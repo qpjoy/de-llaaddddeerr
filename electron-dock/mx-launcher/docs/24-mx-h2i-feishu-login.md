@@ -858,8 +858,11 @@ lsof -nP -iTCP:17891 -sTCP:LISTEN
 | --- | --- | --- |
 | safe config 显示未就绪 | App ID/Secret 缺失、tenant allowlist 为空、redirect allowlist 缺失 | 检查 Secret key 名、ConfigMap 与 Pod rollout；不要输出 Secret 值 |
 | 首次 guest/密码登录提示 insecure bootstrap | 仍在使用显式公网 HTTP，或旧 Domestic 443 尚未配置 h2i 证书/vhost | 先完成 7.4 的 HTTPS 入口；不要关闭客户端门禁、使用 `-k` 或把 capability/bearer 改回明文 |
+| `https://h2i.minsight-ai.com/bootstrap-healthz` 返回 nginx `502`，但 Domestic `:18090` 返回 `200` | official/Compass nginx 与 `mx-domestic-edge` 不在同一 Docker network，或 nginx 仍缓存旧 edge 地址 | 在 `/opt/mx/current/domestic` 执行 `./manage.sh up-public-gateway`，确认 `compass-gateway_default` 同时包含 nginx 与 edge，再执行 nginx config test/reload；最后用 `curl --resolve` 复检公网 443 |
+| 提示末尾出现 `MX_FEISHU_INSECURE_TRANSPORT` | 这是客户端安全错误码，不是可配置的环境变量 | 修复 HTTPS 或先建立并验证访客 WireGuard；不要尝试设置同名变量绕过 |
 | `redirect_uri unmatch` 或 token `20071` | 飞书后台、authorize、token exchange、Electron 四处 URI 不一致 | 精确比较 scheme、`127.0.0.1`、`17891`、path 和尾部斜杠 |
 | 本地报 `EADDRINUSE` | 17891 被其他进程占用或上次异常实例未退出 | 用 `lsof` 找 owner，结束冲突进程后重新发起；不改随机端口 |
+| Windows 报 runtime JSON `rename ... EPERM/EACCES/EBUSY` | 重复实例、安全软件、索引器或短暂文件锁占用本地状态文件 | 先完全退出 tray 和所有 MX-H2I 进程并检查安全软件；新版会串行写入并有限重试，H2O 派生 mirror 失败不再误判为后端不可达 |
 | state 校验失败 | 旧标签页、并发登录、伪造回调或应用已重启 | 关闭旧页面，从 MX-H2I 重新开始完整登录 |
 | Internal 报 transaction missing/mismatch | handle 已用/过期，或 redirect/verifier 不匹配；失败校验也会原子消费 | 不重试旧 handle/code，从 MX-H2I 新建完整授权；检查共享 store 与多 Pod 时钟 |
 | 飞书 `20003`、`20004`、`20065` | code 无效、超过五分钟或已使用 | 重新授权；不要重试原 code |

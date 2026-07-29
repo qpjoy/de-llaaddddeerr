@@ -141,6 +141,67 @@ for (const customGateway of [
   assert.equal(isLegacyDefaultSdkGatewayBaseUrl(customGateway), false, customGateway);
 }
 
+const productionDefaultConfig = {
+  bootstrapApiBaseUrl: 'https://h2i.minsight-ai.com',
+  internalApiBaseUrl: 'http://10.88.88.88:18090',
+  sdkGatewayBaseUrl: ''
+};
+const normalizeBootstrapApiBaseUrlConfig = Function(
+  'normalizeBaseUrl',
+  'DEFAULT_CONFIG',
+  'isLegacyDefaultBootstrapApiBaseUrl',
+  'productionBootstrapCanonicalRequired',
+  'isBarePublicIpBootstrapBaseUrl',
+  `${functionSource(mainSource, 'normalizeBootstrapApiBaseUrlConfig')}; return normalizeBootstrapApiBaseUrlConfig;`
+)(
+  normalizeBaseUrl,
+  productionDefaultConfig,
+  isLegacyDefaultBootstrapApiBaseUrl,
+  () => true,
+  () => false
+);
+assert.equal(
+  normalizeBootstrapApiBaseUrlConfig(
+    'http://10.88.88.88:18090',
+    'http://10.88.88.88:18090'
+  ),
+  'https://h2i.minsight-ai.com',
+  'the known persisted Internal fallback must migrate to public HTTPS'
+);
+assert.equal(
+  normalizeBootstrapApiBaseUrlConfig(
+    'http://10.77.0.1:19090',
+    'http://10.77.0.1:19090'
+  ),
+  'http://10.77.0.1:19090',
+  'a custom Internal-only deployment must not be rewritten'
+);
+
+const sdkGatewayBaseUrl = (baseUrl) => `${normalizeBaseUrl(baseUrl)}/internal/v1/sdk`;
+const normalizeSdkGatewayBaseUrlConfig = Function(
+  'normalizeBaseUrl',
+  'DEFAULT_CONFIG',
+  'sdkGatewayBaseUrl',
+  'isLegacyDefaultSdkGatewayBaseUrl',
+  'productionBootstrapCanonicalRequired',
+  `${functionSource(mainSource, 'normalizeSdkGatewayBaseUrlConfig')}; return normalizeSdkGatewayBaseUrlConfig;`
+)(
+  normalizeBaseUrl,
+  productionDefaultConfig,
+  sdkGatewayBaseUrl,
+  isLegacyDefaultSdkGatewayBaseUrl,
+  () => true
+);
+assert.equal(
+  normalizeSdkGatewayBaseUrlConfig(
+    'http://10.88.88.88:18090/internal/v1/sdk',
+    'https://h2i.minsight-ai.com',
+    'http://10.88.88.88:18090'
+  ),
+  'https://h2i.minsight-ai.com/internal/v1/sdk',
+  'the SDK gateway must follow the migrated canonical bootstrap'
+);
+
 const parseHostResolveTarget = (value) => {
   const text = String(value || '').trim();
   const bracketed = text.match(/^\[([^\]]+)\](?::(\d+))?$/);
@@ -232,6 +293,21 @@ assert.match(
   functionSource(mainSource, 'normalizeBootstrapApiBaseUrlConfig'),
   /productionBootstrapCanonicalRequired\(\)[\s\S]*isBarePublicIpBootstrapBaseUrl\(normalized\)[\s\S]*DEFAULT_CONFIG\.bootstrapApiBaseUrl/,
   'a packaged or production runtime must not persist a bare public IP as its canonical bootstrap URL'
+);
+assert.match(
+  functionSource(mainSource, 'normalizeBootstrapApiBaseUrlConfig'),
+  /normalized === normalizeBaseUrl\(DEFAULT_CONFIG\.internalApiBaseUrl\)[\s\S]*normalized === normalizeBaseUrl\(internalApiBaseUrl\)[\s\S]*DEFAULT_CONFIG\.bootstrapApiBaseUrl/,
+  'a packaged runtime must migrate the known Internal HTTP fallback back to the public HTTPS bootstrap'
+);
+assert.match(
+  functionSource(mainSource, 'normalizeSdkGatewayBaseUrlConfig'),
+  /normalized === sdkGatewayBaseUrl\(DEFAULT_CONFIG\.internalApiBaseUrl\)[\s\S]*return fallback/,
+  'the SDK gateway must migrate with the known stale Internal bootstrap'
+);
+assert.match(
+  functionSource(mainSource, 'shouldPreserveConfiguredBootstrapBaseUrl'),
+  /retainedOverlayBaseUrl[\s\S]*normalizeBaseUrl\(candidate\) === normalizeBaseUrl\(retainedOverlayBaseUrl\)[\s\S]*return true/,
+  'a temporary retained-overlay endpoint must not replace the canonical bootstrap URL'
 );
 assert.match(
   functionSource(mainSource, 'defaultHostResolve'),

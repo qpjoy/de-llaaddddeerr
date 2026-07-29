@@ -50,6 +50,7 @@ const DIAGNOSTIC_LOG_FILE_NAME = 'mx-h2i-runtime.ndjson';
 const DIAGNOSTIC_LOG_MAX_BYTES = 2 * 1024 * 1024;
 const DIAGNOSTIC_LOG_ROTATIONS = 2;
 const DIAGNOSTIC_RECENT_LIMIT = 40;
+const WINDOWS_PRIVATE_JSON_RENAME_RETRY_DELAYS_MS = Object.freeze([25, 75, 150, 300]);
 const PRODUCT_ID = 'mx-h2i';
 const PRODUCT_DISPLAY_NAME = 'MX-H2I';
 const REQUESTED_BY = 'mx-h2i-desktop';
@@ -175,6 +176,7 @@ let diagnosticLogQueue = Promise.resolve();
 let diagnosticLogBytes = null;
 let diagnosticLogDirReady = false;
 let recentDiagnosticLogs = [];
+const privateJsonFileWriteQueues = new Map();
 let appShutdownInFlight = null;
 let appShutdownRequested = false;
 let appShutdownCompleted = false;
@@ -1854,7 +1856,7 @@ async function promoteEmployeeConnection(options = {}) {
       reason: guestFallback ? 'visit-to-staff' : provider === 'feishu' ? 'feishu-login' : null,
       transitionId
     });
-    await saveAndBroadcast();
+    await saveAndBroadcast({ fallbackConnection: networkFallback });
     assertNetworkTransitionCurrent(lifecycleEpoch);
     scheduleNetworkEnvironmentDiagnostics(`${provider}-pre-connect`, {
       phase: 'bootstrap',
@@ -1865,7 +1867,9 @@ async function promoteEmployeeConnection(options = {}) {
     let resolvedBootstrap = options.bootstrap || null;
     let dataPlaneApplyStarted = false;
     try {
-      const bootstrap = resolvedBootstrap || await resolveBootstrapEndpoint(runtime.config);
+      const bootstrap = resolvedBootstrap || await resolveBootstrapEndpoint(runtime.config, {
+        requireSecureTransport: provider === 'feishu'
+      });
       assertNetworkTransitionCurrent(lifecycleEpoch);
       if (provider === 'feishu') {
         assertSecureFeishuTransport(bootstrap, '员工网络切换');
@@ -2007,9 +2011,12 @@ async function startFeishuLogin() {
   try {
     await listenForFeishuCallback(flow);
     if (pendingFeishuLogin !== flow) return;
-    const bootstrap = await resolveBootstrapEndpoint(runtime.config);
+    const bootstrap = await resolveBootstrapEndpoint(runtime.config, {
+      requireSecureTransport: true
+    });
     if (pendingFeishuLogin !== flow) return;
     assertSecureFeishuTransport(bootstrap, '授权初始化');
+    await assertLiveSecureFeishuTransport(bootstrap, '授权初始化');
     await applyResolvedBootstrapEndpoint(bootstrap);
     if (pendingFeishuLogin !== flow) return;
     flow.baseUrl = bootstrap.baseUrl;
@@ -6561,7 +6568,11 @@ function normalizeWindowBounds(input) {
 function normalizeConfig(input) {
   const row = input && typeof input === 'object' ? input : {};
   const domesticRelayPort = Number(row.domesticRelayPort);
-  const bootstrapApiBaseUrl = normalizeBootstrapApiBaseUrlConfig(row.bootstrapApiBaseUrl);
+  const internalApiBaseUrl = normalizeInternalApiBaseUrlConfig(row.internalApiBaseUrl);
+  const bootstrapApiBaseUrl = normalizeBootstrapApiBaseUrlConfig(
+    row.bootstrapApiBaseUrl,
+    internalApiBaseUrl
+  );
   const domesticRelayHost = normalizeDomesticRelayHost(row.domesticRelayHost);
   const hostResolve = normalizeHostResolveConfig(row.hostResolve, bootstrapApiBaseUrl, domesticRelayHost);
   const productId = normalizeLauncherProductId(row.productId || DEFAULT_CONFIG.productId);
@@ -6572,10 +6583,14 @@ function normalizeConfig(input) {
     productId,
     productDisplayName,
     bootstrapApiBaseUrl,
-    internalApiBaseUrl: normalizeInternalApiBaseUrlConfig(row.internalApiBaseUrl),
+    internalApiBaseUrl,
     domesticRelayHost,
     domesticRelayPort: Number.isInteger(domesticRelayPort) && domesticRelayPort > 0 ? domesticRelayPort : DEFAULT_CONFIG.domesticRelayPort,
-    sdkGatewayBaseUrl: normalizeSdkGatewayBaseUrlConfig(row.sdkGatewayBaseUrl, bootstrapApiBaseUrl),
+    sdkGatewayBaseUrl: normalizeSdkGatewayBaseUrlConfig(
+      row.sdkGatewayBaseUrl,
+      bootstrapApiBaseUrl,
+      internalApiBaseUrl
+    ),
     hostResolve,
     bootstrapResolveMode: normalizeBootstrapResolveModeConfig(row.bootstrapResolveMode, bootstrapApiBaseUrl, hostResolve),
     bootstrapDnsServers: stringValue(row.bootstrapDnsServers, DEFAULT_CONFIG.bootstrapDnsServers),
@@ -6588,9 +6603,16 @@ function normalizeConfig(input) {
   };
 }
 
-function normalizeBootstrapApiBaseUrlConfig(value) {
+function normalizeBootstrapApiBaseUrlConfig(value, internalApiBaseUrl) {
   const normalized = normalizeBaseUrl(value) || DEFAULT_CONFIG.bootstrapApiBaseUrl;
   if (isLegacyDefaultBootstrapApiBaseUrl(normalized)) return DEFAULT_CONFIG.bootstrapApiBaseUrl;
+  if (
+    productionBootstrapCanonicalRequired()
+    && normalized === normalizeBaseUrl(DEFAULT_CONFIG.internalApiBaseUrl)
+    && normalized === normalizeBaseUrl(internalApiBaseUrl)
+  ) {
+    return DEFAULT_CONFIG.bootstrapApiBaseUrl;
+  }
   if (productionBootstrapCanonicalRequired() && isBarePublicIpBootstrapBaseUrl(normalized)) {
     return DEFAULT_CONFIG.bootstrapApiBaseUrl;
   }
@@ -6624,10 +6646,17 @@ function isLegacyDefaultBootstrapApiBaseUrl(value) {
   }
 }
 
-function normalizeSdkGatewayBaseUrlConfig(value, bootstrapApiBaseUrl) {
+function normalizeSdkGatewayBaseUrlConfig(value, bootstrapApiBaseUrl, internalApiBaseUrl) {
   const fallback = DEFAULT_CONFIG.sdkGatewayBaseUrl || sdkGatewayBaseUrl(bootstrapApiBaseUrl);
   const normalized = normalizeBaseUrl(value);
   if (!normalized || isLegacyDefaultSdkGatewayBaseUrl(normalized)) return fallback;
+  if (
+    productionBootstrapCanonicalRequired()
+    && normalized === sdkGatewayBaseUrl(DEFAULT_CONFIG.internalApiBaseUrl)
+    && normalizeBaseUrl(internalApiBaseUrl) === normalizeBaseUrl(DEFAULT_CONFIG.internalApiBaseUrl)
+  ) {
+    return fallback;
+  }
   return normalized;
 }
 
@@ -11508,6 +11537,12 @@ function normalizeDiagnostics(input) {
     shutdownCleanup: row.shutdownCleanup && typeof row.shutdownCleanup === 'object'
       ? row.shutdownCleanup
       : null,
+    localPersistence: row.localPersistence && typeof row.localPersistence === 'object' ? {
+      ok: row.localPersistence.ok === true,
+      label: nullableString(row.localPersistence.label),
+      message: nullableString(row.localPersistence.message),
+      updatedAt: nullableString(row.localPersistence.updatedAt)
+    } : null,
     updatedAt: nullableString(row.updatedAt) || nowIso()
   };
 }
@@ -12268,6 +12303,10 @@ async function applyConnectionError(label, err) {
     previousMode: previous?.mode,
     previousState: previous?.state
   });
+  if (classified.state === 'local-storage-error') {
+    applyLocalRuntimePersistenceError(label, classified, previous);
+    return;
+  }
   const endpointRouteRepair = isBootstrapReachabilityState(classified.state)
     ? await repairDarwinStaleEndpointRoutesForRuntime(`${label}-connect-error`, { force: true })
     : null;
@@ -12329,6 +12368,29 @@ async function applyConnectionError(label, err) {
     message: `${label}：${classified.message}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
   };
   touchRuntime(`${label} failed`);
+}
+
+function applyLocalRuntimePersistenceError(label, classified, previous) {
+  runtime.connection = {
+    ...(previous || idleConnection()),
+    mode: previous?.mode || runtime.connection?.mode || 'guest',
+    diagnostics: {
+      ...(previous?.diagnostics || runtime.connection?.diagnostics || {}),
+      localPersistence: {
+        ok: false,
+        label,
+        message: classified.message,
+        updatedAt: nowIso()
+      },
+      updatedAt: nowIso()
+    }
+  };
+  runtime.auth = null;
+  runtime.feedback = {
+    tone: 'danger',
+    message: `${label}：${classified.message}`
+  };
+  touchRuntime(`${label} local persistence failed`);
 }
 
 function isBootstrapReachabilityState(state) {
@@ -14526,10 +14588,11 @@ async function resolveBootstrapBaseUrl(config) {
   return (await resolveBootstrapEndpoint(config)).baseUrl;
 }
 
-async function resolveBootstrapEndpoint(config) {
+async function resolveBootstrapEndpoint(config, options = {}) {
   const requestedMode = normalizeBootstrapResolveMode(config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode);
+  const retainedOverlayBaseUrl = retainedOverlayBootstrapBaseUrl(config);
   const seeds = [
-    retainedOverlayBootstrapBaseUrl(config),
+    retainedOverlayBaseUrl,
     normalizeBaseUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL),
     normalizeBaseUrl(config.bootstrapApiBaseUrl),
     defaultBootstrapApiBaseUrl(),
@@ -14541,6 +14604,9 @@ async function resolveBootstrapEndpoint(config) {
   const candidates = bootstrapBaseUrlCandidates(seeds);
   const failures = [];
   for (const candidate of candidates) {
+    if (options.requireSecureTransport === true && !feishuTransportIsSecure(candidate)) {
+      continue;
+    }
     for (const resolveMode of bootstrapResolveAttempts(candidate, config)) {
       try {
         await probeBootstrapApiBaseUrl(candidate, { bootstrapResolveMode: resolveMode });
@@ -14548,7 +14614,11 @@ async function resolveBootstrapEndpoint(config) {
           baseUrl: candidate,
           resolveMode,
           fallback: bootstrapResolveFallback(requestedMode, resolveMode, failures),
-          preserveConfigBaseUrl: shouldPreserveConfiguredBootstrapBaseUrl(candidate, config)
+          preserveConfigBaseUrl: shouldPreserveConfiguredBootstrapBaseUrl(
+            candidate,
+            config,
+            retainedOverlayBaseUrl
+          )
         };
       } catch (err) {
         failures.push({
@@ -14623,7 +14693,13 @@ function bootstrapCandidateShouldPreferDirect(candidate) {
   }
 }
 
-function shouldPreserveConfiguredBootstrapBaseUrl(candidate, config) {
+function shouldPreserveConfiguredBootstrapBaseUrl(candidate, config, retainedOverlayBaseUrl) {
+  if (
+    retainedOverlayBaseUrl
+    && normalizeBaseUrl(candidate) === normalizeBaseUrl(retainedOverlayBaseUrl)
+  ) {
+    return true;
+  }
   const configured = normalizeBaseUrl(config?.bootstrapApiBaseUrl);
   if (!configured || normalizeBaseUrl(candidate) === configured) return false;
   return isDirectPublicBootstrapUrl(candidate);
@@ -15600,8 +15676,23 @@ function visibleAuth(input) {
   };
 }
 
-async function saveAndBroadcast() {
-  await saveRuntime(runtime);
+async function saveAndBroadcast(options = {}) {
+  try {
+    await saveRuntime(runtime);
+  } catch (err) {
+    if (!isLocalRuntimePersistenceError(err)) throw err;
+    const previous = retainableConnectionSnapshot(options.fallbackConnection)
+      || retainableConnectionSnapshot(runtime.connection);
+    const classified = classifyConnectionError(err);
+    queueDiagnosticError('runtime.primary-save-failed', err, {
+      classifiedState: classified.state,
+      previousMode: previous?.mode,
+      previousState: previous?.state
+    });
+    applyLocalRuntimePersistenceError('本机状态保存失败', classified, previous);
+    broadcastState();
+    throw err;
+  }
   broadcastState();
 }
 
@@ -15633,7 +15724,23 @@ async function publishNetworkModeEvent(name, phase, options = {}) {
 async function saveRuntime(next) {
   const persistable = persistableRuntime(next);
   await writePrivateJsonFile(runtimePath(), protectPersistedRuntime(persistable));
-  await savePersistedH2oRuntime(persistable.apps?.h2o?.runtime);
+  try {
+    await savePersistedH2oRuntime(
+      persistable.apps?.h2o?.runtime,
+      persistable.updatedAt
+    );
+  } catch (err) {
+    queueDiagnosticLog(
+      'warning',
+      'runtime.h2o-mirror-save-failed',
+      'H2O derived runtime mirror could not be persisted; the primary runtime remains authoritative.',
+      {
+        code: typeof err?.code === 'string' ? err.code : null,
+        syscall: typeof err?.syscall === 'string' ? err.syscall : null,
+        message: errorMessage(err)
+      }
+    );
+  }
   await maybeSnapshotAppsState(persistable.apps);
 }
 
@@ -15893,37 +16000,88 @@ function secureCredentialStorageAvailable() {
 }
 
 async function writePrivateJsonFile(filePath, value) {
-  const directory = path.dirname(filePath);
-  const temporaryPath = `${filePath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  try {
-    await fs.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    await fs.chmod(temporaryPath, 0o600);
-    await fs.rename(temporaryPath, filePath);
-    await fs.chmod(filePath, 0o600);
-  } catch (err) {
-    await fs.rm(temporaryPath, { force: true }).catch(() => {});
-    throw err;
+  return serializePrivateJsonFileWrite(filePath, async () => {
+    const directory = path.dirname(filePath);
+    const temporaryPath = `${filePath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    try {
+      await fs.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600
+      });
+      await fs.chmod(temporaryPath, 0o600);
+      await renamePrivateJsonFileWithRetry(temporaryPath, filePath);
+      await fs.chmod(filePath, 0o600);
+    } catch (err) {
+      await fs.rm(temporaryPath, { force: true }).catch(() => {});
+      throw err;
+    }
+  });
+}
+
+function serializePrivateJsonFileWrite(filePath, write) {
+  const previous = privateJsonFileWriteQueues.get(filePath) || Promise.resolve();
+  const current = previous.catch(() => undefined).then(write);
+  const tracked = current.finally(() => {
+    if (privateJsonFileWriteQueues.get(filePath) === tracked) {
+      privateJsonFileWriteQueues.delete(filePath);
+    }
+  });
+  privateJsonFileWriteQueues.set(filePath, tracked);
+  return tracked;
+}
+
+async function renamePrivateJsonFileWithRetry(sourcePath, targetPath, options = {}) {
+  const rename = typeof options.rename === 'function' ? options.rename : fs.rename.bind(fs);
+  const wait = typeof options.wait === 'function' ? options.wait : delay;
+  const platform = options.platform || process.platform;
+  let retryIndex = 0;
+  while (true) {
+    try {
+      await rename(sourcePath, targetPath);
+      return;
+    } catch (err) {
+      const retryDelay = WINDOWS_PRIVATE_JSON_RENAME_RETRY_DELAYS_MS[retryIndex];
+      if (
+        retryDelay === undefined
+        || !isRetryableWindowsPrivateJsonRenameError(err, platform)
+      ) {
+        throw err;
+      }
+      retryIndex += 1;
+      await wait(retryDelay);
+    }
   }
+}
+
+function isRetryableWindowsPrivateJsonRenameError(err, platform = process.platform) {
+  return platform === 'win32'
+    && ['EPERM', 'EACCES', 'EBUSY'].includes(
+      typeof err?.code === 'string' ? err.code.toUpperCase() : ''
+    );
 }
 
 async function loadPersistedH2oRuntime() {
   try {
     const raw = await fs.readFile(h2oRuntimeStorePath(), 'utf8');
-    return h2oPluginRuntime(JSON.parse(raw));
+    const row = JSON.parse(raw);
+    return {
+      runtime: h2oPluginRuntime(row),
+      sourceRuntimeUpdatedAt: nullableString(row.sourceRuntimeUpdatedAt),
+      sourceRuntimeFingerprint: nullableString(row.sourceRuntimeFingerprint)
+    };
   } catch {
     return null;
   }
 }
 
-async function savePersistedH2oRuntime(input) {
+async function savePersistedH2oRuntime(input, sourceRuntimeUpdatedAt) {
   if (!input) return;
   const current = h2oPluginRuntime(input);
   const store = {
     kind: 'h2o-plugin',
+    sourceRuntimeUpdatedAt: nullableString(sourceRuntimeUpdatedAt),
+    sourceRuntimeFingerprint: h2oRuntimePersistenceFingerprint(current),
     mode: current.mode,
     running: false,
     status: h2oHasUsableSubscription(current.activeSubscription) ? 'ready' : 'subscription-required',
@@ -16047,12 +16205,14 @@ async function pruneAppsStateBackups() {
   }
 }
 
-function mergePersistedH2oRuntime(source, persistedRuntime) {
+function mergePersistedH2oRuntime(source, persistedRecord) {
   const next = source && typeof source === 'object' ? { ...source } : source;
   const appRecord = next?.apps?.h2o;
   if (!appRecord?.runtime) return next;
   const current = h2oPluginRuntime(appRecord.runtime);
-  const persisted = persistedRuntime ? h2oPluginRuntime(persistedRuntime) : null;
+  const persisted = shouldMergePersistedH2oRuntime(next, current, persistedRecord)
+    ? h2oPluginRuntime(persistedRecord.runtime)
+    : null;
   const subscriptions = persisted
     ? mergeH2oRuntimeSubscriptions(persisted.subscriptions, current.subscriptions)
     : current.subscriptions;
@@ -16093,6 +16253,40 @@ function mergePersistedH2oRuntime(source, persistedRuntime) {
     }
   };
   return next;
+}
+
+function shouldMergePersistedH2oRuntime(source, current, persistedRecord) {
+  if (!persistedRecord?.runtime) return false;
+  const mirrorFingerprint = nullableString(persistedRecord.sourceRuntimeFingerprint);
+  if (mirrorFingerprint) {
+    return mirrorFingerprint === h2oRuntimePersistenceFingerprint(current);
+  }
+  const sourceUpdatedAt = nullableString(source?.updatedAt);
+  const mirrorUpdatedAt = nullableString(persistedRecord.sourceRuntimeUpdatedAt);
+  if (mirrorUpdatedAt) {
+    const sourceTime = Date.parse(sourceUpdatedAt || '');
+    const mirrorTime = Date.parse(mirrorUpdatedAt);
+    if (Number.isFinite(sourceTime) && Number.isFinite(mirrorTime)) {
+      return mirrorTime >= sourceTime;
+    }
+    return !sourceUpdatedAt || mirrorUpdatedAt === sourceUpdatedAt;
+  }
+  return !arrayValue(current?.subscriptions, []).some(h2oHasUsableSubscription)
+    && !h2oHasUsableSubscription(current?.activeSubscription);
+}
+
+function h2oRuntimePersistenceFingerprint(input) {
+  const current = h2oPluginRuntime(input);
+  return createHash('sha256').update(JSON.stringify({
+    mode: current.mode,
+    tunInstalled: current.tunInstalled,
+    adminUrl: current.adminUrl,
+    ports: current.ports,
+    activeSubscriptionId: current.activeSubscriptionId,
+    activeSubscription: current.activeSubscription,
+    subscriptions: current.subscriptions,
+    rules: current.rules
+  })).digest('hex');
 }
 
 function mergeH2oRuntimeSubscriptions(primary, secondary) {
@@ -16733,6 +16927,12 @@ function classifyConnectionError(err) {
   const message = errorMessage(err);
   const status = Number(err?.status || err?.statusCode || err?.payload?.statusCode || 0);
   const lower = message.toLowerCase();
+  if (isLocalRuntimePersistenceError(err)) {
+    return {
+      state: 'local-storage-error',
+      message: `本机运行状态写入失败，这是本机文件错误，不表示服务端状态。请关闭重复运行的 MX-H2I，并检查安全软件或文件占用后重试；原始错误：${message}`
+    };
+  }
   if (isPublicIcpBlockedError(err)) {
     const host = publicHostFromUrl(runtime?.config?.bootstrapApiBaseUrl) || DEFAULT_BOOTSTRAP_HOST;
     return {
@@ -16762,6 +16962,13 @@ function classifyConnectionError(err) {
     state: 'server-unavailable',
     message
   };
+}
+
+function isLocalRuntimePersistenceError(err) {
+  const code = typeof err?.code === 'string' ? err.code.toUpperCase() : '';
+  const syscall = typeof err?.syscall === 'string' ? err.syscall.toLowerCase() : '';
+  return ['EPERM', 'EACCES', 'EBUSY', 'ENOSPC', 'EROFS'].includes(code)
+    && ['rename', 'write', 'open', 'chmod', 'mkdir', 'unlink', 'rm', 'fsync'].includes(syscall);
 }
 
 function isPublicIcpBlockedError(err) {

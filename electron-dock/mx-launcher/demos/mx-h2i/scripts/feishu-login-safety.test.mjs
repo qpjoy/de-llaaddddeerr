@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const mainSource = readFileSync(
@@ -63,7 +63,17 @@ assert.match(startSource, /randomBytes\(48\)\.toString\('base64url'\)/);
 assert.match(startSource, /createHash\('sha256'\)\.update\(flow\.codeVerifier\)\.digest\('base64url'\)/);
 assert.match(startSource, /\/internal\/v1\/sdk\/oauth\/feishu\/authorize/);
 assert.match(startSource, /redirectUri,[\s\S]*state: flow\.state,[\s\S]*codeChallenge:/);
+assert.match(
+  startSource,
+  /resolveBootstrapEndpoint\(runtime\.config,\s*\{\s*requireSecureTransport:\s*true\s*\}\)/,
+  'Feishu authorization must not select a reachable plaintext fallback'
+);
 assert.match(startSource, /assertSecureFeishuTransport\(bootstrap, '授权初始化'\)/);
+assert.match(
+  startSource,
+  /await assertLiveSecureFeishuTransport\(bootstrap, '授权初始化'\)[\s\S]*requestJson\([\s\S]*\/internal\/v1\/sdk\/oauth\/feishu\/authorize/,
+  'an HTTP overlay must pass a live WireGuard and route probe before authorization state is sent'
+);
 assert.match(startSource, /shell\.openExternal\(authorizationUrl\)/);
 assert.doesNotMatch(
   startSource,
@@ -126,6 +136,16 @@ assert.match(
   functionSource(mainSource, 'completeFeishuLogin'),
   /await assertLiveSecureFeishuTransport\([\s\S]*'授权码交换'\)[\s\S]*authenticateFeishuViaGateway/,
   'the authorization code and PKCE verifier must pass a live transport check before exchange'
+);
+assert.match(
+  functionSource(mainSource, 'promoteEmployeeConnection'),
+  /resolveBootstrapEndpoint\(runtime\.config,\s*\{\s*requireSecureTransport:\s*provider === 'feishu'\s*\}\)/,
+  'the employee transition must apply the same secure-candidate rule to Feishu'
+);
+assert.match(
+  functionSource(mainSource, 'resolveBootstrapEndpoint'),
+  /options\.requireSecureTransport === true && !feishuTransportIsSecure\(candidate\)[\s\S]*continue/,
+  'secure flows must skip plaintext candidates before probing them'
 );
 assert.match(
   functionSource(mainSource, 'assertLiveSecureFeishuTransport'),
@@ -256,8 +276,439 @@ assert.match(
 );
 assert.match(
   functionSource(mainSource, 'writePrivateJsonFile'),
-  /mode: 0o600[\s\S]*fs\.rename\(temporaryPath, filePath\)[\s\S]*fs\.chmod\(filePath, 0o600\)/,
+  /serializePrivateJsonFileWrite\(filePath,[\s\S]*mode: 0o600[\s\S]*renamePrivateJsonFileWithRetry\(temporaryPath, filePath\)[\s\S]*fs\.chmod\(filePath, 0o600\)/,
   'runtime state files must be atomically replaced with private permissions'
+);
+
+const retryableWindowsRenameError = Function(
+  `${functionSource(mainSource, 'isRetryableWindowsPrivateJsonRenameError')}; return isRetryableWindowsPrivateJsonRenameError;`
+)();
+for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+  assert.equal(
+    retryableWindowsRenameError({ code, syscall: 'rename' }, 'win32'),
+    true,
+    `${code} must be retried on Windows`
+  );
+}
+assert.equal(
+  retryableWindowsRenameError({ code: 'EPERM', syscall: 'rename' }, 'darwin'),
+  false,
+  'the Windows rename workaround must not change non-Windows behavior'
+);
+
+const windowsRenameRetryDelays = [25, 75, 150, 300];
+const renamePrivateJsonFileWithRetry = Function(
+  'WINDOWS_PRIVATE_JSON_RENAME_RETRY_DELAYS_MS',
+  'isRetryableWindowsPrivateJsonRenameError',
+  'fs',
+  'delay',
+  'process',
+  `${functionSource(mainSource, 'renamePrivateJsonFileWithRetry')}; return renamePrivateJsonFileWithRetry;`
+)(
+  windowsRenameRetryDelays,
+  retryableWindowsRenameError,
+  { rename: async () => undefined },
+  async () => undefined,
+  { platform: 'linux' }
+);
+let renameAttempts = 0;
+const observedRenameDelays = [];
+await renamePrivateJsonFileWithRetry('source.tmp', 'target.json', {
+  platform: 'win32',
+  rename: async () => {
+    renameAttempts += 1;
+    if (renameAttempts < 3) {
+      throw Object.assign(new Error('transient Windows file lock'), {
+        code: renameAttempts === 1 ? 'EPERM' : 'EBUSY',
+        syscall: 'rename'
+      });
+    }
+  },
+  wait: async (delayMs) => {
+    observedRenameDelays.push(delayMs);
+  }
+});
+assert.equal(renameAttempts, 3);
+assert.deepEqual(observedRenameDelays, windowsRenameRetryDelays.slice(0, 2));
+
+renameAttempts = 0;
+await assert.rejects(
+  renamePrivateJsonFileWithRetry('source.tmp', 'target.json', {
+    platform: 'win32',
+    rename: async () => {
+      renameAttempts += 1;
+      throw Object.assign(new Error('persistent Windows file lock'), {
+        code: 'EACCES',
+        syscall: 'rename'
+      });
+    },
+    wait: async () => undefined
+  }),
+  (err) => err?.code === 'EACCES'
+);
+assert.equal(
+  renameAttempts,
+  windowsRenameRetryDelays.length + 1,
+  'Windows rename retries must remain finite'
+);
+
+const privateJsonFileWriteQueues = new Map();
+const serializePrivateJsonFileWrite = Function(
+  'privateJsonFileWriteQueues',
+  `${functionSource(mainSource, 'serializePrivateJsonFileWrite')}; return serializePrivateJsonFileWrite;`
+)(privateJsonFileWriteQueues);
+let releaseFirstWrite;
+const firstWriteGate = new Promise((resolve) => {
+  releaseFirstWrite = resolve;
+});
+const writeOrder = [];
+const firstWrite = serializePrivateJsonFileWrite('same-runtime.json', async () => {
+  writeOrder.push('first-start');
+  await firstWriteGate;
+  writeOrder.push('first-end');
+});
+const secondWrite = serializePrivateJsonFileWrite('same-runtime.json', async () => {
+  writeOrder.push('second-start');
+});
+await Promise.resolve();
+await Promise.resolve();
+assert.deepEqual(writeOrder, ['first-start'], 'writes to the same runtime path must serialize');
+releaseFirstWrite();
+await Promise.all([firstWrite, secondWrite]);
+assert.deepEqual(writeOrder, ['first-start', 'first-end', 'second-start']);
+assert.equal(privateJsonFileWriteQueues.size, 0, 'completed per-path write queues must be released');
+
+const saveRuntimeSource = functionSource(mainSource, 'saveRuntime');
+const saveRuntimeEvents = [];
+const saveRuntimeWarnings = [];
+let h2oMirrorSourceRevision = null;
+const saveRuntimeWithFailedMirror = Function(
+  'persistableRuntime',
+  'writePrivateJsonFile',
+  'runtimePath',
+  'protectPersistedRuntime',
+  'savePersistedH2oRuntime',
+  'queueDiagnosticLog',
+  'errorMessage',
+  'maybeSnapshotAppsState',
+  `${saveRuntimeSource}; return saveRuntime;`
+)(
+  (value) => value,
+  async () => {
+    saveRuntimeEvents.push('primary');
+  },
+  () => 'mx-h2i-runtime.json',
+  (value) => value,
+  async (_runtime, sourceRuntimeUpdatedAt) => {
+    saveRuntimeEvents.push('mirror');
+    h2oMirrorSourceRevision = sourceRuntimeUpdatedAt;
+    throw Object.assign(new Error('mirror is locked'), {
+      code: 'EPERM',
+      syscall: 'rename'
+    });
+  },
+  (...args) => {
+    saveRuntimeWarnings.push(args);
+  },
+  (err) => err.message,
+  async () => {
+    saveRuntimeEvents.push('snapshot');
+  }
+);
+await saveRuntimeWithFailedMirror({
+  apps: { h2o: { runtime: { status: 'ready' } } },
+  updatedAt: '2026-07-28T01:02:03.000Z'
+});
+assert.deepEqual(saveRuntimeEvents, ['primary', 'mirror', 'snapshot']);
+assert.equal(h2oMirrorSourceRevision, '2026-07-28T01:02:03.000Z');
+assert.equal(saveRuntimeWarnings.length, 1);
+assert.equal(saveRuntimeWarnings[0][0], 'warning');
+assert.equal(saveRuntimeWarnings[0][1], 'runtime.h2o-mirror-save-failed');
+
+const shouldMergePersistedH2oRuntime = Function(
+  'nullableString',
+  'arrayValue',
+  'h2oHasUsableSubscription',
+  'h2oRuntimePersistenceFingerprint',
+  `${functionSource(mainSource, 'shouldMergePersistedH2oRuntime')}; return shouldMergePersistedH2oRuntime;`
+)(
+  (value) => typeof value === 'string' && value.trim() ? value.trim() : null,
+  (value, fallback) => Array.isArray(value) ? value : fallback,
+  (subscription) => subscription?.usable === true,
+  (runtimeValue) => runtimeValue?.fingerprint || 'primary-fingerprint'
+);
+const h2oRuntimePersistenceFingerprint = Function(
+  'h2oPluginRuntime',
+  'createHash',
+  `${functionSource(mainSource, 'h2oRuntimePersistenceFingerprint')}; return h2oRuntimePersistenceFingerprint;`
+)(
+  (value) => value,
+  createHash
+);
+const h2oFingerprintInput = {
+  mode: 'rule',
+  tunInstalled: true,
+  adminUrl: 'http://127.0.0.1:19090',
+  ports: { mixed: 7890 },
+  activeSubscriptionId: 'sub-1',
+  activeSubscription: { id: 'sub-1', url: 'https://example.test/sub' },
+  subscriptions: [{ id: 'sub-1', url: 'https://example.test/sub' }],
+  rules: ['DOMAIN,example.test,DIRECT']
+};
+assert.equal(
+  h2oRuntimePersistenceFingerprint(h2oFingerprintInput),
+  h2oRuntimePersistenceFingerprint({ ...h2oFingerprintInput }),
+  'equivalent H2O persistence content must have a stable fingerprint'
+);
+assert.notEqual(
+  h2oRuntimePersistenceFingerprint(h2oFingerprintInput),
+  h2oRuntimePersistenceFingerprint({
+    ...h2oFingerprintInput,
+    rules: ['DOMAIN,example.test,PROXY']
+  }),
+  'an H2O persistence mutation must change the fingerprint independently of runtime.updatedAt'
+);
+assert.equal(
+  shouldMergePersistedH2oRuntime(
+    { updatedAt: '2026-07-28T01:02:03.000Z' },
+    {
+      fingerprint: 'primary-new',
+      subscriptions: [{ usable: true }],
+      activeSubscription: { usable: true }
+    },
+    {
+      runtime: { rules: ['stale'] },
+      sourceRuntimeUpdatedAt: '2026-07-28T01:02:03.000Z',
+      sourceRuntimeFingerprint: 'primary-old'
+    }
+  ),
+  false,
+  'an H2O content change must reject a stale mirror even when global runtime.updatedAt was not bumped'
+);
+assert.equal(
+  shouldMergePersistedH2oRuntime(
+    { updatedAt: '2026-07-28T01:02:03.000Z' },
+    {
+      fingerprint: 'primary-current',
+      subscriptions: [{ usable: true }],
+      activeSubscription: { usable: true }
+    },
+    {
+      runtime: { rules: ['current'] },
+      sourceRuntimeFingerprint: 'primary-current'
+    }
+  ),
+  true,
+  'a mirror with the same H2O content fingerprint may participate in recovery'
+);
+assert.equal(
+  shouldMergePersistedH2oRuntime(
+    { updatedAt: '2026-07-28T01:02:04.000Z' },
+    { subscriptions: [{ usable: true }], activeSubscription: { usable: true } },
+    {
+      runtime: { rules: ['stale'] },
+      sourceRuntimeUpdatedAt: '2026-07-28T01:02:03.000Z'
+    }
+  ),
+  false,
+  'a mirror older than the primary runtime must never override H2O state after restart'
+);
+assert.equal(
+  shouldMergePersistedH2oRuntime(
+    { updatedAt: '2026-07-28T01:02:03.000Z' },
+    { subscriptions: [{ usable: true }], activeSubscription: { usable: true } },
+    {
+      runtime: { rules: ['current'] },
+      sourceRuntimeUpdatedAt: '2026-07-28T01:02:03.000Z'
+    }
+  ),
+  true,
+  'a mirror written from the same primary revision may participate in recovery'
+);
+assert.equal(
+  shouldMergePersistedH2oRuntime(
+    { updatedAt: '2026-07-28T01:02:03.000Z' },
+    { subscriptions: [], activeSubscription: null },
+    { runtime: { subscriptions: [{ usable: true }] } }
+  ),
+  true,
+  'a legacy unversioned mirror remains a recovery source only when primary H2O data is unusable'
+);
+assert.equal(
+  shouldMergePersistedH2oRuntime(
+    { updatedAt: '2026-07-28T01:02:03.000Z' },
+    { subscriptions: [{ usable: true }], activeSubscription: { usable: true } },
+    { runtime: { subscriptions: [{ usable: true }] } }
+  ),
+  false,
+  'a legacy unversioned mirror must not override an already usable primary runtime'
+);
+
+const localRuntimePersistenceError = Function(
+  `${functionSource(mainSource, 'isLocalRuntimePersistenceError')}; return isLocalRuntimePersistenceError;`
+)();
+assert.equal(
+  localRuntimePersistenceError({ code: 'EPERM', syscall: 'rename' }),
+  true
+);
+assert.equal(
+  localRuntimePersistenceError({ code: 'EPERM', syscall: 'kill' }),
+  false,
+  'an unrelated OS permission error must not be labeled as local runtime persistence'
+);
+const classifyConnectionError = Function(
+  'errorMessage',
+  'isLocalRuntimePersistenceError',
+  'isPublicIcpBlockedError',
+  'publicHostFromUrl',
+  'runtime',
+  'DEFAULT_BOOTSTRAP_HOST',
+  `${functionSource(mainSource, 'classifyConnectionError')}; return classifyConnectionError;`
+)(
+  (err) => `${err.message} / ${err.code}`,
+  localRuntimePersistenceError,
+  () => false,
+  () => null,
+  { config: {} },
+  'h2i.minsight-ai.com'
+);
+const localPersistenceClassification = classifyConnectionError(
+  Object.assign(new Error('operation not permitted'), {
+    code: 'EPERM',
+    syscall: 'rename'
+  })
+);
+assert.equal(localPersistenceClassification.state, 'local-storage-error');
+assert.doesNotMatch(localPersistenceClassification.message, /后端不可达|server-unavailable/);
+
+const retainedRuntime = {
+  connection: {
+    state: 'connected',
+    mode: 'guest',
+    localIp: '10.89.100.12',
+    diagnostics: { retained: true }
+  },
+  auth: { accessToken: 'ephemeral-test-token' },
+  feedback: null
+};
+const makeApplyLocalRuntimePersistenceError = (runtimeValue) => Function(
+  'runtime',
+  'idleConnection',
+  'nowIso',
+  'touchRuntime',
+  `${functionSource(mainSource, 'applyLocalRuntimePersistenceError')}; return applyLocalRuntimePersistenceError;`
+)(
+  runtimeValue,
+  () => ({ state: 'idle', mode: 'guest', diagnostics: {} }),
+  () => '2026-07-28T00:00:00.000Z',
+  () => undefined
+);
+const applyLocalRuntimePersistenceError = makeApplyLocalRuntimePersistenceError(retainedRuntime);
+const applyConnectionError = Function(
+  'runtime',
+  'retainableConnectionSnapshot',
+  'classifyConnectionError',
+  'queueDiagnosticError',
+  'applyLocalRuntimePersistenceError',
+  'idleConnection',
+  'nowIso',
+  'touchRuntime',
+  `${functionSource(mainSource, 'applyConnectionError')}; return applyConnectionError;`
+)(
+  retainedRuntime,
+  (connection) => connection,
+  () => localPersistenceClassification,
+  () => undefined,
+  applyLocalRuntimePersistenceError,
+  () => ({ state: 'idle', mode: 'guest', diagnostics: {} }),
+  () => '2026-07-28T00:00:00.000Z',
+  () => undefined
+);
+await applyConnectionError(
+  '员工账号登录失败',
+  Object.assign(new Error('operation not permitted'), {
+    code: 'EPERM',
+    syscall: 'rename'
+  })
+);
+assert.equal(
+  retainedRuntime.connection.state,
+  'connected',
+  'a local persistence failure must preserve a retained connection instead of marking the server unavailable'
+);
+assert.equal(retainedRuntime.connection.diagnostics.localPersistence.ok, false);
+assert.doesNotMatch(retainedRuntime.feedback.message, /bootstrap API 暂不可达/);
+
+const centralRuntime = {
+  connection: {
+    state: 'connecting',
+    mode: 'employee',
+    diagnostics: {}
+  },
+  auth: null,
+  feedback: null
+};
+const retainedGuestFallback = {
+  state: 'connected',
+  mode: 'guest',
+  localIp: '10.89.100.12',
+  leaseId: 'lease-retained-guest',
+  routePlan: { productId: 'mx-h2i' },
+  wireGuard: { active: true },
+  diagnostics: { retained: true }
+};
+let centralBroadcasts = 0;
+const saveAndBroadcast = Function(
+  'saveRuntime',
+  'runtime',
+  'isLocalRuntimePersistenceError',
+  'retainableConnectionSnapshot',
+  'classifyConnectionError',
+  'queueDiagnosticError',
+  'applyLocalRuntimePersistenceError',
+  'broadcastState',
+  `${functionSource(mainSource, 'saveAndBroadcast')}; return saveAndBroadcast;`
+)(
+  async () => {
+    throw Object.assign(new Error('persistent Windows file lock'), {
+      code: 'EPERM',
+      syscall: 'rename'
+    });
+  },
+  centralRuntime,
+  localRuntimePersistenceError,
+  (connection) => (
+    ['connected', 'tunnel-only', 'lease-only', 'degraded'].includes(connection?.state)
+      ? connection
+      : null
+  ),
+  () => localPersistenceClassification,
+  () => undefined,
+  makeApplyLocalRuntimePersistenceError(centralRuntime),
+  () => {
+    centralBroadcasts += 1;
+  }
+);
+await assert.rejects(
+  saveAndBroadcast({ fallbackConnection: retainedGuestFallback }),
+  (err) => err?.code === 'EPERM'
+);
+assert.equal(centralBroadcasts, 1, 'the in-memory local-storage diagnosis must be broadcast before IPC rejects');
+assert.equal(centralRuntime.connection.state, 'connected');
+assert.equal(centralRuntime.connection.leaseId, 'lease-retained-guest');
+assert.equal(centralRuntime.connection.wireGuard.active, true);
+assert.equal(centralRuntime.connection.diagnostics.localPersistence.ok, false);
+
+assert.match(
+  functionSource(mainSource, 'promoteEmployeeConnection'),
+  /saveAndBroadcast\(\{\s*fallbackConnection:\s*networkFallback\s*\}\)/,
+  'a failed transition save must restore the live guest/employee fallback instead of reporting idle'
+);
+
+assert.match(
+  functionSource(mainSource, 'normalizeDiagnostics'),
+  /localPersistence:[\s\S]*label:[\s\S]*message:[\s\S]*updatedAt:/,
+  'local persistence diagnostics must survive a later successful save and restart'
 );
 
 const secureEqual = Function(
@@ -272,6 +723,11 @@ assert.match(preloadSource, /startFeishuLogin: \(\) => ipcRenderer\.invoke\('mx-
 assert.match(preloadSource, /cancelFeishuLogin: \(\) => ipcRenderer\.invoke\('mx-h2i:cancel-feishu-login'\)/);
 assert.match(rendererSource, /'login-feishu': \(\) => api\.startFeishuLogin\?\.\(\)/);
 assert.match(rendererSource, /'cancel-feishu-login': \(\) => api\.cancelFeishuLogin\?\.\(\)/);
+assert.match(
+  functionSource(rendererSource, 'runAction'),
+  /catch\s*\{[\s\S]*api\.getState\(\)\.catch\(\(\) => null\)[\s\S]*state = next/,
+  'a rejected IPC action must refresh the broadcast in-memory diagnosis instead of becoming unhandled'
+);
 
 const employeeUiSource = functionSource(rendererSource, 'renderEmployeeLogin');
 assert.match(employeeUiSource, /data-action="\$\{feishuAction\}"/);

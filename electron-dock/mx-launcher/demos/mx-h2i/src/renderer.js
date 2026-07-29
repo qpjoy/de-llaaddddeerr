@@ -694,6 +694,11 @@ async function runAction(action, payload) {
         appInspectorCollapsed = true;
       }
     }
+  } catch {
+    const next = await api.getState().catch(() => null);
+    if (next && typeof next === 'object' && 'connection' in next) {
+      state = next;
+    }
   } finally {
     busyAction = '';
     render();
