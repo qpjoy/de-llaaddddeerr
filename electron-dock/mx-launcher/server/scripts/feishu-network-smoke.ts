@@ -498,6 +498,177 @@ const controllerGuestSnapshot = await controller.createSnapshot(
   guestCapabilityV2
 );
 assert.equal(controllerGuestSnapshot.snapshot.overlayPolicy.leaseProfile, 'anonymous');
+const serverMintedGuestInput = {
+  appId: 'mx-h2i',
+  productId: 'mx-h2i',
+  mode: 'standalone',
+  identityKind: 'anonymous',
+  installId: 'inst_guest_server_minted_capability_smoke',
+  deviceId: 'dev_guest_server_minted_capability_smoke',
+  publicKey: `${'R'.repeat(43)}=`
+};
+const serverMintedGuestFirstConnect = await controller.enrollLease(
+  undefined,
+  serverMintedGuestInput
+);
+assert.match(serverMintedGuestFirstConnect.lease.capability ?? '', /^mxlc1\.[A-Za-z0-9_-]{43}$/);
+const serverMintedGuestFirstDigest = store.getLauncherNetworkLease(
+  serverMintedGuestFirstConnect.lease.leaseId
+)?.capabilityDigest;
+assert.ok(serverMintedGuestFirstDigest);
+const releasedServerMintedGuest = await controller.releaseLease(
+  serverMintedGuestFirstConnect.lease.leaseId,
+  undefined,
+  serverMintedGuestFirstConnect.lease.capability,
+  undefined,
+  { requestedBy: 'server-minted-guest-release-smoke' }
+);
+assert.equal(releasedServerMintedGuest.lease.status, 'released');
+await assert.rejects(
+  controller.enrollLease(undefined, serverMintedGuestInput),
+  /valid launcher lease capability/
+);
+await assert.rejects(
+  controller.enrollLease(
+    undefined,
+    serverMintedGuestInput,
+    undefined,
+    `mxlc1.${'T'.repeat(43)}`
+  ),
+  /valid launcher lease capability/
+);
+const recoveredReleasedServerMintedGuest = await controller.enrollLease(
+  undefined,
+  serverMintedGuestInput,
+  serverMintedGuestFirstConnect.lease.capability
+);
+assert.equal(
+  recoveredReleasedServerMintedGuest.lease.leaseId,
+  serverMintedGuestFirstConnect.lease.leaseId
+);
+assert.match(
+  recoveredReleasedServerMintedGuest.lease.capability ?? '',
+  /^mxlc1\.[A-Za-z0-9_-]{43}$/
+);
+assert.notEqual(
+  recoveredReleasedServerMintedGuest.lease.capability,
+  serverMintedGuestFirstConnect.lease.capability
+);
+assert.notEqual(
+  store.getLauncherNetworkLease(recoveredReleasedServerMintedGuest.lease.leaseId)?.capabilityDigest,
+  serverMintedGuestFirstDigest
+);
+const expiringServerMintedGuest = store.getLauncherNetworkLease(
+  recoveredReleasedServerMintedGuest.lease.leaseId
+);
+assert.ok(expiringServerMintedGuest);
+(store as unknown as {
+  launcherNetworkLeases: Map<string, typeof expiringServerMintedGuest>;
+}).launcherNetworkLeases.set(expiringServerMintedGuest.leaseId, {
+  ...expiringServerMintedGuest,
+  expiresAt: '2000-01-01T00:00:00.000Z'
+});
+await assert.rejects(
+  controller.enrollLease(undefined, serverMintedGuestInput),
+  /valid launcher lease capability/
+);
+await assert.rejects(
+  controller.enrollLease(
+    undefined,
+    serverMintedGuestInput,
+    undefined,
+    `mxlc1.${'U'.repeat(43)}`
+  ),
+  /valid launcher lease capability/
+);
+const recoveredExpiredServerMintedGuest = await controller.enrollLease(
+  undefined,
+  serverMintedGuestInput,
+  recoveredReleasedServerMintedGuest.lease.capability
+);
+assert.equal(
+  recoveredExpiredServerMintedGuest.lease.leaseId,
+  serverMintedGuestFirstConnect.lease.leaseId
+);
+assert.match(
+  recoveredExpiredServerMintedGuest.lease.capability ?? '',
+  /^mxlc1\.[A-Za-z0-9_-]{43}$/
+);
+assert.notEqual(
+  recoveredExpiredServerMintedGuest.lease.capability,
+  recoveredReleasedServerMintedGuest.lease.capability
+);
+assert.ok(
+  store.getLauncherNetworkLease(recoveredExpiredServerMintedGuest.lease.leaseId)?.capabilityDigest
+);
+assert.notEqual(
+  store.getLauncherNetworkLease(recoveredExpiredServerMintedGuest.lease.leaseId)?.capabilityDigest,
+  expiringServerMintedGuest.capabilityDigest
+);
+
+const legacyGuestInput = {
+  appId: 'mx-h2i',
+  productId: 'mx-h2i',
+  mode: 'standalone' as const,
+  identityKind: 'anonymous' as const,
+  leaseProfile: 'anonymous' as const,
+  installId: 'inst_guest_legacy_capabilityless_smoke',
+  deviceId: 'dev_guest_legacy_capabilityless_smoke',
+  userId: null,
+  publicKey: `${'Z'.repeat(43)}=`
+};
+const legacyGuest = store.enrollLauncherNetworkLease(legacyGuestInput);
+assert.equal(legacyGuest.capabilityDigest, null);
+await assert.rejects(
+  controller.enrollLease(
+    undefined,
+    {
+      ...legacyGuestInput,
+      deviceId: 'dev_guest_legacy_capabilityless_wrong'
+    }
+  ),
+  /requires the existing device and public key/
+);
+await assert.rejects(
+  controller.createSnapshot(undefined, {
+    leaseId: legacyGuest.leaseId,
+    installId: legacyGuest.installId,
+    deviceId: legacyGuest.deviceId,
+    publicKey: legacyGuest.publicKey,
+    appId: 'mx-h2i',
+    launcherMode: 'standalone'
+  }),
+  /valid launcher lease capability/
+);
+await assert.rejects(
+  controller.releaseLease(
+    legacyGuest.leaseId,
+    undefined,
+    undefined,
+    undefined,
+    { requestedBy: 'legacy-capabilityless-release-smoke' }
+  ),
+  /valid launcher lease capability/
+);
+await assert.rejects(
+  controller.syncDomesticPeer(
+    legacyGuest.leaseId,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {}
+  ),
+  /valid launcher lease capability/
+);
+const upgradedLegacyGuest = await controller.enrollLease(
+  undefined,
+  legacyGuestInput
+);
+assert.equal(upgradedLegacyGuest.lease.leaseId, legacyGuest.leaseId);
+assert.equal(upgradedLegacyGuest.lease.leaseIp, legacyGuest.leaseIp);
+assert.match(upgradedLegacyGuest.lease.capability ?? '', /^mxlc1\.[A-Za-z0-9_-]{43}$/);
+assert.ok(store.getLauncherNetworkLease(legacyGuest.leaseId)?.capabilityDigest);
 const passwordToken = store.issueUserCenterToken({
   subjectKind: 'user',
   subjectId: 'usr_demo_user',
@@ -544,6 +715,119 @@ const authorizedEmployee = await controller.enrollLease(`Bearer ${passwordToken.
 });
 assert.equal(authorizedEmployee.lease.leaseProfile, 'employee');
 assert.match(authorizedEmployee.lease.leaseIp, /^10\.89\.(?:[0-9]|[1-4]\d)\./);
+
+const employeeDeviceOneCapabilityV1 = `mxlc1.${'M'.repeat(43)}`;
+const employeeDeviceOneCapabilityV2 = `mxlc1.${'N'.repeat(43)}`;
+const employeeDeviceOneInput = {
+  appId: 'mx-h2i',
+  productId: 'mx-h2i',
+  mode: 'standalone',
+  identityKind: 'user',
+  installId: 'inst_employee_device_one_smoke',
+  deviceId: 'dev_employee_device_one_smoke',
+  userId: 'usr_demo_user',
+  publicKey: `${'M'.repeat(43)}=`,
+  deviceModel: 'MacBookPro18,3',
+  osVersion: 'macOS 15.6',
+  appVersion: '2.1.0'
+};
+const employeeDeviceOne = await controller.enrollLease(
+  `Bearer ${passwordToken.token}`,
+  employeeDeviceOneInput,
+  undefined,
+  employeeDeviceOneCapabilityV1
+);
+const employeeDeviceOneLease = employeeDeviceOne.lease as typeof employeeDeviceOne.lease & {
+  deviceModel?: string | null;
+  osVersion?: string | null;
+  appVersion?: string | null;
+};
+assert.equal(employeeDeviceOneLease.deviceModel, employeeDeviceOneInput.deviceModel);
+assert.equal(employeeDeviceOneLease.osVersion, employeeDeviceOneInput.osVersion);
+assert.equal(employeeDeviceOneLease.appVersion, employeeDeviceOneInput.appVersion);
+
+const employeeDeviceOneRenewed = await controller.enrollLease(
+  `Bearer ${passwordToken.token}`,
+  {
+    ...employeeDeviceOneInput,
+    deviceModel: 'MacBookPro21,2',
+    osVersion: 'macOS 16.0',
+    appVersion: '2.2.0'
+  },
+  undefined,
+  employeeDeviceOneCapabilityV2
+);
+const employeeDeviceOneRenewedLease = employeeDeviceOneRenewed.lease as
+  typeof employeeDeviceOneRenewed.lease & {
+    deviceModel?: string | null;
+    osVersion?: string | null;
+    appVersion?: string | null;
+  };
+assert.equal(employeeDeviceOneRenewedLease.leaseId, employeeDeviceOneLease.leaseId);
+assert.equal(employeeDeviceOneRenewedLease.leaseIp, employeeDeviceOneLease.leaseIp);
+assert.equal(employeeDeviceOneRenewedLease.capability, employeeDeviceOneCapabilityV2);
+assert.equal(employeeDeviceOneRenewedLease.deviceModel, 'MacBookPro21,2');
+assert.equal(employeeDeviceOneRenewedLease.osVersion, 'macOS 16.0');
+assert.equal(employeeDeviceOneRenewedLease.appVersion, '2.2.0');
+const persistedEmployeeDeviceOne = store.getLauncherNetworkLease(
+  employeeDeviceOneRenewedLease.leaseId
+) as typeof employeeDeviceOneRenewedLease | null;
+assert.equal(persistedEmployeeDeviceOne?.deviceModel, 'MacBookPro21,2');
+assert.equal(persistedEmployeeDeviceOne?.osVersion, 'macOS 16.0');
+assert.equal(persistedEmployeeDeviceOne?.appVersion, '2.2.0');
+
+const employeeDeviceTwo = await controller.enrollLease(
+  `Bearer ${passwordToken.token}`,
+  {
+    ...employeeDeviceOneInput,
+    installId: 'inst_employee_device_two_smoke',
+    deviceId: 'dev_employee_device_two_smoke',
+    publicKey: `${'N'.repeat(43)}=`,
+    deviceModel: 'SurfaceLaptop7',
+    osVersion: 'Windows 11 24H2',
+    appVersion: '2.2.0'
+  },
+  undefined,
+  `mxlc1.${'O'.repeat(43)}`
+);
+assert.equal(employeeDeviceTwo.lease.leaseProfile, 'employee');
+assert.notEqual(employeeDeviceTwo.lease.leaseId, employeeDeviceOneRenewedLease.leaseId);
+assert.notEqual(employeeDeviceTwo.lease.leaseIp, employeeDeviceOneRenewedLease.leaseIp);
+await assert.rejects(
+  controller.enrollLease(
+    `Bearer ${passwordToken.token}`,
+    {
+      ...employeeDeviceOneInput,
+      installId: 'inst_employee_reused_key_smoke',
+      deviceId: 'dev_employee_reused_key_smoke'
+    },
+    undefined,
+    `mxlc1.${'S'.repeat(43)}`
+  ),
+  /already bound to another active lease/
+);
+
+const legacyEmployeeInput = {
+  appId: 'mx-h2i',
+  productId: 'mx-h2i',
+  mode: 'standalone',
+  identityKind: 'user',
+  installId: 'inst_employee_legacy_client_smoke',
+  deviceId: 'dev_employee_legacy_client_smoke',
+  userId: 'usr_demo_user',
+  publicKey: `${'O'.repeat(43)}=`
+};
+const legacyEmployeeFirstConnect = await controller.enrollLease(
+  `Bearer ${passwordToken.token}`,
+  legacyEmployeeInput
+);
+const legacyEmployeeReconnect = await controller.enrollLease(
+  `Bearer ${passwordToken.token}`,
+  legacyEmployeeInput
+);
+assert.equal(legacyEmployeeReconnect.lease.leaseId, legacyEmployeeFirstConnect.lease.leaseId);
+assert.equal(legacyEmployeeReconnect.lease.leaseIp, legacyEmployeeFirstConnect.lease.leaseIp);
+
 await assert.rejects(
   controller.enrollLease(
     `Bearer ${passwordToken.token}`,
@@ -574,18 +858,56 @@ await assert.rejects(
   }),
   /Only a Feishu-authenticated/
 );
-const authorized = await controller.enrollLease(`Bearer ${feishuToken.token}`, {
+const authorizedFeishuCapability = `mxlc1.${'S'.repeat(43)}`;
+const authorized = await controller.enrollLease(
+  `Bearer ${feishuToken.token}`,
+  {
+    appId: 'mx-h2i',
+    productId: 'mx-h2i',
+    mode: 'standalone',
+    identityKind: 'user',
+    leaseProfile: 'employee',
+    installId: 'inst_feishu_controller_smoke',
+    deviceId: 'dev_feishu_controller_smoke',
+    userId: 'usr_demo_user'
+  },
+  undefined,
+  authorizedFeishuCapability
+);
+assert.equal(authorized.lease.leaseProfile, 'feishu');
+assert.match(authorized.lease.leaseIp, /^10\.89\.(?:5\d|[6-9]\d)\./);
+const feishuDeviceOneInput = {
   appId: 'mx-h2i',
   productId: 'mx-h2i',
   mode: 'standalone',
   identityKind: 'user',
-  leaseProfile: 'employee',
-  installId: 'inst_feishu_controller_smoke',
-  deviceId: 'dev_feishu_controller_smoke',
-  userId: 'usr_demo_user'
-});
-assert.equal(authorized.lease.leaseProfile, 'feishu');
-assert.match(authorized.lease.leaseIp, /^10\.89\.(?:5\d|[6-9]\d)\./);
+  leaseProfile: 'feishu',
+  installId: 'inst_feishu_device_one_smoke',
+  deviceId: 'dev_feishu_device_one_smoke',
+  userId: 'usr_demo_user',
+  publicKey: `${'P'.repeat(43)}=`
+};
+const feishuDeviceOne = await controller.enrollLease(
+  `Bearer ${feishuToken.token}`,
+  feishuDeviceOneInput,
+  undefined,
+  `mxlc1.${'P'.repeat(43)}`
+);
+const feishuDeviceTwo = await controller.enrollLease(
+  `Bearer ${feishuToken.token}`,
+  {
+    ...feishuDeviceOneInput,
+    installId: 'inst_feishu_device_two_smoke',
+    deviceId: 'dev_feishu_device_two_smoke',
+    publicKey: `${'Q'.repeat(43)}=`
+  },
+  undefined,
+  `mxlc1.${'Q'.repeat(43)}`
+);
+assert.equal(feishuDeviceOne.lease.leaseProfile, 'feishu');
+assert.equal(feishuDeviceTwo.lease.leaseProfile, 'feishu');
+assert.notEqual(feishuDeviceTwo.lease.leaseId, feishuDeviceOne.lease.leaseId);
+assert.notEqual(feishuDeviceTwo.lease.leaseIp, feishuDeviceOne.lease.leaseIp);
 const authorizedSnapshot = await controller.createSnapshot(`Bearer ${feishuToken.token}`, {
   leaseId: authorized.lease.leaseId,
   appId: 'mx-h2i',

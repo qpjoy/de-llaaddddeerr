@@ -9656,6 +9656,20 @@ function renderAppCenterProductNetwork() {
   renderSelectedAppDetail();
 }
 
+function launcherLeaseRuntimeMetadataLabel(lease) {
+  const value = (field) => String(lease?.[field] ?? '').trim() || '-';
+  return [
+    `user ${value('userId')}`,
+    `install ${value('installId')}`,
+    `device ${value('deviceId')}`,
+    `model ${value('deviceModel')}`,
+    `platform ${value('platform')}`,
+    `os ${value('osVersion')}`,
+    `app ${value('appVersion')}`,
+    `lease ${value('leaseId')}`
+  ].join(' / ');
+}
+
 function renderSelectedAppDetail() {
   if (!appSelectedDetail) return;
   const app = activeAppCenterApp();
@@ -9804,7 +9818,7 @@ function renderSelectedAppDetail() {
             <article>
               <strong>${escapeHtml(lease.leaseIp || '-')}</strong>
               <span>${escapeHtml(`${lease.identityKind || 'identity'} / ${lease.leaseProfile || 'legacy-profile'} / ${lease.launcherMode || 'mode'} / ${lease.deviceLabel || lease.deviceId || '-'}`)}</span>
-              <small>${escapeHtml(lease.leaseId || '-')}</small>
+              <small title="${escapeHtml(launcherLeaseRuntimeMetadataLabel(lease))}">${escapeHtml(launcherLeaseRuntimeMetadataLabel(lease))}</small>
             </article>
           `).join('') || '<div class="empty-state">No Launcher client lease yet.</div>'}
         </div>

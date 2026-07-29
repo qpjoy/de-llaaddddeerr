@@ -2356,6 +2356,9 @@ export interface LauncherNetworkLeaseInput {
   publicKey?: string | null;
   deviceLabel?: string | null;
   platform?: string | null;
+  deviceModel?: string | null;
+  osVersion?: string | null;
+  appVersion?: string | null;
   requestedBy?: string | null;
   requestId?: string | null;
   sdkTestMode?: boolean | string | null;
@@ -2395,6 +2398,9 @@ export interface LauncherNetworkLease {
   publicKey: string | null;
   deviceLabel: string | null;
   platform: string | null;
+  deviceModel?: string | null;
+  osVersion?: string | null;
+  appVersion?: string | null;
   status: 'active' | 'released';
   expiresAt: string;
   releasedAt: string | null;

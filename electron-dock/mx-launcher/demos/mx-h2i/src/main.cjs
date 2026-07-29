@@ -6811,6 +6811,9 @@ function normalizeInstallation(input) {
     ownershipInstanceId: stableOwnershipInstanceId(row),
     siteId: stringValue(row.siteId, 'domestic-main'),
     deviceLabel: nullableString(row.deviceLabel),
+    deviceModel: nullableString(row.deviceModel),
+    osVersion: nullableString(row.osVersion),
+    appVersion: nullableString(row.appVersion),
     keyPair: privateKey && publicKey ? { privateKey, publicKey } : null,
     createdAt: typeof row.createdAt === 'string' ? row.createdAt : null,
     updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : null
@@ -6951,24 +6954,17 @@ function rememberLeaseCapability(lease) {
   });
 }
 
-function forgetLeaseCapability(leaseId) {
-  const normalizedLeaseId = nullableString(leaseId);
-  if (!normalizedLeaseId) return;
-  runtime.leaseCapabilities = normalizeLeaseCapabilities(
-    Object.fromEntries(Object.entries(runtime.leaseCapabilities || {})
-      .filter(([key, record]) => (
-        key !== normalizedLeaseId
-        && record?.leaseId !== normalizedLeaseId
-      )))
-  );
-}
-
 function ensurePendingLeaseCapability(input) {
   const requestedProfile = input.identityKind === 'user'
     ? input.authProvider === 'feishu' ? 'feishu' : 'employee'
     : 'anonymous';
   const userId = nullableString(input.userId) || 'anonymous';
-  const capabilityKey = `pending:${launcherProductId()}:${requestedProfile}:${userId}`;
+  const productId = launcherProductId();
+  const installId = nullableString(runtime.installation?.installId);
+  if (!installId) {
+    throw new Error('Lease capability requires a bound installation.');
+  }
+  const capabilityKey = `pending:${productId}:${installId}:${requestedProfile}:${userId}`;
   const existing = runtime.leaseCapabilities?.[capabilityKey];
   if (existing?.capability) return existing.capability;
   const capability = `mxlc1.${randomBytes(32).toString('base64url')}`;
@@ -6978,10 +6974,10 @@ function ensurePendingLeaseCapability(input) {
       capabilityKey,
       leaseId: null,
       capability,
-      productId: launcherProductId(),
+      productId,
       identityKind: input.identityKind === 'user' ? 'user' : 'anonymous',
       leaseProfile: requestedProfile,
-      installId: nullableString(runtime.installation?.installId),
+      installId,
       userId: nullableString(input.userId),
       publicKey: nullableString(runtime.installation?.keyPair?.publicKey),
       expiresAt: null,
@@ -6995,26 +6991,26 @@ function leaseCapabilitiesForEnrollment(input) {
   const installation = runtime.installation || {};
   const installId = nullableString(installation.installId);
   const publicKey = nullableString(installation.keyPair?.publicKey);
+  const productId = launcherProductId();
+  if (!installId || !publicKey) return undefined;
   const records = Object.values(runtime.leaseCapabilities || {});
   const relevant = records.filter((record) => (
     record
-    && record.productId === launcherProductId()
-    && (!installId || record.installId === installId)
-    && (!publicKey || !record.publicKey || record.publicKey === publicKey)
+    && record.productId === productId
+    && record.installId === installId
+    && record.publicKey === publicKey
   ));
   const requestedProfile = input.identityKind === 'user'
     ? input.authProvider === 'feishu' ? 'feishu' : 'employee'
     : 'anonymous';
-  return [...new Set([
-    nullableString(runtime.connection?.leaseCapability),
-    ...relevant
-      .sort((left, right) => {
-        const leftPriority = left.leaseProfile === requestedProfile ? 1 : 0;
-        const rightPriority = right.leaseProfile === requestedProfile ? 1 : 0;
-        return rightPriority - leftPriority || right.updatedAt.localeCompare(left.updatedAt);
-      })
-      .map((record) => nullableString(record.capability))
-  ].filter(Boolean))].slice(0, 16).join(',') || undefined;
+  return [...new Set(relevant
+    .sort((left, right) => {
+      const leftPriority = left.leaseProfile === requestedProfile ? 1 : 0;
+      const rightPriority = right.leaseProfile === requestedProfile ? 1 : 0;
+      return rightPriority - leftPriority || right.updatedAt.localeCompare(left.updatedAt);
+    })
+    .map((record) => nullableString(record.capability))
+    .filter(Boolean))].slice(0, 16).join(',') || undefined;
 }
 
 function leaseAccessForLeaseId(leaseId) {
@@ -11618,6 +11614,9 @@ async function connectLauncherNetwork(input) {
     publicKey: context.installation.keyPair.publicKey,
     deviceLabel: context.installation.deviceLabel,
     platform: process.platform,
+    deviceModel: context.installation.deviceModel,
+    osVersion: context.installation.osVersion,
+    appVersion: app.getVersion(),
     requestedBy: REQUESTED_BY,
     requestId: makeRequestId(requestTag)
   });
@@ -11716,18 +11715,51 @@ async function ensureInstallation() {
   const now = nowIso();
   const installId = current.installId || `inst_${productId}_${shortId()}`;
   const deviceId = current.deviceId || `dev_${productId}_${shortId()}`;
+  const deviceModel = current.deviceModel || await detectDeviceModel();
   const installation = {
     installId,
     deviceId,
     ownershipInstanceId: stableOwnershipInstanceId(current) || installId || deviceId,
     siteId: current.siteId,
     deviceLabel: current.deviceLabel || `${launcherProductDisplayName()} Desktop`,
+    deviceModel,
+    osVersion: os.release(),
+    appVersion: app.getVersion(),
     keyPair,
     createdAt: current.createdAt || now,
     updatedAt: now
   };
   runtime.installation = installation;
   return installation;
+}
+
+async function detectDeviceModel() {
+  const configured = nullableString(process.env.MX_H2I_DEVICE_MODEL);
+  if (configured) return configured;
+  try {
+    if (process.platform === 'darwin') {
+      return nullableString(await execFileText('/usr/sbin/sysctl', ['-n', 'hw.model'], {
+        timeoutMs: 1500
+      })) || os.machine();
+    }
+    if (process.platform === 'win32') {
+      return nullableString(await execFileText('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        '(Get-CimInstance Win32_ComputerSystem).Model'
+      ], {
+        timeoutMs: 2500
+      })) || os.machine();
+    }
+    if (process.platform === 'linux') {
+      return nullableString(await fs.readFile('/sys/class/dmi/id/product_name', 'utf8'))
+        || os.machine();
+    }
+  } catch {
+    // Hardware inventory is best-effort audit metadata and never gates a lease.
+  }
+  return nullableString(typeof os.machine === 'function' ? os.machine() : process.arch);
 }
 
 async function ensureLauncherProduct(launcher, productId, productDisplayName) {
@@ -12859,7 +12891,6 @@ async function releaseRetiredHandoverLease(lease, options = {}) {
     if (released?.status !== 'released') {
       throw new Error('Internal did not confirm that the retired handover lease was released.');
     }
-    forgetLeaseCapability(leaseId);
     return {
       ok: true,
       status: 'released',
@@ -16938,6 +16969,15 @@ function classifyConnectionError(err) {
     return {
       state: 'network-unavailable',
       message: `公网域名被备案/公网入口拦截，不是 Internal 权限拒绝。请保留 Bootstrap API 域名，并使用 Host Resolve ${host}=<正式 Domestic gateway IP>；HTTPS 仅把该 IP 作为拨号目标，TLS SNI、HTTP Host 与证书校验仍使用原域名。原始错误：${message}`
+    };
+  }
+  if (
+    status === 401
+    && lower.includes('wireguard public key is already bound to another active lease')
+  ) {
+    return {
+      state: 'forbidden',
+      message: `本机 WireGuard 公钥仍绑定在另一条活动租约上；这不是 Domestic 443 或 Internal 网络不可达。客户端已尝试本机保存的历史 capability，仍无法证明旧租约所有权。请在 Internal Admin 按公钥/设备找到并 release 旧租约，或使用“清理旧连接”完整轮换本机 installation 与 WireGuard 密钥后重连；原始错误：${message}`
     };
   }
   if (status === 403 || lower.includes('403 forbidden') || lower.includes('forbidden')) {

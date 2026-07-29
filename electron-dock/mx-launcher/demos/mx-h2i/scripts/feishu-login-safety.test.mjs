@@ -218,8 +218,72 @@ assert.match(
 );
 assert.match(
   functionSource(mainSource, 'releaseRetiredHandoverLease'),
-  /\/release`[\s\S]*released\?\.status !== 'released'[\s\S]*forgetLeaseCapability\(leaseId\)/,
-  'a retired handover lease must be released server-side and forgotten locally'
+  /\/release`[\s\S]*released\?\.status !== 'released'[\s\S]*status: 'released'/,
+  'a retired handover lease must be confirmed released server-side'
+);
+assert.doesNotMatch(
+  functionSource(mainSource, 'releaseRetiredHandoverLease'),
+  /forgetLeaseCapability\(/,
+  'a released lease capability must remain in the encrypted keyring for later allowReleased proof'
+);
+const retainedReleasedCapability = 'mxlc1.released-guest-proof';
+const retiredLeaseRuntime = {
+  config: {
+    bootstrapApiBaseUrl: 'https://h2i.minsight-ai.com',
+    bootstrapResolveMode: 'env-first'
+  },
+  leaseCapabilities: {
+    'lease-retired-guest': {
+      leaseId: 'lease-retired-guest',
+      capability: retainedReleasedCapability
+    }
+  }
+};
+let forgottenReleasedLeaseCount = 0;
+const releaseRetiredHandoverLease = Function(
+  'nullableString',
+  'normalizeBaseUrl',
+  'runtime',
+  'requestJson',
+  'joinApiUrl',
+  'launcherLeaseAccessHeaders',
+  'REQUESTED_BY',
+  'makeRequestId',
+  'nowIso',
+  'errorMessage',
+  'forgetLeaseCapability',
+  `${functionSource(mainSource, 'releaseRetiredHandoverLease')}; return releaseRetiredHandoverLease;`
+)(
+  (value) => typeof value === 'string' && value.trim() ? value.trim() : null,
+  (value) => value,
+  retiredLeaseRuntime,
+  async () => ({
+    lease: {
+      status: 'released',
+      releasedAt: '2026-07-30T01:02:03.000Z'
+    }
+  }),
+  (baseUrl, pathname) => `${baseUrl}${pathname}`,
+  () => ({ 'x-mx-lease-capability': retainedReleasedCapability }),
+  'mx-h2i',
+  () => 'request-id',
+  () => '2026-07-30T01:02:04.000Z',
+  (err) => err.message,
+  (leaseId) => {
+    forgottenReleasedLeaseCount += 1;
+    delete retiredLeaseRuntime.leaseCapabilities[leaseId];
+  }
+);
+const retiredLeaseResult = await releaseRetiredHandoverLease({
+  leaseId: 'lease-retired-guest',
+  capability: retainedReleasedCapability
+});
+assert.equal(retiredLeaseResult.ok, true);
+assert.equal(forgottenReleasedLeaseCount, 0);
+assert.equal(
+  retiredLeaseRuntime.leaseCapabilities['lease-retired-guest'].capability,
+  retainedReleasedCapability,
+  'released guest proof must survive employee handover for a later guest enrollment'
 );
 assert.match(
   functionSource(mainSource, 'retireSupersededLocalLeases'),
@@ -230,6 +294,112 @@ assert.match(
   functionSource(mainSource, 'connectLauncherNetwork'),
   /assertLiveSecureLauncherCapabilityTransport\(context\.bootstrap, 'lease capability 传输'\)/,
   'every lease capability and MX bearer must stay on HTTPS, loopback, or a live verified WireGuard overlay'
+);
+assert.match(
+  functionSource(mainSource, 'connectLauncherNetwork'),
+  /deviceModel: context\.installation\.deviceModel,[\s\S]*osVersion: context\.installation\.osVersion,[\s\S]*appVersion: app\.getVersion\(\)/,
+  'each lease renewal must report best-effort device, OS, and app audit metadata'
+);
+assert.match(
+  functionSource(mainSource, 'ensureInstallation'),
+  /current\.deviceModel \|\| await detectDeviceModel\(\)[\s\S]*osVersion: os\.release\(\)[\s\S]*appVersion: app\.getVersion\(\)/,
+  'device inventory must be cached per installation while OS and app versions refresh'
+);
+const capabilitySelectionRuntime = {
+  installation: {
+    installId: 'inst-current',
+    keyPair: { publicKey: 'shared-public-key' }
+  },
+  connection: {
+    leaseCapability: 'mxlc1.unscoped-connection'
+  },
+  leaseCapabilities: {
+    current: {
+      capability: 'mxlc1.current',
+      productId: 'mx-h2i',
+      installId: 'inst-current',
+      publicKey: 'shared-public-key',
+      leaseProfile: 'anonymous',
+      updatedAt: '2026-07-29T02:00:00.000Z'
+    },
+    historicalProfile: {
+      capability: 'mxlc1.historical-profile',
+      productId: 'mx-h2i',
+      installId: 'inst-current',
+      publicKey: 'shared-public-key',
+      leaseProfile: 'employee',
+      updatedAt: '2026-07-29T01:30:00.000Z'
+    },
+    crossTuple: {
+      capability: 'mxlc1.cross-tuple',
+      productId: 'legacy-product',
+      installId: 'inst-old',
+      publicKey: 'shared-public-key',
+      leaseProfile: 'employee',
+      updatedAt: '2026-07-29T01:00:00.000Z'
+    },
+    otherInstall: {
+      capability: 'mxlc1.other-install',
+      productId: 'mx-h2i',
+      installId: 'inst-other',
+      publicKey: 'shared-public-key',
+      leaseProfile: 'anonymous',
+      updatedAt: '2026-07-29T03:00:00.000Z'
+    },
+    otherPublicKey: {
+      capability: 'mxlc1.other-public-key',
+      productId: 'mx-h2i',
+      installId: 'inst-current',
+      publicKey: 'other-public-key',
+      leaseProfile: 'anonymous',
+      updatedAt: '2026-07-29T04:00:00.000Z'
+    },
+    legacyWithoutPublicKey: {
+      capability: 'mxlc1.legacy-without-public-key',
+      productId: 'mx-h2i',
+      installId: 'inst-current',
+      leaseProfile: 'anonymous',
+      updatedAt: '2026-07-29T05:00:00.000Z'
+    }
+  }
+};
+const leaseCapabilitiesForEnrollment = Function(
+  'runtime',
+  'launcherProductId',
+  'nullableString',
+  `${functionSource(mainSource, 'leaseCapabilitiesForEnrollment')}; return leaseCapabilitiesForEnrollment;`
+)(
+  capabilitySelectionRuntime,
+  () => 'mx-h2i',
+  (value) => typeof value === 'string' && value.trim() ? value.trim() : null
+);
+const selectedCapabilities = leaseCapabilitiesForEnrollment({ identityKind: 'anonymous' }).split(',');
+assert.ok(selectedCapabilities.includes('mxlc1.current'));
+assert.ok(
+  selectedCapabilities.includes('mxlc1.historical-profile'),
+  'the same product, installation, and public key may retain historical profile capabilities'
+);
+for (const forbiddenCapability of [
+  'mxlc1.unscoped-connection',
+  'mxlc1.cross-tuple',
+  'mxlc1.other-install',
+  'mxlc1.other-public-key',
+  'mxlc1.legacy-without-public-key'
+]) {
+  assert.ok(
+    !selectedCapabilities.includes(forbiddenCapability),
+    `${forbiddenCapability} must not cross its product/install/public-key trust tuple`
+  );
+}
+assert.match(
+  functionSource(mainSource, 'leaseCapabilitiesForEnrollment'),
+  /record\.productId === productId[\s\S]*record\.installId === installId[\s\S]*record\.publicKey === publicKey/,
+  'enrollment capabilities must remain inside the current product, installation, and key tuple'
+);
+assert.match(
+  functionSource(mainSource, 'ensurePendingLeaseCapability'),
+  /pending:\$\{productId\}:\$\{installId\}:\$\{requestedProfile\}:\$\{userId\}/,
+  'new pending capabilities must not be reused across installations'
 );
 assert.match(
   functionSource(mainSource, 'rememberLeaseCapability'),
@@ -274,6 +444,73 @@ assert.match(
   /leaseCapabilities: _leaseCapabilities[\s\S]*\.\.\.safeSource/,
   'lease capabilities must never be exposed to the renderer'
 );
+const protectPersistedRuntime = Function(
+  'normalizeAuth',
+  'normalizeInstallation',
+  'normalizeLeaseCapabilities',
+  'nullableString',
+  'secureCredentialStorageAvailable',
+  'idleConnection',
+  'nowIso',
+  'stableOwnershipInstanceId',
+  'safeStorage',
+  `${functionSource(mainSource, 'protectPersistedRuntime')}; return protectPersistedRuntime;`
+)(
+  () => null,
+  (value) => value && typeof value === 'object' ? value : { keyPair: null },
+  (value) => value && typeof value === 'object' ? value : {},
+  (value) => typeof value === 'string' && value.trim() ? value.trim() : null,
+  () => true,
+  () => ({}),
+  () => '2026-07-30T01:02:05.000Z',
+  () => 'ownership-instance',
+  {
+    encryptString: (value) => Buffer.from(`sealed:${value}`)
+  }
+);
+const protectedReleasedCapabilityRuntime = protectPersistedRuntime({
+  installation: { keyPair: null },
+  leaseCapabilities: retiredLeaseRuntime.leaseCapabilities
+});
+assert.deepEqual(protectedReleasedCapabilityRuntime.leaseCapabilities, {});
+assert.ok(protectedReleasedCapabilityRuntime.encryptedLeaseCapabilities);
+assert.equal(
+  JSON.stringify(protectedReleasedCapabilityRuntime).includes(retainedReleasedCapability),
+  false,
+  'a retained released capability must not be persisted in plaintext'
+);
+assert.equal(
+  Buffer.from(protectedReleasedCapabilityRuntime.encryptedLeaseCapabilities, 'base64')
+    .toString('utf8')
+    .includes(retainedReleasedCapability),
+  true,
+  'the encrypted keyring payload must retain the released capability'
+);
+const visibleRuntime = Function(
+  'runtime',
+  'visibleInstallation',
+  'visibleConnection',
+  'visibleAuth',
+  'visibleFeishuAuthFlow',
+  'diagnosticLogStatus',
+  `${functionSource(mainSource, 'visibleRuntime')}; return visibleRuntime;`
+)(
+  {},
+  (value) => value,
+  (value) => value,
+  (value) => value,
+  () => null,
+  () => null
+);
+const visibleReleasedCapabilityRuntime = visibleRuntime({
+  installation: null,
+  connection: null,
+  auth: null,
+  leaseCapabilities: retiredLeaseRuntime.leaseCapabilities,
+  encryptedLeaseCapabilities: protectedReleasedCapabilityRuntime.encryptedLeaseCapabilities
+});
+assert.equal(Object.hasOwn(visibleReleasedCapabilityRuntime, 'leaseCapabilities'), false);
+assert.equal(Object.hasOwn(visibleReleasedCapabilityRuntime, 'encryptedLeaseCapabilities'), false);
 assert.match(
   functionSource(mainSource, 'writePrivateJsonFile'),
   /serializePrivateJsonFileWrite\(filePath,[\s\S]*mode: 0o600[\s\S]*renamePrivateJsonFileWithRetry\(temporaryPath, filePath\)[\s\S]*fs\.chmod\(filePath, 0o600\)/,
@@ -580,6 +817,13 @@ const localPersistenceClassification = classifyConnectionError(
 );
 assert.equal(localPersistenceClassification.state, 'local-storage-error');
 assert.doesNotMatch(localPersistenceClassification.message, /后端不可达|server-unavailable/);
+const publicKeyConflictClassification = classifyConnectionError({
+  status: 401,
+  message: 'This WireGuard public key is already bound to another active lease'
+});
+assert.equal(publicKeyConflictClassification.state, 'forbidden');
+assert.match(publicKeyConflictClassification.message, /不是 Domestic 443 或 Internal 网络不可达/);
+assert.match(publicKeyConflictClassification.message, /release 旧租约/);
 
 const retainedRuntime = {
   connection: {

@@ -2735,6 +2735,11 @@ export class PostgresStore implements PlatformStore {
         serviceVip: lease.serviceVip,
         requestedProductId: requestedProduct.productId,
         appId: normalizedInput.appId,
+        deviceLabel: lease.deviceLabel,
+        platform: lease.platform,
+        deviceModel: lease.deviceModel,
+        osVersion: lease.osVersion,
+        appVersion: lease.appVersion,
         sdkTestMode
       }
     });
@@ -2760,6 +2765,12 @@ export class PostgresStore implements PlatformStore {
         leaseId: released.leaseId,
         launcherMode: released.launcherMode,
         identityKind: released.identityKind,
+        leaseProfile: released.leaseProfile,
+        deviceLabel: released.deviceLabel,
+        platform: released.platform,
+        deviceModel: released.deviceModel,
+        osVersion: released.osVersion,
+        appVersion: released.appVersion,
         status: released.status,
         releasedAt: released.releasedAt
       }

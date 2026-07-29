@@ -280,15 +280,16 @@ authorize/token 参数和应用版本，并向飞书侧确认实际请求证据�
 
 | 登录来源 | lease profile | 地址范围 | 稳定键 |
 | --- | --- | --- | --- |
-| 员工账号密码 | `employee` | `10.89.0.1 - 10.89.49.254` | Internal user ID |
-| 飞书登录 | `feishu` | `10.89.50.1 - 10.89.99.254` | `tenant_key + open_id` 对应的 Internal user ID |
+| 员工账号密码 | `employee` | `10.89.0.1 - 10.89.49.254` | Internal user ID + MX-H2I installation ID |
+| 飞书登录 | `feishu` | `10.89.50.1 - 10.89.99.254` | `tenant_key + open_id` 对应的 Internal user ID + MX-H2I installation ID |
 | 访客 | `anonymous` | `10.89.100.1 - 10.89.254.254` | MX-H2I installation ID |
 
 每个 `/24` 跳过 `.0` 与 `.255`。密码员工池与飞书池各有 12,700 个可用地址。
 
 必须保持以下行为：
 
-- 同一身份续租同一固定 IP。
+- 同一 product/profile/installation 的 lease 续租同一固定 IP；同一员工账号或飞书账号在
+  不同 installation 上使用时，每台设备获得独立 lease、capability 和 IP。
 - 三池分别加锁，分配时对全部 active lease IP 去重；Internal 同时拒绝重叠或倒序的三段
   地址配置，并要求每段完整落在对应的合法 IPv4 CIDR 内。
 - 匿名请求不能申请 `feishu` profile。
@@ -332,7 +333,79 @@ curl -fsS "$BASE/internal/v1/launcher-network/leases" \
 `MX_LAUNCHER_NETWORK_LEGACY_UNAUTHENTICATED_USER_LEASES=1`，但该兼容模式无法证明
 userId 的请求者身份，必须在旧客户端升级完成后立即恢复为 `0`。
 
-### 4.2 两阶段 peer handover
+### 4.2 DHCP 式设备租约、多设备与审计
+
+Launcher Network 的分配语义类似 DHCP，但不是在桌面侧运行 DHCP 协议：Internal 是唯一
+地址分配者，`installId` 相当于稳定 client identifier，`deviceId` 与 WireGuard public key
+用于校验同一次安装的设备和密钥连续性。`userId` 是认证主体，不是单账号唯一的租约键。
+因此同一账号可以同时在 Windows、macOS 或多台同类设备登录；只要 `installId` 不同，就
+必须保留各自的 `/32`、lease ID、generation 和 capability，不能按 `userId` 合并或互相
+覆盖。
+
+租约规则如下：
+
+- 同一 product、profile、user/anonymous principal 与 installation 续租时保留原 IP；
+  `deviceLabel`、设备信息和客户端版本可以随续租更新。
+- 同一账号的不同 installation 分别占用池中地址；某台设备断开或释放不影响该账号的其它
+  设备。
+- `deviceId` 或 WireGuard public key 与已有 active lease 不一致时拒绝原位续租；密钥轮换
+  必须走单独迁移，不能仅修改展示字段绕过 ownership 校验。
+- 重装或安全状态目录丢失会生成新的 installation，旧 lease/peer 不会据此自动消失。运维
+  应把它视为 orphan，对账数据库、Domestic relay 与 Internal direct peer 后再释放，而
+  不是把新设备强行改回旧 `installId`。
+- `deviceLabel`、`deviceModel`、`platform`、`osVersion` 和 `appVersion` 都是客户端自报的
+  资产信息，只用于可见性、兼容性分析和审计，不能参与身份认证、RBAC 或网络授权。
+
+每次 enrollment、refresh、release 和 handover 至少应能关联以下审计字段：
+
+- `leaseId`、`productId`、`siteId`、`identityKind`、`leaseProfile`、`userId`、
+  `installId`、`deviceId`；
+- `deviceLabel`、`deviceModel`、`platform`、`osVersion`、`appVersion`；
+- `leaseIp`/CIDR、WireGuard public key、generation、status、expiry，以及
+  `requestId`、操作人和创建/更新时间。
+
+续租会更新当前 lease 的设备/版本信息，因此 enrollment/refresh 审计事件也必须保存上述
+设备字段，才能还原某一时刻运行的 OS 与应用版本。旧数据库记录没有新字段时按未知值
+显示，不要求回填，也不能根据缺失值撤销仍有效的租约。审计与诊断严禁记录 MX bearer、
+原始 lease capability、WireGuard private key、飞书 code 或 token；服务端只保存
+capability digest、版本和过期时间。
+
+原始 capability 只保存在客户端 `safeStorage` 加密 keyring，服务端和 Admin 列表不能将其
+反查或重新显示。重启时能解密 keyring，客户端才可续租、同步 peer 或恢复 pending
+handover。发送旧 capability 时，只能选择与当前 `productId + installId + WireGuard
+public key` 完全相同的 keyring 记录；不能因为公钥碰巧相同，就把其它产品或安装实例的
+bearer secret 发给当前 Bootstrap。
+
+兼容规则必须区分以下三种情况：
+
+- 新客户端提交 `x-mx-new-lease-capability` 时，服务端保存其 digest；滚动升级中的旧
+  core 没有该 header 时，服务端生成一次新 capability、在 enrollment 响应中返回原文，
+  并且仍只持久化 digest。因此每条新 lease 都进入强 capability 模式，不再创建新的
+  capability-less lease。同一员工/飞书用户、同一 installation/device/public key 的精确
+  续租，也可用有效 MX bearer 证明账号所有权并轮换 capability。
+- 数据库中已经存在的 capability-less 历史 anonymous lease，只能由完全相同的
+  installation/device/public key 在 enrollment 阶段升级；升级后立即写入 digest。
+  snapshot、release、Domestic/Internal peer sync 和 diagnostics 都不能把普通 lease ID
+  当作 bearer。这个路径只用于迁移历史行，不能扩展到新的协议。
+- 已经存在 digest 的匿名 lease（包括 active、expired 或 released）若丢失 capability，
+  不能仅凭 install/device ID 或公开的 WireGuard public key 自动接管。客户端在身份切换
+  后仍保留已释放 lease 的加密 capability，以便之后安全切回原 profile；capability 确实
+  丢失时，保持现有可用 tunnel 或 pending/降级状态，并进入受控恢复或完整轮换
+  installation/device/key。
+
+运维恢复顺序为：
+
+1. 记录 lease/transition ID、installation、当前 IP 和最后阶段，不复制或索要 capability。
+2. 对账数据库、Domestic 与 Internal 两侧真实 `/32`；仍有可用 tunnel 时先保留它。
+3. capability 可恢复时幂等继续 refresh/commit/abort；无法恢复时，由运维凭据受控释放旧
+   lease 并清理两侧 peer，再让该 installation 完成新的 enrollment。
+4. 确认旧 `/32`、旧 generation 和 orphan peer 均已清理后，才把新 lease 标记为恢复完成。
+
+日常容量和安全巡检应按 `leaseProfile` 分别统计三段地址，同时按 `userId + installId`
+检查多设备分布、重复 installation、长期未续租版本及 orphan peer。不能只按账号计数，也
+不能只看数据库 active 状态就认定数据面已经清理。
+
+### 4.3 两阶段 peer handover
 
 从访客切到密码员工/飞书身份，或在两种员工身份间切换时，不能先删旧 peer 再假定新数据面
 一定成功。MX-H2I 对 Domestic relay 与 Internal direct peer 使用相同的
@@ -379,7 +452,7 @@ WireGuard interface address：只有新地址存在才 commit，只有旧地址�
 4. 确认 Domestic/Internal 与数据库最终只剩所选地址，客户端重新连接和健康探测通过后，
    才清理 pending 记录。残留双 `/32` 必须视为未完成事故，不作为可长期运行状态。
 
-### 4.3 离职、禁用与撤销
+### 4.4 离职、禁用与撤销
 
 当前没有接入飞书离职/用户禁用事件，也没有周期性向飞书复验员工状态。飞书侧离职、移出
 应用可用范围或禁用账号不会自动同步到 Internal：已签发的 MX token 最长七天才自然过期，
@@ -878,7 +951,7 @@ lsof -nP -iTCP:17891 -sTCP:LISTEN
 | `user_info` 返回 token 无效 | token exchange 失败、错误环境/应用混用或 token 已失效 | 检查 Feishu/飞书域名品牌、App ID、服务端网络与一次性 exchange |
 | 授权成功但未拿到飞书池 IP | MX token 未带 `auth_provider=feishu`，或 lease 请求未携带 MX token | 检查 Internal token introspection 和 Launcher Network 日志 |
 | 等待飞书授权时访客掉线 | OAuth 阶段错误修改了网络 runtime | 按网络切换 runbook 排查；只有身份验证成功并进入系统网络切换后才应替换访客 peer |
-| 重启后提示 handover capability 缺失 | `safeStorage` 不可用/解密失败，或本地 secret 已被清理 | 保持 pending/降级；按 4.2 同时对账 Domestic/Internal 的 old/new `/32`，选择 commit 或 abort 后再重连 |
+| 重启后提示 handover capability 缺失 | `safeStorage` 不可用/解密失败，或本地 secret 已被清理 | 保持 pending/降级；按 4.3 同时对账 Domestic/Internal 的 old/new `/32`，选择 commit 或 abort 后再重连 |
 | 重启后要求重新 enrollment | `safeStorage` 不可用或持久化密文无法解密 | 这是 fail-closed，不启用明文 fallback；重建 installation/device/key，并清理旧 orphan lease/peer |
 | Internal 无法访问飞书 | DNS、出口、防火墙或证书链问题 | 从 Internal Pod 检查 `accounts.feishu.cn`、`open.feishu.cn` 的 DNS/HTTPS 出口 |
 

@@ -135,23 +135,33 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     const requestedProductId = launcherNetworkLeaseProductId(
       nullableString(body.productId) ?? nullableString(body.appId)
     );
-    const activeLeases = await this.store.listLauncherNetworkLeases();
-    const previousAnonymousLease = requestedInstallId
-      ? activeLeases.find((lease) => launcherNetworkLeaseIsActive(lease)
-        && lease.identityKind === 'anonymous'
+    const leases = await this.store.listLauncherNetworkLeases();
+    const previousAnonymousLeaseRecords = requestedInstallId
+      ? leases.filter((lease) => (
+        lease.identityKind === 'anonymous'
         && lease.productId === requestedProductId
-        && lease.installId === requestedInstallId)
-      : null;
+        && lease.installId === requestedInstallId
+      )).sort((left, right) => (
+        (Number(right.generation) || 0) - (Number(left.generation) || 0)
+        || right.updatedAt.localeCompare(left.updatedAt)
+      ))
+      : [];
+    const previousAnonymousLease = previousAnonymousLeaseRecords
+      .find((lease) => launcherNetworkLeaseIsActive(lease))
+      ?? null;
+    const previousAnonymousLeaseRecord = previousAnonymousLease
+      ?? previousAnonymousLeaseRecords[0]
+      ?? null;
     const publicKeyLeases = requestedPublicKey
-      ? activeLeases.filter((lease) => launcherNetworkLeaseIsActive(lease)
+      ? leases.filter((lease) => launcherNetworkLeaseIsActive(lease)
         && lease.publicKey === requestedPublicKey
         && lease.leaseId !== previousAnonymousLease?.leaseId)
       : [];
     if (
-      previousAnonymousLease
+      previousAnonymousLeaseRecord
       && (
-        previousAnonymousLease.publicKey !== requestedPublicKey
-        || previousAnonymousLease.deviceId !== requestedDeviceId
+        previousAnonymousLeaseRecord.publicKey !== requestedPublicKey
+        || previousAnonymousLeaseRecord.deviceId !== requestedDeviceId
       )
     ) {
       throw new UnauthorizedException(
@@ -160,6 +170,15 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     }
     if (previousAnonymousLease?.capabilityDigest) {
       assertLauncherLeaseCapability(previousAnonymousLease, leaseCapability);
+    } else if (
+      previousAnonymousLeaseRecord?.capabilityDigest
+      && !launcherLeaseCapabilityMatches(
+        previousAnonymousLeaseRecord,
+        leaseCapability,
+        { allowReleased: true }
+      )
+    ) {
+      throw new UnauthorizedException('A valid launcher lease capability is required');
     }
     const auth = await authorizedLeaseIdentity(
       this.store,
@@ -170,7 +189,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       this.config.launcherNetworkLegacyUnauthenticatedUserLeasesEnabled
     );
     const previousUserIdentityLease = auth.userId
-      ? activeLeases.find((lease) => (
+      ? leases.find((lease) => (
           launcherNetworkLeaseIsActive(lease)
           && lease.identityKind === 'user'
           && lease.productId === requestedProductId
@@ -196,6 +215,12 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     }
     for (const publicKeyLease of publicKeyLeases) {
       if (launcherLeaseCapabilityMatches(publicKeyLease, leaseCapability)) continue;
+      if (publicKeyLease.leaseId === previousUserIdentityLease?.leaseId) {
+        if (!publicKeyLease.capabilityDigest && newLeaseCapability) {
+          legacyCapabilityClaimLeaseIds.push(publicKeyLease.leaseId);
+        }
+        continue;
+      }
       const legacyUserClaimMatches = (
         !publicKeyLease.capabilityDigest
         && publicKeyLease.identityKind === 'user'
@@ -209,7 +234,9 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       if (!legacyUserClaimMatches) {
         throw new UnauthorizedException('This WireGuard public key is already bound to another active lease');
       }
-      legacyCapabilityClaimLeaseIds.push(publicKeyLease.leaseId);
+      if (newLeaseCapability) {
+        legacyCapabilityClaimLeaseIds.push(publicKeyLease.leaseId);
+      }
     }
     const ownedPublicKeyLeases = [
       ...(previousAnonymousLease ? [previousAnonymousLease] : []),
@@ -260,6 +287,9 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       publicKey: requestedPublicKey,
       deviceLabel: nullableString(body.deviceLabel),
       platform: nullableString(body.platform),
+      deviceModel: nullableString(body.deviceModel),
+      osVersion: nullableString(body.osVersion),
+      appVersion: nullableString(body.appVersion),
       requestedBy: nullableString(body.requestedBy),
       requestId: nullableString(body.requestId),
       sdkTestMode: body.sdkTestMode === true ? true : nullableString(body.sdkTestMode),

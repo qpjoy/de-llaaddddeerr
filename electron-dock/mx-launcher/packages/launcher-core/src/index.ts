@@ -228,6 +228,9 @@ export interface AnonymousEnrollmentRequest {
   deviceId?: string;
   deviceLabel?: string;
   platform?: string;
+  deviceModel?: string;
+  osVersion?: string;
+  appVersion?: string;
   publicKey?: string;
   relayMode?: string;
   requestId?: string;
@@ -278,6 +281,9 @@ export interface LauncherNetworkLeaseInput {
   publicKey?: string | null;
   deviceLabel?: string | null;
   platform?: string | null;
+  deviceModel?: string | null;
+  osVersion?: string | null;
+  appVersion?: string | null;
   requestedBy?: string | null;
   requestId?: string | null;
   sdkTestMode?: boolean | string | null;
@@ -381,6 +387,9 @@ export interface LauncherNetworkLease {
   publicKey: string | null;
   deviceLabel: string | null;
   platform: string | null;
+  deviceModel?: string | null;
+  osVersion?: string | null;
+  appVersion?: string | null;
   status: 'active';
   expiresAt?: string;
   releasedAt?: string | null;
@@ -718,6 +727,9 @@ export async function createLauncherNetworkSession(
     publicKey: wireGuard.publicKey,
     deviceLabel: input.deviceLabel,
     platform: input.platform,
+    deviceModel: input.deviceModel,
+    osVersion: input.osVersion,
+    appVersion: input.appVersion,
     requestedBy: input.requestedBy ?? 'launcher-network-session',
     requestId: input.requestId,
     sdkTestMode: input.sdkTestMode
