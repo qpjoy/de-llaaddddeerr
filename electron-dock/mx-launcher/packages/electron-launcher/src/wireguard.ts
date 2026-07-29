@@ -1103,7 +1103,7 @@ function readWindowsRouteToTarget(targetIp: string): {
     '    InterfaceMetric = $_.InterfaceMetric',
     '  }',
     '} | ConvertTo-Json -Compress'
-  ].join('; ');
+  ].join('\r\n');
   try {
     const raw = execFileSync(windowsPowerShellCommand(), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       encoding: 'utf8',

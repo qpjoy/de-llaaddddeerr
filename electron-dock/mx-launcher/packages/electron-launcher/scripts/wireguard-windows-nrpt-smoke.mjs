@@ -1,9 +1,21 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   launcherWindowsWireGuardCleanupReady,
   launcherWindowsWireGuardTunnelCleanupReady,
   validateLauncherWindowsNrptDesiredState
 } from '../dist/wireguard.js';
+
+const wireguardBundle = readFileSync(
+  fileURLToPath(new URL('../dist/wireguard.js', import.meta.url)),
+  'utf8'
+);
+assert.doesNotMatch(
+  wireguardBundle,
+  /@\{;/,
+  'Windows PowerShell route probe must not collapse hashtable literals into "@{;"'
+);
 
 const baseStatus = {
   supported: true,
