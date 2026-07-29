@@ -6580,6 +6580,16 @@ function siteSlotDeploymentPhases(
     const flags = deleteStale ? '-az --delete' : '-az';
     return `if command -v rsync >/dev/null 2>&1; then rsync ${flags} -e 'ssh -p ${sshPort}' ${source} ${sshUser}@${target}:${dest}; else ${source.endsWith('/') ? scpRecursive(source, dest) : scp(source, dest)}; fi`;
   };
+  const switchCurrentSymlink = (releaseDir: string, currentDir: string) => {
+    const legacyCurrentDir = `${currentDir}.legacy-${releaseRevision}`;
+    return [
+      `if test -d ${currentDir} && ! test -L ${currentDir}; then`,
+      `if test -e ${legacyCurrentDir} || test -L ${legacyCurrentDir}; then echo "blocked: legacy current directory backup already exists: ${legacyCurrentDir}" >&2; exit 1; fi;`,
+      `mv ${currentDir} ${legacyCurrentDir};`,
+      'fi;',
+      `ln -sfnT ${releaseDir} ${currentDir}`
+    ].join(' ');
+  };
   const workerInternalBaseUrl = siteSlotWorkerInternalBaseUrl(input) ?? '<worker-internal-base-url>';
   const overseaCallbackBaseUrl = kind === 'oversea'
     ? siteSlotOverseaCallbackBaseUrl(input)
@@ -6689,7 +6699,9 @@ function siteSlotDeploymentPhases(
     'fi;',
     'done;',
     'fi;',
-    'docker compose up -d;',
+    kind === 'domestic'
+      ? 'test -x ./manage.sh || { echo "blocked: Domestic service bundle is missing executable manage.sh"; exit 1; }; ./manage.sh up;'
+      : 'docker compose up -d;',
     'else',
     'echo "slot services bundle has no Docker services selected";',
     'fi;',
@@ -6890,7 +6902,7 @@ function siteSlotDeploymentPhases(
       commands: [
         ssh(`install -d -m 0755 ${incomingDir} ${currentRoot} ${domesticTunnelCliReleaseDir}`),
         rsyncOverSsh(domesticTunnelCliBundle, `${incomingDir}/`),
-        ssh(`tar -xzf ${incomingDir}/${domesticTunnelCliBundleName} -C ${domesticTunnelCliReleaseDir} && ln -sfn ${domesticTunnelCliReleaseDir} ${domesticTunnelCliCurrentDir}`),
+        ssh(`tar -xzf ${incomingDir}/${domesticTunnelCliBundleName} -C ${domesticTunnelCliReleaseDir} && ${switchCurrentSymlink(domesticTunnelCliReleaseDir, domesticTunnelCliCurrentDir)}`),
         rsyncOverSsh(domesticBootstrapSubscriptionArtifact, `${domesticBootstrapSubscriptionRemote}`),
         ssh(domesticTunnelBootstrapCommand)
       ],
@@ -6936,7 +6948,7 @@ function siteSlotDeploymentPhases(
       commands: [
         ssh(`install -d -m 0755 /opt/mx ${incomingDir} ${currentRoot} /opt/mx/site-agent ${overseaAccessStackReleaseDir}`),
         rsyncOverSsh(overseaAccessStackBundle, `${incomingDir}/`),
-        ssh(`tar -xzf ${incomingDir}/${overseaAccessStackBundleName} -C ${overseaAccessStackReleaseDir} && ln -sfn ${overseaAccessStackReleaseDir} ${overseaAccessStackCurrentDir}`),
+        ssh(`tar -xzf ${incomingDir}/${overseaAccessStackBundleName} -C ${overseaAccessStackReleaseDir} && ${switchCurrentSymlink(overseaAccessStackReleaseDir, overseaAccessStackCurrentDir)}`),
         ssh(`cd ${overseaAccessStackCurrentDir} && chmod +x manage.sh && test -f docker-compose.yml && test -f .env.example`)
       ],
       notes: ['Internal pushes the access stack over rsync/OpenSSH and falls back to scp; the Oversea host does not clone or pull source code.']
@@ -6991,9 +7003,9 @@ function siteSlotDeploymentPhases(
       target: kind,
       required: true,
       commands: [
-        ssh(`install -d -m 0700 /etc/wireguard && install -d -m 0755 ${slotCurrentDir}`),
+        ssh(`install -d -m 0700 /etc/wireguard && install -d -m 0755 ${slotReleaseDir}`),
         rsyncOverSsh(domesticWireGuardConfig, '/etc/wireguard/mx-domestic.conf'),
-        rsyncOverSsh(domesticRelayEnv, `${slotCurrentDir}/mx-domestic-relay.env`),
+        rsyncOverSsh(domesticRelayEnv, `${slotReleaseDir}/mx-domestic-relay.env`),
         ssh(domesticLegacyWireGuardCompatCommand),
         ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; chmod 600 /etc/wireguard/mx-domestic.conf; if command -v systemctl >/dev/null 2>&1; then systemctl enable wg-quick@mx-domestic >/dev/null 2>&1 || true; systemctl restart wg-quick@mx-domestic; else wg-quick down mx-domestic >/dev/null 2>&1 || true; wg-quick up mx-domestic; fi; ip -4 addr replace 10.88.0.1/16 dev mx-domestic; ip link set up dev mx-domestic; sysctl -w net.ipv4.ip_forward=1; if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i mx-domestic -o mx-domestic -j ACCEPT; if iptables -S DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -i mx-domestic -o mx-domestic -j ACCEPT; fi; for dns_port in 53 50053; do iptables -C INPUT -i mx-domestic -p udp --dport "$dns_port" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p udp --dport "$dns_port" -j ACCEPT; iptables -C INPUT -i mx-domestic -p tcp --dport "$dns_port" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p tcp --dport "$dns_port" -j ACCEPT; done; fi; for route_cidr in 10.89.0.0/16 10.90.0.0/16; do ip route replace "$route_cidr" dev mx-domestic; done; ip -4 address show dev mx-domestic; ip route get 10.89.100.1 || true')
       ],
@@ -7009,8 +7021,8 @@ function siteSlotDeploymentPhases(
         ssh(`install -d -m 0755 ${incomingDir} ${currentRoot} ${slotReleaseDir}`),
         rsyncOverSsh(slotServiceBundle, `${incomingDir}/`),
         kind === 'oversea'
-          ? ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && ${overseaSlotServiceEnvWriteCommand} && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
-          : ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && ${domesticEnvWriteCommand} && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
+          ? ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ${switchCurrentSymlink(slotReleaseDir, slotCurrentDir)} && ${overseaSlotServiceEnvWriteCommand} && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
+          : ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ${switchCurrentSymlink(slotReleaseDir, slotCurrentDir)} && ${domesticEnvWriteCommand} && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
       ],
       notes: [
         'Internal pushes Release Center bundles; slot hosts run the unpacked bundle and do not pull code from git.',

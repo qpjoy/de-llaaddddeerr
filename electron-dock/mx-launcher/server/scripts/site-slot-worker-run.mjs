@@ -354,7 +354,7 @@ function artifactPushRemoteSshPlanStep(step, job, managedSshProfile) {
   const workerStep = normalizeRemoteWorkerStep(step, job);
   const commandKindValue = commandKind(workerStep.command);
   const sshProfile = buildSshProfile(job, managedSshProfile);
-  const effectiveCommand = applySshProfile(workerStep.command, sshProfile);
+  const effectiveCommand = applyArtifactBaseDir(applySshProfile(workerStep.command, sshProfile));
   const evidence = artifactPushEvidence(workerStep, job, {
     mode: 'artifact-push-remote-ssh-plan',
     dryRun: true,
@@ -495,7 +495,7 @@ async function remoteReadonlyProbeStep(step, job, managedSshProfile) {
       attempt
     };
   } catch (error) {
-    const diagnosis = sshFailureDiagnosis(error.stderr || error.message, error.code);
+    const diagnosis = sshFailureDiagnosis(error.stderr || error.message, error.code, step.redactOutput);
     diagnosis.tcpProbe = await tcpConnectProbe(sshProfile.host, sshProfile.sshPort, sshProfile.connectTimeoutSeconds);
     return {
       stepId: step.stepId,
@@ -557,7 +557,7 @@ async function artifactPushRemoteSshStep(step, job, managedSshProfile) {
   const workerStep = normalizeRemoteWorkerStep(step, job);
   const commandKindValue = commandKind(workerStep.command);
   const sshProfile = buildSshProfile(job, managedSshProfile);
-  const effectiveCommand = applySshProfile(workerStep.command, sshProfile);
+  const effectiveCommand = applyArtifactBaseDir(applySshProfile(workerStep.command, sshProfile));
   const evidence = artifactPushEvidence(workerStep, job, {
     mode: 'artifact-push-remote-ssh',
     dryRun: false,
@@ -623,7 +623,7 @@ async function artifactPushRemoteSshStep(step, job, managedSshProfile) {
       attempt
     };
   } catch (error) {
-    const diagnosis = sshFailureDiagnosis(error.stderr || error.message, error.code);
+    const diagnosis = sshFailureDiagnosis(error.stderr || error.message, error.code, workerStep.redactOutput);
     diagnosis.tcpProbe = await tcpConnectProbe(sshProfile.host, sshProfile.sshPort, sshProfile.connectTimeoutSeconds);
     const failedEvidence = {
       ...evidence,
@@ -653,7 +653,7 @@ function artifactPushFakeTransportStep(step, job, managedSshProfile) {
   const workerStep = normalizeRemoteWorkerStep(step, job);
   const commandKindValue = commandKind(workerStep.command);
   const sshProfile = buildSshProfile(job, managedSshProfile);
-  const effectiveCommand = applySshProfile(workerStep.command, sshProfile);
+  const effectiveCommand = applyArtifactBaseDir(applySshProfile(workerStep.command, sshProfile));
   const evidence = artifactPushEvidence(workerStep, job, {
     mode: 'artifact-push-fake-transport',
     dryRun: false,
@@ -1134,6 +1134,17 @@ function resolveArtifactReference(ref) {
   return resolve(commandCwd, ref);
 }
 
+function applyArtifactBaseDir(command) {
+  if (commandKind(command) !== 'artifact-transport') return command;
+  return command.replace(
+    /\.\/artifacts\/site-slots\/[A-Za-z0-9._/-]+/g,
+    (ref) => {
+      const trailingSlash = ref.endsWith('/') ? '/' : '';
+      return `${shellQuote(resolveArtifactReference(ref))}${trailingSlash}`;
+    }
+  );
+}
+
 function artifactKind(ref) {
   return ref.match(/^\.\/artifacts\/site-slots\/([^/]+)\//)?.[1] ?? null;
 }
@@ -1372,9 +1383,10 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
-function sshFailureDiagnosis(stderr, exitCode) {
+function sshFailureDiagnosis(stderr, exitCode, redactOutput = false) {
   const text = String(stderr || '');
   const lower = text.toLowerCase();
+  const trimmed = text.trim();
   let category = 'unknown';
   let summary = 'SSH command failed';
   const nextActions = ['open-remote-terminal-inspect', 'check-ssh-profile-and-host-firewall'];
@@ -1407,7 +1419,7 @@ function sshFailureDiagnosis(stderr, exitCode) {
     category,
     summary,
     exitCode: typeof exitCode === 'number' ? exitCode : null,
-    stderr: text.trim().slice(0, 1000),
+    stderr: redactOutput && trimmed ? '[redacted output]' : trimmed.slice(0, 1000),
     nextActions: Array.from(new Set(nextActions))
   };
 }
@@ -1460,6 +1472,7 @@ function redactEvidence(step, evidence) {
   return {
     ...evidence,
     command: '[redacted command]',
+    originalCommand: evidence.originalCommand ? '[redacted original command]' : undefined,
     effectiveCommand: evidence.effectiveCommand ? '[redacted effective command]' : undefined,
     notes: [...evidence.notes, 'Command was redacted by worker step policy.']
   };

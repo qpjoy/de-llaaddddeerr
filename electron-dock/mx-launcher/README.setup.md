@@ -265,3 +265,26 @@ POST /internal/v1/user-center/users/{userId}/oversea/ensure-subscription
 kubectl -n mx-internal-shadow get secret mx-internal-ops \
   -o go-template='{{index .data "token" | base64decode}}{{"\n"}}'
 ```
+
+```bash
+# masterialize wg
+BASE=http://10.88.88.88:18090
+
+curl -fsS -X POST \
+  "$BASE/internal/v1/admin/actions/execute" \
+  -H 'content-type: application/json' \
+  --data-binary '{
+    "actionId": "site-slot.domestic-wg.materialize",
+    "path": "/internal/v1/config-center/domestic-wg-secrets/domestic-main/materialize-ready",
+    "body": {
+      "siteId": "domestic-main",
+      "publicEndpoint": "116.62.51.154:51280",
+      "listenPort": 51280,
+      "rotateRelayKey": false,
+      "rotateInternalServiceKey": false,
+      "confirmRotate": false,
+      "requestedBy": "operator",
+      "requestId": "refresh-domestic-bundle-20260729"
+    }
+  }'
+```

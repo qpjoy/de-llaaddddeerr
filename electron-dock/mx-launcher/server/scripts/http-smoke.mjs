@@ -698,6 +698,7 @@ const checks = [
         && prepareAccess?.commands?.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-access-stack.tar.gz'))
         && prepareAccess?.commands?.some((command) => command.includes('scp -P') && command.includes('mx-oversea-access-stack.tar.gz'))
         && prepareAccess?.commands?.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/__release_revision__'))
+        && prepareAccess?.commands?.some((command) => command.includes('ln -sfnT /opt/mx/releases/oversea-access-stack/__release_revision__ /opt/mx/current/hysteria2-access-stack'))
         && configureAccess?.commands?.some((command) => command.includes(`HY2_EXPORT_BASE_URL=${state.overseaExportBaseUrl}`) && command.includes('HY2_EXPORT_USER=download') && command.includes('HY2_EXPORT_PASSWORD_HASH='))
         && configureAccess?.commands?.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
         && configureAccess?.commands?.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
@@ -710,6 +711,7 @@ const checks = [
         && deployServices?.mode === 'artifact-push'
         && deployServices?.commands?.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-services.tar.gz'))
         && deployServices?.commands?.some((command) => command.includes('/opt/mx/incoming/mx-oversea-services.tar.gz'))
+        && deployServices?.commands?.some((command) => command.includes('ln -sfnT /opt/mx/releases/oversea/__release_revision__ /opt/mx/current/oversea'))
         && deployServices?.commands?.some((command) => command.includes('MX_SITE_ROLE=oversea') && command.includes('LOCAL_STACK_PATH=/opt/mx/current/hysteria2-access-stack') && command.includes('MX_ACCESS_RUNTIME=hysteria2-only'))
         && deployServices?.commands?.some((command) => command.includes('slot services placeholder; no Docker services selected'))
         && syncInternalConfig?.commands?.some((command) => command.includes('overseaConfigDelivery=internal-pushed') && command.includes('remoteCurl=skipped'))
@@ -826,6 +828,7 @@ const checks = [
       const installDockerRuntime = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'install-domestic-docker-runtime');
       const verifyDomesticEgress = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'verify-domestic-egress');
       const activatePeerCenter = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'activate-domestic-peer-center');
+      const deployServices = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'deploy-slot-services');
       const syncInternalConfig = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'sync-internal-config');
       return typeof state.domesticSlotPlanId === 'string'
         && body?.plan?.kind === 'domestic'
@@ -849,6 +852,7 @@ const checks = [
         && bootstrapEgress?.commands?.some((command) => command.includes('QP_TUNNEL_CLI=/opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli'))
         && bootstrapEgress?.commands?.some((command) => command.includes('attempt pre-egress npm install @qpjoy/tunnel-cli@latest'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('ln -sfnT /opt/mx/releases/qp-tunnel-cli/__release_revision__ /opt/mx/current/qp-tunnel-cli'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('domestic-bootstrap-subscription.yaml'))
         && bootstrapEgress?.commands?.some((command) => command.includes('MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS') && command.includes('using Internal-pushed fallback'))
         && bootstrapEgress?.commands?.some((command) => command.includes('@qpjoy/tunnel-cli@latest') && command.includes('npm refresh skipped after egress-on'))
@@ -870,11 +874,17 @@ const checks = [
         && verifyDomesticEgress?.commands?.some((command) => command.includes('registry-1.docker.io/v2/') && command.includes('127.0.0.1:7788'))
         && verifyDomesticEgress?.commands?.some((command) => command.includes('generic HTTPS is not reachable') && command.includes('Docker registry is not reachable'))
         && verifyDomesticEgress?.commands?.some((command) => command.includes('mihomo-client service is not active') && command.includes('journalctl -u mihomo-client'))
+        && activatePeerCenter?.commands?.some((command) => command.includes('install -d -m 0755 /opt/mx/releases/domestic/__release_revision__'))
+        && !activatePeerCenter?.commands?.some((command) => command.includes('install -d -m 0755 /opt/mx/current/domestic'))
         && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
-        && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-relay.env') && command.includes('/opt/mx/current/domestic/mx-domestic-relay.env'))
+        && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-relay.env') && command.includes('/opt/mx/releases/domestic/__release_revision__/mx-domestic-relay.env'))
+        && !activatePeerCenter?.commands?.some((command) => command.includes('/opt/mx/current/domestic/mx-domestic-relay.env'))
         && activatePeerCenter?.commands?.some((command) => command.includes('preserving V1') && command.includes('cleanup-v1-wireguard --apply'))
         && !activatePeerCenter?.commands?.some((command) => command.includes('disable --now wg-quick@hdo-home') || command.includes('wg-quick down hdo-home') || command.includes('ip link delete hdo-home'))
         && activatePeerCenter?.commands?.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
+        && deployServices?.commands?.some((command) => command.includes('mv /opt/mx/current/domestic /opt/mx/current/domestic.legacy-__release_revision__'))
+        && deployServices?.commands?.some((command) => command.includes('ln -sfnT /opt/mx/releases/domestic/__release_revision__ /opt/mx/current/domestic'))
+        && deployServices?.commands?.some((command) => command.includes('./manage.sh up') && command.includes('Domestic service bundle is missing executable manage.sh'))
         && syncInternalConfig?.commands?.some((command) => command.includes('10.88.88.88:18090/healthz'))
         && !syncInternalConfig?.commands?.some((command) => command.includes('127.0.0.1:18090/healthz'))
         && !activatePeerCenter?.commands?.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'));

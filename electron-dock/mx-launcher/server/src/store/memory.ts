@@ -3489,6 +3489,7 @@ export class MemoryStore implements PlatformStore {
       || !overseaPrepareAccess?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-access-stack.tar.gz'))
       || !overseaPrepareAccess?.commands.some((command) => command.includes('scp -P') && command.includes('mx-oversea-access-stack.tar.gz'))
       || !overseaPrepareAccess?.commands.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/__release_revision__'))
+      || !overseaPrepareAccess?.commands.some((command) => command.includes('ln -sfnT /opt/mx/releases/oversea-access-stack/__release_revision__ /opt/mx/current/hysteria2-access-stack'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_EXPORT_BASE_URL=http://oversea.example.com:3434') && command.includes('HY2_EXPORT_USER=download') && command.includes('HY2_EXPORT_PASSWORD_HASH='))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
@@ -3501,6 +3502,7 @@ export class MemoryStore implements PlatformStore {
       || overseaDeployServices?.mode !== 'artifact-push'
       || !overseaDeployServices?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-services.tar.gz'))
       || !overseaDeployServices?.commands.some((command) => command.includes('/opt/mx/incoming/mx-oversea-services.tar.gz'))
+      || !overseaDeployServices?.commands.some((command) => command.includes('ln -sfnT /opt/mx/releases/oversea/__release_revision__ /opt/mx/current/oversea'))
       || !overseaDeployServices?.commands.some((command) => command.includes('/opt/mx/current/oversea') && command.includes('LOCAL_STACK_PATH=/opt/mx/current/hysteria2-access-stack') && command.includes('MX_ACCESS_RUNTIME=hysteria2-only'))
       || !overseaDeployServices?.commands.some((command) => command.includes('slot services placeholder; no Docker services selected'))
       || !overseaSyncInternalConfig?.commands.some((command) => command.includes('overseaConfigDelivery=internal-pushed') && command.includes('remoteCurl=skipped'))
@@ -3577,6 +3579,7 @@ export class MemoryStore implements PlatformStore {
     const domesticDockerRuntime = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'install-domestic-docker-runtime');
     const domesticEgressProxyReadiness = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'verify-domestic-egress');
     const domesticPeerCenter = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'activate-domestic-peer-center');
+    const domesticDeployServices = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'deploy-slot-services');
     if (
       domesticSlotPlan.network.mode !== 'oversea-assisted'
       || domesticSlotPlan.network.qpTunnelCliMode !== 'egress-on'
@@ -3602,6 +3605,7 @@ export class MemoryStore implements PlatformStore {
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('QP_TUNNEL_CLI=/opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('attempt pre-egress npm install @qpjoy/tunnel-cli@latest'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('ln -sfnT /opt/mx/releases/qp-tunnel-cli/__release_revision__ /opt/mx/current/qp-tunnel-cli'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('domestic-bootstrap-subscription.yaml'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS') && command.includes('using Internal-pushed fallback'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('@qpjoy/tunnel-cli@latest') && command.includes('npm refresh skipped after egress-on'))
@@ -3618,12 +3622,18 @@ export class MemoryStore implements PlatformStore {
       || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('registry-1.docker.io/v2/') && command.includes('127.0.0.1:7788'))
       || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('generic HTTPS is not reachable') && command.includes('Docker registry is not reachable'))
       || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('mihomo-client service is not active') && command.includes('journalctl -u mihomo-client'))
+      || !domesticPeerCenter?.commands.some((command) => command.includes('install -d -m 0755 /opt/mx/releases/domestic/__release_revision__'))
+      || domesticPeerCenter?.commands.some((command) => command.includes('install -d -m 0755 /opt/mx/current/domestic'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
-      || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-relay.env'))
+      || !domesticPeerCenter?.commands.some((command) => command.includes('/opt/mx/releases/domestic/__release_revision__/mx-domestic-relay.env'))
+      || domesticPeerCenter?.commands.some((command) => command.includes('/opt/mx/current/domestic/mx-domestic-relay.env'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('preserving V1') && command.includes('cleanup-v1-wireguard --apply'))
       || domesticPeerCenter?.commands.some((command) => command.includes('disable --now wg-quick@hdo-home') || command.includes('wg-quick down hdo-home') || command.includes('ip link delete hdo-home'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
       || domesticPeerCenter?.commands.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'))
+      || !domesticDeployServices?.commands.some((command) => command.includes('mv /opt/mx/current/domestic /opt/mx/current/domestic.legacy-__release_revision__'))
+      || !domesticDeployServices?.commands.some((command) => command.includes('ln -sfnT /opt/mx/releases/domestic/__release_revision__ /opt/mx/current/domestic'))
+      || !domesticDeployServices?.commands.some((command) => command.includes('./manage.sh up') && command.includes('Domestic service bundle is missing executable manage.sh'))
     ) {
       throw new Error('Domestic slot plan did not model host WireGuard and Oversea-assisted bootstrap');
     }
@@ -3678,12 +3688,14 @@ export class MemoryStore implements PlatformStore {
       requestedBy: 'platform-kernel-smoke',
       requestId: 'smoke-domestic-slot-apply-worker-job'
     });
-    const domesticBootstrapEgressWorkerStep = domesticSlotApplyWorkerJob.steps.find((step) => step.sourceId.startsWith('bootstrap-domestic-egress.'));
+    const domesticBootstrapPrepareWorkerStep = domesticSlotApplyWorkerJob.steps.find((step) => step.sourceId === 'bootstrap-domestic-egress.1');
+    const domesticBootstrapSubscriptionWorkerStep = domesticSlotApplyWorkerJob.steps.find((step) => step.sourceId === 'bootstrap-domestic-egress.4');
     const domesticVerifyEgressWorkerStep = domesticSlotApplyWorkerJob.steps.find((step) => step.sourceId.startsWith('verify-domestic-egress.'));
     if (
       domesticSlotConfirmedApplyExecution.status !== 'ready'
       || domesticSlotApplyRunnerSession.status !== 'completed'
-      || !domesticBootstrapEgressWorkerStep?.redactOutput
+      || domesticBootstrapPrepareWorkerStep?.redactOutput !== false
+      || !domesticBootstrapSubscriptionWorkerStep?.redactOutput
       || domesticVerifyEgressWorkerStep?.redactOutput !== false
     ) {
       throw new Error('Domestic apply worker redaction policy did not preserve egress diagnostics');

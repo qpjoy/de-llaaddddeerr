@@ -505,6 +505,10 @@ const sshProfileForm = document.getElementById('ssh-profile-form');
 const sshProfileId = document.getElementById('ssh-profile-id');
 const sshProfileSiteId = document.getElementById('ssh-profile-site-id');
 const sshProfileKind = document.getElementById('ssh-profile-kind');
+const sshProfileDomesticNetworkModeField = document.getElementById('ssh-profile-domestic-network-mode-field');
+const sshProfileDomesticNetworkMode = document.getElementById('ssh-profile-domestic-network-mode');
+const sshProfileDomesticOverseaSiteField = document.getElementById('ssh-profile-domestic-oversea-site-field');
+const sshProfileDomesticOverseaSite = document.getElementById('ssh-profile-domestic-oversea-site');
 const sshProfileHost = document.getElementById('ssh-profile-host');
 const sshProfileUser = document.getElementById('ssh-profile-user');
 const sshProfilePassword = document.getElementById('ssh-profile-password');
@@ -768,9 +772,23 @@ awxProviderCheckRun.addEventListener('click', () => {
   void checkAwxProviderFromForm();
 });
 
+sshProfileKind.addEventListener('change', () => {
+  syncSshProfilePlanNetworkFields({ reset: true });
+});
+
+sshProfileDomesticNetworkMode.addEventListener('change', () => {
+  syncSshProfilePlanNetworkFields();
+});
+
+sshProfileSiteId.addEventListener('change', () => {
+  syncSshProfilePlanNetworkFields({ reset: true });
+});
+
 for (const control of [
   sshProfileSiteId,
   sshProfileKind,
+  sshProfileDomesticNetworkMode,
+  sshProfileDomesticOverseaSite,
   sshProfileHost,
   sshProfileUser,
   sshProfilePassword,
@@ -1621,6 +1639,12 @@ async function createPlanFromSshProfile() {
     renderSshProfileFeedback();
     return;
   }
+  const networkFailure = sshProfilePlanNetworkValidationFailure(planBody.kind, planBody);
+  if (networkFailure) {
+    state.sshProfileFeedback = { kind: 'error', message: networkFailure };
+    renderSshProfileFeedback();
+    return;
+  }
   state.sshPlanBusy = true;
   state.sshProfileFeedback = { kind: 'info', message: 'Creating site slot plan' };
   renderSshProfileFeedback();
@@ -2039,7 +2063,7 @@ function sshProfilePlanPayload() {
     ? asArray(state.sshProfiles).find((profile) => profile.profileId === profileId) || null
     : null;
   const kind = (savedProfile?.kind || sshProfileKind.value) === 'domestic' ? 'domestic' : 'oversea';
-  const domesticBootstrap = kind === 'domestic' ? domesticBootstrapOverseaSite() : null;
+  const networkInput = sshProfilePlanNetworkInput(kind);
   const formHost = blankToNull(sshProfileHost.value);
   const savedHost = blankToNull(savedProfile?.host);
   const host = kind === 'domestic' && domesticPlanHostValidationFailure(kind, formHost)
@@ -2057,9 +2081,7 @@ function sshProfilePlanPayload() {
     sshPort,
     rootAccess: sshUser === 'root',
     hasDocker: true,
-    hasOutboundInternet: kind === 'oversea',
-    overseaSiteId: domesticBootstrap?.siteId || null,
-    overseaHost: domesticBootstrap?.host || null,
+    ...networkInput,
     ...overseaRuntime,
     createdBy: 'desktop-admin',
     requestId: `desktop-site-slot-plan-${Date.now()}`
@@ -2135,11 +2157,92 @@ function domesticEndpointBlockedReason(endpoint) {
 }
 
 function domesticBootstrapOverseaSite() {
+  return domesticBootstrapOverseaSites()[0] || null;
+}
+
+function domesticBootstrapOverseaSites() {
   const sites = asArray(state.overseaOverview?.sites);
   const usableStatuses = ['installed', 'passed', 'running', 'ready'];
-  return sites.find((site) => usableStatuses.includes(site.status))
-    || sites.find((site) => site.sshProfile?.profileId && site.host)
-    || null;
+  const candidates = [
+    ...sites.filter((site) => usableStatuses.includes(site.status)),
+    ...sites.filter((site) => site.sshProfile?.profileId && site.host)
+  ];
+  return candidates.filter((site, index) => (
+    Boolean(site?.siteId)
+    && candidates.findIndex((candidate) => candidate?.siteId === site.siteId) === index
+  ));
+}
+
+function buildSshProfilePlanNetworkInput(kind, mode, overseaSiteId, overseaSites) {
+  if (kind !== 'domestic' || mode !== 'oversea-assisted') {
+    return {
+      hasOutboundInternet: true,
+      overseaSiteId: null,
+      overseaHost: null
+    };
+  }
+  const sites = Array.isArray(overseaSites) ? overseaSites : [];
+  const bootstrap = sites.find((site) => site?.siteId === overseaSiteId) || null;
+  return {
+    hasOutboundInternet: false,
+    overseaSiteId: bootstrap?.siteId || null,
+    overseaHost: bootstrap?.host || null
+  };
+}
+
+function sshProfilePlanNetworkMode(kind) {
+  if (kind !== 'domestic') return 'direct';
+  return sshProfileDomesticNetworkMode.value === 'oversea-assisted'
+    ? 'oversea-assisted'
+    : 'direct';
+}
+
+function sshProfilePlanNetworkInput(kind) {
+  return buildSshProfilePlanNetworkInput(
+    kind,
+    sshProfilePlanNetworkMode(kind),
+    blankToNull(sshProfileDomesticOverseaSite.value),
+    domesticBootstrapOverseaSites()
+  );
+}
+
+function sshProfilePlanNetworkValidationFailure(
+  kind,
+  networkInput,
+  mode = sshProfilePlanNetworkMode(kind)
+) {
+  if (
+    kind === 'domestic'
+    && mode === 'oversea-assisted'
+    && !networkInput?.overseaSiteId
+  ) {
+    return 'Select an available Oversea bootstrap site for the assisted Domestic plan';
+  }
+  return null;
+}
+
+function syncSshProfilePlanNetworkFields(options = {}) {
+  const reset = options.reset === true;
+  const domestic = sshProfileKind.value === 'domestic';
+  const previousSiteId = reset ? '' : blankToNull(sshProfileDomesticOverseaSite.value);
+  if (reset) sshProfileDomesticNetworkMode.value = 'direct';
+
+  const sites = domesticBootstrapOverseaSites();
+  sshProfileDomesticOverseaSite.innerHTML = [
+    '<option value="">Select Oversea site</option>',
+    ...sites.map((site) => {
+      const detail = [site.siteId, site.host, site.status].filter(Boolean).join(' / ');
+      return `<option value="${escapeHtml(site.siteId)}">${escapeHtml(detail)}</option>`;
+    })
+  ].join('');
+  sshProfileDomesticOverseaSite.value = previousSiteId
+    && sites.some((site) => site.siteId === previousSiteId)
+    ? previousSiteId
+    : '';
+
+  sshProfileDomesticNetworkModeField.hidden = !domestic;
+  sshProfileDomesticOverseaSiteField.hidden = !domestic
+    || sshProfileDomesticNetworkMode.value !== 'oversea-assisted';
 }
 
 function sshProfileShadowSetupPayload() {
@@ -3222,6 +3325,7 @@ function renderSshProfiles(profiles) {
     ? asArray(profiles).filter((profile) => profile.kind === kindFilter)
     : asArray(profiles);
   sshProfileCount.textContent = String(items.length);
+  syncSshProfilePlanNetworkFields();
   renderSshProfileFeedback();
   renderSshProfileSaveState();
   renderSshProfileBootstrap();
@@ -3295,13 +3399,16 @@ function sshProfileListKindFilter() {
 }
 
 function fillSshProfileForm(profile) {
+  const previousFormKey = `${sshProfileKind.value}:${blankToNull(sshProfileSiteId.value) || ''}`;
   const runtime = overseaRuntimeForSiteId(profile.siteId);
   const workerBaseUrl = normalizeWorkerBaseValue(profile.workerInternalBaseUrl)
     || normalizeWorkerBaseValue(runtime.workerInternalBaseUrl)
     || defaultWorkerInternalBaseUrl();
+  const profileKind = profile.kind === 'domestic' ? 'domestic' : 'oversea';
+  const nextFormKey = `${profileKind}:${profile.siteId || ''}`;
   sshProfileId.value = profile.profileId || '';
   sshProfileSiteId.value = profile.siteId || '';
-  sshProfileKind.value = profile.kind === 'domestic' ? 'domestic' : 'oversea';
+  sshProfileKind.value = profileKind;
   sshProfileHost.value = profile.host || '';
   sshProfileUser.value = profile.sshUser || 'root';
   sshProfilePassword.value = '';
@@ -3318,6 +3425,7 @@ function fillSshProfileForm(profile) {
   sshProfileKnownHosts.value = profile.knownHostsFile || '';
   sshProfileConfigFile.value = profile.sshConfigFile || '';
   sshProfileHostKeyAlias.value = profile.hostKeyAlias || profile.siteId || '';
+  syncSshProfilePlanNetworkFields({ reset: previousFormKey !== nextFormKey });
 }
 
 function primeSshProfileForm(pipelines) {
@@ -3387,7 +3495,13 @@ function renderSshProfileSaveState() {
   sshProfileRefreshHostKey.textContent = state.sshHostKeyBusy ? 'Refreshing' : 'Refresh Host Key';
   sshProfileBootstrap.disabled = state.sshProfileBusy || state.sshBootstrapBusy || !blankToNull(sshProfileSiteId.value) || !blankToNull(sshProfileHost.value);
   sshProfileBootstrap.textContent = state.sshBootstrapBusy ? 'Bootstrapping' : 'Bootstrap Key';
-  sshProfileCreatePlan.disabled = state.sshProfileBusy || state.sshPlanBusy || !sshProfileId.value.trim();
+  const profileKind = sshProfileKind.value === 'domestic' ? 'domestic' : 'oversea';
+  const planNetworkInput = sshProfilePlanNetworkInput(profileKind);
+  const planNetworkFailure = sshProfilePlanNetworkValidationFailure(profileKind, planNetworkInput);
+  sshProfileCreatePlan.disabled = state.sshProfileBusy
+    || state.sshPlanBusy
+    || !sshProfileId.value.trim()
+    || Boolean(planNetworkFailure);
   sshProfileCreatePlan.textContent = state.sshPlanBusy ? 'Creating' : 'Create Plan';
   sshProfileShadowSetup.disabled = state.sshProfileBusy || state.sshShadowBusy || sshProfileKind.value !== 'oversea' || !blankToNull(sshProfileSiteId.value) || !blankToNull(sshProfileHost.value);
   sshProfileShadowSetup.textContent = state.sshShadowBusy ? 'Setting up' : 'Shadow Setup';
@@ -5690,6 +5804,7 @@ function fillNewSshProfileForm(kind, siteId) {
   sshProfileKnownHosts.value = '';
   sshProfileConfigFile.value = '';
   sshProfileHostKeyAlias.value = siteId;
+  syncSshProfilePlanNetworkFields({ reset: true });
   renderSshProfileSaveState();
 }
 
@@ -5768,10 +5883,17 @@ function syncSshProfileFormToSelectedSite(siteId, kind) {
     state.sshRuntimePolicy = null;
     renderSshProfileSaveState();
     renderSshProfileReadiness();
-  } else if (!profile && blankToNull(sshProfileSiteId.value) !== siteId) {
+  } else if (
+    !profile
+    && (
+      blankToNull(sshProfileSiteId.value) !== siteId
+      || sshProfileKind.value !== kind
+    )
+  ) {
     sshProfileKind.value = kind;
     sshProfileSiteId.value = siteId;
     sshProfileHostKeyAlias.value = siteId;
+    syncSshProfilePlanNetworkFields({ reset: true });
     renderSshProfileSaveState();
   }
 }

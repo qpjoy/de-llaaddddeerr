@@ -327,6 +327,19 @@
                         <option value="domestic">Domestic</option>
                       </select>
                     </label>
+                    <label id="ssh-profile-domestic-network-mode-field" class="form-field" hidden>
+                      <span>Plan Egress</span>
+                      <select id="ssh-profile-domestic-network-mode">
+                        <option value="direct">Domestic direct</option>
+                        <option value="oversea-assisted">Oversea-assisted</option>
+                      </select>
+                    </label>
+                    <label id="ssh-profile-domestic-oversea-site-field" class="form-field" hidden>
+                      <span>Bootstrap Oversea</span>
+                      <select id="ssh-profile-domestic-oversea-site">
+                        <option value="">Select Oversea site</option>
+                      </select>
+                    </label>
                     <label class="form-field">
                       <span>Host</span>
                       <input id="ssh-profile-host" autocomplete="off" placeholder="203.0.113.10" required />
