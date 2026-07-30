@@ -732,19 +732,101 @@ try {
     AutoDetect: { type: 'REG_DWORD', value: '0' }
   };
   const unusedEdgePort = await unusedLoopbackPort();
+  const stalePacWarnings = [];
   await withManager('browser-unreadable-pac', unreadablePacOwner, async (manager, userDataDir) => {
-    await assert.rejects(
-      manager.apply(browserPolicy(unusedEdgePort, 443)),
-      /Existing Windows PAC/,
-      'an unreadable previous PAC must fail closed instead of replacing public proxy behavior'
+    const applied = await manager.apply(browserPolicy(unusedEdgePort, 443));
+    assert.equal(applied.applied, true);
+    assert.equal(applied.fallbackPacUrl, null);
+    assert.equal(
+      readRegistry().AutoConfigURL?.value,
+      `http://127.0.0.1:${unusedEdgePort}/proxy.pac`,
+      'a dead loopback PAC must not block the MX-H2I browser path'
     );
-    assert.deepEqual(readRegistry(), unreadablePacOwner);
+    const pac = await fetchText(applied.pacUrl);
+    assert.equal(
+      evaluatePac(pac, 'https://public.example.test/', 'public.example.test'),
+      'DIRECT',
+      'public traffic must use DIRECT when the only previous PAC owner is already dead'
+    );
+    await manager.disable('browser-unreadable-pac-smoke');
+    const expected = { ...unreadablePacOwner };
+    delete expected.AutoConfigURL;
+    assert.deepEqual(
+      readRegistry(),
+      expected,
+      'disconnect must not restore the dead loopback PAC'
+    );
     assert.equal(
       existsSync(join(userDataDir, 'electron-launcher-system-domain-proxy.json')),
-      false,
-      'failed PAC coordination must not leave pending product state'
+      false
     );
-  }, { pacPort: unusedEdgePort });
+  }, {
+    pacPort: unusedEdgePort,
+    log: { warn(message) { stalePacWarnings.push(String(message)); } }
+  });
+  assert.ok(
+    stalePacWarnings.some((message) => message.includes('ignored stale Windows PAC')),
+    'dead PAC recovery must remain visible in diagnostics'
+  );
+
+  const delayedPacPort = await unusedLoopbackPort();
+  const delayedPacUrl = `http://127.0.0.1:${delayedPacPort}/proxy.pac`;
+  const delayedPacOwner = {
+    AutoConfigURL: { type: 'REG_SZ', value: delayedPacUrl },
+    ProxyEnable: { type: 'REG_DWORD', value: '0' },
+    AutoDetect: { type: 'REG_DWORD', value: '0' }
+  };
+  const delayedPacStart = new Promise((resolve, reject) => {
+    setTimeout(() => {
+      void listenPac("function FindProxyForURL() { return 'DIRECT'; }", null, delayedPacPort)
+        .then(resolve, reject);
+    }, 650);
+  });
+  let delayedPac = null;
+  try {
+    await withManager('browser-delayed-live-pac', delayedPacOwner, async (manager) => {
+      const applied = await manager.apply(browserPolicy(unusedEdgePort, 443));
+      assert.equal(
+        applied.fallbackPacUrl,
+        delayedPacUrl,
+        'a previous PAC that starts during the Windows login grace period must be preserved'
+      );
+      await manager.disable('browser-delayed-live-pac-smoke');
+      assert.deepEqual(
+        readRegistry(),
+        delayedPacOwner,
+        'disconnect must restore a previous PAC that became live during startup'
+      );
+    }, { pacPort: unusedEdgePort });
+    delayedPac = await delayedPacStart;
+  } finally {
+    delayedPac ||= await delayedPacStart.catch(() => null);
+    if (delayedPac?.server) await closeServer(delayedPac.server);
+  }
+
+  const invalidPac = await listenPac('var proxyConfigurationIsInvalid = true;');
+  const invalidPacOwner = {
+    AutoConfigURL: { type: 'REG_SZ', value: invalidPac.url },
+    ProxyEnable: { type: 'REG_DWORD', value: '0' },
+    AutoDetect: { type: 'REG_DWORD', value: '0' }
+  };
+  try {
+    await withManager('browser-invalid-live-pac', invalidPacOwner, async (manager, userDataDir) => {
+      await assert.rejects(
+        manager.apply(browserPolicy(unusedEdgePort, 443)),
+        /does not define FindProxyForURL/,
+        'a reachable but invalid previous PAC must still fail closed'
+      );
+      assert.deepEqual(readRegistry(), invalidPacOwner);
+      assert.equal(
+        existsSync(join(userDataDir, 'electron-launcher-system-domain-proxy.json')),
+        false,
+        'failed live PAC coordination must not leave pending product state'
+      );
+    }, { pacPort: unusedEdgePort });
+  } finally {
+    await closeServer(invalidPac.server);
+  }
 
   await withManager('fallback', oldClash, async (manager) => {
     const direct = await manager.apply(policy());
@@ -1298,7 +1380,7 @@ async function withStaleManager(name, initialRegistry, run) {
   }
 }
 
-async function listenPac(source, onRequest = null) {
+async function listenPac(source, onRequest = null, port = 0) {
   let currentSource = source;
   const server = createHttpServer((_req, res) => {
     if (onRequest) onRequest();
@@ -1310,7 +1392,7 @@ async function listenPac(source, onRequest = null) {
   });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
+    server.listen(port, '127.0.0.1', resolve);
   });
   const address = server.address();
   assert.ok(address && typeof address === 'object');

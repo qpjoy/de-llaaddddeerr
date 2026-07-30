@@ -272,7 +272,7 @@ Windows 还必须在真实 Clash/mihomo 上补一组动态门禁；它不由 Luo
 | --- | --- | --- |
 | W1 | Clash TUN 开启后连接 MX-H2I | VIP/CIDR、NRPT/system DNS、PAC readback、Chromium `resolveProxy` 到 `2053` 和 CONNECT 同时 ready；unmatched PAC 为 `DIRECT` |
 | W2 | Clash 静态 system proxy | live loopback listener 被包装为 `PROXY <Clash>; DIRECT`，Internal exact/suffix 仍优先走 `2053`；公网 smoke 通过 |
-| W3 | Clash PAC / WPAD / dead listener | 优先包装可读、有效的 loopback PAC；没有 PAC 时可延续可表达的 live static proxy。AutoDetect/WPAD 仅在它是唯一适用 owner 且两种 continuation 都不存在时 fail closed；不可读/非 loopback PAC 或 dead listener 也不写 registry、不报 browser-ready |
+| W3 | Clash PAC / WPAD / dead listener | 优先包装可读、有效的 loopback PAC；启动稍慢但在宽限期内恢复的 PAC 仍须保留。宽限期后仍无 listener 的 stale loopback PAC 被跳过且不恢复，再延续 live static proxy 或 `DIRECT`。AutoDetect/WPAD 仅在它是唯一适用 owner 且两种 continuation 都不存在时 fail closed；live-invalid/非 loopback PAC 或 dead static listener 也不写 registry、不报 browser-ready |
 | W4 | TUN ↔ system proxy、Clash 重启/换端口 | 5 秒 tick 常态只读；每个新 owner signature 可触发一次有界协商并按结果写 `AutoConfigURL`，同一 signature 后续 tick 不重复写；状态变化、重连或手动 repair 可再次协商 |
 | W5 | 从旧客户端升级且保留 WG tunnel/service | live NRPT/system DNS、PAC readback、Chromium `resolveProxy`、CONNECT、route 与 Internal health 全部通过；历史 audit 的 `add complete` 不算当前证据 |
 | W6 | 断开或 Windows 正常退出 | 保持 `2053` 存活；若 MX 仍持有 `AutoConfigURL`，恢复最近成功协商捕获的 external value，若外部 owner 已接管则保留其值。再停止 WG/清 owned NRPT 并核验，最后关闭 `2053`；任一步失败都阻止断开/退出并保留恢复入口 |
@@ -291,7 +291,8 @@ Windows 还必须在真实 Clash/mihomo 上补一组动态门禁；它不由 Luo
 - Windows WinINet PAC：`AutoConfigURL` 是单写者资源；MX-H2I 只读
   `ProxyEnable`/`ProxyServer`/`ProxyOverride`/`AutoDetect`。回归门禁必须保证当前实现只包装
   可验证的 loopback PAC，或在没有该 PAC 时包装 live loopback static proxy；AutoDetect/WPAD
-  仅在没有可表达 continuation 时 fail closed，不可读 PAC 和 dead listener 同样 fail closed。
+  仅在没有可表达 continuation 时 fail closed。短宽限期后仍无 listener 的 stale loopback
+  PAC 必须跳过且不恢复；live-invalid/非 loopback PAC 和 dead static listener 仍 fail closed。
   5 秒 tick 常态只读，但新 owner signature 可触发一次有界协商/写回；同一 signature 不能被
   周期抢写。写前五字段比较与写后 readback 能检测常见竞争，但不是 Windows registry 的
   跨厂商原子 CAS；不合作的 Clash 仍可在最后 read/write 窄窗切换。两个 Launcher PAC owner

@@ -155,8 +155,10 @@ Windows 默认安装 MX-H2I PAC。Internal exact/suffix 固定先返回
   `PROXY <listener>; DIRECT`；
 - AutoDetect/WPAD 仅在它是唯一适用 owner、且不存在可表达的 live static/PAC
   continuation 时 fail closed；
-- 不可读/非 loopback PAC、无法表达的 proxy、dead listener：fail
-  closed，不修改 WinINet registry，也不报告 browser-ready。
+- loopback PAC 初次连接失败时给旧客户端/Clash 一个短启动宽限期；仍无 listener 则按
+  stale owner 跳过，不包装也不在断开时恢复，再继续选择 live static proxy 或 `DIRECT`；
+- listener 存活但 PAC 返回错误、内容无效/不可编译，或 PAC 不是 loopback URL，以及无法
+  表达的 static proxy：继续 fail closed，不修改 WinINet registry，也不报告 browser-ready。
 
 MX-H2I 在 registry 中只拥有并回滚 `AutoConfigURL`，不会切换 `ProxyEnable` 或改写
 `ProxyServer`/`ProxyOverride`。因此 Clash 静态 system proxy 仍可服务微信、Steam 等
@@ -179,8 +181,9 @@ network broker（或双方共同采用同一 lease）提供。
 若实际 PAC 内容或 Clash 当前模式/动态端口未出现在包内，排障人员仍需现场同刻补采；
 报告中不得把缺失字段写成“正常”。
 
-Windows 验收必须覆盖连接前已开 TUN、静态 system proxy、loopback PAC、不可读 PAC、
-WPAD、dead listener，以及连接中 TUN ↔ system proxy、Clash 重启和端口变化。每 5 秒 tick
+Windows 验收必须覆盖连接前已开 TUN、静态 system proxy、loopback PAC、启动稍慢的 PAC、
+stale loopback PAC、live-invalid/非 loopback PAC、WPAD、dead static listener，以及连接中
+TUN ↔ system proxy、Clash 重启和端口变化。每 5 秒 tick
 的常态路径只做 readback/`resolveProxy`/CONNECT 等只读验证；检测到新的外部 owner
 signature 时允许触发一次有界重新协商，并可按结果写回 `AutoConfigURL`，同一 signature
 继续存在时后续 tick 保持只读。每 30 秒可只读刷新 Clash listener/原 PAC 内容，并更新

@@ -180,6 +180,7 @@ interface ResolvedPacSource {
   fallbackProxy: PacProxy | null;
   fallbackPacUrl: string | null;
   fallbackPacScript: string | null;
+  staleWindowsPacIgnored?: boolean;
   pacPort: number | null;
   sharedLocalPac: boolean;
   dnsServers: string[];
@@ -231,6 +232,13 @@ interface LocalPacServerConfig {
   dnsFallbackTarget: string | null;
   reverseProxyRoutes: ElectronLauncherSystemDomainProxyRoute[];
   ownershipClaims: ElectronLauncherNetworkOwnershipClaim[];
+}
+
+interface PacContinuation {
+  fallbackProxy: PacProxy | null;
+  fallbackPacUrl: string | null;
+  fallbackPacScript: string | null;
+  staleWindowsPacIgnored?: boolean;
 }
 
 interface ExecTextResult {
@@ -659,11 +667,11 @@ export function createElectronLauncherSystemDomainProxy(
     const systemResolverMode = normalizeSystemResolverMode(policy.systemResolver);
     const reverseProxyRoutes = normalizeReverseProxyRoutes(policy.reverseProxyRoutes);
     const explicitFallbackProxy = normalizeProxyAddress(policy.fallbackProxy);
-    const continuation = pacUrl
+    const continuation: PacContinuation = pacUrl
       ? { fallbackProxy: explicitFallbackProxy, fallbackPacUrl: null, fallbackPacScript: null }
       : explicitFallbackProxy
         ? { fallbackProxy: explicitFallbackProxy, fallbackPacUrl: null, fallbackPacScript: null }
-        : await fallbackForPac(previous);
+        : await fallbackForPac(previous, log);
     const fallbackProxy = continuation.fallbackProxy;
     const ownershipClaim = normalizeOwnershipClaim(policy.ownershipClaim);
     if (pacUrl) {
@@ -675,6 +683,7 @@ export function createElectronLauncherSystemDomainProxy(
         fallbackProxy,
         fallbackPacUrl: continuation.fallbackPacUrl,
         fallbackPacScript: continuation.fallbackPacScript,
+        staleWindowsPacIgnored: continuation.staleWindowsPacIgnored,
         pacPort: null,
         sharedLocalPac: false,
         dnsServers,
@@ -697,6 +706,7 @@ export function createElectronLauncherSystemDomainProxy(
       fallbackProxy,
       fallbackPacUrl: continuation.fallbackPacUrl,
       fallbackPacScript: continuation.fallbackPacScript,
+      staleWindowsPacIgnored: continuation.staleWindowsPacIgnored,
       pacPort,
       sharedLocalPac: false,
       dnsServers,
@@ -724,9 +734,13 @@ export function createElectronLauncherSystemDomainProxy(
 
   async function prepareApplyState(policy: ElectronLauncherSystemDomainProxyPolicy): Promise<PreparedSystemDomainProxyApply | null> {
     const existing = readState(statePath);
-    const { previous, windowsApplySnapshot } = await platformStatesForApply(existing);
-    const pac = await resolvePacSource(policy, previous);
+    const platformStates = await platformStatesForApply(existing);
+    const pac = await resolvePacSource(policy, platformStates.previous);
     if (!pac) return null;
+    const previous = pac.staleWindowsPacIgnored === true
+      ? windowsStateWithoutAutoConfigUrl(platformStates.previous)
+      : platformStates.previous;
+    const windowsApplySnapshot = platformStates.windowsApplySnapshot;
 
     const resolverPlan = systemResolverPlan(pac);
     const next: StoredState = {
@@ -1304,7 +1318,7 @@ export function createElectronLauncherSystemDomainProxy(
         }
         const current = await captureWindowsState() as Record<string, RegistryValue>;
         const continuationPrevious = windowsContinuationPrevious(state.previous, current);
-        const continuation = await fallbackForPac(continuationPrevious);
+        const continuation = await fallbackForPac(continuationPrevious, log);
         changed = (
           localPacConfig.fallbackProxy?.directive !== continuation.fallbackProxy?.directive
           || localPacConfig.fallbackPacUrl !== continuation.fallbackPacUrl
@@ -1558,6 +1572,16 @@ async function platformStatesForApply(existing: StoredState | null): Promise<{
       autoConfigUrl: previous.autoConfigUrl ?? { exists: false, name: 'AutoConfigURL' }
     },
     windowsApplySnapshot: current
+  };
+}
+
+function windowsStateWithoutAutoConfigUrl(previous: unknown): Record<string, RegistryValue> {
+  const row = previous && typeof previous === 'object'
+    ? previous as Record<string, RegistryValue>
+    : {};
+  return {
+    ...row,
+    autoConfigUrl: { exists: false, name: 'AutoConfigURL' }
   };
 }
 
@@ -2855,11 +2879,10 @@ async function notifyWindowsProxyChanged(): Promise<ExecTextResult> {
   }
 }
 
-async function fallbackForPac(previous: unknown): Promise<{
-  fallbackProxy: PacProxy | null;
-  fallbackPacUrl: string | null;
-  fallbackPacScript: string | null;
-}> {
+async function fallbackForPac(
+  previous: unknown,
+  log?: Pick<Console, 'warn'>
+): Promise<PacContinuation> {
   if (process.platform === 'darwin') {
     for (const service of previousServices(previous)) {
       const proxy = service.secureWebProxy || service.webProxy || service.socksProxy;
@@ -2888,9 +2911,29 @@ async function fallbackForPac(previous: unknown): Promise<{
   const fallbackPacUrl = row.autoConfigUrl?.exists
     ? stringValue(row.autoConfigUrl.value)
     : null;
+  let staleWindowsPacIgnored = false;
   if (fallbackPacUrl) {
-    const fallbackPacScript = await readWindowsFallbackPac(fallbackPacUrl);
-    return { fallbackProxy: null, fallbackPacUrl, fallbackPacScript };
+    try {
+      const fallbackPacScript = await readWindowsFallbackPac(fallbackPacUrl);
+      return { fallbackProxy: null, fallbackPacUrl, fallbackPacScript };
+    } catch (err) {
+      const endpoint = loopbackUrlEndpoint(fallbackPacUrl);
+      if (
+        !endpoint
+        || !errorMessage(err).startsWith('Existing Windows PAC could not be read:')
+      ) {
+        throw err;
+      }
+      if (await tcpEndpointReadyWithGrace(endpoint)) {
+        const fallbackPacScript = await readWindowsFallbackPac(fallbackPacUrl);
+        return { fallbackProxy: null, fallbackPacUrl, fallbackPacScript };
+      }
+      staleWindowsPacIgnored = true;
+      log?.warn(
+        `[electron-launcher] ignored stale Windows PAC ${fallbackPacUrl} because `
+        + `${endpoint.host}:${endpoint.port} is not listening`
+      );
+    }
   }
   if (windowsRegistryDwordEquals(row.proxyEnable, 1)) {
     const proxy = windowsStaticProxyForPac(row.proxyServer?.value);
@@ -2912,13 +2955,19 @@ async function fallbackForPac(previous: unknown): Promise<{
       fallbackPacScript: windowsStaticProxyPacScript(
         row.proxyServer?.value,
         row.proxyOverride?.value
-      )
+      ),
+      staleWindowsPacIgnored
     };
   }
   if (windowsRegistryDwordEquals(row.autoDetect, 1)) {
     throw new Error('Windows WPAD/AutoDetect is active and cannot be preserved by the MX-H2I PAC.');
   }
-  return { fallbackProxy: null, fallbackPacUrl: null, fallbackPacScript: null };
+  return {
+    fallbackProxy: null,
+    fallbackPacUrl: null,
+    fallbackPacScript: null,
+    staleWindowsPacIgnored
+  };
 }
 
 function windowsContinuationPrevious(
