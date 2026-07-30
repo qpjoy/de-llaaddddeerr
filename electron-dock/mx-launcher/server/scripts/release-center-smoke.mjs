@@ -159,11 +159,80 @@ assertPlan(windowsPlan, {
   fileName: uploadedWindowsArtifact.fileName
 });
 
+const asarPlan = await createPlan({
+  releaseId: `rel_smoke_asar_${runId}`,
+  channel: 'smoke',
+  productId: 'luopan',
+  appId: 'luopan',
+  launcherComponentId: 'luopan',
+  launcherUpdatePolicy: 'app-asar',
+  launcherCurrentVersion: '0.1.0',
+  launcherTargetVersion: '0.1.1',
+  appUpdatePolicy: 'app-managed',
+  appCurrentVersion: '0.1.0',
+  appTargetVersion: '0.1.0',
+  artifactKind: 'app-asar',
+  artifactVersion: '0.1.1',
+  artifactUrl: `https://release.invalid/luopan/${runId}/app.asar`,
+  artifactDigest: `sha256:smoke-asar-${runId}`,
+  artifactSizeBytes: 1024,
+  artifactPlatform: 'darwin',
+  artifactArch: 'arm64',
+  artifactFileName: `Luopan-0.1.1-darwin-arm64-${runId}.asar`,
+  activationMode: 'restart-auto',
+  deliveryMode: 'silent-download-next-start',
+  rolloutStrategy: 'all',
+  rolloutPercentage: 100,
+  rolloutRings: ['internal-dogfood', 'stable'],
+  suiteId: 'luopan-asar-smoke',
+  topology: 'h-d-i-asar-smoke',
+  sites: ['internal-main', 'domestic-main'],
+  e2eResult: 'passed',
+  releaseNotes: 'Initial ASAR smoke notes',
+  createdBy: 'release-center-smoke',
+  requestId: `release-center-smoke-asar-${runId}`
+});
+
+assertPlan(asarPlan, {
+  releaseIdPrefix: 'rel_smoke_asar_',
+  gate: 'passed',
+  readyToPromote: true,
+  artifactKind: 'app-asar',
+  updateMode: 'automatic',
+  hotUpdateAuto: false,
+  majorUpdateRequiresInstaller: false,
+  rolloutStrategy: 'all',
+  sizeBytes: 1024,
+  platform: 'darwin',
+  arch: 'arm64',
+  fileName: `Luopan-0.1.1-darwin-arm64-${runId}.asar`
+});
+assert(asarPlan.deliveryMode === 'silent-download-next-start', 'ASAR delivery mode should be silent before metadata edit');
+
+const editedAsarPlan = await updatePlan(asarPlan.planId, {
+  releaseNotes: 'Edited ASAR smoke notes',
+  deliveryMode: 'prompt-download-restart',
+  rolloutStrategy: 'gray',
+  rolloutPercentage: 25,
+  targetInstallIds: [`release-smoke-luopan-${runId}`],
+  updatedBy: 'release-center-smoke',
+  requestId: `release-center-smoke-asar-edit-${runId}`
+});
+assert(editedAsarPlan.releaseNotes === 'Edited ASAR smoke notes', 'release notes edit was not persisted');
+assert(editedAsarPlan.deliveryMode === 'prompt-download-restart', 'delivery mode edit was not persisted');
+assert(editedAsarPlan.rollout?.strategy === 'gray', 'rollout strategy edit was not persisted');
+assert(editedAsarPlan.rollout?.percentage === 25, 'rollout percentage edit was not persisted');
+assert(
+  stableJson(editedAsarPlan.artifacts) === stableJson(asarPlan.artifacts),
+  'metadata edit must not change release artifacts'
+);
+
 await checkReleaseDecision('darwin', 'arm64', majorPlan.releaseId, 'dmg');
 await checkReleaseDecision('win32', 'x64', windowsPlan.releaseId, 'exe');
+await checkAsarReleaseDecision(editedAsarPlan.releaseId);
 await checkReleaseIsCurrentVersionSafe();
 await checkReleaseHistory('darwin', 'arm64', majorPlan.releaseId);
-await checkListIncludes(hotPlan.planId, majorPlan.planId, windowsPlan.planId);
+await checkListIncludes(hotPlan.planId, majorPlan.planId, windowsPlan.planId, asarPlan.planId);
 
 console.log(JSON.stringify({
   ok: true,
@@ -215,6 +284,15 @@ async function createPlan(body) {
     releaseId: payload.plan.releaseId,
     channel: payload.plan.channel
   });
+  return payload.plan;
+}
+
+async function updatePlan(planId, body) {
+  const payload = await requestJson(`/internal/v1/release-management/plans/${encodeURIComponent(planId)}`, {
+    method: 'PATCH',
+    body
+  });
+  assert(payload?.plan?.planId === planId, `update plan ${planId} did not return the same plan`);
   return payload.plan;
 }
 
@@ -304,6 +382,27 @@ async function checkReleaseDecision(platform, arch, releaseId, extension) {
   assert(artifact.url?.endsWith(`/${encodeURIComponent(artifact.fileName)}`), `${platform}/${arch} artifact URL lost the installer file name`);
 }
 
+async function checkAsarReleaseDecision(releaseId) {
+  const payload = await requestJson('/internal/v1/release/check', {
+    method: 'POST',
+    body: {
+      installId: `release-smoke-luopan-${runId}`,
+      productId: 'luopan',
+      channel: 'smoke',
+      platform: 'darwin',
+      arch: 'arm64',
+      artifactKinds: ['app-asar'],
+      components: { luopan: '0.1.0' }
+    }
+  });
+  assert(payload.status === 'update-available', 'Luopan ASAR release should be update-available');
+  assert(payload.releaseId === releaseId, `Luopan ASAR selected ${payload.releaseId}, expected ${releaseId}`);
+  assert(payload.deliveryMode === 'prompt-download-restart', 'Luopan ASAR release check lost edited delivery mode');
+  assert(payload.releaseNotes === 'Edited ASAR smoke notes', 'Luopan ASAR release check lost edited notes');
+  assert(payload.artifacts?.length === 1, 'Luopan ASAR release should contain exactly one artifact');
+  assert(payload.artifacts[0]?.kind === 'app-asar', 'Luopan ASAR release returned a non-ASAR artifact');
+}
+
 async function checkReleaseIsCurrentVersionSafe() {
   const payload = await requestJson('/internal/v1/release/check', {
     method: 'POST',
@@ -370,6 +469,19 @@ async function requestJson(path, options = {}) {
 function absoluteUrl(path) {
   if (/^https?:\/\//i.test(path)) return path;
   return `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function assert(condition, message) {

@@ -80,6 +80,7 @@ test('release checks let new clients select ASAR without changing legacy install
   });
   asarPlan.createdAt = '2026-07-28T02:00:00.000Z';
   asarPlan.rollout.percentage = 100;
+  asarPlan.deliveryMode = 'silent-download-next-start';
 
   const selectedAsar = evaluateReleaseCheck([installerPlan, asarPlan], {
     installId: 'install_h2i',
@@ -92,6 +93,7 @@ test('release checks let new clients select ASAR without changing legacy install
   });
   assert.equal(selectedAsar.releaseId, 'mx-h2i-asar-2.1.3');
   assert.equal(selectedAsar.artifacts[0]?.kind, 'app-asar');
+  assert.equal(selectedAsar.deliveryMode, 'silent-download-next-start');
 
   const legacySelection = evaluateReleaseCheck([installerPlan, asarPlan], {
     installId: 'install_h2i',
@@ -102,6 +104,44 @@ test('release checks let new clients select ASAR without changing legacy install
     components: { 'mx-h2i': '2.1.2' }
   });
   assert.equal(legacySelection.releaseId, 'mx-h2i-asar-2.1.3');
+});
+
+test('release plan metadata can be edited without changing artifact identity', () => {
+  const store = new MemoryStore(testRuntimeConfig());
+  const plan = store.createReleaseManagementPlan({
+    releaseId: 'luopan-asar-0.1.2',
+    productId: 'luopan',
+    appId: 'luopan',
+    channel: 'shadow',
+    launcherComponentId: 'luopan',
+    launcherUpdatePolicy: 'app-asar',
+    launcherCurrentVersion: '0.1.1',
+    launcherTargetVersion: '0.1.2',
+    artifactKind: 'app-asar',
+    artifactVersion: '0.1.2',
+    artifactUrl: '/artifact/luopan.asar',
+    artifactDigest: 'sha256:immutable',
+    artifactPlatform: 'darwin',
+    artifactArch: 'arm64',
+    artifactFileName: 'Luopan-0.1.2-darwin-arm64-app.asar',
+    activationMode: 'restart-auto',
+    e2eResult: 'passed'
+  });
+  const artifactBefore = structuredClone(plan.artifacts);
+  const updated = store.updateReleaseManagementPlan(plan.planId, {
+    releaseNotes: 'Updated notes',
+    deliveryMode: 'silent-download-next-start',
+    rolloutStrategy: 'all',
+    rolloutPercentage: 100,
+    targetUserIds: ['usr_canary'],
+    updatedBy: 'desktop-admin'
+  });
+  assert.equal(updated.releaseNotes, 'Updated notes');
+  assert.equal(updated.deliveryMode, 'silent-download-next-start');
+  assert.equal(updated.rollout.percentage, 100);
+  assert.deepEqual(updated.rollout.audience.userIds, ['usr_canary']);
+  assert.deepEqual(updated.artifacts, artifactBefore);
+  assert.equal(updated.updatedBy, 'desktop-admin');
 });
 
 test('release product identity resolves by package name without changing network identity', async () => {
@@ -426,6 +466,7 @@ test('SDK release plan derives artifact identity, actor, and a pending blocked g
     targetUserIds: [],
     targetInstallIds: ['install_canary'],
     releaseNotes: null,
+    deliveryMode: null,
     suiteId: null,
     topology: null,
     sites: [],
@@ -849,6 +890,9 @@ function releasePlan(
       connectionSafeMode: true
     },
     releaseNotes: input.releaseNotes ?? null,
+    deliveryMode: input.deliveryMode === 'silent-download-next-start'
+      ? 'silent-download-next-start'
+      : 'prompt-download-restart',
     test: {
       suiteId: 'test',
       topology: 'test',

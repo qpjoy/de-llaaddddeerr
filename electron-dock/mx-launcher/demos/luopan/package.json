@@ -1,7 +1,7 @@
 {
   "name": "@qpjoy/luopan-demo",
   "productName": "Luopan",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "author": "QPJoy",
@@ -14,9 +14,12 @@
     "dev": "quasar dev -m electron",
     "start": "pnpm dev",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
-    "check": "node --check scripts/prepare-electron-native.mjs && node scripts/launcher-network-capability.test.mjs && pnpm run typecheck",
+    "check": "node --check scripts/prepare-electron-native.mjs && node --check scripts/build-asar-update.mjs && node --check src-electron/electron-bootstrap.cjs && node scripts/launcher-network-capability.test.mjs && pnpm run typecheck",
     "prebuild": "pnpm run prepare:electron-native",
     "build": "quasar build -m electron --skip-pkg",
+    "make:asar": "pnpm run build && node scripts/build-asar-update.mjs",
+    "make:asar:mac": "bash scripts/build-asar-macos.sh",
+    "make:asar:win": "scripts\\build-asar-windows.cmd",
     "prepackage": "pnpm run prepare:electron-native",
     "package": "CI=true quasar build -m electron"
   },
@@ -30,6 +33,7 @@
     "vue-router": "4.6.4"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "@quasar/app-vite": "2.4.0",
     "@types/node": "22.19.21",
     "dmg-builder": "25.1.8",

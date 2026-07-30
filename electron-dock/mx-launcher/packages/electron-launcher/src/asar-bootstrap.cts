@@ -1,13 +1,48 @@
-const fs = require('node:fs');
-const path = require('node:path');
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 const POINTER_DIR = 'launcher-packages';
 
-function selectMxH2IAsar(input) {
+export interface ElectronLauncherAsarPointer {
+  version: string;
+  path: string;
+  activatedAt: string;
+}
+
+export interface ElectronLauncherAsarSelection {
+  active: boolean;
+  path: string | null;
+  version: string;
+  baseVersion: string;
+  source: 'base' | 'current' | 'pending';
+}
+
+export interface ElectronLauncherAsarSelectionInput {
+  baseDir: string;
+  componentId: string;
+  baseVersion: string;
+  pid?: number;
+  processAlive?: (pid: number) => boolean;
+}
+
+export interface ElectronLauncherAsarLaunchInput {
+  baseDir: string;
+  componentId: string;
+  activePath?: string | null;
+}
+
+export interface ElectronLauncherAsarFailureInput extends ElectronLauncherAsarLaunchInput {
+  baseVersion: string;
+  reason?: string | null;
+}
+
+export function selectElectronLauncherAsar(
+  input: ElectronLauncherAsarSelectionInput
+): ElectronLauncherAsarSelection {
   const baseDir = requiredText(input?.baseDir, 'baseDir');
-  const componentId = safeComponentId(input?.componentId || 'mx-h2i');
+  const componentId = safeComponentId(input?.componentId);
   const baseVersion = requiredText(input?.baseVersion, 'baseVersion');
-  const pid = Number.isInteger(input?.pid) ? input.pid : process.pid;
+  const pid = Number.isInteger(input?.pid) ? Number(input.pid) : process.pid;
   const processAlive = typeof input?.processAlive === 'function' ? input.processAlive : isProcessAlive;
   const files = pointerFiles(baseDir, componentId);
   fs.mkdirSync(files.dir, { recursive: true });
@@ -20,6 +55,7 @@ function selectMxH2IAsar(input) {
     && current
     && marker.path === current.path
     && marker.pid !== pid
+    && typeof marker.pid === 'number'
     && !processAlive(marker.pid)
   ) {
     recordFailedPointer(files, current, 'previous launch did not reach ready');
@@ -61,6 +97,7 @@ function selectMxH2IAsar(input) {
   const liveMarkerForSameAsar = marker
     && marker.path === current.path
     && marker.pid !== pid
+    && typeof marker.pid === 'number'
     && processAlive(marker.pid);
   if (!liveMarkerForSameAsar) {
     writeJsonAtomic(files.launching, {
@@ -80,12 +117,15 @@ function selectMxH2IAsar(input) {
   };
 }
 
-function confirmMxH2IAsarLaunch(input) {
-  const activePath = optionalText(input?.activePath || process.env.MX_H2I_ACTIVE_ASAR);
+export function confirmElectronLauncherAsarLaunch(
+  input: ElectronLauncherAsarLaunchInput
+): boolean {
+  const activePath = optionalText(input?.activePath)
+    || optionalText(process.env.MX_LAUNCHER_ACTIVE_ASAR);
   if (!activePath) return false;
   const files = pointerFiles(
     requiredText(input?.baseDir, 'baseDir'),
-    safeComponentId(input?.componentId || 'mx-h2i')
+    safeComponentId(input?.componentId)
   );
   const marker = readJson(files.launching);
   if (!marker || marker.path !== activePath) return false;
@@ -99,13 +139,15 @@ function confirmMxH2IAsarLaunch(input) {
   return true;
 }
 
-function markMxH2IAsarLaunchFailed(input) {
+export function markElectronLauncherAsarLaunchFailed(
+  input: ElectronLauncherAsarFailureInput
+): boolean {
   const activePath = optionalText(input?.activePath);
   if (!activePath) return false;
   const baseVersion = requiredText(input?.baseVersion, 'baseVersion');
   const files = pointerFiles(
     requiredText(input?.baseDir, 'baseDir'),
-    safeComponentId(input?.componentId || 'mx-h2i')
+    safeComponentId(input?.componentId)
   );
   const current = readPointer(files.current);
   if (!current || current.path !== activePath) return false;
@@ -117,88 +159,11 @@ function markMxH2IAsarLaunchFailed(input) {
   return true;
 }
 
-function runningMxH2IVersion(baseVersion) {
-  return optionalText(process.env.MX_H2I_ACTIVE_ASAR_VERSION) || baseVersion;
+export function runningElectronLauncherVersion(baseVersion: string): string {
+  return optionalText(process.env.MX_LAUNCHER_ACTIVE_ASAR_VERSION) || baseVersion;
 }
 
-function pointerFiles(baseDir, componentId) {
-  const dir = path.join(baseDir, POINTER_DIR);
-  return {
-    dir,
-    pending: path.join(dir, `${componentId}.pending.json`),
-    current: path.join(dir, `${componentId}.current.json`),
-    previous: path.join(dir, `${componentId}.previous.json`),
-    launching: path.join(dir, `${componentId}.launching.json`),
-    healthy: path.join(dir, `${componentId}.healthy.json`),
-    failed: path.join(dir, `${componentId}.failed.json`)
-  };
-}
-
-function usablePointer(pointer, baseVersion) {
-  if (!pointer || compareReleaseVersions(pointer.version, baseVersion) <= 0) return null;
-  try {
-    const stat = fs.statSync(pointer.path);
-    if (!stat.isFile() || path.extname(pointer.path).toLowerCase() !== '.asar') return null;
-  } catch {
-    return null;
-  }
-  return pointer;
-}
-
-function readPointer(filePath) {
-  const value = readJson(filePath);
-  const version = optionalText(value?.version);
-  const artifactPath = optionalText(value?.path);
-  if (!version || !artifactPath || !path.isAbsolute(artifactPath)) return null;
-  return {
-    version,
-    path: artifactPath,
-    activatedAt: optionalText(value.activatedAt) || 'unknown'
-  };
-}
-
-function readJson(filePath) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-function writeJsonAtomic(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.next`;
-  fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  fs.renameSync(tempPath, filePath);
-}
-
-function recordFailedPointer(files, pointer, reason) {
-  writeJsonAtomic(files.failed, {
-    ...pointer,
-    reason,
-    failedAt: new Date().toISOString()
-  });
-}
-
-function removeFile(filePath) {
-  try {
-    fs.rmSync(filePath, { force: true });
-  } catch {
-    // A stale marker is safe; the next launch retries the same recovery.
-  }
-}
-
-function isProcessAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === 'EPERM';
-  }
-}
-
-function compareReleaseVersions(left, right) {
+export function compareElectronLauncherReleaseVersions(left: string, right: string): number {
   if (left === right) return 0;
   const leftParts = numericVersionParts(left);
   const rightParts = numericVersionParts(right);
@@ -211,33 +176,110 @@ function compareReleaseVersions(left, right) {
   return 0;
 }
 
-function numericVersionParts(value) {
+function pointerFiles(baseDir: string, componentId: string) {
+  const dir = path.join(baseDir, POINTER_DIR);
+  return {
+    dir,
+    pending: path.join(dir, `${componentId}.pending.json`),
+    current: path.join(dir, `${componentId}.current.json`),
+    previous: path.join(dir, `${componentId}.previous.json`),
+    launching: path.join(dir, `${componentId}.launching.json`),
+    healthy: path.join(dir, `${componentId}.healthy.json`),
+    failed: path.join(dir, `${componentId}.failed.json`)
+  };
+}
+
+function usablePointer(
+  pointer: ElectronLauncherAsarPointer | null,
+  baseVersion: string
+): ElectronLauncherAsarPointer | null {
+  if (!pointer || compareElectronLauncherReleaseVersions(pointer.version, baseVersion) <= 0) return null;
+  try {
+    const stat = fs.statSync(pointer.path);
+    if (!stat.isFile() || path.extname(pointer.path).toLowerCase() !== '.asar') return null;
+  } catch {
+    return null;
+  }
+  return pointer;
+}
+
+function readPointer(filePath: string): ElectronLauncherAsarPointer | null {
+  const value = readJson(filePath);
+  const version = optionalText(value?.version);
+  const artifactPath = optionalText(value?.path);
+  if (!version || !artifactPath || !path.isAbsolute(artifactPath)) return null;
+  return {
+    version,
+    path: artifactPath,
+    activatedAt: optionalText(value?.activatedAt) || 'unknown'
+  };
+}
+
+function readJson(filePath: string): Record<string, unknown> | null {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return value && typeof value === 'object' ? value as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonAtomic(filePath: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.next`;
+  fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  fs.renameSync(tempPath, filePath);
+}
+
+function recordFailedPointer(
+  files: ReturnType<typeof pointerFiles>,
+  pointer: ElectronLauncherAsarPointer,
+  reason: string
+): void {
+  writeJsonAtomic(files.failed, {
+    ...pointer,
+    reason,
+    failedAt: new Date().toISOString()
+  });
+}
+
+function removeFile(filePath: string): void {
+  try {
+    fs.rmSync(filePath, { force: true });
+  } catch {
+    // A stale marker is safe; the next launch retries the same recovery.
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === 'EPERM';
+  }
+}
+
+function numericVersionParts(value: string): number[] | null {
   const match = String(value || '').trim().match(/^v?(\d+(?:\.\d+)*)(?:[-+].*)?$/i);
   return match ? match[1].split('.').map(Number) : null;
 }
 
-function safeComponentId(value) {
+function safeComponentId(value: unknown): string {
   const componentId = requiredText(value, 'componentId').toLowerCase();
   if (!/^[a-z0-9][a-z0-9._-]*$/.test(componentId)) {
-    throw new Error(`Invalid ASAR componentId: ${value}`);
+    throw new Error(`Invalid ASAR componentId: ${String(value)}`);
   }
   return componentId;
 }
 
-function requiredText(value, name) {
+function requiredText(value: unknown, name: string): string {
   const text = optionalText(value);
   if (!text) throw new Error(`ASAR bootstrap requires ${name}`);
   return text;
 }
 
-function optionalText(value) {
+function optionalText(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
-
-module.exports = {
-  compareReleaseVersions,
-  confirmMxH2IAsarLaunch,
-  markMxH2IAsarLaunchFailed,
-  runningMxH2IVersion,
-  selectMxH2IAsar
-};

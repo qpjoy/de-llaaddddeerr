@@ -1,4 +1,6 @@
 import { existsSync } from 'node:fs';
+import { copyFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 
 import { configure } from 'quasar/wrappers';
 
@@ -53,6 +55,15 @@ export default configure(() => ({
     builder: {
       appId: 'dev.qpjoy.luopan',
       productName: 'Luopan',
+      extraMetadata: {
+        main: 'electron-bootstrap.cjs'
+      },
+      beforePack: async () => {
+        await copyFile(
+          resolve('src-electron/electron-bootstrap.cjs'),
+          resolve('dist/electron/UnPackaged/electron-bootstrap.cjs')
+        );
+      },
       directories: {
         output: 'dist/electron'
       },

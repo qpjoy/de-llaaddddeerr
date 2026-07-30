@@ -20,6 +20,7 @@ const api = {
   openOverseaTestWindow: (input: { url: string }) => ipcRenderer.invoke('luopan:open-oversea-test-window', input),
   checkUpdates: () => ipcRenderer.invoke('luopan:check-updates'),
   applyUpdate: () => ipcRenderer.invoke('luopan:apply-update'),
+  restartApp: () => ipcRenderer.invoke('luopan:restart-app'),
   openStagedInstaller: () => ipcRenderer.invoke('luopan:open-staged-installer'),
   rollbackUpdateSlot: (slot: 'config' | 'renderer') => ipcRenderer.invoke('luopan:rollback-update-slot', slot),
   openAdmin: () => ipcRenderer.invoke('luopan:open-admin'),

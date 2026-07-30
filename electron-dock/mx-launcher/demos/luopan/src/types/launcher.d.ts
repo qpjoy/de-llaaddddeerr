@@ -105,13 +105,15 @@ export interface LuopanRuntimeUpdateExecution {
 }
 
 export interface LuopanRuntimeUpdate {
-  status: 'idle' | 'checking' | 'up-to-date' | 'update-available' | 'blocked' | 'failed';
+  status: 'idle' | 'checking' | 'up-to-date' | 'update-available' | 'staged' | 'applied' | 'ready-to-install' | 'blocked' | 'failed';
   checkedAt: string | null;
   currentVersion: string;
   targetVersion: string | null;
   releaseId: string | null;
   releaseNotes: string | null;
   matchedBy: string | null;
+  deliveryMode: 'prompt-download-restart' | 'silent-download-next-start';
+  restartRequired: boolean;
   featureFlags: string[];
   artifacts: LuopanRuntimeUpdateArtifact[];
   execution: LuopanRuntimeUpdateExecution[];
@@ -153,6 +155,7 @@ export interface LuopanLauncherApi {
   openOverseaTestWindow(input: { url: string }): Promise<LuopanRuntimeState>;
   checkUpdates(): Promise<LuopanRuntimeState>;
   applyUpdate(): Promise<LuopanRuntimeState>;
+  restartApp(): Promise<void>;
   openStagedInstaller(): Promise<LuopanRuntimeState>;
   rollbackUpdateSlot(slot: 'config' | 'renderer'): Promise<LuopanRuntimeState>;
   openAdmin(): Promise<void>;

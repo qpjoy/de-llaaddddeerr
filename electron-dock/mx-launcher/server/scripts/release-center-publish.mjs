@@ -54,6 +54,15 @@ const kind = args.kind || process.env.MX_RELEASE_KIND || 'installer';
 if (!['installer', 'asar', 'hot'].includes(kind)) {
   throw new Error('--kind must be installer, asar, or hot');
 }
+const requestedDeliveryMode = args.deliveryMode
+  || process.env.MX_RELEASE_DELIVERY_MODE
+  || 'prompt-download-restart';
+if (!['prompt-download-restart', 'silent-download-next-start'].includes(requestedDeliveryMode)) {
+  throw new Error('--delivery-mode must be prompt-download-restart or silent-download-next-start');
+}
+if (requestedDeliveryMode === 'silent-download-next-start' && kind !== 'asar') {
+  throw new Error('--delivery-mode silent-download-next-start is only supported for --kind asar');
+}
 const e2eResult = args.e2eResult || process.env.MX_RELEASE_E2E_RESULT || 'running';
 if (releaseAccessToken && e2eResult !== 'running') {
   throw new Error('Scoped Publisher plans always start pending; use the gate endpoint or --approve with evidence after validation');
@@ -215,6 +224,7 @@ function installerBody() {
     artifactArch,
     artifactFileName: basename(artifactPath),
     activationMode: 'installer-manual',
+    deliveryMode: 'prompt-download-restart',
     rolloutStrategy: args.rolloutStrategy || (hasExplicitTargets ? 'manual-ring' : 'all'),
     rolloutPercentage: numberArg(args.rolloutPercentage, hasExplicitTargets ? 0 : 100),
     rolloutRings: listArg(args.rolloutRings, ['internal-dogfood', 'stable']),
@@ -253,6 +263,7 @@ function hotUpdateBody() {
     artifactArch,
     artifactFileName: basename(artifactPath),
     activationMode: 'hot-auto',
+    deliveryMode: 'prompt-download-restart',
     rolloutStrategy: args.rolloutStrategy || 'gray',
     rolloutPercentage: numberArg(args.rolloutPercentage, 10),
     rolloutRings: listArg(args.rolloutRings, ['internal-dogfood', 'canary', 'stable']),
@@ -292,6 +303,7 @@ function asarUpdateBody() {
     artifactArch,
     artifactFileName: basename(artifactPath),
     activationMode: 'restart-auto',
+    deliveryMode: requestedDeliveryMode,
     rolloutStrategy: args.rolloutStrategy || (hasExplicitTargets ? 'manual-ring' : 'gray'),
     rolloutPercentage: numberArg(args.rolloutPercentage, hasExplicitTargets ? 0 : 10),
     rolloutRings: listArg(args.rolloutRings, ['internal-dogfood', 'canary', 'stable']),
@@ -333,6 +345,7 @@ function scopedReleaseBody(artifactId) {
     targetUserIds,
     targetInstallIds,
     releaseNotes,
+    deliveryMode: kind === 'asar' ? requestedDeliveryMode : 'prompt-download-restart',
     suiteId: args.suiteId || `${product}-${kind}-release`,
     topology: args.topology || (isDefaultProduct
       ? `h-d-i-${kind}-release`

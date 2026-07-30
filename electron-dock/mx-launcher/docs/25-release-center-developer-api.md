@@ -76,6 +76,14 @@ AppCenter 产品。平台必须在发放 service account 前完成冲突检查�
 `platform + arch` 文件都是独立 artifact，也应建立独立 plan。单架构包不得标成
 `universal`；同一个版本可为不同平台重复以下流程。
 
+Luopan 从 `0.1.1` 起、MX-H2I 从 `2.1.3` 起在完整安装包入口内置通用
+`@qpjoy/electron-launcher/asar-bootstrap`。这是 ASAR 更新的最小基线：它在产品主进程
+加载前选择 pending/current 包，记录 launching/healthy 状态，并在新 ASAR 未完成首次
+启动时自动回滚 previous。它只做本地文件选择，不建立网络连接，也不会改变
+WireGuard、PAC 或 DNS。旧 MX-H2I 安装仍可运行原产品 bootstrap；新 ASAR 同时保留旧
+环境变量兼容，滚动部署不会断开现有在线连接。未包含 bootstrap 的旧 Luopan 必须先完成
+一次 DMG/EXE 全量升级，之后才能接收 ASAR。
+
 完整安装包统一使用 `kind=app-installer`，应用代码 ASAR 使用 `kind=app-asar`，两者
 都以产品 `productId` 为 `componentId`。不要使用兼容旧 MX-H2I 的
 `mx-h2i-installer`。renderer bundle 使用 `kind=renderer-ui` 和
@@ -375,6 +383,22 @@ Linux CI 可把 `shasum -a 256` 换成 `sha256sum`。Windows/EXE 使用
 `componentId`，无需给 ASAR 另造或写死应用 ID。省略 `artifactKinds` 的旧客户端继续按
 原有计划匹配。
 
+仓库内的 ASAR 构建入口：
+
+```bash
+# Luopan；macOS 默认 universal，Windows 默认 x64
+pnpm --dir demos/luopan run make:asar:mac -- 0.1.2 universal
+pnpm --dir demos/luopan run make:asar:win -- 0.1.2 x64
+
+# MX-H2I
+pnpm --dir demos/mx-h2i run make:asar:mac -- 2.1.4 universal
+pnpm --dir demos/mx-h2i run make:asar:win -- 2.1.4 x64
+```
+
+两个命令都会生成 `.asar` 和相邻的 `.asar.json` manifest，manifest 包含
+`productId/componentId/version/platform/arch/digest/sizeBytes`。`platform/arch` 描述
+目标客户端，不表示 ASAR 内含平台原生二进制；原生依赖仍继承完整安装包。
+
 读取服务端登记的 metadata（不会返回 OSS 凭据）：
 
 ```bash
@@ -395,6 +419,7 @@ PLAN_JSON="$(
     '{
       artifactId: $artifactId,
       currentVersion: "0.1.0",
+      deliveryMode: "prompt-download-restart",
       releaseNotes: "Luopan 0.1.1 macOS arm64 validation",
       targetInstallIds: [$targetInstallId],
       rolloutStrategy: "manual-ring",
@@ -418,6 +443,8 @@ printf 'planId=%s\n' "$PLAN_ID"
 
 - `channel`，但只能省略或与 artifact channel 完全一致；
 - `releaseNotes`；
+- `deliveryMode`：`prompt-download-restart`（默认，提示用户下载并可立即重启）或
+  `silent-download-next-start`（仅 `app-asar`，后台下载并在下一次自然启动生效）；
 - `targetUserIds` / `targetInstallIds`；
 - `rolloutStrategy` / `rolloutPercentage` / `rolloutRings`；
 - `featureKeys`；
@@ -427,6 +454,10 @@ printf 'planId=%s\n' "$PLAN_ID"
 都从服务端保存的 artifact 派生。create body 即使伪造这些字段也不能覆盖 artifact
 metadata。`createdBy/requestedBy` 同样不由调用方决定，审计身份强制使用 Bearer token
 对应的 service account。
+
+完整安装包始终强制 `prompt-download-restart`，不会被静默打开或安装。旧 plan 没有
+`deliveryMode` 字段时，新客户端也按提示模式处理；旧客户端会忽略新字段，因此服务端与
+K8s 可以先滚动升级，再逐步发新版完整安装包。
 
 新 plan 内部的 E2E run 从 `running` 开始；因为尚无通过证据，对外计算出的
 `test.gate.verdict` 是 `blocked`。Publisher 不能在 create body 中直接声称 `passed`。
@@ -570,8 +601,9 @@ FULL_PLAN_ID="$(jq -er '.plan.planId // .release.planId' <<<"$FULL_PLAN_JSON")"
 全量 plan 同样先得到 `blocked` gate；它复用同一个 `artifactId`，但必须使用新的
 `requestId`。审批人复核定向 plan 后，再调用同一个 gate endpoint
 并使用 `$APPROVER_TOKEN` 把 `$FULL_PLAN_ID` 设为 `passed`，把定向 `$PLAN_ID` 写入
-`evidence`。当前 API 没有
-“原地扩大定向 audience”的接口；不要假设定向 plan 会自动变成全量。
+`evidence`。产品 Publisher 仍应通过新 plan 完成 canary → full promotion；Internal
+Admin 可用 `PATCH /internal/v1/release-management/plans/{planId}` 修正 release notes、
+提示/静默方式和灰度参数，但不能改 artifact、digest、平台、架构或目标版本。
 
 `release-center-publish.mjs` 是“上传本地文件并创建一个 plan”的 one-shot 包装，不提供
 `--artifact-id` 或 `--plan-id` 复用模式。CI 使用它时必须显式传稳定的
@@ -579,6 +611,17 @@ FULL_PLAN_ID="$(jq -er '.plan.planId // .release.planId' <<<"$FULL_PLAN_JSON")"
 promotion 和对既有 plan 的延后审批应使用本章 curl：复用服务端返回的同一个
 `artifactId`，为全量 create 使用新的稳定 `requestId`，不要再次运行 CLI 并误以为它会
 自动复用旧 artifact。
+
+ASAR 的 one-shot 发布可追加：
+
+```bash
+--kind asar \
+--delivery-mode prompt-download-restart
+```
+
+如需后台下载并等待用户下一次自然启动，改为
+`--delivery-mode silent-download-next-start`。该值也可通过
+`MX_RELEASE_DELIVERY_MODE` 提供；非 ASAR 制品传 silent 会被 CLI 拒绝。
 
 ## 8. Consumer 的兼容接法
 
@@ -594,13 +637,19 @@ const updater = createElectronLauncherReleaseUpdater({
 });
 
 const result = await updater.check({
-  componentKind: 'app-installer',
+  componentKind: 'app-asar',
   currentVersion: app.getVersion(),
   installId,
   platform: process.platform,
   arch: process.arch
 });
 ```
+
+产品应依次检查 `app-asar`、`app-installer`（以及需要时的 `renderer-ui`），但只执行服务端
+返回的单个匹配决策。提示模式显示更新说明和“下载并应用”；ASAR 下载校验后写入 pending，
+用户点击“立即重启”生效。静默模式不弹提示，下载完成后等下一次正常启动生效。启动成功后
+调用 `confirmElectronLauncherAsarLaunch`；若主入口导入失败或上次启动未到 healthy，
+bootstrap 会自动回滚。
 
 只有正处于服务端滚动升级期的历史应用，才可同时提供原 `productId` 并显式设置
 `allowLegacyProductFallback: true`；该回退只处理旧服务端返回的 404/405。新应用不要开启，
@@ -696,7 +745,8 @@ Luopan 之外的开发者按相同模型接入：
 6. CI 只用 `artifactId` 创建 `blocked`（待验证）定向 plan，并先做离线/CI artifact 验证；
 7. Approver 过定向 gate 后，圈定 Consumer 才使用现有 updater 真机升级并 report；
 8. Approver 依据定向客户端证据建立并审批全量 plan；
-9. 每个平台/架构独立验证；回退版本必须仍有 gate-passed 全量 plan 和可下载 artifact。
+9. 每个平台/架构独立验证；回退版本必须仍有 gate-passed 全量 plan 和可下载 artifact；
+10. 首个支持 ASAR 的版本必须先走完整安装，之后才把 ASAR 设为产品默认热更新方案。
 
 接入方不需要访问 Admin 全量 Release Management API、K8s、数据库或 OSS 凭据。若需求超出
 上述 SDK facade，应先扩展受 scope 和 product allowlist 约束的契约，不要把 Internal ops

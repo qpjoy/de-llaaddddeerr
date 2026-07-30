@@ -8,14 +8,14 @@ import { request as httpsRequest } from 'node:https';
 import { basename, extname, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
-import { BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, Header, Headers, HttpCode, Inject, NotFoundException, Param, Post, Query, Req, Res, StreamableFile, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, Header, Headers, HttpCode, Inject, NotFoundException, Param, Patch, Post, Query, Req, Res, StreamableFile, UnauthorizedException } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
 import type { PlatformStore, PublisherReleasePlanInput } from '../../store/platform-store.js';
 import { normalizeReleaseArtifactKind } from '../../store/domain.js';
 import { PLATFORM_STORE } from '../../tokens.js';
-import type { AppCenterApp, PlatformPrincipal, ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseReportInput } from '../../types.js';
+import type { AppCenterApp, PlatformPrincipal, ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseManagementPlanPatchInput, ReleaseReportInput } from '../../types.js';
 import { evaluateReleaseCheck, signReleaseCheckResult } from './release-check.js';
 import type { ReleaseCheckResult } from './release-check.js';
 
@@ -398,6 +398,24 @@ export class ReleaseController {
     const plan = await this.store.getReleaseManagementPlan(planId);
     if (!plan) throw new NotFoundException('Release management plan not found');
     return { plan };
+  }
+
+  @Patch('internal/v1/release-management/plans/:planId')
+  async updateManagementPlan(
+    @Req() req: IncomingMessage,
+    @Param('planId') planId: string,
+    @Body() rawBody: unknown
+  ) {
+    assertReleaseManagementAccess(req);
+    if (!await this.store.getReleaseManagementPlan(planId)) {
+      throw new NotFoundException('Release management plan not found');
+    }
+    return {
+      plan: await this.store.updateReleaseManagementPlan(
+        planId,
+        toReleaseManagementPlanPatchInput(asRecord(rawBody))
+      )
+    };
   }
 
   @Post('internal/v1/release-management/plans/:planId/gate')
@@ -818,6 +836,7 @@ function publisherRequestFingerprint(
     installId: nullableString(body.installId),
     userId: nullableString(body.userId),
     releaseNotes: nullableString(body.releaseNotes),
+    deliveryMode: nullableString(body.deliveryMode),
     rolloutStrategy: nullableString(body.rolloutStrategy),
     rolloutPercentage: nullableNumber(body.rolloutPercentage),
     rolloutSegment: nullableString(body.rolloutSegment),
@@ -866,6 +885,7 @@ function toReleaseManagementPlanInput(body: Record<string, unknown>): ReleaseMan
     targetUserIds: stringArray(body.targetUserIds),
     targetInstallIds: stringArray(body.targetInstallIds),
     releaseNotes: nullableString(body.releaseNotes),
+    deliveryMode: nullableString(body.deliveryMode),
     suiteId: nullableString(body.suiteId),
     topology: nullableString(body.topology),
     sites: stringArray(body.sites),
@@ -873,6 +893,26 @@ function toReleaseManagementPlanInput(body: Record<string, unknown>): ReleaseMan
     createdBy: nullableString(body.createdBy),
     requestId: nullableString(body.requestId),
     publisherRequestFingerprint: nullableString(body.publisherRequestFingerprint)
+  };
+}
+
+function toReleaseManagementPlanPatchInput(
+  body: Record<string, unknown>
+): ReleaseManagementPlanPatchInput {
+  const has = (key: string) => Object.prototype.hasOwnProperty.call(body, key);
+  return {
+    ...(has('channel') ? { channel: nullableString(body.channel) ?? '' } : {}),
+    ...(has('releaseNotes') ? { releaseNotes: nullableString(body.releaseNotes) } : {}),
+    ...(has('deliveryMode') ? { deliveryMode: nullableString(body.deliveryMode) } : {}),
+    ...(has('rolloutStrategy') ? { rolloutStrategy: nullableString(body.rolloutStrategy) } : {}),
+    ...(has('rolloutPercentage') ? { rolloutPercentage: nullableNumber(body.rolloutPercentage) } : {}),
+    ...(has('rolloutSegment') ? { rolloutSegment: nullableString(body.rolloutSegment) } : {}),
+    ...(has('rolloutRings') ? { rolloutRings: stringArray(body.rolloutRings) } : {}),
+    ...(has('featureKeys') ? { featureKeys: stringArray(body.featureKeys) } : {}),
+    ...(has('targetUserIds') ? { targetUserIds: stringArray(body.targetUserIds) } : {}),
+    ...(has('targetInstallIds') ? { targetInstallIds: stringArray(body.targetInstallIds) } : {}),
+    updatedBy: nullableString(body.updatedBy),
+    requestId: nullableString(body.requestId)
   };
 }
 
@@ -949,6 +989,7 @@ interface ReleaseHistoryRow {
   artifactDigest: string | null;
   artifactSignature: string | null;
   restartRequired: boolean;
+  deliveryMode: 'prompt-download-restart' | 'silent-download-next-start';
   createdAt: string;
   gate: 'passed';
 }
@@ -998,6 +1039,9 @@ function releaseHistoryRow(
     artifactDigest: artifact.digest,
     artifactSignature: artifact.signature,
     restartRequired: artifact.restartRequired,
+    deliveryMode: plan.deliveryMode === 'silent-download-next-start'
+      ? 'silent-download-next-start'
+      : 'prompt-download-restart',
     createdAt: plan.createdAt,
     gate: 'passed'
   };

@@ -56,6 +56,7 @@ test('package identity resolution drives release check and makes artifact URLs a
   });
 
   assert.equal(result.decision.componentId, 'other-desktop-renderer');
+  assert.equal(result.deliveryMode, 'silent-download-next-start');
   assert.equal(
     result.artifacts[0].url,
     'http://10.88.88.88:18090/internal/v1/release-artifacts/artifact_other/download/app.zip'
@@ -163,6 +164,7 @@ function releaseCheckPayload(url, componentId = 'other-desktop-renderer') {
     },
     artifacts: url ? [artifactRef(url, null, null, componentId)] : [],
     activation: null,
+    deliveryMode: 'silent-download-next-start',
     releaseNotes: null,
     featureFlags: [],
     rollout: { matchedBy: null, bucket: null, percentage: null },

@@ -3923,6 +3923,9 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || /^\/internal\/v1\/launcher-network\/leases\/[^/]+\/(?:release|domestic-peer\/sync|domestic-relay\/diagnostics|internal-direct-peer\/sync)$/.test(path)
       || /^\/internal\/v1\/launcher-network\/(?:products\/[^/]+|mihomo\/sites\/[^/]+)$/.test(path);
   }
+  if (verb === 'PATCH') {
+    return /^\/internal\/v1\/release-management\/plans\/[^/]+$/.test(path);
+  }
   return verb === 'DELETE'
     && (
       /^\/internal\/v1\/user-center\/users\/[^/]+$/.test(path)
@@ -6594,9 +6597,39 @@ function releaseArtifactKinds(plan) {
     .filter(Boolean);
 }
 
+function releaseArtifactSummary(artifact) {
+  const kind = artifact?.kind || artifact?.componentKind || 'artifact';
+  const target = [releasePlatformLabel(artifact?.platform), artifact?.arch]
+    .filter(Boolean)
+    .join('/');
+  return target ? `${kind} · ${target}` : kind;
+}
+
+function releasePlatformLabel(platform) {
+  if (platform === 'darwin') return 'macOS';
+  if (platform === 'win32') return 'Windows';
+  if (platform === 'linux') return 'Linux';
+  return platform || '';
+}
+
+function releaseArtifactSize(sizeBytes) {
+  const bytes = Number(sizeBytes);
+  if (!Number.isFinite(bytes) || bytes < 0) return '-';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024;
+    unit = units[index];
+  }
+  return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} ${unit}`;
+}
+
 function releaseDeliveryLabel(plan) {
   const activation = plan?.activation || {};
   if (activation.majorUpdateRequiresInstaller) return 'full installer';
+  if (plan?.deliveryMode === 'silent-download-next-start') return 'silent / next start';
   if (activation.restartAfterApply) return 'staged restart';
   if (activation.hotUpdateAuto) return 'hot auto';
   return 'manual review';
@@ -6660,7 +6693,8 @@ function renderReleaseCenterPanel() {
           </select>
           <button class="secondary-button" type="button" data-release-refresh ${state.releaseCenter.busy ? 'disabled' : ''}>Refresh plans</button>
           <button class="secondary-button" type="button" data-release-upload ${state.releaseCenter.busy ? 'disabled' : ''}>Upload version</button>
-          <button class="secondary-button" type="button" data-release-create="hot" ${state.releaseCenter.busy ? 'disabled' : ''}>Upload hot update</button>
+          <button class="secondary-button" type="button" data-release-create="hot" ${state.releaseCenter.busy ? 'disabled' : ''}>Upload renderer</button>
+          <button class="secondary-button" type="button" data-release-create="asar" ${state.releaseCenter.busy ? 'disabled' : ''}>Upload ASAR</button>
           <button class="primary-button" type="button" data-release-create="installer" ${state.releaseCenter.busy ? 'disabled' : ''}>Upload installer</button>
         </div>
       </div>
@@ -6699,7 +6733,7 @@ function renderReleaseCenterPanel() {
                 <strong>${escapeHtml(releaseComponentSummary(plan))}</strong>
                 <small>${escapeHtml(releaseDeliveryLabel(plan))}</small>
               </span>
-              <span>${renderChipList(artifacts.map((artifact) => artifact.kind || artifact.componentKind).slice(0, 3), 'info')}</span>
+              <span>${renderChipList(artifacts.map(releaseArtifactSummary).slice(0, 3), 'info')}</span>
               <span>
                 <strong>${escapeHtml(`${rollout.strategy || 'gray'} ${rollout.percentage ?? 10}%`)}</strong>
                 <small>${escapeHtml(rollout.segmentId || 'default segment')}</small>
@@ -6847,18 +6881,20 @@ function openReleaseCenterDrawer(planId) {
 }
 
 function openReleaseUploadDrawer(kind = 'installer') {
+  const normalizedKind = kind === 'hot' ? 'hot' : kind === 'asar' ? 'asar' : 'installer';
   state.releaseCenter.drawer = {
     mode: 'upload',
     draft: {
       productId: MX_H2I_PRODUCT_ID,
-      kind: kind === 'hot' ? 'hot' : 'installer',
+      kind: normalizedKind,
       platform: navigator.platform?.toLowerCase().includes('win') ? 'win32' : 'darwin',
       arch: navigator.platform?.toLowerCase().includes('win') ? 'x64' : 'universal',
       storage: 'oss',
       channel: 'stable',
       currentVersion: '2.0.1',
       version: '2.0.3',
-      e2eResult: 'passed'
+      e2eResult: 'passed',
+      deliveryMode: 'prompt-download-restart'
     }
   };
   state.releaseCenter.feedback = null;
@@ -6930,10 +6966,11 @@ function renderReleaseCenterDrawer() {
           <div class="release-artifact-grid">
             ${artifacts.map((artifact) => `
               <article>
-                <span>${escapeHtml(artifact.kind || 'artifact')}</span>
-                <strong>${escapeHtml(artifact.componentId || '-')}</strong>
-                <small>${escapeHtml(`${artifact.version || '-'} / ${artifact.activation || 'hot-auto'}`)}</small>
-                <code>${escapeHtml(artifact.digest || artifact.url || artifact.source || 'Internal release record')}</code>
+                <span>${escapeHtml(releaseArtifactSummary(artifact))}</span>
+                <strong>${escapeHtml(artifact.fileName || artifact.componentId || '-')}</strong>
+                <small>${escapeHtml(`${artifact.version || '-'} / ${artifact.activation || 'hot-auto'} / ${releaseArtifactSize(artifact.sizeBytes)}`)}</small>
+                <code title="${escapeHtml(artifact.digest || '')}">${escapeHtml(artifact.digest || artifact.source || 'Internal release record')}</code>
+                ${artifact.url ? `<a class="secondary-button" href="${escapeHtml(artifact.url)}" target="_blank" rel="noreferrer">View / download package</a>` : '<small>No package URL recorded</small>'}
               </article>
             `).join('') || '<div class="empty-state">No artifact has been attached to this plan yet.</div>'}
           </div>
@@ -6957,9 +6994,63 @@ function renderReleaseCenterDrawer() {
             </div>
           ` : ''}
         </section>
-        <section class="app-drawer-section">
+        <form class="app-drawer-section" data-release-edit-form data-release-plan-id="${escapeHtml(plan.planId)}">
           <div class="app-section-title">
             <span>04</span>
+            <strong>Edit release metadata</strong>
+          </div>
+          <div class="release-upload-grid">
+            <label>
+              <span>Channel</span>
+              <select name="channel">
+                ${['stable', 'canary', 'internal', 'shadow'].map((channel) => `<option value="${channel}" ${plan.channel === channel ? 'selected' : ''}>${channel}</option>`).join('')}
+              </select>
+            </label>
+            <label>
+              <span>Apply behavior</span>
+              <select name="deliveryMode" ${plan.activation?.majorUpdateRequiresInstaller ? 'disabled' : ''}>
+                <option value="prompt-download-restart" ${plan.deliveryMode !== 'silent-download-next-start' ? 'selected' : ''}>提示用户，立即下载/重启</option>
+                <option value="silent-download-next-start" ${plan.deliveryMode === 'silent-download-next-start' ? 'selected' : ''}>静默下载，下次启动生效</option>
+              </select>
+            </label>
+            <label>
+              <span>Rollout strategy</span>
+              <select name="rolloutStrategy">
+                ${['all', 'gray', 'manual-ring'].map((strategy) => `<option value="${strategy}" ${plan.rollout?.strategy === strategy ? 'selected' : ''}>${strategy}</option>`).join('')}
+              </select>
+            </label>
+            <label>
+              <span>Rollout percentage</span>
+              <input name="rolloutPercentage" type="number" min="0" max="100" step="1" value="${escapeHtml(String(plan.rollout?.percentage ?? 100))}" />
+            </label>
+            <label>
+              <span>Target users</span>
+              <input name="targetUserIds" value="${escapeHtml(asArray(plan.rollout?.audience?.userIds).join(', '))}" placeholder="userId, userId" />
+            </label>
+            <label>
+              <span>Target installs</span>
+              <input name="targetInstallIds" value="${escapeHtml(asArray(plan.rollout?.audience?.installIds).join(', '))}" placeholder="installId, installId" />
+            </label>
+            <label>
+              <span>Rings</span>
+              <input name="rolloutRings" value="${escapeHtml(asArray(plan.rollout?.rings).join(', '))}" />
+            </label>
+            <label>
+              <span>Feature keys</span>
+              <input name="featureKeys" value="${escapeHtml(asArray(plan.rollout?.featureKeys).join(', '))}" />
+            </label>
+          </div>
+          <label class="release-notes-field">
+            <span>Release notes</span>
+            <textarea name="releaseNotes" rows="5" placeholder="Markdown release notes">${escapeHtml(plan.releaseNotes || '')}</textarea>
+          </label>
+          <div class="app-drawer-actions">
+            <button class="primary-button" type="submit" ${state.releaseCenter.busy ? 'disabled' : ''}>Save release</button>
+          </div>
+        </form>
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>05</span>
             <strong>Client behavior</strong>
           </div>
           <div class="foundation-table release-client-table">
@@ -6971,7 +7062,7 @@ function renderReleaseCenterDrawer() {
         </section>
         <section class="app-drawer-section">
           <div class="app-section-title">
-            <span>05</span>
+            <span>06</span>
             <strong>Next actions</strong>
           </div>
           <div class="release-next-actions">
@@ -7000,7 +7091,7 @@ function renderReleaseUploadDrawer() {
         <div>
           <span class="site-kind">Release Center</span>
           <h2>Upload Launcher Version</h2>
-          <p>按应用、系统和 CPU 架构上传 DMG/PKG/EXE/MSI，默认由 Internal 直传 OSS。</p>
+          <p>按应用、系统和 CPU 架构上传 ASAR、DMG、PKG、EXE 或 MSI，默认由 Internal 直传 OSS。</p>
         </div>
         <button class="icon-button app-drawer-close" type="button" data-release-drawer-close aria-label="Close release drawer">×</button>
       </header>
@@ -7023,7 +7114,8 @@ function renderReleaseUploadDrawer() {
               <span>Type</span>
               <select name="kind">
                 <option value="installer" ${draft.kind === 'installer' ? 'selected' : ''}>Full installer</option>
-                <option value="hot" ${draft.kind === 'hot' ? 'selected' : ''}>Hot update bundle</option>
+                <option value="asar" ${draft.kind === 'asar' ? 'selected' : ''}>Application ASAR</option>
+                <option value="hot" ${draft.kind === 'hot' ? 'selected' : ''}>Renderer hot bundle</option>
               </select>
             </label>
             <label>
@@ -7081,6 +7173,13 @@ function renderReleaseUploadDrawer() {
               <span>Gate</span>
               <select name="e2eResult">
                 ${['running', 'passed', 'blocked', 'failed'].map((result) => `<option value="${result}" ${draft.e2eResult === result ? 'selected' : ''}>${result}</option>`).join('')}
+              </select>
+            </label>
+            <label>
+              <span>Apply behavior</span>
+              <select name="deliveryMode">
+                <option value="prompt-download-restart" ${draft.deliveryMode !== 'silent-download-next-start' ? 'selected' : ''}>提示用户，立即下载/重启</option>
+                <option value="silent-download-next-start" ${draft.deliveryMode === 'silent-download-next-start' ? 'selected' : ''}>静默下载，下次启动生效</option>
               </select>
             </label>
           </div>
@@ -7177,11 +7276,62 @@ function bindReleaseDrawerControls() {
       void uploadReleaseArtifactFromAdmin(uploadForm);
     });
   }
+  const editForm = userEditorDrawer.querySelector('[data-release-edit-form]');
+  if (editForm) {
+    editForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      void updateReleasePlanFromAdmin(editForm);
+    });
+  }
   for (const button of userEditorDrawer.querySelectorAll('[data-release-evaluate]')) {
     button.addEventListener('click', () => void evaluateReleasePlanFromAdmin(button.dataset.releaseEvaluate));
   }
   for (const button of userEditorDrawer.querySelectorAll('[data-release-complete-gate]')) {
     button.addEventListener('click', () => void completeReleaseGateFromAdmin(button.dataset.releaseCompleteGate));
+  }
+}
+
+async function updateReleasePlanFromAdmin(form) {
+  const planId = form.dataset.releasePlanId;
+  const plan = releasePlanById(planId);
+  if (!plan || state.releaseCenter.busy) return;
+  const percentage = Number(form.elements.rolloutPercentage?.value);
+  const deliveryMode = plan.activation?.majorUpdateRequiresInstaller
+    ? 'prompt-download-restart'
+    : form.elements.deliveryMode?.value || 'prompt-download-restart';
+  const body = {
+    channel: form.elements.channel?.value || plan.channel,
+    deliveryMode,
+    rolloutStrategy: form.elements.rolloutStrategy?.value || plan.rollout?.strategy || 'all',
+    rolloutPercentage: Number.isFinite(percentage) ? percentage : plan.rollout?.percentage,
+    rolloutRings: commaList(form.elements.rolloutRings?.value),
+    featureKeys: commaList(form.elements.featureKeys?.value),
+    targetUserIds: commaList(form.elements.targetUserIds?.value),
+    targetInstallIds: commaList(form.elements.targetInstallIds?.value),
+    releaseNotes: form.elements.releaseNotes?.value?.trim() || null,
+    updatedBy: 'desktop-admin',
+    requestId: `desktop-release-edit-${Date.now()}`
+  };
+  state.releaseCenter.busy = true;
+  state.releaseCenter.feedback = { kind: 'info', message: `Saving ${plan.releaseId}` };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  renderReleaseCenterDrawer();
+  try {
+    const payload = await fetchJson(`/internal/v1/release-management/plans/${encodeURIComponent(planId)}`, {
+      method: 'PATCH',
+      body
+    });
+    const updatedPlan = payload.plan;
+    const plans = [updatedPlan, ...releaseCenterPlans().filter((item) => item.planId !== updatedPlan.planId)];
+    state.dashboard = { ...(state.dashboard || {}), latestReleasePlans: plans };
+    state.releaseCenter.drawer = { planId: updatedPlan.planId };
+    state.releaseCenter.feedback = { kind: 'success', message: `${updatedPlan.releaseId} saved` };
+  } catch (error) {
+    state.releaseCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.releaseCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+    renderInspector();
   }
 }
 
@@ -7275,7 +7425,8 @@ async function uploadReleaseArtifactFromAdmin(form) {
 
 function releaseUploadInputFromForm(form, file) {
   const productId = (form.elements.productId?.value || MX_H2I_PRODUCT_ID).trim().toLowerCase();
-  const kind = form.elements.kind?.value === 'hot' ? 'hot' : 'installer';
+  const rawKind = form.elements.kind?.value;
+  const kind = rawKind === 'hot' ? 'hot' : rawKind === 'asar' ? 'asar' : 'installer';
   const platform = form.elements.platform?.value || 'darwin';
   const arch = form.elements.arch?.value || 'x64';
   const version = form.elements.version?.value?.trim() || '2.0.3';
@@ -7283,6 +7434,9 @@ function releaseUploadInputFromForm(form, file) {
   const channel = form.elements.channel?.value || 'stable';
   const storage = form.elements.storage?.value || 'oss';
   const e2eResult = form.elements.e2eResult?.value || 'running';
+  const deliveryMode = kind === 'asar' && form.elements.deliveryMode?.value === 'silent-download-next-start'
+    ? 'silent-download-next-start'
+    : 'prompt-download-restart';
   const targetUserIds = commaList(form.elements.targetUserIds?.value);
   const targetInstallIds = commaList(form.elements.targetInstallIds?.value);
   const featureKeys = commaList(form.elements.featureKeys?.value);
@@ -7290,14 +7444,14 @@ function releaseUploadInputFromForm(form, file) {
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const suffix = String(Date.now()).slice(-6);
   const releaseId = kind === 'hot'
-    ? `${productId}-hot-${version}-${stamp}-${suffix}`
-    : `${productId}-${platform}-${arch}-${version}-${stamp}-${suffix}`;
+    ? `${productId}-renderer-${version}-${stamp}-${suffix}`
+    : `${productId}-${kind}-${platform}-${arch}-${version}-${stamp}-${suffix}`;
   return {
     productId,
     fileName: file.name,
     contentType: file.type || 'application/octet-stream',
     kind,
-    artifactKind: kind === 'hot' ? 'renderer-ui' : 'app-installer',
+    artifactKind: kind === 'hot' ? 'renderer-ui' : kind === 'asar' ? 'app-asar' : 'app-installer',
     componentId: kind === 'hot' ? `${productId}-renderer` : productId,
     releaseId,
     platform: platform === 'all' ? null : platform,
@@ -7307,6 +7461,7 @@ function releaseUploadInputFromForm(form, file) {
     channel,
     storage,
     e2eResult,
+    deliveryMode,
     targetUserIds,
     targetInstallIds,
     featureKeys,
@@ -7361,9 +7516,46 @@ async function uploadReleaseArtifactFile(input, file) {
 
 function releasePlanBodyFromUpload(input, artifact) {
   const artifactUrl = absoluteReleaseArtifactUrl(artifact.url || artifact.downloadPath);
-  const major = input.kind !== 'hot';
   const hasExplicitTargets = input.targetUserIds.length > 0 || input.targetInstallIds.length > 0;
-  return major
+  if (input.kind === 'asar') {
+    return {
+      releaseId: input.releaseId,
+      channel: input.channel,
+      productId: input.productId,
+      appId: input.productId,
+      launcherComponentId: input.productId,
+      launcherUpdatePolicy: 'app-asar',
+      launcherCurrentVersion: input.currentVersion,
+      launcherTargetVersion: input.version,
+      appUpdatePolicy: 'app-managed',
+      appCurrentVersion: input.currentVersion,
+      appTargetVersion: input.currentVersion,
+      artifactKind: 'app-asar',
+      artifactVersion: input.version,
+      artifactUrl,
+      artifactDigest: artifact.digest,
+      artifactSizeBytes: artifact.sizeBytes,
+      artifactPlatform: input.platform,
+      artifactArch: input.arch,
+      artifactFileName: artifact.fileName || input.fileName,
+      activationMode: 'restart-auto',
+      deliveryMode: input.deliveryMode,
+      rolloutStrategy: hasExplicitTargets ? 'manual-ring' : 'gray',
+      rolloutPercentage: hasExplicitTargets ? 0 : 10,
+      rolloutRings: ['internal-dogfood', 'canary', 'stable'],
+      targetUserIds: input.targetUserIds,
+      targetInstallIds: input.targetInstallIds,
+      featureKeys: input.featureKeys?.length ? input.featureKeys : [`${input.productId}.release.app-asar`],
+      releaseNotes: input.releaseNotes,
+      suiteId: `${input.productId}-asar-release`,
+      topology: `${input.productId}-asar-release`,
+      sites: ['internal-main', 'domestic-main'],
+      e2eResult: input.e2eResult,
+      createdBy: 'desktop-admin',
+      requestId: `desktop-release-upload-${Date.now()}`
+    };
+  }
+  return input.kind === 'installer'
     ? {
         releaseId: input.releaseId,
         channel: input.channel,
@@ -7385,6 +7577,7 @@ function releasePlanBodyFromUpload(input, artifact) {
         artifactArch: input.arch,
         artifactFileName: artifact.fileName || input.fileName,
         activationMode: 'installer-manual',
+        deliveryMode: 'prompt-download-restart',
         rolloutStrategy: hasExplicitTargets ? 'manual-ring' : 'all',
         rolloutPercentage: hasExplicitTargets ? 0 : 100,
         rolloutRings: ['internal-dogfood', 'stable'],
@@ -7421,6 +7614,7 @@ function releasePlanBodyFromUpload(input, artifact) {
         artifactArch: input.arch,
         artifactFileName: artifact.fileName || input.fileName,
         activationMode: 'hot-auto',
+        deliveryMode: 'prompt-download-restart',
         rolloutStrategy: 'gray',
         rolloutPercentage: 10,
         rolloutRings: ['internal-dogfood', 'canary', 'stable'],

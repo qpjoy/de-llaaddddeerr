@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 
-import type { ReleaseArtifactKind, ReleaseManagementPlan, ReleasePolicyDecision } from '../../types.js';
+import type { ReleaseArtifactKind, ReleaseDeliveryMode, ReleaseManagementPlan, ReleasePolicyDecision } from '../../types.js';
 
 /**
  * Server-side release decision (docs/19 §6). The client sends its identity and
@@ -36,6 +36,7 @@ export interface ReleaseCheckResult {
   artifacts: ReleaseManagementPlan['artifacts'];
   activation: ReleaseManagementPlan['activation'] | null;
   releaseNotes: string | null;
+  deliveryMode: ReleaseDeliveryMode;
   featureFlags: string[];
   rollout: {
     matchedBy: ReleaseCheckMatchedBy | null;
@@ -67,6 +68,7 @@ export function evaluateReleaseCheck(
     artifacts: [],
     activation: null,
     releaseNotes: null,
+    deliveryMode: 'prompt-download-restart',
     featureFlags: [],
     rollout: { matchedBy: null, bucket: null, percentage: null }
   };
@@ -103,6 +105,9 @@ export function evaluateReleaseCheck(
       artifacts,
       activation: plan.activation,
       releaseNotes: plan.releaseNotes ?? null,
+      deliveryMode: plan.deliveryMode === 'silent-download-next-start'
+        ? 'silent-download-next-start'
+        : 'prompt-download-restart',
       featureFlags: plan.rollout?.featureKeys ?? [],
       rollout: {
         matchedBy: match.matchedBy,

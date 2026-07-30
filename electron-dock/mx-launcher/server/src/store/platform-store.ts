@@ -69,6 +69,7 @@ import type {
   ReleaseManagementPlan,
   ReleaseManagementGateInput,
   ReleaseManagementPlanInput,
+  ReleaseManagementPlanPatchInput,
   ReleaseReportInput,
   ReleaseTask,
   RuntimeFeaturePolicy,
@@ -365,6 +366,7 @@ export interface PlatformStore {
     input: PublisherReleasePlanInput
   ): MaybePromise<PublisherReleasePlanResult>;
   createReleaseManagementPlan(input: ReleaseManagementPlanInput): MaybePromise<ReleaseManagementPlan>;
+  updateReleaseManagementPlan(planId: string, input: ReleaseManagementPlanPatchInput): MaybePromise<ReleaseManagementPlan>;
   completeReleaseManagementGate(planId: string, input: ReleaseManagementGateInput): MaybePromise<ReleaseManagementPlan>;
   getReleaseManagementPlan(planId: string): MaybePromise<ReleaseManagementPlan | null>;
   listReleaseManagementPlans(): MaybePromise<ReleaseManagementPlan[]>;

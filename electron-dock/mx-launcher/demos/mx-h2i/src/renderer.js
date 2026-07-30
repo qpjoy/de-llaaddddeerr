@@ -3218,6 +3218,7 @@ function renderUpdatePanel() {
         ${metric('Artifact', update.artifactKind || update.componentKind)}
         ${metric('Platform', [update.artifactPlatform, update.artifactArch].filter(Boolean).join(' / ') || '-')}
         ${metric('Activation', update.activation || (update.majorUpdateRequiresInstaller ? 'installer-manual' : update.hotUpdateAuto ? 'hot-auto' : '-'))}
+        ${metric('Delivery', update.deliveryMode === 'silent-download-next-start' ? '静默 / 下次启动' : '提示 / 立即应用')}
         ${metric('Matched by', rolloutMatchedByLabel(update))}
       </div>
       ${update.releaseNotes ? `

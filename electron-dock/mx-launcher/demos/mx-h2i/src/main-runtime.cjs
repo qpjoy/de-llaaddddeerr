@@ -38,9 +38,9 @@ const {
   reconcileRuntimeUpdateWithInstalledVersion
 } = require('./update-state-policy.cjs');
 const {
-  confirmMxH2IAsarLaunch,
-  runningMxH2IVersion
-} = require('./asar-update-bootstrap.cjs');
+  confirmElectronLauncherAsarLaunch,
+  runningElectronLauncherVersion
+} = loadAsarBootstrap();
 const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet, dialog, session: electronSession, safeStorage } = require('electron');
 
 loadDotEnvFiles();
@@ -127,7 +127,22 @@ const DEFAULT_CONFIG = {
 };
 
 function currentReleaseVersion() {
-  return runningMxH2IVersion(app.getVersion());
+  return runningElectronLauncherVersion(app.getVersion());
+}
+
+function loadAsarBootstrap() {
+  try {
+    return require('@qpjoy/electron-launcher/asar-bootstrap');
+  } catch (error) {
+    // An ASAR delivered to the original 2.1.2 base cannot use a package export
+    // that did not exist yet. The build script copies the same compiled shared
+    // module into the update artifact for that one-way compatibility bridge.
+    try {
+      return require('./vendor/asar-bootstrap.cjs');
+    } catch {
+      throw error;
+    }
+  }
 }
 
 function importInstalledPackage(specifier) {
@@ -272,9 +287,10 @@ if (gotSingleInstanceLock) {
       startWireGuardRecoveryWatcher();
     }
     startNetworkChangeWatcher();
-    confirmMxH2IAsarLaunch({
+    confirmElectronLauncherAsarLaunch({
       baseDir: app.getPath('userData'),
-      componentId: PRODUCT_ID
+      componentId: PRODUCT_ID,
+      activePath: process.env.MX_LAUNCHER_ACTIVE_ASAR || process.env.MX_H2I_ACTIVE_ASAR
     });
   });
 }
@@ -9822,6 +9838,9 @@ async function performUpdateCheck(reason, options = {}) {
     restartRequired: releaseArtifact?.restartRequired === true,
     majorUpdateRequiresInstaller: releasePlan?.activation?.majorUpdateRequiresInstaller === true,
     hotUpdateAuto: releasePlan?.activation?.hotUpdateAuto === true,
+    deliveryMode: releaseResult?.deliveryMode === 'silent-download-next-start'
+      ? 'silent-download-next-start'
+      : 'prompt-download-restart',
     releaseNotes: releaseResult?.releaseNotes || null,
     rolloutMatchedBy: releaseResult?.rollout?.matchedBy || null,
     rolloutBucket: Number.isFinite(releaseResult?.rollout?.bucket) ? releaseResult.rollout.bucket : null,
@@ -9841,7 +9860,8 @@ async function performUpdateCheck(reason, options = {}) {
     ? releaseUpdateMessage(releaseResult)
     : 'Release Center 更新策略读取失败。';
   const hasUpdateSignal = ['update-available', 'blocked'].includes(releaseResult?.status);
-  if (!quiet || hasUpdateSignal) {
+  const silentDelivery = releaseResult?.deliveryMode === 'silent-download-next-start';
+  if (!quiet || (hasUpdateSignal && !silentDelivery)) {
     runtime.feedback = {
       tone: failures.length ? 'warning' : (releaseResult?.status === 'update-available' ? 'success' : 'info'),
       message: failures.length
@@ -9851,6 +9871,14 @@ async function performUpdateCheck(reason, options = {}) {
   }
   touchRuntime('update checked');
   await saveAndBroadcast();
+  if (
+    releaseResult?.status === 'update-available'
+    && releaseResult?.deliveryMode === 'silent-download-next-start'
+    && /asar/i.test(releaseArtifact?.kind || '')
+  ) {
+    await applyLauncherUpdate(`silent-${reason}`);
+    await saveAndBroadcast();
+  }
   return { ok: failures.length === 0, skipped: false, releaseResult, catalogSync, releaseSync };
 }
 
@@ -9928,6 +9956,9 @@ function availableReleaseFromPlan(plan, decision = null, artifact = null, status
     artifactUrl: nullableString(selectedArtifact?.url),
     artifactDigest: nullableString(selectedArtifact?.digest),
     artifactSignature: nullableString(selectedArtifact?.signature),
+    deliveryMode: plan?.deliveryMode === 'silent-download-next-start'
+      ? 'silent-download-next-start'
+      : 'prompt-download-restart',
     restartRequired: selectedArtifact?.restartRequired === true,
     createdAt: nullableString(plan?.createdAt),
     gate
@@ -10149,6 +10180,9 @@ function updateForAvailableRelease(update, release) {
     restartRequired: release.restartRequired === true || activation === 'installer-manual',
     majorUpdateRequiresInstaller: activation === 'installer-manual',
     hotUpdateAuto: activation === 'hot-auto',
+    deliveryMode: release.deliveryMode === 'silent-download-next-start'
+      ? 'silent-download-next-start'
+      : 'prompt-download-restart',
     updateAvailable: true,
     stagedPath: null,
     downloadedAt: null,
@@ -10161,6 +10195,7 @@ function updateForAvailableRelease(update, release) {
 }
 
 async function applyLauncherUpdate(reason, requestedReleaseId = null) {
+  const silent = String(reason || '').startsWith('silent-');
   let update = runtime.update || {};
   const selectedRelease = requestedReleaseId ? availableReleaseById(requestedReleaseId) : null;
   if (requestedReleaseId && !selectedRelease) {
@@ -10252,10 +10287,12 @@ async function applyLauncherUpdate(reason, requestedReleaseId = null) {
       message: installer ? '开始下载大版本安装包。' : '开始下载热更新包。'
     }))
   }, runtime.config);
-  runtime.feedback = {
-    tone: 'info',
-    message: installer ? '正在下载 MX-H2I 安装包。' : '正在下载热更新包。'
-  };
+  if (!silent) {
+    runtime.feedback = {
+      tone: 'info',
+      message: installer ? '正在下载 MX-H2I 安装包。' : '正在下载热更新包。'
+    };
+  }
   touchRuntime('update download started');
   await saveAndBroadcast();
   await updater?.report?.({
@@ -10350,7 +10387,7 @@ async function applyLauncherUpdate(reason, requestedReleaseId = null) {
       runtime.update = normalizeUpdate({
         ...runtime.update,
         status: applied ? 'applied' : runtime.update.status,
-        restartPrompt: runtime.update.restartRequired === true || pendingRestart,
+        restartPrompt: silent ? false : runtime.update.restartRequired === true || pendingRestart,
         history: applied
           ? prependUpdateHistory(runtime.update?.history, updateHistoryEntry({
               kind: 'hot-apply',
@@ -10365,16 +10402,18 @@ async function applyLauncherUpdate(reason, requestedReleaseId = null) {
             }))
           : runtime.update?.history
       }, runtime.config);
-      runtime.feedback = applied
-        ? { tone: 'success', message: '热更新已下载校验并自动激活。' }
-        : {
-            tone: activation?.deferredReason ? 'info' : 'success',
-            message: pendingRestart
-              ? '热更新包已下载并校验，将在下次启动时生效。'
-              : activation?.deferredReason
-                ? `热更新包已下载并校验，激活已推迟：${activation.deferredReason}。`
-                : '热更新包已下载并校验，等待热更新激活器处理。'
-          };
+      if (!silent) {
+        runtime.feedback = applied
+          ? { tone: 'success', message: '热更新已下载校验并自动激活。' }
+          : {
+              tone: activation?.deferredReason ? 'info' : 'success',
+              message: pendingRestart
+                ? '热更新包已下载并校验，将在下次启动时生效。'
+                : activation?.deferredReason
+                  ? `热更新包已下载并校验，激活已推迟：${activation.deferredReason}。`
+                  : '热更新包已下载并校验，等待热更新激活器处理。'
+            };
+      }
     }
     touchRuntime('update downloaded');
   } catch (error) {
@@ -11113,6 +11152,9 @@ function normalizeUpdate(input, config) {
     restartRequired: row.restartRequired === true,
     majorUpdateRequiresInstaller: row.majorUpdateRequiresInstaller === true,
     hotUpdateAuto: row.hotUpdateAuto === true,
+    deliveryMode: row.deliveryMode === 'silent-download-next-start'
+      ? 'silent-download-next-start'
+      : 'prompt-download-restart',
     stagedPath: nullableString(row.stagedPath),
     downloadedAt: nullableString(row.downloadedAt),
     downloadedBytes: Number.isFinite(row.downloadedBytes) ? row.downloadedBytes : null,
@@ -11191,6 +11233,9 @@ function normalizeAvailableReleases(input) {
         artifactUrl: nullableString(row.artifactUrl),
         artifactDigest: nullableString(row.artifactDigest),
         artifactSignature: nullableString(row.artifactSignature),
+        deliveryMode: row.deliveryMode === 'silent-download-next-start'
+          ? 'silent-download-next-start'
+          : 'prompt-download-restart',
         restartRequired: row.restartRequired === true,
         createdAt: nullableString(row.createdAt),
         gate: nullableString(row.gate)

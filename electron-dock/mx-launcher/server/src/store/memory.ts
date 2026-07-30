@@ -26,6 +26,7 @@ import {
   buildAwxProviderConfig,
   buildConfigSecretReference,
   buildReleaseManagementPlan,
+  updateReleaseManagementPlanMetadata,
   buildRuntimeFeaturePolicy,
   buildSecretProviderConfig,
   builtinGatewayRuntimeConfig,
@@ -209,6 +210,7 @@ import type {
   ReleaseManagementPlan,
   ReleaseManagementGateInput,
   ReleaseManagementPlanInput,
+  ReleaseManagementPlanPatchInput,
   ReleaseReportInput,
   ReleaseTask,
   RuntimeConfig,
@@ -3244,6 +3246,32 @@ export class MemoryStore implements PlatformStore {
     return this.releaseManagementPlans.get(planId) ?? null;
   }
 
+  updateReleaseManagementPlan(
+    planId: string,
+    input: ReleaseManagementPlanPatchInput
+  ): ReleaseManagementPlan {
+    const plan = this.getReleaseManagementPlan(planId);
+    if (!plan) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
+    const updated = updateReleaseManagementPlanMetadata(plan, input);
+    this.releaseManagementPlans.set(planId, updated);
+    this.recordAudit({
+      eventType: 'release.management_plan.updated',
+      actorKind: 'release-center',
+      requestId: input.requestId ?? null,
+      installId: updated.installId,
+      userId: updated.userId,
+      productId: updated.productId || updated.components.launcher.componentId,
+      metadata: {
+        planId: updated.planId,
+        releaseId: updated.releaseId,
+        channel: updated.channel,
+        deliveryMode: updated.deliveryMode,
+        updatedBy: updated.updatedBy
+      }
+    });
+    return updated;
+  }
+
   completeReleaseManagementGate(planId: string, input: ReleaseManagementGateInput): ReleaseManagementPlan {
     const plan = this.getReleaseManagementPlan(planId);
     if (!plan) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
@@ -3485,7 +3513,7 @@ export class MemoryStore implements PlatformStore {
       throw new Error('SDK Gateway allowed a user without sdk.audit.write');
     }
     checks.push('OK SDK Gateway denied missing scope');
-    const smokeHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
+    const smokeHomePublicKey = randomBytes(32).toString('base64');
     const { enrollment } = this.enrollAnonymous({
       productId: MX_H2I_PRODUCT_ID,
       platform: 'darwin',
@@ -3948,6 +3976,8 @@ export class MemoryStore implements PlatformStore {
     const permissionGrant = this.requestPermission({
       appId: 'h2o',
       installId: enrollment.installId,
+      userId: 'usr_demo_user',
+      sourceAppId: MX_H2I_PRODUCT_ID,
       scopes: ['network.proxy.app'],
       requestedBy: 'platform-kernel-smoke',
       requestId: 'smoke-permission'
@@ -4062,7 +4092,7 @@ export class MemoryStore implements PlatformStore {
     checks.push('OK CoreDNS ConfigMap shadow sync rendered');
     const configPolicySnapshot = this.createConfigPolicySnapshot({
       installId: enrollment.installId,
-      appId: 'h2o',
+      appId: MX_H2I_PRODUCT_ID,
       channel: 'shadow',
       requestId: 'smoke-config-policy'
     });

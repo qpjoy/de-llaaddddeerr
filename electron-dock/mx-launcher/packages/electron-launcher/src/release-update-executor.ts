@@ -136,12 +136,16 @@ export function createElectronLauncherReleaseUpdateExecutor(
     artifact: ElectronLauncherReleaseArtifactRef,
     artifactBaseUrl: string
   ): Promise<string> {
-    const fileName = artifact.fileName
+    const fileName = basename(artifact.fileName
       ? basename(artifact.fileName)
       : artifact.url
         ? basename(new URL(artifact.url, `${artifactBaseUrl.replace(/\/+$/, '')}/`).pathname) || artifact.artifactId
-        : artifact.artifactId;
-    const targetPath = join(baseDir, STAGING_DIR, releaseId, fileName);
+        : artifact.artifactId);
+    if (!fileName || fileName === '.' || fileName === '..') {
+      throw new Error(`invalid release artifact fileName: ${artifact.fileName || artifact.artifactId}`);
+    }
+    const releaseDir = safeLauncherPackageSegment(releaseId, 'releaseId');
+    const targetPath = join(baseDir, STAGING_DIR, releaseDir, fileName);
     phase('downloading', { artifactId: artifact.artifactId, targetPath });
     await report('download-started', { artifactId: artifact.artifactId, releaseId });
     phase('verifying', { artifactId: artifact.artifactId });
@@ -160,7 +164,8 @@ export function createElectronLauncherReleaseUpdateExecutor(
   ): Promise<string> {
     const slotDir = join(baseDir, SLOTS_DIR, slot);
     await mkdir(slotDir, { recursive: true });
-    const activePath = join(slotDir, `active-${artifact.version}-${basename(stagedPath)}`);
+    const version = safeLauncherPackageSegment(artifact.version, 'version');
+    const activePath = join(slotDir, `active-${version}-${basename(stagedPath)}`);
     const tempPath = `${activePath}.next`;
     await copyFile(stagedPath, tempPath);
     await rm(activePath, { force: true });
@@ -168,7 +173,7 @@ export function createElectronLauncherReleaseUpdateExecutor(
     const current = await readPointer(join(slotDir, 'current.json'));
     if (current) await writePointer(join(slotDir, 'previous.json'), current);
     await writePointer(join(slotDir, 'current.json'), {
-      version: artifact.version,
+      version,
       path: activePath,
       activatedAt: new Date().toISOString()
     });
@@ -209,12 +214,15 @@ export function createElectronLauncherReleaseUpdateExecutor(
       result.activated = true;
       await report('artifact-applied', { artifactId: artifact.artifactId, releaseId, artifactClass, path: result.activePath });
     } else if (artifactClass === 'npm-package' || artifactClass === 'asar') {
-      const pendingDir = join(baseDir, 'launcher-packages', artifact.componentId || 'unknown', artifact.version);
+      const componentId = safeLauncherPackageSegment(artifact.componentId || 'unknown', 'componentId')
+        .toLowerCase();
+      const version = safeLauncherPackageSegment(artifact.version, 'version');
+      const pendingDir = join(baseDir, 'launcher-packages', componentId, version);
       await mkdir(pendingDir, { recursive: true });
       const packagePath = join(pendingDir, basename(stagedPath));
       await copyFile(stagedPath, packagePath);
-      await writePointer(join(baseDir, 'launcher-packages', `${artifact.componentId || 'unknown'}.pending.json`), {
-        version: artifact.version,
+      await writePointer(join(baseDir, 'launcher-packages', `${componentId}.pending.json`), {
+        version,
         path: packagePath,
         activatedAt: 'next-start'
       } as unknown as SlotPointer);
@@ -223,8 +231,8 @@ export function createElectronLauncherReleaseUpdateExecutor(
       await report('artifact-staged-pending-restart', {
         artifactId: artifact.artifactId,
         releaseId,
-        componentId: artifact.componentId,
-        version: artifact.version
+        componentId,
+        version
       });
     } else {
       result.deferredReason = `unknown artifact kind ${artifact.kind}`;
@@ -313,6 +321,14 @@ export function createElectronLauncherReleaseUpdateExecutor(
       return previous;
     }
   };
+}
+
+function safeLauncherPackageSegment(value: string, name: string): string {
+  const segment = String(value || '').trim();
+  if (!/^[a-z0-9][a-z0-9._+-]*$/i.test(segment) || segment === '.' || segment === '..') {
+    throw new Error(`invalid release artifact ${name}: ${value}`);
+  }
+  return segment;
 }
 
 /**

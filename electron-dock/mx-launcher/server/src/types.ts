@@ -3247,6 +3247,7 @@ export interface ReleasePolicyDecision {
 }
 
 export type ReleaseManagementE2eResult = 'passed' | 'failed' | 'blocked' | 'running';
+export type ReleaseDeliveryMode = 'prompt-download-restart' | 'silent-download-next-start';
 
 export interface ReleaseManagementPlanInput {
   releaseId?: string | null;
@@ -3282,6 +3283,8 @@ export interface ReleaseManagementPlanInput {
   targetUserIds?: string[];
   targetInstallIds?: string[];
   releaseNotes?: string | null;
+  /** User-facing delivery behavior. Omitted legacy plans default to prompt. */
+  deliveryMode?: ReleaseDeliveryMode | string | null;
   suiteId?: string | null;
   topology?: string | null;
   sites?: string[];
@@ -3296,6 +3299,21 @@ export interface ReleaseManagementGateInput {
   message?: string | null;
   evidence?: Record<string, unknown>;
   requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface ReleaseManagementPlanPatchInput {
+  channel?: string;
+  releaseNotes?: string | null;
+  deliveryMode?: ReleaseDeliveryMode | string | null;
+  rolloutStrategy?: ReleaseRolloutStrategy | string | null;
+  rolloutPercentage?: number | null;
+  rolloutSegment?: string | null;
+  rolloutRings?: string[];
+  featureKeys?: string[];
+  targetUserIds?: string[];
+  targetInstallIds?: string[];
+  updatedBy?: string | null;
   requestId?: string | null;
 }
 
@@ -3320,6 +3338,8 @@ export interface ReleaseManagementPlan {
   rollout: ReleaseRolloutPolicy;
   activation: ReleaseActivationPolicy;
   releaseNotes: string | null;
+  /** Missing on pre-2.0 records; clients must treat that as prompt. */
+  deliveryMode?: ReleaseDeliveryMode;
   test: {
     suiteId: string;
     topology: string;
@@ -3335,6 +3355,8 @@ export interface ReleaseManagementPlan {
     nextActions: string[];
   };
   createdAt: string;
+  updatedAt?: string;
+  updatedBy?: string | null;
 }
 
 export interface TestRunInput {

@@ -7,10 +7,10 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const {
-  confirmMxH2IAsarLaunch,
-  markMxH2IAsarLaunchFailed,
-  selectMxH2IAsar
-} = require('../src/asar-update-bootstrap.cjs');
+  confirmElectronLauncherAsarLaunch,
+  markElectronLauncherAsarLaunchFailed,
+  selectElectronLauncherAsar
+} = require('@qpjoy/electron-launcher/asar-bootstrap');
 
 test('runtime resolves ESM launcher imports through the installed base package', async () => {
   const source = await readFile(new URL('../src/main-runtime.cjs', import.meta.url), 'utf8');
@@ -23,7 +23,7 @@ test('promotes a newer pending ASAR and confirms it after ready', async () => {
   try {
     const artifact = await fixture.asar('2.1.3');
     await fixture.pointer('pending', { version: '2.1.3', path: artifact, activatedAt: 'next-start' });
-    const selected = selectMxH2IAsar({
+    const selected = selectElectronLauncherAsar({
       baseDir: fixture.baseDir,
       componentId: 'mx-h2i',
       baseVersion: '2.1.2',
@@ -32,7 +32,7 @@ test('promotes a newer pending ASAR and confirms it after ready', async () => {
     });
     assert.equal(selected.path, artifact);
     assert.equal(selected.source, 'pending');
-    assert.equal(confirmMxH2IAsarLaunch({
+    assert.equal(confirmElectronLauncherAsarLaunch({
       baseDir: fixture.baseDir,
       componentId: 'mx-h2i',
       activePath: artifact
@@ -52,7 +52,7 @@ test('rolls back to the previous ASAR after an unconfirmed launch', async () => 
     await fixture.pointer('previous', { version: '2.1.2', path: previous, activatedAt: 'earlier' });
     await fixture.pointer('current', { version: '2.1.3', path: current, activatedAt: 'later' });
     await fixture.pointer('launching', { version: '2.1.3', path: current, pid: 5151 });
-    const selected = selectMxH2IAsar({
+    const selected = selectElectronLauncherAsar({
       baseDir: fixture.baseDir,
       componentId: 'mx-h2i',
       baseVersion: '2.1.1',
@@ -71,7 +71,7 @@ test('a newer full installer supersedes stale ASAR pointers', async () => {
   try {
     const artifact = await fixture.asar('2.1.3');
     await fixture.pointer('current', { version: '2.1.3', path: artifact, activatedAt: 'earlier' });
-    const selected = selectMxH2IAsar({
+    const selected = selectElectronLauncherAsar({
       baseDir: fixture.baseDir,
       componentId: 'mx-h2i',
       baseVersion: '2.2.0',
@@ -93,7 +93,7 @@ test('synchronous ASAR load failure immediately restores the previous pointer', 
     const current = await fixture.asar('2.1.3');
     await fixture.pointer('previous', { version: '2.1.2', path: previous, activatedAt: 'earlier' });
     await fixture.pointer('current', { version: '2.1.3', path: current, activatedAt: 'later' });
-    assert.equal(markMxH2IAsarLaunchFailed({
+    assert.equal(markElectronLauncherAsarLaunchFailed({
       baseDir: fixture.baseDir,
       componentId: 'mx-h2i',
       baseVersion: '2.1.1',

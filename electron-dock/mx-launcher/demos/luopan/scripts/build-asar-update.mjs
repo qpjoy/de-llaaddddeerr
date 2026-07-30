@@ -1,41 +1,40 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createPackage } from '@electron/asar';
 
 const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const require = createRequire(import.meta.url);
 const args = parseArgs(process.argv.slice(2));
 const platform = normalizePlatform(requiredArg('platform', args.platform));
 const arch = normalizeArch(requiredArg('arch', args.arch));
 const packageJson = JSON.parse(await readFile(path.join(projectDir, 'package.json'), 'utf8'));
 const version = normalizeVersion(requiredArg('version', args.version));
-const outputDir = path.resolve(projectDir, args.outputDir || 'out/release-asar');
+const sourceDir = path.join(projectDir, 'dist/electron/UnPackaged');
+const outputDir = path.resolve(projectDir, args.outputDir || 'dist/electron/release-asar');
 const stagingDir = path.join(outputDir, `.staging-${process.pid}-${platform}-${arch}`);
-const fileName = `MX-H2I-${version}-${platform}-${arch}-app.asar`;
+const fileName = `Luopan-${version}-${platform}-${arch}-app.asar`;
 const outputPath = path.join(outputDir, fileName);
 
 await mkdir(outputDir, { recursive: true });
 await rm(stagingDir, { recursive: true, force: true });
 await mkdir(stagingDir, { recursive: true });
 try {
-  await cp(path.join(projectDir, 'src'), path.join(stagingDir, 'src'), { recursive: true });
-  await rm(path.join(stagingDir, 'src', 'asar-update-bootstrap.cjs'), { force: true });
-  await mkdir(path.join(stagingDir, 'src', 'vendor'), { recursive: true });
-  await copyFile(
-    require.resolve('@qpjoy/electron-launcher/asar-bootstrap'),
-    path.join(stagingDir, 'src', 'vendor', 'asar-bootstrap.cjs')
-  );
+  for (const entry of ['electron-main.js', 'index.html', 'assets', 'icons', 'preload']) {
+    await cp(path.join(sourceDir, entry), path.join(stagingDir, entry), {
+      recursive: true,
+      force: true
+    });
+  }
   await writeFile(path.join(stagingDir, 'package.json'), `${JSON.stringify({
     name: packageJson.name,
     productName: packageJson.productName,
     version,
     private: true,
-    main: 'src/main.cjs'
+    type: 'module',
+    main: 'electron-main.js'
   }, null, 2)}\n`, 'utf8');
   await rm(outputPath, { force: true });
   await createPackage(stagingDir, outputPath);
@@ -44,18 +43,17 @@ try {
 }
 
 const outputStat = await stat(outputPath);
-const digest = `sha256:${await sha256File(outputPath)}`;
 const manifest = {
-  productId: 'mx-h2i',
+  productId: 'luopan',
   packageName: packageJson.name,
   kind: 'app-asar',
-  componentId: 'mx-h2i',
+  componentId: 'luopan',
   version,
   platform,
   arch,
   fileName,
   sizeBytes: outputStat.size,
-  digest,
+  digest: `sha256:${await sha256File(outputPath)}`,
   activation: 'restart-auto',
   baseCompatibility: {
     minimumVersion: packageJson.version,
@@ -73,14 +71,9 @@ function parseArgs(argv) {
     if (!item.startsWith('--')) continue;
     const [rawKey, inlineValue] = item.slice(2).split('=');
     const key = rawKey.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
-    if (inlineValue !== undefined) {
-      parsed[key] = inlineValue;
-    } else if (argv[index + 1] && !argv[index + 1].startsWith('--')) {
-      parsed[key] = argv[index + 1];
-      index += 1;
-    } else {
-      parsed[key] = true;
-    }
+    if (inlineValue !== undefined) parsed[key] = inlineValue;
+    else if (argv[index + 1] && !argv[index + 1].startsWith('--')) parsed[key] = argv[++index];
+    else parsed[key] = true;
   }
   return parsed;
 }

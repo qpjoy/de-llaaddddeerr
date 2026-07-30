@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -13,7 +14,7 @@ const expectK8sApply = process.env.MX_SMOKE_EXPECT_K8S_APPLY === '1';
 const remoteReadyOnly = process.env.MX_SMOKE_REMOTE_READY_ONLY === '1';
 const internalOpsToken = process.env.MX_INTERNAL_OPS_TOKEN?.trim() || '';
 const state = {};
-const shadowHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
+const shadowHomePublicKey = randomBytes(32).toString('base64');
 const smokeHomePeerLeaseIp = '10.90.100.20';
 const smokeDomesticSiteId = 'domestic-smoke';
 const smokeDomesticHost = process.env.MX_SMOKE_DOMESTIC_HOST || 'domestic-smoke.localdomain';
@@ -154,7 +155,7 @@ const checks = [
     path: '/internal/v1/enrollments/anonymous',
     method: 'POST',
     body: {
-      productId: 'launcher',
+      productId: 'mx-h2i',
       platform: 'darwin',
       publicKey: shadowHomePublicKey,
       requestId: 'http-smoke-enroll'
@@ -292,7 +293,7 @@ const checks = [
       token: state.serviceToken,
       audience: 'mx-sdk',
       installId: state.installId,
-      appId: 'h2o',
+      appId: 'mx-h2i',
       channel: 'shadow',
       requestId: 'http-smoke-config-policy'
     }),
@@ -622,7 +623,7 @@ const checks = [
       releaseId: 'rel_http_smoke',
       installId: state.installId,
       channel: 'shadow',
-      productId: 'launcher',
+      productId: 'mx-h2i',
       appId: 'h2o',
       e2eResult: 'passed',
       createdBy: 'http-smoke',

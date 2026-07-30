@@ -89,6 +89,7 @@ import type {
   ReleaseManagementPlan,
   ReleaseManagementGateInput,
   ReleaseManagementPlanInput,
+  ReleaseManagementPlanPatchInput,
   ReleasePolicyDecision,
   ReleasePolicyInput,
   ReleaseReportInput,
@@ -180,6 +181,7 @@ import {
   buildAwxProviderConfig,
   buildConfigSecretReference,
   buildReleaseManagementPlan,
+  updateReleaseManagementPlanMetadata,
   buildRuntimeFeaturePolicy,
   buildSecretProviderConfig,
   GATEWAY_RUNTIME_CONFIG_ID,
@@ -3924,6 +3926,32 @@ export class PostgresStore implements PlatformStore {
     return this.getRecord<ReleaseManagementPlan>('release-management-plan', planId);
   }
 
+  async updateReleaseManagementPlan(
+    planId: string,
+    input: ReleaseManagementPlanPatchInput
+  ): Promise<ReleaseManagementPlan> {
+    const plan = await this.getReleaseManagementPlan(planId);
+    if (!plan) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
+    const updated = updateReleaseManagementPlanMetadata(plan, input);
+    await this.saveRecord('release-management-plan', planId, updated, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'release.management_plan.updated',
+      actorKind: 'release-center',
+      requestId: input.requestId ?? null,
+      installId: updated.installId,
+      userId: updated.userId,
+      productId: updated.productId || updated.components.launcher.componentId,
+      metadata: {
+        planId: updated.planId,
+        releaseId: updated.releaseId,
+        channel: updated.channel,
+        deliveryMode: updated.deliveryMode,
+        updatedBy: updated.updatedBy
+      }
+    });
+    return updated;
+  }
+
   async completeReleaseManagementGate(planId: string, input: ReleaseManagementGateInput): Promise<ReleaseManagementPlan> {
     return this.dataSource.transaction(async (manager) => {
       await manager.query(
@@ -4281,7 +4309,7 @@ export class PostgresStore implements PlatformStore {
       throw new Error('SDK Gateway allowed a user without sdk.audit.write');
     }
     checks.push('OK SDK Gateway denied missing scope');
-    const smokeHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
+    const smokeHomePublicKey = randomBytes(32).toString('base64');
     const { enrollment } = await this.enrollAnonymous({
       productId: MX_H2I_PRODUCT_ID,
       platform: 'darwin',
@@ -4744,6 +4772,8 @@ export class PostgresStore implements PlatformStore {
     const permissionGrant = await this.requestPermission({
       appId: 'h2o',
       installId: enrollment.installId,
+      userId: 'usr_demo_user',
+      sourceAppId: MX_H2I_PRODUCT_ID,
       scopes: ['network.proxy.app'],
       requestedBy: 'platform-kernel-smoke',
       requestId: 'smoke-permission'
@@ -4858,7 +4888,7 @@ export class PostgresStore implements PlatformStore {
     checks.push('OK CoreDNS ConfigMap shadow sync rendered');
     const configPolicySnapshot = await this.createConfigPolicySnapshot({
       installId: enrollment.installId,
-      appId: 'h2o',
+      appId: MX_H2I_PRODUCT_ID,
       channel: 'shadow',
       requestId: 'smoke-config-policy'
     });

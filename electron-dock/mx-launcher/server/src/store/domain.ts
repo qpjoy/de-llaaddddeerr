@@ -76,6 +76,7 @@ import type {
   ReleasePolicyDecision,
   ReleaseManagementPlan,
   ReleaseManagementPlanInput,
+  ReleaseManagementPlanPatchInput,
   ReleaseRolloutStrategy,
   RuntimeConfig,
   RuntimeFeaturePolicy,
@@ -4639,6 +4640,11 @@ export function buildReleaseManagementPlan(
       connectionSafeMode: true
     },
     releaseNotes: input.releaseNotes?.trim() || null,
+    deliveryMode: artifacts.some((artifact) => artifact.activation === 'installer-manual')
+      ? 'prompt-download-restart'
+      : input.deliveryMode === 'silent-download-next-start'
+        ? 'silent-download-next-start'
+        : 'prompt-download-restart',
     test: {
       suiteId: parts.testRun.suiteId,
       topology: parts.testRun.topology,
@@ -4650,6 +4656,78 @@ export function buildReleaseManagementPlan(
       ...decisions
     },
     createdAt: parts.createdAt
+  };
+}
+
+export function updateReleaseManagementPlanMetadata(
+  plan: ReleaseManagementPlan,
+  input: ReleaseManagementPlanPatchInput,
+  updatedAt = new Date().toISOString()
+): ReleaseManagementPlan {
+  const rollout = plan.rollout ?? {
+    strategy: 'all',
+    percentage: 100,
+    segmentId: `${plan.channel}-all`,
+    rings: [],
+    featureKeys: [],
+    channels: [plan.channel],
+    audience: {
+      installIds: [],
+      userIds: [],
+      siteIds: []
+    },
+    allowAutoPromote: false,
+    canaryMetricGate: 'release-e2e'
+  };
+  const audience = rollout.audience ?? {
+    installIds: [],
+    userIds: [],
+    siteIds: []
+  };
+  const channel = input.channel?.trim() || plan.channel;
+  const strategy = input.rolloutStrategy === undefined
+    ? rollout.strategy
+    : normalizeReleaseRolloutStrategy(input.rolloutStrategy);
+  const percentage = input.rolloutPercentage === undefined || input.rolloutPercentage === null
+    ? rollout.percentage
+    : Math.max(0, Math.min(100, input.rolloutPercentage));
+  const installerOnlyDelivery = plan.artifacts.some((artifact) => artifact.activation === 'installer-manual');
+  return {
+    ...plan,
+    channel,
+    releaseNotes: input.releaseNotes === undefined
+      ? plan.releaseNotes
+      : input.releaseNotes?.trim() || null,
+    deliveryMode: installerOnlyDelivery
+      ? 'prompt-download-restart'
+      : input.deliveryMode === undefined
+        ? plan.deliveryMode ?? 'prompt-download-restart'
+        : input.deliveryMode === 'silent-download-next-start'
+          ? 'silent-download-next-start'
+          : 'prompt-download-restart',
+    rollout: {
+      ...rollout,
+      strategy,
+      percentage,
+      segmentId: input.rolloutSegment === undefined
+        ? rollout.segmentId
+        : input.rolloutSegment?.trim() || `${channel}-${strategy}`,
+      rings: input.rolloutRings === undefined ? rollout.rings : input.rolloutRings,
+      featureKeys: input.featureKeys === undefined ? rollout.featureKeys : input.featureKeys,
+      channels: [channel],
+      audience: {
+        ...audience,
+        installIds: input.targetInstallIds === undefined
+          ? audience.installIds
+          : uniqueAudienceIds(input.targetInstallIds),
+        userIds: input.targetUserIds === undefined
+          ? audience.userIds
+          : uniqueAudienceIds(input.targetUserIds)
+      },
+      allowAutoPromote: strategy !== 'manual-ring' && plan.test.gate.verdict === 'passed'
+    },
+    updatedAt,
+    updatedBy: input.updatedBy?.trim() || null
   };
 }
 

@@ -89,7 +89,7 @@ installId/deviceId，导致已有 Release Center 定向和证据链失去连续�
 └──────────────────────────▲──────────────────────────────────┘
                            │ 每产品仅经由自己的 VIP（HTTP/WG）
 ┌──────────────────────────┴──────────────────────────────────┐
-│ @qpjoy/* npm 包（契约层，2.3.3 lockstep）                     │
+│ @qpjoy/* npm 包（契约层，2.3.14 lockstep）                    │
 │   electron-launcher（网络/身份/Oversea ensure facade）         │
 │   底层：electron-core-wireguard / electron-plugin-tunnel /    │
 │         electron-core-mihomo（Luopan 的代理 runtime 直接消费） │
@@ -346,7 +346,7 @@ mx-h2i 的约定，建议 Luopan 照搬（luopan demo 已具备前两条）：
 
 ```sh
 pnpm run setup        # local：workspace 直连，日常开发；不能省略 run
-pnpm run setup:npm    # npm：从 registry 装 2.3.3（正式打包前必须）
+pnpm run setup:npm    # npm：按当前 package.json 版本从 registry 安装（正式打包前必须）
 pnpm run dev          # quasar dev -m electron
 pnpm run build        # quasar build -m electron --skip-pkg
 ```
@@ -511,20 +511,24 @@ WireGuard connecting 状态——**两个产品的更新行为差异只来自这
 ### 5.2 检查（`luopan:check-updates`）
 
 ```ts
-const check = await releaseUpdater().check({
-  componentKind: 'app-installer',             // 组件 ID 由 package identity 派生
-  currentVersion: app.getVersion(),
-  installId: state.installId,
-  platform: process.platform
-});
-lastUpdateCheck = check;                     // 只留内存，见下
-state.update = updateFromCheck(check);       // 提炼给面板的字段
+const checks = [];
+for (const componentKind of ['app-asar', 'app-installer', 'renderer-ui']) {
+  checks.push(await releaseUpdater().check({
+    componentKind,                           // 组件 ID 由 package identity 派生
+    currentVersion: runningElectronLauncherVersion(app.getVersion()),
+    installId: state.installId,
+    platform: process.platform,
+    arch: process.arch
+  }));
+}
+lastUpdateCheck = chooseUpdateCheck(checks); // 只留内存，见下
+state.update = updateFromCheck(lastUpdateCheck);
 ```
 
 - `check()` 优先打 `/release/check`（服务端单 install 决策），老 server 自动
   fallback。检查是**只读**的，不下载任何东西。
-- demo 与 mx-h2i 同约定检查**两个组件命名空间**：installer 计划 target
-  `luopan`，热更计划 target `luopan-renderer`，择优取 update-available（发版时
+- demo 与 mx-h2i 同约定检查**三类制品**：ASAR 和 installer 计划 target
+  `luopan`，renderer 热更计划 target `luopan-renderer`，择优取 update-available（发版时
   注意 componentId 对应）。登录态下 check 会带 `userId`，按用户定向的计划只对
   登录用户可见。
 - 结果里给面板用的字段：`status`（up-to-date / update-available / blocked /
@@ -545,6 +549,15 @@ state.update.execution = executionSummary(result);   // 每个 artifact 的 phas
 双校验，临时文件原子 rename）→ report `artifact-staged` → 按 class 走 §2.5 的
 四条管线。产品壳不用写任何下载/校验/槽位代码。
 
+Release Center 的 `deliveryMode` 决定谁触发 execute：
+
+- `prompt-download-restart`（旧 plan 的默认值）：连网后的自动 check 弹出更新提示；
+  用户确认后下载并校验 ASAR，再询问“立即重启 / 下次启动”。面板中的
+  “下载并应用”与“立即重启”提供同一条手动路径；
+- `silent-download-next-start`：仅 ASAR 可用，连网后的自动 check 在后台 stage，
+  不主动重启，下一次自然启动由 bootstrap 启用；
+- installer 无论传什么值都由服务端强制为提示/人工安装。
+
 门禁映射是 Luopan 自己的连接语义翻译成 executor 的通用状态：
 
 ```ts
@@ -562,8 +575,8 @@ staged——网络稳定后再点一次 apply 即可激活，不重复下载（d
 
 ### 5.4 installer 手动确认（`luopan:open-staged-installer`）
 
-installer class **永远不会被 executor 自动激活**（`execute` 里直接 skip）。面板上
-"立即安装"按钮触发本 IPC：从 `lastUpdateCheck` 找 installer artifact →
+installer class **永远不会被 executor 自动激活**（`execute` 里直接 skip）。下载完成后
+原生提示框或面板上的“立即安装”按钮触发本 IPC：从 `lastUpdateCheck` 找 installer artifact →
 `executor.openStagedInstaller(artifact)` → OS 打开安装包 + report
 `installer-opened`。安装完成的闭环由 §5.5 的启动簿记回报。
 
@@ -571,9 +584,11 @@ installer class **永远不会被 executor 自动激活**（`execute` 里直接 
 
 `app.whenReady` 里异步执行、失败仅告警（与 mx-h2i 同模式）：
 
-1. `adoptPendingElectronLauncherPackages(baseDir)`：把上次 staged 的
-   npm-package/asar `.pending.json` 指针提升为 current——"下次启动生效"就是这步。
-2. `reportElectronLauncherInstallCompletionIfUpgraded(...)`：对比本次启动版本与
+1. 完整安装包的 `electron-bootstrap.cjs` 在主模块加载前调用
+   `selectElectronLauncherAsar`，把 pending ASAR 提升为 current；窗口 ready 后调用
+   `confirmElectronLauncherAsarLaunch`。未确认的崩溃启动会自动切回 previous。
+2. `adoptPendingElectronLauncherPackages(baseDir)` 保留 npm-package 的通用启动簿记。
+3. `reportElectronLauncherInstallCompletionIfUpgraded(...)`：对比本次启动版本与
    上次记录（`update-slots/app-version.json`），变了就 report
    `installer-completed`——Release Center 靠它把该 install 标记为升级完成，超时未
    回报计入灰度健康度。
@@ -587,7 +602,7 @@ apply 回调 + report `artifact-rolled-back`。面板给个二级菜单入口即
 ### 5.7 面板要求（验收项）
 
 renderer 侧消费 `runtime.update`（preload 已暴露
-`checkUpdates/applyUpdate/openStagedInstaller/rollbackUpdateSlot`），至少展示：
+`checkUpdates/applyUpdate/restartApp/openStagedInstaller/rollbackUpdateSlot`），至少展示：
 当前/目标版本、`status`、`releaseNotes` 原文、`matchedBy`（灰度命中原因）、每个
 artifact 的 execution 状态（含 deferredReason/error），按钮四个对应四个 IPC。样式
 随意（可用 `@qpjoy/ui-design-neon-void`），字段齐全即过验收。
@@ -606,9 +621,14 @@ artifact 的 execution 状态（含 deferredReason/error），按钮四个对应
    export MX_RELEASE_CLIENT_ID=svc_luopan_release_ci
    # MX_RELEASE_CLIENT_SECRET 由 CI secret store 注入。
    pnpm --dir server release:publish -- \
-     --base-url http://10.88.100.3:18090 --product luopan --kind hot \
-     --artifact <bundle> --version 0.1.1 --current-version 0.1.0 \
-     --channel shadow --target-user <你的 userId> --e2e-result running
+     --base-url http://10.88.100.3:18090 --product luopan --kind asar \
+     --artifact demos/luopan/dist/electron/release-asar/Luopan-0.1.2-darwin-arm64-app.asar \
+     --version 0.1.2 --current-version 0.1.1 \
+     --platform darwin --arch arm64 --channel shadow \
+     --delivery-mode prompt-download-restart \
+     --target-user <你的 userId> \
+     --release-id luopan-asar-0.1.2-darwin-arm64 \
+     --request-id luopan-asar-0.1.2-darwin-arm64-target-001
    # installer 类：--kind installer --platform darwin|win32 \
    #   --arch x64|arm64|universal（component 自动为 luopan，artifactKind=app-installer）
    ```
@@ -657,7 +677,7 @@ artifact 的 execution 状态（含 deferredReason/error），按钮四个对应
 5. **更新链路**：§5.8 端到端自测全过；面板字段齐全。
 6. **产品化**：换 UI/登录/业务；期间任何"想抄 main.cjs"的冲动 → 找平台方下沉。
 7. **发布**：依次发布 tunnel engine `0.1.6`、core-mihomo `0.1.2`、tunnel `0.1.18`，
-   再发布 launcher 六包 train `2.3.3`；随后 `pnpm run setup:npm` 构建正式包（红线 5）、签名
+   再发布 launcher 六包 train `2.3.14`；随后 `pnpm run setup:npm` 构建正式包（红线 5）、签名
    （Windows 内部 CA / macOS Developer ID + notarize，见 docs/19 §7.1）、注册进
    Release Center 走灰度。
 

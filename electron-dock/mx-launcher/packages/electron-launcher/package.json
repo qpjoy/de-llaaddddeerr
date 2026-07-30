@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-launcher",
-  "version": "2.3.13",
+  "version": "2.3.14",
   "description": "Product-facing Electron Launcher client for MX Launcher release, update, rollout, AppCenter, and network integration.",
   "type": "module",
   "main": "dist/index.js",
@@ -54,6 +54,11 @@
       "types": "./dist/bootstrap.d.ts",
       "import": "./dist/bootstrap.js"
     },
+    "./asar-bootstrap": {
+      "types": "./dist/asar-bootstrap.d.cts",
+      "require": "./dist/asar-bootstrap.cjs",
+      "import": "./dist/asar-bootstrap.cjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -73,6 +78,7 @@
     "smoke:system-domain-proxy-windows": "pnpm build && node scripts/system-domain-proxy-windows-smoke.mjs",
     "smoke:wireguard-windows-nrpt": "pnpm build && node scripts/wireguard-windows-nrpt-smoke.mjs",
     "test:release-updater": "pnpm build && node --test scripts/release-updater.test.mjs",
+    "test:asar-bootstrap": "pnpm build && node --test scripts/asar-bootstrap.test.mjs",
     "prepack": "pnpm build"
   },
   "dependencies": {

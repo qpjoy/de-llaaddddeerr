@@ -10,6 +10,7 @@ import type { FetchLike } from '@qpjoy/mx-launcher-core';
 
 export type ElectronLauncherReleaseUpdateMode = 'none' | 'automatic' | 'manual' | 'mandatory';
 export type ElectronLauncherReleaseActivationMode = 'hot-auto' | 'hot-manual' | 'restart-auto' | 'restart-manual' | 'installer-manual';
+export type ElectronLauncherReleaseDeliveryMode = 'prompt-download-restart' | 'silent-download-next-start';
 
 export interface ElectronLauncherReleasePolicyDecision {
   componentKind: string;
@@ -78,6 +79,8 @@ export interface ElectronLauncherReleasePlan {
     manualConfirmRequired?: boolean;
     connectionSafeMode?: boolean;
   };
+  deliveryMode?: ElectronLauncherReleaseDeliveryMode;
+  releaseNotes?: string | null;
   test?: {
     suiteId?: string;
     gate?: {
@@ -120,6 +123,8 @@ export interface ElectronLauncherUpdateCheckResult {
   reason: string;
   /** Markdown release notes from the server-side decision, when provided. */
   releaseNotes?: string | null;
+  /** Missing on legacy servers means prompt-download-restart. */
+  deliveryMode?: ElectronLauncherReleaseDeliveryMode;
   /** Feature keys granted to this install by the matched plan. */
   featureFlags?: string[];
   /** Why this install did (not) receive the release; shown in the update panel. */
@@ -350,6 +355,11 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
         reason: status === 'blocked'
           ? plan?.test?.gate?.reason || `release gate is ${gateVerdict}`
           : decision.reason,
+        releaseNotes: plan?.releaseNotes ?? null,
+        deliveryMode: plan?.deliveryMode === 'silent-download-next-start'
+          ? 'silent-download-next-start'
+          : 'prompt-download-restart',
+        featureFlags: plan?.rollout?.featureKeys ?? [],
         checkSource: 'plans-legacy'
       };
     },
@@ -422,6 +432,7 @@ interface ReleaseCheckPayload {
   artifacts: ElectronLauncherReleaseArtifactRef[];
   activation: ElectronLauncherReleasePlan['activation'] | null;
   releaseNotes: string | null;
+  deliveryMode?: ElectronLauncherReleaseDeliveryMode;
   featureFlags: string[];
   rollout: { matchedBy: string | null; bucket: number | null; percentage: number | null };
   signedAt: string;
@@ -472,6 +483,9 @@ function mapReleaseCheckPayload(
           featureKeys: payload.featureFlags ?? []
         },
         activation: payload.activation ?? undefined,
+        deliveryMode: payload.deliveryMode === 'silent-download-next-start'
+          ? 'silent-download-next-start'
+          : 'prompt-download-restart',
         createdAt: payload.signedAt
       }
     : null;
@@ -484,6 +498,9 @@ function mapReleaseCheckPayload(
     artifacts,
     reason: payload.reason,
     releaseNotes: payload.releaseNotes ?? null,
+    deliveryMode: payload.deliveryMode === 'silent-download-next-start'
+      ? 'silent-download-next-start'
+      : 'prompt-download-restart',
     featureFlags: payload.featureFlags ?? [],
     rollout: payload.rollout ?? null,
     checkSource: 'release-check'

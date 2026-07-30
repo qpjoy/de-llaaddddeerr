@@ -89,15 +89,24 @@
                     icon="play_arrow"
                     :disable="runtime.update.status !== 'update-available'"
                     :loading="updateBusy"
-                    label="应用"
+                    label="下载并应用"
                     @click="applyUpdate"
+                  />
+                  <q-btn
+                    dense
+                    unelevated
+                    color="warning"
+                    icon="restart_alt"
+                    :disable="runtime.update.status !== 'staged' || !runtime.update.restartRequired"
+                    label="立即重启"
+                    @click="restartApp"
                   />
                   <q-btn
                     dense
                     outline
                     color="warning"
                     icon="install_desktop"
-                    :disable="!hasInstallerArtifact"
+                    :disable="runtime.update.status !== 'ready-to-install' || !hasInstallerArtifact"
                     label="立即安装"
                     @click="openStagedInstaller"
                   />
@@ -129,6 +138,10 @@
                 <div>
                   <span>灰度命中</span>
                   <strong>{{ runtime.update.matchedBy || '-' }}</strong>
+                </div>
+                <div>
+                  <span>应用方式</span>
+                  <strong>{{ runtime.update.deliveryMode === 'silent-download-next-start' ? '静默·下次启动' : '提示·立即应用' }}</strong>
                 </div>
                 <div>
                   <span>Release</span>
@@ -428,6 +441,8 @@ const fallbackRuntime: LuopanRuntimeState = {
     releaseId: null,
     releaseNotes: null,
     matchedBy: null,
+    deliveryMode: 'prompt-download-restart',
+    restartRequired: false,
     featureFlags: [],
     artifacts: [],
     execution: [],
@@ -614,6 +629,10 @@ async function applyUpdate() {
   }
 }
 
+async function restartApp() {
+  await window.luopanLauncher?.restartApp();
+}
+
 async function openStagedInstaller() {
   const next = await window.luopanLauncher?.openStagedInstaller();
   if (next) applyRuntime(next);
@@ -627,7 +646,8 @@ async function rollbackUpdateSlot(slot: 'config' | 'renderer') {
 const updateStatusColor = computed(() => {
   const status = runtime.value.update.status;
   if (status === 'update-available') return 'warning';
-  if (status === 'up-to-date') return 'positive';
+  if (status === 'up-to-date' || status === 'applied') return 'positive';
+  if (status === 'staged' || status === 'ready-to-install') return 'warning';
   if (status === 'failed' || status === 'blocked') return 'negative';
   return 'grey-6';
 });
