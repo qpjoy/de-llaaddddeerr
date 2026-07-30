@@ -10,7 +10,10 @@ import type { FetchLike } from '@qpjoy/mx-launcher-core';
 
 export type ElectronLauncherReleaseUpdateMode = 'none' | 'automatic' | 'manual' | 'mandatory';
 export type ElectronLauncherReleaseActivationMode = 'hot-auto' | 'hot-manual' | 'restart-auto' | 'restart-manual' | 'installer-manual';
-export type ElectronLauncherReleaseDeliveryMode = 'prompt-download-restart' | 'silent-download-next-start';
+export type ElectronLauncherReleaseDeliveryMode =
+  | 'prompt-download-restart'
+  | 'manual-download'
+  | 'silent-download-next-start';
 
 export interface ElectronLauncherReleasePolicyDecision {
   componentKind: string;
@@ -356,9 +359,7 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
           ? plan?.test?.gate?.reason || `release gate is ${gateVerdict}`
           : decision.reason,
         releaseNotes: plan?.releaseNotes ?? null,
-        deliveryMode: plan?.deliveryMode === 'silent-download-next-start'
-          ? 'silent-download-next-start'
-          : 'prompt-download-restart',
+        deliveryMode: normalizeReleaseDeliveryMode(plan?.deliveryMode),
         featureFlags: plan?.rollout?.featureKeys ?? [],
         checkSource: 'plans-legacy'
       };
@@ -483,9 +484,7 @@ function mapReleaseCheckPayload(
           featureKeys: payload.featureFlags ?? []
         },
         activation: payload.activation ?? undefined,
-        deliveryMode: payload.deliveryMode === 'silent-download-next-start'
-          ? 'silent-download-next-start'
-          : 'prompt-download-restart',
+        deliveryMode: normalizeReleaseDeliveryMode(payload.deliveryMode),
         createdAt: payload.signedAt
       }
     : null;
@@ -498,13 +497,17 @@ function mapReleaseCheckPayload(
     artifacts,
     reason: payload.reason,
     releaseNotes: payload.releaseNotes ?? null,
-    deliveryMode: payload.deliveryMode === 'silent-download-next-start'
-      ? 'silent-download-next-start'
-      : 'prompt-download-restart',
+    deliveryMode: normalizeReleaseDeliveryMode(payload.deliveryMode),
     featureFlags: payload.featureFlags ?? [],
     rollout: payload.rollout ?? null,
     checkSource: 'release-check'
   };
+}
+
+function normalizeReleaseDeliveryMode(value: unknown): ElectronLauncherReleaseDeliveryMode {
+  if (value === 'manual-download') return 'manual-download';
+  if (value === 'silent-download-next-start') return 'silent-download-next-start';
+  return 'prompt-download-restart';
 }
 
 function selectReleasePlan(

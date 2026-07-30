@@ -142,6 +142,24 @@ test('release plan metadata can be edited without changing artifact identity', (
   assert.deepEqual(updated.rollout.audience.userIds, ['usr_canary']);
   assert.deepEqual(updated.artifacts, artifactBefore);
   assert.equal(updated.updatedBy, 'desktop-admin');
+
+  const manual = store.updateReleaseManagementPlan(plan.planId, {
+    deliveryMode: 'manual-download',
+    updatedBy: 'desktop-admin'
+  });
+  assert.equal(manual.deliveryMode, 'manual-download');
+  const decision = evaluateReleaseCheck([manual], {
+    installId: 'install_luopan',
+    userId: 'usr_canary',
+    productId: 'luopan',
+    channel: 'shadow',
+    platform: 'darwin',
+    arch: 'arm64',
+    artifactKinds: ['app-asar'],
+    components: { luopan: '0.1.1' }
+  });
+  assert.equal(decision.deliveryMode, 'manual-download');
+  assert.deepEqual(manual.artifacts, artifactBefore);
 });
 
 test('release product identity resolves by package name without changing network identity', async () => {
@@ -927,9 +945,11 @@ function releasePlan(
       connectionSafeMode: true
     },
     releaseNotes: input.releaseNotes ?? null,
-    deliveryMode: input.deliveryMode === 'silent-download-next-start'
-      ? 'silent-download-next-start'
-      : 'prompt-download-restart',
+    deliveryMode: input.deliveryMode === 'manual-download'
+      ? 'manual-download'
+      : input.deliveryMode === 'silent-download-next-start'
+        ? 'silent-download-next-start'
+        : 'prompt-download-restart',
     test: {
       suiteId: 'test',
       topology: 'test',

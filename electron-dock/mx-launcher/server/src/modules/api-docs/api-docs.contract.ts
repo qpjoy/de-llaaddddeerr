@@ -1237,7 +1237,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Release Publisher',
         summary: '从已上传制品创建 gated 发布',
-        description: '只接受平台 artifactId；releaseId、product、component、URL、digest、size、platform、arch 与 createdBy 均由服务端派生。app-asar 可用 deliveryMode 选择提示立即应用或静默下载至下次启动；安装包始终人工确认。requestId 必填并作为幂等键：相同请求返回原计划，内容变化返回 400。同一 artifactId 可用新的 requestId 创建 canary 与全量计划。新计划的 E2E run 为 running，对外 gate verdict 为 blocked，审批通过后才可消费。',
+        description: '只接受平台 artifactId；releaseId、product、component、URL、digest、size、platform、arch 与 createdBy 均由服务端派生。deliveryMode 可选 prompt-download-restart（弹窗要求立即处理）、manual-download（仅红点/更新卡片，用户手动下载）、silent-download-next-start（仅 ASAR 静默下载，下次启动生效）；安装包不允许 silent。requestId 必填并作为幂等键：相同请求返回原计划，内容变化返回 400。同一 artifactId 可用新的 requestId 创建 canary 与全量计划。新计划的 E2E run 为 running，对外 gate verdict 为 blocked，审批通过后才可消费。',
         operationId: 'createSdkRelease',
         routeId: 'sdk.releases.create',
         scopes: ['sdk.release.publish', 'release.manage'],
@@ -1274,14 +1274,14 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       patch: operation({
         tag: 'Release Publisher',
         summary: 'Admin 修改发布说明、应用方式与灰度参数',
-        description: 'Internal ops 管理接口；不允许修改 artifact 身份、digest、平台、架构或目标版本。可更新 releaseNotes、channel、deliveryMode、rollout strategy/percentage/rings、featureKeys 与目标 user/install。旧计划没有 deliveryMode 时按 prompt-download-restart；installer 计划即使请求 silent 也会强制为 prompt。',
+        description: 'Internal ops 管理接口；不允许修改 artifact 身份、digest、平台、架构或目标版本。可更新 releaseNotes、channel、deliveryMode、rollout strategy/percentage/rings、featureKeys 与目标 user/install。旧计划没有 deliveryMode 时按 prompt-download-restart；installer 计划可以 prompt 或 manual，但请求 silent 会强制为 prompt。',
         operationId: 'updateReleaseManagementPlan',
         routeId: 'release.management_plan.update',
         auth: 'internal',
         pathParams: ['planId'],
         request: {
           releaseNotes: '修复 Windows PAC 并改善首次启动',
-          deliveryMode: 'silent-download-next-start',
+          deliveryMode: 'manual-download',
           rolloutStrategy: 'gray',
           rolloutPercentage: 10,
           rolloutRings: ['internal-dogfood', 'canary', 'stable'],
@@ -1296,7 +1296,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             planId: 'relplan_luopan_020_canary',
             releaseId: 'luopan-asar-0.2.0',
             productId: 'luopan',
-            deliveryMode: 'silent-download-next-start',
+            deliveryMode: 'manual-download',
             updatedBy: 'desktop-admin',
             updatedAt: '2026-07-30T00:00:00.000Z'
           }

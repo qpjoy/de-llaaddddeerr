@@ -120,7 +120,7 @@ const DEFAULT_CONFIG = {
     || DEFAULT_SPLIT_DNS_DOMAINS,
   routePathPreference: normalizeRoutePathPreference(process.env.MX_H2I_ROUTE_PATH || process.env.MX_H2I_PATH_PREFERENCE || 'auto'),
   releaseChannel: 'stable',
-  releaseUpdateStrategy: 'asar',
+  releaseUpdateStrategy: 'installer',
   rolloutGroup: 'staff-ring',
   useLocalEngineResources: true,
   restartAfterCodeUpdate: true
@@ -210,6 +210,7 @@ let lastSystemPacReverseProxyRoutesWarningAt = 0;
 let lastNetworkEnvironmentSignature = null;
 let lastDarwinEndpointRouteRepairAt = 0;
 let releaseUpdateCheckInFlight = null;
+let lastPromptedReleaseUpdateKey = null;
 let postConnectUpdateTimer = null;
 let diagnosticLogQueue = Promise.resolve();
 let diagnosticLogBytes = null;
@@ -6769,7 +6770,7 @@ function normalizeConfig(input) {
     splitDnsDomains: stringValue(row.splitDnsDomains, DEFAULT_CONFIG.splitDnsDomains),
     routePathPreference: normalizeRoutePathPreference(row.routePathPreference || DEFAULT_CONFIG.routePathPreference),
     releaseChannel: stringValue(row.releaseChannel, DEFAULT_CONFIG.releaseChannel),
-    releaseUpdateStrategy: row.releaseUpdateStrategy === 'installer' ? 'installer' : 'asar',
+    releaseUpdateStrategy: row.releaseUpdateStrategy === 'asar' ? 'asar' : 'installer',
     rolloutGroup: stringValue(row.rolloutGroup, DEFAULT_CONFIG.rolloutGroup),
     useLocalEngineResources: row.useLocalEngineResources !== false,
     restartAfterCodeUpdate: row.restartAfterCodeUpdate !== false
@@ -9838,9 +9839,7 @@ async function performUpdateCheck(reason, options = {}) {
     restartRequired: releaseArtifact?.restartRequired === true,
     majorUpdateRequiresInstaller: releasePlan?.activation?.majorUpdateRequiresInstaller === true,
     hotUpdateAuto: releasePlan?.activation?.hotUpdateAuto === true,
-    deliveryMode: releaseResult?.deliveryMode === 'silent-download-next-start'
-      ? 'silent-download-next-start'
-      : 'prompt-download-restart',
+    deliveryMode: normalizeReleaseDeliveryMode(releaseResult?.deliveryMode),
     releaseNotes: releaseResult?.releaseNotes || null,
     rolloutMatchedBy: releaseResult?.rollout?.matchedBy || null,
     rolloutBucket: Number.isFinite(releaseResult?.rollout?.bucket) ? releaseResult.rollout.bucket : null,
@@ -9860,7 +9859,8 @@ async function performUpdateCheck(reason, options = {}) {
     ? releaseUpdateMessage(releaseResult)
     : 'Release Center 更新策略读取失败。';
   const hasUpdateSignal = ['update-available', 'blocked'].includes(releaseResult?.status);
-  const silentDelivery = releaseResult?.deliveryMode === 'silent-download-next-start';
+  const deliveryMode = normalizeReleaseDeliveryMode(releaseResult?.deliveryMode);
+  const silentDelivery = deliveryMode === 'silent-download-next-start';
   if (!quiet || (hasUpdateSignal && !silentDelivery)) {
     runtime.feedback = {
       tone: failures.length ? 'warning' : (releaseResult?.status === 'update-available' ? 'success' : 'info'),
@@ -9873,11 +9873,19 @@ async function performUpdateCheck(reason, options = {}) {
   await saveAndBroadcast();
   if (
     releaseResult?.status === 'update-available'
-    && releaseResult?.deliveryMode === 'silent-download-next-start'
+    && deliveryMode === 'silent-download-next-start'
     && /asar/i.test(releaseArtifact?.kind || '')
   ) {
     await applyLauncherUpdate(`silent-${reason}`);
     await saveAndBroadcast();
+  } else if (
+    releaseResult?.status === 'update-available'
+    && deliveryMode === 'prompt-download-restart'
+    && !quiet
+    && releaseUpdatePromptKey(releaseResult) !== lastPromptedReleaseUpdateKey
+  ) {
+    lastPromptedReleaseUpdateKey = releaseUpdatePromptKey(releaseResult);
+    await promptForLauncherUpdate(releaseResult, releaseArtifact);
   }
   return { ok: failures.length === 0, skipped: false, releaseResult, catalogSync, releaseSync };
 }
@@ -9956,9 +9964,7 @@ function availableReleaseFromPlan(plan, decision = null, artifact = null, status
     artifactUrl: nullableString(selectedArtifact?.url),
     artifactDigest: nullableString(selectedArtifact?.digest),
     artifactSignature: nullableString(selectedArtifact?.signature),
-    deliveryMode: plan?.deliveryMode === 'silent-download-next-start'
-      ? 'silent-download-next-start'
-      : 'prompt-download-restart',
+    deliveryMode: normalizeReleaseDeliveryMode(plan?.deliveryMode),
     restartRequired: selectedArtifact?.restartRequired === true,
     createdAt: nullableString(plan?.createdAt),
     gate
@@ -9994,11 +10000,9 @@ async function checkReleaseCenterUpdate(reason) {
     const currentVersion = currentReleaseVersion();
     const checks = [];
     const productId = launcherProductId();
-    const preferredKind = runtime.config.releaseUpdateStrategy === 'installer' ? 'app-installer' : 'app-asar';
-    const fallbackKind = preferredKind === 'app-asar' ? 'app-installer' : 'app-asar';
     for (const target of [
-      { componentId: productId, componentKind: preferredKind },
-      { componentId: productId, componentKind: fallbackKind },
+      { componentId: productId, componentKind: 'app-installer' },
+      { componentId: productId, componentKind: 'app-asar' },
       { componentId: `${productId}-renderer`, componentKind: 'renderer-ui' }
     ]) {
       try {
@@ -10044,6 +10048,41 @@ async function checkReleaseCenterUpdate(reason) {
     const message = errorMessage(error);
     pushAppLog('appcenter', 'warning', `Release check failed (${reason}): ${message}`);
     return { ok: false, result: null, message };
+  }
+}
+
+function normalizeReleaseDeliveryMode(value) {
+  if (value === 'manual-download') return 'manual-download';
+  if (value === 'silent-download-next-start') return 'silent-download-next-start';
+  return 'prompt-download-restart';
+}
+
+function releaseUpdatePromptKey(result) {
+  return nullableString(result?.plan?.planId)
+    || nullableString(result?.plan?.releaseId)
+    || nullableString(result?.decision?.targetVersion)
+    || 'unknown-release';
+}
+
+async function promptForLauncherUpdate(result, artifact) {
+  const installer = /installer/i.test(artifact?.kind || result?.decision?.componentKind || '');
+  const choice = await dialog.showMessageBox(mainWindow || undefined, {
+    type: 'info',
+    buttons: ['立即下载', '稍后'],
+    defaultId: 0,
+    cancelId: 1,
+    title: installer ? 'MX-H2I 完整更新' : 'MX-H2I 热更新',
+    message: `发现 MX-H2I ${result?.decision?.targetVersion || ''} 更新`,
+    detail: [
+      nullableString(result?.releaseNotes) || nullableString(result?.reason) || 'Release Center 已发布新版本。',
+      installer
+        ? '安装包会先下载并校验，之后交给系统安装器打开。'
+        : 'ASAR 会先下载并校验，之后可立即重启或等下次启动生效。'
+    ].join('\n\n').slice(0, 1200)
+  });
+  if (choice.response === 0) {
+    await applyLauncherUpdate('prompt');
+    await saveAndBroadcast();
   }
 }
 
@@ -10180,9 +10219,7 @@ function updateForAvailableRelease(update, release) {
     restartRequired: release.restartRequired === true || activation === 'installer-manual',
     majorUpdateRequiresInstaller: activation === 'installer-manual',
     hotUpdateAuto: activation === 'hot-auto',
-    deliveryMode: release.deliveryMode === 'silent-download-next-start'
-      ? 'silent-download-next-start'
-      : 'prompt-download-restart',
+    deliveryMode: normalizeReleaseDeliveryMode(release.deliveryMode),
     updateAvailable: true,
     stagedPath: null,
     downloadedAt: null,
@@ -11152,9 +11189,7 @@ function normalizeUpdate(input, config) {
     restartRequired: row.restartRequired === true,
     majorUpdateRequiresInstaller: row.majorUpdateRequiresInstaller === true,
     hotUpdateAuto: row.hotUpdateAuto === true,
-    deliveryMode: row.deliveryMode === 'silent-download-next-start'
-      ? 'silent-download-next-start'
-      : 'prompt-download-restart',
+    deliveryMode: normalizeReleaseDeliveryMode(row.deliveryMode),
     stagedPath: nullableString(row.stagedPath),
     downloadedAt: nullableString(row.downloadedAt),
     downloadedBytes: Number.isFinite(row.downloadedBytes) ? row.downloadedBytes : null,
@@ -11233,9 +11268,7 @@ function normalizeAvailableReleases(input) {
         artifactUrl: nullableString(row.artifactUrl),
         artifactDigest: nullableString(row.artifactDigest),
         artifactSignature: nullableString(row.artifactSignature),
-        deliveryMode: row.deliveryMode === 'silent-download-next-start'
-          ? 'silent-download-next-start'
-          : 'prompt-download-restart',
+        deliveryMode: normalizeReleaseDeliveryMode(row.deliveryMode),
         restartRequired: row.restartRequired === true,
         createdAt: nullableString(row.createdAt),
         gate: nullableString(row.gate)
@@ -13741,7 +13774,7 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
           } else if (!wireGuardResult.ready && reason !== 'interval') {
             runtime.feedback = {
               tone: 'warning',
-              message: `MX-H2I 检测到 WireGuard 未 ready：${wireGuardResult.message}。请点击重新连接进行授权修复，或刷新诊断查看当前路由。`
+              message: `MX-H2I 正在原位校验保留隧道：${wireGuardResult.message}。本机租约会保留；如长时间未恢复，请在高级选项刷新诊断或执行修复网络。`
             };
           } else if (browserFallbackChanged) {
             runtime.feedback = nextBrowserFallback.active === true

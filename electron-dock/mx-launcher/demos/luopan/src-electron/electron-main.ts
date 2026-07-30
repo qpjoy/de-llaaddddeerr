@@ -108,7 +108,7 @@ type RuntimeUpdateStatus =
   | 'blocked'
   | 'failed';
 
-type RuntimeUpdateDeliveryMode = 'prompt-download-restart' | 'silent-download-next-start';
+type RuntimeUpdateDeliveryMode = 'prompt-download-restart' | 'manual-download' | 'silent-download-next-start';
 
 interface RuntimeUpdateArtifact {
   artifactId: string;
@@ -988,6 +988,12 @@ function updateExecutor(updater: ElectronLauncherReleaseUpdater) {
   });
 }
 
+function normalizeReleaseDeliveryMode(value: unknown): RuntimeUpdateDeliveryMode {
+  if (value === 'manual-download') return 'manual-download';
+  if (value === 'silent-download-next-start') return 'silent-download-next-start';
+  return 'prompt-download-restart';
+}
+
 // Ranking across the installer/hot component namespaces: an actionable
 // decision wins; blocked beats up-to-date so gate state stays visible.
 function chooseUpdateCheck(checks: ElectronLauncherUpdateCheckResult[]): ElectronLauncherUpdateCheckResult {
@@ -1007,9 +1013,7 @@ function updateFromCheck(check: ElectronLauncherUpdateCheckResult): RuntimeUpdat
     releaseId: check.plan?.releaseId ?? null,
     releaseNotes: check.releaseNotes ?? null,
     matchedBy: check.rollout?.matchedBy ?? null,
-    deliveryMode: check.deliveryMode === 'silent-download-next-start'
-      ? 'silent-download-next-start'
-      : 'prompt-download-restart',
+    deliveryMode: normalizeReleaseDeliveryMode(check.deliveryMode),
     restartRequired: check.artifacts.some((artifact) => artifact.restartRequired),
     featureFlags: check.featureFlags ?? [],
     artifacts: check.artifacts.map((artifact) => ({
@@ -1133,7 +1137,7 @@ async function checkLuopanUpdates(source: 'user' | 'network-ready' = 'user'): Pr
       const updater = releaseUpdater();
       const userId = hasActiveUserIdentity(state) ? state.identity.userId : null;
       const checks: ElectronLauncherUpdateCheckResult[] = [];
-      for (const componentKind of ['app-asar', 'app-installer', 'renderer-ui'] as const) {
+      for (const componentKind of ['app-installer', 'app-asar', 'renderer-ui'] as const) {
         checks.push(await updater.check({
           componentKind,
           currentVersion: currentReleaseVersion(),
@@ -1158,7 +1162,7 @@ async function checkLuopanUpdates(source: 'user' | 'network-ready' = 'user'): Pr
       } else if (
         source === 'network-ready'
         && check.status === 'update-available'
-        && check.deliveryMode !== 'silent-download-next-start'
+        && check.deliveryMode === 'prompt-download-restart'
         && check.plan?.releaseId !== lastPromptedReleaseId
       ) {
         lastPromptedReleaseId = check.plan?.releaseId ?? `version:${check.decision.targetVersion}`;
@@ -3460,9 +3464,7 @@ function normalizeUpdate(input: unknown): RuntimeUpdate {
     releaseId: stringValue(record.releaseId),
     releaseNotes: stringValue(record.releaseNotes),
     matchedBy: stringValue(record.matchedBy),
-    deliveryMode: record.deliveryMode === 'silent-download-next-start'
-      ? 'silent-download-next-start'
-      : 'prompt-download-restart',
+    deliveryMode: normalizeReleaseDeliveryMode(record.deliveryMode),
     restartRequired: record.restartRequired === true,
     featureFlags: Array.isArray(record.featureFlags) ? record.featureFlags.filter((item): item is string => typeof item === 'string') : [],
     artifacts: Array.isArray(record.artifacts) ? record.artifacts.filter((item): item is RuntimeUpdateArtifact => Boolean(item) && typeof item === 'object') : [],

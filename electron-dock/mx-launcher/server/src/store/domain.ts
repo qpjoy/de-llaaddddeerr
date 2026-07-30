@@ -72,6 +72,7 @@ import type {
   ReleaseActivationMode,
   ReleaseArtifactKind,
   ReleaseArtifactRef,
+  ReleaseDeliveryMode,
   PlatformPrincipal,
   ReleasePolicyDecision,
   ReleaseManagementPlan,
@@ -4599,6 +4600,10 @@ export function buildReleaseManagementPlan(
     : rolloutStrategy === 'all' ? 100 : 10;
   const activationModes = artifacts.map((artifact) => artifact.activation);
   const majorUpdateRequiresInstaller = artifacts.some((artifact) => artifact.activation === 'installer-manual');
+  const deliveryMode = normalizeReleaseDeliveryMode(input.deliveryMode, {
+    allowSilent: !majorUpdateRequiresInstaller,
+    fallback: 'prompt-download-restart'
+  });
   return {
     planId: parts.planId,
     releaseId: parts.releaseId,
@@ -4640,11 +4645,7 @@ export function buildReleaseManagementPlan(
       connectionSafeMode: true
     },
     releaseNotes: input.releaseNotes?.trim() || null,
-    deliveryMode: artifacts.some((artifact) => artifact.activation === 'installer-manual')
-      ? 'prompt-download-restart'
-      : input.deliveryMode === 'silent-download-next-start'
-        ? 'silent-download-next-start'
-        : 'prompt-download-restart',
+    deliveryMode,
     test: {
       suiteId: parts.testRun.suiteId,
       topology: parts.testRun.topology,
@@ -4692,19 +4693,19 @@ export function updateReleaseManagementPlanMetadata(
     ? rollout.percentage
     : Math.max(0, Math.min(100, input.rolloutPercentage));
   const installerOnlyDelivery = plan.artifacts.some((artifact) => artifact.activation === 'installer-manual');
+  const deliveryMode = input.deliveryMode === undefined
+    ? plan.deliveryMode ?? 'prompt-download-restart'
+    : normalizeReleaseDeliveryMode(input.deliveryMode, {
+        allowSilent: !installerOnlyDelivery,
+        fallback: 'prompt-download-restart'
+      });
   return {
     ...plan,
     channel,
     releaseNotes: input.releaseNotes === undefined
       ? plan.releaseNotes
       : input.releaseNotes?.trim() || null,
-    deliveryMode: installerOnlyDelivery
-      ? 'prompt-download-restart'
-      : input.deliveryMode === undefined
-        ? plan.deliveryMode ?? 'prompt-download-restart'
-        : input.deliveryMode === 'silent-download-next-start'
-          ? 'silent-download-next-start'
-          : 'prompt-download-restart',
+    deliveryMode,
     rollout: {
       ...rollout,
       strategy,
@@ -4729,6 +4730,16 @@ export function updateReleaseManagementPlanMetadata(
     updatedAt,
     updatedBy: input.updatedBy?.trim() || null
   };
+}
+
+function normalizeReleaseDeliveryMode(
+  value: ReleaseDeliveryMode | string | null | undefined,
+  options: { allowSilent: boolean; fallback: ReleaseDeliveryMode }
+): ReleaseDeliveryMode {
+  if (value === 'manual-download') return 'manual-download';
+  if (value === 'silent-download-next-start' && options.allowSilent) return 'silent-download-next-start';
+  if (value === 'prompt-download-restart') return 'prompt-download-restart';
+  return options.fallback;
 }
 
 function uniqueAudienceIds(values: Array<string | null | undefined>): string[] {

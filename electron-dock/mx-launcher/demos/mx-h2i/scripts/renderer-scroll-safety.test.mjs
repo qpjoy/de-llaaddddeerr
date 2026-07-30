@@ -34,6 +34,26 @@ assert.match(
   /class="mx-phone advanced-phone" data-scroll-key="phone:advanced"/,
   'the advanced phone view must have an independent stable scroll key'
 );
+assert.match(
+  source,
+  /function retainedConnectionActionLabel\(connection = state\?\.connection\)/,
+  'retained guest connection states must have explicit recovery action labels'
+);
+assert.match(
+  source,
+  /recovering \? retainedConnectionActionLabel\(\) : '连接'/,
+  'retained tunnel or lease states must not fall back to a reconnect label'
+);
+assert.doesNotMatch(
+  source,
+  /leaseOnly \? '重新连接'/,
+  'the startup retained-tunnel UI must not ask users to reconnect while recovery is in progress'
+);
+assert.match(
+  source,
+  /function renderConnectionRecoverySteps\(show\)/,
+  'retained connection recovery must render step-by-step progress'
+);
 
 function functionSource(name) {
   const start = source.indexOf(`function ${name}() {`);

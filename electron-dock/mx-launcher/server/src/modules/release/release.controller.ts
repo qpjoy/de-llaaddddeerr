@@ -15,7 +15,7 @@ import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/int
 import type { PlatformStore, PublisherReleasePlanInput } from '../../store/platform-store.js';
 import { normalizeReleaseArtifactKind } from '../../store/domain.js';
 import { PLATFORM_STORE } from '../../tokens.js';
-import type { AppCenterApp, PlatformPrincipal, ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseManagementPlanPatchInput, ReleaseReportInput } from '../../types.js';
+import type { AppCenterApp, PlatformPrincipal, ReleaseArtifactKind, ReleaseDeliveryMode, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseManagementPlanPatchInput, ReleaseReportInput } from '../../types.js';
 import { evaluateReleaseCheck, signReleaseCheckResult } from './release-check.js';
 import type { ReleaseCheckResult } from './release-check.js';
 
@@ -996,7 +996,7 @@ interface ReleaseHistoryRow {
   artifactDigest: string | null;
   artifactSignature: string | null;
   restartRequired: boolean;
-  deliveryMode: 'prompt-download-restart' | 'silent-download-next-start';
+  deliveryMode: 'prompt-download-restart' | 'manual-download' | 'silent-download-next-start';
   createdAt: string;
   gate: 'passed';
 }
@@ -1046,9 +1046,7 @@ function releaseHistoryRow(
     artifactDigest: artifact.digest,
     artifactSignature: artifact.signature,
     restartRequired: artifact.restartRequired,
-    deliveryMode: plan.deliveryMode === 'silent-download-next-start'
-      ? 'silent-download-next-start'
-      : 'prompt-download-restart',
+    deliveryMode: normalizeReleaseDeliveryMode(plan.deliveryMode),
     createdAt: plan.createdAt,
     gate: 'passed'
   };
@@ -1519,6 +1517,12 @@ function normalizeReleaseArch(value: string | null): string | null {
   if (normalized === 'x86') return 'ia32';
   if (normalized === 'universal' || normalized === 'universal2') return 'universal';
   return safePathPart(normalized);
+}
+
+function normalizeReleaseDeliveryMode(value: ReleaseDeliveryMode | string | null | undefined): ReleaseDeliveryMode {
+  if (value === 'manual-download') return 'manual-download';
+  if (value === 'silent-download-next-start') return 'silent-download-next-start';
+  return 'prompt-download-restart';
 }
 
 function isInstallerArtifactKind(kind: ReleaseArtifactKind): boolean {

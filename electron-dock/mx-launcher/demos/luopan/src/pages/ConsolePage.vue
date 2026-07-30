@@ -141,7 +141,7 @@
                 </div>
                 <div>
                   <span>应用方式</span>
-                  <strong>{{ runtime.update.deliveryMode === 'silent-download-next-start' ? '静默·下次启动' : '提示·立即应用' }}</strong>
+                  <strong>{{ updateDeliveryLabel(runtime.update.deliveryMode) }}</strong>
                 </div>
                 <div>
                   <span>Release</span>
@@ -655,6 +655,12 @@ const updateStatusColor = computed(() => {
 const hasInstallerArtifact = computed(() =>
   runtime.value.update.artifacts.some((artifact) => artifact.artifactClass === 'installer')
 );
+
+function updateDeliveryLabel(deliveryMode: LuopanRuntimeState['update']['deliveryMode']) {
+  if (deliveryMode === 'silent-download-next-start') return '静默·下次启动';
+  if (deliveryMode === 'manual-download') return '红点·手动下载';
+  return '弹窗·立即处理';
+}
 
 async function openAdmin() {
   await window.luopanLauncher?.openAdmin();

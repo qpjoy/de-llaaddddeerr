@@ -652,6 +652,19 @@ span {
   animation-delay: 1.1s;
 }
 
+.connect-dial.is-recovering {
+  background:
+    radial-gradient(circle at 30% 24%, rgba(255, 255, 255, 0.92), transparent 30%),
+    linear-gradient(135deg, #2bf6d2, #f8d06c, #5e8eec, #2bf6d2);
+  background-size: 220% 220%;
+  color: #071311;
+  box-shadow:
+    inset 0 -18px 34px rgba(0, 0, 0, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.46),
+    0 18px 54px rgba(248, 208, 108, 0.2);
+  animation: mx-connection-gradient 2.4s ease-in-out infinite;
+}
+
 .connect-dial.is-connected {
   background:
     radial-gradient(circle at 34% 24%, #8fffe6 0%, #2bf6d2 52%, #12c8af 100%);
@@ -675,6 +688,12 @@ span {
   max-width: 124px;
   font-size: 22px;
   line-height: 1.25;
+}
+
+.connect-dial.is-recovering span {
+  max-width: 124px;
+  font-size: 24px;
+  line-height: 1.2;
 }
 
 .connect-dial:disabled {
@@ -1563,6 +1582,58 @@ button:disabled {
 .feedback[data-tone="warning"] {
   border-color: rgba(248, 208, 108, 0.52);
   background: rgba(248, 208, 108, 0.12);
+}
+
+.connection-recovery-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(43, 246, 210, 0.3);
+  border-radius: 10px;
+  padding: 12px;
+  background: rgba(43, 246, 210, 0.08);
+  color: var(--text-1);
+}
+
+.connection-recovery-panel > strong {
+  font-size: 13px;
+}
+
+.connection-recovery-panel > span {
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.connection-recovery-steps {
+  display: grid;
+  gap: 8px;
+}
+
+.connection-recovery-step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(10, 15, 28, 0.28);
+}
+
+.connection-recovery-step span {
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.connection-recovery-step strong {
+  color: var(--text-1);
+  font-size: 11px;
+  text-align: right;
+}
+
+.connection-recovery-step[data-state="ready"] strong {
+  color: var(--primary);
 }
 
 .workbench-grid {

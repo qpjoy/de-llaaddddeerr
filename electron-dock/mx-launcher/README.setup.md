@@ -288,3 +288,13 @@ curl -fsS -X POST \
     }
   }'
 ```
+
+# 打包更新
+```bash
+# MX-H2I
+# mac
+pnpm --dir electron-dock/mx-launcher/demos/mx-h2i run make:asar:mac -- 2.1.6 universal
+
+# luopan
+pnpm --dir electron-dock/mx-launcher/demos/luopan run make:asar:mac -- 0.1.2 universal
+```

@@ -809,9 +809,27 @@ function isConnectionPending() {
 
 function pendingConnectionLabel() {
   if (state?.connection?.state === 'lease-only') return '等待系统授权';
+  if (state?.connection?.state === 'tunnel-only') return '校验保留隧道';
   if (feishuAuthStage() === 'connecting') return '正在连接飞书员工模式';
   if (busyAction === 'login-employee') return '正在连接员工模式';
   return '等待连接中';
+}
+
+function retainedConnectionActionLabel(connection = state?.connection) {
+  switch (connection?.state) {
+    case 'lease-only':
+      return '等待授权';
+    case 'tunnel-only':
+      return '恢复中';
+    case 'server-unavailable':
+      return '等待服务';
+    case 'network-unavailable':
+      return '等待网络';
+    case 'forbidden':
+      return '修复连接';
+    default:
+      return '连接';
+  }
 }
 
 function feishuAuthFlow() {
@@ -929,7 +947,7 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
     : leaseOnly
       ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 租约已保留`
       : tunnelOnly
-        ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 隧道待恢复`
+        ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 正在恢复`
         : degraded
           ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 待恢复`
     : mode === 'employee'
@@ -949,6 +967,7 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
         <p>${escapeHtml(connectionCaption())}</p>
       </section>
       ${renderFeedback()}
+      ${renderConnectionRecoverySteps(activeLease && !connected)}
 
       ${showEmployeeLogin ? renderEmployeeLogin(connecting) : renderGuestConnect(connected, connecting, activeLease && !connected)}
       ${renderConnectionStrip()}
@@ -957,17 +976,18 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
   `;
 }
 
-function renderGuestConnect(connected, connecting, leaseOnly = false) {
+function renderGuestConnect(connected, connecting, retainedConnection = false) {
   const disconnecting = busyAction === 'disconnect';
   const disconnectable = connected;
   const retainedGuest = state.connection?.mode === 'guest'
     && ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(state.connection?.state);
-  const label = disconnecting ? '正在断开' : disconnectable ? '断开连接' : connecting ? pendingConnectionLabel() : leaseOnly ? '重新连接' : '连接';
+  const recovering = retainedConnection && !disconnectable;
+  const label = disconnecting ? '正在断开' : disconnectable ? '断开连接' : connecting ? pendingConnectionLabel() : recovering ? retainedConnectionActionLabel() : '连接';
   const action = disconnectable ? 'disconnect' : 'connectGuest';
   const disabled = connecting || disconnecting;
   return `
     <section class="connect-panel">
-      <button class="connect-dial ${disconnectable ? 'is-connected' : ''} ${connecting ? 'is-connecting' : ''} ${disconnecting ? 'is-disconnecting' : ''}" type="button" data-action="${action}" aria-busy="${disabled ? 'true' : 'false'}" ${disabled ? 'disabled' : ''}>
+      <button class="connect-dial ${disconnectable ? 'is-connected' : ''} ${connecting ? 'is-connecting' : ''} ${recovering ? 'is-recovering' : ''} ${disconnecting ? 'is-disconnecting' : ''}" type="button" data-action="${action}" aria-busy="${(disabled || recovering) ? 'true' : 'false'}" ${disabled ? 'disabled' : ''}>
         <span>${escapeHtml(label)}</span>
       </button>
       <div class="connect-actions">
@@ -975,6 +995,57 @@ function renderGuestConnect(connected, connecting, leaseOnly = false) {
         ${renderCheckUpdatesButton('text-button')}
         <button class="text-button" type="button" data-action="show-advanced">高级选项</button>
         ${retainedGuest ? '<button class="text-button" type="button" data-action="resetLocalNetworkIdentity">清理旧连接</button>' : ''}
+      </div>
+    </section>
+  `;
+}
+
+function renderConnectionRecoverySteps(show) {
+  if (!show) return '';
+  const connection = state.connection || {};
+  const health = connection.health || {};
+  const diagnostics = connection.diagnostics || {};
+  const wireGuardReady = health.wireGuard === 'ready'
+    || diagnostics?.wireGuard?.ready === true
+    || diagnostics?.wireGuard?.active === true
+    || connection.state === 'tunnel-only';
+  const internalReady = health.internalApi === 'ready';
+  const systemPathReady = connection.state === 'connected';
+  const platform = state.platform || state.runtime?.platform || '';
+  const systemPathLabel = platform === 'win32' ? 'PAC / NRPT / 浏览器路径' : 'Split DNS / 本机 DNS relay';
+  const rows = [
+    {
+      label: '本机租约 / IP',
+      detail: connection.localIp || '等待租约',
+      ready: Boolean(connection.localIp)
+    },
+    {
+      label: 'WireGuard / 守护进程',
+      detail: wireGuardReady ? '已保留或已运行' : (health.wireGuard || '校验中'),
+      ready: wireGuardReady
+    },
+    {
+      label: 'Internal API',
+      detail: internalReady ? 'ready' : (health.internalApi || '校验中'),
+      ready: internalReady
+    },
+    {
+      label: systemPathLabel,
+      detail: systemPathReady ? 'ready' : '恢复校验中',
+      ready: systemPathReady
+    }
+  ];
+  return `
+    <section class="connection-recovery-panel" role="status" aria-live="polite">
+      <strong>正在原位恢复连接</strong>
+      <span>不会卸载或重建仍在运行的隧道；完成后会自动切回已连接。</span>
+      <div class="connection-recovery-steps">
+        ${rows.map((row) => `
+          <div class="connection-recovery-step" data-state="${row.ready ? 'ready' : 'pending'}">
+            <span>${escapeHtml(row.label)}</span>
+            <strong>${escapeHtml(row.detail)}</strong>
+          </div>
+        `).join('')}
       </div>
     </section>
   `;
@@ -1262,6 +1333,12 @@ function updateApplyLabel(update) {
   if (update.status === 'download-failed') return '重新下载';
   if (update.activation === 'installer-manual' || update.majorUpdateRequiresInstaller) return '下载大版本';
   return '下载更新';
+}
+
+function updateDeliveryLabel(deliveryMode) {
+  if (deliveryMode === 'silent-download-next-start') return '静默 / 下次启动';
+  if (deliveryMode === 'manual-download') return '红点 / 手动下载';
+  return '弹窗 / 立即处理';
 }
 
 function renderUpdateProgress(update) {
@@ -1552,7 +1629,7 @@ function renderConfigForm() {
           ${option('asar', config.releaseUpdateStrategy)}
           ${option('installer', config.releaseUpdateStrategy)}
         </select>
-        <small>asar：默认下载并校验热更新包，重启后自动接管；installer：优先使用 DMG/EXE 全量安装包。</small>
+        <small>Release Center 决定本次使用 ASAR 还是 DMG/EXE；本机默认按全量安装包优先兼容旧策略。</small>
       </label>
       <label class="check-row">
         <input name="useLocalEngineResources" type="checkbox" ${config.useLocalEngineResources ? 'checked' : ''} />
@@ -3257,7 +3334,7 @@ function renderUpdatePanel() {
         ${metric('Artifact', update.artifactKind || update.componentKind)}
         ${metric('Platform', [update.artifactPlatform, update.artifactArch].filter(Boolean).join(' / ') || '-')}
         ${metric('Activation', update.activation || (update.majorUpdateRequiresInstaller ? 'installer-manual' : update.hotUpdateAuto ? 'hot-auto' : '-'))}
-        ${metric('Delivery', update.deliveryMode === 'silent-download-next-start' ? '静默 / 下次启动' : '提示 / 立即应用')}
+        ${metric('Delivery', updateDeliveryLabel(update.deliveryMode))}
         ${metric('Matched by', rolloutMatchedByLabel(update))}
       </div>
       ${update.releaseNotes ? `
@@ -3335,8 +3412,8 @@ function connectionCaption() {
   }
   if (connection.state === 'connecting') return '正在准备 WireGuard、DNS、PAC 和权限上下文';
   if (connection.state === 'connected') return `${connection.localIp} / ${connection.routePolicy}`;
-  if (connection.state === 'tunnel-only') return `${connection.localIp} / tunnel only / ${connection.health?.internalApi || 'internal pending'}`;
-  if (connection.state === 'lease-only') return `${connection.localIp} / lease only / ${connection.health?.wireGuard || 'wg pending'}`;
+  if (connection.state === 'tunnel-only') return `${connection.localIp} / 保留隧道 / ${connection.health?.internalApi === 'ready' ? 'Internal ready' : 'Internal 校验中'}`;
+  if (connection.state === 'lease-only') return `${connection.localIp} / 租约保留 / ${connection.health?.wireGuard === 'ready' ? '等待系统授权' : 'WG 校验中'}`;
   if (connection.state === 'network-unavailable') return `${connection.localIp || '未分配'} / network unavailable`;
   if (connection.state === 'server-unavailable') return `${connection.localIp || '未分配'} / server redeploying`;
   if (connection.state === 'forbidden') return `${connection.localIp || '未分配'} / blocked`;
@@ -3357,7 +3434,7 @@ function readConfigForm(form) {
     routePathPreference: String(formData.get('routePathPreference') || ''),
     splitDnsDomains: String(formData.get('splitDnsDomains') || ''),
     releaseChannel: String(formData.get('releaseChannel') || ''),
-    releaseUpdateStrategy: String(formData.get('releaseUpdateStrategy') || 'asar'),
+    releaseUpdateStrategy: String(formData.get('releaseUpdateStrategy') || 'installer'),
     rolloutGroup: String(formData.get('rolloutGroup') || ''),
     useLocalEngineResources: formData.get('useLocalEngineResources') === 'on',
     restartAfterCodeUpdate: formData.get('restartAfterCodeUpdate') === 'on'
@@ -3439,7 +3516,7 @@ function createMockApi() {
       routePathPreference: 'auto',
       splitDnsDomains: 'mxinfo-inc.cn,h2i.mxinfo-inc.cn',
       releaseChannel: 'stable',
-      releaseUpdateStrategy: 'asar',
+      releaseUpdateStrategy: 'installer',
       rolloutGroup: 'staff-ring',
       useLocalEngineResources: true,
       restartAfterCodeUpdate: true

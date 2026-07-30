@@ -105,9 +105,7 @@ export function evaluateReleaseCheck(
       artifacts,
       activation: plan.activation,
       releaseNotes: plan.releaseNotes ?? null,
-      deliveryMode: plan.deliveryMode === 'silent-download-next-start'
-        ? 'silent-download-next-start'
-        : 'prompt-download-restart',
+      deliveryMode: normalizeReleaseDeliveryMode(plan.deliveryMode),
       featureFlags: plan.rollout?.featureKeys ?? [],
       rollout: {
         matchedBy: match.matchedBy,
@@ -117,6 +115,12 @@ export function evaluateReleaseCheck(
     };
   }
   return empty;
+}
+
+function normalizeReleaseDeliveryMode(value: ReleaseDeliveryMode | string | null | undefined): ReleaseDeliveryMode {
+  if (value === 'manual-download') return 'manual-download';
+  if (value === 'silent-download-next-start') return 'silent-download-next-start';
+  return 'prompt-download-restart';
 }
 
 /**

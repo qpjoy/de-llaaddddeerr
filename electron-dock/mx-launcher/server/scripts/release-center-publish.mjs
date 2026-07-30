@@ -57,8 +57,8 @@ if (!['installer', 'asar', 'hot'].includes(kind)) {
 const requestedDeliveryMode = args.deliveryMode
   || process.env.MX_RELEASE_DELIVERY_MODE
   || 'prompt-download-restart';
-if (!['prompt-download-restart', 'silent-download-next-start'].includes(requestedDeliveryMode)) {
-  throw new Error('--delivery-mode must be prompt-download-restart or silent-download-next-start');
+if (!['prompt-download-restart', 'manual-download', 'silent-download-next-start'].includes(requestedDeliveryMode)) {
+  throw new Error('--delivery-mode must be prompt-download-restart, manual-download, or silent-download-next-start');
 }
 if (requestedDeliveryMode === 'silent-download-next-start' && kind !== 'asar') {
   throw new Error('--delivery-mode silent-download-next-start is only supported for --kind asar');
@@ -345,7 +345,9 @@ function scopedReleaseBody(artifactId) {
     targetUserIds,
     targetInstallIds,
     releaseNotes,
-    deliveryMode: kind === 'asar' ? requestedDeliveryMode : 'prompt-download-restart',
+    deliveryMode: kind === 'asar' || requestedDeliveryMode === 'manual-download'
+      ? requestedDeliveryMode
+      : 'prompt-download-restart',
     suiteId: args.suiteId || `${product}-${kind}-release`,
     topology: args.topology || (isDefaultProduct
       ? `h-d-i-${kind}-release`

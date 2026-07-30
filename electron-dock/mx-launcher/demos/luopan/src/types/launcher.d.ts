@@ -112,7 +112,7 @@ export interface LuopanRuntimeUpdate {
   releaseId: string | null;
   releaseNotes: string | null;
   matchedBy: string | null;
-  deliveryMode: 'prompt-download-restart' | 'silent-download-next-start';
+  deliveryMode: 'prompt-download-restart' | 'manual-download' | 'silent-download-next-start';
   restartRequired: boolean;
   featureFlags: string[];
   artifacts: LuopanRuntimeUpdateArtifact[];

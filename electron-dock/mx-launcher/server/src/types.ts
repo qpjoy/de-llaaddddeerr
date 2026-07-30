@@ -3247,7 +3247,10 @@ export interface ReleasePolicyDecision {
 }
 
 export type ReleaseManagementE2eResult = 'passed' | 'failed' | 'blocked' | 'running';
-export type ReleaseDeliveryMode = 'prompt-download-restart' | 'silent-download-next-start';
+export type ReleaseDeliveryMode =
+  | 'prompt-download-restart'
+  | 'manual-download'
+  | 'silent-download-next-start';
 
 export interface ReleaseManagementPlanInput {
   releaseId?: string | null;
