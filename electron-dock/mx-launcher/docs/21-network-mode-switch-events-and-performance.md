@@ -186,7 +186,8 @@ connect/disconnect 仍由 MX-H2I broker/network owner 串行化。
   保持 live NRPT/system DNS、PAC readback、Chromium `resolveProxy -> 2053` 和 CONNECT。
   未命中流量按 owner 状态选择 `DIRECT`、live loopback static proxy 或包装后的 loopback
   PAC；AutoDetect/WPAD 仅在它是唯一适用 owner、且不存在可表达的 live static/PAC
-  continuation 时 fail closed；不可读/非 loopback PAC 或 dead listener 也 fail closed。
+  continuation 时 fail closed；短启动宽限期后仍无 listener 的 stale loopback PAC 被跳过且
+  不恢复，live-invalid/非 loopback PAC 或 dead static listener 仍 fail closed。
 - Windows 的 5 秒 watcher 常态只读验证；新外部 owner signature 可触发一次有界协商并按
   结果写回 `AutoConfigURL`，同一 signature 后续 tick 不重复写。owner 状态变化、重连或
   手动 repair 才开启下一次协商。

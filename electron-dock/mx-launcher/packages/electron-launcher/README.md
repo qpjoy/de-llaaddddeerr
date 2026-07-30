@@ -196,8 +196,13 @@ represented safely:
   `PROXY <listener>; DIRECT`;
 - WPAD/AutoDetect fails closed only when automatic configuration is the sole
   applicable owner and no representable live static/PAC continuation exists;
-- unreadable or non-loopback PAC, an unrepresentable proxy, or a dead listener
-  fails closed before registry mutation and is not browser-ready.
+- a loopback PAC that starts during the short login grace period is preserved;
+- a loopback PAC whose listener remains absent after that grace period is
+  treated as stale, omitted from rollback/restore, and followed by the live
+  static-proxy or `DIRECT` fallback;
+- a reachable but invalid PAC, a non-loopback PAC, an unrepresentable static
+  proxy, or a dead static-proxy listener still fails closed before registry
+  mutation and is not browser-ready.
 
 Windows ready requires all four live proofs: NRPT/system DNS resolves an
 Internal namespace to its Internal target, WinINet reads back the MX-H2I PAC,

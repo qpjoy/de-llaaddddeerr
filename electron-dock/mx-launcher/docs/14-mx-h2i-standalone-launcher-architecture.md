@@ -385,8 +385,10 @@ V1，但本机 V2 已能根据 Internal route/ownership claim 直接回答已知
    loopback explicit PAC；没有该 PAC 时，可用的 live loopback 静态 proxy 作为
    `PROXY ...; DIRECT` fallback；两者都没有且处于 TUN/无 owner 时返回 `DIRECT`。
    AutoDetect/WPAD 只有在它是唯一适用的 automatic-config owner、且不存在可表达的 live
-   static/PAC continuation 时才 fail closed。不可读/非 loopback PAC 或 dead listener
-   同样 fail closed，不修改 WinINet registry。macOS 继续沿用原有 PAC fallback。
+   static/PAC continuation 时才 fail closed。loopback PAC 初次读取失败会等待短启动宽限期；
+   宽限期后仍无 listener 的 stale PAC 不再阻塞 V2，也不会在 V2 断开时恢复。listener
+   存活但 PAC 无效、非 loopback PAC 或 dead static listener 仍 fail closed，不修改
+   WinINet registry。macOS 继续沿用原有 PAC fallback。
    Clash/mihomo fake-ip 的 `198.18.0.0/15` 只能说明代理接管，不作为 Internal 解析成功。
 
 客户端不应把 `/etc/hosts` 作为产品路径。写 hosts 容易触发 EDR/杀毒软件告警，也难以表达
@@ -610,8 +612,10 @@ Windows 默认同时启用 NRPT 与上述 local-edge PAC。接管 WinINet 前先
   `PROXY <listener>; DIRECT`；
 - AutoDetect/WPAD 只有在它是唯一适用 owner、且不存在可表达的 live static/PAC
   continuation 时 fail closed；
-- 不可读/非 loopback PAC、无法安全表达的 proxy 或 dead listener：
-  fail closed，不修改 registry，也不报告 browser-ready。
+- loopback PAC 初次读取失败时等待短启动宽限期；仍无 listener 的 stale PAC 被跳过且不会在
+  断开时恢复，随后继续选择 live static proxy 或 `DIRECT`；
+- listener 存活但 PAC 无效/不可编译、非 loopback PAC、无法安全表达的 static proxy 或
+  dead static listener：fail closed，不修改 registry，也不报告 browser-ready。
 
 Windows 5 秒 watcher 的常态路径只做 WinINet PAC readback、Chromium `resolveProxy` 和
 local-edge CONNECT 等 live 验证。检测到新的外部 owner signature 时，允许触发一次有界
@@ -1013,7 +1017,7 @@ Clash/mihomo 兼容原则不是按模式写两套逻辑，而是统一优先级 
 | Clash system proxy | Windows 默认仍安装 MX-H2I PAC；live loopback 静态 proxy 被复用为 fallback，可读取的 loopback PAC 被包装，Internal exact/suffix 始终先走 `PROXY 127.0.0.1:2053` |
 | Clash TUN/fake-ip | `198.18.0.0/15` 只作为代理 fake-ip 证据，不算系统 DNS ready；WG endpoint 必须先写物理网关 `/32` bypass，Internal route proof 必须命中 MX-H2I WG interface；若 resolver 仍被劫持，PAC/local-edge 浏览器 proof 可进入 browser-ready，但非 PAC 程序保持 degraded |
 | Clash TUN ↔ system proxy 在线切换 | 5 秒巡检常态只读验证；新 owner signature 可触发一次有界协商并按结果写回，同一 signature 后续 tick 不周期抢回；状态变化、重连或手动 repair 可再次协商 |
-| Clash PAC/WPAD 不可安全包装 | 不可读/非 loopback PAC 或 dead listener fail closed；AutoDetect/WPAD 仅在没有可表达的 live static/PAC owner 时 fail closed；均不误报 browser-ready |
+| Clash PAC/WPAD 不可安全包装 | 可读的 live loopback PAC 被包装；短启动宽限期后仍无 listener 的 stale loopback PAC 被跳过且不恢复，再尝试 live static proxy 或 `DIRECT`；live-invalid/非 loopback PAC、dead static listener 仍 fail closed。AutoDetect/WPAD 仅在没有可表达的 live static/PAC owner 时 fail closed；均不误报 browser-ready |
 | Clash 关闭 | MX-H2I 断开后应恢复到系统 DNS/公网解析；如果仍返回 `198.18.*`，优先查系统 DNS cache、Clash 残留 TUN/DNS 或 stale MX-H2I resolver |
 | V2 connected | 对 `10.88.88.88`、`10.88.0.1`、Domestic relay endpoint、DNS server 写更具体 route/priority，压过 TUN 默认路由 |
 | 微信/豆包/Steam 等公网应用异常 | 先查 WinINet/PAC、Clash 当前模式和本地 fallback listener；只有其域名命中 V2 NRPT namespace 时才归入 split-DNS 故障 |
