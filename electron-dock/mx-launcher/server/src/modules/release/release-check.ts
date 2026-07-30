@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 
-import type { ReleaseManagementPlan, ReleasePolicyDecision } from '../../types.js';
+import type { ReleaseArtifactKind, ReleaseManagementPlan, ReleasePolicyDecision } from '../../types.js';
 
 /**
  * Server-side release decision (docs/19 §6). The client sends its identity and
@@ -18,6 +18,8 @@ export interface ReleaseCheckInput {
   channel: string;
   platform?: string | null;
   arch?: string | null;
+  /** Optional artifact classes accepted by this client. Omitted by legacy clients. */
+  artifactKinds?: ReleaseArtifactKind[];
   /** componentId -> currently running version. */
   components: Record<string, string>;
 }
@@ -76,7 +78,13 @@ export function evaluateReleaseCheck(
   for (const plan of candidates) {
     const decision = matchComponentDecision(plan, input.components);
     if (!decision) continue;
-    const artifacts = matchingArtifacts(plan, decision.componentId, input.platform, input.arch);
+    const artifacts = matchingArtifacts(
+      plan,
+      decision.componentId,
+      input.platform,
+      input.arch,
+      input.artifactKinds
+    );
     if (decisionRequiresDownload(decision) && !artifacts.some((artifact) => Boolean(artifact.url))) continue;
     const match = matchRollout(plan, input, decision.componentId);
     if (!match) continue;
@@ -200,12 +208,15 @@ function matchingArtifacts(
   plan: ReleaseManagementPlan,
   componentId: string,
   platform: string | null | undefined,
-  arch: string | null | undefined
+  arch: string | null | undefined,
+  artifactKinds: ReleaseArtifactKind[] | undefined
 ): ReleaseManagementPlan['artifacts'] {
   const normalizedPlatform = platform?.trim() || null;
   const normalizedArch = arch?.trim() || null;
+  const acceptedKinds = artifactKinds?.length ? new Set(artifactKinds) : null;
   return (plan.artifacts ?? [])
     .filter((artifact) => !artifact.componentId || artifact.componentId === componentId)
+    .filter((artifact) => !acceptedKinds || acceptedKinds.has(artifact.kind))
     .filter((artifact) => !artifact.platform || !normalizedPlatform || artifact.platform === normalizedPlatform)
     .filter((artifact) => !artifact.arch || artifact.arch === 'universal' || !normalizedArch || artifact.arch === normalizedArch);
 }

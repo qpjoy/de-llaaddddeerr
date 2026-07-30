@@ -22,6 +22,39 @@ that want a single import surface. Packages with the same major version must be
 protocol-compatible; breaking protocol or broker ABI changes require a new
 major version.
 
+## Release identity
+
+Do not copy `luopan` or another example's `productId` into a shared client.
+Register each app's real `packageName` in AppCenter, then let the updater resolve
+the Release Center product and component namespace:
+
+```ts
+import { createElectronLauncherReleaseUpdater } from '@qpjoy/electron-launcher/release-updater';
+
+const updater = createElectronLauncherReleaseUpdater({
+  baseUrl: internalBaseUrl,
+  packageName: '@example/my-desktop-app', // from this app's package/build metadata
+  channel: 'stable',
+  reportInstallId: installId
+});
+
+const installer = await updater.check({
+  componentKind: 'app-installer',
+  currentVersion: app.getVersion(),
+  installId,
+  platform: process.platform,
+  arch: process.arch
+});
+```
+
+The resolver returns the AppCenter `appId` as the release `productId`, validates
+the requested channel, and derives the installer and renderer component IDs.
+It does not change ProductNetwork ownership or an existing connection. Old
+clients may continue to pass `productId`, `componentId`, and `channel`
+explicitly. A legacy app may set `allowLegacyProductFallback: true` together
+with its existing `productId` while servers are upgraded; new integrations
+should leave that flag off so missing or ambiguous registration fails closed.
+
 See the package design notes in `../README.md`, `../launcher-core/README.md`,
 `../launcher-standalone/README.md`, and `../launcher-embed-sdk/README.md`.
 

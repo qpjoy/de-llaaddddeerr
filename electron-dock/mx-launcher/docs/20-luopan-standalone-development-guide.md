@@ -251,7 +251,9 @@ Launcher network broker。
 2. **决策端点** `POST /internal/v1/release/check`：单 install 决策——targets 显式
    圈选优先，percentage 走 sticky 分桶 `sha256(componentId:channel:installId)%10000`，
    gate 未过返回 blocked；响应带 releaseNotes、featureFlags、`rollout.matchedBy`、
-   HMAC 签名。Luopan 必须同时发送 `productId=luopan`，避免派生组件名与其他产品碰撞。
+   HMAC 签名。新版 Luopan 先以 `packageName=@qpjoy/luopan-demo` 解析发布身份，再发送服务端
+   返回的 `productId=luopan`，避免把示例 ID 复制到其他产品，也避免派生组件名碰撞。
+   旧版显式发送 `productId=luopan` 的路径保持不变。
    客户端**永远拿不到全量 plans**（旧端点已收敛 admin-only）。
 3. **release-updater（包）**：`check()` 打决策端点（老 server 自动 fallback legacy），
    `report()` 上报证据链。
@@ -326,7 +328,7 @@ mx-h2i 的约定，建议 Luopan 照搬（luopan demo 已具备前两条）：
 
 | 块 | 内容 | 关键 API |
 | --- | --- | --- |
-| PRODUCT 定义 | `defineLauncherProduct({ productId: 'luopan', release: { componentId: 'luopan', channel: 'shadow', ... } })`——产品身份的唯一来源，更新检查/ownership 都从这取值 | `defineLauncherProduct` |
+| PRODUCT 定义 | `defineLauncherProduct({ productId: 'luopan', ... })` 是现有 ProductNetwork/ownership 的稳定身份；Release updater 另以 `packageName` 向服务端解析发布身份，二者目前同值但生命周期分离 | `defineLauncherProduct`、`createElectronLauncherReleaseUpdater` |
 | runtime state | `RuntimeState`（installId/deviceId/config/connection/oversea/update/events），loadRuntime/saveRuntime/normalize 三件套 | — |
 | lease 获取 | `luopan:connect-test-mode` → `launcherClient().connectNetwork(...)`（registered/test 模式由 `sdkTestMode` 决定，默认 registered；登录后自动带 `identityKind: 'user'` + userId 切登录 lease 段） | `createElectronLauncher` |
 | 用户中心 | `network-ready` 后，`luopan:login` / `luopan:logout` 才经隧道内 VIP 执行 SDK gateway OAuth password grant（docs/15 `/internal/v1/sdk/oauth/token`）→ `principal.userId` 存入 runtime.identity；access token 只留内存。登录用户可命中 Release Center 按 userId 定向的发版 | SDK gateway |
@@ -476,7 +478,11 @@ function releaseUpdater(): ElectronLauncherReleaseUpdater {
   const state = requireRuntime();
   return createElectronLauncherReleaseUpdater({
     baseUrl: state.config.baseUrl,        // 10.88.100.3:18090——决策走产品自己的 VIP
-    reportInstallId: state.installId      // 证据链主键
+    reportInstallId: state.installId,     // 证据链主键
+    packageName: '@qpjoy/luopan-demo',
+    channel: PRODUCT.release.channel,
+    productId: state.config.productId,    // 仅用于旧服务端滚动升级期回退
+    allowLegacyProductFallback: true
   });
 }
 
@@ -490,7 +496,10 @@ function updateExecutor(updater: ElectronLauncherReleaseUpdater) {
     applyRenderer: (activePath) => {          // renderer 激活后：reload 窗口
       mainWindow?.webContents.reload();
     },
-    openInstaller: (filePath) => shell.openPath(filePath)  // installer 手动确认后走 OS
+    openInstaller: async (filePath) => {   // installer 手动确认后走 OS
+      const message = await shell.openPath(filePath);
+      if (message) throw new Error(message);
+    }
   });
 }
 ```
@@ -503,9 +512,8 @@ WireGuard connecting 状态——**两个产品的更新行为差异只来自这
 
 ```ts
 const check = await releaseUpdater().check({
-  componentId: PRODUCT.release.componentId,  // 'luopan'
+  componentKind: 'app-installer',             // 组件 ID 由 package identity 派生
   currentVersion: app.getVersion(),
-  channel: PRODUCT.release.channel,
   installId: state.installId,
   platform: process.platform
 });

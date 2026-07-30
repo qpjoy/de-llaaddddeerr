@@ -68,17 +68,17 @@ assert.equal(rolledBack.updateAvailable, false);
 assert.equal(rolledBack.artifactUrl, null, 'rollback startup must not retain a newer installer action');
 
 const mainSource = readFileSync(
-  fileURLToPath(new URL('../src/main.cjs', import.meta.url)),
+  fileURLToPath(new URL('../src/main-runtime.cjs', import.meta.url)),
   'utf8'
 );
 assert.match(
   mainSource,
-  /async function normalizeRuntime\(input\)[\s\S]*?reconcileRuntimeUpdateWithInstalledVersion\([\s\S]*?app\.getVersion\(\)[\s\S]*?update: normalizeUpdate\(reconciledUpdate, config\)/,
-  'persisted runtime loading must reconcile against Electron app.getVersion before rendering'
+  /async function normalizeRuntime\(input\)[\s\S]*?reconcileRuntimeUpdateWithInstalledVersion\([\s\S]*?currentReleaseVersion\(\)[\s\S]*?update: normalizeUpdate\(reconciledUpdate, config\)/,
+  'persisted runtime loading must reconcile against the active ASAR or base version before rendering'
 );
 assert.match(
   mainSource,
-  /function normalizeUpdate\(input, config\)[\s\S]*?currentVersion: app\.getVersion\(\)/,
+  /function normalizeUpdate\(input, config\)[\s\S]*?currentVersion: currentReleaseVersion\(\)/,
   'the visible update model must never prefer a stale persisted current version'
 );
 

@@ -908,7 +908,13 @@ function releaseUpdater(): ElectronLauncherReleaseUpdater {
     // panel (and startup bookkeeping) works pre-connect too.
     baseUrl: effectiveApiBaseUrl(),
     reportInstallId: state.installId,
-    productId: PRODUCT.productId
+    packageName: '@qpjoy/luopan-demo',
+    channel: PRODUCT.release.channel,
+    // Compatibility only: old Release Center deployments do not expose the
+    // package resolver yet. This is the existing network product identity,
+    // not a second release identity declaration.
+    productId: state.config.productId,
+    allowLegacyProductFallback: true
   });
 }
 
@@ -942,7 +948,8 @@ function updateExecutor(updater: ElectronLauncherReleaseUpdater) {
       mainWindow?.webContents.reload();
     },
     openInstaller: async (filePath) => {
-      await shell.openPath(filePath);
+      const message = await shell.openPath(filePath);
+      if (message) throw new Error(`Cannot open release installer: ${message}`);
     }
   });
 }
@@ -2166,12 +2173,10 @@ function registerIpc(): void {
       const updater = releaseUpdater();
       const userId = hasActiveUserIdentity(state) ? state.identity.userId : null;
       const checks: ElectronLauncherUpdateCheckResult[] = [];
-      for (const componentId of [PRODUCT.release.componentId, `${PRODUCT.release.componentId}-renderer`]) {
+      for (const componentKind of ['app-installer', 'renderer-ui'] as const) {
         checks.push(await updater.check({
-          productId: PRODUCT.productId,
-          componentId,
+          componentKind,
           currentVersion: app.getVersion(),
-          channel: PRODUCT.release.channel,
           installId: state.installId,
           userId,
           platform: process.platform,

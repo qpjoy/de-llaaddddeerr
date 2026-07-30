@@ -206,6 +206,9 @@ importers:
         specifier: workspace:^
         version: link:../../../../electron-plugin/packages/electron-plugin-tunnel
     devDependencies:
+      '@electron/asar':
+        specifier: 3.4.1
+        version: 3.4.1
       dmg-builder:
         specifier: 26.15.3
         version: 26.15.3(electron-builder-squirrel-windows@26.15.3)

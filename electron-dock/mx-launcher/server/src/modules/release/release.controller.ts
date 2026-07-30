@@ -8,14 +8,14 @@ import { request as httpsRequest } from 'node:https';
 import { basename, extname, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
-import { BadRequestException, Body, Controller, ForbiddenException, Get, Header, Headers, HttpCode, Inject, NotFoundException, Param, Post, Query, Req, Res, StreamableFile, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, Header, Headers, HttpCode, Inject, NotFoundException, Param, Post, Query, Req, Res, StreamableFile, UnauthorizedException } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
 import type { PlatformStore, PublisherReleasePlanInput } from '../../store/platform-store.js';
 import { normalizeReleaseArtifactKind } from '../../store/domain.js';
 import { PLATFORM_STORE } from '../../tokens.js';
-import type { PlatformPrincipal, ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseReportInput } from '../../types.js';
+import type { AppCenterApp, PlatformPrincipal, ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseReportInput } from '../../types.js';
 import { evaluateReleaseCheck, signReleaseCheckResult } from './release-check.js';
 import type { ReleaseCheckResult } from './release-check.js';
 
@@ -59,6 +59,55 @@ export class ReleaseController {
   }
 
   /**
+   * Resolve the Release Center identity from the package's build-time name.
+   * This is deliberately separate from ProductNetwork identity: existing
+   * clients can keep their explicit productId while new consumers avoid
+   * copying a product ID from API examples.
+   */
+  @Get('internal/v1/releases/products/resolve')
+  @Header('Cache-Control', 'private, max-age=300')
+  async resolveReleaseProduct(
+    @Query('packageName') rawPackageName?: string,
+    @Query('channel') rawChannel?: string
+  ) {
+    const packageName = requiredReleasePackageName(rawPackageName);
+    const apps = (await this.store.listAppCenterApps({
+      includeHidden: true,
+      includeDisabled: true
+    })).filter((app) => releasePackageNames(app).includes(packageName));
+    if (apps.length === 0) {
+      throw new NotFoundException(`Release product package is not registered in AppCenter: ${packageName}`);
+    }
+    if (apps.length > 1) {
+      throw new ConflictException(`Release product package is ambiguous in AppCenter: ${packageName}`);
+    }
+    const app = apps[0];
+    if (app.enabled === false) {
+      throw new NotFoundException(`Release product package is disabled in AppCenter: ${packageName}`);
+    }
+    const channels = releaseProductChannels(app);
+    const channel = requiredReleaseChannel(rawChannel || (channels.includes('stable') ? 'stable' : channels[0]));
+    if (!channels.includes(channel)) {
+      throw new BadRequestException(
+        `Release channel ${channel} is not enabled for package ${packageName}`
+      );
+    }
+    return {
+      identity: {
+        appId: app.appId,
+        productId: app.appId,
+        packageName,
+        launcherMode: app.launcherMode ?? 'embed',
+        networkProductId: app.productNetworkId ?? app.appId,
+        componentId: app.appId,
+        rendererComponentId: `${app.appId}-renderer`,
+        channel,
+        channels
+      }
+    };
+  }
+
+  /**
    * Single-install release decision (docs/19 §6). The server owns targeting
    * and rollout evaluation; clients no longer read the full plans list.
    */
@@ -80,6 +129,7 @@ export class ReleaseController {
       channel: nullableString(body.channel) ?? 'stable',
       platform: nullableString(body.platform),
       arch: normalizeReleaseArch(nullableString(body.arch)),
+      artifactKinds: releaseCheckArtifactKinds(body.artifactKinds),
       components
     }));
     await this.store.recordReleaseReport({
@@ -593,14 +643,46 @@ function requiredReleaseProductId(value: unknown): string {
   return productId;
 }
 
+function requiredReleasePackageName(value: unknown): string {
+  const packageName = nullableString(value)?.toLowerCase();
+  if (
+    !packageName
+    || packageName.length > 240
+    || /[\u0000-\u001f\u007f\s?#]/.test(packageName)
+  ) {
+    throw new BadRequestException('valid packageName is required');
+  }
+  return packageName;
+}
+
+function releasePackageNames(app: AppCenterApp): string[] {
+  const values = [
+    app.packageName,
+    app.manifest?.packageName,
+    // Compatibility for the persisted Luopan row created before AppCenter
+    // stored packageName. New products must register their packageName.
+    app.appId === 'luopan' ? '@qpjoy/luopan-demo' : null
+  ];
+  return [...new Set(values
+    .map((value) => value?.trim().toLowerCase() || null)
+    .filter((value): value is string => Boolean(value)))];
+}
+
+function releaseProductChannels(app: AppCenterApp): string[] {
+  const channels = (Array.isArray(app.channels) ? app.channels : [])
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  return [...new Set(channels.length > 0 ? channels : ['stable'])];
+}
+
 function requiredReleaseComponentId(
   value: unknown,
   productId: string,
-  kind: 'app-installer' | 'renderer-ui'
+  kind: 'app-installer' | 'app-asar' | 'renderer-ui'
 ): string {
   const componentId = nullableString(value)?.toLowerCase();
   if (!componentId) throw new BadRequestException('componentId is required');
-  const expectedComponentId = kind === 'app-installer' ? productId : `${productId}-renderer`;
+  const expectedComponentId = kind === 'renderer-ui' ? `${productId}-renderer` : productId;
   if (componentId !== expectedComponentId) {
     throw new ForbiddenException(
       `${kind} componentId for product ${productId} must be ${expectedComponentId}`
@@ -609,9 +691,9 @@ function requiredReleaseComponentId(
   return componentId;
 }
 
-function requiredPublisherArtifactKind(value: unknown): 'app-installer' | 'renderer-ui' {
-  if (value === 'app-installer' || value === 'renderer-ui') return value;
-  throw new BadRequestException('Publisher artifact kind must be app-installer or renderer-ui');
+function requiredPublisherArtifactKind(value: unknown): 'app-installer' | 'app-asar' | 'renderer-ui' {
+  if (value === 'app-installer' || value === 'app-asar' || value === 'renderer-ui') return value;
+  throw new BadRequestException('Publisher artifact kind must be app-installer, app-asar, or renderer-ui');
 }
 
 function requiredReleaseText(value: unknown, field: string, maxLength = 160): string {
@@ -697,14 +779,17 @@ function assertNoPublisherArtifactOverrides(body: Record<string, unknown>): void
 }
 
 function publisherArtifactPolicy(kind: ReleaseArtifactKind): {
-  updatePolicy: 'app-installer' | 'renderer-ui';
-  activationMode: 'installer-manual' | 'hot-auto';
+  updatePolicy: 'app-installer' | 'app-asar' | 'renderer-ui';
+  activationMode: 'installer-manual' | 'restart-auto' | 'hot-auto';
 } {
   if (kind === 'app-installer') {
     return { updatePolicy: 'app-installer', activationMode: 'installer-manual' };
   }
   if (kind === 'renderer-ui') {
     return { updatePolicy: 'renderer-ui', activationMode: 'hot-auto' };
+  }
+  if (kind === 'app-asar') {
+    return { updatePolicy: 'app-asar', activationMode: 'restart-auto' };
   }
   throw new BadRequestException(`SDK publisher does not support artifact kind: ${kind}`);
 }
@@ -803,6 +888,27 @@ function releaseCheckComponents(body: Record<string, unknown>): Record<string, s
   const currentVersion = nullableString(body.currentVersion);
   if (componentId && currentVersion && !components[componentId]) components[componentId] = currentVersion;
   return components;
+}
+
+function releaseCheckArtifactKinds(value: unknown): ReleaseArtifactKind[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const allowed = new Set<ReleaseArtifactKind>([
+    'config-snapshot',
+    'feature-flag',
+    'renderer-ui',
+    'launcher-npm',
+    'launcher-asar',
+    'app-asar',
+    'appcenter-app',
+    'app-installer',
+    'mx-h2i-installer',
+    'native-helper'
+  ]);
+  const kinds = stringArray(value);
+  if (kinds.length === 0 || kinds.some((kind) => !allowed.has(kind as ReleaseArtifactKind))) {
+    throw new BadRequestException('release check artifactKinds contains an unsupported artifact kind');
+  }
+  return [...new Set(kinds)] as ReleaseArtifactKind[];
 }
 
 function releaseCheckWithNamedArtifactUrls(result: ReleaseCheckResult): ReleaseCheckResult {
@@ -1374,6 +1480,14 @@ function validateInstallerArtifact(
   arch: string | null,
   fileName: string
 ): void {
+  if (kind === 'app-asar') {
+    if (extname(fileName).toLowerCase() !== '.asar') {
+      throw new BadRequestException('app-asar file must use .asar');
+    }
+    if (!platform) throw new BadRequestException('app-asar requires platform');
+    if (!arch) throw new BadRequestException('app-asar requires arch (x64, arm64, ia32, or universal)');
+    return;
+  }
   if (kind !== 'app-installer') return;
   if (!platform) throw new BadRequestException('app-installer requires platform');
   if (!arch) throw new BadRequestException('app-installer requires arch (x64, arm64, ia32, or universal)');

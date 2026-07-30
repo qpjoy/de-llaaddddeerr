@@ -1,7 +1,7 @@
 {
   "name": "@qpjoy/mx-h2i-demo",
   "productName": "MX-H2I",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "private": true,
   "author": "QPJoy",
   "description": "MX-H2I Electron standalone launcher demo.",
@@ -12,10 +12,13 @@
     "dev": "node scripts/run-clean-env.mjs node scripts/dev-mode.mjs local && node scripts/run-clean-env.mjs electron-builder install-app-deps && node scripts/run-clean-env.mjs node scripts/run-electron-dev.mjs",
     "start": "pnpm dev",
     "build": "pnpm run package",
-    "check": "node --check scripts/dev-mode.mjs && node --check scripts/node-env.mjs && node scripts/node-env.test.mjs && node scripts/bootstrap-domain-safety.test.mjs && node scripts/split-dns-policy.test.mjs && node scripts/update-state-policy.test.mjs && node scripts/renderer-scroll-safety.test.mjs && node scripts/windows-reconnect-safety.test.mjs && node scripts/feishu-login-safety.test.mjs && node --check scripts/run-clean-env.mjs && node --check scripts/run-electron-dev.mjs && node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
+    "check": "node --check scripts/dev-mode.mjs && node --check scripts/node-env.mjs && node scripts/node-env.test.mjs && node scripts/bootstrap-domain-safety.test.mjs && node scripts/split-dns-policy.test.mjs && node scripts/update-state-policy.test.mjs && node scripts/renderer-scroll-safety.test.mjs && node scripts/windows-reconnect-safety.test.mjs && node scripts/feishu-login-safety.test.mjs && node scripts/asar-update-bootstrap.test.mjs && node --check scripts/build-asar-update.mjs && node --check scripts/run-clean-env.mjs && node --check scripts/run-electron-dev.mjs && node --check src/main.cjs && node --check src/main-runtime.cjs && node --check src/asar-update-bootstrap.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
     "check:windows-network": "pnpm --dir ../../packages/electron-launcher smoke:system-domain-proxy-windows && pnpm --dir ../../../../electron-plugin/packages/electron-core-wireguard smoke:windows-nrpt",
     "package": "node scripts/dev-mode.mjs ensure && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --dir",
     "make": "node scripts/dev-mode.mjs ensure && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs",
+    "make:asar": "node scripts/dev-mode.mjs ensure && pnpm run check && node scripts/build-asar-update.mjs",
+    "make:asar:mac": "bash scripts/build-asar-macos.sh",
+    "make:asar:win": "scripts\\build-asar-windows.cmd",
     "make:mac:dmg": "node scripts/dev-mode.mjs ensure && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --mac dmg --universal",
     "make:win": "node scripts/dev-mode.mjs ensure && pnpm run check && pnpm run check:windows-network && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --win --x64"
   },
@@ -32,6 +35,7 @@
     "@qpjoy/electron-plugin-tunnel-engine-win32-x64": "workspace:^"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "dmg-builder": "26.15.3",
     "electron": "34.5.8",
     "electron-builder": "26.15.3",

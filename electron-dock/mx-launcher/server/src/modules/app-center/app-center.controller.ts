@@ -1,7 +1,7 @@
 import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Header, Headers, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 
 import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
-import { appReleasePublisherServiceAccountId } from '../../store/domain.js';
+import { appReleasePublisherServiceAccountId, buildAppCenterApp } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import type { AppCenterApp, AppCenterAppInput, AppCenterInstallation, AppCenterInstallationInput, AppOnboardingDefaultsInput } from '../../types.js';
@@ -128,8 +128,27 @@ export class AppCenterController {
   private async upsertAppWithPublisher(input: AppCenterAppInput) {
     let app: AppCenterApp;
     try {
+      const requestedAppId = input.appId?.trim() || '';
+      const previous = requestedAppId ? await this.store.getAppCenterApp(requestedAppId) : null;
+      const candidate = buildAppCenterApp(input, previous);
+      const packageName = candidate.packageName?.trim().toLowerCase() || null;
+      if (packageName) {
+        const conflicting = (await this.store.listAppCenterApps({
+          includeHidden: true,
+          includeDisabled: true
+        })).find((item) => (
+          item.appId !== candidate.appId
+          && buildAppCenterApp(item, item).packageName?.trim().toLowerCase() === packageName
+        ));
+        if (conflicting) {
+          throw new ConflictException(
+            `AppCenter packageName ${packageName} is already registered by ${conflicting.appId}`
+          );
+        }
+      }
       app = await this.store.upsertAppCenterApp(input);
     } catch (error) {
+      if (error instanceof ConflictException) throw error;
       const message = error instanceof Error ? error.message : 'AppCenter app cannot be saved';
       if (message.startsWith('Release publisher service account collision:')) {
         throw new ConflictException(message);

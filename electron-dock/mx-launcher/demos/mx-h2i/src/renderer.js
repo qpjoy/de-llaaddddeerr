@@ -1507,6 +1507,14 @@ function renderConfigForm() {
           <input name="rolloutGroup" value="${escapeAttr(config.rolloutGroup)}" />
         </label>
       </div>
+      <label class="field">
+        <span>应用更新方案</span>
+        <select name="releaseUpdateStrategy">
+          ${option('asar', config.releaseUpdateStrategy)}
+          ${option('installer', config.releaseUpdateStrategy)}
+        </select>
+        <small>asar：默认下载并校验热更新包，重启后自动接管；installer：优先使用 DMG/EXE 全量安装包。</small>
+      </label>
       <label class="check-row">
         <input name="useLocalEngineResources" type="checkbox" ${config.useLocalEngineResources ? 'checked' : ''} />
         <span>使用本地引擎资源</span>
@@ -3309,6 +3317,7 @@ function readConfigForm(form) {
     routePathPreference: String(formData.get('routePathPreference') || ''),
     splitDnsDomains: String(formData.get('splitDnsDomains') || ''),
     releaseChannel: String(formData.get('releaseChannel') || ''),
+    releaseUpdateStrategy: String(formData.get('releaseUpdateStrategy') || 'asar'),
     rolloutGroup: String(formData.get('rolloutGroup') || ''),
     useLocalEngineResources: formData.get('useLocalEngineResources') === 'on',
     restartAfterCodeUpdate: formData.get('restartAfterCodeUpdate') === 'on'
@@ -3354,6 +3363,7 @@ function createMockApi() {
       routePathPreference: 'auto',
       splitDnsDomains: 'mxinfo-inc.cn,h2i.mxinfo-inc.cn',
       releaseChannel: 'stable',
+      releaseUpdateStrategy: 'asar',
       rolloutGroup: 'staff-ring',
       useLocalEngineResources: true,
       restartAfterCodeUpdate: true

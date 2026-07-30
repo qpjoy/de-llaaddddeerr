@@ -4,7 +4,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const mainSource = readFileSync(
-  fileURLToPath(new URL('../src/main.cjs', import.meta.url)),
+  fileURLToPath(new URL('../src/main-runtime.cjs', import.meta.url)),
   'utf8'
 );
 const preloadSource = readFileSync(
@@ -327,12 +327,12 @@ assert.match(
 );
 assert.match(
   functionSource(mainSource, 'connectLauncherNetwork'),
-  /deviceModel: context\.installation\.deviceModel,[\s\S]*osVersion: context\.installation\.osVersion,[\s\S]*appVersion: app\.getVersion\(\)/,
+  /deviceModel: context\.installation\.deviceModel,[\s\S]*osVersion: context\.installation\.osVersion,[\s\S]*appVersion: currentReleaseVersion\(\)/,
   'each lease renewal must report best-effort device, OS, and app audit metadata'
 );
 assert.match(
   functionSource(mainSource, 'ensureInstallation'),
-  /current\.deviceModel \|\| await detectDeviceModel\(\)[\s\S]*osVersion: os\.release\(\)[\s\S]*appVersion: app\.getVersion\(\)/,
+  /current\.deviceModel \|\| await detectDeviceModel\(\)[\s\S]*osVersion: os\.release\(\)[\s\S]*appVersion: currentReleaseVersion\(\)/,
   'device inventory must be cached per installation while OS and app versions refresh'
 );
 const capabilitySelectionRuntime = {

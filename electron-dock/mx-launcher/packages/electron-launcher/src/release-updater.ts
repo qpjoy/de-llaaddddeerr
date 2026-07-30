@@ -96,12 +96,14 @@ export interface ElectronLauncherReleasePlan {
 }
 
 export interface ElectronLauncherUpdateCheckInput {
-  /** Stable AppCenter product identity; external products should always set it. */
+  /** Stable AppCenter product identity. Kept for existing clients and explicit legacy fallback. */
   productId?: string | null;
-  componentId: string;
+  /** Omit when packageName-based product resolution should select it from componentKind. */
+  componentId?: string | null;
   componentKind?: string;
   currentVersion: string;
-  channel: string;
+  /** Omit when the updater options or resolved AppCenter identity supplies it. */
+  channel?: string | null;
   installId?: string | null;
   userId?: string | null;
   platform?: string | null;
@@ -134,7 +136,35 @@ export interface ElectronLauncherReleaseUpdaterOptions {
   baseUrl: string;
   fetchImpl?: FetchLike;
   reportInstallId?: string | null;
+  /** Existing explicit product identity. The package resolver takes precedence when configured. */
   productId?: string | null;
+  /** Stable name from the application's package.json, used to resolve its Release Center identity. */
+  packageName?: string | null;
+  /** Preferred Release Center channel; the server verifies that AppCenter enables it. */
+  channel?: string | null;
+  /**
+   * Permit productId to be used only when an older server lacks the package
+   * resolver. Opt in per legacy application; new integrations should fail
+   * closed when package registration is missing.
+   */
+  allowLegacyProductFallback?: boolean;
+}
+
+export interface ElectronLauncherReleaseProductIdentity {
+  appId: string;
+  productId: string;
+  packageName: string;
+  launcherMode: 'standalone' | 'embed' | null;
+  networkProductId: string | null;
+  componentId: string;
+  rendererComponentId: string;
+  channel: string;
+  channels: string[];
+}
+
+export interface ElectronLauncherReleaseProductResolveInput {
+  packageName?: string | null;
+  channel?: string | null;
 }
 
 export interface ElectronLauncherReleaseReportInput {
@@ -149,6 +179,8 @@ export interface ElectronLauncherArtifactDownloadInput {
   artifact: ElectronLauncherReleaseArtifactRef;
   targetPath: string;
   maxRedirects?: number;
+  /** Required only when a caller supplies a relative artifact URL directly. */
+  baseUrl?: string;
 }
 
 export interface ElectronLauncherArtifactDownloadResult {
@@ -160,6 +192,7 @@ export interface ElectronLauncherArtifactDownloadResult {
 }
 
 export interface ElectronLauncherReleaseUpdater {
+  resolveProduct(input?: ElectronLauncherReleaseProductResolveInput): Promise<ElectronLauncherReleaseProductIdentity>;
   check(input: ElectronLauncherUpdateCheckInput): Promise<ElectronLauncherUpdateCheckResult>;
   report(input: ElectronLauncherReleaseReportInput): Promise<Record<string, unknown>>;
 }
@@ -167,14 +200,82 @@ export interface ElectronLauncherReleaseUpdater {
 export function createElectronLauncherReleaseUpdater(options: ElectronLauncherReleaseUpdaterOptions): ElectronLauncherReleaseUpdater {
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   const fetchImpl = options.fetchImpl ?? globalFetch();
+  const resolvedProducts = new Map<string, {
+    expiresAt: number;
+    pending: Promise<ElectronLauncherReleaseProductIdentity>;
+  }>();
+  const resolveProduct = async (
+    input: ElectronLauncherReleaseProductResolveInput = {}
+  ): Promise<ElectronLauncherReleaseProductIdentity> => {
+    const packageName = input.packageName?.trim() || options.packageName?.trim() || '';
+    if (!packageName) throw new Error('Release Center packageName is required to resolve product identity');
+    const channel = input.channel?.trim() || options.channel?.trim() || 'stable';
+    const key = `${packageName.toLowerCase()}\u0000${channel.toLowerCase()}`;
+    const cached = resolvedProducts.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.pending;
+    if (cached) resolvedProducts.delete(key);
+    const pending = (async () => {
+      try {
+        const params = new URLSearchParams({ packageName, channel });
+        const payload = await requestJson<{ identity?: ElectronLauncherReleaseProductIdentity }>(
+          fetchImpl,
+          joinUrl(baseUrl, `/internal/v1/releases/products/resolve?${params.toString()}`),
+          'GET'
+        );
+        return normalizeReleaseProductIdentity(payload.identity, packageName, channel);
+      } catch (error) {
+        const legacyProductId = options.productId?.trim() || '';
+        if (
+          options.allowLegacyProductFallback === true
+          && legacyProductId
+          && error instanceof ReleaseCenterRequestError
+          && (error.status === 404 || error.status === 405)
+        ) {
+          return legacyReleaseProductIdentity(legacyProductId, packageName, channel);
+        }
+        throw error;
+      }
+    })();
+    resolvedProducts.set(key, {
+      expiresAt: Date.now() + 5 * 60 * 1000,
+      pending
+    });
+    try {
+      return await pending;
+    } catch (error) {
+      resolvedProducts.delete(key);
+      throw error;
+    }
+  };
   return {
+    resolveProduct,
     async check(input) {
       const checkedAt = new Date().toISOString();
+      const identity = options.packageName?.trim()
+        ? await resolveProduct({ channel: input.channel })
+        : null;
+      const productId = identity?.productId || input.productId?.trim() || options.productId?.trim() || null;
+      const componentId = input.componentId?.trim()
+        || (input.componentKind === 'renderer-ui' ? identity?.rendererComponentId : identity?.componentId)
+        || '';
+      if (!componentId) {
+        throw new Error('Release Center componentId is required when package identity resolution is not configured');
+      }
+      const channel = input.channel?.trim() || identity?.channel || options.channel?.trim() || '';
+      if (!channel) {
+        throw new Error('Release Center channel is required when package identity resolution is not configured');
+      }
+      const effectiveInput: ResolvedElectronLauncherUpdateCheckInput = {
+        ...input,
+        productId,
+        componentId,
+        channel
+      };
       // Preferred path: server-side single-install decision (docs/19 §6). The
       // server owns target lists and rollout bucketing; the full plans list is
       // being withdrawn to admin-only. Fall back to the legacy flow against
       // older servers that do not expose /release/check yet.
-      const installId = input.installId ?? options.reportInstallId ?? null;
+      const installId = effectiveInput.installId ?? options.reportInstallId ?? null;
       if (installId) {
         try {
           const payload = await requestJson<ReleaseCheckPayload>(
@@ -183,16 +284,17 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
             'POST',
             {
               installId,
-              userId: input.userId ?? null,
-              productId: input.productId ?? options.productId ?? null,
-              channel: input.channel,
-              platform: input.platform ?? null,
-              arch: input.arch ?? null,
-              components: { [input.componentId]: input.currentVersion }
+              userId: effectiveInput.userId ?? null,
+              productId: effectiveInput.productId,
+              channel: effectiveInput.channel,
+              platform: effectiveInput.platform ?? null,
+              arch: effectiveInput.arch ?? null,
+              artifactKinds: effectiveInput.componentKind ? [effectiveInput.componentKind] : undefined,
+              components: { [effectiveInput.componentId]: effectiveInput.currentVersion }
             }
           );
           if (payload && typeof payload.status === 'string') {
-            return mapReleaseCheckPayload(payload, input, baseUrl, checkedAt);
+            return mapReleaseCheckPayload(payload, effectiveInput, baseUrl, checkedAt);
           }
         } catch {
           // Older server without /release/check; use the legacy plans flow.
@@ -203,26 +305,35 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
         joinUrl(baseUrl, '/internal/v1/release-management/plans'),
         'GET'
       );
-      const plans = Array.isArray(plansPayload.plans) ? plansPayload.plans : [];
-      const plan = selectReleasePlan(plans, input);
-      const planDecision = plan ? selectPlanDecision(plan, input) : null;
-      const fallbackTargetVersion = planDecision?.targetVersion || input.currentVersion;
+      const plans = (Array.isArray(plansPayload.plans) ? plansPayload.plans : [])
+        .map((plan) => normalizeReleasePlanArtifactUrls(plan, baseUrl));
+      const plan = selectReleasePlan(plans, effectiveInput);
+      const planDecision = plan ? selectPlanDecision(plan, effectiveInput) : null;
+      const fallbackTargetVersion = planDecision?.targetVersion || effectiveInput.currentVersion;
       const decisionPayload = await requestJson<{ decision: ElectronLauncherReleasePolicyDecision }>(
         fetchImpl,
         joinUrl(baseUrl, '/internal/v1/releases/policy/evaluate'),
         'POST',
         {
-          componentKind: planDecision?.componentKind || input.componentKind || 'app-managed',
-          componentId: input.componentId,
-          currentVersion: input.currentVersion,
+          componentKind: planDecision?.componentKind || effectiveInput.componentKind || 'app-managed',
+          componentId: effectiveInput.componentId,
+          currentVersion: effectiveInput.currentVersion,
           targetVersion: fallbackTargetVersion,
-          channel: input.channel,
-          installId: input.installId ?? null,
-          userId: input.userId ?? null
+          channel: effectiveInput.channel,
+          installId: effectiveInput.installId ?? null,
+          userId: effectiveInput.userId ?? null
         }
       );
       const decision = decisionPayload.decision;
-      const artifacts = plan ? matchingArtifacts(plan, input.componentId, input.platform, input.arch) : [];
+      const artifacts = plan
+        ? matchingArtifacts(
+            plan,
+            effectiveInput.componentId,
+            effectiveInput.platform,
+            effectiveInput.arch,
+            effectiveInput.componentKind
+          )
+        : [];
       const gateVerdict = plan?.test?.gate?.verdict;
       const status = !decision.updateAvailable
         ? 'up-to-date'
@@ -265,6 +376,7 @@ export async function downloadElectronLauncherReleaseArtifactToFile(
 ): Promise<ElectronLauncherArtifactDownloadResult> {
   const url = input.artifact.url?.trim();
   if (!url) throw new Error(`Release artifact ${input.artifact.artifactId} has no URL`);
+  const downloadUrl = resolveReleaseArtifactUrl(url, input.baseUrl);
   await mkdir(dirname(input.targetPath), { recursive: true });
   const tempPath = `${input.targetPath}.download`;
   await rm(tempPath, { force: true });
@@ -273,7 +385,7 @@ export async function downloadElectronLauncherReleaseArtifactToFile(
   let digest: string | null = null;
   const expectedDigest = normalizeDigest(input.artifact.digest);
   try {
-    const response = await openDownloadStream(url, input.maxRedirects ?? 3);
+    const response = await openDownloadStream(downloadUrl, input.maxRedirects ?? 3);
     response.stream.on('data', (chunk: Buffer) => {
       bytes += chunk.length;
       hash.update(chunk);
@@ -316,12 +428,21 @@ interface ReleaseCheckPayload {
   signature: { algorithm: string; keyId: string; value: string };
 }
 
+type ResolvedElectronLauncherUpdateCheckInput = Omit<
+  ElectronLauncherUpdateCheckInput,
+  'componentId' | 'channel'
+> & {
+  componentId: string;
+  channel: string;
+};
+
 function mapReleaseCheckPayload(
   payload: ReleaseCheckPayload,
-  input: ElectronLauncherUpdateCheckInput,
+  input: ResolvedElectronLauncherUpdateCheckInput,
   baseUrl: string,
   checkedAt: string
 ): ElectronLauncherUpdateCheckResult {
+  const artifacts = normalizeReleaseArtifactUrls(payload.artifacts, baseUrl);
   const decision: ElectronLauncherReleasePolicyDecision = payload.decision ?? {
     componentKind: input.componentKind || 'app-managed',
     componentId: input.componentId,
@@ -345,7 +466,7 @@ function mapReleaseCheckPayload(
         userId: input.userId ?? null,
         createdBy: 'release-check',
         components: decision.componentKind === 'app-managed' ? { app: decision } : { launcher: decision },
-        artifacts: payload.artifacts ?? [],
+        artifacts,
         rollout: {
           percentage: payload.rollout?.percentage ?? undefined,
           featureKeys: payload.featureFlags ?? []
@@ -360,7 +481,7 @@ function mapReleaseCheckPayload(
     status: payload.status,
     plan,
     decision,
-    artifacts: payload.artifacts ?? [],
+    artifacts,
     reason: payload.reason,
     releaseNotes: payload.releaseNotes ?? null,
     featureFlags: payload.featureFlags ?? [],
@@ -371,7 +492,7 @@ function mapReleaseCheckPayload(
 
 function selectReleasePlan(
   plans: ElectronLauncherReleasePlan[],
-  input: ElectronLauncherUpdateCheckInput
+  input: ResolvedElectronLauncherUpdateCheckInput
 ): ElectronLauncherReleasePlan | null {
   return plans.find((plan) => {
     if (plan.channel !== input.channel) return false;
@@ -379,14 +500,20 @@ function selectReleasePlan(
     if (plan.userId && plan.userId !== input.userId) return false;
     const decision = selectPlanDecision(plan, input);
     if (!decision) return false;
-    const artifacts = matchingArtifacts(plan, input.componentId, input.platform, input.arch);
+    const artifacts = matchingArtifacts(
+      plan,
+      input.componentId,
+      input.platform,
+      input.arch,
+      input.componentKind
+    );
     return !decisionRequiresDownload(decision) || artifacts.some((artifact) => Boolean(artifact.url));
   }) ?? null;
 }
 
 function selectPlanDecision(
   plan: ElectronLauncherReleasePlan,
-  input: ElectronLauncherUpdateCheckInput
+  input: ResolvedElectronLauncherUpdateCheckInput
 ): ElectronLauncherReleasePolicyDecision | null {
   const decisions = [plan.components?.launcher, plan.components?.app].filter(Boolean);
   return decisions.find((decision) => {
@@ -402,12 +529,15 @@ function matchingArtifacts(
   plan: ElectronLauncherReleasePlan,
   componentId: string,
   platform?: string | null,
-  arch?: string | null
+  arch?: string | null,
+  kind?: string | null
 ): ElectronLauncherReleaseArtifactRef[] {
   const normalizedPlatform = platform?.trim() || null;
   const normalizedArch = arch?.trim() || null;
+  const normalizedKind = kind?.trim() || null;
   return (Array.isArray(plan.artifacts) ? plan.artifacts : [])
     .filter((artifact) => artifact.componentId === componentId || !artifact.componentId)
+    .filter((artifact) => !normalizedKind || releasePolicyKindsMatch(artifact.kind, normalizedKind))
     .filter((artifact) => !artifact.platform || !normalizedPlatform || artifact.platform === normalizedPlatform)
     .filter((artifact) => !artifact.arch || artifact.arch === 'universal' || !normalizedArch || artifact.arch === normalizedArch);
 }
@@ -431,6 +561,124 @@ function decisionRequiresDownload(decision: ElectronLauncherReleasePolicyDecisio
   ].includes(decision.componentKind);
 }
 
+function normalizeReleaseProductIdentity(
+  value: ElectronLauncherReleaseProductIdentity | undefined,
+  requestedPackageName: string,
+  requestedChannel: string
+): ElectronLauncherReleaseProductIdentity {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Release Center product resolver returned no identity');
+  }
+  const productId = requiredResolvedIdentityString(value.productId, 'productId');
+  const appId = requiredResolvedIdentityString(value.appId, 'appId');
+  const packageName = requiredResolvedIdentityString(value.packageName, 'packageName');
+  const componentId = requiredResolvedIdentityString(value.componentId, 'componentId');
+  const rendererComponentId = requiredResolvedIdentityString(value.rendererComponentId, 'rendererComponentId');
+  const channel = requiredResolvedIdentityString(value.channel, 'channel');
+  const channels = Array.isArray(value.channels)
+    ? [...new Set(value.channels.map((item) => String(item).trim().toLowerCase()).filter(Boolean))]
+    : [];
+  if (packageName.toLowerCase() !== requestedPackageName.toLowerCase()) {
+    throw new Error(`Release Center resolved a different package identity: ${packageName}`);
+  }
+  if (
+    appId !== productId
+    || componentId !== productId
+    || rendererComponentId !== `${productId}-renderer`
+  ) {
+    throw new Error('Release Center returned an inconsistent product component namespace');
+  }
+  if (channel.toLowerCase() !== requestedChannel.toLowerCase() || !channels.includes(channel.toLowerCase())) {
+    throw new Error(`Release Center did not confirm requested channel: ${requestedChannel}`);
+  }
+  return {
+    appId,
+    productId,
+    packageName,
+    launcherMode: value.launcherMode === 'standalone' || value.launcherMode === 'embed'
+      ? value.launcherMode
+      : null,
+    networkProductId: typeof value.networkProductId === 'string' && value.networkProductId.trim()
+      ? value.networkProductId.trim()
+      : null,
+    componentId,
+    rendererComponentId,
+    channel: channel.toLowerCase(),
+    channels
+  };
+}
+
+function legacyReleaseProductIdentity(
+  productIdValue: string,
+  packageName: string,
+  channelValue: string
+): ElectronLauncherReleaseProductIdentity {
+  const productId = productIdValue.trim().toLowerCase();
+  const channel = channelValue.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(productId)) {
+    throw new Error('Legacy Release Center productId is invalid');
+  }
+  return {
+    appId: productId,
+    productId,
+    packageName,
+    launcherMode: null,
+    networkProductId: null,
+    componentId: productId,
+    rendererComponentId: `${productId}-renderer`,
+    channel,
+    channels: [channel]
+  };
+}
+
+function requiredResolvedIdentityString(value: unknown, field: string): string {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (!normalized) throw new Error(`Release Center product resolver returned no ${field}`);
+  return normalized;
+}
+
+function normalizeReleasePlanArtifactUrls(
+  plan: ElectronLauncherReleasePlan,
+  baseUrl: string
+): ElectronLauncherReleasePlan {
+  return {
+    ...plan,
+    artifacts: normalizeReleaseArtifactUrls(plan.artifacts, baseUrl)
+  };
+}
+
+function normalizeReleaseArtifactUrls(
+  artifacts: ElectronLauncherReleaseArtifactRef[] | null | undefined,
+  baseUrl: string
+): ElectronLauncherReleaseArtifactRef[] {
+  return (Array.isArray(artifacts) ? artifacts : []).map((artifact) => ({
+    ...artifact,
+    url: artifact.url ? resolveReleaseArtifactUrl(artifact.url, baseUrl) : null
+  }));
+}
+
+function resolveReleaseArtifactUrl(value: string, baseUrl?: string): string {
+  const url = value.trim();
+  try {
+    return new URL(url).toString();
+  } catch {
+    if (!baseUrl?.trim()) {
+      throw new Error(`Relative release artifact URL requires baseUrl: ${url}`);
+    }
+    return new URL(url, `${normalizeBaseUrl(baseUrl)}/`).toString();
+  }
+}
+
+class ReleaseCenterRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = 'ReleaseCenterRequestError';
+  }
+}
+
 async function requestJson<T>(
   fetchImpl: FetchLike,
   url: string,
@@ -446,10 +694,13 @@ async function requestJson<T>(
     ...(body ? { body: JSON.stringify(body) } : {})
   });
   const text = await response.text();
-  const payload = text.trim() ? JSON.parse(text) : null;
   if (!response.ok) {
-    throw new Error(`Release Center request failed: ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`);
+    throw new ReleaseCenterRequestError(
+      response.status,
+      `Release Center request failed: ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`
+    );
   }
+  const payload = text.trim() ? JSON.parse(text) : null;
   return payload as T;
 }
 

@@ -392,6 +392,75 @@ wiring and only shows check/download/staged).
 Installer 类走同样的目标圈选，但激活永远手动：`ready-to-install` 后由用户确认
 打开，新版本首启回报 `installer-completed`。
 
+## Layer 6.7: MX-H2I ASAR 与全量安装包双轨发布
+
+MX-H2I 2.1.2 是首个带稳定 ASAR bootstrap 的基座。运行配置中的“应用更新方案”默认
+`asar`，用户也可以选 `installer`。客户端对同一个 `componentId=mx-h2i` 分别发送
+`artifactKinds:["app-asar"]` 或 `["app-installer"]`；服务端不需要为 ASAR 分配第二个
+应用 ID。旧客户端不发送 `artifactKinds`，继续使用原有 installer/renderer 检查路径。
+
+macOS 与 Windows 的 ASAR 打包入口：
+
+```bash
+cd electron-dock/mx-launcher/demos/mx-h2i
+./scripts/build-asar-macos.sh 2.1.3 universal
+scripts\build-asar-windows.cmd 2.1.3 x64
+```
+
+输出位于 `out/release-asar/`，同时生成 `.asar.json`，记录 sha256、平台、架构和最低基座。
+ASAR 只包含 `src/` 与最小 `package.json`，运行时复用已签名全量安装包中的
+`node_modules` 和 native resources。若改动 Electron/Node ABI、native module、
+WireGuard/Mihomo engine、entitlements、图标或 installer 配置，必须走 DMG/EXE，不能
+宣称 ASAR 兼容。
+
+定向上传 ASAR：
+
+```bash
+pnpm --dir electron-dock/mx-launcher/server release:publish -- \
+  --base-url http://10.88.88.88:18090 \
+  --client-id svc_mx-h2i_release_publisher \
+  --product mx-h2i \
+  --kind asar \
+  --artifact electron-dock/mx-launcher/demos/mx-h2i/out/release-asar/MX-H2I-2.1.3-darwin-universal-app.asar \
+  --version 2.1.3 \
+  --current-version 2.1.2 \
+  --channel stable \
+  --platform darwin \
+  --arch universal \
+  --target-install <canary-install-id>
+```
+
+`MX_RELEASE_CLIENT_SECRET` 只能由 CI/Vault 注入。创建的计划固定为
+`app-asar + restart-auto`，但 gate 仍先为 `blocked`；完成 digest、启动和回退验证后才
+批准定向计划。客户端先下载并校验，写
+`<userData>/launcher-packages/mx-h2i.pending.json`，不会在当前连接中替换运行代码。
+用户下次重启才接管；入口同步加载失败会立即回退，进程未达到 ready 就退出则下次启动回退
+上一 ASAR 或安装包基座。更高版本 DMG/EXE 会自动压过较旧 ASAR 指针。
+
+全量安装包入口保持不变：
+
+```bash
+pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:mac:dmg
+pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:win
+```
+
+上传时把 `--kind asar` 改为 `--kind installer`，artifact 指向 `.dmg` 或 `.exe`，并填写
+实际 `platform/arch/version/current-version`。下载和打开系统安装器不会主动断开当前
+连接；只有用户确认退出/重启应用时，MX-H2I 才执行既有的 WireGuard、DNS、PAC 有序清理。
+
+生产兼容顺序固定为：
+
+1. 先滚动部署 Release Center API，但不创建/批准任何新计划；
+2. 定向发布 2.1.2 DMG/EXE 基座，验证旧连接、重装和首启；
+3. 只向已安装 2.1.2 的 canary 发布更高版本 ASAR并验证自动回退；
+4. 复核 `release-check → download-started → artifact-staged-pending-restart → ready`
+   证据后再扩大比例；
+5. 保留 installer 计划作为用户选择和 native 变更通道。
+
+这套顺序不修改 ProductNetwork、WireGuard、DNS、lease、现有 artifact 下载路由，也不对
+已在线客户端发强制重启。服务端 rollout 期间旧 Pod 与新 Pod 可同时接受不带
+`artifactKinds` 的历史请求。
+
 ## Layer 7: Normal Release Pipeline
 
 The V1 full-installer path is now:

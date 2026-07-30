@@ -9,8 +9,8 @@ const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(serverRoot, '../../..');
 // Product selector: `--product luopan` publishes plans for any standalone
 // launcher product. Component naming follows the launcher convention the
-// clients check against: installer plans target `<product>`, hot plans target
-// `<product>-renderer` (override with --component-id). Release matching is
+// clients check against: installer and ASAR plans target `<product>`, renderer
+// hot plans target `<product>-renderer` (override with --component-id). Release matching is
 // componentId-based. The scoped Publisher API additionally requires the
 // product to be registered and enabled in AppCenter.
 const product = safeProductId(args.product || process.env.MX_RELEASE_PRODUCT || 'mx-h2i');
@@ -51,6 +51,9 @@ const version = requiredArg('version', args.version || process.env.MX_RELEASE_VE
 const channel = args.channel || process.env.MX_RELEASE_CHANNEL || 'stable';
 const currentVersion = args.currentVersion || process.env.MX_RELEASE_CURRENT_VERSION || '0.1.0';
 const kind = args.kind || process.env.MX_RELEASE_KIND || 'installer';
+if (!['installer', 'asar', 'hot'].includes(kind)) {
+  throw new Error('--kind must be installer, asar, or hot');
+}
 const e2eResult = args.e2eResult || process.env.MX_RELEASE_E2E_RESULT || 'running';
 if (releaseAccessToken && e2eResult !== 'running') {
   throw new Error('Scoped Publisher plans always start pending; use the gate endpoint or --approve with evidence after validation');
@@ -59,14 +62,12 @@ const storage = args.storage || process.env.MX_RELEASE_ARTIFACT_STORAGE || 'auto
 const artifactPlatform = normalizePlatform(args.platform || process.env.MX_RELEASE_PLATFORM || (kind === 'hot' ? 'all' : process.platform));
 const artifactArch = normalizeArch(args.arch || process.env.MX_RELEASE_ARCH || (kind === 'hot' ? 'all' : process.arch));
 const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, '')}_${randomBytes(4).toString('hex')}`;
-const releaseId = args.releaseId || (kind === 'hot'
-  ? `${product}-hot-${version}-${runId}`
-  : `${product}-installer-${version}-${runId}`);
+const releaseId = args.releaseId || `${product}-${kind}-${version}-${runId}`;
 const planRequestId = optionalArg(args.requestId || process.env.MX_RELEASE_REQUEST_ID)
-  || `release-center-publish-${kind === 'hot' ? 'hot' : 'installer'}-${runId}`;
+  || `release-center-publish-${kind}-${runId}`;
 const gateRequestId = optionalArg(args.gateRequestId || process.env.MX_RELEASE_GATE_REQUEST_ID)
   || `${planRequestId}-gate`;
-const artifactKind = kind === 'hot' ? 'renderer-ui' : 'app-installer';
+const artifactKind = kind === 'hot' ? 'renderer-ui' : kind === 'asar' ? 'app-asar' : 'app-installer';
 const artifactComponentId = kind === 'hot' ? args.componentId || `${product}-renderer` : product;
 // Point-targeting (docs/19 §6.1): a one-user gray release is
 // `--target-user usr_xxx`; repeat or comma-separate for more.
@@ -107,7 +108,9 @@ const body = releaseAccessToken
     ))
   : kind === 'hot'
     ? hotUpdateBody()
-    : installerBody();
+    : kind === 'asar'
+      ? asarUpdateBody()
+      : installerBody();
 const createPath = releaseAccessToken
   ? '/internal/v1/sdk/releases'
   : '/internal/v1/release-management/plans';
@@ -266,35 +269,74 @@ function hotUpdateBody() {
   };
 }
 
+function asarUpdateBody() {
+  return {
+    releaseId,
+    channel,
+    productId: product,
+    appId: product,
+    launcherComponentId: product,
+    launcherUpdatePolicy: 'app-asar',
+    launcherCurrentVersion: currentVersion,
+    launcherTargetVersion: version,
+    appComponentId: `${product}-config`,
+    appUpdatePolicy: 'config-snapshot',
+    appCurrentVersion: currentVersion,
+    appTargetVersion: currentVersion,
+    artifactKind: 'app-asar',
+    artifactVersion: version,
+    artifactUrl,
+    artifactDigest: digest,
+    artifactSizeBytes,
+    artifactPlatform,
+    artifactArch,
+    artifactFileName: basename(artifactPath),
+    activationMode: 'restart-auto',
+    rolloutStrategy: args.rolloutStrategy || (hasExplicitTargets ? 'manual-ring' : 'gray'),
+    rolloutPercentage: numberArg(args.rolloutPercentage, hasExplicitTargets ? 0 : 10),
+    rolloutRings: listArg(args.rolloutRings, ['internal-dogfood', 'canary', 'stable']),
+    featureKeys: listArg(args.featureKeys, [`${product}.release.asar-update`]),
+    targetUserIds,
+    targetInstallIds,
+    releaseNotes,
+    suiteId: args.suiteId || `${product}-asar-release`,
+    topology: args.topology || (isDefaultProduct ? 'h-d-i-asar-release' : `${product}-asar-release`),
+    sites: listArg(args.sites, ['internal-main', 'domestic-main']),
+    e2eResult,
+    createdBy: args.createdBy || 'release-center-publish',
+    requestId: planRequestId
+  };
+}
+
 function scopedReleaseBody(artifactId) {
-  const hotUpdate = kind === 'hot';
+  const stagedUpdate = kind === 'hot' || kind === 'asar';
   return {
     artifactId,
     currentVersion,
     channel,
-    rolloutStrategy: args.rolloutStrategy || (hotUpdate
+    rolloutStrategy: args.rolloutStrategy || (stagedUpdate
       ? 'gray'
       : hasExplicitTargets
         ? 'manual-ring'
         : 'all'),
     rolloutPercentage: numberArg(
       args.rolloutPercentage,
-      hotUpdate ? 10 : hasExplicitTargets ? 0 : 100
+      stagedUpdate ? 10 : hasExplicitTargets ? 0 : 100
     ),
     rolloutRings: listArg(
       args.rolloutRings,
-      hotUpdate ? ['internal-dogfood', 'canary', 'stable'] : ['internal-dogfood', 'stable']
+      stagedUpdate ? ['internal-dogfood', 'canary', 'stable'] : ['internal-dogfood', 'stable']
     ),
-    featureKeys: hotUpdate
-      ? listArg(args.featureKeys, [`${product}.release.hot-update`])
+    featureKeys: stagedUpdate
+      ? listArg(args.featureKeys, [`${product}.release.${kind === 'asar' ? 'asar' : 'hot'}-update`])
       : [],
     targetUserIds,
     targetInstallIds,
     releaseNotes,
-    suiteId: args.suiteId || `${product}-${hotUpdate ? 'hot' : 'installer'}-release`,
+    suiteId: args.suiteId || `${product}-${kind}-release`,
     topology: args.topology || (isDefaultProduct
-      ? (hotUpdate ? 'h-d-i-hot-release' : 'h-d-i-installer-release')
-      : `${product}-${hotUpdate ? 'hot' : 'installer'}-release`),
+      ? `h-d-i-${kind}-release`
+      : `${product}-${kind}-release`),
     sites: listArg(args.sites, ['internal-main', 'domestic-main']),
     requestId: planRequestId
   };

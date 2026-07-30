@@ -63,6 +63,98 @@ test('release checks bind external callers to productId and ignore planned no-op
   assert.equal(noOp.status, 'up-to-date');
 });
 
+test('release checks let new clients select ASAR without changing legacy installer matching', () => {
+  const installerPlan = releasePlan('mx-h2i', 'sha256:installer');
+  installerPlan.releaseId = 'mx-h2i-installer-2.1.2';
+  installerPlan.createdAt = '2026-07-28T01:00:00.000Z';
+  installerPlan.rollout.percentage = 100;
+  const asarPlan = releasePlan('mx-h2i', 'sha256:asar', {
+    releaseId: 'mx-h2i-asar-2.1.3',
+    launcherUpdatePolicy: 'app-asar',
+    launcherCurrentVersion: '2.1.2',
+    launcherTargetVersion: '2.1.3',
+    artifactKind: 'app-asar',
+    artifactPlatform: 'darwin',
+    artifactArch: 'arm64',
+    artifactFileName: 'MX-H2I-2.1.3-darwin-arm64-app.asar'
+  });
+  asarPlan.createdAt = '2026-07-28T02:00:00.000Z';
+  asarPlan.rollout.percentage = 100;
+
+  const selectedAsar = evaluateReleaseCheck([installerPlan, asarPlan], {
+    installId: 'install_h2i',
+    productId: 'mx-h2i',
+    channel: 'shadow',
+    platform: 'darwin',
+    arch: 'arm64',
+    artifactKinds: ['app-asar'],
+    components: { 'mx-h2i': '2.1.2' }
+  });
+  assert.equal(selectedAsar.releaseId, 'mx-h2i-asar-2.1.3');
+  assert.equal(selectedAsar.artifacts[0]?.kind, 'app-asar');
+
+  const legacySelection = evaluateReleaseCheck([installerPlan, asarPlan], {
+    installId: 'install_h2i',
+    productId: 'mx-h2i',
+    channel: 'shadow',
+    platform: 'darwin',
+    arch: 'arm64',
+    components: { 'mx-h2i': '2.1.2' }
+  });
+  assert.equal(legacySelection.releaseId, 'mx-h2i-asar-2.1.3');
+});
+
+test('release product identity resolves by package name without changing network identity', async () => {
+  const store = new MemoryStore(testRuntimeConfig());
+  store.upsertAppCenterApp({
+    appId: 'other-desktop',
+    packageName: '@example/other-desktop',
+    launcherMode: 'embed',
+    productNetworkId: 'shared-network',
+    channels: ['beta', 'stable']
+  });
+  const controller = new ReleaseController(store);
+
+  const resolved = await controller.resolveReleaseProduct('@example/other-desktop', 'beta');
+  assert.deepEqual(resolved.identity, {
+    appId: 'other-desktop',
+    productId: 'other-desktop',
+    packageName: '@example/other-desktop',
+    launcherMode: 'embed',
+    networkProductId: 'shared-network',
+    componentId: 'other-desktop',
+    rendererComponentId: 'other-desktop-renderer',
+    channel: 'beta',
+    channels: ['beta', 'stable']
+  });
+});
+
+test('release product identity supports the historical Luopan row and fails closed on ambiguity', async () => {
+  const store = new MemoryStore(testRuntimeConfig());
+  store.upsertAppCenterApp({
+    appId: 'luopan',
+    packageName: null,
+    launcherMode: 'standalone',
+    channels: ['shadow', 'stable']
+  });
+  const controller = new ReleaseController(store);
+
+  assert.equal(
+    (await controller.resolveReleaseProduct('@qpjoy/luopan-demo', 'shadow')).identity.productId,
+    'luopan'
+  );
+
+  store.upsertAppCenterApp({
+    appId: 'luopan-copy',
+    packageName: '@qpjoy/luopan-demo',
+    channels: ['shadow']
+  });
+  await assert.rejects(
+    controller.resolveReleaseProduct('@qpjoy/luopan-demo', 'shadow'),
+    (error) => statusOf(error) === 409
+  );
+});
+
 test('Publisher-owned test runs reject generic steps but remain completable through the release gate', () => {
   const store = new MemoryStore(testRuntimeConfig());
   const created = store.createPublisherReleaseManagementPlan({
@@ -175,6 +267,43 @@ test('SDK release upload requires publish scope and product binding', async () =
     ),
     (error) => statusOf(error) === 400
   );
+});
+
+test('SDK publisher accepts a product-scoped app-asar and derives restart-auto policy', async (t) => {
+  const storeDir = await mkdtemp(join(tmpdir(), 'mx-release-sdk-asar-test-'));
+  const previousStoreDir = process.env.MX_RELEASE_ARTIFACT_STORE_DIR;
+  const previousStorage = process.env.MX_RELEASE_ARTIFACT_STORAGE;
+  process.env.MX_RELEASE_ARTIFACT_STORE_DIR = storeDir;
+  process.env.MX_RELEASE_ARTIFACT_STORAGE = 'server';
+  t.after(async () => {
+    if (previousStoreDir === undefined) delete process.env.MX_RELEASE_ARTIFACT_STORE_DIR;
+    else process.env.MX_RELEASE_ARTIFACT_STORE_DIR = previousStoreDir;
+    if (previousStorage === undefined) delete process.env.MX_RELEASE_ARTIFACT_STORAGE;
+    else process.env.MX_RELEASE_ARTIFACT_STORAGE = previousStorage;
+    await rm(storeDir, { recursive: true, force: true });
+  });
+
+  const payload = 'signed luopan app asar';
+  const harness = controllerHarness();
+  const uploaded = await harness.controller.uploadSdkArtifact(
+    'Bearer publisher-token',
+    artifactRequest(payload),
+    {
+      ...artifactQuery(payload),
+      releaseId: 'luopan-asar-0.2.0',
+      kind: 'app-asar',
+      fileName: 'Luopan-0.2.0-darwin-arm64-app.asar'
+    }
+  );
+  const created = await harness.controller.createSdkManagementPlan('Bearer publisher-token', {
+    artifactId: uploaded.artifact.artifactId,
+    currentVersion: '0.1.0',
+    requestId: 'luopan-asar-release-001'
+  });
+  assert.equal(uploaded.artifact.kind, 'app-asar');
+  assert.equal(harness.createInputs[0]?.launcherUpdatePolicy, 'app-asar');
+  assert.equal(harness.createInputs[0]?.activationMode, 'restart-auto');
+  assert.equal(created.plan.artifacts[0]?.kind, 'app-asar');
 });
 
 test('SDK release plan derives artifact identity, actor, and a pending blocked gate from uploaded metadata', async (t) => {
@@ -650,7 +779,11 @@ function releasePlan(
     publisherRequestFingerprint: input.publisherRequestFingerprint ?? null,
     components: {
       launcher: {
-        componentKind: input.launcherUpdatePolicy === 'renderer-ui' ? 'renderer-ui' : 'app-installer',
+        componentKind: input.launcherUpdatePolicy === 'renderer-ui'
+          ? 'renderer-ui'
+          : input.launcherUpdatePolicy === 'app-asar'
+            ? 'app-asar'
+            : 'app-installer',
         componentId: input.launcherComponentId ?? productId,
         currentVersion: input.launcherCurrentVersion ?? '0.1.0',
         targetVersion: input.launcherTargetVersion ?? '0.2.0',
@@ -678,7 +811,7 @@ function releasePlan(
     },
     artifacts: [{
       artifactId: 'artifact_test',
-      kind: 'app-installer',
+      kind: input.artifactKind === 'app-asar' ? 'app-asar' : 'app-installer',
       componentId: productId,
       version: '0.2.0',
       source: 'manual-upload',
@@ -688,9 +821,9 @@ function releasePlan(
       sizeBytes: input.artifactSizeBytes ?? 1,
       platform: 'darwin',
       arch: 'arm64',
-      fileName: 'luopan-0.2.0.dmg',
-      activation: 'installer-manual',
-      autoApply: false,
+      fileName: input.artifactFileName ?? 'luopan-0.2.0.dmg',
+      activation: input.activationMode === 'restart-auto' ? 'restart-auto' : 'installer-manual',
+      autoApply: input.artifactKind === 'app-asar',
       restartRequired: true,
       requiredAppRestart: true,
       notes: []

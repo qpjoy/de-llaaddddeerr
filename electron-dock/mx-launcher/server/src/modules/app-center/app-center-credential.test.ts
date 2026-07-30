@@ -75,6 +75,38 @@ test('App creation issues one product-scoped Publisher credential and idempotent
   }
 });
 
+test('AppCenter rejects duplicate package identities before issuing a Publisher', async () => {
+  const store = new MemoryStore(loadConfig());
+  await store.bootstrapUserCenter();
+  const controller = new AppCenterController(store);
+  const previousOpsToken = process.env.MX_INTERNAL_OPS_TOKEN;
+  const opsToken = 'app-center-package-identity-test-ops-token';
+  process.env.MX_INTERNAL_OPS_TOKEN = opsToken;
+
+  try {
+    await controller.upsertApp('package-owner', opsToken, {
+      displayName: 'Package Owner',
+      packageName: '@example/shared-package'
+    });
+    await assert.rejects(
+      controller.upsertApp('package-collision', opsToken, {
+        displayName: 'Package Collision',
+        packageName: '@example/shared-package'
+      }),
+      (error) => statusOf(error) === 409
+    );
+    assert.equal(await store.getAppCenterApp('package-collision'), null);
+    assert.equal(
+      (await store.listUserCenterServiceAccounts())
+        .some((item) => item.serviceAccountId === 'svc_package-collision_release_publisher'),
+      false
+    );
+  } finally {
+    if (previousOpsToken === undefined) delete process.env.MX_INTERNAL_OPS_TOKEN;
+    else process.env.MX_INTERNAL_OPS_TOKEN = previousOpsToken;
+  }
+});
+
 test('Service-account credential rotation invalidates the old secret', async () => {
   const store = new MemoryStore(loadConfig());
   await store.bootstrapUserCenter();

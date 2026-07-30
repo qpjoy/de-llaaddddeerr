@@ -229,7 +229,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
   openapi: '3.1.0',
   info: {
     title: 'MX Launcher Integration API',
-    version: '2.0.0-shadow',
+    version: '2.0.1-shadow',
     description: 'Internal-authoritative integration contract for MX-H2I, User Center, Permission Center, Release Center and the SDK Gateway.'
   },
   servers: [
@@ -285,7 +285,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'App Center Admin',
         summary: '创建 AppCenter 应用并签发 Release Publisher',
-        description: 'Internal ops 管理接口，要求 x-mx-ops-token。创建 enabled 应用时，平台自动 ensure 仅绑定该 appId 的 Release Publisher service account；账号尚无 credential 时只在本次响应返回一次明文 clientSecret。相同应用的幂等重试不会查询或轮换旧 secret，publisher.credential 返回 null。',
+        description: 'Internal ops 管理接口，要求 x-mx-ops-token。packageName 必须是应用构建元数据中的真实稳定值，并且在 AppCenter 唯一；重复值返回 409，避免用户端解析到错误发布产品。创建 enabled 应用时，平台自动 ensure 仅绑定该 appId 的 Release Publisher service account；账号尚无 credential 时只在本次响应返回一次明文 clientSecret。相同应用的幂等重试不会查询或轮换旧 secret，publisher.credential 返回 null。',
         operationId: 'createAppCenterAppWithPublisher',
         scopes: [],
         auth: 'ops-token',
@@ -293,11 +293,12 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           'curl -sS -X POST "$BASE/internal/v1/app-center/apps" \\',
           '  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \\',
           '  -H "content-type: application/json" \\',
-          '  --data \'{"appId":"luopan","displayName":"Luopan","launcherMode":"standalone","enabled":true,"requestedBy":"internal-release-admin"}\''
+          '  --data \'{"appId":"luopan","displayName":"Luopan","packageName":"@qpjoy/luopan-demo","launcherMode":"standalone","enabled":true,"requestedBy":"internal-release-admin"}\''
         ].join('\n'),
         request: {
           appId: 'luopan',
           displayName: 'Luopan',
+          packageName: '@qpjoy/luopan-demo',
           launcherMode: 'standalone',
           enabled: true,
           requestedBy: 'internal-release-admin'
@@ -311,7 +312,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'App Center Admin',
         summary: '幂等更新应用并补齐 Release Publisher credential',
-        description: 'Internal ops 管理接口，要求 x-mx-ops-token。appId 取自路径。新应用或尚无 credential 的旧应用会得到一次性 publisher.credential；已有 credential 的幂等更新保留数据库 verifier，并在同一响应结构中返回 publisher.credential=null。一次性响应丢失时必须调用 credential rotate 接口，不能查询旧值。',
+        description: 'Internal ops 管理接口，要求 x-mx-ops-token。appId 取自路径；packageName 必须与应用构建元数据一致且全局唯一。新应用或尚无 credential 的旧应用会得到一次性 publisher.credential；已有 credential 的幂等更新保留数据库 verifier，并在同一响应结构中返回 publisher.credential=null。一次性响应丢失时必须调用 credential rotate 接口，不能查询旧值。',
         operationId: 'upsertAppCenterAppWithPublisher',
         scopes: [],
         auth: 'ops-token',
@@ -320,10 +321,11 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           'curl -sS -X POST "$BASE/internal/v1/app-center/apps/luopan" \\',
           '  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \\',
           '  -H "content-type: application/json" \\',
-          '  --data \'{"displayName":"Luopan","launcherMode":"standalone","enabled":true,"requestedBy":"internal-release-admin"}\''
+          '  --data \'{"displayName":"Luopan","packageName":"@qpjoy/luopan-demo","launcherMode":"standalone","enabled":true,"requestedBy":"internal-release-admin"}\''
         ].join('\n'),
         request: {
           displayName: 'Luopan',
+          packageName: '@qpjoy/luopan-demo',
           launcherMode: 'standalone',
           enabled: true,
           requestedBy: 'internal-release-admin'
@@ -977,11 +979,39 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         }
       })
     },
+    '/internal/v1/releases/products/resolve': {
+      get: operation({
+        tag: 'Release Consumer',
+        summary: '按安装包身份解析发布产品',
+        description: '用户端从自身 package.json 读取 packageName，并用它取得服务端登记的 productId、组件命名空间与可用 channel。不要列出所有应用后猜测，也不要从 Luopan 示例复制 productId。旧客户端继续显式发送 productId；两条路径兼容共存。packageName 未登记/产品停用返回 404，重复登记返回 409，避免误领其他应用版本。',
+        operationId: 'resolveReleaseProduct',
+        routeId: 'release.product.resolve',
+        auth: 'internal-consumer',
+        parameters: [
+          queryParameter('packageName', '@qpjoy/luopan-demo', true, { maxLength: 240 }),
+          queryParameter('channel', 'shadow', false, { pattern: '^[a-z0-9][a-z0-9._-]*$', maxLength: 64 })
+        ],
+        curl: 'curl -sS -G "$BASE/internal/v1/releases/products/resolve" --data-urlencode "packageName=@qpjoy/luopan-demo" --data-urlencode "channel=shadow"',
+        response: {
+          identity: {
+            appId: 'luopan',
+            productId: 'luopan',
+            packageName: '@qpjoy/luopan-demo',
+            launcherMode: 'standalone',
+            networkProductId: 'luopan',
+            componentId: 'luopan',
+            rendererComponentId: 'luopan-renderer',
+            channel: 'shadow',
+            channels: ['shadow', 'beta', 'stable']
+          }
+        }
+      })
+    },
     '/internal/v1/release/check': {
       post: operation({
         tag: 'Release Consumer',
         summary: '检查当前安装可见的更新',
-        description: '应用运行时的稳定入口。服务端按 productId、installId/userId、channel、platform、arch、gate 与灰度规则返回单安装决策，不暴露完整发布计划。外部产品必须传 productId，避免派生组件名与其他产品碰撞。该接口用于登录前检查，因此不要求开发者 Bearer；installId/userId 是 rollout selector，不是安全身份，且只能经已建立的 Internal 产品网络访问。',
+        description: '应用运行时的稳定入口。服务端按 productId、installId/userId、channel、platform、arch、可选 artifactKinds、gate 与灰度规则返回单安装决策，不暴露完整发布计划。artifactKinds 允许新客户端在同一 product component 上选择 app-asar 或 app-installer；旧客户端省略时保持历史匹配。外部产品必须传由 packageName 解析或旧版本地声明得到的 productId，避免派生组件名与其他产品碰撞。该接口用于登录前检查，因此不要求开发者 Bearer；installId/userId 是 rollout selector，不是安全身份，且只能经已建立的 Internal 产品网络访问。',
         operationId: 'checkReleaseUpdate',
         routeId: 'release.check',
         auth: 'internal-consumer',
@@ -992,6 +1022,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           channel: 'shadow',
           platform: 'darwin',
           arch: 'arm64',
+          artifactKinds: ['app-asar'],
           components: {
             luopan: '0.1.0',
             'luopan-renderer': '0.1.0'
@@ -1109,7 +1140,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Release Publisher',
         summary: '上传产品发布制品',
-        description: '仅 product-scoped service account 可调用。body 是原始二进制；app-installer 的 componentId 必须精确等于 productId，renderer-ui 必须精确等于 productId-renderer。productId 不能以保留后缀 -renderer/-config 结尾，且两个派生组件名不能与已启用 AppCenter 产品冲突。storage 由平台配置决定，调用方不能选择；OSS 对象按完整 SHA-256 内容寻址。当前稳定开发者契约支持 app-installer 与 renderer-ui。',
+        description: '仅 product-scoped service account 可调用。body 是原始二进制；app-installer/app-asar 的 componentId 必须精确等于 productId，renderer-ui 必须精确等于 productId-renderer。app-asar 必须使用 .asar 文件并携带 platform/arch，激活方式固定为 restart-auto。productId 不能以保留后缀 -renderer/-config 结尾，且两个派生组件名不能与已启用 AppCenter 产品冲突。storage 由平台配置决定，调用方不能选择；OSS 对象按完整 SHA-256 内容寻址。当前稳定开发者契约支持 app-installer、app-asar 与 renderer-ui。',
         operationId: 'uploadSdkReleaseArtifact',
         routeId: 'sdk.release_artifacts.upload',
         scopes: ['sdk.release.publish', 'release.manage'],

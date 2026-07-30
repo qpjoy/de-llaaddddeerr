@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const mainSource = readFileSync(
-  fileURLToPath(new URL('../src/main.cjs', import.meta.url)),
+  fileURLToPath(new URL('../src/main-runtime.cjs', import.meta.url)),
   'utf8'
 );
 

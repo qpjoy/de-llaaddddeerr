@@ -131,17 +131,25 @@ export function createElectronLauncherReleaseUpdateExecutor(
       : null;
   };
 
-  async function stageArtifact(releaseId: string, artifact: ElectronLauncherReleaseArtifactRef): Promise<string> {
+  async function stageArtifact(
+    releaseId: string,
+    artifact: ElectronLauncherReleaseArtifactRef,
+    artifactBaseUrl: string
+  ): Promise<string> {
     const fileName = artifact.fileName
       ? basename(artifact.fileName)
       : artifact.url
-        ? basename(new URL(artifact.url).pathname) || artifact.artifactId
+        ? basename(new URL(artifact.url, `${artifactBaseUrl.replace(/\/+$/, '')}/`).pathname) || artifact.artifactId
         : artifact.artifactId;
     const targetPath = join(baseDir, STAGING_DIR, releaseId, fileName);
     phase('downloading', { artifactId: artifact.artifactId, targetPath });
     await report('download-started', { artifactId: artifact.artifactId, releaseId });
     phase('verifying', { artifactId: artifact.artifactId });
-    await downloadElectronLauncherReleaseArtifactToFile({ artifact, targetPath });
+    await downloadElectronLauncherReleaseArtifactToFile({
+      artifact,
+      targetPath,
+      baseUrl: artifactBaseUrl
+    });
     return targetPath;
   }
 
@@ -246,7 +254,7 @@ export function createElectronLauncherReleaseUpdateExecutor(
         };
         executions.push(execution);
         try {
-          const stagedPath = await stageArtifact(releaseId, artifact);
+          const stagedPath = await stageArtifact(releaseId, artifact, check.baseUrl);
           execution.stagedPath = stagedPath;
           execution.phase = 'staged';
           await report(artifactClass === 'installer' ? 'installer-downloaded' : 'artifact-staged', {

@@ -19,7 +19,7 @@ access token。
 
 | 角色 | 运行位置 | 接口 | 凭据与权限 |
 | --- | --- | --- | --- |
-| Consumer | Luopan/MX-H2I 用户端 | `POST /internal/v1/release/check`、`GET /internal/v1/releases/history`、`POST /internal/v1/release/reports`、响应中的 download URL | 走应用自己的隧道内 VIP；不得持有 Publisher 凭据 |
+| Consumer | Luopan/MX-H2I 用户端 | `GET /internal/v1/releases/products/resolve`、`POST /internal/v1/release/check`、`GET /internal/v1/releases/history`、`POST /internal/v1/release/reports`、响应中的 download URL | 走应用自己的隧道内 VIP；不得持有 Publisher 凭据 |
 | Publisher | 受保护的 Internal CI 或发版主机 | `POST /internal/v1/sdk/releases/artifacts`、`GET /internal/v1/sdk/releases/artifacts/{artifactId}`、`POST/GET /internal/v1/sdk/releases`、`GET /internal/v1/sdk/releases/{planId}` | service account + `sdk.release.publish/read` |
 | Approver | 受保护的审批作业或发布负责人 | `POST /internal/v1/sdk/releases/{planId}/gate` | service account + `sdk.release.approve` |
 
@@ -38,14 +38,27 @@ Publisher 必须从以下任一入口调用：
 `client_credentials` 或 Publisher API。Domestic edge 会拒绝
 `client_credentials`；把 Publisher 路由加入公网 allowlist 也不属于本接入方案。
 
-## 2. Luopan 的固定发布身份
+## 2. 发布身份归属与 Luopan 示例
+
+`productId` 是平台分配并登记在 AppCenter 的稳定发布身份，不是让所有客户端复制
+`luopan`。用户端应从自己的构建元数据读取 `packageName`，通过
+`GET /internal/v1/releases/products/resolve` 取得 `productId`、安装包/renderer 组件名和
+channel。不能先拉取所有应用再按名称猜测。
+
+旧版本继续显式发送本地声明的 `productId/componentId/channel`，接口与计划选择逻辑不变；
+新版解析只服务于 Release Center，不会改写 ProductNetwork、WireGuard、DNS 或现有连接。
+Luopan 的历史 AppCenter 记录早于 `packageName` 字段，服务端保留
+`@qpjoy/luopan-demo → luopan` 兼容映射。其他新产品没有这种隐式回退，必须在注册时写入真实
+`packageName`。
 
 Luopan 当前代码中的发布身份如下，发版作业必须与它一致：
 
 | 内容 | 值 |
 | --- | --- |
+| `packageName` | `@qpjoy/luopan-demo` |
 | `productId` | `luopan` |
 | 完整安装包 `componentId` | `luopan` |
+| ASAR 应用热更 `componentId` | `luopan` |
 | renderer 热更新 `componentId` | `luopan-renderer` |
 | channel | `shadow` |
 | macOS 安装包 | DMG，`platform=darwin`，`arch` 按实际包填写 |
@@ -63,7 +76,8 @@ AppCenter 产品。平台必须在发放 service account 前完成冲突检查�
 `platform + arch` 文件都是独立 artifact，也应建立独立 plan。单架构包不得标成
 `universal`；同一个版本可为不同平台重复以下流程。
 
-完整安装包统一使用 `kind=app-installer`。不要使用兼容旧 MX-H2I 的
+完整安装包统一使用 `kind=app-installer`，应用代码 ASAR 使用 `kind=app-asar`，两者
+都以产品 `productId` 为 `componentId`。不要使用兼容旧 MX-H2I 的
 `mx-h2i-installer`。renderer bundle 使用 `kind=renderer-ui` 和
 `componentId=luopan-renderer`；本文 curl 以完整安装包为例。
 
@@ -82,6 +96,7 @@ PROVISION_JSON="$(
   -H 'content-type: application/json' \
   --data-binary '{
     "displayName": "Luopan",
+    "packageName": "@qpjoy/luopan-demo",
     "launcherMode": "standalone",
     "requestedBy": "internal-release-admin"
   }'
@@ -313,12 +328,12 @@ query 字段：
 | --- | --- |
 | `productId` | 必填；1–120 字符的小写 `[a-z0-9][a-z0-9._-]*`；不得以保留的 `-renderer` / `-config` 结尾；必须命中 service account 的 `allowedProductIds` |
 | `releaseId` | 必填；1–160 字符；首字符必须是字母或数字，其余只允许 `[A-Za-z0-9._-]`；由产品 CI 生成的稳定、可审计 ID |
-| `kind` | 必填；Luopan 完整包使用 `app-installer` |
+| `kind` | 必填；支持 `app-installer`、`app-asar`、`renderer-ui` |
 | `version` | 必填；必须与安装包内应用版本一致 |
-| `componentId` | 必填且精确绑定产品；`app-installer` 必须等于 `productId`，`renderer-ui` 必须等于 `${productId}-renderer` |
+| `componentId` | 必填且精确绑定产品；`app-installer` / `app-asar` 必须等于 `productId`，`renderer-ui` 必须等于 `${productId}-renderer` |
 | `fileName` | 必填；保留正确扩展名，建议只用安全 ASCII 文件名 |
 | `digest` | 必填；文件 sha256，可传 hex 或 `sha256:<hex>` |
-| `platform` / `arch` | 一般可选，但 `app-installer` 两者都必填 |
+| `platform` / `arch` | 一般可选，但 `app-installer` / `app-asar` 两者都必填 |
 | `channel` | 可选，默认 `stable`；1–64 字符；首字符必须是小写字母或数字，其余只允许 `[a-z0-9._-]`；服务端会规范为小写，Luopan 应显式传 `shadow` |
 
 `storage` 不对开发者开放：Internal 根据服务端配置选择本地或 OSS，调用方不得传
@@ -351,6 +366,14 @@ Linux CI 可把 `shasum -a 256` 换成 `sha256sum`。Windows/EXE 使用
 `platform=win32&arch=x64`，Linux/AppImage 使用
 `platform=linux&arch=<实际架构>`。文件内容、digest 或扩展名不一致时上传直接失败，
 不会生成可供 plan 引用的 artifact。
+
+`app-asar` 的文件名必须以 `.asar` 结尾，计划会派生
+`updatePolicy=app-asar`、`activation=restart-auto`。它只应包含应用 JavaScript、HTML
+和静态资源；native module、WireGuard/Mihomo 引擎、Electron/Node ABI 或 entitlements
+变化必须发布 DMG/EXE。客户端检查时按用户配置分别发送
+`artifactKinds:["app-asar"]` 或 `["app-installer"]`，所以两类计划可以共享同一
+`componentId`，无需给 ASAR 另造或写死应用 ID。省略 `artifactKinds` 的旧客户端继续按
+原有计划匹配。
 
 读取服务端登记的 metadata（不会返回 OSS 凭据）：
 
@@ -557,10 +580,42 @@ promotion 和对既有 plan 的延后审批应使用本章 curl：复用服务�
 `artifactId`，为全量 create 使用新的稳定 `requestId`，不要再次运行 CLI 并误以为它会
 自动复用旧 artifact。
 
-## 8. Consumer 保持现有接法
+## 8. Consumer 的兼容接法
 
-Luopan 主进程继续通过 `@qpjoy/electron-launcher` 的 release updater 调用现有接口。
-下面只用于排障，不应替代包内 updater。定向 plan 的 gate 为 `blocked` 时预期得到
+新版主进程通过 `@qpjoy/electron-launcher` 的 release updater 按 package 解析发布身份；
+旧版显式 `productId` 的调用继续有效：
+
+```ts
+const updater = createElectronLauncherReleaseUpdater({
+  baseUrl: internalBaseUrl,
+  packageName: '@example/my-desktop-app',
+  channel: 'stable',
+  reportInstallId: installId
+});
+
+const result = await updater.check({
+  componentKind: 'app-installer',
+  currentVersion: app.getVersion(),
+  installId,
+  platform: process.platform,
+  arch: process.arch
+});
+```
+
+只有正处于服务端滚动升级期的历史应用，才可同时提供原 `productId` 并显式设置
+`allowLegacyProductFallback: true`；该回退只处理旧服务端返回的 404/405。新应用不要开启，
+否则注册遗漏可能被掩盖。
+
+下面的 Luopan curl 只用于排障，不应替代包内 updater。先验证解析结果：
+
+```bash
+curl -fsS -G "$BASE/internal/v1/releases/products/resolve" \
+  --data-urlencode 'packageName=@qpjoy/luopan-demo' \
+  --data-urlencode 'channel=shadow' |
+  jq
+```
+
+定向 plan 的 gate 为 `blocked` 时预期得到
 `status=blocked`；gate 变为 `passed` 后，只有圈定的 user/install 才会得到
 `update-available`：
 
@@ -632,15 +687,16 @@ upload 用稳定 `releaseId` 串联 artifact 证据；create/gate 使用可追�
 
 Luopan 之外的开发者按相同模型接入：
 
-1. 平台先注册 ProductNetwork/AppCenter，并确定唯一 `productId` 和小写 channel；检查
+1. 平台先注册 ProductNetwork/AppCenter，写入应用真实且唯一的 `packageName`，并确定唯一 `productId` 和小写 channel；检查
    `productId` 不使用保留的 `-renderer/-config` 后缀，两个派生组件也不与启用产品冲突；
-2. 平台 upsert AppCenter 应用并把一次性 Publisher secret 写入该应用 CI/Vault；另建独立 Approver credential；
-3. 产品 CI 构建并完成 OS 签名/公证；Release Center 不替代构建、签名或 notarization；
-4. CI 计算 sha256，通过 scoped artifact endpoint 上传；
-5. CI 只用 `artifactId` 创建 `blocked`（待验证）定向 plan，并先做离线/CI artifact 验证；
-6. Approver 过定向 gate 后，圈定 Consumer 才使用现有 updater 真机升级并 report；
-7. Approver 依据定向客户端证据建立并审批全量 plan；
-8. 每个平台/架构独立验证；回退版本必须仍有 gate-passed 全量 plan 和可下载 artifact。
+2. 用 `/internal/v1/releases/products/resolve?packageName=...` 验证返回的发布身份与 channel；重复 package 必须先清理，不能让客户端任选其一；
+3. 平台 upsert AppCenter 应用并把一次性 Publisher secret 写入该应用 CI/Vault；另建独立 Approver credential；
+4. 产品 CI 构建并完成 OS 签名/公证；Release Center 不替代构建、签名或 notarization；
+5. CI 计算 sha256，通过 scoped artifact endpoint 上传；
+6. CI 只用 `artifactId` 创建 `blocked`（待验证）定向 plan，并先做离线/CI artifact 验证；
+7. Approver 过定向 gate 后，圈定 Consumer 才使用现有 updater 真机升级并 report；
+8. Approver 依据定向客户端证据建立并审批全量 plan；
+9. 每个平台/架构独立验证；回退版本必须仍有 gate-passed 全量 plan 和可下载 artifact。
 
 接入方不需要访问 Admin 全量 Release Management API、K8s、数据库或 OSS 凭据。若需求超出
 上述 SDK facade，应先扩展受 scope 和 product allowlist 约束的契约，不要把 Internal ops
