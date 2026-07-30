@@ -3277,8 +3277,7 @@ export class MemoryStore implements PlatformStore {
     if (!plan) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
     const currentVerdict = plan.test.gate.verdict;
     const gateIsTerminal = currentVerdict === 'passed'
-      || currentVerdict === 'failed'
-      || plan.test.run.state === 'blocked';
+      || currentVerdict === 'failed';
     if (gateIsTerminal) {
       if (currentVerdict === input.status) return plan;
       throw new Error(
@@ -3411,7 +3410,10 @@ export class MemoryStore implements PlatformStore {
     } else if (status === 'blocked') {
       run.state = 'blocked';
       run.finishedAt = step.createdAt;
-    } else if (run.steps.length > 0 && run.steps.every((item) => item.status === 'passed')) {
+    } else if (
+      status === 'passed'
+      && (allowPublisherGate || run.steps.length > 0 && run.steps.every((item) => item.status === 'passed'))
+    ) {
       run.state = 'passed';
       run.finishedAt = step.createdAt;
     }

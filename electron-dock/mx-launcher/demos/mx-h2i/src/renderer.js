@@ -139,6 +139,11 @@ root.addEventListener('click', (event) => {
     void setScreen('advanced');
     return;
   }
+  if (action === 'copy-install-id') {
+    phoneMenuOpen = false;
+    void copyInstallationId();
+    return;
+  }
   if (action === 'show-appcenter') {
     phoneMenuOpen = false;
     appShellMenuOpen = false;
@@ -1101,10 +1106,44 @@ function renderAdvancedPhone() {
         ${renderAdvancedRow('应用设置', 'AppCenter / H2O embed defaults', '⚙')}
         ${renderAdvancedRow('更多设置', 'network, release, diagnostics', '…')}
       </section>
+      ${renderInstallationIdentityPanel()}
       ${renderDiagnosticLogPanel()}
       ${renderWireGuardDiagnostics()}
       ${renderConfigForm()}
     </section>
+  `;
+}
+
+function renderInstallationIdentityPanel() {
+  const installation = state.installation || {};
+  const installId = installation.installId || '-';
+  const deviceId = installation.deviceId || '-';
+  return `
+    <section class="settings-panel installation-identity-panel">
+      <div class="panel-head">
+        <div>
+          <h2>本机身份</h2>
+          <p>Release Center 定向灰度使用 installId；deviceId 用于设备排查。</p>
+        </div>
+        <span class="status-pill" data-state="${installId === '-' ? 'idle' : 'ready'}">${installId === '-' ? 'PENDING' : 'READY'}</span>
+      </div>
+      <div class="identity-field-list">
+        ${renderIdentityField('installId', installId, true)}
+        ${renderIdentityField('deviceId', deviceId)}
+      </div>
+      <p class="identity-hint">在 k8s admin 的 Release Center 里，把 installId 填到 Target installs，就能只给这台 MX-H2I 做热更新 canary。</p>
+    </section>
+  `;
+}
+
+function renderIdentityField(label, value, copyable = false) {
+  const empty = !value || value === '-';
+  return `
+    <div class="identity-field">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value || '-')}</strong>
+      ${copyable ? `<button class="text-button" type="button" data-action="copy-install-id" ${empty ? 'disabled' : ''}>复制</button>` : ''}
+    </div>
   `;
 }
 
@@ -3327,6 +3366,42 @@ function readConfigForm(form) {
 
 function option(value, selected) {
   return `<option value="${escapeAttr(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(value)}</option>`;
+}
+
+async function copyInstallationId() {
+  const installId = state.installation?.installId;
+  if (!installId) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(installId);
+    } else {
+      const input = document.createElement('textarea');
+      input.value = installId;
+      input.setAttribute('readonly', '');
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      input.remove();
+    }
+    state = {
+      ...state,
+      feedback: {
+        tone: 'success',
+        message: `installId 已复制：${installId}`
+      }
+    };
+  } catch {
+    state = {
+      ...state,
+      feedback: {
+        tone: 'warning',
+        message: 'installId 复制失败，请手动选中本机身份里的 installId。'
+      }
+    };
+  }
+  render();
 }
 
 function escapeHtml(value) {

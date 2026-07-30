@@ -3970,8 +3970,7 @@ export class PostgresStore implements PlatformStore {
       const plan = planRow.data as unknown as ReleaseManagementPlan;
       const currentVerdict = plan.test.gate.verdict;
       const gateIsTerminal = currentVerdict === 'passed'
-        || currentVerdict === 'failed'
-        || plan.test.run.state === 'blocked';
+        || currentVerdict === 'failed';
       if (gateIsTerminal) {
         if (currentVerdict === input.status) return plan;
         throw new Error(
@@ -4013,7 +4012,7 @@ export class PostgresStore implements PlatformStore {
       if (status === 'failed' || status === 'blocked') {
         run.state = status;
         run.finishedAt = step.createdAt;
-      } else if (run.steps.length > 0 && run.steps.every((item) => item.status === 'passed')) {
+      } else if (status === 'passed') {
         run.state = 'passed';
         run.finishedAt = step.createdAt;
       }

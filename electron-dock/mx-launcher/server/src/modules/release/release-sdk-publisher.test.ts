@@ -234,6 +234,43 @@ test('Publisher-owned test runs reject generic steps but remain completable thro
   assert.equal(completed.test.gate.verdict, 'passed');
 });
 
+test('blocked release gates can be manually completed after canary validation', () => {
+  const store = new MemoryStore(testRuntimeConfig());
+  const plan = store.createReleaseManagementPlan({
+    releaseId: 'mx-h2i-asar-2.1.4',
+    productId: 'mx-h2i',
+    appId: 'mx-h2i',
+    channel: 'stable',
+    launcherComponentId: 'mx-h2i',
+    launcherUpdatePolicy: 'app-asar',
+    launcherCurrentVersion: '2.1.3',
+    launcherTargetVersion: '2.1.4',
+    artifactKind: 'app-asar',
+    artifactVersion: '2.1.4',
+    artifactUrl: '/artifact/MX-H2I-2.1.4-darwin-universal-app.asar',
+    artifactDigest: `sha256:${'c'.repeat(64)}`,
+    artifactPlatform: 'darwin',
+    artifactArch: 'universal',
+    artifactFileName: 'MX-H2I-2.1.4-darwin-universal-app.asar',
+    activationMode: 'restart-auto',
+    e2eResult: 'blocked',
+    targetInstallIds: ['inst_mx_h2i_canary']
+  });
+  assert.equal(plan.test.gate.verdict, 'blocked');
+  assert.equal(plan.test.run.state, 'blocked');
+
+  const completed = store.completeReleaseManagementGate(plan.planId, {
+    status: 'passed',
+    requestedBy: 'desktop-admin',
+    requestId: 'mx-h2i-asar-gate-001',
+    evidence: { canary: 'passed' }
+  });
+
+  assert.equal(completed.test.run.state, 'passed');
+  assert.equal(completed.test.gate.verdict, 'passed');
+  assert.equal(completed.decisions.readyToPromote, true);
+});
+
 test('SDK release upload requires publish scope and product binding', async () => {
   const harness = controllerHarness();
   await assert.rejects(

@@ -427,15 +427,22 @@ export class ReleaseController {
     assertReleaseManagementAccess(req);
     const body = asRecord(rawBody);
     const status = releaseManagementE2eResult(body.status ?? body.e2eResult) ?? 'passed';
-    return {
-      plan: await this.store.completeReleaseManagementGate(planId, {
-        status,
-        message: nullableString(body.message),
-        evidence: asRecord(body.evidence),
-        requestedBy: nullableString(body.requestedBy),
-        requestId: nullableString(body.requestId)
-      })
-    };
+    try {
+      return {
+        plan: await this.store.completeReleaseManagementGate(planId, {
+          status,
+          message: nullableString(body.message),
+          evidence: asRecord(body.evidence),
+          requestedBy: nullableString(body.requestedBy),
+          requestId: nullableString(body.requestId)
+        })
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Release management gate cannot be completed';
+      if (/Unknown releaseManagementPlanId/.test(message)) throw new NotFoundException('Release management plan not found');
+      if (/Release management gate is terminal/.test(message)) throw new BadRequestException(message);
+      throw error;
+    }
   }
 
   @Post('internal/v1/release-artifacts')
