@@ -1808,6 +1808,44 @@ export function builtinAppCenterApps(): AppCenterApp[] {
         desktop: 'app://h2o/index.html',
         settings: 'app://h2o/settings.html'
       }
+    }),
+    buildAppCenterApp({
+      appId: 'luopan',
+      displayName: 'Luopan',
+      fullName: 'Luopan AI Intelligence Console',
+      builtin: true,
+      systemOwned: true,
+      packageName: '@qpjoy/luopan-demo',
+      version: '0.1.0',
+      category: 'intelligence',
+      description: 'Standalone Luopan launcher demo for Internal, User Center, Release Center, and Home To Oversea validation.',
+      launcherMode: 'standalone',
+      standaloneChannelProductId: 'luopan',
+      productNetworkId: 'luopan',
+      permissions: [
+        'auth.read',
+        'network.tun.request',
+        'network.wg.peer',
+        'network.proxy.app',
+        'network.dns.policy',
+        'observability.write'
+      ],
+      requiredCapabilities: ['launcher-network', 'launcher-standalone', 'wireguard-peer'],
+      accessPolicy: {
+        defaultDecision: 'public',
+        allowAdmin: true,
+        allowRoles: [],
+        allowUserIds: [],
+        allowOrgIds: [],
+        allowRegisteredByAppIds: [],
+        allowHomeAppIds: [],
+        requirePermissionGrant: false
+      },
+      updatePolicy: 'launcher-managed',
+      entrypoints: {
+        desktop: 'app://luopan/index.html',
+        settings: 'app://luopan/settings.html'
+      }
     })
   ];
 }
@@ -1882,6 +1920,29 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
       rateLimitProfile: 'product-default',
       dnsPolicyId: 'internal-default',
       licensePolicyId: 'h2o-default',
+      requestedBy: 'builtin'
+    }, null, now),
+    buildLauncherProductNetwork(config, {
+      productId: 'luopan',
+      displayName: 'Luopan',
+      mode: 'standalone',
+      networkScope: 'owner',
+      standaloneChannelProductId: 'luopan',
+      productIndex: 3,
+      serviceVip: '10.88.100.3',
+      userCidr: '10.91.0.0/16',
+      feishuCidr: '10.91.0.0/16',
+      anonymousCidr: '10.91.0.0/16',
+      userLeaseStart: '10.91.0.1',
+      userLeaseEnd: '10.91.49.254',
+      feishuLeaseStart: '10.91.50.1',
+      feishuLeaseEnd: '10.91.99.254',
+      anonymousLeaseStart: '10.91.100.1',
+      anonymousLeaseEnd: '10.91.254.254',
+      updatePolicy: 'launcher-managed',
+      rateLimitProfile: 'standalone-default',
+      dnsPolicyId: 'internal-default',
+      licensePolicyId: 'appcenter-default',
       requestedBy: 'builtin'
     }, null, now)
   ];

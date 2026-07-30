@@ -6882,17 +6882,19 @@ function openReleaseCenterDrawer(planId) {
 
 function openReleaseUploadDrawer(kind = 'installer') {
   const normalizedKind = kind === 'hot' ? 'hot' : kind === 'asar' ? 'asar' : 'installer';
+  const productId = defaultReleaseUploadProductId();
+  const currentVersion = releaseProductCurrentVersion(productId);
   state.releaseCenter.drawer = {
     mode: 'upload',
     draft: {
-      productId: MX_H2I_PRODUCT_ID,
+      productId,
       kind: normalizedKind,
       platform: navigator.platform?.toLowerCase().includes('win') ? 'win32' : 'darwin',
       arch: navigator.platform?.toLowerCase().includes('win') ? 'x64' : 'universal',
       storage: 'oss',
       channel: 'stable',
-      currentVersion: '2.0.1',
-      version: '2.0.3',
+      currentVersion,
+      version: nextPatchVersion(currentVersion),
       e2eResult: 'passed',
       deliveryMode: 'prompt-download-restart'
     }
@@ -6909,6 +6911,73 @@ function closeReleaseCenterDrawer() {
     userEditorDrawer.innerHTML = '';
   }
   renderFoundationGrid(state.dashboard?.overview || {});
+}
+
+function defaultReleaseUploadProductId() {
+  const activeApp = appCenterAppById(state.activeAppNode);
+  if (activeApp && launcherModeForApp(activeApp) === 'standalone') return productNetworkIdForApp(activeApp);
+  return releaseStandaloneApps()[0]?.productId || MX_H2I_PRODUCT_ID;
+}
+
+function releaseStandaloneApps() {
+  const byId = new Map();
+  for (const app of orderedAppCenterApps()) {
+    if (launcherModeForApp(app) !== 'standalone') continue;
+    const productId = productNetworkIdForApp(app);
+    byId.set(productId, {
+      productId,
+      appId: app.appId,
+      displayName: app.displayName || launcherProductDisplayName(productId, launcherProductNetwork(productId)),
+      version: app.version || '0.1.0',
+      packageName: app.packageName || null
+    });
+  }
+  for (const product of asArray(state.launcherProducts)) {
+    if (product?.mode !== 'standalone' || !product.productId) continue;
+    const existing = byId.get(product.productId) || {};
+    byId.set(product.productId, {
+      ...existing,
+      productId: product.productId,
+      displayName: existing.displayName || product.displayName || launcherProductDisplayName(product.productId, product),
+      version: existing.version || '0.1.0'
+    });
+  }
+  if (!byId.has(MX_H2I_PRODUCT_ID)) {
+    byId.set(MX_H2I_PRODUCT_ID, {
+      productId: MX_H2I_PRODUCT_ID,
+      appId: MX_H2I_PRODUCT_ID,
+      displayName: 'MX-H2I',
+      version: '0.1.0',
+      packageName: '@qpjoy/mx-h2i-demo'
+    });
+  }
+  return [...byId.values()]
+    .sort((left, right) => (left.productId === MX_H2I_PRODUCT_ID ? -1 : right.productId === MX_H2I_PRODUCT_ID ? 1 : 0)
+      || String(left.displayName || left.productId).localeCompare(String(right.displayName || right.productId)));
+}
+
+function releaseProductCurrentVersion(productId) {
+  const normalized = normalizeLauncherProductId(productId || MX_H2I_PRODUCT_ID);
+  return releaseStandaloneApps().find((app) => app.productId === normalized)?.version || '0.1.0';
+}
+
+function nextPatchVersion(version) {
+  const match = String(version || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)(.*)$/);
+  if (!match) return version || '0.1.1';
+  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}${match[4] || ''}`;
+}
+
+function renderReleaseUploadProductOptions(selectedProductId) {
+  const selected = normalizeLauncherProductId(selectedProductId || MX_H2I_PRODUCT_ID);
+  const apps = releaseStandaloneApps();
+  const selectedExists = apps.some((app) => app.productId === selected);
+  return [
+    ...(!selectedExists && selected ? [{ productId: selected, displayName: selected, version: releaseProductCurrentVersion(selected) }] : []),
+    ...apps
+  ].map((app) => {
+    const label = `${app.displayName || launcherProductDisplayName(app.productId, launcherProductNetwork(app.productId))} · ${app.productId} · ${app.version || '0.1.0'}`;
+    return `<option value="${escapeHtml(app.productId)}" ${app.productId === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  }).join('');
 }
 
 function renderReleaseCenterDrawer() {
@@ -7083,6 +7152,7 @@ function renderReleaseCenterDrawer() {
 function renderReleaseUploadDrawer() {
   if (!userEditorBackdrop || !userEditorDrawer) return;
   const draft = state.releaseCenter.drawer?.draft || {};
+  const productOptions = renderReleaseUploadProductOptions(draft.productId || defaultReleaseUploadProductId());
   userEditorBackdrop.hidden = false;
   userEditorDrawer.hidden = false;
   userEditorDrawer.innerHTML = `
@@ -7104,7 +7174,9 @@ function renderReleaseUploadDrawer() {
           <div class="release-upload-grid">
             <label>
               <span>Product</span>
-              <input name="productId" value="${escapeHtml(draft.productId || MX_H2I_PRODUCT_ID)}" autocomplete="off" required pattern="[a-z0-9][a-z0-9\\-]*" placeholder="mx-h2i / luopan" />
+              <select name="productId" required>
+                ${productOptions}
+              </select>
             </label>
             <label>
               <span>File</span>
@@ -7271,6 +7343,20 @@ function bindReleaseDrawerControls() {
   }
   const uploadForm = userEditorDrawer.querySelector('[data-release-upload-form]');
   if (uploadForm) {
+    uploadForm.elements.productId?.addEventListener('change', () => {
+      const currentVersion = releaseProductCurrentVersion(uploadForm.elements.productId?.value);
+      if (uploadForm.elements.currentVersion) uploadForm.elements.currentVersion.value = currentVersion;
+      if (uploadForm.elements.version && !uploadForm.elements.version.dataset.userEdited) {
+        uploadForm.elements.version.value = nextPatchVersion(currentVersion);
+      }
+    });
+    uploadForm.elements.version?.addEventListener('input', () => {
+      uploadForm.elements.version.dataset.userEdited = 'true';
+    });
+    uploadForm.elements.artifactFile?.addEventListener('change', () => {
+      const file = uploadForm.elements.artifactFile?.files?.[0] || null;
+      void hydrateReleaseUploadFormFromFile(uploadForm, file);
+    });
     uploadForm.addEventListener('submit', (event) => {
       event.preventDefault();
       void uploadReleaseArtifactFromAdmin(uploadForm);
@@ -7377,6 +7463,90 @@ async function completeReleaseGateFromAdmin(planId) {
   }
 }
 
+async function hydrateReleaseUploadFormFromFile(form, file) {
+  if (!file) return;
+  let hints = releaseArtifactHintsFromFileName(file.name);
+  if (/\.json$/i.test(file.name)) {
+    try {
+      const manifest = JSON.parse(await file.text());
+      hints = { ...hints, ...releaseArtifactHintsFromManifest(manifest) };
+    } catch {
+      // File-name inference is still useful; submit will surface any real error.
+    }
+  }
+  applyReleaseUploadHints(form, hints);
+}
+
+function releaseArtifactHintsFromManifest(manifest) {
+  if (!manifest || typeof manifest !== 'object') return {};
+  const kind = manifest.kind === 'app-asar'
+    ? 'asar'
+    : manifest.kind === 'renderer-ui'
+      ? 'hot'
+      : manifest.kind === 'app-installer'
+        ? 'installer'
+        : null;
+  return {
+    productId: normalizeLauncherProductId(manifest.productId || manifest.componentId || ''),
+    version: cleanReleaseVersion(manifest.version),
+    platform: cleanReleasePlatform(manifest.platform),
+    arch: cleanReleaseArch(manifest.arch),
+    kind
+  };
+}
+
+function releaseArtifactHintsFromFileName(fileName) {
+  const name = String(fileName || '');
+  const lower = name.toLowerCase();
+  const version = cleanReleaseVersion((name.match(/(?:^|[-_ ])v?(\d+\.\d+\.\d+(?:[-+][0-9a-zA-Z.-]+)?)(?=[-_ .]|$)/) || [])[1]);
+  const knownProduct = releaseStandaloneApps().find((app) => {
+    const candidates = [
+      app.productId,
+      app.displayName,
+      app.packageName?.split('/').pop()?.replace(/-demo$/, '')
+    ].filter(Boolean).map((item) => String(item).toLowerCase().replace(/[^a-z0-9]+/g, ''));
+    const compactName = lower.replace(/[^a-z0-9]+/g, '');
+    return candidates.some((candidate) => candidate && compactName.includes(candidate));
+  });
+  return {
+    productId: knownProduct?.productId || null,
+    version,
+    platform: /\b(darwin|macos|mac)\b/i.test(name) ? 'darwin' : /\b(win32|windows|win)\b/i.test(name) ? 'win32' : /\blinux\b/i.test(name) ? 'linux' : null,
+    arch: /\buniversal\b/i.test(name) ? 'universal' : /\barm64\b/i.test(name) ? 'arm64' : /\bx64\b/i.test(name) ? 'x64' : /\bia32\b/i.test(name) ? 'ia32' : null,
+    kind: /\.asar$/i.test(name) ? 'asar' : /\.(dmg|pkg|exe|msi)$/i.test(name) ? 'installer' : /renderer|hot/i.test(name) ? 'hot' : null
+  };
+}
+
+function applyReleaseUploadHints(form, hints) {
+  const productId = normalizeLauncherProductId(hints.productId || '');
+  if (productId && form.elements.productId) {
+    form.elements.productId.value = productId;
+    const currentVersion = releaseProductCurrentVersion(productId);
+    if (form.elements.currentVersion) form.elements.currentVersion.value = currentVersion;
+  }
+  if (hints.kind && form.elements.kind) form.elements.kind.value = hints.kind;
+  if (hints.platform && form.elements.platform) form.elements.platform.value = hints.platform;
+  if (hints.arch && form.elements.arch) form.elements.arch.value = hints.arch;
+  if (hints.version && form.elements.version && !form.elements.version.dataset.userEdited) {
+    form.elements.version.value = hints.version;
+  }
+}
+
+function cleanReleaseVersion(value) {
+  const text = String(value || '').trim();
+  return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(text) ? text : null;
+}
+
+function cleanReleasePlatform(value) {
+  if (value === 'darwin' || value === 'win32' || value === 'linux') return value;
+  return null;
+}
+
+function cleanReleaseArch(value) {
+  if (value === 'x64' || value === 'arm64' || value === 'ia32' || value === 'universal') return value;
+  return null;
+}
+
 async function uploadReleaseArtifactFromAdmin(form) {
   if (state.releaseCenter.busy) return;
   const file = form.elements.artifactFile?.files?.[0] || null;
@@ -7429,8 +7599,8 @@ function releaseUploadInputFromForm(form, file) {
   const kind = rawKind === 'hot' ? 'hot' : rawKind === 'asar' ? 'asar' : 'installer';
   const platform = form.elements.platform?.value || 'darwin';
   const arch = form.elements.arch?.value || 'x64';
-  const version = form.elements.version?.value?.trim() || '2.0.3';
-  const currentVersion = form.elements.currentVersion?.value?.trim() || '2.0.1';
+  const currentVersion = form.elements.currentVersion?.value?.trim() || releaseProductCurrentVersion(productId);
+  const version = form.elements.version?.value?.trim() || nextPatchVersion(currentVersion);
   const channel = form.elements.channel?.value || 'stable';
   const storage = form.elements.storage?.value || 'oss';
   const e2eResult = form.elements.e2eResult?.value || 'running';
@@ -7529,7 +7699,7 @@ function releasePlanBodyFromUpload(input, artifact) {
       launcherTargetVersion: input.version,
       appUpdatePolicy: 'app-managed',
       appCurrentVersion: input.currentVersion,
-      appTargetVersion: input.currentVersion,
+      appTargetVersion: input.version,
       artifactKind: 'app-asar',
       artifactVersion: input.version,
       artifactUrl,
@@ -7567,7 +7737,7 @@ function releasePlanBodyFromUpload(input, artifact) {
         launcherTargetVersion: input.version,
         appUpdatePolicy: 'app-managed',
         appCurrentVersion: input.currentVersion,
-        appTargetVersion: input.currentVersion,
+        appTargetVersion: input.version,
         artifactKind: 'app-installer',
         artifactVersion: input.version,
         artifactUrl,

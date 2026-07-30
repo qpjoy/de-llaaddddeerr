@@ -105,7 +105,7 @@ export interface LuopanRuntimeUpdateExecution {
 }
 
 export interface LuopanRuntimeUpdate {
-  status: 'idle' | 'checking' | 'up-to-date' | 'update-available' | 'staged' | 'applied' | 'ready-to-install' | 'blocked' | 'failed';
+  status: 'idle' | 'checking' | 'up-to-date' | 'update-available' | 'staged' | 'applied' | 'ready-to-install' | 'blocked' | 'needs-connection' | 'failed';
   checkedAt: string | null;
   currentVersion: string;
   targetVersion: string | null;

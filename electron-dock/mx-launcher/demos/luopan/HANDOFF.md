@@ -54,15 +54,18 @@ Luopan 已在 Internal Admin 注册为 standalone launcher 产品：
 | `internalBaseUrl` | `http://10.88.100.3:18090` |
 | 应用域名 | `luopan.mxinfo-inc.cn`（CoreDNS A → 10.88.100.3，gateway 反代） |
 
-`10.88.100.3` 是 Internal 把控制面/DNS/代理 materialize 给 Luopan channel 的产品
-VIP——它是 Luopan 到达 Internal 的**唯一路由**，不是装饰性标签。`10.88.88.88` 和
+`10.88.100.3` 是当前后台 ProductNetwork 给 Luopan 注册的产品
+VIP——它是 Luopan 到达 Internal 的**唯一路由**，不是装饰性标签。其他 standalone
+应用必须通过自己的 `productId` 从后台读取 VIP/CIDR/capabilities，不要复制这个值。
+`10.88.88.88` 和
 `10.88.0.1` 是 MX-H2I/foundation 的迁移期兼容地址，**Luopan 一律不得使用**（包括
 默认 base URL、诊断、兜底逻辑）。
 
 **Bootstrap 首连（开发与打包版通用）**：注册的 base URL（`10.88.100.3`）是隧道内
 VIP，首次 enroll 时不可达。把 bootstrap 可达入口写进 `.env`
-（当前可用 `LUOPAN_BOOTSTRAP_URLS=http://116.62.51.154:18090`，也可按优先级
-追加 LAN 入口，逗号分隔，见 `.env.example`）：
+（当前默认 `LUOPAN_BOOTSTRAP_URLS=http://116.62.51.154:18090,https://h2i.minsight-ai.com`：
+公网 IP 优先保证首连速度，canonical HTTPS 域名兜底；也可按优先级追加 LAN 入口，
+逗号分隔，见 `.env.example`）：
 `network-ready` 之前仅匿名 enroll/bootstrap 与无凭证请求走首个探测通过的
 bootstrap URL；账号、密码和 bearer token 必须等 Internal 就绪后才发往 VIP。加载顺序：真实 env > `<userData>/.env`（每台机器可覆盖）> 打包内
 `Resources/.env`（构建时项目根有 `.env` 会自动带入）> 开发目录 `.env`。能力由
@@ -76,8 +79,8 @@ VIP 主机与 `/healthz` 二次校验通过后发送。
 
 开发期未注册时才允许用非 VIP 的 `LUOPAN_LAUNCHER_BASE_URL=<lan-admin-url>` 覆盖
 base URL，并配合 `LUOPAN_SDK_TEST_MODE=1` 走服务端测试模式；两者都不允许进入正式
-构建。正式 `.env` 可以显式把 base URL 固定为注册 VIP `10.88.100.3`，bootstrap URL
-则本来就是产品的公开入口配置。
+构建。正式 `.env` 应明示 `LUOPAN_PRODUCT_ID` 和 bootstrap URL，base URL 通常由
+`GET /internal/v1/launcher-network/products/{productId}` 的 `serviceVip` 自动推导。
 demo 默认 registered 模式，工具栏 **Connect Internal** 一键完成
 lease → 数据面 → VIP healthz。平台侧开通的完整操作（Admin 注册、Service VIP
 Reconcile、`mx-internal-svc` 语义、enroll 报错对照）见 docs/20 §4.5。

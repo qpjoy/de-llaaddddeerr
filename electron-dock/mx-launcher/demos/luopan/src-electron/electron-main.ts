@@ -11,7 +11,7 @@ import {
   type Session
 } from 'electron';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { networkInterfaces } from 'node:os';
@@ -47,6 +47,7 @@ import {
 import type {
   ElectronLauncherBootstrapResolution,
   ElectronLauncherNetworkGateState,
+  ElectronLauncherNetworkOwnershipClaim,
   ElectronLauncherReleaseUpdater,
   ElectronLauncherStandaloneDataPlaneDiagnostics,
   ElectronLauncherUpdateCheckResult,
@@ -106,6 +107,7 @@ type RuntimeUpdateStatus =
   | 'applied'
   | 'ready-to-install'
   | 'blocked'
+  | 'needs-connection'
   | 'failed';
 
 type RuntimeUpdateDeliveryMode = 'prompt-download-restart' | 'manual-download' | 'silent-download-next-start';
@@ -203,6 +205,10 @@ interface RuntimeState {
 
 type LuopanLeaseProfile = 'anonymous' | 'employee';
 
+interface RequestLuopanLeaseOptions {
+  allowLostCapabilityRecovery?: boolean;
+}
+
 interface RuntimeLeaseCredential {
   credentialKey: string;
   leaseId: string | null;
@@ -286,7 +292,11 @@ const PRODUCT = defineLauncherProduct({
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = 'luopan-runtime.json';
 const CREDENTIAL_VAULT_VERSION = 1;
-const LUOPAN_REGISTERED_BASE_URL = 'http://10.88.100.3:18090';
+const LUOPAN_DEFAULT_PRODUCT_ID = 'luopan';
+const LUOPAN_PUBLIC_BOOTSTRAP_IP_URL = 'http://116.62.51.154:18090';
+const LUOPAN_PUBLIC_BOOTSTRAP_DOMAIN_URL = 'https://h2i.minsight-ai.com';
+const LUOPAN_DEFAULT_BOOTSTRAP_URLS = [LUOPAN_PUBLIC_BOOTSTRAP_IP_URL, LUOPAN_PUBLIC_BOOTSTRAP_DOMAIN_URL];
+const LUOPAN_LEGACY_REGISTERED_BASE_URL = 'http://10.88.100.3:18090';
 const OVERSEA_SUBSCRIPTION_NAME = 'System Oversea 默认订阅';
 const OVERSEA_SESSION_PARTITION = 'persist:luopan-oversea';
 const OVERSEA_ALLOWLIST = [
@@ -361,13 +371,18 @@ function initialDataPlaneApplyMessage(): string {
 }
 
 function defaultConfig(): RuntimeConfig {
+  const productId = normalizeProductId(environmentValue('LUOPAN_PRODUCT_ID')) || LUOPAN_DEFAULT_PRODUCT_ID;
+  const bootstrapUrls = parseElectronLauncherBootstrapUrls(environmentValue('LUOPAN_BOOTSTRAP_URLS'));
   return {
-    // Luopan's registered product VIP (docs/19, HANDOFF §网络注册). Never fall
-    // back to 10.88.88.88 / 10.88.0.1 — those are MX-H2I/foundation migration
-    // compatibility addresses and are off-limits to Luopan.
-    baseUrl: normalizeBaseUrl(environmentValue('LUOPAN_LAUNCHER_BASE_URL') || environmentValue('MX_LAUNCHER_BASE_URL') || LUOPAN_REGISTERED_BASE_URL),
-    bootstrapUrls: parseElectronLauncherBootstrapUrls(environmentValue('LUOPAN_BOOTSTRAP_URLS')),
-    productId: 'luopan',
+    // Product identity is the only app-specific value another standalone demo
+    // should need to change. VIP/CIDR/capabilities are resolved from the
+    // ProductNetwork registry through the bootstrap entrance before connect.
+    baseUrl: normalizeBaseUrl(
+      environmentValue('LUOPAN_LAUNCHER_BASE_URL') || environmentValue('MX_LAUNCHER_BASE_URL') || '',
+      fallbackRegisteredBaseUrl(productId)
+    ),
+    bootstrapUrls: bootstrapUrls.length > 0 ? bootstrapUrls : LUOPAN_DEFAULT_BOOTSTRAP_URLS,
+    productId,
     mode: 'standalone',
     // Registered mode by default: the lease request must pass the server-side
     // ProductNetwork + AppCenter entitlement gate. SDK test mode bypasses that
@@ -411,6 +426,11 @@ function emptyIdentity(): RuntimeIdentity {
     tokenExpiresAt: null,
     loginAt: null
   };
+}
+
+function nextRuntimeIdentityId(productId: string, kind: 'inst' | 'dev'): string {
+  const scopedProductId = normalizeProductId(productId) || LUOPAN_DEFAULT_PRODUCT_ID;
+  return `${scopedProductId}-${kind}-${randomUUID()}`;
 }
 
 function emptyOversea(): RuntimeOversea {
@@ -461,10 +481,11 @@ function emptyUpdate(): RuntimeUpdate {
 }
 
 async function loadRuntime(): Promise<RuntimeState> {
+  const initialConfig = defaultConfig();
   const fallback: RuntimeState = {
-    installId: `luopan-inst-${randomUUID()}`,
-    deviceId: `luopan-dev-${randomUUID()}`,
-    config: defaultConfig(),
+    installId: nextRuntimeIdentityId(initialConfig.productId, 'inst'),
+    deviceId: nextRuntimeIdentityId(initialConfig.productId, 'dev'),
+    config: initialConfig,
     identity: emptyIdentity(),
     connection: emptyConnection(),
     oversea: emptyOversea(),
@@ -795,22 +816,47 @@ function hasReleasableLeaseCredentials(state = requireRuntime()): boolean {
   ));
 }
 
+function launcherApiErrorStatus(error: unknown): number | null {
+  const status = error && typeof error === 'object'
+    ? (error as { status?: unknown }).status
+    : null;
+  return typeof status === 'number' ? status : null;
+}
+
+function canRecoverAnonymousLeaseCapabilityLoss(
+  error: unknown,
+  identityKind: 'anonymous' | 'user',
+  options: RequestLuopanLeaseOptions
+): boolean {
+  if (options.allowLostCapabilityRecovery === false) return false;
+  if (identityKind !== 'anonymous') return false;
+  if (activeSession) return false;
+  if (hasReleasableLeaseCredentials()) return false;
+  if (launcherApiErrorStatus(error) !== 401) return false;
+  return errorMessage(error).toLowerCase().includes('valid launcher lease capability');
+}
+
 function completeLegacyCredentialMigration(): void {
   if (!legacyCredentialCleanupRequired) return;
+  rotateLauncherRuntimeIdentity('after legacy local data-plane cleanup');
+  legacyCredentialCleanupRequired = false;
+}
+
+function rotateLauncherRuntimeIdentity(reason: string): void {
   const state = requireRuntime();
-  state.installId = `luopan-inst-${randomUUID()}`;
-  state.deviceId = `luopan-dev-${randomUUID()}`;
+  state.installId = nextRuntimeIdentityId(state.config.productId, 'inst');
+  state.deviceId = nextRuntimeIdentityId(state.config.productId, 'dev');
   credentialVault = emptyCredentialVault();
   activeAccessToken = null;
+  activeSession = null;
   state.identity = emptyIdentity();
-  legacyCredentialCleanupRequired = false;
-  pushEvent('legacy launcher identity rotated after local data-plane cleanup');
+  pushEvent(`launcher identity rotated ${reason}`);
 }
 
 function visibleRuntime() {
   const state = requireRuntime();
   return {
-    appId: PRODUCT.productId,
+    appId: state.config.productId,
     displayName: PRODUCT.displayName,
     packageName: '@qpjoy/luopan-demo',
     launcherMode: PRODUCT.mode,
@@ -928,6 +974,21 @@ async function ensureBootstrapResolved(force = false): Promise<ElectronLauncherB
   return resolution;
 }
 
+async function hydrateRegisteredProductNetwork(source: string): Promise<void> {
+  const state = requireRuntime();
+  if (state.config.sdkTestMode) return;
+  const product = await launcherClient().getProduct(state.config.productId);
+  const baseUrl = productServiceBaseUrl(product);
+  if (!baseUrl || baseUrl === state.config.baseUrl) return;
+  state.config = {
+    ...state.config,
+    baseUrl
+  };
+  pushEvent(`product registry resolved ${state.config.productId} VIP ${baseUrl} (${source})`);
+  await saveRuntime();
+  broadcastRuntime();
+}
+
 // --- Release update wiring (docs/19 §3+§5, docs/17 state machine) ----------
 // Everything below consumes @qpjoy/electron-launcher; no update logic lives in
 // the product. The last check result is kept in memory only: `apply-update`
@@ -1005,11 +1066,15 @@ function chooseUpdateCheck(checks: ElectronLauncherUpdateCheckResult[]): Electro
 }
 
 function updateFromCheck(check: ElectronLauncherUpdateCheckResult): RuntimeUpdate {
+  const currentVersion = currentReleaseVersion();
+  const targetVersion = check.status === 'up-to-date'
+    ? null
+    : stringValue(check.decision.targetVersion) || null;
   return {
     status: check.status,
     checkedAt: check.checkedAt,
-    currentVersion: currentReleaseVersion(),
-    targetVersion: check.decision.targetVersion || null,
+    currentVersion,
+    targetVersion,
     releaseId: check.plan?.releaseId ?? null,
     releaseNotes: check.releaseNotes ?? null,
     matchedBy: check.rollout?.matchedBy ?? null,
@@ -1133,7 +1198,18 @@ async function checkLuopanUpdates(source: 'user' | 'network-ready' = 'user'): Pr
     state.update = { ...state.update, status: 'checking', message: 'Checking Release Center decision.' };
     broadcastRuntime();
     try {
-      if (state.connection.status !== 'network-ready') await ensureBootstrapResolved();
+      if (state.connection.status !== 'network-ready') {
+        await ensureBootstrapResolved();
+        state.update = {
+          ...emptyUpdate(),
+          status: 'needs-connection',
+          message: `请先让 Launcher Network 进入 network-ready 后再检查 Release Center；当前 ${state.connection.dataPlane?.state || state.connection.status}。`
+        };
+        pushEvent(`update check deferred until network-ready (${source})`);
+        await saveRuntime();
+        broadcastRuntime();
+        return;
+      }
       const updater = releaseUpdater();
       const userId = hasActiveUserIdentity(state) ? state.identity.userId : null;
       const checks: ElectronLauncherUpdateCheckResult[] = [];
@@ -1250,7 +1326,27 @@ async function setConnection(connection: Partial<RuntimeConnection>): Promise<vo
 }
 
 function currentReleaseVersion(): string {
-  return runningElectronLauncherVersion(app.getVersion());
+  return runningElectronLauncherVersion(baseApplicationVersion());
+}
+
+function baseApplicationVersion(): string {
+  return packageJsonVersion(process.env.MX_LAUNCHER_BASE_PACKAGE_JSON)
+    || packageJsonVersion(path.join(currentDir, 'package.json'))
+    || packageJsonVersion(path.resolve(currentDir, '..', 'package.json'))
+    || packageJsonVersion(path.resolve(currentDir, '..', '..', 'package.json'))
+    || packageJsonVersion(path.resolve(currentDir, '..', '..', '..', 'package.json'))
+    || process.env.MX_LAUNCHER_BASE_APP_VERSION
+    || app.getVersion();
+}
+
+function packageJsonVersion(filePath: string | null | undefined): string | null {
+  if (!filePath) return null;
+  try {
+    const manifest = JSON.parse(readFileSync(filePath, 'utf8')) as { version?: unknown };
+    return stringValue(manifest.version);
+  } catch {
+    return null;
+  }
 }
 
 function scheduleAutomaticUpdateCheck(): void {
@@ -1552,7 +1648,7 @@ async function allocateOverseaPorts(status: TunnelStatus): Promise<TunnelStatus[
   const allocated = { ...status.ports };
   for (const [key, service, preferredPort, protocol] of requests) {
     const lease = await allocateElectronLauncherLocalPort({
-      productId: PRODUCT.productId,
+      productId: requireRuntime().config.productId,
       service,
       preferredPort,
       protocol
@@ -1977,7 +2073,7 @@ function countOverseaNodes(yaml: string): number {
 }
 
 function joinApiUrl(baseUrl: string, pathName: string): string {
-  const base = new URL(`${normalizeBaseUrl(baseUrl)}/`);
+  const base = new URL(`${normalizeBaseUrl(baseUrl, fallbackRegisteredBaseUrl(requireRuntime().config.productId))}/`);
   const resolved = new URL(pathName, base);
   if (resolved.origin !== base.origin) {
     throw new Error('Oversea subscription URL must stay on the configured Internal service origin.');
@@ -1992,7 +2088,9 @@ function registerIpc(): void {
     const current = state.config;
     const previousBootstrapBaseUrl = activeBootstrapBaseUrl;
     const next = constrainRuntimeConfig(applyEnvironmentConfigOverrides(normalizeConfig(input, current)));
-    const channelChanged = current.baseUrl !== next.baseUrl || current.sdkTestMode !== next.sdkTestMode;
+    const channelChanged = current.baseUrl !== next.baseUrl
+      || current.productId !== next.productId
+      || current.sdkTestMode !== next.sdkTestMode;
     const bootstrapChanged = current.bootstrapUrls.join('\n') !== next.bootstrapUrls.join('\n');
     const endpointChanged = channelChanged || bootstrapChanged;
     let cleanupError: string | null = null;
@@ -2576,7 +2674,7 @@ async function disconnectLuopanDataPlane(
           routePlan: sessionToStop
             ? luopanStandaloneDataPlaneRoutePlan(sessionToStop.routePlan)
             : undefined,
-          ownerId: `${PRODUCT.productId}:${state.installId}`,
+          ownerId: `${state.config.productId}:${state.installId}`,
           darwinLaunchDaemon: true,
           allowSystemFallback: false,
           darwinServiceIdentity: luopanWireGuardServiceIdentity()
@@ -2647,7 +2745,7 @@ async function disconnectLuopanDataPlane(
 // registered mode the server enforces the entitlement gate: ProductNetwork
 // enabled + AppCenter app `luopan` enabled with launcher-network +
 // launcher-standalone capabilities.
-async function requestLuopanLease(): Promise<boolean> {
+async function requestLuopanLease(options: RequestLuopanLeaseOptions = {}): Promise<boolean> {
   if (legacyCredentialCleanupRequired) {
     const migrated = await disconnectLuopanDataPlane('reset');
     if (!migrated) {
@@ -2675,6 +2773,7 @@ async function requestLuopanLease(): Promise<boolean> {
     if (resolution && !resolution.ok) {
       throw new Error(resolution.message);
     }
+    await hydrateRegisteredProductNetwork('connect');
     ensureCredentialStorageReady();
     const keyPair = ensureWireGuardKeyPair();
     const pendingCapability = ensurePendingLeaseCapability(identityKind, userId);
@@ -2709,6 +2808,21 @@ async function requestLuopanLease(): Promise<boolean> {
     pushEvent(`lease active ${session.lease.leaseIp}`);
     return true;
   } catch (error) {
+    if (canRecoverAnonymousLeaseCapabilityLoss(error, identityKind, options)) {
+      rotateLauncherRuntimeIdentity('after anonymous lease capability was lost');
+      await setConnection({
+        status: 'connecting',
+        leaseId: null,
+        leaseIp: null,
+        serviceVip: null,
+        dnsServer: null,
+        routeCidrs: [],
+        snapshotDigest: null,
+        dataPlane: null,
+        message: '本机匿名 lease capability 已丢失，已轮换 install/device identity 并重新申请 Internal lease。'
+      });
+      return requestLuopanLease({ allowLostCapabilityRecovery: false });
+    }
     await setConnection({
       status: 'error',
       message: errorMessage(error)
@@ -2757,6 +2871,7 @@ async function applyLuopanDataPlane(): Promise<boolean> {
     }
     await syncLeasePeers(activeSession);
     const dataPlaneRoutePlan = luopanStandaloneDataPlaneRoutePlan(activeSession.routePlan);
+    const ownershipMigration = luopanSameProductOwnershipMigration(dataPlaneRoutePlan);
     const result = await applyElectronLauncherStandaloneDataPlane({
       userDataDir: app.getPath('userData'),
       profileName: 'luopan.conf',
@@ -2767,21 +2882,26 @@ async function applyLuopanDataPlane(): Promise<boolean> {
       dnsDomains: [],
       suppressWireGuardDns: true,
       requiredProbeTargets: ['lease-ip', 'service-vip'],
-      ownerId: `${PRODUCT.productId}:${requireRuntime().installId}`,
-      productId: PRODUCT.productId,
+      ownerId: `${requireRuntime().config.productId}:${requireRuntime().installId}`,
+      productId: requireRuntime().config.productId,
       instanceId: requireRuntime().installId,
       displayName: PRODUCT.displayName,
       metadata: {
         dataPlaneMode: 'standalone-wireguard',
         dataPlaneOwner: true
       },
+      dnsHosts: ownershipMigration.legacyDnsHosts,
       routeCidrs: luopanOwnershipRouteCidrs(dataPlaneRoutePlan),
+      supersedeClaims: ownershipMigration.supersedeClaims,
       failOnOwnershipConflicts: true,
       allowSystemFallback: false,
       darwinLaunchDaemon: true,
       fallbackToAppManaged: false,
       darwinServiceIdentity: luopanWireGuardServiceIdentity()
     });
+    if (result.supersededOwnerIds.length) {
+      pushEvent(`data-plane ownership adopted ${result.supersededOwnerIds.join(',')}`);
+    }
     const dataPlane = withServiceVipReachability(result.diagnostics, activeSession, 'standalone-wireguard');
     await setConnection({
       status: runtimeStatusForDataPlane(dataPlane),
@@ -2816,7 +2936,7 @@ async function applySession(session: LauncherNetworkSession): Promise<void> {
     routeCidrs: session.routePlan.routeCidrs,
     snapshotDigest: session.snapshot.signatures.digest,
     dataPlane,
-    message: session.lease.productId === PRODUCT.productId
+    message: session.lease.productId === requireRuntime().config.productId
       ? dataPlane.message
       : `Lease is active on ${session.lease.productId}. ${dataPlane.message}`
   });
@@ -2871,8 +2991,8 @@ function attachToSharedDataPlane(session: LauncherNetworkSession): {
   const dataPlane = withServiceVipReachability(routeProof, session, 'shared-reuse');
   const claim = {
     ...buildElectronLauncherStandaloneOwnershipClaim(session.routePlan, {
-      ownerId: `${PRODUCT.productId}:${requireRuntime().installId}`,
-      productId: PRODUCT.productId,
+      ownerId: `${requireRuntime().config.productId}:${requireRuntime().installId}`,
+      productId: requireRuntime().config.productId,
       instanceId: requireRuntime().installId,
       displayName: PRODUCT.displayName,
       routeCidrs: luopanOwnershipRouteCidrs(session.routePlan),
@@ -2912,9 +3032,26 @@ function luopanOwnershipRouteCidrs(routePlan: LauncherNetworkSession['routePlan'
   ].filter((value): value is string => Boolean(value)));
 }
 
+function luopanSameProductOwnershipMigration(routePlan: LauncherNetworkSession['routePlan']): {
+  legacyDnsHosts: string[];
+  supersedeClaims: ElectronLauncherNetworkOwnershipClaim[];
+} {
+  const ownerId = `${requireRuntime().config.productId}:${requireRuntime().installId}`;
+  const routeCidrs = new Set(luopanOwnershipRouteCidrs(routePlan));
+  const supersedeClaims = readElectronLauncherStandaloneOwnershipState().claims.filter((claim) =>
+    claim.ownerId !== ownerId
+    && claim.productId === requireRuntime().config.productId
+    && (claim.routeCidrs ?? []).some((cidr) => routeCidrs.has(cidr))
+  );
+  return {
+    legacyDnsHosts: uniqueStrings(supersedeClaims.flatMap((claim) => claim.dnsHosts ?? [])),
+    supersedeClaims
+  };
+}
+
 function currentLuopanDataPlaneMode(): LuopanDataPlaneMode {
   if (activeDataPlaneMode) return activeDataPlaneMode;
-  const ownerId = runtime ? `${PRODUCT.productId}:${runtime.installId}` : null;
+  const ownerId = runtime ? `${runtime.config.productId}:${runtime.installId}` : null;
   if (ownerId) {
     const ownClaim = readElectronLauncherStandaloneOwnershipState().claims.find(
       (claim) => claim.ownerId === ownerId
@@ -2926,7 +3063,7 @@ function currentLuopanDataPlaneMode(): LuopanDataPlaneMode {
 }
 
 function releaseLuopanReuseClaim(installId: string): string {
-  releaseElectronLauncherStandaloneOwnershipClaim(`${PRODUCT.productId}:${installId}`);
+  releaseElectronLauncherStandaloneOwnershipClaim(`${requireRuntime().config.productId}:${installId}`);
   return 'Luopan detached from the shared launcher data plane; the shared owner was left running.';
 }
 
@@ -3320,10 +3457,12 @@ function luopanWireGuardServiceIdentity() {
 
 function normalizeConfig(input: unknown, fallback: RuntimeConfig = defaultConfig()): RuntimeConfig {
   const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const productId = normalizeProductId(record.productId) || fallback.productId || LUOPAN_DEFAULT_PRODUCT_ID;
+  const bootstrapUrls = normalizeBootstrapUrls(record.bootstrapUrls, fallback.bootstrapUrls);
   return {
-    baseUrl: normalizeBaseUrl(stringValue(record.baseUrl) || fallback.baseUrl),
-    bootstrapUrls: normalizeBootstrapUrls(record.bootstrapUrls, fallback.bootstrapUrls),
-    productId: 'luopan',
+    baseUrl: normalizeBaseUrl(stringValue(record.baseUrl) || fallback.baseUrl, fallbackRegisteredBaseUrl(productId)),
+    bootstrapUrls: prioritizeBootstrapUrls(productId, bootstrapUrls),
+    productId,
     mode: 'standalone',
     sdkTestMode: typeof record.sdkTestMode === 'boolean' ? record.sdkTestMode : fallback.sdkTestMode,
     deviceLabel: stringValue(record.deviceLabel) || fallback.deviceLabel
@@ -3333,6 +3472,7 @@ function normalizeConfig(input: unknown, fallback: RuntimeConfig = defaultConfig
 function applyEnvironmentConfigOverrides(config: RuntimeConfig): RuntimeConfig {
   const baseUrl = stringValue(environmentValue('LUOPAN_LAUNCHER_BASE_URL'))
     || stringValue(environmentValue('MX_LAUNCHER_BASE_URL'));
+  const productId = normalizeProductId(environmentValue('LUOPAN_PRODUCT_ID'));
   const bootstrapValue = environmentValue('LUOPAN_BOOTSTRAP_URLS');
   const bootstrapUrls = bootstrapValue === undefined
     ? []
@@ -3341,8 +3481,9 @@ function applyEnvironmentConfigOverrides(config: RuntimeConfig): RuntimeConfig {
   const deviceLabel = stringValue(environmentValue('LUOPAN_DEVICE_LABEL'));
   return {
     ...config,
-    baseUrl: baseUrl ? normalizeBaseUrl(baseUrl) : config.baseUrl,
-    bootstrapUrls: bootstrapUrls.length > 0 ? bootstrapUrls : config.bootstrapUrls,
+    productId: productId || config.productId,
+    baseUrl: baseUrl ? normalizeBaseUrl(baseUrl, fallbackRegisteredBaseUrl(productId || config.productId)) : config.baseUrl,
+    bootstrapUrls: prioritizeBootstrapUrls(productId || config.productId, bootstrapUrls.length > 0 ? bootstrapUrls : config.bootstrapUrls),
     sdkTestMode: sdkTestMode === undefined
       ? config.sdkTestMode
       : booleanish(sdkTestMode, false),
@@ -3354,7 +3495,6 @@ function constrainRuntimeConfig(config: RuntimeConfig): RuntimeConfig {
   if (!app.isPackaged) return config;
   return {
     ...config,
-    baseUrl: LUOPAN_REGISTERED_BASE_URL,
     sdkTestMode: false
   };
 }
@@ -3370,6 +3510,26 @@ function normalizeBootstrapUrls(input: unknown, fallback: string[]): string[] {
   if (raw === null) return fallback;
   const parsed = parseElectronLauncherBootstrapUrls(raw);
   return parsed.length > 0 ? parsed : fallback;
+}
+
+function prioritizeBootstrapUrls(productId: string, urls: string[]): string[] {
+  if (productId !== LUOPAN_DEFAULT_PRODUCT_ID) return urls;
+  if (urls.some(isLocalOrPrivateBootstrapUrl)) return urls;
+  return uniqueStrings([...LUOPAN_DEFAULT_BOOTSTRAP_URLS, ...urls]);
+}
+
+function isLocalOrPrivateBootstrapUrl(value: string): boolean {
+  try {
+    const host = new URL(value).hostname;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+    const parts = host.split('.').map((item) => Number.parseInt(item, 10));
+    if (parts.length !== 4 || parts.some((item) => !Number.isInteger(item))) return false;
+    if (parts[0] === 10) return true;
+    if (parts[0] === 192 && parts[1] === 168) return true;
+    return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeConnection(input: unknown): RuntimeConnection {
@@ -3446,21 +3606,30 @@ function normalizeUpdate(input: unknown): RuntimeUpdate {
   const fallback = emptyUpdate();
   const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
   const status = record.status;
+  const normalizedStatus = status === 'up-to-date'
+    || status === 'update-available'
+    || status === 'staged'
+    || status === 'applied'
+    || status === 'ready-to-install'
+    || status === 'blocked'
+    || status === 'needs-connection'
+    || status === 'failed'
+    ? status
+    : 'idle';
+  const currentVersion = currentReleaseVersion();
+  const targetVersion = normalizedStatus === 'up-to-date'
+    || normalizedStatus === 'idle'
+    || normalizedStatus === 'failed'
+    || normalizedStatus === 'needs-connection'
+    ? null
+    : stringValue(record.targetVersion);
   return {
     // A persisted 'checking' means the app died mid-check; reset to idle. The
     // execution summary is kept for display, but apply always re-checks.
-    status: status === 'up-to-date'
-      || status === 'update-available'
-      || status === 'staged'
-      || status === 'applied'
-      || status === 'ready-to-install'
-      || status === 'blocked'
-      || status === 'failed'
-      ? status
-      : 'idle',
+    status: normalizedStatus,
     checkedAt: stringValue(record.checkedAt),
-    currentVersion: currentReleaseVersion(),
-    targetVersion: stringValue(record.targetVersion),
+    currentVersion,
+    targetVersion,
     releaseId: stringValue(record.releaseId),
     releaseNotes: stringValue(record.releaseNotes),
     matchedBy: stringValue(record.matchedBy),
@@ -3505,15 +3674,34 @@ function normalizeDataPlane(value: unknown): ElectronLauncherStandaloneDataPlane
   return record as ElectronLauncherStandaloneDataPlaneDiagnostics;
 }
 
-function normalizeBaseUrl(value: string): string {
+function fallbackRegisteredBaseUrl(productId: string): string {
+  return productId === LUOPAN_DEFAULT_PRODUCT_ID ? LUOPAN_LEGACY_REGISTERED_BASE_URL : 'http://127.0.0.1:18090';
+}
+
+function productServiceBaseUrl(product: unknown): string | null {
+  if (!product || typeof product !== 'object') return null;
+  const record = product as Record<string, unknown>;
+  const serviceVip = stringValue(record.serviceVip);
+  if (!serviceVip) return null;
+  return normalizeBaseUrl(`http://${serviceVip}:18090`, fallbackRegisteredBaseUrl(normalizeProductId(record.productId) || LUOPAN_DEFAULT_PRODUCT_ID));
+}
+
+function normalizeProductId(value: unknown): string | null {
+  const text = stringValue(value);
+  if (!text) return null;
+  const normalized = text.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+  return normalized || null;
+}
+
+function normalizeBaseUrl(value: string, fallback = LUOPAN_LEGACY_REGISTERED_BASE_URL): string {
   const trimmed = value.trim();
-  if (!trimmed) return LUOPAN_REGISTERED_BASE_URL;
+  if (!trimmed) return fallback;
   try {
     const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return LUOPAN_REGISTERED_BASE_URL;
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return fallback;
     return parsed.origin;
   } catch {
-    return LUOPAN_REGISTERED_BASE_URL;
+    return fallback;
   }
 }
 
@@ -3558,7 +3746,20 @@ function safeJson(value: string): unknown {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) {
+    const payload = (error as Error & { payload?: unknown }).payload;
+    const detail = launcherApiErrorDetail(payload);
+    return detail ? `${error.message}: ${detail}` : error.message;
+  }
+  return String(error);
+}
+
+function launcherApiErrorDetail(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const record = payload as Record<string, unknown>;
+  const message = record.message;
+  if (Array.isArray(message)) return message.map((item) => String(item || '').trim()).filter(Boolean).join('; ') || null;
+  return stringValue(message) || stringValue(record.error) || null;
 }
 
 async function shutdownLuopanApplication(): Promise<void> {

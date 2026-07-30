@@ -116,6 +116,7 @@ export interface ElectronLauncherStandaloneDataPlaneApplyInput
   action?: 'up' | 'restart';
   requiredProbeTargets?: ElectronLauncherStandaloneDataPlaneProbeTarget[] | null;
   failOnOwnershipConflicts?: boolean | null;
+  supersedeClaims?: ElectronLauncherNetworkOwnershipClaim[] | null;
   dataPlaneProbeAttempts?: number | null;
   dataPlaneProbeIntervalMs?: number | null;
   ownershipStatePath?: string | null;
@@ -128,6 +129,7 @@ export interface ElectronLauncherStandaloneDataPlaneApplyResult {
   diagnostics: ElectronLauncherStandaloneDataPlaneDiagnostics;
   ownershipClaim: ElectronLauncherNetworkOwnershipClaim;
   ownershipRegistry: ElectronLauncherNetworkOwnershipRegistry;
+  supersededOwnerIds: string[];
   wireGuard: Awaited<ReturnType<typeof connectLauncherWireGuardPeer>> | null;
   message: string;
 }
@@ -348,7 +350,7 @@ export async function applyElectronLauncherStandaloneDataPlane(
         ownershipClaim,
         input.existingClaims ?? [],
         input.failOnOwnershipConflicts !== false,
-        []
+        input.supersedeClaims ?? []
       );
   if (!registration.claimed) {
     const ownershipRegistry = registration.registry;
@@ -359,6 +361,7 @@ export async function applyElectronLauncherStandaloneDataPlane(
       diagnostics,
       ownershipClaim,
       ownershipRegistry,
+      supersededOwnerIds: registration.supersededOwnerIds,
       wireGuard: null,
       message: diagnostics.message
     };
@@ -392,6 +395,7 @@ export async function applyElectronLauncherStandaloneDataPlane(
     diagnostics,
     ownershipClaim: finalOwnershipClaim,
     ownershipRegistry: finalOwnershipRegistry,
+    supersededOwnerIds: registration.supersededOwnerIds,
     wireGuard,
     message: diagnostics.ok ? 'Launcher standalone data plane is ready.' : diagnostics.message
   };

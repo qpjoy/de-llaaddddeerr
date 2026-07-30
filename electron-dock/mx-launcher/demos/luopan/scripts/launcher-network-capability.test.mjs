@@ -6,6 +6,10 @@ const mainSource = readFileSync(
   fileURLToPath(new URL('../src-electron/electron-main.ts', import.meta.url)),
   'utf8'
 );
+const bootstrapSource = readFileSync(
+  fileURLToPath(new URL('../src-electron/electron-bootstrap.cjs', import.meta.url)),
+  'utf8'
+);
 
 function functionSource(source, name) {
   const candidates = [`async function ${name}(`, `function ${name}(`];
@@ -135,18 +139,42 @@ assert.match(
 );
 assert.match(
   functionSource(mainSource, 'completeLegacyCredentialMigration'),
-  /state\.installId = `luopan-inst-\$\{randomUUID\(\)\}`[\s\S]*state\.deviceId = `luopan-dev-\$\{randomUUID\(\)\}`/,
+  /rotateLauncherRuntimeIdentity\('after legacy local data-plane cleanup'\)/,
   'legacy cleanup must rotate both identifiers instead of weakening the server key-rotation gate'
 );
+const identityRotationSource = functionSource(mainSource, 'rotateLauncherRuntimeIdentity');
+assert.match(identityRotationSource, /state\.installId = nextRuntimeIdentityId\(state\.config\.productId, 'inst'\)/);
+assert.match(identityRotationSource, /state\.deviceId = nextRuntimeIdentityId\(state\.config\.productId, 'dev'\)/);
+assert.match(identityRotationSource, /credentialVault = emptyCredentialVault\(\)/);
 assert.match(
   connectSource,
   /if \(legacyCredentialCleanupRequired\)[\s\S]*disconnectLuopanDataPlane\('reset'\)[\s\S]*if \(!migrated\)[\s\S]*return false/,
   'enrollment must wait for legacy local cleanup and identity rotation'
 );
 assert.match(
+  connectSource,
+  /canRecoverAnonymousLeaseCapabilityLoss\(error, identityKind, options\)[\s\S]*rotateLauncherRuntimeIdentity\('after anonymous lease capability was lost'\)[\s\S]*requestLuopanLease\(\{ allowLostCapabilityRecovery: false \}\)/,
+  'anonymous lease capability loss must recover by rotating local identity and retrying only once'
+);
+assert.match(
   functionSource(mainSource, 'shutdownLuopanApplication'),
   /await runtimeSaveQueue\.catch\([\s\S]*must not trap the app in before-quit/,
   'a failed final runtime write must not block quit after local teardown succeeds'
+);
+assert.match(
+  functionSource(mainSource, 'currentReleaseVersion'),
+  /runningElectronLauncherVersion\(baseApplicationVersion\(\)\)/,
+  'Release Center currentVersion must use Luopan package/ASAR version, not Electron runtime version'
+);
+assert.match(
+  functionSource(mainSource, 'baseApplicationVersion'),
+  /packageJsonVersion\(process\.env\.MX_LAUNCHER_BASE_PACKAGE_JSON\)[\s\S]*app\.getVersion\(\)/,
+  'Luopan dev mode must prefer package.json version before falling back to Electron app.getVersion()'
+);
+assert.match(
+  bootstrapSource,
+  /const basePackageJson = resolveBasePackageJson\(basePackageRoot\);[\s\S]*const baseVersion = readPackageVersion\(basePackageJson\) \|\| app\.getVersion\(\);/,
+  'Luopan ASAR bootstrap must select updates against the base app version, not Electron runtime version'
 );
 
 const registerIpcSource = functionSource(mainSource, 'registerIpc');

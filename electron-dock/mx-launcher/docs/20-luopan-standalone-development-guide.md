@@ -29,9 +29,9 @@ Luopan 已在现网 Internal 注册，不需要 SDK test mode。在
 
 ```sh
 cp .env.example .env
-curl -fsS http://116.62.51.154:18090/bootstrap-healthz
-curl -fsS http://116.62.51.154:18090/internal/v1/launcher-network/products/luopan
-curl -fsS http://116.62.51.154:18090/internal/v1/app-center/apps/luopan
+curl -fsS https://h2i.minsight-ai.com/bootstrap-healthz
+curl -fsS https://h2i.minsight-ai.com/internal/v1/launcher-network/products/luopan
+curl -fsS https://h2i.minsight-ai.com/internal/v1/app-center/apps/luopan
 pnpm run setup
 pnpm run dev
 ```
@@ -39,17 +39,22 @@ pnpm run dev
 `.env` 的正式配置是两个阶段的地址：
 
 ```dotenv
-LUOPAN_BOOTSTRAP_URLS=http://116.62.51.154:18090
-LUOPAN_LAUNCHER_BASE_URL=http://10.88.100.3:18090
+LUOPAN_PRODUCT_ID=luopan
+LUOPAN_BOOTSTRAP_URLS=http://116.62.51.154:18090,https://h2i.minsight-ai.com
+# LUOPAN_LAUNCHER_BASE_URL=http://10.88.100.3:18090
 ```
 
-- 这是隧道建立前就可达的公网 facade，仅用于 `/healthz`、匿名 enroll、
+- `LUOPAN_PRODUCT_ID` 对应 Admin/AppCenter 后台创建的应用和 ProductNetwork。
+  其他 standalone 应用复制 Luopan 时只改这个 ID；VIP、CIDR、anonymous/user
+  lease 段和 capabilities 都从后台 product/app 注册读取。
+- bootstrap 是隧道建立前就可达的公网 facade，仅用于 `/healthz`、匿名 enroll、
   snapshot、peer sync 和无用户凭证的连网前请求。账号、密码与 bearer token
   只允许在 `network-ready` 后发往隧道内 VIP。多个候选可用逗号或空格
   排序，第一个 `/healthz` 成功的 URL 被选中。
-- `LUOPAN_LAUNCHER_BASE_URL` 只允许是注册的产品 VIP
-  `http://10.88.100.3:18090`，并且只在网络进入 `network-ready` 后使用；不得把
-  bootstrap 公网地址或 MX-H2I/foundation 地址填进来。
+- `LUOPAN_LAUNCHER_BASE_URL` 通常不需要配置；客户端会在 connect 前从
+  `GET /internal/v1/launcher-network/products/{productId}` 读取 `serviceVip`
+  并推导 `http://<serviceVip>:18090`。显式配置只用于开发覆盖，不得把
+  MX-H2I/foundation 地址填进来。
 - 不要设 `LUOPAN_SDK_TEST_MODE=1`；它会绕过正式 ProductNetwork /
   AppCenter entitlement 验收路径。
 - MX-H2I `.env` 的 `HOST_RESOLVE`、`DNS_SERVERS`、`RESOLVE_MODE` 不是
@@ -58,8 +63,9 @@ LUOPAN_LAUNCHER_BASE_URL=http://10.88.100.3:18090
   `/healthz` 探测模型，不能整套复制 MX-H2I 的变量。
 
 窗口出现后点 **Connect Internal**：bootstrap 探测 → registered anonymous
-lease → Domestic peer sync → 系统授权安装 `luopan.conf` → 路由与
-`10.88.100.3:18090/healthz` 验证。终态必须是 `network-ready`。随后才登录
+ProductNetwork resolve → registered anonymous lease → Domestic peer sync →
+系统授权安装 `luopan.conf` → 路由与 resolved service VIP `/healthz` 验证。
+终态必须是 `network-ready`。随后才登录
 User Center；若要使用登录 lease 段，再执行一次 Disconnect → Connect Internal。
 
 当前骨架直接覆盖网络 lease/WireGuard/VIP、User Center、内嵌 Oversea 和 Release
@@ -118,12 +124,13 @@ WireGuard、route、平台 resolver 和 PAC，embed 只通过 broker 消费结�
 | 迁移期兼容地址 | `10.88.88.88/32`、`10.88.0.1/32` | **无，禁止使用** |
 | internalBaseUrl | `http://10.88.100.1:18090`（迁移期 `10.88.88.88`） | `http://10.88.100.3:18090` |
 | Internal 应用域名 | `h2i.mxinfo-inc.cn` | `luopan.mxinfo-inc.cn` |
-| 公网 bootstrap | `h2i.minsight-ai.com` | 尚未定义 |
+| 公网 bootstrap | `h2i.minsight-ai.com` | `h2i.minsight-ai.com` |
 
 VIP 是 Internal 把控制面/DNS/代理 materialize 给该产品 channel 的地址，是产品到
 Internal 的**唯一路由**。VIP 不跨产品复用；`10.88.88.88` 只属于 MX-H2I 的历史迁移，
-Luopan 的任何代码路径（默认值、诊断、兜底）都不得出现它。demo 的
-`defaultConfig()` 已按此写死 `10.88.100.3` 兜底。
+Luopan 的任何正式代码路径都不得使用它。demo 会通过 ProductNetwork registry
+解析 `serviceVip=10.88.100.3`；这个值属于后端注册数据，不是新应用应复制的
+客户端硬编码。
 
 ### 1.3 `@qpjoy/electron-launcher` 子路径地图
 

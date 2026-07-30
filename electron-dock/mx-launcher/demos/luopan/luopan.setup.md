@@ -4,15 +4,17 @@
 cd electron-dock/mx-launcher/demos/luopan
 cp .env.example .env
 curl -fsS http://116.62.51.154:18090/bootstrap-healthz
-curl -fsS http://116.62.51.154:18090/internal/v1/launcher-network/products/luopan
-curl -fsS http://116.62.51.154:18090/internal/v1/app-center/apps/luopan
+curl -fsS https://h2i.minsight-ai.com/bootstrap-healthz
+curl -fsS https://h2i.minsight-ai.com/internal/v1/launcher-network/products/luopan
+curl -fsS https://h2i.minsight-ai.com/internal/v1/app-center/apps/luopan
 pnpm run setup
 pnpm run dev
 ```
 
 窗口出现后点 **Connect Internal**，允许系统安装 Luopan 自己的 WireGuard
-服务。成功标志是运行态进入 `network-ready`，且路由只包含
-`10.91.0.0/16` 与 `10.88.100.3/32`。
+服务。成功标志是运行态进入 `network-ready`，且路由包含后台 ProductNetwork
+返回的产品 lease CIDR 与 service VIP `/32`（Luopan 当前注册为
+`10.91.0.0/16` 与 `10.88.100.3/32`）。
 
 随后登录 User Center。若 Internal 已是 `network-ready`，Luopan 会自动：
 

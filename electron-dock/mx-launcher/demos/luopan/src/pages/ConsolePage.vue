@@ -299,6 +299,9 @@
                 <q-input v-model="loginDraft.account" dark outlined dense :disable="!internalReady" label="账号 / 邮箱" @keyup.enter="login" />
                 <q-input v-model="loginDraft.password" dark outlined dense :disable="!internalReady" type="password" label="密码" @keyup.enter="login" />
                 <q-btn color="primary" icon="login" :loading="loggingIn" :disable="!internalReady" label="登录 User Center" @click="login" />
+                <p v-if="!internalReady && runtime.connection.dataPlane?.state === 'ownership-conflict'" class="runtime-message runtime-message--warning">
+                  本机还有旧 Launcher owner 占用罗盘路由；请先点 Disconnect / Connect 让新罗盘接管，或清理旧连接后重试。
+                </p>
                 <p class="runtime-message">
                   {{ internalReady
                     ? 'V2 登录通过隧道内 VIP；未迁移的 V1 HDO 账号会按运维配置验证并一次性导入 V2。成功后自动确保订阅并连接 Oversea。'
@@ -314,7 +317,24 @@
                   <h3>测试连接</h3>
                 </div>
               </div>
-              <q-input v-model="draft.baseUrl" dark outlined dense label="MX Server (VIP, in-tunnel)" @blur="saveConfig" />
+              <q-input
+                v-model="draft.productId"
+                dark
+                outlined
+                dense
+                label="Product ID（后台新建应用的产品 ID）"
+                hint="默认 luopan；其他应用只改这里和 bootstrap，VIP/CIDR/capabilities 从后台 ProductNetwork 获取"
+                @blur="saveConfig"
+              />
+              <q-input
+                v-model="draft.baseUrl"
+                dark
+                outlined
+                dense
+                label="MX Server (VIP, in-tunnel)"
+                hint="通常由后台 ProductNetwork.serviceVip 自动填充；开发期才手动覆盖"
+                @blur="saveConfig"
+              />
               <q-input
                 v-model="bootstrapDraft"
                 dark
@@ -332,7 +352,7 @@
                 @update:model-value="saveConfig"
               />
               <div class="config-pair">
-                <span>App ID</span>
+                <span>Product</span>
                 <strong>{{ runtime.config.productId }}</strong>
               </div>
               <div class="config-pair config-pair--copy" role="button" tabindex="0" @click="copyInstallId">
@@ -378,7 +398,7 @@ const fallbackRuntime: LuopanRuntimeState = {
   deviceId: '-',
   config: {
     baseUrl: 'http://10.88.100.3:18090',
-    bootstrapUrls: [],
+    bootstrapUrls: ['http://116.62.51.154:18090', 'https://h2i.minsight-ai.com'],
     productId: 'luopan',
     mode: 'standalone',
     sdkTestMode: false,
@@ -648,6 +668,7 @@ const updateStatusColor = computed(() => {
   if (status === 'update-available') return 'warning';
   if (status === 'up-to-date' || status === 'applied') return 'positive';
   if (status === 'staged' || status === 'ready-to-install') return 'warning';
+  if (status === 'needs-connection') return 'warning';
   if (status === 'failed' || status === 'blocked') return 'negative';
   return 'grey-6';
 });

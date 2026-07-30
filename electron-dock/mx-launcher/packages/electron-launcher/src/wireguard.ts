@@ -1012,6 +1012,9 @@ function routeInterfaceMatchesExpected(
   if (/^wg/.test(interfaceName) && /^wg/.test(expectedInterfaceName)) {
     return true;
   }
+  if (isWireGuardLikeInterface(interfaceName) && isWireGuardLikeInterface(expectedInterfaceName)) {
+    return true;
+  }
   return interfaceHasExpectedAddress(interfaceName, expectedAddresses);
 }
 

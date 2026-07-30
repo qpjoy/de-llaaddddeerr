@@ -21,8 +21,9 @@ From `demos/luopan`:
 ```sh
 cp .env.example .env
 curl -fsS http://116.62.51.154:18090/bootstrap-healthz
-curl -fsS http://116.62.51.154:18090/internal/v1/launcher-network/products/luopan
-curl -fsS http://116.62.51.154:18090/internal/v1/app-center/apps/luopan
+curl -fsS https://h2i.minsight-ai.com/bootstrap-healthz
+curl -fsS https://h2i.minsight-ai.com/internal/v1/launcher-network/products/luopan
+curl -fsS https://h2i.minsight-ai.com/internal/v1/app-center/apps/luopan
 pnpm run setup
 pnpm run dev
 ```
@@ -33,16 +34,21 @@ pnpm run dev
 not rebuild the workspace's Node-native copy. If Electron is upgraded, the
 fingerprint changes and the native copy is rebuilt on the next command.
 
-The two URLs have different phases: `LUOPAN_BOOTSTRAP_URLS` is an ordered list
-of LAN/public entrances reachable before WireGuard is up, while
-`LUOPAN_LAUNCHER_BASE_URL` is the registered in-tunnel Luopan VIP and must stay
-`http://10.88.100.3:18090`. Never set it to the MX-H2I compatibility addresses
-`10.88.88.88` or `10.88.0.1`.
+`LUOPAN_PRODUCT_ID` is the application identity created in Admin/AppCenter.
+The checked-in Luopan demo uses `luopan`; another standalone demo should copy
+this project and change that product ID. `LUOPAN_BOOTSTRAP_URLS` is an ordered
+list of LAN/public entrances reachable before WireGuard is up. Luopan keeps the
+public IP (`http://116.62.51.154:18090`) ahead of the canonical domain
+(`https://h2i.minsight-ai.com`) for fast first connect; local/LAN bootstrap
+overrides still stay first. The in-tunnel base URL is resolved from
+ProductNetwork `serviceVip` before connect and cached in runtime;
+`LUOPAN_LAUNCHER_BASE_URL` is only a development override. Never set it to the
+MX-H2I compatibility addresses `10.88.88.88` or `10.88.0.1`.
 
 After the window opens, use **Connect Internal**. The demo probes the bootstrap
-`/healthz`, enrolls the registered `luopan` ProductNetwork, obtains an anonymous
+`/healthz`, resolves the registered ProductNetwork, obtains an anonymous
 lease, syncs the Domestic peer, asks for OS authorization to install the
-product-scoped WireGuard service, and finally proves the in-tunnel VIP
+product-scoped WireGuard service, and finally proves the resolved in-tunnel VIP
 `/healthz`. `network-ready` is the successful terminal state. Then log in
 through the in-tunnel VIP; the public bootstrap endpoint never receives an
 account, password, or bearer token. If a user-range lease is required, use
@@ -99,15 +105,15 @@ in CONFIG. Do not delete the runtime merely to change URLs: doing so also
 replaces installId/deviceId and breaks existing Release Center targeting and
 evidence continuity.
 
-Changing the VIP base URL or SDK mode in development invalidates the current
-identity, subscription, browser session, and data plane before the new channel
-can be used. Packaged builds force `http://10.88.100.3:18090` with SDK test mode
-off, and login rechecks that the configured host equals the connected service
-VIP and that its `/healthz` is reachable before sending a password.
+Changing the product ID, VIP base URL, bootstrap list, or SDK mode in
+development invalidates the current identity, subscription, browser session,
+and data plane before the new channel can be used. Packaged builds force SDK
+test mode off, and login rechecks that the configured host equals the connected
+service VIP and that its `/healthz` is reachable before sending a password.
 
 A non-VIP `LUOPAN_LAUNCHER_BASE_URL` and `LUOPAN_SDK_TEST_MODE=1` are
-development escape hatches only. The checked-in example uses the registered
-production coordinates.
+development escape hatches only. The checked-in example uses the current
+production bootstrap and resolves registered product coordinates dynamically.
 
 During development the demo consumes `@qpjoy/electron-launcher` 2.3.3 and
 `@qpjoy/electron-plugin-tunnel` 0.1.19 through workspace dependencies. The

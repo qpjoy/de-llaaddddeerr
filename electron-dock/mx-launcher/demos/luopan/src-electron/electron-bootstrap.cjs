@@ -9,8 +9,9 @@ const {
 
 const componentId = 'luopan';
 const baseDir = app.getPath('userData');
-const baseVersion = app.getVersion();
 const basePackageRoot = __dirname;
+const basePackageJson = resolveBasePackageJson(basePackageRoot);
+const baseVersion = readPackageVersion(basePackageJson) || app.getVersion();
 const baseEntry = path.join(basePackageRoot, 'electron-main.js');
 const selected = selectElectronLauncherAsar({
   baseDir,
@@ -19,7 +20,7 @@ const selected = selectElectronLauncherAsar({
 });
 
 process.env.MX_LAUNCHER_BASE_APP_VERSION = baseVersion;
-process.env.MX_LAUNCHER_BASE_PACKAGE_JSON = path.join(basePackageRoot, 'package.json');
+if (basePackageJson) process.env.MX_LAUNCHER_BASE_PACKAGE_JSON = basePackageJson;
 
 void loadEntry(selected.active ? selected.path : null).catch(async (error) => {
   if (!selected.active || !selected.path) {
@@ -57,4 +58,28 @@ async function loadEntry(asarPath) {
   process.env.MX_LAUNCHER_ACTIVE_ASAR = asarPath;
   process.env.MX_LAUNCHER_ACTIVE_ASAR_VERSION = selected.version;
   await import(pathToFileURL(path.join(asarPath, main)).href);
+}
+
+function resolveBasePackageJson(root) {
+  for (const candidate of [
+    path.join(root, 'package.json'),
+    path.resolve(root, '..', 'package.json'),
+    path.resolve(root, '..', '..', 'package.json'),
+    path.resolve(root, '..', '..', '..', 'package.json')
+  ]) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function readPackageVersion(filePath) {
+  if (!filePath) return null;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return typeof manifest.version === 'string' && manifest.version.trim()
+      ? manifest.version.trim()
+      : null;
+  } catch {
+    return null;
+  }
 }

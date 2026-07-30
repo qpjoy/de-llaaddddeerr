@@ -294,7 +294,12 @@ curl -fsS -X POST \
 # MX-H2I
 # mac
 pnpm --dir electron-dock/mx-launcher/demos/mx-h2i run make:asar:mac -- 2.1.6 universal
+# win
+pnpm --dir electron-dock\mx-launcher\demos\mx-h2i run make:asar:win -- 2.1.4 x64
 
 # luopan
+# mac
 pnpm --dir electron-dock/mx-launcher/demos/luopan run make:asar:mac -- 0.1.2 universal
+# win
+pnpm --dir electron-dock/mx-launcher/demos/luopan run make:asar:win -- 0.1.2 x64
 ```
