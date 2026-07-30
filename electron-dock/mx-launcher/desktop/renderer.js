@@ -7063,7 +7063,7 @@ function renderReleaseCenterDrawer() {
             </div>
           ` : ''}
         </section>
-        <form class="app-drawer-section" data-release-edit-form data-release-plan-id="${escapeHtml(plan.planId)}">
+        <form id="release-edit-form" class="app-drawer-section" data-release-edit-form data-release-plan-id="${escapeHtml(plan.planId)}">
           <div class="app-section-title">
             <span>04</span>
             <strong>Edit release metadata</strong>
@@ -7141,6 +7141,7 @@ function renderReleaseCenterDrawer() {
       </div>
       <footer class="app-drawer-actions">
         ${plan.test?.gate?.verdict !== 'passed' ? `<button class="secondary-button" type="button" data-release-complete-gate="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>Complete gate</button>` : ''}
+        <button class="secondary-button" type="submit" form="release-edit-form" ${state.releaseCenter.busy ? 'disabled' : ''}>Save release</button>
         <button class="secondary-button" type="button" data-release-evaluate="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>Evaluate policy</button>
         <button class="primary-button" type="button" data-release-drawer-close>Done</button>
       </footer>
@@ -7498,7 +7499,7 @@ function releaseArtifactHintsFromManifest(manifest) {
 function releaseArtifactHintsFromFileName(fileName) {
   const name = String(fileName || '');
   const lower = name.toLowerCase();
-  const version = cleanReleaseVersion((name.match(/(?:^|[-_ ])v?(\d+\.\d+\.\d+(?:[-+][0-9a-zA-Z.-]+)?)(?=[-_ .]|$)/) || [])[1]);
+  const version = releaseVersionFromFileName(name);
   const knownProduct = releaseStandaloneApps().find((app) => {
     const candidates = [
       app.productId,
@@ -7515,6 +7516,19 @@ function releaseArtifactHintsFromFileName(fileName) {
     arch: /\buniversal\b/i.test(name) ? 'universal' : /\barm64\b/i.test(name) ? 'arm64' : /\bx64\b/i.test(name) ? 'x64' : /\bia32\b/i.test(name) ? 'ia32' : null,
     kind: /\.asar$/i.test(name) ? 'asar' : /\.(dmg|pkg|exe|msi)$/i.test(name) ? 'installer' : /renderer|hot/i.test(name) ? 'hot' : null
   };
+}
+
+function releaseVersionFromFileName(fileName) {
+  const base = String(fileName || '')
+    .trim()
+    .replace(/\.(asar|dmg|pkg|exe|msi|zip|json)$/i, '');
+  const tokens = base.split(/[-_ ]+/).filter(Boolean);
+  for (const token of tokens) {
+    const normalized = token.replace(/^v/i, '');
+    if (/^\d+\.\d+\.\d+(?:\+[0-9A-Za-z.-]+)?$/.test(normalized)) return normalized;
+  }
+  const match = base.match(/(?:^|[^0-9])v?(\d+\.\d+\.\d+)(?=[^0-9]|$)/);
+  return cleanReleaseVersion(match?.[1]);
 }
 
 function applyReleaseUploadHints(form, hints) {
