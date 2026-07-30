@@ -167,6 +167,31 @@ assert.match(
   'Release Center currentVersion must use Luopan package/ASAR version, not Electron runtime version'
 );
 assert.match(
+  mainSource,
+  /channel: 'stable'/,
+  'Luopan Release Center default channel must match the admin stable release lane'
+);
+assert.match(
+  functionSource(mainSource, 'releaseUpdater'),
+  /channel: releaseChannel\(\)/,
+  'Luopan release updater must not hard-code a stale product channel'
+);
+assert.match(
+  functionSource(mainSource, 'releaseChannel'),
+  /LUOPAN_RELEASE_CHANNEL[\s\S]*PRODUCT\.release\.channel/,
+  'Luopan release channel must remain overrideable for canary/shadow validation'
+);
+assert.match(
+  functionSource(mainSource, 'checkLuopanUpdates'),
+  /channel=\$\{channel\}, base=\$\{baseUrl\}/,
+  'Luopan update checks must log the concrete channel and API base used for diagnosis'
+);
+assert.match(
+  functionSource(mainSource, 'checkLuopanUpdates'),
+  /source === 'user' \|\| check\.plan\?\.releaseId !== lastPromptedReleaseId/,
+  'manual Luopan update checks must prompt for a matched update even when auto-check already prompted earlier'
+);
+assert.match(
   functionSource(mainSource, 'baseApplicationVersion'),
   /packageJsonVersion\(process\.env\.MX_LAUNCHER_BASE_PACKAGE_JSON\)[\s\S]*app\.getVersion\(\)/,
   'Luopan dev mode must prefer package.json version before falling back to Electron app.getVersion()'

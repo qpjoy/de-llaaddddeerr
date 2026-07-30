@@ -111,7 +111,7 @@ system TUN 抢 Internal WireGuard。登出和断开 Internal 都会停止代理�
 Luopan 客户端已经是 Release Consumer：通过产品 VIP 调现有 check/history/report/download
 接口；`release/check` 必须发送 `productId=luopan`。完整安装包使用
 `componentId=luopan`，renderer 热更新使用 `componentId=luopan-renderer`，两者 channel
-都是 `shadow`。
+默认都是 `stable`（需要 canary/shadow 验证时用 `LUOPAN_RELEASE_CHANNEL` 覆盖）。
 
 Luopan 当前打包目标为 macOS DMG、Windows NSIS EXE 和 Linux AppImage；每个实际
 platform/arch 都要独立上传、建 plan 和验证。Publisher 不在 Electron 进程中实现，而在
@@ -135,8 +135,8 @@ Consumer 返回 blocked，不得把它误报为可下载灰度。API、curl、se
 3. **不自建更新器、不带 native helper**：更新走
    `@qpjoy/electron-launcher` 的 release-updater（检查/上报）+
    release-update-executor（下载/staged/激活/回滚），完整安装包
-   `componentId=luopan`、renderer `componentId=luopan-renderer`、channel 固定
-   `shadow`。大版本
+   `componentId=luopan`、renderer `componentId=luopan-renderer`、channel 默认
+   `stable`，可用 `LUOPAN_RELEASE_CHANNEL` 覆盖。大版本
    安装包由 Release Center 下发（installer-manual，永远手动确认），热更
    （npm artifact / 配置 / feature flag）自动生效。**本 demo 的
    `src-electron/electron-main.ts` 已带完整接线**（`luopan:check-updates` /

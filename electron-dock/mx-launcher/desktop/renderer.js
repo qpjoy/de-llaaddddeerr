@@ -7113,9 +7113,6 @@ function renderReleaseCenterDrawer() {
             <span>Release notes</span>
             <textarea name="releaseNotes" rows="5" placeholder="Markdown release notes">${escapeHtml(plan.releaseNotes || '')}</textarea>
           </label>
-          <div class="app-drawer-actions">
-            <button class="primary-button" type="submit" ${state.releaseCenter.busy ? 'disabled' : ''}>Save release</button>
-          </div>
         </form>
         <section class="app-drawer-section">
           <div class="app-section-title">

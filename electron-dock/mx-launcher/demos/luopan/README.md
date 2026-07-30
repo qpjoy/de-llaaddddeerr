@@ -78,7 +78,8 @@ the subscription URL, SQLite record, renderer state, or `.env`.
 
 The desktop app is only a Release Consumer. It checks and reports through the
 existing product-VIP endpoints and must never contain a Publisher client secret.
-Runtime checks bind `productId=luopan`. Luopan CI publishes on `channel=shadow`; full installers use
+Runtime checks bind `productId=luopan`. Luopan CI publishes on `channel=stable`
+by default (`LUOPAN_RELEASE_CHANNEL` can override it for canary/shadow validation); full installers use
 `componentId=luopan`, renderer updates use `componentId=luopan-renderer`, and
 the current package targets are macOS DMG, Windows NSIS EXE, and Linux
 AppImage. Artifact upload, targeted validation, gate approval, and full rollout

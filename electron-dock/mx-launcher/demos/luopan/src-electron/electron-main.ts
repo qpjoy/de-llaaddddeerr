@@ -277,7 +277,7 @@ const PRODUCT = defineLauncherProduct({
   },
   release: {
     componentId: 'luopan',
-    channel: 'shadow',
+    channel: 'stable',
     rolloutGroup: 'sdk-test'
   },
   launcherActions: {
@@ -996,21 +996,35 @@ async function hydrateRegisteredProductNetwork(source: string): Promise<void> {
 let lastUpdateCheck: ElectronLauncherUpdateCheckResult | null = null;
 let updateCheckInFlight: Promise<void> | null = null;
 
-function releaseUpdater(): ElectronLauncherReleaseUpdater {
+function releaseUpdater(baseUrl = effectiveApiBaseUrl()): ElectronLauncherReleaseUpdater {
   const state = requireRuntime();
   return createElectronLauncherReleaseUpdater({
     // In-tunnel VIP once connected; bootstrap URL before that, so the update
     // panel (and startup bookkeeping) works pre-connect too.
-    baseUrl: effectiveApiBaseUrl(),
+    baseUrl,
     reportInstallId: state.installId,
     packageName: '@qpjoy/luopan-demo',
-    channel: PRODUCT.release.channel,
+    channel: releaseChannel(),
     // Compatibility only: old Release Center deployments do not expose the
     // package resolver yet. This is the existing network product identity,
     // not a second release identity declaration.
     productId: state.config.productId,
     allowLegacyProductFallback: true
   });
+}
+
+function releaseChannel(): string {
+  return stringValue(environmentValue('LUOPAN_RELEASE_CHANNEL')) || PRODUCT.release.channel;
+}
+
+function releaseCheckBaseUrlCandidates(): string[] {
+  const state = requireRuntime();
+  return uniqueStrings([
+    effectiveApiBaseUrl(),
+    activeBootstrapBaseUrl || '',
+    ...state.config.bootstrapUrls,
+    state.config.baseUrl
+  ]).map((url) => normalizeBaseUrl(url, state.config.baseUrl));
 }
 
 // docs/17 stability boundary: never activate artifacts while the product's
@@ -1117,7 +1131,7 @@ async function applyLuopanUpdate(source: 'user' | 'silent'): Promise<void> {
   let hasAsar = false;
   let hasInstaller = false;
   try {
-    const result = await updateExecutor(releaseUpdater()).execute(lastUpdateCheck);
+    const result = await updateExecutor(releaseUpdater(lastUpdateCheck.baseUrl)).execute(lastUpdateCheck);
     const execution = executionSummary(result);
     hasFailure = execution.some((artifact) => artifact.phase === 'failed');
     hasAsar = execution.some(
@@ -1210,23 +1224,38 @@ async function checkLuopanUpdates(source: 'user' | 'network-ready' = 'user'): Pr
         broadcastRuntime();
         return;
       }
-      const updater = releaseUpdater();
       const userId = hasActiveUserIdentity(state) ? state.identity.userId : null;
-      const checks: ElectronLauncherUpdateCheckResult[] = [];
-      for (const componentKind of ['app-installer', 'app-asar', 'renderer-ui'] as const) {
-        checks.push(await updater.check({
-          componentKind,
-          currentVersion: currentReleaseVersion(),
-          installId: state.installId,
-          userId,
-          platform: process.platform,
-          arch: process.arch
-        }));
+      const channel = releaseChannel();
+      let baseUrl = effectiveApiBaseUrl();
+      let checks: ElectronLauncherUpdateCheckResult[] | null = null;
+      let lastCheckError: unknown = null;
+      for (const candidateBaseUrl of releaseCheckBaseUrlCandidates()) {
+        try {
+          const updater = releaseUpdater(candidateBaseUrl);
+          const candidateChecks: ElectronLauncherUpdateCheckResult[] = [];
+          for (const componentKind of ['app-installer', 'app-asar', 'renderer-ui'] as const) {
+            candidateChecks.push(await updater.check({
+              componentKind,
+              currentVersion: currentReleaseVersion(),
+              installId: state.installId,
+              userId,
+              platform: process.platform,
+              arch: process.arch
+            }));
+          }
+          checks = candidateChecks;
+          baseUrl = candidateBaseUrl;
+          break;
+        } catch (error) {
+          lastCheckError = error;
+          pushEvent(`update check base failed ${candidateBaseUrl}: ${errorMessage(error)}`);
+        }
       }
+      if (!checks) throw lastCheckError ?? new Error('Release Center check failed');
       const check = chooseUpdateCheck(checks);
       lastUpdateCheck = check;
       state.update = updateFromCheck(check);
-      pushEvent(`update check ${check.status} (${source})`);
+      pushEvent(`update check ${check.status} (${source}, channel=${channel}, base=${baseUrl})`);
       await saveRuntime();
       broadcastRuntime();
       if (
@@ -1236,10 +1265,9 @@ async function checkLuopanUpdates(source: 'user' | 'network-ready' = 'user'): Pr
       ) {
         await applyLuopanUpdate('silent');
       } else if (
-        source === 'network-ready'
-        && check.status === 'update-available'
+        check.status === 'update-available'
         && check.deliveryMode === 'prompt-download-restart'
-        && check.plan?.releaseId !== lastPromptedReleaseId
+        && (source === 'user' || check.plan?.releaseId !== lastPromptedReleaseId)
       ) {
         lastPromptedReleaseId = check.plan?.releaseId ?? `version:${check.decision.targetVersion}`;
         const installer = check.artifacts.some(
