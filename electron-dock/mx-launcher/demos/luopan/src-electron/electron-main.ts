@@ -331,7 +331,6 @@ let shutdownInFlight: Promise<void> | null = null;
 let shutdownComplete = false;
 let relaunchRequested = false;
 let automaticUpdateCheckTimer: NodeJS.Timeout | null = null;
-let lastPromptedReleaseId: string | null = null;
 let sessionOperation: Promise<unknown> = Promise.resolve();
 let runtimeSaveQueue: Promise<void> = Promise.resolve();
 let runtimeSaveSequence = 0;
@@ -1264,30 +1263,6 @@ async function checkLuopanUpdates(source: 'user' | 'network-ready' = 'user'): Pr
         && check.artifacts.some((artifact) => classifyElectronLauncherUpdateArtifact(artifact.kind) === 'asar')
       ) {
         await applyLuopanUpdate('silent');
-      } else if (
-        check.status === 'update-available'
-        && check.deliveryMode === 'prompt-download-restart'
-        && (source === 'user' || check.plan?.releaseId !== lastPromptedReleaseId)
-      ) {
-        lastPromptedReleaseId = check.plan?.releaseId ?? `version:${check.decision.targetVersion}`;
-        const installer = check.artifacts.some(
-          (artifact) => classifyElectronLauncherUpdateArtifact(artifact.kind) === 'installer'
-        );
-        const choice = await showLuopanMessageBox({
-          type: 'info',
-          buttons: ['立即下载', '稍后'],
-          defaultId: 0,
-          cancelId: 1,
-          title: installer ? 'Luopan 完整更新' : 'Luopan 热更新',
-          message: `发现 Luopan ${check.decision.targetVersion} 更新`,
-          detail: [
-            check.releaseNotes?.trim() || check.reason,
-            installer
-              ? '安装包会先下载并校验，之后由你确认是否打开安装。'
-              : 'ASAR 会先下载并校验，之后由你确认立即重启或下次启动生效。'
-          ].join('\n\n').slice(0, 1200)
-        });
-        if (choice.response === 0) await applyLuopanUpdate('user');
       }
     } catch (error) {
       lastUpdateCheck = null;

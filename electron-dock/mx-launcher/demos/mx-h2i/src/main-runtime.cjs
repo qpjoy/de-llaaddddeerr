@@ -210,7 +210,6 @@ let lastSystemPacReverseProxyRoutesWarningAt = 0;
 let lastNetworkEnvironmentSignature = null;
 let lastDarwinEndpointRouteRepairAt = 0;
 let releaseUpdateCheckInFlight = null;
-let lastPromptedReleaseUpdateKey = null;
 let postConnectUpdateTimer = null;
 let diagnosticLogQueue = Promise.resolve();
 let diagnosticLogBytes = null;
@@ -547,6 +546,15 @@ function createMainWindow() {
   });
 
   mainWindow.removeMenu();
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const target = new URL(url);
+      if (target.protocol === 'http:' || target.protocol === 'https:') void shell.openExternal(target.toString());
+    } catch {
+      // Release notes may contain malformed links; keep them inside the denied popup.
+    }
+    return { action: 'deny' };
+  });
   if (process.platform === 'win32') {
     // Windows does not emit app.before-quit during logoff/shutdown. Delay the
     // session end until the same PAC -> WG/NRPT -> local-edge teardown settles.
@@ -9859,15 +9867,11 @@ async function performUpdateCheck(reason, options = {}) {
   const releaseMessage = releaseSync.ok
     ? releaseUpdateMessage(releaseResult)
     : 'Release Center 更新策略读取失败。';
-  const releaseNotesLine = releaseNotesSummary(releaseResult?.releaseNotes);
   const hasUpdateSignal = ['update-available', 'blocked'].includes(releaseResult?.status);
   const deliveryMode = normalizeReleaseDeliveryMode(releaseResult?.deliveryMode);
   const silentDelivery = deliveryMode === 'silent-download-next-start';
   if (!quiet || (hasUpdateSignal && !silentDelivery)) {
-    const updateFeedbackMessage = [
-      `${releaseMessage} 当前 ${currentReleaseVersion()}，目标 ${releaseDecision?.targetVersion || currentReleaseVersion()}，通道 ${runtime.config.releaseChannel}。AppCenter 目录已同步 ${catalogSync.count} 个应用。`,
-      releaseNotesLine ? `更新内容：${releaseNotesLine}` : null
-    ].filter(Boolean).join('\n');
+    const updateFeedbackMessage = `${releaseMessage} 当前 ${currentReleaseVersion()}，目标 ${releaseDecision?.targetVersion || currentReleaseVersion()}，通道 ${runtime.config.releaseChannel}。AppCenter 目录已同步 ${catalogSync.count} 个应用。`;
     runtime.feedback = {
       tone: failures.length ? 'warning' : (releaseResult?.status === 'update-available' ? 'success' : 'info'),
       message: failures.length
@@ -9884,14 +9888,6 @@ async function performUpdateCheck(reason, options = {}) {
   ) {
     await applyLauncherUpdate(`silent-${reason}`);
     await saveAndBroadcast();
-  } else if (
-    releaseResult?.status === 'update-available'
-    && deliveryMode === 'prompt-download-restart'
-    && !quiet
-    && releaseUpdatePromptKey(releaseResult) !== lastPromptedReleaseUpdateKey
-  ) {
-    lastPromptedReleaseUpdateKey = releaseUpdatePromptKey(releaseResult);
-    await promptForLauncherUpdate(releaseResult, releaseArtifact);
   }
   return { ok: failures.length === 0, skipped: false, releaseResult, catalogSync, releaseSync };
 }
@@ -10063,35 +10059,6 @@ function normalizeReleaseDeliveryMode(value) {
   return 'prompt-download-restart';
 }
 
-function releaseUpdatePromptKey(result) {
-  return nullableString(result?.plan?.planId)
-    || nullableString(result?.plan?.releaseId)
-    || nullableString(result?.decision?.targetVersion)
-    || 'unknown-release';
-}
-
-async function promptForLauncherUpdate(result, artifact) {
-  const installer = /installer/i.test(artifact?.kind || result?.decision?.componentKind || '');
-  const choice = await dialog.showMessageBox(mainWindow || undefined, {
-    type: 'info',
-    buttons: ['立即下载', '稍后'],
-    defaultId: 0,
-    cancelId: 1,
-    title: installer ? 'MX-H2I 完整更新' : 'MX-H2I 热更新',
-    message: `发现 MX-H2I ${result?.decision?.targetVersion || ''} 更新`,
-    detail: [
-      nullableString(result?.releaseNotes) || nullableString(result?.reason) || 'Release Center 已发布新版本。',
-      installer
-        ? '安装包会先下载并校验，之后交给系统安装器打开。'
-        : 'ASAR 会先下载并校验，之后可立即重启或等下次启动生效。'
-    ].join('\n\n').slice(0, 1200)
-  });
-  if (choice.response === 0) {
-    await applyLauncherUpdate('prompt');
-    await saveAndBroadcast();
-  }
-}
-
 function chooseReleaseUpdateResult(results, currentVersion, baseUrl) {
   const successful = results.filter((result) => result && !result.error && result.decision);
   const available = successful.filter((result) => result.status === 'update-available');
@@ -10139,13 +10106,6 @@ function releaseUpdateMessage(result) {
     return `发现可自动更新版本 ${decision.targetVersion}（${decision.componentKind || 'component'}）。`;
   }
   return result.reason || 'Release Center 更新策略已读取。';
-}
-
-function releaseNotesSummary(value, maxLength = 420) {
-  const notes = nullableString(value)?.replace(/\s+/g, ' ').trim();
-  if (!notes) return '';
-  if (notes.length <= maxLength) return notes;
-  return `${notes.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
 }
 
 function updateHistoryEntry(input) {

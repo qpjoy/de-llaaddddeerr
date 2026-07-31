@@ -314,9 +314,112 @@ body {
 }
 
 .release-notes {
-  white-space: pre-wrap;
   border-left: 2px solid rgba(52, 245, 210, 0.5);
   padding-left: 10px;
+}
+
+.release-notes-markdown {
+  overflow-wrap: anywhere;
+  color: rgba(229, 237, 248, 0.78);
+  line-height: 1.58;
+}
+
+.release-notes-markdown > :first-child {
+  margin-top: 0;
+}
+
+.release-notes-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.release-notes-markdown h1,
+.release-notes-markdown h2,
+.release-notes-markdown h3,
+.release-notes-markdown h4 {
+  margin: 14px 0 7px;
+  color: #f9fbff;
+  font-size: 1.1em;
+  line-height: 1.35;
+}
+
+.release-notes-markdown p,
+.release-notes-markdown ul,
+.release-notes-markdown ol,
+.release-notes-markdown blockquote,
+.release-notes-markdown pre {
+  margin: 8px 0;
+}
+
+.release-notes-markdown ul,
+.release-notes-markdown ol {
+  padding-left: 24px;
+}
+
+.release-notes-markdown blockquote {
+  padding-left: 12px;
+  border-left: 3px solid rgba(52, 245, 210, 0.58);
+  color: rgba(229, 237, 248, 0.62);
+}
+
+.release-notes-markdown code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(7, 12, 21, 0.78);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.release-notes-markdown pre {
+  padding: 10px 12px;
+  overflow-x: auto;
+  border-radius: 7px;
+  background: rgba(7, 12, 21, 0.78);
+}
+
+.release-notes-markdown pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.release-notes-markdown a {
+  color: #34f5d2;
+}
+
+.release-update-dialog {
+  width: min(560px, calc(100vw - 40px));
+  max-width: none;
+  border: 1px solid rgba(81, 108, 163, 0.58);
+  border-radius: 14px;
+  background: #202536;
+  color: #eef3f8;
+}
+
+.release-update-dialog__heading {
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  padding-bottom: 4px;
+  text-align: center;
+}
+
+.release-update-dialog__heading h3 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.release-update-dialog__notes {
+  max-height: min(340px, 44vh);
+  padding: 14px;
+  overflow-y: auto;
+  border: 1px solid rgba(81, 108, 163, 0.44);
+  border-radius: 8px;
+  background: rgba(11, 15, 24, 0.5);
+}
+
+.release-update-dialog__hint {
+  margin: 16px 0 0;
+  color: rgba(229, 237, 248, 0.66);
+  text-align: center;
+  line-height: 1.55;
 }
 
 .event-log {

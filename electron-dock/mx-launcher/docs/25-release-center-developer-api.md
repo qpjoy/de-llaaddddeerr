@@ -657,6 +657,12 @@ const result = await updater.check({
 调用 `confirmElectronLauncherAsarLaunch`；若主入口导入失败或上次启动未到 healthy，
 bootstrap 会自动回滚。
 
+`releaseNotes` 使用受限 Markdown。MX-H2I 与 Luopan 的更新面板和“发现更新”应用内弹窗
+支持 1–4 级标题、段落、无序/有序列表、引用、粗体、斜体、删除线、行内代码、围栏代码块
+以及 HTTP(S) 链接。客户端会先转义原始 HTML；脚本、事件属性、`javascript:` 链接和其他
+原始 HTML 不会执行。发布者不应依赖 HTML 排版。系统原生的“下载完成/立即重启”确认框仍为
+纯文本，因为 Electron 原生 message box 不提供富文本渲染。
+
 只有正处于服务端滚动升级期的历史应用，才可同时提供原 `productId` 并显式设置
 `allowLegacyProductFallback: true`；该回退只处理旧服务端返回的 404/405。新应用不要开启，
 否则注册遗漏可能被掩盖。

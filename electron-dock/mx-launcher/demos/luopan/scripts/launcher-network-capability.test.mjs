@@ -10,6 +10,10 @@ const bootstrapSource = readFileSync(
   fileURLToPath(new URL('../src-electron/electron-bootstrap.cjs', import.meta.url)),
   'utf8'
 );
+const consolePageSource = readFileSync(
+  fileURLToPath(new URL('../src/pages/ConsolePage.vue', import.meta.url)),
+  'utf8'
+);
 
 function functionSource(source, name) {
   const candidates = [`async function ${name}(`, `function ${name}(`];
@@ -187,9 +191,14 @@ assert.match(
   'Luopan update checks must log the concrete channel and API base used for diagnosis'
 );
 assert.match(
+  consolePageSource,
+  /<q-dialog v-model="updatePromptOpen" persistent>[\s\S]*v-html="releaseNotesHtml"[\s\S]*acceptUpdatePrompt/,
+  'Luopan update discovery must use the in-app Markdown prompt instead of a plain native message box'
+);
+assert.doesNotMatch(
   functionSource(mainSource, 'checkLuopanUpdates'),
-  /source === 'user' \|\| check\.plan\?\.releaseId !== lastPromptedReleaseId/,
-  'manual Luopan update checks must prompt for a matched update even when auto-check already prompted earlier'
+  /showLuopanMessageBox/,
+  'the check path must not also show a duplicate native release-notes prompt'
 );
 assert.match(
   functionSource(mainSource, 'baseApplicationVersion'),

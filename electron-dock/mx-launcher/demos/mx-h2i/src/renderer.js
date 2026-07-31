@@ -1,6 +1,8 @@
 const electronApi = window.mxH2i || null;
 const api = electronApi || createMockApi();
 const root = document.getElementById('app');
+const renderReleaseNotesMarkdown = window.MxReleaseNotesMarkdown?.renderReleaseNotesMarkdown
+  || ((value) => `<p>${escapeHtml(value)}</p>`);
 const isWindows = api.platform === 'win32';
 document.documentElement.dataset.platform = api.platform || 'browser';
 const H2O_DEFAULT_TEST_URL = 'https://www.google.com';
@@ -62,6 +64,7 @@ const EMPLOYEE_ACCOUNT_HISTORY_KEY = 'mx-h2i.employeeAccountHistory';
 const EMPLOYEE_ACCOUNT_HISTORY_LIMIT = 10;
 let employeeLoginDraft = { account: '', password: '' };
 let employeeAccountHistory = readEmployeeAccountHistory();
+let dismissedReleasePromptKey = '';
 
 void boot();
 
@@ -89,6 +92,18 @@ root.addEventListener('click', (event) => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
   const action = button.dataset.action;
+  if (action === 'dismiss-release-update') {
+    dismissedReleasePromptKey = releasePromptKey(state.update);
+    render();
+    return;
+  }
+  if (action === 'accept-release-update') {
+    dismissedReleasePromptKey = releasePromptKey(state.update);
+    render();
+    void runAction('applyUpdate');
+    return;
+  }
+  if (action === 'checkUpdates') dismissedReleasePromptKey = '';
   rememberAppGridScroll();
   if (button.dataset.appId && action !== 'select-app') {
     selectedAppId = button.dataset.appId;
@@ -885,9 +900,47 @@ function render() {
       ${screen === 'appcenter' ? '' : renderWindowChrome()}
       ${screen === 'appcenter' ? renderWorkbench(connected, connecting) : renderPhone(connected, connecting, leaseOnly, tunnelOnly, degraded)}
     </div>
+    ${renderReleaseUpdatePrompt()}
   `;
   restorePhoneScroll();
   restoreAppCenterScroll();
+}
+
+function releasePromptKey(update) {
+  return String(update?.planId || update?.releaseId || update?.latestVersion || '');
+}
+
+function renderReleaseUpdatePrompt() {
+  const update = state?.update || {};
+  const key = releasePromptKey(update);
+  const visible = update.status === 'update-available'
+    && update.deliveryMode === 'prompt-download-restart'
+    && key
+    && key !== dismissedReleasePromptKey
+    && busyAction !== 'checkUpdates';
+  if (!visible) return '';
+  const installer = /installer/i.test(update.artifactKind || update.componentKind || '');
+  const notes = update.releaseNotes || update.reason || 'Release Center 已发布新版本。';
+  return `
+    <div class="release-update-overlay" role="presentation">
+      <section class="release-update-dialog" role="dialog" aria-modal="true" aria-labelledby="release-update-title">
+        <img src="./assets/mingxi-logo.png" alt="" class="release-update-dialog__icon" />
+        <h2 id="release-update-title">发现 MX-H2I ${escapeHtml(update.latestVersion || '')} 更新</h2>
+        <div class="release-notes-markdown release-update-dialog__notes">
+          ${renderReleaseNotesMarkdown(notes)}
+        </div>
+        <p class="release-update-dialog__hint">
+          ${installer
+            ? '安装包会先下载并校验，之后交给系统安装器打开。'
+            : 'ASAR 会先下载并校验，之后可立即重启或等下次启动生效。'}
+        </p>
+        <div class="release-update-dialog__actions">
+          <button class="secondary-button" type="button" data-action="dismiss-release-update">稍后</button>
+          <button class="primary-button" type="button" data-action="accept-release-update">立即下载</button>
+        </div>
+      </section>
+    </div>
+  `;
 }
 
 function rememberPhoneScroll() {
@@ -1148,7 +1201,7 @@ function renderPhoneFooterInfo(connected) {
       ${releaseNotes ? `
         <div class="update-release-notes update-release-notes--compact">
           <span>更新内容</span>
-          <pre>${escapeHtml(releaseNotes)}</pre>
+          <div class="release-notes-markdown">${renderReleaseNotesMarkdown(releaseNotes)}</div>
         </div>
       ` : ''}
       ${renderUpdateProgress(update)}
@@ -3354,7 +3407,7 @@ function renderUpdatePanel() {
       ${update.releaseNotes ? `
         <div class="update-release-notes">
           <span>Release notes</span>
-          <pre>${escapeHtml(update.releaseNotes)}</pre>
+          <div class="release-notes-markdown">${renderReleaseNotesMarkdown(update.releaseNotes)}</div>
         </div>
       ` : ''}
       <div class="update-actions">

@@ -377,7 +377,9 @@ wiring and only shows check/download/staged).
    当前高的号，`目标用户` 只填自己的 userId，Release notes 写两行 → Upload and
    create → 行内 `Open` → `Complete gate`。
 2. **被圈中的客户端**：自己的 mx-h2i 点检查更新 → Release/Gray 面板应出现
-   目标版本、`Matched by = 指定用户`、Release notes 原文 → 点下载 → 热更自动
+   目标版本、`Matched by = 指定用户`、Release notes Markdown 排版后的正文；提示模式还应
+   出现相同排版的应用内更新弹窗，标题、列表和粗体不能显示为 `#` / `-` / `**` 原文 →
+   点下载 → 热更自动
    激活（状态 `applied`，历史里有 `hot-apply`）。
 3. **未被圈中的客户端**：另一个账号（或把 targets 改掉再查）→ 检查更新显示
    已是最新，看不到任何计划信息。

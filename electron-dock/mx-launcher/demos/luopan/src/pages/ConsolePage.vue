@@ -148,7 +148,12 @@
                   <strong>{{ runtime.update.releaseId || '-' }}</strong>
                 </div>
               </div>
-              <p v-if="runtime.update.releaseNotes" class="runtime-message release-notes">{{ runtime.update.releaseNotes }}</p>
+              <!-- renderReleaseNotesMarkdown escapes raw HTML before adding the supported Markdown tags. -->
+              <div
+                v-if="runtime.update.releaseNotes"
+                class="runtime-message release-notes release-notes-markdown"
+                v-html="releaseNotesHtml"
+              />
               <p class="runtime-message">{{ runtime.update.message }}</p>
               <div v-if="runtime.update.featureFlags.length" class="runtime-message">
                 feature flags: {{ runtime.update.featureFlags.join(', ') }}
@@ -378,6 +383,27 @@
         </section>
       </q-page>
     </q-page-container>
+    <q-dialog v-model="updatePromptOpen" persistent>
+      <q-card dark class="release-update-dialog">
+        <q-card-section class="release-update-dialog__heading">
+          <q-avatar color="primary" text-color="black" icon="system_update_alt" size="64px" />
+          <h3>发现 Luopan {{ runtime.update.targetVersion }} 更新</h3>
+        </q-card-section>
+        <q-card-section>
+          <!-- The renderer escapes raw HTML and only emits the supported Markdown subset. -->
+          <div class="release-notes-markdown release-update-dialog__notes" v-html="releaseNotesHtml" />
+          <p class="release-update-dialog__hint">
+            {{ updatePromptInstaller
+              ? '安装包会先下载并校验，之后由你确认是否打开安装。'
+              : 'ASAR 会先下载并校验，之后由你确认立即重启或下次启动生效。' }}
+          </p>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat color="grey-5" label="稍后" @click="dismissUpdatePrompt" />
+          <q-btn unelevated color="primary" text-color="black" label="立即下载" :loading="updateBusy" @click="acceptUpdatePrompt" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-layout>
 </template>
 
@@ -387,6 +413,7 @@ import { copyToClipboard, useQuasar, type QTableColumn } from 'quasar';
 
 import OverseaPanel from 'src/components/OverseaPanel.vue';
 import type { LuopanRuntimeConfig, LuopanRuntimeState } from 'src/types/launcher';
+import { renderReleaseNotesMarkdown } from 'src/utils/release-notes-markdown';
 
 const $q = useQuasar();
 const fallbackRuntime: LuopanRuntimeState = {
@@ -472,6 +499,8 @@ const fallbackRuntime: LuopanRuntimeState = {
 };
 
 const runtime = ref<LuopanRuntimeState>(fallbackRuntime);
+const updatePromptOpen = ref(false);
+const dismissedUpdatePromptKey = ref('');
 const draft = reactive<LuopanRuntimeConfig>({ ...fallbackRuntime.config });
 const bootstrapDraft = ref('');
 const connecting = computed(() => runtime.value.connection.status === 'connecting');
@@ -512,6 +541,15 @@ function applyRuntime(next: LuopanRuntimeState) {
   runtime.value = next;
   Object.assign(draft, next.config);
   bootstrapDraft.value = next.config.bootstrapUrls.join(', ');
+  const promptKey = releasePromptKey(next);
+  if (
+    next.update.status === 'update-available'
+    && next.update.deliveryMode === 'prompt-download-restart'
+    && promptKey
+    && promptKey !== dismissedUpdatePromptKey.value
+  ) {
+    updatePromptOpen.value = true;
+  }
 }
 
 async function getRuntime() {
@@ -568,6 +606,26 @@ const loggingIn = ref(false);
 const passwordDraft = reactive({ currentPassword: '', newPassword: '', confirmPassword: '' });
 const passwordChanging = ref(false);
 const updateBusy = ref(false);
+const releaseNotesHtml = computed(() =>
+  renderReleaseNotesMarkdown(runtime.value.update.releaseNotes || runtime.value.update.message)
+);
+const updatePromptInstaller = computed(() =>
+  runtime.value.update.artifacts.some((artifact) => artifact.artifactClass === 'installer')
+);
+
+function releasePromptKey(value: LuopanRuntimeState): string {
+  return value.update.releaseId || value.update.targetVersion || '';
+}
+
+function dismissUpdatePrompt() {
+  dismissedUpdatePromptKey.value = releasePromptKey(runtime.value);
+  updatePromptOpen.value = false;
+}
+
+async function acceptUpdatePrompt() {
+  dismissUpdatePrompt();
+  await applyUpdate();
+}
 
 async function login() {
   if (!internalReady.value) {
@@ -630,6 +688,8 @@ async function changePassword() {
 }
 
 async function checkUpdates() {
+  dismissedUpdatePromptKey.value = '';
+  updatePromptOpen.value = false;
   updateBusy.value = true;
   try {
     const next = await window.luopanLauncher?.checkUpdates();
