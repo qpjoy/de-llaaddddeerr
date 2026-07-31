@@ -7252,6 +7252,16 @@ function renderReleaseUploadDrawer() {
                 <option value="silent-download-next-start" ${draft.deliveryMode === 'silent-download-next-start' ? 'selected' : ''}>静默下载，下次启动生效</option>
               </select>
             </label>
+            <label>
+              <span>Rollout strategy</span>
+              <select name="rolloutStrategy">
+                ${['all', 'gray', 'manual-ring'].map((strategy) => `<option value="${strategy}" ${(draft.rolloutStrategy || (draft.kind === 'installer' ? 'all' : 'gray')) === strategy ? 'selected' : ''}>${strategy}</option>`).join('')}
+              </select>
+            </label>
+            <label>
+              <span>Rollout percentage</span>
+              <input name="rolloutPercentage" type="number" min="0" max="100" step="1" value="${escapeHtml(String(draft.rolloutPercentage ?? (draft.kind === 'installer' ? 100 : 10)))}" />
+            </label>
           </div>
         </section>
         <section class="app-drawer-section">
@@ -7266,7 +7276,7 @@ function renderReleaseUploadDrawer() {
             </label>
             <label>
               <span>目标安装（高级）</span>
-              <input name="targetInstallIds" value="${escapeHtml(draft.targetInstallIds || '')}" autocomplete="off" placeholder="installId 逗号分隔" />
+              <input name="targetInstallIds" value="${escapeHtml(draft.targetInstallIds || '')}" autocomplete="off" placeholder="installId 逗号分隔；命中后优先于灰度百分比" />
             </label>
             <label>
               <span>功能开关（高级）</span>
@@ -7618,6 +7628,14 @@ function releaseUploadInputFromForm(form, file) {
   const deliveryMode = kind === 'asar' && form.elements.deliveryMode?.value === 'silent-download-next-start'
     ? 'silent-download-next-start'
     : 'prompt-download-restart';
+  const fallbackRolloutStrategy = kind === 'installer' ? 'all' : 'gray';
+  const rolloutStrategy = ['all', 'gray', 'manual-ring'].includes(form.elements.rolloutStrategy?.value)
+    ? form.elements.rolloutStrategy.value
+    : fallbackRolloutStrategy;
+  const rolloutPercentageValue = Number(form.elements.rolloutPercentage?.value);
+  const rolloutPercentage = Number.isFinite(rolloutPercentageValue)
+    ? Math.max(0, Math.min(100, rolloutPercentageValue))
+    : rolloutStrategy === 'all' ? 100 : 10;
   const targetUserIds = commaList(form.elements.targetUserIds?.value);
   const targetInstallIds = commaList(form.elements.targetInstallIds?.value);
   const featureKeys = commaList(form.elements.featureKeys?.value);
@@ -7643,6 +7661,8 @@ function releaseUploadInputFromForm(form, file) {
     storage,
     e2eResult,
     deliveryMode,
+    rolloutStrategy,
+    rolloutPercentage,
     targetUserIds,
     targetInstallIds,
     featureKeys,
@@ -7697,7 +7717,6 @@ async function uploadReleaseArtifactFile(input, file) {
 
 function releasePlanBodyFromUpload(input, artifact) {
   const artifactUrl = absoluteReleaseArtifactUrl(artifact.url || artifact.downloadPath);
-  const hasExplicitTargets = input.targetUserIds.length > 0 || input.targetInstallIds.length > 0;
   if (input.kind === 'asar') {
     return {
       releaseId: input.releaseId,
@@ -7721,8 +7740,8 @@ function releasePlanBodyFromUpload(input, artifact) {
       artifactFileName: artifact.fileName || input.fileName,
       activationMode: 'restart-auto',
       deliveryMode: input.deliveryMode,
-      rolloutStrategy: hasExplicitTargets ? 'manual-ring' : 'gray',
-      rolloutPercentage: hasExplicitTargets ? 0 : 10,
+      rolloutStrategy: input.rolloutStrategy,
+      rolloutPercentage: input.rolloutPercentage,
       rolloutRings: ['internal-dogfood', 'canary', 'stable'],
       targetUserIds: input.targetUserIds,
       targetInstallIds: input.targetInstallIds,
@@ -7759,8 +7778,8 @@ function releasePlanBodyFromUpload(input, artifact) {
         artifactFileName: artifact.fileName || input.fileName,
         activationMode: 'installer-manual',
         deliveryMode: 'prompt-download-restart',
-        rolloutStrategy: hasExplicitTargets ? 'manual-ring' : 'all',
-        rolloutPercentage: hasExplicitTargets ? 0 : 100,
+        rolloutStrategy: input.rolloutStrategy,
+        rolloutPercentage: input.rolloutPercentage,
         rolloutRings: ['internal-dogfood', 'stable'],
         targetUserIds: input.targetUserIds,
         targetInstallIds: input.targetInstallIds,
@@ -7796,8 +7815,8 @@ function releasePlanBodyFromUpload(input, artifact) {
         artifactFileName: artifact.fileName || input.fileName,
         activationMode: 'hot-auto',
         deliveryMode: 'prompt-download-restart',
-        rolloutStrategy: 'gray',
-        rolloutPercentage: 10,
+        rolloutStrategy: input.rolloutStrategy,
+        rolloutPercentage: input.rolloutPercentage,
         rolloutRings: ['internal-dogfood', 'canary', 'stable'],
         featureKeys: input.featureKeys?.length ? input.featureKeys : [`${input.productId}.release.hot-update`],
         targetUserIds: input.targetUserIds,

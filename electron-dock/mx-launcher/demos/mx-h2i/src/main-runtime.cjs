@@ -303,6 +303,7 @@ if (gotSingleInstanceLock) {
 async function reportInstallCompletionAndAdoptPendingUpdates() {
   const executorMod = await importInstalledPackage('@qpjoy/electron-launcher/release-update-executor');
   const baseDir = app.getPath('userData');
+  await repairStagedLauncherPackagePointerFromRuntime('startup');
   const adopted = await executorMod.adoptPendingElectronLauncherPackages(baseDir);
   for (const pointer of adopted) {
     pushAppLog('appcenter', 'info', `Launcher package update adopted on start: ${pointer.version} (${pointer.path}).`);
@@ -9858,15 +9859,20 @@ async function performUpdateCheck(reason, options = {}) {
   const releaseMessage = releaseSync.ok
     ? releaseUpdateMessage(releaseResult)
     : 'Release Center 更新策略读取失败。';
+  const releaseNotesLine = releaseNotesSummary(releaseResult?.releaseNotes);
   const hasUpdateSignal = ['update-available', 'blocked'].includes(releaseResult?.status);
   const deliveryMode = normalizeReleaseDeliveryMode(releaseResult?.deliveryMode);
   const silentDelivery = deliveryMode === 'silent-download-next-start';
   if (!quiet || (hasUpdateSignal && !silentDelivery)) {
+    const updateFeedbackMessage = [
+      `${releaseMessage} 当前 ${currentReleaseVersion()}，目标 ${releaseDecision?.targetVersion || currentReleaseVersion()}，通道 ${runtime.config.releaseChannel}。AppCenter 目录已同步 ${catalogSync.count} 个应用。`,
+      releaseNotesLine ? `更新内容：${releaseNotesLine}` : null
+    ].filter(Boolean).join('\n');
     runtime.feedback = {
       tone: failures.length ? 'warning' : (releaseResult?.status === 'update-available' ? 'success' : 'info'),
       message: failures.length
         ? `${releaseMessage} ${failures.join('；')}`
-        : `${releaseMessage} 当前 ${currentReleaseVersion()}，目标 ${releaseDecision?.targetVersion || currentReleaseVersion()}，通道 ${runtime.config.releaseChannel}。AppCenter 目录已同步 ${catalogSync.count} 个应用。`
+        : updateFeedbackMessage
     };
   }
   touchRuntime('update checked');
@@ -10133,6 +10139,13 @@ function releaseUpdateMessage(result) {
     return `发现可自动更新版本 ${decision.targetVersion}（${decision.componentKind || 'component'}）。`;
   }
   return result.reason || 'Release Center 更新策略已读取。';
+}
+
+function releaseNotesSummary(value, maxLength = 420) {
+  const notes = nullableString(value)?.replace(/\s+/g, ' ').trim();
+  if (!notes) return '';
+  if (notes.length <= maxLength) return notes;
+  return `${notes.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
 }
 
 function updateHistoryEntry(input) {
@@ -10626,7 +10639,111 @@ async function activateStagedHotArtifact(updater, artifact, stagedPath, update) 
       mainWindow?.webContents?.reload();
     }
   });
-  return executor.activateStaged(artifact, stagedPath, { releaseId: update?.releaseId ?? null });
+  try {
+    const activation = await executor.activateStaged(artifact, stagedPath, { releaseId: update?.releaseId ?? null });
+    await ensureLauncherPackagePendingPointer(artifact, stagedPath, activation?.activePath);
+    return activation;
+  } catch (error) {
+    const healed = await ensureLauncherPackagePendingPointer(artifact, stagedPath, null);
+    if (healed) {
+      pushAppLog('appcenter', 'warning', `Hot activation self-healed pending pointer after executor error: ${errorMessage(error)}.`);
+      return {
+        artifactClass: /npm|package/i.test(artifact?.kind || '') ? 'npm-package' : 'asar',
+        activated: false,
+        deferredReason: artifact?.restartRequired === false ? 'applies on next start' : 'restart required',
+        activePath: healed.path
+      };
+    }
+    throw error;
+  }
+}
+
+async function ensureLauncherPackagePendingPointer(artifact, stagedPath, activePath) {
+  if (!/asar|npm|launcher-package|package-dist/i.test(artifact?.kind || '')) return null;
+  const componentId = safeLauncherPackageSegment(nullableString(artifact?.componentId) || launcherProductId(), 'componentId').toLowerCase();
+  const version = safeLauncherPackageSegment(nullableString(artifact?.version), 'version');
+  let candidatePath = nullableString(activePath) || path.join(app.getPath('userData'), 'launcher-packages', componentId, version, path.basename(stagedPath));
+  if (!fsSync.existsSync(candidatePath) && fsSync.existsSync(stagedPath)) {
+    await copyReleasePackageFile(stagedPath, candidatePath);
+  }
+  if (!candidatePath || !fsSync.existsSync(candidatePath)) return null;
+  const pointer = {
+    version,
+    path: candidatePath,
+    activatedAt: 'next-start'
+  };
+  const pointerPath = path.join(app.getPath('userData'), 'launcher-packages', `${componentId}.pending.json`);
+  await writeJsonFileAtomic(pointerPath, pointer);
+  return pointer;
+}
+
+async function repairStagedLauncherPackagePointerFromRuntime(reason) {
+  const update = runtime?.update || null;
+  if (!update || update.status !== 'staged') return null;
+  const stagedPath = nullableString(update.stagedPath);
+  if (!stagedPath || !fsSync.existsSync(stagedPath)) return null;
+  const artifact = releaseArtifactFromUpdate(update);
+  if (!/asar|npm|launcher-package|package-dist/i.test(artifact.kind || '')) return null;
+  const expectedDigest = normalizeReleaseDigest(update.downloadedDigest || update.artifactDigest);
+  if (expectedDigest) {
+    const actualDigest = await sha256FileDigest(stagedPath);
+    if (actualDigest !== expectedDigest) {
+      pushAppLog('appcenter', 'warning', `Skipped staged ${artifact.kind} pointer repair (${reason}): digest mismatch ${actualDigest} != ${expectedDigest}.`);
+      return null;
+    }
+  }
+  const pointer = await ensureLauncherPackagePendingPointer(artifact, stagedPath, null);
+  if (pointer) {
+    pushAppLog('appcenter', 'warning', `Repaired staged ${artifact.kind} pointer (${reason}): ${pointer.version} (${pointer.path}).`);
+  }
+  return pointer;
+}
+
+async function sha256FileDigest(filePath) {
+  const hash = createHash('sha256');
+  await new Promise((resolve, reject) => {
+    const input = fsSync.createReadStream(filePath);
+    input.on('data', (chunk) => hash.update(chunk));
+    input.on('error', reject);
+    input.on('end', resolve);
+  });
+  return `sha256:${hash.digest('hex')}`;
+}
+
+async function copyReleasePackageFile(sourcePath, targetPath) {
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  if (!sourcePath.toLowerCase().includes('.asar') && !targetPath.toLowerCase().includes('.asar')) {
+    await fs.copyFile(sourcePath, targetPath);
+    return;
+  }
+  await withElectronAsarDisabled(() => fs.copyFile(sourcePath, targetPath));
+}
+
+async function withElectronAsarDisabled(operation) {
+  const hadNoAsar = Object.prototype.hasOwnProperty.call(process, 'noAsar');
+  const previous = process.noAsar;
+  process.noAsar = true;
+  try {
+    return await operation();
+  } finally {
+    if (hadNoAsar) process.noAsar = previous;
+    else delete process.noAsar;
+  }
+}
+
+function safeLauncherPackageSegment(value, name) {
+  const segment = nullableString(value);
+  if (!segment || !/^[a-z0-9][a-z0-9._+-]*$/i.test(segment) || segment === '.' || segment === '..') {
+    throw new Error(`invalid release artifact ${name}: ${value}`);
+  }
+  return segment;
+}
+
+async function writeJsonFileAtomic(filePath, value) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.next`;
+  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  await fs.rename(tempPath, filePath);
 }
 
 function releaseArtifactFromUpdate(update) {

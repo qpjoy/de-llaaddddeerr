@@ -1567,6 +1567,7 @@ button:disabled {
   background: rgba(94, 142, 236, 0.12);
   color: var(--text-1);
   font-weight: 600;
+  white-space: pre-wrap;
 }
 
 .feedback[data-tone="danger"] {
@@ -3098,4 +3099,12 @@ button:disabled {
   word-break: break-word;
   max-height: 160px;
   overflow-y: auto;
+}
+
+.update-release-notes--compact {
+  margin-top: 0;
+}
+
+.update-release-notes--compact pre {
+  max-height: 92px;
 }

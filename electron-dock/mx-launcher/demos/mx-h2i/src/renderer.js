@@ -1127,6 +1127,7 @@ function renderPhoneFooterInfo(connected) {
   const channel = update.channel || state.config?.releaseChannel || 'stable';
   const status = update.status || (connected ? 'ready' : state.connection?.state || 'idle');
   const latest = update.latestVersion || version;
+  const releaseNotes = updateReleaseNotesPreview(update);
   const hasArtifact = Boolean(update.artifactUrl);
   const canApply = hasArtifact && !['downloading', 'staged', 'installer-opened'].includes(status);
   const canRestart = update.restartPrompt || (status === 'staged' && update.restartRequired);
@@ -1144,6 +1145,12 @@ function renderPhoneFooterInfo(connected) {
         <strong>${escapeHtml(latest === version && !update.updateAvailable ? '已是最新版本' : `目标 ${latest}`)}</strong>
         <span>${escapeHtml(updateSummaryText(update))}</span>
       </div>
+      ${releaseNotes ? `
+        <div class="update-release-notes update-release-notes--compact">
+          <span>更新内容</span>
+          <pre>${escapeHtml(releaseNotes)}</pre>
+        </div>
+      ` : ''}
       ${renderUpdateProgress(update)}
       <div class="update-surface-actions">
         ${renderCheckUpdatesButton('secondary-button')}
@@ -1322,6 +1329,13 @@ function updateSummaryText(update) {
   if (update.status === 'update-available') return update.activation === 'installer-manual' ? '发现大版本安装包' : '发现可自动更新版本';
   if (update.lastCheckedAt) return `上次检查 ${formatDateTime(update.lastCheckedAt)}`;
   return '尚未检查更新';
+}
+
+function updateReleaseNotesPreview(update, maxLength = 360) {
+  const notes = String(update?.releaseNotes || '').replace(/\r\n/g, '\n').trim();
+  if (!notes) return '';
+  if (notes.length <= maxLength) return notes;
+  return `${notes.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
 }
 
 function updateApplyLabel(update) {

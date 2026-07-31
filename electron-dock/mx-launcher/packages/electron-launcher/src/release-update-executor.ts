@@ -220,7 +220,7 @@ export function createElectronLauncherReleaseUpdateExecutor(
       const pendingDir = join(baseDir, 'launcher-packages', componentId, version);
       await mkdir(pendingDir, { recursive: true });
       const packagePath = join(pendingDir, basename(stagedPath));
-      await copyFile(stagedPath, packagePath);
+      await copyReleaseArtifactFile(stagedPath, packagePath);
       await writePointer(join(baseDir, 'launcher-packages', `${componentId}.pending.json`), {
         version,
         path: packagePath,
@@ -329,6 +329,30 @@ function safeLauncherPackageSegment(value: string, name: string): string {
     throw new Error(`invalid release artifact ${name}: ${value}`);
   }
   return segment;
+}
+
+async function copyReleaseArtifactFile(sourcePath: string, targetPath: string): Promise<void> {
+  if (!sourcePath.toLowerCase().includes('.asar') && !targetPath.toLowerCase().includes('.asar')) {
+    await copyFile(sourcePath, targetPath);
+    return;
+  }
+  await withElectronAsarDisabled(() => copyFile(sourcePath, targetPath));
+}
+
+async function withElectronAsarDisabled<T>(operation: () => Promise<T>): Promise<T> {
+  const runtimeProcess = process as NodeJS.Process & { noAsar?: boolean };
+  const hadNoAsar = Object.prototype.hasOwnProperty.call(runtimeProcess, 'noAsar');
+  const previous = runtimeProcess.noAsar;
+  runtimeProcess.noAsar = true;
+  try {
+    return await operation();
+  } finally {
+    if (hadNoAsar) {
+      runtimeProcess.noAsar = previous;
+    } else {
+      delete runtimeProcess.noAsar;
+    }
+  }
 }
 
 /**
