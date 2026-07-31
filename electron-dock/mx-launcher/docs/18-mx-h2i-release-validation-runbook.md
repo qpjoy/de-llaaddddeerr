@@ -394,8 +394,11 @@ Installer 类走同样的目标圈选，但激活永远手动：`ready-to-instal
 
 ## Layer 6.7: MX-H2I ASAR 与全量安装包双轨发布
 
-MX-H2I 2.1.2 是首个带稳定 ASAR bootstrap 的基座。运行配置中的“应用更新方案”默认
-`asar`，用户也可以选 `installer`。客户端对同一个 `componentId=mx-h2i` 分别发送
+MX-H2I 的旧版本已内置 ASAR bootstrap API，但生产 ASAR 基座必须包含 2026-07-31 的
+Electron 物理 `.asar` 校验修复；建议先全量安装 `2.1.10+`，再用更高版本 ASAR 验证。
+否则 Electron 会把外部 `.asar` 虚拟根误判为目录并删除 pending/current 指针。
+运行配置中的“应用更新方案”默认 `asar`，用户也可以选 `installer`。客户端对同一个
+`componentId=mx-h2i` 分别发送
 `artifactKinds:["app-asar"]` 或 `["app-installer"]`；服务端不需要为 ASAR 分配第二个
 应用 ID。旧客户端不发送 `artifactKinds`，继续使用原有 installer/renderer 检查路径。
 
@@ -408,6 +411,8 @@ scripts\build-asar-windows.cmd 2.1.3 x64
 ```
 
 输出位于 `out/release-asar/`，同时生成 `.asar.json`，记录 sha256、平台、架构和最低基座。
+使用 Admin 发布时只上传 `.asar`；`.asar.json` 留在本地用于核对或自动化脚本，服务端会
+重新计算实际上传文件的 sha256 和大小。
 ASAR 只包含 `src/` 与最小 `package.json`，运行时复用已签名全量安装包中的
 `node_modules` 和 native resources。若改动 Electron/Node ABI、native module、
 WireGuard/Mihomo engine、entitlements、图标或 installer 配置，必须走 DMG/EXE，不能
@@ -451,8 +456,9 @@ pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:win
 生产兼容顺序固定为：
 
 1. 先滚动部署 Release Center API，但不创建/批准任何新计划；
-2. 定向发布 2.1.2 DMG/EXE 基座，验证旧连接、重装和首启；
-3. 只向已安装 2.1.2 的 canary 发布更高版本 ASAR并验证自动回退；
+2. 定向发布包含物理 `.asar` 校验修复的 DMG/EXE 基座（建议 2.1.10+），验证旧连接、
+   重装和首启；
+3. 只向已安装该基座的 canary 发布更高版本 ASAR 并验证自动回退；
 4. 复核 `release-check → download-started → artifact-staged-pending-restart → ready`
    证据后再扩大比例；
 5. 保留 installer 计划作为用户选择和 native 变更通道。

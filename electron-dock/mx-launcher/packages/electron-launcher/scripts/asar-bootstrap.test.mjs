@@ -42,6 +42,11 @@ test('promotes a newer pending ASAR and confirms it after ready', async () => {
   }
 });
 
+test('checks ASAR pointers as physical files under Electron', async () => {
+  const source = await readFile(new URL('../src/asar-bootstrap.cts', import.meta.url), 'utf8');
+  assert.match(source, /withElectronAsarDisabled\(\(\) => fs\.statSync\(pointer\.path\)\)/);
+});
+
 test('rolls back to the previous ASAR after an unconfirmed launch', async () => {
   const fixture = await createFixture('luopan');
   try {

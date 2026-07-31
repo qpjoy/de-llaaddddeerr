@@ -195,12 +195,25 @@ function usablePointer(
 ): ElectronLauncherAsarPointer | null {
   if (!pointer || compareElectronLauncherReleaseVersions(pointer.version, baseVersion) <= 0) return null;
   try {
-    const stat = fs.statSync(pointer.path);
+    const stat = withElectronAsarDisabled(() => fs.statSync(pointer.path));
     if (!stat.isFile() || path.extname(pointer.path).toLowerCase() !== '.asar') return null;
   } catch {
     return null;
   }
   return pointer;
+}
+
+function withElectronAsarDisabled<T>(operation: () => T): T {
+  const runtimeProcess = process as NodeJS.Process & { noAsar?: boolean };
+  const hadNoAsar = Object.prototype.hasOwnProperty.call(runtimeProcess, 'noAsar');
+  const previous = runtimeProcess.noAsar;
+  runtimeProcess.noAsar = true;
+  try {
+    return operation();
+  } finally {
+    if (hadNoAsar) runtimeProcess.noAsar = previous;
+    else delete runtimeProcess.noAsar;
+  }
 }
 
 function readPointer(filePath: string): ElectronLauncherAsarPointer | null {

@@ -77,7 +77,10 @@ AppCenter 产品。平台必须在发放 service account 前完成冲突检查�
 `universal`；同一个版本可为不同平台重复以下流程。
 
 Luopan 从 `0.1.1` 起、MX-H2I 从 `2.1.3` 起在完整安装包入口内置通用
-`@qpjoy/electron-launcher/asar-bootstrap`。这是 ASAR 更新的最小基线：它在产品主进程
+`@qpjoy/electron-launcher/asar-bootstrap`。生产 ASAR 基座还必须包含 2026-07-31 的
+Electron 物理 `.asar` 校验修复；较早基座虽然有 bootstrap API，但会把外部 `.asar`
+虚拟根误判为目录并删除更新指针，必须先全量升级到包含该修复的安装包（MX-H2I 建议
+`2.1.10+`）。bootstrap 在产品主进程
 加载前选择 pending/current 包，记录 launching/healthy 状态，并在新 ASAR 未完成首次
 启动时自动回滚 previous。它只做本地文件选择，不建立网络连接，也不会改变
 WireGuard、PAC 或 DNS。旧 MX-H2I 安装仍可运行原产品 bootstrap；新 ASAR 同时保留旧
@@ -397,7 +400,10 @@ pnpm --dir demos/mx-h2i run make:asar:win -- 2.1.4 x64
 
 两个命令都会生成 `.asar` 和相邻的 `.asar.json` manifest，manifest 包含
 `productId/componentId/version/platform/arch/digest/sizeBytes`。`platform/arch` 描述
-目标客户端，不表示 ASAR 内含平台原生二进制；原生依赖仍继承完整安装包。
+目标客户端，不表示 ASAR 内含平台原生二进制；原生依赖仍继承完整安装包。Admin
+上传只选择 `.asar`；相邻 JSON 是本地构建/自动化发布的核对清单，不作为第二个 artifact
+上传。服务端会对收到的 `.asar` 重新计算 digest 和 size，并以 Release Center 表单中的
+发布元数据为准。
 
 读取服务端登记的 metadata（不会返回 OSS 凭据）：
 
