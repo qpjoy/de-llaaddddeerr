@@ -6883,7 +6883,7 @@ function openReleaseCenterDrawer(planId) {
 function openReleaseUploadDrawer(kind = 'installer') {
   const normalizedKind = kind === 'hot' ? 'hot' : kind === 'asar' ? 'asar' : 'installer';
   const productId = defaultReleaseUploadProductId();
-  const currentVersion = releaseProductCurrentVersion(productId);
+  const currentVersion = productId ? releaseProductCurrentVersion(productId) : '';
   state.releaseCenter.drawer = {
     mode: 'upload',
     draft: {
@@ -6894,7 +6894,7 @@ function openReleaseUploadDrawer(kind = 'installer') {
       storage: 'oss',
       channel: 'stable',
       currentVersion,
-      version: nextPatchVersion(currentVersion),
+      version: currentVersion ? nextPatchVersion(currentVersion) : '',
       e2eResult: 'passed',
       deliveryMode: 'prompt-download-restart'
     }
@@ -6914,9 +6914,7 @@ function closeReleaseCenterDrawer() {
 }
 
 function defaultReleaseUploadProductId() {
-  const activeApp = appCenterAppById(state.activeAppNode);
-  if (activeApp && launcherModeForApp(activeApp) === 'standalone') return productNetworkIdForApp(activeApp);
-  return releaseStandaloneApps()[0]?.productId || MX_H2I_PRODUCT_ID;
+  return '';
 }
 
 function releaseStandaloneApps() {
@@ -6968,16 +6966,22 @@ function nextPatchVersion(version) {
 }
 
 function renderReleaseUploadProductOptions(selectedProductId) {
-  const selected = normalizeLauncherProductId(selectedProductId || MX_H2I_PRODUCT_ID);
+  const selected = cleanLauncherProductId(selectedProductId);
   const apps = releaseStandaloneApps();
   const selectedExists = apps.some((app) => app.productId === selected);
-  return [
+  const options = [
     ...(!selectedExists && selected ? [{ productId: selected, displayName: selected, version: releaseProductCurrentVersion(selected) }] : []),
     ...apps
   ].map((app) => {
-    const label = `${app.displayName || launcherProductDisplayName(app.productId, launcherProductNetwork(app.productId))} · ${app.productId} · ${app.version || '0.1.0'}`;
+    const label = [
+      app.displayName || launcherProductDisplayName(app.productId, launcherProductNetwork(app.productId)),
+      app.productId,
+      app.packageName || 'packageName 未登记',
+      app.version || '0.1.0'
+    ].join(' · ');
     return `<option value="${escapeHtml(app.productId)}" ${app.productId === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`;
   }).join('');
+  return `<option value="" ${selected ? '' : 'selected'} disabled>请选择发布应用</option>${options}`;
 }
 
 function renderReleaseCenterDrawer() {
@@ -7352,6 +7356,8 @@ function bindReleaseDrawerControls() {
   const uploadForm = userEditorDrawer.querySelector('[data-release-upload-form]');
   if (uploadForm) {
     uploadForm.elements.productId?.addEventListener('change', () => {
+      uploadForm.elements.productId.dataset.userEdited = 'true';
+      uploadForm.elements.productId.setCustomValidity('');
       const currentVersion = releaseProductCurrentVersion(uploadForm.elements.productId?.value);
       if (uploadForm.elements.currentVersion) uploadForm.elements.currentVersion.value = currentVersion;
       if (uploadForm.elements.version && !uploadForm.elements.version.dataset.userEdited) {
@@ -7495,7 +7501,7 @@ function releaseArtifactHintsFromManifest(manifest) {
         ? 'installer'
         : null;
   return {
-    productId: normalizeLauncherProductId(manifest.productId || manifest.componentId || ''),
+    productId: cleanLauncherProductId(manifest.productId || manifest.componentId || '') || null,
     version: cleanReleaseVersion(manifest.version),
     platform: cleanReleasePlatform(manifest.platform),
     arch: cleanReleaseArch(manifest.arch),
@@ -7539,9 +7545,11 @@ function releaseVersionFromFileName(fileName) {
 }
 
 function applyReleaseUploadHints(form, hints) {
-  const productId = normalizeLauncherProductId(hints.productId || '');
-  if (productId && form.elements.productId) {
-    form.elements.productId.value = productId;
+  const productId = cleanLauncherProductId(hints.productId);
+  const productInput = form.elements.productId;
+  if (productId && productInput && (!productInput.dataset.userEdited || !productInput.value)) {
+    productInput.value = productId;
+    productInput.setCustomValidity('');
     const currentVersion = releaseProductCurrentVersion(productId);
     if (form.elements.currentVersion) form.elements.currentVersion.value = currentVersion;
   }
@@ -7577,7 +7585,21 @@ async function uploadReleaseArtifactFromAdmin(form) {
     renderReleaseCenterDrawer();
     return;
   }
+  const productError = releaseUploadProductError(form, file);
+  if (productError) {
+    form.elements.productId?.setCustomValidity(productError);
+    form.elements.productId?.reportValidity();
+    return;
+  }
+  form.elements.productId?.setCustomValidity('');
   const input = releaseUploadInputFromForm(form, file);
+  state.releaseCenter.drawer = {
+    ...state.releaseCenter.drawer,
+    draft: {
+      ...(state.releaseCenter.drawer?.draft || {}),
+      ...input
+    }
+  };
   state.releaseCenter.busy = true;
   state.releaseCenter.feedback = { kind: 'info', message: `Uploading ${file.name} to ${input.storage}` };
   renderFoundationGrid(state.dashboard?.overview || {});
@@ -7614,8 +7636,19 @@ async function uploadReleaseArtifactFromAdmin(form) {
   }
 }
 
+function releaseUploadProductError(form, file) {
+  const selectedProductId = cleanLauncherProductId(form.elements.productId?.value);
+  if (!selectedProductId) return '请选择本次发版所属的应用';
+  const inferredProductId = cleanLauncherProductId(releaseArtifactHintsFromFileName(file?.name).productId);
+  if (inferredProductId && inferredProductId !== selectedProductId) {
+    return `文件名识别为 ${inferredProductId}，但 Product 选择了 ${selectedProductId}；请确认应用后再上传`;
+  }
+  return '';
+}
+
 function releaseUploadInputFromForm(form, file) {
-  const productId = (form.elements.productId?.value || MX_H2I_PRODUCT_ID).trim().toLowerCase();
+  const productId = cleanLauncherProductId(form.elements.productId?.value);
+  if (!productId) throw new Error('Release productId is required');
   const rawKind = form.elements.kind?.value;
   const kind = rawKind === 'hot' ? 'hot' : rawKind === 'asar' ? 'asar' : 'installer';
   const platform = form.elements.platform?.value || 'darwin';

@@ -251,6 +251,10 @@ Launcher network broker。
 
 ### 2.5 更新系统（docs/17，Luopan 必须完整复刻的部分）
 
+这里的 Luopan 是 `demos/luopan` 验收壳，不是正式 Compass 的发布身份。Compass 接入时应在
+AppCenter 登记自己的 `appId/productId/packageName/channels`；客户端用真实 `packageName`
+解析发布身份，Admin 选择对应的 Compass 选项。不要把 demo 的 `luopan` 常量复制到生产包。
+
 四个角色，前两个在服务端、后两个在包里：
 
 1. **Release Center（server）**：Admin/CLI 或产品受限的 Publisher API 建 plan

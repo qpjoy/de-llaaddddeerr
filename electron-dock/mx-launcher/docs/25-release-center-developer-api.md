@@ -38,10 +38,12 @@ Publisher 必须从以下任一入口调用：
 `client_credentials` 或 Publisher API。Domestic edge 会拒绝
 `client_credentials`；把 Publisher 路由加入公网 allowlist 也不属于本接入方案。
 
-## 2. 发布身份归属与 Luopan 示例
+## 2. 发布身份归属与 Luopan demo 示例
 
 `productId` 是平台分配并登记在 AppCenter 的稳定发布身份，不是让所有客户端复制
-`luopan`。用户端应从自己的构建元数据读取 `packageName`，通过
+`luopan`。`demos/luopan` 只是 standalone launcher 的验收应用；正式 Compass 或其他用户
+开发的桌面应用必须在 AppCenter 建立自己的记录（例如 `appId/productId=compass` 加真实
+`packageName`），不能与 demo 共用发布流。用户端应从自己的构建元数据读取 `packageName`，通过
 `GET /internal/v1/releases/products/resolve` 取得 `productId`、安装包/renderer 组件名和
 channel。不能先拉取所有应用再按名称猜测。
 
@@ -51,7 +53,7 @@ Luopan 的历史 AppCenter 记录早于 `packageName` 字段，服务端保留
 `@qpjoy/luopan-demo → luopan` 兼容映射。其他新产品没有这种隐式回退，必须在注册时写入真实
 `packageName`。
 
-Luopan 当前代码中的发布身份如下，发版作业必须与它一致：
+Luopan demo 当前代码中的发布身份如下，只用于 demo 发版验证：
 
 | 内容 | 值 |
 | --- | --- |
@@ -60,7 +62,7 @@ Luopan 当前代码中的发布身份如下，发版作业必须与它一致：
 | 完整安装包 `componentId` | `luopan` |
 | ASAR 应用热更 `componentId` | `luopan` |
 | renderer 热更新 `componentId` | `luopan-renderer` |
-| channel | `shadow` |
+| channel | `stable` |
 | macOS 安装包 | DMG，`platform=darwin`，`arch` 按实际包填写 |
 | Windows 安装包 | NSIS EXE，`platform=win32`，`arch` 按实际包填写 |
 | Linux 安装包 | AppImage，`platform=linux`，`arch` 按实际包填写 |
@@ -75,6 +77,10 @@ AppCenter 产品。平台必须在发放 service account 前完成冲突检查�
 当前 Luopan builder 的三个目标就是 DMG、NSIS EXE 和 AppImage。每个
 `platform + arch` 文件都是独立 artifact，也应建立独立 plan。单架构包不得标成
 `universal`；同一个版本可为不同平台重复以下流程。
+
+Admin 的 Product 下拉直接来自 AppCenter/Launcher Product Registry，并同时显示
+`displayName · productId · packageName · version`。如果下拉只有 Luopan demo 而没有 Compass，
+应先注册 Compass，不能先把 Compass 包发布到 `luopan` 或 `mx-h2i` 后再靠客户端兼容。
 
 Luopan 从 `0.1.1` 起、MX-H2I 从 `2.1.3` 起在完整安装包入口内置通用
 `@qpjoy/electron-launcher/asar-bootstrap`。生产 ASAR 基座还必须包含 2026-07-31 的
