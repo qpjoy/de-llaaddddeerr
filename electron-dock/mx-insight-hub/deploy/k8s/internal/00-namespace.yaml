@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mx-insight-hub
+  labels:
+    app.kubernetes.io/part-of: mx-insight-hub
+

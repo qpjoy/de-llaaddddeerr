@@ -918,6 +918,7 @@ function gatewayRouteRequiredScopes(routeId: string): string[] {
 
 export const MX_H2I_PRODUCT_ID = 'mx-h2i';
 export const APP_CENTER_PRODUCT_ID = 'appcenter';
+export const MX_INSIGHT_HUB_APP_ID = 'mx-insight-hub';
 export const LAUNCHER_FOUNDATION_PRODUCT_ID = 'launcher';
 export const MX_DEFAULT_APP_DNS_ZONE = 'mxinfo-inc.cn';
 const MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST = 'h2i.minsight-ai.com';
@@ -1810,6 +1811,35 @@ export function builtinAppCenterApps(): AppCenterApp[] {
       }
     }),
     buildAppCenterApp({
+      appId: MX_INSIGHT_HUB_APP_ID,
+      displayName: 'MX Insight Hub',
+      fullName: 'MX Insight Hub Data API Control Plane',
+      builtin: true,
+      systemOwned: true,
+      packageName: '@qpjoy/mx-insight-hub',
+      version: '0.1.0',
+      category: 'data-intelligence',
+      description: 'Governed data API, tenant, API key, quota, usage, and Data Agent control plane.',
+      launcherMode: 'embed',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      productNetworkId: MX_INSIGHT_HUB_APP_ID,
+      permissions: ['auth.read', 'appcenter.read', 'permission.request', 'observability.write'],
+      requiredCapabilities: ['launcher-embed-sdk', 'app-center-runtime', 'data-api-gateway'],
+      runtimeContractVersion: APP_CENTER_RUNTIME_CONTRACT_VERSION,
+      accessPolicy: {
+        defaultDecision: 'private',
+        allowAdmin: true,
+        allowRoles: ['admin'],
+        allowUserIds: [],
+        allowOrgIds: [],
+        allowRegisteredByAppIds: [MX_H2I_PRODUCT_ID],
+        allowHomeAppIds: [MX_H2I_PRODUCT_ID],
+        requirePermissionGrant: true
+      },
+      updatePolicy: 'app-managed',
+      entrypoints: insightHubAdminEntrypoints()
+    }),
+    buildAppCenterApp({
       appId: 'luopan',
       displayName: 'Luopan',
       fullName: 'Luopan AI Intelligence Console',
@@ -1848,6 +1878,18 @@ export function builtinAppCenterApps(): AppCenterApp[] {
       }
     })
   ];
+}
+
+function insightHubAdminEntrypoints(): Record<string, string> {
+  const raw = process.env.MX_INSIGHT_HUB_ADMIN_ENTRYPOINT?.trim();
+  if (!raw) return {};
+  try {
+    const url = new URL(raw);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return {};
+    return { admin: url.href };
+  } catch {
+    return {};
+  }
 }
 
 export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherProductNetwork[] {

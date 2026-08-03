@@ -4,6 +4,7 @@ const SSH_READONLY_PROBE_FEATURE_KEY = 'site-slot.ssh-readonly-probe.execute';
 const LOCAL_SERVER_BASE_URL = 'http://127.0.0.1:18090';
 const MX_H2I_PRODUCT_ID = 'mx-h2i';
 const APP_CENTER_PRODUCT_ID = 'appcenter';
+const MX_INSIGHT_HUB_APP_ID = 'mx-insight-hub';
 const LAUNCHER_FOUNDATION_PRODUCT_ID = 'launcher';
 const MX_INTERNAL_DNS_IP = '10.88.88.88';
 const MX_DOMESTIC_RELAY_IP = '10.88.0.1';
@@ -74,6 +75,9 @@ const state = {
   appNavCollapsed: false,
   appCenterApps: [],
   appCenterAppsError: null,
+  insightHubOverview: null,
+  insightHubOverviewError: null,
+  insightHubOverviewBusy: false,
   appOnboardingTemplates: [],
   appOnboardingTemplatesError: null,
   launcherServiceVipSmokes: [],
@@ -939,6 +943,12 @@ function setActiveView(view, nav = {}, options = {}) {
   renderAppNav();
   if (state.activeView === 'app-center') {
     renderAppCenterShell();
+    if (state.activeAppNode === MX_INSIGHT_HUB_APP_ID
+      && !state.insightHubOverview
+      && !state.insightHubOverviewError
+      && !state.insightHubOverviewBusy) {
+      void loadInsightHubOverview();
+    }
   }
   renderAdminShell();
   if (state.activeView === 'admin' && !state.dashboard) {
@@ -3910,6 +3920,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || /^\/internal\/v1\/sdk\/(?:roles|users|service-accounts)$/.test(path)
       || /^\/internal\/v1\/release-management\/plans(?:\/[^/]+)?$/.test(path)
       || /^\/internal\/v1\/release-artifacts\/[^/]+$/.test(path)
+      || path === '/internal/v1/insight-hub/overview'
       || /^\/internal\/v1\/launcher-network\/leases(?:\/[^/]+)?$/.test(path);
   }
   if (verb === 'POST') {
@@ -8832,6 +8843,23 @@ function fallbackAppCenterApps() {
       productNetworkId: 'h2o',
       channels: ['shadow', 'beta', 'stable'],
       requiredCapabilities: ['launcher-network', 'launcher-embed-sdk', 'app-center-runtime']
+    },
+    {
+      appId: MX_INSIGHT_HUB_APP_ID,
+      displayName: 'MX Insight Hub',
+      builtin: true,
+      systemOwned: true,
+      enabled: true,
+      packageName: '@qpjoy/mx-insight-hub',
+      version: '0.1.0',
+      category: 'data-intelligence',
+      description: 'Governed data API, tenant, API key, quota, usage, and Data Agent control plane.',
+      launcherMode: 'embed',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      productNetworkId: MX_INSIGHT_HUB_APP_ID,
+      channels: ['shadow', 'beta', 'stable'],
+      entrypoints: {},
+      requiredCapabilities: ['launcher-embed-sdk', 'app-center-runtime', 'data-api-gateway']
     }
   ];
 }
@@ -8842,7 +8870,7 @@ function orderedAppCenterApps() {
     if (app?.appId) byId.set(app.appId, { ...byId.get(app.appId), ...app });
   }
   const apps = [...byId.values()];
-  const order = new Map([[MX_H2I_PRODUCT_ID, 0], [APP_CENTER_PRODUCT_ID, 1], ['h2o', 2]]);
+  const order = new Map([[MX_H2I_PRODUCT_ID, 0], [APP_CENTER_PRODUCT_ID, 1], ['h2o', 2], [MX_INSIGHT_HUB_APP_ID, 3]]);
   return apps
     .slice()
     .sort((left, right) => (order.get(left.appId) ?? 50) - (order.get(right.appId) ?? 50)
@@ -9877,6 +9905,84 @@ function selectAppNode(appId) {
     tab.classList.toggle('is-active', active);
   }
   renderAppCenterShell();
+  if (normalized === MX_INSIGHT_HUB_APP_ID) void loadInsightHubOverview();
+}
+
+async function loadInsightHubOverview() {
+  if (state.insightHubOverviewBusy) return;
+  state.insightHubOverviewBusy = true;
+  state.insightHubOverviewError = null;
+  renderSelectedAppDetail();
+  try {
+    const payload = await fetchJson('/internal/v1/insight-hub/overview');
+    state.insightHubOverview = payload.insightHub || null;
+  } catch (error) {
+    state.insightHubOverview = null;
+    state.insightHubOverviewError = error.message;
+  } finally {
+    state.insightHubOverviewBusy = false;
+    if (state.activeAppNode === MX_INSIGHT_HUB_APP_ID) renderSelectedAppDetail();
+  }
+}
+
+function insightHubMetric(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '-';
+}
+
+function renderInsightHubOverviewCard(app) {
+  if (app?.appId !== MX_INSIGHT_HUB_APP_ID) return '';
+  const overview = state.insightHubOverview;
+  const metrics = overview?.metrics || {};
+  const status = state.insightHubOverviewBusy ? 'checking' : overview?.status || 'offline';
+  const error = state.insightHubOverviewError || (!state.insightHubOverviewBusy ? overview?.message : '');
+  return `
+    <section class="app-workbench-panel insight-hub-overview" data-status="${escapeHtml(status)}" aria-label="MX Insight Hub health summary">
+      <div class="insight-hub-overview-head">
+        <div class="app-workbench-panel-head">
+          <span>BI</span>
+          <div>
+            <strong>Data API Control Plane</strong>
+            <small>Server-side health proxy; the Hub admin token never reaches this desktop.</small>
+          </div>
+        </div>
+        <div class="action-row">
+          <span class="insight-hub-status">${escapeHtml(status)}</span>
+          <button class="secondary-button" type="button" data-insight-hub-refresh ${state.insightHubOverviewBusy ? 'disabled' : ''}>
+            ${state.insightHubOverviewBusy ? 'Checking…' : 'Refresh'}
+          </button>
+        </div>
+      </div>
+      <div class="insight-hub-metrics">
+        <span><strong>${escapeHtml(insightHubMetric(metrics.tenants))}</strong><small>tenants</small></span>
+        <span><strong>${escapeHtml(insightHubMetric(metrics.consumers))}</strong><small>consumers</small></span>
+        <span><strong>${escapeHtml(insightHubMetric(metrics.activeApiKeys))}</strong><small>active API keys</small></span>
+        <span><strong>${escapeHtml(insightHubMetric(metrics.requests))}</strong><small>requests</small></span>
+        <span><strong>${escapeHtml(insightHubMetric(metrics.units))}</strong><small>usage units</small></span>
+        <span><strong>${escapeHtml(insightHubMetric(metrics.averageUpstreamLatencyMs))}</strong><small>upstream latency ms</small></span>
+      </div>
+      ${error ? `<p class="profile-feedback" data-kind="${overview?.status === 'online' ? 'success' : 'error'}">${escapeHtml(error)}</p>` : ''}
+    </section>
+  `;
+}
+
+function safeHttpEntrypoint(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function openHttpEntrypoint(value) {
+  const url = safeHttpEntrypoint(value);
+  if (!url) return false;
+  const opened = window.open(url, '_blank', 'noopener,noreferrer');
+  if (opened) opened.opener = null;
+  return true;
 }
 
 function appEditorValue(root, field) {
@@ -10127,6 +10233,9 @@ function renderSelectedAppDetail() {
     ? product?.serviceVip || channelProduct?.serviceVip || 'channel context'
     : product?.serviceVip || '-';
   const appName = app.displayName || launcherProductDisplayName(app.appId, null);
+  const insightHubAdminEntrypoint = app.appId === MX_INSIGHT_HUB_APP_ID
+    ? safeHttpEntrypoint(app.entrypoints?.admin)
+    : null;
   appSelectedDetail.innerHTML = `
     <section class="app-workbench" aria-labelledby="selected-app-title">
       <header class="app-workbench-hero">
@@ -10140,11 +10249,13 @@ function renderSelectedAppDetail() {
           <button class="primary-button" type="button" data-selected-app-launch>Launch</button>
           <button class="secondary-button" type="button" data-selected-app-edit>Edit App</button>
           <button class="secondary-button" type="button" data-selected-app-users>Users / RBAC</button>
-          <button class="secondary-button" type="button" data-selected-app-admin>Open Admin</button>
+          <button class="secondary-button" type="button" data-selected-app-admin ${app.appId === MX_INSIGHT_HUB_APP_ID && !insightHubAdminEntrypoint ? 'disabled title="Configure entrypoints.admin with an http(s) URL"' : ''}>Open Admin</button>
         </div>
       </header>
 
       ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
+
+      ${renderInsightHubOverviewCard(app)}
 
       <section class="product-network-panel app-workbench-network" aria-label="Selected application network">
         <div class="product-network-head">
@@ -10284,7 +10395,17 @@ function renderSelectedAppDetail() {
     });
   }
   const adminButton = appSelectedDetail.querySelector('[data-selected-app-admin]');
-  if (adminButton) adminButton.addEventListener('click', () => void api.openAdmin(serverInput.value));
+  if (adminButton) {
+    adminButton.addEventListener('click', () => {
+      if (app.appId === MX_INSIGHT_HUB_APP_ID) {
+        openHttpEntrypoint(app.entrypoints?.admin);
+        return;
+      }
+      void api.openAdmin(serverInput.value);
+    });
+  }
+  const insightHubRefresh = appSelectedDetail.querySelector('[data-insight-hub-refresh]');
+  if (insightHubRefresh) insightHubRefresh.addEventListener('click', () => void loadInsightHubOverview());
   const domesticButton = appSelectedDetail.querySelector('[data-selected-app-domestic]');
   if (domesticButton) {
     domesticButton.addEventListener('click', () => {

@@ -7,6 +7,7 @@ import { AuditModule } from './modules/audit/audit.module.js';
 import { ConfigCenterModule } from './modules/config-center/config-center.module.js';
 import { DnsModule } from './modules/dns/dns.module.js';
 import { EnrollmentsModule } from './modules/enrollments/enrollments.module.js';
+import { InsightHubModule } from './modules/insight-hub/insight-hub.module.js';
 import { LauncherNetworkModule } from './modules/launcher-network/launcher-network.module.js';
 import { ObservabilityModule } from './modules/observability/observability.module.js';
 import { PermissionsModule } from './modules/permissions/permissions.module.js';
@@ -25,6 +26,7 @@ import { SharedModule } from './shared.module.js';
     AdminModule,
     PlatformModule,
     EnrollmentsModule,
+    InsightHubModule,
     AuditModule,
     ObservabilityModule,
     ReleaseModule,

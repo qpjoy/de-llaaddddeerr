@@ -2268,6 +2268,85 @@ select {
   font-size: 15px;
 }
 
+.insight-hub-overview {
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--mx-primary) 32%, var(--line));
+  background:
+    radial-gradient(circle at 90% -20%, color-mix(in srgb, var(--mx-primary) 18%, transparent), transparent 46%),
+    var(--panel);
+}
+
+.insight-hub-overview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.insight-hub-overview-head .app-workbench-panel-head > div {
+  display: grid;
+  gap: 4px;
+}
+
+.insight-hub-overview-head small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.insight-hub-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--panel-quiet);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.insight-hub-overview[data-status="online"] .insight-hub-status {
+  border-color: color-mix(in srgb, var(--green) 48%, var(--line));
+  color: var(--green);
+}
+
+.insight-hub-overview[data-status="offline"] .insight-hub-status {
+  border-color: color-mix(in srgb, var(--red) 48%, var(--line));
+  color: var(--red);
+}
+
+.insight-hub-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.insight-hub-metrics > span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-quiet) 88%, transparent);
+}
+
+.insight-hub-metrics strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.insight-hub-metrics small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .app-workbench-facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6055,9 +6134,14 @@ select {
   .product-network-facts,
   .app-workbench-panels,
   .app-workbench-facts,
+  .insight-hub-metrics,
   .user-drawer-summary,
   .foundation-contract-grid {
     grid-template-columns: 1fr;
+  }
+
+  .insight-hub-overview-head {
+    display: grid;
   }
 
   .foundation-panel-head {

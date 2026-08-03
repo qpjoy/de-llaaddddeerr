@@ -1,0 +1,313 @@
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  Pulse,
+  ChartLine,
+  Coins,
+  Globe,
+  House,
+  Key,
+  List,
+  LockKey,
+  ShieldCheck,
+  SidebarSimple,
+  SignOut,
+  Users,
+  X,
+} from '@phosphor-icons/react'
+import { adminApi } from './api.js'
+import { ErrorState, Field, ToastStack } from './components.jsx'
+import {
+  ApiKeysPage,
+  ConsumersPage,
+  DashboardPage,
+  PlansQuotasPage,
+  PlatformsPage,
+  RuntimePage,
+  UsagePage,
+} from './pages.jsx'
+
+const SESSION_KEY = 'mx-insight-hub.admin-token'
+
+const ROUTES = [
+  { path: '/dashboard', label: '仪表盘', description: '网关运营总览', icon: House, group: '业务治理', component: DashboardPage },
+  { path: '/consumers', label: '调用者', description: '租户与业务身份', icon: Users, group: '业务治理', component: ConsumersPage },
+  { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage },
+  { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage },
+  { path: '/platforms', label: '平台能力', description: '平台授权与策略', icon: Globe, group: '策略控制', component: PlatformsPage },
+  { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage },
+  { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage },
+]
+
+const ROUTE_MAP = new Map(ROUTES.map((route) => [route.path, route]))
+
+function readSessionToken() {
+  try {
+    return sessionStorage.getItem(SESSION_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function writeSessionToken(token) {
+  try {
+    if (token) sessionStorage.setItem(SESSION_KEY, token)
+    else sessionStorage.removeItem(SESSION_KEY)
+  } catch {
+    // A valid in-memory session still works when browser storage is unavailable.
+  }
+}
+
+function readLocation() {
+  const raw = window.location.hash.replace(/^#/, '') || '/dashboard?range=24h'
+  const separator = raw.indexOf('?')
+  const candidatePath = separator === -1 ? raw : raw.slice(0, separator)
+  const path = ROUTE_MAP.has(candidatePath) ? candidatePath : '/dashboard'
+  const search = separator === -1 ? '' : raw.slice(separator + 1)
+  return { path, query: new URLSearchParams(search) }
+}
+
+function SessionGate({ checking, message, onAuthenticate }) {
+  const [candidate, setCandidate] = useState('')
+  const [error, setError] = useState(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  const submit = async (event) => {
+    event.preventDefault()
+    setSubmitting(true)
+    setError(null)
+    try {
+      await onAuthenticate(candidate.trim())
+    } catch (requestError) {
+      setError(requestError)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="qp-app qp-theme-neon-void qp-density--medium mih-auth">
+      <section className="qp-panel qp-panel--elevated mih-auth-card" aria-labelledby="mih-auth-title">
+        <div className="mih-auth-brand">
+          <img src="/assets/mx-insight-logo-mark.png" alt="" />
+          <div>
+            <span>MX DATA CONTROL PLANE</span>
+            <strong>MX Insight Hub</strong>
+          </div>
+        </div>
+        <div className="mih-auth-copy">
+          <p className="qp-kicker">ADMIN SESSION</p>
+          <h1 id="mih-auth-title">进入数据网关管理台</h1>
+          <p>使用 MX Launcher 提供的 Admin Token。凭证只保存在当前浏览器会话中，关闭会话后自动清除。</p>
+        </div>
+        {message ? <div className="mih-auth-notice"><ShieldCheck size={18} weight="duotone" aria-hidden="true" /><span>{message}</span></div> : null}
+        {checking ? (
+          <div className="mih-auth-checking" role="status">
+            <span className="qp-spinner" aria-hidden="true" />
+            正在验证已有会话
+          </div>
+        ) : (
+          <form className="mih-auth-form" onSubmit={submit}>
+            <Field label="Admin Token" hint="请求时通过 x-mx-insight-admin-token 发送，不写入 URL。">
+              <span className="qp-input-group">
+                <span className="qp-input-group__prefix"><LockKey size={17} aria-hidden="true" /></span>
+                <input
+                  className="qp-input mih-mono"
+                  type="password"
+                  value={candidate}
+                  onChange={(event) => setCandidate(event.target.value)}
+                  placeholder="输入管理凭证"
+                  autoComplete="off"
+                  autoFocus
+                  required
+                />
+              </span>
+            </Field>
+            {error ? <ErrorState error={error} /> : null}
+            <button className="qp-button qp-button--primary qp-button--lg qp-button--block" type="submit" disabled={submitting || !candidate.trim()}>
+              {submitting ? <span className="qp-spinner" aria-hidden="true" /> : <ShieldCheck size={18} aria-hidden="true" />}
+              {submitting ? '正在验证' : '验证并进入'}
+            </button>
+          </form>
+        )}
+        <footer className="mih-auth-footer">
+          <LockKey size={15} aria-hidden="true" />
+          <span>管理面与公共 Data API 严格分离</span>
+        </footer>
+      </section>
+    </div>
+  )
+}
+
+function Navigation({ activePath, onNavigate }) {
+  const groups = [...new Set(ROUTES.map((route) => route.group))]
+  return (
+    <nav className="mih-nav" aria-label="管理台导航">
+      {groups.map((group) => (
+        <section className="mih-nav__group" key={group}>
+          <h2>{group}</h2>
+          {ROUTES.filter((route) => route.group === group).map((route) => {
+            const Icon = route.icon
+            const active = route.path === activePath
+            return (
+              <a
+                className={`mih-nav__item${active ? ' is-active' : ''}`}
+                href={`#${route.path}`}
+                aria-current={active ? 'page' : undefined}
+                onClick={onNavigate}
+                key={route.path}
+              >
+                <Icon size={18} weight={active ? 'duotone' : 'regular'} aria-hidden="true" />
+                <span><strong>{route.label}</strong><small>{route.description}</small></span>
+              </a>
+            )
+          })}
+        </section>
+      ))}
+    </nav>
+  )
+}
+
+export function App() {
+  const initialToken = useMemo(readSessionToken, [])
+  const [token, setToken] = useState(initialToken)
+  const [authState, setAuthState] = useState(initialToken ? 'checking' : 'signed-out')
+  const [authMessage, setAuthMessage] = useState('')
+  const [location, setLocation] = useState(readLocation)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [toasts, setToasts] = useState([])
+
+  useEffect(() => {
+    if (!window.location.hash) {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/dashboard?range=24h`)
+    }
+    const update = () => {
+      setLocation(readLocation())
+      setMenuOpen(false)
+    }
+    window.addEventListener('hashchange', update)
+    return () => window.removeEventListener('hashchange', update)
+  }, [])
+
+  useEffect(() => {
+    if (authState !== 'checking' || !token) return undefined
+    let active = true
+    adminApi.dashboard(token)
+      .then(() => {
+        if (active) setAuthState('signed-in')
+      })
+      .catch((error) => {
+        if (!active) return
+        writeSessionToken('')
+        setToken('')
+        setAuthState('signed-out')
+        setAuthMessage(error?.status === 401 ? '管理会话已失效，请重新验证。' : '无法恢复管理会话，请检查服务状态后重试。')
+      })
+    return () => {
+      active = false
+    }
+  }, [authState, token])
+
+  const authenticate = useCallback(async (candidate) => {
+    await adminApi.dashboard(candidate)
+    writeSessionToken(candidate)
+    setToken(candidate)
+    setAuthMessage('')
+    setAuthState('signed-in')
+  }, [])
+
+  const signOut = useCallback((message = '') => {
+    writeSessionToken('')
+    setToken('')
+    setAuthState('signed-out')
+    setAuthMessage(message)
+    setMenuOpen(false)
+  }, [])
+
+  const handleUnauthorized = useCallback(() => {
+    signOut('管理会话已失效，请重新验证。')
+  }, [signOut])
+
+  const notify = useCallback((message, tone = 'success') => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    setToasts((current) => [...current, { id, message, tone }].slice(-4))
+    window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200)
+  }, [])
+
+  const dismissToast = useCallback((id) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id))
+  }, [])
+
+  const setQuery = useCallback((updates) => {
+    const params = new URLSearchParams(location.query)
+    for (const [name, value] of Object.entries(updates)) {
+      if (value === null || value === undefined || value === '') params.delete(name)
+      else params.set(name, String(value))
+    }
+    const search = params.toString()
+    window.location.hash = `${location.path}${search ? `?${search}` : ''}`
+  }, [location.path, location.query])
+
+  if (authState !== 'signed-in') {
+    return <SessionGate checking={authState === 'checking'} message={authMessage} onAuthenticate={authenticate} />
+  }
+
+  const route = ROUTE_MAP.get(location.path) || ROUTE_MAP.get('/dashboard')
+  const Page = route.component
+  const pageProps = {
+    token,
+    query: location.query,
+    setQuery,
+    onUnauthorized: handleUnauthorized,
+    notify,
+  }
+
+  return (
+    <div className={`qp-app qp-theme-neon-void qp-density--medium qp-shell mih-shell${menuOpen ? ' is-nav-open' : ''}`}>
+      <a className="mih-skip-link" href="#mih-main-content">跳到主要内容</a>
+      <button className="mih-nav-backdrop" type="button" aria-label="关闭导航" onClick={() => setMenuOpen(false)} />
+      <aside className="qp-sidebar qp-scrollbar mih-sidebar" aria-label="MX Insight Hub">
+        <a className="mih-brand" href="#/dashboard" onClick={() => setMenuOpen(false)}>
+          <img src="/assets/mx-insight-logo-mark.png" alt="" />
+          <span><strong>MX Insight Hub</strong><small>Data gateway control plane</small></span>
+        </a>
+        <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} />
+        <section className="mih-sidebar-session">
+          <ShieldCheck size={20} weight="duotone" aria-hidden="true" />
+          <span><strong>Admin session</strong><small>仅当前浏览器会话</small></span>
+          <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="退出管理会话" onClick={() => signOut()}>
+            <SignOut size={17} aria-hidden="true" />
+          </button>
+        </section>
+      </aside>
+
+      <div className="mih-workspace">
+        <header className="qp-appbar mih-topbar">
+          <button className="qp-button qp-button--ghost qp-icon-button mih-menu-button" type="button" aria-label="打开导航" onClick={() => setMenuOpen(true)}>
+            <SidebarSimple size={20} aria-hidden="true" />
+          </button>
+          <div className="mih-topbar-title">
+            <List size={16} aria-hidden="true" />
+            <span>MX Insight Hub</span>
+            <small>/</small>
+            <strong>{route.label}</strong>
+          </div>
+          <div className="mih-topbar-actions">
+            <span className="qp-tag qp-tag--success mih-session-tag"><ShieldCheck size={14} weight="fill" aria-hidden="true" />受保护的管理会话</span>
+            <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="退出管理会话" onClick={() => signOut()}>
+              <SignOut size={17} aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+        <main className="qp-main qp-scrollbar mih-content" id="mih-main-content" tabIndex="-1">
+          <Page {...pageProps} />
+        </main>
+      </div>
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      {menuOpen ? (
+        <button className="qp-button qp-button--ghost qp-icon-button mih-mobile-close" type="button" aria-label="关闭导航" onClick={() => setMenuOpen(false)}>
+          <X size={19} aria-hidden="true" />
+        </button>
+      ) : null}
+    </div>
+  )
+}

@@ -1,0 +1,147 @@
+openapi: 3.1.0
+info:
+  title: MX Insight Hub Public API
+  version: 1.0.0-alpha
+  description: Stable consumer contract. Night-All and provider details are private implementation concerns.
+servers:
+  - url: /api/v1
+security:
+  - bearerKey: []
+paths:
+  /data/capabilities:
+    get:
+      operationId: listCapabilities
+      responses:
+        "200":
+          description: Capabilities granted to this consumer.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, requestId]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      platforms:
+                        type: array
+                        items:
+                          type: object
+                          required: [platform, ready]
+                          properties:
+                            platform: { type: string }
+                            ready: { type: boolean }
+                  requestId: { type: string }
+  /data/search:
+    post:
+      operationId: searchData
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+      responses:
+        "200":
+          description: Stable search response.
+          headers:
+            x-mx-insight-request-id:
+              schema: { type: string, format: uuid }
+            idempotent-replay:
+              schema: { type: string, enum: ["true", "false"] }
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /requests/{requestId}:
+    get:
+      operationId: getRequest
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Caller-owned request status without stored upstream response body.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RequestStatus"
+  /usage:
+    get:
+      operationId: getUsage
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: Usage visible to the authenticated consumer.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      requests: { type: integer }
+                      committed: { type: integer }
+                      released: { type: integer }
+                      unknown: { type: integer }
+                      units: { type: integer }
+components:
+  securitySchemes:
+    bearerKey:
+      type: http
+      scheme: bearer
+      bearerFormat: MX-API-Key
+  schemas:
+    SearchRequest:
+      type: object
+      additionalProperties: false
+      required: [platform, query]
+      properties:
+        platform: { type: string, pattern: "^(?![Aa][Ll][Ll]$|\\*$)[A-Za-z0-9_:-]+$", description: One explicit platform; `all` (case-insensitive) and `*` are forbidden., example: xiaohongshu }
+        query: { type: string, minLength: 1, maxLength: 500, description: Non-blank search query; surrounding whitespace is trimmed. }
+        pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        cursor: { type: string, minLength: 1, maxLength: 1024, description: Non-blank opaque cursor returned by the previous page; send it unchanged. }
+    RequestStatus:
+      type: object
+      required: [id, platform, status]
+      properties:
+        id: { type: string, format: uuid }
+        platform: { type: string }
+        status: { type: string, enum: [reserved, committed, released, unknown] }
+        units: { type: [integer, "null"] }
+        errorCode: { type: [string, "null"] }
+        reservedAt: { type: string, format: date-time }
+        completedAt: { type: [string, "null"], format: date-time }
+  responses:
+    Error:
+      description: Stable error envelope.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+              requestId: { type: string }

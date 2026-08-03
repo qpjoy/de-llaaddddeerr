@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mx-insight-hub-migrate
+  namespace: mx-insight-hub
+  labels:
+    app.kubernetes.io/name: mx-insight-hub-migrate
+    app.kubernetes.io/part-of: mx-insight-hub
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-insight-hub-migrate
+        app.kubernetes.io/part-of: mx-insight-hub
+    spec:
+      restartPolicy: Never
+      serviceAccountName: mx-insight-hub
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: mx-insight-hub:shadow
+          imagePullPolicy: Never
+          command: ["node", "server/migrate.mjs"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: DATABASE_URL
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

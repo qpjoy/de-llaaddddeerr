@@ -1,0 +1,56 @@
+name: mx-insight-hub
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: mx_insight_hub
+      POSTGRES_USER: mx_insight
+      POSTGRES_PASSWORD: ${MX_INSIGHT_POSTGRES_PASSWORD:-local-postgres-change-me}
+    ports:
+      - "127.0.0.1:15440:5432"
+    volumes:
+      - mx-insight-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mx_insight -d mx_insight_hub"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      additional_contexts:
+        ui_design: ../../../mx-launcher/ui-design
+    image: ${MX_INSIGHT_IMAGE:-mx-insight-hub:local}
+    environment:
+      MX_INSIGHT_HOST: 0.0.0.0
+      MX_INSIGHT_PORT: 18180
+      MX_INSIGHT_LISTENER_MODE: combined
+      MX_INSIGHT_STORE: postgres
+      DATABASE_URL: postgres://mx_insight:${MX_INSIGHT_POSTGRES_PASSWORD:-local-postgres-change-me}@postgres:5432/mx_insight_hub
+      MX_INSIGHT_ADMIN_TOKEN: ${MX_INSIGHT_ADMIN_TOKEN:-local-admin-change-me}
+      MX_INSIGHT_API_KEY_PEPPER: ${MX_INSIGHT_API_KEY_PEPPER:-local-pepper-change-me-at-least-32-bytes}
+      NIGHT_ALL_BASE_URL: ${NIGHT_ALL_BASE_URL:-http://host.docker.internal:18141}
+      NIGHT_ALL_TIMEOUT_MS: ${NIGHT_ALL_TIMEOUT_MS:-30000}
+      NIGHT_ALL_READY_MODE: ${NIGHT_ALL_READY_MODE:-ready_only}
+      NIGHT_ALL_SERVICE_TOKEN: ${NIGHT_ALL_SERVICE_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:18180:18180"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "node server/migrate.mjs && exec node server/index.mjs"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18180/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  mx-insight-postgres:

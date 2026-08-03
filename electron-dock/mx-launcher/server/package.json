@@ -20,6 +20,7 @@
     "test:k8s-secret-ensure": "node --test scripts/internal-k8s-secret-ensure.test.mjs scripts/release-oss-secret-env.test.mjs",
     "test:site-slot-worker": "node --test scripts/site-slot-worker-run.test.mjs",
     "test:internal-service-peer-observation": "node --test --import tsx src/modules/admin/internal-service-peer-observation.test.ts",
+    "test:insight-hub": "node --test --import tsx src/modules/insight-hub/insight-hub.client.test.ts",
     "smoke:http": "node scripts/http-smoke.mjs",
     "smoke:release-center": "node scripts/release-center-smoke.mjs",
     "smoke:release-publisher-postgres": "node --import tsx scripts/release-publisher-postgres-smoke.ts",

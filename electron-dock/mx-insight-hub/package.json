@@ -1,0 +1,30 @@
+{
+  "name": "@qpjoy/mx-insight-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:api": "MX_INSIGHT_STORE=memory MX_INSIGHT_ADMIN_TOKEN=local-admin-change-me MX_INSIGHT_API_KEY_PEPPER=local-pepper-change-me-at-least-32-bytes node server/index.mjs",
+    "build": "vite build && node scripts/prepare-sites-build.mjs",
+    "start": "node server/index.mjs",
+    "migrate": "node server/migrate.mjs",
+    "test": "node --test tests/server/*.test.mjs tests/sites-worker.test.mjs",
+    "test:server": "node --test tests/server/*.test.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "preview": "vite preview",
+    "test:sites": "node --test tests/sites-worker.test.mjs"
+  },
+  "dependencies": {
+    "pg": "8.22.0"
+  },
+  "devDependencies": {
+    "@phosphor-icons/react": "2.1.10",
+    "@qpjoy/ui-design-neon-void": "file:../mx-launcher/ui-design",
+    "@vitejs/plugin-react": "5.0.4",
+    "chart.js": "4.5.1",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "vite": "6.4.3"
+  }
+}

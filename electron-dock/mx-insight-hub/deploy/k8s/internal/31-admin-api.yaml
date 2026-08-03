@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-insight-hub-admin
+  namespace: mx-insight-hub
+  labels:
+    app.kubernetes.io/name: mx-insight-hub-admin
+spec:
+  selector:
+    app.kubernetes.io/name: mx-insight-hub-admin
+  ports:
+    - name: http
+      port: 18151
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-insight-hub-admin
+  namespace: mx-insight-hub
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-insight-hub-admin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-insight-hub-admin
+        app.kubernetes.io/part-of: mx-insight-hub
+        mx-insight-hub.io/plane: admin
+    spec:
+      serviceAccountName: mx-insight-hub
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: admin
+          image: mx-insight-hub:shadow
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 18151
+          envFrom:
+            - configMapRef:
+                name: mx-insight-hub-config
+          env:
+            - name: MX_INSIGHT_PORT
+              value: "18151"
+            - name: MX_INSIGHT_LISTENER_MODE
+              value: admin
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: DATABASE_URL
+            - name: MX_INSIGHT_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_ADMIN_TOKEN
+            - name: MX_INSIGHT_API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_API_KEY_PEPPER
+            - name: NIGHT_ALL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: NIGHT_ALL_SERVICE_TOKEN
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

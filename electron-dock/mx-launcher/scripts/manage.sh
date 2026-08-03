@@ -95,6 +95,7 @@ Usage:
   bash scripts/manage.sh ops awx-shadow plan|dry-run|install|status|port-forward [local-port]|logs|password|down
   bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
   bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down
+  bash scripts/manage.sh ops insight-hub plan|deploy|status|smoke|logs|down
   bash scripts/manage.sh ops internal-production plan|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-cni|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh k8s plan internal-shadow
@@ -5579,6 +5580,20 @@ ops_internal_production_repair_cni() {
   kubectl -n kube-system get pods -o wide || true
 }
 
+ops_insight_hub() {
+  local action="${1:-}"
+  local hub_root="${MX_INSIGHT_HUB_HOME:-$ROOT/../mx-insight-hub}"
+  local hub_manage="$hub_root/scripts/manage.sh"
+  case "$action" in
+    plan|deploy|status|smoke|logs|down) ;;
+    *) die "Usage: bash scripts/manage.sh ops insight-hub plan|deploy|status|smoke|logs|down" ;;
+  esac
+  [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops insight-hub plan|deploy|status|smoke|logs|down"
+  [ -f "$hub_manage" ] || die "missing MX Insight Hub management script: $hub_manage"
+  say "delegate MX Insight Hub $action to $hub_manage"
+  (cd "$hub_root" && MX_INSIGHT_SYNC_LAUNCHER=1 bash scripts/manage.sh ops internal-production "$action")
+}
+
 ops_internal_production() {
   local action="$1"
   shift || true
@@ -5631,6 +5646,10 @@ ops_internal_production() {
       k8s_gateway_smoke internal-shadow "${1:-}"
       say "db summary"
       k8s_db_summary internal-shadow
+      if [ "${MX_INSIGHT_HUB_DEPLOY:-0}" = "1" ]; then
+        say "deploy MX Insight Hub after MX Launcher is ready"
+        ops_insight_hub deploy
+      fi
       say "internal-production deploy OK"
       ;;
     apply)
@@ -6237,7 +6256,7 @@ case "$cmd" in
     esac
     ;;
   ops)
-    [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops guide|doctor|config|admin|site-slot|local-shadow|k8s-shadow|awx-shadow|awx-provider|local-platform|internal-production"
+    [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops guide|doctor|config|admin|site-slot|local-shadow|k8s-shadow|awx-shadow|awx-provider|local-platform|insight-hub|internal-production"
     area="$1"
     shift || true
     case "$area" in
@@ -6284,6 +6303,10 @@ case "$cmd" in
       local-platform)
         [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down"
         ops_local_platform "$@"
+        ;;
+      insight-hub)
+        [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops insight-hub plan|deploy|status|smoke|logs|down"
+        ops_insight_hub "$@"
         ;;
       internal-production)
         [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"

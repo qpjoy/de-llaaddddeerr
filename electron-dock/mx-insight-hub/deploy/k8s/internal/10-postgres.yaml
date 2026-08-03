@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-insight-hub-postgres
+  namespace: mx-insight-hub
+  labels:
+    app.kubernetes.io/name: mx-insight-hub-postgres
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mx-insight-hub-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mx-insight-hub-postgres
+  namespace: mx-insight-hub
+spec:
+  serviceName: mx-insight-hub-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-insight-hub-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-insight-hub-postgres
+        app.kubernetes.io/part-of: mx-insight-hub
+    spec:
+      serviceAccountName: mx-insight-hub
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:16-bookworm
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: mx_insight_hub
+            - name: POSTGRES_USER
+              value: mx_insight
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: postgres-password
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U mx_insight -d mx_insight_hub"]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U mx_insight -d mx_insight_hub"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi

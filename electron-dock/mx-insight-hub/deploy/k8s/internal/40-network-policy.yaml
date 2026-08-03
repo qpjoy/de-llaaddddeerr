@@ -1,0 +1,68 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-insight-hub-default-ingress
+  namespace: mx-insight-hub
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-insight-hub-public-ingress
+  namespace: mx-insight-hub
+spec:
+  podSelector:
+    matchLabels:
+      mx-insight-hub.io/plane: public
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mx-platform
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mx-internal-shadow
+      ports:
+        - protocol: TCP
+          port: 18150
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-insight-hub-admin-ingress
+  namespace: mx-insight-hub
+spec:
+  podSelector:
+    matchLabels:
+      mx-insight-hub.io/plane: admin
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mx-internal-shadow
+      ports:
+        - protocol: TCP
+          port: 18151
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-insight-hub-postgres-ingress
+  namespace: mx-insight-hub
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mx-insight-hub-postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: mx-insight-hub
+      ports:
+        - protocol: TCP
+          port: 5432

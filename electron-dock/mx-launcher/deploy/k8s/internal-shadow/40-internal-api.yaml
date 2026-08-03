@@ -184,6 +184,12 @@ spec:
                 secretKeyRef:
                   name: mx-internal-ops
                   key: token
+            - name: MX_INSIGHT_HUB_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-admin
+                  key: token
+                  optional: true
             - name: MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON
               valueFrom:
                 secretKeyRef:
