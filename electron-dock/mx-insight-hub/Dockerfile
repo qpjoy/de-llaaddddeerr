@@ -27,6 +27,9 @@ COPY --from=build /workspace/mx-insight-hub/server ./server
 COPY --from=build /workspace/mx-insight-hub/migrations ./migrations
 COPY --from=build /workspace/mx-insight-hub/dist ./dist
 COPY --from=build /workspace/mx-insight-hub/public ./public
-USER node
+# Use the numeric UID/GID of the base image's `node` user (1000:1000).
+# Kubernetes `runAsNonRoot` cannot verify a non-numeric username, so a numeric
+# USER here lets the image satisfy that check without relying on runAsUser.
+USER 1000:1000
 EXPOSE 18150 18151 18180
 CMD ["node", "server/index.mjs"]
