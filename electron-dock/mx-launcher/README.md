@@ -74,6 +74,9 @@ platform. New Launcher solution design and implementation should happen here.
   dev, npm release, and desktop packaging design.
 - `docs/15-sdk-gateway-api.md` - SDK Gateway external API, token flow,
   User Center, service account, and permission request contracts.
+- `docs/26-mx-insight-hub-integration-architecture.md` - HDO V1 / MX-H2I V2
+  boundary, federated identity, Hub data-plane routing, lifecycle isolation, and
+  non-interference gates for the existing MX-H2I network path.
 
 ## Local Checks
 

@@ -36,6 +36,8 @@ The supplied Sub2API dashboard is used as an information-architecture reference,
 
 The Admin UI must label operational `usage units` separately from model `tokens`. A record count is not a currency until a versioned price book defines it.
 
+The target object model, role split, subscription lifecycle, entitlement snapshots, quota ordering, immutable ledger and Launcher shadow-identity flow are specified in [Commercial control plane](commercial-control-plane.md).
+
 ## Current capacity boundary
 
 The MVP list endpoints are intentionally unpaginated and dashboard/usage aggregates query the transactional request table. Before production-scale Sub2API parity, add cursor pagination, maximum usage windows, `(tenant_id, consumer_id, created_at)` indexes, and hourly/materialized usage projections. Do not expose this build as an unbounded high-cardinality customer control plane.

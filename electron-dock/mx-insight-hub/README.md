@@ -2,6 +2,8 @@
 
 MX Insight Hub is the governed data-access layer between callers and private data systems such as Night-All. It turns internal platform capabilities into stable, key-scoped APIs with tenant isolation, explicit platform grants, quotas, idempotency, usage evidence, and an operator console.
 
+The target data platform adds versioned ingestion, canonical customer-safe data, `/shared_dir` file intake, PostgreSQL/PostGIS serving, immutable raw objects, rebuildable Elasticsearch search, freshness-aware cache/fallback, BI datasets and governed Data Agent tools. Those data-plane capabilities are designed but are not yet implemented by the current MVP; the existing API still dispatches search to Night-All.
+
 It is an independently deployed product module and a sibling of `mx-launcher`, not a Night-All fork and not an embedded Launcher database/service:
 
 - **Night-All** owns providers, collection, normalization, source evidence, and upstream credentials.
@@ -40,6 +42,12 @@ bash scripts/manage.sh local status
 bash scripts/manage.sh local logs
 bash scripts/manage.sh local down
 
+# Optional local Elasticsearch/Kibana; independent from Hub startup
+bash scripts/manage.sh search plan
+bash scripts/manage.sh search up
+bash scripts/manage.sh search status
+bash scripts/manage.sh search down
+
 # Independent internal K8s lifecycle
 bash scripts/manage.sh ops internal-production deploy
 bash scripts/manage.sh ops internal-production status
@@ -68,3 +76,5 @@ GET  /api/v1/usage
 Every costly `POST` requires `Idempotency-Key`. Public callers can choose only documented platform and query fields. Night-All `businessId`, provider, endpoint, credentials, raw response switches, and availability policy are server-owned and never accepted as public parameters.
 
 Start with [docs/README.md](docs/README.md) for architecture, security, operations, and roadmap decisions.
+
+The detailed data-platform decisions start at [data-platform storage and serving](docs/architecture/data-platform-storage-and-serving.md), [ingestion/cache/fallback](docs/architecture/ingestion-cache-and-fallback.md), and the [`/shared_dir` ingestion runbook](docs/operations/shared-directory-ingestion.md).

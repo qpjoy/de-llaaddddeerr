@@ -1245,8 +1245,8 @@ Luopan 这类独立产品：
 - 如果只是 AppCenter 应用，做 embed，复用 `mx-h2i`
 - 如果需要独立登录态、独立守护、独立更新器或隔离策略，做自己的 Launcher standalone channel
 - Luopan 的 embed app 可以选择 `luopan` 作为 Launcher standalone channel
-- v1 仍共用 `mx-domestic` 和 Internal `10.88.88.88`
-- 可分配独立 gateway alias/service VIP，例如 `10.88.0.2` / `10.88.101.1`
+- 可以共用 Domestic relay fabric，但正式 Internal 路径不得复用 MX-H2I 的迁移地址 `10.88.88.88`
+- 使用独立 service VIP；当前 Luopan 固定为 `10.88.100.3`
 - H 端 lease 使用独立段；当前 Luopan 固定为 `10.91.0.0/16`
 
 同机多个 standalone 的本机网络规则：
@@ -1260,9 +1260,9 @@ Luopan 这类独立产品：
   `system-domain-proxy` 目前仍由应用进程持有；若第二个 standalone 也尝试创建 local edge，
   会 fail closed，不会“复用”一个无法保证生命周期和回滚的外部进程。双 DNS/PAC owner
   只有在单一、长生命周期 Launcher network broker 落地后才算支持。
-- 多个 standalone 可以共享同一个 Domestic fabric：Internal 仍是 `10.88.88.88`，Domestic
-  gateway 仍是 `10.88.0.1`；产品差异放在 H 端 lease 段、service VIP、DNS suffix/route 和
-  auth policy。
+- 多个 standalone 可以共享同一个 Domestic fabric 和 `10.88.0.1` gateway，但正式
+  Internal 路径使用各自 service VIP；`10.88.88.88` 只保留给 MX-H2I 迁移兼容，Luopan
+  使用 `10.88.100.3`。产品差异放在 H 端 lease 段、service VIP、DNS suffix/route 和 auth policy。
 - IP 段必须不重叠：MX-H2I 使用 `10.89.0.0/16`，当前 Luopan 使用 `10.91.0.0/16`。
   broker 对重叠 AllowedIPs 应拒绝 apply 或要求切换 owner。
 - DNS policy 可以合并：`mx-h2i` 的域名、`luopan` 的域名、AppCenter embed app 的域名

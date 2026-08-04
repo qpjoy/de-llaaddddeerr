@@ -1,0 +1,9 @@
+cluster.name: mx-insight-local-search
+node.name: mx-insight-es-01
+network.host: 0.0.0.0
+http.host: 0.0.0.0
+bootstrap.memory_lock: true
+action.destructive_requires_name: true
+indices.recovery.max_bytes_per_sec: 100mb
+path.repo:
+  - /usr/share/elasticsearch/snapshots

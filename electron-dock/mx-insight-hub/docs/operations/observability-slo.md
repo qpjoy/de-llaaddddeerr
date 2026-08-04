@@ -29,3 +29,5 @@ Never label metrics with full API keys, query text, user-entered URLs or unrestr
 ## ELK/OpenSearch
 
 Ship structured stdout logs through the shared K8s collector to a persistent index lifecycle: hot 7 days, warm 30 days, archived object storage as policy requires. Add trace IDs across gateway -> Hub -> Night-All. This improves diagnosis and cold log retention but remains separate from transactional backup.
+
+Kibana is an internal engineering/data-quality surface, not the customer BI product. Filebeat/Elastic Agent may tail host/container logs, but `/shared_dir` business files must use the manifest/parser pipeline in [the file-ingestion runbook](shared-directory-ingestion.md); Logstash/Filebeat do not own canonical identity, schema or checkpoint decisions. The opt-in local sample is documented in [Search and observability stack](search-and-observability-stack.md).

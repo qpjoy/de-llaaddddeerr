@@ -6,6 +6,8 @@ Night-All remains the first-party aggregation and intelligence source on the int
 
 MX Insight Hub does not duplicate or fork this logic. Its adapter calls a versioned private Night-All capability contract and converts it into a stable consumer contract.
 
+For Internal production, keep the host Night-All as the only writer and call it through a workload-authenticated host facade/private Service. A second full Docker Night-All is for isolated local snapshot testing, not a production read shortcut and never shares production PG/Redis or scheduler ownership.
+
 ## Current adapter
 
 The Hub calls:
@@ -36,9 +38,13 @@ Night-All’s current search facade is not guaranteed to be end-to-end idempoten
 
 The long-term fix is to pass a Hub request ID into Night-All and make Night-All persist a unique dispatch/result record.
 
+The current Hub also has no durable same-query cache or request coalescing. The target fresh/stale/live decision, per-capability TTL, singleflight lease and historical fallback are defined in [Ingestion, cache and fallback](ingestion-cache-and-fallback.md). A stale response must include its age/source mode; a semantically different historical query must never be returned as if it were live.
+
 ## Platform readiness
 
 Night-All exposes a broad 15-platform catalog, but catalog presence is not proof of a live production contract. Grant only platforms that have passed a real credential/endpoint/pagination verification. Automated deploy smoke must not call all paid platforms.
+
+Before deployment, probe the actual Internal revision and route. The local Night-All checkout contains the new `/api/v1/data/search` and durable-cursor work, but repository presence is not proof that the host has that commit/migration. The adapter must also validate the response business status because Night-All can report a failed/partial platform result inside an HTTP 200 envelope, and readiness must inspect dependency sub-status rather than a top-level `ok` alone.
 
 The Hub stores explicit grants such as `xhs` and `weibo`. A future “all platforms” action creates a versioned snapshot of currently approved platforms; it is not a wildcard.
 

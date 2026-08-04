@@ -1,0 +1,5 @@
+server.name: mx-insight-local-kibana
+server.host: 0.0.0.0
+i18n.locale: zh-CN
+telemetry.enabled: false
+elasticsearch.requestTimeout: 120000

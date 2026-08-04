@@ -71,3 +71,7 @@ The public host must never reach Admin Service or Night-All `13141/18141` direct
 - add exact Night-All workload identity and route/TLS review.
 
 Until these gates close, `internal-production` means the internal K8s deployment profile, not approval for internet exposure.
+
+## Data-plane expansion boundary
+
+PostGIS, object storage, ingest workers, Redis/Valkey, Elasticsearch, Kibana and HanLP are target workloads, not part of the current K8s manifests. Add them as Hub-owned, independently scalable workloads only after their migrations, backup and failure tests exist. Elasticsearch/Kibana readiness must never become Launcher or MX-H2I readiness, and search failure must leave PostgreSQL-backed published data available. The local `deploy/compose/search` stack is not a production K8s manifest.

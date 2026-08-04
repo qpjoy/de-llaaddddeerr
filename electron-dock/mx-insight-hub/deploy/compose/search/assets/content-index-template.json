@@ -1,0 +1,66 @@
+{
+  "index_patterns": ["mx-insight-content-v1-*"],
+  "priority": 500,
+  "version": 1,
+  "_meta": {
+    "owner": "mx-insight-hub",
+    "purpose": "Rebuildable customer-safe content search projection"
+  },
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "analysis": {
+        "analyzer": {
+          "mx_presegmented": {
+            "type": "custom",
+            "tokenizer": "whitespace",
+            "filter": ["lowercase"]
+          }
+        }
+      }
+    },
+    "mappings": {
+      "dynamic": "strict",
+      "properties": {
+        "id": { "type": "keyword" },
+        "tenantId": { "type": "keyword" },
+        "datasetId": { "type": "keyword" },
+        "dataVersion": { "type": "keyword" },
+        "schemaVersion": { "type": "keyword" },
+        "projectionRevision": { "type": "long" },
+        "platform": { "type": "keyword" },
+        "objectType": { "type": "keyword" },
+        "externalId": { "type": "keyword" },
+        "title": {
+          "type": "text",
+          "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } }
+        },
+        "body": { "type": "text" },
+        "titleHanlp": { "type": "text", "analyzer": "mx_presegmented" },
+        "bodyHanlp": { "type": "text", "analyzer": "mx_presegmented" },
+        "tokens": { "type": "keyword", "ignore_above": 256 },
+        "entityIds": { "type": "keyword" },
+        "tags": { "type": "keyword" },
+        "language": { "type": "keyword" },
+        "location": { "type": "geo_point", "ignore_malformed": false },
+        "countryCode": { "type": "keyword" },
+        "admin1Code": { "type": "keyword" },
+        "admin2Code": { "type": "keyword" },
+        "eventTime": { "type": "date" },
+        "collectedAt": { "type": "date" },
+        "publishedAt": { "type": "date" },
+        "source": {
+          "dynamic": "strict",
+          "properties": {
+            "connectorId": { "type": "keyword" },
+            "streamId": { "type": "keyword" },
+            "sourceKey": { "type": "keyword" },
+            "payloadSha256": { "type": "keyword" }
+          }
+        },
+        "extensions": { "type": "flattened" }
+      }
+    }
+  }
+}

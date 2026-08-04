@@ -1,0 +1,93 @@
+name: ${COMPOSE_PROJECT_NAME:-mx-insight-search}
+
+# Local/controlled-development search stack only. Production must enable
+# authentication/TLS and use reviewed persistent storage, snapshots and
+# network policy. This stack is deliberately independent from the default Hub
+# Compose lifecycle so search cannot become an MX-H2I or Hub startup dependency.
+services:
+  volume-init:
+    image: busybox:1.36
+    user: root
+    restart: "no"
+    command:
+      - sh
+      - -ec
+      - |
+        chown -R 1000:0 /es-data /snapshots
+        chmod -R ug+rwX /es-data /snapshots
+    volumes:
+      - elasticsearch-data:/es-data
+      - elasticsearch-snapshots:/snapshots
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION:-9.4.2}
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.license.self_generated.type: basic
+      ES_JAVA_OPTS: -Xms${ELASTICSEARCH_HEAP:-1g} -Xmx${ELASTICSEARCH_HEAP:-1g}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${MX_INSIGHT_ELASTICSEARCH_PORT:-19200}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+      - elasticsearch-snapshots:/usr/share/elasticsearch/snapshots
+      - ./config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  search-setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION:-9.4.2}
+    user: "1000:0"
+    restart: "no"
+    entrypoint: ["/bin/bash", "/bootstrap/bootstrap.sh"]
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    volumes:
+      - ./bootstrap:/bootstrap:ro
+      - ./assets:/assets:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION:-9.4.2}
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${MX_INSIGHT_KIBANA_PORT:-15601}:5601"
+    volumes:
+      - ./config/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      search-setup:
+        condition: service_completed_successfully
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  elasticsearch-data:
+  elasticsearch-snapshots:

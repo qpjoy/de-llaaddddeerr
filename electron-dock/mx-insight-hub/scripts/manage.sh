@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELECTRON_DOCK_DIR="$(cd "${ROOT_DIR}/.." && pwd)"
 COMPOSE_FILE="${ROOT_DIR}/deploy/compose/docker-compose.yml"
+SEARCH_COMPOSE_DIR="${ROOT_DIR}/deploy/compose/search"
+SEARCH_COMPOSE_FILE="${SEARCH_COMPOSE_DIR}/docker-compose.yml"
 K8S_DIR="${ROOT_DIR}/deploy/k8s/internal"
 RUNTIME_DIR="${ROOT_DIR}/.runtime"
 
@@ -18,6 +20,9 @@ MX Insight Hub lifecycle
 Local Docker:
   bash scripts/manage.sh local up|rebuild|status|logs|smoke|data-smoke|bootstrap|down
   bash scripts/manage.sh up|rebuild|status|logs|smoke|down
+
+Optional local search (independent from Hub startup):
+  bash scripts/manage.sh search plan|up|status|logs|down
 
 Internal Kubernetes:
   bash scripts/manage.sh ops internal-production plan|deploy|apply|status|smoke|logs|down
@@ -46,6 +51,19 @@ compose() {
   else
     die "Docker Compose is unavailable"
   fi
+}
+
+search_compose() {
+  (
+    cd "$SEARCH_COMPOSE_DIR"
+    if docker compose version >/dev/null 2>&1; then
+      docker compose -f "$SEARCH_COMPOSE_FILE" "$@"
+    elif command -v docker-compose >/dev/null 2>&1; then
+      docker-compose -f "$SEARCH_COMPOSE_FILE" "$@"
+    else
+      die "Docker Compose is unavailable"
+    fi
+  )
 }
 
 wait_http() {
@@ -99,6 +117,34 @@ local_action() {
     down)
       compose down
       say "Containers stopped; the PostgreSQL volume was preserved."
+      ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+search_action() {
+  local action="${1:-}"
+  load_env_file "${SEARCH_COMPOSE_DIR}/.env"
+  need docker
+  case "$action" in
+    plan)
+      search_compose config
+      ;;
+    up)
+      search_compose up -d
+      search_compose ps
+      say "Local Elasticsearch: http://127.0.0.1:${MX_INSIGHT_ELASTICSEARCH_PORT:-19200}"
+      say "Local Kibana: http://127.0.0.1:${MX_INSIGHT_KIBANA_PORT:-15601}"
+      ;;
+    status)
+      search_compose ps --all
+      ;;
+    logs)
+      search_compose logs --tail=250 elasticsearch search-setup kibana
+      ;;
+    down)
+      search_compose down
+      say "Search containers stopped; Elasticsearch and snapshot volumes were preserved."
       ;;
     *) usage; exit 2 ;;
   esac
@@ -312,6 +358,10 @@ case "${1:-}" in
   ops)
     shift
     ops_action "${1:-}" "${2:-}"
+    ;;
+  search)
+    shift
+    search_action "${1:-}"
     ;;
   up|rebuild|status|logs|smoke|data-smoke|bootstrap|down)
     local_action "$1"

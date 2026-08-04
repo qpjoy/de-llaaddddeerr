@@ -1,0 +1,41 @@
+{
+  "index_patterns": ["logs-mx-insight-*"],
+  "data_stream": {},
+  "priority": 500,
+  "version": 1,
+  "template": {
+    "settings": {
+      "index.lifecycle.name": "mx-insight-logs-policy",
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "dynamic": false,
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "service": {
+          "properties": { "name": { "type": "keyword" } }
+        },
+        "event": {
+          "properties": { "dataset": { "type": "keyword" } }
+        },
+        "log": {
+          "properties": { "level": { "type": "keyword" } }
+        },
+        "message": { "type": "text" },
+        "trace": {
+          "properties": { "id": { "type": "keyword" } }
+        },
+        "transaction": {
+          "properties": { "id": { "type": "keyword" } }
+        },
+        "labels": {
+          "properties": {
+            "tenant_id": { "type": "keyword" },
+            "platform": { "type": "keyword" }
+          }
+        }
+      }
+    }
+  }
+}
