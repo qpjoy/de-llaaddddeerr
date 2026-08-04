@@ -33,6 +33,13 @@ spec:
     spec:
       serviceAccountName: mx-insight-hub
       automountServiceAccountToken: false
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
       securityContext:
         fsGroup: 999
         seccompProfile:
@@ -71,6 +78,8 @@ spec:
               cpu: "2"
               memory: 2Gi
           securityContext:
+            runAsUser: 999
+            runAsGroup: 999
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]

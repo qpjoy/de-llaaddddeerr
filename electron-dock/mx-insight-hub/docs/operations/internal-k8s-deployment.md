@@ -4,13 +4,15 @@
 
 Namespace `mx-insight-hub` contains:
 
-- PostgreSQL 16 StatefulSet and 20 GiB PVC;
+- PostgreSQL 16 StatefulSet and 20 GiB retained PVC/PV;
 - schema migration Job;
 - two-replica public API Deployment/ClusterIP Service on `18150`;
 - one-replica Admin/API/UI Deployment/ClusterIP Service on `18151`;
 - ingress NetworkPolicies allowing only same-namespace and `mx-platform` traffic.
 
-The image uses `imagePullPolicy: Never`, matching the current single-node internal cluster. `scripts/manage.sh` builds with Docker and imports into `k8s.io` containerd through `ctr`. Move to a signed registry before adding nodes.
+The image uses `imagePullPolicy: Never`, matching the current single-node internal cluster. `scripts/manage.sh` requires exactly one Kubernetes node, builds with Docker, imports into `k8s.io` containerd through `ctr`, and preloads `postgres:16-bookworm` through the same path. Move to a signed registry and provisioned storage before adding nodes.
+
+On bare kubeadm without a default StorageClass, deployment creates a pre-bound `Retain` hostPath PV at `/var/lib/mx-insight-hub/k8s/postgres`. An existing classless Pending PVC is bound to that PV in place, even if a default StorageClass was installed after the claim was created; this avoids a PVC-protection deadlock with the Pending PostgreSQL Pod. An existing bound PVC is always reused. A released local PV is repaired only after its path, reclaim policy, and claim identity match the Hub contract; the script never deletes the PVC or host data.
 
 ## Secret preparation
 
@@ -34,7 +36,9 @@ Do not commit the file. Deployment renders a ConfigMap and Secret with `kubectl 
 bash scripts/manage.sh ops internal-production deploy
 ```
 
-Order: build -> containerd import -> namespace/Secret/ConfigMap -> PostgreSQL ready -> migration complete -> public/admin rollout -> smoke.
+Order: acquire deploy lock -> build -> containerd import -> PostgreSQL image preload -> namespace -> retained-secret compatibility check -> Secret/ConfigMap -> storage reconciliation -> PostgreSQL ready -> migration complete -> public/admin rollout -> smoke -> scoped temporary-artifact cleanup.
+
+The command is idempotent after an interrupted deploy. It reuses retained PostgreSQL data, recreates the migration Job, and reapplies workloads. A changed PostgreSQL password or API-key pepper is rejected before the Secret is overwritten because those values require an explicit rotation procedure. A missing Secret is also rejected when retained PostgreSQL storage exists. The Docker build runs entirely inside its build context and does not create host `dist` directories. Temporary image archives, the managed port-forward, the Hub Docker staging image, and a PostgreSQL Docker image pulled only for this run are removed on both success and failure. Tagged containerd release/runtime images, PVCs, Secrets, and host data are retained as runtime or rollback assets; global Docker/BuildKit caches are outside this command's cleanup scope.
 
 ## Launcher delegation
 

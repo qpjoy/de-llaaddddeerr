@@ -2,9 +2,9 @@
 FROM node:22-bookworm-slim AS build
 
 WORKDIR /workspace/mx-insight-hub
-COPY --from=ui_design . /workspace/mx-launcher/ui-design
-RUN node /workspace/mx-launcher/ui-design/scripts/build.mjs \
-    && test -s /workspace/mx-launcher/ui-design/dist/styles.css
+COPY --from=ui_design package.json /workspace/mx-launcher/ui-design/package.json
+COPY --from=ui_design scripts /workspace/mx-launcher/ui-design/scripts
+COPY --from=ui_design src /workspace/mx-launcher/ui-design/src
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . ./

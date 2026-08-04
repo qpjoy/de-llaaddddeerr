@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mx-insight-hub-postgres-local-pv
+  labels:
+    app.kubernetes.io/name: mx-insight-hub-postgres
+    app.kubernetes.io/part-of: mx-insight-hub
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+  storageClassName: ""
+  hostPath:
+    path: /var/lib/mx-insight-hub/k8s/postgres
+    type: Directory
+  claimRef:
+    namespace: mx-insight-hub
+    name: data-mx-insight-hub-postgres-0

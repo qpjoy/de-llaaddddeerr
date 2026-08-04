@@ -18,6 +18,13 @@ spec:
       restartPolicy: Never
       serviceAccountName: mx-insight-hub
       automountServiceAccountToken: false
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
       securityContext:
         runAsNonRoot: true
         seccompProfile:

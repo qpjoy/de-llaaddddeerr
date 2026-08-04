@@ -6,14 +6,16 @@
   "scripts": {
     "dev": "vite",
     "dev:api": "MX_INSIGHT_STORE=memory MX_INSIGHT_ADMIN_TOKEN=local-admin-change-me MX_INSIGHT_API_KEY_PEPPER=local-pepper-change-me-at-least-32-bytes node server/index.mjs",
+    "prebuild": "node ../mx-launcher/ui-design/scripts/build.mjs",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "start": "node server/index.mjs",
     "migrate": "node server/migrate.mjs",
-    "test": "node --test tests/server/*.test.mjs tests/sites-worker.test.mjs",
+    "test": "node --test tests/server/*.test.mjs tests/sites-worker.test.mjs && bash tests/manage-script.test.sh",
     "test:server": "node --test tests/server/*.test.mjs",
     "smoke": "node scripts/smoke.mjs",
     "preview": "vite preview",
-    "test:sites": "node --test tests/sites-worker.test.mjs"
+    "test:sites": "node --test tests/sites-worker.test.mjs",
+    "test:ops": "bash tests/manage-script.test.sh"
   },
   "dependencies": {
     "pg": "8.22.0"

@@ -64,6 +64,8 @@ MX_INSIGHT_HUB_DEPLOY=1 bash scripts/manage.sh ops internal-production deploy
 
 `down` preserves PostgreSQL, PVCs, Secrets, and the namespace. Removing data is deliberately not part of the routine lifecycle command.
 
+The Internal `deploy` command is self-contained for the current single-node kubeadm host: it builds the linked UI package inside the image, preloads PostgreSQL into containerd, reconciles a retained local PV when no usable StorageClass is attached to the claim, prints workload diagnostics on timeout, and removes its temporary build/import artifacts. Re-running the same command after an interrupted deployment is supported.
+
 ## Public API v1
 
 ```text

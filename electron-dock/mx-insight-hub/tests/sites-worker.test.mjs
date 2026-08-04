@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access } from "node:fs/promises";
+import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import worker from "../worker/index.js";
 
@@ -61,8 +61,18 @@ test("does not turn missing API or write requests into the app shell", async () 
   }
 });
 
-test("emits the files required by Sites packaging", async () => {
-  await access(new URL("../dist/client/index.html", import.meta.url));
-  await access(new URL("../dist/server/index.js", import.meta.url));
-  await access(new URL("../dist/.openai/hosting.json", import.meta.url));
+test("prepares the files required by Sites packaging without retained build output", async () => {
+  const dist = new URL("../dist/", import.meta.url);
+  const client = new URL("client/", dist);
+  await rm(dist, { force: true, recursive: true });
+  await mkdir(client, { recursive: true });
+  await writeFile(new URL("index.html", client), "<!doctype html>");
+  try {
+    await import(`../scripts/prepare-sites-build.mjs?test=${Date.now()}`);
+    await access(new URL("client/index.html", dist));
+    await access(new URL("server/index.js", dist));
+    await access(new URL(".openai/hosting.json", dist));
+  } finally {
+    await rm(dist, { force: true, recursive: true });
+  }
 });
