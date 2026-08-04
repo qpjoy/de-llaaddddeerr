@@ -186,6 +186,50 @@ if ops_action internal-production plan | grep -q "$POSTGRES_PV_NAME"; then
 fi
 printf 'ok - static local PV is absent from unconditional plan output\n'
 
+run_pod_security_case() {
+  local pod_user="$1"
+  local log_path="$2"
+  POD_USER="$pod_user" POD_SECURITY_LOG="$log_path" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    case "$*" in
+      *"get statefulset mx-insight-hub-postgres"*"containers"*)
+        :
+        ;;
+      *"get statefulset mx-insight-hub-postgres"*)
+        printf 999
+        ;;
+      *"get pod ${POSTGRES_POD_NAME}"*"-o name"*)
+        printf "pod/%s" "$POSTGRES_POD_NAME"
+        ;;
+      *"get pod ${POSTGRES_POD_NAME}"*)
+        printf "%s" "$POD_USER"
+        ;;
+      *"delete pod ${POSTGRES_POD_NAME}"*)
+        printf "%s\n" "$*" >>"$POD_SECURITY_LOG"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  }
+  reconcile_postgres_pod_security_context
+' _ "$ROOT_DIR"
+}
+
+pod_security_log="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-pod-security.XXXXXX")"
+run_pod_security_case "" "$pod_security_log"
+grep -q "delete pod ${POSTGRES_POD_NAME} --ignore-not-found --wait=false" "$pod_security_log"
+: >"$pod_security_log"
+run_pod_security_case 999 "$pod_security_log"
+if [ -s "$pod_security_log" ]; then
+  printf 'not ok - current UID 999 PostgreSQL Pod was unnecessarily replaced\n' >&2
+  exit 1
+fi
+rm -f -- "$pod_security_log"
+printf 'ok - only a legacy root PostgreSQL Pod is replaced without touching storage\n'
+
 ops_log="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-ops-log.XXXXXX")"
 OPS_LOG="$ops_log" bash -c '
   set -euo pipefail
@@ -218,6 +262,15 @@ OPS_LOG="$ops_log" bash -c '
         :
         ;;
       *"get storageclass -o jsonpath="*)
+        :
+        ;;
+      *"get statefulset mx-insight-hub-postgres"*"containers"*)
+        :
+        ;;
+      *"get statefulset mx-insight-hub-postgres"*)
+        printf 999
+        ;;
+      *"get pod ${POSTGRES_POD_NAME}"*"-o name"*)
         :
         ;;
     esac

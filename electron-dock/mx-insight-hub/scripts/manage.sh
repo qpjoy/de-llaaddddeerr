@@ -11,6 +11,7 @@ RUNTIME_DIR="${ROOT_DIR}/.runtime"
 POSTGRES_RUNTIME_IMAGE="postgres:16-bookworm"
 POSTGRES_PV_NAME="mx-insight-hub-postgres-local-pv"
 POSTGRES_PVC_NAME="data-mx-insight-hub-postgres-0"
+POSTGRES_POD_NAME="mx-insight-hub-postgres-0"
 POSTGRES_HOST_PATH="/var/lib/mx-insight-hub/k8s/postgres"
 
 DEPLOY_TMP_BASE=""
@@ -620,8 +621,52 @@ ensure_postgres_storage() {
   ensure_postgres_local_pv
 }
 
+reconcile_postgres_pod_security_context() {
+  local namespace="mx-insight-hub"
+  local desired_user="999"
+  local template_pod_user template_container_user template_user
+  local pod_ref pod_pod_user pod_container_user pod_user
+
+  template_pod_user="$(
+    kubectl -n "$namespace" get statefulset mx-insight-hub-postgres \
+      -o jsonpath='{.spec.template.spec.securityContext.runAsUser}'
+  )"
+  template_container_user="$(
+    kubectl -n "$namespace" get statefulset mx-insight-hub-postgres \
+      -o 'jsonpath={.spec.template.spec.containers[?(@.name=="postgres")].securityContext.runAsUser}'
+  )"
+  template_user="${template_container_user:-$template_pod_user}"
+  [ "$template_user" = "$desired_user" ] \
+    || die "PostgreSQL StatefulSet must run as UID $desired_user; found ${template_user:-root/default}"
+
+  pod_ref="$(
+    kubectl -n "$namespace" get pod "$POSTGRES_POD_NAME" \
+      --ignore-not-found -o name
+  )"
+  [ -n "$pod_ref" ] || return 0
+  pod_pod_user="$(
+    kubectl -n "$namespace" get pod "$POSTGRES_POD_NAME" \
+      --ignore-not-found -o jsonpath='{.spec.securityContext.runAsUser}'
+  )"
+  pod_container_user="$(
+    kubectl -n "$namespace" get pod "$POSTGRES_POD_NAME" \
+      --ignore-not-found \
+      -o 'jsonpath={.spec.containers[?(@.name=="postgres")].securityContext.runAsUser}'
+  )"
+  pod_user="${pod_container_user:-$pod_pod_user}"
+  if [ "$pod_user" != "$desired_user" ]; then
+    say "replace legacy PostgreSQL Pod running as ${pod_user:-root/default}; PVC and PGDATA stay attached"
+    kubectl -n "$namespace" delete pod "$POSTGRES_POD_NAME" \
+      --ignore-not-found --wait=false
+  fi
+}
+
 k8s_postgres_diagnostics() {
   say "PostgreSQL readiness diagnostics"
+  kubectl -n mx-insight-hub get statefulset mx-insight-hub-postgres \
+    -o jsonpath='StatefulSet runAsUser={.spec.template.spec.securityContext.runAsUser}{" image="}{.spec.template.spec.containers[?(@.name=="postgres")].image}{"\n"}' || true
+  kubectl -n mx-insight-hub get pod "$POSTGRES_POD_NAME" \
+    -o jsonpath='Pod runAsUser={.spec.securityContext.runAsUser}{" imageID="}{.status.containerStatuses[?(@.name=="postgres")].imageID}{"\n"}' || true
   kubectl -n mx-insight-hub get statefulset,pod,pvc -o wide || true
   kubectl get pv "$POSTGRES_PV_NAME" -o wide || true
   kubectl get storageclass || true
@@ -660,6 +705,7 @@ apply_k8s() {
   sync_launcher_secret
   ensure_postgres_storage
   kubectl apply -f "${K8S_DIR}/10-postgres.yaml"
+  reconcile_postgres_pod_security_context
   if ! kubectl -n "$namespace" rollout status \
     statefulset/mx-insight-hub-postgres --timeout=300s; then
     k8s_postgres_diagnostics
