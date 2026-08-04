@@ -31,8 +31,10 @@ const requiredFiles = [
   'README.setup.md',
   'dist/index.js',
   'dist/hdo.js',
+  'dist/h2i.js',
   'dist/index.d.ts',
   'dist/hdo.d.ts',
+  'dist/h2i.d.ts',
   'resources/mihomo-client.sh',
   'resources/manage.sh'
 ];

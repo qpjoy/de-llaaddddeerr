@@ -173,6 +173,9 @@ importers:
       '@qpjoy/electron-core-wireguard':
         specifier: workspace:^
         version: link:../electron-core-wireguard
+      '@qpjoy/mx-launcher-standalone':
+        specifier: 2.3.15
+        version: 2.3.15
     devDependencies:
       '@types/node':
         specifier: ^22.10.7
@@ -707,6 +710,12 @@ packages:
 
   '@qpjoy/marketplace-db@0.1.0':
     resolution: {integrity: sha512-l6UfT5gMDXiRMrWYzGD02envxwLEdYE3PBHL8RwDLVdnfmxwOQ3lUtPaZIs2oF3zKQEvAH7lReA9QhxkqIDvxg==}
+
+  '@qpjoy/mx-launcher-core@2.3.15':
+    resolution: {integrity: sha512-mT/syGW5pfFKWleUdP+nYQQCR1xVu/Gp7nsbAgsIZhlZg+Zy24JNYn7JNz761arfooEYp/Y27in0Gobbs3PJow==}
+
+  '@qpjoy/mx-launcher-standalone@2.3.15':
+    resolution: {integrity: sha512-/s4Lgvd8pSjZ/R+c+t/v7QNmFbyVyOaO+QsZo4MZ+m/ogT+bJ7k0Eo54lIqhEwihxuxusimDFgpgojeZHxu1JQ==}
 
   '@quasar/app-vite@2.4.0':
     resolution: {integrity: sha512-nfdcfERQ1bdUFsgXfYexgUAGBrsRHuzlik5p58cKGpYXiwUZZN6mJhN8VxU/zGT0GYHHiNIZlb67N+R52NYd6Q==}
@@ -3695,6 +3704,12 @@ snapshots:
     dependencies:
       better-sqlite3: 11.10.0
     optional: true
+
+  '@qpjoy/mx-launcher-core@2.3.15': {}
+
+  '@qpjoy/mx-launcher-standalone@2.3.15':
+    dependencies:
+      '@qpjoy/mx-launcher-core': 2.3.15
 
   '@quasar/app-vite@2.4.0(@types/node@22.19.19)(electron-builder@25.1.8(electron-builder-squirrel-windows@25.1.8(dmg-builder@25.1.8)))(quasar@2.19.3)(rollup@4.60.4)(sass@1.99.0)(terser@5.47.1)(typescript@5.9.3)(vue-router@4.6.4(vue@3.5.34(typescript@5.9.3)))(vue@3.5.34(typescript@5.9.3))(yaml@2.9.0)':
     dependencies:

@@ -5,7 +5,22 @@
 # Or run all prerequisites explicitly:
 # ssh root@server 'bash /tmp/qp-tunnel-bootstrap.sh bootstrap 22 @qpjoy/tunnel-cli@latest'
 
-npm i -g @qpjoy/tunnel-cli@0.1.9
+npm i -g @qpjoy/tunnel-cli@0.3.0
+
+# Ubuntu -> MX H2I V2（账号）
+sudo apt-get install -y wireguard-tools
+read -rsp 'H2I password: ' H2I_PASSWORD; export H2I_PASSWORD; printf '\n'
+qp-tunnel-cli h2i enroll --bootstrap-url 'https://h2i.example.com' --username 'user@example.com'
+unset H2I_PASSWORD
+qp-tunnel-cli h2i status
+
+# Ubuntu -> MX H2I V2（匿名）
+qp-tunnel-cli h2i enroll --bootstrap-url 'https://h2i.example.com' --anonymous
+
+# 停止本地隧道；保留 lease 供重连
+qp-tunnel-cli h2i down
+
+# 以下 hdo 命令是 legacy V1，不要把 --server-url 与 V2 --internal-url 混合用于生产连接
 qp-tunnel-cli hdo enroll --internal-url 'http://127.0.0.1:18090' --product-id h2o --identity-kind anonymous --lease-only
 HDO_PASSWORD='...' qp-tunnel-cli hdo enroll --server-url 'https://domestic.example.com' --internal-url 'http://127.0.0.1:18090' --product-id h2o --username internal-i
 

@@ -1140,8 +1140,10 @@ qp_tunnel_cli_fallback_ready() {
     README.setup.md
     dist/index.js
     dist/hdo.js
+    dist/h2i.js
     dist/index.d.ts
     dist/hdo.d.ts
+    dist/h2i.d.ts
     resources/mihomo-client.sh
   )
   local file
@@ -1158,16 +1160,64 @@ qp_tunnel_cli_fallback_version() {
 wireguard_runtime_ready() {
   local plugin_root="$1"
   local core="$plugin_root/packages/electron-core-wireguard"
-  local engine engine_root
+  local engine engine_root binary
   [ -f "$core/package.json" ] || return 1
   [ -f "$core/README.md" ] || return 1
-  [ -d "$core/dist" ] || return 1
+  [ -f "$core/dist/index.js" ] || return 1
+  [ -f "$core/dist/index.d.ts" ] || return 1
   for engine in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-x64; do
     engine_root="$plugin_root/packages/wireguard-engines/$engine"
     [ -f "$engine_root/package.json" ] || return 1
     [ -f "$engine_root/README.md" ] || return 1
-    [ -d "$engine_root/resources" ] || return 1
+    case "$engine" in
+      darwin-*)
+        for binary in wg wireguard-go; do
+          [ -f "$engine_root/resources/wireguard/$engine/$binary" ] || return 1
+        done
+        ;;
+      linux-*)
+        for binary in wg wg-quick; do
+          [ -f "$engine_root/resources/wireguard/$engine/$binary" ] || return 1
+        done
+        ;;
+      win32-x64)
+        for binary in wg.exe wireguard.exe; do
+          [ -f "$engine_root/resources/wireguard/$engine/$binary" ] || return 1
+        done
+        ;;
+    esac
   done
+}
+
+launcher_runtime_ready() {
+  local package package_root
+  for package in launcher-core launcher-standalone; do
+    package_root="$ROOT/packages/$package"
+    [ -f "$package_root/package.json" ] || return 1
+    [ -f "$package_root/README.md" ] || return 1
+    [ -f "$package_root/dist/index.js" ] || return 1
+    [ -f "$package_root/dist/index.d.ts" ] || return 1
+  done
+}
+
+build_launcher_runtime() {
+  say "build MX Launcher core runtime for qp-tunnel-cli fallback"
+  run_pnpm_dir "$ROOT" --filter @qpjoy/mx-launcher-core build
+  say "build MX Launcher standalone runtime for qp-tunnel-cli fallback"
+  run_pnpm_dir "$ROOT" --filter @qpjoy/mx-launcher-standalone build
+}
+
+shadow_image_refresh_tunnel_cli_from_local() {
+  local target_dir="$1"
+  local cli_source="$2"
+  local plugin_root="$3"
+  qp_tunnel_cli_fallback_ready "$cli_source" || die "qp-tunnel-cli local source is not ready: $cli_source"
+  wireguard_runtime_ready "$plugin_root" || die "electron-core-wireguard runtime is not ready before local qp-tunnel-cli refresh"
+  launcher_runtime_ready || die "MX Launcher core/standalone runtime is not ready before local qp-tunnel-cli refresh"
+  node server/scripts/site-slot-refresh-tunnel-cli.mjs --from-local "$cli_source"
+  qp_tunnel_cli_fallback_ready "$target_dir" || die "qp-tunnel-cli fallback is not ready after local refresh: $target_dir"
+  wireguard_runtime_ready "$plugin_root" || die "electron-core-wireguard runtime is not ready after local qp-tunnel-cli refresh"
+  launcher_runtime_ready || die "MX Launcher core/standalone runtime is not ready after local qp-tunnel-cli refresh"
 }
 
 shadow_image_refresh_tunnel_cli_from_npm() {
@@ -1190,7 +1240,8 @@ shadow_image_refresh_tunnel_cli_from_npm() {
     say "warning: npm refresh failed; continuing with existing qp-tunnel-cli fallback $(qp_tunnel_cli_fallback_version "$target_dir")"
     return 0
   fi
-  die "qp-tunnel-cli fallback is missing and npm refresh failed"
+  say "warning: npm refresh failed and existing qp-tunnel-cli fallback is not ready; trying local source"
+  return 0
 }
 
 shadow_image_tunnel_cli_fallback() {
@@ -1200,21 +1251,22 @@ shadow_image_tunnel_cli_fallback() {
   local build_full="${MX_SHADOW_BUILD_ELECTRON_PLUGIN_FALLBACK:-0}"
   shadow_image_refresh_tunnel_cli_from_npm
   if qp_tunnel_cli_fallback_ready "$target_dir"; then
-    if [ -f "$cli_source/package.json" ] && qp_tunnel_cli_fallback_ready "$cli_source" && wireguard_runtime_ready "$plugin_root"; then
+    if [ -f "$cli_source/package.json" ] && qp_tunnel_cli_fallback_ready "$cli_source" && wireguard_runtime_ready "$plugin_root" && launcher_runtime_ready; then
       local target_version=""
       local source_version=""
       target_version="$(qp_tunnel_cli_fallback_version "$target_dir")"
       source_version="$(qp_tunnel_cli_fallback_version "$cli_source")"
       if [ -n "$source_version" ] && [ "$target_version" != "$source_version" ]; then
         say "refresh mx-launcher qp-tunnel-cli fallback from local electron-plugin package ($target_version -> $source_version)"
-        node server/scripts/site-slot-refresh-tunnel-cli.mjs --from-local "$cli_source"
+        shadow_image_refresh_tunnel_cli_from_local "$target_dir" "$cli_source" "$plugin_root"
       fi
+      return 0
     fi
-    return 0
+    [ "$build_full" = "1" ] || return 0
   fi
-  if [ -f "$cli_source/package.json" ] && qp_tunnel_cli_fallback_ready "$cli_source" && wireguard_runtime_ready "$plugin_root"; then
+  if [ -f "$cli_source/package.json" ] && qp_tunnel_cli_fallback_ready "$cli_source" && wireguard_runtime_ready "$plugin_root" && launcher_runtime_ready; then
     say "refresh mx-launcher qp-tunnel-cli fallback from local electron-plugin package"
-    node server/scripts/site-slot-refresh-tunnel-cli.mjs --from-local "$cli_source"
+    shadow_image_refresh_tunnel_cli_from_local "$target_dir" "$cli_source" "$plugin_root"
     return 0
   fi
   if [ "$build_full" != "1" ]; then
@@ -1228,15 +1280,27 @@ shadow_image_tunnel_cli_fallback() {
       say "install electron-plugin workspace dependencies for qp-tunnel-cli fallback"
       run_pnpm_dir "$plugin_root" install --frozen-lockfile
     fi
+  fi
+  if ! wireguard_runtime_ready "$plugin_root"; then
     say "build WireGuard runtime for qp-tunnel-cli fallback"
     run_pnpm_dir "$plugin_root" --filter @qpjoy/electron-core-wireguard build
+  fi
+  if ! launcher_runtime_ready; then
+    if [ ! -d "$ROOT/node_modules" ]; then
+      say "install mx-launcher workspace dependencies for qp-tunnel-cli fallback"
+      run_pnpm_dir "$ROOT" install --frozen-lockfile
+    fi
+    build_launcher_runtime
+  fi
+  if ! qp_tunnel_cli_fallback_ready "$cli_source"; then
     say "build qp-tunnel-cli fallback dist"
     run_pnpm_dir "$plugin_root" --filter @qpjoy/tunnel-cli build
   fi
   qp_tunnel_cli_fallback_ready "$cli_source" || die "qp-tunnel-cli source dist is missing after build: $cli_source/dist"
   wireguard_runtime_ready "$plugin_root" || die "electron-core-wireguard runtime artifacts are missing after build"
+  launcher_runtime_ready || die "MX Launcher core/standalone runtime artifacts are missing after build"
   say "refresh mx-launcher qp-tunnel-cli fallback from local electron-plugin package"
-  node server/scripts/site-slot-refresh-tunnel-cli.mjs --from-local "$cli_source"
+  shadow_image_refresh_tunnel_cli_from_local "$target_dir" "$cli_source" "$plugin_root"
 }
 
 shadow_image_artifacts() {

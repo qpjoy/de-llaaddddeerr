@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 import { runHdoCli } from './hdo';
+import { runH2iCli } from './h2i';
 
 const args = process.argv.slice(2);
 const packageRoot = resolve(__dirname, '..');
@@ -101,6 +102,8 @@ Usage:
   qp-tunnel-cli client-help
   qp-tunnel-cli k8s preload-images [--image postgres:16-alpine]
   qp-tunnel-cli hdo enroll --server-url https://domestic.example.com --username user
+  qp-tunnel-cli h2i enroll --bootstrap-url https://h2i.example.com --username user
+  qp-tunnel-cli h2i enroll --bootstrap-url https://h2i.example.com --anonymous
   qp-tunnel-cli <mihomo-client command> [options]
   qp-tunnel-cli -- <command> [args...]
   qp-tunnel-cli <command-path> [args...]
@@ -119,6 +122,7 @@ Common commands:
   qp-tunnel-cli k8s preload-images
   qp-tunnel-cli update-subscription
   qp-tunnel-cli hdo status
+  qp-tunnel-cli h2i status
   qp-tunnel-cli uninstall --purge
   qp-tunnel-cli ./electron-server/scripts/manage.sh redeploy
 
@@ -201,7 +205,18 @@ function exitFromSpawn(result: SpawnSyncReturns<Buffer>): never {
 }
 
 function sudoSelf(cliArgs: string[]): never {
-  const result = spawnSync('sudo', ['-E', process.execPath, __filename, ...cliArgs], {
+  const sudoEnvironment = [
+    'H2I_BOOTSTRAP_URL',
+    'MX_H2I_BOOTSTRAP_BASE_URL',
+    'H2I_USERNAME',
+    'H2I_PASSWORD',
+    'H2I_ACCESS_TOKEN',
+    'H2I_USER_ID',
+  ].join(',');
+  const sudoOptions = cliArgs[0] === 'h2i'
+    ? [`--preserve-env=${sudoEnvironment}`]
+    : ['-E'];
+  const result = spawnSync('sudo', [...sudoOptions, process.execPath, __filename, ...cliArgs], {
     stdio: 'inherit',
     env: process.env,
   });
@@ -732,6 +747,12 @@ async function main(): Promise<void> {
   if (command === 'hdo' || command === 'hdo-enroll' || command === 'hdo-refresh') {
     const hdoArgs = command === 'hdo' ? args.slice(1) : [command.replace(/^hdo-/, ''), ...args.slice(1)];
     await runHdoCli(hdoArgs, { isRoot, sudoSelf });
+    return;
+  }
+
+  if (command === 'h2i' || command === 'h2i-enroll') {
+    const h2iArgs = command === 'h2i' ? args.slice(1) : ['enroll', ...args.slice(1)];
+    await runH2iCli(h2iArgs, { isRoot, sudoSelf });
     return;
   }
 

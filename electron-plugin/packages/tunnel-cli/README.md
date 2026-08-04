@@ -1,7 +1,7 @@
 # @qpjoy/tunnel-cli
 
 Global CLI wrapper for the QPJoy Linux `mihomo-client` server script and
-cross-platform headless HDO mesh enrollment.
+headless WireGuard enrollment for legacy HDO V1 and MX H2I V2.
 
 ```bash
 npm i -g @qpjoy/tunnel-cli
@@ -24,7 +24,100 @@ MetaCubeX/mihomo GitHub release. This keeps `npm i -g @qpjoy/tunnel-cli` small
 while avoiding GitHub during bootstrap when the npm registry or a registry mirror
 is reachable first.
 
-## HDO Mesh Enrollment
+## MX H2I V2 Enrollment on Ubuntu
+
+`qp-tunnel-cli h2i` is the native V2 path. It uses the same
+`@qpjoy/mx-launcher-standalone` network session as the standalone Launcher and
+does not call the legacy `electron-server` HDO APIs.
+
+Install the CLI and WireGuard tools on the Ubuntu host:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y wireguard-tools
+sudo npm i -g @qpjoy/tunnel-cli@0.3.0 --force
+```
+
+Account enrollment uses the Domestic HTTPS bootstrap facade. Keep the password
+out of shell history by using an environment variable or a root-readable file:
+
+```bash
+read -rsp 'H2I password: ' H2I_PASSWORD; export H2I_PASSWORD; printf '\n'
+qp-tunnel-cli h2i enroll \
+  --bootstrap-url 'https://h2i.example.com' \
+  --username 'user@example.com'
+unset H2I_PASSWORD
+```
+
+Anonymous enrollment skips OAuth but follows the same V2 lease, snapshot, and
+Domestic peer-sync flow:
+
+```bash
+qp-tunnel-cli h2i enroll \
+  --bootstrap-url 'https://h2i.example.com' \
+  --anonymous
+```
+
+The command re-runs itself through `sudo` while preserving only the H2I
+environment variables when the default root-owned paths are used. It then:
+
+- verifies `/bootstrap-healthz` through the Domestic edge
+- exchanges an Internal local-password account for an `mx-sdk` token, or uses
+  the anonymous lease pool
+- creates/renews a stable standalone launcher-network lease and snapshot
+- saves the WireGuard key and lease capability with mode `0600`; it never saves
+  the password or OAuth access token
+- synchronously appends the same public key and lease `/32` to `mx-domestic`
+- writes `/etc/wireguard/mx-h2i.conf` and enables the dedicated
+  `qpjoy-h2i@mx-h2i.service` unit
+- requires a WireGuard handshake and probes `/healthz` over the snapshot's
+  Internal control IP and service port before reporting success
+
+Useful lifecycle commands:
+
+```bash
+qp-tunnel-cli h2i status
+qp-tunnel-cli h2i down
+```
+
+`down` retains the V2 lease by default so the host can reconnect with the same
+identity. Re-running `h2i enroll` renews the lease and rotates its client-held
+capability while reusing the installation id, device id, and WireGuard key.
+Lease revocation is not exposed yet because the current server release endpoint
+does not remove the corresponding peer from Domestic.
+
+H2I never replaces or trusts the global `wg-quick@.service` template, which may
+still belong to a V1 HDO installation. Each interface owns a concrete unit such
+as `/etc/systemd/system/qpjoy-h2i@mx-h2i.service`; this avoids runtime-path
+conflicts between H2I instances. The CLI refuses to overwrite an unmanaged unit
+or an existing WireGuard config that is not bound to the same H2I state.
+
+The first Linux implementation is intentionally Domestic-relay-only:
+
+```text
+Ubuntu mx-h2i -> Domestic mx-domestic:51280/UDP -> Internal 10.88.88.88
+```
+
+It does not enable the optional client-to-Internal direct/hybrid path. Use
+`--no-start` with explicit `--state-file`, `--config-path`, and `--install-dir`
+to stage and inspect a profile without changing the system. DNS is off by
+default, so enrollment does not replace Ubuntu's resolver. `--dns` explicitly
+adds the Internal DNS server through `wg-quick`; this is global resolver
+integration, not split DNS, and requires `resolvconf`/`openresolv`. Keep the
+default when DNS is managed separately.
+
+When selecting a custom directory, the config basename must still match the
+interface (for example `--interface lab-h2i --config-path /srv/wg/lab-h2i.conf`).
+State, interface, and config locks cover the complete enrollment so concurrent
+renewals cannot race lease capabilities or restart the same kernel interface.
+
+Server-side prerequisites must already be ready: the `mx-h2i` Product Network
+and AppCenter entitlement, an active Domestic WG secret with public endpoint
+and key, an active Domestic Site Slot SSH profile, and a running `mx-domestic`
+interface. Enrollment deliberately fails when Domestic peer sync is blocked;
+receiving a lease alone is not considered connected.
+
+## Legacy HDO V1 Mesh Enrollment
 
 For macOS, Windows, or a headless Linux machine such as an Internal/company
 server, enroll into the HDO mesh without installing Electron:
@@ -104,6 +197,11 @@ Current MVP authentication accepts either username/password or the same bearer
 token used by the HDO API. Production enrollment should move to short-lived
 enrollment tokens and durable service tokens so external systems do not need to
 handle user session JWTs.
+
+Do not combine V1 `hdo --server-url` with a V2 `--internal-url` lease for a
+production H2I connection: the legacy Domestic peer is assigned a `100.89.*`
+address while the V2 lease is `10.*`, so its `AllowedIPs` do not form a valid V2
+path. Use `qp-tunnel-cli h2i enroll` for V2.
 
 ## Server Usage
 

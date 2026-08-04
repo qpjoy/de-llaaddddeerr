@@ -1,7 +1,7 @@
 {
   "name": "@qpjoy/tunnel-cli",
-  "version": "0.2.10",
-  "description": "Global QPJoy Tunnel CLI for mihomo-client and cross-platform HDO mesh enrollment.",
+  "version": "2.0.1",
+  "description": "Global QPJoy Tunnel CLI for mihomo-client, legacy HDO, and MX H2I V2 enrollment.",
   "private": false,
   "type": "commonjs",
   "main": "dist/index.js",
@@ -25,11 +25,13 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "tsc -p tsconfig.json && node scripts/prepare-package.mjs",
     "sync:mx-launcher-fallback": "node scripts/sync-mx-launcher-fallback.mjs",
+    "test": "pnpm build && node --test tests/*.test.cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@qpjoy/electron-core-wireguard": "workspace:^"
+    "@qpjoy/electron-core-wireguard": "workspace:^",
+    "@qpjoy/mx-launcher-standalone": "2.3.15"
   },
   "devDependencies": {
     "@types/node": "^22.10.7"

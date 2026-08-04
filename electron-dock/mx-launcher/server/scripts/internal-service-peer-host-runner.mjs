@@ -174,8 +174,15 @@ function fallbackTunnelCliMarkerPath() {
 
 function fallbackTunnelCliRuntimeReady() {
   return existsSync(fallbackTunnelCliPath())
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'package/package.json'))
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'package/dist/index.js'))
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'package/dist/h2i.js'))
     && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/electron-core-wireguard/package.json'))
-    && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/electron-core-wireguard/dist/index.js'));
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/electron-core-wireguard/dist/index.js'))
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/mx-launcher-core/package.json'))
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/mx-launcher-core/dist/index.js'))
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/mx-launcher-standalone/package.json'))
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/mx-launcher-standalone/dist/index.js'));
 }
 
 function fallbackArchiveFingerprint(archivePath) {
@@ -270,7 +277,7 @@ async function ensureFallbackTunnelCli() {
     }
     chmodFallbackTunnelCliRuntime();
     if (!fallbackTunnelCliRuntimeReady()) {
-      throw new Error(`extracted archive does not contain qp-tunnel-cli plus @qpjoy/electron-core-wireguard under ${fallbackTunnelCliRuntimeDir}`);
+      throw new Error(`extracted archive does not contain the complete H2I runtime (qp-tunnel-cli package.json plus dist/index.js and dist/h2i.js, @qpjoy/electron-core-wireguard, @qpjoy/mx-launcher-core, and @qpjoy/mx-launcher-standalone package/dist) under ${fallbackTunnelCliRuntimeDir}`);
     }
     writeFallbackArchiveMarker(archivePath);
     cachedFallbackTunnelCli = {

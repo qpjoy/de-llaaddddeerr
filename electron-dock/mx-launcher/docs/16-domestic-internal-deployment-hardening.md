@@ -111,8 +111,10 @@ Failed to load @qpjoy/electron-core-wireguard from qp-tunnel-cli
 
 脚本和 host-runner 防线：
 
-- fallback runtime readiness 必须同时检查 `bin/qp-tunnel-cli`、core package
-  `package.json` 和 `dist/index.js`。
+- fallback runtime readiness 必须同时检查 `bin/qp-tunnel-cli`、CLI package 的
+  `package.json` / `dist/index.js` / `dist/h2i.js`，以及
+  `@qpjoy/electron-core-wireguard`、`@qpjoy/mx-launcher-core`、
+  `@qpjoy/mx-launcher-standalone` 各自的 package/dist。
 - archive candidate 应优先使用当前 state/runtime artifact，再回退到项目 artifact，
   最后才考虑 `server/artifacts`，避免旧模板包覆盖新包。
 - UI 的 `wg runtime` 必须展示 `missing / qp-tunnel-cli` 以及真实 module load error。
@@ -190,6 +192,71 @@ ExecStart=/usr/local/lib/qpjoy/hdo/bin/wg-quick up mx-internal-svc
 
 这说明系统 `wg-quick@.service` 仍可能被旧 HDO 路径覆盖。它不是这次 placeholder key 的
 根因，但应作为兼容风险显示在 UI/诊断中。
+
+## Ubuntu H2I V2 CLI 当前契约
+
+Ubuntu 无桌面环境时使用 `qp-tunnel-cli h2i` 接入 V2。它不是 V1 `hdo enroll` 的延伸：
+Internal 持有账号、Product Network lease、snapshot 和配置真相；Domestic 只暴露 HTTPS
+bootstrap facade、同步 relay peer，并承载客户端到 Internal 的 WireGuard 数据面。
+
+离线发布的 `mx-domestic-qp-tunnel-cli-fallback.tar.gz` 必须包含 Node.js CLI 的
+`package/dist/h2i.js`、`@qpjoy/electron-core-wireguard`、`@qpjoy/mx-launcher-core` 和
+`@qpjoy/mx-launcher-standalone` 的 package/dist；运行 H2I 还要求宿主机 Node.js 18 或更新版本。
+缺少这些内容时 host-runner 必须把 archive 判为 not ready，CLI 入口必须给出明确错误，不能把
+Node 16 的运行时 `ReferenceError` 暴露给操作者。非 H2I 的 legacy 命令仍可回退到
+`resources/mihomo-client.sh`。
+
+账号登录使用 Domestic 的 HTTPS bootstrap URL；密码放在环境变量或 root-only 文件中，避免写入
+shell history：
+
+```bash
+read -rsp 'H2I password: ' H2I_PASSWORD; export H2I_PASSWORD; printf '\n'
+qp-tunnel-cli h2i enroll \
+  --bootstrap-url 'https://h2i.example.com' \
+  --username 'user@example.com'
+unset H2I_PASSWORD
+```
+
+匿名接入不走账号 OAuth，但仍由 Internal 分配匿名 lease、生成 snapshot 并同步 Domestic peer：
+
+```bash
+sudo qp-tunnel-cli h2i enroll \
+  --bootstrap-url 'https://h2i.example.com' \
+  --anonymous
+```
+
+首个 Linux V2 实现固定为 relay-only：
+
+```text
+Ubuntu mx-h2i -> Domestic mx-domestic:51280/UDP -> Internal 10.88.88.88
+```
+
+当前不启用 client-to-Internal direct/hybrid 路径。成功不能只以获得 lease 为准；还必须完成
+Domestic peer sync、WireGuard handshake，并能访问 Internal healthz。
+
+H2I 默认不向生成的 WireGuard profile 写入 DNS，也不接管 Ubuntu 的全局 resolver。确实需要
+Internal DNS 时可显式传 `--dns`；当前实现通过 `wg-quick`/`resolvconf` 做全局 resolver 接管，
+不是 split DNS，因此宿主机必须先提供 `resolvconf` 或 `openresolv`。不要把 DNS 接管当作
+enroll 的隐含副作用。
+
+H2I 为每个 interface 写入独立 unit（默认
+`/etc/systemd/system/qpjoy-h2i@mx-h2i.service`），不会读取、覆盖或信任全局
+`wg-quick@.service`。后者可能仍由 V1 HDO 安装指向旧路径；独立 unit 也避免多个 H2I
+interface 的 runtime 路径互相覆盖。CLI 会拒绝覆盖不属于当前 H2I state 的现有 WireGuard
+config；迁移时应先确认并移走旧 config，或者为 H2I 指定独立的 state、config 和 interface。
+自定义 config 目录时，basename 必须仍为 `<interface>.conf`；CLI 会在整个 enroll/down 期间
+同时锁定 state、config 和 Linux interface，避免并发 capability 轮换或同名接口互相 restart。
+
+生命周期命令为：
+
+```bash
+sudo qp-tunnel-cli h2i status
+sudo qp-tunnel-cli h2i down
+```
+
+`h2i down` 只停止本地隧道并保留 lease，方便同一 installation/device/WireGuard identity 重连。
+当前不得提供或调用 lease release：只有 Internal release 与 Domestic peer 删除成为同一个原子边界
+后，才可以开放释放能力，否则会留下可路由的陈旧 peer。
 
 ## 下一次部署检查清单
 

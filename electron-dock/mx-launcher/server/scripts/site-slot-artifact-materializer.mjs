@@ -184,7 +184,7 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
     die(`Missing required artifact source: ${join(sourceRoot, 'package.json')}`);
   }
   const packageJson = JSON.parse(readFileSync(join(sourceRoot, 'package.json'), 'utf8'));
-  const fullFallbackReady = tunnelCliFullFallbackReady(sourceRoot) && wireGuardRuntimeReady();
+  const fullFallbackReady = tunnelCliFullFallbackReady(sourceRoot) && tunnelCliRuntimeReady();
   const allowDegraded = process.env.MX_SITE_SLOT_ALLOW_DEGRADED_QP_TUNNEL_CLI !== '0';
   if (!fullFallbackReady && !allowDegraded) {
     die(`Missing required qp-tunnel-cli fallback dist or WireGuard runtime. Re-run after refreshing ${sourceRoot}, or set MX_SITE_SLOT_ALLOW_DEGRADED_QP_TUNNEL_CLI=1 for server-safe materialization.`);
@@ -193,6 +193,7 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
     artifactRoot,
     moduleId: 'qp-tunnel-cli',
     artifactName: 'mx-domestic-qp-tunnel-cli-fallback.tar.gz',
+    rootOwnedArchive: true,
     targetPath: '/opt/mx/current/qp-tunnel-cli',
     status: 'ready',
     metadata: {
@@ -201,7 +202,7 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
       npmInstallCommand: 'npm i -g @qpjoy/tunnel-cli@latest --force',
       refreshCommand: 'bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest | bash scripts/manage.sh ops site-slot refresh-tunnel-cli --from-tarball <tgz>',
       fallbackMode: fullFallbackReady
-        ? 'node-capable-qp-tunnel-cli-with-electron-core-wireguard'
+        ? 'node-capable-qp-tunnel-cli-with-launcher-standalone-and-electron-core-wireguard'
         : 'server-safe-mihomo-shell-fallback-without-electron-plugin-build',
       bootstrapMode: 'Internal-pushed no-node/no-outbound first'
     },
@@ -219,8 +220,10 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
         copyOptional(sourceRoot, join(staging, 'package'), [
           'dist/index.js',
           'dist/hdo.js',
+          'dist/h2i.js',
           'dist/index.d.ts',
-          'dist/hdo.d.ts'
+          'dist/hdo.d.ts',
+          'dist/h2i.d.ts'
         ]);
       }
       const binDir = join(staging, 'bin');
@@ -229,8 +232,32 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
         '#!/usr/bin/env sh',
         'set -eu',
         'ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"',
-        'if command -v node >/dev/null 2>&1 && [ -f "$ROOT/package/dist/index.js" ]; then',
-        '  exec node "$ROOT/package/dist/index.js" "$@"',
+        'NODE_CLI="$ROOT/package/dist/index.js"',
+        'H2I_COMMAND=0',
+        'case "${1:-}" in',
+        '  h2i|h2i-enroll) H2I_COMMAND=1 ;;',
+        'esac',
+        'if [ -f "$NODE_CLI" ] && command -v node >/dev/null 2>&1; then',
+        '  NODE_MAJOR="$(node -p \'process.versions.node.split(".")[0]\' 2>/dev/null || true)"',
+        '  case "$NODE_MAJOR" in',
+        '    \'\'|*[!0-9]*) NODE_MAJOR=0 ;;',
+        '  esac',
+        '  if [ "$NODE_MAJOR" -ge 18 ]; then',
+        '    exec node "$NODE_CLI" "$@"',
+        '  fi',
+        '  if [ "$H2I_COMMAND" -eq 1 ]; then',
+        '    NODE_VERSION="$(node --version 2>/dev/null || echo unknown)"',
+        '    echo "qp-tunnel-cli h2i requires Node.js 18 or newer; found $NODE_VERSION." >&2',
+        '    exit 1',
+        '  fi',
+        'fi',
+        'if [ "$H2I_COMMAND" -eq 1 ]; then',
+        '  if [ ! -f "$NODE_CLI" ]; then',
+        '    echo "qp-tunnel-cli h2i requires the packaged Node CLI runtime ($NODE_CLI), but it is missing." >&2',
+        '  else',
+        '    echo "qp-tunnel-cli h2i requires Node.js 18 or newer, but node was not found on PATH." >&2',
+        '  fi',
+        '  exit 1',
         'fi',
         'exec "$ROOT/package/resources/mihomo-client.sh" "$@"',
         ''
@@ -246,18 +273,36 @@ function tunnelCliFullFallbackReady(sourceRoot) {
   return [
     'dist/index.js',
     'dist/hdo.js',
+    'dist/h2i.js',
     'dist/index.d.ts',
-    'dist/hdo.d.ts'
+    'dist/hdo.d.ts',
+    'dist/h2i.d.ts'
   ].every((file) => existsSync(join(sourceRoot, file)));
 }
 
-function wireGuardRuntimeReady() {
+function tunnelCliRuntimeReady() {
   const electronPluginRoot = resolve(mxRoot, '../../electron-plugin');
   const coreSource = join(electronPluginRoot, 'packages/electron-core-wireguard');
-  if (!existsSync(join(coreSource, 'package.json')) || !existsSync(join(coreSource, 'dist'))) return false;
-  return ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64'].every((engine) => {
+  const packageRuntimeFiles = ['package.json', 'README.md', 'dist/index.js', 'dist/index.d.ts'];
+  if (!packageRuntimeFiles.every((file) => existsSync(join(coreSource, file)))) return false;
+  for (const packageName of ['launcher-core', 'launcher-standalone']) {
+    const packageRoot = join(mxRoot, 'packages', packageName);
+    if (!packageRuntimeFiles.every((file) => existsSync(join(packageRoot, file)))) return false;
+  }
+  const engineRuntimeFiles = {
+    'darwin-arm64': ['wg', 'wireguard-go'],
+    'darwin-x64': ['wg', 'wireguard-go'],
+    'linux-arm64': ['wg', 'wg-quick'],
+    'linux-x64': ['wg', 'wg-quick'],
+    'win32-x64': ['wg.exe', 'wireguard.exe']
+  };
+  return Object.entries(engineRuntimeFiles).every(([engine, binaries]) => {
     const engineSource = join(electronPluginRoot, `packages/wireguard-engines/${engine}`);
-    return existsSync(join(engineSource, 'package.json')) && existsSync(join(engineSource, 'resources'));
+    return [
+      'package.json',
+      'README.md',
+      ...binaries.map((binary) => `resources/wireguard/${engine}/${binary}`)
+    ].every((file) => existsSync(join(engineSource, file)));
   });
 }
 
@@ -275,6 +320,18 @@ function copyTunnelCliRuntimeDependencies(staging, options = {}) {
     'README.md',
     'dist'
   ], { allowMissing });
+  for (const packageName of ['launcher-core', 'launcher-standalone']) {
+    const packageSource = join(mxRoot, 'packages', packageName);
+    if (!existsSync(join(packageSource, 'package.json'))) {
+      if (allowMissing) continue;
+      die(`Missing required MX Launcher runtime package: ${packageSource}`);
+    }
+    copyPackageRuntime(packageSource, join(targetScope, `mx-${packageName}`), [
+      'package.json',
+      'README.md',
+      'dist'
+    ], { allowMissing });
+  }
   for (const engine of ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64']) {
     const engineSource = join(electronPluginRoot, `packages/wireguard-engines/${engine}`);
     if (!existsSync(join(engineSource, 'package.json'))) {
@@ -1375,14 +1432,21 @@ function createPlaceholderServicesTar({ artifactRoot, kind, artifactName, target
   });
 }
 
-function createTarModule({ artifactRoot, moduleId, artifactName, targetPath, status, metadata = {}, notes, buildStaging }) {
+function createTarModule({ artifactRoot, moduleId, artifactName, targetPath, status, metadata = {}, notes, rootOwnedArchive = false, buildStaging }) {
   const staging = join(artifactRoot, '.staging', moduleId);
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
   buildStaging(staging);
 
   const artifactPath = join(artifactRoot, artifactName);
-  execFileSync('tar', ['-czf', artifactPath, '-C', staging, '.'], {
+  execFileSync('tar', [
+    '-czf',
+    artifactPath,
+    ...(rootOwnedArchive ? rootOwnedTarArgs() : []),
+    '-C',
+    staging,
+    '.'
+  ], {
     env: { ...process.env, LC_ALL: 'C', LANG: 'C' }
   });
   const files = listRelativeFiles(staging);
@@ -1399,6 +1463,18 @@ function createTarModule({ artifactRoot, moduleId, artifactName, targetPath, sta
     files,
     notes
   };
+}
+
+function rootOwnedTarArgs() {
+  const version = execFileSync('tar', ['--version'], {
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C', LANG: 'C' }
+  });
+  if (/bsdtar/i.test(version)) {
+    return ['--uid', '0', '--gid', '0', '--uname', 'root', '--gname', 'root'];
+  }
+  if (/GNU tar/i.test(version)) return ['--owner=0', '--group=0'];
+  die(`Unsupported tar implementation for root-owned qp-tunnel-cli archive: ${version.trim()}`);
 }
 
 function writeManifest(kindValue, artifactRoot, modules) {
