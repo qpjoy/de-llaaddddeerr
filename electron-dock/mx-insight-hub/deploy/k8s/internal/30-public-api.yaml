@@ -19,12 +19,11 @@ metadata:
   name: mx-insight-hub-public
   namespace: mx-insight-hub
 spec:
-  replicas: 2
+  # hostNetwork binds a fixed host port, so at most one replica can run per node
+  # and a rolling surge pod would collide on that port. Single node + Recreate.
+  replicas: 1
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: mx-insight-hub-public
@@ -35,6 +34,11 @@ spec:
         app.kubernetes.io/part-of: mx-insight-hub
         mx-insight-hub.io/plane: public
     spec:
+      # Share the host network namespace so the API reaches host-local Night-All at
+      # 127.0.0.1:13141 and binds directly on the host (10.88.88.88:18150).
+      # ClusterFirstWithHostNet keeps cluster DNS for the Postgres Service FQDN.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: mx-insight-hub
       automountServiceAccountToken: false
       tolerations:

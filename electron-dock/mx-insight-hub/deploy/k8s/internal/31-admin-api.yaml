@@ -19,9 +19,11 @@ metadata:
   name: mx-insight-hub-admin
   namespace: mx-insight-hub
 spec:
+  # hostNetwork binds a fixed host port, so a rolling surge pod would collide on
+  # that port. Single replica + Recreate.
   replicas: 1
   strategy:
-    type: RollingUpdate
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: mx-insight-hub-admin
@@ -32,6 +34,11 @@ spec:
         app.kubernetes.io/part-of: mx-insight-hub
         mx-insight-hub.io/plane: admin
     spec:
+      # Share the host network namespace so the Admin API reaches host-local
+      # Night-All at 127.0.0.1:13141 and binds directly on the host
+      # (10.88.88.88:18151). ClusterFirstWithHostNet keeps cluster DNS for Postgres.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: mx-insight-hub
       automountServiceAccountToken: false
       tolerations:

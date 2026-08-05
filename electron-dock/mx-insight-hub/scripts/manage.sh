@@ -281,7 +281,12 @@ require_production_env() {
   : "${MX_INSIGHT_ADMIN_TOKEN:?MX_INSIGHT_ADMIN_TOKEN is required in .env.internal or the environment}"
   : "${MX_INSIGHT_API_KEY_PEPPER:?MX_INSIGHT_API_KEY_PEPPER is required in .env.internal or the environment}"
   : "${MX_INSIGHT_POSTGRES_PASSWORD:?MX_INSIGHT_POSTGRES_PASSWORD is required in .env.internal or the environment}"
-  : "${NIGHT_ALL_BASE_URL:?NIGHT_ALL_BASE_URL is required in .env.internal or the environment}"
+  # hostNetwork overlay: the API pods share the host netns, so the default reaches
+  # host-local Night-All (127.0.0.1:13141) with no Night-All bind change required.
+  NIGHT_ALL_BASE_URL="${NIGHT_ALL_BASE_URL:-http://127.0.0.1:13141}"
+  # The Admin plane is now host-exposed; default the optional Launcher-integration
+  # entrypoint to it (only consumed when MX_INSIGHT_SYNC_LAUNCHER=1).
+  MX_INSIGHT_HUB_ADMIN_ENTRYPOINT="${MX_INSIGHT_HUB_ADMIN_ENTRYPOINT:-http://10.88.88.88:18151}"
   [ "${#MX_INSIGHT_ADMIN_TOKEN}" -ge 32 ] || die "MX_INSIGHT_ADMIN_TOKEN must be at least 32 characters"
   [ "${#MX_INSIGHT_API_KEY_PEPPER}" -ge 32 ] || die "MX_INSIGHT_API_KEY_PEPPER must be at least 32 characters"
   [ "${#MX_INSIGHT_POSTGRES_PASSWORD}" -ge 24 ] || die "MX_INSIGHT_POSTGRES_PASSWORD must be at least 24 characters"
@@ -735,21 +740,82 @@ apply_k8s() {
 }
 
 k8s_smoke() {
-  local namespace="mx-insight-hub"
-  local port="${MX_INSIGHT_SMOKE_PORT:-28151}"
-  local log_path="${DEPLOY_TMP_DIR}/port-forward.log"
-  kubectl -n "$namespace" port-forward service/mx-insight-hub-admin "${port}:18151" >"$log_path" 2>&1 &
-  DEPLOY_PORT_FORWARD_PID=$!
-  if ! wait_http "http://127.0.0.1:${port}/health/live" 30; then
-    sed -n '1,120p' "$log_path" >&2 || true
-    die "Admin port-forward did not become ready"
-  fi
-  MX_SMOKE_BASE_URL="http://127.0.0.1:${port}" \
+  # The Admin and Public planes are host-exposed via hostNetwork, and deploy runs
+  # on the Internal host, so reach them directly on loopback (no port-forward).
+  local admin_base="http://127.0.0.1:18151"
+  local public_base="http://127.0.0.1:18150"
+  wait_http "${admin_base}/health/live" 90 \
+    || die "Admin API not reachable on the host at ${admin_base} (hostNetwork bind failed?)"
+  wait_http "${public_base}/health/live" 90 \
+    || die "Public API not reachable on the host at ${public_base} (hostNetwork bind failed?)"
+  MX_SMOKE_BASE_URL="$admin_base" \
   MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN" \
     node "${ROOT_DIR}/scripts/smoke.mjs"
-  kill "$DEPLOY_PORT_FORWARD_PID" >/dev/null 2>&1 || true
-  wait "$DEPLOY_PORT_FORWARD_PID" 2>/dev/null || true
-  DEPLOY_PORT_FORWARD_PID=""
+}
+
+# Idempotently guarantee a usable public API key after deploy. The plaintext key
+# is stored in the mx-insight-hub-bootstrap Secret and reused on later deploys, so
+# no manual admin call is needed to start pulling platform data. Best-effort: a
+# provisioning failure warns but never fails the deploy.
+ensure_default_api_key() {
+  local namespace="mx-insight-hub"
+  local admin_base="http://127.0.0.1:18151"
+  need base64
+  BOOTSTRAP_API_KEY="$(
+    kubectl -n "$namespace" get secret mx-insight-hub-bootstrap \
+      -o jsonpath='{.data.MX_INSIGHT_API_KEY}' --ignore-not-found 2>/dev/null \
+      | base64 -d 2>/dev/null || true
+  )"
+  if [ -n "$BOOTSTRAP_API_KEY" ]; then
+    say "Reusing stored bootstrap API key (Secret mx-insight-hub-bootstrap)."
+    return 0
+  fi
+  say "Provisioning a bootstrap tenant/consumer/API key via the Admin API."
+  local provision_out
+  if ! provision_out="$(
+    MX_INSIGHT_ADMIN_BASE_URL="$admin_base" \
+    MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN" \
+    NIGHT_ALL_BASE_URL="$NIGHT_ALL_BASE_URL" \
+    NIGHT_ALL_SERVICE_TOKEN="${NIGHT_ALL_SERVICE_TOKEN:-}" \
+    MX_INSIGHT_BOOTSTRAP_PLATFORMS="${MX_INSIGHT_BOOTSTRAP_PLATFORMS:-}" \
+      node "${ROOT_DIR}/scripts/provision.mjs"
+  )"; then
+    say "WARNING: bootstrap API-key provisioning failed. The Hub is up; create a key via the Admin API when Night-All access is needed."
+    BOOTSTRAP_API_KEY=""
+    return 0
+  fi
+  BOOTSTRAP_API_KEY="$(printf '%s\n' "$provision_out" | sed -n '1p')"
+  local tenant_id consumer_id
+  tenant_id="$(printf '%s\n' "$provision_out" | sed -n '2p')"
+  consumer_id="$(printf '%s\n' "$provision_out" | sed -n '3p')"
+  kubectl -n "$namespace" create secret generic mx-insight-hub-bootstrap \
+    --from-literal=MX_INSIGHT_API_KEY="$BOOTSTRAP_API_KEY" \
+    --from-literal=MX_INSIGHT_TENANT_ID="$tenant_id" \
+    --from-literal=MX_INSIGHT_CONSUMER_ID="$consumer_id" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  say "Stored bootstrap API key in Secret mx-insight-hub-bootstrap."
+}
+
+print_deploy_summary() {
+  local host_ip="${MX_INSIGHT_HOST_IP:-10.88.88.88}"
+  say "==================== MX Insight Hub is live ===================="
+  say "Admin  : http://${host_ip}:18151/            (SPA + /internal/v1/admin/*; header x-mx-insight-admin-token)"
+  say "Public : http://${host_ip}:18150/api/v1/...  (Authorization: Bearer <API key>)"
+  say "Night-All upstream: ${NIGHT_ALL_BASE_URL} (reached via the hostNetwork overlay)"
+  if [ -n "${BOOTSTRAP_API_KEY:-}" ]; then
+    say "Bootstrap API key : ${BOOTSTRAP_API_KEY}"
+    say "Quick check       : curl -H \"authorization: Bearer ${BOOTSTRAP_API_KEY}\" http://${host_ip}:18150/api/v1/data/capabilities"
+    # capabilities calls Night-All and validates the key; a 200 proves the whole
+    # public → Hub → Night-All path works (independent of per-platform grants).
+    if curl -fsS -H "authorization: Bearer ${BOOTSTRAP_API_KEY}" \
+         "http://127.0.0.1:18150/api/v1/data/capabilities" >/dev/null 2>&1; then
+      say "Night-All data path: OK (capabilities returned through the Hub)."
+    else
+      say "Night-All data path: NOT verified (Hub is up; Night-All at ${NIGHT_ALL_BASE_URL} may be down)."
+    fi
+  fi
+  say "SECURITY: hostNetwork binds :18150/:18151 on all host interfaces. Firewall them to the internal net until the public Nginx front is in place."
+  say "==============================================================="
 }
 
 ops_action() {
@@ -774,7 +840,9 @@ ops_action() {
       build_and_import_image
       apply_k8s
       k8s_smoke
-      say "Internal production deploy OK. Public and Admin Services remain separate."
+      ensure_default_api_key
+      print_deploy_summary
+      say "Internal production deploy OK."
       ;;
     apply)
       require_production_env
@@ -785,6 +853,8 @@ ops_action() {
       acquire_deploy_lock
       apply_k8s
       k8s_smoke
+      ensure_default_api_key
+      print_deploy_summary
       ;;
     status)
       kubectl -n mx-insight-hub get pods,services,pvc,jobs
