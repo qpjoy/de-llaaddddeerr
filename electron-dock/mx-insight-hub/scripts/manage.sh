@@ -493,13 +493,16 @@ ensure_build_proxy_builder() {
   docker buildx version >/dev/null 2>&1 \
     || die "MX_INSIGHT_BUILD_PROXY requires 'docker buildx' (Docker with the buildx plugin)."
   if ! docker buildx inspect "$name" >/dev/null 2>&1; then
+    local no_proxy="${MX_INSIGHT_BUILD_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}"
     say "Creating one-off buildx builder '$name' routed via ${proxy} (Docker daemon proxy left untouched)."
+    # --driver-opt values are parsed as CSV, so a comma-bearing NO_PROXY must be
+    # wrapped in embedded double quotes or buildx splits it on the commas.
     docker buildx create --name "$name" \
       --driver docker-container \
       --driver-opt network=host \
       --driver-opt "env.HTTP_PROXY=${proxy}" \
       --driver-opt "env.HTTPS_PROXY=${proxy}" \
-      --driver-opt "env.NO_PROXY=${MX_INSIGHT_BUILD_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}" \
+      --driver-opt "env.NO_PROXY=\"${no_proxy}\"" \
       --buildkitd-flags '--allow-insecure-entitlement network.host' >/dev/null
   fi
 }

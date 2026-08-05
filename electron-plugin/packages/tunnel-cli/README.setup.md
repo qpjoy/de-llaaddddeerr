@@ -82,4 +82,7 @@ qp-tunnel-cli h2i enroll \
 # wg show mx-h2i
 # systemctl is-enabled qpjoy-h2i@mx-h2i.service
 # systemctl status qpjoy-h2i@mx-h2i.service --no-pager
+
+
+git -c http.proxy=http://127.0.0.1:7788 -c https.proxy=http://127.0.0.1:7788 pull
 ```
