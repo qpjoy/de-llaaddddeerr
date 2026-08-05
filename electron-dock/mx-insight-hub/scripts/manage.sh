@@ -483,6 +483,27 @@ ensure_k8s_runtime_image() {
   containerd_import_docker_image "$image"
 }
 
+# Opt-in: create (once) a scoped buildx builder that routes image pulls AND RUN
+# steps through MX_INSIGHT_BUILD_PROXY, WITHOUT touching the Docker daemon's own
+# proxy. Host network lets it reach a 127.0.0.1 proxy; the network.host
+# entitlement lets RUN steps reach it too. Idempotent.
+ensure_build_proxy_builder() {
+  local proxy="$1"
+  local name="${MX_INSIGHT_BUILDX_BUILDER:-mx-insight-buildproxy}"
+  docker buildx version >/dev/null 2>&1 \
+    || die "MX_INSIGHT_BUILD_PROXY requires 'docker buildx' (Docker with the buildx plugin)."
+  if ! docker buildx inspect "$name" >/dev/null 2>&1; then
+    say "Creating one-off buildx builder '$name' routed via ${proxy} (Docker daemon proxy left untouched)."
+    docker buildx create --name "$name" \
+      --driver docker-container \
+      --driver-opt network=host \
+      --driver-opt "env.HTTP_PROXY=${proxy}" \
+      --driver-opt "env.HTTPS_PROXY=${proxy}" \
+      --driver-opt "env.NO_PROXY=${MX_INSIGHT_BUILD_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}" \
+      --buildkitd-flags '--allow-insecure-entitlement network.host' >/dev/null
+  fi
+}
+
 build_and_import_image() {
   local image="${MX_INSIGHT_IMAGE:-mx-insight-hub:shadow}"
   need docker
@@ -490,15 +511,35 @@ build_and_import_image() {
   DEPLOY_PREVIOUS_DOCKER_IMAGE_ID="$(
     docker image inspect --format '{{.Id}}' "$image" 2>/dev/null || true
   )"
-  docker build \
-    --rm \
-    --force-rm \
-    --label dev.qpjoy.mx-insight-hub.project=mx-insight-hub \
-    --label dev.qpjoy.mx-insight-hub.image=internal \
-    --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \
-    -t "$image" \
-    -f "${ROOT_DIR}/Dockerfile" \
-    "$ROOT_DIR"
+  if [ -n "${MX_INSIGHT_BUILD_PROXY:-}" ]; then
+    # Special case: force THIS build through the given proxy (e.g. Mihomo 7788),
+    # leaving the server's global Docker proxy untouched.
+    ensure_build_proxy_builder "$MX_INSIGHT_BUILD_PROXY"
+    docker buildx build \
+      --builder "${MX_INSIGHT_BUILDX_BUILDER:-mx-insight-buildproxy}" \
+      --network host \
+      --allow network.host \
+      --build-arg "HTTP_PROXY=$MX_INSIGHT_BUILD_PROXY" \
+      --build-arg "HTTPS_PROXY=$MX_INSIGHT_BUILD_PROXY" \
+      --build-arg "NO_PROXY=${MX_INSIGHT_BUILD_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}" \
+      --label dev.qpjoy.mx-insight-hub.project=mx-insight-hub \
+      --label dev.qpjoy.mx-insight-hub.image=internal \
+      --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \
+      -t "$image" \
+      -f "${ROOT_DIR}/Dockerfile" \
+      --load \
+      "$ROOT_DIR"
+  else
+    docker build \
+      --rm \
+      --force-rm \
+      --label dev.qpjoy.mx-insight-hub.project=mx-insight-hub \
+      --label dev.qpjoy.mx-insight-hub.image=internal \
+      --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \
+      -t "$image" \
+      -f "${ROOT_DIR}/Dockerfile" \
+      "$ROOT_DIR"
+  fi
   DEPLOY_DOCKER_IMAGE="$image"
   DEPLOY_DOCKER_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$image")"
   containerd_import_docker_image "$image"
