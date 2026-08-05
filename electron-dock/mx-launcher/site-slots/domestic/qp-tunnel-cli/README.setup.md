@@ -85,4 +85,7 @@ qp-tunnel-cli h2i enroll \
 
 
 git -c http.proxy=http://127.0.0.1:7788 -c https.proxy=http://127.0.0.1:7788 pull
+
+# docker拿到代理
+systemctl show docker --property=Environment | tr ' ' '\n' | grep -i proxy
 ```

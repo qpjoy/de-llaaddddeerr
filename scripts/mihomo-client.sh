@@ -1250,9 +1250,13 @@ docker_build_proxy_on_command() {
 	backup="${daemon_json}.qp-build-proxy.bak"
 
 	# 1. Proxy drop-in for docker.service ONLY, so containerd/k8s are not bounced.
+	#    Name it to sort LAST so it overrides any pre-existing default-proxy drop-in:
+	#    systemd applies drop-ins in filename order and the last assignment of a
+	#    variable wins, and Go/dockerd reads the upper-case HTTPS_PROXY first.
 	dir="$(service_dropin_dir docker.service)"
-	file="${dir}/${MIHOMO_DOCKER_BUILD_PROXY_DROPIN:-mihomo-build-proxy.conf}"
+	file="${dir}/${MIHOMO_DOCKER_BUILD_PROXY_DROPIN:-zzz-qp-tunnel-docker-build-proxy.conf}"
 	mkdir -p "$dir"
+	rm -f "${dir}/mihomo-build-proxy.conf"
 	cat > "$file" <<EOF
 [Service]
 Environment="HTTP_PROXY=http://127.0.0.1:$port"
@@ -1290,8 +1294,8 @@ docker_build_proxy_off_command() {
 	backup="${daemon_json}.qp-build-proxy.bak"
 
 	dir="$(service_dropin_dir docker.service)"
-	file="${dir}/${MIHOMO_DOCKER_BUILD_PROXY_DROPIN:-mihomo-build-proxy.conf}"
-	rm -f "$file"
+	file="${dir}/${MIHOMO_DOCKER_BUILD_PROXY_DROPIN:-zzz-qp-tunnel-docker-build-proxy.conf}"
+	rm -f "$file" "${dir}/mihomo-build-proxy.conf"
 	if [[ -d "$dir" ]] && [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
 		rmdir "$dir" 2>/dev/null || true
 	fi
