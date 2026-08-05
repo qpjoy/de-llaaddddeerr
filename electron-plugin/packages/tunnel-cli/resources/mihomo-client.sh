@@ -72,6 +72,7 @@ Commands:
   daemon-proxy-off     Remove daemon proxy overrides
   docker-proxy-on      Backward-compatible alias for daemon-proxy-on
   docker-proxy-off     Backward-compatible alias for daemon-proxy-off
+  docker-build-proxy   Route docker image builds via the Mihomo proxy: 'on' proxies docker.service and disables registry-mirrors, 'off' restores. Usage: docker-build-proxy on|off
   run                  Run one command with Mihomo proxy env injected
   test                 Test outbound access through the local mixed-port
   print-env            Print proxy env exports for the current local mixed-port
@@ -1220,6 +1221,91 @@ daemon_proxy_off_command() {
 	echo "Daemon proxy disabled."
 }
 
+docker_build_proxy_strip_registry_mirrors() {
+	# Print $1 (a daemon.json) to stdout with the "registry-mirrors" key removed.
+	local input="$1"
+	if command -v jq >/dev/null 2>&1; then
+		jq 'del(.["registry-mirrors"])' "$input"
+	elif command -v python3 >/dev/null 2>&1; then
+		python3 - "$input" <<'PY'
+import json, sys
+with open(sys.argv[1]) as handle:
+    data = json.load(handle)
+if isinstance(data, dict):
+    data.pop("registry-mirrors", None)
+json.dump(data, sys.stdout, indent=2, ensure_ascii=False)
+sys.stdout.write("\n")
+PY
+	else
+		return 1
+	fi
+}
+
+docker_build_proxy_on_command() {
+	require_cmd systemctl
+	local port dir file daemon_json backup tmp
+	port="$(mixed_port_from_config)"
+	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
+	daemon_json="${MIHOMO_DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
+	backup="${daemon_json}.qp-build-proxy.bak"
+
+	# 1. Proxy drop-in for docker.service ONLY, so containerd/k8s are not bounced.
+	dir="$(service_dropin_dir docker.service)"
+	file="${dir}/${MIHOMO_DOCKER_BUILD_PROXY_DROPIN:-mihomo-build-proxy.conf}"
+	mkdir -p "$dir"
+	cat > "$file" <<EOF
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:$port"
+Environment="HTTPS_PROXY=http://127.0.0.1:$port"
+Environment="NO_PROXY=$MIHOMO_NO_PROXY"
+Environment="http_proxy=http://127.0.0.1:$port"
+Environment="https_proxy=http://127.0.0.1:$port"
+Environment="no_proxy=$MIHOMO_NO_PROXY"
+EOF
+
+	# 2. Disable registry-mirrors so docker.io resolves directly through the proxy
+	#    instead of hitting China mirrors that get dragged oversea and time out.
+	if [[ -f "$daemon_json" ]]; then
+		[[ -f "$backup" ]] || cp "$daemon_json" "$backup"
+		tmp="$(mktemp)"
+		if docker_build_proxy_strip_registry_mirrors "$daemon_json" > "$tmp" && [[ -s "$tmp" ]]; then
+			mv "$tmp" "$daemon_json"
+			log "Disabled registry-mirrors in $daemon_json (backup: $backup)."
+		else
+			rm -f "$tmp"
+			die "Could not edit $daemon_json; install jq or python3, or remove registry-mirrors manually."
+		fi
+	fi
+
+	systemd_reload
+	systemctl restart docker.service
+	echo "docker-build-proxy ON: docker.service pulls images via http://127.0.0.1:$port; registry-mirrors disabled."
+	echo "Note: build RUN steps (npm/pip/...) still need a reachable registry (e.g. a China mirror). Undo with: docker-build-proxy off"
+}
+
+docker_build_proxy_off_command() {
+	require_cmd systemctl
+	local dir file daemon_json backup
+	daemon_json="${MIHOMO_DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
+	backup="${daemon_json}.qp-build-proxy.bak"
+
+	dir="$(service_dropin_dir docker.service)"
+	file="${dir}/${MIHOMO_DOCKER_BUILD_PROXY_DROPIN:-mihomo-build-proxy.conf}"
+	rm -f "$file"
+	if [[ -d "$dir" ]] && [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
+		rmdir "$dir" 2>/dev/null || true
+	fi
+
+	if [[ -f "$backup" ]]; then
+		mv "$backup" "$daemon_json"
+		log "Restored $daemon_json from backup (registry-mirrors back)."
+	fi
+
+	systemd_reload
+	systemctl restart docker.service
+	echo "docker-build-proxy OFF: docker.service proxy drop-in removed and registry-mirrors restored."
+}
+
 tun_on_command() {
 	write_tun_overlay
 	render_runtime_config
@@ -1590,6 +1676,13 @@ main() {
 		;;
 		docker-proxy-off)
 			daemon_proxy_off_command
+		;;
+		docker-build-proxy)
+			case "${1:-}" in
+				on) docker_build_proxy_on_command ;;
+				off) docker_build_proxy_off_command ;;
+				*) die "Usage: docker-build-proxy on|off" ;;
+			esac
 		;;
 		run)
 			run_command "$@"

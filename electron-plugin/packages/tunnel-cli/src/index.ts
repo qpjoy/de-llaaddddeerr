@@ -86,6 +86,7 @@ const clientCommands = new Set([
   'daemon-proxy-off',
   'docker-proxy-on',
   'docker-proxy-off',
+  'docker-build-proxy',
   'run',
   'test',
   'print-env',
@@ -116,6 +117,8 @@ Common commands:
   qp-tunnel-cli start
   qp-tunnel-cli egress-on
   qp-tunnel-cli egress-off
+  qp-tunnel-cli docker-build-proxy on
+  qp-tunnel-cli docker-build-proxy off
   qp-tunnel-cli tun-on
   MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS=203.0.113.10/32 sudo -E qp-tunnel-cli tun-on
   qp-tunnel-cli tun-off
