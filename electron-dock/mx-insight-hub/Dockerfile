@@ -1,20 +1,24 @@
 # syntax=docker/dockerfile:1.7
 FROM node:22-bookworm-slim AS build
+# Default to the China npm mirror so the build needs no oversea proxy.
+# Override with --build-arg NPM_REGISTRY=https://registry.npmjs.org if desired.
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 
 WORKDIR /workspace/mx-insight-hub
 COPY --from=ui_design package.json /workspace/mx-launcher/ui-design/package.json
 COPY --from=ui_design scripts /workspace/mx-launcher/ui-design/scripts
 COPY --from=ui_design src /workspace/mx-launcher/ui-design/src
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --registry="$NPM_REGISTRY"
 COPY . ./
 RUN npm run build
 
 FROM node:22-bookworm-slim AS production-dependencies
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev --registry="$NPM_REGISTRY" && npm cache clean --force
 
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production \
