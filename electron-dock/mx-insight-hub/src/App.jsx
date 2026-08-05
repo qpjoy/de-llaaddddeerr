@@ -88,7 +88,7 @@ function SessionGate({ checking, message, onAuthenticate }) {
     <div className="qp-app qp-theme-neon-void qp-density--medium mih-auth">
       <section className="qp-panel qp-panel--elevated mih-auth-card" aria-labelledby="mih-auth-title">
         <div className="mih-auth-brand">
-          <img src="/assets/mx-insight-logo-mark.png" alt="" />
+          <img src="assets/mx-insight-logo-mark.png" alt="" />
           <div>
             <span>MX DATA CONTROL PLANE</span>
             <strong>MX Insight Hub</strong>
@@ -267,7 +267,7 @@ export function App() {
       <button className="mih-nav-backdrop" type="button" aria-label="关闭导航" onClick={() => setMenuOpen(false)} />
       <aside className="qp-sidebar qp-scrollbar mih-sidebar" aria-label="MX Insight Hub">
         <a className="mih-brand" href="#/dashboard" onClick={() => setMenuOpen(false)}>
-          <img src="/assets/mx-insight-logo-mark.png" alt="" />
+          <img src="assets/mx-insight-logo-mark.png" alt="" />
           <span><strong>MX Insight Hub</strong><small>Data gateway control plane</small></span>
         </a>
         <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} />
