@@ -55,3 +55,34 @@ sudo qp-tunnel-cli tun-off
 
 qp-tunnel-cli k8s preload-images --from-cluster
 ```
+
+# V2 enroll
+```bash
+# 用户密码
+unset H2I_ACCESS_TOKEN H2I_USER_ID
+
+read -rsp 'H2I password: ' H2I_PASSWORD
+export H2I_PASSWORD
+printf '\n'
+
+qp-tunnel-cli h2i enroll \
+  --bootstrap-url https://h2i.www.com \
+  --username '你的用户名'
+
+unset H2I_PASSWORD
+
+# 访客登录
+# --anonymous
+unset H2I_USERNAME H2I_PASSWORD H2I_ACCESS_TOKEN H2I_USER_ID
+
+qp-tunnel-cli h2i enroll \
+  --bootstrap-url https://h2i.www.com \
+
+# qp-tunnel-cli h2i status
+# wg show mx-h2i
+# systemctl is-enabled qpjoy-h2i@mx-h2i.service
+# systemctl status qpjoy-h2i@mx-h2i.service --no-pager
+
+
+git -c http.proxy=http://127.0.0.1:7788 -c https.proxy=http://127.0.0.1:7788 pull
+```
