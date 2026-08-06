@@ -277,6 +277,17 @@ export function createApp({
             capabilities: principal.capabilities,
             memberships: principal.memberships,
             identityProvider: identity?.enabled ? 'mx-launcher' : null,
+            // Diagnostic pair for federated sessions: what the provider said,
+            // and what would have granted platform admin.
+            ...(principal.launcherScopes
+              ? {
+                  launcherScopes: principal.launcherScopes,
+                  adminScopeAllowlist: principal.adminScopeAllowlist,
+                  adminScopeMatched: principal.launcherScopes.filter((scope) =>
+                    principal.adminScopeAllowlist.includes(scope),
+                  ),
+                }
+              : {}),
           },
           requestId,
         })

@@ -56,9 +56,25 @@ export function parseProviderConfig(raw, { kind = 'chat' } = {}) {
         `provider[${index}] requires id, baseUrl and model`,
       )
     }
+    // The router appends the endpoint path itself, so a baseUrl that already
+    // contains one produces `/v1/chat/completions/chat/completions` and a 404
+    // on every call. Caught here because the alternative is discovering it
+    // through a provider chain that silently fails over to nothing.
+    const baseUrl = String(entry.baseUrl).replace(/\/+$/, '')
+    for (const endpoint of ['/chat/completions', '/embeddings', '/completions']) {
+      if (baseUrl.endsWith(endpoint)) {
+        throw new AppError(
+          500,
+          'invalid_configuration',
+          `provider[${index}] "${entry.id}": baseUrl must be the API root, not an endpoint. ` +
+            `Use "${baseUrl.slice(0, -endpoint.length)}" instead of "${baseUrl}".`,
+        )
+      }
+    }
+
     return {
       id: entry.id,
-      baseUrl: String(entry.baseUrl).replace(/\/$/, ''),
+      baseUrl,
       model: entry.model,
       apiKeyEnv: entry.apiKeyEnv || null,
       timeoutMs: entry.timeoutMs || DEFAULT_TIMEOUT_MS,

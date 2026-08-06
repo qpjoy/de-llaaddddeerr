@@ -318,3 +318,36 @@ test('embedding without a provider fails loudly: there is no fallback for a vect
   })
   await assert.rejects(() => agent.embed(['x']), /No embedding provider is configured/)
 })
+
+test('a baseUrl that already contains an endpoint path is rejected', () => {
+  // The router appends /chat/completions itself; a baseUrl carrying it produces
+  // /v1/chat/completions/chat/completions and 404s on every single call, which
+  // then looks like the provider being down and fails over to nothing.
+  assert.throws(
+    () => parseProviderConfig(JSON.stringify([
+      { id: 'openai', baseUrl: 'https://llm.example.com/v1/chat/completions', model: 'gpt-4o-mini' },
+    ])),
+    /baseUrl must be the API root/,
+  )
+  assert.throws(
+    () => parseProviderConfig(JSON.stringify([
+      { id: 'x', baseUrl: 'https://llm.example.com/v1/embeddings', model: 'e' },
+    ])),
+    /baseUrl must be the API root/,
+  )
+  // The message names the correction rather than only the problem.
+  try {
+    parseProviderConfig(JSON.stringify([
+      { id: 'openai', baseUrl: 'https://llm.example.com/v1/chat/completions', model: 'm' },
+    ]))
+  } catch (error) {
+    assert.match(error.message, /Use "https:\/\/llm\.example\.com\/v1"/)
+  }
+})
+
+test('trailing slashes are normalised without tripping the endpoint check', () => {
+  const [provider] = parseProviderConfig(JSON.stringify([
+    { id: 'openai', baseUrl: 'https://llm.example.com/v1///', model: 'gpt-4o-mini' },
+  ]))
+  assert.equal(provider.baseUrl, 'https://llm.example.com/v1')
+})

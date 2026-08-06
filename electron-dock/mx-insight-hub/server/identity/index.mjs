@@ -111,6 +111,12 @@ export class IdentityService {
       subject,
       issuer,
       launcherPrincipalId: principal.principalId,
+      // The scopes Launcher actually returned, alongside the allowlist they are
+      // matched against. Without both, "why am I not a platform admin" is
+      // unanswerable from outside the server: a scope name that matches nothing
+      // produces exactly the same result as having no privileges at all.
+      launcherScopes: principal.scopes,
+      adminScopeAllowlist: [...this.adminScopes],
       platformAdmin,
       // A platform admin is unscoped; everyone else sees exactly their tenants.
       tenantIds: platformAdmin ? null : active.map((membership) => membership.tenantId),
