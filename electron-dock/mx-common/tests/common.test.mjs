@@ -162,3 +162,36 @@ test('snapshot health goes unhealthy once the last success is stale', async () =
   assert.ok(health.lastSuccessAgeHours >= 47)
   assert.equal(health.snapshotsFailed, 3)
 })
+
+// ---------------------------------------------------------------------------
+// Host-side scripts must not need node_modules
+// ---------------------------------------------------------------------------
+
+test('the snapshot config renderer imports nothing that needs installing', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const here = dirname(fileURLToPath(import.meta.url))
+
+  // `manage.sh ensure` runs this on the operator's host, where mx-common has no
+  // node_modules and should need none. Reaching it through `src/index.mjs`
+  // drags in the PostgreSQL helpers and therefore `pg`, which fails with
+  // ERR_MODULE_NOT_FOUND on a freshly cloned server.
+  const script = await readFile(resolve(here, '../scripts/print-snapshot-config.mjs'), 'utf8')
+  const imports = [...script.matchAll(/from\s+'([^']+)'/g)].map((match) => match[1])
+  for (const specifier of imports) {
+    assert.ok(
+      specifier.startsWith('.') || specifier.startsWith('node:'),
+      `${specifier} is an installed dependency; host-side scripts must only use relative or node: imports`,
+    )
+    assert.ok(
+      !specifier.endsWith('/src/index.mjs'),
+      'import the leaf module, not the package barrel: the barrel re-exports pg-dependent code',
+    )
+  }
+
+  // The module it does import must itself be dependency-free, transitively.
+  const snapshots = await readFile(resolve(here, '../src/elasticsearch/snapshots.mjs'), 'utf8')
+  const nested = [...snapshots.matchAll(/from\s+'([^']+)'/g)].map((match) => match[1])
+  assert.deepEqual(nested, [], 'snapshots.mjs must stay import-free')
+})

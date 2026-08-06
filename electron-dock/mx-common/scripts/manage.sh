@@ -628,15 +628,17 @@ ensure_snapshot_policy() {
     return 0
   fi
 
-  local repository_body policy_body
-  repository_body="$(node "${ROOT_DIR}/scripts/print-snapshot-config.mjs" repository)" || {
-    warn "could not render the snapshot repository definition"
+  local repository_body policy_body render_error
+  render_error="$(mktemp)"
+  if ! repository_body="$(node "${ROOT_DIR}/scripts/print-snapshot-config.mjs" repository 2>"$render_error")" \
+    || ! policy_body="$(node "${ROOT_DIR}/scripts/print-snapshot-config.mjs" policy 2>>"$render_error")"; then
+    warn "could not render the snapshot configuration; BACKUPS ARE NOT SCHEDULED"
+    sed -n '1,5p' "$render_error" >&2
+    rm -f -- "$render_error"
+    warn "  Apply it separately once fixed:  bash scripts/manage.sh snapshot apply"
     return 0
-  }
-  policy_body="$(node "${ROOT_DIR}/scripts/print-snapshot-config.mjs" policy)" || {
-    warn "could not render the snapshot policy definition"
-    return 0
-  }
+  fi
+  rm -f -- "$render_error"
 
   if ! es_curl PUT "/_snapshot/${repository}?verify=true" "$repository_body" >/dev/null 2>&1; then
     warn "snapshot repository ${repository} could not be registered or verified"

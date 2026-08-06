@@ -8,7 +8,19 @@
 // operator's machine. This script is the seam between the two.
 //
 // Usage: node scripts/print-snapshot-config.mjs repository|policy <name>
-import { fsRepository, s3Repository, dailySnapshotPolicy, DEFAULT_REPOSITORY } from '../src/index.mjs'
+// Import the leaf module, never the package barrel.
+//
+// This script runs on the OPERATOR'S HOST during `ensure`, where mx-common has
+// no node_modules and should need none. `src/index.mjs` re-exports the
+// PostgreSQL helpers, which import `pg`, so going through the barrel makes a
+// dependency-free config renderer die with ERR_MODULE_NOT_FOUND. The snapshot
+// definitions themselves import nothing at all.
+import {
+  fsRepository,
+  s3Repository,
+  dailySnapshotPolicy,
+  DEFAULT_REPOSITORY,
+} from '../src/elasticsearch/snapshots.mjs'
 
 const [, , what, name] = process.argv
 
