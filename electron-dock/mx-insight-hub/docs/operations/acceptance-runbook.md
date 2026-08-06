@@ -35,6 +35,9 @@ bash scripts/manage.sh status
 | ES 反复重启 / OOM | 内存不够：`MX_COMMON_ELASTICSEARCH_HEAP=512m bash scripts/manage.sh ensure` |
 | `vm.max_map_count` 提不上去 | 脚本会打印需要 root 执行的命令 |
 | `creating retained local PV` | 正常，无默认 StorageClass 时自动建 Retain 本地 PV |
+| PG `Permission denied` / ES `node.lock AccessDeniedException` | hostPath 目录属主不对。**`fsGroup` 对 hostPath 卷不生效**，`ensure` 会按各 Pod 的 runAsUser 修正（PG 999:999 0700，ES 1000:0 0775）并重启崩溃的 Pod |
+| `hanlp: disabled` | 正常。HanLP 默认关闭，未启用时分词走内置回退，搜索质量降级但不中断 |
+| 首次 `Pulling` 耗时几十分钟 | ES 镜像约 890MB，境外 registry 很慢。`ensure` 现在会先用 Docker 预热 |
 
 单节点上这台机器同时跑 Night-All、Hub 及其 worker，ES 默认请求 2Gi / 上限 3Gi / 堆 1g。堆和内存请求要一起调——只调其中一个会让两者不一致，Pod 会 OOM。请求量大约取堆的两倍，剩下是 Lucene 读段用的堆外 page cache。
 

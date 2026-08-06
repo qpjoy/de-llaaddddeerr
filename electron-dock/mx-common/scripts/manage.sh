@@ -122,30 +122,66 @@ has_default_storage_class() {
     | grep -q '"storageclass.kubernetes.io/is-default-class": *"true"'
 }
 
+# Take ownership of a hostPath directory on behalf of the workload that mounts it.
+#
+# This is the step whose absence breaks both PostgreSQL and Elasticsearch, and it
+# is not obvious: `fsGroup` in a pod securityContext does NOT apply to hostPath
+# volumes. The kubelet only fixes ownership for volume types that support it
+# (CSI, emptyDir, and friends); a hostPath is used exactly as the node presents
+# it. A directory created here by root is therefore root:root, and a container
+# running as uid 999 or 1000 cannot write to it — PostgreSQL fails to mkdir
+# PGDATA, Elasticsearch fails to create node.lock.
+#
+# Applied on every run, not only at creation, so a directory left with the wrong
+# owner by an earlier version is repaired rather than requiring a manual chown.
+ensure_host_path_ownership() {
+  local host_path="$1" owner="$2" mode="$3"
+  # `stat %a` prints 700, not 0700, so the expected mode is normalised before
+  # comparing. Getting this wrong only costs a redundant chown, but it also
+  # prints a misleading "ownership changed" line on every single run.
+  local current expected
+  current="$(stat -c '%u:%g:%a' "$host_path" 2>/dev/null || true)"
+  expected="${owner}:${mode#0}"
+  [ -n "$current" ] && [ "$current" = "$expected" ] && return 0
+
+  if chown -R "$owner" "$host_path" 2>/dev/null && chmod "$mode" "$host_path" 2>/dev/null; then
+    :
+  elif sudo -n chown -R "$owner" "$host_path" 2>/dev/null \
+    && sudo -n chmod "$mode" "$host_path" 2>/dev/null; then
+    :
+  else
+    warn "cannot set ${host_path} to ${owner} (${mode}); the workload will fail to write to it"
+    warn "  Run as root:  chown -R ${owner} ${host_path} && chmod ${mode} ${host_path}"
+    return 1
+  fi
+  say "host path ${host_path} owned by ${owner} (${mode})"
+}
+
 # Bare kubeadm has no dynamic provisioner, so a PVC stays Pending forever and the
 # StatefulSet never schedules. Pre-create a Retain hostPath PV bound to the exact
 # claim. Reclaim policy is Retain so that deleting the PVC never deletes data.
 ensure_local_pv() {
   local pv_name="$1" claim_name="$2" size="$3" sub_path="$4"
+  # Must match the pod's runAsUser:runAsGroup, since hostPath ignores fsGroup.
+  local owner="${5:-1000:0}" mode="${6:-0775}"
   local host_path="${HOST_DATA_ROOT}/${sub_path}"
+
+  mkdir -p "$host_path" 2>/dev/null \
+    || sudo -n mkdir -p "$host_path" 2>/dev/null \
+    || die "cannot create host path ${host_path}"
+  ensure_host_path_ownership "$host_path" "$owner" "$mode" || true
 
   if kubectl get pv "$pv_name" >/dev/null 2>&1; then
     local phase
     phase="$(kubectl get pv "$pv_name" -o jsonpath='{.status.phase}')"
     case "$phase" in
-      Bound|Available) return 0 ;;
       Released)
         warn "PV ${pv_name} is Released; leaving it untouched to protect retained data."
         warn "Inspect ${host_path} and clear spec.claimRef manually to reuse it."
-        return 0
         ;;
     esac
     return 0
   fi
-
-  mkdir -p "$host_path" 2>/dev/null \
-    || sudo -n mkdir -p "$host_path" 2>/dev/null \
-    || die "cannot create host path ${host_path}"
 
   say "creating retained local PV ${pv_name} -> ${host_path}"
   kubectl apply -f - <<EOF >/dev/null
@@ -176,11 +212,13 @@ ensure_storage() {
     return 0
   fi
   say "no default StorageClass; provisioning retained local PVs"
-  ensure_local_pv mx-common-postgres-data data-mx-common-postgres-0 50Gi postgres/data
-  ensure_local_pv mx-common-elasticsearch-data data-mx-common-elasticsearch-0 50Gi elasticsearch/data
-  ensure_local_pv mx-common-elasticsearch-snapshots mx-common-elasticsearch-snapshots 20Gi elasticsearch/snapshots
+  # Owners mirror each pod's securityContext. PostgreSQL additionally refuses to
+  # start unless PGDATA's parent is 0700 or 0750.
+  ensure_local_pv mx-common-postgres-data data-mx-common-postgres-0 50Gi postgres/data 999:999 0700
+  ensure_local_pv mx-common-elasticsearch-data data-mx-common-elasticsearch-0 50Gi elasticsearch/data 1000:0 0775
+  ensure_local_pv mx-common-elasticsearch-snapshots mx-common-elasticsearch-snapshots 20Gi elasticsearch/snapshots 1000:0 0775
   if [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ]; then
-    ensure_local_pv mx-common-hanlp-models mx-common-hanlp-models 10Gi hanlp/models
+    ensure_local_pv mx-common-hanlp-models mx-common-hanlp-models 10Gi hanlp/models 1000:1000 0755
   fi
 }
 
@@ -236,7 +274,27 @@ apply_manifests() {
     render_manifest "$file" | kubectl apply -f - >/dev/null
   done < <(manifest_list)
   allow_hostnetwork_clients
+  restart_crashlooping_pods
   say "manifests applied"
+}
+
+# Delete pods that are crash-looping so they retry immediately.
+#
+# CrashLoopBackOff grows to a five-minute delay. Once the cause is fixed --
+# a hostPath ownership repair, a config change -- the pod would otherwise sit
+# out the remaining backoff, and `ensure` would report failure for a stack that
+# is actually already correct.
+restart_crashlooping_pods() {
+  local pod
+  while IFS= read -r pod; do
+    [ -n "$pod" ] || continue
+    say "restarting crash-looping pod ${pod} so it retries without waiting out its backoff"
+    kubectl -n "$NAMESPACE" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  done < <(
+    kubectl -n "$NAMESPACE" get pods \
+      -o jsonpath='{range .items[?(@.status.containerStatuses[0].state.waiting.reason=="CrashLoopBackOff")]}{.metadata.name}{"\n"}{end}' \
+      2>/dev/null || true
+  )
 }
 
 # Allow node IPs to reach the shared stores.
@@ -344,6 +402,10 @@ wait_ready() {
           ;;
         CrashLoopBackOff)
           diagnose_workload "$name"
+          warn "  If the logs mention Permission denied, AccessDeniedException or node.lock,"
+          warn "  the hostPath directory is owned by the wrong uid. fsGroup does NOT apply to"
+          warn "  hostPath volumes, so ${HOST_DATA_ROOT} must be chowned to the pod's runAsUser."
+          warn "  Re-running ensure repairs it."
           ;;
       esac
       [ "$required" = "optional" ] && return 0
