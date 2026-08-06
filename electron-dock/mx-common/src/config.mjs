@@ -108,9 +108,11 @@ export function loadCommonConfig(productId, environment = process.env) {
     },
 
     segmenter: {
-      // No URL means the built-in fallback segmenter is used. It is weaker than
-      // HanLP but keeps ingest working, and the projection is rebuildable, so a
-      // later HanLP rollout is a reindex rather than a data loss.
+      // 'hanlp' | 'jieba' | 'fallback'. Unset picks the best available: HanLP if
+      // a URL is configured, otherwise jieba, otherwise bigrams. Every choice
+      // degrades at runtime instead of refusing to start, because the search
+      // projection is rebuildable and a stalled projector is not.
+      backend: trimmed(environment.MX_COMMON_SEGMENTER),
       hanlpUrl,
       hanlpToken: trimmed(environment.MX_COMMON_HANLP_TOKEN),
       timeoutMs: requirePositiveInteger(

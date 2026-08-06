@@ -195,3 +195,55 @@ test('the snapshot config renderer imports nothing that needs installing', async
   const nested = [...snapshots.matchAll(/from\s+'([^']+)'/g)].map((match) => match[1])
   assert.deepEqual(nested, [], 'snapshots.mjs must stay import-free')
 })
+
+// ---------------------------------------------------------------------------
+// Segmenter backend selection
+// ---------------------------------------------------------------------------
+
+test('jieba is the default backend, not the bigram fallback', async () => {
+  const { createSegmenter, JiebaSegmenter, FallbackSegmenter, HanlpSegmenter } =
+    await import('../src/segmenter/index.mjs')
+  const quiet = { warn() {} }
+
+  // Nothing configured: dictionary segmentation is a large quality win over
+  // bigrams and costs no extra service, so it is what an unconfigured
+  // deployment gets.
+  assert.ok(createSegmenter({}, { logger: quiet }) instanceof JiebaSegmenter)
+  // A configured HanLP URL outranks it.
+  assert.ok(
+    createSegmenter({ hanlpUrl: 'http://hanlp:8000' }, { logger: quiet }) instanceof HanlpSegmenter,
+  )
+  // An explicit choice wins over both.
+  assert.ok(createSegmenter({ backend: 'fallback' }, { logger: quiet }) instanceof FallbackSegmenter)
+  assert.ok(
+    createSegmenter({ backend: 'jieba', hanlpUrl: 'http://hanlp:8000' }, { logger: quiet })
+      instanceof JiebaSegmenter,
+  )
+})
+
+test('MX_COMMON_SEGMENTER=hanlp without a URL degrades instead of failing', async () => {
+  const { createSegmenter, JiebaSegmenter } = await import('../src/segmenter/index.mjs')
+  const warnings = []
+  const segmenter = createSegmenter(
+    { backend: 'hanlp' },
+    { logger: { warn: (message) => warnings.push(message) } },
+  )
+  // A projector that refuses to boot over a segmenter misconfiguration stops
+  // ingestion; a worse segmenter only costs a later reindex.
+  assert.ok(segmenter instanceof JiebaSegmenter)
+  assert.match(warnings[0], /no MX_COMMON_HANLP_URL/)
+})
+
+test('jieba keeps multi-character terms whole and drops punctuation', async () => {
+  const { createSegmenter } = await import('../src/segmenter/index.mjs')
+  const segmenter = createSegmenter({ backend: 'jieba' }, { logger: { warn() {} } })
+  const tokens = await segmenter.segment('人工智能，与检索增强生成的关系')
+  if (!segmenter.available) return // package absent on this platform; covered by the fallback test
+
+  // `new Jieba()` without the default dictionary silently produces single
+  // characters, which retrieves no better than bigrams. This asserts the
+  // dictionary is actually loaded.
+  assert.ok(tokens.includes('人工智能'), `expected an intact term, got ${JSON.stringify(tokens)}`)
+  assert.ok(!tokens.includes('，'), 'punctuation must not reach the token facet')
+  assert.ok(tokens.every((token) => token === token.toLowerCase()))
+})

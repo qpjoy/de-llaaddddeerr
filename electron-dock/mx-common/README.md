@@ -24,7 +24,24 @@ Redis 仍然部署，但定位是缓存类依赖：限流、singleflight、短�
 
 **中文分词在写入端做，ES 不装插件。** 索引侧只用 `whitespace` tokenizer 读取已分好的词。代价是换分词器需要 reindex；收益是所有 MX 集群都跑官方原版 elasticsearch 镜像——装 IK 或 HanLP 插件意味着每个 ES 补丁版本都要重建自定义镜像，且任何节点重启前都必须先装好插件。因为按 ADR-0005 所有搜索索引都是 PostgreSQL 的可重建投影，reindex 是可接受的操作，而自定义镜像是长期负担。
 
-HanLP 服务是可选的。没配 `MX_COMMON_HANLP_URL` 时用内置回退分词器（CJK 双字组合 + 拉丁词），质量明显更差但永远可用。这是刻意的：HanLP 挂掉应该降级搜索质量，而不是中断入库——入不了库是账本上的永久空洞，而错误的分词以后 reindex 就能修好。
+三档分词后端，`MX_COMMON_SEGMENTER` 可显式指定，不指定则自动选最好的可用项：
+
+| 后端 | 质量 | 代价 | 何时用 |
+| --- | --- | --- | --- |
+| `hanlp` | 最好，实体/品牌名尤其准 | 约 2GB PyTorch 容器 + 模型下载 | 语料以人名机构名为主，且愿意维护一个服务 |
+| `jieba` | 好，词典分词 | 一个 npm 可选依赖，带预编译二进制 | **默认**，绝大多数场景 |
+| `fallback` | 差，CJK 双字组合 | 零依赖 | 前两者都不可用时自动兜底 |
+
+对比同一句话：
+
+```
+jieba     建议 都 去 学 吴恩达 的 ai agent 人工智能 与 检索 增强 生成 的 关系   (15 tokens)
+fallback  建 议 都 去 学 吴 恩 达 建议 议都 都去 ...                          (45 tokens)
+```
+
+每一档都是**运行时降级而非启动失败**：HanLP 不可达退 jieba 的位置、jieba 装不上退 bigram，入库永不中断。这是刻意的——入不了库是账本上的永久空洞，而错误的分词以后 reindex 就能修好。
+
+两个容易踩且会静默减半质量的点已在代码里处理：`new Jieba()` 的词典是**空的**，会把中文切成单字（看起来在工作，检索效果等同 bigram），必须显式 `Jieba.withDict(dict)`；以及 `hmm: true` 才能切出词典里没有的词，社交文本里这类词很多。
 
 **ILM 没有 delete 阶段。** hot(30d rollover) → warm(30d, forcemerge) → cold(90d, readonly)，数据无限期保留，清理只能通过显式的、有审计的操作。
 
@@ -42,11 +59,19 @@ bash scripts/manage.sh down      # 只缩容，保留 PVC/PV/索引
 
 `ensure` 会自己处理单节点 kubeadm 上的两个硬性前提：`vm.max_map_count`（ES 不满足就起不来，需要节点 root 权限，所以在这里设而不是塞一个 privileged init container）和无默认 StorageClass 时的 Retain hostPath PV 绑定。
 
-可选组件默认关闭：
+PostgreSQL / Elasticsearch / Redis 是核心组件，随 `ensure` 一起部署。只有 HanLP 是可选的：
 
 ```bash
-MX_COMMON_HANLP_ENABLED=1      # HanLP 分词服务（镜像约 2GB）
-MX_COMMON_POSTGRES_ENABLED=1   # 共享 PostgreSQL 实例
+MX_COMMON_HANLP_ENABLED=1      # HanLP 分词服务（镜像约 2GB，需先自行构建）
+```
+
+镜像与容量调节：
+
+```bash
+MX_COMMON_ELASTICSEARCH_IMAGE=<mirror>/elasticsearch:9.4.2   # 境内镜像源
+MX_COMMON_ELASTICSEARCH_HEAP=4g                              # 堆，上限 31g
+MX_COMMON_SEGMENTER=jieba|hanlp|fallback                     # 分词后端
+bash scripts/manage.sh preload                               # 预热镜像，避免 ensure 卡在拉取
 ```
 
 代码侧：
@@ -67,14 +92,17 @@ await withTransaction(pool, async (client) => {
 })
 ```
 
-## 与 mx-insight-hub 现有 PostgreSQL 的关系
+## 每产品一个数据库
 
-Hub 已有的 PostgreSQL **不会被 deploy 搬迁**。它带着 retained local PV 在运行，迁移一个活库是一次需要独立演练、备份和 cutover 的操作，把它塞进 `deploy` 等于让运行中的数据离一个脚本 bug 只有一步之遥。所以：
+`manage.sh provision <productId>` 幂等地在共享实例里建角色、建库、装 `pg_trgm` 和 `vector` 扩展，并把凭据存进 mx-common 自己的 Secret（重复部署复用而不是轮换），然后把 DSN 打到 stdout——其余输出都走 stderr，所以调用方可以直接 `$(...)` 捕获。
 
-- mx-common 提取的是 PG 的 **manifest 定义和代码封装**；
-- Hub 默认仍连自己那套 StatefulSet；
-- 共享实例（`optional/10-postgres.yaml`，用 `pgvector/pgvector:pg16`）供后续产品使用；
-- Hub 要合并过去，走独立的显式命令，不混在部署流程里。
+Hub 的 `deploy` 会自动调用它，不需要手动执行。
+
+## hostPath 与 fsGroup
+
+无默认 StorageClass 时 `ensure` 会建 Retain 的 hostPath PV，并**按各 Pod 的 `runAsUser` 修正目录属主**（PG `999:999 0700`、ES `1000:0 0775`）。这一步不能省：**`fsGroup` 对 hostPath 卷不生效**，kubelet 只对支持所有权管理的卷类型做 chown。root 建的目录是 `root:root`，PG 会在 `mkdir PGDATA` 时失败、ES 会在创建 `node.lock` 时失败，两者的报错都只说 Permission denied，不会指向真正的原因。
+
+属主每次运行都校验，所以早先版本留下的错属主目录会被自动修好。
 
 ## 依赖健康契约
 

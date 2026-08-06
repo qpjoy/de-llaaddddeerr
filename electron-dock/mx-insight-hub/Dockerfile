@@ -29,7 +29,11 @@ WORKDIR /mx-common
 COPY --from=mx_common package.json package-lock.json ./
 COPY --from=mx_common src ./src
 COPY --from=mx_common migrations ./migrations
-RUN npm ci --omit=dev --omit=optional --registry="$NPM_REGISTRY" && npm cache clean --force
+# Optional dependencies are installed on purpose. mx-common's default Chinese
+# segmenter is @node-rs/jieba, declared optional so a platform without prebuilt
+# binaries still installs; omitting it here would silently downgrade every
+# deployment to the bigram fallback with only a log line to show for it.
+RUN npm ci --omit=dev --registry="$NPM_REGISTRY" && npm cache clean --force
 
 WORKDIR /app
 COPY package.json package-lock.json ./

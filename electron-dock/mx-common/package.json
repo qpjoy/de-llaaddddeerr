@@ -20,7 +20,8 @@
     "pg": "8.22.0"
   },
   "optionalDependencies": {
-    "bullmq": "^5.79.0"
+    "bullmq": "^5.79.0",
+    "@node-rs/jieba": "^2.0.0"
   },
   "engines": {
     "node": ">=22"

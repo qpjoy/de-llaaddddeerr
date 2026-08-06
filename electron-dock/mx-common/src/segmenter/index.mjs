@@ -5,9 +5,19 @@
 // simple: `segment(text)` returns tokens, and the projector joins them with
 // spaces into the `*Hanlp` fields that `mx_presegmented` indexes verbatim.
 //
-// Two backends:
-//   * HanLP RESTful (`MX_COMMON_HANLP_URL`) - the real segmenter.
-//   * built-in fallback - no network, no model, materially worse, always available.
+// Three backends, in descending quality and ascending cost:
+//
+//   hanlp     HanLP RESTful service (MX_COMMON_HANLP_URL). Best quality,
+//             especially on entity and brand names. Costs a ~2GB PyTorch
+//             container and a model download.
+//   jieba     @node-rs/jieba, dictionary-based, in-process. Much better than
+//             bigrams, no extra service, prebuilt native binaries. The right
+//             default for most deployments.
+//   fallback  CJK bigrams. No dependency at all, materially worse, always
+//             available.
+//
+// None of these is an Elasticsearch plugin, deliberately. See
+// src/elasticsearch/analysis.mjs.
 //
 // The fallback exists so that a HanLP outage degrades search quality instead of
 // stopping ingestion. Because ES projections are rebuildable from PostgreSQL,
@@ -109,6 +119,76 @@ export function fallbackSegment(text) {
   return [...new Set(tokens)]
 }
 
+/**
+ * Dictionary-based segmentation in the projector process.
+ *
+ * Loaded lazily and optional: a deployment that never installs @node-rs/jieba
+ * degrades to bigrams with a warning rather than failing to start. The package
+ * ships prebuilt native binaries, so this adds no build toolchain requirement.
+ *
+ * Two details that are easy to get wrong and silently halve the quality:
+ *
+ *  - `new Jieba()` starts with an EMPTY dictionary and segments Chinese into
+ *    single characters, which looks like it works and retrieves like bigrams.
+ *    The default dictionary has to be passed explicitly via `Jieba.withDict`.
+ *  - `hmm: true` lets the model segment words absent from the dictionary, which
+ *    social-media text is full of. With it, 吴恩达 stays one token; without it,
+ *    it becomes three.
+ */
+export class JiebaSegmenter {
+  #instance = null
+  #loading = null
+
+  constructor({ logger = console } = {}) {
+    this.logger = logger
+    this.available = true
+    this.lastError = null
+  }
+
+  async #load() {
+    if (this.#instance) return this.#instance
+    if (!this.#loading) {
+      this.#loading = (async () => {
+        const { Jieba } = await import('@node-rs/jieba')
+        // Explicit `.js`: the package publishes no exports map, so the bare
+        // '@node-rs/jieba/dict' subpath does not resolve under ESM.
+        const dictionary = await import('@node-rs/jieba/dict.js')
+        const dict = dictionary.dict ?? dictionary.default?.dict
+        if (!dict) throw new Error('@node-rs/jieba/dict.js exposes no dict')
+        this.#instance = Jieba.withDict(dict)
+        return this.#instance
+      })().catch((error) => {
+        this.available = false
+        this.lastError = error.message
+        this.logger?.warn?.(
+          `[mx-common] jieba unavailable (${error.message}); using the bigram fallback`,
+        )
+        return null
+      })
+    }
+    return this.#loading
+  }
+
+  async segment(text) {
+    if (!text) return []
+    const jieba = await this.#load()
+    if (!jieba) return fallbackSegment(text)
+    try {
+      // cutAsync keeps the native call off the event loop; the projector runs
+      // this once per document in a tight bulk-indexing loop.
+      const tokens = await jieba.cutAsync(String(text), true)
+      return tokens
+        .map((token) => token.trim().toLowerCase())
+        // Punctuation and whitespace carry no retrieval signal and would
+        // dominate the `tokens` keyword facet.
+        .filter((token) => token && /[\p{L}\p{N}]/u.test(token))
+    } catch (error) {
+      this.lastError = error.message
+      return fallbackSegment(text)
+    }
+  }
+}
+
 export class FallbackSegmenter {
   constructor() {
     this.available = true
@@ -120,8 +200,24 @@ export class FallbackSegmenter {
   }
 }
 
+/**
+ * Pick a backend.
+ *
+ * An explicit `MX_COMMON_SEGMENTER` wins so a deployment can pin one; otherwise
+ * a configured HanLP URL beats jieba, and jieba beats bigrams. Every branch
+ * degrades at runtime rather than refusing to start: the projection is
+ * rebuildable, so a worse segmenter costs a reindex later, while a projector
+ * that will not boot costs ingestion now.
+ */
 export function createSegmenter(config, { logger = console } = {}) {
-  if (config?.hanlpUrl) {
+  const explicit = config?.backend
+  if (explicit === 'fallback') return new FallbackSegmenter()
+  if (explicit === 'jieba') return new JiebaSegmenter({ logger })
+  if (explicit === 'hanlp' || (!explicit && config?.hanlpUrl)) {
+    if (!config?.hanlpUrl) {
+      logger?.warn?.('[mx-common] MX_COMMON_SEGMENTER=hanlp but no MX_COMMON_HANLP_URL; using jieba')
+      return new JiebaSegmenter({ logger })
+    }
     return new HanlpSegmenter({
       url: config.hanlpUrl,
       token: config.hanlpToken,
@@ -129,7 +225,7 @@ export function createSegmenter(config, { logger = console } = {}) {
       logger,
     })
   }
-  return new FallbackSegmenter()
+  return new JiebaSegmenter({ logger })
 }
 
 /** Join tokens into the whitespace-delimited form `mx_presegmented` expects. */
