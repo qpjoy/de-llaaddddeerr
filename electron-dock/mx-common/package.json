@@ -1,0 +1,28 @@
+{
+  "name": "@qpjoy/mx-common",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared data-plane primitives for MX product modules: PostgreSQL pools and migrations, Elasticsearch index lifecycle, durable queues, Chinese segmentation, and health probes.",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./postgres": "./src/postgres/index.mjs",
+    "./elasticsearch": "./src/elasticsearch/index.mjs",
+    "./queue": "./src/queue/index.mjs",
+    "./segmenter": "./src/segmenter/index.mjs",
+    "./health": "./src/health/index.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "pg": "8.22.0"
+  },
+  "optionalDependencies": {
+    "bullmq": "^5.79.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

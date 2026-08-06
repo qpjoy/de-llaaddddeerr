@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mx-common
+  labels:
+    kubernetes.io/metadata.name: mx-common
+    app.kubernetes.io/part-of: mx-common
+    # Products select this namespace in their own NetworkPolicies to allow
+    # egress to the shared data plane; the label is the stable contract.
+    mx-common.io/plane: data
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mx-common
+  namespace: mx-common
+automountServiceAccountToken: false

@@ -1,0 +1,670 @@
+#!/usr/bin/env bash
+#
+# mx-common shared data-plane lifecycle.
+#
+# Design contract, because products call `ensure` from inside their own deploy:
+#
+#   * `ensure` is idempotent and non-destructive. It never deletes an index, a
+#     PVC, a PV or a namespace. `kubectl apply` on unchanged manifests is a
+#     no-op, so a healthy stack is left strictly alone.
+#   * `ensure` exits non-zero only when a REQUIRED dependency cannot be brought
+#     up. Optional components that fail are reported and skipped, so a product
+#     deploy degrades rather than aborts.
+#   * Nothing here touches a product's own database or workloads.
+#
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+K8S_DIR="${ROOT_DIR}/deploy/k8s"
+NAMESPACE="mx-common"
+HOST_DATA_ROOT="${MX_COMMON_HOST_DATA_ROOT:-/var/lib/mx-common/k8s}"
+WAIT_TIMEOUT="${MX_COMMON_WAIT_TIMEOUT:-300}"
+
+say() { printf '[mx-common] %s\n' "$*"; }
+warn() { printf '[mx-common] WARN: %s\n' "$*" >&2; }
+die() { printf '[mx-common] ERROR: %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
+
+usage() {
+  cat <<'EOF'
+Usage: bash scripts/manage.sh <command>
+
+  ensure          Reconcile the shared data plane and wait until it is healthy.
+                  Safe to call on every product deploy; a healthy stack is a no-op.
+  status          Show workloads, PVCs and Elasticsearch cluster health.
+  health          Probe only. Exit 0 healthy, 1 degraded/down. Prints JSON.
+  plan            Print the manifests that `ensure` would apply.
+  down            Scale shared workloads to zero. Data, PVCs and indices are kept.
+  logs [service]  Tail logs (elasticsearch | redis | hanlp | postgres).
+
+  snapshot status|run|list|apply
+                  Elasticsearch backups. `status` reports whether a snapshot has
+                  actually succeeded, not merely that a policy exists.
+
+  provision <productId>
+                  Create (idempotently) the per-product PostgreSQL role, database
+                  and extensions, and print the connection string on stdout.
+
+Optional components (off by default):
+  MX_COMMON_HANLP_ENABLED=1      Deploy the HanLP tokenizer (large image).
+
+Environment:
+  MX_COMMON_HOST_DATA_ROOT      Host path for local PVs (default /var/lib/mx-common/k8s)
+  MX_COMMON_WAIT_TIMEOUT        Seconds to wait for readiness (default 300)
+  MX_COMMON_SNAPSHOT_SCHEDULE   SLM cron (default "0 30 1 * * ?", 01:30 daily)
+  MX_COMMON_SNAPSHOT_S3_BUCKET  Store snapshots off-node instead of on this host
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Host prerequisites
+# ---------------------------------------------------------------------------
+
+# Elasticsearch mmaps its indices and refuses to start when the kernel limit is
+# below 262144. Setting it needs root on the NODE, not in the pod, so this is
+# done here rather than through a privileged init container — an init container
+# with CAP_SYS_ADMIN would be a far larger standing privilege than a one-time
+# sysctl.
+ensure_vm_max_map_count() {
+  local required=262144 current
+  current="$(sysctl -n vm.max_map_count 2>/dev/null || echo 0)"
+  if [ "$current" -ge "$required" ]; then
+    return 0
+  fi
+  say "vm.max_map_count is ${current}; Elasticsearch requires ${required}"
+  if sysctl -w vm.max_map_count="$required" >/dev/null 2>&1; then
+    say "raised vm.max_map_count to ${required} for this boot"
+  elif sudo -n sysctl -w vm.max_map_count="$required" >/dev/null 2>&1; then
+    say "raised vm.max_map_count to ${required} for this boot (sudo)"
+  else
+    warn "cannot raise vm.max_map_count; Elasticsearch will fail to start."
+    warn "Run as root:  sysctl -w vm.max_map_count=${required}"
+    warn "Persist with: echo 'vm.max_map_count=${required}' > /etc/sysctl.d/99-mx-common.conf"
+    return 1
+  fi
+  # Persist so a node reboot does not silently break search on next start.
+  if [ -w /etc/sysctl.d ] || sudo -n test -w /etc/sysctl.d 2>/dev/null; then
+    printf 'vm.max_map_count=%s\n' "$required" \
+      | (sudo -n tee /etc/sysctl.d/99-mx-common.conf >/dev/null 2>&1 \
+         || tee /etc/sysctl.d/99-mx-common.conf >/dev/null 2>&1) || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+
+has_default_storage_class() {
+  kubectl get storageclass -o json 2>/dev/null \
+    | grep -q '"storageclass.kubernetes.io/is-default-class": *"true"'
+}
+
+# Bare kubeadm has no dynamic provisioner, so a PVC stays Pending forever and the
+# StatefulSet never schedules. Pre-create a Retain hostPath PV bound to the exact
+# claim. Reclaim policy is Retain so that deleting the PVC never deletes data.
+ensure_local_pv() {
+  local pv_name="$1" claim_name="$2" size="$3" sub_path="$4"
+  local host_path="${HOST_DATA_ROOT}/${sub_path}"
+
+  if kubectl get pv "$pv_name" >/dev/null 2>&1; then
+    local phase
+    phase="$(kubectl get pv "$pv_name" -o jsonpath='{.status.phase}')"
+    case "$phase" in
+      Bound|Available) return 0 ;;
+      Released)
+        warn "PV ${pv_name} is Released; leaving it untouched to protect retained data."
+        warn "Inspect ${host_path} and clear spec.claimRef manually to reuse it."
+        return 0
+        ;;
+    esac
+    return 0
+  fi
+
+  mkdir -p "$host_path" 2>/dev/null \
+    || sudo -n mkdir -p "$host_path" 2>/dev/null \
+    || die "cannot create host path ${host_path}"
+
+  say "creating retained local PV ${pv_name} -> ${host_path}"
+  kubectl apply -f - <<EOF >/dev/null
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ${pv_name}
+  labels:
+    app.kubernetes.io/part-of: mx-common
+spec:
+  capacity:
+    storage: ${size}
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: ${host_path}
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: ${NAMESPACE}
+    name: ${claim_name}
+EOF
+}
+
+ensure_storage() {
+  if has_default_storage_class; then
+    say "default StorageClass present; using dynamic provisioning"
+    return 0
+  fi
+  say "no default StorageClass; provisioning retained local PVs"
+  ensure_local_pv mx-common-postgres-data data-mx-common-postgres-0 50Gi postgres/data
+  ensure_local_pv mx-common-elasticsearch-data data-mx-common-elasticsearch-0 50Gi elasticsearch/data
+  ensure_local_pv mx-common-elasticsearch-snapshots mx-common-elasticsearch-snapshots 20Gi elasticsearch/snapshots
+  if [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ]; then
+    ensure_local_pv mx-common-hanlp-models mx-common-hanlp-models 10Gi hanlp/models
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Manifests
+# ---------------------------------------------------------------------------
+
+manifest_list() {
+  printf '%s\n' \
+    "${K8S_DIR}/common/00-namespace.yaml" \
+    "${K8S_DIR}/common/10-postgres.yaml" \
+    "${K8S_DIR}/common/20-elasticsearch.yaml" \
+    "${K8S_DIR}/common/30-redis.yaml"
+  [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ] && printf '%s\n' "${K8S_DIR}/optional/50-hanlp.yaml"
+  # Network policy last: it references labels the workloads above define.
+  printf '%s\n' "${K8S_DIR}/common/40-network-policy.yaml"
+}
+
+ensure_secret() {
+  if kubectl -n "$NAMESPACE" get secret mx-common-secrets >/dev/null 2>&1; then
+    return 0
+  fi
+  local password="${MX_COMMON_POSTGRES_PASSWORD:-}"
+  if [ -z "$password" ]; then
+    password="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
+    say "generated a PostgreSQL password into secret/mx-common-secrets"
+  fi
+  kubectl -n "$NAMESPACE" create secret generic mx-common-secrets \
+    --from-literal=postgres-password="$password" >/dev/null
+}
+
+# A product namespace must be labelled before its pods can reach the shared
+# stores; the NetworkPolicy selects on this label rather than on pod identity so
+# onboarding is one explicit, auditable action.
+allow_client_namespace() {
+  local target="$1"
+  kubectl get namespace "$target" >/dev/null 2>&1 || return 0
+  kubectl label namespace "$target" mx-common.io/client=allowed --overwrite >/dev/null
+  say "namespace ${target} is allowed to reach the shared data plane"
+}
+
+apply_manifests() {
+  local file
+  while IFS= read -r file; do
+    kubectl apply -f "$file" >/dev/null
+  done < <(manifest_list)
+  allow_hostnetwork_clients
+  say "manifests applied"
+}
+
+# Allow node IPs to reach the shared stores.
+#
+# This is not a convenience hole. A pod with `hostNetwork: true` shares the
+# node's network namespace, so its packets carry the NODE's IP and carry no pod
+# identity at all -- `namespaceSelector` and `podSelector` rules simply never
+# match it. mx-insight-hub's public and admin planes run that way deliberately,
+# to reach host-local Night-All at 127.0.0.1, so without this rule they can
+# connect to nothing in mx-common.
+#
+# The allowance is narrowed as far as the mechanism permits: exact /32 node
+# addresses discovered at apply time, not a CIDR. Anything else sharing a node
+# IP is already inside the cluster's trust boundary.
+allow_hostnetwork_clients() {
+  local addresses cidrs=""
+  addresses="$(kubectl get nodes \
+    -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' \
+    2>/dev/null | awk 'NF')"
+  if [ -z "$addresses" ]; then
+    warn "could not discover node InternalIPs; hostNetwork clients may be blocked"
+    return 0
+  fi
+  local address
+  while IFS= read -r address; do
+    cidrs="${cidrs}
+        - ipBlock:
+            cidr: ${address}/32"
+  done <<EOF
+$addresses
+EOF
+
+  kubectl apply -f - <<EOF >/dev/null
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-common-hostnetwork-clients
+  namespace: ${NAMESPACE}
+  annotations:
+    mx-common.io/generated-by: scripts/manage.sh
+    mx-common.io/reason: >-
+      hostNetwork pods present the node IP and carry no pod identity, so
+      namespaceSelector rules cannot match them.
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:${cidrs}
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 9200
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 8000
+EOF
+  say "allowed hostNetwork clients from node IPs: $(printf '%s' "$addresses" | tr '\n' ' ')"
+}
+
+wait_ready() {
+  local kind="$1" name="$2" required="${3:-required}"
+  if kubectl -n "$NAMESPACE" rollout status "$kind/$name" --timeout="${WAIT_TIMEOUT}s" >/dev/null 2>&1; then
+    say "${name} is ready"
+    return 0
+  fi
+  if [ "$required" = "optional" ]; then
+    warn "${name} did not become ready in ${WAIT_TIMEOUT}s; continuing without it"
+    kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=${name}" 2>/dev/null || true
+    return 0
+  fi
+  kubectl -n "$NAMESPACE" describe "$kind/$name" 2>/dev/null | tail -30 >&2 || true
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+es_port_forward_pid=""
+cleanup_port_forward() {
+  [ -n "$es_port_forward_pid" ] && kill "$es_port_forward_pid" 2>/dev/null || true
+  es_port_forward_pid=""
+}
+trap cleanup_port_forward EXIT
+
+# Probe Elasticsearch from inside the cluster. Running curl in the ES pod itself
+# avoids a port-forward and works identically whether or not the caller has a
+# route into the pod network.
+es_cluster_health() {
+  kubectl -n "$NAMESPACE" exec statefulset/mx-common-elasticsearch -c elasticsearch -- \
+    curl -fsS --max-time 5 'http://127.0.0.1:9200/_cluster/health' 2>/dev/null || true
+}
+
+health_json() {
+  local es_health es_status="down" redis_status="down" pg_status="down" hanlp_status="disabled"
+
+  es_health="$(es_cluster_health)"
+  if [ -n "$es_health" ]; then
+    es_status="$(printf '%s' "$es_health" | sed -n 's/.*"status":"\([a-z]*\)".*/\1/p')"
+    [ -n "$es_status" ] || es_status="unknown"
+  fi
+
+  if kubectl -n "$NAMESPACE" exec deployment/mx-common-redis -- redis-cli ping >/dev/null 2>&1; then
+    redis_status="ok"
+  fi
+
+  pg_status="down"
+  if kubectl -n "$NAMESPACE" exec statefulset/mx-common-postgres -- \
+      pg_isready -U mx_common -d mx_common >/dev/null 2>&1; then
+    pg_status="ok"
+  fi
+
+  if [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ]; then
+    hanlp_status="down"
+    if kubectl -n "$NAMESPACE" exec deployment/mx-common-hanlp -- \
+        python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)" \
+        >/dev/null 2>&1; then
+      hanlp_status="ok"
+    fi
+  fi
+
+  printf '{"elasticsearch":"%s","redis":"%s","postgres":"%s","hanlp":"%s"}\n' \
+    "$es_status" "$redis_status" "$pg_status" "$hanlp_status"
+}
+
+# Yellow is healthy here: a single-node cluster holds no replicas, so green is
+# unreachable by construction and gating on it would hang every deploy.
+es_is_healthy() {
+  local status
+  status="$(health_json | sed -n 's/.*"elasticsearch":"\([a-z]*\)".*/\1/p')"
+  [ "$status" = "green" ] || [ "$status" = "yellow" ]
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_ensure() {
+  need kubectl
+  local target_namespaces="${MX_COMMON_CLIENT_NAMESPACES:-mx-insight-hub}"
+
+  if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 && es_is_healthy; then
+    say "shared data plane is already healthy; reconciling declaratively (no restart unless a manifest changed)"
+  else
+    say "shared data plane is absent or unhealthy; deploying"
+  fi
+
+  ensure_vm_max_map_count || warn "continuing; Elasticsearch may fail to start"
+  kubectl apply -f "${K8S_DIR}/common/00-namespace.yaml" >/dev/null
+  ensure_secret
+  ensure_storage
+  apply_manifests
+
+  for namespace in $target_namespaces; do
+    allow_client_namespace "$namespace"
+  done
+
+  local failed=0
+  # PostgreSQL is the only hard requirement: it holds every product's
+  # transactional truth. Elasticsearch failing is a search degradation.
+  wait_ready statefulset mx-common-postgres || failed=1
+  wait_ready statefulset mx-common-elasticsearch || warn "elasticsearch is not ready; products run with search degraded"
+  wait_ready deployment mx-common-redis || warn "redis is not ready; products fall back to their PostgreSQL queue"
+  [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ] && wait_ready deployment mx-common-hanlp optional
+
+  if [ "$failed" -ne 0 ]; then
+    warn "a required shared component did not become ready"
+    health_json
+    return 1
+  fi
+
+  # Readiness of the pod is not the same as usability of the cluster; wait for
+  # the cluster to actually accept requests before declaring success.
+  local waited=0
+  until es_is_healthy || [ "$waited" -ge "$WAIT_TIMEOUT" ]; do
+    sleep 5
+    waited=$((waited + 5))
+  done
+  if ! es_is_healthy; then
+    warn "Elasticsearch pod is running but the cluster is not yellow/green after ${WAIT_TIMEOUT}s"
+    health_json
+    return 1
+  fi
+
+  # Backups reconcile after the cluster is confirmed usable: registering a
+  # repository against a cluster that is still forming just fails.
+  ensure_snapshot_policy
+
+  say "shared data plane healthy: $(health_json)"
+}
+
+# ---------------------------------------------------------------------------
+# Snapshots
+# ---------------------------------------------------------------------------
+
+# Run a curl inside the Elasticsearch pod. Keeps every cluster call on the same
+# path as the health probe: no port-forward, no cluster credentials on the
+# operator's machine, works identically from CI and from a laptop.
+es_curl() {
+  local method="$1" path="$2" body="${3:-}"
+  if [ -n "$body" ]; then
+    printf '%s' "$body" | kubectl -n "$NAMESPACE" exec -i statefulset/mx-common-elasticsearch \
+      -c elasticsearch -- curl -fsS --max-time 30 -X "$method" \
+      -H 'content-type: application/json' --data-binary @- "http://127.0.0.1:9200${path}"
+  else
+    kubectl -n "$NAMESPACE" exec statefulset/mx-common-elasticsearch -c elasticsearch -- \
+      curl -fsS --max-time 30 -X "$method" "http://127.0.0.1:9200${path}"
+  fi
+}
+
+# Reconcile the snapshot repository and SLM policy.
+#
+# The definitions live in src/elasticsearch/snapshots.mjs so they are reviewable
+# and unit-tested; this only transports them. Failure is reported, not fatal:
+# backup configuration matters, but it must not be able to fail the deploy of an
+# otherwise healthy data plane.
+ensure_snapshot_policy() {
+  local repository="${MX_COMMON_SNAPSHOT_REPOSITORY:-mx-common-snapshots}"
+  local policy_name="${MX_COMMON_SNAPSHOT_POLICY:-mx-common-daily}"
+
+  if ! command -v node >/dev/null 2>&1; then
+    warn "node is unavailable; skipping snapshot policy reconcile"
+    return 0
+  fi
+
+  local repository_body policy_body
+  repository_body="$(node "${ROOT_DIR}/scripts/print-snapshot-config.mjs" repository)" || {
+    warn "could not render the snapshot repository definition"
+    return 0
+  }
+  policy_body="$(node "${ROOT_DIR}/scripts/print-snapshot-config.mjs" policy)" || {
+    warn "could not render the snapshot policy definition"
+    return 0
+  }
+
+  if ! es_curl PUT "/_snapshot/${repository}?verify=true" "$repository_body" >/dev/null 2>&1; then
+    warn "snapshot repository ${repository} could not be registered or verified"
+    warn "  the repository path must be inside the cluster's path.repo setting"
+    return 0
+  fi
+  if ! es_curl PUT "/_slm/policy/${policy_name}" "$policy_body" >/dev/null 2>&1; then
+    warn "snapshot policy ${policy_name} could not be applied"
+    return 0
+  fi
+
+  say "snapshot policy ${policy_name} -> ${repository}"
+  if [ -z "${MX_COMMON_SNAPSHOT_S3_BUCKET:-}" ]; then
+    # Say this every time. A backup on the same disk as the data protects
+    # against deleting an index by mistake, not against losing the machine, and
+    # that distinction is exactly what gets forgotten between now and an outage.
+    say "NOTE: snapshots are stored on this node. They protect against index"
+    say "      loss and bad mappings, NOT against losing the machine. Set"
+    say "      MX_COMMON_SNAPSHOT_S3_BUCKET for off-node durability."
+  fi
+}
+
+# Report whether backups are actually happening, not merely configured.
+snapshot_status() {
+  local policy_name="${MX_COMMON_SNAPSHOT_POLICY:-mx-common-daily}"
+  local policy
+  policy="$(es_curl GET "/_slm/policy/${policy_name}" 2>/dev/null || true)"
+  if [ -z "$policy" ] || [ "$policy" = '{}' ]; then
+    printf 'snapshot policy %s is not registered\n' "$policy_name"
+    return 1
+  fi
+  printf '%s\n' "$policy"
+  # A policy that exists but has never succeeded is the failure this catches:
+  # "configured" and "working" are not the same claim.
+  case "$policy" in
+    *'"last_success"'*) return 0 ;;
+    *) printf 'WARNING: %s has never completed a snapshot successfully\n' "$policy_name" >&2; return 1 ;;
+  esac
+}
+
+cmd_snapshot() {
+  need kubectl
+  case "${1:-status}" in
+    status) snapshot_status ;;
+    run)
+      es_curl POST "/_slm/policy/${MX_COMMON_SNAPSHOT_POLICY:-mx-common-daily}/_execute"
+      printf '\n'
+      say "snapshot started; watch it with: bash scripts/manage.sh snapshot list"
+      ;;
+    list) es_curl GET "/_snapshot/${MX_COMMON_SNAPSHOT_REPOSITORY:-mx-common-snapshots}/_all?verbose=false"; printf '\n' ;;
+    apply) ensure_snapshot_policy ;;
+    *) die "unknown snapshot command: $1" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Per-product provisioning
+# ---------------------------------------------------------------------------
+
+psql_super() {
+  local database="${1:-mx_common}"
+  shift
+  kubectl -n "$NAMESPACE" exec -i statefulset/mx-common-postgres -- \
+    psql -v ON_ERROR_STOP=1 -U mx_common -d "$database" -q "$@"
+}
+
+# `mx-insight-hub` -> `mx_insight_hub`. Identifiers cannot contain hyphens
+# without quoting at every use site, so the mapping is done once, here.
+product_identifier() {
+  printf '%s' "$1" | tr '-' '_'
+}
+
+# Passwords are generated from [A-Za-z0-9] only. That is not cosmetic: it makes
+# single-quoted SQL literals and URL userinfo safe without escaping, removing a
+# whole class of quoting bugs from a path that runs unattended during deploy.
+generate_password() {
+  LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40
+}
+
+# Create (idempotently) a product's role, database and extensions, then print the
+# DSN on stdout. Everything else this script prints goes to stderr, so callers
+# can capture the DSN with a plain command substitution.
+cmd_provision() {
+  need kubectl
+  local product_id="$1"
+  local password="${2:-}"
+  [ -n "$product_id" ] || die "usage: manage.sh provision <productId> [password]"
+  case "$product_id" in
+    [a-z]*[a-z0-9]) : ;;
+    *) die "productId must be lowercase alphanumeric with hyphens: $product_id" ;;
+  esac
+
+  local identifier secret_name
+  identifier="$(product_identifier "$product_id")"
+  secret_name="mx-common-db-${product_id}"
+
+  # The generated password is stored in the shared namespace so re-provisioning
+  # is idempotent. Regenerating it on every deploy would rotate the credential
+  # out from under running product pods.
+  if [ -z "$password" ]; then
+    password="$(kubectl -n "$NAMESPACE" get secret "$secret_name" \
+      -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  fi
+  if [ -z "$password" ]; then
+    password="$(generate_password)"
+    say "generated a database password for ${product_id}" >&2
+  fi
+  case "$password" in
+    *[!A-Za-z0-9]*) die "password must be alphanumeric so it is safe in SQL literals and DSNs" ;;
+  esac
+
+  kubectl -n "$NAMESPACE" create secret generic "$secret_name" \
+    --from-literal=password="$password" \
+    --from-literal=database="$identifier" \
+    --from-literal=username="$identifier" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  # Role first. ALTER on the existing branch keeps the stored secret and the
+  # live credential in agreement even if one of them was changed by hand.
+  psql_super mx_common >/dev/null <<SQL
+DO \$provision\$
+BEGIN
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = '${identifier}') THEN
+    ALTER ROLE ${identifier} WITH LOGIN PASSWORD '${password}';
+  ELSE
+    CREATE ROLE ${identifier} WITH LOGIN PASSWORD '${password}';
+  END IF;
+END
+\$provision\$;
+SQL
+
+  # CREATE DATABASE cannot run inside a transaction or a DO block, so it goes
+  # through psql's \gexec instead of an IF NOT EXISTS guard.
+  psql_super mx_common >/dev/null <<SQL
+SELECT 'CREATE DATABASE ${identifier} OWNER ${identifier}'
+ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${identifier}')\gexec
+SQL
+
+  # Extensions are installed by the superuser into the product database. pg_trgm
+  # is trusted from PostgreSQL 13 and the product role could install it itself,
+  # but `vector` is not — doing both here keeps product migrations free of any
+  # privilege assumption.
+  psql_super "$identifier" >/dev/null <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS vector;
+SQL
+
+  # The product role owns the database but not the public schema, which in
+  # PostgreSQL 15+ is owned by the bootstrap superuser and is not writable by
+  # others by default.
+  psql_super "$identifier" >/dev/null <<SQL
+ALTER SCHEMA public OWNER TO ${identifier};
+GRANT ALL ON SCHEMA public TO ${identifier};
+SQL
+
+  say "provisioned database ${identifier} for ${product_id}" >&2
+  printf 'postgres://%s:%s@mx-common-postgres.%s.svc.cluster.local:5432/%s\n' \
+    "$identifier" "$password" "$NAMESPACE" "$identifier"
+}
+
+cmd_status() {
+  need kubectl
+  kubectl -n "$NAMESPACE" get statefulsets,deployments,services,pvc 2>/dev/null || {
+    say "namespace ${NAMESPACE} does not exist"
+    return 0
+  }
+  kubectl get pv -l app.kubernetes.io/part-of=mx-common -o wide 2>/dev/null || true
+  printf '\nHealth: %s\n' "$(health_json)"
+  say "Elasticsearch indices:"
+  kubectl -n "$NAMESPACE" exec statefulset/mx-common-elasticsearch -c elasticsearch -- \
+    curl -fsS --max-time 5 'http://127.0.0.1:9200/_cat/indices?v&s=index' 2>/dev/null || true
+}
+
+cmd_health() {
+  need kubectl
+  local output
+  output="$(health_json)"
+  printf '%s\n' "$output"
+  es_is_healthy
+}
+
+cmd_plan() {
+  local file
+  while IFS= read -r file; do
+    printf '\n===== %s =====\n' "${file#"${ROOT_DIR}/"}"
+    cat "$file"
+  done < <(manifest_list)
+}
+
+cmd_down() {
+  need kubectl
+  kubectl -n "$NAMESPACE" scale statefulset/mx-common-elasticsearch --replicas=0 >/dev/null 2>&1 || true
+  kubectl -n "$NAMESPACE" scale deployment/mx-common-redis --replicas=0 >/dev/null 2>&1 || true
+  kubectl -n "$NAMESPACE" scale deployment/mx-common-hanlp --replicas=0 >/dev/null 2>&1 || true
+  kubectl -n "$NAMESPACE" scale statefulset/mx-common-postgres --replicas=0 >/dev/null 2>&1 || true
+  say "shared workloads scaled to zero. PVCs, PVs, indices and the namespace were preserved."
+}
+
+cmd_logs() {
+  need kubectl
+  case "${1:-elasticsearch}" in
+    elasticsearch) kubectl -n "$NAMESPACE" logs statefulset/mx-common-elasticsearch --tail=200 ;;
+    redis) kubectl -n "$NAMESPACE" logs deployment/mx-common-redis --tail=200 ;;
+    hanlp) kubectl -n "$NAMESPACE" logs deployment/mx-common-hanlp --tail=200 ;;
+    postgres) kubectl -n "$NAMESPACE" logs statefulset/mx-common-postgres --tail=200 ;;
+    *) die "unknown service: $1" ;;
+  esac
+}
+
+main() {
+  case "${1:-}" in
+    ensure) cmd_ensure ;;
+    provision) shift; cmd_provision "${1:-}" "${2:-}" ;;
+    snapshot) shift; cmd_snapshot "${1:-status}" ;;
+    status) cmd_status ;;
+    health) cmd_health ;;
+    plan) cmd_plan ;;
+    down) cmd_down ;;
+    logs) shift; cmd_logs "${1:-elasticsearch}" ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

@@ -9,6 +9,8 @@
     "prebuild": "node ../mx-launcher/ui-design/scripts/build.mjs",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "start": "node server/index.mjs",
+    "projector": "node server/workers/projector.mjs",
+    "ingest": "node server/workers/ingest.mjs",
     "migrate": "node server/migrate.mjs",
     "test": "node --test tests/server/*.test.mjs tests/sites-worker.test.mjs && bash tests/manage-script.test.sh",
     "test:server": "node --test tests/server/*.test.mjs",
@@ -18,6 +20,7 @@
     "test:ops": "bash tests/manage-script.test.sh"
   },
   "dependencies": {
+    "@qpjoy/mx-common": "file:../mx-common",
     "pg": "8.22.0"
   },
   "devDependencies": {

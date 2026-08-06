@@ -1,10 +1,16 @@
 import { createServer } from 'node:http'
+import { createPool, createQueue } from '@qpjoy/mx-common'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { NightAllAdapter } from './adapters/night-all.mjs'
 import { createApp } from './app.mjs'
 import { loadConfig } from './config.mjs'
 import { HubService } from './hub-service.mjs'
+import { createAgent } from './agent/index.mjs'
+import { createSearch } from './search/index.mjs'
+import { EmbeddingPipeline } from './embedding/pipeline.mjs'
+import { ExternalImporter } from './ingest/external/importer.mjs'
+import { createIdentityService } from './identity/index.mjs'
 import { MemoryStore } from './stores/memory-store.mjs'
 import { createPostgresStore } from './stores/postgres-store.mjs'
 
@@ -15,21 +21,55 @@ export async function createRuntime(config = loadConfig()) {
     ? await createPostgresStore({ connectionString: config.databaseUrl })
     : new MemoryStore()
   const adapter = new NightAllAdapter(config.nightAll)
+  // The queue is only reachable with a real database. Without one the admin
+  // backfill routes report unavailable rather than pretending to schedule work.
+  const pool = config.storeDriver === 'postgres'
+    ? createPool(config.common.postgres, { applicationName: 'mx-insight-hub-api' })
+    : null
+  const queue = pool ? createQueue({ ...config.common.queue, driver: 'postgres' }, { pool }) : null
   const service = new HubService({
     store,
     adapter,
     apiKeyPepper: config.apiKeyPepper,
     reservationLeaseMs: config.reservationLeaseMs,
   })
+  // Constructed unconditionally; it reports `enabled: false` when no Launcher
+  // URL is configured, so the admin-token path is unaffected either way.
+  const identity = createIdentityService({ store, launcher: config.launcher })
+  // External imports write through the canonical path, which only the
+  // PostgreSQL store implements.
+  const importer = config.storeDriver === 'postgres' ? new ExternalImporter({ store }) : null
+  // Reports `available: false` with no providers configured; every caller has a
+  // deterministic fallback, so the agent is an accelerator, not a dependency.
+  const agent = createAgent({ config })
+  // Read-only here. The API serves retrieval queries and reports pipeline
+  // status; the writing stages belong to the projector workload.
+  const search = pool ? createSearch({ pool, config: config.common }) : null
+  const embedding = pool && search
+    ? new EmbeddingPipeline({
+        pool,
+        agent,
+        client: search.client,
+        segmenter: search.segmenter,
+        chunkIndexSet: search.chunkIndexSet,
+      })
+    : null
   const app = createApp({
     service,
     store,
     adapter,
+    identity,
+    queue,
+    importer,
+    agent,
+    search,
+    embedding,
+    backfillPlatforms: config.backfill.platforms,
     adminToken: config.adminToken,
     listenerMode: config.listenerMode,
     staticRoot: config.listenerMode === 'public' ? null : resolve(projectRoot, 'dist/client'),
   })
-  return { app, store, adapter, service }
+  return { app, store, adapter, service, identity, queue, pool, importer, agent, search, embedding }
 }
 
 export async function start(config = loadConfig()) {
@@ -42,6 +82,7 @@ export async function start(config = loadConfig()) {
   const close = async () => {
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))
     await runtime.store.close()
+    await runtime.pool?.end()
   }
   return { ...runtime, server, close }
 }

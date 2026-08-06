@@ -325,6 +325,81 @@ export class MemoryStore {
   async ingestSearchResult() {
     return { ingested: 0, changed: 0, skipped: 0, runId: null }
   }
+
+  // ---- federated identity ------------------------------------------------
+  //
+  // Unlike ingestion, identity IS implemented here. Local development and the
+  // test suite need to exercise sign-in, scoping and membership without a
+  // database, and an identity model that only works against PostgreSQL would go
+  // untested until deployment.
+
+  #memberByBinding = new Map()
+  #members = new Map()
+  #memberships = new Map()
+  #platformAdmins = new Set()
+
+  async upsertExternalIdentity({ issuer, subject, audience, displayName, ...rest }) {
+    const bindingKey = `${issuer} ${subject} ${audience}`
+    const existingId = this.#memberByBinding.get(bindingKey)
+    if (existingId) {
+      const member = this.#members.get(existingId)
+      if (displayName) member.displayName = displayName
+      return { ...member }
+    }
+    const member = {
+      id: randomUUID(),
+      displayName: displayName || subject,
+      status: 'active',
+      binding: { issuer, subject, audience, ...rest },
+    }
+    this.#members.set(member.id, member)
+    this.#memberByBinding.set(bindingKey, member.id)
+    return { ...member }
+  }
+
+  async syncPlatformAdmin(memberId, { granted }) {
+    if (granted) this.#platformAdmins.add(memberId)
+    else this.#platformAdmins.delete(memberId)
+    return granted
+  }
+
+  async listTenantMemberships(memberId) {
+    return [...(this.#memberships.get(memberId) || new Map()).values()].map((membership) => ({
+      ...membership,
+      tenantName: this.tenants.get(membership.tenantId)?.name ?? null,
+    }))
+  }
+
+  async listMembers() {
+    return [...this.#members.values()].map((member) => ({
+      id: member.id,
+      displayName: member.displayName,
+      status: member.status,
+      platformAdmin: this.#platformAdmins.has(member.id),
+      memberships: [...(this.#memberships.get(member.id) || new Map()).values()],
+    }))
+  }
+
+  async grantTenantMembership({ memberId, tenantId, role }) {
+    if (!this.#members.has(memberId)) {
+      throw new AppError(404, 'member_not_found', 'Member not found')
+    }
+    if (!this.tenants.has(tenantId)) {
+      throw new AppError(404, 'tenant_not_found', 'Tenant not found')
+    }
+    const forMember = this.#memberships.get(memberId) || new Map()
+    const membership = { id: randomUUID(), memberId, tenantId, role, status: 'active' }
+    forMember.set(tenantId, membership)
+    this.#memberships.set(memberId, forMember)
+    return { ...membership }
+  }
+
+  async revokeTenantMembership({ memberId, tenantId }) {
+    const membership = this.#memberships.get(memberId)?.get(tenantId)
+    if (!membership) throw new AppError(404, 'membership_not_found', 'Membership not found')
+    membership.status = 'suspended'
+    return { memberId, tenantId, status: 'suspended' }
+  }
 }
 
 function summarizeUsage(records) {

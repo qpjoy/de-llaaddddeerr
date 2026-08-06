@@ -1,0 +1,204 @@
+# Shared Elasticsearch for MX product search projections.
+#
+# Every index is a rebuildable projection of some product's PostgreSQL (ADR-0005),
+# so this workload is explicitly NOT backed up as a source of truth and its loss
+# is a reindex, not a data loss. It is sized and secured accordingly.
+#
+# Security posture: authentication is disabled and the cluster is reachable only
+# from namespaces labelled as MX product planes (see 40-network-policy.yaml).
+# That is acceptable only because the cluster is single-node and private. Turning
+# on xpack.security is the prerequisite for ever exposing this beyond the node.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mx-common-elasticsearch-config
+  namespace: mx-common
+data:
+  elasticsearch.yml: |
+    cluster.name: mx-common
+    network.host: 0.0.0.0
+
+    # Cluster discovery, NOT `discovery.type: single-node`.
+    #
+    # This matters more than it looks. A node started with `single-node`
+    # discovery forms a cluster that can never accept a second node: it skips
+    # the bootstrap protocol entirely, and growing out of it means creating a
+    # new cluster and reindexing everything into it. Seed-host discovery behaves
+    # identically at one node while leaving 1 -> 3 as a replica count change plus
+    # a rolling restart.
+    #
+    # The cost of not using `single-node` is that production bootstrap checks are
+    # enforced (heap min == max, vm.max_map_count, file descriptors). Those are
+    # satisfied by this manifest and by mx-common's `ensure`, and they are checks
+    # worth passing anyway.
+    discovery.seed_hosts: ["mx-common-elasticsearch-headless"]
+    cluster.initial_master_nodes: ["mx-common-elasticsearch-0"]
+
+    xpack.security.enabled: false
+    xpack.license.self_generated.type: basic
+    # ILM runs the hot/warm/cold transitions declared in code by
+    # mx-common/src/elasticsearch/index-manager.mjs.
+    xpack.ml.enabled: false
+    # Poll faster than the 10m default so a rollover condition met during a
+    # deploy smoke test is actually observable.
+    indices.lifecycle.poll_interval: 1m
+    path.repo: ["/usr/share/elasticsearch/snapshots"]
+---
+# Headless Service for peer discovery. Separate from the client Service because
+# discovery needs per-pod DNS records, which a load-balanced ClusterIP cannot
+# provide.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-common-elasticsearch-headless
+  namespace: mx-common
+  labels:
+    app.kubernetes.io/name: mx-common-elasticsearch
+spec:
+  clusterIP: None
+  # Peers must resolve each other before they are ready -- that is what being
+  # ready depends on.
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: mx-common-elasticsearch
+  ports:
+    - name: transport
+      port: 9300
+      targetPort: 9300
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-common-elasticsearch
+  namespace: mx-common
+  labels:
+    app.kubernetes.io/name: mx-common-elasticsearch
+spec:
+  selector:
+    app.kubernetes.io/name: mx-common-elasticsearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mx-common-elasticsearch
+  namespace: mx-common
+spec:
+  serviceName: mx-common-elasticsearch-headless
+  # Scale to 3 for real high availability, together with
+  # MX_COMMON_ELASTICSEARCH_REPLICAS=1 so shards actually have somewhere to
+  # replicate to. Note that 3 pods on ONE machine is not high availability: it
+  # survives a pod restart, not a node failure. HA needs more hardware, not more
+  # replicas.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-common-elasticsearch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-common-elasticsearch
+        app.kubernetes.io/part-of: mx-common
+        mx-common.io/service: elasticsearch
+    spec:
+      serviceAccountName: mx-common
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 0
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:9.4.2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9200
+            - name: transport
+              containerPort: 9300
+          env:
+            # node.name must match the pod name so cluster.initial_master_nodes
+            # resolves on first bootstrap.
+            - name: node.name
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: ES_JAVA_OPTS
+              value: "-Xms1g -Xmx1g"
+            - name: TZ
+              value: Asia/Shanghai
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?local=true
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+            - name: snapshots
+              mountPath: /usr/share/elasticsearch/snapshots
+            - name: config
+              mountPath: /usr/share/elasticsearch/config/elasticsearch.yml
+              subPath: elasticsearch.yml
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: mx-common-elasticsearch-config
+        - name: snapshots
+          persistentVolumeClaim:
+            claimName: mx-common-elasticsearch-snapshots
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mx-common-elasticsearch-snapshots
+  namespace: mx-common
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi

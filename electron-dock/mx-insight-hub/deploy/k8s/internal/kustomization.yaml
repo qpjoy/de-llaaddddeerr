@@ -3,8 +3,9 @@ kind: Kustomization
 resources:
   - 00-namespace.yaml
   - 05-serviceaccount.yaml
-  - 10-postgres.yaml
   - 20-migration-job.yaml
   - 30-public-api.yaml
   - 31-admin-api.yaml
+  - 32-projector.yaml
+  - 33-ingest.yaml
   - 40-network-policy.yaml

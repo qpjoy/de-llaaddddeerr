@@ -1,0 +1,91 @@
+# Default-deny ingress for the shared data plane, then explicit allows.
+#
+# The shared stores run without authentication, so the network IS the boundary.
+# Only namespaces carrying `mx-common.io/client: allowed` may reach them, which
+# makes onboarding a new product an explicit, reviewable namespace label rather
+# than an implicit consequence of scheduling a pod on the node.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-common-default-deny
+  namespace: mx-common
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-common-elasticsearch-ingress
+  namespace: mx-common
+spec:
+  podSelector:
+    matchLabels:
+      mx-common.io/service: elasticsearch
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              mx-common.io/client: allowed
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 9200
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-common-redis-ingress
+  namespace: mx-common
+spec:
+  podSelector:
+    matchLabels:
+      mx-common.io/service: redis
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              mx-common.io/client: allowed
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-common-postgres-ingress
+  namespace: mx-common
+spec:
+  podSelector:
+    matchLabels:
+      mx-common.io/service: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              mx-common.io/client: allowed
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-common-hanlp-ingress
+  namespace: mx-common
+spec:
+  podSelector:
+    matchLabels:
+      mx-common.io/service: hanlp
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              mx-common.io/client: allowed
+      ports:
+        - protocol: TCP
+          port: 8000

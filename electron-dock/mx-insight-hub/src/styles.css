@@ -1074,3 +1074,97 @@ select {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Data-plane pages (external sources, agent, retrieval)
+   --------------------------------------------------------------------------- */
+
+/* Degradation notices. Deliberately inline and in the reading flow rather than
+   a toast: "the agent was unavailable so this mapping is rule-inferred" has to
+   stay visible next to the thing it qualifies, not disappear after four
+   seconds. */
+.mih-inline-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--qp-space-2, 0.5rem);
+  margin: var(--qp-space-3, 0.75rem) 0;
+  padding: var(--qp-space-3, 0.75rem) var(--qp-space-4, 1rem);
+  border: 1px solid color-mix(in oklab, var(--qp-color-warning, #d99a2b) 45%, transparent);
+  border-radius: var(--qp-radius-md, 8px);
+  background: color-mix(in oklab, var(--qp-color-warning, #d99a2b) 12%, transparent);
+  color: var(--qp-color-text, inherit);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.mih-code-block {
+  max-height: 20rem;
+  overflow: auto;
+  margin: var(--qp-space-3, 0.75rem) 0;
+  padding: var(--qp-space-4, 1rem);
+  border: 1px solid var(--qp-color-border, rgba(255, 255, 255, 0.12));
+  border-radius: var(--qp-radius-md, 8px);
+  background: var(--qp-color-surface-sunken, rgba(0, 0, 0, 0.28));
+  font-family: var(--qp-font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.mih-inline-form {
+  display: flex;
+  gap: var(--qp-space-3, 0.75rem);
+  align-items: center;
+  margin-bottom: var(--qp-space-4, 1rem);
+}
+
+.mih-inline-form .qp-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mih-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--qp-space-3, 0.75rem);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: mih-result;
+}
+
+.mih-result-list > li {
+  padding: var(--qp-space-4, 1rem);
+  border: 1px solid var(--qp-color-border, rgba(255, 255, 255, 0.12));
+  border-radius: var(--qp-radius-md, 8px);
+  background: var(--qp-color-surface, transparent);
+}
+
+.mih-result-list > li > strong {
+  display: block;
+  margin-bottom: var(--qp-space-2, 0.5rem);
+}
+
+/* Chunk text can be long; clamping keeps the ranked list scannable while the
+   full text stays one click away at the source URL. */
+.mih-result-list > li > p {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 0 0 var(--qp-space-2, 0.5rem);
+  color: var(--qp-color-text-muted, inherit);
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.mih-result-list__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--qp-space-3, 0.75rem);
+  margin-bottom: var(--qp-space-2, 0.5rem);
+  color: var(--qp-color-text-muted, inherit);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}

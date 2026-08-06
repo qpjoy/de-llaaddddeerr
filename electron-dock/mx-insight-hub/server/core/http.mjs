@@ -18,6 +18,29 @@ export async function readJson(request, limitBytes = 1_048_576) {
   }
 }
 
+/**
+ * Read a raw binary body, for file imports.
+ *
+ * File uploads deliberately do NOT use multipart/form-data. Multipart needs its
+ * own parser for attacker-controlled input — boundary handling, header
+ * injection, part-count exhaustion — and this path already accepts untrusted
+ * spreadsheets. A raw body with the filename in a query parameter carries the
+ * same information with no parser at all.
+ */
+export async function readBuffer(request, limitBytes = 64 * 1024 * 1024) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of request) {
+    size += chunk.length
+    if (size > limitBytes) {
+      throw new AppError(413, 'payload_too_large', `Upload exceeds ${limitBytes} bytes`)
+    }
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) throw new AppError(400, 'empty_body', 'Request body is empty')
+  return Buffer.concat(chunks)
+}
+
 export function sendJson(response, status, payload, headers = {}) {
   const body = JSON.stringify(payload)
   response.writeHead(status, {

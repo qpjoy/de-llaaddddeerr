@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  Brain,
+  Database,
+  DownloadSimple,
+  MagnifyingGlass,
   Pulse,
   ChartLine,
   Coins,
@@ -25,20 +29,36 @@ import {
   RuntimePage,
   UsagePage,
 } from './pages.jsx'
+import { AgentPage, BackfillPage, RetrievalPage, SourcesPage } from './pages-data.jsx'
 
 const SESSION_KEY = 'mx-insight-hub.admin-token'
 
+// `capability` gates the route against what the session actually grants. The
+// console renders itself from the server's answer rather than from a local role
+// guess, so a scoped user never sees a control that would 403.
 const ROUTES = [
-  { path: '/dashboard', label: '仪表盘', description: '网关运营总览', icon: House, group: '业务治理', component: DashboardPage },
-  { path: '/consumers', label: '调用者', description: '租户与业务身份', icon: Users, group: '业务治理', component: ConsumersPage },
-  { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage },
-  { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage },
-  { path: '/platforms', label: '平台能力', description: '平台授权与策略', icon: Globe, group: '策略控制', component: PlatformsPage },
-  { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage },
-  { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage },
+  { path: '/dashboard', label: '仪表盘', description: '网关运营总览', icon: House, group: '业务治理', component: DashboardPage, capability: 'usage.read' },
+  { path: '/consumers', label: '调用者', description: '租户与业务身份', icon: Users, group: '业务治理', component: ConsumersPage, capability: 'consumer.read' },
+  { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
+  { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
+  { path: '/platforms', label: '平台能力', description: '平台授权与策略', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
+  { path: '/sources', label: '外部数据源', description: '表格、文本与异构库', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write' },
+  { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write' },
+  { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read' },
+  { path: '/agent', label: '中心 Agent', description: '模型链路与降级', icon: Brain, group: '数据平面', component: AgentPage, capability: 'membership.write' },
+  { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
+  { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read' },
 ]
 
 const ROUTE_MAP = new Map(ROUTES.map((route) => [route.path, route]))
+
+function visibleRoutes(session) {
+  // No session information (admin token, or an older server) shows everything;
+  // the server still enforces, so this only affects what is offered.
+  if (!session?.capabilities) return ROUTES
+  const granted = new Set(session.capabilities)
+  return ROUTES.filter((route) => !route.capability || granted.has(route.capability))
+}
 
 function readSessionToken() {
   try {
@@ -138,14 +158,14 @@ function SessionGate({ checking, message, onAuthenticate }) {
   )
 }
 
-function Navigation({ activePath, onNavigate }) {
-  const groups = [...new Set(ROUTES.map((route) => route.group))]
+function Navigation({ activePath, onNavigate, routes = ROUTES }) {
+  const groups = [...new Set(routes.map((route) => route.group))]
   return (
     <nav className="mih-nav" aria-label="管理台导航">
       {groups.map((group) => (
         <section className="mih-nav__group" key={group}>
           <h2>{group}</h2>
-          {ROUTES.filter((route) => route.group === group).map((route) => {
+          {routes.filter((route) => route.group === group).map((route) => {
             const Icon = route.icon
             const active = route.path === activePath
             return (
@@ -175,6 +195,7 @@ export function App() {
   const [location, setLocation] = useState(readLocation)
   const [menuOpen, setMenuOpen] = useState(false)
   const [toasts, setToasts] = useState([])
+  const [session, setSession] = useState(null)
 
   useEffect(() => {
     if (!window.location.hash) {
@@ -191,9 +212,14 @@ export function App() {
   useEffect(() => {
     if (authState !== 'checking' || !token) return undefined
     let active = true
-    adminApi.dashboard(token)
-      .then(() => {
-        if (active) setAuthState('signed-in')
+    // `session` rather than `dashboard`: it is the endpoint that reports who
+    // the caller is and what they may do, and it is reachable by every valid
+    // principal including one with no tenant membership yet.
+    adminApi.session(token)
+      .then((data) => {
+        if (!active) return
+        setSession(data)
+        setAuthState('signed-in')
       })
       .catch((error) => {
         if (!active) return
@@ -208,9 +234,12 @@ export function App() {
   }, [authState, token])
 
   const authenticate = useCallback(async (candidate) => {
-    await adminApi.dashboard(candidate)
+    // Accepts an admin token or a Launcher session token; the server decides
+    // which it is and answers with the capabilities that follow.
+    const data = await adminApi.session(candidate)
     writeSessionToken(candidate)
     setToken(candidate)
+    setSession(data)
     setAuthMessage('')
     setAuthState('signed-in')
   }, [])
@@ -220,6 +249,7 @@ export function App() {
     setToken('')
     setAuthState('signed-out')
     setAuthMessage(message)
+    setSession(null)
     setMenuOpen(false)
   }, [])
 
@@ -251,7 +281,11 @@ export function App() {
     return <SessionGate checking={authState === 'checking'} message={authMessage} onAuthenticate={authenticate} />
   }
 
-  const route = ROUTE_MAP.get(location.path) || ROUTE_MAP.get('/dashboard')
+  const routes = visibleRoutes(session)
+  const requested = ROUTE_MAP.get(location.path)
+  // Falling back to the first permitted route rather than the dashboard: a user
+  // scoped out of the dashboard would otherwise land on a permanent 403.
+  const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
   const Page = route.component
   const pageProps = {
     token,
@@ -270,10 +304,17 @@ export function App() {
           <img src="assets/mx-insight-logo-mark.png" alt="" />
           <span><strong>MX Insight Hub</strong><small>Data gateway control plane</small></span>
         </a>
-        <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} />
+        <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} routes={routes} />
         <section className="mih-sidebar-session">
           <ShieldCheck size={20} weight="duotone" aria-hidden="true" />
-          <span><strong>Admin session</strong><small>仅当前浏览器会话</small></span>
+          <span>
+            <strong>{session?.displayName || 'Admin session'}</strong>
+            <small>
+              {session?.kind === 'launcher-user'
+                ? (session.platformAdmin ? '平台管理员' : `${session.memberships?.length || 0} 个租户`)
+                : '仅当前浏览器会话'}
+            </small>
+          </span>
           <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="退出管理会话" onClick={() => signOut()}>
             <SignOut size={17} aria-hidden="true" />
           </button>

@@ -1631,13 +1631,22 @@ mixed_port_listener_line() {
 	local port="${1:-}"
 	[[ -n "$port" ]] || return 0
 	command -v ss >/dev/null 2>&1 || return 0
-	ss -lntp 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$") { print; exit }'
+	# Deliberately no `exit` in awk: quitting early makes ss die of SIGPIPE, and
+	# under `set -o pipefail` that non-zero status would abort the whole script.
+	ss -lntp 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$") && !seen { print; seen = 1 }' || true
+	return 0
 }
 
+# Always succeeds; prints nothing when there is no live main PID. A bare
+# `[[ ... ]] && printf` would make the function return 1, which `set -e` turns
+# into an abort at the caller's assignment.
 service_main_pid() {
 	local pid
 	pid="$(systemctl show -p MainPID --value "$MIHOMO_SERVICE_NAME" 2>/dev/null || true)"
-	[[ -n "$pid" && "$pid" != "0" ]] && printf '%s' "$pid"
+	if [[ -n "$pid" && "$pid" != "0" ]]; then
+		printf '%s' "$pid"
+	fi
+	return 0
 }
 
 # True only when someone *else* holds the port; this instance already owning it

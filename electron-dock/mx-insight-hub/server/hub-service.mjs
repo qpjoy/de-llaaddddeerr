@@ -71,6 +71,7 @@ export class HubService {
     apiKeyPepper,
     defaultPolicy = DEFAULT_POLICY,
     reservationLeaseMs = 120_000,
+    ingestQueueName = 'mx-insight-hub:ingest',
     logger = console,
   }) {
     this.store = store
@@ -78,6 +79,10 @@ export class HubService {
     this.apiKeyPepper = apiKeyPepper
     this.defaultPolicy = defaultPolicy
     this.reservationLeaseMs = reservationLeaseMs
+    // Fully-qualified queue name: the store writes the row directly inside the
+    // commit transaction and so cannot go through the queue object's own
+    // namespacing.
+    this.ingestQueueName = ingestQueueName
     this.logger = logger
   }
 
@@ -305,29 +310,44 @@ export class HubService {
       })
       const responseBody = upstream.payload
       const itemCount = Array.isArray(responseBody?.data?.items) ? responseBody.data.items.length : 0
-      await this.store.commitRequest(activeRequestId, {
+      const commit = {
         responseStatus: 200,
         responseBody,
         unitsActual: Math.max(1, itemCount),
         upstreamLatencyMs: Math.round(performance.now() - startedAt),
-      })
+      }
 
-      // Persist the result as authoritative Hub data. Best-effort by design:
-      // the caller already holds a committed, billed response, so an ingest
-      // failure must not turn a successful upstream call into an error. It is
-      // logged for the P2 backfill worker instead.
-      try {
-        await this.store.ingestSearchResult({
-          platform,
-          rawPayload: upstream.raw,
-          queryFingerprint: fingerprint,
-          requestId: activeRequestId,
+      // Persist the result as authoritative Hub data.
+      //
+      // Ingestion is queued rather than run inline. Two reasons, and the second
+      // matters more than the first:
+      //
+      //  1. Latency. Normalising and writing a page of items costs several
+      //     round trips the caller should not wait for; the billed upstream
+      //     result is already in hand.
+      //  2. Durability. The commit and the enqueue happen in ONE transaction,
+      //     so a committed request can never exist without its ingest job. The
+      //     previous inline version was best-effort and swallowed failures,
+      //     which meant a transient database error silently lost the data with
+      //     nothing left to retry from.
+      if (this.store.commitRequestAndEnqueueIngest) {
+        await this.store.commitRequestAndEnqueueIngest(activeRequestId, commit, {
+          queue: this.ingestQueueName,
+          payload: {
+            kind: 'search-result',
+            platform,
+            rawPayload: upstream.raw,
+            queryFingerprint: fingerprint,
+            requestId: activeRequestId,
+          },
+          // The request id is already unique per billed call, so a retried
+          // commit cannot enqueue the same page twice.
+          dedupeKey: `search-result:${activeRequestId}`,
         })
-      } catch (error) {
-        this.logger?.error?.(
-          { requestId: activeRequestId, platform, error },
-          'ingest of upstream search result failed',
-        )
+      } else {
+        // Stores without a transactional queue (the in-memory one) keep the
+        // simple path; they persist nothing anyway.
+        await this.store.commitRequest(activeRequestId, commit)
       }
 
       return { status: 200, body: responseBody, requestId: activeRequestId, replay: false }

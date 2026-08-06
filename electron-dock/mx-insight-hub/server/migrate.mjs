@@ -55,5 +55,11 @@ export async function runMigrations({ connectionString, migrationsDir = resolve(
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await runMigrations({ connectionString: process.env.DATABASE_URL })
+  const connectionString = process.env.DATABASE_URL
+  // mx-common's schema (job queue, cursors) first: Hub migrations may reference
+  // `mxq` objects, and both sets share one `schema_migrations` table, keyed by
+  // filename. The `mxcommon_` prefix keeps the two namespaces from colliding.
+  const { runCommonMigrations } = await import('@qpjoy/mx-common')
+  await runCommonMigrations({ connectionString })
+  await runMigrations({ connectionString })
 }

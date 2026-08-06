@@ -7,12 +7,14 @@ COMPOSE_FILE="${ROOT_DIR}/deploy/compose/docker-compose.yml"
 SEARCH_COMPOSE_DIR="${ROOT_DIR}/deploy/compose/search"
 SEARCH_COMPOSE_FILE="${SEARCH_COMPOSE_DIR}/docker-compose.yml"
 K8S_DIR="${ROOT_DIR}/deploy/k8s/internal"
+MX_COMMON_DIR="${ELECTRON_DOCK_DIR}/mx-common"
 RUNTIME_DIR="${ROOT_DIR}/.runtime"
-POSTGRES_RUNTIME_IMAGE="postgres:16-bookworm"
-POSTGRES_PV_NAME="mx-insight-hub-postgres-local-pv"
-POSTGRES_PVC_NAME="data-mx-insight-hub-postgres-0"
-POSTGRES_POD_NAME="mx-insight-hub-postgres-0"
-POSTGRES_HOST_PATH="/var/lib/mx-insight-hub/k8s/postgres"
+# Retired local PostgreSQL. The Hub database now lives in the shared mx-common
+# instance; these names exist only so `decommission-local-postgres` can find and
+# remove what an earlier deploy left behind.
+LEGACY_POSTGRES_PV_NAME="mx-insight-hub-postgres-local-pv"
+LEGACY_POSTGRES_PVC_NAME="data-mx-insight-hub-postgres-0"
+LEGACY_POSTGRES_HOST_PATH="/var/lib/mx-insight-hub/k8s/postgres"
 
 DEPLOY_TMP_BASE=""
 DEPLOY_TMP_DIR=""
@@ -151,6 +153,10 @@ Optional local search (independent from Hub startup):
 
 Internal Kubernetes:
   bash scripts/manage.sh ops internal-production plan|deploy|apply|status|smoke|logs|down
+  bash scripts/manage.sh ops internal-production decommission-local-postgres
+
+PostgreSQL, Elasticsearch and Redis live in the shared mx-common data plane;
+`deploy` reconciles it first and provisions the Hub's own database inside it.
 
 The production command loads .env.internal when present. Keep that file mode 0600.
 `down` scales Hub workloads to zero and intentionally preserves PostgreSQL/PVC/Secrets.
@@ -280,7 +286,9 @@ require_production_env() {
   load_env_file "${ROOT_DIR}/.env.internal"
   : "${MX_INSIGHT_ADMIN_TOKEN:?MX_INSIGHT_ADMIN_TOKEN is required in .env.internal or the environment}"
   : "${MX_INSIGHT_API_KEY_PEPPER:?MX_INSIGHT_API_KEY_PEPPER is required in .env.internal or the environment}"
-  : "${MX_INSIGHT_POSTGRES_PASSWORD:?MX_INSIGHT_POSTGRES_PASSWORD is required in .env.internal or the environment}"
+  # MX_INSIGHT_POSTGRES_PASSWORD is optional: the database now lives in the
+  # shared mx-common instance, which generates and stores the per-product
+  # credential itself. Set it only to pin a specific password.
   # hostNetwork overlay: the API pods share the host netns, so the default reaches
   # host-local Night-All (127.0.0.1:13141) with no Night-All bind change required.
   NIGHT_ALL_BASE_URL="${NIGHT_ALL_BASE_URL:-http://127.0.0.1:13141}"
@@ -289,8 +297,10 @@ require_production_env() {
   MX_INSIGHT_HUB_ADMIN_ENTRYPOINT="${MX_INSIGHT_HUB_ADMIN_ENTRYPOINT:-http://10.88.88.88:18151}"
   [ "${#MX_INSIGHT_ADMIN_TOKEN}" -ge 32 ] || die "MX_INSIGHT_ADMIN_TOKEN must be at least 32 characters"
   [ "${#MX_INSIGHT_API_KEY_PEPPER}" -ge 32 ] || die "MX_INSIGHT_API_KEY_PEPPER must be at least 32 characters"
-  [ "${#MX_INSIGHT_POSTGRES_PASSWORD}" -ge 24 ] || die "MX_INSIGHT_POSTGRES_PASSWORD must be at least 24 characters"
-  case "$MX_INSIGHT_ADMIN_TOKEN:$MX_INSIGHT_API_KEY_PEPPER:$MX_INSIGHT_POSTGRES_PASSWORD" in
+  if [ -n "${MX_INSIGHT_POSTGRES_PASSWORD:-}" ]; then
+    [ "${#MX_INSIGHT_POSTGRES_PASSWORD}" -ge 24 ] || die "MX_INSIGHT_POSTGRES_PASSWORD must be at least 24 characters"
+  fi
+  case "$MX_INSIGHT_ADMIN_TOKEN:$MX_INSIGHT_API_KEY_PEPPER:${MX_INSIGHT_POSTGRES_PASSWORD:-}" in
     *local-*-change-me*) die "Local example secrets cannot be used for internal-production" ;;
   esac
   case "$NIGHT_ALL_BASE_URL" in
@@ -300,8 +310,10 @@ require_production_env() {
   if [ -n "${NIGHT_ALL_SERVICE_TOKEN:-}" ] && [ "${#NIGHT_ALL_SERVICE_TOKEN}" -lt 32 ]; then
     die "NIGHT_ALL_SERVICE_TOKEN must be empty or at least 32 characters"
   fi
-  case "$MX_INSIGHT_POSTGRES_PASSWORD" in
-    *[!A-Za-z0-9._~-]*) die "MX_INSIGHT_POSTGRES_PASSWORD must be URL-safe (A-Z a-z 0-9 . _ ~ -)" ;;
+  # mx-common builds the DSN, so the password must survive URL userinfo and a
+  # single-quoted SQL literal without escaping.
+  case "${MX_INSIGHT_POSTGRES_PASSWORD:-x}" in
+    *[!A-Za-z0-9]*) die "MX_INSIGHT_POSTGRES_PASSWORD must be alphanumeric (A-Z a-z 0-9)" ;;
   esac
 }
 
@@ -336,32 +348,19 @@ require_existing_secret_match() {
 
 validate_existing_runtime_secret() {
   local namespace="mx-insight-hub"
-  local secret_name pvc_phase pv_phase
+  local secret_name
   secret_name="$(
     kubectl -n "$namespace" get secret mx-insight-hub-secrets \
       --ignore-not-found -o name
   )"
   if [ -z "$secret_name" ]; then
-    pvc_phase="$(
-      kubectl -n "$namespace" get pvc "$POSTGRES_PVC_NAME" \
-        -o jsonpath='{.status.phase}' --ignore-not-found
-    )"
-    pv_phase="$(
-      kubectl get pv "$POSTGRES_PV_NAME" \
-        -o jsonpath='{.status.phase}' --ignore-not-found
-    )"
-    if [ "$pvc_phase" = Bound ] || [ -n "$pv_phase" ] \
-      || [ -e "${POSTGRES_HOST_PATH}/PG_VERSION" ]; then
-      die "mx-insight-hub-secrets is missing while retained PostgreSQL storage exists. Restore the original Secret/.env.internal values before deploying; automatic credential reconstruction is unsafe."
-    fi
     return 0
   fi
   need base64
-  require_existing_secret_match \
-    "$namespace" \
-    postgres-password \
-    "$MX_INSIGHT_POSTGRES_PASSWORD" \
-    "PostgreSQL password differs from the retained deployment; automatic rotation is blocked to protect existing PGDATA. Restore the original .env.internal value or use an explicit database password-rotation procedure."
+  # The database credential is no longer checked here: mx-common owns it, stores
+  # it in its own Secret, and re-provisioning reuses the stored value. What still
+  # must not drift is the API-key pepper, because rotating it silently
+  # invalidates every issued API key.
   require_existing_secret_match \
     "$namespace" \
     MX_INSIGHT_API_KEY_PEPPER \
@@ -371,7 +370,17 @@ validate_existing_runtime_secret() {
 
 create_runtime_config() {
   local namespace="mx-insight-hub"
-  local database_url="postgres://mx_insight:${MX_INSIGHT_POSTGRES_PASSWORD}@mx-insight-hub-postgres.${namespace}.svc.cluster.local:5432/mx_insight_hub"
+  local database_url="${MX_INSIGHT_DATABASE_URL:?ensure_shared_data_plane must run before create_runtime_config}"
+
+  # Shared data-plane endpoints. Empty values are meaningful: an unset
+  # Elasticsearch URL makes the Hub run search-free rather than fail to start,
+  # which is what keeps the Night-All path independent of the search rollout.
+  local elasticsearch_url="${MX_COMMON_ELASTICSEARCH_URL:-http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200}"
+  local redis_url="${MX_COMMON_REDIS_URL:-redis://mx-common-redis.mx-common.svc.cluster.local:6379}"
+  if [ "${MX_INSIGHT_SEARCH_READY:-0}" != "1" ] && [ -z "${MX_COMMON_ELASTICSEARCH_URL:-}" ]; then
+    say "shared search is not ready; deploying with MX_COMMON_ELASTICSEARCH_URL unset (search degraded)"
+    elasticsearch_url=""
+  fi
 
   kubectl -n "$namespace" create configmap mx-insight-hub-config \
     --from-literal=MX_INSIGHT_HOST=0.0.0.0 \
@@ -379,14 +388,29 @@ create_runtime_config() {
     --from-literal=NIGHT_ALL_BASE_URL="$NIGHT_ALL_BASE_URL" \
     --from-literal=NIGHT_ALL_TIMEOUT_MS="${NIGHT_ALL_TIMEOUT_MS:-30000}" \
     --from-literal=NIGHT_ALL_READY_MODE="${NIGHT_ALL_READY_MODE:-ready_only}" \
+    --from-literal=MX_COMMON_ELASTICSEARCH_URL="$elasticsearch_url" \
+    --from-literal=MX_COMMON_REDIS_URL="$redis_url" \
+    --from-literal=MX_COMMON_HANLP_URL="${MX_COMMON_HANLP_URL:-}" \
+    --from-literal=MX_COMMON_QUEUE_DRIVER="${MX_COMMON_QUEUE_DRIVER:-postgres}" \
+    --from-literal=MX_INSIGHT_EMBEDDING_MODEL="${MX_INSIGHT_EMBEDDING_MODEL:-}" \
+    --from-literal=MX_INSIGHT_EMBEDDING_DIMENSIONS="${MX_INSIGHT_EMBEDDING_DIMENSIONS:-}" \
+    --from-literal=MX_INSIGHT_LAUNCHER_URL="${MX_INSIGHT_LAUNCHER_URL:-}" \
+    --from-literal=MX_INSIGHT_LAUNCHER_AUDIENCE="${MX_INSIGHT_LAUNCHER_AUDIENCE:-mx-insight-hub}" \
+    --from-literal=MX_INSIGHT_LAUNCHER_ADMIN_SCOPES="${MX_INSIGHT_LAUNCHER_ADMIN_SCOPES:-}" \
+    --from-literal=MX_INSIGHT_BACKFILL_PLATFORMS="${MX_INSIGHT_BACKFILL_PLATFORMS:-xiaohongshu,douyin,twitter}" \
+    --from-literal=MX_INSIGHT_AGENT_PROVIDERS="${MX_INSIGHT_AGENT_PROVIDERS:-}" \
+    --from-literal=MX_INSIGHT_EMBEDDING_PROVIDERS="${MX_INSIGHT_EMBEDDING_PROVIDERS:-}" \
     --dry-run=client -o yaml | kubectl apply -f -
 
   kubectl -n "$namespace" create secret generic mx-insight-hub-secrets \
-    --from-literal=postgres-password="$MX_INSIGHT_POSTGRES_PASSWORD" \
     --from-literal=DATABASE_URL="$database_url" \
     --from-literal=MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN" \
     --from-literal=MX_INSIGHT_API_KEY_PEPPER="$MX_INSIGHT_API_KEY_PEPPER" \
     --from-literal=NIGHT_ALL_SERVICE_TOKEN="${NIGHT_ALL_SERVICE_TOKEN:-}" \
+    --from-literal=NIGHT_ALL_EXPORT_TOKEN="${NIGHT_ALL_EXPORT_TOKEN:-}" \
+    --from-literal=OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+    --from-literal=DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" \
+    --from-literal=MX_INSIGHT_MODEL_API_KEY="${MX_INSIGHT_MODEL_API_KEY:-}" \
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
@@ -467,22 +491,6 @@ containerd_import_docker_image() {
     || die "containerd import did not create required image ref $canonical"
 }
 
-ensure_k8s_runtime_image() {
-  local image="$1"
-  local canonical
-  canonical="$(canonical_image_ref "$image")"
-  if containerd_image_ref_present "$canonical"; then
-    say "containerd runtime image already present: $canonical"
-    return 0
-  fi
-  if ! docker image inspect "$image" >/dev/null 2>&1; then
-    say "pull runtime image through Docker: $image"
-    docker pull "$image"
-    DEPLOY_PULLED_RUNTIME_IMAGE="$image"
-  fi
-  containerd_import_docker_image "$image"
-}
-
 # Opt-in: create (once) a scoped buildx builder that routes image pulls AND RUN
 # steps through MX_INSIGHT_BUILD_PROXY, WITHOUT touching the Docker daemon's own
 # proxy. Host network lets it reach a 127.0.0.1 proxy; the network.host
@@ -506,6 +514,65 @@ ensure_build_proxy_builder() {
   fi
 }
 
+# Reconcile the shared mx-common data plane (Elasticsearch, Redis) before the
+# Hub rolls out.
+#
+# Failure here is deliberately NOT fatal. Elasticsearch is a rebuildable
+# projection, not a source of truth: the Hub's Night-All path, PostgreSQL
+# ingestion and billing all work without it, and aborting a Hub deploy because
+# search is unhealthy would convert a degraded feature into an outage. Set
+# MX_INSIGHT_REQUIRE_SEARCH=1 to invert that for environments where search is
+# considered part of the product's minimum viable surface.
+ensure_shared_data_plane() {
+  local manage="${MX_COMMON_DIR}/scripts/manage.sh"
+  if [ ! -x "$manage" ] && [ ! -f "$manage" ]; then
+    say "mx-common is not present at ${MX_COMMON_DIR}; skipping shared data plane"
+    MX_INSIGHT_SEARCH_READY=0
+    return 0
+  fi
+
+  say "reconciling shared data plane (mx-common)"
+  # Hub's namespace must carry the client label before its pods can reach the
+  # shared stores; mx-common applies it from this list.
+  if MX_COMMON_CLIENT_NAMESPACES="mx-insight-hub ${MX_COMMON_EXTRA_CLIENT_NAMESPACES:-}" \
+     bash "$manage" ensure; then
+    MX_INSIGHT_SEARCH_READY=1
+    say "shared data plane is healthy"
+  else
+    MX_INSIGHT_SEARCH_READY=0
+    if [ "${MX_INSIGHT_REQUIRE_SEARCH:-0}" = "1" ]; then
+      die "shared data plane is unhealthy and MX_INSIGHT_REQUIRE_SEARCH=1"
+    fi
+    say "WARNING: shared data plane is degraded; continuing with search degraded." >&2
+    say "         Night-All dispatch and billing are unaffected." >&2
+    say "         Diagnose with: bash ${manage#"${ELECTRON_DOCK_DIR}/"} status" >&2
+  fi
+
+  # The database is not optional, so this runs even on a degraded data plane and
+  # a failure here IS fatal: without it the Hub has nowhere to record requests,
+  # usage or ingested content.
+  ensure_hub_database "$manage"
+}
+
+# Obtain the Hub's dedicated database inside the shared instance.
+#
+# mx-common owns the credential: it generates one on first provision and stores
+# it in its own Secret, so re-running deploy reuses the same password instead of
+# rotating it out from under running pods. Setting MX_INSIGHT_POSTGRES_PASSWORD
+# pins a specific value instead.
+ensure_hub_database() {
+  local manage="$1"
+  say "provisioning database mx_insight_hub in the shared instance"
+  MX_INSIGHT_DATABASE_URL="$(
+    bash "$manage" provision mx-insight-hub "${MX_INSIGHT_POSTGRES_PASSWORD:-}"
+  )" || die "could not provision the Hub database in mx-common"
+  case "$MX_INSIGHT_DATABASE_URL" in
+    postgres://*) : ;;
+    *) die "mx-common returned an unexpected connection string" ;;
+  esac
+  say "database ready: mx-common-postgres.mx-common.svc.cluster.local/mx_insight_hub"
+}
+
 build_and_import_image() {
   local image="${MX_INSIGHT_IMAGE:-mx-insight-hub:shadow}"
   need docker
@@ -527,6 +594,7 @@ build_and_import_image() {
       --label dev.qpjoy.mx-insight-hub.project=mx-insight-hub \
       --label dev.qpjoy.mx-insight-hub.image=internal \
       --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \
+      --build-context "mx_common=${MX_COMMON_DIR}" \
       -t "$image" \
       -f "${ROOT_DIR}/Dockerfile" \
       --load \
@@ -538,6 +606,7 @@ build_and_import_image() {
       --label dev.qpjoy.mx-insight-hub.project=mx-insight-hub \
       --label dev.qpjoy.mx-insight-hub.image=internal \
       --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \
+      --build-context "mx_common=${MX_COMMON_DIR}" \
       -t "$image" \
       -f "${ROOT_DIR}/Dockerfile" \
       "$ROOT_DIR"
@@ -552,177 +621,6 @@ k8s_default_storage_class() {
     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}{"\t"}{.metadata.annotations.storageclass\.beta\.kubernetes\.io/is-default-class}{"\n"}{end}' \
     2>/dev/null \
     | awk '$2 == "true" || $3 == "true" { print $1; exit }'
-}
-
-prepare_postgres_host_path() {
-  if [ "$(id -u)" -eq 0 ]; then
-    install -d -o 999 -g 999 -m 0700 "$POSTGRES_HOST_PATH"
-  else
-    need sudo
-    sudo install -d -o 999 -g 999 -m 0700 "$POSTGRES_HOST_PATH"
-  fi
-}
-
-validate_postgres_local_pv() {
-  local path reclaim claim_namespace claim_name storage_class
-  path="$(kubectl get pv "$POSTGRES_PV_NAME" -o jsonpath='{.spec.hostPath.path}')"
-  reclaim="$(kubectl get pv "$POSTGRES_PV_NAME" -o jsonpath='{.spec.persistentVolumeReclaimPolicy}')"
-  claim_namespace="$(kubectl get pv "$POSTGRES_PV_NAME" -o jsonpath='{.spec.claimRef.namespace}')"
-  claim_name="$(kubectl get pv "$POSTGRES_PV_NAME" -o jsonpath='{.spec.claimRef.name}')"
-  storage_class="$(kubectl get pv "$POSTGRES_PV_NAME" -o jsonpath='{.spec.storageClassName}')"
-  [ "$path" = "$POSTGRES_HOST_PATH" ] \
-    || die "$POSTGRES_PV_NAME points to unexpected hostPath $path"
-  [ "$reclaim" = Retain ] \
-    || die "$POSTGRES_PV_NAME must use Retain, found $reclaim"
-  [ "$claim_namespace" = mx-insight-hub ] && [ "$claim_name" = "$POSTGRES_PVC_NAME" ] \
-    || die "$POSTGRES_PV_NAME has an unexpected claimRef ${claim_namespace}/${claim_name}"
-  [ -z "$storage_class" ] \
-    || die "$POSTGRES_PV_NAME must not use a StorageClass, found $storage_class"
-}
-
-ensure_postgres_local_pv() {
-  local phase
-  prepare_postgres_host_path
-  phase="$(
-    kubectl get pv "$POSTGRES_PV_NAME" \
-      -o jsonpath='{.status.phase}' --ignore-not-found
-  )"
-  if [ -n "$phase" ]; then
-    validate_postgres_local_pv
-  fi
-  case "$phase" in
-    Released|Failed)
-      say "repair $phase local PV metadata; retained data stays at $POSTGRES_HOST_PATH"
-      kubectl delete pv "$POSTGRES_PV_NAME" --wait=false
-      kubectl wait --for=delete "pv/${POSTGRES_PV_NAME}" --timeout=60s
-      ;;
-    Available|Bound)
-      say "reuse local PostgreSQL PV $POSTGRES_PV_NAME ($phase)"
-      return 0
-      ;;
-    "")
-      ;;
-    *)
-      die "$POSTGRES_PV_NAME is in unsupported phase $phase"
-      ;;
-  esac
-  kubectl apply -f "${K8S_DIR}/08-postgres-local-pv.yaml"
-}
-
-ensure_postgres_storage() {
-  local pvc_phase pvc_class pvc_volume default_class pv_phase
-  pvc_phase="$(
-    kubectl -n mx-insight-hub get pvc "$POSTGRES_PVC_NAME" \
-      -o jsonpath='{.status.phase}' --ignore-not-found
-  )"
-  pvc_class="$(
-    kubectl -n mx-insight-hub get pvc "$POSTGRES_PVC_NAME" \
-      -o jsonpath='{.spec.storageClassName}' --ignore-not-found
-  )"
-  pvc_volume="$(
-    kubectl -n mx-insight-hub get pvc "$POSTGRES_PVC_NAME" \
-      -o jsonpath='{.spec.volumeName}' --ignore-not-found
-  )"
-  pv_phase="$(
-    kubectl get pv "$POSTGRES_PV_NAME" \
-      -o jsonpath='{.status.phase}' --ignore-not-found
-  )"
-
-  if [ "$pvc_phase" = Bound ]; then
-    if [ "$pvc_volume" = "$POSTGRES_PV_NAME" ]; then
-      validate_postgres_local_pv
-      prepare_postgres_host_path
-      say "reuse bound PostgreSQL PVC ${pvc_volume}"
-    else
-      say "reuse bound PostgreSQL PVC backed by ${pvc_volume:-an external provisioner}"
-    fi
-    return 0
-  fi
-  if [ -n "$pvc_volume" ] && [ "$pvc_volume" != "$POSTGRES_PV_NAME" ]; then
-    die "$POSTGRES_PVC_NAME requests unexpected PV $pvc_volume"
-  fi
-  if [ -n "$pv_phase" ]; then
-    ensure_postgres_local_pv
-    return 0
-  fi
-  if [ -n "$pvc_class" ]; then
-    [ -z "$pvc_phase" ] || [ "$pvc_phase" = Pending ] \
-      || die "$POSTGRES_PVC_NAME is in unsupported phase $pvc_phase"
-    say "PostgreSQL PVC uses StorageClass $pvc_class; wait for its provisioner"
-    return 0
-  fi
-  if [ "$pvc_phase" = Pending ]; then
-    say "existing classless PostgreSQL PVC is immutable; bind a retained local PV in place"
-    ensure_postgres_local_pv
-    return 0
-  fi
-  default_class="$(k8s_default_storage_class)"
-  if [ -n "$default_class" ]; then
-    [ -z "$pvc_phase" ] \
-      || die "$POSTGRES_PVC_NAME is in unsupported phase $pvc_phase"
-    say "use default StorageClass $default_class for PostgreSQL"
-    return 0
-  fi
-  [ -z "$pvc_phase" ] || [ "$pvc_phase" = Pending ] \
-    || die "$POSTGRES_PVC_NAME is in unsupported phase $pvc_phase"
-  say "no usable StorageClass detected; prepare retained single-node PostgreSQL PV"
-  ensure_postgres_local_pv
-}
-
-reconcile_postgres_pod_security_context() {
-  local namespace="mx-insight-hub"
-  local desired_user="999"
-  local template_pod_user template_container_user template_user
-  local pod_ref pod_pod_user pod_container_user pod_user
-
-  template_pod_user="$(
-    kubectl -n "$namespace" get statefulset mx-insight-hub-postgres \
-      -o jsonpath='{.spec.template.spec.securityContext.runAsUser}'
-  )"
-  template_container_user="$(
-    kubectl -n "$namespace" get statefulset mx-insight-hub-postgres \
-      -o 'jsonpath={.spec.template.spec.containers[?(@.name=="postgres")].securityContext.runAsUser}'
-  )"
-  template_user="${template_container_user:-$template_pod_user}"
-  [ "$template_user" = "$desired_user" ] \
-    || die "PostgreSQL StatefulSet must run as UID $desired_user; found ${template_user:-root/default}"
-
-  pod_ref="$(
-    kubectl -n "$namespace" get pod "$POSTGRES_POD_NAME" \
-      --ignore-not-found -o name
-  )"
-  [ -n "$pod_ref" ] || return 0
-  pod_pod_user="$(
-    kubectl -n "$namespace" get pod "$POSTGRES_POD_NAME" \
-      --ignore-not-found -o jsonpath='{.spec.securityContext.runAsUser}'
-  )"
-  pod_container_user="$(
-    kubectl -n "$namespace" get pod "$POSTGRES_POD_NAME" \
-      --ignore-not-found \
-      -o 'jsonpath={.spec.containers[?(@.name=="postgres")].securityContext.runAsUser}'
-  )"
-  pod_user="${pod_container_user:-$pod_pod_user}"
-  if [ "$pod_user" != "$desired_user" ]; then
-    say "replace legacy PostgreSQL Pod running as ${pod_user:-root/default}; PVC and PGDATA stay attached"
-    kubectl -n "$namespace" delete pod "$POSTGRES_POD_NAME" \
-      --ignore-not-found --wait=false
-  fi
-}
-
-k8s_postgres_diagnostics() {
-  say "PostgreSQL readiness diagnostics"
-  kubectl -n mx-insight-hub get statefulset mx-insight-hub-postgres \
-    -o jsonpath='StatefulSet runAsUser={.spec.template.spec.securityContext.runAsUser}{" image="}{.spec.template.spec.containers[?(@.name=="postgres")].image}{"\n"}' || true
-  kubectl -n mx-insight-hub get pod "$POSTGRES_POD_NAME" \
-    -o jsonpath='Pod runAsUser={.spec.securityContext.runAsUser}{" imageID="}{.status.containerStatuses[?(@.name=="postgres")].imageID}{"\n"}' || true
-  kubectl -n mx-insight-hub get statefulset,pod,pvc -o wide || true
-  kubectl get pv "$POSTGRES_PV_NAME" -o wide || true
-  kubectl get storageclass || true
-  kubectl -n mx-insight-hub describe pvc "$POSTGRES_PVC_NAME" || true
-  kubectl -n mx-insight-hub describe pod mx-insight-hub-postgres-0 || true
-  kubectl -n mx-insight-hub logs mx-insight-hub-postgres-0 -c postgres --tail=200 || true
-  kubectl -n mx-insight-hub logs mx-insight-hub-postgres-0 -c postgres --previous --tail=200 || true
-  kubectl -n mx-insight-hub get events --sort-by=.lastTimestamp | tail -n 80 || true
 }
 
 k8s_migration_diagnostics() {
@@ -743,22 +641,57 @@ k8s_api_diagnostics() {
   kubectl -n mx-insight-hub get events --sort-by=.lastTimestamp | tail -n 80 || true
 }
 
+# A local PostgreSQL left over from a previous release keeps running and keeps
+# holding its PVC. Removing it automatically here would delete a database during
+# a routine deploy, so this only reports it.
+warn_local_postgres_present() {
+  kubectl -n mx-insight-hub get statefulset mx-insight-hub-postgres \
+    >/dev/null 2>&1 || return 0
+  say "NOTE: a local PostgreSQL StatefulSet from a previous release is still running." >&2
+  say "      The Hub now uses mx-common; this workload is unused but not removed." >&2
+  say "      Remove it deliberately with:" >&2
+  say "        bash scripts/manage.sh ops internal-production decommission-local-postgres" >&2
+}
+
+# Explicit, irreversible removal of the retired local PostgreSQL.
+#
+# Separate command, never part of deploy, and it names what it will destroy
+# before doing it. `MX_INSIGHT_CONFIRM_DESTROY=mx-insight-hub` is required
+# because there is no undo: the PV is Retain, but the host directory is removed.
+decommission_local_postgres() {
+  local namespace="mx-insight-hub"
+  if [ "${MX_INSIGHT_CONFIRM_DESTROY:-}" != "mx-insight-hub" ]; then
+    say "This permanently deletes the retired local PostgreSQL and its data:" >&2
+    say "  statefulset/mx-insight-hub-postgres" >&2
+    say "  pvc/${LEGACY_POSTGRES_PVC_NAME}" >&2
+    say "  pv/${LEGACY_POSTGRES_PV_NAME}" >&2
+    say "  host path ${LEGACY_POSTGRES_HOST_PATH}" >&2
+    die "Re-run with MX_INSIGHT_CONFIRM_DESTROY=mx-insight-hub to proceed"
+  fi
+  kubectl -n "$namespace" delete statefulset mx-insight-hub-postgres --ignore-not-found
+  kubectl -n "$namespace" delete service mx-insight-hub-postgres --ignore-not-found
+  kubectl -n "$namespace" delete pvc "$LEGACY_POSTGRES_PVC_NAME" --ignore-not-found
+  kubectl delete pv "$LEGACY_POSTGRES_PV_NAME" --ignore-not-found
+  if [ -d "$LEGACY_POSTGRES_HOST_PATH" ]; then
+    rm -rf -- "$LEGACY_POSTGRES_HOST_PATH" 2>/dev/null \
+      || sudo -n rm -rf -- "$LEGACY_POSTGRES_HOST_PATH" 2>/dev/null \
+      || say "could not remove ${LEGACY_POSTGRES_HOST_PATH}; remove it as root" >&2
+  fi
+  say "retired local PostgreSQL removed."
+}
+
 apply_k8s() {
   local namespace="mx-insight-hub"
-  ensure_k8s_runtime_image "$POSTGRES_RUNTIME_IMAGE"
   kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
   kubectl apply -f "${K8S_DIR}/05-serviceaccount.yaml"
   validate_existing_runtime_secret
   create_runtime_config
   sync_launcher_secret
-  ensure_postgres_storage
-  kubectl apply -f "${K8S_DIR}/10-postgres.yaml"
-  reconcile_postgres_pod_security_context
-  if ! kubectl -n "$namespace" rollout status \
-    statefulset/mx-insight-hub-postgres --timeout=300s; then
-    k8s_postgres_diagnostics
-    die "PostgreSQL did not become ready"
-  fi
+  # PostgreSQL is no longer a Hub workload. The database lives in the shared
+  # mx-common instance and was provisioned by ensure_shared_data_plane; a
+  # previously deployed local StatefulSet is left untouched here and removed
+  # only by the explicit `decommission-local-postgres` action.
+  warn_local_postgres_present
 
   kubectl -n "$namespace" delete job mx-insight-hub-migrate --ignore-not-found
   render_file "${K8S_DIR}/20-migration-job.yaml" | kubectl apply -f -
@@ -770,6 +703,8 @@ apply_k8s() {
 
   render_file "${K8S_DIR}/30-public-api.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/31-admin-api.yaml" | kubectl apply -f -
+  render_file "${K8S_DIR}/32-projector.yaml" | kubectl apply -f -
+  render_file "${K8S_DIR}/33-ingest.yaml" | kubectl apply -f -
   kubectl apply -f "${K8S_DIR}/40-network-policy.yaml"
   kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-public deployment/mx-insight-hub-admin
   if ! kubectl -n "$namespace" rollout status \
@@ -778,6 +713,32 @@ apply_k8s() {
       deployment/mx-insight-hub-admin --timeout=300s; then
     k8s_api_diagnostics
     die "Hub API workloads did not become ready"
+  fi
+
+  # The projector is scaled to match search availability rather than deployed
+  # unconditionally: with no Elasticsearch URL it would exit(2) and crash-loop,
+  # turning "search is not configured" into a permanently red workload. Outbox
+  # events accumulate meanwhile and are drained once it is scaled back up --
+  # that is exactly what the outbox is for.
+  if [ "${MX_INSIGHT_SEARCH_READY:-0}" = "1" ]; then
+    kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-projector
+    if ! kubectl -n "$namespace" rollout status \
+      deployment/mx-insight-hub-projector --timeout=180s; then
+      kubectl -n "$namespace" logs deployment/mx-insight-hub-projector --tail=60 >&2 || true
+      say "WARNING: projector did not become ready; search will lag until it recovers." >&2
+    fi
+  else
+    kubectl -n "$namespace" scale deployment/mx-insight-hub-projector --replicas=0 >/dev/null 2>&1 || true
+    say "projector scaled to zero (search not available). Outbox events are retained."
+  fi
+  # The ingest worker only needs PostgreSQL and Night-All, so it rolls out
+  # regardless of search availability. It is the workload that must not stop: a
+  # missed ingest is a permanent hole, a missed projection is a reindex.
+  kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-ingest
+  if ! kubectl -n "$namespace" rollout status \
+    deployment/mx-insight-hub-ingest --timeout=180s; then
+    kubectl -n "$namespace" logs deployment/mx-insight-hub-ingest --tail=60 >&2 || true
+    die "ingest worker did not become ready"
   fi
   refresh_launcher_workload
 }
@@ -869,7 +830,7 @@ ops_action() {
   load_env_file "${ROOT_DIR}/.env.internal"
   case "$action" in
     plan)
-      for file in 00-namespace.yaml 05-serviceaccount.yaml 10-postgres.yaml 20-migration-job.yaml 30-public-api.yaml 31-admin-api.yaml 40-network-policy.yaml; do
+      for file in 00-namespace.yaml 05-serviceaccount.yaml 20-migration-job.yaml 30-public-api.yaml 31-admin-api.yaml 32-projector.yaml 33-ingest.yaml 40-network-policy.yaml; do
         render_file "${K8S_DIR}/${file}"
       done
       ;;
@@ -880,6 +841,7 @@ ops_action() {
       require_single_k8s_node
       init_deploy_runtime
       acquire_deploy_lock
+      ensure_shared_data_plane
       build_and_import_image
       apply_k8s
       k8s_smoke
@@ -894,14 +856,19 @@ ops_action() {
       require_single_k8s_node
       init_deploy_runtime
       acquire_deploy_lock
+      ensure_shared_data_plane
       apply_k8s
       k8s_smoke
       ensure_default_api_key
       print_deploy_summary
       ;;
+    decommission-local-postgres)
+      need kubectl
+      decommission_local_postgres
+      ;;
     status)
       kubectl -n mx-insight-hub get pods,services,pvc,jobs
-      kubectl get pv "$POSTGRES_PV_NAME" -o wide 2>/dev/null || true
+      kubectl get pv "$LEGACY_POSTGRES_PV_NAME" -o wide 2>/dev/null || true
       ;;
     smoke)
       : "${MX_INSIGHT_ADMIN_TOKEN:?MX_INSIGHT_ADMIN_TOKEN is required for smoke}"

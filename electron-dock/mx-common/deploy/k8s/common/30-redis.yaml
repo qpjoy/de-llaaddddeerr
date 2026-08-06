@@ -1,0 +1,112 @@
+# Shared Redis for MX product modules.
+#
+# Scope is deliberately narrow: rate limiting, singleflight, short-lived caches,
+# and BullMQ for products that opt into that driver. It is NOT the durable job
+# store — mx-common's default queue driver keeps jobs in each product's own
+# PostgreSQL so a job and its originating row commit together (see
+# migrations/mxcommon_001_queue.sql). Redis here is therefore a cache-class
+# dependency: losing it degrades throughput, never correctness.
+#
+# `appendonly no` follows from that. Persisting a cache buys nothing and costs
+# fsync latency on a single shared node.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mx-common-redis-config
+  namespace: mx-common
+data:
+  redis.conf: |
+    bind 0.0.0.0
+    protected-mode no
+    appendonly no
+    save ""
+    maxmemory 512mb
+    maxmemory-policy allkeys-lru
+    tcp-keepalive 60
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-common-redis
+  namespace: mx-common
+  labels:
+    app.kubernetes.io/name: mx-common-redis
+spec:
+  selector:
+    app.kubernetes.io/name: mx-common-redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-common-redis
+  namespace: mx-common
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-common-redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-common-redis
+        app.kubernetes.io/part-of: mx-common
+        mx-common.io/service: redis
+    spec:
+      serviceAccountName: mx-common
+      automountServiceAccountToken: false
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["redis-server", "/etc/redis/redis.conf"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 640Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/redis
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: mx-common-redis-config

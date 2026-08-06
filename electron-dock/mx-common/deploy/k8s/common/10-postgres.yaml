@@ -1,0 +1,118 @@
+# Shared PostgreSQL for MX product modules.
+#
+# Isolation model (per ADR-0003): one instance, one database and one role per
+# product, provisioned by `manage.sh provision <productId>`. Products cannot
+# read each other's data, backups can be taken and restored per database, and no
+# product can hold a transaction open across another product's tables. The
+# instance is shared; the transactional boundary is not.
+#
+# The `mx_common` superuser owns nothing application-facing. It exists to create
+# per-product roles, databases and extensions; product workloads connect as
+# their own least-privileged role and cannot reach another product's database.
+#
+# The image is `pgvector/pgvector:pg16` rather than stock postgres:16 because
+# semantic retrieval needs the `vector` type, and swapping the image of a
+# running database later means a restart at exactly the wrong moment. Note it
+# still lacks PostGIS; a geo-enabled build is a separate decision (see
+# migrations/006 in mx-insight-hub, which stores lat/lng as plain columns).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-common-postgres
+  namespace: mx-common
+  labels:
+    app.kubernetes.io/name: mx-common-postgres
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mx-common-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mx-common-postgres
+  namespace: mx-common
+spec:
+  serviceName: mx-common-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-common-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-common-postgres
+        app.kubernetes.io/part-of: mx-common
+        mx-common.io/service: postgres
+    spec:
+      serviceAccountName: mx-common
+      automountServiceAccountToken: false
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: mx_common
+            - name: POSTGRES_USER
+              value: mx_common
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mx-common-secrets
+                  key: postgres-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U mx_common -d mx_common"]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U mx_common -d mx_common"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi

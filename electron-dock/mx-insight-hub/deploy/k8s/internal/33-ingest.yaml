@@ -1,0 +1,119 @@
+# Ingest worker: queued search results and Night-All backfill.
+#
+# Distinct from the projector because the two fail for different reasons and
+# must be restartable independently. This worker needs PostgreSQL and Night-All;
+# the projector needs Elasticsearch. Collapsing them would let a search outage
+# stop ingestion, which is the one thing that must not stop -- a missed ingest
+# is a permanent hole, while a missed projection is a reindex.
+#
+# hostNetwork, unlike the projector, because backfill calls Night-All on the
+# host at 127.0.0.1:13141 exactly as the API planes do.
+#
+# No Service and no ingress: nothing calls it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-insight-hub-ingest
+  namespace: mx-insight-hub
+  labels:
+    app.kubernetes.io/name: mx-insight-hub-ingest
+    app.kubernetes.io/part-of: mx-insight-hub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-insight-hub-ingest
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-insight-hub-ingest
+        app.kubernetes.io/part-of: mx-insight-hub
+        mx-insight-hub.io/plane: worker
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: mx-insight-hub
+      automountServiceAccountToken: false
+      # Long enough to finish the page in flight and commit its cursor, so a
+      # rollout costs at most a replayed page rather than a lost one.
+      terminationGracePeriodSeconds: 90
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: projector
+          image: mx-insight-hub:shadow
+          imagePullPolicy: Never
+          command: ["node", "server/workers/ingest.mjs"]
+          envFrom:
+            - configMapRef:
+                name: mx-insight-hub-config
+          env:
+            - name: MX_INSIGHT_LISTENER_MODE
+              value: public
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: DATABASE_URL
+            - name: MX_INSIGHT_API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_API_KEY_PEPPER
+            # Model credentials, referenced by name from the provider chain in
+            # MX_INSIGHT_AGENT_PROVIDERS. Optional: an absent key disables that
+            # provider and the chain fails over to the next one.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: OPENAI_API_KEY
+                  optional: true
+            - name: DEEPSEEK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: DEEPSEEK_API_KEY
+                  optional: true
+            - name: MX_INSIGHT_MODEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_MODEL_API_KEY
+                  optional: true
+            - name: NIGHT_ALL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: NIGHT_ALL_SERVICE_TOKEN
+            - name: NIGHT_ALL_EXPORT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: NIGHT_ALL_EXPORT_TOKEN
+                  optional: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

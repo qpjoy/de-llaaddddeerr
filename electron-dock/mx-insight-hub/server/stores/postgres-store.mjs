@@ -503,6 +503,158 @@ export class PostgresStore {
     }
   }
 
+  /**
+   * Commit a billed request and queue its ingestion in ONE transaction.
+   *
+   * This is the property the PostgreSQL queue driver exists for. Committing the
+   * request and then enqueueing separately leaves a window where the caller has
+   * a billed, committed response and the follow-up ingest job does not exist —
+   * a silent data hole that nothing would ever detect. Here, if the request row
+   * says committed, the job is in `mxq.jobs` by the same COMMIT.
+   *
+   * The payload travels inside the job rather than being re-fetched later,
+   * because the upstream call was billed and is not repeatable.
+   */
+  async commitRequestAndEnqueueIngest(id, { responseStatus, responseBody, unitsActual, upstreamLatencyMs }, job) {
+    return withPgTransaction(this.pool, async (client) => {
+      const { rows } = await client.query(
+        `UPDATE usage_requests
+            SET status = 'committed', response_status = $2, response_body = $3,
+                units_actual = $4, upstream_latency_ms = $5, completed_at = now()
+          WHERE id = $1
+          RETURNING *`,
+        [id, responseStatus, responseBody, unitsActual, upstreamLatencyMs],
+      )
+      if (!rows[0]) throw new AppError(404, 'request_not_found', 'Request not found')
+
+      if (job) {
+        await client.query(
+          `INSERT INTO mxq.jobs (queue, payload, dedupe_key, priority)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (queue, dedupe_key) WHERE dedupe_key IS NOT NULL AND status IN ('pending','running')
+           DO NOTHING`,
+          [job.queue, job.payload, job.dedupeKey, job.priority ?? 100],
+        )
+      }
+      return requestRecord(rows[0])
+    })
+  }
+
+  /**
+   * Write mapped external records through the same canonical path as Night-All
+   * content.
+   *
+   * Sharing `core.canonical_records` rather than giving external data its own
+   * table is what makes a spreadsheet row and a scraped post searchable by the
+   * same query and projectable by the same worker. They are separated by
+   * `dataset_id`, not by physical schema, so external data never silently
+   * merges into platform analytics while still living in one queryable model.
+   */
+  async ingestExternalRecords({ datasetId, platform, records, importRunId, connectorId }) {
+    if (records.length === 0) return { ingested: 0, changed: 0 }
+    const stream = `${platform}.external.v1`
+    const client = await this.pool.connect()
+    let changed = 0
+    try {
+      await client.query('BEGIN')
+      for (const record of records) {
+        await client.query(
+          `INSERT INTO ingest.source_objects
+             (id, connector_id, stream_id, object_type, source_key,
+              payload_sha256, raw_payload, source_updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (connector_id, stream_id, object_type, source_key) DO UPDATE SET
+             payload_sha256 = EXCLUDED.payload_sha256,
+             raw_payload = EXCLUDED.raw_payload,
+             source_updated_at = EXCLUDED.source_updated_at,
+             last_seen_at = now()`,
+          [
+            randomUUID(), connectorId, stream, record.objectType, record.externalId,
+            record.payloadSha256, record.rawItem, record.eventTime,
+          ],
+        )
+
+        const upserted = await client.query(
+          `INSERT INTO core.canonical_records
+             (id, dataset_id, platform, object_type, external_id, schema_version,
+              payload_sha256, content_type, url, title, body,
+              author_external_id, author_name, event_time, collected_at,
+              latitude, longitude, country_code, admin1_code, admin2_code,
+              stable_fields, extensions)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                   $16, $17, $18, $19, $20, $21, $22)
+           ON CONFLICT (dataset_id, platform, object_type, external_id) DO UPDATE SET
+             payload_sha256 = EXCLUDED.payload_sha256,
+             content_type = EXCLUDED.content_type,
+             url = EXCLUDED.url,
+             title = EXCLUDED.title,
+             body = EXCLUDED.body,
+             author_external_id = EXCLUDED.author_external_id,
+             author_name = EXCLUDED.author_name,
+             event_time = EXCLUDED.event_time,
+             collected_at = EXCLUDED.collected_at,
+             latitude = EXCLUDED.latitude,
+             longitude = EXCLUDED.longitude,
+             country_code = EXCLUDED.country_code,
+             admin1_code = EXCLUDED.admin1_code,
+             admin2_code = EXCLUDED.admin2_code,
+             stable_fields = EXCLUDED.stable_fields,
+             extensions = EXCLUDED.extensions,
+             last_seen_at = now(),
+             current_revision = core.canonical_records.current_revision
+               + (core.canonical_records.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256)::int,
+             projection_revision = core.canonical_records.projection_revision
+               + (core.canonical_records.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256)::int
+           RETURNING id, current_revision, projection_revision`,
+          [
+            randomUUID(), datasetId, platform, record.objectType, record.externalId,
+            'external.v1', record.payloadSha256, record.contentType, record.url,
+            record.title, record.body, record.authorExternalId, record.authorName,
+            record.eventTime, record.collectedAt, record.latitude, record.longitude,
+            record.countryCode, record.admin1Code, record.admin2Code,
+            record.stableFields, record.extensions,
+          ],
+        )
+        const { id, current_revision: revision, projection_revision: projection } = upserted.rows[0]
+
+        const revisionInsert = await client.query(
+          `INSERT INTO core.record_revisions
+             (record_id, revision, payload_sha256, normalized_payload, parser_version)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (record_id, revision) DO NOTHING`,
+          [id, revision, record.payloadSha256, record.rawItem, record.parserVersion],
+        )
+        if (revisionInsert.rowCount > 0) changed += 1
+
+        // Same outbox contract as the Night-All path: the projector cannot tell
+        // (and must not care) which ingest route produced the event.
+        await client.query(
+          `INSERT INTO outbox.projection_events
+             (aggregate_type, aggregate_id, event_type, projection_revision, payload)
+           VALUES ('canonical_record', $1, 'upsert', $2, $3)
+           ON CONFLICT (aggregate_id, projection_revision) DO NOTHING`,
+          [id, projection, { datasetId, platform, objectType: record.objectType }],
+        )
+      }
+
+      if (importRunId) {
+        await client.query(
+          `UPDATE ingest.import_runs
+              SET ingested_count = ingested_count + $2
+            WHERE id = $1`,
+          [importRunId, records.length],
+        )
+      }
+      await client.query('COMMIT')
+      return { ingested: records.length, changed }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
   async #updateRequest(sql, values) {
     const { rows } = await this.pool.query(sql, values)
     if (!rows[0]) throw new AppError(404, 'request_not_found', 'Request not found')
@@ -571,6 +723,409 @@ export class PostgresStore {
       activeApiKeys: keysResult.rows[0].count,
       ...usage,
     }
+  }
+
+  // ---- external sources (migration 008) ----------------------------------
+
+  async createExternalSource({ sourceKey, displayName, sourceKind, datasetId, platform, objectType, connection }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO catalog.external_sources
+         (id, source_key, display_name, source_kind, dataset_id, platform, object_type, connection)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (source_key) DO UPDATE SET
+         display_name = EXCLUDED.display_name,
+         dataset_id = EXCLUDED.dataset_id,
+         platform = EXCLUDED.platform,
+         object_type = EXCLUDED.object_type,
+         connection = EXCLUDED.connection,
+         updated_at = now()
+       RETURNING *`,
+      [randomUUID(), sourceKey, displayName, sourceKind, datasetId, platform, objectType || 'record', connection || {}],
+    )
+    return externalSource(rows[0])
+  }
+
+  async getExternalSource(sourceKey) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM catalog.external_sources WHERE source_key = $1',
+      [sourceKey],
+    )
+    return externalSource(rows[0])
+  }
+
+  async listExternalSources() {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM catalog.external_sources ORDER BY created_at DESC',
+    )
+    return rows.map(externalSource)
+  }
+
+  /**
+   * Add a mapping version. Never edits an existing one.
+   *
+   * Mappings are immutable per version because they explain historical rows:
+   * editing version 3 in place would silently rewrite the answer to "why is
+   * this 2026-03 record missing a title".
+   */
+  async createSourceMapping({ sourceId, fieldMap, origin, agentModel, agentConfidence, notes }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO catalog.source_mappings
+         (id, source_id, version, field_map, origin, agent_model, agent_confidence, notes)
+       VALUES (
+         $1, $2,
+         (SELECT coalesce(max(version), 0) + 1 FROM catalog.source_mappings WHERE source_id = $2),
+         $3, $4, $5, $6, $7
+       )
+       RETURNING *`,
+      [randomUUID(), sourceId, fieldMap, origin || 'manual', agentModel || null, agentConfidence ?? null, notes || null],
+    )
+    return sourceMapping(rows[0])
+  }
+
+  async approveSourceMapping({ sourceId, version, approvedBy }) {
+    const { rows } = await this.pool.query(
+      `UPDATE catalog.source_mappings
+          SET approved_at = now(), approved_by = $3
+        WHERE source_id = $1 AND version = $2
+        RETURNING *`,
+      [sourceId, version, approvedBy],
+    )
+    if (!rows[0]) throw new AppError(404, 'mapping_not_found', 'Mapping version not found')
+    return sourceMapping(rows[0])
+  }
+
+  async listSourceMappings(sourceId) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM catalog.source_mappings WHERE source_id = $1 ORDER BY version DESC',
+      [sourceId],
+    )
+    return rows.map(sourceMapping)
+  }
+
+  /** Highest approved version. Unapproved mappings are never returned. */
+  async getActiveMapping(sourceId) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM catalog.source_mappings
+        WHERE source_id = $1 AND approved_at IS NOT NULL
+        ORDER BY version DESC LIMIT 1`,
+      [sourceId],
+    )
+    return sourceMapping(rows[0])
+  }
+
+  /**
+   * Open an import run, or report that this exact input already succeeded.
+   *
+   * Content-hash deduplication at the file level is cheaper than relying on
+   * per-row uniqueness for a 50,000-row spreadsheet someone uploaded twice, and
+   * it gives the operator a clear answer ("skipped, identical to run X")
+   * instead of a run that reports 50,000 rows and zero changes.
+   */
+  async startImportRun({ sourceId, mappingVersion, inputSha256, inputName, inputBytes }) {
+    if (inputSha256) {
+      const { rows } = await this.pool.query(
+        `SELECT id, started_at FROM ingest.import_runs
+          WHERE source_id = $1 AND input_sha256 = $2 AND status = 'succeeded'
+          ORDER BY started_at DESC LIMIT 1`,
+        [sourceId, inputSha256],
+      )
+      if (rows[0]) return { duplicateOf: rows[0].id, id: null }
+    }
+    const { rows } = await this.pool.query(
+      `INSERT INTO ingest.import_runs
+         (id, source_id, mapping_version, input_sha256, input_name, input_bytes)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [randomUUID(), sourceId, mappingVersion, inputSha256, inputName, inputBytes],
+    )
+    return { id: rows[0].id, duplicateOf: null }
+  }
+
+  async finishImportRun(id, { status, rowCount, rejectedCount, error }) {
+    await this.pool.query(
+      `UPDATE ingest.import_runs
+          SET status = $2, row_count = $3, rejected_count = $4, last_error = $5, finished_at = now()
+        WHERE id = $1`,
+      [id, status, rowCount, rejectedCount, error ? String(error).slice(0, 2_000) : null],
+    )
+  }
+
+  /**
+   * Record rows that could not be mapped, with the reason.
+   *
+   * These are evidence. A row rejected for a missing external id is how you
+   * find out a spreadsheet gained a header row or an upstream column was
+   * renamed; discarding them is how an import "succeeds" at 60% coverage and
+   * nobody notices for a month.
+   */
+  async recordRejectedRows(importRunId, rejections) {
+    if (rejections.length === 0) return
+    // Cap what is stored: a mapping that rejects every row of a large file
+    // would otherwise write a second copy of it into the database.
+    const stored = rejections.slice(0, 1_000)
+    const values = stored.flatMap((rejection) => [importRunId, rejection.rowIndex, rejection.reason, rejection.raw])
+    const tuples = stored
+      .map((_, index) => `($${index * 4 + 1}, $${index * 4 + 2}, $${index * 4 + 3}, $${index * 4 + 4})`)
+      .join(', ')
+    await this.pool.query(
+      `INSERT INTO ingest.rejected_rows (import_run_id, row_index, reason, raw_row) VALUES ${tuples}`,
+      values,
+    )
+  }
+
+  async listImportRuns(sourceId, limit = 20) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM ingest.import_runs
+        WHERE ($1::uuid IS NULL OR source_id = $1)
+        ORDER BY started_at DESC LIMIT $2`,
+      [sourceId || null, limit],
+    )
+    return rows.map(importRun)
+  }
+
+  // ---- federated identity (migration 007) --------------------------------
+
+  /**
+   * Find or create the Hub member behind a verified external identity.
+   *
+   * The binding, not the member, carries the uniqueness constraint, so the same
+   * human reaching the Hub through two issuers gets two bindings and (for now)
+   * two members. Merging them is an explicit operator action; doing it
+   * automatically would mean guessing that two subjects are the same person,
+   * which is exactly the mistake that email-keyed identity makes.
+   */
+  async upsertExternalIdentity({
+    issuer,
+    subject,
+    audience,
+    organizationId,
+    launcherTenantId,
+    authProvider,
+    displayName,
+  }) {
+    return withPgTransaction(this.pool, async (client) => {
+      const existing = await client.query(
+        `SELECT b.member_id, m.display_name, m.status
+           FROM iam.external_identity_bindings b
+           JOIN iam.members m ON m.id = b.member_id
+          WHERE b.issuer = $1 AND b.subject = $2 AND b.audience = $3`,
+        [issuer, subject, audience],
+      )
+
+      if (existing.rows[0]) {
+        const row = existing.rows[0]
+        await client.query(
+          `UPDATE iam.external_identity_bindings
+              SET last_seen_at = now(),
+                  organization_id = COALESCE($4, organization_id),
+                  launcher_tenant_id = COALESCE($5, launcher_tenant_id),
+                  auth_provider = COALESCE($6, auth_provider)
+            WHERE issuer = $1 AND subject = $2 AND audience = $3`,
+          [issuer, subject, audience, organizationId, launcherTenantId, authProvider],
+        )
+        // Refresh the cached display name, which is a Launcher attribute and can
+        // change there at any time.
+        if (displayName && displayName !== row.display_name) {
+          await client.query(
+            'UPDATE iam.members SET display_name = $2, updated_at = now() WHERE id = $1',
+            [row.member_id, displayName],
+          )
+        }
+        return { id: row.member_id, displayName: displayName || row.display_name, status: row.status }
+      }
+
+      const memberId = randomUUID()
+      await client.query(
+        'INSERT INTO iam.members (id, display_name) VALUES ($1, $2)',
+        [memberId, displayName || subject],
+      )
+      await client.query(
+        `INSERT INTO iam.external_identity_bindings
+           (id, member_id, issuer, subject, audience, organization_id, launcher_tenant_id, auth_provider, last_seen_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())`,
+        [randomUUID(), memberId, issuer, subject, audience, organizationId, launcherTenantId, authProvider],
+      )
+      await client.query(
+        `INSERT INTO iam.identity_events (member_id, event_type, issuer, subject, detail)
+         VALUES ($1, 'member.provisioned', $2, $3, $4)`,
+        [memberId, issuer, subject, { organizationId, authProvider }],
+      )
+      return { id: memberId, displayName: displayName || subject, status: 'active' }
+    })
+  }
+
+  /**
+   * Reconcile platform-admin status against the current token's scopes.
+   *
+   * Revoking is as important as granting: if the allowlisted scope is removed in
+   * Launcher, the next sign-in must drop the Hub privilege too. A grant that
+   * only ever accumulates is a privilege ratchet.
+   */
+  async syncPlatformAdmin(memberId, { granted, grantedVia }) {
+    if (granted) {
+      await this.pool.query(
+        `INSERT INTO iam.platform_admins (member_id, granted_via)
+         VALUES ($1, $2)
+         ON CONFLICT (member_id) DO UPDATE SET granted_via = EXCLUDED.granted_via, updated_at = now()`,
+        [memberId, grantedVia || 'launcher-scope'],
+      )
+      return true
+    }
+    const { rowCount } = await this.pool.query(
+      'DELETE FROM iam.platform_admins WHERE member_id = $1',
+      [memberId],
+    )
+    if (rowCount > 0) {
+      await this.pool.query(
+        `INSERT INTO iam.identity_events (member_id, event_type, detail)
+         VALUES ($1, 'platform_admin.revoked', '{"reason":"scope no longer present"}'::jsonb)`,
+        [memberId],
+      )
+    }
+    return false
+  }
+
+  async listTenantMemberships(memberId) {
+    const { rows } = await this.pool.query(
+      `SELECT m.id, m.tenant_id, m.role, m.status, t.name AS tenant_name
+         FROM iam.tenant_memberships m
+         JOIN tenants t ON t.id = m.tenant_id
+        WHERE m.member_id = $1
+        ORDER BY t.name`,
+      [memberId],
+    )
+    return rows.map((row) => ({
+      id: row.id,
+      tenantId: row.tenant_id,
+      tenantName: row.tenant_name,
+      role: row.role,
+      status: row.status,
+    }))
+  }
+
+  async listMembers() {
+    const { rows } = await this.pool.query(
+      `SELECT m.id, m.display_name, m.status, m.created_at,
+              (a.member_id IS NOT NULL) AS platform_admin,
+              coalesce(
+                json_agg(
+                  json_build_object('tenantId', tm.tenant_id, 'role', tm.role, 'status', tm.status)
+                ) FILTER (WHERE tm.id IS NOT NULL),
+                '[]'::json
+              ) AS memberships
+         FROM iam.members m
+         LEFT JOIN iam.platform_admins a ON a.member_id = m.id
+         LEFT JOIN iam.tenant_memberships tm ON tm.member_id = m.id
+        GROUP BY m.id, a.member_id
+        ORDER BY m.created_at DESC`,
+    )
+    return rows.map((row) => ({
+      id: row.id,
+      displayName: row.display_name,
+      status: row.status,
+      platformAdmin: row.platform_admin,
+      memberships: row.memberships,
+      createdAt: iso(row.created_at),
+    }))
+  }
+
+  async grantTenantMembership({ memberId, tenantId, role, grantedBy }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO iam.tenant_memberships (id, member_id, tenant_id, role, granted_by)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (member_id, tenant_id) DO UPDATE SET
+         role = EXCLUDED.role, status = 'active', granted_by = EXCLUDED.granted_by, updated_at = now()
+       RETURNING id, member_id, tenant_id, role, status`,
+      [randomUUID(), memberId, tenantId, role, grantedBy],
+    )
+    await this.pool.query(
+      `INSERT INTO iam.identity_events (member_id, event_type, detail)
+       VALUES ($1, 'membership.granted', $2)`,
+      [memberId, { tenantId, role, grantedBy }],
+    )
+    const row = rows[0]
+    return { id: row.id, memberId: row.member_id, tenantId: row.tenant_id, role: row.role, status: row.status }
+  }
+
+  async revokeTenantMembership({ memberId, tenantId, revokedBy }) {
+    const { rowCount } = await this.pool.query(
+      `UPDATE iam.tenant_memberships SET status = 'suspended', updated_at = now()
+        WHERE member_id = $1 AND tenant_id = $2`,
+      [memberId, tenantId],
+    )
+    if (rowCount === 0) throw new AppError(404, 'membership_not_found', 'Membership not found')
+    await this.pool.query(
+      `INSERT INTO iam.identity_events (member_id, event_type, detail)
+       VALUES ($1, 'membership.revoked', $2)`,
+      [memberId, { tenantId, revokedBy }],
+    )
+    return { memberId, tenantId, status: 'suspended' }
+  }
+}
+
+function externalSource(row) {
+  return row && {
+    id: row.id,
+    sourceKey: row.source_key,
+    displayName: row.display_name,
+    sourceKind: row.source_kind,
+    datasetId: row.dataset_id,
+    platform: row.platform,
+    objectType: row.object_type,
+    status: row.status,
+    connection: row.connection,
+    createdAt: iso(row.created_at),
+  }
+}
+
+function sourceMapping(row) {
+  return row && {
+    id: row.id,
+    sourceId: row.source_id,
+    version: row.version,
+    fieldMap: row.field_map,
+    origin: row.origin,
+    agentModel: row.agent_model,
+    agentConfidence: row.agent_confidence === null ? null : Number(row.agent_confidence),
+    notes: row.notes,
+    approved: Boolean(row.approved_at),
+    approvedAt: iso(row.approved_at),
+    approvedBy: row.approved_by,
+    createdAt: iso(row.created_at),
+  }
+}
+
+function importRun(row) {
+  return row && {
+    id: row.id,
+    sourceId: row.source_id,
+    mappingVersion: row.mapping_version,
+    inputName: row.input_name,
+    inputBytes: row.input_bytes === null ? null : Number(row.input_bytes),
+    status: row.status,
+    rowCount: row.row_count,
+    ingestedCount: row.ingested_count,
+    rejectedCount: row.rejected_count,
+    lastError: row.last_error,
+    startedAt: iso(row.started_at),
+    finishedAt: iso(row.finished_at),
+  }
+}
+
+// Local transaction helper. mx-common exports an equivalent, but the store
+// receives a pool rather than the shared config and should not reach into the
+// package for one three-line function.
+async function withPgTransaction(pool, fn) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await fn(client)
+    await client.query('COMMIT')
+    return result
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
   }
 }
 

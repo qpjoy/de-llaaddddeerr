@@ -1,0 +1,94 @@
+# Outbox -> Elasticsearch projector.
+#
+# Separate workload from the API on purpose: a bulk-indexing loop and a
+# latency-sensitive request path should not share an event loop, and the
+# projector must be restartable without dropping in-flight API requests.
+#
+# It carries NO Service and NO ingress. Nothing calls it; it only reads the
+# outbox and writes to the shared cluster, so exposing a port would add attack
+# surface for no capability.
+#
+# replicas: 1 is a deliberate default, not a limitation. The claim query uses
+# `FOR UPDATE SKIP LOCKED` and leases, so several replicas are safe; one is
+# enough for current volume and keeps ordering easy to reason about.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-insight-hub-projector
+  namespace: mx-insight-hub
+  labels:
+    app.kubernetes.io/name: mx-insight-hub-projector
+    app.kubernetes.io/part-of: mx-insight-hub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-insight-hub-projector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-insight-hub-projector
+        app.kubernetes.io/part-of: mx-insight-hub
+        mx-insight-hub.io/plane: worker
+    spec:
+      # Cluster DNS only: unlike the API planes this workload never talks to
+      # host-local Night-All, so it has no reason to share the host network.
+      serviceAccountName: mx-insight-hub
+      automountServiceAccountToken: false
+      # Long enough to finish a bulk batch and mark it delivered, so a rollout
+      # does not leave events to be reclaimed by lease expiry.
+      terminationGracePeriodSeconds: 60
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: projector
+          image: mx-insight-hub:shadow
+          imagePullPolicy: Never
+          command: ["node", "server/workers/projector.mjs"]
+          envFrom:
+            - configMapRef:
+                name: mx-insight-hub-config
+          env:
+            - name: MX_INSIGHT_LISTENER_MODE
+              value: public
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: DATABASE_URL
+            - name: MX_INSIGHT_API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_API_KEY_PEPPER
+            - name: MX_INSIGHT_EMBEDDING_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_EMBEDDING_API_KEY
+                  optional: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
