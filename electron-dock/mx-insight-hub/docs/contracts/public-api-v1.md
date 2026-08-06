@@ -37,6 +37,20 @@ Successful responses preserve the stable Night-All data-search envelope and add:
 - `x-mx-insight-request-id`: durable Hub request ID;
 - `idempotent-replay: true|false`.
 
+## Planned capabilities
+
+Not implemented. Recorded here so the client-facing shape stays stable once the upstream capabilities land. Each keeps the same auth (`Authorization: Bearer <API key>`), grant checks, quota accounting and freshness envelope as `search`.
+
+```http
+POST /api/v1/data/post          { "platform": "...", "postId": "..." }
+POST /api/v1/data/comments      { "platform": "...", "postId": "...", "pageSize": 20, "cursor": "..." }
+POST /api/v1/data/entities/search  { "platform": "...", "query": "...", "mode": "match|prefix", "pageSize": 20 }
+```
+
+`post` and `comments` depend on upstream `post_detail`/`post_comments` capabilities that the versioned Night-All data contract does not yet expose; see [Night-All integration](../architecture/night-all-integration.md). Until they exist under readiness governance these routes stay unpublished rather than silently proxying an ungoverned legacy route.
+
+`entities/search` is served from the Hub's own entity projection and does not call Night-All, so it carries no provider cost but is rate limited independently; see §4.4 of [Data platform storage and serving](../architecture/data-platform-storage-and-serving.md). Identifier lookups take `postId` as the caller-facing name; platform-specific aliases such as `noteId`, `awemeId` or `tweetId` are normalized internally and are not part of this contract.
+
 ## Request status
 
 ```http

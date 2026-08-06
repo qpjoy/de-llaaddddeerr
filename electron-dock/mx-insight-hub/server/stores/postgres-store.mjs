@@ -1,5 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import {
+  CONNECTOR_ID,
+  DATASET_ID,
+  PARSER_VERSION,
+  SCHEMA_VERSION,
+  normalizeSearchPayload,
+  observationHash,
+  streamId,
+} from '../ingest/normalizers.mjs'
 
 function iso(value) {
   if (value == null) return null
@@ -357,6 +366,141 @@ export class PostgresStore {
        WHERE id = $1 RETURNING *`,
       [id, errorCode],
     )
+  }
+
+  // Persist an upstream search result as authoritative Hub data.
+  //
+  // Ordering follows ADR-0006: the ingest run, raw source object, canonical
+  // upsert, revision, observation and outbox event all commit together, so a
+  // crash can only lose the whole batch and a replay is idempotent:
+  //   * unchanged content keeps its revision, writes no new revision row and
+  //     enqueues no projection event;
+  //   * a repeated batch collides on the observation hash and is ignored;
+  //   * changed content bumps current/projection revision and emits one event.
+  //
+  // `rawPayload` must be the pre-redaction upstream payload: provider and
+  // endpoint identifiers are lineage evidence and never reach public responses.
+  async ingestSearchResult({ platform, rawPayload, queryFingerprint = null, requestId = null }) {
+    const { records, skipped } = normalizeSearchPayload(rawPayload, platform)
+    if (records.length === 0) return { ingested: 0, changed: 0, skipped, runId: null }
+
+    const stream = streamId(platform)
+    const runId = randomUUID()
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `INSERT INTO ingest.ingest_runs
+           (id, connector_id, stream_id, trigger, request_id, query_fingerprint)
+         VALUES ($1, $2, $3, 'api_search', $4, $5)`,
+        [runId, CONNECTOR_ID, stream, requestId, queryFingerprint],
+      )
+
+      let changed = 0
+      for (const record of records) {
+        await client.query(
+          `INSERT INTO ingest.source_objects
+             (id, connector_id, stream_id, object_type, source_key,
+              payload_sha256, raw_payload, source_updated_at, ingest_run_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (connector_id, stream_id, object_type, source_key) DO UPDATE SET
+             payload_sha256 = EXCLUDED.payload_sha256,
+             raw_payload = EXCLUDED.raw_payload,
+             source_updated_at = EXCLUDED.source_updated_at,
+             last_seen_at = now(),
+             ingest_run_id = EXCLUDED.ingest_run_id`,
+          [
+            randomUUID(), CONNECTOR_ID, stream, record.objectType, record.externalId,
+            record.payloadSha256, record.rawItem, record.eventTime, runId,
+          ],
+        )
+
+        const upserted = await client.query(
+          `INSERT INTO core.canonical_records
+             (id, dataset_id, platform, object_type, external_id, schema_version,
+              payload_sha256, content_type, url, title, body,
+              author_external_id, author_name, event_time, collected_at,
+              latitude, longitude, country_code, admin1_code, admin2_code,
+              stable_fields, extensions)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                   $16, $17, $18, $19, $20, $21, $22)
+           ON CONFLICT (dataset_id, platform, object_type, external_id) DO UPDATE SET
+             payload_sha256 = EXCLUDED.payload_sha256,
+             content_type = EXCLUDED.content_type,
+             url = EXCLUDED.url,
+             title = EXCLUDED.title,
+             body = EXCLUDED.body,
+             author_external_id = EXCLUDED.author_external_id,
+             author_name = EXCLUDED.author_name,
+             event_time = EXCLUDED.event_time,
+             collected_at = EXCLUDED.collected_at,
+             latitude = EXCLUDED.latitude,
+             longitude = EXCLUDED.longitude,
+             country_code = EXCLUDED.country_code,
+             admin1_code = EXCLUDED.admin1_code,
+             admin2_code = EXCLUDED.admin2_code,
+             stable_fields = EXCLUDED.stable_fields,
+             extensions = EXCLUDED.extensions,
+             last_seen_at = now(),
+             current_revision = core.canonical_records.current_revision
+               + (core.canonical_records.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256)::int,
+             projection_revision = core.canonical_records.projection_revision
+               + (core.canonical_records.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256)::int
+           RETURNING id, current_revision, projection_revision`,
+          [
+            randomUUID(), DATASET_ID, record.platform, record.objectType, record.externalId,
+            SCHEMA_VERSION, record.payloadSha256, record.contentType, record.url,
+            record.title, record.body, record.authorExternalId, record.authorName,
+            record.eventTime, record.collectedAt, record.latitude, record.longitude,
+            record.countryCode, record.admin1Code, record.admin2Code,
+            record.stableFields, record.extensions,
+          ],
+        )
+        const { id, current_revision: revision, projection_revision: projection } = upserted.rows[0]
+
+        // Unchanged content collides on (record_id, revision) and is skipped.
+        const revisionInsert = await client.query(
+          `INSERT INTO core.record_revisions
+             (record_id, revision, payload_sha256, normalized_payload, parser_version, ingest_run_id)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (record_id, revision) DO NOTHING`,
+          [id, revision, record.payloadSha256, record.rawItem, PARSER_VERSION, runId],
+        )
+        if (revisionInsert.rowCount > 0) changed += 1
+
+        await client.query(
+          `INSERT INTO core.observations
+             (id, record_id, connector_id, query_fingerprint, rank, metrics,
+              observation_hash, ingest_run_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (record_id, observation_hash) DO NOTHING`,
+          [
+            randomUUID(), id, CONNECTOR_ID, queryFingerprint, record.rank ?? null,
+            record.metrics || {}, observationHash(record, queryFingerprint), runId,
+          ],
+        )
+
+        await client.query(
+          `INSERT INTO outbox.projection_events
+             (aggregate_type, aggregate_id, event_type, projection_revision, payload)
+           VALUES ('canonical_record', $1, 'upsert', $2, $3)
+           ON CONFLICT (aggregate_id, projection_revision) DO NOTHING`,
+          [id, projection, { datasetId: DATASET_ID, platform: record.platform, objectType: record.objectType }],
+        )
+      }
+
+      await client.query(
+        `UPDATE ingest.ingest_runs SET item_count = $2, finished_at = now() WHERE id = $1`,
+        [runId, records.length],
+      )
+      await client.query('COMMIT')
+      return { ingested: records.length, changed, skipped, runId }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async #updateRequest(sql, values) {

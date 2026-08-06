@@ -317,6 +317,14 @@ export class MemoryStore {
       ...usage,
     }
   }
+
+  // Authoritative ingestion needs PostgreSQL transactions and uniqueness, so
+  // the in-memory store deliberately does not persist canonical data. It
+  // reports nothing ingested rather than pretending to store it, keeping local
+  // and test runs working without implying a second source of truth.
+  async ingestSearchResult() {
+    return { ingested: 0, changed: 0, skipped: 0, runId: null }
+  }
 }
 
 function summarizeUsage(records) {

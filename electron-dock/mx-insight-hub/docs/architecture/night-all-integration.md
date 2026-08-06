@@ -48,6 +48,14 @@ Before deployment, probe the actual Internal revision and route. The local Night
 
 The Hub stores explicit grants such as `xhs` and `weibo`. A future “all platforms” action creates a versioned snapshot of currently approved platforms; it is not a wildcard.
 
+Observed on Internal (2026-08-06): every platform in `/api/v1/data/capabilities` reports `degraded` with reason `endpoint_degraded`, so `ready_only` search fails closed with `503 DATA_PLATFORM_NOT_READY`. Per the upstream spec a platform is promoted to `ready` only when a successful live call is recorded no earlier than the contract version it belongs to (`last_success_at >= contract_updated_at`); re-verification is required whenever the endpoint path/params/schema change. Hub-side grants and the Admin "platform enabled" view are authorization state and say nothing about upstream readiness, so the Admin console must surface the upstream capability status separately instead of implying a granted platform can serve data.
+
+## Upstream capability coverage
+
+The versioned `/api/v1/data/*` contract currently fixes `capability` to `search_posts`. Item lookup, profile lookup and comments exist only on the older `/api/v1/search/post-detail`, `/api/v1/search/post-comments` and `/api/v1/search/user-info` routes, which are outside the readiness/contract-freshness governance that `ready_only` depends on.
+
+Therefore the Hub cannot yet offer detail/comments through the same stability guarantees as search. The target is to extend the upstream data contract with `post_detail`, `post_comments` and `profile` capabilities so they inherit catalog readiness, opaque cursors and stable fields. Proxying the legacy routes is acceptable only as an explicitly labelled transitional path, and such responses must be marked as coming from an ungoverned capability rather than presented as contract-stable.
+
 ## Night-All work that stays outside this repository
 
 - internal service authentication middleware;

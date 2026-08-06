@@ -196,6 +196,41 @@ mapping 使用 `dynamic: strict`；provider 扩展如确需检索放入 `flatten
 - ES 不可用时，精确 ID/时间/平台/区域等 PG 路径继续工作；全文接口返回明确 degraded 或最后物化结果。
 - ES 结果中的文档 revision 必须不高于已发布 dataset version，防止未发布数据越权露出。
 
+### 4.4 实体检索、模糊匹配与联想
+
+账号/用户检索与正文检索语义不同，不塞进 `mx-insight-content-v1-*`（该索引 `dynamic: strict` 且面向内容对象）。使用独立投影索引：
+
+```text
+mx-insight-entity-v1-000001      write alias: mx-insight-entity-v1-write
+                                 read alias:  mx-insight-entity-v1
+```
+
+字段策略（`dynamic: strict`）：
+
+| 字段 | 类型 | 用途 |
+| --- | --- | --- |
+| `handle` | `keyword` + `text`(edge_ngram) + `search_as_you_type` | 精确命中、前缀联想 |
+| `normalizedHandle` | `keyword` | 去重与精确 join |
+| `displayName` | `text` + `keyword` + `displayNameHanlp` | 中文昵称召回 |
+| `platform` / `objectType` / `externalId` | `keyword` | 过滤与回表 |
+| `tenantId` / `datasetId` / `dataVersion` | `keyword` | 授权与发布版本过滤 |
+| `metrics` | 数值列 | 排序（粉丝量、活跃度） |
+
+三类查询分开处理，不用一个 DSL 兼顾：
+
+1. **前缀联想（type-ahead）**：走 `search_as_you_type`/edge_ngram，只查 handle 与 displayName，设独立低延迟预算；
+2. **模糊容错**：`fuzziness: AUTO` 仅作用于 handle/name，禁止对正文开 fuzzy（召回爆炸且无意义）；
+3. **中文昵称**：与 4.2 一致，查询词经同一 HanLP 模型处理后打预分词字段，与原文字段加权合并。
+
+归一化规则必须版本化并随记录保存：Unicode NFKC、大小写折叠、去零宽字符与同形字映射，产出 `normalizedHandle`。
+
+约束：
+
+- 权威仍在 PG。实体是 `canonical_records` 中 `object_type='account'` 的记录，唯一键沿用 3.3 的 `(dataset_id, platform, object_type, external_id)`；ES 只是可重建投影。
+- 联想与模糊查询同样必须带 tenant/dataset grant filter，且文档 revision 不高于已发布 dataset version，避免未发布或越权数据通过 suggest 泄露。
+- 实体投影只读本地数据，不触发 Night-All，因此不产生 provider 成本；但需要独立限流，防止 type-ahead 每次击键放大成后端压力。
+- 实体冷启动来自两处：从 search/detail 响应的作者字段抽取，以及未来专门的 profile/user-info capability。抽取得到的实体标记来源与置信度，不与一手 profile 记录混淆。
+
 ## 5. BI 与聚合
 
 先使用 PG 分区表、只读副本、物化视图和增量 aggregate 表：

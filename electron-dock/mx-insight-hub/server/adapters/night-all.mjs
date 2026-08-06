@@ -36,7 +36,10 @@ export class NightAllAdapter {
     this.serviceToken = serviceToken
   }
 
-  async #request(method, path, body, validate) {
+  // `keepRaw` returns the pre-redaction payload alongside the public one.
+  // Provider/endpoint identifiers are ingest lineage evidence; they are stored,
+  // never served, so the redacted copy remains the only thing callers can see.
+  async #request(method, path, body, validate, { keepRaw = false } = {}) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     let response
@@ -70,7 +73,8 @@ export class NightAllAdapter {
     if (!payload || typeof payload !== 'object' || (validate && !validate(payload))) {
       throw new UpstreamRejectedError(502, { code: 'invalid_upstream_contract' })
     }
-    return stripProviderMetadata(payload)
+    const redacted = stripProviderMetadata(payload)
+    return keepRaw ? { payload: redacted, raw: payload } : redacted
   }
 
   async dependencies() {
@@ -113,6 +117,7 @@ export class NightAllAdapter {
         availabilityMode: 'ready_only',
       },
       (payload) => payload?.data && typeof payload.data === 'object' && Array.isArray(payload.data.items),
+      { keepRaw: true },
     )
   }
 }

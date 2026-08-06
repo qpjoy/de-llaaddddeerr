@@ -65,12 +65,20 @@ function positiveInteger(value, field, fallback) {
 }
 
 export class HubService {
-  constructor({ store, adapter, apiKeyPepper, defaultPolicy = DEFAULT_POLICY, reservationLeaseMs = 120_000 }) {
+  constructor({
+    store,
+    adapter,
+    apiKeyPepper,
+    defaultPolicy = DEFAULT_POLICY,
+    reservationLeaseMs = 120_000,
+    logger = console,
+  }) {
     this.store = store
     this.adapter = adapter
     this.apiKeyPepper = apiKeyPepper
     this.defaultPolicy = defaultPolicy
     this.reservationLeaseMs = reservationLeaseMs
+    this.logger = logger
   }
 
   createTenant(body) {
@@ -291,10 +299,11 @@ export class HubService {
     const activeRequestId = reservation.request.id
     const startedAt = performance.now()
     try {
-      const responseBody = await this.adapter.search({
+      const upstream = await this.adapter.search({
         body: upstreamBody,
         businessId: context.consumer.businessId,
       })
+      const responseBody = upstream.payload
       const itemCount = Array.isArray(responseBody?.data?.items) ? responseBody.data.items.length : 0
       await this.store.commitRequest(activeRequestId, {
         responseStatus: 200,
@@ -302,6 +311,25 @@ export class HubService {
         unitsActual: Math.max(1, itemCount),
         upstreamLatencyMs: Math.round(performance.now() - startedAt),
       })
+
+      // Persist the result as authoritative Hub data. Best-effort by design:
+      // the caller already holds a committed, billed response, so an ingest
+      // failure must not turn a successful upstream call into an error. It is
+      // logged for the P2 backfill worker instead.
+      try {
+        await this.store.ingestSearchResult({
+          platform,
+          rawPayload: upstream.raw,
+          queryFingerprint: fingerprint,
+          requestId: activeRequestId,
+        })
+      } catch (error) {
+        this.logger?.error?.(
+          { requestId: activeRequestId, platform, error },
+          'ingest of upstream search result failed',
+        )
+      }
+
       return { status: 200, body: responseBody, requestId: activeRequestId, replay: false }
     } catch (error) {
       if (error instanceof UpstreamRejectedError) {
