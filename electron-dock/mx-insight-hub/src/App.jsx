@@ -157,6 +157,13 @@ function SessionGate({ checking, message, onAuthenticate }) {
           </div>
         ) : (
           <>
+            {options && !options.launcher && options.launcherUnavailableReason ? (
+              // Shown rather than hidden: an operator who configured Launcher
+              // and sees no tab needs to know which half is missing.
+              <p className="mih-auth-hint">
+                Launcher 账号登录未启用：{options.launcherUnavailableReason}
+              </p>
+            ) : null}
             {options?.launcher ? (
               <div className="mih-signin-tabs" role="tablist">
                 <button type="button" role="tab" aria-selected={mode === 'launcher'}

@@ -236,12 +236,23 @@ export function createApp({
       // which a user needs anyway to authenticate and neither of which is
       // secret. No Hub state is exposed.
       if (request.method === 'GET' && pathname === '/internal/v1/admin/sign-in-options') {
+        // When Launcher sign-in is unavailable, say WHICH half is missing. The
+        // two causes need different fixes and look identical from the login
+        // page: an absent provider URL means Launcher was never discovered, an
+        // absent public URL means it was discovered but the browser has no way
+        // to reach it.
+        const available = Boolean(identity?.enabled) && Boolean(launcherPublicUrl)
         sendJson(response, 200, {
           data: {
             adminToken: true,
-            launcher: identity?.enabled && launcherPublicUrl
-              ? { url: launcherPublicUrl, audience: launcherAudience }
-              : null,
+            launcher: available ? { url: launcherPublicUrl, audience: launcherAudience } : null,
+            ...(available
+              ? {}
+              : {
+                  launcherUnavailableReason: !identity?.enabled
+                    ? 'MX_INSIGHT_LAUNCHER_URL is not set and no mx-launcher Service was discovered'
+                    : 'MX_INSIGHT_LAUNCHER_PUBLIC_URL is not set, so the browser has no address to sign in against',
+                }),
           },
           requestId,
         })

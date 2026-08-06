@@ -1188,3 +1188,15 @@ select {
   color: var(--qp-color-primary, inherit);
   background: color-mix(in oklab, var(--qp-color-primary, #3ddc97) 12%, transparent);
 }
+
+/* Explains why a sign-in method is absent. Muted rather than alarming: a
+   token-only deployment is a valid configuration, not an error. */
+.mih-auth-hint {
+  margin: 0 0 var(--qp-space-4, 1rem);
+  padding: var(--qp-space-3, 0.75rem);
+  border: 1px dashed var(--qp-color-border, rgba(255, 255, 255, 0.18));
+  border-radius: var(--qp-radius-md, 8px);
+  color: var(--qp-color-text-muted, inherit);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}

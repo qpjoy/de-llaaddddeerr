@@ -271,3 +271,54 @@ async function firstMemberId() {
   const members = await (await callAdmin('/internal/v1/admin/members')).json()
   return members.data[members.data.length - 1].id
 }
+
+// ---------------------------------------------------------------------------
+// Sign-in discovery
+// ---------------------------------------------------------------------------
+
+test('sign-in options are readable without authentication', async () => {
+  // The console must learn how to sign in before it can sign in. The response
+  // carries only the Launcher address and audience -- both needed to
+  // authenticate, neither secret, and no Hub state.
+  const response = await fetch(`${baseUrl}/internal/v1/admin/sign-in-options`)
+  assert.equal(response.status, 200)
+  const { data } = await response.json()
+  assert.equal(data.adminToken, true)
+})
+
+test('an unavailable Launcher sign-in says which half is missing', async () => {
+  const response = await fetch(`${baseUrl}/internal/v1/admin/sign-in-options`)
+  const { data } = await response.json()
+  // This harness configures identity but no public URL, so the reason must
+  // point at the public URL rather than at discovery. The two need different
+  // fixes and are indistinguishable from the login page otherwise.
+  assert.equal(data.launcher, null)
+  assert.match(data.launcherUnavailableReason, /MX_INSIGHT_LAUNCHER_PUBLIC_URL/)
+})
+
+test('sign-in options offer the Launcher form once both halves are configured', async () => {
+  const { createApp } = await import('../../server/app.mjs')
+  const { createServer } = await import('node:http')
+  const configured = createApp({
+    service: { authenticate: async () => null },
+    store,
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    identity,
+    adminToken: ADMIN_TOKEN,
+    launcherPublicUrl: 'http://10.88.88.88:18090',
+    launcherAudience: AUDIENCE,
+  })
+  const server2 = createServer(configured)
+  await new Promise((resolve) => server2.listen(0, '127.0.0.1', resolve))
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${server2.address().port}/internal/v1/admin/sign-in-options`,
+    )
+    const { data } = await response.json()
+    assert.equal(data.launcher.url, 'http://10.88.88.88:18090')
+    assert.equal(data.launcher.audience, AUDIENCE)
+    assert.equal(data.launcherUnavailableReason, undefined)
+  } finally {
+    await new Promise((resolve) => server2.close(resolve))
+  }
+})

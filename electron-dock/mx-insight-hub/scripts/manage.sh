@@ -406,16 +406,26 @@ EOF
   say "discovered Launcher identity provider: ${MX_INSIGHT_LAUNCHER_URL}"
 
   # The console signs users in from the browser, which cannot resolve cluster
-  # DNS. That address is a deployment decision (which host or domain the browser
-  # reaches Launcher on), so it is suggested rather than guessed.
-  if [ -z "${MX_INSIGHT_LAUNCHER_PUBLIC_URL:-}" ]; then
-    local node_ip
-    node_ip="$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)"
-    say "  NOTE: the console's Launcher sign-in form needs a browser-reachable URL."
-    say "        Set MX_INSIGHT_LAUNCHER_PUBLIC_URL, e.g. http://${node_ip:-<node-ip>}:${port}"
-    say "        Without it the console offers only token paste (the token still works)."
-  else
+  # DNS, so it needs a host-reachable address.
+  #
+  # Derived from the Hub's own admin entrypoint rather than from the node's
+  # Kubernetes InternalIP: this node has several addresses (a LAN IP and a
+  # WireGuard overlay IP) and only the one operators actually browse is known to
+  # work. Launcher's gateway is a hostNetwork DaemonSet with hostPort 18090, so
+  # the same host answers on that port.
+  if [ -z "${MX_INSIGHT_LAUNCHER_PUBLIC_URL:-}" ] && [ -n "${MX_INSIGHT_HUB_ADMIN_ENTRYPOINT:-}" ]; then
+    local admin_host
+    admin_host="$(printf '%s' "$MX_INSIGHT_HUB_ADMIN_ENTRYPOINT" | sed -E 's#^(https?://[^:/]+).*#\1#')"
+    if [ -n "$admin_host" ]; then
+      MX_INSIGHT_LAUNCHER_PUBLIC_URL="${admin_host}:18090"
+      say "  browser sign-in endpoint (derived): ${MX_INSIGHT_LAUNCHER_PUBLIC_URL}"
+      say "    Override with MX_INSIGHT_LAUNCHER_PUBLIC_URL if the browser reaches Launcher elsewhere."
+    fi
+  elif [ -n "${MX_INSIGHT_LAUNCHER_PUBLIC_URL:-}" ]; then
     say "  browser sign-in endpoint: ${MX_INSIGHT_LAUNCHER_PUBLIC_URL}"
+  fi
+  if [ -z "${MX_INSIGHT_LAUNCHER_PUBLIC_URL:-}" ]; then
+    say "  NOTE: no browser-reachable Launcher URL; the console will offer token paste only." >&2
   fi
 
   # Reachability is verified now rather than at first sign-in. A wrong address
