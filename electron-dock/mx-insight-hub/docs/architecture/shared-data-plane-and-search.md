@@ -143,10 +143,13 @@ principal 解析出 `tenantIds`（`null` = 不受限，`[]` = 无任何访问）
 ### 3.5 配置
 
 ```bash
-MX_INSIGHT_LAUNCHER_URL=http://mx-launcher-server.mx-internal-shadow.svc.cluster.local:PORT
+# URL 由 deploy 自动发现（label app.kubernetes.io/name=mx-launcher-internal），
+# 只在自动发现看不到时才需要手填。
 MX_INSIGHT_LAUNCHER_AUDIENCE=mx-insight-hub
 MX_INSIGHT_LAUNCHER_ADMIN_SCOPES=insight-hub.admin
 ```
+
+自动发现的理由：service 名、namespace、端口三个值全都已经记录在集群里，任何一个手填错的结果都是「Hub 静默地只接受 admin token」——一个几天后才会以「我密码不对」的形式暴露出来的故障。deploy 顺带检查该 Service 有没有就绪 endpoints，因为地址对了但后端没起来是同样的症状。
 
 不配 `MX_INSIGHT_LAUNCHER_URL` 就只有 admin token 生效——接入是叠加的，不是切换。后续其他产品复用同一套 introspection 契约，而不是共享 Launcher 的用户表；Launcher 的数据不进 mx-common，这条边界不变。
 

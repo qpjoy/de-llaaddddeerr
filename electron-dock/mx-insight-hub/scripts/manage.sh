@@ -371,6 +371,118 @@ validate_existing_runtime_secret() {
     "API-key pepper differs from the retained deployment; automatic rotation is blocked because existing API keys would stop validating. Restore the original .env.internal value or use an explicit key-rotation procedure."
 }
 
+# Locate the Launcher User Center in the cluster.
+#
+# The URL is discovered rather than configured because the parts an operator has
+# to get exactly right by hand -- service name, namespace, port -- are all
+# already recorded in the cluster, and getting any one of them wrong produces a
+# Hub that silently accepts only the admin token. An explicit
+# MX_INSIGHT_LAUNCHER_URL always wins, for clusters this heuristic cannot see.
+discover_launcher_url() {
+  if [ -n "${MX_INSIGHT_LAUNCHER_URL:-}" ]; then
+    say "Launcher identity provider: ${MX_INSIGHT_LAUNCHER_URL} (explicitly configured)"
+    return 0
+  fi
+
+  local found namespace name port
+  # Match on the label rather than the name so a rename does not break this.
+  found="$(kubectl get svc --all-namespaces \
+    -l app.kubernetes.io/name=mx-launcher-internal \
+    -o jsonpath='{range .items[0]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.spec.ports[0].port}{end}' \
+    2>/dev/null || true)"
+  if [ -z "$found" ]; then
+    say "no mx-launcher Service found in this cluster; Launcher sign-in stays disabled"
+    say "  Only the admin token will work. Set MX_INSIGHT_LAUNCHER_URL to override."
+    MX_INSIGHT_LAUNCHER_URL=""
+    return 0
+  fi
+
+  read -r namespace name port <<EOF
+$found
+EOF
+  MX_INSIGHT_LAUNCHER_URL="http://${name}.${namespace}.svc.cluster.local:${port}"
+  say "discovered Launcher identity provider: ${MX_INSIGHT_LAUNCHER_URL}"
+
+  # Reachability is verified now rather than at first sign-in. A wrong address
+  # here surfaces as "your password is rejected" days later, at which point
+  # nobody suspects a Service port.
+  if kubectl -n "$namespace" get endpoints "$name" \
+    -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null | grep -q .; then
+    say "  endpoints are populated"
+  else
+    say "  WARNING: the Service has no ready endpoints; Launcher sign-in will return 503" >&2
+  fi
+}
+
+# Build the Secret holding model API keys, derived from the provider chains.
+#
+# The previous version wired a hardcoded OPENAI_API_KEY / DEEPSEEK_API_KEY /
+# MX_INSIGHT_MODEL_API_KEY into the manifests. That silently breaks the moment
+# anyone adds a provider with a different `apiKeyEnv` -- the key never reaches
+# the pod, the chain skips that provider, and the only evidence is a log line.
+# Reading the names out of the configuration means any provider works without
+# touching YAML.
+create_model_key_secret() {
+  local namespace="mx-insight-hub"
+  local names=""
+
+  if command -v node >/dev/null 2>&1; then
+    names="$(
+      MX_INSIGHT_AGENT_PROVIDERS="${MX_INSIGHT_AGENT_PROVIDERS:-}" \
+      MX_INSIGHT_EMBEDDING_PROVIDERS="${MX_INSIGHT_EMBEDDING_PROVIDERS:-}" \
+      node -e '
+        const names = new Set()
+        for (const raw of [process.env.MX_INSIGHT_AGENT_PROVIDERS, process.env.MX_INSIGHT_EMBEDDING_PROVIDERS]) {
+          if (!raw) continue
+          try {
+            for (const provider of JSON.parse(raw)) {
+              if (provider?.apiKeyEnv) names.add(provider.apiKeyEnv)
+            }
+          } catch {
+            // A malformed chain is reported by the server at startup with a far
+            // better message than anything this script could produce.
+          }
+        }
+        process.stdout.write([...names].join(" "))
+      ' 2>/dev/null || true
+    )"
+  fi
+
+  if [ -z "$names" ]; then
+    kubectl -n "$namespace" delete secret mx-insight-hub-model-keys --ignore-not-found >/dev/null 2>&1 || true
+    say "no model providers configured; the agent stays disabled"
+    return 0
+  fi
+
+  local args=() name value missing="" wired=""
+  for name in $names; do
+    value="$(printenv "$name" || true)"
+    if [ -z "$value" ]; then
+      missing="${missing} ${name}"
+      continue
+    fi
+    args+=("--from-literal=${name}=${value}")
+    wired="${wired} ${name}"
+  done
+
+  if [ -n "$missing" ]; then
+    # Named explicitly. A provider whose key is absent is skipped at runtime,
+    # which looks identical to that provider being down.
+    say "WARNING: provider chain references unset variable(s):${missing}" >&2
+    say "         those providers will be skipped; set them in .env.internal" >&2
+  fi
+  if [ ${#args[@]} -eq 0 ]; then
+    kubectl -n "$namespace" delete secret mx-insight-hub-model-keys --ignore-not-found >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  kubectl -n "$namespace" create secret generic mx-insight-hub-model-keys \
+    "${args[@]}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # Report only what was actually wired; listing a key that was skipped is how
+  # an operator concludes the chain is complete when it is not.
+  say "model keys wired:${wired}"
+}
+
 create_runtime_config() {
   local namespace="mx-insight-hub"
   local database_url="${MX_INSIGHT_DATABASE_URL:?ensure_shared_data_plane must run before create_runtime_config}"
@@ -411,9 +523,6 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_API_KEY_PEPPER="$MX_INSIGHT_API_KEY_PEPPER" \
     --from-literal=NIGHT_ALL_SERVICE_TOKEN="${NIGHT_ALL_SERVICE_TOKEN:-}" \
     --from-literal=NIGHT_ALL_EXPORT_TOKEN="${NIGHT_ALL_EXPORT_TOKEN:-}" \
-    --from-literal=OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
-    --from-literal=DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" \
-    --from-literal=MX_INSIGHT_MODEL_API_KEY="${MX_INSIGHT_MODEL_API_KEY:-}" \
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
@@ -555,6 +664,7 @@ ensure_shared_data_plane() {
   # a failure here IS fatal: without it the Hub has nowhere to record requests,
   # usage or ingested content.
   ensure_hub_database "$manage"
+  discover_launcher_url
 }
 
 # Obtain the Hub's dedicated database inside the shared instance.
@@ -689,6 +799,7 @@ apply_k8s() {
   kubectl apply -f "${K8S_DIR}/05-serviceaccount.yaml"
   validate_existing_runtime_secret
   create_runtime_config
+  create_model_key_secret
   sync_launcher_secret
   # PostgreSQL is no longer a Hub workload. The database lives in the shared
   # mx-common instance and was provisioned by ensure_shared_data_plane; a

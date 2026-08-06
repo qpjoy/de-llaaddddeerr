@@ -52,14 +52,24 @@ NIGHT_ALL_BASE_URL=http://127.0.0.1:13141
 NIGHT_ALL_EXPORT_TOKEN=<与 Night-All 一致>
 
 # 可选：Launcher 登录（不配则只有 admin token）
-MX_INSIGHT_LAUNCHER_URL=http://mx-launcher-server.mx-internal-shadow.svc.cluster.local:PORT
+# MX_INSIGHT_LAUNCHER_URL 不用填 —— deploy 会按 label
+# app.kubernetes.io/name=mx-launcher-internal 自动发现 Service 的命名空间和端口，
+# 并检查它有没有就绪的 endpoints。只有自动发现看不到的集群才需要手动指定。
 MX_INSIGHT_LAUNCHER_ADMIN_SCOPES=insight-hub.admin
 
 # 可选：Agent 与向量（不配则映射建议退回规则推断，检索只有 BM25）
-MX_INSIGHT_AGENT_PROVIDERS='[{"id":"deepseek","baseUrl":"https://api.deepseek.com/v1","model":"deepseek-chat","apiKeyEnv":"DEEPSEEK_API_KEY"}]'
-MX_INSIGHT_EMBEDDING_PROVIDERS='[{"id":"deepseek","baseUrl":"https://api.deepseek.com/v1","model":"embedding-2","apiKeyEnv":"DEEPSEEK_API_KEY","dimensions":1024}]'
-MX_INSIGHT_EMBEDDING_DIMENSIONS=1024
+# 数组顺序即降级顺序。任何 OpenAI 兼容端点都能加，一行配置，不用改代码或 YAML。
+MX_INSIGHT_AGENT_PROVIDERS='[
+  {"id":"deepseek","baseUrl":"https://api.deepseek.com/v1","model":"deepseek-chat","apiKeyEnv":"DEEPSEEK_API_KEY"},
+  {"id":"openai","baseUrl":"https://api.openai.com/v1","model":"gpt-4o-mini","apiKeyEnv":"OPENAI_API_KEY"}
+]'
+MX_INSIGHT_EMBEDDING_PROVIDERS='[{"id":"openai","baseUrl":"https://api.openai.com/v1","model":"text-embedding-3-small","apiKeyEnv":"OPENAI_API_KEY","dimensions":1536}]'
+MX_INSIGHT_EMBEDDING_DIMENSIONS=1536
+
+# key 用 apiKeyEnv 里写的那个变量名，deploy 会自己把用到的变量收集进
+# Secret/mx-insight-hub-model-keys 并注入所有工作负载。加新 provider 不用动 YAML。
 DEEPSEEK_API_KEY=<key>
+OPENAI_API_KEY=<key>
 ```
 
 `MX_INSIGHT_POSTGRES_PASSWORD` 不再需要——数据库在 mx-common 里，凭据由它生成并保存，重复部署复用而不轮换。
