@@ -243,7 +243,7 @@ ensure_secret() {
   fi
   local password="${MX_COMMON_POSTGRES_PASSWORD:-}"
   if [ -z "$password" ]; then
-    password="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
+    password="$(generate_password)"
     say "generated a PostgreSQL password into secret/mx-common-secrets"
   fi
   kubectl -n "$NAMESPACE" create secret generic mx-common-secrets \
@@ -714,8 +714,23 @@ product_identifier() {
 # Passwords are generated from [A-Za-z0-9] only. That is not cosmetic: it makes
 # single-quoted SQL literals and URL userinfo safe without escaping, removing a
 # whole class of quoting bugs from a path that runs unattended during deploy.
+#
+# Every read is BOUNDED. The obvious spelling of this,
+#
+#   tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40
+#
+# is a trap under `set -o pipefail`: tr reads an infinite stream, head exits at
+# 40 bytes, tr dies of SIGPIPE with status 141, pipefail propagates it and
+# `set -e` kills the script — silently, before anything can be logged. Reading a
+# fixed number of bytes lets every command in the pipeline exit normally.
 generate_password() {
-  LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40
+  local candidate=""
+  while [ "${#candidate}" -lt 40 ]; do
+    # ~96 random bytes yields ~60 usable characters; the loop covers the case
+    # where a draw happens to be filtered down below the target.
+    candidate="${candidate}$(head -c 96 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+  done
+  printf '%s' "${candidate:0:40}"
 }
 
 # Create (idempotently) a product's role, database and extensions, then print the

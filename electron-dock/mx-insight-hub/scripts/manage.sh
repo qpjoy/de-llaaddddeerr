@@ -674,11 +674,32 @@ ensure_shared_data_plane() {
 # rotating it out from under running pods. Setting MX_INSIGHT_POSTGRES_PASSWORD
 # pins a specific value instead.
 ensure_hub_database() {
-  local manage="$1"
+  local manage="$1" provision_log status=0
   say "provisioning database mx_insight_hub in the shared instance"
+
+  # provision writes the DSN to stdout and everything else to stderr, so stderr
+  # is captured separately rather than discarded. Swallowing it turns any
+  # failure into "could not provision", which is exactly as useless as it
+  # sounds — it is how a SIGPIPE in a password generator looked like a database
+  # problem.
+  provision_log="$(mktemp)"
   MX_INSIGHT_DATABASE_URL="$(
-    bash "$manage" provision mx-insight-hub "${MX_INSIGHT_POSTGRES_PASSWORD:-}"
-  )" || die "could not provision the Hub database in mx-common"
+    bash "$manage" provision mx-insight-hub "${MX_INSIGHT_POSTGRES_PASSWORD:-}" 2>"$provision_log"
+  )" || status=$?
+
+  if [ "$status" -ne 0 ] || [ -z "${MX_INSIGHT_DATABASE_URL:-}" ]; then
+    say "ERROR: could not provision the Hub database in mx-common (exit ${status})" >&2
+    if [ -s "$provision_log" ]; then
+      sed -n '1,20p' "$provision_log" >&2
+    else
+      say "  provision produced no output at all." >&2
+      say "  Reproduce it directly:  bash ${manage} provision mx-insight-hub" >&2
+    fi
+    rm -f -- "$provision_log"
+    exit 1
+  fi
+  rm -f -- "$provision_log"
+
   case "$MX_INSIGHT_DATABASE_URL" in
     postgres://*) : ;;
     *) die "mx-common returned an unexpected connection string" ;;

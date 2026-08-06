@@ -49,7 +49,11 @@ bash scripts/manage.sh status
 MX_INSIGHT_ADMIN_TOKEN=<32+ 位>
 MX_INSIGHT_API_KEY_PEPPER=<32+ 位>
 NIGHT_ALL_BASE_URL=http://127.0.0.1:13141
-NIGHT_ALL_EXPORT_TOKEN=<与 Night-All 一致>
+# 只有要做历史回填（从 Night-All 存量内容拉数据）才需要。
+# 不配的话：实时链路、入库、ES 投影全部正常，只是回填不可用。
+# 配了就必须和 Night-All 的 NIGHTALL_EXPORT_TOKEN 完全一致，
+# 且 Night-All 那边也要设置——它未配置时导出路由返回 503 而不是放行。
+NIGHT_ALL_EXPORT_TOKEN=<与 Night-All 一致，可留空>
 
 # 可选：Launcher 登录（不配则只有 admin token）
 # MX_INSIGHT_LAUNCHER_URL 不用填 —— deploy 会按 label

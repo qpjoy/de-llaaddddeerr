@@ -247,3 +247,32 @@ test('jieba keeps multi-character terms whole and drops punctuation', async () =
   assert.ok(!tokens.includes('，'), 'punctuation must not reach the token facet')
   assert.ok(tokens.every((token) => token === token.toLowerCase()))
 })
+
+// ---------------------------------------------------------------------------
+// Shell: bounded random reads
+// ---------------------------------------------------------------------------
+
+test('password generation cannot be killed by SIGPIPE under pipefail', async () => {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const run = promisify(execFile)
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/manage.sh')
+
+  // `tr -dc ... </dev/urandom | head -c N` reads an infinite stream; head exits
+  // first, tr dies of SIGPIPE (141), pipefail propagates it and `set -e` kills
+  // the deploy before anything is logged. Every draw here must be bounded.
+  const { stdout } = await run('bash', [
+    '-c',
+    `set -euo pipefail; source ${script} >/dev/null 2>&1 || true; for i in 1 2 3 4 5 6 7 8; do generate_password; echo; done`,
+  ])
+  const passwords = stdout.trim().split('\n')
+  assert.equal(passwords.length, 8, 'every invocation must succeed, not just most')
+  for (const password of passwords) {
+    assert.match(password, /^[A-Za-z0-9]{40}$/)
+  }
+  // Alphanumeric-only is load-bearing: the value goes into a single-quoted SQL
+  // literal and into URL userinfo, both without escaping.
+  assert.equal(new Set(passwords).size, 8, 'passwords must not repeat')
+})
