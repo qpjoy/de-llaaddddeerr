@@ -152,6 +152,9 @@ Optional local search (independent from Hub startup):
   bash scripts/manage.sh search plan|up|status|logs|down
 
 Internal Kubernetes:
+  bash scripts/manage.sh deploy          # 全量幂等部署（= ops internal-production deploy）
+  bash scripts/manage.sh verify          # 冒烟（= ops internal-production smoke）
+
   bash scripts/manage.sh ops internal-production plan|deploy|apply|status|smoke|logs|down
   bash scripts/manage.sh ops internal-production decommission-local-postgres
 
@@ -897,6 +900,16 @@ main() {
     ops)
       shift
       ops_action "${1:-}" "${2:-}"
+      ;;
+    # Full idempotent production deploy in one word. Everything it runs is
+    # already idempotent -- shared data plane, database provisioning, image
+    # build, migrations, workload rollout, smoke -- so re-running it after a
+    # partial failure resumes rather than restarts.
+    deploy|redeploy)
+      ops_action internal-production deploy
+      ;;
+    verify)
+      ops_action internal-production smoke
       ;;
     search)
       shift

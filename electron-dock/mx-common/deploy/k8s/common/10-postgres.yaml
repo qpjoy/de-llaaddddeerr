@@ -85,6 +85,25 @@ spec:
                   key: postgres-password
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+          # Defaults are sized for a 1GB container and leave a large machine
+          # idle. shared_buffers at ~25% of the memory request, and effective_
+          # cache_size describing what the OS page cache can realistically hold
+          # so the planner stops preferring sequential scans over index scans.
+          args:
+            - -c
+            - shared_buffers=2GB
+            - -c
+            - effective_cache_size=8GB
+            - -c
+            - work_mem=32MB
+            - -c
+            - maintenance_work_mem=512MB
+            - -c
+            - max_connections=200
+            # SSD-appropriate: the default 4.0 assumes spinning disks and
+            # systematically over-prices index scans.
+            - -c
+            - random_page_cost=1.1
           readinessProbe:
             exec:
               command: ["sh", "-c", "pg_isready -U mx_common -d mx_common"]
@@ -96,11 +115,11 @@ spec:
             periodSeconds: 15
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: "2"
+              cpu: 500m
               memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -115,4 +134,9 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
+            # Nominal. With a hostPath PV nothing enforces this figure -- the
+            # real bound is the node's disk. It is also IMMUTABLE:
+            # volumeClaimTemplates cannot be edited on a live StatefulSet, so
+            # changing it means recreating the workload
+            # (`manage.sh reset-storage`, which destroys data).
             storage: 50Gi

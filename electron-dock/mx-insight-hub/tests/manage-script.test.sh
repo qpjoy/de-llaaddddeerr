@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+#
+# Behavioural tests for scripts/manage.sh.
+#
+# Rewritten after PostgreSQL moved into the shared mx-common data plane: the
+# previous suite exercised local PV binding, runtime-image preloading and pod
+# security reconciliation, none of which the Hub owns any more. What it tests now
+# is the deploy contract that remains: credentials must not drift silently,
+# database provisioning must happen before the config that consumes it, and a
+# failed deploy must leave nothing behind.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -6,15 +15,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT_DIR}/scripts/manage.sh"
 
 assert_eq() {
-  local expected="$1"
-  local actual="$2"
-  local label="$3"
+  local expected="$1" actual="$2" label="$3"
   if [ "$expected" != "$actual" ]; then
     printf 'not ok - %s: expected %q, got %q\n' "$label" "$expected" "$actual" >&2
     exit 1
   fi
   printf 'ok - %s\n' "$label"
 }
+
+# ---------------------------------------------------------------------------
+# Image reference canonicalisation (used by the containerd import path)
+# ---------------------------------------------------------------------------
 
 assert_eq \
   docker.io/library/postgres:16-bookworm \
@@ -29,128 +40,46 @@ assert_eq \
   "$(canonical_image_ref registry.example/mx-insight-hub:release)" \
   "qualified registry image"
 
-runtime_calls=""
-run_ctr() {
-  if [ "$*" = "images ls -q" ]; then
-    printf '%s\n' docker.io/library/postgres:16-bookworm
-  else
-    runtime_calls="${runtime_calls}ctr:$*;"
-  fi
-}
-docker() {
-  runtime_calls="${runtime_calls}docker:$*;"
-}
-ensure_k8s_runtime_image postgres:16-bookworm
-assert_eq "" "$runtime_calls" "existing runtime image is reused"
+# ---------------------------------------------------------------------------
+# Credential drift
+# ---------------------------------------------------------------------------
 
-storage_calls=""
-mock_pvc_phase=Pending
-kubectl() {
-  case "$*" in
-    *"get pvc ${POSTGRES_PVC_NAME} -o jsonpath={.status.phase}"*)
-      printf '%s' "$mock_pvc_phase"
-      ;;
-    *"get pvc ${POSTGRES_PVC_NAME} -o jsonpath={.spec.storageClassName}"*|\
-    *"get pvc ${POSTGRES_PVC_NAME} -o jsonpath={.spec.volumeName}"*|\
-    *"get pv ${POSTGRES_PV_NAME} -o jsonpath={.status.phase}"*)
-      :
-      ;;
-    *)
-      storage_calls="${storage_calls}kubectl:$*;"
-      ;;
-  esac
-}
-k8s_default_storage_class() { :; }
-ensure_postgres_local_pv() { storage_calls="${storage_calls}ensure-local-pv;"; }
-ensure_postgres_storage
-assert_eq "ensure-local-pv;" "$storage_calls" "pending classless PVC selects retained local PV"
-
-storage_calls=""
-k8s_default_storage_class() { printf '%s' fast-storage; }
-ensure_postgres_storage
-assert_eq \
-  "ensure-local-pv;" \
-  "$storage_calls" \
-  "existing classless Pending PVC binds locally without deletion"
-storage_calls=""
-mock_pvc_phase=""
-ensure_postgres_storage
-assert_eq "" "$storage_calls" "new PVC uses the available default StorageClass"
-mock_pvc_phase=Pending
-k8s_default_storage_class() { :; }
-
-released_log="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-released-pv.XXXXXX")"
-PV_LOG="$released_log" bash -c '
-  set -euo pipefail
-  source "$1/scripts/manage.sh"
-  prepare_postgres_host_path() { printf "prepare\n" >>"$PV_LOG"; }
-  validate_postgres_local_pv() { printf "validate\n" >>"$PV_LOG"; }
-  kubectl() {
-    printf "kubectl:%s\n" "$*" >>"$PV_LOG"
-    case "$*" in
-      *"get pv ${POSTGRES_PV_NAME} -o jsonpath={.status.phase}"*)
-        printf Released
-        ;;
-    esac
-  }
-  ensure_postgres_local_pv
-' _ "$ROOT_DIR"
-validate_line="$(grep -n '^validate$' "$released_log" | cut -d: -f1)"
-delete_line="$(grep -n "delete pv ${POSTGRES_PV_NAME}" "$released_log" | cut -d: -f1)"
-apply_line="$(grep -n '08-postgres-local-pv.yaml' "$released_log" | cut -d: -f1)"
-if [ -z "$validate_line" ] || [ -z "$delete_line" ] || [ -z "$apply_line" ] \
-  || [ "$validate_line" -ge "$delete_line" ] || [ "$delete_line" -ge "$apply_line" ]; then
-  printf 'not ok - released PV was not validated before safe metadata rebuild\n' >&2
-  sed -n '1,120p' "$released_log" >&2
-  exit 1
-fi
-rm -f -- "$released_log"
-printf 'ok - released retained PV is validated before metadata rebuild\n'
-
-secret_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-secret-drift.XXXXXX")"
+# Rotating the API-key pepper invalidates every issued API key, so a changed
+# value must stop the deploy before the Secret is overwritten. The database
+# password is deliberately NOT checked here any more: mx-common owns it.
+pepper_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-pepper-drift.XXXXXX")"
 if bash -c '
   set -euo pipefail
   source "$1/scripts/manage.sh"
-  export MX_INSIGHT_POSTGRES_PASSWORD=current-postgres-password-123456
   export MX_INSIGHT_API_KEY_PEPPER=current-api-key-pepper-1234567890
-  old_password="old-postgres-password-1234567890"
-  old_encoded="$(encoded_secret_value "$old_password")"
+  old_encoded="$(encoded_secret_value "old-api-key-pepper-0987654321xx")"
   kubectl() {
     case "$*" in
-      *"postgres-password"*)
-        printf "%s" "$old_encoded"
-        ;;
-      *"get secret mx-insight-hub-secrets"*)
-        printf '%s' secret/mx-insight-hub-secrets
-        ;;
-      *)
-        return 1
-        ;;
+      *"MX_INSIGHT_API_KEY_PEPPER"*) printf "%s" "$old_encoded" ;;
+      *"get secret mx-insight-hub-secrets"*) printf "%s" secret/mx-insight-hub-secrets ;;
+      *) return 1 ;;
     esac
   }
   validate_existing_runtime_secret
-' _ "$ROOT_DIR" 2>"$secret_error"; then
-  printf 'not ok - retained PostgreSQL password drift was accepted\n' >&2
+' _ "$ROOT_DIR" 2>"$pepper_error"; then
+  printf 'not ok - API-key pepper drift was accepted\n' >&2
   exit 1
 fi
-grep -q 'automatic rotation is blocked' "$secret_error"
-if grep -qE 'current-postgres-password|old-postgres-password' "$secret_error"; then
-  printf 'not ok - secret drift error exposed a secret value\n' >&2
+grep -q 'automatic rotation is blocked' "$pepper_error"
+if grep -qE 'current-api-key-pepper|old-api-key-pepper' "$pepper_error"; then
+  printf 'not ok - drift error exposed a secret value\n' >&2
   exit 1
 fi
-rm -f -- "$secret_error"
-printf 'ok - retained PostgreSQL password drift fails before Secret overwrite\n'
+rm -f -- "$pepper_error"
+printf 'ok - API-key pepper drift fails before Secret overwrite\n'
 
 bash -c '
   set -euo pipefail
   source "$1/scripts/manage.sh"
-  export MX_INSIGHT_POSTGRES_PASSWORD=current-postgres-password-123456
   export MX_INSIGHT_API_KEY_PEPPER=current-api-key-pepper-1234567890
-  postgres_encoded="$(encoded_secret_value "$MX_INSIGHT_POSTGRES_PASSWORD")"
   pepper_encoded="$(encoded_secret_value "$MX_INSIGHT_API_KEY_PEPPER")"
   kubectl() {
     case "$*" in
-      *"postgres-password"*) printf "%s" "$postgres_encoded" ;;
       *"MX_INSIGHT_API_KEY_PEPPER"*) printf "%s" "$pepper_encoded" ;;
       *"get secret mx-insight-hub-secrets"*) printf "%s" secret/mx-insight-hub-secrets ;;
       *) return 1 ;;
@@ -160,133 +89,100 @@ bash -c '
 ' _ "$ROOT_DIR"
 printf 'ok - unchanged retained Secret remains deployable\n'
 
-missing_secret_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-missing-secret.XXXXXX")"
+# A missing Secret is no longer fatal: the database credential it used to guard
+# now lives in mx-common, which regenerates nothing on its own.
+#
+# The stub mirrors the real command: `get --ignore-not-found -o name` exits 0
+# with empty output when the object is absent.
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() { return 0; }
+  validate_existing_runtime_secret
+' _ "$ROOT_DIR"
+printf 'ok - absent Secret is provisioned rather than refused\n'
+
+# ---------------------------------------------------------------------------
+# Database provisioning
+# ---------------------------------------------------------------------------
+
+# The DSN must come from mx-common's `provision`, on stdout, so it can be
+# captured. Everything else that command prints goes to stderr for this reason.
+provision_dsn="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  manage_stub="$(mktemp)"
+  cat >"$manage_stub" <<"STUB"
+#!/usr/bin/env bash
+echo "[mx-common] chatter that must not be captured" >&2
+echo "postgres://mx_insight_hub:secret@mx-common-postgres.mx-common.svc.cluster.local:5432/mx_insight_hub"
+STUB
+  chmod +x "$manage_stub"
+  ensure_hub_database "$manage_stub" >/dev/null 2>&1
+  printf "%s" "$MX_INSIGHT_DATABASE_URL"
+  rm -f "$manage_stub"
+' _ "$ROOT_DIR")"
+assert_eq \
+  "postgres://mx_insight_hub:secret@mx-common-postgres.mx-common.svc.cluster.local:5432/mx_insight_hub" \
+  "$provision_dsn" \
+  "provisioned DSN is captured from stdout only"
+
+# A provisioning step that returns something else must stop the deploy rather
+# than write a nonsense DATABASE_URL into the Secret.
 if bash -c '
   set -euo pipefail
   source "$1/scripts/manage.sh"
-  kubectl() {
-    case "$*" in
-      *"get secret mx-insight-hub-secrets"*) return 0 ;;
-      *"get pvc ${POSTGRES_PVC_NAME} -o jsonpath={.status.phase}"*) printf Bound ;;
-      *) return 0 ;;
-    esac
-  }
-  validate_existing_runtime_secret
-' _ "$ROOT_DIR" 2>"$missing_secret_error"; then
-  printf 'not ok - missing Secret was reconstructed over retained storage\n' >&2
+  manage_stub="$(mktemp)"
+  printf "#!/usr/bin/env bash\necho not-a-dsn\n" >"$manage_stub"
+  chmod +x "$manage_stub"
+  ensure_hub_database "$manage_stub"
+' _ "$ROOT_DIR" >/dev/null 2>&1; then
+  printf 'not ok - a malformed connection string was accepted\n' >&2
   exit 1
 fi
-grep -q 'retained PostgreSQL storage exists' "$missing_secret_error"
-rm -f -- "$missing_secret_error"
-printf 'ok - missing Secret with retained storage fails closed\n'
+printf 'ok - a malformed connection string stops the deploy\n'
 
-if ops_action internal-production plan | grep -q "$POSTGRES_PV_NAME"; then
-  printf 'not ok - conditional local PV leaked into unconditional plan output\n' >&2
-  exit 1
-fi
-printf 'ok - static local PV is absent from unconditional plan output\n'
-
-run_pod_security_case() {
-  local pod_user="$1"
-  local log_path="$2"
-  POD_USER="$pod_user" POD_SECURITY_LOG="$log_path" bash -c '
+# create_runtime_config must refuse to run before provisioning, instead of
+# silently writing an empty DATABASE_URL.
+if bash -c '
   set -euo pipefail
   source "$1/scripts/manage.sh"
-  kubectl() {
-    case "$*" in
-      *"get statefulset mx-insight-hub-postgres"*"containers"*)
-        :
-        ;;
-      *"get statefulset mx-insight-hub-postgres"*)
-        printf 999
-        ;;
-      *"get pod ${POSTGRES_POD_NAME}"*"-o name"*)
-        printf "pod/%s" "$POSTGRES_POD_NAME"
-        ;;
-      *"get pod ${POSTGRES_POD_NAME}"*)
-        printf "%s" "$POD_USER"
-        ;;
-      *"delete pod ${POSTGRES_POD_NAME}"*)
-        printf "%s\n" "$*" >>"$POD_SECURITY_LOG"
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-  }
-  reconcile_postgres_pod_security_context
-' _ "$ROOT_DIR"
-}
-
-pod_security_log="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-pod-security.XXXXXX")"
-run_pod_security_case "" "$pod_security_log"
-grep -q "delete pod ${POSTGRES_POD_NAME} --ignore-not-found --wait=false" "$pod_security_log"
-: >"$pod_security_log"
-run_pod_security_case 999 "$pod_security_log"
-if [ -s "$pod_security_log" ]; then
-  printf 'not ok - current UID 999 PostgreSQL Pod was unnecessarily replaced\n' >&2
+  unset MX_INSIGHT_DATABASE_URL
+  kubectl() { return 0; }
+  create_runtime_config
+' _ "$ROOT_DIR" >/dev/null 2>&1; then
+  printf 'not ok - runtime config was written without a provisioned database\n' >&2
   exit 1
 fi
-rm -f -- "$pod_security_log"
-printf 'ok - only a legacy root PostgreSQL Pod is replaced without touching storage\n'
+printf 'ok - runtime config requires provisioning to have run first\n'
 
-ops_log="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-ops-log.XXXXXX")"
-OPS_LOG="$ops_log" bash -c '
+# ---------------------------------------------------------------------------
+# Retired local PostgreSQL
+# ---------------------------------------------------------------------------
+
+if ops_action internal-production plan 2>/dev/null | grep -q '10-postgres.yaml'; then
+  printf 'not ok - retired local PostgreSQL manifest is still in the plan\n' >&2
+  exit 1
+fi
+printf 'ok - retired local PostgreSQL is absent from the plan\n'
+
+# Destroying a database must never be a routine deploy step, so it requires an
+# explicit confirmation token.
+if bash -c '
   set -euo pipefail
   source "$1/scripts/manage.sh"
-  export MX_INSIGHT_ADMIN_TOKEN=admin-token-at-least-32-characters
-  export MX_INSIGHT_API_KEY_PEPPER=api-key-pepper-at-least-32-characters
-  export MX_INSIGHT_POSTGRES_PASSWORD=postgres-password-at-least-24
-  export NIGHT_ALL_BASE_URL=http://10.88.88.88:13141
-  export MX_INSIGHT_SYNC_LAUNCHER=0
-  ensure_k8s_runtime_image() { printf "ensure-image:%s\n" "$1" >>"$OPS_LOG"; }
-  prepare_postgres_host_path() { printf "prepare-host-path\n" >>"$OPS_LOG"; }
-  kubectl() {
-    printf "kubectl:%s\n" "$*" >>"$OPS_LOG"
-    case "$*" in
-      *"get secret mx-insight-hub-secrets"*)
-        return 0
-        ;;
-      *"create configmap"*|*"create secret"*)
-        printf "apiVersion: v1\nkind: List\nitems: []\n"
-        ;;
-      *"apply -f -"*)
-        cat >/dev/null
-        ;;
-      *"get pvc ${POSTGRES_PVC_NAME} -o jsonpath={.status.phase}"*)
-        printf Pending
-        ;;
-      *"get pvc ${POSTGRES_PVC_NAME} -o jsonpath={.spec.storageClassName}"*|\
-      *"get pvc ${POSTGRES_PVC_NAME} -o jsonpath={.spec.volumeName}"*|\
-      *"get pv ${POSTGRES_PV_NAME} -o jsonpath={.status.phase}"*)
-        :
-        ;;
-      *"get storageclass -o jsonpath="*)
-        :
-        ;;
-      *"get statefulset mx-insight-hub-postgres"*"containers"*)
-        :
-        ;;
-      *"get statefulset mx-insight-hub-postgres"*)
-        printf 999
-        ;;
-      *"get pod ${POSTGRES_POD_NAME}"*"-o name"*)
-        :
-        ;;
-    esac
-  }
-  apply_k8s
-' _ "$ROOT_DIR"
-pv_line="$(grep -n '08-postgres-local-pv.yaml' "$ops_log" | head -n 1 | cut -d: -f1)"
-statefulset_line="$(grep -n '10-postgres.yaml' "$ops_log" | head -n 1 | cut -d: -f1)"
-if [ -z "$pv_line" ] || [ -z "$statefulset_line" ] || [ "$pv_line" -ge "$statefulset_line" ]; then
-  printf 'not ok - deploy did not reconcile the local PV before PostgreSQL\n' >&2
-  sed -n '1,160p' "$ops_log" >&2
+  unset MX_INSIGHT_CONFIRM_DESTROY
+  kubectl() { printf "unexpected kubectl call: %s\n" "$*" >&2; return 1; }
+  decommission_local_postgres
+' _ "$ROOT_DIR" >/dev/null 2>&1; then
+  printf 'not ok - local PostgreSQL was decommissioned without confirmation\n' >&2
   exit 1
 fi
-grep -q '^ensure-image:postgres:16-bookworm$' "$ops_log"
-rm -f -- "$ops_log"
-printf 'ok - apply preloads PostgreSQL and binds storage before StatefulSet rollout\n'
+printf 'ok - decommissioning requires explicit confirmation\n'
+
+# ---------------------------------------------------------------------------
+# Deploy cleanup
+# ---------------------------------------------------------------------------
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/mx-insight-hub-manage-test.XXXXXX")"
 mkdir -p "$tmp_root/tmp" "$tmp_root/work/hub/dist" "$tmp_root/work/dock/mx-launcher/ui-design/dist"
@@ -321,30 +217,3 @@ if [ -e "$tmp_root/work/runtime/internal-production-deploy.lock" ]; then
 fi
 rm -rf -- "$tmp_root"
 printf 'ok - failed deploy removes only its temp directory and lock\n'
-
-image_log="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-runtime-image.XXXXXX")"
-image_tmp="$(mktemp -d "${TMPDIR:-/tmp}/mx-insight-hub-runtime-image-tmp.XXXXXX")"
-IMAGE_LOG="$image_log" TMPDIR="$image_tmp" bash -c '
-  set -euo pipefail
-  source "$1/scripts/manage.sh"
-  containerd_image_ref_present() { return 1; }
-  containerd_import_docker_image() { :; }
-  docker() {
-    printf "%s\n" "$*" >>"$IMAGE_LOG"
-    case "$*" in
-      "image inspect "*) return 1 ;;
-      *) return 0 ;;
-    esac
-  }
-  init_deploy_runtime
-  ensure_k8s_runtime_image postgres:16-bookworm
-' _ "$ROOT_DIR"
-grep -q '^pull postgres:16-bookworm$' "$image_log"
-grep -q '^image rm postgres:16-bookworm$' "$image_log"
-if find "$image_tmp" -mindepth 1 -print -quit | grep -q .; then
-  printf 'not ok - runtime image staging temp survived cleanup\n' >&2
-  exit 1
-fi
-rm -f -- "$image_log"
-rmdir "$image_tmp"
-printf 'ok - Docker-only runtime image pulled by deploy is removed after import\n'

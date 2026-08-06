@@ -20,7 +20,7 @@ data:
     protected-mode no
     appendonly no
     save ""
-    maxmemory 512mb
+    maxmemory 2gb
     maxmemory-policy allkeys-lru
     tcp-keepalive 60
 ---
@@ -92,11 +92,14 @@ spec:
             periodSeconds: 15
           resources:
             requests:
-              cpu: 50m
-              memory: 128Mi
+              cpu: 100m
+              memory: 512Mi
             limits:
-              cpu: "1"
-              memory: 640Mi
+              cpu: "2"
+              # Above maxmemory so eviction, not the OOM killer, enforces the
+              # ceiling. A limit at maxmemory means the kernel kills Redis at
+              # exactly the point its own policy was meant to handle.
+              memory: 3Gi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

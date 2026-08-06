@@ -19,13 +19,24 @@ sh start-node.sh restart
 
 ```bash
 cd electron-dock/mx-common
-bash scripts/manage.sh ensure
+bash scripts/manage.sh deploy     # = ensure，缺失镜像会自动通过 Docker 预热
 bash scripts/manage.sh status
 ```
 
 **通过判据**：`health` 输出 `{"elasticsearch":"green|yellow","redis":"ok","postgres":"ok",...}`。
 
-常见失败：`vm.max_map_count` 提不上去（脚本会打印需要 root 执行的命令）；无默认 StorageClass 时脚本会自动建 Retain 本地 PV，看到 `creating retained local PV` 属正常。
+`ensure` 开始会先报三件事：节点可分配内存 vs 本栈请求量、每个镜像是否已缓存、以及等待过程中每个 Pod 的状态变化。**不再有静默等待**——看到 `still waiting on X (Ns of 300s)` 说明在正常拉镜像，看到 `stuck in ImagePullBackOff` 会立即中止并给出处置方式。
+
+常见失败：
+
+| 现象 | 处置 |
+| --- | --- |
+| `ImagePullBackOff` | `bash scripts/manage.sh preload`，或设镜像源 `MX_COMMON_ELASTICSEARCH_IMAGE=<mirror>/elasticsearch:9.4.2` |
+| ES 反复重启 / OOM | 内存不够：`MX_COMMON_ELASTICSEARCH_HEAP=512m bash scripts/manage.sh ensure` |
+| `vm.max_map_count` 提不上去 | 脚本会打印需要 root 执行的命令 |
+| `creating retained local PV` | 正常，无默认 StorageClass 时自动建 Retain 本地 PV |
+
+单节点上这台机器同时跑 Night-All、Hub 及其 worker，ES 默认请求 2Gi / 上限 3Gi / 堆 1g。堆和内存请求要一起调——只调其中一个会让两者不一致，Pod 会 OOM。请求量大约取堆的两倍，剩下是 Lucene 读段用的堆外 page cache。
 
 ## 2. Hub 部署
 
@@ -52,7 +63,7 @@ DEEPSEEK_API_KEY=<key>
 
 ```bash
 cd electron-dock/mx-insight-hub
-bash scripts/manage.sh ops internal-production deploy
+bash scripts/manage.sh deploy     # 检查共享数据面 → 建库 → 构建 → migrate → 滚动 → 冒烟
 ```
 
 **通过判据**：`Internal production deploy OK.`，且 `kubectl -n mx-insight-hub get pods` 中 public / admin / projector / ingest 四个都 Running。
@@ -67,7 +78,7 @@ MX_INSIGHT_CONFIRM_DESTROY=mx-insight-hub \
 ## 3. 冒烟
 
 ```bash
-bash scripts/manage.sh ops internal-production smoke
+bash scripts/manage.sh verify
 ```
 
 ### 3.1 原有 Night-All 通路（回归项，必须先过）

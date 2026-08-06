@@ -20,6 +20,19 @@ NAMESPACE="mx-common"
 HOST_DATA_ROOT="${MX_COMMON_HOST_DATA_ROOT:-/var/lib/mx-common/k8s}"
 WAIT_TIMEOUT="${MX_COMMON_WAIT_TIMEOUT:-300}"
 
+# Image references, overridable for mirrors or air-gapped nodes. These registries
+# are slow or unreachable from some networks, and a 1.3GB Elasticsearch pull is
+# the single most likely reason `ensure` appears to hang.
+ELASTICSEARCH_IMAGE="${MX_COMMON_ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:9.4.2}"
+POSTGRES_IMAGE="${MX_COMMON_POSTGRES_IMAGE:-pgvector/pgvector:pg16}"
+REDIS_IMAGE="${MX_COMMON_REDIS_IMAGE:-redis:7.4-alpine}"
+
+# Elasticsearch heap. Xms and Xmx are always set together: a JVM whose min and
+# max heap differ fails Elasticsearch's production bootstrap check, and the
+# memory REQUEST has to leave room for both the heap and the off-heap page cache
+# Lucene reads segments through. Roughly heap x2 is the working rule.
+ELASTICSEARCH_HEAP="${MX_COMMON_ELASTICSEARCH_HEAP:-4g}"
+
 say() { printf '[mx-common] %s\n' "$*"; }
 warn() { printf '[mx-common] WARN: %s\n' "$*" >&2; }
 die() { printf '[mx-common] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -31,9 +44,14 @@ Usage: bash scripts/manage.sh <command>
 
   ensure          Reconcile the shared data plane and wait until it is healthy.
                   Safe to call on every product deploy; a healthy stack is a no-op.
+                  Missing images are preloaded through Docker automatically.
+  deploy          Alias for `ensure`.
   status          Show workloads, PVCs and Elasticsearch cluster health.
   health          Probe only. Exit 0 healthy, 1 degraded/down. Prints JSON.
   plan            Print the manifests that `ensure` would apply.
+  preload         Pull the shared images through Docker and import them into
+                  containerd. Use when the node cannot reach the registries
+                  directly, or to avoid a slow pull during `ensure`.
   down            Scale shared workloads to zero. Data, PVCs and indices are kept.
   logs [service]  Tail logs (elasticsearch | redis | hanlp | postgres).
 
@@ -53,6 +71,11 @@ Environment:
   MX_COMMON_WAIT_TIMEOUT        Seconds to wait for readiness (default 300)
   MX_COMMON_SNAPSHOT_SCHEDULE   SLM cron (default "0 30 1 * * ?", 01:30 daily)
   MX_COMMON_SNAPSHOT_S3_BUCKET  Store snapshots off-node instead of on this host
+  MX_COMMON_ELASTICSEARCH_IMAGE Mirror override (default docker.elastic.co/...:9.4.2)
+  MX_COMMON_POSTGRES_IMAGE      Mirror override (default pgvector/pgvector:pg16)
+  MX_COMMON_REDIS_IMAGE         Mirror override (default redis:7.4-alpine)
+  MX_COMMON_ELASTICSEARCH_HEAP  JVM heap, Xms and Xmx together (default 4g, cap 31g)
+  MX_COMMON_AUTO_PRELOAD=0      Do not preload images during ensure
 EOF
 }
 
@@ -199,10 +222,18 @@ allow_client_namespace() {
   say "namespace ${target} is allowed to reach the shared data plane"
 }
 
+render_manifest() {
+  sed -e "s#docker.elastic.co/elasticsearch/elasticsearch:9.4.2#${ELASTICSEARCH_IMAGE}#g" \
+      -e "s#pgvector/pgvector:pg16#${POSTGRES_IMAGE}#g" \
+      -e "s#redis:7.4-alpine#${REDIS_IMAGE}#g" \
+      -e "s#-Xms4g -Xmx4g#-Xms${ELASTICSEARCH_HEAP} -Xmx${ELASTICSEARCH_HEAP}#g" \
+      "$1"
+}
+
 apply_manifests() {
   local file
   while IFS= read -r file; do
-    kubectl apply -f "$file" >/dev/null
+    render_manifest "$file" | kubectl apply -f - >/dev/null
   done < <(manifest_list)
   allow_hostnetwork_clients
   say "manifests applied"
@@ -267,19 +298,119 @@ EOF
   say "allowed hostNetwork clients from node IPs: $(printf '%s' "$addresses" | tr '\n' ' ')"
 }
 
+# Container states that will never resolve on their own. Waiting out the full
+# timeout on these teaches the operator nothing and wastes five minutes.
+pod_terminal_reason() {
+  local name="$1"
+  kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=${name}" \
+    -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{range .status.initContainerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{end}' \
+    2>/dev/null | awk 'NF' | grep -E '^(ImagePullBackOff|ErrImagePull|CrashLoopBackOff|CreateContainerConfigError|InvalidImageName)$' | head -1
+}
+
+# One-line progress summary: phase, readiness, restarts and whatever the pod is
+# currently waiting on.
+pod_progress() {
+  local name="$1"
+  kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=${name}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{" ready="}{.status.containerStatuses[0].ready}{" restarts="}{.status.containerStatuses[0].restartCount}{" "}{.status.containerStatuses[0].state.waiting.reason}{end}' \
+    2>/dev/null || true
+}
+
+# Wait for a workload, reporting progress while it happens.
+#
+# The previous version ran `rollout status` with all output discarded, which
+# meant up to five minutes of total silence — indistinguishable from a hang.
+# Pulling a 1.3GB image over a slow link is a legitimate reason to wait; being
+# unable to tell that apart from a crash loop is not.
 wait_ready() {
   local kind="$1" name="$2" required="${3:-required}"
-  if kubectl -n "$NAMESPACE" rollout status "$kind/$name" --timeout="${WAIT_TIMEOUT}s" >/dev/null 2>&1; then
-    say "${name} is ready"
-    return 0
-  fi
-  if [ "$required" = "optional" ]; then
-    warn "${name} did not become ready in ${WAIT_TIMEOUT}s; continuing without it"
-    kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=${name}" 2>/dev/null || true
-    return 0
-  fi
-  kubectl -n "$NAMESPACE" describe "$kind/$name" 2>/dev/null | tail -30 >&2 || true
+  local waited=0 interval=5 reason progress last_progress=""
+
+  while [ "$waited" -lt "$WAIT_TIMEOUT" ]; do
+    if kubectl -n "$NAMESPACE" rollout status "$kind/$name" --timeout=3s >/dev/null 2>&1; then
+      say "${name} is ready (${waited}s)"
+      return 0
+    fi
+
+    reason="$(pod_terminal_reason "$name")"
+    if [ -n "$reason" ]; then
+      warn "${name} is stuck in ${reason}; not waiting out the remaining $((WAIT_TIMEOUT - waited))s"
+      case "$reason" in
+        ImagePullBackOff|ErrImagePull|InvalidImageName)
+          warn "  The node cannot pull this workload's image. Options:"
+          warn "    1. Point at a mirror:  MX_COMMON_ELASTICSEARCH_IMAGE=... MX_COMMON_POSTGRES_IMAGE=... MX_COMMON_REDIS_IMAGE=..."
+          warn "    2. Preload from a host that can reach the registry:  bash scripts/manage.sh preload"
+          warn "  Current images: $(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=${name} -o jsonpath='{.items[*].spec.containers[*].image}' 2>/dev/null)"
+          ;;
+        CrashLoopBackOff)
+          diagnose_workload "$name"
+          ;;
+      esac
+      [ "$required" = "optional" ] && return 0
+      return 1
+    fi
+
+    progress="$(pod_progress "$name")"
+    # Print only on change, so a slow pull produces a readable trail rather than
+    # a wall of identical lines.
+    if [ -n "$progress" ] && [ "$progress" != "$last_progress" ]; then
+      say "  ${progress} (${waited}s elapsed)"
+      last_progress="$progress"
+    elif [ $((waited % 30)) -eq 0 ] && [ "$waited" -gt 0 ]; then
+      say "  still waiting on ${name} (${waited}s of ${WAIT_TIMEOUT}s)"
+    fi
+
+    sleep "$interval"
+    waited=$((waited + interval))
+  done
+
+  warn "${name} did not become ready in ${WAIT_TIMEOUT}s"
+  diagnose_workload "$name"
+  [ "$required" = "optional" ] && return 0
   return 1
+}
+
+# Print the diagnosis that actually explains a stuck workload.
+#
+# Describing the StatefulSet or Deployment shows only controller-level events
+# ("SuccessfulCreate"), which say nothing about why the pod is not running.
+# Scheduling failures, image pulls and mount errors are all POD events, so that
+# is what gets described here.
+diagnose_workload() {
+  local name="$1" pod
+  pod="$(kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=${name}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [ -z "$pod" ]; then
+    warn "  no pod exists for ${name}; the controller could not create one"
+    kubectl -n "$NAMESPACE" get events --field-selector "involvedObject.name=${name}" \
+      --sort-by=.lastTimestamp 2>/dev/null | tail -10 >&2 || true
+    return 0
+  fi
+
+  warn "  pod ${pod}:"
+  kubectl -n "$NAMESPACE" get pod "$pod" -o wide 2>/dev/null >&2 || true
+
+  # Container-level waiting reason and message: this is where "Back-off pulling
+  # image" and "failed to create containerd task" actually appear.
+  kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{range .status.containerStatuses[*]}  container {.name}: {.state.waiting.reason}{" - "}{.state.waiting.message}{"\n"}{end}' \
+    2>/dev/null >&2 || true
+  kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{range .status.conditions[*]}  {.type}={.status} {.reason} {.message}{"\n"}{end}' \
+    2>/dev/null >&2 || true
+
+  warn "  recent pod events:"
+  kubectl -n "$NAMESPACE" describe pod "$pod" 2>/dev/null \
+    | sed -n '/^Events:/,$p' | tail -15 >&2 || true
+
+  # Logs only exist once a container has actually started; absence here is
+  # itself the signal that the problem is before startup.
+  local logs
+  logs="$(kubectl -n "$NAMESPACE" logs "$pod" --tail=20 --all-containers 2>/dev/null || true)"
+  if [ -n "$logs" ]; then
+    warn "  last log lines:"
+    printf '%s\n' "$logs" >&2
+  else
+    warn "  no container logs yet: the container has not started (image pull, mount or scheduling)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -356,6 +487,8 @@ cmd_ensure() {
   fi
 
   ensure_vm_max_map_count || warn "continuing; Elasticsearch may fail to start"
+  report_capacity
+  report_image_readiness
   kubectl apply -f "${K8S_DIR}/common/00-namespace.yaml" >/dev/null
   ensure_secret
   ensure_storage
@@ -602,6 +735,30 @@ SQL
     "$identifier" "$password" "$NAMESPACE" "$identifier"
 }
 
+# Recreate the shared stateful workloads and their storage from scratch.
+#
+# The only way to change a StatefulSet's volumeClaimTemplate, which Kubernetes
+# treats as immutable. Separate command, never part of ensure, and it names what
+# it destroys first: every index and every product database goes with it.
+cmd_reset_storage() {
+  need kubectl
+  if [ "${MX_COMMON_CONFIRM_DESTROY:-}" != "mx-common" ]; then
+    say "This DESTROYS all shared data:" >&2
+    say "  every Elasticsearch index (rebuildable projections)" >&2
+    say "  every product database in the shared PostgreSQL (NOT rebuildable)" >&2
+    say "  the PVCs, the PVs and ${HOST_DATA_ROOT}" >&2
+    die "Re-run with MX_COMMON_CONFIRM_DESTROY=mx-common to proceed"
+  fi
+  kubectl -n "$NAMESPACE" delete statefulset mx-common-elasticsearch mx-common-postgres --ignore-not-found
+  kubectl -n "$NAMESPACE" delete deployment mx-common-redis --ignore-not-found
+  kubectl -n "$NAMESPACE" delete pvc --all --ignore-not-found
+  kubectl delete pv -l app.kubernetes.io/part-of=mx-common --ignore-not-found
+  rm -rf -- "${HOST_DATA_ROOT:?}"/* 2>/dev/null \
+    || sudo -n rm -rf -- "${HOST_DATA_ROOT:?}"/* 2>/dev/null \
+    || warn "could not clear ${HOST_DATA_ROOT}; remove it as root"
+  say "storage reset. Run `ensure` to recreate, then re-provision each product database."
+}
+
 cmd_status() {
   need kubectl
   kubectl -n "$NAMESPACE" get statefulsets,deployments,services,pvc 2>/dev/null || {
@@ -627,8 +784,123 @@ cmd_plan() {
   local file
   while IFS= read -r file; do
     printf '\n===== %s =====\n' "${file#"${ROOT_DIR}/"}"
-    cat "$file"
+    render_manifest "$file"
   done < <(manifest_list)
+}
+
+# ---------------------------------------------------------------------------
+# Images
+# ---------------------------------------------------------------------------
+
+images_in_use() {
+  printf '%s\n' "$POSTGRES_IMAGE" "$ELASTICSEARCH_IMAGE" "$REDIS_IMAGE"
+}
+
+containerd_has_image() {
+  local image="$1"
+  if [ "$(id -u)" -eq 0 ]; then
+    ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "docker.io/${image}\|${image}"
+  else
+    sudo -n ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "docker.io/${image}\|${image}"
+  fi
+}
+
+# Report which images the node already has BEFORE applying anything.
+#
+# This is the difference between "ensure sat silent for five minutes then
+# failed" and "ensure told you up front it was about to pull 1.3GB".
+report_image_readiness() {
+  local image missing=0
+  while IFS= read -r image; do
+    if containerd_has_image "$image"; then
+      say "image present: ${image}"
+    else
+      say "image NOT cached, will be pulled: ${image}"
+      missing=$((missing + 1))
+    fi
+  done < <(images_in_use)
+  if [ "$missing" -gt 0 ]; then
+    say "${missing} image(s) not cached; Elasticsearch alone is ~1.3GB."
+    # Preloading through Docker beats letting the kubelet pull: the pull happens
+    # here, with visible progress and a real error if it fails, instead of
+    # inside a pod that just sits in ContainerCreating.
+    if [ "${MX_COMMON_AUTO_PRELOAD:-1}" = "1" ] && command -v docker >/dev/null 2>&1; then
+      say "preloading images through Docker (set MX_COMMON_AUTO_PRELOAD=0 to skip)"
+      cmd_preload || warn "preload did not complete; the kubelet will try to pull directly"
+    else
+      say "  Set a mirror:  MX_COMMON_ELASTICSEARCH_IMAGE=<mirror>/elasticsearch:9.4.2"
+      say "  Or preload:    bash scripts/manage.sh preload"
+    fi
+  fi
+}
+
+# Pull through Docker and import into containerd, matching how mx-insight-hub
+# already gets its own image onto this node.
+cmd_preload() {
+  need docker
+  local image failed=0
+  while IFS= read -r image; do
+    if containerd_has_image "$image"; then
+      say "already imported: ${image}"
+      continue
+    fi
+    say "pulling ${image}"
+    if ! docker pull "$image"; then
+      warn "could not pull ${image}"
+      failed=1
+      continue
+    fi
+    local archive
+    archive="$(mktemp -t mx-common-image.XXXXXX).tar"
+    docker image save -o "$archive" "$image"
+    if [ "$(id -u)" -eq 0 ]; then
+      ctr -n k8s.io images import "$archive"
+    else
+      need sudo
+      sudo ctr -n k8s.io images import "$archive"
+    fi
+    rm -f -- "$archive"
+    say "imported ${image}"
+  done < <(images_in_use)
+  [ "$failed" -eq 0 ] || die "one or more images could not be pulled"
+  say "all shared data-plane images are present on this node"
+}
+
+# ---------------------------------------------------------------------------
+# Capacity
+# ---------------------------------------------------------------------------
+
+# Compare what this stack requests against what the node can still allocate.
+#
+# Reported as a warning rather than a hard gate: Kubernetes schedules on
+# requests, and a node that is tight but sufficient should not be blocked by a
+# script's arithmetic. But an operator asking "is memory too small?" deserves
+# the numbers rather than a guess.
+report_capacity() {
+  local allocatable requested_mi=0
+  allocatable="$(kubectl get nodes -o jsonpath='{.items[0].status.allocatable.memory}' 2>/dev/null || true)"
+  [ -n "$allocatable" ] || return 0
+
+  # PostgreSQL 2Gi + Elasticsearch 10Gi + Redis 512Mi of *requests*.
+  requested_mi=$((2048 + 10240 + 512))
+  [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ] && requested_mi=$((requested_mi + 1024))
+
+  local allocatable_mi=0
+  case "$allocatable" in
+    *Ki) allocatable_mi=$(( ${allocatable%Ki} / 1024 )) ;;
+    *Mi) allocatable_mi=${allocatable%Mi} ;;
+    *Gi) allocatable_mi=$(( ${allocatable%Gi} * 1024 )) ;;
+  esac
+  [ "$allocatable_mi" -gt 0 ] || return 0
+
+  say "node allocatable memory: ${allocatable_mi}Mi; this stack requests ${requested_mi}Mi"
+  if [ "$allocatable_mi" -lt $((requested_mi * 2)) ]; then
+    warn "memory is tight. Elasticsearch requests 2Gi (1g heap, 3Gi limit) and this"
+    warn "node also runs Night-All, the Hub and its workers."
+    warn "  Shrink the heap:  MX_COMMON_ELASTICSEARCH_HEAP=512m bash scripts/manage.sh ensure"
+    warn "  Keep the memory request at roughly twice the heap; the rest is the"
+    warn "  off-heap page cache Lucene reads segments through."
+  fi
 }
 
 cmd_down() {
@@ -655,6 +927,11 @@ main() {
   case "${1:-}" in
     ensure) cmd_ensure ;;
     provision) shift; cmd_provision "${1:-}" "${2:-}" ;;
+    preload) cmd_preload ;;
+    reset-storage) cmd_reset_storage ;;
+    # `deploy` reads naturally from either project directory and does the same
+    # idempotent reconcile.
+    deploy) cmd_ensure ;;
     snapshot) shift; cmd_snapshot "${1:-status}" ;;
     status) cmd_status ;;
     health) cmd_health ;;

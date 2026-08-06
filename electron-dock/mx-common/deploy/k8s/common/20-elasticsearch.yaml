@@ -139,7 +139,12 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: ES_JAVA_OPTS
-              value: "-Xms1g -Xmx1g"
+              # Heap is capped at 31g on purpose, not sized to the machine.
+              # Above ~32g the JVM loses compressed ordinary object pointers and
+              # every reference doubles in width, so a 33g heap holds LESS than
+              # a 31g one. Give spare RAM to the page cache instead, which is
+              # what Lucene actually reads segments through.
+              value: "-Xms4g -Xmx4g"
             - name: TZ
               value: Asia/Shanghai
           readinessProbe:
@@ -158,11 +163,12 @@ spec:
             failureThreshold: 6
           resources:
             requests:
-              cpu: 250m
-              memory: 2Gi
+              cpu: "1"
+              # Roughly twice the heap: the remainder is off-heap page cache.
+              memory: 10Gi
             limits:
-              cpu: "2"
-              memory: 3Gi
+              cpu: "4"
+              memory: 16Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -190,6 +196,11 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
+            # Nominal. With a hostPath PV nothing enforces this figure -- the
+            # real bound is the node's disk. It is also IMMUTABLE:
+            # volumeClaimTemplates cannot be edited on a live StatefulSet, so
+            # changing it means recreating the workload
+            # (`manage.sh reset-storage`, which destroys data).
             storage: 50Gi
 ---
 apiVersion: v1
@@ -201,4 +212,6 @@ spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
+      # Nominal for hostPath; snapshots are bounded by the SLM retention policy
+      # (30 days / 60 snapshots) rather than by this number.
       storage: 20Gi
