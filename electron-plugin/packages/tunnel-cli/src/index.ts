@@ -72,6 +72,9 @@ const clientCommands = new Set([
   'enable',
   'disable',
   'upgrade-systemd',
+  'reload',
+  'port',
+  'listen',
   'server-on',
   'server-off',
   'egress-on',
@@ -90,6 +93,7 @@ const clientCommands = new Set([
   'run',
   'test',
   'print-env',
+  'print-unset-env',
   'uninstall',
 ]);
 
@@ -119,11 +123,17 @@ Common commands:
   qp-tunnel-cli egress-off
   qp-tunnel-cli docker-build-proxy on
   qp-tunnel-cli docker-build-proxy off
+  eval "$(qp-tunnel-cli print-unset-env)"
   qp-tunnel-cli tun-on
   MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS=203.0.113.10/32 sudo -E qp-tunnel-cli tun-on
   qp-tunnel-cli tun-off
   qp-tunnel-cli k8s preload-images
   qp-tunnel-cli update-subscription
+  qp-tunnel-cli reload
+  qp-tunnel-cli port 7888
+  qp-tunnel-cli listen on
+  qp-tunnel-cli listen on 7890
+  qp-tunnel-cli listen off
   qp-tunnel-cli hdo status
   qp-tunnel-cli h2i status
   qp-tunnel-cli uninstall --purge
@@ -242,7 +252,9 @@ function runClientCommand(scriptArgs: string[]): never {
     process.exit(1);
   }
 
-  if (!isRoot()) {
+  // Printing the unset lines touches nothing privileged, and prompting for a
+  // sudo password inside `eval "$(...)"` would be both surprising and unusable.
+  if (!isRoot() && scriptArgs[0] !== 'print-unset-env') {
     sudoSelf(scriptArgs);
   }
 

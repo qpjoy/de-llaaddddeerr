@@ -83,9 +83,18 @@ qp-tunnel-cli h2i enroll \
 # systemctl is-enabled qpjoy-h2i@mx-h2i.service
 # systemctl status qpjoy-h2i@mx-h2i.service --no-pager
 
-
+# docker pull
+qp-tunnel-cli docker-build-proxy on
+qp-tunnel-cli docker-build-proxy off
+# git pull
 git -c http.proxy=http://127.0.0.1:7788 -c https.proxy=http://127.0.0.1:7788 pull
 
 # docker拿到代理
 systemctl show docker --property=Environment | tr ' ' '\n' | grep -i proxy
+
+# update-subscription
+qp-tunnel-cli update-subscription --url ''
+
+# docker环境变量目录
+/etc/systemd/system/docker.service.d/
 ```

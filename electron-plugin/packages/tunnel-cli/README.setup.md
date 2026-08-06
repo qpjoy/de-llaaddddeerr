@@ -94,4 +94,7 @@ systemctl show docker --property=Environment | tr ' ' '\n' | grep -i proxy
 
 # update-subscription
 qp-tunnel-cli update-subscription --url ''
+
+# docker环境变量目录
+/etc/systemd/system/docker.service.d/
 ```
