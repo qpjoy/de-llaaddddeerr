@@ -70,6 +70,13 @@ export function loadConfig(environment = process.env) {
   // what makes this additive rather than a cutover.
   const launcher = {
     baseUrl: environment.MX_INSIGHT_LAUNCHER_URL?.trim() || null,
+    // Browser-reachable address, distinct from the in-cluster one. The console
+    // signs in by posting the user's credentials from the BROWSER straight to
+    // Launcher, so the Hub server never sees a password -- ADR-0004 keeps
+    // Launcher as the only authentication authority, and proxying the form here
+    // would quietly put the Hub back in the credential path.
+    // A cluster DNS name cannot be used: it does not resolve in a browser.
+    publicUrl: environment.MX_INSIGHT_LAUNCHER_PUBLIC_URL?.trim() || null,
     audience: environment.MX_INSIGHT_LAUNCHER_AUDIENCE?.trim() || 'mx-insight-hub',
     timeoutMs: positiveInteger(environment.MX_INSIGHT_LAUNCHER_TIMEOUT_MS, 3_000, 'MX_INSIGHT_LAUNCHER_TIMEOUT_MS'),
     // Bounds how long a revoked Launcher token can still be accepted here.

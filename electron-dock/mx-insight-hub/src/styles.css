@@ -1168,3 +1168,23 @@ select {
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 }
+
+/* Sign-in method selector. Only rendered when the server reports that a
+   Launcher identity provider is configured, so a token-only deployment sees no
+   tabs at all rather than a disabled control. */
+.mih-signin-tabs {
+  display: flex;
+  gap: var(--qp-space-2, 0.5rem);
+  margin-bottom: var(--qp-space-4, 1rem);
+}
+
+.mih-signin-tabs .qp-button {
+  flex: 1 1 0;
+  justify-content: center;
+}
+
+.mih-signin-tabs .qp-button.is-active {
+  border-color: var(--qp-color-primary, currentColor);
+  color: var(--qp-color-primary, inherit);
+  background: color-mix(in oklab, var(--qp-color-primary, #3ddc97) 12%, transparent);
+}

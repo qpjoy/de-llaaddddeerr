@@ -64,6 +64,8 @@ export async function createRuntime(config = loadConfig()) {
     agent,
     search,
     embedding,
+    launcherPublicUrl: config.launcher.publicUrl,
+    launcherAudience: config.launcher.audience,
     backfillPlatforms: config.backfill.platforms,
     adminToken: config.adminToken,
     listenerMode: config.listenerMode,

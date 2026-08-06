@@ -120,6 +120,8 @@ export function createApp({
   agent = null,
   search = null,
   embedding = null,
+  launcherPublicUrl = null,
+  launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
   staticRoot,
   logger = console,
@@ -226,6 +228,23 @@ export function createApp({
           'access-control-allow-methods': 'GET, POST, PUT, OPTIONS',
         })
         response.end()
+        return
+      }
+
+      // Unauthenticated by necessity: the console has to know how to sign in
+      // before it can. Reveals only the Launcher address and audience, both of
+      // which a user needs anyway to authenticate and neither of which is
+      // secret. No Hub state is exposed.
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/sign-in-options') {
+        sendJson(response, 200, {
+          data: {
+            adminToken: true,
+            launcher: identity?.enabled && launcherPublicUrl
+              ? { url: launcherPublicUrl, audience: launcherAudience }
+              : null,
+          },
+          requestId,
+        })
         return
       }
 

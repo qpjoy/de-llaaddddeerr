@@ -18,7 +18,7 @@ import {
   Users,
   X,
 } from '@phosphor-icons/react'
-import { adminApi } from './api.js'
+import { adminApi, signInWithLauncher } from './api.js'
 import { ErrorState, Field, ToastStack } from './components.jsx'
 import {
   ApiKeysPage,
@@ -90,6 +90,36 @@ function SessionGate({ checking, message, onAuthenticate }) {
   const [candidate, setCandidate] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  const [mode, setMode] = useState('token')
+  const [options, setOptions] = useState(null)
+  const [account, setAccount] = useState({ username: '', password: '' })
+
+  useEffect(() => {
+    // Which sign-in methods exist is a server-side fact; asking avoids showing
+    // a Launcher form in a deployment that has no Launcher.
+    adminApi.signInOptions().then(setOptions)
+  }, [])
+
+  const submitLauncher = async (event) => {
+    event.preventDefault()
+    setSubmitting(true)
+    setError(null)
+    try {
+      // The password goes from this browser straight to Launcher; the Hub only
+      // ever receives the resulting token.
+      const token = await signInWithLauncher({
+        url: options.launcher.url,
+        audience: options.launcher.audience,
+        username: account.username.trim(),
+        password: account.password,
+      })
+      await onAuthenticate(token)
+    } catch (requestError) {
+      setError(requestError)
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
   const submit = async (event) => {
     event.preventDefault()
@@ -126,28 +156,64 @@ function SessionGate({ checking, message, onAuthenticate }) {
             正在验证已有会话
           </div>
         ) : (
-          <form className="mih-auth-form" onSubmit={submit}>
-            <Field label="Admin Token" hint="请求时通过 x-mx-insight-admin-token 发送，不写入 URL。">
-              <span className="qp-input-group">
-                <span className="qp-input-group__prefix"><LockKey size={17} aria-hidden="true" /></span>
-                <input
-                  className="qp-input mih-mono"
-                  type="password"
-                  value={candidate}
-                  onChange={(event) => setCandidate(event.target.value)}
-                  placeholder="输入管理凭证"
-                  autoComplete="off"
-                  autoFocus
-                  required
-                />
-              </span>
-            </Field>
-            {error ? <ErrorState error={error} /> : null}
-            <button className="qp-button qp-button--primary qp-button--lg qp-button--block" type="submit" disabled={submitting || !candidate.trim()}>
-              {submitting ? <span className="qp-spinner" aria-hidden="true" /> : <ShieldCheck size={18} aria-hidden="true" />}
-              {submitting ? '正在验证' : '验证并进入'}
-            </button>
-          </form>
+          <>
+            {options?.launcher ? (
+              <div className="mih-signin-tabs" role="tablist">
+                <button type="button" role="tab" aria-selected={mode === 'launcher'}
+                  className={`qp-button qp-button--ghost${mode === 'launcher' ? ' is-active' : ''}`}
+                  onClick={() => { setMode('launcher'); setError(null) }}>Launcher 账号</button>
+                <button type="button" role="tab" aria-selected={mode === 'token'}
+                  className={`qp-button qp-button--ghost${mode === 'token' ? ' is-active' : ''}`}
+                  onClick={() => { setMode('token'); setError(null) }}>Admin Token</button>
+              </div>
+            ) : null}
+
+            {options?.launcher && mode === 'launcher' ? (
+              <form className="mih-auth-form" onSubmit={submitLauncher}>
+                <Field label="账号" hint={`凭据直接提交给 ${options.launcher.url}，不经过 Hub。`}>
+                  <input className="qp-input" value={account.username} autoComplete="username" autoFocus required
+                    onChange={(event) => setAccount({ ...account, username: event.target.value })} />
+                </Field>
+                <Field label="密码">
+                  <span className="qp-input-group">
+                    <span className="qp-input-group__prefix"><LockKey size={17} aria-hidden="true" /></span>
+                    <input className="qp-input" type="password" value={account.password}
+                      autoComplete="current-password" required
+                      onChange={(event) => setAccount({ ...account, password: event.target.value })} />
+                  </span>
+                </Field>
+                {error ? <ErrorState error={error} /> : null}
+                <button className="qp-button qp-button--primary qp-button--lg qp-button--block" type="submit"
+                  disabled={submitting || !account.username.trim() || !account.password}>
+                  {submitting ? <span className="qp-spinner" aria-hidden="true" /> : <ShieldCheck size={18} aria-hidden="true" />}
+                  {submitting ? '正在验证' : '使用 Launcher 账号登录'}
+                </button>
+              </form>
+            ) : (
+              <form className="mih-auth-form" onSubmit={submit}>
+                <Field label="Admin Token" hint="请求时通过 x-mx-insight-admin-token 发送，不写入 URL。">
+                  <span className="qp-input-group">
+                    <span className="qp-input-group__prefix"><LockKey size={17} aria-hidden="true" /></span>
+                    <input
+                      className="qp-input mih-mono"
+                      type="password"
+                      value={candidate}
+                      onChange={(event) => setCandidate(event.target.value)}
+                      placeholder="输入管理凭证或 Launcher token"
+                      autoComplete="off"
+                      autoFocus
+                      required
+                    />
+                  </span>
+                </Field>
+                {error ? <ErrorState error={error} /> : null}
+                <button className="qp-button qp-button--primary qp-button--lg qp-button--block" type="submit" disabled={submitting || !candidate.trim()}>
+                  {submitting ? <span className="qp-spinner" aria-hidden="true" /> : <ShieldCheck size={18} aria-hidden="true" />}
+                  {submitting ? '正在验证' : '验证并进入'}
+                </button>
+              </form>
+            )}
+          </>
         )}
         <footer className="mih-auth-footer">
           <LockKey size={15} aria-hidden="true" />

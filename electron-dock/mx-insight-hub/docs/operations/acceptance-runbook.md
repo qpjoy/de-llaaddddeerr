@@ -183,3 +183,104 @@ cd ../mx-common && bash scripts/manage.sh down
 ```
 
 两条命令都不删 PVC、PV、索引和 Secret。
+
+
+## 6. Launcher 登录怎么用
+
+**Hub 不做 OAuth 跳转**，控制台的登录框接受两种凭据：admin token，或一个 Launcher 签发的 token（`mx-v1-...`）。这决定了平台管理员是怎么产生的：
+
+**没有人"自动"成为管理员。** JIT provisioning 发生在**该用户用 Launcher token 登录 Hub 控制台的那一刻**——那时 Hub 才去 introspect、创建 member、比对 scope 白名单。在此之前「成员」列表是空的，这是正常的，不是配置没生效。
+
+先确认 Launcher 已被发现：
+
+```bash
+curl -s -H "x-mx-insight-admin-token: $TOKEN" \
+  http://10.88.88.88:18151/internal/v1/admin/session | jq '.data.identityProvider'
+```
+
+`"mx-launcher"` 表示已接上；`null` 表示没发现到 Launcher，登录只有 admin token 可用。
+
+签一个用户 token（需要 Launcher 的 ops token）：
+
+```bash
+curl -X POST http://mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090/internal/v1/user-center/tokens/issue \
+  -H "x-mx-ops-token: $LAUNCHER_OPS_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"subjectKind":"user","subjectId":"<userId>","audience":"mx-insight-hub"}'
+```
+
+把返回的 token 粘进 Hub 控制台登录框。登录后查自己的 scope 匹配情况：
+
+```bash
+curl -s -H "x-mx-insight-admin-token: <那个 mx-v1 token>" \
+  http://10.88.88.88:18151/internal/v1/admin/session \
+  | jq '{launcherScopes, adminScopeAllowlist, adminScopeMatched, platformAdmin}'
+```
+
+`adminScopeMatched` 为空数组就是白名单没配对——Launcher 实际定义的 scope 是 `rbac.manage`、`admin.dashboard.read`、`release.manage`、`site-slot.manage`、`dns.manage` 等，`MX_INSIGHT_LAUNCHER_ADMIN_SCOPES` 必须写其中之一。
+
+没匹配上的用户仍然能登录成功，只是看到空控制台，直到有人给他授予 tenant membership。**认证成功不等于有权限**，这是刻意的。
+
+## 7. 验证 API key 的调用能力
+
+新建的调用者需要两样东西才能调：**平台授权**和 **API key**。控制台「平台能力」授权、「API Keys」签发。
+
+然后跑端到端验证——它比手工 curl 多验四步：
+
+```bash
+bash scripts/manage.sh verify-data-path <api-key>
+```
+
+不传 key 就用部署时存下的 bootstrap key。逐段报告：
+
+| 阶段 | 验证的东西 |
+| --- | --- |
+| 1/5 capabilities | key 有效、平台已授权 |
+| 2/5 search | Night-All 可达、返回了 items（**这一步是计费的**） |
+| 3/5 ingest → PG | 异步入库确实落地（接口返回时并不等它） |
+| 4/5 outbox → projector | 投影事件被消费干净 |
+| 5/5 Elasticsearch | 文档真的进了索引 |
+
+任一步失败会直接给出该看哪个 workload 的日志。3/5 卡住看 ingest worker，4/5 卡住看 projector 和死信。
+
+## 8. Launcher token 到底怎么来的
+
+先把事实说清楚——这几点在 Launcher 现有实现里是确定的：
+
+- **Launcher 管理台没有"签发 token"的按钮。** 它只调 `bootstrap` / `roles` / `users` / `users/import` / `oversea-entitlements`，没有任何界面调用 `tokens/issue`。
+- **API 文档在** `http://10.88.88.88:18090/docs/api`（还有 `openapi.json` 和 `mx-launcher-api.md`）。
+- **内网网关 `:18090` 把所有路径反代给 Launcher**，所以下面这些接口浏览器可直接访问。
+
+有两条路拿到 token：
+
+**用户自己登录（推荐，不需要 ops token）**
+
+```bash
+curl -X POST http://10.88.88.88:18090/internal/v1/sdk/oauth/token \
+  -H 'content-type: application/json' \
+  -d '{"grant_type":"password","username":"<账号>","password":"<密码>","audience":"mx-insight-hub"}'
+```
+
+⚠️ `audience` **必须**写 `mx-insight-hub`。它默认是 `mx-sdk`，而 Hub 会校验 audience 并拒绝不匹配的 token。
+
+**管理员代签（需要 ops token）**
+
+```bash
+curl -X POST http://10.88.88.88:18090/internal/v1/user-center/tokens/issue \
+  -H "x-mx-ops-token: $LAUNCHER_OPS_TOKEN" -H 'content-type: application/json' \
+  -d '{"subjectKind":"user","subjectId":"<userId>","audience":"mx-insight-hub"}'
+```
+
+### 但现在不用手工 curl 了
+
+Hub 控制台登录页新增了「Launcher 账号」页签，直接填账号密码即可。
+
+**密码由浏览器直接提交给 Launcher，不经过 Hub 服务端**——Launcher 是唯一的认证权威（ADR-0004），让 Hub 代理这个表单等于把它重新放回凭据链路里。Hub 只接收换回来的 token。
+
+需要配一个浏览器可达的地址（集群 DNS 名在浏览器里解析不了）：
+
+```bash
+MX_INSIGHT_LAUNCHER_PUBLIC_URL=http://10.88.88.88:18090
+```
+
+不配的话登录页只显示 token 粘贴框，粘贴上面 curl 拿到的 token 一样能用。deploy 时会提示这一点并给出建议值。

@@ -154,6 +154,8 @@ Optional local search (independent from Hub startup):
 Internal Kubernetes:
   bash scripts/manage.sh deploy          # 全量幂等部署（= ops internal-production deploy）
   bash scripts/manage.sh verify          # 冒烟（= ops internal-production smoke）
+  bash scripts/manage.sh verify-data-path [api-key]
+                                         # 端到端：search -> PG -> outbox -> ES
 
   bash scripts/manage.sh ops internal-production plan|deploy|apply|status|smoke|logs|down
   bash scripts/manage.sh ops internal-production decommission-local-postgres
@@ -403,6 +405,19 @@ EOF
   MX_INSIGHT_LAUNCHER_URL="http://${name}.${namespace}.svc.cluster.local:${port}"
   say "discovered Launcher identity provider: ${MX_INSIGHT_LAUNCHER_URL}"
 
+  # The console signs users in from the browser, which cannot resolve cluster
+  # DNS. That address is a deployment decision (which host or domain the browser
+  # reaches Launcher on), so it is suggested rather than guessed.
+  if [ -z "${MX_INSIGHT_LAUNCHER_PUBLIC_URL:-}" ]; then
+    local node_ip
+    node_ip="$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)"
+    say "  NOTE: the console's Launcher sign-in form needs a browser-reachable URL."
+    say "        Set MX_INSIGHT_LAUNCHER_PUBLIC_URL, e.g. http://${node_ip:-<node-ip>}:${port}"
+    say "        Without it the console offers only token paste (the token still works)."
+  else
+    say "  browser sign-in endpoint: ${MX_INSIGHT_LAUNCHER_PUBLIC_URL}"
+  fi
+
   # Reachability is verified now rather than at first sign-in. A wrong address
   # here surfaces as "your password is rejected" days later, at which point
   # nobody suspects a Service port.
@@ -512,6 +527,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_LAUNCHER_URL="${MX_INSIGHT_LAUNCHER_URL:-}" \
     --from-literal=MX_INSIGHT_LAUNCHER_AUDIENCE="${MX_INSIGHT_LAUNCHER_AUDIENCE:-mx-insight-hub}" \
     --from-literal=MX_INSIGHT_LAUNCHER_ADMIN_SCOPES="${MX_INSIGHT_LAUNCHER_ADMIN_SCOPES:-}" \
+    --from-literal=MX_INSIGHT_LAUNCHER_PUBLIC_URL="${MX_INSIGHT_LAUNCHER_PUBLIC_URL:-}" \
     --from-literal=MX_INSIGHT_BACKFILL_PLATFORMS="${MX_INSIGHT_BACKFILL_PLATFORMS:-xiaohongshu,douyin,twitter}" \
     --from-literal=MX_INSIGHT_AGENT_PROVIDERS="${MX_INSIGHT_AGENT_PROVIDERS:-}" \
     --from-literal=MX_INSIGHT_EMBEDDING_PROVIDERS="${MX_INSIGHT_EMBEDDING_PROVIDERS:-}" \
@@ -957,6 +973,117 @@ print_deploy_summary() {
   say "==============================================================="
 }
 
+# End-to-end check of the data path, stage by stage.
+#
+# A single curl only proves the first hop. What actually needs verifying is that
+# one billed request lands in PostgreSQL, produces an outbox event, and reaches
+# Elasticsearch -- four systems, each of which can fail while the one before it
+# reports success. Each stage is reported separately so a failure names itself.
+verify_data_path() {
+  local api_key="${1:-}"
+  local platform="${MX_INSIGHT_VERIFY_PLATFORM:-xiaohongshu}"
+  local query="${MX_INSIGHT_VERIFY_QUERY:-AI Agent}"
+  local public_url="${MX_INSIGHT_PUBLIC_URL:-http://127.0.0.1:18150}"
+  need kubectl
+  need curl
+
+  if [ -z "$api_key" ]; then
+    api_key="$(kubectl -n mx-insight-hub get secret mx-insight-hub-bootstrap \
+      -o jsonpath='{.data.api-key}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  fi
+  [ -n "$api_key" ] || die "no API key given and none stored; pass one: manage.sh verify-data-path <key>"
+
+  # --- 1. capabilities: authentication and platform grants -----------------
+  say "1/5 capabilities"
+  local capabilities
+  capabilities="$(curl -fsS -H "authorization: Bearer ${api_key}" \
+    "${public_url}/api/v1/data/capabilities" 2>/dev/null || true)"
+  if [ -z "$capabilities" ]; then
+    die "capabilities failed: the API key is invalid, revoked, or the public plane is down"
+  fi
+  if ! printf '%s' "$capabilities" | grep -q "\"${platform}\""; then
+    say "  ERROR: ${platform} is not granted to this key's consumer." >&2
+    say "  Grant it in the console under 平台能力, or:" >&2
+    say "    curl -X PUT \"\$ADMIN/internal/v1/admin/platforms/${platform}\" \\" >&2
+    say "      -H \"x-mx-insight-admin-token: \$TOKEN\" -H 'content-type: application/json' \\" >&2
+    say "      -d '{\"tenantId\":\"<id>\",\"consumerId\":\"<id>\"}'" >&2
+    return 1
+  fi
+  say "  ${platform} is granted"
+
+  # --- 2. the billed upstream call -----------------------------------------
+  say "2/5 search (this calls Night-All and is billed)"
+  local before response items
+  before="$(pg_count "SELECT count(*) FROM core.canonical_records WHERE platform = '${platform}'")"
+  response="$(curl -fsS -X POST "${public_url}/api/v1/data/search" \
+    -H "authorization: Bearer ${api_key}" \
+    -H 'content-type: application/json' \
+    -H "idempotency-key: verify-$(date +%s)-$$" \
+    -d "{\"platform\":\"${platform}\",\"query\":\"${query}\",\"pageSize\":5}" 2>/dev/null || true)"
+  if [ -z "$response" ]; then
+    die "search failed; check Night-All at ${NIGHT_ALL_BASE_URL:-http://127.0.0.1:13141}"
+  fi
+  items="$(printf '%s' "$response" | grep -o '"externalId"' | wc -l | tr -d ' ')"
+  [ "$items" -gt 0 ] || die "search returned no items; nothing downstream can be verified"
+  say "  ${items} item(s) returned"
+
+  # --- 3. asynchronous ingest into PostgreSQL ------------------------------
+  say "3/5 ingest -> PostgreSQL (asynchronous; the response does not wait for it)"
+  local waited=0 after="$before"
+  while [ "$waited" -lt 60 ]; do
+    after="$(pg_count "SELECT count(*) FROM core.canonical_records WHERE platform = '${platform}'")"
+    [ "$after" -gt "$before" ] && break
+    sleep 3
+    waited=$((waited + 3))
+  done
+  if [ "$after" -le "$before" ]; then
+    say "  ERROR: no new canonical records after ${waited}s" >&2
+    say "  The ingest worker is the thing to look at:" >&2
+    say "    kubectl -n mx-insight-hub logs deployment/mx-insight-hub-ingest --tail=40" >&2
+    return 1
+  fi
+  say "  canonical records: ${before} -> ${after}"
+
+  # --- 4. outbox drain ------------------------------------------------------
+  say "4/5 outbox -> projector"
+  local pending=1
+  waited=0
+  while [ "$waited" -lt 60 ]; do
+    pending="$(pg_count "SELECT count(*) FROM outbox.projection_events WHERE status IN ('pending','claimed')")"
+    [ "$pending" -eq 0 ] && break
+    sleep 3
+    waited=$((waited + 3))
+  done
+  if [ "$pending" -ne 0 ]; then
+    say "  WARNING: ${pending} event(s) still queued after ${waited}s" >&2
+    say "    kubectl -n mx-insight-hub logs deployment/mx-insight-hub-projector --tail=40" >&2
+    say "    dead letters: SELECT count(*) FROM outbox.projection_events WHERE status='dead'" >&2
+  else
+    say "  outbox drained"
+  fi
+
+  # --- 5. Elasticsearch -----------------------------------------------------
+  say "5/5 Elasticsearch"
+  local es_count
+  es_count="$(kubectl -n mx-common exec statefulset/mx-common-elasticsearch -c elasticsearch -- \
+    curl -fsS 'http://127.0.0.1:9200/mx-insight-hub-content/_count' 2>/dev/null \
+    | sed -n 's/.*"count":\([0-9]*\).*/\1/p' || true)"
+  if [ -z "$es_count" ] || [ "$es_count" -eq 0 ] 2>/dev/null; then
+    say "  WARNING: the content index is empty or unreachable" >&2
+    say "  Search is degraded; PostgreSQL still serves exact queries." >&2
+  else
+    say "  indexed documents: ${es_count}"
+  fi
+
+  say "data path verified end to end."
+}
+
+# Run a scalar query against the Hub database as the shared instance superuser.
+pg_count() {
+  kubectl -n mx-common exec statefulset/mx-common-postgres -- \
+    psql -U mx_common -d mx_insight_hub -tAc "$1" 2>/dev/null | tr -d ' \n' || printf '0'
+}
+
 ops_action() {
   local environment="${1:-}"
   local action="${2:-}"
@@ -1042,6 +1169,11 @@ main() {
       ;;
     verify)
       ops_action internal-production smoke
+      ;;
+    verify-data-path)
+      shift
+      load_env_file "${ROOT_DIR}/.env.internal"
+      verify_data_path "${1:-}"
       ;;
     search)
       shift
