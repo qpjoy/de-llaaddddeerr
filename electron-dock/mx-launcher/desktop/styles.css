@@ -608,6 +608,14 @@ select {
   color: #ffb8bd;
 }
 
+/* Retired machine: deliberately muted so it reads as "out of service", not as a fault. */
+.health-chip[data-health="archived"] {
+  border-color: color-mix(in srgb, var(--mx-text-muted) 42%, transparent);
+  background: color-mix(in srgb, var(--mx-text-muted) 12%, var(--mx-bg-panel));
+  color: var(--mx-text-muted);
+  text-decoration: line-through;
+}
+
 .health-chip[data-health="blocked"] {
   border-color: color-mix(in srgb, var(--mx-warning) 62%, transparent);
   background: color-mix(in srgb, var(--mx-warning) 18%, var(--mx-bg-panel));

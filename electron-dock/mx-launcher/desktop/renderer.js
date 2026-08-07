@@ -13312,6 +13312,8 @@ function normalizeStageStatus(status) {
   if (status === 'rollback') return 'rollback';
   if (status === 'failed' || status === 'rollback-required') return 'failed';
   if (status === 'blocked' || status === 'requires-confirmation' || status === 'paused') return 'blocked';
+  // A retired machine is not 'planned' (not-yet-deployed); render it as its own neutral state.
+  if (status === 'archived') return 'archived';
   return 'planned';
 }
 
