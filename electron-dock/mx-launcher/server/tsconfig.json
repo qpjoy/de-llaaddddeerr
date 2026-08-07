@@ -17,5 +17,9 @@
     "types": ["node"],
     "typeRoots": ["./node_modules/@types", "../../../electron-server/node_modules/@types"]
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts"],
+  // 生产构建不编译测试：测试里的 dev-only import（例如 yaml）不该变成
+  // Docker build 的失败点，编译产物里也不该带测试代码。
+  // 测试仍然被类型检查，见 tsconfig.test.json；运行时走 tsx 直接读源码。
+  "exclude": ["node_modules", "dist", "**/*.test.ts"]
 }

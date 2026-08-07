@@ -4,8 +4,6 @@ import test from 'node:test';
 import { MemoryStore } from '../../store/memory.js';
 import { loadConfig } from '../../config.js';
 import { renderUserOverseaMihomoSubscription } from '../../store/domain.js';
-import { parse } from 'yaml';
-
 import type { SiteSlotAccessAccount } from '../../types.js';
 
 const SITES = ['oversea-main', 'oversea-mx', 'oversea-sg-1'];
@@ -41,9 +39,27 @@ function subscriptionNodeNames(store: MemoryStore, userId: string): string[] {
   });
   const user = { userId, account: userId, email: null } as never;
   const render = renderUserOverseaMihomoSubscription(user, entitlement, entries);
-  // Parse rather than grep: `proxy-groups` entries also start with `- name:`.
-  const config = parse(render.yaml) as { proxies?: Array<{ name?: string }> };
-  return (config.proxies ?? []).map((proxy) => String(proxy.name));
+  return proxyNamesFromSubscriptionYaml(render.yaml);
+}
+
+/**
+ * Read the `proxies:` block only. A bare `- name:` grep would also match
+ * `proxy-groups:`, and a YAML parser would pull a dependency into the server
+ * package purely for a test -- which is what broke the production image build.
+ */
+function proxyNamesFromSubscriptionYaml(yaml: string): string[] {
+  const names: string[] = [];
+  let insideProxies = false;
+  for (const line of yaml.split('\n')) {
+    if (/^[^\s#]/.test(line)) {
+      insideProxies = line.startsWith('proxies:');
+      continue;
+    }
+    if (!insideProxies) continue;
+    const match = /^\s+-\s+name:\s*(.+?)\s*$/.exec(line);
+    if (match) names.push(match[1].replace(/^"|"$/g, ''));
+  }
+  return names;
 }
 
 test('a site with no archive flag reads as active', () => {

@@ -9,7 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.test.json",
     "migrate:up": "node dist/src/migrate.js",
     "smoke:platform-kernel": "pnpm run build && node dist/scripts/platform-kernel-smoke.js",
     "smoke:config-secret-registry": "pnpm run build && node dist/scripts/config-secret-registry-smoke.js",
