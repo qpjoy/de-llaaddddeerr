@@ -15,6 +15,7 @@ const api = {
   launchH2o: () => ipcRenderer.invoke('mx-h2i:launch-h2o'),
   stopH2o: () => ipcRenderer.invoke('mx-h2i:stop-h2o'),
   setH2oMode: (mode) => ipcRenderer.invoke('mx-h2i:set-h2o-mode', mode),
+  selectH2oNode: (name) => ipcRenderer.invoke('mx-h2i:select-h2o-node', name),
   updateH2oRuntime: (patch) => ipcRenderer.invoke('mx-h2i:update-h2o-runtime', patch),
   refreshH2oSubscription: (input) => ipcRenderer.invoke('mx-h2i:refresh-h2o-subscription', input),
   provisionH2oOversea: (input) => ipcRenderer.invoke('mx-h2i:provision-h2o-oversea', input),

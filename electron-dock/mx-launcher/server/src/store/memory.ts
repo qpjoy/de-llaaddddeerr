@@ -33,6 +33,7 @@ import {
   builtinSecretProviderConfigs,
   buildGatewayRuntimeConfig,
   attachDomesticWireGuardRefreshHint,
+  applyLauncherNetworkMihomoSiteArchive,
   buildLauncherNetworkMihomoSite,
   buildLauncherNetworkTopology,
   buildLauncherNetworkReachabilityPlan,
@@ -195,6 +196,8 @@ import type {
   LauncherNetworkSnapshotInput,
   LauncherNetworkMihomoSite,
   LauncherNetworkMihomoSiteInput,
+  LauncherNetworkMihomoSiteArchiveInput,
+  LauncherNetworkMihomoSiteArchiveResult,
   LauncherNetworkReachabilityPlan,
   LauncherProductNetwork,
   LauncherProductNetworkInput,
@@ -2049,6 +2052,50 @@ export class MemoryStore implements PlatformStore {
 
   getSiteSlotAccessAccount(siteId: string, username: string): SiteSlotAccessAccount | null {
     return this.listSiteSlotAccessAccounts(siteId).find((account) => account.username === username) ?? null;
+  }
+
+  archiveLauncherNetworkMihomoSite(
+    input: LauncherNetworkMihomoSiteArchiveInput
+  ): LauncherNetworkMihomoSiteArchiveResult {
+    const siteId = input.siteId?.trim();
+    if (!siteId) throw new Error('siteId is required');
+    const previous = this.launcherNetworkMihomoSites.get(siteId) ?? null;
+    if (!previous) throw new Error(`Launcher Network mihomo site not found: ${siteId}`);
+    const requestedBy = input.requestedBy?.trim() || 'internal';
+    const now = new Date().toISOString();
+    const site = applyLauncherNetworkMihomoSiteArchive(previous, input.archived, requestedBy, now);
+    this.launcherNetworkMihomoSites.set(site.siteId, site);
+
+    // Pausing the accounts is what removes this node from every user's
+    // subscription: the renderer only emits proxies for active accounts.
+    const nextStatus = input.archived ? 'paused' : 'active';
+    const changed: SiteSlotAccessAccount[] = [];
+    for (const account of this.listSiteSlotAccessAccounts(siteId)) {
+      if (account.status === nextStatus) continue;
+      const updated: SiteSlotAccessAccount = { ...account, status: nextStatus, updatedBy: requestedBy, updatedAt: now };
+      this.siteSlotAccessAccounts.set(updated.accountId, updated);
+      changed.push(updated);
+    }
+
+    const affectedUserIds = [...new Set(this.listUserOverseaEntitlements()
+      .filter((entitlement) => entitlement.siteIds.includes(siteId))
+      .map((entitlement) => entitlement.userId))];
+
+    this.recordAudit({
+      eventType: input.archived
+        ? 'launcher_network.mihomo_site.archived'
+        : 'launcher_network.mihomo_site.unarchived',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: { siteId: site.siteId, archivedBy: requestedBy, accountsChanged: changed.length, affectedUserIds }
+    });
+
+    return {
+      site,
+      pausedAccounts: input.archived ? changed : [],
+      reactivatedAccounts: input.archived ? [] : changed,
+      affectedUserIds
+    };
   }
 
   upsertLauncherNetworkMihomoSite(input: LauncherNetworkMihomoSiteInput): LauncherNetworkMihomoSite {

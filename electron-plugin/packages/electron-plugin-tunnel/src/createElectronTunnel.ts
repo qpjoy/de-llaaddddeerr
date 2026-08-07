@@ -3,6 +3,7 @@ import { createConnection } from 'net';
 import { join, resolve } from 'path';
 import { BrowserWindow } from 'electron';
 import type { App, IpcMain, Session } from 'electron';
+import { isTunRuntimeMode } from '@qpjoy/electron-core-mihomo';
 
 import { AdminServer } from './admin/AdminServer';
 import { registerTunnelIpc } from './ipc/registerTunnelIpc';
@@ -128,7 +129,7 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
 
   async function openTestWindow(url: string): Promise<void> {
     const status = manager.status();
-    if (status.mode !== 'system-tun') {
+    if (!isTunRuntimeMode(status.mode)) {
       if (!status.running) {
         throw new Error('隧道核心未运行。请先启动 Tunnel，再打开测试窗口。');
       }

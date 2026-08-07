@@ -7467,6 +7467,11 @@ export function buildLauncherNetworkMihomoSite(
         'H endpoints should reach Internal DNS and this mihomo subscription through Domestic WG relay; external traffic then uses the Oversea hysteria2 proxy.'
       ]
     },
+    // upsert 不改归档状态：重新配置一台已归档机器的 host/端口不应该悄悄让它复活，
+    // 复活必须走显式的 unarchive。
+    status: previous?.status === 'archived' ? 'archived' : 'active',
+    archivedAt: previous?.archivedAt ?? null,
+    archivedBy: previous?.archivedBy ?? null,
     createdBy: previous?.createdBy ?? input.requestedBy ?? 'internal',
     createdAt: previous?.createdAt ?? now,
     updatedBy: input.requestedBy ?? previous?.updatedBy ?? 'internal',
@@ -7477,8 +7482,34 @@ export function buildLauncherNetworkMihomoSite(
 export function normalizeLauncherNetworkMihomoSite(site: LauncherNetworkMihomoSite): LauncherNetworkMihomoSite {
   const tlsFingerprint = normalizeTlsFingerprint(site.tlsFingerprint);
   const serverPorts = normalizeHysteria2ServerPorts(site.serverPorts).normalized;
-  if (site.serverPorts === serverPorts && site.tlsFingerprint === tlsFingerprint) return site;
-  return { ...site, serverPorts, tlsFingerprint };
+  // 归档字段是后加的，历史记录里没有；缺省按 active 读，避免老站点被当成已归档。
+  const status = site.status === 'archived' ? 'archived' : 'active';
+  const archivedAt = site.archivedAt ?? null;
+  const archivedBy = site.archivedBy ?? null;
+  if (
+    site.serverPorts === serverPorts
+    && site.tlsFingerprint === tlsFingerprint
+    && site.status === status
+    && site.archivedAt === archivedAt
+    && site.archivedBy === archivedBy
+  ) return site;
+  return { ...site, serverPorts, tlsFingerprint, status, archivedAt, archivedBy };
+}
+
+export function applyLauncherNetworkMihomoSiteArchive(
+  site: LauncherNetworkMihomoSite,
+  archived: boolean,
+  requestedBy: string,
+  now = new Date().toISOString()
+): LauncherNetworkMihomoSite {
+  return {
+    ...site,
+    status: archived ? 'archived' : 'active',
+    archivedAt: archived ? site.archivedAt ?? now : null,
+    archivedBy: archived ? site.archivedBy ?? requestedBy : null,
+    updatedBy: requestedBy,
+    updatedAt: now
+  };
 }
 
 export function buildLauncherNetworkReachabilityPlan(

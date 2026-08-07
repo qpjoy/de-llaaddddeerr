@@ -1756,6 +1756,37 @@ async function runOverseaShadowSetupFromSshProfile() {
   }
 }
 
+// 归档不删除任何证据：站点记录、plan 和 worker report 都保留，只是把 access
+// account 置为 paused —— 用户订阅只收 active 账号，节点因此自动消失。
+async function setSelectedOverseaArchived(archived) {
+  const site = selectedOverseaSite();
+  if (!site) return;
+  const affected = Number(site.activeAccounts || 0);
+  const warning = archived
+    ? `Archive ${site.siteId}?\n\nIt will be removed from every user's subscription on their next refresh${affected ? ` (${affected} active access account${affected > 1 ? 's' : ''} will be paused)` : ''}.\n\nEvidence is preserved and you can unarchive it later.`
+    : `Unarchive ${site.siteId}?\n\nIts access accounts become active again and the node reappears in entitled users' subscriptions.`;
+  if (!window.confirm(warning)) return;
+  try {
+    const payload = await fetchJson(
+      `/internal/v1/admin/oversea/${encodeURIComponent(site.siteId)}/${archived ? 'archive' : 'unarchive'}`,
+      { method: 'POST', body: { requestedBy: 'desktop-admin', requestId: `desktop-oversea-archive-${Date.now()}` } }
+    );
+    state.overseaOverview = payload.overview || state.overseaOverview;
+    state.overseaOverviewError = null;
+    const users = asArray(payload.archive?.affectedUserIds);
+    state.overseaEnsureFeedback = {
+      tone: 'success',
+      message: archived
+        ? `${site.siteId} archived${users.length ? `; ${users.length} entitled user(s) will lose this node on next subscription refresh` : ''}.`
+        : `${site.siteId} restored${users.length ? `; ${users.length} entitled user(s) regain this node` : ''}.`
+    };
+  } catch (error) {
+    state.overseaOverviewError = error.message;
+    state.overseaEnsureFeedback = { tone: 'error', message: `Archive failed: ${error.message}` };
+  }
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+}
+
 async function ensureSelectedOversea() {
   if (state.overseaEnsureBusy) return;
   const overviewSite = selectedOverseaSite();
@@ -5573,6 +5604,12 @@ function renderOverseaWorkbench(pipelines) {
       void refreshAdmin();
     });
   }
+  const archiveButton = siteWorkbench.querySelector('[data-oversea-archive]');
+  if (archiveButton) {
+    archiveButton.addEventListener('click', () => {
+      void setSelectedOverseaArchived(archiveButton.dataset.overseaArchive === 'archive');
+    });
+  }
   const editProfileButton = siteWorkbench.querySelector('[data-oversea-edit-profile]');
   if (editProfileButton) {
     editProfileButton.addEventListener('click', () => {
@@ -5637,7 +5674,7 @@ function renderOverseaSiteDetail(site) {
       <div class="oversea-actions">
         ${hostPeer ? '<button class="secondary-button" type="button" data-oversea-reuse-host-ssh>Reuse Host SSH</button>' : ''}
         <button class="secondary-button" type="button" data-oversea-edit-profile>Edit Profile</button>
-        <button class="secondary-button" type="button" disabled title="Site Registry archive will preserve evidence">Archive</button>
+        <button class="secondary-button" type="button" data-oversea-archive="${site.archived ? 'unarchive' : 'archive'}" title="${site.archived ? 'Restore this Oversea node and re-activate its access accounts' : 'Retire this Oversea node: pauses its access accounts so it drops out of every user subscription. Evidence is preserved and it can be restored.'}">${site.archived ? 'Unarchive' : 'Archive'}</button>
         <button class="primary-button" type="button" data-oversea-ensure ${installDisabled ? 'disabled' : ''}>
           ${escapeHtml(installLabel)}
         </button>

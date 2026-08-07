@@ -23,9 +23,10 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepack": "pnpm build",
+    "prepack": "pnpm build && node --test scripts/runtime-mode.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "tsc -p tsconfig.json --noEmit"
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm build && node --test scripts/runtime-mode.test.mjs"
   },
   "keywords": [
     "mihomo",

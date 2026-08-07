@@ -26,7 +26,8 @@
     "smoke:release-publisher-postgres": "node --import tsx scripts/release-publisher-postgres-smoke.ts",
     "smoke:internal-dns-exposure": "node scripts/internal-dns-exposure-smoke.mjs",
     "smoke:site-slot-domestic-dns": "node scripts/site-slot-domestic-dns-artifact-smoke.mjs",
-    "release:publish": "node scripts/release-center-publish.mjs"
+    "release:publish": "node scripts/release-center-publish.mjs",
+    "test:oversea-site-archive": "node --test --import tsx src/modules/launcher-network/oversea-site-archive.test.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.19",

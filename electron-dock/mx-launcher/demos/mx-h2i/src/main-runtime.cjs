@@ -38,6 +38,14 @@ const {
   reconcileRuntimeUpdateWithInstalledVersion
 } = require('./update-state-policy.cjs');
 const {
+  extractNpmTarball,
+  normalizePluginSources,
+  pluginDownloadPlan,
+  rewriteTarballToSource,
+  selectPackumentVersion,
+  verifyTarballIntegrity
+} = require('./plugin-package-source.cjs');
+const {
   confirmElectronLauncherAsarLaunch,
   runningElectronLauncherVersion
 } = loadAsarBootstrap();
@@ -1288,7 +1296,7 @@ function registerIpc() {
       await saveAndBroadcast();
       return visibleRuntime();
     }
-    if (currentH2oRuntime.mode === 'system-tun' && !currentH2oRuntime.tunInstalled) {
+    if (h2oModeNeedsTun(currentH2oRuntime.mode) && !currentH2oRuntime.tunInstalled) {
       runtime.apps.h2o.runtime = h2oPluginRuntime({
         ...currentH2oRuntime,
         running: false,
@@ -1426,7 +1434,7 @@ function registerIpc() {
       await saveAndBroadcast();
       return visibleRuntime();
     }
-    if (nextMode === 'system-tun' && !currentH2oRuntime.tunInstalled) {
+    if (h2oModeNeedsTun(nextMode) && !currentH2oRuntime.tunInstalled) {
       runtime.apps.h2o.runtime = h2oPluginRuntime({
         ...currentH2oRuntime,
         status: 'tun-required',
@@ -1486,6 +1494,38 @@ function registerIpc() {
         : 'H2O 模式已切换。'
     };
     touchRuntime('h2o mode changed');
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:select-h2o-node', async (_event, nodeName) => {
+    const name = nullableString(nodeName);
+    const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
+    if (!name) return visibleRuntime();
+    let nextRuntime = h2oPluginRuntime({ ...current, selectedNode: name, lastAppliedAt: nowIso() });
+    if (current.running) {
+      // 运行中优先走 external-controller 即时切换，不重启核心也不断开现有连接。
+      try {
+        const manager = getH2oTunnelManager();
+        const result = await manager.selectProxyNode(name);
+        nextRuntime = h2oPluginRuntime({
+          ...nextRuntime,
+          nodes: normalizeH2oNodes(h2oTunnelNodes(manager)) || nextRuntime.nodes
+        });
+        pushAppLog('h2o', 'info', `H2O oversea node switched to ${name} (${result.applied}).`);
+        runtime.feedback = { tone: 'success', message: `已切换出海节点：${name}` };
+      } catch (err) {
+        pushAppLog('h2o', 'error', `H2O oversea node switch failed: ${errorMessage(err)}`);
+        runtime.feedback = { tone: 'error', message: `切换出海节点失败：${errorMessage(err)}` };
+        await saveAndBroadcast();
+        return visibleRuntime();
+      }
+    } else {
+      pushAppLog('h2o', 'info', `H2O oversea node preset to ${name}; applies on next start.`);
+      runtime.feedback = { tone: 'success', message: `已选择出海节点：${name}，下次启动生效。` };
+    }
+    runtime.apps.h2o.runtime = nextRuntime;
+    runtime.apps.h2o.lastAction = nowIso();
+    await saveH2oUserRuntimeProfileForCurrentUser(nextRuntime, { reason: 'select-h2o-node' });
     await saveAndBroadcast();
     return visibleRuntime();
   });
@@ -7411,6 +7451,9 @@ function h2oPluginRuntime(input) {
       mixed: normalizePort(ports.mixed, 23458),
       dns: normalizePort(ports.dns, 1053)
     },
+    tuning: normalizeH2oTuning(row.tuning),
+    nodes: normalizeH2oNodes(row.nodes),
+    selectedNode: nullableString(row.selectedNode),
     activeSubscriptionId: activeSubscription.id,
     activeSubscription,
     subscriptions,
@@ -7485,6 +7528,8 @@ function normalizeH2oSubscription(input, defaults) {
     syncStatus,
     errorMessage,
     yamlBytes: normalizeNonNegativeInteger(row.yamlBytes, normalizeNonNegativeInteger(defaults.yamlBytes, 0)),
+    // 上一次真正取回内容的地址；比 url 更可信，候选链会优先用它。
+    resolvedUrl: nullableString(row.resolvedUrl) || nullableString(defaults.resolvedUrl),
     auth: normalizeH2oSubscriptionAuth(row.auth, defaults.auth),
     headers: normalizeStringRecord(row.headers, defaults.headers || {}),
     pinnedAt: nullableString(row.pinnedAt) || nullableString(defaults.pinnedAt),
@@ -7574,13 +7619,54 @@ function policyToH2oRuleKind(policy) {
   return ['internal-direct', 'direct', 'block', 'blacklist'].includes(String(policy || '').trim()) ? 'block' : 'allow';
 }
 
+const H2O_MODES = ['app-rule', 'app-global', 'system-tun'];
+
 function normalizeH2oMode(value) {
   const text = String(value || '').trim().toLowerCase();
   if (text === 'rule') return 'app-rule';
-  if (text === 'global') return 'app-global';
-  if (text === 'tun') return 'system-tun';
-  if (text === 'direct') return 'app-global';
-  return ['app-rule', 'app-global', 'system-tun'].includes(text) ? text : 'app-global';
+  if (text === 'global' || text === 'direct') return 'app-global';
+  // system-fakeip 曾短暂作为独立模式存在，现在折叠成 system-tun + dnsMode。
+  if (text === 'tun' || text === 'system-fakeip' || text === 'fakeip' || text === 'fake-ip') return 'system-tun';
+  return H2O_MODES.includes(text) ? text : 'app-global';
+}
+
+/** 虚拟网卡模式需要 TUN 安装 + 管理员授权。 */
+function h2oModeNeedsTun(mode) {
+  return normalizeH2oMode(mode) === 'system-tun';
+}
+
+// 订阅里可选的出海节点。一个 oversea entitlement 可能覆盖多台机器
+// （oversea-main / oversea-mx / oversea-sg-1…），用户在这些之间切换。
+function normalizeH2oNodes(value) {
+  const rows = Array.isArray(value) ? value : [];
+  return rows.map((item) => {
+    const row = item && typeof item === 'object' ? item : {};
+    const name = nullableString(row.name);
+    if (!name) return null;
+    return {
+      name,
+      type: nullableString(row.type),
+      server: nullableString(row.server),
+      port: normalizeNonNegativeInteger(row.port, 0) || null,
+      latencyMs: normalizeNonNegativeInteger(row.latencyMs, 0) || null
+    };
+  }).filter(Boolean).slice(0, 64);
+}
+
+// fake-ip / redir-host、TUN 协议栈、cn-direct 都是 mode 之外的独立开关，
+// 和 Clash 的设置分层一致：换模式不该把用户的 DNS 偏好重置掉。
+function normalizeH2oTuning(value) {
+  const row = value && typeof value === 'object' ? value : {};
+  const dnsMode = String(row.dnsMode || '').trim().toLowerCase().replace(/_/g, '-');
+  const tunStack = String(row.tunStack || '').trim().toLowerCase();
+  return {
+    dnsMode: ['redir-host', 'redir', 'real-ip'].includes(dnsMode) ? 'redir-host' : 'fake-ip',
+    // 默认 system：内核栈最快，也是判断问题是否出在协议栈上的基线；
+    // 出问题按 system -> mixed -> gvisor 升级。
+    tunStack: ['gvisor', 'mixed'].includes(tunStack) ? tunStack : 'system',
+    strictRoute: row.strictRoute === true,
+    cnDirect: row.cnDirect !== false
+  };
 }
 
 function h2oHasUsableSubscription(subscription) {
@@ -7835,6 +7921,14 @@ function getH2oTunnelManager() {
     mixedPort: current.ports.mixed,
     dnsPort: current.ports.dns
   });
+  // 进程重启后 manager 是新实例，先补一次控制面白名单，
+  // 避免 admin 页 / 订阅刷新触发的 renderConfig 少了直连规则。
+  if (typeof h2oTunnelManager.setRuntimeGuard === 'function') {
+    h2oTunnelManager.setRuntimeGuard(h2oControlPlaneGuard(current));
+  }
+  if (typeof h2oTunnelManager.setRuntimeTuning === 'function') {
+    h2oTunnelManager.setRuntimeTuning(current.tuning);
+  }
   return h2oTunnelManager;
 }
 
@@ -7849,14 +7943,23 @@ async function startH2oMihomoRuntime(currentRuntime) {
     mixed: current.ports.mixed,
     dns: current.ports.dns
   });
+  const subscriptionInput = h2oTunnelSubscriptionInput(current.activeSubscription);
+  const prefetched = await h2oPrefetchSubscriptionContent(current.activeSubscription, subscriptionInput);
+  // 交给 mihomo 的 URL 必须是真正取回内容的那一个：公网 Domestic 目前不反代
+  // /internal/v1/*，固定 404，预取失败时 mihomo 用同一个地址下载只会再 404 一次。
+  if (prefetched?.url) subscriptionInput.url = prefetched.url;
   const result = await manager.applyManagedConfig({
-    subscription: h2oTunnelSubscriptionInput(current.activeSubscription),
+    subscription: subscriptionInput,
+    ...(prefetched?.yaml ? { subscriptionContent: prefetched.yaml } : {}),
     mode: current.mode,
+    tuning: current.tuning,
+    selectedNode: current.selectedNode,
     rules: h2oTunnelRulesForMode(current),
+    guard: h2oControlPlaneGuard(current),
     source: 'h2o',
     autoStart: true,
     autoUpdate: true,
-    allowSystemTunPrivilege: current.mode === 'system-tun'
+    allowSystemTunPrivilege: h2oModeNeedsTun(current.mode)
   });
   let status = result.status || manager.status();
   const mixedPort = normalizePort(status?.ports?.mixed, current.ports.mixed);
@@ -7874,7 +7977,13 @@ async function startH2oMihomoRuntime(currentRuntime) {
   }
   await stopH2oOrphanMihomoProcesses({ preservePid: status?.pid, reason: 'start-ready' });
   const traffic = await h2oTunnelTrafficSummary(manager);
-  return { ...status, traffic };
+  return {
+    ...status,
+    traffic,
+    nodes: h2oTunnelNodes(manager),
+    selectedNode: h2oTunnelSelectedNode(manager),
+    resolvedSubscriptionUrl: prefetched?.url || null
+  };
 }
 
 async function stopH2oMihomoRuntime() {
@@ -7900,6 +8009,115 @@ function h2oTunnelSubscriptionInput(subscription) {
   };
 }
 
+// mihomo runtime 用裸 fetch 下载订阅，不会带 MX-H2I 的 Host Resolve / SNI 覆写；
+// Domestic ingress 按 SNI 分流，裸 IP https 会直接返回 TLS unrecognized_name。
+// 这里先用 launcher 自己的 requestText（带 host override + servername）取回 YAML，
+// 成功就把内容直接交给 MihomoManager，避免它再发一次不带 SNI 的请求。
+/**
+ * managed 订阅的候选地址，按可达性排序。
+ *
+ * Domestic edge 目前只暴露 /healthz（`x-mx-domestic-mode: bootstrap-and-relay`），
+ * `/internal/v1/*` 一律 nginx 404 —— 所以公网地址只是"将来 Domestic 开了反代就能用"
+ * 的首选项，真正可达的是 WG 之后的 Internal 地址。两个都试，用第一个成功的。
+ */
+function h2oSubscriptionUrlCandidates(subscription) {
+  const url = nullableString(subscription?.url);
+  if (!url) return [];
+  const candidates = [nullableString(subscription?.resolvedUrl), url].filter(Boolean);
+  if (h2oLooksLikeManagedSubscriptionUrl(url)) {
+    const pathName = h2oManagedSubscriptionPath(url);
+    for (const baseUrl of [
+      runtime?.connection?.internalBaseUrl,
+      runtime?.config?.internalApiBaseUrl,
+      DEFAULT_CONFIG.internalApiBaseUrl
+    ]) {
+      const normalized = normalizeBaseUrl(baseUrl);
+      if (!normalized || !pathName) continue;
+      try {
+        candidates.push(joinApiUrl(normalized, pathName));
+      } catch (_err) {
+        // skip an unusable base URL
+      }
+    }
+  }
+  return uniqueStrings(candidates);
+}
+
+function h2oSubscriptionRequestHeaders(subscription, subscriptionInput) {
+  const headers = {
+    accept: 'text/yaml, application/yaml, text/plain, */*',
+    ...appCenterCatalogHeaders(),
+    ...normalizeStringRecord(subscription?.headers, {})
+  };
+  if (subscriptionInput?.username || subscriptionInput?.password) {
+    const token = Buffer
+      .from(`${subscriptionInput.username || ''}:${subscriptionInput.password || ''}`, 'utf8')
+      .toString('base64');
+    headers.authorization = `Basic ${token}`;
+  }
+  return headers;
+}
+
+/**
+ * 返回 { yaml, url }：url 是**实际取回内容的那个地址**，调用方要把它写回 runtime，
+ * 这样 UI 和 mihomo 看到的都是真正可达的地址，而不是一个固定 404 的公网地址。
+ */
+async function h2oPrefetchSubscriptionContent(subscription, subscriptionInput) {
+  const candidates = h2oSubscriptionUrlCandidates({
+    ...subscription,
+    url: nullableString(subscriptionInput?.url) || subscription?.url
+  });
+  if (!candidates.length) return null;
+  const headers = h2oSubscriptionRequestHeaders(subscription, subscriptionInput);
+  const failures = [];
+  for (const candidate of candidates) {
+    try {
+      const yaml = await requestText(candidate, { timeoutMs: 12000, headers });
+      if (!nullableString(yaml)) throw new Error('订阅内容为空。');
+      pushAppLog('h2o', 'info', `H2O subscription prefetched via launcher network: ${candidate}`);
+      return { yaml, url: candidate };
+    } catch (err) {
+      failures.push(`${candidate}: ${errorMessage(err)}`);
+    }
+  }
+  pushAppLog(
+    'h2o',
+    'warning',
+    `H2O subscription prefetch failed, falling back to mihomo download: ${failures.join('；')}`
+  );
+  return null;
+}
+
+// 虚拟网卡模式会接管整机流量。MX-H2I 自己的控制面（WireGuard endpoint、Domestic
+// bootstrap、Internal API、split-DNS 内网域名、订阅下载地址）必须留在隧道之外，
+// 否则 H2O 一启动就会把 launcher 的连接掐掉，再也拿不到订阅/续期。
+function h2oControlPlaneGuard(h2oRuntime) {
+  const config = runtime?.config || {};
+  const connection = runtime?.connection || {};
+  const routePlan = connection.routePlan || {};
+  const directDomains = uniqueStrings([
+    ...splitDnsDomains(config),
+    hostnameFromUrl(config.bootstrapApiBaseUrl),
+    hostnameFromUrl(DEFAULT_CONFIG.bootstrapApiBaseUrl),
+    hostnameFromUrl(connection.internalBaseUrl),
+    hostnameFromUrl(config.internalApiBaseUrl),
+    hostnameFromUrl(routePlan.internalBaseUrl),
+    publicHostFromEndpoint(config.domesticRelayHost),
+    hostnameFromUrl(h2oRuntime?.activeSubscription?.url),
+    ...parseHostResolve(effectiveHostResolve()).keys()
+  ].filter((host) => host && net.isIP(host) === 0));
+  const directIps = uniqueStrings([
+    publicHostFromEndpoint(config.domesticRelayHost),
+    publicHostFromEndpoint(DEFAULT_CONFIG.domesticRelayHost),
+    publicHostFromEndpoint(connection.domesticRelayEndpoint),
+    publicHostFromEndpoint(connection.wireGuard?.endpoint),
+    publicHostFromEndpoint(routePlan.endpoint),
+    ...expectedInternalDnsTargets(),
+    ...[...parseHostResolve(effectiveHostResolve()).values()].map((mapped) => mapped?.host)
+  ].filter((host) => host && net.isIP(host) !== 0));
+  return { directDomains, directIps, fakeIpFilter: directDomains.map((domain) => `+.${domain}`) };
+}
+
 function h2oTunnelRulesForMode(h2oRuntime) {
   const enabled = normalizeH2oRules(h2oRuntime.rules).filter((rule) => rule.enabled !== false);
   const blocklist = enabled.filter((rule) => rule.kind === 'block').map((rule) => rule.host);
@@ -7909,12 +8127,39 @@ function h2oTunnelRulesForMode(h2oRuntime) {
   return { allowlist, blocklist };
 }
 
+function h2oTunnelNodes(manager) {
+  if (typeof manager?.listProxyNodes !== 'function') return [];
+  try {
+    return manager.listProxyNodes();
+  } catch (_err) {
+    return [];
+  }
+}
+
+function h2oTunnelSelectedNode(manager) {
+  if (typeof manager?.selectedProxyNode !== 'function') return null;
+  try {
+    return manager.selectedProxyNode();
+  } catch (_err) {
+    return null;
+  }
+}
+
 function h2oRuntimeWithTunnelStatus(h2oRuntime, tunnelStatus) {
   const running = tunnelStatus?.running === true;
+  const nodes = normalizeH2oNodes(tunnelStatus?.nodes);
+  // 把真正可达的订阅地址写回去，下次启动和 UI 都直接用它，不再从 404 的公网地址重试。
+  const resolvedUrl = nullableString(tunnelStatus?.resolvedSubscriptionUrl);
+  const activeSubscription = resolvedUrl && h2oRuntime.activeSubscription
+    ? { ...h2oRuntime.activeSubscription, resolvedUrl }
+    : h2oRuntime.activeSubscription;
   return h2oPluginRuntime({
     ...h2oRuntime,
+    activeSubscription,
     running,
     status: running ? 'running' : 'ready',
+    nodes: nodes.length ? nodes : h2oRuntime.nodes,
+    selectedNode: nullableString(tunnelStatus?.selectedNode) || h2oRuntime.selectedNode,
     ports: tunnelStatus?.ports || h2oRuntime.ports,
     adminUrl: tunnelStatus?.adminUrl || h2oRuntime.adminUrl,
     metrics: h2oMetricsFromTunnelTraffic(tunnelStatus?.traffic, h2oRuntime.metrics),
@@ -8775,7 +9020,7 @@ function h2oLocalProxyReady(port) {
 function h2oTestProxyMode(h2oRuntime, targetUrl) {
   if (!h2oRuntime?.running) return 'direct-not-running';
   if (!h2oHasUsableSubscription(h2oRuntime.activeSubscription)) return 'direct-no-subscription';
-  if (h2oRuntime.mode === 'system-tun') return 'system-tun';
+  if (h2oModeNeedsTun(h2oRuntime.mode)) return 'system-tun';
   const hostname = hostnameFromUrl(targetUrl);
   if (!hostname) return 'direct';
   if (h2oRuleMatchesHost(h2oRuntime.rules, hostname, 'block')) return 'blocked';
@@ -9382,28 +9627,39 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
       }
     }
 
-    let yaml;
-    try {
-      yaml = await requestText(subscriptionFetchUrl, {
-        timeoutMs: 5000,
-        bootstrapResolveMode: options.bootstrapResolveMode,
-        headers: { ...appCenterCatalogHeaders(), accept: 'text/yaml, text/plain, */*' }
-      });
-    } catch (err) {
-      const internalSubscriptionUrl = joinApiUrl(baseUrl, subscriptionPath);
-      if (internalSubscriptionUrl === subscriptionFetchUrl) throw err;
-      pushAppLog('h2o', 'warning', `H2O public subscription fetch failed, retrying Internal URL: ${errorMessage(err)}`);
-      yaml = await requestText(internalSubscriptionUrl, {
-        timeoutMs: 5000,
-        bootstrapResolveMode: options.bootstrapResolveMode,
-        headers: { ...appCenterCatalogHeaders(), accept: 'text/yaml, text/plain, */*' }
-      });
+    // 和启动时的预取共用同一条候选链，并记住真正成功的地址：Domestic edge 现在
+    // 只反代 /healthz，公网地址恒 404，能取到的是 WG 之后的 Internal 地址。
+    const fetchCandidates = uniqueStrings([
+      subscriptionFetchUrl,
+      joinApiUrl(baseUrl, subscriptionPath),
+      ...h2oSubscriptionUrlCandidates({ url: subscriptionFetchUrl })
+    ]);
+    let yaml = null;
+    let resolvedUrl = null;
+    const fetchFailures = [];
+    for (const candidate of fetchCandidates) {
+      try {
+        yaml = await requestText(candidate, {
+          timeoutMs: 5000,
+          bootstrapResolveMode: options.bootstrapResolveMode,
+          headers: { ...appCenterCatalogHeaders(), accept: 'text/yaml, text/plain, */*' }
+        });
+        resolvedUrl = candidate;
+        break;
+      } catch (err) {
+        fetchFailures.push(`${candidate}: ${errorMessage(err)}`);
+      }
+    }
+    if (!resolvedUrl) throw new Error(fetchFailures.join('；'));
+    if (resolvedUrl !== subscriptionFetchUrl) {
+      pushAppLog('h2o', 'info', `H2O subscription resolved via fallback URL: ${resolvedUrl}`);
     }
     applyH2oManagedSubscriptionState(current, {
       entitlement,
       status: 'ready',
       syncStatus: syncedAccounts.length ? 'synced' : 'pending-runtime-sync',
       subscriptionUrl: subscriptionRuntimeUrl,
+      resolvedUrl,
       yaml,
       errorMessage: syncedAccounts.length
         ? null
@@ -9436,6 +9692,7 @@ function applyH2oManagedSubscriptionState(current, input = {}) {
     id: 'h2o-default',
     name: 'System Oversea 默认订阅',
     url: defaultUrl,
+    resolvedUrl: nullableString(input.resolvedUrl) || nullableString(current.activeSubscription?.resolvedUrl),
     nodes,
     latencyMs: Number(current.activeSubscription?.latencyMs || 42),
     status: input.status || 'pending',
@@ -9638,13 +9895,24 @@ function h2oDomesticApiBaseUrl(fallbackBaseUrl) {
   if (!bootstrapBaseUrl || !domesticHost) return null;
   try {
     const parsed = new URL(bootstrapBaseUrl);
-    parsed.hostname = domesticHost;
+    // 订阅 URL 会被交给 mihomo / 外部下载器，它们不会带 MX-H2I 的 Host Resolve + SNI 覆写。
+    // Domestic 入口是按 SNI 分流的 ingress，用裸 IP 直连 https 会拿到 TLS unrecognized_name，
+    // 因此 https 场景保留 bootstrap 域名（域名已解析到同一个 Domestic 公网 IP）。
+    if (!h2oSubscriptionHostKeepsTlsIdentity(parsed, domesticHost)) {
+      parsed.hostname = domesticHost;
+    }
     parsed.username = '';
     parsed.password = '';
     return normalizeBaseUrl(parsed.toString());
   } catch (_err) {
     return null;
   }
+}
+
+function h2oSubscriptionHostKeepsTlsIdentity(parsed, domesticHost) {
+  if (parsed.protocol !== 'https:') return false;
+  if (net.isIP(domesticHost) === 0) return false;
+  return net.isIP(parsed.hostname) === 0;
 }
 
 function countHysteria2Proxies(yaml) {
@@ -11136,6 +11404,19 @@ async function installAppPackage(appRecord) {
       installedAt: nowIso()
     };
   }
+  // 首选：用 launcher 自己的网络栈拉 tarball 并解到独立 slot。
+  // 打包后的客户端不能指望本机有可用的 npm/pnpm（Windows 上 spawn npm 常年失败），
+  // 而且这条路径可以做 integrity 校验和原子回滚。npm CLI 只作为最后兜底。
+  try {
+    const staged = await stagePluginPackage(appRecord, packageName, version);
+    return { ...staged, installSource: source };
+  } catch (err) {
+    pushAppLog(
+      appRecord.appId || 'appcenter',
+      'warning',
+      `插件包直连安装失败，回退到本机包管理器：${errorMessage(err)}`
+    );
+  }
   const targetDir = path.join(app.getPath('userData'), 'appcenter-cache', safePathSegment(appRecord.appId || packageName));
   await fs.mkdir(targetDir, { recursive: true });
   await fs.writeFile(path.join(targetDir, 'package.json'), JSON.stringify({
@@ -11153,6 +11434,103 @@ async function installAppPackage(appRecord) {
     installedVersion: version,
     installedAt: nowIso()
   };
+}
+
+function appCenterPluginSources() {
+  return normalizePluginSources({
+    registryUrl: nullableString(process.env.MX_H2I_APPCENTER_REGISTRY)
+      || nullableString(runtime?.config?.appCenterRegistryUrl),
+    mirrorRegistryUrl: nullableString(process.env.MX_H2I_APPCENTER_REGISTRY_MIRROR)
+      || nullableString(runtime?.config?.appCenterRegistryMirrorUrl),
+    tarballBaseUrl: nullableString(process.env.MX_H2I_APPCENTER_TARBALL_BASE)
+      || nullableString(runtime?.config?.appCenterTarballBaseUrl)
+  });
+}
+
+/**
+ * 按 registry -> mirror -> OSS 顺序尝试，第一个通过完整性校验的来源获胜。
+ * 每个版本解到自己的 slot 目录，安装成功后才切换 current 指针，
+ * 失败时上一版仍然完整可用。
+ */
+async function stagePluginPackage(appRecord, packageName, version) {
+  const sources = appCenterPluginSources();
+  const plan = pluginDownloadPlan({ packageName, version, sources });
+  if (!plan.length) throw new Error('没有可用的插件包来源，请检查 AppCenter registry / OSS 配置。');
+  const failures = [];
+  for (const step of plan) {
+    try {
+      const resolved = await resolvePluginTarball(step, packageName, version);
+      const tarball = await requestBuffer(resolved.tarballUrl, { timeoutMs: 60_000 });
+      const verified = verifyTarballIntegrity(tarball, resolved);
+      if (!verified.ok) throw new Error(`完整性校验失败（${verified.reason}）`);
+      const installPath = await writePluginSlot(appRecord, packageName, resolved.version, tarball);
+      pushAppLog(
+        appRecord.appId || 'appcenter',
+        'info',
+        `插件包已从 ${step.sourceId} 安装：${packageName}@${resolved.version}（${verified.algorithm} 校验通过）`
+      );
+      return { installPath, installedVersion: resolved.version, installedAt: nowIso() };
+    } catch (err) {
+      failures.push(`${step.sourceId}: ${errorMessage(err)}`);
+    }
+  }
+  throw new Error(failures.join('；'));
+}
+
+async function resolvePluginTarball(step, packageName, version) {
+  if (step.kind === 'tarball') {
+    // OSS 直链没有 packument，integrity 由 Release Center 的 sidecar 提供。
+    const meta = await requestJson(`${step.tarballUrl}.json`, { timeoutMs: 15_000 }).catch(() => null);
+    return {
+      version: nullableString(meta?.version) || version,
+      tarballUrl: step.tarballUrl,
+      integrity: nullableString(meta?.integrity),
+      shasum: nullableString(meta?.shasum)
+    };
+  }
+  const packument = await requestJson(step.packumentUrl, { timeoutMs: 20_000 });
+  const selected = selectPackumentVersion(packument, version);
+  if (!selected?.tarball) throw new Error(`registry 没有返回 ${packageName}@${version} 的 tarball`);
+  return {
+    version: selected.version,
+    tarballUrl: rewriteTarballToSource(step.source, selected.tarball),
+    integrity: selected.integrity,
+    shasum: selected.shasum
+  };
+}
+
+async function writePluginSlot(appRecord, packageName, version, tarball) {
+  const entries = extractNpmTarball(tarball);
+  if (!entries.some((entry) => entry.path === 'package.json')) {
+    throw new Error('tarball 里没有 package.json，不是有效的 npm 包');
+  }
+  const root = path.join(app.getPath('userData'), 'appcenter-plugins', safePathSegment(appRecord.appId || packageName));
+  const slot = path.join(root, `v${safePathSegment(version)}`);
+  const staging = `${slot}.staging`;
+  await fs.rm(staging, { recursive: true, force: true });
+  for (const entry of entries) {
+    const target = path.join(staging, entry.path);
+    // extractNpmTarball 已经挡了 `..` 和绝对路径，这里再确认一次落点在 slot 内。
+    if (!target.startsWith(`${staging}${path.sep}`)) throw new Error(`tarball 条目越界：${entry.path}`);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, entry.content, { mode: entry.mode & 0o777 });
+  }
+  await fs.rm(slot, { recursive: true, force: true });
+  await fs.rename(staging, slot);
+  await pruneOldPluginSlots(root, path.basename(slot));
+  return slot;
+}
+
+/** 只保留当前版本和上一版，回滚够用，又不会让缓存无限长大。 */
+async function pruneOldPluginSlots(root, keepName) {
+  const rows = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+  const slots = rows
+    .filter((row) => row.isDirectory() && row.name.startsWith('v') && row.name !== keepName)
+    .map((row) => row.name)
+    .sort();
+  for (const name of slots.slice(0, Math.max(0, slots.length - 1))) {
+    await fs.rm(path.join(root, name), { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 async function resolveWorkspaceEntrypoint(appRecord) {
@@ -11461,26 +11839,50 @@ function embedDefaults() {
   ];
 }
 
+// Standalone owner 列表来自 Internal 的 launcher app registry（每个 standalone
+// 产品由 admin 注册并分到 10.88.100.x 的 service VIP），不是本机常量。
+// 早期版本在这里写死了 luopan=10.88.110.1/reserved，和注册表对不上。
+const FOUNDATION_OWNER_FALLBACKS = [
+  { productId: PRODUCT_ID, displayName: 'MX-H2I', serviceVip: '10.88.100.1' },
+  { productId: 'luopan', displayName: 'Luopan', serviceVip: '10.88.100.3' }
+];
+
 function foundationContract() {
+  const apps = runtime?.apps && typeof runtime.apps === 'object' ? runtime.apps : {};
+  const owners = new Map();
+  for (const fallback of FOUNDATION_OWNER_FALLBACKS) {
+    owners.set(fallback.productId, { ...fallback, state: foundationOwnerState(fallback.productId, null) });
+  }
+  for (const app of Object.values(apps)) {
+    if (!app || app.launcherMode !== 'standalone') continue;
+    const productId = nullableString(app.productNetworkId) || nullableString(app.appId);
+    if (!productId) continue;
+    const previous = owners.get(productId);
+    owners.set(productId, {
+      productId,
+      displayName: nullableString(app.displayName) || previous?.displayName || productId,
+      state: foundationOwnerState(productId, app),
+      serviceVip: nullableString(app.serviceVip) || previous?.serviceVip || null
+    });
+  }
   return {
     runtimeName: 'Launcher Foundation',
     socketNamespace: '~/.qpjoy/mx-launcher/sockets/{standaloneChannelProductId}.sock',
     sharedCapabilities: ['auth', 'permission', 'release', 'network', 'observability'],
-    standaloneOwners: [
-      {
-        productId: 'mx-h2i',
-        displayName: 'MX-H2I',
-        state: 'active',
-        serviceVip: '10.88.100.1'
-      },
-      {
-        productId: 'luopan',
-        displayName: 'Luopan',
-        state: 'reserved',
-        serviceVip: '10.88.110.1'
-      }
-    ]
+    standaloneOwners: [...owners.values()]
   };
+}
+
+/**
+ * 只有本机正在持有 standalone channel 的产品才是 active；其它已注册产品是
+ * `registered`（admin 已分配 VIP，本机没跑），未注册的才是 `reserved`。
+ */
+function foundationOwnerState(productId, app) {
+  if (productId === normalizeLauncherProductId(runtime?.config?.productId)) {
+    return runtime?.connection?.state === 'connected' ? 'active' : 'idle';
+  }
+  if (app) return app.installed === true ? 'installed' : 'registered';
+  return 'registered';
 }
 
 function idleConnection() {
@@ -15477,6 +15879,26 @@ async function requestText(url, options = {}) {
   return result.text;
 }
 
+// 插件 tarball 走和 Internal API 完全相同的一条网络路径（Host Resolve + SNI 覆写、
+// bootstrap DNS、system-only 回退），这样公司网络里能取到 API 就一定能取到插件包。
+async function requestBuffer(url, options = {}) {
+  const resolveMode = normalizeBootstrapResolveMode(
+    options.bootstrapResolveMode || runtime?.config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode
+  );
+  const hostOverride = await requestHostOverride(url, { bootstrapResolveMode: options.bootstrapResolveMode });
+  const result = hostOverride
+    ? await requestTextWithHostOverride(hostOverride, options)
+    : resolveMode === 'system-only'
+      ? await requestTextWithSystemNetwork(url, options)
+      : await requestTextWithFetch(url, options);
+  if (result.status < 200 || result.status >= 300) {
+    const err = new Error(`HTTP ${result.status}${result.statusText ? ` ${result.statusText}` : ''}`);
+    err.originalUrl = url;
+    throw err;
+  }
+  return Buffer.isBuffer(result.body) ? result.body : Buffer.from(result.text || '', 'utf8');
+}
+
 function requestJsonWithHostOverride(override, options = {}) {
   return requestTextWithHostOverride(override, options).then((result) => {
     const payload = parseJsonPayload(result.text);
@@ -15571,9 +15993,10 @@ function requestTextWithHostOverride(override, options = {}) {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk));
       response.on('end', () => {
-        const text = Buffer.concat(chunks).toString('utf8');
+        const body = Buffer.concat(chunks);
         resolve({
-          text,
+          text: body.toString('utf8'),
+          body,
           status: response.statusCode || 0,
           statusText: response.statusMessage || '',
           headers: response.headers
@@ -15649,8 +16072,10 @@ function requestTextWithElectronNet(url, options = {}) {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk));
       response.on('end', () => {
+        const body = Buffer.concat(chunks);
         finish(resolve, {
-          text: Buffer.concat(chunks).toString('utf8'),
+          text: body.toString('utf8'),
+          body,
           status: response.statusCode || 0,
           statusText: response.statusMessage || '',
           headers: response.headers || {}
@@ -15698,8 +16123,10 @@ async function requestTextWithFetch(url, options = {}, resolveMode = null) {
       ...(body !== undefined ? { body } : {}),
       signal: controller.signal
     });
+    const payload = Buffer.from(await response.arrayBuffer());
     return {
-      text: await response.text(),
+      text: payload.toString('utf8'),
+      body: payload,
       status: response.status,
       statusText: response.statusText,
       headers: response.headers

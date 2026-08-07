@@ -458,6 +458,155 @@ H2O 运行时订阅策略：
   的轻量补同步回退。
 - H2O 默认使用 `app-global`，即 AppCenter/嵌入 App 里除黑名单外都走 H2O；`app-rule`
   是显式选择的白名单模式，不能作为新用户或缺省配置的回退。
+
+### 模式与开关：和 Clash 一样分两层
+
+**模式**决定作用范围（`MihomoRuntimeMode`，三种）：
+
+| mode | 覆盖范围 | TUN | 尾规则 |
+| --- | --- | --- | --- |
+| `app-rule` | 仅嵌入 App | 关 | 白名单走 H2O，其余 `MATCH,REJECT` |
+| `app-global` | 仅嵌入 App | 关 | 黑名单之外都走 H2O（**默认**，不影响外部联网） |
+| `system-tun` | 整机，含外部浏览器 | 开 | 同 `app-global` |
+
+**开关**独立于模式，切模式不会重置（`RuntimeTuning`）：
+
+| 开关 | 取值 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `dnsMode` | `fake-ip` / `redir-host` | `fake-ip` | fake-ip 快且不泄漏 DNS；redir-host 解析真实 IP，兼容需要真实地址的局域网/游戏 |
+| `tunStack` | `system` / `mixed` / `gvisor` | `system` | 见下方升级路径 |
+| `strictRoute` | on / off | off | 防泄漏更强，但会和其它 VPN 抢路由 |
+| `cnDirect` | on / off | on | 关掉表示国内域名也走 H2O；控制面直连规则不受影响 |
+
+早期版本曾把 fake-ip 做成第四个模式 `system-fakeip`，现已折叠：
+`normalizeRuntimeMode('system-fakeip') === 'system-tun'`，旧的本机状态仍能加载。
+
+### TUN 协议栈：system → mixed → gvisor 逐档升级
+
+三档不是并列选项，而是一条排障路径。默认停在最快的一档，遇到具体症状再往上走：
+
+| stack | 实现 | 何时用 |
+| --- | --- | --- |
+| `system` | 内核 TCP 栈 | **默认**。吞吐和内存最好，也是判断"问题是否出在协议栈"的基线 |
+| `mixed` | TCP 内核栈 + UDP gvisor | system 栈下 UDP 异常时（游戏、语音、QUIC）先换这档 |
+| `gvisor` | 全用户态栈 | 前两档都不行时。兼容性最好，代价是吞吐和内存 |
+
+**`strict-route` 和 `auto-redirect` 与协议栈无关**，早期实现把三者绑在一起是错的：
+
+- `strict-route` 是各协议栈都支持的防泄漏开关（用防火墙规则把绕过 TUN 的流量抓回来）。
+  默认关，因为开着正是和其它 VPN / 外部 Clash 抢路由的原因。
+- `auto-redirect` 只有 Linux 实现（nftables/iptables 重定向），因此按**平台**决定，
+  macOS / Windows 恒为 false。
+
+### 与外部 Clash 共存
+
+`app-rule` / `app-global` 只改本进程和嵌入窗口的代理，外部 Clash 不受影响，反之亦然。
+`system-tun` 会和外部虚拟网卡抢路由 —— 这是唯一需要二选一的场景。缓解手段按优先级：
+
+1. 默认就是 `app-global`，不接管整机流量，所以默认不冲突。
+2. `strictRoute` 默认关：只接管进入虚拟网卡的流量，不去抢别人的路由。
+3. 控制面 guard（下一节）保证无论谁在接管，MX-H2I 的内网和 WireGuard 都是直连例外。
+
+### 虚拟网卡模式下的控制面保护
+
+`system-tun` 会接管整机流量，MX-H2I 自己的控制面必须留在隧道之外，否则 H2O 一启动
+就会掐掉 launcher 自己的连接，再也拿不到订阅或续期。`h2oControlPlaneGuard()` 收集：
+
+- split DNS 内网域名、bootstrap/Internal/订阅 URL 的 hostname、Host Resolve 表里的域名
+- Domestic relay / WireGuard endpoint / Internal DNS target 的 IP
+
+并通过 `applyManagedConfig({ guard })` 下发，渲染成三样东西：
+
+1. 排在所有用户规则和 `MATCH` 之前的 `IP-CIDR,...,DIRECT,no-resolve` / `DOMAIN-SUFFIX,...,DIRECT`
+2. `dns.fake-ip-filter` 排除项（这些域名不能拿到 198.18.x 假地址）
+3. `dns.nameserver-policy` 指向明文 DNS —— 用 DoH 解析 bootstrap 域名需要隧道先能出网，
+   会死锁
+
+guard 存在 manager 实例上，进程重启后 `getH2oTunnelManager()` 会补一次，
+保证 admin 页/订阅刷新触发的 `renderConfig()` 也带着直连规则。
+
+### 一个用户一个订阅 URL，里面装所有 oversea 节点
+
+**不是每台 oversea 一个订阅 URL。** 结论如下，服务端 `renderUserOverseaMihomoSubscription`
+已经是这个实现：
+
+```
+GET /internal/v1/user-center/users/{userId}/oversea/subscription.yaml   ← 每个用户固定一个
+  proxies:
+    - oversea-main-hysteria2   -> 156.239.45.4:51289
+    - oversea-mx-hysteria2     -> 156.239.45.5:51289
+    - oversea-sg-1-hysteria2   -> sg.example.com:51289
+  proxy-groups:
+    - {name: Oversea, type: select, proxies: [...三个节点..., DIRECT]}
+  rules:
+    ... MATCH,Oversea
+```
+
+- 只有 `account.status === 'active'` 的站点会进 `proxies`，所以增删机器不改 URL。
+- 规则指向 `Oversea` 这个 select 组，H2O 换节点只是改组内选择，URL 和规则都不动。
+- 换 URL 的方案被否掉：那样每加一台机器都要重新下发订阅、客户端还要维护 N 个订阅状态，
+  而且切节点会断开所有连接。
+
+### 订阅地址可达性：公网还是 Internal
+
+Domestic edge 目前是 `bootstrap-and-relay` 模式，nginx **只反代 `/healthz`**，
+`/internal/v1/*` 一律 404（实测 `https://h2i.minsight-ai.com/internal/v1/...` → nginx 404）。
+所以客户端按候选链取订阅，用第一个成功的，并把它记进 `activeSubscription.resolvedUrl`：
+
+| 顺序 | 地址 | 现状 |
+| --- | --- | --- |
+| 1 | 上次成功的 `resolvedUrl` | 有就先用，避免每次都撞 404 |
+| 2 | 公网 `https://{bootstrap 域名}/internal/v1/...` | **目前 404**，等 Domestic 开反代后自动生效 |
+| 3 | Internal `http://10.88.88.88:18090/internal/v1/...` | 当前真正可达（需要 WG 起来） |
+
+hydrate（登录/刷新订阅）和 start（启动 mihomo 前预取）共用同一条链，取到的 YAML 通过
+`applyManagedConfig({ subscriptionContent })` 直接交给 mihomo，它自己不再下载。
+**要让公网路径可用，Domestic nginx 需要把 `/internal/v1/user-center/` 反代到 Internal** ——
+这是服务端待办，客户端已经准备好，一旦开通会自动切到候选 2。
+
+### oversea 机器退役：归档而不是删除
+
+退役一台机器走 `POST /internal/v1/admin/oversea/{siteId}/archive`（admin UI Site Registry
+的 Archive 按钮）。语义：
+
+1. 站点记为 `status: 'archived'`，沉到 Site Registry 底部，不再参与新分配。
+2. **该站点下所有 access account 置为 `paused`** —— 这是关键机制：订阅渲染只收 active
+   账号，所以这个节点自动从每个用户的 `subscription.yaml` 里消失，不需要逐个改 entitlement。
+3. entitlement 本身保留。`unarchive` 时账号重新 active，节点自动回到订阅里。
+4. 接口返回 `affectedUserIds`，admin 能看到影响了谁；plan / worker report / evidence 全部保留。
+5. `upsert` 不会让已归档站点复活 —— 改 host/端口不等于重新启用，必须显式 unarchive。
+
+### 多 oversea 节点切换
+
+一个用户的 oversea entitlement 可以覆盖多个站点（`oversea-main` / `oversea-mx` /
+`oversea-sg-1`…），订阅 YAML 里就是多条 `proxies`。切换遵循 Clash 的做法：
+
+- **规则永远指向 select 组，不指向具体节点。** 订阅自带 `proxy-groups` 就沿用第一个组；
+  没有就合成一个 `PROXY` select 组把所有节点装进去。换节点因此不需要重写任何一条规则。
+- 运行中切换走 external-controller（`PUT /proxies/{group}`），即时生效、不断开已有连接。
+- 同时把选中的节点重排到组的第一位并落盘 —— mihomo 的 `select` 组在没有运行时选择记录
+  时用第一项，这就是重启后仍然保持用户选择的持久化方式。
+- 选中的节点不在当前订阅里（换了 entitlement、站点被回收）时自动回落到第一个节点，
+  而不是把组清空。
+
+相关 API：`proxyNodes(yaml)` 列节点、`proxyPolicyGroupName(yaml)` 取组名、
+`MihomoManager.selectProxyNode(name)` 切换、`applyManagedConfig({ selectedNode })` 下发。
+
+### 从商业 Clash 订阅里可以借鉴的结构
+
+`demos/mx-app-h2o/subscription.clash.md` 是一份真实的商业订阅，值得往 Domestic
+控制面吸收的是它的**分层**，而不是它的节点：
+
+| 结构 | 现状 | 建议 |
+| --- | --- | --- |
+| 多个命名 `proxy-groups` 作为策略靶子 | 已实现（单个 select 组） | 扩展成场景组：`出海` / `国内` / `拦截` / `漏网之鱼` |
+| `type: url-test` / `fallback` / `load-balance` | 未实现 | 多 oversea 站点时按延迟自动选站，比手动切更实用 |
+| 规则种类 `DOMAIN-KEYWORD` / `DST-PORT` / `IP-CIDR6` | 只生成 `DOMAIN-SUFFIX` / `IP-CIDR` | 规则模型补齐这几种，Internal 侧才能表达完整策略 |
+| `rule-providers` 远端规则集 | 未实现 | Internal 托管规则集，客户端按 interval 拉取，避免每次改规则都重发订阅 |
+| `nameserver-policy` 按域名指定 DNS | 已实现（控制面 guard 用） | 可开放给 Internal 下发内网 DNS 分区 |
+
+优先级建议：先补规则种类和场景组（纯客户端渲染层，Internal 不用改），
+`url-test` 自动选站次之，`rule-providers` 最后（需要 Internal 新增托管端点）。
 - 用户手动保存的外部订阅、Basic Auth、headers 和置顶/active 选择属于本机偏好，不应被
   Internal managed profile 刷新覆盖。历史上写进 `h2o-default` 的外部 URL 应迁移成
   `custom-*` 订阅，并在下一次启动时继续自动 active。
@@ -468,6 +617,14 @@ H2O 运行时订阅策略：
 - 交给 mihomo 的 managed subscription URL 应使用 Domestic/bootstrap 可达地址，例如
   `http://<domestic-host>:18090/internal/v1/...`。`10.88.88.88` 依赖 WG，k8s service URL
   只适合集群内部，二者都不应作为默认 runtime 下载 URL 持久化给 H2O。
+- **https 场景必须保留 bootstrap 域名，不能换成裸 IP。** Domestic ingress 按 SNI 分流，
+  `https://<ip>/internal/v1/...` 握手时没有 SNI，会拿到
+  `ERR_SSL_TLSV1_ALERT_UNRECOGNIZED_NAME`。launcher 自己的 `requestText` 有 Host Resolve +
+  `servername` 覆写所以不受影响，但 mihomo/外部下载器没有，只能靠域名。
+  `h2oDomesticApiBaseUrl()` 因此在 https + 裸 IP relay host 时保留 bootstrap hostname。
+- H2O 启动前会先用 launcher 网络栈把订阅 YAML 取回来，通过 `applyManagedConfig`
+  的 `subscriptionContent` 直接交给 mihomo，避免它再发一次不带 SNI 的请求；
+  预取失败时才回退到 mihomo 自己下载。
 - 订阅 YAML 里的 `mixed-port` 只是上游模板值，H2O runtime 会在渲染本机 mihomo config 时
   覆盖成本地端口（默认 `23458`）。系统订阅能下载但不能连时，应优先检查 Internal 是否已经
   同步 Oversea `serverPorts` 和 `TLS fingerprint`；`Stack Status` / worker report 里的

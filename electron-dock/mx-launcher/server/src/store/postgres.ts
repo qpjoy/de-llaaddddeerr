@@ -107,6 +107,8 @@ import type {
   SiteSlotExecutionInput,
   SiteSlotExecutionRun,
   SiteSlotAccessAccount,
+  LauncherNetworkMihomoSiteArchiveInput,
+  LauncherNetworkMihomoSiteArchiveResult,
   SiteSlotAccessAccountIssueInput,
   SiteSlotAccessAccountIssueResult,
   SiteSlotDomesticRuntimeConfig,
@@ -249,6 +251,7 @@ import {
   introspectShadowToken,
   normalizeImportUserCenterRow,
   normalizeTestStatus,
+  applyLauncherNetworkMihomoSiteArchive,
   normalizeLauncherNetworkMihomoSite,
   normalizeUpdatePolicy,
   issueUserCenterServiceAccountCredential,
@@ -2432,6 +2435,63 @@ export class PostgresStore implements PlatformStore {
       }
     });
     return site;
+  }
+
+  /**
+   * 归档/恢复一台 oversea 机器。
+   *
+   * 关键点：不去逐个改用户 entitlement，而是把该站点下所有 access account 置为
+   * paused —— `renderUserOverseaMihomoSubscription` 只收 active 账号，所以节点会
+   * 自动从每个用户的 subscription.yaml 里消失，用户下次刷新订阅就看不到它了。
+   * entitlement 本身保留，恢复站点时账号重新 active，订阅自动恢复。
+   */
+  async archiveLauncherNetworkMihomoSite(
+    input: LauncherNetworkMihomoSiteArchiveInput
+  ): Promise<LauncherNetworkMihomoSiteArchiveResult> {
+    const siteId = input.siteId?.trim();
+    if (!siteId) throw new Error('siteId is required');
+    const previous = await this.getLauncherNetworkMihomoSite(siteId);
+    if (!previous) throw new Error(`Launcher Network mihomo site not found: ${siteId}`);
+    const requestedBy = input.requestedBy?.trim() || 'internal';
+    const now = new Date().toISOString();
+    const site = applyLauncherNetworkMihomoSiteArchive(previous, input.archived, requestedBy, now);
+    await this.saveRecord('launcher-network-mihomo-site', site.siteId, site, site.siteId);
+
+    const accounts = await this.listSiteSlotAccessAccounts(siteId);
+    const nextStatus = input.archived ? 'paused' : 'active';
+    const changed: SiteSlotAccessAccount[] = [];
+    for (const account of accounts) {
+      if (account.status === nextStatus) continue;
+      const updated: SiteSlotAccessAccount = { ...account, status: nextStatus, updatedBy: requestedBy, updatedAt: now };
+      await this.saveRecord('site-slot-access-account', updated.accountId, updated, updated.siteId);
+      changed.push(updated);
+    }
+
+    const entitlements = await this.listUserOverseaEntitlements();
+    const affectedUserIds = [...new Set(entitlements
+      .filter((entitlement) => entitlement.siteIds.includes(siteId))
+      .map((entitlement) => entitlement.userId))];
+
+    await this.recordAudit({
+      eventType: input.archived
+        ? 'launcher_network.mihomo_site.archived'
+        : 'launcher_network.mihomo_site.unarchived',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        siteId: site.siteId,
+        archivedBy: requestedBy,
+        accountsChanged: changed.length,
+        affectedUserIds
+      }
+    });
+
+    return {
+      site,
+      pausedAccounts: input.archived ? changed : [],
+      reactivatedAccounts: input.archived ? [] : changed,
+      affectedUserIds
+    };
   }
 
   async getLauncherNetworkMihomoSite(siteId: string): Promise<LauncherNetworkMihomoSite | null> {

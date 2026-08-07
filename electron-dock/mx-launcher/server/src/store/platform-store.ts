@@ -54,6 +54,8 @@ import type {
   LauncherNetworkSnapshotInput,
   LauncherNetworkMihomoSite,
   LauncherNetworkMihomoSiteInput,
+  LauncherNetworkMihomoSiteArchiveInput,
+  LauncherNetworkMihomoSiteArchiveResult,
   LauncherNetworkReachabilityPlan,
   LauncherProductNetwork,
   LauncherProductNetworkInput,
@@ -309,6 +311,9 @@ export interface PlatformStore {
   listSiteSlotAccessAccounts(siteId: string): MaybePromise<SiteSlotAccessAccount[]>;
   getSiteSlotAccessAccount(siteId: string, username: string): MaybePromise<SiteSlotAccessAccount | null>;
   upsertLauncherNetworkMihomoSite(input: LauncherNetworkMihomoSiteInput): MaybePromise<LauncherNetworkMihomoSite>;
+  archiveLauncherNetworkMihomoSite(
+    input: LauncherNetworkMihomoSiteArchiveInput
+  ): MaybePromise<LauncherNetworkMihomoSiteArchiveResult>;
   getLauncherNetworkMihomoSite(siteId: string): MaybePromise<LauncherNetworkMihomoSite | null>;
   getLauncherNetworkMihomoReachability(siteId: string): MaybePromise<LauncherNetworkReachabilityPlan | null>;
   listLauncherProductNetworks(): MaybePromise<LauncherProductNetwork[]>;

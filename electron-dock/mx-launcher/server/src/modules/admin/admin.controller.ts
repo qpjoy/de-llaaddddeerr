@@ -404,6 +404,57 @@ export class AdminController {
     return this.buildOverseaOverview(actionPolicy);
   }
 
+  /**
+   * 归档一台退役的 oversea 机器。会把该站点下所有 access account 置为 paused，
+   * 于是它从每个用户的 subscription.yaml 里自动消失；entitlement 保留，
+   * unarchive 时账号重新 active，订阅自动恢复。
+   */
+  @Post('oversea/:siteId/archive')
+  async archiveOverseaSite(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('siteId') rawSiteId: string,
+    @Body() rawBody: unknown,
+    @Query('token') rawToken?: string,
+    @Query('userId') rawUserId?: string
+  ) {
+    return this.setOverseaSiteArchived(true, authorization, rawSiteId, rawBody, rawToken, rawUserId);
+  }
+
+  @Post('oversea/:siteId/unarchive')
+  async unarchiveOverseaSite(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('siteId') rawSiteId: string,
+    @Body() rawBody: unknown,
+    @Query('token') rawToken?: string,
+    @Query('userId') rawUserId?: string
+  ) {
+    return this.setOverseaSiteArchived(false, authorization, rawSiteId, rawBody, rawToken, rawUserId);
+  }
+
+  private async setOverseaSiteArchived(
+    archived: boolean,
+    authorization: string | undefined,
+    rawSiteId: string,
+    rawBody: unknown,
+    rawToken?: string,
+    rawUserId?: string
+  ) {
+    const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
+    assertPrincipalScope(actionPolicy, 'site-slot.manage');
+    const body = asRecord(rawBody);
+    const siteId = sanitizeSiteId(rawSiteId, 'oversea-main');
+    const result = await this.store.archiveLauncherNetworkMihomoSite({
+      siteId,
+      archived,
+      requestedBy: stringValue(body.requestedBy) ?? actionPolicy.principal.principalId,
+      requestId: stringValue(body.requestId) ?? `admin-oversea-${archived ? 'archive' : 'unarchive'}-${Date.now()}`
+    });
+    return {
+      archive: result,
+      overview: await this.buildOverseaOverview(actionPolicy)
+    };
+  }
+
   @Post('oversea/:siteId/shadow-setup')
   async shadowSetupOverseaSite(
     @Headers('authorization') authorization: string | undefined,
@@ -1111,7 +1162,8 @@ export class AdminController {
       actionPolicy,
       ensure: ensure ?? null,
       counts: {
-        overseaSites: sites.length,
+        overseaSites: sites.filter((site) => !site.archived).length,
+        archived: sites.filter((site) => site.archived).length,
         installed: sites.filter((site) => site.status === 'installed').length,
         readyToInstall: sites.filter((site) => site.status === 'ready-to-install').length,
         blocked: sites.filter((site) => site.status === 'blocked' || site.status === 'failed').length,
@@ -1127,10 +1179,12 @@ export class AdminController {
         domesticGatewayIp: '10.88.0.1',
         deliveryBoundary: 'Internal publishes subscriptions; H endpoints need Domestic WG/H2I/DNS before they can fetch Internal mihomo.'
       },
+      // 归档站点保留在列表里（可以恢复、可以看历史 evidence），但一律沉到底部。
       sites: sites.sort((left, right) => {
         const selectedSiteId = stringValue(ensure?.siteId);
         if (left.siteId === selectedSiteId) return -1;
         if (right.siteId === selectedSiteId) return 1;
+        if (left.archived !== right.archived) return left.archived ? 1 : -1;
         return right.updatedAt.localeCompare(left.updatedAt);
       })
     };
@@ -1150,7 +1204,11 @@ export class AdminController {
     const accounts = await this.store.listSiteSlotAccessAccounts(siteId);
     const mihomoSite = await this.store.getLauncherNetworkMihomoSite(siteId);
     const reachability = await this.store.getLauncherNetworkMihomoReachability(siteId);
-    const status = overseaSiteStatus(profile, pipeline, latestSession, latestJob, latestReport);
+    // 归档状态压过部署进度：一台退役机器不该继续显示 installed / ready-to-install。
+    const archived = mihomoSite?.status === 'archived';
+    const status = archived
+      ? 'archived'
+      : overseaSiteStatus(profile, pipeline, latestSession, latestJob, latestReport);
     const latestReportFailure = latestReport ? workerReportFailureSummary(latestReport) : null;
     const subscriptionBaseUrl = mihomoSite?.subscriptionBaseUrl ?? null;
     const planWorkerInternalBaseUrl = normalizeWorkerInternalBaseUrl(pipeline?.plan.runtime.oversea?.workerInternalBaseUrl);
@@ -1162,6 +1220,10 @@ export class AdminController {
       siteId,
       kind: 'oversea' as const,
       status,
+      archived,
+      archivedAt: mihomoSite?.archivedAt ?? null,
+      archivedBy: mihomoSite?.archivedBy ?? null,
+      activeAccounts: accounts.filter((account) => account.status === 'active').length,
       updatedAt: latestReport?.createdAt ?? latestJob?.updatedAt ?? latestJob?.createdAt ?? pipeline?.summary.latestUpdatedAt ?? profile?.updatedAt ?? new Date(0).toISOString(),
       host: profile?.host ?? pipeline?.plan.host ?? null,
       sshProfile: profile ? {

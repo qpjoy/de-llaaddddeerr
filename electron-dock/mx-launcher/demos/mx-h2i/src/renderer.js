@@ -246,6 +246,28 @@ root.addEventListener('click', (event) => {
     render();
     return;
   }
+  if (action === 'selectH2oNode') {
+    const name = button.dataset.node || '';
+    if (name) void runAction('selectH2oNode', name);
+    return;
+  }
+  if (action === 'setH2oTuning') {
+    const runtime = h2oRuntime();
+    const field = button.dataset.tuningField || '';
+    const raw = button.dataset.tuningValue || '';
+    if (!['dnsMode', 'tunStack', 'cnDirect', 'strictRoute'].includes(field)) return;
+    const value = ['cnDirect', 'strictRoute'].includes(field) ? raw === 'on' : raw;
+    const tuning = { ...h2oTuning(runtime), [field]: value };
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      tuning,
+      // 运行中才需要重渲染 mihomo config；停止状态下留到下次启动生效。
+      applyTunnelRuntime: runtime.running === true,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O ${field} set to ${String(value)}.`
+    });
+    return;
+  }
   if (action === 'setH2oMode') {
     const runtime = h2oRuntime();
     const nextMode = normalizeH2oModeUi(button.dataset.mode || 'app-global');
@@ -261,7 +283,7 @@ root.addEventListener('click', (event) => {
       });
       return;
     }
-    if (nextMode === 'system-tun' && !runtime.tunInstalled) {
+    if (h2oModeNeedsTun(nextMode) && !runtime.tunInstalled) {
       h2oManagerView = 'proxy';
       void runAction('updateH2oRuntime', {
         ...runtime,
@@ -281,7 +303,7 @@ root.addEventListener('click', (event) => {
     void runAction('updateH2oRuntime', {
       ...runtime,
       tunInstalled,
-      mode: !tunInstalled && runtime.mode === 'system-tun' ? 'app-global' : runtime.mode,
+      mode: !tunInstalled && h2oModeNeedsTun(runtime.mode) ? 'app-global' : runtime.mode,
       status: runtime.running ? 'running' : 'ready',
       applyTunnelRuntime: true,
       lastAppliedAt: new Date().toISOString(),
@@ -684,6 +706,7 @@ async function runAction(action, payload) {
       launchH2o: () => api.launchH2o?.() || api.enableH2o(),
       stopH2o: () => api.stopH2o?.(),
       setH2oMode: () => api.setH2oMode?.(payload),
+      selectH2oNode: () => api.selectH2oNode?.(payload),
       updateH2oRuntime: () => api.updateH2oRuntime?.(payload),
       refreshH2oSubscription: () => api.refreshH2oSubscription?.(payload),
       provisionH2oOversea: () => api.provisionH2oOversea?.(payload),
@@ -2345,8 +2368,10 @@ function renderH2oProxyManager(runtime, connected) {
       <div class="h2o-mode-grid">
         ${h2oManagerModeButton('app-rule', runtime.mode, 'App 模式')}
         ${h2oManagerModeButton('app-global', runtime.mode, '全局模式')}
-        ${h2oManagerModeButton('system-tun', runtime.mode, '系统 TUN')}
+        ${h2oManagerModeButton('system-tun', runtime.mode, '虚拟网卡')}
       </div>
+      ${renderH2oNodePanel(runtime)}
+      ${renderH2oTuningPanel(runtime)}
       <section class="h2o-port-panel">
         <div class="panel-head">
           <div>
@@ -2551,7 +2576,7 @@ function renderH2oPluginPanel(app) {
       <div class="h2o-mode-row">
         ${h2oModeButton('app-rule', runtime.mode, '规则')}
         ${h2oModeButton('app-global', runtime.mode, '全局')}
-        ${h2oModeButton('system-tun', runtime.mode, 'TUN')}
+        ${h2oModeButton('system-tun', runtime.mode, '网卡')}
       </div>
       <div class="h2o-runtime-facts">
         <div><span>订阅</span><strong>${escapeHtml(subscription.name || 'System Oversea 默认订阅')}</strong></div>
@@ -2569,8 +2594,120 @@ function h2oModeButton(mode, activeMode, label) {
 
 function h2oModeLabel(mode) {
   if (mode === 'app-global') return '全局模式';
-  if (mode === 'system-tun') return '系统 TUN';
+  if (mode === 'system-tun') return '虚拟网卡';
   return 'App 模式';
+}
+
+function h2oModeNeedsTun(mode) {
+  return normalizeH2oModeUi(mode) === 'system-tun';
+}
+
+function h2oTuning(runtime) {
+  const row = runtime && typeof runtime.tuning === 'object' && runtime.tuning ? runtime.tuning : {};
+  return {
+    dnsMode: row.dnsMode === 'redir-host' ? 'redir-host' : 'fake-ip',
+    tunStack: row.tunStack === 'gvisor' || row.tunStack === 'mixed' ? row.tunStack : 'system',
+    strictRoute: row.strictRoute === true,
+    cnDirect: row.cnDirect !== false
+  };
+}
+
+// fake-ip / redir-host、协议栈和 cn-direct 独立于模式，切模式不重置这些偏好。
+function renderH2oTuningPanel(runtime) {
+  const tuning = h2oTuning(runtime);
+  const tunMode = h2oModeNeedsTun(runtime.mode);
+  return `
+    <section class="h2o-port-panel">
+      <div class="panel-head">
+        <div>
+          <h4>解析与分流</h4>
+          <p>独立于代理模式，切换模式不会重置</p>
+        </div>
+      </div>
+      <div class="h2o-mode-grid">
+        ${h2oTuningButton('dnsMode', 'fake-ip', tuning.dnsMode, 'Fake-IP')}
+        ${h2oTuningButton('dnsMode', 'redir-host', tuning.dnsMode, 'Redir-Host')}
+      </div>
+      <p class="h2o-manager-note">${escapeHtml(tuning.dnsMode === 'fake-ip'
+        ? 'Fake-IP：DNS 只返回 198.18.x 占位地址，由 H2O 按域名分流，最快且不泄漏查询。内网域名和 MX-H2I 控制面已在排除表里。'
+        : 'Redir-Host：解析真实 IP 再分流，兼容需要真实地址的局域网、游戏和直连探测。')}</p>
+      <div class="h2o-mode-grid">
+        ${h2oTuningButton('cnDirect', 'on', tuning.cnDirect ? 'on' : 'off', '国内直连')}
+        ${h2oTuningButton('cnDirect', 'off', tuning.cnDirect ? 'on' : 'off', '全部走 H2O')}
+      </div>
+      ${tunMode ? `
+      <div class="h2o-mode-grid">
+        ${h2oTuningButton('tunStack', 'system', tuning.tunStack, 'system 栈')}
+        ${h2oTuningButton('tunStack', 'mixed', tuning.tunStack, 'mixed 栈')}
+        ${h2oTuningButton('tunStack', 'gvisor', tuning.tunStack, 'gvisor 栈')}
+      </div>
+      <p class="h2o-manager-note">${escapeHtml(h2oTunStackGuidance(tuning.tunStack))}</p>
+      <div class="h2o-mode-grid">
+        ${h2oTuningButton('strictRoute', 'off', tuning.strictRoute ? 'on' : 'off', '宽松路由')}
+        ${h2oTuningButton('strictRoute', 'on', tuning.strictRoute ? 'on' : 'off', '严格路由')}
+      </div>
+      <p class="h2o-manager-note">${escapeHtml(tuning.strictRoute
+        ? '严格路由：用防火墙规则把绕过虚拟网卡的流量也抓回来，防泄漏更强，但会和其它 VPN、外部 Clash 抢路由。'
+        : '宽松路由（推荐）：只接管进入虚拟网卡的流量，和其它 VPN 共存最好。')}</p>` : ''}
+    </section>
+  `;
+}
+
+// 一个 oversea entitlement 可以覆盖多台机器；节点切换只改 select 组，
+// 规则、订阅和当前模式都不受影响。
+function renderH2oNodePanel(runtime) {
+  const nodes = runtime.nodes || [];
+  if (!nodes.length) {
+    return `
+      <section class="h2o-port-panel">
+        <div class="panel-head">
+          <div>
+            <h4>出海节点</h4>
+            <p>启动后显示当前订阅提供的节点</p>
+          </div>
+        </div>
+        <p class="h2o-manager-note">当前订阅还没有解析出可选节点。若已分配多个 oversea 站点，请先刷新订阅再启动 H2O。</p>
+      </section>
+    `;
+  }
+  const selected = runtime.selectedNode || nodes[0].name;
+  return `
+    <section class="h2o-port-panel">
+      <div class="panel-head">
+        <div>
+          <h4>出海节点</h4>
+          <p>${escapeHtml(`${nodes.length} 个可用节点`)}</p>
+        </div>
+      </div>
+      <div class="h2o-mode-grid">
+        ${nodes.map((node) => `<button class="${node.name === selected ? 'is-active' : ''}" type="button" data-action="selectH2oNode" data-node="${escapeAttr(node.name)}" title="${escapeAttr(h2oNodeDetail(node))}">${escapeHtml(node.name)}</button>`).join('')}
+      </div>
+      <p class="h2o-manager-note">${escapeHtml(runtime.running
+        ? '运行中切换会通过控制接口即时生效，不会断开已有连接。'
+        : '当前未运行，所选节点在下次启动时生效。')}</p>
+    </section>
+  `;
+}
+
+function h2oNodeDetail(node) {
+  return [node.type, node.server && node.port ? `${node.server}:${node.port}` : node.server]
+    .filter(Boolean)
+    .join(' · ') || node.name;
+}
+
+// 遇到兼容性问题的升级路径：system -> mixed -> gvisor。
+function h2oTunStackGuidance(stack) {
+  if (stack === 'gvisor') {
+    return 'gvisor：全用户态协议栈，兼容性最好，代价是吞吐和内存开销更高。前两档都不行时再用。';
+  }
+  if (stack === 'mixed') {
+    return 'mixed：TCP 走内核栈、UDP 走 gvisor。system 栈下 UDP（游戏、语音、QUIC）异常时先换这一档。';
+  }
+  return 'system（默认）：直接用内核 TCP 栈，最快也最省内存。出问题按 system → mixed → gvisor 逐档升级。';
+}
+
+function h2oTuningButton(field, value, activeValue, label) {
+  return `<button class="${value === activeValue ? 'is-active' : ''}" type="button" data-action="setH2oTuning" data-tuning-field="${escapeAttr(field)}" data-tuning-value="${escapeAttr(value)}">${escapeHtml(label)}</button>`;
 }
 
 function h2oRuntimeStatusLabel(runtime) {
@@ -2586,10 +2723,10 @@ function h2oRuntimeStatusLabel(runtime) {
 }
 
 function h2oModeGuidance(mode, runtime) {
-  if (mode === 'system-tun') {
+  if (h2oModeNeedsTun(mode)) {
     return runtime.tunInstalled
-      ? '系统 TUN 由 MX-H2I standalone 统一分发，覆盖当前应用、应用内通道以及系统浏览器和其他应用；黑名单阻止访问。'
-      : '系统 TUN 需要先安装本机 helper。';
+      ? '虚拟网卡覆盖整机：当前应用、应用内通道、系统浏览器和其它应用都走 H2O；MX-H2I 自己的 WireGuard、Domestic bootstrap 和内网域名强制直连，不受影响。'
+      : '虚拟网卡需要先安装本机 TUN helper。';
   }
   if (mode === 'app-global') return '全局模式由 MX-H2I standalone 注册分发，覆盖当前应用和后续新建 BrowserWindow；国内 cn-direct，黑名单阻止访问，其余走 H2O。';
   return 'App 模式只覆盖当前应用；cn-direct 优先，配置白名单后仅白名单域名走 H2O，H2O 不可用时回退系统代理。';
@@ -2704,6 +2841,9 @@ function h2oRuntime(app = state.apps?.h2o) {
   return {
     kind: 'h2o-plugin',
     mode: normalizeH2oModeUi(runtime.mode),
+    tuning: h2oTuning(runtime),
+    nodes: Array.isArray(runtime.nodes) ? runtime.nodes.filter((item) => item && item.name) : [],
+    selectedNode: runtime.selectedNode || null,
     running: runtime.running === true,
     status,
     tunInstalled: runtime.tunInstalled === true,
@@ -2728,7 +2868,7 @@ function normalizeH2oModeUi(value) {
   const text = String(value || '').trim();
   if (text === 'global') return 'app-global';
   if (text === 'rule') return 'app-rule';
-  if (text === 'tun') return 'system-tun';
+  if (text === 'tun' || text === 'system-fakeip' || text === 'fakeip' || text === 'fake-ip') return 'system-tun';
   if (text === 'direct') return 'app-global';
   return ['app-rule', 'app-global', 'system-tun'].includes(text) ? text : 'app-global';
 }
@@ -3333,7 +3473,7 @@ function renderOwner(owner) {
         : '<div class="product-icon">LP</div>'}
       <div>
         <strong>${escapeHtml(owner.displayName)}</strong>
-        <span>${escapeHtml(owner.productId)} / ${escapeHtml(owner.serviceVip)}</span>
+        <span>${escapeHtml(owner.productId)} / ${escapeHtml(owner.serviceVip || 'VIP 待分配')}</span>
       </div>
       <span class="status-pill" data-state="${escapeAttr(owner.state)}">${escapeHtml(owner.state)}</span>
     </article>
@@ -3754,7 +3894,7 @@ function createMockApi() {
         sharedCapabilities: ['auth', 'permission', 'release', 'network', 'observability'],
         standaloneOwners: [
           { productId: 'mx-h2i', displayName: 'MX-H2I', state: 'active', serviceVip: '10.88.100.1' },
-          { productId: 'luopan', displayName: 'Luopan', state: 'reserved', serviceVip: '10.88.110.1' }
+          { productId: 'luopan', displayName: 'Luopan', state: 'registered', serviceVip: '10.88.100.3' }
         ]
       }
     },
@@ -4010,6 +4150,21 @@ function createMockApi() {
         }
       },
       feedback: { tone: 'info', message: 'H2O 已停止，配置和订阅仍保留。' }
+    }),
+    selectH2oNode: async (name) => commit({
+      apps: {
+        ...mockState.apps,
+        h2o: {
+          ...mockState.apps.h2o,
+          runtime: {
+            ...mockState.apps.h2o.runtime,
+            selectedNode: name,
+            lastAppliedAt: new Date().toISOString()
+          },
+          logs: [{ level: 'info', message: `H2O oversea node switched to ${name}.`, at: new Date().toISOString() }, ...(mockState.apps.h2o.logs || [])]
+        }
+      },
+      feedback: { tone: 'success', message: `已切换出海节点：${name}` }
     }),
     setH2oMode: async (mode) => commit({
       apps: {

@@ -1,9 +1,11 @@
 import type { Session } from 'electron';
 
+import { isTunRuntimeMode } from '@qpjoy/electron-core-mihomo';
+
 import type { RuntimeMode, TunnelPorts } from '../types';
 
 export async function applyElectronProxy(session: Session, mode: RuntimeMode, ports: TunnelPorts): Promise<void> {
-  if (mode === 'system-tun') {
+  if (isTunRuntimeMode(mode)) {
     await session.setProxy({ mode: 'direct' });
     return;
   }

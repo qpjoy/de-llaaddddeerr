@@ -2750,10 +2750,32 @@ export interface LauncherNetworkMihomoSite {
     h2iRequired: true;
     notes: string[];
   };
+  /**
+   * `archived` 表示这台 oversea 机器已经退役。归档时会把该站点下所有 access
+   * account 置为 paused —— 用户订阅渲染只收 active 账号，所以节点会自动从每个
+   * 用户的 subscription.yaml 里消失，不需要逐个改 entitlement。
+   */
+  status: 'active' | 'archived';
+  archivedAt: string | null;
+  archivedBy: string | null;
   createdBy: string;
   createdAt: string;
   updatedBy: string;
   updatedAt: string;
+}
+
+export interface LauncherNetworkMihomoSiteArchiveInput {
+  siteId: string;
+  archived: boolean;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface LauncherNetworkMihomoSiteArchiveResult {
+  site: LauncherNetworkMihomoSite;
+  pausedAccounts: SiteSlotAccessAccount[];
+  reactivatedAccounts: SiteSlotAccessAccount[];
+  affectedUserIds: string[];
 }
 
 export type LauncherNetworkReachabilityStageStatus = 'ready' | 'pending-evidence' | 'blocked';

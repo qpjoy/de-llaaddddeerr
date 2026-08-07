@@ -188,6 +188,7 @@ export function adminHtml(): string {
     var snapshot = null;
     var busy = false;
     var modeLabels = { 'system-tun': '虚拟网卡', 'app-global': '全局模式', 'app-rule': 'App 模式' };
+    function isTunMode(mode) { return mode === 'system-tun'; }
     var pageTitles = { home: '首页', proxy: '代理', subscriptions: '订阅', rules: '规则', test: '测试', logs: '日志' };
 
     function byId(id) { return document.getElementById(id); }
@@ -361,7 +362,7 @@ export function adminHtml(): string {
     }
     function modeGuidance(mode) {
       if (mode === 'system-tun') {
-        return '虚拟网卡模式会接管所有 App 流量；首次使用请先安装 TUN，DNS 由 QPJoy Tunnel 劫持到本地 1053，不依赖 Clash 的 53。';
+        return '虚拟网卡模式接管整机流量（含外部浏览器）；DNS 被劫持到本地。fake-ip / redir-host 和协议栈在下方单独切换。首次使用请先安装 TUN。';
       }
       if (mode === 'app-global') {
         return '全局模式只影响当前 App：默认全部走代理，只有黑名单会被拒绝。';
@@ -376,7 +377,7 @@ export function adminHtml(): string {
     function preflightModeChange(mode) {
       var s = status();
       if (!hasUsableSubscription(s)) return guideSubscriptionFirst();
-      if (mode === 'system-tun' && !(s && s.tunInstalled)) {
+      if (isTunMode(mode) && !(s && s.tunInstalled)) {
         toast('第二步：切换虚拟网卡前请先点击「安装 TUN」；安装后再切换，所有 App 都会生效。', true);
         goPage('proxy');
         return false;
@@ -387,7 +388,7 @@ export function adminHtml(): string {
     function preflightStart() {
       var s = status();
       if (!hasUsableSubscription(s)) return guideSubscriptionFirst();
-      if (s && s.mode === 'system-tun' && !s.tunInstalled) {
+      if (s && isTunMode(s.mode) && !s.tunInstalled) {
         toast('第二步：当前是虚拟网卡模式，请先在「代理」页安装 TUN 后再启动。', true);
         goPage('proxy');
         return false;

@@ -3,7 +3,15 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { basename, join } from 'path';
 import { gunzipSync } from 'zlib';
-import { validateSubscriptionYaml } from '@qpjoy/electron-core-mihomo';
+import {
+  isTunRuntimeMode,
+  normalizeDnsMode,
+  normalizeTunStack,
+  proxyNodes,
+  proxyPolicyGroupName,
+  validateSubscriptionYaml,
+  type MihomoProxyNode
+} from '@qpjoy/electron-core-mihomo';
 
 import { TunnelDatabase } from '../db/TunnelDatabase';
 import { DOMAIN_PRESETS, type DomainPresetId } from '../defaults';
@@ -15,6 +23,7 @@ import type {
   ManagedTunnelConfigResult,
   RuntimeSettings,
   RuntimeMode,
+  RuntimeTuning,
   SubscriptionInput,
   SubscriptionUpdateInput,
   SubscriptionRecord,
@@ -35,6 +44,38 @@ interface ManagerPaths {
 
 interface StopOptions {
   allowElevatedPrompt?: boolean;
+}
+
+const DEFAULT_TUNING: RuntimeTuning = { dnsMode: 'fake-ip', tunStack: 'system', strictRoute: false, cnDirect: true };
+
+function mergeTuning(current: RuntimeTuning, patch: ManagedTunnelConfigInput['tuning']): RuntimeTuning {
+  if (!patch) return current;
+  return {
+    dnsMode: patch.dnsMode === undefined ? current.dnsMode : normalizeDnsMode(patch.dnsMode),
+    tunStack: patch.tunStack === undefined ? current.tunStack : normalizeTunStack(patch.tunStack),
+    strictRoute: patch.strictRoute === undefined ? current.strictRoute : patch.strictRoute === true,
+    cnDirect: patch.cnDirect === undefined ? current.cnDirect : patch.cnDirect !== false
+  };
+}
+
+interface RuntimeGuard {
+  directDomains: string[];
+  directIps: string[];
+  fakeIpFilter: string[];
+}
+
+function normalizeGuard(input: ManagedTunnelConfigInput['guard']): RuntimeGuard | null {
+  if (!input) return null;
+  const list = (value: unknown): string[] => (
+    Array.isArray(value)
+      ? [...new Set(value.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean))]
+      : []
+  );
+  return {
+    directDomains: list(input.directDomains),
+    directIps: list(input.directIps),
+    fakeIpFilter: list(input.fakeIpFilter)
+  };
 }
 
 function pathsFromOptions(options: TunnelManagerOptions): ManagerPaths {
@@ -63,7 +104,7 @@ function isRootUser(): boolean {
 }
 
 function needsElevatedTun(settings: RuntimeSettings): boolean {
-  return settings.mode === 'system-tun'
+  return isTunRuntimeMode(settings.mode)
     && settings.tunInstalled
     && !isRootUser()
     && (process.platform === 'darwin' || process.platform === 'linux' || process.platform === 'win32');
@@ -203,6 +244,9 @@ export class MihomoManager extends EventEmitter {
   private lastRuntimeError: string | null = null;
   private closed = false;
   private closePromise: Promise<void> | null = null;
+  private runtimeGuard: RuntimeGuard = { directDomains: [], directIps: [], fakeIpFilter: [] };
+  private runtimeTuning: RuntimeTuning = { ...DEFAULT_TUNING };
+  private selectedNode: string | null = null;
 
   constructor(private readonly options: TunnelManagerOptions) {
     super();
@@ -231,6 +275,7 @@ export class MihomoManager extends EventEmitter {
       running,
       pid: running ? this.child?.pid ?? this.elevatedPid : null,
       mode: settings.mode,
+      tuning: { ...this.runtimeTuning },
       tunInstalled: settings.tunInstalled,
       health: this.runtimeHealth(settings, running),
       ports: settings.ports,
@@ -448,7 +493,7 @@ export class MihomoManager extends EventEmitter {
     const settings = this.db.getSettings();
     this.db.updateSettings({
       tunInstalled: false,
-      mode: settings.mode === 'system-tun' ? 'app-rule' : settings.mode
+      mode: isTunRuntimeMode(settings.mode) ? 'app-rule' : settings.mode
     });
     this.log('info', 'TUN feature disabled for generated runtime config');
   }
@@ -495,9 +540,81 @@ export class MihomoManager extends EventEmitter {
     return this.updateSubscription(active.id);
   }
 
+  /**
+   * Control-plane endpoints the tunnel must never capture. Persisted on the
+   * manager so every later re-render (restart, mode switch, subscription
+   * refresh) keeps the same guard, not just the managed apply that set it.
+   */
+  setRuntimeGuard(guard: ManagedTunnelConfigInput['guard']): void {
+    const normalized = normalizeGuard(guard);
+    if (!normalized) return;
+    this.runtimeGuard = normalized;
+  }
+
+  /** fake-ip / redir-host、TUN 栈和 cn-direct：独立于 mode，也独立于订阅。 */
+  setRuntimeTuning(tuning: ManagedTunnelConfigInput['tuning']): void {
+    this.runtimeTuning = mergeTuning(this.runtimeTuning, tuning);
+  }
+
+  runtimeTuningSnapshot(): RuntimeTuning {
+    return { ...this.runtimeTuning };
+  }
+
+  /** 当前订阅提供的出海节点。用户在这些之间切换，规则始终指向 select 组。 */
+  listProxyNodes(): MihomoProxyNode[] {
+    const active = this.db.getActiveSubscription();
+    return active?.content ? proxyNodes(active.content) : [];
+  }
+
+  selectedProxyNode(): string | null {
+    return this.selectedNode;
+  }
+
+  /**
+   * 切换出海节点。运行中优先走 external-controller 立即生效（不断开现有连接），
+   * 控制器不可用时回退到重渲染 config —— 重渲染同时也是重启后的持久化路径。
+   */
+  async selectProxyNode(name: string): Promise<{ applied: 'controller' | 'config'; node: string }> {
+    const node = name.trim();
+    if (!node) throw new Error('proxy node name is required');
+    if (!this.listProxyNodes().some((row) => row.name === node)) {
+      throw new Error(`proxy node not found in the active subscription: ${node}`);
+    }
+    this.selectedNode = node;
+    if (this.isRunning()) {
+      const groupName = this.activeProxyPolicyName();
+      if (groupName) {
+        const response = await this.api.selectProxy(groupName, node).catch(() => null);
+        if (response?.ok) {
+          // Persist the choice for the next start without restarting the core now.
+          this.renderConfig();
+          this.log('info', `Proxy node switched: ${node}`);
+          return { applied: 'controller', node };
+        }
+      }
+    }
+    await this.applyRuntimeConfigChange();
+    this.log('info', `Proxy node switched with a config reload: ${node}`);
+    return { applied: 'config', node };
+  }
+
+  private activeProxyPolicyName(): string | null {
+    if (!existsSync(this.paths.config)) return null;
+    try {
+      return proxyPolicyGroupName(readFileSync(this.paths.config, 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+
   async applyManagedConfig(input: ManagedTunnelConfigInput = {}): Promise<ManagedTunnelConfigResult> {
     const source = `managed:${normalizeManagedSource(input.source)}`;
     let subscription: SubscriptionRecord | null = null;
+    this.setRuntimeGuard(input.guard);
+    this.setRuntimeTuning(input.tuning);
+    // Applied before the config render below; an unknown node is dropped once
+    // the new subscription is in place rather than pinning a stale name.
+    if (input.selectedNode !== undefined) this.selectedNode = input.selectedNode?.trim() || null;
 
     if (input.subscription?.url) {
       const normalized = normalizeSubscriptionInput(input.subscription);
@@ -529,6 +646,11 @@ export class MihomoManager extends EventEmitter {
       }
     }
 
+    if (this.selectedNode && !this.listProxyNodes().some((row) => row.name === this.selectedNode)) {
+      this.log('warn', `Selected proxy node is not in the active subscription, falling back: ${this.selectedNode}`);
+      this.selectedNode = null;
+    }
+
     this.db.removeRulesBySource(source);
     for (const domain of normalizeDomainList(input.rules?.blocklist)) {
       this.addDomainRule('block', domain, source);
@@ -538,7 +660,7 @@ export class MihomoManager extends EventEmitter {
     }
 
     if (input.mode) {
-      if (input.mode === 'system-tun' && !this.db.getSettings().tunInstalled) {
+      if (isTunRuntimeMode(input.mode) && !this.db.getSettings().tunInstalled) {
         this.installTunFeature();
       }
       this.setMode(input.mode);
@@ -600,9 +722,14 @@ export class MihomoManager extends EventEmitter {
     const useGeoRules = this.runtimeGeoDataReady();
     const rendered = renderRuntimeConfig({
       baseYaml: active.content,
-      settings,
+      settings: { ...settings, ...this.runtimeTuning },
       rules: this.db.listRules(),
-      useGeoRules
+      useGeoRules,
+      selectedNode: this.selectedNode,
+      platform: process.platform,
+      directDomains: this.runtimeGuard.directDomains,
+      directIps: this.runtimeGuard.directIps,
+      fakeIpFilter: this.runtimeGuard.fakeIpFilter
     });
     writeFileSync(this.paths.config, rendered.yaml, 'utf8');
     chmodSync(this.paths.config, 0o600);
@@ -1111,7 +1238,7 @@ export class MihomoManager extends EventEmitter {
   async stop(): Promise<void> {
     await this.runExclusive(() => {
       const settings = this.db.getSettings();
-      return this.stopUnlocked({ allowElevatedPrompt: settings.mode === 'system-tun' });
+      return this.stopUnlocked({ allowElevatedPrompt: isTunRuntimeMode(settings.mode) });
     });
   }
 
@@ -1260,7 +1387,7 @@ export class MihomoManager extends EventEmitter {
   }
 
   private assertRuntimeModeAvailable(settings: RuntimeSettings): void {
-    if (settings.mode !== 'system-tun') {
+    if (!isTunRuntimeMode(settings.mode)) {
       return;
     }
 
@@ -1312,6 +1439,6 @@ export class MihomoManager extends EventEmitter {
   }
 
   private shouldWatchWindowsTun(settings: RuntimeSettings): boolean {
-    return process.platform === 'win32' && settings.mode === 'system-tun' && settings.tunInstalled;
+    return process.platform === 'win32' && isTunRuntimeMode(settings.mode) && settings.tunInstalled;
   }
 }
