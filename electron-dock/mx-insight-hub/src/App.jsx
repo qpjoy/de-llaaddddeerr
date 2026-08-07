@@ -105,11 +105,10 @@ function SessionGate({ checking, message, onAuthenticate }) {
     setSubmitting(true)
     setError(null)
     try {
-      // The password goes from this browser straight to Launcher; the Hub only
-      // ever receives the resulting token.
+      // Forwarded through the Hub, which is the only path that works when
+      // Launcher answers on the internal network and the browser does not sit
+      // on it.
       const token = await signInWithLauncher({
-        url: options.launcher.url,
-        audience: options.launcher.audience,
         username: account.username.trim(),
         password: account.password,
       })
@@ -177,7 +176,7 @@ function SessionGate({ checking, message, onAuthenticate }) {
 
             {options?.launcher && mode === 'launcher' ? (
               <form className="mih-auth-form" onSubmit={submitLauncher}>
-                <Field label="账号" hint={`凭据直接提交给 ${options.launcher.url}，不经过 Hub。`}>
+                <Field label="账号" hint="使用 MX Launcher 的账号密码；由 Hub 转发给 Launcher 校验。">
                   <input className="qp-input" value={account.username} autoComplete="username" autoFocus required
                     onChange={(event) => setAccount({ ...account, username: event.target.value })} />
                 </Field>

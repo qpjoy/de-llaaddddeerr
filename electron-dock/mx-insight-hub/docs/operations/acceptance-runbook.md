@@ -273,14 +273,12 @@ curl -X POST http://10.88.88.88:18090/internal/v1/user-center/tokens/issue \
 
 ### 但现在不用手工 curl 了
 
-Hub 控制台登录页新增了「Launcher 账号」页签，直接填账号密码即可。
+Hub 控制台登录页有「Launcher 账号」页签，直接填账号密码。
 
-**密码由浏览器直接提交给 Launcher，不经过 Hub 服务端**——Launcher 是唯一的认证权威（ADR-0004），让 Hub 代理这个表单等于把它重新放回凭据链路里。Hub 只接收换回来的 token。
+**登录请求由 Hub 后端转发给 Launcher**，浏览器不直连 Launcher。这一点是刻意的：Launcher 只在内网 `10.88.88.88:18090` 上应答，不连 VPN 的浏览器根本够不着；而 Hub 和 Launcher 同机部署，Hub 后端本来就要调 Launcher 做 introspection，转发登录用的是同一条已存在的信任链路。
 
-需要配一个浏览器可达的地址（集群 DNS 名在浏览器里解析不了）：
+密码只转发、不落地——不记日志、不入库、不进缓存，只有换回来的 token 会返回给浏览器。
 
-```bash
-MX_INSIGHT_LAUNCHER_PUBLIC_URL=http://10.88.88.88:18090
-```
+不需要任何额外配置：`MX_INSIGHT_LAUNCHER_URL` 由 deploy 自动发现，登录页签随之出现。
 
-不配的话登录页只显示 token 粘贴框，粘贴上面 curl 拿到的 token 一样能用。deploy 时会提示这一点并给出建议值。
+两点防护：调用方 IP 通过 `X-Forwarded-For` 透传给 Launcher（否则它的按源限流只会看到 Hub 一个地址，一个攻击者就能把所有人锁死），Hub 侧另有每 IP 每分钟 10 次的本地限流，避免 Hub 变成放大器。

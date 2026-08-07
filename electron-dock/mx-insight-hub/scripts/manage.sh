@@ -405,29 +405,6 @@ EOF
   MX_INSIGHT_LAUNCHER_URL="http://${name}.${namespace}.svc.cluster.local:${port}"
   say "discovered Launcher identity provider: ${MX_INSIGHT_LAUNCHER_URL}"
 
-  # The console signs users in from the browser, which cannot resolve cluster
-  # DNS, so it needs a host-reachable address.
-  #
-  # Derived from the Hub's own admin entrypoint rather than from the node's
-  # Kubernetes InternalIP: this node has several addresses (a LAN IP and a
-  # WireGuard overlay IP) and only the one operators actually browse is known to
-  # work. Launcher's gateway is a hostNetwork DaemonSet with hostPort 18090, so
-  # the same host answers on that port.
-  if [ -z "${MX_INSIGHT_LAUNCHER_PUBLIC_URL:-}" ] && [ -n "${MX_INSIGHT_HUB_ADMIN_ENTRYPOINT:-}" ]; then
-    local admin_host
-    admin_host="$(printf '%s' "$MX_INSIGHT_HUB_ADMIN_ENTRYPOINT" | sed -E 's#^(https?://[^:/]+).*#\1#')"
-    if [ -n "$admin_host" ]; then
-      MX_INSIGHT_LAUNCHER_PUBLIC_URL="${admin_host}:18090"
-      say "  browser sign-in endpoint (derived): ${MX_INSIGHT_LAUNCHER_PUBLIC_URL}"
-      say "    Override with MX_INSIGHT_LAUNCHER_PUBLIC_URL if the browser reaches Launcher elsewhere."
-    fi
-  elif [ -n "${MX_INSIGHT_LAUNCHER_PUBLIC_URL:-}" ]; then
-    say "  browser sign-in endpoint: ${MX_INSIGHT_LAUNCHER_PUBLIC_URL}"
-  fi
-  if [ -z "${MX_INSIGHT_LAUNCHER_PUBLIC_URL:-}" ]; then
-    say "  NOTE: no browser-reachable Launcher URL; the console will offer token paste only." >&2
-  fi
-
   # Reachability is verified now rather than at first sign-in. A wrong address
   # here surfaces as "your password is rejected" days later, at which point
   # nobody suspects a Service port.
@@ -537,7 +514,6 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_LAUNCHER_URL="${MX_INSIGHT_LAUNCHER_URL:-}" \
     --from-literal=MX_INSIGHT_LAUNCHER_AUDIENCE="${MX_INSIGHT_LAUNCHER_AUDIENCE:-mx-insight-hub}" \
     --from-literal=MX_INSIGHT_LAUNCHER_ADMIN_SCOPES="${MX_INSIGHT_LAUNCHER_ADMIN_SCOPES:-}" \
-    --from-literal=MX_INSIGHT_LAUNCHER_PUBLIC_URL="${MX_INSIGHT_LAUNCHER_PUBLIC_URL:-}" \
     --from-literal=MX_INSIGHT_BACKFILL_PLATFORMS="${MX_INSIGHT_BACKFILL_PLATFORMS:-xiaohongshu,douyin,twitter}" \
     --from-literal=MX_INSIGHT_AGENT_PROVIDERS="${MX_INSIGHT_AGENT_PROVIDERS:-}" \
     --from-literal=MX_INSIGHT_EMBEDDING_PROVIDERS="${MX_INSIGHT_EMBEDDING_PROVIDERS:-}" \

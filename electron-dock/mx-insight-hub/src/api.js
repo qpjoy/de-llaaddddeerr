@@ -79,40 +79,30 @@ async function health(token, path) {
 }
 
 /**
- * Exchange Launcher credentials for a token, from the BROWSER.
+ * Sign in with a Launcher account, through the Hub.
  *
- * Deliberately does not go through the Hub. Launcher is the only authentication
- * authority (ADR-0004); routing the form through the Hub server would put it in
- * the credential path for a password it must never see or store. The browser
- * posts to Launcher, gets an opaque `mx-v1-...` token back, and that token is
- * what the Hub then introspects.
+ * Not posted to Launcher directly: Launcher answers only on the internal
+ * network, so a browser outside the VPN could never reach it. The Hub forwards
+ * the credentials and returns just the issued token.
  */
-export async function signInWithLauncher({ url, audience, username, password }) {
-  const response = await fetch(`${url.replace(/\/$/, '')}/internal/v1/sdk/oauth/token`, {
+export async function signInWithLauncher({ username, password }) {
+  const response = await fetch(`${API_BASE}${ADMIN_ROOT}/sign-in`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({ grant_type: 'password', username, password, audience }),
+    body: JSON.stringify({ username, password }),
   })
   const payload = await parsePayload(response)
   if (!response.ok) {
     throw new ApiError({
       status: response.status,
-      code: 'launcher_sign_in_failed',
-      message: response.status === 401
+      code: payload?.error?.code,
+      message: payload?.error?.code === 'invalid_credentials'
         ? '账号或密码不正确'
-        : payload?.message || `Launcher 返回 HTTP ${response.status}`,
+        : payload?.error?.message || `登录失败（HTTP ${response.status}）`,
+      requestId: payload?.requestId,
     })
   }
-  // Launcher wraps the issued token differently across its endpoints; accept
-  // the shapes it actually returns rather than assuming one.
-  const token = payload?.access_token
-    ?? payload?.token
-    ?? payload?.issued?.token
-    ?? payload?.data?.access_token
-  if (!token) {
-    throw new ApiError({ code: 'launcher_sign_in_failed', message: 'Launcher 未返回 token' })
-  }
-  return token
+  return payload?.data?.token
 }
 
 export const adminApi = {

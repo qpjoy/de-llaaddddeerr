@@ -286,39 +286,106 @@ test('sign-in options are readable without authentication', async () => {
   assert.equal(data.adminToken, true)
 })
 
-test('an unavailable Launcher sign-in says which half is missing', async () => {
+test('sign-in options advertise the proxied Launcher form when configured', async () => {
   const response = await fetch(`${baseUrl}/internal/v1/admin/sign-in-options`)
   const { data } = await response.json()
-  // This harness configures identity but no public URL, so the reason must
-  // point at the public URL rather than at discovery. The two need different
-  // fixes and are indistinguishable from the login page otherwise.
-  assert.equal(data.launcher, null)
-  assert.match(data.launcherUnavailableReason, /MX_INSIGHT_LAUNCHER_PUBLIC_URL/)
+  // The browser needs no Launcher address of its own: the exchange goes through
+  // this server, which is the only way it can work when Launcher is reachable
+  // only on the internal network.
+  assert.equal(data.launcher.mode, 'proxied')
+  assert.equal(data.launcher.audience, AUDIENCE)
+  assert.equal(data.launcher.url, undefined, 'no internal address is leaked to the browser')
 })
 
-test('sign-in options offer the Launcher form once both halves are configured', async () => {
+test('an unconfigured Launcher says so instead of hiding the form silently', async () => {
   const { createApp } = await import('../../server/app.mjs')
-  const { createServer } = await import('node:http')
-  const configured = createApp({
+  const bare = createApp({
     service: { authenticate: async () => null },
     store,
     adapter: { dependencies: async () => ({ status: 'up' }) },
-    identity,
+    identity: null,
     adminToken: ADMIN_TOKEN,
-    launcherPublicUrl: 'http://10.88.88.88:18090',
-    launcherAudience: AUDIENCE,
   })
-  const server2 = createServer(configured)
+  const server2 = createServer(bare)
   await new Promise((resolve) => server2.listen(0, '127.0.0.1', resolve))
   try {
     const response = await fetch(
       `http://127.0.0.1:${server2.address().port}/internal/v1/admin/sign-in-options`,
     )
     const { data } = await response.json()
-    assert.equal(data.launcher.url, 'http://10.88.88.88:18090')
-    assert.equal(data.launcher.audience, AUDIENCE)
-    assert.equal(data.launcherUnavailableReason, undefined)
+    assert.equal(data.launcher, null)
+    assert.match(data.launcherUnavailableReason, /MX_INSIGHT_LAUNCHER_URL/)
   } finally {
     await new Promise((resolve) => server2.close(resolve))
   }
+})
+
+test('sign-in forwards credentials to Launcher and returns only the token', async () => {
+  let seen = null
+  const proxied = new LauncherIdentityClient({
+    baseUrl: 'http://launcher.invalid',
+    audience: AUDIENCE,
+    logger: { warn() {} },
+    fetchImpl: async (url, options) => {
+      seen = { url, body: JSON.parse(options.body), headers: options.headers }
+      // The real Launcher nests it: `{ token: { access_token, ... } }`. Reading
+      // `payload.token` naively yields the wrapper OBJECT, which stringifies to
+      // "[object Object]" and is then reported as an unknown token.
+      return new Response(
+        JSON.stringify({ token: { access_token: 'mx-v1-real-token', expires_at: 'later' } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    },
+  })
+
+  const issued = await proxied.signIn({ username: 'test', password: 'secret', clientIp: '203.0.113.9' })
+  assert.equal(issued.token, 'mx-v1-real-token')
+  assert.equal(typeof issued.token, 'string')
+  assert.match(seen.url, /\/internal\/v1\/sdk\/oauth\/token$/)
+  assert.equal(seen.body.grant_type, 'password')
+  // Audience must be the Hub's; Launcher defaults to mx-sdk, which the Hub then
+  // rejects on introspection.
+  assert.equal(seen.body.audience, AUDIENCE)
+  // The caller's address is forwarded so Launcher's per-source throttle still
+  // discriminates between users rather than seeing only the Hub.
+  assert.equal(seen.headers['x-forwarded-for'], '203.0.113.9')
+})
+
+test('a wrong password stays a 401 while a provider failure becomes 503', async () => {
+  const make = (status) => new LauncherIdentityClient({
+    baseUrl: 'http://launcher.invalid',
+    audience: AUDIENCE,
+    logger: { warn() {} },
+    fetchImpl: async () => new Response('{}', { status, headers: { 'content-type': 'application/json' } }),
+  })
+  await assert.rejects(
+    () => make(401).signIn({ username: 'a', password: 'b' }),
+    (error) => error.status === 401 && error.code === 'invalid_credentials',
+  )
+  // Not the user's problem to retype a password over.
+  await assert.rejects(
+    () => make(500).signIn({ username: 'a', password: 'b' }),
+    (error) => error.status === 503,
+  )
+  await assert.rejects(
+    () => make(429).signIn({ username: 'a', password: 'b' }),
+    (error) => error.status === 429,
+  )
+})
+
+test('a response without a usable token string is rejected, not passed through', async () => {
+  const client = new LauncherIdentityClient({
+    baseUrl: 'http://launcher.invalid',
+    audience: AUDIENCE,
+    logger: { warn() {} },
+    // Wrapper object only, no access_token inside: must not be handed back as
+    // if it were a credential.
+    fetchImpl: async () => new Response(JSON.stringify({ token: { audience: AUDIENCE } }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    }),
+  })
+  await assert.rejects(
+    () => client.signIn({ username: 'a', password: 'b' }),
+    /did not return a token/,
+  )
 })

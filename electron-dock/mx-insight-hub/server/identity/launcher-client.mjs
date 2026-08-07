@@ -117,7 +117,14 @@ export class LauncherIdentityClient {
     }
 
     const introspection = payload?.introspection
-    if (!introspection?.active || !introspection.principal) return null
+    if (!introspection?.active || !introspection.principal) {
+      // Launcher explains itself in `reason`; discarding it turns every
+      // rejection into an indistinguishable "invalid session".
+      this.logger?.warn?.(
+        `[identity] token rejected by Launcher: ${introspection?.reason || 'no reason given'}`,
+      )
+      return null
+    }
 
     // Audience is re-checked here even though it was sent in the request.
     // Trusting the authority to have filtered on a value we supplied, without
@@ -152,8 +159,102 @@ export class LauncherIdentityClient {
     return result
   }
 
+  /**
+   * Exchange a username and password for a Launcher token, server-side.
+   *
+   * This reverses an earlier decision to do the exchange in the browser. The
+   * browser-side version kept the Hub out of the credential path, which is
+   * genuinely better, but it cannot work here: Launcher is only reachable at an
+   * internal address that requires VPN, so any user outside the VPN could not
+   * sign in at all. Hub and Launcher are co-located and the Hub backend already
+   * calls Launcher to introspect, so proxying the exchange uses a trust
+   * relationship that already exists.
+   *
+   * The password is forwarded and forgotten: never logged, never stored, never
+   * cached. Only the resulting token is returned.
+   */
+  async signIn({ username, password, clientIp }) {
+    if (!this.enabled) {
+      throw new AppError(503, 'launcher_not_configured', 'Launcher sign-in is not configured')
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    let response
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/internal/v1/sdk/oauth/token`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          // Launcher rate-limits password attempts per source IP. Proxying
+          // would make every attempt look like it came from the Hub, so the
+          // real client is forwarded; without it one attacker could exhaust the
+          // shared limit and lock out everyone.
+          ...(clientIp ? { 'x-forwarded-for': clientIp } : {}),
+        },
+        body: JSON.stringify({
+          grant_type: 'password',
+          username,
+          password,
+          audience: this.audience,
+        }),
+        signal: controller.signal,
+      })
+    } catch (error) {
+      throw new AppError(503, 'launcher_unavailable', 'Identity provider is unreachable')
+    } finally {
+      clearTimeout(timer)
+    }
+
+    let payload = null
+    try {
+      payload = await response.json()
+    } catch {
+      payload = null
+    }
+    if (!response.ok) {
+      // 401 is a wrong credential and must stay a 401; anything else is the
+      // provider failing, which is not the user's problem to retype.
+      if (response.status === 401 || response.status === 400) {
+        throw new AppError(401, 'invalid_credentials', 'Account or password is incorrect')
+      }
+      if (response.status === 429) {
+        throw new AppError(429, 'too_many_attempts', 'Too many sign-in attempts; try again later')
+      }
+      throw new AppError(503, 'launcher_unavailable', 'Identity provider rejected the sign-in', {
+        upstreamStatus: response.status,
+      })
+    }
+
+    const token = extractAccessToken(payload)
+    if (!token) {
+      throw new AppError(502, 'launcher_invalid_response', 'Launcher did not return a token')
+    }
+    return { token, expiresAt: payload?.token?.expires_at ?? payload?.expires_at ?? null }
+  }
+
   /** Drop cached introspections; used after a membership change. */
   invalidate() {
     this.#cache.clear()
   }
+}
+
+/**
+ * Pull the access token out of whatever shape Launcher returned.
+ *
+ * The nesting matters and is easy to get wrong: the OAuth endpoint answers with
+ * `{ token: { access_token, audience, ... } }`, so a naive `payload.token`
+ * yields the WRAPPER OBJECT rather than the string. Stringified into a header
+ * that becomes the literal "[object Object]", which Launcher then reports as an
+ * unknown token — a failure that looks like a session problem and is really a
+ * parsing one. Every candidate is therefore type-checked.
+ */
+function extractAccessToken(payload) {
+  const candidates = [
+    payload?.token?.access_token,
+    payload?.access_token,
+    payload?.issued?.token,
+    payload?.data?.access_token,
+    payload?.token,
+  ]
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate) || null
 }

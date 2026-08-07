@@ -69,6 +69,45 @@ function requiredField(body, name) {
   return value.trim()
 }
 
+// Best-effort client address for rate limiting and for forwarding upstream.
+// The proxy header is trusted only because this plane sits behind a controlled
+// edge; on a directly exposed listener it would be attacker-controlled.
+function clientAddress(request) {
+  const forwarded = request.headers['x-forwarded-for']
+  if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim()
+  return request.socket?.remoteAddress || null
+}
+
+// Fixed-window throttle on sign-in attempts, per client address.
+//
+// Launcher already rate-limits, but proxying means it sees the Hub's address
+// rather than the caller's, so its per-source limit would either be useless or
+// lock out every user at once. This keeps the Hub from becoming an amplifier
+// regardless of how the upstream treats the forwarded header.
+const SIGN_IN_WINDOW_MS = 60_000
+const SIGN_IN_MAX_ATTEMPTS = 10
+const signInAttempts = new Map()
+
+function assertSignInAllowed(clientIp) {
+  const key = clientIp || 'unknown'
+  const now = Date.now()
+  const entry = signInAttempts.get(key)
+  if (!entry || now - entry.startedAt > SIGN_IN_WINDOW_MS) {
+    signInAttempts.set(key, { startedAt: now, count: 1 })
+    // Bound the map so a spray of source addresses cannot grow it without limit.
+    if (signInAttempts.size > 10_000) {
+      for (const [candidate, value] of signInAttempts) {
+        if (now - value.startedAt > SIGN_IN_WINDOW_MS) signInAttempts.delete(candidate)
+      }
+    }
+    return
+  }
+  entry.count += 1
+  if (entry.count > SIGN_IN_MAX_ATTEMPTS) {
+    throw new AppError(429, 'too_many_attempts', 'Too many sign-in attempts; try again in a minute')
+  }
+}
+
 function requiredQuery(searchParams, name) {
   const value = searchParams.get(name)
   if (!value) throw new AppError(400, 'invalid_request', `${name} query parameter is required`)
@@ -120,7 +159,6 @@ export function createApp({
   agent = null,
   search = null,
   embedding = null,
-  launcherPublicUrl = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
   staticRoot,
@@ -241,21 +279,44 @@ export function createApp({
         // page: an absent provider URL means Launcher was never discovered, an
         // absent public URL means it was discovered but the browser has no way
         // to reach it.
-        const available = Boolean(identity?.enabled) && Boolean(launcherPublicUrl)
+        // Sign-in goes through this server, so the browser needs no address of
+        // its own for Launcher -- which is the whole point: Launcher is only
+        // reachable on the internal network, and the console is not.
+        const available = Boolean(identity?.enabled)
         sendJson(response, 200, {
           data: {
             adminToken: true,
-            launcher: available ? { url: launcherPublicUrl, audience: launcherAudience } : null,
+            launcher: available ? { audience: launcherAudience, mode: 'proxied' } : null,
             ...(available
               ? {}
               : {
-                  launcherUnavailableReason: !identity?.enabled
-                    ? 'MX_INSIGHT_LAUNCHER_URL is not set and no mx-launcher Service was discovered'
-                    : 'MX_INSIGHT_LAUNCHER_PUBLIC_URL is not set, so the browser has no address to sign in against',
+                  launcherUnavailableReason:
+                    'MX_INSIGHT_LAUNCHER_URL is not set and no mx-launcher Service was discovered',
                 }),
           },
           requestId,
         })
+        return
+      }
+
+      // Sign-in proxy. Unauthenticated by definition: it is how a session is
+      // obtained. The password is forwarded to Launcher and never stored,
+      // logged or cached here.
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/sign-in') {
+        if (!identity?.enabled) {
+          throw new AppError(503, 'launcher_not_configured', 'Launcher sign-in is not configured')
+        }
+        const clientIp = clientAddress(request)
+        // A local throttle so the Hub cannot be used to amplify attempts
+        // against Launcher, independently of Launcher's own limits.
+        assertSignInAllowed(clientIp)
+        const body = await readJson(request)
+        const issued = await identity.client.signIn({
+          username: requiredField(body, 'username'),
+          password: requiredField(body, 'password'),
+          clientIp,
+        })
+        sendJson(response, 200, { data: issued, requestId })
         return
       }
 
