@@ -2503,12 +2503,31 @@ k8s_verify_internal_coredns_host_ports() {
   fi
   command -v dig >/dev/null 2>&1 \
     || die "dig is required to verify Internal CoreDNS UDP/TCP answers"
-  udp_answers="$(dig +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
+  # `kubectl rollout status` returns as soon as pods are Ready, but hostPort 53 is
+  # published by the portmap CNI plugin afterwards, and the retired dns-edge pod may
+  # still be releasing the port. A single 3s probe therefore races the data path and
+  # fails on an otherwise healthy cluster, so poll until it settles.
+  local attempts attempt
+  attempts="${MX_INTERNAL_DNS_PROBE_ATTEMPTS:-20}"
+  udp_answers=""
+  tcp_answers=""
+  for attempt in $(seq 1 "$attempts"); do
+    udp_answers="$(dig +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
+    tcp_answers="$(dig +tcp +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
+    if printf '%s\n' "$udp_answers" | grep -Fxq "$expected_ip" \
+      && printf '%s\n' "$tcp_answers" | grep -Fxq "$expected_ip"; then
+      break
+    fi
+    [ "$attempt" -lt "$attempts" ] || break
+    if [ "$attempt" = 1 ] || [ $((attempt % 5)) = 0 ]; then
+      say "waiting for internal coredns to answer on $probe_server (attempt $attempt/$attempts)"
+    fi
+    sleep 3
+  done
   printf '%s\n' "$udp_answers" | grep -Fxq "$expected_ip" \
-    || die "internal coredns UDP answer is not ready: server=$probe_server host=$probe_host expected=$expected_ip answers=${udp_answers:-none}; apply the current Config Center signed zone"
-  tcp_answers="$(dig +tcp +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
+    || die "internal coredns UDP answer is not ready after $attempts attempts: server=$probe_server host=$probe_host expected=$expected_ip answers=${udp_answers:-none}; hostPort 53 is published by the portmap CNI plugin as iptables DNAT, not as a host socket, so check it with: kubectl -n mx-dns get pod -l app.kubernetes.io/name=mx-internal-coredns -o jsonpath={.items[0].spec.containers[0].ports}; iptables -t nat -S | grep -F 10.88.88.88"
   printf '%s\n' "$tcp_answers" | grep -Fxq "$expected_ip" \
-    || die "internal coredns TCP answer is not ready: server=$probe_server host=$probe_host expected=$expected_ip answers=${tcp_answers:-none}; apply the current Config Center signed zone"
+    || die "internal coredns TCP answer is not ready after $attempts attempts: server=$probe_server host=$probe_host expected=$expected_ip answers=${tcp_answers:-none}; apply the current Config Center signed zone"
   say "internal coredns host ports ready: podIP=$pod_ip hostIP=$host_ip UDP/TCP 53; $probe_host -> $expected_ip via $probe_server"
 }
 
