@@ -100,9 +100,29 @@ spec:
             - /bin/sh
             - -ec
             - |
+              # Re-seed whenever the image ships different artifacts.
+              #
+              # The old guard was `if manifest.json is missing`, so the volume was
+              # seeded exactly once and every later image kept serving the first
+              # build's tarballs -- a Caddyfile or compose change could never reach
+              # a site no matter how many times the server was redeployed.
+              #
+              # Fingerprint the image-side manifests (they carry generatedAt, so a
+              # rebuild always differs) and keep a single overwritten stamp file.
+              # Copy over the top instead of wiping: this volume is also the
+              # materializer's output dir and holds runtime-rendered secrets.
+              set -eu
               mkdir -p /app/runtime-artifacts/site-slots
-              if [ ! -f /app/runtime-artifacts/site-slots/domestic/manifest.json ]; then
+              STAMP=/app/runtime-artifacts/site-slots/.image-artifact-revision
+              REVISION="$(cat /app/artifacts/site-slots/*/manifest.json 2>/dev/null | md5sum | cut -d' ' -f1)"
+              if [ -z "$REVISION" ]; then
+                echo "seed-site-slot-artifacts: image has no artifact manifests; leaving the volume untouched"
+              elif [ "$(cat "$STAMP" 2>/dev/null || true)" = "$REVISION" ]; then
+                echo "seed-site-slot-artifacts: volume already matches image revision $REVISION"
+              else
+                echo "seed-site-slot-artifacts: refreshing artifacts to image revision $REVISION"
                 cp -a /app/artifacts/site-slots/. /app/runtime-artifacts/site-slots/
+                printf '%s\n' "$REVISION" > "$STAMP"
               fi
           volumeMounts:
             - name: site-slots

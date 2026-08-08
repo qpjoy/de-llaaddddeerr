@@ -309,3 +309,8 @@ pnpm --dir electron-dock/mx-launcher/demos/luopan run make:asar:mac -- 0.1.2 uni
 # win
 pnpm --dir electron-dock/mx-launcher/demos/luopan run make:asar:win -- 0.1.2 x64
 ```
+```bash
+# 推送domestic包，
+# 1. 物化产物
+node server/scripts/site-slot-artifact-materializer.mjs domestic
+```
