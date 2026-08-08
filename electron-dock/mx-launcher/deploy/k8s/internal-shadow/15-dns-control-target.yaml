@@ -70,6 +70,15 @@ metadata:
     mx.qpjoy.com/environment: shadow
 spec:
   type: ClusterIP
+  # kube-proxy owns and continuously reconciles the DNAT for this address, which is
+  # what makes 10.88.88.88:53 survive an iptables flush. The Deployment also
+  # publishes hostPort 53 on the same address, but the portmap CNI plugin writes
+  # those rules once at pod creation and never reconciles them, so a firewalld
+  # reload silently blackholes Internal DNS until the pod is recreated.
+  # Keep both: portmap covers the moment before kube-proxy syncs, kube-proxy covers
+  # every flush afterwards. Both DNAT to the same endpoints, so they cannot conflict.
+  externalIPs:
+    - 10.88.88.88
   selector:
     app.kubernetes.io/name: mx-internal-coredns
   ports:

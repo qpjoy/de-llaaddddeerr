@@ -2460,12 +2460,40 @@ k8s_patch_internal_coredns_host_ports() {
 
 # hostPort is iptables DNAT, not a host socket, so this is the only direct way to
 # tell "rules were never written / got flushed" apart from "CoreDNS is unhealthy".
+#
+# Two independent paths can publish $expected_ip:53, and they heal very differently:
+#   - portmap CNI (Deployment hostPort): written once at pod creation, never
+#     reconciled. A firewalld reload strips it until the pod is recreated.
+#   - kube-proxy (Service externalIPs): re-synced on a timer, so it comes back on
+#     its own after any flush. This is the one worth waiting for.
+k8s_internal_coredns_dnat_rules() {
+  local expected_ip="$1"
+  command -v iptables >/dev/null 2>&1 || return 1
+  iptables -t nat -S 2>/dev/null | grep -F -- "-d $expected_ip/32" | grep -- "--dport 53"
+}
+
 k8s_internal_coredns_hostport_dnat_present() {
   local expected_ip="$1"
   command -v iptables >/dev/null 2>&1 || return 0
-  iptables -t nat -S 2>/dev/null \
-    | grep -F -- "-d $expected_ip/32" \
-    | grep -q -- "--dport 53 -j DNAT"
+  k8s_internal_coredns_dnat_rules "$expected_ip" | grep -q -- "-j DNAT"
+}
+
+# kube-proxy names its chains KUBE-*; portmap uses CNI-*. Telling them apart is how
+# we know whether the address is backed by something self-healing.
+k8s_internal_coredns_externalip_dnat_present() {
+  local expected_ip="$1"
+  command -v iptables >/dev/null 2>&1 || return 1
+  k8s_internal_coredns_dnat_rules "$expected_ip" | grep -q -- "-A KUBE-"
+}
+
+k8s_report_internal_coredns_dnat_owner() {
+  local expected_ip="$1"
+  command -v iptables >/dev/null 2>&1 || return 0
+  if k8s_internal_coredns_externalip_dnat_present "$expected_ip"; then
+    say "internal coredns $expected_ip:53 is published by kube-proxy (Service externalIPs); it self-heals after an iptables flush"
+  else
+    say "internal coredns $expected_ip:53 is published only by the portmap CNI plugin; it will NOT survive an iptables flush until the Service externalIPs rollout lands"
+  fi
 }
 
 # At most one recreate per deploy: if a fresh pod still cannot publish hostPort 53,
@@ -2543,6 +2571,11 @@ k8s_verify_internal_coredns_host_ports() {
     *" TCP "*) ;;
     *) die "internal coredns service must expose TCP 53: protocols=${service_protocols:-none}" ;;
   esac
+  local service_external_ips
+  service_external_ips="$(kubectl -n mx-dns get service mx-internal-coredns \
+    -o jsonpath='{range .spec.externalIPs[*]}{@}{"\n"}{end}' 2>/dev/null || true)"
+  printf '%s\n' "$service_external_ips" | grep -Fxq "${MX_INTERNAL_DNS_EXPECTED_IP:-10.88.88.88}" \
+    || die "internal coredns service is missing externalIPs ${MX_INTERNAL_DNS_EXPECTED_IP:-10.88.88.88}: externalIPs=${service_external_ips:-none}; without it only the portmap CNI plugin publishes :53 and an iptables flush blackholes Internal DNS until the pod is recreated"
   probe_host="${MX_INTERNAL_DNS_PROBE_HOST:-h2i.mxinfo-inc.cn}"
   expected_ip="${MX_INTERNAL_DNS_EXPECTED_IP:-10.88.88.88}"
   probe_server="${MX_INTERNAL_DNS_PROBE_SERVER:-$expected_ip}"
@@ -2578,6 +2611,7 @@ k8s_verify_internal_coredns_host_ports() {
     || die "internal coredns UDP answer is not ready after $attempts attempts: server=$probe_server host=$probe_host expected=$expected_ip answers=${udp_answers:-none}; hostPort 53 is published by the portmap CNI plugin as iptables DNAT, not as a host socket, so check it with: kubectl -n mx-dns get pod -l app.kubernetes.io/name=mx-internal-coredns -o jsonpath={.items[0].spec.containers[0].ports}; iptables -t nat -S | grep -F 10.88.88.88"
   printf '%s\n' "$tcp_answers" | grep -Fxq "$expected_ip" \
     || die "internal coredns TCP answer is not ready after $attempts attempts: server=$probe_server host=$probe_host expected=$expected_ip answers=${tcp_answers:-none}; apply the current Config Center signed zone"
+  k8s_report_internal_coredns_dnat_owner "$expected_ip"
   say "internal coredns host ports ready: podIP=$pod_ip hostIP=$host_ip UDP/TCP 53; $probe_host -> $expected_ip via $probe_server"
 }
 
