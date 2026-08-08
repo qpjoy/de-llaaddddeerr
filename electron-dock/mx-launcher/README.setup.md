@@ -30,6 +30,12 @@ bash scripts/install-k8s-centos.sh \
   --allow-cgroup-v1 \
   --image-repository registry.aliyuncs.com/google_containers
 
+
+# Bootstrap Key
+bash scripts/manage.sh k8s ssh-bootstrap internal-shadow enable
+# 查看门禁环境变量
+kubectl -n mx-internal-shadow exec deploy/mx-launcher-internal -- printenv | grep SITE_SLOT
+
 # 重新初始化K8s
 # --reinit 会做这些事：
 # 备份旧 /etc/kubernetes 到 /data/mx-backup/<timestamp>/kubernetes-conf

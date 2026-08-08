@@ -14183,7 +14183,8 @@ function selectedSiteSetupMessage(site, profile, profileReady, hostPeer) {
       ? `这个 host 已有 ${hostPeer.siteId} 的 SSH 凭据，可复用路径后保存，再继续 Shadow Setup。`
       : '该 profile 缺少 Internal-managed identity file。可以 Bootstrap Key，或填入已有 key/known_hosts 后保存。';
   }
-  return 'SSH 凭据已就绪，可以生成 oversea-s1 自己的 plan、runner、AWX worker job 和 evidence。';
+  // 这里以前把 siteId 写死成 oversea-s1，换站点时提示会指向别的节点。
+  return `SSH 凭据已就绪，可以生成 ${site?.siteId || '该 Oversea'} 自己的 plan、runner、AWX worker job 和 evidence。`;
 }
 
 function setupRunViewState(nextAction) {
