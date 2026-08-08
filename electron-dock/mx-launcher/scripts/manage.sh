@@ -2458,6 +2458,60 @@ k8s_patch_internal_coredns_host_ports() {
     -p='[{"op":"add","path":"/spec/template/spec/containers/0/ports","value":[{"name":"dns-udp","containerPort":53,"hostIP":"10.88.88.88","hostPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":53,"hostIP":"10.88.88.88","hostPort":53,"protocol":"TCP"}]}]'
 }
 
+# hostPort is iptables DNAT, not a host socket, so this is the only direct way to
+# tell "rules were never written / got flushed" apart from "CoreDNS is unhealthy".
+k8s_internal_coredns_hostport_dnat_present() {
+  local expected_ip="$1"
+  command -v iptables >/dev/null 2>&1 || return 0
+  iptables -t nat -S 2>/dev/null \
+    | grep -F -- "-d $expected_ip/32" \
+    | grep -q -- "--dport 53 -j DNAT"
+}
+
+# At most one recreate per deploy: if a fresh pod still cannot publish hostPort 53,
+# the cause is not stale portmap state and restarting again only adds DNS downtime.
+MX_INTERNAL_DNS_RESTARTED=0
+k8s_restart_internal_coredns_for_hostport() {
+  [ "${MX_INTERNAL_DNS_AUTO_RESTART:-1}" = "1" ] || {
+    say "internal coredns auto-restart disabled by MX_INTERNAL_DNS_AUTO_RESTART=0"
+    return 0
+  }
+  [ "$MX_INTERNAL_DNS_RESTARTED" = "0" ] || {
+    say "internal coredns was already recreated once this run; not restarting again"
+    return 0
+  }
+  MX_INTERNAL_DNS_RESTARTED=1
+  kubectl -n mx-dns rollout restart deployment mx-internal-coredns >/dev/null 2>&1 || true
+  if ! k8s_rollout_status mx-dns deployment mx-internal-coredns 180s; then
+    k8s_workload_diagnostics mx-dns deployment mx-internal-coredns
+    die "internal coredns rollout failed while republishing hostPort 53"
+  fi
+}
+
+# Poll rather than probe once: hostPort DNAT lands slightly after the pod is Ready.
+# Leaves the last answers in globals so the caller can report them.
+k8s_probe_internal_coredns() {
+  local probe_server="$1" probe_host="$2" expected_ip="$3"
+  local attempts attempt
+  attempts="${MX_INTERNAL_DNS_PROBE_ATTEMPTS:-20}"
+  MX_INTERNAL_DNS_LAST_UDP_ANSWERS=""
+  MX_INTERNAL_DNS_LAST_TCP_ANSWERS=""
+  for attempt in $(seq 1 "$attempts"); do
+    MX_INTERNAL_DNS_LAST_UDP_ANSWERS="$(dig +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
+    MX_INTERNAL_DNS_LAST_TCP_ANSWERS="$(dig +tcp +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
+    if printf '%s\n' "$MX_INTERNAL_DNS_LAST_UDP_ANSWERS" | grep -Fxq "$expected_ip" \
+      && printf '%s\n' "$MX_INTERNAL_DNS_LAST_TCP_ANSWERS" | grep -Fxq "$expected_ip"; then
+      return 0
+    fi
+    [ "$attempt" -lt "$attempts" ] || break
+    if [ "$attempt" = 1 ] || [ $((attempt % 5)) = 0 ]; then
+      say "waiting for internal coredns to answer on $probe_server (attempt $attempt/$attempts)"
+    fi
+    sleep 3
+  done
+  return 1
+}
+
 k8s_verify_internal_coredns_host_ports() {
   local host_network port_bindings pod_ip host_ip service_protocols
   local probe_server probe_host expected_ip udp_answers tcp_answers
@@ -2503,27 +2557,23 @@ k8s_verify_internal_coredns_host_ports() {
   fi
   command -v dig >/dev/null 2>&1 \
     || die "dig is required to verify Internal CoreDNS UDP/TCP answers"
-  # `kubectl rollout status` returns as soon as pods are Ready, but hostPort 53 is
-  # published by the portmap CNI plugin afterwards, and the retired dns-edge pod may
-  # still be releasing the port. A single 3s probe therefore races the data path and
-  # fails on an otherwise healthy cluster, so poll until it settles.
-  local attempts attempt
-  attempts="${MX_INTERNAL_DNS_PROBE_ATTEMPTS:-20}"
-  udp_answers=""
-  tcp_answers=""
-  for attempt in $(seq 1 "$attempts"); do
-    udp_answers="$(dig +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
-    tcp_answers="$(dig +tcp +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
-    if printf '%s\n' "$udp_answers" | grep -Fxq "$expected_ip" \
-      && printf '%s\n' "$tcp_answers" | grep -Fxq "$expected_ip"; then
-      break
-    fi
-    [ "$attempt" -lt "$attempts" ] || break
-    if [ "$attempt" = 1 ] || [ $((attempt % 5)) = 0 ]; then
-      say "waiting for internal coredns to answer on $probe_server (attempt $attempt/$attempts)"
-    fi
-    sleep 3
-  done
+  # The portmap CNI plugin writes the hostPort DNAT rules once, at pod sandbox
+  # creation, and never reconciles them. Anything that flushes the nat table
+  # afterwards (firewalld --reload, libvirt, a container runtime restart) silently
+  # strips them, and a long-lived CoreDNS pod then keeps serving on its pod IP while
+  # 10.88.88.88:53 is a black hole. Recreating the pod is what re-runs portmap, so
+  # detect the missing rules and heal instead of failing the deploy.
+  if ! k8s_internal_coredns_hostport_dnat_present "$expected_ip"; then
+    say "internal coredns hostPort DNAT rules are missing; portmap only writes them at pod creation, so recreating the pod"
+    k8s_restart_internal_coredns_for_hostport
+  fi
+  if ! k8s_probe_internal_coredns "$probe_server" "$probe_host" "$expected_ip"; then
+    say "internal coredns is not answering on $probe_server yet; recreating the pod once to republish hostPort 53"
+    k8s_restart_internal_coredns_for_hostport
+    k8s_probe_internal_coredns "$probe_server" "$probe_host" "$expected_ip" || true
+  fi
+  udp_answers="$MX_INTERNAL_DNS_LAST_UDP_ANSWERS"
+  tcp_answers="$MX_INTERNAL_DNS_LAST_TCP_ANSWERS"
   printf '%s\n' "$udp_answers" | grep -Fxq "$expected_ip" \
     || die "internal coredns UDP answer is not ready after $attempts attempts: server=$probe_server host=$probe_host expected=$expected_ip answers=${udp_answers:-none}; hostPort 53 is published by the portmap CNI plugin as iptables DNAT, not as a host socket, so check it with: kubectl -n mx-dns get pod -l app.kubernetes.io/name=mx-internal-coredns -o jsonpath={.items[0].spec.containers[0].ports}; iptables -t nat -S | grep -F 10.88.88.88"
   printf '%s\n' "$tcp_answers" | grep -Fxq "$expected_ip" \
