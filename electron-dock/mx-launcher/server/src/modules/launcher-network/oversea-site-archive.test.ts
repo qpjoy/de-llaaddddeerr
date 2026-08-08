@@ -158,3 +158,36 @@ test('re-running upsert on an archived site does not silently revive it', () => 
   assert.equal(site.status, 'archived');
   assert.equal(site.publicHost, 'new-host.example.com');
 });
+
+test('a new user is never defaulted onto a retired site', () => {
+  const store = seedStore();
+  // Retire the historical default and leave a healthy replacement behind.
+  store.archiveLauncherNetworkMihomoSite({ siteId: 'oversea-main', archived: true, requestedBy: 'admin' });
+  store.archiveLauncherNetworkMihomoSite({ siteId: 'oversea-mx', archived: true, requestedBy: 'admin' });
+
+  const user = store.createUserCenterUser({ account: 'carol', displayName: 'Carol' });
+  assert.ok(user);
+  // No siteIds passed: this is exactly the path that used to hardcode oversea-main.
+  const entitlement = store.upsertUserOverseaEntitlement({ userId: user.userId, requestedBy: 'test' });
+
+  assert.ok(
+    !entitlement.siteIds.includes('oversea-main'),
+    'the archived default must not be handed to a new user'
+  );
+  assert.deepEqual(entitlement.siteIds, ['oversea-sg-1'], 'it falls through to the site still in service');
+  assert.ok(subscriptionNodeNames(store, user.userId).includes('oversea-sg-1-hysteria2'));
+});
+
+test('the default still resolves when every site is retired, so ensure can report blocked', () => {
+  const store = seedStore();
+  for (const siteId of SITES) {
+    store.archiveLauncherNetworkMihomoSite({ siteId, archived: true, requestedBy: 'admin' });
+  }
+  const user = store.createUserCenterUser({ account: 'dave', displayName: 'Dave' });
+  assert.ok(user);
+  const entitlement = store.upsertUserOverseaEntitlement({ userId: user.userId, requestedBy: 'test' });
+  // Returning nothing here would silently produce an empty entitlement; the caller
+  // is the layer that should surface "no usable oversea".
+  assert.equal(entitlement.siteIds.length, 1);
+  assert.deepEqual(subscriptionNodeNames(store, user.userId), [], 'but the subscription has no live proxies');
+});

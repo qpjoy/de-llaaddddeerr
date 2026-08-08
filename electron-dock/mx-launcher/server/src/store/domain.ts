@@ -157,6 +157,31 @@ export const APP_CENTER_BROKER_ABI_VERSION = '2';
 
 export const USER_OVERSEA_SUBSCRIPTION_SCOPE = 'oversea.subscription.ensure';
 
+/**
+ * Public subscription links are a separate credential class from login tokens.
+ *
+ * A Clash client cannot send an Authorization header, so the credential has to
+ * live in the URL. That makes it long-lived and copy-pasteable, which is exactly
+ * why it must NOT be a login token: this audience+scope pair can only render one
+ * user's oversea subscription, and revoking it never touches their session.
+ */
+export const USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE = 'mx-oversea-subscription';
+export const USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE = 'oversea.subscription.read';
+/** Clash refreshes on a slow timer; a year avoids silent breakage mid-quarter. */
+export const USER_OVERSEA_SUBSCRIPTION_LINK_TTL_SECONDS = 365 * 24 * 60 * 60;
+
+export function userOverseaSubscriptionLinkPath(token: string): string {
+  return `/internal/v1/oversea-subscriptions/${encodeURIComponent(token)}.yaml`;
+}
+
+/**
+ * The token is the whole credential, so it must survive a round trip through a
+ * URL path segment without needing escaping. `mx-v1-` + base64url satisfies that.
+ */
+export function isUserOverseaSubscriptionLinkToken(value: string): boolean {
+  return /^mx-v1-[A-Za-z0-9_-]{16,}$/.test(value);
+}
+
 const USER_SCOPES = [
   'auth.read',
   'appcenter.read',

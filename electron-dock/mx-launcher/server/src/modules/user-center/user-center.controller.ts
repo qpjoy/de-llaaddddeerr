@@ -332,6 +332,70 @@ export class UserCenterController {
     };
   }
 
+  /**
+   * Public, token-only subscription for third-party clients such as Clash.
+   *
+   * Kept on its own path rather than adding `?token=` to the Bearer-guarded
+   * user-center route: one path, one auth mode is far easier to allowlist safely
+   * at the edge, and this URL carries no userId, so it leaks no user directory.
+   */
+  @Get('internal/v1/oversea-subscriptions/:token.yaml')
+  @Header('content-type', 'text/yaml; charset=utf-8')
+  @Header('cache-control', 'no-store')
+  @Header('referrer-policy', 'no-referrer')
+  async publicOverseaSubscription(@Param('token') token: string) {
+    const userId = await this.store.resolveUserOverseaSubscriptionLink(String(token ?? ''));
+    // A bad, revoked or expired link is indistinguishable from a wrong one on
+    // purpose: probing must not reveal whether a token ever existed.
+    if (!userId) throw new NotFoundException('Oversea subscription not found');
+    const subscription = await this.store.renderUserOverseaMihomoSubscription(userId);
+    if (!subscription) throw new NotFoundException('Oversea subscription not found');
+    return subscription.yaml;
+  }
+
+  /** Issue or rotate the public link. The plaintext token is returned only here. */
+  @Post('internal/v1/user-center/users/:userId/oversea/subscription-link')
+  async issueOverseaSubscriptionLink(
+    @Param('userId') userId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    await this.assertUserOverseaAuthorization(userId, authorization);
+    const body = asRecord(rawBody);
+    const issued = await this.store.issueUserOverseaSubscriptionLink(userId, {
+      requestedBy: nullableString(body.requestedBy),
+      requestId: nullableString(body.requestId)
+    });
+    return {
+      link: {
+        path: issued.path,
+        token: issued.token,
+        tokenId: issued.record.tokenId,
+        issuedAt: issued.record.issuedAt,
+        expiresAt: issued.record.expiresAt,
+        note: 'Copy this URL now; only its metadata is retrievable afterwards.'
+      }
+    };
+  }
+
+  @Delete('internal/v1/user-center/users/:userId/oversea/subscription-link')
+  async revokeOverseaSubscriptionLink(
+    @Param('userId') userId: string,
+    @Headers('authorization') authorization: string | undefined
+  ) {
+    await this.assertUserOverseaAuthorization(userId, authorization);
+    return { revoked: await this.store.revokeUserOverseaSubscriptionLink(userId) };
+  }
+
+  @Get('internal/v1/user-center/users/:userId/oversea/subscription-link')
+  async describeOverseaSubscriptionLink(
+    @Param('userId') userId: string,
+    @Headers('authorization') authorization: string | undefined
+  ) {
+    await this.assertUserOverseaAuthorization(userId, authorization);
+    return { link: await this.store.describeUserOverseaSubscriptionLink(userId) };
+  }
+
   @Get('internal/v1/user-center/users/:userId/oversea/subscription.yaml')
   @Header('content-type', 'text/yaml; charset=utf-8')
   async userOverseaSubscription(

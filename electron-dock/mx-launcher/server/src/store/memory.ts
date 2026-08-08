@@ -88,6 +88,11 @@ import {
   appCenterInstallationMatchesQuery,
   evaluateDnsPolicy,
   hashToken,
+  isUserOverseaSubscriptionLinkToken,
+  USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE,
+  USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE,
+  USER_OVERSEA_SUBSCRIPTION_LINK_TTL_SECONDS,
+  userOverseaSubscriptionLinkPath,
   introspectUserCenterToken,
   introspectShadowToken,
   buildReleaseManagementDecisions,
@@ -1376,6 +1381,83 @@ export class MemoryStore implements PlatformStore {
     return [...this.userOverseaAccountSyncReports.values()]
       .filter((item) => (!userId || item.userId === userId) && (!siteId || item.siteId === siteId))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** Mirrors the Postgres store; see the comments there for the security rationale. */
+  issueUserOverseaSubscriptionLink(
+    userId: string,
+    options: { requestedBy?: string | null; requestId?: string | null } = {}
+  ): { token: string; path: string; record: UserCenterTokenRecord } {
+    const user = this.users.get(userId);
+    if (!user) throw new Error(`User not found: ${userId}`);
+    const revoked = this.revokeUserOverseaSubscriptionLink(userId, { silent: true });
+    const token = `mx-v1-${randomBytes(24).toString('base64url')}`;
+    const issued = createUserCenterTokenRecord(this.config, {
+      subjectKind: 'user',
+      subjectId: user.userId,
+      audience: USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE,
+      scopes: [USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE],
+      ttlSeconds: USER_OVERSEA_SUBSCRIPTION_LINK_TTL_SECONDS
+    }, token);
+    this.tokens.set(issued.record.tokenHash, issued.record);
+    this.recordAudit({
+      eventType: 'auth.oversea_subscription_link.issued',
+      actorKind: 'user',
+      userId: user.userId,
+      requestId: options.requestId ?? null,
+      metadata: { tokenId: issued.record.tokenId, revokedPrevious: revoked, requestedBy: options.requestedBy ?? null }
+    });
+    return { token, path: userOverseaSubscriptionLinkPath(token), record: issued.record };
+  }
+
+  revokeUserOverseaSubscriptionLink(
+    userId: string,
+    options: { silent?: boolean; requestId?: string | null } = {}
+  ): number {
+    const now = new Date().toISOString();
+    const tokens = [...this.tokens.values()].filter((token) => (
+      token.subjectKind === 'user'
+      && token.subjectId === userId
+      && token.audience === USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE
+      && !token.revokedAt
+    ));
+    for (const token of tokens) {
+      this.tokens.set(token.tokenHash, { ...token, revokedAt: now });
+    }
+    if (tokens.length > 0 && options.silent !== true) {
+      this.recordAudit({
+        eventType: 'auth.oversea_subscription_link.revoked',
+        actorKind: 'user',
+        userId,
+        requestId: options.requestId ?? null,
+        metadata: { revoked: tokens.length }
+      });
+    }
+    return tokens.length;
+  }
+
+  describeUserOverseaSubscriptionLink(userId: string): { issuedAt: string; expiresAt: string } | null {
+    const token = [...this.tokens.values()]
+      .filter((row) => (
+        row.subjectKind === 'user'
+        && row.subjectId === userId
+        && row.audience === USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE
+        && !row.revokedAt
+        && Date.parse(row.expiresAt) > Date.now()
+      ))
+      .sort((a, b) => b.issuedAt.localeCompare(a.issuedAt))[0];
+    return token ? { issuedAt: token.issuedAt, expiresAt: token.expiresAt } : null;
+  }
+
+  resolveUserOverseaSubscriptionLink(token: string): string | null {
+    if (!isUserOverseaSubscriptionLinkToken(token)) return null;
+    const record = this.tokens.get(hashToken(token));
+    if (!record || record.revokedAt) return null;
+    if (record.audience !== USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE) return null;
+    if (!record.scopes.includes(USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE)) return null;
+    if (record.subjectKind !== 'user') return null;
+    if (Date.parse(record.expiresAt) <= Date.now()) return null;
+    return record.subjectId;
   }
 
   renderUserOverseaMihomoSubscription(userId: string): UserOverseaSubscriptionRender | null {
@@ -4204,11 +4286,29 @@ export class MemoryStore implements PlatformStore {
     return siteId ? [siteId] : [];
   }
 
+  /** Mirrors the Postgres store: never hand a user a retired site as their default. */
   private defaultUserOverseaSiteId(): string | null {
     const configured = this.configuredDefaultOverseaSiteCandidates();
     const explicit = configured.find((item) => item.explicit);
-    if (explicit) return explicit.siteId;
-    return 'oversea-main';
+    if (explicit && this.overseaSiteIsServiceable(explicit.siteId)) return explicit.siteId;
+
+    const sites = [...this.launcherNetworkMihomoSites.values()]
+      .map((site) => normalizeLauncherNetworkMihomoSite(site))
+      .filter((site) => site.status !== 'archived' && site.publicHost)
+      .sort((a, b) => a.siteId.localeCompare(b.siteId));
+
+    for (const site of sites) {
+      if (this.listSiteSlotAccessAccounts(site.siteId).some((account) => account.status === 'active')) {
+        return site.siteId;
+      }
+    }
+    if (sites.length > 0) return sites[0].siteId;
+    return explicit?.siteId ?? 'oversea-main';
+  }
+
+  private overseaSiteIsServiceable(siteId: string): boolean {
+    const site = this.getLauncherNetworkMihomoSite(siteId);
+    return Boolean(site && site.status !== 'archived' && site.publicHost);
   }
 
   private configuredDefaultOverseaSiteCandidates(): Array<{ siteId: string; explicit: boolean }> {

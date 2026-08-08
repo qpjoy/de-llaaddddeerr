@@ -247,6 +247,11 @@ import {
   evaluateDnsPolicy,
   emptyUserCredentialSummary,
   hashToken,
+  isUserOverseaSubscriptionLinkToken,
+  USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE,
+  USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE,
+  USER_OVERSEA_SUBSCRIPTION_LINK_TTL_SECONDS,
+  userOverseaSubscriptionLinkPath,
   introspectUserCenterToken,
   introspectShadowToken,
   normalizeImportUserCenterRow,
@@ -1526,6 +1531,97 @@ export class PostgresStore implements PlatformStore {
     return (await this.listRecords<UserOverseaAccountSyncReport>('user-oversea-account-sync-report'))
       .filter((item) => (!userId || item.userId === userId) && (!siteId || item.siteId === siteId))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /**
+   * Issue (or rotate) the public subscription link for a user.
+   *
+   * Previous links are revoked in the same pass: a rotation that left the old URL
+   * working would give a leaked link unlimited life, which is the main thing an
+   * admin rotates to stop.
+   */
+  async issueUserOverseaSubscriptionLink(
+    userId: string,
+    options: { requestedBy?: string | null; requestId?: string | null } = {}
+  ): Promise<{ token: string; path: string; record: UserCenterTokenRecord }> {
+    const user = await this.getRecord<UserCenterUser>('iam-user', userId);
+    if (!user) throw new Error(`User not found: ${userId}`);
+    const revoked = await this.revokeUserOverseaSubscriptionLink(userId, { silent: true });
+    const token = `mx-v1-${randomBytes(24).toString('base64url')}`;
+    const issued = createUserCenterTokenRecord(this.config, {
+      subjectKind: 'user',
+      subjectId: user.userId,
+      audience: USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE,
+      scopes: [USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE],
+      ttlSeconds: USER_OVERSEA_SUBSCRIPTION_LINK_TTL_SECONDS
+    }, token);
+    await this.saveRecord('iam-token', issued.record.tokenHash, issued.record, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'auth.oversea_subscription_link.issued',
+      actorKind: 'user',
+      userId: user.userId,
+      requestId: options.requestId ?? null,
+      // The token itself is never audited; only its id and what it replaced.
+      metadata: { tokenId: issued.record.tokenId, revokedPrevious: revoked, requestedBy: options.requestedBy ?? null }
+    });
+    return { token, path: userOverseaSubscriptionLinkPath(token), record: issued.record };
+  }
+
+  async revokeUserOverseaSubscriptionLink(
+    userId: string,
+    options: { silent?: boolean; requestId?: string | null } = {}
+  ): Promise<number> {
+    const now = new Date().toISOString();
+    const tokens = (await this.listRecords<UserCenterTokenRecord>('iam-token')).filter((token) => (
+      token.subjectKind === 'user'
+      && token.subjectId === userId
+      && token.audience === USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE
+      && !token.revokedAt
+    ));
+    for (const token of tokens) {
+      await this.saveRecord('iam-token', token.tokenHash, { ...token, revokedAt: now }, this.config.siteId);
+    }
+    if (tokens.length > 0 && options.silent !== true) {
+      await this.recordAudit({
+        eventType: 'auth.oversea_subscription_link.revoked',
+        actorKind: 'user',
+        userId,
+        requestId: options.requestId ?? null,
+        metadata: { revoked: tokens.length }
+      });
+    }
+    return tokens.length;
+  }
+
+  /** Metadata only -- the plaintext token exists solely in the URL the admin copied. */
+  async describeUserOverseaSubscriptionLink(userId: string): Promise<{ issuedAt: string; expiresAt: string } | null> {
+    const token = (await this.listRecords<UserCenterTokenRecord>('iam-token'))
+      .filter((row) => (
+        row.subjectKind === 'user'
+        && row.subjectId === userId
+        && row.audience === USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE
+        && !row.revokedAt
+        && Date.parse(row.expiresAt) > Date.now()
+      ))
+      .sort((a, b) => b.issuedAt.localeCompare(a.issuedAt))[0];
+    return token ? { issuedAt: token.issuedAt, expiresAt: token.expiresAt } : null;
+  }
+
+  /**
+   * Resolve a public subscription token to its owner.
+   *
+   * Deliberately narrow: a token minted for any other audience or scope -- a login
+   * token above all -- must not be usable here even though it is a valid token.
+   */
+  async resolveUserOverseaSubscriptionLink(token: string): Promise<string | null> {
+    if (!isUserOverseaSubscriptionLinkToken(token)) return null;
+    const record = await this.getRecord<UserCenterTokenRecord>('iam-token', hashToken(token));
+    if (!record || record.revokedAt) return null;
+    if (record.audience !== USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE) return null;
+    if (!record.scopes.includes(USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE)) return null;
+    if (record.subjectKind !== 'user') return null;
+    if (Date.parse(record.expiresAt) <= Date.now()) return null;
+    return record.subjectId;
   }
 
   async renderUserOverseaMihomoSubscription(userId: string): Promise<UserOverseaSubscriptionRender | null> {
@@ -5492,11 +5588,36 @@ export class PostgresStore implements PlatformStore {
     return siteId ? [siteId] : [];
   }
 
+  /**
+   * 兜底站点必须是「还在服役的」站点。
+   *
+   * 之前这里无条件返回 'oversea-main'：那台机器退役/归档之后，新用户仍然会被分到
+   * 它上面，拿到一份指向死节点的订阅，而且客户端看不出问题在服务端。
+   * 现在按 显式配置 -> 有活跃账号的在役站点 -> 任意在役站点 -> oversea-main 逐级降级。
+   */
   private async defaultUserOverseaSiteId(): Promise<string | null> {
     const configured = await this.configuredDefaultOverseaSiteCandidates();
     const explicit = configured.find((item) => item.explicit);
-    if (explicit) return explicit.siteId;
-    return 'oversea-main';
+    if (explicit && await this.overseaSiteIsServiceable(explicit.siteId)) return explicit.siteId;
+
+    const sites = (await this.listRecords<LauncherNetworkMihomoSite>('launcher-network-mihomo-site'))
+      .map((site) => normalizeLauncherNetworkMihomoSite(site))
+      .filter((site) => site.status !== 'archived' && site.publicHost)
+      .sort((a, b) => a.siteId.localeCompare(b.siteId));
+
+    for (const site of sites) {
+      const accounts = await this.listSiteSlotAccessAccounts(site.siteId);
+      if (accounts.some((account) => account.status === 'active')) return site.siteId;
+    }
+    if (sites.length > 0) return sites[0].siteId;
+    // 一个可用站点都没有时保留历史行为，让上层的 ensure 去报 blocked，
+    // 而不是在这里返回 null 让 entitlement 静默变成空。
+    return explicit?.siteId ?? 'oversea-main';
+  }
+
+  private async overseaSiteIsServiceable(siteId: string): Promise<boolean> {
+    const site = await this.getLauncherNetworkMihomoSite(siteId);
+    return Boolean(site && site.status !== 'archived' && site.publicHost);
   }
 
   private async configuredDefaultOverseaSiteCandidates(): Promise<Array<{ siteId: string; explicit: boolean }>> {

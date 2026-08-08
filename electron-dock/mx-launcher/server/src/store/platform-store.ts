@@ -140,6 +140,7 @@ import type {
   UserOverseaEntitlementInput,
   UserOverseaAccountSyncReport,
   UserOverseaAccountSyncReportInput,
+  UserCenterTokenRecord,
   UserOverseaSubscriptionRender,
   TestRun,
   TestRunInput,
@@ -256,6 +257,18 @@ export interface PlatformStore {
   recordUserOverseaAccountSyncReport(input: UserOverseaAccountSyncReportInput): MaybePromise<UserOverseaAccountSyncReport>;
   listUserOverseaAccountSyncReports(userId?: string | null, siteId?: string | null): MaybePromise<UserOverseaAccountSyncReport[]>;
   renderUserOverseaMihomoSubscription(userId: string): MaybePromise<UserOverseaSubscriptionRender | null>;
+  issueUserOverseaSubscriptionLink(
+    userId: string,
+    options?: { requestedBy?: string | null; requestId?: string | null }
+  ): MaybePromise<{ token: string; path: string; record: UserCenterTokenRecord }>;
+  revokeUserOverseaSubscriptionLink(
+    userId: string,
+    options?: { silent?: boolean; requestId?: string | null }
+  ): MaybePromise<number>;
+  describeUserOverseaSubscriptionLink(
+    userId: string
+  ): MaybePromise<{ issuedAt: string; expiresAt: string } | null>;
+  resolveUserOverseaSubscriptionLink(token: string): MaybePromise<string | null>;
   getUserH2oRuntimeProfile(userId: string, appId?: string | null): MaybePromise<UserH2oRuntimeProfile | null>;
   upsertUserH2oRuntimeProfile(input: UserH2oRuntimeProfileInput): MaybePromise<UserH2oRuntimeProfile>;
   listUserCenterServiceAccounts(): MaybePromise<UserCenterServiceAccount[]>;

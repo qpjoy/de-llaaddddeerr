@@ -194,6 +194,8 @@ const state = {
     overseaFeedback: null,
     overseaBusy: false,
     overseaSyncBusy: false,
+    overseaLinkBusy: false,
+    overseaLink: null,
     feedback: null,
     busy: false
   },
@@ -2932,7 +2934,12 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
   state.userCenter.feedback = null;
   state.userCenter.overseaFeedback = null;
   state.userCenter.selectedOverseaUserId = user?.userId || null;
+  // Clear any link state carried over from the previously edited user, then load
+  // this one's metadata so an existing link is visible without rotating it.
+  state.userCenter.overseaLink = null;
+  state.userCenter.overseaLinkBusy = false;
   renderUserEditorDrawer();
+  if (user?.userId) void loadUserOverseaPublicLinkMeta(user.userId);
   requestAnimationFrame(() => {
     const firstField = userEditorDrawer?.querySelector('[data-user-editor-field="account"]:not([readonly]), [data-user-editor-field="displayName"]');
     firstField?.focus?.();
@@ -2940,6 +2947,9 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
 }
 
 function closeUserEditorDrawer() {
+  // The plaintext link is only ever held in memory; drop it when the drawer closes.
+  state.userCenter.overseaLink = null;
+  state.userCenter.overseaLinkBusy = false;
   state.userCenter.drawer = null;
   state.userCenter.openDropdown = null;
   state.userCenter.busy = false;
@@ -3248,6 +3258,82 @@ async function runUserOverseaRuntimeSync(userId, siteIds, requestId) {
       requestId
     }
   });
+}
+
+async function issueUserOverseaPublicLink() {
+  const userId = state.userCenter.drawer?.userId;
+  if (!userId || state.userCenter.overseaLinkBusy) return;
+  const existing = state.userCenter.overseaLink?.userId === userId ? state.userCenter.overseaLink : null;
+  // Rotating silently invalidates whatever the user already pasted into Clash,
+  // so make that consequence explicit rather than surprising them later.
+  if ((existing?.meta || existing?.issued) && !window.confirm(
+    'Rotate the public subscription link?\n\nThe current URL stops working immediately and every client using it must be updated.'
+  )) return;
+  state.userCenter.overseaLinkBusy = true;
+  renderUserEditorDrawer();
+  try {
+    const payload = await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription-link`, {
+      method: 'POST',
+      body: { requestedBy: 'desktop-admin', requestId: `desktop-oversea-link-${Date.now()}` }
+    });
+    state.userCenter.overseaLink = {
+      userId,
+      issued: payload.link || null,
+      meta: payload.link ? { issuedAt: payload.link.issuedAt, expiresAt: payload.link.expiresAt } : null,
+      feedback: { kind: 'success', message: 'Public link issued.' }
+    };
+  } catch (error) {
+    state.userCenter.overseaLink = {
+      userId,
+      issued: null,
+      meta: state.userCenter.overseaLink?.userId === userId ? state.userCenter.overseaLink.meta : null,
+      feedback: { kind: 'error', message: `Issue failed: ${error.message}` }
+    };
+  } finally {
+    state.userCenter.overseaLinkBusy = false;
+    renderUserEditorDrawer();
+  }
+}
+
+async function revokeUserOverseaPublicLink() {
+  const userId = state.userCenter.drawer?.userId;
+  if (!userId || state.userCenter.overseaLinkBusy) return;
+  if (!window.confirm('Revoke the public subscription link?\n\nAny Clash client using it stops updating immediately. H2O is unaffected.')) return;
+  state.userCenter.overseaLinkBusy = true;
+  renderUserEditorDrawer();
+  try {
+    const payload = await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription-link`, {
+      method: 'DELETE'
+    });
+    state.userCenter.overseaLink = {
+      userId,
+      issued: null,
+      meta: null,
+      feedback: { kind: 'success', message: `Revoked ${Number(payload.revoked || 0)} link(s).` }
+    };
+  } catch (error) {
+    state.userCenter.overseaLink = {
+      userId,
+      issued: null,
+      meta: state.userCenter.overseaLink?.userId === userId ? state.userCenter.overseaLink.meta : null,
+      feedback: { kind: 'error', message: `Revoke failed: ${error.message}` }
+    };
+  } finally {
+    state.userCenter.overseaLinkBusy = false;
+    renderUserEditorDrawer();
+  }
+}
+
+/** Metadata only; the plaintext URL exists solely in the issue response. */
+async function loadUserOverseaPublicLinkMeta(userId) {
+  if (!userId) return;
+  try {
+    const payload = await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription-link`);
+    state.userCenter.overseaLink = { userId, issued: null, meta: payload.link || null, feedback: null };
+  } catch {
+    state.userCenter.overseaLink = { userId, issued: null, meta: null, feedback: null };
+  }
+  renderUserEditorDrawer();
 }
 
 async function syncUserOverseaRuntimeFromAdmin(input = {}) {
@@ -7971,9 +8057,10 @@ function renderUserOverseaEditor(user) {
         ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
       </div>
       <div class="foundation-subscription-url">
-        <span>Subscription URL</span>
+        <span>Subscription URL <small>internal / H2O</small></span>
         <code>${escapeHtml(subscriptionUrl || 'Assign one or more Oversea sites to generate a user subscription URL')}</code>
       </div>
+      ${renderUserOverseaPublicLink(userId, Boolean(subscriptionUrl))}
       <div class="user-runtime-list">
         ${accounts.map((account) => `
           <article>
@@ -7985,6 +8072,53 @@ function renderUserOverseaEditor(user) {
       </div>
     </section>
   `;
+}
+
+/**
+ * The public link is a different credential from the internal URL above: H2O
+ * carries a Bearer token, third-party clients such as Clash cannot, so they get a
+ * revocable per-user token embedded in the path. The plaintext is returned once
+ * at issue time, so it is surfaced here only right after a rotation.
+ */
+function renderUserOverseaPublicLink(userId, hasSubscription) {
+  const link = state.userCenter.overseaLink || {};
+  const forUser = link.userId === userId ? link : {};
+  const busy = state.userCenter.overseaLinkBusy === true;
+  const issued = forUser.issued || null;
+  const meta = forUser.meta || null;
+  const publicUrl = issued ? `${overseaPublicSubscriptionBase()}${issued.path}` : '';
+  return `
+    <div class="foundation-subscription-url">
+      <span>Public Link <small>external / Clash</small></span>
+      ${publicUrl
+        ? `<code data-oversea-public-url>${escapeHtml(publicUrl)}</code>`
+        : `<code>${escapeHtml(meta
+            ? `A link is active (issued ${formatTime(meta.issuedAt)}, expires ${formatTime(meta.expiresAt)}). Rotate to reveal a new URL.`
+            : hasSubscription
+              ? 'No public link yet. Issue one for Clash and other third-party clients.'
+              : 'Assign Oversea access first.')}</code>`}
+      <div class="foundation-operation-actions">
+        <button class="secondary-button" type="button" data-oversea-link-issue ${busy || !userId || !hasSubscription ? 'disabled' : ''}>
+          ${busy ? 'Working' : meta || issued ? 'Rotate Link' : 'Issue Link'}
+        </button>
+        ${publicUrl ? '<button class="secondary-button" type="button" data-oversea-link-copy>Copy</button>' : ''}
+        ${meta || issued ? `<button class="secondary-button" type="button" data-oversea-link-revoke ${busy ? 'disabled' : ''}>Revoke</button>` : ''}
+        ${issued ? '<span class="profile-feedback" data-kind="warning">Copy it now; only metadata is retrievable afterwards.</span>' : ''}
+        ${forUser.feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(forUser.feedback.kind)}">${escapeHtml(forUser.feedback.message)}</span>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Public links must be handed out on the public hostname, not the 10.88.* admin
+ * origin: that address only resolves inside the VPN, which is exactly what a
+ * third-party client cannot reach.
+ */
+function overseaPublicSubscriptionBase() {
+  const configured = String(state.config?.overseaPublicBaseUrl || '').trim();
+  if (configured) return configured.replace(/\/+$/, '');
+  return 'https://h2i.minsight-ai.com';
 }
 
 function renderUserEditorDrawer() {
@@ -8184,6 +8318,17 @@ function bindUserEditorDrawerControls() {
   if (assignOversea) assignOversea.addEventListener('click', () => void assignUserOverseaFromAdmin());
   const syncOverseaUser = userEditorDrawer.querySelector('[data-oversea-sync-user]');
   if (syncOverseaUser) syncOverseaUser.addEventListener('click', () => void syncUserOverseaRuntimeFromAdmin());
+  const issueLink = userEditorDrawer.querySelector('[data-oversea-link-issue]');
+  if (issueLink) issueLink.addEventListener('click', () => void issueUserOverseaPublicLink());
+  const revokeLink = userEditorDrawer.querySelector('[data-oversea-link-revoke]');
+  if (revokeLink) revokeLink.addEventListener('click', () => void revokeUserOverseaPublicLink());
+  const copyLink = userEditorDrawer.querySelector('[data-oversea-link-copy]');
+  if (copyLink) {
+    copyLink.addEventListener('click', () => {
+      const url = userEditorDrawer.querySelector('[data-oversea-public-url]')?.textContent || '';
+      if (url) void navigator.clipboard?.writeText(url);
+    });
+  }
 }
 
 function overseaAuthoritySites() {
