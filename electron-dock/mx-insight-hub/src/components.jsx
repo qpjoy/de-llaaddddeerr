@@ -360,6 +360,7 @@ export function platformLabel(platform) {
     twitter: 'X / Twitter',
     facebook: 'Facebook',
     wechat_mp: '微信公众号',
+    telegram: 'Telegram',
   }
   return labels[platform] || platform
 }

@@ -30,6 +30,11 @@ const TIME_TARGETS = new Set(['eventTime', 'collectedAt'])
 const NUMBER_TARGETS = new Set(['latitude', 'longitude'])
 const METRIC_TARGETS = new Set([
   'metrics.likes', 'metrics.comments', 'metrics.shares', 'metrics.views', 'metrics.bookmarks',
+  'metrics.members',
+])
+const ATTRIBUTE_TARGETS = new Set(['attributes.username', 'attributes.chatType'])
+const RELATION_TARGETS = new Set([
+  'relations.chatId', 'relations.messageId', 'relations.replyToMessageId',
 ])
 
 export class MappingError extends Error {
@@ -50,7 +55,10 @@ export function validateFieldMap(fieldMap) {
   if (!fieldMap || typeof fieldMap !== 'object' || Array.isArray(fieldMap)) {
     throw new MappingError('fieldMap must be an object')
   }
-  const known = new Set([...SCALAR_TARGETS, ...TIME_TARGETS, ...NUMBER_TARGETS, ...METRIC_TARGETS])
+  const known = new Set([
+    ...SCALAR_TARGETS, ...TIME_TARGETS, ...NUMBER_TARGETS, ...METRIC_TARGETS,
+    ...ATTRIBUTE_TARGETS, ...RELATION_TARGETS,
+  ])
   const errors = []
   for (const [target, rule] of Object.entries(fieldMap)) {
     if (!known.has(target)) {
@@ -60,6 +68,14 @@ export function validateFieldMap(fieldMap) {
     const sources = Array.isArray(rule?.from) ? rule.from : [rule?.from]
     if (sources.length === 0 || sources.some((column) => typeof column !== 'string' || !column)) {
       errors.push(`${target}.from must be a column name or a non-empty array of them`)
+    }
+    if (rule?.type === 'composite') {
+      if (target !== 'externalId' || sources.length < 2) {
+        errors.push('type=composite is supported only for externalId with at least two source columns')
+      }
+      if (rule.separator != null && (typeof rule.separator !== 'string' || !rule.separator || rule.separator.length > 8)) {
+        errors.push('externalId.separator must be a non-empty string of at most 8 characters')
+      }
     }
   }
   // externalId is the dedup key. Without it every import would create new rows
@@ -72,6 +88,11 @@ export function validateFieldMap(fieldMap) {
 
 function pick(record, rule) {
   const sources = Array.isArray(rule?.from) ? rule.from : [rule?.from]
+  if (rule?.type === 'composite') {
+    const values = sources.map((column) => record[column])
+    if (values.some((value) => value === undefined || value === null || String(value).trim() === '')) return null
+    return values.map((value) => String(value).trim()).join(rule.separator || ':')
+  }
   for (const column of sources) {
     const value = record[column]
     if (value !== undefined && value !== null && String(value).trim() !== '') return value
@@ -149,6 +170,17 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record' })
     if (typeof value === 'number') metrics[target.slice('metrics.'.length)] = value
   }
 
+  const attributes = {}
+  for (const target of ATTRIBUTE_TARGETS) {
+    const value = mapped[target]
+    if (value !== undefined) attributes[target.slice('attributes.'.length)] = value
+  }
+  const relations = {}
+  for (const target of RELATION_TARGETS) {
+    const value = mapped[target]
+    if (value !== undefined) relations[target.slice('relations.'.length)] = value
+  }
+
   const record = {
     platform,
     objectType,
@@ -170,6 +202,8 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record' })
       author: { externalId: mapped.authorExternalId ?? null, name: mapped.authorName ?? null },
       media: {},
       metrics,
+      attributes,
+      relations,
       language: mapped.language ?? null,
     },
     extensions,
@@ -177,17 +211,17 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record' })
     rawItem: raw,
   }
 
-  // The content hash excludes collectedAt and metrics for the same reason the
-  // Night-All path does: re-importing an unchanged spreadsheet must not create a
-  // revision for every row and flood the projection outbox.
+  // Collection time is observation metadata, not content. Metrics remain in
+  // the hash: they are part of the public/search projection, so excluding them
+  // would update PostgreSQL without incrementing projection_revision and leave
+  // Elasticsearch/AI reads stale.
   record.payloadSha256 = sha256(canonicalJson(contentOnly(record)))
   return { record, rejected: null }
 }
 
 function contentOnly(record) {
-  const { collectedAt: _collectedAt, metrics: _metrics, rawItem: _rawItem, stableFields, ...rest } = record
-  const { metrics: _stableMetrics, ...stableRest } = stableFields
-  return { ...rest, stableFields: stableRest }
+  const { collectedAt: _collectedAt, metrics: _metrics, rawItem: _rawItem, ...rest } = record
+  return rest
 }
 
 /**

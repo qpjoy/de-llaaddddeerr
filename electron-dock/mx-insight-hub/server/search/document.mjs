@@ -6,17 +6,28 @@ import { DATASET_ID } from '../ingest/normalizers.mjs'
 // (see adapters/night-all.mjs `keepRaw`); the search projection is customer
 // facing, so that evidence is stripped again here rather than relying on it
 // having been stripped upstream.
-const LINEAGE_KEY = /(provider|credential|upstream|endpoint|business.?id|availability|billing|token|secret)/i
+const LINEAGE_KEY = /(provider|credential|upstream|endpoint|business.?id|availability|billing|token|secret|password|auth)/i
+
+function safeExtensionValue(value) {
+  if (Array.isArray(value)) return value.map(safeExtensionValue)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !LINEAGE_KEY.test(key))
+      .map(([key, nested]) => [key, safeExtensionValue(nested)]),
+  )
+}
 
 function safeExtensions(extensions) {
   if (!extensions || typeof extensions !== 'object') return {}
   const result = {}
   for (const [key, value] of Object.entries(extensions)) {
     if (LINEAGE_KEY.test(key)) continue
+    const safeValue = safeExtensionValue(value)
     // `flattened` indexes leaf values as keywords; deep objects still work but
     // arrays of objects lose structure. Stringify anything non-scalar rather
     // than pretending it stayed queryable.
-    result[key] = value && typeof value === 'object' ? JSON.stringify(value) : value
+    result[key] = safeValue && typeof safeValue === 'object' ? JSON.stringify(safeValue) : safeValue
   }
   return result
 }

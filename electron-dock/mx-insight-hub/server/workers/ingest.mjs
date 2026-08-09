@@ -3,6 +3,9 @@ import { createPool, createQueue, runCommonMigrations, startWorker } from '@qpjo
 import { NightAllAdapter } from '../adapters/night-all.mjs'
 import { loadConfig } from '../config.mjs'
 import { NightAllBackfill } from '../ingest/backfill.mjs'
+import { DatabaseSourcePuller } from '../ingest/external/database-source.mjs'
+import { runExternalPullScheduler } from '../ingest/external/scheduler.mjs'
+import { EXTERNAL_PULL_QUEUE, runExternalPullJob } from '../ingest/external/sync-job.mjs'
 import { createPostgresStore } from '../stores/postgres-store.mjs'
 
 // Ingest worker: drains queued search results and runs Night-All backfills.
@@ -33,6 +36,7 @@ async function main() {
   // has to read from the same table.
   const queue = createQueue({ ...config.common.queue, driver: 'postgres' }, { pool, logger })
   const backfill = new NightAllBackfill({ store, adapter, queue, logger })
+  const databasePuller = new DatabaseSourcePuller({ store, queue, logger })
 
   const controller = new AbortController()
   const shutdown = (signal) => {
@@ -94,12 +98,34 @@ async function main() {
     }
   }
 
+  async function handleExternalPull(payload, job) {
+    return runExternalPullJob({
+      puller: databasePuller,
+      queue,
+      payload,
+      job,
+      signal: controller.signal,
+      logger,
+    })
+  }
+
   const workers = [
     startLoop(queue, INGEST_QUEUE, handleIngest, controller.signal),
     // Backfill runs at concurrency 1: it is a bulk scan, and running several in
     // parallel would compete with the latency-sensitive ingest queue for the
     // same connection pool.
     startLoop(queue, BACKFILL_QUEUE, handleBackfill, controller.signal, 1),
+    // Foreign-table scans are bulk I/O just like backfill. One at a time keeps
+    // them from competing with latency-sensitive search-result ingestion.
+    startLoop(queue, EXTERNAL_PULL_QUEUE, handleExternalPull, controller.signal, 1),
+    runExternalPullScheduler({
+      store,
+      queue,
+      batchSize: config.externalPull.batchSize,
+      intervalMs: config.externalPull.intervalMs,
+      signal: controller.signal,
+      logger,
+    }),
   ]
 
   logger.log('[ingest] draining ingest and backfill queues')

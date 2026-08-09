@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-08-04.
+Last reviewed: 2026-08-09.
 
 This directory is the source of truth for MX Insight Hub. Night-All-specific implementation details remain in the Night-All repository; this project records only the stable dependency contract and ownership boundary.
 
@@ -8,15 +8,16 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 
 | Area | Current state |
 | --- | --- |
-| Modular monolith API | Implemented: tenants, consumers, one-time API keys, explicit platform grants, per-platform limits, request idempotency, usage and health. |
-| Admin console | Implemented with the shared MX Launcher Neon Void design package. |
+| Modular monolith API | Implemented: multiple tenants, tenant rename, consumers, one-time API keys, explicit platform grants, per-platform limits, request idempotency, usage and health. Each consumer belongs to exactly one tenant. |
+| Admin console | Implemented with the shared MX Launcher Neon Void design package, including platform-admin tenant create/list/rename and explicit tenant selection when creating a consumer. |
 | Night-All adapter | Implemented for the private `/api/v1/data/search` facade; provider details are filtered. |
 | Local lifecycle | Docker Compose, PostgreSQL, bootstrap and smoke commands. |
-| Internal K8s | Manifests and one-click lifecycle implemented: independent namespace, PostgreSQL PVC, migration Job, split public/admin Deployments, Services and NetworkPolicy. Not yet deployed/verified on the internal server. |
+| Internal K8s | One-click lifecycle and manifests implemented: independent Hub namespace, a dedicated Hub database/role provisioned inside shared `mx-common` PostgreSQL, migration Job, split public/Admin Deployments, projector/ingest workers, Services and NetworkPolicy. A retired Hub-local PostgreSQL is decommissioned only by an explicit destructive command. |
 | Launcher integration | Lifecycle delegation, offline-safe status summary and AppCenter entrypoint. |
-| Unified identity | Boundary and claim mapping designed. Launcher SSO bearer validation, JWKS verification, identity bindings and tenant-member administration are not implemented yet. |
-| Data ingest and serving plane | Detailed storage, canonical identity, checkpoint, cache/fallback, file-ingest, PostGIS and ES projection design is complete. Runtime schemas/workers/object storage/cache/projector are not implemented. |
-| Local search stack | Opt-in Elasticsearch/Kibana development sample and strict customer-safe mapping exist under `deploy/compose/search`; the Hub API does not write or query it yet. |
+| Unified identity | Launcher opaque-token sign-in/introspection, Hub-local external identity bindings, multi-tenant memberships, per-tenant roles, explicit platform-admin scope mapping and the global Admin Token break-glass path are implemented. Direct JWT/JWKS validation is not used because Launcher tokens are opaque. |
+| Data ingest and serving plane | PostgreSQL source objects, canonical records/revisions, projection outbox, durable queues/cursors, file import, versioned mappings, PostgreSQL external pull and stored Telegram history serving are implemented. `/shared_dir` watcher, immutable object storage, freshness cache/fallback, CDC/delete propagation and generic non-PostgreSQL connectors are not. |
+| Telegram monitor sources | `telegram.monitor.chats.v1` and `telegram.monitor.messages.v1`, source schema/preview/sync Admin routes and strict public `GET` routes are implemented. Production sources are seeded paused with unapproved candidate mappings until the real external schema passes the runbook. These canonical datasets have no `tenant_id`; all consumers with the `telegram` grant read the same corpus, with tenant/consumer scoping only for identity, grant, quota and usage. |
+| Search/retrieval | Canonical projection outbox, projector, strict customer-safe Elasticsearch mapping, Admin retrieval/semantic-search path and shared `mx-common` search deployment are implemented. Elasticsearch remains a rebuildable projection and is not required for the PostgreSQL Telegram feed API. |
 | Private/public DNS routes | Deliberately not auto-created. They require route/TLS review and a deployed public Service. |
 | Billing, BI and Data Agent | Designed as later phases; the MVP has mutable request/usage evidence, not an append-only billing ledger or invoice engine. |
 | Backup/PITR and ELK/SLO | Target runbooks are documented but automation/exporters are not implemented yet; these remain production release gates. |
@@ -40,9 +41,10 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 14. [Key lifecycle](security/key-lifecycle.md)
 15. [Local development](operations/local-development.md)
 16. [Internal K8s deployment](operations/internal-k8s-deployment.md)
-17. [Backup and restore](operations/backup-restore.md)
-18. [Observability and SLO](operations/observability-slo.md)
-19. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
+17. [Telegram monitor PostgreSQL ingestion](operations/telegram-monitor-ingestion.md)
+18. [Backup and restore](operations/backup-restore.md)
+19. [Observability and SLO](operations/observability-slo.md)
+20. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
 
 ## Decisions
 

@@ -156,6 +156,57 @@ if bash -c '
 fi
 printf 'ok - runtime config requires provisioning to have run first\n'
 
+# The foreign Telegram reader is optional, but when configured it must be
+# passed as a Secret key (never a ConfigMap value or terminal output).
+tg_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-tg-wired.XXXXXX")"
+tg_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-tg-output.XXXXXX")"
+rm -f -- "$tg_marker"
+if ! TG_MARKER="$tg_marker" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+  export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+  export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+  export NIGHT_ALL_BASE_URL="http://night-all.internal"
+  export MX_INSIGHT_SEARCH_READY=1
+  export MX_INSIGHT_TG_MONITOR_DATABASE_URL="postgres://tg-reader:tg-reader-password@tg-db/night_all"
+  kubectl() {
+    local argument
+    for argument in "$@"; do
+      case "$argument" in
+        --from-literal=MX_INSIGHT_TG_MONITOR_DATABASE_URL=*) : >"$TG_MARKER" ;;
+      esac
+    done
+    case " $* " in
+      *" --dry-run=client -o yaml "*) printf "apiVersion: v1\\nkind: List\\nitems: []\\n" ;;
+      *) while IFS= read -r _line; do :; done ;;
+    esac
+  }
+  create_runtime_config
+' _ "$ROOT_DIR" >"$tg_output" 2>&1; then
+  printf 'not ok - configured Telegram reader was not accepted by runtime config\n' >&2
+  exit 1
+fi
+if [ ! -f "$tg_marker" ]; then
+  printf 'not ok - Telegram reader was not wired into the runtime Secret\n' >&2
+  exit 1
+fi
+if grep -qE 'tg-reader-password|postgres://tg-reader' "$tg_output"; then
+  printf 'not ok - runtime config output exposed the Telegram reader DSN\n' >&2
+  exit 1
+fi
+rm -f -- "$tg_marker" "$tg_output"
+printf 'ok - optional Telegram reader is Secret-wired without output exposure\n'
+
+grep -q 'MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS.*60000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q '^  ingest:' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'server/workers/ingest.mjs' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+printf 'ok - local Compose wires the periodic external-pull worker\n'
+grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE=' "$ROOT_DIR/scripts/manage.sh"
+printf 'ok - internal runtime ConfigMap wires external-pull scheduling controls\n'
+
 # ---------------------------------------------------------------------------
 # Retired local PostgreSQL
 # ---------------------------------------------------------------------------

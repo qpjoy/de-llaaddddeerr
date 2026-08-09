@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import {
+  Buildings,
   Pulse,
   ChartLine,
   Cloud,
@@ -8,6 +9,7 @@ import {
   Globe,
   Key,
   MagnifyingGlass,
+  PencilSimple,
   Plus,
   Power,
   ShieldCheck,
@@ -56,9 +58,19 @@ const PLATFORM_CATALOG = [
   'twitter',
   'facebook',
   'wechat_mp',
+  'telegram',
 ]
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 }
+
+function tenantAllows(session, tenantId, capability) {
+  if (!tenantId) return false
+  return Boolean(
+    session?.platformAdmin || session?.memberships?.some((membership) => (
+      membership.tenantId === tenantId && membership.capabilities?.includes(capability)
+    )),
+  )
+}
 
 function sortedPlatforms(byPlatform = {}) {
   return Object.entries(byPlatform).sort((left, right) => Number(right[1]?.requests || 0) - Number(left[1]?.requests || 0))
@@ -189,13 +201,16 @@ export function DashboardPage({ token, query, setQuery, onUnauthorized }) {
   )
 }
 
-export function ConsumersPage({ token, query, setQuery, onUnauthorized, notify }) {
+export function ConsumersPage({ token, session, query, setQuery, onUnauthorized, notify }) {
   const tenantId = query.get('tenantId') || ''
   const [search, setSearch] = useState('')
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState(null)
   const [form, setForm] = useState({ tenantId: '', tenantName: '', name: '' })
+  const [tenantDialog, setTenantDialog] = useState(null)
+  const [tenantSaving, setTenantSaving] = useState(false)
+  const [tenantError, setTenantError] = useState(null)
 
   const load = useCallback(async () => {
     const [tenants, consumers] = await Promise.all([adminApi.tenants(token), adminApi.consumers(token, tenantId)])
@@ -206,11 +221,44 @@ export function ConsumersPage({ token, query, setQuery, onUnauthorized, notify }
   const consumers = state.data?.consumers || []
   const visibleConsumers = consumers.filter((consumer) => consumer.name.toLowerCase().includes(search.trim().toLowerCase()))
   const tenantNames = new Map(tenants.map((tenant) => [tenant.id, tenant.name]))
+  const consumerTenants = tenants.filter((tenant) => tenantAllows(session, tenant.id, 'consumer.write'))
+  const canCreateConsumer = Boolean(session?.platformAdmin) || consumerTenants.length > 0
+  const canCreateTenant = Boolean(session?.platformAdmin)
 
   const showCreate = () => {
-    setForm({ tenantId: tenantId || tenants[0]?.id || '', tenantName: '', name: '' })
+    const selectedTenantId = consumerTenants.some((tenant) => tenant.id === tenantId)
+      ? tenantId
+      : consumerTenants[0]?.id || ''
+    setForm({ tenantId: selectedTenantId, tenantName: '', name: '' })
     setFormError(null)
     setOpen(true)
+  }
+
+  const showTenantDialog = (tenant = null) => {
+    setTenantError(null)
+    setTenantDialog({ id: tenant?.id || null, name: tenant?.name || '' })
+  }
+
+  const saveTenant = async (event) => {
+    event.preventDefault()
+    setTenantSaving(true)
+    setTenantError(null)
+    try {
+      if (tenantDialog.id) {
+        await adminApi.renameTenant(token, tenantDialog.id, { name: tenantDialog.name })
+        notify('租户名称已更新', 'success')
+      } else {
+        await adminApi.createTenant(token, { name: tenantDialog.name })
+        notify('租户已创建', 'success')
+      }
+      setTenantDialog(null)
+      state.refresh()
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      setTenantError(error)
+    } finally {
+      setTenantSaving(false)
+    }
   }
 
   const create = async (event) => {
@@ -242,11 +290,52 @@ export function ConsumersPage({ token, query, setQuery, onUnauthorized, notify }
   return (
     <>
       <PageHeading eyebrow="IDENTITY / TENANCY" title="调用者管理" description="调用者是 API Key、平台授权和用量归属的最小业务主体。" loading={state.loading} onRefresh={state.refresh}>
-        <button className="qp-button qp-button--primary" type="button" onClick={showCreate}>
-          <UserPlus size={17} aria-hidden="true" />新建调用者
-        </button>
+        {canCreateConsumer ? (
+          <button className="qp-button qp-button--primary" type="button" onClick={showCreate}>
+            <UserPlus size={17} aria-hidden="true" />新建调用者
+          </button>
+        ) : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
+      <Panel
+        title="租户"
+        subtitle={`${tenants.length} 个租户`}
+        action={canCreateTenant ? (
+          <button className="qp-button qp-button--outline" type="button" onClick={() => showTenantDialog()}>
+            <Plus size={16} aria-hidden="true" />新建租户
+          </button>
+        ) : null}
+      >
+        {tenants.length ? (
+          <Table label="租户列表">
+            <thead><tr><th>名称</th><th>状态</th><th>更新时间</th><th>Tenant ID</th><th className="mih-table__actions">操作</th></tr></thead>
+            <tbody>
+              {tenants.map((tenant) => (
+                <tr key={tenant.id}>
+                  <td><strong>{tenant.name}</strong><small>调用者与用量的隔离边界</small></td>
+                  <td><StatusBadge status={tenant.status} /></td>
+                  <td>{formatDate(tenant.updatedAt)}</td>
+                  <td><code className="mih-mono">{tenant.id}</code></td>
+                  <td className="mih-table__actions">
+                    {tenantAllows(session, tenant.id, 'tenant.write') ? (
+                      <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => showTenantDialog(tenant)}>
+                        <PencilSimple size={15} aria-hidden="true" />重命名
+                      </button>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        ) : (
+          <EmptyState
+            icon={Buildings}
+            title="还没有租户"
+            description="先创建租户，再把调用者和 API Key 归入对应的隔离边界。"
+            action={canCreateTenant ? <button className="qp-button qp-button--outline" type="button" onClick={() => showTenantDialog()}><Plus size={16} aria-hidden="true" />新建租户</button> : null}
+          />
+        )}
+      </Panel>
       <section className="qp-panel mih-filterbar">
         <FilterSelect
           label="租户"
@@ -282,7 +371,7 @@ export function ConsumersPage({ token, query, setQuery, onUnauthorized, notify }
             icon={Users}
             title={search ? '没有匹配的调用者' : '还没有调用者'}
             description={search ? '请调整搜索条件。' : '创建调用者后，才能签发 API Key 并配置平台权限。'}
-            action={!search ? <button className="qp-button qp-button--outline" type="button" onClick={showCreate}><Plus size={16} aria-hidden="true" />新建调用者</button> : null}
+            action={!search && canCreateConsumer ? <button className="qp-button qp-button--outline" type="button" onClick={showCreate}><Plus size={16} aria-hidden="true" />新建调用者</button> : null}
           />
         )}
       </Panel>
@@ -300,10 +389,10 @@ export function ConsumersPage({ token, query, setQuery, onUnauthorized, notify }
           )}
         >
           <form id="create-consumer" className="mih-form" onSubmit={create}>
-            {tenants.length ? (
+            {consumerTenants.length ? (
               <Field label="所属租户">
                 <select className="qp-select" value={form.tenantId} onChange={(event) => setForm({ ...form, tenantId: event.target.value })} required autoFocus>
-                  {tenants.map((tenant) => <option value={tenant.id} key={tenant.id}>{tenant.name}</option>)}
+                  {consumerTenants.map((tenant) => <option value={tenant.id} key={tenant.id}>{tenant.name}</option>)}
                 </select>
               </Field>
             ) : (
@@ -318,11 +407,32 @@ export function ConsumersPage({ token, query, setQuery, onUnauthorized, notify }
           </form>
         </Modal>
       ) : null}
+
+      {tenantDialog ? (
+        <Modal
+          title={tenantDialog.id ? '重命名租户' : '新建租户'}
+          description="租户是调用者、API Key、授权和用量的隔离边界。"
+          onClose={() => !tenantSaving && setTenantDialog(null)}
+          footer={(
+            <>
+              <button className="qp-button qp-button--ghost" type="button" onClick={() => setTenantDialog(null)} disabled={tenantSaving}>取消</button>
+              <button className="qp-button qp-button--primary" type="submit" form="save-tenant" disabled={tenantSaving}>{tenantSaving ? '正在保存' : '保存租户'}</button>
+            </>
+          )}
+        >
+          <form id="save-tenant" className="mih-form" onSubmit={saveTenant}>
+            <Field label="租户名称">
+              <input className="qp-input" value={tenantDialog.name} onChange={(event) => setTenantDialog({ ...tenantDialog, name: event.target.value })} placeholder="例如：舟山租户" required autoFocus />
+            </Field>
+            {tenantError ? <ErrorState error={tenantError} /> : null}
+          </form>
+        </Modal>
+      ) : null}
     </>
   )
 }
 
-export function ApiKeysPage({ token, query, setQuery, onUnauthorized, notify }) {
+export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, notify }) {
   const consumerId = query.get('consumerId') || ''
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -333,16 +443,25 @@ export function ApiKeysPage({ token, query, setQuery, onUnauthorized, notify }) 
   const [revoking, setRevoking] = useState(false)
 
   const load = useCallback(async () => {
-    const [consumers, keys] = await Promise.all([adminApi.consumers(token), adminApi.apiKeys(token, consumerId)])
-    return { consumers: consumers || [], keys: keys || [] }
-  }, [consumerId, token])
+    const allConsumers = (await adminApi.consumers(token)) || []
+    const consumers = allConsumers.filter((consumer) => tenantAllows(session, consumer.tenantId, 'apikey.read'))
+    const selectedConsumerId = consumers.some((consumer) => consumer.id === consumerId) ? consumerId : ''
+    const keys = consumers.length ? await adminApi.apiKeys(token, selectedConsumerId) : []
+    return { consumers, keys: keys || [], selectedConsumerId }
+  }, [consumerId, session, token])
   const state = useRemoteData(load, onUnauthorized)
   const consumers = state.data?.consumers || []
   const keys = state.data?.keys || []
+  const selectedConsumerId = state.data?.selectedConsumerId || ''
+  const writableConsumers = consumers.filter((consumer) => tenantAllows(session, consumer.tenantId, 'apikey.write'))
+  const canIssueKey = writableConsumers.length > 0
   const consumerNames = new Map(consumers.map((consumer) => [consumer.id, consumer.name]))
 
   const showCreate = () => {
-    setForm({ consumerId: consumerId || consumers[0]?.id || '', name: '', environment: 'live' })
+    const targetConsumerId = writableConsumers.some((consumer) => consumer.id === selectedConsumerId)
+      ? selectedConsumerId
+      : writableConsumers[0]?.id || ''
+    setForm({ consumerId: targetConsumerId, name: '', environment: 'live' })
     setFormError(null)
     setOpen(true)
   }
@@ -386,15 +505,17 @@ export function ApiKeysPage({ token, query, setQuery, onUnauthorized, notify }) 
   return (
     <>
       <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="密钥只在签发时显示一次；权限、配额和用量绑定到调用者。" loading={state.loading} onRefresh={state.refresh}>
-        <button className="qp-button qp-button--primary" type="button" onClick={showCreate} disabled={!consumers.length}>
-          <Plus size={17} aria-hidden="true" />签发 API Key
-        </button>
+        {canIssueKey ? (
+          <button className="qp-button qp-button--primary" type="button" onClick={showCreate}>
+            <Plus size={17} aria-hidden="true" />签发 API Key
+          </button>
+        ) : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       <section className="qp-panel mih-filterbar">
         <FilterSelect
           label="调用者"
-          value={consumerId}
+          value={selectedConsumerId}
           onChange={(value) => setQuery({ consumerId: value || null })}
           options={consumers.map((consumer) => ({ value: consumer.id, label: consumer.name }))}
         />
@@ -412,9 +533,11 @@ export function ApiKeysPage({ token, query, setQuery, onUnauthorized, notify }) 
                   <td><StatusBadge status={key.status} /></td>
                   <td>{formatDate(key.lastUsedAt)}</td>
                   <td className="mih-table__actions">
-                    <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`撤销 ${key.name}`} disabled={key.status !== 'active'} onClick={() => setRevokeTarget(key)}>
-                      <Trash size={17} aria-hidden="true" />
-                    </button>
+                    {tenantAllows(session, key.tenantId, 'apikey.write') ? (
+                      <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`撤销 ${key.name}`} disabled={key.status !== 'active'} onClick={() => setRevokeTarget(key)}>
+                        <Trash size={17} aria-hidden="true" />
+                      </button>
+                    ) : null}
                   </td>
                 </tr>
               ))}
@@ -425,7 +548,7 @@ export function ApiKeysPage({ token, query, setQuery, onUnauthorized, notify }) 
             icon={Key}
             title={consumers.length ? '还没有 API Key' : '请先创建调用者'}
             description={consumers.length ? '签发后完整 secret 只展示一次。' : 'API Key 必须归属于一个调用者。'}
-            action={consumers.length ? <button className="qp-button qp-button--outline" type="button" onClick={showCreate}><Plus size={16} aria-hidden="true" />签发 API Key</button> : <a className="qp-button qp-button--outline" href="#/consumers"><Users size={16} aria-hidden="true" />前往调用者</a>}
+            action={canIssueKey ? <button className="qp-button qp-button--outline" type="button" onClick={showCreate}><Plus size={16} aria-hidden="true" />签发 API Key</button> : !consumers.length ? <a className="qp-button qp-button--outline" href="#/consumers"><Users size={16} aria-hidden="true" />前往调用者</a> : null}
           />
         )}
       </Panel>
@@ -445,7 +568,7 @@ export function ApiKeysPage({ token, query, setQuery, onUnauthorized, notify }) 
           <form id="create-api-key" className="mih-form" onSubmit={create}>
             <Field label="调用者">
               <select className="qp-select" value={form.consumerId} onChange={(event) => setForm({ ...form, consumerId: event.target.value })} required autoFocus>
-                {consumers.map((consumer) => <option value={consumer.id} key={consumer.id}>{consumer.name}</option>)}
+                {writableConsumers.map((consumer) => <option value={consumer.id} key={consumer.id}>{consumer.name}</option>)}
               </select>
             </Field>
             <Field label="密钥名称">
@@ -502,7 +625,7 @@ async function loadConfigurationContext(token, requestedTenantId, requestedConsu
   return { tenants: safeTenants, consumers, tenantId, consumerId, configuration }
 }
 
-export function PlansQuotasPage({ token, query, setQuery, onUnauthorized }) {
+export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorized }) {
   const requestedTenantId = query.get('tenantId') || ''
   const requestedConsumerId = query.get('consumerId') || ''
   const load = useCallback(
@@ -518,11 +641,13 @@ export function PlansQuotasPage({ token, query, setQuery, onUnauthorized }) {
   const policies = data.configuration?.policies || []
   const grants = new Set(data.configuration?.grants || [])
   const platformHref = `#/platforms?${new URLSearchParams({ tenantId: data.tenantId || '', consumerId: data.consumerId || '' })}`
+  const selectedConsumer = data.consumers.find((consumer) => consumer.id === data.consumerId)
+  const canManagePlatform = tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
 
   return (
     <>
       <PageHeading eyebrow="PLANS / LIMITS / CREDITS" title="套餐与配额" description="当前 MVP 使用租户与平台策略执行请求窗口和分页上限；后续套餐层映射到同一计量模型。" loading={state.loading} onRefresh={state.refresh}>
-        <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={17} aria-hidden="true" />管理平台策略</a>
+        {canManagePlatform ? <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={17} aria-hidden="true" />管理平台策略</a> : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       <section className="qp-panel mih-filterbar">
@@ -571,7 +696,7 @@ export function PlansQuotasPage({ token, query, setQuery, onUnauthorized }) {
             icon={Coins}
             title={data.consumerId ? '当前使用默认配额' : '请选择调用者'}
             description={data.consumerId ? '在平台管理中保存配置后，会在这里显示显式策略。' : '配额策略需要绑定到租户和调用者。'}
-            action={data.consumerId ? <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={16} aria-hidden="true" />配置平台</a> : null}
+            action={data.consumerId && canManagePlatform ? <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={16} aria-hidden="true" />配置平台</a> : null}
           />
         )}
       </Panel>
@@ -579,7 +704,7 @@ export function PlansQuotasPage({ token, query, setQuery, onUnauthorized }) {
   )
 }
 
-export function PlatformsPage({ token, query, setQuery, onUnauthorized, notify }) {
+export function PlatformsPage({ token, session, query, setQuery, onUnauthorized, notify }) {
   const requestedTenantId = query.get('tenantId') || ''
   const requestedConsumerId = query.get('consumerId') || ''
   const [busyPlatform, setBusyPlatform] = useState('')
@@ -604,9 +729,11 @@ export function PlatformsPage({ token, query, setQuery, onUnauthorized, notify }
     policy: policyByPlatform.get(platform) || DEFAULT_POLICY,
     explicit: policyByPlatform.has(platform),
   }))
+  const selectedConsumer = data.consumers.find((consumer) => consumer.id === data.consumerId)
+  const canUpdatePlatform = tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
 
   const updatePlatform = async (row, enabled, overrides = row.policy) => {
-    if (!data.tenantId || !data.consumerId) return
+    if (!data.tenantId || !data.consumerId || !canUpdatePlatform) return
     setBusyPlatform(row.platform)
     setFormError(null)
     try {
@@ -631,6 +758,7 @@ export function PlatformsPage({ token, query, setQuery, onUnauthorized, notify }
   }
 
   const configure = (row) => {
+    if (!canUpdatePlatform) return
     setConfigureTarget(row)
     setPolicyForm({
       maxRequests: row.policy.maxRequests,
@@ -674,19 +802,23 @@ export function PlatformsPage({ token, query, setQuery, onUnauthorized, notify }
                   <td>{formatNumber(row.policy.windowSeconds)} 秒</td>
                   <td>{formatNumber(row.policy.maxPageSize)}</td>
                   <td className="mih-table__actions mih-table__actions--wide">
-                    <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => configure(row)}>
-                      <SlidersHorizontal size={15} aria-hidden="true" />配置
-                    </button>
-                    <button
-                      className={`qp-button qp-button--sm ${row.enabled ? 'qp-button--transparent' : 'qp-button--outline'}`}
-                      type="button"
-                      aria-pressed={row.enabled}
-                      disabled={busyPlatform === row.platform}
-                      onClick={() => updatePlatform(row, !row.enabled)}
-                    >
-                      <Power size={15} weight={row.enabled ? 'fill' : 'regular'} aria-hidden="true" />
-                      {busyPlatform === row.platform ? '处理中' : row.enabled ? '停用' : '启用'}
-                    </button>
+                    {canUpdatePlatform ? (
+                      <>
+                        <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => configure(row)}>
+                          <SlidersHorizontal size={15} aria-hidden="true" />配置
+                        </button>
+                        <button
+                          className={`qp-button qp-button--sm ${row.enabled ? 'qp-button--transparent' : 'qp-button--outline'}`}
+                          type="button"
+                          aria-pressed={row.enabled}
+                          disabled={busyPlatform === row.platform}
+                          onClick={() => updatePlatform(row, !row.enabled)}
+                        >
+                          <Power size={15} weight={row.enabled ? 'fill' : 'regular'} aria-hidden="true" />
+                          {busyPlatform === row.platform ? '处理中' : row.enabled ? '停用' : '启用'}
+                        </button>
+                      </>
+                    ) : null}
                   </td>
                 </tr>
               ))}
@@ -697,7 +829,7 @@ export function PlatformsPage({ token, query, setQuery, onUnauthorized, notify }
         )}
       </Panel>
 
-      {configureTarget ? (
+      {configureTarget && canUpdatePlatform ? (
         <Modal
           title={`配置 ${platformLabel(configureTarget.platform)}`}
           description="保存后立即作用于该调用者的新请求。"

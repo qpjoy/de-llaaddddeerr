@@ -7,6 +7,7 @@ servers:
   - url: /api/v1
 security:
   - bearerKey: []
+  - apiKeyHeader: []
 paths:
   /data/capabilities:
     get:
@@ -31,6 +32,9 @@ paths:
                           properties:
                             platform: { type: string }
                             ready: { type: boolean }
+                            capabilities:
+                              type: array
+                              items: { type: string }
                   requestId: { type: string }
   /data/search:
     post:
@@ -62,6 +66,83 @@ paths:
         "429":
           $ref: "#/components/responses/Error"
         "502":
+          $ref: "#/components/responses/Error"
+  /data/telegram/chats:
+    get:
+      operationId: listTelegramMonitorChats
+      summary: List normalized Telegram monitor chats from Hub storage.
+      description: >-
+        Requires the API key's consumer to have the explicit `telegram` grant.
+        Only the documented query fields are accepted; source tables, raw rows,
+        provider details and arbitrary sorting are not public inputs. The read
+        serves the same complete canonical dataset to every consumer granted
+        telegram; tenant-specific row scoping is not implemented. It
+        consumes one request from telegram.maxRequests and commits
+        max(1, returnedCount) usage units without retaining the response body in
+        usage evidence. A retry is a separately metered request.
+      x-mx-allowed-query-fields: [chatId, from, to, pageSize, cursor]
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - $ref: "#/components/parameters/TelegramChatId"
+        - $ref: "#/components/parameters/TelegramFrom"
+        - $ref: "#/components/parameters/TelegramTo"
+        - $ref: "#/components/parameters/TelegramPageSize"
+        - $ref: "#/components/parameters/TelegramCursor"
+      responses:
+        "200":
+          $ref: "#/components/responses/TelegramPage"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /data/telegram/messages:
+    get:
+      operationId: listTelegramMonitorMessages
+      summary: List normalized Telegram monitor messages from Hub storage.
+      description: >-
+        Requires the API key's consumer to have the explicit `telegram` grant.
+        Results use descending event-time/internal-ID keyset pagination. Return
+        `nextCursor` unchanged; it is opaque. Free-text `q`, OFFSET, SQL, raw
+        export, caller-selected datasets and tenant-specific row subsets are not
+        supported. The read consumes
+        one request from telegram.maxRequests and commits max(1, returnedCount)
+        usage units; a retry is separately metered.
+      x-mx-allowed-query-fields: [chatId, from, to, pageSize, cursor]
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - $ref: "#/components/parameters/TelegramChatId"
+        - $ref: "#/components/parameters/TelegramFrom"
+        - $ref: "#/components/parameters/TelegramTo"
+        - $ref: "#/components/parameters/TelegramPageSize"
+        - $ref: "#/components/parameters/TelegramCursor"
+      responses:
+        "200":
+          $ref: "#/components/responses/TelegramPage"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "503":
           $ref: "#/components/responses/Error"
   /requests/{requestId}:
     get:
@@ -109,6 +190,50 @@ components:
       type: http
       scheme: bearer
       bearerFormat: MX-API-Key
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: x-api-key
+  parameters:
+    TelegramChatId:
+      name: chatId
+      in: query
+      required: false
+      description: >-
+        Exact normalized chat identifier. It matches the chat external ID on
+        the chats resource and the normalized chat relation on messages.
+      schema: { type: string, minLength: 1, maxLength: 256 }
+    TelegramFrom:
+      name: from
+      in: query
+      required: false
+      description: >-
+        Inclusive lower bound on eventTime. Must be a complete RFC3339
+        date-time with T, seconds, and Z or a numeric offset; date-only and
+        space-separated forms are rejected.
+      schema: { type: string, format: date-time }
+    TelegramTo:
+      name: to
+      in: query
+      required: false
+      description: >-
+        Inclusive upper bound on eventTime in the same complete RFC3339 form;
+        must not precede from.
+      schema: { type: string, format: date-time }
+    TelegramPageSize:
+      name: pageSize
+      in: query
+      required: false
+      description: >-
+        Defaults to 50 or the consumer's lower policy limit. The effective
+        maximum is the consumer telegram.maxPageSize and never exceeds 100.
+      schema: { type: integer, minimum: 1, maximum: 100 }
+    TelegramCursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque nextCursor from the previous page; return unchanged.
+      schema: { type: string, minLength: 1, maxLength: 1024 }
   schemas:
     SearchRequest:
       type: object
@@ -130,18 +255,124 @@ components:
         errorCode: { type: [string, "null"] }
         reservedAt: { type: string, format: date-time }
         completedAt: { type: [string, "null"], format: date-time }
+    TelegramRecord:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - platform
+        - objectType
+        - contentType
+        - title
+        - text
+        - url
+        - author
+        - relations
+        - attributes
+        - metrics
+        - eventTime
+        - collectedAt
+        - dataVersion
+      properties:
+        id:
+          type: string
+          description: Stable external identity within the fixed Hub dataset.
+        platform: { type: string, const: telegram }
+        objectType: { type: string, enum: [chat, message] }
+        contentType: { type: [string, "null"] }
+        title: { type: [string, "null"] }
+        text: { type: [string, "null"] }
+        url: { type: [string, "null"] }
+        author:
+          type: object
+          additionalProperties: false
+          required: [id, name]
+          properties:
+            id: { type: [string, "null"] }
+            name: { type: [string, "null"] }
+        relations:
+          type: object
+          additionalProperties: false
+          properties:
+            chatId: { type: string }
+            messageId: { type: string }
+            replyToMessageId: { type: string }
+        attributes:
+          type: object
+          additionalProperties: false
+          properties:
+            username: { type: string }
+            chatType: { type: string }
+            memberCount: { type: number }
+        metrics:
+          type: object
+          additionalProperties: false
+          properties:
+            likes: { type: number }
+            comments: { type: number }
+            shares: { type: number }
+            views: { type: number }
+            bookmarks: { type: number }
+            members: { type: number }
+        eventTime: { type: [string, "null"], format: date-time }
+        collectedAt: { type: [string, "null"], format: date-time }
+        dataVersion: { type: string }
+    TelegramPageInfo:
+      type: object
+      additionalProperties: false
+      required: [returnedCount, hasMore, nextCursor]
+      properties:
+        returnedCount: { type: integer, minimum: 0, maximum: 100 }
+        hasMore: { type: boolean }
+        nextCursor:
+          type: [string, "null"]
+          description: Opaque cursor for the next page; null when hasMore is false.
+    TelegramPageEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [items, pageInfo]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items:
+                $ref: "#/components/schemas/TelegramRecord"
+            pageInfo:
+              $ref: "#/components/schemas/TelegramPageInfo"
+        requestId: { type: string }
   responses:
+    TelegramPage:
+      description: >-
+        Strict customer-safe canonical projection. Raw rows, extensions,
+        database/source lineage and provider-private values are omitted.
+      headers:
+        x-request-id:
+          schema: { type: string }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TelegramPageEnvelope"
     Error:
       description: Stable error envelope.
       content:
         application/json:
           schema:
             type: object
+            additionalProperties: false
+            required: [error, requestId]
             properties:
               error:
                 type: object
+                additionalProperties: false
                 required: [code, message]
                 properties:
                   code: { type: string }
                   message: { type: string }
+                  details:
+                    description: Optional bounded machine-readable context for the stable error code.
               requestId: { type: string }

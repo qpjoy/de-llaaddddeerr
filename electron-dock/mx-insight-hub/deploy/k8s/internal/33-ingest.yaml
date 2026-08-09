@@ -92,6 +92,12 @@ spec:
                   name: mx-insight-hub-secrets
                   key: NIGHT_ALL_EXPORT_TOKEN
                   optional: true
+            - name: MX_INSIGHT_TG_MONITOR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_TG_MONITOR_DATABASE_URL
+                  optional: true
           resources:
             requests:
               cpu: 100m

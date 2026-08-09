@@ -37,6 +37,9 @@ services:
       NIGHT_ALL_TIMEOUT_MS: ${NIGHT_ALL_TIMEOUT_MS:-30000}
       NIGHT_ALL_READY_MODE: ${NIGHT_ALL_READY_MODE:-ready_only}
       NIGHT_ALL_SERVICE_TOKEN: ${NIGHT_ALL_SERVICE_TOKEN:-}
+      MX_INSIGHT_TG_MONITOR_DATABASE_URL: ${MX_INSIGHT_TG_MONITOR_DATABASE_URL:-}
+      MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS: ${MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS:-60000}
+      MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE: ${MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE:-1000}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -50,6 +53,28 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
+    restart: unless-stopped
+
+  ingest:
+    image: ${MX_INSIGHT_IMAGE:-mx-insight-hub:local}
+    environment:
+      MX_INSIGHT_STORE: postgres
+      DATABASE_URL: postgres://mx_insight:${MX_INSIGHT_POSTGRES_PASSWORD:-local-postgres-change-me}@postgres:5432/mx_insight_hub
+      MX_INSIGHT_ADMIN_TOKEN: ${MX_INSIGHT_ADMIN_TOKEN:-local-admin-change-me}
+      MX_INSIGHT_API_KEY_PEPPER: ${MX_INSIGHT_API_KEY_PEPPER:-local-pepper-change-me-at-least-32-bytes}
+      NIGHT_ALL_BASE_URL: ${NIGHT_ALL_BASE_URL:-http://host.docker.internal:18141}
+      NIGHT_ALL_TIMEOUT_MS: ${NIGHT_ALL_TIMEOUT_MS:-30000}
+      NIGHT_ALL_READY_MODE: ${NIGHT_ALL_READY_MODE:-ready_only}
+      NIGHT_ALL_SERVICE_TOKEN: ${NIGHT_ALL_SERVICE_TOKEN:-}
+      MX_INSIGHT_TG_MONITOR_DATABASE_URL: ${MX_INSIGHT_TG_MONITOR_DATABASE_URL:-}
+      MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS: ${MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS:-60000}
+      MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE: ${MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE:-1000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      app:
+        condition: service_healthy
+    command: ["node", "server/workers/ingest.mjs"]
     restart: unless-stopped
 
 volumes:

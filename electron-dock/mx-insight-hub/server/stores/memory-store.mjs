@@ -60,6 +60,14 @@ export class MemoryStore {
     return clone(this.tenants.get(id) || null)
   }
 
+  async renameTenant(id, name) {
+    const record = this.tenants.get(id)
+    if (!record) return null
+    record.name = name
+    record.updatedAt = nowIso()
+    return clone(record)
+  }
+
   async createConsumer({ tenantId, name, status = 'active', businessId }) {
     if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
     const id = randomUUID()

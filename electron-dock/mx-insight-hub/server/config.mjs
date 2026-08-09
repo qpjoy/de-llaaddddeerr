@@ -122,5 +122,17 @@ export function loadConfig(environment = process.env) {
         .filter(Boolean),
       pageSize: positiveInteger(environment.MX_INSIGHT_BACKFILL_PAGE_SIZE, 200, 'MX_INSIGHT_BACKFILL_PAGE_SIZE'),
     },
+    externalPull: {
+      intervalMs: positiveInteger(
+        environment.MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS,
+        60_000,
+        'MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS',
+      ),
+      batchSize: positiveInteger(
+        environment.MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE,
+        1_000,
+        'MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE',
+      ),
+    },
   }
 }

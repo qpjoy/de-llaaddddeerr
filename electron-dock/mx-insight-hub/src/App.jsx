@@ -42,10 +42,10 @@ const ROUTES = [
   { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
   { path: '/platforms', label: '平台能力', description: '平台授权与策略', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
-  { path: '/sources', label: '外部数据源', description: '表格、文本与异构库', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write' },
-  { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write' },
-  { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read' },
-  { path: '/agent', label: '中心 Agent', description: '模型链路与降级', icon: Brain, group: '数据平面', component: AgentPage, capability: 'membership.write' },
+  { path: '/sources', label: '外部数据源', description: '表格、文本与异构库', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true },
+  { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
+  { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
+  { path: '/agent', label: '中心 Agent', description: '模型链路与降级', icon: Brain, group: '数据平面', component: AgentPage, capability: 'membership.write', platformAdmin: true },
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
   { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read' },
 ]
@@ -53,11 +53,15 @@ const ROUTES = [
 const ROUTE_MAP = new Map(ROUTES.map((route) => [route.path, route]))
 
 function visibleRoutes(session) {
-  // No session information (admin token, or an older server) shows everything;
-  // the server still enforces, so this only affects what is offered.
-  if (!session?.capabilities) return ROUTES
+  // An older server may omit capabilities, but platform-wide pages still stay
+  // hidden unless the session explicitly identifies a platform administrator.
+  if (!session?.capabilities) {
+    return ROUTES.filter((route) => !route.platformAdmin || session?.platformAdmin)
+  }
   const granted = new Set(session.capabilities)
-  return ROUTES.filter((route) => !route.capability || granted.has(route.capability))
+  return ROUTES.filter((route) => (
+    (!route.platformAdmin || session.platformAdmin) && (!route.capability || granted.has(route.capability))
+  ))
 }
 
 function readSessionToken() {
@@ -361,6 +365,7 @@ export function App() {
   const Page = route.component
   const pageProps = {
     token,
+    session,
     query: location.query,
     setQuery,
     onUnauthorized: handleUnauthorized,

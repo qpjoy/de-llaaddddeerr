@@ -283,13 +283,13 @@ bash scripts/manage.sh snapshot list
 
 已处理的实际坑：Excel 序列号日期（46234 → 2026-07-31，含 Lotus 1-2-3 闰年 bug 偏移）、`1,234` / `87%` 这类表格数字格式（直接 `Number()` 会得到 NaN 并静默丢掉指标）、稀疏行补齐、重复/空表头。
 
-### 8.4 尚未完成
+### 8.4 历史阶段说明
 
-- `catalog.external_sources` / `source_mappings` / `import_runs` 的 store CRUD
-- 文件上传的 admin 路由与 import job handler
-- 异构数据库拉取（`source_kind='database'`）
-
-解析、映射语义、去重和写入路径（`ingestExternalRecords`，与 Night-All 走同一套 canonical/outbox 契约）已完成并有测试覆盖。
+本节最初记录的 source CRUD、文件上传/import job 和 PostgreSQL 数据库拉取
+缺口已经在 §9 及 Telegram monitor 接入中补完。当前数据库连接器仍只支持
+PostgreSQL；生产 schema、水位、索引和删除语义必须逐来源验证，不能把
+“连接器存在”理解成“任意外部表可直接同步”。Telegram 两个来源的具体门禁
+见[运行手册](../operations/telegram-monitor-ingestion.md)。
 
 ## 9. P4 补完（已实现）
 
@@ -313,8 +313,18 @@ curl -X POST '.../internal/v1/admin/sources/weekly-report/import?filename=r.xlsx
 - **上传用裸 body + `filename` query，不用 multipart**。multipart 需要为攻击者可控输入再写一个解析器（boundary、header 注入、part 数耗尽），而这条路径已经在接收不可信表格了。裸 body 传递同样的信息，且没有解析器。
 - **没有批准的映射不能导入**，也不会回退到推断。推断是给人看的起点，不是决定数据怎么存的静默默认值。
 - **文件级内容哈希去重**：字节相同且已成功导入过 → 直接报 `skipped, duplicateOf`，而不是重跑一遍报告"0 changed"（后者读起来像 bug）。
-- **被拒绝的行是证据**，进 `ingest.rejected_rows` 并带原因。拒绝率 >10% 会打 warning——一次"成功"但只覆盖 60% 的导入通常是某列被改名了，应该当天可见而不是一个月后。
+- **被拒绝的行是证据**，进 `ingest.rejected_rows` 并带原因。这里的文件上传
+  importer 在拒绝率 >10% 时打 warning；这不是数据库 pull 的容错阈值。数据库
+  pull 只要有一行 rejected 就整批失败、不写 canonical、不推进 cursor，避免永久
+  越过坏行。
 - **异构库拉取只支持 PostgreSQL**。通用"任意数据库"意味着每个引擎打包一个驱动，并为每种方言的排序和类型转换规则重新实现游标语义。真出现 MySQL 源时，它该有自己的模块和自己的游标测试。连接以 `default_transaction_read_only=on` 打开，**DSN 存的是环境变量名而非 DSN 本身**（数据库行里的密码就是每份备份里的密码），表名/列名走严格标识符白名单——标识符不能参数化，只能校验。
+- 数据库源已提供 `GET .../schema`、Admin-only `GET .../preview` 和
+  `GET|POST .../sync`。`preview` 上限 3 行，只返回 type/null/JSON serialized
+  length 的 value-free shape，不要求先批准 mapping；同步采用持久
+  `(timestamp, physical id)` 游标和分块续作。`batchSize` 是每批上限，不是
+  总量 canary，不能用小值假装只同步几行。ingest worker 周期调度 active 且
+  cursor 缺失/idle 的数据库源；running/failed 不自动重复，failed 修复后由运维
+  显式 `POST .../sync` 恢复。
 
 ## 10. P5：中心 Agent（已实现）
 
