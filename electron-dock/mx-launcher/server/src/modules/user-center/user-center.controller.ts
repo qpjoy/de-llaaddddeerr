@@ -358,9 +358,13 @@ export class UserCenterController {
   async issueOverseaSubscriptionLink(
     @Param('userId') userId: string,
     @Headers('authorization') authorization: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
     @Body() rawBody: unknown
   ) {
-    await this.assertUserOverseaAuthorization(userId, authorization);
+    // Admins drive this from the desktop UI, which authenticates with the ops
+    // token rather than a user Bearer -- same posture as the sibling oversea
+    // entitlement routes.
+    await this.assertUserOrOpsAuthorization(userId, authorization, opsToken, USER_OVERSEA_SUBSCRIPTION_SCOPE);
     const body = asRecord(rawBody);
     const issued = await this.store.issueUserOverseaSubscriptionLink(userId, {
       requestedBy: nullableString(body.requestedBy),
@@ -381,18 +385,20 @@ export class UserCenterController {
   @Delete('internal/v1/user-center/users/:userId/oversea/subscription-link')
   async revokeOverseaSubscriptionLink(
     @Param('userId') userId: string,
-    @Headers('authorization') authorization: string | undefined
+    @Headers('authorization') authorization: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
   ) {
-    await this.assertUserOverseaAuthorization(userId, authorization);
+    await this.assertUserOrOpsAuthorization(userId, authorization, opsToken, USER_OVERSEA_SUBSCRIPTION_SCOPE);
     return { revoked: await this.store.revokeUserOverseaSubscriptionLink(userId) };
   }
 
   @Get('internal/v1/user-center/users/:userId/oversea/subscription-link')
   async describeOverseaSubscriptionLink(
     @Param('userId') userId: string,
-    @Headers('authorization') authorization: string | undefined
+    @Headers('authorization') authorization: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
   ) {
-    await this.assertUserOverseaAuthorization(userId, authorization);
+    await this.assertUserOrOpsAuthorization(userId, authorization, opsToken, USER_OVERSEA_SUBSCRIPTION_SCOPE);
     return { link: await this.store.describeUserOverseaSubscriptionLink(userId) };
   }
 

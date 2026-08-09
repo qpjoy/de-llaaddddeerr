@@ -7716,7 +7716,9 @@ async function resolveH2oUserIdFromAccount(options = {}) {
     || normalizeBaseUrl(runtime.config?.bootstrapApiBaseUrl);
   if (!baseUrl) return null;
   try {
-    const payload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/user-center/users'), {
+    // Same public-vs-Internal fallback as the hydrate path: the user directory is
+    // not on Domestic's public allowlist, so the bootstrap base URL 404s here.
+    const { payload } = await h2oRequestInternalJson(baseUrl, '/internal/v1/user-center/users', {
       timeoutMs: 3500,
       bootstrapResolveMode: options.bootstrapResolveMode,
       headers: appCenterCatalogHeaders()
@@ -8041,6 +8043,36 @@ function h2oSubscriptionUrlCandidates(subscription) {
     }
   }
   return uniqueStrings(candidates);
+}
+
+/**
+ * Internal control-plane base URLs, most-reachable first.
+ *
+ * Login hands this module the public bootstrap base URL, but Domestic only
+ * reverse-proxies a tiny allowlist -- user-center paths deliberately are not on
+ * it, so every such call 404s at nginx. Try the caller's base first (it becomes
+ * correct the moment Domestic proxies more), then the Internal address behind WG.
+ */
+function h2oInternalApiBaseUrls(preferredBaseUrl) {
+  return uniqueStrings([
+    normalizeBaseUrl(preferredBaseUrl),
+    normalizeBaseUrl(runtime?.connection?.internalBaseUrl),
+    normalizeBaseUrl(runtime?.config?.internalApiBaseUrl),
+    normalizeBaseUrl(DEFAULT_CONFIG.internalApiBaseUrl)
+  ].filter(Boolean));
+}
+
+/** Same call against each base URL; the first that answers wins. */
+async function h2oRequestInternalJson(preferredBaseUrl, pathName, options = {}) {
+  const failures = [];
+  for (const base of h2oInternalApiBaseUrls(preferredBaseUrl)) {
+    try {
+      return { payload: await requestJson(joinApiUrl(base, pathName), options), baseUrl: base };
+    } catch (err) {
+      failures.push(`${base}: ${errorMessage(err)}`);
+    }
+  }
+  throw new Error(failures.join('；') || `没有可用的 Internal API 地址：${pathName}`);
 }
 
 function h2oSubscriptionRequestHeaders(subscription, subscriptionInput) {
@@ -9079,9 +9111,17 @@ async function provisionH2oOverseaForCurrentUser(input = {}) {
     bootstrapResolveMode: input.bootstrapResolveMode
   });
   if (!userId) throw new Error('Internal OAuth token 没有返回 userId，无法分配 oversea 订阅。');
+  // Read the current grant first so re-provisioning keeps whatever the admin set
+  // in User Center instead of resetting the user to a client-side default.
+  const existingEntitlement = await h2oRequestInternalJson(
+    baseUrl,
+    `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`,
+    { timeoutMs: 5000, bootstrapResolveMode: input.bootstrapResolveMode, headers: appCenterCatalogHeaders() }
+  ).then((result) => result.payload?.entitlement || null).catch(() => null);
   const siteAttempts = await h2oOverseaProvisionSiteAttempts(input, {
     baseUrl,
-    bootstrapResolveMode: input.bootstrapResolveMode
+    bootstrapResolveMode: input.bootstrapResolveMode,
+    entitlementSiteIds: arrayValue(existingEntitlement?.siteIds, [])
   });
   const requestedBy = 'mx-h2i-h2o';
   const requestId = makeRequestId('h2o-oversea');
@@ -9151,11 +9191,22 @@ async function h2oOverseaProvisionSiteAttempts(input = {}, options = {}) {
   ].map((item) => String(item || '').trim()).filter(Boolean);
   if (explicit.length) return [[explicit[0]]];
 
+  // What the admin already granted this user outranks any client-side guess:
+  // re-provisioning used to hard-code oversea-main first, so it silently reverted
+  // an explicit Oversea access change back to a site the admin had moved off.
+  const entitledSiteIds = uniqueStrings(arrayValue(options.entitlementSiteIds, [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean));
+
   const discoveredSiteIds = await discoverH2oOverseaSiteIds(options);
-  const hasOverseaMain = discoveredSiteIds.includes('oversea-main');
-  const candidates = hasOverseaMain || !discoveredSiteIds.length
-    ? ['oversea-main', '', ...discoveredSiteIds.filter((item) => item !== 'oversea-main')]
-    : [discoveredSiteIds[0], '', ...discoveredSiteIds.slice(1), 'oversea-main'];
+  // Internal picks the server default when the site list is empty; keep that as a
+  // fallback rung rather than pinning oversea-main, which may be retired.
+  const candidates = [
+    ...entitledSiteIds,
+    ...discoveredSiteIds,
+    '',
+    'oversea-main'
+  ];
   const seen = new Set();
   return candidates
     .filter((siteId) => {
@@ -9477,7 +9528,7 @@ function h2oUserRuntimeProfileActiveSubscription(profile, subscriptions) {
 async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
   if (!runtime?.apps?.h2o?.runtime || !runtimeHasUserIdentity()) return;
   let current = h2oPluginRuntime(runtime.apps.h2o.runtime);
-  const baseUrl = normalizeBaseUrl(options.baseUrl)
+  let baseUrl = normalizeBaseUrl(options.baseUrl)
     || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
     || await resolveBootstrapBaseUrl(runtime.config);
   const userId = nullableString(options.userId)
@@ -9518,14 +9569,19 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
     await saveAndBroadcast();
   }
   try {
-    const entitlementPayload = await requestJson(
-      joinApiUrl(baseUrl, `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`),
+    const entitlementResult = await h2oRequestInternalJson(
+      baseUrl,
+      `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`,
       {
         timeoutMs: 5000,
         bootstrapResolveMode: options.bootstrapResolveMode,
         headers: appCenterCatalogHeaders()
       }
     );
+    const entitlementPayload = entitlementResult.payload;
+    // Every later call in this function reuses the base URL that actually
+    // answered, so one probe fixes the whole hydrate rather than each call site.
+    baseUrl = entitlementResult.baseUrl;
     let entitlement = entitlementPayload?.entitlement && typeof entitlementPayload.entitlement === 'object'
       ? entitlementPayload.entitlement
       : null;

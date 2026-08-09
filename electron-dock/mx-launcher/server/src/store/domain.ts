@@ -6952,9 +6952,16 @@ function siteSlotDeploymentPhases(
     'fi;',
     'done;',
     'fi;',
+    // `--force-recreate` is required, not defensive: the push above swaps the
+    // /opt/mx/current/<kind> symlink to a fresh release directory, but compose only
+    // sees the unchanged `./<file>` mount string, reports "Running", and leaves the
+    // container bound to the previous release's inode. Without this the bundle lands
+    // on disk while the service keeps serving the old config -- a silent no-op that
+    // looks like a successful deploy. Domestic gets the same treatment inside
+    // manage.sh's start_domestic_edge, so a manual `./manage.sh up` behaves too.
     kind === 'domestic'
       ? 'test -x ./manage.sh || { echo "blocked: Domestic service bundle is missing executable manage.sh"; exit 1; }; ./manage.sh up;'
-      : 'docker compose up -d;',
+      : 'docker compose up -d --force-recreate;',
     'else',
     'echo "slot services bundle has no Docker services selected";',
     'fi;',
