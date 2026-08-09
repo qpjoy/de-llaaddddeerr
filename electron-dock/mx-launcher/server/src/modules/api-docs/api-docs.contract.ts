@@ -244,9 +244,53 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
     { name: 'Permission Center', description: 'AppCenter-aware permission grant evaluation.' },
     { name: 'Release Consumer', description: 'Installed applications check, download, and report sanitized Release Center decisions.' },
     { name: 'Release Publisher', description: 'Product-scoped CI and developer APIs for artifact upload, gated release creation, and approval.' },
-    { name: 'Internal User Operations', description: 'Trusted Internal operations for import, Oversea entitlement and H2O runtime state.' }
+    { name: 'Internal User Operations', description: 'Trusted Internal operations for import, Oversea entitlement and H2O runtime state.' },
+    { name: 'Oversea Subscriptions', description: 'Subscription surfaces for H2O and for third-party clients such as Clash. The two use different credential classes.' },
+    { name: 'Launcher Network', description: 'Product network bootstrap that clients read before they can reach Internal.' }
   ],
   paths: {
+    '/healthz': {
+      get: operation({
+        tag: 'Discovery',
+        summary: '存活探针',
+        description: '唯一在公网 edge 上放行的无认证路径，接入方可以用它确认到 Internal 的链路是通的。'
+          + '它返回 200 不代表 /internal/v1/* 可达——那些走 WG 或 edge allowlist。',
+        operationId: 'healthz',
+        auth: 'public',
+        response: {
+          ok: true,
+          service: 'mx-launcher-server',
+          framework: 'nestjs',
+          ts: '2026-07-20T00:00:00.000Z'
+        }
+      })
+    },
+    '/internal/v1/launcher-network/products/{productId}': {
+      get: operation({
+        tag: 'Launcher Network',
+        summary: '读取产品网络配置',
+        description: '客户端 bootstrap 的第一跳：拿到 DNS、网关和默认站点后才能连进 Internal。'
+          + '这条 GET 在 Domestic edge 的 allowlist 里，所以公网可读；同名 POST 只在 Internal 内可用。',
+        operationId: 'getLauncherProductNetwork',
+        auth: 'public',
+        pathParams: ['productId'],
+        response: {
+          product: {
+            productId: 'mx-h2i',
+            mode: 'embed',
+            productIndex: 1,
+            dnsServer: '10.88.88.88',
+            domesticGatewayIp: '10.88.0.1',
+            serviceVip: '10.88.88.88',
+            userCidr: '10.88.1.0/24',
+            defaultDomesticSiteId: 'domestic-main',
+            defaultOverseaSiteId: 'mx-oversea-hk01',
+            enabled: true,
+            updatedAt: '2026-07-20T00:00:00.000Z'
+          }
+        }
+      })
+    },
     '/internal/v1/sdk/gateway/manifest': {
       get: operation({
         tag: 'Discovery',
@@ -755,6 +799,37 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         }
       })
     },
+    '/internal/v1/user-center/users': {
+      get: operation({
+        tag: 'Internal User Operations',
+        summary: '列出 User Center 用户',
+        description: 'Internal 管理面读取接口，返回权威用户目录。对外集成请用 `/internal/v1/sdk/users`，它有 scope 边界。',
+        operationId: 'listInternalUserCenterUsers',
+        auth: 'internal',
+        response: { users: [userExample] }
+      }),
+      post: operation({
+        tag: 'Internal User Operations',
+        summary: '创建 User Center 用户',
+        description: '创建主体、本地登录凭据和可选的 Oversea 授权。'
+          + '`defaultOverseaSiteIds` 省略时由平台默认站点决定（可在 admin 后台改，不再写死 oversea-main）。',
+        operationId: 'createInternalUserCenterUser',
+        auth: 'internal',
+        request: {
+          account: 'partner-alice',
+          displayName: 'Alice',
+          email: 'alice@example.com',
+          roleIds: ['mx-user'],
+          password: '<初始口令>',
+          provisionOversea: true,
+          defaultOverseaSiteIds: ['mx-oversea-hk01'],
+          requestedBy: 'internal-admin',
+          requestId: 'user-create-001'
+        },
+        required: ['account'],
+        response: { user: userExample }
+      })
+    },
     '/internal/v1/user-center/users/import': {
       post: operation({
         tag: 'Internal User Operations',
@@ -966,6 +1041,113 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         auth: 'internal-bearer',
         pathParams: ['userId'],
         response: 'mixed-port: 7890\nproxies:\n  - name: oversea-main\n    type: hysteria2\n    server: oversea.example.com'
+      })
+    },
+    '/internal/v1/user-center/users/{userId}/oversea/sync-runtime': {
+      post: operation({
+        tag: 'Internal User Operations',
+        summary: '把用户账号同步到远端 Oversea 主机',
+        description: 'Internal 生成 entitlement 之后，目标主机上的 hysteria2 还不认这个账号，必须跑一次同步。'
+          + '需要该站点有 active 的 oversea SSH profile、`SITE_SLOT_WORKER_REMOTE_SSH=1` 和 `confirmRemoteExecution: true`；'
+          + '任一不满足会返回 status=blocked 并在 diagnosis.gateFailures 里列出原因，而不是静默失败。'
+          + '`siteIds` 省略表示同步该用户的全部 active 站点。',
+        operationId: 'syncUserOverseaRuntime',
+        scopes: ['oversea.subscription.ensure'],
+        auth: 'internal',
+        pathParams: ['userId'],
+        request: {
+          siteIds: ['mx-oversea-hk01'],
+          confirmRemoteExecution: true,
+          requestedBy: 'desktop-admin',
+          requestId: 'user-oversea-sync-001'
+        },
+        response: {
+          sync: {
+            status: 'passed',
+            generatedAt: '2026-07-20T00:00:00.000Z',
+            reports: [{
+              reportId: 'useroverseasync_0001',
+              userId: 'usr_partner_alice',
+              siteId: 'mx-oversea-hk01',
+              username: 'mx-oversea-hk01-alice',
+              status: 'passed',
+              exitCode: 0
+            }]
+          },
+          entitlement: entitlementExample
+        }
+      })
+    },
+    '/internal/v1/user-center/users/{userId}/oversea/subscription-link': {
+      post: operation({
+        tag: 'Oversea Subscriptions',
+        summary: '签发或轮换公开订阅链接',
+        description: 'Clash 这类第三方客户端发不了 Bearer，所以给它一条 token 在路径里的只读地址。'
+          + '**明文 token 只在本次响应返回**，之后只能读到元数据。轮换会立即吊销上一条链接。'
+          + '返回的 path 需要自己拼域名：内网用 Internal origin，外网用公网 bootstrap 域名（裸 IP 的 https 在 Domestic ingress 上握手必失败）。',
+        operationId: 'issueUserOverseaSubscriptionLink',
+        scopes: ['oversea.subscription.ensure'],
+        auth: 'internal',
+        pathParams: ['userId'],
+        request: { requestedBy: 'desktop-admin', requestId: 'oversea-link-001' },
+        response: {
+          link: {
+            path: '/internal/v1/oversea-subscriptions/mx-v1-<token>.yaml',
+            token: 'mx-v1-<仅本次响应返回的随机值>',
+            tokenId: 'tok_0123456789abcdef',
+            issuedAt: '2026-07-20T00:00:00.000Z',
+            expiresAt: '2026-10-18T00:00:00.000Z',
+            note: 'Copy this URL now; only its metadata is retrievable afterwards.'
+          }
+        }
+      }),
+      get: operation({
+        tag: 'Oversea Subscriptions',
+        summary: '查看公开链接的元数据',
+        description: '只返回签发时间和过期时间，永远不会返回明文 token。没有链接时返回 null。',
+        operationId: 'describeUserOverseaSubscriptionLink',
+        scopes: ['oversea.subscription.ensure'],
+        auth: 'internal',
+        pathParams: ['userId'],
+        response: { link: { issuedAt: '2026-07-20T00:00:00.000Z', expiresAt: '2026-10-18T00:00:00.000Z' } }
+      }),
+      delete: operation({
+        tag: 'Oversea Subscriptions',
+        summary: '吊销公开链接',
+        description: '立即失效，使用该 URL 的第三方客户端会停止更新。H2O 走 Bearer，不受影响。',
+        operationId: 'revokeUserOverseaSubscriptionLink',
+        scopes: ['oversea.subscription.ensure'],
+        auth: 'internal',
+        pathParams: ['userId'],
+        response: { revoked: 1 }
+      })
+    },
+    '/internal/v1/oversea-subscriptions/{token}.yaml': {
+      get: operation({
+        tag: 'Oversea Subscriptions',
+        summary: '公开的聚合订阅（Clash 直接粘这条）',
+        description: '**URL 本身就是凭据**：路径里的 token 可吊销、只能读自己那份订阅，且不含 userId。'
+          + '返回和 H2O 相同的多节点 YAML——`Oversea` 是 select 组，默认走列表第一个节点（平台默认站点），其余可手动切换。'
+          + '这是唯一在公网 edge 放行的用户订阅形态；Bearer 保护的 user-center 订阅永远不会开到公网。'
+          + '无效、过期或已吊销的 token 一律返回 404，不区分——避免探测出 token 是否存在过。',
+        operationId: 'getPublicOverseaSubscription',
+        auth: 'public',
+        pathParams: ['token'],
+        responseContentType: 'text/yaml',
+        response: 'proxies:\n  - name: "mx-oversea-hk01-hysteria2"\n    type: hysteria2\nproxy-groups:\n  - name: Oversea\n    type: select\n    proxies:\n      - "mx-oversea-hk01-hysteria2"\n      - "oversea-main-hysteria2"\n      - DIRECT\nrules:\n  - MATCH,Oversea'
+      })
+    },
+    '/internal/v1/site-slots/{siteId}/subscriptions/hysteria2/{username}.yaml': {
+      get: operation({
+        tag: 'Oversea Subscriptions',
+        summary: '单站点单账号订阅',
+        description: 'URL 即凭据的单节点订阅，用于只想连某一台机器的场景。'
+          + '想要多节点和可切换，用上面的聚合链接；这条不会随 entitlement 增减节点而变化。',
+        operationId: 'getSiteSlotHysteria2Subscription',
+        auth: 'public',
+        pathParams: ['siteId', 'username'],
+        responseContentType: 'text/yaml',
+        response: 'proxies:\n  - name: "mx-oversea-hk01-hysteria2"\n    type: hysteria2\n    server: hk01.example.com'
       })
     },
     '/internal/v1/user-center/users/{userId}/h2o/runtime-profile': {
@@ -1408,7 +1590,10 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
   'x-mx-context': {
     authority: 'V2 MX-H2I uses Internal as the control-plane authority for users, permissions, DNS and configuration.',
     compatibility: 'V1 HDO remains online through electron-server and /api/v1/hdo/*; it is a compatibility surface, not the target integration contract.',
-    publicBoundary: 'Port 18090 is an Internal/Domestic-relay surface. Do not publish it directly to the public Internet.',
+    publicBoundary: 'Port 18090 is an Internal/Domestic-relay surface. Do not publish it directly to the public Internet. '
+      + 'Only a strict allowlist reaches the public edge: /healthz, the OAuth bootstrap routes, GET launcher-network/products/{id}, '
+      + 'and the two URL-is-the-credential subscription shapes (oversea-subscriptions/{token}.yaml and site-slots/.../hysteria2/{user}.yaml). '
+      + 'The Bearer-guarded user-center subscription must never be added to that allowlist.',
     onlinePath: '/docs/api/',
     openApiPath: '/docs/api/openapi.json',
     markdownPath: '/docs/api/mx-launcher-api.md'

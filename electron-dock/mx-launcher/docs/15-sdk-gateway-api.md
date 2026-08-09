@@ -18,6 +18,34 @@ http://<internal-host>:18090/docs/api/mx-launcher-api.md
 reverse proxy 到 mx-launcher server，因此不需要额外增加 gateway path；SDK Gateway
 manifest 的 `sdk.documentationUrl`、`sdk.openApiUrl`、`sdk.markdownUrl` 也可用于运行时发现。
 
+### 换一个好记的域名（`h2i.api.mxinfo-inc.cn`）
+
+`/docs/api/` 由 mx-launcher server 自己挂载，**不存在单独的文档站**：换域名等于给
+Internal API 加一条内网 DNS 反代路由，而不是部署新服务。所以直接访问
+`http://h2i.api.mxinfo-inc.cn/docs/api/` 打不开是正常的——那条记录还没建。
+
+```bash
+curl -sS -X POST "$MX_INTERNAL/internal/v1/dns/reverse-proxy/routes" -H "x-mx-ops-token: $MX_OPS_TOKEN" -H 'content-type: application/json' -d '{"host":"h2i.api.mxinfo-inc.cn","dnsTarget":"10.88.88.88","targetUrl":"http://10.88.88.88:18090","tlsMode":"internal","authRequired":false,"requestedBy":"ops"}'
+```
+
+建完要 `POST /internal/v1/dns/zones/build` 重建 zone，再让 gateway 生效；`10.88.88.88`
+按实际 serviceVip 替换。两个注意点：
+
+- **别用 `api.mxinfo-inc.cn`**：那条是 V1 HDO 的记录（指向 `100.89.0.12`），动它会断线上用户。
+  `h2i.api.` 是新的三级域名，互不影响。
+- **文档站只走内网。** 18090 属于 Internal/Domestic relay 面，公网 edge 的 allowlist 里
+  没有也不应该有 `/docs/*`；接入方要看文档就得先连上 WG。
+
+### 覆盖范围
+
+契约目前收录 44 条 path / 53 个 operation，覆盖 SDK Gateway、OAuth、User Center、
+AppCenter、Release Center、Oversea 订阅和 Launcher Network bootstrap。服务端实际路由
+远多于此（约 200 个 handler），未收录的基本是 admin/运维专用面——**它们刻意不进契约**，
+避免第三方按内部运维接口集成。新增对外接口时，同时改
+`server/src/modules/api-docs/api-docs.contract.ts`，`pnpm run test:api-docs` 会校验
+operationId 唯一、tag 声明与使用一致、path 参数齐全，以及 Bearer 保护的用户订阅没有被
+误标成 public。
+
 该入口属于 Internal/Domestic relay 网络面，不得直接暴露到公网。用户调用使用 active
 `mx-sdk` Bearer；users/roles/service-accounts 管理接口以及 AppCenter 应用写入/删除还要求
 Internal 运维凭据 `x-mx-ops-token`。仍有部分 V1 shadow SDK route 依赖 gateway access
