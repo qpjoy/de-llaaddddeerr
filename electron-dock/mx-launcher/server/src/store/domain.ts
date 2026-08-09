@@ -206,6 +206,11 @@ const HYSTERIA2_CLIENT_DOWNLOAD = '30 Mbps';
 const HYSTERIA2_CLIENT_UPLOAD = '30 Mbps';
 const HYSTERIA2_CLIENT_ALPN = 'h3';
 const HYSTERIA2_CLIENT_DNS = ['223.5.5.5', '119.29.29.29', '1.1.1.1', '8.8.8.8'];
+/** 健康探测必须是「墙外可达且国内不可达」的地址，否则节点挂了探测仍然算通过。 */
+const OVERSEA_HEALTH_CHECK_URL = 'http://www.gstatic.com/generate_204';
+const OVERSEA_HEALTH_CHECK_INTERVAL_SECONDS = 300;
+const OVERSEA_AUTO_GROUP = 'Oversea-Auto';
+const OVERSEA_SELECT_GROUP = 'Oversea';
 const HYSTERIA2_LOCAL_DIRECT_RULES = [
   'DOMAIN-SUFFIX,local,DIRECT',
   'IP-CIDR,127.0.0.0/8,DIRECT,no-resolve',
@@ -8031,6 +8036,35 @@ function normalizeNonNegativeInteger(value: unknown, fallback: number): number {
   return Number.isInteger(number) && number >= 0 ? number : fallback;
 }
 
+/**
+ * 多节点时先给一个 `fallback` 组：它按列表顺序健康探测，当前节点不通就自动顺延到下一个，
+ * 不需要用户手动切。`Oversea` 仍然是 select 组，只是把 Auto 放在第一位——
+ * 没手动选过就是「自动按顺序」，想固定某台机器仍然可以在组里点它。
+ *
+ * 单节点时不生成 Auto 组：一个节点没有可顺延的对象，多一层只会让 UI 里多一个假选项。
+ */
+function overseaProxyGroupLines(proxyNames: string[]): string[] {
+  const autoGroup = proxyNames.length > 1
+    ? [
+        `  - name: ${OVERSEA_AUTO_GROUP}`,
+        '    type: fallback',
+        `    url: ${yamlQuote(OVERSEA_HEALTH_CHECK_URL)}`,
+        `    interval: ${OVERSEA_HEALTH_CHECK_INTERVAL_SECONDS}`,
+        '    proxies:',
+        ...proxyNames.map((proxyName) => `      - ${yamlQuote(proxyName)}`)
+      ]
+    : [];
+  return [
+    ...autoGroup,
+    `  - name: ${OVERSEA_SELECT_GROUP}`,
+    '    type: select',
+    '    proxies:',
+    ...(autoGroup.length ? [`      - ${yamlQuote(OVERSEA_AUTO_GROUP)}`] : []),
+    ...proxyNames.map((proxyName) => `      - ${yamlQuote(proxyName)}`),
+    '      - DIRECT'
+  ];
+}
+
 export function renderUserOverseaMihomoSubscription(
   user: UserCenterUser,
   entitlement: UserOverseaEntitlement,
@@ -8083,11 +8117,7 @@ export function renderUserOverseaMihomoSubscription(
     'proxies:',
     ...proxyLines,
     'proxy-groups:',
-    '  - name: Oversea',
-    '    type: select',
-    '    proxies:',
-    ...proxyNames.map((proxyName) => `      - ${yamlQuote(proxyName)}`),
-    '      - DIRECT',
+    ...overseaProxyGroupLines(proxyNames),
     'rules:',
     ...HYSTERIA2_LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`),
     ...reservedInternalCidrs.map((cidr) => `  - IP-CIDR,${cidr},DIRECT,no-resolve`),

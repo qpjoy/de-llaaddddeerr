@@ -38,6 +38,10 @@ const {
   reconcileRuntimeUpdateWithInstalledVersion
 } = require('./update-state-policy.cjs');
 const {
+  decideClashLinkAction,
+  resolveEffectiveProxyNode
+} = require('./clash-link-policy.cjs');
+const {
   extractNpmTarball,
   normalizePluginSources,
   pluginDownloadPlan,
@@ -241,6 +245,8 @@ const WINDOW_BOUNDS_SAVE_DELAY_MS = 420;
 const WINDOW_DRAG_SIZE_BATCH_MS = 80;
 const H2O_PROXY_START_TIMEOUT_MS = 12_000;
 const H2O_PORT_RELEASE_TIMEOUT_MS = 8_000;
+// 订阅里 MATCH 指向的那个 select 组；Internal 渲染订阅时用的是同一个名字。
+const H2O_OVERSEA_SELECT_GROUP = 'Oversea';
 const H2O_MANAGED_SUBSCRIPTION_REFRESH_MS = 30_000;
 
 app.setAppUserModelId(APP_ID);
@@ -1596,6 +1602,26 @@ function registerIpc() {
         : 'H2O 运行配置已更新。'
     };
     touchRuntime('h2o runtime updated');
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:issue-h2o-clash-link', async (_event, input = {}) => {
+    try {
+      const issued = await issueH2oClashSubscriptionLink(input);
+      const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
+      runtime.apps.h2o.runtime = h2oPluginRuntime({
+        ...current,
+        clashLink: { url: issued.url, expiresAt: issued.expiresAt, issuedAt: nowIso() }
+      });
+      runtime.feedback = {
+        tone: 'success',
+        message: 'Clash 订阅链接已生成，可直接复制到 Clash。旧链接同时失效。'
+      };
+      pushAppLog('h2o', 'info', 'H2O clash subscription link issued.');
+    } catch (err) {
+      runtime.feedback = { tone: 'warning', message: `生成 Clash 订阅链接失败：${errorMessage(err)}` };
+      pushAppLog('h2o', 'warning', `H2O clash subscription link failed: ${errorMessage(err)}`);
+    }
     await saveAndBroadcast();
     return visibleRuntime();
   });
@@ -7459,9 +7485,27 @@ function h2oPluginRuntime(input) {
     subscriptions,
     rules: normalizeH2oRules(row.rules),
     metrics: normalizeH2oMetrics(row.metrics),
+    clashLink: normalizeH2oClashLink(row.clashLink),
+    // 用户选的是 selectedNode，实际出流量的是 activeNode——开了自动顺延时两者会不一样。
+    activeNode: nullableString(row.activeNode),
     startedAt: nullableString(row.startedAt),
     lastAppliedAt: nullableString(row.lastAppliedAt)
   };
+}
+
+/**
+ * 只保存可复制的地址和有效期；token 本身就在 URL 里，不额外留副本。
+ *
+ * `url` 为空但有 issuedAt/expiresAt 是一个有意义的状态：服务端有活跃链接，但明文只在
+ * 签发那一次返回过，本机没有副本——UI 要能把「还没有链接」和「有链接但看不到」分开说。
+ */
+function normalizeH2oClashLink(value) {
+  const row = value && typeof value === 'object' ? value : {};
+  const url = nullableString(row.url);
+  const issuedAt = nullableString(row.issuedAt);
+  const expiresAt = nullableString(row.expiresAt);
+  if (!url && !issuedAt && !expiresAt) return null;
+  return { url, issuedAt, expiresAt };
 }
 
 function normalizeH2oSubscriptions(value, activeSubscription) {
@@ -8254,6 +8298,26 @@ async function h2oTunnelTrafficSummary(manager = h2oTunnelManager) {
   }
 }
 
+/**
+ * 问 mihomo「现在实际在用哪个节点」。
+ *
+ * 不能直接显示用户选的那个：Oversea 是 select 组，选中 Oversea-Auto 时真正出流量的是
+ * fallback 组按健康探测顺延到的节点，可能已经不是列表里的第一个了。
+ * 所以顺着 group -> now 一路走到底，走到非组为止。
+ */
+async function h2oActiveProxyNode(manager = h2oTunnelManager) {
+  const api = manager?.api;
+  if (!api || typeof api.proxies !== 'function') return null;
+  try {
+    const response = await api.proxies();
+    const proxies = response?.ok ? response.data?.proxies : null;
+    if (!proxies || typeof proxies !== 'object') return null;
+    return resolveEffectiveProxyNode(proxies, H2O_OVERSEA_SELECT_GROUP);
+  } catch (_err) {
+    return null;
+  }
+}
+
 function h2oTunnelRecentProblem(manager = h2oTunnelManager) {
   if (!manager || typeof manager.listEvents !== 'function') return '';
   try {
@@ -8636,9 +8700,14 @@ async function refreshH2oRuntimeTrafficSnapshot(reason = 'traffic-refresh') {
   const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
   const traffic = await h2oTunnelTrafficSummary();
   const metrics = h2oMetricsFromTunnelTraffic(traffic, current.metrics);
+  const activeNode = await h2oActiveProxyNode();
+  if (activeNode && current.activeNode && activeNode !== current.activeNode) {
+    pushAppLog('h2o', 'info', `H2O oversea traffic moved to ${activeNode} (was ${current.activeNode}).`);
+  }
   runtime.apps.h2o.runtime = h2oPluginRuntime({
     ...current,
     metrics,
+    activeNode: activeNode || current.activeNode,
     lastAppliedAt: nowIso()
   });
   pushAppLog('h2o', 'info', `H2O traffic snapshot refreshed: ${reason}.`);
@@ -9735,6 +9804,7 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
     if (resolvedUrl !== subscriptionFetchUrl) {
       pushAppLog('h2o', 'info', `H2O subscription resolved via fallback URL: ${resolvedUrl}`);
     }
+    await ensureH2oClashSubscriptionLink({ baseUrl, bootstrapResolveMode: options.bootstrapResolveMode });
     applyH2oManagedSubscriptionState(current, {
       entitlement,
       status: 'ready',
@@ -9823,6 +9893,9 @@ function applyH2oManagedSubscriptionState(current, input = {}) {
     activeSubscription,
     activeSubscriptionId: activeSubscription.id,
     status: nextStatus,
+    // `current` 是调用方更早拿的快照，而 clashLink 可能在那之后才写进来（水合时顺带签发的）。
+    // 不显式取实时值的话，这次覆盖会把刚拿到的链接冲掉。
+    clashLink: h2oPluginRuntime(runtime.apps.h2o.runtime).clashLink || current.clashLink || null,
     lastAppliedAt: now
   });
   if (input.status === 'ready') {
@@ -9930,6 +10003,86 @@ function firstH2oOverseaSyncReason(accounts) {
   const rows = Array.isArray(accounts) ? accounts : [];
   const account = rows.find((item) => item?.runtimeSync?.reason) || rows[0];
   return nullableString(account?.runtimeSync?.reason);
+}
+
+/**
+ * 聚合订阅（System Oversea 默认订阅）的地址**不能给 Clash 用**：
+ * 它要 Bearer，而且 Domestic edge 的 allowlist 故意不放行 /internal/v1/user-center/*，
+ * 所以粘到 Clash 里只会 404。第三方客户端要用的是 token 在路径里的 public link。
+ *
+ * 这里按用户自己的 Bearer 签发/轮换那条链接（scope: oversea.subscription.ensure），
+ * 明文 token 只在签发响应里出现一次，所以拿到就直接存进 runtime 供复制。
+ */
+/**
+ * 水合订阅时顺带备好那条可复制的 token 链接，这样默认订阅那一行直接就有能用的地址，
+ * 不用用户先去点一次按钮。
+ *
+ * **绝不静默轮换**：签发会吊销上一条，已经配进 Clash 的订阅会当场失效。
+ * 所以只在「服务端没有活跃链接」且「本机也没有副本」时才签发；服务端有链接但本机没有
+ * 明文（明文只在签发响应里出现一次，换了台机器就拿不回来）时保持为空，由 UI 说明要重新生成。
+ */
+async function ensureH2oClashSubscriptionLink(input = {}) {
+  try {
+    const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
+    if (decideClashLinkAction({ local: current.clashLink }) === 'reuse') return current.clashLink;
+    const baseUrl = normalizeBaseUrl(input?.baseUrl)
+      || normalizeBaseUrl(runtime.connection?.internalBaseUrl);
+    const userId = await h2oCurrentUserId({ baseUrl, bootstrapResolveMode: input.bootstrapResolveMode });
+    if (!userId) return null;
+    const remote = await h2oRequestInternalJson(
+      baseUrl,
+      `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription-link`,
+      { timeoutMs: 5000, bootstrapResolveMode: input.bootstrapResolveMode, headers: appCenterCatalogHeaders() }
+    ).then((result) => result.payload?.link || null).catch(() => null);
+    const action = decideClashLinkAction({ local: current.clashLink, remote });
+    if (action === 'remote-only') {
+      // 有链接但本机没有明文：宁可让用户显式重新生成，也不要替他把旧链接作废。
+      runtime.apps.h2o.runtime = h2oPluginRuntime({
+        ...h2oPluginRuntime(runtime.apps.h2o.runtime),
+        clashLink: { url: null, issuedAt: nullableString(remote.issuedAt), expiresAt: nullableString(remote.expiresAt) }
+      });
+      return null;
+    }
+    const issued = await issueH2oClashSubscriptionLink(input);
+    runtime.apps.h2o.runtime = h2oPluginRuntime({
+      ...h2oPluginRuntime(runtime.apps.h2o.runtime),
+      clashLink: { url: issued.url, expiresAt: issued.expiresAt, issuedAt: nowIso() }
+    });
+    pushAppLog('h2o', 'info', 'H2O clash subscription link provisioned during hydrate.');
+    return issued;
+  } catch (err) {
+    // 这是锦上添花的一步，取不到不该影响订阅本身。
+    pushAppLog('h2o', 'info', `H2O clash subscription link skipped: ${errorMessage(err)}`);
+    return null;
+  }
+}
+
+async function issueH2oClashSubscriptionLink(input = {}) {
+  const baseUrl = normalizeBaseUrl(input?.baseUrl)
+    || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
+    || await resolveBootstrapBaseUrl(runtime.config);
+  const userId = await h2oCurrentUserId({ baseUrl, bootstrapResolveMode: input.bootstrapResolveMode });
+  if (!userId) throw new Error('需要先登录员工用户才能签发 Clash 订阅链接。');
+  const { payload } = await h2oRequestInternalJson(
+    baseUrl,
+    `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription-link`,
+    {
+      method: 'POST',
+      timeoutMs: 8000,
+      bootstrapResolveMode: input.bootstrapResolveMode,
+      headers: appCenterCatalogHeaders(),
+      body: {
+        requestedBy: 'mx-h2i-h2o',
+        requestId: makeRequestId('h2o-clash-link')
+      }
+    }
+  );
+  const path = nullableString(payload?.link?.path);
+  if (!path) throw new Error('Internal 没有返回可用的订阅链接。');
+  // public link 必须走公网域名：裸 IP 的 https 在 Domestic ingress 上 SNI 握手必失败。
+  const url = h2oManagedSubscriptionUrl(path, { baseUrl });
+  if (!url) throw new Error('无法拼出可用的订阅链接地址。');
+  return { url, expiresAt: nullableString(payload?.link?.expiresAt) };
 }
 
 function h2oManagedSubscriptionUrl(pathName, options = {}) {

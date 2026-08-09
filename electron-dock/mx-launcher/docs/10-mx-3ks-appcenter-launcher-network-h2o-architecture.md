@@ -561,6 +561,14 @@ GET /internal/v1/user-center/users/{userId}/oversea/subscription.yaml   ← 每�
 
 - 只有 `account.status === 'active'` 的站点会进 `proxies`，所以增删机器不改 URL。
 - 规则指向 `Oversea` 这个 select 组，H2O 换节点只是改组内选择，URL 和规则都不动。
+- **多节点时先出一个 `Oversea-Auto` fallback 组**（单节点不生成，没有可顺延的对象）：
+  它按列表顺序健康探测（`http://www.gstatic.com/generate_204`，300s），当前节点不通就
+  自动顺延到下一个，恢复后自动切回靠前的。`Oversea` 仍是 select 组，只是把 `Oversea-Auto`
+  放在第一位——**没手动选过 = 自动顺延，想固定某台机器仍可在组里点它**；`MATCH` 依旧指向
+  `Oversea`，手动切换的入口没被顶掉。
+- H2O 界面区分「用户选的」和「实际在出流量的」：后者顺着 mihomo `/proxies` 的
+  `group -> now` 一路解析到非组为止（`resolveEffectiveProxyNode`，带跳数上限防成环）。
+  两者不一致时会明说「已自动顺延到 X（所选 Y 当前探测不通）」，免得用户以为切换没生效。
 - **`select` 组没有测速也不会自动挑**：客户端没手动选过时，默认走 `proxies` 里的第一个。
   这个顺序原来等于 `entitlement.siteIds` 的字母序（`mx-oversea-hk01` 排在 `oversea-main`
   前面纯属巧合，换成 `oversea-sg-1` 就是 `oversea-main` 胜出）。现在渲染时把**平台默认
@@ -598,6 +606,18 @@ allowlist 单独放行了这一条（`@publicOverseaAggregate`），所以它和
 | --- | --- |
 | 内网 / VPN | `http://10.88.88.88:18090/internal/v1/oversea-subscriptions/{token}.yaml` |
 | 外网 / 公网 | `https://h2i.minsight-ai.com/internal/v1/oversea-subscriptions/{token}.yaml` |
+
+**H2O 订阅列表里那三条地址不是一回事**，别混着复制：
+
+| 行 | 地址形态 | 能不能粘进 Clash |
+| --- | --- | --- |
+| System Oversea 默认订阅 | `/internal/v1/user-center/.../subscription.yaml` | **不能**。要 Bearer，且公网 allowlist 永不放行，粘过去必 404 |
+| `{siteId}` 用户订阅 | `/internal/v1/site-slots/.../hysteria2/{user}.yaml` | 能，但只有单节点，不随 entitlement 增减 |
+| 生成 Clash 链接 | `/internal/v1/oversea-subscriptions/{token}.yaml` | 能，且是多节点聚合——**要多节点就用这条** |
+
+所以 H2O 在默认订阅那一行直接标注「这条地址需要登录态」，并提供「生成 Clash 链接」
+按钮：用当前用户自己的 Bearer（scope `oversea.subscription.ensure`）调 subscription-link
+签发，明文 token 只在响应里出现一次，拿到即写进 runtime 供复制。重新生成会吊销旧链接。
 
 admin UI 的 User Center → Oversea access → Public Link 会在签发后同时给出这两个地址，
 各带一个 Copy 按钮；外网那条必须走域名（裸 IP 的 https 在 Domestic ingress 上 SNI 握手

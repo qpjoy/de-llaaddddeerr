@@ -18,6 +18,7 @@ const api = {
   selectH2oNode: (name) => ipcRenderer.invoke('mx-h2i:select-h2o-node', name),
   updateH2oRuntime: (patch) => ipcRenderer.invoke('mx-h2i:update-h2o-runtime', patch),
   refreshH2oSubscription: (input) => ipcRenderer.invoke('mx-h2i:refresh-h2o-subscription', input),
+  issueH2oClashLink: (input) => ipcRenderer.invoke('mx-h2i:issue-h2o-clash-link', input),
   provisionH2oOversea: (input) => ipcRenderer.invoke('mx-h2i:provision-h2o-oversea', input),
   openH2oTestWindow: (input) => ipcRenderer.invoke('mx-h2i:open-h2o-test-window', input),
   checkUpdates: () => ipcRenderer.invoke('mx-h2i:check-updates'),

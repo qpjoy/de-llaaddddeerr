@@ -397,6 +397,18 @@ root.addEventListener('click', (event) => {
     });
     return;
   }
+  if (action === 'issueH2oClashLink') {
+    // 轮换会立即作废已经配进 Clash 的那条，别让它变成一次误点。
+    const existing = h2oRuntime().clashLink;
+    if (existing && !window.confirm('重新生成 Clash 订阅链接？\n\n当前链接会立即失效，已经配置过的 Clash 需要重新粘贴。')) return;
+    void runAction('issueH2oClashLink', {});
+    return;
+  }
+  if (action === 'copyH2oClashLink') {
+    const url = h2oRuntime().clashLink?.url || '';
+    if (url) void copyH2oClashLink(url);
+    return;
+  }
   if (action === 'refreshH2oSubscription') {
     const runtime = h2oRuntime();
     const subscriptionId = button.dataset.subscriptionId || runtime.activeSubscription.id;
@@ -709,6 +721,7 @@ async function runAction(action, payload) {
       selectH2oNode: () => api.selectH2oNode?.(payload),
       updateH2oRuntime: () => api.updateH2oRuntime?.(payload),
       refreshH2oSubscription: () => api.refreshH2oSubscription?.(payload),
+      issueH2oClashLink: () => api.issueH2oClashLink?.(payload),
       provisionH2oOversea: () => api.provisionH2oOversea?.(payload),
       openH2oTestWindow: () => api.openH2oTestWindow?.(payload),
       checkUpdates: () => api.checkUpdates(),
@@ -2439,6 +2452,7 @@ function renderH2oSubscriptionManager(runtime, connected) {
             <div>
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.url)}</span>
+              ${h2oSubscriptionNeedsBearer(item) ? renderH2oClashLink(runtime, connected, currentUserReady, busyAction) : ''}
             </div>
             <div class="h2o-subscription-meta">
               <span>${escapeHtml(h2oSubscriptionBadge(item))}</span>
@@ -2671,22 +2685,41 @@ function renderH2oNodePanel(runtime) {
     `;
   }
   const selected = runtime.selectedNode || nodes[0].name;
+  const activeNode = runtime.running ? runtime.activeNode : null;
   return `
     <section class="h2o-port-panel">
       <div class="panel-head">
         <div>
           <h4>出海节点</h4>
-          <p>${escapeHtml(`${nodes.length} 个可用节点`)}</p>
+          <p>${escapeHtml(h2oNodeSummary(nodes, activeNode))}</p>
         </div>
       </div>
       <div class="h2o-mode-grid">
-        ${nodes.map((node) => `<button class="${node.name === selected ? 'is-active' : ''}" type="button" data-action="selectH2oNode" data-node="${escapeAttr(node.name)}" title="${escapeAttr(h2oNodeDetail(node))}">${escapeHtml(node.name)}</button>`).join('')}
+        ${nodes.map((node) => `<button class="${node.name === selected ? 'is-active' : ''} ${node.name === activeNode ? 'is-live' : ''}" type="button" data-action="selectH2oNode" data-node="${escapeAttr(node.name)}" title="${escapeAttr(h2oNodeDetail(node))}">${escapeHtml(node.name)}${node.name === activeNode ? ' ·' : ''}</button>`).join('')}
       </div>
-      <p class="h2o-manager-note">${escapeHtml(runtime.running
-        ? '运行中切换会通过控制接口即时生效，不会断开已有连接。'
-        : '当前未运行，所选节点在下次启动时生效。')}</p>
+      <p class="h2o-manager-note">${escapeHtml(h2oNodeNote(runtime, nodes, selected, activeNode))}</p>
     </section>
   `;
+}
+
+function h2oNodeSummary(nodes, activeNode) {
+  const base = `${nodes.length} 个可用节点`;
+  return activeNode ? `${base}｜当前出流量：${activeNode}` : base;
+}
+
+/**
+ * 多节点订阅带一个 fallback 组：当前节点探测不通会自动顺延到下一个，
+ * 所以「用户选的」和「实际在用的」可能不一致——这时候要说清楚，别让用户以为切换没生效。
+ */
+function h2oNodeNote(runtime, nodes, selected, activeNode) {
+  if (!runtime.running) return '当前未运行，所选节点在下次启动时生效。';
+  if (activeNode && activeNode !== selected) {
+    return `已自动顺延到 ${activeNode}（所选 ${selected} 当前探测不通）。恢复后会自动切回按顺序靠前的节点。`;
+  }
+  if (nodes.length > 1) {
+    return '运行中切换即时生效，不断开已有连接；未手动指定时按订阅顺序自动选择可用节点。';
+  }
+  return '运行中切换会通过控制接口即时生效，不会断开已有连接。';
 }
 
 function h2oNodeDetail(node) {
@@ -2859,6 +2892,8 @@ function h2oRuntime(app = state.apps?.h2o) {
     subscriptions,
     rules: normalizeH2oRules(runtime.rules),
     metrics: normalizeH2oMetrics(runtime.metrics),
+    clashLink: normalizeH2oClashLinkUi(runtime.clashLink),
+    activeNode: runtime.activeNode || null,
     startedAt: runtime.startedAt || null,
     lastAppliedAt: runtime.lastAppliedAt || null
   };
@@ -2934,6 +2969,51 @@ function normalizeH2oSubscription(input) {
     pinnedAt: row.pinnedAt || null,
     lastUpdatedAt: row.lastUpdatedAt || new Date().toISOString()
   };
+}
+
+/**
+ * 聚合订阅走 Bearer，H2O 自己能取，但**复制到 Clash 一定 404**：
+ * /internal/v1/user-center/* 不在公网 edge 的 allowlist 里，Clash 也发不了 Bearer。
+ * 单站点订阅（site-slots/...）则是 URL 即凭据，可以直接复制。
+ */
+function h2oSubscriptionNeedsBearer(item) {
+  return /\/internal\/v1\/user-center\//.test(String(item?.url || ''));
+}
+
+function normalizeH2oClashLinkUi(value) {
+  const row = value && typeof value === 'object' ? value : {};
+  const url = row.url ? String(row.url) : null;
+  const issuedAt = row.issuedAt ? String(row.issuedAt) : null;
+  const expiresAt = row.expiresAt ? String(row.expiresAt) : null;
+  if (!url && !issuedAt && !expiresAt) return null;
+  return { url, issuedAt, expiresAt };
+}
+
+/**
+ * 默认订阅那条地址要登录态，Clash 用不了；这里直接给出 token 在路径里的等价地址。
+ * 水合时已经自动备好，所以正常情况下用户打开就能复制，不用先点按钮。
+ */
+function renderH2oClashLink(runtime, connected, currentUserReady, busyAction) {
+  const link = runtime.clashLink || null;
+  const busy = busyAction === 'issueH2oClashLink';
+  const disabled = !connected || !currentUserReady || busy;
+  const issuedElsewhere = Boolean(link && !link.url);
+  return `
+    <div class="h2o-clash-link">
+      <small>上面那条要登录态，复制到 Clash 会 404。Clash 请用下面这条（token 在地址里，直接 GET）。</small>
+      ${link?.url ? `<code data-clash-link>${escapeHtml(link.url)}</code>` : ''}
+      ${issuedElsewhere
+        ? '<small>这个账号已经有一条链接，但明文只在生成时显示过一次，本机没有副本。重新生成会让旧链接立即失效。</small>'
+        : ''}
+      <div class="toolbar-actions">
+        <button class="secondary-button" type="button" data-action="issueH2oClashLink" ${disabled ? 'disabled' : ''}>
+          ${busy ? '生成中' : link?.url || issuedElsewhere ? '重新生成' : '生成 Clash 链接'}
+        </button>
+        ${link?.url ? '<button class="secondary-button" type="button" data-action="copyH2oClashLink">复制</button>' : ''}
+      </div>
+      ${link?.expiresAt ? `<small>有效期至 ${escapeHtml(formatDateTime(link.expiresAt))}${link.url ? '；重新生成会让旧链接立即失效。' : ''}</small>` : ''}
+    </div>
+  `;
 }
 
 function h2oIsManagedSubscriptionIdUi(id) {
@@ -3684,6 +3764,29 @@ async function copyInstallationId() {
         message: 'installId 复制失败，请手动选中本机身份里的 installId。'
       }
     };
+  }
+  render();
+}
+
+async function copyH2oClashLink(url) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+    } else {
+      const input = document.createElement('textarea');
+      input.value = url;
+      input.setAttribute('readonly', '');
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      input.remove();
+    }
+    state = { ...state, feedback: { tone: 'success', message: 'Clash 订阅链接已复制。' } };
+  } catch {
+    // 链接就在上面的 code 块里，手动选中即可，不必把 URL 再塞进提示。
+    state = { ...state, feedback: { tone: 'warning', message: '复制失败，请手动选中上面的订阅链接。' } };
   }
   render();
 }

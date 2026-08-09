@@ -2601,6 +2601,12 @@ button:disabled {
   color: var(--primary);
 }
 
+/* 实际在出流量的节点。自动顺延时它可能不是用户选中的那个，所以要能同时看出两者。 */
+.h2o-mode-grid button.is-live {
+  border-color: rgba(43, 246, 210, 0.62);
+  color: var(--primary);
+}
+
 .h2o-manager-view {
   display: grid;
   align-content: start;
@@ -2789,6 +2795,34 @@ button:disabled {
 
 .h2o-subscription-list article.is-disabled {
   opacity: 0.58;
+}
+
+.h2o-clash-link {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(43, 246, 210, 0.28);
+  border-radius: 8px;
+  background: rgba(43, 246, 210, 0.05);
+}
+
+.h2o-clash-link small {
+  color: var(--muted, #9aa0aa);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.h2o-clash-link code {
+  overflow-wrap: anywhere;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(10, 12, 17, 0.6);
+  color: #ffd46b;
+  font-size: 11px;
+  white-space: normal;
 }
 
 .h2o-subscription-list strong,
