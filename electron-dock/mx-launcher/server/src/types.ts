@@ -2842,6 +2842,40 @@ export interface UserOverseaEntitlementInput {
   requestId?: string | null;
 }
 
+export interface UserOverseaEntitlementMigrationInput {
+  fromSiteId?: string | null;
+  toSiteId?: string | null;
+  /** 'replace' 把 fromSiteId 换成 toSiteId；'add' 只追加，不动原有站点。 */
+  mode?: 'replace' | 'add' | null;
+  /** 缺省是 dry-run：先看清楚会动哪些人，再显式 confirm。 */
+  confirm?: boolean | null;
+  userIds?: string[] | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface UserOverseaEntitlementMigrationChange {
+  userId: string;
+  account: string;
+  before: string[];
+  after: string[];
+  status: 'migrated' | 'planned' | 'skipped' | 'failed';
+  reason?: string | null;
+}
+
+export interface UserOverseaEntitlementMigrationResult {
+  fromSiteId: string;
+  toSiteId: string;
+  mode: 'replace' | 'add';
+  applied: boolean;
+  scanned: number;
+  matched: number;
+  changed: number;
+  failed: number;
+  changes: UserOverseaEntitlementMigrationChange[];
+  generatedAt: string;
+}
+
 export interface UserOverseaEntitlementAccount {
   siteId: string;
   username: string;

@@ -99,6 +99,11 @@ import {
   normalizeImportUserCenterRow,
   normalizeTestStatus,
   normalizeLauncherNetworkMihomoSite,
+  orderDefaultOverseaSiteCandidates,
+  orderOverseaSubscriptionEntries,
+  planUserOverseaEntitlementMigration,
+  assertUserOverseaMigrationInput,
+  buildUserOverseaMigrationResult,
   normalizeUpdatePolicy,
   issueUserCenterServiceAccountCredential,
   siteSlotWorkerReportTlsFingerprint,
@@ -286,6 +291,9 @@ import type {
   UserH2oRuntimeProfile,
   UserH2oRuntimeProfileInput,
   UserOverseaEntitlement,
+  UserOverseaEntitlementMigrationInput,
+  UserOverseaEntitlementMigrationChange,
+  UserOverseaEntitlementMigrationResult,
   UserOverseaEntitlementInput,
   UserOverseaAccountSyncReport,
   UserOverseaAccountSyncReportInput,
@@ -1332,6 +1340,55 @@ export class MemoryStore implements PlatformStore {
     return this.withUserOverseaRuntimeSync(entitlement);
   }
 
+  /** 见 PostgresStore.migrateUserOverseaEntitlements：默认 dry-run，confirm 才写。 */
+  migrateUserOverseaEntitlements(
+    input: UserOverseaEntitlementMigrationInput
+  ): UserOverseaEntitlementMigrationResult {
+    const plan = assertUserOverseaMigrationInput(input);
+    if (!this.overseaSiteIsServiceable(plan.toSiteId)) {
+      throw new Error(`Target Oversea site is not serviceable: ${plan.toSiteId}`);
+    }
+    const entitlements = this.listUserOverseaEntitlements();
+    const planned = planUserOverseaEntitlementMigration(entitlements, plan);
+    const applied = input.confirm === true;
+    const changes: UserOverseaEntitlementMigrationResult['changes'] = [];
+    for (const item of planned) {
+      const user = this.users.get(item.userId);
+      const base = { userId: item.userId, account: user?.account ?? item.userId, before: item.before, after: item.after };
+      if (!applied) {
+        changes.push({ ...base, status: 'planned' });
+        continue;
+      }
+      try {
+        const updated = this.upsertUserOverseaEntitlement({
+          userId: item.userId,
+          siteIds: item.after,
+          requestedBy: input.requestedBy ?? 'oversea-migration',
+          requestId: input.requestId ?? null
+        });
+        changes.push({ ...base, after: updated.siteIds, status: 'migrated' });
+      } catch (error) {
+        changes.push({ ...base, status: 'failed', reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    const result = buildUserOverseaMigrationResult(plan, applied, entitlements.length, changes);
+    this.recordAudit({
+      eventType: 'iam.user_oversea_entitlement.migrated',
+      actorKind: 'user-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        fromSiteId: plan.fromSiteId,
+        toSiteId: plan.toSiteId,
+        mode: plan.mode,
+        applied,
+        matched: result.matched,
+        changed: result.changed,
+        failed: result.failed
+      }
+    });
+    return result;
+  }
+
   recordUserOverseaAccountSyncReport(input: UserOverseaAccountSyncReportInput): UserOverseaAccountSyncReport {
     const now = new Date().toISOString();
     const userId = input.userId?.trim();
@@ -1474,7 +1531,11 @@ export class MemoryStore implements PlatformStore {
       })
       .filter((entry): entry is { site: LauncherNetworkMihomoSite; account: SiteSlotAccessAccount } => Boolean(entry));
     if (!entries.length) return null;
-    return renderUserOverseaMihomoSubscription(user, entitlement, entries);
+    return renderUserOverseaMihomoSubscription(
+      user,
+      entitlement,
+      orderOverseaSubscriptionEntries(entries, this.defaultUserOverseaSiteId())
+    );
   }
 
   getUserH2oRuntimeProfile(userId: string, appId = 'h2o'): UserH2oRuntimeProfile | null {
@@ -4313,13 +4374,9 @@ export class MemoryStore implements PlatformStore {
     return Boolean(site && site.status !== 'archived' && site.publicHost);
   }
 
+  /** 见 PostgresStore：mx-h2i 的 product network 是平台默认出海站点的权威来源。 */
   private configuredDefaultOverseaSiteCandidates(): Array<{ siteId: string; explicit: boolean }> {
-    return this.listLauncherProductNetworks()
-      .map((product) => ({
-        siteId: product.defaultOverseaSiteId,
-        explicit: product.updatedBy !== 'builtin' || product.createdBy !== 'builtin'
-      }))
-      .filter((item) => item.siteId);
+    return orderDefaultOverseaSiteCandidates(this.listLauncherProductNetworks());
   }
 
   private ensureEnabledAppPublisherServiceAccounts(): void {

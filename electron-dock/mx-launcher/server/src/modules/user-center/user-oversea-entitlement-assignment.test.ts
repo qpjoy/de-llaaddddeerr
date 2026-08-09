@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { MemoryStore } from '../../store/memory.js';
 import { loadConfig } from '../../config.js';
+import { MX_H2I_PRODUCT_ID } from '../../store/domain.js';
 
 function seed() {
   const store = new MemoryStore(loadConfig());
@@ -24,6 +25,37 @@ test('a first entitlement with no siteIds falls back to the platform default', (
   const entitlement = store.upsertUserOverseaEntitlement({ userId: user.userId, requestedBy: 'test' });
 
   assert.ok(entitlement.siteIds.length > 0, 'a brand-new user still gets a default site');
+});
+
+test('the admin-set default site decides where a brand-new user lands', () => {
+  const { store, user } = seed();
+  // oversea-main was the hard-coded default; it has since been repurposed, so the
+  // platform default has to be movable from the admin UI.
+  store.upsertLauncherProductNetwork({
+    productId: MX_H2I_PRODUCT_ID,
+    defaultOverseaSiteId: 'mx-oversea-hk01',
+    requestedBy: 'desktop-admin'
+  });
+
+  const entitlement = store.upsertUserOverseaEntitlement({ userId: user.userId, requestedBy: 'test' });
+  assert.deepEqual(entitlement.siteIds, ['mx-oversea-hk01']);
+});
+
+test('an archived default site is skipped rather than handed out', () => {
+  const { store, user } = seed();
+  store.upsertLauncherProductNetwork({
+    productId: MX_H2I_PRODUCT_ID,
+    defaultOverseaSiteId: 'mx-oversea-hk01',
+    requestedBy: 'desktop-admin'
+  });
+  store.archiveLauncherNetworkMihomoSite({
+    siteId: 'mx-oversea-hk01',
+    archived: true,
+    requestedBy: 'test'
+  });
+
+  const entitlement = store.upsertUserOverseaEntitlement({ userId: user.userId, requestedBy: 'test' });
+  assert.deepEqual(entitlement.siteIds, ['oversea-main'], 'falls back to a site that is still in service');
 });
 
 test('re-provisioning without siteIds keeps the admin assignment', () => {
@@ -61,6 +93,91 @@ test('an explicit siteIds still reassigns, and an empty list still disables', ()
   const afterRefresh = store.upsertUserOverseaEntitlement({ userId: user.userId, requestedBy: 'mx-h2i-h2o' });
   assert.deepEqual(afterRefresh.siteIds, []);
   assert.equal(afterRefresh.status, 'disabled');
+});
+
+test('the default site is listed first so the select group defaults to it', () => {
+  const { store, user } = seed();
+  store.upsertLauncherProductNetwork({
+    productId: MX_H2I_PRODUCT_ID,
+    defaultOverseaSiteId: 'mx-oversea-hk01',
+    requestedBy: 'desktop-admin'
+  });
+  store.upsertUserOverseaEntitlement({
+    userId: user.userId,
+    siteIds: ['oversea-main', 'mx-oversea-hk01'],
+    requestedBy: 'test'
+  });
+
+  const yaml = store.renderUserOverseaMihomoSubscription(user.userId)?.yaml ?? '';
+  const group = yaml.slice(yaml.indexOf('proxy-groups:'));
+  // A `select` group with no saved pick uses its first entry, so ordering IS the
+  // default-traffic decision -- it must follow the admin default, not the alphabet.
+  assert.match(group, /proxies:\s*\n\s+- "mx-oversea-hk01-hysteria2"\s*\n\s+- "oversea-main-hysteria2"/);
+  assert.match(group, /oversea-main-hysteria2/, 'the other node stays switchable');
+});
+
+test('migration is a dry run until confirmed, then rewrites the matched users', () => {
+  const { store, user } = seed();
+  store.upsertUserOverseaEntitlement({ userId: user.userId, siteIds: ['oversea-main'], requestedBy: 'test' });
+
+  const preview = store.migrateUserOverseaEntitlements({
+    fromSiteId: 'oversea-main',
+    toSiteId: 'mx-oversea-hk01',
+    requestedBy: 'test'
+  });
+  assert.equal(preview.applied, false);
+  assert.equal(preview.matched, 1);
+  assert.equal(preview.changed, 0);
+  assert.deepEqual(preview.changes[0].after, ['mx-oversea-hk01']);
+  assert.deepEqual(
+    store.getUserOverseaEntitlement(user.userId)?.siteIds,
+    ['oversea-main'],
+    'a dry run must not touch anything'
+  );
+
+  const applied = store.migrateUserOverseaEntitlements({
+    fromSiteId: 'oversea-main',
+    toSiteId: 'mx-oversea-hk01',
+    confirm: true,
+    requestedBy: 'test'
+  });
+  assert.equal(applied.changed, 1);
+  assert.equal(applied.failed, 0);
+  assert.deepEqual(store.getUserOverseaEntitlement(user.userId)?.siteIds, ['mx-oversea-hk01']);
+
+  const again = store.migrateUserOverseaEntitlements({
+    fromSiteId: 'oversea-main',
+    toSiteId: 'mx-oversea-hk01',
+    confirm: true,
+    requestedBy: 'test'
+  });
+  assert.equal(again.matched, 0, 're-running is a no-op once nobody is left on the old site');
+});
+
+test('migration in add mode keeps the old site, and refuses a dead target', () => {
+  const { store, user } = seed();
+  store.upsertUserOverseaEntitlement({ userId: user.userId, siteIds: ['oversea-main'], requestedBy: 'test' });
+
+  const added = store.migrateUserOverseaEntitlements({
+    fromSiteId: 'oversea-main',
+    toSiteId: 'mx-oversea-hk01',
+    mode: 'add',
+    confirm: true,
+    requestedBy: 'test'
+  });
+  assert.deepEqual(added.changes[0].after, ['mx-oversea-hk01', 'oversea-main']);
+
+  store.archiveLauncherNetworkMihomoSite({ siteId: 'mx-oversea-hk01', archived: true, requestedBy: 'test' });
+  assert.throws(
+    () => store.migrateUserOverseaEntitlements({
+      fromSiteId: 'oversea-main',
+      toSiteId: 'mx-oversea-hk01',
+      confirm: true,
+      requestedBy: 'test'
+    }),
+    /not serviceable/,
+    'never move users onto a retired site'
+  );
 });
 
 test('a multi-site assignment survives a refresh so the subscription stays multi-node', () => {

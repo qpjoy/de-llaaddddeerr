@@ -143,6 +143,9 @@ import type {
   UserH2oRuntimeProfileInput,
   UserH2oSubscription,
   UserOverseaEntitlement,
+  UserOverseaEntitlementMigrationInput,
+  UserOverseaEntitlementMigrationChange,
+  UserOverseaEntitlementMigrationResult,
   UserOverseaSubscriptionRender,
   TestStep,
   TestGateVerdict,
@@ -942,6 +945,109 @@ function gatewayRouteRequiredScopes(routeId: string): string[] {
 }
 
 export const MX_H2I_PRODUCT_ID = 'mx-h2i';
+
+/**
+ * 平台默认出海站点的候选顺序：mx-h2i 优先，其余产品按原顺序兜底。
+ *
+ * `explicit` 表示这条默认值是人改过的（不是 builtin seed），只有 explicit 的才能
+ * 覆盖「按在役站点自动挑一个」的降级逻辑——所以 admin 在后台设过默认节点之后，
+ * 它必须稳定胜出，而不是取决于产品列表的排序。
+ */
+export function orderDefaultOverseaSiteCandidates(
+  products: Array<Pick<LauncherProductNetwork, 'productId' | 'defaultOverseaSiteId' | 'createdBy' | 'updatedBy'>>
+): Array<{ siteId: string; explicit: boolean }> {
+  return products
+    .slice()
+    .sort((a, b) => Number(b.productId === MX_H2I_PRODUCT_ID) - Number(a.productId === MX_H2I_PRODUCT_ID))
+    .map((product) => ({
+      siteId: product.defaultOverseaSiteId,
+      explicit: product.updatedBy !== 'builtin' || product.createdBy !== 'builtin'
+    }))
+    .filter((item) => item.siteId);
+}
+
+/**
+ * `Oversea` 是 `type: select` 组，Clash/mihomo 在用户没手动选过时**默认用列表里的第一个**
+ * ——没有测速、没有自动挑选。而节点顺序原来等于 `entitlement.siteIds` 的字母序，
+ * 也就是说「默认走哪台机器」是被站点名的字母顺序决定的，纯属巧合。
+ *
+ * 这里把平台默认站点排到第一位，其余保持原顺序：默认流量可控，同时组内其它节点仍在，
+ * 用户手动切换过的选择也不会被覆盖（那是客户端侧记住的）。
+ */
+export function orderOverseaSubscriptionEntries<T extends { site: { siteId: string } }>(
+  entries: T[],
+  preferredSiteId: string | null
+): T[] {
+  const preferred = String(preferredSiteId || '').trim();
+  if (!preferred) return entries;
+  return entries
+    .slice()
+    .sort((a, b) => Number(b.site.siteId === preferred) - Number(a.site.siteId === preferred));
+}
+
+/**
+ * 批量迁移的「只算不写」部分：给定一批 entitlement，算出每个人迁移后的站点集合。
+ *
+ * 拆成纯函数是为了让 dry-run 和真正执行走同一段逻辑——预览里看到的 after，就是
+ * confirm 之后会写进去的值，不会出现两套算法对不上的情况。
+ */
+export function planUserOverseaEntitlementMigration(
+  entitlements: Array<Pick<UserOverseaEntitlement, 'userId' | 'siteIds'>>,
+  input: { fromSiteId: string; toSiteId: string; mode: 'replace' | 'add'; userIds?: string[] | null }
+): Array<{ userId: string; before: string[]; after: string[] }> {
+  const scope = new Set((input.userIds ?? []).map((item) => String(item || '').trim()).filter(Boolean));
+  const plans: Array<{ userId: string; before: string[]; after: string[] }> = [];
+  for (const entitlement of entitlements) {
+    if (scope.size > 0 && !scope.has(entitlement.userId)) continue;
+    const before = [...new Set(entitlement.siteIds.map((item) => String(item || '').trim()).filter(Boolean))].sort();
+    if (!before.includes(input.fromSiteId)) continue;
+    const kept = input.mode === 'replace'
+      ? before.filter((siteId) => siteId !== input.fromSiteId)
+      : before;
+    const after = [...new Set([...kept, input.toSiteId])].sort();
+    if (after.length === before.length && after.every((siteId, index) => siteId === before[index])) continue;
+    plans.push({ userId: entitlement.userId, before, after });
+  }
+  return plans;
+}
+
+export function assertUserOverseaMigrationInput(
+  input: UserOverseaEntitlementMigrationInput
+): { fromSiteId: string; toSiteId: string; mode: 'replace' | 'add'; userIds: string[] | null } {
+  const fromSiteId = input.fromSiteId?.trim() ?? '';
+  const toSiteId = input.toSiteId?.trim() ?? '';
+  if (!fromSiteId) throw new Error('fromSiteId is required');
+  if (!toSiteId) throw new Error('toSiteId is required');
+  if (fromSiteId === toSiteId) throw new Error('fromSiteId and toSiteId must differ');
+  return {
+    fromSiteId,
+    toSiteId,
+    mode: input.mode === 'add' ? 'add' : 'replace',
+    userIds: input.userIds?.length ? input.userIds : null
+  };
+}
+
+export function buildUserOverseaMigrationResult(
+  plan: { fromSiteId: string; toSiteId: string; mode: 'replace' | 'add' },
+  applied: boolean,
+  scanned: number,
+  changes: UserOverseaEntitlementMigrationChange[],
+  now = new Date().toISOString()
+): UserOverseaEntitlementMigrationResult {
+  return {
+    fromSiteId: plan.fromSiteId,
+    toSiteId: plan.toSiteId,
+    mode: plan.mode,
+    applied,
+    scanned,
+    matched: changes.length,
+    changed: changes.filter((change) => change.status === 'migrated').length,
+    failed: changes.filter((change) => change.status === 'failed').length,
+    changes,
+    generatedAt: now
+  };
+}
+
 export const APP_CENTER_PRODUCT_ID = 'appcenter';
 export const MX_INSIGHT_HUB_APP_ID = 'mx-insight-hub';
 export const LAUNCHER_FOUNDATION_PRODUCT_ID = 'launcher';

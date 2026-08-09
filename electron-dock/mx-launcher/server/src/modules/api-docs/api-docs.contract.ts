@@ -856,6 +856,46 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         response: { entitlements: [entitlementExample] }
       })
     },
+    '/internal/v1/user-center/oversea-entitlements/migrate': {
+      post: operation({
+        tag: 'Internal User Operations',
+        summary: '批量迁移用户的 Oversea 站点',
+        description: '站点退役/改用途时把存量用户从 fromSiteId 搬到 toSiteId。'
+          + '不带 confirm 是 dry-run，只返回将要变更的名单；confirm=true 才写入。'
+          + 'mode=replace 换掉原站点，mode=add 只追加。目标站点必须仍在役。',
+        operationId: 'migrateInternalUserOverseaEntitlements',
+        auth: 'internal',
+        request: {
+          fromSiteId: 'oversea-main',
+          toSiteId: 'mx-oversea-hk01',
+          mode: 'replace',
+          confirm: false,
+          requestedBy: 'desktop-admin',
+          requestId: 'oversea-migration-001'
+        },
+        required: ['fromSiteId', 'toSiteId'],
+        response: {
+          migration: {
+            fromSiteId: 'oversea-main',
+            toSiteId: 'mx-oversea-hk01',
+            mode: 'replace',
+            applied: false,
+            scanned: 42,
+            matched: 12,
+            changed: 0,
+            failed: 0,
+            changes: [{
+              userId: 'usr_demo_user',
+              account: 'demo.user',
+              before: ['oversea-main'],
+              after: ['mx-oversea-hk01'],
+              status: 'planned'
+            }],
+            generatedAt: '2026-08-09T09:16:05.000Z'
+          }
+        }
+      })
+    },
     '/internal/v1/user-center/users/{userId}/oversea': {
       get: operation({
         tag: 'Internal User Operations',

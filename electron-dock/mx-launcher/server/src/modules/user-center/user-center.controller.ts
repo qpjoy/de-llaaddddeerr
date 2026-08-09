@@ -166,6 +166,35 @@ export class UserCenterController {
     };
   }
 
+  /**
+   * Bulk-move users off one Oversea site onto another (a site being retired or
+   * repurposed). Defaults to a dry run: without `confirm: true` it only reports
+   * what would change, so an operator can eyeball the blast radius first.
+   */
+  @Post('internal/v1/user-center/oversea-entitlements/migrate')
+  async migrateUserOverseaEntitlements(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
+    const body = asRecord(rawBody);
+    try {
+      return {
+        migration: await this.store.migrateUserOverseaEntitlements({
+          fromSiteId: nullableString(body.fromSiteId),
+          toSiteId: nullableString(body.toSiteId),
+          mode: nullableString(body.mode) === 'add' ? 'add' : 'replace',
+          confirm: booleanValue(body.confirm) === true,
+          userIds: stringArray(body.userIds),
+          requestedBy: nullableString(body.requestedBy) ?? 'desktop-admin',
+          requestId: nullableString(body.requestId) ?? `oversea-migration-${Date.now()}`
+        })
+      };
+    } catch (error) {
+      throw userCenterMutationException(error);
+    }
+  }
+
   @Get('internal/v1/user-center/users/:userId/h2o/runtime-profile')
   async userH2oRuntimeProfile(
     @Param('userId') userId: string,

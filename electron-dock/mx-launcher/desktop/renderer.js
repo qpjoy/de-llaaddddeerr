@@ -153,6 +153,9 @@ const state = {
   overseaOverviewError: null,
   overseaEnsureBusy: false,
   overseaEnsureFeedback: null,
+  overseaDefaultSiteBusy: false,
+  overseaDefaultSiteFeedback: null,
+  overseaMigration: null,
   overseaTerminalBusy: false,
   overseaTerminalCommand: '',
   overseaTerminalResult: null,
@@ -3366,9 +3369,15 @@ async function syncUserOverseaRuntimeFromAdmin(input = {}) {
     const passed = reports.filter((report) => report.status === 'passed').length;
     const blocked = reports.filter((report) => report.status === 'blocked').length;
     const failed = reports.filter((report) => report.status === 'failed').length;
+    // 只报计数的话，admin 只能看到「1 blocked / 1 failed」，却不知道是哪台机器、
+    // 缺什么（多半是那个站点没有 active 的 oversea SSH profile）。
+    const detail = reports
+      .filter((report) => report.status !== 'passed')
+      .map((report) => `${report.siteId}: ${userOverseaSyncReportReason(report)}`)
+      .join('；');
     state.userCenter.overseaFeedback = {
       kind: failed ? 'error' : blocked ? 'warning' : 'success',
-      message: `Remote sync ${passed} passed${blocked ? ` / ${blocked} blocked` : ''}${failed ? ` / ${failed} failed` : ''}`
+      message: `Remote sync ${passed} passed${blocked ? ` / ${blocked} blocked` : ''}${failed ? ` / ${failed} failed` : ''}${detail ? ` — ${detail}` : ''}`
     };
     await refreshUserCenterPanels();
   } catch (error) {
@@ -3378,6 +3387,16 @@ async function syncUserOverseaRuntimeFromAdmin(input = {}) {
     state.userCenter.overseaSyncBusy = false;
     renderUserCenterSurfaces();
   }
+}
+
+/** First gate failure if the sync never ran; otherwise whatever the remote said. */
+function userOverseaSyncReportReason(report) {
+  const gateFailures = asArray(report?.diagnosis?.gateFailures).filter(Boolean);
+  if (gateFailures.length) return gateFailures.join(', ');
+  const summary = String(report?.diagnosis?.summary || '').trim();
+  if (summary) return summary;
+  const stderr = String(report?.stderr || '').trim().split('\n').filter(Boolean)[0];
+  return stderr || report?.status || 'unknown';
 }
 
 async function enrollHomeRelayFromAdmin(root = foundationGrid) {
@@ -4041,7 +4060,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || /^\/internal\/v1\/launcher-network\/leases(?:\/[^/]+)?$/.test(path);
   }
   if (verb === 'POST') {
-    return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue)$/.test(path)
+    return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue|oversea-entitlements\/migrate)$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:password|oversea|h2o\/runtime-profile|oversea\/sync-runtime|oversea\/subscription-link)$/.test(path)
       || /^\/internal\/v1\/sdk\/(?:users|service-accounts)$/.test(path)
       || /^\/internal\/v1\/sdk\/service-accounts\/[^/]+\/credentials\/rotate$/.test(path)
@@ -5585,6 +5604,165 @@ function domesticLegacyCleanupState(plan, summary = null) {
   return { status: 'ready', label: 'manual cleanup only' };
 }
 
+/**
+ * 新用户第一次拿到 entitlement 时用哪个站点。oversea-main 早期是唯一出海机器，
+ * 后来职责变了，所以这个默认必须能在后台改，而不是写死在代码里。
+ *
+ * 写在 mx-h2i 的 product network 上：Internal 的 defaultUserOverseaSiteId() 以它为准，
+ * 并且仍会检查该站点在役（archived / 没有 publicHost 的会被自动跳过）。
+ * 只影响「还没有 entitlement 的用户」；已分配的用户不会被这里改动。
+ */
+function renderOverseaDefaultSitePicker(sites) {
+  const current = launcherProductById(MX_H2I_PRODUCT_ID)?.defaultOverseaSiteId || '';
+  const selectable = asArray(sites).filter((site) => site.status !== 'archived');
+  const feedback = state.overseaDefaultSiteFeedback;
+  const busy = state.overseaDefaultSiteBusy === true;
+  const options = uniqueStringList([...selectable.map((site) => site.siteId), current].filter(Boolean));
+  return `
+    <div class="oversea-default-site">
+      <span>
+        <strong>Default site</strong>
+        <small>新用户首次分配用它；已分配用户不受影响</small>
+      </span>
+      <select data-oversea-default-site ${busy || !options.length ? 'disabled' : ''}>
+        ${options.map((siteId) => `
+          <option value="${escapeHtml(siteId)}" ${siteId === current ? 'selected' : ''}>${escapeHtml(siteId)}</option>
+        `).join('')}
+      </select>
+      <button class="secondary-button" type="button" data-oversea-default-site-save ${busy || !options.length ? 'disabled' : ''}>
+        ${busy ? 'Saving' : 'Set Default'}
+      </button>
+      ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
+    </div>
+    ${renderOverseaMigration(options, current)}
+  `;
+}
+
+/**
+ * 存量用户不会因为改了 Default site 就自动搬家——那只管新用户。
+ * 站点退役/改用途时需要这个批量迁移：先 Preview 看清楚会动谁，再 Apply。
+ */
+function renderOverseaMigration(siteIds, defaultSiteId) {
+  const migration = state.overseaMigration || {};
+  const busy = migration.busy === true;
+  const result = migration.result || null;
+  const from = migration.fromSiteId || siteIds.find((siteId) => siteId !== defaultSiteId) || '';
+  const to = migration.toSiteId || defaultSiteId || '';
+  const option = (siteId, selected) => `<option value="${escapeHtml(siteId)}" ${siteId === selected ? 'selected' : ''}>${escapeHtml(siteId)}</option>`;
+  return `
+    <div class="oversea-default-site oversea-migration">
+      <span>
+        <strong>Migrate users</strong>
+        <small>把存量用户从一个站点搬到另一个；先 Preview 再 Apply</small>
+      </span>
+      <select data-oversea-migrate-from ${busy ? 'disabled' : ''}>
+        ${siteIds.map((siteId) => option(siteId, from)).join('')}
+      </select>
+      <select data-oversea-migrate-to ${busy ? 'disabled' : ''}>
+        ${siteIds.map((siteId) => option(siteId, to)).join('')}
+      </select>
+      <button class="secondary-button" type="button" data-oversea-migrate-preview ${busy ? 'disabled' : ''}>
+        ${busy ? 'Working' : 'Preview'}
+      </button>
+      <button class="secondary-button" type="button" data-oversea-migrate-apply ${busy || !result?.matched || result?.applied ? 'disabled' : ''}>
+        Apply${result?.matched && !result.applied ? ` (${result.matched})` : ''}
+      </button>
+      ${migration.feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(migration.feedback.kind)}">${escapeHtml(migration.feedback.message)}</span>` : ''}
+      ${result?.changes?.length ? `
+        <div class="oversea-migration-list">
+          ${result.changes.slice(0, 40).map((change) => `
+            <article data-status="${escapeHtml(change.status)}">
+              <strong>${escapeHtml(change.account || change.userId)}</strong>
+              <small>${escapeHtml(asArray(change.before).join(', ') || '-')} → ${escapeHtml(asArray(change.after).join(', ') || '-')}</small>
+              <small>${escapeHtml(change.reason || change.status)}</small>
+            </article>
+          `).join('')}
+          ${result.changes.length > 40 ? `<div class="empty-state">… 共 ${escapeHtml(result.changes.length)} 人</div>` : ''}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+async function runOverseaMigration(confirm) {
+  const migration = state.overseaMigration || (state.overseaMigration = {});
+  if (migration.busy) return;
+  const fromSiteId = migration.fromSiteId;
+  const toSiteId = migration.toSiteId;
+  if (!fromSiteId || !toSiteId || fromSiteId === toSiteId) {
+    migration.feedback = { kind: 'error', message: '请选择两个不同的站点' };
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+    return;
+  }
+  // Applying rewrites every matched user's entitlement, so make the count explicit.
+  if (confirm && !window.confirm(
+    `Migrate ${migration.result?.matched || 0} user(s) from ${fromSiteId} to ${toSiteId}?\n\n`
+    + 'Their subscriptions change immediately. Each migrated account still needs a remote sync on the target site.'
+  )) return;
+  migration.busy = true;
+  migration.feedback = null;
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+  try {
+    const payload = await fetchJson('/internal/v1/user-center/oversea-entitlements/migrate', {
+      method: 'POST',
+      body: {
+        fromSiteId,
+        toSiteId,
+        mode: 'replace',
+        confirm: confirm === true,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-oversea-migrate-${Date.now()}`
+      }
+    });
+    const result = payload.migration || null;
+    migration.result = result;
+    migration.feedback = result
+      ? {
+          kind: result.failed ? 'error' : result.matched ? 'success' : 'info',
+          message: result.applied
+            ? `已迁移 ${result.changed}/${result.matched} 人${result.failed ? `，${result.failed} 人失败` : ''}；请对目标站点跑一次 Sync Runtime`
+            : result.matched
+              ? `预览：${result.matched} 人会从 ${fromSiteId} 换到 ${toSiteId}`
+              : `没有用户还在 ${fromSiteId}`
+        }
+      : { kind: 'error', message: 'Migration returned no result' };
+    if (result?.applied) await refreshUserCenterPanels();
+  } catch (error) {
+    migration.feedback = { kind: 'error', message: `迁移失败：${error.message}` };
+  } finally {
+    migration.busy = false;
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+  }
+}
+
+async function saveOverseaDefaultSite(siteId) {
+  const desired = String(siteId || '').trim();
+  if (!desired || state.overseaDefaultSiteBusy) return;
+  state.overseaDefaultSiteBusy = true;
+  state.overseaDefaultSiteFeedback = null;
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+  try {
+    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(MX_H2I_PRODUCT_ID)}`, {
+      method: 'POST',
+      body: {
+        defaultOverseaSiteId: desired,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-oversea-default-${Date.now()}`
+      }
+    });
+    if (payload.product) upsertLocalLauncherProduct(payload.product);
+    state.overseaDefaultSiteFeedback = {
+      kind: 'success',
+      message: `新用户默认站点已设为 ${payload.product?.defaultOverseaSiteId || desired}`
+    };
+  } catch (error) {
+    state.overseaDefaultSiteFeedback = { kind: 'error', message: `设置默认站点失败：${error.message}` };
+  } finally {
+    state.overseaDefaultSiteBusy = false;
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+  }
+}
+
 function renderOverseaWorkbench(pipelines) {
   const overview = state.overseaOverview;
   const overviewSites = asArray(overview?.sites);
@@ -5639,6 +5817,7 @@ function renderOverseaWorkbench(pipelines) {
           </span>
           <button class="secondary-button" type="button" data-oversea-new>New Oversea</button>
         </div>
+        ${renderOverseaDefaultSitePicker(sites)}
         ${sites.length ? sites.map((site) => `
           <button class="oversea-node-card ${site.siteId === state.selectedSiteId ? 'is-selected' : ''}" type="button" data-oversea-site="${escapeHtml(site.siteId)}">
             <span>
@@ -5679,6 +5858,29 @@ function renderOverseaWorkbench(pipelines) {
       }
     });
   }
+  const defaultSiteSave = siteWorkbench.querySelector('[data-oversea-default-site-save]');
+  if (defaultSiteSave) {
+    defaultSiteSave.addEventListener('click', () => {
+      const picker = siteWorkbench.querySelector('[data-oversea-default-site]');
+      void saveOverseaDefaultSite(picker?.value);
+    });
+  }
+  const migrateFrom = siteWorkbench.querySelector('[data-oversea-migrate-from]');
+  const migrateTo = siteWorkbench.querySelector('[data-oversea-migrate-to]');
+  for (const [picker, field] of [[migrateFrom, 'fromSiteId'], [migrateTo, 'toSiteId']]) {
+    if (!picker) continue;
+    state.overseaMigration = state.overseaMigration || {};
+    if (!state.overseaMigration[field]) state.overseaMigration[field] = picker.value || '';
+    picker.addEventListener('change', () => {
+      // A changed pair invalidates the preview: never let Apply act on stale counts.
+      state.overseaMigration = { ...state.overseaMigration, [field]: picker.value, result: null, feedback: null };
+      renderDeploymentWorkbench(pipelines);
+    });
+  }
+  const migratePreview = siteWorkbench.querySelector('[data-oversea-migrate-preview]');
+  if (migratePreview) migratePreview.addEventListener('click', () => void runOverseaMigration(false));
+  const migrateApply = siteWorkbench.querySelector('[data-oversea-migrate-apply]');
+  if (migrateApply) migrateApply.addEventListener('click', () => void runOverseaMigration(true));
   const ensureButton = siteWorkbench.querySelector('[data-oversea-ensure]');
   if (ensureButton) {
     ensureButton.addEventListener('click', () => {

@@ -138,6 +138,8 @@ import type {
   UserH2oRuntimeProfileInput,
   UserOverseaEntitlement,
   UserOverseaEntitlementInput,
+  UserOverseaEntitlementMigrationInput,
+  UserOverseaEntitlementMigrationResult,
   UserOverseaAccountSyncReport,
   UserOverseaAccountSyncReportInput,
   UserCenterTokenRecord,
@@ -254,6 +256,9 @@ export interface PlatformStore {
   listUserOverseaEntitlements(): MaybePromise<UserOverseaEntitlement[]>;
   getUserOverseaEntitlement(userId: string): MaybePromise<UserOverseaEntitlement | null>;
   upsertUserOverseaEntitlement(input: UserOverseaEntitlementInput): MaybePromise<UserOverseaEntitlement>;
+  migrateUserOverseaEntitlements(
+    input: UserOverseaEntitlementMigrationInput
+  ): MaybePromise<UserOverseaEntitlementMigrationResult>;
   recordUserOverseaAccountSyncReport(input: UserOverseaAccountSyncReportInput): MaybePromise<UserOverseaAccountSyncReport>;
   listUserOverseaAccountSyncReports(userId?: string | null, siteId?: string | null): MaybePromise<UserOverseaAccountSyncReport[]>;
   renderUserOverseaMihomoSubscription(userId: string): MaybePromise<UserOverseaSubscriptionRender | null>;

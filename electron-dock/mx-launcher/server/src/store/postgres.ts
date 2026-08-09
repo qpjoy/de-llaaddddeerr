@@ -161,6 +161,9 @@ import type {
   UserH2oRuntimeProfile,
   UserH2oRuntimeProfileInput,
   UserOverseaEntitlement,
+  UserOverseaEntitlementMigrationInput,
+  UserOverseaEntitlementMigrationChange,
+  UserOverseaEntitlementMigrationResult,
   UserOverseaEntitlementInput,
   UserOverseaAccountSyncReport,
   UserOverseaAccountSyncReportInput,
@@ -258,6 +261,11 @@ import {
   normalizeTestStatus,
   applyLauncherNetworkMihomoSiteArchive,
   normalizeLauncherNetworkMihomoSite,
+  orderDefaultOverseaSiteCandidates,
+  orderOverseaSubscriptionEntries,
+  planUserOverseaEntitlementMigration,
+  assertUserOverseaMigrationInput,
+  buildUserOverseaMigrationResult,
   normalizeUpdatePolicy,
   issueUserCenterServiceAccountCredential,
   siteSlotWorkerReportTlsFingerprint,
@@ -1484,6 +1492,61 @@ export class PostgresStore implements PlatformStore {
     return this.withUserOverseaRuntimeSync(entitlement);
   }
 
+  /**
+   * 把一批用户从一个出海站点搬到另一个（例如 oversea-main 退役改作他用）。
+   *
+   * 默认 dry-run：不带 confirm 就只返回将要发生的变更。真正执行时每个用户走
+   * `upsertUserOverseaEntitlement`，所以账号签发、审计、runtimeSync 判定都和
+   * admin 手动改一个用户完全一致——这里不另开一条写路径。
+   */
+  async migrateUserOverseaEntitlements(
+    input: UserOverseaEntitlementMigrationInput
+  ): Promise<UserOverseaEntitlementMigrationResult> {
+    const plan = assertUserOverseaMigrationInput(input);
+    if (!await this.overseaSiteIsServiceable(plan.toSiteId)) {
+      throw new Error(`Target Oversea site is not serviceable: ${plan.toSiteId}`);
+    }
+    const entitlements = await this.listUserOverseaEntitlements();
+    const planned = planUserOverseaEntitlementMigration(entitlements, plan);
+    const applied = input.confirm === true;
+    const changes: UserOverseaEntitlementMigrationResult['changes'] = [];
+    for (const item of planned) {
+      const user = await this.getRecord<UserCenterUser>('iam-user', item.userId);
+      const base = { userId: item.userId, account: user?.account ?? item.userId, before: item.before, after: item.after };
+      if (!applied) {
+        changes.push({ ...base, status: 'planned' });
+        continue;
+      }
+      try {
+        const updated = await this.upsertUserOverseaEntitlement({
+          userId: item.userId,
+          siteIds: item.after,
+          requestedBy: input.requestedBy ?? 'oversea-migration',
+          requestId: input.requestId ?? null
+        });
+        changes.push({ ...base, after: updated.siteIds, status: 'migrated' });
+      } catch (error) {
+        changes.push({ ...base, status: 'failed', reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    const result = buildUserOverseaMigrationResult(plan, applied, entitlements.length, changes);
+    await this.recordAudit({
+      eventType: 'iam.user_oversea_entitlement.migrated',
+      actorKind: 'user-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        fromSiteId: plan.fromSiteId,
+        toSiteId: plan.toSiteId,
+        mode: plan.mode,
+        applied,
+        matched: result.matched,
+        changed: result.changed,
+        failed: result.failed
+      }
+    });
+    return result;
+  }
+
   async recordUserOverseaAccountSyncReport(input: UserOverseaAccountSyncReportInput): Promise<UserOverseaAccountSyncReport> {
     const now = new Date().toISOString();
     const userId = input.userId?.trim();
@@ -1639,7 +1702,11 @@ export class PostgresStore implements PlatformStore {
       if (site && account) entries.push({ site, account });
     }
     if (!entries.length) return null;
-    return renderUserOverseaMihomoSubscription(user, entitlement, entries);
+    return renderUserOverseaMihomoSubscription(
+      user,
+      entitlement,
+      orderOverseaSubscriptionEntries(entries, await this.defaultUserOverseaSiteId())
+    );
   }
 
   async getUserH2oRuntimeProfile(userId: string, appId = 'h2o'): Promise<UserH2oRuntimeProfile | null> {
@@ -5624,13 +5691,15 @@ export class PostgresStore implements PlatformStore {
     return Boolean(site && site.status !== 'archived' && site.publicHost);
   }
 
+  /**
+   * MX-H2I 的 product network 是平台默认出海站点的唯一权威来源。
+   *
+   * `listLauncherProductNetworks()` 按 mode/index/id 排序，谁排在前面纯属巧合；
+   * 以前 `find(explicit)` 会随机挑中某个 standalone 产品的默认站点，admin 在
+   * Site Registry 里改了默认也可能不生效。这里把 mx-h2i 顶到最前面。
+   */
   private async configuredDefaultOverseaSiteCandidates(): Promise<Array<{ siteId: string; explicit: boolean }>> {
-    return (await this.listLauncherProductNetworks())
-      .map((product) => ({
-        siteId: product.defaultOverseaSiteId,
-        explicit: product.updatedBy !== 'builtin' || product.createdBy !== 'builtin'
-      }))
-      .filter((item) => item.siteId);
+    return orderDefaultOverseaSiteCandidates(await this.listLauncherProductNetworks());
   }
 
   private async findUserCenterUserForInput(input: CreateUserInput): Promise<UserCenterUser | null> {

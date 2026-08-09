@@ -452,6 +452,18 @@ H2O 运行时订阅策略：
   Hysteria2 runtime 已能用该账号 auth，而不仅是 Internal 已生成 YAML 或 host
   `users.csv` 有记录；否则 H2O 应保留 initializing/诊断状态，避免给用户一个看似可用但无法
   出网的订阅。
+- **平台默认站点在后台可改，不再写死 `oversea-main`。** admin UI → Deployment → Oversea →
+  Site Registry 顶部的 **Default site** 写的是 `mx-h2i` product network 的
+  `defaultOverseaSiteId`（`POST /internal/v1/launcher-network/products/mx-h2i`）。
+  `defaultUserOverseaSiteId()` 以 mx-h2i 这一条为准（不再取决于产品列表排序），并且仍会
+  校验站点在役——默认站点被 archive 掉时自动降级到还在服役的站点。**只影响还没有
+  entitlement 的用户**；已分配的用户要换站点走下面的批量迁移，或 User Center 里逐个勾选。
+- **存量用户批量迁移**：Site Registry 的 **Migrate users**（`POST /internal/v1/user-center/
+  oversea-entitlements/migrate`，ops token）。`mode: 'replace'` 把 from 换成 to，`'add'` 只追加；
+  **不带 `confirm: true` 是 dry-run**，只返回将要变更的名单。执行时逐个走
+  `upsertUserOverseaEntitlement`，审计/账号签发/runtimeSync 判定和手动改一个用户完全一致。
+  目标站点必须在役（archived / 无 publicHost 直接拒绝）。迁移只改 Internal 的授权，
+  **目标站点上的 hysteria2 账号还需要跑一次 Sync Runtime** 才会真正可用。
 - **`ensure-subscription` 不带 `siteIds` = 「不改分配」，不是「回到平台默认」。** Internal 只在
   用户**还没有任何 entitlement 记录**时才落到 `defaultUserOverseaSiteId()`；已有记录时原样
   保留 admin 在 User Center 勾的站点（勾成空 = 停用，也要保留，不能被刷新悄悄重新授权）。
@@ -549,6 +561,11 @@ GET /internal/v1/user-center/users/{userId}/oversea/subscription.yaml   ← 每�
 
 - 只有 `account.status === 'active'` 的站点会进 `proxies`，所以增删机器不改 URL。
 - 规则指向 `Oversea` 这个 select 组，H2O 换节点只是改组内选择，URL 和规则都不动。
+- **`select` 组没有测速也不会自动挑**：客户端没手动选过时，默认走 `proxies` 里的第一个。
+  这个顺序原来等于 `entitlement.siteIds` 的字母序（`mx-oversea-hk01` 排在 `oversea-main`
+  前面纯属巧合，换成 `oversea-sg-1` 就是 `oversea-main` 胜出）。现在渲染时把**平台默认
+  站点排到第一位**（`orderOverseaSubscriptionEntries`），默认流量才真正可控；其余节点
+  仍在组里可切，用户手动选过的节点由客户端自己记住，不会被顺序覆盖。
 - 换 URL 的方案被否掉：那样每加一台机器都要重新下发订阅、客户端还要维护 N 个订阅状态，
   而且切节点会断开所有连接。
 
