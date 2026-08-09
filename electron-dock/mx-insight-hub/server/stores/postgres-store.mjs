@@ -129,6 +129,14 @@ export class PostgresStore {
     return tenant(rows[0]) || null
   }
 
+  async renameTenant(id, name) {
+    const { rows } = await this.pool.query(
+      'UPDATE tenants SET name = $2, updated_at = now() WHERE id = $1 RETURNING *',
+      [id, name],
+    )
+    return tenant(rows[0]) || null
+  }
+
   async createConsumer({ tenantId, name, status = 'active', businessId }) {
     const id = randomUUID()
     const { rows } = await this.pool.query(
@@ -655,6 +663,49 @@ export class PostgresStore {
     }
   }
 
+  /**
+   * Keyset page over a fixed canonical dataset.
+   *
+   * Only explicitly selected customer-safe columns leave the store. Raw source
+   * objects, `extensions`, connector ids and lineage remain inside PostgreSQL.
+   */
+  async listCanonicalRecords({
+    datasetId,
+    platform,
+    objectType,
+    pageSize,
+    cursor = null,
+    chatId = null,
+    from = null,
+    to = null,
+  }) {
+    const chatPredicate = objectType === 'chat'
+      ? 'external_id = $4'
+      : `(stable_fields #>> '{relations,chatId}') = $4`
+    const { rows } = await this.pool.query(
+      `SELECT id, external_id, object_type, content_type, url, title, body,
+              author_external_id, author_name, event_time, collected_at,
+              stable_fields, current_revision, event_time AS sort_time
+         FROM core.canonical_records
+        WHERE dataset_id = $1
+          AND platform = $2
+          AND object_type = $3
+          AND deleted_at IS NULL
+          AND event_time IS NOT NULL
+          AND ($4::text IS NULL OR ${chatPredicate})
+          AND ($5::timestamptz IS NULL OR event_time >= $5::timestamptz)
+          AND ($6::timestamptz IS NULL OR event_time <= $6::timestamptz)
+          AND ($7::timestamptz IS NULL OR (event_time, id) < ($7::timestamptz, $8::uuid))
+        ORDER BY event_time DESC, id DESC
+        LIMIT $9`,
+      [
+        datasetId, platform, objectType, chatId, from, to,
+        cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1,
+      ],
+    )
+    return rows
+  }
+
   async #updateRequest(sql, values) {
     const { rows } = await this.pool.query(sql, values)
     if (!rows[0]) throw new AppError(404, 'request_not_found', 'Request not found')
@@ -727,21 +778,33 @@ export class PostgresStore {
 
   // ---- external sources (migration 008) ----------------------------------
 
-  async createExternalSource({ sourceKey, displayName, sourceKind, datasetId, platform, objectType, connection }) {
+  async createExternalSource({ sourceKey, displayName, sourceKind, datasetId, platform, objectType, status, connection }) {
     const { rows } = await this.pool.query(
       `INSERT INTO catalog.external_sources
-         (id, source_key, display_name, source_kind, dataset_id, platform, object_type, connection)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (source_key) DO UPDATE SET
-         display_name = EXCLUDED.display_name,
-         dataset_id = EXCLUDED.dataset_id,
-         platform = EXCLUDED.platform,
-         object_type = EXCLUDED.object_type,
-         connection = EXCLUDED.connection,
-         updated_at = now()
+         (id, source_key, display_name, source_kind, dataset_id, platform, object_type, status, connection)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (source_key) DO NOTHING
        RETURNING *`,
-      [randomUUID(), sourceKey, displayName, sourceKind, datasetId, platform, objectType || 'record', connection || {}],
+      [
+        randomUUID(), sourceKey, displayName, sourceKind, datasetId, platform,
+        objectType || 'record', status || 'active', connection || {},
+      ],
     )
+    if (!rows[0]) throw new AppError(409, 'source_exists', `Source key already exists: ${sourceKey}`)
+    return externalSource(rows[0])
+  }
+
+  async updateExternalSource(sourceKey, { status = null, connection = null }) {
+    const { rows } = await this.pool.query(
+      `UPDATE catalog.external_sources
+          SET status = coalesce($2, status),
+              connection = coalesce($3, connection),
+              updated_at = now()
+        WHERE source_key = $1
+        RETURNING *`,
+      [sourceKey, status, connection],
+    )
+    if (!rows[0]) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
     return externalSource(rows[0])
   }
 

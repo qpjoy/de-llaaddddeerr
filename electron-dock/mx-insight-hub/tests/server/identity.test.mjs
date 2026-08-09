@@ -123,6 +123,40 @@ test('the admin token works while Launcher is unreachable', async () => {
   assert.equal(response.status, 200)
 })
 
+test('the admin token manages multiple tenants and assigns consumers explicitly', async () => {
+  const tenantA = await (await callAdmin('/internal/v1/admin/tenants', {
+    method: 'POST', body: { name: 'Admin Tenant A' },
+  })).json()
+  const tenantB = await (await callAdmin('/internal/v1/admin/tenants', {
+    method: 'POST', body: { name: 'Admin Tenant B' },
+  })).json()
+
+  const renamed = await callAdmin(`/internal/v1/admin/tenants/${tenantB.data.id}`, {
+    method: 'PUT', body: { name: 'Admin Tenant B Renamed' },
+  })
+  assert.equal(renamed.status, 200)
+  assert.equal((await renamed.json()).data.name, 'Admin Tenant B Renamed')
+
+  const tenants = await (await callAdmin('/internal/v1/admin/tenants')).json()
+  assert.equal(tenants.data.some((tenant) => tenant.id === tenantA.data.id), true)
+  assert.equal(tenants.data.some((tenant) => tenant.id === tenantB.data.id && tenant.name === 'Admin Tenant B Renamed'), true)
+
+  const consumerA = await (await callAdmin('/internal/v1/admin/consumers', {
+    method: 'POST', body: { tenantId: tenantA.data.id, name: 'Consumer A' },
+  })).json()
+  const consumerB = await (await callAdmin('/internal/v1/admin/consumers', {
+    method: 'POST', body: { tenantId: tenantB.data.id, name: 'Consumer B' },
+  })).json()
+  assert.equal(consumerA.data.tenantId, tenantA.data.id)
+  assert.equal(consumerB.data.tenantId, tenantB.data.id)
+
+  const missingTenant = await callAdmin('/internal/v1/admin/consumers', {
+    method: 'POST', body: { name: 'Unscoped Consumer' },
+  })
+  assert.equal(missingTenant.status, 400)
+  assert.equal((await missingTenant.json()).error.code, 'invalid_request')
+})
+
 test('an unknown credential is rejected when Launcher is unreachable', async () => {
   launcherState = { unavailable: true }
   const response = await callAdmin('/internal/v1/admin/tenants', { token: 'mx-v1-something' })
@@ -206,6 +240,14 @@ test('a member sees only the tenant they were granted', async () => {
   assert.equal(tenants.data.length, 1)
   assert.equal(tenants.data[0].id, tenantA.data.id)
 
+  const renameDenied = await callAdmin(`/internal/v1/admin/tenants/${tenantA.data.id}`, {
+    token: 'mx-v1-scoped',
+    method: 'PUT',
+    body: { name: 'Admin cannot rename' },
+  })
+  assert.equal(renameDenied.status, 403)
+  assert.equal((await renameDenied.json()).error.code, 'insufficient_capability')
+
   // Asking for a tenant outside the grant is denied explicitly rather than
   // returned empty, so the response cannot be used to probe which ids exist.
   const denied = await callAdmin(
@@ -217,14 +259,139 @@ test('a member sees only the tenant they were granted', async () => {
   assert.equal(error.code, 'tenant_not_permitted')
 })
 
-test('a scoped member cannot create a tenant', async () => {
-  launcherState = { payload: launcherResponse({ subject: 'scoped-user' }) }
-  const response = await callAdmin('/internal/v1/admin/tenants', {
-    token: 'mx-v1-scoped',
+test('a tenant owner can rename only their tenant and cannot create another tenant', async () => {
+  const tenantA = await (await callAdmin('/internal/v1/admin/tenants', {
+    method: 'POST', body: { name: 'Owner Tenant' },
+  })).json()
+  const tenantB = await (await callAdmin('/internal/v1/admin/tenants', {
+    method: 'POST', body: { name: 'Other Tenant' },
+  })).json()
+  launcherState = { payload: launcherResponse({ subject: 'tenant-owner' }) }
+  const session = await (await callAdmin('/internal/v1/admin/session', { token: 'mx-v1-owner' })).json()
+  const grant = await callAdmin('/internal/v1/admin/members/memberships', {
     method: 'POST',
-    body: { name: 'Sneaky Tenant' },
+    body: { memberId: session.data.memberId, tenantId: tenantA.data.id, role: 'owner' },
   })
-  assert.equal(response.status, 403)
+  assert.equal(grant.status, 201)
+
+  const renamed = await callAdmin(`/internal/v1/admin/tenants/${tenantA.data.id}`, {
+    token: 'mx-v1-owner', method: 'PUT', body: { name: 'Owner Tenant Renamed' },
+  })
+  assert.equal(renamed.status, 200)
+
+  const outside = await callAdmin(`/internal/v1/admin/tenants/${tenantB.data.id}`, {
+    token: 'mx-v1-owner', method: 'PUT', body: { name: 'Not Allowed' },
+  })
+  assert.equal(outside.status, 403)
+  assert.equal((await outside.json()).error.code, 'tenant_not_permitted')
+
+  const create = await callAdmin('/internal/v1/admin/tenants', {
+    token: 'mx-v1-owner', method: 'POST', body: { name: 'Sneaky Tenant' },
+  })
+  assert.equal(create.status, 403)
+  assert.equal((await create.json()).error.code, 'platform_admin_required')
+
+  for (const path of [
+    '/internal/v1/ops/summary',
+    '/internal/v1/admin/sources',
+    '/internal/v1/admin/agent',
+    '/internal/v1/admin/backfill',
+    '/internal/v1/admin/members',
+    '/internal/v1/admin/retrieval',
+  ]) {
+    const denied = await callAdmin(path, { token: 'mx-v1-owner' })
+    assert.equal(denied.status, 403)
+    assert.equal((await denied.json()).error.code, 'platform_admin_required')
+  }
+  const retrievalSearch = await callAdmin('/internal/v1/admin/retrieval/search', {
+    token: 'mx-v1-owner', method: 'POST', body: { query: 'must stay platform scoped' },
+  })
+  assert.equal(retrievalSearch.status, 403)
+  assert.equal((await retrievalSearch.json()).error.code, 'platform_admin_required')
+})
+
+test('tenant capabilities come from the role held in the target tenant', async () => {
+  const tenantA = (await (await callAdmin('/internal/v1/admin/tenants', {
+    method: 'POST', body: { name: 'Mixed Role Owner Tenant' },
+  })).json()).data
+  const tenantB = (await (await callAdmin('/internal/v1/admin/tenants', {
+    method: 'POST', body: { name: 'Mixed Role Viewer Tenant' },
+  })).json()).data
+  const consumerA = (await (await callAdmin('/internal/v1/admin/consumers', {
+    method: 'POST', body: { tenantId: tenantA.id, name: 'Owner Consumer' },
+  })).json()).data
+  const consumerB = (await (await callAdmin('/internal/v1/admin/consumers', {
+    method: 'POST', body: { tenantId: tenantB.id, name: 'Viewer Consumer' },
+  })).json()).data
+  const keyA = (await (await callAdmin('/internal/v1/admin/api-keys', {
+    method: 'POST', body: { consumerId: consumerA.id, name: 'Owner Key' },
+  })).json()).data
+  const keyB = (await (await callAdmin('/internal/v1/admin/api-keys', {
+    method: 'POST', body: { consumerId: consumerB.id, name: 'Viewer Key' },
+  })).json()).data
+
+  launcherState = { payload: launcherResponse({ subject: 'mixed-role-user' }) }
+  const firstSession = (await (await callAdmin('/internal/v1/admin/session', {
+    token: 'mx-v1-mixed-role',
+  })).json()).data
+  for (const [tenantId, role] of [[tenantA.id, 'owner'], [tenantB.id, 'viewer']]) {
+    const grant = await callAdmin('/internal/v1/admin/members/memberships', {
+      method: 'POST',
+      body: { memberId: firstSession.memberId, tenantId, role },
+    })
+    assert.equal(grant.status, 201)
+  }
+
+  const session = (await (await callAdmin('/internal/v1/admin/session', {
+    token: 'mx-v1-mixed-role',
+  })).json()).data
+  const ownerMembership = session.memberships.find((membership) => membership.tenantId === tenantA.id)
+  const viewerMembership = session.memberships.find((membership) => membership.tenantId === tenantB.id)
+  assert.equal(ownerMembership.capabilities.includes('tenant.write'), true)
+  assert.equal(ownerMembership.capabilities.includes('consumer.write'), true)
+  assert.equal(viewerMembership.capabilities.includes('tenant.write'), false)
+  assert.equal(viewerMembership.capabilities.includes('consumer.write'), false)
+
+  const ownerConsumer = await callAdmin('/internal/v1/admin/consumers', {
+    token: 'mx-v1-mixed-role', method: 'POST',
+    body: { tenantId: tenantA.id, name: 'Allowed Owner Consumer' },
+  })
+  assert.equal(ownerConsumer.status, 201)
+
+  const deniedRequests = [
+    callAdmin(`/internal/v1/admin/tenants/${tenantB.id}`, {
+      token: 'mx-v1-mixed-role', method: 'PUT', body: { name: 'Viewer Cannot Rename' },
+    }),
+    callAdmin('/internal/v1/admin/consumers', {
+      token: 'mx-v1-mixed-role', method: 'POST',
+      body: { tenantId: tenantB.id, name: 'Viewer Cannot Create' },
+    }),
+    callAdmin('/internal/v1/admin/members/memberships', {
+      token: 'mx-v1-mixed-role', method: 'POST',
+      body: { memberId: firstSession.memberId, tenantId: tenantB.id, role: 'owner' },
+    }),
+    callAdmin(`/internal/v1/admin/api-keys?consumerId=${consumerB.id}`, {
+      token: 'mx-v1-mixed-role',
+    }),
+    callAdmin(`/internal/v1/admin/api-keys/${keyB.id}/revoke`, {
+      token: 'mx-v1-mixed-role', method: 'POST',
+    }),
+    callAdmin('/internal/v1/admin/platforms/xiaohongshu', {
+      token: 'mx-v1-mixed-role', method: 'PUT',
+      body: { tenantId: tenantB.id, consumerId: consumerB.id, enabled: true },
+    }),
+  ]
+  for (const responsePromise of deniedRequests) {
+    const response = await responsePromise
+    assert.equal(response.status, 403)
+    assert.equal((await response.json()).error.code, 'insufficient_capability')
+  }
+
+  const visibleKeys = (await (await callAdmin('/internal/v1/admin/api-keys', {
+    token: 'mx-v1-mixed-role',
+  })).json()).data
+  assert.equal(visibleKeys.some((key) => key.id === keyA.id), true)
+  assert.equal(visibleKeys.some((key) => key.id === keyB.id), false)
 })
 
 // ---------------------------------------------------------------------------
@@ -236,6 +403,24 @@ test('an allowlisted Launcher scope confers platform admin, and losing it revoke
   const granted = await (await callAdmin('/internal/v1/admin/session', { token: 'mx-v1-ops' })).json()
   assert.equal(granted.data.platformAdmin, true)
   assert.equal(granted.data.tenantIds, null, 'a platform admin is unscoped')
+
+  const tenant = await callAdmin('/internal/v1/admin/tenants', {
+    token: 'mx-v1-ops', method: 'POST', body: { name: 'Launcher Platform Admin Tenant' },
+  })
+  assert.equal(tenant.status, 201)
+  const tenantId = (await tenant.json()).data.id
+  const renamed = await callAdmin(`/internal/v1/admin/tenants/${tenantId}`, {
+    token: 'mx-v1-ops', method: 'PUT', body: { name: 'Launcher Platform Admin Renamed' },
+  })
+  assert.equal(renamed.status, 200)
+  for (const path of [
+    '/internal/v1/ops/summary',
+    '/internal/v1/admin/agent',
+    '/internal/v1/admin/members',
+    '/internal/v1/admin/retrieval',
+  ]) {
+    assert.equal((await callAdmin(path, { token: 'mx-v1-ops' })).status, 200)
+  }
 
   // Scope removed upstream: the next sign-in must drop the Hub privilege too,
   // otherwise the grant is a ratchet that only ever accumulates.

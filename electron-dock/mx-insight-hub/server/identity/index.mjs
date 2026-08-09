@@ -102,7 +102,12 @@ export class IdentityService {
     })
 
     const memberships = await this.store.listTenantMemberships(member.id)
-    const active = memberships.filter((membership) => membership.status === 'active')
+    const active = memberships
+      .filter((membership) => membership.status === 'active')
+      .map((membership) => ({
+        ...membership,
+        capabilities: [...capabilitiesForRole(membership.role)],
+      }))
 
     return {
       kind: 'launcher-user',
@@ -122,7 +127,7 @@ export class IdentityService {
       tenantIds: platformAdmin ? null : active.map((membership) => membership.tenantId),
       capabilities: platformAdmin
         ? ALL_CAPABILITIES
-        : [...new Set(active.flatMap((membership) => capabilitiesForRole(membership.role)))],
+        : [...new Set(active.flatMap((membership) => membership.capabilities))],
       memberships: active,
     }
   }
@@ -140,6 +145,13 @@ export class IdentityService {
 export function requireCapability(principal, capability) {
   if (!principal.capabilities.includes(capability)) {
     throw new AppError(403, 'insufficient_capability', `This account lacks the ${capability} capability`)
+  }
+}
+
+/** Require a platform-wide administrator (admin token or allowlisted Launcher scope). */
+export function requirePlatformAdmin(principal) {
+  if (!principal.platformAdmin) {
+    throw new AppError(403, 'platform_admin_required', 'Only platform admins may perform this action')
   }
 }
 
@@ -165,6 +177,59 @@ export function scopeTenantFilter(principal, requestedTenantId) {
     return requestedTenantId
   }
   return principal.tenantIds
+}
+
+function membershipHasCapability(membership, capability) {
+  const capabilities = membership.capabilities || capabilitiesForRole(membership.role)
+  return capabilities.includes(capability)
+}
+
+/** Require a capability from the role held in one specific tenant. */
+export function requireTenantCapability(principal, tenantId, capability) {
+  if (!tenantId) {
+    throw new AppError(400, 'invalid_request', 'tenantId is required')
+  }
+  if (principal.platformAdmin) return tenantId
+
+  scopeTenantFilter(principal, tenantId)
+  const membership = principal.memberships.find((candidate) => candidate.tenantId === tenantId)
+  if (!membership || !membershipHasCapability(membership, capability)) {
+    throw new AppError(
+      403,
+      'insufficient_capability',
+      `This account lacks the ${capability} capability in this tenant`,
+    )
+  }
+  return tenantId
+}
+
+/**
+ * Resolve an optional tenant filter to only tenants where the corresponding
+ * membership role grants the requested capability.
+ */
+export function scopeTenantCapability(principal, requestedTenantId, capability) {
+  if (principal.platformAdmin) return requestedTenantId ?? null
+  const scope = scopeTenantFilter(principal, requestedTenantId)
+  if (!Array.isArray(scope)) {
+    requireTenantCapability(principal, scope, capability)
+    return scope
+  }
+
+  const allowed = scope.filter((tenantId) => {
+    const membership = principal.memberships.find((candidate) => candidate.tenantId === tenantId)
+    return membership && membershipHasCapability(membership, capability)
+  })
+  if (allowed.length === 0) {
+    throw new AppError(403, 'insufficient_capability', `This account lacks the ${capability} capability`)
+  }
+  return allowed
+}
+
+/** Post-filter records by the capability held in each record's tenant. */
+export function filterByTenantCapability(principal, records, capability) {
+  if (principal.platformAdmin) return records
+  const allowed = new Set(scopeTenantCapability(principal, null, capability))
+  return records.filter((record) => allowed.has(record.tenantId))
 }
 
 /** Post-filter a list of records that carry a `tenantId`. */

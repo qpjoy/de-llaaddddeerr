@@ -488,6 +488,16 @@ create_model_key_secret() {
 create_runtime_config() {
   local namespace="mx-insight-hub"
   local database_url="${MX_INSIGHT_DATABASE_URL:?ensure_shared_data_plane must run before create_runtime_config}"
+  local -a secret_args=(
+    --from-literal=DATABASE_URL="$database_url"
+    --from-literal=MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN"
+    --from-literal=MX_INSIGHT_API_KEY_PEPPER="$MX_INSIGHT_API_KEY_PEPPER"
+    --from-literal=NIGHT_ALL_SERVICE_TOKEN="${NIGHT_ALL_SERVICE_TOKEN:-}"
+    --from-literal=NIGHT_ALL_EXPORT_TOKEN="${NIGHT_ALL_EXPORT_TOKEN:-}"
+  )
+  if [ -n "${MX_INSIGHT_TG_MONITOR_DATABASE_URL:-}" ]; then
+    secret_args+=(--from-literal=MX_INSIGHT_TG_MONITOR_DATABASE_URL="$MX_INSIGHT_TG_MONITOR_DATABASE_URL")
+  fi
 
   # Shared data-plane endpoints. Empty values are meaningful: an unset
   # Elasticsearch URL makes the Hub run search-free rather than fail to start,
@@ -515,16 +525,14 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_LAUNCHER_AUDIENCE="${MX_INSIGHT_LAUNCHER_AUDIENCE:-mx-insight-hub}" \
     --from-literal=MX_INSIGHT_LAUNCHER_ADMIN_SCOPES="${MX_INSIGHT_LAUNCHER_ADMIN_SCOPES:-}" \
     --from-literal=MX_INSIGHT_BACKFILL_PLATFORMS="${MX_INSIGHT_BACKFILL_PLATFORMS:-xiaohongshu,douyin,twitter}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS="${MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS:-60000}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE="${MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE:-1000}" \
     --from-literal=MX_INSIGHT_AGENT_PROVIDERS="${MX_INSIGHT_AGENT_PROVIDERS:-}" \
     --from-literal=MX_INSIGHT_EMBEDDING_PROVIDERS="${MX_INSIGHT_EMBEDDING_PROVIDERS:-}" \
     --dry-run=client -o yaml | kubectl apply -f -
 
   kubectl -n "$namespace" create secret generic mx-insight-hub-secrets \
-    --from-literal=DATABASE_URL="$database_url" \
-    --from-literal=MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN" \
-    --from-literal=MX_INSIGHT_API_KEY_PEPPER="$MX_INSIGHT_API_KEY_PEPPER" \
-    --from-literal=NIGHT_ALL_SERVICE_TOKEN="${NIGHT_ALL_SERVICE_TOKEN:-}" \
-    --from-literal=NIGHT_ALL_EXPORT_TOKEN="${NIGHT_ALL_EXPORT_TOKEN:-}" \
+    "${secret_args[@]}" \
     --dry-run=client -o yaml | kubectl apply -f -
 }
 

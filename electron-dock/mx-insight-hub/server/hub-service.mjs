@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { hmacSecret, issueApiKey, requestFingerprint } from './core/crypto.mjs'
 import { AppError, UpstreamAmbiguousError, UpstreamRejectedError, assert } from './core/errors.mjs'
+import {
+  normalizeTelegramMonitorQuery,
+  publicTelegramMonitorPage,
+  telegramMonitorResource,
+} from './data/telegram-monitor.mjs'
 
 const DEFAULT_POLICY = Object.freeze({
   maxRequests: 1_000,
@@ -97,6 +102,13 @@ export class HubService {
     return this.store.listTenants()
   }
 
+  async renameTenant(id, body) {
+    const tenantId = requiredUuid(id, 'tenantId')
+    const tenant = await this.store.renameTenant(tenantId, requiredString(body.name, 'name'))
+    assert(tenant, 404, 'tenant_not_found', 'Tenant not found')
+    return tenant
+  }
+
   async createConsumer(body) {
     const tenantId = requiredUuid(body.tenantId, 'tenantId')
     assert(await this.store.getTenant(tenantId), 404, 'tenant_not_found', 'Tenant not found')
@@ -189,7 +201,18 @@ export class HubService {
 
   async capabilities(context) {
     const grants = await this.store.listGrants(context.consumer.id)
-    return this.adapter.capabilities(grants)
+    const payload = await this.adapter.capabilities(grants)
+    if (grants.includes('telegram') && typeof this.store.listCanonicalRecords === 'function') {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === 'telegram')) {
+        platforms.push({
+          platform: 'telegram',
+          ready: true,
+          capabilities: ['monitor_chats', 'monitor_messages'],
+        })
+      }
+    }
+    return payload
   }
 
   async publicUsage(context, filters) {
@@ -199,6 +222,76 @@ export class HubService {
       tenantId: context.tenant.id,
       consumerId: context.consumer.id,
     }))
+  }
+
+  async telegramMonitor(context, resourceName, queryInput) {
+    const grants = await this.store.listGrants(context.consumer.id)
+    assert(grants.includes('telegram'), 403, 'platform_not_granted', 'Telegram is not granted')
+    if (typeof this.store.listCanonicalRecords !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Stored Telegram data requires the PostgreSQL store')
+    }
+    const policy = {
+      ...this.defaultPolicy,
+      ...((await this.store.getPolicy(context.consumer.id, 'telegram')) || {}),
+    }
+    const resource = telegramMonitorResource(resourceName)
+    const query = normalizeTelegramMonitorQuery(queryInput, policy.maxPageSize)
+    const requestId = randomUUID()
+    const startedAt = performance.now()
+    const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
+    await this.store.reapStaleReservations()
+    const reservation = await this.store.reserve({
+      requestId,
+      idempotencyKey: `telegram-read:${requestId}`,
+      fingerprint: requestFingerprint({
+        method: 'GET',
+        path: `/api/v1/data/telegram/${resourceName}`,
+        body: query,
+      }),
+      tenantId: context.tenant.id,
+      consumerId: context.consumer.id,
+      apiKeyId: context.apiKey.id,
+      platform: 'telegram',
+      unitsReserved: 1,
+      leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
+      windowStart,
+      maxRequests: policy.maxRequests,
+    })
+    assert(
+      reservation.kind === 'reserved' && reservation.request?.id === requestId,
+      500,
+      'usage_reservation_failed',
+      'Stored read usage reservation did not enter the expected state',
+    )
+    let page
+    try {
+      const rows = await this.store.listCanonicalRecords({
+        ...resource,
+        platform: 'telegram',
+        ...query,
+      })
+      page = publicTelegramMonitorPage(rows, query.pageSize)
+    } catch (error) {
+      await this.store.releaseRequest(requestId, 'stored_read_failed').catch(() => {})
+      throw error
+    }
+    try {
+      await this.store.commitRequest(requestId, {
+        responseStatus: 200,
+        // Historical pages may contain customer-visible message text. Usage
+        // evidence needs counts and latency, not a second retained copy.
+        responseBody: null,
+        unitsActual: Math.max(1, page.pageInfo.returnedCount),
+        upstreamLatencyMs: Math.round(performance.now() - startedAt),
+      })
+      return page
+    } catch (error) {
+      // A failed commit response is ambiguous: PostgreSQL may have committed
+      // before the connection dropped. Releasing here could turn delivered
+      // usage into free usage, so retain it as unknown for operator review.
+      await this.store.markRequestUnknown(requestId, 'usage_commit_ambiguous').catch(() => {})
+      throw error
+    }
   }
 
   async requestStatus(context, requestId) {

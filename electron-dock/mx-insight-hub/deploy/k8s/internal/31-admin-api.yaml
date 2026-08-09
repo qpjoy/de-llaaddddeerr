@@ -97,6 +97,12 @@ spec:
                 secretKeyRef:
                   name: mx-insight-hub-secrets
                   key: NIGHT_ALL_SERVICE_TOKEN
+            - name: MX_INSIGHT_TG_MONITOR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_TG_MONITOR_DATABASE_URL
+                  optional: true
           readinessProbe:
             httpGet:
               path: /health/ready

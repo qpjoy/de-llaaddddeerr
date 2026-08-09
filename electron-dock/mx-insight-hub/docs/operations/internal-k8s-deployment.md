@@ -2,17 +2,26 @@
 
 ## Layout
 
-Namespace `mx-insight-hub` contains:
+The `mx-insight-hub` namespace contains only Hub workloads and their runtime
+configuration:
 
-- PostgreSQL 16 StatefulSet and 20 GiB retained PVC/PV;
 - schema migration Job;
 - two-replica public API Deployment/ClusterIP Service on `18150`;
 - one-replica Admin/API/UI Deployment/ClusterIP Service on `18151`;
-- ingress NetworkPolicies allowing only same-namespace and `mx-platform` traffic.
+- independent projector and ingest worker Deployments;
+- ServiceAccount and ingress NetworkPolicies.
 
-The image uses `imagePullPolicy: Never`, matching the current single-node internal cluster. `scripts/manage.sh` requires exactly one Kubernetes node, builds with Docker, imports into `k8s.io` containerd through `ctr`, and preloads `postgres:16-bookworm` through the same path. Move to a signed registry and provisioned storage before adding nodes.
+PostgreSQL, Elasticsearch and Redis are not Hub-local StatefulSets. They live in
+the shared `mx-common` data plane. `mx-common provision mx-insight-hub` creates
+and retains a dedicated `mx_insight_hub` database and product role in the shared
+PostgreSQL instance; sharing an instance does not mean sharing another product's
+database or credentials. Elasticsearch/Redis are accelerators/queue services
+owned by the same shared plane.
 
-On bare kubeadm without a default StorageClass, deployment creates a pre-bound `Retain` hostPath PV at `/var/lib/mx-insight-hub/k8s/postgres`. An existing classless Pending PVC is bound to that PV in place, even if a default StorageClass was installed after the claim was created; this avoids a PVC-protection deadlock with the Pending PostgreSQL Pod. An existing bound PVC is always reused. A released local PV is repaired only after its path, reclaim policy, and claim identity match the Hub contract; the script never deletes the PVC or host data.
+The current profile still uses local images with `imagePullPolicy: Never`, so
+`scripts/manage.sh` requires one Kubernetes node, builds with Docker and imports
+the Hub image into `k8s.io` containerd. Move to a signed registry and reviewed
+multi-node storage/networking before adding nodes.
 
 ## Secret preparation
 
@@ -21,14 +30,27 @@ Create `.env.internal` with mode `0600`:
 ```bash
 MX_INSIGHT_ADMIN_TOKEN=<long-random-token>
 MX_INSIGHT_API_KEY_PEPPER=<long-random-pepper>
-MX_INSIGHT_POSTGRES_PASSWORD=<url-safe-random-password>
 NIGHT_ALL_BASE_URL=http://192.168.1.2:13141
 NIGHT_ALL_SERVICE_TOKEN=<night-all-workload-token-when-supported>
+
+# Optional: mx-common otherwise generates and retains the Hub database password.
+MX_INSIGHT_POSTGRES_PASSWORD=<explicit-url-safe-password-if-pinning-is-required>
+
+# Optional until a reviewed Telegram source is activated; must be read-only.
+MX_INSIGHT_TG_MONITOR_DATABASE_URL=<night-all-readonly-postgres-dsn>
 ```
 
-Generate independent values, for example `openssl rand -hex 32`. The deploy script rejects local example values, short secrets, non-URL-safe PostgreSQL passwords and non-HTTP Night-All URLs.
+Generate independent values (for example, `openssl rand -hex 32`). Do not reuse
+the Admin Token as an API key, database password or source credential. The
+deploy script renders a ConfigMap and Secrets with `kubectl create
+--dry-run=client | kubectl apply`; values are not written into manifests or the
+Hub source catalog.
 
-Do not commit the file. Deployment renders a ConfigMap and Secret with `kubectl create --dry-run=client | kubectl apply`; values are not written into manifests.
+The Hub database DSN is returned by `mx-common provision` and stored in the Hub
+runtime Secret. Repeated deploys reuse the credential. The optional Telegram
+source DSN is injected only into Admin/ingest workloads; the public API reads
+Hub PostgreSQL and does not need direct source access. Source rows store only
+the environment-variable name `MX_INSIGHT_TG_MONITOR_DATABASE_URL`.
 
 ## Independent deploy
 
@@ -36,9 +58,42 @@ Do not commit the file. Deployment renders a ConfigMap and Secret with `kubectl 
 bash scripts/manage.sh ops internal-production deploy
 ```
 
-Order: acquire deploy lock -> build -> containerd import -> PostgreSQL image preload -> namespace -> retained-secret compatibility check -> Secret/ConfigMap -> storage reconciliation -> PostgreSQL ready -> migration complete -> public/admin rollout -> smoke -> scoped temporary-artifact cleanup.
+Order:
 
-The command is idempotent after an interrupted deploy. It reuses retained PostgreSQL data, recreates the migration Job, and reapplies workloads. PostgreSQL runs explicitly as UID/GID 999 with all Linux capabilities dropped; if an older Pending/CrashLoop Pod still has the historical root security context, deploy deletes only that Pod so the StatefulSet recreates it from the current template. The PVC, PV, and PGDATA are never removed. A changed PostgreSQL password or API-key pepper is rejected before the Secret is overwritten because those values require an explicit rotation procedure. A missing Secret is also rejected when retained PostgreSQL storage exists. The Docker build runs entirely inside its build context and does not create host `dist` directories. Temporary image archives, the managed port-forward, the Hub Docker staging image, and a PostgreSQL Docker image pulled only for this run are removed on both success and failure. Tagged containerd release/runtime images, PVCs, Secrets, and host data are retained as runtime or rollback assets; global Docker/BuildKit caches are outside this command's cleanup scope.
+1. acquire the deploy lock and validate the single-node target;
+2. reconcile `mx-common` and provision the Hub database/role (database failure
+   is fatal; optional search degradation is not unless
+   `MX_INSIGHT_REQUIRE_SEARCH=1`);
+3. discover the optional Launcher introspection endpoint;
+4. build/import the Hub image;
+5. apply namespace, ServiceAccount, ConfigMap and Secrets;
+6. run the migration Job against shared PostgreSQL;
+7. roll out public, Admin, projector and ingest workloads, apply NetworkPolicy,
+   and run smoke checks;
+8. remove scoped temporary build/import artifacts.
+
+The command is idempotent after an interrupted deployment. A migration Job is
+recreated; data and credentials remain in `mx-common`. The Hub deploy neither
+recreates nor deletes shared PVCs. Tagged containerd runtime/release images,
+Hub Secrets and shared data-plane assets are retained for runtime or rollback.
+
+### Retired Hub-local PostgreSQL
+
+Older releases may have left `statefulset/mx-insight-hub-postgres` and its PVC.
+Routine deploy only warns: silently deleting a database during upgrade is not a
+safe migration strategy. After the shared database has been verified and the
+legacy copy is no longer needed, remove it explicitly:
+
+```bash
+MX_INSIGHT_CONFIRM_DESTROY=mx-insight-hub \
+  bash scripts/manage.sh ops internal-production decommission-local-postgres
+```
+
+This action is destructive and removes the old StatefulSet, claim, retained PV
+and host path. It is never part of `deploy` or `down`.
+
+`down` scales Hub workloads to zero. It does not stop `mx-common`, delete the
+Hub database, remove shared PVCs or remove Hub Secrets.
 
 ## Launcher delegation
 
@@ -53,29 +108,51 @@ Joint deployment is opt-in:
 MX_INSIGHT_HUB_DEPLOY=1 bash scripts/manage.sh ops internal-production deploy
 ```
 
-Launcher deploy remains unchanged when the variable is absent. Hub failure in optional mode must be reported clearly; production policy may later add `disabled|optional|required` instead of a boolean.
+Launcher deploy remains unchanged when the variable is absent. Only the managed
+delegation path sets `MX_INSIGHT_SYNC_LAUNCHER=1` to synchronize the bounded Hub
+Admin integration; an independent Hub deployment does not roll out Launcher.
 
 ## DNS/gateway cutover
 
-Do not create a temporary gate route to Night-All. After Services, workload auth and smoke pass:
+Do not create a temporary gate route to Night-All. After Services, workload auth
+and smoke pass:
 
-1. Private Admin route: `insight.mxinfo-inc.cn` -> Admin Service `18151`, MX-H2I only.
-2. Private data route: `gate.night-all.mxinfo-inc.cn` -> public Service `18150`, MX-H2I only.
-3. Public route, if approved: public TLS edge -> WireGuard -> public Service `18150`, exact method/path allowlist.
+1. Private Admin route: `insight.mxinfo-inc.cn` -> Admin Service `18151`,
+   MX-H2I only.
+2. Private data route: reviewed exact host -> public Service `18150`, MX-H2I
+   only.
+3. Public route, if approved: public TLS edge -> WireGuard -> public Service
+   `18150`, exact method/path allowlist.
 
-The public host must never reach Admin Service or Night-All `13141/18141` directly.
+The public host must never reach Admin Service, shared store Admin endpoints or
+Night-All `13141/18141` directly. Host-network Hub workloads reach shared stores
+through the explicit node-IP client rule reconciled by `mx-common`; a Pod
+namespace selector alone cannot identify host-network traffic.
 
 ## Production release gates still open
 
-- public/admin currently share the PostgreSQL owner connection; introduce migration/admin/public least-privilege roles (and tenant isolation/RLS or controlled functions) before any public route;
-- add operator reconciliation for requests moved to `unknown` after the implemented reservation lease expires;
-- add list pagination, bounded usage windows and aggregate projections;
-- implement PITR/off-node backup and prove restore;
-- wire metrics/traces/log retention and alerting;
-- add exact Night-All workload identity and route/TLS review.
+- public/Admin/projector/ingest currently use the same Hub product database
+  role; split migration/admin/public/worker privileges and add row isolation or
+  controlled functions before broad internet exposure;
+- prove PITR/off-node backup and restore for the Hub database inside
+  `mx-common`;
+- add bounded list/usage windows and aggregate projections where still absent;
+- complete metrics/traces/log retention, alerting and request reconciliation;
+- complete exact Night-All workload identity plus route/TLS review;
+- for Telegram monitor, prove the external read-only role, real schema,
+  watermark/ID/index contract, shape preview, rejection rate, deletion
+  semantics and rollback using the dedicated
+  [ingestion runbook](telegram-monitor-ingestion.md).
 
-Until these gates close, `internal-production` means the internal K8s deployment profile, not approval for internet exposure.
+Until these gates close, `internal-production` means the Internal K8s deployment
+profile, not approval for public internet exposure.
 
 ## Data-plane expansion boundary
 
-PostGIS, object storage, ingest workers, Redis/Valkey, Elasticsearch, Kibana and HanLP are target workloads, not part of the current K8s manifests. Add them as Hub-owned, independently scalable workloads only after their migrations, backup and failure tests exist. Elasticsearch/Kibana readiness must never become Launcher or MX-H2I readiness, and search failure must leave PostgreSQL-backed published data available. The local `deploy/compose/search` stack is not a production K8s manifest.
+Canonical PostgreSQL storage, queues, ingest/projector workers, shared
+Elasticsearch/Redis integration and optional HanLP are implemented. Immutable
+raw object storage, `/shared_dir` watcher, freshness-aware cache/fallback,
+production CDC/delete propagation, BI datasets and governed Text2SQL remain
+separate future capabilities. A shared search outage may degrade retrieval but
+must not stop authoritative PostgreSQL ingest, billing evidence, Launcher or
+MX-H2I networking.

@@ -1,6 +1,10 @@
 # Backup and restore
 
-> Target baseline — not yet automated. The current manifests provide one PostgreSQL PVC only; pgBackRest/WAL-G, off-node object storage, CronJobs and restore verification must be implemented before production gate cutover.
+> Target baseline — not yet automated. The Hub has a dedicated database/role in
+> the shared `mx-common` PostgreSQL instance; backup ownership is therefore a
+> coordinated `mx-common` operation, not a Hub-local PVC. pgBackRest/WAL-G,
+> off-node object storage, CronJobs and per-product restore verification must be
+> implemented before production gate cutover.
 
 ## What must be backed up
 
@@ -12,7 +16,10 @@
 | Secrets | external secret manager or encrypted operator escrow | per rotation |
 | Logs/traces | ELK/OpenSearch/object retention | diagnostic only |
 
-PVC snapshots are useful for fast local recovery but are not the only backup. ELK/OpenSearch cannot reconstruct balances, idempotency records or API-key state.
+Shared PostgreSQL PVC snapshots are useful for fast instance recovery but are
+not a per-product logical restore plan and cannot be the only backup.
+Elasticsearch cannot reconstruct balances, idempotency records or API-key
+state.
 
 Night-All data and Hub data have separate backup owners and restore drills. Restoring one does not silently rewind the other.
 

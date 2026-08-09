@@ -114,6 +114,7 @@ export const adminApi = {
   dashboard: (token) => request(token, `${ADMIN_ROOT}/dashboard`),
   tenants: (token) => request(token, `${ADMIN_ROOT}/tenants`),
   createTenant: (token, body) => request(token, `${ADMIN_ROOT}/tenants`, { method: 'POST', body }),
+  renameTenant: (token, id, body) => request(token, `${ADMIN_ROOT}/tenants/${encodeURIComponent(id)}`, { method: 'PUT', body }),
   consumers: (token, tenantId) => request(token, `${ADMIN_ROOT}/consumers`, { query: { tenantId } }),
   createConsumer: (token, body) => request(token, `${ADMIN_ROOT}/consumers`, { method: 'POST', body }),
   apiKeys: (token, consumerId) => request(token, `${ADMIN_ROOT}/api-keys`, { query: { consumerId } }),

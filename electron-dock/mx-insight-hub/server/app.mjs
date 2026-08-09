@@ -5,11 +5,14 @@ import { secureEqual } from './core/crypto.mjs'
 import { AppError } from './core/errors.mjs'
 import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson } from './core/http.mjs'
 import { validateFieldMap } from './ingest/external/mapping.mjs'
+import { validateDatabaseConnection } from './ingest/external/database-source.mjs'
 import {
   adminTokenPrincipal,
-  filterByTenant,
+  filterByTenantCapability,
   requireCapability,
-  scopeTenantFilter,
+  requirePlatformAdmin,
+  requireTenantCapability,
+  scopeTenantCapability,
 } from './identity/index.mjs'
 
 function queryFilters(searchParams) {
@@ -156,6 +159,7 @@ export function createApp({
   queue = null,
   backfillPlatforms = [],
   importer = null,
+  databasePuller = null,
   agent = null,
   search = null,
   embedding = null,
@@ -200,7 +204,7 @@ export function createApp({
   // Usage for exactly the tenants a principal may see. An unscoped principal
   // passes straight through to the existing platform-wide query.
   async function scopedUsageFor(principal, filters) {
-    const scope = scopeTenantFilter(principal, filters.tenantId ?? null)
+    const scope = scopeTenantCapability(principal, filters.tenantId ?? null, 'usage.read')
     if (!Array.isArray(scope)) {
       return service.usage({ ...filters, tenantId: scope || undefined })
     }
@@ -213,19 +217,19 @@ export function createApp({
   // Resolve a consumer's owning tenant before acting on it. The tenant is never
   // taken from the request body: a caller who could name the tenant could name
   // one they are entitled to and still address a consumer in another.
-  async function assertConsumerInScope(principal, consumerId) {
-    if (principal.tenantIds === null || !consumerId) return
+  async function assertConsumerCapability(principal, consumerId, capability) {
+    if (!consumerId || principal.platformAdmin) return
     const consumer = await store.getConsumer(consumerId)
     if (!consumer) throw new AppError(404, 'consumer_not_found', 'Consumer not found')
-    scopeTenantFilter(principal, consumer.tenantId)
+    requireTenantCapability(principal, consumer.tenantId, capability)
   }
 
-  async function assertApiKeyInScope(principal, apiKeyId) {
-    if (principal.tenantIds === null) return
+  async function assertApiKeyCapability(principal, apiKeyId, capability) {
+    if (principal.platformAdmin) return
     const keys = await service.listApiKeys()
     const key = keys.find((candidate) => candidate.id === apiKeyId)
     if (!key) throw new AppError(404, 'api_key_not_found', 'API key not found')
-    scopeTenantFilter(principal, key.tenantId)
+    requireTenantCapability(principal, key.tenantId, capability)
   }
 
   async function requireSource(sourceKey) {
@@ -234,9 +238,19 @@ export function createApp({
     return source
   }
 
+  function requireSourceAdmin(principal) {
+    requirePlatformAdmin(principal)
+  }
+
   function requireImporter() {
     if (!importer) {
       throw new AppError(503, 'importer_unavailable', 'External imports require the PostgreSQL store')
+    }
+  }
+
+  function requireDatabasePuller() {
+    if (!databasePuller || !queue) {
+      throw new AppError(503, 'database_pull_unavailable', 'Database source pulls require the PostgreSQL store')
     }
   }
 
@@ -386,7 +400,6 @@ export function createApp({
       }
 
       if (request.method === 'GET' && pathname === '/internal/v1/admin/dashboard') {
-        requireCapability(principal, 'usage.read')
         // A scoped principal must not see platform-wide totals, so the
         // dashboard is derived from their own usage rather than the global one.
         if (principal.tenantIds !== null) {
@@ -399,8 +412,8 @@ export function createApp({
       }
       if (request.method === 'GET' && pathname === '/internal/v1/ops/summary') {
         // Operational summary for Launcher's health proxy: platform-wide by
-        // definition, so it stays admin-token only.
-        requireCapability(principal, 'membership.write')
+        // definition, so only either platform-admin identity may read it.
+        requirePlatformAdmin(principal)
         sendJson(response, 200, { data: await service.dashboard(), requestId })
         return
       }
@@ -412,10 +425,10 @@ export function createApp({
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/tenants') {
-        requireCapability(principal, 'tenant.read')
-        const tenants = filterByTenant(
+        const tenants = filterByTenantCapability(
           principal,
           (await service.listTenants()).map((tenant) => ({ ...tenant, tenantId: tenant.id })),
+          'tenant.read',
         )
         sendJson(response, 200, { data: tenants.map(({ tenantId: _, ...rest }) => rest), requestId })
         return
@@ -424,13 +437,18 @@ export function createApp({
         // Creating a tenant is a platform action: a scoped user has no tenant to
         // create it "inside", and letting them would let anyone mint themselves
         // an unbounded namespace.
-        requireCapability(principal, 'tenant.write')
+        requirePlatformAdmin(principal)
         sendJson(response, 201, { data: await service.createTenant(await readJson(request)), requestId })
         return
       }
+      let params = routeMatch(pathname, '/internal/v1/admin/tenants/:id')
+      if (request.method === 'PUT' && params) {
+        requireTenantCapability(principal, params.id, 'tenant.write')
+        sendJson(response, 200, { data: await service.renameTenant(params.id, await readJson(request)), requestId })
+        return
+      }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/consumers') {
-        requireCapability(principal, 'consumer.read')
-        const scope = scopeTenantFilter(principal, searchParams.get('tenantId') || null)
+        const scope = scopeTenantCapability(principal, searchParams.get('tenantId') || null, 'consumer.read')
         if (Array.isArray(scope)) {
           const all = await Promise.all(scope.map((tenantId) => service.listConsumers(tenantId)))
           sendJson(response, 200, { data: all.flat(), requestId })
@@ -440,38 +458,40 @@ export function createApp({
         return
       }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/consumers') {
-        requireCapability(principal, 'consumer.write')
         const body = await readJson(request)
-        scopeTenantFilter(principal, body?.tenantId ?? null)
+        requireTenantCapability(principal, body?.tenantId, 'consumer.write')
         sendJson(response, 201, { data: await service.createConsumer(body), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/api-keys') {
-        requireCapability(principal, 'apikey.read')
-        const keys = filterByTenant(principal, await service.listApiKeys(searchParams.get('consumerId') || undefined))
+        const consumerId = searchParams.get('consumerId') || undefined
+        await assertConsumerCapability(principal, consumerId, 'apikey.read')
+        const keys = filterByTenantCapability(
+          principal,
+          await service.listApiKeys(consumerId),
+          'apikey.read',
+        )
         sendJson(response, 200, { data: keys, requestId })
         return
       }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/api-keys') {
-        requireCapability(principal, 'apikey.write')
         const body = await readJson(request)
         // The tenant is derived from the consumer, so scope has to be checked
         // against the consumer's owner rather than anything the caller sends.
-        await assertConsumerInScope(principal, body?.consumerId)
+        await assertConsumerCapability(principal, body?.consumerId, 'apikey.write')
         sendJson(response, 201, { data: await service.createApiKey(body), requestId })
         return
       }
-      let params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/revoke')
+      params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/revoke')
       if (request.method === 'POST' && params) {
-        requireCapability(principal, 'apikey.write')
-        await assertApiKeyInScope(principal, params.id)
+        await assertApiKeyCapability(principal, params.id, 'apikey.write')
         sendJson(response, 200, { data: await service.revokeApiKey(params.id), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/platforms') {
-        requireCapability(principal, 'consumer.read')
         const filters = queryFilters(searchParams)
-        await assertConsumerInScope(principal, filters.consumerId)
+        if (filters.consumerId) await assertConsumerCapability(principal, filters.consumerId, 'consumer.read')
+        else scopeTenantCapability(principal, null, 'consumer.read')
         sendJson(response, 200, {
           data: await service.getPlatformConfiguration(filters),
           requestId,
@@ -480,9 +500,8 @@ export function createApp({
       }
       params = routeMatch(pathname, '/internal/v1/admin/platforms/:platform')
       if (request.method === 'PUT' && params) {
-        requireCapability(principal, 'platform.write')
         const body = await readJson(request)
-        scopeTenantFilter(principal, body?.tenantId ?? null)
+        await assertConsumerCapability(principal, body?.consumerId, 'platform.write')
         sendJson(response, 200, {
           data: await service.putPlatformConfiguration(params.platform, body),
           requestId,
@@ -490,7 +509,6 @@ export function createApp({
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/usage') {
-        requireCapability(principal, 'usage.read')
         sendJson(response, 200, {
           data: await scopedUsageFor(principal, queryFilters(searchParams)),
           requestId,
@@ -504,37 +522,90 @@ export function createApp({
       // enters the canonical model, so both need platform authority rather than
       // a tenant-scoped role.
       if (request.method === 'GET' && pathname === '/internal/v1/admin/sources') {
-        requireCapability(principal, 'membership.write')
+        requireSourceAdmin(principal)
         sendJson(response, 200, { data: await store.listExternalSources(), requestId })
         return
       }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/sources') {
-        requireCapability(principal, 'membership.write')
+        requireSourceAdmin(principal)
         const body = await readJson(request)
+        const sourceKey = requiredField(body, 'sourceKey')
+        if (await store.getExternalSource?.(sourceKey)) {
+          throw new AppError(409, 'source_exists', 'Source keys are immutable; update a paused source through its PUT route')
+        }
+        if ((body.sourceKind || 'file') === 'database') validateDatabaseConnection(body.connection)
         const created = await store.createExternalSource({
-          sourceKey: requiredField(body, 'sourceKey'),
+          sourceKey,
           displayName: requiredField(body, 'displayName'),
           sourceKind: body.sourceKind || 'file',
           // External data lands in its own dataset by default so it never
           // silently merges into the Night-All corpus and skews platform stats.
-          datasetId: body.datasetId || `external.${requiredField(body, 'sourceKey')}.v1`,
+          datasetId: body.datasetId || `external.${sourceKey}.v1`,
           platform: body.platform || 'external',
           objectType: body.objectType || 'record',
+          status: (body.sourceKind || 'file') === 'database' ? 'paused' : 'active',
           connection: body.connection || {},
         })
         sendJson(response, 201, { data: created, requestId })
         return
       }
 
+      params = routeMatch(pathname, '/internal/v1/admin/sources/:key')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        const source = await requireSource(params.key)
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => !['connection', 'status'].includes(field))
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported source fields: ${unsupported.join(', ')}`)
+        }
+        if (body.status != null && !['active', 'paused'].includes(body.status)) {
+          throw new AppError(400, 'invalid_status', 'status must be active or paused')
+        }
+        if (body.connection != null) {
+          if (source.sourceKind !== 'database') {
+            throw new AppError(400, 'wrong_source_kind', 'Only database sources have connection metadata')
+          }
+          if (source.status !== 'paused') {
+            throw new AppError(409, 'source_pause_required', 'Pause this source before changing its connection metadata')
+          }
+          if (body.status === 'active') {
+            throw new AppError(409, 'source_probe_required', 'Update connection while paused, then probe and activate separately')
+          }
+          validateDatabaseConnection({ ...source.connection, ...body.connection })
+        }
+        if (body.status === 'active' && source.status !== 'active') {
+          requireDatabasePuller()
+          const mapping = await store.getActiveMapping(source.id)
+          if (!mapping) {
+            throw new AppError(409, 'no_approved_mapping', 'Approve a verified field mapping before activating this source')
+          }
+          const description = await databasePuller.describe(params.key)
+          if (description.issues.length > 0) {
+            throw new AppError(409, 'source_probe_failed', 'Source schema is not safe for incremental sync', {
+              issues: description.issues,
+            })
+          }
+        }
+        sendJson(response, 200, {
+          data: await store.updateExternalSource(params.key, {
+            status: body.status ?? null,
+            connection: body.connection == null ? null : { ...source.connection, ...body.connection },
+          }),
+          requestId,
+        })
+        return
+      }
+
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/mappings')
       if (params && request.method === 'GET') {
-        requireCapability(principal, 'membership.write')
+        requireSourceAdmin(principal)
         const source = await requireSource(params.key)
         sendJson(response, 200, { data: await store.listSourceMappings(source.id), requestId })
         return
       }
       if (params && request.method === 'POST') {
-        requireCapability(principal, 'membership.write')
+        requireSourceAdmin(principal)
         const source = await requireSource(params.key)
         const body = await readJson(request)
         validateFieldMap(body?.fieldMap)
@@ -554,8 +625,11 @@ export function createApp({
 
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/mappings/:version/approve')
       if (params && request.method === 'POST') {
-        requireCapability(principal, 'membership.write')
+        requireSourceAdmin(principal)
         const source = await requireSource(params.key)
+        if (source.sourceKind === 'database' && source.status !== 'paused') {
+          throw new AppError(409, 'source_pause_required', 'Pause this database source before changing its active mapping')
+        }
         const approved = await store.approveSourceMapping({
           sourceId: source.id,
           version: Number(params.version),
@@ -566,8 +640,17 @@ export function createApp({
       }
 
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/preview')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, {
+          data: await databasePuller.preview(params.key, { limit: Number(searchParams.get('limit') || 3) }),
+          requestId,
+        })
+        return
+      }
       if (params && request.method === 'POST') {
-        requireCapability(principal, 'membership.write')
+        requireSourceAdmin(principal)
         requireImporter()
         const buffer = await readBuffer(request)
         const preview = await importer.preview(buffer, requiredQuery(searchParams, 'filename'))
@@ -585,9 +668,64 @@ export function createApp({
         return
       }
 
+      params = routeMatch(pathname, '/internal/v1/admin/sources/:key/schema')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, { data: await databasePuller.describe(params.key), requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/sources/:key/sync')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        await requireSource(params.key)
+        sendJson(response, 200, {
+          data: {
+            cursor: await queue.getCursor(`external:${params.key}`),
+            queue: await queue.stats('external-pull'),
+          },
+          requestId,
+        })
+        return
+      }
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const source = await requireSource(params.key)
+        if (source.sourceKind !== 'database') {
+          throw new AppError(400, 'wrong_source_kind', 'This source is not a database source')
+        }
+        if (source.status !== 'active') {
+          throw new AppError(409, 'source_paused', 'Probe, approve and activate this source before scheduling sync')
+        }
+        const description = await databasePuller.describe(params.key)
+        if (description.issues.length > 0) {
+          throw new AppError(409, 'source_probe_failed', 'Source schema is not safe for incremental sync', {
+            issues: description.issues,
+          })
+        }
+        const body = await readJson(request)
+        const batchSize = body?.batchSize ?? 1_000
+        if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 5_000) {
+          throw new AppError(400, 'invalid_batch_size', 'batchSize must be an integer between 1 and 5000')
+        }
+        const jobId = await queue.enqueue(
+          'external-pull',
+          { sourceKey: params.key, batchSize, chunk: 0 },
+          { dedupeKey: `external-pull:${params.key}:0`, priority: 220 },
+        )
+        sendJson(response, 202, {
+          data: { sourceKey: params.key, jobId, alreadyScheduled: jobId === null },
+          requestId,
+        })
+        return
+      }
+
       // ---- retrieval ------------------------------------------------------
       if (request.method === 'GET' && pathname === '/internal/v1/admin/retrieval') {
-        requireCapability(principal, 'usage.read')
+        requirePlatformAdmin(principal)
         sendJson(response, 200, {
           data: embedding ? await embedding.status() : { enabled: false },
           requestId,
@@ -595,7 +733,7 @@ export function createApp({
         return
       }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/retrieval/search') {
-        requireCapability(principal, 'usage.read')
+        requirePlatformAdmin(principal)
         if (!search?.queries?.chunkIndexSet) {
           throw new AppError(503, 'semantic_search_unavailable', 'The chunk index is not configured')
         }
@@ -614,7 +752,7 @@ export function createApp({
 
       // ---- agent (P5) -----------------------------------------------------
       if (request.method === 'GET' && pathname === '/internal/v1/admin/agent') {
-        requireCapability(principal, 'membership.write')
+        requirePlatformAdmin(principal)
         sendJson(response, 200, {
           data: {
             available: Boolean(agent?.available),
@@ -629,7 +767,7 @@ export function createApp({
 
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/import')
       if (params && request.method === 'POST') {
-        requireCapability(principal, 'membership.write')
+        requireSourceAdmin(principal)
         requireImporter()
         // Raw body plus a filename query parameter, deliberately not multipart:
         // multipart needs its own parser for attacker-controlled input, and this
@@ -646,7 +784,7 @@ export function createApp({
 
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/imports')
       if (params && request.method === 'GET') {
-        requireCapability(principal, 'membership.write')
+        requireSourceAdmin(principal)
         const source = await requireSource(params.key)
         sendJson(response, 200, { data: await store.listImportRuns(source.id), requestId })
         return
@@ -655,10 +793,10 @@ export function createApp({
       // ---- backfill control ----------------------------------------------
       //
       // Backfill is platform-wide, reads Night-All's whole store, and costs
-      // real database work, so it requires the same authority as membership
-      // changes rather than any tenant-scoped role.
+      // real database work, so it requires platform administration rather than
+      // any tenant-scoped role.
       if (request.method === 'GET' && pathname === '/internal/v1/admin/backfill') {
-        requireCapability(principal, 'membership.write')
+        requirePlatformAdmin(principal)
         if (!queue) {
           throw new AppError(503, 'queue_unavailable', 'Backfill requires the PostgreSQL store')
         }
@@ -678,7 +816,7 @@ export function createApp({
         return
       }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/backfill') {
-        requireCapability(principal, 'membership.write')
+        requirePlatformAdmin(principal)
         if (!queue) {
           throw new AppError(503, 'queue_unavailable', 'Backfill requires the PostgreSQL store')
         }
@@ -707,14 +845,13 @@ export function createApp({
 
       // ---- membership administration ------------------------------------
       if (request.method === 'GET' && pathname === '/internal/v1/admin/members') {
-        requireCapability(principal, 'membership.write')
+        requirePlatformAdmin(principal)
         sendJson(response, 200, { data: await store.listMembers(), requestId })
         return
       }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/members/memberships') {
-        requireCapability(principal, 'membership.write')
         const body = await readJson(request)
-        scopeTenantFilter(principal, body?.tenantId ?? null)
+        requireTenantCapability(principal, body?.tenantId, 'membership.write')
         const granted = await store.grantTenantMembership({
           memberId: body?.memberId,
           tenantId: body?.tenantId,
@@ -728,9 +865,8 @@ export function createApp({
         return
       }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/members/memberships/revoke') {
-        requireCapability(principal, 'membership.write')
         const body = await readJson(request)
-        scopeTenantFilter(principal, body?.tenantId ?? null)
+        requireTenantCapability(principal, body?.tenantId, 'membership.write')
         const revoked = await store.revokeTenantMembership({
           memberId: body?.memberId,
           tenantId: body?.tenantId,
@@ -745,6 +881,19 @@ export function createApp({
         const context = await requirePublic(request)
         const payload = await service.capabilities(context)
         sendJson(response, 200, { ...payload, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/data/telegram/:resource')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.telegramMonitor(
+            context,
+            params.resource,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
         return
       }
       if (request.method === 'POST' && pathname === '/api/v1/data/search') {
