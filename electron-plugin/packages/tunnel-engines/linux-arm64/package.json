@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-plugin-tunnel-engine-linux-arm64",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": false,
   "description": "Linux arm64 mihomo engine resources for @qpjoy/electron-plugin-tunnel.",
   "license": "UNLICENSED",
