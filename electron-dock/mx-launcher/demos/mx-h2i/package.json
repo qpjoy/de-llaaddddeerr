@@ -1,7 +1,7 @@
 {
   "name": "@qpjoy/mx-h2i-demo",
   "productName": "MX-H2I",
-  "version": "2.1.13",
+  "version": "2.1.18",
   "private": true,
   "author": "QPJoy",
   "description": "MX-H2I Electron standalone launcher demo.",
