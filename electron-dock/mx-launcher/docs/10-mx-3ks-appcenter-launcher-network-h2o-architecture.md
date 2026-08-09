@@ -452,6 +452,11 @@ H2O 运行时订阅策略：
   Hysteria2 runtime 已能用该账号 auth，而不仅是 Internal 已生成 YAML 或 host
   `users.csv` 有记录；否则 H2O 应保留 initializing/诊断状态，避免给用户一个看似可用但无法
   出网的订阅。
+- **`ensure-subscription` 不带 `siteIds` = 「不改分配」，不是「回到平台默认」。** Internal 只在
+  用户**还没有任何 entitlement 记录**时才落到 `defaultUserOverseaSiteId()`；已有记录时原样
+  保留 admin 在 User Center 勾的站点（勾成空 = 停用，也要保留，不能被刷新悄悄重新授权）。
+  客户端侧同样：`ensure-subscription` 的第一档候选是「已授权站点全集」而不是逐个站点，
+  否则多站点授权会在服务端被裁成单站点，用户的节点列表随之变短。
 - 如果 entitlement 已存在但账号缺失或 `runtimeSync` 不是 `synced`，H2O 水合 managed profile
   时也应优先调用 `ensure-subscription`，让一次请求同时补 entitlement、site access account、
   remote runtime sync 和 YAML 可渲染性；`/oversea/sync-runtime` 只作为已有 active account
@@ -563,6 +568,26 @@ hydrate（登录/刷新订阅）和 start（启动 mihomo 前预取）共用同�
 `applyManagedConfig({ subscriptionContent })` 直接交给 mihomo，它自己不再下载。
 **要让公网路径可用，Domestic nginx 需要把 `/internal/v1/user-center/` 反代到 Internal** ——
 这是服务端待办，客户端已经准备好，一旦开通会自动切到候选 2。
+
+#### 例外：Clash 用的 public link 已经开在公网
+
+`user-center/.../subscription.yaml` 需要 Bearer，Clash 这类第三方客户端发不了，所以另有一条
+**token-in-path** 的只读路径 `GET /internal/v1/oversea-subscriptions/{token}.yaml`
+（token 可吊销、可轮换、只能读自己那份订阅，URL 里不含 userId）。Domestic edge 的严格
+allowlist 单独放行了这一条（`@publicOverseaAggregate`），所以它和内网地址都能取到同一份
+聚合订阅：
+
+| 面 | 地址 |
+| --- | --- |
+| 内网 / VPN | `http://10.88.88.88:18090/internal/v1/oversea-subscriptions/{token}.yaml` |
+| 外网 / 公网 | `https://h2i.minsight-ai.com/internal/v1/oversea-subscriptions/{token}.yaml` |
+
+admin UI 的 User Center → Oversea access → Public Link 会在签发后同时给出这两个地址，
+各带一个 Copy 按钮；外网那条必须走域名（裸 IP 的 https 在 Domestic ingress 上 SNI 握手
+必失败）。注意 Caddyfile 有两份生成器——admin Sync 走
+`admin.controller.ts` 的 `domesticServicesCaddyfileContent()`，产物打包走
+`scripts/site-slot-artifact-materializer.mjs`——两边必须一致，否则一次 Sync 就会把
+allowlist 覆盖回去。
 
 ### oversea 机器退役：归档而不是删除
 

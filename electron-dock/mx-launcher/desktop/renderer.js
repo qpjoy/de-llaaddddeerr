@@ -4033,7 +4033,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
   const path = url.pathname;
   if (verb === 'GET') {
     return /^\/internal\/v1\/user-center\/(?:roles|users|oversea-entitlements|service-accounts)$/.test(path)
-      || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:oversea|h2o\/runtime-profile)$/.test(path)
+      || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:oversea|oversea\/subscription-link|h2o\/runtime-profile)$/.test(path)
       || /^\/internal\/v1\/sdk\/(?:roles|users|service-accounts)$/.test(path)
       || /^\/internal\/v1\/release-management\/plans(?:\/[^/]+)?$/.test(path)
       || /^\/internal\/v1\/release-artifacts\/[^/]+$/.test(path)
@@ -4042,7 +4042,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
   }
   if (verb === 'POST') {
     return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue)$/.test(path)
-      || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:password|oversea|h2o\/runtime-profile|oversea\/sync-runtime)$/.test(path)
+      || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:password|oversea|h2o\/runtime-profile|oversea\/sync-runtime|oversea\/subscription-link)$/.test(path)
       || /^\/internal\/v1\/sdk\/(?:users|service-accounts)$/.test(path)
       || /^\/internal\/v1\/sdk\/service-accounts\/[^/]+\/credentials\/rotate$/.test(path)
       || /^\/internal\/v1\/app-center\/apps(?:\/[^/]+)?$/.test(path)
@@ -4057,6 +4057,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
   return verb === 'DELETE'
     && (
       /^\/internal\/v1\/user-center\/users\/[^/]+$/.test(path)
+      || /^\/internal\/v1\/user-center\/users\/[^/]+\/oversea\/subscription-link$/.test(path)
       || /^\/internal\/v1\/app-center\/apps\/[^/]+$/.test(path)
     );
 }
@@ -8079,6 +8080,10 @@ function renderUserOverseaEditor(user) {
  * carries a Bearer token, third-party clients such as Clash cannot, so they get a
  * revocable per-user token embedded in the path. The plaintext is returned once
  * at issue time, so it is surfaced here only right after a rotation.
+ *
+ * The same token is served on both faces of the network, so hand out both URLs
+ * rather than guessing where the user's Clash runs: the 10.88.* admin origin only
+ * resolves inside the VPN, and the public hostname only works from outside it.
  */
 function renderUserOverseaPublicLink(userId, hasSubscription) {
   const link = state.userCenter.overseaLink || {};
@@ -8086,12 +8091,14 @@ function renderUserOverseaPublicLink(userId, hasSubscription) {
   const busy = state.userCenter.overseaLinkBusy === true;
   const issued = forUser.issued || null;
   const meta = forUser.meta || null;
-  const publicUrl = issued ? `${overseaPublicSubscriptionBase()}${issued.path}` : '';
+  const urls = issued ? overseaPublicSubscriptionUrls(issued.path) : [];
   return `
     <div class="foundation-subscription-url">
-      <span>Public Link <small>external / Clash</small></span>
-      ${publicUrl
-        ? `<code data-oversea-public-url>${escapeHtml(publicUrl)}</code>`
+      <span>Public Link <small>Clash / 第三方客户端</small></span>
+      ${urls.length
+        ? urls.map((item) => `
+            <code data-oversea-public-url="${escapeHtml(item.url)}">${escapeHtml(item.label)} — ${escapeHtml(item.url)}</code>
+          `).join('')
         : `<code>${escapeHtml(meta
             ? `A link is active (issued ${formatTime(meta.issuedAt)}, expires ${formatTime(meta.expiresAt)}). Rotate to reveal a new URL.`
             : hasSubscription
@@ -8101,13 +8108,31 @@ function renderUserOverseaPublicLink(userId, hasSubscription) {
         <button class="secondary-button" type="button" data-oversea-link-issue ${busy || !userId || !hasSubscription ? 'disabled' : ''}>
           ${busy ? 'Working' : meta || issued ? 'Rotate Link' : 'Issue Link'}
         </button>
-        ${publicUrl ? '<button class="secondary-button" type="button" data-oversea-link-copy>Copy</button>' : ''}
+        ${urls.map((item) => `
+          <button class="secondary-button" type="button" data-oversea-link-copy="${escapeHtml(item.url)}">Copy ${escapeHtml(item.label)}</button>
+        `).join('')}
         ${meta || issued ? `<button class="secondary-button" type="button" data-oversea-link-revoke ${busy ? 'disabled' : ''}>Revoke</button>` : ''}
         ${issued ? '<span class="profile-feedback" data-kind="warning">Copy it now; only metadata is retrievable afterwards.</span>' : ''}
         ${forUser.feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(forUser.feedback.kind)}">${escapeHtml(forUser.feedback.message)}</span>` : ''}
       </div>
     </div>
   `;
+}
+
+/** Intranet first (that is where the admin sits), then the public hostname. */
+function overseaPublicSubscriptionUrls(path) {
+  const suffix = String(path || '');
+  if (!suffix) return [];
+  const candidates = [
+    { label: '内网', url: `${normalizedServerBase()}${suffix}` },
+    { label: '外网', url: `${overseaPublicSubscriptionBase()}${suffix}` }
+  ];
+  const seen = new Set();
+  return candidates.filter((item) => {
+    if (!item.url || seen.has(item.url)) return false;
+    seen.add(item.url);
+    return true;
+  });
 }
 
 /**
@@ -8322,10 +8347,9 @@ function bindUserEditorDrawerControls() {
   if (issueLink) issueLink.addEventListener('click', () => void issueUserOverseaPublicLink());
   const revokeLink = userEditorDrawer.querySelector('[data-oversea-link-revoke]');
   if (revokeLink) revokeLink.addEventListener('click', () => void revokeUserOverseaPublicLink());
-  const copyLink = userEditorDrawer.querySelector('[data-oversea-link-copy]');
-  if (copyLink) {
+  for (const copyLink of userEditorDrawer.querySelectorAll('[data-oversea-link-copy]')) {
     copyLink.addEventListener('click', () => {
-      const url = userEditorDrawer.querySelector('[data-oversea-public-url]')?.textContent || '';
+      const url = copyLink.dataset.overseaLinkCopy || '';
       if (url) void navigator.clipboard?.writeText(url);
     });
   }

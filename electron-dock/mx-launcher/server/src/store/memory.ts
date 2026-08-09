@@ -1275,11 +1275,13 @@ export class MemoryStore implements PlatformStore {
     if (!userId) throw new Error('userId is required');
     const user = this.users.get(userId);
     if (!user) throw new Error(`User not found: ${userId}`);
-    const siteIds = normalizeEntitlementSiteIds(input.siteIds);
-    const effectiveSiteIds = input.siteIds !== undefined && input.siteIds !== null
-      ? siteIds
-      : this.defaultUserOverseaSiteIds();
     const previous = this.getUserOverseaEntitlement(user.userId);
+    // 见 PostgresStore.upsertUserOverseaEntitlement：省略 siteIds = 保留已有分配。
+    const effectiveSiteIds = input.siteIds !== undefined && input.siteIds !== null
+      ? normalizeEntitlementSiteIds(input.siteIds)
+      : previous
+        ? normalizeEntitlementSiteIds(previous.siteIds)
+        : this.defaultUserOverseaSiteIds();
     const accounts = effectiveSiteIds.map((siteId) => {
       const accountName = userOverseaAccountName(user, siteId);
       const issued = this.issueSiteSlotAccessAccounts({

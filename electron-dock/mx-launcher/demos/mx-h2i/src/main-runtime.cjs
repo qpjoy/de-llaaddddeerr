@@ -8687,11 +8687,7 @@ async function openH2oTestWindow(input = {}) {
   win.show();
   if (win.isMinimized()) win.restore();
   win.focus();
-  if (
-    !current.running
-    && current.status === 'starting'
-    && h2oHasUsableSubscription(current.activeSubscription)
-  ) {
+  if (h2oTestWindowShouldPreflightStart(current)) {
     await ensureH2oProxyReady({ ...current, running: true }, 'test-window-preflight');
     if (!isH2oTestLoadCurrent(loadId, win)) return;
   }
@@ -8715,6 +8711,18 @@ async function openH2oTestWindow(input = {}) {
   };
   pushAppLog('h2o', 'info', `H2O test window opened ${targetUrl} via ${proxyMode}; loading async.`);
   void loadH2oTestWindowUrl(win, targetUrl, proxyMode, loadId);
+}
+
+/**
+ * 测试窗口的意义就是走 H2O，所以订阅可用时先把 mihomo 拉起来，而不是静默回退系统代理
+ * 再抛一个 ERR_FAILED —— 后者正是「点了测试却上不了外网」的现象。
+ *
+ * TUN 模式例外：那会改整机路由，必须留给用户显式点「启动」。
+ */
+function h2oTestWindowShouldPreflightStart(current) {
+  return !current.running
+    && !h2oModeNeedsTun(current.mode)
+    && h2oHasUsableSubscription(current.activeSubscription);
 }
 
 function createH2oTestWindow(targetUrl) {
@@ -8876,6 +8884,10 @@ async function h2oTestWindowFailureDiagnostics(win, targetUrl, proxyMode) {
   const session = h2oTestWindowSession(win);
   if (!session) return '';
   const parts = [];
+  // 回退系统代理时失败的原因几乎总是「H2O 根本没在代理这次请求」，
+  // 直接说清楚下一步，别让用户对着裸 ERR_FAILED 猜。
+  const hint = h2oTestFallbackHint(proxyMode);
+  if (hint) parts.push(hint);
   const decision = await h2oResolveProxyDecision(session, targetUrl);
   if (decision) parts.push(`resolveProxy=${decision}`);
   if (proxyMode === 'proxy') {
@@ -8885,6 +8897,19 @@ async function h2oTestWindowFailureDiagnostics(win, targetUrl, proxyMode) {
     parts.push(`mixed 127.0.0.1:${mixedPort}=${ready ? 'listening' : 'not listening'}`);
   }
   return parts.length ? `诊断：${parts.join('；')}` : '';
+}
+
+function h2oTestFallbackHint(proxyMode) {
+  if (proxyMode === 'direct-not-running') {
+    return '本次请求没有走 H2O：H2O 未运行，已回退系统代理。请先在 H2O 管理页点击「启动」再测试';
+  }
+  if (proxyMode === 'direct-no-subscription') {
+    return '本次请求没有走 H2O：订阅未就绪，已回退系统代理。请先刷新/分配系统默认订阅';
+  }
+  if (proxyMode === 'direct-not-whitelisted') {
+    return '本次请求没有走 H2O：App 规则模式下该域名不在白名单，走的是直连';
+  }
+  return '';
 }
 
 async function loadH2oTestErrorPage(win, targetUrl, message) {
@@ -9185,11 +9210,11 @@ async function provisionH2oOverseaForCurrentUser(input = {}) {
 }
 
 async function h2oOverseaProvisionSiteAttempts(input = {}, options = {}) {
-  const explicit = [
+  const explicit = uniqueStrings([
     ...arrayValue(input?.siteIds, []),
     nullableString(input?.siteId)
-  ].map((item) => String(item || '').trim()).filter(Boolean);
-  if (explicit.length) return [[explicit[0]]];
+  ].map((item) => String(item || '').trim()).filter(Boolean));
+  if (explicit.length) return [explicit];
 
   // What the admin already granted this user outranks any client-side guess:
   // re-provisioning used to hard-code oversea-main first, so it silently reverted
@@ -9199,23 +9224,23 @@ async function h2oOverseaProvisionSiteAttempts(input = {}, options = {}) {
     .filter(Boolean));
 
   const discoveredSiteIds = await discoverH2oOverseaSiteIds(options);
-  // Internal picks the server default when the site list is empty; keep that as a
-  // fallback rung rather than pinning oversea-main, which may be retired.
+  // 第一档是「admin 授权的全集」而不是逐个站点：订阅本来就是多节点聚合，
+  // 只发第一个站点会把多站点授权在服务端裁成单站点，用户的节点列表随之变短。
+  // 之后才逐档降级；空数组 = 不带 siteIds，由 Internal 保留已有分配或取平台默认。
   const candidates = [
-    ...entitledSiteIds,
-    ...discoveredSiteIds,
-    '',
-    'oversea-main'
+    entitledSiteIds,
+    ...entitledSiteIds.map((siteId) => [siteId]),
+    ...discoveredSiteIds.map((siteId) => [siteId]),
+    [],
+    ['oversea-main']
   ];
   const seen = new Set();
-  return candidates
-    .filter((siteId) => {
-      const key = siteId || '<server-default>';
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .map((siteId) => siteId ? [siteId] : []);
+  return candidates.filter((siteIds) => {
+    const key = siteIds.length ? siteIds.join(',') : '<server-default>';
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function discoverH2oOverseaSiteIds(options = {}) {

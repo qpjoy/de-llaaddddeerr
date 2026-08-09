@@ -309,8 +309,14 @@ pnpm --dir electron-dock/mx-launcher/demos/luopan run make:asar:mac -- 0.1.2 uni
 # win
 pnpm --dir electron-dock/mx-launcher/demos/luopan run make:asar:win -- 0.1.2 x64
 ```
+
+### 设置oversea节点
 ```bash
 # 推送domestic包，
 # 1. 物化产物
-node server/scripts/site-slot-artifact-materializer.mjs domestic
+kubectl -n mx-internal-shadow exec deploy/mx-launcher-internal -- node server/scripts/site-slot-artifact-materializer.mjs domestic
+# 2. 推送domestic包
+kubectl -n mx-internal-shadow exec deploy/mx-launcher-internal -- sh -c 'tar -xzOf /app/runtime-artifacts/site-slots/domestic/mx-domestic-services.tar.gz Caddyfile | grep -c publicOverseaSubscription'
+# 3. 查验包是否更新
+ kubectl -n mx-internal-shadow exec deploy/mx-launcher-internal -- sh -c 'tar -xzOf /app/runtime-artifacts/site-slots/domestic/mx-domestic-services.tar.gz ./Caddyfile | grep -cE "publicOverseaSubscription|publicOverseaAggregate"'
 ```

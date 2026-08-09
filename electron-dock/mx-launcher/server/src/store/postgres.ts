@@ -1424,11 +1424,15 @@ export class PostgresStore implements PlatformStore {
     if (!userId) throw new Error('userId is required');
     const user = await this.getRecord<UserCenterUser>('iam-user', userId);
     if (!user) throw new Error(`User not found: ${userId}`);
-    const siteIds = normalizeEntitlementSiteIds(input.siteIds);
-    const effectiveSiteIds = input.siteIds !== undefined && input.siteIds !== null
-      ? siteIds
-      : await this.defaultUserOverseaSiteIds();
     const previous = await this.getUserOverseaEntitlement(user.userId);
+    // 省略 siteIds 只表示「不改分配」，不表示「回到平台默认」。
+    // H2O 的 ensure-subscription 每次刷新都不带 siteIds，之前落到 defaultUserOverseaSiteIds()
+    // 会把 admin 刚指派的站点悄悄改回默认站点，用户看到的仍旧是老节点。
+    const effectiveSiteIds = input.siteIds !== undefined && input.siteIds !== null
+      ? normalizeEntitlementSiteIds(input.siteIds)
+      : previous
+        ? normalizeEntitlementSiteIds(previous.siteIds)
+        : await this.defaultUserOverseaSiteIds();
     const accounts: UserOverseaEntitlement['accounts'] = [];
     for (const siteId of effectiveSiteIds) {
       const accountName = userOverseaAccountName(user, siteId);

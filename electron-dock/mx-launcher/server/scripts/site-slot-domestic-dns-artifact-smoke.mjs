@@ -111,6 +111,21 @@ try {
     caddyfile,
     /@publicLeaseOperation \{[\s\S]*?method POST[\s\S]*?path_regexp launcherLeaseOperation \^\/internal\/v1\/launcher-network\/leases\/\[A-Za-z0-9\._-\]\+\/\(release\|domestic-peer\/sync\|internal-direct-peer\/sync\|domestic-relay\/diagnostics\)\$[\s\S]*?\}/
   );
+  // Clash cannot send a Bearer, so the token-in-path subscription is the only
+  // user-center surface allowed through the public edge.
+  assert.match(
+    caddyfile,
+    /@publicOverseaAggregate \{[\s\S]*?method GET[\s\S]*?path_regexp overseaAggregate \^\/internal\/v1\/oversea-subscriptions\/mx-v1-\[A-Za-z0-9_-\]\+\\\.yaml\$[\s\S]*?\}/
+  );
+  assert.match(
+    caddyfile,
+    /@publicOverseaSubscription \{[\s\S]*?method GET[\s\S]*?path_regexp overseaSubscription \^\/internal\/v1\/site-slots\/\[A-Za-z0-9\._-\]\+\/subscriptions\/hysteria2\/\[A-Za-z0-9\._-\]\+\\\.yaml\$[\s\S]*?\}/
+  );
+  assert.doesNotMatch(
+    caddyfile,
+    /path_regexp[^\n]*user-center/,
+    'the Bearer-guarded user-center subscription must never be reachable from the public edge'
+  );
   assert.match(
     caddyfile,
     /@blockedControlPlane path \/internal \/internal\/\* \/api \/api\/\* \/h2i \/h2i\/\*/
@@ -122,7 +137,7 @@ try {
   assert.doesNotMatch(caddyfile, /config-center/);
   assert.equal(
     [...caddyfile.matchAll(/^\s*header_up X-Forwarded-For \{http\.request\.header\.X-Forwarded-For\}\s*$/gm)].length,
-    5,
+    7,
     'the loopback edge must preserve the client IP value cleaned by the public TLS owner'
   );
 
@@ -134,14 +149,16 @@ try {
   assert.match(publicTlsCaddyfile, /@publicLauncherProduct \{[\s\S]*?method GET/);
   assert.match(publicTlsCaddyfile, /@publicClientPost \{[\s\S]*?method POST/);
   assert.match(publicTlsCaddyfile, /@publicLeaseOperation \{[\s\S]*?method POST/);
+  assert.match(publicTlsCaddyfile, /@publicOverseaAggregate \{[\s\S]*?method GET/);
+  assert.match(publicTlsCaddyfile, /@publicOverseaSubscription \{[\s\S]*?method GET/);
   assert.equal(
     [...publicTlsCaddyfile.matchAll(/^\s*reverse_proxy domestic-edge:8088\s*\{$/gm)].length,
-    5,
-    'public TLS must proxy only health plus the four explicit client-bootstrap matcher groups'
+    7,
+    'public TLS must proxy only health plus the six explicit client-bootstrap matcher groups'
   );
   assert.equal(
     [...publicTlsCaddyfile.matchAll(/^\s*header_up X-Forwarded-For \{remote_host\}\s*$/gm)].length,
-    5,
+    7,
     'the public TLS owner must overwrite user-supplied forwarding headers with the socket client IP'
   );
   assert.match(publicTlsCaddyfile, /respond "not found\\n" 404/);
