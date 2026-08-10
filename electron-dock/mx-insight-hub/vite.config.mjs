@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+const devApiTarget = process.env.MX_INSIGHT_DEV_API_TARGET || "http://127.0.0.1:18180";
+
 export default defineConfig({
   // Relative asset base so the built Admin SPA works both at the listener root
   // (direct http://HOST:18151/) and behind the public edge under /admin/ where
@@ -17,9 +19,9 @@ export default defineConfig({
     host: "0.0.0.0",
     allowedHosts: ["terminal.local"],
     proxy: {
-      "/api": "http://127.0.0.1:18180",
-      "/health": "http://127.0.0.1:18180",
-      "/internal": "http://127.0.0.1:18180",
+      "/api": devApiTarget,
+      "/health": devApiTarget,
+      "/internal": devApiTarget,
     },
     warmup: {
       clientFiles: ["./src/main.jsx"],

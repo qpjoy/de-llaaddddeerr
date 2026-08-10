@@ -29,39 +29,51 @@ function adminCredential(request) {
   return (typeof value === 'string' && value) || bearerToken(request)
 }
 
-// Combine per-tenant usage summaries into one. Counters add; the latency figure
-// is re-derived as a request-weighted mean, because averaging two averages
-// unweighted would over-represent a tenant with almost no traffic.
-function mergeUsage(left, right) {
-  if (!left) return right
-  const byPlatform = { ...left.byPlatform }
-  for (const [platform, entry] of Object.entries(right.byPlatform || {})) {
-    const existing = byPlatform[platform]
-    byPlatform[platform] = existing
-      ? {
-          ...existing,
-          requests: existing.requests + entry.requests,
-          committed: existing.committed + entry.committed,
-          released: existing.released + entry.released,
-          unknown: existing.unknown + entry.unknown,
-          units: existing.units + entry.units,
-        }
-      : entry
+// Combine all tenant summaries in one pass. Store averages are weighted by
+// committed requests, so released/unknown traffic must not dilute latency here.
+function mergeUsageSummaries(summaries) {
+  const merged = {
+    requests: 0,
+    committed: 0,
+    released: 0,
+    unknown: 0,
+    units: 0,
+    averageUpstreamLatencyMs: null,
+    byPlatform: {},
   }
-  const requests = (left.requests || 0) + (right.requests || 0)
-  const weighted =
-    (left.averageUpstreamLatencyMs || 0) * (left.requests || 0) +
-    (right.averageUpstreamLatencyMs || 0) * (right.requests || 0)
-  return {
-    ...left,
-    requests,
-    committed: (left.committed || 0) + (right.committed || 0),
-    released: (left.released || 0) + (right.released || 0),
-    unknown: (left.unknown || 0) + (right.unknown || 0),
-    units: (left.units || 0) + (right.units || 0),
-    averageUpstreamLatencyMs: requests > 0 ? Math.round(weighted / requests) : null,
-    byPlatform,
+  let weightedLatency = 0
+  let latencyCommitted = 0
+
+  for (const summary of summaries) {
+    merged.requests += summary.requests || 0
+    merged.committed += summary.committed || 0
+    merged.released += summary.released || 0
+    merged.unknown += summary.unknown || 0
+    merged.units += summary.units || 0
+
+    if (summary.averageUpstreamLatencyMs != null && summary.committed > 0) {
+      weightedLatency += summary.averageUpstreamLatencyMs * summary.committed
+      latencyCommitted += summary.committed
+    }
+
+    for (const [platform, entry] of Object.entries(summary.byPlatform || {})) {
+      const existing = merged.byPlatform[platform]
+      merged.byPlatform[platform] = existing
+        ? {
+            requests: existing.requests + entry.requests,
+            committed: existing.committed + entry.committed,
+            released: existing.released + entry.released,
+            unknown: existing.unknown + entry.unknown,
+            units: existing.units + entry.units,
+          }
+        : { ...entry }
+    }
   }
+
+  merged.averageUpstreamLatencyMs = latencyCommitted > 0
+    ? Math.round(weightedLatency / latencyCommitted)
+    : null
+  return merged
 }
 
 function requiredField(body, name) {
@@ -211,7 +223,28 @@ export function createApp({
     const results = await Promise.all(
       scope.map((tenantId) => service.usage({ ...filters, tenantId })),
     )
-    return results.reduce(mergeUsage, null) ?? results[0] ?? { requests: 0, byPlatform: {} }
+    return mergeUsageSummaries(results)
+  }
+
+  async function scopedDashboardFor(principal) {
+    const scope = scopeTenantCapability(principal, null, 'usage.read')
+    if (!Array.isArray(scope)) return service.dashboard()
+
+    const allowedTenantIds = new Set(scope)
+    const [usage, tenants, consumers, apiKeys] = await Promise.all([
+      scopedUsageFor(principal, {}),
+      service.listTenants(),
+      service.listConsumers(),
+      service.listApiKeys(),
+    ])
+    return {
+      tenants: tenants.filter((tenant) => allowedTenantIds.has(tenant.id)).length,
+      consumers: consumers.filter((consumer) => allowedTenantIds.has(consumer.tenantId)).length,
+      activeApiKeys: apiKeys.filter((key) => (
+        allowedTenantIds.has(key.tenantId) && key.status === 'active'
+      )).length,
+      ...usage,
+    }
   }
 
   // Resolve a consumer's owning tenant before acting on it. The tenant is never
@@ -400,14 +433,7 @@ export function createApp({
       }
 
       if (request.method === 'GET' && pathname === '/internal/v1/admin/dashboard') {
-        // A scoped principal must not see platform-wide totals, so the
-        // dashboard is derived from their own usage rather than the global one.
-        if (principal.tenantIds !== null) {
-          const scopedUsage = await scopedUsageFor(principal, {})
-          sendJson(response, 200, { data: scopedUsage, requestId })
-          return
-        }
-        sendJson(response, 200, { data: await service.dashboard(), requestId })
+        sendJson(response, 200, { data: await scopedDashboardFor(principal), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/ops/summary') {

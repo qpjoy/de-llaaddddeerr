@@ -394,6 +394,128 @@ test('tenant capabilities come from the role held in the target tenant', async (
   assert.equal(visibleKeys.some((key) => key.id === keyB.id), false)
 })
 
+test('scoped dashboard counts only mixed-role tenants and weights latency by committed usage', async () => {
+  const create = async (path, body) => {
+    const response = await callAdmin(path, { method: 'POST', body })
+    assert.equal(response.status, 201)
+    return (await response.json()).data
+  }
+  const ownerTenant = await create('/internal/v1/admin/tenants', { name: 'Dashboard Owner Tenant' })
+  const viewerTenant = await create('/internal/v1/admin/tenants', { name: 'Dashboard Viewer Tenant' })
+  const hiddenTenant = await create('/internal/v1/admin/tenants', { name: 'Dashboard Hidden Tenant' })
+  const ownerConsumer = await create('/internal/v1/admin/consumers', {
+    tenantId: ownerTenant.id, name: 'Dashboard Owner Consumer',
+  })
+  const viewerConsumer = await create('/internal/v1/admin/consumers', {
+    tenantId: viewerTenant.id, name: 'Dashboard Viewer Consumer',
+  })
+  const hiddenConsumer = await create('/internal/v1/admin/consumers', {
+    tenantId: hiddenTenant.id, name: 'Dashboard Hidden Consumer',
+  })
+  const ownerKey = await create('/internal/v1/admin/api-keys', {
+    consumerId: ownerConsumer.id, name: 'Dashboard Owner Key',
+  })
+  const viewerKey = await create('/internal/v1/admin/api-keys', {
+    consumerId: viewerConsumer.id, name: 'Dashboard Viewer Key',
+  })
+  const hiddenKey = await create('/internal/v1/admin/api-keys', {
+    consumerId: hiddenConsumer.id, name: 'Dashboard Hidden Key',
+  })
+  const revokedKey = await create('/internal/v1/admin/api-keys', {
+    consumerId: ownerConsumer.id, name: 'Dashboard Revoked Key',
+  })
+  assert.equal((await callAdmin(`/internal/v1/admin/api-keys/${revokedKey.id}/revoke`, {
+    method: 'POST',
+  })).status, 200)
+
+  launcherState = { payload: launcherResponse({ subject: 'dashboard-scoped-user' }) }
+  const firstSession = (await (await callAdmin('/internal/v1/admin/session', {
+    token: 'mx-v1-dashboard-scoped',
+  })).json()).data
+  for (const [tenantId, role] of [[ownerTenant.id, 'owner'], [viewerTenant.id, 'viewer']]) {
+    assert.equal((await callAdmin('/internal/v1/admin/members/memberships', {
+      method: 'POST', body: { memberId: firstSession.memberId, tenantId, role },
+    })).status, 201)
+  }
+
+  const recordUsage = async ({ tenant, consumer, key, index, status, latency }) => {
+    const requestId = `dashboard-${tenant.id}-${index}`
+    await store.reserve({
+      requestId,
+      idempotencyKey: requestId,
+      fingerprint: requestId,
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      apiKeyId: key.id,
+      platform: 'xiaohongshu',
+      unitsReserved: 1,
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+      windowStart: new Date(0),
+      maxRequests: Number.POSITIVE_INFINITY,
+    })
+    if (status === 'committed') {
+      await store.commitRequest(requestId, {
+        responseStatus: 200,
+        responseBody: null,
+        unitsActual: 1,
+        upstreamLatencyMs: latency,
+      })
+    } else {
+      await store.releaseRequest(requestId, 'upstream_rejected')
+    }
+  }
+
+  await recordUsage({
+    tenant: ownerTenant, consumer: ownerConsumer, key: ownerKey,
+    index: 'committed', status: 'committed', latency: 100,
+  })
+  for (let index = 0; index < 2; index += 1) {
+    await recordUsage({
+      tenant: ownerTenant, consumer: ownerConsumer, key: ownerKey,
+      index: `released-${index}`, status: 'released',
+    })
+  }
+  for (let index = 0; index < 3; index += 1) {
+    await recordUsage({
+      tenant: viewerTenant, consumer: viewerConsumer, key: viewerKey,
+      index: `committed-${index}`, status: 'committed', latency: 500,
+    })
+  }
+  await recordUsage({
+    tenant: hiddenTenant, consumer: hiddenConsumer, key: hiddenKey,
+    index: 'must-not-leak', status: 'committed', latency: 999,
+  })
+
+  const scopedResponse = await callAdmin('/internal/v1/admin/dashboard', {
+    token: 'mx-v1-dashboard-scoped',
+  })
+  assert.equal(scopedResponse.status, 200)
+  const scoped = (await scopedResponse.json()).data
+  assert.deepEqual({
+    tenants: scoped.tenants,
+    consumers: scoped.consumers,
+    activeApiKeys: scoped.activeApiKeys,
+    requests: scoped.requests,
+    committed: scoped.committed,
+    released: scoped.released,
+    averageUpstreamLatencyMs: scoped.averageUpstreamLatencyMs,
+  }, {
+    tenants: 2,
+    consumers: 2,
+    activeApiKeys: 2,
+    requests: 6,
+    committed: 4,
+    released: 2,
+    averageUpstreamLatencyMs: 400,
+  })
+
+  const admin = (await (await callAdmin('/internal/v1/admin/dashboard')).json()).data
+  assert.deepEqual(admin, await store.dashboard(), 'admin token remains platform-wide')
+  assert.ok(admin.tenants > scoped.tenants)
+  assert.ok(admin.consumers > scoped.consumers)
+  assert.ok(admin.activeApiKeys > scoped.activeApiKeys)
+})
+
 // ---------------------------------------------------------------------------
 // Platform admin follows the Launcher scope in both directions
 // ---------------------------------------------------------------------------

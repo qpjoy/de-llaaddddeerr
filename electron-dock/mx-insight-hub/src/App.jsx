@@ -416,7 +416,7 @@ export function App() {
             </button>
           </div>
         </header>
-        <main className="qp-main qp-scrollbar mih-content" id="mih-main-content" tabIndex="-1">
+        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
           <Page {...pageProps} />
         </main>
       </div>

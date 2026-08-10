@@ -36,9 +36,9 @@ export function useRemoteData(load, onUnauthorized) {
   return { ...state, refresh, setData: (data) => setState({ data, error: null, loading: false }) }
 }
 
-export function PageHeading({ eyebrow, title, description, loading, onRefresh, children }) {
+export function PageHeading({ eyebrow, title, description, loading, onRefresh, children, className = '' }) {
   return (
-    <header className="mih-page-heading">
+    <header className={`mih-page-heading ${className}`.trim()}>
       <div className="mih-page-heading__copy">
         <p className="qp-kicker">{eyebrow}</p>
         <h1>{title}</h1>
@@ -262,14 +262,27 @@ function useChart(buildConfig, signature) {
   return canvasRef
 }
 
-export function OutcomeChart({ committed = 0, released = 0, unknown = 0 }) {
-  const values = useMemo(() => [committed, released, unknown], [committed, released, unknown])
+export function OutcomeChart({ committed = 0, released = 0, unknown = 0, processing = 0 }) {
+  const includeProcessing = Number(processing) > 0
+  const values = useMemo(
+    () => includeProcessing
+      ? [committed, released, unknown, processing]
+      : [committed, released, unknown],
+    [committed, includeProcessing, processing, released, unknown],
+  )
   const signature = values.join(':')
   const buildConfig = useCallback((theme, reducedMotion) => ({
     type: 'doughnut',
     data: {
-      labels: ['成功', '已释放', '结果未知'],
-      datasets: [{ data: values, backgroundColor: [theme.success, theme.danger, theme.warning], borderWidth: 0, spacing: 3 }],
+      labels: includeProcessing ? ['成功', '已释放', '结果未知', '处理中'] : ['成功', '已释放', '结果未知'],
+      datasets: [{
+        data: values,
+        backgroundColor: includeProcessing
+          ? [theme.success, theme.danger, theme.warning, theme.info]
+          : [theme.success, theme.danger, theme.warning],
+        borderWidth: 0,
+        spacing: 3,
+      }],
     },
     options: {
       responsive: true,
@@ -281,11 +294,15 @@ export function OutcomeChart({ committed = 0, released = 0, unknown = 0 }) {
         tooltip: { backgroundColor: theme.panel, titleColor: theme.text, bodyColor: theme.text },
       },
     },
-  }), [values])
+  }), [includeProcessing, values])
   const ref = useChart(buildConfig, signature)
   return (
     <div className="mih-chart-canvas">
-      <canvas ref={ref} role="img" aria-label={`成功 ${committed}，已释放 ${released}，结果未知 ${unknown}`} />
+      <canvas
+        ref={ref}
+        role="img"
+        aria-label={`成功 ${committed}，已释放 ${released}，结果未知 ${unknown}${includeProcessing ? `，处理中 ${processing}` : ''}`}
+      />
     </div>
   )
 }
@@ -298,7 +315,14 @@ export function PlatformChart({ entries }) {
     type: 'bar',
     data: {
       labels,
-      datasets: [{ label: '请求数', data: values, backgroundColor: theme.info, hoverBackgroundColor: theme.primary, borderRadius: 4 }],
+      datasets: [{
+        label: '请求数',
+        data: values,
+        backgroundColor: theme.info,
+        hoverBackgroundColor: theme.primary,
+        borderRadius: 4,
+        maxBarThickness: 52,
+      }],
     },
     options: {
       responsive: true,
@@ -318,6 +342,150 @@ export function PlatformChart({ entries }) {
   return (
     <div className="mih-chart-canvas">
       <canvas ref={ref} role="img" aria-label={entries.map(([platform, value]) => `${platformLabel(platform)} ${value.requests || 0}`).join('，')} />
+    </div>
+  )
+}
+
+function clampPercent(value) {
+  return Math.max(0, Math.min(100, Number(value) || 0))
+}
+
+export function ReadinessGauge({ score, label, delta }) {
+  const hasScore = score !== null && score !== undefined
+  const normalized = hasScore ? clampPercent(score) : 0
+  const values = useMemo(() => [normalized, 100 - normalized], [normalized])
+  const signature = `${hasScore}:${values.join(':')}`
+  const buildConfig = useCallback((theme, reducedMotion) => ({
+    type: 'doughnut',
+    data: {
+      datasets: [{
+        data: values,
+        backgroundColor: [hasScore ? theme.primary : theme.muted, theme.line],
+        borderWidth: 0,
+        borderRadius: 4,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      rotation: -120,
+      circumference: 240,
+      cutout: '78%',
+      animation: reducedMotion ? false : { duration: 260 },
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+    },
+  }), [hasScore, values])
+  const ref = useChart(buildConfig, signature)
+  return (
+    <div className="mih-readiness-gauge">
+      <canvas ref={ref} role="img" aria-label={hasScore ? `网关战备参考分 ${normalized} 分` : '当前窗口尚无请求，无法计算网关战备参考分'} />
+      <div className="mih-readiness-gauge__value" aria-hidden="true">
+        <strong>{hasScore ? normalized : '—'}{hasScore ? <small>/100</small> : null}</strong>
+        <span>{label}</span>
+      </div>
+      <small className="mih-readiness-gauge__delta">{delta}</small>
+    </div>
+  )
+}
+
+export function StatusRing({ label, value, display, hint, tone = 'primary' }) {
+  const normalized = clampPercent(value)
+  const values = useMemo(() => [normalized, 100 - normalized], [normalized])
+  const signature = `${tone}:${values.join(':')}`
+  const buildConfig = useCallback((theme, reducedMotion) => ({
+    type: 'doughnut',
+    data: {
+      datasets: [{
+        data: values,
+        backgroundColor: [theme[tone] || theme.primary, theme.line],
+        borderWidth: 0,
+        borderRadius: 3,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '76%',
+      animation: reducedMotion ? false : { duration: 220 },
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+    },
+  }), [tone, values])
+  const ref = useChart(buildConfig, signature)
+  return (
+    <article className="mih-status-ring">
+      <div className="mih-status-ring__chart">
+        <canvas ref={ref} role="img" aria-label={`${label} ${display}`} />
+      </div>
+      <div>
+        <span>{label}</span>
+        <strong>{display}</strong>
+        <small>{hint}</small>
+      </div>
+    </article>
+  )
+}
+
+export function TrafficComparisonChart({ current = {}, previous = {} }) {
+  const periods = useMemo(() => [previous, current], [current, previous])
+  const values = useMemo(() => ({
+    committed: periods.map((item) => Number(item.committed || 0)),
+    released: periods.map((item) => Number(item.released || 0)),
+    unknown: periods.map((item) => Number(item.unknown || 0)),
+    processing: periods.map((item) => Math.max(0, Number(item.requests || 0)
+      - Number(item.committed || 0) - Number(item.released || 0) - Number(item.unknown || 0))),
+    successRate: periods.map((item) => item.requests ? Number(((Number(item.committed || 0) / Number(item.requests)) * 100).toFixed(2)) : 0),
+  }), [periods])
+  const signature = JSON.stringify(values)
+  const comparisonLabel = `上一周期：成功 ${values.committed[0]}，已释放 ${values.released[0]}，结果未知 ${values.unknown[0]}，处理中 ${values.processing[0]}，成功率 ${values.successRate[0]}%；当前周期：成功 ${values.committed[1]}，已释放 ${values.released[1]}，结果未知 ${values.unknown[1]}，处理中 ${values.processing[1]}，成功率 ${values.successRate[1]}%`
+  const buildConfig = useCallback((theme, reducedMotion) => ({
+    type: 'bar',
+    data: {
+      labels: ['上一周期', '当前周期'],
+      datasets: [
+        { type: 'bar', label: '成功', data: values.committed, backgroundColor: theme.success, borderRadius: 3, maxBarThickness: 84, stack: 'outcome' },
+        { type: 'bar', label: '已释放', data: values.released, backgroundColor: theme.danger, borderRadius: 3, maxBarThickness: 84, stack: 'outcome' },
+        { type: 'bar', label: '结果未知', data: values.unknown, backgroundColor: theme.warning, borderRadius: 3, maxBarThickness: 84, stack: 'outcome' },
+        { type: 'bar', label: '处理中', data: values.processing, backgroundColor: theme.info, borderRadius: 3, maxBarThickness: 84, stack: 'outcome' },
+        {
+          type: 'line',
+          label: '成功率',
+          data: values.successRate,
+          yAxisID: 'rate',
+          borderColor: theme.archetype,
+          backgroundColor: theme.archetype,
+          borderWidth: 2,
+          pointRadius: 4,
+          pointHoverRadius: 5,
+          tension: 0.28,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: reducedMotion ? false : { duration: 240 },
+      interaction: { intersect: false, mode: 'index' },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { color: theme.text } },
+        y: { stacked: true, beginAtZero: true, grid: { color: theme.line }, ticks: { color: theme.muted, precision: 0 } },
+        rate: {
+          position: 'right',
+          min: 0,
+          max: 100,
+          grid: { display: false },
+          ticks: { color: theme.archetype, callback: (value) => `${value}%` },
+        },
+      },
+      plugins: {
+        legend: { position: 'top', align: 'start', labels: { color: theme.text, boxWidth: 9, boxHeight: 9, padding: 14 } },
+        tooltip: { backgroundColor: theme.panel, titleColor: theme.text, bodyColor: theme.text },
+      },
+    },
+  }), [values])
+  const ref = useChart(buildConfig, signature)
+  return (
+    <div className="mih-chart-canvas mih-chart-canvas--comparison">
+      <canvas ref={ref} role="img" aria-label={comparisonLabel} />
     </div>
   )
 }

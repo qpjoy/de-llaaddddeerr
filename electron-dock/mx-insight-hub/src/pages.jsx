@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  ArrowRight,
   Buildings,
   Pulse,
   ChartLine,
@@ -15,6 +16,8 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Timer,
+  TrendDown,
+  TrendUp,
   Trash,
   UserPlus,
   Users,
@@ -31,8 +34,11 @@ import {
   OutcomeChart,
   PageHeading,
   PlatformChart,
+  ReadinessGauge,
   SecretPanel,
+  StatusRing,
   StatusBadge,
+  TrafficComparisonChart,
   formatDate,
   formatLatency,
   formatNumber,
@@ -122,81 +128,406 @@ function Table({ children, label }) {
   )
 }
 
+function comparisonBounds(range) {
+  const current = rangeBounds(range)
+  const from = Date.parse(current.from)
+  const to = Date.parse(current.to)
+  const duration = to - from
+  return {
+    current,
+    previous: {
+      from: new Date(from - duration).toISOString(),
+      to: current.from,
+    },
+  }
+}
+
+function numericPercent(part, total) {
+  if (!Number(total)) return null
+  return (Number(part || 0) / Number(total)) * 100
+}
+
+const LATENCY_CONCERN_MS = 1500
+
+function processingCount(usage) {
+  return Math.max(0, Number(usage?.requests || 0)
+    - Number(usage?.committed || 0)
+    - Number(usage?.released || 0)
+    - Number(usage?.unknown || 0))
+}
+
+function certaintyPercent(usage) {
+  const requests = Number(usage?.requests || 0)
+  if (!requests) return null
+  const certain = Math.max(0, Number(usage?.committed || 0) + Number(usage?.released || 0))
+  return Math.min(100, (certain / requests) * 100)
+}
+
+function optionalNumber(value) {
+  return value === null || value === undefined ? '—' : formatNumber(value)
+}
+
+function metricDelta(current, previous, { lowerIsBetter = false, points = false } = {}) {
+  const now = Number(current || 0)
+  const before = Number(previous || 0)
+  if (!before) {
+    if (!now) return { label: '与上期持平', direction: 'flat', favorable: true }
+    return { label: '本期新增', direction: 'up', favorable: !lowerIsBetter }
+  }
+  const change = points ? now - before : ((now - before) / before) * 100
+  if (Math.abs(change) < 0.05) return { label: '与上期持平', direction: 'flat', favorable: true }
+  const direction = change > 0 ? 'up' : 'down'
+  const favorable = lowerIsBetter ? change < 0 : change > 0
+  return {
+    label: `${change > 0 ? '+' : ''}${points ? change.toFixed(1) : Math.abs(change) >= 10 ? change.toFixed(0) : change.toFixed(1)}${points ? 'pp' : '%'}`,
+    direction,
+    favorable,
+  }
+}
+
+function readinessScore(usage) {
+  const requests = Number(usage?.requests || 0)
+  if (!requests) return null
+  const success = Number(usage?.committed || 0) / requests
+  const certainty = (certaintyPercent(usage) || 0) / 100
+  const latency = usage?.averageUpstreamLatencyMs
+  const latencyHealth = latency === null || latency === undefined
+    ? 0
+    : Math.max(0, Math.min(1, 1 - (Number(latency) / LATENCY_CONCERN_MS)))
+  return Math.round(success * 70 + certainty * 15 + latencyHealth * 15)
+}
+
+function readinessLabel(score) {
+  if (score === null) return '等待数据'
+  if (score >= 95) return '优秀'
+  if (score >= 85) return '稳定'
+  if (score >= 70) return '关注'
+  return '告警'
+}
+
+function buildRiskEvents(usage, summary, platformCount, range) {
+  const events = []
+  const requests = Number(usage.requests || 0)
+  const unknown = Number(usage.unknown || 0)
+  const released = Number(usage.released || 0)
+  const processing = processingCount(usage)
+  const latency = usage.averageUpstreamLatencyMs
+  if (unknown > 0) {
+    events.push({
+      severity: 'critical',
+      label: '严重',
+      title: '存在结果未知请求',
+      detail: `${formatNumber(unknown)} 次请求需要人工核验后再决定是否重试`,
+      icon: WarningCircle,
+      href: `#/usage?range=${range}`,
+    })
+  }
+  if (released > 0) {
+    events.push({
+      severity: 'high',
+      label: '高危',
+      title: '请求已释放',
+      detail: `${formatNumber(released)} 次调用未计量，可检查上游失败原因`,
+      icon: Cloud,
+      href: `#/usage?range=${range}`,
+    })
+  }
+  if (processing > 0) {
+    events.push({
+      severity: 'info',
+      label: '信息',
+      title: '存在处理中请求',
+      detail: `${formatNumber(processing)} 次请求尚未形成最终计量结果`,
+      icon: Pulse,
+      href: `#/usage?range=${range}`,
+    })
+  }
+  if (latency !== null && latency !== undefined && Number(latency) > LATENCY_CONCERN_MS) {
+    events.push({
+      severity: 'warning',
+      label: '警告',
+      title: '上游平均延迟偏高',
+      detail: `${formatLatency(latency)}，已超过 1.5 秒关注阈值`,
+      icon: Timer,
+      href: `#/usage?range=${range}`,
+    })
+  }
+  if (summary.activeApiKeys === 0) {
+    events.push({
+      severity: 'warning',
+      label: '警告',
+      title: '没有启用的 API Key',
+      detail: '调用者当前无法通过公共 Data API 发起请求',
+      icon: Key,
+      href: '#/api-keys',
+    })
+  }
+  if (!requests) {
+    events.push({
+      severity: 'info',
+      label: '信息',
+      title: '当前窗口没有请求',
+      detail: '可扩大时间范围，或检查调用者与平台授权是否已配置',
+      icon: Pulse,
+      href: '#/platforms',
+    })
+  } else if (!platformCount) {
+    events.push({
+      severity: 'info',
+      label: '信息',
+      title: '未识别到活跃平台',
+      detail: '用量已产生，但平台分布尚未形成可用摘要',
+      icon: Globe,
+      href: '#/platforms',
+    })
+  }
+  return events
+}
+
+function DashboardKpi({ icon: Icon, label, value, delta, tone = 'primary' }) {
+  const TrendIcon = delta?.direction === 'up' ? TrendUp : delta?.direction === 'down' ? TrendDown : null
+  return (
+    <article className={`mih-command-kpi mih-command-kpi--${tone}`}>
+      <Icon size={18} weight="duotone" aria-hidden="true" />
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small className={delta ? (delta.favorable ? 'is-positive' : 'is-negative') : ''}>
+        {TrendIcon ? <TrendIcon size={12} aria-hidden="true" /> : null}
+        {delta?.label || '当前范围'}
+      </small>
+    </article>
+  )
+}
+
 export function DashboardPage({ token, query, setQuery, onUnauthorized }) {
   const range = query.get('range') || '24h'
+  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [chartView, setChartView] = useState('comparison')
   const load = useCallback(async () => {
-    const [summary, usage] = await Promise.all([
+    const bounds = comparisonBounds(range)
+    const [summary, usage, previousUsage] = await Promise.all([
       adminApi.dashboard(token),
-      adminApi.usage(token, rangeBounds(range)),
+      adminApi.usage(token, bounds.current),
+      adminApi.usage(token, bounds.previous),
     ])
-    return { summary, usage }
+    return { summary, usage, previousUsage, asOf: new Date().toISOString() }
   }, [range, token])
   const state = useRemoteData(load, onUnauthorized)
+
+  useEffect(() => {
+    if (!autoRefresh) return undefined
+    const timer = window.setInterval(state.refresh, 30_000)
+    return () => window.clearInterval(timer)
+  }, [autoRefresh, state.refresh])
 
   if (state.loading && !state.data) return <LoadingState label="正在汇总网关指标" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   const summary = state.data?.summary || {}
   const usage = state.data?.usage || {}
+  const previousUsage = state.data?.previousUsage || {}
   const platforms = sortedPlatforms(usage.byPlatform)
-  const successRate = percent(usage.committed, usage.requests)
+  const successRateValue = numericPercent(usage.committed, usage.requests)
+  const previousSuccessRate = numericPercent(previousUsage.committed, previousUsage.requests)
+  const certaintyValue = certaintyPercent(usage)
+  const score = readinessScore(usage)
+  const previousScore = readinessScore(previousUsage)
+  const scoreDelta = score === null
+    ? '产生调用后自动计算'
+    : previousScore === null
+      ? '当前窗口首个可用基线'
+      : `较上一周期 ${score - previousScore >= 0 ? '+' : ''}${score - previousScore} 分`
+  const latencyHealth = usage.averageUpstreamLatencyMs === null || usage.averageUpstreamLatencyMs === undefined
+    ? 0
+    : Math.max(0, Math.min(100, 100 - (Number(usage.averageUpstreamLatencyMs) / LATENCY_CONCERN_MS) * 100))
+  const risks = buildRiskEvents(usage, summary, platforms.length, range)
+  const riskCounts = risks.reduce((counts, event) => ({ ...counts, [event.severity]: (counts[event.severity] || 0) + 1 }), {})
+  const processing = processingCount(usage)
+  const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || '浏览器本地时区'
 
   return (
     <>
       <PageHeading
+        className="mih-command-heading"
         eyebrow="GATEWAY / GOVERNANCE / EVIDENCE"
         title="数据网关总览"
-        description="统一观察调用者、API Key、平台权限、用量与上游稳定性。"
+        description="用真实计量证据观察网关战备度、请求结果、风险事件与平台健康。"
         loading={state.loading}
         onRefresh={state.refresh}
       >
+        <span className="mih-command-refresh-state" title={state.data?.asOf ? `最后更新：${formatDate(state.data.asOf)}` : undefined}>
+          <i className={autoRefresh ? 'is-live' : ''} aria-hidden="true" />
+          {autoRefresh ? '30 秒自动刷新' : '自动刷新已暂停'}
+        </span>
+        <button
+          className="qp-button qp-button--ghost qp-button--sm"
+          type="button"
+          aria-pressed={autoRefresh}
+          onClick={() => setAutoRefresh((value) => !value)}
+        >
+          {autoRefresh ? '暂停' : '开启'}
+        </button>
         <RangeFilter value={range} onChange={(value) => setQuery({ range: value })} />
       </PageHeading>
 
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
 
-      <section className="mih-metric-grid" aria-label="核心指标">
-        <MetricCard icon={Key} label="启用 API Key" value={formatNumber(summary.activeApiKeys)} hint={`${formatNumber(summary.consumers)} 个调用者`} />
-        <MetricCard icon={Pulse} label="区间请求" value={formatNumber(usage.requests)} hint={`累计 ${formatNumber(summary.requests)}`} tone="info" />
-        <MetricCard icon={ShieldCheck} label="成功率" value={successRate} hint={`${formatNumber(usage.committed)} 次成功`} tone="success" />
-        <MetricCard icon={Coins} label="数据用量" value={formatNumber(usage.units)} hint="按实际返回记录计量" tone="warning" />
-        <MetricCard icon={Timer} label="平均上游耗时" value={formatLatency(usage.averageUpstreamLatencyMs)} hint="不含客户端网络耗时" tone="archetype" />
-        <MetricCard icon={WarningCircle} label="结果未知" value={formatNumber(usage.unknown)} hint="需要人工核验后再重试" tone="danger" />
-        <MetricCard icon={Users} label="调用者" value={formatNumber(summary.consumers)} hint={`${formatNumber(summary.tenants)} 个租户`} tone="info" />
-        <MetricCard icon={Globe} label="活跃平台" value={formatNumber(platforms.length)} hint="当前统计窗口内有调用" />
-      </section>
+      <section className="mih-command-overview" aria-label="网关指挥舱">
+        <Panel
+          title="网关战备参考分"
+          subtitle="本地启发式（非 SLO）：成功率 70% + 结果确定性 15% + 上游延迟 15%"
+          className="mih-command-readiness"
+        >
+          <ReadinessGauge score={score} label={readinessLabel(score)} delta={scoreDelta} />
+        </Panel>
 
-      <section className="mih-chart-grid">
-        <Panel title="调用结果" subtitle="成功、已释放与结果未知" className="mih-chart-panel">
-          {usage.requests ? <OutcomeChart committed={usage.committed} released={usage.released} unknown={usage.unknown} /> : (
-            <EmptyState icon={ChartLine} title="当前窗口暂无请求" description="产生调用后，这里会展示结果分布。" />
+        <Panel title="平台请求态势" subtitle="当前周期按真实请求量展示平台负载" className="mih-command-traffic">
+          {platforms.length ? (
+            <PlatformChart entries={platforms.slice(0, 8)} />
+          ) : (
+            <EmptyState icon={Globe} title="当前周期暂无平台请求" description="产生真实调用后，这里会显示平台负载分布。" />
           )}
         </Panel>
-        <Panel title="平台请求分布" subtitle="按请求数从高到低排列" className="mih-chart-panel">
-          {platforms.length ? <PlatformChart entries={platforms.slice(0, 8)} /> : (
-            <EmptyState icon={Globe} title="暂无平台用量" description="启用平台并完成调用后即可查看。" />
-          )}
+
+        <Panel title="链路健康" subtitle="只展示当前接口可证实的指标" className="mih-command-rings">
+          <StatusRing
+            label="调用成功率"
+            value={successRateValue || 0}
+            display={successRateValue === null ? '暂无' : `${successRateValue.toFixed(2)}%`}
+            hint={metricDelta(successRateValue, previousSuccessRate, { points: true }).label}
+            tone="success"
+          />
+          <StatusRing
+            label="平均上游延迟"
+            value={latencyHealth}
+            display={formatLatency(usage.averageUpstreamLatencyMs)}
+            hint="关注阈值 1.5 秒"
+            tone="info"
+          />
+          <StatusRing
+            label="结果确定率"
+            value={certaintyValue || 0}
+            display={certaintyValue === null ? '暂无' : `${certaintyValue.toFixed(2)}%`}
+            hint={`${formatNumber(usage.unknown)} 次未知`}
+            tone="archetype"
+          />
         </Panel>
       </section>
 
-      <Panel title="平台用量摘要" subtitle="仅显示网关业务语义，不暴露上游凭证或内部端点">
-        {platforms.length ? (
-          <Table label="平台用量摘要">
-            <thead><tr><th>平台</th><th>请求</th><th>成功</th><th>用量</th><th>状态</th></tr></thead>
-            <tbody>
-              {platforms.map(([platform, item]) => (
-                <tr key={platform}>
-                  <td><strong>{platformLabel(platform)}</strong><small>{platform}</small></td>
-                  <td>{formatNumber(item.requests)}</td>
-                  <td>{formatNumber(item.committed)}</td>
-                  <td>{formatNumber(item.units)}</td>
-                  <td><StatusBadge status={item.unknown ? 'warning' : item.released ? 'degraded' : 'active'} label={item.unknown ? '需核验' : item.released ? '有失败' : '正常'} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        ) : <EmptyState icon={Globe} title="暂无平台数据" description="平台用量会在第一笔请求完成后出现。" />}
-      </Panel>
+      <section className="mih-command-kpi-rail" aria-label="核心计量指标">
+        <DashboardKpi icon={Pulse} label="请求总数" value={formatNumber(usage.requests)} delta={metricDelta(usage.requests, previousUsage.requests)} tone="info" />
+        <DashboardKpi icon={ShieldCheck} label="成功" value={formatNumber(usage.committed)} delta={metricDelta(usage.committed, previousUsage.committed)} tone="success" />
+        <DashboardKpi icon={Cloud} label="已释放" value={formatNumber(usage.released)} delta={metricDelta(usage.released, previousUsage.released, { lowerIsBetter: true })} tone="danger" />
+        <DashboardKpi icon={WarningCircle} label="结果未知" value={formatNumber(usage.unknown)} delta={metricDelta(usage.unknown, previousUsage.unknown, { lowerIsBetter: true })} tone="warning" />
+        <DashboardKpi icon={Coins} label="计量单位" value={formatNumber(usage.units)} delta={metricDelta(usage.units, previousUsage.units)} tone="archetype" />
+        <DashboardKpi icon={Key} label="启用 API Key" value={optionalNumber(summary.activeApiKeys)} tone="primary" />
+        <DashboardKpi icon={Users} label="调用者" value={optionalNumber(summary.consumers)} tone="info" />
+        <DashboardKpi icon={Buildings} label="租户" value={optionalNumber(summary.tenants)} tone="info" />
+        <DashboardKpi icon={Globe} label="活跃平台" value={formatNumber(platforms.length)} tone="primary" />
+      </section>
+
+      <section className="mih-command-grid">
+        <Panel
+          title="请求与结果对比"
+          subtitle="成功、已释放、结果未知与处理中请求"
+          className="mih-command-panel--outcomes"
+          action={(
+            <div className="mih-command-segmented" aria-label="图表视图">
+              <button type="button" aria-pressed={chartView === 'comparison'} onClick={() => setChartView('comparison')}>对比</button>
+              <button type="button" aria-pressed={chartView === 'composition'} onClick={() => setChartView('composition')}>结构</button>
+            </div>
+          )}
+        >
+          {usage.requests || previousUsage.requests ? (
+            chartView === 'comparison'
+              ? <TrafficComparisonChart current={usage} previous={previousUsage} />
+              : <OutcomeChart committed={usage.committed} released={usage.released} unknown={usage.unknown} processing={processing} />
+          ) : (
+            <EmptyState icon={ChartLine} title="当前没有可比较的调用结果" description="更换时间范围，或在第一笔调用完成后回来查看。" />
+          )}
+          <div className="mih-command-outcome-strip">
+            <span><small>当前请求</small><strong>{formatNumber(usage.requests)}</strong></span>
+            <span><small>成功</small><strong>{formatNumber(usage.committed)} <em>{percent(usage.committed, usage.requests)}</em></strong></span>
+            <span><small>已释放</small><strong>{formatNumber(usage.released)} <em>{percent(usage.released, usage.requests)}</em></strong></span>
+            <span><small>结果未知</small><strong>{formatNumber(usage.unknown)} <em>{percent(usage.unknown, usage.requests)}</em></strong></span>
+            <span><small>处理中</small><strong>{formatNumber(processing)} <em>{percent(processing, usage.requests)}</em></strong></span>
+          </div>
+        </Panel>
+
+        <Panel
+          title="风险事件"
+          subtitle="由当前计量、链路阈值与可用配置直接推导"
+          className={`mih-command-panel--risks${risks.length < 3 ? ' is-compact' : ''}`}
+          action={<a className="mih-command-link" href={`#/usage?range=${range}`}>查看证据<ArrowRight size={13} aria-hidden="true" /></a>}
+        >
+          {risks.length ? (
+            <div className="mih-risk-list">
+              {risks.map((risk) => {
+                const Icon = risk.icon
+                return (
+                  <article className={`mih-risk-item mih-risk-item--${risk.severity}`} key={`${risk.severity}-${risk.title}`}>
+                    <span className="mih-risk-item__icon"><Icon size={17} weight="duotone" aria-hidden="true" /></span>
+                    <div><strong>{risk.title}</strong><p>{risk.detail}</p></div>
+                    <span className="mih-risk-item__level">{risk.label}</span>
+                    <a href={risk.href} aria-label={`查看${risk.title}详情`}><ArrowRight size={15} aria-hidden="true" /></a>
+                  </article>
+                )
+              })}
+            </div>
+          ) : (
+            <EmptyState icon={ShieldCheck} title="当前未发现需处置事件" description="成功率、延迟与结果确定性均处于正常范围。" />
+          )}
+          {risks.length ? (
+            <section className="mih-risk-playbook" aria-labelledby="mih-risk-playbook-title">
+              <h3 id="mih-risk-playbook-title">建议处置路径</h3>
+              <a href={`#/usage?range=${range}`}><span>01</span><strong>查看计量证据</strong><ArrowRight size={13} aria-hidden="true" /></a>
+              <a href="#/runtime"><span>02</span><strong>检查运行依赖</strong><ArrowRight size={13} aria-hidden="true" /></a>
+              <a href="#/platforms"><span>03</span><strong>复核平台策略</strong><ArrowRight size={13} aria-hidden="true" /></a>
+            </section>
+          ) : null}
+          <div className="mih-risk-summary" aria-label="风险级别汇总">
+            <span><strong>{riskCounts.critical || 0}</strong><small>严重</small></span>
+            <span><strong>{riskCounts.high || 0}</strong><small>高危</small></span>
+            <span><strong>{riskCounts.warning || 0}</strong><small>警告</small></span>
+            <span><strong>{riskCounts.info || 0}</strong><small>信息</small></span>
+          </div>
+        </Panel>
+
+        <Panel
+          title="平台健康矩阵"
+          subtitle="按当前窗口请求量排序；不暴露上游凭证或内部端点"
+          className={`mih-command-panel--platforms${risks.length < 3 ? ' is-wide' : ''}`}
+          action={<a className="mih-command-link" href="#/platforms">管理平台<ArrowRight size={13} aria-hidden="true" /></a>}
+        >
+          {platforms.length ? (
+            <Table label="平台健康矩阵">
+              <thead><tr><th>平台</th><th>状态</th><th>请求</th><th>成功率</th><th>异常结果</th><th>计量单位</th></tr></thead>
+              <tbody>
+                {platforms.slice(0, 8).map(([platform, item]) => {
+                  const anomalies = Number(item.unknown || 0) + Number(item.released || 0)
+                  return (
+                    <tr key={platform}>
+                      <td><strong>{platformLabel(platform)}</strong><small>{platform}</small></td>
+                      <td><StatusBadge status={item.unknown ? 'warning' : item.released ? 'degraded' : 'active'} label={item.unknown ? '需核验' : item.released ? '有失败' : '健康'} /></td>
+                      <td>{formatNumber(item.requests)}</td>
+                      <td>{percent(item.committed, item.requests)}</td>
+                      <td className={anomalies ? 'mih-table-value--danger' : ''}>{formatNumber(anomalies)}</td>
+                      <td>{formatNumber(item.units)}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </Table>
+          ) : <EmptyState icon={Globe} title="暂无平台健康数据" description="平台用量会在第一笔真实请求完成后出现。" />}
+        </Panel>
+      </section>
+
+      <footer className="mih-command-footer" aria-label="仪表盘状态">
+        <span>时区：{browserTimeZone}</span>
+        <span><i className="is-live" aria-hidden="true" />自动刷新：{autoRefresh ? '已开启（30 秒）' : '已暂停'}</span>
+        <span>最后更新：{state.data?.asOf ? formatDate(state.data.asOf) : '尚未完成'}</span>
+        <span>数据口径：网关计量事实</span>
+      </footer>
     </>
   )
 }
