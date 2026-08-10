@@ -61,6 +61,38 @@ New source configuration stores connection fields directly, so changing a
 password or host does not require a Hub deployment. No physical connection
 field or credential is part of a public data response.
 
+### Explicit source-contract preparation
+
+Ordinary ingest, inspection and progress connections remain read-only by
+construction. External DDL is not coupled to the Hub migration Job or routine
+deploy: an unavailable/locked source must not block the Hub, and the normal
+runtime credential should stay a least-privilege reader.
+
+The fixed Telegram business pipeline has one explicit Admin-token preparation
+action. It requires both children paused and drained, a destructive
+confirmation, and either the saved table-owner credential or one-request
+migration credentials that are never persisted. A bounded source transaction
+locks both fixed tables, installs a versioned shared watermark and
+`ENABLE ALWAYS` INSERT/UPDATE plus hard-delete triggers, then online index
+steps create/repair the two composite cursor indexes. A final read-only probe
+accepts only exact trigger semantics and indexes whose `indisvalid` and
+`indisready` flags are true. Any failure leaves the pipeline paused.
+
+The shared watermark is advanced once per write statement while its singleton
+row remains locked until transaction end; the last row trigger overwrites
+application-provided `updated_at`. Rows in one statement may share a timestamp,
+with the immutable ID providing total order. This deliberately serializes TG
+write statements. A high-volume source should use an ordered change journal or
+logical CDC instead of silently weakening this contract.
+
+The source stores an installation generation tied to both physical table
+identities, and Hub binds that generation into its checkpoint contract hash.
+Table replacement, server/database replacement, or repair of a broken
+correctness contract therefore makes an existing checkpoint incompatible.
+Preparation never resets it automatically: the operator must review evidence
+and invoke the separately confirmed paired reset/full replay. Re-running
+preparation against an already-ready installation preserves the generation.
+
 ### Mapping and data minimization
 
 Mappings are immutable reviewed versions. They define canonical identity,
@@ -71,7 +103,7 @@ consumed/dropped rather than allowed into public extensions.
 
 ### Checkpoint and run evidence
 
-The source checkpoint advances only after source-object/canonical/revision/
+The source checkpoint, including its prepared-source generation, advances only after source-object/canonical/revision/
 outbox writes commit. A rejected database row fails its batch and leaves the
 prior checkpoint intact. Replay is safe because canonical identity has a
 database uniqueness constraint and unchanged revision hashes do not create a

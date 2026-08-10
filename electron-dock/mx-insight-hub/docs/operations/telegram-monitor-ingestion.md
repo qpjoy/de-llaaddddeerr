@@ -1,6 +1,6 @@
 # Telegram monitor PostgreSQL ingestion
 
-Last verified against the source metadata: 2026-08-10.
+Last verified against the source metadata and source-contract implementation: 2026-08-11.
 
 This runbook connects the independently written tables below to MX Insight Hub:
 
@@ -30,9 +30,13 @@ Hub ingest -> source objects -> canonical PostgreSQL -> projection outbox
                      history/search/entity public APIs
 ```
 
-- The collector remains the only writer of the two source tables. Hub sessions
-  set `default_transaction_read_only=on` and never repair source data or create
-  source indexes.
+- The collector remains the business writer of the two source tables. Hub
+  ingestion, schema inspection and progress sessions always set
+  `default_transaction_read_only=on`. The sole write exception is the explicit
+  Admin-token **prepare source** action in §3.1: it uses a short-lived DDL
+  session to install a versioned source-side cursor contract, then closes that
+  session before ordinary read-only ingestion can resume. Normal Hub deploys
+  never mutate an external database.
 - Hub PostgreSQL is authoritative for the data Hub has accepted. Canonical
   identity, revisions, tombstones, mapping version, import evidence and durable
   checkpoints live there.
@@ -100,6 +104,7 @@ All endpoints in this section require the platform Admin Token specifically.
 | `POST` | `/internal/v1/admin/pipelines/telegram-monitor/status` | Activate or safely pause both fixed inputs. |
 | `POST` | `/internal/v1/admin/pipelines/telegram-monitor/sync` | Enqueue both active inputs with one operator action. |
 | `GET` | `/internal/v1/admin/pipelines/telegram-monitor/progress` | Explicit exact source counts/checkpoint-relative progress and blockers. |
+| `GET, POST` | `/internal/v1/admin/pipelines/telegram-monitor/source/prepare` | Inspect, then explicitly install/repair the fixed source-side watermark, triggers, guards and indexes. |
 | `POST` | `/internal/v1/admin/pipelines/telegram-monitor/checkpoints/reset` | Confirm and atomically reset both paused TG checkpoints against the fixed mapping contract. |
 | `GET` | `/internal/v1/admin/sources` | List sources and their Admin-visible connection fields. |
 | `POST` | `/internal/v1/admin/sources` | Create a PostgreSQL or file source. |
@@ -213,6 +218,78 @@ rows/bytes. `preview` returns at most three rows of
 `jsonType/isNull/serializedLength`, not text, usernames, URLs or raw JSON. A
 real-value sample remains a separately authorized data-review activity; do not
 weaken the Admin preview route into a data-export endpoint.
+
+### 3.1 Prepare or repair the source-side cursor contract
+
+Saving the connection does not grant the long-lived `mx_data` reader DDL
+rights and does not silently alter `night_all`. With both child tasks paused
+and drained, open **一键准备 / 修复 TG 源库**, inspect the current evidence, type
+`telegram-monitor`, and execute the explicit preparation action. Stop the
+upstream collector for this short maintenance window: the core migration takes
+an `ACCESS EXCLUSIVE` lock on both fixed tables with a bounded lock timeout and
+fails safely instead of racing an active writer.
+
+If the saved account owns both tables and can create the private contract
+schema, leave the optional migration fields empty. The recommended production
+arrangement keeps `mx_data` read-only and supplies a source owner/DDL username
+and password only in this request. Those one-time credentials replace only the
+connection username/password in memory; they are not written to Hub
+PostgreSQL, returned by the API or placed in logs. Revoke or rotate the DDL
+credential after the operation.
+
+```http
+POST /internal/v1/admin/pipelines/telegram-monitor/source/prepare
+Content-Type: application/json
+x-mx-insight-admin-token: <admin-token>
+
+{
+  "confirmPipelineKey": "telegram-monitor",
+  "migrationCredentials": {
+    "username": "<source-owner>",
+    "password": "<one-time-password>"
+  }
+}
+```
+
+The versioned, idempotent source script performs and verifies all of these
+steps:
+
+1. validate the two fixed tables and stable primary keys;
+2. add/backfill `messages.updated_at`, validate `chats.updated_at`, require
+   finite `timestamptz` values, and make both non-null;
+3. install a private singleton watermark plus a `BEFORE STATEMENT` trigger
+   that advances and locks it once per write statement;
+4. install a last-running `BEFORE ROW` trigger on both tables that overwrites
+   any application-supplied `updated_at` with that statement watermark;
+5. install `ENABLE ALWAYS` guards that reject hard `DELETE` and `TRUNCATE`;
+6. create or repair `(updated_at, chat_id)` and `(updated_at, id)` indexes
+   outside the DDL transaction, then require `indisvalid` and `indisready`;
+7. record a source installation generation tied to the physical table
+   identities and bind that generation into Hub checkpoint compatibility.
+
+The shared watermark row remains locked until the writer transaction commits.
+This serializes TG write statements so a later-visible commit cannot carry a
+cursor behind one already exposed to Hub; multiple rows in one statement may
+share a timestamp and the stable ID remains the deterministic tie-breaker.
+The trade-off is deliberate write serialization. Test collector throughput and
+transaction duration before enabling a high-volume writer.
+
+Adding the trailing column is normally transparent to writers that name their
+columns. Before preparation, audit `COPY table FROM` without a column list,
+binary/fixed-shape row decoders, `SELECT *`/`RETURNING *` assumptions and
+logical-replication subscribers; those integrations can require a coordinated
+schema update. A table owner or superuser can still disable/drop triggers or
+replace tables, so such roles must not be used by the ordinary collector.
+
+Preparation always leaves the Hub pipeline paused. It never starts a pull,
+attests the business writer contract or resets a checkpoint. On the first
+installation with no checkpoint, proceed to the probe and activation gates
+without reset. If a server/database changes, either table is recreated, or a
+broken source contract is repaired after syncing may have occurred, the source
+generation changes and the old checkpoint becomes incompatible. Review the
+incident, then use the separate confirmed **统一重置双表 Checkpoint** action to
+perform a full replay. An already-ready idempotent recheck keeps the same
+generation and does not require replay.
 
 ## 4. Verified source schema and canonical mapping
 
@@ -400,9 +477,9 @@ may call Agent with audited model/prompt/data scope and cost, but it must not
 choose identity, watermark or tombstone semantics and cannot block the
 deterministic raw/canonical path.
 
-## 5. Continuous-sync gate (currently open)
+## 5. Continuous-sync gate
 
-### 5.1 Why messages must remain paused
+### 5.1 Why the unprepared messages table must remain paused
 
 The semantic probe found:
 
@@ -423,12 +500,11 @@ column would therefore skip real changes forever. `edited_at` and `deleted_at`
 are nullable and each covers only one change kind, so neither is a unified
 watermark.
 
-The source owner must provide one of these reviewed contracts:
+Before activation, provide one of these reviewed contracts:
 
-1. add `updated_at timestamptz NOT NULL` and update it for every insert, content
-   edit, metric/media/entity change and soft delete; add a full btree index
-   beginning `(updated_at, id)`; and prove writer/transaction ordering cannot
-   commit an older watermark after Hub has advanced past it; or
+1. run the explicit source preparation in §3.1. Its database-enforced shared
+   watermark, triggers, hard-delete guard and composite indexes implement the
+   fixed v1 writer contract; or
 2. provide an append-only change journal/CDC stream with an ordered commit
    position and extend the Hub connector to consume that position.
 
@@ -437,13 +513,13 @@ proof of commit order: overlapping transactions can commit in the opposite
 order. A serialized single-writer protocol may satisfy option 1 if it is part of
 the enforced writer contract. Otherwise prefer CDC/WAL semantics.
 
-### 5.2 Chats are not yet safe either
+### 5.2 The unprepared chats table is not safe either
 
-Chats have a plausible non-null `updated_at` and stable `chat_id`, but the
-source currently has no full `(updated_at, chat_id)` index, and the writer's
-commit/update contract is not recorded. Add the index only after verifying that
-every relevant chat mutation advances `updated_at`, then prove the same
-commit-order property.
+The original probe found a plausible non-null `updated_at` and stable `chat_id`
+but no full `(updated_at, chat_id)` index and no enforceable writer/commit
+contract. The source preparation action installs both-table enforcement and
+the missing index as one versioned operation; do not manually mark this gate
+complete merely because the column name exists.
 
 ### 5.3 Activation checklist
 
@@ -457,6 +533,10 @@ For each table independently:
 - writer commit ordering or CDC position semantics are documented and tested;
 - approved mapping matches current column types;
 - source connection test and schema probe return no issues;
+- source preparation reports the current generation ready and no later
+  competing row trigger can overwrite its stamp;
+- both source and singleton-watermark timestamps are finite and protected by
+  database CHECK constraints;
 - initial full-table load and source impact are accepted.
 
 There is no safe bounded snapshot/canary mode in the current database puller:
@@ -574,8 +654,9 @@ Correctness rules:
   leaves the previous checkpoint unchanged;
 - failed cursors do not auto-retry every scheduler tick. Pause/fix/probe,
   approve a new mapping when required, then explicitly resume;
-- the checkpoint carries a hash of source coordinates, table, cursor,
-  dataset/object identity and mapping version. A changed contract returns
+- the checkpoint carries a hash of source coordinates, prepared-source
+  generation, table, cursor, dataset/object identity and mapping version. A
+  changed server or recreated/repaired source contract therefore returns
   `checkpoint_contract_mismatch` instead of continuing from an unrelated
   position. A generic reset is an explicit paused-source action. TG instead
   requires both children paused/drained and exact

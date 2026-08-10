@@ -19,7 +19,7 @@ The console intentionally keeps Sub2API-like operational clarity while using the
 | Business governance | API Keys | Issue one-time secrets with a 180-day default (configurable 1–730 days), distinguish effective expiry from revocation, filter keys and perform explicit revocation. |
 | Policy control | Plans and quotas | Explain and edit product-limit semantics. |
 | Policy control | Platforms | Grant concrete platforms and configure consumer-specific windows/page size. |
-| Data plane | External sources | Register/test PostgreSQL connections directly on paused sources; inspect schema/value shapes; review/approve mappings; activate, sync and inspect checkpoints/import-run counts. Direct file upload remains supported. |
+| Data plane | External sources | Register/test PostgreSQL connections; operate the fixed TG two-table pipeline; explicitly prepare its source-side cursor contract; inspect schema/value shapes, checkpoints, progress and import-run counts. Direct file upload remains supported. |
 | Observability | Usage | Inspect request evidence without exposing provider details. |
 | Observability | Runtime | Separate liveness, store readiness and Night-All readiness. |
 
@@ -45,6 +45,17 @@ Checkpoint reset is shown only for paused database sources and requires typing
 the exact source key. If a pull still owns the source advisory lock, the UI
 surfaces `409 source_busy`; the operator waits for that pull to exit and retries
 instead of racing its cursor acknowledgement.
+
+The Telegram business card treats source preparation as a separate destructive
+workflow, not another deploy checkbox. It shows evidence for both fixed tables:
+`updated_at`, stable ID, exact `ENABLE ALWAYS` triggers, valid/ready cursor
+index, hard-delete guard and source generation. Execution requires a
+paused/drained pipeline plus typing `telegram-monitor`. An optional source-owner
+username/password is scoped to that one request and the form clears it on both
+success and failure. The result always remains paused and refreshes progress;
+when a replacement/repair changes the source generation, the UI explains why a
+separate paired checkpoint reset/full replay is required but never performs it
+automatically.
 
 Source pause is shown as draining while its cursor remains `running`: no new
 batch starts, the in-flight batch reaches its checkpoint boundary, and

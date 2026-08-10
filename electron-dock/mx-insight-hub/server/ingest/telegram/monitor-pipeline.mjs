@@ -116,6 +116,16 @@ function sameValue(left, right) {
   return JSON.stringify(leftEntries) === JSON.stringify(rightEntries)
 }
 
+function sourceCoordinates(connection = {}) {
+  return {
+    host: connection.host ?? null,
+    port: connection.port ?? 5432,
+    database: connection.database ?? null,
+    username: connection.username ?? null,
+    sslMode: connection.sslMode ?? 'require',
+  }
+}
+
 function nextDueAt(source, cursor) {
   const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
   if (!updatedAt || source.syncIntervalSeconds == null) return null
@@ -178,10 +188,11 @@ function syncInterval(value) {
 }
 
 export class TelegramMonitorPipeline {
-  constructor({ store, queue, databasePuller }) {
+  constructor({ store, queue, databasePuller, sourcePreparer = null }) {
     this.store = store
     this.queue = queue
     this.databasePuller = databasePuller
+    this.sourcePreparer = sourcePreparer
   }
 
   async #source(input) {
@@ -208,6 +219,164 @@ export class TelegramMonitorPipeline {
       throw new AppError(503, 'source_lock_unavailable', 'Telegram monitor changes require source locking')
     }
     return this.databasePuller.withSourceLocks(sourceKeys, operation)
+  }
+
+  #requireSourcePreparer() {
+    if (!this.sourcePreparer) {
+      throw new AppError(503, 'source_prepare_unavailable', 'Telegram source preparation requires the PostgreSQL workload')
+    }
+  }
+
+  async #sourcePreparationResetEvidence(sources, preparation, { generationChangedWithCheckpoint = false } = {}) {
+    const cursors = await Promise.all(sources.map((source) => this.#cursor(source.sourceKey)))
+    const checkpointed = cursors.map((cursor) => Boolean(
+      cursor?.position?.contractHash || cursor?.position?.cursor || cursor?.position?.lastId,
+    ))
+    if (!checkpointed.some(Boolean)) {
+      return { requiresCheckpointReset: false, checkpointResetReason: null }
+    }
+    const generation = preparation.contract?.generation ?? null
+    const storedGenerationMismatch = sources.some((source) => (
+      source.connection?.sourceContractId !== generation
+    ))
+    let contractMismatch = false
+    for (const [index, input] of TELEGRAM_MONITOR_INPUTS.entries()) {
+      if (!checkpointed[index]) continue
+      const mappings = await this.store.listSourceMappings(sources[index].id)
+      const builtIn = mappings.find((mapping) => (
+        mapping.id === input.builtInMappingId && mapping.version === input.builtInMappingVersion
+      ))
+      if (!builtIn) continue
+      try {
+        await this.databasePuller.assertCheckpointCompatible(input.sourceKey, { mappingOverride: builtIn })
+      } catch (error) {
+        if (error?.code !== 'checkpoint_contract_mismatch') throw error
+        contractMismatch = true
+      }
+    }
+    const requiresCheckpointReset = generationChangedWithCheckpoint
+      || preparation.sourceIdentityChanged === true
+      || storedGenerationMismatch
+      || contractMismatch
+    return {
+      requiresCheckpointReset,
+      checkpointResetReason: requiresCheckpointReset
+        ? 'The saved checkpoint belongs to another source installation or connection; reset both checkpoints explicitly before activation.'
+        : null,
+    }
+  }
+
+  async inspectSourcePreparation() {
+    this.#requireSourcePreparer()
+    const keys = TELEGRAM_MONITOR_INPUTS.map((input) => input.sourceKey)
+    return this.#withLocks(keys, async () => {
+      const sources = await this.#sources()
+      if (sources.some((source) => source.status !== 'paused')) {
+        throw new AppError(409, 'source_pause_required', 'Pause the Telegram monitor pipeline before inspecting source preparation')
+      }
+      const cursors = await Promise.all(keys.map((key) => this.#cursor(key)))
+      if (cursors.some((cursor) => cursor?.status === 'running')) {
+        throw new AppError(409, 'source_draining', 'Wait for both Telegram monitor tasks to reach a checkpoint')
+      }
+      const configuration = pipelineConfiguration(sources)
+      if (configuration.issues.length > 0 || !isConfigured(configuration.connection)) {
+        throw new AppError(409, 'pipeline_configuration_required', 'Save one consistent Telegram source connection before preparing it')
+      }
+      const preparation = await this.sourcePreparer.inspect(configuration.connection)
+      return {
+        ...preparation,
+        ...await this.#sourcePreparationResetEvidence(sources, preparation),
+      }
+    })
+  }
+
+  async prepareSource(body = {}) {
+    this.#requireSourcePreparer()
+    const unsupported = unsupportedFields(body, new Set(['confirmPipelineKey', 'migrationCredentials']))
+    if (unsupported.length > 0) {
+      throw new AppError(400, 'unsupported_fields', `Unsupported source preparation fields: ${unsupported.join(', ')}`)
+    }
+    if (body?.confirmPipelineKey !== 'telegram-monitor') {
+      throw new AppError(400, 'source_prepare_confirmation_required', 'confirmPipelineKey must be telegram-monitor')
+    }
+    const migrationCredentials = body?.migrationCredentials
+    if (migrationCredentials != null) {
+      if (typeof migrationCredentials !== 'object' || Array.isArray(migrationCredentials)) {
+        throw new AppError(400, 'invalid_migration_credentials', 'migrationCredentials must contain username and password')
+      }
+      const unsupportedCredentials = unsupportedFields(migrationCredentials, new Set(['username', 'password']))
+      if (unsupportedCredentials.length > 0) {
+        throw new AppError(400, 'unsupported_fields', `Unsupported migration credential fields: ${unsupportedCredentials.join(', ')}`)
+      }
+      if (
+        typeof migrationCredentials.username !== 'string'
+        || migrationCredentials.username.trim().length === 0
+        || migrationCredentials.username !== migrationCredentials.username.trim()
+        || typeof migrationCredentials.password !== 'string'
+        || migrationCredentials.password.length === 0
+      ) {
+        throw new AppError(400, 'invalid_migration_credentials', 'migrationCredentials requires a trimmed username and non-empty password')
+      }
+    }
+
+    const keys = TELEGRAM_MONITOR_INPUTS.map((input) => input.sourceKey)
+    return this.#withLocks(keys, async () => {
+      const sources = await this.#sources()
+      if (sources.some((source) => source.status !== 'paused')) {
+        throw new AppError(409, 'source_pause_required', 'Pause the Telegram monitor pipeline before preparing its source')
+      }
+      const cursors = await Promise.all(keys.map((key) => this.#cursor(key)))
+      if (cursors.some((cursor) => cursor?.status === 'running')) {
+        throw new AppError(409, 'source_draining', 'Wait for both Telegram monitor tasks to reach a checkpoint')
+      }
+      const configuration = pipelineConfiguration(sources)
+      if (configuration.issues.length > 0 || !isConfigured(configuration.connection)) {
+        throw new AppError(409, 'pipeline_configuration_required', 'Save one consistent Telegram source connection before preparing it')
+      }
+      const migrationConnection = migrationCredentials
+        ? {
+            ...configuration.connection,
+            username: migrationCredentials.username,
+            password: migrationCredentials.password,
+          }
+        : configuration.connection
+      validateDatabaseConnection({
+        ...migrationConnection,
+        schema: TELEGRAM_MONITOR_INPUTS[0].schema,
+        table: TELEGRAM_MONITOR_INPUTS[0].table,
+        cursorColumn: TELEGRAM_MONITOR_INPUTS[0].cursorColumn,
+        idColumn: TELEGRAM_MONITOR_INPUTS[0].idColumn,
+      })
+      const preparation = await this.sourcePreparer.prepare(migrationConnection)
+      const generation = preparation.contract?.generation
+      if (typeof generation !== 'string' || !/^[a-f0-9]{32}$/.test(generation)) {
+        throw new AppError(409, 'source_prepare_incomplete', 'Telegram source generation evidence is missing')
+      }
+      const hasCheckpoint = cursors.some((cursor) => Boolean(
+        cursor?.position?.contractHash || cursor?.position?.cursor || cursor?.position?.lastId,
+      ))
+      const generationChanged = sources.some((source) => source.connection?.sourceContractId !== generation)
+      const generationChangedWithCheckpoint = generationChanged && hasCheckpoint
+      if (generationChanged) {
+        await this.store.updateExternalSourcesBatch(sources.map((source) => ({
+          sourceKey: source.sourceKey,
+          connection: { ...source.connection, sourceContractId: generation },
+        })))
+      }
+      const updatedSources = await this.#sources()
+      const resetEvidence = await this.#sourcePreparationResetEvidence(updatedSources, preparation, {
+        generationChangedWithCheckpoint,
+      })
+      return {
+        ...preparation,
+        source: {
+          ...preparation.source,
+          user: migrationCredentials ? configuration.connection.username : preparation.source.user,
+        },
+        migrationAccountUsed: Boolean(migrationCredentials),
+        ...resetEvidence,
+      }
+    })
   }
 
   async #task(input, source) {
@@ -294,6 +463,9 @@ export class TelegramMonitorPipeline {
         const common = existing.slice(1).every((value) => sameValue(value, existing[0])) ? existing[0] : {}
         requestedConnection = { ...common, ...body.connection }
         delete requestedConnection.dsnEnv
+        if (!sameValue(sourceCoordinates(common), sourceCoordinates(requestedConnection))) {
+          delete requestedConnection.sourceContractId
+        }
         const probeConnection = {
           ...requestedConnection,
           schema: TELEGRAM_MONITOR_INPUTS[0].schema,
@@ -354,6 +526,21 @@ export class TelegramMonitorPipeline {
       const cursors = await Promise.all(keys.map((key) => this.#cursor(key)))
       if (cursors.some((cursor) => cursor?.status === 'running')) {
         throw new AppError(409, 'source_draining', 'Wait for both Telegram monitor tasks to reach a checkpoint')
+      }
+      if (this.sourcePreparer) {
+        const preparation = await this.sourcePreparer.inspect(configuration.connection)
+        const generation = preparation.contract?.generation
+        const generationMatches = typeof generation === 'string' && sources.every((source) => (
+          source.connection?.sourceContractId === generation
+        ))
+        if (!preparation.ready || preparation.sourceIdentityChanged || !generationMatches) {
+          throw new AppError(
+            409,
+            'source_prepare_required',
+            'Prepare and verify the Telegram source contract before activation',
+            { steps: preparation.steps, warnings: preparation.warnings },
+          )
+        }
       }
 
       const approvals = []

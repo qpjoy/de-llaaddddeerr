@@ -33,6 +33,20 @@ export async function runExternalPullJob({
       trigger: payload.trigger ?? 'manual',
     })
   } catch (error) {
+    if (error?.code === 'source_contract_mismatch') {
+      if (typeof puller.markSourceContractFailed !== 'function') throw error
+      await puller.markSourceContractFailed(sourceKey, error.code)
+      logger.warn?.(`[external] ${sourceKey} stopped for operator action: ${error.code}`)
+      return {
+        pulled: 0,
+        ingested: 0,
+        changed: 0,
+        rejected: 0,
+        done: true,
+        failed: true,
+        error: error.code,
+      }
+    }
     if (['row_rejections_detected', 'import_batch_failed'].includes(error?.code)) {
       logger.warn?.(`[external] ${sourceKey} stopped for operator action: ${error.code}`)
       return {

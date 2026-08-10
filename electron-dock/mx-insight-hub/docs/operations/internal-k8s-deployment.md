@@ -59,6 +59,14 @@ cannot create, inspect, test or change source connections. Pull sessions are
 still forced read-only. The optional legacy Telegram DSN remains a Secret for
 old `dsnEnv` source records only.
 
+The explicit Telegram **prepare source** action is the only external-DDL
+exception. It runs in the Admin workload (which has the Internal host-network
+path needed by a saved `127.0.0.1` source), only while the fixed pipeline is
+paused/drained, and may receive a one-request source-owner credential that is
+not stored in a ConfigMap, Secret or catalog row. The ordinary migration Job
+has only the Hub `DATABASE_URL`; it never connects to or migrates `night_all`.
+Thus an unavailable external source cannot make a routine Hub deploy fail.
+
 ## Independent deploy
 
 ```bash
@@ -146,10 +154,10 @@ namespace selector alone cannot identify host-network traffic.
 - add bounded list/usage windows and aggregate projections where still absent;
 - complete metrics/traces/log retention, alerting and request reconciliation;
 - complete exact Night-All workload identity plus route/TLS review;
-- for Telegram monitor, the real source schema/identity/tombstone fields are
-  recorded, but prove the external read-only role and the still-open unified
-  watermark/ID/index/commit-order contract, shape preview, rejection/replay and
-  rollback using the dedicated
+- for Telegram monitor, use the dedicated preparation action to install and
+  verify the source-side watermark/trigger/index contract, then prove the
+  long-lived external reader, shape preview, rejection/replay and rollback
+  using the dedicated
   [ingestion runbook](telegram-monitor-ingestion.md).
 
 Until these gates close, `internal-production` means the Internal K8s deployment

@@ -11,6 +11,7 @@ import { createSearch } from './search/index.mjs'
 import { EmbeddingPipeline } from './embedding/pipeline.mjs'
 import { ExternalImporter } from './ingest/external/importer.mjs'
 import { DatabaseSourcePuller } from './ingest/external/database-source.mjs'
+import { TelegramMonitorSourcePreparer } from './ingest/telegram/source-preparer.mjs'
 import { createIdentityService } from './identity/index.mjs'
 import { MemoryStore } from './stores/memory-store.mjs'
 import { createPostgresStore } from './stores/postgres-store.mjs'
@@ -36,6 +37,9 @@ export async function createRuntime(config = loadConfig()) {
   const importer = config.storeDriver === 'postgres' ? new ExternalImporter({ store }) : null
   const databasePuller = config.storeDriver === 'postgres'
     ? new DatabaseSourcePuller({ store, queue })
+    : null
+  const telegramSourcePreparer = config.storeDriver === 'postgres'
+    ? new TelegramMonitorSourcePreparer()
     : null
   // Reports `available: false` with no providers configured; every caller has a
   // deterministic fallback, so the agent is an accelerator, not a dependency.
@@ -67,6 +71,7 @@ export async function createRuntime(config = loadConfig()) {
     queue,
     importer,
     databasePuller,
+    telegramSourcePreparer,
     agent,
     search,
     embedding,
@@ -78,7 +83,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer,
-    databasePuller, agent, search, embedding,
+    databasePuller, telegramSourcePreparer, agent, search, embedding,
   }
 }
 

@@ -313,6 +313,16 @@ function telegramPipelineFixture() {
   return { sources, mappings, activeMappings, cursors, calls, store, databasePuller, queue }
 }
 
+function preparedSource(generation = '0123456789abcdef0123456789abcdef') {
+  return {
+    pipelineKey: 'telegram-monitor', status: 'ready', ready: true, applied: true,
+    source: { database: 'night_all', user: 'source_owner', serverVersion: '16.11', readOnly: false },
+    contract: { version: 1, installedVersion: 1, generation },
+    permissions: { canPrepare: true, isSuperuser: false, isDatabaseOwner: true },
+    tables: [], steps: [], warnings: [], sourceIdentityChanged: false,
+  }
+}
+
 test('Telegram monitor pipeline exposes one consistent connection and fixed task contracts', async () => {
   const fixture = telegramPipelineFixture()
   const pipeline = new TelegramMonitorPipeline(fixture)
@@ -413,6 +423,83 @@ test('Telegram monitor configuration probes once and atomically injects fixed ta
   assert.equal(result.syncIntervalSeconds, 600)
 })
 
+test('Telegram connection password rotation preserves source generation while topology changes clear it', async () => {
+  const fixture = telegramPipelineFixture()
+  for (const source of fixture.sources.values()) {
+    source.connection.sourceContractId = '0123456789abcdef0123456789abcdef'
+  }
+  const pipeline = new TelegramMonitorPipeline(fixture)
+  await pipeline.configure({ connection: { password: 'rotated-password' } })
+  assert.equal(
+    [...fixture.sources.values()].every((source) => (
+      source.connection.sourceContractId === '0123456789abcdef0123456789abcdef'
+    )),
+    true,
+  )
+
+  await pipeline.configure({ connection: { host: 'replacement.internal' } })
+  assert.equal(
+    [...fixture.sources.values()].every((source) => source.connection.sourceContractId == null),
+    true,
+  )
+})
+
+test('Telegram source preparation uses one-time DDL credentials without persisting them and binds checkpoints to its generation', async () => {
+  const fixture = telegramPipelineFixture()
+  const preparations = []
+  fixture.sourcePreparer = {
+    inspect: async () => preparedSource(),
+    prepare: async (connection) => {
+      preparations.push(structuredClone(connection))
+      return preparedSource()
+    },
+  }
+  const pipeline = new TelegramMonitorPipeline(fixture)
+
+  const inspected = await pipeline.inspectSourcePreparation()
+  assert.equal(inspected.ready, true)
+  assert.equal(inspected.requiresCheckpointReset, false)
+
+  const result = await pipeline.prepareSource({
+    confirmPipelineKey: 'telegram-monitor',
+    migrationCredentials: { username: 'source_owner', password: 'one-time-secret' },
+  })
+  assert.equal(preparations[0].username, 'source_owner')
+  assert.equal(preparations[0].password, 'one-time-secret')
+  assert.equal(result.migrationAccountUsed, true)
+  assert.equal(result.source.user, 'mx_data')
+  assert.equal(JSON.stringify(result).includes('source_owner'), false)
+  assert.equal(JSON.stringify(result).includes('one-time-secret'), false)
+  for (const source of fixture.sources.values()) {
+    assert.equal(source.connection.username, 'mx_data')
+    assert.equal(source.connection.password, 'private')
+    assert.equal(source.connection.sourceContractId, '0123456789abcdef0123456789abcdef')
+  }
+
+  await assert.rejects(
+    () => pipeline.prepareSource({
+      confirmPipelineKey: 'telegram-monitor',
+      migrationCredentials: { username: 'source_owner' },
+    }),
+    (error) => error?.code === 'invalid_migration_credentials',
+  )
+})
+
+test('Telegram source generation changes fail closed on an existing checkpoint', async () => {
+  const fixture = telegramPipelineFixture()
+  for (const cursor of fixture.cursors.values()) {
+    cursor.position = { cursor: '2026-08-10T00:00:00.000Z', lastId: '10' }
+  }
+  fixture.sourcePreparer = { prepare: async () => preparedSource('fedcba9876543210fedcba9876543210') }
+  const result = await new TelegramMonitorPipeline(fixture).prepareSource({
+    confirmPipelineKey: 'telegram-monitor',
+  })
+  assert.equal(result.requiresCheckpointReset, true)
+  assert.match(result.checkpointResetReason, /reset both checkpoints/i)
+  assert.equal(fixture.sources.get('telegram-monitor-chats').status, 'paused')
+  assert.equal(fixture.sources.get('telegram-monitor-messages').status, 'paused')
+})
+
 test('Telegram monitor activation probes before one atomic mapping, status and attestation write', async () => {
   const fixture = telegramPipelineFixture()
   let badSource = 'telegram-monitor-messages'
@@ -475,6 +562,23 @@ test('Telegram monitor activation probes before one atomic mapping, status and a
   assert.equal(fixture.calls.some(([kind, updates]) => (
     kind === 'updateBatch' && updates.every((update) => update.status === 'paused')
   )), true)
+})
+
+test('Telegram monitor activation rejects an old source generation after connection replacement', async () => {
+  const fixture = telegramPipelineFixture()
+  for (const source of fixture.sources.values()) {
+    source.connection.sourceContractId = '0123456789abcdef0123456789abcdef'
+  }
+  fixture.sourcePreparer = {
+    inspect: async () => preparedSource('fedcba9876543210fedcba9876543210'),
+  }
+  await assert.rejects(
+    () => new TelegramMonitorPipeline(fixture).setStatus('active', {
+      writerContractAttestation: WRITER_CONTRACT_ATTESTATION,
+    }),
+    (error) => error?.status === 409 && error?.code === 'source_prepare_required',
+  )
+  assert.equal([...fixture.sources.values()].every((source) => source.status === 'paused'), true)
 })
 
 test('Telegram monitor rejects a version-2 mapping collision instead of treating it as built in', async () => {
@@ -580,6 +684,43 @@ test('Telegram monitor routes require the admin token and queue both active task
       options: { dedupeKey: 'external-pull:telegram-monitor-messages:0', priority: 220 },
     },
   ])
+})
+
+test('Telegram source prepare routes are Admin-Token-only and never return one-time credentials', async () => {
+  const fixture = telegramPipelineFixture()
+  const sourcePreparer = {
+    inspect: async () => preparedSource(),
+    prepare: async () => preparedSource(),
+  }
+  const app = createApp({
+    service: {}, ...fixture,
+    telegramSourcePreparer: sourcePreparer,
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+  await withServer(app, async (baseUrl) => {
+    const path = '/internal/v1/admin/pipelines/telegram-monitor/source/prepare'
+    const denied = await call(baseUrl, path, { headers: { 'x-api-key': 'mih_live_caller' } })
+    assert.equal(denied.response.status, 403)
+    assert.equal(denied.payload.error.code, 'admin_token_required')
+
+    const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+    const inspected = await call(baseUrl, path, { headers })
+    assert.equal(inspected.response.status, 200)
+    assert.equal(inspected.payload.data.ready, true)
+
+    const prepared = await call(baseUrl, path, {
+      method: 'POST', headers,
+      body: {
+        confirmPipelineKey: 'telegram-monitor',
+        migrationCredentials: { username: 'source_owner', password: 'one-time-secret' },
+      },
+    })
+    assert.equal(prepared.response.status, 200)
+    assert.equal(prepared.payload.data.migrationAccountUsed, true)
+    assert.equal(JSON.stringify(prepared.payload).includes('source_owner'), false)
+    assert.equal(JSON.stringify(prepared.payload).includes('one-time-secret'), false)
+  })
 })
 
 test('Telegram monitor child sources reject generic mutations but retain read-only inspection', async () => {

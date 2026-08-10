@@ -188,6 +188,12 @@ export const adminApi = {
   telegramMonitorPipelineProgress: (token) => request(
     token, `${ADMIN_ROOT}/pipelines/telegram-monitor/progress`,
   ),
+  telegramMonitorSourcePreparation: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-monitor/source/prepare`,
+  ),
+  prepareTelegramMonitorSource: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-monitor/source/prepare`, { method: 'POST', body },
+  ),
   resetTelegramMonitorPipelineCheckpoints: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/telegram-monitor/checkpoints/reset`, { method: 'POST', body },
   ),

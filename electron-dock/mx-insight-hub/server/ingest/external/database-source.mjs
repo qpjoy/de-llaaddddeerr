@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import pg from 'pg'
 import { AppError } from '../../core/errors.mjs'
 import { applyMapping, validateFieldMap, CHUNKER_VERSION } from './mapping.mjs'
+import { isTelegramSourceFunctionDefinition } from '../telegram/source-preparer.mjs'
 
 // Incremental pull from a foreign PostgreSQL database.
 //
@@ -30,6 +31,7 @@ const CONNECTION_FIELDS = new Set([
   'table',
   'cursorColumn',
   'idColumn',
+  'sourceContractId',
 ])
 const REQUIRED_DIRECT_CONNECTION_FIELDS = ['host', 'database', 'username', 'password']
 const DIRECT_CONNECTION_FIELDS = [...REQUIRED_DIRECT_CONNECTION_FIELDS, 'port', 'sslMode']
@@ -128,6 +130,12 @@ export function validateDatabaseConnection(connection) {
   safeIdentifier(connection.table, 'table')
   if (connection.cursorColumn != null) safeIdentifier(connection.cursorColumn, 'cursorColumn')
   if (connection.idColumn != null) safeIdentifier(connection.idColumn, 'idColumn')
+  if (
+    connection.sourceContractId != null
+    && (typeof connection.sourceContractId !== 'string' || !/^[a-f0-9]{32}$/.test(connection.sourceContractId))
+  ) {
+    throw new AppError(400, 'invalid_source_contract_id', 'sourceContractId must be a 32-character lowercase hex identifier')
+  }
   return true
 }
 
@@ -238,6 +246,7 @@ function sourceContractHash(source, mapping) {
     platform: source.platform,
     objectType: source.objectType,
     mappingVersion: mapping.version,
+    ...(connection.sourceContractId ? { sourceContractId: connection.sourceContractId } : {}),
   }
   return createHash('sha256').update(JSON.stringify(contract)).digest('hex')
 }
@@ -394,6 +403,215 @@ export class DatabaseSourcePuller {
     return { source, mapping, connection: source.connection || {} }
   }
 
+  async #assertManagedSourceContract(pool, connection) {
+    if (!connection.sourceContractId) return
+    let marker
+    let triggers
+    let indexes
+    let infrastructure
+    let constraints
+    try {
+      ;[marker, triggers, indexes, infrastructure, constraints] = await Promise.all([
+        pool.query(
+          `SELECT version, generation,
+                  chats_table_oid = to_regclass('public.tg_monitor_chats')::oid AS chats_match,
+                  messages_table_oid = to_regclass('public.tg_monitor_messages')::oid AS messages_match,
+                  EXISTS (
+                    SELECT 1 FROM pg_class c
+                    WHERE c.oid = to_regclass('public.tg_monitor_chats')
+                      AND c.relkind = 'r' AND NOT c.relispartition
+                      AND NOT EXISTS (
+                        SELECT 1 FROM pg_inherits i
+                         WHERE i.inhrelid = c.oid OR i.inhparent = c.oid
+                      )
+                  ) AS chats_ordinary,
+                  EXISTS (
+                    SELECT 1 FROM pg_class c
+                    WHERE c.oid = to_regclass('public.tg_monitor_messages')
+                      AND c.relkind = 'r' AND NOT c.relispartition
+                      AND NOT EXISTS (
+                        SELECT 1 FROM pg_inherits i
+                         WHERE i.inhrelid = c.oid OR i.inhparent = c.oid
+                      )
+                  ) AS messages_ordinary
+             FROM mx_insight_hub_source.telegram_monitor_contract
+            WHERE contract_key = 'telegram-monitor'`,
+        ),
+        pool.query(
+          `SELECT c.relname AS table_name, t.tgname AS name, t.tgenabled AS enabled,
+                  t.tgtype AS trigger_type, pn.nspname AS function_schema,
+                  p.proname AS function_name, p.prosecdef AS security_definer,
+                  p.prosrc AS function_source, p.proconfig AS function_config,
+                  l.lanname AS function_language,
+                  p.proowner = wm.relowner AS owner_matches_watermark,
+                  t.tgqual IS NULL AS no_when_clause,
+                  t.tgattr = ''::int2vector AS no_column_filter,
+                  t.tgnargs = 0 AS no_arguments
+             FROM pg_trigger t
+             JOIN pg_class c ON c.oid = t.tgrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_proc p ON p.oid = t.tgfoid
+             JOIN pg_namespace pn ON pn.oid = p.pronamespace
+             JOIN pg_language l ON l.oid = p.prolang
+             LEFT JOIN pg_class wm
+               ON wm.oid = to_regclass('mx_insight_hub_source.telegram_monitor_watermark')
+            WHERE n.nspname = 'public'
+              AND c.relname IN ('tg_monitor_chats', 'tg_monitor_messages')
+              AND NOT t.tgisinternal`,
+        ),
+        pool.query(
+          `SELECT c.relname AS table_name, i.indisvalid AS valid, i.indisready AS ready,
+                  am.amname AS access_method,
+                  i.indexprs IS NULL AS no_expressions,
+                  i.indpred IS NULL AS no_predicate,
+                  pg_get_indexdef(i.indexrelid, 1, true) AS first_key,
+                  pg_get_indexdef(i.indexrelid, 2, true) AS second_key
+             FROM pg_index i
+             JOIN pg_class c ON c.oid = i.indrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_class ci ON ci.oid = i.indexrelid
+             JOIN pg_am am ON am.oid = ci.relam
+            WHERE n.nspname = 'public'
+              AND c.relname IN ('tg_monitor_chats', 'tg_monitor_messages')`,
+        ),
+        pool.query(
+          `SELECT
+             EXISTS (
+               SELECT 1
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'mx_insight_hub_source'
+                  AND c.relname = 'telegram_monitor_watermark'
+                  AND c.relkind = 'r'
+                  AND NOT c.relrowsecurity
+                  AND NOT c.relforcerowsecurity
+                  AND (SELECT count(*) FROM pg_attribute a
+                        WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped) = 2
+                  AND EXISTS (
+                    SELECT 1 FROM pg_attribute a
+                     WHERE a.attrelid = c.oid AND a.attname = 'singleton'
+                       AND a.atttypid = 'boolean'::regtype AND a.attnotnull
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM pg_attribute a
+                     WHERE a.attrelid = c.oid AND a.attname = 'last_updated_at'
+                       AND a.atttypid = 'timestamp with time zone'::regtype AND a.attnotnull
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM pg_constraint con
+                     WHERE con.conrelid = c.oid AND con.contype = 'p'
+                       AND pg_get_constraintdef(con.oid) = 'PRIMARY KEY (singleton)'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM pg_constraint con
+                     WHERE con.conrelid = c.oid AND con.contype = 'c' AND con.convalidated
+                       AND pg_get_expr(con.conbin, con.conrelid) = 'singleton'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM pg_constraint con
+                     WHERE con.conrelid = c.oid AND con.contype = 'c' AND con.convalidated
+                       AND pg_get_expr(con.conbin, con.conrelid) = 'isfinite(last_updated_at)'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+                  )
+             ) AS structure_ready,
+             (SELECT count(*) FROM mx_insight_hub_source.telegram_monitor_watermark) = 1
+               AS one_row,
+             (SELECT count(*) FROM mx_insight_hub_source.telegram_monitor_watermark
+               WHERE singleton IS TRUE AND isfinite(last_updated_at)) = 1
+               AS finite_singleton`,
+        ),
+        pool.query(
+          `SELECT c.relname AS table_name, con.convalidated AS validated,
+                  pg_get_expr(con.conbin, con.conrelid) AS expression
+             FROM pg_constraint con
+             JOIN pg_class c ON c.oid = con.conrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relname IN ('tg_monitor_chats', 'tg_monitor_messages')
+              AND con.contype = 'c'`,
+        ),
+      ])
+    } catch {
+      throw new AppError(409, 'source_contract_mismatch', 'Telegram source contract evidence is missing or unreadable')
+    }
+    const contract = marker.rows[0]
+    const markerReady = Number(contract?.version) === 1
+      && contract?.generation === connection.sourceContractId
+      && contract?.chats_match === true
+      && contract?.messages_match === true
+      && contract?.chats_ordinary === true
+      && contract?.messages_ordinary === true
+    const infrastructureReady = infrastructure.rows[0]?.structure_ready === true
+      && infrastructure.rows[0]?.one_row === true
+      && infrastructure.rows[0]?.finite_singleton === true
+    const triggerReady = (tableName) => {
+      const rows = triggers.rows.filter((row) => row.table_name === tableName)
+      const expected = [
+        ['mx_insight_hub_advance_watermark', 22, 'telegram_monitor_advance_watermark', 'pg_catalog,mx_insight_hub_source'],
+        ['zzzzzzzz_mx_insight_hub_touch_updated_at', 23, 'telegram_monitor_touch_updated_at', 'pg_catalog,mx_insight_hub_source'],
+        ['mx_insight_hub_deny_hard_delete', 42, 'telegram_monitor_deny_hard_delete', 'pg_catalog'],
+      ]
+      const exact = expected.every(([name, type, functionName, searchPath]) => rows.some((row) => {
+        const config = Array.isArray(row.function_config)
+          ? row.function_config.join(',').replace(/\s+/g, '')
+          : ''
+        return row.name === name
+          && row.enabled === 'A'
+          && Number(row.trigger_type) === type
+          && row.function_schema === 'mx_insight_hub_source'
+          && row.function_name === functionName
+          && row.security_definer === true
+          && row.function_language === 'plpgsql'
+          && row.owner_matches_watermark === true
+          && row.no_when_clause === true
+          && row.no_column_filter === true
+          && row.no_arguments === true
+          && config.includes(`search_path=${searchPath}`.replace(/\s+/g, ''))
+          && isTelegramSourceFunctionDefinition(functionName, row.function_source)
+      }))
+      const laterCompeting = rows.some((row) => (
+        row.name > 'zzzzzzzz_mx_insight_hub_touch_updated_at'
+        && (Number(row.trigger_type) & 1) === 1
+        && (Number(row.trigger_type) & 2) === 2
+        && ((Number(row.trigger_type) & 4) === 4 || (Number(row.trigger_type) & 16) === 16)
+      ))
+      return exact && !laterCompeting
+    }
+    const indexReady = (tableName, idColumn) => indexes.rows.some((row) => (
+      row.table_name === tableName
+      && row.valid === true
+      && row.ready === true
+      && row.access_method === 'btree'
+      && row.no_expressions === true
+      && row.no_predicate === true
+      && String(row.first_key).replace(/"/g, '').trim() === 'updated_at'
+      && String(row.second_key).replace(/"/g, '').trim() === idColumn
+    ))
+    const finiteUpdatedAt = (tableName) => constraints.rows.some((row) => (
+      row.table_name === tableName
+      && row.validated === true
+      && row.expression === 'isfinite(updated_at)'
+    ))
+    if (
+      !markerReady
+      || !infrastructureReady
+      || !triggerReady('tg_monitor_chats')
+      || !triggerReady('tg_monitor_messages')
+      || !finiteUpdatedAt('tg_monitor_chats')
+      || !finiteUpdatedAt('tg_monitor_messages')
+      || !indexReady('tg_monitor_chats', 'chat_id')
+      || !indexReady('tg_monitor_messages', 'id')
+    ) {
+      throw new AppError(
+        409,
+        'source_contract_mismatch',
+        'Telegram source contract changed; pause, prepare, and reset checkpoints when instructed',
+      )
+    }
+  }
+
   async withSourceLock(sourceKey, operation) {
     if (typeof this.store.withExternalSourceLock === 'function') {
       return this.store.withExternalSourceLock(
@@ -424,8 +642,20 @@ export class DatabaseSourcePuller {
     return acquire(0, [])
   }
 
-  #assertCheckpoint(position, { contractHash, mappingVersion }) {
-    if (!position?.contractHash) return
+  #assertCheckpoint(position, { contractHash, mappingVersion, sourceContractId = null }) {
+    if (!position?.contractHash) {
+      const meaningfulLegacyCheckpoint = position?.cursor != null
+        || position?.lastId != null
+        || position?.importRunId != null
+      if (sourceContractId && meaningfulLegacyCheckpoint) {
+        throw new AppError(
+          409,
+          'checkpoint_contract_mismatch',
+          'The saved checkpoint predates the managed source contract; pause and reset it explicitly',
+        )
+      }
+      return
+    }
     if (position.contractHash !== contractHash || Number(position.mappingVersion) !== Number(mappingVersion)) {
       throw new AppError(
         409,
@@ -440,7 +670,11 @@ export class DatabaseSourcePuller {
     const { source, mapping } = await this.#source(sourceKey, { requireMapping: true, mappingOverride })
     const contractHash = sourceContractHash(source, mapping)
     const cursor = await this.queue.getCursor(`external:${sourceKey}`)
-    this.#assertCheckpoint(cursor?.position ?? {}, { contractHash, mappingVersion: mapping.version })
+    this.#assertCheckpoint(cursor?.position ?? {}, {
+      contractHash,
+      mappingVersion: mapping.version,
+      sourceContractId: source.connection?.sourceContractId ?? null,
+    })
     return { compatible: true, contractHash, mappingVersion: mapping.version, cursor: cursor ?? null }
   }
 
@@ -555,10 +789,15 @@ export class DatabaseSourcePuller {
         [schema, table],
       ),
       pool.query(
-        `SELECT indexname AS name, indexdef AS definition
-           FROM pg_indexes
-          WHERE schemaname = $1 AND tablename = $2
-          ORDER BY indexname`,
+        `SELECT p.indexname AS name, p.indexdef AS definition,
+                i.indisvalid AS valid, i.indisready AS ready
+           FROM pg_indexes p
+           JOIN pg_namespace n ON n.nspname = p.schemaname
+           JOIN pg_class t ON t.relnamespace = n.oid AND t.relname = p.tablename
+           JOIN pg_class ci ON ci.relnamespace = n.oid AND ci.relname = p.indexname
+           JOIN pg_index i ON i.indrelid = t.oid AND i.indexrelid = ci.oid
+          WHERE p.schemaname = $1 AND p.tablename = $2
+          ORDER BY p.indexname`,
         [schema, table],
       ),
       pool.query(
@@ -583,7 +822,12 @@ export class DatabaseSourcePuller {
     return {
       estimatedRows: relation.estimated_rows == null ? null : Number(relation.estimated_rows),
       totalBytes: relation.total_bytes == null ? null : Number(relation.total_bytes),
-      indexes: indexResult.rows.map((row) => ({ name: row.name, definition: row.definition })),
+      indexes: indexResult.rows.map((row) => ({
+        name: row.name,
+        definition: row.definition,
+        valid: row.valid !== false,
+        ready: row.ready !== false,
+      })),
       constraints: constraintResult.rows.map((row) => ({ name: row.name, type: row.type, definition: row.definition })),
       triggers: triggerResult.rows.map((row) => ({
         name: row.name, event: row.event, timing: row.timing, statement: row.statement,
@@ -628,10 +872,10 @@ export class DatabaseSourcePuller {
           .map((target) => `mapping ${target} is required for ${source.platform} records`)
         : []
       const hasCursorIndex = cursorColumn != null && idColumn != null && metadata.indexes.some((index) =>
-        indexStartsWith(index.definition, cursorColumn, idColumn),
+        index.valid && index.ready && indexStartsWith(index.definition, cursorColumn, idColumn),
       )
       const hasUniqueOrder = cursorColumn != null && idColumn != null && metadata.indexes.some((index) =>
-        uniqueIndexProvesOrder(index.definition, cursorColumn, idColumn),
+        index.valid && index.ready && uniqueIndexProvesOrder(index.definition, cursorColumn, idColumn),
       )
       return {
         source: safeSource(source),
@@ -807,12 +1051,18 @@ export class DatabaseSourcePuller {
       const schema = safeIdentifier(connection.schema || 'public', 'schema')
       const sourceTable = safeIdentifier(connection.table, 'table')
       const indexResult = await pool.query(
-        `SELECT indexdef AS definition
-           FROM pg_indexes
-          WHERE schemaname = $1 AND tablename = $2`,
+        `SELECT p.indexdef AS definition, i.indisvalid AS valid, i.indisready AS ready
+           FROM pg_indexes p
+           JOIN pg_namespace n ON n.nspname = p.schemaname
+           JOIN pg_class t ON t.relnamespace = n.oid AND t.relname = p.tablename
+           JOIN pg_class ci ON ci.relnamespace = n.oid AND ci.relname = p.indexname
+           JOIN pg_index i ON i.indrelid = t.oid AND i.indexrelid = ci.oid
+          WHERE p.schemaname = $1 AND p.tablename = $2`,
         [schema, sourceTable],
       )
-      const definitions = indexResult.rows.map((row) => row.definition)
+      const definitions = indexResult.rows
+        .filter((row) => row.valid !== false && row.ready !== false)
+        .map((row) => row.definition)
       if (!definitions.some((definition) => indexStartsWith(definition, cursorName, idName))) {
         issues.push(`no index begins with (${cursorName}, ${idName})`)
       }
@@ -1039,6 +1289,38 @@ export class DatabaseSourcePuller {
     })
   }
 
+  async markSourceContractFailed(sourceKey, error = 'source_contract_mismatch') {
+    return this.withSourceLock(sourceKey, async (assertOwned) => {
+      if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
+      const source = await this.store.getExternalSource(sourceKey)
+      if (!source) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
+      const cursorId = `external:${sourceKey}`
+      const saved = await this.queue.getCursor(cursorId)
+      const position = saved?.position ?? {}
+      const importRunId = position.importRunId ?? null
+      if (importRunId && typeof this.store.markExternalImportCursorFailed === 'function') {
+        await this.#assertImportRun(source, importRunId)
+        const input = {
+          importRunId,
+          sourceId: source.id,
+          cursorId,
+          position: { ...withoutImportRun(position), importRunId },
+          error,
+        }
+        await assertOwned()
+        try {
+          return (await this.store.markExternalImportCursorFailed(input)).cursor
+        } catch (markError) {
+          if (markError?.code !== 'external_cursor_failure_outcome_unknown') throw markError
+          await assertOwned()
+          return (await this.store.markExternalImportCursorFailed(input)).cursor
+        }
+      }
+      await assertOwned()
+      return this.queue.saveCursor(cursorId, position, { status: 'failed', error })
+    })
+  }
+
   async #pullBatchUnlocked(
     sourceKey,
     { batchSize = 1_000, importRunId = null, trigger = 'manual' } = {},
@@ -1065,7 +1347,11 @@ export class DatabaseSourcePuller {
     const saved = await this.queue.getCursor(cursorId)
     const position = saved?.position ?? {}
     const contractHash = sourceContractHash(source, mapping)
-    this.#assertCheckpoint(position, { contractHash, mappingVersion: mapping.version })
+    this.#assertCheckpoint(position, {
+      contractHash,
+      mappingVersion: mapping.version,
+      sourceContractId: connection.sourceContractId ?? null,
+    })
     const checkpointRunId = position.importRunId ?? null
     if (importRunId && !checkpointRunId) {
       // The predecessor was retried after its atomic finalize/reset committed.
@@ -1166,6 +1452,7 @@ export class DatabaseSourcePuller {
     let checkpointWriteInFlight = false
 
     try {
+      await this.#assertManagedSourceContract(pool, connection)
       const columns = await this.#columns(pool, connection)
       const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
       const { rows } = await pool.query(

@@ -244,6 +244,63 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /pipelines/telegram-monitor/source/prepare:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: inspectTelegramMonitorSourcePreparation
+      summary: Inspect the fixed TG source-side writer contract.
+      description: >-
+        Requires the platform Admin Token and a paused, drained Telegram
+        pipeline. Uses the saved read-only connection to inspect the two fixed
+        tables without returning row values or credentials. A ready result
+        proves the installed column/trigger/index shape; activation still
+        requires the separate writer-contract attestation.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: Current source-contract evidence and reset guidance.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TelegramSourcePreparationEnvelope" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: prepareTelegramMonitorSource
+      summary: Idempotently install or repair the fixed TG source contract.
+      description: >-
+        Explicit source-side DDL action; it is not part of ordinary Hub deploy
+        or ingestion. Both child tasks must be paused and drained. It adds or
+        repairs updated_at, a commit-ordered shared watermark, ENABLE ALWAYS
+        writer triggers, hard-delete guards and valid composite cursor indexes,
+        then re-inspects the result. Optional migration credentials override
+        only username/password for this request and are never persisted,
+        returned or logged. The saved runtime connection remains read-only.
+        This operation never activates the task or resets a checkpoint. A new
+        source/table generation makes the old checkpoint incompatible and the
+        response instructs the operator to use the separate confirmed paired
+        reset before full replay.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TelegramSourcePreparationRequest" }
+      responses:
+        "200":
+          description: Verified source-contract evidence; the pipeline remains paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TelegramSourcePreparationEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /pipelines/telegram-monitor/checkpoints/reset:
     servers:
       - url: /internal/v1/admin
@@ -1164,6 +1221,11 @@ components:
         password: { type: [string, "null"], minLength: 1 }
         sslMode: { type: string, enum: [disable, require, verify-ca, verify-full] }
         dsnEnv: { type: string, minLength: 1 }
+        sourceContractId:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
+          readOnly: true
+          description: Internal source-installation generation bound into checkpoint compatibility.
     TelegramMonitorPipelinePatch:
       type: object
       additionalProperties: false
@@ -1329,6 +1391,223 @@ components:
       properties:
         data: { $ref: "#/components/schemas/TelegramMonitorPipeline" }
         requestId: { type: string }
+    TelegramSourceMigrationCredentials:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      description: >-
+        One-request source owner or DDL credentials. They replace only the
+        saved username/password while this preparation call runs and are never
+        persisted or returned.
+      properties:
+        username: { type: string, minLength: 1, maxLength: 128, writeOnly: true }
+        password: { type: string, minLength: 1, maxLength: 4096, writeOnly: true }
+    TelegramSourcePreparationRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmPipelineKey]
+      properties:
+        confirmPipelineKey: { type: string, const: telegram-monitor }
+        migrationCredentials: { $ref: "#/components/schemas/TelegramSourceMigrationCredentials" }
+    TelegramSourcePreparationCheck:
+      type: object
+      additionalProperties: false
+      required: [key, status, message]
+      properties:
+        key: { type: string }
+        status: { type: string, enum: [ready, needed, applied] }
+        message: { type: string }
+    TelegramSourcePreparationNotice:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+    TelegramSourceUpdatedAtEvidence:
+      type: object
+      additionalProperties: false
+      required: [exists, type, nullable, finite, ready]
+      properties:
+        exists: { type: boolean }
+        type: { type: [string, "null"] }
+        nullable: { type: [boolean, "null"] }
+        finite: { type: boolean }
+        ready: { type: boolean }
+    TelegramSourceStableIdEvidence:
+      type: object
+      additionalProperties: false
+      required: [exists, nullable, unique, ready]
+      properties:
+        exists: { type: boolean }
+        nullable: { type: [boolean, "null"] }
+        unique: { type: boolean }
+        ready: { type: boolean }
+    TelegramSourceTriggerEvidence:
+      type: object
+      additionalProperties: false
+      required: [installed, enabledAlways, laterCompetingTriggers]
+      properties:
+        installed: { type: boolean }
+        enabledAlways: { type: boolean }
+        laterCompetingTriggers:
+          type: array
+          items: { type: string }
+    TelegramSourceDeleteGuardEvidence:
+      type: object
+      additionalProperties: false
+      required: [installed, enabledAlways]
+      properties:
+        installed: { type: boolean }
+        enabledAlways: { type: boolean }
+    TelegramSourceCursorIndexEvidence:
+      type: object
+      additionalProperties: false
+      required: [exists, name, valid, ready, namedIndexExists]
+      properties:
+        exists: { type: boolean }
+        name: { type: [string, "null"] }
+        valid: { type: boolean }
+        ready: { type: boolean }
+        namedIndexExists: { type: boolean }
+    TelegramSourcePreparationTable:
+      type: object
+      additionalProperties: false
+      required:
+        - role
+        - table
+        - idColumn
+        - cursorIndexName
+        - exists
+        - oid
+        - canAlter
+        - stableId
+        - updatedAt
+        - trigger
+        - deleteGuard
+        - cursorIndex
+        - ready
+      properties:
+        role: { type: string, enum: [chats, messages] }
+        table: { type: string, enum: [public.tg_monitor_chats, public.tg_monitor_messages] }
+        idColumn: { type: string, enum: [chat_id, id] }
+        cursorIndexName: { type: string }
+        exists: { type: boolean }
+        oid: { type: [string, "null"] }
+        canAlter: { type: boolean }
+        stableId: { $ref: "#/components/schemas/TelegramSourceStableIdEvidence" }
+        updatedAt: { $ref: "#/components/schemas/TelegramSourceUpdatedAtEvidence" }
+        trigger: { $ref: "#/components/schemas/TelegramSourceTriggerEvidence" }
+        deleteGuard: { $ref: "#/components/schemas/TelegramSourceDeleteGuardEvidence" }
+        cursorIndex: { $ref: "#/components/schemas/TelegramSourceCursorIndexEvidence" }
+        ready: { type: boolean }
+    TelegramSourceInfrastructureEvidence:
+      type: object
+      additionalProperties: false
+      required:
+        - watermarkExists
+        - watermarkStructureReady
+        - watermarkRowReady
+        - advanceFunctionExists
+        - touchFunctionExists
+        - deleteFunctionExists
+        - ready
+      properties:
+        watermarkExists: { type: boolean }
+        watermarkStructureReady: { type: boolean }
+        watermarkRowReady: { type: boolean }
+        advanceFunctionExists: { type: boolean }
+        touchFunctionExists: { type: boolean }
+        deleteFunctionExists: { type: boolean }
+        ready: { type: boolean }
+    TelegramSourcePreparation:
+      type: object
+      additionalProperties: false
+      required:
+        - pipelineKey
+        - status
+        - ready
+        - applied
+        - source
+        - contract
+        - permissions
+        - tables
+        - steps
+        - warnings
+        - sourceIdentityChanged
+        - requiresCheckpointReset
+        - checkpointResetReason
+      properties:
+        pipelineKey: { type: string, const: telegram-monitor }
+        status: { type: string, enum: [ready, needs_prepare] }
+        ready: { type: boolean }
+        applied: { type: boolean }
+        source:
+          type: object
+          additionalProperties: false
+          required: [database, user, serverVersion, readOnly]
+          properties:
+            database: { type: [string, "null"] }
+            user: { type: [string, "null"] }
+            serverVersion: { type: [string, "null"] }
+            readOnly: { type: boolean }
+        contract:
+          type: object
+          additionalProperties: false
+          required:
+            - version
+            - installedVersion
+            - installedAt
+            - generation
+            - previousTableOids
+            - infrastructure
+          properties:
+            version: { type: integer, const: 1 }
+            installedVersion: { type: [integer, "null"] }
+            installedAt: { type: [string, "null"], format: date-time }
+            generation: { type: [string, "null"], pattern: "^[0-9a-f]{32}$" }
+            previousTableOids:
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [chats, messages]
+                  properties:
+                    chats: { type: [string, "null"] }
+                    messages: { type: [string, "null"] }
+                - { type: "null" }
+            infrastructure: { $ref: "#/components/schemas/TelegramSourceInfrastructureEvidence" }
+        permissions:
+          type: object
+          additionalProperties: false
+          required: [canPrepare, isSuperuser, isDatabaseOwner, canCreateSchema, currentSessionWritable]
+          properties:
+            canPrepare: { type: boolean }
+            isSuperuser: { type: boolean }
+            isDatabaseOwner: { type: boolean }
+            canCreateSchema: { type: boolean }
+            currentSessionWritable: { type: boolean }
+        tables:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { $ref: "#/components/schemas/TelegramSourcePreparationTable" }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/TelegramSourcePreparationCheck" }
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/TelegramSourcePreparationNotice" }
+        sourceIdentityChanged: { type: boolean }
+        migrationAccountUsed: { type: boolean }
+        requiresCheckpointReset: { type: boolean }
+        checkpointResetReason: { type: [string, "null"] }
+    TelegramSourcePreparationEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/TelegramSourcePreparation" }
+        requestId: { type: string }
     TelegramMonitorProgressTask:
       type: object
       additionalProperties: false
@@ -1431,6 +1710,11 @@ components:
         table: { type: string, minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
         cursorColumn: { type: [string, "null"], minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
         idColumn: { type: [string, "null"], minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+        sourceContractId:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
+          readOnly: true
+          description: Internal prepared-source generation used by checkpoint compatibility.
     DirectPostgresConnectionPatch:
       type: object
       additionalProperties: false

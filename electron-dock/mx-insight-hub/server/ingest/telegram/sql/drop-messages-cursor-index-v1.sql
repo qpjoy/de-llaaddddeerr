@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS public.mx_insight_hub_tg_monitor_messages_cursor_idx;

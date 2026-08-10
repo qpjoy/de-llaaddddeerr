@@ -250,6 +250,41 @@ function telegramPipelineStatus(pipeline) {
   return { status: 'disabled', label: telegramPipelineConfigured(pipeline) ? '已暂停' : '待配置' }
 }
 
+function telegramPreparationTables(preparation) {
+  const tables = preparation?.tables || preparation?.tableStatus || preparation?.inspection?.tables
+  if (Array.isArray(tables)) return tables
+  return Object.entries(tables || {}).map(([role, table]) => ({ role, ...(table || {}) }))
+}
+
+function telegramPreparationSteps(preparation) {
+  return preparation?.steps || preparation?.lastRun?.steps || preparation?.preparation?.steps || []
+}
+
+function telegramPreparationIssues(preparation) {
+  return [
+    ...(preparation?.blockers || []),
+    ...(preparation?.issues || []),
+    ...(preparation?.warnings || []),
+  ].map((issue) => typeof issue === 'string' ? issue : issue?.message || issue?.reason || JSON.stringify(issue))
+}
+
+function telegramPreparationCheck(value) {
+  if (value == null) return { status: 'unknown', label: '待探测' }
+  if (typeof value === 'boolean') return value
+    ? { status: 'ready', label: '已就绪' }
+    : { status: 'not_ready', label: '待修复' }
+  if (typeof value === 'string') {
+    const normalized = value.toLowerCase()
+    const ready = ['ready', 'valid', 'installed', 'present', 'ok', 'complete', 'completed'].includes(normalized)
+    return { status: ready ? 'ready' : normalized, label: value }
+  }
+  const ready = value.ready ?? value.valid ?? value.installed ?? value.exists ?? value.ok
+  return {
+    status: value.status || value.state || (ready === true ? 'ready' : ready === false ? 'not_ready' : 'unknown'),
+    label: value.label || value.message || (ready === true ? '已就绪' : ready === false ? '待修复' : '待探测'),
+  }
+}
+
 function TelegramPipelineCard({ pipeline, loading, error, onOpen, onRetry }) {
   const status = telegramPipelineStatus(pipeline)
   const tasks = pipeline?.tasks || []
@@ -456,6 +491,27 @@ function TelegramPipelineModal({
         </form>
       </Panel>
 
+      <TelegramSourcePreparationPanel
+        key={[
+          pipeline.connection?.host,
+          pipeline.connection?.port,
+          pipeline.connection?.database,
+          pipeline.connection?.username,
+        ].join(':')}
+        token={token}
+        pipeline={pipeline}
+        configured={configured}
+        connectionConsistent={connectionConsistent}
+        running={running}
+        disabled={Boolean(busyAction)}
+        onUnauthorized={onUnauthorized}
+        notify={notify}
+        onPrepared={() => {
+          onRefresh()
+          progress.refresh()
+        }}
+      />
+
       <Panel title="源端 Writer 增量合同" subtitle="Schema 探测无法证明并发提交顺序；每次启用都必须由管理员显式确认并留存审计记录">
         <ul className="mih-source-issues mih-source-issues--warning">
           <li>{pipeline.writerContract?.summary?.watermark || '任何新增、编辑、指标、媒体和软删除都必须推进统一 updated_at。'}</li>
@@ -525,6 +581,211 @@ function TelegramPipelineModal({
         </section>
       ) : null}
     </Modal>
+  )
+}
+
+function TelegramSourcePreparationPanel({
+  token, pipeline, configured, connectionConsistent, running, disabled, onUnauthorized, notify, onPrepared,
+}) {
+  const connectionFingerprint = [
+    pipeline.connection?.host,
+    pipeline.connection?.port,
+    pipeline.connection?.database,
+    pipeline.connection?.username,
+  ].join(':')
+  const load = useCallback(
+    () => configured
+      ? adminApi.telegramMonitorSourcePreparation(token)
+      : Promise.resolve({ status: 'needs_prepare', ready: false, tables: [], warnings: [] }),
+    [configured, connectionFingerprint, token],
+  )
+  const preparation = useRemoteData(load, onUnauthorized)
+  const [confirmation, setConfirmation] = useState('')
+  const [migrationUsername, setMigrationUsername] = useState('')
+  const [migrationPassword, setMigrationPassword] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [prepareError, setPrepareError] = useState(null)
+  const data = preparation.data || {}
+  const tables = telegramPreparationTables(data)
+  const steps = telegramPreparationSteps(data)
+  const issues = telegramPreparationIssues(data)
+  const ready = Boolean(data.ready)
+  const pausedAndDrained = pipeline.status === 'paused' && !running
+  const credentialsIncomplete = Boolean(migrationUsername.trim()) !== Boolean(migrationPassword)
+  const canPrepare = configured && connectionConsistent && pausedAndDrained && !disabled && !submitting
+  const displayedError = prepareError || preparation.error
+
+  const refreshPreparation = () => {
+    setPrepareError(null)
+    preparation.refresh()
+  }
+
+  const submit = async (event) => {
+    event.preventDefault()
+    if (!canPrepare || credentialsIncomplete || confirmation !== 'telegram-monitor') return
+    setSubmitting(true)
+    setPrepareError(null)
+    try {
+      const username = migrationUsername.trim()
+      const result = await adminApi.prepareTelegramMonitorSource(token, {
+        confirmPipelineKey: confirmation,
+        ...(username && migrationPassword ? { migrationCredentials: { username, password: migrationPassword } } : {}),
+      })
+      preparation.setData(result)
+      setConfirmation('')
+      notify?.('TG 源库合同已准备并重新核验；清洗任务仍保持暂停，请确认后再启用', 'success')
+      onPrepared?.()
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      setPrepareError(error)
+      notify?.(error.message, 'error')
+      preparation.refresh()
+    } finally {
+      setMigrationUsername('')
+      setMigrationPassword('')
+      setSubmitting(false)
+    }
+  }
+
+  const sourceLabel = data.source
+    ? `${data.source.database || pipeline.connection?.database || '源库'} · ${data.source.user || pipeline.connection?.username || '—'} · PostgreSQL ${data.source.serverVersion || '—'}`
+    : configured ? `${pipeline.connection?.database || '源库'} · ${pipeline.connection?.username || '—'}` : '请先保存共享连接'
+
+  return (
+    <Panel
+      title="一键准备 / 修复 TG 源库"
+      subtitle="可重复执行的源库迁移：补齐 updated_at，安装数据库触发器、游标索引和硬删除保护"
+      actions={<button className="qp-button qp-button--ghost" type="button" disabled={!configured || preparation.loading || submitting} onClick={refreshPreparation}><ArrowClockwise size={16} />重新探测</button>}
+    >
+      <div className="mih-telegram-prepare__summary">
+        <div>
+          <StatusBadge
+            status={ready ? 'ready' : data.status === 'needs_prepare' ? 'not_ready' : data.status || 'unknown'}
+            label={!configured ? '连接待配置' : ready ? '源库合同已就绪' : preparation.loading ? '正在探测' : '需要准备或修复'}
+          />
+          {data.applied ? <StatusBadge status="ready" label="本次已应用迁移" /> : null}
+          {data.migrationAccountUsed ? <StatusBadge status="ready" label="本次使用一次性迁移账号" /> : null}
+          <code>{sourceLabel}</code>
+          {data.contract?.generation ? <code>contract v{data.contract.installedVersion || data.contract.version} · {data.contract.generation.slice(0, 12)}…</code> : null}
+        </div>
+        <p>此操作会直接 <strong>ALTER 两个源表</strong>，由源 PostgreSQL 安装并维护 <code>updated_at</code> 触发器与 <code>(updated_at, id)</code> 游标索引，并通过数据库保护阻止 Hub 无法观察的硬删除。它不会开始同步、不会启用任务，也不会自动重置 Checkpoint。</p>
+      </div>
+
+      {data.permissions ? (
+        <div className="mih-telegram-prepare__permissions">
+          <StatusBadge status={data.permissions.canPrepare ? 'ready' : 'disabled'} label={data.permissions.canPrepare ? '已保存账号可执行迁移' : '已保存账号仅用于运行 / 探测'} />
+          <span>只读会话：{data.source?.readOnly ? '是' : '否'}</span>
+          <span>数据库 owner：{data.permissions.isDatabaseOwner ? '是' : '否'}</span>
+          <span>superuser：{data.permissions.isSuperuser ? '是' : '否'}</span>
+          {!data.permissions.canPrepare ? <small>执行时请使用下方一次性 source owner / DDL 账号；不会替换已保存的只读连接。</small> : null}
+        </div>
+      ) : null}
+
+      {data.requiresCheckpointReset ? (
+        <p className="mih-telegram-prepare__critical"><Warning size={17} aria-hidden="true" /><span>检测到源库身份或游标合同发生变化；准备完成后仍需人工核对，并在确需全量重放时单独执行“统一重置双表 Checkpoint”。本操作不会代替你重置。{data.checkpointResetReason ? <small>{data.checkpointResetReason}</small> : null}</span></p>
+      ) : null}
+
+      {issues.length > 0 ? (
+        <ul className="mih-source-issues mih-source-issues--warning">
+          {issues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
+        </ul>
+      ) : null}
+
+      {displayedError ? (
+        <div className="mih-telegram-prepare__error">
+          <ErrorState error={displayedError} onRetry={refreshPreparation} />
+          {displayedError.details ? <details className="mih-inline-details"><summary>安全错误详情</summary><pre className="mih-code-block">{JSON.stringify(displayedError.details, null, 2)}</pre></details> : null}
+        </div>
+      ) : null}
+
+      <div className="mih-telegram-prepare__tables">
+        {(tables.length ? tables : [
+          { role: 'chats', table: 'public.tg_monitor_chats' },
+          { role: 'messages', table: 'public.tg_monitor_messages' },
+        ]).map((table) => (
+          <TelegramPreparationTable key={table.role || table.table} table={table} contract={data.contract} />
+        ))}
+      </div>
+
+      {steps.length > 0 ? (
+        <div className="mih-telegram-prepare__steps">
+          <strong>最近探测 / 执行步骤</strong>
+          <ol>
+            {steps.map((step, index) => {
+              const value = typeof step === 'string' ? { message: step } : step
+              const stepStatus = value.status === 'applied' ? 'ready' : value.status === 'needed' ? 'not_ready' : value.status || 'unknown'
+              return (
+                <li key={value.key || `${value.message}-${index}`}>
+                  <StatusBadge status={stepStatus} label={value.status === 'applied' ? '已执行' : value.status === 'needed' ? '待执行' : undefined} />
+                  <span>{value.message || value.key || '未命名步骤'}</span>
+                </li>
+              )
+            })}
+          </ol>
+        </div>
+      ) : null}
+
+      <form className="mih-telegram-prepare__form" onSubmit={submit}>
+        <div className="mih-telegram-prepare__notice">
+          <Warning size={22} weight="duotone" aria-hidden="true" />
+          <div>
+            <strong>仅在任务已暂停且批次排空后执行</strong>
+            <p>如果已保存的 <code>mx_data</code> 是只读账号，请在下面临时输入 source owner / DDL 账号。临时账号只用于本次请求，不保存、不回填，也不会由接口返回；留空则使用已保存连接。准备成功后，运行期仍使用已保存的只读连接。</p>
+          </div>
+        </div>
+        <div className="mih-form mih-form--grid mih-telegram-prepare__credentials">
+          <Field label="一次性迁移用户名（可选）" hint="source owner / 具备 ALTER、CREATE、TRIGGER 权限">
+            <input className="qp-input" autoComplete="off" value={migrationUsername} onChange={(event) => setMigrationUsername(event.target.value)} />
+          </Field>
+          <Field label="一次性迁移密码（可选）" hint="请求结束立即从页面状态清除">
+            <input className="qp-input" type="password" autoComplete="new-password" value={migrationPassword} onChange={(event) => setMigrationPassword(event.target.value)} />
+          </Field>
+        </div>
+        {credentialsIncomplete ? <p className="mih-telegram-prepare__field-error">一次性迁移用户名和密码必须同时填写，或同时留空。</p> : null}
+        <div className="mih-telegram-prepare__confirm">
+          <Field label="输入业务标识以二次确认" hint={<code>telegram-monitor</code>}>
+            <input className="qp-input" value={confirmation} autoComplete="off" spellCheck="false" onChange={(event) => setConfirmation(event.target.value)} />
+          </Field>
+          <button className="qp-button qp-button--danger" type="submit" disabled={!canPrepare || credentialsIncomplete || confirmation !== 'telegram-monitor'}
+            title={!configured ? '先验证并保存共享连接' : !connectionConsistent ? '先统一两个固定任务的连接' : !pausedAndDrained ? '请先安全暂停并等待运行批次排空' : ''}>
+            {submitting ? '正在准备源库…' : ready ? '重新核验并修复源库' : '一次性准备源库'}
+          </button>
+        </div>
+      </form>
+    </Panel>
+  )
+}
+
+function TelegramPreparationTable({ table, contract }) {
+  const name = table.table || table.tableName || table.qualifiedName || (table.role === 'chats' ? 'public.tg_monitor_chats' : 'public.tg_monitor_messages')
+  const updatedAtType = String(table.updatedAt?.type || '').toLowerCase()
+  const updatedAtReady = table.updatedAt?.ready ?? Boolean(table.updatedAt?.exists && !table.updatedAt?.nullable && ['timestamptz', 'timestamp with time zone'].includes(updatedAtType))
+  const stableIdReady = Boolean(table.stableId?.ready)
+  const competingTriggers = table.trigger?.laterCompetingTriggers || []
+  const triggerReady = Boolean(table.trigger?.installed && table.trigger?.enabledAlways && competingTriggers.length === 0)
+  const indexReady = Boolean(table.cursorIndex?.ready)
+  const deleteGuardReady = Boolean(table.deleteGuard?.installed && table.deleteGuard?.enabledAlways)
+  const tableReady = Boolean(table.exists && updatedAtReady && stableIdReady && triggerReady && indexReady && deleteGuardReady)
+  const contractReady = tableReady && contract?.installedVersion === contract?.version
+  const checks = [
+    ['updated_at', { ready: updatedAtReady, label: table.updatedAt?.exists ? `${table.updatedAt.type || 'timestamp'} · ${table.updatedAt.nullable ? '允许 NULL' : 'NOT NULL'}` : '列待安装' }],
+    ['稳定 ID', { ready: stableIdReady, label: table.stableId?.exists ? table.stableId.ready ? 'NOT NULL · UNIQUE' : '存在但不满足唯一非空' : '列待核验' }],
+    ['强制触发器', { ready: triggerReady, label: table.trigger?.installed ? !table.trigger.enabledAlways ? '已安装 · 未启用 ALWAYS' : competingTriggers.length ? `存在后置竞争触发器：${competingTriggers.join('、')}` : '已安装 · ENABLE ALWAYS' : '触发器待安装' }],
+    ['游标索引', { ready: indexReady, label: table.cursorIndex?.exists ? table.cursorIndex.valid && table.cursorIndex.ready ? '存在 · VALID / READY' : '存在但不可用' : '索引待创建' }],
+    ['硬删除保护', { ready: deleteGuardReady, label: table.deleteGuard?.installed ? table.deleteGuard.enabledAlways ? '已安装 · ENABLE ALWAYS' : '已安装 · 未启用 ALWAYS' : '待安装' }],
+    ['表合同', { ready: contractReady, label: contractReady ? `TG source v${contract.installedVersion} 已满足` : '尚未满足' }],
+  ]
+
+  return (
+    <article className="mih-telegram-prepare-table">
+      <header><strong>{table.role === 'chats' ? '会话目录' : table.role === 'messages' ? '消息事实' : table.role || '固定输入表'}</strong><code>{name}</code></header>
+      <dl>
+        {checks.map(([label, value]) => {
+          const check = telegramPreparationCheck(value)
+          return <div key={label}><dt>{label}</dt><dd><StatusBadge status={check.status} label={check.label} /></dd></div>
+        })}
+      </dl>
+    </article>
   )
 }
 

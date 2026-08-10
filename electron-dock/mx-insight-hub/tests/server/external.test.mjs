@@ -429,7 +429,7 @@ test('schema and preview driver failures never expose source coordinates to admi
   }
 })
 
-test('password rotation preserves the checkpoint contract while coordinate changes require reset', async () => {
+test('password rotation preserves the checkpoint contract while source generation or coordinates require reset', async () => {
   const source = {
     id: 's1', sourceKey: 'direct', sourceKind: 'database', status: 'paused',
     datasetId: 'telegram.monitor.messages.v1', platform: 'telegram', objectType: 'message',
@@ -455,11 +455,103 @@ test('password rotation preserves the checkpoint contract while coordinate chang
   const rotated = await puller.assertCheckpointCompatible('direct')
   assert.equal(rotated.contractHash, initial.contractHash)
 
+  source.connection.sourceContractId = '0123456789abcdef0123456789abcdef'
+  await assert.rejects(
+    () => puller.assertCheckpointCompatible('direct'),
+    (error) => error?.status === 409 && error?.code === 'checkpoint_contract_mismatch',
+  )
+
+  delete source.connection.sourceContractId
   source.connection.host = 'replacement.internal'
   await assert.rejects(
     () => puller.assertCheckpointCompatible('direct'),
     (error) => error?.status === 409 && error?.code === 'checkpoint_contract_mismatch',
   )
+})
+
+test('a managed source rejects a non-empty legacy checkpoint without a contract hash', async () => {
+  const source = {
+    id: 's-managed-legacy', sourceKey: 'telegram-monitor-messages',
+    sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.messages.v1', platform: 'telegram', objectType: 'message',
+    connection: {
+      host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
+      password: 'private', sslMode: 'disable', schema: 'public', table: 'tg_monitor_messages',
+      cursorColumn: 'updated_at', idColumn: 'id',
+      sourceContractId: '0123456789abcdef0123456789abcdef',
+    },
+  }
+  const mapping = { version: 2, fieldMap: { externalId: { from: 'id' } } }
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+    },
+    queue: {
+      getCursor: async () => ({
+        position: { cursor: '2026-08-01T00:00:00.000Z', lastId: '42' },
+      }),
+    },
+    poolFactory: () => { throw new Error('source pool must not open before checkpoint validation') },
+  })
+
+  for (const operation of [
+    () => puller.assertCheckpointCompatible(source.sourceKey),
+    () => puller.pullBatch(source.sourceKey),
+  ]) {
+    await assert.rejects(
+      operation,
+      (error) => error?.status === 409 && error?.code === 'checkpoint_contract_mismatch',
+    )
+  }
+})
+
+test('a managed Telegram pull attests generation and rejects partition children', async () => {
+  const source = {
+    id: 's-managed', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.messages.v1', platform: 'telegram', objectType: 'message',
+    connection: {
+      host: 'database.internal', database: 'night_all', username: 'mx_data', password: 'private',
+      sslMode: 'disable', schema: 'public', table: 'tg_monitor_messages',
+      cursorColumn: 'updated_at', idColumn: 'id',
+      sourceContractId: '0123456789abcdef0123456789abcdef',
+    },
+  }
+  const mapping = { version: 2, fieldMap: { externalId: { from: 'id' } } }
+  let markerSql = ''
+  const pool = {
+    async query(sql) {
+      if (/telegram_monitor_contract/.test(sql)) {
+        markerSql = sql
+        return { rows: [{
+          version: 1, generation: source.connection.sourceContractId,
+          chats_match: true, messages_match: true,
+          chats_ordinary: false, messages_ordinary: true,
+        }] }
+      }
+      if (
+        /FROM pg_trigger/.test(sql)
+        || /FROM pg_index/.test(sql)
+        || /FROM pg_constraint/.test(sql)
+      ) return { rows: [] }
+      throw new Error(`unexpected query: ${sql}`)
+    },
+    async end() {},
+  }
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+    },
+    queue: { getCursor: async () => null },
+    poolFactory: () => pool,
+  })
+  await assert.rejects(
+    () => puller.pullBatch(source.sourceKey),
+    (error) => error?.status === 409 && error?.code === 'source_contract_mismatch',
+  )
+  assert.match(markerSql, /NOT c\.relispartition/)
+  assert.match(markerSql, /FROM pg_inherits i/)
 })
 
 test('database schema discovery returns value-free operational metadata and validates the pull index', async () => {
@@ -589,6 +681,8 @@ test('database schema discovery rejects nullable cursors and partial indexes as 
       if (sql.includes('FROM pg_indexes')) {
         return { rows: [{
           name: 'unsafe_partial_cursor',
+          valid: false,
+          ready: false,
           definition: 'CREATE UNIQUE INDEX unsafe_partial_cursor ON public.tg_monitor_chats (updated_at, id) WHERE updated_at IS NOT NULL',
         }] }
       }
@@ -612,6 +706,8 @@ test('database schema discovery rejects nullable cursors and partial indexes as 
   assert.ok(result.issues.includes('cursor column updated_at must be non-null'))
   assert.ok(result.issues.includes('no index begins with (updated_at, id)'))
   assert.ok(result.issues.includes('no unique index proves (updated_at, id) is a total order'))
+  assert.equal(result.indexes[0].valid, false)
+  assert.equal(result.indexes[0].ready, false)
 })
 
 test('database preview returns value-free shapes, never raw row content', async () => {
@@ -1472,6 +1568,27 @@ test('operator-action import failures complete the queue job without retrying or
     assert.equal(enqueued, false)
     assert.equal(marked, false)
   }
+})
+
+test('source contract drift marks its cursor failed so periodic scheduling cannot loop', async () => {
+  const marked = []
+  const error = new Error('contract drift')
+  error.code = 'source_contract_mismatch'
+  const result = await runExternalPullJob({
+    puller: {
+      pullBatch: async () => { throw error },
+      markSourceContractFailed: async (...args) => marked.push(args),
+    },
+    queue: { heartbeat: async () => {} },
+    payload: { sourceKey: 'telegram-monitor-messages', chunk: 0 },
+    job: { id: 7, attempts: 1, max_attempts: 5 },
+    logger: { log() {}, warn() {} },
+  })
+  assert.deepEqual(marked, [['telegram-monitor-messages', 'source_contract_mismatch']])
+  assert.deepEqual(result, {
+    pulled: 0, ingested: 0, changed: 0, rejected: 0,
+    done: true, failed: true, error: 'source_contract_mismatch',
+  })
 })
 
 test('a manual sync resumes the same running import after continuation enqueue exhaustion', async () => {

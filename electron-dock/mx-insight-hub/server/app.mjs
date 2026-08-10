@@ -197,6 +197,7 @@ export function createApp({
   backfillPlatforms = [],
   importer = null,
   databasePuller = null,
+  telegramSourcePreparer = null,
   agent = null,
   search = null,
   embedding = null,
@@ -205,7 +206,12 @@ export function createApp({
   staticRoot,
   logger = console,
 }) {
-  const telegramMonitorPipeline = new TelegramMonitorPipeline({ store, queue, databasePuller })
+  const telegramMonitorPipeline = new TelegramMonitorPipeline({
+    store,
+    queue,
+    databasePuller,
+    sourcePreparer: telegramSourcePreparer,
+  })
 
   /**
    * Resolve the caller of an administrative route.
@@ -638,6 +644,31 @@ export function createApp({
         requireSourceAdmin(principal)
         requireDatabasePuller()
         sendJson(response, 200, { data: await telegramMonitorPipeline.progress(), requestId })
+        return
+      }
+      if (
+        request.method === 'GET'
+        && pathname === '/internal/v1/admin/pipelines/telegram-monitor/source/prepare'
+      ) {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, {
+          data: await telegramMonitorPipeline.inspectSourcePreparation(),
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'POST'
+        && pathname === '/internal/v1/admin/pipelines/telegram-monitor/source/prepare'
+      ) {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        sendJson(response, 200, {
+          data: await telegramMonitorPipeline.prepareSource(body),
+          requestId,
+        })
         return
       }
       if (

@@ -134,10 +134,13 @@ with the [Telegram monitor ingestion
 runbook](docs/operations/telegram-monitor-ingestion.md). PostgreSQL connection
 fields are managed directly on each source by the Admin Token; they are stored
 in the Hub catalog and can change without a deployment. Catalog/database dumps
-therefore contain sensitive credentials and require restricted access. The registered sources
-remain paused until the source owner supplies the missing
-watermark/index/commit-order guarantees. The current messages table cannot
-safely track later edits/deletions with `message_at` or `collected_at`.
+therefore contain sensitive credentials and require restricted access. The
+Admin-token TG task now has an explicit, repeatable **prepare source** action
+that installs and verifies the missing source-side watermark triggers,
+hard-delete guards and cursor indexes using one-request DDL credentials; normal
+ingestion and deploys remain read-only. The task stays paused until preparation,
+schema probing and writer attestation pass. `message_at` and `collected_at`
+remain invalid substitutes for the unified source watermark.
 
 Start with [docs/README.md](docs/README.md) for architecture, security, operations, and roadmap decisions.
 
