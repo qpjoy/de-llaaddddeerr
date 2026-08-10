@@ -1,7 +1,7 @@
 import { EXTERNAL_PULL_QUEUE } from './sync-job.mjs'
 
 /** Schedule one incremental scan for every active foreign database source. */
-export async function scheduleActiveDatabaseSources({ store, queue, batchSize = 1_000 }) {
+export async function scheduleActiveDatabaseSources({ store, queue, batchSize = 1_000, now = new Date() }) {
   const sources = await store.listExternalSources()
   let enqueued = 0
   for (const source of sources) {
@@ -11,9 +11,12 @@ export async function scheduleActiveDatabaseSources({ store, queue, batchSize = 
     // operator to fix/probe and explicitly resume; automatic retries would
     // turn a deterministic mapping failure into an alert storm.
     if (cursor && cursor.status !== 'idle') continue
+    const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
+    const intervalMs = (source.syncIntervalSeconds ?? 60) * 1_000
+    if (updatedAt && now.getTime() - new Date(updatedAt).getTime() < intervalMs) continue
     const jobId = await queue.enqueue(
       EXTERNAL_PULL_QUEUE,
-      { sourceKey: source.sourceKey, batchSize, chunk: 0 },
+      { sourceKey: source.sourceKey, batchSize, trigger: 'schedule', chunk: 0 },
       { dedupeKey: `external-pull:${source.sourceKey}:0`, priority: 220 },
     )
     if (jobId != null) enqueued += 1

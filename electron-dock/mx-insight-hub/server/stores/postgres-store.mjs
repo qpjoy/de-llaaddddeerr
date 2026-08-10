@@ -558,27 +558,95 @@ export class PostgresStore {
    * `dataset_id`, not by physical schema, so external data never silently
    * merges into platform analytics while still living in one queryable model.
    */
-  async ingestExternalRecords({ datasetId, platform, records, importRunId, connectorId }) {
+  async ingestExternalRecords({
+    datasetId,
+    platform,
+    records,
+    importRunId,
+    sourceId = null,
+    connectorId,
+    batch = null,
+  }) {
     if (records.length === 0) return { ingested: 0, changed: 0 }
     const stream = `${platform}.external.v1`
     const client = await this.pool.connect()
     let changed = 0
+    let deleted = 0
+    let commitStarted = false
+    let committed = false
+    let releaseError = null
     try {
       await client.query('BEGIN')
+      if (importRunId) {
+        const runResult = await client.query(
+          `SELECT id, source_id, status
+             FROM ingest.import_runs
+            WHERE id = $1
+            FOR UPDATE`,
+          [importRunId],
+        )
+        const run = runResult.rows[0]
+        if (!run || run.status !== 'running' || (sourceId && run.source_id !== sourceId)) {
+          throw new AppError(
+            409,
+            'import_run_not_running',
+            'External records can only be written to the running import run that owns this source',
+          )
+        }
+      }
+
+      // A reclaimed worker must detect a committed page before touching
+      // canonical state. Locking the run row above serializes this check with
+      // another worker that is committing the same logical run.
+      if (importRunId && batch?.key) {
+        const existing = await client.query(
+          `SELECT batch_key, cursor_end, row_count, ingested_count,
+                  changed_count, deleted_count, rejected_count, status,
+                  page_fingerprint
+             FROM ingest.import_run_batches
+            WHERE import_run_id = $1 AND batch_key = $2`,
+          [importRunId, batch.key],
+        )
+        if (existing.rows[0]) {
+          const replay = existing.rows[0]
+          if (replay.status !== 'succeeded') {
+            throw new AppError(409, 'import_batch_failed', 'This import batch previously failed and must be reset')
+          }
+          commitStarted = true
+          await client.query('COMMIT')
+          committed = true
+          return {
+            ingested: Number(replay.ingested_count),
+            changed: Number(replay.changed_count),
+            deleted: Number(replay.deleted_count),
+            cursorEnd: replay.cursor_end,
+            rowCount: Number(replay.row_count),
+            replayed: true,
+            pageDrifted: Boolean(
+              replay.page_fingerprint
+              && batch.pageFingerprint
+              && replay.page_fingerprint !== batch.pageFingerprint,
+            ),
+          }
+        }
+      }
+
       for (const record of records) {
+        if (record.deletedAt != null) deleted += 1
         await client.query(
           `INSERT INTO ingest.source_objects
              (id, connector_id, stream_id, object_type, source_key,
-              payload_sha256, raw_payload, source_updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+              payload_sha256, raw_payload, source_updated_at, external_import_run_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            ON CONFLICT (connector_id, stream_id, object_type, source_key) DO UPDATE SET
              payload_sha256 = EXCLUDED.payload_sha256,
              raw_payload = EXCLUDED.raw_payload,
              source_updated_at = EXCLUDED.source_updated_at,
+             external_import_run_id = EXCLUDED.external_import_run_id,
              last_seen_at = now()`,
           [
             randomUUID(), connectorId, stream, record.objectType, record.externalId,
-            record.payloadSha256, record.rawItem, record.eventTime,
+            record.payloadSha256, record.rawItem, record.collectedAt, importRunId,
           ],
         )
 
@@ -588,9 +656,9 @@ export class PostgresStore {
               payload_sha256, content_type, url, title, body,
               author_external_id, author_name, event_time, collected_at,
               latitude, longitude, country_code, admin1_code, admin2_code,
-              stable_fields, extensions)
+              stable_fields, extensions, deleted_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                   $16, $17, $18, $19, $20, $21, $22)
+                   $16, $17, $18, $19, $20, $21, $22, $23)
            ON CONFLICT (dataset_id, platform, object_type, external_id) DO UPDATE SET
              payload_sha256 = EXCLUDED.payload_sha256,
              content_type = EXCLUDED.content_type,
@@ -608,6 +676,7 @@ export class PostgresStore {
              admin2_code = EXCLUDED.admin2_code,
              stable_fields = EXCLUDED.stable_fields,
              extensions = EXCLUDED.extensions,
+             deleted_at = EXCLUDED.deleted_at,
              last_seen_at = now(),
              current_revision = core.canonical_records.current_revision
                + (core.canonical_records.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256)::int,
@@ -620,17 +689,17 @@ export class PostgresStore {
             record.title, record.body, record.authorExternalId, record.authorName,
             record.eventTime, record.collectedAt, record.latitude, record.longitude,
             record.countryCode, record.admin1Code, record.admin2Code,
-            record.stableFields, record.extensions,
+            record.stableFields, record.extensions, record.deletedAt,
           ],
         )
         const { id, current_revision: revision, projection_revision: projection } = upserted.rows[0]
 
         const revisionInsert = await client.query(
           `INSERT INTO core.record_revisions
-             (record_id, revision, payload_sha256, normalized_payload, parser_version)
-           VALUES ($1, $2, $3, $4, $5)
+             (record_id, revision, payload_sha256, normalized_payload, parser_version, external_import_run_id)
+           VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (record_id, revision) DO NOTHING`,
-          [id, revision, record.payloadSha256, record.rawItem, record.parserVersion],
+          [id, revision, record.payloadSha256, record.rawItem, record.parserVersion, importRunId],
         )
         if (revisionInsert.rowCount > 0) changed += 1
 
@@ -639,27 +708,72 @@ export class PostgresStore {
         await client.query(
           `INSERT INTO outbox.projection_events
              (aggregate_type, aggregate_id, event_type, projection_revision, payload)
-           VALUES ('canonical_record', $1, 'upsert', $2, $3)
+           VALUES ('canonical_record', $1, $3, $2, $4)
            ON CONFLICT (aggregate_id, projection_revision) DO NOTHING`,
-          [id, projection, { datasetId, platform, objectType: record.objectType }],
+          [
+            id,
+            projection,
+            record.deletedAt ? 'delete' : 'upsert',
+            { datasetId, platform, objectType: record.objectType },
+          ],
+        )
+      }
+
+      if (importRunId && batch?.key) {
+        await client.query(
+          `INSERT INTO ingest.import_run_batches
+             (import_run_id, batch_key, cursor_start, cursor_end, row_count,
+              ingested_count, changed_count, deleted_count, rejected_count, status,
+              page_fingerprint)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 'succeeded', $9)`,
+          [
+            importRunId, batch.key, batch.cursorStart ?? null, batch.cursorEnd ?? null,
+            batch.rowCount ?? records.length, records.length, changed, deleted,
+            batch.pageFingerprint ?? null,
+          ],
         )
       }
 
       if (importRunId) {
-        await client.query(
+        const updated = await client.query(
           `UPDATE ingest.import_runs
-              SET ingested_count = ingested_count + $2
-            WHERE id = $1`,
-          [importRunId, records.length],
+              SET row_count = row_count + $2,
+                  ingested_count = ingested_count + $3,
+                  changed_count = changed_count + $4,
+                  deleted_count = deleted_count + $5
+            WHERE id = $1 AND status = 'running'
+            RETURNING id`,
+          [importRunId, batch?.rowCount ?? 0, records.length, changed, deleted],
         )
+        if (updated.rowCount === 0) {
+          throw new AppError(409, 'import_run_not_running', 'The import run stopped before this batch could commit')
+        }
       }
+      commitStarted = true
       await client.query('COMMIT')
-      return { ingested: records.length, changed }
+      committed = true
+      return {
+        ingested: records.length,
+        changed,
+        deleted,
+        cursorEnd: batch?.cursorEnd ?? null,
+        rowCount: batch?.rowCount ?? records.length,
+      }
     } catch (error) {
-      await client.query('ROLLBACK')
+      if (commitStarted && !committed) {
+        releaseError = error
+        const unknown = new AppError(
+          503,
+          'external_commit_outcome_unknown',
+          'The external batch commit outcome is unknown; retry the same run and batch',
+        )
+        unknown.cause = error
+        throw unknown
+      }
+      await client.query('ROLLBACK').catch(() => {})
       throw error
     } finally {
-      client.release()
+      client.release(releaseError)
     }
   }
 
@@ -683,7 +797,7 @@ export class PostgresStore {
       ? 'external_id = $4'
       : `(stable_fields #>> '{relations,chatId}') = $4`
     const { rows } = await this.pool.query(
-      `SELECT id, external_id, object_type, content_type, url, title, body,
+      `SELECT id, dataset_id, external_id, object_type, content_type, url, title, body,
               author_external_id, author_name, event_time, collected_at,
               stable_fields, current_revision, event_time AS sort_time
          FROM core.canonical_records
@@ -776,33 +890,190 @@ export class PostgresStore {
     }
   }
 
+  // ---- source providers (migration 011) ---------------------------------
+
+  async createSourceProvider({
+    providerKey, displayName, providerType = 'postgresql', config, encryptedSecret, health = null,
+  }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO catalog.source_providers
+         (id, provider_key, display_name, provider_type, config, encrypted_secret,
+          health_status, health_checked_at, health_error_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (provider_key) DO NOTHING
+       RETURNING id, provider_key, display_name, provider_type, config,
+                 true AS secret_configured, health_status, health_checked_at,
+                 health_error_code, created_at, updated_at`,
+      [
+        randomUUID(), providerKey, displayName, providerType, config, encryptedSecret,
+        health?.status ?? 'unknown', health?.checkedAt ?? null, health?.errorCode ?? null,
+      ],
+    )
+    if (!rows[0]) throw new AppError(409, 'provider_exists', `Provider key already exists: ${providerKey}`)
+    return sourceProvider(rows[0])
+  }
+
+  async listSourceProviders() {
+    const { rows } = await this.pool.query(
+      `SELECT id, provider_key, display_name, provider_type, config,
+              true AS secret_configured, health_status, health_checked_at,
+              health_error_code, created_at, updated_at
+         FROM catalog.source_providers
+        ORDER BY created_at DESC`,
+    )
+    return rows.map(sourceProvider)
+  }
+
+  async getSourceProvider(providerKey) {
+    const { rows } = await this.pool.query(
+      `SELECT id, provider_key, display_name, provider_type, config,
+              true AS secret_configured, health_status, health_checked_at,
+              health_error_code, created_at, updated_at
+         FROM catalog.source_providers
+        WHERE provider_key = $1`,
+      [providerKey],
+    )
+    return sourceProvider(rows[0])
+  }
+
+  // The encrypted envelope is available only through an explicitly internal
+  // method. Normal create/list/get/update results never carry it toward an API.
+  async getSourceProviderSecret(providerKey) {
+    const { rows } = await this.pool.query(
+      `SELECT id, provider_key, display_name, provider_type, config, encrypted_secret,
+              health_status, health_checked_at, health_error_code, created_at, updated_at
+         FROM catalog.source_providers
+        WHERE provider_key = $1`,
+      [providerKey],
+    )
+    return sourceProvider(rows[0], { includeSecret: true })
+  }
+
+  async updateSourceProvider(providerKey, patch) {
+    const has = (field) => Object.prototype.hasOwnProperty.call(patch, field)
+    const { rows } = await this.pool.query(
+      `UPDATE catalog.source_providers
+          SET display_name = CASE WHEN $2 THEN $3 ELSE display_name END,
+              config = CASE WHEN $4 THEN $5 ELSE config END,
+              encrypted_secret = CASE WHEN $6 THEN $7 ELSE encrypted_secret END,
+              health_status = CASE WHEN $8 THEN $9 ELSE health_status END,
+              health_checked_at = CASE WHEN $8 THEN $10 ELSE health_checked_at END,
+              health_error_code = CASE WHEN $8 THEN $11 ELSE health_error_code END,
+              updated_at = now()
+        WHERE provider_key = $1
+        RETURNING id, provider_key, display_name, provider_type, config,
+                  true AS secret_configured, health_status, health_checked_at,
+                  health_error_code, created_at, updated_at`,
+      [
+        providerKey,
+        has('displayName'), patch.displayName ?? null,
+        has('config'), patch.config ?? null,
+        has('encryptedSecret'), patch.encryptedSecret ?? null,
+        has('healthStatus'), patch.healthStatus ?? null,
+        patch.healthCheckedAt ?? null,
+        patch.healthErrorCode ?? null,
+      ],
+    )
+    if (!rows[0]) throw new AppError(404, 'provider_not_found', `Unknown source provider: ${providerKey}`)
+    return sourceProvider(rows[0])
+  }
+
+  async deleteSourceProvider(providerKey) {
+    let rows
+    try {
+      const result = await this.pool.query(
+        'DELETE FROM catalog.source_providers WHERE provider_key = $1 RETURNING provider_key',
+        [providerKey],
+      )
+      rows = result.rows
+    } catch (error) {
+      if (error?.code === '23503') {
+        throw new AppError(409, 'provider_in_use', `Source provider is still in use: ${providerKey}`)
+      }
+      throw error
+    }
+    if (!rows[0]) throw new AppError(404, 'provider_not_found', `Unknown source provider: ${providerKey}`)
+    return { providerKey: rows[0].provider_key }
+  }
+
+  async updateSourceProviderHealth(providerKey, { status, errorCode = null, checkedAt = new Date() }) {
+    const { rows } = await this.pool.query(
+      `UPDATE catalog.source_providers
+          SET health_status = $2,
+              health_checked_at = $3,
+              health_error_code = $4,
+              updated_at = now()
+        WHERE provider_key = $1
+        RETURNING id, provider_key, display_name, provider_type, config,
+                  true AS secret_configured, health_status, health_checked_at,
+                  health_error_code, created_at, updated_at`,
+      [providerKey, status, checkedAt, errorCode],
+    )
+    if (!rows[0]) throw new AppError(404, 'provider_not_found', `Unknown source provider: ${providerKey}`)
+    return sourceProvider(rows[0])
+  }
+
   // ---- external sources (migration 008) ----------------------------------
 
-  async createExternalSource({ sourceKey, displayName, sourceKind, datasetId, platform, objectType, status, connection }) {
+  async createExternalSource({
+    sourceKey,
+    displayName,
+    sourceKind,
+    datasetId,
+    platform,
+    objectType,
+    status,
+    connection,
+    providerId = null,
+    syncIntervalSeconds = 60,
+  }) {
     const { rows } = await this.pool.query(
-      `INSERT INTO catalog.external_sources
-         (id, source_key, display_name, source_kind, dataset_id, platform, object_type, status, connection)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (source_key) DO NOTHING
-       RETURNING *`,
+      `WITH inserted AS (
+         INSERT INTO catalog.external_sources
+           (id, source_key, display_name, source_kind, dataset_id, platform, object_type, status, connection,
+            provider_id, sync_interval_seconds)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (source_key) DO NOTHING
+         RETURNING *
+       )
+       SELECT inserted.*, p.provider_key
+         FROM inserted
+         LEFT JOIN catalog.source_providers p ON p.id = inserted.provider_id`,
       [
         randomUUID(), sourceKey, displayName, sourceKind, datasetId, platform,
-        objectType || 'record', status || 'active', connection || {},
+        objectType || 'record', status || 'active', connection || {}, providerId, syncIntervalSeconds,
       ],
     )
     if (!rows[0]) throw new AppError(409, 'source_exists', `Source key already exists: ${sourceKey}`)
     return externalSource(rows[0])
   }
 
-  async updateExternalSource(sourceKey, { status = null, connection = null }) {
+  async updateExternalSource(sourceKey, patch) {
+    const hasProvider = Object.prototype.hasOwnProperty.call(patch, 'providerId')
+    const hasSyncInterval = Object.prototype.hasOwnProperty.call(patch, 'syncIntervalSeconds')
     const { rows } = await this.pool.query(
-      `UPDATE catalog.external_sources
-          SET status = coalesce($2, status),
-              connection = coalesce($3, connection),
-              updated_at = now()
-        WHERE source_key = $1
-        RETURNING *`,
-      [sourceKey, status, connection],
+      `WITH changed AS (
+         UPDATE catalog.external_sources
+            SET status = coalesce($2, status),
+                connection = coalesce($3, connection),
+                provider_id = CASE WHEN $4 THEN $5 ELSE provider_id END,
+                sync_interval_seconds = CASE WHEN $6 THEN $7 ELSE sync_interval_seconds END,
+                updated_at = now()
+          WHERE source_key = $1
+          RETURNING *
+       )
+       SELECT changed.*, p.provider_key
+         FROM changed
+         LEFT JOIN catalog.source_providers p ON p.id = changed.provider_id`,
+      [
+        sourceKey,
+        patch.status ?? null,
+        patch.connection ?? null,
+        hasProvider,
+        patch.providerId ?? null,
+        hasSyncInterval,
+        patch.syncIntervalSeconds ?? null,
+      ],
     )
     if (!rows[0]) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
     return externalSource(rows[0])
@@ -810,7 +1081,10 @@ export class PostgresStore {
 
   async getExternalSource(sourceKey) {
     const { rows } = await this.pool.query(
-      'SELECT * FROM catalog.external_sources WHERE source_key = $1',
+      `SELECT s.*, p.provider_key
+         FROM catalog.external_sources s
+         LEFT JOIN catalog.source_providers p ON p.id = s.provider_id
+        WHERE s.source_key = $1`,
       [sourceKey],
     )
     return externalSource(rows[0])
@@ -818,9 +1092,65 @@ export class PostgresStore {
 
   async listExternalSources() {
     const { rows } = await this.pool.query(
-      'SELECT * FROM catalog.external_sources ORDER BY created_at DESC',
+      `SELECT s.*, p.provider_key
+         FROM catalog.external_sources s
+         LEFT JOIN catalog.source_providers p ON p.id = s.provider_id
+        ORDER BY s.created_at DESC`,
     )
     return rows.map(externalSource)
+  }
+
+  /**
+   * Serialize pull/reset operations for one source across all Hub workers.
+   *
+   * This is a session advisory lock rather than an in-memory mutex because the
+   * ingest deployment can be restarted or scaled.  try-lock semantics keep an
+   * operator reset responsive: it reports `source_busy` instead of waiting
+   * behind a long upstream query with no visible progress.
+   */
+  async withExternalSourceLock(sourceKey, operation) {
+    const client = await this.pool.connect()
+    const lockName = `mx-insight-hub:external-source:${sourceKey}`
+    let locked = false
+    let lockLost = false
+    const markLockLost = () => { lockLost = true }
+    client.once?.('error', markLockLost)
+    client.once?.('end', markLockLost)
+    const assertOwned = async () => {
+      if (lockLost) {
+        throw new AppError(409, 'source_lock_lost', `External source lock was lost: ${sourceKey}`)
+      }
+      try {
+        await client.query('SELECT 1')
+      } catch {
+        lockLost = true
+        throw new AppError(409, 'source_lock_lost', `External source lock was lost: ${sourceKey}`)
+      }
+      if (lockLost) {
+        throw new AppError(409, 'source_lock_lost', `External source lock was lost: ${sourceKey}`)
+      }
+    }
+    try {
+      const { rows } = await client.query(
+        'SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked',
+        [lockName],
+      )
+      locked = rows[0]?.locked === true
+      if (!locked) {
+        throw new AppError(409, 'source_busy', `External source is currently being synchronized: ${sourceKey}`)
+      }
+      return await operation(assertOwned)
+    } finally {
+      if (locked) {
+        await client.query(
+          'SELECT pg_advisory_unlock(hashtextextended($1, 0))',
+          [lockName],
+        ).catch(() => {})
+      }
+      client.off?.('error', markLockLost)
+      client.off?.('end', markLockLost)
+      client.release(lockLost ? new Error('external source lock session lost') : undefined)
+    }
   }
 
   /**
@@ -876,6 +1206,123 @@ export class PostgresStore {
     return sourceMapping(rows[0])
   }
 
+  async getImportRunState(id) {
+    const { rows } = await this.pool.query(
+      `SELECT id, source_id, status
+         FROM ingest.import_runs
+        WHERE id = $1`,
+      [id],
+    )
+    return rows[0] && {
+      id: rows[0].id,
+      sourceId: rows[0].source_id,
+      status: rows[0].status,
+    }
+  }
+
+  async getImportBatch(importRunId, batchKey) {
+    const { rows } = await this.pool.query(
+      `SELECT batch_key, cursor_start, cursor_end, row_count, ingested_count,
+              changed_count, deleted_count, rejected_count, status, error_code,
+              page_fingerprint
+         FROM ingest.import_run_batches
+        WHERE import_run_id = $1 AND batch_key = $2`,
+      [importRunId, batchKey],
+    )
+    return importRunBatch(rows[0])
+  }
+
+  /** Finish a database import and its durable cursor in one PostgreSQL commit. */
+  async finalizeExternalImportRun({
+    importRunId,
+    sourceId,
+    cursorId,
+    position,
+    status,
+    cursorStatus,
+    processedDelta = 0,
+    error = null,
+  }) {
+    return withPgTransaction(this.pool, async (client) => {
+      const updated = await client.query(
+        `UPDATE ingest.import_runs
+            SET status = $3,
+                cursor_end = coalesce($4, cursor_end),
+                last_error = $5,
+                finished_at = now()
+          WHERE id = $1 AND source_id = $2 AND status = 'running'
+          RETURNING *`,
+        [
+          importRunId,
+          sourceId,
+          status,
+          position,
+          error ? String(error).slice(0, 2_000) : null,
+        ],
+      )
+      if (updated.rowCount === 0) {
+        throw new AppError(
+          409,
+          'import_run_not_running',
+          'The import run is missing, terminal, or belongs to another source',
+        )
+      }
+      const cursor = await saveCursorInTransaction(client, cursorId, position, {
+        status: cursorStatus,
+        processedDelta,
+        error,
+      })
+      return { run: importRun(updated.rows[0]), cursor }
+    }, { outcomeUnknownCode: 'external_finalize_outcome_unknown' })
+  }
+
+  /** Keep a resumable run open when only its continuation hand-off is lost. */
+  async markExternalImportCursorFailed({ importRunId, sourceId, cursorId, position, error }) {
+    return withPgTransaction(this.pool, async (client) => {
+      const { rows } = await client.query(
+        `SELECT id
+           FROM ingest.import_runs
+          WHERE id = $1 AND source_id = $2 AND status = 'running'
+          FOR UPDATE`,
+        [importRunId, sourceId],
+      )
+      if (!rows[0]) {
+        throw new AppError(
+          409,
+          'import_run_not_running',
+          'The continuation import run is missing, terminal, or belongs to another source',
+        )
+      }
+      const cursor = await saveCursorInTransaction(client, cursorId, position, {
+        status: 'failed',
+        processedDelta: 0,
+        error,
+      })
+      return { importRunId, cursor }
+    }, { outcomeUnknownCode: 'external_cursor_failure_outcome_unknown' })
+  }
+
+  /** Reset the checkpoint and fail every orphaned running run atomically. */
+  async resetExternalImportCheckpoint({ sourceId, cursorId, position }) {
+    return withPgTransaction(this.pool, async (client) => {
+      const { rows } = await client.query(
+        `UPDATE ingest.import_runs
+            SET status = 'failed',
+                cursor_end = $2,
+                last_error = 'checkpoint_reset',
+                finished_at = now()
+          WHERE source_id = $1 AND run_key IS NOT NULL AND status = 'running'
+          RETURNING id`,
+        [sourceId, position],
+      )
+      const cursor = await saveCursorInTransaction(client, cursorId, position, {
+        status: 'idle',
+        error: null,
+      })
+      return { failedRunIds: rows.map((row) => row.id), cursor }
+    }, { outcomeUnknownCode: 'external_reset_outcome_unknown' })
+  }
+
   /**
    * Open an import run, or report that this exact input already succeeded.
    *
@@ -884,7 +1331,16 @@ export class PostgresStore {
    * it gives the operator a clear answer ("skipped, identical to run X")
    * instead of a run that reports 50,000 rows and zero changes.
    */
-  async startImportRun({ sourceId, mappingVersion, inputSha256, inputName, inputBytes }) {
+  async startImportRun({
+    sourceId,
+    mappingVersion,
+    inputSha256,
+    inputName,
+    inputBytes,
+    cursorStart = null,
+    trigger = inputSha256 ? 'file' : 'manual',
+    runKey = null,
+  }) {
     if (inputSha256) {
       const { rows } = await this.pool.query(
         `SELECT id, started_at FROM ingest.import_runs
@@ -894,22 +1350,121 @@ export class PostgresStore {
       )
       if (rows[0]) return { duplicateOf: rows[0].id, id: null }
     }
+    if (runKey) {
+      const { rows } = await this.pool.query(
+        `INSERT INTO ingest.import_runs
+           (id, source_id, mapping_version, input_sha256, input_name, input_bytes,
+            cursor_start, trigger, run_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (source_id, run_key)
+           WHERE run_key IS NOT NULL AND status = 'running'
+         DO UPDATE SET run_key = EXCLUDED.run_key
+         RETURNING id`,
+        [
+          randomUUID(), sourceId, mappingVersion, inputSha256, inputName, inputBytes,
+          cursorStart, trigger, runKey,
+        ],
+      )
+      return { id: rows[0].id, duplicateOf: null }
+    }
     const { rows } = await this.pool.query(
       `INSERT INTO ingest.import_runs
-         (id, source_id, mapping_version, input_sha256, input_name, input_bytes)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [randomUUID(), sourceId, mappingVersion, inputSha256, inputName, inputBytes],
+         (id, source_id, mapping_version, input_sha256, input_name, input_bytes, cursor_start, trigger)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [
+        randomUUID(), sourceId, mappingVersion, inputSha256, inputName, inputBytes,
+        cursorStart, trigger,
+      ],
     )
     return { id: rows[0].id, duplicateOf: null }
   }
 
-  async finishImportRun(id, { status, rowCount, rejectedCount, error }) {
-    await this.pool.query(
+  async finishImportRun(id, {
+    status,
+    rowCount,
+    rejectedCount,
+    changedCount,
+    deletedCount,
+    cursorEnd = null,
+    error,
+  }) {
+    const result = await this.pool.query(
       `UPDATE ingest.import_runs
-          SET status = $2, row_count = $3, rejected_count = $4, last_error = $5, finished_at = now()
-        WHERE id = $1`,
-      [id, status, rowCount, rejectedCount, error ? String(error).slice(0, 2_000) : null],
+          SET status = $2,
+              row_count = coalesce($3, row_count),
+              rejected_count = coalesce($4, rejected_count),
+              changed_count = coalesce($5, changed_count),
+              deleted_count = coalesce($6, deleted_count),
+              cursor_end = coalesce($7, cursor_end),
+              last_error = $8,
+              finished_at = now()
+        WHERE id = $1
+          AND (status = 'running' OR status = $2)`,
+      [
+        id, status, rowCount, rejectedCount, changedCount ?? null, deletedCount ?? null, cursorEnd,
+        error ? String(error).slice(0, 2_000) : null,
+      ],
     )
+    return { transitioned: result.rowCount !== 0 }
+  }
+
+  async recordRejectedImportBatch(importRunId, {
+    sourceId = null,
+    batchKey,
+    cursorStart = null,
+    rowCount,
+    rejections,
+    pageFingerprint = null,
+    errorCode = 'row_rejections_detected',
+  }) {
+    return withPgTransaction(this.pool, async (client) => {
+      const runResult = await client.query(
+        `SELECT id, source_id, status
+           FROM ingest.import_runs
+          WHERE id = $1
+          FOR UPDATE`,
+        [importRunId],
+      )
+      const run = runResult.rows[0]
+      if (!run || run.status !== 'running' || (sourceId && run.source_id !== sourceId)) {
+        throw new AppError(409, 'import_run_not_running', 'Rejected rows can only be attached to their running import run')
+      }
+      const inserted = await client.query(
+        `INSERT INTO ingest.import_run_batches
+           (import_run_id, batch_key, cursor_start, cursor_end, row_count,
+            ingested_count, changed_count, deleted_count, rejected_count, status,
+            error_code, page_fingerprint)
+         VALUES ($1, $2, $3, $3, $4, 0, 0, 0, $5, 'failed', $6, $7)
+         ON CONFLICT (import_run_id, batch_key) DO NOTHING
+         RETURNING batch_key`,
+        [
+          importRunId, batchKey, cursorStart, rowCount, rejections.length,
+          errorCode, pageFingerprint,
+        ],
+      )
+      if (inserted.rowCount === 0) return { recorded: false }
+      const stored = rejections.slice(0, 1_000)
+      if (stored.length > 0) {
+        const values = stored.flatMap((rejection) => [
+          importRunId, rejection.rowIndex, rejection.reason, rejection.raw,
+        ])
+        const tuples = stored
+          .map((_, index) => `($${index * 4 + 1}, $${index * 4 + 2}, $${index * 4 + 3}, $${index * 4 + 4})`)
+          .join(', ')
+        await client.query(
+          `INSERT INTO ingest.rejected_rows (import_run_id, row_index, reason, raw_row) VALUES ${tuples}`,
+          values,
+        )
+      }
+      await client.query(
+        `UPDATE ingest.import_runs
+            SET row_count = row_count + $2,
+                rejected_count = rejected_count + $3
+          WHERE id = $1 AND status = 'running'`,
+        [importRunId, rowCount, rejections.length],
+      )
+      return { recorded: true }
+    })
   }
 
   /**
@@ -937,9 +1492,11 @@ export class PostgresStore {
 
   async listImportRuns(sourceId, limit = 20) {
     const { rows } = await this.pool.query(
-      `SELECT * FROM ingest.import_runs
-        WHERE ($1::uuid IS NULL OR source_id = $1)
-        ORDER BY started_at DESC LIMIT $2`,
+      `SELECT r.*,
+              (SELECT count(*)::int FROM ingest.import_run_batches b WHERE b.import_run_id = r.id) AS batch_count
+         FROM ingest.import_runs r
+        WHERE ($1::uuid IS NULL OR r.source_id = $1)
+        ORDER BY r.started_at DESC LIMIT $2`,
       [sourceId || null, limit],
     )
     return rows.map(importRun)
@@ -1136,8 +1693,31 @@ function externalSource(row) {
     objectType: row.object_type,
     status: row.status,
     connection: row.connection,
+    providerId: row.provider_id ?? null,
+    providerKey: row.provider_key ?? null,
+    syncIntervalSeconds: row.sync_interval_seconds == null ? null : Number(row.sync_interval_seconds),
     createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
   }
+}
+
+function sourceProvider(row, { includeSecret = false } = {}) {
+  if (!row) return null
+  const provider = {
+    id: row.id,
+    providerKey: row.provider_key,
+    displayName: row.display_name,
+    providerType: row.provider_type,
+    config: row.config,
+    secretConfigured: row.secret_configured ?? Boolean(row.encrypted_secret),
+    healthStatus: row.health_status,
+    healthCheckedAt: iso(row.health_checked_at),
+    healthErrorCode: row.health_error_code,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  }
+  if (includeSecret) provider.encryptedSecret = row.encrypted_secret
+  return provider
 }
 
 function sourceMapping(row) {
@@ -1168,27 +1748,85 @@ function importRun(row) {
     rowCount: row.row_count,
     ingestedCount: row.ingested_count,
     rejectedCount: row.rejected_count,
+    changedCount: Number(row.changed_count ?? 0),
+    deletedCount: Number(row.deleted_count ?? 0),
+    batchCount: Number(row.batch_count ?? 0),
+    trigger: row.trigger ?? null,
+    cursorStart: row.cursor_start ?? null,
+    cursorEnd: row.cursor_end ?? null,
     lastError: row.last_error,
     startedAt: iso(row.started_at),
     finishedAt: iso(row.finished_at),
   }
 }
 
+function importRunBatch(row) {
+  return row && {
+    key: row.batch_key,
+    cursorStart: row.cursor_start ?? null,
+    cursorEnd: row.cursor_end ?? null,
+    rowCount: Number(row.row_count),
+    ingested: Number(row.ingested_count),
+    changed: Number(row.changed_count),
+    deleted: Number(row.deleted_count),
+    rejected: Number(row.rejected_count),
+    status: row.status,
+    errorCode: row.error_code ?? null,
+    pageFingerprint: row.page_fingerprint ?? null,
+  }
+}
+
+async function saveCursorInTransaction(client, id, position, {
+  status,
+  processedDelta = 0,
+  error = null,
+}) {
+  const { rows } = await client.query(
+    `INSERT INTO mxq.cursors
+       (id, position, status, processed_count, last_error, started_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, now(), now())
+     ON CONFLICT (id) DO UPDATE SET
+       position = EXCLUDED.position,
+       status = EXCLUDED.status,
+       processed_count = mxq.cursors.processed_count + $4,
+       last_error = EXCLUDED.last_error,
+       updated_at = now()
+     RETURNING *`,
+    [id, position, status, processedDelta, error],
+  )
+  return rows[0]
+}
+
 // Local transaction helper. mx-common exports an equivalent, but the store
 // receives a pool rather than the shared config and should not reach into the
 // package for one three-line function.
-async function withPgTransaction(pool, fn) {
+async function withPgTransaction(pool, fn, { outcomeUnknownCode = null } = {}) {
   const client = await pool.connect()
+  let commitStarted = false
+  let committed = false
+  let releaseError = null
   try {
     await client.query('BEGIN')
     const result = await fn(client)
+    commitStarted = true
     await client.query('COMMIT')
+    committed = true
     return result
   } catch (error) {
+    if (commitStarted && !committed && outcomeUnknownCode) {
+      releaseError = error
+      const unknown = new AppError(
+        503,
+        outcomeUnknownCode,
+        'The transaction outcome is unknown; retry the same operation',
+      )
+      unknown.cause = error
+      throw unknown
+    }
     await client.query('ROLLBACK').catch(() => {})
     throw error
   } finally {
-    client.release()
+    client.release(releaseError)
   }
 }
 

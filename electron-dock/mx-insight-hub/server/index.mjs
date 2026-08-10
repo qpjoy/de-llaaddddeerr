@@ -11,6 +11,7 @@ import { createSearch } from './search/index.mjs'
 import { EmbeddingPipeline } from './embedding/pipeline.mjs'
 import { ExternalImporter } from './ingest/external/importer.mjs'
 import { DatabaseSourcePuller } from './ingest/external/database-source.mjs'
+import { ProviderRegistry } from './ingest/external/provider-registry.mjs'
 import { createIdentityService } from './identity/index.mjs'
 import { MemoryStore } from './stores/memory-store.mjs'
 import { createPostgresStore } from './stores/postgres-store.mjs'
@@ -28,20 +29,17 @@ export async function createRuntime(config = loadConfig()) {
     ? createPool(config.common.postgres, { applicationName: 'mx-insight-hub-api' })
     : null
   const queue = pool ? createQueue({ ...config.common.queue, driver: 'postgres' }, { pool }) : null
-  const service = new HubService({
-    store,
-    adapter,
-    apiKeyPepper: config.apiKeyPepper,
-    reservationLeaseMs: config.reservationLeaseMs,
-  })
   // Constructed unconditionally; it reports `enabled: false` when no Launcher
   // URL is configured, so the admin-token path is unaffected either way.
   const identity = createIdentityService({ store, launcher: config.launcher })
   // External imports write through the canonical path, which only the
   // PostgreSQL store implements.
   const importer = config.storeDriver === 'postgres' ? new ExternalImporter({ store }) : null
+  const providerRegistry = config.storeDriver === 'postgres' && config.providerMasterKey
+    ? new ProviderRegistry({ store, masterKey: config.providerMasterKey })
+    : null
   const databasePuller = config.storeDriver === 'postgres'
-    ? new DatabaseSourcePuller({ store, queue })
+    ? new DatabaseSourcePuller({ store, queue, providerRegistry })
     : null
   // Reports `available: false` with no providers configured; every caller has a
   // deterministic fallback, so the agent is an accelerator, not a dependency.
@@ -49,6 +47,13 @@ export async function createRuntime(config = loadConfig()) {
   // Read-only here. The API serves retrieval queries and reports pipeline
   // status; the writing stages belong to the projector workload.
   const search = pool ? createSearch({ pool, config: config.common }) : null
+  const service = new HubService({
+    store,
+    adapter,
+    apiKeyPepper: config.apiKeyPepper,
+    reservationLeaseMs: config.reservationLeaseMs,
+    searchQueries: search?.queries ?? null,
+  })
   const embedding = pool && search
     ? new EmbeddingPipeline({
         pool,
@@ -66,6 +71,7 @@ export async function createRuntime(config = loadConfig()) {
     queue,
     importer,
     databasePuller,
+    providerRegistry,
     agent,
     search,
     embedding,
@@ -75,7 +81,10 @@ export async function createRuntime(config = loadConfig()) {
     listenerMode: config.listenerMode,
     staticRoot: config.listenerMode === 'public' ? null : resolve(projectRoot, 'dist/client'),
   })
-  return { app, store, adapter, service, identity, queue, pool, importer, databasePuller, agent, search, embedding }
+  return {
+    app, store, adapter, service, identity, queue, pool, importer,
+    providerRegistry, databasePuller, agent, search, embedding,
+  }
 }
 
 export async function start(config = loadConfig()) {

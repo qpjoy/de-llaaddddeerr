@@ -25,6 +25,43 @@ Server-controlled additions:
 
 Caller-controlled fields are currently limited to platform, query, page size and an opaque cursor when the adapter supports it. Provider names, provider endpoint IDs, debug metadata, upstream credentials, and internal accounting fields are stripped.
 
+### Telegram is a stored-data exception
+
+Telegram monitor history is not proxied through Night-All on every request.
+The two externally written `night_all.public.tg_monitor_*` tables enter Hub
+through a read-only managed PostgreSQL provider, then become canonical Hub
+records and an Elasticsearch projection:
+
+```text
+source PostgreSQL -> Hub canonical PostgreSQL -> ES projection
+                              |
+                              +-> history/search/entity APIs
+```
+
+`POST /api/v1/data/search` with `platform=telegram` and the richer
+`POST /api/v1/data/telegram/search` both search stored Hub data. Their response
+uses `night-all.data-search.v1` so existing clients retain the stable item and
+pagination envelope. Each item fixes `source.provider=null` and
+`source.endpointId=hub-canonical-search`; response metadata fixes
+`sourceProvider=mx-insight-hub` and `endpointId=hub-canonical-search`. These are
+logical serving-plane labels. PostgreSQL search degradation appears only in
+`warnings`, never as `meta.searchMode`. No physical source provider key, host,
+database/table name, collector account, credential or TGStat endpoint crosses
+the public boundary.
+
+Night-All's present Telegram implementation is TGStat live crawling. It remains
+useful for separately labelled live enrichment or fallback after its Telegram
+capability has passed readiness governance, but it does not provide the local
+history, fuzzy username/chat search, durable change checkpoint or tombstone
+semantics required by the Hub dataset. The current Hub Telegram search does not
+silently call TGStat when ES is down; it falls back to authoritative Hub
+PostgreSQL. An automatic historical-to-live fallback needs an explicit
+freshness/source-mode contract so live results are never represented as the
+same snapshot.
+
+The source table and continuous-sync safety gates are documented in the
+[Telegram ingestion runbook](../operations/telegram-monitor-ingestion.md).
+
 ## Idempotency and unknown outcomes
 
 Night-All’s current search facade is not guaranteed to be end-to-end idempotent: a search may call a paid provider and write audit/cache/observation records. Therefore:

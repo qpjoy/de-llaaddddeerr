@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-08-09.
+Last reviewed: 2026-08-10.
 
 This directory is the source of truth for MX Insight Hub. Night-All-specific implementation details remain in the Night-All repository; this project records only the stable dependency contract and ownership boundary.
 
@@ -15,9 +15,9 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | Internal K8s | One-click lifecycle and manifests implemented: independent Hub namespace, a dedicated Hub database/role provisioned inside shared `mx-common` PostgreSQL, migration Job, split public/Admin Deployments, projector/ingest workers, Services and NetworkPolicy. A retired Hub-local PostgreSQL is decommissioned only by an explicit destructive command. |
 | Launcher integration | Lifecycle delegation, offline-safe status summary and AppCenter entrypoint. |
 | Unified identity | Launcher opaque-token sign-in/introspection, Hub-local external identity bindings, multi-tenant memberships, per-tenant roles, explicit platform-admin scope mapping and the global Admin Token break-glass path are implemented. Direct JWT/JWKS validation is not used because Launcher tokens are opaque. |
-| Data ingest and serving plane | PostgreSQL source objects, canonical records/revisions, projection outbox, durable queues/cursors, file import, versioned mappings, PostgreSQL external pull and stored Telegram history serving are implemented. `/shared_dir` watcher, immutable object storage, freshness cache/fallback, CDC/delete propagation and generic non-PostgreSQL connectors are not. |
-| Telegram monitor sources | `telegram.monitor.chats.v1` and `telegram.monitor.messages.v1`, source schema/preview/sync Admin routes and strict public `GET` routes are implemented. Production sources are seeded paused with unapproved candidate mappings until the real external schema passes the runbook. These canonical datasets have no `tenant_id`; all consumers with the `telegram` grant read the same corpus, with tenant/consumer scoping only for identity, grant, quota and usage. |
-| Search/retrieval | Canonical projection outbox, projector, strict customer-safe Elasticsearch mapping, Admin retrieval/semantic-search path and shared `mx-common` search deployment are implemented. Elasticsearch remains a rebuildable projection and is not required for the PostgreSQL Telegram feed API. |
+| Data ingest and serving plane | PostgreSQL source providers with encrypted passwords, source objects, canonical records/revisions/tombstones, projection outbox, durable queues/cursors, direct file import, versioned mappings, PostgreSQL external pull and import-run evidence are implemented. `/shared_dir` watcher, immutable object/cloud storage adapters, a generic CDC connector and non-PostgreSQL database connectors are not. |
+| Telegram monitor sources | `telegram.monitor.chats.v1` and `telegram.monitor.messages.v1`, provider/source/schema/shape/sync/import-run Admin paths, strict history, Night-All-v1-compatible stored search and fuzzy entity search are implemented. The real source schema is recorded, but both sources remain paused until the source owner supplies a safe unified change watermark/index/commit-order contract—especially messages, where `collected_at` misses later edits/deletions. These canonical datasets have no `tenant_id`; all consumers with the `telegram` grant read the same corpus. |
+| Search/retrieval | Canonical projection outbox, projector, customer-safe Elasticsearch full-text/name fields, PostgreSQL degradation paths, Admin semantic search and shared `mx-common` search deployment are implemented. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
 | Private/public DNS routes | Deliberately not auto-created. They require route/TLS review and a deployed public Service. |
 | Billing, BI and Data Agent | Designed as later phases; the MVP has mutable request/usage evidence, not an append-only billing ledger or invoice engine. |
 | Backup/PITR and ELK/SLO | Target runbooks are documented but automation/exporters are not implemented yet; these remain production release gates. |
@@ -54,3 +54,4 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 - [ADR-0004: federated identity and Hub-local product authorization](adr/0004-federated-identity-and-product-authorization.md)
 - [ADR-0005: authoritative data and rebuildable search projections](adr/0005-authoritative-data-and-search-projections.md)
 - [ADR-0006: idempotent ingestion and independent checkpoints](adr/0006-idempotent-ingestion-and-checkpoints.md)
+- [ADR-0007: managed source providers and change watermarks](adr/0007-managed-source-providers-and-change-watermarks.md)

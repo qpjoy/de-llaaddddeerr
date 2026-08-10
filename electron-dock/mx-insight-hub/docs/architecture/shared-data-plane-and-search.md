@@ -1,6 +1,8 @@
 # 共享数据面、搜索投影与后续演进
 
-状态：已实现 —— 共享数据面归并（§4）、ES 投影链路（§1）、联邦身份 P6（§3）。P3–P5 为设计，未实现（§2）。
+状态：已实现 —— 共享数据面归并（§4）、content/chunk current-state ES
+投影（§1）、P3 durable landing、P4 文件/PostgreSQL 接入、P5 Agent/embedding
+与联邦身份 P6。未知结构自动分类、云/对象存储 adapter 等剩余边界会明确标为未来。
 
 本文承接 [ADR-0005](../adr/0005-authoritative-data-and-search-projections.md)（PostgreSQL 权威 + 可重建投影）与 [ADR-0006](../adr/0006-idempotent-ingestion-and-checkpoints.md)（幂等接入与独立 checkpoint），记录把 Elasticsearch 真正接进来时做的决定，以及尚未落地的部分。
 
@@ -14,7 +16,10 @@ flowchart LR
   OB --> PJ["mx-insight-hub-projector\n（独立 Deployment）"]
   PJ --> SEG["mx-common segmenter\nHanLP / 内置回退"]
   SEG --> PJ
-  PJ --> ES["mx-common Elasticsearch\nmx-insight-hub-content-v1"]
+  PJ --> ES1["Elasticsearch current state\ncontent-v2-current"]
+  PG --> CH["record_chunks + durable chunk deletes"]
+  CH --> EP["embedding/delete loop"]
+  EP --> ES2["Elasticsearch current state\nchunk-v1-current"]
   API -. "ES 不可用时降级" .-> PG
 ```
 
@@ -25,7 +30,7 @@ flowchart LR
 | 文档投影与脱敏 | `server/search/document.mjs` |
 | outbox 消费者 | `server/search/projector.mjs` |
 | 读路径与 PG 降级 | `server/search/queries.mjs` |
-| 表结构 | `migrations/006_search_projection.sql` |
+| 表结构 | `migrations/006_search_projection.sql`、`013_chunk_projection_deletions.sql` |
 
 ### 1.1 一次 deploy 起全部
 
@@ -38,19 +43,35 @@ flowchart LR
 
 搜索不可用时 projector 会被缩容到 0 而不是留着 crash-loop——它在没有 `MX_COMMON_ELASTICSEARCH_URL` 时会 `exit(2)`。此时 outbox 事件正常堆积，等 projector 起来后一次性排空，这正是 outbox 的用途。
 
-### 1.2 三层索引命名
+### 1.2 多索引 current-state 命名
 
 ```
-读别名   mx-insight-hub-content              查询永远只用这个
-写别名   mx-insight-hub-content-v1           ILM rollover 目标，一个 schema 版本一个
-后备索引 mx-insight-hub-content-v1-000001    ILM 实际滚动的对象
+全文读别名     mx-insight-hub-content
+兼容写别名     mx-insight-hub-content-v2
+当前全文索引   mx-insight-hub-content-v2-current
+
+语义读别名     mx-insight-hub-chunk
+兼容写别名     mx-insight-hub-chunk-v1
+当前语义索引   mx-insight-hub-chunk-v1-current
 ```
 
-不兼容的 mapping 变更 bump schema 版本，在同一个读别名后面产生第二个写别名。迁移期间查询不中断，旧版本在 reindex 验证通过后才退役。
+这两个投影都表示**当前状态**，不能使用 ILM rollover：同一 `_id` 若残留在多个
+backing index，更新/删除写 alias 只能改其中一个，旧内容仍会被 read alias 命中。
+启动 reconcile 在 PG advisory lock 下创建/清理唯一 `*-current`，从 PG 当前
+canonical/chunk 全量扫一遍，原子切 read/所有兼容 write alias，再扫第二遍关闭
+并发写窗口。不兼容 mapping 变更 bump schema version；旧 alias 中可见的副本按
+各自 revision 上限清除，不能让多代索引共同承担 current truth。
 
 ### 1.3 乱序与重投递
 
-bulk 写入使用 `version_type: external`，版本号取 `projection_revision`。ES 拒绝版本不大于当前值的写入，所以迟到的事件永远无法覆盖更新的内容。**409 version_conflict 被当作投递成功**——它意味着索引里已经是同版本或更新的内容，崩溃后重投递不应该消耗事件的重试预算。
+projector 把同一批里同 aggregate 的事件聚合为一次操作，并重新读取 PostgreSQL
+当前真相：当前行缺失/有 `deleted_at` 就发 delete，当前行 active 就发 index。
+两种操作都采用 ES 外部版本控制，版本号取当前 `projection_revision`（硬删除时
+取已认领事件的最高版本）；active index 使用 `external`，可幂等重试的 delete
+使用 `external_gte`。ES 拒绝旧版本写入，所以迟到 upsert 不会复活 tombstone，
+迟到 delete 也不会覆盖后来恢复的内容。**409 version_conflict 被当作投递成功**
+——它意味着索引里已经是同版本或更新状态；同 aggregate 的全部已认领事件
+一起标记 delivered。
 
 ### 1.4 崩溃与故障语义
 
@@ -59,23 +80,58 @@ bulk 写入使用 `version_type: external`，版本号取 `projection_revision`�
 | projector pod 被 rollout/OOM 杀掉 | 租约过期，下一轮 sweep 把事件退回 `pending`，自动续投 |
 | ES 整体不可达 | 整批事件原样退回并回滚 attempts 计数，指数退避重试。长时间宕机不会把健康积压打成死信 |
 | 单条文档被 ES 拒绝 | 只有该事件计入失败，超过 5 次进 `dead` 并保留证据 |
-| canonical 行已不存在 | 直接进 `dead`，不空转重试 |
+| canonical 行已不存在或已 tombstone | 按 PostgreSQL 当前真相发 externally-versioned delete；同 aggregate 已认领事件共同完成 |
+| record 缩短、chunker 变化或 canonical tombstone | PG 事务先登记旧 chunk document ID，再删/换 authoritative chunk；embedding loop 先投递 delete，后生成/投递新 chunk |
+| embedding provider 不可用 | 新向量暂停；durable chunk delete 仍继续，已删内容不会因模型故障留在语义检索 |
 | HanLP 不可达 | 回退分词器接管，入库继续，质量降级 |
-| ES 宕机时用户查询 | `queries.mjs` 走 PG trigram 路径，响应里 `mode: "postgres"` 明示这是降级结果 |
+| ES 宕机时用户查询 | `queries.mjs` 走 PG trigram 路径；内部/entity 结果可带 `mode: "postgres"`，Night-All-v1 Telegram wrapper 只在 `warnings` 加 `search_projection_degraded`，不添加 `meta.searchMode` |
 
-### 1.5 模糊搜索用户名
+### 1.5 chunk 删除与可重建性
+
+`core.record_chunks` 是语义切片/向量的 PG 权威集合；ES chunk index 只是第二个
+查询投影。内容缩短、chunker version 改变、正文低于阈值或 canonical tombstone
+时，同一 PG 事务先把将消失的确定性文档 ID 写入
+`core.chunk_projection_deletes`，再删除旧 chunk。delete queue 以
+`source_revision` 幂等更新，并在 ES externally-versioned delete 成功/409 后才
+标记 `projected_at`。因此 worker 崩溃可续投，模型 provider 故障也不阻塞删除。
+
+启动时 content 从 `core.canonical_records` 重建；chunk 从仍属于当前 revision、
+已有 vector 的 `core.record_chunks` 重建。两者都使用两遍 PG current snapshot +
+alias 原子切换，而不是依赖 ES 旧索引或快照成为唯一真相。
+
+### 1.6 模糊搜索用户名
 
 `authorName` 是一个四子字段的复合字段：`keyword`（精确，权重最高）、`prefix`（edge_ngram，输入即匹配）、`bigram`（CJK 双字，任意位置子串）、以及分词后的主字段。查询用 `bool.should` 并行打分，**不用 `wildcard` 也不用 `fuzzy`**——两者都要扫词典且随语料规模劣化，而且编辑距离对中文基本没有意义。
 
 PG 侧同时建了 `pg_trgm` GIN 索引，`similarity()` 提供排序而不只是过滤，所以降级路径是一条真实的查询计划，不是占位符。
 
-## 2. 未实现（P3–P5）
+### 1.7 Telegram 搜索分页
 
-以下已定方向但尚未落地，按依赖顺序排列。
+Night-All-v1 Telegram 搜索返回的 `nextCursor` 是最长 8,192 字符的 v2
+HMAC 不透明游标，签名绑定规范化后的 query、scope、过滤条件、match mode 与
+page size；调用方不能解码、拼装或在翻页时改变这些输入。`pageIndex` 只是根据已见
+条数给出的兼容字段，不代表底层用 OFFSET。
+
+ES 首页打开 PIT，每次翻页把 keep-alive 续到 2 分钟，按
+`_score DESC, eventTime DESC, id DESC` 用 `search_after` 前进。每页取
+`size + 1` 判定 `hasMore`，不依赖 `total`，所以不会在 10,000 命中窗口停住。
+PIT 保证这一轮 ES 翻页看到固定快照；最后一页主动关闭，异常遗留由 TTL 回收。
+
+首屏 ES 不可用时才可选择 PG，并返回 `search_projection_degraded`。PG 按
+`event_time DESC NULLS LAST, id DESC` 做 NULL-aware keyset，不用 OFFSET。
+模式写入游标后保持固定：PG 游标继续走 PG；已有 ES 游标暂时无法服务时返回
+`503 search_cursor_unavailable` 并要求原游标重试，绝不静默降级；PIT 已过期或
+不存在则返回 `410 search_cursor_expired`，调用方必须从无游标第一页重新开始。
+
+## 2. P3–P5 落地与剩余边界
+
+以下保留最初分期，同时把已经落地和仍属未来的部分分开。
 
 ### P3 — 写路径异步化与 Night-All 回填
 
-当前 `hub-service.mjs` 里的 ingest 是同步 best-effort：失败只记日志，会留下静默的数据空洞。目标形态：
+非 Telegram Night-All 搜索已经用同一 PG 事务完成 request commit 与 ingest job
+入队，worker 可恢复地规范化；不再是同步 best-effort。下面的“按差异自动送 Agent
+分类”仍是未来分类策略，不应误写成已上线：
 
 1. 上游返回的数据结构与预存契约**一致** → 直接返回，PG 与 ES 全部交给队列；
 2. **部分出入** → 入队并标记 `needs_classification`，由 Agent 处理后入库；
@@ -87,7 +143,7 @@ Night-All 回填：Night-All 侧的 `source_social_{platform}_contents` 已有 `
 
 优先覆盖 `xiaohongshu` / `douyin` / `twitter` 三个平台，三者的 normalizer hook 已存在于 `server/ingest/normalizers.mjs`。
 
-### P4 — 外部数据接入（xlsx / text / 异构库）
+### P4 — 外部数据接入（已实现基线，范围见 §9）
 
 表结构差异用**两条腿**而不是二选一：
 
@@ -95,15 +151,17 @@ Night-All 回填：Night-All 侧的 `source_social_{platform}_contents` 已有 `
 - 规范列由 migration 向前兼容地扩展，**不做宽表预留冗余列**。预留列会退化成一堆语义不明的 `col_1..col_20`，而 `core.canonical_records.extensions`（jsonb）已经承接了未映射字段，需要时再提升为正式列并回填。
 - 每次 deploy 自动 migrate 已经是现状（`20-migration-job.yaml`），迁移文件不可变，改动只能新增。
 
-### P5 — 中心 Agent
+### P5 — 中心 Agent（已实现基线，范围见 §10）
 
-一个 Hub 内的 Agent 服务，配置三方 base URL + API key（OpenAI 兼容），职责限定为三件事：
+Hub 内 Agent 已支持有序 OpenAI-compatible provider 链，职责限定为三件事：
 
 1. **智能 mapping**：新数据源字段 → 既有 canonical 列的映射建议。产出是**建议**，落库前需要一次显式确认，且映射本身要版本化存表——让 LLM 直接决定 schema 会让数据模型变得不可复现。
 2. **接口返回数据的清洗与分类**：P3 中第 2、3 类数据的处理者。
 3. **embedding 生成**：填充 `core.record_chunks` 与 ES `chunk` 索引。
 
-`MX_INSIGHT_EMBEDDING_DIMENSIONS` / `MX_INSIGHT_EMBEDDING_MODEL` 与 chunk 索引已经就位，只缺 Agent 本身。
+`MX_INSIGHT_EMBEDDING_DIMENSIONS`、embedding provider 链、PG chunk/vector 与
+独立 ES chunk current-state 索引已经落地。无模型时 mapping 有确定性 fallback，
+embedding 暂停，但 chunk tombstone/delete 仍运行。
 
 一个必须先确认的现实问题：本次样本里 XHS 的 `text` 是截断摘要（`"希望可以帮到你～ #大模型 #agent…"`），正文主要在图片中。只对 title+text 做 embedding，RAG 召回质量不会好。要么先补 OCR/详情抓取，要么把 RAG 范围限定为「结构化召回 + LLM 归纳」。
 
@@ -298,8 +356,10 @@ PostgreSQL；生产 schema、水位、索引和删除语义必须逐来源验证
 ```bash
 # 1. 注册源
 curl -X POST .../internal/v1/admin/sources -d '{"sourceKey":"weekly-report","displayName":"周报"}'
-# 2. 预览：拿到列、行数、推断映射（带 agent 建议）、前 5 行映射结果
+# 2. 预览：默认仅本地推断；显式 agent=true 才请求 Agent
 curl -X POST '.../internal/v1/admin/sources/weekly-report/preview?filename=r.xlsx' --data-binary @r.xlsx
+# 可选 Agent 只接收列名，sampleRows 固定为空
+curl -X POST '.../internal/v1/admin/sources/weekly-report/preview?filename=r.xlsx&agent=true' --data-binary @r.xlsx
 # 3. 提交映射（创建时未批准）
 curl -X POST .../internal/v1/admin/sources/weekly-report/mappings -d '{"fieldMap":{...}}'
 # 4. 批准
@@ -312,19 +372,31 @@ curl -X POST '.../internal/v1/admin/sources/weekly-report/import?filename=r.xlsx
 
 - **上传用裸 body + `filename` query，不用 multipart**。multipart 需要为攻击者可控输入再写一个解析器（boundary、header 注入、part 数耗尽），而这条路径已经在接收不可信表格了。裸 body 传递同样的信息，且没有解析器。
 - **没有批准的映射不能导入**，也不会回退到推断。推断是给人看的起点，不是决定数据怎么存的静默默认值。
+- **preview 默认完全本地。** 只有显式 `agent=true` 才调用模型，而且只发送
+  `columns`，`sampleRows` 固定为空；文件值/样例行不会离开 Hub。响应以
+  `agentDataScope=column_names_only` 记录这一边界。
 - **文件级内容哈希去重**：字节相同且已成功导入过 → 直接报 `skipped, duplicateOf`，而不是重跑一遍报告"0 changed"（后者读起来像 bug）。
 - **被拒绝的行是证据**，进 `ingest.rejected_rows` 并带原因。这里的文件上传
   importer 在拒绝率 >10% 时打 warning；这不是数据库 pull 的容错阈值。数据库
   pull 只要有一行 rejected 就整批失败、不写 canonical、不推进 cursor，避免永久
   越过坏行。
-- **异构库拉取只支持 PostgreSQL**。通用"任意数据库"意味着每个引擎打包一个驱动，并为每种方言的排序和类型转换规则重新实现游标语义。真出现 MySQL 源时，它该有自己的模块和自己的游标测试。连接以 `default_transaction_read_only=on` 打开，**DSN 存的是环境变量名而非 DSN 本身**（数据库行里的密码就是每份备份里的密码），表名/列名走严格标识符白名单——标识符不能参数化，只能校验。
+- **异构库拉取只支持 PostgreSQL**。通用"任意数据库"意味着每个引擎打包一个驱动，并为每种方言的排序和类型转换规则重新实现游标语义。真出现 MySQL 源时，它该有自己的模块和自己的游标测试。新连接通过 Admin source-provider 注册：host/port/database/username/SSL 模式按白名单保存，password 用平台 master key 做 AES-256-GCM 加密且不回显；源记录只引用 `provider_id`。旧 `dsnEnv` 仅兼容历史部署。所有连接以 `default_transaction_read_only=on` 打开，表名/列名走严格标识符白名单——标识符不能参数化，只能校验。
 - 数据库源已提供 `GET .../schema`、Admin-only `GET .../preview` 和
   `GET|POST .../sync`。`preview` 上限 3 行，只返回 type/null/JSON serialized
   length 的 value-free shape，不要求先批准 mapping；同步采用持久
   `(timestamp, physical id)` 游标和分块续作。`batchSize` 是每批上限，不是
   总量 canary，不能用小值假装只同步几行。ingest worker 周期调度 active 且
   cursor 缺失/idle 的数据库源；running/failed 不自动重复，failed 修复后由运维
-  显式 `POST .../sync` 恢复。
+  显式 `POST .../sync` 恢复。每次 import run 记录 row/ingested/rejected/
+  changed/deleted、cursor start/end 和安全错误码；映射出的 tombstone 会写
+  `deleted_at`，projector 按 PG 当前状态投递 externally-versioned delete，公开
+  读取统一排除。pull/reset 由按 source 的 PG session advisory try-lock 串行；
+  冲突立即返回 `409 source_busy`。active run ID 在入库前进入 checkpoint，稳定
+  `run_key` + batch key 使 COMMIT 后、cursor ack 前崩溃可续跑同一 run 且不重复计数。
+  canonical batch 事务先查 batch evidence 再写；run 终态和 cursor 原子提交。
+  COMMIT 结果未知时只能重试同一 run/batch/操作，不能先 reset。暂停在当前批次
+  checkpoint 边界 drain；连接/映射/再激活在 cursor running 时返回
+  `source_draining`。
 
 ## 10. P5：中心 Agent（已实现）
 

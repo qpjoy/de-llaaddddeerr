@@ -1,420 +1,595 @@
 # Telegram monitor PostgreSQL ingestion
 
-Status: implemented connector and serving path; production activation is
-blocked until the real source schema and watermark contract pass this runbook.
+Last verified against the source metadata: 2026-08-10.
 
-This runbook covers the two tables written by an independent server-side
-program:
+This runbook connects the independently written tables below to MX Insight Hub:
 
 ```text
 night_all.public.tg_monitor_chats
 night_all.public.tg_monitor_messages
 ```
 
-At the time this path was added, those tables were not defined by the Night-All
-repository migrations or the available local database snapshot. Their names
-are known; their columns, types, constraints, update behavior, delete behavior
-and production indexes are not Hub-owned facts. Migration
-`010_tg_monitor_sources.sql` therefore registers both sources as **paused** and
-adds only **unapproved inferred mappings**. A candidate alias in that migration
-is a review aid, never evidence that the production column exists.
+The source is reachable and its shape is now known, but **known schema is not a
+safe incremental-change contract**. Keep both registered sources paused until
+the source-owner gates in §5 are complete. In particular, do not configure
+`message_at` or `collected_at` as a convenient substitute for a change
+watermark: doing so permanently skips later edits and deletions.
 
-## 1. Runtime boundary
+## 1. Ownership and serving path
 
 ```text
-external collector/writer(s) -> night_all public tables
-                       |
-                       | read-only PostgreSQL session
-                       v
-Hub external-pull worker -> source_objects -> canonical_records/revisions
-                                             |
-                                             v
-                         GET /api/v1/data/telegram/{chats|messages}
+collector/writer -> night_all PostgreSQL (authoritative source)
+                              |
+                              | read-only provider connection
+                              v
+Hub ingest -> source objects -> canonical PostgreSQL -> projection outbox
+                                      |                    |
+                                      |                    v
+                                      |              Elasticsearch
+                                      v
+                     history/search/entity public APIs
 ```
 
-- Hub never writes these source tables; the existing external program(s) retain
-  writer ownership. The number of writers and their transaction contract must
-  be verified rather than inferred here.
-- Hub stores only the environment-variable **name**
-  `MX_INSIGHT_TG_MONITOR_DATABASE_URL`; a DSN never enters the catalog or an
-  Admin response.
-- The connector supports PostgreSQL only and opens every source session with
-  `default_transaction_read_only=on`.
-- Source management, schema, preview and sync endpoints require a Hub platform
-  administrator. A tenant owner cannot register or inspect a global source.
-- The public route reads Hub PostgreSQL. It does not expose a database route or
-  query the source database on behalf of each caller.
+- The collector remains the only writer of the two source tables. Hub sessions
+  set `default_transaction_read_only=on` and never repair source data or create
+  source indexes.
+- Hub PostgreSQL is authoritative for the data Hub has accepted. Canonical
+  identity, revisions, tombstones, mapping version, import evidence and durable
+  checkpoints live there.
+- Elasticsearch is a rebuildable full-text/fuzzy-search projection. An ES
+  outage degrades search to PostgreSQL; it must not stop ingestion or the
+  keyset-paginated history API.
+- Night-All's current Telegram/TGStat path is useful for live enrichment or a
+  separately labelled fallback. It is not a substitute for historical local
+  search, username lookup, durable checkpointing or tombstone propagation.
+- Public responses may expose logical lineage such as `datasetId` and
+  `origin=hub-direct`. They never expose the source host, database, table,
+  provider key, encrypted password, collector account, raw row or Night-All
+  endpoint/provider identifiers.
 
-## 2. Create the least-privilege source credential
+The fixed Telegram canonical datasets do not contain `tenant_id`. Every
+consumer granted `telegram` currently sees the same corpus; tenant boundaries
+still protect API-key ownership, grants, policy, quota and usage. Stop and add a
+versioned row-scope model before different tenants require different Telegram
+subsets.
 
-The Night-All database owner, not the Hub deployment, creates the reader. The
-exact role and Secret names are deployment choices; the privilege set is not:
+## 2. Register the source provider
+
+### 2.1 Platform encryption key
+
+Admin/combined API and ingest workloads need one stable
+`MX_INSIGHT_PROVIDER_MASTER_KEY`: exactly 32 bytes encoded as base64, or 64
+hexadecimal characters. It encrypts provider passwords with AES-256-GCM before
+they enter the Hub catalog. It is not a database password and must be stored
+separately from the Hub PostgreSQL backup.
+
+The public listener does not receive this key. Deployment blocks silent key
+drift once the key is retained because changing it without re-encryption makes
+all registered provider passwords unreadable. Back up and restore the key under
+the same controls as the API-key pepper; do not rotate it by simply changing an
+environment variable.
+
+For production, setting this key is a release prerequisite for enabling the
+Provider management surface and provider-backed ingest: both Admin/combined
+and ingest must receive the same retained value before rollout. Public remains
+keyless.
+
+If the key is absent, provider-management and provider-backed pulls return a
+bounded `503 provider_registry_unavailable`. Legacy `dsnEnv` sources can still
+run, but new sources should use the provider registry so connection changes do
+not require image or deployment changes.
+
+### 2.2 Least-privilege source role
+
+The existing `mx_data` connection was verified as read-only and has `SELECT` on
+both tables. For any replacement role, the source owner grants only:
 
 ```sql
-GRANT CONNECT ON DATABASE night_all TO mx_insight_tg_reader;
-GRANT USAGE ON SCHEMA public TO mx_insight_tg_reader;
+GRANT CONNECT ON DATABASE night_all TO <hub_reader>;
+GRANT USAGE ON SCHEMA public TO <hub_reader>;
 GRANT SELECT ON TABLE
   public.tg_monitor_chats,
   public.tg_monitor_messages
-TO mx_insight_tg_reader;
-ALTER ROLE mx_insight_tg_reader SET default_transaction_read_only = on;
+TO <hub_reader>;
+ALTER ROLE <hub_reader> SET default_transaction_read_only = on;
 ```
 
-Do not grant table ownership, schema `CREATE`, DML, sequence access, a Night-All
-writer role or superuser. Put the resulting DSN in the Hub Admin/ingest workload
-Secret as `MX_INSIGHT_TG_MONITOR_DATABASE_URL`. The public listener does not
-need this Secret.
+Do not grant ownership, schema `CREATE`, DML, sequence access, a collector role
+or superuser. Network ACLs should allow only the Admin/ingest workload source
+addresses; the public API does not connect to `night_all`.
 
-Before continuing, connect as that reader and record the output of:
+### 2.3 Admin API
 
-```sql
-SELECT current_database(), current_user,
-       has_table_privilege(current_user, 'public.tg_monitor_chats', 'SELECT') AS chats_select,
-       has_table_privilege(current_user, 'public.tg_monitor_messages', 'SELECT') AS messages_select;
-SHOW default_transaction_read_only;
-```
+All endpoints in this section require platform-admin authentication.
 
-Both privileges and read-only mode must be true. A failed write probe should be
-performed only in an explicit transaction that is rolled back; do not mutate a
-production row to prove the role is read-only.
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/internal/v1/admin/source-provider-types` | List available provider adapters and safe config/secret field names. |
+| `GET` | `/internal/v1/admin/source-providers` | List redacted registered providers. |
+| `POST` | `/internal/v1/admin/source-providers` | Register a provider. |
+| `PUT` | `/internal/v1/admin/source-providers/:key` | Update safe coordinates or rotate the write-only password. |
+| `DELETE` | `/internal/v1/admin/source-providers/:key` | Delete only when no source references it. |
+| `POST` | `/internal/v1/admin/source-providers/:key/test` | Run a bounded read-only connection test. |
 
-## 3. Schema gate: metadata before row values
-
-The Hub endpoint reports columns and whether the configured cursor, ID and
-mapping aliases exist. It deliberately does not return row values:
+Register one PostgreSQL provider. The password is write-only: it is accepted in
+this request, encrypted, and never returned by list/create/update responses.
+Creation is not a draft save: Admin builds the complete candidate credentials,
+opens a bounded `default_transaction_read_only=on` session, and persists the
+provider only after that probe succeeds. A failed test leaves no provider row or
+secret envelope. If the Admin workload cannot run the PostgreSQL probe, creation
+returns `503 provider_validation_unavailable` rather than accepting an untested
+credential.
 
 ```http
-GET /internal/v1/admin/sources/telegram-monitor-chats/schema
-GET /internal/v1/admin/sources/telegram-monitor-messages/schema
-x-mx-insight-admin-token: <admin token>
-```
-
-Capture the initial `issues` and `warnings`; the final probe immediately before
-activation must have no `issues`. The schema probe evaluates only the currently
-approved mapping. Migration 010's candidate is deliberately unapproved, so the
-initial probe reports `mappingVersion: null` and does not treat candidate aliases
-as warnings; inspect that candidate through the mappings list instead. Once a
-mapping is approved, absent optional aliases appear as `warnings`. The migration
-also leaves `cursorColumn` and `idColumn` unconfigured, so the initial probe is
-expected to report both until they are selected from evidence. There are no
-implicit `updated_at`/`id` defaults.
-
-The schema endpoint also reports estimated rows/bytes, indexes, constraints and
-triggers without returning row values. Cross-check its evidence with these
-read-only metadata queries when reviewing the source contract:
-
-```sql
-SELECT table_name, ordinal_position, column_name, data_type, udt_name, is_nullable
-FROM information_schema.columns
-WHERE table_schema = 'public'
-  AND table_name IN ('tg_monitor_chats', 'tg_monitor_messages')
-ORDER BY table_name, ordinal_position;
-
-SELECT tablename, indexname, indexdef
-FROM pg_indexes
-WHERE schemaname = 'public'
-  AND tablename IN ('tg_monitor_chats', 'tg_monitor_messages')
-ORDER BY tablename, indexname;
-
-SELECT conrelid::regclass AS source_table, conname,
-       pg_get_constraintdef(oid) AS definition
-FROM pg_constraint
-WHERE conrelid IN (
-  'public.tg_monitor_chats'::regclass,
-  'public.tg_monitor_messages'::regclass
-)
-ORDER BY source_table, conname;
-
-SELECT relname, reltuples::bigint AS estimated_rows
-FROM pg_class
-WHERE oid IN (
-  'public.tg_monitor_chats'::regclass,
-  'public.tg_monitor_messages'::regclass
-);
-```
-
-For each table, approve all of the following before configuring it:
-
-1. One non-null source identity maps deterministically to Hub `externalId`.
-   Telegram message IDs may be chat-scoped, but that must be proved from the
-   writer contract or a uniqueness constraint; do not assume it from Telegram
-   conventions alone.
-2. `cursorColumn` is a non-null, monotonically non-decreasing date/timestamp
-   that changes when a row changes. The current connector accepts PostgreSQL
-   `date`, `timestamp` and `timestamptz`; integer/LSN watermarks are not
-   supported. A day-only `date` still needs proof that the ID tie-breaker cannot
-   make later inserts sort behind an advanced cursor.
-3. `idColumn` is one non-null, immutable physical small/int/big integer, UUID or
-   text-like column used as the tie-breaker. The current connector cannot use a
-   SQL expression or a two-column composite as its pull tie-breaker.
-4. The ordered pair `(cursorColumn, idColumn)` forms a provable total order: a
-   full-table (non-partial) btree index begins with those two native columns,
-   and a full-table unique index covers either `idColumn` alone or exactly the
-   pair. Partial indexes are rejected even when their predicate looks
-   equivalent to the non-null gate. Ask the source owner to
-   review `EXPLAIN` and create the production index if needed; Hub does not
-   create indexes in Night-All.
-5. The writer's transaction/update behavior guarantees that advancing the
-   watermark cannot hide a later commit with an older timestamp.
-
-If any item fails, stop. The safe fix is a writer-owned stable key/watermark (or
-a reviewed source view) or a new connector cursor strategy. Choosing a nearby
-column name is not a workaround.
-
-## 4. Configure physical names without storing a DSN
-
-While the source is paused, use the platform-admin source update after
-substituting only names verified in the schema gate. The example values below
-are placeholders, not production column claims:
-
-```http
-PUT /internal/v1/admin/sources/telegram-monitor-messages
+POST /internal/v1/admin/source-providers
 Content-Type: application/json
 
 {
-  "connection": {
-    "dsnEnv": "MX_INSIGHT_TG_MONITOR_DATABASE_URL",
-    "schema": "public",
-    "table": "tg_monitor_messages",
-    "cursorColumn": "<verified timestamp watermark>",
-    "idColumn": "<verified stable physical id>"
-  }
+  "providerKey": "night-all-postgres",
+  "displayName": "Night-All PostgreSQL",
+  "providerType": "postgresql",
+  "config": {
+    "host": "<internal-host-or-dns>",
+    "port": 5432,
+    "database": "night_all",
+    "username": "mx_data",
+    "sslMode": "require"
+  },
+  "password": "<provided-out-of-band>"
 }
 ```
 
-Repeat for chats with its independently verified cursor/ID columns. The seeded
-dataset/platform/object type are not caller-editable on this update. Literal
-`dsn`, host, user, password and arbitrary connection properties are rejected;
-connection metadata cannot change while a source is active or in the same call
-that activates it.
+Use `sslMode=disable` only for a reviewed host-local/trusted transport where the
+server does not offer TLS. `require` encrypts transport but does not validate a
+CA; use `verify-ca` or `verify-full` when the deployment supplies a trusted
+certificate path.
 
-Re-run both `/schema` endpoints. A source stays paused through this operation.
-
-## 5. Shape-preview three rows, then approve a mapping
-
-While the source is paused, request the bounded value-free preview:
+Verify the session before binding a source:
 
 ```http
+POST /internal/v1/admin/source-providers/night-all-postgres/test
+```
+
+The response contains redacted provider metadata plus safe connection evidence:
+database/user/server version, `readOnly: true`, health status, check time and a
+machine error code. A driver message or password is never returned or persisted.
+
+A `PUT` that changes `config` or `password` is an atomic candidate rotation, not
+“save then test”. Admin acquires the Provider advisory lock and every currently
+referencing source lock in deterministic order, rechecks that the reference set
+did not change, and requires every reference to be both `paused` and no longer
+`cursor.status=running`. It then tests the merged candidate (new fields plus the
+unchanged stored secret/config) read-only and only on success replaces the
+encrypted envelope/coordinates. Therefore a typo cannot break all bound sources.
+An active or draining reference returns `409 provider_pause_required`; a newly
+attached reference returns `409 provider_topology_changed`; lock contention
+returns `409 source_busy`. A display-name-only `PUT` does not rotate a connection.
+The explicit test and delete routes also hold the Provider lock. Deletion remains
+blocked with `provider_in_use` while any source references it.
+
+Provider list/create/update responses return the stable `providerKey` and an
+opaque `id`, never the password or encrypted envelope. Source records store the
+relationship as `provider_id` and return it as `providerId` together with
+`providerKey` for Admin correlation. Neither identifier crosses the public data
+API.
+
+## 3. Bind and inspect the registered sources
+
+Migration 010 created stable source/dataset identities:
+
+| Source key | Dataset | Object type |
+| --- | --- | --- |
+| `telegram-monitor-chats` | `telegram.monitor.chats.v1` | `chat` |
+| `telegram-monitor-messages` | `telegram.monitor.messages.v1` | `message` |
+
+Bind each paused source to the provider. Physical schema/table names are
+control-plane configuration; they do not become public API inputs.
+
+```http
+PUT /internal/v1/admin/sources/telegram-monitor-chats
+Content-Type: application/json
+
+{
+  "providerKey": "night-all-postgres",
+  "connection": {
+    "schema": "public",
+    "table": "tg_monitor_chats",
+    "cursorColumn": "updated_at",
+    "idColumn": "chat_id"
+  },
+  "syncIntervalSeconds": 60
+}
+```
+
+This records the reviewed chats cursor *candidate* so the schema probe can show
+its missing supporting source index; it is not approval to activate. Bind
+`telegram-monitor-messages` with only `schema` and `table` until the source
+owner supplies a real unified change cursor. A managed database source's
+`connection` accepts only `schema`, `table`, `cursorColumn` and `idColumn`.
+The old seeded `dsnEnv` name may remain in a legacy connection record for
+compatibility, but a bound top-level `providerKey` takes precedence and no
+literal DSN/password is accepted in a source body.
+
+Use metadata and value-free shapes before looking at business values:
+
+```http
+GET /internal/v1/admin/sources/{sourceKey}/schema
 GET /internal/v1/admin/sources/{sourceKey}/preview?limit=3
 ```
 
-The response includes columns and `sampleShapes`. For each row/column it exposes
-only `jsonType`, `isNull` and the `serializedLength` of its JSON representation;
-it never returns the source value, message text, username, raw object or mapped
-record. `serializedLength` is the UTF-8 byte length of the runtime JSON
-serialization (or its JSON-string fallback); it is not PostgreSQL storage size
-or the original binary payload length. The server maximum is three. This is
-sufficient to spot obvious type/null/size drift without
-turning an Admin diagnostic into a data-export API. Inspecting actual sample
-values requires a separately authorized data-review process outside this
-endpoint; do not weaken the shape preview to obtain demo content.
-The preview intentionally uses `SELECT * ... LIMIT 3` with no `ORDER BY`; it
-is row-bounded, not byte-bounded, and is not a promise to show the newest rows.
-A table with very large values can still make those three rows expensive, so
-run the preview inside the reviewed source load/timeout budget.
+`schema` returns columns, constraints, indexes, triggers and estimated
+rows/bytes. `preview` returns at most three rows of
+`jsonType/isNull/serializedLength`, not text, usernames, URLs or raw JSON. A
+real-value sample remains a separately authorized data-review activity; do not
+weaken the Admin preview route into a data-export endpoint.
 
-List `/internal/v1/admin/sources/{sourceKey}/mappings`. Version 1 from migration
-010 is `origin=inferred`, unapproved, and may contain aliases that do not exist.
-Use the schema and writer contract to create a corrected immutable version:
+## 4. Verified source schema and canonical mapping
 
-```http
-POST /internal/v1/admin/sources/{sourceKey}/mappings
-Content-Type: application/json
+### 4.1 Chats
 
+Observed shape:
+
+- primary key: `chat_id bigint NOT NULL`;
+- presentation: `chat_type`, `title`, `username`, `primary_url`, `links`;
+- state/metrics: `monitor_enabled`, `collection_status`,
+  `participant_count`, `last_message_id`, `last_error`;
+- times: `first_seen_at`, `last_seen_at`, `updated_at` (non-null), plus nullable
+  collection/link verification times;
+- approximately 100 rows / 256 KiB at the probe time.
+
+`first_seen_at` is the collector's first observation time, not evidence of the
+Telegram chat's creation time. The current canonical `eventTime` mapping keeps
+that source meaning; clients must not reinterpret it as platform creation.
+
+Migration 012 seeds this reviewed mapping as version 2, deliberately
+**unapproved**. It also preconfigures the chat cursor candidate
+`(updated_at, chat_id)` so `/schema` visibly reports the missing source index;
+it does not activate the source.
+
+Reviewed canonical mapping:
+
+```json
 {
-  "origin": "manual",
-  "notes": "Verified against production schema and writer contract on <date>",
-  "fieldMap": {
-    "externalId": { "from": "<verified identity column>" },
-    "eventTime": { "from": "<verified business event timestamp>" },
-    "collectedAt": { "from": "<verified collection/update timestamp>" }
+  "externalId": { "from": "chat_id" },
+  "contentType": { "from": "chat_type" },
+  "url": { "from": "primary_url" },
+  "title": { "from": "title" },
+  "eventTime": { "from": "first_seen_at", "type": "timestamp" },
+  "collectedAt": { "from": "updated_at", "type": "timestamp" },
+  "attributes.username": { "from": "username" },
+  "attributes.chatType": { "from": "chat_type" },
+  "metrics.members": { "from": "participant_count", "type": "number" },
+  "links": { "from": "links" },
+  "_drop": {
+    "from": [
+      "owner_account_id", "monitor_enabled", "collection_status",
+      "last_message_id", "last_collected_at", "last_link_verified_at",
+      "last_error", "metadata", "last_seen_at"
+    ]
   }
 }
 ```
 
-The messages mapping may use
-`{"from":["<verified chat id>","<verified message id>"],"type":"composite"}`
-for `externalId` only after that identity rule is proven.
+Operational/private collector fields are deliberately consumed by `_drop`
+instead of being copied into public extensions.
 
-For the public messages contract, also map the verified chat/message identities
-to `relations.chatId` and `relations.messageId`; otherwise exact `chatId`
-filtering and response relations cannot work even though an ingest row is
-technically valid. `eventTime` is required for both datasets because serving
-orders and bounds pages by that value.
+The reviewed mapping retains source `links` only inside the governed canonical
+record. Its member-object fields have not yet been proved by a safe production
+shape sample, so public Telegram history always projects `links: []`. Publishing
+link members requires a field allowlist, schema/version review and contract
+update; it is not enabled by merely adding data upstream.
 
-Approve the exact new version with:
+### 4.2 Messages
+
+Observed shape:
+
+- physical primary key: `id bigint NOT NULL`;
+- business uniqueness: `UNIQUE (chat_id, message_id)`;
+- content/author: sender ID/name/username, `message_text`, `message_type`,
+  `message_url`;
+- relations: reply/thread/group IDs;
+- engagement: view/forward counts and outgoing flag;
+- structured payloads: `media jsonb`, `entities jsonb`, private `metadata`;
+- time/state: `message_at`, `collected_at`, nullable `edited_at` and
+  `deleted_at`;
+- 163,401 exact rows at the semantic probe time (the planner estimate was
+  lower), approximately 168 MiB.
+
+Migration 012 also seeds this reviewed messages mapping as version 2 and leaves
+it unapproved because no safe continuous watermark exists.
+
+Reviewed canonical mapping:
+
+```json
+{
+  "externalId": {
+    "from": ["chat_id", "message_id"],
+    "type": "composite",
+    "separator": ":"
+  },
+  "contentType": { "from": "message_type" },
+  "url": { "from": "message_url" },
+  "body": { "from": "message_text" },
+  "authorExternalId": { "from": "sender_id" },
+  "authorName": { "from": ["sender_name", "sender_username"] },
+  "eventTime": { "from": "message_at", "type": "timestamp" },
+  "collectedAt": { "from": "collected_at", "type": "timestamp" },
+  "editedAt": { "from": "edited_at", "type": "timestamp" },
+  "deletedAt": { "from": "deleted_at", "type": "timestamp" },
+  "attributes.username": { "from": "sender_username" },
+  "attributes.isOutgoing": { "from": "is_outgoing", "type": "boolean" },
+  "relations.chatId": { "from": "chat_id" },
+  "relations.messageId": { "from": "message_id" },
+  "relations.replyToMessageId": { "from": "reply_to_message_id" },
+  "relations.threadId": { "from": "thread_id" },
+  "relations.groupedId": { "from": "grouped_id" },
+  "metrics.views": { "from": "view_count", "type": "number" },
+  "metrics.shares": { "from": "forward_count", "type": "number" },
+  "media": { "from": "media" },
+  "entities": { "from": "entities" },
+  "_drop": { "from": ["id", "metadata", "collected_by_account_id"] }
+}
+```
+
+This mapping preserves the public media/entity allowlist and tombstone time
+while deliberately omitting collector account and arbitrary metadata. Current
+message types include text, image, other, video, document, service and audio;
+blank text is valid for media/service rows and is not by itself a rejection.
+
+The structured-value probe supports only these current public member fields:
+
+- `media`: `media_kind`, `status`, `telegram_id`, `file_name`, `extension`,
+  `mime_type`, `size_bytes`; duplicated `chat_id`/`message_id` stay in canonical
+  relations instead;
+- `entities[]`: `type`, `offset`, `length`, optional `url` and `user_id`;
+- `metadata`: no public fields. Observed forward/view/grouping/post-author
+  members remain private and the entire object is consumed by `_drop`.
+
+Anything added inside these JSON values is ignored by the public projector
+until a new allowlist review; it does not become an API field automatically.
+
+Mappings are immutable versions. Review seeded v2 against the schema and value
+shapes. If it needs correction, create a new version; then approve the exact
+reviewed version while the source is paused:
 
 ```http
+POST /internal/v1/admin/sources/{sourceKey}/mappings
 POST /internal/v1/admin/sources/{sourceKey}/mappings/{version}/approve
 ```
 
-Approval changes which mapping is active; it does not start a pull. Compare the
-field map to the schema, writer contract and value-free shapes. Reject it if
-identity/watermark evidence is incomplete, composite collisions are possible,
-a time/numeric type is incompatible, or chat/message relations are ambiguous.
-Create and approve a new version; never edit an approved version in place.
+Approval selects a transform; it does not prove the incremental watermark or
+activate the source.
 
-## 6. Activation and full pull
+For a direct file source, `POST .../preview?filename=...` is deterministic and
+local by default: parsing, field inference and sample rendering do not call a
+model. Agent assistance is opt-in with `agent=true`; even then the model receives
+only the column-name array and `sampleRows: []`, never file values. The response
+records `agentDataScope=column_names_only`. This direct file path is implemented
+for CSV/JSON/XLSX uploads; it is not a watched directory, cloud bucket or cloud
+warehouse adapter.
 
-After all gates are signed off, activate only the reviewed source:
+## 5. Continuous-sync gate (currently open)
+
+### 5.1 Why messages must remain paused
+
+The semantic probe found:
+
+```text
+rows                         163401
+edited rows                    1530
+deleted rows                   7480
+edits after collection          203
+deletions after collection     7480
+collected before event           35
+blank text                     2023
+```
+
+`message_at` is event time and does not change on edit/delete.
+`collected_at` is the original collection observation; at least 203 edits and
+all 7,480 observed deletions occurred after it. Advancing a cursor on either
+column would therefore skip real changes forever. `edited_at` and `deleted_at`
+are nullable and each covers only one change kind, so neither is a unified
+watermark.
+
+The source owner must provide one of these reviewed contracts:
+
+1. add `updated_at timestamptz NOT NULL` and update it for every insert, content
+   edit, metric/media/entity change and soft delete; add a full btree index
+   beginning `(updated_at, id)`; and prove writer/transaction ordering cannot
+   commit an older watermark after Hub has advanced past it; or
+2. provide an append-only change journal/CDC stream with an ordered commit
+   position and extend the Hub connector to consume that position.
+
+An ordinary trigger assigning `now()` and an index are not, by themselves,
+proof of commit order: overlapping transactions can commit in the opposite
+order. A serialized single-writer protocol may satisfy option 1 if it is part of
+the enforced writer contract. Otherwise prefer CDC/WAL semantics.
+
+### 5.2 Chats are not yet safe either
+
+Chats have a plausible non-null `updated_at` and stable `chat_id`, but the
+source currently has no full `(updated_at, chat_id)` index, and the writer's
+commit/update contract is not recorded. Add the index only after verifying that
+every relevant chat mutation advances `updated_at`, then prove the same
+commit-order property.
+
+### 5.3 Activation checklist
+
+For each table independently:
+
+- stable non-null canonical identity is proved;
+- the change watermark covers insert/update/delete and is non-null;
+- the physical tie-breaker is immutable and supported by the connector;
+- a non-partial btree begins `(cursorColumn, idColumn)`;
+- a full unique index proves the ID/pair forms a total order;
+- writer commit ordering or CDC position semantics are documented and tested;
+- approved mapping matches current column types;
+- provider test and source schema probe return no issues;
+- initial full-table load and source impact are accepted.
+
+There is no safe bounded snapshot/canary mode in the current database puller:
+`batchSize` limits each transaction, not total rows, and continuations drain to
+the current end. Do not set `batchSize=3` expecting only three records. A
+one-time exported CSV/JSON/XLSX can use the existing direct file importer, but
+that is a separately evidenced snapshot, not continuous database synchronization
+or a cloud/object-storage connector.
+
+## 6. Run, monitor and recover
+
+Only after §5 passes, configure `cursorColumn`/`idColumn`, re-run `/schema`, and
+activate in a separate call. Start one source at a time:
 
 ```http
-PUT /internal/v1/admin/sources/{sourceKey}
-Content-Type: application/json
-
-{ "status": "active" }
+PUT  /internal/v1/admin/sources/{sourceKey}  { "status": "active" }
+POST /internal/v1/admin/sources/{sourceKey}/sync  { "batchSize": 1000 }
+GET  /internal/v1/admin/sources/{sourceKey}/sync
+GET  /internal/v1/admin/sources/{sourceKey}/imports
 ```
 
-Activation is not a blind flag flip: the route requires an approved mapping,
-runs the schema/index probe, and rejects any non-empty `issues`. Connection
-metadata must have been updated in an earlier paused-state call.
+The ingest worker scans on `MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS` (global scan
+granularity) and schedules an idle source only when its own
+`syncIntervalSeconds` is due. Values are bounded to 60–86,400 seconds. This is
+polling rather than event-driven CDC: expected detection delay is the source
+interval plus up to one global scan interval. A running continuation owns the
+source, and a failed cursor waits for explicit operator recovery instead of
+creating a retry storm.
 
-Start one table at a time:
+Pull and checkpoint reset for the same source share a PostgreSQL session
+advisory try-lock across Admin/ingest workers. They never overlap: a concurrent
+operation returns `409 source_busy` immediately. Pause first, let the current
+pull leave the critical section, then retry reset; do not loop aggressively.
 
-```http
-POST /internal/v1/admin/sources/{sourceKey}/sync
-Content-Type: application/json
+Pausing is deliberately a batch-boundary drain, not a transaction kill. The
+`PUT {"status":"paused"}` prevents another scheduled/continuation batch from
+starting, while a batch already holding the source lock may finish its canonical
+COMMIT and checkpoint acknowledgement. During this interval source status is
+paused but cursor status is still running. Connection changes, mapping approval
+and reactivation return `409 source_draining`; Provider rotation reports the
+source under `provider_pause_required`. Wait until `GET .../sync` shows a
+non-running cursor before changing topology, approving a mapping or resetting.
 
-{ "batchSize": 1000 }
-```
+The durable queue/cursor and import runs expose status, trigger
+(`manual|schedule|file`), row/ingested/rejected/changed/deleted counts, cursor
+start/end, safe error code, next due time and timestamps. One database import
+run spans its complete multi-batch continuation chain; batch keys absorb a
+replayed committed page without inflating counters. Accepted source objects and
+new revisions link back to that import run. The Admin UI is the normal operator
+view for these records.
 
-This `POST` is the immediate first-run/operator trigger, not the only mechanism
-for continuous intake. The ingest worker also runs a periodic scheduler:
+The puller writes an active `importRunId` into the durable checkpoint before
+canonical ingest. Its deterministic active `run_key` is derived from the
+source, contract/mapping and starting checkpoint. If the process dies after the
+canonical transaction commits but before cursor acknowledgement, lease reclaim
+reuses that same run and batch key: the committed page is replayed safely,
+counts remain single, and lineage does not move to a second run.
 
-- `MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS` controls the scan interval (default
-  60,000 ms), and `MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE` controls the scheduled
-  batch size (default 1,000; the puller still caps a batch at 5,000);
-- only active database sources whose durable cursor is absent or `idle` are
-  scheduled;
-- a `running` cursor owns its continuation chain, and pending/running jobs are
-  additionally protected by the queue dedupe key;
-- a `failed` cursor is deliberately not retried on every scheduler tick. Fix
-  and probe the cause (pausing/updating/reactivating the source when required),
-  then explicitly `POST .../sync` to resume from the unchanged checkpoint.
+The canonical transaction locks that run and checks `(import_run_id,batch_key)`
+before writing any source object, canonical row, revision, outbox event or
+counter. A previously succeeded batch returns its stored counts and
+`cursor_end`; the ordinary pull path performs this check before it even opens the
+source connection. Each committed/failed batch also stores a SHA-256 fingerprint
+of its ordered source-page identity. If a lower-level duplicate call presents a
+different page for the same batch key, the store reports `pageDrifted=true` and
+the stored fingerprint/batch remains incident evidence. The already committed
+batch stays authoritative—the new page is not a reason to overwrite its cursor
+or counters.
 
-Each database-pull job sends a lease heartbeat immediately and every 30
-seconds while its batch runs, then once more before continuation. An unfinished
-batch persists its continuation even during graceful shutdown, so a `running`
-cursor is not orphaned across a rollout. This reduces
-duplicate lease reclamation during a slow query/ingest transaction; the
-checkpoint and canonical uniqueness constraints remain the correctness layer
-if a worker still dies. The scheduler scans immediately at worker startup.
-Internal K8s supplies its settings through the ConfigMap; local Compose runs a
-separate `ingest` service after the API is healthy, so both profiles consume
-manual and periodically scheduled jobs.
+Run terminal state and its terminal durable cursor are committed together in one
+Hub PostgreSQL transaction. A transport failure during COMMIT can therefore mean
+“committed, reply lost” or “not committed”. Errors
+`external_commit_outcome_unknown`, `external_finalize_outcome_unknown` and
+`external_reset_outcome_unknown` explicitly represent that ambiguity; they are
+not proof of rollback.
 
-The current Internal ingest Deployment deliberately has one replica and a
-`Recreate` rollout. Do not scale it horizontally until each source has a
-cross-worker mutex or cursor compare-and-swap; queue dedupe alone is not a
-complete source-level lease for future multi-worker scheduling.
+Correctness rules:
 
-`batchSize` is bounded to 1–5,000 rows **per transaction**. It is not a total
-canary limit: when a full batch completes, the worker schedules a distinct
-continuation and drains forward until it reaches the current end. Therefore the
-only built-in bounded inspection is `/preview?limit=3`, and it is not an ingest
-canary. Do not enqueue sync until a full-table pull is acceptable. If a bounded
-ingest canary is mandatory, the source owner must provide a reviewed limited
-view and it must use a separate temporary Hub source/dataset. Do not pretend
-`batchSize: 3` imports only three rows.
+- canonical uniqueness is
+  `(dataset_id, platform, object_type, external_id)`; replays update/skip rather
+  than creating another logical record;
+- revision hashes avoid a new revision for unchanged content; metrics/edit/
+  tombstone changes do produce projection work;
+- a mapped `deletedAt` sets the canonical tombstone and all
+  history/search/entity queries exclude that row while retaining
+  source/revision evidence. The projector groups claimed events per aggregate,
+  reloads PostgreSQL current truth, and issues one externally versioned delete
+  for missing/tombstoned state or index for active state. A stale upsert cannot
+  resurrect a deleted document; ES version conflicts are successful stale
+  delivery;
+- the source cursor advances only after canonical writes and outbox evidence
+  commit;
+- any rejected database row fails the batch, preserves rejection evidence and
+  leaves the previous checkpoint unchanged;
+- failed cursors do not auto-retry every scheduler tick. Pause/fix/probe,
+  approve a new mapping when required, then explicitly resume;
+- the checkpoint carries a hash of provider coordinates, table, cursor,
+  dataset/object identity and mapping version. A changed contract returns
+  `checkpoint_contract_mismatch` instead of continuing from an unrelated
+  position. Reset is an explicit paused-source action and requires an exact
+  `confirmSourceKey` through
+  `POST /internal/v1/admin/sources/{sourceKey}/checkpoint/reset`. It returns
+  `409 source_busy` while a pull holds the source lock; after acquiring the
+  lock, it marks a checkpoint-owned active run failed with
+  `error=checkpoint_reset`, removes that run from the new idle checkpoint and
+  records `resetAt`;
+- a crash before commit replays normally. A crash after canonical COMMIT but
+  before cursor ack resumes the checkpoint-owned run and reuses its batch key;
+  neither path may skip forward or double-count the run.
 
-Monitor:
+### 6.1 Safe manual recovery
 
-```http
-GET /internal/v1/admin/sources/{sourceKey}/sync
-```
+1. Capture `GET .../sync`, the latest import run/counts/error, queue attempt and
+   request ID. Never edit `mxq.cursors`, `ingest.import_runs` or batch rows by
+   hand.
+2. For batch/finalize outcome-unknown, **leave the source active and do not
+   reset, rotate, remap or create another run**. Allow the same queued payload to
+   retry; if attempts are exhausted, issue one explicit `POST .../sync` while the
+   checkpoint still owns the same `importRunId`. The batch-first lookup or stale
+   continuation check resolves either COMMIT outcome safely.
+3. For reset outcome-unknown, keep the source paused and retry the same confirmed
+   reset request. Do not reactivate until the response and `GET .../sync` agree
+   on an idle checkpoint with no active run.
+4. For `source_busy`/`source_lock_lost`, do not infer whether a batch committed.
+   Wait for the owner/lease and retry the same operation. Do not turn contention
+   into a reset loop.
+5. For `row_rejections_detected` or `import_batch_failed`, preserve the failed
+   batch/rejection evidence. Pause and drain, correct the source contract or
+   create/review/approve a new mapping, probe again, then use the explicit
+   confirmed reset before a full replay. A failed batch never advances the old
+   checkpoint.
+6. A `pageDrifted` observation means the source changed what the same keyset page
+   represents. Preserve the committed batch, pause at the next boundary and
+   audit watermark/index/commit-order guarantees with the source owner; blindly
+   rewinding can hide the exact correctness defect.
 
-This reports the durable `external:{sourceKey}` cursor and `external-pull`
-queue counts. Also monitor worker logs for `pulled`, `ingested`, `changed` and
-`rejected`. A batch advances the cursor only after the canonical transaction
-commits. A crash before that point replays the batch; uniqueness on
-`(dataset_id, platform, object_type, external_id)` and revision hashes makes the
-replay idempotent. A database batch with any rejected row fails before accepted
-rows are ingested, so the checkpoint never advances past data that needs a
-mapping correction. Each batch has an `ingest.import_runs` audit record and
-rejected rows/reasons enter the existing bounded `ingest.rejected_rows` evidence
-store. Other pull/ingest failures also keep the prior checkpoint. Import/cursor
-failures retain only a safe error code, never a driver message that might contain
-a host, schema detail or credential. Correct and approve a new mapping while the
-source is paused, then reschedule from the unchanged checkpoint.
+Do not expose `ingest.rejected_rows.raw_row` through Admin preview or the public
+API. It may contain source content and needs restricted database access and a
+retention policy.
 
-`ingest.import_runs` is currently batch-level evidence: it records counts,
-status/error and rejected rows. Accepted `source_objects` and
-`record_revisions` do not yet store the corresponding `import_run_id`, so do
-not claim row-to-import-run lineage. Add a reviewed schema link before that is
-a compliance requirement. An idle periodic poll also creates a succeeded
-zero-row import run; include that expected audit noise in retention/monitoring
-budgets rather than alerting on the row count alone.
+Before granting consumers, reconcile source and Hub exact counts/time bounds,
+account for tombstones, resolve every rejection, record mapping version and
+cursor, and verify a customer-safe three-item response. Then validate:
 
-`ingest.rejected_rows.raw_row` is bounded to the first 1,000 rejections per run
-but can contain source business content. It is internal incident evidence, not
-a public/Admin preview response; apply database access control and retention
-policy before production activation.
+- `GET /api/v1/data/telegram/chats|messages` for deterministic history;
+- `POST /api/v1/data/telegram/search` for Night-All-v1-compatible stored
+  full-text search, including more than one page with each returned cursor sent
+  back unchanged and a separate stable idempotency key per distinct page body;
+- `GET /api/v1/data/telegram/entities/search` for fuzzy author/chat lookup;
+- first-page ES outage fallback to PostgreSQL without loss of canonical
+  availability. Confirm the warning and verify from query evidence that its
+  NULL-aware `(event_time, id)` keyset does not use `OFFSET`;
+- an established ES cursor during a temporary ES outage returns
+  `503 search_cursor_unavailable` and never silently changes to PostgreSQL;
+- an expired two-minute PIT returns `410 search_cursor_expired`; discard that
+  cursor and restart at a cursor-less first page. Do not confuse this public
+  search cursor with the source ingestion checkpoint or manually edit either.
 
-After the first source reaches `idle`, compare source and Hub counts/time bounds
-using the verified mapping and investigate every rejection before starting the
-second source. The release evidence must include:
+To stop delivery, remove/disable the affected consumer grant. To stop intake,
+pause the source. A transaction already in flight may finish; the next pull
+observes the paused state. Do not delete canonical rows or manually rewind a
+cursor as routine rollback—preserve evidence and use a reviewed replay plan.
 
-- source row estimate/exact count and min/max verified watermark;
-- Hub canonical count and min/max `event_time` for the fixed dataset;
-- zero unresolved rejected rows, plus correction/successful-replay evidence for
-  every earlier rejection, and the mapping version;
-- cursor position, duration, average batch rate and source DB load;
-- a public `pageSize=3` response checked against the strict field allowlist.
-
-Only after that evidence passes should a consumer receive the `telegram` grant
-and call `/api/v1/data/telegram/chats` or `/messages`.
-
-The grant exposes the complete fixed dataset. Canonical Telegram records do
-not currently carry `tenant_id`, so this rollout cannot use tenant membership
-as a row filter. If consumers require different subsets, stop and design a
-versioned dataset/row-scope contract before granting access.
-
-Before enabling message `chatId` traffic at scale, review `EXPLAIN` on the Hub
-query and install the expression index outside the transactional migration
-runner. Use a direct maintenance connection and monitor build progress:
-
-```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS canonical_records_tg_monitor_chat_idx
-  ON core.canonical_records
-    (dataset_id, (stable_fields #>> '{relations,chatId}'), event_time DESC, id DESC)
-  WHERE platform = 'telegram'
-    AND object_type = 'message'
-    AND deleted_at IS NULL
-    AND dataset_id = 'telegram.monitor.messages.v1';
-```
-
-Migration 005's generic feed index supports the initial fixed-dataset scan.
-Migration 010 deliberately does not create indexes on an already-populated Hub
-table because the migration runner wraps each file in a transaction, where
-`CREATE INDEX CONCURRENTLY` is forbidden.
-
-## 7. Updates, deletions and rollback
-
-- An unchanged replay refreshes `ingest.source_objects.last_seen_at` and the
-  canonical record's `last_seen_at`, but does not create a new content revision
-  or a `core.observations` row. A changed row is seen only when the verified
-  source watermark also advances. Projected metrics are part of the external
-  content hash, so a metrics-only change increments the revision and refreshes
-  search/AI projections rather than leaving them stale.
-- Hard-deleted source rows are invisible to an incremental forward cursor.
-  Absence is **not deletion**. The current mapping has no public tombstone field
-  and this connector does not set `canonical_records.deleted_at` from a source
-  soft-delete flag. Do not promise delete propagation. Define a writer-owned
-  tombstone/CDC contract and implement/test it before deletion becomes part of
-  the dataset SLA.
-- To stop delivery, first disable the `telegram` grant for affected consumers.
-  To stop ingestion, call `PUT /internal/v1/admin/sources/{sourceKey}` with
-  `{ "status": "paused" }`. The already-running transaction may finish; the
-  next pull observes the paused state. There is no queue-cancel endpoint in this
-  release.
-- Do not delete canonical rows or rewind a cursor as a routine rollback. Keep
-  source objects, revisions and projection evidence; correct the mapping with a
-  new version and run a reviewed replay/backfill procedure.
-
-The current public Telegram `GET` route enforces API-key authentication,
-explicit consumer grant, strict fields, keyset pagination, page-size policy and
-the consumer's `telegram.maxRequests` window. Each successful page commits
-`max(1, returnedCount)` usage units without retaining its response body. Failed
-local reads release their reservation and ambiguous usage commits remain
-`unknown` for reconciliation. Delete propagation and a bounded-sync canary are
-explicit follow-up gates, not implicit behavior.
+Migration 012 also adds PostgreSQL trigram indexes for body, author handle and
+chat username so the ES degradation path is viable for the current corpus. On
+an already large Hub canonical table, rehearse this migration or create the
+equivalent indexes concurrently in a maintenance window before running the
+transactional migration; ordinary index creation can hold a disruptive lock.

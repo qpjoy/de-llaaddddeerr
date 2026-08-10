@@ -3,9 +3,16 @@ import { createServer } from 'node:http'
 import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
 import { HubService } from '../../server/hub-service.mjs'
+import { ProviderRegistry } from '../../server/ingest/external/provider-registry.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
-import { normalizeTelegramMonitorQuery } from '../../server/data/telegram-monitor.mjs'
+import {
+  encodeTelegramSearchCursor,
+  normalizeTelegramMonitorQuery,
+  normalizeTelegramSearchQuery,
+  publicTelegramMonitorRecord,
+  telegramDataSearchResponse,
+} from '../../server/data/telegram-monitor.mjs'
 
 const ADMIN_TOKEN = 'test-admin-token'
 const PEPPER = 'test-pepper-with-enough-entropy'
@@ -46,6 +53,109 @@ test('Telegram query parameters reject explicit empty values', () => {
     pageSize: 50,
     cursor: null,
   })
+})
+
+test('public Telegram records enforce field types and withhold unverified link objects', () => {
+  const record = publicTelegramMonitorRecord({
+    external_id: '-1007:42',
+    dataset_id: 'telegram.monitor.messages.v1',
+    object_type: 'message',
+    event_time: new Date('2026-08-10T00:00:00.000Z'),
+    collected_at: new Date('2026-08-10T00:01:00.000Z'),
+    stable_fields: {
+      relations: { chatId: '-1007', messageId: '42', threadId: { private: true } },
+      attributes: { username: 'alice', memberCount: { private: true } },
+      metrics: { views: 10, likes: Number.POSITIVE_INFINITY, shares: { private: true } },
+      media: { media_kind: 'image', size_bytes: 100, status: { private: true } },
+      entities: [{ type: 'url', offset: 0, length: 5, url: 'https://example.test', private: 'no' }],
+      links: [{ url: 'https://t.me/example', ownerAccountId: 9, credential: 'must-not-leak' }],
+      source: { origin: 'database', providerKey: 'must-not-leak' },
+    },
+    current_revision: 2,
+  })
+  assert.deepEqual(record.relations, { chatId: '-1007', messageId: '42' })
+  assert.deepEqual(record.attributes, { username: 'alice' })
+  assert.deepEqual(record.metrics, { views: 10 })
+  assert.deepEqual(record.media, { media_kind: 'image', size_bytes: 100 })
+  assert.deepEqual(record.entities, [{ type: 'url', offset: 0, length: 5, url: 'https://example.test' }])
+  assert.deepEqual(record.links, [])
+  assert.equal(JSON.stringify(record).includes('must-not-leak'), false)
+})
+
+test('Night-All v1 Telegram search maps negative metric sentinels to null', () => {
+  const response = telegramDataSearchResponse({
+    query: 'sentinel',
+    result: {
+      mode: 'elasticsearch',
+      total: 1,
+      items: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        externalId: '-1007:42',
+        objectType: 'message',
+        metrics: { likes: -1, comments: -1, shares: -1, views: -1, bookmarks: -1 },
+      }],
+    },
+    pageSize: 1,
+    cursor: null,
+    cursorBinding: 'not-used-without-another-page',
+    cursorSecret: PEPPER,
+    durationMs: 0,
+  })
+
+  assert.deepEqual(response.data.items[0].metrics, {
+    likes: null,
+    comments: null,
+    shares: null,
+    views: null,
+    bookmarks: null,
+  })
+})
+
+test('Telegram search cursors exceed 10k safely and are bound to the normalized query and filters', () => {
+  const input = {
+    query: 'keyword', scope: 'messages', chatId: '-1007', authorId: 'user-1',
+    from: '2026-08-01T00:00:00Z', to: '2026-08-10T23:59:59Z', pageSize: 50,
+  }
+  const first = normalizeTelegramSearchQuery(input, 100, PEPPER)
+  const cursor = encodeTelegramSearchCursor({
+    mode: 'postgres',
+    pitId: null,
+    searchAfter: ['2026-08-05T00:00:00.000Z', '11111111-1111-4111-8111-111111111111'],
+    seen: 10_050,
+  }, first.cursorBinding, PEPPER)
+  const resumed = normalizeTelegramSearchQuery({ ...input, cursor }, 100, PEPPER)
+  assert.equal(resumed.cursor.seen, 10_050)
+  assert.deepEqual(resumed.cursor.searchAfter, [
+    '2026-08-05T00:00:00.000Z',
+    '11111111-1111-4111-8111-111111111111',
+  ])
+
+  const esCursor = encodeTelegramSearchCursor({
+    mode: 'elasticsearch',
+    pitId: 'pit-renewed',
+    searchAfter: [12.5, 9_223_372_036_854_775_000, '11111111-1111-4111-8111-111111111111', 42],
+    seen: 100,
+  }, first.cursorBinding, PEPPER)
+  assert.deepEqual(
+    normalizeTelegramSearchQuery({ ...input, cursor: esCursor }, 100, PEPPER).cursor,
+    {
+      mode: 'elasticsearch',
+      pitId: 'pit-renewed',
+      searchAfter: [12.5, 9_223_372_036_854_775_000, '11111111-1111-4111-8111-111111111111', 42],
+      seen: 100,
+    },
+  )
+
+  for (const changed of [
+    { ...input, query: 'different', cursor },
+    { ...input, chatId: '-1008', cursor },
+    { ...input, pageSize: 25, cursor },
+  ]) {
+    assert.throws(
+      () => normalizeTelegramSearchQuery(changed, 100, PEPPER),
+      (error) => error?.code === 'invalid_cursor',
+    )
+  }
 })
 
 async function withServer(app, callback) {
@@ -117,9 +227,213 @@ test('admin database source routes expose schema/preview and schedule a bounded 
   assert.deepEqual(calls[2], ['describe', 'telegram-monitor-messages'])
   assert.deepEqual(calls[3], [
     'enqueue', 'external-pull',
-    { sourceKey: 'telegram-monitor-messages', batchSize: 2500, chunk: 0 },
+    { sourceKey: 'telegram-monitor-messages', batchSize: 2500, trigger: 'manual', chunk: 0 },
     { dedupeKey: 'external-pull:telegram-monitor-messages:0', priority: 220 },
   ])
+})
+
+test('file preview stays local by default and Agent opt-in sends column names only', async () => {
+  const agentCalls = []
+  const preview = {
+    rowCount: 1,
+    columns: ['id', 'private_email'],
+    inferredFieldMap: { externalId: { from: 'id' } },
+    unmappedColumns: ['private_email'],
+    sample: [{ raw: { id: '1', private_email: 'secret@example.test' } }],
+  }
+  const app = createApp({
+    service: {},
+    store: {},
+    importer: { preview: async () => preview },
+    agent: {
+      suggestFieldMap: async (input) => {
+        agentCalls.push(input)
+        return { fieldMap: preview.inferredFieldMap, origin: 'agent', model: 'test:model' }
+      },
+    },
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+  await withServer(app, async (baseUrl) => {
+    const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN, 'content-type': 'text/csv' }
+    const localResponse = await fetch(`${baseUrl}/internal/v1/admin/sources/file/preview?filename=sample.csv`, {
+      method: 'POST', headers, body: 'id,private_email\n1,secret@example.test\n',
+    })
+    const local = await localResponse.json()
+    assert.equal(localResponse.status, 200)
+    assert.equal(local.data.agentRequested, false)
+    assert.equal(local.data.agentDataScope, 'none')
+    assert.equal(local.data.suggestion.origin, 'inferred')
+    assert.equal(agentCalls.length, 0)
+
+    const agentResponse = await fetch(`${baseUrl}/internal/v1/admin/sources/file/preview?filename=sample.csv&agent=true`, {
+      method: 'POST', headers, body: 'id,private_email\n1,secret@example.test\n',
+    })
+    const enhanced = await agentResponse.json()
+    assert.equal(agentResponse.status, 200)
+    assert.equal(enhanced.data.agentRequested, true)
+    assert.equal(enhanced.data.agentDataScope, 'column_names_only')
+    assert.deepEqual(agentCalls, [{ columns: preview.columns, sampleRows: [] }])
+    assert.equal(JSON.stringify(agentCalls).includes('secret@example.test'), false)
+  })
+})
+
+test('manual sync does not fork a second run while the source cursor is running', async () => {
+  let described = false
+  let enqueued = false
+  const app = createApp({
+    service: {},
+    store: {
+      getExternalSource: async () => ({
+        sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active',
+      }),
+    },
+    databasePuller: { describe: async () => { described = true } },
+    queue: {
+      getCursor: async () => ({ status: 'running' }),
+      enqueue: async () => { enqueued = true },
+    },
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+  await withServer(app, async (baseUrl) => {
+    const result = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/sync', {
+      method: 'POST', headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
+    })
+    assert.equal(result.response.status, 202)
+    assert.deepEqual(result.payload.data, {
+      sourceKey: 'telegram-monitor-messages', jobId: null, alreadyScheduled: true,
+    })
+  })
+  assert.equal(described, false)
+  assert.equal(enqueued, false)
+})
+
+test('provider admin routes preflight secrets and require referenced sources to be paused and drained', async () => {
+  const store = new MemoryStore()
+  let referenced = []
+  store.listExternalSources = async () => referenced
+  const providerRegistry = new ProviderRegistry({ store, masterKey: '33'.repeat(32) })
+  const databasePuller = {
+    testProviderCredentials: async (credentials) => ({
+      database: credentials.database,
+      user: credentials.username,
+      serverVersion: '16.11',
+      readOnly: true,
+    }),
+    testProvider: async (key) => ({
+      provider: await providerRegistry.get(key),
+      connection: { database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true },
+    }),
+  }
+  const app = createApp({
+    service: {}, store, providerRegistry, databasePuller, queue: {},
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+  await withServer(app, async (baseUrl) => {
+    const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+    const types = await call(baseUrl, '/internal/v1/admin/source-provider-types', { headers })
+    assert.equal(types.response.status, 200)
+    assert.equal(types.payload.data[0].available, true)
+
+    const created = await call(baseUrl, '/internal/v1/admin/source-providers', {
+      method: 'POST', headers,
+      body: {
+        providerKey: 'night-all-pg', displayName: 'Night-All', providerType: 'postgresql',
+        config: {
+          host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data', sslMode: 'disable',
+        },
+        password: 'first-private-password',
+      },
+    })
+    assert.equal(created.response.status, 201)
+    assert.equal(created.payload.data.secretConfigured, true)
+    assert.equal(JSON.stringify(created.payload).includes('first-private-password'), false)
+    assert.equal('encryptedSecret' in created.payload.data, false)
+
+    referenced = [{ sourceKey: 'telegram-monitor-messages', providerKey: 'night-all-pg', status: 'active' }]
+    const activeRotation = await call(baseUrl, '/internal/v1/admin/source-providers/night-all-pg', {
+      method: 'PUT', headers, body: { password: 'rotated-private-password' },
+    })
+    assert.equal(activeRotation.response.status, 409)
+    assert.equal(activeRotation.payload.error.code, 'provider_pause_required')
+    assert.equal((await providerRegistry.resolveCredentials('night-all-pg')).password, 'first-private-password')
+
+    referenced[0].status = 'paused'
+    const rotated = await call(baseUrl, '/internal/v1/admin/source-providers/night-all-pg', {
+      method: 'PUT', headers, body: { password: 'rotated-private-password' },
+    })
+    assert.equal(rotated.response.status, 200)
+    assert.equal((await providerRegistry.resolveCredentials('night-all-pg')).password, 'rotated-private-password')
+    assert.equal(JSON.stringify(rotated.payload).includes('rotated-private-password'), false)
+
+    const coordinates = await call(baseUrl, '/internal/v1/admin/source-providers/night-all-pg', {
+      method: 'PUT', headers,
+      body: {
+        config: {
+          host: 'other.internal', port: 5432, database: 'night_all', username: 'mx_data', sslMode: 'disable',
+        },
+      },
+    })
+    assert.equal(coordinates.response.status, 200)
+    assert.equal(coordinates.payload.data.config.host, 'other.internal')
+
+    const deletion = await call(baseUrl, '/internal/v1/admin/source-providers/night-all-pg', {
+      method: 'DELETE', headers,
+    })
+    assert.equal(deletion.response.status, 409)
+    assert.equal(deletion.payload.error.code, 'provider_in_use')
+
+    const tested = await call(baseUrl, '/internal/v1/admin/source-providers/night-all-pg/test', {
+      method: 'POST', headers,
+    })
+    assert.equal(tested.response.status, 200)
+    assert.deepEqual(tested.payload.data.connection, {
+      database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true,
+    })
+
+    const listed = await call(baseUrl, '/internal/v1/admin/source-providers', { headers })
+    const serialized = JSON.stringify(listed.payload)
+    assert.equal(serialized.includes('first-private-password'), false)
+    assert.equal(serialized.includes('rotated-private-password'), false)
+    assert.equal(serialized.includes('ciphertext'), false)
+  })
+})
+
+test('checkpoint reset requires a paused source and exact source-key confirmation', async () => {
+  const calls = []
+  const source = {
+    sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'paused',
+  }
+  const app = createApp({
+    service: {},
+    store: { getExternalSource: async () => source },
+    databasePuller: {
+      resetCheckpoint: async (key) => {
+        calls.push(key)
+        return { status: 'idle', position: { resetAt: '2026-08-10T00:00:00.000Z' } }
+      },
+    },
+    queue: {},
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+  await withServer(app, async (baseUrl) => {
+    const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+    const denied = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/checkpoint/reset', {
+      method: 'POST', headers, body: { confirmSourceKey: 'wrong-source' },
+    })
+    assert.equal(denied.response.status, 400)
+    assert.equal(denied.payload.error.code, 'checkpoint_reset_confirmation_required')
+
+    const reset = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/checkpoint/reset', {
+      method: 'POST', headers, body: { confirmSourceKey: 'telegram-monitor-messages' },
+    })
+    assert.equal(reset.response.status, 200)
+    assert.equal(reset.payload.data.status, 'idle')
+  })
+  assert.deepEqual(calls, ['telegram-monitor-messages'])
 })
 
 test('database source registration rejects a literal DSN before it can be persisted', async () => {
@@ -259,6 +573,46 @@ test('an active database source must be paused before connection metadata change
   assert.equal(updated, false)
 })
 
+test('a paused but draining source cannot change its connection or active mapping', async () => {
+  const source = {
+    id: 'source-1', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'paused',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', schema: 'public', table: 'tg_monitor_messages',
+      cursorColumn: 'updated_at', idColumn: 'id',
+    },
+  }
+  let mutated = false
+  const app = createApp({
+    service: {},
+    store: {
+      getExternalSource: async () => source,
+      updateExternalSource: async () => { mutated = true },
+      approveSourceMapping: async () => { mutated = true },
+    },
+    queue: { getCursor: async () => ({ status: 'running', position: { importRunId: 'run-1' } }) },
+    databasePuller: { withSourceLocks: async (_keys, operation) => operation() },
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+  await withServer(app, async (baseUrl) => {
+    const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+    const connection = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+      method: 'PUT', headers, body: { connection: { table: 'tg_monitor_messages_v2' } },
+    })
+    assert.equal(connection.response.status, 409)
+    assert.equal(connection.payload.error.code, 'source_draining')
+
+    const mapping = await call(
+      baseUrl,
+      '/internal/v1/admin/sources/telegram-monitor-messages/mappings/2/approve',
+      { method: 'POST', headers },
+    )
+    assert.equal(mapping.response.status, 409)
+    assert.equal(mapping.payload.error.code, 'source_draining')
+  })
+  assert.equal(mutated, false)
+})
+
 test('an active database source must be paused before approving a new mapping', async () => {
   let approved = false
   const app = createApp({
@@ -371,6 +725,159 @@ test('public Telegram history is consumer-granted, page-bounded, keyset-paged an
     assert.equal(second.response.status, 200)
     assert.equal(seen.at(-1).cursor.id, canonicalRows()[1].id)
     assert.equal(seen.at(-1).cursor.sortTime, '2026-08-01T00:00:00.000Z')
+  })
+})
+
+test('local Telegram search keeps Night-All v1 compatibility, idempotency and strict lineage projection', async () => {
+  const store = new MemoryStore()
+  const contentCalls = []
+  const searchQueries = {
+    searchContent: async (query, options) => {
+      contentCalls.push({ query, options })
+      return {
+        mode: 'postgres',
+        hasMore: true,
+        nextCursor: {
+          mode: 'postgres', pitId: null,
+          searchAfter: ['2026-08-10T00:00:00.000Z', '11111111-1111-4111-8111-111111111111'],
+        },
+        items: [{
+          id: '11111111-1111-4111-8111-111111111111',
+          externalId: '-1007:42',
+          platform: 'telegram',
+          objectType: 'message',
+          contentType: 'text',
+          url: 'https://t.me/example/42',
+          title: null,
+          body: 'keyword result',
+          authorExternalId: 'user-1',
+          authorName: 'Alice',
+          eventTime: '2026-08-10T00:00:00.000Z',
+          collectedAt: '2026-08-10T00:01:00.000Z',
+          metrics: { views: 12, internalMetric: 'must-not-leak' },
+          providerKey: 'must-not-leak',
+          raw: { password: 'must-not-leak' },
+        }],
+      }
+    },
+    searchAuthors: async () => ({
+      mode: 'postgres',
+      authors: [{
+        authorExternalId: 'user-1', authorName: 'Alice', username: 'alice', postCount: 3, score: 0.8,
+        providerKey: 'must-not-leak',
+      }],
+    }),
+    searchTelegramChats: async () => ({
+      mode: 'postgres',
+      chats: [{
+        id: '-1007', title: 'Alice chat', username: 'alice_chat', url: 'https://t.me/alice_chat',
+        memberCount: 20, eventTime: '2026-08-01T00:00:00.000Z',
+        collectedAt: '2026-08-10T00:00:00.000Z', score: 0.9,
+        providerPassword: 'must-not-leak',
+      }],
+    }),
+  }
+  const adapter = {
+    search: async () => { throw new Error('Telegram local search must not call Night-All') },
+    capabilities: async () => ({ data: { platforms: [] } }),
+  }
+  const service = new HubService({ store, adapter, apiKeyPepper: PEPPER, searchQueries })
+  const tenant = await service.createTenant({ name: 'Telegram tenant' })
+  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Telegram consumer' })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Telegram key' })
+  await service.putPlatformConfiguration('telegram', {
+    tenantId: tenant.id, consumerId: consumer.id, enabled: true,
+    maxRequests: 20, windowSeconds: 3600, maxPageSize: 20,
+  })
+  const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN })
+
+  await withServer(app, async (baseUrl) => {
+    const authorization = { authorization: `Bearer ${key.secret}` }
+    const body = {
+      query: 'keyword', scope: 'messages', chatId: '-1007', authorId: 'user-1',
+      from: '2026-08-01T00:00:00Z', to: '2026-08-10T23:59:59Z', pageSize: 1,
+    }
+    const missingKey = await call(baseUrl, '/api/v1/data/telegram/search', {
+      method: 'POST', headers: authorization, body,
+    })
+    assert.equal(missingKey.response.status, 400)
+    assert.equal(missingKey.payload.error.code, 'idempotency_key_required')
+
+    const headers = { ...authorization, 'idempotency-key': 'telegram-search-0001' }
+    const first = await call(baseUrl, '/api/v1/data/telegram/search', {
+      method: 'POST', headers, body,
+    })
+    assert.equal(first.response.status, 200)
+    assert.equal(first.response.headers.get('idempotent-replay'), 'false')
+    assert.equal(first.payload.data.contractVersion, 'night-all.data-search.v1')
+    assert.equal(first.payload.data.meta.capability, 'search_posts')
+    assert.equal(first.payload.data.meta.sourceProvider, 'mx-insight-hub')
+    assert.equal(first.payload.data.meta.endpointId, 'hub-canonical-search')
+    assert.deepEqual(first.payload.data.items[0].source, {
+      provider: null, endpointId: 'hub-canonical-search',
+    })
+    assert.deepEqual(first.payload.data.items[0].metrics, {
+      likes: null, comments: null, shares: null, views: 12, bookmarks: null,
+    })
+    assert.equal(first.payload.data.pageInfo.cursorType, 'opaque')
+    assert.ok(first.payload.data.pageInfo.nextCursor)
+    assert.deepEqual(first.payload.data.warnings, [{
+      code: 'search_projection_degraded',
+      message: 'Elasticsearch unavailable or disabled; PostgreSQL substring search was used.',
+    }])
+    assert.equal(JSON.stringify(first.payload).includes('must-not-leak'), false)
+    assert.deepEqual(contentCalls[0], {
+      query: 'keyword',
+      options: {
+        platform: 'telegram',
+        datasetIds: ['telegram.monitor.messages.v1'],
+        objectType: 'message',
+        authorExternalId: 'user-1',
+        chatId: '-1007',
+        fromTime: '2026-08-01T00:00:00.000Z',
+        toTime: '2026-08-10T23:59:59.000Z',
+        size: 1,
+        cursor: null,
+      },
+    })
+
+    const replay = await call(baseUrl, '/api/v1/data/telegram/search', {
+      method: 'POST', headers, body,
+    })
+    assert.equal(replay.response.status, 200)
+    assert.equal(replay.response.headers.get('idempotent-replay'), 'true')
+    assert.equal(contentCalls.length, 1)
+
+    const second = await call(baseUrl, '/api/v1/data/telegram/search', {
+      method: 'POST',
+      headers: { ...authorization, 'idempotency-key': 'telegram-search-0003' },
+      body: { ...body, cursor: first.payload.data.pageInfo.nextCursor },
+    })
+    assert.equal(second.response.status, 200)
+    assert.equal(second.payload.data.pageInfo.pageIndex, 2)
+    assert.deepEqual(contentCalls[1].options.cursor, {
+      mode: 'postgres',
+      pitId: null,
+      searchAfter: ['2026-08-10T00:00:00.000Z', '11111111-1111-4111-8111-111111111111'],
+      seen: 1,
+    })
+
+    const generic = await call(baseUrl, '/api/v1/data/search', {
+      method: 'POST',
+      headers: { ...authorization, 'idempotency-key': 'telegram-search-0002' },
+      body: { platform: 'telegram', query: 'keyword', pageSize: 1 },
+    })
+    assert.equal(generic.response.status, 200)
+    assert.equal(generic.payload.data.platform, 'telegram')
+    assert.equal(contentCalls[2].options.objectType, 'message')
+
+    const entities = await call(baseUrl, '/api/v1/data/telegram/entities/search?query=alice&pageSize=5', {
+      headers: authorization,
+    })
+    assert.equal(entities.response.status, 200)
+    assert.equal(entities.payload.data.items.length, 2)
+    assert.equal(entities.payload.data.items[0].entityType, 'chat')
+    assert.equal(JSON.stringify(entities.payload).includes('must-not-leak'), false)
   })
 })
 

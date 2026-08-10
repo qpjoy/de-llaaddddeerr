@@ -102,6 +102,11 @@ export function loadConfig(environment = process.env) {
     ),
     storeDriver,
     databaseUrl,
+    // One platform trust root encrypts per-provider passwords stored by the
+    // control plane. It is optional so public-only listeners and deployments
+    // that still use legacy dsnEnv sources do not gain access to source
+    // credentials merely by starting.
+    providerMasterKey: environment.MX_INSIGHT_PROVIDER_MASTER_KEY?.trim() || null,
     nightAll: {
       baseUrl: environment.NIGHT_ALL_BASE_URL || 'http://127.0.0.1:13141',
       timeoutMs: nightAllTimeoutMs,

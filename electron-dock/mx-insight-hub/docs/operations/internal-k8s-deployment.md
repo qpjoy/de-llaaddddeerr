@@ -6,7 +6,8 @@ The `mx-insight-hub` namespace contains only Hub workloads and their runtime
 configuration:
 
 - schema migration Job;
-- two-replica public API Deployment/ClusterIP Service on `18150`;
+- one-replica public API Deployment/ClusterIP Service on `18150` (the current
+  host-network profile cannot place two pods on the same node/port);
 - one-replica Admin/API/UI Deployment/ClusterIP Service on `18151`;
 - independent projector and ingest worker Deployments;
 - ServiceAccount and ingress NetworkPolicies.
@@ -30,27 +31,42 @@ Create `.env.internal` with mode `0600`:
 ```bash
 MX_INSIGHT_ADMIN_TOKEN=<long-random-token>
 MX_INSIGHT_API_KEY_PEPPER=<long-random-pepper>
+MX_INSIGHT_PROVIDER_MASTER_KEY=<32-byte-base64-or-64-hex>
 NIGHT_ALL_BASE_URL=http://192.168.1.2:13141
 NIGHT_ALL_SERVICE_TOKEN=<night-all-workload-token-when-supported>
 
 # Optional: mx-common otherwise generates and retains the Hub database password.
 MX_INSIGHT_POSTGRES_PASSWORD=<explicit-url-safe-password-if-pinning-is-required>
 
-# Optional until a reviewed Telegram source is activated; must be read-only.
+# Legacy source compatibility only. New source credentials are registered in
+# the Hub Admin console/API and encrypted under MX_INSIGHT_PROVIDER_MASTER_KEY.
 MX_INSIGHT_TG_MONITOR_DATABASE_URL=<night-all-readonly-postgres-dsn>
 ```
 
 Generate independent values (for example, `openssl rand -hex 32`). Do not reuse
-the Admin Token as an API key, database password or source credential. The
+the Admin Token as an API key, provider master key, database password or source
+credential. The
 deploy script renders a ConfigMap and Secrets with `kubectl create
 --dry-run=client | kubectl apply`; values are not written into manifests or the
 Hub source catalog.
 
 The Hub database DSN is returned by `mx-common provision` and stored in the Hub
-runtime Secret. Repeated deploys reuse the credential. The optional Telegram
-source DSN is injected only into Admin/ingest workloads; the public API reads
-Hub PostgreSQL and does not need direct source access. Source rows store only
-the environment-variable name `MX_INSIGHT_TG_MONITOR_DATABASE_URL`.
+runtime Secret. Repeated deploys reuse the credential. The provider master key
+is injected only into Admin and ingest workloads; the public API reads Hub
+PostgreSQL and cannot decrypt source credentials. Provider passwords are
+write-only Admin input and are stored as AES-256-GCM envelopes in the catalog;
+coordinates are allowlisted. This lets operators update/test a source without
+rebuilding or redeploying Hub. The optional legacy Telegram DSN has the same
+Admin/ingest-only boundary.
+
+The deploy refuses a retained provider-master-key mismatch. A Hub database
+restore containing provider envelopes is incomplete without the original key;
+rotation requires an explicit decrypt/re-encrypt procedure, not an environment
+variable replacement.
+
+Production deploy treats the master key as an explicit release prerequisite
+for the Provider Admin surface and provider-backed ingest. Admin/combined and
+ingest receive the same retained key; public must not receive it.
 
 ## Independent deploy
 
@@ -139,9 +155,10 @@ namespace selector alone cannot identify host-network traffic.
 - add bounded list/usage windows and aggregate projections where still absent;
 - complete metrics/traces/log retention, alerting and request reconciliation;
 - complete exact Night-All workload identity plus route/TLS review;
-- for Telegram monitor, prove the external read-only role, real schema,
-  watermark/ID/index contract, shape preview, rejection rate, deletion
-  semantics and rollback using the dedicated
+- for Telegram monitor, the real source schema/identity/tombstone fields are
+  recorded, but prove the external read-only role and the still-open unified
+  watermark/ID/index/commit-order contract, shape preview, rejection/replay and
+  rollback using the dedicated
   [ingestion runbook](telegram-monitor-ingestion.md).
 
 Until these gates close, `internal-production` means the Internal K8s deployment
@@ -149,10 +166,13 @@ profile, not approval for public internet exposure.
 
 ## Data-plane expansion boundary
 
-Canonical PostgreSQL storage, queues, ingest/projector workers, shared
+Canonical PostgreSQL storage/tombstones, direct file import, encrypted
+PostgreSQL providers, queues, ingest/projector workers, shared
 Elasticsearch/Redis integration and optional HanLP are implemented. Immutable
-raw object storage, `/shared_dir` watcher, freshness-aware cache/fallback,
-production CDC/delete propagation, BI datasets and governed Text2SQL remain
-separate future capabilities. A shared search outage may degrade retrieval but
+raw object/cloud storage, `/shared_dir` watcher, freshness-aware live fallback,
+generic CDC, non-PostgreSQL providers, BI datasets and governed Text2SQL remain
+separate future capabilities. A mapped source tombstone is propagated today;
+the open Telegram issue is obtaining a watermark that reliably observes every
+edit/delete. A shared search outage may degrade retrieval but
 must not stop authoritative PostgreSQL ingest, billing evidence, Launcher or
 MX-H2I networking.

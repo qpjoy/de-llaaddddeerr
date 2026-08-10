@@ -39,6 +39,23 @@ paths:
   /data/search:
     post:
       operationId: searchData
+      description: >-
+        Stable Night-All-v1 search facade. For platform telegram, Hub serves
+        canonical local data with the same fixed item source and response meta
+        labels documented by /data/telegram/search; PostgreSQL degradation is
+        represented only by warnings. Other enabled platforms use the governed
+        private Night-All adapter. Telegram pagination follows the signed,
+        query-bound cursor, PIT/keyset and sticky-mode rules documented by
+        /data/telegram/search.
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields, unsupported_match_mode, idempotency_key_required, invalid_idempotency_key]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
+        "410": [search_cursor_expired]
+        "429": [quota_exceeded]
+        "502": [night_all_rejected, upstream_outcome_unknown]
+        "503": [stored_search_unavailable, search_cursor_unavailable]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -60,12 +77,23 @@ paths:
               schema: { type: string, enum: ["true", "false"] }
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
+              schema:
+                $ref: "#/components/schemas/NightAllDataSearchEnvelope"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
         "409":
+          $ref: "#/components/responses/Error"
+        "410":
           $ref: "#/components/responses/Error"
         "429":
           $ref: "#/components/responses/Error"
         "502":
+          $ref: "#/components/responses/Error"
+        "503":
           $ref: "#/components/responses/Error"
   /data/telegram/chats:
     get:
@@ -134,6 +162,107 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/TelegramPage"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /data/telegram/search:
+    post:
+      operationId: searchStoredTelegram
+      summary: Search canonical Telegram chats/messages without an upstream provider call.
+      description: >-
+        Returns the Night-All data-search v1 envelope from Hub-owned canonical
+        storage. Elasticsearch is the ranked projection; PostgreSQL substring
+        search is the documented degraded path and is reported only through a
+        search_projection_degraded warning, never through meta.searchMode.
+        Every item has source.provider null and source.endpointId
+        hub-canonical-search; response meta has sourceProvider mx-insight-hub
+        and endpointId hub-canonical-search. These are serving-plane labels;
+        physical source/provider identity and credentials are never returned.
+        Night-All-v1 metrics are non-negative numbers or null; invalid or
+        negative source sentinels are normalized to null. Pagination uses an
+        HMAC-signed version-2 opaque cursor bound to the normalized query,
+        filters and page size. Elasticsearch uses a renewable two-minute PIT,
+        _score/eventTime/id search_after and size plus one, independent of
+        result totals and the 10,000-hit window. PostgreSQL fallback uses a
+        NULL-aware event_time/id keyset and never OFFSET. First-page ES failure
+        may select PostgreSQL with a warning; the selected cursor mode is sticky.
+        An unavailable existing ES cursor returns 503 without fallback, and an
+        expired PIT returns 410.
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields, unsupported_match_mode, idempotency_key_required, invalid_idempotency_key]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
+        "410": [search_cursor_expired]
+        "429": [quota_exceeded]
+        "503": [stored_search_unavailable, search_cursor_unavailable]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TelegramSearchRequest"
+      responses:
+        "200":
+          description: Night-All-v1-compatible stored search response.
+          headers:
+            x-mx-insight-request-id:
+              schema: { type: string, format: uuid }
+            idempotent-replay:
+              schema: { type: string, enum: ["true", "false"] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NightAllDataSearchPlatformEnvelope"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "410":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /data/telegram/entities/search:
+    get:
+      operationId: searchTelegramEntities
+      summary: Fuzzy-search Telegram authors and chats from Hub projections.
+      description: >-
+        Searches names/usernames and chat titles/usernames. Elasticsearch uses
+        ranked name/prefix/CJK fields and PostgreSQL trigram/substring search is
+        the documented fallback. This metered safe GET makes no Night-All call.
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: Ranked union of author and chat entities.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
         "400":
           $ref: "#/components/responses/Error"
         "401":
@@ -243,7 +372,201 @@ components:
         platform: { type: string, pattern: "^(?![Aa][Ll][Ll]$|\\*$)[A-Za-z0-9_:-]+$", description: One explicit platform; `all` (case-insensitive) and `*` are forbidden., example: xiaohongshu }
         query: { type: string, minLength: 1, maxLength: 500, description: Non-blank search query; surrounding whitespace is trimmed. }
         pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
-        cursor: { type: string, minLength: 1, maxLength: 1024, description: Non-blank opaque cursor returned by the previous page; send it unchanged. }
+        cursor: { type: string, minLength: 1, maxLength: 8192, description: Non-blank opaque cursor returned by the previous page; send it unchanged. Telegram cursors are signed and bound to the normalized request. }
+    TelegramSearchRequest:
+      type: object
+      additionalProperties: false
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 500 }
+        scope: { type: string, enum: [messages, chats, all], default: messages }
+        chatId: { type: string, minLength: 1, maxLength: 256 }
+        authorId: { type: string, minLength: 1, maxLength: 256 }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        matchMode: { type: string, const: full_text, default: full_text }
+        pageSize: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        cursor:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          description: HMAC-signed version-2 opaque nextCursor bound to the normalized query, filters, match mode and page size; return unchanged.
+    NightAllDataSearchEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          $ref: "#/components/schemas/NightAllDataSearchPlatformResult"
+        requestId: { type: string, format: uuid }
+        traceId: { type: string }
+    NightAllDataSearchPlatformEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          $ref: "#/components/schemas/NightAllDataSearchPlatformResult"
+        requestId: { type: string, format: uuid }
+        traceId: { type: string }
+    NightAllDataSearchPlatformResult:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, platform, query, items, pageInfo, status, warnings, meta]
+      properties:
+        contractVersion: { type: string, const: night-all.data-search.v1 }
+        platform: { type: string, minLength: 1 }
+        query: { type: string, minLength: 1 }
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/NightAllDataSearchItem"
+        pageInfo:
+          $ref: "#/components/schemas/NightAllDataSearchPageInfo"
+        status: { type: string, enum: [ok, partial, failed] }
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/NightAllDataSearchWarning"
+        meta:
+          $ref: "#/components/schemas/NightAllDataSearchMeta"
+    NightAllDataSearchMultiResult:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, query, status, results, warnings, meta]
+      properties:
+        contractVersion: { type: string, const: night-all.data-search.v1 }
+        query: { type: string, minLength: 1 }
+        status: { type: string, enum: [ok, partial, failed] }
+        results:
+          type: array
+          minItems: 1
+          maxItems: 15
+          items:
+            $ref: "#/components/schemas/NightAllDataSearchPlatformResult"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/NightAllDataSearchWarning"
+        meta:
+          type: object
+          additionalProperties: false
+          required: [requestedPlatforms, succeeded, failed, concurrency, durationMs]
+          properties:
+            requestedPlatforms: { type: integer, minimum: 1, maximum: 15 }
+            succeeded: { type: integer, minimum: 0, maximum: 15 }
+            failed: { type: integer, minimum: 0, maximum: 15 }
+            concurrency: { type: integer, minimum: 1, maximum: 15 }
+            durationMs: { type: integer, minimum: 0 }
+    NightAllDataSearchItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - externalId
+        - platform
+        - contentType
+        - url
+        - title
+        - text
+        - publishedAt
+        - collectedAt
+        - author
+        - metrics
+        - media
+        - source
+      properties:
+        id: { type: string, minLength: 1 }
+        externalId: { type: [string, "null"] }
+        platform: { type: string, minLength: 1 }
+        contentType: { type: [string, "null"] }
+        url: { type: [string, "null"] }
+        title: { type: [string, "null"] }
+        text: { type: [string, "null"] }
+        publishedAt: { type: [string, "null"], format: date-time }
+        collectedAt: { type: [string, "null"], format: date-time }
+        author:
+          type: object
+          additionalProperties: false
+          required: [id, name, avatarUrl]
+          properties:
+            id: { type: [string, "null"] }
+            name: { type: [string, "null"] }
+            avatarUrl: { type: [string, "null"] }
+        metrics:
+          type: object
+          additionalProperties: false
+          required: [likes, comments, shares, views, bookmarks]
+          properties:
+            likes: { type: [number, "null"], minimum: 0 }
+            comments: { type: [number, "null"], minimum: 0 }
+            shares: { type: [number, "null"], minimum: 0 }
+            views: { type: [number, "null"], minimum: 0 }
+            bookmarks: { type: [number, "null"], minimum: 0 }
+        media:
+          type: object
+          additionalProperties: false
+          required: [coverUrl, images, videos]
+          properties:
+            coverUrl: { type: [string, "null"] }
+            images:
+              type: array
+              items: { type: string }
+            videos:
+              type: array
+              items: { type: string }
+        source:
+          type: object
+          additionalProperties: false
+          description: >-
+            Generic Night-All-backed responses retain this object but redact its
+            provider/endpoint members. Stored Telegram search returns both known
+            members with provider null and endpointId hub-canonical-search.
+          properties:
+            provider:
+              oneOf:
+                - { type: string, enum: [tikhub, rapidapi, justone] }
+                - { type: "null" }
+            endpointId: { type: [string, "null"] }
+    NightAllDataSearchPageInfo:
+      type: object
+      additionalProperties: false
+      required: [pageIndex, pageSize, returnedCount, hasMore, nextCursor, cursorType]
+      properties:
+        pageIndex: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 0, maximum: 100 }
+        returnedCount: { type: integer, minimum: 0, maximum: 100 }
+        hasMore: { type: boolean }
+        nextCursor: { type: [string, "null"], maxLength: 8192, description: Opaque cursor for the next page; search callers return it unchanged. }
+        cursorType: { type: string, enum: [opaque, none] }
+    NightAllDataSearchWarning:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string, minLength: 1 }
+        message: { type: string, minLength: 1 }
+    NightAllDataSearchMeta:
+      type: object
+      additionalProperties: false
+      properties:
+        capability: { type: string, const: search_posts }
+        capabilityStatus: { type: string, enum: [declared, catalogued, ready, degraded, disabled] }
+        paginationMode: { type: string, enum: [cursor, compound, page, offset, composite, none, unknown] }
+        sourceProvider: { type: [string, "null"], minLength: 1 }
+        endpointId: { type: [string, "null"], minLength: 1 }
+        providerCalls: { type: integer, minimum: 0 }
+        durationMs: { type: integer, minimum: 0 }
+        error:
+          $ref: "#/components/schemas/NightAllDataSearchError"
+    NightAllDataSearchError:
+      type: object
+      additionalProperties: false
+      required: [code, message, statusCode]
+      properties:
+        code: { type: string, minLength: 1 }
+        message: { type: string, minLength: 1 }
+        statusCode: { type: integer, minimum: 400, maximum: 599 }
     RequestStatus:
       type: object
       required: [id, platform, status]
@@ -260,6 +583,7 @@ components:
       additionalProperties: false
       required:
         - id
+        - externalId
         - platform
         - objectType
         - contentType
@@ -272,11 +596,19 @@ components:
         - metrics
         - eventTime
         - collectedAt
+        - editedAt
+        - media
+        - entities
+        - links
+        - lineage
         - dataVersion
       properties:
         id:
           type: string
           description: Stable external identity within the fixed Hub dataset.
+        externalId:
+          type: string
+          description: Alias of id retained for data-search contract compatibility.
         platform: { type: string, const: telegram }
         objectType: { type: string, enum: [chat, message] }
         contentType: { type: [string, "null"] }
@@ -286,10 +618,11 @@ components:
         author:
           type: object
           additionalProperties: false
-          required: [id, name]
+          required: [id, name, username]
           properties:
             id: { type: [string, "null"] }
             name: { type: [string, "null"] }
+            username: { type: [string, "null"] }
         relations:
           type: object
           additionalProperties: false
@@ -297,6 +630,8 @@ components:
             chatId: { type: string }
             messageId: { type: string }
             replyToMessageId: { type: string }
+            threadId: { type: string }
+            groupedId: { type: string }
         attributes:
           type: object
           additionalProperties: false
@@ -304,6 +639,7 @@ components:
             username: { type: string }
             chatType: { type: string }
             memberCount: { type: number }
+            isOutgoing: { type: boolean }
         metrics:
           type: object
           additionalProperties: false
@@ -314,8 +650,47 @@ components:
             views: { type: number }
             bookmarks: { type: number }
             members: { type: number }
+        media:
+          type: object
+          additionalProperties: false
+          properties:
+            media_kind: { type: string }
+            status: { type: string }
+            telegram_id: { type: string }
+            file_name: { type: string }
+            extension: { type: string }
+            mime_type: { type: string }
+            size_bytes: { type: number }
+        entities:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              type: { type: string }
+              offset: { type: number }
+              length: { type: number }
+              url: { type: string }
+              user_id: { type: number }
+        links:
+          type: array
+          maxItems: 0
+          description: >-
+            Always empty in this contract version. Source link members remain
+            private until their object fields have an explicit reviewed
+            allowlist and versioned public schema.
+          items: {}
         eventTime: { type: [string, "null"], format: date-time }
         collectedAt: { type: [string, "null"], format: date-time }
+        editedAt: { type: [string, "null"], format: date-time }
+        lineage:
+          type: object
+          additionalProperties: false
+          required: [datasetId, origin]
+          properties:
+            datasetId: { type: string, enum: [telegram.monitor.chats.v1, telegram.monitor.messages.v1] }
+            origin: { type: string, enum: [hub-direct, hub-import] }
         dataVersion: { type: string }
     TelegramPageInfo:
       type: object

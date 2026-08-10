@@ -137,8 +137,25 @@ export const adminApi = {
   revokeMembership: (token, body) => request(token, `${ADMIN_ROOT}/members/memberships/revoke`, { method: 'POST', body }),
 
   // External sources (P4).
+  sourceProviderTypes: (token) => request(token, `${ADMIN_ROOT}/source-provider-types`),
+  sourceProviders: (token) => request(token, `${ADMIN_ROOT}/source-providers`),
+  createSourceProvider: (token, body) => request(
+    token, `${ADMIN_ROOT}/source-providers`, { method: 'POST', body },
+  ),
+  updateSourceProvider: (token, key, body) => request(
+    token, `${ADMIN_ROOT}/source-providers/${encodeURIComponent(key)}`, { method: 'PUT', body },
+  ),
+  deleteSourceProvider: (token, key) => request(
+    token, `${ADMIN_ROOT}/source-providers/${encodeURIComponent(key)}`, { method: 'DELETE' },
+  ),
+  testSourceProvider: (token, key) => request(
+    token, `${ADMIN_ROOT}/source-providers/${encodeURIComponent(key)}/test`, { method: 'POST' },
+  ),
   sources: (token) => request(token, `${ADMIN_ROOT}/sources`),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
+  updateSource: (token, key, body) => request(
+    token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },
+  ),
   sourceMappings: (token, key) => request(token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/mappings`),
   createMapping: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/mappings`, { method: 'POST', body },
@@ -146,15 +163,26 @@ export const adminApi = {
   approveMapping: (token, key, version) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/mappings/${version}/approve`, { method: 'POST' },
   ),
-  previewImport: (token, key, file) => request(
+  previewImport: (token, key, file, { useAgent = false } = {}) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/preview`,
-    { method: 'POST', raw: file, query: { filename: file.name } },
+    { method: 'POST', raw: file, query: { filename: file.name, agent: useAgent } },
   ),
   runImport: (token, key, file) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/import`,
     { method: 'POST', raw: file, query: { filename: file.name } },
   ),
   importRuns: (token, key) => request(token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/imports`),
+  sourceSchema: (token, key) => request(token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/schema`),
+  previewDatabaseSource: (token, key, limit = 3) => request(
+    token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/preview`, { query: { limit } },
+  ),
+  sourceSync: (token, key) => request(token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/sync`),
+  runSourceSync: (token, key, body = {}) => request(
+    token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/sync`, { method: 'POST', body },
+  ),
+  resetSourceCheckpoint: (token, key, body) => request(
+    token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/checkpoint/reset`, { method: 'POST', body },
+  ),
 
   // Backfill (P3), agent (P5) and retrieval (embedding pipeline).
   backfill: (token) => request(token, `${ADMIN_ROOT}/backfill`),

@@ -1,6 +1,10 @@
 # 数据平台存储、检索与服务架构
 
-状态：目标设计；现有 MVP 只实现租户、Consumer、API Key、平台授权、请求幂等、用量记录和 Night-All 同步搜索适配器。本文中的 PostGIS、对象存储、数据目录、导入流水线、Elasticsearch 投影、缓存和 BI 聚合均未接入生产。
+状态：目标设计与当前落地并存。现有实现已包含租户/Consumer/API Key/
+授权/幂等/用量、Night-All 搜索适配器、加密 PostgreSQL source provider、
+文件与数据库导入、canonical/revision/tombstone、outbox、Elasticsearch 投影
+及 PostgreSQL 降级检索。PostGIS、不可变对象/云存储、`/shared_dir` watcher、
+通用 CDC、fresh/stale 缓存和 BI 聚合仍是后续能力，不能按本文目标图宣称已上线。
 
 ## 1. 目标与边界
 
@@ -25,8 +29,8 @@ flowchart LR
 
 责任边界保持不变：
 
-- Night-All 负责 provider、采集、provider fallback、上游凭据和一手来源证据。
-- Hub 负责客户身份、订阅和授权、稳定响应、规范化产品视图、查询缓存、数据发布版本和用量账本。
+- Night-All 负责其 API/TGStat 等上游 provider、采集、fallback、凭据和一手来源证据。
+- Hub 负责客户身份、订阅和授权、稳定响应、规范化产品视图、查询缓存、数据发布版本和用量账本；对管理员直接注册的数据库/文件来源，Hub 也负责 provider 凭据加密、映射、checkpoint 和任务证据。
 - Launcher 负责人类登录、AppCenter 入口、K8s 生命周期和网络路由；它不保存 Hub 的数据、余额或客户 API Key。
 - Elasticsearch 是查询投影，Kibana 是内部运维工具；两者都不是事实库或备份。
 
@@ -162,17 +166,39 @@ Night-All 现有 `lat/lng + geo JSONB` 可作为来源字段，Hub 规范层增�
 
 ### 4.1 投影而非双写
 
-业务事务只提交 PG + outbox。独立 projector 消费 outbox，并以 `canonical_record.id` 作为 ES `_id`、以单调 `projection_revision` 做外部版本控制。失败事件进入 DLQ，修复后可重放；全量 reindex 从已发布 PG snapshot/Parquet 重建。
+业务事务只提交 PG + outbox。独立 projector 消费 outbox，并以
+`canonical_record.id` 作为 ES `_id`、以单调 `projection_revision` 做外部版本
+控制。每次 claim 都重读 PG 当前行，而不是信任旧事件 payload；当前行已删除/
+tombstone 就发 delete，否则发 index。失败事件进入 DLQ，修复后可重放；全文
+current index 可直接从 PG canonical current state 重建。
 
 索引命名建议：
 
 ```text
-mx-insight-content-v1-000001     write alias: mx-insight-content-v1-write
-                                 read alias:  mx-insight-content-v1
+mx-insight-hub-content-v2-current  current concrete index
+mx-insight-hub-content             read alias
+mx-insight-hub-content-v2          compatible write alias
+
+mx-insight-hub-chunk-v1-current    semantic current concrete index
+mx-insight-hub-chunk               read alias
+mx-insight-hub-chunk-v1            compatible write alias
 logs-mx-insight-*                observability data stream
 ```
 
-mapping 使用 `dynamic: strict`；provider 扩展如确需检索放入 `flattened`，避免 mapping explosion。租户字段、平台、对象类型、schema version 使用 `keyword`；正文使用 `text`；经纬度使用 `geo_point`；时间使用 `date`。
+content/chunk 都是 mutable current-state projection，不使用 ILM rollover。
+启动 reconcile 在 PG advisory lock 下把 PG current truth 扫入唯一 `*-current`，
+原子切换 read/兼容 write alias 后再扫第二遍；这避免相同 `_id` 残留在多个
+backing index，被 read alias 继续命中。mapping 使用 `dynamic: strict`；provider
+扩展如确需检索放入 `flattened`，避免 mapping explosion。平台、对象类型、schema
+version 使用 `keyword`；正文使用 `text`；经纬度使用 `geo_point`；时间使用
+`date`。
+
+语义检索独立使用 chunk index。PG `record_chunks` 保存当前切片与已生成向量；
+内容缩短、chunker 变化、低于切片阈值或 canonical tombstone 时，同一 PG 事务
+先登记旧 chunk 文档 ID 到 durable delete queue，再删除/替换 authoritative
+chunks。worker 在生成新 embedding 前投递 externally-versioned delete，并只在
+成功后 ack，因此模型 provider 下线或 worker 崩溃都不会让已删除文本永久留在
+语义检索。chunk index 可从 PG 当前 chunk/vector 重建，无需重新付费 embedding。
 
 ### 4.2 HanLP 中文处理
 
@@ -198,7 +224,11 @@ mapping 使用 `dynamic: strict`；provider 扩展如确需检索放入 `flatten
 
 ### 4.4 实体检索、模糊匹配与联想
 
-账号/用户检索与正文检索语义不同，不塞进 `mx-insight-content-v1-*`（该索引 `dynamic: strict` 且面向内容对象）。使用独立投影索引：
+账号/用户检索与正文检索语义不同。当前实现先在 strict content 投影中
+显式加入 `authorName`/`authorHandle`，按作者聚合；Telegram chat 的
+title/username 也使用显式字段。这样已有 canonical/outbox 可立即支持模糊作者
+和 chat 检索，ES 不可用时退回 PG trigram/substring。独立 entity 索引是数据量
+或 type-ahead 负载证明现有方式不足后的扩展，而不是当前已部署组件：
 
 ```text
 mx-insight-entity-v1-000001      write alias: mx-insight-entity-v1-write

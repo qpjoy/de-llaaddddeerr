@@ -291,6 +291,7 @@ require_production_env() {
   load_env_file "${ROOT_DIR}/.env.internal"
   : "${MX_INSIGHT_ADMIN_TOKEN:?MX_INSIGHT_ADMIN_TOKEN is required in .env.internal or the environment}"
   : "${MX_INSIGHT_API_KEY_PEPPER:?MX_INSIGHT_API_KEY_PEPPER is required in .env.internal or the environment}"
+  : "${MX_INSIGHT_PROVIDER_MASTER_KEY:?MX_INSIGHT_PROVIDER_MASTER_KEY is required in .env.internal or the environment}"
   # MX_INSIGHT_POSTGRES_PASSWORD is optional: the database now lives in the
   # shared mx-common instance, which generates and stores the per-product
   # credential itself. Set it only to pin a specific password.
@@ -302,6 +303,18 @@ require_production_env() {
   MX_INSIGHT_HUB_ADMIN_ENTRYPOINT="${MX_INSIGHT_HUB_ADMIN_ENTRYPOINT:-http://10.88.88.88:18151}"
   [ "${#MX_INSIGHT_ADMIN_TOKEN}" -ge 32 ] || die "MX_INSIGHT_ADMIN_TOKEN must be at least 32 characters"
   [ "${#MX_INSIGHT_API_KEY_PEPPER}" -ge 32 ] || die "MX_INSIGHT_API_KEY_PEPPER must be at least 32 characters"
+  if ! MX_INSIGHT_PROVIDER_MASTER_KEY="$MX_INSIGHT_PROVIDER_MASTER_KEY" node -e '
+    const value = process.env.MX_INSIGHT_PROVIDER_MASTER_KEY || ""
+    const hex = /^[0-9a-fA-F]{64}$/.test(value)
+    const base64 = /^[A-Za-z0-9+/]+={0,2}$/.test(value)
+      && Buffer.from(value, "base64").length === 32
+      && Buffer.from(value, "base64").toString("base64").replace(/=+$/, "") === value.replace(/=+$/, "")
+    process.exit(hex || base64 ? 0 : 1)
+  '; then
+    die "MX_INSIGHT_PROVIDER_MASTER_KEY must be a 32-byte base64 value or 64 hexadecimal characters"
+  fi
+  [ "$MX_INSIGHT_PROVIDER_MASTER_KEY" != "0000000000000000000000000000000000000000000000000000000000000000" ] \
+    || die "The local example source-provider master key cannot be used for internal-production"
   if [ -n "${MX_INSIGHT_POSTGRES_PASSWORD:-}" ]; then
     [ "${#MX_INSIGHT_POSTGRES_PASSWORD}" -ge 24 ] || die "MX_INSIGHT_POSTGRES_PASSWORD must be at least 24 characters"
   fi
@@ -371,6 +384,22 @@ validate_existing_runtime_secret() {
     MX_INSIGHT_API_KEY_PEPPER \
     "$MX_INSIGHT_API_KEY_PEPPER" \
     "API-key pepper differs from the retained deployment; automatic rotation is blocked because existing API keys would stop validating. Restore the original .env.internal value or use an explicit key-rotation procedure."
+
+  # The key was introduced after the original Secret. Its absence is a safe
+  # first-time bootstrap, but once present it must not drift: existing encrypted
+  # provider passwords would become undecryptable.
+  local provider_key_existing provider_key_desired
+  if [ -n "${MX_INSIGHT_PROVIDER_MASTER_KEY:-}" ]; then
+    provider_key_existing="$(
+      kubectl -n "$namespace" get secret mx-insight-hub-secrets \
+        -o "jsonpath={.data['MX_INSIGHT_PROVIDER_MASTER_KEY']}"
+    )"
+    if [ -n "$provider_key_existing" ]; then
+      provider_key_desired="$(encoded_secret_value "$MX_INSIGHT_PROVIDER_MASTER_KEY")"
+      [ "$provider_key_existing" = "$provider_key_desired" ] \
+        || die "Source-provider master key differs from the retained deployment; automatic rotation is blocked because registered source credentials would stop decrypting. Restore the original value or use a reviewed re-encryption procedure."
+    fi
+  fi
 }
 
 # Locate the Launcher User Center in the cluster.
@@ -495,6 +524,9 @@ create_runtime_config() {
     --from-literal=NIGHT_ALL_SERVICE_TOKEN="${NIGHT_ALL_SERVICE_TOKEN:-}"
     --from-literal=NIGHT_ALL_EXPORT_TOKEN="${NIGHT_ALL_EXPORT_TOKEN:-}"
   )
+  if [ -n "${MX_INSIGHT_PROVIDER_MASTER_KEY:-}" ]; then
+    secret_args+=(--from-literal=MX_INSIGHT_PROVIDER_MASTER_KEY="$MX_INSIGHT_PROVIDER_MASTER_KEY")
+  fi
   if [ -n "${MX_INSIGHT_TG_MONITOR_DATABASE_URL:-}" ]; then
     secret_args+=(--from-literal=MX_INSIGHT_TG_MONITOR_DATABASE_URL="$MX_INSIGHT_TG_MONITOR_DATABASE_URL")
   fi

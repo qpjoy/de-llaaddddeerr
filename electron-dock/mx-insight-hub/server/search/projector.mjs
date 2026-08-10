@@ -2,6 +2,7 @@ import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
 import { buildContentDocument } from './document.mjs'
+import { purgeStaleCurrentStateCopies } from './current-state.mjs'
 
 // Outbox -> Elasticsearch projector.
 //
@@ -92,29 +93,37 @@ export class SearchProjector {
   }
 
   async #markDelivered(eventIds) {
-    if (eventIds.length === 0) return
-    await this.pool.query(
+    if (eventIds.length === 0) return 0
+    const { rowCount } = await this.pool.query(
       `UPDATE outbox.projection_events
           SET status = 'delivered', delivered_at = now(), leased_until = NULL,
               locked_by = NULL, last_error = NULL
-        WHERE id = ANY($1::bigint[])`,
-      [eventIds],
+        WHERE id = ANY($1::bigint[])
+          AND status = 'claimed'
+          AND locked_by = $2`,
+      [eventIds, this.workerId],
     )
+    return rowCount
   }
 
   async #markFailed(failures) {
+    let transitioned = 0
     for (const [eventId, { attempts, error }] of failures) {
       const exhausted = attempts >= MAX_ATTEMPTS
-      await this.pool.query(
+      const { rowCount } = await this.pool.query(
         `UPDATE outbox.projection_events
             SET status = $2, last_error = $3, leased_until = NULL, locked_by = NULL
-          WHERE id = $1`,
-        [eventId, exhausted ? 'dead' : 'pending', String(error).slice(0, 2_000)],
+          WHERE id = $1
+            AND status = 'claimed'
+            AND locked_by = $4`,
+        [eventId, exhausted ? 'dead' : 'pending', String(error).slice(0, 2_000), this.workerId],
       )
-      if (exhausted) {
+      transitioned += rowCount
+      if (exhausted && rowCount > 0) {
         this.logger?.error?.(`[projector] event ${eventId} dead after ${attempts} attempts: ${error}`)
       }
     }
+    return transitioned
   }
 
   /**
@@ -131,88 +140,139 @@ export class SearchProjector {
     const runId = await this.#startRun(events.length)
     const records = await this.#loadRecords([...new Set(events.map((event) => event.aggregate_id))])
 
-    const operations = []
-    const eventByDocumentId = new Map()
-    const failures = new Map()
-
+    const eventsByAggregate = new Map()
     for (const event of events) {
-      if (event.event_type === 'delete') {
-        operations.push({ delete: { _index: this.indexSet.writeAlias, _id: event.aggregate_id } })
-        eventByDocumentId.set(event.aggregate_id, event)
-        continue
-      }
-      const record = records.get(event.aggregate_id)
-      if (!record) {
-        // The canonical row is gone (hard-deleted or never committed). There is
-        // nothing to project and retrying cannot help, so retire the event
-        // instead of letting it cycle until it dies.
-        failures.set(event.id, { attempts: MAX_ATTEMPTS, error: 'canonical record not found' })
-        continue
+      const aggregateEvents = eventsByAggregate.get(event.aggregate_id) || []
+      aggregateEvents.push(event)
+      eventsByAggregate.set(event.aggregate_id, aggregateEvents)
+    }
+    const failures = new Map()
+    const projections = []
+
+    for (const [aggregateId, aggregateEvents] of eventsByAggregate) {
+      const record = records.get(aggregateId)
+      const projectionRevision = record
+        ? Number(record.projection_revision)
+        : Math.max(...aggregateEvents.map((event) => Number(event.projection_revision)))
+      const projection = {
+        aggregateId,
+        aggregateEvents,
+        projectionRevision,
+        document: null,
+        deleted: !record || record.deleted_at != null,
       }
       try {
-        const document = await buildContentDocument(record, { segmenter: this.segmenter })
-        operations.push({
-          index: {
-            _index: this.indexSet.writeAlias,
-            _id: record.id,
-            // External versioning is the guard against out-of-order delivery:
-            // Elasticsearch refuses a write whose version is not greater than
-            // what it holds, so a late event can never clobber newer content.
-            version: Number(record.projection_revision),
-            version_type: 'external',
-          },
-        })
-        operations.push(document)
-        eventByDocumentId.set(record.id, event)
+        if (!projection.deleted) {
+          projection.document = await buildContentDocument(record, { segmenter: this.segmenter })
+        }
+        projections.push(projection)
       } catch (error) {
-        failures.set(event.id, { attempts: event.attempts, error: error.message })
+        for (const event of aggregateEvents) {
+          failures.set(event.id, { attempts: event.attempts, error: error.message })
+        }
       }
     }
 
     let delivered = []
-    if (operations.length > 0) {
-      let response
+    if (projections.length > 0) {
       try {
-        response = await this.client.bulk(operations)
-      } catch (error) {
-        if (error instanceof ElasticsearchUnavailableError) {
-          // Give the whole batch back untouched; this is not the events' fault.
-          await this.#releaseClaim(events.map((event) => event.id))
-          await this.#finishRun(runId, { delivered: 0, failed: 0, error: error.message })
-          throw error
+        // Schema migrations and ILM rollover can leave several concrete indices
+        // behind one read alias. `_id` and external versions are index-local, so
+        // first remove only obsolete copies whose revision is not newer than the
+        // PostgreSQL truth, then write that truth to the concrete current index.
+        const { currentIndex } = await purgeStaleCurrentStateCopies({
+          client: this.client,
+          indexSet: this.indexSet,
+          documents: projections.map((projection) => ({
+            id: projection.aggregateId,
+            version: projection.projectionRevision,
+          })),
+          versionField: 'projectionRevision',
+        })
+        const operations = []
+        const descriptors = []
+        for (const projection of projections) {
+          if (projection.deleted) {
+            operations.push({
+              delete: {
+                _index: currentIndex,
+                _id: projection.aggregateId,
+                version: projection.projectionRevision,
+                // A retried tombstone at the same revision must remain a
+                // successful delete rather than depend on conflict handling.
+                version_type: 'external_gte',
+              },
+            })
+            descriptors.push({ ...projection, operation: 'delete' })
+            continue
+          }
+          operations.push({
+            index: {
+              _index: currentIndex,
+              _id: projection.aggregateId,
+              version: projection.projectionRevision,
+              version_type: 'external',
+            },
+          })
+          operations.push(projection.document)
+          descriptors.push({ ...projection, operation: 'index' })
         }
-        throw error
-      }
+        const response = await this.client.bulk(operations)
+        this.#recordBulkOutcomes(response, descriptors, failures)
 
-      for (const item of response.items || []) {
-        const action = item.index || item.delete || {}
-        const event = eventByDocumentId.get(action._id)
-        if (!event) continue
-        // 409 version_conflict means the index already holds this revision or a
-        // newer one. That is the success case for a redelivered event, not an
-        // error: the projection is already at least as fresh as this event.
-        const isConflict = action.status === 409
-        if (!action.error || isConflict) delivered.push(event.id)
-        else failures.set(event.id, { attempts: event.attempts, error: JSON.stringify(action.error) })
+        for (const projection of projections) {
+          if (!projection.aggregateEvents.some((event) => failures.has(event.id))) {
+            delivered.push(...projection.aggregateEvents.map((event) => event.id))
+          }
+        }
+      } catch (error) {
+        if (!(error instanceof ElasticsearchUnavailableError)) throw error
+        // Give the whole batch back untouched; purge/index are idempotent, and a
+        // transport failure does not belong in any individual event's budget.
+        await this.#releaseClaim(events.map((event) => event.id))
+        await this.#finishRun(runId, { delivered: 0, failed: 0, error: error.message })
+        throw error
       }
     }
 
-    await this.#markDelivered(delivered)
-    await this.#markFailed(failures)
-    await this.#finishRun(runId, { delivered: delivered.length, failed: failures.size, error: null })
+    const deliveredCount = await this.#markDelivered(delivered)
+    const failedCount = await this.#markFailed(failures)
+    await this.#finishRun(runId, { delivered: deliveredCount, failed: failedCount, error: null })
 
-    return { claimed: events.length, delivered: delivered.length, failed: failures.size }
+    return { claimed: events.length, delivered: deliveredCount, failed: failedCount }
   }
 
   async #releaseClaim(eventIds) {
-    if (eventIds.length === 0) return
-    await this.pool.query(
+    if (eventIds.length === 0) return 0
+    const { rowCount } = await this.pool.query(
       `UPDATE outbox.projection_events
           SET status = 'pending', leased_until = NULL, locked_by = NULL,
               attempts = GREATEST(attempts - 1, 0)
-        WHERE id = ANY($1::bigint[])`,
-      [eventIds],
+        WHERE id = ANY($1::bigint[])
+          AND status = 'claimed'
+          AND locked_by = $2`,
+      [eventIds, this.workerId],
     )
+    return rowCount
+  }
+
+  #recordBulkOutcomes(response, descriptors, failures) {
+    const items = response?.items || []
+    for (const [index, descriptor] of descriptors.entries()) {
+      const item = items[index]
+      const action = item?.index || item?.delete
+      const status = Number(action?.status ?? 0)
+      const isConflict = status === 409
+      const isMissingDelete = descriptor.operation === 'delete' && status === 404
+      const succeeded = Boolean(action) && (!action.error || isConflict || isMissingDelete)
+      if (succeeded) continue
+      const error = action?.error
+        ? JSON.stringify(action.error)
+        : `missing ${descriptor.operation} result from Elasticsearch bulk response`
+      for (const event of descriptor.aggregateEvents) {
+        failures.set(event.id, { attempts: event.attempts, error })
+      }
+    }
   }
 
   async #startRun(claimed) {

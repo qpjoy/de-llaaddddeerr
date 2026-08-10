@@ -1,6 +1,7 @@
 # Elasticsearch、HanLP、Kibana 与日志组件
 
-状态：目标设计。仓库中的 `deploy/compose/search` 是本机/受控开发环境样板，不是生产批准，也尚未被 Hub API/projector 使用。
+状态：Hub content/chunk current-state projector 与 PG 降级查询已实现；仓库中的
+`deploy/compose/search` 仍只是本机/受控开发样板，不代表生产批准。
 
 ## 1. 结论
 
@@ -51,7 +52,9 @@ bash scripts/manage.sh search down
 - `mx-insight-logs-policy` 和日志 data-stream template；
 - 本地 fs snapshot repository。
 
-它不创建业务 index，也不从 PG 搬数据；只有未来 projector/reindex job 才能写业务文档。
+Compose bootstrap 本身不搬业务数据；当前 projector 启动后会 reconcile
+content 与（配置 embedding dimensions 时）chunk 的唯一 `*-current` 索引，
+从 PostgreSQL 扫描 current truth、原子切 alias，再异步排空 outbox/delete queue。
 
 ## 4. HanLP 集成
 
@@ -79,6 +82,7 @@ Elastic classic plugin 会校验精确 ES 版本。现有社区 `elasticsearch-a
 | 类型 | 内容 | Retention | 访问 |
 | --- | --- | --- | --- |
 | `mx-insight-content-*` | 客户安全规范记录 | 跟 dataset policy；reindex 管理 | Hub query service account |
+| `mx-insight-hub-chunk-*` | 当前语义切片与 embedding 投影 | 从 PG chunk/vector 重建 | Hub query/projector service account |
 | `logs-mx-insight-*` | API/worker/projector 结构化日志 | 本地 7/30 日样板；生产按合规 | 运维/Kibana space |
 | audit/usage | 权威审计和账本仍在 PG | 业务/合规策略 | Hub Admin，不依赖 Kibana |
 
@@ -101,9 +105,12 @@ K8s 内优先统一 stdout + 集群级 collector（Elastic Agent/Filebeat/Vector
 - ES/Kibana 同版本，版本和 image digest 固定；
 - 认证/TLS 开启，9200/5601 不直接公网或 H2I 全网开放；
 - 数据节点/副本、磁盘 watermark、JVM heap、PDB/反亲和按实际资源设计；
-- ILM/数据生命周期和 snapshot repository 指向独立对象存储；
+- 日志 ILM/数据生命周期和 snapshot repository 指向独立对象存储；content/chunk
+  current-state index 不做 rollover，避免旧 `_id` 在 read alias 下复活；
 - 升级前 snapshot + restore 验证、deprecation/Upgrade Assistant、plugin 清单和 rollback 计划；
 - projector 支持暂停、积压观测、重放和 alias 原子切换；
+- `core.chunk_projection_deletes` pending 数可观测；content/chunk 清空后均能从
+  PG current state 重建，chunk delete 在 embedding provider 不可用时仍可续投；
 - HanLP 服务与 ES 独立升级，模型 digest 跟随数据版本。
 
 不要从旧 8.13.4 直接把 data volume 挂给 9.x。先快照和验证受支持的逐步升级路径，或在新集群从 PG/object source 重建业务索引。

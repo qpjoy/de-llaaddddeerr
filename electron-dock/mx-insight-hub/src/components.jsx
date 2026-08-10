@@ -157,17 +157,62 @@ export function Field({ label, hint, children, className = '' }) {
 
 export function Modal({ title, description, children, footer, onClose, size = 'medium' }) {
   const titleId = useId()
+  const dialogRef = useRef(null)
+  const onCloseRef = useRef(onClose)
+  const returnFocusRef = useRef(null)
+  onCloseRef.current = onClose
+
   useEffect(() => {
+    returnFocusRef.current = document.activeElement
+    const dialog = dialogRef.current
+    const focusableSelector = [
+      'a[href]',
+      'button:not([disabled])',
+      'input:not([disabled]):not([type="hidden"])',
+      'select:not([disabled])',
+      'textarea:not([disabled])',
+      '[tabindex]:not([tabindex="-1"])',
+    ].join(',')
+    const focusableElements = () => [...(dialog?.querySelectorAll(focusableSelector) || [])]
     const onKeyDown = (event) => {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onCloseRef.current()
+        return
+      }
+      if (event.key !== 'Tab' || !dialog) return
+      const elements = focusableElements()
+      if (elements.length === 0) {
+        event.preventDefault()
+        dialog.focus()
+        return
+      }
+      const [first] = elements
+      const last = elements[elements.length - 1]
+      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+        event.preventDefault()
+        first.focus()
+      }
     }
     document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [onClose])
+    const frame = window.requestAnimationFrame(() => {
+      const initial = dialog?.querySelector('[autofocus]') || focusableElements()[0] || dialog
+      initial?.focus()
+    })
+    return () => {
+      window.cancelAnimationFrame(frame)
+      document.removeEventListener('keydown', onKeyDown)
+      const returnTarget = returnFocusRef.current
+      if (returnTarget instanceof HTMLElement && returnTarget.isConnected) returnTarget.focus()
+    }
+  }, [])
 
   return (
     <div className="mih-modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className={`mih-modal mih-modal--${size}`} role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <section ref={dialogRef} className={`mih-modal mih-modal--${size}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <header className="mih-modal__header">
           <div>
             <h2 id={titleId}>{title}</h2>

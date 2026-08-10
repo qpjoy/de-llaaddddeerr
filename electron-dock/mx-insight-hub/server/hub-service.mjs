@@ -3,7 +3,10 @@ import { hmacSecret, issueApiKey, requestFingerprint } from './core/crypto.mjs'
 import { AppError, UpstreamAmbiguousError, UpstreamRejectedError, assert } from './core/errors.mjs'
 import {
   normalizeTelegramMonitorQuery,
+  normalizeTelegramEntityQuery,
+  normalizeTelegramSearchQuery,
   publicTelegramMonitorPage,
+  telegramDataSearchResponse,
   telegramMonitorResource,
 } from './data/telegram-monitor.mjs'
 
@@ -77,6 +80,7 @@ export class HubService {
     defaultPolicy = DEFAULT_POLICY,
     reservationLeaseMs = 120_000,
     ingestQueueName = 'mx-insight-hub:ingest',
+    searchQueries = null,
     logger = console,
   }) {
     this.store = store
@@ -88,6 +92,7 @@ export class HubService {
     // commit transaction and so cannot go through the queue object's own
     // namespacing.
     this.ingestQueueName = ingestQueueName
+    this.searchQueries = searchQueries
     this.logger = logger
   }
 
@@ -208,7 +213,7 @@ export class HubService {
         platforms.push({
           platform: 'telegram',
           ready: true,
-          capabilities: ['monitor_chats', 'monitor_messages'],
+          capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search'],
         })
       }
     }
@@ -225,17 +230,88 @@ export class HubService {
   }
 
   async telegramMonitor(context, resourceName, queryInput) {
-    const grants = await this.store.listGrants(context.consumer.id)
-    assert(grants.includes('telegram'), 403, 'platform_not_granted', 'Telegram is not granted')
     if (typeof this.store.listCanonicalRecords !== 'function') {
       throw new AppError(503, 'stored_data_unavailable', 'Stored Telegram data requires the PostgreSQL store')
     }
-    const policy = {
+    const policy = await this.#telegramPolicy(context)
+    const resource = telegramMonitorResource(resourceName)
+    const query = normalizeTelegramMonitorQuery(queryInput, policy.maxPageSize)
+    return this.#meterStoredTelegramRead(context, policy, {
+      path: `/api/v1/data/telegram/${resourceName}`,
+      fingerprintBody: query,
+      operation: async () => {
+      const rows = await this.store.listCanonicalRecords({
+        ...resource,
+        platform: 'telegram',
+        ...query,
+      })
+        return publicTelegramMonitorPage(rows, query.pageSize)
+      },
+    })
+  }
+
+  async telegramEntities(context, queryInput) {
+    if (!this.searchQueries?.searchAuthors || !this.searchQueries?.searchTelegramChats) {
+      throw new AppError(503, 'stored_search_unavailable', 'Telegram entity search requires the PostgreSQL search layer')
+    }
+    const policy = await this.#telegramPolicy(context)
+    const query = normalizeTelegramEntityQuery(queryInput, policy.maxPageSize)
+    return this.#meterStoredTelegramRead(context, policy, {
+      path: '/api/v1/data/telegram/entities/search',
+      fingerprintBody: query,
+      operation: async () => {
+        const [authors, chats] = await Promise.all([
+          this.searchQueries.searchAuthors(query.query, {
+            platform: 'telegram',
+            datasetId: 'telegram.monitor.messages.v1',
+            objectType: 'message',
+            size: query.pageSize,
+          }),
+          this.searchQueries.searchTelegramChats(query.query, { size: query.pageSize }),
+        ])
+        const ranked = [
+          ...(authors.authors || []).map((author) => ({
+            entityType: 'author',
+            id: author.authorExternalId,
+            name: author.authorName,
+            username: author.username ?? null,
+            postCount: author.postCount,
+            score: author.score,
+          })),
+          ...(chats.chats || []).map((chat) => ({
+            entityType: 'chat',
+            id: chat.id,
+            title: chat.title ?? null,
+            username: chat.username ?? null,
+            url: chat.url ?? null,
+            memberCount: chat.memberCount ?? null,
+            eventTime: chat.eventTime ?? null,
+            collectedAt: chat.collectedAt ?? null,
+            score: chat.score ?? null,
+          })),
+        ].sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
+          .slice(0, query.pageSize)
+        return {
+          items: ranked,
+          pageInfo: { returnedCount: ranked.length, hasMore: false, nextCursor: null },
+          searchMode: authors.mode === 'elasticsearch' || chats.mode === 'elasticsearch'
+            ? 'elasticsearch'
+            : 'postgres',
+        }
+      },
+    })
+  }
+
+  async #telegramPolicy(context) {
+    const grants = await this.store.listGrants(context.consumer.id)
+    assert(grants.includes('telegram'), 403, 'platform_not_granted', 'Telegram is not granted')
+    return {
       ...this.defaultPolicy,
       ...((await this.store.getPolicy(context.consumer.id, 'telegram')) || {}),
     }
-    const resource = telegramMonitorResource(resourceName)
-    const query = normalizeTelegramMonitorQuery(queryInput, policy.maxPageSize)
+  }
+
+  async #meterStoredTelegramRead(context, policy, { path, fingerprintBody, operation }) {
     const requestId = randomUUID()
     const startedAt = performance.now()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
@@ -243,11 +319,7 @@ export class HubService {
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey: `telegram-read:${requestId}`,
-      fingerprint: requestFingerprint({
-        method: 'GET',
-        path: `/api/v1/data/telegram/${resourceName}`,
-        body: query,
-      }),
+      fingerprint: requestFingerprint({ method: 'GET', path, body: fingerprintBody }),
       tenantId: context.tenant.id,
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
@@ -263,14 +335,9 @@ export class HubService {
       'usage_reservation_failed',
       'Stored read usage reservation did not enter the expected state',
     )
-    let page
+    let payload
     try {
-      const rows = await this.store.listCanonicalRecords({
-        ...resource,
-        platform: 'telegram',
-        ...query,
-      })
-      page = publicTelegramMonitorPage(rows, query.pageSize)
+      payload = await operation()
     } catch (error) {
       await this.store.releaseRequest(requestId, 'stored_read_failed').catch(() => {})
       throw error
@@ -278,17 +345,14 @@ export class HubService {
     try {
       await this.store.commitRequest(requestId, {
         responseStatus: 200,
-        // Historical pages may contain customer-visible message text. Usage
-        // evidence needs counts and latency, not a second retained copy.
+        // Stored pages may contain customer-visible text. Usage evidence needs
+        // counts and latency, not a second retained copy of that content.
         responseBody: null,
-        unitsActual: Math.max(1, page.pageInfo.returnedCount),
+        unitsActual: Math.max(1, payload.pageInfo?.returnedCount ?? payload.items?.length ?? 0),
         upstreamLatencyMs: Math.round(performance.now() - startedAt),
       })
-      return page
+      return payload
     } catch (error) {
-      // A failed commit response is ambiguous: PostgreSQL may have committed
-      // before the connection dropped. Releasing here could turn delivered
-      // usage into free usage, so retain it as unknown for operator review.
       await this.store.markRequestUnknown(requestId, 'usage_commit_ambiguous').catch(() => {})
       throw error
     }
@@ -318,14 +382,12 @@ export class HubService {
       'Idempotency-Key must contain 8-128 safe characters',
     )
     assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
-    const unsupportedFields = Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field))
-    assert(
-      unsupportedFields.length === 0,
-      400,
-      'unsupported_fields',
-      `Unsupported public fields: ${unsupportedFields.join(', ')}`,
-    )
-    const platform = canonicalPlatform(body.platform)
+    const dedicatedTelegramSearch = path === '/api/v1/data/telegram/search'
+    const unsupportedFields = dedicatedTelegramSearch
+      ? []
+      : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field))
+    assert(unsupportedFields.length === 0, 400, 'unsupported_fields', `Unsupported public fields: ${unsupportedFields.join(', ')}`)
+    const platform = dedicatedTelegramSearch ? 'telegram' : canonicalPlatform(body.platform)
     assert(!RESERVED_PLATFORM_NAMES.has(platform), 400, 'invalid_platform', 'A single explicit platform is required')
     const query = requiredString(body.query, 'query')
     assert(query.length <= 500, 400, 'invalid_request', 'query must not exceed 500 characters')
@@ -346,15 +408,28 @@ export class HubService {
     let cursor
     if (body.cursor != null) {
       cursor = requiredString(body.cursor, 'cursor')
-      assert(cursor.length <= 1024, 400, 'invalid_cursor', 'cursor is too long')
+      assert(cursor.length <= 8192, 400, 'invalid_cursor', 'cursor is too long')
     }
+    const telegramQuery = platform === 'telegram'
+      ? normalizeTelegramSearchQuery(
+          dedicatedTelegramSearch
+            ? body
+            : { query, pageSize, ...(cursor ? { cursor } : {}), scope: 'messages' },
+          policy.maxPageSize,
+          this.apiKeyPepper,
+        )
+      : null
     const upstreamBody = {
       platform,
       query,
       pageSize,
       ...(cursor ? { cursor } : {}),
     }
-    const fingerprint = requestFingerprint({ method: 'POST', path, body: upstreamBody })
+    const fingerprint = requestFingerprint({
+      method: 'POST',
+      path,
+      body: telegramQuery ?? upstreamBody,
+    })
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
     await this.store.reapStaleReservations()
@@ -397,11 +472,16 @@ export class HubService {
     const activeRequestId = reservation.request.id
     const startedAt = performance.now()
     try {
-      const upstream = await this.adapter.search({
-        body: upstreamBody,
-        businessId: context.consumer.businessId,
-      })
-      const responseBody = upstream.payload
+      const localTelegram = platform === 'telegram'
+      const upstream = localTelegram
+        ? null
+        : await this.adapter.search({
+            body: upstreamBody,
+            businessId: context.consumer.businessId,
+          })
+      const responseBody = localTelegram
+        ? await this.#searchStoredTelegram(telegramQuery, startedAt)
+        : upstream.payload
       const itemCount = Array.isArray(responseBody?.data?.items) ? responseBody.data.items.length : 0
       const commit = {
         responseStatus: 200,
@@ -423,7 +503,7 @@ export class HubService {
       //     previous inline version was best-effort and swallowed failures,
       //     which meant a transient database error silently lost the data with
       //     nothing left to retry from.
-      if (this.store.commitRequestAndEnqueueIngest) {
+      if (!localTelegram && this.store.commitRequestAndEnqueueIngest) {
         await this.store.commitRequestAndEnqueueIngest(activeRequestId, commit, {
           queue: this.ingestQueueName,
           payload: {
@@ -461,5 +541,36 @@ export class HubService {
       await this.store.releaseRequest(activeRequestId, 'internal_error')
       throw error
     }
+  }
+
+  async #searchStoredTelegram(query, startedAt) {
+    if (!this.searchQueries?.searchContent) {
+      throw new AppError(503, 'stored_search_unavailable', 'Stored Telegram search requires the PostgreSQL search layer')
+    }
+    const datasets = {
+      messages: ['telegram.monitor.messages.v1'],
+      chats: ['telegram.monitor.chats.v1'],
+      all: ['telegram.monitor.messages.v1', 'telegram.monitor.chats.v1'],
+    }[query.scope]
+    const result = await this.searchQueries.searchContent(query.query, {
+      platform: 'telegram',
+      datasetIds: datasets,
+      objectType: query.scope === 'all' ? null : query.scope === 'chats' ? 'chat' : 'message',
+      authorExternalId: query.authorId,
+      chatId: query.chatId,
+      fromTime: query.from,
+      toTime: query.to,
+      size: query.pageSize,
+      cursor: query.cursor,
+    })
+    return telegramDataSearchResponse({
+      query: query.query,
+      result,
+      pageSize: query.pageSize,
+      cursor: query.cursor,
+      cursorBinding: query.cursorBinding,
+      cursorSecret: this.apiKeyPepper,
+      durationMs: Math.round(performance.now() - startedAt),
+    })
   }
 }

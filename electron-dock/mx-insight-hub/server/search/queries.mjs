@@ -1,5 +1,5 @@
 import { toPresegmentedText } from '@qpjoy/mx-common/segmenter'
-import { ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
+import { ElasticsearchError, ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
 import { AppError } from '../core/errors.mjs'
 
 // Read-side queries, with an explicit PostgreSQL degradation path.
@@ -13,6 +13,7 @@ import { AppError } from '../core/errors.mjs'
 
 const DEFAULT_SIZE = 20
 const MAX_SIZE = 100
+const SEARCH_PIT_KEEP_ALIVE = '2m'
 
 function clampSize(size) {
   return Math.min(Math.max(Number(size) || DEFAULT_SIZE, 1), MAX_SIZE)
@@ -94,9 +95,14 @@ export class SearchQueries {
    * decide whether that is good enough rather than silently trusting a degraded
    * ordering.
    */
-  async searchAuthors(term, { platform = null, size = DEFAULT_SIZE } = {}) {
+  async searchAuthors(term, {
+    platform = null,
+    datasetId = null,
+    objectType = null,
+    size = DEFAULT_SIZE,
+  } = {}) {
     const limit = clampSize(size)
-    if (!this.client) return this.#searchAuthorsPostgres(term, { platform, limit })
+    if (!this.client) return this.#searchAuthorsPostgres(term, { platform, datasetId, objectType, limit })
     try {
       const tokens = await this.segmenter.segment(term)
       const response = await this.client.search(this.indexSet.readAlias, {
@@ -104,7 +110,13 @@ export class SearchQueries {
         query: {
           bool: {
             must: [authorNameQuery(term, tokens)],
-            ...(platform ? { filter: [{ term: { platform } }] } : {}),
+            ...((platform || datasetId || objectType) ? {
+              filter: [
+                ...(platform ? [{ term: { platform } }] : []),
+                ...(datasetId ? [{ term: { datasetId } }] : []),
+                ...(objectType ? [{ term: { objectType } }] : []),
+              ],
+            } : {}),
           },
         },
         aggs: {
@@ -112,7 +124,12 @@ export class SearchQueries {
             terms: { field: 'authorExternalId', size: limit, order: { relevance: 'desc' } },
             aggs: {
               relevance: { max: { script: { source: '_score' } } },
-              name: { top_hits: { size: 1, _source: ['authorName', 'authorExternalId', 'platform', 'authorAvatarUrl'] } },
+              name: {
+                top_hits: {
+                  size: 1,
+                  _source: ['authorName', 'authorHandle', 'authorExternalId', 'platform', 'authorAvatarUrl'],
+                },
+              },
               posts: { value_count: { field: 'id' } },
             },
           },
@@ -125,7 +142,8 @@ export class SearchQueries {
           const source = bucket.name?.hits?.hits?.[0]?._source || {}
           return {
             authorExternalId: bucket.key,
-            authorName: source.authorName ?? null,
+                authorName: source.authorName ?? null,
+                username: source.authorHandle ?? null,
             platform: source.platform ?? null,
             avatarUrl: source.authorAvatarUrl ?? null,
             postCount: bucket.posts?.value ?? bucket.doc_count,
@@ -136,7 +154,7 @@ export class SearchQueries {
     } catch (error) {
       if (error instanceof ElasticsearchUnavailableError) {
         this.logger?.warn?.('[search] Elasticsearch unavailable; falling back to PostgreSQL author search')
-        return this.#searchAuthorsPostgres(term, { platform, limit })
+        return this.#searchAuthorsPostgres(term, { platform, datasetId, objectType, limit })
       }
       throw error
     }
@@ -145,31 +163,131 @@ export class SearchQueries {
   // Trigram similarity ranking. `%` uses the pg_trgm similarity threshold and is
   // index-backed by canonical_records_author_name_trgm_idx; ILIKE alone would be
   // too, but similarity gives an ordering rather than an arbitrary one.
-  async #searchAuthorsPostgres(term, { platform, limit }) {
+  async #searchAuthorsPostgres(term, { platform, datasetId, objectType, limit }) {
     const { rows } = await this.pool.query(
       `SELECT author_external_id,
               max(author_name) AS author_name,
+              max(stable_fields #>> '{author,handle}') AS username,
               max(platform) AS platform,
               count(*)::int AS post_count,
-              max(similarity(author_name, $1)) AS score
+              greatest(
+                max(similarity(coalesce(author_name, ''), $1)),
+                max(similarity(coalesce(stable_fields #>> '{author,handle}', ''), $1))
+              ) AS score
          FROM core.canonical_records
-        WHERE author_name IS NOT NULL
+        WHERE deleted_at IS NULL
           AND author_external_id IS NOT NULL
-          AND (author_name ILIKE '%' || $1 || '%' OR author_name % $1)
+          AND (
+            author_name ILIKE '%' || $1 || '%'
+            OR author_name % $1
+            OR (stable_fields #>> '{author,handle}') ILIKE '%' || $1 || '%'
+            OR (stable_fields #>> '{author,handle}') % $1
+          )
           AND ($2::text IS NULL OR platform = $2)
+          AND ($3::text IS NULL OR dataset_id = $3)
+          AND ($4::text IS NULL OR object_type = $4)
         GROUP BY author_external_id
         ORDER BY score DESC NULLS LAST, post_count DESC
-        LIMIT $3`,
-      [term, platform, limit],
+        LIMIT $5`,
+      [term, platform, datasetId, objectType, limit],
     )
     return {
       mode: 'postgres',
       authors: rows.map((row) => ({
         authorExternalId: row.author_external_id,
         authorName: row.author_name,
+        username: row.username,
         platform: row.platform,
         avatarUrl: null,
         postCount: row.post_count,
+        score: row.score,
+      })),
+    }
+  }
+
+  /** Telegram chat title/username lookup with the same ES -> PG degradation contract. */
+  async searchTelegramChats(term, { datasetId = 'telegram.monitor.chats.v1', size = DEFAULT_SIZE } = {}) {
+    const limit = clampSize(size)
+    if (!this.client) return this.#searchTelegramChatsPostgres(term, { datasetId, limit })
+    try {
+      const tokens = await this.segmenter.segment(term)
+      const response = await this.client.search(this.indexSet.readAlias, {
+        size: limit,
+        query: {
+          bool: {
+            filter: [
+              { term: { platform: 'telegram' } },
+              { term: { datasetId } },
+              { term: { objectType: 'chat' } },
+            ],
+            should: [
+              { term: { externalId: { value: term, boost: 12 } } },
+              { term: { 'username.keyword': { value: term, boost: 10 } } },
+              { match_phrase: { 'username.prefix': { query: term, boost: 6 } } },
+              { match: { username: { query: toPresegmentedText(tokens), boost: 4 } } },
+              { match_phrase: { 'title.keyword': { query: term, boost: 8 } } },
+              { match: { title: { query: term, boost: 3 } } },
+            ],
+            minimum_should_match: 1,
+          },
+        },
+        _source: ['externalId', 'title', 'username', 'url', 'metrics', 'eventTime', 'collectedAt'],
+      })
+      return {
+        mode: 'elasticsearch',
+        chats: (response.hits?.hits || []).map((hit) => ({
+          id: hit._source?.externalId,
+          title: hit._source?.title ?? null,
+          username: hit._source?.username ?? null,
+          url: hit._source?.url ?? null,
+          memberCount: hit._source?.metrics?.members ?? null,
+          eventTime: hit._source?.eventTime ?? null,
+          collectedAt: hit._source?.collectedAt ?? null,
+          score: hit._score ?? null,
+        })),
+      }
+    } catch (error) {
+      if (error instanceof ElasticsearchUnavailableError) {
+        this.logger?.warn?.('[search] Elasticsearch unavailable; falling back to PostgreSQL Telegram chat search')
+        return this.#searchTelegramChatsPostgres(term, { datasetId, limit })
+      }
+      throw error
+    }
+  }
+
+  async #searchTelegramChatsPostgres(term, { datasetId, limit }) {
+    const { rows } = await this.pool.query(
+      `SELECT external_id, title, url, event_time, collected_at, stable_fields,
+              greatest(
+                similarity(coalesce(title, ''), $1),
+                similarity(coalesce(stable_fields #>> '{attributes,username}', ''), $1)
+              ) AS score
+         FROM core.canonical_records
+        WHERE deleted_at IS NULL
+          AND dataset_id = $2
+          AND platform = 'telegram'
+          AND object_type = 'chat'
+          AND (
+            external_id = $1
+            OR title ILIKE '%' || $1 || '%'
+            OR title % $1
+            OR (stable_fields #>> '{attributes,username}') ILIKE '%' || $1 || '%'
+            OR (stable_fields #>> '{attributes,username}') % $1
+          )
+        ORDER BY (external_id = $1) DESC, score DESC NULLS LAST, title
+        LIMIT $3`,
+      [term, datasetId, limit],
+    )
+    return {
+      mode: 'postgres',
+      chats: rows.map((row) => ({
+        id: row.external_id,
+        title: row.title,
+        username: row.stable_fields?.attributes?.username ?? null,
+        url: row.url,
+        memberCount: row.stable_fields?.metrics?.members ?? null,
+        eventTime: row.event_time,
+        collectedAt: row.collected_at,
         score: row.score,
       })),
     }
@@ -183,19 +301,65 @@ export class SearchQueries {
    * merely for having the term in both the raw and segmented copy of the same
    * text.
    */
-  async searchContent(query, { platform = null, authorExternalId = null, size = DEFAULT_SIZE, from = 0 } = {}) {
+  async searchContent(query, {
+    platform = null,
+    datasetId = null,
+    datasetIds = null,
+    objectType = null,
+    authorExternalId = null,
+    chatId = null,
+    fromTime = null,
+    toTime = null,
+    size = DEFAULT_SIZE,
+    cursor = null,
+  } = {}) {
     const limit = clampSize(size)
-    if (!this.client) return this.#searchContentPostgres(query, { platform, authorExternalId, limit })
+    if (!this.client && cursor?.mode === 'elasticsearch') {
+      throw new AppError(503, 'search_cursor_unavailable', 'Elasticsearch is unavailable; retry the same cursor later')
+    }
+    if (!this.client || cursor?.mode === 'postgres') {
+      return this.#searchContentPostgres(query, {
+        platform, datasetId, datasetIds, objectType, authorExternalId, chatId, fromTime, toTime, limit, cursor,
+      })
+    }
+    let pitId = cursor?.pitId ?? null
     try {
+      if (!pitId) {
+        const opened = await this.client.request(
+          'POST',
+          `/${encodeURIComponent(this.indexSet.readAlias)}/_pit?keep_alive=${SEARCH_PIT_KEEP_ALIVE}`,
+        )
+        pitId = opened?.id
+        if (!pitId) throw new Error('Elasticsearch did not return a point-in-time id')
+      }
       const tokens = await this.segmenter.segment(query)
       const segmented = toPresegmentedText(tokens)
       const filter = [
         ...(platform ? [{ term: { platform } }] : []),
+        ...(datasetId ? [{ term: { datasetId } }] : []),
+        ...(Array.isArray(datasetIds) && datasetIds.length > 0 ? [{ terms: { datasetId: datasetIds } }] : []),
+        ...(objectType ? [{ term: { objectType } }] : []),
         ...(authorExternalId ? [{ term: { authorExternalId } }] : []),
+        ...(chatId ? [{ term: { chatId } }] : []),
+        ...((fromTime || toTime) ? [{
+          range: {
+            eventTime: {
+              ...(fromTime ? { gte: fromTime } : {}),
+              ...(toTime ? { lte: toTime } : {}),
+            },
+          },
+        }] : []),
       ]
-      const response = await this.client.search(this.indexSet.readAlias, {
-        size: limit,
-        from,
+      const response = await this.client.request('POST', '/_search', {
+        size: limit + 1,
+        pit: { id: pitId, keep_alive: SEARCH_PIT_KEEP_ALIVE },
+        ...(cursor?.searchAfter ? { search_after: cursor.searchAfter } : {}),
+        track_scores: true,
+        sort: [
+          { _score: { order: 'desc' } },
+          { eventTime: { order: 'desc', missing: '_last', format: 'strict_date_time' } },
+          { id: { order: 'desc' } },
+        ],
         query: {
           bool: {
             should: [
@@ -209,19 +373,42 @@ export class SearchQueries {
         highlight: { fields: { title: {}, body: {}, titleHanlp: {}, bodyHanlp: {} } },
         _source: { excludes: ['titleHanlp', 'bodyHanlp', 'tokens'] },
       })
+      const hits = response.hits?.hits || []
+      const hasMore = hits.length > limit
+      const pageHits = hasMore ? hits.slice(0, limit) : hits
+      const currentPitId = response.pit_id ?? pitId
+      if (!hasMore) await this.#closeSearchPit(currentPitId)
       return {
         mode: 'elasticsearch',
         total: response.hits?.total?.value ?? 0,
-        items: (response.hits?.hits || []).map((hit) => ({
+        totalRelation: response.hits?.total?.relation ?? 'eq',
+        hasMore,
+        nextCursor: hasMore ? {
+          mode: 'elasticsearch',
+          pitId: currentPitId,
+          searchAfter: pageHits.at(-1)?.sort,
+        } : null,
+        items: pageHits.map((hit) => ({
           ...hit._source,
           score: hit._score,
           highlight: hit.highlight ?? null,
         })),
       }
     } catch (error) {
+      if (cursor?.mode === 'elasticsearch') {
+        if (isExpiredSearchPit(error)) {
+          throw new AppError(410, 'search_cursor_expired', 'The search cursor expired; restart from the first page')
+        }
+        if (error instanceof ElasticsearchUnavailableError) {
+          throw new AppError(503, 'search_cursor_unavailable', 'Elasticsearch is unavailable; retry the same cursor later')
+        }
+        throw error
+      }
       if (error instanceof ElasticsearchUnavailableError) {
         this.logger?.warn?.('[search] Elasticsearch unavailable; falling back to PostgreSQL content search')
-        return this.#searchContentPostgres(query, { platform, authorExternalId, limit })
+        return this.#searchContentPostgres(query, {
+          platform, datasetId, datasetIds, objectType, authorExternalId, chatId, fromTime, toTime, limit, cursor: null,
+        })
       }
       throw error
     }
@@ -308,24 +495,73 @@ export class SearchQueries {
     }
   }
 
-  async #searchContentPostgres(query, { platform, authorExternalId, limit }) {
+  async #searchContentPostgres(query, {
+    platform,
+    datasetId,
+    datasetIds,
+    objectType,
+    authorExternalId,
+    chatId,
+    fromTime,
+    toTime,
+    limit,
+    cursor,
+  }) {
     const { rows } = await this.pool.query(
-      `SELECT id, platform, external_id, url, title, body, author_external_id, author_name,
+      `SELECT id, dataset_id, platform, object_type, external_id, url, title, body,
+              author_external_id, author_name,
               event_time, collected_at, stable_fields
          FROM core.canonical_records
-        WHERE (title ILIKE '%' || $1 || '%' OR body ILIKE '%' || $1 || '%')
+        WHERE deleted_at IS NULL
+          AND (title ILIKE '%' || $1 || '%' OR body ILIKE '%' || $1 || '%')
           AND ($2::text IS NULL OR platform = $2)
-          AND ($3::text IS NULL OR author_external_id = $3)
-        ORDER BY event_time DESC NULLS LAST
-        LIMIT $4`,
-      [query, platform, authorExternalId, limit],
+          AND ($3::text IS NULL OR dataset_id = $3)
+          AND ($4::text[] IS NULL OR dataset_id = ANY($4::text[]))
+          AND ($5::text IS NULL OR object_type = $5)
+          AND ($6::text IS NULL OR author_external_id = $6)
+          AND ($7::text IS NULL OR (stable_fields #>> '{relations,chatId}') = $7)
+          AND ($8::timestamptz IS NULL OR event_time >= $8::timestamptz)
+          AND ($9::timestamptz IS NULL OR event_time <= $9::timestamptz)
+          AND (
+            $10::uuid IS NULL
+            OR (
+              $11::timestamptz IS NULL
+              AND event_time IS NULL
+              AND id < $10::uuid
+            )
+            OR (
+              $11::timestamptz IS NOT NULL
+              AND (
+                event_time IS NULL
+                OR event_time < $11::timestamptz
+                OR (event_time = $11::timestamptz AND id < $10::uuid)
+              )
+            )
+          )
+        ORDER BY event_time DESC NULLS LAST, id DESC
+        LIMIT $12`,
+      [
+        query, platform, datasetId, datasetIds, objectType, authorExternalId, chatId,
+        fromTime, toTime, cursor?.searchAfter?.[1] ?? null, cursor?.searchAfter?.[0] ?? null,
+        limit + 1,
+      ],
     )
+    const hasMore = rows.length > limit
+    const pageRows = hasMore ? rows.slice(0, limit) : rows
+    const last = pageRows.at(-1)
     return {
       mode: 'postgres',
-      total: rows.length,
-      items: rows.map((row) => ({
+      hasMore,
+      nextCursor: hasMore ? {
+        mode: 'postgres',
+        pitId: null,
+        searchAfter: [last.event_time ? new Date(last.event_time).toISOString() : null, last.id],
+      } : null,
+      items: pageRows.map((row) => ({
         id: row.id,
+        datasetId: row.dataset_id,
         platform: row.platform,
+        objectType: row.object_type,
         externalId: row.external_id,
         url: row.url,
         title: row.title,
@@ -340,4 +576,19 @@ export class SearchQueries {
       })),
     }
   }
+
+  async #closeSearchPit(pitId) {
+    if (!pitId) return
+    try {
+      await this.client.request('DELETE', '/_pit', { id: pitId })
+    } catch (error) {
+      this.logger?.warn?.({ error }, '[search] failed to close completed Elasticsearch PIT; TTL will reclaim it')
+    }
+  }
+}
+
+function isExpiredSearchPit(error) {
+  if (!(error instanceof ElasticsearchError)) return false
+  const detail = JSON.stringify(error.body || {})
+  return error.status === 404 || /search_context_missing_exception|no search context found/i.test(detail)
 }

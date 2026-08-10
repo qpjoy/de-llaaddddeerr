@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import test from 'node:test'
 import {
   ParseError,
@@ -21,6 +22,7 @@ import {
 } from '../../server/ingest/external/database-source.mjs'
 import { runExternalPullJob } from '../../server/ingest/external/sync-job.mjs'
 import { scheduleActiveDatabaseSources } from '../../server/ingest/external/scheduler.mjs'
+import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 
 const hash = (value) => createHash('sha256').update(value).digest('hex').slice(0, 16)
 
@@ -133,6 +135,69 @@ test('a composite external id keeps Telegram message ids scoped to their chat', 
   assert.equal(record.externalId, '-1007:42')
   assert.deepEqual(record.stableFields.relations, { chatId: '-1007', messageId: '42' })
   assert.equal(applyMapping({ chat_id: '-1007' }, mapping, { platform: 'telegram' }).record, null)
+})
+
+test('Telegram edits, tombstones and structured fields survive mapping without exposing dropped collector fields', () => {
+  const mapping = {
+    externalId: { from: ['chat_id', 'message_id'], type: 'composite', separator: ':' },
+    body: { from: 'message_text' },
+    eventTime: { from: 'message_at' },
+    collectedAt: { from: 'collected_at' },
+    editedAt: { from: 'edited_at' },
+    deletedAt: { from: 'deleted_at' },
+    media: { from: 'media' },
+    entities: { from: 'entities' },
+    'attributes.username': { from: 'sender_username' },
+    'attributes.isOutgoing': { from: 'is_outgoing' },
+    'relations.threadId': { from: 'thread_id' },
+    'relations.groupedId': { from: 'grouped_id' },
+    _drop: { from: ['id', 'collected_by_account_id', 'metadata'] },
+  }
+  validateFieldMap(mapping)
+  const deletedAt = '2026-08-10T03:00:00Z'
+  const { record } = applyMapping({
+    id: 88,
+    chat_id: -1007,
+    message_id: 42,
+    message_text: 'hello',
+    message_at: '2026-08-09T03:00:00Z',
+    collected_at: '2026-08-09T03:00:01Z',
+    edited_at: '2026-08-09T04:00:00Z',
+    deleted_at: deletedAt,
+    sender_username: 'mx_user',
+    is_outgoing: false,
+    thread_id: 7,
+    grouped_id: 9,
+    media: { media_kind: 'image', size_bytes: 123 },
+    entities: [{ type: 'url', offset: 0, length: 5 }],
+    collected_by_account_id: 999,
+    metadata: { provider_token: 'must-not-project' },
+  }, mapping, {
+    platform: 'telegram',
+    objectType: 'message',
+    source: { origin: 'database', sourceKey: 'telegram-monitor-messages' },
+  })
+
+  assert.equal(record.deletedAt.toISOString(), '2026-08-10T03:00:00.000Z')
+  assert.equal(record.stableFields.editedAt.toISOString(), '2026-08-09T04:00:00.000Z')
+  assert.equal(record.stableFields.author.handle, 'mx_user')
+  assert.equal(record.stableFields.attributes.isOutgoing, false)
+  assert.deepEqual(record.stableFields.media, { media_kind: 'image', size_bytes: 123 })
+  assert.deepEqual(record.stableFields.entities, [{ type: 'url', offset: 0, length: 5 }])
+  assert.deepEqual(record.stableFields.relations, { threadId: '7', groupedId: '9' })
+  assert.deepEqual(record.stableFields.source, { origin: 'database', sourceKey: 'telegram-monitor-messages' })
+  assert.deepEqual(record.extensions, {})
+  assert.ok(!JSON.stringify({ stableFields: record.stableFields, extensions: record.extensions }).includes('must-not-project'))
+})
+
+test('a tombstone changes the canonical content hash', () => {
+  const mapping = {
+    externalId: { from: 'id' },
+    deletedAt: { from: 'deleted_at' },
+  }
+  const live = applyMapping({ id: '1', deleted_at: null }, mapping, { platform: 'telegram' })
+  const deleted = applyMapping({ id: '1', deleted_at: '2026-08-10T03:00:00Z' }, mapping, { platform: 'telegram' })
+  assert.notEqual(live.record.payloadSha256, deleted.record.payloadSha256)
 })
 
 test('a row without an external id is rejected, not given a synthetic key', () => {
@@ -481,7 +546,7 @@ test('database pull advances a durable total-order cursor only after idempotent 
       },
     },
     queue: {
-      getCursor: async () => ({ position: { cursor: '2026-08-01T00:00:00Z', lastId: '2' } }),
+      getCursor: async () => ({ position: {} }),
       saveCursor: async (id, position, options) => saved.push({ id, position, options }),
     },
     env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
@@ -512,14 +577,17 @@ test('database pull advances a durable total-order cursor only after idempotent 
   assert.match(selectSql, /"updated_at" IS NOT NULL/)
   assert.match(selectSql, /\("updated_at", "id"\) > \(\$1::timestamptz, \$2::bigint\)/)
   assert.match(selectSql, /ORDER BY "updated_at", "id"/)
-  assert.deepEqual(saved.at(-1).position, { cursor: new Date('2026-08-02T00:00:00Z'), lastId: '10' })
+  assert.equal(saved.at(-1).position.cursor.toISOString(), '2026-08-02T00:00:00.000Z')
+  assert.equal(saved.at(-1).position.lastId, '10')
+  assert.equal(saved.at(-1).position.mappingVersion, 1)
+  assert.match(saved.at(-1).position.contractHash, /^[a-f0-9]{64}$/)
   assert.equal(saved.at(-1).options.status, 'idle')
-  assert.deepEqual(rejectedRows, [{ id: 'run-1', rows: [] }])
+  assert.deepEqual(rejectedRows, [])
   assert.equal(finished.at(-1).result.status, 'succeeded')
 })
 
 test('a rejected database row records evidence and does not advance its cursor', async () => {
-  const position = { cursor: '2026-08-01T00:00:00Z', lastId: '2' }
+  const position = {}
   const saved = []
   const finished = []
   const rejectedRows = []
@@ -572,12 +640,15 @@ test('a rejected database row records evidence and does not advance its cursor',
   assert.equal(rejectedRows[0].rows.length, 1)
   assert.equal(finished.at(-1).result.status, 'failed')
   assert.equal(finished.at(-1).result.error, 'row_rejections_detected')
-  assert.deepEqual(saved.at(-1).position, position)
+  assert.equal(saved.at(-1).position.cursor, position.cursor)
+  assert.equal(saved.at(-1).position.lastId, position.lastId)
+  assert.equal(saved.at(-1).position.importRunId, undefined)
+  assert.match(saved.at(-1).position.contractHash, /^[a-f0-9]{64}$/)
   assert.equal(saved.at(-1).options.status, 'failed')
 })
 
 test('a failed database ingest records only a safe code and leaves its cursor unchanged', async () => {
-  const position = { cursor: '2026-08-01T00:00:00Z', lastId: '2' }
+  const position = {}
   const saved = []
   const finished = []
   const source = {
@@ -623,8 +694,483 @@ test('a failed database ingest records only a safe code and leaves its cursor un
   assert.equal(finished.at(-1).result.status, 'failed')
   assert.equal(finished.at(-1).result.error, 'ECONNRESET')
   assert.equal(JSON.stringify(finished).includes('private.invalid'), false)
-  assert.deepEqual(saved.at(-1).position, position)
+  assert.equal(saved.at(-1).position.cursor, position.cursor)
+  assert.equal(saved.at(-1).position.lastId, position.lastId)
+  assert.equal(saved.at(-1).position.importRunId, undefined)
+  assert.match(saved.at(-1).position.contractHash, /^[a-f0-9]{64}$/)
   assert.equal(saved.at(-1).options.error, 'ECONNRESET')
+})
+
+test('a reclaimed batch resumes one durable import run after canonical commit but before cursor acknowledgement', async () => {
+  const source = {
+    id: 'source-crash', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.messages.v1', platform: 'telegram', objectType: 'message',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_messages',
+      cursorColumn: 'updated_at', idColumn: 'id',
+    },
+  }
+  const mapping = {
+    version: 2,
+    fieldMap: {
+      externalId: { from: 'message_id' },
+      eventTime: { from: 'updated_at' },
+    },
+  }
+  let cursor = { position: {}, status: 'idle', processedCount: 0 }
+  let failCursorAcknowledgement = true
+  const started = []
+  const finished = []
+  const batches = []
+  let ingestAttempt = 0
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+      startImportRun: async (input) => {
+        started.push(input)
+        return { id: 'run-stable', duplicateOf: null }
+      },
+      finishImportRun: async (id, result) => finished.push({ id, result }),
+      ingestExternalRecords: async (input) => {
+        ingestAttempt += 1
+        batches.push(input.batch.key)
+        return {
+          ingested: 1,
+          changed: 1,
+          deleted: 0,
+          ...(ingestAttempt > 1 ? { replayed: true } : {}),
+        }
+      },
+    },
+    queue: {
+      getCursor: async () => cursor,
+      saveCursor: async (id, position, options) => {
+        if (position.cursor && failCursorAcknowledgement) {
+          failCursorAcknowledgement = false
+          throw new Error('cursor checkpoint write failed')
+        }
+        cursor = {
+          position,
+          status: options.status,
+          processedCount: cursor.processedCount + (options.processedDelta ?? 0),
+        }
+        return cursor
+      },
+    },
+    env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: [
+            { column_name: 'id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 1 },
+            { column_name: 'updated_at', data_type: 'timestamp with time zone', udt_name: 'timestamptz', is_nullable: 'NO', ordinal_position: 2 },
+          ] }
+        }
+        return { rows: [{
+          id: 7,
+          message_id: '99',
+          updated_at: new Date('2026-08-10T00:00:00.000Z'),
+        }] }
+      },
+      async end() {},
+    }),
+  })
+
+  await assert.rejects(() => puller.pullBatch(source.sourceKey, { batchSize: 10 }), /checkpoint write failed/)
+  assert.equal(cursor.position.importRunId, 'run-stable')
+  assert.equal(cursor.position.cursor, undefined)
+  assert.equal(finished.length, 0)
+
+  const retried = await puller.pullBatch(source.sourceKey, { batchSize: 10 })
+  assert.equal(retried.replayed, true)
+  assert.equal(started.length, 1)
+  assert.match(started[0].runKey, /^[a-f0-9]{64}$/)
+  assert.deepEqual(batches, [batches[0], batches[0]])
+  assert.equal(finished.length, 1)
+  assert.equal(finished[0].result.status, 'succeeded')
+  assert.equal(cursor.status, 'idle')
+  assert.equal(cursor.position.importRunId, undefined)
+  assert.equal(cursor.position.lastId, '7')
+  assert.equal(cursor.processedCount, 1)
+})
+
+test('an ambiguous canonical COMMIT keeps the same run and batch for evidence-based retry', async () => {
+  const source = {
+    id: 'source-unknown', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.messages.v1', platform: 'telegram', objectType: 'message',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_messages',
+      cursorColumn: 'updated_at', idColumn: 'id',
+    },
+  }
+  const mapping = {
+    version: 2,
+    fieldMap: { externalId: { from: 'message_id' }, eventTime: { from: 'updated_at' } },
+  }
+  let cursor = { position: {}, status: 'idle', processedCount: 0 }
+  let committedEvidence = null
+  let started = 0
+  const finished = []
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+      getImportRunState: async () => ({ id: 'run-unknown', sourceId: source.id, status: 'running' }),
+      getImportBatch: async () => committedEvidence,
+      startImportRun: async () => {
+        started += 1
+        return { id: 'run-unknown', duplicateOf: null }
+      },
+      ingestExternalRecords: async (input) => {
+        committedEvidence = {
+          key: input.batch.key,
+          cursorEnd: input.batch.cursorEnd,
+          rowCount: input.batch.rowCount,
+          ingested: 1,
+          changed: 1,
+          deleted: 0,
+          rejected: 0,
+          status: 'succeeded',
+        }
+        const error = new Error('commit acknowledgement lost')
+        error.code = 'external_commit_outcome_unknown'
+        throw error
+      },
+      finishImportRun: async (id, result) => finished.push({ id, result }),
+    },
+    queue: {
+      getCursor: async () => cursor,
+      saveCursor: async (id, position, options) => {
+        cursor = {
+          position,
+          status: options.status,
+          processedCount: cursor.processedCount + (options.processedDelta ?? 0),
+        }
+        return cursor
+      },
+    },
+    env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: [
+            { column_name: 'id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 1 },
+            { column_name: 'updated_at', data_type: 'timestamp with time zone', udt_name: 'timestamptz', is_nullable: 'NO', ordinal_position: 2 },
+          ] }
+        }
+        return { rows: [{
+          id: 7, message_id: '99', updated_at: new Date('2026-08-10T00:00:00.000Z'),
+        }] }
+      },
+      async end() {},
+    }),
+  })
+
+  await assert.rejects(
+    () => puller.pullBatch(source.sourceKey, { batchSize: 10 }),
+    (error) => error?.code === 'external_commit_outcome_unknown',
+  )
+  assert.equal(cursor.status, 'running')
+  assert.equal(cursor.position.importRunId, 'run-unknown')
+  assert.equal(finished.length, 0)
+
+  const retried = await puller.pullBatch(source.sourceKey, { batchSize: 10 })
+  assert.equal(retried.replayed, true)
+  assert.equal(started, 1)
+  assert.equal(finished.length, 1)
+  assert.equal(finished[0].result.status, 'succeeded')
+  assert.equal(cursor.status, 'idle')
+  assert.equal(cursor.processedCount, 1)
+})
+
+test('a checkpoint can resume only its running import run for the same source', async () => {
+  const source = {
+    id: 'source-owner', sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.chats.v1', platform: 'telegram', objectType: 'chat',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_chats',
+      cursorColumn: 'updated_at', idColumn: 'chat_id',
+    },
+  }
+  for (const runState of [
+    { id: 'run-terminal', sourceId: source.id, status: 'succeeded' },
+    { id: 'run-terminal', sourceId: 'another-source', status: 'running' },
+  ]) {
+    const puller = new DatabaseSourcePuller({
+      store: {
+        getExternalSource: async () => source,
+        getActiveMapping: async () => ({
+          version: 1,
+          fieldMap: { externalId: { from: 'chat_id' }, eventTime: { from: 'updated_at' } },
+        }),
+        getImportRunState: async () => runState,
+      },
+      queue: {
+        getCursor: async () => ({ position: { importRunId: 'run-terminal' }, status: 'running' }),
+      },
+      env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+      poolFactory: () => { throw new Error('an invalid checkpoint must not read upstream') },
+    })
+    await assert.rejects(
+      () => puller.pullBatch(source.sourceKey),
+      (error) => error?.code === 'import_run_checkpoint_invalid',
+    )
+  }
+})
+
+test('a committed replay advances from stored cursor evidence without rereading a drifted source page', async () => {
+  const source = {
+    id: 'source-replay', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.messages.v1', platform: 'telegram', objectType: 'message',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_messages',
+      cursorColumn: 'updated_at', idColumn: 'id',
+    },
+  }
+  const storedEnd = {
+    cursor: '2026-08-10T00:00:05.000Z', lastId: '9',
+    contractHash: 'a'.repeat(64), mappingVersion: 2,
+  }
+  let finalized = null
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => ({
+        version: 2,
+        fieldMap: { externalId: { from: 'message_id' }, eventTime: { from: 'updated_at' } },
+      }),
+      getImportRunState: async () => ({ id: 'run-replay', sourceId: source.id, status: 'running' }),
+      getImportBatch: async () => ({
+        key: 'batch', cursorEnd: storedEnd, rowCount: 1,
+        ingested: 1, changed: 1, deleted: 0, rejected: 0, status: 'succeeded',
+      }),
+      finalizeExternalImportRun: async (input) => {
+        finalized = input
+        return { cursor: { position: input.position, status: input.cursorStatus } }
+      },
+    },
+    queue: {
+      getCursor: async () => ({
+        position: { cursor: '2026-08-10T00:00:00.000Z', lastId: '2', importRunId: 'run-replay' },
+        status: 'running',
+      }),
+    },
+    env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+    poolFactory: () => { throw new Error('a replay must not read a page that may have drifted') },
+  })
+
+  const result = await puller.pullBatch(source.sourceKey, { batchSize: 10, importRunId: 'run-replay' })
+  assert.equal(result.replayed, true)
+  assert.equal(result.done, true)
+  assert.deepEqual(finalized.position, storedEnd)
+  assert.equal(finalized.processedDelta, 1)
+  assert.equal(finalized.status, 'succeeded')
+})
+
+test('pausing during a full batch closes the run successfully at that batch boundary', async () => {
+  const activeSource = {
+    id: 'source-pause', sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.chats.v1', platform: 'telegram', objectType: 'chat',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_chats',
+      cursorColumn: 'updated_at', idColumn: 'chat_id',
+    },
+  }
+  let sourceRead = 0
+  let cursor = { position: {}, status: 'idle' }
+  let finalized = null
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => {
+        sourceRead += 1
+        return sourceRead === 1 ? activeSource : { ...activeSource, status: 'paused' }
+      },
+      getActiveMapping: async () => ({
+        version: 1,
+        fieldMap: { externalId: { from: 'chat_id' }, eventTime: { from: 'updated_at' } },
+      }),
+      startImportRun: async () => ({ id: 'run-pause', duplicateOf: null }),
+      ingestExternalRecords: async (input) => ({
+        ingested: 1, changed: 1, deleted: 0,
+        rowCount: 1, cursorEnd: input.batch.cursorEnd,
+      }),
+      finalizeExternalImportRun: async (input) => {
+        finalized = input
+        cursor = { position: input.position, status: input.cursorStatus }
+        return { cursor }
+      },
+    },
+    queue: {
+      getCursor: async () => cursor,
+      saveCursor: async (id, position, options) => {
+        cursor = { position, status: options.status }
+        return cursor
+      },
+    },
+    env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: [
+            { column_name: 'chat_id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 1 },
+            { column_name: 'updated_at', data_type: 'timestamp with time zone', udt_name: 'timestamptz', is_nullable: 'NO', ordinal_position: 2 },
+          ] }
+        }
+        return { rows: [{ chat_id: -1007, updated_at: new Date('2026-08-10T00:00:00.000Z') }] }
+      },
+      async end() {},
+    }),
+  })
+
+  const result = await puller.pullBatch(activeSource.sourceKey, { batchSize: 1 })
+  assert.equal(result.paused, true)
+  assert.equal(result.done, true)
+  assert.equal(finalized.status, 'succeeded')
+  assert.equal(finalized.cursorStatus, 'idle')
+  assert.equal(finalized.position.importRunId, undefined)
+})
+
+test('source lock helpers expose deterministic multi-source serialization', async () => {
+  const acquired = []
+  const puller = new DatabaseSourcePuller({
+    store: {
+      withExternalSourceLock: async (key, operation) => {
+        acquired.push(key)
+        return operation()
+      },
+    },
+    queue: null,
+  })
+  const result = await puller.withSourceLocks(['z-source', 'a-source', 'z-source'], async () => 'done')
+  assert.equal(result, 'done')
+  assert.deepEqual(acquired, ['a-source', 'z-source'])
+})
+
+test('a lost source lock after reading a page prevents canonical ingest and cursor advancement', async () => {
+  const source = {
+    id: 'source-lock-loss', sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.chats.v1', platform: 'telegram', objectType: 'chat',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_chats',
+      cursorColumn: 'updated_at', idColumn: 'chat_id',
+    },
+  }
+  let guardCalls = 0
+  let canonicalWritten = false
+  const saved = []
+  const puller = new DatabaseSourcePuller({
+    store: {
+      withExternalSourceLock: async (key, operation) => operation(async () => {
+        guardCalls += 1
+        if (guardCalls >= 4) {
+          const error = new Error('source lock lost')
+          error.code = 'source_lock_lost'
+          throw error
+        }
+      }),
+      getExternalSource: async () => source,
+      getActiveMapping: async () => ({
+        version: 1,
+        fieldMap: { externalId: { from: 'chat_id' }, eventTime: { from: 'updated_at' } },
+      }),
+      startImportRun: async () => ({ id: 'run-lock-loss', duplicateOf: null }),
+      finishImportRun: async () => {},
+      ingestExternalRecords: async () => { canonicalWritten = true },
+    },
+    queue: {
+      getCursor: async () => ({ position: {} }),
+      saveCursor: async (id, position, options) => saved.push({ position, options }),
+    },
+    env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: [
+            { column_name: 'chat_id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 1 },
+            { column_name: 'updated_at', data_type: 'timestamp with time zone', udt_name: 'timestamptz', is_nullable: 'NO', ordinal_position: 2 },
+          ] }
+        }
+        return { rows: [{ chat_id: -1007, updated_at: new Date('2026-08-10T00:00:00.000Z') }] }
+      },
+      async end() {},
+    }),
+  })
+
+  await assert.rejects(
+    () => puller.pullBatch(source.sourceKey),
+    (error) => error?.code === 'source_lock_lost',
+  )
+  assert.equal(canonicalWritten, false)
+  assert.equal(saved.at(-1).position.cursor, undefined)
+  assert.equal(saved.at(-1).position.importRunId, 'run-lock-loss')
+})
+
+test('checkpoint reset cannot race an in-flight pull and wins after the source becomes idle', async () => {
+  let source = {
+    id: 'source-lock', sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.chats.v1', platform: 'telegram', objectType: 'chat',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_chats',
+      cursorColumn: 'updated_at', idColumn: 'chat_id',
+    },
+  }
+  const mapping = {
+    version: 2,
+    fieldMap: { externalId: { from: 'chat_id' }, eventTime: { from: 'updated_at' } },
+  }
+  let cursor = { position: {}, status: 'idle' }
+  let releaseRows
+  let rowsStarted
+  const rowGate = new Promise((resolve) => { releaseRows = resolve })
+  const rowStarted = new Promise((resolve) => { rowsStarted = resolve })
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+      startImportRun: async () => ({ id: 'run-locked', duplicateOf: null }),
+      finishImportRun: async () => {},
+      ingestExternalRecords: async () => ({ ingested: 1, changed: 1, deleted: 0 }),
+    },
+    queue: {
+      getCursor: async () => cursor,
+      saveCursor: async (id, position, options) => {
+        cursor = { position, status: options.status }
+        return cursor
+      },
+    },
+    env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: [
+            { column_name: 'chat_id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 1 },
+            { column_name: 'updated_at', data_type: 'timestamp with time zone', udt_name: 'timestamptz', is_nullable: 'NO', ordinal_position: 2 },
+          ] }
+        }
+        rowsStarted()
+        await rowGate
+        return { rows: [{ chat_id: -1007, updated_at: new Date('2026-08-10T00:00:00.000Z') }] }
+      },
+      async end() {},
+    }),
+  })
+
+  const inFlight = puller.pullBatch(source.sourceKey, { batchSize: 10 })
+  await rowStarted
+  source = { ...source, status: 'paused' }
+  await assert.rejects(
+    () => puller.resetCheckpoint(source.sourceKey),
+    (error) => error?.status === 409 && error?.code === 'source_busy',
+  )
+  releaseRows()
+  await inFlight
+
+  await puller.resetCheckpoint(source.sourceKey)
+  assert.equal(cursor.status, 'idle')
+  assert.equal(cursor.position.cursor, undefined)
+  assert.equal(cursor.position.importRunId, undefined)
+  assert.ok(cursor.position.resetAt)
 })
 
 test('external pull worker hands an unfinished batch to a distinct continuation', async () => {
@@ -638,7 +1184,10 @@ test('external pull worker hands an unfinished batch to a distinct continuation'
         assert.equal(sourceKey, 'telegram-monitor-messages')
         assert.equal(options.batchSize, 2500)
         await intervalHeartbeat()
-        return { pulled: 2500, ingested: 2500, changed: 20, rejected: 0, done: false }
+        return {
+          pulled: 2500, ingested: 2500, changed: 20, rejected: 0,
+          importRunId: 'run-logical-1', done: false,
+        }
       },
     },
     queue: {
@@ -660,9 +1209,180 @@ test('external pull worker hands an unfinished batch to a distinct continuation'
   assert.equal(intervalCleared, true)
   assert.deepEqual(enqueued, [[
     'external-pull',
-    { sourceKey: 'telegram-monitor-messages', batchSize: 2500, chunk: 8 },
+    { sourceKey: 'telegram-monitor-messages', batchSize: 2500, importRunId: 'run-logical-1', chunk: 8 },
     { dedupeKey: 'external-pull:telegram-monitor-messages:8', priority: 220 },
   ]])
+})
+
+test('an exhausted continuation enqueue marks its cursor failed while preserving the import run id', async () => {
+  for (const [attempts, shouldClose] of [[4, false], [5, true]]) {
+    const closed = []
+    const puller = {
+      pullBatch: async () => ({
+        pulled: 10, ingested: 10, changed: 1, rejected: 0,
+        importRunId: 'run-continuation', done: false,
+      }),
+      markContinuationFailed: async (...args) => closed.push(args),
+    }
+    await assert.rejects(
+      () => runExternalPullJob({
+        puller,
+        queue: {
+          heartbeat: async () => {},
+          enqueue: async () => { throw new Error('queue unavailable') },
+        },
+        payload: { sourceKey: 'telegram-monitor-messages', chunk: 2 },
+        job: { id: 7, attempts, max_attempts: 5 },
+        logger: { log() {}, error() {} },
+      }),
+      /queue unavailable/,
+    )
+    assert.equal(closed.length, shouldClose ? 1 : 0)
+    if (shouldClose) {
+      assert.deepEqual(closed[0], [
+        'telegram-monitor-messages', 'run-continuation', 'continuation_enqueue_failed',
+      ])
+    }
+  }
+})
+
+test('an exhausted ambiguous pull marks its checkpoint failed even before a continuation result exists', async () => {
+  for (const [attempts, shouldMark] of [[4, false], [5, true]]) {
+    const marked = []
+    const error = new Error('commit acknowledgement lost')
+    error.code = 'external_commit_outcome_unknown'
+    await assert.rejects(
+      () => runExternalPullJob({
+        puller: {
+          pullBatch: async () => { throw error },
+          markContinuationFailed: async (...args) => marked.push(args),
+        },
+        queue: { heartbeat: async () => {} },
+        payload: { sourceKey: 'telegram-monitor-messages', chunk: 2 },
+        job: { id: 7, attempts, max_attempts: 5 },
+        logger: { log() {}, error() {} },
+      }),
+      (actual) => actual === error,
+    )
+    assert.equal(marked.length, shouldMark ? 1 : 0)
+    if (shouldMark) {
+      assert.deepEqual(marked[0], [
+        'telegram-monitor-messages', null, 'external_commit_outcome_unknown',
+      ])
+    }
+  }
+})
+
+test('operator-action import failures complete the queue job without retrying or advancing', async () => {
+  for (const code of ['row_rejections_detected', 'import_batch_failed']) {
+    let enqueued = false
+    let marked = false
+    const error = new Error(code)
+    error.code = code
+    const result = await runExternalPullJob({
+      puller: {
+        pullBatch: async () => { throw error },
+        markContinuationFailed: async () => { marked = true },
+      },
+      queue: {
+        heartbeat: async () => {},
+        enqueue: async () => { enqueued = true },
+      },
+      payload: { sourceKey: 'telegram-monitor-messages', chunk: 2 },
+      job: { id: 7, attempts: 1, max_attempts: 5 },
+      logger: { log() {}, warn() {}, error() {} },
+    })
+    assert.deepEqual(result, {
+      pulled: 0, ingested: 0, changed: 0, rejected: 0,
+      done: true, failed: true, error: code,
+    })
+    assert.equal(enqueued, false)
+    assert.equal(marked, false)
+  }
+})
+
+test('a manual sync resumes the same running import after continuation enqueue exhaustion', async () => {
+  const source = {
+    id: 'source-resume', sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.chats.v1', platform: 'telegram', objectType: 'chat',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_chats',
+      cursorColumn: 'updated_at', idColumn: 'chat_id',
+    },
+  }
+  let runStatus = 'running'
+  let markAttempts = 0
+  let cursor = {
+    position: {
+      cursor: '2026-08-10T00:00:00.000Z', lastId: '-1008', importRunId: 'run-resume',
+    },
+    status: 'running',
+  }
+  let finalizedRunId = null
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => ({
+        version: 1,
+        fieldMap: { externalId: { from: 'chat_id' }, eventTime: { from: 'updated_at' } },
+      }),
+      getImportRunState: async () => ({ id: 'run-resume', sourceId: source.id, status: runStatus }),
+      getImportBatch: async () => null,
+      markExternalImportCursorFailed: async (input) => {
+        markAttempts += 1
+        if (markAttempts === 1) {
+          const error = new Error('cursor failure commit acknowledgement lost')
+          error.code = 'external_cursor_failure_outcome_unknown'
+          throw error
+        }
+        cursor = { position: input.position, status: 'failed', lastError: input.error }
+        return { cursor }
+      },
+      startImportRun: async () => { throw new Error('manual resume must not fork a new run') },
+      ingestExternalRecords: async (input) => ({
+        ingested: 1, changed: 1, deleted: 0,
+        rowCount: 1, cursorEnd: input.batch.cursorEnd,
+      }),
+      finalizeExternalImportRun: async (input) => {
+        finalizedRunId = input.importRunId
+        runStatus = input.status
+        cursor = { position: input.position, status: input.cursorStatus }
+        return { cursor }
+      },
+    },
+    queue: {
+      getCursor: async () => cursor,
+      saveCursor: async (id, position, options) => {
+        cursor = { position, status: options.status }
+        return cursor
+      },
+    },
+    env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: [
+            { column_name: 'chat_id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 1 },
+            { column_name: 'updated_at', data_type: 'timestamp with time zone', udt_name: 'timestamptz', is_nullable: 'NO', ordinal_position: 2 },
+          ] }
+        }
+        return { rows: [{ chat_id: -1007, updated_at: new Date('2026-08-10T00:00:01.000Z') }] }
+      },
+      async end() {},
+    }),
+  })
+
+  await puller.markContinuationFailed(source.sourceKey, 'run-resume')
+  assert.equal(cursor.status, 'failed')
+  assert.equal(cursor.position.importRunId, 'run-resume')
+  assert.equal(runStatus, 'running')
+  assert.equal(markAttempts, 2)
+
+  const resumed = await puller.pullBatch(source.sourceKey, { batchSize: 10 })
+  assert.equal(resumed.done, true)
+  assert.equal(finalizedRunId, 'run-resume')
+  assert.equal(runStatus, 'succeeded')
+  assert.equal(cursor.position.importRunId, undefined)
 })
 
 test('external pull worker stops when complete but durably hands off an unfinished shutdown batch', async () => {
@@ -708,7 +1428,272 @@ test('periodic external scheduling selects only active database sources with per
   assert.deepEqual(result, { active: 3, enqueued: 1 })
   assert.deepEqual(calls, [[
     'external-pull',
-    { sourceKey: 'telegram-monitor-chats', batchSize: 750, chunk: 0 },
+    { sourceKey: 'telegram-monitor-chats', batchSize: 750, trigger: 'schedule', chunk: 0 },
     { dedupeKey: 'external-pull:telegram-monitor-chats:0', priority: 220 },
   ]])
+})
+
+test('periodic external scheduling honours each source interval using its durable cursor time', async () => {
+  const calls = []
+  const now = new Date('2026-08-10T08:00:00.000Z')
+  const result = await scheduleActiveDatabaseSources({
+    store: {
+      listExternalSources: async () => [
+        {
+          sourceKey: 'not-due', sourceKind: 'database', status: 'active', syncIntervalSeconds: 300,
+        },
+        {
+          sourceKey: 'due', sourceKind: 'database', status: 'active', syncIntervalSeconds: 60,
+        },
+      ],
+    },
+    queue: {
+      getCursor: async (id) => ({
+        status: 'idle',
+        updatedAt: id.endsWith('not-due')
+          ? '2026-08-10T07:58:00.000Z'
+          : '2026-08-10T07:58:59.000Z',
+      }),
+      enqueue: async (...args) => {
+        calls.push(args)
+        return 1
+      },
+    },
+    batchSize: 500,
+    now,
+  })
+  assert.deepEqual(result, { active: 2, enqueued: 1 })
+  assert.equal(calls[0][1].sourceKey, 'due')
+  assert.equal(calls[0][1].trigger, 'schedule')
+})
+
+test('checkpoint contracts reject table or mapping drift and reset only while paused', async () => {
+  let source = {
+    id: 'source-1', sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'paused',
+    datasetId: 'telegram.monitor.chats.v1', platform: 'telegram', objectType: 'chat',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', schema: 'public', table: 'tg_monitor_chats',
+      cursorColumn: 'updated_at', idColumn: 'chat_id',
+    },
+  }
+  const mapping = { version: 2, fieldMap: { externalId: { from: 'chat_id' }, eventTime: { from: 'first_seen_at' } } }
+  let cursor = { position: {} }
+  const saves = []
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+    },
+    queue: {
+      getCursor: async () => cursor,
+      saveCursor: async (id, position, options) => {
+        saves.push({ id, position, options })
+        cursor = { position, status: options.status }
+        return cursor
+      },
+    },
+    env: { TG_DATABASE_URL: 'postgres://private.invalid/night_all' },
+  })
+
+  const compatible = await puller.assertCheckpointCompatible(source.sourceKey)
+  cursor = {
+    position: {
+      contractHash: compatible.contractHash,
+      mappingVersion: compatible.mappingVersion,
+      cursor: '2026-08-10T00:00:00.000Z',
+      lastId: '-1007',
+    },
+  }
+  source = { ...source, connection: { ...source.connection, table: 'tg_monitor_chats_v2' } }
+  await assert.rejects(
+    () => puller.assertCheckpointCompatible(source.sourceKey),
+    (error) => error?.status === 409 && error?.code === 'checkpoint_contract_mismatch',
+  )
+
+  source = { ...source, connection: { ...source.connection, table: 'tg_monitor_chats' } }
+  const reset = await puller.resetCheckpoint(source.sourceKey)
+  assert.equal(reset.status, 'idle')
+  assert.equal(saves.at(-1).position.cursor, undefined)
+  assert.match(saves.at(-1).position.contractHash, /^[a-f0-9]{64}$/)
+  assert.ok(saves.at(-1).position.resetAt)
+
+  source = { ...source, status: 'active' }
+  await assert.rejects(
+    () => puller.resetCheckpoint(source.sourceKey),
+    (error) => error?.status === 409 && error?.code === 'source_pause_required',
+  )
+})
+
+test('PostgresStore rejects terminal or cross-source runs before any canonical write', async () => {
+  for (const runRow of [
+    { id: 'run-1', source_id: 'source-1', status: 'succeeded' },
+    { id: 'run-1', source_id: 'source-2', status: 'running' },
+  ]) {
+    const queries = []
+    const client = {
+      async query(sql) {
+        queries.push(sql)
+        if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (sql.includes('FROM ingest.import_runs')) return { rows: [runRow], rowCount: 1 }
+        throw new Error(`unexpected canonical query: ${sql}`)
+      },
+      release() {},
+    }
+    const store = new PostgresStore({ connect: async () => client })
+    await assert.rejects(
+      () => store.ingestExternalRecords({
+        datasetId: 'dataset', platform: 'telegram', connectorId: 'external:test',
+        sourceId: 'source-1', importRunId: 'run-1', records: [{}],
+      }),
+      (error) => error?.code === 'import_run_not_running',
+    )
+    assert.equal(queries.some((sql) => sql.includes('INSERT INTO ingest.source_objects')), false)
+    assert.equal(queries.at(-1), 'ROLLBACK')
+  }
+})
+
+test('PostgresStore detects a replay before canonical writes and returns its durable cursor end', async () => {
+  const queries = []
+  const storedEnd = { cursor: '2026-08-10T00:00:05.000Z', lastId: '9' }
+  const client = {
+    async query(sql) {
+      queries.push(sql)
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
+      if (sql.includes('FROM ingest.import_runs')) {
+        return { rows: [{ id: 'run-1', source_id: 'source-1', status: 'running' }], rowCount: 1 }
+      }
+      if (sql.includes('FROM ingest.import_run_batches')) {
+        return { rows: [{
+          batch_key: 'batch-1', cursor_end: storedEnd, row_count: 2,
+          ingested_count: 2, changed_count: 1, deleted_count: 0,
+          rejected_count: 0, status: 'succeeded', page_fingerprint: 'a'.repeat(64),
+        }], rowCount: 1 }
+      }
+      throw new Error(`unexpected canonical query: ${sql}`)
+    },
+    release() {},
+  }
+  const store = new PostgresStore({ connect: async () => client })
+  const result = await store.ingestExternalRecords({
+    datasetId: 'dataset', platform: 'telegram', connectorId: 'external:test',
+    sourceId: 'source-1', importRunId: 'run-1', records: [{}],
+    batch: { key: 'batch-1', pageFingerprint: 'b'.repeat(64) },
+  })
+  assert.equal(result.replayed, true)
+  assert.equal(result.pageDrifted, true)
+  assert.deepEqual(result.cursorEnd, storedEnd)
+  assert.equal(queries.some((sql) => sql.includes('INSERT INTO ingest.source_objects')), false)
+})
+
+test('PostgresStore reports an ambiguous COMMIT without rolling back or reclassifying the run', async () => {
+  const queries = []
+  let releasedWith = null
+  const commitError = Object.assign(new Error('socket closed after commit send'), { code: 'ECONNRESET' })
+  const client = {
+    async query(sql) {
+      queries.push(sql)
+      if (sql === 'BEGIN') return { rows: [], rowCount: 0 }
+      if (sql === 'COMMIT') throw commitError
+      if (sql.includes('FROM ingest.import_runs')) {
+        return { rows: [{ id: 'run-1', source_id: 'source-1', status: 'running' }], rowCount: 1 }
+      }
+      if (sql.includes('FROM ingest.import_run_batches')) {
+        return { rows: [{
+          batch_key: 'batch-1', cursor_end: { cursor: '5', lastId: '9' }, row_count: 2,
+          ingested_count: 2, changed_count: 1, deleted_count: 0,
+          rejected_count: 0, status: 'succeeded', page_fingerprint: 'a'.repeat(64),
+        }], rowCount: 1 }
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    },
+    release(error) { releasedWith = error },
+  }
+  const store = new PostgresStore({ connect: async () => client })
+  await assert.rejects(
+    () => store.ingestExternalRecords({
+      datasetId: 'dataset', platform: 'telegram', connectorId: 'external:test',
+      sourceId: 'source-1', importRunId: 'run-1', records: [{}], batch: { key: 'batch-1' },
+    }),
+    (error) => error?.code === 'external_commit_outcome_unknown',
+  )
+  assert.equal(queries.includes('ROLLBACK'), false)
+  assert.equal(releasedWith, commitError)
+})
+
+test('PostgresStore finalizes and resets import runs with their cursor in one transaction', async () => {
+  const makeStore = () => {
+    const queries = []
+    const client = {
+      async query(sql) {
+        queries.push(sql)
+        if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
+        if (sql.includes('UPDATE ingest.import_runs') && sql.includes("status = $3")) {
+          return { rows: [{ id: 'run-1', source_id: 'source-1', status: 'succeeded' }], rowCount: 1 }
+        }
+        if (sql.includes('UPDATE ingest.import_runs')) return { rows: [{ id: 'run-orphan' }], rowCount: 1 }
+        if (sql.includes('FROM ingest.import_runs')) return { rows: [{ id: 'run-1' }], rowCount: 1 }
+        if (sql.includes('INSERT INTO mxq.cursors')) {
+          return { rows: [{ id: 'external:test', position: { cursor: '5' }, status: 'idle' }], rowCount: 1 }
+        }
+        throw new Error(`unexpected query: ${sql}`)
+      },
+      release() {},
+    }
+    return { store: new PostgresStore({ connect: async () => client }), queries }
+  }
+
+  const finalized = makeStore()
+  await finalized.store.finalizeExternalImportRun({
+    importRunId: 'run-1', sourceId: 'source-1', cursorId: 'external:test',
+    position: { cursor: '5' }, status: 'succeeded', cursorStatus: 'idle', processedDelta: 2,
+  })
+  assert.deepEqual(finalized.queries.map((sql) => (
+    sql === 'BEGIN' || sql === 'COMMIT' ? sql : sql.includes('mxq.cursors') ? 'CURSOR' : 'RUN'
+  )), ['BEGIN', 'RUN', 'CURSOR', 'COMMIT'])
+
+  const continuation = makeStore()
+  await continuation.store.markExternalImportCursorFailed({
+    importRunId: 'run-1', sourceId: 'source-1', cursorId: 'external:test',
+    position: { cursor: '5', importRunId: 'run-1' }, error: 'continuation_enqueue_failed',
+  })
+  assert.equal(continuation.queries.some((sql) => sql.includes('UPDATE ingest.import_runs')), false)
+  assert.deepEqual(continuation.queries.map((sql) => (
+    sql === 'BEGIN' || sql === 'COMMIT' ? sql : sql.includes('mxq.cursors') ? 'CURSOR' : 'RUN'
+  )), ['BEGIN', 'RUN', 'CURSOR', 'COMMIT'])
+
+  const reset = makeStore()
+  const result = await reset.store.resetExternalImportCheckpoint({
+    sourceId: 'source-1', cursorId: 'external:test', position: { resetAt: 'now' },
+  })
+  assert.deepEqual(result.failedRunIds, ['run-orphan'])
+  assert.deepEqual(reset.queries.map((sql) => (
+    sql === 'BEGIN' || sql === 'COMMIT' ? sql : sql.includes('mxq.cursors') ? 'CURSOR' : 'RUN'
+  )), ['BEGIN', 'RUN', 'CURSOR', 'COMMIT'])
+})
+
+test('PostgresStore source lock guard stops work after its advisory-lock session errors or ends', async () => {
+  for (const event of ['error', 'end']) {
+    const queries = []
+    class LockClient extends EventEmitter {
+      async query(sql) {
+        queries.push(sql)
+        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] }
+        if (sql.includes('pg_advisory_unlock')) return { rows: [{ pg_advisory_unlock: false }] }
+        if (sql === 'SELECT 1') return { rows: [{ '?column?': 1 }] }
+        throw new Error(`unexpected query: ${sql}`)
+      }
+
+      release() {}
+    }
+    const client = new LockClient()
+    const store = new PostgresStore({ connect: async () => client })
+    await assert.rejects(
+      () => store.withExternalSourceLock('telegram-monitor-chats', async (assertOwned) => {
+        client.emit(event, event === 'error' ? new Error('lock connection lost') : undefined)
+        await assertOwned()
+      }),
+      (error) => error?.code === 'source_lock_lost',
+    )
+    assert.equal(queries.includes('SELECT 1'), false)
+  }
 })

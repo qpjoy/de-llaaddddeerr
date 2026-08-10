@@ -172,6 +172,7 @@ export function createApp({
   backfillPlatforms = [],
   importer = null,
   databasePuller = null,
+  providerRegistry = null,
   agent = null,
   search = null,
   embedding = null,
@@ -287,6 +288,19 @@ export function createApp({
     }
   }
 
+  function requireProviderRegistry() {
+    if (!providerRegistry) {
+      throw new AppError(503, 'provider_registry_unavailable', 'Source provider management requires MX_INSIGHT_PROVIDER_MASTER_KEY')
+    }
+    return providerRegistry
+  }
+
+  async function withSourceLocks(keys, operation) {
+    const unique = [...new Set((keys || []).filter(Boolean))]
+    if (unique.length === 0 || typeof databasePuller?.withSourceLocks !== 'function') return operation()
+    return databasePuller.withSourceLocks(unique, operation)
+  }
+
   async function dependencies() {
     const result = { store: { status: 'down' }, nightAll: { status: 'down' } }
     try {
@@ -310,7 +324,7 @@ export function createApp({
         response.writeHead(204, {
           'access-control-allow-origin': '*',
           'access-control-allow-headers': 'authorization, content-type, idempotency-key, x-api-key, x-mx-insight-admin-token',
-          'access-control-allow-methods': 'GET, POST, PUT, OPTIONS',
+          'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
         })
         response.end()
         return
@@ -547,6 +561,112 @@ export function createApp({
       // Registering a source and approving a mapping decide how outside data
       // enters the canonical model, so both need platform authority rather than
       // a tenant-scoped role.
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/source-provider-types') {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: [{
+            providerType: 'postgresql',
+            displayName: 'PostgreSQL',
+            available: Boolean(providerRegistry),
+            configFields: ['host', 'port', 'database', 'username', 'sslMode'],
+            secretFields: ['password'],
+          }],
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/source-providers') {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, { data: await requireProviderRegistry().list(), requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/source-providers') {
+        requireSourceAdmin(principal)
+        if (typeof databasePuller?.testProviderCredentials !== 'function') {
+          throw new AppError(503, 'provider_validation_unavailable', 'Provider creation requires the PostgreSQL test workload')
+        }
+        const created = await requireProviderRegistry().create(await readJson(request), {
+          validateCredentials: (credentials) => databasePuller.testProviderCredentials(credentials),
+        })
+        sendJson(response, 201, { data: created, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/source-providers/:key/test')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireProviderRegistry()
+        if (!databasePuller) {
+          throw new AppError(503, 'database_pull_unavailable', 'Provider tests require the PostgreSQL workload')
+        }
+        const data = await withSourceLocks(
+          [`provider:${params.key}`],
+          () => databasePuller.testProvider(params.key),
+        )
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/source-providers/:key')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        const body = await readJson(request)
+        const changesConnection = body?.config != null || body?.password != null
+        const initialReferences = changesConnection
+          ? (await store.listExternalSources()).filter((source) => source.providerKey === params.key)
+          : []
+        const lockedSourceKeys = new Set(initialReferences.map((source) => source.sourceKey))
+        const updateProvider = async () => {
+          if (changesConnection) {
+            const referenced = (await store.listExternalSources()).filter(
+              (source) => source.providerKey === params.key,
+            )
+            if (referenced.some((source) => !lockedSourceKeys.has(source.sourceKey))) {
+              throw new AppError(409, 'provider_topology_changed', 'A source started using this provider; retry the update')
+            }
+            const unsafe = []
+            for (const source of referenced) {
+              const cursor = await queue?.getCursor?.(`external:${source.sourceKey}`)
+              if (source.status !== 'paused' || cursor?.status === 'running') unsafe.push(source.sourceKey)
+            }
+            if (unsafe.length > 0) {
+              throw new AppError(409, 'provider_pause_required', 'Pause and drain all sources before changing provider credentials or coordinates', {
+                sourceKeys: unsafe,
+              })
+            }
+            if (typeof databasePuller?.testProviderCredentials !== 'function') {
+              throw new AppError(503, 'provider_validation_unavailable', 'Provider connection changes require the PostgreSQL test workload')
+            }
+          }
+          return requireProviderRegistry().update(params.key, body, changesConnection
+            ? { validateCredentials: (credentials) => databasePuller.testProviderCredentials(credentials) }
+            : undefined)
+        }
+        const data = await withSourceLocks(
+          changesConnection
+            ? [`provider:${params.key}`, ...lockedSourceKeys]
+            : [],
+          updateProvider,
+        )
+        sendJson(response, 200, {
+          data,
+          requestId,
+        })
+        return
+      }
+      if (params && request.method === 'DELETE') {
+        requireSourceAdmin(principal)
+        const data = await withSourceLocks([`provider:${params.key}`], async () => {
+          const referenced = await store.listExternalSources?.() ?? []
+          if (referenced.some((source) => source.providerKey === params.key)) {
+            throw new AppError(409, 'provider_in_use', 'Source provider is still referenced by an external source')
+          }
+          return requireProviderRegistry().delete(params.key)
+        })
+        sendJson(response, 200, {
+          data, requestId,
+        })
+        return
+      }
+
       if (request.method === 'GET' && pathname === '/internal/v1/admin/sources') {
         requireSourceAdmin(principal)
         sendJson(response, 200, { data: await store.listExternalSources(), requestId })
@@ -559,19 +679,41 @@ export function createApp({
         if (await store.getExternalSource?.(sourceKey)) {
           throw new AppError(409, 'source_exists', 'Source keys are immutable; update a paused source through its PUT route')
         }
-        if ((body.sourceKind || 'file') === 'database') validateDatabaseConnection(body.connection)
-        const created = await store.createExternalSource({
-          sourceKey,
-          displayName: requiredField(body, 'displayName'),
-          sourceKind: body.sourceKind || 'file',
-          // External data lands in its own dataset by default so it never
-          // silently merges into the Night-All corpus and skews platform stats.
-          datasetId: body.datasetId || `external.${sourceKey}.v1`,
-          platform: body.platform || 'external',
-          objectType: body.objectType || 'record',
-          status: (body.sourceKind || 'file') === 'database' ? 'paused' : 'active',
-          connection: body.connection || {},
-        })
+        let provider = null
+        if ((body.sourceKind || 'file') === 'database') {
+          if (body.providerKey != null) {
+            provider = await requireProviderRegistry().get(requiredField(body, 'providerKey'))
+            if (!provider) throw new AppError(404, 'provider_not_found', 'Source provider was not found')
+          }
+          validateDatabaseConnection(body.connection, { providerConfigured: Boolean(provider) })
+        }
+        const syncIntervalSeconds = body.syncIntervalSeconds ?? 60
+        if (!Number.isInteger(syncIntervalSeconds) || syncIntervalSeconds < 60 || syncIntervalSeconds > 86_400) {
+          throw new AppError(400, 'invalid_sync_interval', 'syncIntervalSeconds must be between 60 and 86400')
+        }
+        const created = await withSourceLocks(
+          provider ? [`provider:${provider.providerKey}`] : [],
+          async () => {
+            if (provider) {
+              provider = await requireProviderRegistry().get(provider.providerKey)
+              if (!provider) throw new AppError(404, 'provider_not_found', 'Source provider was not found')
+            }
+            return store.createExternalSource({
+              sourceKey,
+              displayName: requiredField(body, 'displayName'),
+              sourceKind: body.sourceKind || 'file',
+              // External data lands in its own dataset by default so it never
+              // silently merges into the Night-All corpus and skews platform stats.
+              datasetId: body.datasetId || `external.${sourceKey}.v1`,
+              platform: body.platform || 'external',
+              objectType: body.objectType || 'record',
+              status: (body.sourceKind || 'file') === 'database' ? 'paused' : 'active',
+              connection: body.connection || {},
+              providerId: provider?.id ?? null,
+              syncIntervalSeconds,
+            })
+          },
+        )
         sendJson(response, 201, { data: created, requestId })
         return
       }
@@ -579,45 +721,94 @@ export function createApp({
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key')
       if (params && request.method === 'PUT') {
         requireSourceAdmin(principal)
-        const source = await requireSource(params.key)
+        const initialSource = await requireSource(params.key)
         const body = await readJson(request)
-        const unsupported = Object.keys(body || {}).filter((field) => !['connection', 'status'].includes(field))
+        const unsupported = Object.keys(body || {}).filter(
+          (field) => !['connection', 'status', 'providerKey', 'syncIntervalSeconds'].includes(field),
+        )
         if (unsupported.length > 0) {
           throw new AppError(400, 'unsupported_fields', `Unsupported source fields: ${unsupported.join(', ')}`)
         }
         if (body.status != null && !['active', 'paused'].includes(body.status)) {
           throw new AppError(400, 'invalid_status', 'status must be active or paused')
         }
-        if (body.connection != null) {
-          if (source.sourceKind !== 'database') {
-            throw new AppError(400, 'wrong_source_kind', 'Only database sources have connection metadata')
-          }
-          if (source.status !== 'paused') {
-            throw new AppError(409, 'source_pause_required', 'Pause this source before changing its connection metadata')
-          }
-          if (body.status === 'active') {
-            throw new AppError(409, 'source_probe_required', 'Update connection while paused, then probe and activate separately')
-          }
-          validateDatabaseConnection({ ...source.connection, ...body.connection })
+        const changesConnection = body.connection != null || body.providerKey != null
+        if (body.syncIntervalSeconds != null && (
+          !Number.isInteger(body.syncIntervalSeconds) || body.syncIntervalSeconds < 60 || body.syncIntervalSeconds > 86_400
+        )) {
+          throw new AppError(400, 'invalid_sync_interval', 'syncIntervalSeconds must be between 60 and 86400')
         }
-        if (body.status === 'active' && source.status !== 'active') {
-          requireDatabasePuller()
-          const mapping = await store.getActiveMapping(source.id)
-          if (!mapping) {
-            throw new AppError(409, 'no_approved_mapping', 'Approve a verified field mapping before activating this source')
+        const requestedProviderKey = body.providerKey != null
+          ? requiredField(body, 'providerKey')
+          : initialSource.providerKey
+        const needsExclusiveProbe = changesConnection || body.status === 'active'
+        const lockKeys = needsExclusiveProbe
+          ? [
+              params.key,
+              initialSource.providerKey ? `provider:${initialSource.providerKey}` : null,
+              requestedProviderKey ? `provider:${requestedProviderKey}` : null,
+            ]
+          : []
+        const updateSource = async () => {
+          const source = await requireSource(params.key)
+          if (body.providerKey == null && source.providerKey !== initialSource.providerKey) {
+            throw new AppError(409, 'source_topology_changed', 'The source provider changed concurrently; retry the update')
           }
-          const description = await databasePuller.describe(params.key)
-          if (description.issues.length > 0) {
-            throw new AppError(409, 'source_probe_failed', 'Source schema is not safe for incremental sync', {
-              issues: description.issues,
-            })
+          if (changesConnection) {
+            if (source.sourceKind !== 'database') {
+              throw new AppError(400, 'wrong_source_kind', 'Only database sources have connection metadata')
+            }
+            if (source.status !== 'paused') {
+              throw new AppError(409, 'source_pause_required', 'Pause this source before changing its connection metadata')
+            }
+            if (body.status === 'active') {
+              throw new AppError(409, 'source_probe_required', 'Update connection while paused, then probe and activate separately')
+            }
+            const cursor = await queue?.getCursor?.(`external:${params.key}`)
+            if (cursor?.status === 'running') {
+              throw new AppError(409, 'source_draining', 'Wait for the running batch to reach its checkpoint before changing connection metadata')
+            }
           }
-        }
-        sendJson(response, 200, {
-          data: await store.updateExternalSource(params.key, {
+          let provider = null
+          if (requestedProviderKey) {
+            provider = await requireProviderRegistry().get(requestedProviderKey)
+            if (!provider) throw new AppError(404, 'provider_not_found', 'Source provider was not found')
+          }
+          const mergedConnection = { ...source.connection, ...(body.connection || {}) }
+          // Attaching a provider is the explicit migration away from the legacy
+          // environment-variable reference. Keep exactly one credential source.
+          if (body.providerKey != null) delete mergedConnection.dsnEnv
+          if (changesConnection) {
+            validateDatabaseConnection(mergedConnection, { providerConfigured: Boolean(provider) })
+          }
+          if (body.status === 'active' && source.status !== 'active') {
+            requireDatabasePuller()
+            const cursor = await queue?.getCursor?.(`external:${params.key}`)
+            if (cursor?.status === 'running') {
+              throw new AppError(409, 'source_draining', 'Wait for the running batch to finish before activating this source')
+            }
+            const mapping = await store.getActiveMapping(source.id)
+            if (!mapping) {
+              throw new AppError(409, 'no_approved_mapping', 'Approve a verified field mapping before activating this source')
+            }
+            await databasePuller.assertCheckpointCompatible?.(params.key)
+            const description = await databasePuller.describe(params.key)
+            if (description.issues.length > 0) {
+              throw new AppError(409, 'source_probe_failed', 'Source schema is not safe for incremental sync', {
+                issues: description.issues,
+              })
+            }
+          }
+          return store.updateExternalSource(params.key, {
             status: body.status ?? null,
-            connection: body.connection == null ? null : { ...source.connection, ...body.connection },
-          }),
+            connection: changesConnection ? mergedConnection : null,
+            ...(body.providerKey == null ? {} : { providerId: provider.id }),
+            ...(body.syncIntervalSeconds == null ? {} : { syncIntervalSeconds: body.syncIntervalSeconds }),
+          })
+        }
+        const data = await withSourceLocks(lockKeys, updateSource)
+        sendJson(response, 200, {
+          data,
           requestId,
         })
         return
@@ -652,14 +843,23 @@ export function createApp({
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/mappings/:version/approve')
       if (params && request.method === 'POST') {
         requireSourceAdmin(principal)
-        const source = await requireSource(params.key)
-        if (source.sourceKind === 'database' && source.status !== 'paused') {
-          throw new AppError(409, 'source_pause_required', 'Pause this database source before changing its active mapping')
-        }
-        const approved = await store.approveSourceMapping({
-          sourceId: source.id,
-          version: Number(params.version),
-          approvedBy: principal.memberId || 'admin-token',
+        const initial = await requireSource(params.key)
+        const approved = await withSourceLocks(initial.sourceKind === 'database' ? [params.key] : [], async () => {
+          const source = await requireSource(params.key)
+          if (source.sourceKind === 'database' && source.status !== 'paused') {
+            throw new AppError(409, 'source_pause_required', 'Pause this database source before changing its active mapping')
+          }
+          if (source.sourceKind === 'database') {
+            const cursor = await queue?.getCursor?.(`external:${params.key}`)
+            if (cursor?.status === 'running') {
+              throw new AppError(409, 'source_draining', 'Wait for the running batch to finish before changing the active mapping')
+            }
+          }
+          return store.approveSourceMapping({
+            sourceId: source.id,
+            version: Number(params.version),
+            approvedBy: principal.memberId || 'admin-token',
+          })
         })
         sendJson(response, 200, { data: approved, requestId })
         return
@@ -680,15 +880,30 @@ export function createApp({
         requireImporter()
         const buffer = await readBuffer(request)
         const preview = await importer.preview(buffer, requiredQuery(searchParams, 'filename'))
-        // Ask the agent to improve on the deterministic mapping. It returns the
-        // inferred one unchanged when no model is configured or every provider
-        // is down, so this never blocks the preview.
-        const suggestion = await agent?.suggestFieldMap({
-          columns: preview.columns,
-          sampleRows: preview.sample.map((entry) => entry.raw),
-        })
+        const agentQuery = searchParams.get('agent')
+        if (agentQuery != null && !['true', 'false'].includes(agentQuery)) {
+          throw new AppError(400, 'invalid_agent_preview', 'agent must be true or false')
+        }
+        const agentRequested = agentQuery === 'true'
+        // Preview is local and deterministic by default. Even after an
+        // operator explicitly opts into Agent assistance, only column names
+        // are sent — never source rows or values. This keeps a harmless-looking
+        // preview from becoming an undisclosed data export to a model provider.
+        const suggestion = agentRequested
+          ? await agent?.suggestFieldMap({ columns: preview.columns, sampleRows: [] })
+          : {
+              fieldMap: preview.inferredFieldMap,
+              origin: 'inferred',
+              model: null,
+              confidence: null,
+            }
         sendJson(response, 200, {
-          data: { ...preview, suggestion: suggestion ?? null },
+          data: {
+            ...preview,
+            suggestion: suggestion ?? null,
+            agentRequested,
+            agentDataScope: agentRequested ? 'column_names_only' : 'none',
+          },
           requestId,
         })
         return
@@ -706,11 +921,18 @@ export function createApp({
       if (params && request.method === 'GET') {
         requireSourceAdmin(principal)
         requireDatabasePuller()
-        await requireSource(params.key)
+        const source = await requireSource(params.key)
+        const cursor = await queue.getCursor(`external:${params.key}`)
+        const latestRun = (await store.listImportRuns(source.id, 1))[0] ?? null
+        const cursorUpdatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
         sendJson(response, 200, {
           data: {
-            cursor: await queue.getCursor(`external:${params.key}`),
-            queue: await queue.stats('external-pull'),
+            cursor,
+            latestRun,
+            syncIntervalSeconds: source.syncIntervalSeconds ?? 60,
+            nextDueAt: cursorUpdatedAt
+              ? new Date(new Date(cursorUpdatedAt).getTime() + (source.syncIntervalSeconds ?? 60) * 1_000).toISOString()
+              : null,
           },
           requestId,
         })
@@ -726,6 +948,14 @@ export function createApp({
         if (source.status !== 'active') {
           throw new AppError(409, 'source_paused', 'Probe, approve and activate this source before scheduling sync')
         }
+        const existingCursor = await queue.getCursor(`external:${params.key}`)
+        if (existingCursor?.status === 'running') {
+          sendJson(response, 202, {
+            data: { sourceKey: params.key, jobId: null, alreadyScheduled: true },
+            requestId,
+          })
+          return
+        }
         const description = await databasePuller.describe(params.key)
         if (description.issues.length > 0) {
           throw new AppError(409, 'source_probe_failed', 'Source schema is not safe for incremental sync', {
@@ -739,12 +969,27 @@ export function createApp({
         }
         const jobId = await queue.enqueue(
           'external-pull',
-          { sourceKey: params.key, batchSize, chunk: 0 },
+          { sourceKey: params.key, batchSize, trigger: 'manual', chunk: 0 },
           { dedupeKey: `external-pull:${params.key}:0`, priority: 220 },
         )
         sendJson(response, 202, {
           data: { sourceKey: params.key, jobId, alreadyScheduled: jobId === null },
           requestId,
+        })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/sources/:key/checkpoint/reset')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const source = await requireSource(params.key)
+        const body = await readJson(request)
+        if (body?.confirmSourceKey !== source.sourceKey) {
+          throw new AppError(400, 'checkpoint_reset_confirmation_required', 'confirmSourceKey must exactly match the source key')
+        }
+        sendJson(response, 200, {
+          data: await databasePuller.resetCheckpoint(params.key), requestId,
         })
         return
       }
@@ -907,6 +1152,27 @@ export function createApp({
         const context = await requirePublic(request)
         const payload = await service.capabilities(context)
         sendJson(response, 200, { ...payload, requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/telegram/entities/search') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.telegramEntities(context, Object.fromEntries(searchParams.entries())),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/api/v1/data/telegram/search') {
+        const context = await requirePublic(request)
+        const result = await service.search(context, {
+          body: await readJson(request),
+          idempotencyKey: request.headers['idempotency-key'],
+          path: pathname,
+        })
+        sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+        })
         return
       }
       params = routeMatch(pathname, '/api/v1/data/telegram/:resource')

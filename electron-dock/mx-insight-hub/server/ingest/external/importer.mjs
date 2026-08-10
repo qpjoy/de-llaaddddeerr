@@ -99,6 +99,7 @@ export class ExternalImporter {
       const { record, rejected } = applyMapping(raw, mapping.fieldMap, {
         platform: source.platform,
         objectType: source.objectType,
+        source: { origin: 'file', sourceKey: source.sourceKey },
       })
       if (rejected) {
         rejections.push({ rowIndex: index + 1, reason: rejected, raw })

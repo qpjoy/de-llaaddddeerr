@@ -58,7 +58,7 @@ function quotedIdentifier(value, what) {
   return `"${safeIdentifier(value, what)}"`
 }
 
-export function validateDatabaseConnection(connection) {
+export function validateDatabaseConnection(connection, { providerConfigured = false } = {}) {
   if (!connection || typeof connection !== 'object' || Array.isArray(connection)) {
     throw new AppError(400, 'invalid_connection', 'connection must be an object')
   }
@@ -66,7 +66,10 @@ export function validateDatabaseConnection(connection) {
   if (unsupported.length > 0) {
     throw new AppError(400, 'unsupported_connection_fields', `Unsupported database connection fields: ${unsupported.join(', ')}`)
   }
-  if (typeof connection.dsnEnv !== 'string' || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(connection.dsnEnv)) {
+  if (providerConfigured && connection.dsnEnv != null) {
+    throw new AppError(400, 'ambiguous_database_provider', 'A provider-backed source must not also configure connection.dsnEnv')
+  }
+  if (!providerConfigured && (typeof connection.dsnEnv !== 'string' || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(connection.dsnEnv))) {
     throw new AppError(400, 'missing_dsn_env', 'connection.dsnEnv must name an uppercase environment variable')
   }
   safeIdentifier(connection.schema || 'public', 'schema')
@@ -139,6 +142,59 @@ function pullInputName(sourceKey, position) {
   return `database-pull:${sourceKey}:${window}`
 }
 
+function sourceContractHash(source, mapping, provider) {
+  const connection = source.connection || {}
+  const contract = {
+    provider: provider
+      ? { providerKey: provider.providerKey, providerType: provider.providerType, config: provider.config }
+      : { dsnEnv: connection.dsnEnv || null },
+    schema: connection.schema || 'public',
+    table: connection.table,
+    cursorColumn: connection.cursorColumn || null,
+    idColumn: connection.idColumn || null,
+    datasetId: source.datasetId,
+    platform: source.platform,
+    objectType: source.objectType,
+    mappingVersion: mapping.version,
+  }
+  return createHash('sha256').update(JSON.stringify(contract)).digest('hex')
+}
+
+function importBatchKey({ contractHash, position, limit }) {
+  return createHash('sha256').update(JSON.stringify({
+    contractHash,
+    cursor: position.cursor ?? null,
+    lastId: position.lastId ?? null,
+    limit,
+  })).digest('hex')
+}
+
+function sourcePageFingerprint(rows, cursorColumn, idColumn) {
+  const orderKeys = rows.map((row) => {
+    const cursor = row[cursorColumn]
+    return [cursor instanceof Date ? cursor.toISOString() : cursor, String(row[idColumn])]
+  })
+  return createHash('sha256').update(JSON.stringify(orderKeys)).digest('hex')
+}
+
+function importRunKey({ sourceId, contractHash, mappingVersion, position }) {
+  return createHash('sha256').update(JSON.stringify({
+    sourceId,
+    contractHash,
+    mappingVersion,
+    cursor: position.cursor ?? null,
+    lastId: position.lastId ?? null,
+    // A deliberate checkpoint reset starts a new logical import even when it
+    // returns to the same source boundary.
+    resetAt: position.resetAt ?? null,
+  })).digest('hex')
+}
+
+function withoutImportRun(position) {
+  const { importRunId: _importRunId, ...rest } = position || {}
+  return rest
+}
+
 function indexStartsWith(definition, cursorColumn, idColumn) {
   if (/\bwhere\b/i.test(String(definition))) return false
   const order = '(?:\\s+(?:asc|desc))?(?:\\s+nulls\\s+(?:first|last))?'
@@ -162,12 +218,21 @@ function uniqueIndexProvesOrder(definition, cursorColumn, idColumn) {
 }
 
 export class DatabaseSourcePuller {
-  constructor({ store, queue, logger = console, poolFactory = (options) => new pg.Pool(options), env = process.env }) {
+  constructor({
+    store,
+    queue,
+    providerRegistry = null,
+    logger = console,
+    poolFactory = (options) => new pg.Pool(options),
+    env = process.env,
+  }) {
     this.store = store
     this.queue = queue
+    this.providerRegistry = providerRegistry
     this.logger = logger
     this.poolFactory = poolFactory
     this.env = env
+    this.sourceLocks = new Set()
   }
 
   /**
@@ -190,16 +255,43 @@ export class DatabaseSourcePuller {
     return dsn
   }
 
-  #pool(connection, applicationName) {
-    return this.poolFactory({
-      connectionString: this.#dsn(connection),
+  async #poolOptions(source, connection, applicationName) {
+    let connectionOptions
+    if (source?.providerKey) {
+      if (!this.providerRegistry) {
+        throw new AppError(503, 'provider_registry_unavailable', 'Source provider credentials are not available in this workload')
+      }
+      const credentials = await this.providerRegistry.resolveCredentials(source.providerKey)
+      connectionOptions = this.#providerConnectionOptions(credentials)
+    } else {
+      connectionOptions = { connectionString: this.#dsn(connection) }
+    }
+    return {
+      ...connectionOptions,
       max: 2,
       application_name: applicationName,
       statement_timeout: 60_000,
       // Read-only for the whole session. Even a bug in identifier handling
       // cannot mutate the upstream database from here.
       options: '-c default_transaction_read_only=on',
-    })
+    }
+  }
+
+  async #pool(source, connection, applicationName) {
+    return this.poolFactory(await this.#poolOptions(source, connection, applicationName))
+  }
+
+  #providerConnectionOptions(credentials) {
+    return {
+      host: credentials.host,
+      port: credentials.port,
+      database: credentials.database,
+      user: credentials.username,
+      password: credentials.password,
+      ssl: credentials.sslMode === 'disable'
+        ? false
+        : { rejectUnauthorized: credentials.sslMode !== 'require' },
+    }
   }
 
   async #source(sourceKey, { requireMapping = false } = {}) {
@@ -208,13 +300,112 @@ export class DatabaseSourcePuller {
     if (source.sourceKind !== 'database') {
       throw new AppError(400, 'wrong_source_kind', 'This source is not a database source')
     }
-    validateDatabaseConnection(source.connection || {})
+    validateDatabaseConnection(source.connection || {}, { providerConfigured: Boolean(source.providerKey) })
     const mapping = await this.store.getActiveMapping(source.id)
     if (requireMapping && !mapping) {
       throw new AppError(409, 'no_approved_mapping', 'This source has no approved field mapping')
     }
     if (mapping) validateFieldMap(mapping.fieldMap)
-    return { source, mapping, connection: source.connection || {} }
+    let provider = null
+    if (source.providerKey) {
+      if (!this.providerRegistry) {
+        throw new AppError(503, 'provider_registry_unavailable', 'Source provider credentials are not available in this workload')
+      }
+      provider = await this.providerRegistry.get(source.providerKey)
+      if (!provider) throw new AppError(404, 'provider_not_found', `Unknown source provider: ${source.providerKey}`)
+    }
+    return { source, mapping, provider, connection: source.connection || {} }
+  }
+
+  async withSourceLock(sourceKey, operation) {
+    if (typeof this.store.withExternalSourceLock === 'function') {
+      return this.store.withExternalSourceLock(
+        sourceKey,
+        (assertOwned = async () => {}) => operation(assertOwned),
+      )
+    }
+    // MemoryStore and focused unit-test doubles do not own a PostgreSQL
+    // session. Keep the same non-overlap contract within this process.
+    if (this.sourceLocks.has(sourceKey)) {
+      throw new AppError(409, 'source_busy', `External source is currently being synchronized: ${sourceKey}`)
+    }
+    this.sourceLocks.add(sourceKey)
+    try {
+      return await operation(async () => {})
+    } finally {
+      this.sourceLocks.delete(sourceKey)
+    }
+  }
+
+  async withSourceLocks(sourceKeys, operation) {
+    const keys = [...new Set(sourceKeys)].sort()
+    const acquire = (index, guards) => index >= keys.length
+      ? operation(async () => {
+          for (const assertOwned of guards) await assertOwned()
+        })
+      : this.withSourceLock(keys[index], (assertOwned) => acquire(index + 1, [...guards, assertOwned]))
+    return acquire(0, [])
+  }
+
+  #assertCheckpoint(position, { contractHash, mappingVersion }) {
+    if (!position?.contractHash) return
+    if (position.contractHash !== contractHash || Number(position.mappingVersion) !== Number(mappingVersion)) {
+      throw new AppError(
+        409,
+        'checkpoint_contract_mismatch',
+        'The saved checkpoint belongs to a different provider, table, cursor, dataset, or mapping; pause and reset it explicitly',
+      )
+    }
+  }
+
+  async assertCheckpointCompatible(sourceKey) {
+    if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
+    const { source, mapping, provider } = await this.#source(sourceKey, { requireMapping: true })
+    const contractHash = sourceContractHash(source, mapping, provider)
+    const cursor = await this.queue.getCursor(`external:${sourceKey}`)
+    this.#assertCheckpoint(cursor?.position ?? {}, { contractHash, mappingVersion: mapping.version })
+    return { compatible: true, contractHash, mappingVersion: mapping.version, cursor: cursor ?? null }
+  }
+
+  async resetCheckpoint(sourceKey) {
+    return this.withSourceLock(sourceKey, async (assertOwned) => {
+      if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
+      const { source, mapping, provider } = await this.#source(sourceKey, { requireMapping: true })
+      if (source.status !== 'paused') {
+        throw new AppError(409, 'source_pause_required', 'Pause this source before resetting its checkpoint')
+      }
+      const cursorId = `external:${sourceKey}`
+      const saved = await this.queue.getCursor(cursorId)
+      const previousPosition = saved?.position ?? {}
+      const contractHash = sourceContractHash(source, mapping, provider)
+      const resetPosition = {
+        contractHash,
+        mappingVersion: mapping.version,
+        resetAt: new Date().toISOString(),
+      }
+      if (typeof this.store.resetExternalImportCheckpoint === 'function') {
+        await assertOwned()
+        const result = await this.store.resetExternalImportCheckpoint({
+          sourceId: source.id,
+          cursorId,
+          position: resetPosition,
+        })
+        return result.cursor
+      }
+      if (previousPosition.importRunId) {
+        await assertOwned()
+        await this.store.finishImportRun(previousPosition.importRunId, {
+          status: 'failed', rowCount: null, rejectedCount: null,
+          cursorEnd: resetPosition, error: 'checkpoint_reset',
+        })
+      }
+      await assertOwned()
+      return this.queue.saveCursor(
+        cursorId,
+        resetPosition,
+        { status: 'idle', error: null },
+      )
+    })
   }
 
   async #columns(pool, connection) {
@@ -291,7 +482,7 @@ export class DatabaseSourcePuller {
   /** Inspect a registered source without returning its DSN or any row values. */
   async describe(sourceKey) {
     const { source, mapping, connection } = await this.#source(sourceKey)
-    const pool = this.#pool(connection, 'mx-insight-hub-external-describe')
+    const pool = await this.#pool(source, connection, 'mx-insight-hub-external-describe')
     try {
       const [columns, metadata] = await Promise.all([
         this.#columns(pool, connection),
@@ -376,7 +567,7 @@ export class DatabaseSourcePuller {
       throw new AppError(400, 'invalid_preview_limit', `preview limit must be between 1 and ${MAX_PREVIEW}`)
     }
     const table = qualifiedTable(connection)
-    const pool = this.#pool(connection, 'mx-insight-hub-external-preview')
+    const pool = await this.#pool(source, connection, 'mx-insight-hub-external-preview')
     try {
       const columns = await this.#columns(pool, connection)
       const { rows } = await pool.query(
@@ -396,6 +587,60 @@ export class DatabaseSourcePuller {
     }
   }
 
+  /** Test candidate credentials without persisting them or changing provider health. */
+  async testProviderCredentials(credentials) {
+    let pool = null
+    try {
+      pool = this.poolFactory({
+        ...this.#providerConnectionOptions(credentials),
+        max: 2,
+        application_name: 'mx-insight-hub-provider-draft-test',
+        statement_timeout: 60_000,
+        options: '-c default_transaction_read_only=on',
+      })
+      const { rows } = await pool.query(
+        `SELECT current_database() AS database_name,
+                current_user AS database_user,
+                current_setting('server_version') AS server_version,
+                current_setting('transaction_read_only') AS read_only`,
+      )
+      const row = rows[0]
+      if (row?.read_only !== 'on') {
+        throw new AppError(503, 'provider_not_read_only', 'Provider test session is not read-only')
+      }
+      return {
+        database: row.database_name,
+        user: row.database_user,
+        serverVersion: row.server_version,
+        readOnly: true,
+      }
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'provider_not_read_only') throw error
+      throw new AppError(503, 'provider_connection_failed', 'PostgreSQL provider connection test failed')
+    } finally {
+      if (pool) await pool.end().catch(() => {})
+    }
+  }
+
+  /** Verify a persisted provider and store only safe health evidence. */
+  async testProvider(providerKey) {
+    if (!this.providerRegistry) {
+      throw new AppError(503, 'provider_registry_unavailable', 'Source provider credentials are not available in this workload')
+    }
+    try {
+      const connection = await this.testProviderCredentials(
+        await this.providerRegistry.resolveCredentials(providerKey),
+      )
+      const provider = await this.providerRegistry.recordHealth(providerKey, { status: 'healthy' })
+      return { provider, connection }
+    } catch (error) {
+      await this.providerRegistry.recordHealth(providerKey, {
+        status: 'unhealthy', errorCode: 'provider_connection_failed',
+      }).catch(() => {})
+      throw error
+    }
+  }
+
   /**
    * Pull one batch, resuming from the durable cursor.
    *
@@ -403,9 +648,169 @@ export class DatabaseSourcePuller {
    * backfill uses `(last_seen_at, id)`: a timestamp alone is not a total order,
    * and rows sharing one would be skipped or repeated forever.
    */
-  async pullBatch(sourceKey, { batchSize = 1_000 } = {}) {
-    const { source, mapping, connection } = await this.#source(sourceKey, { requireMapping: true })
-    if (source.status !== 'active') throw new AppError(409, 'source_paused', 'This source is paused')
+  async pullBatch(sourceKey, options = {}) {
+    return this.withSourceLock(
+      sourceKey,
+      (assertOwned) => this.#pullBatchUnlocked(sourceKey, options, assertOwned),
+    )
+  }
+
+  async #assertImportRun(source, importRunId) {
+    if (!importRunId || typeof this.store.getImportRunState !== 'function') return
+    const run = await this.store.getImportRunState(importRunId)
+    if (!run || run.sourceId !== source.id || run.status !== 'running') {
+      throw new AppError(
+        409,
+        'import_run_checkpoint_invalid',
+        'The checkpoint import run is missing, terminal, or belongs to another source; reset the checkpoint',
+      )
+    }
+  }
+
+  async #finalizeRun({
+    source,
+    cursorId,
+    importRunId,
+    position,
+    status,
+    cursorStatus,
+    processedDelta = 0,
+    error = null,
+    assertOwned = async () => {},
+  }) {
+    const cursorPosition = withoutImportRun(position)
+    if (typeof this.store.finalizeExternalImportRun === 'function') {
+      try {
+        await assertOwned()
+        const result = await this.store.finalizeExternalImportRun({
+          importRunId,
+          sourceId: source.id,
+          cursorId,
+          position: cursorPosition,
+          status,
+          cursorStatus,
+          processedDelta,
+          error,
+        })
+        return result.cursor
+      } catch (finalizeError) {
+        finalizeError.externalFinalizationAttempted = true
+        throw finalizeError
+      }
+    }
+
+    // Focused unit-test doubles and MemoryStore do not own mxq.cursors. Keep
+    // their legacy ordering while PostgreSQL uses the atomic path above.
+    let remainingDelta = processedDelta
+    if (status === 'succeeded' && cursorStatus === 'idle' && processedDelta > 0) {
+      await assertOwned()
+      await this.queue.saveCursor(
+        cursorId,
+        { ...withoutImportRun(position), importRunId },
+        { status: 'running', processedDelta, error: null },
+      )
+      remainingDelta = 0
+    }
+    await assertOwned()
+    await this.store.finishImportRun(importRunId, {
+      status,
+      rowCount: null,
+      rejectedCount: null,
+      cursorEnd: withoutImportRun(position),
+      error,
+    })
+    await assertOwned()
+    return this.queue.saveCursor(cursorId, cursorPosition, {
+      status: cursorStatus,
+      processedDelta: remainingDelta,
+      error,
+    })
+  }
+
+  async #acknowledgeBatch({
+    source,
+    sourceKey,
+    cursorId,
+    importRunId,
+    cursorEnd,
+    rowCount,
+    limit,
+    ingested,
+    assertOwned = async () => {},
+  }) {
+    if (!cursorEnd || typeof cursorEnd !== 'object') {
+      throw new AppError(500, 'import_batch_cursor_missing', 'A committed import batch has no cursor end')
+    }
+    const latestSource = await this.store.getExternalSource(sourceKey)
+    const paused = latestSource?.status === 'paused'
+    const done = paused || rowCount < limit
+    if (done) {
+      await this.#finalizeRun({
+        source,
+        cursorId,
+        importRunId,
+        position: cursorEnd,
+        status: 'succeeded',
+        cursorStatus: 'idle',
+        processedDelta: ingested,
+        error: null,
+        assertOwned,
+      })
+    } else {
+      await assertOwned()
+      await this.queue.saveCursor(
+        cursorId,
+        { ...withoutImportRun(cursorEnd), importRunId },
+        { status: 'running', processedDelta: ingested, error: null },
+      )
+    }
+    return { done, paused, cursorEnd: withoutImportRun(cursorEnd) }
+  }
+
+  async markContinuationFailed(sourceKey, importRunId, error = 'continuation_enqueue_failed') {
+    return this.withSourceLock(sourceKey, async (assertOwned) => {
+      if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
+      const source = await this.store.getExternalSource(sourceKey)
+      if (!source) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
+      const cursorId = `external:${sourceKey}`
+      const saved = await this.queue.getCursor(cursorId)
+      const position = saved?.position ?? {}
+      const checkpointRunId = position.importRunId ?? null
+      if (!checkpointRunId || (importRunId && checkpointRunId !== importRunId)) {
+        throw new AppError(409, 'import_run_checkpoint_mismatch', 'The failed continuation no longer owns this checkpoint')
+      }
+      await this.#assertImportRun(source, checkpointRunId)
+      const failedPosition = { ...withoutImportRun(position), importRunId: checkpointRunId }
+      if (typeof this.store.markExternalImportCursorFailed === 'function') {
+        const input = {
+          importRunId: checkpointRunId,
+          sourceId: source.id,
+          cursorId,
+          position: failedPosition,
+          error,
+        }
+        await assertOwned()
+        try {
+          return (await this.store.markExternalImportCursorFailed(input)).cursor
+        } catch (markError) {
+          if (markError?.code !== 'external_cursor_failure_outcome_unknown') throw markError
+          // The operation is idempotent and leaves the run running. Retrying
+          // resolves both possibilities of an ambiguous first COMMIT.
+          await assertOwned()
+          return (await this.store.markExternalImportCursorFailed(input)).cursor
+        }
+      }
+      await assertOwned()
+      return this.queue.saveCursor(cursorId, failedPosition, { status: 'failed', error })
+    })
+  }
+
+  async #pullBatchUnlocked(
+    sourceKey,
+    { batchSize = 1_000, importRunId = null, trigger = 'manual' } = {},
+    assertOwned = async () => {},
+  ) {
+    const { source, mapping, provider, connection } = await this.#source(sourceKey, { requireMapping: true })
     if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
 
     const table = qualifiedTable(connection)
@@ -420,29 +825,113 @@ export class DatabaseSourcePuller {
       throw new AppError(400, 'invalid_batch_size', 'batchSize must be a positive integer')
     }
     const limit = Math.min(batchSize, MAX_BATCH)
+    if (!source.providerKey) this.#dsn(connection)
 
-    // Resolve the DSN before touching the cursor. Every check above is pure
-    // configuration validation; doing I/O first would mean a misconfigured
-    // source reports its problem only after a round trip, and reports it as
-    // whatever failed second.
-    this.#dsn(connection)
     const cursorId = `external:${sourceKey}`
     const saved = await this.queue.getCursor(cursorId)
     const position = saved?.position ?? {}
-    const pool = this.#pool(connection, 'mx-insight-hub-external-pull')
-    let run = null
+    const contractHash = sourceContractHash(source, mapping, provider)
+    this.#assertCheckpoint(position, { contractHash, mappingVersion: mapping.version })
+    const checkpointRunId = position.importRunId ?? null
+    if (importRunId && !checkpointRunId) {
+      // The predecessor was retried after its atomic finalize/reset committed.
+      // It no longer owns work and must not open a fresh run.
+      return {
+        pulled: 0, ingested: 0, changed: 0, deleted: 0, rejected: 0,
+        importRunId, done: true, stale: true,
+      }
+    }
+    if (importRunId && importRunId !== checkpointRunId) {
+      throw new AppError(
+        409,
+        'import_run_checkpoint_mismatch',
+        'The queued import run no longer owns this source checkpoint; discard the stale continuation',
+      )
+    }
+    await this.#assertImportRun(source, checkpointRunId)
+
+    let run = checkpointRunId ? { id: checkpointRunId, duplicateOf: null } : null
+    const completedPosition = withoutImportRun({
+      ...position,
+      contractHash,
+      mappingVersion: mapping.version,
+    })
+    if (source.status !== 'active') {
+      if (run) {
+        await this.#finalizeRun({
+          source,
+          cursorId,
+          importRunId: run.id,
+          position: completedPosition,
+          status: 'succeeded',
+          cursorStatus: 'idle',
+          error: null,
+          assertOwned,
+        })
+      } else if (saved?.status === 'running' || saved?.status === 'paused') {
+        await assertOwned()
+        await this.queue.saveCursor(cursorId, completedPosition, { status: 'idle', error: null })
+      }
+      return {
+        pulled: 0, ingested: 0, changed: 0, deleted: 0, rejected: 0,
+        importRunId: run?.id ?? null, done: true, paused: true,
+      }
+    }
+
+    const batchKey = importBatchKey({ contractHash, position, limit })
+    if (run && typeof this.store.getImportBatch === 'function') {
+      const committedBatch = await this.store.getImportBatch(run.id, batchKey)
+      if (committedBatch) {
+        if (committedBatch.status !== 'succeeded') {
+          await this.#finalizeRun({
+            source,
+            cursorId,
+            importRunId: run.id,
+            position: committedBatch.cursorStart ?? completedPosition,
+            status: 'failed',
+            cursorStatus: 'failed',
+            error: committedBatch.errorCode ?? 'import_batch_failed',
+          })
+          throw new AppError(409, 'import_batch_failed', 'This import batch previously failed and must be reset')
+        }
+        const acknowledgement = await this.#acknowledgeBatch({
+          source,
+          sourceKey,
+          cursorId,
+          importRunId: run.id,
+          cursorEnd: committedBatch.cursorEnd,
+          rowCount: committedBatch.rowCount,
+          limit,
+          ingested: committedBatch.ingested,
+          assertOwned,
+        })
+        return {
+          pulled: committedBatch.rowCount,
+          ingested: committedBatch.ingested,
+          changed: committedBatch.changed,
+          deleted: committedBatch.deleted,
+          replayed: true,
+          rejected: committedBatch.rejected,
+          rejectionRate: committedBatch.rowCount > 0
+            ? Math.round((committedBatch.rejected / committedBatch.rowCount) * 1_000) / 1_000
+            : 0,
+          importRunId: run.id,
+          done: acknowledgement.done,
+          paused: acknowledgement.paused,
+        }
+      }
+    }
+
+    // Credentials and the upstream pool are deliberately opened only after a
+    // committed replay has been ruled out; replay can advance from stored
+    // cursor evidence even if the source page has since drifted or vanished.
+    const poolOptions = await this.#poolOptions(source, connection, 'mx-insight-hub-external-pull')
+    const pool = this.poolFactory(poolOptions)
     let runFinished = false
-    let pulledCount = 0
-    let rejectionCount = 0
+    let batchCommitted = false
+    let checkpointWriteInFlight = false
 
     try {
-      run = await this.store.startImportRun({
-        sourceId: source.id,
-        mappingVersion: mapping.version,
-        inputSha256: null,
-        inputName: pullInputName(sourceKey, position),
-        inputBytes: null,
-      })
       const columns = await this.#columns(pool, connection)
       const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
       const { rows } = await pool.query(
@@ -453,15 +942,59 @@ export class DatabaseSourcePuller {
           LIMIT $3`,
         [position.cursor ?? null, position.lastId ?? null, limit],
       )
-      pulledCount = rows.length
+      await assertOwned()
       if (rows.length === 0) {
-        await this.store.finishImportRun(run.id, {
-          status: 'succeeded', rowCount: 0, rejectedCount: 0, error: null,
-        })
-        runFinished = true
-        await this.queue.saveCursor(cursorId, position, { status: 'idle' })
-        return { pulled: 0, ingested: 0, rejected: 0, importRunId: run.id, done: true }
+        if (run) {
+          await this.#finalizeRun({
+            source,
+            cursorId,
+            importRunId: run.id,
+            position: completedPosition,
+            status: 'succeeded',
+            cursorStatus: 'idle',
+            error: null,
+            assertOwned,
+          })
+          runFinished = true
+        } else {
+          await assertOwned()
+          await this.queue.saveCursor(cursorId, completedPosition, { status: 'idle', error: null })
+        }
+        return { pulled: 0, ingested: 0, rejected: 0, importRunId: run?.id ?? null, done: true }
       }
+
+      if (!run) {
+        const runKey = importRunKey({
+          sourceId: source.id,
+          contractHash,
+          mappingVersion: mapping.version,
+          position,
+        })
+        await assertOwned()
+        run = await this.store.startImportRun({
+          sourceId: source.id,
+          mappingVersion: mapping.version,
+          inputSha256: null,
+          inputName: pullInputName(sourceKey, position),
+          inputBytes: null,
+          cursorStart: withoutImportRun({ ...position, contractHash, mappingVersion: mapping.version }),
+          trigger,
+          runKey,
+        })
+        // Persist the logical run before canonical ingest. If the worker dies
+        // after COMMIT but before enqueueing a continuation, the reclaimed job
+        // resumes this run and the batch key absorbs the replay.
+        checkpointWriteInFlight = true
+        await assertOwned()
+        await this.queue.saveCursor(cursorId, {
+          ...position,
+          contractHash,
+          mappingVersion: mapping.version,
+          importRunId: run.id,
+        }, { status: 'running', error: null })
+        checkpointWriteInFlight = false
+      }
+      const pageFingerprint = sourcePageFingerprint(rows, cursorName, idName)
 
       const rejections = []
       const mapped = []
@@ -469,6 +1002,7 @@ export class DatabaseSourcePuller {
         const { record, rejected } = applyMapping(raw, mapping.fieldMap, {
           platform: source.platform,
           objectType: source.objectType,
+          source: { origin: 'database', sourceKey: source.sourceKey },
         })
         if (rejected) {
           rejections.push({ rowIndex: index + 1, reason: rejected, raw })
@@ -482,15 +1016,30 @@ export class DatabaseSourcePuller {
         mapped.push(record)
       }
 
-      await this.store.recordRejectedRows(run.id, rejections)
-      rejectionCount = rejections.length
       const rejectionRate = rejections.length / rows.length
       if (rejections.length > 0) {
-        await this.store.finishImportRun(run.id, {
+        if (this.store.recordRejectedImportBatch) {
+          await assertOwned()
+          await this.store.recordRejectedImportBatch(run.id, {
+            sourceId: source.id,
+            batchKey,
+            cursorStart: { ...position, contractHash, mappingVersion: mapping.version },
+            rowCount: rows.length,
+            rejections,
+            pageFingerprint,
+          })
+        } else {
+          await this.store.recordRejectedRows(run.id, rejections)
+        }
+        await this.#finalizeRun({
+          source,
+          cursorId,
+          importRunId: run.id,
+          position: { ...position, contractHash, mappingVersion: mapping.version },
           status: 'failed',
-          rowCount: rows.length,
-          rejectedCount: rejections.length,
+          cursorStatus: 'failed',
           error: 'row_rejections_detected',
+          assertOwned,
         })
         runFinished = true
         throw new AppError(
@@ -500,31 +1049,45 @@ export class DatabaseSourcePuller {
         )
       }
 
+      const last = rows[rows.length - 1]
+      const nextPosition = {
+        contractHash,
+        mappingVersion: mapping.version,
+        cursor: last[cursorName],
+        lastId: String(last[idName]),
+      }
+      await assertOwned()
       const result = await this.store.ingestExternalRecords({
         datasetId: source.datasetId,
         platform: source.platform,
         connectorId: `external:${source.sourceKey}`,
         records: mapped,
         importRunId: run.id,
+        sourceId: source.id,
+        batch: {
+          key: batchKey,
+          cursorStart: withoutImportRun({ ...position, contractHash, mappingVersion: mapping.version }),
+          cursorEnd: nextPosition,
+          rowCount: rows.length,
+          pageFingerprint,
+        },
       })
+      batchCommitted = true
 
-      await this.store.finishImportRun(run.id, {
-        status: 'succeeded',
-        rowCount: rows.length,
-        rejectedCount: rejections.length,
-        error: null,
-      })
-      runFinished = true
-
-      // Cursor advances only after the batch is written, so a crash replays it
-      // and the uniqueness constraint absorbs the repeat.
-      const last = rows[rows.length - 1]
-      const done = rows.length < limit
-      await this.queue.saveCursor(
+      const acknowledgedPosition = result.cursorEnd ?? nextPosition
+      const acknowledgedRows = result.rowCount ?? rows.length
+      const acknowledgement = await this.#acknowledgeBatch({
+        source,
+        sourceKey,
         cursorId,
-        { cursor: last[cursorName], lastId: String(last[idName]) },
-        { status: done ? 'idle' : 'running', processedDelta: result.ingested },
-      )
+        importRunId: run.id,
+        cursorEnd: acknowledgedPosition,
+        rowCount: acknowledgedRows,
+        limit,
+        ingested: result.ingested,
+        assertOwned,
+      })
+      runFinished = acknowledgement.done
 
       if (rejections.length > 0) {
         this.logger?.warn?.(
@@ -535,26 +1098,40 @@ export class DatabaseSourcePuller {
         pulled: rows.length,
         ingested: result.ingested,
         changed: result.changed,
+        deleted: result.deleted ?? 0,
+        replayed: result.replayed === true,
         rejected: rejections.length,
         rejectionRate: Math.round(rejectionRate * 1_000) / 1_000,
         importRunId: run.id,
-        done,
+        done: acknowledgement.done,
+        paused: acknowledgement.paused,
       }
     } catch (error) {
-      if (run && !runFinished) {
-        await this.store.finishImportRun(run.id, {
-          status: 'failed', rowCount: pulledCount, rejectedCount: rejectionCount, error: safeFailureCode(error),
+      const preserveForRetry = batchCommitted
+        || checkpointWriteInFlight
+        || error?.externalFinalizationAttempted === true
+        || ['external_commit_outcome_unknown', 'external_finalize_outcome_unknown'].includes(error?.code)
+      if (!preserveForRetry && run && !runFinished) {
+        await this.#finalizeRun({
+          source,
+          cursorId,
+          importRunId: run.id,
+          position: { ...position, contractHash, mappingVersion: mapping.version },
+          status: 'failed',
+          cursorStatus: 'failed',
+          error: safeFailureCode(error),
+          assertOwned,
         }).catch(() => {})
+      } else if (!preserveForRetry && !run) {
+        await assertOwned().then(() => this.queue.saveCursor(
+          cursorId,
+          withoutImportRun(position),
+          { status: 'failed', error: safeFailureCode(error) },
+        )).catch(() => {})
       }
-      await this.queue.saveCursor(cursorId, position, {
-        status: 'failed',
-        // Cursor status is returned through an admin API. Preserve a useful
-        // machine code without copying a DSN/host-bearing driver message into it.
-        error: safeFailureCode(error),
-      }).catch(() => {})
       throw error
     } finally {
-      await pool.end()
+      await pool.end().catch(() => {})
     }
   }
 }

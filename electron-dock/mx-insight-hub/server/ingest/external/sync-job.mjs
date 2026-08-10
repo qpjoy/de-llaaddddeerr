@@ -1,5 +1,12 @@
 export const EXTERNAL_PULL_QUEUE = 'external-pull'
 
+function safeFailureCode(error) {
+  for (const candidate of [error?.code, error?.name]) {
+    if (typeof candidate === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(candidate)) return candidate
+  }
+  return 'source_pull_failed'
+}
+
 /** Run one bounded source batch and enqueue exactly one continuation if needed. */
 export async function runExternalPullJob({
   puller,
@@ -20,7 +27,35 @@ export async function runExternalPullJob({
   timer?.unref?.()
   let result
   try {
-    result = await puller.pullBatch(sourceKey, { batchSize: payload.batchSize ?? 1_000 })
+    result = await puller.pullBatch(sourceKey, {
+      batchSize: payload.batchSize ?? 1_000,
+      importRunId: payload.importRunId ?? null,
+      trigger: payload.trigger ?? 'manual',
+    })
+  } catch (error) {
+    if (['row_rejections_detected', 'import_batch_failed'].includes(error?.code)) {
+      logger.warn?.(`[external] ${sourceKey} stopped for operator action: ${error.code}`)
+      return {
+        pulled: 0,
+        ingested: 0,
+        changed: 0,
+        rejected: 0,
+        done: true,
+        failed: true,
+        error: error.code,
+      }
+    }
+    const exhausted = Number(job?.attempts) >= Number(job?.max_attempts)
+    if (exhausted && typeof puller.markContinuationFailed === 'function') {
+      await puller.markContinuationFailed(
+        sourceKey,
+        payload.importRunId ?? null,
+        safeFailureCode(error),
+      ).catch((finalizeError) => {
+        logger.error?.(`[external] ${sourceKey} could not preserve failed pull checkpoint: ${finalizeError.message}`)
+      })
+    }
+    throw error
   } finally {
     clearIntervalFn(timer)
   }
@@ -35,11 +70,29 @@ export async function runExternalPullJob({
     // marked the durable cursor `running`; omitting the continuation here would
     // leave no job for the next worker while the periodic scheduler correctly
     // refuses to overlap a running source.
-    await queue.enqueue(
-      EXTERNAL_PULL_QUEUE,
-      { ...payload, chunk: nextChunk },
-      { dedupeKey: `external-pull:${sourceKey}:${nextChunk}`, priority: 220 },
-    )
+    try {
+      await queue.enqueue(
+        EXTERNAL_PULL_QUEUE,
+        {
+          ...payload,
+          ...(result.importRunId ? { importRunId: result.importRunId } : {}),
+          chunk: nextChunk,
+        },
+        { dedupeKey: `external-pull:${sourceKey}:${nextChunk}`, priority: 220 },
+      )
+    } catch (error) {
+      const exhausted = Number(job?.attempts) >= Number(job?.max_attempts)
+      if (exhausted && result.importRunId && typeof puller.markContinuationFailed === 'function') {
+        await puller.markContinuationFailed(
+          sourceKey,
+          result.importRunId,
+          'continuation_enqueue_failed',
+        ).catch((finalizeError) => {
+          logger.error?.(`[external] ${sourceKey} could not close failed continuation: ${finalizeError.message}`)
+        })
+      }
+      throw error
+    }
   }
   return result
 }

@@ -40,3 +40,10 @@ bash scripts/manage.sh ops internal-production logs
 # bash scripts/manage.sh search up
 # bash scripts/manage.sh local up
 ```
+
+```bash
+# 进入TG数据库
+PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout=30000 -c lock_timeout=3000' \
+psql "host=127.0.0.1 port=5432 dbname=night_all user=mx_data" \
+  -X -W -v ON_ERROR_STOP=1
+```

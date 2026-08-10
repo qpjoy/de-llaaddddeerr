@@ -26,16 +26,20 @@ const SCALAR_TARGETS = new Set([
   'authorExternalId', 'authorName', 'language',
   'countryCode', 'admin1Code', 'admin2Code',
 ])
-const TIME_TARGETS = new Set(['eventTime', 'collectedAt'])
+const TIME_TARGETS = new Set(['eventTime', 'collectedAt', 'editedAt', 'deletedAt'])
 const NUMBER_TARGETS = new Set(['latitude', 'longitude'])
 const METRIC_TARGETS = new Set([
   'metrics.likes', 'metrics.comments', 'metrics.shares', 'metrics.views', 'metrics.bookmarks',
   'metrics.members',
 ])
 const ATTRIBUTE_TARGETS = new Set(['attributes.username', 'attributes.chatType'])
+const BOOLEAN_TARGETS = new Set(['attributes.isOutgoing'])
+const JSON_TARGETS = new Set(['media', 'entities', 'links'])
 const RELATION_TARGETS = new Set([
   'relations.chatId', 'relations.messageId', 'relations.replyToMessageId',
+  'relations.threadId', 'relations.groupedId',
 ])
+const DROP_TARGET = '_drop'
 
 export class MappingError extends Error {
   constructor(message) {
@@ -57,7 +61,8 @@ export function validateFieldMap(fieldMap) {
   }
   const known = new Set([
     ...SCALAR_TARGETS, ...TIME_TARGETS, ...NUMBER_TARGETS, ...METRIC_TARGETS,
-    ...ATTRIBUTE_TARGETS, ...RELATION_TARGETS,
+    ...ATTRIBUTE_TARGETS, ...BOOLEAN_TARGETS, ...JSON_TARGETS, ...RELATION_TARGETS,
+    DROP_TARGET,
   ])
   const errors = []
   for (const [target, rule] of Object.entries(fieldMap)) {
@@ -69,7 +74,9 @@ export function validateFieldMap(fieldMap) {
     if (sources.length === 0 || sources.some((column) => typeof column !== 'string' || !column)) {
       errors.push(`${target}.from must be a column name or a non-empty array of them`)
     }
-    if (rule?.type === 'composite') {
+    if (target === DROP_TARGET && rule?.type != null) {
+      errors.push('_drop does not accept a type; it only marks source columns as intentionally omitted')
+    } else if (rule?.type === 'composite') {
       if (target !== 'externalId' || sources.length < 2) {
         errors.push('type=composite is supported only for externalId with at least two source columns')
       }
@@ -95,7 +102,9 @@ function pick(record, rule) {
   }
   for (const column of sources) {
     const value = record[column]
-    if (value !== undefined && value !== null && String(value).trim() !== '') return value
+    if (value === undefined || value === null) continue
+    if (typeof value === 'string' && value.trim() === '') continue
+    return value
   }
   return null
 }
@@ -127,6 +136,13 @@ function asTimestamp(value) {
   return Number.isNaN(parsed.getTime()) ? null : parsed
 }
 
+function asBoolean(value) {
+  if (typeof value === 'boolean') return value
+  if (value === 1 || value === '1' || String(value).toLowerCase() === 'true') return true
+  if (value === 0 || value === '0' || String(value).toLowerCase() === 'false') return false
+  return null
+}
+
 /**
  * Apply a mapping to one raw record.
  *
@@ -134,18 +150,21 @@ function asTimestamp(value) {
  * rather than given a synthetic key: a synthetic key cannot deduplicate, so the
  * same row would be re-inserted on every import.
  */
-export function applyMapping(raw, fieldMap, { platform, objectType = 'record' }) {
+export function applyMapping(raw, fieldMap, { platform, objectType = 'record', source = null }) {
   const mapped = {}
   const consumed = new Set()
 
   for (const [target, rule] of Object.entries(fieldMap)) {
     const sources = Array.isArray(rule?.from) ? rule.from : [rule?.from]
     for (const column of sources) consumed.add(column)
+    if (target === DROP_TARGET) continue
     const value = pick(raw, rule)
     if (value === null) continue
 
     if (TIME_TARGETS.has(target)) mapped[target] = asTimestamp(value)
     else if (NUMBER_TARGETS.has(target) || METRIC_TARGETS.has(target)) mapped[target] = asNumber(value)
+    else if (BOOLEAN_TARGETS.has(target)) mapped[target] = asBoolean(value)
+    else if (JSON_TARGETS.has(target)) mapped[target] = value
     else mapped[target] = String(value).trim()
   }
 
@@ -171,7 +190,7 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record' })
   }
 
   const attributes = {}
-  for (const target of ATTRIBUTE_TARGETS) {
+  for (const target of [...ATTRIBUTE_TARGETS, ...BOOLEAN_TARGETS]) {
     const value = mapped[target]
     if (value !== undefined) attributes[target.slice('attributes.'.length)] = value
   }
@@ -193,17 +212,27 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record' })
     authorName: mapped.authorName ?? null,
     eventTime: mapped.eventTime ?? null,
     collectedAt: mapped.collectedAt ?? new Date(),
+    editedAt: mapped.editedAt ?? null,
+    deletedAt: mapped.deletedAt ?? null,
     latitude: mapped.latitude ?? null,
     longitude: mapped.longitude ?? null,
     countryCode: mapped.countryCode ?? null,
     admin1Code: mapped.admin1Code ?? null,
     admin2Code: mapped.admin2Code ?? null,
     stableFields: {
-      author: { externalId: mapped.authorExternalId ?? null, name: mapped.authorName ?? null },
-      media: {},
+      author: {
+        externalId: mapped.authorExternalId ?? null,
+        name: mapped.authorName ?? null,
+        handle: attributes.username ?? null,
+      },
+      media: mapped.media ?? {},
+      entities: Array.isArray(mapped.entities) ? mapped.entities : [],
+      links: Array.isArray(mapped.links) ? mapped.links : [],
       metrics,
       attributes,
       relations,
+      editedAt: mapped.editedAt ?? null,
+      ...(source ? { source } : {}),
       language: mapped.language ?? null,
     },
     extensions,

@@ -5,7 +5,7 @@ export const PRODUCT_ID = 'mx-insight-hub'
 // Bump only for a mapping change Elasticsearch cannot apply in place (a changed
 // field type, a changed analyzer on an existing field). Adding a field is
 // additive and does not need a version bump.
-export const CONTENT_SCHEMA_VERSION = 1
+export const CONTENT_SCHEMA_VERSION = 2
 export const CHUNK_SCHEMA_VERSION = 1
 
 /**
@@ -21,7 +21,7 @@ export const CHUNK_SCHEMA_VERSION = 1
  * matter how many keys arrive.
  */
 export function contentIndex({ numberOfReplicas = 0 } = {}) {
-  return defineIndexSet({
+  const definition = defineIndexSet({
     productId: PRODUCT_ID,
     name: 'content',
     schemaVersion: CONTENT_SCHEMA_VERSION,
@@ -66,6 +66,9 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
         },
       },
       authorAvatarUrl: { type: 'keyword', index: false },
+      username: nameField(),
+      chatId: { type: 'keyword' },
+      messageId: { type: 'keyword' },
 
       tokens: { type: 'keyword', ignore_above: 256 },
       entityIds: { type: 'keyword' },
@@ -82,6 +85,7 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
           shares: { type: 'long' },
           views: { type: 'long' },
           bookmarks: { type: 'long' },
+          members: { type: 'long' },
         },
       },
       mediaCount: { type: 'integer' },
@@ -109,6 +113,15 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
       extensions: { type: 'flattened' },
     },
   })
+  // Content is a mutable current-state projection, not an append-only time
+  // series. ILM rollover would allow the same `_id` to survive in several
+  // backing indices, where an edit/delete against the write alias cannot remove
+  // the older copy. Keep one schema-versioned concrete index instead.
+  delete definition.settings['index.lifecycle.name']
+  delete definition.settings['index.lifecycle.rollover_alias']
+  definition.currentIndex = `${definition.writeAlias}-current`
+  definition.bootstrapIndex = definition.currentIndex
+  return definition
 }
 
 /**
@@ -125,7 +138,7 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
  */
 export function chunkIndex({ dimensions, numberOfReplicas = 0 } = {}) {
   if (!dimensions) return null
-  return defineIndexSet({
+  const definition = defineIndexSet({
     productId: PRODUCT_ID,
     name: 'chunk',
     schemaVersion: CHUNK_SCHEMA_VERSION,
@@ -148,8 +161,17 @@ export function chunkIndex({ dimensions, numberOfReplicas = 0 } = {}) {
       embeddingModel: { type: 'keyword' },
       embeddingVersion: { type: 'integer' },
       chunkerVersion: { type: 'keyword' },
+      sourceRevision: { type: 'long' },
       eventTime: { type: 'date' },
       createdAt: { type: 'date' },
     },
   })
+  // Chunks are also mutable current state: edits can replace or shorten their
+  // set, and a deleted record must disappear from retrieval. Keep one concrete
+  // index so an old ILM backing cannot retain an otherwise invisible copy.
+  delete definition.settings['index.lifecycle.name']
+  delete definition.settings['index.lifecycle.rollover_alias']
+  definition.currentIndex = `${definition.writeAlias}-current`
+  definition.bootstrapIndex = definition.currentIndex
+  return definition
 }

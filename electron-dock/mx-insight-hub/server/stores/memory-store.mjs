@@ -23,6 +23,7 @@ export class MemoryStore {
     this.policies = new Map()
     this.requests = new Map()
     this.requestsByScope = new Map()
+    this.sourceProviders = new Map()
   }
 
   async close() {}
@@ -324,6 +325,82 @@ export class MemoryStore {
       activeApiKeys: [...this.apiKeys.values()].filter(active).length,
       ...usage,
     }
+  }
+
+  // Source providers are implemented in memory only to exercise registration,
+  // encryption and safe response behaviour without requiring PostgreSQL. The
+  // authoritative external ingest path remains PostgreSQL-only below.
+  #publicSourceProvider(record) {
+    if (!record) return null
+    const { encryptedSecret: _encryptedSecret, ...safe } = record
+    return clone({ ...safe, secretConfigured: Boolean(record.encryptedSecret) })
+  }
+
+  async createSourceProvider({
+    providerKey, displayName, providerType = 'postgresql', config, encryptedSecret, health = null,
+  }) {
+    if (this.sourceProviders.has(providerKey)) {
+      throw new AppError(409, 'provider_exists', `Provider key already exists: ${providerKey}`)
+    }
+    const timestamp = nowIso()
+    const record = {
+      id: randomUUID(),
+      providerKey,
+      displayName,
+      providerType,
+      config: clone(config),
+      encryptedSecret: clone(encryptedSecret),
+      healthStatus: health?.status ?? 'unknown',
+      healthCheckedAt: health?.checkedAt ? new Date(health.checkedAt).toISOString() : null,
+      healthErrorCode: health?.errorCode ?? null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }
+    this.sourceProviders.set(providerKey, record)
+    return this.#publicSourceProvider(record)
+  }
+
+  async listSourceProviders() {
+    return [...this.sourceProviders.values()].map((record) => this.#publicSourceProvider(record))
+  }
+
+  async getSourceProvider(providerKey) {
+    return this.#publicSourceProvider(this.sourceProviders.get(providerKey))
+  }
+
+  async getSourceProviderSecret(providerKey) {
+    return clone(this.sourceProviders.get(providerKey) || null)
+  }
+
+  async updateSourceProvider(providerKey, patch) {
+    const record = this.sourceProviders.get(providerKey)
+    if (!record) throw new AppError(404, 'provider_not_found', `Unknown source provider: ${providerKey}`)
+    for (const field of [
+      'displayName', 'config', 'encryptedSecret',
+      'healthStatus', 'healthCheckedAt', 'healthErrorCode',
+    ]) {
+      if (Object.prototype.hasOwnProperty.call(patch, field)) record[field] = clone(patch[field])
+    }
+    if (record.healthCheckedAt instanceof Date) record.healthCheckedAt = record.healthCheckedAt.toISOString()
+    record.updatedAt = nowIso()
+    return this.#publicSourceProvider(record)
+  }
+
+  async deleteSourceProvider(providerKey) {
+    if (!this.sourceProviders.delete(providerKey)) {
+      throw new AppError(404, 'provider_not_found', `Unknown source provider: ${providerKey}`)
+    }
+    return { providerKey }
+  }
+
+  async updateSourceProviderHealth(providerKey, { status, errorCode = null, checkedAt = new Date() }) {
+    const record = this.sourceProviders.get(providerKey)
+    if (!record) throw new AppError(404, 'provider_not_found', `Unknown source provider: ${providerKey}`)
+    record.healthStatus = status
+    record.healthCheckedAt = new Date(checkedAt).toISOString()
+    record.healthErrorCode = errorCode
+    record.updatedAt = nowIso()
+    return this.#publicSourceProvider(record)
   }
 
   // Authoritative ingestion needs PostgreSQL transactions and uniqueness, so

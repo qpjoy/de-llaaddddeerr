@@ -2,13 +2,15 @@
 
 MX Insight Hub is the governed data-access layer between callers and private data systems such as Night-All. It turns internal platform capabilities into stable, key-scoped APIs with tenant-scoped identities, consumers, grants, quotas and usage evidence, plus idempotency and an operator console.
 
-The runtime now includes versioned source objects, canonical records/revisions,
-transactional projection outbox, external file/PostgreSQL source mappings,
-durable pull workers and a customer-safe stored Telegram history API. The
-existing search API still dispatches to Night-All. `/shared_dir` watching,
-immutable object storage, freshness-aware cache/fallback, production delete/CDC
-semantics, BI datasets and governed Text2SQL/Data Agent tools remain later
-delivery gates rather than implied capabilities.
+The runtime now includes encrypted PostgreSQL source providers, versioned source
+objects/mappings, canonical records/revisions/tombstones, transactional
+projection outbox, direct file import, durable pull workers and customer-safe
+Telegram history/full-text/entity APIs. Non-Telegram live search still
+dispatches to Night-All; Telegram stored search is locally served in the same
+`night-all.data-search.v1` envelope. `/shared_dir` watching, immutable
+object/cloud adapters, a generic CDC connector, freshness-aware live fallback,
+BI datasets and governed Text2SQL/Data Agent tools remain later delivery gates
+rather than implied capabilities.
 
 It is an independently deployed product module and a sibling of `mx-launcher`, not a Night-All fork and not an embedded Launcher database/service:
 
@@ -113,6 +115,8 @@ GET  /api/v1/data/capabilities
 POST /api/v1/data/search
 GET  /api/v1/data/telegram/chats
 GET  /api/v1/data/telegram/messages
+POST /api/v1/data/telegram/search
+GET  /api/v1/data/telegram/entities/search
 GET  /api/v1/requests/:requestId
 GET  /api/v1/usage
 ```
@@ -125,11 +129,12 @@ not apply a tenant row filter; all granted consumers read the same canonical
 Telegram corpus while authorization, quota and usage remain consumer/tenant
 scoped. Their complete field,
 pagination, privacy and current metering semantics are in the [Public API v1
-contract](docs/contracts/public-api-v1.md). Production source activation starts
+contract](docs/contracts/public-api-v1.md). Production source registration and activation starts
 with the [Telegram monitor ingestion
 runbook](docs/operations/telegram-monitor-ingestion.md); the registered sources
-remain paused until the real external schema and watermark contract are
-verified.
+remain paused until the source owner supplies the missing
+watermark/index/commit-order guarantees. The current messages table cannot
+safely track later edits/deletions with `message_at` or `collected_at`.
 
 Start with [docs/README.md](docs/README.md) for architecture, security, operations, and roadmap decisions.
 

@@ -81,6 +81,11 @@ spec:
                 secretKeyRef:
                   name: mx-insight-hub-secrets
                   key: MX_INSIGHT_API_KEY_PEPPER
+            - name: MX_INSIGHT_PROVIDER_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_PROVIDER_MASTER_KEY
             - name: NIGHT_ALL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:

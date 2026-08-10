@@ -23,20 +23,32 @@ state.
 
 Night-All data and Hub data have separate backup owners and restore drills. Restoring one does not silently rewind the other.
 
+`MX_INSIGHT_API_KEY_PEPPER` and `MX_INSIGHT_PROVIDER_MASTER_KEY` are restore
+dependencies, not ordinary regeneratable configuration. A database dump without
+the pepper cannot validate existing API keys; a dump without the provider
+master key cannot decrypt registered source passwords. Keep both in independent
+encrypted escrow/external secret management, and never write plaintext values
+into backup logs or manifests.
+
 ## Restore order
 
 1. Create a new isolated namespace/database target.
 2. Restore PostgreSQL base backup and replay WAL to the selected point.
 3. Run schema compatibility checks without starting public traffic.
-4. Start Admin mode, verify tenants/keys/grants/request and ledger invariants.
-5. Compare `unknown` requests with Night-All audit evidence and reconcile explicitly.
-6. Start public mode behind a temporary internal route and run non-billable smoke.
-7. Move the gateway route only after evidence is recorded.
+4. Restore the original API-key pepper and provider master key into the isolated
+   Admin/ingest workloads (not the public listener); test decryptability through
+   a redacted provider connection test.
+5. Start Admin mode, verify tenants/keys/grants/request and ledger invariants.
+6. Compare `unknown` requests with Night-All audit evidence and reconcile explicitly.
+7. Start public mode behind a temporary internal route and run non-billable smoke.
+8. Move the gateway route only after evidence is recorded.
 
 ## Required drills
 
 - monthly logical restore into a clean database;
 - quarterly PITR rehearsal and measured RTO;
 - API-key digest/pepper recovery validation without printing plaintext keys;
+- provider-envelope/master-key recovery and read-only connection validation
+  without printing a source password or driver connection string;
 - reconciliation check proving credits and immutable entries balance;
 - restore evidence stored outside the recovered cluster.

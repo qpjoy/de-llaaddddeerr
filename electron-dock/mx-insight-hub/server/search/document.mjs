@@ -36,7 +36,7 @@ function metricsOf(stableFields) {
   const metrics = stableFields?.metrics
   if (!metrics || typeof metrics !== 'object') return {}
   const result = {}
-  for (const key of ['likes', 'comments', 'shares', 'views', 'bookmarks']) {
+  for (const key of ['likes', 'comments', 'shares', 'views', 'bookmarks', 'members']) {
     if (typeof metrics[key] === 'number' && Number.isFinite(metrics[key])) result[key] = metrics[key]
   }
   return result
@@ -46,7 +46,14 @@ function mediaOf(stableFields) {
   const media = stableFields?.media
   const images = Array.isArray(media?.images) ? media.images : []
   const videos = Array.isArray(media?.videos) ? media.videos : []
-  return { mediaCount: images.length + videos.length, hasVideo: videos.length > 0 }
+  if (images.length > 0 || videos.length > 0) {
+    return { mediaCount: images.length + videos.length, hasVideo: videos.length > 0 }
+  }
+  const kind = typeof media?.media_kind === 'string' ? media.media_kind.toLowerCase() : null
+  return {
+    mediaCount: kind ? 1 : 0,
+    hasVideo: kind === 'video',
+  }
 }
 
 // Elasticsearch expects [lon, lat]; the canonical row stores them as separate
@@ -95,6 +102,9 @@ export async function buildContentDocument(row, { segmenter }) {
     authorName: row.author_name,
     authorHandle: stableFields.author?.handle ?? null,
     authorAvatarUrl: stableFields.author?.avatarUrl ?? null,
+    username: stableFields.attributes?.username ?? stableFields.author?.handle ?? null,
+    chatId: stableFields.relations?.chatId ?? null,
+    messageId: stableFields.relations?.messageId ?? null,
 
     // Union of both segmented fields: a cheap keyword facet for "what is this
     // corpus about" aggregations without re-analyzing text at query time.
@@ -118,8 +128,12 @@ export async function buildContentDocument(row, { segmenter }) {
     lastSeenAt: row.last_seen_at,
 
     source: {
-      connectorId: stableFields.connectorId ?? 'night-all',
-      streamId: `${row.platform}.search_posts.v1`,
+      connectorId: stableFields.source?.sourceKey
+        ? `external:${stableFields.source.sourceKey}`
+        : stableFields.connectorId ?? 'night-all',
+      streamId: stableFields.source?.origin === 'database'
+        ? `${row.platform}.external.v1`
+        : `${row.platform}.search_posts.v1`,
       sourceKey: row.external_id,
       payloadSha256: row.payload_sha256,
     },
