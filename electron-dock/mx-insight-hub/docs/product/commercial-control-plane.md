@@ -119,6 +119,17 @@ stateDiagram-v2
 4. 只显示一次 plaintext，PG 保存 HMAC digest、prefix、last four；
 5. audit 记录发行人、consumer、snapshot 和 reason，不保存 plaintext。
 
+当前实现要求每把 key 都有明确到期时间：控制台和 API 默认 `180` 天，可在签发时通过
+`expiresInDays` 设置 `1–730` 天。到达 `expiresAt` 后认证立即失败，列表保留原始
+`status` 并以 `effectiveStatus=expired` 展示，不把过期误报成已撤销。升级前已存在且
+没有期限的 key 在迁移时获得新的 180 天窗口，避免发布瞬间中断现有调用；仍应按轮换
+流程逐步替换。过期和撤销都不会删除历史 usage 或审计证据。
+
+当前平台授权和平台 Policy 绑定到 `consumer`，不是单把 key；因此一个调用者可授权
+多个平台，它名下所有有效 key 共享这组平台权限和额度策略。若需要同一调用者下按 key
+再细分平台，必须新增 key-scoped grant/entitlement，不能只在签发界面保存一个无执行力
+的勾选列表。
+
 轮换采用 overlap：先发第二把 key，验证流量，撤销旧 key。缓存鉴权必须有短 TTL 和主动失效。浏览器前端不长期保存 Admin token；公共 key 不进入 URL、日志、Kibana 或 Night-All。
 
 ## 7. 请求授权和额度顺序

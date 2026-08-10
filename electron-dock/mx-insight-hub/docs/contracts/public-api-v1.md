@@ -25,7 +25,13 @@ Content-Type: application/json
 }
 ```
 
-Current v1 accepts one explicit platform per request. Platform names `all` (case-insensitive) and `*` are invalid; cross-platform fan-out will be a job API so one slow platform cannot hold an unbounded synchronous request.
+Current Hub v1 accepts one explicit platform per request. Platform names `all`
+(case-insensitive) and `*` are invalid. Night-All already has a grouped
+multi-platform response, but the Hub does not expose it yet because its grants,
+policies, idempotency and usage ledger are enforced per platform. A future
+bounded endpoint may return per-platform `results[]` and independent cursors;
+large/`all` fan-out belongs in a job API. It must not be represented as one
+fictional `multi` platform or one globally mixed cursor.
 
 `query` must be non-blank and at most 500 characters after trimming. `cursor`, when present, must be a non-blank opaque string of at most 8,192 characters. Clients must return the cursor from the previous response unchanged rather than constructing or decoding it.
 

@@ -102,6 +102,83 @@ bash -c '
 ' _ "$ROOT_DIR"
 printf 'ok - absent Secret is provisioned rather than refused\n'
 
+# API keys enter a fixed 30-day overlap window. The deploy must inspect the
+# effective status and expiry rather than trusting the persisted raw status.
+rotation_secret='mih_live_rotation_example_1234'
+assert_eq \
+  'reuse|11111111-1111-4111-8111-111111111111|valid|1970-02-01T00:00:00.000Z' \
+  "$(api_key_rotation_decision \
+    '{"data":[{"id":"11111111-1111-4111-8111-111111111111","prefix":"mih_live_rotation","lastFour":"1234","status":"active","effectiveStatus":"active","expiresAt":"1970-02-01T00:00:00.000Z"}]}' \
+    "$rotation_secret" \
+    0)" \
+  'key beyond the 30-day window is reused'
+assert_eq \
+  'rotate|11111111-1111-4111-8111-111111111111|rotation_window|1970-01-31T00:00:00.000Z' \
+  "$(api_key_rotation_decision \
+    '{"data":[{"id":"11111111-1111-4111-8111-111111111111","prefix":"mih_live_rotation","lastFour":"1234","status":"active","effectiveStatus":"active","expiresAt":"1970-01-31T00:00:00.000Z"}]}' \
+    "$rotation_secret" \
+    0)" \
+  'key at the 30-day boundary rotates'
+assert_eq \
+  'rotate|11111111-1111-4111-8111-111111111111|expired|1970-02-01T00:00:00.000Z' \
+  "$(api_key_rotation_decision \
+    '{"data":[{"id":"11111111-1111-4111-8111-111111111111","prefix":"mih_live_rotation","lastFour":"1234","status":"active","effectiveStatus":"expired","expiresAt":"1970-02-01T00:00:00.000Z"}]}' \
+    "$rotation_secret" \
+    0)" \
+  'effective expiry overrides raw active status'
+
+# Rotation is overlap-safe: mint and persist the replacement before revoking
+# the old key. Stubs record externally visible ordering while the real decision
+# helper continues to run in Node.
+rotation_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-key-rotation.XXXXXX")"
+rotation_old_secret='mih_live_bootstrap_old_5678'
+rotation_old_encoded="$(printf '%s' "$rotation_old_secret" | base64)"
+ROTATION_EVENTS="$rotation_events" \
+ROTATION_OLD_ENCODED="$rotation_old_encoded" \
+MX_INSIGHT_ADMIN_TOKEN='admin-token-with-at-least-32-bytes' \
+NIGHT_ALL_BASE_URL='http://127.0.0.1:13141' \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    case "$*" in
+      *"get secret mx-insight-hub-bootstrap"*) printf "%s" "$ROTATION_OLD_ENCODED" ;;
+      *"create secret generic mx-insight-hub-bootstrap"*)
+        printf "persist\n" >>"$ROTATION_EVENTS"
+        printf "apiVersion: v1\n"
+        ;;
+      *"apply -f -"*) cat >/dev/null ;;
+      *) return 1 ;;
+    esac
+  }
+  curl() {
+    case "$*" in
+      *"/revoke"*) printf "revoke\n" >>"$ROTATION_EVENTS" ;;
+      *"/internal/v1/admin/api-keys"*)
+        printf "%s" '\''{"data":[{"id":"22222222-2222-4222-8222-222222222222","prefix":"mih_live_bootstrap_old","lastFour":"5678","status":"active","effectiveStatus":"expired","expiresAt":"2000-01-01T00:00:00.000Z"}]}'\''
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  node() {
+    case "$*" in
+      *"scripts/provision.mjs"*)
+        printf "mint\n" >>"$ROTATION_EVENTS"
+        printf "mih_live_bootstrap_new_9999\ntenant-id\nconsumer-id\n"
+        ;;
+      *) command node "$@" ;;
+    esac
+  }
+  ensure_default_api_key
+' _ "$ROOT_DIR"
+assert_eq $'mint\npersist\nrevoke' "$(cat "$rotation_events")" 'bootstrap rotation persists before revoke'
+rm -f -- "$rotation_events"
+
+assert_eq \
+  '2' \
+  "$(grep -c "jsonpath='{.data.MX_INSIGHT_API_KEY}'" "$ROOT_DIR/scripts/manage.sh")" \
+  'bootstrap provisioning and verification read the same Secret field'
+
 # Direct source credentials now live in the Admin-managed catalog. Production
 # validation must therefore succeed without a separate provider credential key.
 bash -c '

@@ -4,6 +4,7 @@ import { after, before, test } from 'node:test'
 import { NightAllAdapter } from '../../server/adapters/night-all.mjs'
 import { createApp } from '../../server/app.mjs'
 import { loadConfig } from '../../server/config.mjs'
+import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all-data-search.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 
@@ -23,6 +24,52 @@ function jsonResponse(payload, status = 200) {
     status,
     headers: { 'content-type': 'application/json' },
   })
+}
+
+function nightAllSearchEnvelope({ platform = 'xiaohongshu', query = 'AI', pageSize = 20 } = {}) {
+  return {
+    data: {
+      contractVersion: 'night-all.data-search.v1',
+      platform,
+      query,
+      items: [{
+        id: `${platform}:one`,
+        externalId: 'one',
+        platform,
+        contentType: 'normal',
+        url: null,
+        title: query,
+        text: query,
+        publishedAt: '2026-08-01T00:00:00.000Z',
+        collectedAt: '2026-08-01T00:01:00.000Z',
+        author: { id: 'author-one', name: 'Alice', avatarUrl: null },
+        metrics: { likes: 1, comments: 2, shares: 3, views: 4, bookmarks: 5 },
+        media: { coverUrl: null, images: [], videos: [] },
+        source: { provider: 'tikhub', endpointId: 'private-upstream-endpoint' },
+      }],
+      pageInfo: {
+        pageIndex: 1,
+        pageSize,
+        returnedCount: 1,
+        hasMore: false,
+        nextCursor: null,
+        cursorType: 'none',
+      },
+      status: 'ok',
+      warnings: [],
+      meta: {
+        capability: 'search_posts',
+        capabilityStatus: 'ready',
+        paginationMode: 'composite',
+        sourceProvider: 'tikhub',
+        endpointId: 'private-upstream-endpoint',
+        providerCalls: 1,
+        durationMs: 12,
+      },
+    },
+    requestId: 'night-all-request',
+    traceId: 'night-all-trace',
+  }
 }
 
 before(async () => {
@@ -49,13 +96,7 @@ before(async () => {
     upstreamCalls.set(body.platform, (upstreamCalls.get(body.platform) || 0) + 1)
     if (body.platform === 'twitter') throw new TypeError('connection reset')
     if (body.platform === 'facebook') return jsonResponse({ error: { code: 'unavailable' } }, 503)
-    return jsonResponse({
-      data: {
-        platform: body.platform,
-        items: [{ id: 'one', title: body.query, provider: 'must-not-leak', endpointId: 'must-not-leak' }],
-        meta: { providerMetadata: { billing: 'secret' }, safe: true },
-      },
-    })
+    return jsonResponse(nightAllSearchEnvelope(body))
   }
   adapter = new NightAllAdapter({ baseUrl: 'http://night-all.invalid', fetchImpl })
   service = new HubService({ store, adapter, apiKeyPepper: PEPPER })
@@ -108,6 +149,42 @@ test('Night-All adapter rejects invalid successful envelopes', async () => {
     () => invalidAdapter.search({ body: { platform: 'xiaohongshu', query: 'AI', pageSize: 1 }, businessId: 'test' }),
     (error) => error?.name === 'UpstreamRejectedError' && error?.status === 502,
   )
+
+  const missingSource = nightAllSearchEnvelope({ pageSize: 1 })
+  delete missingSource.data.items[0].source.endpointId
+  const invalidContractAdapter = new NightAllAdapter({
+    baseUrl: 'http://night-all.invalid',
+    fetchImpl: async () => jsonResponse(missingSource),
+  })
+  await assert.rejects(
+    () => invalidContractAdapter.search({ body: { platform: 'xiaohongshu', query: 'AI', pageSize: 1 }, businessId: 'test' }),
+    (error) => (
+      error?.name === 'UpstreamRejectedError'
+      && error?.status === 502
+      && error?.body?.code === 'invalid_upstream_contract'
+    ),
+  )
+})
+
+test('Hub validator is equivalent to the strict Night-All v1 single-platform field contract', () => {
+  const valid = nightAllSearchEnvelope()
+  assert.equal(isNightAllDataSearchV1Envelope(valid), true)
+
+  const missingRequiredSourceField = structuredClone(valid)
+  delete missingRequiredSourceField.data.items[0].source.provider
+  assert.equal(isNightAllDataSearchV1Envelope(missingRequiredSourceField), false)
+
+  const unknownItemField = structuredClone(valid)
+  unknownItemField.data.items[0].rawProviderPayload = { secret: true }
+  assert.equal(isNightAllDataSearchV1Envelope(unknownItemField), false)
+
+  const negativeMetric = structuredClone(valid)
+  negativeMetric.data.items[0].metrics.views = -1
+  assert.equal(isNightAllDataSearchV1Envelope(negativeMetric), false)
+
+  const emptyMetaEndpoint = structuredClone(valid)
+  emptyMetaEndpoint.data.meta.endpointId = ''
+  assert.equal(isNightAllDataSearchV1Envelope(emptyMetaEndpoint), false)
 })
 
 test('expired reservations become unknown instead of permanent in-progress requests', async () => {
@@ -186,6 +263,55 @@ test('platform policies are isolated between consumers in the same tenant', asyn
     },
     { consumerId: consumerB.id, maxRequests: 2, windowSeconds: 60, maxPageSize: 1 },
   )
+})
+
+test('API keys default to 180 days, allow bounded expiry, and reject expired authentication', async () => {
+  const isolatedStore = new MemoryStore()
+  const isolatedService = new HubService({
+    store: isolatedStore,
+    adapter: {},
+    apiKeyPepper: PEPPER,
+  })
+  const tenant = await isolatedService.createTenant({ name: 'Expiry tenant' })
+  const consumer = await isolatedService.createConsumer({ tenantId: tenant.id, name: 'Expiry consumer' })
+
+  const issuedAt = Date.now()
+  const defaultKey = await isolatedService.createApiKey({ consumerId: consumer.id, name: 'Default lifetime' })
+  const defaultLifetimeMs = new Date(defaultKey.expiresAt).getTime() - issuedAt
+  assert.ok(defaultLifetimeMs >= 180 * 86_400_000 - 2_000)
+  assert.ok(defaultLifetimeMs <= 180 * 86_400_000 + 2_000)
+  assert.equal(defaultKey.effectiveStatus, 'active')
+
+  const customKey = await isolatedService.createApiKey({
+    consumerId: consumer.id,
+    name: 'Custom lifetime',
+    expiresInDays: 30,
+  })
+  const customLifetimeMs = new Date(customKey.expiresAt).getTime() - Date.now()
+  assert.ok(customLifetimeMs >= 30 * 86_400_000 - 2_000)
+  assert.ok(customLifetimeMs <= 30 * 86_400_000 + 2_000)
+
+  for (const expiresInDays of [0, 1.5, 731]) {
+    await assert.rejects(
+      () => isolatedService.createApiKey({
+        consumerId: consumer.id,
+        name: 'Invalid lifetime',
+        expiresInDays,
+      }),
+      (error) => error?.status === 400 && error?.code === 'invalid_request',
+    )
+  }
+
+  const stored = isolatedStore.apiKeys.get(defaultKey.id)
+  stored.expiresAt = new Date(Date.now() - 1_000).toISOString()
+  assert.equal(stored.lastUsedAt, null)
+  await assert.rejects(
+    () => isolatedService.authenticate(defaultKey.secret),
+    (error) => error?.status === 401 && error?.code === 'invalid_api_key',
+  )
+  assert.equal(stored.lastUsedAt, null)
+  assert.equal((await isolatedService.listApiKeys(consumer.id)).find((key) => key.id === defaultKey.id).effectiveStatus, 'expired')
+  assert.equal((await isolatedStore.dashboard()).activeApiKeys, 1)
 })
 
 test('health reports liveness and dependencies', async () => {
@@ -277,6 +403,8 @@ test('admin provisioning, grants, authenticated search, idempotency, usage, and 
   const secret = keyResult.payload.data.secret
   assert.match(secret, /^mih_live_/)
   assert.equal(keyResult.payload.data.environment, 'live')
+  assert.equal(keyResult.payload.data.effectiveStatus, 'active')
+  assert.ok(new Date(keyResult.payload.data.expiresAt).getTime() > Date.now() + 179 * 86_400_000)
   assert.equal([...store.apiKeys.values()][0].digest.includes(secret), false)
 
   const keys = await call(`/internal/v1/admin/api-keys?consumerId=${consumer.id}`, {
@@ -339,9 +467,11 @@ test('admin provisioning, grants, authenticated search, idempotency, usage, and 
   })
   assert.equal(first.response.status, 200)
   assert.equal(first.response.headers.get('idempotent-replay'), 'false')
-  assert.equal(first.payload.data.items[0].provider, undefined)
-  assert.equal(first.payload.data.items[0].endpointId, undefined)
-  assert.deepEqual(first.payload.data.meta, { safe: true })
+  assert.equal(isNightAllDataSearchV1Envelope(first.payload), true)
+  assert.deepEqual(first.payload.data.items[0].source, { provider: null, endpointId: null })
+  assert.equal(first.payload.data.meta.sourceProvider, undefined)
+  assert.equal(first.payload.data.meta.endpointId, undefined)
+  assert.equal(JSON.stringify(first.payload).includes('private-upstream-endpoint'), false)
   assert.equal(upstreamBodies.at(-1).businessId, consumer.businessId)
   assert.equal(upstreamBodies.at(-1).availabilityMode, 'ready_only')
 

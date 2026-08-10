@@ -117,6 +117,7 @@ const STATUS_TONES = {
   warning: 'warning',
   unknown: 'warning',
   revoked: 'danger',
+  expired: 'danger',
   down: 'danger',
   released: 'danger',
   disabled: 'neutral',

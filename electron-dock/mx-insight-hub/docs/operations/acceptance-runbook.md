@@ -224,6 +224,8 @@ curl -s -H "x-mx-insight-admin-token: <那个 mx-v1 token>" \
 ## 7. 验证 API key 的调用能力
 
 新建的调用者需要两样东西才能调：**平台授权**和 **API key**。控制台「平台能力」授权、「API Keys」签发。
+新 key 默认有效 180 天，也可在签发时设置 1–730 天；验收时应同时记录返回的
+`expiresAt`，并在到期前采用“新旧 key 短期并行、验证新 key、撤销旧 key”的方式轮换。
 
 然后跑端到端验证——它比手工 curl 多验四步：
 

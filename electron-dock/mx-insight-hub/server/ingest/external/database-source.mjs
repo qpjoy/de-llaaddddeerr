@@ -374,14 +374,19 @@ export class DatabaseSourcePuller {
     return this.poolFactory(await this.#poolOptions(connection, applicationName))
   }
 
-  async #source(sourceKey, { requireMapping = false } = {}) {
+  async #source(sourceKey, { requireMapping = false, mappingOverride = undefined } = {}) {
     const source = await this.store.getExternalSource(sourceKey)
     if (!source) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
     if (source.sourceKind !== 'database') {
       throw new AppError(400, 'wrong_source_kind', 'This source is not a database source')
     }
     validateDatabaseConnection(source.connection || {})
-    const mapping = await this.store.getActiveMapping(source.id)
+    const mapping = mappingOverride === undefined
+      ? await this.store.getActiveMapping(source.id)
+      : mappingOverride
+    if (mapping && mapping.sourceId && mapping.sourceId !== source.id) {
+      throw new AppError(409, 'mapping_source_mismatch', 'The field mapping belongs to another source')
+    }
     if (requireMapping && !mapping) {
       throw new AppError(409, 'no_approved_mapping', 'This source has no approved field mapping')
     }
@@ -430,9 +435,9 @@ export class DatabaseSourcePuller {
     }
   }
 
-  async assertCheckpointCompatible(sourceKey) {
+  async assertCheckpointCompatible(sourceKey, { mappingOverride = undefined } = {}) {
     if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
-    const { source, mapping } = await this.#source(sourceKey, { requireMapping: true })
+    const { source, mapping } = await this.#source(sourceKey, { requireMapping: true, mappingOverride })
     const contractHash = sourceContractHash(source, mapping)
     const cursor = await this.queue.getCursor(`external:${sourceKey}`)
     this.#assertCheckpoint(cursor?.position ?? {}, { contractHash, mappingVersion: mapping.version })
@@ -477,6 +482,41 @@ export class DatabaseSourcePuller {
         resetPosition,
         { status: 'idle', error: null },
       )
+    })
+  }
+
+  async resetCheckpoints(sourceKeys, { mappingOverrides = {} } = {}) {
+    return this.withSourceLocks(sourceKeys, async (assertOwned) => {
+      if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
+      if (typeof this.store.resetExternalImportCheckpointsBatch !== 'function') {
+        throw new AppError(503, 'atomic_checkpoint_reset_unavailable', 'Pipeline checkpoint reset requires the PostgreSQL store')
+      }
+      const resetAt = new Date().toISOString()
+      const resets = []
+      for (const sourceKey of sourceKeys) {
+        const mappingOverride = mappingOverrides instanceof Map
+          ? mappingOverrides.get(sourceKey)
+          : mappingOverrides[sourceKey]
+        const { source, mapping } = await this.#source(sourceKey, {
+          requireMapping: true,
+          mappingOverride,
+        })
+        if (source.status !== 'paused') {
+          throw new AppError(409, 'source_pause_required', 'Pause every pipeline source before resetting checkpoints')
+        }
+        resets.push({
+          sourceKey,
+          sourceId: source.id,
+          cursorId: `external:${sourceKey}`,
+          position: {
+            contractHash: sourceContractHash(source, mapping),
+            mappingVersion: mapping.version,
+            resetAt,
+          },
+        })
+      }
+      await assertOwned()
+      return this.store.resetExternalImportCheckpointsBatch(resets)
     })
   }
 
@@ -552,8 +592,8 @@ export class DatabaseSourcePuller {
   }
 
   /** Inspect a registered source without returning its DSN or any row values. */
-  async describe(sourceKey) {
-    const { source, mapping, connection } = await this.#source(sourceKey)
+  async describe(sourceKey, { mappingOverride = undefined } = {}) {
+    const { source, mapping, connection } = await this.#source(sourceKey, { mappingOverride })
     let pool = null
     try {
       pool = await this.#pool(connection, 'mx-insight-hub-external-describe')
@@ -707,6 +747,128 @@ export class DatabaseSourcePuller {
   async testSource(sourceKey) {
     const { connection } = await this.#source(sourceKey)
     return this.testConnection(connection)
+  }
+
+  /**
+   * Count an upstream source only when an operator explicitly opens progress.
+   *
+   * This deliberately does not run in the scheduler: exact COUNT queries can
+   * be expensive on a large foreign table. A saved composite checkpoint makes
+   * completed/remaining exact; before the first checkpoint only the total is
+   * knowable without inventing progress.
+   */
+  async progress(sourceKey) {
+    const { connection } = await this.#source(sourceKey)
+    const table = qualifiedTable(connection)
+    const cursorId = `external:${sourceKey}`
+    const saved = await this.queue?.getCursor?.(cursorId) ?? null
+    const position = saved?.position ?? {}
+    const hasConfiguredCursor = Boolean(connection.cursorColumn && connection.idColumn)
+    let pool = null
+    try {
+      pool = await this.#pool(connection, 'mx-insight-hub-external-progress')
+      const totalOnly = async (blocker, issues) => {
+        const { rows } = await pool.query(`SELECT count(*)::bigint AS total_rows FROM ${table}`)
+        return {
+          totalRows: Number(rows[0]?.total_rows ?? 0),
+          completedRows: null,
+          remainingRows: null,
+          percent: null,
+          cursor: saved,
+          blocker,
+          issues,
+        }
+      }
+      if (!hasConfiguredCursor) {
+        return totalOnly('source_cursor_unconfigured', ['cursorColumn and idColumn are not configured'])
+      }
+
+      const cursorName = safeIdentifier(connection.cursorColumn, 'cursorColumn')
+      const idName = safeIdentifier(connection.idColumn, 'idColumn')
+      const cursorColumn = quotedIdentifier(cursorName, 'cursorColumn')
+      const idColumn = quotedIdentifier(idName, 'idColumn')
+      const columns = await this.#columns(pool, connection)
+      const cursorDefinition = columns.find((column) => column.name === cursorName)
+      const idDefinition = columns.find((column) => column.name === idName)
+      const issues = [
+        ...(!cursorDefinition ? [`cursor column ${cursorName} is missing`] : []),
+        ...(!idDefinition ? [`id column ${idName} is missing`] : []),
+        ...(cursorDefinition?.nullable ? [`cursor column ${cursorName} must be non-null`] : []),
+        ...(idDefinition?.nullable ? [`id column ${idName} must be non-null`] : []),
+        ...(cursorDefinition && !CURSOR_CASTS.has(cursorDefinition.databaseType)
+          ? [`cursor column ${cursorName} has unsupported type`]
+          : []),
+        ...(idDefinition && !ID_CASTS.has(idDefinition.databaseType)
+          ? [`id column ${idName} has unsupported type`]
+          : []),
+      ]
+      if (issues.length > 0) return totalOnly('source_cursor_unsafe', issues)
+
+      const schema = safeIdentifier(connection.schema || 'public', 'schema')
+      const sourceTable = safeIdentifier(connection.table, 'table')
+      const indexResult = await pool.query(
+        `SELECT indexdef AS definition
+           FROM pg_indexes
+          WHERE schemaname = $1 AND tablename = $2`,
+        [schema, sourceTable],
+      )
+      const definitions = indexResult.rows.map((row) => row.definition)
+      if (!definitions.some((definition) => indexStartsWith(definition, cursorName, idName))) {
+        issues.push(`no index begins with (${cursorName}, ${idName})`)
+      }
+      if (!definitions.some((definition) => uniqueIndexProvesOrder(definition, cursorName, idName))) {
+        issues.push(`no unique index proves (${cursorName}, ${idName}) is a total order`)
+      }
+      if (issues.length > 0) return totalOnly('source_cursor_unsafe', issues)
+
+      const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
+      if (position.cursor == null || position.lastId == null) {
+        const { rows } = await pool.query(
+          `SELECT count(*)::bigint AS total_rows
+             FROM ${table}
+            WHERE ${cursorColumn} IS NOT NULL`,
+        )
+        return {
+          totalRows: Number(rows[0]?.total_rows ?? 0),
+          completedRows: null,
+          remainingRows: null,
+          percent: null,
+          cursor: saved,
+          blocker: null,
+          issues: [],
+        }
+      }
+
+      const { rows } = await pool.query(
+        `SELECT count(*) FILTER (WHERE ${cursorColumn} IS NOT NULL)::bigint AS total_rows,
+                count(*) FILTER (
+                  WHERE ${cursorColumn} IS NOT NULL
+                    AND (${cursorColumn}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast})
+                )::bigint AS remaining_rows
+           FROM ${table}`,
+        [position.cursor, position.lastId],
+      )
+      const totalRows = Number(rows[0]?.total_rows ?? 0)
+      const remainingRows = Number(rows[0]?.remaining_rows ?? 0)
+      const completedRows = Math.max(0, totalRows - remainingRows)
+      return {
+        totalRows,
+        completedRows,
+        remainingRows,
+        percent: totalRows === 0 ? 100 : Math.round((completedRows / totalRows) * 10_000) / 100,
+        cursor: saved,
+        blocker: null,
+        issues: [],
+      }
+    } catch (error) {
+      throw safeSourceOperationError(
+        error,
+        'source_progress_failed',
+        'PostgreSQL source progress query failed',
+      )
+    } finally {
+      if (pool) await pool.end().catch(() => {})
+    }
   }
 
   /**

@@ -16,7 +16,7 @@ The console intentionally keeps Sub2API-like operational clarity while using the
 | --- | --- | --- |
 | Business governance | Dashboard | Observe callers, active keys, request outcomes, units and upstream latency. |
 | Business governance | Consumers | Manage tenant-scoped business/application identities. |
-| Business governance | API Keys | Issue one-time secrets, filter keys and perform explicit revocation. |
+| Business governance | API Keys | Issue one-time secrets with a 180-day default (configurable 1–730 days), distinguish effective expiry from revocation, filter keys and perform explicit revocation. |
 | Policy control | Plans and quotas | Explain and edit product-limit semantics. |
 | Policy control | Platforms | Grant concrete platforms and configure consumer-specific windows/page size. |
 | Data plane | External sources | Register/test PostgreSQL connections directly on paused sources; inspect schema/value shapes; review/approve mappings; activate, sync and inspect checkpoints/import-run counts. Direct file upload remains supported. |

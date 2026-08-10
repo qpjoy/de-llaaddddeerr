@@ -9,6 +9,291 @@ security:
   - bearerKey: []
   - apiKeyHeader: []
 paths:
+  /api-keys:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: listApiKeys
+      summary: List API keys visible in the caller's tenant scope.
+      description: >-
+        Returns only safe key metadata; plaintext secrets and HMAC digests are
+        never returned. The break-glass Admin Token may list every tenant, while
+        Launcher sessions require apikey.read in each returned tenant. Public
+        mih_live/mih_test API keys are not management credentials.
+      security:
+        - adminToken: []
+        - launcherSession: []
+      parameters:
+        - name: consumerId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Safe API-key metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiKeyListEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createApiKey
+      summary: Issue a one-time API key with a bounded lifetime.
+      description: >-
+        Requires apikey.write in the consumer's owning tenant, or the
+        break-glass Admin Token. The complete secret is returned exactly once.
+        Omitted expiresInDays defaults to 180; callers may select 1 through 730
+        days. Lifetime is immutable: rotate by issuing a replacement and then
+        revoking the old key.
+      security:
+        - adminToken: []
+        - launcherSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateApiKeyRequest" }
+      responses:
+        "201":
+          description: Newly issued key; this is the only response containing secret.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedApiKeyEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api-keys/{apiKeyId}/revoke:
+    servers:
+      - url: /internal/v1/admin
+    post:
+      operationId: revokeApiKey
+      summary: Irreversibly revoke an API key.
+      description: >-
+        Requires apikey.write in the key's owning tenant, or the break-glass
+        Admin Token. Revocation takes effect on the next request and does not
+        delete usage evidence.
+      security:
+        - adminToken: []
+        - launcherSession: []
+      parameters:
+        - name: apiKeyId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Revoked key metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiKeyEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /pipelines/telegram-monitor:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: getTelegramMonitorPipeline
+      summary: Read the fixed two-input Telegram Monitor cleaning pipeline.
+      description: >-
+        Requires the platform Admin Token. Returns the one shared source
+        connection, fixed chats/messages task definitions, mapping/checkpoint
+        state, current writer contract/last attestation and recent run evidence.
+        Physical schema/tables are not caller-selectable.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: Telegram Monitor business-pipeline state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TelegramMonitorPipelineEnvelope" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      operationId: configureTelegramMonitorPipeline
+      summary: Validate and save one connection/schedule for both fixed inputs.
+      description: >-
+        Both child sources must be paused and drained. The server opens a
+        bounded read-only test session, then atomically writes the shared
+        connection while injecting the fixed table/cursor/id contracts.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TelegramMonitorPipelinePatch" }
+      responses:
+        "200":
+          description: Validated and atomically updated pipeline.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TelegramMonitorPipelineEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /pipelines/telegram-monitor/status:
+    servers:
+      - url: /internal/v1/admin
+    post:
+      operationId: setTelegramMonitorPipelineStatus
+      summary: Activate or safely pause both Telegram Monitor inputs.
+      description: >-
+        Activation first requires both schema/index gates and checkpoint
+        compatibility to pass, then requires an explicit attestation matching
+        the current writer-contract version and digest. Both exact built-in
+        mappings, the immutable attestation and both active statuses commit in
+        one Hub transaction. Pause prevents new batches; an in-flight batch
+        finishes at its durable checkpoint boundary.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TelegramMonitorPipelineStatusRequest" }
+      responses:
+        "200":
+          description: Updated aggregate and child-task status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TelegramMonitorPipelineEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /pipelines/telegram-monitor/sync:
+    servers:
+      - url: /internal/v1/admin
+    post:
+      operationId: syncTelegramMonitorPipeline
+      summary: Enqueue both active Telegram Monitor input tasks.
+      description: >-
+        Requires a current writer-contract attestation. Both child jobs are
+        inserted in one PostgreSQL queue transaction; a pre-commit failure
+        schedules neither child, while an unknown COMMIT outcome is reported
+        explicitly for queue inspection.
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TelegramMonitorPipelineSyncRequest" }
+      responses:
+        "202":
+          description: Per-input jobs accepted or already scheduled.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, requestId]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [pipelineKey, tasks]
+                    properties:
+                      pipelineKey: { type: string, const: telegram-monitor }
+                      tasks:
+                        type: array
+                        minItems: 2
+                        maxItems: 2
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required: [sourceKey, jobId, alreadyScheduled]
+                          properties:
+                            sourceKey: { type: string }
+                            jobId: { type: [string, integer, "null"] }
+                            alreadyScheduled: { type: boolean }
+                  requestId: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /pipelines/telegram-monitor/progress:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: getTelegramMonitorPipelineProgress
+      summary: Explicitly count source rows and checkpoint-relative progress.
+      description: >-
+        Executes source COUNT queries only when requested. With a proven
+        composite cursor it returns exact completed/remaining counts at
+        checkedAt. If a cursor column/index/order contract is unsafe it still
+        returns exact totalRows plus blocker/issues, while progress and percent
+        stay null rather than being invented.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: Exact point-in-time source progress evidence.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TelegramMonitorProgressEnvelope" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /pipelines/telegram-monitor/checkpoints/reset:
+    servers:
+      - url: /internal/v1/admin
+    post:
+      operationId: resetTelegramMonitorPipelineCheckpoints
+      summary: Atomically reset both paused Telegram Monitor checkpoints.
+      description: >-
+        Both fixed inputs must be paused and drained. The reset is written
+        against the exact built-in mapping contract, so a legacy checkpoint
+        cannot keep activation pinned to an older mapping. Child-source reset
+        routes reject these pipeline-managed keys.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirmPipelineKey]
+              properties:
+                confirmPipelineKey: { type: string, const: telegram-monitor }
+      responses:
+        "200":
+          description: Both checkpoints reset to the fixed business contract.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data, requestId]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [pipelineKey, resets]
+                    properties:
+                      pipelineKey: { type: string, const: telegram-monitor }
+                      resets:
+                        type: array
+                        minItems: 2
+                        maxItems: 2
+                        items: { type: object, additionalProperties: true }
+                  requestId: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /sources:
     servers:
       - url: /internal/v1/admin
@@ -90,6 +375,8 @@ paths:
         A direct connection change is read-only-tested before replacing the
         saved connection. A running batch returns source_draining. Activate only
         after mapping approval and the schema/index/watermark gate succeeds.
+        The two fixed Telegram Monitor keys return pipeline_managed_source and
+        must be changed through the pipeline routes.
       security:
         - adminToken: []
       requestBody:
@@ -184,6 +471,7 @@ paths:
     post:
       operationId: createSourceMapping
       summary: Create an unapproved mapping version.
+      description: Fixed Telegram Monitor child keys are read-only here and return pipeline_managed_source.
       security:
         - adminToken: []
       requestBody:
@@ -197,6 +485,7 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /sources/{sourceKey}/mappings/{version}/approve:
     servers:
       - url: /internal/v1/admin
@@ -209,6 +498,7 @@ paths:
     post:
       operationId: approveSourceMapping
       summary: Approve one exact mapping version while a database source is paused and drained.
+      description: Fixed Telegram Monitor mappings are approved only by the atomic pipeline activation.
       security:
         - adminToken: []
       responses:
@@ -281,6 +571,7 @@ paths:
     post:
       operationId: scheduleSourceSync
       summary: Queue a manual pull for an active, approved and probe-safe database source.
+      description: Fixed Telegram Monitor child keys return pipeline_managed_source; use the paired pipeline sync.
       security:
         - adminToken: []
       requestBody:
@@ -308,6 +599,7 @@ paths:
     post:
       operationId: resetSourceCheckpoint
       summary: Reset a paused, drained source checkpoint after exact source-key confirmation.
+      description: Fixed Telegram Monitor child keys return pipeline_managed_source; use the paired pipeline reset.
       security:
         - adminToken: []
       requestBody:
@@ -679,6 +971,16 @@ components:
       in: header
       name: x-mx-insight-admin-token
       description: Platform break-glass Admin Token; the only credential accepted by source-management routes.
+    launcherSession:
+      type: apiKey
+      in: header
+      name: x-mx-insight-admin-token
+      description: >-
+        Launcher-issued management session carried in the same bootstrap
+        header as the Admin Token. The server compares the Admin Token first,
+        then resolves any non-matching value through Launcher and enforces the
+        Hub capability held in the target tenant. This is not a mih_live or
+        mih_test public API key.
     bearerKey:
       type: http
       scheme: bearer
@@ -739,6 +1041,347 @@ components:
       description: Opaque nextCursor from the previous page; return unchanged.
       schema: { type: string, minLength: 1, maxLength: 1024 }
   schemas:
+    CreateApiKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [consumerId, name]
+      properties:
+        consumerId: { type: string, format: uuid }
+        name: { type: string, minLength: 1 }
+        environment: { type: string, enum: [live, test], default: live }
+        expiresInDays:
+          type: integer
+          minimum: 1
+          maximum: 730
+          default: 180
+          description: Whole-day lifetime measured from server-side issuance time.
+    ApiKeyMetadata:
+      type: object
+      required:
+        - id
+        - tenantId
+        - consumerId
+        - name
+        - prefix
+        - lastFour
+        - environment
+        - status
+        - effectiveStatus
+        - createdAt
+        - expiresAt
+        - revokedAt
+        - lastUsedAt
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        consumerId: { type: string, format: uuid }
+        name: { type: string }
+        prefix:
+          type: string
+          description: Non-secret display prefix; never sufficient for authentication.
+        lastFour: { type: string, minLength: 4, maxLength: 4 }
+        environment: { type: string, enum: [live, test] }
+        status:
+          type: string
+          enum: [active, revoked]
+          description: Persisted lifecycle state; expiry does not rewrite it.
+        effectiveStatus:
+          type: string
+          enum: [active, expired, revoked]
+          description: Runtime state after applying the exclusive expiresAt boundary.
+        createdAt: { type: string, format: date-time }
+        expiresAt:
+          type: string
+          format: date-time
+          description: Exclusive authentication expiry.
+        revokedAt: { type: [string, "null"], format: date-time }
+        lastUsedAt: { type: [string, "null"], format: date-time }
+    ApiKey:
+      allOf:
+        - { $ref: "#/components/schemas/ApiKeyMetadata" }
+      unevaluatedProperties: false
+    IssuedApiKey:
+      allOf:
+        - { $ref: "#/components/schemas/ApiKeyMetadata" }
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              pattern: "^mih_(live|test)_"
+              description: One-time plaintext secret; never returned by list or revoke.
+      unevaluatedProperties: false
+    ApiKeyEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/ApiKey" }
+        requestId: { type: string }
+    IssuedApiKeyEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/IssuedApiKey" }
+        requestId: { type: string }
+    ApiKeyListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ApiKey" }
+        requestId: { type: string }
+    TelegramMonitorSharedConnection:
+      type: object
+      additionalProperties: false
+      required: [host, database, username, password]
+      description: >-
+        One Admin-token-visible direct connection reused by both fixed inputs.
+        schema/table/cursor/id are deliberately absent and injected as the
+        fixed public Telegram Monitor business definition.
+      properties:
+        host: { type: string, minLength: 1, maxLength: 255 }
+        port: { type: integer, minimum: 1, maximum: 65535, default: 5432 }
+        database: { type: string, minLength: 1, maxLength: 128 }
+        username: { type: string, minLength: 1, maxLength: 128 }
+        password: { type: string, minLength: 1 }
+        sslMode: { type: string, enum: [disable, require, verify-ca, verify-full], default: require }
+    TelegramMonitorStoredSharedConnection:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >-
+        Admin-visible stored shared coordinates. Legacy seeded sources may
+        expose dsnEnv until the first direct pipeline configuration.
+      properties:
+        host: { type: string, minLength: 1, maxLength: 255 }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        database: { type: string, minLength: 1, maxLength: 128 }
+        username: { type: string, minLength: 1, maxLength: 128 }
+        password: { type: [string, "null"], minLength: 1 }
+        sslMode: { type: string, enum: [disable, require, verify-ca, verify-full] }
+        dsnEnv: { type: string, minLength: 1 }
+    TelegramMonitorPipelinePatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        connection: { $ref: "#/components/schemas/TelegramMonitorSharedConnection" }
+        syncIntervalSeconds: { type: integer, minimum: 60, maximum: 86400 }
+    TelegramMonitorPipelineStatusRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [status]
+          properties:
+            status: { type: string, const: paused }
+        - type: object
+          additionalProperties: false
+          required: [status, writerContractAttestation]
+          properties:
+            status: { type: string, const: active }
+            writerContractAttestation:
+              $ref: "#/components/schemas/TelegramMonitorWriterContractAttestationRequest"
+    TelegramMonitorWriterContractAttestationRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmed, contractVersion, contractDigest]
+      properties:
+        confirmed: { type: boolean, const: true }
+        contractVersion: { type: string, const: telegram-monitor.writer.v1 }
+        contractDigest: { type: string, pattern: "^[0-9a-f]{64}$" }
+    TelegramMonitorWriterContractSummary:
+      type: object
+      additionalProperties: false
+      required: [watermark, deletion, ordering, inputs]
+      properties:
+        watermark: { type: string }
+        deletion: { type: string }
+        ordering: { type: string }
+        inputs:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: object
+            additionalProperties: false
+            required: [role, table, cursor]
+            properties:
+              role: { type: string, enum: [chats, messages] }
+              table: { type: string, enum: [public.tg_monitor_chats, public.tg_monitor_messages] }
+              cursor:
+                type: array
+                minItems: 2
+                maxItems: 2
+                items: { type: string }
+    TelegramMonitorWriterContractAttestation:
+      type: object
+      additionalProperties: false
+      required: [id, pipelineKey, contractVersion, contractDigest, contractSummary, attestedBy, attestedAt]
+      properties:
+        id: { type: string, format: uuid }
+        pipelineKey: { type: string, const: telegram-monitor }
+        contractVersion: { type: string, const: telegram-monitor.writer.v1 }
+        contractDigest: { type: string, pattern: "^[0-9a-f]{64}$" }
+        contractSummary: { $ref: "#/components/schemas/TelegramMonitorWriterContractSummary" }
+        attestedBy: { type: string }
+        attestedAt: { type: string, format: date-time }
+    TelegramMonitorWriterContract:
+      type: object
+      additionalProperties: false
+      required: [version, digest, summary, latestAttestation]
+      properties:
+        version: { type: string, const: telegram-monitor.writer.v1 }
+        digest: { type: string, pattern: "^[0-9a-f]{64}$" }
+        summary: { $ref: "#/components/schemas/TelegramMonitorWriterContractSummary" }
+        latestAttestation:
+          oneOf:
+            - { $ref: "#/components/schemas/TelegramMonitorWriterContractAttestation" }
+            - { type: "null" }
+    TelegramMonitorPipelineSyncRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        batchSize: { type: integer, minimum: 1, maximum: 5000, default: 1000 }
+    TelegramMonitorPipelineTask:
+      type: object
+      additionalProperties: true
+      required:
+        - role
+        - sourceKey
+        - schema
+        - table
+        - cursorColumn
+        - idColumn
+        - builtInMappingVersion
+        - builtInMappingAvailable
+        - source
+      properties:
+        role: { type: string, enum: [chats, messages] }
+        sourceKey: { type: string, enum: [telegram-monitor-chats, telegram-monitor-messages] }
+        schema: { type: string, const: public }
+        table: { type: string, enum: [tg_monitor_chats, tg_monitor_messages] }
+        cursorColumn: { type: string, const: updated_at }
+        idColumn: { type: string, enum: [chat_id, id] }
+        builtInMappingVersion: { type: integer, const: 2 }
+        builtInMappingAvailable: { type: boolean }
+        source: { $ref: "#/components/schemas/ExternalSource" }
+        activeMapping:
+          oneOf:
+            - { type: object, additionalProperties: true }
+            - { type: "null" }
+        cursor:
+          oneOf:
+            - { type: object, additionalProperties: true }
+            - { type: "null" }
+        latestRun:
+          oneOf:
+            - { type: object, additionalProperties: true }
+            - { type: "null" }
+        nextDueAt: { type: [string, "null"], format: date-time }
+    TelegramMonitorPipeline:
+      type: object
+      additionalProperties: false
+      required:
+        - pipelineKey
+        - displayName
+        - builtInMappingVersion
+        - status
+        - connection
+        - syncIntervalSeconds
+        - configured
+        - connectionConsistent
+        - syncIntervalConsistent
+        - inputContractsConsistent
+        - configurationIssues
+        - writerContract
+        - tasks
+      properties:
+        pipelineKey: { type: string, const: telegram-monitor }
+        displayName: { type: string, const: Telegram monitor }
+        builtInMappingVersion: { type: integer, const: 2 }
+        status: { type: string, enum: [active, paused, mixed] }
+        connection:
+          oneOf:
+            - { $ref: "#/components/schemas/TelegramMonitorStoredSharedConnection" }
+            - { type: "null" }
+        syncIntervalSeconds: { type: [integer, "null"], minimum: 60, maximum: 86400 }
+        configured: { type: boolean }
+        connectionConsistent: { type: boolean }
+        syncIntervalConsistent: { type: boolean }
+        inputContractsConsistent: { type: boolean }
+        configurationIssues:
+          type: array
+          items: { type: string }
+        writerContract: { $ref: "#/components/schemas/TelegramMonitorWriterContract" }
+        tasks:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { $ref: "#/components/schemas/TelegramMonitorPipelineTask" }
+    TelegramMonitorPipelineEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/TelegramMonitorPipeline" }
+        requestId: { type: string }
+    TelegramMonitorProgressTask:
+      type: object
+      additionalProperties: false
+      required:
+        - role
+        - sourceKey
+        - totalRows
+        - completedRows
+        - remainingRows
+        - percent
+        - cursor
+        - blocker
+        - issues
+        - checkedAt
+      properties:
+        role: { type: string, enum: [chats, messages] }
+        sourceKey: { type: string, enum: [telegram-monitor-chats, telegram-monitor-messages] }
+        totalRows: { type: integer, minimum: 0 }
+        completedRows: { type: [integer, "null"], minimum: 0 }
+        remainingRows: { type: [integer, "null"], minimum: 0 }
+        percent: { type: [number, "null"], minimum: 0, maximum: 100 }
+        cursor:
+          oneOf:
+            - { type: object, additionalProperties: true }
+            - { type: "null" }
+        blocker: { type: [string, "null"], enum: [source_cursor_unconfigured, source_cursor_unsafe, null] }
+        issues:
+          type: array
+          items: { type: string }
+        checkedAt: { type: string, format: date-time }
+    TelegramMonitorProgress:
+      type: object
+      additionalProperties: false
+      required: [pipelineKey, checkedAt, totalRows, completedRows, remainingRows, percent, tasks]
+      properties:
+        pipelineKey: { type: string, const: telegram-monitor }
+        checkedAt: { type: string, format: date-time }
+        totalRows: { type: integer, minimum: 0 }
+        completedRows: { type: [integer, "null"], minimum: 0 }
+        remainingRows: { type: [integer, "null"], minimum: 0 }
+        percent: { type: [number, "null"], minimum: 0, maximum: 100 }
+        tasks:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { $ref: "#/components/schemas/TelegramMonitorProgressTask" }
+    TelegramMonitorProgressEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/TelegramMonitorProgress" }
+        requestId: { type: string }
     DirectPostgresConnection:
       type: object
       additionalProperties: false
@@ -946,34 +1589,6 @@ components:
             $ref: "#/components/schemas/NightAllDataSearchWarning"
         meta:
           $ref: "#/components/schemas/NightAllDataSearchMeta"
-    NightAllDataSearchMultiResult:
-      type: object
-      additionalProperties: false
-      required: [contractVersion, query, status, results, warnings, meta]
-      properties:
-        contractVersion: { type: string, const: night-all.data-search.v1 }
-        query: { type: string, minLength: 1 }
-        status: { type: string, enum: [ok, partial, failed] }
-        results:
-          type: array
-          minItems: 1
-          maxItems: 15
-          items:
-            $ref: "#/components/schemas/NightAllDataSearchPlatformResult"
-        warnings:
-          type: array
-          items:
-            $ref: "#/components/schemas/NightAllDataSearchWarning"
-        meta:
-          type: object
-          additionalProperties: false
-          required: [requestedPlatforms, succeeded, failed, concurrency, durationMs]
-          properties:
-            requestedPlatforms: { type: integer, minimum: 1, maximum: 15 }
-            succeeded: { type: integer, minimum: 0, maximum: 15 }
-            failed: { type: integer, minimum: 0, maximum: 15 }
-            concurrency: { type: integer, minimum: 1, maximum: 15 }
-            durationMs: { type: integer, minimum: 0 }
     NightAllDataSearchItem:
       type: object
       additionalProperties: false
@@ -1034,10 +1649,12 @@ components:
         source:
           type: object
           additionalProperties: false
+          required: [provider, endpointId]
           description: >-
-            Generic Night-All-backed responses retain this object but redact its
-            provider/endpoint members. Stored Telegram search returns both known
-            members with provider null and endpointId hub-canonical-search.
+            Both fields are always present to preserve the strict Night-All-v1
+            item contract. Generic Night-All-backed responses replace both
+            private upstream labels with null. Stored Telegram search returns
+            provider null and endpointId hub-canonical-search.
           properties:
             provider:
               oneOf:

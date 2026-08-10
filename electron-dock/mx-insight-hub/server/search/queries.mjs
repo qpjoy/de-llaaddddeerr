@@ -19,15 +19,19 @@ function clampSize(size) {
   return Math.min(Math.max(Number(size) || DEFAULT_SIZE, 1), MAX_SIZE)
 }
 
+function wildcardSubstring(term) {
+  return `*${String(term).replace(/[\\*?]/g, '\\$&')}*`
+}
+
 /**
  * Fuzzy author-name lookup.
  *
- * Deliberately avoids `fuzzy` and `wildcard`. Both scan the term dictionary and
- * degrade with corpus size; neither handles Chinese, where the useful notion of
- * "similar" is a shared substring rather than an edit distance. Instead this
- * fans out over the four sub-fields built in mx-common's `nameField`:
+ * Deliberately avoids `fuzzy` and avoids wildcard queries on ordinary keyword
+ * fields. The dedicated `wildcard` field below is ngram-backed by Elasticsearch
+ * for identifier substring lookup; Chinese names additionally use bigrams and
+ * pre-segmented text.
  *
- *   authorName          segmented tokens   "美丽的 AI 搬运工" matches "搬运工"
+ *   authorNameHanlp     segmented tokens   "美丽的 AI 搬运工" matches "搬运工"
  *   authorName.prefix   edge ngrams        "美丽" matches from the first character
  *   authorName.bigram   CJK bigrams        "丽的AI" matches mid-string
  *   authorName.keyword  exact              highest weight, ranks exact matches first
@@ -38,9 +42,11 @@ export function authorNameQuery(term, tokens) {
       should: [
         { term: { 'authorName.keyword': { value: term, boost: 10 } } },
         { match_phrase: { 'authorName.prefix': { query: term, boost: 5 } } },
-        { match: { authorName: { query: toPresegmentedText(tokens), boost: 3 } } },
+        { match: { authorNameHanlp: { query: toPresegmentedText(tokens), boost: 3 } } },
         { match: { 'authorName.bigram': { query: term, boost: 2 } } },
         { match_phrase: { 'authorHandle.prefix': { query: term, boost: 4 } } },
+        { match: { 'authorHandle.bigram': { query: term, boost: 3 } } },
+        { wildcard: { authorHandleSubstring: { value: wildcardSubstring(term), case_insensitive: true, boost: 3 } } },
       ],
       minimum_should_match: 1,
     },
@@ -224,7 +230,11 @@ export class SearchQueries {
               { term: { externalId: { value: term, boost: 12 } } },
               { term: { 'username.keyword': { value: term, boost: 10 } } },
               { match_phrase: { 'username.prefix': { query: term, boost: 6 } } },
-              { match: { username: { query: toPresegmentedText(tokens), boost: 4 } } },
+              // Prefix matching misses a Chinese substring that starts after
+              // the first character (for example 文频 in 中文频道).
+              { match: { 'username.bigram': { query: term, boost: 5 } } },
+              { match: { usernameHanlp: { query: toPresegmentedText(tokens), boost: 4 } } },
+              { wildcard: { usernameSubstring: { value: wildcardSubstring(term), case_insensitive: true, boost: 4 } } },
               { match_phrase: { 'title.keyword': { query: term, boost: 8 } } },
               { match: { title: { query: term, boost: 3 } } },
             ],

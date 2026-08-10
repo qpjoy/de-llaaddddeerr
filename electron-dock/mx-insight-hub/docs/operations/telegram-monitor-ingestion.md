@@ -96,18 +96,23 @@ All endpoints in this section require the platform Admin Token specifically.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
+| `GET, PUT` | `/internal/v1/admin/pipelines/telegram-monitor` | Read or atomically configure the one shared TG connection and interval. |
+| `POST` | `/internal/v1/admin/pipelines/telegram-monitor/status` | Activate or safely pause both fixed inputs. |
+| `POST` | `/internal/v1/admin/pipelines/telegram-monitor/sync` | Enqueue both active inputs with one operator action. |
+| `GET` | `/internal/v1/admin/pipelines/telegram-monitor/progress` | Explicit exact source counts/checkpoint-relative progress and blockers. |
+| `POST` | `/internal/v1/admin/pipelines/telegram-monitor/checkpoints/reset` | Confirm and atomically reset both paused TG checkpoints against the fixed mapping contract. |
 | `GET` | `/internal/v1/admin/sources` | List sources and their Admin-visible connection fields. |
 | `POST` | `/internal/v1/admin/sources` | Create a PostgreSQL or file source. |
 | `GET` | `/internal/v1/admin/sources/:key` | Read one Admin-visible source configuration. |
-| `PUT` | `/internal/v1/admin/sources/:key` | Change the source connection/status/schedule while safety gates permit. |
+| `PUT` | `/internal/v1/admin/sources/:key` | Change a generic source connection/status/schedule; fixed TG child keys return `409 pipeline_managed_source`. |
 | `POST` | `/internal/v1/admin/sources/:key/test` | Test the saved PostgreSQL connection read-only. |
 | `GET` | `/internal/v1/admin/sources/:key/schema` | Probe columns/indexes/constraints/triggers and activation issues. |
-| `GET, POST` | `/internal/v1/admin/sources/:key/mappings` | List mapping versions or create an unapproved version. |
-| `POST` | `/internal/v1/admin/sources/:key/mappings/:version/approve` | Approve an exact mapping while a database source is paused/drained. |
+| `GET, POST` | `/internal/v1/admin/sources/:key/mappings` | List mapping versions; POST is generic-source only and fixed TG child keys return 409. |
+| `POST` | `/internal/v1/admin/sources/:key/mappings/:version/approve` | Approve a generic source mapping; fixed TG mappings are activated only by the business pipeline. |
 | `GET` | `/internal/v1/admin/sources/:key/preview?limit=3` | Return value-free database row shapes. |
 | `POST` | `/internal/v1/admin/sources/:key/preview?filename=...&agent=false` | Preview raw file bytes locally; Agent opt-in receives column names only. |
-| `GET, POST` | `/internal/v1/admin/sources/:key/sync` | Inspect sync state or enqueue a manual database pull. |
-| `POST` | `/internal/v1/admin/sources/:key/checkpoint/reset` | Confirm and reset a paused/drained source checkpoint. |
+| `GET, POST` | `/internal/v1/admin/sources/:key/sync` | Inspect sync state; POST is generic-source only for fixed TG child keys. |
+| `POST` | `/internal/v1/admin/sources/:key/checkpoint/reset` | Reset a generic paused/drained source; TG uses the paired pipeline reset. |
 | `POST` | `/internal/v1/admin/sources/:key/import?filename=...` | Import raw file bytes through the approved mapping. |
 | `GET` | `/internal/v1/admin/sources/:key/imports` | List durable import-run evidence. |
 
@@ -134,12 +139,12 @@ version, `readOnly: true`, health status, check time and a bounded machine error
 code. The saved source response is Admin-token-only and can include its
 plaintext connection fields; public responses never do.
 
-A connection-changing `PUT` requires this source to be `paused` and its cursor
+A connection-changing generic-source `PUT` requires that source to be `paused` and its cursor
 to be no longer `running`. It tests the merged candidate before replacing the
 last-known-good connection. Draining returns `409 source_draining`; advisory
 lock contention returns `409 source_busy`.
 
-## 3. Register and inspect both sources
+## 3. Configure the Telegram Monitor business task
 
 Migration 010 created stable source/dataset identities:
 
@@ -148,12 +153,14 @@ Migration 010 created stable source/dataset identities:
 | `telegram-monitor-chats` | `telegram.monitor.chats.v1` | `chat` |
 | `telegram-monitor-messages` | `telegram.monitor.messages.v1` | `message` |
 
-Update each seeded paused source with its complete PostgreSQL connection.
-Physical connection and schema/table names are control-plane configuration;
-they do not become public API inputs.
+Do not register two replacement sources and do not enter table/mapping settings
+twice. The Admin UI presents these seeded inputs as one **Telegram Monitor 清洗任务**.
+Its business definition owns both tables, datasets, object types, cursor/id
+candidates and mapping v2; the operator supplies only one shared database
+connection and schedule.
 
 ```http
-PUT /internal/v1/admin/sources/telegram-monitor-chats
+PUT /internal/v1/admin/pipelines/telegram-monitor
 Content-Type: application/json
 x-mx-insight-admin-token: <admin-token>
 
@@ -164,29 +171,37 @@ x-mx-insight-admin-token: <admin-token>
     "database": "night_all",
     "username": "mx_data",
     "password": "<provided-out-of-band>",
-    "sslMode": "require",
-    "schema": "public",
-    "table": "tg_monitor_chats",
-    "cursorColumn": "updated_at",
-    "idColumn": "chat_id"
+    "sslMode": "require"
   },
-  "syncIntervalSeconds": 60
+  "syncIntervalSeconds": 300
 }
 ```
 
-This records the reviewed chats cursor *candidate* so the schema probe can show
-its missing supporting source index; it is not approval to activate. Configure
-`telegram-monitor-messages` with the same host/database credentials plus its
-`schema` and `table`, but omit `cursorColumn` and `idColumn` until the source
-owner supplies a real unified change cursor. A PostgreSQL source's `connection`
-accepts only `host`, `port`, `database`, `username`, `password`, `sslMode`,
-`schema`, `table`, `cursorColumn` and `idColumn`.
+The server tests a bounded read-only session, then atomically writes that shared
+connection to both paused/drained inputs while injecting these immutable
+contracts:
 
-The old seeded `dsnEnv` form remains compatible for existing records and reads
-its DSN from the ingest/Admin workload environment. New source requests use the
-direct fields above; do not combine `dsnEnv` with direct coordinates.
+| Role | Physical input | Cursor / ID candidate | Mapping |
+| --- | --- | --- | --- |
+| chats | `public.tg_monitor_chats` | `updated_at, chat_id` | built-in v2 |
+| messages | `public.tg_monitor_messages` | `updated_at, id` | built-in v2 |
 
-Use metadata and value-free shapes before looking at business values:
+The messages `updated_at` entry is the **required source contract**, not a claim
+that the probed table already has that column. The current production sample
+does not. Saving the connection therefore succeeds, exact progress can report
+the current total row count, but activation remains blocked until §5 is fixed.
+The UI shows this as a source-watermark blocker instead of inventing completed/
+remaining percentages.
+
+The old seeded `dsnEnv` form remains readable until the first unified direct
+configuration. New TG operations use the pipeline route above. Generic child
+mutations are deliberately rejected with `409 pipeline_managed_source`, so a
+single-table edit/sync/reset cannot split the business contract. The child GET,
+test, schema, value-shape, mapping-list, sync-state and import-run endpoints stay
+available as a read-only diagnostic surface.
+
+Use each task's advanced view for metadata and value-free shapes before looking
+at business values:
 
 ```http
 GET /internal/v1/admin/sources/{sourceKey}/schema
@@ -324,17 +339,13 @@ The structured-value probe supports only these current public member fields:
 Anything added inside these JSON values is ignored by the public projector
 until a new allowlist review; it does not become an API field automatically.
 
-Mappings are immutable versions. Review seeded v2 against the schema and value
-shapes. If it needs correction, create a new version; then approve the exact
-reviewed version while the source is paused:
-
-```http
-POST /internal/v1/admin/sources/{sourceKey}/mappings
-POST /internal/v1/admin/sources/{sourceKey}/mappings/{version}/approve
-```
-
-Approval selects a transform; it does not prove the incremental watermark or
-activate the source.
+Mappings are immutable versions. The fixed pipeline accepts only the seeded v2
+mapping IDs, not merely an arbitrary row whose version happens to be `2`; an
+upgrade-time collision fails closed as `builtin_mapping_conflict`. It never
+invents a mapping from live rows. A TG mapping correction is a reviewed business
+code/migration version applied to both inputs, not an ad-hoc child-source edit.
+Mapping approval selects a transform; it still does not prove the incremental
+watermark or activate the pipeline.
 
 For a direct file source, `POST .../preview?filename=...` is deterministic and
 local by default: parsing, field inference and sample rendering do not call a
@@ -343,6 +354,51 @@ only the column-name array and `sampleRows: []`, never file values. The response
 records `agentDataScope=column_names_only`. This direct file path is implemented
 for CSV/TSV, JSONL/NDJSON, TXT/MD and XLSX/XLSM uploads; it is not a watched directory, cloud bucket or cloud
 warehouse adapter.
+
+### 4.3 Fixed cleaning and search projection
+
+The built-in transform is deterministic:
+
+```text
+read-only source row
+  -> ingest.source_objects raw evidence
+  -> core.canonical_records + revision (idempotent business identity)
+  -> outbox.projection_events
+  -> Elasticsearch current-state projection
+```
+
+Messages preserve `relations.chatId`, so callers can relate the two datasets
+without copying a mutable chat object into every message. The current ingest
+does **not** materialize a chat/message join or denormalize chat title/username
+onto every message; such a design would also need fan-out reprojection whenever
+a chat changes. Public history/search expose the two fixed datasets and message
+chat IDs; a future join/enrichment must be an explicit versioned contract.
+
+Before the first full TG projection, content schema v3 fixes the fields that
+need real ES types:
+
+- title/body raw text plus `titleHanlp/bodyHanlp`;
+- author/username raw values with exact, prefix and CJK-bigram subfields,
+  dedicated ES `wildcard` typed fields for Latin mid-string handle lookup, plus
+  `authorNameHanlp/usernameHanlp` for pre-segmented relevance;
+- chat/message/reply/thread/group IDs, chat type and outgoing flag;
+- media kind/MIME/extension/file name/size and bounded entity type/user/url
+  arrays;
+- metrics and event/edited/collection times.
+
+The mapping stays `dynamic: strict`; extra source JSON remains in PostgreSQL
+raw/canonical extensions instead of creating arbitrary ES fields. On rollout,
+the projector creates `mx-insight-hub-content-v3-current`, rebuilds it from PG
+current truth under an advisory lock, atomically switches read/compatible write
+aliases, then runs a second reconciliation pass. PG remains authoritative and
+the old index is never used as the reindex source.
+
+The fixed TG v2 path does not call an LLM per row. Today Agent is used only for
+explicit `agent=true` file-column mapping suggestions (column names only), while
+embedding is a separate retrieval worker. Future drift/quarantine enrichment
+may call Agent with audited model/prompt/data scope and cost, but it must not
+choose identity, watermark or tombstone semantics and cannot block the
+deterministic raw/canonical path.
 
 ## 5. Continuous-sync gate (currently open)
 
@@ -412,23 +468,45 @@ or a cloud/object-storage connector.
 
 ## 6. Run, monitor and recover
 
-Only after §5 passes, configure `cursorColumn`/`idColumn`, re-run `/schema`, and
-activate in a separate call. Start one source at a time:
+Only after both §5 gates pass, use the unified business controls. Read
+`writerContract.version` and `writerContract.digest` from the pipeline GET,
+verify the listed writer guarantees with the source owner, then send that exact
+pair back. The Hub first probes both fixed source contracts and checkpoint
+compatibility; only then does one Hub transaction approve both exact built-in
+mappings, persist the immutable attestation, and activate both children:
 
 ```http
-PUT  /internal/v1/admin/sources/{sourceKey}  { "status": "active" }
-POST /internal/v1/admin/sources/{sourceKey}/sync  { "batchSize": 1000 }
-GET  /internal/v1/admin/sources/{sourceKey}/sync
-GET  /internal/v1/admin/sources/{sourceKey}/imports
+POST /internal/v1/admin/pipelines/telegram-monitor/status
+{
+  "status": "active",
+  "writerContractAttestation": {
+    "confirmed": true,
+    "contractVersion": "<writerContract.version>",
+    "contractDigest": "<writerContract.digest>"
+  }
+}
+POST /internal/v1/admin/pipelines/telegram-monitor/sync    { "batchSize": 1000 }
+GET  /internal/v1/admin/pipelines/telegram-monitor
+GET  /internal/v1/admin/pipelines/telegram-monitor/progress
 ```
 
+`progress` performs explicit source `COUNT` queries only when the task console is
+opened/refreshed; it is not part of the scheduler loop. With a safe saved
+composite checkpoint it reports exact `totalRows/completedRows/remainingRows`
+for that `checkedAt` snapshot. Before the first checkpoint those progress fields
+are null. When a column/index/order gate is unsafe it still returns exact
+`totalRows` plus `blocker/issues`, but deliberately leaves completed, remaining
+and percent null. Per-child `/sources/{sourceKey}/sync` GET and `/imports` stay
+available under “只读诊断”; their mutation routes cannot bypass the pipeline.
+
 The ingest worker scans on `MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS` (global scan
-granularity) and schedules an idle source only when its own
-`syncIntervalSeconds` is due. Values are bounded to 60–86,400 seconds. This is
-polling rather than event-driven CDC: expected detection delay is the source
-interval plus up to one global scan interval. A running continuation owns the
-source, and a failed cursor waits for explicit operator recovery instead of
-creating a retry storm.
+granularity). Generic sources are scheduled independently. TG is excluded from
+that loop: it becomes due only when both fixed children are active, idle, due,
+and covered by the current writer-contract digest; both jobs are inserted in
+one PostgreSQL queue transaction. Values are bounded to 60–86,400 seconds. This
+is polling rather than event-driven CDC: expected detection delay is the source
+interval plus up to one global scan interval. A failed child intentionally holds
+the pair until an operator resolves it instead of creating a split retry storm.
 
 Pull and checkpoint reset for the same source share a PostgreSQL session
 advisory try-lock across Admin/ingest workers. They never overlap: a concurrent
@@ -499,9 +577,12 @@ Correctness rules:
 - the checkpoint carries a hash of source coordinates, table, cursor,
   dataset/object identity and mapping version. A changed contract returns
   `checkpoint_contract_mismatch` instead of continuing from an unrelated
-  position. Reset is an explicit paused-source action and requires an exact
-  `confirmSourceKey` through
-  `POST /internal/v1/admin/sources/{sourceKey}/checkpoint/reset`. It returns
+  position. A generic reset is an explicit paused-source action. TG instead
+  requires both children paused/drained and exact
+  `confirmPipelineKey=telegram-monitor` through
+  `POST /internal/v1/admin/pipelines/telegram-monitor/checkpoints/reset`. It
+  writes both checkpoints against the fixed v2 mapping contract in one action,
+  so a legacy v1 checkpoint cannot deadlock the next activation. It returns
   `409 source_busy` while a pull holds the source lock; after acquiring the
   lock, it marks a checkpoint-owned active run failed with
   `error=checkpoint_reset`, removes that run from the new idle checkpoint and

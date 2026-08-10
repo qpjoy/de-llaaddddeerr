@@ -29,6 +29,60 @@ say() { printf '[mx-insight-hub] %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
+API_KEY_ROTATION_WINDOW_DAYS=30
+
+# Print: decision|key-id|reason|expires-at. The secret is used only to match the
+# Admin API's safe prefix/last-four projection and is never written to output.
+api_key_rotation_decision() {
+  local key_list_json="$1"
+  local secret="$2"
+  local now_ms="${3:-}"
+  MX_INSIGHT_KEY_SECRET="$secret" \
+  MX_INSIGHT_KEY_NOW_MS="$now_ms" \
+  MX_INSIGHT_KEY_ROTATION_DAYS="$API_KEY_ROTATION_WINDOW_DAYS" \
+    node -e '
+      let input = ""
+      process.stdin.setEncoding("utf8")
+      process.stdin.on("data", (chunk) => { input += chunk })
+      process.stdin.on("end", () => {
+        const payload = JSON.parse(input)
+        const keys = Array.isArray(payload) ? payload : payload?.data
+        if (!Array.isArray(keys)) throw new Error("Admin API key list is not an array")
+        const secret = process.env.MX_INSIGHT_KEY_SECRET || ""
+        const key = keys.find((candidate) => (
+          candidate?.prefix
+          && candidate?.lastFour
+          && secret.startsWith(candidate.prefix)
+          && secret.endsWith(candidate.lastFour)
+        ))
+        if (!key) {
+          process.stdout.write("rotate||key_not_found|")
+          return
+        }
+        const status = key.effectiveStatus || key.status
+        if (key.status !== "active" || status !== "active") {
+          process.stdout.write(`rotate|${key.id}|${status || "inactive"}|${key.expiresAt || ""}`)
+          return
+        }
+        const expiresAtMs = Date.parse(key.expiresAt)
+        if (!Number.isFinite(expiresAtMs)) {
+          process.stdout.write(`rotate|${key.id}|missing_expiry|`)
+          return
+        }
+        const configuredNow = Number(process.env.MX_INSIGHT_KEY_NOW_MS)
+        const now = Number.isFinite(configuredNow) && process.env.MX_INSIGHT_KEY_NOW_MS
+          ? configuredNow
+          : Date.now()
+        const windowMs = Number(process.env.MX_INSIGHT_KEY_ROTATION_DAYS) * 86_400_000
+        if (expiresAtMs - now <= windowMs) {
+          process.stdout.write(`rotate|${key.id}|rotation_window|${key.expiresAt}`)
+          return
+        }
+        process.stdout.write(`reuse|${key.id}|valid|${key.expiresAt}`)
+      })
+    ' <<<"$key_list_json"
+}
+
 cleanup_deploy_runtime() {
   local status=$?
   local lock_owner=""
@@ -911,14 +965,35 @@ ensure_default_api_key() {
   local namespace="mx-insight-hub"
   local admin_base="http://127.0.0.1:18151"
   need base64
+  need curl
+  need node
+  local previous_key_id=""
   BOOTSTRAP_API_KEY="$(
     kubectl -n "$namespace" get secret mx-insight-hub-bootstrap \
       -o jsonpath='{.data.MX_INSIGHT_API_KEY}' --ignore-not-found 2>/dev/null \
       | base64 -d 2>/dev/null || true
   )"
   if [ -n "$BOOTSTRAP_API_KEY" ]; then
-    say "Reusing stored bootstrap API key (Secret mx-insight-hub-bootstrap)."
-    return 0
+    local key_list_json decision action reason expires_at
+    if key_list_json="$(curl -fsS \
+      -H "x-mx-insight-admin-token: ${MX_INSIGHT_ADMIN_TOKEN}" \
+      "${admin_base}/internal/v1/admin/api-keys")"; then
+      decision="$(api_key_rotation_decision "$key_list_json" "$BOOTSTRAP_API_KEY")" \
+        || die "could not evaluate the stored bootstrap API key"
+      IFS='|' read -r action previous_key_id reason expires_at <<<"$decision"
+      if [ "$action" = "reuse" ]; then
+        say "Reusing stored bootstrap API key; valid beyond the ${API_KEY_ROTATION_WINDOW_DAYS}-day rotation window (${expires_at})."
+        return 0
+      fi
+      say "Rotating stored bootstrap API key (${reason}); the old key remains valid until the replacement is persisted."
+      BOOTSTRAP_API_KEY=""
+    else
+      # Do not replace a credential merely because the Admin API is temporarily
+      # unavailable: minting may fail for the same reason and must not disturb
+      # the last recoverable plaintext key.
+      say "WARNING: could not inspect bootstrap API-key expiry; retaining the stored key for this deploy."
+      return 0
+    fi
   fi
   say "Provisioning a bootstrap tenant/consumer/API key via the Admin API."
   local provision_out
@@ -944,6 +1019,15 @@ ensure_default_api_key() {
     --from-literal=MX_INSIGHT_CONSUMER_ID="$consumer_id" \
     --dry-run=client -o yaml | kubectl apply -f -
   say "Stored bootstrap API key in Secret mx-insight-hub-bootstrap."
+  if [ -n "$previous_key_id" ]; then
+    if curl -fsS -X POST \
+      -H "x-mx-insight-admin-token: ${MX_INSIGHT_ADMIN_TOKEN}" \
+      "${admin_base}/internal/v1/admin/api-keys/${previous_key_id}/revoke" >/dev/null; then
+      say "Revoked the replaced bootstrap API key after persisting its replacement."
+    else
+      say "WARNING: replacement is stored, but the previous bootstrap API key could not be revoked; revoke key ${previous_key_id} from the Admin UI."
+    fi
+  fi
 }
 
 print_deploy_summary() {
@@ -984,7 +1068,7 @@ verify_data_path() {
 
   if [ -z "$api_key" ]; then
     api_key="$(kubectl -n mx-insight-hub get secret mx-insight-hub-bootstrap \
-      -o jsonpath='{.data.api-key}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+      -o jsonpath='{.data.MX_INSIGHT_API_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true)"
   fi
   [ -n "$api_key" ] || die "no API key given and none stored; pass one: manage.sh verify-data-path <key>"
 

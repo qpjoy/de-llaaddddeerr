@@ -65,13 +65,29 @@ function DataTable({ label, children }) {
 export function SourcesPage({ token, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.sources(token), [token])
   const state = useRemoteData(load, onUnauthorized)
+  const loadTelegramPipeline = useCallback(() => adminApi.telegramMonitorPipeline(token), [token])
+  const telegramPipeline = useRemoteData(loadTelegramPipeline, onUnauthorized)
   const [selected, setSelected] = useState(null)
   const [creating, setCreating] = useState(false)
+  const [telegramOpen, setTelegramOpen] = useState(false)
 
   if (state.loading && !state.data) return <LoadingState label="正在加载外部数据源" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   const sources = asList(state.data)
+  const genericSources = sources.filter((source) => !TELEGRAM_MONITOR_SOURCE_KEYS.has(source.sourceKey))
+
+  const openTelegramTaskDetail = (task) => {
+    const sourceKey = telegramTaskSourceKey(task)
+    const source = sources.find((candidate) => candidate.sourceKey === sourceKey)
+      || (typeof task?.source === 'object' ? task.source : null)
+    if (!source) {
+      notify?.(`无法读取子任务 ${sourceKey || task?.role || 'unknown'} 的数据源详情`, 'warning')
+      return
+    }
+    setTelegramOpen(false)
+    setSelected(source)
+  }
 
   return (
     <>
@@ -85,20 +101,28 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         <button className="qp-button" type="button" onClick={() => setCreating(true)}>注册数据源</button>
       </PageHeading>
 
-      {sources.length === 0 ? (
+      <TelegramPipelineCard
+        pipeline={telegramPipeline.data}
+        loading={telegramPipeline.loading}
+        error={telegramPipeline.error}
+        onOpen={() => setTelegramOpen(true)}
+        onRetry={telegramPipeline.refresh}
+      />
+
+      {genericSources.length === 0 ? (
         <EmptyState
           icon={Database}
-          title="还没有注册外部数据源"
-          description="注册后可以上传 xlsx / csv / jsonl / txt，或配置一个只读的 PostgreSQL 拉取源。"
+          title="还没有注册通用数据源"
+          description="Telegram monitor 已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
         />
       ) : (
-        <Panel title="已注册数据源" subtitle="每个源有独立的 dataset，不会与 Night-All 语料混合">
+        <Panel title="通用数据源" subtitle="每个源有独立的 dataset，不会与固定业务清洗任务混合">
           <DataTable label="外部数据源列表">
             <thead>
               <tr><th>标识</th><th>名称</th><th>来源</th><th>Dataset / 平台</th><th>同步策略</th><th>状态</th><th /></tr>
             </thead>
             <tbody>
-              {sources.map((source) => (
+              {genericSources.map((source) => (
                 <tr key={source.id}>
                   <td><code className="mih-source-label">{source.sourceKey}</code></td>
                   <td>{source.displayName}</td>
@@ -129,6 +153,23 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
           onCreated={() => { setCreating(false); state.refresh() }}
         />
       ) : null}
+      {telegramOpen && telegramPipeline.data ? (
+        <TelegramPipelineModal
+          token={token}
+          pipeline={telegramPipeline.data}
+          loading={telegramPipeline.loading}
+          onUnauthorized={onUnauthorized}
+          notify={notify}
+          onClose={() => setTelegramOpen(false)}
+          onRefresh={telegramPipeline.refresh}
+          onPipelineChanged={(updated) => {
+            if (updated?.tasks) telegramPipeline.setData(updated)
+            telegramPipeline.refresh()
+            state.refresh()
+          }}
+          onOpenAdvanced={openTelegramTaskDetail}
+        />
+      ) : null}
       {selected ? (
         <SourceDetailModal
           token={token}
@@ -141,6 +182,410 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
       ) : null}
     </>
   )
+}
+
+const TELEGRAM_MONITOR_SOURCE_KEYS = new Set([
+  'telegram-monitor-chats',
+  'telegram-monitor-messages',
+])
+
+const TELEGRAM_TASK_META = {
+  chats: {
+    label: '会话目录',
+    table: 'tg_monitor_chats',
+    dataset: 'telegram.monitor.chats.v1',
+    objectType: 'chat',
+  },
+  messages: {
+    label: '消息事实',
+    table: 'tg_monitor_messages',
+    dataset: 'telegram.monitor.messages.v1',
+    objectType: 'message',
+  },
+}
+
+function telegramTaskMeta(task) {
+  const sourceKey = telegramTaskSourceKey(task)
+  if (task?.role === 'chats' || sourceKey.endsWith('-chats')) return TELEGRAM_TASK_META.chats
+  return TELEGRAM_TASK_META.messages
+}
+
+function telegramTaskSourceKey(task) {
+  if (typeof task?.source === 'string') return task.source
+  return task?.source?.sourceKey || task?.sourceKey || ''
+}
+
+function telegramPipelineIsRunning(pipeline) {
+  return pipeline?.status === 'draining' || (pipeline?.tasks || []).some((task) => (
+    ['running', 'draining'].includes(String(task?.cursor?.status || task?.latestRun?.status || '').toLowerCase())
+  ))
+}
+
+function telegramPipelineConfigured(pipeline) {
+  if (pipeline?.configured != null) return Boolean(pipeline.configured)
+  if (pipeline?.connection?.host && pipeline?.connection?.database && pipeline?.connection?.username) return true
+  return Boolean(pipeline?.tasks?.length) && pipeline.tasks.every((task) => (
+    task.source?.connection?.host && task.source?.connection?.database && task.source?.connection?.username
+  ))
+}
+
+function telegramConnectionConsistent(pipeline) {
+  return pipeline?.connectionConsistent
+    ?? pipeline?.consistency?.connection
+    ?? (pipeline?.consistent && Boolean(pipeline?.connection))
+    ?? true
+}
+
+function telegramScheduleConsistent(pipeline) {
+  return pipeline?.syncIntervalConsistent
+    ?? pipeline?.consistency?.syncIntervalSeconds
+    ?? pipeline?.consistent
+    ?? true
+}
+
+function telegramPipelineStatus(pipeline) {
+  if (telegramPipelineIsRunning(pipeline)) return { status: 'warning', label: pipeline?.status === 'paused' ? '暂停中 · 排空批次' : '正在运行' }
+  if (pipeline?.status === 'active') return { status: 'active', label: '已启用' }
+  if (pipeline?.status === 'mixed') return { status: 'warning', label: '子任务状态不一致' }
+  return { status: 'disabled', label: telegramPipelineConfigured(pipeline) ? '已暂停' : '待配置' }
+}
+
+function TelegramPipelineCard({ pipeline, loading, error, onOpen, onRetry }) {
+  const status = telegramPipelineStatus(pipeline)
+  const tasks = pipeline?.tasks || []
+  const latestRunAt = tasks
+    .map((task) => task.latestRun?.finishedAt || task.latestRun?.startedAt || task.latestRun?.createdAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1)
+
+  return (
+    <section className="qp-panel mih-telegram-card" aria-labelledby="telegram-pipeline-title">
+      <div className="mih-telegram-card__identity">
+        <span className="mih-telegram-card__icon"><Database size={22} weight="duotone" aria-hidden="true" /></span>
+        <div>
+          <p className="qp-kicker">BUSINESS PIPELINE / TELEGRAM</p>
+          <h2 id="telegram-pipeline-title">Telegram monitor 清洗任务</h2>
+          <p>一套源库连接，固定协调 chats 与 messages 的幂等清洗、PG 落库和 ES 索引。</p>
+        </div>
+      </div>
+      {error && !pipeline ? (
+        <div className="mih-telegram-card__error"><ErrorState error={error} onRetry={onRetry} /></div>
+      ) : (
+        <>
+          <dl className="mih-telegram-card__facts">
+            <div><dt>运行状态</dt><dd><StatusBadge status={status.status} label={status.label} /></dd></div>
+            <div><dt>源库</dt><dd><code>{telegramPipelineConfigured(pipeline) ? `${pipeline.connection?.host || '连接待统一'}:${pipeline.connection?.port || 5432}` : '尚未配置'}</code></dd></div>
+            <div><dt>数据库</dt><dd><code>{pipeline?.connection?.database || '—'}</code></dd></div>
+            <div><dt>输入任务</dt><dd>{tasks.length || 2} 个固定表</dd></div>
+            <div><dt>同步周期</dt><dd>{telegramScheduleConsistent(pipeline) ? `${formatNumber(pipeline?.syncIntervalSeconds || 300)} 秒` : '待统一'}</dd></div>
+            <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
+          </dl>
+          <div className="mih-telegram-card__actions">
+            {!telegramConnectionConsistent(pipeline) || !telegramScheduleConsistent(pipeline) ? <span className="mih-telegram-card__alert"><Warning size={15} />双表连接或周期不一致，需重新统一保存</span> : null}
+            <button className="qp-button qp-button--ghost" type="button" disabled={loading || !pipeline} onClick={onOpen}>
+              {loading ? '正在刷新…' : '打开任务控制'}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+function TelegramPipelineModal({
+  token, pipeline, loading, onUnauthorized, notify, onClose, onRefresh, onPipelineChanged, onOpenAdvanced,
+}) {
+  const initialConnection = pipeline.connection || pipeline.tasks?.[0]?.source?.connection || {}
+  const configured = telegramPipelineConfigured(pipeline)
+  const connectionConsistent = telegramConnectionConsistent(pipeline)
+  const scheduleConsistent = telegramScheduleConsistent(pipeline)
+  const [form, setForm] = useState(() => ({
+    host: initialConnection.host || '',
+    port: String(initialConnection.port || 5432),
+    database: initialConnection.database || '',
+    username: initialConnection.username || '',
+    password: initialConnection.password || '',
+    sslMode: initialConnection.sslMode || 'require',
+    syncIntervalSeconds: String(pipeline.syncIntervalSeconds || pipeline.tasks?.[0]?.source?.syncIntervalSeconds || 300),
+  }))
+  const loadProgress = useCallback(
+    () => configured ? adminApi.telegramMonitorPipelineProgress(token) : Promise.resolve({ tasks: [] }),
+    [configured, token],
+  )
+  const progress = useRemoteData(loadProgress, onUnauthorized)
+  const [busyAction, setBusyAction] = useState(null)
+  const [writerContractConfirmed, setWriterContractConfirmed] = useState(false)
+  const [resetConfirmation, setResetConfirmation] = useState('')
+  const running = telegramPipelineIsRunning(pipeline)
+  const status = telegramPipelineStatus(pipeline)
+  const progressBlockers = (progress.data?.tasks || []).filter((task) => task.blocker)
+
+  useEffect(() => {
+    if (!running || loading) return undefined
+    const timer = window.setTimeout(onRefresh, 2_000)
+    return () => window.clearTimeout(timer)
+  }, [loading, onRefresh, running])
+
+  const mutate = async (action, request, successMessage) => {
+    setBusyAction(action)
+    try {
+      const updated = await request()
+      if (updated?.tasks && updated?.status) onPipelineChanged(updated)
+      else onRefresh()
+      notify?.(successMessage, 'success')
+    } catch (error) {
+      notify?.(error.message, 'error')
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  const save = (event) => {
+    event.preventDefault()
+    mutate(
+      'save',
+      () => adminApi.updateTelegramMonitorPipeline(token, {
+        connection: {
+          host: form.host.trim(),
+          port: Number(form.port),
+          database: form.database.trim(),
+          username: form.username.trim(),
+          password: form.password,
+          sslMode: form.sslMode,
+        },
+        syncIntervalSeconds: Number(form.syncIntervalSeconds),
+      }),
+      'Telegram monitor 连接已验证并统一写入两个子任务',
+    )
+  }
+
+  const changeStatus = (nextStatus) => mutate(
+    `status-${nextStatus}`,
+    () => adminApi.updateTelegramMonitorPipelineStatus(
+      token,
+      nextStatus,
+      nextStatus === 'active' ? {
+        confirmed: writerContractConfirmed,
+        contractVersion: pipeline.writerContract?.version,
+        contractDigest: pipeline.writerContract?.digest,
+      } : null,
+    ),
+    nextStatus === 'active' ? 'Telegram monitor 清洗任务已启用' : '已请求安全暂停，运行中批次会先完成收口',
+  )
+
+  const runSync = () => mutate(
+    'sync',
+    () => adminApi.runTelegramMonitorPipeline(token, { batchSize: 1000 }),
+    '双表同步任务已提交',
+  )
+
+  const resetCheckpoints = (event) => {
+    event.preventDefault()
+    if (resetConfirmation !== 'telegram-monitor') return
+    mutate(
+      'reset',
+      async () => {
+        const result = await adminApi.resetTelegramMonitorPipelineCheckpoints(token, {
+          confirmPipelineKey: resetConfirmation,
+        })
+        setResetConfirmation('')
+        progress.refresh()
+        return result
+      },
+      '两个 TG 子任务的 Checkpoint 已统一重置；下次同步会从起点幂等重放',
+    )
+  }
+
+  const tasks = pipeline.tasks || []
+
+  return (
+    <Modal
+      title={pipeline.displayName || 'Telegram monitor 清洗任务'}
+      description="固定 TG v2 业务管线 · 共享源库连接与统一调度"
+      size="xlarge"
+      onClose={onClose}
+      footer={<button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭</button>}
+    >
+      <div className="mih-telegram-toolbar">
+        <div>
+          <StatusBadge status={status.status} label={status.label} />
+          <code>{pipeline.pipelineKey || 'telegram-monitor'}</code>
+          {!connectionConsistent || !scheduleConsistent ? <span className="mih-telegram-toolbar__warning"><Warning size={15} />双表连接或调度周期存在漂移</span> : null}
+        </div>
+        <div className="mih-page-actions">
+          {pipeline.status === 'active' || pipeline.status === 'mixed' ? (
+            <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)} onClick={() => changeStatus('paused')}>
+              <Pause size={16} />{busyAction === 'status-paused' ? '安全暂停中…' : '安全暂停'}
+            </button>
+          ) : (
+            <button className="qp-button qp-button--ghost" type="button"
+              disabled={Boolean(busyAction) || !configured || !connectionConsistent || !scheduleConsistent || running || progressBlockers.length > 0 || !writerContractConfirmed}
+              title={!configured ? '先保存并验证源库连接' : !connectionConsistent || !scheduleConsistent ? '先统一双表连接与调度周期' : progressBlockers.length > 0 ? '源表水位或索引门禁未满足，请查看子任务进度提示' : !writerContractConfirmed ? '请先确认源端 writer 增量合同' : ''}
+              onClick={() => changeStatus('active')}>
+              <Play size={16} />{busyAction === 'status-active' ? '正在启用…' : '启用任务'}
+            </button>
+          )}
+          <button className="qp-button" type="button" disabled={Boolean(busyAction) || pipeline.status !== 'active'} onClick={runSync}>
+            <ArrowClockwise size={16} />{busyAction === 'sync' ? '正在提交…' : '立即同步'}
+          </button>
+        </div>
+      </div>
+
+      <Panel title="源库与调度" subtitle="只填写一次连接；Hub 会验证只读权限，并把同一连接应用到两个固定输入表">
+        <p className="mih-inline-warning"><Key size={16} aria-hidden="true" />连接与明文密码仅 Admin Token 管理面可读取和修改，不需要额外 Provider Key。</p>
+        <form className="mih-form mih-form--grid mih-telegram-config" onSubmit={save}>
+          <Field label="主机"><input className="qp-input" required value={form.host} placeholder="127.0.0.1" onChange={(event) => setForm({ ...form, host: event.target.value })} /></Field>
+          <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={form.port} onChange={(event) => setForm({ ...form, port: event.target.value })} /></Field>
+          <Field label="数据库"><input className="qp-input" required value={form.database} placeholder="night_all" onChange={(event) => setForm({ ...form, database: event.target.value })} /></Field>
+          <Field label="用户名"><input className="qp-input" required autoComplete="off" value={form.username} placeholder="mx_data" onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
+          <Field label="密码" hint="明文保存，仅 Admin Token 接口返回"><input className="qp-input" type="text" required autoComplete="off" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
+          <Field label="SSL 模式">
+            <select className="qp-input" value={form.sslMode} onChange={(event) => setForm({ ...form, sslMode: event.target.value })}>
+              <option value="disable">disable（同机或受控内网）</option><option value="require">require</option>
+              <option value="verify-ca">verify-ca</option><option value="verify-full">verify-full</option>
+            </select>
+          </Field>
+          <Field label="同步间隔（秒）" hint="60–86400；暂停后不再发起新批次"><input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds} onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} /></Field>
+          <div className="mih-page-actions mih-form__wide">
+            <button className="qp-button qp-button--ghost" type="submit" disabled={Boolean(busyAction) || pipeline.status !== 'paused' || running}
+              title={running ? '运行中的批次收口后才能修改连接' : pipeline.status !== 'paused' ? '请先安全暂停整个业务任务' : ''}>
+              {busyAction === 'save' ? '正在验证并保存…' : '验证并保存共享连接'}
+            </button>
+          </div>
+        </form>
+      </Panel>
+
+      <Panel title="源端 Writer 增量合同" subtitle="Schema 探测无法证明并发提交顺序；每次启用都必须由管理员显式确认并留存审计记录">
+        <ul className="mih-source-issues mih-source-issues--warning">
+          <li>{pipeline.writerContract?.summary?.watermark || '任何新增、编辑、指标、媒体和软删除都必须推进统一 updated_at。'}</li>
+          <li>{pipeline.writerContract?.summary?.deletion || '禁止无法被 Hub 观察到的硬删除；删除必须以源表字段保留。'}</li>
+          <li>{pipeline.writerContract?.summary?.ordering || '提交顺序不得让较晚提交落到 Hub 已越过的 checkpoint 之前；否则应使用 CDC/outbox。'}</li>
+        </ul>
+        <label className="mih-agent-consent">
+          <input type="checkbox" checked={writerContractConfirmed} disabled={Boolean(busyAction) || running}
+            onChange={(event) => setWriterContractConfirmed(event.target.checked)} />
+          <span>
+            <strong>我已验证源端实现满足上述合同</strong>
+            <small>合同 {pipeline.writerContract?.version || 'telegram-monitor.writer.v1'} · 摘要 {pipeline.writerContract?.digest?.slice(0, 12) || '待加载'}…；确认人和时间会随启用操作永久记录。</small>
+          </span>
+        </label>
+        {pipeline.writerContract?.latestAttestation ? (
+          <p className="mih-preview-provenance">最近确认：{pipeline.writerContract.latestAttestation.attestedBy || 'admin-token'} · {formatDate(pipeline.writerContract.latestAttestation.attestedAt)}</p>
+        ) : <p className="mih-preview-provenance">尚无 writer 合同确认记录。</p>}
+      </Panel>
+
+      <Panel title="固定输入与清洗状态" subtitle="表、Dataset、对象类型和 TG v2 映射属于业务定义，不随部署配置漂移"
+        actions={<button className="qp-button qp-button--ghost" type="button" disabled={progress.loading} onClick={progress.refresh}><ArrowClockwise size={16} />精确核对源库进度</button>}>
+        {progressBlockers.length > 0 ? (
+          <p className="mih-inline-warning"><Warning size={16} aria-hidden="true" />连接已可用，但 {progressBlockers.map((task) => telegramTaskMeta(task).label).join('、')} 的安全增量水位尚未满足；修复源表契约前任务会保持暂停。</p>
+        ) : null}
+        <div className="mih-telegram-task-grid">
+          {(tasks.length ? tasks : [{ role: 'chats' }, { role: 'messages' }]).map((task) => (
+            <TelegramTaskCard key={task.role || telegramTaskSourceKey(task)} task={task} progress={progress.data?.tasks || []}
+              configured={configured} onOpenAdvanced={() => onOpenAdvanced(task)} />
+          ))}
+        </div>
+        {progress.loading && !progress.data ? <LoadingState label="正在精确统计源表进度" /> : null}
+        {progress.error ? <ErrorState error={progress.error} onRetry={progress.refresh} /> : null}
+      </Panel>
+
+      <Panel title="处理链路与索引能力" subtitle="业务映射与运行基础设施分层，确保重试和 ES 重建不会重复污染规范数据">
+        <div className="mih-telegram-flow" aria-label="Telegram 数据处理链路">
+          {['只读源表', '原始 PG', 'Canonical PG', 'Outbox', 'Elasticsearch'].map((step, index) => (
+            <span key={step}>{index > 0 ? <b aria-hidden="true">→</b> : null}<em>{step}</em></span>
+          ))}
+        </div>
+        <div className="mih-telegram-capabilities">
+          <div><strong>确定性清洗</strong><p>固定 TG v2 分别清洗双表，以 chatId 保留可联查关系并幂等写入；主流程不调用 LLM。</p></div>
+          <div><strong>漂移处理</strong><p>新增或缺失字段进入可观测告警。Agent 仅可生成映射建议，当前未启用自动采纳。</p></div>
+          <div><strong>检索阶段</strong><p>ES 预置中英文 title/body 全文检索、名称模糊匹配与结构化过滤；Embedding 属于后续独立阶段。</p></div>
+        </div>
+      </Panel>
+
+      {pipeline.status === 'paused' && !running ? (
+        <section className="mih-source-danger" aria-labelledby="telegram-checkpoint-reset-title">
+          <div className="mih-source-danger__copy">
+            <Warning size={24} weight="duotone" aria-hidden="true" />
+            <div>
+              <h3 id="telegram-checkpoint-reset-title">统一重置双表 Checkpoint</h3>
+              <p>下一次同步会从两个固定源表起点重放。Canonical 仍会幂等去重，但源库读取和 PG/ES 重投影负载可能明显增加。</p>
+            </div>
+          </div>
+          <form className="mih-source-danger__form" onSubmit={resetCheckpoints}>
+            <Field label="输入业务标识以确认" hint={<code>telegram-monitor</code>}>
+              <input className="qp-input" value={resetConfirmation} autoComplete="off" spellCheck="false"
+                onChange={(event) => setResetConfirmation(event.target.value)} />
+            </Field>
+            <button className="qp-button qp-button--danger" type="submit"
+              disabled={Boolean(busyAction) || resetConfirmation !== 'telegram-monitor'}>
+              {busyAction === 'reset' ? '正在统一重置…' : '确认重置双表 Checkpoint'}
+            </button>
+          </form>
+        </section>
+      ) : null}
+    </Modal>
+  )
+}
+
+function TelegramTaskCard({ task, progress, configured, onOpenAdvanced }) {
+  const meta = telegramTaskMeta(task)
+  const sourceKey = telegramTaskSourceKey(task)
+    || (meta.objectType === 'chat' ? 'telegram-monitor-chats' : 'telegram-monitor-messages')
+  const exact = progress.find((entry) => entry.role === task.role || entry.sourceKey === sourceKey)
+  const latest = task.latestRun
+  const cursorStatus = task.cursor?.status || latest?.status || 'idle'
+  const mappingVersion = task.activeMapping?.version ?? task.activeMapping ?? '—'
+  const percent = Math.max(0, Math.min(100, Number(exact?.percent || 0)))
+  const stat = (names) => {
+    const key = names.find((name) => latest?.[name] != null)
+    return key ? latest[key] : 0
+  }
+
+  return (
+    <article className="mih-telegram-task">
+      <header>
+        <div><span className="mih-telegram-task__role">{meta.label}</span><code>{sourceKey}</code></div>
+        <StatusBadge status={cursorStatus === 'failed' ? 'down' : cursorStatus === 'running' ? 'warning' : task.source?.status || cursorStatus} label={cursorStatus === 'running' ? '运行中' : undefined} />
+      </header>
+      <dl className="mih-telegram-task__definition">
+        <div><dt>输入表</dt><dd><code>{task.source?.connection?.schema || 'public'}.{meta.table}</code></dd></div>
+        <div><dt>Dataset / 对象</dt><dd><code>{meta.dataset}</code><small>telegram · {meta.objectType}</small></dd></div>
+        <div><dt>映射</dt><dd>内置 TG v{task.builtInMappingVersion || 2}<small>当前批准：{mappingVersion === '—' ? '待配置' : `v${mappingVersion}`}{(task.builtInMappingAvailable ?? task.builtInAvailable) === false ? ' · 内置版本不可用' : ''}</small></dd></div>
+        <div><dt>下次调度</dt><dd>{formatDate(task.nextDueAt)}</dd></div>
+      </dl>
+      <div className="mih-telegram-task__checkpoint"><span>Checkpoint</span><code>{compactCheckpoint(task.cursor?.position)}</code></div>
+      <div className="mih-telegram-task__run">
+        <span>最近批次</span>
+        <dl>
+          <div><dt>读取</dt><dd>{formatNumber(stat(['rowCount', 'inputRows', 'readRows', 'rowsRead', 'processedCount']))}</dd></div>
+          <div><dt>入库</dt><dd>{formatNumber(stat(['ingestedCount', 'ingested', 'ingestedRows', 'writtenRows']))}</dd></div>
+          <div><dt>变更</dt><dd>{formatNumber(stat(['changedCount', 'changed', 'changedRows', 'updatedRows']))}</dd></div>
+          <div><dt>删除</dt><dd>{formatNumber(stat(['deletedCount', 'deleted', 'deletedRows']))}</dd></div>
+          <div><dt>拒绝</dt><dd>{formatNumber(stat(['rejectedCount', 'rejected', 'rejectedRows']))}</dd></div>
+        </dl>
+      </div>
+      <div className="mih-telegram-progress">
+        <div><span>精确源库快照</span><strong>{exact ? `${exact.completedRows == null ? '—' : formatNumber(exact.completedRows)} / ${formatNumber(exact.totalRows)}` : configured ? '打开时核对中' : '连接待配置'}</strong></div>
+        <div className="mih-telegram-progress__track"><i style={{ width: `${percent}%` }} /></div>
+        <small className={exact?.blocker ? 'mih-telegram-progress__warning' : undefined}>{exact
+          ? exact.blocker
+            ? `同步门禁：${(exact.issues || []).join('；') || exact.blocker}。已核对总量，但不会伪造已完成/剩余比例。`
+            : `剩余 ${exact.remainingRows == null ? '待建立 checkpoint' : formatNumber(exact.remainingRows)} · ${exact.percent == null ? '进度待计算' : `${percent.toFixed(percent % 1 ? 1 : 0)}%`} · ${exact.checkedAt ? `核对于 ${formatDate(exact.checkedAt)}` : '本次打开时核对'}`
+          : configured ? '该统计只在打开窗口或手动点击时读取源库，不参与高频轮询。' : '保存共享连接后才能读取源库总量与剩余量。'}</small>
+      </div>
+      <footer>
+        <span>最近运行：{latest ? formatDate(latest.finishedAt || latest.startedAt || latest.createdAt) : '尚未运行'}</span>
+        <button className="qp-button qp-button--ghost" type="button" disabled={!task.source && !sourceKey} onClick={onOpenAdvanced}>只读诊断</button>
+      </footer>
+    </article>
+  )
+}
+
+function compactCheckpoint(position) {
+  if (!position || Object.keys(position).length === 0) return '尚未建立'
+  const serialized = JSON.stringify(position)
+  return serialized.length > 104 ? `${serialized.slice(0, 101)}…` : serialized
 }
 
 function asList(value) {
@@ -294,6 +739,7 @@ function CreateSourceModal({ token, notify, onClose, onCreated }) {
 }
 
 function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onSourceChanged }) {
+  const managedByPipeline = TELEGRAM_MONITOR_SOURCE_KEYS.has(source.sourceKey)
   const [currentSource, setCurrentSource] = useState(source)
   const load = useCallback(() => adminApi.sourceMappings(token, source.sourceKey), [token, source.sourceKey])
   const mappings = useRemoteData(load, onUnauthorized)
@@ -326,9 +772,9 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
   // opened it. Without this the import button silently ran a preview.
   const intentRef = useRef('preview')
   const isDraining = currentSource.status === 'paused' && sync.data?.cursor?.status === 'running'
-  const mappingMutationBlocked = currentSource.sourceKind === 'database' && (
+  const mappingMutationBlocked = managedByPipeline || (currentSource.sourceKind === 'database' && (
     isDraining || sync.loading || Boolean(sync.error)
-  )
+  ))
 
   useEffect(() => {
     if (!isDraining || sync.loading) return undefined
@@ -524,7 +970,9 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
   const agentModelLabel = agentModels.map((model) => `${model.id} / ${model.model}`).join(' → ')
 
   return (
-    <Modal title={currentSource.displayName} description={`标识 ${currentSource.sourceKey} · dataset ${currentSource.datasetId}`} size="xlarge" onClose={onClose}
+    <Modal title={currentSource.displayName}
+      description={`标识 ${currentSource.sourceKey} · dataset ${currentSource.datasetId}${managedByPipeline ? ' · Telegram 业务子任务只读诊断' : ''}`}
+      size="xlarge" onClose={onClose}
       footer={<button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭</button>}>
 
       {currentSource.sourceKind === 'database' ? (
@@ -540,6 +988,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
           isDraining={isDraining}
           editing={editingSettings}
           canActivate={canActivate}
+          readOnly={managedByPipeline}
           onEdit={() => setEditingSettings(true)}
           onCancelEdit={() => setEditingSettings(false)}
           onSave={saveDatabaseSettings}
@@ -551,7 +1000,9 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
         />
       ) : null}
 
-      <Panel title="字段映射" subtitle="创建时未批准；批准之后才能用于导入">
+      <Panel title="字段映射" subtitle={managedByPipeline
+        ? '由 Telegram monitor 业务版本统一管理；此处只读展示'
+        : '创建时未批准；批准之后才能用于导入'}>
         {mappings.loading ? <LoadingState /> : null}
         {mappings.error ? <ErrorState error={mappings.error} onRetry={mappings.refresh} /> : null}
         {(mappings.data || []).length === 0 ? (
@@ -569,7 +1020,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
                   <td>{formatDate(mapping.createdAt)}</td>
                   <td>
                     <details className="mih-inline-details"><summary>fieldMap</summary><pre className="mih-code-block">{JSON.stringify(mapping.fieldMap, null, 2)}</pre></details>
-                    {mapping.approved ? null : <button className="qp-button qp-button--ghost" type="button" disabled={busy || mappingMutationBlocked}
+                    {mapping.approved || managedByPipeline ? null : <button className="qp-button qp-button--ghost" type="button" disabled={busy || mappingMutationBlocked}
                       title={mappingMutationBlocked ? '确认同步游标 idle 后再批准' : ''} onClick={() => approve(mapping.version)}>批准</button>}
                   </td>
                 </tr>
@@ -577,7 +1028,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
             </tbody>
           </DataTable>
         )}
-        {currentSource.sourceKind === 'database' ? (
+        {currentSource.sourceKind === 'database' && !managedByPipeline ? (
           <div className="mih-source-mapping-editor">
             <Field label="新映射版本（JSON）" hint="只创建待批准版本；已启用数据源需先暂停才能批准">
               <textarea className="qp-input mih-json-editor" value={mappingDraft} spellCheck="false"
@@ -668,7 +1119,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
 
 function DatabaseSourceControl({
   source, schema, sync, preview, checkpointResetError, busy, statusTransition, isDraining, editing, canActivate,
-  onEdit, onCancelEdit, onSave, onStatus, onSync, onTest, onPreview, onResetCheckpoint,
+  readOnly = false, onEdit, onCancelEdit, onSave, onStatus, onSync, onTest, onPreview, onResetCheckpoint,
 }) {
   const [draft, setDraft] = useState(() => ({
     host: source.connection?.host || '',
@@ -707,10 +1158,13 @@ function DatabaseSourceControl({
 
   return (
     <>
-      <Panel title="数据库源控制" subtitle="暂停会等待当前批次在安全边界收口，不会中断已开始的源库查询或写入"
+      <Panel title={readOnly ? '业务子任务诊断' : '数据库源控制'}
+        subtitle={readOnly
+          ? '连接、调度、状态和映射由 Telegram monitor 业务统一管理；此处只读检查源表和运行证据'
+          : '暂停会等待当前批次在安全边界收口，不会中断已开始的源库查询或写入'}
         actions={
           <>
-            {source.status === 'active' ? (
+            {!readOnly && (source.status === 'active' ? (
               <button className="qp-button qp-button--ghost" type="button" disabled={busy} onClick={() => onStatus('paused')}>
                 <Pause size={16} /> {statusTransition === 'paused' ? '正在等待批次边界…' : '安全暂停'}
               </button>
@@ -718,12 +1172,13 @@ function DatabaseSourceControl({
               <button className="qp-button qp-button--ghost" type="button" disabled={busy || !canActivate}
                 title={isDraining ? '正在等待当前批次收口' : canActivate ? '' : '需先解决探测问题并批准映射'}
                 onClick={() => onStatus('active')}><Play size={16} /> {statusTransition === 'active' ? '正在启用…' : '启用'}</button>
-            )}
-            <button className="qp-button qp-button--ghost" type="button"
-              disabled={busy || source.status !== 'paused' || isDraining || sync.loading || Boolean(sync.error)}
-              title={isDraining ? '当前批次收口后才能修改连接配置' : ''} onClick={onEdit}>编辑配置</button>
+            ))}
+            {!readOnly ? <button className="qp-button qp-button--ghost" type="button"
+              disabled={busy || source.status !== 'paused' || isDraining}
+              title={isDraining ? '当前批次收口后才能修改连接配置' : source.status !== 'paused' ? '请先安全暂停后修改连接配置' : ''}
+              onClick={onEdit}>编辑配置</button> : null}
             <button className="qp-button qp-button--ghost" type="button" disabled={busy} onClick={onTest}>测试连接</button>
-            <button className="qp-button" type="button" disabled={busy || source.status !== 'active'} onClick={onSync}><ArrowClockwise size={16} /> 立即同步</button>
+            {!readOnly ? <button className="qp-button" type="button" disabled={busy || source.status !== 'active'} onClick={onSync}><ArrowClockwise size={16} /> 立即同步</button> : null}
           </>
         }>
         <dl className="mih-source-definition">
@@ -738,8 +1193,9 @@ function DatabaseSourceControl({
           <div><dt>最近变更</dt><dd>{formatDate(source.updatedAt)}</dd></div>
         </dl>
         {isDraining ? <p className="mih-inline-warning"><Warning size={16} aria-hidden="true" />暂停已生效于调度层；当前批次仍在安全收口。完成前不会允许改连接、批准映射或重置 Checkpoint。</p> : null}
+        {readOnly ? <p className="mih-inline-warning"><Warning size={16} aria-hidden="true" />这是固定业务子任务。请返回 Telegram monitor 任务控制统一修改连接、周期和启停状态。</p> : null}
         <p className="mih-inline-warning"><Key size={16} aria-hidden="true" />连接信息随数据源管理，密码以明文回填；本页面和对应接口仅允许 Admin Token 会话访问。</p>
-        {editing ? (
+        {editing && !readOnly ? (
           <form className="mih-form mih-form--grid mih-source-settings" onSubmit={submit}>
             <Field label="主机"><input className="qp-input" required value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} /></Field>
             <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={draft.port} onChange={(event) => setDraft({ ...draft, port: event.target.value })} /></Field>
@@ -815,7 +1271,7 @@ function DatabaseSourceControl({
               : <small>当前没有排队或运行中的任务</small>}
           </div></div> : null}
         </div> : null}
-        {source.status === 'paused' && !isDraining && !sync.loading && !sync.error ? (
+        {!readOnly && source.status === 'paused' && !isDraining && !sync.loading && !sync.error ? (
           <section className="mih-source-danger" aria-labelledby="checkpoint-reset-title">
             <div className="mih-source-danger__copy">
               <Warning size={24} weight="duotone" aria-hidden="true" />
@@ -917,6 +1373,14 @@ export function AgentPage({ token, onUnauthorized }) {
           <ProviderTable providers={embeddings} />
         </Panel>
       ) : null}
+      <Panel title="当前接线边界" subtitle="模型已配置不等于所有数据源都在执行智能清洗">
+        <div className="mih-agent-scope-grid">
+          <div><strong>文件映射建议</strong><p>已接线，但只在管理员预览时显式勾选；仅发送列名，建议仍需人工批准。</p></div>
+          <div><strong>数据库 / Telegram 清洗</strong><p>使用确定性、版本化 mapping。逐行分类能力尚未接入，不会静默把源数据发送给模型。</p></div>
+          <div><strong>向量检索</strong><p>{embeddings.length > 0 ? 'Embedding worker 已配置，可生成独立 chunk 索引。' : '未配置 Embedding provider；PG/全文检索不受影响。'}</p></div>
+          <div><strong>建议的下一步</strong><p>只把 schema drift 或拒绝行副本送入隔离队列，并记录模型、prompt、数据范围、费用和人工结论。</p></div>
+        </div>
+      </Panel>
     </>
   )
 }

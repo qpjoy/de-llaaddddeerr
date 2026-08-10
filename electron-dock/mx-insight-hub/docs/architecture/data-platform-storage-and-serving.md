@@ -175,9 +175,9 @@ current index 可直接从 PG canonical current state 重建。
 索引命名建议：
 
 ```text
-mx-insight-hub-content-v2-current  current concrete index
+mx-insight-hub-content-v3-current  current concrete index
 mx-insight-hub-content             read alias
-mx-insight-hub-content-v2          compatible write alias
+mx-insight-hub-content-v3          compatible write alias
 
 mx-insight-hub-chunk-v1-current    semantic current concrete index
 mx-insight-hub-chunk               read alias
@@ -191,7 +191,12 @@ content/chunk 都是 mutable current-state projection，不使用 ILM rollover�
 backing index，被 read alias 继续命中。mapping 使用 `dynamic: strict`；provider
 扩展如确需检索放入 `flattened`，避免 mapping explosion。平台、对象类型、schema
 version 使用 `keyword`；正文使用 `text`；经纬度使用 `geo_point`；时间使用
-`date`。
+`date`。content v3 在首次 Telegram 全量发布前固定了名称与消息结构：作者名和
+用户名的原文用于 exact/prefix/CJK bigram，handle/username 另有 ES 原生
+`wildcard` typed field 对齐 PG trigram 的拉丁任意位置子串，`authorNameHanlp`/
+`usernameHanlp` 保存预分词副本；reply/thread/grouped 关系、媒体类型/MIME/扩展名/
+大小，以及 entity type/user/url 都是有界的 typed fields。源 JSON 仍只以 PG raw
+副本为权威，不允许 ES dynamic mapping 猜字段。
 
 语义检索独立使用 chunk index。PG `record_chunks` 保存当前切片与已生成向量；
 内容缩短、chunker 变化、低于切片阈值或 canonical tombstone 时，同一 PG 事务

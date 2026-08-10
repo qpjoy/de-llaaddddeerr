@@ -15,6 +15,8 @@ const DEFAULT_POLICY = Object.freeze({
   windowSeconds: 3_600,
   maxPageSize: 100,
 })
+const DEFAULT_API_KEY_LIFETIME_DAYS = 180
+const MAX_API_KEY_LIFETIME_DAYS = 730
 
 const PLATFORM_ALIASES = new Map([
   ['red', 'xiaohongshu'],
@@ -70,6 +72,17 @@ function positiveInteger(value, field, fallback) {
   if (value == null) return fallback
   assert(Number.isInteger(value) && value > 0, 400, 'invalid_request', `${field} must be a positive integer`)
   return value
+}
+
+function apiKeyLifetimeDays(value) {
+  const days = positiveInteger(value, 'expiresInDays', DEFAULT_API_KEY_LIFETIME_DAYS)
+  assert(
+    days <= MAX_API_KEY_LIFETIME_DAYS,
+    400,
+    'invalid_request',
+    `expiresInDays must not exceed ${MAX_API_KEY_LIFETIME_DAYS}`,
+  )
+  return days
 }
 
 export class HubService {
@@ -134,10 +147,13 @@ export class HubService {
     assert(consumer, 404, 'consumer_not_found', 'Consumer not found')
     const environment = body.environment || 'live'
     assert(['live', 'test'].includes(environment), 400, 'invalid_request', 'environment must be live or test')
+    const expiresInDays = apiKeyLifetimeDays(body.expiresInDays)
+    const expiresAt = new Date(Date.now() + expiresInDays * 86_400_000).toISOString()
     const issued = issueApiKey(this.apiKeyPepper, environment)
     const record = await this.store.createApiKey({
       ...issued,
       environment,
+      expiresAt,
       tenantId: consumer.tenantId,
       consumerId,
       name: requiredString(body.name, 'name'),
@@ -156,7 +172,7 @@ export class HubService {
   async authenticate(secret) {
     assert(secret, 401, 'api_key_required', 'API key is required')
     const context = await this.store.findApiKeyByDigest(hmacSecret(secret, this.apiKeyPepper))
-    assert(context, 401, 'invalid_api_key', 'API key is invalid or revoked')
+    assert(context, 401, 'invalid_api_key', 'API key is invalid, expired, or revoked')
     return context
   }
 
@@ -471,6 +487,7 @@ export class HubService {
 
     const activeRequestId = reservation.request.id
     const startedAt = performance.now()
+    let commitAttempted = false
     try {
       const localTelegram = platform === 'telegram'
       const upstream = localTelegram
@@ -503,6 +520,7 @@ export class HubService {
       //     previous inline version was best-effort and swallowed failures,
       //     which meant a transient database error silently lost the data with
       //     nothing left to retry from.
+      commitAttempted = true
       if (!localTelegram && this.store.commitRequestAndEnqueueIngest) {
         await this.store.commitRequestAndEnqueueIngest(activeRequestId, commit, {
           queue: this.ingestQueueName,
@@ -537,6 +555,15 @@ export class HubService {
         throw new AppError(502, 'upstream_outcome_unknown', 'Night-All outcome is unknown; do not retry automatically', {
           requestId: activeRequestId,
         })
+      }
+      if (commitAttempted) {
+        // A database error after the commit call begins cannot prove whether
+        // the write committed before the connection failed. Preserve that
+        // uncertainty so the same idempotency key cannot execute the request
+        // again. The store permits committed -> unknown for this exact case,
+        // but never committed -> released.
+        await this.store.markRequestUnknown(activeRequestId, 'usage_commit_ambiguous').catch(() => {})
+        throw error
       }
       await this.store.releaseRequest(activeRequestId, 'internal_error')
       throw error

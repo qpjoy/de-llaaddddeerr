@@ -265,8 +265,8 @@ test('an expired PIT is reported as an expired cursor instead of restarting on P
 test('content index derives read alias, write alias and bootstrap index', () => {
   const definition = contentIndex()
   assert.equal(definition.readAlias, 'mx-insight-hub-content')
-  assert.equal(definition.writeAlias, 'mx-insight-hub-content-v2')
-  assert.equal(definition.currentIndex, 'mx-insight-hub-content-v2-current')
+  assert.equal(definition.writeAlias, 'mx-insight-hub-content-v3')
+  assert.equal(definition.currentIndex, 'mx-insight-hub-content-v3-current')
   assert.equal(definition.bootstrapIndex, definition.currentIndex)
   assert.equal(definition.settings['index.lifecycle.name'], undefined)
   assert.equal(definition.settings['index.lifecycle.rollover_alias'], undefined)
@@ -280,9 +280,16 @@ test('content mapping carries the author fields the projector writes', () => {
   assert.ok(properties.authorName.fields.keyword, 'exact match sub-field')
   assert.ok(properties.authorName.fields.prefix, 'prefix sub-field')
   assert.ok(properties.authorName.fields.bigram, 'CJK bigram sub-field')
+  assert.equal(properties.authorNameHanlp.analyzer, 'mx_presegmented')
   assert.equal(properties.authorExternalId.type, 'keyword')
   assert.ok(properties.username.fields.bigram, 'Telegram usernames use the ranked name mapping')
+  assert.equal(properties.usernameHanlp.analyzer, 'mx_presegmented')
+  assert.equal(properties.usernameSubstring.type, 'wildcard')
+  assert.equal(properties.authorHandleSubstring.type, 'wildcard')
   assert.equal(properties.chatId.type, 'keyword')
+  assert.equal(properties.replyToMessageId.type, 'keyword')
+  assert.equal(properties.mediaSizeBytes.type, 'long')
+  assert.equal(properties.entityTypes.type, 'keyword')
 })
 
 test('chunk index is not created without configured embedding dimensions', () => {
@@ -381,13 +388,13 @@ function currentSnapshotPool(matchSql, rows, { deletions = [] } = {}) {
   }
 }
 
-test('content current index atomically replaces v1/v2 read memberships from PostgreSQL truth', async () => {
+test('content current index atomically replaces v1/v2 read memberships with v3 PostgreSQL truth', async () => {
   const indexSet = contentIndex()
   const oldV1 = 'mx-insight-hub-content-v1-000001'
   const oldV2 = 'mx-insight-hub-content-v2-000001'
   const harness = currentIndexHarness(indexSet, {
     [oldV1]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v1': { is_write_index: true } },
-    [oldV2]: { [indexSet.readAlias]: {}, [indexSet.writeAlias]: { is_write_index: true } },
+    [oldV2]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v2': { is_write_index: true } },
   })
   const live = canonicalRow()
   const deleted = canonicalRow({
@@ -406,7 +413,7 @@ test('content current index atomically replaces v1/v2 read memberships from Post
   })
 
   assert.equal(result.rebuilt, true)
-  assert.equal(result.currentIndex, 'mx-insight-hub-content-v2-current')
+  assert.equal(result.currentIndex, 'mx-insight-hub-content-v3-current')
   assert.equal(harness.calls.templates.length, 1)
   assert.equal(harness.calls.templates[0].body.template.aliases, undefined, 'partial rebuild is never exposed by a template alias')
   assert.equal(harness.calls.templates[0].body.template.settings['index.lifecycle.name'], undefined)
@@ -569,7 +576,62 @@ test('content document carries author, metrics and segmented text', async () => 
   assert.equal(document.mediaCount, 2)
   assert.equal(document.hasVideo, false)
   assert.ok(document.titleHanlp.includes(' '), 'segmented title is whitespace delimited')
+  assert.ok(document.authorNameHanlp.includes(' '), 'author name has a dedicated segmented copy')
   assert.equal(document.projectionRevision, 3)
+})
+
+test('Telegram document promotes fixed relation, media and entity fields before the initial index build', async () => {
+  const editedAt = new Date('2026-08-09T10:20:30.000Z')
+  const document = await buildContentDocument(canonicalRow({
+    dataset_id: 'telegram.monitor.messages.v1',
+    platform: 'telegram',
+    object_type: 'message',
+    author_name: '中文频道管理员',
+    stable_fields: {
+      author: { name: '中文频道管理员', handle: 'alice_admin' },
+      attributes: { username: '中文频道', isOutgoing: false },
+      relations: {
+        chatId: -1007,
+        messageId: 42,
+        replyToMessageId: 41,
+        threadId: 7,
+        groupedId: 99,
+      },
+      media: {
+        media_kind: 'image',
+        mime_type: 'image/jpeg',
+        extension: 'JPG',
+        file_name: 'sample.jpg',
+        size_bytes: 2048,
+      },
+      entities: [
+        { type: 'text_url', url: 'https://example.test/a', user_id: 8 },
+        { type: 'mention', user_id: 8 },
+      ],
+      editedAt,
+      metrics: { views: 12 },
+    },
+  }), { segmenter })
+
+  assert.equal(document.username, '中文频道')
+  assert.equal(document.usernameSubstring, '中文频道')
+  assert.equal(document.authorHandleSubstring, 'alice_admin')
+  assert.ok(document.usernameHanlp.includes(' '), 'username has a dedicated segmented copy')
+  assert.equal(document.chatId, '-1007')
+  assert.equal(document.messageId, '42')
+  assert.equal(document.replyToMessageId, '41')
+  assert.equal(document.threadId, '7')
+  assert.equal(document.groupedId, '99')
+  assert.equal(document.isOutgoing, false)
+  assert.equal(document.mediaKind, 'image')
+  assert.equal(document.mediaMimeType, 'image/jpeg')
+  assert.equal(document.mediaExtension, 'jpg')
+  assert.equal(document.mediaFileName, 'sample.jpg')
+  assert.equal(document.mediaSizeBytes, 2048)
+  assert.deepEqual(document.entityTypes, ['text_url', 'mention'])
+  assert.deepEqual(document.entityUserIds, ['8'])
+  assert.deepEqual(document.entityUrls, ['https://example.test/a'])
+  assert.equal(document.editedAt, editedAt)
 })
 
 test('provider lineage never reaches the customer-facing projection', async () => {
@@ -601,13 +663,37 @@ test('location is only emitted when both coordinates are known', async () => {
 // Queries
 // ---------------------------------------------------------------------------
 
-test('author query avoids wildcard and fuzzy, ranking exact matches first', () => {
-  const query = authorNameQuery('搬运工', fallbackSegment('搬运工'))
+test('author query confines substring wildcard matching to its native field and ranks exact matches first', () => {
+  const query = authorNameQuery('admin', fallbackSegment('admin'))
   const serialized = JSON.stringify(query)
-  assert.ok(!serialized.includes('"wildcard"'), 'no wildcard clause')
   assert.ok(!serialized.includes('"fuzzy"'), 'no fuzzy clause')
   const exact = query.bool.should.find((clause) => clause.term?.['authorName.keyword'])
   assert.equal(exact.term['authorName.keyword'].boost, 10)
+  assert.ok(serialized.includes('authorNameHanlp'), 'segmented matching uses the dedicated HanLP field')
+  assert.ok(serialized.includes('authorHandle.bigram'), 'handles support a Chinese mid-string match')
+  const substring = query.bool.should.find((clause) => clause.wildcard?.authorHandleSubstring)
+  assert.equal(substring.wildcard.authorHandleSubstring.value, '*admin*')
+  assert.equal(substring.wildcard.authorHandleSubstring.case_insensitive, true)
+})
+
+test('Telegram chat lookup uses raw exact/prefix fields and the dedicated username HanLP field', async () => {
+  let body = null
+  const queries = contentSearch({
+    client: {
+      async search(_index, request) {
+        body = request
+        return { hits: { hits: [] } }
+      },
+    },
+  })
+  await queries.searchTelegramChats('中文频道')
+  const serialized = JSON.stringify(body.query)
+  assert.ok(serialized.includes('username.keyword'))
+  assert.ok(serialized.includes('username.prefix'))
+  assert.ok(serialized.includes('username.bigram'))
+  assert.ok(serialized.includes('usernameHanlp'))
+  assert.ok(serialized.includes('usernameSubstring'))
+  assert.ok(!serialized.includes('"fuzzy"'))
 })
 
 // ---------------------------------------------------------------------------
@@ -682,6 +768,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
   const backingIndices = [
     'mx-insight-hub-content-v1-000001',
     'mx-insight-hub-content-v2-000001',
+    'mx-insight-hub-content-v3-current',
   ]
   let cleanupRequest = null
   let bulkBody = null
@@ -703,9 +790,9 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     logger: { log() {}, warn() {}, error() {} },
     client: {
       async getAlias(alias) {
-        if (alias === 'mx-insight-hub-content-v2') {
+        if (alias === 'mx-insight-hub-content-v3') {
           return {
-            [backingIndices[1]]: {
+            [backingIndices[2]]: {
               aliases: { [alias]: { is_write_index: true } },
             },
           }
@@ -734,7 +821,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
   assert.equal(result.failed, 0)
   assert.deepEqual(delivered, [[8]])
   assert.equal(cleanupRequest.method, 'POST')
-  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001\/_delete_by_query/)
+  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001\/_delete_by_query/)
   assert.deepEqual(
     cleanupRequest.body.query.bool.should[0].bool.filter,
     [
@@ -751,7 +838,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     ],
   )
   assert.equal(bulkBody.length, 1)
-  assert.equal(bulkBody[0].delete._index, backingIndices[1])
+  assert.equal(bulkBody[0].delete._index, backingIndices[2])
   assert.equal(bulkBody[0].delete.version, 4, 'the tombstone uses current PostgreSQL state')
   assert.equal(bulkBody[0].delete.version_type, 'external_gte')
 })
@@ -761,6 +848,7 @@ test('projector turns a stale delete into the current restored document', async 
   const backingIndices = [
     'mx-insight-hub-content-v1-000001',
     'mx-insight-hub-content-v2-000001',
+    'mx-insight-hub-content-v3-current',
   ]
   let cleanupRequest = null
   let bulkBody = null
@@ -779,9 +867,9 @@ test('projector turns a stale delete into the current restored document', async 
     logger: { log() {}, warn() {}, error() {} },
     client: {
       async getAlias(alias) {
-        if (alias === 'mx-insight-hub-content-v2') {
+        if (alias === 'mx-insight-hub-content-v3') {
           return {
-            [backingIndices[1]]: {
+            [backingIndices[2]]: {
               aliases: { [alias]: { is_write_index: true } },
             },
           }
@@ -802,9 +890,9 @@ test('projector turns a stale delete into the current restored document', async 
   const result = await projector.projectBatch()
   assert.equal(result.delivered, 1)
   assert.equal(result.failed, 0)
-  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001\/_delete_by_query/)
+  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001\/_delete_by_query/)
   assert.equal(bulkBody.length, 2)
-  assert.equal(bulkBody[0].index._index, backingIndices[1])
+  assert.equal(bulkBody[0].index._index, backingIndices[2])
   assert.equal(bulkBody[0].index.version, 5)
   assert.equal(bulkBody[0].index.version_type, 'external')
   assert.equal(bulkBody[1].id, row.id)

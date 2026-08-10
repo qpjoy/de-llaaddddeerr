@@ -38,6 +38,9 @@ function consumer(row) {
 }
 
 function apiKey(row) {
+  const expired = row?.status === 'active'
+    && row.expires_at != null
+    && new Date(row.expires_at).getTime() <= Date.now()
   return row && {
     id: row.id,
     tenantId: row.tenant_id,
@@ -47,7 +50,9 @@ function apiKey(row) {
     lastFour: row.last_four,
     environment: row.environment,
     status: row.status,
+    effectiveStatus: expired ? 'expired' : row.status,
     createdAt: iso(row.created_at),
+    expiresAt: iso(row.expires_at),
     revokedAt: iso(row.revoked_at),
     lastUsedAt: iso(row.last_used_at),
   }
@@ -159,12 +164,12 @@ export class PostgresStore {
     return consumer(rows[0]) || null
   }
 
-  async createApiKey({ id, tenantId, consumerId, name, digest, prefix, lastFour, environment = 'live', status = 'active' }) {
+  async createApiKey({ id, tenantId, consumerId, name, digest, prefix, lastFour, environment = 'live', status = 'active', expiresAt }) {
     const { rows } = await this.pool.query(
       `INSERT INTO api_keys
-         (id, tenant_id, consumer_id, name, key_digest, key_prefix, last_four, environment, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [id, tenantId, consumerId, name, digest, prefix, lastFour, environment, status],
+         (id, tenant_id, consumer_id, name, key_digest, key_prefix, last_four, environment, status, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [id, tenantId, consumerId, name, digest, prefix, lastFour, environment, status, expiresAt],
     )
     return apiKey(rows[0])
   }
@@ -185,7 +190,9 @@ export class PostgresStore {
        FROM api_keys k
        JOIN consumers c ON c.id = k.consumer_id AND c.status = 'active'
        JOIN tenants t ON t.id = k.tenant_id AND t.status = 'active'
-       WHERE k.key_digest = $1 AND k.status = 'active'`,
+       WHERE k.key_digest = $1
+         AND k.status = 'active'
+         AND k.expires_at > now()`,
       [digest],
     )
     if (!rows[0]) return null
@@ -355,7 +362,7 @@ export class PostgresStore {
       `UPDATE usage_requests SET
          status = 'committed', response_status = $2, response_body = $3,
          units_actual = $4, upstream_latency_ms = $5, completed_at = now()
-       WHERE id = $1 RETURNING *`,
+       WHERE id = $1 AND status = 'reserved' RETURNING *`,
       [id, responseStatus, responseBody, unitsActual, upstreamLatencyMs],
     )
   }
@@ -363,7 +370,7 @@ export class PostgresStore {
   releaseRequest(id, errorCode) {
     return this.#updateRequest(
       `UPDATE usage_requests SET status = 'released', error_code = $2, completed_at = now()
-       WHERE id = $1 RETURNING *`,
+       WHERE id = $1 AND status = 'reserved' RETURNING *`,
       [id, errorCode],
     )
   }
@@ -371,7 +378,7 @@ export class PostgresStore {
   markRequestUnknown(id, errorCode) {
     return this.#updateRequest(
       `UPDATE usage_requests SET status = 'unknown', error_code = $2, completed_at = now()
-       WHERE id = $1 RETURNING *`,
+       WHERE id = $1 AND status IN ('reserved', 'committed') RETURNING *`,
       [id, errorCode],
     )
   }
@@ -526,10 +533,10 @@ export class PostgresStore {
   async commitRequestAndEnqueueIngest(id, { responseStatus, responseBody, unitsActual, upstreamLatencyMs }, job) {
     return withPgTransaction(this.pool, async (client) => {
       const { rows } = await client.query(
-        `UPDATE usage_requests
+          `UPDATE usage_requests
             SET status = 'committed', response_status = $2, response_body = $3,
                 units_actual = $4, upstream_latency_ms = $5, completed_at = now()
-          WHERE id = $1
+          WHERE id = $1 AND status = 'reserved'
           RETURNING *`,
         [id, responseStatus, responseBody, unitsActual, upstreamLatencyMs],
       )
@@ -545,7 +552,7 @@ export class PostgresStore {
         )
       }
       return requestRecord(rows[0])
-    })
+    }, { outcomeUnknownCode: 'usage_commit_outcome_unknown' })
   }
 
   /**
@@ -879,7 +886,7 @@ export class PostgresStore {
     const [tenantsResult, consumersResult, keysResult, usage] = await Promise.all([
       this.pool.query('SELECT count(*)::integer AS count FROM tenants'),
       this.pool.query('SELECT count(*)::integer AS count FROM consumers'),
-      this.pool.query("SELECT count(*)::integer AS count FROM api_keys WHERE status = 'active'"),
+      this.pool.query("SELECT count(*)::integer AS count FROM api_keys WHERE status = 'active' AND expires_at > now()"),
       this.usage(),
     ])
     return {
@@ -939,6 +946,36 @@ export class PostgresStore {
     )
     if (!rows[0]) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
     return externalSource(rows[0])
+  }
+
+  /** Apply related source changes in one transaction (for built-in pipelines). */
+  async updateExternalSourcesBatch(updates) {
+    if (!Array.isArray(updates) || updates.length === 0) return []
+    return withPgTransaction(this.pool, async (client) => {
+      const results = []
+      for (const update of updates) {
+        const hasSyncInterval = Object.prototype.hasOwnProperty.call(update, 'syncIntervalSeconds')
+        const { rows } = await client.query(
+          `UPDATE catalog.external_sources
+              SET status = coalesce($2, status),
+                  connection = coalesce($3, connection),
+                  sync_interval_seconds = CASE WHEN $4 THEN $5 ELSE sync_interval_seconds END,
+                  updated_at = now()
+            WHERE source_key = $1
+            RETURNING *`,
+          [
+            update.sourceKey,
+            update.status ?? null,
+            update.connection ?? null,
+            hasSyncInterval,
+            update.syncIntervalSeconds ?? null,
+          ],
+        )
+        if (!rows[0]) throw new AppError(404, 'source_not_found', `Unknown external source: ${update.sourceKey}`)
+        results.push(externalSource(rows[0]))
+      }
+      return results
+    })
   }
 
   async getExternalSource(sourceKey) {
@@ -1041,6 +1078,85 @@ export class PostgresStore {
     )
     if (!rows[0]) throw new AppError(404, 'mapping_not_found', 'Mapping version not found')
     return sourceMapping(rows[0])
+  }
+
+  /** Approve all mappings or none, so a built-in pipeline cannot split versions. */
+  async approveSourceMappingsBatch({ approvals, approvedBy }) {
+    if (!Array.isArray(approvals) || approvals.length === 0) return []
+    return withPgTransaction(this.pool, async (client) => {
+      const results = []
+      for (const approval of approvals) {
+        const { rows } = await client.query(
+          `UPDATE catalog.source_mappings
+              SET approved_at = now(), approved_by = $4
+            WHERE id = $1 AND source_id = $2 AND version = $3
+            RETURNING *`,
+          [approval.mappingId, approval.sourceId, approval.version, approvedBy],
+        )
+        if (!rows[0]) throw new AppError(404, 'mapping_not_found', 'Mapping version not found')
+        results.push(sourceMapping(rows[0]))
+      }
+      return results
+    })
+  }
+
+  async activateExternalSourcesWithAttestation({
+    sourceKeys,
+    pipelineKey,
+    contractVersion,
+    contractDigest,
+    contractSummary,
+    attestedBy,
+    approvals = [],
+  }) {
+    return withPgTransaction(this.pool, async (client) => {
+      for (const approval of approvals) {
+        const approved = await client.query(
+          `UPDATE catalog.source_mappings
+              SET approved_at = now(), approved_by = $4
+            WHERE id = $1 AND source_id = $2 AND version = $3
+            RETURNING id`,
+          [approval.mappingId, approval.sourceId, approval.version, attestedBy],
+        )
+        if (!approved.rows[0]) throw new AppError(409, 'builtin_mapping_conflict', 'Seeded built-in mapping changed before activation')
+      }
+
+      const attestationResult = await client.query(
+        `INSERT INTO catalog.pipeline_writer_contract_attestations
+           (id, pipeline_key, contract_version, contract_digest, contract_summary, attested_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [randomUUID(), pipelineKey, contractVersion, contractDigest, contractSummary, attestedBy],
+      )
+      const sources = []
+      for (const sourceKey of sourceKeys) {
+        const { rows } = await client.query(
+          `UPDATE catalog.external_sources
+              SET status = 'active', updated_at = now()
+            WHERE source_key = $1
+            RETURNING *`,
+          [sourceKey],
+        )
+        if (!rows[0]) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
+        sources.push(externalSource(rows[0]))
+      }
+      return {
+        sources,
+        attestation: pipelineWriterContractAttestation(attestationResult.rows[0]),
+      }
+    }, { outcomeUnknownCode: 'pipeline_activation_outcome_unknown' })
+  }
+
+  async getLatestPipelineWriterContractAttestation(pipelineKey) {
+    const { rows } = await this.pool.query(
+      `SELECT *
+         FROM catalog.pipeline_writer_contract_attestations
+        WHERE pipeline_key = $1
+        ORDER BY attested_at DESC
+        LIMIT 1`,
+      [pipelineKey],
+    )
+    return pipelineWriterContractAttestation(rows[0])
   }
 
   async listSourceMappings(sourceId) {
@@ -1176,6 +1292,35 @@ export class PostgresStore {
         error: null,
       })
       return { failedRunIds: rows.map((row) => row.id), cursor }
+    }, { outcomeUnknownCode: 'external_reset_outcome_unknown' })
+  }
+
+  /** Reset every child checkpoint of one built-in pipeline in one commit. */
+  async resetExternalImportCheckpointsBatch(resets) {
+    return withPgTransaction(this.pool, async (client) => {
+      const results = []
+      for (const reset of resets) {
+        const { rows } = await client.query(
+          `UPDATE ingest.import_runs
+              SET status = 'failed',
+                  cursor_end = $2,
+                  last_error = 'checkpoint_reset',
+                  finished_at = now()
+            WHERE source_id = $1 AND run_key IS NOT NULL AND status = 'running'
+            RETURNING id`,
+          [reset.sourceId, reset.position],
+        )
+        const cursor = await saveCursorInTransaction(client, reset.cursorId, reset.position, {
+          status: 'idle',
+          error: null,
+        })
+        results.push({
+          sourceKey: reset.sourceKey,
+          failedRunIds: rows.map((row) => row.id),
+          cursor,
+        })
+      }
+      return results
     }, { outcomeUnknownCode: 'external_reset_outcome_unknown' })
   }
 
@@ -1569,6 +1714,18 @@ function sourceMapping(row) {
     approvedAt: iso(row.approved_at),
     approvedBy: row.approved_by,
     createdAt: iso(row.created_at),
+  }
+}
+
+function pipelineWriterContractAttestation(row) {
+  return row && {
+    id: row.id,
+    pipelineKey: row.pipeline_key,
+    contractVersion: row.contract_version,
+    contractDigest: row.contract_digest,
+    contractSummary: row.contract_summary,
+    attestedBy: row.attested_by,
+    attestedAt: iso(row.attested_at),
   }
 }
 

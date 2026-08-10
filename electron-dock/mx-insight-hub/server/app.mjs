@@ -7,6 +7,10 @@ import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson }
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import { validateDatabaseConnection } from './ingest/external/database-source.mjs'
 import {
+  isTelegramMonitorSourceKey,
+  TelegramMonitorPipeline,
+} from './ingest/telegram/monitor-pipeline.mjs'
+import {
   adminTokenPrincipal,
   filterByTenantCapability,
   requireCapability,
@@ -94,6 +98,15 @@ function requiredSourceKey(body) {
     )
   }
   return sourceKey
+}
+
+function assertGenericSourceMutable(sourceKey) {
+  if (!isTelegramMonitorSourceKey(sourceKey)) return
+  throw new AppError(
+    409,
+    'pipeline_managed_source',
+    'Telegram monitor sources are managed through /internal/v1/admin/pipelines/telegram-monitor',
+  )
 }
 
 // Best-effort client address for rate limiting and for forwarding upstream.
@@ -192,6 +205,8 @@ export function createApp({
   staticRoot,
   logger = console,
 }) {
+  const telegramMonitorPipeline = new TelegramMonitorPipeline({ store, queue, databasePuller })
+
   /**
    * Resolve the caller of an administrative route.
    *
@@ -259,7 +274,7 @@ export function createApp({
       tenants: tenants.filter((tenant) => allowedTenantIds.has(tenant.id)).length,
       consumers: consumers.filter((consumer) => allowedTenantIds.has(consumer.tenantId)).length,
       activeApiKeys: apiKeys.filter((key) => (
-        allowedTenantIds.has(key.tenantId) && key.status === 'active'
+        allowedTenantIds.has(key.tenantId) && (key.effectiveStatus || key.status) === 'active'
       )).length,
       ...usage,
     }
@@ -580,6 +595,69 @@ export function createApp({
       // operator policy, so this surface is narrower than general platform
       // administration: only the break-glass admin token may enter it.
 
+      if (pathname === '/internal/v1/admin/pipelines/telegram-monitor') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        if (request.method === 'GET') {
+          sendJson(response, 200, { data: await telegramMonitorPipeline.get(), requestId })
+          return
+        }
+        if (request.method === 'PUT') {
+          const body = await readJson(request)
+          sendJson(response, 200, { data: await telegramMonitorPipeline.configure(body), requestId })
+          return
+        }
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/telegram-monitor/status') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter(
+          (field) => !['status', 'writerContractAttestation'].includes(field),
+        )
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported status fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await telegramMonitorPipeline.setStatus(body?.status, {
+            approvedBy: principal.memberId || 'admin-token',
+            writerContractAttestation: body?.writerContractAttestation ?? null,
+          }),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/telegram-monitor/sync') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        sendJson(response, 202, { data: await telegramMonitorPipeline.sync(body), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/pipelines/telegram-monitor/progress') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, { data: await telegramMonitorPipeline.progress(), requestId })
+        return
+      }
+      if (
+        request.method === 'POST'
+        && pathname === '/internal/v1/admin/pipelines/telegram-monitor/checkpoints/reset'
+      ) {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'confirmPipelineKey')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported checkpoint reset fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await telegramMonitorPipeline.resetCheckpoints(body?.confirmPipelineKey),
+          requestId,
+        })
+        return
+      }
+
       if (request.method === 'GET' && pathname === '/internal/v1/admin/sources') {
         requireSourceAdmin(principal)
         sendJson(response, 200, { data: await store.listExternalSources(), requestId })
@@ -589,6 +667,7 @@ export function createApp({
         requireSourceAdmin(principal)
         const body = await readJson(request)
         const sourceKey = requiredSourceKey(body)
+        assertGenericSourceMutable(sourceKey)
         if (await store.getExternalSource?.(sourceKey)) {
           throw new AppError(409, 'source_exists', 'Source keys are immutable; update a paused source through its PUT route')
         }
@@ -638,6 +717,7 @@ export function createApp({
       }
       if (params && request.method === 'PUT') {
         requireSourceAdmin(principal)
+        assertGenericSourceMutable(params.key)
         const initialSource = await requireSource(params.key)
         const body = await readJson(request)
         const unsupported = Object.keys(body || {}).filter(
@@ -742,6 +822,7 @@ export function createApp({
       }
       if (params && request.method === 'POST') {
         requireSourceAdmin(principal)
+        assertGenericSourceMutable(params.key)
         const source = await requireSource(params.key)
         const body = await readJson(request)
         validateFieldMap(body?.fieldMap)
@@ -762,6 +843,7 @@ export function createApp({
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/mappings/:version/approve')
       if (params && request.method === 'POST') {
         requireSourceAdmin(principal)
+        assertGenericSourceMutable(params.key)
         const initial = await requireSource(params.key)
         const approved = await withSourceLocks(initial.sourceKind === 'database' ? [params.key] : [], async () => {
           const source = await requireSource(params.key)
@@ -860,6 +942,7 @@ export function createApp({
       if (params && request.method === 'POST') {
         requireSourceAdmin(principal)
         requireDatabasePuller()
+        assertGenericSourceMutable(params.key)
         const source = await requireSource(params.key)
         if (source.sourceKind !== 'database') {
           throw new AppError(400, 'wrong_source_kind', 'This source is not a database source')
@@ -902,6 +985,7 @@ export function createApp({
       if (params && request.method === 'POST') {
         requireSourceAdmin(principal)
         requireDatabasePuller()
+        assertGenericSourceMutable(params.key)
         const source = await requireSource(params.key)
         const body = await readJson(request)
         if (body?.confirmSourceKey !== source.sourceKey) {
@@ -959,6 +1043,7 @@ export function createApp({
       if (params && request.method === 'POST') {
         requireSourceAdmin(principal)
         requireImporter()
+        assertGenericSourceMutable(params.key)
         // Raw body plus a filename query parameter, deliberately not multipart:
         // multipart needs its own parser for attacker-controlled input, and this
         // path already accepts untrusted spreadsheets.

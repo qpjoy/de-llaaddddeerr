@@ -1,4 +1,5 @@
 import { UpstreamAmbiguousError, UpstreamRejectedError } from '../core/errors.mjs'
+import { isNightAllDataSearchV1Envelope } from '../contracts/night-all-data-search.mjs'
 
 const BLOCKED_KEYS = new Set([
   'provider',
@@ -28,6 +29,27 @@ export function stripProviderMetadata(value) {
   )
 }
 
+/**
+ * Keep the strict Night-All-v1 item shape after removing private provider data.
+ * `provider` and `endpointId` are required nullable fields in the published
+ * contract, so deleting their keys would make an otherwise valid response fail
+ * the contract clients already validate.
+ */
+export function redactNightAllDataSearchResponse(payload) {
+  const redacted = stripProviderMetadata(payload)
+  if (!Array.isArray(redacted?.data?.items)) return redacted
+  return {
+    ...redacted,
+    data: {
+      ...redacted.data,
+      items: redacted.data.items.map((item) => ({
+        ...item,
+        source: { provider: null, endpointId: null },
+      })),
+    },
+  }
+}
+
 export class NightAllAdapter {
   constructor({ baseUrl, fetchImpl = globalThis.fetch, timeoutMs = 30_000, serviceToken, exportToken }) {
     this.baseUrl = baseUrl.replace(/\/$/, '')
@@ -43,7 +65,12 @@ export class NightAllAdapter {
   // `keepRaw` returns the pre-redaction payload alongside the public one.
   // Provider/endpoint identifiers are ingest lineage evidence; they are stored,
   // never served, so the redacted copy remains the only thing callers can see.
-  async #request(method, path, body, validate, { keepRaw = false, token, timeoutMs } = {}) {
+  async #request(method, path, body, validate, {
+    keepRaw = false,
+    token,
+    timeoutMs,
+    redact = stripProviderMetadata,
+  } = {}) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs || this.timeoutMs)
     let response
@@ -79,7 +106,7 @@ export class NightAllAdapter {
     if (!payload || typeof payload !== 'object' || (validate && !validate(payload))) {
       throw new UpstreamRejectedError(502, { code: 'invalid_upstream_contract' })
     }
-    const redacted = stripProviderMetadata(payload)
+    const redacted = redact(payload)
     return keepRaw ? { payload: redacted, raw: payload } : redacted
   }
 
@@ -157,8 +184,8 @@ export class NightAllAdapter {
         businessId,
         availabilityMode: 'ready_only',
       },
-      (payload) => payload?.data && typeof payload.data === 'object' && Array.isArray(payload.data.items),
-      { keepRaw: true },
+      isNightAllDataSearchV1Envelope,
+      { keepRaw: true, redact: redactNightAllDataSearchResponse },
     )
   }
 }

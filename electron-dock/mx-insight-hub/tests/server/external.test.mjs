@@ -22,6 +22,7 @@ import {
 } from '../../server/ingest/external/database-source.mjs'
 import { runExternalPullJob } from '../../server/ingest/external/sync-job.mjs'
 import { scheduleActiveDatabaseSources } from '../../server/ingest/external/scheduler.mjs'
+import { TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST } from '../../server/ingest/telegram/monitor-pipeline.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 
 const hash = (value) => createHash('sha256').update(value).digest('hex').slice(0, 16)
@@ -1577,8 +1578,8 @@ test('periodic external scheduling selects only active database sources with per
   const result = await scheduleActiveDatabaseSources({
     store: {
       listExternalSources: async () => [
-        { sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active' },
-        { sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active' },
+        { sourceKey: 'warehouse-ready', sourceKind: 'database', status: 'active' },
+        { sourceKey: 'warehouse-running', sourceKind: 'database', status: 'active' },
         { sourceKey: 'telegram-monitor-failed', sourceKind: 'database', status: 'active' },
         { sourceKey: 'telegram-monitor-paused', sourceKind: 'database', status: 'paused' },
         { sourceKey: 'weekly-file', sourceKind: 'file', status: 'active' },
@@ -1586,8 +1587,8 @@ test('periodic external scheduling selects only active database sources with per
     },
     queue: {
       getCursor: async (id) => ({
-        'external:telegram-monitor-chats': { status: 'idle' },
-        'external:telegram-monitor-messages': { status: 'running' },
+        'external:warehouse-ready': { status: 'idle' },
+        'external:warehouse-running': { status: 'running' },
         'external:telegram-monitor-failed': { status: 'failed' },
       })[id] ?? null,
       enqueue: async (...args) => {
@@ -1600,9 +1601,117 @@ test('periodic external scheduling selects only active database sources with per
   assert.deepEqual(result, { active: 3, enqueued: 1 })
   assert.deepEqual(calls, [[
     'external-pull',
-    { sourceKey: 'telegram-monitor-chats', batchSize: 750, trigger: 'schedule', chunk: 0 },
-    { dedupeKey: 'external-pull:telegram-monitor-chats:0', priority: 220 },
+    { sourceKey: 'warehouse-ready', batchSize: 750, trigger: 'schedule', chunk: 0 },
+    { dedupeKey: 'external-pull:warehouse-ready:0', priority: 220 },
   ]])
+})
+
+test('periodic Telegram scheduling waits for both inputs and commits the due pair together', async () => {
+  const sources = [
+    {
+      sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active',
+      syncIntervalSeconds: 300,
+    },
+    {
+      sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active',
+      syncIntervalSeconds: 300,
+    },
+  ]
+  const statements = []
+  const enqueues = []
+  const client = {
+    query: async (sql) => { statements.push(sql); return { rows: [] } },
+    release() {},
+  }
+  const queue = {
+    pool: { connect: async () => client },
+    getCursor: async (id) => ({
+      status: 'idle',
+      updatedAt: id.endsWith('chats')
+        ? '2026-08-10T07:50:00.000Z'
+        : '2026-08-10T07:58:00.000Z',
+    }),
+    enqueue: async (name, payload, options) => {
+      assert.equal(options.client, client)
+      enqueues.push([name, payload, options.dedupeKey])
+      return enqueues.length
+    },
+  }
+  let latestAttestation = null
+  const store = {
+    listExternalSources: async () => sources,
+    getLatestPipelineWriterContractAttestation: async () => latestAttestation,
+  }
+
+  const early = await scheduleActiveDatabaseSources({
+    store, queue, now: new Date('2026-08-10T08:00:00.000Z'), batchSize: 750,
+  })
+  assert.deepEqual(early, { active: 2, enqueued: 0 })
+  assert.deepEqual(enqueues, [])
+
+  const unattested = await scheduleActiveDatabaseSources({
+    store, queue, now: new Date('2026-08-10T08:04:00.000Z'), batchSize: 750,
+  })
+  assert.deepEqual(unattested, { active: 2, enqueued: 0 })
+  assert.deepEqual(enqueues, [])
+
+  latestAttestation = {
+    contractVersion: 'telegram-monitor.writer.v1',
+    contractDigest: TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
+  }
+  const due = await scheduleActiveDatabaseSources({
+    store, queue, now: new Date('2026-08-10T08:04:00.000Z'), batchSize: 750,
+  })
+  assert.deepEqual(due, { active: 2, enqueued: 2 })
+  assert.deepEqual(statements, ['BEGIN', 'COMMIT'])
+  assert.deepEqual(enqueues.map(([, payload]) => payload.sourceKey), [
+    'telegram-monitor-chats',
+    'telegram-monitor-messages',
+  ])
+})
+
+test('periodic Telegram scheduling rolls back both jobs when the second enqueue fails', async () => {
+  const statements = []
+  const staged = []
+  const committed = []
+  const client = {
+    async query(sql) {
+      statements.push(sql)
+      if (sql === 'COMMIT') committed.push(...staged)
+      if (sql === 'ROLLBACK') staged.length = 0
+      return { rows: [] }
+    },
+    release() {},
+  }
+  const queue = {
+    pool: { connect: async () => client },
+    getCursor: async () => ({ status: 'idle' }),
+    enqueue: async (_name, payload, options) => {
+      assert.equal(options.client, client)
+      if (payload.sourceKey === 'telegram-monitor-messages') throw new Error('queue unavailable')
+      staged.push(payload.sourceKey)
+      return 1
+    },
+  }
+  await assert.rejects(
+    () => scheduleActiveDatabaseSources({
+      store: {
+        listExternalSources: async () => [
+          { sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active' },
+          { sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active' },
+        ],
+        getLatestPipelineWriterContractAttestation: async () => ({
+          contractVersion: 'telegram-monitor.writer.v1',
+          contractDigest: TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
+        }),
+      },
+      queue,
+    }),
+    (error) => error?.code === 'telegram_schedule_failed',
+  )
+  assert.deepEqual(statements, ['BEGIN', 'ROLLBACK'])
+  assert.deepEqual(committed, [])
+  assert.deepEqual(staged, [])
 })
 
 test('periodic external scheduling honours each source interval using its durable cursor time', async () => {

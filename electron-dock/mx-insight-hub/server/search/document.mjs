@@ -42,17 +42,52 @@ function metricsOf(stableFields) {
   return result
 }
 
+function asText(value) {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  return text || null
+}
+
+function finiteNonNegative(value) {
+  if (value === null || value === undefined || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) && number >= 0 ? number : null
+}
+
 function mediaOf(stableFields) {
   const media = stableFields?.media
   const images = Array.isArray(media?.images) ? media.images : []
   const videos = Array.isArray(media?.videos) ? media.videos : []
   if (images.length > 0 || videos.length > 0) {
-    return { mediaCount: images.length + videos.length, hasVideo: videos.length > 0 }
+    return {
+      mediaCount: images.length + videos.length,
+      hasVideo: videos.length > 0,
+      mediaKind: videos.length > 0 ? 'video' : 'image',
+      mediaMimeType: null,
+      mediaExtension: null,
+      mediaFileName: null,
+      mediaSizeBytes: null,
+    }
   }
-  const kind = typeof media?.media_kind === 'string' ? media.media_kind.toLowerCase() : null
+  const kind = asText(media?.media_kind ?? media?.mediaKind)?.toLowerCase() ?? null
   return {
     mediaCount: kind ? 1 : 0,
     hasVideo: kind === 'video',
+    mediaKind: kind,
+    mediaMimeType: asText(media?.mime_type ?? media?.mimeType),
+    mediaExtension: asText(media?.extension)?.toLowerCase() ?? null,
+    mediaFileName: asText(media?.file_name ?? media?.fileName),
+    mediaSizeBytes: finiteNonNegative(media?.size_bytes ?? media?.sizeBytes),
+  }
+}
+
+function entitiesOf(stableFields) {
+  const entities = Array.isArray(stableFields?.entities) ? stableFields.entities : []
+  const unique = (values) => [...new Set(values.filter(Boolean))].slice(0, 100)
+  return {
+    entityTypes: unique(entities.map((entity) => asText(entity?.type)?.toLowerCase() ?? null)),
+    entityUserIds: unique(entities.map((entity) => asText(entity?.user_id ?? entity?.userId))),
+    entityUrls: unique(entities.map((entity) => asText(entity?.url))),
   }
 }
 
@@ -73,11 +108,16 @@ function locationOf(row) {
  */
 export async function buildContentDocument(row, { segmenter }) {
   const stableFields = row.stable_fields || {}
-  const [titleTokens, bodyTokens] = await Promise.all([
+  const authorName = row.author_name ?? stableFields.author?.name ?? null
+  const username = stableFields.attributes?.username ?? stableFields.author?.handle ?? null
+  const [titleTokens, bodyTokens, authorNameTokens, usernameTokens] = await Promise.all([
     segmenter.segment(row.title || ''),
     segmenter.segment(row.body || ''),
+    segmenter.segment(authorName || ''),
+    segmenter.segment(username || ''),
   ])
   const media = mediaOf(stableFields)
+  const entities = entitiesOf(stableFields)
   const location = locationOf(row)
 
   return {
@@ -99,18 +139,30 @@ export async function buildContentDocument(row, { segmenter }) {
     bodyHanlp: toPresegmentedText(bodyTokens),
 
     authorExternalId: row.author_external_id,
-    authorName: row.author_name,
+    authorName,
+    authorNameHanlp: toPresegmentedText(authorNameTokens),
     authorHandle: stableFields.author?.handle ?? null,
+    authorHandleSubstring: stableFields.author?.handle ?? null,
     authorAvatarUrl: stableFields.author?.avatarUrl ?? null,
-    username: stableFields.attributes?.username ?? stableFields.author?.handle ?? null,
-    chatId: stableFields.relations?.chatId ?? null,
-    messageId: stableFields.relations?.messageId ?? null,
+    username,
+    usernameHanlp: toPresegmentedText(usernameTokens),
+    usernameSubstring: username,
+    chatId: asText(stableFields.relations?.chatId),
+    messageId: asText(stableFields.relations?.messageId),
+    replyToMessageId: asText(stableFields.relations?.replyToMessageId),
+    threadId: asText(stableFields.relations?.threadId),
+    groupedId: asText(stableFields.relations?.groupedId),
+    chatType: asText(stableFields.attributes?.chatType),
+    isOutgoing: typeof stableFields.attributes?.isOutgoing === 'boolean'
+      ? stableFields.attributes.isOutgoing
+      : null,
 
     // Union of both segmented fields: a cheap keyword facet for "what is this
     // corpus about" aggregations without re-analyzing text at query time.
     tokens: [...new Set([...titleTokens, ...bodyTokens])].slice(0, 512),
     tags: Array.isArray(stableFields.tags) ? stableFields.tags : [],
-    entityIds: [],
+    entityIds: entities.entityUserIds,
+    ...entities,
     language: stableFields.language ?? null,
 
     metrics: metricsOf(stableFields),
@@ -122,6 +174,7 @@ export async function buildContentDocument(row, { segmenter }) {
     admin2Code: row.admin2_code,
 
     eventTime: row.event_time,
+    editedAt: stableFields.editedAt ?? null,
     publishedAt: row.event_time,
     collectedAt: row.collected_at,
     firstSeenAt: row.first_seen_at,

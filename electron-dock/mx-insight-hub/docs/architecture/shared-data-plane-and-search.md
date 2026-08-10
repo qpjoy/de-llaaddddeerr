@@ -16,7 +16,7 @@ flowchart LR
   OB --> PJ["mx-insight-hub-projector\n（独立 Deployment）"]
   PJ --> SEG["mx-common segmenter\nHanLP / 内置回退"]
   SEG --> PJ
-  PJ --> ES1["Elasticsearch current state\ncontent-v2-current"]
+  PJ --> ES1["Elasticsearch current state\ncontent-v3-current"]
   PG --> CH["record_chunks + durable chunk deletes"]
   CH --> EP["embedding/delete loop"]
   EP --> ES2["Elasticsearch current state\nchunk-v1-current"]
@@ -47,8 +47,8 @@ flowchart LR
 
 ```
 全文读别名     mx-insight-hub-content
-兼容写别名     mx-insight-hub-content-v2
-当前全文索引   mx-insight-hub-content-v2-current
+兼容写别名     mx-insight-hub-content-v3
+当前全文索引   mx-insight-hub-content-v3-current
 
 语义读别名     mx-insight-hub-chunk
 兼容写别名     mx-insight-hub-chunk-v1
@@ -101,7 +101,12 @@ alias 原子切换，而不是依赖 ES 旧索引或快照成为唯一真相。
 
 ### 1.6 模糊搜索用户名
 
-`authorName` 是一个四子字段的复合字段：`keyword`（精确，权重最高）、`prefix`（edge_ngram，输入即匹配）、`bigram`（CJK 双字，任意位置子串）、以及分词后的主字段。查询用 `bool.should` 并行打分，**不用 `wildcard` 也不用 `fuzzy`**——两者都要扫词典且随语料规模劣化，而且编辑距离对中文基本没有意义。
+content v3 将名称原文与预分词文本分开：`authorName`/`username` 保留原文并提供
+`keyword`（精确）、`prefix`（edge_ngram）和 `bigram`（CJK 任意位置子串）；
+`authorNameHanlp`/`usernameHanlp` 保存同一分词器生成的空格分隔 tokens，负责相关性
+召回。handle/username 的拉丁任意位置子串落在 ES 专用 `wildcard` field；查询不会
+对普通 keyword 字段做通配词典扫描，也不用对中文没有意义的 edit-distance fuzzy。
+查询用 `bool.should` 并行打分，exact 仍具有最高权重。
 
 PG 侧同时建了 `pg_trgm` GIN 索引，`similarity()` 提供排序而不只是过滤，所以降级路径是一条真实的查询计划，不是占位符。
 
@@ -153,11 +158,16 @@ Night-All 回填：Night-All 侧的 `source_social_{platform}_contents` 已有 `
 
 ### P5 — 中心 Agent（已实现基线，范围见 §10）
 
-Hub 内 Agent 已支持有序 OpenAI-compatible provider 链，职责限定为三件事：
+Hub 内 Agent 已支持有序 OpenAI-compatible provider 链，但当前真正接进运行链路的
+只有两件事：
 
-1. **智能 mapping**：新数据源字段 → 既有 canonical 列的映射建议。产出是**建议**，落库前需要一次显式确认，且映射本身要版本化存表——让 LLM 直接决定 schema 会让数据模型变得不可复现。
-2. **接口返回数据的清洗与分类**：P3 中第 2、3 类数据的处理者。
-3. **embedding 生成**：填充 `core.record_chunks` 与 ES `chunk` 索引。
+1. **文件 mapping 建议**：只有管理员在 preview 显式传 `agent=true` 才调用；只发
+   列名、不发样例值，产出仍需版本化并人工批准。
+2. **embedding 生成**：填充 `core.record_chunks` 与 ES `chunk` 索引。
+
+`classifyRecord()` 目前只是受约束的库能力，数据库 pull、Telegram 固定 v2 清洗和
+Night-All ingest 都没有调用它。P3 的“差异自动分类”仍是未来任务，不能把模型已
+配置等同于智能清洗已上线。
 
 `MX_INSIGHT_EMBEDDING_DIMENSIONS`、embedding provider 链、PG chunk/vector 与
 独立 ES chunk current-state 索引已经落地。无模型时 mapping 有确定性 fallback，
@@ -349,6 +359,23 @@ PostgreSQL；生产 schema、水位、索引和删除语义必须逐来源验证
 “连接器存在”理解成“任意外部表可直接同步”。Telegram 两个来源的具体门禁
 见[运行手册](../operations/telegram-monitor-ingestion.md)。
 
+### 8.5 Source 与清洗任务不是同一个抽象
+
+`catalog.external_sources` 当前刻意保持“一张物理表/一个 checkpoint”的底层输入
+语义；它适合复用连接器、mapping、batch evidence 和恢复协议，但不应直接成为
+业务控制台的唯一心智模型。Telegram Monitor 现在是其上的薄编排：管理员只配置
+一套连接和周期，业务定义固定两个 input，统一启停/同步/进度，子 source 只在
+“只读诊断”中出现。通用 source 写接口对这两个固定 key 返回
+`pipeline_managed_source`；writer 水位/删除/提交顺序合同必须按当前摘要哈希显式确认，
+然后与两个固定 mapping 的批准和 active 状态在一个事务中落审计。手工与周期调度
+都把两条队列任务原子提交，不能静默产生单边同步。
+
+本轮没有为了一个业务先引入通用 DAG。若第二个多输入清洗业务出现，再把这层提升为
+持久化 `cleaning_tasks / task_inputs / task_runs`：task run 记录输入快照、mapping/
+transform/Agent 版本、读入/拒绝/变更/删除、PG commit、outbox/ES 投影进度和耗时；
+input run 继续引用现有 source import run。不要把两个独立 import run 事后伪装成
+已经存在的父事务，也不要用 UI 聚合值替代 durable lineage。
+
 ## 9. P4 补完（已实现）
 
 文件路径端到端可用：
@@ -438,14 +465,19 @@ MX_INSIGHT_AGENT_PROVIDERS='[
 
 返回时还会再校验一次维度：配置可以是对的，而 provider 悄悄换了模型版本。
 
-### 10.4 三件事，每件都有确定性兜底
+### 10.4 已接线能力与保留能力
 
 | 能力 | 无模型/全部不可用时 |
 | --- | --- |
 | 映射建议 | 退回确定性别名匹配器，并报 `degradedReason` |
-| 记录分类 | 返回 null，调用方保留原始记录（`extensions` 里的未分类行可恢复，丢掉的不可恢复） |
+| 记录分类（当前未接入 ingest） | 库方法返回 null；未来调用方必须保留 raw 并转 quarantine，不能悄悄发布 |
 | Embedding | **直接失败**——向量没有兜底可言 |
 
 模型输出一律不被信任：**幻觉出来的列名会被丢弃**（它产生的映射读起来合理却什么都不映射，正是能通过评审的那种失败），越界的分类值归为 `unknown`，返回的映射在离开 agent 之前就跑 `validateFieldMap`——丢了 `externalId` 的映射绝不能带着合法外表走到批准界面。带 ``` 围栏和前言的响应会被取最外层花括号跨度解析。
 
 agent 产出的映射写库时 `origin: 'agent'` 且 **`approved_at` 为空**——它仍然要人批准才能生效。
+
+固定 Telegram v2 不应逐行调用 LLM：external identity、游标、删除和字段映射必须
+保持确定性、可重放。未来 Agent 只适合处理 schema drift 后的隔离样本或可丢弃的
+enrichment，并记录模型、prompt/version、输入范围、成本与人工决定；Agent 失败
+不能阻塞 raw/canonical 基线同步，也不能自行改变 identity/watermark/tombstone。

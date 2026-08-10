@@ -1,12 +1,32 @@
-import { defineIndexSet, nameField, vectorField } from '@qpjoy/mx-common/elasticsearch'
+import { defineIndexSet, vectorField } from '@qpjoy/mx-common/elasticsearch'
 
 export const PRODUCT_ID = 'mx-insight-hub'
 
 // Bump only for a mapping change Elasticsearch cannot apply in place (a changed
 // field type, a changed analyzer on an existing field). Adding a field is
 // additive and does not need a version bump.
-export const CONTENT_SCHEMA_VERSION = 2
+export const CONTENT_SCHEMA_VERSION = 3
 export const CHUNK_SCHEMA_VERSION = 1
+
+// Human names arrive as raw source text. Keep that raw value in `_source` and
+// let the multi-fields handle exact, prefix and arbitrary CJK substring
+// matching; the separately projected *Hanlp field carries pre-segmented tokens
+// for relevance-ranked full-text matching. This separation avoids feeding raw
+// Chinese into mx_presegmented, which expects whitespace-delimited tokens.
+function rawNameField() {
+  return {
+    type: 'text',
+    fields: {
+      keyword: { type: 'keyword', ignore_above: 256 },
+      prefix: {
+        type: 'text',
+        analyzer: 'mx_edge_ngram',
+        search_analyzer: 'mx_edge_ngram_search',
+      },
+      bigram: { type: 'text', analyzer: 'mx_cjk_bigram' },
+    },
+  }
+}
 
 /**
  * Customer-safe content projection.
@@ -58,17 +78,43 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
       // with `dynamic: strict` meant any document carrying an author would have
       // been rejected outright.
       authorExternalId: { type: 'keyword' },
-      authorName: nameField(),
+      authorName: rawNameField(),
+      authorNameHanlp: { type: 'text', analyzer: 'mx_presegmented', search_analyzer: 'mx_presegmented_search' },
       authorHandle: {
         type: 'keyword',
         fields: {
           prefix: { type: 'text', analyzer: 'mx_edge_ngram', search_analyzer: 'mx_edge_ngram_search' },
+          bigram: { type: 'text', analyzer: 'mx_cjk_bigram' },
         },
       },
+      // `wildcard` fields keep an ngram-backed representation specifically
+      // for arbitrary identifier substrings. Using a wildcard query against a
+      // normal keyword field would scan its term dictionary; this field type
+      // is the bounded ES-native counterpart to PostgreSQL trigram ILIKE.
+      authorHandleSubstring: { type: 'wildcard' },
       authorAvatarUrl: { type: 'keyword', index: false },
-      username: nameField(),
+      username: rawNameField(),
+      usernameHanlp: { type: 'text', analyzer: 'mx_presegmented', search_analyzer: 'mx_presegmented_search' },
+      usernameSubstring: { type: 'wildcard' },
       chatId: { type: 'keyword' },
       messageId: { type: 'keyword' },
+      replyToMessageId: { type: 'keyword' },
+      threadId: { type: 'keyword' },
+      groupedId: { type: 'keyword' },
+      chatType: { type: 'keyword' },
+      isOutgoing: { type: 'boolean' },
+
+      // Telegram media/entities are promoted to stable typed fields now, before
+      // the initial corpus build. Raw JSON remains in PostgreSQL; Elasticsearch
+      // receives only bounded, query-oriented projections.
+      mediaKind: { type: 'keyword' },
+      mediaMimeType: { type: 'keyword' },
+      mediaExtension: { type: 'keyword' },
+      mediaFileName: { type: 'keyword', ignore_above: 512 },
+      mediaSizeBytes: { type: 'long' },
+      entityTypes: { type: 'keyword' },
+      entityUserIds: { type: 'keyword' },
+      entityUrls: { type: 'keyword', ignore_above: 2048 },
 
       tokens: { type: 'keyword', ignore_above: 256 },
       entityIds: { type: 'keyword' },
@@ -97,6 +143,7 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
       admin2Code: { type: 'keyword' },
 
       eventTime: { type: 'date' },
+      editedAt: { type: 'date' },
       collectedAt: { type: 'date' },
       publishedAt: { type: 'date' },
       firstSeenAt: { type: 'date' },

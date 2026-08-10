@@ -94,7 +94,7 @@ export class MemoryStore {
     return clone(this.consumers.get(id) || null)
   }
 
-  async createApiKey({ id, tenantId, consumerId, name, digest, prefix, lastFour, environment = 'live', status = 'active' }) {
+  async createApiKey({ id, tenantId, consumerId, name, digest, prefix, lastFour, environment = 'live', status = 'active', expiresAt }) {
     if (!this.consumers.has(consumerId)) {
       throw new AppError(404, 'consumer_not_found', 'Consumer not found')
     }
@@ -109,6 +109,7 @@ export class MemoryStore {
       environment,
       status,
       createdAt: nowIso(),
+      expiresAt,
       revokedAt: null,
       lastUsedAt: null,
     }
@@ -119,7 +120,14 @@ export class MemoryStore {
 
   #publicApiKey(record) {
     const { digest: _digest, ...safe } = record
-    return clone(safe)
+    return clone({
+      ...safe,
+      effectiveStatus: safe.status === 'active'
+        && safe.expiresAt != null
+        && new Date(safe.expiresAt).getTime() <= Date.now()
+        ? 'expired'
+        : safe.status,
+    })
   }
 
   async listApiKeys(consumerId) {
@@ -130,7 +138,7 @@ export class MemoryStore {
 
   async findApiKeyByDigest(digest) {
     const key = this.apiKeys.get(this.apiKeysByDigest.get(digest))
-    if (!active(key)) return null
+    if (!active(key) || (key.expiresAt != null && new Date(key.expiresAt).getTime() <= Date.now())) return null
     const consumer = this.consumers.get(key.consumerId)
     const tenant = this.tenants.get(key.tenantId)
     if (!active(consumer) || !active(tenant)) return null
@@ -264,7 +272,7 @@ export class MemoryStore {
   }
 
   async commitRequest(id, { responseStatus, responseBody, unitsActual, upstreamLatencyMs }) {
-    const record = this.#request(id)
+    const record = this.#requestInState(id, ['reserved'])
     Object.assign(record, {
       status: 'committed',
       responseStatus,
@@ -277,13 +285,13 @@ export class MemoryStore {
   }
 
   async releaseRequest(id, errorCode) {
-    const record = this.#request(id)
+    const record = this.#requestInState(id, ['reserved'])
     Object.assign(record, { status: 'released', errorCode, completedAt: nowIso() })
     return clone(record)
   }
 
   async markRequestUnknown(id, errorCode) {
-    const record = this.#request(id)
+    const record = this.#requestInState(id, ['reserved', 'committed'])
     Object.assign(record, { status: 'unknown', errorCode, completedAt: nowIso() })
     return clone(record)
   }
@@ -291,6 +299,18 @@ export class MemoryStore {
   #request(id) {
     const record = this.requests.get(id)
     if (!record) throw new AppError(404, 'request_not_found', 'Request not found')
+    return record
+  }
+
+  #requestInState(id, allowedStatuses) {
+    const record = this.#request(id)
+    if (!allowedStatuses.includes(record.status)) {
+      throw new AppError(
+        409,
+        'request_state_conflict',
+        `Request in ${record.status} state cannot transition from ${allowedStatuses.join(' or ')}`,
+      )
+    }
     return record
   }
 
@@ -321,7 +341,9 @@ export class MemoryStore {
     return {
       tenants: this.tenants.size,
       consumers: this.consumers.size,
-      activeApiKeys: [...this.apiKeys.values()].filter(active).length,
+      activeApiKeys: [...this.apiKeys.values()].filter((key) => (
+        active(key) && (key.expiresAt == null || new Date(key.expiresAt).getTime() > Date.now())
+      )).length,
       ...usage,
     }
   }

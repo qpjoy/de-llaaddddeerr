@@ -172,6 +172,25 @@ export const adminApi = {
   resetSourceCheckpoint: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/checkpoint/reset`, { method: 'POST', body },
   ),
+  telegramMonitorPipeline: (token) => request(token, `${ADMIN_ROOT}/pipelines/telegram-monitor`),
+  updateTelegramMonitorPipeline: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-monitor`, { method: 'PUT', body },
+  ),
+  updateTelegramMonitorPipelineStatus: (token, status, writerContractAttestation = null) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-monitor/status`, {
+      method: 'POST',
+      body: { status, ...(writerContractAttestation ? { writerContractAttestation } : {}) },
+    },
+  ),
+  runTelegramMonitorPipeline: (token, body = {}) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-monitor/sync`, { method: 'POST', body },
+  ),
+  telegramMonitorPipelineProgress: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-monitor/progress`,
+  ),
+  resetTelegramMonitorPipelineCheckpoints: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-monitor/checkpoints/reset`, { method: 'POST', body },
+  ),
 
   // Backfill (P3), agent (P5) and retrieval (embedding pipeline).
   backfill: (token) => request(token, `${ADMIN_ROOT}/backfill`),

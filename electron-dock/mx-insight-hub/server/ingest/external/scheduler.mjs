@@ -1,4 +1,41 @@
 import { EXTERNAL_PULL_QUEUE } from './sync-job.mjs'
+import { enqueueJobsAtomically } from './atomic-enqueue.mjs'
+import {
+  isTelegramMonitorSourceKey,
+  TELEGRAM_MONITOR_INPUTS,
+  TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
+  TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION,
+} from '../telegram/monitor-pipeline.mjs'
+
+const TELEGRAM_SCHEDULE_ERRORS = Object.freeze({
+  unavailable: {
+    code: 'telegram_schedule_unavailable',
+    message: 'Telegram monitor scheduling requires the PostgreSQL queue',
+  },
+  failed: {
+    code: 'telegram_schedule_failed',
+    message: 'No Telegram monitor task was scheduled',
+  },
+  outcomeUnknown: {
+    code: 'telegram_schedule_outcome_unknown',
+    message: 'The Telegram monitor scheduling outcome is unknown',
+  },
+})
+
+function isDue(source, cursor, now) {
+  if (cursor && cursor.status !== 'idle') return false
+  const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
+  const intervalMs = (source.syncIntervalSeconds ?? 60) * 1_000
+  return !updatedAt || now.getTime() - new Date(updatedAt).getTime() >= intervalMs
+}
+
+function scheduledJob(sourceKey, batchSize) {
+  return {
+    queue: EXTERNAL_PULL_QUEUE,
+    payload: { sourceKey, batchSize, trigger: 'schedule', chunk: 0 },
+    options: { dedupeKey: `external-pull:${sourceKey}:0`, priority: 220 },
+  }
+}
 
 /** Schedule one incremental scan for every active foreign database source. */
 export async function scheduleActiveDatabaseSources({ store, queue, batchSize = 1_000, now = new Date() }) {
@@ -6,20 +43,45 @@ export async function scheduleActiveDatabaseSources({ store, queue, batchSize = 
   let enqueued = 0
   for (const source of sources) {
     if (source.sourceKind !== 'database' || source.status !== 'active') continue
+    if (isTelegramMonitorSourceKey(source.sourceKey)) continue
     const cursor = await queue.getCursor(`external:${source.sourceKey}`)
     // A running continuation owns this source. Failed cursors require an
     // operator to fix/probe and explicitly resume; automatic retries would
     // turn a deterministic mapping failure into an alert storm.
     if (cursor && cursor.status !== 'idle') continue
-    const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
-    const intervalMs = (source.syncIntervalSeconds ?? 60) * 1_000
-    if (updatedAt && now.getTime() - new Date(updatedAt).getTime() < intervalMs) continue
+    if (!isDue(source, cursor, now)) continue
     const jobId = await queue.enqueue(
       EXTERNAL_PULL_QUEUE,
       { sourceKey: source.sourceKey, batchSize, trigger: 'schedule', chunk: 0 },
       { dedupeKey: `external-pull:${source.sourceKey}:0`, priority: 220 },
     )
     if (jobId != null) enqueued += 1
+  }
+
+  const telegramSources = TELEGRAM_MONITOR_INPUTS.map((input) => (
+    sources.find((source) => source.sourceKey === input.sourceKey)
+  ))
+  if (telegramSources.every((source) => source?.sourceKind === 'database' && source.status === 'active')) {
+    const attestation = await store.getLatestPipelineWriterContractAttestation?.('telegram-monitor')
+    const attested = attestation?.contractVersion === TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION
+      && attestation?.contractDigest === TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST
+    if (!attested) {
+      return {
+        active: sources.filter((source) => source.sourceKind === 'database' && source.status === 'active').length,
+        enqueued,
+      }
+    }
+    const cursors = await Promise.all(telegramSources.map(
+      (source) => queue.getCursor(`external:${source.sourceKey}`),
+    ))
+    if (telegramSources.every((source, index) => isDue(source, cursors[index], now))) {
+      const jobIds = await enqueueJobsAtomically(
+        queue,
+        telegramSources.map((source) => scheduledJob(source.sourceKey, batchSize)),
+        TELEGRAM_SCHEDULE_ERRORS,
+      )
+      enqueued += jobIds.filter((jobId) => jobId != null).length
+    }
   }
   return { active: sources.filter((source) => source.sourceKind === 'database' && source.status === 'active').length, enqueued }
 }

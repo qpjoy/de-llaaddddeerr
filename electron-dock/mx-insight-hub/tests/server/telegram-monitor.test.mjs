@@ -4,6 +4,13 @@ import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
 import { AppError } from '../../server/core/errors.mjs'
 import { HubService } from '../../server/hub-service.mjs'
+import { DatabaseSourcePuller } from '../../server/ingest/external/database-source.mjs'
+import {
+  TELEGRAM_MONITOR_INPUTS,
+  TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
+  TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION,
+  TelegramMonitorPipeline,
+} from '../../server/ingest/telegram/monitor-pipeline.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 import {
@@ -16,6 +23,11 @@ import {
 
 const ADMIN_TOKEN = 'test-admin-token'
 const PEPPER = 'test-pepper-with-enough-entropy'
+const WRITER_CONTRACT_ATTESTATION = Object.freeze({
+  confirmed: true,
+  contractVersion: TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION,
+  contractDigest: TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
+})
 
 test('Telegram page size keeps the server hard cap even when policy is larger', () => {
   assert.throws(
@@ -177,9 +189,629 @@ async function call(baseUrl, path, { method = 'GET', body, headers = {} } = {}) 
   return { response, payload: await response.json() }
 }
 
+function telegramPipelineFixture() {
+  const sources = new Map([
+    ['telegram-monitor-chats', {
+      id: 'source-chats', sourceKey: 'telegram-monitor-chats', displayName: 'Telegram chats',
+      sourceKind: 'database', datasetId: 'telegram.monitor.chats.v1', platform: 'telegram',
+      objectType: 'chat', status: 'paused', syncIntervalSeconds: 300,
+      connection: {
+        host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
+        password: 'private', sslMode: 'disable', schema: 'public', table: 'tg_monitor_chats',
+        cursorColumn: 'updated_at', idColumn: 'chat_id',
+      },
+    }],
+    ['telegram-monitor-messages', {
+      id: 'source-messages', sourceKey: 'telegram-monitor-messages', displayName: 'Telegram messages',
+      sourceKind: 'database', datasetId: 'telegram.monitor.messages.v1', platform: 'telegram',
+      objectType: 'message', status: 'paused', syncIntervalSeconds: 300,
+      connection: {
+        host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
+        password: 'private', sslMode: 'disable', schema: 'public', table: 'tg_monitor_messages',
+        cursorColumn: 'updated_at', idColumn: 'id',
+      },
+    }],
+  ])
+  const mappings = new Map([
+    ['source-chats', [{
+      id: TELEGRAM_MONITOR_INPUTS[0].builtInMappingId,
+      sourceId: 'source-chats', version: 2, approved: false,
+    }]],
+    ['source-messages', [{
+      id: TELEGRAM_MONITOR_INPUTS[1].builtInMappingId,
+      sourceId: 'source-messages', version: 2, approved: false,
+    }]],
+  ])
+  const activeMappings = new Map()
+  let latestAttestation = null
+  const cursors = new Map(TELEGRAM_MONITOR_INPUTS.map((input) => [
+    `external:${input.sourceKey}`,
+    { status: 'idle', position: {}, updatedAt: '2026-08-10T00:00:00.000Z' },
+  ]))
+  const calls = []
+  const store = {
+    getExternalSource: async (key) => sources.get(key) ?? null,
+    getActiveMapping: async (sourceId) => activeMappings.get(sourceId) ?? null,
+    listSourceMappings: async (sourceId) => mappings.get(sourceId) ?? [],
+    listImportRuns: async (sourceId) => [{ id: `run-${sourceId}`, status: 'succeeded' }],
+    getLatestPipelineWriterContractAttestation: async () => latestAttestation,
+    updateExternalSourcesBatch: async (updates) => {
+      calls.push(['updateBatch', structuredClone(updates)])
+      for (const update of updates) {
+        const source = sources.get(update.sourceKey)
+        sources.set(update.sourceKey, {
+          ...source,
+          ...(update.status == null ? {} : { status: update.status }),
+          ...(update.connection == null ? {} : { connection: update.connection }),
+          ...(update.syncIntervalSeconds == null ? {} : { syncIntervalSeconds: update.syncIntervalSeconds }),
+        })
+      }
+      return updates.map((update) => sources.get(update.sourceKey))
+    },
+    activateExternalSourcesWithAttestation: async (input) => {
+      calls.push(['activateWithAttestation', structuredClone(input)])
+      const { approvals, attestedBy } = input
+      for (const approval of approvals) {
+        const mapping = mappings.get(approval.sourceId).find((candidate) => (
+          candidate.id === approval.mappingId && candidate.version === approval.version
+        ))
+        if (!mapping) throw new AppError(409, 'builtin_mapping_conflict', 'mapping changed')
+        activeMappings.set(approval.sourceId, { ...mapping, approved: true })
+      }
+      for (const source of sources.values()) source.status = 'active'
+      latestAttestation = {
+        id: 'attestation-1', pipelineKey: input.pipelineKey,
+        contractVersion: input.contractVersion, contractDigest: input.contractDigest,
+        contractSummary: input.contractSummary, attestedBy,
+        attestedAt: '2026-08-10T00:00:00.000Z',
+      }
+      return { sources: [...sources.values()], attestation: latestAttestation }
+    },
+  }
+  const databasePuller = {
+    withSourceLocks: async (keys, operation) => {
+      calls.push(['locks', [...keys]])
+      return operation()
+    },
+    testConnection: async (connection) => {
+      calls.push(['testConnection', structuredClone(connection)])
+      return { database: connection.database, user: connection.username, readOnly: true }
+    },
+    assertCheckpointCompatible: async (key, options) => {
+      calls.push(['checkpoint', key, options?.mappingOverride?.id])
+      return { compatible: true }
+    },
+    describe: async (key, options) => {
+      calls.push(['describe', key, options?.mappingOverride?.id])
+      return { issues: [] }
+    },
+    progress: async (key) => ({
+      totalRows: key.endsWith('chats') ? 10 : 90,
+      completedRows: key.endsWith('chats') ? 5 : 45,
+      remainingRows: key.endsWith('chats') ? 5 : 45,
+      percent: 50,
+      cursor: cursors.get(`external:${key}`),
+    }),
+  }
+  const queueClient = {
+    query: async (sql) => {
+      calls.push(['queueTx', sql])
+      return { rows: [] }
+    },
+    release: () => calls.push(['queueRelease']),
+  }
+  const queue = {
+    pool: { connect: async () => queueClient },
+    getCursor: async (id) => cursors.get(id) ?? null,
+    enqueue: async (queueName, payload, options) => {
+      const { client, ...loggedOptions } = options
+      assert.equal(client, queueClient)
+      calls.push(['enqueue', queueName, structuredClone(payload), structuredClone(loggedOptions)])
+      return calls.filter(([kind]) => kind === 'enqueue').length
+    },
+  }
+  return { sources, mappings, activeMappings, cursors, calls, store, databasePuller, queue }
+}
+
+test('Telegram monitor pipeline exposes one consistent connection and fixed task contracts', async () => {
+  const fixture = telegramPipelineFixture()
+  const pipeline = new TelegramMonitorPipeline(fixture)
+  const result = await pipeline.get()
+
+  assert.equal(result.status, 'paused')
+  assert.equal(result.configured, true)
+  assert.equal(result.connectionConsistent, true)
+  assert.equal(result.syncIntervalConsistent, true)
+  assert.deepEqual(result.connection, {
+    host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
+    password: 'private', sslMode: 'disable',
+  })
+  assert.equal(result.syncIntervalSeconds, 300)
+  assert.equal(result.writerContract.version, TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION)
+  assert.equal(result.writerContract.digest, TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST)
+  assert.equal(result.writerContract.latestAttestation, null)
+  assert.deepEqual(result.tasks.map((task) => ({
+    role: task.role,
+    sourceKey: task.sourceKey,
+    table: task.table,
+    cursorColumn: task.cursorColumn,
+    idColumn: task.idColumn,
+    builtInMappingAvailable: task.builtInMappingAvailable,
+  })), [
+    {
+      role: 'chats',
+      sourceKey: 'telegram-monitor-chats', table: 'tg_monitor_chats',
+      cursorColumn: 'updated_at', idColumn: 'chat_id', builtInMappingAvailable: true,
+    },
+    {
+      role: 'messages',
+      sourceKey: 'telegram-monitor-messages', table: 'tg_monitor_messages',
+      cursorColumn: 'updated_at', idColumn: 'id', builtInMappingAvailable: true,
+    },
+  ])
+  const progress = await pipeline.progress()
+  assert.equal(progress.totalRows, 100)
+  assert.equal(progress.completedRows, 50)
+  assert.deepEqual(progress.tasks.map((task) => task.role), ['chats', 'messages'])
+  assert.equal(progress.tasks.every((task) => task.checkedAt === progress.checkedAt), true)
+
+  const messages = fixture.sources.get('telegram-monitor-messages')
+  messages.status = 'active'
+  messages.syncIntervalSeconds = 60
+  messages.connection = { ...messages.connection, host: 'drifted.internal', table: 'drifted_messages' }
+  const drifted = await pipeline.get()
+  assert.equal(drifted.status, 'mixed')
+  assert.equal(drifted.configured, false)
+  assert.equal(drifted.connection, null)
+  assert.equal(drifted.connectionConsistent, false)
+  assert.equal(drifted.syncIntervalConsistent, false)
+  assert.equal(drifted.inputContractsConsistent, false)
+  assert.match(drifted.configurationIssues.join(' '), /telegram-monitor-messages table/)
+})
+
+test('Telegram monitor configuration probes once and atomically injects fixed tables and cursors', async () => {
+  const fixture = telegramPipelineFixture()
+  const pipeline = new TelegramMonitorPipeline(fixture)
+  await assert.rejects(
+    () => pipeline.configure({
+      connection: {
+        host: 'new.internal', database: 'night_all', username: 'mx_data', password: 'private',
+        schema: 'attacker', table: 'attacker_table',
+      },
+    }),
+    (error) => error?.code === 'unsupported_pipeline_connection_fields',
+  )
+  await assert.rejects(
+    () => pipeline.configure({ connection: { schema: 'public' } }),
+    (error) => (
+      error?.code === 'unsupported_pipeline_connection_fields'
+      && error.message.includes('schema')
+    ),
+  )
+
+  const result = await pipeline.configure({
+    connection: {
+      host: 'new.internal', port: 5432, database: 'night_all', username: 'mx_data',
+      password: 'rotated', sslMode: 'disable',
+    },
+    syncIntervalSeconds: 600,
+  })
+  const tests = fixture.calls.filter(([kind]) => kind === 'testConnection')
+  assert.equal(tests.length, 1)
+  assert.equal(tests[0][1].table, 'tg_monitor_chats')
+  assert.equal(tests[0][1].schema, 'public')
+  assert.equal(tests[0][1].cursorColumn, 'updated_at')
+  assert.equal(tests[0][1].idColumn, 'chat_id')
+  const update = fixture.calls.find(([kind]) => kind === 'updateBatch')[1]
+  assert.deepEqual(update.map((entry) => [
+    entry.sourceKey, entry.connection.table, entry.connection.cursorColumn, entry.connection.idColumn,
+  ]), [
+    ['telegram-monitor-chats', 'tg_monitor_chats', 'updated_at', 'chat_id'],
+    ['telegram-monitor-messages', 'tg_monitor_messages', 'updated_at', 'id'],
+  ])
+  assert.equal(result.connection.host, 'new.internal')
+  assert.equal(result.syncIntervalSeconds, 600)
+})
+
+test('Telegram monitor activation probes before one atomic mapping, status and attestation write', async () => {
+  const fixture = telegramPipelineFixture()
+  let badSource = 'telegram-monitor-messages'
+  fixture.databasePuller.describe = async (key, options) => {
+    fixture.calls.push(['describe', key, options?.mappingOverride?.id])
+    return { issues: key === badSource ? ['missing safe index'] : [] }
+  }
+  const pipeline = new TelegramMonitorPipeline(fixture)
+  const messages = fixture.sources.get('telegram-monitor-messages')
+  messages.connection = { ...messages.connection, table: 'drifted_messages' }
+  await assert.rejects(
+    () => pipeline.setStatus('active'),
+    (error) => error?.code === 'pipeline_configuration_drift' && /table/.test(error?.details?.issues?.[0]),
+  )
+  messages.connection = { ...messages.connection, table: 'tg_monitor_messages' }
+  messages.syncIntervalSeconds = 60
+  await assert.rejects(
+    () => pipeline.setStatus('active'),
+    (error) => error?.code === 'pipeline_configuration_drift' && /sync interval/.test(error?.details?.issues?.join(' ')),
+  )
+  messages.syncIntervalSeconds = 300
+  await assert.rejects(
+    () => pipeline.setStatus('active'),
+    (error) => error?.code === 'source_probe_failed' && error?.details?.sourceKey === badSource,
+  )
+  assert.equal([...fixture.sources.values()].every((source) => source.status === 'paused'), true)
+  assert.equal(fixture.calls.some(([kind]) => kind === 'activateWithAttestation'), false)
+
+  badSource = null
+  await assert.rejects(
+    () => pipeline.setStatus('active'),
+    (error) => error?.code === 'writer_contract_attestation_required',
+  )
+  assert.equal(fixture.calls.some(([kind]) => kind === 'activateWithAttestation'), false)
+  assert.equal([...fixture.sources.values()].every((source) => source.status === 'paused'), true)
+
+  const activated = await pipeline.setStatus('active', {
+    approvedBy: 'operator-1',
+    writerContractAttestation: WRITER_CONTRACT_ATTESTATION,
+  })
+  assert.equal(activated.status, 'active')
+  assert.equal(activated.writerContract.latestAttestation.attestedBy, 'operator-1')
+  const activation = fixture.calls.find(([kind]) => kind === 'activateWithAttestation')[1]
+  assert.deepEqual(activation.approvals, [
+    {
+      mappingId: TELEGRAM_MONITOR_INPUTS[0].builtInMappingId,
+      sourceId: 'source-chats', version: 2,
+    },
+    {
+      mappingId: TELEGRAM_MONITOR_INPUTS[1].builtInMappingId,
+      sourceId: 'source-messages', version: 2,
+    },
+  ])
+  assert.equal(activation.contractVersion, TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION)
+  assert.equal(activation.contractDigest, TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST)
+  assert.equal(activation.attestedBy, 'operator-1')
+
+  const paused = await pipeline.setStatus('paused')
+  assert.equal(paused.status, 'paused')
+  assert.equal(fixture.calls.some(([kind, updates]) => (
+    kind === 'updateBatch' && updates.every((update) => update.status === 'paused')
+  )), true)
+})
+
+test('Telegram monitor rejects a version-2 mapping collision instead of treating it as built in', async () => {
+  const fixture = telegramPipelineFixture()
+  fixture.mappings.set('source-messages', [{
+    id: '11111111-1111-4111-8111-111111111111',
+    sourceId: 'source-messages', version: 2, approved: false,
+  }])
+  const pipeline = new TelegramMonitorPipeline(fixture)
+  const aggregate = await pipeline.get()
+  assert.equal(aggregate.tasks.find((task) => task.role === 'messages').builtInMappingAvailable, false)
+  await assert.rejects(
+    () => pipeline.setStatus('active', {
+      writerContractAttestation: WRITER_CONTRACT_ATTESTATION,
+    }),
+    (error) => error?.code === 'builtin_mapping_conflict',
+  )
+  assert.equal(fixture.calls.some(([kind]) => kind === 'activateWithAttestation'), false)
+})
+
+test('Telegram monitor pipeline reset replaces legacy v1 checkpoints with the fixed v2 contract', async () => {
+  const fixture = telegramPipelineFixture()
+  for (const input of TELEGRAM_MONITOR_INPUTS) {
+    fixture.activeMappings.set(fixture.sources.get(input.sourceKey).id, {
+      id: `legacy-v1-${input.role}`,
+      sourceId: fixture.sources.get(input.sourceKey).id,
+      version: 1,
+      approved: true,
+    })
+    fixture.cursors.get(`external:${input.sourceKey}`).position = { mappingVersion: 1 }
+  }
+  fixture.databasePuller.resetCheckpoints = async (keys, { mappingOverrides }) => {
+    fixture.calls.push(['resetPipeline', [...keys], structuredClone(mappingOverrides)])
+    for (const key of keys) {
+      fixture.cursors.get(`external:${key}`).position = {
+        mappingVersion: mappingOverrides[key].version,
+        contractHash: `v${mappingOverrides[key].version}:${mappingOverrides[key].id}`,
+      }
+    }
+    return keys.map((sourceKey) => ({ sourceKey }))
+  }
+  fixture.databasePuller.assertCheckpointCompatible = async (key, { mappingOverride }) => {
+    const position = fixture.cursors.get(`external:${key}`).position
+    if (position.mappingVersion !== mappingOverride.version) {
+      throw new AppError(409, 'checkpoint_contract_mismatch', 'wrong mapping checkpoint')
+    }
+    return { compatible: true }
+  }
+  const pipeline = new TelegramMonitorPipeline(fixture)
+  const reset = await pipeline.resetCheckpoints('telegram-monitor')
+  assert.equal(reset.resets.length, 2)
+  const resetCall = fixture.calls.find(([kind]) => kind === 'resetPipeline')
+  assert.deepEqual(
+    Object.entries(resetCall[2]).map(([sourceKey, mapping]) => [sourceKey, mapping.id, mapping.version]),
+    TELEGRAM_MONITOR_INPUTS.map((input) => [input.sourceKey, input.builtInMappingId, 2]),
+  )
+  const activated = await pipeline.setStatus('active', {
+    writerContractAttestation: WRITER_CONTRACT_ATTESTATION,
+  })
+  assert.equal(activated.status, 'active')
+})
+
+test('Telegram monitor routes require the admin token and queue both active tasks with existing dedupe keys', async () => {
+  const fixture = telegramPipelineFixture()
+  for (const source of fixture.sources.values()) source.status = 'active'
+  fixture.store.getLatestPipelineWriterContractAttestation = async () => ({
+    contractVersion: TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION,
+    contractDigest: TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
+  })
+  const app = createApp({
+    service: {}, ...fixture,
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+  await withServer(app, async (baseUrl) => {
+    const denied = await call(baseUrl, '/internal/v1/admin/pipelines/telegram-monitor', {
+      headers: { 'x-api-key': 'mih_live_not_admin' },
+    })
+    assert.equal(denied.response.status, 403)
+    assert.equal(denied.payload.error.code, 'admin_token_required')
+
+    const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+    const aggregate = await call(baseUrl, '/internal/v1/admin/pipelines/telegram-monitor', { headers })
+    assert.equal(aggregate.response.status, 200)
+    assert.equal(aggregate.payload.data.tasks.length, 2)
+
+    const synced = await call(baseUrl, '/internal/v1/admin/pipelines/telegram-monitor/sync', {
+      method: 'POST', headers, body: { batchSize: 2500 },
+    })
+    assert.equal(synced.response.status, 202)
+    assert.equal(synced.payload.data.tasks.length, 2)
+  })
+  const enqueues = fixture.calls.filter(([kind]) => kind === 'enqueue')
+  assert.deepEqual(enqueues.map(([, queueName, payload, options]) => ({ queueName, payload, options })), [
+    {
+      queueName: 'external-pull',
+      payload: { sourceKey: 'telegram-monitor-chats', batchSize: 2500, trigger: 'manual', chunk: 0 },
+      options: { dedupeKey: 'external-pull:telegram-monitor-chats:0', priority: 220 },
+    },
+    {
+      queueName: 'external-pull',
+      payload: { sourceKey: 'telegram-monitor-messages', batchSize: 2500, trigger: 'manual', chunk: 0 },
+      options: { dedupeKey: 'external-pull:telegram-monitor-messages:0', priority: 220 },
+    },
+  ])
+})
+
+test('Telegram monitor child sources reject generic mutations but retain read-only inspection', async () => {
+  const source = {
+    id: 'source-messages', sourceKey: 'telegram-monitor-messages', sourceKind: 'database',
+    status: 'active', syncIntervalSeconds: 300,
+  }
+  let mutated = false
+  const store = {
+    getExternalSource: async () => source,
+    createExternalSource: async () => { mutated = true },
+    updateExternalSource: async () => { mutated = true },
+    createSourceMapping: async () => { mutated = true },
+    approveSourceMapping: async () => { mutated = true },
+    listSourceMappings: async () => [],
+    listImportRuns: async () => [],
+  }
+  const databasePuller = {
+    describe: async () => ({ issues: [], columns: [] }),
+    preview: async () => ({ sampleShapes: [] }),
+    testSource: async () => ({ readOnly: true }),
+    resetCheckpoint: async () => { mutated = true },
+  }
+  const app = createApp({
+    service: {}, store, databasePuller,
+    importer: { importFile: async () => { mutated = true } },
+    queue: {
+      getCursor: async () => ({ status: 'idle' }),
+      enqueue: async () => { mutated = true },
+    },
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+  await withServer(app, async (baseUrl) => {
+    const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+    const mutations = [
+      ['/internal/v1/admin/sources', {
+        method: 'POST', body: {
+          sourceKey: 'telegram-monitor-messages', displayName: 'replacement', sourceKind: 'database',
+        },
+      }],
+      ['/internal/v1/admin/sources/telegram-monitor-messages', {
+        method: 'PUT', body: { status: 'paused' },
+      }],
+      ['/internal/v1/admin/sources/telegram-monitor-messages/mappings', {
+        method: 'POST', body: { fieldMap: { externalId: { from: 'id' } } },
+      }],
+      ['/internal/v1/admin/sources/telegram-monitor-messages/mappings/2/approve', { method: 'POST' }],
+      ['/internal/v1/admin/sources/telegram-monitor-messages/sync', { method: 'POST' }],
+      ['/internal/v1/admin/sources/telegram-monitor-messages/checkpoint/reset', {
+        method: 'POST', body: { confirmSourceKey: 'telegram-monitor-messages' },
+      }],
+      ['/internal/v1/admin/sources/telegram-monitor-messages/import?filename=input.csv', {
+        method: 'POST', body: { row: 1 },
+      }],
+    ]
+    for (const [path, options] of mutations) {
+      const result = await call(baseUrl, path, { ...options, headers })
+      assert.equal(result.response.status, 409, path)
+      assert.equal(result.payload.error.code, 'pipeline_managed_source', path)
+    }
+
+    for (const path of [
+      '/internal/v1/admin/sources/telegram-monitor-messages',
+      '/internal/v1/admin/sources/telegram-monitor-messages/mappings',
+      '/internal/v1/admin/sources/telegram-monitor-messages/schema',
+      '/internal/v1/admin/sources/telegram-monitor-messages/preview?limit=3',
+      '/internal/v1/admin/sources/telegram-monitor-messages/sync',
+      '/internal/v1/admin/sources/telegram-monitor-messages/imports',
+    ]) {
+      const result = await call(baseUrl, path, { headers })
+      assert.equal(result.response.status, 200, path)
+    }
+    const tested = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/test', {
+      method: 'POST', headers,
+    })
+    assert.equal(tested.response.status, 200)
+  })
+  assert.equal(mutated, false)
+})
+
+test('Telegram monitor manual sync rolls back when the second task cannot be enqueued', async () => {
+  const fixture = telegramPipelineFixture()
+  for (const source of fixture.sources.values()) source.status = 'active'
+  const staged = []
+  const committed = []
+  fixture.queue.enqueue = async (_name, payload, options) => {
+    assert.ok(options.client)
+    if (payload.sourceKey === 'telegram-monitor-messages') throw new Error('queue unavailable')
+    staged.push(payload.sourceKey)
+    return 1
+  }
+  fixture.queue.pool = {
+    connect: async () => ({
+      async query(sql) {
+        fixture.calls.push(['queueTx', sql])
+        if (sql === 'COMMIT') committed.push(...staged)
+        if (sql === 'ROLLBACK') staged.length = 0
+        return { rows: [] }
+      },
+      release() {},
+    }),
+  }
+  const pipeline = new TelegramMonitorPipeline(fixture)
+  await assert.rejects(
+    () => pipeline.sync({ batchSize: 500 }),
+    (error) => error?.code === 'writer_contract_attestation_required',
+  )
+  fixture.store.getLatestPipelineWriterContractAttestation = async () => ({
+    contractVersion: TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION,
+    contractDigest: TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
+  })
+  await assert.rejects(
+    () => pipeline.sync({ batchSize: 500 }),
+    (error) => error?.code === 'pipeline_sync_enqueue_failed',
+  )
+  assert.deepEqual(
+    fixture.calls.filter(([kind]) => kind === 'queueTx').map(([, sql]) => sql),
+    ['BEGIN', 'ROLLBACK'],
+  )
+  assert.deepEqual(committed, [])
+  assert.deepEqual(staged, [])
+})
+
+test('database source progress counts exact composite-cursor remaining rows and redacts failures', async () => {
+  const queries = []
+  const source = {
+    id: 'source-messages', sourceKey: 'telegram-monitor-messages', sourceKind: 'database',
+    connection: {
+      host: 'database.internal', database: 'night_all', username: 'mx_data', password: 'private',
+      sslMode: 'disable', schema: 'public', table: 'tg_monitor_messages',
+      cursorColumn: 'updated_at', idColumn: 'id',
+    },
+  }
+  const pool = {
+    async query(sql, values) {
+      queries.push({ sql, values })
+      if (/information_schema\.columns/.test(sql)) {
+        return { rows: [
+          { column_name: 'updated_at', data_type: 'timestamp with time zone', udt_name: 'timestamptz', is_nullable: 'NO', ordinal_position: 1 },
+          { column_name: 'id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 2 },
+        ] }
+      }
+      if (/FROM pg_indexes/.test(sql)) {
+        return { rows: [
+          { definition: 'CREATE INDEX messages_cursor_idx ON public.tg_monitor_messages (updated_at, id)' },
+          { definition: 'CREATE UNIQUE INDEX messages_pkey ON public.tg_monitor_messages (id)' },
+        ] }
+      }
+      return { rows: [{ total_rows: '100', remaining_rows: '25' }] }
+    },
+    async end() {},
+  }
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => null,
+    },
+    queue: { getCursor: async () => ({ status: 'idle', position: { cursor: '2026-08-10T00:00:00Z', lastId: '50' } }) },
+    poolFactory: () => pool,
+  })
+  const result = await puller.progress(source.sourceKey)
+  assert.deepEqual({
+    totalRows: result.totalRows,
+    completedRows: result.completedRows,
+    remainingRows: result.remainingRows,
+    percent: result.percent,
+  }, { totalRows: 100, completedRows: 75, remainingRows: 25, percent: 75 })
+  const remainingQuery = queries.find(({ sql }) => /remaining_rows/.test(sql))
+  assert.match(remainingQuery.sql, /\("updated_at", "id"\) > \(\$1::timestamptz, \$2::bigint\)/)
+  assert.deepEqual(remainingQuery.values, ['2026-08-10T00:00:00Z', '50'])
+
+  const initialPuller = new DatabaseSourcePuller({
+    store: puller.store,
+    queue: { getCursor: async () => null },
+    poolFactory: () => pool,
+  })
+  const initial = await initialPuller.progress(source.sourceKey)
+  assert.equal(initial.totalRows, 100)
+  assert.equal(initial.completedRows, null)
+  assert.equal(initial.remainingRows, null)
+  assert.equal(initial.percent, null)
+  assert.equal(initial.blocker, null)
+
+  const missingCursorPuller = new DatabaseSourcePuller({
+    store: puller.store,
+    queue: puller.queue,
+    poolFactory: () => ({
+      async query(sql) {
+        if (/information_schema\.columns/.test(sql)) {
+          return { rows: [
+            { column_name: 'id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 1 },
+          ] }
+        }
+        return { rows: [{ total_rows: '163401' }] }
+      },
+      async end() {},
+    }),
+  })
+  const blocked = await missingCursorPuller.progress(source.sourceKey)
+  assert.equal(blocked.totalRows, 163_401)
+  assert.equal(blocked.completedRows, null)
+  assert.equal(blocked.remainingRows, null)
+  assert.equal(blocked.percent, null)
+  assert.equal(blocked.blocker, 'source_cursor_unsafe')
+  assert.deepEqual(blocked.issues, ['cursor column updated_at is missing'])
+
+  const failedPuller = new DatabaseSourcePuller({
+    store: puller.store,
+    queue: puller.queue,
+    poolFactory: () => ({
+      async query() {
+        const error = new Error('password=private host=database.internal')
+        error.code = 'ECONNRESET'
+        throw error
+      },
+      async end() {},
+    }),
+  })
+  await assert.rejects(
+    () => failedPuller.progress(source.sourceKey),
+    (error) => (
+      error?.code === 'source_progress_failed'
+      && !error.message.includes('private')
+      && !error.message.includes('database.internal')
+    ),
+  )
+})
+
 test('admin database source routes expose schema/preview and schedule a bounded sync', async () => {
   const calls = []
-  const source = { sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active' }
+  const source = { sourceKey: 'warehouse-events', sourceKind: 'database', status: 'active' }
   const store = {
     getExternalSource: async () => source,
   }
@@ -208,27 +840,27 @@ test('admin database source routes expose schema/preview and schedule a bounded 
   })
   await withServer(app, async (baseUrl) => {
     const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
-    const schema = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/schema', { headers })
+    const schema = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events/schema', { headers })
     assert.equal(schema.response.status, 200)
     assert.equal(schema.payload.data.columns[0].name, 'message_id')
 
-    const preview = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/preview?limit=3', { headers })
+    const preview = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events/preview?limit=3', { headers })
     assert.equal(preview.response.status, 200)
     assert.equal(preview.payload.data.sampleShapes[0].message_id.jsonType, 'number')
 
-    const sync = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/sync', {
+    const sync = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events/sync', {
       method: 'POST', body: { batchSize: 2500 }, headers,
     })
     assert.equal(sync.response.status, 202)
     assert.equal(sync.payload.data.jobId, 77)
   })
-  assert.deepEqual(calls[0], ['describe', 'telegram-monitor-messages'])
-  assert.deepEqual(calls[1], ['preview', 'telegram-monitor-messages', { limit: 3 }])
-  assert.deepEqual(calls[2], ['describe', 'telegram-monitor-messages'])
+  assert.deepEqual(calls[0], ['describe', 'warehouse-events'])
+  assert.deepEqual(calls[1], ['preview', 'warehouse-events', { limit: 3 }])
+  assert.deepEqual(calls[2], ['describe', 'warehouse-events'])
   assert.deepEqual(calls[3], [
     'enqueue', 'external-pull',
-    { sourceKey: 'telegram-monitor-messages', batchSize: 2500, trigger: 'manual', chunk: 0 },
-    { dedupeKey: 'external-pull:telegram-monitor-messages:0', priority: 220 },
+    { sourceKey: 'warehouse-events', batchSize: 2500, trigger: 'manual', chunk: 0 },
+    { dedupeKey: 'external-pull:warehouse-events:0', priority: 220 },
   ])
 })
 
@@ -285,7 +917,7 @@ test('manual sync does not fork a second run while the source cursor is running'
     service: {},
     store: {
       getExternalSource: async () => ({
-        sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active',
+        sourceKey: 'warehouse-events', sourceKind: 'database', status: 'active',
       }),
     },
     databasePuller: { describe: async () => { described = true } },
@@ -297,12 +929,12 @@ test('manual sync does not fork a second run while the source cursor is running'
     adminToken: ADMIN_TOKEN,
   })
   await withServer(app, async (baseUrl) => {
-    const result = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/sync', {
+    const result = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events/sync', {
       method: 'POST', headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
     })
     assert.equal(result.response.status, 202)
     assert.deepEqual(result.payload.data, {
-      sourceKey: 'telegram-monitor-messages', jobId: null, alreadyScheduled: true,
+      sourceKey: 'warehouse-events', jobId: null, alreadyScheduled: true,
     })
   })
   assert.equal(described, false)
@@ -377,7 +1009,7 @@ test('admin-token direct source routes preflight credentials and return the stor
     const failedCreate = await call(baseUrl, '/internal/v1/admin/sources', {
       method: 'POST', headers,
       body: {
-        sourceKey: 'telegram-monitor-messages', displayName: 'Telegram messages', sourceKind: 'database',
+        sourceKey: 'warehouse-events', displayName: 'Warehouse events', sourceKind: 'database',
         connection: { ...direct, password: 'wrong-password' },
       },
     })
@@ -388,8 +1020,8 @@ test('admin-token direct source routes preflight credentials and return the stor
     const created = await call(baseUrl, '/internal/v1/admin/sources', {
       method: 'POST', headers,
       body: {
-        sourceKey: 'telegram-monitor-messages', displayName: 'Telegram messages', sourceKind: 'database',
-        datasetId: 'telegram.monitor.messages.v1', platform: 'telegram', objectType: 'message', connection: direct,
+        sourceKey: 'warehouse-events', displayName: 'Warehouse events', sourceKind: 'database',
+        datasetId: 'external.warehouse-events.v1', platform: 'external', objectType: 'record', connection: direct,
       },
     })
     assert.equal(created.response.status, 201)
@@ -398,24 +1030,24 @@ test('admin-token direct source routes preflight credentials and return the stor
 
     const listed = await call(baseUrl, '/internal/v1/admin/sources', { headers })
     assert.equal(listed.payload.data[0].connection.password, 'first-private-password')
-    const detail = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', { headers })
+    const detail = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', { headers })
     assert.equal(detail.payload.data.connection.password, 'first-private-password')
 
-    const failedRotation = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+    const failedRotation = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', {
       method: 'PUT', headers, body: { connection: { password: 'wrong-password' } },
     })
     assert.equal(failedRotation.response.status, 503)
     assert.equal(source.connection.password, 'first-private-password')
     assert.equal(updateCalls, 0)
 
-    const rotated = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+    const rotated = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', {
       method: 'PUT', headers, body: { connection: { password: 'rotated-private-password' } },
     })
     assert.equal(rotated.response.status, 200)
     assert.equal(rotated.payload.data.connection.password, 'rotated-private-password')
     assert.equal(source.connection.password, 'rotated-private-password')
 
-    const connectionTest = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/test', {
+    const connectionTest = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events/test', {
       method: 'POST', headers,
     })
     assert.equal(connectionTest.response.status, 200)
@@ -441,7 +1073,7 @@ test('admin-token direct source routes preflight credentials and return the stor
 test('checkpoint reset requires a paused source and exact source-key confirmation', async () => {
   const calls = []
   const source = {
-    sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'paused',
+    sourceKey: 'warehouse-events', sourceKind: 'database', status: 'paused',
   }
   const app = createApp({
     service: {},
@@ -458,19 +1090,19 @@ test('checkpoint reset requires a paused source and exact source-key confirmatio
   })
   await withServer(app, async (baseUrl) => {
     const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
-    const denied = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/checkpoint/reset', {
+    const denied = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events/checkpoint/reset', {
       method: 'POST', headers, body: { confirmSourceKey: 'wrong-source' },
     })
     assert.equal(denied.response.status, 400)
     assert.equal(denied.payload.error.code, 'checkpoint_reset_confirmation_required')
 
-    const reset = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/checkpoint/reset', {
-      method: 'POST', headers, body: { confirmSourceKey: 'telegram-monitor-messages' },
+    const reset = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events/checkpoint/reset', {
+      method: 'POST', headers, body: { confirmSourceKey: 'warehouse-events' },
     })
     assert.equal(reset.response.status, 200)
     assert.equal(reset.payload.data.status, 'idle')
   })
-  assert.deepEqual(calls, ['telegram-monitor-messages'])
+  assert.deepEqual(calls, ['warehouse-events'])
 })
 
 test('database source registration rejects a literal DSN before it can be persisted', async () => {
@@ -501,7 +1133,7 @@ test('database source registration cannot replace an existing source key and cur
   const app = createApp({
     service: {},
     store: {
-      getExternalSource: async () => ({ sourceKey: 'telegram-monitor-messages', status: 'paused' }),
+      getExternalSource: async () => ({ sourceKey: 'warehouse-events', status: 'paused' }),
       createExternalSource: async () => { created = true },
     },
     adapter: { dependencies: async () => ({ status: 'up' }) },
@@ -512,7 +1144,7 @@ test('database source registration cannot replace an existing source key and cur
       method: 'POST',
       headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
       body: {
-        sourceKey: 'telegram-monitor-messages', displayName: 'replacement', sourceKind: 'database',
+        sourceKey: 'warehouse-events', displayName: 'replacement', sourceKind: 'database',
         connection: { dsnEnv: 'TG_DATABASE_URL', table: 'replacement_table' },
       },
     })
@@ -524,7 +1156,7 @@ test('database source registration cannot replace an existing source key and cur
 
 test('a paused database source cannot activate before mapping and schema gates pass', async () => {
   let source = {
-    id: 'source-1', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'paused',
+    id: 'source-1', sourceKey: 'warehouse-events', sourceKind: 'database', status: 'paused',
     connection: { dsnEnv: 'TG_DATABASE_URL', schema: 'public', table: 'tg_monitor_messages' },
   }
   let mapping = null
@@ -553,27 +1185,27 @@ test('a paused database source cannot activate before mapping and schema gates p
   })
   await withServer(app, async (baseUrl) => {
     const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
-    const configured = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+    const configured = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', {
       method: 'PUT', headers, body: { connection: { cursorColumn: 'updated_at', idColumn: 'id' } },
     })
     assert.equal(configured.response.status, 200)
     assert.equal(configured.payload.data.status, 'paused')
 
-    const noMapping = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+    const noMapping = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', {
       method: 'PUT', headers, body: { status: 'active' },
     })
     assert.equal(noMapping.response.status, 409)
     assert.equal(noMapping.payload.error.code, 'no_approved_mapping')
 
     mapping = { version: 2 }
-    const badSchema = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+    const badSchema = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', {
       method: 'PUT', headers, body: { status: 'active' },
     })
     assert.equal(badSchema.response.status, 409)
     assert.equal(badSchema.payload.error.code, 'source_probe_failed')
 
     issues = []
-    const activated = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+    const activated = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', {
       method: 'PUT', headers, body: { status: 'active' },
     })
     assert.equal(activated.response.status, 200)
@@ -583,7 +1215,7 @@ test('a paused database source cannot activate before mapping and schema gates p
 
 test('a paused source can switch between legacy dsnEnv and direct credentials without ambiguous residue', async () => {
   let source = {
-    id: 'source-1', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'paused',
+    id: 'source-1', sourceKey: 'warehouse-events', sourceKind: 'database', status: 'paused',
     connection: {
       dsnEnv: 'TG_DATABASE_URL', schema: 'public', table: 'tg_monitor_messages',
       cursorColumn: 'updated_at', idColumn: 'id',
@@ -611,7 +1243,7 @@ test('a paused source can switch between legacy dsnEnv and direct credentials wi
   })
   await withServer(app, async (baseUrl) => {
     const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
-    const direct = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+    const direct = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', {
       method: 'PUT', headers,
       body: { connection: {
         host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
@@ -622,7 +1254,7 @@ test('a paused source can switch between legacy dsnEnv and direct credentials wi
     assert.equal(direct.payload.data.connection.dsnEnv, undefined)
     assert.equal(direct.payload.data.connection.password, 'plain-password')
 
-    const legacy = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+    const legacy = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', {
       method: 'PUT', headers, body: { connection: { dsnEnv: 'TG_DATABASE_URL' } },
     })
     assert.equal(legacy.response.status, 200)
@@ -637,7 +1269,7 @@ test('a paused source can switch between legacy dsnEnv and direct credentials wi
 
 test('an active database source must be paused before connection metadata changes', async () => {
   const source = {
-    id: 'source-1', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active',
+    id: 'source-1', sourceKey: 'warehouse-events', sourceKind: 'database', status: 'active',
     connection: {
       dsnEnv: 'TG_DATABASE_URL', schema: 'public', table: 'tg_monitor_messages',
       cursorColumn: 'updated_at', idColumn: 'id',
@@ -656,7 +1288,7 @@ test('an active database source must be paused before connection metadata change
     adminToken: ADMIN_TOKEN,
   })
   await withServer(app, async (baseUrl) => {
-    const result = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+    const result = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', {
       method: 'PUT',
       headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
       body: { connection: { table: 'tg_monitor_messages_v2' } },
@@ -669,7 +1301,7 @@ test('an active database source must be paused before connection metadata change
 
 test('a paused but draining source cannot change its connection or active mapping', async () => {
   const source = {
-    id: 'source-1', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'paused',
+    id: 'source-1', sourceKey: 'warehouse-events', sourceKind: 'database', status: 'paused',
     connection: {
       dsnEnv: 'TG_DATABASE_URL', schema: 'public', table: 'tg_monitor_messages',
       cursorColumn: 'updated_at', idColumn: 'id',
@@ -690,7 +1322,7 @@ test('a paused but draining source cannot change its connection or active mappin
   })
   await withServer(app, async (baseUrl) => {
     const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
-    const connection = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+    const connection = await call(baseUrl, '/internal/v1/admin/sources/warehouse-events', {
       method: 'PUT', headers, body: { connection: { table: 'tg_monitor_messages_v2' } },
     })
     assert.equal(connection.response.status, 409)
@@ -698,7 +1330,7 @@ test('a paused but draining source cannot change its connection or active mappin
 
     const mapping = await call(
       baseUrl,
-      '/internal/v1/admin/sources/telegram-monitor-messages/mappings/2/approve',
+      '/internal/v1/admin/sources/warehouse-events/mappings/2/approve',
       { method: 'POST', headers },
     )
     assert.equal(mapping.response.status, 409)
@@ -713,7 +1345,7 @@ test('an active database source must be paused before approving a new mapping', 
     service: {},
     store: {
       getExternalSource: async () => ({
-        id: 'source-1', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active',
+        id: 'source-1', sourceKey: 'warehouse-events', sourceKind: 'database', status: 'active',
       }),
       approveSourceMapping: async () => { approved = true },
     },
@@ -724,7 +1356,7 @@ test('an active database source must be paused before approving a new mapping', 
   await withServer(app, async (baseUrl) => {
     const result = await call(
       baseUrl,
-      '/internal/v1/admin/sources/telegram-monitor-messages/mappings/2/approve',
+      '/internal/v1/admin/sources/warehouse-events/mappings/2/approve',
       { method: 'POST', headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN } },
     )
     assert.equal(result.response.status, 409)
@@ -973,6 +1605,108 @@ test('local Telegram search keeps Night-All v1 compatibility, idempotency and st
     assert.equal(entities.payload.data.items[0].entityType, 'chat')
     assert.equal(JSON.stringify(entities.payload).includes('must-not-leak'), false)
   })
+})
+
+test('POST Telegram search keeps an ambiguous commit unknown and never releases it', async () => {
+  const store = new MemoryStore()
+  let searchCalls = 0
+  let releaseCalls = 0
+  const searchQueries = {
+    searchContent: async () => {
+      searchCalls += 1
+      return { mode: 'postgres', hasMore: false, nextCursor: null, items: [] }
+    },
+  }
+  const service = new HubService({
+    store,
+    adapter: { capabilities: async () => ({ data: { platforms: [] } }) },
+    apiKeyPepper: PEPPER,
+    searchQueries,
+  })
+  const tenant = await service.createTenant({ name: 'Ambiguous POST tenant' })
+  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Ambiguous POST consumer' })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Ambiguous POST key' })
+  await service.putPlatformConfiguration('telegram', {
+    tenantId: tenant.id, consumerId: consumer.id, enabled: true,
+    maxRequests: 10, windowSeconds: 3600, maxPageSize: 20,
+  })
+
+  const commit = store.commitRequest.bind(store)
+  store.commitRequest = async (...args) => {
+    await commit(...args)
+    throw new Error('connection dropped after commit')
+  }
+  const release = store.releaseRequest.bind(store)
+  store.releaseRequest = async (...args) => {
+    releaseCalls += 1
+    return release(...args)
+  }
+  const app = createApp({
+    service,
+    store,
+    adapter: {},
+    adminToken: ADMIN_TOKEN,
+    logger: { error() {} },
+  })
+
+  await withServer(app, async (baseUrl) => {
+    const headers = {
+      authorization: `Bearer ${key.secret}`,
+      'idempotency-key': 'telegram-ambiguous-commit',
+    }
+    const first = await call(baseUrl, '/api/v1/data/search', {
+      method: 'POST', headers, body: { platform: 'telegram', query: 'agent' },
+    })
+    assert.equal(first.response.status, 500)
+    assert.equal(first.payload.error.code, 'internal_error')
+
+    const request = [...store.requests.values()].at(-1)
+    assert.equal(request.status, 'unknown')
+    assert.equal(request.errorCode, 'usage_commit_ambiguous')
+    assert.equal(releaseCalls, 0)
+
+    const retry = await call(baseUrl, '/api/v1/data/search', {
+      method: 'POST', headers, body: { platform: 'telegram', query: 'agent' },
+    })
+    assert.equal(retry.response.status, 409)
+    assert.equal(retry.payload.error.code, 'request_outcome_unknown')
+    assert.equal(searchCalls, 1)
+  })
+})
+
+test('usage request terminal states cannot transition back to committed or released', async () => {
+  const store = new MemoryStore()
+  const input = {
+    requestId: 'terminal-request',
+    idempotencyKey: 'terminal-request',
+    fingerprint: 'fingerprint',
+    tenantId: 'tenant',
+    consumerId: 'consumer',
+    apiKeyId: 'key',
+    platform: 'telegram',
+    unitsReserved: 1,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    windowStart: new Date(0),
+    maxRequests: 10,
+  }
+  await store.reserve(input)
+  await store.commitRequest(input.requestId, {
+    responseStatus: 200, responseBody: { data: { items: [] } }, unitsActual: 1, upstreamLatencyMs: 1,
+  })
+  await assert.rejects(
+    () => store.releaseRequest(input.requestId, 'must-not-regress'),
+    (error) => error?.code === 'request_state_conflict',
+  )
+  assert.equal(store.requests.get(input.requestId).status, 'committed')
+
+  await store.markRequestUnknown(input.requestId, 'commit_outcome_unknown')
+  await assert.rejects(
+    () => store.commitRequest(input.requestId, {
+      responseStatus: 200, responseBody: null, unitsActual: 1, upstreamLatencyMs: 1,
+    }),
+    (error) => error?.code === 'request_state_conflict',
+  )
+  assert.equal(store.requests.get(input.requestId).status, 'unknown')
 })
 
 test('Telegram history enforces maxRequests and commits count-only usage evidence', async () => {

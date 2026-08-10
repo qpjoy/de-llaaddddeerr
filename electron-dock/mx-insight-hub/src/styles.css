@@ -1365,10 +1365,442 @@ select {
   gap: 12px;
 }
 
+.mih-telegram-card {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.15fr) minmax(480px, 2fr) auto;
+  gap: 18px;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  border-color: color-mix(in srgb, var(--qp-primary) 34%, var(--qp-line));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--qp-primary) 7%, transparent), transparent 42%),
+    var(--qp-bg-3);
+}
+
+.mih-telegram-card__identity {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.mih-telegram-card__icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 42%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  background: color-mix(in srgb, var(--qp-primary) 10%, var(--qp-bg-2));
+  color: var(--qp-primary);
+}
+
+.mih-telegram-card__identity h2,
+.mih-telegram-card__identity p {
+  margin: 0;
+}
+
+.mih-telegram-card__identity h2 {
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-head-2);
+  font-weight: 550;
+}
+
+.mih-telegram-card__identity > div > p:last-child {
+  margin-top: 3px;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  line-height: 1.45;
+}
+
+.mih-telegram-card__facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 14px;
+  min-width: 0;
+  margin: 0;
+  padding-left: 18px;
+  border-left: 1px solid var(--qp-line);
+}
+
+.mih-telegram-card__facts > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.mih-telegram-card__facts dt,
+.mih-telegram-task dt {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  letter-spacing: 0.04em;
+}
+
+.mih-telegram-card__facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-body-2);
+}
+
+.mih-telegram-card__actions {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.mih-telegram-card__alert,
+.mih-telegram-toolbar__warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--qp-warning);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-telegram-card__error {
+  grid-column: 2 / -1;
+}
+
+.mih-telegram-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  background: color-mix(in srgb, var(--qp-bg-2) 75%, transparent);
+}
+
+.mih-telegram-toolbar > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  min-width: 0;
+}
+
+.mih-telegram-toolbar code {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-telegram-config {
+  padding-top: 2px;
+}
+
+.mih-telegram-task-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mih-telegram-task {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  background: color-mix(in srgb, var(--qp-bg-3) 82%, transparent);
+}
+
+.mih-telegram-task > header,
+.mih-telegram-task > footer,
+.mih-telegram-progress > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mih-telegram-task > header > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.mih-telegram-task > header code {
+  overflow: hidden;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  text-overflow: ellipsis;
+}
+
+.mih-telegram-task__role {
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-body-1);
+  font-weight: 550;
+}
+
+.mih-telegram-task__definition {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-sm);
+  background: var(--qp-line);
+}
+
+.mih-telegram-task__definition > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+  background: var(--qp-bg-3);
+}
+
+.mih-telegram-task__definition dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-telegram-task__definition dd small {
+  display: block;
+  margin-top: 2px;
+  color: var(--qp-text-3);
+}
+
+.mih-telegram-task__checkpoint {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.mih-telegram-task__checkpoint span,
+.mih-telegram-task__run > span,
+.mih-telegram-progress span {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-telegram-task__checkpoint code {
+  min-width: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  border-radius: var(--qp-radius-sm);
+  background: var(--qp-bg-1);
+  color: var(--qp-text-2);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mih-telegram-task__run {
+  display: grid;
+  gap: 7px;
+}
+
+.mih-telegram-task__run dl {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border-radius: var(--qp-radius-sm);
+  background: var(--qp-line);
+}
+
+.mih-telegram-task__run dl > div {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--qp-bg-2) 86%, transparent);
+  text-align: center;
+}
+
+.mih-telegram-task__run dd {
+  margin: 0;
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-body-2);
+}
+
+.mih-telegram-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.mih-telegram-progress strong {
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-telegram-progress__track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--qp-bg-1);
+}
+
+.mih-telegram-progress__track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--qp-info), var(--qp-primary));
+  box-shadow: 0 0 10px color-mix(in srgb, var(--qp-primary) 58%, transparent);
+}
+
+.mih-telegram-progress small,
+.mih-telegram-task > footer > span {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  line-height: 1.45;
+}
+
+.mih-telegram-progress .mih-telegram-progress__warning {
+  color: var(--qp-warning);
+}
+
+.mih-telegram-task > footer {
+  padding-top: 10px;
+  border-top: 1px solid var(--qp-line);
+}
+
+.mih-telegram-flow {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mih-telegram-flow span {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.mih-telegram-flow b {
+  position: absolute;
+  left: -10px;
+  z-index: 1;
+  color: var(--qp-primary);
+  font-weight: 500;
+}
+
+.mih-telegram-flow em {
+  width: 100%;
+  padding: 10px 8px;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 28%, var(--qp-line));
+  border-radius: var(--qp-radius-sm);
+  background: color-mix(in srgb, var(--qp-primary) 6%, var(--qp-bg-3));
+  color: var(--qp-text-2);
+  font-size: var(--qp-font-caption-1);
+  font-style: normal;
+  text-align: center;
+}
+
+.mih-telegram-capabilities,
+.mih-agent-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mih-agent-scope-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mih-telegram-capabilities > div,
+.mih-agent-scope-grid > div {
+  padding: 11px 12px;
+  border-left: 2px solid color-mix(in srgb, var(--qp-primary) 66%, transparent);
+  background: color-mix(in srgb, var(--qp-bg-2) 68%, transparent);
+}
+
+.mih-telegram-capabilities strong,
+.mih-telegram-capabilities p,
+.mih-agent-scope-grid strong,
+.mih-agent-scope-grid p {
+  margin: 0;
+}
+
+.mih-telegram-capabilities strong,
+.mih-agent-scope-grid strong {
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-body-2);
+}
+
+.mih-telegram-capabilities p,
+.mih-agent-scope-grid p {
+  margin-top: 4px;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  line-height: 1.55;
+}
+
+@media (max-width: 1180px) {
+  .mih-telegram-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .mih-telegram-card__facts,
+  .mih-telegram-card__error {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .mih-telegram-card__facts {
+    padding-top: 12px;
+    padding-left: 0;
+    border-top: 1px solid var(--qp-line);
+    border-left: 0;
+  }
+}
+
 @media (max-width: 760px) {
   .mih-source-definition,
-  .mih-source-sync-grid {
+  .mih-source-sync-grid,
+  .mih-telegram-task-grid,
+  .mih-telegram-capabilities,
+  .mih-agent-scope-grid {
     grid-template-columns: 1fr;
+  }
+
+  .mih-telegram-card {
+    grid-template-columns: 1fr;
+  }
+
+  .mih-telegram-card__facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-top: 12px;
+    padding-left: 0;
+    border-top: 1px solid var(--qp-line);
+    border-left: 0;
+  }
+
+  .mih-telegram-card__actions {
+    justify-items: stretch;
+  }
+
+  .mih-telegram-toolbar,
+  .mih-telegram-task > footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mih-telegram-flow {
+    grid-template-columns: 1fr;
+  }
+
+  .mih-telegram-flow b {
+    top: -13px;
+    left: 50%;
+    transform: rotate(90deg);
+  }
+
+  .mih-telegram-task__run dl {
+    grid-template-columns: repeat(5, minmax(54px, 1fr));
+    overflow-x: auto;
   }
 
   .mih-source-sync-grid__wide {

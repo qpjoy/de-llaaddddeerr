@@ -768,7 +768,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState(null)
-  const [form, setForm] = useState({ consumerId: '', name: '', environment: 'live' })
+  const [form, setForm] = useState({ consumerId: '', name: '', environment: 'live', expiresInDays: 180 })
   const [issuedSecret, setIssuedSecret] = useState(null)
   const [revokeTarget, setRevokeTarget] = useState(null)
   const [revoking, setRevoking] = useState(false)
@@ -792,7 +792,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     const targetConsumerId = writableConsumers.some((consumer) => consumer.id === selectedConsumerId)
       ? selectedConsumerId
       : writableConsumers[0]?.id || ''
-    setForm({ consumerId: targetConsumerId, name: '', environment: 'live' })
+    setForm({ consumerId: targetConsumerId, name: '', environment: 'live', expiresInDays: 180 })
     setFormError(null)
     setOpen(true)
   }
@@ -804,7 +804,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
     try {
       const key = await adminApi.createApiKey(token, form)
       setOpen(false)
-      setIssuedSecret(key.secret)
+      setIssuedSecret({ secret: key.secret, expiresAt: key.expiresAt })
       state.refresh()
       notify('API Key 已签发', 'success')
     } catch (error) {
@@ -835,7 +835,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
 
   return (
     <>
-      <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="密钥只在签发时显示一次；权限、配额和用量绑定到调用者。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="ACCESS / ROTATION / REVOCATION" title="API Keys" description="密钥只在签发时显示一次；权限、配额和用量绑定到调用者，默认有效期 180 天。" loading={state.loading} onRefresh={state.refresh}>
         {canIssueKey ? (
           <button className="qp-button qp-button--primary" type="button" onClick={showCreate}>
             <Plus size={17} aria-hidden="true" />签发 API Key
@@ -854,14 +854,15 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
       <Panel title="已签发密钥" subtitle={`${keys.length} 条记录`}>
         {keys.length ? (
           <Table label="API Key 列表">
-            <thead><tr><th>名称</th><th>调用者</th><th>密钥标识</th><th>状态</th><th>最后使用</th><th><span className="mih-sr-only">操作</span></th></tr></thead>
+            <thead><tr><th>名称</th><th>调用者</th><th>密钥标识</th><th>状态</th><th>有效至</th><th>最后使用</th><th><span className="mih-sr-only">操作</span></th></tr></thead>
             <tbody>
               {keys.map((key) => (
                 <tr key={key.id}>
                   <td><strong>{key.name}</strong><small>{formatDate(key.createdAt)} 签发</small></td>
                   <td>{consumerNames.get(key.consumerId) || key.consumerId}</td>
                   <td><code className="mih-mono">{key.prefix}****{key.lastFour}</code></td>
-                  <td><StatusBadge status={key.status} /></td>
+                  <td><StatusBadge status={key.effectiveStatus || key.status} /></td>
+                  <td>{formatDate(key.expiresAt)}</td>
                   <td>{formatDate(key.lastUsedAt)}</td>
                   <td className="mih-table__actions">
                     {tenantAllows(session, key.tenantId, 'apikey.write') ? (
@@ -911,14 +912,26 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                 <option value="test">Test</option>
               </select>
             </Field>
+            <Field label="有效期（天）" hint="默认 180 天；可设置 1–730 天，到期后立即拒绝认证。">
+              <input
+                className="qp-input"
+                type="number"
+                min="1"
+                max="730"
+                step="1"
+                value={form.expiresInDays}
+                onChange={(event) => setForm({ ...form, expiresInDays: Number(event.target.value) })}
+                required
+              />
+            </Field>
             {formError ? <ErrorState error={formError} /> : null}
           </form>
         </Modal>
       ) : null}
 
       {issuedSecret ? (
-        <Modal title="API Key 已签发" description="这是唯一一次显示完整密钥。" onClose={() => setIssuedSecret(null)} footer={<button className="qp-button qp-button--primary" type="button" onClick={() => setIssuedSecret(null)}>我已安全保存</button>}>
-          <SecretPanel secret={issuedSecret} onCopied={() => notify('密钥已复制', 'success')} />
+        <Modal title="API Key 已签发" description={`这是唯一一次显示完整密钥；有效至 ${formatDate(issuedSecret.expiresAt)}。`} onClose={() => setIssuedSecret(null)} footer={<button className="qp-button qp-button--primary" type="button" onClick={() => setIssuedSecret(null)}>我已安全保存</button>}>
+          <SecretPanel secret={issuedSecret.secret} onCopied={() => notify('密钥已复制', 'success')} />
         </Modal>
       ) : null}
 
