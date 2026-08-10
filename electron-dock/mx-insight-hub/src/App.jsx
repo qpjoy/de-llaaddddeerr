@@ -42,7 +42,7 @@ const ROUTES = [
   { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
   { path: '/platforms', label: '平台能力', description: '平台授权与策略', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
-  { path: '/sources', label: '外部数据源', description: '表格、文本与异构库', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true },
+  { path: '/sources', label: '外部数据源', description: '表格、文本与异构库', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
   { path: '/agent', label: '中心 Agent', description: '模型链路与降级', icon: Brain, group: '数据平面', component: AgentPage, capability: 'membership.write', platformAdmin: true },
@@ -56,11 +56,15 @@ function visibleRoutes(session) {
   // An older server may omit capabilities, but platform-wide pages still stay
   // hidden unless the session explicitly identifies a platform administrator.
   if (!session?.capabilities) {
-    return ROUTES.filter((route) => !route.platformAdmin || session?.platformAdmin)
+    return ROUTES.filter((route) => (
+      (!route.platformAdmin || session?.platformAdmin) && (!route.adminTokenOnly || session?.kind === 'admin-token')
+    ))
   }
   const granted = new Set(session.capabilities)
   return ROUTES.filter((route) => (
-    (!route.platformAdmin || session.platformAdmin) && (!route.capability || granted.has(route.capability))
+    (!route.platformAdmin || session.platformAdmin)
+      && (!route.adminTokenOnly || session.kind === 'admin-token')
+      && (!route.capability || granted.has(route.capability))
   ))
 }
 

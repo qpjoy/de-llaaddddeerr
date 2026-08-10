@@ -17,7 +17,23 @@ import { applyMapping, validateFieldMap, CHUNKER_VERSION } from './mapping.mjs'
 
 const MAX_BATCH = 5_000
 const MAX_PREVIEW = 3
-const CONNECTION_FIELDS = new Set(['dsnEnv', 'schema', 'table', 'cursorColumn', 'idColumn'])
+const SOURCE_CONNECTION_TIMEOUT_MS = 10_000
+const CONNECTION_FIELDS = new Set([
+  'dsnEnv',
+  'host',
+  'port',
+  'database',
+  'username',
+  'password',
+  'sslMode',
+  'schema',
+  'table',
+  'cursorColumn',
+  'idColumn',
+])
+const REQUIRED_DIRECT_CONNECTION_FIELDS = ['host', 'database', 'username', 'password']
+const DIRECT_CONNECTION_FIELDS = [...REQUIRED_DIRECT_CONNECTION_FIELDS, 'port', 'sslMode']
+const SSL_MODES = new Set(['disable', 'require', 'verify-ca', 'verify-full'])
 const CURSOR_CASTS = new Map([
   ['timestamptz', 'timestamptz'],
   ['timestamp', 'timestamp'],
@@ -58,7 +74,7 @@ function quotedIdentifier(value, what) {
   return `"${safeIdentifier(value, what)}"`
 }
 
-export function validateDatabaseConnection(connection, { providerConfigured = false } = {}) {
+export function validateDatabaseConnection(connection) {
   if (!connection || typeof connection !== 'object' || Array.isArray(connection)) {
     throw new AppError(400, 'invalid_connection', 'connection must be an object')
   }
@@ -66,11 +82,47 @@ export function validateDatabaseConnection(connection, { providerConfigured = fa
   if (unsupported.length > 0) {
     throw new AppError(400, 'unsupported_connection_fields', `Unsupported database connection fields: ${unsupported.join(', ')}`)
   }
-  if (providerConfigured && connection.dsnEnv != null) {
-    throw new AppError(400, 'ambiguous_database_provider', 'A provider-backed source must not also configure connection.dsnEnv')
+  const usesDsnEnv = connection.dsnEnv != null
+  const directFields = DIRECT_CONNECTION_FIELDS.filter((field) => connection[field] != null)
+  if (usesDsnEnv && directFields.length > 0) {
+    throw new AppError(400, 'ambiguous_database_connection', 'Use either connection.dsnEnv or direct PostgreSQL credentials, not both')
   }
-  if (!providerConfigured && (typeof connection.dsnEnv !== 'string' || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(connection.dsnEnv))) {
-    throw new AppError(400, 'missing_dsn_env', 'connection.dsnEnv must name an uppercase environment variable')
+  if (usesDsnEnv) {
+    if (typeof connection.dsnEnv !== 'string' || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(connection.dsnEnv)) {
+      throw new AppError(400, 'invalid_dsn_env', 'connection.dsnEnv must name an uppercase environment variable')
+    }
+  } else {
+    const missing = REQUIRED_DIRECT_CONNECTION_FIELDS.filter((field) => (
+      typeof connection[field] !== 'string' || connection[field].trim().length === 0
+    ))
+    if (missing.length > 0) {
+      throw new AppError(400, 'missing_database_credentials', `Direct PostgreSQL connection requires: ${missing.join(', ')}`)
+    }
+    if (
+      connection.host !== connection.host.trim()
+      || connection.database !== connection.database.trim()
+      || connection.username !== connection.username.trim()
+      || connection.host.length > 253
+      || connection.database.length > 128
+      || connection.username.length > 128
+      || /[\u0000-\u001f\u007f]/.test(`${connection.host}${connection.database}${connection.username}`)
+    ) {
+      throw new AppError(400, 'invalid_database_credentials', 'PostgreSQL host, database, and username must be trimmed strings within their allowed lengths')
+    }
+    if (/\s|\/|@|:\/\//.test(connection.host)) {
+      throw new AppError(400, 'invalid_database_host', 'connection.host must not contain a URL scheme, path, credentials, or whitespace')
+    }
+    if (Buffer.byteLength(connection.password, 'utf8') > 4_096) {
+      throw new AppError(400, 'invalid_database_password', 'connection.password must be at most 4096 bytes')
+    }
+    const port = connection.port ?? 5432
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new AppError(400, 'invalid_database_port', 'connection.port must be an integer between 1 and 65535')
+    }
+    const sslMode = connection.sslMode ?? 'require'
+    if (!SSL_MODES.has(sslMode)) {
+      throw new AppError(400, 'invalid_database_ssl_mode', 'connection.sslMode must be disable, require, verify-ca, or verify-full')
+    }
   }
   safeIdentifier(connection.schema || 'public', 'schema')
   safeIdentifier(connection.table, 'table')
@@ -137,17 +189,47 @@ function safeFailureCode(error) {
   return 'source_pull_failed'
 }
 
+function safePullError(error) {
+  // AppError instances originate at explicit Hub trust boundaries and already
+  // carry operator-safe messages. Driver/store errors do not: PostgreSQL often
+  // embeds connection coordinates (and sometimes a full DSN) in Error.message.
+  // The queue worker logs that message and persists it as jobs.last_error, so
+  // discard the raw object here while retaining the stable code used for
+  // retry/operator-action/unknown-commit classification.
+  if (error instanceof AppError) return error
+  const wrapped = new AppError(
+    503,
+    safeFailureCode(error),
+    'External source pull failed; retry from the last durable checkpoint',
+  )
+  if (error?.externalFinalizationAttempted === true) {
+    wrapped.externalFinalizationAttempted = true
+  }
+  return wrapped
+}
+
+function safeSourceOperationError(error, code, message) {
+  if (error instanceof AppError) return error
+  return new AppError(503, code, message)
+}
+
 function pullInputName(sourceKey, position) {
   const window = createHash('sha256').update(JSON.stringify(position || {})).digest('hex').slice(0, 16)
   return `database-pull:${sourceKey}:${window}`
 }
 
-function sourceContractHash(source, mapping, provider) {
+function sourceContractHash(source, mapping) {
   const connection = source.connection || {}
   const contract = {
-    provider: provider
-      ? { providerKey: provider.providerKey, providerType: provider.providerType, config: provider.config }
-      : { dsnEnv: connection.dsnEnv || null },
+    connection: connection.dsnEnv
+      ? { dsnEnv: connection.dsnEnv }
+      : {
+          host: connection.host,
+          port: connection.port ?? 5432,
+          database: connection.database,
+          username: connection.username,
+          sslMode: connection.sslMode ?? 'require',
+        },
     schema: connection.schema || 'public',
     table: connection.table,
     cursorColumn: connection.cursorColumn || null,
@@ -221,14 +303,12 @@ export class DatabaseSourcePuller {
   constructor({
     store,
     queue,
-    providerRegistry = null,
     logger = console,
     poolFactory = (options) => new pg.Pool(options),
     env = process.env,
   }) {
     this.store = store
     this.queue = queue
-    this.providerRegistry = providerRegistry
     this.logger = logger
     this.poolFactory = poolFactory
     this.env = env
@@ -236,12 +316,7 @@ export class DatabaseSourcePuller {
   }
 
   /**
-   * Resolve the DSN from the environment.
-   *
-   * `catalog.external_sources.connection` stores the NAME of an environment
-   * variable, never the DSN itself. A password in a database row is a password
-   * in every backup, every replica and every admin API response that forgets to
-   * redact it.
+   * Resolve a legacy DSN reference from the environment.
    */
   #dsn(connection) {
     const variable = connection.dsnEnv
@@ -255,21 +330,39 @@ export class DatabaseSourcePuller {
     return dsn
   }
 
-  async #poolOptions(source, connection, applicationName) {
-    let connectionOptions
-    if (source?.providerKey) {
-      if (!this.providerRegistry) {
-        throw new AppError(503, 'provider_registry_unavailable', 'Source provider credentials are not available in this workload')
-      }
-      const credentials = await this.providerRegistry.resolveCredentials(source.providerKey)
-      connectionOptions = this.#providerConnectionOptions(credentials)
-    } else {
-      connectionOptions = { connectionString: this.#dsn(connection) }
+  #directConnectionOptions(connection) {
+    const sslMode = connection.sslMode ?? 'require'
+    let ssl = false
+    if (sslMode === 'require') ssl = { rejectUnauthorized: false }
+    if (sslMode === 'verify-ca') {
+      // Verify the certificate chain while deliberately skipping hostname
+      // matching, which is PostgreSQL's verify-ca (not verify-full) contract.
+      ssl = { rejectUnauthorized: true, checkServerIdentity: () => undefined }
     }
+    if (sslMode === 'verify-full') ssl = { rejectUnauthorized: true }
+    return {
+      host: connection.host,
+      port: connection.port ?? 5432,
+      database: connection.database,
+      user: connection.username,
+      password: connection.password,
+      ssl,
+    }
+  }
+
+  async #poolOptions(connection, applicationName) {
+    validateDatabaseConnection(connection)
+    const connectionOptions = connection.dsnEnv
+      ? { connectionString: this.#dsn(connection) }
+      : this.#directConnectionOptions(connection)
     return {
       ...connectionOptions,
       max: 2,
       application_name: applicationName,
+      // statement_timeout starts only after PostgreSQL accepts the session.
+      // Bound DNS/TCP/TLS startup separately so an unreachable source cannot
+      // hold an admin request or source advisory lock until the kernel gives up.
+      connectionTimeoutMillis: SOURCE_CONNECTION_TIMEOUT_MS,
       statement_timeout: 60_000,
       // Read-only for the whole session. Even a bug in identifier handling
       // cannot mutate the upstream database from here.
@@ -277,21 +370,8 @@ export class DatabaseSourcePuller {
     }
   }
 
-  async #pool(source, connection, applicationName) {
-    return this.poolFactory(await this.#poolOptions(source, connection, applicationName))
-  }
-
-  #providerConnectionOptions(credentials) {
-    return {
-      host: credentials.host,
-      port: credentials.port,
-      database: credentials.database,
-      user: credentials.username,
-      password: credentials.password,
-      ssl: credentials.sslMode === 'disable'
-        ? false
-        : { rejectUnauthorized: credentials.sslMode !== 'require' },
-    }
+  async #pool(connection, applicationName) {
+    return this.poolFactory(await this.#poolOptions(connection, applicationName))
   }
 
   async #source(sourceKey, { requireMapping = false } = {}) {
@@ -300,21 +380,13 @@ export class DatabaseSourcePuller {
     if (source.sourceKind !== 'database') {
       throw new AppError(400, 'wrong_source_kind', 'This source is not a database source')
     }
-    validateDatabaseConnection(source.connection || {}, { providerConfigured: Boolean(source.providerKey) })
+    validateDatabaseConnection(source.connection || {})
     const mapping = await this.store.getActiveMapping(source.id)
     if (requireMapping && !mapping) {
       throw new AppError(409, 'no_approved_mapping', 'This source has no approved field mapping')
     }
     if (mapping) validateFieldMap(mapping.fieldMap)
-    let provider = null
-    if (source.providerKey) {
-      if (!this.providerRegistry) {
-        throw new AppError(503, 'provider_registry_unavailable', 'Source provider credentials are not available in this workload')
-      }
-      provider = await this.providerRegistry.get(source.providerKey)
-      if (!provider) throw new AppError(404, 'provider_not_found', `Unknown source provider: ${source.providerKey}`)
-    }
-    return { source, mapping, provider, connection: source.connection || {} }
+    return { source, mapping, connection: source.connection || {} }
   }
 
   async withSourceLock(sourceKey, operation) {
@@ -353,15 +425,15 @@ export class DatabaseSourcePuller {
       throw new AppError(
         409,
         'checkpoint_contract_mismatch',
-        'The saved checkpoint belongs to a different provider, table, cursor, dataset, or mapping; pause and reset it explicitly',
+        'The saved checkpoint belongs to a different connection, table, cursor, dataset, or mapping; pause and reset it explicitly',
       )
     }
   }
 
   async assertCheckpointCompatible(sourceKey) {
     if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
-    const { source, mapping, provider } = await this.#source(sourceKey, { requireMapping: true })
-    const contractHash = sourceContractHash(source, mapping, provider)
+    const { source, mapping } = await this.#source(sourceKey, { requireMapping: true })
+    const contractHash = sourceContractHash(source, mapping)
     const cursor = await this.queue.getCursor(`external:${sourceKey}`)
     this.#assertCheckpoint(cursor?.position ?? {}, { contractHash, mappingVersion: mapping.version })
     return { compatible: true, contractHash, mappingVersion: mapping.version, cursor: cursor ?? null }
@@ -370,14 +442,14 @@ export class DatabaseSourcePuller {
   async resetCheckpoint(sourceKey) {
     return this.withSourceLock(sourceKey, async (assertOwned) => {
       if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
-      const { source, mapping, provider } = await this.#source(sourceKey, { requireMapping: true })
+      const { source, mapping } = await this.#source(sourceKey, { requireMapping: true })
       if (source.status !== 'paused') {
         throw new AppError(409, 'source_pause_required', 'Pause this source before resetting its checkpoint')
       }
       const cursorId = `external:${sourceKey}`
       const saved = await this.queue.getCursor(cursorId)
       const previousPosition = saved?.position ?? {}
-      const contractHash = sourceContractHash(source, mapping, provider)
+      const contractHash = sourceContractHash(source, mapping)
       const resetPosition = {
         contractHash,
         mappingVersion: mapping.version,
@@ -482,8 +554,9 @@ export class DatabaseSourcePuller {
   /** Inspect a registered source without returning its DSN or any row values. */
   async describe(sourceKey) {
     const { source, mapping, connection } = await this.#source(sourceKey)
-    const pool = await this.#pool(source, connection, 'mx-insight-hub-external-describe')
+    let pool = null
     try {
+      pool = await this.#pool(connection, 'mx-insight-hub-external-describe')
       const [columns, metadata] = await Promise.all([
         this.#columns(pool, connection),
         this.#metadata(pool, connection),
@@ -554,8 +627,14 @@ export class DatabaseSourcePuller {
         ],
         warnings: missingMappings.filter((entry) => !requiredMappingTargets.has(entry.target)).map((entry) => entry.message),
       }
+    } catch (error) {
+      throw safeSourceOperationError(
+        error,
+        'source_schema_probe_failed',
+        'PostgreSQL source schema probe failed',
+      )
     } finally {
-      await pool.end()
+      if (pool) await pool.end().catch(() => {})
     }
   }
 
@@ -567,8 +646,9 @@ export class DatabaseSourcePuller {
       throw new AppError(400, 'invalid_preview_limit', `preview limit must be between 1 and ${MAX_PREVIEW}`)
     }
     const table = qualifiedTable(connection)
-    const pool = await this.#pool(source, connection, 'mx-insight-hub-external-preview')
+    let pool = null
     try {
+      pool = await this.#pool(connection, 'mx-insight-hub-external-preview')
       const columns = await this.#columns(pool, connection)
       const { rows } = await pool.query(
         `SELECT * FROM ${table} LIMIT $1`,
@@ -582,22 +662,22 @@ export class DatabaseSourcePuller {
           Object.entries(row).map(([key, value]) => [key, valueShape(value)]),
         )),
       }
+    } catch (error) {
+      throw safeSourceOperationError(
+        error,
+        'source_preview_failed',
+        'PostgreSQL source preview failed',
+      )
     } finally {
-      await pool.end()
+      if (pool) await pool.end().catch(() => {})
     }
   }
 
-  /** Test candidate credentials without persisting them or changing provider health. */
-  async testProviderCredentials(credentials) {
+  /** Test a candidate source connection before it is persisted. */
+  async testConnection(connection) {
     let pool = null
     try {
-      pool = this.poolFactory({
-        ...this.#providerConnectionOptions(credentials),
-        max: 2,
-        application_name: 'mx-insight-hub-provider-draft-test',
-        statement_timeout: 60_000,
-        options: '-c default_transaction_read_only=on',
-      })
+      pool = this.poolFactory(await this.#poolOptions(connection, 'mx-insight-hub-source-connection-test'))
       const { rows } = await pool.query(
         `SELECT current_database() AS database_name,
                 current_user AS database_user,
@@ -606,7 +686,7 @@ export class DatabaseSourcePuller {
       )
       const row = rows[0]
       if (row?.read_only !== 'on') {
-        throw new AppError(503, 'provider_not_read_only', 'Provider test session is not read-only')
+        throw new AppError(503, 'source_not_read_only', 'Source test session is not read-only')
       }
       return {
         database: row.database_name,
@@ -615,30 +695,18 @@ export class DatabaseSourcePuller {
         readOnly: true,
       }
     } catch (error) {
-      if (error instanceof AppError && error.code === 'provider_not_read_only') throw error
-      throw new AppError(503, 'provider_connection_failed', 'PostgreSQL provider connection test failed')
+      if (error instanceof AppError && error.code === 'source_not_read_only') throw error
+      if (error instanceof AppError && error.status < 500) throw error
+      throw new AppError(503, 'source_connection_failed', 'PostgreSQL source connection test failed')
     } finally {
       if (pool) await pool.end().catch(() => {})
     }
   }
 
-  /** Verify a persisted provider and store only safe health evidence. */
-  async testProvider(providerKey) {
-    if (!this.providerRegistry) {
-      throw new AppError(503, 'provider_registry_unavailable', 'Source provider credentials are not available in this workload')
-    }
-    try {
-      const connection = await this.testProviderCredentials(
-        await this.providerRegistry.resolveCredentials(providerKey),
-      )
-      const provider = await this.providerRegistry.recordHealth(providerKey, { status: 'healthy' })
-      return { provider, connection }
-    } catch (error) {
-      await this.providerRegistry.recordHealth(providerKey, {
-        status: 'unhealthy', errorCode: 'provider_connection_failed',
-      }).catch(() => {})
-      throw error
-    }
+  /** Verify the currently persisted connection for one source. */
+  async testSource(sourceKey) {
+    const { connection } = await this.#source(sourceKey)
+    return this.testConnection(connection)
   }
 
   /**
@@ -649,10 +717,14 @@ export class DatabaseSourcePuller {
    * and rows sharing one would be skipped or repeated forever.
    */
   async pullBatch(sourceKey, options = {}) {
-    return this.withSourceLock(
-      sourceKey,
-      (assertOwned) => this.#pullBatchUnlocked(sourceKey, options, assertOwned),
-    )
+    try {
+      return await this.withSourceLock(
+        sourceKey,
+        (assertOwned) => this.#pullBatchUnlocked(sourceKey, options, assertOwned),
+      )
+    } catch (error) {
+      throw safePullError(error)
+    }
   }
 
   async #assertImportRun(source, importRunId) {
@@ -810,7 +882,7 @@ export class DatabaseSourcePuller {
     { batchSize = 1_000, importRunId = null, trigger = 'manual' } = {},
     assertOwned = async () => {},
   ) {
-    const { source, mapping, provider, connection } = await this.#source(sourceKey, { requireMapping: true })
+    const { source, mapping, connection } = await this.#source(sourceKey, { requireMapping: true })
     if (!this.queue) throw new AppError(503, 'queue_unavailable', 'Database pull requires a durable cursor store')
 
     const table = qualifiedTable(connection)
@@ -825,12 +897,12 @@ export class DatabaseSourcePuller {
       throw new AppError(400, 'invalid_batch_size', 'batchSize must be a positive integer')
     }
     const limit = Math.min(batchSize, MAX_BATCH)
-    if (!source.providerKey) this.#dsn(connection)
+    if (connection.dsnEnv) this.#dsn(connection)
 
     const cursorId = `external:${sourceKey}`
     const saved = await this.queue.getCursor(cursorId)
     const position = saved?.position ?? {}
-    const contractHash = sourceContractHash(source, mapping, provider)
+    const contractHash = sourceContractHash(source, mapping)
     this.#assertCheckpoint(position, { contractHash, mappingVersion: mapping.version })
     const checkpointRunId = position.importRunId ?? null
     if (importRunId && !checkpointRunId) {
@@ -925,7 +997,7 @@ export class DatabaseSourcePuller {
     // Credentials and the upstream pool are deliberately opened only after a
     // committed replay has been ruled out; replay can advance from stored
     // cursor evidence even if the source page has since drifted or vanished.
-    const poolOptions = await this.#poolOptions(source, connection, 'mx-insight-hub-external-pull')
+    const poolOptions = await this.#poolOptions(connection, 'mx-insight-hub-external-pull')
     const pool = this.poolFactory(poolOptions)
     let runFinished = false
     let batchCommitted = false

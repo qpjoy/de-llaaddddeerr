@@ -84,6 +84,18 @@ function requiredField(body, name) {
   return value.trim()
 }
 
+function requiredSourceKey(body) {
+  const sourceKey = requiredField(body, 'sourceKey')
+  if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(sourceKey)) {
+    throw new AppError(
+      400,
+      'invalid_source_key',
+      'sourceKey must be 1-128 lowercase letters, digits, dots, underscores, or hyphens',
+    )
+  }
+  return sourceKey
+}
+
 // Best-effort client address for rate limiting and for forwarding upstream.
 // The proxy header is trusted only because this plane sits behind a controlled
 // edge; on a directly exposed listener it would be attacker-controlled.
@@ -172,7 +184,6 @@ export function createApp({
   backfillPlatforms = [],
   importer = null,
   databasePuller = null,
-  providerRegistry = null,
   agent = null,
   search = null,
   embedding = null,
@@ -193,12 +204,18 @@ export function createApp({
   async function resolvePrincipal(request) {
     const credential = adminCredential(request)
     if (!credential) {
+      if (typeof request.headers['x-api-key'] === 'string' && request.headers['x-api-key'].trim()) {
+        throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may manage external data sources')
+      }
       throw new AppError(401, 'admin_auth_required', 'Admin token or Launcher session is required')
     }
     // The `adminToken &&` guard is load-bearing: secureEqual stringifies its
     // arguments, so a null admin token would compare equal to the literal
     // credential "null".
     if (adminToken && secureEqual(credential, adminToken)) return adminTokenPrincipal()
+    if (credential.startsWith('mih_live_') || credential.startsWith('mih_test_')) {
+      throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may manage external data sources')
+    }
 
     if (!identity?.enabled) {
       throw new AppError(401, 'admin_auth_required', 'Valid admin token is required')
@@ -273,7 +290,9 @@ export function createApp({
   }
 
   function requireSourceAdmin(principal) {
-    requirePlatformAdmin(principal)
+    if (principal?.kind !== 'admin-token') {
+      throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may manage external data sources')
+    }
   }
 
   function requireImporter() {
@@ -288,11 +307,10 @@ export function createApp({
     }
   }
 
-  function requireProviderRegistry() {
-    if (!providerRegistry) {
-      throw new AppError(503, 'provider_registry_unavailable', 'Source provider management requires MX_INSIGHT_PROVIDER_MASTER_KEY')
+  function requireDatabaseSourceTester() {
+    if (typeof databasePuller?.testSource !== 'function') {
+      throw new AppError(503, 'source_validation_unavailable', 'Database source testing requires the PostgreSQL workload')
     }
-    return providerRegistry
   }
 
   async function withSourceLocks(keys, operation) {
@@ -558,114 +576,9 @@ export function createApp({
 
       // ---- external sources (P4) ------------------------------------------
       //
-      // Registering a source and approving a mapping decide how outside data
-      // enters the canonical model, so both need platform authority rather than
-      // a tenant-scoped role.
-      if (request.method === 'GET' && pathname === '/internal/v1/admin/source-provider-types') {
-        requireSourceAdmin(principal)
-        sendJson(response, 200, {
-          data: [{
-            providerType: 'postgresql',
-            displayName: 'PostgreSQL',
-            available: Boolean(providerRegistry),
-            configFields: ['host', 'port', 'database', 'username', 'sslMode'],
-            secretFields: ['password'],
-          }],
-          requestId,
-        })
-        return
-      }
-      if (request.method === 'GET' && pathname === '/internal/v1/admin/source-providers') {
-        requireSourceAdmin(principal)
-        sendJson(response, 200, { data: await requireProviderRegistry().list(), requestId })
-        return
-      }
-      if (request.method === 'POST' && pathname === '/internal/v1/admin/source-providers') {
-        requireSourceAdmin(principal)
-        if (typeof databasePuller?.testProviderCredentials !== 'function') {
-          throw new AppError(503, 'provider_validation_unavailable', 'Provider creation requires the PostgreSQL test workload')
-        }
-        const created = await requireProviderRegistry().create(await readJson(request), {
-          validateCredentials: (credentials) => databasePuller.testProviderCredentials(credentials),
-        })
-        sendJson(response, 201, { data: created, requestId })
-        return
-      }
-      params = routeMatch(pathname, '/internal/v1/admin/source-providers/:key/test')
-      if (params && request.method === 'POST') {
-        requireSourceAdmin(principal)
-        requireProviderRegistry()
-        if (!databasePuller) {
-          throw new AppError(503, 'database_pull_unavailable', 'Provider tests require the PostgreSQL workload')
-        }
-        const data = await withSourceLocks(
-          [`provider:${params.key}`],
-          () => databasePuller.testProvider(params.key),
-        )
-        sendJson(response, 200, { data, requestId })
-        return
-      }
-      params = routeMatch(pathname, '/internal/v1/admin/source-providers/:key')
-      if (params && request.method === 'PUT') {
-        requireSourceAdmin(principal)
-        const body = await readJson(request)
-        const changesConnection = body?.config != null || body?.password != null
-        const initialReferences = changesConnection
-          ? (await store.listExternalSources()).filter((source) => source.providerKey === params.key)
-          : []
-        const lockedSourceKeys = new Set(initialReferences.map((source) => source.sourceKey))
-        const updateProvider = async () => {
-          if (changesConnection) {
-            const referenced = (await store.listExternalSources()).filter(
-              (source) => source.providerKey === params.key,
-            )
-            if (referenced.some((source) => !lockedSourceKeys.has(source.sourceKey))) {
-              throw new AppError(409, 'provider_topology_changed', 'A source started using this provider; retry the update')
-            }
-            const unsafe = []
-            for (const source of referenced) {
-              const cursor = await queue?.getCursor?.(`external:${source.sourceKey}`)
-              if (source.status !== 'paused' || cursor?.status === 'running') unsafe.push(source.sourceKey)
-            }
-            if (unsafe.length > 0) {
-              throw new AppError(409, 'provider_pause_required', 'Pause and drain all sources before changing provider credentials or coordinates', {
-                sourceKeys: unsafe,
-              })
-            }
-            if (typeof databasePuller?.testProviderCredentials !== 'function') {
-              throw new AppError(503, 'provider_validation_unavailable', 'Provider connection changes require the PostgreSQL test workload')
-            }
-          }
-          return requireProviderRegistry().update(params.key, body, changesConnection
-            ? { validateCredentials: (credentials) => databasePuller.testProviderCredentials(credentials) }
-            : undefined)
-        }
-        const data = await withSourceLocks(
-          changesConnection
-            ? [`provider:${params.key}`, ...lockedSourceKeys]
-            : [],
-          updateProvider,
-        )
-        sendJson(response, 200, {
-          data,
-          requestId,
-        })
-        return
-      }
-      if (params && request.method === 'DELETE') {
-        requireSourceAdmin(principal)
-        const data = await withSourceLocks([`provider:${params.key}`], async () => {
-          const referenced = await store.listExternalSources?.() ?? []
-          if (referenced.some((source) => source.providerKey === params.key)) {
-            throw new AppError(409, 'provider_in_use', 'Source provider is still referenced by an external source')
-          }
-          return requireProviderRegistry().delete(params.key)
-        })
-        sendJson(response, 200, {
-          data, requestId,
-        })
-        return
-      }
+      // Source configuration includes the upstream password by explicit
+      // operator policy, so this surface is narrower than general platform
+      // administration: only the break-glass admin token may enter it.
 
       if (request.method === 'GET' && pathname === '/internal/v1/admin/sources') {
         requireSourceAdmin(principal)
@@ -675,56 +588,60 @@ export function createApp({
       if (request.method === 'POST' && pathname === '/internal/v1/admin/sources') {
         requireSourceAdmin(principal)
         const body = await readJson(request)
-        const sourceKey = requiredField(body, 'sourceKey')
+        const sourceKey = requiredSourceKey(body)
         if (await store.getExternalSource?.(sourceKey)) {
           throw new AppError(409, 'source_exists', 'Source keys are immutable; update a paused source through its PUT route')
         }
-        let provider = null
-        if ((body.sourceKind || 'file') === 'database') {
-          if (body.providerKey != null) {
-            provider = await requireProviderRegistry().get(requiredField(body, 'providerKey'))
-            if (!provider) throw new AppError(404, 'provider_not_found', 'Source provider was not found')
-          }
-          validateDatabaseConnection(body.connection, { providerConfigured: Boolean(provider) })
+        const sourceKind = body.sourceKind || 'file'
+        if (!['file', 'database'].includes(sourceKind)) {
+          throw new AppError(400, 'invalid_source_kind', 'sourceKind must be file or database')
         }
+        const displayName = requiredField(body, 'displayName')
         const syncIntervalSeconds = body.syncIntervalSeconds ?? 60
         if (!Number.isInteger(syncIntervalSeconds) || syncIntervalSeconds < 60 || syncIntervalSeconds > 86_400) {
           throw new AppError(400, 'invalid_sync_interval', 'syncIntervalSeconds must be between 60 and 86400')
         }
-        const created = await withSourceLocks(
-          provider ? [`provider:${provider.providerKey}`] : [],
-          async () => {
-            if (provider) {
-              provider = await requireProviderRegistry().get(provider.providerKey)
-              if (!provider) throw new AppError(404, 'provider_not_found', 'Source provider was not found')
-            }
-            return store.createExternalSource({
+        if (sourceKind === 'database') {
+          validateDatabaseConnection(body.connection)
+          if (typeof databasePuller?.testConnection !== 'function') {
+            throw new AppError(503, 'source_validation_unavailable', 'Database source creation requires the PostgreSQL test workload')
+          }
+          await databasePuller.testConnection(body.connection)
+        }
+        const created = await withSourceLocks([sourceKey], async () => {
+          if (await store.getExternalSource?.(sourceKey)) {
+            throw new AppError(409, 'source_exists', 'Source keys are immutable; update a paused source through its PUT route')
+          }
+          return store.createExternalSource({
               sourceKey,
-              displayName: requiredField(body, 'displayName'),
-              sourceKind: body.sourceKind || 'file',
+              displayName,
+              sourceKind,
               // External data lands in its own dataset by default so it never
               // silently merges into the Night-All corpus and skews platform stats.
               datasetId: body.datasetId || `external.${sourceKey}.v1`,
               platform: body.platform || 'external',
               objectType: body.objectType || 'record',
-              status: (body.sourceKind || 'file') === 'database' ? 'paused' : 'active',
+              status: sourceKind === 'database' ? 'paused' : 'active',
               connection: body.connection || {},
-              providerId: provider?.id ?? null,
               syncIntervalSeconds,
             })
-          },
-        )
+        })
         sendJson(response, 201, { data: created, requestId })
         return
       }
 
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, { data: await requireSource(params.key), requestId })
+        return
+      }
       if (params && request.method === 'PUT') {
         requireSourceAdmin(principal)
         const initialSource = await requireSource(params.key)
         const body = await readJson(request)
         const unsupported = Object.keys(body || {}).filter(
-          (field) => !['connection', 'status', 'providerKey', 'syncIntervalSeconds'].includes(field),
+          (field) => !['connection', 'status', 'syncIntervalSeconds'].includes(field),
         )
         if (unsupported.length > 0) {
           throw new AppError(400, 'unsupported_fields', `Unsupported source fields: ${unsupported.join(', ')}`)
@@ -732,28 +649,16 @@ export function createApp({
         if (body.status != null && !['active', 'paused'].includes(body.status)) {
           throw new AppError(400, 'invalid_status', 'status must be active or paused')
         }
-        const changesConnection = body.connection != null || body.providerKey != null
+        const changesConnection = body.connection != null
         if (body.syncIntervalSeconds != null && (
           !Number.isInteger(body.syncIntervalSeconds) || body.syncIntervalSeconds < 60 || body.syncIntervalSeconds > 86_400
         )) {
           throw new AppError(400, 'invalid_sync_interval', 'syncIntervalSeconds must be between 60 and 86400')
         }
-        const requestedProviderKey = body.providerKey != null
-          ? requiredField(body, 'providerKey')
-          : initialSource.providerKey
         const needsExclusiveProbe = changesConnection || body.status === 'active'
-        const lockKeys = needsExclusiveProbe
-          ? [
-              params.key,
-              initialSource.providerKey ? `provider:${initialSource.providerKey}` : null,
-              requestedProviderKey ? `provider:${requestedProviderKey}` : null,
-            ]
-          : []
+        const lockKeys = needsExclusiveProbe ? [params.key] : []
         const updateSource = async () => {
           const source = await requireSource(params.key)
-          if (body.providerKey == null && source.providerKey !== initialSource.providerKey) {
-            throw new AppError(409, 'source_topology_changed', 'The source provider changed concurrently; retry the update')
-          }
           if (changesConnection) {
             if (source.sourceKind !== 'database') {
               throw new AppError(400, 'wrong_source_kind', 'Only database sources have connection metadata')
@@ -769,17 +674,23 @@ export function createApp({
               throw new AppError(409, 'source_draining', 'Wait for the running batch to reach its checkpoint before changing connection metadata')
             }
           }
-          let provider = null
-          if (requestedProviderKey) {
-            provider = await requireProviderRegistry().get(requestedProviderKey)
-            if (!provider) throw new AppError(404, 'provider_not_found', 'Source provider was not found')
-          }
           const mergedConnection = { ...source.connection, ...(body.connection || {}) }
-          // Attaching a provider is the explicit migration away from the legacy
-          // environment-variable reference. Keep exactly one credential source.
-          if (body.providerKey != null) delete mergedConnection.dsnEnv
+          if (body.connection && Object.keys(body.connection).some((field) => (
+            ['host', 'port', 'database', 'username', 'password', 'sslMode'].includes(field)
+          ))) {
+            delete mergedConnection.dsnEnv
+          }
+          if (typeof body.connection?.dsnEnv === 'string') {
+            for (const field of ['host', 'port', 'database', 'username', 'password', 'sslMode']) {
+              delete mergedConnection[field]
+            }
+          }
           if (changesConnection) {
-            validateDatabaseConnection(mergedConnection, { providerConfigured: Boolean(provider) })
+            validateDatabaseConnection(mergedConnection)
+            if (typeof databasePuller?.testConnection !== 'function') {
+              throw new AppError(503, 'source_validation_unavailable', 'Database source connection changes require the PostgreSQL test workload')
+            }
+            await databasePuller.testConnection(mergedConnection)
           }
           if (body.status === 'active' && source.status !== 'active') {
             requireDatabasePuller()
@@ -802,7 +713,6 @@ export function createApp({
           return store.updateExternalSource(params.key, {
             status: body.status ?? null,
             connection: changesConnection ? mergedConnection : null,
-            ...(body.providerKey == null ? {} : { providerId: provider.id }),
             ...(body.syncIntervalSeconds == null ? {} : { syncIntervalSeconds: body.syncIntervalSeconds }),
           })
         }
@@ -811,6 +721,15 @@ export function createApp({
           data,
           requestId,
         })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/sources/:key/test')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireDatabaseSourceTester()
+        const data = await withSourceLocks([params.key], () => databasePuller.testSource(params.key))
+        sendJson(response, 200, { data, requestId })
         return
       }
 

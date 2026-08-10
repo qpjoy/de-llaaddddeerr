@@ -46,4 +46,12 @@ Never update a balance without a corresponding immutable entry. Provider quota a
 
 ## Retention and analytics
 
-Authorization, `x-api-key`, Admin tokens and provider secrets are never stored. The caller's `Idempotency-Key` is intentionally stored as request business state. Query payload retention should be tenant-configurable because search terms can be sensitive. Long-term BI reads should use an outbox/CDC projection, not repeatedly scan the transactional request table or Night-All’s collection OLTP database.
+Authorization headers, `x-api-key`, Admin tokens and Night-All upstream provider
+secrets are never stored. Direct PostgreSQL source passwords are the explicit
+exception: the Admin-token source plane stores them as plaintext in
+`catalog.external_sources.connection`, so Hub database and backup readers are
+credential-trusted roles. The caller's `Idempotency-Key` is intentionally stored
+as request business state. Query payload retention should be tenant-configurable
+because search terms can be sensitive. Long-term BI reads should use an
+outbox/CDC projection, not repeatedly scan the transactional request table or
+Night-All’s collection OLTP database.

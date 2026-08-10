@@ -890,129 +890,6 @@ export class PostgresStore {
     }
   }
 
-  // ---- source providers (migration 011) ---------------------------------
-
-  async createSourceProvider({
-    providerKey, displayName, providerType = 'postgresql', config, encryptedSecret, health = null,
-  }) {
-    const { rows } = await this.pool.query(
-      `INSERT INTO catalog.source_providers
-         (id, provider_key, display_name, provider_type, config, encrypted_secret,
-          health_status, health_checked_at, health_error_code)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (provider_key) DO NOTHING
-       RETURNING id, provider_key, display_name, provider_type, config,
-                 true AS secret_configured, health_status, health_checked_at,
-                 health_error_code, created_at, updated_at`,
-      [
-        randomUUID(), providerKey, displayName, providerType, config, encryptedSecret,
-        health?.status ?? 'unknown', health?.checkedAt ?? null, health?.errorCode ?? null,
-      ],
-    )
-    if (!rows[0]) throw new AppError(409, 'provider_exists', `Provider key already exists: ${providerKey}`)
-    return sourceProvider(rows[0])
-  }
-
-  async listSourceProviders() {
-    const { rows } = await this.pool.query(
-      `SELECT id, provider_key, display_name, provider_type, config,
-              true AS secret_configured, health_status, health_checked_at,
-              health_error_code, created_at, updated_at
-         FROM catalog.source_providers
-        ORDER BY created_at DESC`,
-    )
-    return rows.map(sourceProvider)
-  }
-
-  async getSourceProvider(providerKey) {
-    const { rows } = await this.pool.query(
-      `SELECT id, provider_key, display_name, provider_type, config,
-              true AS secret_configured, health_status, health_checked_at,
-              health_error_code, created_at, updated_at
-         FROM catalog.source_providers
-        WHERE provider_key = $1`,
-      [providerKey],
-    )
-    return sourceProvider(rows[0])
-  }
-
-  // The encrypted envelope is available only through an explicitly internal
-  // method. Normal create/list/get/update results never carry it toward an API.
-  async getSourceProviderSecret(providerKey) {
-    const { rows } = await this.pool.query(
-      `SELECT id, provider_key, display_name, provider_type, config, encrypted_secret,
-              health_status, health_checked_at, health_error_code, created_at, updated_at
-         FROM catalog.source_providers
-        WHERE provider_key = $1`,
-      [providerKey],
-    )
-    return sourceProvider(rows[0], { includeSecret: true })
-  }
-
-  async updateSourceProvider(providerKey, patch) {
-    const has = (field) => Object.prototype.hasOwnProperty.call(patch, field)
-    const { rows } = await this.pool.query(
-      `UPDATE catalog.source_providers
-          SET display_name = CASE WHEN $2 THEN $3 ELSE display_name END,
-              config = CASE WHEN $4 THEN $5 ELSE config END,
-              encrypted_secret = CASE WHEN $6 THEN $7 ELSE encrypted_secret END,
-              health_status = CASE WHEN $8 THEN $9 ELSE health_status END,
-              health_checked_at = CASE WHEN $8 THEN $10 ELSE health_checked_at END,
-              health_error_code = CASE WHEN $8 THEN $11 ELSE health_error_code END,
-              updated_at = now()
-        WHERE provider_key = $1
-        RETURNING id, provider_key, display_name, provider_type, config,
-                  true AS secret_configured, health_status, health_checked_at,
-                  health_error_code, created_at, updated_at`,
-      [
-        providerKey,
-        has('displayName'), patch.displayName ?? null,
-        has('config'), patch.config ?? null,
-        has('encryptedSecret'), patch.encryptedSecret ?? null,
-        has('healthStatus'), patch.healthStatus ?? null,
-        patch.healthCheckedAt ?? null,
-        patch.healthErrorCode ?? null,
-      ],
-    )
-    if (!rows[0]) throw new AppError(404, 'provider_not_found', `Unknown source provider: ${providerKey}`)
-    return sourceProvider(rows[0])
-  }
-
-  async deleteSourceProvider(providerKey) {
-    let rows
-    try {
-      const result = await this.pool.query(
-        'DELETE FROM catalog.source_providers WHERE provider_key = $1 RETURNING provider_key',
-        [providerKey],
-      )
-      rows = result.rows
-    } catch (error) {
-      if (error?.code === '23503') {
-        throw new AppError(409, 'provider_in_use', `Source provider is still in use: ${providerKey}`)
-      }
-      throw error
-    }
-    if (!rows[0]) throw new AppError(404, 'provider_not_found', `Unknown source provider: ${providerKey}`)
-    return { providerKey: rows[0].provider_key }
-  }
-
-  async updateSourceProviderHealth(providerKey, { status, errorCode = null, checkedAt = new Date() }) {
-    const { rows } = await this.pool.query(
-      `UPDATE catalog.source_providers
-          SET health_status = $2,
-              health_checked_at = $3,
-              health_error_code = $4,
-              updated_at = now()
-        WHERE provider_key = $1
-        RETURNING id, provider_key, display_name, provider_type, config,
-                  true AS secret_configured, health_status, health_checked_at,
-                  health_error_code, created_at, updated_at`,
-      [providerKey, status, checkedAt, errorCode],
-    )
-    if (!rows[0]) throw new AppError(404, 'provider_not_found', `Unknown source provider: ${providerKey}`)
-    return sourceProvider(rows[0])
-  }
-
   // ---- external sources (migration 008) ----------------------------------
 
   async createExternalSource({
@@ -1024,24 +901,18 @@ export class PostgresStore {
     objectType,
     status,
     connection,
-    providerId = null,
     syncIntervalSeconds = 60,
   }) {
     const { rows } = await this.pool.query(
-      `WITH inserted AS (
-         INSERT INTO catalog.external_sources
-           (id, source_key, display_name, source_kind, dataset_id, platform, object_type, status, connection,
-            provider_id, sync_interval_seconds)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         ON CONFLICT (source_key) DO NOTHING
-         RETURNING *
-       )
-       SELECT inserted.*, p.provider_key
-         FROM inserted
-         LEFT JOIN catalog.source_providers p ON p.id = inserted.provider_id`,
+      `INSERT INTO catalog.external_sources
+         (id, source_key, display_name, source_kind, dataset_id, platform, object_type, status, connection,
+          sync_interval_seconds)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (source_key) DO NOTHING
+       RETURNING *`,
       [
         randomUUID(), sourceKey, displayName, sourceKind, datasetId, platform,
-        objectType || 'record', status || 'active', connection || {}, providerId, syncIntervalSeconds,
+        objectType || 'record', status || 'active', connection || {}, syncIntervalSeconds,
       ],
     )
     if (!rows[0]) throw new AppError(409, 'source_exists', `Source key already exists: ${sourceKey}`)
@@ -1049,28 +920,19 @@ export class PostgresStore {
   }
 
   async updateExternalSource(sourceKey, patch) {
-    const hasProvider = Object.prototype.hasOwnProperty.call(patch, 'providerId')
     const hasSyncInterval = Object.prototype.hasOwnProperty.call(patch, 'syncIntervalSeconds')
     const { rows } = await this.pool.query(
-      `WITH changed AS (
-         UPDATE catalog.external_sources
-            SET status = coalesce($2, status),
-                connection = coalesce($3, connection),
-                provider_id = CASE WHEN $4 THEN $5 ELSE provider_id END,
-                sync_interval_seconds = CASE WHEN $6 THEN $7 ELSE sync_interval_seconds END,
-                updated_at = now()
-          WHERE source_key = $1
-          RETURNING *
-       )
-       SELECT changed.*, p.provider_key
-         FROM changed
-         LEFT JOIN catalog.source_providers p ON p.id = changed.provider_id`,
+      `UPDATE catalog.external_sources
+          SET status = coalesce($2, status),
+              connection = coalesce($3, connection),
+              sync_interval_seconds = CASE WHEN $4 THEN $5 ELSE sync_interval_seconds END,
+              updated_at = now()
+        WHERE source_key = $1
+        RETURNING *`,
       [
         sourceKey,
         patch.status ?? null,
         patch.connection ?? null,
-        hasProvider,
-        patch.providerId ?? null,
         hasSyncInterval,
         patch.syncIntervalSeconds ?? null,
       ],
@@ -1081,10 +943,7 @@ export class PostgresStore {
 
   async getExternalSource(sourceKey) {
     const { rows } = await this.pool.query(
-      `SELECT s.*, p.provider_key
-         FROM catalog.external_sources s
-         LEFT JOIN catalog.source_providers p ON p.id = s.provider_id
-        WHERE s.source_key = $1`,
+      `SELECT * FROM catalog.external_sources WHERE source_key = $1`,
       [sourceKey],
     )
     return externalSource(rows[0])
@@ -1092,10 +951,7 @@ export class PostgresStore {
 
   async listExternalSources() {
     const { rows } = await this.pool.query(
-      `SELECT s.*, p.provider_key
-         FROM catalog.external_sources s
-         LEFT JOIN catalog.source_providers p ON p.id = s.provider_id
-        ORDER BY s.created_at DESC`,
+      `SELECT * FROM catalog.external_sources ORDER BY created_at DESC`,
     )
     return rows.map(externalSource)
   }
@@ -1693,31 +1549,10 @@ function externalSource(row) {
     objectType: row.object_type,
     status: row.status,
     connection: row.connection,
-    providerId: row.provider_id ?? null,
-    providerKey: row.provider_key ?? null,
     syncIntervalSeconds: row.sync_interval_seconds == null ? null : Number(row.sync_interval_seconds),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   }
-}
-
-function sourceProvider(row, { includeSecret = false } = {}) {
-  if (!row) return null
-  const provider = {
-    id: row.id,
-    providerKey: row.provider_key,
-    displayName: row.display_name,
-    providerType: row.provider_type,
-    config: row.config,
-    secretConfigured: row.secret_configured ?? Boolean(row.encrypted_secret),
-    healthStatus: row.health_status,
-    healthCheckedAt: iso(row.health_checked_at),
-    healthErrorCode: row.health_error_code,
-    createdAt: iso(row.created_at),
-    updatedAt: iso(row.updated_at),
-  }
-  if (includeSecret) provider.encryptedSecret = row.encrypted_secret
-  return provider
 }
 
 function sourceMapping(row) {

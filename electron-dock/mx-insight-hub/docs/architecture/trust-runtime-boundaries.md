@@ -27,6 +27,9 @@ The public Kubernetes Service never selects an admin-mode Pod. This matters beca
 - Launcher-to-Hub management calls use a separate admin token and short timeout.
 - Hub-to-Night-All requires a workload token when Night-All supports it. Network placement alone is not identity.
 - Night-All provider secrets never enter the Hub database or public response.
+- Direct PostgreSQL source passwords are the intentional exception: they are
+  plaintext Hub catalog data available only to the Admin Token, and make Hub
+  database/backup access credential-sensitive.
 - Public requests reject `businessId`, `provider`, `endpointId`, `availabilityMode`, arbitrary `params`, and raw-response flags.
 - Private Admin is not the public data-plane. A public route must not wildcard proxy the admin listener.
 
@@ -36,4 +39,3 @@ The public Kubernetes Service never selects an admin-mode Pod. This matters beca
 - A provider/platform failure is recorded per request and must not disable unrelated platforms.
 - There is no automatic retry after Night-All dispatch until Night-All supports an end-to-end idempotency token. A timeout is `unknown`, not “free failure”.
 - Routine Hub `down` never stops host Night-All or Launcher and never deletes Hub data.
-

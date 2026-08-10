@@ -1,4 +1,4 @@
-# ADR-0007: Managed source providers and change watermarks
+# ADR-0007: Managed data sources and change watermarks
 
 Status: accepted, with source-specific activation gates.
 
@@ -17,45 +17,36 @@ table can be incrementally synchronized without missing edits/deletions.
 
 ## Decision
 
-Use distinct, explicit resources:
+Use one explicit source resource:
 
 ```text
-source_provider 1 ── N external_source 1 ── N immutable mapping versions
-                              |
-                              ├── durable cursor / queued continuation
-                              └── N import runs / rejection evidence
+external_source 1 ── N immutable mapping versions
+        |
+        ├── direct PostgreSQL connection or file configuration
+        ├── durable cursor / queued continuation
+        └── N import runs / rejection evidence
 ```
-
-### Source provider
-
-A provider is a reusable connection/security boundary. The first implemented
-type is PostgreSQL. Only allowlisted coordinates (`host`, `port`, `database`,
-`username`, `sslMode`) are stored as readable configuration. Its password is
-encrypted with AES-256-GCM under `MX_INSIGHT_PROVIDER_MASTER_KEY`; list/update/test
-responses contain only `secretConfigured` and safe health evidence.
-
-Provider creation and every update that changes coordinates or password test
-the complete candidate connection in a read-only session **before** saving
-configuration or encrypted secret. A failed candidate leaves no new provider
-and does not replace the last-known-good provider. A display-name-only update is
-not a connection change. Sensitive update acquires the Provider lock plus every
-currently referencing source lock, rechecks the reference topology, and requires
-all referenced sources to be both `paused` and drained. A newly attached source
-causes `provider_topology_changed`; an active/running reference causes
-`provider_pause_required`.
-
-The master key is a platform Secret injected into Admin/combined and ingest
-workloads, not the public listener. Hub database backups contain ciphertext but
-not the key. Key drift is blocked; rotation requires re-encryption. Physical
-provider identity and credentials never enter the public data contract.
 
 ### External source
 
-A source binds one provider to a schema/table plus Hub dataset/platform/object
-type and polling policy. Connection coordinates can change only while the
-source is paused. Activation requires an approved mapping and a successful
-schema/index probe. A provider may serve many sources, but cannot be deleted
-while referenced.
+A PostgreSQL source owns its Hub dataset/platform/object type, polling policy,
+table/cursor mapping and its complete allowlisted connection:
+`host`, `port`, `database`, `username`, `password`, `sslMode`, `schema`, `table`,
+`cursorColumn` and `idColumn`. There is no separate Provider resource or
+credential master key. This keeps onboarding and changes on one Admin page.
+
+Only the platform Admin Token can list, create, view, test or update
+these sources. Launcher-login sessions and public API keys cannot access source
+management. The password is intentionally stored as plaintext inside
+`catalog.external_sources.connection` and may be returned to that Admin-token
+surface for management. Consequently Hub database readers, base/WAL/logical
+backups and any isolated restore can recover source credentials; those assets
+must be access-controlled, encrypted in storage/transit, audited and excluded
+from logs/support bundles.
+
+Create/update tests the complete candidate in a bounded read-only session.
+Connection coordinates can change only while that source is paused and drained.
+Activation requires an approved mapping and a successful schema/index probe.
 
 `PUT {status:"paused"}` stops new scheduling immediately but does not abort a
 transaction already reading/writing a batch. That batch is allowed to commit and
@@ -65,13 +56,10 @@ connection changes, mapping approval and reactivation return
 `409 source_draining`. Operators must observe the cursor becoming idle before a
 topology or mapping change.
 
-The legacy `dsnEnv` form remains read-only compatibility for existing sources;
-new source configuration uses `providerKey` so changing a password/host does
-not require a Hub deployment.
-
-The catalog persists the binding as an internal `provider_id` foreign key.
-Admin source responses expose both the stable operator-facing `providerKey`
-and opaque `providerId`; neither field is part of a public data response.
+The legacy `dsnEnv` form remains read-only compatibility for existing sources.
+New source configuration stores connection fields directly, so changing a
+password or host does not require a Hub deployment. No physical connection
+field or credential is part of a public data response.
 
 ### Mapping and data minimization
 
@@ -112,9 +100,8 @@ absorbs the replay; if it did not, the retry performs it. Resetting or creating 
 new run before resolving that ambiguity can split lineage or acknowledge the
 wrong position and is forbidden.
 
-Source and Provider topology operations use sorted PostgreSQL session advisory
-try-locks. Pull/reset share the source lock; Provider test/update/delete and
-source attach/change also take the relevant `provider:<key>` and source locks.
+Source topology operations use PostgreSQL session advisory try-locks.
+Pull/reset/test/connection change share the source lock.
 A conflict returns `409 source_busy` instead of waiting behind source I/O. Reset
 still requires a paused, drained source; it atomically marks every active
 database run for that source failed with `checkpoint_reset` and stores a fresh
@@ -156,7 +143,8 @@ timestamp assumption.
 
 ## Source-type boundary
 
-- PostgreSQL managed providers and direct CSV/JSON/XLSX file upload are
+- Admin-managed PostgreSQL sources and direct CSV/TSV, JSONL/NDJSON, TXT/MD and
+  XLSX/XLSM file upload are
   implemented.
 - A direct file source uses file-content hash, mapping version and import-run
   evidence; it is not a continuously watched directory or cloud bucket.
@@ -164,18 +152,18 @@ timestamp assumption.
   are future adapters. Each requires its own credentials allowlist, read-only
   test, pagination/checkpoint/delete semantics and driver tests. They are not
   represented as arbitrary PostgreSQL config and are not currently advertised
-  as available provider types.
+  as available source types.
 
 ## Consequences
 
-- Operators can create/test/rotate a PostgreSQL provider and attach multiple
-  sources without redeploying Hub.
-- A healthy provider can coexist with a deliberately paused unsafe source.
+- Operators can create/test/update each PostgreSQL source without redeploying
+  Hub; repeated tables on one database currently repeat their connection fields.
+- A healthy connection can coexist with a deliberately paused unsafe source.
 - PostgreSQL canonical state remains authoritative; Elasticsearch is rebuildable
   and a search outage cannot stop ingest/history.
 - Source onboarding takes an explicit schema/mapping/watermark review. This is
   intentional: silently skipped changes are more damaging than a visible paused
   source.
-- MX-H2I login/networking is outside this data-plane path. Hub deployment gives
-  the source master key only to Hub Admin/ingest workloads and does not alter
-  Launcher, Domestic/Internal routing, WireGuard, DNS or user connectivity.
+- MX-H2I login/networking is outside this data-plane path. Source management is
+  restricted to Hub's Admin Token and does not alter Launcher,
+  Domestic/Internal routing, WireGuard, DNS or user connectivity.

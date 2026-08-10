@@ -24,7 +24,7 @@ flowchart LR
 
 | Concern | Owner | Reason |
 | --- | --- | --- |
-| Provider credentials, endpoint selection, fallback, collection, normalization, evidence | Night-All | These change with source behavior and belong next to source integrations. |
+| Night-All upstream provider credentials, endpoint selection, fallback, collection, normalization, evidence | Night-All | These change with source behavior and belong next to source integrations. Direct PostgreSQL source credentials are the separate Admin-managed Hub exception. |
 | Customer tenant, consumer, API key, platform grant, plan, credit, idempotency and usage | MX Insight Hub | These are stable data-product and commercial semantics. |
 | Human operator IAM, K8s deployment, service routing, WireGuard/MX-H2I, public TLS | MX Launcher | These are platform control-plane concerns. |
 | Logs, metrics, traces and alert transport | Shared observability platform | Cross-service operation, but not a replacement for either business database. |

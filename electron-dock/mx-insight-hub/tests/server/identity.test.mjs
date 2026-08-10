@@ -293,7 +293,6 @@ test('a tenant owner can rename only their tenant and cannot create another tena
 
   for (const path of [
     '/internal/v1/ops/summary',
-    '/internal/v1/admin/sources',
     '/internal/v1/admin/agent',
     '/internal/v1/admin/backfill',
     '/internal/v1/admin/members',
@@ -303,6 +302,9 @@ test('a tenant owner can rename only their tenant and cannot create another tena
     assert.equal(denied.status, 403)
     assert.equal((await denied.json()).error.code, 'platform_admin_required')
   }
+  const sourceDenied = await callAdmin('/internal/v1/admin/sources', { token: 'mx-v1-owner' })
+  assert.equal(sourceDenied.status, 403)
+  assert.equal((await sourceDenied.json()).error.code, 'admin_token_required')
   const retrievalSearch = await callAdmin('/internal/v1/admin/retrieval/search', {
     token: 'mx-v1-owner', method: 'POST', body: { query: 'must stay platform scoped' },
   })
@@ -542,6 +544,29 @@ test('an allowlisted Launcher scope confers platform admin, and losing it revoke
     '/internal/v1/admin/retrieval',
   ]) {
     assert.equal((await callAdmin(path, { token: 'mx-v1-ops' })).status, 200)
+  }
+  const sourceManagementRoutes = [
+    ['GET', '/internal/v1/admin/sources'],
+    ['POST', '/internal/v1/admin/sources'],
+    ['GET', '/internal/v1/admin/sources/guard-probe'],
+    ['PUT', '/internal/v1/admin/sources/guard-probe'],
+    ['POST', '/internal/v1/admin/sources/guard-probe/test'],
+    ['GET', '/internal/v1/admin/sources/guard-probe/mappings'],
+    ['POST', '/internal/v1/admin/sources/guard-probe/mappings'],
+    ['POST', '/internal/v1/admin/sources/guard-probe/mappings/1/approve'],
+    ['GET', '/internal/v1/admin/sources/guard-probe/preview'],
+    ['POST', '/internal/v1/admin/sources/guard-probe/preview'],
+    ['GET', '/internal/v1/admin/sources/guard-probe/schema'],
+    ['GET', '/internal/v1/admin/sources/guard-probe/sync'],
+    ['POST', '/internal/v1/admin/sources/guard-probe/sync'],
+    ['POST', '/internal/v1/admin/sources/guard-probe/checkpoint/reset'],
+    ['POST', '/internal/v1/admin/sources/guard-probe/import'],
+    ['GET', '/internal/v1/admin/sources/guard-probe/imports'],
+  ]
+  for (const [method, path] of sourceManagementRoutes) {
+    const sourceDenied = await callAdmin(path, { token: 'mx-v1-ops', method })
+    assert.equal(sourceDenied.status, 403, `${method} ${path}`)
+    assert.equal((await sourceDenied.json()).error.code, 'admin_token_required', `${method} ${path}`)
   }
 
   // Scope removed upstream: the next sign-in must drop the Hub privilege too,

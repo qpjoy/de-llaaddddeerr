@@ -20,7 +20,7 @@ watermark: doing so permanently skips later edits and deletions.
 ```text
 collector/writer -> night_all PostgreSQL (authoritative source)
                               |
-                              | read-only provider connection
+                              | read-only source connection
                               v
 Hub ingest -> source objects -> canonical PostgreSQL -> projection outbox
                                       |                    |
@@ -44,7 +44,7 @@ Hub ingest -> source objects -> canonical PostgreSQL -> projection outbox
   search, username lookup, durable checkpointing or tombstone propagation.
 - Public responses may expose logical lineage such as `datasetId` and
   `origin=hub-direct`. They never expose the source host, database, table,
-  provider key, encrypted password, collector account, raw row or Night-All
+  source connection/password, collector account, raw row or Night-All
   endpoint/provider identifiers.
 
 The fixed Telegram canonical datasets do not contain `tenant_id`. Every
@@ -53,31 +53,23 @@ still protect API-key ownership, grants, policy, quota and usage. Stop and add a
 versioned row-scope model before different tenants require different Telegram
 subsets.
 
-## 2. Register the source provider
+## 2. Register a direct PostgreSQL source
 
-### 2.1 Platform encryption key
+### 2.1 Access and credential storage
 
-Admin/combined API and ingest workloads need one stable
-`MX_INSIGHT_PROVIDER_MASTER_KEY`: exactly 32 bytes encoded as base64, or 64
-hexadecimal characters. It encrypts provider passwords with AES-256-GCM before
-they enter the Hub catalog. It is not a database password and must be stored
-separately from the Hub PostgreSQL backup.
+Source management is deliberately simpler than public API-key management: it
+has no independent Provider resource and no provider/master key. Only requests
+authenticated with `x-mx-insight-admin-token` may list, create, inspect, test or
+change a source. Launcher-login sessions and customer API keys are
+rejected even if the Launcher identity has an admin role.
 
-The public listener does not receive this key. Deployment blocks silent key
-drift once the key is retained because changing it without re-encryption makes
-all registered provider passwords unreadable. Back up and restore the key under
-the same controls as the API-key pepper; do not rotate it by simply changing an
-environment variable.
-
-For production, setting this key is a release prerequisite for enabling the
-Provider management surface and provider-backed ingest: both Admin/combined
-and ingest must receive the same retained value before rollout. Public remains
-keyless.
-
-If the key is absent, provider-management and provider-backed pulls return a
-bounded `503 provider_registry_unavailable`. Legacy `dsnEnv` sources can still
-run, but new sources should use the provider registry so connection changes do
-not require image or deployment changes.
+PostgreSQL connection fields, including `password`, are stored as plaintext in
+`catalog.external_sources.connection` so the Admin-token console can display
+and edit one complete source configuration without a deployment. This is an
+explicit operational trade-off: anyone with Hub database, WAL, logical-backup
+or isolated-restore access can recover source credentials. Encrypt backup
+storage and transport, restrict/audit database and backup access, and never
+write the connection object to logs, traces, metrics or support bundles.
 
 ### 2.2 Least-privilege source role
 
@@ -100,80 +92,54 @@ addresses; the public API does not connect to `night_all`.
 
 ### 2.3 Admin API
 
-All endpoints in this section require platform-admin authentication.
+All endpoints in this section require the platform Admin Token specifically.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/internal/v1/admin/source-provider-types` | List available provider adapters and safe config/secret field names. |
-| `GET` | `/internal/v1/admin/source-providers` | List redacted registered providers. |
-| `POST` | `/internal/v1/admin/source-providers` | Register a provider. |
-| `PUT` | `/internal/v1/admin/source-providers/:key` | Update safe coordinates or rotate the write-only password. |
-| `DELETE` | `/internal/v1/admin/source-providers/:key` | Delete only when no source references it. |
-| `POST` | `/internal/v1/admin/source-providers/:key/test` | Run a bounded read-only connection test. |
+| `GET` | `/internal/v1/admin/sources` | List sources and their Admin-visible connection fields. |
+| `POST` | `/internal/v1/admin/sources` | Create a PostgreSQL or file source. |
+| `GET` | `/internal/v1/admin/sources/:key` | Read one Admin-visible source configuration. |
+| `PUT` | `/internal/v1/admin/sources/:key` | Change the source connection/status/schedule while safety gates permit. |
+| `POST` | `/internal/v1/admin/sources/:key/test` | Test the saved PostgreSQL connection read-only. |
+| `GET` | `/internal/v1/admin/sources/:key/schema` | Probe columns/indexes/constraints/triggers and activation issues. |
+| `GET, POST` | `/internal/v1/admin/sources/:key/mappings` | List mapping versions or create an unapproved version. |
+| `POST` | `/internal/v1/admin/sources/:key/mappings/:version/approve` | Approve an exact mapping while a database source is paused/drained. |
+| `GET` | `/internal/v1/admin/sources/:key/preview?limit=3` | Return value-free database row shapes. |
+| `POST` | `/internal/v1/admin/sources/:key/preview?filename=...&agent=false` | Preview raw file bytes locally; Agent opt-in receives column names only. |
+| `GET, POST` | `/internal/v1/admin/sources/:key/sync` | Inspect sync state or enqueue a manual database pull. |
+| `POST` | `/internal/v1/admin/sources/:key/checkpoint/reset` | Confirm and reset a paused/drained source checkpoint. |
+| `POST` | `/internal/v1/admin/sources/:key/import?filename=...` | Import raw file bytes through the approved mapping. |
+| `GET` | `/internal/v1/admin/sources/:key/imports` | List durable import-run evidence. |
 
-Register one PostgreSQL provider. The password is write-only: it is accepted in
-this request, encrypted, and never returned by list/create/update responses.
-Creation is not a draft save: Admin builds the complete candidate credentials,
-opens a bounded `default_transaction_read_only=on` session, and persists the
-provider only after that probe succeeds. A failed test leaves no provider row or
-secret envelope. If the Admin workload cannot run the PostgreSQL probe, creation
-returns `503 provider_validation_unavailable` rather than accepting an untested
-credential.
-
-```http
-POST /internal/v1/admin/source-providers
-Content-Type: application/json
-
-{
-  "providerKey": "night-all-postgres",
-  "displayName": "Night-All PostgreSQL",
-  "providerType": "postgresql",
-  "config": {
-    "host": "<internal-host-or-dns>",
-    "port": 5432,
-    "database": "night_all",
-    "username": "mx_data",
-    "sslMode": "require"
-  },
-  "password": "<provided-out-of-band>"
-}
-```
+Creation validates a complete database candidate with a bounded
+`default_transaction_read_only=on` session before it is accepted; a failed
+probe leaves no source record. The Telegram keys below are already seeded by
+migration 010, so configure them with `PUT` in §3 instead of attempting a
+duplicate `POST`.
 
 Use `sslMode=disable` only for a reviewed host-local/trusted transport where the
 server does not offer TLS. `require` encrypts transport but does not validate a
 CA; use `verify-ca` or `verify-full` when the deployment supplies a trusted
 certificate path.
 
-Verify the session before binding a source:
+Verify the saved session:
 
 ```http
-POST /internal/v1/admin/source-providers/night-all-postgres/test
+POST /internal/v1/admin/sources/telegram-monitor-chats/test
+x-mx-insight-admin-token: <admin-token>
 ```
 
-The response contains redacted provider metadata plus safe connection evidence:
-database/user/server version, `readOnly: true`, health status, check time and a
-machine error code. A driver message or password is never returned or persisted.
+The response contains safe connection evidence such as database/user/server
+version, `readOnly: true`, health status, check time and a bounded machine error
+code. The saved source response is Admin-token-only and can include its
+plaintext connection fields; public responses never do.
 
-A `PUT` that changes `config` or `password` is an atomic candidate rotation, not
-“save then test”. Admin acquires the Provider advisory lock and every currently
-referencing source lock in deterministic order, rechecks that the reference set
-did not change, and requires every reference to be both `paused` and no longer
-`cursor.status=running`. It then tests the merged candidate (new fields plus the
-unchanged stored secret/config) read-only and only on success replaces the
-encrypted envelope/coordinates. Therefore a typo cannot break all bound sources.
-An active or draining reference returns `409 provider_pause_required`; a newly
-attached reference returns `409 provider_topology_changed`; lock contention
-returns `409 source_busy`. A display-name-only `PUT` does not rotate a connection.
-The explicit test and delete routes also hold the Provider lock. Deletion remains
-blocked with `provider_in_use` while any source references it.
+A connection-changing `PUT` requires this source to be `paused` and its cursor
+to be no longer `running`. It tests the merged candidate before replacing the
+last-known-good connection. Draining returns `409 source_draining`; advisory
+lock contention returns `409 source_busy`.
 
-Provider list/create/update responses return the stable `providerKey` and an
-opaque `id`, never the password or encrypted envelope. Source records store the
-relationship as `provider_id` and return it as `providerId` together with
-`providerKey` for Admin correlation. Neither identifier crosses the public data
-API.
-
-## 3. Bind and inspect the registered sources
+## 3. Register and inspect both sources
 
 Migration 010 created stable source/dataset identities:
 
@@ -182,16 +148,23 @@ Migration 010 created stable source/dataset identities:
 | `telegram-monitor-chats` | `telegram.monitor.chats.v1` | `chat` |
 | `telegram-monitor-messages` | `telegram.monitor.messages.v1` | `message` |
 
-Bind each paused source to the provider. Physical schema/table names are
-control-plane configuration; they do not become public API inputs.
+Update each seeded paused source with its complete PostgreSQL connection.
+Physical connection and schema/table names are control-plane configuration;
+they do not become public API inputs.
 
 ```http
 PUT /internal/v1/admin/sources/telegram-monitor-chats
 Content-Type: application/json
+x-mx-insight-admin-token: <admin-token>
 
 {
-  "providerKey": "night-all-postgres",
   "connection": {
+    "host": "<internal-host-or-dns>",
+    "port": 5432,
+    "database": "night_all",
+    "username": "mx_data",
+    "password": "<provided-out-of-band>",
+    "sslMode": "require",
     "schema": "public",
     "table": "tg_monitor_chats",
     "cursorColumn": "updated_at",
@@ -202,13 +175,16 @@ Content-Type: application/json
 ```
 
 This records the reviewed chats cursor *candidate* so the schema probe can show
-its missing supporting source index; it is not approval to activate. Bind
-`telegram-monitor-messages` with only `schema` and `table` until the source
-owner supplies a real unified change cursor. A managed database source's
-`connection` accepts only `schema`, `table`, `cursorColumn` and `idColumn`.
-The old seeded `dsnEnv` name may remain in a legacy connection record for
-compatibility, but a bound top-level `providerKey` takes precedence and no
-literal DSN/password is accepted in a source body.
+its missing supporting source index; it is not approval to activate. Configure
+`telegram-monitor-messages` with the same host/database credentials plus its
+`schema` and `table`, but omit `cursorColumn` and `idColumn` until the source
+owner supplies a real unified change cursor. A PostgreSQL source's `connection`
+accepts only `host`, `port`, `database`, `username`, `password`, `sslMode`,
+`schema`, `table`, `cursorColumn` and `idColumn`.
+
+The old seeded `dsnEnv` form remains compatible for existing records and reads
+its DSN from the ingest/Admin workload environment. New source requests use the
+direct fields above; do not combine `dsnEnv` with direct coordinates.
 
 Use metadata and value-free shapes before looking at business values:
 
@@ -365,7 +341,7 @@ local by default: parsing, field inference and sample rendering do not call a
 model. Agent assistance is opt-in with `agent=true`; even then the model receives
 only the column-name array and `sampleRows: []`, never file values. The response
 records `agentDataScope=column_names_only`. This direct file path is implemented
-for CSV/JSON/XLSX uploads; it is not a watched directory, cloud bucket or cloud
+for CSV/TSV, JSONL/NDJSON, TXT/MD and XLSX/XLSM uploads; it is not a watched directory, cloud bucket or cloud
 warehouse adapter.
 
 ## 5. Continuous-sync gate (currently open)
@@ -424,13 +400,13 @@ For each table independently:
 - a full unique index proves the ID/pair forms a total order;
 - writer commit ordering or CDC position semantics are documented and tested;
 - approved mapping matches current column types;
-- provider test and source schema probe return no issues;
+- source connection test and schema probe return no issues;
 - initial full-table load and source impact are accepted.
 
 There is no safe bounded snapshot/canary mode in the current database puller:
 `batchSize` limits each transaction, not total rows, and continuations drain to
 the current end. Do not set `batchSize=3` expecting only three records. A
-one-time exported CSV/JSON/XLSX can use the existing direct file importer, but
+one-time exported CSV/TSV, JSONL/NDJSON, TXT/MD or XLSX/XLSM can use the existing direct file importer, but
 that is a separately evidenced snapshot, not continuous database synchronization
 or a cloud/object-storage connector.
 
@@ -464,8 +440,7 @@ Pausing is deliberately a batch-boundary drain, not a transaction kill. The
 starting, while a batch already holding the source lock may finish its canonical
 COMMIT and checkpoint acknowledgement. During this interval source status is
 paused but cursor status is still running. Connection changes, mapping approval
-and reactivation return `409 source_draining`; Provider rotation reports the
-source under `provider_pause_required`. Wait until `GET .../sync` shows a
+and reactivation return `409 source_draining`. Wait until `GET .../sync` shows a
 non-running cursor before changing topology, approving a mapping or resetting.
 
 The durable queue/cursor and import runs expose status, trigger
@@ -521,7 +496,7 @@ Correctness rules:
   leaves the previous checkpoint unchanged;
 - failed cursors do not auto-retry every scheduler tick. Pause/fix/probe,
   approve a new mapping when required, then explicitly resume;
-- the checkpoint carries a hash of provider coordinates, table, cursor,
+- the checkpoint carries a hash of source coordinates, table, cursor,
   dataset/object identity and mapping version. A changed contract returns
   `checkpoint_contract_mismatch` instead of continuing from an unrelated
   position. Reset is an explicit paused-source action and requires an exact

@@ -102,6 +102,20 @@ bash -c '
 ' _ "$ROOT_DIR"
 printf 'ok - absent Secret is provisioned rather than refused\n'
 
+# Direct source credentials now live in the Admin-managed catalog. Production
+# validation must therefore succeed without a separate provider credential key.
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  load_env_file() { :; }
+  export MX_INSIGHT_ADMIN_TOKEN=admin-token-with-at-least-32-bytes
+  export MX_INSIGHT_API_KEY_PEPPER=api-key-pepper-with-at-least-32-bytes
+  export NIGHT_ALL_BASE_URL=http://127.0.0.1:13141
+  unset MX_INSIGHT_POSTGRES_PASSWORD
+  require_production_env
+' _ "$ROOT_DIR"
+printf 'ok - production validation needs no separate source credential key\n'
+
 # ---------------------------------------------------------------------------
 # Database provisioning
 # ---------------------------------------------------------------------------
@@ -206,6 +220,15 @@ printf 'ok - local Compose wires the periodic external-pull worker\n'
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE=' "$ROOT_DIR/scripts/manage.sh"
 printf 'ok - internal runtime ConfigMap wires external-pull scheduling controls\n'
+
+if rg -q 'MX_INSIGHT_PROVIDER_MASTER_KEY' \
+  "$ROOT_DIR/.env.example" \
+  "$ROOT_DIR/deploy" \
+  "$ROOT_DIR/scripts/manage.sh"; then
+  printf 'not ok - retired source credential master key is still required by deployment\n' >&2
+  exit 1
+fi
+printf 'ok - deployment has no separate source credential master key\n'
 
 # ---------------------------------------------------------------------------
 # Retired local PostgreSQL

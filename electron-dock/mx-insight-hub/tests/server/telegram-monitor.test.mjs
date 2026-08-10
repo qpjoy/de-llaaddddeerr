@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
+import { AppError } from '../../server/core/errors.mjs'
 import { HubService } from '../../server/hub-service.mjs'
-import { ProviderRegistry } from '../../server/ingest/external/provider-registry.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 import {
@@ -309,96 +309,133 @@ test('manual sync does not fork a second run while the source cursor is running'
   assert.equal(enqueued, false)
 })
 
-test('provider admin routes preflight secrets and require referenced sources to be paused and drained', async () => {
-  const store = new MemoryStore()
-  let referenced = []
-  store.listExternalSources = async () => referenced
-  const providerRegistry = new ProviderRegistry({ store, masterKey: '33'.repeat(32) })
+test('admin-token direct source routes preflight credentials and return the stored plaintext password', async () => {
+  let source = null
+  let createCalls = 0
+  let updateCalls = 0
+  const store = {
+    getExternalSource: async (key) => source?.sourceKey === key ? source : null,
+    listExternalSources: async () => source ? [source] : [],
+    createExternalSource: async (input) => {
+      createCalls += 1
+      source = { id: 'source-1', createdAt: '2026-08-10T00:00:00.000Z', updatedAt: '2026-08-10T00:00:00.000Z', ...input }
+      return source
+    },
+    updateExternalSource: async (_key, patch) => {
+      updateCalls += 1
+      source = {
+        ...source,
+        ...(patch.status == null ? {} : { status: patch.status }),
+        ...(patch.connection == null ? {} : { connection: patch.connection }),
+      }
+      return source
+    },
+  }
+  const tested = []
   const databasePuller = {
-    testProviderCredentials: async (credentials) => ({
-      database: credentials.database,
-      user: credentials.username,
+    testConnection: async (connection) => {
+      tested.push(structuredClone(connection))
+      if (connection.password === 'wrong-password') {
+        throw new AppError(503, 'source_connection_failed', 'PostgreSQL source connection test failed')
+      }
+      return {
+        database: connection.database,
+        user: connection.username,
+        serverVersion: '16.11',
+        readOnly: true,
+      }
+    },
+    testSource: async (key) => ({
+      database: source.connection.database,
+      user: source.connection.username,
       serverVersion: '16.11',
       readOnly: true,
     }),
-    testProvider: async (key) => ({
-      provider: await providerRegistry.get(key),
-      connection: { database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true },
-    }),
   }
   const app = createApp({
-    service: {}, store, providerRegistry, databasePuller, queue: {},
+    service: {}, store, databasePuller, queue: { getCursor: async () => ({ status: 'idle' }) },
     adapter: { dependencies: async () => ({ status: 'up' }) },
     adminToken: ADMIN_TOKEN,
   })
   await withServer(app, async (baseUrl) => {
     const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
-    const types = await call(baseUrl, '/internal/v1/admin/source-provider-types', { headers })
-    assert.equal(types.response.status, 200)
-    assert.equal(types.payload.data[0].available, true)
-
-    const created = await call(baseUrl, '/internal/v1/admin/source-providers', {
+    const direct = {
+      host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
+      password: 'first-private-password', sslMode: 'disable', schema: 'public',
+      table: 'tg_monitor_messages', cursorColumn: 'updated_at', idColumn: 'id',
+    }
+    for (const sourceKey of ['bad key', 'bad\nkey', 'bad/key', 'A'.repeat(10), 'a'.repeat(129)]) {
+      const invalidKey = await call(baseUrl, '/internal/v1/admin/sources', {
+        method: 'POST', headers,
+        body: { sourceKey, displayName: 'Invalid source', sourceKind: 'database', connection: direct },
+      })
+      assert.equal(invalidKey.response.status, 400)
+      assert.equal(invalidKey.payload.error.code, 'invalid_source_key')
+      assert.equal(tested.length, 0)
+      assert.equal(createCalls, 0)
+    }
+    const failedCreate = await call(baseUrl, '/internal/v1/admin/sources', {
       method: 'POST', headers,
       body: {
-        providerKey: 'night-all-pg', displayName: 'Night-All', providerType: 'postgresql',
-        config: {
-          host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data', sslMode: 'disable',
-        },
-        password: 'first-private-password',
+        sourceKey: 'telegram-monitor-messages', displayName: 'Telegram messages', sourceKind: 'database',
+        connection: { ...direct, password: 'wrong-password' },
+      },
+    })
+    assert.equal(failedCreate.response.status, 503)
+    assert.equal(failedCreate.payload.error.code, 'source_connection_failed')
+    assert.equal(createCalls, 0)
+
+    const created = await call(baseUrl, '/internal/v1/admin/sources', {
+      method: 'POST', headers,
+      body: {
+        sourceKey: 'telegram-monitor-messages', displayName: 'Telegram messages', sourceKind: 'database',
+        datasetId: 'telegram.monitor.messages.v1', platform: 'telegram', objectType: 'message', connection: direct,
       },
     })
     assert.equal(created.response.status, 201)
-    assert.equal(created.payload.data.secretConfigured, true)
-    assert.equal(JSON.stringify(created.payload).includes('first-private-password'), false)
-    assert.equal('encryptedSecret' in created.payload.data, false)
+    assert.equal(created.payload.data.connection.password, 'first-private-password')
+    assert.equal(source.status, 'paused')
 
-    referenced = [{ sourceKey: 'telegram-monitor-messages', providerKey: 'night-all-pg', status: 'active' }]
-    const activeRotation = await call(baseUrl, '/internal/v1/admin/source-providers/night-all-pg', {
-      method: 'PUT', headers, body: { password: 'rotated-private-password' },
+    const listed = await call(baseUrl, '/internal/v1/admin/sources', { headers })
+    assert.equal(listed.payload.data[0].connection.password, 'first-private-password')
+    const detail = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', { headers })
+    assert.equal(detail.payload.data.connection.password, 'first-private-password')
+
+    const failedRotation = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+      method: 'PUT', headers, body: { connection: { password: 'wrong-password' } },
     })
-    assert.equal(activeRotation.response.status, 409)
-    assert.equal(activeRotation.payload.error.code, 'provider_pause_required')
-    assert.equal((await providerRegistry.resolveCredentials('night-all-pg')).password, 'first-private-password')
+    assert.equal(failedRotation.response.status, 503)
+    assert.equal(source.connection.password, 'first-private-password')
+    assert.equal(updateCalls, 0)
 
-    referenced[0].status = 'paused'
-    const rotated = await call(baseUrl, '/internal/v1/admin/source-providers/night-all-pg', {
-      method: 'PUT', headers, body: { password: 'rotated-private-password' },
+    const rotated = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+      method: 'PUT', headers, body: { connection: { password: 'rotated-private-password' } },
     })
     assert.equal(rotated.response.status, 200)
-    assert.equal((await providerRegistry.resolveCredentials('night-all-pg')).password, 'rotated-private-password')
-    assert.equal(JSON.stringify(rotated.payload).includes('rotated-private-password'), false)
+    assert.equal(rotated.payload.data.connection.password, 'rotated-private-password')
+    assert.equal(source.connection.password, 'rotated-private-password')
 
-    const coordinates = await call(baseUrl, '/internal/v1/admin/source-providers/night-all-pg', {
-      method: 'PUT', headers,
-      body: {
-        config: {
-          host: 'other.internal', port: 5432, database: 'night_all', username: 'mx_data', sslMode: 'disable',
-        },
-      },
-    })
-    assert.equal(coordinates.response.status, 200)
-    assert.equal(coordinates.payload.data.config.host, 'other.internal')
-
-    const deletion = await call(baseUrl, '/internal/v1/admin/source-providers/night-all-pg', {
-      method: 'DELETE', headers,
-    })
-    assert.equal(deletion.response.status, 409)
-    assert.equal(deletion.payload.error.code, 'provider_in_use')
-
-    const tested = await call(baseUrl, '/internal/v1/admin/source-providers/night-all-pg/test', {
+    const connectionTest = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages/test', {
       method: 'POST', headers,
     })
-    assert.equal(tested.response.status, 200)
-    assert.deepEqual(tested.payload.data.connection, {
+    assert.equal(connectionTest.response.status, 200)
+    assert.deepEqual(connectionTest.payload.data, {
       database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true,
     })
 
-    const listed = await call(baseUrl, '/internal/v1/admin/source-providers', { headers })
-    const serialized = JSON.stringify(listed.payload)
-    assert.equal(serialized.includes('first-private-password'), false)
-    assert.equal(serialized.includes('rotated-private-password'), false)
-    assert.equal(serialized.includes('ciphertext'), false)
+    const retiredProviderRoute = await call(baseUrl, '/internal/v1/admin/source-providers', { headers })
+    assert.equal(retiredProviderRoute.response.status, 404)
+
+    const apiKeyDenied = await call(baseUrl, '/internal/v1/admin/sources', {
+      headers: { 'x-api-key': 'mih_live_fake_api_key' },
+    })
+    assert.equal(apiKeyDenied.response.status, 403)
+    assert.equal(apiKeyDenied.payload.error.code, 'admin_token_required')
   })
+  assert.equal(tested[0].password, 'wrong-password')
+  assert.equal(tested[1].password, 'first-private-password')
+  assert.equal(tested[2].password, 'wrong-password')
+  assert.equal(tested[3].password, 'rotated-private-password')
 })
 
 test('checkpoint reset requires a paused source and exact source-key confirmation', async () => {
@@ -506,7 +543,10 @@ test('a paused database source cannot activate before mapping and schema gates p
   }
   const app = createApp({
     service: {}, store,
-    databasePuller: { describe: async () => ({ issues }) },
+    databasePuller: {
+      describe: async () => ({ issues }),
+      testConnection: async () => ({ database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true }),
+    },
     queue: {},
     adapter: { dependencies: async () => ({ status: 'up' }) },
     adminToken: ADMIN_TOKEN,
@@ -539,6 +579,60 @@ test('a paused database source cannot activate before mapping and schema gates p
     assert.equal(activated.response.status, 200)
     assert.equal(activated.payload.data.status, 'active')
   })
+})
+
+test('a paused source can switch between legacy dsnEnv and direct credentials without ambiguous residue', async () => {
+  let source = {
+    id: 'source-1', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'paused',
+    connection: {
+      dsnEnv: 'TG_DATABASE_URL', schema: 'public', table: 'tg_monitor_messages',
+      cursorColumn: 'updated_at', idColumn: 'id',
+    },
+  }
+  const tested = []
+  const store = {
+    getExternalSource: async () => source,
+    updateExternalSource: async (_key, patch) => {
+      source = { ...source, connection: patch.connection ?? source.connection }
+      return source
+    },
+  }
+  const app = createApp({
+    service: {}, store,
+    databasePuller: {
+      testConnection: async (connection) => {
+        tested.push(structuredClone(connection))
+        return { database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true }
+      },
+    },
+    queue: { getCursor: async () => ({ status: 'idle' }) },
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+  await withServer(app, async (baseUrl) => {
+    const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+    const direct = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+      method: 'PUT', headers,
+      body: { connection: {
+        host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
+        password: 'plain-password', sslMode: 'verify-ca',
+      } },
+    })
+    assert.equal(direct.response.status, 200)
+    assert.equal(direct.payload.data.connection.dsnEnv, undefined)
+    assert.equal(direct.payload.data.connection.password, 'plain-password')
+
+    const legacy = await call(baseUrl, '/internal/v1/admin/sources/telegram-monitor-messages', {
+      method: 'PUT', headers, body: { connection: { dsnEnv: 'TG_DATABASE_URL' } },
+    })
+    assert.equal(legacy.response.status, 200)
+    assert.equal(legacy.payload.data.connection.dsnEnv, 'TG_DATABASE_URL')
+    for (const field of ['host', 'port', 'database', 'username', 'password', 'sslMode']) {
+      assert.equal(legacy.payload.data.connection[field], undefined)
+    }
+  })
+  assert.equal(tested[0].dsnEnv, undefined)
+  assert.equal(tested[1].dsnEnv, 'TG_DATABASE_URL')
 })
 
 test('an active database source must be paused before connection metadata changes', async () => {

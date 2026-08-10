@@ -281,8 +281,7 @@ test('a database source refuses to run without a DSN environment variable', asyn
     getExternalSource: async () => ({
       id: 's1', sourceKey: 'legacy', sourceKind: 'database',
       datasetId: 'd', platform: 'external', objectType: 'record', status: 'active',
-      // The DSN is referenced by env var name, never stored in the row: a
-      // password in a database row is a password in every backup.
+      // Legacy deployment-managed DSNs remain supported.
       connection: {
         table: 'posts', dsnEnv: 'DEFINITELY_NOT_SET_IN_TESTS',
         cursorColumn: 'updated_at', idColumn: 'id',
@@ -300,13 +299,165 @@ test('a database source rejects a file-kind source', async () => {
   await assert.rejects(() => puller.pullBatch('sheet'), /not a database source/)
 })
 
-test('a database source accepts an env name but rejects literal connection secrets', () => {
+test('a database source accepts direct credentials or a legacy env name but rejects literal DSNs', () => {
   assert.equal(validateDatabaseConnection({
     dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_messages', cursorColumn: 'updated_at', idColumn: 'id',
+  }), true)
+  assert.equal(validateDatabaseConnection({
+    host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
+    password: 'plain-by-operator-policy', sslMode: 'disable', schema: 'public',
+    table: 'tg_monitor_messages', cursorColumn: 'updated_at', idColumn: 'id',
   }), true)
   assert.throws(
     () => validateDatabaseConnection({ dsn: 'postgres://user:secret@db/x', table: 'messages' }),
     /Unsupported database connection fields/,
+  )
+  assert.throws(
+    () => validateDatabaseConnection({
+      dsnEnv: 'TG_DATABASE_URL', host: 'database.internal', database: 'night_all',
+      username: 'mx_data', password: 'ambiguous', table: 'messages',
+    }),
+    /either connection\.dsnEnv or direct PostgreSQL credentials/,
+  )
+})
+
+test('direct source tests reload plaintext credentials for every read-only session', async () => {
+  let password = 'first-password'
+  const optionsSeen = []
+  const store = {
+    getExternalSource: async () => ({
+      id: 's1', sourceKey: 'direct', sourceKind: 'database', status: 'paused',
+      connection: {
+        host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
+        password, sslMode: 'verify-full', schema: 'public', table: 'tg_monitor_messages',
+      },
+    }),
+    getActiveMapping: async () => null,
+  }
+  const puller = new DatabaseSourcePuller({
+    store,
+    queue: null,
+    poolFactory: (options) => {
+      optionsSeen.push(options)
+      return {
+        query: async () => ({ rows: [{
+          database_name: 'night_all', database_user: 'mx_data', server_version: '16.11', read_only: 'on',
+        }] }),
+        end: async () => {},
+      }
+    },
+  })
+
+  assert.deepEqual(await puller.testSource('direct'), {
+    database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true,
+  })
+  password = 'rotated-password'
+  await puller.testSource('direct')
+  const direct = await store.getExternalSource()
+  direct.connection.sslMode = 'verify-ca'
+  store.getExternalSource = async () => direct
+  await puller.testSource('direct')
+  assert.equal(optionsSeen[0].password, 'first-password')
+  assert.equal(optionsSeen[1].password, 'rotated-password')
+  assert.equal(optionsSeen[0].options, '-c default_transaction_read_only=on')
+  assert.equal(optionsSeen[0].connectionTimeoutMillis, 10_000)
+  assert.deepEqual(optionsSeen[0].ssl, { rejectUnauthorized: true })
+  assert.equal(optionsSeen[2].ssl.rejectUnauthorized, true)
+  assert.equal(typeof optionsSeen[2].ssl.checkServerIdentity, 'function')
+})
+
+test('source connection failures never echo host, username, or password', async () => {
+  const connection = {
+    host: 'private.internal', port: 5432, database: 'night_all', username: 'private_user',
+    password: 'private-password', sslMode: 'disable', schema: 'public', table: 'messages',
+  }
+  const puller = new DatabaseSourcePuller({
+    store: {}, queue: null,
+    poolFactory: () => {
+      throw new Error('postgres://private_user:private-password@private.internal/night_all refused')
+    },
+  })
+  await assert.rejects(
+    () => puller.testConnection(connection),
+    (error) => error?.status === 503
+      && error?.code === 'source_connection_failed'
+      && !error.message.includes('private.internal')
+      && !error.message.includes('private_user')
+      && !error.message.includes('private-password'),
+  )
+})
+
+test('schema and preview driver failures never expose source coordinates to admin logs', async () => {
+  const leaked = 'postgres://private_user:private-password@private.internal/night_all'
+  const source = {
+    id: 's1', sourceKey: 'direct', sourceKind: 'database', status: 'paused',
+    connection: {
+      host: 'private.internal', port: 5432, database: 'night_all', username: 'private_user',
+      password: 'private-password', sslMode: 'disable', schema: 'public', table: 'messages',
+    },
+  }
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => null,
+    },
+    queue: null,
+    poolFactory: () => ({
+      query: async () => { throw new Error(`${leaked} refused`) },
+      end: async () => {},
+    }),
+  })
+
+  for (const [operation, code, message] of [
+    [() => puller.describe('direct'), 'source_schema_probe_failed', 'PostgreSQL source schema probe failed'],
+    [() => puller.preview('direct'), 'source_preview_failed', 'PostgreSQL source preview failed'],
+  ]) {
+    let adminError
+    try {
+      await operation()
+    } catch (error) {
+      adminError = error
+    }
+    assert.equal(adminError?.status, 503)
+    assert.equal(adminError?.code, code)
+    assert.equal(adminError?.message, message)
+    const logged = adminError?.stack || adminError?.message
+    for (const secret of [leaked, 'private.internal', 'private_user', 'private-password']) {
+      assert.equal(logged.includes(secret), false)
+    }
+  }
+})
+
+test('password rotation preserves the checkpoint contract while coordinate changes require reset', async () => {
+  const source = {
+    id: 's1', sourceKey: 'direct', sourceKind: 'database', status: 'paused',
+    datasetId: 'telegram.monitor.messages.v1', platform: 'telegram', objectType: 'message',
+    connection: {
+      host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
+      password: 'first-password', sslMode: 'disable', schema: 'public', table: 'tg_monitor_messages',
+      cursorColumn: 'updated_at', idColumn: 'id',
+    },
+  }
+  const mapping = { version: 2, fieldMap: { externalId: { from: 'id' } } }
+  let saved = null
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+    },
+    queue: { getCursor: async () => saved },
+  })
+
+  const initial = await puller.assertCheckpointCompatible('direct')
+  saved = { position: { contractHash: initial.contractHash, mappingVersion: 2 } }
+  source.connection.password = 'rotated-password'
+  const rotated = await puller.assertCheckpointCompatible('direct')
+  assert.equal(rotated.contractHash, initial.contractHash)
+
+  source.connection.host = 'replacement.internal'
+  await assert.rejects(
+    () => puller.assertCheckpointCompatible('direct'),
+    (error) => error?.status === 409 && error?.code === 'checkpoint_contract_mismatch',
   )
 })
 
@@ -647,7 +798,7 @@ test('a rejected database row records evidence and does not advance its cursor',
   assert.equal(saved.at(-1).options.status, 'failed')
 })
 
-test('a failed database ingest records only a safe code and leaves its cursor unchanged', async () => {
+test('a failed database ingest exposes only a safe worker/job error and leaves its cursor unchanged', async () => {
   const position = {}
   const saved = []
   const finished = []
@@ -690,7 +841,23 @@ test('a failed database ingest records only a safe code and leaves its cursor un
     }),
   })
 
-  await assert.rejects(() => puller.pullBatch(source.sourceKey), /private\.invalid/)
+  let workerError
+  try {
+    await puller.pullBatch(source.sourceKey)
+  } catch (error) {
+    workerError = error
+  }
+  assert.equal(workerError?.status, 503)
+  assert.equal(workerError?.code, 'ECONNRESET')
+  assert.equal(workerError?.message, 'External source pull failed; retry from the last durable checkpoint')
+  // mx-common logs the rejected error and persists error.message in
+  // mxq.jobs.last_error. Both representations must be safe at this boundary.
+  const workerLog = workerError?.stack || workerError?.message
+  const jobLastError = workerError?.message
+  for (const secret of ['postgres://user:secret@private.invalid', 'private.invalid', 'user', 'secret']) {
+    assert.equal(workerLog.includes(secret), false)
+    assert.equal(jobLastError.includes(secret), false)
+  }
   assert.equal(finished.at(-1).result.status, 'failed')
   assert.equal(finished.at(-1).result.error, 'ECONNRESET')
   assert.equal(JSON.stringify(finished).includes('private.invalid'), false)
@@ -777,7 +944,12 @@ test('a reclaimed batch resumes one durable import run after canonical commit bu
     }),
   })
 
-  await assert.rejects(() => puller.pullBatch(source.sourceKey, { batchSize: 10 }), /checkpoint write failed/)
+  await assert.rejects(
+    () => puller.pullBatch(source.sourceKey, { batchSize: 10 }),
+    (error) => error?.status === 503
+      && error?.code === 'Error'
+      && error?.message === 'External source pull failed; retry from the last durable checkpoint',
+  )
   assert.equal(cursor.position.importRunId, 'run-stable')
   assert.equal(cursor.position.cursor, undefined)
   assert.equal(finished.length, 0)

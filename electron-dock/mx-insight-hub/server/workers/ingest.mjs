@@ -4,7 +4,6 @@ import { NightAllAdapter } from '../adapters/night-all.mjs'
 import { loadConfig } from '../config.mjs'
 import { NightAllBackfill } from '../ingest/backfill.mjs'
 import { DatabaseSourcePuller } from '../ingest/external/database-source.mjs'
-import { ProviderRegistry } from '../ingest/external/provider-registry.mjs'
 import { runExternalPullScheduler } from '../ingest/external/scheduler.mjs'
 import { EXTERNAL_PULL_QUEUE, runExternalPullJob } from '../ingest/external/sync-job.mjs'
 import { createPostgresStore } from '../stores/postgres-store.mjs'
@@ -37,10 +36,7 @@ async function main() {
   // has to read from the same table.
   const queue = createQueue({ ...config.common.queue, driver: 'postgres' }, { pool, logger })
   const backfill = new NightAllBackfill({ store, adapter, queue, logger })
-  const providerRegistry = config.providerMasterKey
-    ? new ProviderRegistry({ store, masterKey: config.providerMasterKey })
-    : null
-  const databasePuller = new DatabaseSourcePuller({ store, queue, logger, providerRegistry })
+  const databasePuller = new DatabaseSourcePuller({ store, queue, logger })
 
   const controller = new AbortController()
   const shutdown = (signal) => {

@@ -14,10 +14,10 @@ bash scripts/manage.sh up
 
 This builds from the `electron-dock` parent context so the real sibling `mx-launcher/ui-design` package is available, starts PostgreSQL and the combined Hub, runs migrations, bootstraps local records and performs a control-plane smoke.
 
-Compose supplies an obviously local-only provider master key so the managed
-source UI can be exercised. Override it with a stable 32-byte base64/64-hex
-value when local provider records must survive configuration changes; never
-reuse the local value in Internal production.
+The Admin-token-only source UI stores PostgreSQL connection fields directly in
+the local Hub catalog; no separate source credential key is required. Treat the
+local PostgreSQL volume and any dump as secret-bearing when a real source
+password has been entered.
 
 Endpoints:
 
@@ -43,7 +43,7 @@ Normal smoke validates health and Admin auth but deliberately does not call paid
 The Compose stack has its own PostgreSQL volume and never mounts the Night-All
 source directory or database. By default it calls Night-All only over its HTTP
 facade and has no registered direct source. An operator may explicitly register
-a read-only PostgreSQL source provider for schema/ingest tests; Hub still opens
+a read-only PostgreSQL source for schema/ingest tests; Hub still opens
 that session read-only and does not acquire writer/scheduler ownership. Stopping
 Hub does not stop or mutate host Night-All.
 

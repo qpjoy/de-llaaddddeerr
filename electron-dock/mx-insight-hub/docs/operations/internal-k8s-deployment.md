@@ -31,42 +31,33 @@ Create `.env.internal` with mode `0600`:
 ```bash
 MX_INSIGHT_ADMIN_TOKEN=<long-random-token>
 MX_INSIGHT_API_KEY_PEPPER=<long-random-pepper>
-MX_INSIGHT_PROVIDER_MASTER_KEY=<32-byte-base64-or-64-hex>
 NIGHT_ALL_BASE_URL=http://192.168.1.2:13141
 NIGHT_ALL_SERVICE_TOKEN=<night-all-workload-token-when-supported>
 
 # Optional: mx-common otherwise generates and retains the Hub database password.
 MX_INSIGHT_POSTGRES_PASSWORD=<explicit-url-safe-password-if-pinning-is-required>
 
-# Legacy source compatibility only. New source credentials are registered in
-# the Hub Admin console/API and encrypted under MX_INSIGHT_PROVIDER_MASTER_KEY.
+# Legacy source compatibility only. New source credentials are saved directly
+# on the data source through the Admin-token-only Hub console/API.
 MX_INSIGHT_TG_MONITOR_DATABASE_URL=<night-all-readonly-postgres-dsn>
 ```
 
 Generate independent values (for example, `openssl rand -hex 32`). Do not reuse
-the Admin Token as an API key, provider master key, database password or source
-credential. The
+the Admin Token as an API key, database password or source credential. The
 deploy script renders a ConfigMap and Secrets with `kubectl create
 --dry-run=client | kubectl apply`; values are not written into manifests or the
-Hub source catalog.
+Hub source catalog. New PostgreSQL source coordinates and passwords are instead
+written to `catalog.external_sources.connection` by the Admin Token and take
+effect without a deployment. This intentional plaintext storage makes the Hub
+database, WAL/logical backups and Admin source responses secret-bearing; restrict
+database/backup access and never print connection objects in deploy logs.
 
 The Hub database DSN is returned by `mx-common provision` and stored in the Hub
-runtime Secret. Repeated deploys reuse the credential. The provider master key
-is injected only into Admin and ingest workloads; the public API reads Hub
-PostgreSQL and cannot decrypt source credentials. Provider passwords are
-write-only Admin input and are stored as AES-256-GCM envelopes in the catalog;
-coordinates are allowlisted. This lets operators update/test a source without
-rebuilding or redeploying Hub. The optional legacy Telegram DSN has the same
-Admin/ingest-only boundary.
-
-The deploy refuses a retained provider-master-key mismatch. A Hub database
-restore containing provider envelopes is incomplete without the original key;
-rotation requires an explicit decrypt/re-encrypt procedure, not an environment
-variable replacement.
-
-Production deploy treats the master key as an explicit release prerequisite
-for the Provider Admin surface and provider-backed ingest. Admin/combined and
-ingest receive the same retained key; public must not receive it.
+runtime Secret. Repeated deploys reuse the credential. Source management is
+available only to the Admin Token; Launcher login sessions and public API keys
+cannot create, inspect, test or change source connections. Pull sessions are
+still forced read-only. The optional legacy Telegram DSN remains a Secret for
+old `dsnEnv` source records only.
 
 ## Independent deploy
 
@@ -166,11 +157,11 @@ profile, not approval for public internet exposure.
 
 ## Data-plane expansion boundary
 
-Canonical PostgreSQL storage/tombstones, direct file import, encrypted
-PostgreSQL providers, queues, ingest/projector workers, shared
+Canonical PostgreSQL storage/tombstones, Admin-managed direct PostgreSQL/file
+sources, queues, ingest/projector workers, shared
 Elasticsearch/Redis integration and optional HanLP are implemented. Immutable
 raw object/cloud storage, `/shared_dir` watcher, freshness-aware live fallback,
-generic CDC, non-PostgreSQL providers, BI datasets and governed Text2SQL remain
+generic CDC, non-PostgreSQL sources, BI datasets and governed Text2SQL remain
 separate future capabilities. A mapped source tombstone is propagated today;
 the open Telegram issue is obtaining a watermark that reliably observes every
 edit/delete. A shared search outage may degrade retrieval but

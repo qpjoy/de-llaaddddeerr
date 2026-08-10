@@ -1,6 +1,6 @@
 # Admin console design
 
-Status: implemented; source-provider/data-source workflow updated on 2026-08-10.
+Status: implemented; direct data-source workflow updated on 2026-08-10.
 
 ## Sources
 
@@ -19,24 +19,28 @@ The console intentionally keeps Sub2API-like operational clarity while using the
 | Business governance | API Keys | Issue one-time secrets, filter keys and perform explicit revocation. |
 | Policy control | Plans and quotas | Explain and edit product-limit semantics. |
 | Policy control | Platforms | Grant concrete platforms and configure consumer-specific windows/page size. |
-| Data plane | External sources | Register/test encrypted PostgreSQL providers; bind paused sources; inspect schema/value shapes; review/approve mappings; activate, sync and inspect checkpoints/import-run counts. Direct file upload remains a provider-free source path. |
+| Data plane | External sources | Register/test PostgreSQL connections directly on paused sources; inspect schema/value shapes; review/approve mappings; activate, sync and inspect checkpoints/import-run counts. Direct file upload remains supported. |
 | Observability | Usage | Inspect request evidence without exposing provider details. |
 | Observability | Runtime | Separate liveness, store readiness and Night-All readiness. |
 
 Admin authentication is a session-only bootstrap surface. The token is kept in browser session storage, never written to the URL, and automatically cleared on authorization failure or explicit logout.
 
 The source UI deliberately separates connection health from synchronization
-safety. A green provider test proves a read-only session, not that a table has a
-safe watermark; source activation remains blocked by mapping/schema/index
-issues. Provider passwords are write-only fields, never prefilled or rendered.
-Provider create and connection/secret update are candidate operations: the
-read-only probe succeeds before anything is saved. Sensitive update requires all
-referencing sources paused and drained and serializes Provider/source topology;
-the UI keeps the last-known-good values on a failed probe and surfaces
-`provider_pause_required`, `provider_topology_changed` or `source_busy` directly.
+safety. A green source connection test proves a read-only session, not that a
+table has a safe watermark; source activation remains blocked by
+mapping/schema/index issues. PostgreSQL host, port, database, username,
+password, SSL mode, schema/table and cursor fields live directly on the source.
+The Admin Token can view and change them; Launcher-login admins and public API
+keys cannot access this page or its routes. The password is intentionally stored
+as plaintext catalog data for direct management, so the UI labels the database
+and backups as credential-bearing. Connection changes require that source to be
+paused and drained; the UI keeps the last-known-good values on a failed probe
+and surfaces `source_draining` or `source_busy` directly.
 Task cards show durable cursor/queue and import-run row/changed/deleted/rejected
-evidence without displaying raw rejected rows. Cloud/object/warehouse provider
-choices are not shown until their adapters and checkpoint semantics exist.
+evidence without displaying raw rejected rows. Cloud/object/warehouse choices
+are not shown until their adapters and checkpoint semantics exist; today the
+implemented source types are PostgreSQL and direct CSV/TSV, JSONL/NDJSON,
+TXT/MD and XLSX/XLSM files.
 Checkpoint reset is shown only for paused database sources and requires typing
 the exact source key. If a pull still owns the source advisory lock, the UI
 surfaces `409 source_busy`; the operator waits for that pull to exit and retries

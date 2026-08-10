@@ -1119,17 +1119,6 @@ select {
   margin-top: var(--qp-space-5, 1.25rem);
 }
 
-.mih-source-provider-error {
-  display: grid;
-  gap: 8px;
-}
-
-.mih-source-provider-error > p {
-  margin: 0;
-  color: var(--qp-text-3);
-  font-size: var(--qp-font-body-2);
-}
-
 .mih-agent-consent {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

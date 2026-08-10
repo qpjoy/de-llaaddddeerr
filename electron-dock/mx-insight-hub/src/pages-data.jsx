@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowClockwise,
   Brain,
-  Cloud,
   Database,
   FileArrowUp,
   Key,
@@ -11,7 +10,6 @@ import {
   Play,
   Plugs,
   Table,
-  Trash,
   Warning,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
@@ -67,19 +65,13 @@ function DataTable({ label, children }) {
 export function SourcesPage({ token, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.sources(token), [token])
   const state = useRemoteData(load, onUnauthorized)
-  const loadProviders = useCallback(() => adminApi.sourceProviders(token), [token])
-  const providersState = useRemoteData(loadProviders, onUnauthorized)
-  const loadProviderTypes = useCallback(() => adminApi.sourceProviderTypes(token), [token])
-  const providerTypesState = useRemoteData(loadProviderTypes, onUnauthorized)
   const [selected, setSelected] = useState(null)
   const [creating, setCreating] = useState(false)
-  const [managingProviders, setManagingProviders] = useState(false)
 
   if (state.loading && !state.data) return <LoadingState label="正在加载外部数据源" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   const sources = asList(state.data)
-  const providers = asList(providersState.data)
 
   return (
     <>
@@ -90,29 +82,8 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         loading={state.loading}
         onRefresh={state.refresh}
       >
-        <button className="qp-button qp-button--ghost" type="button" onClick={() => setManagingProviders(true)}>
-          <Cloud size={16} aria-hidden="true" /> 管理连接
-        </button>
         <button className="qp-button" type="button" onClick={() => setCreating(true)}>注册数据源</button>
       </PageHeading>
-
-      <Panel
-        title="数据源 Provider"
-        subtitle="连接信息由 Hub 加密托管；数据源只引用 Provider，修改密码不需要重新部署"
-        actions={<button className="qp-button qp-button--ghost" type="button" onClick={() => setManagingProviders(true)}>查看与测试</button>}
-      >
-        {providersState.loading && !providersState.data ? <LoadingState label="正在加载 Provider" /> : null}
-        {providersState.error ? (
-          <div className="mih-source-provider-error">
-            <ErrorState error={providersState.error} onRetry={providersState.refresh} />
-            <p>Provider 管理不可用时，文件上传数据源仍可正常注册和导入。</p>
-          </div>
-        ) : null}
-        {!providersState.loading && !providersState.error && providers.length === 0 ? (
-          <EmptyState icon={Cloud} title="还没有数据库连接" description="创建 PostgreSQL Provider 后，可让多个表级数据源复用同一组连接凭据。" />
-        ) : null}
-        {providers.length > 0 ? <SourceProviderTable providers={providers} /> : null}
-      </Panel>
 
       {sources.length === 0 ? (
         <EmptyState
@@ -132,7 +103,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
                   <td><code className="mih-source-label">{source.sourceKey}</code></td>
                   <td>{source.displayName}</td>
                   <td>
-                    <strong>{source.sourceKind === 'file' ? '文件上传' : source.providerKey || '数据库'}</strong>
+                    <strong>{source.sourceKind === 'file' ? '文件上传' : `${source.connection?.host || '数据库'}:${source.connection?.port || 5432}`}</strong>
                     <small className="mih-source-label">{source.sourceKind === 'database' ? `${source.connection?.schema || 'public'}.${source.connection?.table || '—'}` : 'xlsx / csv / jsonl / txt'}</small>
                   </td>
                   <td><code className="mih-source-label">{source.datasetId}</code><small className="mih-source-label">{source.platform} · {source.objectType}</small></td>
@@ -153,8 +124,6 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
       {creating ? (
         <CreateSourceModal
           token={token}
-          providers={providers}
-          providersAvailable={!providersState.error}
           notify={notify}
           onClose={() => setCreating(false)}
           onCreated={() => { setCreating(false); state.refresh() }}
@@ -164,24 +133,10 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         <SourceDetailModal
           token={token}
           source={selected}
-          providers={providers}
           onUnauthorized={onUnauthorized}
           notify={notify}
           onClose={() => setSelected(null)}
           onSourceChanged={(source) => { setSelected(source); state.refresh() }}
-        />
-      ) : null}
-      {managingProviders ? (
-        <ProviderManagerModal
-          token={token}
-          providers={providers}
-          sources={sources}
-          providerTypes={asList(providerTypesState.data)}
-          error={providersState.error}
-          loading={providersState.loading}
-          notify={notify}
-          onRefresh={providersState.refresh}
-          onClose={() => setManagingProviders(false)}
         />
       ) : null}
     </>
@@ -190,256 +145,17 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
 
 function asList(value) {
   if (Array.isArray(value)) return value
-  for (const key of ['items', 'types', 'providers', 'sources']) {
+  for (const key of ['items', 'sources']) {
     if (Array.isArray(value?.[key])) return value[key]
   }
   return []
 }
 
-function providerTone(status) {
-  if (status === 'healthy') return 'active'
-  if (status === 'unhealthy') return 'down'
-  return 'unknown'
-}
-
-function providerHealthLabel(status) {
-  if (status === 'healthy') return '正常'
-  if (status === 'unhealthy') return '失败'
-  return '待验证'
-}
-
-function SourceProviderTable({ providers, actions }) {
-  return (
-    <DataTable label="数据源 Provider 列表">
-      <thead><tr><th>Provider</th><th>类型</th><th>目标</th><th>凭据</th><th>健康状态</th>{actions ? <th /> : null}</tr></thead>
-      <tbody>
-        {providers.map((provider) => (
-          <tr key={provider.id || provider.providerKey}>
-            <td><strong>{provider.displayName}</strong><small className="mih-source-label"><code>{provider.providerKey}</code></small></td>
-            <td>{provider.providerType || 'postgresql'}</td>
-            <td><code className="mih-source-label">{provider.config?.host}:{provider.config?.port}/{provider.config?.database}</code><small className="mih-source-label">{provider.config?.username} · SSL {provider.config?.sslMode}</small></td>
-            <td><StatusBadge status={provider.secretConfigured ? 'active' : 'down'} label={provider.secretConfigured ? '已加密保存' : '未配置'} /></td>
-            <td><StatusBadge status={providerTone(provider.healthStatus)} label={providerHealthLabel(provider.healthStatus)} /><small>{provider.healthStatus === 'unknown' ? '需执行连接测试' : formatDate(provider.healthCheckedAt)}</small></td>
-            {actions ? <td className="mih-table__actions">{actions(provider)}</td> : null}
-          </tr>
-        ))}
-      </tbody>
-    </DataTable>
-  )
-}
-
-function blankProvider(type = 'postgresql') {
-  return {
-    providerKey: '', displayName: '', providerType: type,
-    host: '', port: '5432', database: '', username: '', sslMode: 'require', password: '',
-    editing: false,
-  }
-}
-
-function providerDraft(provider) {
-  return {
-    providerKey: provider.providerKey,
-    displayName: provider.displayName,
-    providerType: provider.providerType || 'postgresql',
-    host: provider.config?.host || '',
-    port: String(provider.config?.port || 5432),
-    database: provider.config?.database || '',
-    username: provider.config?.username || '',
-    sslMode: provider.config?.sslMode || 'require',
-    password: '',
-    secretConfigured: provider.secretConfigured,
-    editing: true,
-    originalConfig: provider.config || {},
-  }
-}
-
-function ProviderManagerModal({ token, providers, sources = [], providerTypes, error, loading, notify, onRefresh, onClose }) {
-  const types = providerTypes.length > 0 ? providerTypes : [{ providerType: 'postgresql', displayName: 'PostgreSQL' }]
-  const [draft, setDraft] = useState(null)
-  const [formError, setFormError] = useState(null)
-  const [busyKey, setBusyKey] = useState(null)
-
-  const save = async (event) => {
-    event.preventDefault()
-    const editing = draft.editing
-    const config = {
-      host: draft.host.trim(), port: Number(draft.port), database: draft.database.trim(),
-      username: draft.username.trim(), sslMode: draft.sslMode,
-    }
-    const body = { displayName: draft.displayName.trim() }
-    const configChanged = Object.entries(config).some(([key, value]) => String(draft.originalConfig?.[key]) !== String(value))
-    const activeReferences = sources.filter(
-      (source) => source.providerKey === draft.providerKey && source.status === 'active',
-    )
-    if (editing && activeReferences.length > 0 && (configChanged || draft.password)) {
-      setFormError({
-        message: `请先暂停引用此 Provider 的数据源：${activeReferences.map((source) => source.sourceKey).join('、')}`,
-        code: 'provider_pause_required',
-      })
-      return
-    }
-    if (!editing || configChanged) body.config = config
-    if (!editing || draft.password) body.password = draft.password
-    if (!editing) {
-      body.providerKey = draft.providerKey.trim()
-      body.providerType = draft.providerType
-    }
-    setBusyKey(draft.providerKey || 'new')
-    setFormError(null)
-    try {
-      if (editing) await adminApi.updateSourceProvider(token, draft.providerKey, body)
-      else await adminApi.createSourceProvider(token, body)
-      const connectionChanged = !editing || configChanged || Boolean(draft.password)
-      notify?.(
-        `Provider ${draft.providerKey} 已${connectionChanged ? '通过只读连接测试并' : ''}${editing ? '更新' : '创建'}`,
-        'success',
-      )
-      setDraft(null)
-      onRefresh()
-    } catch (requestError) {
-      setFormError(requestError)
-    } finally {
-      setBusyKey(null)
-    }
-  }
-
-  const test = async (provider) => {
-    setBusyKey(provider.providerKey)
-    try {
-      const result = await adminApi.testSourceProvider(token, provider.providerKey)
-      notify?.(`Provider ${provider.providerKey} 连接正常 · PostgreSQL ${result.connection?.serverVersion || '未知版本'} · 只读`, 'success')
-      onRefresh()
-    } catch (requestError) {
-      notify?.(requestError.message, 'error')
-      onRefresh()
-    } finally {
-      setBusyKey(null)
-    }
-  }
-
-  const remove = async (provider) => {
-    if (!window.confirm(`删除 Provider “${provider.displayName}”？仍被数据源引用时服务器会拒绝删除。`)) return
-    setBusyKey(provider.providerKey)
-    try {
-      await adminApi.deleteSourceProvider(token, provider.providerKey)
-      notify?.(`Provider ${provider.providerKey} 已删除`, 'success')
-      onRefresh()
-    } catch (requestError) {
-      notify?.(requestError.message, 'error')
-    } finally {
-      setBusyKey(null)
-    }
-  }
-
-  const activeReferences = draft
-    ? sources.filter((source) => source.providerKey === draft.providerKey && source.status === 'active')
-    : []
-  const connectionLocked = Boolean(draft?.editing && activeReferences.length > 0)
-  const requiresValidation = Boolean(draft && (
-    !draft.editing || draft.password || Object.entries({
-      host: draft.host.trim(), port: Number(draft.port), database: draft.database.trim(),
-      username: draft.username.trim(), sslMode: draft.sslMode,
-    }).some(([key, value]) => String(draft.originalConfig?.[key]) !== String(value))
-  ))
-
-  return (
-    <Modal title="数据源 Provider" description="集中托管数据库连接与加密密码；连接或凭据变更必须先通过只读测试，列表和接口永不返回明文密码。" size="xlarge" onClose={onClose}
-      footer={<button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭</button>}>
-      <Panel title="连接注册表" subtitle="测试会建立只读连接并记录健康状态"
-        actions={<button className="qp-button" type="button" disabled={Boolean(error)} onClick={() => setDraft(blankProvider(types[0]?.providerType || types[0]?.type))}>新建 Provider</button>}>
-        {loading && providers.length === 0 ? <LoadingState label="正在加载 Provider" /> : null}
-        {error ? <ErrorState error={error} onRetry={onRefresh} /> : null}
-        {providers.length > 0 ? (
-          <SourceProviderTable providers={providers} actions={(provider) => (
-            <div className="mih-table__actions--wide">
-              <button className="qp-button qp-button--ghost" type="button" disabled={busyKey === provider.providerKey} onClick={() => test(provider)}>测试</button>
-              <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyKey)} onClick={() => { setDraft(providerDraft(provider)); setFormError(null) }}>编辑</button>
-              <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyKey)} onClick={() => remove(provider)} aria-label={`删除 ${provider.displayName}`}><Trash size={16} /></button>
-            </div>
-          )} />
-        ) : null}
-      </Panel>
-
-      {draft ? (
-        <Panel title={draft.secretConfigured ? `编辑 ${draft.displayName}` : '新建 PostgreSQL Provider'} subtitle="候选配置会先建立只读连接；失败不会替换现有坐标或密文。密码留空表示保留当前值">
-          <form id="provider-form" className="mih-form mih-form--grid" onSubmit={save}>
-            {connectionLocked ? (
-              <p className="mih-inline-warning mih-form__wide">
-                <Warning size={16} aria-hidden="true" />
-                此 Provider 正被活跃数据源引用。显示名称仍可修改；连接坐标和密码需先暂停所有引用源，再通过安全连接测试切换。
-              </p>
-            ) : null}
-            <Field label="Provider 标识" hint="创建后不可修改">
-              <input className="qp-input" required pattern="[a-z0-9][a-z0-9._-]*" value={draft.providerKey}
-                disabled={draft.editing} onChange={(event) => setDraft({ ...draft, providerKey: event.target.value })} />
-            </Field>
-            <Field label="显示名称">
-              <input className="qp-input" required maxLength={128} value={draft.displayName}
-                onChange={(event) => setDraft({ ...draft, displayName: event.target.value })} />
-            </Field>
-            <Field label="Provider 类型">
-              <select className="qp-input" value={draft.providerType} disabled={draft.editing}
-                onChange={(event) => setDraft({ ...draft, providerType: event.target.value })}>
-                {types.map((type) => {
-                  const value = type.providerType || type.type || type.key
-                  return <option value={value} key={value}>{type.displayName || type.label || value}</option>
-                })}
-              </select>
-            </Field>
-            <Field label="主机">
-              <input className="qp-input" required value={draft.host} placeholder="db.internal.example"
-                disabled={connectionLocked}
-                onChange={(event) => setDraft({ ...draft, host: event.target.value })} />
-            </Field>
-            <Field label="端口">
-              <input className="qp-input" required type="number" min="1" max="65535" value={draft.port}
-                disabled={connectionLocked}
-                onChange={(event) => setDraft({ ...draft, port: event.target.value })} />
-            </Field>
-            <Field label="数据库">
-              <input className="qp-input" required value={draft.database}
-                disabled={connectionLocked}
-                onChange={(event) => setDraft({ ...draft, database: event.target.value })} />
-            </Field>
-            <Field label="用户名">
-              <input className="qp-input" required value={draft.username} autoComplete="off"
-                disabled={connectionLocked}
-                onChange={(event) => setDraft({ ...draft, username: event.target.value })} />
-            </Field>
-            <Field label="SSL 模式">
-              <select className="qp-input" value={draft.sslMode}
-                disabled={connectionLocked}
-                onChange={(event) => setDraft({ ...draft, sslMode: event.target.value })}>
-                <option value="disable">disable（同机或受控内网）</option>
-                <option value="require">require</option>
-                <option value="verify-ca">verify-ca</option>
-                <option value="verify-full">verify-full</option>
-              </select>
-            </Field>
-            <Field label={draft.secretConfigured ? '轮换密码（可选）' : '密码'} className="mih-form__wide"
-              hint={draft.secretConfigured ? '留空保留当前密码；Hub 不会把已保存密码发回浏览器' : '通过平台主密钥进行 AES-256-GCM 加密后保存'}>
-              <input className="qp-input" type="password" required={!draft.secretConfigured} value={draft.password}
-                disabled={connectionLocked}
-                autoComplete="new-password" onChange={(event) => setDraft({ ...draft, password: event.target.value })} />
-            </Field>
-            {formError ? <div className="mih-form__wide"><ErrorState error={formError} /></div> : null}
-            <div className="mih-page-actions mih-form__wide">
-              <button className="qp-button qp-button--ghost" type="button" onClick={() => setDraft(null)}>取消</button>
-              <button className="qp-button" type="submit" disabled={Boolean(busyKey)}>
-                {busyKey ? (requiresValidation ? '正在验证…' : '保存中…') : (requiresValidation ? '验证并保存' : '保存')}
-              </button>
-            </div>
-          </form>
-        </Panel>
-      ) : null}
-    </Modal>
-  )
-}
-
-function CreateSourceModal({ token, providers, providersAvailable, notify, onClose, onCreated }) {
+function CreateSourceModal({ token, notify, onClose, onCreated }) {
   const [form, setForm] = useState({
     sourceKey: '', displayName: '', sourceKind: 'file', datasetId: '', platform: 'external', objectType: 'record',
-    providerKey: providers[0]?.providerKey || '', schema: 'public', table: '', cursorColumn: '', idColumn: '', syncIntervalSeconds: '300',
+    host: '', port: '5432', database: '', username: '', password: '', sslMode: 'require',
+    schema: 'public', table: '', cursorColumn: '', idColumn: '', syncIntervalSeconds: '300',
   })
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -455,9 +171,10 @@ function CreateSourceModal({ token, providers, providersAvailable, notify, onClo
         platform: form.platform.trim() || 'external', objectType: form.objectType.trim() || 'record',
       }
       if (form.sourceKind === 'database') {
-        body.providerKey = form.providerKey || providers[0]?.providerKey || ''
         body.syncIntervalSeconds = Number(form.syncIntervalSeconds)
         body.connection = {
+          host: form.host.trim(), port: Number(form.port), database: form.database.trim(),
+          username: form.username.trim(), password: form.password, sslMode: form.sslMode,
           schema: form.schema.trim() || 'public', table: form.table.trim(),
           ...(form.cursorColumn.trim() ? { cursorColumn: form.cursorColumn.trim() } : {}),
           ...(form.idColumn.trim() ? { idColumn: form.idColumn.trim() } : {}),
@@ -476,20 +193,21 @@ function CreateSourceModal({ token, providers, providersAvailable, notify, onClo
   return (
     <Modal
       title="注册外部数据源"
-      description="标识用于所有后续操作，注册后不建议更改。"
+      description="数据库连接随数据源直接保存；包括明文密码在内的连接信息仅 Admin Token 管理面可见。"
       onClose={onClose}
       footer={
         <>
           <button className="qp-button qp-button--ghost" type="button" onClick={onClose}>取消</button>
           <button className="qp-button" type="submit" form="create-source" disabled={submitting}>
-            {submitting ? '注册中…' : '注册'}
+            {submitting ? '正在验证并注册…' : (form.sourceKind === 'database' ? '验证并注册' : '注册')}
           </button>
         </>
       }
     >
       <form id="create-source" onSubmit={submit} className="mih-form mih-form--grid">
-        <Field label="标识" hint="小写字母、数字与连字符，例如 weekly-report">
-          <input className="qp-input" value={form.sourceKey} required
+        <Field label="标识" hint="小写字母或数字开头，可包含点号、下划线与连字符，最长 128 个字符">
+          <input className="qp-input" value={form.sourceKey} required maxLength={128}
+            pattern="[a-z0-9][a-z0-9._-]*" title="请使用小写字母或数字开头，并仅包含小写字母、数字、点号、下划线或连字符"
             onChange={(event) => setForm({ ...form, sourceKey: event.target.value })} />
         </Field>
         <Field label="名称">
@@ -517,11 +235,34 @@ function CreateSourceModal({ token, providers, providersAvailable, notify, onClo
         </Field>
         {form.sourceKind === 'database' ? (
           <>
-            <Field label="Provider" hint="连接密码由 Provider 独立托管">
-              <select className="qp-input" value={form.providerKey || providers[0]?.providerKey || ''} required
-                onChange={(event) => setForm({ ...form, providerKey: event.target.value })}>
-                <option value="">选择 PostgreSQL Provider</option>
-                {providers.map((provider) => <option value={provider.providerKey} key={provider.providerKey}>{provider.displayName}</option>)}
+            <p className="mih-inline-warning mih-form__wide"><Key size={16} />连接信息会在保存前以只读会话验证；明文密码仅当前 Admin Token 管理面可读取。</p>
+            <Field label="主机">
+              <input className="qp-input" value={form.host} required placeholder="127.0.0.1"
+                onChange={(event) => setForm({ ...form, host: event.target.value })} />
+            </Field>
+            <Field label="端口">
+              <input className="qp-input" type="number" min="1" max="65535" value={form.port} required
+                onChange={(event) => setForm({ ...form, port: event.target.value })} />
+            </Field>
+            <Field label="数据库">
+              <input className="qp-input" value={form.database} required placeholder="night_all"
+                onChange={(event) => setForm({ ...form, database: event.target.value })} />
+            </Field>
+            <Field label="用户名">
+              <input className="qp-input" value={form.username} required autoComplete="off" placeholder="mx_data"
+                onChange={(event) => setForm({ ...form, username: event.target.value })} />
+            </Field>
+            <Field label="密码" hint="明文保存并仅向 Admin Token 管理接口返回">
+              <input className="qp-input" type="text" value={form.password} required autoComplete="off"
+                onChange={(event) => setForm({ ...form, password: event.target.value })} />
+            </Field>
+            <Field label="SSL 模式">
+              <select className="qp-input" value={form.sslMode}
+                onChange={(event) => setForm({ ...form, sslMode: event.target.value })}>
+                <option value="disable">disable（同机或受控内网）</option>
+                <option value="require">require</option>
+                <option value="verify-ca">verify-ca</option>
+                <option value="verify-full">verify-full</option>
               </select>
             </Field>
             <Field label="Schema">
@@ -544,9 +285,6 @@ function CreateSourceModal({ token, providers, providersAvailable, notify, onClo
               <input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds}
                 onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} />
             </Field>
-            {!providersAvailable || providers.length === 0 ? (
-              <p className="mih-inline-warning mih-form__wide"><Warning size={16} /> 请先创建可用的 PostgreSQL Provider；这不会影响文件源注册。</p>
-            ) : null}
           </>
         ) : null}
         {error ? <ErrorState error={error} /> : null}
@@ -555,7 +293,7 @@ function CreateSourceModal({ token, providers, providersAvailable, notify, onClo
   )
 }
 
-function SourceDetailModal({ token, source, providers, onUnauthorized, notify, onClose, onSourceChanged }) {
+function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onSourceChanged }) {
   const [currentSource, setCurrentSource] = useState(source)
   const load = useCallback(() => adminApi.sourceMappings(token, source.sourceKey), [token, source.sourceKey])
   const mappings = useRemoteData(load, onUnauthorized)
@@ -732,6 +470,19 @@ function SourceDetailModal({ token, source, providers, onUnauthorized, notify, o
     }
   }
 
+  const testConnection = async () => {
+    setBusy(true)
+    try {
+      const result = await adminApi.testSource(token, source.sourceKey)
+      notify?.(`连接正常 · PostgreSQL ${result.connection?.serverVersion || result.serverVersion || '未知版本'} · 只读`, 'success')
+      schema.refresh()
+    } catch (error) {
+      notify?.(error.message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const runSync = async () => {
     setBusy(true)
     try {
@@ -768,9 +519,9 @@ function SourceDetailModal({ token, source, providers, onUnauthorized, notify, o
   const canActivate = Boolean(
     activeMapping && schema.data && schemaIssues.length === 0 && !sync.loading && !sync.error && !isDraining,
   )
-  const agentProviders = agentStatus.data?.chat || []
-  const agentAvailable = Boolean(agentStatus.data?.available && agentProviders.length > 0)
-  const agentProviderLabel = agentProviders.map((provider) => `${provider.id} / ${provider.model}`).join(' → ')
+  const agentModels = agentStatus.data?.chat || []
+  const agentAvailable = Boolean(agentStatus.data?.available && agentModels.length > 0)
+  const agentModelLabel = agentModels.map((model) => `${model.id} / ${model.model}`).join(' → ')
 
   return (
     <Modal title={currentSource.displayName} description={`标识 ${currentSource.sourceKey} · dataset ${currentSource.datasetId}`} size="xlarge" onClose={onClose}
@@ -780,7 +531,6 @@ function SourceDetailModal({ token, source, providers, onUnauthorized, notify, o
         <DatabaseSourceControl
           key={`${currentSource.id}:${currentSource.updatedAt || ''}`}
           source={currentSource}
-          providers={providers}
           schema={schema}
           sync={sync}
           preview={preview}
@@ -795,6 +545,7 @@ function SourceDetailModal({ token, source, providers, onUnauthorized, notify, o
           onSave={saveDatabaseSettings}
           onStatus={changeStatus}
           onSync={runSync}
+          onTest={testConnection}
           onPreview={previewDatabase}
           onResetCheckpoint={resetCheckpoint}
         />
@@ -862,13 +613,13 @@ function SourceDetailModal({ token, source, providers, onUnauthorized, notify, o
           <span>
             <strong>使用 Agent 增强映射建议（显式授权）</strong>
             {agentStatus.loading ? (
-              <small>正在读取 Agent Provider 链路；当前预览保持本地规则推断。</small>
+              <small>正在读取 Agent 模型链路；当前预览保持本地规则推断。</small>
             ) : agentStatus.error ? (
-              <small>无法确认 Agent Provider：{agentStatus.error.message}。为保护样例，当前只允许本地规则推断。</small>
+              <small>无法确认 Agent 模型链路：{agentStatus.error.message}。为保护样例，当前只允许本地规则推断。</small>
             ) : agentAvailable ? (
-              <small>仅发送列名，不发送 value-shape 或原始单元格值。Provider 故障时可能按顺序发送到：{agentProviderLabel}</small>
+              <small>仅发送列名，不发送 value-shape 或原始单元格值。模型服务故障时可能按顺序发送到：{agentModelLabel}</small>
             ) : (
-              <small>未配置可用 Agent Provider；预览只使用 Hub 内置规则，不向模型服务发送数据。</small>
+              <small>未配置可用 Agent 模型；预览只使用 Hub 内置规则，不向模型服务发送数据。</small>
             )}
           </span>
         </label>
@@ -890,7 +641,7 @@ function SourceDetailModal({ token, source, providers, onUnauthorized, notify, o
             ) : null}
             <p className="mih-preview-provenance">
               建议来源：{preview.suggestion?.origin === 'agent'
-                ? `Agent · ${preview.suggestion.model || '已配置 Provider'}`
+                ? `Agent · ${preview.suggestion.model || '已配置模型'}`
                 : 'Hub 本地规则推断'}
             </p>
             <pre className="mih-code-block">{JSON.stringify(preview.suggestion?.fieldMap || preview.inferredFieldMap, null, 2)}</pre>
@@ -916,14 +667,16 @@ function SourceDetailModal({ token, source, providers, onUnauthorized, notify, o
 }
 
 function DatabaseSourceControl({
-  source, providers, schema, sync, preview, checkpointResetError, busy, statusTransition, isDraining, editing, canActivate,
-  onEdit, onCancelEdit, onSave, onStatus, onSync, onPreview, onResetCheckpoint,
+  source, schema, sync, preview, checkpointResetError, busy, statusTransition, isDraining, editing, canActivate,
+  onEdit, onCancelEdit, onSave, onStatus, onSync, onTest, onPreview, onResetCheckpoint,
 }) {
-  const providerOptions = providers.some((provider) => provider.providerKey === source.providerKey)
-    ? providers
-    : [{ providerKey: source.providerKey, displayName: source.providerKey }, ...providers].filter((provider) => provider.providerKey)
   const [draft, setDraft] = useState(() => ({
-    providerKey: source.providerKey || '',
+    host: source.connection?.host || '',
+    port: String(source.connection?.port || 5432),
+    database: source.connection?.database || '',
+    username: source.connection?.username || '',
+    password: source.connection?.password || '',
+    sslMode: source.connection?.sslMode || 'require',
     schema: source.connection?.schema || 'public',
     table: source.connection?.table || '',
     cursorColumn: source.connection?.cursorColumn || '',
@@ -935,9 +688,10 @@ function DatabaseSourceControl({
   const submit = (event) => {
     event.preventDefault()
     onSave({
-      providerKey: draft.providerKey,
       syncIntervalSeconds: Number(draft.syncIntervalSeconds),
       connection: {
+        host: draft.host.trim(), port: Number(draft.port), database: draft.database.trim(),
+        username: draft.username.trim(), password: draft.password, sslMode: draft.sslMode,
         schema: draft.schema.trim() || 'public', table: draft.table.trim(),
         cursorColumn: draft.cursorColumn.trim() || null,
         idColumn: draft.idColumn.trim() || null,
@@ -968,11 +722,15 @@ function DatabaseSourceControl({
             <button className="qp-button qp-button--ghost" type="button"
               disabled={busy || source.status !== 'paused' || isDraining || sync.loading || Boolean(sync.error)}
               title={isDraining ? '当前批次收口后才能修改连接配置' : ''} onClick={onEdit}>编辑配置</button>
+            <button className="qp-button qp-button--ghost" type="button" disabled={busy} onClick={onTest}>测试连接</button>
             <button className="qp-button" type="button" disabled={busy || source.status !== 'active'} onClick={onSync}><ArrowClockwise size={16} /> 立即同步</button>
           </>
         }>
         <dl className="mih-source-definition">
-          <div><dt>Provider</dt><dd><code>{source.providerKey || '—'}</code></dd></div>
+          <div><dt>连接地址</dt><dd><code>{source.connection?.host || '—'}:{source.connection?.port || 5432}</code></dd></div>
+          <div><dt>数据库 / 用户</dt><dd><code>{source.connection?.database || '—'} / {source.connection?.username || '—'}</code></dd></div>
+          <div><dt>密码</dt><dd><code>{source.connection?.password || '—'}</code><small>仅 Admin Token 管理面可见</small></dd></div>
+          <div><dt>SSL</dt><dd><code>{source.connection?.sslMode || 'require'}</code></dd></div>
           <div><dt>源表</dt><dd><code>{source.connection?.schema || 'public'}.{source.connection?.table || '—'}</code></dd></div>
           <div><dt>游标</dt><dd><code>{source.connection?.cursorColumn || '未配置'} + {source.connection?.idColumn || '未配置'}</code></dd></div>
           <div><dt>调度</dt><dd>{formatNumber(source.syncIntervalSeconds || 60)} 秒</dd></div>
@@ -980,11 +738,22 @@ function DatabaseSourceControl({
           <div><dt>最近变更</dt><dd>{formatDate(source.updatedAt)}</dd></div>
         </dl>
         {isDraining ? <p className="mih-inline-warning"><Warning size={16} aria-hidden="true" />暂停已生效于调度层；当前批次仍在安全收口。完成前不会允许改连接、批准映射或重置 Checkpoint。</p> : null}
+        <p className="mih-inline-warning"><Key size={16} aria-hidden="true" />连接信息随数据源管理，密码以明文回填；本页面和对应接口仅允许 Admin Token 会话访问。</p>
         {editing ? (
           <form className="mih-form mih-form--grid mih-source-settings" onSubmit={submit}>
-            <Field label="Provider">
-              <select className="qp-input" required value={draft.providerKey} onChange={(event) => setDraft({ ...draft, providerKey: event.target.value })}>
-                {providerOptions.map((provider) => <option key={provider.providerKey} value={provider.providerKey}>{provider.displayName}</option>)}
+            <Field label="主机"><input className="qp-input" required value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} /></Field>
+            <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={draft.port} onChange={(event) => setDraft({ ...draft, port: event.target.value })} /></Field>
+            <Field label="数据库"><input className="qp-input" required value={draft.database} onChange={(event) => setDraft({ ...draft, database: event.target.value })} /></Field>
+            <Field label="用户名"><input className="qp-input" required autoComplete="off" value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></Field>
+            <Field label="密码" hint="明文保存并仅向 Admin Token 管理接口返回">
+              <input className="qp-input" type="text" required autoComplete="off" value={draft.password} onChange={(event) => setDraft({ ...draft, password: event.target.value })} />
+            </Field>
+            <Field label="SSL 模式">
+              <select className="qp-input" value={draft.sslMode} onChange={(event) => setDraft({ ...draft, sslMode: event.target.value })}>
+                <option value="disable">disable（同机或受控内网）</option>
+                <option value="require">require</option>
+                <option value="verify-ca">verify-ca</option>
+                <option value="verify-full">verify-full</option>
               </select>
             </Field>
             <Field label="Schema"><input className="qp-input" required value={draft.schema} onChange={(event) => setDraft({ ...draft, schema: event.target.value })} /></Field>
@@ -994,7 +763,7 @@ function DatabaseSourceControl({
             <Field label="同步间隔（秒）"><input className="qp-input" type="number" min="60" max="86400" required value={draft.syncIntervalSeconds} onChange={(event) => setDraft({ ...draft, syncIntervalSeconds: event.target.value })} /></Field>
             <div className="mih-page-actions mih-form__wide">
               <button className="qp-button qp-button--ghost" type="button" onClick={onCancelEdit}>取消</button>
-              <button className="qp-button" type="submit" disabled={busy}>保存并重新探测</button>
+              <button className="qp-button" type="submit" disabled={busy}>验证并保存</button>
             </div>
           </form>
         ) : null}

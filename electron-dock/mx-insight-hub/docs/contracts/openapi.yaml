@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: MX Insight Hub Public API
+  title: MX Insight Hub Public and Source Admin API
   version: 1.0.0-alpha
   description: Stable consumer contract. Night-All and provider details are private implementation concerns.
 servers:
@@ -9,6 +9,365 @@ security:
   - bearerKey: []
   - apiKeyHeader: []
 paths:
+  /sources:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: listExternalSources
+      summary: List source configurations, including Admin-visible PostgreSQL credentials.
+      description: >-
+        Requires the platform Admin Token specifically. Launcher-login sessions
+        and public API keys cannot access source management. PostgreSQL
+        passwords are intentionally stored as plaintext in
+        catalog.external_sources.connection and can be returned on this
+        Admin-token-only surface; protect Hub database and backup access.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: Admin-visible source configurations.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, requestId]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/ExternalSource" }
+                  requestId: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createExternalSource
+      summary: Create a direct PostgreSQL or file source.
+      description: >-
+        Requires the platform Admin Token. A database candidate is tested with
+        a bounded read-only PostgreSQL session before it is saved; a file source
+        has no connection object and is registered for later preview/mapping/
+        import. No separate Provider resource or provider master key is involved.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExternalSourceCreate" }
+      responses:
+        "201":
+          description: Paused database source or active file source created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalSourceEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    get:
+      operationId: getExternalSource
+      summary: Get one Admin-visible source configuration.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: Source configuration; direct connection credentials are Admin-visible.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalSourceEnvelope" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      operationId: updateExternalSource
+      summary: Change a paused, drained source connection, schedule or status.
+      description: >-
+        A direct connection change is read-only-tested before replacing the
+        saved connection. A running batch returns source_draining. Activate only
+        after mapping approval and the schema/index/watermark gate succeeds.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExternalSourcePatch" }
+      responses:
+        "200":
+          description: Updated source.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalSourceEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/test:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    post:
+      operationId: testExternalSource
+      summary: Test the saved PostgreSQL connection in a read-only session.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: Bounded safe connection evidence; no driver error or password is logged.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, requestId]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: true
+                    properties:
+                      database: { type: string }
+                      user: { type: string }
+                      serverVersion: { type: string }
+                      readOnly: { type: boolean, const: true }
+                  requestId: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/schema:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    get:
+      operationId: describeExternalSource
+      summary: Inspect source schema/index/constraint evidence and activation issues.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: Value-free source metadata and activation issues.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, requestId]
+                properties:
+                  data: { type: object, additionalProperties: true }
+                  requestId: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/mappings:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    get:
+      operationId: listSourceMappings
+      summary: List immutable mapping versions for a source.
+      security:
+        - adminToken: []
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createSourceMapping
+      summary: Create an unapproved mapping version.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SourceMappingCreate" }
+      responses:
+        "201": { $ref: "#/components/responses/AdminData" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/mappings/{version}/approve:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+      - name: version
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    post:
+      operationId: approveSourceMapping
+      summary: Approve one exact mapping version while a database source is paused and drained.
+      security:
+        - adminToken: []
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/preview:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    get:
+      operationId: previewDatabaseSource
+      summary: Return value-free shapes for up to three PostgreSQL rows.
+      security:
+        - adminToken: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 3, default: 3 }
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: previewSourceFile
+      summary: Parse a file locally; optional Agent assistance receives column names only.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/SourceFilename"
+        - name: agent
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/sync:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    get:
+      operationId: getSourceSync
+      summary: Inspect durable cursor, latest run and next due time.
+      security:
+        - adminToken: []
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: scheduleSourceSync
+      summary: Queue a manual pull for an active, approved and probe-safe database source.
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                batchSize: { type: integer, minimum: 1, maximum: 5000, default: 1000 }
+      responses:
+        "202": { $ref: "#/components/responses/AdminData" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/checkpoint/reset:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    post:
+      operationId: resetSourceCheckpoint
+      summary: Reset a paused, drained source checkpoint after exact source-key confirmation.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirmSourceKey]
+              properties:
+                confirmSourceKey: { type: string, minLength: 1, maxLength: 128 }
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/import:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+      - $ref: "#/components/parameters/SourceFilename"
+    post:
+      operationId: importSourceFile
+      summary: Import a file with the source's approved mapping.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "201": { $ref: "#/components/responses/AdminData" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/imports:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    get:
+      operationId: listSourceImports
+      summary: List durable import runs and row/change/delete/rejection evidence.
+      security:
+        - adminToken: []
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /data/capabilities:
     get:
       operationId: listCapabilities
@@ -315,6 +674,11 @@ paths:
                       units: { type: integer }
 components:
   securitySchemes:
+    adminToken:
+      type: apiKey
+      in: header
+      name: x-mx-insight-admin-token
+      description: Platform break-glass Admin Token; the only credential accepted by source-management routes.
     bearerKey:
       type: http
       scheme: bearer
@@ -324,6 +688,17 @@ components:
       in: header
       name: x-api-key
   parameters:
+    SourceKey:
+      name: sourceKey
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9][a-z0-9._-]*$" }
+    SourceFilename:
+      name: filename
+      in: query
+      required: true
+      description: Basename used to select the supported CSV/TSV, JSONL/NDJSON, TXT/MD or XLSX/XLSM parser; the request body contains the raw file bytes.
+      schema: { type: string, minLength: 1, maxLength: 255 }
     TelegramChatId:
       name: chatId
       in: query
@@ -364,6 +739,147 @@ components:
       description: Opaque nextCursor from the previous page; return unchanged.
       schema: { type: string, minLength: 1, maxLength: 1024 }
   schemas:
+    DirectPostgresConnection:
+      type: object
+      additionalProperties: false
+      required: [host, database, username, password, table]
+      description: >-
+        Direct source connection. The password is plaintext catalog data and is
+        visible only on the Admin-token source surface. cursorColumn/idColumn
+        may remain absent while an unsafe source is paused.
+      properties:
+        host: { type: string, minLength: 1, maxLength: 255 }
+        port: { type: integer, minimum: 1, maximum: 65535, default: 5432 }
+        database: { type: string, minLength: 1, maxLength: 128 }
+        username: { type: string, minLength: 1, maxLength: 128 }
+        password: { type: string, minLength: 1 }
+        sslMode: { type: string, enum: [disable, require, verify-ca, verify-full], default: require }
+        schema: { type: string, minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$", default: public }
+        table: { type: string, minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+        cursorColumn: { type: [string, "null"], minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+        idColumn: { type: [string, "null"], minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+    LegacyDsnConnection:
+      type: object
+      additionalProperties: true
+      required: [dsnEnv, schema, table]
+      description: Existing-record compatibility only; new source requests use DirectPostgresConnection.
+      properties:
+        dsnEnv: { type: string, minLength: 1 }
+        schema: { type: string }
+        table: { type: string }
+        cursorColumn: { type: string }
+        idColumn: { type: string }
+    StoredDirectPostgresConnection:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >-
+        Admin-visible stored direct connection. A source migrated from the
+        retired Provider registry is paused and may temporarily lack password;
+        create requests still use DirectPostgresConnection and require it.
+      properties:
+        host: { type: string, minLength: 1, maxLength: 255 }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        database: { type: string, minLength: 1, maxLength: 128 }
+        username: { type: string, minLength: 1, maxLength: 128 }
+        password: { type: [string, "null"], minLength: 1 }
+        sslMode: { type: string, enum: [disable, require, verify-ca, verify-full] }
+        schema: { type: string, minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+        table: { type: string, minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+        cursorColumn: { type: [string, "null"], minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+        idColumn: { type: [string, "null"], minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+    DirectPostgresConnectionPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: Partial direct connection update; the server merges it with the saved connection and tests the complete candidate before saving.
+      properties:
+        host: { type: string, minLength: 1, maxLength: 255 }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        database: { type: string, minLength: 1, maxLength: 128 }
+        username: { type: string, minLength: 1, maxLength: 128 }
+        password: { type: string, minLength: 1 }
+        sslMode: { type: string, enum: [disable, require, verify-ca, verify-full] }
+        schema: { type: string, minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+        table: { type: string, minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+        cursorColumn: { type: [string, "null"], minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+        idColumn: { type: [string, "null"], minLength: 1, maxLength: 63, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+    DatabaseSourceCreate:
+      type: object
+      additionalProperties: false
+      required: [sourceKey, displayName, sourceKind, connection]
+      properties:
+        sourceKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9][a-z0-9._-]*$" }
+        displayName: { type: string, minLength: 1, maxLength: 200 }
+        sourceKind: { type: string, const: database }
+        datasetId: { type: string, minLength: 1, maxLength: 200 }
+        platform: { type: string, minLength: 1, maxLength: 100 }
+        objectType: { type: string, minLength: 1, maxLength: 100 }
+        connection: { $ref: "#/components/schemas/DirectPostgresConnection" }
+        syncIntervalSeconds: { type: integer, minimum: 60, maximum: 86400, default: 60 }
+    FileSourceCreate:
+      type: object
+      additionalProperties: false
+      required: [sourceKey, displayName, sourceKind]
+      properties:
+        sourceKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9][a-z0-9._-]*$" }
+        displayName: { type: string, minLength: 1, maxLength: 200 }
+        sourceKind: { type: string, const: file }
+        datasetId: { type: string, minLength: 1, maxLength: 200 }
+        platform: { type: string, minLength: 1, maxLength: 100, default: external }
+        objectType: { type: string, minLength: 1, maxLength: 100, default: record }
+    ExternalSourceCreate:
+      oneOf:
+        - $ref: "#/components/schemas/DatabaseSourceCreate"
+        - $ref: "#/components/schemas/FileSourceCreate"
+      discriminator:
+        propertyName: sourceKind
+    ExternalSourcePatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        connection: { $ref: "#/components/schemas/DirectPostgresConnectionPatch" }
+        status: { type: string, enum: [active, paused] }
+        syncIntervalSeconds: { type: integer, minimum: 60, maximum: 86400 }
+    ExternalSource:
+      type: object
+      additionalProperties: true
+      required: [sourceKey, sourceKind, status, connection]
+      properties:
+        id: { type: string, format: uuid }
+        sourceKey: { type: string }
+        displayName: { type: string }
+        sourceKind: { type: string, enum: [database, file] }
+        datasetId: { type: string }
+        platform: { type: string }
+        objectType: { type: string }
+        status: { type: string, enum: [active, paused] }
+        connection:
+          oneOf:
+            - $ref: "#/components/schemas/StoredDirectPostgresConnection"
+            - $ref: "#/components/schemas/LegacyDsnConnection"
+            - type: object
+              additionalProperties: false
+              maxProperties: 0
+              description: File sources have no connection fields.
+        syncIntervalSeconds: { type: [integer, "null"], minimum: 60, maximum: 86400 }
+    ExternalSourceEnvelope:
+      type: object
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/ExternalSource" }
+        requestId: { type: string }
+    SourceMappingCreate:
+      type: object
+      additionalProperties: false
+      required: [fieldMap]
+      properties:
+        fieldMap: { type: object, minProperties: 1, additionalProperties: true }
+        origin: { type: string, minLength: 1, maxLength: 100, default: manual }
+        agentModel: { type: [string, "null"] }
+        agentConfidence: { type: [number, "null"], minimum: 0, maximum: 1 }
+        notes: { type: [string, "null"], maxLength: 4000 }
     SearchRequest:
       type: object
       additionalProperties: false
@@ -721,6 +1237,16 @@ components:
               $ref: "#/components/schemas/TelegramPageInfo"
         requestId: { type: string }
   responses:
+    AdminData:
+      description: Admin-token-only operation result.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data, requestId]
+            properties:
+              data: {}
+              requestId: { type: string }
     TelegramPage:
       description: >-
         Strict customer-safe canonical projection. Raw rows, extensions,

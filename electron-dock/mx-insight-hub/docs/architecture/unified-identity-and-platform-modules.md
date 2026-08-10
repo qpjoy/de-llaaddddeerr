@@ -54,7 +54,7 @@ path as OIDC/JWKS, or either path as shared user management.
 | Public API key | Does not issue or validate | Issues, hashes, rotates and validates | Never receives it |
 | Platform/dataset authorization | Coarse route admission only | Authoritative grant decision | Executes only the bounded internal request |
 | Quota, reservation, usage, credit and billing | Does not own | Authoritative | Reports upstream outcome/evidence |
-| Provider credentials, collection and provider fallback | None | Never stores them | Authoritative |
+| Night-All upstream provider credentials, collection and fallback | None | Never stores them | Authoritative |
 | Edge DNS/TLS, host and method routing | Authoritative | Declares required routes | Private origin only |
 
 Launcher may retain organization display metadata needed for login and navigation. Hub may retain a denormalized organization label for operator usability. Neither copy is a substitute for the explicit identity binding and Hub-local tenant membership.

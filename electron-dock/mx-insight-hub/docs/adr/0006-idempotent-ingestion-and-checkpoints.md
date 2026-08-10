@@ -26,11 +26,11 @@
   batch，并直接采用其 `cursor_end`；若较低层重放同时提供了不同 fingerprint，
   `pageDrifted` 是来源页发生漂移的事故证据，已提交 batch 仍是权威，不能把
   新页面盲写成同一 batch。
-- source、`provider:<providerKey>` 都使用排序后的 PostgreSQL session advisory
-  try-lock。pull/reset、连接/映射切换、Provider 测试/敏感变更等拓扑操作不会
+- source 使用 PostgreSQL session advisory try-lock。pull/reset、连接测试、
+  连接/映射切换等拓扑操作不会
   交叉；争用立即返回 `409 source_busy`，不在长查询后面无界等待。暂停只阻止
   新批次；已在运行的批次到 checkpoint 边界收尾，在此期间返回
-  `409 source_draining`（Provider 敏感变更为 `provider_pause_required`）。
+  `409 source_draining`。
 - 删除必须来自明确 tombstone 或完整 snapshot contract；“本轮未返回”不自动视为删除。
 
 ## 拒绝方案

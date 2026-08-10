@@ -11,7 +11,6 @@ import { createSearch } from './search/index.mjs'
 import { EmbeddingPipeline } from './embedding/pipeline.mjs'
 import { ExternalImporter } from './ingest/external/importer.mjs'
 import { DatabaseSourcePuller } from './ingest/external/database-source.mjs'
-import { ProviderRegistry } from './ingest/external/provider-registry.mjs'
 import { createIdentityService } from './identity/index.mjs'
 import { MemoryStore } from './stores/memory-store.mjs'
 import { createPostgresStore } from './stores/postgres-store.mjs'
@@ -35,11 +34,8 @@ export async function createRuntime(config = loadConfig()) {
   // External imports write through the canonical path, which only the
   // PostgreSQL store implements.
   const importer = config.storeDriver === 'postgres' ? new ExternalImporter({ store }) : null
-  const providerRegistry = config.storeDriver === 'postgres' && config.providerMasterKey
-    ? new ProviderRegistry({ store, masterKey: config.providerMasterKey })
-    : null
   const databasePuller = config.storeDriver === 'postgres'
-    ? new DatabaseSourcePuller({ store, queue, providerRegistry })
+    ? new DatabaseSourcePuller({ store, queue })
     : null
   // Reports `available: false` with no providers configured; every caller has a
   // deterministic fallback, so the agent is an accelerator, not a dependency.
@@ -71,7 +67,6 @@ export async function createRuntime(config = loadConfig()) {
     queue,
     importer,
     databasePuller,
-    providerRegistry,
     agent,
     search,
     embedding,
@@ -83,7 +78,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer,
-    providerRegistry, databasePuller, agent, search, embedding,
+    databasePuller, agent, search, embedding,
   }
 }
 

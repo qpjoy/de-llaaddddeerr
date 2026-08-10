@@ -380,7 +380,7 @@ curl -X POST '.../internal/v1/admin/sources/weekly-report/import?filename=r.xlsx
   importer 在拒绝率 >10% 时打 warning；这不是数据库 pull 的容错阈值。数据库
   pull 只要有一行 rejected 就整批失败、不写 canonical、不推进 cursor，避免永久
   越过坏行。
-- **异构库拉取只支持 PostgreSQL**。通用"任意数据库"意味着每个引擎打包一个驱动，并为每种方言的排序和类型转换规则重新实现游标语义。真出现 MySQL 源时，它该有自己的模块和自己的游标测试。新连接通过 Admin source-provider 注册：host/port/database/username/SSL 模式按白名单保存，password 用平台 master key 做 AES-256-GCM 加密且不回显；源记录只引用 `provider_id`。旧 `dsnEnv` 仅兼容历史部署。所有连接以 `default_transaction_read_only=on` 打开，表名/列名走严格标识符白名单——标识符不能参数化，只能校验。
+- **异构库拉取只支持 PostgreSQL**。通用"任意数据库"意味着每个引擎打包一个驱动，并为每种方言的排序和类型转换规则重新实现游标语义。真出现 MySQL 源时，它该有自己的模块和自己的游标测试。新连接由 Admin Token 直接写入 source 的 `connection`：`host/port/database/username/password/sslMode/schema/table/cursorColumn/idColumn` 按白名单保存，不再存在独立 Provider 资源或额外 master key。password 为便于后台查看和修改而明文保存在 Hub catalog；数据库、逻辑备份、PITR 和 Admin 响应都必须按敏感凭据控制。旧 `dsnEnv` 仅兼容历史源。所有连接以 `default_transaction_read_only=on` 打开，表名/列名走严格标识符白名单——标识符不能参数化，只能校验。
 - 数据库源已提供 `GET .../schema`、Admin-only `GET .../preview` 和
   `GET|POST .../sync`。`preview` 上限 3 行，只返回 type/null/JSON serialized
   length 的 value-free shape，不要求先批准 mapping；同步采用持久

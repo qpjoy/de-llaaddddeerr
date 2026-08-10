@@ -1,7 +1,7 @@
 # 数据平台存储、检索与服务架构
 
 状态：目标设计与当前落地并存。现有实现已包含租户/Consumer/API Key/
-授权/幂等/用量、Night-All 搜索适配器、加密 PostgreSQL source provider、
+授权/幂等/用量、Night-All 搜索适配器、Admin 管理的 PostgreSQL/文件 source、
 文件与数据库导入、canonical/revision/tombstone、outbox、Elasticsearch 投影
 及 PostgreSQL 降级检索。PostGIS、不可变对象/云存储、`/shared_dir` watcher、
 通用 CDC、fresh/stale 缓存和 BI 聚合仍是后续能力，不能按本文目标图宣称已上线。
@@ -30,7 +30,7 @@ flowchart LR
 责任边界保持不变：
 
 - Night-All 负责其 API/TGStat 等上游 provider、采集、fallback、凭据和一手来源证据。
-- Hub 负责客户身份、订阅和授权、稳定响应、规范化产品视图、查询缓存、数据发布版本和用量账本；对管理员直接注册的数据库/文件来源，Hub 也负责 provider 凭据加密、映射、checkpoint 和任务证据。
+- Hub 负责客户身份、订阅和授权、稳定响应、规范化产品视图、查询缓存、数据发布版本和用量账本；对 Admin Token 直接注册的 PostgreSQL/文件来源，Hub 也负责连接配置、映射、checkpoint 和任务证据。数据库密码按明确的运维取舍明文保存在 `catalog.external_sources.connection`，因此 Hub 数据库和备份必须按凭据库限制访问。
 - Launcher 负责人类登录、AppCenter 入口、K8s 生命周期和网络路由；它不保存 Hub 的数据、余额或客户 API Key。
 - Elasticsearch 是查询投影，Kibana 是内部运维工具；两者都不是事实库或备份。
 

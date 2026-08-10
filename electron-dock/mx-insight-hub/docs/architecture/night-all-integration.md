@@ -29,7 +29,7 @@ Caller-controlled fields are currently limited to platform, query, page size and
 
 Telegram monitor history is not proxied through Night-All on every request.
 The two externally written `night_all.public.tg_monitor_*` tables enter Hub
-through a read-only managed PostgreSQL provider, then become canonical Hub
+through an Admin-managed read-only PostgreSQL source, then become canonical Hub
 records and an Elasticsearch projection:
 
 ```text
@@ -45,7 +45,7 @@ pagination envelope. Each item fixes `source.provider=null` and
 `source.endpointId=hub-canonical-search`; response metadata fixes
 `sourceProvider=mx-insight-hub` and `endpointId=hub-canonical-search`. These are
 logical serving-plane labels. PostgreSQL search degradation appears only in
-`warnings`, never as `meta.searchMode`. No physical source provider key, host,
+`warnings`, never as `meta.searchMode`. No physical source key, host,
 database/table name, collector account, credential or TGStat endpoint crosses
 the public boundary.
 

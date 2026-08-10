@@ -2,8 +2,8 @@
 
 MX Insight Hub is the governed data-access layer between callers and private data systems such as Night-All. It turns internal platform capabilities into stable, key-scoped APIs with tenant-scoped identities, consumers, grants, quotas and usage evidence, plus idempotency and an operator console.
 
-The runtime now includes encrypted PostgreSQL source providers, versioned source
-objects/mappings, canonical records/revisions/tombstones, transactional
+The runtime now includes Admin-managed PostgreSQL and file sources, versioned
+source objects/mappings, canonical records/revisions/tombstones, transactional
 projection outbox, direct file import, durable pull workers and customer-safe
 Telegram history/full-text/entity APIs. Non-Telegram live search still
 dispatches to Night-All; Telegram stored search is locally served in the same
@@ -131,7 +131,10 @@ scoped. Their complete field,
 pagination, privacy and current metering semantics are in the [Public API v1
 contract](docs/contracts/public-api-v1.md). Production source registration and activation starts
 with the [Telegram monitor ingestion
-runbook](docs/operations/telegram-monitor-ingestion.md); the registered sources
+runbook](docs/operations/telegram-monitor-ingestion.md). PostgreSQL connection
+fields are managed directly on each source by the Admin Token; they are stored
+in the Hub catalog and can change without a deployment. Catalog/database dumps
+therefore contain sensitive credentials and require restricted access. The registered sources
 remain paused until the source owner supplies the missing
 watermark/index/commit-order guarantees. The current messages table cannot
 safely track later edits/deletions with `message_at` or `collected_at`.

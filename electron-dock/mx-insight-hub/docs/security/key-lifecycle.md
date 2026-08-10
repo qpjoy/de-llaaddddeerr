@@ -20,22 +20,19 @@ The pepper is a K8s Secret, not a database field. A database dump alone must not
 - Admin token: permits internal operator API access; never accepted by public routes.
 - Night-All service token: workload identity on the private Hub-to-Night-All hop.
 - Night-All upstream/provider credentials: remain in Night-All Credential Center.
-- Direct source-provider password: write-only Hub Admin input, encrypted in the
-  catalog with AES-256-GCM and never exposed to public/Admin read responses.
-- `MX_INSIGHT_PROVIDER_MASTER_KEY`: platform trust root for those encrypted
-  source passwords; present only in Admin/combined and ingest workloads, never
-  in the public listener.
+- Direct PostgreSQL source password: accepted and readable only through the
+  Admin-token source surface and stored as plaintext in
+  `catalog.external_sources.connection`. It is never accepted by or returned to
+  public API-key callers or Launcher-login sessions. Database and backup access
+  therefore grants access to source credentials and must be restricted/audited.
 
 Development defaults in Compose are intentionally local-only. Internal
-production requires an explicit Admin token, API-key pepper, provider master
-key in `.env.internal` or the environment. Night-All may use either an explicit
+production requires an explicit Admin token and API-key pepper in
+`.env.internal` or the environment. Night-All may use either an explicit
 reviewed URL or the documented host-local default. The shared `mx-common` plane
 may generate and retain the Hub database password; pinning it is optional.
 
-The provider master key must be restored together with catalog backups and must
-not be silently replaced. The deployment blocks drift once retained because an
-uncoordinated change makes every registered source password undecryptable.
-Rotate with a reviewed decrypt/re-encrypt procedure and a rollback copy; source
-password rotation is independent and uses
-`PUT /internal/v1/admin/source-providers/:key` followed by a read-only
-connection test.
+Source passwords are changed directly with
+`PUT /internal/v1/admin/sources/:key` while the source is paused and drained,
+then verified through `POST /internal/v1/admin/sources/:key/test`. No additional
+provider credential key is deployed or restored.

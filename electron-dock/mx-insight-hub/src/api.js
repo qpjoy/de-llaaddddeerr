@@ -137,24 +137,13 @@ export const adminApi = {
   revokeMembership: (token, body) => request(token, `${ADMIN_ROOT}/members/memberships/revoke`, { method: 'POST', body }),
 
   // External sources (P4).
-  sourceProviderTypes: (token) => request(token, `${ADMIN_ROOT}/source-provider-types`),
-  sourceProviders: (token) => request(token, `${ADMIN_ROOT}/source-providers`),
-  createSourceProvider: (token, body) => request(
-    token, `${ADMIN_ROOT}/source-providers`, { method: 'POST', body },
-  ),
-  updateSourceProvider: (token, key, body) => request(
-    token, `${ADMIN_ROOT}/source-providers/${encodeURIComponent(key)}`, { method: 'PUT', body },
-  ),
-  deleteSourceProvider: (token, key) => request(
-    token, `${ADMIN_ROOT}/source-providers/${encodeURIComponent(key)}`, { method: 'DELETE' },
-  ),
-  testSourceProvider: (token, key) => request(
-    token, `${ADMIN_ROOT}/source-providers/${encodeURIComponent(key)}/test`, { method: 'POST' },
-  ),
   sources: (token) => request(token, `${ADMIN_ROOT}/sources`),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },
+  ),
+  testSource: (token, key) => request(
+    token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/test`, { method: 'POST' },
   ),
   sourceMappings: (token, key) => request(token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/mappings`),
   createMapping: (token, key, body) => request(

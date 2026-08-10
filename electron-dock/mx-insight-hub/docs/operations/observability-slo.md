@@ -10,13 +10,13 @@
 - Night-All dependency latency/circuit state without provider credential labels;
 - PostgreSQL connections, transaction latency, locks, storage and backup age;
 - Admin key issuance/revocation/grant-change audit events;
-- source-provider health with bounded machine error code (never host/user/password);
+- per-source connection health with bounded machine error code (never host/user/password);
 - per-source cursor status/age, last successful run and scheduled-vs-running age;
 - import row/ingested/changed/deleted/rejected counts, active-run resume and
   `checkpoint_reset` termination; outcome-unknown batch/finalize/reset errors
   must retain source/run/batch correlation without including page values;
 - bounded `source_busy`, `source_lock_lost`, `source_draining`,
-  `provider_pause_required` and `provider_topology_changed` conflicts (alert on
+  source-topology conflicts (alert on
   sustained contention/drain, not one expected operator retry);
 - durable batch replay count and source-page fingerprint mismatch/
   `pageDrifted` incident count; never emit the page or raw row as a label;
@@ -28,7 +28,7 @@
 Never label metrics with full API keys, query text, user-entered URLs or unrestricted tenant names. Use internal IDs and bounded platform/capability labels.
 
 Alert on a failed cursor, a running cursor with no live lease/progress, repeated
-schema-probe drift, unresolved rejected rows, unhealthy provider, or projection
+schema-probe drift, unresolved rejected rows, unhealthy source connection, or projection
 lag beyond the dataset SLO. A zero-row idle poll is normal and must not page by
 itself. `ingest.rejected_rows.raw_row` may contain business content; it stays in
 restricted incident storage and never becomes a metric/log label or Admin
