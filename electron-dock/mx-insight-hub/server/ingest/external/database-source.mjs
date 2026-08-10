@@ -1024,7 +1024,7 @@ export class DatabaseSourcePuller {
         }
       }
       if (!hasConfiguredCursor) {
-        return totalOnly('source_cursor_unconfigured', ['cursorColumn and idColumn are not configured'])
+        return await totalOnly('source_cursor_unconfigured', ['cursorColumn and idColumn are not configured'])
       }
 
       const cursorName = safeIdentifier(connection.cursorColumn, 'cursorColumn')
@@ -1046,7 +1046,7 @@ export class DatabaseSourcePuller {
           ? [`id column ${idName} has unsupported type`]
           : []),
       ]
-      if (issues.length > 0) return totalOnly('source_cursor_unsafe', issues)
+      if (issues.length > 0) return await totalOnly('source_cursor_unsafe', issues)
 
       const schema = safeIdentifier(connection.schema || 'public', 'schema')
       const sourceTable = safeIdentifier(connection.table, 'table')
@@ -1069,7 +1069,7 @@ export class DatabaseSourcePuller {
       if (!definitions.some((definition) => uniqueIndexProvesOrder(definition, cursorName, idName))) {
         issues.push(`no unique index proves (${cursorName}, ${idName}) is a total order`)
       }
-      if (issues.length > 0) return totalOnly('source_cursor_unsafe', issues)
+      if (issues.length > 0) return await totalOnly('source_cursor_unsafe', issues)
 
       const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
       if (position.cursor == null || position.lastId == null) {

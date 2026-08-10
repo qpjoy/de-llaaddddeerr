@@ -566,6 +566,7 @@ function TelegramPipelineModal({
             <div>
               <h3 id="telegram-checkpoint-reset-title">统一重置双表 Checkpoint</h3>
               <p>下一次同步会从两个固定源表起点重放。Canonical 仍会幂等去重，但源库读取和 PG/ES 重投影负载可能明显增加。</p>
+              <p>仅在“准备 / 修复源库”明确提示需要重置，或经审计决定全量重放时使用；首次接入、普通新增、暂停恢复与 ES 重建都不需要重置。</p>
             </div>
           </div>
           <form className="mih-source-danger__form" onSubmit={resetCheckpoints}>
@@ -674,10 +675,10 @@ function TelegramSourcePreparationPanel({
       {data.permissions ? (
         <div className="mih-telegram-prepare__permissions">
           <StatusBadge status={data.permissions.canPrepare ? 'ready' : 'disabled'} label={data.permissions.canPrepare ? '已保存账号可执行迁移' : '已保存账号仅用于运行 / 探测'} />
-          <span>只读会话：{data.source?.readOnly ? '是' : '否'}</span>
+          <span>本次探测强制只读：{data.source?.readOnly ? '是' : '否'}</span>
           <span>数据库 owner：{data.permissions.isDatabaseOwner ? '是' : '否'}</span>
           <span>superuser：{data.permissions.isSuperuser ? '是' : '否'}</span>
-          {!data.permissions.canPrepare ? <small>执行时请使用下方一次性 source owner / DDL 账号；不会替换已保存的只读连接。</small> : null}
+          {!data.permissions.canPrepare ? <small>执行时请使用下方临时 source owner / DDL 账号；不会替换已保存的运行连接。</small> : null}
         </div>
       ) : null}
 
@@ -730,25 +731,27 @@ function TelegramSourcePreparationPanel({
           <Warning size={22} weight="duotone" aria-hidden="true" />
           <div>
             <strong>仅在任务已暂停且批次排空后执行</strong>
-            <p>如果已保存的 <code>mx_data</code> 是只读账号，请在下面临时输入 source owner / DDL 账号。临时账号只用于本次请求，不保存、不回填，也不会由接口返回；留空则使用已保存连接。准备成功后，运行期仍使用已保存的只读连接。</p>
+            <p>{data.permissions?.canPrepare
+              ? <>已保存的 <code>{pipeline.connection?.username || '源库账号'}</code> 已通过本次 DDL 权限核验，下面两个临时账号字段请留空。</>
+              : <>已保存账号不能修改源表时，请在下面临时输入双表 owner（或其成员）且具备 database CREATE 权限的账号，或 superuser。</>} 临时账号只用于本次请求，不保存、不回填，也不会由接口返回；准备成功后，运行期仍使用已保存连接。</p>
           </div>
         </div>
         <div className="mih-form mih-form--grid mih-telegram-prepare__credentials">
-          <Field label="一次性迁移用户名（可选）" hint="source owner / 具备 ALTER、CREATE、TRIGGER 权限">
+          <Field label="临时 DDL 用户名（仅在需要时）" hint="双表 owner（或成员）+ database CREATE，或 superuser">
             <input className="qp-input" autoComplete="off" value={migrationUsername} onChange={(event) => setMigrationUsername(event.target.value)} />
           </Field>
-          <Field label="一次性迁移密码（可选）" hint="请求结束立即从页面状态清除">
+          <Field label="临时 DDL 密码（仅在需要时）" hint="请求结束立即从页面状态清除">
             <input className="qp-input" type="password" autoComplete="new-password" value={migrationPassword} onChange={(event) => setMigrationPassword(event.target.value)} />
           </Field>
         </div>
-        {credentialsIncomplete ? <p className="mih-telegram-prepare__field-error">一次性迁移用户名和密码必须同时填写，或同时留空。</p> : null}
+        {credentialsIncomplete ? <p className="mih-telegram-prepare__field-error">临时 DDL 用户名和密码必须同时填写，或同时留空。</p> : null}
         <div className="mih-telegram-prepare__confirm">
           <Field label="输入业务标识以二次确认" hint={<code>telegram-monitor</code>}>
             <input className="qp-input" value={confirmation} autoComplete="off" spellCheck="false" onChange={(event) => setConfirmation(event.target.value)} />
           </Field>
           <button className="qp-button qp-button--danger" type="submit" disabled={!canPrepare || credentialsIncomplete || confirmation !== 'telegram-monitor'}
             title={!configured ? '先验证并保存共享连接' : !connectionConsistent ? '先统一两个固定任务的连接' : !pausedAndDrained ? '请先安全暂停并等待运行批次排空' : ''}>
-            {submitting ? '正在准备源库…' : ready ? '重新核验并修复源库' : '一次性准备源库'}
+            {submitting ? '正在准备源库…' : ready ? '重新核验并修复源库' : '准备 / 修复源库'}
           </button>
         </div>
       </form>

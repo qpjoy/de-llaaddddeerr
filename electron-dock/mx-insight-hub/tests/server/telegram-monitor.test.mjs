@@ -928,6 +928,35 @@ test('database source progress counts exact composite-cursor remaining rows and 
   assert.equal(blocked.blocker, 'source_cursor_unsafe')
   assert.deepEqual(blocked.issues, ['cursor column updated_at is missing'])
 
+  let delayedPoolEnded = false
+  const delayedCountPuller = new DatabaseSourcePuller({
+    store: puller.store,
+    queue: puller.queue,
+    poolFactory: () => ({
+      async query(sql) {
+        if (/information_schema\.columns/.test(sql)) {
+          return { rows: [
+            { column_name: 'id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 1 },
+          ] }
+        }
+        return new Promise((resolve, reject) => {
+          setImmediate(() => {
+            if (delayedPoolEnded) {
+              reject(new Error('pool ended before the progress COUNT completed'))
+              return
+            }
+            resolve({ rows: [{ total_rows: '163401' }] })
+          })
+        })
+      },
+      async end() { delayedPoolEnded = true },
+    }),
+  })
+  const delayedBlocked = await delayedCountPuller.progress(source.sourceKey)
+  assert.equal(delayedBlocked.totalRows, 163_401)
+  assert.equal(delayedBlocked.blocker, 'source_cursor_unsafe')
+  assert.equal(delayedPoolEnded, true)
+
   const failedPuller = new DatabaseSourcePuller({
     store: puller.store,
     queue: puller.queue,

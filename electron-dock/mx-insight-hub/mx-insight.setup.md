@@ -46,4 +46,48 @@ bash scripts/manage.sh ops internal-production logs
 PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout=30000 -c lock_timeout=3000' \
 psql "host=127.0.0.1 port=5432 dbname=night_all user=mx_data" \
   -X -W -v ON_ERROR_STOP=1
+
+
+# LLM 在 .env.internal 配置
+# baseUrl 填 API 根路径，不要填 /chat/completions。
+# apiKeyEnv 填环境变量名，不是明文 Key。
+# 修改后重新部署，脚本会自动把 Key 放进 Kubernetes Secret。
+
+# MX_INSIGHT_AGENT_PROVIDERS='[
+#   {
+#     "id":"thirdparty",
+#     "baseUrl":"https://your-provider.example.com/v1",
+#     "model":"your-chat-model",
+#     "apiKeyEnv":"THIRDPARTY_API_KEY"
+#   }
+# ]'
+# THIRDPARTY_API_KEY='<实际 key>'
+
+
+# 向量检索是另一套独立配置
+# MX_INSIGHT_EMBEDDING_PROVIDERS='[
+#   {
+#     "id":"openai",
+#     "baseUrl":"https://api.openai.com/v1",
+#     "model":"text-embedding-3-small",
+#     "apiKeyEnv":"OPENAI_API_KEY",
+#     "dimensions":1536
+#   }
+# ]'
+# MX_INSIGHT_EMBEDDING_DIMENSIONS=1536
+# OPENAI_API_KEY='<实际 key>'
+
+# TG 数据库迁移
+# 1. 保持 TG 任务暂停，源端写入程序也先停止。
+# 2. 临时 DDL 两项留空。
+# 3. 确认框输入 telegram-monitor。
+# 4. 点击“准备 / 修复源库”。
+# 5. 等两张表的 updated_at、触发器、游标索引、硬删除保护、表合同全部变绿。
+# 6. 点击“精确核对源库进度”。
+# 7. 确认 Writer 合同，启用任务，再点“立即同步”。
+
+# 只有以下情况才重置：
+# 已有 Checkpoint 后换服务器、换数据库或源表被 DROP/重建；
+# 准备面板明确显示 requiresCheckpointReset；
+# 修复历史漏数后，明确决定从头全量重放。
 ```
