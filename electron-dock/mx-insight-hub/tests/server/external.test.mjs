@@ -834,6 +834,90 @@ test('database pull advances a durable total-order cursor only after idempotent 
   assert.equal(finished.at(-1).result.status, 'succeeded')
 })
 
+test('database pull preserves PostgreSQL cursor microseconds across checkpoints and fingerprints', async () => {
+  const exactCursor = '2026-08-05 03:25:49.438776+00'
+  const source = {
+    id: 's-precise', sourceKey: 'precise-events', sourceKind: 'database',
+    datasetId: 'precise.events.v1', platform: 'telegram', objectType: 'message', status: 'active',
+    connection: { dsnEnv: 'TG_DATABASE_URL', table: 'precise_events', cursorColumn: 'updated_at', idColumn: 'id' },
+  }
+  const mapping = {
+    version: 1,
+    fieldMap: {
+      externalId: { from: 'id' },
+      eventTime: { from: 'created_at' },
+      collectedAt: { from: 'updated_at' },
+    },
+  }
+  let position = { cursor: '2026-08-05T03:25:49.438Z', lastId: '10' }
+  let selectCount = 0
+  let firstCheckpoint
+  let ingestedBatch
+  const selects = []
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+      startImportRun: async () => ({ id: 'run-precise', duplicateOf: null }),
+      finishImportRun: async () => {},
+      recordRejectedRows: async () => {},
+      ingestExternalRecords: async (input) => {
+        ingestedBatch = input
+        return { ingested: input.records.length, changed: 0 }
+      },
+    },
+    queue: {
+      getCursor: async () => ({ status: 'idle', position }),
+      saveCursor: async (id, nextPosition, options) => {
+        position = nextPosition
+        if (options.status === 'idle' && nextPosition.cursor === exactCursor) firstCheckpoint = nextPosition
+        return { id, position: nextPosition, status: options.status }
+      },
+    },
+    env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+    poolFactory: () => ({
+      async query(sql, values) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: [
+            { column_name: 'id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 1 },
+            { column_name: 'created_at', data_type: 'timestamp with time zone', udt_name: 'timestamptz', is_nullable: 'NO', ordinal_position: 2 },
+            { column_name: 'updated_at', data_type: 'timestamp with time zone', udt_name: 'timestamptz', is_nullable: 'NO', ordinal_position: 3 },
+            { column_name: '__mx_insight_cursor_0', data_type: 'text', udt_name: 'text', is_nullable: 'YES', ordinal_position: 4 },
+          ] }
+        }
+        selects.push({ sql, values })
+        selectCount += 1
+        if (selectCount > 1) return { rows: [] }
+        const alias = sql.match(/"updated_at"::text AS "([^"]+)"/)?.[1]
+        assert.equal(alias, '__mx_insight_cursor_1', 'the internal alias must avoid source-column collisions')
+        return { rows: [{
+          id: '10',
+          created_at: new Date('2026-08-05T03:00:00Z'),
+          updated_at: new Date('2026-08-05T03:25:49.438Z'),
+          __mx_insight_cursor_0: 'real-source-field',
+          [alias]: exactCursor,
+        }] }
+      },
+      async end() {},
+    }),
+  })
+
+  const first = await puller.pullBatch(source.sourceKey, { batchSize: 10 })
+  assert.equal(first.pulled, 1)
+  assert.equal(firstCheckpoint.cursor, exactCursor)
+  assert.equal(firstCheckpoint.lastId, '10')
+  assert.equal(ingestedBatch.records[0].rawItem.__mx_insight_cursor_0, 'real-source-field')
+  assert.equal('__mx_insight_cursor_1' in ingestedBatch.records[0].rawItem, false)
+  assert.equal(
+    ingestedBatch.batch.pageFingerprint,
+    createHash('sha256').update(JSON.stringify([[exactCursor, '10']])).digest('hex'),
+  )
+
+  const second = await puller.pullBatch(source.sourceKey, { batchSize: 10 })
+  assert.equal(second.pulled, 0)
+  assert.deepEqual(selects[1].values.slice(0, 2), [exactCursor, '10'])
+})
+
 test('a rejected database row records evidence and does not advance its cursor', async () => {
   const position = {}
   const saved = []

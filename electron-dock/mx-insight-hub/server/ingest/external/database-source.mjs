@@ -260,12 +260,28 @@ function importBatchKey({ contractHash, position, limit }) {
   })).digest('hex')
 }
 
-function sourcePageFingerprint(rows, cursorColumn, idColumn) {
-  const orderKeys = rows.map((row) => {
-    const cursor = row[cursorColumn]
-    return [cursor instanceof Date ? cursor.toISOString() : cursor, String(row[idColumn])]
-  })
+function sourcePageFingerprint(rows, exactCursors, idColumn) {
+  const orderKeys = rows.map((row, index) => [exactCursors[index], String(row[idColumn])])
   return createHash('sha256').update(JSON.stringify(orderKeys)).digest('hex')
+}
+
+function internalCursorAlias(columns) {
+  const names = new Set(columns.map((column) => column.name))
+  for (let index = 0; ; index += 1) {
+    const candidate = `__mx_insight_cursor_${index}`
+    if (!names.has(candidate)) return candidate
+  }
+}
+
+function takeExactCursors(rows, alias, cursorColumn) {
+  return rows.map((row) => {
+    // PostgreSQL guarantees this alias for a real pull. The fallback keeps
+    // injected pool test doubles and non-pg adapters source-compatible.
+    const hasExactCursor = Object.prototype.hasOwnProperty.call(row, alias)
+    const cursor = hasExactCursor ? row[alias] : row[cursorColumn]
+    if (hasExactCursor) delete row[alias]
+    return cursor
+  })
 }
 
 function importRunKey({ sourceId, contractHash, mappingVersion, position }) {
@@ -1455,14 +1471,17 @@ export class DatabaseSourcePuller {
       await this.#assertManagedSourceContract(pool, connection)
       const columns = await this.#columns(pool, connection)
       const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
+      const cursorAliasName = internalCursorAlias(columns)
+      const cursorAlias = quotedIdentifier(cursorAliasName, 'internal cursor alias')
       const { rows } = await pool.query(
-        `SELECT * FROM ${table}
+        `SELECT *, ${cursorColumn}::text AS ${cursorAlias} FROM ${table}
           WHERE ${cursorColumn} IS NOT NULL
             AND ($1::${cursorCast} IS NULL OR (${cursorColumn}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast}))
           ORDER BY ${cursorColumn}, ${idColumn}
           LIMIT $3`,
         [position.cursor ?? null, position.lastId ?? null, limit],
       )
+      const exactCursors = takeExactCursors(rows, cursorAliasName, cursorName)
       await assertOwned()
       if (rows.length === 0) {
         if (run) {
@@ -1515,7 +1534,7 @@ export class DatabaseSourcePuller {
         }, { status: 'running', error: null })
         checkpointWriteInFlight = false
       }
-      const pageFingerprint = sourcePageFingerprint(rows, cursorName, idName)
+      const pageFingerprint = sourcePageFingerprint(rows, exactCursors, idName)
 
       const rejections = []
       const mapped = []
@@ -1574,7 +1593,7 @@ export class DatabaseSourcePuller {
       const nextPosition = {
         contractHash,
         mappingVersion: mapping.version,
-        cursor: last[cursorName],
+        cursor: exactCursors[exactCursors.length - 1],
         lastId: String(last[idName]),
       }
       await assertOwned()

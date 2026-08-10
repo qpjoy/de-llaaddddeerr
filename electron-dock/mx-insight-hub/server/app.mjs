@@ -4,6 +4,7 @@ import { extname, join, normalize } from 'node:path'
 import { secureEqual } from './core/crypto.mjs'
 import { AppError } from './core/errors.mjs'
 import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson } from './core/http.mjs'
+import { PUBLIC_DOCS_HTML, PUBLIC_OPENAPI_DOCUMENT } from './public-docs.mjs'
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import { validateDatabaseConnection } from './ingest/external/database-source.mjs'
 import {
@@ -439,6 +440,28 @@ export function createApp({
           ...(listenerMode === 'public' ? {} : { dependencies: data }),
         }
         sendJson(response, ready ? 200 : 503, { data: readiness, requestId })
+        return
+      }
+
+      if (request.method === 'GET' && (pathname === '/docs' || pathname === '/docs/')) {
+        if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
+        response.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'content-length': Buffer.byteLength(PUBLIC_DOCS_HTML),
+          'cache-control': 'public, max-age=300',
+          'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+          'referrer-policy': 'no-referrer',
+          'x-content-type-options': 'nosniff',
+        })
+        response.end(PUBLIC_DOCS_HTML)
+        return
+      }
+      if (request.method === 'GET' && pathname === '/docs/openapi.json') {
+        if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
+        sendJson(response, 200, PUBLIC_OPENAPI_DOCUMENT, {
+          'cache-control': 'public, max-age=300',
+          'access-control-allow-origin': '*',
+        })
         return
       }
 

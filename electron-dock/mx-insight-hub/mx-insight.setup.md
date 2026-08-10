@@ -7,6 +7,7 @@ vi .env.internal
 
 # 写入 .env.internal（三个密钥必填）
 MX_INSIGHT_ADMIN_TOKEN=<独立随机值，至少32字符>
+# 7606b8c6c660287139f5f1baf6080df6952250ec21fc8d4a3d2845a835b324
 MX_INSIGHT_API_KEY_PEPPER=<另一个独立随机值，至少32字符>
 MX_INSIGHT_POSTGRES_PASSWORD=<另一个URL安全随机值，至少24字符>
 NIGHT_ALL_SERVICE_TOKEN=
