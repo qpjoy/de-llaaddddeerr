@@ -508,10 +508,33 @@ test('the HanLP image and HTTP service keep reproducibility and load bounds expl
 
   assert.match(dockerfile, /^ARG HANLP_VERSION=\d+\.\d+\.\d+$/m)
   assert.match(dockerfile, /^ARG TORCH_VERSION=\d+\.\d+\.\d+$/m)
+  assert.match(dockerfile, /^ARG PIP_DEFAULT_TIMEOUT=\d+$/m)
+  assert.match(dockerfile, /^ARG PIP_RETRIES=\d+$/m)
+  assert.match(
+    dockerfile,
+    /^ARG PYTORCH_CPU_WHEEL_LINKS=https:\/\/download\.pytorch\.org\/whl\/cpu\/torch\/$/m,
+  )
+  assert.match(dockerfile, /--mount=type=cache,target=\/root\/\.cache\/pip/)
+  assert.match(dockerfile, /--timeout "\$PIP_DEFAULT_TIMEOUT"[\s\S]*?--retries "\$PIP_RETRIES"/)
+  assert.match(
+    dockerfile,
+    /--index-url "\$PIP_INDEX_URL"[\s\S]*?--find-links "\$PYTORCH_CPU_WHEEL_LINKS"[\s\S]*?"torch==\$\{TORCH_VERSION\}\+cpu"[\s\S]*?"hanlp==\$\{HANLP_VERSION\}"/,
+  )
+  assert.doesNotMatch(dockerfile, /--extra-index-url/)
+  assert.doesNotMatch(dockerfile, /https:\/\/pypi\.org\/simple/)
+  assert.match(dockerfile, /python -m pip check/)
+  assert.match(dockerfile, /assert '\+cpu' in torch\.__version__/)
+  assert.match(dockerfile, /assert torch\.version\.cuda is None/)
   assert.match(server, /MAX_BODY_BYTES/)
   assert.match(server, /BoundedSemaphore/)
   assert.match(manifest, /name: seed-models[\s\S]*?resources:/)
   assert.match(manage, /--driver docker-container/)
+  assert.match(manage, /--buildkitd-flags '--allow-insecure-entitlement network\.host'/)
+  assert.match(manage, /--network host[\s\S]*?--allow network\.host/)
+  assert.match(manage, /MX_COMMON_HANLP_PROXY_CONFIG/)
+  assert.match(manage, /docker buildx rm --keep-state/)
   assert.match(manage, /docker update[\s\S]*?--memory[\s\S]*?--cpu-quota/)
+  assert.match(manage, /HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy/)
+  assert.match(manage, /proxy_build_args\+=\(--build-arg "\$proxy_name"\)/)
   assert.match(manage, /MX_COMMON_CONTAINERD_ROOT/)
 })

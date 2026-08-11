@@ -995,25 +995,34 @@ ensure_hanlp_builder() {
     ''|*[!A-Za-z0-9_.-]*) die "MX_COMMON_HANLP_BUILDER contains unsupported characters" ;;
   esac
 
+  local expected_http_proxy expected_https_proxy proxy_checksum proxy_size proxy_fingerprint
+  expected_http_proxy="${HTTP_PROXY:-${http_proxy:-}}"
+  expected_https_proxy="${HTTPS_PROXY:-${https_proxy:-}}"
+  read -r proxy_checksum proxy_size _ < <(
+    printf '%s\n%s\n' "$expected_http_proxy" "$expected_https_proxy" | cksum
+  )
+  proxy_fingerprint="${proxy_checksum}-${proxy_size}"
+
+  local -a create_args=(
+    --name "$HANLP_BUILDER"
+    --driver docker-container
+    --driver-opt "memory=${HANLP_BUILD_MEMORY}"
+    --driver-opt "memory-swap=${HANLP_BUILD_MEMORY}"
+    --driver-opt "cpu-period=100000"
+    --driver-opt "cpu-quota=${HANLP_BUILD_CPU_QUOTA}"
+    --driver-opt network=host
+    --driver-opt "env.MX_COMMON_HANLP_PROXY_CONFIG=${proxy_fingerprint}"
+    --buildkitd-flags '--allow-insecure-entitlement network.host'
+  )
+  # NO_PROXY is intentionally not a driver option: its comma-separated value
+  # is parsed by buildx as multiple driver options. Docker's normal build args
+  # provide it to RUN steps below.
+  [ -n "$expected_http_proxy" ] \
+    && create_args+=(--driver-opt "env.HTTP_PROXY=${expected_http_proxy}")
+  [ -n "$expected_https_proxy" ] \
+    && create_args+=(--driver-opt "env.HTTPS_PROXY=${expected_https_proxy}")
+
   if ! docker buildx inspect "$HANLP_BUILDER" >/dev/null 2>&1; then
-    local -a create_args=(
-      --name "$HANLP_BUILDER"
-      --driver docker-container
-      --driver-opt "memory=${HANLP_BUILD_MEMORY}"
-      --driver-opt "memory-swap=${HANLP_BUILD_MEMORY}"
-      --driver-opt "cpu-period=100000"
-      --driver-opt "cpu-quota=${HANLP_BUILD_CPU_QUOTA}"
-      --driver-opt network=host
-    )
-    local proxy_name proxy_value
-    # NO_PROXY is intentionally not a driver option: its comma-separated value
-    # is parsed by buildx as multiple driver options. Docker's normal build args
-    # still provide the operator's client-side NO_PROXY policy to RUN steps.
-    for proxy_name in HTTP_PROXY HTTPS_PROXY; do
-      proxy_value="${!proxy_name:-}"
-      [ -n "$proxy_value" ] \
-        && create_args+=(--driver-opt "env.${proxy_name}=${proxy_value}")
-    done
     docker buildx create "${create_args[@]}" >/dev/null \
       || die "could not create constrained buildx builder ${HANLP_BUILDER}"
     say "created constrained buildx builder ${HANLP_BUILDER}"
@@ -1038,6 +1047,49 @@ ensure_hanlp_builder() {
   fi
   [ -n "$builder_container" ] \
     || die "cannot locate the buildkit container for ${HANLP_BUILDER}"
+
+  # Builders created by older manage.sh versions lack the entitlement required
+  # for a RUN step to reach a host-local proxy such as 127.0.0.1:7788. A builder
+  # also has to be reconciled when the operator adds, changes or removes its
+  # proxy. Recreate only this dedicated builder and retain its BuildKit cache.
+  local builder_args builder_env builder_proxy_fingerprint="" recreate_reason="" proxy_entry
+  builder_args="$(docker inspect --format '{{json .Args}}' "$builder_container" 2>/dev/null || true)"
+  builder_env="$(
+    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+      "$builder_container" 2>/dev/null || true
+  )"
+  while IFS= read -r proxy_entry; do
+    case "$proxy_entry" in
+      MX_COMMON_HANLP_PROXY_CONFIG=*)
+        builder_proxy_fingerprint="${proxy_entry#MX_COMMON_HANLP_PROXY_CONFIG=}"
+        break
+        ;;
+    esac
+  done <<< "$builder_env"
+  if [[ "$builder_args" != *allow-insecure-entitlement*network.host* ]]; then
+    recreate_reason="host-network support changed"
+  elif [ "$builder_proxy_fingerprint" != "$proxy_fingerprint" ]; then
+    recreate_reason="proxy configuration changed"
+  fi
+  if [ -n "$recreate_reason" ]; then
+    say "recreating builder ${HANLP_BUILDER}: ${recreate_reason}"
+    docker buildx rm --keep-state "$HANLP_BUILDER" >/dev/null \
+      || die "could not replace buildx builder ${HANLP_BUILDER}"
+    docker buildx create "${create_args[@]}" >/dev/null \
+      || die "could not recreate constrained buildx builder ${HANLP_BUILDER}"
+    docker buildx inspect --bootstrap "$HANLP_BUILDER" >/dev/null \
+      || die "could not start recreated buildx builder ${HANLP_BUILDER}"
+    builder_container="$(
+      docker ps -aq --filter "label=com.docker.buildx.builder=${HANLP_BUILDER}" | head -1
+    )"
+    if [ -z "$builder_container" ]; then
+      builder_container="$(
+        docker ps -aq --filter "name=^/buildx_buildkit_${HANLP_BUILDER}0$" | head -1
+      )"
+    fi
+    [ -n "$builder_container" ] \
+      || die "cannot locate the recreated buildkit container for ${HANLP_BUILDER}"
+  fi
   docker update \
     --memory "$HANLP_BUILD_MEMORY" \
     --memory-swap "$HANLP_BUILD_MEMORY" \
@@ -1050,16 +1102,27 @@ ensure_hanlp_builder() {
 build_hanlp_image() {
   need docker
   ensure_hanlp_builder
+  local -a proxy_build_args=()
+  local proxy_name
+  # Predefined Docker proxy build args are excluded from image history. Pass
+  # only names whose values are exported by the caller, so pip/model downloads
+  # use the same scoped proxy as buildkitd without baking credentials in.
+  for proxy_name in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+    [ -n "${!proxy_name:-}" ] && proxy_build_args+=(--build-arg "$proxy_name")
+  done
   say "building model-preloaded HanLP image ${HANLP_IMAGE}"
   if ! docker buildx build \
       --builder "$HANLP_BUILDER" \
       --load \
+      --network host \
+      --allow network.host \
       --build-arg PREFETCH_MODEL=1 \
+      "${proxy_build_args[@]}" \
       -t "$HANLP_IMAGE" \
       -f "${ROOT_DIR}/deploy/hanlp/Dockerfile" \
       "${ROOT_DIR}/deploy/hanlp"; then
     docker buildx stop "$HANLP_BUILDER" >/dev/null 2>&1 || true
-    die "HanLP image build failed"
+    die "HanLP image build failed; downloads are cached, so fix the network/proxy and rerun the same command"
   fi
   docker buildx stop "$HANLP_BUILDER" >/dev/null 2>&1 \
     || warn "could not stop the now-idle HanLP buildx builder"

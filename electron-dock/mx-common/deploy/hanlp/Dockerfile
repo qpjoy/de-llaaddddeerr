@@ -9,23 +9,41 @@
 FROM python:3.11-slim-bookworm
 
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PYTORCH_CPU_WHEEL_LINKS=https://download.pytorch.org/whl/cpu/torch/
+ARG PIP_DEFAULT_TIMEOUT=300
+ARG PIP_RETRIES=10
 ARG PREFETCH_MODEL=0
 ARG HANLP_MODEL=COARSE_ELECTRA_SMALL_ZH
 ARG HANLP_VERSION=2.1.3
 ARG TORCH_VERSION=2.13.0
 ENV HANLP_HOME=/models \
     HANLP_MODEL=${HANLP_MODEL} \
+    PIP_DEFAULT_TIMEOUT=${PIP_DEFAULT_TIMEOUT} \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_RETRIES=${PIP_RETRIES} \
     PYTHONUNBUFFERED=1 \
     PORT=8000
 
 WORKDIR /app
 
 # CPU-only torch: the GPU wheels are several gigabytes and this workload is
-# tokenization on short social-post text, which is not GPU-bound.
-RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" \
-      --extra-index-url https://pypi.org/simple \
-      "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu \
- && pip install --no-cache-dir --index-url "$PIP_INDEX_URL" "hanlp==${HANLP_VERSION}"
+# tokenization on short social-post text, which is not GPU-bound. PyTorch's CPU
+# wheel page supplies only torch itself; the sole package index remains the
+# configured PyPI mirror. Pinning the +cpu local version prevents pip from
+# choosing the ordinary PyPI wheel. Keep pip's cache outside the image layer so
+# a failed dependency download does not force the ~200MB wheel to be downloaded
+# again.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python -m pip install \
+      --timeout "$PIP_DEFAULT_TIMEOUT" \
+      --retries "$PIP_RETRIES" \
+      --index-url "$PIP_INDEX_URL" \
+      --find-links "$PYTORCH_CPU_WHEEL_LINKS" \
+      "torch==${TORCH_VERSION}+cpu" \
+      "hanlp==${HANLP_VERSION}" \
+ && python -m pip check \
+ && python -c \
+      "import torch; assert '+cpu' in torch.__version__, torch.__version__; assert torch.version.cuda is None, torch.version.cuda"
 
 COPY server.py seed-models.sh ./
 

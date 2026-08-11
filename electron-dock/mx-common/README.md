@@ -68,11 +68,22 @@ bash scripts/manage.sh deploy hanlp
 该命令会先确认当前主机就是唯一 Kubernetes 节点并检查至少 8GiB 可用磁盘，
 再用专用的 `docker-container` buildx builder 和 Docker cache 构建约 2GB 的模型
 预热镜像。builder 会自动创建并收敛到 4GiB/2 CPU 限额；
+Python 依赖默认经清华 PyPI 镜像下载，Torch 只从官方 CPU wheel 源下载；下载缓存
+会跨失败重试保留，慢网络下也不会因为后续小依赖超时而重新下载完整 Torch wheel。
 构建完成后会停止 builder 容器并保留 cache；
 随后把本次构建结果重新导入 `k8s.io` containerd（可自愈同名旧镜像）、把镜像
 模型校验后精确同步到持久化 PVC、应用 HanLP Service/Deployment/NetworkPolicy，
 并以 `/health` 和 `/tokenize` 作为成功条件。相同 image ID 不会触发无变化的
 Pod rollout；整个命令可安全重复执行。
+
+若节点访问 PyTorch 官方 CPU wheel 源仍然很慢，可只给这次构建传代理；脚本会把
+代理同时交给 builder 和镜像内的 pip/模型下载步骤，不改 Docker daemon 的全局配置：
+
+```bash
+HTTP_PROXY=http://127.0.0.1:7788 \
+HTTPS_PROXY=http://127.0.0.1:7788 \
+bash scripts/manage.sh deploy hanlp
+```
 
 不要再把 `MX_COMMON_HANLP_ENABLED=1` 当作部署开关；该旧入口会被明确拒绝，
 避免 Docker 与 Kubernetes containerd 的同名镜像内容不一致。
