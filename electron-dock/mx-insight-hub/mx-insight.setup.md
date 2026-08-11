@@ -56,10 +56,11 @@ psql "host=127.0.0.1 port=5432 dbname=night_all user=mx_data" \
   -X -W -v ON_ERROR_STOP=1
 
 
-# LLM 在 .env.internal 配置
-# baseUrl 填 API 根路径，不要填 /chat/completions。
-# apiKeyEnv 填环境变量名，不是明文 Key。
-# 修改后重新部署，脚本会自动把 Key 放进 Kubernetes Secret。
+# LLM 有两种配置来源：
+# 1. 推荐：先部署一次，然后用 Hub admin token 登录「中心 Agent」，把 Provider/Key
+#    保存到数据库；后续地址、Key、超时、启停和顺序更新无需改 env 或重启。
+# 2. 回滚/兼容：继续用下面的环境变量。baseUrl 填 API 根路径，不要填
+#    /chat/completions；apiKeyEnv 填变量名，不是明文 Key。环境配置变化仍需重新部署。
 
 # MX_INSIGHT_AGENT_PROVIDERS='[
 #   {
@@ -72,7 +73,9 @@ psql "host=127.0.0.1 port=5432 dbname=night_all user=mx_data" \
 # THIRDPARTY_API_KEY='<实际 key>'
 
 
-# 向量检索是另一套独立配置
+# 向量检索是另一套独立配置。Provider Key/地址可在中心 Agent 热更新，但
+# MX_INSIGHT_EMBEDDING_DIMENSIONS 决定 ES mapping，仍必须在部署时固定。
+# 模型或 dimensions 的变化需要受控 reindex，管理接口不会直接放行。
 # MX_INSIGHT_EMBEDDING_PROVIDERS='[
 #   {
 #     "id":"openai",

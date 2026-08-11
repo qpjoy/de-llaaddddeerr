@@ -6,7 +6,8 @@ import { NightAllAdapter } from './adapters/night-all.mjs'
 import { createApp } from './app.mjs'
 import { loadConfig } from './config.mjs'
 import { HubService } from './hub-service.mjs'
-import { createAgent } from './agent/index.mjs'
+import { createAgentRuntime } from './agent/runtime.mjs'
+import { AgentSettingsStore } from './agent/settings-store.mjs'
 import { createSearch } from './search/index.mjs'
 import { EmbeddingPipeline } from './embedding/pipeline.mjs'
 import { ExternalImporter } from './ingest/external/importer.mjs'
@@ -43,7 +44,18 @@ export async function createRuntime(config = loadConfig()) {
     : null
   // Reports `available: false` with no providers configured; every caller has a
   // deterministic fallback, so the agent is an accelerator, not a dependency.
-  const agent = createAgent({ config })
+  // Only the admin/combined API loads model credentials. The public listener has
+  // no Agent route and must not query the plaintext credential table.
+  const agentSettings = pool && config.listenerMode !== 'public'
+    ? new AgentSettingsStore(pool)
+    : null
+  const agent = await createAgentRuntime({
+    config,
+    settingsStore: agentSettings,
+    // The public listener exposes neither Agent routes nor model-backed work.
+    // Keep its runtime empty even if provider metadata exists in the ConfigMap.
+    managedKinds: config.listenerMode === 'public' ? [] : ['chat', 'embedding'],
+  })
   // Read-only here. The API serves retrieval queries and reports pipeline
   // status; the writing stages belong to the projector workload.
   const search = pool ? createSearch({ pool, config: config.common }) : null
@@ -83,7 +95,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer,
-    databasePuller, telegramSourcePreparer, agent, search, embedding,
+    databasePuller, telegramSourcePreparer, agent, agentSettings, search, embedding,
   }
 }
 
@@ -96,6 +108,7 @@ export async function start(config = loadConfig()) {
   })
   const close = async () => {
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))
+    runtime.agent.close()
     await runtime.store.close()
     await runtime.pool?.end()
   }

@@ -7,9 +7,12 @@ import {
   Key,
   MagnifyingGlass,
   Pause,
+  PencilSimple,
   Play,
   Plugs,
+  Plus,
   Table,
+  Trash,
   Warning,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
@@ -1604,16 +1607,41 @@ function formatBytes(value) {
 // Agent
 // ---------------------------------------------------------------------------
 
-export function AgentPage({ token, onUnauthorized }) {
+export function AgentPage({ token, session, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.agent(token), [token])
   const state = useRemoteData(load, onUnauthorized)
+  const [editingKind, setEditingKind] = useState(null)
 
   if (state.loading && !state.data) return <LoadingState label="正在读取模型链路" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   const agent = state.data || {}
-  const chain = agent.chat || []
-  const embeddings = agent.embeddings || []
+  const chatSetting = agentProviderSetting(agent, 'chat')
+  const embeddingSetting = agentProviderSetting(agent, 'embedding')
+  const chatProviders = mergeProviderStatus(chatSetting.providers, agent.chat)
+  const embeddingProviders = mergeProviderStatus(embeddingSetting.providers, agent.embeddings)
+  const canEdit = session?.kind === 'admin-token'
+
+  const saveSetting = async (kind, body) => {
+    try {
+      const updated = await adminApi.updateAgentProviders(token, kind, body)
+      state.setData({
+        ...agent,
+        settings: { ...agent.settings, [kind]: updated },
+      })
+      notify?.(
+        updated.runtimeApplied === false
+          ? `${kind === 'chat' ? '对话' : 'Embedding'} Provider 配置已保存，运行时正在重试应用`
+          : `${kind === 'chat' ? '对话' : 'Embedding'} Provider 配置已保存并生效`,
+        updated.runtimeApplied === false ? 'warning' : 'success',
+      )
+      state.refresh()
+      return updated
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      throw error
+    }
+  }
 
   return (
     <>
@@ -1626,48 +1654,390 @@ export function AgentPage({ token, onUnauthorized }) {
       />
       {!agent.available ? (
         <EmptyState icon={Brain} title="未配置模型 provider"
-          description="设置 MX_INSIGHT_AGENT_PROVIDERS 后启用。未配置时映射建议回退到规则推断，功能不中断。" />
-      ) : (
-        <Panel title="对话模型链路" subtitle="按顺序降级；400/422 不降级，因为换个 provider 会一样失败">
-          <ProviderTable providers={chain} />
-        </Panel>
-      )}
-      {embeddings.length > 0 ? (
-        <Panel title="Embedding 链路" subtitle={`维度 ${agent.embeddingDimensions ?? '未配置'}；链路内所有模型必须同维度`}>
-          <ProviderTable providers={embeddings} />
-        </Panel>
+          description={canEdit
+            ? '可在下方配置 Provider。未配置时映射建议回退到规则推断，Hub 与现有联网功能不中断。'
+            : '未配置时映射建议回退到规则推断，Hub 与现有联网功能不中断。'} />
       ) : null}
+      <AgentProviderPanel
+        kind="chat"
+        title="对话模型链路"
+        subtitle="按优先级降级；400/422 不降级，因为换个 provider 会一样失败"
+        setting={chatSetting}
+        providers={chatProviders}
+        canEdit={canEdit}
+        onEdit={() => setEditingKind('chat')}
+      />
+      <AgentProviderPanel
+        kind="embedding"
+        title="Embedding 链路"
+        subtitle={`当前运行维度 ${agent.embeddingDimensions ?? '未配置'}；链路内所有模型必须同维度`}
+        setting={embeddingSetting}
+        providers={embeddingProviders}
+        canEdit={canEdit}
+        onEdit={() => setEditingKind('embedding')}
+      />
       <Panel title="当前接线边界" subtitle="模型已配置不等于所有数据源都在执行智能清洗">
         <div className="mih-agent-scope-grid">
           <div><strong>文件映射建议</strong><p>已接线，但只在管理员预览时显式勾选；仅发送列名，建议仍需人工批准。</p></div>
           <div><strong>数据库 / Telegram 清洗</strong><p>使用确定性、版本化 mapping。逐行分类能力尚未接入，不会静默把源数据发送给模型。</p></div>
-          <div><strong>向量检索</strong><p>{embeddings.length > 0 ? 'Embedding worker 已配置，可生成独立 chunk 索引。' : '未配置 Embedding provider；PG/全文检索不受影响。'}</p></div>
+          <div><strong>向量检索</strong><p>{embeddingProviders.length > 0 ? 'Embedding worker 已配置，可生成独立 chunk 索引。' : '未配置 Embedding provider；PG/全文检索不受影响。'}</p></div>
           <div><strong>建议的下一步</strong><p>只把 schema drift 或拒绝行副本送入隔离队列，并记录模型、prompt、数据范围、费用和人工结论。</p></div>
         </div>
       </Panel>
+      {editingKind ? (
+        <ProviderSettingsModal
+          kind={editingKind}
+          setting={editingKind === 'chat' ? chatSetting : embeddingSetting}
+          onClose={() => setEditingKind(null)}
+          onSave={(body) => saveSetting(editingKind, body)}
+        />
+      ) : null}
     </>
   )
 }
 
-function ProviderTable({ providers }) {
+function agentProviderSetting(agent, kind) {
+  const configured = agent.settings?.[kind]
+  const runtimeProviders = kind === 'chat' ? agent.chat : agent.embeddings
+  return {
+    source: configured?.source === 'database' ? 'database' : 'environment',
+    revision: configured?.revision ?? null,
+    providers: Array.isArray(configured?.providers)
+      ? configured.providers
+      : Array.isArray(runtimeProviders) ? runtimeProviders : [],
+  }
+}
+
+function mergeProviderStatus(configured, runtime) {
+  const liveById = new Map((Array.isArray(runtime) ? runtime : []).map((provider) => [provider.id, provider]))
+  return configured.map((provider, index) => {
+    const live = liveById.get(provider.id) || {}
+    return {
+      ...provider,
+      priority: provider.priority ?? index + 1,
+      keyConfigured: provider.keyConfigured ?? live.keyConfigured,
+      circuit: live.circuit,
+    }
+  })
+}
+
+function AgentProviderPanel({ kind, title, subtitle, setting, providers, canEdit, onEdit }) {
+  const sourceLabel = setting.source === 'database' ? '数据库' : '环境变量'
   return (
-    <DataTable>
-      <thead><tr><th>顺序</th><th>Provider</th><th>模型</th><th>凭据</th><th>熔断</th></tr></thead>
+    <Panel
+      title={title}
+      subtitle={subtitle}
+      actions={canEdit ? (
+        <button className="qp-button qp-button--outline" type="button" onClick={onEdit}>
+          <PencilSimple size={16} aria-hidden="true" />编辑配置
+        </button>
+      ) : null}
+    >
+      <div className="mih-agent-chain-meta">
+        <span>配置来源 <strong>{sourceLabel}</strong><code>{setting.source}</code></span>
+        <span>Revision <code>{setting.revision ?? '—'}</code></span>
+        {!canEdit ? <span>权限 <strong>只读</strong></span> : null}
+      </div>
+      <ProviderTable providers={providers} kind={kind} />
+    </Panel>
+  )
+}
+
+function ProviderTable({ providers, kind }) {
+  return (
+    <DataTable label={`${kind === 'chat' ? '对话' : 'Embedding'} Provider 链`}>
+      <thead><tr><th>优先级</th><th>Provider</th><th>模型</th><th>Endpoint</th><th>状态</th><th>凭据</th><th>熔断</th></tr></thead>
       <tbody>
         {providers.map((provider, index) => (
           <tr key={provider.id}>
-            <td>{index === 0 ? '首选' : `降级 ${index}`}</td>
+            <td><strong>{index === 0 ? '首选' : `降级 ${index}`}</strong><small>priority {provider.priority}</small></td>
             <td><code>{provider.id}</code></td>
-            <td><code>{provider.model}</code></td>
-            <td><StatusBadge status={provider.keyConfigured ? 'active' : 'suspended'}
-              label={provider.keyConfigured ? '已配置' : '缺失'} /></td>
-            <td><StatusBadge
-              status={provider.circuit === 'closed' ? 'active' : provider.circuit === 'open' ? 'suspended' : 'pending'}
-              label={{ closed: '正常', degraded: '有失败', open: '已熔断' }[provider.circuit]} /></td>
+            <td><code>{provider.model}</code>{kind === 'embedding' ? <small>{provider.dimensions || '—'} dimensions</small> : null}</td>
+            <td><code>{provider.baseUrl || '—'}</code><small>{provider.timeoutMs ? `${provider.timeoutMs} ms` : 'timeout 未知'} · {provider.authMode || 'bearer'}</small></td>
+            <td><StatusBadge status={provider.enabled === false ? 'disabled' : 'active'} label={provider.enabled === false ? '停用' : '启用'} /></td>
+            <td>{provider.authMode === 'none' ? (
+              <StatusBadge status="active" label="无需密钥" />
+            ) : (
+              <StatusBadge status={provider.keyConfigured ? 'active' : 'suspended'} label={provider.keyConfigured ? '已配置' : '缺失'} />
+            )}</td>
+            <td>{provider.circuit ? (
+              <StatusBadge
+                status={provider.circuit === 'closed' ? 'active' : provider.circuit === 'open' ? 'suspended' : 'pending'}
+                label={{ closed: '正常', degraded: '有失败', open: '已熔断' }[provider.circuit] || provider.circuit} />
+            ) : '—'}</td>
           </tr>
         ))}
+        {providers.length === 0 ? <tr><td colSpan="7" className="mih-agent-provider-empty">尚未配置 Provider</td></tr> : null}
       </tbody>
     </DataTable>
+  )
+}
+
+function providerDraft(provider, index, kind) {
+  return {
+    id: String(provider.id || ''),
+    baseUrl: String(provider.baseUrl || ''),
+    model: String(provider.model || ''),
+    timeoutMs: String(provider.timeoutMs || 60_000),
+    dimensions: kind === 'embedding' ? String(provider.dimensions || '') : '',
+    enabled: provider.enabled !== false,
+    priority: String(provider.priority ?? (index + 1) * 10),
+    authMode: provider.authMode || 'bearer',
+    keyConfigured: provider.keyConfigured === true,
+    originalBaseUrl: String(provider.baseUrl || ''),
+    apiKey: '',
+    clearKey: false,
+  }
+}
+
+function blankProvider(index, kind) {
+  return providerDraft({ priority: (index + 1) * 10, enabled: true, authMode: 'bearer' }, index, kind)
+}
+
+function vectorSignatures(providers) {
+  const activeProviders = providers.filter((provider) => provider.enabled !== false)
+  const signatureProviders = activeProviders.length > 0 ? activeProviders : providers
+  return [...new Set(signatureProviders
+    .map((provider) => `${String(provider.model).trim()}::${String(provider.dimensions).trim()}`))]
+    .sort()
+}
+
+function ProviderSettingsModal({ kind, setting, onClose, onSave }) {
+  const initialProviders = useMemo(
+    () => setting.providers.map((provider, index) => providerDraft(provider, index, kind)),
+    [kind, setting],
+  )
+  const [providers, setProviders] = useState(initialProviders)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  const [targetSource, setTargetSource] = useState(setting.source === 'environment' ? 'database' : setting.source)
+  const isEmbedding = kind === 'embedding'
+  const initialVectorSignatures = isEmbedding ? vectorSignatures(initialProviders) : []
+  const nextVectorSignatures = isEmbedding ? vectorSignatures(providers) : []
+  const removedExistingEmbeddingChain = isEmbedding && initialProviders.length > 0 && providers.length === 0
+  const embeddingChanged = isEmbedding
+    && initialProviders.length > 0
+    && (removedExistingEmbeddingChain
+      || JSON.stringify(initialVectorSignatures) !== JSON.stringify(nextVectorSignatures))
+  const databaseTarget = targetSource === 'database'
+  const blockedEmbeddingChange = databaseTarget && embeddingChanged
+
+  const patchProvider = (index, patch) => {
+    setProviders((current) => current.map((provider, providerIndex) => (
+      providerIndex === index ? { ...provider, ...patch } : provider
+    )))
+    setError(null)
+  }
+
+  const addProvider = () => {
+    setProviders((current) => [...current, blankProvider(current.length, kind)])
+    setError(null)
+  }
+
+  const removeProvider = (index) => {
+    setProviders((current) => current.filter((_, providerIndex) => providerIndex !== index))
+    setError(null)
+  }
+
+  const changeTargetSource = (source) => {
+    setTargetSource(source)
+    if (source === 'environment') {
+      setProviders((current) => current.map((provider) => ({ ...provider, apiKey: '', clearKey: false })))
+    }
+    setError(null)
+  }
+
+  const submit = async (event) => {
+    event.preventDefault()
+    setError(null)
+    const normalized = []
+    if (databaseTarget) {
+      const ids = providers.map((provider) => provider.id.trim())
+      if (ids.some((id) => !id) || new Set(ids).size !== ids.length) {
+        setError(new Error('Provider ID 必须填写且不能重复。'))
+        return
+      }
+      if (setting.source === 'environment' && providers.some((provider) => (
+        provider.authMode === 'bearer' && !provider.apiKey.trim()
+      ))) {
+        setError(new Error('首次从环境变量迁移到数据库时，每个 Bearer Provider 都必须重新输入密钥。'))
+        return
+      }
+      const unsafeBaseUrlChange = providers.find((provider) => (
+        setting.source === 'database'
+        && provider.authMode === 'bearer'
+        && provider.keyConfigured
+        && provider.baseUrl.trim() !== provider.originalBaseUrl
+        && !provider.apiKey.trim()
+        && !provider.clearKey
+      ))
+      if (unsafeBaseUrlChange) {
+        setError(new Error(`${unsafeBaseUrlChange.id.trim() || 'Provider'} 修改 Base URL 后必须重新输入密钥，或明确清除旧密钥。`))
+        return
+      }
+      if (embeddingChanged) {
+        setError(new Error(removedExistingEmbeddingChain
+          ? '已有 Embedding 链不能删除为空；如需暂停，请保留原 Provider 条目并全部停用。'
+          : 'Embedding 模型或 dimensions 不能在此处直接修改；请先完成受控 reindex 流程。'))
+        return
+      }
+      for (const provider of providers) {
+        const timeoutMs = Number(provider.timeoutMs)
+        const priority = Number(provider.priority)
+        const dimensions = Number(provider.dimensions)
+        if (!provider.baseUrl.trim() || !provider.model.trim()) {
+          setError(new Error(`${provider.id.trim()} 必须填写 Base URL 和模型。`))
+          return
+        }
+        if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 300_000) {
+          setError(new Error(`${provider.id.trim()} 的超时必须是 1000–300000 ms 的整数。`))
+          return
+        }
+        if (!Number.isInteger(priority) || priority < 0 || priority > 10_000) {
+          setError(new Error(`${provider.id.trim()} 的优先级必须是 0–10000 的整数。`))
+          return
+        }
+        if (isEmbedding && (!Number.isInteger(dimensions) || dimensions < 1)) {
+          setError(new Error(`${provider.id.trim()} 的 Embedding 维度必须是正整数。`))
+          return
+        }
+        normalized.push({
+          id: provider.id.trim(),
+          baseUrl: provider.baseUrl.trim(),
+          model: provider.model.trim(),
+          timeoutMs,
+          ...(isEmbedding ? { dimensions } : {}),
+          enabled: provider.enabled,
+          priority,
+          authMode: provider.authMode,
+          ...(provider.clearKey ? { clearApiKey: true } : {}),
+          ...(!provider.clearKey && provider.apiKey.trim() ? { apiKey: provider.apiKey.trim() } : {}),
+        })
+      }
+      normalized.sort((left, right) => left.priority - right.priority)
+    }
+
+    setSaving(true)
+    try {
+      await onSave({ source: targetSource, expectedRevision: setting.revision ?? null, providers: normalized })
+      setProviders((current) => current.map((provider) => ({ ...provider, apiKey: '', clearKey: false })))
+      onClose()
+    } catch (saveError) {
+      setProviders((current) => current.map((provider) => ({ ...provider, apiKey: '' })))
+      setError(saveError)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Modal
+      title={`编辑${kind === 'chat' ? '对话' : ' Embedding'} Provider`}
+      description={`当前来源：${setting.source} · Revision ${setting.revision ?? '—'}。保存使用 expectedRevision 防止覆盖并发修改。`}
+      size="xlarge"
+      onClose={onClose}
+      footer={<>
+        <button className="qp-button qp-button--ghost" type="button" onClick={onClose} disabled={saving}>取消</button>
+        <button className="qp-button qp-button--primary" type="submit" form={`agent-provider-${kind}`} disabled={saving || blockedEmbeddingChange}>
+          {saving ? '正在保存' : targetSource === 'environment' ? '切回环境变量' : '保存 Provider 链'}
+        </button>
+      </>}
+    >
+      <form id={`agent-provider-${kind}`} className="mih-agent-provider-form" onSubmit={submit}>
+        <Field
+          label="目标配置来源"
+          className="mih-agent-source-choice"
+          hint="数据库配置可在线更新；环境变量由部署注入。"
+        >
+          <select className="qp-input" value={targetSource} onChange={(event) => changeTargetSource(event.target.value)} disabled={saving}>
+            <option value="database">数据库（可在线更新）</option>
+            <option value="environment">环境变量（由部署管理）</option>
+          </select>
+        </Field>
+        {targetSource === 'environment' ? (
+          <div className="mih-inline-warning">
+            <Warning size={17} aria-hidden="true" />
+            切回后将读取部署环境中的 Provider 配置；本操作不会修改环境变量。环境配置有变化时仍需重新部署服务。
+          </div>
+        ) : null}
+        {databaseTarget && setting.source === 'environment' ? (
+          <div className="mih-inline-warning">
+            <Key size={17} aria-hidden="true" />
+            环境变量中的密钥不会自动复制到数据库。首次保存时，每个 Bearer Provider 都必须重新输入密钥。
+          </div>
+        ) : null}
+        {databaseTarget && isEmbedding ? (
+          <div className="mih-inline-warning">
+            <Warning size={17} aria-hidden="true" />
+            Embedding 模型与 dimensions 决定向量空间。修改前必须安排完整 reindex，不能直接复用已有向量。
+          </div>
+        ) : null}
+        {blockedEmbeddingChange ? (
+          <div className="mih-inline-warning">
+            <Warning size={17} aria-hidden="true" />
+            {removedExistingEmbeddingChain
+              ? '已有 Embedding 链不能删除为空。保存已禁用；如需暂停向量生成，请保留原 Provider 条目并全部设为停用。'
+              : '检测到既有 Embedding 模型或 dimensions 签名变化，保存已禁用。请通过受控 reindex 流程完成变更。'}
+          </div>
+        ) : null}
+        {error ? <ErrorState error={error} /> : null}
+        {databaseTarget ? <div className="mih-agent-provider-list">
+          {providers.map((provider, index) => (
+            <article className="mih-agent-provider-editor" key={index}>
+              <header>
+                <div>
+                  <span>{index === 0 ? '首选 Provider' : `降级 Provider ${index}`}</span>
+                  {provider.authMode === 'none' ? (
+                    <StatusBadge status="active" label="无需密钥" />
+                  ) : (
+                    <StatusBadge status={provider.keyConfigured ? 'active' : 'suspended'} label={provider.keyConfigured ? '密钥已配置' : '密钥缺失'} />
+                  )}
+                </div>
+                <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`删除 Provider ${index + 1}`} onClick={() => removeProvider(index)} disabled={saving}>
+                  <Trash size={17} aria-hidden="true" />
+                </button>
+              </header>
+              <div className="mih-agent-provider-editor__grid">
+                <Field label="Provider ID"><input className="qp-input" required maxLength="64" pattern="[a-z0-9][a-z0-9._-]{0,63}" value={provider.id} onChange={(event) => patchProvider(index, { id: event.target.value })} /></Field>
+                <Field label="模型"><input className="qp-input" required maxLength="200" value={provider.model} onChange={(event) => patchProvider(index, { model: event.target.value })} /></Field>
+                <Field label="Base URL" className="mih-agent-provider-editor__wide" hint="修改后必须重新输入密钥或明确清除旧密钥"><input className="qp-input" type="url" required value={provider.baseUrl} placeholder="https://api.example.com/v1" onChange={(event) => patchProvider(index, { baseUrl: event.target.value })} /></Field>
+                <Field label="超时（ms）"><input className="qp-input" type="number" min="1000" max="300000" step="1" required value={provider.timeoutMs} onChange={(event) => patchProvider(index, { timeoutMs: event.target.value })} /></Field>
+                <Field label="优先级" hint="保存时按数值从小到大排序"><input className="qp-input" type="number" min="0" max="10000" step="1" required value={provider.priority} onChange={(event) => patchProvider(index, { priority: event.target.value })} /></Field>
+                {isEmbedding ? <Field label="Dimensions" hint="改变后必须 reindex"><input className="qp-input" type="number" min="1" step="1" required value={provider.dimensions} onChange={(event) => patchProvider(index, { dimensions: event.target.value })} /></Field> : null}
+                <Field label="认证方式"><select className="qp-input" value={provider.authMode} onChange={(event) => patchProvider(index, { authMode: event.target.value })}><option value="bearer">Bearer Token</option><option value="none">无需认证</option></select></Field>
+                <Field
+                  label="API Key"
+                  className="mih-agent-provider-editor__wide"
+                  hint={setting.source === 'environment' && provider.authMode === 'bearer'
+                    ? '必须重新输入；环境变量密钥不会自动迁移'
+                    : '始终不回显；留空保留现有密钥'}
+                >
+                  <input
+                    className="qp-input"
+                    type="password"
+                    autoComplete="new-password"
+                    maxLength="8192"
+                    value={provider.apiKey}
+                    disabled={provider.clearKey || provider.authMode === 'none'}
+                    onChange={(event) => patchProvider(index, { apiKey: event.target.value })}
+                  />
+                </Field>
+              </div>
+              <footer>
+                <label><input type="checkbox" checked={provider.enabled} onChange={(event) => patchProvider(index, { enabled: event.target.checked })} />启用 Provider</label>
+                <label className="mih-agent-provider-clear"><input type="checkbox" checked={provider.clearKey} onChange={(event) => patchProvider(index, { clearKey: event.target.checked, apiKey: '' })} />明确清除已保存密钥</label>
+              </footer>
+            </article>
+          ))}
+          {providers.length === 0 ? <p className="mih-agent-provider-empty">此链为空；保存后对应能力将保持确定性降级。</p> : null}
+        </div> : null}
+        {databaseTarget ? (
+          <button className="qp-button qp-button--outline" type="button" onClick={addProvider} disabled={saving}>
+            <Plus size={16} aria-hidden="true" />添加 Provider
+          </button>
+        ) : null}
+      </form>
+    </Modal>
   )
 }
 

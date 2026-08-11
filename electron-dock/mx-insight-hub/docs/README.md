@@ -45,6 +45,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 18. [Backup and restore](operations/backup-restore.md)
 19. [Observability and SLO](operations/observability-slo.md)
 20. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
+21. [Agent provider settings](operations/agent-provider-settings.md)
 
 ## Decisions
 

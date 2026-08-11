@@ -350,7 +350,7 @@ test('health reports liveness and dependencies', async () => {
 })
 
 test('listener modes fail closed across public and admin planes', async () => {
-  async function isolatedCall(listenerMode, path, headers) {
+  async function isolatedCall(listenerMode, path, headers, method = 'GET') {
     const isolated = createServer(createApp({
       service,
       store,
@@ -361,7 +361,7 @@ test('listener modes fail closed across public and admin planes', async () => {
     }))
     await new Promise((resolve) => isolated.listen(0, '127.0.0.1', resolve))
     try {
-      const response = await fetch(`http://127.0.0.1:${isolated.address().port}${path}`, { headers })
+      const response = await fetch(`http://127.0.0.1:${isolated.address().port}${path}`, { headers, method })
       return response.status
     } finally {
       await new Promise((resolve) => isolated.close(resolve))
@@ -370,6 +370,14 @@ test('listener modes fail closed across public and admin planes', async () => {
 
   assert.equal(
     await isolatedCall('public', '/internal/v1/admin/dashboard', adminHeaders),
+    404,
+  )
+  assert.equal(
+    await isolatedCall('public', '/internal/v1/admin/sign-in-options'),
+    404,
+  )
+  assert.equal(
+    await isolatedCall('public', '/internal/v1/admin/sign-in', { 'content-type': 'application/json' }, 'POST'),
     404,
   )
   assert.equal(

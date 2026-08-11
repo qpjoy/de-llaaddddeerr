@@ -545,6 +545,13 @@ test('an allowlisted Launcher scope confers platform admin, and losing it revoke
   ]) {
     assert.equal((await callAdmin(path, { token: 'mx-v1-ops' })).status, 200)
   }
+  const providerWrite = await callAdmin('/internal/v1/admin/agent/providers/chat', {
+    token: 'mx-v1-ops',
+    method: 'PUT',
+    body: { expectedRevision: 0, source: 'environment', providers: [] },
+  })
+  assert.equal(providerWrite.status, 403)
+  assert.equal((await providerWrite.json()).error.code, 'admin_token_required')
   const sourceManagementRoutes = [
     ['GET', '/internal/v1/admin/sources'],
     ['POST', '/internal/v1/admin/sources'],

@@ -37,13 +37,16 @@ export class NoProviderAvailableError extends Error {
   }
 }
 
-export function parseProviderConfig(raw, { kind = 'chat' } = {}) {
+export function parseProviderConfig(raw, { kind = 'chat', allowInlineApiKey = false } = {}) {
   if (!raw) return []
   let parsed
   try {
     parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
-  } catch (error) {
-    throw new AppError(500, 'invalid_configuration', `agent provider config is not valid JSON: ${error.message}`)
+  } catch {
+    // Parser messages can quote the malformed input. Static configuration must
+    // never be reflected into logs because operators sometimes paste secrets
+    // while diagnosing a provider entry.
+    throw new AppError(500, 'invalid_configuration', 'agent provider config is not valid JSON')
   }
   if (!Array.isArray(parsed)) {
     throw new AppError(500, 'invalid_configuration', 'agent provider config must be a JSON array')
@@ -55,6 +58,24 @@ export function parseProviderConfig(raw, { kind = 'chat' } = {}) {
         'invalid_configuration',
         `provider[${index}] requires id, baseUrl and model`,
       )
+    }
+    const hasInlineApiKey = Object.prototype.hasOwnProperty.call(entry, 'apiKey')
+    if (hasInlineApiKey && !allowInlineApiKey) {
+      throw new AppError(
+        500,
+        'invalid_configuration',
+        `provider[${index}] must reference a runtime Secret with apiKeyEnv; inline apiKey is forbidden`,
+      )
+    }
+    if (hasInlineApiKey && entry.apiKeyEnv) {
+      throw new AppError(500, 'invalid_configuration', `provider[${index}] cannot use apiKey and apiKeyEnv together`)
+    }
+    const authMode = entry.authMode ?? (entry.apiKeyEnv || entry.apiKey ? 'bearer' : 'none')
+    if (!['bearer', 'none'].includes(authMode)) {
+      throw new AppError(500, 'invalid_configuration', `provider[${index}].authMode must be bearer or none`)
+    }
+    if (authMode === 'none' && (entry.apiKeyEnv || entry.apiKey)) {
+      throw new AppError(500, 'invalid_configuration', `provider[${index}] cannot configure an API key when authMode is none`)
     }
     // The router appends the endpoint path itself, so a baseUrl that already
     // contains one produces `/v1/chat/completions/chat/completions` and a 404
@@ -77,6 +98,10 @@ export function parseProviderConfig(raw, { kind = 'chat' } = {}) {
       baseUrl,
       model: entry.model,
       apiKeyEnv: entry.apiKeyEnv || null,
+      // Database-backed settings resolve a credential before constructing the
+      // router. Environment configuration keeps the original apiKeyEnv path.
+      apiKey: entry.apiKey || null,
+      authMode,
       timeoutMs: entry.timeoutMs || DEFAULT_TIMEOUT_MS,
       // Embedding providers carry dimensions because the index mapping is fixed
       // to them; see EmbeddingRouter for why mixing them is forbidden.
@@ -150,8 +175,17 @@ export class ProviderRouter {
   }
 
   #apiKey(provider) {
-    if (!provider.apiKeyEnv) return null
-    return process.env[provider.apiKeyEnv] || null
+    if (provider.apiKey) return provider.apiKey
+    if (provider.apiKeyEnv) return process.env[provider.apiKeyEnv] || null
+    return null
+  }
+
+  #authMode(provider) {
+    // Keep compatibility with callers that construct ProviderRouter entries
+    // directly instead of going through parseProviderConfig. Historically the
+    // presence of apiKeyEnv meant bearer authentication even though authMode
+    // did not yet exist on the provider shape.
+    return provider.authMode ?? (provider.apiKeyEnv || provider.apiKey ? 'bearer' : 'none')
   }
 
   /**
@@ -173,12 +207,14 @@ export class ProviderRouter {
         attempts.push({ provider: provider.id, error: 'circuit open', skipped: true })
         continue
       }
-      const apiKey = this.#apiKey(provider)
-      if (provider.apiKeyEnv && !apiKey) {
+      const authMode = this.#authMode(provider)
+      const apiKey = authMode === 'bearer' ? this.#apiKey(provider) : null
+      if (authMode === 'bearer' && !apiKey) {
         // A configured-but-unset key is a deployment mistake worth surfacing,
         // not a silent skip that looks like the provider is down.
-        attempts.push({ provider: provider.id, error: `${provider.apiKeyEnv} is not set` })
-        this.logger?.warn?.(`[agent] ${provider.id}: ${provider.apiKeyEnv} is not set`)
+        const reason = 'API key is not configured'
+        attempts.push({ provider: provider.id, error: reason })
+        this.logger?.warn?.(`[agent] ${provider.id}: API key is not configured`)
         continue
       }
 
@@ -192,29 +228,40 @@ export class ProviderRouter {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+            ...(authMode === 'bearer' && apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
           },
           body: JSON.stringify(buildBody(provider)),
           signal: controller.signal,
+          redirect: 'error',
         })
 
         if (!response.ok) {
-          const detail = (await response.text()).slice(0, 500)
+          // Upstream bodies may contain reflected prompts, credentials or vendor
+          // diagnostics. Status is enough to decide failover; never copy the body
+          // into an API error, attempt trail or log.
+          await response.body?.cancel?.().catch?.(() => {})
           if (!shouldFailover(response.status)) {
             // Our request is wrong; every other provider will reject it too.
             breaker.recordSuccess()
-            throw new AppError(400, 'agent_request_rejected', `Model rejected the request: ${detail}`, {
+            throw new AppError(400, 'agent_request_rejected', 'Model rejected the request', {
               provider: provider.id,
               upstreamStatus: response.status,
             })
           }
           breaker.recordFailure()
-          attempts.push({ provider: provider.id, error: `HTTP ${response.status}: ${detail}` })
+          attempts.push({ provider: provider.id, error: `HTTP ${response.status}` })
           this.logger?.warn?.(`[agent] ${provider.id} failed (${response.status}); trying next provider`)
           continue
         }
 
-        const payload = await response.json()
+        let payload
+        try {
+          payload = await response.json()
+        } catch {
+          // JSON parser errors may include a fragment of the upstream body.
+          // Replace them before the generic failure trail/logging boundary.
+          throw new Error('provider returned invalid JSON')
+        }
         breaker.recordSuccess()
         return {
           provider: provider.id,
@@ -245,7 +292,7 @@ export class ProviderRouter {
       id: provider.id,
       model: provider.model,
       dimensions: provider.dimensions,
-      keyConfigured: !provider.apiKeyEnv || Boolean(process.env[provider.apiKeyEnv]),
+      keyConfigured: this.#authMode(provider) !== 'bearer' || Boolean(this.#apiKey(provider)),
       circuit: this.#breakers.get(provider.id).state,
     }))
   }
@@ -273,6 +320,15 @@ export class EmbeddingRouter extends ProviderRouter {
           'invalid_configuration',
           `embedding providers disagree on dimensions (${[...dimensions].join(', ')}); ` +
             'falling back to a differently-sized model would corrupt the vector index',
+        )
+      }
+      const models = new Set(providers.map((provider) => provider.model))
+      if (models.size > 1) {
+        throw new AppError(
+          500,
+          'invalid_configuration',
+          `embedding providers disagree on model (${[...models].join(', ')}); ` +
+            'falling back across vector spaces would corrupt retrieval quality',
         )
       }
       const [configured] = [...dimensions]

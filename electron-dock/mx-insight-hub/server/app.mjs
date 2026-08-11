@@ -317,6 +317,12 @@ export function createApp({
     }
   }
 
+  function requireAgentAdmin(principal) {
+    if (principal?.kind !== 'admin-token') {
+      throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may change model providers')
+    }
+  }
+
   function requireImporter() {
     if (!importer) {
       throw new AppError(503, 'importer_unavailable', 'External imports require the PostgreSQL store')
@@ -359,6 +365,14 @@ export function createApp({
     try {
       const url = new URL(request.url, 'http://localhost')
       const { pathname, searchParams } = url
+      const isAdminPath = pathname.startsWith('/internal/v1/admin/') || pathname.startsWith('/internal/v1/ops/')
+      const isPublicPath = pathname.startsWith('/api/v1/')
+      // Listener isolation must run before unauthenticated sign-in routes. The
+      // public listener previously exposed both sign-in endpoints because their
+      // handlers appeared before this guard.
+      if ((listenerMode === 'public' && isAdminPath) || (listenerMode === 'admin' && isPublicPath)) {
+        throw new AppError(404, 'not_found', 'Route not found')
+      }
 
       if (request.method === 'OPTIONS') {
         response.writeHead(204, {
@@ -463,12 +477,6 @@ export function createApp({
           'access-control-allow-origin': '*',
         })
         return
-      }
-
-      const isAdminPath = pathname.startsWith('/internal/v1/admin/') || pathname.startsWith('/internal/v1/ops/')
-      const isPublicPath = pathname.startsWith('/api/v1/')
-      if ((listenerMode === 'public' && isAdminPath) || (listenerMode === 'admin' && isPublicPath)) {
-        throw new AppError(404, 'not_found', 'Route not found')
       }
 
       let principal = null
@@ -1088,6 +1096,23 @@ export function createApp({
             // it shows when the chain is quietly running on a fallback.
             ...(agent?.status() ?? {}),
           },
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent/providers/:kind')
+      if (params && request.method === 'PUT') {
+        requireAgentAdmin(principal)
+        if (typeof agent?.updateSetting !== 'function') {
+          throw new AppError(503, 'agent_settings_unavailable', 'Dynamic provider settings require PostgreSQL')
+        }
+        const data = await agent.updateSetting(
+          params.kind,
+          await readJson(request, 64 * 1024),
+          { updatedBy: 'admin-token' },
+        )
+        sendJson(response, data.runtimeApplied === false ? 202 : 200, {
+          data,
           requestId,
         })
         return

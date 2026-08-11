@@ -202,6 +202,11 @@ export const adminApi = {
   backfill: (token) => request(token, `${ADMIN_ROOT}/backfill`),
   startBackfill: (token, body) => request(token, `${ADMIN_ROOT}/backfill`, { method: 'POST', body }),
   agent: (token) => request(token, `${ADMIN_ROOT}/agent`),
+  updateAgentProviders: (token, kind, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent/providers/${encodeURIComponent(kind)}`,
+    { method: 'PUT', body },
+  ),
   retrieval: (token) => request(token, `${ADMIN_ROOT}/retrieval`),
   semanticSearch: (token, body) => request(token, `${ADMIN_ROOT}/retrieval/search`, { method: 'POST', body }),
   runtime: (token) => Promise.all([

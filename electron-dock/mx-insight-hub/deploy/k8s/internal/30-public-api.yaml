@@ -64,14 +64,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: mx-insight-hub-config
-            # Model API keys, keyed by whatever `apiKeyEnv` each provider in
-            # MX_INSIGHT_AGENT_PROVIDERS names. envFrom rather than explicit
-            # entries so adding a provider never requires editing this file --
-            # a key that silently fails to reach the pod is indistinguishable
-            # from that provider being down.
-            - secretRef:
-                name: mx-insight-hub-model-keys
-                optional: true
           env:
             - name: MX_INSIGHT_PORT
               value: "18150"

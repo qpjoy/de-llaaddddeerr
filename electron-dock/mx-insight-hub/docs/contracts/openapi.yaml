@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: MX Insight Hub Public and Source Admin API
+  title: MX Insight Hub Public and Admin API
   version: 1.0.0-alpha
   description: Stable consumer contract. Night-All and provider details are private implementation concerns.
 servers:
@@ -93,6 +93,73 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /agent:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: getAgentStatus
+      summary: Read the redacted Chat and Embedding provider status.
+      description: >-
+        The break-glass Admin Token and an allowlisted Launcher platform-admin
+        session may read provider metadata, circuit state and keyConfigured.
+        Responses never contain apiKey, apiKeyEnv, Secret names or environment
+        variable names, and there is no credential-reveal operation.
+      security:
+        - adminToken: []
+        - launcherSession: []
+      responses:
+        "200":
+          description: Redacted runtime and persisted-setting status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentOverviewEnvelope" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/providers/{kind}:
+    servers:
+      - url: /internal/v1/admin
+    put:
+      operationId: updateAgentProviders
+      summary: Atomically replace one dynamic provider chain.
+      description: >-
+        Only the break-glass Hub Admin Token may write. Launcher sessions,
+        including platform administrators, receive 403. expectedRevision
+        prevents lost updates. Database-managed Base URLs must be HTTPS API
+        roots without userinfo, query, fragment, localhost or IP literals.
+        Changing a keyed provider's Base URL requires a new apiKey or an
+        explicit clearApiKey. apiKey is write-only; apiKeyEnv and unknown fields
+        are rejected, and neither successful nor error responses echo secrets.
+      security:
+        - adminToken: []
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema: { type: string, enum: [chat, embedding] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProviderUpdateRequest" }
+      responses:
+        "200":
+          description: Setting committed and applied to this runtime; runtimeApplied is true.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProviderSettingAppliedEnvelope" }
+        "202":
+          description: >-
+            Setting committed, but this runtime could not reload it immediately;
+            the changed capability is failed closed and runtimeApplied is false.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProviderSettingDeferredEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /pipelines/telegram-monitor:
     servers:
       - url: /internal/v1/admin
@@ -1027,7 +1094,9 @@ components:
       type: apiKey
       in: header
       name: x-mx-insight-admin-token
-      description: Platform break-glass Admin Token; the only credential accepted by source-management routes.
+      description: >-
+        Platform break-glass Admin Token; the only credential accepted by
+        source-management routes and Agent-provider writes.
     launcherSession:
       type: apiKey
       in: header
@@ -1098,6 +1167,168 @@ components:
       description: Opaque nextCursor from the previous page; return unchanged.
       schema: { type: string, minLength: 1, maxLength: 1024 }
   schemas:
+    AgentProviderSafe:
+      type: object
+      additionalProperties: false
+      required: [id, baseUrl, model, timeoutMs, enabled, priority, authMode, keyConfigured]
+      description: >-
+        Redacted provider metadata. apiKey, apiKeyEnv, Secret names and
+        environment-variable names are intentionally not members of this schema.
+      properties:
+        id: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" }
+        baseUrl: { type: string, format: uri }
+        model: { type: string, minLength: 1, maxLength: 200 }
+        timeoutMs: { type: integer, minimum: 1000, maximum: 300000 }
+        dimensions: { type: integer, minimum: 1 }
+        enabled: { type: boolean }
+        priority: { type: integer, minimum: 0, maximum: 10000 }
+        authMode: { type: string, enum: [bearer, none] }
+        keyConfigured:
+          type: boolean
+          description: Presence only; no credential value or lookup name is returned.
+    AgentRuntimeProviderStatus:
+      type: object
+      additionalProperties: false
+      required: [id, model, keyConfigured, circuit]
+      properties:
+        id: { type: string }
+        model: { type: string }
+        dimensions: { type: integer, minimum: 1 }
+        keyConfigured: { type: boolean }
+        circuit: { type: string, enum: [closed, degraded, open] }
+    AgentProviderSetting:
+      type: object
+      additionalProperties: false
+      required: [kind, source, revision, providers, updatedBy, updatedAt]
+      description: Safe persisted provider setting; credential values and names are absent.
+      properties:
+        kind: { type: string, enum: [chat, embedding] }
+        source: { type: string, enum: [environment, database] }
+        revision: { type: integer, minimum: 0 }
+        providers:
+          type: array
+          maxItems: 8
+          items: { $ref: "#/components/schemas/AgentProviderSafe" }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+        runtimeApplied:
+          type: boolean
+          description: Present on PUT responses; false corresponds to HTTP 202.
+    AgentProviderSettingApplied:
+      allOf:
+        - { $ref: "#/components/schemas/AgentProviderSetting" }
+        - type: object
+          required: [runtimeApplied]
+          properties:
+            runtimeApplied: { type: boolean, const: true }
+    AgentProviderSettingDeferred:
+      allOf:
+        - { $ref: "#/components/schemas/AgentProviderSetting" }
+        - type: object
+          required: [runtimeApplied]
+          properties:
+            runtimeApplied: { type: boolean, const: false }
+    AgentOverview:
+      type: object
+      additionalProperties: false
+      required: [available]
+      properties:
+        available: { type: boolean }
+        chat:
+          type: array
+          maxItems: 8
+          items: { $ref: "#/components/schemas/AgentRuntimeProviderStatus" }
+        embeddings:
+          type: array
+          maxItems: 8
+          items: { $ref: "#/components/schemas/AgentRuntimeProviderStatus" }
+        embeddingDimensions: { type: [integer, "null"], minimum: 1 }
+        settings:
+          type: object
+          additionalProperties: false
+          required: [chat, embedding]
+          properties:
+            chat: { $ref: "#/components/schemas/AgentProviderSetting" }
+            embedding: { $ref: "#/components/schemas/AgentProviderSetting" }
+    AgentOverviewEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentOverview" }
+        requestId: { type: string }
+    AgentProviderSettingAppliedEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentProviderSettingApplied" }
+        requestId: { type: string }
+    AgentProviderSettingDeferredEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentProviderSettingDeferred" }
+        requestId: { type: string }
+    AgentProviderUpdateInput:
+      type: object
+      additionalProperties: false
+      required: [id, baseUrl, model]
+      description: >-
+        apiKey is accepted only on this write shape. apiKeyEnv, keyConfigured
+        and every other unlisted field are rejected.
+      properties:
+        id: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" }
+        baseUrl:
+          type: string
+          format: uri
+          description: HTTPS API root without userinfo, query, fragment, localhost or an IP literal.
+        model: { type: string, minLength: 1, maxLength: 200 }
+        timeoutMs: { type: integer, minimum: 1000, maximum: 300000, default: 60000 }
+        dimensions:
+          type: integer
+          minimum: 1
+          description: Required for embedding and rejected for chat.
+        enabled: { type: boolean, default: true }
+        priority: { type: integer, minimum: 0, maximum: 10000 }
+        authMode: { type: string, enum: [bearer, none], default: bearer }
+        apiKey:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          writeOnly: true
+          description: Never echoed, logged or exposed by a reveal endpoint.
+        clearApiKey:
+          type: boolean
+          writeOnly: true
+          description: Explicitly delete the stored key; cannot be true with apiKey.
+    AgentEnvironmentProviderUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, source]
+      properties:
+        expectedRevision: { type: integer, minimum: 0 }
+        source: { type: string, const: environment }
+        providers:
+          type: array
+          maxItems: 0
+          description: May be omitted or must be empty; environment provider definitions are deployment-owned.
+    AgentDatabaseProviderUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, source, providers]
+      properties:
+        expectedRevision: { type: integer, minimum: 0 }
+        source: { type: string, const: database }
+        providers:
+          type: array
+          maxItems: 8
+          items: { $ref: "#/components/schemas/AgentProviderUpdateInput" }
+    AgentProviderUpdateRequest:
+      oneOf:
+        - { $ref: "#/components/schemas/AgentEnvironmentProviderUpdateRequest" }
+        - { $ref: "#/components/schemas/AgentDatabaseProviderUpdateRequest" }
     CreateApiKeyRequest:
       type: object
       additionalProperties: false

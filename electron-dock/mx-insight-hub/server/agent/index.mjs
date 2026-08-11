@@ -46,8 +46,10 @@ function extractJson(text) {
   }
   try {
     return JSON.parse(text.slice(start, end + 1))
-  } catch (error) {
-    throw new AppError(502, 'agent_invalid_response', `Model response was not valid JSON: ${error.message}`)
+  } catch {
+    // Native JSON parse errors may quote a fragment of the model response.
+    // Prompts and returned content must never enter logs or degradedReason.
+    throw new AppError(502, 'agent_invalid_response', 'Model response was not valid JSON')
   }
 }
 
@@ -207,11 +209,26 @@ export function createAgent({ config, logger = console }) {
   const chatProviders = parseProviderConfig(config.agent.chatProviders, { kind: 'chat' })
   const embeddingProviders = parseProviderConfig(config.agent.embeddingProviders, { kind: 'embedding' })
 
+  return createAgentFromProviders({
+    chatProviders,
+    embeddingProviders,
+    expectedEmbeddingDimensions: config.embedding?.dimensions ?? null,
+    logger,
+  })
+}
+
+/** Construct from already validated providers (used by the DB-backed runtime). */
+export function createAgentFromProviders({
+  chatProviders,
+  embeddingProviders,
+  expectedEmbeddingDimensions = null,
+  logger = console,
+}) {
   return new HubAgent({
     chat: new ProviderRouter({ providers: chatProviders, logger }),
     embeddings: new EmbeddingRouter({
       providers: embeddingProviders,
-      expectedDimensions: config.embedding?.dimensions ?? null,
+      expectedDimensions: expectedEmbeddingDimensions,
       logger,
     }),
     logger,

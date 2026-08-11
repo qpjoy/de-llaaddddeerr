@@ -37,7 +37,34 @@ function chatReply(content) {
 test('provider config requires id, baseUrl and model', () => {
   assert.throws(() => parseProviderConfig('[{"id":"x"}]'), /requires id, baseUrl and model/)
   assert.throws(() => parseProviderConfig('not json'), /not valid JSON/)
+  assert.throws(
+    () => parseProviderConfig('{"apiKey":"secret-parser-sentinel"'),
+    (error) => error.message === 'agent provider config is not valid JSON'
+      && !error.message.includes('secret-parser-sentinel'),
+  )
   assert.deepEqual(parseProviderConfig(null), [])
+})
+
+test('environment provider config rejects inline API keys', () => {
+  assert.throws(
+    () => parseProviderConfig([{
+      id: 'unsafe', baseUrl: 'https://provider.invalid/v1', model: 'm', apiKey: 'must-not-enter-configmap',
+    }]),
+    /inline apiKey is forbidden/,
+  )
+  assert.throws(
+    () => parseProviderConfig([{
+      id: 'bad-mode', baseUrl: 'https://provider.invalid/v1', model: 'm', authMode: 'custom',
+    }]),
+    /authMode must be bearer or none/,
+  )
+  assert.throws(
+    () => parseProviderConfig([{
+      id: 'anonymous', baseUrl: 'https://provider.invalid/v1', model: 'm',
+      authMode: 'none', apiKeyEnv: 'MUST_NOT_BE_SENT',
+    }]),
+    /cannot configure an API key when authMode is none/,
+  )
 })
 
 test('provider order is the failover order', () => {
@@ -141,8 +168,66 @@ test('a configured-but-unset API key is reported, not silently skipped', async (
   })
   await assert.rejects(
     () => router.call('/chat/completions', (p) => ({ model: p.model })),
-    /DEFINITELY_UNSET_KEY is not set/,
+    (error) => {
+      assert.match(error.message, /API key is not configured/)
+      assert.doesNotMatch(error.message, /DEFINITELY_UNSET_KEY/)
+      return true
+    },
   )
+})
+
+test('provider calls do not expose upstream bodies and refuse redirects', async () => {
+  let redirectMode = null
+  const router = new ProviderRouter({
+    providers: providers('only'),
+    logger: quiet,
+    fetchImpl: async (_url, options) => {
+      redirectMode = options.redirect
+      return new Response('reflected-secret-and-prompt', { status: 503 })
+    },
+  })
+  await assert.rejects(
+    () => router.call('/chat/completions', () => ({})),
+    (error) => {
+      assert.equal(redirectMode, 'error')
+      assert.doesNotMatch(JSON.stringify(error), /reflected-secret-and-prompt/)
+      assert.equal(error.attempts[0].error, 'HTTP 503')
+      return true
+    },
+  )
+})
+
+test('invalid successful provider JSON is replaced before attempts or logs', async () => {
+  const logged = []
+  const router = new ProviderRouter({
+    providers: providers('only'),
+    logger: { warn(message) { logged.push(message) } },
+    fetchImpl: async () => new Response('sensitive-upstream-response-fragment', { status: 200 }),
+  })
+  await assert.rejects(
+    () => router.call('/chat/completions', () => ({})),
+    (error) => {
+      assert.equal(error.attempts[0].error, 'provider returned invalid JSON')
+      assert.doesNotMatch(JSON.stringify({ error, logged }), /sensitive-upstream-response-fragment/)
+      return true
+    },
+  )
+})
+
+test('authMode none never emits an Authorization header', async () => {
+  let authorization = 'not-called'
+  const router = new ProviderRouter({
+    providers: [{
+      ...providers('anonymous')[0], authMode: 'none', apiKey: 'must-not-be-sent',
+    }],
+    logger: quiet,
+    fetchImpl: async (_url, options) => {
+      authorization = options.headers.authorization
+      return jsonResponse(chatReply('ok'))
+    },
+  })
+  await router.call('/chat/completions', () => ({}))
+  assert.equal(authorization, undefined)
 })
 
 // ---------------------------------------------------------------------------
@@ -189,6 +274,19 @@ test('embedding providers with different dimensions are rejected at construction
       logger: quiet,
     }),
     /disagree on dimensions/,
+  )
+})
+
+test('embedding failover requires the same model even when dimensions match', () => {
+  assert.throws(
+    () => new EmbeddingRouter({
+      providers: [
+        { id: 'a', baseUrl: 'https://a/v1', model: 'space-a', dimensions: 4, timeoutMs: 1000 },
+        { id: 'b', baseUrl: 'https://b/v1', model: 'space-b', dimensions: 4, timeoutMs: 1000 },
+      ],
+      logger: quiet,
+    }),
+    /disagree on model/,
   )
 })
 
@@ -290,6 +388,16 @@ test('a fenced JSON response is still parsed', async () => {
   const result = await agent.suggestFieldMap({ columns: ['id'] })
   assert.equal(result.origin, 'agent')
   assert.equal(result.fieldMap.externalId.from, 'id')
+})
+
+test('malformed model JSON never enters degradedReason', async () => {
+  const agent = agentWith(async () => jsonResponse(chatReply(
+    '{"externalId": sensitive-model-response-fragment}',
+  )))
+  const result = await agent.suggestFieldMap({ columns: ['id'] })
+  assert.equal(result.origin, 'inferred')
+  assert.equal(result.degradedReason, 'Model response was not valid JSON')
+  assert.doesNotMatch(JSON.stringify(result), /sensitive-model-response-fragment/)
 })
 
 test('classification rejects a category outside the allowed set', async () => {

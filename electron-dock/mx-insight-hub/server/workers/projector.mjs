@@ -2,7 +2,8 @@ import process from 'node:process'
 import { createPool, runCommonMigrations } from '@qpjoy/mx-common'
 import { loadConfig } from '../config.mjs'
 import { createSearch, ensureSearchIndices, runProjectorLoop } from '../search/index.mjs'
-import { createAgent } from '../agent/index.mjs'
+import { createAgentRuntime } from '../agent/runtime.mjs'
+import { AgentSettingsStore } from '../agent/settings-store.mjs'
 import { EmbeddingPipeline, runEmbeddingLoop } from '../embedding/pipeline.mjs'
 
 // Projector worker entrypoint.
@@ -59,7 +60,12 @@ async function main() {
   // Elasticsearch through the same client and index definitions. They run as
   // independent loops so a stalled model provider cannot hold up the content
   // projection, which has no external dependency at all.
-  const agent = createAgent({ config, logger })
+  const agent = await createAgentRuntime({
+    config,
+    settingsStore: new AgentSettingsStore(pool),
+    managedKinds: ['embedding'],
+    logger,
+  })
   const embedding = new EmbeddingPipeline({
     pool,
     agent,
@@ -86,6 +92,7 @@ async function main() {
 
   await Promise.all(loops)
 
+  agent.close()
   await pool.end()
   logger.log('[projector] stopped')
 }

@@ -438,7 +438,19 @@ MX_INSIGHT_AGENT_PROVIDERS='[
 ]'
 ```
 
-**数组顺序就是降级顺序。** API key 用环境变量名引用——provider 列表在 ConfigMap 和 admin 响应里可见，key 不在，它们在 Secret 里。
+**数组顺序就是降级顺序。** 环境变量仍是 bootstrap/回滚来源：API key 用环境
+变量名引用，provider 列表在 ConfigMap 中，key 在 Secret 中。首次部署 migration
+后，Hub admin token 还可以在「中心 Agent」把每条链切为 `database` 来源；地址、
+Key、超时、启停和顺序按 revision 热更新，API 进程立即加载，projector 在轮询周期
+内收敛，无需修改 env 或 rollout。
+
+数据库模式把 Provider 元数据和明文 Key 分到两张表。普通设置查询永远不选择 Key，
+GET/PUT 和 UI 只返回 `keyConfigured`；密钥输入留空表示保留，清除必须显式请求。
+写接口仅接受 Hub admin token，Launcher platform-admin 只有脱敏只读权限。动态设置
+不接受 `apiKeyEnv` 或任意环境变量名，地址只接受经过校验的 HTTPS API 根路径；
+地址变化必须重新输入 Key 或明确清除，避免把旧凭据发往新主机。数据库备份、WAL
+和恢复介质因此必须作为 credential-bearing 资产管理。完整操作边界见
+[Agent provider settings](../operations/agent-provider-settings.md)。
 
 ### 10.2 降级语义
 
