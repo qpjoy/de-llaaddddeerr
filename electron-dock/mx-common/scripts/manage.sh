@@ -1251,7 +1251,34 @@ ensure_hanlp_storage() {
 
 hanlp_tokenize_smoke() {
   kubectl -n "$NAMESPACE" exec deployment/mx-common-hanlp -- python -c \
-    'import json, urllib.request; body=json.dumps({"text":"吴恩达与人工智能","coarse":True}).encode(); request=urllib.request.Request("http://127.0.0.1:8000/tokenize", data=body, headers={"content-type":"application/json"}); result=json.load(urllib.request.urlopen(request, timeout=10)); assert result and result[0]'
+    'import json, sys, urllib.error, urllib.request
+body = json.dumps({"text": "吴恩达与人工智能", "coarse": True}).encode()
+request = urllib.request.Request(
+    "http://127.0.0.1:8000/tokenize",
+    data=body,
+    headers={"content-type": "application/json"},
+)
+try:
+    response = urllib.request.urlopen(request, timeout=10)
+    raw = response.read(65537)
+except urllib.error.HTTPError as error:
+    detail = " ".join(error.read(2049).decode("utf-8", "replace").split())[:2048]
+    detail = detail or "[empty body]"
+    print(f"HanLP /tokenize returned HTTP {error.code}: {detail}", file=sys.stderr)
+    raise SystemExit(1)
+if len(raw) > 65536:
+    print("HanLP /tokenize response exceeds 65536 bytes", file=sys.stderr)
+    raise SystemExit(1)
+try:
+    result = json.loads(raw)
+except (UnicodeDecodeError, json.JSONDecodeError):
+    print("HanLP /tokenize returned invalid JSON", file=sys.stderr)
+    raise SystemExit(1)
+tokens = result if isinstance(result, list) else []
+flat = [token for sentence in tokens for token in (sentence if isinstance(sentence, list) else [sentence])]
+if not any(isinstance(token, str) and token.strip() for token in flat):
+    print("HanLP /tokenize returned no tokens", file=sys.stderr)
+    raise SystemExit(1)'
 }
 
 cmd_deploy_hanlp() {

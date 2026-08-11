@@ -571,20 +571,80 @@ fi
 grep -q -- '--from-literal=MX_COMMON_HANLP_URL=' <<<"$runtime_config_body"
 printf 'ok - regular deploy discovers HanLP before publishing runtime config\n'
 
-hanlp_hub_smoke="$(bash -c '
-  set -euo pipefail
-  source "$1/scripts/manage.sh"
-  export MX_COMMON_HANLP_URL=http://mx-common-hanlp.mx-common.svc.cluster.local:8000
+run_hanlp_hub_smoke() (
+  export MX_COMMON_HANLP_URL=http://hanlp.test
   export MX_INSIGHT_SEARCH_READY=1
-  say() { :; }
-  kubectl() { printf "%s\n" "$*"; }
+  export HANLP_SMOKE_MODE="$1"
+  kubectl() {
+    [ "$1" = "-n" ] \
+      && [ "$2" = "mx-insight-hub" ] \
+      && [ "$3" = "exec" ] \
+      && [ "$4" = "deployment/mx-insight-hub-projector" ] \
+      && [ "$5" = "--" ] \
+      || return 2
+    shift 5
+    [ "$1" = "node" ] && [ "$2" = "--input-type=module" ] && [ "$3" = "-e" ] || return 2
+
+    HANLP_SMOKE_SCRIPT="$4" node --input-type=module -e '
+      globalThis.fetch = async (endpoint, options) => {
+        const input = JSON.parse(options.body)
+        if (endpoint !== "http://hanlp.test/tokenize"
+          || options.method !== "POST"
+          || options.headers["content-type"] !== "application/json"
+          || input.text !== "吴恩达与人工智能"
+          || input.coarse !== true) {
+          return new Response(JSON.stringify({ error: "request contract mismatch" }), { status: 418 })
+        }
+        if (process.env.HANLP_SMOKE_MODE === "success") {
+          return new Response(JSON.stringify([["吴恩达", "人工智能"]]), { status: 200 })
+        }
+        if (process.env.HANLP_SMOKE_MODE === "empty") {
+          return new Response(JSON.stringify([[]]), { status: 200 })
+        }
+        return new Response(JSON.stringify({
+          error: `BertTokenizer has no attribute encode_plus ${"x".repeat(5000)}`,
+        }), { status: 500 })
+      }
+      await import(`data:text/javascript,${encodeURIComponent(process.env.HANLP_SMOKE_SCRIPT)}`)
+    ' "$5"
+  }
   verify_hanlp_from_hub
-' _ "$ROOT_DIR")"
-case "$hanlp_hub_smoke" in
-  *'exec deployment/mx-insight-hub-projector'*'http://mx-common-hanlp.mx-common.svc.cluster.local:8000'*) ;;
-  *) printf 'not ok - HanLP was not verified through a real Hub pod\n' >&2; exit 1 ;;
-esac
-printf 'ok - HanLP connectivity smoke runs through the Hub namespace\n'
+)
+
+run_hanlp_hub_smoke success
+printf 'ok - HanLP connectivity smoke runs through a real Hub pod command\n'
+
+hanlp_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-hanlp-error.XXXXXX")"
+if run_hanlp_hub_smoke error 2>"$hanlp_error"; then
+  printf 'not ok - HanLP HTTP 500 passed the deployment smoke\n' >&2
+  exit 1
+fi
+grep -Fq 'returned HTTP 500; response body="{\"error\":\"BertTokenizer has no attribute encode_plus' "$hanlp_error"
+grep -Fq ' [truncated]' "$hanlp_error"
+if [ "$(wc -c <"$hanlp_error")" -gt 2400 ]; then
+  printf 'not ok - HanLP error diagnostic was not bounded\n' >&2
+  exit 1
+fi
+if grep -Eq 'file:///.+\[eval\]|^[[:space:]]+at ' "$hanlp_error"; then
+  printf 'not ok - HanLP smoke exposed a raw eval stack\n' >&2
+  exit 1
+fi
+grep -Fq 'HanLP /tokenize contract failed from the projector' "$hanlp_error"
+rm -f -- "$hanlp_error"
+printf 'ok - HanLP non-2xx response body is bounded without an eval stack\n'
+
+hanlp_empty_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-hanlp-empty.XXXXXX")"
+if run_hanlp_hub_smoke empty 2>"$hanlp_empty_error"; then
+  printf 'not ok - HanLP nested empty token response passed the deployment smoke\n' >&2
+  exit 1
+fi
+grep -Fq 'response contains no non-empty token' "$hanlp_empty_error"
+if grep -Eq 'file:///.+\[eval\]|^[[:space:]]+at ' "$hanlp_empty_error"; then
+  printf 'not ok - empty HanLP response exposed a raw eval stack\n' >&2
+  exit 1
+fi
+rm -f -- "$hanlp_empty_error"
+printf 'ok - HanLP smoke rejects nested empty token responses\n'
 
 # Independent deployment is the safety default: neither secret sync nor a
 # Launcher rollout may issue kubectl mutations unless explicitly enabled.

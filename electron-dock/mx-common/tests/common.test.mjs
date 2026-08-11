@@ -248,6 +248,139 @@ test('jieba keeps multi-character terms whole and drops punctuation', async () =
   assert.ok(tokens.every((token) => token === token.toLowerCase()))
 })
 
+test('HanLP image pins the compatible transformers line and infers during prefetch', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const here = dirname(fileURLToPath(import.meta.url))
+  const dockerfile = await readFile(resolve(here, '../deploy/hanlp/Dockerfile'), 'utf8')
+
+  assert.match(dockerfile, /ARG TRANSFORMERS_VERSION=4\.54\.1/)
+  assert.match(dockerfile, /"transformers==\$\{TRANSFORMERS_VERSION\}"/)
+  const prefetch = dockerfile.slice(dockerfile.indexOf('RUN if [ "$PREFETCH_MODEL" = "1" ]'))
+  assert.match(prefetch, /hanlp\.load/)
+  assert.match(prefetch, /tokenizer\(\['\u5434\u6069\u8fbe\u4e0e\u4eba\u5de5\u667a\u80fd'\]\)/)
+  assert.match(prefetch, /any\(isinstance\(sentence, list\)/)
+  assert.match(prefetch, /any\(isinstance\(token, str\) and token\.strip\(\)/)
+})
+
+test('HanLP publishes readiness after warm-up and serializes safe inference', async () => {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const run = promisify(execFile)
+  const server = resolve(dirname(fileURLToPath(import.meta.url)), '../deploy/hanlp/server.py')
+
+  const probe = String.raw`
+import contextlib
+import importlib.util
+import io
+import json
+import sys
+import types
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("mx_common_hanlp_server", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+assert module.MAX_CONCURRENT_INFERENCES == 1
+assert module.INFERENCE_QUEUE_TIMEOUT_SECONDS > 0
+
+class GoodTokenizer:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, text):
+        self.calls.append(text)
+        return [["吴恩达", "与", "人工智能"]]
+
+good = GoodTokenizer()
+model_ref = object()
+sys.modules["hanlp"] = types.SimpleNamespace(
+    pretrained=types.SimpleNamespace(
+        tok=types.SimpleNamespace(COARSE_ELECTRA_SMALL_ZH=model_ref)
+    ),
+    load=lambda requested: good if requested is model_ref else None,
+)
+module._tokenizer = None
+module._load_error = None
+module._load_model()
+assert module._tokenizer is good
+assert good.calls == [[module.WARMUP_TEXT]]
+
+class EmptyTokenizer:
+    def __call__(self, _text):
+        return [[]]
+
+sys.modules["hanlp"].load = lambda _requested: EmptyTokenizer()
+module._tokenizer = None
+module._load_error = None
+empty_log = io.StringIO()
+with contextlib.redirect_stderr(empty_log):
+    module._load_model()
+assert module._tokenizer is None
+assert module._load_error == "RuntimeError: model warm-up failed"
+
+class BrokenTokenizer:
+    def __call__(self, text):
+        raise RuntimeError(f"inference detail contains {text}")
+
+sys.modules["hanlp"].load = lambda _requested: BrokenTokenizer()
+module._tokenizer = None
+module._load_error = None
+startup_log = io.StringIO()
+with contextlib.redirect_stderr(startup_log):
+    module._load_model()
+assert module._tokenizer is None
+assert module._load_error == "RuntimeError: model warm-up failed"
+assert module.WARMUP_TEXT not in startup_log.getvalue()
+assert "RuntimeError" in startup_log.getvalue()
+
+class Slot:
+    def __init__(self):
+        self.timeout = None
+        self.released = False
+
+    def acquire(self, *, timeout):
+        self.timeout = timeout
+        return True
+
+    def release(self):
+        self.released = True
+
+slot = Slot()
+module._inference_slots = slot
+request_calls = []
+
+class RequestBrokenTokenizer:
+    def __call__(self, text):
+        request_calls.append(text)
+        raise RuntimeError(f"inference detail contains {text}")
+
+module._tokenizer = RequestBrokenTokenizer()
+request_text = "request-content-must-not-enter-logs"
+body = json.dumps({"text": request_text}).encode()
+handler = object.__new__(module.Handler)
+handler.path = "/tokenize"
+handler.headers = {"content-length": str(len(body))}
+handler.rfile = io.BytesIO(body)
+sent = []
+handler._send = lambda status, payload: sent.append((status, payload))
+inference_log = io.StringIO()
+with contextlib.redirect_stderr(inference_log):
+    module.Handler.do_POST(handler)
+assert sent == [(500, {"error": "tokenizer inference failed"})]
+assert request_calls == [[request_text]]
+assert request_text not in inference_log.getvalue()
+assert "RuntimeError" in inference_log.getvalue()
+assert slot.timeout == module.INFERENCE_QUEUE_TIMEOUT_SECONDS
+assert slot.released
+`
+  await run('python3', ['-c', probe, server])
+})
+
 // ---------------------------------------------------------------------------
 // Shell: bounded random reads
 // ---------------------------------------------------------------------------
@@ -537,4 +670,7 @@ test('the HanLP image and HTTP service keep reproducibility and load bounds expl
   assert.match(manage, /HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy/)
   assert.match(manage, /proxy_build_args\+=\(--build-arg "\$proxy_name"\)/)
   assert.match(manage, /MX_COMMON_CONTAINERD_ROOT/)
+  assert.match(manage, /except urllib\.error\.HTTPError as error:/)
+  assert.match(manage, /error\.read\(2049\)/)
+  assert.match(manage, /HanLP \/tokenize returned no tokens/)
 })

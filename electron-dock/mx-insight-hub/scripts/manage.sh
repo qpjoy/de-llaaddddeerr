@@ -537,18 +537,44 @@ verify_hanlp_from_hub() {
   fi
   if ! kubectl -n mx-insight-hub exec deployment/mx-insight-hub-projector -- \
       node --input-type=module -e '
-        const base = process.argv[1].replace(/\/$/, "")
-        const response = await fetch(`${base}/tokenize`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ text: "吴恩达与人工智能", coarse: true }),
-          signal: AbortSignal.timeout(10000),
-        })
-        if (!response.ok) throw new Error(`HanLP returned HTTP ${response.status}`)
-        const tokens = await response.json()
-        if (!Array.isArray(tokens) || !tokens.length) throw new Error("empty HanLP response")
+        let endpoint = "HanLP /tokenize"
+        const fail = (message) => { throw new Error(message) }
+        try {
+          const base = (process.argv[1] || "").replace(/\/$/, "")
+          if (!base) fail("HanLP base URL is empty")
+          endpoint = `${base}/tokenize`
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: "吴恩达与人工智能", coarse: true }),
+            signal: AbortSignal.timeout(10000),
+          })
+          const body = await response.text()
+          if (!response.ok) {
+            const compact = body.replace(/\s+/g, " ").trim()
+            const truncated = compact.length > 2048
+            const preview = compact.slice(0, 2048) || "<empty>"
+            fail(`POST ${endpoint} returned HTTP ${response.status}; response body=${JSON.stringify(preview)}${truncated ? " [truncated]" : ""}`)
+          }
+
+          let payload
+          try {
+            payload = JSON.parse(body)
+          } catch {
+            fail(`POST ${endpoint} returned invalid JSON`)
+          }
+          const data = Array.isArray(payload) ? payload : payload?.tokens || payload?.data || []
+          const flat = Array.isArray(data[0]) ? data.flat() : data
+          const tokens = Array.isArray(flat)
+            ? flat.filter((token) => typeof token === "string" && token.trim())
+            : []
+          if (!tokens.length) fail(`POST ${endpoint} response contains no non-empty token`)
+        } catch (error) {
+          console.error(`HanLP smoke failed: ${error instanceof Error ? error.message : String(error)}`)
+          process.exitCode = 1
+        }
       ' "$MX_COMMON_HANLP_URL"; then
-    say "WARNING: projector cannot reach HanLP /tokenize; Hub will degrade to local jieba." >&2
+    say "WARNING: HanLP /tokenize contract failed from the projector; Hub will degrade to local jieba." >&2
     return 1
   fi
   say "HanLP tokenizer verified from the Hub namespace."

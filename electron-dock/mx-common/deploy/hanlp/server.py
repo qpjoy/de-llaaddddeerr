@@ -18,7 +18,9 @@ readiness stays false until the model is in memory.
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import sys
 import threading
+import traceback
 
 # Coarse-grained ("CTB-style") segmentation keeps multi-character terms such as
 # 人工智能 and brand names intact. Fine-grained models split them, which hurts
@@ -26,12 +28,38 @@ import threading
 MODEL_NAME = os.environ.get("HANLP_MODEL", "COARSE_ELECTRA_SMALL_ZH")
 PORT = int(os.environ.get("PORT", "8000"))
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", "65536"))
-MAX_CONCURRENT_INFERENCES = int(os.environ.get("MAX_CONCURRENT_INFERENCES", "2"))
+# A HanLP component is one mutable Python object. Keep forward passes serialized
+# unless an operator has explicitly validated a particular model as thread-safe.
+# Waiting briefly is important: the Hub projector segments several fields in
+# parallel, so a non-blocking slot would routinely degrade otherwise healthy
+# requests to the local fallback.
+MAX_CONCURRENT_INFERENCES = int(os.environ.get("MAX_CONCURRENT_INFERENCES", "1"))
+INFERENCE_QUEUE_TIMEOUT_SECONDS = float(
+    os.environ.get("INFERENCE_QUEUE_TIMEOUT_SECONDS", "3")
+)
+WARMUP_TEXT = "吴恩达与人工智能"
 
 _tokenizer = None
 _load_error = None
 _lock = threading.Lock()
 _inference_slots = threading.BoundedSemaphore(MAX_CONCURRENT_INFERENCES)
+
+
+def _log_safe_traceback(context, error):
+    """Log diagnostic frames without reflecting request text or exception data."""
+    print(f"[hanlp] {context}: {type(error).__name__}", file=sys.stderr)
+    traceback.print_tb(error.__traceback__, file=sys.stderr)
+
+
+def _warm_up(tokenizer):
+    tokens = tokenizer([WARMUP_TEXT])
+    has_token = isinstance(tokens, list) and any(
+        isinstance(sentence, list)
+        and any(isinstance(token, str) and token.strip() for token in sentence)
+        for sentence in tokens
+    )
+    if not has_token:
+        raise RuntimeError("tokenizer warm-up returned no tokens")
 
 
 def _load_model():
@@ -42,9 +70,15 @@ def _load_model():
         try:
             import hanlp  # imported lazily so the process starts before weights load
 
-            _tokenizer = hanlp.load(getattr(hanlp.pretrained.tok, MODEL_NAME))
+            candidate = hanlp.load(getattr(hanlp.pretrained.tok, MODEL_NAME))
+            # Loading weights alone does not exercise the transformers forward
+            # API. Warm up before publishing readiness so an incompatible
+            # dependency fails closed instead of making every request return 500.
+            _warm_up(candidate)
+            _tokenizer = candidate
         except Exception as error:  # noqa: BLE001 - surfaced through /health
-            _load_error = str(error)
+            _load_error = f"{type(error).__name__}: model warm-up failed"
+            _log_safe_traceback("model load or warm-up failed", error)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -99,14 +133,18 @@ class Handler(BaseHTTPRequestHandler):
         # Bound the input: a single oversized document must not stall the shared
         # tokenizer for every other caller.
         text = text[:20_000]
-        if not _inference_slots.acquire(blocking=False):
+        if not _inference_slots.acquire(timeout=INFERENCE_QUEUE_TIMEOUT_SECONDS):
             self._send(429, {"error": "tokenizer is busy"})
             return
         try:
             try:
-                tokens = _tokenizer(text)
+                # HanLP's native tokenizer API is batch-shaped. Keeping the
+                # one-item batch here also guarantees the HTTP contract remains
+                # a list of tokenized sentences.
+                tokens = _tokenizer([text])
             except Exception as error:  # noqa: BLE001
-                self._send(500, {"error": str(error)})
+                _log_safe_traceback("tokenizer inference failed", error)
+                self._send(500, {"error": "tokenizer inference failed"})
                 return
         finally:
             _inference_slots.release()

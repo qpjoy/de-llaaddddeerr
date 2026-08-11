@@ -16,6 +16,7 @@ ARG PREFETCH_MODEL=0
 ARG HANLP_MODEL=COARSE_ELECTRA_SMALL_ZH
 ARG HANLP_VERSION=2.1.3
 ARG TORCH_VERSION=2.13.0
+ARG TRANSFORMERS_VERSION=4.54.1
 ENV HANLP_HOME=/models \
     HANLP_MODEL=${HANLP_MODEL} \
     PIP_DEFAULT_TIMEOUT=${PIP_DEFAULT_TIMEOUT} \
@@ -41,6 +42,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
       --find-links "$PYTORCH_CPU_WHEEL_LINKS" \
       "torch==${TORCH_VERSION}+cpu" \
       "hanlp==${HANLP_VERSION}" \
+      "transformers==${TRANSFORMERS_VERSION}" \
  && python -m pip check \
  && python -c \
       "import torch; assert '+cpu' in torch.__version__, torch.__version__; assert torch.version.cuda is None, torch.version.cuda"
@@ -50,7 +52,7 @@ COPY server.py seed-models.sh ./
 RUN if [ "$PREFETCH_MODEL" = "1" ]; then \
       mkdir -p /opt/hanlp-model-seed; \
       HANLP_HOME=/opt/hanlp-model-seed python -c \
-        "import hanlp, os; hanlp.load(getattr(hanlp.pretrained.tok, os.environ['HANLP_MODEL']))"; \
+        "import hanlp, os; tokenizer = hanlp.load(getattr(hanlp.pretrained.tok, os.environ['HANLP_MODEL'])); tokens = tokenizer(['吴恩达与人工智能']); assert isinstance(tokens, list) and any(isinstance(sentence, list) and any(isinstance(token, str) and token.strip() for token in sentence) for sentence in tokens), 'HanLP tokenizer inference returned no tokens'"; \
       cd /opt/hanlp-model-seed; \
       find . -type f ! -name .mx-common-manifest.sha256 -print0 \
         | sort -z | xargs -0 -r sha256sum > .mx-common-manifest.sha256; \
