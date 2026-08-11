@@ -411,6 +411,34 @@ select {
   max-width: 460px;
 }
 
+.mih-platform-context {
+  display: grid;
+  gap: 2px;
+  min-width: min(420px, 100%);
+  margin-left: auto;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 34%, var(--qp-line));
+  border-radius: var(--qp-radius-sm);
+  background: color-mix(in srgb, var(--qp-primary) 7%, transparent);
+}
+
+.mih-platform-context span,
+.mih-platform-context small {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-platform-context strong {
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-body-2);
+}
+
+.mih-platform-context code {
+  color: var(--qp-primary);
+  font-size: var(--qp-font-caption-1);
+  overflow-wrap: anywhere;
+}
+
 .mih-filterbar--usage .mih-filter-field {
   width: min(220px, 100%);
 }
@@ -1019,6 +1047,12 @@ select {
   .mih-filterbar--usage .mih-filter-field {
     width: 100%;
     max-width: none;
+  }
+
+  .mih-platform-context {
+    width: 100%;
+    min-width: 0;
+    margin-left: 0;
   }
 
   .mih-form--grid {

@@ -235,6 +235,21 @@ export class PostgresStore {
     }
   }
 
+  async setPlatformGrant(consumerId, platformName, enabled) {
+    if (enabled) {
+      await this.pool.query(
+        `INSERT INTO platform_grants (consumer_id, platform) VALUES ($1, $2)
+         ON CONFLICT (consumer_id, platform) DO NOTHING`,
+        [consumerId, platformName],
+      )
+      return
+    }
+    await this.pool.query(
+      'DELETE FROM platform_grants WHERE consumer_id = $1 AND platform = $2',
+      [consumerId, platformName],
+    )
+  }
+
   async listGrants(consumerId) {
     const { rows } = await this.pool.query(
       'SELECT platform FROM platform_grants WHERE consumer_id = $1 ORDER BY platform',

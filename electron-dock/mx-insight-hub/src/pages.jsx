@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowRight,
   Buildings,
@@ -82,10 +82,10 @@ function sortedPlatforms(byPlatform = {}) {
   return Object.entries(byPlatform).sort((left, right) => Number(right[1]?.requests || 0) - Number(left[1]?.requests || 0))
 }
 
-function FilterSelect({ label, value, onChange, options, emptyLabel = '全部' }) {
+function FilterSelect({ label, value, onChange, options, emptyLabel = '全部', disabled = false }) {
   return (
     <Field label={label} className="mih-filter-field">
-      <select className="qp-select" value={value || ''} onChange={(event) => onChange(event.target.value)}>
+      <select className="qp-select" value={value || ''} onChange={(event) => onChange(event.target.value)} disabled={disabled}>
         <option value="">{emptyLabel}</option>
         {options.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
       </select>
@@ -864,7 +864,16 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                   <td><StatusBadge status={key.effectiveStatus || key.status} /></td>
                   <td>{formatDate(key.expiresAt)}</td>
                   <td>{formatDate(key.lastUsedAt)}</td>
-                  <td className="mih-table__actions">
+                  <td className="mih-table__actions mih-table__actions--wide">
+                    {tenantAllows(session, key.tenantId, 'platform.write') ? (
+                      <a
+                        className="qp-button qp-button--ghost qp-button--sm"
+                        href={`#/platforms?${new URLSearchParams({ tenantId: key.tenantId, consumerId: key.consumerId })}`}
+                        aria-label={`管理 ${key.name} 所属调用者的平台授权`}
+                      >
+                        <SlidersHorizontal size={15} aria-hidden="true" />平台授权
+                      </a>
+                    ) : null}
                     {tenantAllows(session, key.tenantId, 'apikey.write') ? (
                       <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`撤销 ${key.name}`} disabled={key.status !== 'active'} onClick={() => setRevokeTarget(key)}>
                         <Trash size={17} aria-hidden="true" />
@@ -1051,6 +1060,9 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
 export function PlatformsPage({ token, session, query, setQuery, onUnauthorized, notify }) {
   const requestedTenantId = query.get('tenantId') || ''
   const requestedConsumerId = query.get('consumerId') || ''
+  const requestedContext = `${requestedTenantId}\u0000${requestedConsumerId}`
+  const contextRef = useRef(requestedContext)
+  contextRef.current = requestedContext
   const [busyPlatform, setBusyPlatform] = useState('')
   const [configureTarget, setConfigureTarget] = useState(null)
   const [policyForm, setPolicyForm] = useState(DEFAULT_POLICY)
@@ -1060,6 +1072,11 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
     [requestedConsumerId, requestedTenantId, token],
   )
   const state = useRemoteData(load, onUnauthorized)
+
+  useEffect(() => {
+    setConfigureTarget(null)
+    setFormError(null)
+  }, [requestedConsumerId, requestedTenantId])
 
   if (state.loading && !state.data) return <LoadingState label="正在加载平台策略" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
@@ -1073,25 +1090,41 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
     policy: policyByPlatform.get(platform) || DEFAULT_POLICY,
     explicit: policyByPlatform.has(platform),
   }))
+  const selectedTenant = data.tenants.find((tenant) => tenant.id === data.tenantId)
   const selectedConsumer = data.consumers.find((consumer) => consumer.id === data.consumerId)
-  const canUpdatePlatform = tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
+  const contextMatchesRequest = (
+    (!requestedTenantId || requestedTenantId === data.tenantId)
+    && (!requestedConsumerId || requestedConsumerId === data.consumerId)
+  )
+  const contextUnavailable = state.loading || !contextMatchesRequest
+  const hasPlatformWrite = tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
+  const canUpdatePlatform = hasPlatformWrite && !contextUnavailable
+  const mutationPending = Boolean(busyPlatform)
+  const mutationDisabled = mutationPending || contextUnavailable
 
   const updatePlatform = async (row, enabled, overrides = row.policy) => {
-    if (!data.tenantId || !data.consumerId || !canUpdatePlatform) return
+    if (!data.tenantId || !data.consumerId || !canUpdatePlatform || mutationDisabled) return
+    const targetContext = contextRef.current
+    const targetTenantId = data.tenantId
+    const targetConsumerId = data.consumerId
+    const targetConsumerName = selectedConsumer?.name || data.consumerId
     setBusyPlatform(row.platform)
     setFormError(null)
     try {
       await adminApi.updatePlatform(token, row.platform, {
-        tenantId: data.tenantId,
-        consumerId: data.consumerId,
+        tenantId: targetTenantId,
+        consumerId: targetConsumerId,
         enabled,
         maxRequests: Number(overrides.maxRequests),
         windowSeconds: Number(overrides.windowSeconds),
         maxPageSize: Number(overrides.maxPageSize),
       })
-      setConfigureTarget(null)
-      state.refresh()
-      notify(`${platformLabel(row.platform)} 已${enabled ? '启用' : '停用'}`, 'success')
+      if (contextRef.current === targetContext) {
+        const refreshed = await load()
+        if (contextRef.current === targetContext) state.setData(refreshed)
+        setConfigureTarget(null)
+      }
+      notify(`${platformLabel(row.platform)} 已为调用者「${targetConsumerName}」${enabled ? '启用' : '停用'}`, 'success')
     } catch (error) {
       if (error?.status === 401) onUnauthorized(error)
       if (configureTarget) setFormError(error)
@@ -1120,17 +1153,41 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         <FilterSelect
           label="租户"
           value={data.tenantId}
-          onChange={(value) => setQuery({ tenantId: value || null, consumerId: null })}
+          onChange={(value) => {
+            setConfigureTarget(null)
+            setFormError(null)
+            setQuery({ tenantId: value || null, consumerId: null })
+          }}
           options={data.tenants.map((tenant) => ({ value: tenant.id, label: tenant.name }))}
           emptyLabel="请选择租户"
+          disabled={mutationPending || state.loading}
         />
         <FilterSelect
           label="调用者"
           value={data.consumerId}
-          onChange={(value) => setQuery({ tenantId: data.tenantId || null, consumerId: value || null })}
+          onChange={(value) => {
+            setConfigureTarget(null)
+            setFormError(null)
+            setQuery({ tenantId: data.tenantId || null, consumerId: value || null })
+          }}
           options={data.consumers.map((consumer) => ({ value: consumer.id, label: consumer.name }))}
           emptyLabel="请选择调用者"
+          disabled={mutationPending || state.loading}
         />
+        {contextUnavailable ? (
+          <div className="mih-platform-context" role="status" aria-live="polite">
+            <span>{state.loading ? '正在加载授权对象' : '授权对象尚未就绪'}</span>
+            <strong>当前显示的旧数据暂不可操作</strong>
+            <small>{state.loading ? '加载完成后可继续配置' : '请重试或重新选择调用者'}</small>
+          </div>
+        ) : selectedConsumer ? (
+          <div className="mih-platform-context" role="status" aria-live="polite">
+            <span>当前授权对象</span>
+            <strong>{selectedTenant?.name || data.tenantId} / {selectedConsumer.name}</strong>
+            <code className="mih-mono">Consumer ID: {selectedConsumer.id}</code>
+            <small>API Key 仅继承其所属调用者的平台权限</small>
+          </div>
+        ) : null}
       </section>
 
       <Panel title="平台授权矩阵" subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用`}>
@@ -1146,16 +1203,16 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
                   <td>{formatNumber(row.policy.windowSeconds)} 秒</td>
                   <td>{formatNumber(row.policy.maxPageSize)}</td>
                   <td className="mih-table__actions mih-table__actions--wide">
-                    {canUpdatePlatform ? (
+                    {hasPlatformWrite ? (
                       <>
-                        <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => configure(row)}>
+                        <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={mutationDisabled} onClick={() => configure(row)}>
                           <SlidersHorizontal size={15} aria-hidden="true" />配置
                         </button>
                         <button
                           className={`qp-button qp-button--sm ${row.enabled ? 'qp-button--transparent' : 'qp-button--outline'}`}
                           type="button"
                           aria-pressed={row.enabled}
-                          disabled={busyPlatform === row.platform}
+                          disabled={mutationDisabled}
                           onClick={() => updatePlatform(row, !row.enabled)}
                         >
                           <Power size={15} weight={row.enabled ? 'fill' : 'regular'} aria-hidden="true" />
@@ -1176,7 +1233,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
       {configureTarget && canUpdatePlatform ? (
         <Modal
           title={`配置 ${platformLabel(configureTarget.platform)}`}
-          description="保存后立即作用于该调用者的新请求。"
+          description={`保存后立即作用于调用者「${selectedConsumer?.name || data.consumerId}」的新请求。`}
           onClose={() => !busyPlatform && setConfigureTarget(null)}
           footer={(
             <>

@@ -29,6 +29,33 @@ say() { printf '[mx-insight-hub] %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
+# Execute curl with one sensitive header without placing its value in process
+# argv. The subshell owns a mode-0600 header file and always removes it when the
+# request succeeds, fails, or is interrupted.
+curl_with_protected_header() (
+  local header_name="$1"
+  local header_value="$2"
+  shift 2
+  case "${header_name}${header_value}" in
+    *$'\r'*|*$'\n'*) return 64 ;;
+  esac
+
+  local header_file header_file_quoted
+  umask 077
+  header_file="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-curl-header.XXXXXX")" || return 1
+  chmod 600 "$header_file" || {
+    rm -f -- "$header_file"
+    return 1
+  }
+  printf -v header_file_quoted '%q' "$header_file"
+  # EXIT runs after function-local variables can be unwound by a signal, so
+  # capture the non-secret path in the trap rather than dereferencing it later.
+  trap "rm -f -- ${header_file_quoted}" EXIT
+  trap 'exit 1' HUP INT TERM
+  printf '%s: %s\n' "$header_name" "$header_value" >"$header_file"
+  curl -H "@${header_file}" "$@"
+)
+
 API_KEY_ROTATION_WINDOW_DAYS=30
 
 # Print: decision|key-id|reason|expires-at. The secret is used only to match the
@@ -957,6 +984,75 @@ k8s_smoke() {
     node "${ROOT_DIR}/scripts/smoke.mjs"
 }
 
+# A retained bootstrap key keeps the grants of its consumer. Operators may add
+# newly approved platforms through MX_INSIGHT_BOOTSTRAP_PLATFORMS without
+# rotating that key, but an empty setting must never expand its permissions from
+# upstream or Hub-local capability discovery.
+reconcile_reused_bootstrap_platforms() {
+  local namespace="$1"
+  local admin_base="$2"
+  [ -n "${MX_INSIGHT_BOOTSTRAP_PLATFORMS:-}" ] || return 0
+
+  local tenant_id consumer_id grant_body
+  tenant_id="$(
+    kubectl -n "$namespace" get secret mx-insight-hub-bootstrap \
+      -o jsonpath='{.data.MX_INSIGHT_TENANT_ID}' --ignore-not-found 2>/dev/null \
+      | base64 -d 2>/dev/null || true
+  )"
+  consumer_id="$(
+    kubectl -n "$namespace" get secret mx-insight-hub-bootstrap \
+      -o jsonpath='{.data.MX_INSIGHT_CONSUMER_ID}' --ignore-not-found 2>/dev/null \
+      | base64 -d 2>/dev/null || true
+  )"
+  if [ -z "$tenant_id" ] || [ -z "$consumer_id" ]; then
+    say "WARNING: explicit bootstrap platforms were not reconciled because the stored tenant/consumer IDs are missing."
+    return 0
+  fi
+
+  grant_body="$(
+    MX_INSIGHT_BOOTSTRAP_TENANT_ID="$tenant_id" \
+    MX_INSIGHT_BOOTSTRAP_CONSUMER_ID="$consumer_id" \
+      node -e 'process.stdout.write(JSON.stringify({
+        tenantId: process.env.MX_INSIGHT_BOOTSTRAP_TENANT_ID,
+        consumerId: process.env.MX_INSIGHT_BOOTSTRAP_CONSUMER_ID,
+        enabled: true,
+      }))'
+  )"
+
+  local platform encoded_platform reconciled=""
+  while IFS= read -r platform; do
+    [ -n "$platform" ] || continue
+    encoded_platform="$(
+      MX_INSIGHT_BOOTSTRAP_PLATFORM="$platform" \
+        node -e 'process.stdout.write(encodeURIComponent(process.env.MX_INSIGHT_BOOTSTRAP_PLATFORM))'
+    )"
+    if curl_with_protected_header \
+      'x-mx-insight-admin-token' "$MX_INSIGHT_ADMIN_TOKEN" \
+      -fsS -X PUT \
+      -H 'content-type: application/json' \
+      --data "$grant_body" \
+      "${admin_base}/internal/v1/admin/platforms/${encoded_platform}" >/dev/null; then
+      reconciled="${reconciled}${reconciled:+, }${platform}"
+    else
+      say "WARNING: could not reconcile explicit bootstrap platform ${platform}."
+    fi
+  done < <(
+    MX_INSIGHT_BOOTSTRAP_PLATFORMS="$MX_INSIGHT_BOOTSTRAP_PLATFORMS" \
+      node -e '
+        const seen = new Set()
+        for (const entry of (process.env.MX_INSIGHT_BOOTSTRAP_PLATFORMS || "").split(",")) {
+          const platform = entry.trim().toLowerCase()
+          if (!platform || seen.has(platform)) continue
+          seen.add(platform)
+          process.stdout.write(`${platform}\n`)
+        }
+      '
+  )
+  if [ -n "$reconciled" ]; then
+    say "Reconciled explicit bootstrap platform grants: ${reconciled}."
+  fi
+}
+
 # Idempotently guarantee a usable public API key after deploy. The plaintext key
 # is stored in the mx-insight-hub-bootstrap Secret and reused on later deploys, so
 # no manual admin call is needed to start pulling platform data. Best-effort: a
@@ -975,14 +1071,16 @@ ensure_default_api_key() {
   )"
   if [ -n "$BOOTSTRAP_API_KEY" ]; then
     local key_list_json decision action reason expires_at
-    if key_list_json="$(curl -fsS \
-      -H "x-mx-insight-admin-token: ${MX_INSIGHT_ADMIN_TOKEN}" \
+    if key_list_json="$(curl_with_protected_header \
+      'x-mx-insight-admin-token' "$MX_INSIGHT_ADMIN_TOKEN" \
+      -fsS \
       "${admin_base}/internal/v1/admin/api-keys")"; then
       decision="$(api_key_rotation_decision "$key_list_json" "$BOOTSTRAP_API_KEY")" \
         || die "could not evaluate the stored bootstrap API key"
       IFS='|' read -r action previous_key_id reason expires_at <<<"$decision"
       if [ "$action" = "reuse" ]; then
         say "Reusing stored bootstrap API key; valid beyond the ${API_KEY_ROTATION_WINDOW_DAYS}-day rotation window (${expires_at})."
+        reconcile_reused_bootstrap_platforms "$namespace" "$admin_base"
         return 0
       fi
       say "Rotating stored bootstrap API key (${reason}); the old key remains valid until the replacement is persisted."
@@ -1020,8 +1118,9 @@ ensure_default_api_key() {
     --dry-run=client -o yaml | kubectl apply -f -
   say "Stored bootstrap API key in Secret mx-insight-hub-bootstrap."
   if [ -n "$previous_key_id" ]; then
-    if curl -fsS -X POST \
-      -H "x-mx-insight-admin-token: ${MX_INSIGHT_ADMIN_TOKEN}" \
+    if curl_with_protected_header \
+      'x-mx-insight-admin-token' "$MX_INSIGHT_ADMIN_TOKEN" \
+      -fsS -X POST \
       "${admin_base}/internal/v1/admin/api-keys/${previous_key_id}/revoke" >/dev/null; then
       say "Revoked the replaced bootstrap API key after persisting its replacement."
     else
@@ -1037,11 +1136,12 @@ print_deploy_summary() {
   say "Public : http://${host_ip}:18150/api/v1/...  (Authorization: Bearer <API key>)"
   say "Night-All upstream: ${NIGHT_ALL_BASE_URL} (reached via the hostNetwork overlay)"
   if [ -n "${BOOTSTRAP_API_KEY:-}" ]; then
-    say "Bootstrap API key : ${BOOTSTRAP_API_KEY}"
-    say "Quick check       : curl -H \"authorization: Bearer ${BOOTSTRAP_API_KEY}\" http://${host_ip}:18150/api/v1/data/capabilities"
+    say "Bootstrap API key : stored in Secret mx-insight-hub-bootstrap (plaintext withheld)"
+    say "Quick check       : bash scripts/manage.sh verify-data-path"
     # capabilities calls Night-All and validates the key; a 200 proves the whole
     # public → Hub → Night-All path works (independent of per-platform grants).
-    if curl -fsS -H "authorization: Bearer ${BOOTSTRAP_API_KEY}" \
+    if curl_with_protected_header \
+         'authorization' "Bearer ${BOOTSTRAP_API_KEY}" -fsS \
          "http://127.0.0.1:18150/api/v1/data/capabilities" >/dev/null 2>&1; then
       say "Night-All data path: OK (capabilities returned through the Hub)."
     else
@@ -1075,7 +1175,8 @@ verify_data_path() {
   # --- 1. capabilities: authentication and platform grants -----------------
   say "1/5 capabilities"
   local capabilities
-  capabilities="$(curl -fsS -H "authorization: Bearer ${api_key}" \
+  capabilities="$(curl_with_protected_header \
+    'authorization' "Bearer ${api_key}" -fsS \
     "${public_url}/api/v1/data/capabilities" 2>/dev/null || true)"
   if [ -z "$capabilities" ]; then
     die "capabilities failed: the API key is invalid, revoked, or the public plane is down"
@@ -1094,8 +1195,9 @@ verify_data_path() {
   say "2/5 search (this calls Night-All and is billed)"
   local before response items
   before="$(pg_count "SELECT count(*) FROM core.canonical_records WHERE platform = '${platform}'")"
-  response="$(curl -fsS -X POST "${public_url}/api/v1/data/search" \
-    -H "authorization: Bearer ${api_key}" \
+  response="$(curl_with_protected_header \
+    'authorization' "Bearer ${api_key}" \
+    -fsS -X POST "${public_url}/api/v1/data/search" \
     -H 'content-type: application/json' \
     -H "idempotency-key: verify-$(date +%s)-$$" \
     -d "{\"platform\":\"${platform}\",\"query\":\"${query}\",\"pageSize\":5}" 2>/dev/null || true)"

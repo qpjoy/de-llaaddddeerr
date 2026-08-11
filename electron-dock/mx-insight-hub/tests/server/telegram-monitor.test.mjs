@@ -1576,20 +1576,42 @@ test('public Telegram history is consumer-granted, page-bounded, keyset-paged an
   }
   const service = new HubService({ store, adapter, apiKeyPepper: PEPPER })
   const tenantA = await service.createTenant({ name: 'Tenant A' })
-  const tenantB = await service.createTenant({ name: 'Tenant B' })
   const consumerA = await service.createConsumer({ tenantId: tenantA.id, name: 'Consumer A' })
-  const consumerB = await service.createConsumer({ tenantId: tenantB.id, name: 'Consumer B' })
+  const consumerB = await service.createConsumer({ tenantId: tenantA.id, name: 'Consumer B' })
   const keyA = await service.createApiKey({ consumerId: consumerA.id, name: 'A' })
   const keyB = await service.createApiKey({ consumerId: consumerB.id, name: 'B' })
-  await service.putPlatformConfiguration('telegram', {
-    tenantId: tenantA.id, consumerId: consumerA.id, enabled: true,
-    maxRequests: 10, windowSeconds: 3600, maxPageSize: 2,
-  })
   const app = createApp({ service, store, adapter, adminToken: ADMIN_TOKEN })
 
   await withServer(app, async (baseUrl) => {
     const allowed = { authorization: `Bearer ${keyA.secret}` }
     const denied = { authorization: `Bearer ${keyB.secret}` }
+
+    const beforeGrant = await call(baseUrl, '/api/v1/data/telegram/messages?pageSize=1', { headers: allowed })
+    assert.equal(beforeGrant.response.status, 403)
+    assert.equal(beforeGrant.payload.error.code, 'platform_not_granted')
+
+    const grant = await call(baseUrl, '/internal/v1/admin/platforms/telegram', {
+      method: 'PUT',
+      headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
+      body: {
+        tenantId: tenantA.id,
+        consumerId: consumerA.id,
+        enabled: true,
+        maxRequests: 10,
+        windowSeconds: 3600,
+        maxPageSize: 2,
+      },
+    })
+    assert.equal(grant.response.status, 200)
+    assert.equal(grant.payload.data.enabled, true)
+
+    const immediatelyAllowed = await call(baseUrl, '/api/v1/data/telegram/messages?pageSize=1', { headers: allowed })
+    assert.equal(immediatelyAllowed.response.status, 200)
+    assert.equal(immediatelyAllowed.payload.data.items.length, 1)
+
+    const stillForbidden = await call(baseUrl, '/api/v1/data/telegram/messages?pageSize=1', { headers: denied })
+    assert.equal(stillForbidden.response.status, 403)
+    assert.equal(stillForbidden.payload.error.code, 'platform_not_granted')
 
     const tooLarge = await call(baseUrl, '/api/v1/data/telegram/messages?pageSize=3', { headers: allowed })
     assert.equal(tooLarge.response.status, 400)
@@ -1598,10 +1620,6 @@ test('public Telegram history is consumer-granted, page-bounded, keyset-paged an
     const unboundedText = await call(baseUrl, '/api/v1/data/telegram/messages?q=secret', { headers: allowed })
     assert.equal(unboundedText.response.status, 400)
     assert.equal(unboundedText.payload.error.code, 'unsupported_fields')
-
-    const forbidden = await call(baseUrl, '/api/v1/data/telegram/messages?pageSize=1', { headers: denied })
-    assert.equal(forbidden.response.status, 403)
-    assert.equal(forbidden.payload.error.code, 'platform_not_granted')
 
     const first = await call(baseUrl, '/api/v1/data/telegram/messages?chatId=-1007&pageSize=2', { headers: allowed })
     assert.equal(first.response.status, 200)

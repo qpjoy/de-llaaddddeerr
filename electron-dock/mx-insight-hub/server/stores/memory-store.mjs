@@ -163,6 +163,16 @@ export class MemoryStore {
     return clone(normalized)
   }
 
+  async setPlatformGrant(consumerId, platform, enabled) {
+    if (!this.consumers.has(consumerId)) {
+      throw new AppError(404, 'consumer_not_found', 'Consumer not found')
+    }
+    const grants = new Set(this.grants.get(consumerId) || [])
+    if (enabled) grants.add(platform)
+    else grants.delete(platform)
+    this.grants.set(consumerId, [...grants].sort())
+  }
+
   async listGrants(consumerId) {
     return clone(this.grants.get(consumerId) || [])
   }

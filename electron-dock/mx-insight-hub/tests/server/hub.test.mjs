@@ -265,6 +265,32 @@ test('platform policies are isolated between consumers in the same tenant', asyn
   )
 })
 
+test('concurrent platform grants preserve each independently enabled platform', async () => {
+  const isolatedStore = new MemoryStore()
+  const isolatedService = new HubService({
+    store: isolatedStore,
+    adapter: {},
+    apiKeyPepper: PEPPER,
+  })
+  const tenant = await isolatedService.createTenant({ name: 'Concurrent grant tenant' })
+  const consumer = await isolatedService.createConsumer({ tenantId: tenant.id, name: 'Concurrent grant consumer' })
+
+  await Promise.all([
+    isolatedService.putPlatformConfiguration('xiaohongshu', {
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      enabled: true,
+    }),
+    isolatedService.putPlatformConfiguration('telegram', {
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      enabled: true,
+    }),
+  ])
+
+  assert.deepEqual(await isolatedStore.listGrants(consumer.id), ['telegram', 'xiaohongshu'])
+})
+
 test('API keys default to 180 days, allow bounded expiry, and reject expired authentication', async () => {
   const isolatedStore = new MemoryStore()
   const isolatedService = new HubService({

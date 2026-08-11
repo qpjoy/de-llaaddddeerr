@@ -193,10 +193,8 @@ export class HubService {
     const consumer = await this.store.getConsumer(consumerId)
     assert(consumer?.tenantId === tenantId, 404, 'consumer_not_found', 'Consumer not found in tenant')
 
-    const grants = new Set(await this.store.listGrants(consumerId))
-    if (body.enabled === false) grants.delete(platform)
-    else grants.add(platform)
-    const savedGrants = await this.store.replaceGrants(consumerId, [...grants])
+    const enabled = body.enabled !== false
+    await this.store.setPlatformGrant(consumerId, platform, enabled)
 
     const current = (await this.store.getPolicy(consumerId, platform)) || this.defaultPolicy
     const policy = await this.store.putPolicy({
@@ -207,7 +205,7 @@ export class HubService {
       windowSeconds: positiveInteger(body.windowSeconds, 'windowSeconds', current.windowSeconds),
       maxPageSize: positiveInteger(body.maxPageSize, 'maxPageSize', current.maxPageSize),
     })
-    return { platform, enabled: savedGrants.includes(platform), policy }
+    return { platform, enabled, policy }
   }
 
   async dashboard() {

@@ -127,15 +127,132 @@ assert_eq \
     0)" \
   'effective expiry overrides raw active status'
 
+# Reusing a healthy bootstrap key must not mint or rotate it. An operator can
+# explicitly add a newly approved platform to that same consumer, and deploy
+# output must never echo the retained plaintext key.
+reuse_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-key-reuse.XXXXXX")"
+reuse_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-key-output.XXXXXX")"
+reuse_curl_audit="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-curl-audit.XXXXXX")"
+reuse_secret='mih_live_bootstrap_reuse_material_4321'
+reuse_admin_token='admin-token-with-at-least-32-bytes'
+reuse_encoded="$(printf '%s' "$reuse_secret" | base64)"
+reuse_tenant_id='11111111-1111-4111-8111-111111111111'
+reuse_consumer_id='22222222-2222-4222-8222-222222222222'
+reuse_tenant_encoded="$(printf '%s' "$reuse_tenant_id" | base64)"
+reuse_consumer_encoded="$(printf '%s' "$reuse_consumer_id" | base64)"
+reuse_prefix="${reuse_secret:0:25}"
+reuse_last_four="${reuse_secret: -4}"
+REUSE_EVENTS="$reuse_events" \
+REUSE_CURL_AUDIT="$reuse_curl_audit" \
+REUSE_SECRET="$reuse_secret" \
+REUSE_ENCODED="$reuse_encoded" \
+REUSE_TENANT_ENCODED="$reuse_tenant_encoded" \
+REUSE_CONSUMER_ENCODED="$reuse_consumer_encoded" \
+REUSE_PREFIX="$reuse_prefix" \
+REUSE_LAST_FOUR="$reuse_last_four" \
+MX_INSIGHT_ADMIN_TOKEN="$reuse_admin_token" \
+MX_INSIGHT_BOOTSTRAP_PLATFORMS=' telegram,telegram ' \
+NIGHT_ALL_BASE_URL='http://127.0.0.1:13141' \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    case "$*" in
+      *"MX_INSIGHT_API_KEY"*) printf "%s" "$REUSE_ENCODED" ;;
+      *"MX_INSIGHT_TENANT_ID"*) printf "%s" "$REUSE_TENANT_ENCODED" ;;
+      *"MX_INSIGHT_CONSUMER_ID"*) printf "%s" "$REUSE_CONSUMER_ENCODED" ;;
+      *) return 1 ;;
+    esac
+  }
+  audit_curl_header() {
+    label="$1"
+    expected_header="$2"
+    shift 2
+    header_file=""
+    for argument in "$@"; do
+      case "$argument" in
+        *"$MX_INSIGHT_ADMIN_TOKEN"*|*"$REUSE_SECRET"*)
+          printf "unsafe-argv:%s\n" "$label" >>"$REUSE_CURL_AUDIT"
+          return 88
+          ;;
+        @*) header_file="${argument#@}" ;;
+      esac
+    done
+    if [ -z "$header_file" ] || [ ! -f "$header_file" ]; then
+      printf "missing-header-file:%s\n" "$label" >>"$REUSE_CURL_AUDIT"
+      return 89
+    fi
+    header_mode="$(stat -f "%Lp" "$header_file" 2>/dev/null || stat -c "%a" "$header_file")"
+    IFS= read -r header_line <"$header_file"
+    if [ "$header_mode" != "600" ] || [ "$header_line" != "$expected_header" ]; then
+      printf "unsafe-header-file:%s\n" "$label" >>"$REUSE_CURL_AUDIT"
+      return 90
+    fi
+    printf "safe-header-file:%s:%s\n" "$label" "$header_file" >>"$REUSE_CURL_AUDIT"
+  }
+  curl() {
+    case "$*" in
+      *"/internal/v1/admin/api-keys"*)
+        audit_curl_header key-list "x-mx-insight-admin-token: $MX_INSIGHT_ADMIN_TOKEN" "$@" || return
+        printf '\''{"data":[{"id":"33333333-3333-4333-8333-333333333333","prefix":"%s","lastFour":"%s","status":"active","effectiveStatus":"active","expiresAt":"2999-01-01T00:00:00.000Z"}]}'\'' "$REUSE_PREFIX" "$REUSE_LAST_FOUR"
+        ;;
+      *"-X PUT"*"/internal/v1/admin/platforms/telegram"*)
+        audit_curl_header platform-grant "x-mx-insight-admin-token: $MX_INSIGHT_ADMIN_TOKEN" "$@" || return
+        printf "grant:telegram\n" >>"$REUSE_EVENTS"
+        printf '\''{"data":{"platform":"telegram","enabled":true}}'\''
+        ;;
+      *"/api/v1/data/capabilities"*)
+        audit_curl_header summary-capabilities "authorization: Bearer $REUSE_SECRET" "$@" || return
+        printf '\''{"data":{"platforms":[]}}'\''
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  node() {
+    case "$*" in
+      *"scripts/provision.mjs"*)
+        printf "mint\n" >>"$REUSE_EVENTS"
+        return 1
+        ;;
+      *) command node "$@" ;;
+    esac
+  }
+  ensure_default_api_key
+  print_deploy_summary
+' _ "$ROOT_DIR" >"$reuse_output" 2>&1
+assert_eq 'grant:telegram' "$(cat "$reuse_events")" 'reused bootstrap key reconciles only the explicit platform without minting'
+assert_eq '3' "$(grep -c '^safe-header-file:' "$reuse_curl_audit")" 'bootstrap key list, grant, and summary use protected headers'
+while IFS= read -r reuse_header_file; do
+  if [ -e "$reuse_header_file" ]; then
+    printf 'not ok - bootstrap credential request did not clean up its protected header file\n' >&2
+    exit 1
+  fi
+done < <(sed -n 's/^safe-header-file:[^:]*://p' "$reuse_curl_audit")
+if grep -Fq "$reuse_secret" "$reuse_output" || grep -Fq "$reuse_admin_token" "$reuse_output"; then
+  printf 'not ok - deploy output exposed a bootstrap credential\n' >&2
+  exit 1
+fi
+grep -q 'stored in Secret mx-insight-hub-bootstrap (plaintext withheld)' "$reuse_output"
+grep -q 'bash scripts/manage.sh verify-data-path' "$reuse_output"
+rm -f -- "$reuse_events" "$reuse_output" "$reuse_curl_audit"
+printf 'ok - bootstrap grant reconciliation protects credentials and deploy output withholds keys\n'
+
 # Rotation is overlap-safe: mint and persist the replacement before revoking
 # the old key. Stubs record externally visible ordering while the real decision
 # helper continues to run in Node.
 rotation_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-key-rotation.XXXXXX")"
+rotation_curl_audit="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-rotation-curl.XXXXXX")"
+rotation_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-rotation-output.XXXXXX")"
 rotation_old_secret='mih_live_bootstrap_old_5678'
+rotation_new_secret='mih_live_bootstrap_new_9999'
+rotation_admin_token='rotation-admin-token-with-at-least-32-bytes'
 rotation_old_encoded="$(printf '%s' "$rotation_old_secret" | base64)"
 ROTATION_EVENTS="$rotation_events" \
+ROTATION_CURL_AUDIT="$rotation_curl_audit" \
 ROTATION_OLD_ENCODED="$rotation_old_encoded" \
-MX_INSIGHT_ADMIN_TOKEN='admin-token-with-at-least-32-bytes' \
+ROTATION_OLD_SECRET="$rotation_old_secret" \
+ROTATION_NEW_SECRET="$rotation_new_secret" \
+MX_INSIGHT_ADMIN_TOKEN="$rotation_admin_token" \
 NIGHT_ALL_BASE_URL='http://127.0.0.1:13141' \
 bash -c '
   set -euo pipefail
@@ -151,10 +268,39 @@ bash -c '
       *) return 1 ;;
     esac
   }
+  audit_admin_curl() {
+    label="$1"
+    shift
+    header_file=""
+    for argument in "$@"; do
+      case "$argument" in
+        *"$MX_INSIGHT_ADMIN_TOKEN"*|*"$ROTATION_OLD_SECRET"*|*"$ROTATION_NEW_SECRET"*)
+          printf "unsafe-argv:%s\n" "$label" >>"$ROTATION_CURL_AUDIT"
+          return 88
+          ;;
+        @*) header_file="${argument#@}" ;;
+      esac
+    done
+    if [ -z "$header_file" ] || [ ! -f "$header_file" ]; then
+      printf "missing-header-file:%s\n" "$label" >>"$ROTATION_CURL_AUDIT"
+      return 89
+    fi
+    header_mode="$(stat -f "%Lp" "$header_file" 2>/dev/null || stat -c "%a" "$header_file")"
+    IFS= read -r header_line <"$header_file"
+    if [ "$header_mode" != "600" ] || [ "$header_line" != "x-mx-insight-admin-token: $MX_INSIGHT_ADMIN_TOKEN" ]; then
+      printf "unsafe-header-file:%s\n" "$label" >>"$ROTATION_CURL_AUDIT"
+      return 90
+    fi
+    printf "safe-header-file:%s:%s\n" "$label" "$header_file" >>"$ROTATION_CURL_AUDIT"
+  }
   curl() {
     case "$*" in
-      *"/revoke"*) printf "revoke\n" >>"$ROTATION_EVENTS" ;;
+      *"/revoke"*)
+        audit_admin_curl revoke "$@" || return
+        printf "revoke\n" >>"$ROTATION_EVENTS"
+        ;;
       *"/internal/v1/admin/api-keys"*)
+        audit_admin_curl key-list "$@" || return
         printf "%s" '\''{"data":[{"id":"22222222-2222-4222-8222-222222222222","prefix":"mih_live_bootstrap_old","lastFour":"5678","status":"active","effectiveStatus":"expired","expiresAt":"2000-01-01T00:00:00.000Z"}]}'\''
         ;;
       *) return 1 ;;
@@ -164,15 +310,167 @@ bash -c '
     case "$*" in
       *"scripts/provision.mjs"*)
         printf "mint\n" >>"$ROTATION_EVENTS"
-        printf "mih_live_bootstrap_new_9999\ntenant-id\nconsumer-id\n"
+        printf "%s\ntenant-id\nconsumer-id\n" "$ROTATION_NEW_SECRET"
         ;;
       *) command node "$@" ;;
     esac
   }
   ensure_default_api_key
-' _ "$ROOT_DIR"
+' _ "$ROOT_DIR" >"$rotation_output" 2>&1
 assert_eq $'mint\npersist\nrevoke' "$(cat "$rotation_events")" 'bootstrap rotation persists before revoke'
-rm -f -- "$rotation_events"
+assert_eq '2' "$(grep -c '^safe-header-file:' "$rotation_curl_audit")" 'bootstrap key inspection and revoke use protected headers'
+while IFS= read -r rotation_header_file; do
+  if [ -e "$rotation_header_file" ]; then
+    printf 'not ok - bootstrap rotation did not clean up its protected header file\n' >&2
+    exit 1
+  fi
+done < <(sed -n 's/^safe-header-file:[^:]*://p' "$rotation_curl_audit")
+if grep -Fq "$rotation_admin_token" "$rotation_output" \
+  || grep -Fq "$rotation_old_secret" "$rotation_output" \
+  || grep -Fq "$rotation_new_secret" "$rotation_output"; then
+  printf 'not ok - bootstrap rotation output exposed a credential\n' >&2
+  exit 1
+fi
+rm -f -- "$rotation_events" "$rotation_curl_audit" "$rotation_output"
+
+# The operator verification command makes two public requests. Its API key is
+# protected in the same way as deploy-time requests, including the billed
+# search path.
+verify_curl_audit="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-verify-curl.XXXXXX")"
+verify_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-verify-output.XXXXXX")"
+verify_pg_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-verify-pg.XXXXXX")"
+verify_secret='mih_live_verify_path_material_2468'
+rm -f -- "$verify_pg_marker"
+VERIFY_CURL_AUDIT="$verify_curl_audit" \
+VERIFY_PG_MARKER="$verify_pg_marker" \
+VERIFY_SECRET="$verify_secret" \
+NIGHT_ALL_BASE_URL='http://127.0.0.1:13141' \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  audit_public_curl() {
+    label="$1"
+    shift
+    header_file=""
+    for argument in "$@"; do
+      case "$argument" in
+        *"$VERIFY_SECRET"*)
+          printf "unsafe-argv:%s\n" "$label" >>"$VERIFY_CURL_AUDIT"
+          return 88
+          ;;
+        @*) header_file="${argument#@}" ;;
+      esac
+    done
+    if [ -z "$header_file" ] || [ ! -f "$header_file" ]; then
+      printf "missing-header-file:%s\n" "$label" >>"$VERIFY_CURL_AUDIT"
+      return 89
+    fi
+    header_mode="$(stat -f "%Lp" "$header_file" 2>/dev/null || stat -c "%a" "$header_file")"
+    IFS= read -r header_line <"$header_file"
+    if [ "$header_mode" != "600" ] || [ "$header_line" != "authorization: Bearer $VERIFY_SECRET" ]; then
+      printf "unsafe-header-file:%s\n" "$label" >>"$VERIFY_CURL_AUDIT"
+      return 90
+    fi
+    printf "safe-header-file:%s:%s\n" "$label" "$header_file" >>"$VERIFY_CURL_AUDIT"
+  }
+  curl() {
+    case "$*" in
+      *"/api/v1/data/capabilities"*)
+        audit_public_curl capabilities "$@" || return
+        printf '\''{"data":{"platforms":["xiaohongshu"]}}'\''
+        ;;
+      *"/api/v1/data/search"*)
+        audit_public_curl search "$@" || return
+        printf '\''{"data":{"items":[{"externalId":"one"}]}}'\''
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  pg_count() {
+    case "$1" in
+      *"core.canonical_records"*)
+        if [ -f "$VERIFY_PG_MARKER" ]; then printf "1"; else : >"$VERIFY_PG_MARKER"; printf "0"; fi
+        ;;
+      *"outbox.projection_events"*) printf "0" ;;
+      *) printf "0" ;;
+    esac
+  }
+  kubectl() { printf '\''{"count":1}'\''; }
+  verify_data_path "$VERIFY_SECRET"
+' _ "$ROOT_DIR" >"$verify_output" 2>&1
+assert_eq '2' "$(grep -c '^safe-header-file:' "$verify_curl_audit")" 'verification capabilities and search use protected headers'
+while IFS= read -r verify_header_file; do
+  if [ -e "$verify_header_file" ]; then
+    printf 'not ok - data-path verification did not clean up its protected header file\n' >&2
+    exit 1
+  fi
+done < <(sed -n 's/^safe-header-file:[^:]*://p' "$verify_curl_audit")
+if grep -Fq "$verify_secret" "$verify_output"; then
+  printf 'not ok - data-path verification output exposed its API key\n' >&2
+  exit 1
+fi
+rm -f -- "$verify_curl_audit" "$verify_output" "$verify_pg_marker"
+printf 'ok - data-path verification protects its API key\n'
+
+# Protected header files must also disappear when curl fails or the request is
+# interrupted, not only after successful requests.
+cleanup_curl_audit="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-cleanup-curl.XXXXXX")"
+cleanup_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-cleanup-output.XXXXXX")"
+cleanup_secret='cleanup-secret-with-at-least-32-bytes'
+CLEANUP_CURL_AUDIT="$cleanup_curl_audit" \
+CLEANUP_SECRET="$cleanup_secret" \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  curl() {
+    label=failure
+    case "$*" in *"/interrupt"*) label=interrupt ;; esac
+    header_file=""
+    for argument in "$@"; do
+      case "$argument" in
+        *"$CLEANUP_SECRET"*)
+          printf "unsafe-argv:%s\n" "$label" >>"$CLEANUP_CURL_AUDIT"
+          return 88
+          ;;
+        @*) header_file="${argument#@}" ;;
+      esac
+    done
+    if [ -z "$header_file" ] || [ ! -f "$header_file" ]; then
+      printf "missing-header-file:%s\n" "$label" >>"$CLEANUP_CURL_AUDIT"
+      return 89
+    fi
+    header_mode="$(stat -f "%Lp" "$header_file" 2>/dev/null || stat -c "%a" "$header_file")"
+    IFS= read -r header_line <"$header_file"
+    if [ "$header_mode" != "600" ] || [ "$header_line" != "authorization: Bearer $CLEANUP_SECRET" ]; then
+      printf "unsafe-header-file:%s\n" "$label" >>"$CLEANUP_CURL_AUDIT"
+      return 90
+    fi
+    printf "safe-header-file:%s:%s\n" "$label" "$header_file" >>"$CLEANUP_CURL_AUDIT"
+    if [ "$label" = interrupt ]; then
+      sh -c '\''kill -TERM "$PPID"'\''
+    fi
+    return 22
+  }
+  if curl_with_protected_header authorization "Bearer $CLEANUP_SECRET" -fsS http://example/failure; then
+    exit 91
+  fi
+  if curl_with_protected_header authorization "Bearer $CLEANUP_SECRET" -fsS http://example/interrupt; then
+    exit 92
+  fi
+' _ "$ROOT_DIR" >"$cleanup_output" 2>&1
+assert_eq '2' "$(grep -c '^safe-header-file:' "$cleanup_curl_audit")" 'protected headers are created for failed and interrupted requests'
+while IFS= read -r cleanup_header_file; do
+  if [ -e "$cleanup_header_file" ]; then
+    printf 'not ok - failed or interrupted curl left a protected header file behind\n' >&2
+    exit 1
+  fi
+done < <(sed -n 's/^safe-header-file:[^:]*://p' "$cleanup_curl_audit")
+if grep -Fq "$cleanup_secret" "$cleanup_output"; then
+  printf 'not ok - failed or interrupted curl output exposed its credential\n' >&2
+  exit 1
+fi
+rm -f -- "$cleanup_curl_audit" "$cleanup_output"
+printf 'ok - failed and interrupted requests clean up protected headers\n'
 
 assert_eq \
   '2' \
