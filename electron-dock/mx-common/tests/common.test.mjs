@@ -276,3 +276,242 @@ test('password generation cannot be killed by SIGPIPE under pipefail', async () 
   // literal and into URL userinfo, both without escaping.
   assert.equal(new Set(passwords).size, 8, 'passwords must not repeat')
 })
+
+test('deploy parses the hanlp target and rejects ignored arguments', async () => {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const run = promisify(execFile)
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/manage.sh')
+
+  const { stdout } = await run('bash', [
+    '-c',
+    'source "$1"; cmd_ensure() { echo core; }; cmd_deploy_hanlp() { echo hanlp; }; main deploy; main deploy hanlp',
+    '_',
+    script,
+  ])
+  assert.deepEqual(stdout.trim().split('\n'), ['core', 'hanlp'])
+
+  await assert.rejects(
+    run('bash', ['-c', 'source "$1"; main deploy unknown', '_', script]),
+    /unknown deploy target/,
+  )
+  await assert.rejects(
+    run('bash', ['-c', 'source "$1"; main deploy hanlp extra', '_', script]),
+    /usage: manage\.sh deploy \[hanlp\]/,
+  )
+  await assert.rejects(
+    run('bash', [
+      '-c',
+      'source "$1"; need() { :; }; MX_COMMON_HANLP_ENABLED=1; cmd_ensure',
+      '_',
+      script,
+    ]),
+    /no longer a standalone deploy switch/,
+  )
+})
+
+test('containerd image names are canonicalized before idempotency checks', async () => {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const run = promisify(execFile)
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/manage.sh')
+
+  const { stdout } = await run('bash', [
+    '-c',
+    'source "$1"; canonical_image_ref mx-common-hanlp:local; canonical_image_ref qpjoy/hanlp:v1; canonical_image_ref registry.example/hanlp:v1',
+    '_',
+    script,
+  ])
+  assert.deepEqual(stdout.trim().split('\n'), [
+    'docker.io/library/mx-common-hanlp:local',
+    'docker.io/qpjoy/hanlp:v1',
+    'registry.example/hanlp:v1',
+  ])
+})
+
+test('the rendered HanLP pod template tracks the built image ID and local node', async () => {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const run = promisify(execFile)
+  const here = dirname(fileURLToPath(import.meta.url))
+  const script = resolve(here, '../scripts/manage.sh')
+  const manifest = resolve(here, '../deploy/k8s/optional/50-hanlp.yaml')
+
+  const { stdout } = await run('bash', [
+    '-c',
+    'source "$1"; HANLP_IMAGE=registry.example/hanlp:test; MX_COMMON_HANLP_IMAGE_ID=sha256:abc123; MX_COMMON_HANLP_NODE_NAME=node-a; render_manifest "$2"',
+    '_',
+    script,
+    manifest,
+  ])
+  assert.match(stdout, /mx-common\.io\/hanlp-image-id: "sha256:abc123"/)
+  assert.equal((stdout.match(/image: registry\.example\/hanlp:test/g) || []).length, 2)
+  assert.match(stdout, /kubernetes\.io\/hostname: node-a/)
+  assert.doesNotMatch(stdout, /MX_COMMON_HANLP_IMAGE_ID_PLACEHOLDER/)
+  assert.doesNotMatch(stdout, /MX_COMMON_HANLP_NODE_NAME_PLACEHOLDER/)
+})
+
+test('HanLP deploy re-imports the built image to self-heal a stale mutable tag', async () => {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const run = promisify(execFile)
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/manage.sh')
+
+  const { stdout } = await run('bash', [
+    '-c',
+    `source "$1"
+     need() { :; }
+     require_local_single_k8s_node() { MX_COMMON_HANLP_NODE_NAME=node-a; export MX_COMMON_HANLP_NODE_NAME; }
+     report_capacity() { :; }
+     require_hanlp_disk_capacity() { :; }
+     build_hanlp_image() { MX_COMMON_HANLP_IMAGE_ID=sha256:same; export MX_COMMON_HANLP_IMAGE_ID; echo build; }
+     import_hanlp_image() { echo import; }
+     kubectl() { return 0; }
+     has_default_storage_class() { return 0; }
+     render_manifest() { printf 'kind: List\n'; }
+     allow_hostnetwork_clients() { :; }
+     allow_client_namespace() { :; }
+     wait_ready() { :; }
+     hanlp_is_healthy() { return 0; }
+     hanlp_tokenize_smoke() { return 0; }
+     cmd_deploy_hanlp`,
+    '_',
+    script,
+  ])
+  assert.match(stdout, /build/)
+  assert.match(stdout, /^import$/m)
+})
+
+test('HanLP local-image deploy refuses a remote Kubernetes node', async () => {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const run = promisify(execFile)
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/manage.sh')
+
+  const matching = await run('bash', [
+    '-c',
+    `source "$1"
+     kubectl() {
+       case "$*" in
+         'get nodes '*) printf 'node-metadata-name\\n' ;;
+         'get node node-metadata-name '*) printf 'node-hostname-label\\n10.0.0.2\\n' ;;
+         *) return 1 ;;
+       esac
+     }
+     hostname() {
+       case "\${1:-}" in
+         -f) printf 'node-metadata-name\\n' ;;
+         -I) printf '10.0.0.2\\n' ;;
+         *) printf 'node-metadata-name\\n' ;;
+       esac
+     }
+     say() { :; }
+     require_local_single_k8s_node
+     printf '%s' "$MX_COMMON_HANLP_NODE_NAME"`,
+    '_',
+    script,
+  ])
+  assert.equal(matching.stdout, 'node-hostname-label')
+
+  await assert.rejects(
+    run('bash', [
+      '-c',
+      `source "$1"
+       kubectl() {
+         case "$*" in
+           'get nodes '*) printf 'remote-node\\n' ;;
+           'get node remote-node '*) printf 'remote-node\\n10.9.8.7\\n' ;;
+           *) return 1 ;;
+         esac
+       }
+       hostname() {
+         case "\${1:-}" in
+           -f) printf 'local-host\\n' ;;
+           -I) printf '10.0.0.2\\n' ;;
+           *) printf 'local-host\\n' ;;
+         esac
+       }
+       require_local_single_k8s_node`,
+      '_',
+      script,
+    ]),
+    /this host is not that node/,
+  )
+
+  await assert.rejects(
+    run('bash', ['-c', 'source "$1"; kubectl() { return 1; }; require_local_single_k8s_node', '_', script]),
+    /cannot query Kubernetes nodes/,
+  )
+})
+
+test('the HanLP PVC seeder is repeatable and repairs a corrupt cache', async () => {
+  const { execFile } = await import('node:child_process')
+  const { mkdtemp, mkdir, readFile, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join, resolve, dirname } = await import('node:path')
+  const { createHash } = await import('node:crypto')
+  const { fileURLToPath } = await import('node:url')
+  const { promisify } = await import('node:util')
+  const run = promisify(execFile)
+  const root = await mkdtemp(join(tmpdir(), 'mx-common-hanlp-seed-'))
+  const seed = join(root, 'seed')
+  const models = join(root, 'models')
+  await mkdir(seed)
+  await mkdir(models)
+
+  const payload = 'model-weights-v1\n'
+  const digest = createHash('sha256').update(payload).digest('hex')
+  await writeFile(join(seed, 'model.bin'), payload)
+  await writeFile(join(seed, '.mx-common-manifest.sha256'), `${digest}  ./model.bin\n`)
+
+  const script = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '../deploy/hanlp/seed-models.sh',
+  )
+  const environment = { ...process.env, HANLP_SEED_DIR: seed, HANLP_HOME: models }
+  const first = await run('sh', [script], { env: environment })
+  assert.match(first.stdout, /seeded and verified/)
+  const second = await run('sh', [script], { env: environment })
+  assert.match(second.stdout, /cache is current/)
+
+  await writeFile(join(models, 'stale-model.bin'), 'obsolete')
+  const cleaned = await run('sh', [script], { env: environment })
+  assert.match(cleaned.stdout, /seeded and verified/)
+  await assert.rejects(readFile(join(models, 'stale-model.bin')))
+
+  await writeFile(join(models, 'model.bin'), 'corrupt')
+  const repaired = await run('sh', [script], { env: environment })
+  assert.match(repaired.stdout, /seeded and verified/)
+  assert.equal(await readFile(join(models, 'model.bin'), 'utf8'), payload)
+  await rm(root, { recursive: true, force: true })
+})
+
+test('the HanLP image and HTTP service keep reproducibility and load bounds explicit', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { dirname, resolve } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const here = dirname(fileURLToPath(import.meta.url))
+  const dockerfile = await readFile(resolve(here, '../deploy/hanlp/Dockerfile'), 'utf8')
+  const server = await readFile(resolve(here, '../deploy/hanlp/server.py'), 'utf8')
+  const manifest = await readFile(resolve(here, '../deploy/k8s/optional/50-hanlp.yaml'), 'utf8')
+  const manage = await readFile(resolve(here, '../scripts/manage.sh'), 'utf8')
+
+  assert.match(dockerfile, /^ARG HANLP_VERSION=\d+\.\d+\.\d+$/m)
+  assert.match(dockerfile, /^ARG TORCH_VERSION=\d+\.\d+\.\d+$/m)
+  assert.match(server, /MAX_BODY_BYTES/)
+  assert.match(server, /BoundedSemaphore/)
+  assert.match(manifest, /name: seed-models[\s\S]*?resources:/)
+  assert.match(manage, /--driver docker-container/)
+  assert.match(manage, /docker update[\s\S]*?--memory[\s\S]*?--cpu-quota/)
+  assert.match(manage, /MX_COMMON_CONTAINERD_ROOT/)
+})

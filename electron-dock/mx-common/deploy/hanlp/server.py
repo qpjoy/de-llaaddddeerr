@@ -25,10 +25,13 @@ import threading
 # search precision far more than it helps recall.
 MODEL_NAME = os.environ.get("HANLP_MODEL", "COARSE_ELECTRA_SMALL_ZH")
 PORT = int(os.environ.get("PORT", "8000"))
+MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", "65536"))
+MAX_CONCURRENT_INFERENCES = int(os.environ.get("MAX_CONCURRENT_INFERENCES", "2"))
 
 _tokenizer = None
 _load_error = None
 _lock = threading.Lock()
+_inference_slots = threading.BoundedSemaphore(MAX_CONCURRENT_INFERENCES)
 
 
 def _load_model():
@@ -70,7 +73,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self.path.startswith("/tokenize"):
             self._send(404, {"error": "not found"})
             return
-        length = int(self.headers.get("content-length") or 0)
+        try:
+            length = int(self.headers.get("content-length") or 0)
+        except ValueError:
+            self._send(400, {"error": "invalid content-length"})
+            return
+        if length < 0 or length > MAX_BODY_BYTES:
+            self.close_connection = True
+            self._send(413, {"error": f"request body exceeds {MAX_BODY_BYTES} bytes"})
+            return
         try:
             request = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
@@ -88,11 +99,17 @@ class Handler(BaseHTTPRequestHandler):
         # Bound the input: a single oversized document must not stall the shared
         # tokenizer for every other caller.
         text = text[:20_000]
-        try:
-            tokens = _tokenizer(text)
-        except Exception as error:  # noqa: BLE001
-            self._send(500, {"error": str(error)})
+        if not _inference_slots.acquire(blocking=False):
+            self._send(429, {"error": "tokenizer is busy"})
             return
+        try:
+            try:
+                tokens = _tokenizer(text)
+            except Exception as error:  # noqa: BLE001
+                self._send(500, {"error": str(error)})
+                return
+        finally:
+            _inference_slots.release()
         # Normalize to the list-of-sentences shape the Node client expects.
         if tokens and isinstance(tokens[0], str):
             tokens = [tokens]

@@ -492,6 +492,114 @@ bash -c '
 printf 'ok - production validation needs no separate source credential key\n'
 
 # ---------------------------------------------------------------------------
+# Optional HanLP discovery
+# ---------------------------------------------------------------------------
+
+hanlp_explicit="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  say() { :; }
+  export MX_COMMON_HANLP_URL=http://external-hanlp.example:8000
+  kubectl() { return 99; }
+  discover_hanlp_url
+  printf "%s" "$MX_COMMON_HANLP_URL"
+' _ "$ROOT_DIR")"
+assert_eq \
+  'http://external-hanlp.example:8000' \
+  "$hanlp_explicit" \
+  'explicit HanLP URL overrides cluster discovery'
+
+hanlp_disabled="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  say() { :; }
+  export MX_COMMON_HANLP_URL=
+  kubectl() { printf "10.42.0.9"; }
+  discover_hanlp_url
+  printf "%s:%s" "${MX_COMMON_HANLP_URL+x}" "$MX_COMMON_HANLP_URL"
+' _ "$ROOT_DIR")"
+assert_eq 'x:' "$hanlp_disabled" 'explicit empty HanLP URL disables discovery'
+
+hanlp_discovered="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  say() { :; }
+  unset MX_COMMON_HANLP_URL
+  kubectl() {
+    case " $* " in
+      *" get endpoints mx-common-hanlp "*) printf "10.42.0.9" ;;
+      *) return 1 ;;
+    esac
+  }
+  discover_hanlp_url
+  printf "%s" "$MX_COMMON_HANLP_URL"
+' _ "$ROOT_DIR")"
+assert_eq \
+  'http://mx-common-hanlp.mx-common.svc.cluster.local:8000' \
+  "$hanlp_discovered" \
+  'ready HanLP Endpoint is auto-discovered'
+
+hanlp_absent="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  say() { :; }
+  unset MX_COMMON_HANLP_URL
+  kubectl() { return 1; }
+  discover_hanlp_url
+  printf "%s" "$MX_COMMON_HANLP_URL"
+' _ "$ROOT_DIR")"
+assert_eq '' "$hanlp_absent" 'missing HanLP Endpoint keeps local jieba'
+
+grep -q '^    mx-common\.io/client: allowed$' \
+  "$ROOT_DIR/deploy/k8s/internal/00-namespace.yaml"
+printf 'ok - Hub namespace is always admitted by the mx-common client policy\n'
+
+# Discovery must happen after the namespace exists and before the ConfigMap is
+# rendered so a regular Hub redeploy publishes the discovered URL atomically.
+apply_k8s_body="$(sed -n '/^apply_k8s() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
+runtime_config_body="$(sed -n '/^create_runtime_config() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
+namespace_line="$(grep -n '00-namespace.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
+discovery_line="$(grep -n 'discover_hanlp_url' <<<"$apply_k8s_body" | cut -d: -f1)"
+config_line="$(grep -n 'create_runtime_config' <<<"$apply_k8s_body" | cut -d: -f1)"
+first_workload_change_line="$(grep -nE 'rollout restart|scale deployment' <<<"$apply_k8s_body" | head -1 | cut -d: -f1)"
+if ! [ "$namespace_line" -lt "$discovery_line" ] \
+  || ! [ "$discovery_line" -lt "$config_line" ] \
+  || ! [ "$config_line" -lt "$first_workload_change_line" ]; then
+  printf 'not ok - HanLP discovery is not ordered before runtime ConfigMap creation\n' >&2
+  exit 1
+fi
+grep -q -- '--from-literal=MX_COMMON_HANLP_URL=' <<<"$runtime_config_body"
+printf 'ok - regular deploy discovers HanLP before publishing runtime config\n'
+
+hanlp_hub_smoke="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_COMMON_HANLP_URL=http://mx-common-hanlp.mx-common.svc.cluster.local:8000
+  export MX_INSIGHT_SEARCH_READY=1
+  say() { :; }
+  kubectl() { printf "%s\n" "$*"; }
+  verify_hanlp_from_hub
+' _ "$ROOT_DIR")"
+case "$hanlp_hub_smoke" in
+  *'exec deployment/mx-insight-hub-projector'*'http://mx-common-hanlp.mx-common.svc.cluster.local:8000'*) ;;
+  *) printf 'not ok - HanLP was not verified through a real Hub pod\n' >&2; exit 1 ;;
+esac
+printf 'ok - HanLP connectivity smoke runs through the Hub namespace\n'
+
+# Independent deployment is the safety default: neither secret sync nor a
+# Launcher rollout may issue kubectl mutations unless explicitly enabled.
+launcher_default="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  unset MX_INSIGHT_SYNC_LAUNCHER
+  say() { :; }
+  kubectl() { printf "kubectl-called"; return 99; }
+  sync_launcher_secret
+  refresh_launcher_workload
+' _ "$ROOT_DIR")"
+assert_eq '' "$launcher_default" 'default deploy does not mutate Launcher'
+
+# ---------------------------------------------------------------------------
 # Database provisioning
 # ---------------------------------------------------------------------------
 

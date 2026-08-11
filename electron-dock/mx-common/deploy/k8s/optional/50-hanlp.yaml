@@ -1,4 +1,4 @@
-# HanLP tokenization service. Opt-in via `MX_COMMON_HANLP_ENABLED=1`.
+# HanLP tokenization service. Deploy with `bash scripts/manage.sh deploy hanlp`.
 #
 # Not part of the default reconcile because the image carries PyTorch and model
 # weights (~2GB) and this node also hosts Elasticsearch. Products degrade to
@@ -27,6 +27,7 @@ metadata:
   namespace: mx-common
 spec:
   replicas: 1
+  progressDeadlineSeconds: 900
   strategy:
     type: Recreate
   selector:
@@ -38,9 +39,13 @@ spec:
         app.kubernetes.io/name: mx-common-hanlp
         app.kubernetes.io/part-of: mx-common
         mx-common.io/service: hanlp
+      annotations:
+        mx-common.io/hanlp-image-id: "MX_COMMON_HANLP_IMAGE_ID_PLACEHOLDER"
     spec:
       serviceAccountName: mx-common
       automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: MX_COMMON_HANLP_NODE_NAME_PLACEHOLDER
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
@@ -55,6 +60,30 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: seed-models
+          image: mx-common-hanlp:local
+          imagePullPolicy: Never
+          command: ["/app/seed-models.sh"]
+          env:
+            - name: HANLP_HOME
+              value: /models
+            - name: HANLP_SEED_DIR
+              value: /opt/hanlp-model-seed
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: models
+              mountPath: /models
       containers:
         - name: hanlp
           image: mx-common-hanlp:local
@@ -65,21 +94,31 @@ spec:
           env:
             - name: HANLP_HOME
               value: /models
-          # Model load can take minutes on a cold volume. A generous
-          # failureThreshold on readiness (rather than a long liveness delay)
-          # keeps the pod out of rotation while loading without restart loops.
+          # Model load can take minutes on a cold volume. The startup probe
+          # keeps liveness from restarting it while readiness holds it out of
+          # service until the tokenizer has actually loaded.
           readinessProbe:
             httpGet:
               path: /health
               port: http
             initialDelaySeconds: 15
             periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
             failureThreshold: 60
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /health
               port: http
-            initialDelaySeconds: 600
             periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
           resources:
             requests:
               cpu: 200m

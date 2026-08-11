@@ -4,4 +4,4 @@ metadata:
   name: mx-insight-hub
   labels:
     app.kubernetes.io/part-of: mx-insight-hub
-
+    mx-common.io/client: allowed

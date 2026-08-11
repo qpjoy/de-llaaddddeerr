@@ -498,6 +498,62 @@ EOF
   fi
 }
 
+# Use the in-cluster HanLP service only after its readiness probe has populated
+# an Endpoint. An explicitly set URL (including an explicit empty value) is an
+# operator decision and always wins over discovery.
+discover_hanlp_url() {
+  if [ "${MX_COMMON_HANLP_URL+x}" = x ]; then
+    if [ -n "$MX_COMMON_HANLP_URL" ]; then
+      say "HanLP tokenizer: ${MX_COMMON_HANLP_URL} (explicitly configured)"
+    else
+      say "HanLP tokenizer auto-discovery explicitly disabled; using local jieba"
+    fi
+    return 0
+  fi
+
+  local ready_endpoint
+  ready_endpoint="$(
+    kubectl -n mx-common get endpoints mx-common-hanlp \
+      -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true
+  )"
+  if [ -n "$ready_endpoint" ]; then
+    MX_COMMON_HANLP_URL="http://mx-common-hanlp.mx-common.svc.cluster.local:8000"
+    say "discovered ready HanLP tokenizer: ${MX_COMMON_HANLP_URL}"
+  else
+    MX_COMMON_HANLP_URL=""
+    say "no ready HanLP endpoint found; using local jieba"
+  fi
+  export MX_COMMON_HANLP_URL
+}
+
+# Probe through the non-hostNetwork projector and the Service DNS, not through
+# HanLP localhost or a node-IP client. This verifies the namespace label, DNS
+# and mx-common NetworkPolicy contract that production tokenization uses.
+verify_hanlp_from_hub() {
+  [ -n "${MX_COMMON_HANLP_URL:-}" ] || return 0
+  if [ "${MX_INSIGHT_SEARCH_READY:-0}" != "1" ]; then
+    say "HanLP cross-namespace smoke deferred because the projector is scaled down."
+    return 0
+  fi
+  if ! kubectl -n mx-insight-hub exec deployment/mx-insight-hub-projector -- \
+      node --input-type=module -e '
+        const base = process.argv[1].replace(/\/$/, "")
+        const response = await fetch(`${base}/tokenize`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "吴恩达与人工智能", coarse: true }),
+          signal: AbortSignal.timeout(10000),
+        })
+        if (!response.ok) throw new Error(`HanLP returned HTTP ${response.status}`)
+        const tokens = await response.json()
+        if (!Array.isArray(tokens) || !tokens.length) throw new Error("empty HanLP response")
+      ' "$MX_COMMON_HANLP_URL"; then
+    say "WARNING: projector cannot reach HanLP /tokenize; Hub will degrade to local jieba." >&2
+    return 1
+  fi
+  say "HanLP tokenizer verified from the Hub namespace."
+}
+
 # Build the Secret holding model API keys, derived from the provider chains.
 #
 # The previous version wired a hardcoded OPENAI_API_KEY / DEEPSEEK_API_KEY /
@@ -738,7 +794,8 @@ ensure_shared_data_plane() {
   say "reconciling shared data plane (mx-common)"
   # Hub's namespace must carry the client label before its pods can reach the
   # shared stores; mx-common applies it from this list.
-  if MX_COMMON_CLIENT_NAMESPACES="mx-insight-hub ${MX_COMMON_EXTRA_CLIENT_NAMESPACES:-}" \
+  if MX_COMMON_HANLP_ENABLED=0 \
+     MX_COMMON_CLIENT_NAMESPACES="mx-insight-hub ${MX_COMMON_EXTRA_CLIENT_NAMESPACES:-}" \
      bash "$manage" ensure; then
     MX_INSIGHT_SEARCH_READY=1
     say "shared data plane is healthy"
@@ -911,6 +968,7 @@ apply_k8s() {
   kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
   kubectl apply -f "${K8S_DIR}/05-serviceaccount.yaml"
   validate_existing_runtime_secret
+  discover_hanlp_url
   create_runtime_config
   create_model_key_secret
   sync_launcher_secret
@@ -967,6 +1025,7 @@ apply_k8s() {
     kubectl -n "$namespace" logs deployment/mx-insight-hub-ingest --tail=60 >&2 || true
     die "ingest worker did not become ready"
   fi
+  verify_hanlp_from_hub || true
   refresh_launcher_workload
 }
 

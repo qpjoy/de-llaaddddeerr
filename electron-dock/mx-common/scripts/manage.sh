@@ -19,6 +19,7 @@ K8S_DIR="${ROOT_DIR}/deploy/k8s"
 NAMESPACE="mx-common"
 HOST_DATA_ROOT="${MX_COMMON_HOST_DATA_ROOT:-/var/lib/mx-common/k8s}"
 WAIT_TIMEOUT="${MX_COMMON_WAIT_TIMEOUT:-300}"
+HANLP_WAIT_TIMEOUT="${MX_COMMON_HANLP_WAIT_TIMEOUT:-900}"
 
 # Image references, overridable for mirrors or air-gapped nodes. These registries
 # are slow or unreachable from some networks, and a 1.3GB Elasticsearch pull is
@@ -26,6 +27,11 @@ WAIT_TIMEOUT="${MX_COMMON_WAIT_TIMEOUT:-300}"
 ELASTICSEARCH_IMAGE="${MX_COMMON_ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:9.4.2}"
 POSTGRES_IMAGE="${MX_COMMON_POSTGRES_IMAGE:-pgvector/pgvector:pg16}"
 REDIS_IMAGE="${MX_COMMON_REDIS_IMAGE:-redis:7.4-alpine}"
+HANLP_IMAGE="${MX_COMMON_HANLP_IMAGE:-mx-common-hanlp:local}"
+HANLP_SERVICE_URL="http://mx-common-hanlp.mx-common.svc.cluster.local:8000"
+HANLP_BUILD_MEMORY="${MX_COMMON_HANLP_BUILD_MEMORY:-4g}"
+HANLP_BUILD_CPU_QUOTA="${MX_COMMON_HANLP_BUILD_CPU_QUOTA:-200000}"
+HANLP_BUILDER="${MX_COMMON_HANLP_BUILDER:-mx-common-hanlp}"
 
 # Elasticsearch heap. Xms and Xmx are always set together: a JVM whose min and
 # max heap differ fails Elasticsearch's production bootstrap check, and the
@@ -46,6 +52,8 @@ Usage: bash scripts/manage.sh <command>
                   Safe to call on every product deploy; a healthy stack is a no-op.
                   Missing images are preloaded through Docker automatically.
   deploy          Alias for `ensure`.
+  deploy hanlp    Build and import the model-preloaded HanLP image, deploy only
+                  the HanLP service and its dependencies, and require it healthy.
   status          Show workloads, PVCs and Elasticsearch cluster health.
   health          Probe only. Exit 0 healthy, 1 degraded/down. Prints JSON.
   plan            Print the manifests that `ensure` would apply.
@@ -64,7 +72,7 @@ Usage: bash scripts/manage.sh <command>
                   and extensions, and print the connection string on stdout.
 
 Optional components (off by default):
-  MX_COMMON_HANLP_ENABLED=1      Deploy the HanLP tokenizer (large image).
+  deploy hanlp                   Preferred HanLP build/import/deploy workflow.
 
 Environment:
   MX_COMMON_HOST_DATA_ROOT      Host path for local PVs (default /var/lib/mx-common/k8s)
@@ -74,6 +82,13 @@ Environment:
   MX_COMMON_ELASTICSEARCH_IMAGE Mirror override (default docker.elastic.co/...:9.4.2)
   MX_COMMON_POSTGRES_IMAGE      Mirror override (default pgvector/pgvector:pg16)
   MX_COMMON_REDIS_IMAGE         Mirror override (default redis:7.4-alpine)
+  MX_COMMON_HANLP_IMAGE         HanLP image tag (default mx-common-hanlp:local)
+  MX_COMMON_HANLP_WAIT_TIMEOUT  HanLP init/start wait in seconds (default 900)
+  MX_COMMON_HANLP_BUILD_MEMORY  Docker build memory ceiling (default 4g)
+  MX_COMMON_HANLP_BUILD_CPU_QUOTA Docker build CPU quota (default 200000 = 2 CPUs)
+  MX_COMMON_HANLP_BUILDER        Dedicated constrained buildx builder name
+  MX_COMMON_HANLP_MIN_FREE_GIB  Free disk required before build/import (default 8)
+  MX_COMMON_CONTAINERD_ROOT     containerd data root for disk check (default /var/lib/containerd)
   MX_COMMON_ELASTICSEARCH_HEAP  JVM heap, Xms and Xmx together (default 4g, cap 31g)
   MX_COMMON_AUTO_PRELOAD=0      Do not preload images during ensure
 EOF
@@ -217,9 +232,6 @@ ensure_storage() {
   ensure_local_pv mx-common-postgres-data data-mx-common-postgres-0 50Gi postgres/data 999:999 0700
   ensure_local_pv mx-common-elasticsearch-data data-mx-common-elasticsearch-0 50Gi elasticsearch/data 1000:0 0775
   ensure_local_pv mx-common-elasticsearch-snapshots mx-common-elasticsearch-snapshots 20Gi elasticsearch/snapshots 1000:0 0775
-  if [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ]; then
-    ensure_local_pv mx-common-hanlp-models mx-common-hanlp-models 10Gi hanlp/models 1000:1000 0755
-  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -232,7 +244,6 @@ manifest_list() {
     "${K8S_DIR}/common/10-postgres.yaml" \
     "${K8S_DIR}/common/20-elasticsearch.yaml" \
     "${K8S_DIR}/common/30-redis.yaml"
-  [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ] && printf '%s\n' "${K8S_DIR}/optional/50-hanlp.yaml"
   # Network policy last: it references labels the workloads above define.
   printf '%s\n' "${K8S_DIR}/common/40-network-policy.yaml"
 }
@@ -261,9 +272,14 @@ allow_client_namespace() {
 }
 
 render_manifest() {
+  local hanlp_image_id="${MX_COMMON_HANLP_IMAGE_ID:-unmanaged}"
+  local hanlp_node_name="${MX_COMMON_HANLP_NODE_NAME:-unmanaged}"
   sed -e "s#docker.elastic.co/elasticsearch/elasticsearch:9.4.2#${ELASTICSEARCH_IMAGE}#g" \
       -e "s#pgvector/pgvector:pg16#${POSTGRES_IMAGE}#g" \
       -e "s#redis:7.4-alpine#${REDIS_IMAGE}#g" \
+      -e "s#mx-common-hanlp:local#${HANLP_IMAGE}#g" \
+      -e "s#MX_COMMON_HANLP_IMAGE_ID_PLACEHOLDER#${hanlp_image_id}#g" \
+      -e "s#MX_COMMON_HANLP_NODE_NAME_PLACEHOLDER#${hanlp_node_name}#g" \
       -e "s#-Xms4g -Xmx4g#-Xms${ELASTICSEARCH_HEAP} -Xmx${ELASTICSEARCH_HEAP}#g" \
       "$1"
 }
@@ -362,7 +378,7 @@ pod_terminal_reason() {
   local name="$1"
   kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=${name}" \
     -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{range .status.initContainerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{end}' \
-    2>/dev/null | awk 'NF' | grep -E '^(ImagePullBackOff|ErrImagePull|CrashLoopBackOff|CreateContainerConfigError|InvalidImageName)$' | head -1
+    2>/dev/null | awk 'NF' | grep -E '^(ImagePullBackOff|ErrImagePull|ErrImageNeverPull|CrashLoopBackOff|CreateContainerConfigError|InvalidImageName)$' | head -1
 }
 
 # One-line progress summary: phase, readiness, restarts and whatever the pod is
@@ -394,7 +410,7 @@ wait_ready() {
     if [ -n "$reason" ]; then
       warn "${name} is stuck in ${reason}; not waiting out the remaining $((WAIT_TIMEOUT - waited))s"
       case "$reason" in
-        ImagePullBackOff|ErrImagePull|InvalidImageName)
+        ImagePullBackOff|ErrImagePull|ErrImageNeverPull|InvalidImageName)
           warn "  The node cannot pull this workload's image. Options:"
           warn "    1. Point at a mirror:  MX_COMMON_ELASTICSEARCH_IMAGE=... MX_COMMON_POSTGRES_IMAGE=... MX_COMMON_REDIS_IMAGE=..."
           warn "    2. Preload from a host that can reach the registry:  bash scripts/manage.sh preload"
@@ -513,11 +529,9 @@ health_json() {
     pg_status="ok"
   fi
 
-  if [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ]; then
+  if hanlp_is_deployed; then
     hanlp_status="down"
-    if kubectl -n "$NAMESPACE" exec deployment/mx-common-hanlp -- \
-        python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)" \
-        >/dev/null 2>&1; then
+    if hanlp_is_healthy; then
       hanlp_status="ok"
     fi
   fi
@@ -529,9 +543,20 @@ health_json() {
 # Yellow is healthy here: a single-node cluster holds no replicas, so green is
 # unreachable by construction and gating on it would hang every deploy.
 es_is_healthy() {
-  local status
-  status="$(health_json | sed -n 's/.*"elasticsearch":"\([a-z]*\)".*/\1/p')"
+  local health status
+  health="$(es_cluster_health)"
+  status="$(printf '%s' "$health" | sed -n 's/.*"status":"\([a-z]*\)".*/\1/p')"
   [ "$status" = "green" ] || [ "$status" = "yellow" ]
+}
+
+hanlp_is_deployed() {
+  kubectl -n "$NAMESPACE" get deployment mx-common-hanlp >/dev/null 2>&1
+}
+
+hanlp_is_healthy() {
+  kubectl -n "$NAMESPACE" exec deployment/mx-common-hanlp -- \
+    python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)" \
+    >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -541,6 +566,10 @@ es_is_healthy() {
 cmd_ensure() {
   need kubectl
   local target_namespaces="${MX_COMMON_CLIENT_NAMESPACES:-mx-insight-hub}"
+
+  if [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ]; then
+    die "MX_COMMON_HANLP_ENABLED is no longer a standalone deploy switch; run 'bash scripts/manage.sh deploy hanlp', then run ensure without that variable"
+  fi
 
   if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 && es_is_healthy; then
     say "shared data plane is already healthy; reconciling declaratively (no restart unless a manifest changed)"
@@ -566,7 +595,6 @@ cmd_ensure() {
   wait_ready statefulset mx-common-postgres || failed=1
   wait_ready statefulset mx-common-elasticsearch || warn "elasticsearch is not ready; products run with search degraded"
   wait_ready deployment mx-common-redis || warn "redis is not ready; products fall back to their PostgreSQL queue"
-  [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ] && wait_ready deployment mx-common-hanlp optional
 
   if [ "$failed" -ne 0 ]; then
     warn "a required shared component did not become ready"
@@ -877,11 +905,26 @@ images_in_use() {
 
 containerd_has_image() {
   local image="$1"
+  local canonical
+  canonical="$(canonical_image_ref "$image")"
   if [ "$(id -u)" -eq 0 ]; then
-    ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "docker.io/${image}\|${image}"
+    ctr -n k8s.io images ls -q 2>/dev/null | grep -Fqx -e "$canonical" -e "$image"
   else
-    sudo -n ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "docker.io/${image}\|${image}"
+    sudo -n ctr -n k8s.io images ls -q 2>/dev/null | grep -Fqx -e "$canonical" -e "$image"
   fi
+}
+
+canonical_image_ref() {
+  local image="$1" first
+  if [[ "$image" != */* ]]; then
+    printf 'docker.io/library/%s\n' "$image"
+    return 0
+  fi
+  first="${image%%/*}"
+  case "$first" in
+    *.*|*:*|localhost) printf '%s\n' "$image" ;;
+    *) printf 'docker.io/%s\n' "$image" ;;
+  esac
 }
 
 # Report which images the node already has BEFORE applying anything.
@@ -945,6 +988,263 @@ cmd_preload() {
   say "all shared data-plane images are present on this node"
 }
 
+ensure_hanlp_builder() {
+  docker buildx version >/dev/null 2>&1 \
+    || die "HanLP's resource-bounded build requires the Docker buildx plugin"
+  case "$HANLP_BUILDER" in
+    ''|*[!A-Za-z0-9_.-]*) die "MX_COMMON_HANLP_BUILDER contains unsupported characters" ;;
+  esac
+
+  if ! docker buildx inspect "$HANLP_BUILDER" >/dev/null 2>&1; then
+    local -a create_args=(
+      --name "$HANLP_BUILDER"
+      --driver docker-container
+      --driver-opt "memory=${HANLP_BUILD_MEMORY}"
+      --driver-opt "memory-swap=${HANLP_BUILD_MEMORY}"
+      --driver-opt "cpu-period=100000"
+      --driver-opt "cpu-quota=${HANLP_BUILD_CPU_QUOTA}"
+      --driver-opt network=host
+    )
+    local proxy_name proxy_value
+    # NO_PROXY is intentionally not a driver option: its comma-separated value
+    # is parsed by buildx as multiple driver options. Docker's normal build args
+    # still provide the operator's client-side NO_PROXY policy to RUN steps.
+    for proxy_name in HTTP_PROXY HTTPS_PROXY; do
+      proxy_value="${!proxy_name:-}"
+      [ -n "$proxy_value" ] \
+        && create_args+=(--driver-opt "env.${proxy_name}=${proxy_value}")
+    done
+    docker buildx create "${create_args[@]}" >/dev/null \
+      || die "could not create constrained buildx builder ${HANLP_BUILDER}"
+    say "created constrained buildx builder ${HANLP_BUILDER}"
+  elif ! docker buildx inspect "$HANLP_BUILDER" \
+      | grep -Eq '^Driver:[[:space:]]+docker-container$'; then
+    die "buildx builder ${HANLP_BUILDER} exists but does not use the docker-container driver"
+  fi
+
+  docker buildx inspect --bootstrap "$HANLP_BUILDER" >/dev/null \
+    || die "could not start buildx builder ${HANLP_BUILDER}"
+
+  # Driver options are applied at creation; docker update also converges an
+  # existing builder when an operator changes the limits later.
+  local builder_container
+  builder_container="$(
+    docker ps -aq --filter "label=com.docker.buildx.builder=${HANLP_BUILDER}" | head -1
+  )"
+  if [ -z "$builder_container" ]; then
+    builder_container="$(
+      docker ps -aq --filter "name=^/buildx_buildkit_${HANLP_BUILDER}0$" | head -1
+    )"
+  fi
+  [ -n "$builder_container" ] \
+    || die "cannot locate the buildkit container for ${HANLP_BUILDER}"
+  docker update \
+    --memory "$HANLP_BUILD_MEMORY" \
+    --memory-swap "$HANLP_BUILD_MEMORY" \
+    --cpu-period 100000 \
+    --cpu-quota "$HANLP_BUILD_CPU_QUOTA" \
+    "$builder_container" >/dev/null \
+    || die "could not enforce HanLP build CPU/memory limits"
+}
+
+build_hanlp_image() {
+  need docker
+  ensure_hanlp_builder
+  say "building model-preloaded HanLP image ${HANLP_IMAGE}"
+  if ! docker buildx build \
+      --builder "$HANLP_BUILDER" \
+      --load \
+      --build-arg PREFETCH_MODEL=1 \
+      -t "$HANLP_IMAGE" \
+      -f "${ROOT_DIR}/deploy/hanlp/Dockerfile" \
+      "${ROOT_DIR}/deploy/hanlp"; then
+    docker buildx stop "$HANLP_BUILDER" >/dev/null 2>&1 || true
+    die "HanLP image build failed"
+  fi
+  docker buildx stop "$HANLP_BUILDER" >/dev/null 2>&1 \
+    || warn "could not stop the now-idle HanLP buildx builder"
+
+  MX_COMMON_HANLP_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$HANLP_IMAGE")"
+  [ -n "$MX_COMMON_HANLP_IMAGE_ID" ] || die "Docker did not return an image ID for ${HANLP_IMAGE}"
+  export MX_COMMON_HANLP_IMAGE_ID
+  say "HanLP image ready: ${MX_COMMON_HANLP_IMAGE_ID}"
+}
+
+import_hanlp_image() (
+  need ctr
+  local archive current_image_id
+  archive="$(mktemp -t mx-common-hanlp.XXXXXX).tar"
+  trap 'rm -f -- "$archive"' EXIT HUP INT TERM
+
+  say "importing ${HANLP_IMAGE} into k8s.io containerd"
+  docker image save -o "$archive" "$HANLP_IMAGE"
+  current_image_id="$(docker image inspect --format '{{.Id}}' "$HANLP_IMAGE" 2>/dev/null || true)"
+  [ "$current_image_id" = "$MX_COMMON_HANLP_IMAGE_ID" ] \
+    || die "${HANLP_IMAGE} changed while its archive was being created; retry the deploy"
+  if [ "$(id -u)" -eq 0 ]; then
+    ctr -n k8s.io images import "$archive" \
+      || die "containerd could not import ${HANLP_IMAGE}"
+  else
+    need sudo
+    sudo -n ctr -n k8s.io images import "$archive" \
+      || die "non-interactive sudo cannot import ${HANLP_IMAGE} into containerd"
+  fi
+  containerd_has_image "$HANLP_IMAGE" \
+    || die "containerd import completed but ${HANLP_IMAGE} is not present in k8s.io"
+  say "imported ${HANLP_IMAGE}"
+)
+
+require_local_single_k8s_node() {
+  local nodes count node_name node_details node_hostname node_ips local_names local_ips matches=0
+  if ! nodes="$(kubectl get nodes \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)"; then
+    die "cannot query Kubernetes nodes; check the current kubeconfig/context"
+  fi
+  count="$(printf '%s\n' "$nodes" | awk 'NF { count += 1 } END { print count + 0 }')"
+  [ "$count" -eq 1 ] \
+    || die "local HanLP image and hostPath storage require exactly one Kubernetes node; found ${count}"
+
+  node_name="$(printf '%s\n' "$nodes" | awk 'NF { print; exit }')"
+  if ! node_details="$(kubectl get node "$node_name" \
+      -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}{"\n"}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}' \
+      2>/dev/null)"; then
+    die "cannot inspect Kubernetes node ${node_name}"
+  fi
+  node_hostname="$(printf '%s\n' "$node_details" | sed -n '1p')"
+  node_ips="$(printf '%s\n' "$node_details" | sed '1d')"
+  [ -n "$node_hostname" ] \
+    || die "Kubernetes node ${node_name} has no kubernetes.io/hostname label"
+  local_names="$(
+    hostname 2>/dev/null || true
+    hostname -f 2>/dev/null || true
+  )"
+  local_ips="$(
+    hostname -I 2>/dev/null | tr ' ' '\n' || true
+    if command -v ip >/dev/null 2>&1; then
+      ip -o addr show 2>/dev/null | awk '{ split($4, part, "/"); print part[1] }'
+    fi
+  )"
+
+  if printf '%s\n' "$local_names" | grep -Fqx -- "$node_name"; then
+    matches=1
+  else
+    local node_ip
+    while IFS= read -r node_ip; do
+      [ -n "$node_ip" ] || continue
+      if printf '%s\n' "$local_ips" | grep -Fqx -- "$node_ip"; then
+        matches=1
+        break
+      fi
+    done <<EOF
+$node_ips
+EOF
+  fi
+  [ "$matches" -eq 1 ] \
+    || die "kubectl points at node ${node_name}, but this host is not that node; run 'deploy hanlp' on the Kubernetes node itself"
+
+  MX_COMMON_HANLP_NODE_NAME="$node_hostname"
+  export MX_COMMON_HANLP_NODE_NAME
+  say "verified local Kubernetes node: ${node_name} (hostname label ${node_hostname})"
+}
+
+require_hanlp_disk_capacity() {
+  local minimum_gib="${MX_COMMON_HANLP_MIN_FREE_GIB:-8}" docker_root path checked_path available_kib
+  case "$minimum_gib" in
+    ''|*[!0-9]*) die "MX_COMMON_HANLP_MIN_FREE_GIB must be a non-negative integer" ;;
+  esac
+  docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+  [ -n "$docker_root" ] || die "cannot determine DockerRootDir; is the Docker daemon running?"
+
+  for path in \
+      "$docker_root" \
+      "${TMPDIR:-/tmp}" \
+      "${MX_COMMON_CONTAINERD_ROOT:-/var/lib/containerd}" \
+      "$HOST_DATA_ROOT"; do
+    case "$path" in
+      /*) ;;
+      *) die "disk preflight paths must be absolute: ${path}" ;;
+    esac
+    checked_path="$path"
+    while [ ! -e "$checked_path" ] && [ "$checked_path" != / ]; do
+      checked_path="${checked_path%/*}"
+      [ -n "$checked_path" ] || checked_path=/
+    done
+    available_kib="$(df -Pk "$checked_path" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+    [ -n "$available_kib" ] || die "cannot measure free disk space for ${path}"
+    [ "$available_kib" -ge $((minimum_gib * 1024 * 1024)) ] \
+      || die "HanLP build/import needs at least ${minimum_gib}GiB free on ${path}"
+  done
+  say "HanLP build/import disk preflight passed (${minimum_gib}GiB minimum)."
+}
+
+ensure_hanlp_storage() {
+  if has_default_storage_class; then
+    say "default StorageClass present; using dynamic provisioning for HanLP"
+    return 0
+  fi
+  say "no default StorageClass; provisioning retained HanLP model PV"
+  ensure_local_pv mx-common-hanlp-models mx-common-hanlp-models 10Gi hanlp/models 1000:1000 0755
+}
+
+hanlp_tokenize_smoke() {
+  kubectl -n "$NAMESPACE" exec deployment/mx-common-hanlp -- python -c \
+    'import json, urllib.request; body=json.dumps({"text":"吴恩达与人工智能","coarse":True}).encode(); request=urllib.request.Request("http://127.0.0.1:8000/tokenize", data=body, headers={"content-type":"application/json"}); result=json.load(urllib.request.urlopen(request, timeout=10)); assert result and result[0]'
+}
+
+cmd_deploy_hanlp() {
+  need docker
+  need kubectl
+  need ctr
+  require_local_single_k8s_node
+  case "$HANLP_WAIT_TIMEOUT" in
+    ''|*[!0-9]*) die "MX_COMMON_HANLP_WAIT_TIMEOUT must be an integer" ;;
+  esac
+  [ "$HANLP_WAIT_TIMEOUT" -ge 660 ] \
+    || die "MX_COMMON_HANLP_WAIT_TIMEOUT must be at least 660 seconds"
+  WAIT_TIMEOUT="$HANLP_WAIT_TIMEOUT"
+
+  report_capacity hanlp
+  require_hanlp_disk_capacity
+  build_hanlp_image
+  # Import every successful build. A tag-exists check cannot prove that Docker
+  # and containerd hold the same content for a mutable local tag; re-importing
+  # the exact archive is deterministic and self-heals stale node images.
+  import_hanlp_image
+
+  kubectl apply -f "${K8S_DIR}/common/00-namespace.yaml" >/dev/null
+  ensure_hanlp_storage
+  render_manifest "${K8S_DIR}/optional/50-hanlp.yaml" | kubectl apply -f - >/dev/null
+  render_manifest "${K8S_DIR}/common/40-network-policy.yaml" | kubectl apply -f - >/dev/null
+  allow_hostnetwork_clients
+
+  local target_namespaces="${MX_COMMON_CLIENT_NAMESPACES:-mx-insight-hub}" namespace
+  for namespace in $target_namespaces; do
+    allow_client_namespace "$namespace"
+  done
+
+  wait_ready deployment mx-common-hanlp
+
+  if ! hanlp_is_healthy; then
+    diagnose_workload mx-common-hanlp
+    die "HanLP deployment is not serving /health"
+  fi
+  if ! hanlp_tokenize_smoke; then
+    diagnose_workload mx-common-hanlp
+    die "HanLP deployment failed the /tokenize contract smoke"
+  fi
+  say "HanLP deployment ready: ${HANLP_SERVICE_URL}"
+  say "Redeploy mx-insight-hub to auto-discover this ready endpoint."
+}
+
+cmd_deploy() {
+  [ "$#" -le 1 ] || die "usage: manage.sh deploy [hanlp]"
+  case "${1:-}" in
+    "") cmd_ensure ;;
+    hanlp) cmd_deploy_hanlp ;;
+    *) die "unknown deploy target: $1" ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Capacity
 # ---------------------------------------------------------------------------
@@ -956,13 +1256,13 @@ cmd_preload() {
 # script's arithmetic. But an operator asking "is memory too small?" deserves
 # the numbers rather than a guess.
 report_capacity() {
-  local allocatable requested_mi=0
+  local component="${1:-core}" allocatable requested_mi=0
   allocatable="$(kubectl get nodes -o jsonpath='{.items[0].status.allocatable.memory}' 2>/dev/null || true)"
   [ -n "$allocatable" ] || return 0
 
   # PostgreSQL 2Gi + Elasticsearch 10Gi + Redis 512Mi of *requests*.
   requested_mi=$((2048 + 10240 + 512))
-  [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ] && requested_mi=$((requested_mi + 1024))
+  [ "$component" = "hanlp" ] && requested_mi=$((requested_mi + 1024))
 
   local allocatable_mi=0
   case "$allocatable" in
@@ -1008,9 +1308,7 @@ main() {
     provision) shift; cmd_provision "${1:-}" "${2:-}" ;;
     preload) cmd_preload ;;
     reset-storage) cmd_reset_storage ;;
-    # `deploy` reads naturally from either project directory and does the same
-    # idempotent reconcile.
-    deploy) cmd_ensure ;;
+    deploy) shift; cmd_deploy "$@" ;;
     snapshot) shift; cmd_snapshot "${1:-status}" ;;
     status) cmd_status ;;
     health) cmd_health ;;

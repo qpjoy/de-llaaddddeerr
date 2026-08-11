@@ -110,6 +110,31 @@ and host path. It is never part of `deploy` or `down`.
 `down` scales Hub workloads to zero. It does not stop `mx-common`, delete the
 Hub database, remove shared PVCs or remove Hub Secrets.
 
+## Optional HanLP tokenizer
+
+Deploy HanLP from the shared plane first, then run the ordinary Hub deploy:
+
+```bash
+cd ../mx-common
+bash scripts/manage.sh deploy hanlp
+
+cd ../mx-insight-hub
+bash scripts/manage.sh deploy
+```
+
+The HanLP command builds a model-preloaded local image, imports it into the
+single node's `k8s.io` containerd, seeds and verifies the retained model PVC,
+and requires both `/health` and `/tokenize` to pass. The Hub deploy discovers
+the service only when Kubernetes has a ready Endpoint and writes its stable DNS
+URL into `mx-insight-hub-config`, then verifies `/tokenize` through a real Hub
+projector pod so DNS and namespace NetworkPolicy are covered. A transient smoke
+failure is reported and safely degrades to local jieba rather than failing the
+Hub deploy. An explicitly configured
+`MX_COMMON_HANLP_URL` wins; an explicitly empty value disables discovery.
+
+This independent path leaves `MX_INSIGHT_SYNC_LAUNCHER` at its default `0` and
+does not modify or roll out Launcher.
+
 ## Launcher delegation
 
 ```bash

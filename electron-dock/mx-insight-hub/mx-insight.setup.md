@@ -16,6 +16,12 @@ NIGHT_ALL_SERVICE_TOKEN=
 # 可选：限定 bootstrap key 授权的平台（逗号分隔）；不填则自动发现 Night-All 支持的全部平台
 # MX_INSIGHT_BOOTSTRAP_PLATFORMS=xiaohongshu,douyin
 
+# 可选：先幂等部署 HanLP。Hub 随后的普通 deploy 会自动发现 ready Endpoint，
+# 无需在 .env.internal 手工配置 MX_COMMON_HANLP_ENABLED / MX_COMMON_HANLP_URL。
+cd ../mx-common
+bash scripts/manage.sh deploy hanlp
+cd ../mx-insight-hub
+
 # 一键部署：自动 build → migrate → 起 Admin/Public → 幂等建并打印 bootstrap API key
 MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 bash scripts/manage.sh ops internal-production deploy
 bash scripts/manage.sh ops internal-production deploy
@@ -36,6 +42,7 @@ bash scripts/manage.sh ops internal-production logs
 
 # 如需联动 Launcher（会 rollout restart mx-launcher-internal），显式开启：
 # MX_INSIGHT_SYNC_LAUNCHER=1 bash scripts/manage.sh ops internal-production deploy
+# 独立 Hub deploy 默认等价于 MX_INSIGHT_SYNC_LAUNCHER=0，不会重启 Launcher。
 
 # 首次不要执行（本地开发栈）：
 # bash scripts/manage.sh search up

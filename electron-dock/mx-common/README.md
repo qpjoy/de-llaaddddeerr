@@ -59,11 +59,27 @@ bash scripts/manage.sh down      # 只缩容，保留 PVC/PV/索引
 
 `ensure` 会自己处理单节点 kubeadm 上的两个硬性前提：`vm.max_map_count`（ES 不满足就起不来，需要节点 root 权限，所以在这里设而不是塞一个 privileged init container）和无默认 StorageClass 时的 Retain hostPath PV 绑定。
 
-PostgreSQL / Elasticsearch / Redis 是核心组件，随 `ensure` 一起部署。只有 HanLP 是可选的：
+PostgreSQL / Elasticsearch / Redis 是核心组件，随 `ensure` 一起部署。HanLP 使用独立的幂等部署目标：
 
 ```bash
-MX_COMMON_HANLP_ENABLED=1      # HanLP 分词服务（镜像约 2GB，需先自行构建）
+bash scripts/manage.sh deploy hanlp
 ```
+
+该命令会先确认当前主机就是唯一 Kubernetes 节点并检查至少 8GiB 可用磁盘，
+再用专用的 `docker-container` buildx builder 和 Docker cache 构建约 2GB 的模型
+预热镜像。builder 会自动创建并收敛到 4GiB/2 CPU 限额；
+构建完成后会停止 builder 容器并保留 cache；
+随后把本次构建结果重新导入 `k8s.io` containerd（可自愈同名旧镜像）、把镜像
+模型校验后精确同步到持久化 PVC、应用 HanLP Service/Deployment/NetworkPolicy，
+并以 `/health` 和 `/tokenize` 作为成功条件。相同 image ID 不会触发无变化的
+Pod rollout；整个命令可安全重复执行。
+
+不要再把 `MX_COMMON_HANLP_ENABLED=1` 当作部署开关；该旧入口会被明确拒绝，
+避免 Docker 与 Kubernetes containerd 的同名镜像内容不一致。
+
+HanLP ready 后重新部署 `mx-insight-hub`；Hub 会从 ready Endpoint 自动发现
+`http://mx-common-hanlp.mx-common.svc.cluster.local:8000`。显式设置
+`MX_COMMON_HANLP_URL` 仍可覆盖自动发现，显式设置为空则关闭自动发现并使用 jieba。
 
 镜像与容量调节：
 
