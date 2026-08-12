@@ -225,3 +225,25 @@ Hub 不获得 Launcher network lease，不注册 endpoint ProductNetwork，不�
 - 公共 route 不能访问 Hub Admin、Kibana、Elasticsearch、Night-All raw/provider/credential route。
 
 Hub 的详细数据架构位于 sibling `../../mx-insight-hub/docs/`，重点参考 [数据存储与服务](../../mx-insight-hub/docs/architecture/data-platform-storage-and-serving.md)、[增量接入与缓存回退](../../mx-insight-hub/docs/architecture/ingestion-cache-and-fallback.md)、[Telegram monitor ingestion](../../mx-insight-hub/docs/operations/telegram-monitor-ingestion.md) 和 [`/shared_dir` 导入](../../mx-insight-hub/docs/operations/shared-directory-ingestion.md)。
+
+## 11. 2026-08-12 Hub 管理台口径与文件源入口
+
+- Neon Void 已在 `demos/ui-design-neon-void` 和 `mx-launcher/ui-design`
+  沉淀 `qp-dropdown` 的 trigger/menu/option 规范。Hub 数据中心应使用该
+  自定义 listbox，不依赖 macOS/Chromium 无法稳定换肤的原生
+  `<select>` 展开层。这是 Hub 页面内组件选择，不改 Launcher 共享样式
+  包、身份会话或 MX-H2I 网络状态机。
+- 数据中心的“已删除记录”是 Hub PostgreSQL current truth 中
+  `deleted_at IS NOT NULL` 的当前逻辑记录数，不是 Hub 物理删除次数，
+  也不是 Elasticsearch delete 请求或 import-run 累计。当时的源库
+  semantic probe 记录 `tg_monitor_messages` 163,401 行中 7,480 行
+  `deleted_at` 非空，且均在首次采集后标记。Hub 保留 raw/revision/
+  canonical 证据，只从 current search projection 隐藏 tombstone。当前源
+  schema 没有已证明的 `delete_reason/deleted_by`，因此不能从 Hub 推断
+  是作者、管理员、Telegram 还是 collector 对账行为。
+- 当前可立即使用的文件源是 Admin Console 单文件直传：“外部数据源”
+  注册 file source，上传小样预览，审核并批准版本化 mapping，再选文件
+  正式导入。支持 `xlsx/xlsm` 首个工作表、`csv/tsv`、`jsonl/ndjson`
+  和 `txt/md`；HanLP 在 canonical 入库后的 ES 投影阶段运行，不是文件导入
+  前置条件。`/shared_dir` watcher/landing agent 仍是设计，不得将手册中的
+  拟议批量命令当作已实现入口。

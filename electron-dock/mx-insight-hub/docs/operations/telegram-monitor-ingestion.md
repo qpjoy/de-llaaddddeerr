@@ -432,6 +432,22 @@ records `agentDataScope=column_names_only`. This direct file path is implemented
 for CSV/TSV, JSONL/NDJSON, TXT/MD and XLSX/XLSM uploads; it is not a watched directory, cloud bucket or cloud
 warehouse adapter.
 
+The operator path is **Admin Console → 外部数据源 → 注册文件源 → 映射与导入**:
+
+1. upload a small representative file for a non-writing preview;
+2. verify that `externalId` is a stable deduplication key, save the suggested
+   mapping as a version and explicitly approve it;
+3. select the file again for the real import, then inspect the import-run
+   evidence and Data Center counts.
+
+The raw-body upload limit is 64 MiB. Tabular/JSONL inputs are limited to
+500,000 rows. XLSX/XLSM reads only the first worksheet and cached cell values;
+CSV/TSV is UTF-8. TXT/MD is split into non-empty paragraphs and deterministically
+emits a content-derived `externalId`. HanLP is not a file-parser
+setting: canonical PostgreSQL ingest commits first, then the Elasticsearch
+projector applies HanLP (with Jieba/CJK fallback) to searchable text. A HanLP
+outage therefore degrades tokenization but does not block file ingestion.
+
 ### 4.3 Fixed cleaning and search projection
 
 The built-in transform is deterministic:

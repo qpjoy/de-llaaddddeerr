@@ -411,6 +411,49 @@ select {
   max-width: 460px;
 }
 
+.mih-dropdown__menu {
+  max-height: min(280px, 46vh);
+  overflow-y: auto;
+}
+
+.mih-dropdown .qp-dropdown__trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.mih-step-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--qp-space-3);
+  margin: 0;
+  padding: 0;
+  counter-reset: file-import-step;
+  list-style: none;
+}
+
+.mih-step-list li {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  border-left: 1px solid var(--qp-line);
+  padding: 2px 12px;
+  counter-increment: file-import-step;
+}
+
+.mih-step-list strong::before {
+  content: "0" counter(file-import-step) " / ";
+  color: var(--qp-primary);
+  font-family: var(--qp-font-mono);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-step-list span {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-body-2);
+  line-height: 1.55;
+}
+
 .mih-platform-context {
   display: grid;
   gap: 2px;
@@ -931,6 +974,10 @@ select {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .mih-step-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .mih-content {
     padding-inline: 22px;
   }
@@ -1030,6 +1077,10 @@ select {
   .mih-metric-grid,
   .mih-metric-grid--compact,
   .mih-runtime-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .mih-step-list {
     grid-template-columns: 1fr;
   }
 

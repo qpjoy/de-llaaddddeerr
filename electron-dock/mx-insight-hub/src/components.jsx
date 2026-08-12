@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import {
   ArrowClockwise,
+  CaretDown,
   CheckCircle,
   CircleNotch,
   Copy,
@@ -153,6 +154,181 @@ export function Field({ label, hint, children, className = '' }) {
       {children}
       {hint ? <span className="qp-field__hint">{hint}</span> : null}
     </label>
+  )
+}
+
+export function DropdownField({ label, value, onChange, options, disabled = false, className = '' }) {
+  const labelId = useId()
+  const triggerId = useId()
+  const listboxId = useId()
+  const rootRef = useRef(null)
+  const triggerRef = useRef(null)
+  const optionRefs = useRef([])
+  const typeaheadRef = useRef({ value: '', timer: null })
+  const [open, setOpen] = useState(false)
+  const selectedIndex = options.findIndex((option) => option.value === value)
+  const firstEnabledIndex = useMemo(
+    () => options.findIndex((option) => !option.disabled),
+    [options],
+  )
+  const initialIndex = selectedIndex >= 0 ? selectedIndex : firstEnabledIndex
+  const [highlightedIndex, setHighlightedIndex] = useState(initialIndex)
+  const selected = selectedIndex >= 0 ? options[selectedIndex] : null
+
+  const openMenu = () => {
+    if (disabled) return
+    setHighlightedIndex(selectedIndex >= 0 ? selectedIndex : firstEnabledIndex)
+    setOpen(true)
+  }
+
+  const closeMenu = ({ restoreFocus = false } = {}) => {
+    setOpen(false)
+    if (restoreFocus) triggerRef.current?.focus()
+  }
+
+  const selectOption = (index) => {
+    const option = options[index]
+    if (!option || option.disabled) return
+    onChange(option.value)
+    setHighlightedIndex(index)
+    closeMenu({ restoreFocus: true })
+  }
+
+  const moveHighlight = (delta) => {
+    const enabled = options.flatMap((option, index) => (option.disabled ? [] : [index]))
+    if (!enabled.length) return
+    const position = enabled.indexOf(highlightedIndex)
+    const nextPosition = position < 0
+      ? (delta > 0 ? 0 : enabled.length - 1)
+      : (position + delta + enabled.length) % enabled.length
+    setHighlightedIndex(enabled[nextPosition])
+  }
+
+  const moveToEdge = (edge) => {
+    const enabled = options.flatMap((option, index) => (option.disabled ? [] : [index]))
+    if (enabled.length) setHighlightedIndex(edge === 'start' ? enabled[0] : enabled.at(-1))
+  }
+
+  const moveByCharacter = (character) => {
+    if (!character || character.length !== 1 || /\s/u.test(character)) return false
+    clearTimeout(typeaheadRef.current.timer)
+    const query = `${typeaheadRef.current.value}${character}`.toLocaleLowerCase()
+    const start = highlightedIndex >= 0 ? highlightedIndex + 1 : 0
+    const ordered = [...options.keys()].map((_, offset) => (start + offset) % options.length)
+    const match = ordered.find((index) => (
+      !options[index].disabled && String(options[index].label).toLocaleLowerCase().startsWith(query)
+    ))
+    typeaheadRef.current.value = query
+    typeaheadRef.current.timer = window.setTimeout(() => {
+      typeaheadRef.current.value = ''
+      typeaheadRef.current.timer = null
+    }, 500)
+    if (match !== undefined) {
+      setHighlightedIndex(match)
+      if (!open) setOpen(true)
+    }
+    return true
+  }
+
+  const onTriggerKeyDown = (event) => {
+    if (event.key === 'Escape' && open) {
+      event.preventDefault()
+      closeMenu()
+      return
+    }
+    if (event.key === 'Tab') {
+      closeMenu()
+      return
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (!open) openMenu()
+      else moveHighlight(event.key === 'ArrowDown' ? 1 : -1)
+      return
+    }
+    if (open && (event.key === 'Home' || event.key === 'End')) {
+      event.preventDefault()
+      moveToEdge(event.key === 'Home' ? 'start' : 'end')
+      return
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      if (open) selectOption(highlightedIndex)
+      else openMenu()
+      return
+    }
+    if (moveByCharacter(event.key)) event.preventDefault()
+  }
+
+  useEffect(() => {
+    if (!open) return undefined
+    const closeOnOutsidePointer = (event) => {
+      if (!rootRef.current?.contains(event.target)) closeMenu()
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer)
+  }, [open])
+
+  useEffect(() => {
+    if (open) optionRefs.current[highlightedIndex]?.scrollIntoView({ block: 'nearest' })
+  }, [highlightedIndex, open])
+
+  useEffect(() => () => clearTimeout(typeaheadRef.current.timer), [])
+
+  useEffect(() => {
+    if (!open) setHighlightedIndex(selectedIndex >= 0 ? selectedIndex : firstEnabledIndex)
+  }, [firstEnabledIndex, open, selectedIndex])
+
+  return (
+    <div
+      ref={rootRef}
+      className={`qp-field ${className}`.trim()}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) closeMenu()
+      }}
+    >
+      <span className="qp-field__label" id={labelId}>{label}</span>
+      <div className={`qp-dropdown mih-dropdown${open ? ' is-open' : ''}`}>
+        <button
+          ref={triggerRef}
+          id={triggerId}
+          className="qp-dropdown__trigger"
+          type="button"
+          role="combobox"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-controls={listboxId}
+          aria-labelledby={`${labelId} ${triggerId}`}
+          aria-activedescendant={open && highlightedIndex >= 0 ? `${listboxId}-option-${highlightedIndex}` : undefined}
+          disabled={disabled}
+          onClick={() => (open ? closeMenu() : openMenu())}
+          onKeyDown={onTriggerKeyDown}
+        >
+          <span className="qp-dropdown__value">{selected?.label ?? (value ? `未知筛选：${value}` : '请选择')}</span>
+          <CaretDown className="qp-dropdown__chevron" size={14} aria-hidden="true" />
+        </button>
+        <div className="qp-dropdown__menu mih-dropdown__menu" id={listboxId} role="listbox" aria-labelledby={labelId}>
+          {options.map((option, index) => (
+            <button
+              ref={(node) => { optionRefs.current[index] = node }}
+              className={`qp-dropdown__option${index === selectedIndex ? ' is-selected' : ''}${index === highlightedIndex ? ' is-highlighted' : ''}`}
+              id={`${listboxId}-option-${index}`}
+              key={option.value}
+              type="button"
+              role="option"
+              aria-selected={index === selectedIndex}
+              aria-disabled={option.disabled || undefined}
+              disabled={option.disabled}
+              tabIndex={-1}
+              onMouseEnter={() => setHighlightedIndex(index)}
+              onClick={() => selectOption(index)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
   )
 }
 

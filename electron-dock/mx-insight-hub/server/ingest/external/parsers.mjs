@@ -166,19 +166,25 @@ export function parseJsonLines(text) {
  *
  * `externalId` is a content hash rather than a line number, so re-importing a
  * file with a paragraph inserted at the top does not renumber — and therefore
- * duplicate — every paragraph after it.
+ * duplicate — every paragraph after it. The dedicated `externalId` column is
+ * intentionally emitted only by this parser; treating a generic spreadsheet's
+ * contentHash column as identity would turn content edits into new records.
  */
 export function parseText(text, { hash }) {
   const records = stripBom(text)
     .split(/\n\s*\n/)
     .map((block) => block.trim())
     .filter(Boolean)
-    .map((content, index) => ({
-      lineNumber: index + 1,
-      content: truncate(content),
-      contentHash: hash(content),
-    }))
-  return { columns: ['lineNumber', 'content', 'contentHash'], records }
+    .map((content, index) => {
+      const contentHash = hash(content)
+      return {
+        lineNumber: index + 1,
+        content: truncate(content),
+        contentHash,
+        externalId: contentHash,
+      }
+    })
+  return { columns: ['lineNumber', 'content', 'contentHash', 'externalId'], records }
 }
 
 // ---------------------------------------------------------------------------
@@ -188,10 +194,10 @@ export function parseText(text, { hash }) {
 /**
  * Read the first worksheet of an XLSX workbook.
  *
- * An .xlsx file is a ZIP of XML parts. Only three are read: the shared string
- * table, the workbook (to find the first sheet) and that sheet's data. Formulas
- * are ignored in favour of the cached `<v>` value Excel stores alongside them,
- * which is both what the user sees and the only part that cannot execute.
+ * An .xlsx file is a ZIP of XML parts. Only the shared string table, workbook,
+ * workbook relationships and worksheet data are read. Formulas are ignored in
+ * favour of the cached `<v>` value Excel stores alongside them, which is both
+ * what the user sees and the only part that cannot execute.
  */
 export function parseXlsx(buffer) {
   const entries = readZipEntries(buffer)
@@ -233,7 +239,12 @@ function readZipEntries(buffer) {
     if (uncompressedSize > MAX_ENTRY_BYTES) {
       throw new ParseError(`zip entry ${name} declares ${uncompressedSize} bytes, over the limit`)
     }
-    if (name === 'xl/sharedStrings.xml' || name === 'xl/workbook.xml' || name.startsWith('xl/worksheets/')) {
+    if (
+      name === 'xl/sharedStrings.xml'
+      || name === 'xl/workbook.xml'
+      || name === 'xl/_rels/workbook.xml.rels'
+      || name.startsWith('xl/worksheets/')
+    ) {
       entries.set(name, inflateEntry(buffer, localOffset, method, compressedSize))
     }
     offset += 46 + nameLength + extraLength + commentLength
@@ -275,7 +286,37 @@ function readSharedStrings(xml) {
 function findFirstSheetPath(entries) {
   const candidates = [...entries.keys()].filter((name) => name.startsWith('xl/worksheets/sheet'))
   if (candidates.length === 0) return null
-  // Numeric order: sheet10 must not sort before sheet2.
+
+  // Workbook tab order is declared in workbook.xml. The relationship target
+  // can point at any sheetN.xml, so numeric path order is not authoritative
+  // after a user reorders tabs.
+  const workbook = entries.get('xl/workbook.xml')?.toString('utf8')
+  const relationships = entries.get('xl/_rels/workbook.xml.rels')?.toString('utf8')
+  const firstRelationshipId = workbook
+    ? /<sheet\b[^>]*\br:id="([^"]+)"[^>]*\/?\s*>/.exec(workbook)?.[1]
+    : null
+  if (firstRelationshipId && relationships) {
+    for (const match of relationships.matchAll(/<Relationship\b([^>]*)\/?\s*>/g)) {
+      const id = /\bId="([^"]+)"/.exec(match[1])?.[1]
+      if (id !== firstRelationshipId) continue
+      const target = /\bTarget="([^"]+)"/.exec(match[1])?.[1]
+      if (!target) break
+      const decoded = decodeXml(target).replaceAll('\\', '/')
+      const relative = decoded.startsWith('/') ? decoded.slice(1) : `xl/${decoded}`
+      const segments = []
+      for (const segment of relative.split('/')) {
+        if (!segment || segment === '.') continue
+        if (segment === '..') segments.pop()
+        else segments.push(segment)
+      }
+      const relatedPath = segments.join('/')
+      if (relatedPath.startsWith('xl/worksheets/') && entries.has(relatedPath)) return relatedPath
+      break
+    }
+  }
+
+  // Fallback for incomplete producers without workbook relationships. Numeric
+  // order at least ensures sheet10 does not sort before sheet2.
   candidates.sort((left, right) => sheetNumber(left) - sheetNumber(right))
   return candidates[0]
 }
@@ -349,7 +390,7 @@ const EXTENSION_PARSERS = {
   '.xlsm': (buffer) => parseXlsx(buffer),
 }
 
-export const SUPPORTED_EXTENSIONS = Object.keys(EXTENSION_PARSERS).concat('.txt')
+export const SUPPORTED_EXTENSIONS = Object.keys(EXTENSION_PARSERS).concat('.txt', '.md')
 
 /** Parse by filename extension. `hash` is required for plain text. */
 export function parseFile(buffer, filename, { hash } = {}) {

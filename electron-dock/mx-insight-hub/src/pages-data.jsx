@@ -104,6 +104,16 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         <button className="qp-button" type="button" onClick={() => setCreating(true)}>注册数据源</button>
       </PageHeading>
 
+      <Panel title="首次文件导入" subtitle="当前是单文件直传；目录监听、云桶和 /shared_dir landing agent 尚未上线">
+        <ol className="mih-step-list">
+          <li><strong>注册文件源</strong><span>点击“注册数据源”，类型保持“文件上传”，填写 Dataset、平台和对象类型。</span></li>
+          <li><strong>预览样例</strong><span>在该源的“映射与导入”中上传一个小样；预览只解析，不写 canonical 数据。</span></li>
+          <li><strong>审核并批准映射</strong><span>保存规则推断或 Agent 建议为版本，确认 externalId、正文和时间字段后批准。</span></li>
+          <li><strong>正式导入</strong><span>再次选择文件执行导入；结果会出现在任务记录和数据中心，完全相同的内容会幂等跳过。</span></li>
+        </ol>
+        <p className="mih-inline-warning"><Warning size={16} aria-hidden="true" />支持首个工作表的 xlsx/xlsm，以及 csv、tsv、jsonl/ndjson、txt/md。HanLP 属于检索投影阶段，不需要在文件源表单里单独配置。</p>
+      </Panel>
+
       <TelegramPipelineCard
         pipeline={telegramPipeline.data}
         loading={telegramPipeline.loading}
@@ -131,7 +141,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
                   <td>{source.displayName}</td>
                   <td>
                     <strong>{source.sourceKind === 'file' ? '文件上传' : `${source.connection?.host || '数据库'}:${source.connection?.port || 5432}`}</strong>
-                    <small className="mih-source-label">{source.sourceKind === 'database' ? `${source.connection?.schema || 'public'}.${source.connection?.table || '—'}` : 'xlsx / csv / jsonl / txt'}</small>
+                    <small className="mih-source-label">{source.sourceKind === 'database' ? `${source.connection?.schema || 'public'}.${source.connection?.table || '—'}` : 'xlsx/xlsm · csv/tsv · jsonl/ndjson · txt/md'}</small>
                   </td>
                   <td><code className="mih-source-label">{source.datasetId}</code><small className="mih-source-label">{source.platform} · {source.objectType}</small></td>
                   <td>{source.sourceKind === 'database' ? `${formatNumber(source.syncIntervalSeconds || 60)} 秒` : '手动导入'}</td>
@@ -929,7 +939,7 @@ function CreateSourceModal({ token, notify, onClose, onCreated }) {
         <Field label="类型">
           <select className="qp-input" value={form.sourceKind}
             onChange={(event) => setForm({ ...form, sourceKind: event.target.value })}>
-            <option value="file">文件上传（xlsx / csv / jsonl / txt）</option>
+            <option value="file">文件上传（xlsx/xlsm · csv/tsv · jsonl/ndjson · txt/md）</option>
             <option value="database">只读 PostgreSQL 拉取</option>
           </select>
         </Field>
@@ -1308,7 +1318,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
 
       {currentSource.sourceKind === 'file' ? <Panel
         title="上传"
-        subtitle={activeMapping ? `将使用已批准的映射 v${activeMapping.version}` : '尚无已批准映射，只能预览'}
+        subtitle={activeMapping ? `将使用已批准的映射 v${activeMapping.version}` : '尚无已批准映射，只能预览 · 单文件上限 64 MiB · 表格与 JSONL 最多 50 万行'}
         actions={
           <>
             <input ref={fileRef} type="file" hidden accept=".xlsx,.xlsm,.csv,.tsv,.jsonl,.ndjson,.txt,.md"
@@ -1341,6 +1351,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
             )}
           </span>
         </label>
+        <p className="mih-preview-provenance">xlsx/xlsm 只读第一个工作表的缓存值，csv/tsv 使用 UTF-8；预览时请先确认 externalId 是稳定去重键。</p>
         {preview ? (
           <>
             <div className="mih-metric-grid mih-metric-grid--compact">

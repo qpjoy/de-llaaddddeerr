@@ -29,6 +29,42 @@ import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 
 const hash = (value) => createHash('sha256').update(value).digest('hex').slice(0, 16)
 
+function zipStored(files) {
+  const localParts = []
+  const centralParts = []
+  let offset = 0
+  for (const [name, content] of Object.entries(files)) {
+    const nameBuffer = Buffer.from(name)
+    const data = Buffer.from(content)
+    const local = Buffer.alloc(30)
+    local.writeUInt32LE(0x04034b50, 0)
+    local.writeUInt16LE(20, 4)
+    local.writeUInt32LE(data.length, 18)
+    local.writeUInt32LE(data.length, 22)
+    local.writeUInt16LE(nameBuffer.length, 26)
+    localParts.push(local, nameBuffer, data)
+
+    const central = Buffer.alloc(46)
+    central.writeUInt32LE(0x02014b50, 0)
+    central.writeUInt16LE(20, 4)
+    central.writeUInt16LE(20, 6)
+    central.writeUInt32LE(data.length, 20)
+    central.writeUInt32LE(data.length, 24)
+    central.writeUInt16LE(nameBuffer.length, 28)
+    central.writeUInt32LE(offset, 42)
+    centralParts.push(central, nameBuffer)
+    offset += local.length + nameBuffer.length + data.length
+  }
+  const centralDirectory = Buffer.concat(centralParts)
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0)
+  eocd.writeUInt16LE(Object.keys(files).length, 8)
+  eocd.writeUInt16LE(Object.keys(files).length, 10)
+  eocd.writeUInt32LE(centralDirectory.length, 12)
+  eocd.writeUInt32LE(offset, 16)
+  return Buffer.concat([...localParts, centralDirectory, eocd])
+}
+
 // ---------------------------------------------------------------------------
 // Delimited parsing
 // ---------------------------------------------------------------------------
@@ -65,12 +101,34 @@ test('text records are keyed by content hash, not position', () => {
   const withInsert = parseText('inserted\n\nfirst para\n\nsecond para', { hash })
   // Keying on line number would renumber -- and therefore duplicate -- every
   // paragraph after an insertion.
-  assert.equal(original.records[0].contentHash, withInsert.records[1].contentHash)
+  assert.equal(original.records[0].externalId, withInsert.records[1].externalId)
+  assert.equal(original.records[0].contentHash, original.records[0].externalId)
+})
+
+test('plain-text inference produces an approvable stable mapping', () => {
+  const parsed = parseFile(Buffer.from('first para\n\nsecond para'), 'notes.md', { hash })
+  const inferred = inferFieldMap(parsed.columns)
+  assert.deepEqual(inferred, {
+    externalId: { from: 'externalId' },
+    body: { from: 'content' },
+  })
+  assert.equal(validateFieldMap(inferred), true)
+  assert.equal(
+    applyMapping(parsed.records[0], inferred, { platform: 'external' }).record.externalId,
+    parsed.records[0].externalId,
+  )
+})
+
+test('a generic contentHash column is not inferred as record identity', () => {
+  assert.deepEqual(inferFieldMap(['contentHash', 'content']), {
+    body: { from: 'content' },
+  })
 })
 
 test('unsupported file types are rejected with the supported list', () => {
   assert.throws(() => parseFile(Buffer.from(''), 'data.pdf'), /unsupported file type/)
   assert.ok(SUPPORTED_EXTENSIONS.includes('.xlsx'))
+  assert.ok(SUPPORTED_EXTENSIONS.includes('.md'))
 })
 
 // ---------------------------------------------------------------------------
@@ -79,6 +137,19 @@ test('unsupported file types are rejected with the supported list', () => {
 
 test('a non-ZIP payload is rejected before any parsing', () => {
   assert.throws(() => parseFile(Buffer.from('this is not a workbook'), 'book.xlsx'), ParseError)
+})
+
+test('XLSX follows workbook tab order instead of numeric worksheet filenames', () => {
+  const workbook = `<?xml version="1.0"?><workbook xmlns:r="relationships"><sheets><sheet name="Visible first" r:id="rId9"/><sheet name="Other" r:id="rId2"/></sheets></workbook>`
+  const relationships = `<?xml version="1.0"?><Relationships><Relationship Id="rId9" Target="worksheets/sheet2.xml"/><Relationship Id="rId2" Target="worksheets/sheet1.xml"/></Relationships>`
+  const sheet = (value) => `<?xml version="1.0"?><worksheet><sheetData><row><c r="A1" t="inlineStr"><is><t>id</t></is></c></row><row><c r="A2" t="inlineStr"><is><t>${value}</t></is></c></row></sheetData></worksheet>`
+  const workbookBuffer = zipStored({
+    'xl/workbook.xml': workbook,
+    'xl/_rels/workbook.xml.rels': relationships,
+    'xl/worksheets/sheet1.xml': sheet('wrong-sheet'),
+    'xl/worksheets/sheet2.xml': sheet('first-tab'),
+  })
+  assert.deepEqual(parseFile(workbookBuffer, 'tabs.xlsx').records, [{ id: 'first-tab' }])
 })
 
 // ---------------------------------------------------------------------------

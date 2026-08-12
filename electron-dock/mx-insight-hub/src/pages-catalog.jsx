@@ -9,8 +9,8 @@ import {
 import { adminApi } from './api.js'
 import {
   EmptyState,
+  DropdownField,
   ErrorState,
-  Field,
   LoadingState,
   MetricCard,
   PageHeading,
@@ -96,29 +96,23 @@ export function DataCenterPage({ token, onUnauthorized }) {
         <MetricCard icon={Stack} label="数据集" value={formatNumber(stats.datasetCount || datasets.length)} hint="按 dataset_id 聚合" />
         <MetricCard icon={Database} label="当前记录" value={formatNumber(stats.activeRecordCount || 0)} hint="排除 tombstone" />
         <MetricCard icon={ClockCounterClockwise} label="历史修订" value={formatNumber(stats.revisionCount || 0)} hint="可追溯版本" />
-        <MetricCard icon={Archive} label="已删除记录" value={formatNumber(stats.deletedRecordCount || 0)} hint="保留删除证据" tone={stats.deletedRecordCount ? 'warning' : 'primary'} />
+        <MetricCard icon={Archive} label="已删除记录" value={formatNumber(stats.deletedRecordCount || 0)} hint="源端 tombstone；Hub 保留证据而非物理删除" tone={stats.deletedRecordCount ? 'warning' : 'primary'} />
       </div>
 
       <Panel title="筛选" subtitle="数据集筛选同时作用于下方记录样例">
         <div className="mih-filter-bar">
-          <Field label="Dataset">
-            <select className="qp-select" value={datasetId} onChange={(event) => setDatasetId(event.target.value)}>
-              <option value="">全部数据集</option>
-              {datasets.map((dataset) => <option value={dataset.datasetId} key={dataset.datasetId}>{dataset.datasetId}</option>)}
-            </select>
-          </Field>
-          <Field label="平台">
-            <select className="qp-select" value={platform} onChange={(event) => setPlatform(event.target.value)}>
-              <option value="">全部平台</option>
-              {platforms.map((value) => <option value={value} key={value}>{value}</option>)}
-            </select>
-          </Field>
-          <Field label="对象类型">
-            <select className="qp-select" value={objectType} onChange={(event) => setObjectType(event.target.value)}>
-              <option value="">全部类型</option>
-              {objectTypes.map((value) => <option value={value} key={value}>{value}</option>)}
-            </select>
-          </Field>
+          <DropdownField label="Dataset" value={datasetId} onChange={setDatasetId} options={[
+            { value: '', label: '全部数据集' },
+            ...datasets.map((dataset) => ({ value: dataset.datasetId, label: dataset.datasetId })),
+          ]} />
+          <DropdownField label="平台" value={platform} onChange={setPlatform} options={[
+            { value: '', label: '全部平台' },
+            ...platforms.map((value) => ({ value, label: value })),
+          ]} />
+          <DropdownField label="对象类型" value={objectType} onChange={setObjectType} options={[
+            { value: '', label: '全部类型' },
+            ...objectTypes.map((value) => ({ value, label: value })),
+          ]} />
         </div>
       </Panel>
 
