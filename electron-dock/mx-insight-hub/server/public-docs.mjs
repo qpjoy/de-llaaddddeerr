@@ -157,7 +157,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Tools'],
         operationId: 'tokenizeText',
         summary: 'Tokenize bounded Chinese or mixed-language text',
-        description: 'Requires the nlp.tokenize capability grant. The response reports the backend actually used and whether fallback degraded the result. Idempotency-Key is required; an exact replay is not segmented or metered twice.',
+        description: 'Requires an issued API Key and the nlp.tokenize capability grant. New or never-configured consumers receive it by default; administrators may explicitly disable it. The default is 1000 requests per rolling 3600-second consumer + capability window, shared by all API Keys for that consumer. The response reports the backend actually used and whether fallback degraded the result. Idempotency-Key is required; an exact replay is not segmented or metered twice.',
         parameters: [idempotencyParameter],
         requestBody: {
           required: true,
@@ -709,7 +709,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
 }</code></pre>
 
     <h2 id="tools">通用工具</h2>
-    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/tools/tokenize</code></div><p>需要独立的 <code>nlp.tokenize</code> capability 授权；它不是数据平台授权。响应报告实际分词后端及是否发生质量降级。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/tools/tokenize</code></div><p>新建或从未配置的调用者默认获得 <code>nlp.tokenize</code>，管理员可显式停用；调用仍必须携带已签发的 API Key。默认按 consumer + capability 的 3600 秒滚动窗口限制 1000 次，同一调用者的所有 Key 共享上限。它不授予数据平台权限，响应会报告实际分词后端及降级状态。</p></div>
     <pre><code>curl -sS -X POST "$HUB_URL/api/v1/tools/tokenize" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   -H "Content-Type: application/json" \

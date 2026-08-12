@@ -151,6 +151,11 @@ export class HubService {
       tenantId,
       name: requiredString(body.name, 'name'),
       status: validateStatus(body.status),
+      defaultCapabilityPolicy: {
+        capability: TOKENIZE_CAPABILITY,
+        maxRequests: this.defaultPolicy.maxRequests,
+        windowSeconds: this.defaultPolicy.windowSeconds,
+      },
     })
   }
 

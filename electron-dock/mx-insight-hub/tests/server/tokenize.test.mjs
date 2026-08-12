@@ -124,6 +124,8 @@ test('generic capability grants stay separate from platform grants and policies'
 
 test('a failed atomic capability update cannot leave a partial grant or policy', async () => {
   await withFixture(null, async ({ store, service, tenant, consumer }) => {
+    const beforeGrants = await store.listCapabilityGrants(consumer.id)
+    const beforePolicy = await store.getCapabilityPolicy(consumer.id, 'nlp.tokenize')
     store.setCapabilityGrant = async () => assert.fail('service must not mutate the grant separately')
     store.putCapabilityPolicy = async () => assert.fail('service must not mutate the policy separately')
     store.putCapabilityConfiguration = async () => {
@@ -140,9 +142,127 @@ test('a failed atomic capability update cannot leave a partial grant or policy',
       }),
       /simulated policy write failure/,
     )
-    assert.deepEqual(await store.listCapabilityGrants(consumer.id), [])
-    assert.equal(await store.getCapabilityPolicy(consumer.id, 'nlp.tokenize'), null)
+    assert.deepEqual(await store.listCapabilityGrants(consumer.id), beforeGrants)
+    assert.deepEqual(await store.getCapabilityPolicy(consumer.id, 'nlp.tokenize'), beforePolicy)
   })
+})
+
+test('new consumers receive tokenize defaults but still need an issued API key', async () => {
+  const store = new MemoryStore()
+  const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
+  const tenant = await service.createTenant({ name: 'Default capability tenant' })
+  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Default capability consumer' })
+
+  assert.deepEqual(await store.listCapabilityGrants(consumer.id), ['nlp.tokenize'])
+  assert.deepEqual(await store.getCapabilityPolicy(consumer.id, 'nlp.tokenize'), {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    capability: 'nlp.tokenize',
+    maxRequests: 1_000,
+    windowSeconds: 3_600,
+    updatedAt: (await store.getCapabilityPolicy(consumer.id, 'nlp.tokenize')).updatedAt,
+  })
+  await assert.rejects(
+    service.authenticate('mih_live_not-issued'),
+    (error) => error?.status === 401 && error?.code === 'invalid_api_key',
+  )
+})
+
+test('Postgres creates a consumer and its default tokenize policy in one transaction', async () => {
+  const statements = []
+  const parameters = []
+  const tenantId = '00000000-0000-4000-8000-000000000001'
+  const client = {
+    async query(sql, params = []) {
+      const normalized = sql.trim().replace(/\s+/g, ' ')
+      parameters.push(params)
+      if (normalized === 'BEGIN' || normalized === 'COMMIT') {
+        statements.push(normalized)
+        return { rows: [] }
+      }
+      if (normalized.startsWith('INSERT INTO consumers')) {
+        statements.push('CONSUMER')
+        return {
+          rows: [{
+            id: params[0], tenant_id: params[1], name: params[2], status: params[3],
+            business_id: params[4], created_at: new Date(), updated_at: new Date(),
+          }],
+        }
+      }
+      if (normalized.startsWith('INSERT INTO capability_grants')) {
+        statements.push('GRANT')
+        return { rows: [] }
+      }
+      if (normalized.startsWith('INSERT INTO consumer_capability_policies')) {
+        statements.push('POLICY')
+        return { rows: [] }
+      }
+      assert.fail(`unexpected SQL: ${normalized}`)
+    },
+    release() {},
+  }
+  const store = new PostgresStore({ connect: async () => client })
+  const consumer = await store.createConsumer({
+    tenantId,
+    name: 'PG default consumer',
+    defaultCapabilityPolicy: {
+      capability: 'nlp.tokenize', maxRequests: 1_000, windowSeconds: 3_600,
+    },
+  })
+
+  assert.equal(consumer.tenantId, tenantId)
+  assert.deepEqual(statements, ['BEGIN', 'CONSUMER', 'GRANT', 'POLICY', 'COMMIT'])
+  assert.deepEqual(parameters[2], [consumer.id, 'nlp.tokenize'])
+  assert.deepEqual(parameters[3], [tenantId, consumer.id, 'nlp.tokenize', 1_000, 3_600])
+})
+
+test('Postgres consumer defaults roll back the consumer when policy creation fails', async () => {
+  const statements = []
+  let released = false
+  const client = {
+    async query(sql, params = []) {
+      const normalized = sql.trim().replace(/\s+/g, ' ')
+      if (normalized === 'BEGIN' || normalized === 'ROLLBACK') {
+        statements.push(normalized)
+        return { rows: [] }
+      }
+      if (normalized.startsWith('INSERT INTO consumers')) {
+        statements.push('CONSUMER')
+        return {
+          rows: [{
+            id: params[0], tenant_id: params[1], name: params[2], status: params[3],
+            business_id: params[4], created_at: new Date(), updated_at: new Date(),
+          }],
+        }
+      }
+      if (normalized.startsWith('INSERT INTO capability_grants')) {
+        statements.push('GRANT')
+        return { rows: [] }
+      }
+      if (normalized.startsWith('INSERT INTO consumer_capability_policies')) {
+        statements.push('POLICY')
+        throw new Error('simulated default policy failure')
+      }
+      if (normalized === 'COMMIT') assert.fail('failed creation must not commit')
+      assert.fail(`unexpected SQL: ${normalized}`)
+    },
+    release() { released = true },
+  }
+  const store = new PostgresStore({ connect: async () => client })
+
+  await assert.rejects(
+    store.createConsumer({
+      tenantId: '00000000-0000-4000-8000-000000000001',
+      name: 'Rollback default consumer',
+      defaultCapabilityPolicy: {
+        capability: 'nlp.tokenize', maxRequests: 1_000, windowSeconds: 3_600,
+      },
+    }),
+    /simulated default policy failure/,
+  )
+  assert.deepEqual(statements, ['BEGIN', 'CONSUMER', 'GRANT', 'POLICY', 'ROLLBACK'])
+  assert.equal(statements.includes('COMMIT'), false)
+  assert.equal(released, true)
 })
 
 test('Postgres capability configuration rolls back its grant when policy persistence fails', async () => {
@@ -218,6 +338,11 @@ test('public tokenize enforces auth, grant, strict input, quota, and bounded rep
     assert.equal(unauthenticated.response.status, 401)
     assert.equal(unauthenticated.payload.error.code, 'api_key_required')
 
+    await service.putCapabilityConfiguration('nlp.tokenize', {
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      enabled: false,
+    })
     const forbidden = await call('/api/v1/tools/tokenize', {
       method: 'POST', headers: { ...headers, 'idempotency-key': 'forbidden-one' }, body: { text: '人工智能' },
     })
@@ -485,4 +610,36 @@ test('migration 018 keeps generic capability authority and usage separate from p
   assert.match(migration, /ADD COLUMN IF NOT EXISTS capability text/)
   assert.match(migration, /usage_requests_single_scope_check/)
   assert.doesNotMatch(migration, /INSERT INTO platform_grants[^;]*nlp\.tokenize/is)
+})
+
+test('migration 020 enables only consumers that never configured tokenize', async () => {
+  const migration = await readFile(
+    fileURLToPath(new URL('../../migrations/020_default_tokenize_capability.sql', import.meta.url)),
+    'utf8',
+  )
+  const guards = migration.match(
+    /WHERE NOT EXISTS\s*\([\s\S]*?consumer_capability_policies[\s\S]*?p\.consumer_id\s*=\s*c\.id[\s\S]*?p\.capability\s*=\s*'nlp\.tokenize'[\s\S]*?\)/g,
+  ) || []
+  assert.equal(guards.length, 2)
+  assert.match(
+    migration,
+    /LOCK TABLE\s+consumers,\s*capability_grants,\s*consumer_capability_policies\s+IN SHARE ROW EXCLUSIVE MODE;/,
+  )
+  assert.ok(
+    migration.indexOf('LOCK TABLE') < migration.indexOf('INSERT INTO capability_grants'),
+    'the transaction-scoped lock must be acquired before the backfill writes',
+  )
+  assert.match(migration, /INSERT INTO capability_grants/)
+  assert.match(migration, /INSERT INTO consumer_capability_policies/)
+
+  const consumers = [
+    { id: 'never-configured', hasPolicy: false, granted: false },
+    { id: 'explicit-enabled', hasPolicy: true, granted: true },
+    { id: 'explicit-disabled', hasPolicy: true, granted: false },
+  ]
+  const backfilled = consumers
+    .filter((consumer) => !consumer.hasPolicy)
+    .map((consumer) => consumer.id)
+  assert.deepEqual(backfilled, ['never-configured'])
+  assert.equal(backfilled.includes('explicit-disabled'), false)
 })

@@ -70,19 +70,35 @@ export class MemoryStore {
     return clone(record)
   }
 
-  async createConsumer({ tenantId, name, status = 'active', businessId }) {
+  async createConsumer({ tenantId, name, status = 'active', businessId, defaultCapabilityPolicy = null }) {
     if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
     const id = randomUUID()
+    const createdAt = nowIso()
     const record = {
       id,
       tenantId,
       name,
       status,
       businessId: businessId || `mxih:${tenantId}:${id}`,
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
+      createdAt,
+      updatedAt: createdAt,
     }
+
+    // Consumer creation and its default public capability become visible in
+    // the same synchronous turn; API keys are still issued separately.
     this.consumers.set(id, record)
+    if (defaultCapabilityPolicy) {
+      const { capability, maxRequests, windowSeconds } = defaultCapabilityPolicy
+      this.capabilityGrants.set(id, [capability])
+      this.capabilityPolicies.set(`${id}:${capability}`, {
+        tenantId,
+        consumerId: id,
+        capability,
+        maxRequests,
+        windowSeconds,
+        updatedAt: createdAt,
+      })
+    }
     return clone(record)
   }
 

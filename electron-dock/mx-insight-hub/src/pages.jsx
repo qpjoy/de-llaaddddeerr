@@ -6,6 +6,7 @@ import {
   ChartLine,
   Cloud,
   Coins,
+  Copy,
   Database,
   Globe,
   Key,
@@ -24,6 +25,7 @@ import {
   WarningCircle,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
+import { copyText, TOKENIZE_CURL_TEMPLATE } from './open-capabilities.js'
 import {
   EmptyState,
   ErrorState,
@@ -73,6 +75,7 @@ const CAPABILITY_CATALOG = {
     label: '中文分词',
     description: 'HanLP → Jieba → CJK bigram，响应明确本次实际后端与降级状态',
     endpoint: 'POST /api/v1/tools/tokenize',
+    usageHint: 'curl 粘贴即运行并静默读取 Key；旧 API Key 不会被读取或回显',
   },
 }
 
@@ -1019,7 +1022,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
 
   return (
     <>
-      <PageHeading eyebrow="PLANS / LIMITS / CREDITS" title="套餐与配额" description="数据平台和通用能力共享调用者、API Key 与计量证据，各自执行独立窗口策略。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="PLANS / LIMITS / CREDITS" title="套餐与配额" description="数据平台和通用能力按 consumer × platform/capability 执行独立滑动窗口；同一调用者的所有 API Key 共享对应上限。" loading={state.loading} onRefresh={state.refresh}>
         {canManagePlatform ? <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={17} aria-hidden="true" />管理开放能力</a> : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
@@ -1041,8 +1044,8 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       </section>
 
       <section className="mih-metric-grid mih-metric-grid--compact" aria-label="默认配额基线">
-        <MetricCard icon={Pulse} label="默认请求窗口" value={formatNumber(DEFAULT_POLICY.maxRequests)} hint="每个启用平台" />
-        <MetricCard icon={Timer} label="窗口长度" value="1 小时" hint={`${DEFAULT_POLICY.windowSeconds} 秒`} tone="info" />
+        <MetricCard icon={Pulse} label="默认滑动窗口上限" value={formatNumber(DEFAULT_POLICY.maxRequests)} hint="每个平台或能力" />
+        <MetricCard icon={Timer} label="滑动窗口长度" value="1 小时" hint={`${DEFAULT_POLICY.windowSeconds} 秒`} tone="info" />
         <MetricCard icon={Database} label="最大分页" value={formatNumber(DEFAULT_POLICY.maxPageSize)} hint="单次 pageSize" tone="warning" />
         <MetricCard icon={Globe} label="已授权平台" value={formatNumber(grants.size)} hint="按调用者显式授权" tone="success" />
         <MetricCard icon={Brain} label="已授权通用能力" value={formatNumber(capabilityGrants.size)} hint="不隐含数据读取权" tone="info" />
@@ -1051,7 +1054,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       <Panel title="平台级配额" subtitle="显式策略覆盖默认基线">
         {policies.length ? (
           <Table label="平台级配额策略">
-            <thead><tr><th>平台</th><th>授权</th><th>请求上限</th><th>窗口</th><th>最大分页</th><th>更新时间</th></tr></thead>
+            <thead><tr><th>平台</th><th>授权</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>最大分页</th><th>更新时间</th></tr></thead>
             <tbody>
               {policies.map((policy) => (
                 <tr key={policy.platform}>
@@ -1075,10 +1078,10 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
         )}
       </Panel>
 
-      <Panel title="通用能力配额" subtitle="与数据平台分开计量，不使用 pageSize">
+      <Panel title="通用能力配额" subtitle="按 consumer × capability 滑动计量；同一调用者的所有 API Key 共享上限，不使用 pageSize">
         {capabilityPolicies.length ? (
           <Table label="通用能力配额策略">
-            <thead><tr><th>能力</th><th>授权</th><th>请求上限</th><th>窗口</th><th>更新时间</th></tr></thead>
+            <thead><tr><th>能力</th><th>授权</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>更新时间</th></tr></thead>
             <tbody>
               {capabilityPolicies.map((policy) => {
                 const metadata = CAPABILITY_CATALOG[policy.capability]
@@ -1256,9 +1259,18 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
     setFormError(null)
   }
 
+  const copyCapabilityCurl = async (row) => {
+    if (row.capability !== 'nlp.tokenize') return
+    if (await copyText(TOKENIZE_CURL_TEMPLATE)) {
+      notify('中文分词 curl 已复制；粘贴运行后会静默提示输入 API Key', 'success')
+    } else {
+      notify('无法访问剪贴板，请从公共 API 文档复制 curl', 'danger')
+    }
+  }
+
   return (
     <>
-      <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="同一套调用者和 API Key 同时承载数据平台与通用接口；每项能力单独授权和计量。" loading={state.loading} onRefresh={state.refresh}>
+      <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="每项能力按 consumer × capability 独立授权和滑动计量；同一调用者的所有 API Key 共享请求上限。" loading={state.loading} onRefresh={state.refresh}>
         <a className="qp-button qp-button--outline" href={PUBLIC_DOCS_HREF} target="_blank" rel="noreferrer">查看公共 API 文档</a>
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
@@ -1306,7 +1318,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
       <Panel title="平台授权矩阵" subtitle={`${grants.size} / ${PLATFORM_CATALOG.length} 已启用`}>
         {data.consumerId ? (
           <Table label="平台授权与策略">
-            <thead><tr><th>平台</th><th>状态</th><th>请求上限</th><th>窗口</th><th>最大分页</th><th>操作</th></tr></thead>
+            <thead><tr><th>平台</th><th>状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>最大分页</th><th>操作</th></tr></thead>
             <tbody>
               {rows.map((row) => (
                 <tr key={row.platform}>
@@ -1343,20 +1355,25 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         )}
       </Panel>
 
-      <Panel title="通用开放 API" subtitle={`${capabilityGrants.size} / ${capabilityRows.length} 已启用；不授予任何数据集读取权限`}>
+      <Panel title="通用开放 API" subtitle={`${capabilityGrants.size} / ${capabilityRows.length} 已启用；所有 Key 共享调用者能力配额，不授予数据集读取权限`}>
         {data.consumerId ? (
           capabilityRows.length ? (
             <Table label="通用 API 授权与策略">
-              <thead><tr><th>能力</th><th>授权</th><th>运行状态</th><th>请求上限</th><th>窗口</th><th>操作</th></tr></thead>
+              <thead><tr><th>能力</th><th>授权</th><th>运行状态</th><th>滑动窗口内请求上限</th><th>滑动窗口秒数</th><th>操作</th></tr></thead>
               <tbody>
                 {capabilityRows.map((row) => (
                   <tr key={row.capability}>
-                    <td><strong>{row.metadata.label}</strong><small>{row.capability} · {row.metadata.endpoint}</small><small>{row.metadata.description}</small></td>
+                    <td><strong>{row.metadata.label}</strong><small>{row.capability} · {row.metadata.endpoint}</small><small>{row.metadata.description}</small>{row.metadata.usageHint ? <small>{row.metadata.usageHint}</small> : null}</td>
                     <td><StatusBadge status={row.enabled ? 'enabled' : 'disabled'} label={row.enabled ? '已授权' : '未授权'} /></td>
                     <td><StatusBadge status={row.ready ? 'ready' : 'degraded'} label={row.ready ? '可调用' : '运行时未就绪'} /></td>
                     <td>{formatNumber(row.policy.maxRequests)}{row.explicit ? '' : '（默认）'}</td>
                     <td>{formatNumber(row.policy.windowSeconds)} 秒</td>
                     <td className="mih-table__actions mih-table__actions--wide">
+                      {row.capability === 'nlp.tokenize' ? (
+                        <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => copyCapabilityCurl(row)}>
+                          <Copy size={15} aria-hidden="true" />复制 curl
+                        </button>
+                      ) : null}
                       {hasPlatformWrite ? (
                         <>
                           <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={mutationDisabled} onClick={() => configureCapability(row)}>
@@ -1408,10 +1425,10 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
               updatePlatform(configureTarget, configureTarget.enabled, policyForm)
             }}
           >
-            <Field label="窗口请求上限">
+            <Field label="滑动窗口内请求上限">
               <input className="qp-input" type="number" min="1" value={policyForm.maxRequests} onChange={(event) => setPolicyForm({ ...policyForm, maxRequests: event.target.value })} required autoFocus />
             </Field>
-            <Field label="窗口长度（秒）">
+            <Field label="滑动窗口秒数">
               <input className="qp-input" type="number" min="1" value={policyForm.windowSeconds} onChange={(event) => setPolicyForm({ ...policyForm, windowSeconds: event.target.value })} required />
             </Field>
             <Field label="最大 pageSize">
@@ -1425,7 +1442,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
       {configureCapabilityTarget && canUpdatePlatform ? (
         <Modal
           title={`配置 ${configureCapabilityTarget.metadata.label}`}
-          description={`能力 ${configureCapabilityTarget.capability}；保存后立即作用于调用者「${selectedConsumer?.name || data.consumerId}」的新请求。`}
+          description={`能力 ${configureCapabilityTarget.capability}；这是 consumer × capability 的滑动窗口，该调用者的所有 API Key 共享上限。`}
           onClose={() => !busyCapability && setConfigureCapabilityTarget(null)}
           footer={(
             <>
@@ -1442,10 +1459,10 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
               updateCapability(configureCapabilityTarget, configureCapabilityTarget.enabled, capabilityPolicyForm)
             }}
           >
-            <Field label="窗口请求上限">
+            <Field label="滑动窗口内请求上限">
               <input className="qp-input" type="number" min="1" value={capabilityPolicyForm.maxRequests} onChange={(event) => setCapabilityPolicyForm({ ...capabilityPolicyForm, maxRequests: event.target.value })} required autoFocus />
             </Field>
-            <Field label="窗口长度（秒）">
+            <Field label="滑动窗口秒数">
               <input className="qp-input" type="number" min="1" value={capabilityPolicyForm.windowSeconds} onChange={(event) => setCapabilityPolicyForm({ ...capabilityPolicyForm, windowSeconds: event.target.value })} required />
             </Field>
             {formError ? <div className="mih-form__wide"><ErrorState error={formError} /></div> : null}

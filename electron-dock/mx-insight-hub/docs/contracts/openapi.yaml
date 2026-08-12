@@ -892,10 +892,14 @@ paths:
       operationId: tokenizeText
       summary: Tokenize bounded text with the consumer's generic capability grant.
       description: >-
-        Requires the separate nlp.tokenize grant; no data-platform grant is
-        implied. The response names the backend that actually produced the
-        tokens and whether fallback degraded quality. Idempotent replay does
-        not invoke the segmenter or consume quota twice.
+        Requires an issued API Key and the separate nlp.tokenize grant; no
+        data-platform grant is implied. New or never-configured consumers are
+        granted it by default and administrators may explicitly disable it.
+        The default is 1000 requests per rolling 3600-second consumer +
+        capability window, shared by all API Keys for that consumer. The
+        response names the backend that actually produced the tokens and
+        whether fallback degraded quality. Idempotent replay does not invoke
+        the segmenter or consume quota twice.
       x-mx-error-codes:
         "400": [invalid_request, unsupported_fields, idempotency_key_required, invalid_idempotency_key]
         "401": [api_key_required, invalid_api_key]

@@ -34,11 +34,16 @@ Content-Type: application/json
 { "text": "吴恩达与人工智能" }
 ```
 
-This route requires the consumer's explicit `nlp.tokenize` capability grant;
-it does not imply or require any platform grant. The body is a strict object
-containing only `text`. Text is trimmed, must contain a Unicode letter or
-number, may not contain unsafe control characters, and is limited to 4,096
-characters. The complete JSON body is additionally bounded at 16 KiB.
+This route requires the consumer's `nlp.tokenize` capability grant; it does not
+imply or require any platform grant. New consumers and existing consumers that
+have never configured this capability receive it by default, while an
+administrator may explicitly disable it. A valid issued API Key is always
+required. The default policy is 1,000 requests per rolling 3,600-second window
+for each consumer + capability; every API Key belonging to that consumer shares
+the same window. The body is a strict object containing only `text`. Text is
+trimmed, must contain a Unicode letter or number, may not contain unsafe control
+characters, and is limited to 4,096 characters. The complete JSON body is
+additionally bounded at 16 KiB.
 
 ```json
 {

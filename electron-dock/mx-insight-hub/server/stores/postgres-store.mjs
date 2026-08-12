@@ -154,14 +154,37 @@ export class PostgresStore {
     return tenant(rows[0]) || null
   }
 
-  async createConsumer({ tenantId, name, status = 'active', businessId }) {
+  async createConsumer({ tenantId, name, status = 'active', businessId, defaultCapabilityPolicy = null }) {
     const id = randomUUID()
-    const { rows } = await this.pool.query(
-      `INSERT INTO consumers (id, tenant_id, name, status, business_id)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [id, tenantId, name, status, businessId || `mxih:${tenantId}:${id}`],
-    )
-    return consumer(rows[0])
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const { rows } = await client.query(
+        `INSERT INTO consumers (id, tenant_id, name, status, business_id)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [id, tenantId, name, status, businessId || `mxih:${tenantId}:${id}`],
+      )
+      if (defaultCapabilityPolicy) {
+        const { capability, maxRequests, windowSeconds } = defaultCapabilityPolicy
+        await client.query(
+          'INSERT INTO capability_grants (consumer_id, capability) VALUES ($1, $2)',
+          [id, capability],
+        )
+        await client.query(
+          `INSERT INTO consumer_capability_policies
+             (tenant_id, consumer_id, capability, max_requests, window_seconds)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [tenantId, id, capability, maxRequests, windowSeconds],
+        )
+      }
+      await client.query('COMMIT')
+      return consumer(rows[0])
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async listConsumers(tenantId) {
