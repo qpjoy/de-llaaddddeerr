@@ -109,12 +109,24 @@ test('Data Center route is admin-token-only, validates filters, and stays off th
 })
 
 test('MemoryStore exposes an empty authoritative catalog', async () => {
-  assert.deepEqual(await new MemoryStore().dataCenter({ pageSize: 17 }), {
+  const store = new MemoryStore()
+  assert.deepEqual(await store.dataCenter({ pageSize: 17 }), {
     stats: { datasetCount: 0, activeRecordCount: 0, revisionCount: 0, deletedRecordCount: 0 },
     datasets: [],
     records: [],
     pageSize: 17,
   })
+  const source = await store.createExternalSource({
+    sourceKey: 'local-upload',
+    displayName: 'Local upload',
+    sourceKind: 'file',
+    datasetId: 'external.local-upload.v1',
+    platform: 'external',
+    objectType: 'record',
+    connection: { fileMode: 'upload' },
+  })
+  assert.deepEqual(await store.getExternalSource('local-upload'), source)
+  assert.deepEqual(await store.listExternalSources(), [source])
 })
 
 test('PostgresStore aggregates canonical truth and returns only safe record fields', async () => {

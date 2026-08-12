@@ -17,7 +17,11 @@ import {
   inferFieldMap,
   validateFieldMap,
 } from '../../server/ingest/external/mapping.mjs'
-import { ExternalImporter } from '../../server/ingest/external/importer.mjs'
+import {
+  ExternalImporter,
+  buildFileStructure,
+  fingerprintFileStructure,
+} from '../../server/ingest/external/importer.mjs'
 import {
   DatabaseSourcePuller,
   validateDatabaseConnection,
@@ -83,6 +87,16 @@ test('blank and duplicate headers get stable synthetic names', () => {
   assert.deepEqual(columns, ['id', 'column_2', '备注', '备注_2'])
 })
 
+test('structure rules reject headers that collide after normalization', () => {
+  assert.throws(
+    () => buildFileStructure({
+      columns: ['ID', ' id '],
+      records: [{ ID: '1', ' id ': '2' }],
+    }, 'records.csv'),
+    (error) => error?.status === 400 && error?.code === 'ambiguous_file_columns',
+  )
+})
+
 test('an unterminated quote is an error rather than a truncated row', () => {
   assert.throws(() => parseDelimited('id,text\n1,"never closed'), ParseError)
 })
@@ -129,6 +143,74 @@ test('unsupported file types are rejected with the supported list', () => {
   assert.throws(() => parseFile(Buffer.from(''), 'data.pdf'), /unsupported file type/)
   assert.ok(SUPPORTED_EXTENSIONS.includes('.xlsx'))
   assert.ok(SUPPORTED_EXTENSIONS.includes('.md'))
+})
+
+test('file preview returns content identity and a value-free reusable structure fingerprint', async () => {
+  const importer = new ExternalImporter({ store: {} })
+  const first = await importer.preview(
+    Buffer.from(' ID ,title\n1,first\n2,second\n'),
+    'weekly-one.CSV',
+  )
+  const sameStructure = await importer.preview(
+    Buffer.from('id,title\n99,entirely different\n'),
+    'weekly-two.csv',
+  )
+
+  assert.match(first.inputSha256, /^[a-f0-9]{64}$/)
+  assert.notEqual(first.inputSha256, sameStructure.inputSha256)
+  assert.equal(first.schemaFingerprint, sameStructure.schemaFingerprint)
+  assert.deepEqual(first.fileStructure, {
+    parserFamily: 'delimited',
+    format: 'csv',
+    selector: 'header-row',
+    parserVersion: CHUNKER_VERSION,
+    columns: [
+      { name: 'id', valueTypeFamilies: ['string'], required: true },
+      { name: 'title', valueTypeFamilies: ['string'], required: true },
+    ],
+  })
+  assert.equal(first.rowCount, 2, 'existing preview fields remain available')
+  assert.equal(first.fileStructure.columns.some((column) => 'sample' in column), false)
+  assert.equal(first.schemaFingerprint, fingerprintFileStructure(first.fileStructure))
+})
+
+test('JSONL structure ignores object key discovery order but detects type and required drift', async () => {
+  const importer = new ExternalImporter({ store: {} })
+  const first = await importer.preview(
+    Buffer.from('{"id":1,"title":"one"}\n{"title":"two","id":2}\n'),
+    'first.jsonl',
+  )
+  const reordered = await importer.preview(
+    Buffer.from('{"title":"different","id":99}\n'),
+    'renamed.jsonl',
+  )
+  const typeDrift = await importer.preview(
+    Buffer.from('{"title":"different","id":"99"}\n'),
+    'typed.jsonl',
+  )
+  const requiredDrift = await importer.preview(
+    Buffer.from('{"id":1,"title":"one"}\n{"id":2}\n'),
+    'optional.jsonl',
+  )
+
+  assert.deepEqual(first.fileStructure.columns.map((column) => column.name), ['id', 'title'])
+  assert.equal(first.schemaFingerprint, reordered.schemaFingerprint)
+  assert.notEqual(first.schemaFingerprint, typeDrift.schemaFingerprint)
+  assert.notEqual(first.schemaFingerprint, requiredDrift.schemaFingerprint)
+  assert.equal(requiredDrift.fileStructure.columns.find((column) => column.name === 'title').required, false)
+})
+
+test('file structure fingerprint includes format and selector without filename or row count', () => {
+  const parsed = { columns: ['id'], records: [{ id: '1' }, { id: '2' }] }
+  const csv = buildFileStructure(parsed, 'a.csv')
+  const tsv = buildFileStructure(parsed, 'anything.tsv')
+  const workbook = buildFileStructure(parsed, 'anything.xlsx')
+
+  assert.notEqual(fingerprintFileStructure(csv), fingerprintFileStructure(tsv))
+  assert.equal(csv.selector, 'header-row')
+  assert.equal(workbook.selector, 'first-worksheet')
+  assert.equal('filename' in csv, false)
+  assert.equal('rowCount' in csv, false)
 })
 
 // ---------------------------------------------------------------------------
@@ -361,6 +443,44 @@ test('direct-file deduplication keys include the immutable parser, mapping, and 
   assert.equal(new Set(started.map((run) => run.inputSha256)).size, 1)
 })
 
+test('direct-file interpretation and parser versions include a shared format-rule version when present', async () => {
+  const started = []
+  const parserVersions = []
+  const importer = new ExternalImporter({
+    store: {
+      getExternalSource: async () => ({
+        id: 'source-file', sourceKey: 'files', status: 'active',
+        datasetId: 'files.v1', platform: 'external', objectType: 'document',
+      }),
+      getActiveMapping: async () => ({
+        version: 3,
+        formatRuleVersionId: 'rule-version-7',
+        fieldMap: { externalId: { from: 'id' } },
+      }),
+      startImportRun: async (input) => {
+        started.push(input)
+        return { id: 'rule-run', duplicateOf: null }
+      },
+      ingestExternalRecords: async ({ records }) => {
+        parserVersions.push(...records.map((record) => record.parserVersion))
+        return { ingested: records.length, changed: records.length }
+      },
+      recordRejectedRows: async () => {},
+      finishImportRun: async () => {},
+    },
+  })
+
+  await importer.importFile({
+    sourceKey: 'files', buffer: Buffer.from('id\n1\n'), filename: 'records.csv',
+  })
+
+  const expectedKey = createHash('sha256')
+    .update(`parser=${CHUNKER_VERSION}\nmapping=3\nformat=.csv\nformatRuleVersion=rule-version-7`)
+    .digest('hex')
+  assert.equal(started[0].interpretationKey, expectedKey)
+  assert.deepEqual(parserVersions, [`${CHUNKER_VERSION}:map3:rule=rule-version-7`])
+})
+
 test('direct-file imports fence claim, batch writes, evidence, and finish with the source lock guard', async () => {
   const events = []
   const sessionClient = { name: 'held-source-lock-session' }
@@ -380,6 +500,7 @@ test('direct-file imports fence claim, batch writes, evidence, and finish with t
       },
       ingestExternalRecords: async (input) => {
         assert.equal(input.sessionClient, sessionClient)
+        assert.equal(input.records[0].parserVersion, `${CHUNKER_VERSION}:map1`)
         events.push('ingest')
         return { ingested: 1, changed: 1 }
       },

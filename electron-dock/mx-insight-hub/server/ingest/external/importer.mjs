@@ -12,6 +12,95 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+const FILE_FORMATS = {
+  '.csv': { parserFamily: 'delimited', format: 'csv', selector: 'header-row' },
+  '.tsv': { parserFamily: 'delimited', format: 'tsv', selector: 'header-row' },
+  '.jsonl': { parserFamily: 'json-lines', format: 'jsonl', selector: 'line-object' },
+  '.ndjson': { parserFamily: 'json-lines', format: 'ndjson', selector: 'line-object' },
+  '.xlsx': { parserFamily: 'openxml-workbook', format: 'xlsx', selector: 'first-worksheet' },
+  '.xlsm': { parserFamily: 'openxml-workbook', format: 'xlsm', selector: 'first-worksheet' },
+  '.txt': { parserFamily: 'plain-text', format: 'txt', selector: 'paragraph' },
+  '.md': { parserFamily: 'plain-text', format: 'md', selector: 'paragraph' },
+}
+
+function extensionOf(filename) {
+  return /\.[^.]+$/.exec(String(filename).toLowerCase())?.[0] ?? ''
+}
+
+export function normalizeStructureColumnName(value) {
+  return String(value).normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase()
+}
+
+function assertUnambiguousStructureColumns(columns) {
+  const normalized = new Set()
+  for (const column of columns) {
+    const name = normalizeStructureColumnName(column)
+    if (normalized.has(name)) {
+      throw new AppError(
+        400,
+        'ambiguous_file_columns',
+        'File columns must remain unique after case and whitespace normalization',
+      )
+    }
+    normalized.add(name)
+  }
+}
+
+function hasRequiredValue(record, column) {
+  if (!Object.prototype.hasOwnProperty.call(record, column)) return false
+  const value = record[column]
+  return value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === '')
+}
+
+function valueTypeFamily(value) {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string' && value.trim() === '') return null
+  if (Array.isArray(value)) return 'array'
+  if (typeof value === 'object') return 'object'
+  if (typeof value === 'boolean') return 'boolean'
+  if (typeof value === 'number' || typeof value === 'bigint') return 'number'
+  return 'string'
+}
+
+/**
+ * Describe only the reusable shape of one parsed file. Content identity, row
+ * count, filename and sample values deliberately stay out of this object.
+ */
+export function buildFileStructure({ columns, records }, filename) {
+  const descriptor = FILE_FORMATS[extensionOf(filename)]
+  if (!descriptor) throw new Error(`Cannot describe unsupported file format: ${filename}`)
+  assertUnambiguousStructureColumns(columns)
+
+  const profiledColumns = columns.map((column) => {
+    const families = new Set()
+    for (const record of records) {
+      const family = valueTypeFamily(record[column])
+      if (family) families.add(family)
+    }
+    return {
+      name: normalizeStructureColumnName(column),
+      valueTypeFamilies: families.size > 0 ? [...families].sort() : ['unknown'],
+      required: records.length > 0 && records.every((record) => hasRequiredValue(record, column)),
+    }
+  })
+
+  // JSON object key order is not schema. parseJsonLines discovers columns in
+  // first-seen order, so canonicalize it before hashing to avoid false drift.
+  if (descriptor.parserFamily === 'json-lines') {
+    profiledColumns.sort((left, right) => {
+      const leftKey = JSON.stringify(left)
+      const rightKey = JSON.stringify(right)
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0
+    })
+  }
+
+  return { ...descriptor, parserVersion: CHUNKER_VERSION, columns: profiledColumns }
+}
+
+export function fingerprintFileStructure(fileStructure) {
+  return sha256(JSON.stringify(fileStructure))
+}
+
 export class ExternalImporter {
   constructor({ store, logger = console }) {
     this.store = store
@@ -29,6 +118,7 @@ export class ExternalImporter {
   async preview(buffer, filename) {
     const { columns, records } = parseFile(buffer, filename, { hash: sha256 })
     const fieldMap = inferFieldMap(columns)
+    const fileStructure = buildFileStructure({ columns, records }, filename)
     const sample = records.slice(0, 5).map((raw) => {
       const { record, rejected } = applyMapping(raw, fieldMap, { platform: 'preview' })
       return rejected ? { rejected, raw } : { mapped: record, raw }
@@ -36,6 +126,9 @@ export class ExternalImporter {
     return {
       columns,
       rowCount: records.length,
+      inputSha256: sha256(buffer),
+      schemaFingerprint: fingerprintFileStructure(fileStructure),
+      fileStructure,
       inferredFieldMap: fieldMap,
       // Columns the inference could not place. These are the ones that will
       // land in `extensions` — usually correct, occasionally the sign that the
@@ -76,14 +169,21 @@ export class ExternalImporter {
     validateFieldMap(mapping.fieldMap)
 
     const inputSha256 = sha256(buffer)
+    const formatRuleVersionId = mapping.formatRuleVersionId == null
+      ? null
+      : String(mapping.formatRuleVersionId)
     const parserVersion = `${CHUNKER_VERSION}:map${mapping.version}`
+      + (formatRuleVersionId === null ? '' : `:rule=${formatRuleVersionId}`)
     const inputFormat = /\.[^.]+$/.exec(String(filename).toLowerCase())?.[0] ?? '(none)'
     // Hash the auditable components into a fixed-width index key. The filename
     // is untrusted, so indexing the raw extension would let an oversized name
     // exceed PostgreSQL's btree entry limit.
-    const interpretationKey = sha256(
-      `parser=${CHUNKER_VERSION}\nmapping=${mapping.version}\nformat=${inputFormat}`,
-    )
+    const interpretationKey = sha256([
+      `parser=${CHUNKER_VERSION}`,
+      `mapping=${mapping.version}`,
+      `format=${inputFormat}`,
+      ...(formatRuleVersionId === null ? [] : [`formatRuleVersion=${formatRuleVersionId}`]),
+    ].join('\n'))
     await assertOwned()
     const run = await this.store.startImportRun({
       sourceId: source.id,

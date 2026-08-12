@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { extname, join, normalize } from 'node:path'
 import { secureEqual } from './core/crypto.mjs'
@@ -6,6 +6,10 @@ import { AppError } from './core/errors.mjs'
 import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson } from './core/http.mjs'
 import { PUBLIC_DOCS_HTML, PUBLIC_OPENAPI_DOCUMENT } from './public-docs.mjs'
 import { validateFieldMap } from './ingest/external/mapping.mjs'
+import {
+  fingerprintFileStructure,
+  normalizeStructureColumnName,
+} from './ingest/external/importer.mjs'
 import { validateDatabaseConnection } from './ingest/external/database-source.mjs'
 import {
   isTelegramMonitorSourceKey,
@@ -200,6 +204,7 @@ export function createApp({
   queue = null,
   backfillPlatforms = [],
   importer = null,
+  serverFileReader = null,
   databasePuller = null,
   telegramSourcePreparer = null,
   agent = null,
@@ -329,6 +334,102 @@ export function createApp({
   function requireImporter() {
     if (!importer) {
       throw new AppError(503, 'importer_unavailable', 'External imports require the PostgreSQL store')
+    }
+  }
+
+  function requireServerFileReader() {
+    if (!serverFileReader) {
+      throw new AppError(503, 'server_file_reader_unavailable', 'Server file reads are unavailable on this listener')
+    }
+    return serverFileReader
+  }
+
+  function requireServerPathSource(source) {
+    if (source.sourceKind !== 'file' || source.connection?.fileMode !== 'server_path') {
+      throw new AppError(400, 'wrong_source_kind', 'This operation requires a server-path file source')
+    }
+  }
+
+  async function readServerSourceFile(source, serverPath) {
+    requireServerPathSource(source)
+    const reader = requireServerFileReader()
+    if (serverPath != null && typeof serverPath !== 'string') {
+      throw new AppError(400, 'invalid_server_file_path', 'serverPath must be a string')
+    }
+    if (typeof serverPath === 'string' && serverPath.trim()) {
+      return reader.readInput(serverPath.trim())
+    }
+    return reader.readLocator({
+      rootId: source.connection?.rootId,
+      relativePath: source.connection?.relativePath,
+    })
+  }
+
+  function filePathHash(file) {
+    return createHash('sha256')
+      .update(`${file.rootId}\0${file.relativePath}`)
+      .digest('hex')
+  }
+
+  function adaptFormatRuleFieldMap(fieldMap, columns) {
+    const exactByNormalized = new Map()
+    for (const column of columns) {
+      const normalized = normalizeStructureColumnName(column)
+      if (exactByNormalized.has(normalized)) return null
+      exactByNormalized.set(normalized, column)
+    }
+    const adapted = {}
+    for (const [target, rule] of Object.entries(fieldMap || {})) {
+      const sources = Array.isArray(rule.from) ? rule.from : [rule.from]
+      const currentSources = sources.map((sourceColumn) => (
+        exactByNormalized.get(normalizeStructureColumnName(sourceColumn))
+      ))
+      if (currentSources.some((sourceColumn) => !sourceColumn)) return null
+      adapted[target] = {
+        ...rule,
+        from: Array.isArray(rule.from) ? currentSources : currentSources[0],
+      }
+    }
+    return adapted
+  }
+
+  async function previewWithSuggestion({ source, buffer, filename, agentRequested }) {
+    const preview = await importer.preview(buffer, filename)
+    let matchedFormatRule = source && typeof store.findApprovedFileFormatRule === 'function'
+      ? await store.findApprovedFileFormatRule({
+          schemaFingerprint: preview.schemaFingerprint,
+          datasetId: source.datasetId,
+          platform: source.platform,
+          objectType: source.objectType,
+        })
+      : null
+    if (matchedFormatRule) {
+      const adaptedFieldMap = adaptFormatRuleFieldMap(matchedFormatRule.fieldMap, preview.columns)
+      matchedFormatRule = adaptedFieldMap
+        ? { ...matchedFormatRule, fieldMap: adaptedFieldMap }
+        : null
+    }
+    const suggestion = matchedFormatRule
+      ? {
+          fieldMap: matchedFormatRule.fieldMap,
+          origin: 'format_rule',
+          model: null,
+          confidence: null,
+        }
+      : agentRequested
+        ? await agent?.suggestFieldMap({ columns: preview.columns, sampleRows: [] })
+        : {
+            fieldMap: preview.inferredFieldMap,
+            origin: 'inferred',
+            model: null,
+            confidence: null,
+          }
+    return {
+      ...preview,
+      matchedFormatRule,
+      suggestion: suggestion ?? null,
+      agentRequested,
+      agentDataScope: agentRequested && !matchedFormatRule ? 'column_names_only' : 'none',
     }
   }
 
@@ -763,6 +864,12 @@ export function createApp({
         sendJson(response, 200, { data: await store.listExternalSources(), requestId })
         return
       }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/server-file-roots') {
+        requireSourceAdmin(principal)
+        const description = requireServerFileReader().describeRoots()
+        sendJson(response, 200, { data: description.roots, requestId })
+        return
+      }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/sources') {
         requireSourceAdmin(principal)
         const body = await readJson(request)
@@ -787,6 +894,27 @@ export function createApp({
           }
           await databasePuller.testConnection(body.connection)
         }
+        let sourceConnection = body.connection || {}
+        if (sourceKind === 'file') {
+          const fileMode = body.fileMode || 'upload'
+          if (!['upload', 'server_path'].includes(fileMode)) {
+            throw new AppError(400, 'invalid_file_mode', 'fileMode must be upload or server_path')
+          }
+          if (fileMode === 'server_path') {
+            const serverPath = requiredField(body, 'serverPath')
+            const file = await requireServerFileReader().readInput(serverPath)
+            sourceConnection = {
+              fileMode: 'server_path',
+              rootId: file.rootId,
+              relativePath: file.relativePath,
+            }
+          } else {
+            if (body.serverPath != null) {
+              throw new AppError(400, 'unsupported_fields', 'serverPath requires fileMode server_path')
+            }
+            sourceConnection = { fileMode: 'upload' }
+          }
+        }
         const created = await withSourceLocks([sourceKey], async () => {
           if (await store.getExternalSource?.(sourceKey)) {
             throw new AppError(409, 'source_exists', 'Source keys are immutable; update a paused source through its PUT route')
@@ -801,7 +929,7 @@ export function createApp({
               platform: body.platform || 'external',
               objectType: body.objectType || 'record',
               status: sourceKind === 'database' ? 'paused' : 'active',
-              connection: body.connection || {},
+              connection: sourceConnection,
               syncIntervalSeconds,
             })
         })
@@ -926,6 +1054,21 @@ export function createApp({
         const source = await requireSource(params.key)
         const body = await readJson(request)
         validateFieldMap(body?.fieldMap)
+        if (source.sourceKind === 'file' && source.connection?.fileMode === 'server_path') {
+          if (!/^[0-9a-f]{64}$/.test(body?.schemaFingerprint || '')) {
+            throw new AppError(400, 'invalid_schema_fingerprint', 'A server-path mapping requires its preview structure fingerprint')
+          }
+          if (!body.fileStructure || typeof body.fileStructure !== 'object' || Array.isArray(body.fileStructure)) {
+            throw new AppError(400, 'invalid_file_structure', 'A server-path mapping requires its preview structure')
+          }
+        }
+        if (body?.schemaFingerprint != null) {
+          if (!/^[0-9a-f]{64}$/.test(body.schemaFingerprint)
+            || !body.fileStructure
+            || fingerprintFileStructure(body.fileStructure) !== body.schemaFingerprint) {
+            throw new AppError(400, 'invalid_schema_fingerprint', 'schemaFingerprint does not match fileStructure')
+          }
+        }
         const mapping = await store.createSourceMapping({
           sourceId: source.id,
           fieldMap: body.fieldMap,
@@ -933,6 +1076,9 @@ export function createApp({
           agentModel: body.agentModel,
           agentConfidence: body.agentConfidence,
           notes: body.notes,
+          schemaFingerprint: body.schemaFingerprint,
+          fileStructure: body.fileStructure,
+          formatRuleVersionId: body.formatRuleVersionId,
         })
         // Created unapproved on purpose: a mapping decides how stored data is
         // shaped, so it takes a second, explicit action to put it in force.
@@ -945,7 +1091,12 @@ export function createApp({
         requireSourceAdmin(principal)
         assertGenericSourceMutable(params.key)
         const initial = await requireSource(params.key)
-        const approved = await withSourceLocks(initial.sourceKind === 'database' ? [params.key] : [], async () => {
+        const needsMappingLock = initial.sourceKind === 'database'
+          || initial.connection?.fileMode === 'server_path'
+        const approved = await withSourceLocks(needsMappingLock ? [params.key] : [], async (
+          _assertOwned = async () => {},
+          sessionClients = [],
+        ) => {
           const source = await requireSource(params.key)
           if (source.sourceKind === 'database' && source.status !== 'paused') {
             throw new AppError(409, 'source_pause_required', 'Pause this database source before changing its active mapping')
@@ -956,11 +1107,15 @@ export function createApp({
               throw new AppError(409, 'source_draining', 'Wait for the running batch to finish before changing the active mapping')
             }
           }
+          const sessionClient = needsMappingLock ? sessionClients[0] : null
+          if (needsMappingLock && !sessionClient) {
+            throw new AppError(503, 'source_lock_unavailable', 'Mapping approval requires the PostgreSQL source-lock session')
+          }
           return store.approveSourceMapping({
             sourceId: source.id,
             version: Number(params.version),
             approvedBy: principal.memberId || 'admin-token',
-          })
+          }, { sessionClient })
         })
         sendJson(response, 200, { data: approved, requestId })
         return
@@ -979,8 +1134,15 @@ export function createApp({
       if (params && request.method === 'POST') {
         requireSourceAdmin(principal)
         requireImporter()
+        // Preserve the original local-preview contract for embedded/test
+        // importers whose store does not expose a source catalog. Production
+        // PostgreSQL stores do, and therefore also receive scoped format-rule
+        // matching. Preview itself never writes canonical data.
+        const source = typeof store.getExternalSource === 'function'
+          ? await requireSource(params.key)
+          : null
         const buffer = await readBuffer(request)
-        const preview = await importer.preview(buffer, requiredQuery(searchParams, 'filename'))
+        const filename = requiredQuery(searchParams, 'filename')
         const agentQuery = searchParams.get('agent')
         if (agentQuery != null && !['true', 'false'].includes(agentQuery)) {
           throw new AppError(400, 'invalid_agent_preview', 'agent must be true or false')
@@ -990,21 +1152,56 @@ export function createApp({
         // operator explicitly opts into Agent assistance, only column names
         // are sent — never source rows or values. This keeps a harmless-looking
         // preview from becoming an undisclosed data export to a model provider.
-        const suggestion = agentRequested
-          ? await agent?.suggestFieldMap({ columns: preview.columns, sampleRows: [] })
-          : {
-              fieldMap: preview.inferredFieldMap,
-              origin: 'inferred',
-              model: null,
-              confidence: null,
-            }
         sendJson(response, 200, {
-          data: {
-            ...preview,
-            suggestion: suggestion ?? null,
-            agentRequested,
-            agentDataScope: agentRequested ? 'column_names_only' : 'none',
-          },
+          data: await previewWithSuggestion({ source, buffer, filename, agentRequested }),
+          requestId,
+        })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/sources/:key/server-preview')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireImporter()
+        const source = await requireSource(params.key)
+        const body = await readJson(request, 64 * 1024)
+        if (body.agent != null && typeof body.agent !== 'boolean') {
+          throw new AppError(400, 'invalid_agent_preview', 'agent must be true or false')
+        }
+        const file = await readServerSourceFile(source, body.serverPath)
+        const data = await previewWithSuggestion({
+          source,
+          buffer: file.buffer,
+          filename: file.filename,
+          agentRequested: body.agent === true,
+        })
+        if (typeof store.recordFileObservation === 'function') {
+          await store.recordFileObservation({
+            sourceId: source.id,
+            rootId: file.rootId,
+            relativePath: file.relativePath,
+            pathHash: filePathHash(file),
+            inputSha256: file.inputSha256,
+            inputBytes: file.inputBytes,
+            mtime: file.mtime,
+            schemaFingerprint: data.schemaFingerprint,
+            formatRuleVersionId: data.matchedFormatRule?.versionId || null,
+            status: 'previewed',
+          })
+        }
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/sources/:key/files')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        const source = await requireSource(params.key)
+        requireServerPathSource(source)
+        sendJson(response, 200, {
+          data: typeof store.listFileObservations === 'function'
+            ? await store.listFileObservations(source.id)
+            : [],
           requestId,
         })
         return
@@ -1181,6 +1378,69 @@ export function createApp({
             assertOwned,
             sessionClient,
           })
+        })
+        sendJson(response, result.status === 'skipped' ? 200 : 201, { data: result, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/sources/:key/server-import')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireImporter()
+        assertGenericSourceMutable(params.key)
+        requireFileImportLock()
+        const initialSource = await requireSource(params.key)
+        requireServerPathSource(initialSource)
+        const body = await readJson(request, 64 * 1024)
+        if (!/^[0-9a-f]{64}$/.test(body.expectedSha256 || '')) {
+          throw new AppError(400, 'invalid_expected_sha256', 'Preview inputSha256 is required before a server-file import')
+        }
+        const result = await withSourceLocks([params.key], async (
+          assertOwned = async () => {},
+          sessionClients = [],
+        ) => {
+          const sessionClient = sessionClients[0]
+          if (!sessionClient) {
+            throw new AppError(503, 'source_lock_unavailable', 'File import lock session is unavailable')
+          }
+          const source = await requireSource(params.key)
+          const file = await readServerSourceFile(source, body.serverPath)
+          if (file.inputSha256 !== body.expectedSha256) {
+            throw new AppError(409, 'server_file_changed', 'Server file changed after preview; preview it again before importing')
+          }
+          const structurePreview = await importer.preview(file.buffer, file.filename)
+          const activeMapping = await store.getActiveMapping(source.id)
+          if (activeMapping?.schemaFingerprint
+            && activeMapping.schemaFingerprint !== structurePreview.schemaFingerprint) {
+            throw new AppError(409, 'file_schema_drift', 'Server file structure differs from the approved mapping; preview and approve the new structure')
+          }
+          const imported = await importer.importFile({
+            sourceKey: params.key,
+            buffer: file.buffer,
+            filename: file.filename,
+            assertOwned,
+            sessionClient,
+          })
+          if (typeof store.recordFileObservation === 'function') {
+            await store.recordFileObservation({
+              sourceId: source.id,
+              rootId: file.rootId,
+              relativePath: file.relativePath,
+              pathHash: filePathHash(file),
+              inputSha256: file.inputSha256,
+              inputBytes: file.inputBytes,
+              mtime: file.mtime,
+              schemaFingerprint: structurePreview.schemaFingerprint,
+              formatRuleVersionId: activeMapping?.formatRuleVersionId || null,
+              importRunId: imported.importRunId || imported.duplicateOf || null,
+              status: 'imported',
+            })
+          }
+          return {
+            ...imported,
+            file: { rootId: file.rootId, relativePath: file.relativePath },
+            schemaFingerprint: structurePreview.schemaFingerprint,
+          }
         })
         sendJson(response, result.status === 'skipped' ? 200 : 201, { data: result, requestId })
         return

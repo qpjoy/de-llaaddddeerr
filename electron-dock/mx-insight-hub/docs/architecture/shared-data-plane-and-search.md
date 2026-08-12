@@ -395,6 +395,26 @@ curl -X POST .../internal/v1/admin/sources/weekly-report/mappings/1/approve
 curl -X POST '.../internal/v1/admin/sources/weekly-report/import?filename=r.xlsx' --data-binary @r.xlsx
 ```
 
+服务器已有文件不必先穿过浏览器上传。运维配置静态根 allowlist 后，注册时可以在普通
+文本框直接粘贴白名单内的精确绝对路径；后端只保存 `rootId + relativePath`：
+
+```bash
+export MX_INSIGHT_SERVER_FILE_ROOTS='{"internal":"/shared_dir/import"}'
+
+curl -X POST .../internal/v1/admin/sources \
+  -d '{"sourceKey":"server-weekly","displayName":"服务器周报","sourceKind":"file","fileMode":"server_path","serverPath":"/shared_dir/import/reports/r.xlsx"}'
+curl -X POST .../internal/v1/admin/sources/server-weekly/server-preview \
+  -d '{"agent":false}'
+# 将 preview 返回的 inputSha256 原样带入；文件在两步之间变化会返回 409
+curl -X POST .../internal/v1/admin/sources/server-weekly/server-import \
+  -d '{"expectedSha256":"<preview.inputSha256>"}'
+```
+
+Preview 同时生成包含 parser version、格式/selector、规范化列名、类型族和 required 特征
+的结构指纹。相同 `datasetId/platform/objectType` 内完全一致的指纹复用 immutable format
+rule version；任意结构漂移需要重新预览并人工批准。规则中的列引用做 NFKC/大小写/空白
+规范化，而各 source mapping 保留真实列名，因此同结构复用不会让实际解析找不到字段。
+
 几个决定：
 
 - **上传用裸 body + `filename` query，不用 multipart**。multipart 需要为攻击者可控输入再写一个解析器（boundary、header 注入、part 数耗尽），而这条路径已经在接收不可信表格了。裸 body 传递同样的信息，且没有解析器。

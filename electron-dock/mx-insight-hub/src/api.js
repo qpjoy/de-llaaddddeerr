@@ -143,6 +143,7 @@ export const adminApi = {
 
   // External sources (P4).
   sources: (token) => request(token, `${ADMIN_ROOT}/sources`),
+  listServerFileRoots: (token) => request(token, `${ADMIN_ROOT}/server-file-roots`),
   dataCenter: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center`, { query }),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
@@ -165,6 +166,14 @@ export const adminApi = {
   runImport: (token, key, file) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/import`,
     { method: 'POST', raw: file, query: { filename: file.name } },
+  ),
+  serverPreview: (token, key, { serverPath, agent = false } = {}) => request(
+    token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/server-preview`,
+    { method: 'POST', body: { ...(serverPath ? { serverPath } : {}), agent } },
+  ),
+  serverImport: (token, key, { serverPath, expectedSha256 }) => request(
+    token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/server-import`,
+    { method: 'POST', body: { ...(serverPath ? { serverPath } : {}), expectedSha256 } },
   ),
   importRuns: (token, key) => request(token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/imports`),
   sourceSchema: (token, key) => request(token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/schema`),

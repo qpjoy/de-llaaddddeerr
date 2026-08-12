@@ -13,6 +13,7 @@ import { createSearch } from './search/index.mjs'
 import { EmbeddingPipeline } from './embedding/pipeline.mjs'
 import { ExternalImporter } from './ingest/external/importer.mjs'
 import { DatabaseSourcePuller } from './ingest/external/database-source.mjs'
+import { ServerFileReader } from './ingest/external/server-files.mjs'
 import { TelegramMonitorSourcePreparer } from './ingest/telegram/source-preparer.mjs'
 import { createIdentityService } from './identity/index.mjs'
 import { MemoryStore } from './stores/memory-store.mjs'
@@ -37,6 +38,9 @@ export async function createRuntime(config = loadConfig()) {
   // External imports write through the canonical path, which only the
   // PostgreSQL store implements.
   const importer = config.storeDriver === 'postgres' ? new ExternalImporter({ store }) : null
+  const serverFileReader = config.listenerMode === 'public'
+    ? null
+    : await ServerFileReader.create({ roots: config.serverFiles?.roots || [] })
   const databasePuller = config.storeDriver === 'postgres'
     ? new DatabaseSourcePuller({ store, queue })
     : null
@@ -85,6 +89,7 @@ export async function createRuntime(config = loadConfig()) {
     identity,
     queue,
     importer,
+    serverFileReader,
     databasePuller,
     telegramSourcePreparer,
     agent,
@@ -97,7 +102,7 @@ export async function createRuntime(config = loadConfig()) {
     staticRoot: config.listenerMode === 'public' ? null : resolve(projectRoot, 'dist/client'),
   })
   return {
-    app, store, adapter, service, identity, queue, pool, importer,
+    app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
     databasePuller, telegramSourcePreparer, agent, agentSettings, search, embedding,
   }
 }

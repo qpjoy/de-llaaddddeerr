@@ -452,9 +452,11 @@ paths:
       summary: Create a direct PostgreSQL or file source.
       description: >-
         Requires the platform Admin Token. A database candidate is tested with
-        a bounded read-only PostgreSQL session before it is saved; a file source
-        has no connection object and is registered for later preview/mapping/
-        import. No separate Provider resource or provider master key is involved.
+        a bounded read-only PostgreSQL session before it is saved. A browser-upload
+        file source stores only its mode; a server-path source resolves the pasted
+        absolute path once and stores only rootId plus relativePath for later
+        preview/mapping/import. No separate Provider resource or provider master
+        key is involved.
       security:
         - adminToken: []
       requestBody:
@@ -472,6 +474,19 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /server-file-roots:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: listServerFileRoots
+      summary: List configured server-file root IDs without exposing mount paths.
+      security:
+        - adminToken: []
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /sources/{sourceKey}:
     servers:
@@ -715,6 +730,68 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/server-preview:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    post:
+      operationId: previewServerSourceFile
+      summary: Read and preview one allowlisted server file, then match an approved format rule.
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServerFilePreviewRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/server-import:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    post:
+      operationId: importServerSourceFile
+      summary: Import the exact server-file content approved by the latest preview hash.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServerFileImportRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "201": { $ref: "#/components/responses/AdminData" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /sources/{sourceKey}/files:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/SourceKey"
+    get:
+      operationId: listServerFileObservations
+      summary: List content-addressed observations for a server-path source.
+      security:
+        - adminToken: []
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /sources/{sourceKey}/checkpoint/reset:
     servers:
       - url: /internal/v1/admin
@@ -2106,10 +2183,23 @@ components:
       type: object
       additionalProperties: false
       required: [sourceKey, displayName, sourceKind]
+      allOf:
+        - if:
+            required: [fileMode]
+            properties:
+              fileMode: { const: server_path }
+          then:
+            required: [serverPath]
       properties:
         sourceKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9][a-z0-9._-]*$" }
         displayName: { type: string, minLength: 1, maxLength: 200 }
         sourceKind: { type: string, const: file }
+        fileMode: { type: string, enum: [upload, server_path], default: upload }
+        serverPath:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Transient absolute path input required for server_path; never persisted or returned.
         datasetId: { type: string, minLength: 1, maxLength: 200 }
         platform: { type: string, minLength: 1, maxLength: 100, default: external }
         objectType: { type: string, minLength: 1, maxLength: 100, default: record }
@@ -2144,10 +2234,7 @@ components:
           oneOf:
             - $ref: "#/components/schemas/StoredDirectPostgresConnection"
             - $ref: "#/components/schemas/LegacyDsnConnection"
-            - type: object
-              additionalProperties: false
-              maxProperties: 0
-              description: File sources have no connection fields.
+            - $ref: "#/components/schemas/FileSourceLocator"
         syncIntervalSeconds: { type: [integer, "null"], minimum: 60, maximum: 86400 }
     ExternalSourceEnvelope:
       type: object
@@ -2159,12 +2246,58 @@ components:
       type: object
       additionalProperties: false
       required: [fieldMap]
+      allOf:
+        - if:
+            anyOf:
+              - required: [schemaFingerprint]
+              - required: [fileStructure]
+              - required: [formatRuleVersionId]
+          then:
+            required: [schemaFingerprint, fileStructure]
       properties:
         fieldMap: { type: object, minProperties: 1, additionalProperties: true }
         origin: { type: string, minLength: 1, maxLength: 100, default: manual }
         agentModel: { type: [string, "null"] }
         agentConfidence: { type: [number, "null"], minimum: 0, maximum: 1 }
         notes: { type: [string, "null"], maxLength: 4000 }
+        schemaFingerprint: { type: [string, "null"], pattern: "^[0-9a-f]{64}$" }
+        fileStructure: { type: [object, "null"], additionalProperties: true }
+        formatRuleVersionId: { type: [string, "null"], format: uuid }
+    FileSourceLocator:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [fileMode]
+          properties:
+            fileMode: { type: string, const: upload }
+        - type: object
+          additionalProperties: false
+          required: [fileMode, rootId, relativePath]
+          properties:
+            fileMode: { type: string, const: server_path }
+            rootId: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" }
+            relativePath: { type: string, minLength: 1, maxLength: 4096 }
+    ServerFilePreviewRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        serverPath:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Optional transient override; omitted uses the source's stored locator.
+        agent: { type: boolean, default: false }
+    ServerFileImportRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedSha256]
+      properties:
+        serverPath:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Optional transient override; omitted uses the source's stored locator.
+        expectedSha256: { type: string, pattern: "^[0-9a-f]{64}$" }
     SearchRequest:
       type: object
       additionalProperties: false

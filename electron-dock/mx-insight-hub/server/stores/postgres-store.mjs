@@ -15,6 +15,28 @@ function iso(value) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
 }
 
+// Format rules are shared across files whose concrete header spelling may
+// differ only by case, Unicode width or whitespace.  Source mappings retain
+// the concrete parser column names used for that source; rule versions store
+// this canonical form so semantic equality does not depend on those spellings.
+function canonicalFileFieldMap(fieldMap) {
+  const canonical = {}
+  for (const [target, rule] of Object.entries(fieldMap || {})) {
+    const normalizeColumn = (column) => String(column)
+      .normalize('NFKC')
+      .trim()
+      .replace(/\s+/gu, ' ')
+      .toLowerCase()
+    canonical[target] = {
+      ...rule,
+      from: Array.isArray(rule.from)
+        ? rule.from.map(normalizeColumn)
+        : normalizeColumn(rule.from),
+    }
+  }
+  return canonical
+}
+
 function tenant(row) {
   return row && {
     id: row.id,
@@ -1239,31 +1261,263 @@ export class PostgresStore {
    * editing version 3 in place would silently rewrite the answer to "why is
    * this 2026-03 record missing a title".
    */
-  async createSourceMapping({ sourceId, fieldMap, origin, agentModel, agentConfidence, notes }) {
-    const { rows } = await this.pool.query(
-      `INSERT INTO catalog.source_mappings
-         (id, source_id, version, field_map, origin, agent_model, agent_confidence, notes)
-       VALUES (
-         $1, $2,
-         (SELECT coalesce(max(version), 0) + 1 FROM catalog.source_mappings WHERE source_id = $2),
-         $3, $4, $5, $6, $7
-       )
-       RETURNING *`,
-      [randomUUID(), sourceId, fieldMap, origin || 'manual', agentModel || null, agentConfidence ?? null, notes || null],
-    )
-    return sourceMapping(rows[0])
+  async createSourceMapping({
+    sourceId,
+    fieldMap,
+    origin,
+    agentModel,
+    agentConfidence,
+    notes,
+    schemaFingerprint = null,
+    fileStructure = null,
+    formatRuleVersionId = null,
+  }) {
+    return withPgTransaction(this.pool, async (client) => {
+      // max(version) + 1 needs serialization per source. Without this lock, two
+      // simultaneous previews can both choose the same next version and one
+      // fails at the unique constraint even though both requests are valid.
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`mx-insight-hub:source-mapping:${sourceId}`],
+      )
+      const { rows } = await client.query(
+        `INSERT INTO catalog.source_mappings
+           (id, source_id, version, field_map, origin, agent_model, agent_confidence, notes,
+            schema_fingerprint, file_structure, format_rule_version_id)
+         VALUES (
+           $1, $2,
+           (SELECT coalesce(max(version), 0) + 1 FROM catalog.source_mappings WHERE source_id = $2),
+           $3, $4, $5, $6, $7, $8, $9, $10
+         )
+         RETURNING *`,
+        [
+          randomUUID(), sourceId, fieldMap, origin || 'manual', agentModel || null,
+          agentConfidence ?? null, notes || null, schemaFingerprint, fileStructure,
+          formatRuleVersionId,
+        ],
+      )
+      return sourceMapping(rows[0])
+    })
   }
 
-  async approveSourceMapping({ sourceId, version, approvedBy }) {
+  async approveSourceMapping({ sourceId, version, approvedBy }, { sessionClient = null } = {}) {
+    return withPgTransaction(this.pool, async (client) => {
+      const selected = await client.query(
+        `SELECT m.*, s.source_kind, s.dataset_id, s.platform, s.object_type
+           FROM catalog.source_mappings m
+           JOIN catalog.external_sources s ON s.id = m.source_id
+          WHERE m.source_id = $1 AND m.version = $2
+          FOR UPDATE OF m`,
+        [sourceId, version],
+      )
+      const mapping = selected.rows[0]
+      if (!mapping) throw new AppError(404, 'mapping_not_found', 'Mapping version not found')
+      const canonicalFieldMap = canonicalFileFieldMap(mapping.field_map)
+
+      if (mapping.source_kind !== 'file' && (
+        mapping.schema_fingerprint || mapping.file_structure || mapping.format_rule_version_id
+      )) {
+        throw new AppError(409, 'format_rule_mismatch', 'File structure evidence is only valid for file sources')
+      }
+
+      let formatRuleVersionId = mapping.format_rule_version_id
+      if (formatRuleVersionId) {
+        const linked = await client.query(
+          `SELECT v.id
+             FROM catalog.file_format_rule_versions v
+             JOIN catalog.file_format_rules r ON r.id = v.rule_id
+            WHERE v.id = $1
+              AND r.dataset_id = $2 AND r.platform = $3 AND r.object_type = $4
+              AND v.schema_fingerprint = $5
+              AND v.field_map = $6::jsonb
+              AND v.file_structure = $7::jsonb`,
+          [
+            formatRuleVersionId, mapping.dataset_id, mapping.platform,
+            mapping.object_type, mapping.schema_fingerprint, canonicalFieldMap,
+            mapping.file_structure,
+          ],
+        )
+        if (!linked.rows[0]) {
+          throw new AppError(409, 'format_rule_mismatch', 'The selected format rule does not match this source and mapping')
+        }
+      } else if (mapping.schema_fingerprint && mapping.file_structure) {
+        const lockKey = `mx-insight-hub:file-format-rule:${JSON.stringify([
+          mapping.dataset_id, mapping.platform, mapping.object_type,
+          mapping.schema_fingerprint,
+        ])}`
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey])
+        const matched = await client.query(
+          `SELECT r.id AS rule_id, v.id AS version_id, v.version,
+                  v.file_structure = $5::jsonb AS file_structure_matches,
+                  v.field_map = $6::jsonb AS field_map_matches
+             FROM catalog.file_format_rules r
+             JOIN catalog.file_format_rule_versions v ON v.rule_id = r.id
+            WHERE r.dataset_id = $1 AND r.platform = $2 AND r.object_type = $3
+              AND v.schema_fingerprint = $4
+            ORDER BY v.approved_at DESC, v.version DESC
+            LIMIT 1`,
+          [
+            mapping.dataset_id, mapping.platform, mapping.object_type,
+            mapping.schema_fingerprint, mapping.file_structure, canonicalFieldMap,
+          ],
+        )
+        if (matched.rows[0] && matched.rows[0].file_structure_matches !== true) {
+          throw new AppError(409, 'schema_fingerprint_conflict', 'The structure fingerprint is already linked to different structure evidence')
+        }
+        let ruleId = matched.rows[0]?.rule_id
+        if (!ruleId) {
+          ruleId = randomUUID()
+          const inputFormat = typeof mapping.file_structure.format === 'string'
+            ? mapping.file_structure.format
+            : 'file'
+          await client.query(
+            `INSERT INTO catalog.file_format_rules
+               (id, rule_key, display_name, dataset_id, platform, object_type)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              ruleId,
+              `file.${mapping.schema_fingerprint.slice(0, 16)}.${ruleId.slice(0, 8)}`,
+              `${inputFormat.toUpperCase()} ${mapping.schema_fingerprint.slice(0, 8)}`,
+              mapping.dataset_id,
+              mapping.platform,
+              mapping.object_type,
+            ],
+          )
+        }
+
+        if (matched.rows[0]?.field_map_matches === true) {
+          formatRuleVersionId = matched.rows[0].version_id
+        } else {
+          const parserFamily = typeof mapping.file_structure.parserFamily === 'string'
+            ? mapping.file_structure.parserFamily
+            : 'unknown'
+          const inputFormat = typeof mapping.file_structure.format === 'string'
+            ? mapping.file_structure.format
+            : 'unknown'
+          const inserted = await client.query(
+            `INSERT INTO catalog.file_format_rule_versions
+               (id, rule_id, version, schema_fingerprint, parser_family, input_format,
+                file_structure, field_map, origin, agent_model, agent_confidence,
+                approved_at, approved_by)
+             VALUES (
+               $1, $2,
+               (SELECT coalesce(max(version), 0) + 1 FROM catalog.file_format_rule_versions WHERE rule_id = $2),
+               $3, $4, $5, $6, $7, $8, $9, $10, now(), $11
+             )
+             RETURNING id`,
+            [
+              randomUUID(), ruleId, mapping.schema_fingerprint,
+              parserFamily,
+              inputFormat,
+              mapping.file_structure, canonicalFieldMap,
+              mapping.origin === 'format_rule' ? 'manual' : mapping.origin,
+              mapping.agent_model, mapping.agent_confidence, approvedBy,
+            ],
+          )
+          formatRuleVersionId = inserted.rows[0].id
+        }
+      }
+
+      const approved = await client.query(
+        `UPDATE catalog.source_mappings
+            SET approved_at = now(), approved_by = $3,
+                format_rule_version_id = $4
+          WHERE source_id = $1 AND version = $2
+          RETURNING *`,
+        [sourceId, version, approvedBy, formatRuleVersionId],
+      )
+      return sourceMapping(approved.rows[0])
+    }, { sessionClient })
+  }
+
+  async findApprovedFileFormatRule({ schemaFingerprint, datasetId, platform, objectType }) {
     const { rows } = await this.pool.query(
-      `UPDATE catalog.source_mappings
-          SET approved_at = now(), approved_by = $3
-        WHERE source_id = $1 AND version = $2
-        RETURNING *`,
-      [sourceId, version, approvedBy],
+      `SELECT r.id AS rule_id, r.rule_key, r.display_name,
+              v.id AS version_id, v.version, v.schema_fingerprint, v.field_map,
+              v.parser_family, v.input_format, v.file_structure
+         FROM catalog.file_format_rules r
+         JOIN catalog.file_format_rule_versions v ON v.rule_id = r.id
+        WHERE r.dataset_id = $1 AND r.platform = $2 AND r.object_type = $3
+          AND v.schema_fingerprint = $4
+        ORDER BY v.approved_at DESC, v.version DESC
+        LIMIT 1`,
+      [datasetId, platform, objectType, schemaFingerprint],
     )
-    if (!rows[0]) throw new AppError(404, 'mapping_not_found', 'Mapping version not found')
-    return sourceMapping(rows[0])
+    return fileFormatRule(rows[0])
+  }
+
+  async recordFileObservation({
+    sourceId,
+    rootId,
+    relativePath,
+    pathHash,
+    inputSha256,
+    inputBytes,
+    mtime,
+    schemaFingerprint = null,
+    formatRuleVersionId = null,
+    importRunId = null,
+    status,
+  }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO ingest.file_observations
+         (id, source_id, root_id, relative_path, path_hash, input_sha256,
+          input_bytes, source_mtime, schema_fingerprint, format_rule_version_id,
+          import_run_id, status)
+       SELECT $1, s.id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+         FROM catalog.external_sources s
+         LEFT JOIN catalog.file_format_rule_versions v ON v.id = $10
+         LEFT JOIN catalog.file_format_rules r ON r.id = v.rule_id
+         LEFT JOIN ingest.import_runs ir ON ir.id = $11
+        WHERE s.id = $2
+          AND s.source_kind = 'file'
+          AND s.connection->>'fileMode' = 'server_path'
+          AND ($10::uuid IS NULL OR (
+            r.dataset_id = s.dataset_id
+            AND r.platform = s.platform
+            AND r.object_type = s.object_type
+            AND v.schema_fingerprint = $9
+          ))
+          AND ($11::uuid IS NULL OR ir.source_id = s.id)
+       ON CONFLICT (source_id, root_id, relative_path, input_sha256) DO UPDATE SET
+         input_bytes = EXCLUDED.input_bytes,
+         source_mtime = EXCLUDED.source_mtime,
+         schema_fingerprint = CASE
+           WHEN EXCLUDED.status = 'imported' OR ingest.file_observations.status <> 'imported'
+             THEN EXCLUDED.schema_fingerprint
+           ELSE ingest.file_observations.schema_fingerprint
+         END,
+         format_rule_version_id = CASE
+           WHEN EXCLUDED.status = 'imported' OR ingest.file_observations.status <> 'imported'
+             THEN EXCLUDED.format_rule_version_id
+           ELSE ingest.file_observations.format_rule_version_id
+         END,
+         import_run_id = CASE
+           WHEN EXCLUDED.status = 'imported' THEN EXCLUDED.import_run_id
+           ELSE ingest.file_observations.import_run_id
+         END,
+         status = CASE WHEN EXCLUDED.status = 'imported' THEN 'imported' ELSE ingest.file_observations.status END,
+         last_seen_at = now()
+       RETURNING *`,
+      [
+        randomUUID(), sourceId, rootId, relativePath, pathHash, inputSha256,
+        inputBytes, mtime, schemaFingerprint, formatRuleVersionId, importRunId, status,
+      ],
+    )
+    if (!rows[0]) {
+      throw new AppError(409, 'file_observation_scope_mismatch', 'File evidence must reference the same file source, format-rule scope and import run')
+    }
+    return fileObservation(rows[0])
+  }
+
+  async listFileObservations(sourceId, limit = 20) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM ingest.file_observations
+        WHERE source_id = $1
+        ORDER BY last_seen_at DESC LIMIT $2`,
+      [sourceId, limit],
+    )
+    return rows.map(fileObservation)
   }
 
   /** Approve all mappings or none, so a built-in pipeline cannot split versions. */
@@ -1969,10 +2223,47 @@ function sourceMapping(row) {
     agentModel: row.agent_model,
     agentConfidence: row.agent_confidence === null ? null : Number(row.agent_confidence),
     notes: row.notes,
+    schemaFingerprint: row.schema_fingerprint ?? null,
+    fileStructure: row.file_structure ?? null,
+    formatRuleVersionId: row.format_rule_version_id ?? null,
     approved: Boolean(row.approved_at),
     approvedAt: iso(row.approved_at),
     approvedBy: row.approved_by,
     createdAt: iso(row.created_at),
+  }
+}
+
+function fileFormatRule(row) {
+  return row && {
+    ruleId: row.rule_id,
+    ruleKey: row.rule_key,
+    displayName: row.display_name,
+    versionId: row.version_id,
+    version: Number(row.version),
+    schemaFingerprint: row.schema_fingerprint,
+    fieldMap: row.field_map,
+    parserFamily: row.parser_family,
+    inputFormat: row.input_format,
+    fileStructure: row.file_structure,
+  }
+}
+
+function fileObservation(row) {
+  return row && {
+    id: row.id,
+    sourceId: row.source_id,
+    rootId: row.root_id,
+    relativePath: row.relative_path,
+    pathHash: row.path_hash,
+    inputSha256: row.input_sha256,
+    inputBytes: Number(row.input_bytes),
+    mtime: iso(row.source_mtime),
+    schemaFingerprint: row.schema_fingerprint ?? null,
+    formatRuleVersionId: row.format_rule_version_id ?? null,
+    importRunId: row.import_run_id ?? null,
+    status: row.status,
+    firstSeenAt: iso(row.first_seen_at),
+    lastSeenAt: iso(row.last_seen_at),
   }
 }
 

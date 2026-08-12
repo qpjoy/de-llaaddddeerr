@@ -1,5 +1,6 @@
 import { loadCommonConfig } from '@qpjoy/mx-common'
 import { AppError } from './core/errors.mjs'
+import { parseServerFileRoots } from './ingest/external/server-files.mjs'
 
 export const PRODUCT_ID = 'mx-insight-hub'
 
@@ -133,6 +134,14 @@ export function loadConfig(environment = process.env) {
         1_000,
         'MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE',
       ),
+    },
+    serverFiles: {
+      // A deployment-owned allowlist. API requests may paste an absolute path,
+      // but the runtime immediately reduces it to one of these stable root IDs
+      // plus a relative path before any lineage is stored.
+      roots: listenerMode === 'public'
+        ? []
+        : parseServerFileRoots(environment.MX_INSIGHT_SERVER_FILE_ROOTS),
     },
   }
 }

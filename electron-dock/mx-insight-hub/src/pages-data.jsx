@@ -17,6 +17,7 @@ import {
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import {
+  DropdownField,
   EmptyState,
   ErrorState,
   Field,
@@ -104,10 +105,10 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         <button className="qp-button" type="button" onClick={() => setCreating(true)}>注册数据源</button>
       </PageHeading>
 
-      <Panel title="首次文件导入" subtitle="当前是单文件直传；目录监听、云桶和 /shared_dir landing agent 尚未上线">
+      <Panel title="首次文件导入" subtitle="支持浏览器直传或粘贴服务器受控路径；目录监听和云桶仍未上线">
         <ol className="mih-step-list">
-          <li><strong>注册文件源</strong><span>点击“注册数据源”，类型保持“文件上传”，填写 Dataset、平台和对象类型。</span></li>
-          <li><strong>预览样例</strong><span>在该源的“映射与导入”中上传一个小样；预览只解析，不写 canonical 数据。</span></li>
+          <li><strong>注册文件源</strong><span>选择浏览器上传或服务器路径；服务器路径可以直接复制粘贴，不需要从下拉列表寻找。</span></li>
+          <li><strong>预览样例</strong><span>上传小样或读取服务器文件；预览只解析结构并匹配格式规则，不写 canonical 数据。</span></li>
           <li><strong>审核并批准映射</strong><span>保存规则推断或 Agent 建议为版本，确认 externalId、正文和时间字段后批准。</span></li>
           <li><strong>正式导入</strong><span>再次选择文件执行导入；结果会出现在任务记录和数据中心，完全相同的内容会幂等跳过。</span></li>
         </ol>
@@ -140,8 +141,14 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
                   <td><code className="mih-source-label">{source.sourceKey}</code></td>
                   <td>{source.displayName}</td>
                   <td>
-                    <strong>{source.sourceKind === 'file' ? '文件上传' : `${source.connection?.host || '数据库'}:${source.connection?.port || 5432}`}</strong>
-                    <small className="mih-source-label">{source.sourceKind === 'database' ? `${source.connection?.schema || 'public'}.${source.connection?.table || '—'}` : 'xlsx/xlsm · csv/tsv · jsonl/ndjson · txt/md'}</small>
+                    <strong>{source.sourceKind === 'file'
+                      ? (source.connection?.fileMode === 'server_path' ? '服务器路径' : '文件上传')
+                      : `${source.connection?.host || '数据库'}:${source.connection?.port || 5432}`}</strong>
+                    <small className="mih-source-label">{source.sourceKind === 'database'
+                      ? `${source.connection?.schema || 'public'}.${source.connection?.table || '—'}`
+                      : source.connection?.fileMode === 'server_path'
+                        ? `${source.connection?.rootId || '受控根目录'}:${source.connection?.relativePath || '—'}`
+                        : 'xlsx/xlsm · csv/tsv · jsonl/ndjson · txt/md'}</small>
                   </td>
                   <td><code className="mih-source-label">{source.datasetId}</code><small className="mih-source-label">{source.platform} · {source.objectType}</small></td>
                   <td>{source.sourceKind === 'database' ? `${formatNumber(source.syncIntervalSeconds || 60)} 秒` : '手动导入'}</td>
@@ -876,6 +883,7 @@ function asList(value) {
 function CreateSourceModal({ token, notify, onClose, onCreated }) {
   const [form, setForm] = useState({
     sourceKey: '', displayName: '', sourceKind: 'file', datasetId: '', platform: 'external', objectType: 'record',
+    fileMode: 'upload', serverPath: '',
     host: '', port: '5432', database: '', username: '', password: '', sslMode: 'require',
     schema: 'public', table: '', cursorColumn: '', idColumn: '', syncIntervalSeconds: '300',
   })
@@ -884,13 +892,22 @@ function CreateSourceModal({ token, notify, onClose, onCreated }) {
 
   const submit = async (event) => {
     event.preventDefault()
-    setSubmitting(true)
     setError(null)
+    const serverPath = form.serverPath.trim()
+    if (form.sourceKind === 'file' && form.fileMode === 'server_path' && !serverPath) {
+      setError({ code: 'server_path_required', message: '服务器路径不能为空' })
+      return
+    }
+    setSubmitting(true)
     try {
       const body = {
         sourceKey: form.sourceKey.trim(), displayName: form.displayName.trim(), sourceKind: form.sourceKind,
         ...(form.datasetId.trim() ? { datasetId: form.datasetId.trim() } : {}),
         platform: form.platform.trim() || 'external', objectType: form.objectType.trim() || 'record',
+      }
+      if (form.sourceKind === 'file') {
+        body.fileMode = form.fileMode
+        if (form.fileMode === 'server_path') body.serverPath = serverPath
       }
       if (form.sourceKind === 'database') {
         body.syncIntervalSeconds = Number(form.syncIntervalSeconds)
@@ -915,7 +932,7 @@ function CreateSourceModal({ token, notify, onClose, onCreated }) {
   return (
     <Modal
       title="注册外部数据源"
-      description="数据库连接随数据源直接保存；包括明文密码在内的连接信息仅 Admin Token 管理面可见。"
+      description="文件可由浏览器上传或直接粘贴服务器路径；数据库连接信息仅 Admin Token 管理面可见。"
       onClose={onClose}
       footer={
         <>
@@ -936,13 +953,12 @@ function CreateSourceModal({ token, notify, onClose, onCreated }) {
           <input className="qp-input" value={form.displayName} required
             onChange={(event) => setForm({ ...form, displayName: event.target.value })} />
         </Field>
-        <Field label="类型">
-          <select className="qp-input" value={form.sourceKind}
-            onChange={(event) => setForm({ ...form, sourceKind: event.target.value })}>
-            <option value="file">文件上传（xlsx/xlsm · csv/tsv · jsonl/ndjson · txt/md）</option>
-            <option value="database">只读 PostgreSQL 拉取</option>
-          </select>
-        </Field>
+        <DropdownField label="类型" value={form.sourceKind}
+          onChange={(value) => setForm({ ...form, sourceKind: value })}
+          options={[
+            { value: 'file', label: '文件（浏览器上传或服务器路径）' },
+            { value: 'database', label: '只读 PostgreSQL 拉取' },
+          ]} />
         <Field label="Dataset" hint="留空时自动生成 external.&lt;标识&gt;.v1">
           <input className="qp-input" value={form.datasetId} placeholder="telegram.monitor.messages.v1"
             onChange={(event) => setForm({ ...form, datasetId: event.target.value })} />
@@ -1009,6 +1025,23 @@ function CreateSourceModal({ token, notify, onClose, onCreated }) {
             </Field>
           </>
         ) : null}
+        {form.sourceKind === 'file' ? (
+          <>
+            <DropdownField label="文件入口" value={form.fileMode}
+              onChange={(value) => setForm({ ...form, fileMode: value })}
+              options={[
+                { value: 'upload', label: '浏览器上传' },
+                { value: 'server_path', label: '服务器路径' },
+              ]} />
+            {form.fileMode === 'server_path' ? (
+              <Field label="服务器文件路径" hint="直接粘贴完整路径；不支持目录、通配符或路径下拉">
+                <input className="qp-input mih-server-path-input" value={form.serverPath} required
+                  spellCheck="false" autoComplete="off" placeholder="/shared_dir/reports/2026-08/report.xlsx"
+                  onChange={(event) => setForm({ ...form, serverPath: event.target.value })} />
+              </Field>
+            ) : null}
+          </>
+        ) : null}
         {error ? <ErrorState error={error} /> : null}
       </form>
     </Modal>
@@ -1018,6 +1051,8 @@ function CreateSourceModal({ token, notify, onClose, onCreated }) {
 function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onSourceChanged }) {
   const managedByPipeline = TELEGRAM_MONITOR_SOURCE_KEYS.has(source.sourceKey)
   const [currentSource, setCurrentSource] = useState(source)
+  const isServerPathSource = currentSource.sourceKind === 'file'
+    && currentSource.connection?.fileMode === 'server_path'
   const load = useCallback(() => adminApi.sourceMappings(token, source.sourceKey), [token, source.sourceKey])
   const mappings = useRemoteData(load, onUnauthorized)
   const loadRuns = useCallback(() => adminApi.importRuns(token, source.sourceKey), [token, source.sourceKey])
@@ -1037,7 +1072,13 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
     [token, source.sourceKind],
   )
   const agentStatus = useRemoteData(loadAgentStatus, onUnauthorized)
+  const loadServerFileRoots = useCallback(
+    () => isServerPathSource ? adminApi.listServerFileRoots(token) : Promise.resolve([]),
+    [isServerPathSource, token],
+  )
+  const serverFileRoots = useRemoteData(loadServerFileRoots, onUnauthorized)
   const [preview, setPreview] = useState(null)
+  const [serverPath, setServerPath] = useState('')
   const [useAgentPreview, setUseAgentPreview] = useState(false)
   const [editingSettings, setEditingSettings] = useState(false)
   const [mappingDraft, setMappingDraft] = useState('{}')
@@ -1063,11 +1104,32 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
     () => (mappings.data || []).find((mapping) => mapping.approved),
     [mappings.data],
   )
+  const serverImportReady = Boolean(
+    activeMapping
+    && preview?.inputSha256
+    && preview?.schemaFingerprint
+    && activeMapping.schemaFingerprint === preview.schemaFingerprint,
+  )
 
   const runPreview = async (file) => {
     setBusy(true)
     try {
       setPreview(await adminApi.previewImport(token, source.sourceKey, file, { useAgent: useAgentPreview }))
+    } catch (error) {
+      notify?.(error.message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const runServerPreview = async () => {
+    const path = serverPath.trim()
+    setBusy(true)
+    try {
+      setPreview(await adminApi.serverPreview(token, source.sourceKey, {
+        ...(path ? { serverPath: path } : {}),
+        agent: useAgentPreview,
+      }))
     } catch (error) {
       notify?.(error.message, 'error')
     } finally {
@@ -1083,7 +1145,16 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
         fieldMap,
         origin: preview?.suggestion?.origin || 'inferred',
         agentModel: preview?.suggestion?.model,
+        ...(preview?.schemaFingerprint ? { schemaFingerprint: preview.schemaFingerprint } : {}),
+        ...(preview?.fileStructure ? { fileStructure: preview.fileStructure } : {}),
+        ...(preview?.matchedFormatRule?.versionId
+          ? { formatRuleVersionId: preview.matchedFormatRule.versionId }
+          : {}),
       })
+      mappings.setData([
+        created,
+        ...(mappings.data || []).filter((mapping) => mapping.id !== created.id),
+      ])
       notify?.(`映射 v${created.version} 已创建，待批准`, 'success')
       mappings.refresh()
     } catch (error) {
@@ -1100,7 +1171,11 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
     }
     setBusy(true)
     try {
-      await adminApi.approveMapping(token, source.sourceKey, version)
+      const approved = await adminApi.approveMapping(token, source.sourceKey, version)
+      const currentMappings = mappings.data || []
+      mappings.setData(currentMappings.some((mapping) => mapping.id === approved.id)
+        ? currentMappings.map((mapping) => mapping.id === approved.id ? approved : mapping)
+        : [approved, ...currentMappings])
       notify?.(`映射 v${version} 已批准`, 'success')
       mappings.refresh()
     } catch (error) {
@@ -1120,6 +1195,43 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
         notify?.('内容完全相同的文件已导入过，本次跳过', 'info')
       } else {
         notify?.(`导入完成：${result.ingested} 条入库，${result.rejected} 条被拒绝`, result.rejected > 0 ? 'warning' : 'success')
+      }
+    } catch (error) {
+      notify?.(error.message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const runServerImport = async () => {
+    const path = serverPath.trim()
+    if (!activeMapping) {
+      notify?.('请先批准当前文件结构的映射', 'warning')
+      return
+    }
+    if (!preview?.inputSha256) {
+      notify?.('请先预览当前服务器文件，确认内容哈希后再导入', 'warning')
+      return
+    }
+    if (!preview.schemaFingerprint || activeMapping.schemaFingerprint !== preview.schemaFingerprint) {
+      notify?.('已批准映射与当前文件结构不一致，请保存并批准本次预览的映射', 'warning')
+      return
+    }
+    setBusy(true)
+    try {
+      const result = await adminApi.serverImport(token, source.sourceKey, {
+        ...(path ? { serverPath: path } : {}),
+        expectedSha256: preview.inputSha256,
+      })
+      mappings.refresh()
+      runs.refresh()
+      if (result.status === 'skipped') {
+        notify?.('当前内容与已成功导入的文件相同，本次跳过', 'info')
+      } else {
+        notify?.(
+          `导入完成：${formatNumber(result.ingested || 0)} 条入库，${formatNumber(result.rejected || 0)} 条被拒绝`,
+          result.rejected > 0 ? 'warning' : 'success',
+        )
       }
     } catch (error) {
       notify?.(error.message, 'error')
@@ -1283,7 +1395,9 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
         {mappings.loading ? <LoadingState /> : null}
         {mappings.error ? <ErrorState error={mappings.error} onRetry={mappings.refresh} /> : null}
         {(mappings.data || []).length === 0 ? (
-          <EmptyState icon={Plugs} title="还没有映射" description={currentSource.sourceKind === 'file' ? '先上传一个样例文件生成建议映射。' : '根据探测到的字段创建一个版本化 fieldMap。'} />
+          <EmptyState icon={Plugs} title="还没有映射" description={currentSource.sourceKind === 'file'
+            ? (isServerPathSource ? '先读取服务器文件，匹配或生成建议映射。' : '先上传一个样例文件生成建议映射。')
+            : '根据探测到的字段创建一个版本化 fieldMap。'} />
         ) : (
           <DataTable label="字段映射版本">
             <thead><tr><th>版本</th><th>来源</th><th>模型</th><th>状态</th><th>创建时间</th><th /></tr></thead>
@@ -1291,7 +1405,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
               {(mappings.data || []).map((mapping) => (
                 <tr key={mapping.id}>
                   <td>v{mapping.version}</td>
-                  <td>{{ manual: '手动', agent: 'Agent 建议', inferred: '规则推断' }[mapping.origin] || mapping.origin}</td>
+                  <td>{{ manual: '手动', agent: 'Agent 建议', inferred: '规则推断', format_rule: '格式规则' }[mapping.origin] || mapping.origin}</td>
                   <td><code>{mapping.agentModel || '—'}</code></td>
                   <td><StatusBadge status={mapping.approved ? 'active' : 'pending'} label={mapping.approved ? '已批准' : '待批准'} /></td>
                   <td>{formatDate(mapping.createdAt)}</td>
@@ -1317,24 +1431,62 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
       </Panel>
 
       {currentSource.sourceKind === 'file' ? <Panel
-        title="上传"
+        title={isServerPathSource ? '服务器文件' : '上传'}
         subtitle={activeMapping ? `将使用已批准的映射 v${activeMapping.version}` : '尚无已批准映射，只能预览 · 单文件上限 64 MiB · 表格与 JSONL 最多 50 万行'}
         actions={
-          <>
-            <input ref={fileRef} type="file" hidden accept=".xlsx,.xlsm,.csv,.tsv,.jsonl,.ndjson,.txt,.md"
-              onChange={(event) => {
-                const file = event.target.files?.[0]
-                if (file) (intentRef.current === 'import' ? runImport : runPreview)(file)
-                // Reset so re-selecting the same file fires change again.
-                event.target.value = ''
-              }} />
-            <button className="qp-button qp-button--ghost" type="button" disabled={busy}
-              onClick={() => { intentRef.current = 'preview'; fileRef.current?.click() }}>
-              <FileArrowUp size={16} aria-hidden="true" /> 选择文件并预览
-            </button>
-          </>
+          isServerPathSource ? (
+            <>
+              <button className="qp-button qp-button--ghost" type="button" disabled={busy}
+                onClick={runServerPreview}>
+                <MagnifyingGlass size={16} aria-hidden="true" /> 读取并预览
+              </button>
+              <button className="qp-button" type="button"
+                disabled={busy || !serverImportReady}
+                title={!activeMapping
+                  ? '需先批准映射'
+                  : !preview?.inputSha256
+                    ? '需先预览当前文件'
+                    : !serverImportReady
+                      ? '需批准与当前文件结构一致的映射'
+                      : ''}
+                onClick={runServerImport}>
+                <FileArrowUp size={16} aria-hidden="true" /> 从服务器导入
+              </button>
+            </>
+          ) : (
+            <>
+              <input ref={fileRef} type="file" hidden accept=".xlsx,.xlsm,.csv,.tsv,.jsonl,.ndjson,.txt,.md"
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  if (file) (intentRef.current === 'import' ? runImport : runPreview)(file)
+                  // Reset so re-selecting the same file fires change again.
+                  event.target.value = ''
+                }} />
+              <button className="qp-button qp-button--ghost" type="button" disabled={busy}
+                onClick={() => { intentRef.current = 'preview'; fileRef.current?.click() }}>
+                <FileArrowUp size={16} aria-hidden="true" /> 选择文件并预览
+              </button>
+            </>
+          )
         }
       >
+        {isServerPathSource ? (
+          <div className="mih-server-file-control">
+            <Field label="服务器文件路径" hint="留空读取已注册文件；也可粘贴白名单内另一精确路径。不支持目录和通配符">
+              <input className="qp-input mih-server-path-input" value={serverPath} spellCheck="false"
+                autoComplete="off" placeholder="/shared_dir/reports/2026-08/report.xlsx"
+                onChange={(event) => { setServerPath(event.target.value); setPreview(null) }} />
+            </Field>
+            {serverFileRoots.loading ? <small>正在核对允许的服务器根目录…</small> : null}
+            {serverFileRoots.error ? <ErrorState error={serverFileRoots.error} onRetry={serverFileRoots.refresh} /> : null}
+            <p>已注册安全定位：<code>{currentSource.connection?.rootId || '受控根目录'}:{currentSource.connection?.relativePath || '—'}</code></p>
+            {asList(serverFileRoots.data).length > 0 ? (
+              <p>可用只读根标识：{asList(serverFileRoots.data).map((root) => (
+                <code key={root.rootId}>{root.rootId}</code>
+              ))}</p>
+            ) : null}
+          </div>
+        ) : null}
         <label className={`mih-agent-consent${agentAvailable ? '' : ' is-disabled'}`}>
           <input type="checkbox" checked={useAgentPreview} disabled={!agentAvailable || busy}
             onChange={(event) => setUseAgentPreview(event.target.checked)} />
@@ -1356,10 +1508,33 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
           <>
             <div className="mih-metric-grid mih-metric-grid--compact">
               <MetricCard icon={Table} label="行数" value={formatNumber(preview.rowCount)} />
-              <MetricCard icon={Database} label="列数" value={formatNumber(preview.columns.length)} />
-              <MetricCard icon={Warning} label="未映射列" value={formatNumber(preview.unmappedColumns.length)}
-                hint="这些列会进入 extensions" tone={preview.unmappedColumns.length > 0 ? 'warning' : 'primary'} />
+              <MetricCard icon={Database} label="列数" value={formatNumber(preview.columns?.length || 0)} />
+              <MetricCard icon={Warning} label="未映射列" value={formatNumber(preview.unmappedColumns?.length || 0)}
+                hint="这些列会进入 extensions" tone={preview.unmappedColumns?.length > 0 ? 'warning' : 'primary'} />
             </div>
+            {preview.schemaFingerprint ? (
+              <div className={`mih-format-rule-match${preview.matchedFormatRule ? ' is-matched' : ''}`}>
+                <header>
+                  <div>
+                    <strong>{preview.matchedFormatRule ? '已匹配格式规则' : '发现新的文件结构'}</strong>
+                    <span>{preview.matchedFormatRule
+                      ? '相同结构的文件可以复用这条已批准规则'
+                      : '尚无精确结构匹配；保存并批准后可供同结构文件复用'}</span>
+                  </div>
+                  <StatusBadge status={preview.matchedFormatRule ? 'active' : 'warning'}
+                    label={preview.matchedFormatRule ? '精确匹配' : '待确认'} />
+                </header>
+                <dl>
+                  <div><dt>结构指纹</dt><dd><code>{preview.schemaFingerprint}</code></dd></div>
+                  <div><dt>格式规则</dt><dd>{preview.matchedFormatRule
+                    ? <><strong>{preview.matchedFormatRule.displayName}</strong><small><code>{preview.matchedFormatRule.ruleKey}</code> · v{preview.matchedFormatRule.version}</small></>
+                    : '—'}</dd></div>
+                </dl>
+                {preview.fileStructure ? (
+                  <details><summary>查看文件结构证据</summary><pre className="mih-code-block">{JSON.stringify(preview.fileStructure, null, 2)}</pre></details>
+                ) : null}
+              </div>
+            ) : null}
             {preview.suggestion?.degradedReason ? (
               // Say when the suggestion came from the deterministic matcher
               // because the model was unavailable, rather than presenting it as
@@ -1371,22 +1546,36 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
             <p className="mih-preview-provenance">
               建议来源：{preview.suggestion?.origin === 'agent'
                 ? `Agent · ${preview.suggestion.model || '已配置模型'}`
-                : 'Hub 本地规则推断'}
+                : preview.suggestion?.origin === 'format_rule'
+                  ? `格式规则 · ${preview.matchedFormatRule?.displayName || '精确结构匹配'}`
+                  : 'Hub 本地规则推断'}
             </p>
             <pre className="mih-code-block">{JSON.stringify(preview.suggestion?.fieldMap || preview.inferredFieldMap, null, 2)}</pre>
             <div className="mih-page-actions">
               <button className="qp-button qp-button--ghost" type="button" disabled={busy} onClick={saveSuggestion}>
                 保存为新映射版本
               </button>
-              <button className="qp-button" type="button" disabled={busy || !activeMapping}
-                onClick={() => { intentRef.current = 'import'; fileRef.current?.click() }}>
-                {activeMapping ? '选择文件并导入' : '需要先批准映射'}
-              </button>
+              {isServerPathSource ? (
+                <button className="qp-button" type="button" disabled={busy || !serverImportReady}
+                  title={serverImportReady ? '' : '需先批准与当前文件结构一致的映射'}
+                  onClick={runServerImport}>
+                  {serverImportReady
+                    ? '从服务器导入当前文件'
+                    : activeMapping ? '需要批准当前结构' : '需要先批准映射'}
+                </button>
+              ) : (
+                <button className="qp-button" type="button" disabled={busy || !activeMapping}
+                  onClick={() => { intentRef.current = 'import'; fileRef.current?.click() }}>
+                  {activeMapping ? '选择文件并导入' : '需要先批准映射'}
+                </button>
+              )}
             </div>
           </>
         ) : (
-          <EmptyState icon={FileArrowUp} title="选择一个样例文件"
-            description="预览会显示列、行数、推断映射和前几行的映射结果，不会写入任何数据。" />
+          <EmptyState icon={FileArrowUp} title={isServerPathSource ? '读取服务器文件' : '选择一个样例文件'}
+            description={isServerPathSource
+              ? '留空即读取已注册文件，也可粘贴白名单内其他精确路径；预览不会写入数据。'
+              : '预览会显示列、行数、推断映射和前几行的映射结果，不会写入任何数据。'} />
         )}
       </Panel> : null}
 

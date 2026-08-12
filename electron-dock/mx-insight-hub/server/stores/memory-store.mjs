@@ -25,6 +25,10 @@ export class MemoryStore {
     this.capabilityPolicies = new Map()
     this.requests = new Map()
     this.requestsByScope = new Map()
+    // File/source administration is durable only in PostgreSQL. Keeping a
+    // small in-memory catalog makes the local UI and focused HTTP tests honest
+    // enough to exercise registration without pretending imports are durable.
+    this.externalSources = new Map()
   }
 
   async close() {}
@@ -437,6 +441,40 @@ export class MemoryStore {
       records: [],
       pageSize,
     }
+  }
+
+  async createExternalSource({
+    sourceKey,
+    displayName,
+    sourceKind,
+    datasetId,
+    platform,
+    objectType,
+    status = 'active',
+    connection = {},
+    syncIntervalSeconds = 60,
+  }) {
+    if (this.externalSources.has(sourceKey)) {
+      throw new AppError(409, 'source_exists', `Source key already exists: ${sourceKey}`)
+    }
+    const createdAt = nowIso()
+    const source = {
+      id: randomUUID(), sourceKey, displayName, sourceKind, datasetId, platform,
+      objectType: objectType || 'record', status, connection,
+      syncIntervalSeconds, createdAt, updatedAt: createdAt,
+    }
+    this.externalSources.set(sourceKey, source)
+    return clone(source)
+  }
+
+  async getExternalSource(sourceKey) {
+    return clone(this.externalSources.get(sourceKey) || null)
+  }
+
+  async listExternalSources() {
+    return clone([...this.externalSources.values()].sort((left, right) => (
+      right.createdAt.localeCompare(left.createdAt)
+    )))
   }
 
   // Authoritative ingestion needs PostgreSQL transactions and uniqueness, so

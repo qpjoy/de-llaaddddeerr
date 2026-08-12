@@ -1,6 +1,8 @@
 # `/shared_dir` 文件接入设计与迁移手册
 
-状态：设计；当前仓库没有 `/shared_dir` watcher/importer，本手册中的 agent、parser、对象存储和 manifest 表尚未实现。任何首轮导入都必须先以 dry-run inventory 开始，不移动、不删除源文件。
+状态：分阶段交付。精确单文件的服务器路径注册、预览、结构指纹、格式规则复用、观察证据
+与手动导入已经实现；`/shared_dir` 目录 watcher、landing agent、对象存储、递归 manifest
+和 archive importer 尚未实现。现有功能从不移动、不重命名、不删除源文件。
 
 ## 1. 已知输入
 
@@ -30,15 +32,18 @@ flowchart LR
   P --> Z["Quarantine + error evidence"]
 ```
 
-生产推荐在 Night-All/文件所在宿主机运行最小 landing agent，单向上传对象和 manifest；Hub API 不挂载宿主根目录。过渡期单节点 K8s 可以把运维预先批准的精确目录以 `readOnly: true` hostPath 挂给专用 landing workload，但这不能成为多节点部署契约，也不能挂给 public/admin Pod。
+未来目录级生产拓扑推荐在 Night-All/文件所在宿主机运行最小 landing agent，单向上传对象和 manifest；届时 Hub API 不挂载宿主根目录。过渡期单节点 K8s 可以把运维预先批准的精确目录以 `readOnly: true` hostPath 挂给专用 landing workload。当前已实现的同步单文件能力允许把同一精确目录只读挂给 Admin/combined ingest runtime；两种方案都不能把该目录挂给 Public listener，也不能把过渡挂载当成多节点部署契约。
 
-运行时配置维护不可由 API 修改的 `rootId -> mountPath` allowlist。数据库、API 和界面
-只保存 `rootId`、规范化相对路径和 opaque fileVersionId；不得接收绝对路径、glob 或
-动态 mountPath。真实路径解析后必须仍位于批准根目录内，且拒绝 symlink 逃逸、device、
-socket 和 executable。特别地，Admin Pod 使用 hostNetwork，不能为了“方便浏览文件”
-把宿主目录挂到 Admin。
+运行时配置以 `MX_INSIGHT_SERVER_FILE_ROOTS` 维护不可由 API 修改的
+`rootId -> mountPath` allowlist。界面可以用普通文本框粘贴绝对路径，但 API 只把它当作
+瞬时输入并立即映射；数据库只保存 `rootId`、规范化相对路径和内容哈希，不保存绝对路径，
+也不接受 glob 或动态 mountPath。真实路径解析后必须仍位于批准根目录内，且拒绝任何
+symlink、device、socket、executable、未知扩展和超过 64 MiB 的文件。当前同步单文件
+能力要求 Admin/combined runtime 具有该精确目录的只读 mount；Public listener 不加载根。
 
-## 3. 不变式
+## 3. 未来目录 watcher 的不变式（未实现）
+
+以下约束属于后续 landing agent、raw bucket 与目录 watcher，而不是当前同步单文件接口：
 
 - 源目录只读；importer 不 rename、move、delete 或修复源文件。
 - 文件在两次扫描间 `size + mtime` 稳定（默认间隔 60 秒）后才接收；支持上游使用 `.part` 后原子改名。
@@ -123,9 +128,26 @@ stateDiagram-v2
 - 文件可能包含账号、联系方式、泄漏或其他敏感数据，dataset catalog 必须先设置用途、法务依据、retention、字段脱敏和访问审批；
 - 日志只记录 manifest ID/hash prefix/error code，不打印整行数据、token 或个人字段。
 
-## 8. 首次迁移步骤
+## 8. 当前可用的精确单文件流程
 
-### Phase A：只读 inventory
+1. 运维在 Hub runtime 配置静态 allowlist，例如
+   `MX_INSIGHT_SERVER_FILE_ROOTS={"internal":"/shared_dir/import"}`，并以只读方式挂载同一路径；
+2. 使用 Hub Admin Token 进入“外部数据源”，注册文件源并选择“服务器路径”；
+3. 在普通文本框直接粘贴白名单内的精确文件路径；注册后 catalog 仅显示
+   `internal:relative/path`；
+4. “读取并预览”生成内容 SHA-256、结构指纹和本地映射建议；若同 dataset/platform/
+   objectType 已有完全相同指纹，会显示并适配已批准格式规则；
+5. 保存并显式批准 mapping。新结构形成不可变规则版本，同结构则引用已有版本；
+6. 再次预览后导入。导入必须携带该次 preview SHA，文件变化或 schema drift 会返回 409；
+7. `ingest.file_observations` 保存路径 locator、内容版本、结构/规则及 import run 证据。
+
+当前支持 `.csv/.tsv/.jsonl/.ndjson/.xlsx/.xlsm/.txt/.md`；不支持目录、glob、PDF、DOCX、
+ZIP/RAR、Parquet、老 `.xls` 或 `.json` 数组。HanLP 在 PG 写入后由 ES projector 使用，
+不是文件解析的前置步骤。
+
+## 9. 后续目录迁移步骤
+
+### Phase A：只读 inventory（未实现）
 
 输出机器可读 manifest，不上传内容：
 
@@ -151,7 +173,7 @@ relative_path, size, mtime, detected_mime, extension, sha256(optional), decision
 
 周期扫描或 inotify 只负责发现；仍需稳定窗口和全量 hash。定期做低频 reconcile，弥补 watcher 丢事件。源删除默认只登记 `source_missing`，不立即删除已发布数据。
 
-## 9. 需要实现的命令契约
+## 10. 需要实现的命令契约
 
 后续 importer 应提供如下安全入口；本文不把未实现命令写成可运行事实：
 
@@ -169,7 +191,7 @@ mx-insight ingest runs retry <run-id> --failed-only
 source、bucket、database、文件数和预计字节数。不得提供“清空源目录”或自动删除 raw
 的快捷命令。
 
-## 10. 验收
+## 11. 验收
 
 - 同一 manifest 连续导入三次，canonical 记录数不增长，observation/run 证据符合策略；
 - 同一路径内容变化生成新 file version，不覆盖旧 raw；

@@ -8,10 +8,10 @@ Hub 已经有租户、调用者、多 API Key、平台授权、配额和调用�
 Night-All 数据查询为中心。HanLP、Jieba、CJK bigram 已属于 Hub 的搜索依赖，
 却没有一个可计量、可授权、能说明实际后端的通用分词接口。
 
-文件接入已经支持单文件上传、人工批准的版本化字段映射、原始行保留、文件哈希
-幂等和 canonical 业务键去重；它还不支持宿主机目录、跨来源复用的格式规则、规则
-提示词生命周期和大批量低成本分类。管理台也缺少一个从 PostgreSQL 权威数据出发
-的数据中心。
+文件接入已经支持单文件上传、受控服务器路径、人工批准的版本化字段映射、原始行保留、
+文件哈希幂等、结构规则复用和 canonical 业务键去重；它还不支持宿主机目录 watcher、
+规则提示词生命周期和大批量低成本分类。管理台已有从 PostgreSQL 权威数据出发的
+数据中心。
 
 这些能力必须扩展 Hub，但不能改变 Launcher/MX-H2I 的登录、DNS、VPN、WireGuard、
 Clash 或用户联网链路。
@@ -80,21 +80,25 @@ HanLP -> Jieba -> CJK bigram
 数据中心不以 ES 命中数作为权威计数。ES 整库删除或重建期间，PG 中的数据集合仍必须
 可见。原始 payload、连接凭据和未筛选 `extensions` 不在目录列表直接展开。
 
-### 4. 宿主路径只进入专用 ingest 边界
+### 4. 宿主路径只进入受控 ingest 边界
 
-支持管理员从已登记的服务器根中选择相对目录/文件，但不允许浏览器登记任意绝对路径，
-更不能让 Admin/Public Pod 直接读取。根目录只能由运维配置为只读 allowlist，例如：
+管理界面使用普通文本框，允许管理员直接粘贴一个服务器绝对文件路径，不提供路径下拉、
+目录浏览、glob 或递归扫描。绝对路径只是输入体验：后端必须立即把它匹配到运维静态配置
+的只读 allowlist，持久化时只保存 `rootId + normalized relativePath`，不把绝对路径写入
+catalog、observation、import run、URL、Agent 请求或响应。例如：
 
 ```text
 source root: internal-files -> /srv/mx-insight/import
-request path: reports/2026-08/
+pasted path: /srv/mx-insight/import/reports/2026-08/report.xlsx
+stored locator: internal-files + reports/2026-08/report.xlsx
 ```
 
-解析后的真实路径必须仍位于该根目录，拒绝 `..`、符号链接逃逸、设备文件、socket、
-可执行文件和未知 archive extractor。API 不接受 glob；批量选择来自 landing agent 生成的
-目录 inventory/manifest。专用 ingest worker/landing agent 获得该根目录的
-read-only mount；Public/Admin Pod 不挂宿主数据目录。多节点环境优先使用落地 agent 将
-content-addressed raw object 与 manifest 单向上传，不能把单节点 `hostPath` 当成集群协议。
+解析后的真实路径必须仍位于该根目录，拒绝 `..`、任意符号链接、设备文件、socket、
+可执行文件、未知格式和读取过程中的 inode/size/mtime 变化。当前单文件预览/导入在配置了
+allowlist 的 Admin/combined ingest runtime 同步执行，导入仍由 source advisory lock 串行；
+Public listener 从不加载文件根。生产只应给这个受控 runtime 挂精确目录的 read-only mount。
+多节点或目录批量接入仍优先使用 landing agent + content-addressed object/manifest，不能把
+单节点 hostPath 当成集群协议。
 
 批量提交先做 inventory/preview，再由用户批准规则和发布范围；不让 Agent 在看不到
 完整证据时直接把一整个目录写进 canonical。
