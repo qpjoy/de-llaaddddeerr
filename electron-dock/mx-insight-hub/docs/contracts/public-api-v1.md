@@ -1,4 +1,4 @@
-# Public API v1
+# Open API v1
 
 Base path: `/api/v1`. Authentication uses `Authorization: Bearer <mx key>` or `x-api-key`.
 
@@ -8,7 +8,65 @@ Base path: `/api/v1`. Authentication uses `Authorization: Bearer <mx key>` or `x
 GET /api/v1/data/capabilities
 ```
 
-Returns only platforms/capabilities granted to the authenticated consumer. Provider names and internal endpoint IDs are omitted.
+Returns only platforms and generic capabilities granted to the authenticated
+consumer. Generic capabilities are returned separately from `platforms`, for
+example:
+
+```json
+{
+  "data": {
+    "platforms": [],
+    "capabilities": [{ "capability": "nlp.tokenize", "ready": true }]
+  }
+}
+```
+
+Provider names and internal endpoint IDs are omitted.
+
+## Tokenize text
+
+```http
+POST /api/v1/tools/tokenize
+Authorization: Bearer <mx key>
+Idempotency-Key: <caller-generated stable key>
+Content-Type: application/json
+
+{ "text": "吴恩达与人工智能" }
+```
+
+This route requires the consumer's explicit `nlp.tokenize` capability grant;
+it does not imply or require any platform grant. The body is a strict object
+containing only `text`. Text is trimmed, must contain a Unicode letter or
+number, may not contain unsafe control characters, and is limited to 4,096
+characters. The complete JSON body is additionally bounded at 16 KiB.
+
+```json
+{
+  "data": {
+    "capability": "nlp.tokenize",
+    "tokens": ["吴恩达", "与", "人工智能"],
+    "actualBackend": "hanlp",
+    "degraded": false,
+    "errorCode": null
+  },
+  "requestId": "00000000-0000-4000-8000-000000000004"
+}
+```
+
+`actualBackend` is the backend that produced this response, one of `hanlp`,
+`jieba` or `bigram`; it is not inferred from configuration. `degraded=true`
+means the preferred backend failed and a lower-quality backend produced the
+tokens. `errorCode`, when present, is a bounded category and never contains an
+upstream body, URL, credential or stack.
+
+The request uses the same idempotency ledger as search. Replaying the same path
+and body with the same key returns the stored bounded response without another
+segmenter call or usage charge. Reusing that key with different text returns
+`idempotency_conflict`. A successful request consumes one request from the
+capability's `maxRequests/windowSeconds` policy and records at least one usage
+unit, normally the number of returned tokens. The original input text is not
+stored in usage evidence; the bounded public response is retained solely for
+idempotent replay.
 
 ## Search
 
@@ -274,7 +332,10 @@ future capability; the Telegram-specific entity route above is implemented.
 GET /api/v1/requests/{requestId}
 ```
 
-Only the owning consumer can read the record. An `unknown` state means the upstream outcome is ambiguous; the caller must not automatically repeat the request with a new key.
+Only the owning consumer can read the record. Data calls identify their
+`platform`; generic tools identify their `capability`. Exactly one is present.
+An `unknown` state means the outcome is ambiguous; the caller must not
+automatically repeat the request with a new key.
 
 ## Usage
 
@@ -282,7 +343,8 @@ Only the owning consumer can read the record. An `unknown` state means the upstr
 GET /api/v1/usage?from=2026-08-01T00:00:00Z&to=2026-08-04T00:00:00Z
 ```
 
-Returns only the authenticated consumer’s usage.
+Returns only the authenticated consumer’s usage. Existing data usage remains
+under `byPlatform`; generic tools are reported separately under `byCapability`.
 
 ## Error semantics
 
@@ -297,9 +359,14 @@ Returns only the authenticated consumer’s usage.
 | `410` | A search cursor's Elasticsearch PIT has expired; restart from the first page. |
 | `429` | Request/concurrency/period quota exhausted. |
 | `502` | Definite Night-All rejection or ambiguous upstream outcome. |
-| `503` | A required stored-data runtime is unavailable. |
+| `503` | A required stored-data or tokenizer runtime is unavailable. |
 
 Clients should retry only safe `GET` operations and documented pre-dispatch failures. Costly `POST` retry always reuses the same idempotency key.
+
+Tokenizer errors add `capability_not_granted`, `tokenizer_unavailable` and
+`tokenizer_invalid_response`. Any segmenter exception is mapped to a fixed safe
+message; upstream response bodies and credentials are never copied into the
+client error.
 
 For Telegram history, `400` includes `invalid_request`, `invalid_cursor`,
 `page_size_exceeded` and `unsupported_fields`; `401` is `api_key_required` or

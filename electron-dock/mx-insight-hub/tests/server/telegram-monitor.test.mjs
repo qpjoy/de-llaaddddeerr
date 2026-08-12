@@ -1080,6 +1080,99 @@ test('file preview stays local by default and Agent opt-in sends column names on
   })
 })
 
+test('file import route holds one source lock for the whole import and releases it for retry', async () => {
+  let locked = false
+  let importCalls = 0
+  let signalStarted
+  let releaseImport
+  const lockClient = { name: 'held-source-lock-session' }
+  const started = new Promise((resolve) => { signalStarted = resolve })
+  const gate = new Promise((resolve) => { releaseImport = resolve })
+  const databasePuller = {
+    withSourceLocks: async (keys, operation) => {
+      assert.deepEqual(keys, ['file-source'])
+      if (locked) throw new AppError(409, 'source_busy', 'source busy')
+      locked = true
+      try {
+        return await operation(async () => {}, [lockClient])
+      } finally {
+        locked = false
+      }
+    },
+  }
+  const importer = {
+    importFile: async (input) => {
+      assert.equal(input.sessionClient, lockClient)
+      importCalls += 1
+      signalStarted()
+      await gate
+      return { status: 'succeeded', importRunId: `run-${importCalls}` }
+    },
+  }
+  const app = createApp({
+    service: {}, store: {}, databasePuller, importer,
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+
+  await withServer(app, async (baseUrl) => {
+    const url = `${baseUrl}/internal/v1/admin/sources/file-source/import?filename=sample.csv`
+    const options = {
+      method: 'POST',
+      headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN, 'content-type': 'text/csv' },
+      body: 'id\n1\n',
+    }
+    const firstPromise = fetch(url, options)
+    await started
+    const concurrent = await fetch(url, options)
+    assert.equal(concurrent.status, 409)
+    assert.equal((await concurrent.json()).error.code, 'source_busy')
+    assert.equal(importCalls, 1)
+
+    releaseImport()
+    assert.equal((await firstPromise).status, 201)
+    assert.equal(locked, false)
+
+    const retry = await fetch(url, options)
+    assert.equal(retry.status, 201)
+    assert.equal(importCalls, 2)
+  })
+})
+
+test('file import route fails closed when its source lock has no held PostgreSQL session', async () => {
+  let imported = false
+  const app = createApp({
+    service: {},
+    store: {},
+    databasePuller: {
+      withSourceLocks: async (_keys, operation) => operation(async () => {}, []),
+    },
+    importer: {
+      importFile: async () => {
+        imported = true
+        return { status: 'succeeded' }
+      },
+    },
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    adminToken: ADMIN_TOKEN,
+  })
+
+  await withServer(app, async (baseUrl) => {
+    const result = await call(
+      baseUrl,
+      '/internal/v1/admin/sources/file-source/import?filename=sample.csv',
+      {
+        method: 'POST',
+        headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN, 'content-type': 'text/csv' },
+        body: 'id\n1\n',
+      },
+    )
+    assert.equal(result.response.status, 503)
+    assert.equal(result.payload.error.code, 'source_lock_unavailable')
+    assert.equal(imported, false)
+  })
+})
+
 test('manual sync does not fork a second run while the source cursor is running', async () => {
   let described = false
   let enqueued = false

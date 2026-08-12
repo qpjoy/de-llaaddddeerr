@@ -16,6 +16,7 @@ import {
   SidebarSimple,
   SignOut,
   Users,
+  Stack,
   X,
 } from '@phosphor-icons/react'
 import { adminApi, signInWithLauncher } from './api.js'
@@ -30,6 +31,7 @@ import {
   UsagePage,
 } from './pages.jsx'
 import { AgentPage, BackfillPage, RetrievalPage, SourcesPage } from './pages-data.jsx'
+import { DataCenterPage } from './pages-catalog.jsx'
 
 const SESSION_KEY = 'mx-insight-hub.admin-token'
 
@@ -41,7 +43,8 @@ const ROUTES = [
   { path: '/consumers', label: '调用者', description: '租户与业务身份', icon: Users, group: '业务治理', component: ConsumersPage, capability: 'consumer.read' },
   { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
-  { path: '/platforms', label: '平台能力', description: '平台授权与策略', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
+  { path: '/platforms', label: '开放能力', description: '数据平台与通用 API', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
+  { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/sources', label: '外部数据源', description: '表格、文本与异构库', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },

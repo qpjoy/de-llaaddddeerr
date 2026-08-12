@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-08-10.
+Last reviewed: 2026-08-12.
 
 This directory is the source of truth for MX Insight Hub. Night-All-specific implementation details remain in the Night-All repository; this project records only the stable dependency contract and ownership boundary.
 
@@ -10,12 +10,14 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | --- | --- |
 | Modular monolith API | Implemented: multiple tenants, tenant rename, consumers, one-time API keys, explicit platform grants, per-platform limits, request idempotency, usage and health. Each consumer belongs to exactly one tenant. |
 | Admin console | Implemented with the shared MX Launcher Neon Void design package, including platform-admin tenant create/list/rename and explicit tenant selection when creating a consumer. |
+| Open capabilities | Implemented: platform-independent capability grants and quotas reuse the existing tenant/consumer/API Key lifecycle. `nlp.tokenize` is the first capability and reports the actual HanLP/Jieba/bigram backend plus degradation state. |
+| Data Center | Implemented as an Admin-Token-only PostgreSQL canonical catalog with dataset aggregates and a customer-safe recent-record field allowlist. Elasticsearch is not used as the authoritative count. |
 | Night-All adapter | Implemented for the private `/api/v1/data/search` facade; provider details are filtered. |
 | Local lifecycle | Docker Compose, PostgreSQL, bootstrap and smoke commands. |
 | Internal K8s | One-click lifecycle and manifests implemented: independent Hub namespace, a dedicated Hub database/role provisioned inside shared `mx-common` PostgreSQL, migration Job, split public/Admin Deployments, projector/ingest workers, Services and NetworkPolicy. A retired Hub-local PostgreSQL is decommissioned only by an explicit destructive command. |
 | Launcher integration | Lifecycle delegation, offline-safe status summary and AppCenter entrypoint. |
 | Unified identity | Launcher opaque-token sign-in/introspection, Hub-local external identity bindings, multi-tenant memberships, per-tenant roles, explicit platform-admin scope mapping and the global Admin Token break-glass path are implemented. Direct JWT/JWKS validation is not used because Launcher tokens are opaque. |
-| Data ingest and serving plane | Admin-token-only PostgreSQL/file source management, source objects, canonical records/revisions/tombstones, projection outbox, durable queues/cursors, direct file import, versioned mappings, PostgreSQL external pull and import-run evidence are implemented. PostgreSQL credentials live directly in `catalog.external_sources.connection`; catalog backups are therefore sensitive. `/shared_dir` watcher, immutable object/cloud storage adapters, a generic CDC connector and non-PostgreSQL database connectors are not. |
+| Data ingest and serving plane | Admin-token-only PostgreSQL/file source management, source objects, canonical records/revisions/tombstones, projection outbox, durable queues/cursors, direct file import, versioned mappings, interpretation-aware file idempotency, PostgreSQL external pull and import-run evidence are implemented. PostgreSQL credentials live directly in `catalog.external_sources.connection`; catalog backups are therefore sensitive. `/shared_dir` watcher/landing agent, immutable object/cloud storage adapters, reusable cross-source format rules, prompt CRUD, a generic CDC connector and non-PostgreSQL database connectors are not. |
 | Telegram monitor sources | `telegram.monitor.chats.v1` and `telegram.monitor.messages.v1`, a fixed two-input business task, explicit idempotent source-contract preparation, source progress/import evidence, strict history, Night-All-v1-compatible stored search and fuzzy entity search are implemented. Preparation installs the database-enforced watermark/trigger/index contract with one-request DDL credentials while ordinary ingest stays read-only; activation remains fail-closed until probe and writer attestation pass. These canonical datasets have no `tenant_id`; all consumers with the `telegram` grant read the same corpus. |
 | Search/retrieval | Canonical projection outbox, projector, customer-safe Elasticsearch full-text/name fields, PostgreSQL degradation paths, Admin semantic search and shared `mx-common` search deployment are implemented. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
 | Private/public DNS routes | Deliberately not auto-created. They require route/TLS review and a deployed public Service. |
@@ -36,7 +38,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 10. [Commercial control plane](product/commercial-control-plane.md)
 11. [Sub2API parity and roadmap](product/sub2api-parity-roadmap.md)
 12. [Admin console design](product/admin-console-design.md)
-13. [Public API v1](contracts/public-api-v1.md)
+13. [Open API v1](contracts/public-api-v1.md)
    - Machine-readable contract: [OpenAPI](contracts/openapi.yaml)
 14. [Key lifecycle](security/key-lifecycle.md)
 15. [Local development](operations/local-development.md)
@@ -46,6 +48,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 19. [Observability and SLO](operations/observability-slo.md)
 20. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
 21. [Agent provider settings](operations/agent-provider-settings.md)
+22. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
 
 ## Decisions
 
@@ -56,3 +59,4 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 - [ADR-0005: authoritative data and rebuildable search projections](adr/0005-authoritative-data-and-search-projections.md)
 - [ADR-0006: idempotent ingestion and independent checkpoints](adr/0006-idempotent-ingestion-and-checkpoints.md)
 - [ADR-0007: managed data sources and change watermarks](adr/0007-managed-data-sources-and-change-watermarks.md)
+- [ADR-0008: open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)

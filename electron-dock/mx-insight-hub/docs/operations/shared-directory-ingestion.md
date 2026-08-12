@@ -30,7 +30,13 @@ flowchart LR
   P --> Z["Quarantine + error evidence"]
 ```
 
-生产推荐在 Night-All/文件所在宿主机运行最小 landing agent，单向上传对象和 manifest；Hub API 不挂载宿主根目录。过渡期单节点 K8s 可以把 `/shared_dir` 以 `readOnly: true` hostPath 挂给专用 importer Job，但这不能成为多节点部署契约，也不能挂给 public/admin Pod。
+生产推荐在 Night-All/文件所在宿主机运行最小 landing agent，单向上传对象和 manifest；Hub API 不挂载宿主根目录。过渡期单节点 K8s 可以把运维预先批准的精确目录以 `readOnly: true` hostPath 挂给专用 landing workload，但这不能成为多节点部署契约，也不能挂给 public/admin Pod。
+
+运行时配置维护不可由 API 修改的 `rootId -> mountPath` allowlist。数据库、API 和界面
+只保存 `rootId`、规范化相对路径和 opaque fileVersionId；不得接收绝对路径、glob 或
+动态 mountPath。真实路径解析后必须仍位于批准根目录内，且拒绝 symlink 逃逸、device、
+socket 和 executable。特别地，Admin Pod 使用 hostNetwork，不能为了“方便浏览文件”
+把宿主目录挂到 Admin。
 
 ## 3. 不变式
 
@@ -45,11 +51,11 @@ flowchart LR
 ## 4. Manifest 模型
 
 ```text
-file_sources
-  id, host_id, root_path, owner, classification, enabled
+landing_root_state
+  root_id, config_digest, node_id, last_scan_at, status
 
 file_objects
-  id, source_id, relative_path, device_id/inode_hint
+  id, root_id, relative_path, path_key, device_id/inode_hint
   size_bytes, mtime, mime, sha256, raw_uri
   first_seen_at, last_seen_at, state
 
@@ -68,8 +74,11 @@ parse_runs
 
 约束建议：
 
-- `(source_id, relative_path, sha256)` 唯一，保留同一路径的新版本；
+- `path_key = sha256(root_id + "\\0" + normalized_relative_path)`，同一路径是一个 slot；
+- `(file_object_id, sha256)` 唯一，保留同一路径的新版本；
 - `raw_blobs.sha256` 唯一，实现物理 blob 去重；
+- parse/import identity 还必须包含 file hash、format-rule version、parser version、
+  mapping/taxonomy policy；不能让旧的成功导入阻止修复后的新解释；
 - parser 输出使用 [ADR-0006](../adr/0006-idempotent-ingestion-and-checkpoints.md) 的 canonical natural key；
 - manifest 状态只允许单向推进，失败重试创建新的 parse run，不覆盖旧证据。
 
@@ -147,7 +156,7 @@ relative_path, size, mtime, detected_mime, extension, sha256(optional), decision
 后续 importer 应提供如下安全入口；本文不把未实现命令写成可运行事实：
 
 ```text
-mx-insight ingest files inventory --source internal-shared --root /shared_dir --output manifest.json
+mx-insight ingest files inventory --source internal-shared --root-id internal-shared --output manifest.json
 mx-insight ingest files sample --manifest manifest.json --limit-per-type 3
 mx-insight ingest files run --manifest manifest.json --batch-size 100
 mx-insight ingest files reconcile --source internal-shared
@@ -155,7 +164,10 @@ mx-insight ingest runs status <run-id>
 mx-insight ingest runs retry <run-id> --failed-only
 ```
 
-必须默认 dry-run；真实上传/写库需显式 `--execute`，并显示目标 source、bucket、database、文件数和预计字节数。不得提供“清空源目录”或自动删除 raw 的快捷命令。
+`--root-id` 必须已存在于 workload 的静态 allowlist；CLI/API 均不得接受 `--root` 或任意
+绝对路径。所有命令必须默认 dry-run；真实上传/写库需显式 `--execute`，并显示目标
+source、bucket、database、文件数和预计字节数。不得提供“清空源目录”或自动删除 raw
+的快捷命令。
 
 ## 10. 验收
 

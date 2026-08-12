@@ -68,6 +68,24 @@ const PLATFORM_CATALOG = [
 ]
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 }
+const CAPABILITY_CATALOG = {
+  'nlp.tokenize': {
+    label: '中文分词',
+    description: 'HanLP → Jieba → CJK bigram，响应明确本次实际后端与降级状态',
+    endpoint: 'POST /api/v1/tools/tokenize',
+  },
+}
+
+const PUBLIC_DOCS_HREF = (() => {
+  const configured = import.meta.env.VITE_MX_INSIGHT_PUBLIC_DOCS_URL?.trim()
+  if (configured) return configured
+  if (typeof window !== 'undefined' && window.location.port === '18151') {
+    const url = new URL('/docs', window.location.origin)
+    url.port = '18150'
+    return url.toString()
+  }
+  return '/docs'
+})()
 
 function tenantAllows(session, tenantId, capability) {
   if (!tenantId) return false
@@ -993,14 +1011,16 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
   const data = state.data || { tenants: [], consumers: [], configuration: { grants: [], policies: [] } }
   const policies = data.configuration?.policies || []
   const grants = new Set(data.configuration?.grants || [])
+  const capabilityPolicies = data.configuration?.capabilityPolicies || []
+  const capabilityGrants = new Set(data.configuration?.capabilityGrants || [])
   const platformHref = `#/platforms?${new URLSearchParams({ tenantId: data.tenantId || '', consumerId: data.consumerId || '' })}`
   const selectedConsumer = data.consumers.find((consumer) => consumer.id === data.consumerId)
   const canManagePlatform = tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
 
   return (
     <>
-      <PageHeading eyebrow="PLANS / LIMITS / CREDITS" title="套餐与配额" description="当前 MVP 使用租户与平台策略执行请求窗口和分页上限；后续套餐层映射到同一计量模型。" loading={state.loading} onRefresh={state.refresh}>
-        {canManagePlatform ? <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={17} aria-hidden="true" />管理平台策略</a> : null}
+      <PageHeading eyebrow="PLANS / LIMITS / CREDITS" title="套餐与配额" description="数据平台和通用能力共享调用者、API Key 与计量证据，各自执行独立窗口策略。" loading={state.loading} onRefresh={state.refresh}>
+        {canManagePlatform ? <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={17} aria-hidden="true" />管理开放能力</a> : null}
       </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       <section className="qp-panel mih-filterbar">
@@ -1025,6 +1045,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
         <MetricCard icon={Timer} label="窗口长度" value="1 小时" hint={`${DEFAULT_POLICY.windowSeconds} 秒`} tone="info" />
         <MetricCard icon={Database} label="最大分页" value={formatNumber(DEFAULT_POLICY.maxPageSize)} hint="单次 pageSize" tone="warning" />
         <MetricCard icon={Globe} label="已授权平台" value={formatNumber(grants.size)} hint="按调用者显式授权" tone="success" />
+        <MetricCard icon={Brain} label="已授权通用能力" value={formatNumber(capabilityGrants.size)} hint="不隐含数据读取权" tone="info" />
       </section>
 
       <Panel title="平台级配额" subtitle="显式策略覆盖默认基线">
@@ -1053,6 +1074,35 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
           />
         )}
       </Panel>
+
+      <Panel title="通用能力配额" subtitle="与数据平台分开计量，不使用 pageSize">
+        {capabilityPolicies.length ? (
+          <Table label="通用能力配额策略">
+            <thead><tr><th>能力</th><th>授权</th><th>请求上限</th><th>窗口</th><th>更新时间</th></tr></thead>
+            <tbody>
+              {capabilityPolicies.map((policy) => {
+                const metadata = CAPABILITY_CATALOG[policy.capability]
+                return (
+                  <tr key={policy.capability}>
+                    <td><strong>{metadata?.label || policy.capability}</strong><small>{policy.capability}</small></td>
+                    <td><StatusBadge status={capabilityGrants.has(policy.capability) ? 'enabled' : 'disabled'} label={capabilityGrants.has(policy.capability) ? '已授权' : '未授权'} /></td>
+                    <td>{formatNumber(policy.maxRequests)}</td>
+                    <td>{formatNumber(policy.windowSeconds)} 秒</td>
+                    <td>{formatDate(policy.updatedAt)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </Table>
+        ) : (
+          <EmptyState
+            icon={Brain}
+            title={data.consumerId ? '当前通用能力使用默认配额' : '请选择调用者'}
+            description={data.consumerId ? '在开放能力中保存配置后，会在这里显示显式策略。' : '能力策略需要绑定到租户和调用者。'}
+            action={data.consumerId && canManagePlatform ? <a className="qp-button qp-button--outline" href={platformHref}><SlidersHorizontal size={16} aria-hidden="true" />配置开放能力</a> : null}
+          />
+        )}
+      </Panel>
     </>
   )
 }
@@ -1064,8 +1114,11 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   const contextRef = useRef(requestedContext)
   contextRef.current = requestedContext
   const [busyPlatform, setBusyPlatform] = useState('')
+  const [busyCapability, setBusyCapability] = useState('')
   const [configureTarget, setConfigureTarget] = useState(null)
+  const [configureCapabilityTarget, setConfigureCapabilityTarget] = useState(null)
   const [policyForm, setPolicyForm] = useState(DEFAULT_POLICY)
+  const [capabilityPolicyForm, setCapabilityPolicyForm] = useState(DEFAULT_POLICY)
   const [formError, setFormError] = useState(null)
   const load = useCallback(
     () => loadConfigurationContext(token, requestedTenantId, requestedConsumerId),
@@ -1075,6 +1128,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
 
   useEffect(() => {
     setConfigureTarget(null)
+    setConfigureCapabilityTarget(null)
     setFormError(null)
   }, [requestedConsumerId, requestedTenantId])
 
@@ -1090,6 +1144,22 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
     policy: policyByPlatform.get(platform) || DEFAULT_POLICY,
     explicit: policyByPlatform.has(platform),
   }))
+  const capabilityGrants = new Set(data.configuration?.capabilityGrants || [])
+  const capabilityPolicyByName = new Map(
+    (data.configuration?.capabilityPolicies || []).map((policy) => [policy.capability, policy]),
+  )
+  const capabilityRows = (data.configuration?.availableCapabilities || []).map((entry) => ({
+    capability: entry.capability,
+    ready: entry.ready === true,
+    enabled: capabilityGrants.has(entry.capability),
+    policy: capabilityPolicyByName.get(entry.capability) || DEFAULT_POLICY,
+    explicit: capabilityPolicyByName.has(entry.capability),
+    metadata: CAPABILITY_CATALOG[entry.capability] || {
+      label: entry.capability,
+      description: 'Hub 通用开放能力',
+      endpoint: '—',
+    },
+  }))
   const selectedTenant = data.tenants.find((tenant) => tenant.id === data.tenantId)
   const selectedConsumer = data.consumers.find((consumer) => consumer.id === data.consumerId)
   const contextMatchesRequest = (
@@ -1099,7 +1169,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
   const contextUnavailable = state.loading || !contextMatchesRequest
   const hasPlatformWrite = tenantAllows(session, selectedConsumer?.tenantId, 'platform.write')
   const canUpdatePlatform = hasPlatformWrite && !contextUnavailable
-  const mutationPending = Boolean(busyPlatform)
+  const mutationPending = Boolean(busyPlatform || busyCapability)
   const mutationDisabled = mutationPending || contextUnavailable
 
   const updatePlatform = async (row, enabled, overrides = row.policy) => {
@@ -1145,9 +1215,52 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
     setFormError(null)
   }
 
+  const updateCapability = async (row, enabled, overrides = row.policy) => {
+    if (!data.tenantId || !data.consumerId || !canUpdatePlatform || mutationDisabled) return
+    const targetContext = contextRef.current
+    const targetTenantId = data.tenantId
+    const targetConsumerId = data.consumerId
+    setBusyCapability(row.capability)
+    setFormError(null)
+    try {
+      await adminApi.updateCapability(token, row.capability, {
+        tenantId: targetTenantId,
+        consumerId: targetConsumerId,
+        enabled,
+        maxRequests: Number(overrides.maxRequests),
+        windowSeconds: Number(overrides.windowSeconds),
+      })
+      if (contextRef.current === targetContext) {
+        const refreshed = await load()
+        if (contextRef.current === targetContext) state.setData(refreshed)
+        setConfigureCapabilityTarget(null)
+      }
+      notify(`${row.metadata.label} 已为调用者「${selectedConsumer?.name || targetConsumerId}」${enabled ? '启用' : '停用'}`, 'success')
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized(error)
+      if (configureCapabilityTarget) setFormError(error)
+      else notify(error.message || '开放能力更新失败', 'danger')
+    } finally {
+      setBusyCapability('')
+    }
+  }
+
+  const configureCapability = (row) => {
+    if (!canUpdatePlatform) return
+    setConfigureCapabilityTarget(row)
+    setCapabilityPolicyForm({
+      maxRequests: row.policy.maxRequests,
+      windowSeconds: row.policy.windowSeconds,
+      maxPageSize: DEFAULT_POLICY.maxPageSize,
+    })
+    setFormError(null)
+  }
+
   return (
     <>
-      <PageHeading eyebrow="PLATFORM / GRANTS / POLICY" title="平台能力" description="每个平台必须显式授权，并拥有独立的窗口限额与分页上限。" loading={state.loading} onRefresh={state.refresh} />
+      <PageHeading eyebrow="OPEN PLATFORM / GRANTS / POLICY" title="开放能力" description="同一套调用者和 API Key 同时承载数据平台与通用接口；每项能力单独授权和计量。" loading={state.loading} onRefresh={state.refresh}>
+        <a className="qp-button qp-button--outline" href={PUBLIC_DOCS_HREF} target="_blank" rel="noreferrer">查看公共 API 文档</a>
+      </PageHeading>
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       <section className="qp-panel mih-filterbar">
         <FilterSelect
@@ -1185,7 +1298,7 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
             <span>当前授权对象</span>
             <strong>{selectedTenant?.name || data.tenantId} / {selectedConsumer.name}</strong>
             <code className="mih-mono">Consumer ID: {selectedConsumer.id}</code>
-            <small>API Key 仅继承其所属调用者的平台权限</small>
+            <small>API Key 仅继承其所属调用者的数据平台与通用能力授权</small>
           </div>
         ) : null}
       </section>
@@ -1230,6 +1343,51 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
         )}
       </Panel>
 
+      <Panel title="通用开放 API" subtitle={`${capabilityGrants.size} / ${capabilityRows.length} 已启用；不授予任何数据集读取权限`}>
+        {data.consumerId ? (
+          capabilityRows.length ? (
+            <Table label="通用 API 授权与策略">
+              <thead><tr><th>能力</th><th>授权</th><th>运行状态</th><th>请求上限</th><th>窗口</th><th>操作</th></tr></thead>
+              <tbody>
+                {capabilityRows.map((row) => (
+                  <tr key={row.capability}>
+                    <td><strong>{row.metadata.label}</strong><small>{row.capability} · {row.metadata.endpoint}</small><small>{row.metadata.description}</small></td>
+                    <td><StatusBadge status={row.enabled ? 'enabled' : 'disabled'} label={row.enabled ? '已授权' : '未授权'} /></td>
+                    <td><StatusBadge status={row.ready ? 'ready' : 'degraded'} label={row.ready ? '可调用' : '运行时未就绪'} /></td>
+                    <td>{formatNumber(row.policy.maxRequests)}{row.explicit ? '' : '（默认）'}</td>
+                    <td>{formatNumber(row.policy.windowSeconds)} 秒</td>
+                    <td className="mih-table__actions mih-table__actions--wide">
+                      {hasPlatformWrite ? (
+                        <>
+                          <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={mutationDisabled} onClick={() => configureCapability(row)}>
+                            <SlidersHorizontal size={15} aria-hidden="true" />配置
+                          </button>
+                          <button
+                            className={`qp-button qp-button--sm ${row.enabled ? 'qp-button--transparent' : 'qp-button--outline'}`}
+                            type="button"
+                            aria-pressed={row.enabled}
+                            disabled={mutationDisabled || (!row.ready && !row.enabled)}
+                            title={!row.ready && !row.enabled ? '运行时未就绪，暂不能启用' : ''}
+                            onClick={() => updateCapability(row, !row.enabled)}
+                          >
+                            <Power size={15} weight={row.enabled ? 'fill' : 'regular'} aria-hidden="true" />
+                            {busyCapability === row.capability ? '处理中' : row.enabled ? '停用' : '启用'}
+                          </button>
+                        </>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+          ) : (
+            <EmptyState icon={Globe} title="当前版本没有可配置的通用能力" description="升级 Hub 后刷新能力目录。" />
+          )
+        ) : (
+          <EmptyState icon={Globe} title="请选择调用者" description="通用 API 授权与配额同样绑定到具体调用者。" />
+        )}
+      </Panel>
+
       {configureTarget && canUpdatePlatform ? (
         <Modal
           title={`配置 ${platformLabel(configureTarget.platform)}`}
@@ -1263,6 +1421,37 @@ export function PlatformsPage({ token, session, query, setQuery, onUnauthorized,
           </form>
         </Modal>
       ) : null}
+
+      {configureCapabilityTarget && canUpdatePlatform ? (
+        <Modal
+          title={`配置 ${configureCapabilityTarget.metadata.label}`}
+          description={`能力 ${configureCapabilityTarget.capability}；保存后立即作用于调用者「${selectedConsumer?.name || data.consumerId}」的新请求。`}
+          onClose={() => !busyCapability && setConfigureCapabilityTarget(null)}
+          footer={(
+            <>
+              <button className="qp-button qp-button--ghost" type="button" onClick={() => setConfigureCapabilityTarget(null)} disabled={Boolean(busyCapability)}>取消</button>
+              <button className="qp-button qp-button--primary" type="submit" form="capability-policy" disabled={Boolean(busyCapability)}>{busyCapability ? '正在保存' : '保存策略'}</button>
+            </>
+          )}
+        >
+          <form
+            id="capability-policy"
+            className="mih-form mih-form--grid"
+            onSubmit={(event) => {
+              event.preventDefault()
+              updateCapability(configureCapabilityTarget, configureCapabilityTarget.enabled, capabilityPolicyForm)
+            }}
+          >
+            <Field label="窗口请求上限">
+              <input className="qp-input" type="number" min="1" value={capabilityPolicyForm.maxRequests} onChange={(event) => setCapabilityPolicyForm({ ...capabilityPolicyForm, maxRequests: event.target.value })} required autoFocus />
+            </Field>
+            <Field label="窗口长度（秒）">
+              <input className="qp-input" type="number" min="1" value={capabilityPolicyForm.windowSeconds} onChange={(event) => setCapabilityPolicyForm({ ...capabilityPolicyForm, windowSeconds: event.target.value })} required />
+            </Field>
+            {formError ? <div className="mih-form__wide"><ErrorState error={formError} /></div> : null}
+          </form>
+        </Modal>
+      ) : null}
     </>
   )
 }
@@ -1287,10 +1476,11 @@ export function UsagePage({ token, query, setQuery, onUnauthorized }) {
   const data = state.data || { tenants: [], consumers: [], usage: {} }
   const usage = data.usage || {}
   const platforms = sortedPlatforms(usage.byPlatform)
+  const capabilities = sortedPlatforms(usage.byCapability)
 
   return (
     <>
-      <PageHeading eyebrow="METERING / COST / AUDIT" title="使用记录" description="以请求结果、实际数据单元和上游耗时作为计量与对账证据。" loading={state.loading} onRefresh={state.refresh} />
+      <PageHeading eyebrow="METERING / COST / AUDIT" title="使用记录" description="统一记录数据平台与通用能力的请求结果、工作单元和耗时证据。" loading={state.loading} onRefresh={state.refresh} />
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       <section className="qp-panel mih-filterbar mih-filterbar--usage">
         <RangeFilter value={range} onChange={(value) => setQuery({ range: value })} />
@@ -1311,12 +1501,12 @@ export function UsagePage({ token, query, setQuery, onUnauthorized }) {
       <section className="mih-metric-grid mih-metric-grid--compact" aria-label="使用摘要">
         <MetricCard icon={Pulse} label="请求数" value={formatNumber(usage.requests)} hint={`${formatNumber(usage.committed)} 次成功`} />
         <MetricCard icon={ShieldCheck} label="成功率" value={percent(usage.committed, usage.requests)} hint={`${formatNumber(usage.released)} 次释放`} tone="success" />
-        <MetricCard icon={Coins} label="数据用量" value={formatNumber(usage.units)} hint="按实际返回记录计量" tone="warning" />
+        <MetricCard icon={Coins} label="工作单元" value={formatNumber(usage.units)} hint="平台记录或能力结果单元" tone="warning" />
         <MetricCard icon={Timer} label="平均上游耗时" value={formatLatency(usage.averageUpstreamLatencyMs)} hint={`${formatNumber(usage.unknown)} 次结果未知`} tone="archetype" />
       </section>
 
       <section className="mih-chart-grid">
-        <Panel title="平台用量" subtitle="当前筛选范围" className="mih-chart-panel">
+        <Panel title="数据平台用量" subtitle="当前筛选范围" className="mih-chart-panel">
           {platforms.length ? <PlatformChart entries={platforms.slice(0, 10)} /> : <EmptyState icon={ChartLine} title="暂无用量" description="当前筛选范围没有请求。" />}
         </Panel>
         <Panel title="调用结果" subtitle="成功、释放与未知" className="mih-chart-panel">
@@ -1342,6 +1532,26 @@ export function UsagePage({ token, query, setQuery, onUnauthorized }) {
             </tbody>
           </Table>
         ) : <EmptyState icon={Database} title="没有可展示的记录" description="更换时间范围或调用者后重试。" />}
+      </Panel>
+
+      <Panel title="通用能力计量明细" subtitle={`${capabilities.length} 项能力`}>
+        {capabilities.length ? (
+          <Table label="通用能力计量明细">
+            <thead><tr><th>能力</th><th>请求</th><th>成功</th><th>已释放</th><th>结果未知</th><th>工作单元</th></tr></thead>
+            <tbody>
+              {capabilities.map(([capability, item]) => (
+                <tr key={capability}>
+                  <td><strong>{CAPABILITY_CATALOG[capability]?.label || capability}</strong><small>{capability}</small></td>
+                  <td>{formatNumber(item.requests)}</td>
+                  <td>{formatNumber(item.committed)}</td>
+                  <td>{formatNumber(item.released)}</td>
+                  <td>{formatNumber(item.unknown)}</td>
+                  <td>{formatNumber(item.units)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        ) : <EmptyState icon={Brain} title="没有通用能力调用" description="为调用者授权能力并使用 API 后，这里会出现独立计量。" />}
       </Panel>
     </>
   )

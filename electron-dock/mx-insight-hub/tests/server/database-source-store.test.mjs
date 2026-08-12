@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 
@@ -151,6 +152,141 @@ test('PostgresStore atomically resumes a running database import by its stable r
   assert.match(captured.sql, /status = 'running'/)
 })
 
+test('PostgresStore scopes direct-file duplicate lookup and inserts to the interpretation key', async () => {
+  const calls = []
+  const client = {
+    async query(sql, values) {
+      calls.push({ sql, values })
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
+      if (/UPDATE ingest\.import_runs/.test(sql)) return { rows: [], rowCount: 1 }
+      if (/^\s*SELECT id, started_at FROM ingest\.import_runs/.test(sql)) return { rows: [] }
+      return { rows: [{ id: '44444444-4444-4444-8444-444444444444' }] }
+    },
+    release() {},
+  }
+  const store = new PostgresStore({ connect: async () => client })
+  const interpretationKey = 'c'.repeat(64)
+
+  await store.startImportRun({
+    sourceId: '22222222-2222-4222-8222-222222222222',
+    mappingVersion: 3,
+    inputSha256: 'a'.repeat(64),
+    interpretationKey,
+    inputName: 'records.csv',
+    inputBytes: 42,
+  })
+
+  assert.deepEqual(
+    calls.map(({ sql }) => sql.trim().split(/\s+/)[0]),
+    ['BEGIN', 'UPDATE', 'SELECT', 'INSERT', 'COMMIT'],
+  )
+  assert.match(calls[1].sql, /input_sha256 IS NOT NULL/)
+  assert.match(calls[1].sql, /last_error = 'superseded_by_new_file_import'/)
+  assert.deepEqual(calls[1].values, ['22222222-2222-4222-8222-222222222222'])
+  assert.match(calls[2].sql, /interpretation_key = \$3/)
+  assert.deepEqual(calls[2].values, [
+    '22222222-2222-4222-8222-222222222222', 'a'.repeat(64), interpretationKey,
+  ])
+  assert.match(calls[3].sql, /interpretation_key/)
+  assert.equal(calls[3].values.at(-3), interpretationKey)
+})
+
+test('PostgresStore fences stale file runs before returning a NULL-key legacy duplicate', async () => {
+  const calls = []
+  let staleStatus = 'running'
+  const client = {
+    async query(sql, values) {
+      calls.push({ sql, values })
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
+      if (/UPDATE ingest\.import_runs/.test(sql)) {
+        staleStatus = 'failed'
+        return { rows: [], rowCount: 1 }
+      }
+      if (/SELECT id, started_at FROM ingest\.import_runs/.test(sql)) {
+        assert.equal(staleStatus, 'failed')
+        return { rows: [{ id: '55555555-5555-4555-8555-555555555555' }] }
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+    release() {},
+  }
+  const store = new PostgresStore({ connect: async () => client })
+
+  const run = await store.startImportRun({
+    sourceId: '22222222-2222-4222-8222-222222222222',
+    mappingVersion: 2,
+    inputSha256: 'b'.repeat(64),
+    inputName: 'legacy.csv',
+    inputBytes: 7,
+  })
+
+  assert.deepEqual(run, { duplicateOf: '55555555-5555-4555-8555-555555555555', id: null })
+  assert.equal(staleStatus, 'failed')
+  assert.deepEqual(
+    calls.map(({ sql }) => sql.trim().split(/\s+/)[0]),
+    ['BEGIN', 'UPDATE', 'SELECT', 'COMMIT'],
+  )
+  assert.match(calls[2].sql, /interpretation_key IS NULL/)
+  assert.deepEqual(calls[2].values, [
+    '22222222-2222-4222-8222-222222222222', 'b'.repeat(64),
+  ])
+  assert.equal(calls.some(({ sql }) => /INSERT INTO ingest\.import_runs/.test(sql)), false)
+})
+
+test('PostgresStore fences pre-012 file runs without relying on their legacy manual trigger', async () => {
+  const historical = [{ id: 'stale-run', inputSha256: 'f'.repeat(64), trigger: 'manual', status: 'running' }]
+  const calls = []
+  const client = {
+    async query(sql, values) {
+      calls.push({ sql, values })
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
+      if (/UPDATE ingest\.import_runs/.test(sql)) {
+        for (const run of historical) {
+          if (run.inputSha256 && run.status === 'running') run.status = 'failed'
+        }
+        return { rows: [], rowCount: 1 }
+      }
+      if (/SELECT id, started_at FROM ingest\.import_runs/.test(sql)) {
+        return { rows: historical.filter((row) => row.status === 'succeeded') }
+      }
+      return { rows: [{ id: 'retry-run' }] }
+    },
+    release() {},
+  }
+  const store = new PostgresStore({ connect: async () => client })
+
+  const run = await store.startImportRun({
+    sourceId: '22222222-2222-4222-8222-222222222222',
+    mappingVersion: 3,
+    inputSha256: 'd'.repeat(64),
+    interpretationKey: 'e'.repeat(64),
+    inputName: 'records.csv',
+    inputBytes: 42,
+  })
+
+  assert.deepEqual(run, { id: 'retry-run', duplicateOf: null })
+  assert.equal(historical[0].status, 'failed')
+  assert.match(calls[1].sql, /input_sha256 IS NOT NULL/)
+  assert.doesNotMatch(calls[1].sql, /trigger = 'file'/)
+  assert.match(calls[2].sql, /status = 'succeeded'/)
+  assert.doesNotMatch(calls[2].sql, /status IN \('succeeded', 'running'\)/)
+  assert.equal(calls.filter(({ sql }) => /INSERT INTO ingest\.import_runs/.test(sql)).length, 1)
+})
+
+test('migration 019 splits interpreted successes while retaining legacy NULL-key uniqueness', async () => {
+  const migration = await readFile(
+    new URL('../../migrations/019_direct_file_interpretation_idempotency.sql', import.meta.url),
+    'utf8',
+  )
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS interpretation_key char\(64\)/)
+  assert.match(migration, /interpretation_key ~ '\^\[0-9a-f\]\{64\}\$'/)
+  assert.match(migration, /\(source_id, input_sha256, interpretation_key\)/)
+  assert.match(migration, /interpretation_key IS NOT NULL/)
+  assert.match(migration, /import_runs_legacy_input_idx/)
+  assert.match(migration, /interpretation_key IS NULL/)
+  assert.match(migration, /DROP INDEX IF EXISTS ingest\.import_runs_input_idx/)
+})
+
 test('PostgresStore uses a session advisory lock for source pull and reset operations', async () => {
   const queries = []
   let released = false
@@ -163,7 +299,10 @@ test('PostgresStore uses a session advisory lock for source pull and reset opera
     release() { released = true },
   }
   const store = new PostgresStore({ connect: async () => client })
-  assert.equal(await store.withExternalSourceLock('warehouse-events', async () => 'done'), 'done')
+  assert.equal(await store.withExternalSourceLock('warehouse-events', async (_assertOwned, sessionClient) => {
+    assert.equal(sessionClient, client)
+    return 'done'
+  }), 'done')
   assert.equal(queries.length, 2)
   assert.match(queries[0].sql, /pg_try_advisory_lock/)
   assert.match(queries[1].sql, /pg_advisory_unlock/)
@@ -180,6 +319,95 @@ test('PostgresStore uses a session advisory lock for source pull and reset opera
     () => busyStore.withExternalSourceLock('warehouse-events', async () => 'never'),
     (error) => error?.status === 409 && error?.code === 'source_busy',
   )
+})
+
+test('a disconnected source-lock session is destroyed and a later caller can retry', async () => {
+  let endHandler
+  let lostReleaseError
+  const lostClient = {
+    once(event, handler) { if (event === 'end') endHandler = handler },
+    off() {},
+    async query(sql) {
+      if (/pg_try_advisory_lock/.test(sql)) return { rows: [{ locked: true }] }
+      if (/pg_advisory_unlock/.test(sql)) throw new Error('lock session disconnected')
+      return { rows: [] }
+    },
+    release(error) { lostReleaseError = error },
+  }
+  const retryClient = {
+    async query(sql) {
+      if (/pg_try_advisory_lock/.test(sql)) return { rows: [{ locked: true }] }
+      return { rows: [{ pg_advisory_unlock: true }] }
+    },
+    release() {},
+  }
+  const clients = [lostClient, retryClient]
+  const store = new PostgresStore({ connect: async () => clients.shift() })
+
+  await assert.rejects(
+    () => store.withExternalSourceLock('files', async (assertOwned) => {
+      endHandler()
+      await assertOwned()
+    }),
+    (error) => error?.code === 'source_lock_lost',
+  )
+  assert.match(lostReleaseError.message, /lock session lost/)
+  assert.equal(await store.withExternalSourceLock('files', async () => 'retried'), 'retried')
+})
+
+test('file-import writes never fall back to the pool after their held session fails', async () => {
+  let poolUses = 0
+  let releases = 0
+  const disconnected = new Error('held source-lock session disconnected')
+  const sessionClient = {
+    async query() { throw disconnected },
+    release() { releases += 1 },
+  }
+  const store = new PostgresStore({
+    async query() {
+      poolUses += 1
+      throw new Error('must not use pool query')
+    },
+    async connect() {
+      poolUses += 1
+      throw new Error('must not acquire replacement client')
+    },
+  })
+  const sourceId = '22222222-2222-4222-8222-222222222222'
+
+  await assert.rejects(
+    () => store.startImportRun({
+      sourceId, mappingVersion: 2, inputSha256: 'a'.repeat(64),
+      interpretationKey: 'b'.repeat(64), inputName: 'records.csv', inputBytes: 10,
+      sessionClient,
+    }),
+    (error) => error === disconnected,
+  )
+  await assert.rejects(
+    () => store.ingestExternalRecords({
+      datasetId: 'dataset', platform: 'external', connectorId: 'external:files',
+      sourceId, importRunId: '33333333-3333-4333-8333-333333333333', records: [{}],
+      sessionClient,
+    }),
+    (error) => error === disconnected,
+  )
+  await assert.rejects(
+    () => store.recordRejectedRows(
+      '33333333-3333-4333-8333-333333333333',
+      [{ rowIndex: 1, reason: 'missing id', raw: {} }],
+      { sessionClient },
+    ),
+    (error) => error === disconnected,
+  )
+  await assert.rejects(
+    () => store.finishImportRun('33333333-3333-4333-8333-333333333333', {
+      status: 'failed', rowCount: 1, rejectedCount: 1, error: 'session lost',
+    }, { sessionClient }),
+    (error) => error === disconnected,
+  )
+
+  assert.equal(poolUses, 0)
+  assert.equal(releases, 0)
 })
 
 test('PostgresStore updates a built-in pipeline source set in one transaction', async () => {

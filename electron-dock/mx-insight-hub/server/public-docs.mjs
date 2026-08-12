@@ -74,10 +74,10 @@ const searchResponse = {
 export const PUBLIC_OPENAPI_DOCUMENT = {
   openapi: '3.1.0',
   info: {
-    title: 'MX Insight Hub Public Data API',
+    title: 'MX Insight Hub Open API',
     version: '1.0.0',
     description: [
-      'Consumer-facing data access only. All endpoints require an issued API key and enforce the consumer\'s explicit platform grants, policy and usage quota.',
+      'Consumer-facing data and tool access only. All endpoints require an issued API key and enforce the consumer\'s explicit platform or capability grants, policy and usage quota.',
       'No management endpoints, physical data-source coordinates, credentials or raw source rows are part of this contract.',
     ].join('\n\n'),
   },
@@ -85,6 +85,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   tags: [
     { name: 'Discovery', description: 'Discover the caller\'s granted platform capabilities.' },
     { name: 'Search', description: 'Idempotent content search.' },
+    { name: 'Tools', description: 'Granted platform-independent processing capabilities.' },
     {
       name: 'Telegram',
       description: 'Hub-stored Telegram history, search and entities. Every consumer granted telegram reads the same complete canonical corpus; tenant-specific row subsets are not implemented.',
@@ -98,7 +99,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Discovery'],
         operationId: 'listPublicCapabilities',
         summary: 'List capabilities granted to the authenticated consumer',
-        description: 'Use this response to decide which platform operations the current API key may call. A platform must be both granted and ready.',
+        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. Each entry must be both granted and ready.',
         responses: {
           200: {
             description: 'Granted public capabilities.',
@@ -112,6 +113,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                       ready: true,
                       capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search'],
                     }],
+                    capabilities: [{ capability: 'nlp.tokenize', ready: true }],
                   },
                   requestId: '00000000-0000-4000-8000-000000000001',
                 },
@@ -148,6 +150,45 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
         },
         responses: { 200: searchResponse, ...publicErrors },
+      },
+    },
+    '/tools/tokenize': {
+      post: {
+        tags: ['Tools'],
+        operationId: 'tokenizeText',
+        summary: 'Tokenize bounded Chinese or mixed-language text',
+        description: 'Requires the nlp.tokenize capability grant. The response reports the backend actually used and whether fallback degraded the result. Idempotency-Key is required; an exact replay is not segmented or metered twice.',
+        parameters: [idempotencyParameter],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/TokenizeRequest' },
+              example: { text: '吴恩达与人工智能' },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'Bounded tokens and actual backend metadata.',
+            headers: {
+              'x-mx-insight-request-id': { schema: { type: 'string', format: 'uuid' } },
+              'idempotent-replay': { schema: { type: 'string', enum: ['true', 'false'] } },
+            },
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/TokenizeEnvelope' },
+              },
+            },
+          },
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          409: errorResponse,
+          413: errorResponse,
+          429: errorResponse,
+          503: errorResponse,
+        },
       },
     },
     '/data/telegram/chats': {
@@ -332,6 +373,17 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'Opaque nextCursor from the prior page.' },
         },
       },
+      TokenizeRequest: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['text'],
+        properties: {
+          text: {
+            type: 'string', minLength: 1, maxLength: 4096,
+            description: 'Must contain at least one Unicode letter or number; control characters are rejected.',
+          },
+        },
+      },
       TelegramSearchRequest: {
         type: 'object',
         additionalProperties: false,
@@ -442,6 +494,18 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   },
                 },
               },
+              capabilities: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['capability', 'ready'],
+                  properties: {
+                    capability: { type: 'string', enum: ['nlp.tokenize'] },
+                    ready: { type: 'boolean' },
+                  },
+                },
+              },
             },
           },
           requestId: { type: 'string' },
@@ -469,11 +533,16 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         properties: {
           data: {
             type: 'object',
-            required: ['id', 'status', 'platform'],
+            required: ['id', 'status'],
+            oneOf: [
+              { required: ['platform'], not: { required: ['capability'] } },
+              { required: ['capability'], not: { required: ['platform'] } },
+            ],
             properties: {
               id: { type: 'string', format: 'uuid' },
               status: { type: 'string', enum: ['reserved', 'committed', 'released', 'unknown'] },
               platform: { type: 'string' }, units: { type: ['integer', 'null'] },
+              capability: { type: 'string' },
               errorCode: { type: ['string', 'null'] }, reservedAt: { type: 'string', format: 'date-time' },
               completedAt: { type: ['string', 'null'], format: 'date-time' },
             },
@@ -493,9 +562,30 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
               unknown: { type: 'integer' }, units: { type: 'integer' },
               averageUpstreamLatencyMs: { type: ['integer', 'null'] },
               byPlatform: { type: 'object', additionalProperties: true },
+              byCapability: { type: 'object', additionalProperties: true },
             },
           },
           requestId: { type: 'string' },
+        },
+      },
+      TokenizeEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['capability', 'tokens', 'actualBackend', 'degraded', 'errorCode'],
+            properties: {
+              capability: { type: 'string', const: 'nlp.tokenize' },
+              tokens: { type: 'array', minItems: 1, maxItems: 8192, items: { type: 'string', minLength: 1, maxLength: 512 } },
+              actualBackend: { type: 'string', enum: ['hanlp', 'jieba', 'bigram'] },
+              degraded: { type: 'boolean' },
+              errorCode: { type: ['string', 'null'] },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
         },
       },
       ErrorEnvelope: {
@@ -521,8 +611,8 @@ export const PUBLIC_DOCS_HTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="MX Insight Hub 公共数据 API 文档">
-  <title>MX Insight Hub · Public Data API</title>
+  <meta name="description" content="MX Insight Hub Open API 文档">
+  <title>MX Insight Hub · Open API</title>
   <style>
     :root { color-scheme: dark; --bg:#070b12; --panel:#101824; --line:#26364b; --text:#e9f2fb; --muted:#91a4b8; --cyan:#2de4d0; --blue:#5597ff; --amber:#f3c85a; }
     * { box-sizing:border-box; }
@@ -568,21 +658,21 @@ export const PUBLIC_DOCS_HTML = `<!doctype html>
 <body>
 <div class="layout">
   <aside>
-    <div class="brand"><div class="mark">MX</div><div><strong>MX Insight Hub</strong><span>Public Data API</span></div></div>
+    <div class="brand"><div class="mark">MX</div><div><strong>MX Insight Hub</strong><span>Open API</span></div></div>
     <nav aria-label="文档目录">
       <a href="#start">开始调用</a><a href="#rules">认证与调用规则</a><a href="#search">通用搜索</a>
-      <a href="#telegram">Telegram</a><a href="#discovery">能力与证据</a><a href="#errors">错误与重试</a>
+      <a href="#tools">通用工具</a><a href="#telegram">Telegram</a><a href="#discovery">能力与证据</a><a href="#errors">错误与重试</a>
       <a href="/docs/openapi.json">OpenAPI JSON ↗</a>
     </nav>
   </aside>
   <main>
     <header id="start"><div class="eyebrow">Consumer contract · API v1</div><h1>统一数据访问，<br>由授权边界控制。</h1>
-      <p class="lead">通过一个调用者 API Key 访问已授权平台。Telegram 数据由 Hub 的规范化数据层提供，通用搜索保持统一响应结构。</p></header>
+      <p class="lead">通过一个调用者 API Key 访问已授权平台与通用能力。Telegram 数据由 Hub 的规范化数据层提供，通用搜索和分词工具保持稳定响应结构。</p></header>
     <div class="cards"><div class="card"><strong>Base path</strong><code>/api/v1</code></div><div class="card"><strong>Authentication</strong>Bearer API Key 或 <code>x-api-key</code></div><div class="card"><strong>Machine contract</strong><a href="/docs/openapi.json">OpenAPI 3.1 JSON</a></div></div>
 
     <h2 id="rules">认证与调用规则</h2>
-    <h3>认证及平台授权</h3>
-    <p>每个请求必须携带已签发的调用者 API Key。建议使用 Bearer；不要把 Key 放进 URL、日志或前端代码。Key 只能调用后台为其调用者显式启用的平台；先调用 capabilities 确认授权与就绪状态。</p>
+    <h3>认证及显式授权</h3>
+    <p>每个请求必须携带已签发的调用者 API Key。建议使用 Bearer；不要把 Key 放进 URL、日志或前端代码。Key 只能调用后台为其调用者显式启用的平台或通用 capability；先调用 capabilities 确认授权与就绪状态。</p>
     <pre><code>export HUB_URL="https://hub.example.com"
 export MX_INSIGHT_API_KEY="&lt;issued-api-key&gt;"
 
@@ -591,6 +681,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
     <h3>幂等、游标与配额</h3>
     <table><thead><tr><th>规则</th><th>客户端行为</th></tr></thead><tbody>
       <tr><td>POST 搜索</td><td><code>Idempotency-Key</code> 在同一 consumer 内全局唯一。仅在重试完全相同的路径和规范化 body 时复用；新路径、新 body 或新页面必须使用新 Key。</td></tr>
+      <tr><td>POST 分词</td><td>同样必须携带 <code>Idempotency-Key</code>；相同请求重放不会再次分词或重复计量。</td></tr>
       <tr><td>下一页</td><td>使用响应中的 <code>pageInfo.nextCursor</code>，不要解析或修改；因为 body 已变化，新页面必须使用新的幂等 Key。</td></tr>
       <tr><td>GET 历史/实体</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>
       <tr><td>页大小</td><td>同时受接口上限与该调用者平台策略约束；超限返回 <code>page_size_exceeded</code>。</td></tr>
@@ -617,6 +708,24 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   "requestId": "00000000-0000-4000-8000-000000000003"
 }</code></pre>
 
+    <h2 id="tools">通用工具</h2>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/tools/tokenize</code></div><p>需要独立的 <code>nlp.tokenize</code> capability 授权；它不是数据平台授权。响应报告实际分词后端及是否发生质量降级。</p></div>
+    <pre><code>curl -sS -X POST "$HUB_URL/api/v1/tools/tokenize" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: tokenize-$(uuidgen)" \
+  -d '{"text":"吴恩达与人工智能"}' | jq</code></pre>
+    <pre><code>{
+  "data": {
+    "capability": "nlp.tokenize",
+    "tokens": ["吴恩达", "与", "人工智能"],
+    "actualBackend": "hanlp",
+    "degraded": false,
+    "errorCode": null
+  },
+  "requestId": "00000000-0000-4000-8000-000000000004"
+}</code></pre>
+
     <h2 id="telegram">Telegram 数据</h2>
     <div class="notice">授权 <code>telegram</code> 后，调用者读取的是同一份 Hub 全量规范化语料；当前没有按租户划分不同的 Telegram 行级数据子集。租户隔离作用于 API Key 所有权、平台授权、策略、配额和用量证据。</div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/messages</code></div><p>消息历史；支持 <code>chatId</code>、<code>from</code>、<code>to</code>、<code>pageSize</code>、<code>cursor</code>。</p></div>
@@ -633,7 +742,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
     <div class="notice">如果搜索响应的 <code>warnings</code> 包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底；响应仍然有效。已有 Elasticsearch 游标不会在中途静默切换模式。</div>
 
     <h2 id="discovery">能力、请求状态与用量</h2>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>仅返回当前调用者已授权且可公开使用的平台能力。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>仅返回当前调用者已授权且可公开使用的平台与通用 capabilities。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/requests/{requestId}</code></div><p>查询当前调用者拥有的持久请求记录。requestId 来自搜索响应头 <code>x-mx-insight-request-id</code>。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/usage?from=...&amp;to=...</code></div><p>读取当前调用者的请求、提交、释放、未知状态与计费单元汇总。</p></div>
 
@@ -647,7 +756,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
       <tr><td>503</td><td>当前数据或搜索运行时不可用</td><td>安全 GET 可稍后重试；POST 复用原幂等 Key</td></tr>
     </tbody></table>
     <p>所有错误都返回稳定的 <code>error.code</code> 和用于排查的 <code>requestId</code>。</p>
-    <footer>MX Insight Hub Public Data API v1 · <a href="/docs/openapi.json">下载 OpenAPI JSON</a></footer>
+    <footer>MX Insight Hub Open API v1 · <a href="/docs/openapi.json">下载 OpenAPI JSON</a></footer>
   </main>
 </div>
 </body>

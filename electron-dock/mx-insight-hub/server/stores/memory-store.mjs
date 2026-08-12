@@ -21,6 +21,8 @@ export class MemoryStore {
     this.apiKeysByDigest = new Map()
     this.grants = new Map()
     this.policies = new Map()
+    this.capabilityGrants = new Map()
+    this.capabilityPolicies = new Map()
     this.requests = new Map()
     this.requestsByScope = new Map()
   }
@@ -177,6 +179,46 @@ export class MemoryStore {
     return clone(this.grants.get(consumerId) || [])
   }
 
+  async listCapabilityGrants(consumerId) {
+    return clone(this.capabilityGrants.get(consumerId) || [])
+  }
+
+  async putCapabilityConfiguration({
+    tenantId,
+    consumerId,
+    capability,
+    enabled,
+    maxRequests,
+    windowSeconds,
+  }) {
+    if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
+    if (this.consumers.get(consumerId)?.tenantId !== tenantId) {
+      throw new AppError(404, 'consumer_not_found', 'Consumer not found')
+    }
+
+    const grants = new Set(this.capabilityGrants.get(consumerId) || [])
+    if (enabled) grants.add(capability)
+    else grants.delete(capability)
+    const policyRecord = {
+      tenantId,
+      consumerId,
+      capability,
+      maxRequests,
+      windowSeconds,
+      updatedAt: nowIso(),
+    }
+
+    // Publish both copy-on-write snapshots in one synchronous turn. No caller
+    // can observe a new grant paired with the old policy (or vice versa).
+    const nextGrants = new Map(this.capabilityGrants)
+    nextGrants.set(consumerId, [...grants].sort())
+    const nextPolicies = new Map(this.capabilityPolicies)
+    nextPolicies.set(`${consumerId}:${capability}`, policyRecord)
+    this.capabilityGrants = nextGrants
+    this.capabilityPolicies = nextPolicies
+    return clone(policyRecord)
+  }
+
   async putPolicy({ tenantId, consumerId, platform, maxRequests, windowSeconds, maxPageSize }) {
     if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
     if (this.consumers.get(consumerId)?.tenantId !== tenantId) throw new AppError(404, 'consumer_not_found', 'Consumer not found')
@@ -202,6 +244,14 @@ export class MemoryStore {
     return clone([...this.policies.values()].filter((record) => record.consumerId === consumerId))
   }
 
+  async getCapabilityPolicy(consumerId, capability) {
+    return clone(this.capabilityPolicies.get(`${consumerId}:${capability}`) || null)
+  }
+
+  async listCapabilityPolicies(consumerId) {
+    return clone([...this.capabilityPolicies.values()].filter((record) => record.consumerId === consumerId))
+  }
+
   async reserve({
     requestId,
     idempotencyKey,
@@ -210,11 +260,15 @@ export class MemoryStore {
     consumerId,
     apiKeyId,
     platform,
+    capability,
     unitsReserved,
     leaseExpiresAt,
     windowStart,
     maxRequests,
   }) {
+    if (Boolean(platform) === Boolean(capability)) {
+      throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')
+    }
     const scopeKey = `${consumerId}:${idempotencyKey}`
     const existingId = this.requestsByScope.get(scopeKey)
     if (existingId) {
@@ -224,7 +278,7 @@ export class MemoryStore {
       if (existing.status === 'reserved') return { kind: 'in_progress', request: clone(existing) }
       if (existing.status === 'unknown') return { kind: 'unknown', request: clone(existing) }
       if (existing.status === 'released') {
-        this.#assertQuota({ tenantId, consumerId, platform, windowStart, maxRequests })
+        this.#assertQuota({ tenantId, consumerId, platform, capability, windowStart, maxRequests })
         Object.assign(existing, {
           status: 'reserved',
           unitsReserved,
@@ -237,7 +291,7 @@ export class MemoryStore {
       }
     }
 
-    this.#assertQuota({ tenantId, consumerId, platform, windowStart, maxRequests })
+    this.#assertQuota({ tenantId, consumerId, platform, capability, windowStart, maxRequests })
     const record = {
       id: requestId,
       tenantId,
@@ -245,7 +299,8 @@ export class MemoryStore {
       apiKeyId,
       idempotencyKey,
       fingerprint,
-      platform,
+      platform: platform ?? null,
+      capability: capability ?? null,
       status: 'reserved',
       unitsReserved,
       unitsActual: null,
@@ -263,19 +318,20 @@ export class MemoryStore {
     return { kind: 'reserved', request: clone(record) }
   }
 
-  #assertQuota({ tenantId, consumerId, platform, windowStart, maxRequests }) {
+  #assertQuota({ tenantId, consumerId, platform, capability, windowStart, maxRequests }) {
     if (!Number.isFinite(maxRequests)) return
     const count = [...this.requests.values()].filter(
       (record) =>
         record.tenantId === tenantId &&
         record.consumerId === consumerId &&
-        record.platform === platform &&
+        record.platform === (platform ?? null) &&
+        record.capability === (capability ?? null) &&
         ['reserved', 'committed', 'unknown'].includes(record.status) &&
         new Date(record.reservedAt) >= windowStart,
     ).length
     if (count >= maxRequests) {
       throw new AppError(429, 'quota_exceeded', 'Request quota exceeded', {
-        platform,
+        ...(platform ? { platform } : { capability }),
         maxRequests,
       })
     }
@@ -355,6 +411,15 @@ export class MemoryStore {
         active(key) && (key.expiresAt == null || new Date(key.expiresAt).getTime() > Date.now())
       )).length,
       ...usage,
+    }
+  }
+
+  async dataCenter({ pageSize = 50 } = {}) {
+    return {
+      stats: { datasetCount: 0, activeRecordCount: 0, revisionCount: 0, deletedRecordCount: 0 },
+      datasets: [],
+      records: [],
+      pageSize,
     }
   }
 
@@ -444,10 +509,13 @@ export class MemoryStore {
 
 function summarizeUsage(records) {
   const byPlatform = {}
+  const byCapability = {}
   let latencyTotal = 0
   let latencyCount = 0
   for (const record of records) {
-    const entry = (byPlatform[record.platform] ||= {
+    const bucket = record.capability ? byCapability : byPlatform
+    const scope = record.capability || record.platform
+    const entry = (bucket[scope] ||= {
       requests: 0,
       committed: 0,
       released: 0,
@@ -473,5 +541,6 @@ function summarizeUsage(records) {
     ),
     averageUpstreamLatencyMs: latencyCount ? Math.round(latencyTotal / latencyCount) : null,
     byPlatform,
+    byCapability,
   }
 }

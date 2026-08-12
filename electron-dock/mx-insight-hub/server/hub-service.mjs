@@ -25,11 +25,26 @@ const PLATFORM_ALIASES = new Map([
 ])
 const PUBLIC_SEARCH_FIELDS = new Set(['platform', 'query', 'pageSize', 'cursor'])
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
+const PUBLIC_CAPABILITIES = new Set(['nlp.tokenize'])
+const TOKENIZE_CAPABILITY = 'nlp.tokenize'
+const TOKENIZE_MAX_TEXT_LENGTH = 4_096
+const TOKENIZE_MAX_TOKENS = 8_192
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function canonicalPlatform(value) {
   const platform = requiredString(value, 'platform').toLowerCase()
   return PLATFORM_ALIASES.get(platform) || platform
+}
+
+function canonicalCapability(value) {
+  const capability = requiredString(value, 'capability').toLowerCase()
+  assert(
+    PUBLIC_CAPABILITIES.has(capability),
+    400,
+    'unsupported_capability',
+    'Capability is not supported',
+  )
+  return capability
 }
 
 function requiredString(value, field) {
@@ -94,6 +109,7 @@ export class HubService {
     reservationLeaseMs = 120_000,
     ingestQueueName = 'mx-insight-hub:ingest',
     searchQueries = null,
+    segmenter = null,
     logger = console,
   }) {
     this.store = store
@@ -106,6 +122,7 @@ export class HubService {
     // namespacing.
     this.ingestQueueName = ingestQueueName
     this.searchQueries = searchQueries
+    this.segmenter = segmenter
     this.logger = logger
   }
 
@@ -182,6 +199,16 @@ export class HubService {
     return {
       grants: normalizedConsumerId ? await this.store.listGrants(normalizedConsumerId) : [],
       policies: normalizedConsumerId ? await this.store.listPolicies(normalizedConsumerId) : [],
+      capabilityGrants: normalizedConsumerId && typeof this.store.listCapabilityGrants === 'function'
+        ? await this.store.listCapabilityGrants(normalizedConsumerId)
+        : [],
+      capabilityPolicies: normalizedConsumerId && typeof this.store.listCapabilityPolicies === 'function'
+        ? await this.store.listCapabilityPolicies(normalizedConsumerId)
+        : [],
+      availableCapabilities: [{
+        capability: TOKENIZE_CAPABILITY,
+        ready: typeof this.segmenter?.segmentWithMeta === 'function',
+      }],
     }
   }
 
@@ -208,6 +235,39 @@ export class HubService {
     return { platform, enabled, policy }
   }
 
+  async putCapabilityConfiguration(capabilityParam, body) {
+    const capability = canonicalCapability(capabilityParam)
+    assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
+    const unsupported = Object.keys(body).filter(
+      (field) => !['tenantId', 'consumerId', 'enabled', 'maxRequests', 'windowSeconds'].includes(field),
+    )
+    assert(unsupported.length === 0, 400, 'unsupported_fields', `Unsupported capability fields: ${unsupported.join(', ')}`)
+    assert(body.enabled == null || typeof body.enabled === 'boolean', 400, 'invalid_request', 'enabled must be a boolean')
+    const tenantId = requiredUuid(body.tenantId, 'tenantId')
+    const consumerId = requiredUuid(body.consumerId, 'consumerId')
+    const consumer = await this.store.getConsumer(consumerId)
+    assert(consumer?.tenantId === tenantId, 404, 'consumer_not_found', 'Consumer not found in tenant')
+    assert(
+      typeof this.store.putCapabilityConfiguration === 'function'
+        && typeof this.store.getCapabilityPolicy === 'function',
+      503,
+      'capability_store_unavailable',
+      'Capability grants require the current Hub database migration',
+    )
+
+    const enabled = body.enabled !== false
+    const current = (await this.store.getCapabilityPolicy(consumerId, capability)) || this.defaultPolicy
+    const policy = await this.store.putCapabilityConfiguration({
+      tenantId,
+      consumerId,
+      capability,
+      enabled,
+      maxRequests: positiveInteger(body.maxRequests, 'maxRequests', current.maxRequests),
+      windowSeconds: positiveInteger(body.windowSeconds, 'windowSeconds', current.windowSeconds),
+    })
+    return { capability, enabled, policy }
+  }
+
   async dashboard() {
     await this.store.reapStaleReservations()
     return this.store.dashboard()
@@ -220,7 +280,9 @@ export class HubService {
 
   async capabilities(context) {
     const grants = await this.store.listGrants(context.consumer.id)
-    const payload = await this.adapter.capabilities(grants)
+    const payload = grants.length > 0
+      ? await this.adapter.capabilities(grants)
+      : { data: { platforms: [] } }
     if (grants.includes('telegram') && typeof this.store.listCanonicalRecords === 'function') {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === 'telegram')) {
@@ -231,7 +293,153 @@ export class HubService {
         })
       }
     }
-    return payload
+    const capabilityGrants = typeof this.store.listCapabilityGrants === 'function'
+      ? await this.store.listCapabilityGrants(context.consumer.id)
+      : []
+    return {
+      ...payload,
+      data: {
+        ...(payload?.data || {}),
+        capabilities: capabilityGrants
+          .filter((capability) => PUBLIC_CAPABILITIES.has(capability))
+          .map((capability) => ({
+            capability,
+            ready: capability === TOKENIZE_CAPABILITY
+              && typeof this.segmenter?.segmentWithMeta === 'function',
+          })),
+      },
+    }
+  }
+
+  async tokenize(context, { body, idempotencyKey }) {
+    assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
+    assert(
+      typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
+      400,
+      'invalid_idempotency_key',
+      'Idempotency-Key must contain 8-128 safe characters',
+    )
+    assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
+    const unsupported = Object.keys(body).filter((field) => field !== 'text')
+    assert(unsupported.length === 0, 400, 'unsupported_fields', `Unsupported tokenize fields: ${unsupported.join(', ')}`)
+    const text = requiredString(body.text, 'text')
+    assert(text.length <= TOKENIZE_MAX_TEXT_LENGTH, 400, 'invalid_request', `text must not exceed ${TOKENIZE_MAX_TEXT_LENGTH} characters`)
+    assert(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text), 400, 'invalid_request', 'text contains unsupported control characters')
+    assert(/[\p{L}\p{N}]/u.test(text), 400, 'invalid_request', 'text must contain at least one letter or number')
+
+    const grants = typeof this.store.listCapabilityGrants === 'function'
+      ? await this.store.listCapabilityGrants(context.consumer.id)
+      : []
+    assert(grants.includes(TOKENIZE_CAPABILITY), 403, 'capability_not_granted', 'Capability is not granted')
+    const policy = {
+      ...this.defaultPolicy,
+      ...((await this.store.getCapabilityPolicy(context.consumer.id, TOKENIZE_CAPABILITY)) || {}),
+    }
+
+    const requestId = randomUUID()
+    const startedAt = performance.now()
+    const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
+    await this.store.reapStaleReservations()
+    const reservation = await this.store.reserve({
+      requestId,
+      idempotencyKey,
+      fingerprint: requestFingerprint({
+        method: 'POST',
+        path: '/api/v1/tools/tokenize',
+        body: { text },
+      }),
+      tenantId: context.tenant.id,
+      consumerId: context.consumer.id,
+      apiKeyId: context.apiKey.id,
+      capability: TOKENIZE_CAPABILITY,
+      unitsReserved: 1,
+      leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
+      windowStart,
+      maxRequests: policy.maxRequests,
+    })
+    if (reservation.kind === 'conflict') {
+      throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
+    }
+    if (reservation.kind === 'in_progress') {
+      throw new AppError(409, 'request_in_progress', 'Request with this Idempotency-Key is in progress', {
+        requestId: reservation.request.id,
+      })
+    }
+    if (reservation.kind === 'unknown') {
+      throw new AppError(409, 'request_outcome_unknown', 'Previous request outcome is unknown; do not retry automatically', {
+        requestId: reservation.request.id,
+      })
+    }
+    if (reservation.kind === 'replay') {
+      return {
+        status: reservation.request.responseStatus,
+        body: reservation.request.responseBody,
+        requestId: reservation.request.id,
+        replay: true,
+      }
+    }
+    assert(reservation.kind === 'reserved' && reservation.request?.id, 500, 'usage_reservation_failed', 'Tokenizer usage reservation did not enter the expected state')
+    const activeRequestId = reservation.request.id
+    if (typeof this.segmenter?.segmentWithMeta !== 'function') {
+      await this.store.releaseRequest(activeRequestId, 'tokenizer_unavailable').catch(() => {})
+      throw new AppError(503, 'tokenizer_unavailable', 'Tokenizer is temporarily unavailable')
+    }
+
+    let metadata
+    try {
+      metadata = await this.segmenter.segmentWithMeta(text)
+      assert(metadata && typeof metadata === 'object' && !Array.isArray(metadata), 503, 'tokenizer_invalid_response', 'Tokenizer returned an invalid response')
+      assert(Array.isArray(metadata.tokens) && metadata.tokens.length > 0, 503, 'tokenizer_invalid_response', 'Tokenizer returned an invalid response')
+      assert(metadata.tokens.length <= TOKENIZE_MAX_TOKENS, 503, 'tokenizer_invalid_response', 'Tokenizer returned an invalid response')
+      assert(
+        metadata.tokens.every((token) => (
+          typeof token === 'string'
+            && token.trim()
+            && token.length <= 512
+            && !/[\u0000-\u001f\u007f]/u.test(token)
+        )),
+        503,
+        'tokenizer_invalid_response',
+        'Tokenizer returned an invalid response',
+      )
+      assert(['hanlp', 'jieba', 'bigram'].includes(metadata.backendUsed), 503, 'tokenizer_invalid_response', 'Tokenizer returned an invalid response')
+      assert(typeof metadata.degraded === 'boolean', 503, 'tokenizer_invalid_response', 'Tokenizer returned an invalid response')
+    } catch (error) {
+      await this.store.releaseRequest(activeRequestId, 'tokenizer_failed').catch(() => {})
+      if (error instanceof AppError) throw error
+      throw new AppError(503, 'tokenizer_unavailable', 'Tokenizer is temporarily unavailable')
+    }
+
+    const safeErrorCode = metadata.errorCode == null
+      ? null
+      : typeof metadata.errorCode === 'string' && /^[a-z0-9_]{1,64}$/.test(metadata.errorCode)
+        ? metadata.errorCode
+        : 'segmenter_error'
+    const tokens = metadata.tokens.map((token) => token.trim())
+    const responseBody = {
+      data: {
+        capability: TOKENIZE_CAPABILITY,
+        tokens,
+        actualBackend: metadata.backendUsed,
+        degraded: metadata.degraded,
+        errorCode: safeErrorCode,
+      },
+    }
+    try {
+      await this.store.commitRequest(activeRequestId, {
+        responseStatus: 200,
+        // The idempotency contract needs the successful response for replay.
+        // Store only the bounded public result, never the original input text,
+        // upstream response body, URL or credentials.
+        responseBody,
+        unitsActual: Math.max(1, tokens.length),
+        upstreamLatencyMs: Math.round(performance.now() - startedAt),
+      })
+    } catch (error) {
+      await this.store.markRequestUnknown(activeRequestId, 'usage_commit_ambiguous').catch(() => {})
+      throw error
+    }
+    return { status: 200, body: responseBody, requestId: activeRequestId, replay: false }
   }
 
   async publicUsage(context, filters) {
@@ -379,7 +587,8 @@ export class HubService {
     return {
       id: record.id,
       status: record.status,
-      platform: record.platform,
+      ...(record.platform ? { platform: record.platform } : {}),
+      ...(record.capability ? { capability: record.capability } : {}),
       units: record.status === 'committed' ? record.unitsActual : null,
       errorCode: record.errorCode,
       reservedAt: record.reservedAt,

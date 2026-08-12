@@ -248,6 +248,260 @@ test('jieba keeps multi-character terms whole and drops punctuation', async () =
   assert.ok(tokens.every((token) => token === token.toLowerCase()))
 })
 
+test('segmentWithMeta reports HanLP success and segment keeps its array contract', async () => {
+  const { HanlpSegmenter } = await import('../src/segmenter/index.mjs')
+  let fallbackCalls = 0
+  const segmenter = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => [['吴恩达', '与', '人工智能']],
+    }),
+    fallbackSegmenter: {
+      async segmentWithMeta() {
+        fallbackCalls += 1
+        return { tokens: ['jieba'], backendUsed: 'jieba', degraded: false, errorCode: null }
+      },
+    },
+    logger: { warn() {} },
+  })
+
+  assert.deepEqual(await segmenter.segmentWithMeta('吴恩达与人工智能'), {
+    tokens: ['吴恩达', '与', '人工智能'],
+    backendUsed: 'hanlp',
+    degraded: false,
+    errorCode: null,
+  })
+  assert.deepEqual(await segmenter.segment('吴恩达与人工智能'), ['吴恩达', '与', '人工智能'])
+  assert.equal(fallbackCalls, 0)
+})
+
+test('HanLP failures report stable per-call codes and degrade to jieba', async (t) => {
+  const { HanlpSegmenter } = await import('../src/segmenter/index.mjs')
+  const cases = [
+    {
+      name: 'HTTP error',
+      expected: 'hanlp_http_error',
+      fetchImpl: async () => ({ ok: false, status: 500 }),
+    },
+    {
+      name: 'invalid JSON',
+      expected: 'hanlp_invalid_json',
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => { throw new SyntaxError('bad JSON') },
+      }),
+    },
+    {
+      name: 'empty tokens',
+      expected: 'hanlp_empty_response',
+      fetchImpl: async () => ({ ok: true, json: async () => [[]] }),
+    },
+    {
+      name: 'request failure',
+      expected: 'hanlp_request_error',
+      fetchImpl: async () => {
+        throw Object.assign(new Error('connect failed'), { code: 'ECONNREFUSED' })
+      },
+    },
+  ]
+
+  for (const candidate of cases) {
+    await t.test(candidate.name, async () => {
+      const fallbackInputs = []
+      const segmenter = new HanlpSegmenter({
+        url: 'http://hanlp:8000',
+        fetchImpl: candidate.fetchImpl,
+        fallbackSegmenter: {
+          async segmentWithMeta(text) {
+            fallbackInputs.push(text)
+            return { tokens: ['吴恩达', '人工智能'], backendUsed: 'jieba', degraded: false, errorCode: null }
+          },
+        },
+        logger: { warn() {} },
+      })
+
+      assert.deepEqual(await segmenter.segmentWithMeta('吴恩达与人工智能'), {
+        tokens: ['吴恩达', '人工智能'],
+        backendUsed: 'jieba',
+        degraded: true,
+        errorCode: candidate.expected,
+      })
+      assert.deepEqual(fallbackInputs, ['吴恩达与人工智能'])
+    })
+  }
+})
+
+test('HanLP timeout degrades to jieba without borrowing shared status', async () => {
+  const { HanlpSegmenter } = await import('../src/segmenter/index.mjs')
+  const segmenter = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    timeoutMs: 5,
+    fetchImpl: async (_url, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), {
+        once: true,
+      })
+    }),
+    fallbackSegmenter: {
+      async segmentWithMeta() {
+        return { tokens: ['超时', '降级'], backendUsed: 'jieba', degraded: false, errorCode: null }
+      },
+    },
+    logger: { warn() {} },
+  })
+
+  assert.deepEqual(await segmenter.segmentWithMeta('超时降级'), {
+    tokens: ['超时', '降级'],
+    backendUsed: 'jieba',
+    degraded: true,
+    errorCode: 'hanlp_timeout',
+  })
+})
+
+test('jieba reports its backend and falls back to CJK bigrams on failure', async (t) => {
+  const { fallbackSegment, JiebaSegmenter } = await import('../src/segmenter/index.mjs')
+  const quiet = { warn() {} }
+
+  await t.test('success', async () => {
+    const segmenter = new JiebaSegmenter({
+      loadImpl: async () => ({ cutAsync: async () => ['吴恩达', '，', 'AI'] }),
+      logger: quiet,
+    })
+    assert.deepEqual(await segmenter.segmentWithMeta('吴恩达，AI'), {
+      tokens: ['吴恩达', 'ai'],
+      backendUsed: 'jieba',
+      degraded: false,
+      errorCode: null,
+    })
+  })
+
+  await t.test('load failure', async () => {
+    const segmenter = new JiebaSegmenter({
+      loadImpl: async () => { throw new Error('module unavailable') },
+      logger: quiet,
+    })
+    assert.deepEqual(await segmenter.segmentWithMeta('人工智能'), {
+      tokens: fallbackSegment('人工智能'),
+      backendUsed: 'bigram',
+      degraded: true,
+      errorCode: 'jieba_unavailable',
+    })
+  })
+
+  await t.test('inference failure', async () => {
+    const segmenter = new JiebaSegmenter({
+      loadImpl: async () => ({ cutAsync: async () => { throw new Error('native failure') } }),
+      logger: quiet,
+    })
+    assert.deepEqual(await segmenter.segmentWithMeta('人工智能'), {
+      tokens: fallbackSegment('人工智能'),
+      backendUsed: 'bigram',
+      degraded: true,
+      errorCode: 'jieba_inference_error',
+    })
+  })
+
+  for (const tokens of [[], ['，']]) {
+    await t.test(`empty normalized response ${JSON.stringify(tokens)}`, async () => {
+      const segmenter = new JiebaSegmenter({
+        loadImpl: async () => ({ cutAsync: async () => tokens }),
+        logger: quiet,
+      })
+      assert.deepEqual(await segmenter.segmentWithMeta('人工智能'), {
+        tokens: fallbackSegment('人工智能'),
+        backendUsed: 'bigram',
+        degraded: true,
+        errorCode: 'jieba_empty_response',
+      })
+    })
+  }
+})
+
+test('HanLP falls through a failed jieba backend to CJK bigrams', async () => {
+  const { fallbackSegment, HanlpSegmenter, JiebaSegmenter } =
+    await import('../src/segmenter/index.mjs')
+  const quiet = { warn() {} }
+  const segmenter = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    fetchImpl: async () => ({ ok: false, status: 503 }),
+    fallbackSegmenter: new JiebaSegmenter({
+      loadImpl: async () => { throw new Error('jieba unavailable') },
+      logger: quiet,
+    }),
+    logger: quiet,
+  })
+
+  assert.deepEqual(await segmenter.segmentWithMeta('人工智能'), {
+    tokens: fallbackSegment('人工智能'),
+    backendUsed: 'bigram',
+    degraded: true,
+    errorCode: 'hanlp_http_error',
+  })
+})
+
+test('HanLP recovers and concurrent calls keep their own backend provenance', async () => {
+  const { HanlpSegmenter } = await import('../src/segmenter/index.mjs')
+  let recoverCalls = 0
+  const recovering = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    fetchImpl: async () => {
+      recoverCalls += 1
+      return recoverCalls === 1
+        ? { ok: false, status: 503 }
+        : { ok: true, json: async () => [['已恢复']] }
+    },
+    fallbackSegmenter: {
+      async segmentWithMeta() {
+        return { tokens: ['降级'], backendUsed: 'jieba', degraded: false, errorCode: null }
+      },
+    },
+    logger: { warn() {} },
+  })
+  assert.equal((await recovering.segmentWithMeta('第一次')).backendUsed, 'jieba')
+  assert.deepEqual(await recovering.segmentWithMeta('第二次'), {
+    tokens: ['已恢复'],
+    backendUsed: 'hanlp',
+    degraded: false,
+    errorCode: null,
+  })
+  assert.equal(recovering.available, true)
+  assert.equal(recovering.lastError, null)
+
+  const pending = new Map()
+  const concurrent = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    fetchImpl: async (_url, options) => {
+      const { text } = JSON.parse(options.body)
+      return new Promise((resolve) => pending.set(text, resolve))
+    },
+    fallbackSegmenter: {
+      async segmentWithMeta(text) {
+        return { tokens: [`jieba:${text}`], backendUsed: 'jieba', degraded: false, errorCode: null }
+      },
+    },
+    logger: { warn() {} },
+  })
+  const failing = concurrent.segmentWithMeta('慢失败')
+  const succeeding = concurrent.segmentWithMeta('快成功')
+  pending.get('快成功')({ ok: true, json: async () => [['hanlp:快成功']] })
+  const successResult = await succeeding
+  pending.get('慢失败')({ ok: false, status: 500 })
+  const failureResult = await failing
+
+  assert.deepEqual(successResult, {
+    tokens: ['hanlp:快成功'],
+    backendUsed: 'hanlp',
+    degraded: false,
+    errorCode: null,
+  })
+  assert.deepEqual(failureResult, {
+    tokens: ['jieba:慢失败'],
+    backendUsed: 'jieba',
+    degraded: true,
+    errorCode: 'hanlp_http_error',
+  })
+})
+
 test('HanLP image pins the compatible transformers line and infers during prefetch', async () => {
   const { readFile } = await import('node:fs/promises')
   const { fileURLToPath } = await import('node:url')

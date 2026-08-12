@@ -632,7 +632,7 @@ export class DatabaseSourcePuller {
     if (typeof this.store.withExternalSourceLock === 'function') {
       return this.store.withExternalSourceLock(
         sourceKey,
-        (assertOwned = async () => {}) => operation(assertOwned),
+        (assertOwned = async () => {}, sessionClient = null) => operation(assertOwned, sessionClient),
       )
     }
     // MemoryStore and focused unit-test doubles do not own a PostgreSQL
@@ -642,7 +642,7 @@ export class DatabaseSourcePuller {
     }
     this.sourceLocks.add(sourceKey)
     try {
-      return await operation(async () => {})
+      return await operation(async () => {}, null)
     } finally {
       this.sourceLocks.delete(sourceKey)
     }
@@ -650,12 +650,19 @@ export class DatabaseSourcePuller {
 
   async withSourceLocks(sourceKeys, operation) {
     const keys = [...new Set(sourceKeys)].sort()
-    const acquire = (index, guards) => index >= keys.length
+    const acquire = (index, guards, sessionClients) => index >= keys.length
       ? operation(async () => {
           for (const assertOwned of guards) await assertOwned()
-        })
-      : this.withSourceLock(keys[index], (assertOwned) => acquire(index + 1, [...guards, assertOwned]))
-    return acquire(0, [])
+        }, sessionClients)
+      : this.withSourceLock(
+          keys[index],
+          (assertOwned, sessionClient) => acquire(
+            index + 1,
+            [...guards, assertOwned],
+            [...sessionClients, sessionClient],
+          ),
+        )
+    return acquire(0, [], [])
   }
 
   #assertCheckpoint(position, { contractHash, mappingVersion, sourceContractId = null }) {

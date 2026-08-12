@@ -13,9 +13,11 @@ import {
 import {
   MappingError,
   applyMapping,
+  CHUNKER_VERSION,
   inferFieldMap,
   validateFieldMap,
 } from '../../server/ingest/external/mapping.mjs'
+import { ExternalImporter } from '../../server/ingest/external/importer.mjs'
 import {
   DatabaseSourcePuller,
   validateDatabaseConnection,
@@ -252,6 +254,121 @@ test('the content hash tracks projected metrics but ignores collection time', ()
 
   const edited = applyMapping({ id: '1', 标题: 'changed', 点赞数: '10' }, fieldMap, { platform: 'external' })
   assert.notEqual(first.record.payloadSha256, edited.record.payloadSha256)
+})
+
+test('direct-file deduplication keys include the immutable parser, mapping, and format', async () => {
+  const mapping = { version: 1, fieldMap: { externalId: { from: 'id' } } }
+  const started = []
+  const importer = new ExternalImporter({
+    store: {
+      getExternalSource: async () => ({
+        id: 'source-file', sourceKey: 'files', status: 'active',
+        datasetId: 'files.v1', platform: 'external', objectType: 'document',
+      }),
+      getActiveMapping: async () => mapping,
+      startImportRun: async (input) => {
+        started.push(input)
+        return { id: null, duplicateOf: 'previous-run' }
+      },
+    },
+  })
+  const content = Buffer.from('id,title\n1,hello\n')
+  const keyFor = (mappingVersion, format) => createHash('sha256')
+    .update(`parser=${CHUNKER_VERSION}\nmapping=${mappingVersion}\nformat=${format}`)
+    .digest('hex')
+
+  await importer.importFile({ sourceKey: 'files', buffer: content, filename: 'first.CSV' })
+  mapping.version = 2
+  await importer.importFile({ sourceKey: 'files', buffer: content, filename: 'second.csv' })
+  mapping.version = 1
+  await importer.importFile({ sourceKey: 'files', buffer: content, filename: 'first.txt' })
+
+  assert.equal(started[0].interpretationKey, keyFor(1, '.csv'))
+  assert.equal(started[1].interpretationKey, keyFor(2, '.csv'))
+  assert.equal(started[2].interpretationKey, keyFor(1, '.txt'))
+  assert.match(started[0].interpretationKey, /^[a-f0-9]{64}$/)
+  assert.equal(new Set(started.map((run) => run.inputSha256)).size, 1)
+})
+
+test('direct-file imports fence claim, batch writes, evidence, and finish with the source lock guard', async () => {
+  const events = []
+  const sessionClient = { name: 'held-source-lock-session' }
+  const importer = new ExternalImporter({
+    store: {
+      getExternalSource: async () => ({
+        id: 'source-file', sourceKey: 'files', status: 'active',
+        datasetId: 'files.v1', platform: 'external', objectType: 'document',
+      }),
+      getActiveMapping: async () => ({
+        version: 1, fieldMap: { externalId: { from: 'id' }, title: { from: 'title' } },
+      }),
+      startImportRun: async (input) => {
+        assert.equal(input.sessionClient, sessionClient)
+        events.push('claim')
+        return { id: 'guarded-run', duplicateOf: null }
+      },
+      ingestExternalRecords: async (input) => {
+        assert.equal(input.sessionClient, sessionClient)
+        events.push('ingest')
+        return { ingested: 1, changed: 1 }
+      },
+      recordRejectedRows: async (_id, _rows, options) => {
+        assert.equal(options.sessionClient, sessionClient)
+        events.push('evidence')
+      },
+      finishImportRun: async (_id, result, options) => {
+        assert.equal(options.sessionClient, sessionClient)
+        events.push(`finish:${result.status}`)
+      },
+    },
+  })
+
+  await importer.importFile({
+    sourceKey: 'files', buffer: Buffer.from('id,title\n1,hello\n'), filename: 'records.csv',
+    assertOwned: async () => { events.push('guard') },
+    sessionClient,
+  })
+
+  assert.deepEqual(events, [
+    'guard', 'claim', 'guard', 'ingest', 'guard', 'evidence', 'guard', 'finish:succeeded',
+  ])
+})
+
+test('a lost source lock fences direct-file writes and terminalizes its claimed run', async () => {
+  let guardCalls = 0
+  let canonicalWritten = false
+  const finished = []
+  const importer = new ExternalImporter({
+    store: {
+      getExternalSource: async () => ({
+        id: 'source-file', sourceKey: 'files', status: 'active',
+        datasetId: 'files.v1', platform: 'external', objectType: 'document',
+      }),
+      getActiveMapping: async () => ({ version: 1, fieldMap: { externalId: { from: 'id' } } }),
+      startImportRun: async () => ({ id: 'lost-lock-run', duplicateOf: null }),
+      ingestExternalRecords: async () => { canonicalWritten = true },
+      recordRejectedRows: async () => {},
+      finishImportRun: async (_id, result) => { finished.push(result) },
+    },
+  })
+
+  await assert.rejects(
+    () => importer.importFile({
+      sourceKey: 'files', buffer: Buffer.from('id\n1\n'), filename: 'records.csv',
+      assertOwned: async () => {
+        guardCalls += 1
+        if (guardCalls === 2) {
+          const error = new Error('source lock lost')
+          error.code = 'source_lock_lost'
+          throw error
+        }
+      },
+    }),
+    (error) => error?.code === 'source_lock_lost',
+  )
+
+  assert.equal(canonicalWritten, false)
+  assert.equal(finished.at(-1).status, 'failed')
 })
 
 // ---------------------------------------------------------------------------
@@ -2032,6 +2149,118 @@ test('PostgresStore rejects terminal or cross-source runs before any canonical w
     assert.equal(queries.some((sql) => sql.includes('INSERT INTO ingest.source_objects')), false)
     assert.equal(queries.at(-1), 'ROLLBACK')
   }
+})
+
+test('a reclaimed file claim fences the old run before its writer can touch canonical state', async () => {
+  const sourceId = '22222222-2222-4222-8222-222222222222'
+  const oldRunId = '33333333-3333-4333-8333-333333333333'
+  const runs = new Map([[
+    oldRunId,
+    {
+      id: oldRunId,
+      source_id: sourceId,
+      input_sha256: 'a'.repeat(64),
+      interpretation_key: 'b'.repeat(64),
+      status: 'running',
+      trigger: 'manual',
+    },
+  ]])
+  const queries = []
+  let canonicalWrites = 0
+  let releases = 0
+
+  const query = async (sql, values = []) => {
+    queries.push({ sql, values })
+    if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+      return { rows: [], rowCount: 0 }
+    }
+    if (/UPDATE ingest\.import_runs\s+SET status = 'failed'/.test(sql)) {
+      let rowCount = 0
+      for (const run of runs.values()) {
+        if (run.source_id === values[0] && run.input_sha256 && run.status === 'running') {
+          run.status = 'failed'
+          run.last_error = 'superseded_by_new_file_import'
+          rowCount += 1
+        }
+      }
+      return { rows: [], rowCount }
+    }
+    if (/SELECT id, started_at FROM ingest\.import_runs/.test(sql)) {
+      const rows = [...runs.values()].filter((run) => (
+        run.source_id === values[0]
+        && run.input_sha256 === values[1]
+        && run.interpretation_key === values[2]
+        && run.status === 'succeeded'
+      ))
+      return { rows, rowCount: rows.length }
+    }
+    if (/INSERT INTO ingest\.import_runs/.test(sql)) {
+      const run = {
+        id: values[0], source_id: values[1], input_sha256: values[3],
+        interpretation_key: values[6], status: 'running', trigger: values[8],
+      }
+      runs.set(run.id, run)
+      return { rows: [{ id: run.id }], rowCount: 1 }
+    }
+    if (/SELECT id, source_id, status\s+FROM ingest\.import_runs/.test(sql)) {
+      const run = runs.get(values[0])
+      return { rows: run ? [run] : [], rowCount: run ? 1 : 0 }
+    }
+    if (/UPDATE ingest\.import_runs\s+SET status = \$2/.test(sql)) {
+      const run = runs.get(values[0])
+      if (!run || (run.status !== 'running' && run.status !== values[1])) {
+        return { rows: [], rowCount: 0 }
+      }
+      run.status = values[1]
+      return { rows: [], rowCount: 1 }
+    }
+    if (/ingest\.source_objects|core\.canonical_records|outbox\.projection_events/.test(sql)) {
+      canonicalWrites += 1
+    }
+    throw new Error(`unexpected SQL after run fence: ${sql}`)
+  }
+  const sessionClient = {
+    query,
+    release() { releases += 1 },
+  }
+  const store = new PostgresStore({ query, connect: async () => sessionClient })
+
+  const claim = await store.startImportRun({
+    sourceId,
+    mappingVersion: 2,
+    inputSha256: 'c'.repeat(64),
+    interpretationKey: 'd'.repeat(64),
+    inputName: 'retry.csv',
+    inputBytes: 12,
+    sessionClient,
+  })
+  assert.equal(runs.get(oldRunId).status, 'failed')
+  assert.equal(runs.get(oldRunId).last_error, 'superseded_by_new_file_import')
+  assert.equal(runs.get(claim.id).status, 'running')
+
+  await assert.rejects(
+    () => store.ingestExternalRecords({
+      datasetId: 'dataset', platform: 'external', connectorId: 'external:files',
+      sourceId, importRunId: oldRunId, records: [{}], sessionClient,
+    }),
+    (error) => error?.code === 'import_run_not_running',
+  )
+  const lateFinish = await store.finishImportRun(oldRunId, {
+    status: 'succeeded', rowCount: 1, rejectedCount: 0, error: null,
+  }, { sessionClient })
+
+  assert.equal(lateFinish.transitioned, false)
+  assert.equal(runs.get(oldRunId).status, 'failed')
+  assert.equal(canonicalWrites, 0)
+  assert.equal(releases, 0)
+  assert.deepEqual(
+    queries.slice(0, 5).map(({ sql }) => sql.trim().split(/\s+/)[0]),
+    ['BEGIN', 'UPDATE', 'SELECT', 'INSERT', 'COMMIT'],
+  )
+  assert.match(queries[1].sql, /input_sha256 IS NOT NULL/)
+  assert.match(queries[5].sql, /^BEGIN$/)
+  assert.match(queries[6].sql, /FOR UPDATE/)
+  assert.match(queries[7].sql, /^ROLLBACK$/)
 })
 
 test('PostgresStore detects a replay before canonical writes and returns its durable cursor end', async () => {

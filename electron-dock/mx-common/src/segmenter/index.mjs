@@ -19,10 +19,11 @@
 // None of these is an Elasticsearch plugin, deliberately. See
 // src/elasticsearch/analysis.mjs.
 //
-// The fallback exists so that a HanLP outage degrades search quality instead of
-// stopping ingestion. Because ES projections are rebuildable from PostgreSQL,
-// documents indexed with fallback tokens can be corrected later by a reindex;
-// documents *not* ingested at all would be a permanent hole in the ledger.
+// The fallbacks exist so that a HanLP outage degrades first to jieba and only
+// then to bigrams instead of stopping ingestion. Because ES projections are
+// rebuildable from PostgreSQL, documents indexed with fallback tokens can be
+// corrected later by a reindex; documents *not* ingested at all would be a
+// permanent hole in the ledger.
 
 const CJK = /[㐀-䶿一-鿿豈-﫿぀-ヿ]/
 // A leading # or @ is kept only when it actually prefixes a word. Matching the
@@ -32,19 +33,41 @@ const CJK = /[㐀-䶿一-鿿豈-﫿぀-ヿ]/
 // discriminates nothing.
 const LATIN_TOKEN = /[#@]?[A-Za-z0-9_][A-Za-z0-9_'\-.]*/g
 
+// Per-call provenance is returned with the tokens so concurrent requests never
+// have to infer their backend from the shared `available`/`lastError` snapshot.
+function segmentResult(tokens, backendUsed, degraded = false, errorCode = null) {
+  return { tokens, backendUsed, degraded, errorCode }
+}
+
+function segmenterError(code, message) {
+  return Object.assign(new Error(message), { segmenterCode: code })
+}
+
 export class HanlpSegmenter {
-  constructor({ url, token, timeoutMs = 5_000, fetchImpl = globalThis.fetch, logger = console }) {
+  constructor({
+    url,
+    token,
+    timeoutMs = 5_000,
+    fetchImpl = globalThis.fetch,
+    fallbackSegmenter = null,
+    logger = console,
+  }) {
     this.url = url.replace(/\/$/, '')
     this.token = token || null
     this.timeoutMs = timeoutMs
     this.fetchImpl = fetchImpl
     this.logger = logger
+    this.fallbackSegmenter = fallbackSegmenter || new JiebaSegmenter({ logger })
     this.available = true
     this.lastError = null
   }
 
   async segment(text) {
-    if (!text) return []
+    return (await this.segmentWithMeta(text)).tokens
+  }
+
+  async segmentWithMeta(text) {
+    if (!text) return segmentResult([], 'hanlp')
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     try {
@@ -60,18 +83,33 @@ export class HanlpSegmenter {
         body: JSON.stringify({ text, coarse: true }),
         signal: controller.signal,
       })
-      if (!response.ok) throw new Error(`HanLP responded ${response.status}`)
-      const payload = await response.json()
+      if (!response.ok) {
+        throw segmenterError('hanlp_http_error', `HanLP responded ${response.status}`)
+      }
+      let payload
+      try {
+        payload = await response.json()
+      } catch {
+        throw segmenterError('hanlp_invalid_json', 'HanLP returned invalid JSON')
+      }
       const tokens = normalizeHanlpResponse(payload)
+      if (tokens.length === 0) {
+        throw segmenterError('hanlp_empty_response', 'HanLP returned no tokens')
+      }
       this.available = true
       this.lastError = null
-      return tokens
+      return segmentResult(tokens, 'hanlp')
     } catch (error) {
       // Do not throw: a segmentation failure must never fail an ingest.
+      const message = error instanceof Error ? error.message : String(error)
+      const errorCode = controller.signal.aborted
+        ? 'hanlp_timeout'
+        : error?.segmenterCode || 'hanlp_request_error'
       this.available = false
-      this.lastError = error.message
-      this.logger?.warn?.(`[mx-common] HanLP segmentation failed, using fallback: ${error.message}`)
-      return fallbackSegment(text)
+      this.lastError = message
+      this.logger?.warn?.(`[mx-common] HanLP segmentation failed, using jieba fallback: ${message}`)
+      const fallback = await this.fallbackSegmenter.segmentWithMeta(text)
+      return segmentResult(fallback.tokens, fallback.backendUsed, true, errorCode)
     } finally {
       clearTimeout(timer)
     }
@@ -82,6 +120,7 @@ export class HanlpSegmenter {
 // flat `["token", ...]`, depending on version and input shape.
 function normalizeHanlpResponse(payload) {
   const data = Array.isArray(payload) ? payload : payload?.tokens || payload?.data || []
+  if (!Array.isArray(data)) return []
   const flat = Array.isArray(data[0]) ? data.flat() : data
   return flat.filter((token) => typeof token === 'string' && token.trim()).map((token) => token.trim())
 }
@@ -135,12 +174,23 @@ export function fallbackSegment(text) {
  *    social-media text is full of. With it, 吴恩达 stays one token; without it,
  *    it becomes three.
  */
+async function loadDefaultJieba() {
+  const { Jieba } = await import('@node-rs/jieba')
+  // Explicit `.js`: the package publishes no exports map, so the bare
+  // '@node-rs/jieba/dict' subpath does not resolve under ESM.
+  const dictionary = await import('@node-rs/jieba/dict.js')
+  const dict = dictionary.dict ?? dictionary.default?.dict
+  if (!dict) throw new Error('@node-rs/jieba/dict.js exposes no dict')
+  return Jieba.withDict(dict)
+}
+
 export class JiebaSegmenter {
   #instance = null
   #loading = null
 
-  constructor({ logger = console } = {}) {
+  constructor({ logger = console, loadImpl = loadDefaultJieba } = {}) {
     this.logger = logger
+    this.loadImpl = loadImpl
     this.available = true
     this.lastError = null
   }
@@ -149,19 +199,20 @@ export class JiebaSegmenter {
     if (this.#instance) return this.#instance
     if (!this.#loading) {
       this.#loading = (async () => {
-        const { Jieba } = await import('@node-rs/jieba')
-        // Explicit `.js`: the package publishes no exports map, so the bare
-        // '@node-rs/jieba/dict' subpath does not resolve under ESM.
-        const dictionary = await import('@node-rs/jieba/dict.js')
-        const dict = dictionary.dict ?? dictionary.default?.dict
-        if (!dict) throw new Error('@node-rs/jieba/dict.js exposes no dict')
-        this.#instance = Jieba.withDict(dict)
+        this.#instance = await this.loadImpl()
+        if (typeof this.#instance?.cutAsync !== 'function') {
+          throw new Error('jieba loader returned no cutAsync implementation')
+        }
+        this.available = true
+        this.lastError = null
         return this.#instance
       })().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        this.#instance = null
         this.available = false
-        this.lastError = error.message
+        this.lastError = message
         this.logger?.warn?.(
-          `[mx-common] jieba unavailable (${error.message}); using the bigram fallback`,
+          `[mx-common] jieba unavailable (${message}); using the bigram fallback`,
         )
         return null
       })
@@ -170,21 +221,37 @@ export class JiebaSegmenter {
   }
 
   async segment(text) {
-    if (!text) return []
+    return (await this.segmentWithMeta(text)).tokens
+  }
+
+  async segmentWithMeta(text) {
+    if (!text) return segmentResult([], 'jieba')
     const jieba = await this.#load()
-    if (!jieba) return fallbackSegment(text)
+    if (!jieba) {
+      return segmentResult(fallbackSegment(text), 'bigram', true, 'jieba_unavailable')
+    }
     try {
       // cutAsync keeps the native call off the event loop; the projector runs
       // this once per document in a tight bulk-indexing loop.
       const tokens = await jieba.cutAsync(String(text), true)
-      return tokens
+      const normalized = tokens
         .map((token) => token.trim().toLowerCase())
         // Punctuation and whitespace carry no retrieval signal and would
         // dominate the `tokens` keyword facet.
         .filter((token) => token && /[\p{L}\p{N}]/u.test(token))
+      if (normalized.length === 0) {
+        this.available = false
+        this.lastError = 'jieba returned no tokens'
+        return segmentResult(fallbackSegment(text), 'bigram', true, 'jieba_empty_response')
+      }
+      this.available = true
+      this.lastError = null
+      return segmentResult(normalized, 'jieba')
     } catch (error) {
-      this.lastError = error.message
-      return fallbackSegment(text)
+      const message = error instanceof Error ? error.message : String(error)
+      this.available = false
+      this.lastError = message
+      return segmentResult(fallbackSegment(text), 'bigram', true, 'jieba_inference_error')
     }
   }
 }
@@ -196,7 +263,11 @@ export class FallbackSegmenter {
   }
 
   async segment(text) {
-    return fallbackSegment(text)
+    return (await this.segmentWithMeta(text)).tokens
+  }
+
+  async segmentWithMeta(text) {
+    return segmentResult(fallbackSegment(text), 'bigram')
   }
 }
 

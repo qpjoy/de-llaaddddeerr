@@ -73,6 +73,7 @@ function requestRecord(row) {
     responseStatus: row.response_status,
     responseBody: row.response_body,
     errorCode: row.error_code,
+    capability: row.capability,
     upstreamLatencyMs: row.upstream_latency_ms,
     reservedAt: iso(row.reserved_at),
     leaseExpiresAt: iso(row.lease_expires_at),
@@ -89,6 +90,17 @@ function policy(row) {
     maxRequests: row.max_requests,
     windowSeconds: row.window_seconds,
     maxPageSize: row.max_page_size,
+    updatedAt: iso(row.updated_at),
+  }
+}
+
+function capabilityPolicy(row) {
+  return row && {
+    tenantId: row.tenant_id,
+    consumerId: row.consumer_id,
+    capability: row.capability,
+    maxRequests: row.max_requests,
+    windowSeconds: row.window_seconds,
     updatedAt: iso(row.updated_at),
   }
 }
@@ -258,6 +270,59 @@ export class PostgresStore {
     return rows.map((row) => row.platform)
   }
 
+  async listCapabilityGrants(consumerId) {
+    const { rows } = await this.pool.query(
+      'SELECT capability FROM capability_grants WHERE consumer_id = $1 ORDER BY capability',
+      [consumerId],
+    )
+    return rows.map((row) => row.capability)
+  }
+
+  async putCapabilityConfiguration({
+    tenantId,
+    consumerId,
+    capability,
+    enabled,
+    maxRequests,
+    windowSeconds,
+  }) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      if (enabled) {
+        await client.query(
+          `INSERT INTO capability_grants (consumer_id, capability) VALUES ($1, $2)
+           ON CONFLICT (consumer_id, capability) DO NOTHING`,
+          [consumerId, capability],
+        )
+      } else {
+        await client.query(
+          'DELETE FROM capability_grants WHERE consumer_id = $1 AND capability = $2',
+          [consumerId, capability],
+        )
+      }
+      const { rows } = await client.query(
+        `INSERT INTO consumer_capability_policies
+           (tenant_id, consumer_id, capability, max_requests, window_seconds)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (consumer_id, capability) DO UPDATE SET
+           tenant_id = EXCLUDED.tenant_id,
+           max_requests = EXCLUDED.max_requests,
+           window_seconds = EXCLUDED.window_seconds,
+           updated_at = now()
+         RETURNING *`,
+        [tenantId, consumerId, capability, maxRequests, windowSeconds],
+      )
+      await client.query('COMMIT')
+      return capabilityPolicy(rows[0])
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
   async putPolicy({ tenantId, consumerId, platform: platformName, maxRequests, windowSeconds, maxPageSize }) {
     const { rows } = await this.pool.query(
       `INSERT INTO consumer_platform_policies
@@ -291,12 +356,31 @@ export class PostgresStore {
     return rows.map(policy)
   }
 
+  async getCapabilityPolicy(consumerId, capability) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM consumer_capability_policies WHERE consumer_id = $1 AND capability = $2',
+      [consumerId, capability],
+    )
+    return capabilityPolicy(rows[0]) || null
+  }
+
+  async listCapabilityPolicies(consumerId) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM consumer_capability_policies WHERE consumer_id = $1 ORDER BY capability',
+      [consumerId],
+    )
+    return rows.map(capabilityPolicy)
+  }
+
   async reserve(input) {
+    if (Boolean(input.platform) === Boolean(input.capability)) {
+      throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')
+    }
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        `${input.tenantId}:${input.consumerId}:${input.platform}`,
+        `${input.tenantId}:${input.consumerId}:${input.capability ? `capability:${input.capability}` : `platform:${input.platform}`}`,
       ])
       const { rows } = await client.query(
         `SELECT * FROM usage_requests
@@ -330,8 +414,8 @@ export class PostgresStore {
       const inserted = await client.query(
         `INSERT INTO usage_requests
            (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
-            platform, status, units_reserved, lease_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'reserved', $8, $9)
+            platform, capability, status, units_reserved, lease_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reserved', $9, $10)
          RETURNING *`,
         [
           input.requestId,
@@ -340,7 +424,8 @@ export class PostgresStore {
           input.apiKeyId,
           input.idempotencyKey,
           input.fingerprint,
-          input.platform,
+          input.platform ?? null,
+          input.capability ?? null,
           input.unitsReserved,
           input.leaseExpiresAt,
         ],
@@ -359,14 +444,16 @@ export class PostgresStore {
     const { rows } = await client.query(
       `SELECT count(*)::integer AS count
        FROM usage_requests
-       WHERE tenant_id = $1 AND consumer_id = $2 AND platform = $3
+       WHERE tenant_id = $1 AND consumer_id = $2
+         AND platform IS NOT DISTINCT FROM $3
+         AND capability IS NOT DISTINCT FROM $4
          AND status IN ('reserved', 'committed', 'unknown')
-         AND reserved_at >= $4`,
-      [input.tenantId, input.consumerId, input.platform, input.windowStart],
+         AND reserved_at >= $5`,
+      [input.tenantId, input.consumerId, input.platform ?? null, input.capability ?? null, input.windowStart],
     )
     if (rows[0].count >= input.maxRequests) {
       throw new AppError(429, 'quota_exceeded', 'Request quota exceeded', {
-        platform: input.platform,
+        ...(input.platform ? { platform: input.platform } : { capability: input.capability }),
         maxRequests: input.maxRequests,
       })
     }
@@ -588,10 +675,11 @@ export class PostgresStore {
     sourceId = null,
     connectorId,
     batch = null,
+    sessionClient = null,
   }) {
     if (records.length === 0) return { ingested: 0, changed: 0 }
     const stream = `${platform}.external.v1`
-    const client = await this.pool.connect()
+    const client = sessionClient ?? await this.pool.connect()
     let changed = 0
     let deleted = 0
     let commitStarted = false
@@ -795,7 +883,7 @@ export class PostgresStore {
       await client.query('ROLLBACK').catch(() => {})
       throw error
     } finally {
-      client.release(releaseError)
+      if (!sessionClient) client.release(releaseError)
     }
   }
 
@@ -842,6 +930,65 @@ export class PostgresStore {
     return rows
   }
 
+  async dataCenter({ datasetId = null, platform = null, objectType = null, pageSize = 50 } = {}) {
+    const values = []
+    const clauses = []
+    for (const [column, value] of [
+      ['dataset_id', datasetId],
+      ['platform', platform],
+      ['object_type', objectType],
+    ]) {
+      if (!value) continue
+      values.push(value)
+      clauses.push(`${column} = $${values.length}`)
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    const recordValues = [...values, pageSize]
+    const [datasetResult, recordResult] = await Promise.all([
+      this.pool.query(
+        `SELECT dataset_id,
+                array_agg(DISTINCT platform ORDER BY platform) AS platforms,
+                array_agg(DISTINCT object_type ORDER BY object_type) AS object_types,
+                coalesce(
+                  array_agg(DISTINCT content_type ORDER BY content_type)
+                    FILTER (WHERE content_type IS NOT NULL),
+                  ARRAY[]::text[]
+                ) AS content_types,
+                count(*) FILTER (WHERE deleted_at IS NULL) AS active_record_count,
+                count(*) FILTER (WHERE deleted_at IS NOT NULL) AS deleted_record_count,
+                coalesce(sum(current_revision), 0) AS revision_count,
+                max(collected_at) AS last_collected_at,
+                max(event_time) AS last_event_at
+           FROM core.canonical_records
+           ${where}
+          GROUP BY dataset_id
+          ORDER BY dataset_id`,
+        values,
+      ),
+      this.pool.query(
+        `SELECT id, dataset_id, platform, object_type, content_type, external_id,
+                title, current_revision, event_time, collected_at, deleted_at
+           FROM core.canonical_records
+           ${where}
+          ORDER BY coalesce(event_time, collected_at, last_seen_at, first_seen_at) DESC, id DESC
+          LIMIT $${recordValues.length}`,
+        recordValues,
+      ),
+    ])
+    const datasets = datasetResult.rows.map(dataCenterDataset)
+    return {
+      stats: {
+        datasetCount: datasets.length,
+        activeRecordCount: datasets.reduce((total, row) => total + row.activeRecordCount, 0),
+        revisionCount: datasets.reduce((total, row) => total + row.revisionCount, 0),
+        deletedRecordCount: datasets.reduce((total, row) => total + row.deletedRecordCount, 0),
+      },
+      datasets,
+      records: recordResult.rows.map(dataCenterRecord),
+      pageSize,
+    }
+  }
+
   async #updateRequest(sql, values) {
     const { rows } = await this.pool.query(sql, values)
     if (!rows[0]) throw new AppError(404, 'request_not_found', 'Request not found')
@@ -884,6 +1031,7 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       `SELECT
          platform,
+         capability,
          count(*)::integer AS requests,
          count(*) FILTER (WHERE status = 'committed')::integer AS committed,
          count(*) FILTER (WHERE status = 'released')::integer AS released,
@@ -891,7 +1039,7 @@ export class PostgresStore {
          coalesce(sum(units_actual) FILTER (WHERE status = 'committed'), 0)::integer AS units,
          round(avg(upstream_latency_ms))::integer AS average_latency
        FROM usage_requests ${where}
-       GROUP BY platform`,
+       GROUP BY platform, capability`,
       values,
     )
     return summarizeAggregates(rows)
@@ -1047,7 +1195,7 @@ export class PostgresStore {
       if (!locked) {
         throw new AppError(409, 'source_busy', `External source is currently being synchronized: ${sourceKey}`)
       }
-      return await operation(assertOwned)
+      return await operation(assertOwned, client)
     } finally {
       if (locked) {
         await client.query(
@@ -1351,45 +1499,88 @@ export class PostgresStore {
     sourceId,
     mappingVersion,
     inputSha256,
+    interpretationKey = null,
     inputName,
     inputBytes,
     cursorStart = null,
     trigger = inputSha256 ? 'file' : 'manual',
     runKey = null,
+    sessionClient = null,
   }) {
     if (inputSha256) {
-      const { rows } = await this.pool.query(
-        `SELECT id, started_at FROM ingest.import_runs
-          WHERE source_id = $1 AND input_sha256 = $2 AND status = 'succeeded'
-          ORDER BY started_at DESC LIMIT 1`,
-        [sourceId, inputSha256],
-      )
-      if (rows[0]) return { duplicateOf: rows[0].id, id: null }
+      const keyedInterpretation = interpretationKey !== null
+      return withPgTransaction(this.pool, async (client) => {
+        // This UPDATE is the database fence for a reclaimed file import. It
+        // takes the same run-row lock that ingestExternalRecords holds while
+        // writing a batch, so an old writer either commits before this claim
+        // or observes the failed status before touching canonical state.
+        // input_sha256 also covers file runs created before migration 012,
+        // whose trigger column was backfilled to the legacy 'manual' default.
+        await client.query(
+          `UPDATE ingest.import_runs
+              SET status = 'failed',
+                  last_error = 'superseded_by_new_file_import',
+                  finished_at = now()
+            WHERE source_id = $1
+              AND input_sha256 IS NOT NULL
+              AND status = 'running'`,
+          [sourceId],
+        )
+
+        const { rows } = await client.query(
+          `SELECT id, started_at FROM ingest.import_runs
+            WHERE source_id = $1
+              AND input_sha256 = $2
+              AND ${keyedInterpretation ? 'interpretation_key = $3' : 'interpretation_key IS NULL'}
+              AND status = 'succeeded'
+            ORDER BY started_at DESC LIMIT 1`,
+          keyedInterpretation
+            ? [sourceId, inputSha256, interpretationKey]
+            : [sourceId, inputSha256],
+        )
+        if (rows[0]) return { duplicateOf: rows[0].id, id: null }
+
+        const inserted = await client.query(
+          `INSERT INTO ingest.import_runs
+             (id, source_id, mapping_version, input_sha256, input_name, input_bytes,
+              interpretation_key, cursor_start, trigger)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+          [
+            randomUUID(), sourceId, mappingVersion, inputSha256, inputName, inputBytes,
+            interpretationKey, cursorStart, trigger,
+          ],
+        )
+        return { id: inserted.rows[0].id, duplicateOf: null }
+      }, {
+        outcomeUnknownCode: 'external_import_claim_outcome_unknown',
+        sessionClient,
+      })
     }
     if (runKey) {
       const { rows } = await this.pool.query(
         `INSERT INTO ingest.import_runs
            (id, source_id, mapping_version, input_sha256, input_name, input_bytes,
-            cursor_start, trigger, run_key)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            interpretation_key, cursor_start, trigger, run_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (source_id, run_key)
            WHERE run_key IS NOT NULL AND status = 'running'
          DO UPDATE SET run_key = EXCLUDED.run_key
          RETURNING id`,
         [
           randomUUID(), sourceId, mappingVersion, inputSha256, inputName, inputBytes,
-          cursorStart, trigger, runKey,
+          interpretationKey, cursorStart, trigger, runKey,
         ],
       )
       return { id: rows[0].id, duplicateOf: null }
     }
     const { rows } = await this.pool.query(
       `INSERT INTO ingest.import_runs
-         (id, source_id, mapping_version, input_sha256, input_name, input_bytes, cursor_start, trigger)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+         (id, source_id, mapping_version, input_sha256, input_name, input_bytes,
+          interpretation_key, cursor_start, trigger)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
       [
         randomUUID(), sourceId, mappingVersion, inputSha256, inputName, inputBytes,
-        cursorStart, trigger,
+        interpretationKey, cursorStart, trigger,
       ],
     )
     return { id: rows[0].id, duplicateOf: null }
@@ -1403,8 +1594,8 @@ export class PostgresStore {
     deletedCount,
     cursorEnd = null,
     error,
-  }) {
-    const result = await this.pool.query(
+  }, { sessionClient = null } = {}) {
+    const result = await (sessionClient ?? this.pool).query(
       `UPDATE ingest.import_runs
           SET status = $2,
               row_count = coalesce($3, row_count),
@@ -1491,7 +1682,7 @@ export class PostgresStore {
    * renamed; discarding them is how an import "succeeds" at 60% coverage and
    * nobody notices for a month.
    */
-  async recordRejectedRows(importRunId, rejections) {
+  async recordRejectedRows(importRunId, rejections, { sessionClient = null } = {}) {
     if (rejections.length === 0) return
     // Cap what is stored: a mapping that rejects every row of a large file
     // would otherwise write a second copy of it into the database.
@@ -1500,7 +1691,7 @@ export class PostgresStore {
     const tuples = stored
       .map((_, index) => `($${index * 4 + 1}, $${index * 4 + 2}, $${index * 4 + 3}, $${index * 4 + 4})`)
       .join(', ')
-    await this.pool.query(
+    await (sessionClient ?? this.pool).query(
       `INSERT INTO ingest.rejected_rows (import_run_id, row_index, reason, raw_row) VALUES ${tuples}`,
       values,
     )
@@ -1698,6 +1889,36 @@ export class PostgresStore {
   }
 }
 
+function dataCenterDataset(row) {
+  return {
+    datasetId: row.dataset_id,
+    platforms: row.platforms || [],
+    objectTypes: row.object_types || [],
+    contentTypes: row.content_types || [],
+    activeRecordCount: Number(row.active_record_count || 0),
+    deletedRecordCount: Number(row.deleted_record_count || 0),
+    revisionCount: Number(row.revision_count || 0),
+    lastCollectedAt: iso(row.last_collected_at),
+    lastEventAt: iso(row.last_event_at),
+  }
+}
+
+function dataCenterRecord(row) {
+  return {
+    id: row.id,
+    datasetId: row.dataset_id,
+    platform: row.platform,
+    objectType: row.object_type,
+    contentType: row.content_type,
+    externalId: row.external_id,
+    title: row.title,
+    currentRevision: Number(row.current_revision),
+    eventTime: iso(row.event_time),
+    collectedAt: iso(row.collected_at),
+    deletedAt: iso(row.deleted_at),
+  }
+}
+
 function externalSource(row) {
   return row && {
     id: row.id,
@@ -1807,8 +2028,11 @@ async function saveCursorInTransaction(client, id, position, {
 // Local transaction helper. mx-common exports an equivalent, but the store
 // receives a pool rather than the shared config and should not reach into the
 // package for one three-line function.
-async function withPgTransaction(pool, fn, { outcomeUnknownCode = null } = {}) {
-  const client = await pool.connect()
+async function withPgTransaction(pool, fn, {
+  outcomeUnknownCode = null,
+  sessionClient = null,
+} = {}) {
+  const client = sessionClient ?? await pool.connect()
   let commitStarted = false
   let committed = false
   let releaseError = null
@@ -1833,12 +2057,13 @@ async function withPgTransaction(pool, fn, { outcomeUnknownCode = null } = {}) {
     await client.query('ROLLBACK').catch(() => {})
     throw error
   } finally {
-    client.release(releaseError)
+    if (!sessionClient) client.release(releaseError)
   }
 }
 
 function summarizeAggregates(rows) {
   const byPlatform = {}
+  const byCapability = {}
   let requests = 0
   let committed = 0
   let released = 0
@@ -1854,7 +2079,8 @@ function summarizeAggregates(rows) {
       unknown: row.unknown,
       units: row.units,
     }
-    byPlatform[row.platform] = entry
+    if (row.capability) byCapability[row.capability] = entry
+    else byPlatform[row.platform] = entry
     requests += row.requests
     committed += row.committed
     released += row.released
@@ -1873,6 +2099,7 @@ function summarizeAggregates(rows) {
     units,
     averageUpstreamLatencyMs: latencyRequests ? Math.round(weightedLatency / latencyRequests) : null,
     byPlatform,
+    byCapability,
   }
 }
 

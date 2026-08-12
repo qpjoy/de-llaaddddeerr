@@ -126,6 +126,11 @@ export const adminApi = {
     `${ADMIN_ROOT}/platforms/${encodeURIComponent(platform)}`,
     { method: 'PUT', body },
   ),
+  updateCapability: (token, capability, body) => request(
+    token,
+    `${ADMIN_ROOT}/capabilities/${encodeURIComponent(capability)}`,
+    { method: 'PUT', body },
+  ),
   usage: (token, query) => request(token, `${ADMIN_ROOT}/usage`, { query }),
 
   // Identity. `session` is fetched first on load: the console renders itself
@@ -138,6 +143,7 @@ export const adminApi = {
 
   // External sources (P4).
   sources: (token) => request(token, `${ADMIN_ROOT}/sources`),
+  dataCenter: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center`, { query }),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },

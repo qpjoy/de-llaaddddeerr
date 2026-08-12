@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { createPool, createQueue } from '@qpjoy/mx-common'
+import { createSegmenter } from '@qpjoy/mx-common/segmenter'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { NightAllAdapter } from './adapters/night-all.mjs'
@@ -59,12 +60,14 @@ export async function createRuntime(config = loadConfig()) {
   // Read-only here. The API serves retrieval queries and reports pipeline
   // status; the writing stages belong to the projector workload.
   const search = pool ? createSearch({ pool, config: config.common }) : null
+  const segmenter = search?.segmenter ?? createSegmenter(config.common.segmenter)
   const service = new HubService({
     store,
     adapter,
     apiKeyPepper: config.apiKeyPepper,
     reservationLeaseMs: config.reservationLeaseMs,
     searchQueries: search?.queries ?? null,
+    segmenter,
   })
   const embedding = pool && search
     ? new EmbeddingPipeline({

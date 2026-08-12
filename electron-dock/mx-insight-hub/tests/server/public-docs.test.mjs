@@ -35,6 +35,9 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/messages/)
     assert.match(html, /\/api\/v1\/data\/capabilities/)
+    assert.match(html, /\/api\/v1\/tools\/tokenize/)
+    assert.match(html, /nlp\.tokenize/)
+    assert.match(html, /actualBackend/)
     assert.match(html, /\/api\/v1\/requests\/\{requestId\}/)
     assert.match(html, /\/api\/v1\/usage/)
     assert.match(html, /Idempotency-Key/)
@@ -46,7 +49,7 @@ test('public listener serves self-contained public API documentation', async () 
   })
 })
 
-test('public OpenAPI document contains only implemented public data paths', async () => {
+test('public OpenAPI document contains only implemented Open API paths', async () => {
   await withServer('public', async (baseUrl) => {
     const response = await fetch(`${baseUrl}/docs/openapi.json`)
     const document = await response.json()
@@ -62,6 +65,7 @@ test('public OpenAPI document contains only implemented public data paths', asyn
       '/data/telegram/messages',
       '/data/telegram/search',
       '/requests/{requestId}',
+      '/tools/tokenize',
       '/usage',
     ])
     assert.deepEqual(Object.keys(document.components.securitySchemes).sort(), ['apiKeyHeader', 'bearerKey'])
@@ -71,6 +75,15 @@ test('public OpenAPI document contains only implemented public data paths', asyn
     assert.doesNotMatch(serialized, /mih_(?:live|test)_[A-Za-z0-9_-]+/i)
     assert.match(serialized, /Idempotency-Key/)
     assert.match(serialized, /opaque nextCursor/i)
+    assert.equal(
+      document.paths['/tools/tokenize'].post.requestBody.content['application/json'].schema.$ref,
+      '#/components/schemas/TokenizeRequest',
+    )
+    assert.deepEqual(
+      document.components.schemas.TokenizeEnvelope.properties.data.properties.actualBackend.enum,
+      ['hanlp', 'jieba', 'bigram'],
+    )
+    assert.equal(document.components.schemas.TokenizeRequest.additionalProperties, false)
   })
 })
 

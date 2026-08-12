@@ -45,6 +45,7 @@ function mergeUsageSummaries(summaries) {
     units: 0,
     averageUpstreamLatencyMs: null,
     byPlatform: {},
+    byCapability: {},
   }
   let weightedLatency = 0
   let latencyCommitted = 0
@@ -61,17 +62,19 @@ function mergeUsageSummaries(summaries) {
       latencyCommitted += summary.committed
     }
 
-    for (const [platform, entry] of Object.entries(summary.byPlatform || {})) {
-      const existing = merged.byPlatform[platform]
-      merged.byPlatform[platform] = existing
-        ? {
-            requests: existing.requests + entry.requests,
-            committed: existing.committed + entry.committed,
-            released: existing.released + entry.released,
-            unknown: existing.unknown + entry.unknown,
-            units: existing.units + entry.units,
-          }
-        : { ...entry }
+    for (const dimension of ['byPlatform', 'byCapability']) {
+      for (const [scope, entry] of Object.entries(summary[dimension] || {})) {
+        const existing = merged[dimension][scope]
+        merged[dimension][scope] = existing
+          ? {
+              requests: existing.requests + entry.requests,
+              committed: existing.committed + entry.committed,
+              released: existing.released + entry.released,
+              unknown: existing.unknown + entry.unknown,
+              units: existing.units + entry.units,
+            }
+          : { ...entry }
+      }
     }
   }
 
@@ -329,6 +332,12 @@ export function createApp({
     }
   }
 
+  function requireFileImportLock() {
+    if (typeof databasePuller?.withSourceLocks !== 'function') {
+      throw new AppError(503, 'source_lock_unavailable', 'File imports require the PostgreSQL source-lock session')
+    }
+  }
+
   function requireDatabasePuller() {
     if (!databasePuller || !queue) {
       throw new AppError(503, 'database_pull_unavailable', 'Database source pulls require the PostgreSQL store')
@@ -534,6 +543,25 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/data-center') {
+        requireSourceAdmin(principal)
+        const rawPageSize = searchParams.get('pageSize')
+        const pageSize = rawPageSize == null || rawPageSize === '' ? 50 : Number(rawPageSize)
+        if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+          throw new AppError(400, 'invalid_page_size', 'pageSize must be an integer between 1 and 100')
+        }
+        const optionalFilter = (name) => searchParams.get(name)?.trim() || null
+        sendJson(response, 200, {
+          data: await store.dataCenter({
+            datasetId: optionalFilter('datasetId'),
+            platform: optionalFilter('platform'),
+            objectType: optionalFilter('objectType'),
+            pageSize,
+          }),
+          requestId,
+        })
+        return
+      }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/tenants') {
         const tenants = filterByTenantCapability(
           principal,
@@ -614,6 +642,16 @@ export function createApp({
         await assertConsumerCapability(principal, body?.consumerId, 'platform.write')
         sendJson(response, 200, {
           data: await service.putPlatformConfiguration(params.platform, body),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/capabilities/:capability')
+      if (request.method === 'PUT' && params) {
+        const body = await readJson(request, 64 * 1024)
+        await assertConsumerCapability(principal, body?.consumerId, 'platform.write')
+        sendJson(response, 200, {
+          data: await service.putCapabilityConfiguration(params.capability, body),
           requestId,
         })
         return
@@ -1123,14 +1161,26 @@ export function createApp({
         requireSourceAdmin(principal)
         requireImporter()
         assertGenericSourceMutable(params.key)
+        requireFileImportLock()
         // Raw body plus a filename query parameter, deliberately not multipart:
         // multipart needs its own parser for attacker-controlled input, and this
         // path already accepts untrusted spreadsheets.
         const buffer = await readBuffer(request)
-        const result = await importer.importFile({
-          sourceKey: params.key,
-          buffer,
-          filename: requiredQuery(searchParams, 'filename'),
+        const result = await withSourceLocks([params.key], (
+          assertOwned = async () => {},
+          sessionClients = [],
+        ) => {
+          const sessionClient = sessionClients[0]
+          if (!sessionClient) {
+            throw new AppError(503, 'source_lock_unavailable', 'File import lock session is unavailable')
+          }
+          return importer.importFile({
+            sourceKey: params.key,
+            buffer,
+            filename: requiredQuery(searchParams, 'filename'),
+            assertOwned,
+            sessionClient,
+          })
         })
         sendJson(response, result.status === 'skipped' ? 200 : 201, { data: result, requestId })
         return
@@ -1235,6 +1285,18 @@ export function createApp({
         const context = await requirePublic(request)
         const payload = await service.capabilities(context)
         sendJson(response, 200, { ...payload, requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/api/v1/tools/tokenize') {
+        const context = await requirePublic(request)
+        const result = await service.tokenize(context, {
+          body: await readJson(request, 16 * 1024),
+          idempotencyKey: request.headers['idempotency-key'],
+        })
+        sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
+          'x-mx-insight-request-id': result.requestId,
+          'idempotent-replay': String(result.replay),
+        })
         return
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/telegram/entities/search') {
