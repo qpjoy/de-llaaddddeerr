@@ -224,19 +224,40 @@ JSON
 	container_running() {
 		return 0
 	}
+	readiness_trace="$TEST_ROOT/system-subscription-readiness-trace"
+	sleep_trace="$TEST_ROOT/system-subscription-sleep-trace"
+	sleep() {
+		printf "%s\n" "${1:-}" >> "$sleep_trace"
+	}
 	curl() {
-		local output=""
+		local output="" url="" ready_attempts
 		while [[ $# -gt 0 ]]; do
 			case "$1" in
 				-o) output="$2"; shift 2 ;;
+				http://*) url="$1"; shift ;;
 				*) shift ;;
 			esac
 		done
+		if [[ "$url" == "http://127.0.0.1:${HY2_EXPORT_FALLBACK_PORT}/healthz" ]]; then
+			printf "healthz\n" >> "$readiness_trace"
+			ready_attempts="$(grep -c '^healthz$' "$readiness_trace")"
+			(( ready_attempts >= 3 ))
+			return
+		fi
+		[[ "$url" == "http://127.0.0.1:${HY2_EXPORT_FALLBACK_PORT}${HY2_SYSTEM_SUBSCRIPTION_PATH}" ]] \
+			|| fail "unexpected system subscription curl URL: $url"
+		[[ "$(grep -c '^healthz$' "$readiness_trace")" == "3" ]] \
+			|| fail "exact-path curl ran before subscription readiness"
+		printf "exact-path\n" >> "$readiness_trace"
 		[[ -n "$output" ]] || return 1
 		cp "$managed" "$output"
 	}
 	check_system_subscription_command | grep -F "mixed-port 7788: passed" >/dev/null \
 		|| fail "exact-path system subscription verification did not pass"
+	[[ "$(tr '\n' ' ' < "$readiness_trace")" == "healthz healthz healthz exact-path " ]] \
+		|| fail "system subscription readiness/exact-path curl order changed"
+	[[ "$(wc -l < "$sleep_trace" | tr -d ' ')" == "2" ]] \
+		|| fail "readiness retry did not use the non-blocking sleep stub exactly twice"
 	container_running() {
 		return 1
 	}

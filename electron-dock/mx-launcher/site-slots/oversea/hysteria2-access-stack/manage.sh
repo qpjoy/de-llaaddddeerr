@@ -1927,6 +1927,7 @@ check_system_subscription_command() {
 		|| die "System subscription YAML does not advertise mixed-port ${SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}."
 	container_running "$SUBSCRIPTIONS_CONTAINER" || die "System subscription outlet is not running."
 	basic_user="${HY2_SYSTEM_SUBSCRIPTION_BASIC_USER:-subscriptions}"
+	wait_for_subscription_http_ready "$HY2_EXPORT_FALLBACK_PORT"
 	downloaded="$(mktemp "$STACK_DIR/data/subscriptions/.system-subscription-check.XXXXXX")"
 	if ! curl -fsS \
 		--config <(printf 'user = "%s:%s"\n' "$basic_user" "$auth_token") \
