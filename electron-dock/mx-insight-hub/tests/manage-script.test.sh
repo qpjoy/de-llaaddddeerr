@@ -713,6 +713,90 @@ if bash -c '
 fi
 printf 'ok - runtime config requires provisioning to have run first\n'
 
+# The production loader sources this example as Bash. Quote JSON as one value;
+# otherwise Bash strips its inner quotes before the runtime validator sees it.
+example_server_roots="$(
+  bash -c '
+    set -euo pipefail
+    unset MX_INSIGHT_SERVER_FILE_ROOTS
+    source "$1/.env.example"
+    printf "%s" "$MX_INSIGHT_SERVER_FILE_ROOTS"
+  ' _ "$ROOT_DIR"
+)"
+assert_eq \
+  '{"shared-dir":"/shared_dir"}' \
+  "$example_server_roots" \
+  '.env.example preserves server-file root JSON when sourced'
+MX_INSIGHT_SERVER_FILE_ROOTS_VALUE="$example_server_roots" \
+  node --input-type=module -e '
+    const { parseServerFileRoots } = await import(process.argv[1])
+    parseServerFileRoots(process.env.MX_INSIGHT_SERVER_FILE_ROOTS_VALUE)
+  ' "$ROOT_DIR/server/ingest/external/server-files.mjs"
+
+# A configured JSON object must reach the ConfigMap byte-for-byte. Keeping a
+# brace literal inside Bash `${VAR:-word}` appends one `}` when VAR is set.
+server_roots_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-server-roots.XXXXXX")"
+rm -f -- "$server_roots_marker"
+SERVER_ROOTS_MARKER="$server_roots_marker" \
+MX_INSIGHT_SERVER_FILE_ROOTS='{"custom-root":"/srv/custom-files"}' \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+  export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+  export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+  export NIGHT_ALL_BASE_URL="http://night-all.internal"
+  export MX_INSIGHT_SEARCH_READY=1
+  kubectl() {
+    local argument
+    for argument in "$@"; do
+      case "$argument" in
+        --from-literal=MX_INSIGHT_SERVER_FILE_ROOTS=*)
+          printf "%s" "${argument#--from-literal=MX_INSIGHT_SERVER_FILE_ROOTS=}" >"$SERVER_ROOTS_MARKER"
+          ;;
+      esac
+    done
+    case " $* " in
+      *" --dry-run=client -o yaml "*) printf "apiVersion: v1\\nkind: List\\nitems: []\\n" ;;
+      *) while IFS= read -r _line; do :; done ;;
+    esac
+  }
+  create_runtime_config
+' _ "$ROOT_DIR"
+assert_eq \
+  '{"custom-root":"/srv/custom-files"}' \
+  "$(cat "$server_roots_marker")" \
+  'configured server-file root JSON is preserved exactly'
+rm -f -- "$server_roots_marker"
+
+# Reject malformed configuration before kubectl can overwrite the last known
+# good ConfigMap and take the Admin listener down.
+invalid_roots_kubectl_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-roots.XXXXXX")"
+invalid_roots_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-roots-error.XXXXXX")"
+rm -f -- "$invalid_roots_kubectl_marker"
+if INVALID_ROOTS_KUBECTL_MARKER="$invalid_roots_kubectl_marker" \
+  MX_INSIGHT_SERVER_FILE_ROOTS='{"custom-root":"/srv/custom-files"}}' \
+  bash -c '
+    set -euo pipefail
+    source "$1/scripts/manage.sh"
+    export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+    export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+    export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+    export NIGHT_ALL_BASE_URL="http://night-all.internal"
+    kubectl() { : >"$INVALID_ROOTS_KUBECTL_MARKER"; }
+    create_runtime_config
+  ' _ "$ROOT_DIR" >/dev/null 2>"$invalid_roots_error"; then
+  printf 'not ok - malformed server-file root JSON was accepted\n' >&2
+  exit 1
+fi
+if [ -e "$invalid_roots_kubectl_marker" ]; then
+  printf 'not ok - malformed server-file root JSON reached kubectl\n' >&2
+  exit 1
+fi
+grep -q 'must be a valid server-file root JSON object' "$invalid_roots_error"
+rm -f -- "$invalid_roots_error"
+printf 'ok - malformed server-file root JSON fails before ConfigMap mutation\n'
+
 # The foreign Telegram reader is optional, but when configured it must be
 # passed as a Secret key (never a ConfigMap value or terminal output).
 tg_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-tg-wired.XXXXXX")"

@@ -651,6 +651,7 @@ create_model_key_secret() {
 
 create_runtime_config() {
   local namespace="mx-insight-hub"
+  need node
   local database_url="${MX_INSIGHT_DATABASE_URL:?ensure_shared_data_plane must run before create_runtime_config}"
   local -a secret_args=(
     --from-literal=DATABASE_URL="$database_url"
@@ -668,7 +669,20 @@ create_runtime_config() {
   # which is what keeps the Night-All path independent of the search rollout.
   local elasticsearch_url="${MX_COMMON_ELASTICSEARCH_URL:-http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200}"
   local redis_url="${MX_COMMON_REDIS_URL:-redis://mx-common-redis.mx-common.svc.cluster.local:6379}"
-  local server_file_roots="${MX_INSIGHT_SERVER_FILE_ROOTS:-{\"shared-dir\":\"/shared_dir\"}}"
+  # Keep the JSON default outside `${VAR:-word}`. A `}` inside `word` closes
+  # that parameter expansion early, so an explicitly configured JSON object
+  # previously acquired one trailing `}` and crashed the Admin listener.
+  local server_file_roots='{"shared-dir":"/shared_dir"}'
+  if [ -n "${MX_INSIGHT_SERVER_FILE_ROOTS:-}" ]; then
+    server_file_roots="$MX_INSIGHT_SERVER_FILE_ROOTS"
+  fi
+  if ! MX_INSIGHT_SERVER_FILE_ROOTS_VALUE="$server_file_roots" \
+    node --input-type=module -e '
+      const { parseServerFileRoots } = await import(process.argv[1])
+      parseServerFileRoots(process.env.MX_INSIGHT_SERVER_FILE_ROOTS_VALUE)
+    ' "${ROOT_DIR}/server/ingest/external/server-files.mjs" >/dev/null 2>&1; then
+    die "MX_INSIGHT_SERVER_FILE_ROOTS must be a valid server-file root JSON object"
+  fi
   if [ "${MX_INSIGHT_SEARCH_READY:-0}" != "1" ] && [ -z "${MX_COMMON_ELASTICSEARCH_URL:-}" ]; then
     say "shared search is not ready; deploying with MX_COMMON_ELASTICSEARCH_URL unset (search degraded)"
     elasticsearch_url=""

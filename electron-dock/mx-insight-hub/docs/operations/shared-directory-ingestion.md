@@ -135,7 +135,7 @@ stateDiagram-v2
 ## 8. 当前可用的精确单文件流程
 
 1. 运维在 Hub runtime 配置静态 allowlist，例如
-   `MX_INSIGHT_SERVER_FILE_ROOTS={"internal":"/shared_dir/import"}`，以只读方式挂载同一路径，
+   `MX_INSIGHT_SERVER_FILE_ROOTS='{"internal":"/shared_dir/import"}'`，以只读方式挂载同一路径，
    并让 Admin runtime 仅附加可遍历该目录的 numeric group；
 2. 使用 Hub Admin Token 进入“外部数据源”，注册文件源并选择“服务器路径”；
 3. 在普通文本框直接粘贴白名单内的精确文件路径；注册后 catalog 仅显示
