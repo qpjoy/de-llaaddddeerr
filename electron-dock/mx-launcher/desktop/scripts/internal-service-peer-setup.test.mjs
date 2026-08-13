@@ -179,6 +179,27 @@ assert.match(
 const internalPeerWorkbenchSource = functionSource(rendererSource, 'renderInternalPeerWorkbench');
 assert.match(
   internalPeerWorkbenchSource,
+  /if \(state\.deploymentKind !== 'internal'\) \{\s*renderDeploymentWorkbench\(pipelines\);\s*return;\s*\}/,
+  'a delayed Internal peer refresh must render the current deployment lane instead of overwriting Oversea'
+);
+const delayedInternalRefresh = Function(
+  `
+const state = { deploymentKind: 'oversea' };
+let routed = null;
+function renderDeploymentWorkbench(pipelines) { routed = pipelines; }
+${internalPeerWorkbenchSource}
+return { run: renderInternalPeerWorkbench, routed: () => routed };
+`
+)();
+const overseaPipelines = [{ kind: 'oversea', siteId: 'mx-oversea-hk01' }];
+delayedInternalRefresh.run(overseaPipelines);
+assert.strictEqual(
+  delayedInternalRefresh.routed(),
+  overseaPipelines,
+  'a late Internal status response must redispatch the current Oversea lane'
+);
+assert.match(
+  internalPeerWorkbenchSource,
   /const runtimeHealthy = runtimeStatus\?\.status === 'passed';\s*const panelStatus = runtimeHealthy\s*\? 'passed'/,
   'a healthy live Domestic/Internal WG must remain passed when only its control-plane artifact is stale'
 );
@@ -197,5 +218,53 @@ assert.match(
   /Refresh Domestic Artifact/,
   'the control-plane action must not be presented as a runtime WG install or restart'
 );
+
+const renderOverseaSiteDetail = Function(
+  `
+const state = { overseaEnsureBusy: false };
+function asArray(value) { return Array.isArray(value) ? value : []; }
+function escapeHtml(value) { return String(value ?? ''); }
+function normalizeStageStatus(value) { return value || 'ready'; }
+function sameHostPeerProfile() { return null; }
+function workerInternalBaseUrlForSite() { return 'http://127.0.0.1:18090'; }
+function renderSameHostNote() { return ''; }
+function renderOverseaTerminal() { return ''; }
+${functionSource(rendererSource, 'renderOverseaSiteDetail')}
+return renderOverseaSiteDetail;
+`
+)();
+
+function overseaSite(status, archived = false) {
+  return {
+    siteId: 'mx-oversea-hk01',
+    host: '18.166.135.196',
+    status,
+    archived,
+    sshProfile: { profileId: 'sshprof_hk01' },
+    services: [],
+    subscriptions: []
+  };
+}
+
+function overseaEnsureTag(html) {
+  return html.match(/<button[^>]*data-oversea-ensure[^>]*>/)?.[0] || '';
+}
+
+const waitingOverseaHtml = renderOverseaSiteDetail(overseaSite('waiting'));
+assert.match(waitingOverseaHtml, /Install \/ Sync/, 'a waiting site keeps the explicit Install / Sync action');
+assert.doesNotMatch(overseaEnsureTag(waitingOverseaHtml), /\bdisabled\b/, 'a waiting site with an SSH profile remains syncable');
+assert.doesNotMatch(
+  waitingOverseaHtml,
+  /data-internal-peer|Generate Handoff|Sync Domestic WG Key|Install \/ Restart|Open Domestic/,
+  'the Oversea detail never renders Domestic or Internal runtime controls'
+);
+
+const installedOverseaHtml = renderOverseaSiteDetail(overseaSite('installed'));
+assert.match(installedOverseaHtml, /Sync Remote/, 'an installed site exposes Sync Remote independently of pipeline action hints');
+assert.doesNotMatch(overseaEnsureTag(installedOverseaHtml), /\bdisabled\b/, 'an installed active site remains syncable');
+
+const archivedOverseaHtml = renderOverseaSiteDetail(overseaSite('archived', true));
+assert.match(archivedOverseaHtml, /Unarchive First/, 'an archived site requires explicit restoration before sync');
+assert.match(overseaEnsureTag(archivedOverseaHtml), /\bdisabled\b/, 'an archived site cannot sync');
 
 console.log('internal service peer setup safety contract: ok');

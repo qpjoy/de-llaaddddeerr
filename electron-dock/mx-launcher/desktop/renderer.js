@@ -4623,6 +4623,10 @@ function renderDeploymentWorkbench(pipelines) {
 }
 
 function renderInternalPeerWorkbench(pipelines) {
+  if (state.deploymentKind !== 'internal') {
+    renderDeploymentWorkbench(pipelines);
+    return;
+  }
   const sites = deploymentSites(pipelines, 'domestic');
   deploymentSiteCount.textContent = `${sites.length} domestic relay${sites.length === 1 ? '' : 's'}`;
   const selectedSite = sites.find((item) => item.siteId === state.selectedSiteId) || null;
