@@ -719,7 +719,9 @@ hash_password() (
 	umask 077
 	secret_dir="$(mktemp -d "${hash_tmp_base%/}/mx-hy2-caddy-hash.XXXXXX")"
 	secret_file="$secret_dir/plaintext"
-	printf "%s" "$plaintext" > "$secret_file"
+	# Caddy's stdin password prompt requires a line terminator; without it the
+	# non-interactive reader returns EOF before hashing.
+	printf "%s\n" "$plaintext" > "$secret_file"
 	chmod 600 "$secret_file"
 	unset plaintext
 
@@ -733,7 +735,7 @@ hash_password() (
 			--mount "type=bind,source=${secret_file},target=/run/secrets/mx-hy2-password,readonly" \
 			--entrypoint /bin/sh \
 			caddy:2-alpine \
-			-ec 'exec caddy hash-password < /run/secrets/mx-hy2-password'
+			-ec 'exec caddy hash-password --algorithm bcrypt < /run/secrets/mx-hy2-password'
 	)" || status=$?
 	if (( status != 0 )); then
 		return "$status"
@@ -2428,7 +2430,7 @@ main() {
 			status_command
 		;;
 		docker-status)
-			docker_status_command
+			docker_status_command "$@"
 		;;
 		sync-internal-defaults)
 			sync_internal_defaults_command

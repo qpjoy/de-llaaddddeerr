@@ -100,7 +100,7 @@ JSON
 			[[ "$previous" == "--network" && "$arg" == "none" ]] && saw_network_none="true"
 			[[ "$previous" == "--user" && "$arg" == "0:0" ]] && saw_root_user="true"
 			[[ "$previous" == "--entrypoint" && "$arg" == "/bin/sh" ]] && saw_entrypoint="true"
-			[[ "$arg" == *'caddy hash-password < /run/secrets/mx-hy2-password'* ]] && saw_fixed_command="true"
+			[[ "$arg" == *'caddy hash-password --algorithm bcrypt < /run/secrets/mx-hy2-password'* ]] && saw_fixed_command="true"
 			if [[ "$previous" == "--mount" ]]; then
 				mount_spec="$arg"
 			fi
@@ -119,12 +119,16 @@ JSON
 		[[ -f "$mount_source" ]] || fail "hash secret file was absent during docker invocation"
 		[[ "$(cat "$mount_source")" == "$HASH_SECURITY_SECRET" ]] \
 			|| fail "hash container mount did not contain the requested secret"
+		if [[ "$(tail -c 1 "$mount_source" | od -An -tx1 | tr -d '[:space:]')" != "0a" ]]; then
+			echo "Error: EOF" >&2
+			return 65
+		fi
 		file_mode="$(stat -f '%Lp' "$mount_source" 2>/dev/null || stat -c '%a' "$mount_source")"
 		[[ "$file_mode" == "600" ]] || fail "hash secret mode is ${file_mode}, expected 600"
 		printf "%s" "$mount_source" > "$hash_security_mount_record"
 	}
 	docker() {
-		inspect_hash_docker_call "$@"
+		inspect_hash_docker_call "$@" || return $?
 		printf "%s\n" '$2a$14$Zkx.HbQOScCQ1YI8Iu7/fO1M/ieGJqmXiF6Vq95PVIYzGKqG7SNU.'
 	}
 	security_hash="$(hash_password "$HASH_SECURITY_SECRET")"
@@ -263,6 +267,22 @@ JSON
 	[[ -f data/subscriptions/clients.csv ]] || fail "disabling system subscription removed evidence summary"
 )
 
+(
+	cd "$TEST_ROOT"
+	# shellcheck disable=SC1091
+	source ./manage.sh
+	require_root() { return 0; }
+	detect_compose() { return 0; }
+	ensure_stack_dirs() { return 0; }
+	ensure_env_file() { return 0; }
+	ensure_users_file() { return 0; }
+	docker_status_command() {
+		[[ "$#" == "1" && "$1" == "--soft" ]] \
+			|| fail "main did not pass docker-status options through"
+	}
+	main docker-status --soft
+)
+
 assert_contains "$SOURCE_DIR/Caddyfile" '@systemSubscription path {$HY2_SYSTEM_SUBSCRIPTION_PATH:/__system-subscription-disabled__}'
 assert_not_contains "$SOURCE_DIR/Caddyfile" '@systemSubscription path /peer_*'
 assert_contains "$SOURCE_DIR/Caddyfile" '{$HY2_SYSTEM_SUBSCRIPTION_BASIC_USER} {$HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH}'
@@ -273,6 +293,8 @@ assert_contains "$SOURCE_DIR/manage.sh" 'chmod 600 "$secret_file"'
 assert_contains "$SOURCE_DIR/manage.sh" 'trap cleanup_hash_password_secret EXIT'
 assert_contains "$SOURCE_DIR/manage.sh" 'target=/run/secrets/mx-hy2-password,readonly'
 assert_contains "$SOURCE_DIR/manage.sh" 'unset plaintext'
+assert_contains "$SOURCE_DIR/manage.sh" 'exec caddy hash-password --algorithm bcrypt < /run/secrets/mx-hy2-password'
+assert_contains "$SOURCE_DIR/manage.sh" 'docker_status_command "$@"'
 assert_not_contains "$SOURCE_DIR/manage.sh" 'hash-password --plaintext'
 if grep -Eq 'docker run[^#]*--plaintext' "$SOURCE_DIR/manage.sh"; then
 	fail "hash_password regressed to passing plaintext through host docker argv"
