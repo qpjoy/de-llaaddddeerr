@@ -1307,7 +1307,7 @@ shadow_image_artifacts() {
   shadow_image_tunnel_cli_fallback
   say "materialize site-slot artifacts for shadow image"
   MX_SITE_SLOT_ALLOW_DEGRADED_QP_TUNNEL_CLI="${MX_SITE_SLOT_ALLOW_DEGRADED_QP_TUNNEL_CLI:-1}" \
-    node server/scripts/site-slot-artifact-materializer.mjs all --out-dir server/artifacts/site-slots
+    node server/scripts/site-slot-artifact-materializer.mjs all --out-dir server/artifacts/site-slots --no-preserve-runtime-secrets
 }
 
 shadow_image_admin_assets() {

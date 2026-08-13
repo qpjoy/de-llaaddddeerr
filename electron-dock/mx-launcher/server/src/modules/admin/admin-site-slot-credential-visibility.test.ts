@@ -1,8 +1,19 @@
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
+import { loadConfig } from '../../config.js';
+import { MemoryStore } from '../../store/memory.js';
 import type { PlatformStore } from '../../store/platform-store.js';
-import type { AdminSiteSlotPipeline } from '../../types.js';
+import type {
+  AdminSiteSlotPipeline,
+  SiteSlotDomesticWireGuardSecretInput,
+  SiteSlotKind,
+  SiteSlotPlanInput
+} from '../../types.js';
+import { generateWireGuardKeyPair } from '../config-center/wireguard-keys.js';
 import { AdminController } from './admin.controller.js';
 
 const OPS_TOKEN = 'admin-site-slot-credential-test-ops-token';
@@ -293,4 +304,359 @@ test('admin Oversea plan materializes the current Internal credentials instead o
     upRate: '50 Mbps',
     downRate: '50 Mbps'
   }]);
+});
+
+test('Oversea Install/Sync and archive never cross the Domestic WG runtime boundary', async (t) => {
+  await withOpsToken(async () => {
+    const outputDir = mkdtempSync(join(tmpdir(), 'mx-oversea-materialize-isolation-'));
+    t.after(() => rmSync(outputDir, { recursive: true, force: true }));
+    const rawStore = new MemoryStore(loadConfig());
+    const relayKeyPair = generateWireGuardKeyPair();
+    const internalKeyPair = generateWireGuardKeyPair();
+    const domesticPlan = rawStore.createSiteSlotPlan({
+      siteId: 'domestic-isolation-test',
+      kind: 'domestic',
+      host: '198.51.100.20',
+      sshUser: 'root',
+      rootAccess: true,
+      hasDocker: true,
+      hasOutboundInternet: true,
+      createdBy: 'test'
+    });
+    const domesticBefore = rawStore.upsertSiteSlotDomesticWireGuardSecret({
+      siteId: domesticPlan.siteId,
+      publicEndpoint: '198.51.100.20:51280',
+      domesticRelayPrivateKey: relayKeyPair.privateKey,
+      domesticRelayPublicKey: relayKeyPair.publicKey,
+      internalServicePrivateKey: internalKeyPair.privateKey,
+      internalServicePublicKey: internalKeyPair.publicKey,
+      requestedBy: 'test'
+    });
+    rawStore.upsertSiteSlotSshProfile({
+      profileId: 'sshprof_mx-oversea-hk01_isolation',
+      siteId: 'mx-oversea-hk01',
+      kind: 'oversea',
+      host: '203.0.113.21',
+      sshUser: 'root',
+      identityFile: process.execPath,
+      knownHostsFile: process.execPath,
+      hostKeyAlias: 'mx-oversea-hk01',
+      serverPorts: '51289',
+      exportPort: 3435,
+      workerInternalBaseUrl: 'http://127.0.0.1:18090',
+      status: 'active',
+      requestedBy: 'test'
+    });
+
+    const createdPlanKinds: SiteSlotKind[] = [];
+    let domesticSecretWrites = 0;
+    const store = new Proxy(rawStore, {
+      get(target, property, receiver) {
+        if (property === 'createSiteSlotPlan') {
+          return (input: SiteSlotPlanInput) => {
+            const kind = input.kind === 'oversea' ? 'oversea' : 'domestic';
+            createdPlanKinds.push(kind);
+            assert.equal(kind, 'oversea', 'Oversea ensure must not create a Domestic plan');
+            return target.createSiteSlotPlan(input);
+          };
+        }
+        if (property === 'upsertSiteSlotDomesticWireGuardSecret') {
+          return (input: SiteSlotDomesticWireGuardSecretInput) => {
+            domesticSecretWrites += 1;
+            throw new Error(`Oversea action attempted Domestic WG mutation for ${input.siteId ?? 'domestic-main'}`);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    }) as unknown as PlatformStore;
+    const controller = new AdminController(store);
+    const internals = controller as unknown as {
+      buildOverseaOverview: (...args: unknown[]) => Promise<Record<string, unknown>>;
+      runRemoteSshWorker: (...args: unknown[]) => Promise<{
+        status: 'completed';
+        exitCode: number;
+        stdout: string;
+        stderr: string;
+      }>;
+    };
+    internals.buildOverseaOverview = async () => ({});
+    internals.runRemoteSshWorker = async () => ({
+      status: 'completed',
+      exitCode: 0,
+      stdout: 'mock Oversea remote sync passed',
+      stderr: ''
+    });
+
+    const previousArtifactDir = process.env.SITE_SLOT_ARTIFACT_BASE_DIR;
+    const previousHostRunnerUrl = process.env.MX_INTERNAL_HOST_RUNNER_URL;
+    const originalFetch = globalThis.fetch;
+    const hostRunnerRequests: string[] = [];
+    process.env.SITE_SLOT_ARTIFACT_BASE_DIR = outputDir;
+    process.env.MX_INTERNAL_HOST_RUNNER_URL = 'http://127.0.0.1:9';
+    globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+      hostRunnerRequests.push(String(args[0]));
+      throw new Error('Domestic host runner must not be called by an Oversea action');
+    }) as typeof fetch;
+    try {
+      const ensured = await controller.ensureOverseaSite(
+        undefined,
+        'mx-oversea-hk01',
+        {
+          executeRemote: true,
+          confirmInstall: true,
+          requestedBy: 'test',
+          requestId: 'oversea-domestic-isolation'
+        },
+        undefined,
+        undefined,
+        OPS_TOKEN
+      );
+      assert.equal(ensured.ensure.status, 'passed');
+
+      const archived = await controller.archiveOverseaSite(
+        undefined,
+        'mx-oversea-hk01',
+        { requestedBy: 'test', requestId: 'oversea-domestic-isolation-archive' },
+        undefined,
+        undefined,
+        OPS_TOKEN
+      );
+      assert.equal(archived.archive.site.status, 'archived');
+      const pausedAccounts = rawStore.listSiteSlotAccessAccounts('mx-oversea-hk01');
+      assert.ok(pausedAccounts.length > 0);
+      assert.ok(pausedAccounts.every((account) => account.status === 'paused'));
+
+      const refusedSync = await controller.ensureOverseaSite(
+        undefined,
+        'mx-oversea-hk01',
+        {
+          executeRemote: true,
+          confirmInstall: true,
+          requestedBy: 'test',
+          requestId: 'oversea-domestic-isolation-refused-archived-sync'
+        },
+        undefined,
+        undefined,
+        OPS_TOKEN
+      );
+      assert.equal(refusedSync.ensure.status, 'blocked');
+      assert.match(refusedSync.ensure.blockedReasons.join('\n'), /archived.*Unarchive/i);
+      assert.ok(
+        rawStore.listSiteSlotAccessAccounts('mx-oversea-hk01').every((account) => account.status === 'paused'),
+        'Install/Sync cannot implicitly reactivate an archived site account'
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousArtifactDir === undefined) delete process.env.SITE_SLOT_ARTIFACT_BASE_DIR;
+      else process.env.SITE_SLOT_ARTIFACT_BASE_DIR = previousArtifactDir;
+      if (previousHostRunnerUrl === undefined) delete process.env.MX_INTERNAL_HOST_RUNNER_URL;
+      else process.env.MX_INTERNAL_HOST_RUNNER_URL = previousHostRunnerUrl;
+    }
+
+    const domesticAfter = rawStore.getSiteSlotDomesticWireGuardSecret(domesticPlan.siteId);
+    assert.deepEqual(createdPlanKinds, ['oversea']);
+    assert.equal(existsSync(join(outputDir, 'oversea', 'manifest.json')), true);
+    assert.equal(
+      existsSync(join(outputDir, 'domestic')),
+      false,
+      'Oversea Install/Sync must not materialize a Domestic artifact set'
+    );
+    assert.equal(domesticSecretWrites, 0);
+    assert.deepEqual(hostRunnerRequests, [], 'Oversea actions must not probe or apply the Domestic host runner');
+    assert.equal(
+      rawStore.listSiteSlotPlans().filter((plan) => plan.kind === 'domestic').length,
+      1,
+      'the pre-existing Domestic plan is the only Domestic plan after Oversea actions'
+    );
+    assert.deepEqual(domesticAfter?.fingerprints, domesticBefore.fingerprints);
+    assert.equal(domesticAfter?.domesticRelayPrivateKey, domesticBefore.domesticRelayPrivateKey);
+    assert.equal(domesticAfter?.internalServicePrivateKey, domesticBefore.internalServicePrivateKey);
+  });
+});
+
+test('Domestic materialize with rotate=false reuses both key pairs and only rebuilds artifacts', async (t) => {
+  await withOpsToken(async () => {
+    const outputDir = mkdtempSync(join(tmpdir(), 'mx-domestic-materialize-isolation-'));
+    t.after(() => rmSync(outputDir, { recursive: true, force: true }));
+    const store = new MemoryStore(loadConfig());
+    const plan = store.createSiteSlotPlan({
+      siteId: 'domestic-materialize-test',
+      kind: 'domestic',
+      host: '198.51.100.30',
+      sshUser: 'root',
+      rootAccess: true,
+      hasDocker: true,
+      hasOutboundInternet: true,
+      createdBy: 'test'
+    });
+    const relayKeyPair = generateWireGuardKeyPair();
+    const internalKeyPair = generateWireGuardKeyPair();
+    const before = store.upsertSiteSlotDomesticWireGuardSecret({
+      siteId: plan.siteId,
+      publicEndpoint: '198.51.100.30:51280',
+      domesticRelayPrivateKey: relayKeyPair.privateKey,
+      domesticRelayPublicKey: relayKeyPair.publicKey,
+      internalServicePrivateKey: internalKeyPair.privateKey,
+      internalServicePublicKey: internalKeyPair.publicKey,
+      requestedBy: 'test'
+    });
+
+    const previousArtifactDir = process.env.SITE_SLOT_ARTIFACT_BASE_DIR;
+    const previousHostRunnerUrl = process.env.MX_INTERNAL_HOST_RUNNER_URL;
+    const originalFetch = globalThis.fetch;
+    const hostRunnerRequests: string[] = [];
+    process.env.SITE_SLOT_ARTIFACT_BASE_DIR = outputDir;
+    process.env.MX_INTERNAL_HOST_RUNNER_URL = 'http://127.0.0.1:9';
+    globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+      hostRunnerRequests.push(String(args[0]));
+      throw new Error('Domestic materialize must not call the host runner apply API');
+    }) as typeof fetch;
+
+    let response: Awaited<ReturnType<AdminController['executeAction']>>;
+    try {
+      response = await new AdminController(store).executeAction(
+        undefined,
+        {
+          actionId: 'site-slot.domestic-wg.materialize',
+          path: `/internal/v1/config-center/domestic-wg-secrets/${plan.siteId}/materialize-ready`,
+          body: {
+            siteId: plan.siteId,
+            planId: plan.planId,
+            // A stale UI/plan body must not rewrite any live-owned setting
+            // during an artifact-only recovery.
+            publicEndpoint: '203.0.113.250:59999',
+            listenPort: 59999,
+            internalDirectEnabled: false,
+            internalDirectListenPort: 59998,
+            domesticGatewayIp: '10.88.99.1',
+            domesticGatewayCidr: '10.88.99.0/24',
+            productRelayCidrs: ['10.99.0.0/16'],
+            userRelayCidr: '10.99.0.0/16',
+            internalServiceIp: '10.88.99.88',
+            internalServiceCidr: '10.88.99.0/24',
+            guestRelayCidr: '10.100.0.0/16',
+            rotateRelayKey: false,
+            rotateInternalServiceKey: false,
+            confirmRotate: false,
+            preserveExistingKeys: true,
+            requestedBy: 'test',
+            requestId: 'domestic-materialize-no-rotate'
+          }
+        },
+        undefined,
+        undefined,
+        OPS_TOKEN
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousArtifactDir === undefined) delete process.env.SITE_SLOT_ARTIFACT_BASE_DIR;
+      else process.env.SITE_SLOT_ARTIFACT_BASE_DIR = previousArtifactDir;
+      if (previousHostRunnerUrl === undefined) delete process.env.MX_INTERNAL_HOST_RUNNER_URL;
+      else process.env.MX_INTERNAL_HOST_RUNNER_URL = previousHostRunnerUrl;
+    }
+
+    const result = (response as unknown as {
+      domesticWgMaterialize: {
+        status: string;
+        execution: string;
+        artifact: { status: string } | null;
+        rotate: Record<string, boolean>;
+        generated: Record<string, boolean>;
+        clientRefresh: { changed: boolean };
+      };
+    }).domesticWgMaterialize;
+    const after = store.getSiteSlotDomesticWireGuardSecret(plan.siteId);
+    assert.equal(result.status, 'passed');
+    assert.equal(result.execution, 'completed');
+    assert.equal(result.artifact?.status, 'ready');
+    assert.deepEqual(result.rotate, {
+      domesticRelayKeyPair: false,
+      internalServiceKeyPair: false
+    });
+    assert.deepEqual(result.generated, {
+      domesticRelayKeyPair: false,
+      internalServiceKeyPair: false
+    });
+    assert.equal(result.clientRefresh.changed, false);
+    assert.deepEqual(after?.fingerprints, before.fingerprints);
+    assert.equal(after?.domesticRelayPrivateKey, relayKeyPair.privateKey);
+    assert.equal(after?.domesticRelayPublicKey, relayKeyPair.publicKey);
+    assert.equal(after?.internalServicePrivateKey, internalKeyPair.privateKey);
+    assert.equal(after?.internalServicePublicKey, internalKeyPair.publicKey);
+    assert.equal(after?.publicEndpoint, before.publicEndpoint);
+    assert.equal(after?.listenPort, before.listenPort);
+    assert.equal(after?.internalDirectEnabled, before.internalDirectEnabled);
+    assert.equal(after?.internalDirectListenPort, before.internalDirectListenPort);
+    assert.equal(after?.domesticGatewayIp, before.domesticGatewayIp);
+    assert.equal(after?.domesticGatewayCidr, before.domesticGatewayCidr);
+    assert.deepEqual(after?.productRelayCidrs, before.productRelayCidrs);
+    assert.equal(after?.userRelayCidr, before.userRelayCidr);
+    assert.equal(after?.internalServiceIp, before.internalServiceIp);
+    assert.equal(after?.internalServiceCidr, before.internalServiceCidr);
+    assert.equal(after?.guestRelayCidr, before.guestRelayCidr);
+    assert.deepEqual(hostRunnerRequests, [], 'materialize must not call status/apply on the host runner');
+    assert.equal(store.listSiteSlotExecutions(plan.planId).length, 0, 'materialize must not create an apply execution');
+  });
+});
+
+test('artifact-only Domestic refresh fails closed before generating missing or replacement keys', async () => {
+  await withOpsToken(async () => {
+    const store = new MemoryStore(loadConfig());
+    const plan = store.createSiteSlotPlan({
+      siteId: 'domestic-artifact-refresh-incomplete',
+      kind: 'domestic',
+      host: '198.51.100.40',
+      sshUser: 'root',
+      rootAccess: true,
+      hasDocker: true,
+      hasOutboundInternet: true,
+      createdBy: 'test'
+    });
+    const before = store.upsertSiteSlotDomesticWireGuardSecret({
+      siteId: plan.siteId,
+      publicEndpoint: '198.51.100.40:51280',
+      domesticRelayPrivateKey: null,
+      domesticRelayPublicKey: null,
+      internalServicePrivateKey: null,
+      internalServicePublicKey: null,
+      requestedBy: 'test'
+    });
+    const response = await new AdminController(store).executeAction(
+      undefined,
+      {
+        actionId: 'site-slot.domestic-wg.materialize',
+        path: `/internal/v1/config-center/domestic-wg-secrets/${plan.siteId}/materialize-ready`,
+        body: {
+          siteId: plan.siteId,
+          planId: plan.planId,
+          preserveExistingKeys: true,
+          rotateRelayKey: true,
+          rotateInternalServiceKey: true,
+          confirmRotate: true,
+          requestedBy: 'test'
+        }
+      },
+      undefined,
+      undefined,
+      OPS_TOKEN
+    );
+    const result = (response as unknown as {
+      domesticWgMaterialize: {
+        status: string;
+        generated: Record<string, boolean>;
+        blockedReasons: string[];
+      };
+    }).domesticWgMaterialize;
+    const after = store.getSiteSlotDomesticWireGuardSecret(plan.siteId);
+    assert.equal(result.status, 'blocked');
+    assert.deepEqual(result.generated, {
+      domesticRelayKeyPair: false,
+      internalServiceKeyPair: false
+    });
+    assert.match(result.blockedReasons.join('\n'), /cannot rotate|key pair is incomplete/);
+    assert.equal(after?.updatedAt, before.updatedAt, 'a blocked artifact refresh does not write the secret');
+    assert.equal(after?.domesticRelayPrivateKey, null);
+    assert.equal(after?.internalServicePrivateKey, null);
+  });
 });

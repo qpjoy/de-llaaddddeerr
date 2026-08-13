@@ -308,12 +308,33 @@ API base。Admin 触发的 remote-ssh worker 和 Internal API 在同一个运行
 
 Internal tunnel-state 中若存在与 `HY2_SYSTEM_SUBSCRIPTION_ACCOUNT` 一致、名称以
 `-subscriptions` 结尾的 active access account，Oversea `manage.sh` 会从该账户原子物化
-唯一的 `peer_<account>.mihomo.yaml`。该 YAML 使用 `mixed-port: 7890`、`PROXY` 组、
+唯一的 `peer_<account>.mihomo.yaml`。该 YAML 使用 `mixed-port: 7788`、`PROXY` 组、
 private/CN direct 规则和 50 Mbps 客户端提示；“unmetered”表示不设置累计字节 quota，
-不表示绕过 Hysteria2 进程现有的 server-wide bandwidth。普通用户/Internal 订阅仍使用
-既有 `7788`，`refresh_subscriptions` 继续更新 `clients.csv` 且不会删除这一个受管文件。
+不表示绕过 Hysteria2 进程现有的 server-wide bandwidth。系统目录只 Reveal/Copy URL，不负责
+安装或管理本地 mihomo 实例；普通用户/Internal 的既有 7788 运行路径不变，`refresh_subscriptions`
+继续更新 `clients.csv` 且不会删除这一个受管文件。
 Caddy 只对 `.env` 中的精确 `HY2_SYSTEM_SUBSCRIPTION_PATH` 使用 system Basic Auth，不能
 改回 `/peer_*.yaml` 通配；默认发布 TCP `3434`，端口冲突时沿用 plan 选择的 `3435`。
+
+### 生产 Domestic/Internal 硬隔离
+
+已有 MX-H2I 用户在线时，Domestic ↔ Internal WireGuard 属于现役数据面。Oversea 的 New、
+Edit Profile、Install/Sync、Archive/Unarchive 只能修改 `kind=oversea` 的账号、plan、SSH profile
+和远端 Hysteria/Caddy；不得修改 Domestic WG secret、route、listener、host runner 或 systemd
+service，也不得生成/执行 `kind=domestic` plan。专项回归会同时断言 Domestic 两组 key/fingerprint
+不变、Domestic artifact 目录零写入、host-runner 请求为零。
+
+Internal pod 启动时使用 `seed-site-slot-artifacts.mjs` 合并镜像 artifact。已经是
+`wireguard-config=ready` 且 `secretMaterial=injected` 的 PVC 文件属于 runtime，镜像中的 Domestic
+template 不能覆盖；两份 runtime subscription YAML 也只能从权限为 `0600` 的有效 PVC 保留，不能
+从镜像层引入。Oversea/image-owned artifact 仍按 image revision 更新。
+
+如果旧版本已经把 Domestic manifest 覆盖成 template，但运行态检查仍为 `passed`，这只表示控制面
+artifact 待恢复，不表示 WG 已断。部署含上述 seeder 的新版本后，只使用 **Refresh Domestic
+Artifact**：该请求要求已有完整 key，并完全按数据库当前 runtime snapshot 重建文件；即使旧 plan/body
+带有不同 endpoint、CIDR、listen port 或 direct-mode，也不会写入。它不执行 handoff、key sync、
+host apply 或 restart。不要为修复 artifact 点击 `Generate Handoff`、`Sync Domestic WG Key`、
+`Install / Restart`。
 
 如果是一台空 Ubuntu，推荐先在 Admin 的 `SSH Profiles` 中输入 site、host、user、一次性
 password，然后点击 `Bootstrap Key`。Internal 会在默认 key root 生成并托管 SSH key、

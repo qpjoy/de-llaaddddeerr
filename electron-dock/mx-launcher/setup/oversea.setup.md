@@ -20,8 +20,9 @@
       只读分发一个精确路径 `/peer_<account>.mihomo.yaml`。该文件使用独立 Basic Auth，
       默认用户名是 `subscriptions`；默认密码复用这一个 system access account 的高熵 token。
       Oversea 的受限 `users.csv`/YAML 因 Hysteria2 运行需要包含该 token，但 Caddy 容器只接收
-      bcrypt hash。YAML 固定使用本机 `mixed-port: 7890`，不会改动
-      MX-H2I/用户订阅现有的 `7788`。如果账户、token 或 bcrypt hash 缺失/非法，路径会切到
+      bcrypt hash。YAML 固定声明 `mixed-port: 7788`；MX 只 Reveal/Copy URL，不安装、启动或
+      修改本机 7788/7890 实例。若把完整配置导入已有 7890 应用，需由该应用的 provider/override
+      保持其本地监听端口。如果账户、token 或 bcrypt hash 缺失/非法，路径会切到
       不存在的 disabled 路径，`/healthz` 与受保护的 `/clients.csv` 仍继续工作。
       还要求 Internal/Oversea 已得到 TLS certificate fingerprint，避免生成只有
       `skip-cert-verify`、没有证书 pin 的 direct-IP 节点。直接 IP 的 HTTP Basic 链路是兼容性

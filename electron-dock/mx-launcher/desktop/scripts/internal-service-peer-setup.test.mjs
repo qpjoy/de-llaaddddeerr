@@ -176,4 +176,26 @@ assert.match(
   'a successful status check must settle its running row as passed'
 );
 
+const internalPeerWorkbenchSource = functionSource(rendererSource, 'renderInternalPeerWorkbench');
+assert.match(
+  internalPeerWorkbenchSource,
+  /const runtimeHealthy = runtimeStatus\?\.status === 'passed';\s*const panelStatus = runtimeHealthy\s*\? 'passed'/,
+  'a healthy live Domestic/Internal WG must remain passed when only its control-plane artifact is stale'
+);
+assert.doesNotMatch(
+  internalPeerWorkbenchSource,
+  /const panelStatus = materializeAction\s*\? 'blocked'/,
+  'artifact maintenance must not relabel the running WG data plane as blocked'
+);
+assert.match(
+  internalPeerWorkbenchSource,
+  /Oversea operations do not modify this runtime\. Refresh Artifact reuses the current keys and does not sync, apply, or restart WG\./,
+  'the maintenance warning must state the hard runtime isolation boundary'
+);
+assert.match(
+  internalPeerWorkbenchSource,
+  /Refresh Domestic Artifact/,
+  'the control-plane action must not be presented as a runtime WG install or restart'
+);
+
 console.log('internal service peer setup safety contract: ok');

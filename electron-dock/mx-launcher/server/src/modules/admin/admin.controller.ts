@@ -651,6 +651,20 @@ export class AdminController {
     const requestExportPort = numberValueOrNull(body.exportPort);
     const ensureSteps: Array<Record<string, unknown>> = [];
 
+    // Archive is the only supported retirement boundary. Never let a later
+    // Install/Sync implicitly reactivate paused accounts or mutate the remote;
+    // restoration must be an explicit Unarchive action first.
+    const registeredSite = await this.store.getLauncherNetworkMihomoSite(siteId);
+    if (registeredSite?.status === 'archived') {
+      const ensure = {
+        ...ensureBlocked(siteId, 'site-archived', [
+          'This Oversea site is archived. Unarchive it explicitly before Install/Sync.'
+        ], ensureSteps),
+        nextActions: ['unarchive-site']
+      };
+      return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
+    }
+
     const profiles = await this.store.listSiteSlotSshProfiles();
     const profile = latestByUpdatedAt(profiles.filter((item) => item.kind === 'oversea' && item.siteId === siteId && item.status === 'active'));
     if (!profile) {
@@ -3994,37 +4008,46 @@ function buildAdminDomesticWireGuardSecretInput(
   const rotateRelayKey = rotateAll || booleanValue(body.rotateRelayKey);
   const rotateInternalServiceKey = rotateAll || booleanValue(body.rotateInternalServiceKey);
   const confirmRotate = booleanValue(body.confirmRotate);
-  const listenPort = numberValueOrNull(body.listenPort) ?? previous?.listenPort ?? 51280;
+  const preserveExistingKeys = booleanValue(body.preserveExistingKeys) === true;
+  // Artifact-only maintenance is deliberately bound to the complete current
+  // runtime snapshot, not just its keys. A stale plan/body must not rewrite an
+  // endpoint, CIDR, listener, or direct-mode setting while rebuilding files.
+  const listenPort = preserveExistingKeys && previous
+    ? previous.listenPort
+    : numberValueOrNull(body.listenPort) ?? previous?.listenPort ?? 51280;
   const planEndpoint = endpointFromPlanHost(plan, listenPort);
   const explicitEndpoint = stringValue(body.publicEndpoint) ?? stringValue(body.endpoint);
   const previousEndpoint = previous?.publicEndpoint;
-  const publicEndpoint = explicitEndpoint
-    ?? planEndpoint
-    ?? previousEndpoint
-    ?? null;
-  const internalDirectEndpoint = stringValue(body.internalDirectEndpoint) ?? previous?.internalDirectEndpoint ?? null;
-  const internalDirectEnabled = booleanValue(body.internalDirectEnabled) ?? previous?.internalDirectEnabled ?? true;
+  const publicEndpoint = preserveExistingKeys && previous
+    ? previousEndpoint
+    : explicitEndpoint ?? planEndpoint ?? previousEndpoint ?? null;
+  const internalDirectEndpoint = preserveExistingKeys && previous
+    ? previous.internalDirectEndpoint
+    : stringValue(body.internalDirectEndpoint) ?? previous?.internalDirectEndpoint ?? null;
+  const internalDirectEnabled = preserveExistingKeys && previous
+    ? previous.internalDirectEnabled
+    : booleanValue(body.internalDirectEnabled) ?? previous?.internalDirectEnabled ?? true;
   const relayMissing = !validWireGuardPrivateKey(previous?.domesticRelayPrivateKey)
     || !validWireGuardPublicKey(previous?.domesticRelayPublicKey);
   const internalMissing = !validWireGuardPrivateKey(previous?.internalServicePrivateKey)
     || !validWireGuardPublicKey(previous?.internalServicePublicKey);
-  const relayPair = relayMissing || rotateRelayKey ? generateWireGuardKeyPair() : null;
-  const internalPair = internalMissing || rotateInternalServiceKey ? generateWireGuardKeyPair() : null;
+  const relayPair = !preserveExistingKeys && (relayMissing || rotateRelayKey) ? generateWireGuardKeyPair() : null;
+  const internalPair = !preserveExistingKeys && (internalMissing || rotateInternalServiceKey) ? generateWireGuardKeyPair() : null;
   const secretInput: SiteSlotDomesticWireGuardSecretInput = {
     siteId,
-    status: stringValue(body.status) ?? previous?.status ?? 'active',
+    status: preserveExistingKeys && previous ? previous.status : stringValue(body.status) ?? previous?.status ?? 'active',
     publicEndpoint,
     listenPort,
     internalDirectEnabled,
     internalDirectEndpoint,
-    internalDirectListenPort: numberValueOrNull(body.internalDirectListenPort) ?? previous?.internalDirectListenPort ?? 51280,
-    domesticGatewayIp: stringValue(body.domesticGatewayIp) ?? previous?.domesticGatewayIp ?? '10.88.0.1',
-    domesticGatewayCidr: stringValue(body.domesticGatewayCidr) ?? previous?.domesticGatewayCidr ?? '10.88.0.0/16',
-    productRelayCidrs: cidrListValue(body.productRelayCidrs) ?? previous?.productRelayCidrs ?? ['10.89.0.0/16', '10.90.0.0/16'],
-    userRelayCidr: stringValue(body.userRelayCidr) ?? previous?.userRelayCidr ?? '10.89.0.0/16',
-    internalServiceIp: stringValue(body.internalServiceIp) ?? previous?.internalServiceIp ?? '10.88.88.88',
-    internalServiceCidr: stringValue(body.internalServiceCidr) ?? previous?.internalServiceCidr ?? '10.88.0.0/16',
-    guestRelayCidr: stringValue(body.guestRelayCidr) ?? previous?.guestRelayCidr ?? '10.90.0.0/16',
+    internalDirectListenPort: preserveExistingKeys && previous ? previous.internalDirectListenPort : numberValueOrNull(body.internalDirectListenPort) ?? previous?.internalDirectListenPort ?? 51280,
+    domesticGatewayIp: preserveExistingKeys && previous ? previous.domesticGatewayIp : stringValue(body.domesticGatewayIp) ?? previous?.domesticGatewayIp ?? '10.88.0.1',
+    domesticGatewayCidr: preserveExistingKeys && previous ? previous.domesticGatewayCidr : stringValue(body.domesticGatewayCidr) ?? previous?.domesticGatewayCidr ?? '10.88.0.0/16',
+    productRelayCidrs: preserveExistingKeys && previous ? previous.productRelayCidrs : cidrListValue(body.productRelayCidrs) ?? previous?.productRelayCidrs ?? ['10.89.0.0/16', '10.90.0.0/16'],
+    userRelayCidr: preserveExistingKeys && previous ? previous.userRelayCidr : stringValue(body.userRelayCidr) ?? previous?.userRelayCidr ?? '10.89.0.0/16',
+    internalServiceIp: preserveExistingKeys && previous ? previous.internalServiceIp : stringValue(body.internalServiceIp) ?? previous?.internalServiceIp ?? '10.88.88.88',
+    internalServiceCidr: preserveExistingKeys && previous ? previous.internalServiceCidr : stringValue(body.internalServiceCidr) ?? previous?.internalServiceCidr ?? '10.88.0.0/16',
+    guestRelayCidr: preserveExistingKeys && previous ? previous.guestRelayCidr : stringValue(body.guestRelayCidr) ?? previous?.guestRelayCidr ?? '10.90.0.0/16',
     domesticRelayPrivateKey: relayPair?.privateKey ?? previous?.domesticRelayPrivateKey ?? null,
     domesticRelayPublicKey: relayPair?.publicKey ?? previous?.domesticRelayPublicKey ?? null,
     internalServicePrivateKey: internalPair?.privateKey ?? previous?.internalServicePrivateKey ?? null,
@@ -4042,9 +4065,13 @@ function buildAdminDomesticWireGuardSecretInput(
       domesticRelayKeyPair: rotateRelayKey,
       internalServiceKeyPair: rotateInternalServiceKey
     },
+    preserveExistingKeys,
     endpointChanged: Boolean(previous && publicEndpoint && previous.publicEndpoint !== publicEndpoint),
     previousMaterialDigest: previous?.fingerprints.materialDigest ?? null,
     blockedReasons: [
+      ...(preserveExistingKeys && !previous ? ['existing Domestic WG key material is required for an artifact-only refresh'] : []),
+      ...(preserveExistingKeys && (relayMissing || internalMissing) ? ['artifact-only refresh refused because the current Domestic/Internal WG key pair is incomplete'] : []),
+      ...(preserveExistingKeys && (rotateRelayKey || rotateInternalServiceKey) ? ['artifact-only refresh cannot rotate Domestic/Internal WG keys'] : []),
       ...(rotateRelayKey || rotateInternalServiceKey ? confirmRotate ? [] : ['confirmRotate=true is required before rotating Domestic WG keys'] : []),
       ...(publicEndpoint ? [] : ['publicEndpoint is required before materializing Domestic WG']),
       ...(publicEndpoint && domesticRelayEndpointBlockedReason(publicEndpoint) ? [domesticRelayEndpointBlockedReason(publicEndpoint) as string] : [])
@@ -7364,6 +7391,7 @@ function domesticWgMaterializeAction(
         rotateRelayKey: false,
         rotateInternalServiceKey: false,
         confirmRotate: false,
+        preserveExistingKeys: Boolean(secret),
         requestedBy: actionPolicy.principal.principalId,
         requestId: 'admin-ui-domestic-wg-materialize'
       }

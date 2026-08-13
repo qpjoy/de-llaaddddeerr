@@ -431,22 +431,15 @@ H2O 是用户体验和策略 UI；Launcher Network 是底层执行者。
 User Center 顶部的 `subscriptions` 是只读虚拟系统账号，不是 `UserCenterUser`，因此不能设置
 local password、不能 OAuth/飞书登录、不能被赋予用户 entitlement。它按 Oversea site 提供
 Direct-IP + HTTP Basic channel：默认 export port 是 3434，SSH profile 明确配置冲突替代端口时可为
-3435；客户端配置固定 `mixed-port: 7890`，并显式表达 `maxBytes/resetPeriod/expiresAt = null`
+3435；订阅 YAML 固定 `mixed-port: 7788`，并显式表达 `maxBytes/resetPeriod/expiresAt = null`
 （无总流量 quota）。`50 Mbps` 是上下行提示，不等于总流量上限。
 
 操作顺序是：在系统订阅抽屉 **Ensure System Accounts** → 正常 Oversea **Install/Sync** →
 worker evidence passed 后 **Reveal**。GET 目录始终脱敏，明文 Basic URL 只由 ops-token `no-store`
-reveal 返回。安装到已有服务器必须使用独立实例：
-
-```bash
-sudo npm i -g @qpjoy/tunnel-cli@2.0.8
-sudo qp-tunnel-cli install --instance subscriptions --mixed-port 7890 \
-  --url 'http://subscriptions:<secret>@<oversea-ip>:3434/peer_<site>-subscriptions.mihomo.yaml'
-```
-
-`subscriptions` 实例只启动本地 7890 mixed proxy，禁止 egress/TUN/listen/proxy/SSH/daemon 注入；默认
-不带 `--instance` 的 `/etc/mihomo-client`、`mihomo-client.service` 与 7788 完全不变。现有用户仍走
-Bearer `ensure-subscription` 和 7788 YAML；HTTPS public-token 链路也继续作为第三方客户端的兼容方案。
+reveal 返回。MX 只提供和复制 URL，不生成 `qp-tunnel-cli install` 命令，也不安装、启动或修改任何
+本地 7788/7890 实例。管理员把 URL 手工添加到自行选择的现有应用；若应用把订阅当作完整配置加载，
+需要自行确认它如何处理 YAML 中的 `mixed-port: 7788`。现有用户仍走 Bearer `ensure-subscription`
+和既有 7788 路径；HTTPS public-token 链路也继续作为第三方客户端的兼容方案。
 
 ## Oversea 和 Mihomo 放置
 

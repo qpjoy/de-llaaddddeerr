@@ -19,11 +19,12 @@ const mxRoot = resolveMxRoot(scriptDir);
 const args = process.argv.slice(2);
 const kind = args.find((arg) => !arg.startsWith('--')) || 'all';
 const outDirArg = optionValue('--out-dir');
+const preserveRuntimeSecrets = !args.includes('--no-preserve-runtime-secrets');
 const outputBase = resolve(outDirArg || process.env.SITE_SLOT_ARTIFACT_OUTPUT_DIR || join(mxRoot, 'artifacts/site-slots'));
 const releaseRevision = process.env.SITE_SLOT_RELEASE_REVISION || gitRevision() || timestampRevision();
 
 if (!['oversea', 'domestic', 'all'].includes(kind)) {
-  die('Usage: node server/scripts/site-slot-artifact-materializer.mjs [oversea|domestic|all] [--out-dir DIR]');
+  die('Usage: node server/scripts/site-slot-artifact-materializer.mjs [oversea|domestic|all] [--out-dir DIR] [--no-preserve-runtime-secrets]');
 }
 
 const materialized = [];
@@ -96,8 +97,15 @@ function materializeOversea() {
 
 function materializeDomestic() {
   const previousModules = readExistingArtifactModules('domestic');
-  const previousBootstrapSubscription = readExistingRuntimeFile('domestic', 'mx-domestic-bootstrap-subscription.yaml');
-  const previousInternalEgressSubscription = readExistingRuntimeFile('domestic', 'mx-internal-egress-subscription.yaml');
+  // Runtime API refreshes preserve Config Center generated YAML in the
+  // runtime artifact root. Image builds explicitly disable this: ignored
+  // developer/runtime files must never become immutable image-layer secrets.
+  const previousBootstrapSubscription = preserveRuntimeSecrets
+    ? readExistingRuntimeFile('domestic', 'mx-domestic-bootstrap-subscription.yaml')
+    : null;
+  const previousInternalEgressSubscription = preserveRuntimeSecrets
+    ? readExistingRuntimeFile('domestic', 'mx-internal-egress-subscription.yaml')
+    : null;
   const artifactRoot = resetArtifactRoot('domestic');
   if (previousBootstrapSubscription) {
     const bootstrapSubscriptionPath = join(artifactRoot, 'mx-domestic-bootstrap-subscription.yaml');
@@ -692,22 +700,25 @@ function wireGuardForwardingCommands(prefix) {
 }
 
 function domesticWireGuardMaterial() {
-  const listenPort = envValue('MX_WG_LISTEN_PORT') || '51280';
+  // Image artifacts are contracts/templates only. Even if an operator's
+  // shell exports live WG material, the image build must not consume it.
+  const runtimeValue = (name) => preserveRuntimeSecrets ? envValue(name) : '';
+  const listenPort = runtimeValue('MX_WG_LISTEN_PORT') || '51280';
   const listenPortNumber = Number.parseInt(listenPort, 10) || 51280;
-  const internalDirectEnabled = envBool('MX_INTERNAL_DIRECT_ENABLED', true);
-  const internalDirectListenPort = envValue('MX_INTERNAL_DIRECT_LISTEN_PORT') || '51280';
+  const internalDirectEnabled = preserveRuntimeSecrets ? envBool('MX_INTERNAL_DIRECT_ENABLED', true) : true;
+  const internalDirectListenPort = runtimeValue('MX_INTERNAL_DIRECT_LISTEN_PORT') || '51280';
   const internalDirectListenPortNumber = Number.parseInt(internalDirectListenPort, 10) || 51280;
-  const internalDirectEndpoint = envValue('MX_INTERNAL_DIRECT_ENDPOINT');
-  const domesticGatewayIp = envValue('MX_DOMESTIC_GATEWAY_IP') || '10.88.0.1';
-  const internalServiceIp = envValue('MX_INTERNAL_SERVICE_IP') || '10.88.88.88';
-  const domesticGatewayCidr = envValue('MX_DOMESTIC_GATEWAY_CIDR') || '10.88.0.0/16';
-  const userRelayCidr = envValue('MX_USER_RELAY_CIDR') || '10.89.0.0/16';
-  const internalServiceCidr = envValue('MX_INTERNAL_SERVICE_CIDR') || '10.88.0.0/16';
-  const guestRelayCidr = envValue('MX_GUEST_RELAY_CIDR') || '10.90.0.0/16';
-  const productRelayCidrs = parseCsv(envValue('MX_PRODUCT_RELAY_CIDRS') || `${userRelayCidr},${guestRelayCidr}`)
+  const internalDirectEndpoint = runtimeValue('MX_INTERNAL_DIRECT_ENDPOINT');
+  const domesticGatewayIp = runtimeValue('MX_DOMESTIC_GATEWAY_IP') || '10.88.0.1';
+  const internalServiceIp = runtimeValue('MX_INTERNAL_SERVICE_IP') || '10.88.88.88';
+  const domesticGatewayCidr = runtimeValue('MX_DOMESTIC_GATEWAY_CIDR') || '10.88.0.0/16';
+  const userRelayCidr = runtimeValue('MX_USER_RELAY_CIDR') || '10.89.0.0/16';
+  const internalServiceCidr = runtimeValue('MX_INTERNAL_SERVICE_CIDR') || '10.88.0.0/16';
+  const guestRelayCidr = runtimeValue('MX_GUEST_RELAY_CIDR') || '10.90.0.0/16';
+  const productRelayCidrs = parseCsv(runtimeValue('MX_PRODUCT_RELAY_CIDRS') || `${userRelayCidr},${guestRelayCidr}`)
     .filter((cidr) => /^10\.\d{1,3}\.0\.0\/16$/.test(cidr) || /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}\/32$/.test(cidr));
-  const endpoint = envValue('MX_DOMESTIC_PUBLIC_ENDPOINT')
-    || (envValue('MX_DOMESTIC_PUBLIC_HOST') ? `${envValue('MX_DOMESTIC_PUBLIC_HOST')}:${listenPort}` : '<domestic-public-ip>:51280');
+  const endpoint = runtimeValue('MX_DOMESTIC_PUBLIC_ENDPOINT')
+    || (runtimeValue('MX_DOMESTIC_PUBLIC_HOST') ? `${runtimeValue('MX_DOMESTIC_PUBLIC_HOST')}:${listenPort}` : '<domestic-public-ip>:51280');
   const required = [
     ['MX_DOMESTIC_RELAY_PRIVATE_KEY', '<domestic-relay-private-key-from-internal-secret>'],
     ['MX_DOMESTIC_RELAY_PUBLIC_KEY', '<domestic-relay-public-key-from-internal-secret>'],
@@ -717,7 +728,7 @@ function domesticWireGuardMaterial() {
   const missingInputs = [];
   const values = {};
   for (const [name, placeholder] of required) {
-    const value = envValue(name);
+    const value = runtimeValue(name);
     const valid = validWireGuardKeyMaterial(value);
     values[name] = valid ? value : placeholder;
     if (!valid) missingInputs.push(name);

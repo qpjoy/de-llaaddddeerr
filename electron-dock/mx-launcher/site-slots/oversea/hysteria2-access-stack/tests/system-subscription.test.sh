@@ -63,7 +63,7 @@ cp -R "$SOURCE_DIR/scripts" "$TEST_ROOT/scripts"
 	set_env_value HY2_SYSTEM_SUBSCRIPTION_BASIC_USER "subscriptions"
 	set_env_value HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH '$2a$14$Zkx.HbQOScCQ1YI8Iu7/fO1M/ieGJqmXiF6Vq95PVIYzGKqG7SNU.'
 	set_env_value HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256 ""
-	set_env_value HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT "7890"
+	set_env_value HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT "7788"
 	cat > tunnel-state.json <<'JSON'
 {
   "revision": "test-system-subscription-v1",
@@ -191,8 +191,8 @@ JSON
 
 	managed="data/subscriptions/peer_oversea-main-subscriptions.mihomo.yaml"
 	[[ -f "$managed" ]] || fail "managed YAML was not created"
-	assert_contains "$managed" "mixed-port: 7890"
-	assert_not_contains "$managed" "mixed-port: 7788"
+	assert_contains "$managed" "mixed-port: 7788"
+	assert_not_contains "$managed" "mixed-port: 7890"
 	assert_contains "$managed" "password: 'token-''one'"
 	assert_contains "$managed" "down: '50 Mbps'"
 	assert_contains "$managed" "up: '50 Mbps'"
@@ -235,7 +235,7 @@ JSON
 		[[ -n "$output" ]] || return 1
 		cp "$managed" "$output"
 	}
-	check_system_subscription_command | grep -F "mixed-port 7890: passed" >/dev/null \
+	check_system_subscription_command | grep -F "mixed-port 7788: passed" >/dev/null \
 		|| fail "exact-path system subscription verification did not pass"
 	container_running() {
 		return 1
@@ -289,6 +289,7 @@ assert_contains "$SOURCE_DIR/Caddyfile" '{$HY2_SYSTEM_SUBSCRIPTION_BASIC_USER} {
 assert_contains "$SOURCE_DIR/docker-compose.yml" '${HY2_EXPORT_FALLBACK_PORT}:8080'
 assert_contains "$SOURCE_DIR/docker-compose.yml" 'HY2_SYSTEM_SUBSCRIPTION_PATH: ${HY2_SYSTEM_SUBSCRIPTION_PATH:-/__system-subscription-disabled__}'
 assert_contains "$SOURCE_DIR/.env.example" 'HY2_EXPORT_FALLBACK_PORT=3434'
+assert_contains "$SOURCE_DIR/.env.example" 'HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=7788'
 assert_contains "$SOURCE_DIR/manage.sh" 'chmod 600 "$secret_file"'
 assert_contains "$SOURCE_DIR/manage.sh" 'trap cleanup_hash_password_secret EXIT'
 assert_contains "$SOURCE_DIR/manage.sh" 'target=/run/secrets/mx-hy2-password,readonly'

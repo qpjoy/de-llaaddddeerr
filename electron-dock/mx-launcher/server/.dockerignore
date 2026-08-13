@@ -7,3 +7,8 @@ dist
 .DS_Store
 npm-debug.log
 pnpm-debug.log
+artifacts/release-center
+artifacts/ssh
+artifacts/internal-shadow-gates
+artifacts/site-slots/domestic/mx-domestic-bootstrap-subscription.yaml
+artifacts/site-slots/domestic/mx-internal-egress-subscription.yaml

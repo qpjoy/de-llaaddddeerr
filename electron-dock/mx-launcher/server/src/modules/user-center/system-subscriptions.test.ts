@@ -62,7 +62,7 @@ test('subscriptions is a virtual non-login account and ensure never leaks its to
     assert.ok(account?.authToken);
     assert.equal(ensured.catalog.account.loginAllowed, false);
     assert.equal(ensured.catalog.account.immutable, true);
-    assert.equal(ensured.catalog.subscriptions[0]?.client.mixedPort, 7890);
+    assert.equal(ensured.catalog.subscriptions[0]?.client.mixedPort, 7788);
     assert.equal(ensured.catalog.subscriptions[0]?.trafficPolicy.mode, 'unlimited');
     assert.equal(ensured.catalog.subscriptions[0]?.status, 'pending-sync');
     assert.equal(JSON.stringify(ensured).includes(account!.authToken), false, 'ensure response must remain masked');
@@ -81,6 +81,35 @@ test('system subscription management rejects anything except the Internal ops to
     const { controller } = seed();
     await assert.rejects(controller.systemSubscriptions('user-bearer-or-wrong-token'), /valid Internal ops token/);
     await assert.rejects(controller.ensureSystemSubscriptions(undefined, {}), /valid Internal ops token/);
+  });
+});
+
+test('archived Oversea evidence is preserved outside the live system subscription catalog', async () => {
+  await withOpsToken(async () => {
+    const { store, controller } = seed();
+    await controller.ensureSystemSubscriptions(OPS_TOKEN, { siteIds: ['mx-oversea-hk01'] });
+    const before = await controller.systemSubscriptions(OPS_TOKEN);
+    assert.equal(before.catalog.subscriptions.length, 1);
+
+    store.archiveLauncherNetworkMihomoSite({
+      siteId: 'mx-oversea-hk01',
+      archived: true,
+      requestedBy: 'test'
+    });
+
+    const after = await controller.systemSubscriptions(OPS_TOKEN);
+    assert.equal(after.catalog.subscriptions.length, 0, 'retired sites do not clutter the live URL catalog');
+    assert.equal(after.catalog.summary.total, 0);
+    assert.equal(
+      store.listLauncherNetworkMihomoSites().find((site) => site.siteId === 'mx-oversea-hk01')?.status,
+      'archived',
+      'the site record and its audit evidence remain restorable'
+    );
+    await assert.rejects(
+      controller.revealSystemSubscription('mx-oversea-hk01', OPS_TOKEN),
+      /not found/,
+      'an archived channel cannot reveal credentials'
+    );
   });
 });
 
@@ -157,8 +186,9 @@ test('a direct URL is revealed only after the latest Oversea plan has passing de
     const revealed = await controller.revealSystemSubscription('mx-oversea-hk01', OPS_TOKEN);
     assert.match(revealed.subscription.url, /^http:\/\/subscriptions:[^@]+@203\.0\.113\.21:3435\/peer_/);
     assert.ok(revealed.subscription.url.includes(encodeURIComponent(account.authToken)));
-    assert.match(revealed.subscription.installCommand, /--instance subscriptions --mixed-port 7890/);
-    assert.doesNotMatch(revealed.subscription.installCommand, /7788/);
+    assert.equal('installCommand' in revealed.subscription, false, 'reveal returns only the URL, not a local installer');
+    assert.doesNotMatch(JSON.stringify(revealed), /qp-tunnel-cli|--instance|7890/);
+    assert.match(revealed.subscription.note, /does not install or manage a local proxy instance/);
 
     store.upsertLauncherNetworkMihomoSite({
       siteId: 'mx-oversea-hk01',

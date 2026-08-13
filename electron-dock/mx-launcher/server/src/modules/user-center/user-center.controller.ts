@@ -182,8 +182,7 @@ export class UserCenterController {
         subscriptionId: item.subscriptionId,
         siteId: item.siteId,
         url,
-        installCommand: `qp-tunnel-cli install --instance subscriptions --mixed-port ${SYSTEM_SUBSCRIPTION_MIXED_PORT} --url ${shellQuote(url)}`,
-        note: 'Clear-text Basic credentials are returned only by this no-store response. The named instance does not alter the existing 7788 service.'
+        note: 'Clear-text Basic credentials are returned only by this no-store response. Copy the URL into the operator-chosen application; MX does not install or manage a local proxy instance.'
       }
     };
   }
@@ -601,7 +600,11 @@ export class UserCenterController {
       this.store.listSiteSlotWorkerJobs(),
       this.store.listSiteSlotWorkerReports()
     ]);
-    const subscriptions = await Promise.all(sites.map(async (site) => {
+    // Archived sites retain plans/reports for audit and may be restored, but
+    // they are not live subscription channels. Keep them out of the pinned
+    // system catalog instead of rendering dead credentials as disabled cards.
+    const liveSites = sites.filter((site) => site.status !== 'archived');
+    const subscriptions = await Promise.all(liveSites.map(async (site) => {
       const account = await this.store.getSiteSlotAccessAccount(
         site.siteId,
         systemSubscriptionAccessAccountName(site.siteId)
@@ -1157,7 +1160,6 @@ function buildSystemSubscriptionItem(
       }
     },
     client: {
-      instance: SYSTEM_SUBSCRIPTIONS_SERVICE_ACCOUNT_ID,
       mixedPort: SYSTEM_SUBSCRIPTION_MIXED_PORT,
       routingMode: 'cn-direct',
       explicitUseOnly: true

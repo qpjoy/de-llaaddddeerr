@@ -91,6 +91,16 @@ test('the integration entry points third-party apps need are all present', () =>
   }
 });
 
+test('the system subscription contract is URL-only and does not provision a local 7890 instance', () => {
+  const catalog = JSON.stringify(paths['/internal/v1/user-center/system-subscriptions']?.get?.responses['200']);
+  assert.match(catalog, /"mixedPort":7788/);
+  assert.doesNotMatch(catalog, /"instance":"subscriptions"|7890/);
+
+  const reveal = JSON.stringify(paths['/internal/v1/user-center/system-subscriptions/sites/{siteId}/reveal']?.post?.responses['200']);
+  assert.match(reveal, /"url":/);
+  assert.doesNotMatch(reveal, /installCommand|qp-tunnel-cli|--instance|7890/);
+});
+
 test('both renderers produce output without throwing', () => {
   const html = renderApiDocsHtml(mxLauncherApiDocument);
   assert.match(html, /<html/i);

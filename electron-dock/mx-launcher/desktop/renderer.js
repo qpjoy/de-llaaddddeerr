@@ -151,6 +151,7 @@ const state = {
   currentPipeline: null,
   overseaOverview: null,
   overseaOverviewError: null,
+  overseaShowArchived: false,
   overseaEnsureBusy: false,
   overseaEnsureFeedback: null,
   overseaDefaultSiteBusy: false,
@@ -4682,8 +4683,9 @@ function renderInternalPeerWorkbench(pipelines) {
   const hostRunnerCommand = internalPeerHostRunnerCommand(runtimeStatus);
   const hostRunnerSetupDetail = internalPeerHostRunnerSetupDetail(runtimeStatus);
   const runtimeBlocked = hostRunnerOffline || runtimeStatus?.status === 'blocked' || installUnavailable;
-  const panelStatus = materializeAction
-    ? 'blocked'
+  const runtimeHealthy = runtimeStatus?.status === 'passed';
+  const panelStatus = runtimeHealthy
+    ? 'passed'
     : endpointBlockedReason
       ? 'blocked'
       : result?.status === 'blocked' && !runtimeStatus
@@ -4695,8 +4697,10 @@ function renderInternalPeerWorkbench(pipelines) {
             : runtimeStatus?.status === 'ready'
               ? 'ready'
               : result?.status || (pipeline.health === 'passed' ? 'ready' : pipeline.health);
-  const handoffHeading = materializeAction
-    ? 'Domestic WG materialize required'
+  const handoffHeading = runtimeHealthy
+    ? materializeAction
+      ? 'Internal service peer running · artifact refresh pending'
+      : 'Internal service peer ready'
     : endpointBlockedReason
       ? 'Domestic endpoint required'
       : result?.status === 'ready'
@@ -4709,15 +4713,27 @@ function renderInternalPeerWorkbench(pipelines) {
               ? 'Internal service peer ready'
               : 'Generate Internal peer handoff';
   const materializeFeedback = materializeAction && !feedback
-    ? { kind: materializeAction.allowed ? 'warning' : 'error', message: materializeAction.allowed ? 'Materialize Domestic WG before generating handoff' : materializeAction.reason || 'Domestic WG materialize is locked', detail: null }
+    ? {
+        kind: materializeAction.allowed ? 'warning' : 'error',
+        message: runtimeHealthy
+          ? 'Running Domestic ↔ Internal WG is healthy; only its control-plane artifact is stale'
+          : materializeAction.allowed
+            ? 'Refresh the Domestic WG control-plane artifact before generating a new handoff'
+            : materializeAction.reason || 'Domestic WG artifact refresh is locked',
+        detail: runtimeHealthy
+          ? 'Oversea operations do not modify this runtime. Refresh Artifact reuses the current keys and does not sync, apply, or restart WG.'
+          : null
+      }
     : endpointBlockedReason && !feedback
       ? { kind: 'warning', message: endpointBlockedReason, detail: canCreatePlan ? `Create a new Domestic 2.0 plan from SSH Profile ${profile.profileId}, then Generate Handoff.` : 'Open SSH Access and save the real Domestic public host first.' }
     : hostRunnerOffline && !feedback
       ? { kind: 'warning', message: 'Handoff is ready; install or start the native Internal host runner, then Install / Restart assigns 10.88.88.88.', detail: hostRunnerSetupDetail }
     : null;
-  const handoffDescription = materializeAction
-    ? '当前 Domestic WG secret/artifact 与选中的 plan 不一致，先重新 materialize，再生成 Internal handoff。'
-    : endpointBlockedReason
+  const handoffDescription = runtimeHealthy && materializeAction
+    ? '现有 Domestic ↔ Internal WG 已通过运行态检查且保持在线。仅控制面 artifact 待手动刷新；Oversea 操作不会修改密钥、路由、服务或 listener。'
+    : materializeAction
+      ? 'Domestic WG 控制面 artifact 待刷新；该维护不会自动下发或重启运行中的 WG。'
+      : endpointBlockedReason
       ? '当前 Domestic endpoint 仍是模板或本机地址。先用真实公网 IP/DNS 创建新的 Domestic 2.0 plan，或重新 Materialize Domestic WG。'
       : 'Generate Handoff only creates the Internal WG artifact. Ensure the host runner on the Internal host, then Install / Restart enables qp-tunnel-cli egress-on, installs WG, and assigns 10.88.88.88.';
   const displayedFeedback = feedback || materializeFeedback;
@@ -4777,7 +4793,7 @@ function renderInternalPeerWorkbench(pipelines) {
           <p>${escapeHtml(handoffDescription)}</p>
         </div>
         <div class="domestic-relay-actions">
-          ${materializeAction ? `<button class="primary-button" type="button" data-internal-peer-materialize ${materializeDisabled ? 'disabled' : ''} title="${escapeHtml(endpointBlockedReason || materializeAction.reason || 'Materialize Domestic WG')}">${state.internalPeer.materializeBusy ? 'Materializing' : 'Materialize Domestic WG'}</button>` : ''}
+          ${materializeAction ? `<button class="primary-button" type="button" data-internal-peer-materialize ${materializeDisabled ? 'disabled' : ''} title="${escapeHtml(endpointBlockedReason || materializeAction.reason || 'Rebuild the control-plane artifact without applying or restarting WG')}">${state.internalPeer.materializeBusy ? 'Refreshing Artifact' : 'Refresh Domestic Artifact'}</button>` : ''}
           ${endpointBlockedReason ? `<button class="primary-button" type="button" data-internal-peer-create-plan ${canCreatePlan && !state.sshPlanBusy ? '' : 'disabled'}>${state.sshPlanBusy ? 'Creating' : 'New 2.0 Plan'}</button>` : ''}
           <button class="primary-button" type="button" data-internal-peer-handoff ${handoffDisabled ? 'disabled' : ''} title="${escapeHtml(materializeAction ? 'Materialize Domestic WG first' : endpointBlockedReason || 'Generate Internal peer handoff')}">${state.internalPeer.busy ? 'Generating' : 'Generate Handoff'}</button>
           <button class="secondary-button" type="button" data-internal-peer-sync-domestic-key ${keySyncDisabled ? 'disabled' : ''} title="${escapeHtml(endpointBlockedReason || 'Sync Domestic mx-domestic Internal peer key with the current Internal runtime key')}">${state.internalPeer.syncBusy ? 'Syncing' : 'Sync Domestic WG Key'}</button>
@@ -5057,7 +5073,7 @@ async function saveInternalPeerDirectMode(site, pipeline, enabled) {
 async function materializeDomesticWgForInternalPeer(site, pipeline, action) {
   if (state.internalPeer.materializeBusy) return;
   state.internalPeer.materializeBusy = true;
-  state.internalPeer.feedback = { kind: 'info', message: 'Materializing Domestic WG for selected plan', detail: null };
+  state.internalPeer.feedback = { kind: 'info', message: 'Refreshing the Domestic WG control-plane artifact without applying runtime changes', detail: null };
   state.internalPeer.result = null;
   renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
   try {
@@ -5072,7 +5088,7 @@ async function materializeDomesticWgForInternalPeer(site, pipeline, action) {
     const materialize = payload.domesticWgMaterialize || null;
     state.internalPeer.feedback = {
       kind: materialize?.status === 'passed' ? 'success' : materialize?.status === 'blocked' ? 'warning' : 'error',
-      message: materialize ? `Domestic WG materialize ${materialize.status}` : 'Domestic WG materialize finished',
+      message: materialize ? `Domestic WG artifact refresh ${materialize.status}` : 'Domestic WG artifact refresh finished',
       detail: summarizeActionDetail(payload)
     };
     await refreshAdmin();
@@ -5810,8 +5826,12 @@ async function saveOverseaDefaultSite(siteId) {
 function renderOverseaWorkbench(pipelines) {
   const overview = state.overseaOverview;
   const overviewSites = asArray(overview?.sites);
-  const sites = overseaSitesWithDraft(overviewSites);
-  deploymentSiteCount.textContent = overview ? `${sites.length || overview.counts?.overseaSites || 0} nodes` : '0 nodes';
+  const allSites = overseaSitesWithDraft(overviewSites);
+  const archivedCount = allSites.filter((site) => site.archived || site.status === 'archived').length;
+  const sites = state.overseaShowArchived
+    ? allSites
+    : allSites.filter((site) => !site.archived && site.status !== 'archived');
+  deploymentSiteCount.textContent = overview ? `${sites.length} active${archivedCount ? ` · ${archivedCount} archived` : ''}` : '0 nodes';
   if (state.overseaOverviewError) {
     siteWorkbench.innerHTML = `<div class="empty-state">Oversea overview unavailable: ${escapeHtml(state.overseaOverviewError)}</div>`;
     renderInspector();
@@ -5823,7 +5843,7 @@ function renderOverseaWorkbench(pipelines) {
     return;
   }
   if (!state.selectedSiteId && sites[0]) state.selectedSiteId = sites[0].siteId;
-  const selected = selectedOverseaSite() || sites[0] || null;
+  const selected = sites.find((site) => site.siteId === state.selectedSiteId) || sites[0] || null;
   if (selected) {
     state.selectedSiteId = selected.siteId;
     syncSshProfileFormToSelectedSite(selected.siteId, 'oversea');
@@ -5837,8 +5857,8 @@ function renderOverseaWorkbench(pipelines) {
     <section class="oversea-summary-grid">
       <article>
         <span>Oversea Nodes</span>
-        <strong>${escapeHtml(sites.length || counts.overseaSites || 0)}</strong>
-        <small>${escapeHtml(counts.installed || 0)} installed / ${escapeHtml(counts.readyToInstall || 0)} ready</small>
+        <strong>${escapeHtml(sites.length)}</strong>
+        <small>${escapeHtml(counts.installed || 0)} installed / ${escapeHtml(counts.readyToInstall || 0)} ready${archivedCount ? ` / ${escapeHtml(archivedCount)} archived` : ''}</small>
       </article>
       <article>
         <span>Internal mihomo</span>
@@ -5857,8 +5877,9 @@ function renderOverseaWorkbench(pipelines) {
         <div class="oversea-list-toolbar">
           <span>
             <strong>Site Registry</strong>
-            <small>${state.siteDraft?.kind === 'oversea' ? 'draft pending save' : 'active profiles + evidence'}</small>
+            <small>${state.siteDraft?.kind === 'oversea' ? 'draft pending save' : state.overseaShowArchived ? 'active + archived evidence' : 'active profiles; archived evidence hidden'}</small>
           </span>
+          ${archivedCount ? `<button class="secondary-button" type="button" data-oversea-toggle-archived>${state.overseaShowArchived ? 'Hide Archived' : `Show Archived (${escapeHtml(archivedCount)})`}</button>` : ''}
           <button class="secondary-button" type="button" data-oversea-new>New Oversea</button>
         </div>
         ${renderOverseaDefaultSitePicker(sites)}
@@ -5870,7 +5891,7 @@ function renderOverseaWorkbench(pipelines) {
             </span>
             <span class="health-chip" data-health="${escapeHtml(normalizeStageStatus(site.status))}">${escapeHtml(site.status || 'planned')}</span>
           </button>
-        `).join('') : '<div class="empty-state">No Oversea nodes yet. Click New Oversea to start.</div>'}
+        `).join('') : `<div class="empty-state">${archivedCount ? 'No active Oversea nodes. Archived evidence is preserved and hidden.' : 'No Oversea nodes yet. Click New Oversea to start.'}</div>`}
       </div>
       <section class="oversea-detail">
         ${selected ? renderOverseaSiteDetail(selected) : '<div class="empty-state">Select an Oversea node</div>'}
@@ -5882,6 +5903,13 @@ function renderOverseaWorkbench(pipelines) {
   if (newButton) {
     newButton.addEventListener('click', () => {
       startNewSiteProfile('oversea');
+    });
+  }
+  const archivedToggle = siteWorkbench.querySelector('[data-oversea-toggle-archived]');
+  if (archivedToggle) {
+    archivedToggle.addEventListener('click', () => {
+      state.overseaShowArchived = !state.overseaShowArchived;
+      renderDeploymentWorkbench(pipelines);
     });
   }
   for (const button of siteWorkbench.querySelectorAll('[data-oversea-site]')) {
@@ -5983,16 +6011,19 @@ function renderOverseaWorkbench(pipelines) {
 function renderOverseaSiteDetail(site) {
   const status = site.status || 'planned';
   const installed = status === 'installed';
-  const installDisabled = state.overseaEnsureBusy || status === 'blocked' || status === 'draft' || status === 'needs-ssh-profile' || !site.sshProfile?.profileId;
+  const archived = site.archived || status === 'archived';
+  const installDisabled = state.overseaEnsureBusy || archived || status === 'blocked' || status === 'draft' || status === 'needs-ssh-profile' || !site.sshProfile?.profileId;
   const installLabel = state.overseaEnsureBusy
     ? 'Running'
-    : status === 'blocked'
-      ? 'Blocked'
-      : status === 'draft' || !site.sshProfile?.profileId
-        ? 'Save Profile First'
-        : installed
-          ? 'Sync Remote'
-          : 'Install / Sync';
+    : archived
+      ? 'Unarchive First'
+      : status === 'blocked'
+        ? 'Blocked'
+        : status === 'draft' || !site.sshProfile?.profileId
+          ? 'Save Profile First'
+          : installed
+            ? 'Sync Remote'
+            : 'Install / Sync';
   const services = asArray(site.services);
   const subscriptions = asArray(site.subscriptions);
   const failure = site.runtime?.failure || null;
@@ -6836,7 +6867,7 @@ function systemSubscriptionsVisible() {
   const haystack = [
     catalog.account.accountId,
     catalog.account.displayName,
-    'system account subscription control plane unlimited 7890 basic direct ip',
+    'system account subscription control plane unlimited 7788 manual url basic direct ip',
     ...asArray(catalog.subscriptions).flatMap((item) => [item.label, item.siteId, item.status])
   ].filter(Boolean).join(' ').toLowerCase();
   const matchesQuery = !query || haystack.includes(query);
@@ -8564,7 +8595,7 @@ function renderSystemSubscriptionsDrawer() {
             <article><span>Traffic quota</span><strong>Unlimited</strong><small>no byte cap / reset / expiry</small></article>
             <article><span>Channels</span><strong>${escapeHtml(`${summary.ready || 0}/${summary.total || items.length} ready`)}</strong><small>Internal pushes, Oversea serves</small></article>
           </div>
-          <div class="system-subscription-warning">HTTP Basic over direct IP is intentionally available for application compatibility. Treat the URL as a secret; use the HTTPS user subscription where the application accepts it.</div>
+          <div class="system-subscription-warning">HTTP Basic over direct IP is intentionally available for application compatibility. Treat the URL as a secret. MX only reveals and copies the URL; the consuming application owns its local listener. This YAML declares 7788; use the consuming application's provider/override option if its existing 7890 listener must remain unchanged.</div>
         </section>
         <section class="app-drawer-section">
           <div class="app-section-title"><span>02</span><strong>Direct-IP subscription channels</strong></div>
@@ -8583,7 +8614,7 @@ function renderSystemSubscriptionsDrawer() {
                   </header>
                   <div class="system-subscription-facts">
                     <span><small>Delivery</small><strong>Direct IP · HTTP Basic · :${escapeHtml(String(delivery.port || 3434))}</strong></span>
-                    <span><small>Client</small><strong>${escapeHtml(client.instance || 'subscriptions')} · mixed-port ${escapeHtml(String(client.mixedPort || 7890))}</strong></span>
+                    <span><small>YAML</small><strong>mixed-port ${escapeHtml(String(client.mixedPort || 7788))} · manual URL import</strong></span>
                     <span><small>Policy</small><strong>Unlimited traffic · 50 Mbps hints</strong></span>
                   </div>
                   <div class="foundation-subscription-url">
@@ -8595,7 +8626,6 @@ function renderSystemSubscriptionsDrawer() {
                     <button class="secondary-button" type="button" data-system-subscription-reveal="${escapeHtml(item.siteId)}" ${busy || !canReveal ? 'disabled' : ''}>${secret ? 'Reveal Again' : 'Reveal'}</button>
                     ${secret ? `
                       <button class="secondary-button" type="button" data-system-subscription-copy-url="${escapeHtml(item.siteId)}">Copy URL</button>
-                      <button class="secondary-button" type="button" data-system-subscription-copy-cli="${escapeHtml(item.siteId)}">Copy CLI</button>
                     ` : ''}
                   </div>
                 </article>
@@ -8628,12 +8658,6 @@ function renderSystemSubscriptionsDrawer() {
     copy.addEventListener('click', () => {
       const secret = state.userCenter.systemSubscriptionSecrets?.[copy.dataset.systemSubscriptionCopyUrl];
       void copySystemSubscriptionValue(secret?.url, 'Subscription URL');
-    });
-  }
-  for (const copy of userEditorDrawer.querySelectorAll('[data-system-subscription-copy-cli]')) {
-    copy.addEventListener('click', () => {
-      const secret = state.userCenter.systemSubscriptionSecrets?.[copy.dataset.systemSubscriptionCopyCli];
-      void copySystemSubscriptionValue(secret?.installCommand, 'Install command');
     });
   }
 }

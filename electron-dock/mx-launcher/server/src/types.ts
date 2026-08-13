@@ -2884,8 +2884,7 @@ export interface SystemSubscriptionItem {
     };
   };
   client: {
-    instance: 'subscriptions';
-    mixedPort: 7890;
+    mixedPort: 7788;
     routingMode: 'cn-direct';
     explicitUseOnly: true;
   };
