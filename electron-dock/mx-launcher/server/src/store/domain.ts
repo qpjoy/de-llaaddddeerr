@@ -204,6 +204,7 @@ const HYSTERIA2_ACCESS_PORTS = String(HYSTERIA2_ACCESS_PORT);
 const HYSTERIA2_EXPORT_FALLBACK_PORT = 3434;
 const HYSTERIA2_CLIENT_DOWNLOAD = '30 Mbps';
 const HYSTERIA2_CLIENT_UPLOAD = '30 Mbps';
+export const SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH = '50 Mbps';
 const HYSTERIA2_CLIENT_ALPN = 'h3';
 const HYSTERIA2_CLIENT_DNS = ['223.5.5.5', '119.29.29.29', '1.1.1.1', '8.8.8.8'];
 /** 健康探测必须是「墙外可达且国内不可达」的地址，否则节点挂了探测仍然算通过。 */
@@ -211,6 +212,8 @@ const OVERSEA_HEALTH_CHECK_URL = 'http://www.gstatic.com/generate_204';
 const OVERSEA_HEALTH_CHECK_INTERVAL_SECONDS = 300;
 const OVERSEA_AUTO_GROUP = 'Oversea-Auto';
 const OVERSEA_SELECT_GROUP = 'Oversea';
+export const SYSTEM_SUBSCRIPTIONS_SERVICE_ACCOUNT_ID = 'subscriptions';
+export const SYSTEM_SUBSCRIPTION_MIXED_PORT = 7890;
 const HYSTERIA2_LOCAL_DIRECT_RULES = [
   'DOMAIN-SUFFIX,local,DIRECT',
   'IP-CIDR,127.0.0.0/8,DIRECT,no-resolve',
@@ -5949,7 +5952,7 @@ export function buildSiteSlotWorkerJob(
 function siteSlotWorkerStepRedactOutput(step: SiteSlotRunnerSession['stepResults'][number]): boolean {
   const command = step.command;
   if (step.sourceId.startsWith('verify-domestic-egress.')) return false;
-  if (command.includes('subscription') || command.includes('DATABASE_URL')) return true;
+  if (command.includes('subscription') || command.includes('tunnel-state.json') || command.includes('DATABASE_URL')) return true;
   return /(^|[^A-Za-z0-9_])(?:authToken|AUTH_TOKEN|accessToken|ACCESS_TOKEN|token|TOKEN)(?:=|:)/.test(command);
 }
 
@@ -6974,6 +6977,7 @@ function siteSlotDeploymentPhases(
   const overseaDefaultAccountNames = defaultSiteSlotAccessAccountNames(overseaSiteId);
   const overseaInternalAccountName = `${safeAccountPrefix(overseaSiteId)}-internal`;
   const overseaDomesticAccountName = `${safeAccountPrefix(overseaSiteId)}-domestic`;
+  const overseaSystemSubscriptionAccountName = systemSubscriptionAccessAccountName(overseaSiteId);
   const domesticBootstrapSubscriptionUrl = `${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml`;
   const domesticTunnelInstallWrapperCommand = `printf "%s\\n" "#!/usr/bin/env sh" "exec ${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli \\"\\$@\\"" > /usr/local/bin/qp-tunnel-cli && chmod 0755 /usr/local/bin/qp-tunnel-cli`;
   const qpTunnelCliVersionProbe = (command: string) => `${command} --version 2>/dev/null || ${command} version 2>/dev/null || ${command} -v 2>/dev/null || ${command} help 2>/dev/null | sed -n "1p" || echo unknown`;
@@ -7116,7 +7120,12 @@ function siteSlotDeploymentPhases(
     `HY2_EXPORT_BASE_URL=${overseaExportBaseUrl}`,
     `HY2_EXPORT_FALLBACK_PORT=${overseaExportPort}`,
     'HY2_EXPORT_USER=download',
-    'HY2_EXPORT_PASSWORD_HASH='
+    'HY2_EXPORT_PASSWORD_HASH=',
+    `HY2_SYSTEM_SUBSCRIPTION_ACCOUNT=${overseaSystemSubscriptionAccountName}`,
+    `HY2_SYSTEM_SUBSCRIPTION_BASIC_USER=${SYSTEM_SUBSCRIPTIONS_SERVICE_ACCOUNT_ID}`,
+    'HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH=',
+    'HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256=',
+    `HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=${SYSTEM_SUBSCRIPTION_MIXED_PORT}`
   ];
   const overseaEnvWriteCommand = `cd ${overseaAccessStackCurrentDir} && cp -n .env.example .env && printf "%s\\n" ${overseaEnvLines.map(shellDoubleQuote).join(' ')} >> .env`;
   const overseaTunnelStateJson = JSON.stringify({
@@ -7146,11 +7155,19 @@ function siteSlotDeploymentPhases(
         authToken: overseaAccessAccountMaterial.get(safeAccountName(username))?.authToken ?? `<hy2-token:${username}:from-internal-config-center>`,
         status: 'active',
         policyId: 'cn-direct',
-        upRate: overseaAccessAccountMaterial.get(safeAccountName(username))?.upRate || HYSTERIA2_CLIENT_UPLOAD,
-        downRate: overseaAccessAccountMaterial.get(safeAccountName(username))?.downRate || HYSTERIA2_CLIENT_DOWNLOAD
+        systemSubscription: username === overseaSystemSubscriptionAccountName,
+        upRate: overseaAccessAccountMaterial.get(safeAccountName(username))?.upRate
+          || (username === overseaSystemSubscriptionAccountName ? SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH : HYSTERIA2_CLIENT_UPLOAD),
+        downRate: overseaAccessAccountMaterial.get(safeAccountName(username))?.downRate
+          || (username === overseaSystemSubscriptionAccountName ? SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH : HYSTERIA2_CLIENT_DOWNLOAD)
       }))
   });
   const overseaTunnelStateBase64 = Buffer.from(overseaTunnelStateJson, 'utf8').toString('base64');
+  const overseaSystemSubscriptionToken = overseaAccessAccountMaterial
+    .get(safeAccountName(overseaSystemSubscriptionAccountName))?.authToken ?? null;
+  const overseaSystemSubscriptionCredentialMarker = overseaSystemSubscriptionToken
+    ? `Verify system-subscription-credential-sha256=${hashToken(overseaSystemSubscriptionToken)}`
+    : 'Verify system-subscription-credential-sha256=missing';
   const overseaRegistrationCommand = overseaCallbackBaseUrl
     ? ssh(`chmod +x ${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli && ${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli register --internal ${overseaCallbackBaseUrl} --role oversea --site ${input.siteId ?? 'oversea-main'} --service hysteria2`)
     : ssh(`install -d -m 0755 /opt/mx/site-agent && printf "%s\\n" "MX_INTERNAL_CALLBACK_MODE=push-only" "MX_SITE_ID=${input.siteId ?? 'oversea-main'}" "MX_SITE_ROLE=oversea" > /opt/mx/site-agent/registration.env && echo "oversea callback push-only; registration skipped"`);
@@ -7337,14 +7354,15 @@ function siteSlotDeploymentPhases(
           `Record overseaAccessAccountMaterial=internal-issued accounts=${overseaAccountMaterialCount}/${overseaRuntimeAccountNames.length} source=config-center`,
           ssh(overseaDockerInstallScript()),
           ssh(overseaEnvWriteCommand),
-          ssh(`printf "%s" ${overseaTunnelStateBase64} | base64 -d > /opt/mx/site-agent/tunnel-state.json`),
+          ssh(`umask 077 && printf "%s" ${overseaTunnelStateBase64} | base64 -d > /opt/mx/site-agent/.tunnel-state.json.tmp && chmod 600 /opt/mx/site-agent/.tunnel-state.json.tmp && mv -f /opt/mx/site-agent/.tunnel-state.json.tmp /opt/mx/site-agent/tunnel-state.json`),
           ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh reconcile-from-json --state-file /opt/mx/site-agent/tunnel-state.json --mode hysteria2-only`),
           overseaRegistrationCommand,
-          ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh sync-internal-defaults && ./manage.sh docker-status && curl -fsS http://127.0.0.1:${overseaExportPort}/healthz`)
+          ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh sync-internal-defaults && ./manage.sh docker-status && ./manage.sh check-system-subscription && curl -fsS http://127.0.0.1:${overseaExportPort}/healthz`),
+          overseaSystemSubscriptionCredentialMarker
         ],
         notes: [
           'Oversea runs hysteria2 only; Internal runs mihomo and stores subscription/account material.',
-          `Port ${overseaExportPort} on Oversea is a protected health/evidence outlet for clients.csv and healthz, not a subscription authority.`,
+          `Port ${overseaExportPort} on Oversea is a protected delivery/health/evidence outlet for one exact system YAML path, clients.csv, and healthz; Internal remains the subscription authority.`,
           'H endpoints use WG relay only for Internal DNS and reserved/product routes; Domestic defaults to 10.88.0.1, cn-direct stays direct, and external traffic uses the Oversea hysteria2 subscription.'
         ]
       },
@@ -7569,8 +7587,24 @@ export function defaultSiteSlotAccessAccountNames(siteId: string): string[] {
   return [
     `${prefix}-internal`,
     `${prefix}-domestic`,
+    systemSubscriptionAccessAccountName(siteId),
     ...Array.from({ length: 9 }, (_, index) => `${prefix}-internal${String(index + 1).padStart(2, '0')}`)
   ];
+}
+
+export function systemSubscriptionAccessAccountName(siteId: string): string {
+  const suffix = `-${SYSTEM_SUBSCRIPTIONS_SERVICE_ACCOUNT_ID}`;
+  // The Oversea materializer and Caddy path allow at most 64 characters. Keep
+  // the semantic suffix intact so the runtime can identify this account, even
+  // when an operator chose an unusually long site id.
+  const prefix = safeAccountPrefix(siteId).slice(0, 64 - suffix.length).replace(/[-.]+$/g, '') || 'oversea';
+  return `${prefix}${suffix}`;
+}
+
+export function isSystemSubscriptionAccessAccount(
+  account: Pick<SiteSlotAccessAccount, 'siteId' | 'username'>
+): boolean {
+  return account.username === systemSubscriptionAccessAccountName(account.siteId);
 }
 
 export function buildLauncherNetworkMihomoSite(
@@ -7664,6 +7698,7 @@ export function buildLauncherNetworkReachabilityPlan(
   const domesticAccounts = accounts.filter((account) => account.role === 'domestic');
   const reservedAccounts = accounts.filter((account) => account.role === 'internal-reserved');
   const hEndpointAccounts = accounts.filter((account) => account.role === 'h-endpoint');
+  const operatorAccounts = accounts.filter((account) => account.role === 'operator');
   const hasBootstrapAccounts = internalAccounts.length > 0 && domesticAccounts.length > 0;
   const internalStageStatus = hasBootstrapAccounts ? 'ready' : 'blocked';
   return {
@@ -7677,7 +7712,8 @@ export function buildLauncherNetworkReachabilityPlan(
       internal: internalAccounts.length,
       domestic: domesticAccounts.length,
       internalReserved: reservedAccounts.length,
-      hEndpoint: hEndpointAccounts.length
+      hEndpoint: hEndpointAccounts.length,
+      operator: operatorAccounts.length
     },
     executionOrder: [
       'Internal issues hysteria2 accounts and publishes mihomo subscription YAML.',
@@ -8140,7 +8176,7 @@ function safeAccountPrefix(siteId: string): string {
   return safeAccountName(siteId || 'oversea-main');
 }
 
-function safeAccountName(value: string): string {
+export function canonicalSiteSlotAccessAccountName(value: string): string {
   return String(value ?? '')
     .trim()
     .toLowerCase()
@@ -8150,10 +8186,15 @@ function safeAccountName(value: string): string {
     .slice(0, 80) || 'account';
 }
 
+function safeAccountName(value: string): string {
+  return canonicalSiteSlotAccessAccountName(value);
+}
+
 function inferAccessAccountRole(siteId: string, username: string): SiteSlotAccessAccountRole {
   const prefix = safeAccountPrefix(siteId);
   if (username === `${prefix}-internal`) return 'internal';
   if (username === `${prefix}-domestic`) return 'domestic';
+  if (username === systemSubscriptionAccessAccountName(siteId)) return 'operator';
   if (username.startsWith(`${prefix}-internal`)) return 'internal-reserved';
   return 'h-endpoint';
 }

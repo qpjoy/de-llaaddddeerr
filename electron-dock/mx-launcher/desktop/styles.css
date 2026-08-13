@@ -1302,6 +1302,13 @@ select {
   color: var(--red);
 }
 
+.user-admin-table .system-subscription-row {
+  border-color: color-mix(in srgb, var(--mx-primary) 48%, var(--line));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--mx-primary) 9%, transparent), transparent 42%),
+    rgba(20, 20, 23, 0.42);
+}
+
 .release-catalog-controls {
   grid-template-columns: minmax(220px, 1fr) minmax(130px, 0.42fr) minmax(130px, 0.42fr) minmax(150px, 0.5fr) auto auto auto auto;
   width: min(1120px, 100%);
@@ -4421,6 +4428,111 @@ select {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.system-subscription-list {
+  display: grid;
+  gap: 10px;
+}
+
+.system-subscription-card {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(18, 20, 28, 0.5);
+}
+
+.system-subscription-card[data-state="ready"] {
+  border-color: color-mix(in srgb, var(--green) 42%, var(--line));
+}
+
+.system-subscription-card[data-state="pending-sync"] {
+  border-color: color-mix(in srgb, var(--yellow) 42%, var(--line));
+}
+
+.system-subscription-card[data-state="blocked"],
+.system-subscription-card[data-state="disabled"] {
+  border-color: color-mix(in srgb, var(--red) 38%, var(--line));
+}
+
+.system-subscription-card > header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.system-subscription-card > header > span:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.system-subscription-card > header strong,
+.system-subscription-card > header small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-subscription-card > header strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.system-subscription-card > header small,
+.system-subscription-card > p,
+.system-subscription-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.system-subscription-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.system-subscription-facts > span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px;
+  background: var(--panel-quiet);
+}
+
+.system-subscription-facts small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.system-subscription-facts strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-subscription-warning {
+  border: 1px solid color-mix(in srgb, var(--yellow) 42%, var(--line));
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--yellow) 7%, transparent);
+  color: var(--yellow);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .foundation-operation-panel {

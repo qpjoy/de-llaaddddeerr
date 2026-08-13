@@ -35,6 +35,15 @@ Rules:
 - Never map one source column to two target fields.
 - Omit a target field entirely if no column fits. Do not invent columns.`
 
+const FILE_PROFILE_SYSTEM_PROMPT = `${MAPPING_SYSTEM_PROMPT}
+
+The input is a value-free structural summary sampled from the first, middle and
+last records. Also infer a lowercase platform and objectType when the evidence
+is clear. Reply in this envelope:
+{"platform":"twitter","objectType":"post","fieldMap":{"externalId":{"from":"id"}}}
+Use null for an uncertain platform or objectType. Never infer identity from a
+numeric value; use only column names, value type families and aggregate signals.`
+
 function extractJson(text) {
   if (!text) throw new AppError(502, 'agent_invalid_response', 'Model returned an empty response')
   // Models add fences and preamble despite instructions. Take the outermost
@@ -50,6 +59,43 @@ function extractJson(text) {
     // Native JSON parse errors may quote a fragment of the model response.
     // Prompts and returned content must never enter logs or degradedReason.
     throw new AppError(502, 'agent_invalid_response', 'Model response was not valid JSON')
+  }
+}
+
+function valueFreeFileSampling(sampling) {
+  if (!sampling || typeof sampling !== 'object') return null
+  const integer = (value) => Number.isInteger(value) && value >= 0 ? value : null
+  const positions = Array.isArray(sampling.sampledPositions)
+    ? sampling.sampledPositions.flatMap((item) => (
+        item && ['head', 'middle', 'tail'].includes(item.position) && integer(item.index) != null
+          ? [{ position: item.position, index: item.index }]
+          : []
+      ))
+    : []
+  const columns = Array.isArray(sampling.columns)
+    ? sampling.columns.flatMap((column) => {
+        if (!column || typeof column.name !== 'string') return []
+        return [{
+          name: column.name,
+          presentCount: integer(column.presentCount),
+          nonEmptyCount: integer(column.nonEmptyCount),
+          valueTypeFamilies: Array.isArray(column.valueTypeFamilies)
+            ? column.valueTypeFamilies.filter((value) => typeof value === 'string')
+            : [],
+        }]
+      })
+    : []
+  const signals = Object.fromEntries(Object.entries(sampling.signals || {}).flatMap(([key, value]) => (
+    typeof value === 'number' && Number.isFinite(value) ? [[key, value]] : []
+  )))
+  return {
+    strategy: typeof sampling.strategy === 'string' ? sampling.strategy : null,
+    sourceRowCount: integer(sampling.sourceRowCount),
+    sampledRowCount: integer(sampling.sampledRowCount),
+    sampledPositions: positions,
+    sampledRowIndexes: positions.map(({ index }) => index),
+    columns,
+    signals,
   }
 }
 
@@ -123,6 +169,68 @@ export class HubAgent {
       // blocking the operator, and says so.
       this.logger?.warn?.(`[agent] mapping suggestion failed (${error.message}); using inferred mapping`)
       return {
+        fieldMap: deterministic,
+        origin: 'inferred',
+        model: null,
+        confidence: null,
+        degradedReason: error.message,
+      }
+    }
+  }
+
+  /**
+   * Suggest source scope and mapping without sending source values to a model.
+   * `sampling` is produced by the external importer and contains only column
+   * names, type families and aggregate signal counts.
+   */
+  async suggestFileProfile({ columns, sampling = null, signal } = {}) {
+    const deterministic = inferFieldMap(columns)
+    const safeSampling = valueFreeFileSampling(sampling)
+    if (!this.available) {
+      return {
+        platform: null,
+        objectType: null,
+        fieldMap: deterministic,
+        origin: 'inferred',
+        model: null,
+        confidence: null,
+      }
+    }
+    try {
+      const result = await this.complete([
+        { role: 'system', content: FILE_PROFILE_SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: [
+            `Columns: ${JSON.stringify(columns)}`,
+            safeSampling ? `First/middle/last structural summary: ${JSON.stringify(safeSampling)}` : '',
+            `A deterministic matcher proposed: ${JSON.stringify(deterministic)}`,
+            'Correct and complete the profile.',
+          ].filter(Boolean).join('\n'),
+        },
+      ], { signal })
+      const raw = extractJson(result.payload?.choices?.[0]?.message?.content)
+      const fieldMap = this.#sanitizeFieldMap(raw?.fieldMap, columns)
+      validateFieldMap(fieldMap)
+      const normalizedScope = (value) => (
+        typeof value === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/u.test(value.trim().toLowerCase())
+          ? value.trim().toLowerCase()
+          : null
+      )
+      return {
+        platform: normalizedScope(raw.platform),
+        objectType: normalizedScope(raw.objectType),
+        fieldMap,
+        origin: 'agent',
+        model: `${result.provider}:${result.model}`,
+        confidence: null,
+        attempts: result.attempts,
+      }
+    } catch (error) {
+      this.logger?.warn?.(`[agent] file profile failed (${error.message}); using inferred mapping`)
+      return {
+        platform: null,
+        objectType: null,
         fieldMap: deterministic,
         origin: 'inferred',
         model: null,

@@ -32,6 +32,7 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(response.headers.get('content-security-policy'), /default-src 'none'/)
     assert.match(html, /MX Insight Hub/)
     assert.match(html, /\/api\/v1\/data\/search/)
+    assert.match(html, /\/api\/v1\/data\/stored\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/messages/)
     assert.match(html, /\/api\/v1\/data\/capabilities/)
@@ -60,6 +61,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.deepEqual(paths.sort(), [
       '/data/capabilities',
       '/data/search',
+      '/data/stored/search',
       '/data/telegram/chats',
       '/data/telegram/entities/search',
       '/data/telegram/messages',
@@ -84,6 +86,11 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       ['hanlp', 'jieba', 'bigram'],
     )
     assert.equal(document.components.schemas.TokenizeRequest.additionalProperties, false)
+    assert.equal(document.components.schemas.StoredSearchRequest.additionalProperties, false)
+    assert.equal(
+      document.components.schemas.StoredSearchEnvelope.properties.data.properties.source.const,
+      'hub',
+    )
   })
 })
 

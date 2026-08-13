@@ -183,6 +183,10 @@ const state = {
     users: [],
     roles: [],
     overseaEntitlements: [],
+    systemSubscriptions: null,
+    systemSubscriptionBusy: false,
+    systemSubscriptionFeedback: null,
+    systemSubscriptionSecrets: {},
     filter: {
       search: '',
       roleId: 'all',
@@ -1092,8 +1096,11 @@ async function refreshAdmin() {
     state.userCenter.users = asArray(userCenterPayload.users);
     state.userCenter.roles = asArray(userCenterPayload.roles);
     state.userCenter.overseaEntitlements = asArray(userCenterPayload.overseaEntitlements);
+    state.userCenter.systemSubscriptions = userCenterPayload.systemSubscriptions || null;
     if (userCenterPayload.error) {
       state.userCenter.feedback = { kind: 'error', message: userCenterPayload.error };
+    } else if (userCenterPayload.systemSubscriptionsError) {
+      state.userCenter.feedback = { kind: 'warning', message: `System subscriptions unavailable: ${userCenterPayload.systemSubscriptionsError}` };
     }
     state.awxProviders = asArray(dashboard.awxProviders);
     state.appCenterApps = asArray(appCenterAppsPayload.apps);
@@ -1400,19 +1407,30 @@ async function loadSshProfiles() {
 
 async function loadUserCenterOverview() {
   try {
-    const [usersPayload, rolesPayload, entitlementPayload] = await Promise.all([
+    const [usersPayload, rolesPayload, entitlementPayload, systemSubscriptionsPayload] = await Promise.all([
       fetchJson('/internal/v1/user-center/users'),
       fetchJson('/internal/v1/user-center/roles'),
-      fetchJson('/internal/v1/user-center/oversea-entitlements')
+      fetchJson('/internal/v1/user-center/oversea-entitlements'),
+      fetchJson('/internal/v1/user-center/system-subscriptions')
+        .catch((error) => ({ catalog: null, error: error.message }))
     ]);
     return {
       users: asArray(usersPayload.users),
       roles: asArray(rolesPayload.roles),
       overseaEntitlements: asArray(entitlementPayload.entitlements),
+      systemSubscriptions: systemSubscriptionsPayload.catalog || null,
+      systemSubscriptionsError: systemSubscriptionsPayload.error || null,
       error: null
     };
   } catch (error) {
-    return { users: [], roles: [], overseaEntitlements: [], error: error.message };
+    return {
+      users: [],
+      roles: [],
+      overseaEntitlements: [],
+      systemSubscriptions: null,
+      systemSubscriptionsError: null,
+      error: error.message
+    };
   }
 }
 
@@ -2703,7 +2721,11 @@ async function refreshUserCenterPanels() {
   state.userCenter.users = asArray(payload.users);
   state.userCenter.roles = asArray(payload.roles);
   state.userCenter.overseaEntitlements = asArray(payload.overseaEntitlements);
+  state.userCenter.systemSubscriptions = payload.systemSubscriptions || null;
   if (payload.error) state.userCenter.feedback = { kind: 'error', message: payload.error };
+  else if (payload.systemSubscriptionsError) {
+    state.userCenter.feedback = { kind: 'warning', message: `System subscriptions unavailable: ${payload.systemSubscriptionsError}` };
+  }
   renderFoundationGrid(state.dashboard?.overview || {});
   renderUserEditorDrawer();
 }
@@ -2949,10 +2971,22 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
   });
 }
 
+function openSystemSubscriptionsDrawer() {
+  state.userCenter.drawer = { mode: 'system-subscriptions' };
+  state.userCenter.openDropdown = null;
+  state.userCenter.feedback = null;
+  state.userCenter.systemSubscriptionFeedback = null;
+  state.userCenter.systemSubscriptionSecrets = {};
+  renderUserEditorDrawer();
+}
+
 function closeUserEditorDrawer() {
   // The plaintext link is only ever held in memory; drop it when the drawer closes.
   state.userCenter.overseaLink = null;
   state.userCenter.overseaLinkBusy = false;
+  state.userCenter.systemSubscriptionSecrets = {};
+  state.userCenter.systemSubscriptionFeedback = null;
+  state.userCenter.systemSubscriptionBusy = false;
   state.userCenter.drawer = null;
   state.userCenter.openDropdown = null;
   state.userCenter.busy = false;
@@ -4051,19 +4085,29 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
   const verb = String(method || 'GET').toUpperCase();
   const path = url.pathname;
   if (verb === 'GET') {
-    return /^\/internal\/v1\/user-center\/(?:roles|users|oversea-entitlements|service-accounts)$/.test(path)
+    return /^\/internal\/v1\/user-center\/(?:roles|users|oversea-entitlements|service-accounts|system-subscriptions)$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:oversea|oversea\/subscription-link|h2o\/runtime-profile)$/.test(path)
       || /^\/internal\/v1\/sdk\/(?:roles|users|service-accounts)$/.test(path)
       || /^\/internal\/v1\/release-management\/plans(?:\/[^/]+)?$/.test(path)
       || /^\/internal\/v1\/release-artifacts\/[^/]+$/.test(path)
       || path === '/internal/v1/insight-hub/overview'
+      || /^\/internal\/v1\/site-slots\/plans(?:\/[^/]+)?$/.test(path)
+      || /^\/internal\/v1\/site-slots\/[^/]+\/access-accounts$/.test(path)
+      || path === '/internal/v1/admin/oversea'
+      || /^\/internal\/v1\/admin\/site-slots\/pipelines\/[^/]+$/.test(path)
       || /^\/internal\/v1\/launcher-network\/leases(?:\/[^/]+)?$/.test(path);
   }
   if (verb === 'POST') {
-    return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue|oversea-entitlements\/migrate)$/.test(path)
+    return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue|oversea-entitlements\/migrate|system-subscriptions\/ensure)$/.test(path)
+      || /^\/internal\/v1\/user-center\/system-subscriptions\/sites\/[^/]+\/reveal$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:password|oversea|h2o\/runtime-profile|oversea\/sync-runtime|oversea\/subscription-link)$/.test(path)
       || /^\/internal\/v1\/sdk\/(?:users|service-accounts)$/.test(path)
       || /^\/internal\/v1\/sdk\/service-accounts\/[^/]+\/credentials\/rotate$/.test(path)
+      || path === '/internal/v1/site-slots/plans'
+      || /^\/internal\/v1\/site-slots\/[^/]+\/access-accounts$/.test(path)
+      || /^\/internal\/v1\/config-center\/site-slot-ssh-profiles(?:\/bootstrap|\/[^/]+\/readiness-probe)?$/.test(path)
+      || path === '/internal/v1/admin/actions/execute'
+      || /^\/internal\/v1\/admin\/oversea\/[^/]+\/(?:shadow-setup|archive|unarchive|ensure|terminal)$/.test(path)
       || /^\/internal\/v1\/app-center\/apps(?:\/[^/]+)?$/.test(path)
       || /^\/internal\/v1\/release-management\/plans(?:\/[^/]+\/gate)?$/.test(path)
       || path === '/internal/v1/release-artifacts'
@@ -6391,6 +6435,22 @@ function renderFoundationGrid(overview) {
       });
     });
   }
+  const systemSubscriptionsRow = foundationGrid.querySelector('[data-system-subscriptions-select]');
+  if (systemSubscriptionsRow) {
+    systemSubscriptionsRow.addEventListener('click', (event) => {
+      if (event.target.closest('button')) return;
+      openSystemSubscriptionsDrawer();
+    });
+    systemSubscriptionsRow.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      openSystemSubscriptionsDrawer();
+    });
+  }
+  const openSystemSubscriptions = foundationGrid.querySelector('[data-system-subscriptions-open]');
+  if (openSystemSubscriptions) {
+    openSystemSubscriptions.addEventListener('click', () => openSystemSubscriptionsDrawer());
+  }
   renderUserEditorDrawer();
   bindReleaseCenterControls(foundationGrid);
   renderReleaseCenterDrawer();
@@ -6768,9 +6828,62 @@ function renderUserStatusBadge(status) {
   return `<mark data-kind="${escapeHtml(normalized)}">${escapeHtml(normalized)}</mark>`;
 }
 
+function systemSubscriptionsVisible() {
+  const catalog = state.userCenter.systemSubscriptions;
+  if (!catalog?.account) return false;
+  const filter = userCenterFilters();
+  const query = String(filter.search || '').trim().toLowerCase();
+  const haystack = [
+    catalog.account.accountId,
+    catalog.account.displayName,
+    'system account subscription control plane unlimited 7890 basic direct ip',
+    ...asArray(catalog.subscriptions).flatMap((item) => [item.label, item.siteId, item.status])
+  ].filter(Boolean).join(' ').toLowerCase();
+  const matchesQuery = !query || haystack.includes(query);
+  const matchesRole = !filter.roleId || filter.roleId === 'all';
+  const matchesStatus = !filter.status || filter.status === 'all' || filter.status === 'active';
+  return matchesQuery && matchesRole && matchesStatus;
+}
+
+function renderSystemSubscriptionsRow() {
+  const catalog = state.userCenter.systemSubscriptions;
+  if (!catalog?.account || !systemSubscriptionsVisible()) return '';
+  const summary = catalog.summary || {};
+  const total = Number(summary.total || asArray(catalog.subscriptions).length);
+  const ready = Number(summary.ready || 0);
+  const pending = Number(summary.pending || 0);
+  const selected = state.userCenter.drawer?.mode === 'system-subscriptions';
+  return `
+    <article class="app-table-row system-subscription-row ${selected ? 'is-selected' : ''}" data-system-subscriptions-select tabindex="0">
+      <span>
+        <strong>subscriptions</strong>
+        <small>System subscriptions · no login</small>
+      </span>
+      <span>
+        <strong>System account</strong>
+        <small>Immutable / pinned</small>
+      </span>
+      <span>${renderChipList(['Subscription', 'Oversea'], 'info')}</span>
+      <span>
+        <strong>Control plane</strong>
+        <small>ops-token only / no password login</small>
+      </span>
+      <span>
+        <strong>${escapeHtml(`${ready}/${total} ready`)}</strong>
+        <small>${escapeHtml(pending ? `${pending} pending sync` : 'Direct IP · HTTP Basic')}</small>
+      </span>
+      <span>${renderUserStatusBadge('active')}</span>
+      <span class="app-table-actions">
+        <button class="secondary-button" type="button" data-system-subscriptions-open>Open</button>
+      </span>
+    </article>
+  `;
+}
+
 function renderUserCenterPanel() {
   const users = asArray(state.userCenter.users);
   const filteredUsers = filteredUserCenterUsers();
+  const systemRow = renderSystemSubscriptionsRow();
   const filter = userCenterFilters();
   const feedback = state.userCenter.feedback;
   const roleOptions = userRoleDropdownOptions(true);
@@ -6812,8 +6925,8 @@ function renderUserCenterPanel() {
         </div>
       </div>
       <div class="user-workbench-meta">
-        <span>${escapeHtml(String(filteredUsers.length))} shown</span>
-        <span>${escapeHtml(String(users.length))} total</span>
+        <span>${escapeHtml(String(filteredUsers.length + (systemRow ? 1 : 0)))} shown</span>
+        <span>${escapeHtml(`${users.length} users${state.userCenter.systemSubscriptions?.account ? ' + 1 system account' : ''}`)}</span>
         ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
         ${state.userCenter.importFeedback ? `<span class="profile-feedback" data-kind="${escapeHtml(state.userCenter.importFeedback.kind)}">${escapeHtml(state.userCenter.importFeedback.message)}</span>` : ''}
       </div>
@@ -6827,6 +6940,7 @@ function renderUserCenterPanel() {
           <span>Status</span>
           <b>Actions</b>
         </article>
+        ${systemRow}
         ${filteredUsers.map((user) => {
           const entitlement = entitlementForUser(user.userId);
           const syncDisabled = state.userCenter.overseaBusy
@@ -6861,7 +6975,7 @@ function renderUserCenterPanel() {
               <button class="secondary-button" type="button" data-user-sync="${escapeHtml(user.userId)}" ${syncDisabled ? 'disabled' : ''}>Sync</button>
             </span>
           </article>
-        `; }).join('') || '<div class="empty-state">No users match the current filters.</div>'}
+        `; }).join('') || (systemRow ? '' : '<div class="empty-state">No users match the current filters.</div>')}
       </div>
     </section>
   `;
@@ -8348,6 +8462,182 @@ function overseaPublicSubscriptionBase() {
   return 'https://h2i.minsight-ai.com';
 }
 
+async function ensureSystemSubscriptionAccounts() {
+  if (state.userCenter.systemSubscriptionBusy) return;
+  state.userCenter.systemSubscriptionBusy = true;
+  state.userCenter.systemSubscriptionFeedback = { kind: 'info', message: 'Ensuring Internal system subscription accounts...' };
+  renderUserEditorDrawer();
+  try {
+    const payload = await fetchJson('/internal/v1/user-center/system-subscriptions/ensure', {
+      method: 'POST',
+      body: {
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-system-subscriptions-ensure-${Date.now()}`
+      }
+    });
+    state.userCenter.systemSubscriptions = payload.catalog || state.userCenter.systemSubscriptions;
+    const ensured = asArray(payload.ensure?.accounts).length;
+    state.userCenter.systemSubscriptionFeedback = {
+      kind: payload.ensure?.status === 'blocked' ? 'error' : 'success',
+      message: ensured
+        ? `${ensured} system account(s) ensured. Run Oversea Install/Sync for channels still pending.`
+        : payload.ensure?.nextAction || 'No active Oversea site could be ensured.'
+    };
+    renderFoundationGrid(state.dashboard?.overview || {});
+  } catch (error) {
+    state.userCenter.systemSubscriptionFeedback = { kind: 'error', message: error.message };
+  } finally {
+    state.userCenter.systemSubscriptionBusy = false;
+    renderUserEditorDrawer();
+  }
+}
+
+async function revealSystemSubscription(siteId) {
+  if (!siteId || state.userCenter.systemSubscriptionBusy) return;
+  state.userCenter.systemSubscriptionBusy = true;
+  state.userCenter.systemSubscriptionFeedback = { kind: 'info', message: `Revealing ${siteId} for this session...` };
+  renderUserEditorDrawer();
+  try {
+    const payload = await fetchJson(`/internal/v1/user-center/system-subscriptions/sites/${encodeURIComponent(siteId)}/reveal`, {
+      method: 'POST',
+      body: {}
+    });
+    const subscription = payload.subscription || null;
+    state.userCenter.systemSubscriptionSecrets = {
+      ...state.userCenter.systemSubscriptionSecrets,
+      [siteId]: subscription
+    };
+    state.userCenter.systemSubscriptionFeedback = {
+      kind: 'success',
+      message: `${siteId} revealed in memory. Copy it before closing the drawer.`
+    };
+  } catch (error) {
+    state.userCenter.systemSubscriptionFeedback = { kind: 'error', message: error.message };
+  } finally {
+    state.userCenter.systemSubscriptionBusy = false;
+    renderUserEditorDrawer();
+  }
+}
+
+async function copySystemSubscriptionValue(value, label) {
+  if (!value) return;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+    await navigator.clipboard.writeText(value);
+    state.userCenter.systemSubscriptionFeedback = { kind: 'success', message: `${label} copied.` };
+  } catch (error) {
+    state.userCenter.systemSubscriptionFeedback = { kind: 'error', message: `Copy failed: ${error.message}` };
+  }
+  renderUserEditorDrawer();
+}
+
+function systemSubscriptionFeedbackKind(status) {
+  if (status === 'ready') return 'success';
+  if (status === 'pending-sync') return 'warning';
+  if (status === 'blocked') return 'error';
+  return 'info';
+}
+
+function renderSystemSubscriptionsDrawer() {
+  const catalog = state.userCenter.systemSubscriptions;
+  const items = asArray(catalog?.subscriptions);
+  const summary = catalog?.summary || {};
+  const feedback = state.userCenter.systemSubscriptionFeedback;
+  const busy = state.userCenter.systemSubscriptionBusy;
+  userEditorBackdrop.hidden = false;
+  userEditorDrawer.hidden = false;
+  userEditorDrawer.innerHTML = `
+    <div class="app-editor-form system-subscriptions-drawer" data-system-subscriptions-drawer>
+      <header class="app-drawer-header">
+        <div>
+          <span class="site-kind">User Center · System</span>
+          <h2 id="user-editor-title">Subscriptions</h2>
+          <p>置顶的只读系统订阅目录。不可登录、不可设密码，不参与 MX-H2I 用户 OAuth 或现有 7788 ensure-subscription。</p>
+        </div>
+        <button class="icon-button app-drawer-close" type="button" data-system-subscriptions-close aria-label="Close system subscriptions">×</button>
+      </header>
+      <div class="app-drawer-scroll">
+        <section class="app-drawer-section">
+          <div class="app-section-title"><span>01</span><strong>System account boundary</strong></div>
+          <div class="user-drawer-summary">
+            <article><span>Identity</span><strong>subscriptions</strong><small>immutable / login disabled</small></article>
+            <article><span>Traffic quota</span><strong>Unlimited</strong><small>no byte cap / reset / expiry</small></article>
+            <article><span>Channels</span><strong>${escapeHtml(`${summary.ready || 0}/${summary.total || items.length} ready`)}</strong><small>Internal pushes, Oversea serves</small></article>
+          </div>
+          <div class="system-subscription-warning">HTTP Basic over direct IP is intentionally available for application compatibility. Treat the URL as a secret; use the HTTPS user subscription where the application accepts it.</div>
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title"><span>02</span><strong>Direct-IP subscription channels</strong></div>
+          <div class="system-subscription-list">
+            ${items.map((item) => {
+              const delivery = item.delivery || {};
+              const client = item.client || {};
+              const secret = state.userCenter.systemSubscriptionSecrets?.[item.siteId] || null;
+              const revealedValue = secret?.url || delivery.urlMasked || 'Endpoint pending configuration';
+              const canReveal = item.status === 'ready' && delivery.auth?.passwordAvailable;
+              return `
+                <article class="system-subscription-card" data-state="${escapeHtml(item.status || 'blocked')}">
+                  <header>
+                    <span><strong>${escapeHtml(item.label || item.siteId)}</strong><small>${escapeHtml(item.siteId || '-')}</small></span>
+                    <span class="profile-feedback" data-kind="${escapeHtml(systemSubscriptionFeedbackKind(item.status))}">${escapeHtml(item.status || 'blocked')}</span>
+                  </header>
+                  <div class="system-subscription-facts">
+                    <span><small>Delivery</small><strong>Direct IP · HTTP Basic · :${escapeHtml(String(delivery.port || 3434))}</strong></span>
+                    <span><small>Client</small><strong>${escapeHtml(client.instance || 'subscriptions')} · mixed-port ${escapeHtml(String(client.mixedPort || 7890))}</strong></span>
+                    <span><small>Policy</small><strong>Unlimited traffic · 50 Mbps hints</strong></span>
+                  </div>
+                  <div class="foundation-subscription-url">
+                    <span>${secret ? 'Revealed URL · clear text' : 'Masked URL'}</span>
+                    <code>${escapeHtml(revealedValue)}</code>
+                  </div>
+                  <p>${escapeHtml(item.statusReason || '')}</p>
+                  <div class="foundation-operation-actions">
+                    <button class="secondary-button" type="button" data-system-subscription-reveal="${escapeHtml(item.siteId)}" ${busy || !canReveal ? 'disabled' : ''}>${secret ? 'Reveal Again' : 'Reveal'}</button>
+                    ${secret ? `
+                      <button class="secondary-button" type="button" data-system-subscription-copy-url="${escapeHtml(item.siteId)}">Copy URL</button>
+                      <button class="secondary-button" type="button" data-system-subscription-copy-cli="${escapeHtml(item.siteId)}">Copy CLI</button>
+                    ` : ''}
+                  </div>
+                </article>
+              `;
+            }).join('') || '<div class="empty-state">No Oversea sites are registered. Register a site before ensuring a system subscription.</div>'}
+          </div>
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title"><span>03</span><strong>Activation</strong></div>
+          <p class="system-subscription-note">Ensure creates only the Internal credential. A channel stays pending until the normal Oversea Install/Sync deploys the stack and returns passing worker evidence. This keeps live user networking untouched.</p>
+          ${feedback ? `<div class="feedback ${escapeHtml(feedback.kind || 'info')}">${escapeHtml(feedback.message || '')}</div>` : ''}
+        </section>
+      </div>
+      <footer class="app-drawer-actions">
+        <button class="secondary-button" type="button" data-system-subscriptions-ensure ${busy ? 'disabled' : ''}>${busy ? 'Working...' : 'Ensure System Accounts'}</button>
+        <span class="user-drawer-action-spacer"></span>
+        <button class="secondary-button" type="button" data-system-subscriptions-close>Close</button>
+      </footer>
+    </div>
+  `;
+  for (const close of userEditorDrawer.querySelectorAll('[data-system-subscriptions-close]')) {
+    close.addEventListener('click', () => closeUserEditorDrawer());
+  }
+  userEditorDrawer.querySelector('[data-system-subscriptions-ensure]')
+    ?.addEventListener('click', () => void ensureSystemSubscriptionAccounts());
+  for (const reveal of userEditorDrawer.querySelectorAll('[data-system-subscription-reveal]')) {
+    reveal.addEventListener('click', () => void revealSystemSubscription(reveal.dataset.systemSubscriptionReveal));
+  }
+  for (const copy of userEditorDrawer.querySelectorAll('[data-system-subscription-copy-url]')) {
+    copy.addEventListener('click', () => {
+      const secret = state.userCenter.systemSubscriptionSecrets?.[copy.dataset.systemSubscriptionCopyUrl];
+      void copySystemSubscriptionValue(secret?.url, 'Subscription URL');
+    });
+  }
+  for (const copy of userEditorDrawer.querySelectorAll('[data-system-subscription-copy-cli]')) {
+    copy.addEventListener('click', () => {
+      const secret = state.userCenter.systemSubscriptionSecrets?.[copy.dataset.systemSubscriptionCopyCli];
+      void copySystemSubscriptionValue(secret?.installCommand, 'Install command');
+    });
+  }
+}
+
 function renderUserEditorDrawer() {
   if (!userEditorBackdrop || !userEditorDrawer) return;
   const drawer = state.userCenter.drawer;
@@ -8355,6 +8645,10 @@ function renderUserEditorDrawer() {
     userEditorBackdrop.hidden = true;
     userEditorDrawer.hidden = true;
     userEditorDrawer.innerHTML = '';
+    return;
+  }
+  if (drawer.mode === 'system-subscriptions') {
+    renderSystemSubscriptionsDrawer();
     return;
   }
   const editing = drawer.mode === 'edit';

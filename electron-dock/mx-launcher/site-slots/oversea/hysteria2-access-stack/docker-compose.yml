@@ -16,7 +16,7 @@ services:
       - hy2_access
     restart: unless-stopped
 
-  # Health/evidence outlet only. Internal remains the subscription/account authority.
+  # Direct system-YAML delivery plus health/evidence. Internal remains the authority.
   subscriptions:
     image: caddy:2-alpine
     container_name: mx-oversea-hysteria2-health
@@ -27,6 +27,9 @@ services:
       HY2_EXPORT_SITE_ADDRESS: ${HY2_EXPORT_SITE_ADDRESS}
       HY2_EXPORT_USER: ${HY2_EXPORT_USER}
       HY2_EXPORT_PASSWORD_HASH: ${HY2_EXPORT_PASSWORD_HASH}
+      HY2_SYSTEM_SUBSCRIPTION_PATH: ${HY2_SYSTEM_SUBSCRIPTION_PATH:-/__system-subscription-disabled__}
+      HY2_SYSTEM_SUBSCRIPTION_BASIC_USER: ${HY2_SYSTEM_SUBSCRIPTION_BASIC_USER:-subscriptions}
+      HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH: ${HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./data/subscriptions:/srv/hy2:ro

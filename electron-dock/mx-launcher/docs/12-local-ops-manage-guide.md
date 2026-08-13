@@ -306,6 +306,15 @@ API base。Admin 触发的 remote-ssh worker 和 Internal API 在同一个运行
 默认 Docker bridge 子网是 `10.254.0.0/24`；如果目标机器已有 Docker 网络冲突，远端
 `manage.sh` 会在 compose 启动前自动改用一个不冲突的候选子网并写回 `.env`。
 
+Internal tunnel-state 中若存在与 `HY2_SYSTEM_SUBSCRIPTION_ACCOUNT` 一致、名称以
+`-subscriptions` 结尾的 active access account，Oversea `manage.sh` 会从该账户原子物化
+唯一的 `peer_<account>.mihomo.yaml`。该 YAML 使用 `mixed-port: 7890`、`PROXY` 组、
+private/CN direct 规则和 50 Mbps 客户端提示；“unmetered”表示不设置累计字节 quota，
+不表示绕过 Hysteria2 进程现有的 server-wide bandwidth。普通用户/Internal 订阅仍使用
+既有 `7788`，`refresh_subscriptions` 继续更新 `clients.csv` 且不会删除这一个受管文件。
+Caddy 只对 `.env` 中的精确 `HY2_SYSTEM_SUBSCRIPTION_PATH` 使用 system Basic Auth，不能
+改回 `/peer_*.yaml` 通配；默认发布 TCP `3434`，端口冲突时沿用 plan 选择的 `3435`。
+
 如果是一台空 Ubuntu，推荐先在 Admin 的 `SSH Profiles` 中输入 site、host、user、一次性
 password，然后点击 `Bootstrap Key`。Internal 会在默认 key root 生成并托管 SSH key、
 known_hosts 和 profile；password 只用于把公钥写入远端 `authorized_keys`，不会保存到
@@ -503,9 +512,15 @@ MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
 ```
 
 远程 worker 会在执行前注入 OpenSSH profile。推荐先把站点级 profile 写入 Internal Config
-Center，worker 会按 `job.siteId` 自动读取 active profile：
+Center。SSH profile 的创建/更新、密码 bootstrap 和 readiness probe 都要求
+`x-mx-ops-token`；CLI 从 `MX_INTERNAL_OPS_TOKEN` 发送该 header。计划生成后，Admin gate 与
+worker 执行点都会重新核对计划快照中的 `profileId/site/kind/host/user/port`，并强制
+`StrictHostKeyChecking=yes`、`BatchMode=yes`。配置发生漂移时任务会 fail closed，必须先
+用新 profile 重建计划，不能把旧计划中的 tunnel-state 推向新主机：
 
 ```bash
+export MX_INTERNAL_OPS_TOKEN='<Internal ops token>'
+
 SITE_SLOT_SSH_IDENTITY_FILE=/opt/mx/ssh/oversea-sg-1_ed25519 \
 SITE_SLOT_SSH_KNOWN_HOSTS_FILE=/opt/mx/ssh/known_hosts.oversea-sg-1 \
 SITE_SLOT_SSH_HOST_KEY_ALIAS=oversea-sg-1 \
@@ -524,6 +539,7 @@ MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
 curl -sS -X POST \
   http://127.0.0.1:18090/internal/v1/admin/oversea/oversea-main/shadow-setup \
   -H 'content-type: application/json' \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \
   -d '{
     "sshProfileId": "sshprof_oversea-main",
     "host": "oversea.example.com",

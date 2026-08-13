@@ -78,7 +78,9 @@ HanLP -> Jieba -> CJK bigram
 - 后续增加文件规则、分类覆盖率、projector backlog 和 ES projection 状态。
 
 数据中心不以 ES 命中数作为权威计数。ES 整库删除或重建期间，PG 中的数据集合仍必须
-可见。原始 payload、连接凭据和未筛选 `extensions` 不在目录列表直接展开。
+可见。列表默认保持紧凑；只有 Hub Admin Token 可在详情中展开真实 canonical 当前
+revision payload、`extensions` 和 lineage，且该管理证据面不脱敏。连接凭据和宿主绝对
+路径仍不返回。Public API 始终使用独立字段 allowlist，不能复用 Admin detail serializer。
 
 ### 4. 宿主路径只进入受控 ingest 边界
 

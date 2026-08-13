@@ -5,6 +5,7 @@ import test from 'node:test'
 import {
   ParseError,
   parseDelimited,
+  parseJson,
   parseJsonLines,
   parseText,
   parseFile,
@@ -110,6 +111,42 @@ test('JSON Lines reports the offending line number', () => {
   assert.throws(() => parseJsonLines('{"a":1}\nnot json\n'), /line 2/)
 })
 
+test('JSON accepts a top-level object and an array of objects with deterministic selectors', () => {
+  assert.deepEqual(parseJson('{"id":"one","title":"single"}'), {
+    columns: ['id', 'title'],
+    records: [{ id: 'one', title: 'single' }],
+    selector: 'top-level-object',
+  })
+  assert.deepEqual(parseJson('[{"id":"one"},{"title":"two","id":"two"}]'), {
+    columns: ['id', 'title'],
+    records: [{ id: 'one' }, { title: 'two', id: 'two' }],
+    selector: 'top-level-array',
+  })
+})
+
+test('JSON unwraps exactly one common object-array envelope', () => {
+  for (const key of ['items', 'records', 'data']) {
+    const parsed = parseJson(JSON.stringify({ ok: true, [key]: [{ id: 'one' }, { id: 'two' }] }))
+    assert.deepEqual(parsed.records, [{ id: 'one' }, { id: 'two' }])
+    assert.equal(parsed.selector, `envelope:${key}`)
+  }
+})
+
+test('JSON rejects primitives, mixed arrays and ambiguous envelopes', () => {
+  for (const input of ['null', '42', '"text"', 'true', '[{"id":1},2]', '[1,2]']) {
+    assert.throws(() => parseJson(input), ParseError)
+  }
+  assert.throws(
+    () => parseJson('{"items":[{"id":1}],"data":[{"id":2}]}'),
+    /multiple object-array envelopes/,
+  )
+})
+
+test('JSON enforces the shared external-file row limit', () => {
+  const oversized = `[${Array.from({ length: 500_001 }, () => '{}').join(',')}]`
+  assert.throws(() => parseJson(oversized), /more than 500000 rows/)
+})
+
 test('text records are keyed by content hash, not position', () => {
   const original = parseText('first para\n\nsecond para', { hash })
   const withInsert = parseText('inserted\n\nfirst para\n\nsecond para', { hash })
@@ -141,6 +178,7 @@ test('a generic contentHash column is not inferred as record identity', () => {
 
 test('unsupported file types are rejected with the supported list', () => {
   assert.throws(() => parseFile(Buffer.from(''), 'data.pdf'), /unsupported file type/)
+  assert.ok(SUPPORTED_EXTENSIONS.includes('.json'))
   assert.ok(SUPPORTED_EXTENSIONS.includes('.xlsx'))
   assert.ok(SUPPORTED_EXTENSIONS.includes('.md'))
 })
@@ -198,6 +236,18 @@ test('JSONL structure ignores object key discovery order but detects type and re
   assert.notEqual(first.schemaFingerprint, typeDrift.schemaFingerprint)
   assert.notEqual(first.schemaFingerprint, requiredDrift.schemaFingerprint)
   assert.equal(requiredDrift.fileStructure.columns.find((column) => column.name === 'title').required, false)
+})
+
+test('JSON file structure fingerprints include the selected document location', async () => {
+  const importer = new ExternalImporter({ store: {} })
+  const topLevel = await importer.preview(Buffer.from('[{"id":"one"}]'), 'records.json')
+  const enveloped = await importer.preview(Buffer.from('{"records":[{"id":"one"}]}'), 'records.json')
+
+  assert.equal(topLevel.fileStructure.parserFamily, 'json-document')
+  assert.equal(topLevel.fileStructure.format, 'json')
+  assert.equal(topLevel.fileStructure.selector, 'top-level-array')
+  assert.equal(enveloped.fileStructure.selector, 'envelope:records')
+  assert.notEqual(topLevel.schemaFingerprint, enveloped.schemaFingerprint)
 })
 
 test('file structure fingerprint includes format and selector without filename or row count', () => {

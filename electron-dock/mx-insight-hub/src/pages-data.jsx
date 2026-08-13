@@ -112,7 +112,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
           <li><strong>审核并批准映射</strong><span>保存规则推断或 Agent 建议为版本，确认 externalId、正文和时间字段后批准。</span></li>
           <li><strong>正式导入</strong><span>再次选择文件执行导入；结果会出现在任务记录和数据中心，完全相同的内容会幂等跳过。</span></li>
         </ol>
-        <p className="mih-inline-warning"><Warning size={16} aria-hidden="true" />支持首个工作表的 xlsx/xlsm，以及 csv、tsv、jsonl/ndjson、txt/md。HanLP 属于检索投影阶段，不需要在文件源表单里单独配置。</p>
+        <p className="mih-inline-warning"><Warning size={16} aria-hidden="true" />支持首个工作表的 xlsx/xlsm，以及 csv、tsv、json、jsonl/ndjson、txt/md。HanLP 属于检索投影阶段，不需要在文件源表单里单独配置。</p>
       </Panel>
 
       <TelegramPipelineCard
@@ -148,7 +148,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
                       ? `${source.connection?.schema || 'public'}.${source.connection?.table || '—'}`
                       : source.connection?.fileMode === 'server_path'
                         ? `${source.connection?.rootId || '受控根目录'}:${source.connection?.relativePath || '—'}`
-                        : 'xlsx/xlsm · csv/tsv · jsonl/ndjson · txt/md'}</small>
+                        : 'xlsx/xlsm · csv/tsv · json/jsonl/ndjson · txt/md'}</small>
                   </td>
                   <td><code className="mih-source-label">{source.datasetId}</code><small className="mih-source-label">{source.platform} · {source.objectType}</small></td>
                   <td>{source.sourceKind === 'database' ? `${formatNumber(source.syncIntervalSeconds || 60)} 秒` : '手动导入'}</td>
@@ -168,6 +168,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
       {creating ? (
         <CreateSourceModal
           token={token}
+          onUnauthorized={onUnauthorized}
           notify={notify}
           onClose={() => setCreating(false)}
           onCreated={() => { setCreating(false); state.refresh() }}
@@ -874,21 +875,139 @@ function compactCheckpoint(position) {
 
 function asList(value) {
   if (Array.isArray(value)) return value
-  for (const key of ['items', 'sources']) {
+  for (const key of ['items', 'sources', 'rules']) {
     if (Array.isArray(value?.[key])) return value[key]
   }
   return []
 }
 
-function CreateSourceModal({ token, notify, onClose, onCreated }) {
+function formatRuleOfPreview(preview) {
+  return preview?.selectedFormatRule
+    || preview?.matchedFormatRule
+    || preview?.detection?.formatRule
+    || preview?.builtinFormatRule
+    || null
+}
+
+function formatRuleFormats(rule) {
+  const formats = rule?.inputFormats || rule?.formats
+  const values = Array.isArray(formats)
+    ? formats
+    : [rule?.inputFormat || rule?.format || 'file']
+  return [...new Set(values.filter(Boolean).map((value) => String(value).toLowerCase()))]
+}
+
+function formatRuleFormatLabel(rule) {
+  return formatRuleFormats(rule).map((value) => value.toUpperCase()).join(' / ')
+}
+
+function formatRuleOptions(value) {
+  const rules = asList(value)
+    .filter((rule) => rule?.ruleKey)
+    .sort((left, right) => {
+      const leftGroup = `${left.platform || 'other'}\u0000${formatRuleFormats(left).join('/')}`
+      const rightGroup = `${right.platform || 'other'}\u0000${formatRuleFormats(right).join('/')}`
+      return leftGroup.localeCompare(rightGroup) || String(left.displayName || left.ruleKey).localeCompare(String(right.displayName || right.ruleKey))
+    })
+  const options = [{ value: '', label: '自动识别（推荐）' }]
+  let previousGroup = null
+  for (const rule of rules) {
+    const platform = rule.platform || 'other'
+    const inputFormat = formatRuleFormats(rule).join('/')
+    const group = `${platform}\u0000${inputFormat}`
+    if (group !== previousGroup) {
+      options.push({
+        value: `__group:${platform}:${inputFormat}`,
+        label: `${platform.toUpperCase()} · ${formatRuleFormatLabel(rule)}`,
+        disabled: true,
+        group: true,
+      })
+      previousGroup = group
+    }
+    options.push({
+      value: rule.ruleKey,
+      label: `${rule.displayName || rule.ruleKey}${rule.version ? ` · v${rule.version}` : ''}`,
+    })
+  }
+  return options
+}
+
+function preferredRuleOfSource(source) {
+  return source?.preferredRuleKey || source?.connection?.preferredRuleKey || ''
+}
+
+function previewDetection(preview) {
+  if (!preview) return null
+  const detection = preview.detection || preview.recognition || {}
+  const rule = formatRuleOfPreview(preview)
+  const platform = detection.platform || preview.detectedPlatform || rule?.platform || null
+  const ruleKey = detection.ruleKey || rule?.ruleKey || null
+  const inputFormat = detection.inputFormat || detection.format || rule?.inputFormat || preview.fileStructure?.format || null
+  const confidence = detection.confidence ?? preview.detectionConfidence ?? null
+  const basis = Array.isArray(detection.basis) ? detection.basis.filter(Boolean) : []
+  const method = detection.method || detection.origin || preview.detectionMethod || basis.join(' + ') || null
+  if (!platform && !ruleKey && !inputFormat && confidence == null && !method) return null
+  return {
+    platform,
+    ruleKey,
+    displayName: detection.displayName || rule?.displayName || null,
+    inputFormat,
+    confidence,
+    method,
+    reason: detection.reason || detection.explanation || null,
+  }
+}
+
+function previewSamples(preview) {
+  if (!preview) return []
+  const sampling = preview.sampling?.items || preview.samples || preview.sampleRows
+  if (Array.isArray(sampling)) return sampling.map((item, index) => ({
+    ...item,
+    position: item.position || item.segment || (typeof item.source === 'string' ? item.source : null) || (index === 0 ? 'head' : null),
+  }))
+  if (sampling && typeof sampling === 'object') {
+    return ['head', 'middle', 'tail'].flatMap((position) => {
+      const values = Array.isArray(sampling[position]) ? sampling[position] : sampling[position] ? [sampling[position]] : []
+      return values.map((item) => ({ ...item, position }))
+    })
+  }
+  if (Array.isArray(preview.sampling?.sampledPositions)) {
+    return preview.sampling.sampledPositions.map(({ position, index }) => ({
+      position,
+      rowIndex: Number.isInteger(index) ? index + 1 : null,
+      sampled: true,
+    }))
+  }
+  return Array.isArray(preview.sample) ? preview.sample.map((item, index) => ({
+    ...item,
+    position: index === 0 ? 'head' : 'sample',
+    rowIndex: index + 1,
+  })) : []
+}
+
+function samplePositionLabel(value) {
+  return { head: '首部', middle: '中部', tail: '尾部' }[value] || '样例'
+}
+
+function confidenceLabel(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '未提供'
+  return `${Math.round((number <= 1 ? number * 100 : number) * 10) / 10}%`
+}
+
+function CreateSourceModal({ token, onUnauthorized, notify, onClose, onCreated }) {
   const [form, setForm] = useState({
     sourceKey: '', displayName: '', sourceKind: 'file', datasetId: '', platform: 'external', objectType: 'record',
-    fileMode: 'upload', serverPath: '',
+    fileMode: 'upload', serverPath: '', preferredRuleKey: '',
     host: '', port: '5432', database: '', username: '', password: '', sslMode: 'require',
     schema: 'public', table: '', cursorColumn: '', idColumn: '', syncIntervalSeconds: '300',
   })
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  const loadFormatRules = useCallback(() => adminApi.fileFormatRules(token), [token])
+  const formatRules = useRemoteData(loadFormatRules, onUnauthorized)
+  const ruleOptions = useMemo(() => formatRuleOptions(formatRules.data), [formatRules.data])
+  const selectedRule = asList(formatRules.data).find((rule) => rule.ruleKey === form.preferredRuleKey)
 
   const submit = async (event) => {
     event.preventDefault()
@@ -907,6 +1026,7 @@ function CreateSourceModal({ token, notify, onClose, onCreated }) {
       }
       if (form.sourceKind === 'file') {
         body.fileMode = form.fileMode
+        if (form.preferredRuleKey) body.preferredRuleKey = form.preferredRuleKey
         if (form.fileMode === 'server_path') body.serverPath = serverPath
       }
       if (form.sourceKind === 'database') {
@@ -1033,6 +1153,29 @@ function CreateSourceModal({ token, notify, onClose, onCreated }) {
                 { value: 'upload', label: '浏览器上传' },
                 { value: 'server_path', label: '服务器路径' },
               ]} />
+            <DropdownField label="格式规则" value={form.preferredRuleKey}
+              className="mih-form__wide"
+              disabled={formatRules.loading}
+              onChange={(value) => {
+                const rule = asList(formatRules.data).find((candidate) => candidate.ruleKey === value)
+                setForm({
+                  ...form,
+                  preferredRuleKey: value,
+                  ...(rule?.platform ? { platform: rule.platform } : {}),
+                  ...(rule?.objectType ? { objectType: rule.objectType } : {}),
+                  ...(rule?.datasetId ? { datasetId: rule.datasetId } : {}),
+                })
+              }}
+              options={ruleOptions} />
+            <p className="mih-file-rule-hint mih-form__wide">
+              {formatRules.loading
+                ? '正在读取可用格式规则…'
+                : formatRules.error
+                  ? '格式规则目录暂不可用；仍可使用自动识别注册，稍后在详情中重试。'
+                  : selectedRule
+                    ? `显式使用 ${selectedRule.displayName || selectedRule.ruleKey}；平台 ${selectedRule.platform || form.platform} · 格式 ${formatRuleFormatLabel(selectedRule)}`
+                    : '自动识别会根据文件结构、平台证据与已批准规则选择建议；正式导入前仍需人工批准映射。'}
+            </p>
             {form.fileMode === 'server_path' ? (
               <Field label="服务器文件路径" hint="直接粘贴完整路径；不支持目录、通配符或路径下拉">
                 <input className="qp-input mih-server-path-input" value={form.serverPath} required
@@ -1077,9 +1220,15 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
     [isServerPathSource, token],
   )
   const serverFileRoots = useRemoteData(loadServerFileRoots, onUnauthorized)
+  const loadFormatRules = useCallback(
+    () => source.sourceKind === 'file' ? adminApi.fileFormatRules(token) : Promise.resolve([]),
+    [source.sourceKind, token],
+  )
+  const formatRules = useRemoteData(loadFormatRules, onUnauthorized)
   const [preview, setPreview] = useState(null)
   const [serverPath, setServerPath] = useState('')
-  const [useAgentPreview, setUseAgentPreview] = useState(false)
+  const [preferredRuleKey, setPreferredRuleKey] = useState(() => preferredRuleOfSource(source))
+  const [useAgentPreview, setUseAgentPreview] = useState(true)
   const [editingSettings, setEditingSettings] = useState(false)
   const [mappingDraft, setMappingDraft] = useState('{}')
   const [checkpointResetError, setCheckpointResetError] = useState(null)
@@ -1104,6 +1253,11 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
     () => (mappings.data || []).find((mapping) => mapping.approved),
     [mappings.data],
   )
+  const ruleOptions = useMemo(() => formatRuleOptions(formatRules.data), [formatRules.data])
+  const selectedRule = asList(formatRules.data).find((rule) => rule.ruleKey === preferredRuleKey)
+  const selectedPreviewRule = formatRuleOfPreview(preview)
+  const detection = previewDetection(preview)
+  const samples = previewSamples(preview)
   const serverImportReady = Boolean(
     activeMapping
     && preview?.inputSha256
@@ -1114,7 +1268,10 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
   const runPreview = async (file) => {
     setBusy(true)
     try {
-      setPreview(await adminApi.previewImport(token, source.sourceKey, file, { useAgent: useAgentPreview }))
+      setPreview(await adminApi.previewImport(token, source.sourceKey, file, {
+        useAgent: useAgentPreview,
+        preferredRuleKey: preferredRuleKey || null,
+      }))
     } catch (error) {
       notify?.(error.message, 'error')
     } finally {
@@ -1129,6 +1286,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
       setPreview(await adminApi.serverPreview(token, source.sourceKey, {
         ...(path ? { serverPath: path } : {}),
         agent: useAgentPreview,
+        preferredRuleKey: preferredRuleKey || null,
       }))
     } catch (error) {
       notify?.(error.message, 'error')
@@ -1137,25 +1295,41 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
     }
   }
 
-  const saveSuggestion = async () => {
+  const saveSuggestion = async ({ approveImmediately = false } = {}) => {
     const fieldMap = preview?.suggestion?.fieldMap || preview?.inferredFieldMap
+    if (!fieldMap) {
+      notify?.('当前预览没有可保存的字段映射', 'warning')
+      return
+    }
     setBusy(true)
     try {
       const created = await adminApi.createMapping(token, source.sourceKey, {
         fieldMap,
         origin: preview?.suggestion?.origin || 'inferred',
         agentModel: preview?.suggestion?.model,
+        ...(preview?.suggestion?.confidence != null
+          ? { agentConfidence: preview.suggestion.confidence }
+          : {}),
+        ...((selectedPreviewRule?.ruleKey || detection?.ruleKey || preferredRuleKey)
+          ? { selectedRuleKey: selectedPreviewRule?.ruleKey || detection?.ruleKey || preferredRuleKey }
+          : {}),
         ...(preview?.schemaFingerprint ? { schemaFingerprint: preview.schemaFingerprint } : {}),
         ...(preview?.fileStructure ? { fileStructure: preview.fileStructure } : {}),
-        ...(preview?.matchedFormatRule?.versionId
-          ? { formatRuleVersionId: preview.matchedFormatRule.versionId }
+        ...(selectedPreviewRule?.versionId
+          ? { formatRuleVersionId: selectedPreviewRule.versionId }
           : {}),
       })
+      const saved = approveImmediately
+        ? await adminApi.approveMapping(token, source.sourceKey, created.version)
+        : created
       mappings.setData([
-        created,
-        ...(mappings.data || []).filter((mapping) => mapping.id !== created.id),
+        saved,
+        ...(mappings.data || []).filter((mapping) => mapping.id !== saved.id),
       ])
-      notify?.(`映射 v${created.version} 已创建，待批准`, 'success')
+      notify?.(
+        approveImmediately ? `映射 v${saved.version} 已保存并批准，可以导入` : `映射 v${saved.version} 已创建，待批准`,
+        'success',
+      )
       mappings.refresh()
     } catch (error) {
       notify?.(error.message, 'error')
@@ -1455,7 +1629,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
             </>
           ) : (
             <>
-              <input ref={fileRef} type="file" hidden accept=".xlsx,.xlsm,.csv,.tsv,.jsonl,.ndjson,.txt,.md"
+              <input ref={fileRef} type="file" hidden accept=".xlsx,.xlsm,.csv,.tsv,.json,.jsonl,.ndjson,.txt,.md"
                 onChange={(event) => {
                   const file = event.target.files?.[0]
                   if (file) (intentRef.current === 'import' ? runImport : runPreview)(file)
@@ -1470,6 +1644,26 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
           )
         }
       >
+        <div className="mih-file-rule-control">
+          <DropdownField label="格式规则" value={preferredRuleKey}
+            disabled={busy || formatRules.loading}
+            onChange={(value) => { setPreferredRuleKey(value); setPreview(null) }}
+            options={ruleOptions} />
+          <div>
+            <strong>{selectedRule ? selectedRule.displayName || selectedRule.ruleKey : '自动识别'}</strong>
+            <small>{formatRules.loading
+              ? '正在读取规则目录…'
+              : formatRules.error
+                ? '规则目录暂不可用；可继续自动预览或重试。'
+                : selectedRule
+                  ? `${selectedRule.platform || '未限定平台'} · ${formatRuleFormatLabel(selectedRule)} · ${selectedRule.ruleKey}`
+                  : '根据结构指纹与平台证据识别；预览后再人工确认。'}</small>
+          </div>
+          {formatRules.error ? (
+            <button className="qp-button qp-button--ghost" type="button" disabled={formatRules.loading}
+              onClick={formatRules.refresh}>重试规则目录</button>
+          ) : null}
+        </div>
         {isServerPathSource ? (
           <div className="mih-server-file-control">
             <Field label="服务器文件路径" hint="留空读取已注册文件；也可粘贴白名单内另一精确路径。不支持目录和通配符">
@@ -1491,7 +1685,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
           <input type="checkbox" checked={useAgentPreview} disabled={!agentAvailable || busy}
             onChange={(event) => setUseAgentPreview(event.target.checked)} />
           <span>
-            <strong>使用 Agent 增强映射建议（显式授权）</strong>
+            <strong>自动使用 Agent 分析首部 / 中部 / 尾部结构</strong>
             {agentStatus.loading ? (
               <small>正在读取 Agent 模型链路；当前预览保持本地规则推断。</small>
             ) : agentStatus.error ? (
@@ -1503,7 +1697,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
             )}
           </span>
         </label>
-        <p className="mih-preview-provenance">xlsx/xlsm 只读第一个工作表的缓存值，csv/tsv 使用 UTF-8；预览时请先确认 externalId 是稳定去重键。</p>
+        <p className="mih-preview-provenance">xlsx/xlsm 只读第一个工作表的缓存值，csv/tsv/json 使用 UTF-8；JSON 中的 64 位 ID 必须写成字符串。预览时请先确认 externalId 是稳定去重键。</p>
         {preview ? (
           <>
             <div className="mih-metric-grid mih-metric-grid--compact">
@@ -1512,22 +1706,65 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
               <MetricCard icon={Warning} label="未映射列" value={formatNumber(preview.unmappedColumns?.length || 0)}
                 hint="这些列会进入 extensions" tone={preview.unmappedColumns?.length > 0 ? 'warning' : 'primary'} />
             </div>
+            {detection ? (
+              <section className="mih-file-detection" aria-label="文件识别结果">
+                <header>
+                  <div><strong>平台与格式识别</strong><span>{preferredRuleKey ? '显式规则优先' : '自动识别结果'}</span></div>
+                  <StatusBadge status={detection.ruleKey ? 'active' : 'warning'}
+                    label={detection.ruleKey ? '已识别规则' : '待确认规则'} />
+                </header>
+                <dl>
+                  <div><dt>平台</dt><dd>{detection.platform || '未识别'}</dd></div>
+                  <div><dt>格式</dt><dd>{detection.inputFormat ? String(detection.inputFormat).toUpperCase() : '未识别'}</dd></div>
+                  <div><dt>规则</dt><dd>{detection.displayName || detection.ruleKey || '未匹配'}</dd></div>
+                  <div><dt>置信度</dt><dd>{confidenceLabel(detection.confidence)}</dd></div>
+                  <div><dt>方法</dt><dd>{detection.method || (preferredRuleKey ? 'explicit' : 'structure')}</dd></div>
+                </dl>
+                {detection.reason ? <p>{detection.reason}</p> : null}
+              </section>
+            ) : null}
+            {samples.length > 0 ? (
+              <section className="mih-file-samples" aria-label="首中尾抽样">
+                <header><strong>首 / 中 / 尾抽样</strong><span>抽样仅用于确认结构与映射，不会写入 canonical 数据。</span></header>
+                <div>
+                  {samples.map((sample, index) => {
+                    const raw = sample.raw ?? sample.record ?? sample.value ?? sample
+                    const mapped = sample.mapped ?? sample.output ?? null
+                    const hasPayload = Object.prototype.hasOwnProperty.call(sample, 'raw')
+                      || Object.prototype.hasOwnProperty.call(sample, 'record')
+                      || Object.prototype.hasOwnProperty.call(sample, 'value')
+                      || Boolean(mapped)
+                      || Boolean(sample.rejected)
+                    return (
+                      <article key={`${sample.position || 'sample'}:${sample.rowIndex ?? sample.index ?? index}`}>
+                        <span>{samplePositionLabel(sample.position)}{sample.rowIndex != null ? ` · 第 ${formatNumber(sample.rowIndex)} 行` : ''}</span>
+                        {hasPayload ? <><strong>源记录</strong><pre className="mih-code-block">{JSON.stringify(raw, null, 2)}</pre></> : (
+                          <small>该位置已参与确定性结构识别；当前响应只返回抽样位置与 value-free 证据。</small>
+                        )}
+                        {mapped ? <><strong>映射后</strong><pre className="mih-code-block">{JSON.stringify(mapped, null, 2)}</pre></> : null}
+                        {sample.rejected ? <small className="mih-sample-rejected">拒绝：{sample.rejected}</small> : null}
+                      </article>
+                    )
+                  })}
+                </div>
+              </section>
+            ) : null}
             {preview.schemaFingerprint ? (
-              <div className={`mih-format-rule-match${preview.matchedFormatRule ? ' is-matched' : ''}`}>
+              <div className={`mih-format-rule-match${selectedPreviewRule ? ' is-matched' : ''}`}>
                 <header>
                   <div>
-                    <strong>{preview.matchedFormatRule ? '已匹配格式规则' : '发现新的文件结构'}</strong>
-                    <span>{preview.matchedFormatRule
+                    <strong>{selectedPreviewRule ? '已匹配格式规则' : '发现新的文件结构'}</strong>
+                    <span>{selectedPreviewRule
                       ? '相同结构的文件可以复用这条已批准规则'
                       : '尚无精确结构匹配；保存并批准后可供同结构文件复用'}</span>
                   </div>
-                  <StatusBadge status={preview.matchedFormatRule ? 'active' : 'warning'}
-                    label={preview.matchedFormatRule ? '精确匹配' : '待确认'} />
+                  <StatusBadge status={selectedPreviewRule ? 'active' : 'warning'}
+                    label={selectedPreviewRule ? '精确匹配' : '待确认'} />
                 </header>
                 <dl>
                   <div><dt>结构指纹</dt><dd><code>{preview.schemaFingerprint}</code></dd></div>
-                  <div><dt>格式规则</dt><dd>{preview.matchedFormatRule
-                    ? <><strong>{preview.matchedFormatRule.displayName}</strong><small><code>{preview.matchedFormatRule.ruleKey}</code> · v{preview.matchedFormatRule.version}</small></>
+                  <div><dt>格式规则</dt><dd>{selectedPreviewRule
+                    ? <><strong>{selectedPreviewRule.displayName || selectedPreviewRule.ruleKey}</strong><small><code>{selectedPreviewRule.ruleKey}</code>{selectedPreviewRule.version ? ` · v${selectedPreviewRule.version}` : ''}</small></>
                     : '—'}</dd></div>
                 </dl>
                 {preview.fileStructure ? (
@@ -1547,13 +1784,18 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
               建议来源：{preview.suggestion?.origin === 'agent'
                 ? `Agent · ${preview.suggestion.model || '已配置模型'}`
                 : preview.suggestion?.origin === 'format_rule'
-                  ? `格式规则 · ${preview.matchedFormatRule?.displayName || '精确结构匹配'}`
+                  ? `格式规则 · ${selectedPreviewRule?.displayName || '精确结构匹配'}`
                   : 'Hub 本地规则推断'}
             </p>
             <pre className="mih-code-block">{JSON.stringify(preview.suggestion?.fieldMap || preview.inferredFieldMap, null, 2)}</pre>
             <div className="mih-page-actions">
-              <button className="qp-button qp-button--ghost" type="button" disabled={busy} onClick={saveSuggestion}>
+              <button className="qp-button qp-button--ghost" type="button" disabled={busy}
+                onClick={() => saveSuggestion()}>
                 保存为新映射版本
+              </button>
+              <button className="qp-button qp-button--outline" type="button" disabled={busy}
+                onClick={() => saveSuggestion({ approveImmediately: true })}>
+                保存并批准映射
               </button>
               {isServerPathSource ? (
                 <button className="qp-button" type="button" disabled={busy || !serverImportReady}

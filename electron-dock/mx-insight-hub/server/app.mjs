@@ -7,6 +7,10 @@ import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson }
 import { PUBLIC_DOCS_HTML, PUBLIC_OPENAPI_DOCUMENT } from './public-docs.mjs'
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import {
+  BUILTIN_FILE_FORMAT_RULES,
+  builtinFileFormatRule,
+} from './ingest/external/builtin-format-rules.mjs'
+import {
   fingerprintFileStructure,
   normalizeStructureColumnName,
 } from './ingest/external/importer.mjs'
@@ -106,6 +110,42 @@ function requiredSourceKey(body) {
     )
   }
   return sourceKey
+}
+
+function dataCenterCursorBinding({ query, datasetId, platform, objectType, pageSize }) {
+  return createHash('sha256')
+    .update(JSON.stringify({ query, datasetId, platform, objectType, pageSize }))
+    .digest('base64url')
+}
+
+function encodeDataCenterCursor(kind, cursor, binding) {
+  if (!cursor) return null
+  return Buffer.from(JSON.stringify({ v: 1, kind, binding, cursor }), 'utf8').toString('base64url')
+}
+
+function decodeDataCenterCursor(value, kind, binding) {
+  if (!value) return null
+  if (typeof value !== 'string' || value.length > 16_384) {
+    throw new AppError(400, 'invalid_cursor', 'cursor is invalid')
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (parsed?.v !== 1 || parsed.kind !== kind || parsed.binding !== binding || !parsed.cursor) {
+      throw new Error('cursor binding mismatch')
+    }
+    if (kind === 'browse') {
+      if (typeof parsed.cursor.sortTime !== 'string'
+        || Number.isNaN(new Date(parsed.cursor.sortTime).getTime())
+        || typeof parsed.cursor.id !== 'string') {
+        throw new Error('invalid browse cursor')
+      }
+    } else if (!['elasticsearch', 'postgres'].includes(parsed.cursor.mode)) {
+      throw new Error('invalid search cursor')
+    }
+    return parsed.cursor
+  } catch {
+    throw new AppError(400, 'invalid_cursor', 'cursor is invalid or belongs to different filters')
+  }
 }
 
 function assertGenericSourceMutable(sourceKey) {
@@ -319,6 +359,45 @@ export function createApp({
     return source
   }
 
+  async function fileFormatRuleCatalog() {
+    const persisted = typeof store.listFileFormatRules === 'function'
+      ? await store.listFileFormatRules()
+      : []
+    const byKey = new Map(BUILTIN_FILE_FORMAT_RULES.map((rule) => [rule.ruleKey, {
+      ...rule,
+      versions: [],
+    }]))
+    for (const rule of persisted || []) {
+      if (!rule?.ruleKey) continue
+      const builtin = byKey.get(rule.ruleKey)
+      byKey.set(rule.ruleKey, {
+        ...(builtin || {}),
+        ...rule,
+        builtIn: Boolean(builtin?.builtIn || rule.builtIn),
+        inputFormats: [...new Set([
+          ...(builtin?.inputFormats || []),
+          ...(rule.inputFormats || []),
+          ...(rule.inputFormat ? [rule.inputFormat] : []),
+        ])].sort(),
+        versions: rule.versions || builtin?.versions || [],
+      })
+    }
+    return [...byKey.values()].sort((left, right) => (
+      String(left.platform).localeCompare(String(right.platform))
+      || String(left.displayName || left.ruleKey).localeCompare(String(right.displayName || right.ruleKey))
+    ))
+  }
+
+  async function resolveFileFormatRule(ruleKey) {
+    if (ruleKey == null || ruleKey === '') return null
+    if (typeof ruleKey !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(ruleKey)) {
+      throw new AppError(400, 'invalid_file_format_rule', 'preferredRuleKey must name a valid file format rule')
+    }
+    const rule = (await fileFormatRuleCatalog()).find((candidate) => candidate.ruleKey === ruleKey)
+    if (!rule) throw new AppError(400, 'unknown_file_format_rule', `Unknown file format rule: ${ruleKey}`)
+    return rule
+  }
+
   function requireSourceAdmin(principal) {
     if (principal?.kind !== 'admin-token') {
       throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may manage external data sources')
@@ -393,9 +472,33 @@ export function createApp({
     return adapted
   }
 
-  async function previewWithSuggestion({ source, buffer, filename, agentRequested }) {
+  async function previewWithSuggestion({
+    source,
+    buffer,
+    filename,
+    agentRequested,
+    preferredRuleKey = null,
+  }) {
     const preview = await importer.preview(buffer, filename)
-    let matchedFormatRule = source && typeof store.findApprovedFileFormatRule === 'function'
+    const requestedRule = preferredRuleKey || source?.connection?.preferredRuleKey || null
+    const requestedDefinition = requestedRule ? await resolveFileFormatRule(requestedRule) : null
+    const requestedBuiltin = requestedRule ? builtinFileFormatRule(requestedRule) : null
+    if (requestedRule && requestedBuiltin && preview.builtinFormatRule?.ruleKey !== requestedRule) {
+      throw new AppError(409, 'file_format_rule_mismatch', 'The selected built-in rule does not match this file structure and sampled platform evidence')
+    }
+    if (requestedDefinition) {
+      const scopeMatches = !source || (
+        source.datasetId === requestedDefinition.datasetId
+        && source.platform === requestedDefinition.platform
+        && source.objectType === requestedDefinition.objectType
+      )
+      const inputFormatMatches = !requestedDefinition.inputFormats?.length
+        || requestedDefinition.inputFormats.includes(preview.fileStructure?.format)
+      if (!scopeMatches || !inputFormatMatches) {
+        throw new AppError(409, 'file_format_rule_mismatch', 'The selected rule does not match this source scope or input format')
+      }
+    }
+    let matchedFormatRule = !requestedRule && source && typeof store.findApprovedFileFormatRule === 'function'
       ? await store.findApprovedFileFormatRule({
           schemaFingerprint: preview.schemaFingerprint,
           datasetId: source.datasetId,
@@ -409,15 +512,72 @@ export function createApp({
         ? { ...matchedFormatRule, fieldMap: adaptedFieldMap }
         : null
     }
-    const suggestion = matchedFormatRule
+    let selectedFormatRule = matchedFormatRule
+    if (requestedRule && typeof store.findApprovedFileFormatRuleByKey === 'function') {
+      const selected = await store.findApprovedFileFormatRuleByKey({
+        ruleKey: requestedRule,
+        schemaFingerprint: preview.schemaFingerprint,
+        datasetId: source?.datasetId ?? requestedDefinition?.datasetId ?? null,
+        platform: source?.platform ?? requestedDefinition?.platform ?? null,
+        objectType: source?.objectType ?? requestedDefinition?.objectType ?? null,
+      })
+      if (selected) {
+        const adaptedFieldMap = adaptFormatRuleFieldMap(selected.fieldMap, preview.columns)
+        if (!adaptedFieldMap) {
+          throw new AppError(409, 'file_format_rule_mismatch', 'The selected rule cannot be adapted to this file columns')
+        }
+        selectedFormatRule = { ...selected, fieldMap: adaptedFieldMap }
+      } else {
+        // A logical rule may receive a new immutable version when its schema
+        // changes. The new mapping still requires explicit human approval.
+        selectedFormatRule = {
+          ...requestedDefinition,
+          // Only code-owned built-ins have a mapping that is valid before an
+          // exact immutable version exists. A generic logical rule needs Agent
+          // or deterministic inference for its new schema.
+          fieldMap: requestedBuiltin?.fieldMap ?? null,
+        }
+      }
+    }
+    if (!selectedFormatRule && preview.builtinFormatRule) {
+      const definition = builtinFileFormatRule(preview.builtinFormatRule.ruleKey)
+      const sourceScopeMatches = !source || (
+        source.datasetId === definition.datasetId
+        && source.platform === definition.platform
+        && source.objectType === definition.objectType
+      )
+      if (sourceScopeMatches) {
+        selectedFormatRule = {
+          ...definition,
+          inputFormat: preview.builtinFormatRule.inputFormat,
+          fieldMap: preview.builtinFormatRule.fieldMap,
+        }
+      }
+    }
+    const valueFreeSampling = preview.sampling
+      ? { ...preview.sampling, items: undefined }
+      : null
+    const agentSuggestion = !selectedFormatRule?.fieldMap && agentRequested
+      ? typeof agent?.suggestFileProfile === 'function'
+        ? await agent.suggestFileProfile({ columns: preview.columns, sampling: valueFreeSampling })
+        : typeof agent?.suggestFieldMap === 'function'
+          ? await agent.suggestFieldMap({ columns: preview.columns, sampleRows: [] })
+          : {
+              fieldMap: preview.inferredFieldMap,
+              origin: 'inferred',
+              model: null,
+              confidence: null,
+            }
+      : null
+    const suggestion = selectedFormatRule?.fieldMap
       ? {
-          fieldMap: matchedFormatRule.fieldMap,
+          fieldMap: selectedFormatRule.fieldMap,
           origin: 'format_rule',
           model: null,
           confidence: null,
         }
       : agentRequested
-        ? await agent?.suggestFieldMap({ columns: preview.columns, sampleRows: [] })
+        ? agentSuggestion
         : {
             fieldMap: preview.inferredFieldMap,
             origin: 'inferred',
@@ -427,9 +587,25 @@ export function createApp({
     return {
       ...preview,
       matchedFormatRule,
+      selectedFormatRule,
       suggestion: suggestion ?? null,
+      detection: {
+        ...preview.detection,
+        platform: selectedFormatRule?.platform || agentSuggestion?.platform || preview.detection?.platform || null,
+        objectType: selectedFormatRule?.objectType || agentSuggestion?.objectType || preview.detection?.objectType || null,
+        ruleKey: selectedFormatRule?.ruleKey || preview.detection?.ruleKey || null,
+        displayName: selectedFormatRule?.displayName || preview.builtinFormatRule?.displayName || null,
+        confidence: selectedFormatRule?.fieldMap || preview.builtinFormatRule ? 1 : null,
+        method: requestedRule
+          ? 'explicit-rule'
+          : selectedFormatRule
+            ? 'structure-rule'
+            : agentSuggestion?.origin === 'agent'
+              ? 'agent-structure-summary'
+              : 'deterministic-structure',
+      },
       agentRequested,
-      agentDataScope: agentRequested && !matchedFormatRule ? 'column_names_only' : 'none',
+      agentDataScope: agentRequested && !selectedFormatRule?.fieldMap ? 'column_names_and_value_shapes' : 'none',
     }
   }
 
@@ -663,6 +839,78 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/data-center/records') {
+        requireSourceAdmin(principal)
+        const rawPageSize = searchParams.get('pageSize')
+        const pageSize = rawPageSize == null || rawPageSize === '' ? 50 : Number(rawPageSize)
+        if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+          throw new AppError(400, 'invalid_page_size', 'pageSize must be an integer between 1 and 100')
+        }
+        const optionalFilter = (name) => searchParams.get(name)?.trim() || null
+        const query = optionalFilter('q')
+        if (query && query.length > 500) {
+          throw new AppError(400, 'invalid_request', 'q must not exceed 500 characters')
+        }
+        const filters = {
+          datasetId: optionalFilter('datasetId'),
+          platform: optionalFilter('platform'),
+          objectType: optionalFilter('objectType'),
+        }
+        const binding = dataCenterCursorBinding({ query, ...filters, pageSize })
+        const encodedCursor = optionalFilter('cursor')
+        if (query) {
+          if (!search?.queries?.searchContent) {
+            throw new AppError(503, 'stored_search_unavailable', 'Data Center search requires the canonical search layer')
+          }
+          const cursor = decodeDataCenterCursor(encodedCursor, 'search', binding)
+          const result = await search.queries.searchContent(query, {
+            ...filters,
+            size: pageSize,
+            cursor,
+          })
+          let items = result.items
+          if (typeof store.dataCenterRecordsByIds === 'function' && result.items.length > 0) {
+            const fullRecords = await store.dataCenterRecordsByIds(result.items.map((item) => item.id))
+            const fullById = new Map(fullRecords.map((record) => [record.id, record]))
+            items = result.items.map((item) => ({
+              ...(fullById.get(item.id) || item),
+              score: item.score ?? null,
+              highlight: item.highlight ?? null,
+            }))
+          }
+          sendJson(response, 200, {
+            data: {
+              items,
+              mode: result.mode,
+              pageInfo: {
+                pageSize,
+                hasMore: result.hasMore,
+                nextCursor: encodeDataCenterCursor('search', result.nextCursor, binding),
+              },
+            },
+            requestId,
+          })
+          return
+        }
+        if (typeof store.dataCenterRecords !== 'function') {
+          throw new AppError(503, 'data_center_unavailable', 'Data Center record browsing requires the PostgreSQL store')
+        }
+        const cursor = decodeDataCenterCursor(encodedCursor, 'browse', binding)
+        const result = await store.dataCenterRecords({ ...filters, pageSize, cursor })
+        sendJson(response, 200, {
+          data: {
+            items: result.items,
+            mode: 'postgres',
+            pageInfo: {
+              pageSize,
+              hasMore: result.hasMore,
+              nextCursor: encodeDataCenterCursor('browse', result.nextCursor, binding),
+            },
+          },
+          requestId,
+        })
+        return
+      }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/tenants') {
         const tenants = filterByTenantCapability(
           principal,
@@ -870,6 +1118,11 @@ export function createApp({
         sendJson(response, 200, { data: description.roots, requestId })
         return
       }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/file-format-rules') {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, { data: await fileFormatRuleCatalog(), requestId })
+        return
+      }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/sources') {
         requireSourceAdmin(principal)
         const body = await readJson(request)
@@ -895,26 +1148,61 @@ export function createApp({
           await databasePuller.testConnection(body.connection)
         }
         let sourceConnection = body.connection || {}
+        let selectedRule = null
+        let detectedProfile = null
         if (sourceKind === 'file') {
           const fileMode = body.fileMode || 'upload'
           if (!['upload', 'server_path'].includes(fileMode)) {
             throw new AppError(400, 'invalid_file_mode', 'fileMode must be upload or server_path')
           }
+          selectedRule = await resolveFileFormatRule(body.preferredRuleKey || null)
           if (fileMode === 'server_path') {
             const serverPath = requiredField(body, 'serverPath')
             const file = await requireServerFileReader().readInput(serverPath)
+            if (importer) {
+              const preview = await previewWithSuggestion({
+                source: null,
+                buffer: file.buffer,
+                filename: file.filename,
+                // Registration is the user's explicit request to classify this
+                // server file. Only the value-free structural summary reaches a
+                // configured model; raw samples stay in the Admin response path.
+                agentRequested: true,
+                preferredRuleKey: selectedRule?.ruleKey || null,
+              })
+              const detectedRuleKey = preview.detection?.ruleKey || null
+              if (!selectedRule && detectedRuleKey) selectedRule = await resolveFileFormatRule(detectedRuleKey)
+              detectedProfile = preview.detection || null
+            }
             sourceConnection = {
               fileMode: 'server_path',
               rootId: file.rootId,
               relativePath: file.relativePath,
+              ...(selectedRule ? { preferredRuleKey: selectedRule.ruleKey } : {}),
             }
           } else {
             if (body.serverPath != null) {
               throw new AppError(400, 'unsupported_fields', 'serverPath requires fileMode server_path')
             }
-            sourceConnection = { fileMode: 'upload' }
+            sourceConnection = {
+              fileMode: 'upload',
+              ...(selectedRule ? { preferredRuleKey: selectedRule.ruleKey } : {}),
+            }
           }
+        } else if (body.preferredRuleKey != null || body.fileMode != null || body.serverPath != null) {
+          throw new AppError(400, 'unsupported_fields', 'File rule and path fields require sourceKind file')
         }
+        const datasetId = selectedRule?.datasetId || body.datasetId || `external.${sourceKey}.v1`
+        const platform = selectedRule?.platform
+          || (detectedProfile?.platform && (!body.platform || body.platform === 'external')
+            ? detectedProfile.platform
+            : body.platform)
+          || 'external'
+        const objectType = selectedRule?.objectType
+          || (detectedProfile?.objectType && (!body.objectType || body.objectType === 'record')
+            ? detectedProfile.objectType
+            : body.objectType)
+          || 'record'
         const created = await withSourceLocks([sourceKey], async () => {
           if (await store.getExternalSource?.(sourceKey)) {
             throw new AppError(409, 'source_exists', 'Source keys are immutable; update a paused source through its PUT route')
@@ -925,9 +1213,9 @@ export function createApp({
               sourceKind,
               // External data lands in its own dataset by default so it never
               // silently merges into the Night-All corpus and skews platform stats.
-              datasetId: body.datasetId || `external.${sourceKey}.v1`,
-              platform: body.platform || 'external',
-              objectType: body.objectType || 'record',
+              datasetId,
+              platform,
+              objectType,
               status: sourceKind === 'database' ? 'paused' : 'active',
               connection: sourceConnection,
               syncIntervalSeconds,
@@ -1054,6 +1342,23 @@ export function createApp({
         const source = await requireSource(params.key)
         const body = await readJson(request)
         validateFieldMap(body?.fieldMap)
+        const requestedRuleKey = body?.selectedRuleKey ?? null
+        const preferredRuleKey = source.connection?.preferredRuleKey ?? null
+        if (requestedRuleKey != null && preferredRuleKey != null && requestedRuleKey !== preferredRuleKey) {
+          throw new AppError(
+            409,
+            'file_format_rule_mismatch',
+            'selectedRuleKey conflicts with this source preferredRuleKey',
+          )
+        }
+        const selectedRule = await resolveFileFormatRule(requestedRuleKey ?? preferredRuleKey)
+        if (selectedRule && (
+          source.datasetId !== selectedRule.datasetId
+          || source.platform !== selectedRule.platform
+          || source.objectType !== selectedRule.objectType
+        )) {
+          throw new AppError(409, 'file_format_rule_mismatch', 'The selected rule does not match this source scope')
+        }
         if (source.sourceKind === 'file' && source.connection?.fileMode === 'server_path') {
           if (!/^[0-9a-f]{64}$/.test(body?.schemaFingerprint || '')) {
             throw new AppError(400, 'invalid_schema_fingerprint', 'A server-path mapping requires its preview structure fingerprint')
@@ -1079,6 +1384,7 @@ export function createApp({
           schemaFingerprint: body.schemaFingerprint,
           fileStructure: body.fileStructure,
           formatRuleVersionId: body.formatRuleVersionId,
+          selectedRuleKey: selectedRule?.ruleKey || null,
         })
         // Created unapproved on purpose: a mapping decides how stored data is
         // shaped, so it takes a second, explicit action to put it in force.
@@ -1148,12 +1454,13 @@ export function createApp({
           throw new AppError(400, 'invalid_agent_preview', 'agent must be true or false')
         }
         const agentRequested = agentQuery === 'true'
-        // Preview is local and deterministic by default. Even after an
-        // operator explicitly opts into Agent assistance, only column names
-        // are sent — never source rows or values. This keeps a harmless-looking
-        // preview from becoming an undisclosed data export to a model provider.
+        const preferredRuleKey = searchParams.get('preferredRuleKey')?.trim() || null
+        // Agent-assisted preview receives only column names and a value-free
+        // first/middle/last structure summary — never source rows or values.
         sendJson(response, 200, {
-          data: await previewWithSuggestion({ source, buffer, filename, agentRequested }),
+          data: await previewWithSuggestion({
+            source, buffer, filename, agentRequested, preferredRuleKey,
+          }),
           requestId,
         })
         return
@@ -1174,6 +1481,7 @@ export function createApp({
           buffer: file.buffer,
           filename: file.filename,
           agentRequested: body.agent === true,
+          preferredRuleKey: body.preferredRuleKey || null,
         })
         if (typeof store.recordFileObservation === 'function') {
           await store.recordFileObservation({
@@ -1185,7 +1493,7 @@ export function createApp({
             inputBytes: file.inputBytes,
             mtime: file.mtime,
             schemaFingerprint: data.schemaFingerprint,
-            formatRuleVersionId: data.matchedFormatRule?.versionId || null,
+            formatRuleVersionId: data.selectedFormatRule?.versionId || data.matchedFormatRule?.versionId || null,
             status: 'previewed',
           })
         }
@@ -1570,6 +1878,19 @@ export function createApp({
       if (request.method === 'POST' && pathname === '/api/v1/data/telegram/search') {
         const context = await requirePublic(request)
         const result = await service.search(context, {
+          body: await readJson(request),
+          idempotencyKey: request.headers['idempotency-key'],
+          path: pathname,
+        })
+        sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/api/v1/data/stored/search') {
+        const context = await requirePublic(request)
+        const result = await service.storedSearch(context, {
           body: await readJson(request),
           idempotencyKey: request.headers['idempotency-key'],
           path: pathname,

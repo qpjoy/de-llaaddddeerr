@@ -143,8 +143,10 @@ export const adminApi = {
 
   // External sources (P4).
   sources: (token) => request(token, `${ADMIN_ROOT}/sources`),
+  fileFormatRules: (token) => request(token, `${ADMIN_ROOT}/file-format-rules`),
   listServerFileRoots: (token) => request(token, `${ADMIN_ROOT}/server-file-roots`),
   dataCenter: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center`, { query }),
+  dataCenterRecords: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center/records`, { query }),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },
@@ -159,17 +161,28 @@ export const adminApi = {
   approveMapping: (token, key, version) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/mappings/${version}/approve`, { method: 'POST' },
   ),
-  previewImport: (token, key, file, { useAgent = false } = {}) => request(
+  previewImport: (token, key, file, { useAgent = false, preferredRuleKey = null } = {}) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/preview`,
-    { method: 'POST', raw: file, query: { filename: file.name, agent: useAgent } },
+    {
+      method: 'POST',
+      raw: file,
+      query: { filename: file.name, agent: useAgent, preferredRuleKey: preferredRuleKey || undefined },
+    },
   ),
   runImport: (token, key, file) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/import`,
     { method: 'POST', raw: file, query: { filename: file.name } },
   ),
-  serverPreview: (token, key, { serverPath, agent = false } = {}) => request(
+  serverPreview: (token, key, { serverPath, agent = false, preferredRuleKey = null } = {}) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/server-preview`,
-    { method: 'POST', body: { ...(serverPath ? { serverPath } : {}), agent } },
+    {
+      method: 'POST',
+      body: {
+        ...(serverPath ? { serverPath } : {}),
+        ...(preferredRuleKey ? { preferredRuleKey } : {}),
+        agent,
+      },
+    },
   ),
   serverImport: (token, key, { serverPath, expectedSha256 }) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}/server-import`,

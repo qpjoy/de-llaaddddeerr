@@ -115,6 +115,9 @@ Usage:
 
 Common commands:
   qp-tunnel-cli install --url http://IP:3434/peer_user01.mihomo.yaml --user download --password pass
+  qp-tunnel-cli install --instance subscriptions --mixed-port 7890 --url http://user:pass@IP:3434/peer_subscriptions.mihomo.yaml
+  qp-tunnel-cli status --instance subscriptions
+  qp-tunnel-cli update-subscription --instance subscriptions
   qp-tunnel-cli install --url http://internal:18090/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-internal.yaml
   qp-tunnel-cli install --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
   qp-tunnel-cli status
@@ -142,6 +145,11 @@ Common commands:
 The npm package distributes the Linux mihomo-client script and a cross-platform
 HDO WireGuard enrollment command. Linux mihomo-client commands re-run through
 sudo when needed, then execute the bundled shell script.
+
+The default Mihomo instance remains on mixed-port 7788 with its historical paths.
+Named instances use isolated state, binary, launcher and systemd unit paths. The
+reserved subscriptions instance is explicit-use-only: applications connect to
+its local port directly, and host-wide proxy/SSH/daemon/TUN wiring is refused.
 
 Unknown commands are executed with QPJoy proxy variables injected. Host commands
 receive HTTP_PROXY=http://127.0.0.1:<mixed-port>; Docker/Compose build contexts

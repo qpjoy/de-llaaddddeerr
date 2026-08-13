@@ -979,9 +979,9 @@ export class PostgresStore {
     const values = []
     const clauses = []
     for (const [column, value] of [
-      ['dataset_id', datasetId],
-      ['platform', platform],
-      ['object_type', objectType],
+      ['r.dataset_id', datasetId],
+      ['r.platform', platform],
+      ['r.object_type', objectType],
     ]) {
       if (!value) continue
       values.push(value)
@@ -1004,7 +1004,7 @@ export class PostgresStore {
                 coalesce(sum(current_revision), 0) AS revision_count,
                 max(collected_at) AS last_collected_at,
                 max(event_time) AS last_event_at
-           FROM core.canonical_records
+           FROM core.canonical_records r
            ${where}
           GROUP BY dataset_id
           ORDER BY dataset_id`,
@@ -1013,7 +1013,7 @@ export class PostgresStore {
       this.pool.query(
         `SELECT id, dataset_id, platform, object_type, content_type, external_id,
                 title, current_revision, event_time, collected_at, deleted_at
-           FROM core.canonical_records
+           FROM core.canonical_records r
            ${where}
           ORDER BY coalesce(event_time, collected_at, last_seen_at, first_seen_at) DESC, id DESC
           LIMIT $${recordValues.length}`,
@@ -1032,6 +1032,101 @@ export class PostgresStore {
       records: recordResult.rows.map(dataCenterRecord),
       pageSize,
     }
+  }
+
+  /**
+   * Keyset page for the Admin Data Center record browser.
+   *
+   * This is deliberately separate from `dataCenter()`: the catalog/count query
+   * is cheap and stable, while a user may walk many record pages. Only canonical
+   * Admin operators need the canonical truth for diagnosis and curation, so
+   * this page deliberately includes the current revision payload, extensions
+   * and lineage. Public API projections remain separately allowlisted.
+   */
+  async dataCenterRecords({
+    datasetId = null,
+    platform = null,
+    objectType = null,
+    pageSize = 50,
+    cursor = null,
+  } = {}) {
+    const values = []
+    const clauses = []
+    for (const [column, value] of [
+      ['r.dataset_id', datasetId],
+      ['r.platform', platform],
+      ['r.object_type', objectType],
+    ]) {
+      if (!value) continue
+      values.push(value)
+      clauses.push(`${column} = $${values.length}`)
+    }
+    if (cursor) {
+      values.push(cursor.sortTime, cursor.id)
+      clauses.push(
+        `(coalesce(r.event_time, r.collected_at, r.last_seen_at, r.first_seen_at), r.id)`
+        + ` < ($${values.length - 1}::timestamptz, $${values.length}::uuid)`,
+      )
+    }
+    values.push(pageSize + 1)
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    const { rows } = await this.pool.query(
+      `WITH page AS MATERIALIZED (
+         SELECT r.id,
+                coalesce(r.event_time, r.collected_at, r.last_seen_at, r.first_seen_at) AS sort_time
+           FROM core.canonical_records r
+           ${where}
+          ORDER BY coalesce(r.event_time, r.collected_at, r.last_seen_at, r.first_seen_at) DESC, r.id DESC
+          LIMIT $${values.length}
+       )
+       SELECT r.id, r.dataset_id, r.platform, r.object_type, r.external_id, r.identity_hash,
+              r.schema_version, r.payload_sha256, r.content_type, r.url, r.title, r.body,
+              r.author_external_id, r.author_name, r.event_time, r.collected_at,
+              r.latitude, r.longitude, r.country_code, r.admin1_code, r.admin2_code,
+              r.stable_fields, r.extensions, r.current_revision, r.projection_revision,
+              r.first_seen_at, r.last_seen_at, r.deleted_at,
+              revision.normalized_payload AS raw_payload,
+              revision.parser_version, revision.ingest_run_id,
+              revision.external_import_run_id,
+              page.sort_time
+         FROM page
+         JOIN core.canonical_records r ON r.id = page.id
+         LEFT JOIN core.record_revisions revision
+           ON revision.record_id = r.id AND revision.revision = r.current_revision
+        ORDER BY page.sort_time DESC, page.id DESC`,
+      values,
+    )
+    const hasMore = rows.length > pageSize
+    const pageRows = hasMore ? rows.slice(0, pageSize) : rows
+    const last = pageRows.at(-1)
+    return {
+      items: pageRows.map(dataCenterRecordDetail),
+      hasMore,
+      nextCursor: hasMore && last
+        ? { sortTime: iso(last.sort_time), id: last.id }
+        : null,
+    }
+  }
+
+  async dataCenterRecordsByIds(ids) {
+    if (!Array.isArray(ids) || ids.length === 0) return []
+    const { rows } = await this.pool.query(
+      `SELECT r.id, r.dataset_id, r.platform, r.object_type, r.external_id, r.identity_hash,
+              r.schema_version, r.payload_sha256, r.content_type, r.url, r.title, r.body,
+              r.author_external_id, r.author_name, r.event_time, r.collected_at,
+              r.latitude, r.longitude, r.country_code, r.admin1_code, r.admin2_code,
+              r.stable_fields, r.extensions, r.current_revision, r.projection_revision,
+              r.first_seen_at, r.last_seen_at, r.deleted_at,
+              revision.normalized_payload AS raw_payload,
+              revision.parser_version, revision.ingest_run_id,
+              revision.external_import_run_id
+         FROM core.canonical_records r
+         LEFT JOIN core.record_revisions revision
+           ON revision.record_id = r.id AND revision.revision = r.current_revision
+        WHERE r.id = ANY($1::uuid[])`,
+      [ids],
+    )
+    return rows.map(dataCenterRecordDetail)
   }
 
   async #updateRequest(sql, values) {
@@ -1271,6 +1366,7 @@ export class PostgresStore {
     schemaFingerprint = null,
     fileStructure = null,
     formatRuleVersionId = null,
+    selectedRuleKey = null,
   }) {
     return withPgTransaction(this.pool, async (client) => {
       // max(version) + 1 needs serialization per source. Without this lock, two
@@ -1282,18 +1378,18 @@ export class PostgresStore {
       )
       const { rows } = await client.query(
         `INSERT INTO catalog.source_mappings
-           (id, source_id, version, field_map, origin, agent_model, agent_confidence, notes,
-            schema_fingerprint, file_structure, format_rule_version_id)
+          (id, source_id, version, field_map, origin, agent_model, agent_confidence, notes,
+            schema_fingerprint, file_structure, format_rule_version_id, selected_rule_key)
          VALUES (
            $1, $2,
            (SELECT coalesce(max(version), 0) + 1 FROM catalog.source_mappings WHERE source_id = $2),
-           $3, $4, $5, $6, $7, $8, $9, $10
+           $3, $4, $5, $6, $7, $8, $9, $10, $11
          )
          RETURNING *`,
         [
           randomUUID(), sourceId, fieldMap, origin || 'manual', agentModel || null,
           agentConfidence ?? null, notes || null, schemaFingerprint, fileStructure,
-          formatRuleVersionId,
+          formatRuleVersionId, selectedRuleKey,
         ],
       )
       return sourceMapping(rows[0])
@@ -1316,12 +1412,14 @@ export class PostgresStore {
 
       if (mapping.source_kind !== 'file' && (
         mapping.schema_fingerprint || mapping.file_structure || mapping.format_rule_version_id
+        || mapping.selected_rule_key
       )) {
         throw new AppError(409, 'format_rule_mismatch', 'File structure evidence is only valid for file sources')
       }
 
       let formatRuleVersionId = mapping.format_rule_version_id
       if (formatRuleVersionId) {
+        const selectedRuleClause = mapping.selected_rule_key ? 'AND r.rule_key = $8' : ''
         const linked = await client.query(
           `SELECT v.id
              FROM catalog.file_format_rule_versions v
@@ -1330,41 +1428,84 @@ export class PostgresStore {
               AND r.dataset_id = $2 AND r.platform = $3 AND r.object_type = $4
               AND v.schema_fingerprint = $5
               AND v.field_map = $6::jsonb
-              AND v.file_structure = $7::jsonb`,
+              AND v.file_structure = $7::jsonb
+              ${selectedRuleClause}`,
           [
             formatRuleVersionId, mapping.dataset_id, mapping.platform,
             mapping.object_type, mapping.schema_fingerprint, canonicalFieldMap,
             mapping.file_structure,
+            ...(mapping.selected_rule_key ? [mapping.selected_rule_key] : []),
           ],
         )
         if (!linked.rows[0]) {
           throw new AppError(409, 'format_rule_mismatch', 'The selected format rule does not match this source and mapping')
         }
       } else if (mapping.schema_fingerprint && mapping.file_structure) {
-        const lockKey = `mx-insight-hub:file-format-rule:${JSON.stringify([
+        const structureLockKey = `mx-insight-hub:file-format-rule:${JSON.stringify([
           mapping.dataset_id, mapping.platform, mapping.object_type,
           mapping.schema_fingerprint,
         ])}`
-        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey])
-        const matched = await client.query(
-          `SELECT r.id AS rule_id, v.id AS version_id, v.version,
-                  v.file_structure = $5::jsonb AS file_structure_matches,
-                  v.field_map = $6::jsonb AS field_map_matches
-             FROM catalog.file_format_rules r
-             JOIN catalog.file_format_rule_versions v ON v.rule_id = r.id
-            WHERE r.dataset_id = $1 AND r.platform = $2 AND r.object_type = $3
-              AND v.schema_fingerprint = $4
-            ORDER BY v.approved_at DESC, v.version DESC
-            LIMIT 1`,
-          [
-            mapping.dataset_id, mapping.platform, mapping.object_type,
-            mapping.schema_fingerprint, mapping.file_structure, canonicalFieldMap,
-          ],
+        await client.query(
+          'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+          [structureLockKey],
         )
+        if (mapping.selected_rule_key) {
+          await client.query(
+            'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+            [`mx-insight-hub:file-format-rule-key:${mapping.selected_rule_key}`],
+          )
+        }
+        let ruleId = null
+        let matched
+        if (mapping.selected_rule_key) {
+          const selectedRule = await client.query(
+            `SELECT r.id
+               FROM catalog.file_format_rules r
+              WHERE r.rule_key = $1
+                AND r.dataset_id = $2 AND r.platform = $3 AND r.object_type = $4
+              FOR UPDATE`,
+            [
+              mapping.selected_rule_key, mapping.dataset_id,
+              mapping.platform, mapping.object_type,
+            ],
+          )
+          ruleId = selectedRule.rows[0]?.id ?? null
+          if (!ruleId) {
+            throw new AppError(409, 'format_rule_mismatch', 'The selected format rule is outside this source scope')
+          }
+          matched = await client.query(
+            `SELECT v.id AS version_id, v.version,
+                    v.file_structure = $3::jsonb AS file_structure_matches,
+                    v.field_map = $4::jsonb AS field_map_matches
+               FROM catalog.file_format_rule_versions v
+              WHERE v.rule_id = $1
+                AND v.schema_fingerprint = $2
+              ORDER BY v.approved_at DESC, v.version DESC
+              LIMIT 1`,
+            [ruleId, mapping.schema_fingerprint, mapping.file_structure, canonicalFieldMap],
+          )
+        } else {
+          matched = await client.query(
+            `SELECT r.id AS rule_id, v.id AS version_id, v.version,
+                    v.file_structure = $5::jsonb AS file_structure_matches,
+                    v.field_map = $6::jsonb AS field_map_matches
+               FROM catalog.file_format_rules r
+               JOIN catalog.file_format_rule_versions v ON v.rule_id = r.id
+              WHERE r.dataset_id = $1 AND r.platform = $2 AND r.object_type = $3
+                AND v.schema_fingerprint = $4
+              ORDER BY v.approved_at DESC, v.version DESC
+              LIMIT 1
+              FOR UPDATE OF r`,
+            [
+              mapping.dataset_id, mapping.platform, mapping.object_type,
+              mapping.schema_fingerprint, mapping.file_structure, canonicalFieldMap,
+            ],
+          )
+          ruleId = matched.rows[0]?.rule_id ?? null
+        }
         if (matched.rows[0] && matched.rows[0].file_structure_matches !== true) {
           throw new AppError(409, 'schema_fingerprint_conflict', 'The structure fingerprint is already linked to different structure evidence')
         }
-        let ruleId = matched.rows[0]?.rule_id
         if (!ruleId) {
           ruleId = randomUUID()
           const inputFormat = typeof mapping.file_structure.format === 'string'
@@ -1433,6 +1574,7 @@ export class PostgresStore {
   async findApprovedFileFormatRule({ schemaFingerprint, datasetId, platform, objectType }) {
     const { rows } = await this.pool.query(
       `SELECT r.id AS rule_id, r.rule_key, r.display_name,
+              r.dataset_id, r.platform, r.object_type,
               v.id AS version_id, v.version, v.schema_fingerprint, v.field_map,
               v.parser_family, v.input_format, v.file_structure
          FROM catalog.file_format_rules r
@@ -1442,6 +1584,51 @@ export class PostgresStore {
         ORDER BY v.approved_at DESC, v.version DESC
         LIMIT 1`,
       [datasetId, platform, objectType, schemaFingerprint],
+    )
+    return fileFormatRule(rows[0])
+  }
+
+  async listFileFormatRules() {
+    const { rows } = await this.pool.query(
+      `SELECT r.id AS rule_id, r.rule_key, r.display_name,
+              r.dataset_id, r.platform, r.object_type,
+              v.id AS version_id, v.version, v.schema_fingerprint, v.field_map,
+              v.parser_family, v.input_format, v.file_structure
+         FROM catalog.file_format_rules r
+         LEFT JOIN LATERAL (
+           SELECT version.id, version.version, version.schema_fingerprint,
+                  version.field_map, version.parser_family, version.input_format,
+                  version.file_structure
+             FROM catalog.file_format_rule_versions version
+            WHERE version.rule_id = r.id
+            ORDER BY version.approved_at DESC, version.version DESC
+            LIMIT 1
+         ) v ON true
+        ORDER BY r.platform, r.dataset_id, r.object_type, r.display_name, r.rule_key`,
+    )
+    return rows.map(fileFormatRule)
+  }
+
+  async findApprovedFileFormatRuleByKey({
+    ruleKey,
+    schemaFingerprint,
+    datasetId,
+    platform,
+    objectType,
+  }) {
+    const { rows } = await this.pool.query(
+      `SELECT r.id AS rule_id, r.rule_key, r.display_name,
+              r.dataset_id, r.platform, r.object_type,
+              v.id AS version_id, v.version, v.schema_fingerprint, v.field_map,
+              v.parser_family, v.input_format, v.file_structure
+         FROM catalog.file_format_rules r
+         JOIN catalog.file_format_rule_versions v ON v.rule_id = r.id
+        WHERE r.rule_key = $1
+          AND r.dataset_id = $2 AND r.platform = $3 AND r.object_type = $4
+          AND v.schema_fingerprint = $5
+        ORDER BY v.approved_at DESC, v.version DESC
+        LIMIT 1`,
+      [ruleKey, datasetId, platform, objectType, schemaFingerprint],
     )
     return fileFormatRule(rows[0])
   }
@@ -2196,6 +2383,37 @@ function dataCenterRecord(row) {
   }
 }
 
+function dataCenterRecordDetail(row) {
+  return {
+    ...dataCenterRecord(row),
+    identityHash: row.identity_hash,
+    schemaVersion: row.schema_version,
+    payloadSha256: row.payload_sha256,
+    url: row.url,
+    body: row.body,
+    authorExternalId: row.author_external_id,
+    authorName: row.author_name,
+    latitude: row.latitude == null ? null : Number(row.latitude),
+    longitude: row.longitude == null ? null : Number(row.longitude),
+    countryCode: row.country_code,
+    admin1Code: row.admin1_code,
+    admin2Code: row.admin2_code,
+    stableFields: row.stable_fields || {},
+    extensions: row.extensions || {},
+    metrics: row.stable_fields?.metrics || {},
+    rawPayload: row.raw_payload ?? null,
+    lineage: {
+      parserVersion: row.parser_version ?? null,
+      ingestRunId: row.ingest_run_id ?? null,
+      externalImportRunId: row.external_import_run_id ?? null,
+    },
+    projectionRevision: Number(row.projection_revision || 0),
+    firstSeenAt: iso(row.first_seen_at),
+    lastSeenAt: iso(row.last_seen_at),
+    highlight: null,
+  }
+}
+
 function externalSource(row) {
   return row && {
     id: row.id,
@@ -2226,6 +2444,7 @@ function sourceMapping(row) {
     schemaFingerprint: row.schema_fingerprint ?? null,
     fileStructure: row.file_structure ?? null,
     formatRuleVersionId: row.format_rule_version_id ?? null,
+    selectedRuleKey: row.selected_rule_key ?? null,
     approved: Boolean(row.approved_at),
     approvedAt: iso(row.approved_at),
     approvedBy: row.approved_by,
@@ -2234,17 +2453,21 @@ function sourceMapping(row) {
 }
 
 function fileFormatRule(row) {
-  return row && {
+  if (!row) return null
+  return {
     ruleId: row.rule_id,
     ruleKey: row.rule_key,
     displayName: row.display_name,
-    versionId: row.version_id,
-    version: Number(row.version),
-    schemaFingerprint: row.schema_fingerprint,
-    fieldMap: row.field_map,
-    parserFamily: row.parser_family,
-    inputFormat: row.input_format,
-    fileStructure: row.file_structure,
+    datasetId: row.dataset_id,
+    platform: row.platform,
+    objectType: row.object_type,
+    versionId: row.version_id ?? null,
+    version: row.version == null ? null : Number(row.version),
+    schemaFingerprint: row.schema_fingerprint ?? null,
+    fieldMap: row.field_map ?? null,
+    parserFamily: row.parser_family ?? null,
+    inputFormat: row.input_format ?? null,
+    fileStructure: row.file_structure ?? null,
   }
 }
 

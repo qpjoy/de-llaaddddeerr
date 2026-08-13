@@ -208,6 +208,7 @@ import {
   buildReleaseManagementDecisions,
   appReleasePublisherServiceAccountId,
   buildSiteSlotAccessAccount,
+  canonicalSiteSlotAccessAccountName,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
   buildSiteSlotDomesticRuntimeConfig,
@@ -2664,6 +2665,12 @@ export class PostgresStore implements PlatformStore {
   async getLauncherNetworkMihomoSite(siteId: string): Promise<LauncherNetworkMihomoSite | null> {
     const site = await this.getRecord<LauncherNetworkMihomoSite>('launcher-network-mihomo-site', siteId);
     return site ? normalizeLauncherNetworkMihomoSite(site) : null;
+  }
+
+  async listLauncherNetworkMihomoSites(): Promise<LauncherNetworkMihomoSite[]> {
+    return (await this.listRecords<LauncherNetworkMihomoSite>('launcher-network-mihomo-site'))
+      .map((site) => normalizeLauncherNetworkMihomoSite(site))
+      .sort((a, b) => a.siteId.localeCompare(b.siteId));
   }
 
   async getLauncherNetworkMihomoReachability(siteId: string): Promise<LauncherNetworkReachabilityPlan | null> {
@@ -5781,7 +5788,7 @@ function resolveIssueAccountNames(input: SiteSlotAccessAccountIssueInput, siteId
   const names = (input.issueDefaults === false && requested.length > 0)
     ? requested
     : [...defaultSiteSlotAccessAccountNames(siteId), ...requested];
-  return [...new Set(names.map((name) => String(name).trim().toLowerCase()).filter(Boolean))];
+  return [...new Set(names.map((name) => canonicalSiteSlotAccessAccountName(String(name))))];
 }
 
 function normalizeEntitlementSiteIds(value: UserOverseaEntitlementInput['siteIds']): string[] {

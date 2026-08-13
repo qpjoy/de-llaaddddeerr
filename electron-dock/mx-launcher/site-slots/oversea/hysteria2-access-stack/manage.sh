@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-STACK_DIR="$(cd "$(dirname "$0")" && pwd)"
+STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$STACK_DIR/../.." && pwd)"
 ENV_FILE="$STACK_DIR/.env"
 ENV_EXAMPLE="$STACK_DIR/.env.example"
@@ -17,6 +17,11 @@ HYSTERIA_CONTAINER="mx-oversea-hysteria2"
 SUBSCRIPTIONS_CONTAINER="mx-oversea-hysteria2-health"
 OLD_WG_STACK_DIR="$ROOT_DIR/docker/wg-mihomo-stack"
 OLD_WG_ENV_FILE="$OLD_WG_STACK_DIR/.env"
+SYSTEM_SUBSCRIPTION_DISABLED_PATH="/__system-subscription-disabled__"
+SYSTEM_SUBSCRIPTION_DISABLED_PASSWORD_HASH='$2a$14$Zkx.HbQOScCQ1YI8Iu7/fO1M/ieGJqmXiF6Vq95PVIYzGKqG7SNU.'
+SYSTEM_SUBSCRIPTION_CADDY_SIGNATURE_FILE="$STACK_DIR/data/caddy/system-subscription-signature.sha256"
+SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT="7890"
+SYSTEM_SUBSCRIPTION_BANDWIDTH_HINT="50 Mbps"
 COMPOSE_BIN=""
 
 usage() {
@@ -39,6 +44,8 @@ Commands:
                     Apply Internal-managed runtime defaults, render config, and reconcile containers
   check-subscription-auth
                     Show health/evidence Basic Auth state; optionally verify with --password
+  check-system-subscription
+                    Verify the exact system YAML is live behind its dedicated Basic Auth
   list-users        Show current configured Hysteria2 users and advertised up/down values
   add-user          Add/upsert one or more Hysteria2 users, no restart needed
   del-user          Delete one or more Hysteria2 users and refresh summary
@@ -584,6 +591,14 @@ safe_recreate_service() {
 	local service="$1"
 	local container_name
 	container_name="$(container_name_for_service "$service")"
+	if [[ "$service" == "subscriptions" ]]; then
+		# Every entry point, including `start subscriptions` and `reset-auth`,
+		# reaches Caddy with either a fully materialized exact route or the
+		# locked disabled route. Never start it with an empty Basic Auth hash.
+		load_env
+		materialize_system_subscription
+		load_env
+	fi
 
 	compose stop "$service" >/dev/null 2>&1 || true
 	compose rm -f "$service" >/dev/null 2>&1 || true
@@ -595,6 +610,10 @@ safe_recreate_service() {
 		rm -f "$STACK_DIR/config/caddy/caddy/autosave.json" >/dev/null 2>&1 || true
 	fi
 	compose up -d "$service"
+	if [[ "$service" == "subscriptions" ]]; then
+		load_env
+		record_system_subscription_caddy_signature
+	fi
 }
 
 wait_for_container() {
@@ -673,10 +692,55 @@ wait_for_subscription_http_ready() {
 	die "Subscription HTTP endpoint did not become ready in time on port ${port}."
 }
 
-hash_password() {
+hash_password() (
+	# Keep plaintext out of the host docker argv and the persisted container Cmd.
+	# The subshell scopes traps so every success/failure/signal path removes the
+	# root-only secret without changing traps used by the caller.
 	local plaintext="$1"
-	docker run --rm caddy:2-alpine caddy hash-password --plaintext "$plaintext" | tr -d '\r\n'
-}
+	local secret_dir=""
+	local secret_file=""
+	local raw_hash=""
+	local status=0
+	local hash_tmp_base="${TMPDIR:-/tmp}"
+
+	cleanup_hash_password_secret() {
+		if [[ -n "$secret_file" ]]; then
+			rm -f "$secret_file" 2>/dev/null || true
+		fi
+		if [[ -n "$secret_dir" ]]; then
+			rmdir "$secret_dir" 2>/dev/null || true
+		fi
+	}
+	trap cleanup_hash_password_secret EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+
+	umask 077
+	secret_dir="$(mktemp -d "${hash_tmp_base%/}/mx-hy2-caddy-hash.XXXXXX")"
+	secret_file="$secret_dir/plaintext"
+	printf "%s" "$plaintext" > "$secret_file"
+	chmod 600 "$secret_file"
+	unset plaintext
+
+	# The fixed shell command reads the read-only mount inside the container.
+	# No secret value is interpolated into docker's host argv or Config.Cmd.
+	raw_hash="$(
+		docker run --rm \
+			--network none \
+			--read-only \
+			--user 0:0 \
+			--mount "type=bind,source=${secret_file},target=/run/secrets/mx-hy2-password,readonly" \
+			--entrypoint /bin/sh \
+			caddy:2-alpine \
+			-ec 'exec caddy hash-password < /run/secrets/mx-hy2-password'
+	)" || status=$?
+	if (( status != 0 )); then
+		return "$status"
+	fi
+
+	printf "%s" "$raw_hash" | tr -d '\r\n'
+)
 
 random_token() {
 	if command -v openssl >/dev/null 2>&1; then
@@ -856,6 +920,9 @@ render_runtime_files() {
 	ensure_export_auth_defaults
 	load_env
 	ensure_cert_material
+	load_env
+	materialize_system_subscription
+	load_env
 	render_auth_script
 	render_server_config
 }
@@ -1075,6 +1142,240 @@ user_record() {
 	' "$USERS_FILE"
 }
 
+sha256_text() {
+	local value="$1"
+	if command -v sha256sum >/dev/null 2>&1; then
+		printf "%s" "$value" | sha256sum | awk '{ print $1 }'
+	elif command -v shasum >/dev/null 2>&1; then
+		printf "%s" "$value" | shasum -a 256 | awk '{ print $1 }'
+	elif command -v openssl >/dev/null 2>&1; then
+		printf "%s" "$value" | openssl dgst -sha256 | awk '{ print $NF }'
+	else
+		die "sha256sum, shasum, or openssl is required for system subscription credential tracking."
+	fi
+}
+
+yaml_single_quote() {
+	local value="$1"
+	value="$(printf "%s" "$value" | sed "s/'/''/g")"
+	printf "'%s'" "$value"
+}
+
+is_bcrypt_password_hash() {
+	local value="${1:-}"
+	[[ "$value" =~ ^\$2[aby]\$[0-9][0-9]\$[./A-Za-z0-9]{53}$ ]]
+}
+
+system_subscription_account_name() {
+	local account="${HY2_SYSTEM_SUBSCRIPTION_ACCOUNT:-}"
+	if is_placeholder_value "$account"; then
+		return 1
+	fi
+	[[ "$account" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || return 1
+	[[ "$account" == *-subscriptions ]] || return 1
+	printf "%s\n" "$account"
+}
+
+system_subscription_filename() {
+	local account
+	account="$(system_subscription_account_name)" || return 1
+	printf "peer_%s.mihomo.yaml\n" "$account"
+}
+
+system_subscription_public_path() {
+	local filename
+	filename="$(system_subscription_filename)" || return 1
+	printf "/%s\n" "$filename"
+}
+
+cleanup_system_subscription_yamls() {
+	local keep_name="${1:-}"
+	if [[ -n "$keep_name" ]]; then
+		find "$STACK_DIR/data/subscriptions" -maxdepth 1 -type f \
+			-name 'peer_*-subscriptions.mihomo.yaml' ! -name "$keep_name" -delete 2>/dev/null || true
+	else
+		find "$STACK_DIR/data/subscriptions" -maxdepth 1 -type f \
+			-name 'peer_*-subscriptions.mihomo.yaml' -delete 2>/dev/null || true
+	fi
+}
+
+disable_system_subscription_artifact() {
+	local reason="${1:-not configured}"
+	local current_hash="${HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH:-}"
+
+	cleanup_system_subscription_yamls
+	set_env_value HY2_SYSTEM_SUBSCRIPTION_PATH "$SYSTEM_SUBSCRIPTION_DISABLED_PATH"
+	if ! is_bcrypt_password_hash "$current_hash"; then
+		set_env_value HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH "$SYSTEM_SUBSCRIPTION_DISABLED_PASSWORD_HASH"
+		set_env_value HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256 "disabled"
+	fi
+	echo "System subscription disabled: ${reason}. Health/evidence outlet remains available." >&2
+}
+
+system_subscription_caddy_signature() {
+	sha256_text "${HY2_SYSTEM_SUBSCRIPTION_ACCOUNT:-}|${HY2_SYSTEM_SUBSCRIPTION_BASIC_USER:-}|${HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH:-}|${HY2_SYSTEM_SUBSCRIPTION_PATH:-}"
+}
+
+record_system_subscription_caddy_signature() {
+	local tmp
+	mkdir -p "$(dirname "$SYSTEM_SUBSCRIPTION_CADDY_SIGNATURE_FILE")"
+	tmp="$(mktemp "${SYSTEM_SUBSCRIPTION_CADDY_SIGNATURE_FILE}.XXXXXX")"
+	system_subscription_caddy_signature > "$tmp"
+	chmod 600 "$tmp"
+	mv -f "$tmp" "$SYSTEM_SUBSCRIPTION_CADDY_SIGNATURE_FILE"
+}
+
+ensure_system_subscription_caddy_current() {
+	local expected applied
+	load_env
+	container_running "$SUBSCRIPTIONS_CONTAINER" || return 0
+	expected="$(system_subscription_caddy_signature)"
+	applied="$(cat "$SYSTEM_SUBSCRIPTION_CADDY_SIGNATURE_FILE" 2>/dev/null || true)"
+	[[ -n "$expected" && "$expected" == "$applied" ]] && return 0
+
+	echo "System subscription Caddy credential/path changed; recreating the health/evidence outlet."
+	safe_recreate_service subscriptions
+	wait_for_container "$SUBSCRIPTIONS_CONTAINER"
+}
+
+materialize_system_subscription() {
+	local account record auth_token ignored_up ignored_down host server_port mixed_port
+	local basic_user auth_hash auth_token_sha stored_auth_token_sha filename public_path proxy_name
+	local fingerprint tmp dns_server
+
+	ensure_stack_dirs
+	ensure_users_file
+	account="$(system_subscription_account_name || true)"
+	if [[ -z "$account" ]]; then
+		disable_system_subscription_artifact "Internal did not provide a valid *-subscriptions account"
+		return 0
+	fi
+	filename="peer_${account}.mihomo.yaml"
+	public_path="/${filename}"
+
+	basic_user="${HY2_SYSTEM_SUBSCRIPTION_BASIC_USER:-subscriptions}"
+	if is_placeholder_value "$basic_user"; then
+		basic_user="subscriptions"
+		set_env_value HY2_SYSTEM_SUBSCRIPTION_BASIC_USER "$basic_user"
+	elif [[ ! "$basic_user" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; then
+		set_env_value HY2_SYSTEM_SUBSCRIPTION_BASIC_USER "subscriptions"
+		disable_system_subscription_artifact "Basic Auth username is invalid"
+		return 0
+	fi
+
+	record="$(user_record "$account")"
+	if [[ -z "$record" ]]; then
+		disable_system_subscription_artifact "${account} is absent from Internal-issued users.csv"
+		return 0
+	fi
+	IFS=$'\t' read -r auth_token ignored_up ignored_down <<< "$record"
+	if [[ -z "$auth_token" ]]; then
+		disable_system_subscription_artifact "${account} has no auth token"
+		return 0
+	fi
+
+	host="${HY2_SERVER_HOST:-}"
+	if is_placeholder_value "$host" || [[ "$host" =~ [[:space:]/] ]] || ! is_ip_value "$host"; then
+		disable_system_subscription_artifact "a direct Hysteria public IP is missing or invalid"
+		return 0
+	fi
+	server_port="${HY2_SERVER_PORTS:-}"
+	server_port="${server_port%%-*}"
+	if [[ ! "$server_port" =~ ^[0-9]+$ ]] || (( server_port < 1 || server_port > 65535 )); then
+		disable_system_subscription_artifact "Hysteria public UDP port is invalid"
+		return 0
+	fi
+	fingerprint="${HY2_TLS_FINGERPRINT:-}"
+	if is_placeholder_value "$fingerprint"; then
+		disable_system_subscription_artifact "TLS certificate fingerprint is missing"
+		return 0
+	fi
+	mixed_port="${HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT:-$SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}"
+	if [[ ! "$mixed_port" =~ ^[0-9]+$ ]] || (( mixed_port < 1 || mixed_port > 65535 )); then
+		disable_system_subscription_artifact "system subscription mixed port is invalid"
+		return 0
+	fi
+	set_env_value HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT "$mixed_port"
+
+	auth_hash="${HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH:-}"
+	stored_auth_token_sha="${HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256:-}"
+	auth_token_sha="$(sha256_text "$auth_token")"
+	if is_placeholder_value "$auth_hash" \
+		|| [[ "$stored_auth_token_sha" == "disabled" ]] \
+		|| [[ "$stored_auth_token_sha" != "$auth_token_sha" ]]; then
+		# Remove the old artifact before rotating the download credential. A hash
+		# failure therefore cannot leave a stale credential-bearing YAML available.
+		cleanup_system_subscription_yamls
+		set_env_value HY2_SYSTEM_SUBSCRIPTION_PATH "$SYSTEM_SUBSCRIPTION_DISABLED_PATH"
+		auth_hash="$(hash_password "$auth_token")"
+		if ! is_bcrypt_password_hash "$auth_hash"; then
+			disable_system_subscription_artifact "Caddy did not return a valid bcrypt hash"
+			return 0
+		fi
+		set_env_value HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH "$auth_hash"
+		set_env_value HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256 "$auth_token_sha"
+	elif ! is_bcrypt_password_hash "$auth_hash"; then
+		disable_system_subscription_artifact "configured Basic Auth hash is not bcrypt"
+		return 0
+	fi
+
+	proxy_name="peer_${account}"
+	tmp="$(mktemp "$STACK_DIR/data/subscriptions/.${filename}.XXXXXX")"
+	{
+		echo "# Generated from the Internal-issued ${account} access account."
+		echo "# Unmetered traffic quota; 50 Mbps values are client bandwidth hints."
+		echo "mixed-port: ${mixed_port}"
+		echo "allow-lan: false"
+		echo "mode: rule"
+		echo "log-level: info"
+		echo "geodata-mode: true"
+		echo "geo-auto-update: true"
+		echo "geo-update-interval: 24"
+		echo
+		echo "proxies:"
+		printf "  - name: %s\n" "$(yaml_single_quote "$proxy_name")"
+		echo "    type: hysteria2"
+		printf "    server: %s\n" "$(yaml_single_quote "$host")"
+		echo "    port: ${server_port}"
+		printf "    password: %s\n" "$(yaml_single_quote "$auth_token")"
+		printf "    down: %s\n" "$(yaml_single_quote "$SYSTEM_SUBSCRIPTION_BANDWIDTH_HINT")"
+		printf "    up: %s\n" "$(yaml_single_quote "$SYSTEM_SUBSCRIPTION_BANDWIDTH_HINT")"
+		echo "    skip-cert-verify: true"
+		printf "    fingerprint: %s\n" "$(yaml_single_quote "$fingerprint")"
+		echo "    alpn:"
+		echo "      - h3"
+		echo "    dns:"
+		while IFS= read -r dns_server; do
+			printf "      - %s\n" "$(yaml_single_quote "$dns_server")"
+		done < <(csv_to_array "${HY2_PEER_DNS:-$(default_hy2_peer_dns)}")
+		echo
+		echo "proxy-groups:"
+		echo "  - name: PROXY"
+		echo "    type: select"
+		echo "    proxies:"
+		printf "      - %s\n" "$(yaml_single_quote "$proxy_name")"
+		echo "      - DIRECT"
+		echo
+		echo "rules:"
+		echo "  - DOMAIN-SUFFIX,local,DIRECT"
+		echo "  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve"
+		echo "  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve"
+		echo "  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve"
+		echo "  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"
+		echo "  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve"
+		echo "  - IP-CIDR6,::1/128,DIRECT,no-resolve"
+		echo "  - IP-CIDR6,fc00::/7,DIRECT,no-resolve"
+		echo "  - IP-CIDR6,fe80::/10,DIRECT,no-resolve"
+		echo "  - GEOSITE,CN,DIRECT"
+		echo "  - GEOIP,CN,DIRECT"
+		echo "  - MATCH,PROXY"
+	} > "$tmp"
+	chmod 600 "$tmp"
+	mv -f "$tmp" "$STACK_DIR/data/subscriptions/$filename"
+	cleanup_system_subscription_yamls "$filename"
+	set_env_value HY2_SYSTEM_SUBSCRIPTION_PATH "$public_path"
+}
+
 upsert_user_record() {
 	local name="$1"
 	local auth_token="$2"
@@ -1157,9 +1458,21 @@ subscription_auth_hash_state() {
 }
 
 refresh_subscriptions() {
-	local user_count
+	local user_count managed_filename
 
-	find "$STACK_DIR/data/subscriptions" -maxdepth 1 -type f -name '*.yaml' -delete 2>/dev/null || true
+	load_env
+	materialize_system_subscription
+	load_env
+	managed_filename=""
+	if [[ "${HY2_SYSTEM_SUBSCRIPTION_PATH:-}" =~ ^/([^/]+-subscriptions\.mihomo\.yaml)$ ]]; then
+		managed_filename="${BASH_REMATCH[1]}"
+	fi
+	if [[ -n "$managed_filename" && -f "$STACK_DIR/data/subscriptions/$managed_filename" ]]; then
+		find "$STACK_DIR/data/subscriptions" -maxdepth 1 -type f -name '*.yaml' \
+			! -name "$managed_filename" -delete 2>/dev/null || true
+	else
+		find "$STACK_DIR/data/subscriptions" -maxdepth 1 -type f -name '*.yaml' -delete 2>/dev/null || true
+	fi
 
 	user_count="$(awk -F, 'NR > 1 && $1 != "" { count++ } END { print count + 0 }' "$USERS_FILE")"
 	(
@@ -1176,6 +1489,7 @@ refresh_subscriptions() {
 	else
 		echo "Health/evidence summary refreshed for ${user_count} Hysteria2 users."
 	fi
+	ensure_system_subscription_caddy_current
 }
 
 wait_for_existing_yaml() {
@@ -1373,7 +1687,7 @@ docker_container_summary() {
 
 internal_defaults_drift_report() {
 	local drift=0
-	local default_up default_down user_limit_drift
+	local default_up default_down system_account user_limit_drift
 
 	if [[ -z "${HY2_SERVER_PORTS:-}" ]]; then
 		echo "drift: HY2_SERVER_PORTS=unset expected Internal-managed Hysteria2 UDP port"
@@ -1415,13 +1729,24 @@ internal_defaults_drift_report() {
 	if [[ -f "$USERS_FILE" ]]; then
 		default_up="${HY2_DEFAULT_UP:-$(default_hy2_upload_rate)}"
 		default_down="${HY2_DEFAULT_DOWN:-$(default_hy2_download_rate)}"
-		user_limit_drift="$(awk -F, -v default_up="$default_up" -v default_down="$default_down" '
+		system_account="${HY2_SYSTEM_SUBSCRIPTION_ACCOUNT:-}"
+		user_limit_drift="$(awk -F, \
+			-v default_up="$default_up" \
+			-v default_down="$default_down" \
+			-v system_account="$system_account" \
+			-v system_bandwidth="$SYSTEM_SUBSCRIPTION_BANDWIDTH_HINT" '
 			NR > 1 && $1 != "" {
+				expected_up = default_up
+				expected_down = default_down
 				for (i = 1; i <= 4; i++) {
 					gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
 				}
-				if ($3 != default_up || $4 != default_down) {
-					printf "%s up=%s down=%s expected up=%s down=%s\n", $1, $3, $4, default_up, default_down
+				if (system_account != "" && $1 == system_account) {
+					expected_up = system_bandwidth
+					expected_down = system_bandwidth
+				}
+				if ($3 != expected_up || $4 != expected_down) {
+					printf "%s up=%s down=%s expected up=%s down=%s\n", $1, $3, $4, expected_up, expected_down
 				}
 			}
 		' "$USERS_FILE")"
@@ -1524,6 +1849,7 @@ sync_internal_defaults_command() {
 	else
 		refresh_subscriptions
 	fi
+	ensure_system_subscription_caddy_current
 
 	echo "Internal-managed Docker hysteria2 defaults synced: ports=${HY2_SERVER_PORTS:-unset}, dns=${HY2_PEER_DNS:-unset}, down=${HY2_SERVER_BANDWIDTH_DOWN:-unset}"
 }
@@ -1573,6 +1899,46 @@ check_subscription_auth_command() {
 	verify_subscription_auth "${HY2_EXPORT_USER:-}" "$auth_pass"
 	echo
 	echo "Health/evidence Basic Auth verified locally."
+}
+
+check_system_subscription_command() {
+	local account record auth_token ignored_up ignored_down basic_user public_path filename artifact downloaded
+
+	load_env
+	account="$(system_subscription_account_name || true)"
+	[[ -n "$account" ]] || die "System subscription account is not configured."
+	record="$(user_record "$account")"
+	[[ -n "$record" ]] || die "System subscription account is absent from Internal-issued users.csv."
+	IFS=$'\t' read -r auth_token ignored_up ignored_down <<< "$record"
+	[[ -n "$auth_token" ]] || die "System subscription account has no auth token."
+	public_path="$(system_subscription_public_path)"
+	[[ "${HY2_SYSTEM_SUBSCRIPTION_PATH:-}" == "$public_path" ]] \
+		|| die "System subscription Caddy path does not match the Internal-issued account."
+	[[ "${HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT:-$SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}" == "$SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT" ]] \
+		|| die "System subscription mixed port must remain ${SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}."
+	is_bcrypt_password_hash "${HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH:-}" \
+		|| die "System subscription Basic Auth hash is missing or invalid."
+	filename="${public_path#/}"
+	artifact="$STACK_DIR/data/subscriptions/$filename"
+	[[ -f "$artifact" ]] || die "System subscription YAML is not materialized: $filename"
+	grep -Eq "^mixed-port:[[:space:]]*${SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}[[:space:]]*$" "$artifact" \
+		|| die "System subscription YAML does not advertise mixed-port ${SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}."
+	container_running "$SUBSCRIPTIONS_CONTAINER" || die "System subscription outlet is not running."
+	basic_user="${HY2_SYSTEM_SUBSCRIPTION_BASIC_USER:-subscriptions}"
+	downloaded="$(mktemp "$STACK_DIR/data/subscriptions/.system-subscription-check.XXXXXX")"
+	if ! curl -fsS \
+		--config <(printf 'user = "%s:%s"\n' "$basic_user" "$auth_token") \
+		-o "$downloaded" \
+		"http://127.0.0.1:${HY2_EXPORT_FALLBACK_PORT}${public_path}"; then
+		rm -f "$downloaded"
+		die "System subscription exact-path Basic Auth verification failed."
+	fi
+	if ! cmp -s "$artifact" "$downloaded"; then
+		rm -f "$downloaded"
+		die "System subscription outlet returned content that differs from the managed YAML."
+	fi
+	rm -f "$downloaded"
+	echo "System subscription exact path, Basic Auth, and mixed-port ${SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}: passed"
 }
 
 list_users_command() {
@@ -1989,6 +2355,7 @@ reconcile_from_json_command() {
 	else
 		refresh_subscriptions
 	fi
+	ensure_system_subscription_caddy_current
 
 	echo "Tunnel reconcile applied: revision=${TUNNEL_REVISION:-unknown}, mode=${mode}, users=${TUNNEL_ACCOUNT_COUNT:-0}, host=${HY2_SERVER_HOST:-unset}, ports=${HY2_SERVER_PORTS:-unset}, routing=${HY2_MIHOMO_ROUTING_MODE:-cn-direct}, subscriptionSource=${TUNNEL_SUBSCRIPTION_SOURCE:-internal}"
 	if [[ "$old_host" != "${HY2_SERVER_HOST:-}" || "$old_routing" != "${HY2_MIHOMO_ROUTING_MODE:-}" ]]; then
@@ -2076,6 +2443,9 @@ main() {
 			done
 			check_subscription_auth_command "$auth_pass"
 		;;
+		check-system-subscription)
+			check_system_subscription_command
+		;;
 		list-users)
 			list_users_command
 		;;
@@ -2152,4 +2522,6 @@ main() {
 	esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi

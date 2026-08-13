@@ -122,6 +122,12 @@ function asTimestamp(value) {
   if (value === null) return null
   const text = String(value).trim()
 
+  // Scraped/social datasets commonly use Unix epoch values. Keep the accepted
+  // shapes explicit: 10 digits are seconds and 13 digits are milliseconds.
+  // Guessing by numeric magnitude would make malformed IDs look like dates.
+  if (/^\d{10}$/u.test(text)) return new Date(Number(text) * 1_000)
+  if (/^\d{13}$/u.test(text)) return new Date(Number(text))
+
   // Excel serial dates: days since 1899-12-30 (Lotus 1-2-3 leap-year bug and
   // all). A bare number in a date column is otherwise parsed as a year.
   if (/^\d+(\.\d+)?$/.test(text)) {

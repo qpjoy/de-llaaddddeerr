@@ -52,6 +52,10 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        # The Internal landing directory is operator-owned by host group 10
+        # (`wheel`). Add that group without changing host permissions. The
+        # current node runtime does not support supplementalGroupsPolicy.
+        supplementalGroups: [10]
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -128,3 +132,14 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            # Only the Admin plane may resolve operator-pasted server paths.
+            # The public API and background workers never receive this mount.
+            - name: server-files
+              mountPath: /shared_dir
+              readOnly: true
+      volumes:
+        - name: server-files
+          hostPath:
+            path: /shared_dir
+            type: Directory

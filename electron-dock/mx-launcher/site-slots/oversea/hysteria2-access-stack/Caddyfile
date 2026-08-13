@@ -1,19 +1,33 @@
-# Protected health/evidence outlet. Internal remains the subscription/account authority.
+# Protected health/evidence plus Internal-pushed system subscription outlet.
+# Oversea serves the artifact, but Internal remains the subscription/account authority.
 {$HY2_EXPORT_SITE_ADDRESS} {
 	root * /srv/hy2
-
-	@health path /healthz
-	respond @health 200
-
-	@protected not path /healthz
-	basic_auth @protected bcrypt {
-		{$HY2_EXPORT_USER} {$HY2_EXPORT_PASSWORD_HASH}
-	}
+	encode gzip
 
 	header {
 		Cache-Control "private, no-store"
 		X-Content-Type-Options "nosniff"
 	}
 
-	file_server
+	@health path /healthz
+	handle @health {
+		respond 200
+	}
+
+	# manage.sh derives this exact path from the Internal-issued *-subscriptions
+	# account. The disabled default never maps to a generated file.
+	@systemSubscription path {$HY2_SYSTEM_SUBSCRIPTION_PATH:/__system-subscription-disabled__}
+	handle @systemSubscription {
+		basic_auth bcrypt {
+			{$HY2_SYSTEM_SUBSCRIPTION_BASIC_USER} {$HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH}
+		}
+		file_server
+	}
+
+	handle {
+		basic_auth bcrypt {
+			{$HY2_EXPORT_USER} {$HY2_EXPORT_PASSWORD_HASH}
+		}
+		file_server
+	}
 }

@@ -39,7 +39,11 @@ flowchart LR
 瞬时输入并立即映射；数据库只保存 `rootId`、规范化相对路径和内容哈希，不保存绝对路径，
 也不接受 glob 或动态 mountPath。真实路径解析后必须仍位于批准根目录内，且拒绝任何
 symlink、device、socket、executable、未知扩展和超过 64 MiB 的文件。当前同步单文件
-能力要求 Admin/combined runtime 具有该精确目录的只读 mount；Public listener 不加载根。
+能力要求 Admin/combined runtime 具有该精确目录的只读 mount 和目录遍历权限；Public
+listener 不加载根。Internal 当前 `/shared_dir` 由宿主 `wheel` GID 10 管理，Admin Pod
+只附加该 numeric group，不修改源目录的 owner/mode。当前节点 runtime 不支持
+`supplementalGroupsPolicy: Strict`，因此升级节点后再启用该策略；其他部署必须显式配置
+对应只读 GID，不能为了导入而 `chmod 777`。
 
 ## 3. 未来目录 watcher 的不变式（未实现）
 
@@ -131,7 +135,8 @@ stateDiagram-v2
 ## 8. 当前可用的精确单文件流程
 
 1. 运维在 Hub runtime 配置静态 allowlist，例如
-   `MX_INSIGHT_SERVER_FILE_ROOTS={"internal":"/shared_dir/import"}`，并以只读方式挂载同一路径；
+   `MX_INSIGHT_SERVER_FILE_ROOTS={"internal":"/shared_dir/import"}`，以只读方式挂载同一路径，
+   并让 Admin runtime 仅附加可遍历该目录的 numeric group；
 2. 使用 Hub Admin Token 进入“外部数据源”，注册文件源并选择“服务器路径”；
 3. 在普通文本框直接粘贴白名单内的精确文件路径；注册后 catalog 仅显示
    `internal:relative/path`；
@@ -141,9 +146,18 @@ stateDiagram-v2
 6. 再次预览后导入。导入必须携带该次 preview SHA，文件变化或 schema drift 会返回 409；
 7. `ingest.file_observations` 保存路径 locator、内容版本、结构/规则及 import run 证据。
 
-当前支持 `.csv/.tsv/.jsonl/.ndjson/.xlsx/.xlsm/.txt/.md`；不支持目录、glob、PDF、DOCX、
-ZIP/RAR、Parquet、老 `.xls` 或 `.json` 数组。HanLP 在 PG 写入后由 ES projector 使用，
-不是文件解析的前置步骤。
+已内置 `rule-twitter-canyie`（目录显示为 `Twitter / Canyie archive`）：CSV、JSON 与 JSONL
+属于同一逻辑规则的不同不可变版本，固定归档到
+`external.twitter.canyie.v1 / twitter / post`。它使用 `content_id` 作为业务去重键，
+把 `full_text -> content -> text` 作为正文优先级，并转换 10 位 Unix 秒/13 位毫秒的
+时间字段。JSON/JSONL 的 `content_id`/`author_id` 必须写成字符串，不能用会损失 64 位精度的
+JavaScript number。相同字节 + 相同规则版本直接 skip；不同文件但同结构复用该规则，
+记录仍按 `content_id` 幂等 upsert。所谓归档不移动源文件。
+
+当前支持 `.csv/.tsv/.json/.jsonl/.ndjson/.xlsx/.xlsm/.txt/.md`。普通 JSON 接受顶层
+object、顶层 object array，或 `items`/`records`/`data` 中恰好一个 object array；primitive、
+混合数组和多候选 envelope 会拒绝。不支持目录、glob、PDF、DOCX、ZIP/RAR、Parquet 或老
+`.xls`。HanLP 在 PG 写入后由 ES projector 使用，不是文件解析的前置步骤。
 
 ## 9. 后续目录迁移步骤
 

@@ -443,6 +443,14 @@ export class MemoryStore {
     }
   }
 
+  async dataCenterRecords() {
+    return { items: [], hasMore: false, nextCursor: null }
+  }
+
+  async dataCenterRecordsByIds() {
+    return []
+  }
+
   async createExternalSource({
     sourceKey,
     displayName,
@@ -475,6 +483,14 @@ export class MemoryStore {
     return clone([...this.externalSources.values()].sort((left, right) => (
       right.createdAt.localeCompare(left.createdAt)
     )))
+  }
+
+  async listFileFormatRules() {
+    return []
+  }
+
+  async findApprovedFileFormatRuleByKey() {
+    return null
   }
 
   // Authoritative ingestion needs PostgreSQL transactions and uniqueness, so

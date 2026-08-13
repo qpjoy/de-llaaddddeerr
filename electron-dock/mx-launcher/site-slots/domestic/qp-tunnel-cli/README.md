@@ -300,6 +300,62 @@ sudo qp-tunnel-cli install --url 'http://download:pass@example.com/peer.yaml'
 sudo qp-tunnel-cli install --url 'http://example.com/peer.yaml' --user download --password pass
 ```
 
+### Isolated application subscription instance
+
+The historical/default instance remains unchanged: it uses
+`/etc/mihomo-client`, `mihomo-client.service`, and local mixed-port `7788`.
+To keep that login/bootstrap egress intact while exposing a second subscription
+to applications on `7890`, install the reserved named instance explicitly:
+
+```bash
+npm i -g @qpjoy/tunnel-cli@2.0.8
+
+sudo qp-tunnel-cli install \
+  --instance subscriptions \
+  --mixed-port 7890 \
+  --url 'http://user:pass@OVERSEA_IP:3434/peer_subscriptions.mihomo.yaml'
+```
+
+Use the export port assigned to that Oversea deployment; it is normally `3434`
+and may be `3435` when the default port is already occupied.
+
+`--mixed-port` is persisted in the named instance's private `client.env` and
+overrides any `mixed-port` embedded in the downloaded YAML. A named instance's
+first install requires the option, which prevents an omitted flag from silently
+competing with the default listener on `7788`.
+
+The `subscriptions` instance owns separate resources:
+
+- state and credentials: `/etc/mihomo-client/instances/subscriptions`
+- service: `mihomo-client@subscriptions.service`
+- binary and launcher: `/usr/local/bin/mihomo-subscriptions` and
+  `/usr/local/bin/mihomo-client-subscriptions`
+- profile, SSH helper/config, and daemon drop-in names (kept separate even
+  though this reserved instance refuses to enable those integrations)
+
+Manage or update it by passing the same instance name:
+
+```bash
+sudo qp-tunnel-cli status --instance subscriptions
+sudo qp-tunnel-cli update-subscription --instance subscriptions
+sudo qp-tunnel-cli restart --instance subscriptions
+sudo qp-tunnel-cli stop --instance subscriptions
+sudo qp-tunnel-cli start --instance subscriptions
+
+curl --proxy http://127.0.0.1:7890 https://www.google.com/generate_204
+```
+
+This instance is explicit-use-only. Host integration changes (`egress-*`,
+`server-*`, `tun-*`, `listen on/off`, `proxy-*`, `ssh-proxy-*`, and
+daemon/Docker proxy changes) are rejected for it, so installing or updating port
+`7890` cannot replace or restart the host-wide `7788` egress used by MX-H2I.
+Removal is instance-scoped:
+
+```bash
+sudo qp-tunnel-cli uninstall --instance subscriptions
+# Add --purge only when its private config and binary should also be deleted.
+```
+
 `--no-auth` forces an unauthenticated fetch and also avoids prompting for saved
 credentials, so do not combine it with a URL that needs `user:pass@` auth.
 

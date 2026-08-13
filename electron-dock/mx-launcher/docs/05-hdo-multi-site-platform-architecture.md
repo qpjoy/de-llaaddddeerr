@@ -135,7 +135,9 @@ Domestic 和 Oversea 不再是配置真相源，而是 Internal 的可插拔 sit
   入站服务回程，导致外部访问站点异常。
 - Oversea slot 默认接收 Internal 推送的 Docker hysteria2 access stack，mihomo、
   用户、权限和订阅 authority 留在 Internal。Oversea 暴露 `3434` 作为受保护的
-  health/evidence outlet，用于 `/healthz` 和 `/clients.csv` 摘要，不作为订阅控制面。
+  delivery/health/evidence outlet：除 `/healthz` 和 `/clients.csv` 摘要外，可只读分发
+  Internal 物化并推送的唯一 system subscription YAML；它不生成账户、不保存订阅主数据，
+  因而仍不作为订阅控制面。端口冲突时由 plan 显式改成 `3435` 或其它端口。
 - 如果 Domestic 无外网，Internal 会先提示配置 Oversea，再用 Internal 生成的 Oversea
   hysteria2 订阅和 `@qpjoy/tunnel-cli server-on` 帮 Domestic 做常驻 outbound bootstrap：国内目标按
   `cn-direct` 直连，外网目标经 Oversea；`tun-on` 只保留给非公网主机或短时排障。
@@ -150,7 +152,8 @@ Oversea 当前核心能力是 Internal 推送的 Docker `hysteria2-access-stack`
 
 - 提供 Hysteria2 访问能力。
 - 接收 signed snapshot 或 runner job 后生成节点本地配置。
-- 通过 `3434` 的 health/evidence outlet 上报节点健康、用户限速和受保护证据摘要。
+- 通过默认 `3434` 的 outlet 上报节点健康、用户限速和受保护证据摘要；同一 Caddy
+  只能在独立 Basic Auth 下分发 Internal 推送的精确 system subscription 路径。
 - 尽量以 site-agent outbound 方式连回控制面，减少 SSH 长连接和公网暴露。
 
 不应该保存：
@@ -229,6 +232,9 @@ flowchart LR
 | `GET /internal/v1/user-center/oversea-entitlements` | Internal modules / ops | 查看用户到 Oversea site 的 entitlement 和 runtime sync 状态 |
 | `POST /internal/v1/user-center/users/:userId/oversea` | Internal modules / ops | 手动分配或关闭用户级 Oversea access |
 | `POST /internal/v1/user-center/users/:userId/oversea/sync-runtime` | Internal modules / ops | 把用户级 hysteria2/mihomo access 同步到选定 Oversea runtime |
+| `GET /internal/v1/user-center/system-subscriptions` | Internal Admin / ops | 查看置顶、不可登录的 `subscriptions` 系统账号和脱敏 Direct-IP channel（7890 / 无流量 quota） |
+| `POST /internal/v1/user-center/system-subscriptions/ensure` | Internal Admin / ops | 幂等建立系统 Hysteria2 账号；不会触发用户登录、现有 7788 或远端部署 |
+| `POST /internal/v1/user-center/system-subscriptions/sites/:siteId/reveal` | Internal Admin / ops | 对已完成 Oversea Install/Sync 的 channel 临时返回 Basic URL 与命名实例安装命令；响应 `no-store` |
 | `GET /internal/v1/app-center/apps?userId=...&sourceAppId=...` | Launcher / AppCenter | 按应用访问策略过滤用户可见应用 |
 | `POST /internal/v1/sdk/gateway/access/evaluate` | SDK / 外部系统 | 可带 `appId/sourceAppId`，同时判断 SDK scope 和 app access policy |
 | `GET /internal/v1/user-center/service-accounts` | Internal modules / ops | 查看服务账号 |
@@ -385,7 +391,7 @@ internal-authority-domestic-relay-oversea-access-v1`：
 | `homePath.afterEnroll` | `home-to-domestic-wg-relay-to-internal`，enroll 后用 Domestic WG/H2I 进入 Internal |
 | `homePath.subscriptionFetch` | `home-through-domestic-h2i-to-internal-mihomo`，订阅 authority 仍是 Internal |
 | `homePath.overseaTraffic` | `home-direct-to-oversea-hysteria2`，订阅拿到后外网流量直连 Oversea |
-| `oversea.healthEvidenceOutlet` | Oversea `3434` 只作为 `/healthz` 和 `/clients.csv` 证据出口，authority 仍是 Internal Config Center |
+| `oversea.healthEvidenceOutlet` | Oversea 默认 `3434`（冲突时显式配置 `3435`）作为 `/healthz`、`/clients.csv` 和精确 system YAML 的只读分发出口；账户、凭证和 YAML authority 仍是 Internal Config Center |
 | `domestic.gatewayIp` | `10.88.0.1`，Domestic 只作为 relay/proxy/cache/forwarder |
 | `domestic.storesAuthority` | 固定为 `false`，禁止把用户、订阅、权限真相放回 Domestic |
 | `subscriptions.mihomo.fallback` | `domestic-snapshot-cache`，只允许缓存 Internal 签名快照 |

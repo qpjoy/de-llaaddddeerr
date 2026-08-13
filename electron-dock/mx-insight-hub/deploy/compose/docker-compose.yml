@@ -40,10 +40,17 @@ services:
       MX_INSIGHT_TG_MONITOR_DATABASE_URL: ${MX_INSIGHT_TG_MONITOR_DATABASE_URL:-}
       MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS: ${MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS:-60000}
       MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE: ${MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE:-1000}
+      MX_INSIGHT_SERVER_FILE_ROOTS: ${MX_INSIGHT_SERVER_FILE_ROOTS:-{"shared-dir":"/shared_dir"}}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:18180:18180"
+    # Match the read-only group on the operator-owned server-file directory.
+    # This grants traversal/read access without chmod/chown on source files.
+    group_add:
+      - "${MX_INSIGHT_SERVER_FILE_GROUP_ID:-10}"
+    volumes:
+      - ${MX_INSIGHT_SERVER_FILE_HOST_PATH:-/shared_dir}:/shared_dir:ro
     depends_on:
       postgres:
         condition: service_healthy

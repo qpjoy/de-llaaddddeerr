@@ -308,7 +308,9 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
           <CaretDown className="qp-dropdown__chevron" size={14} aria-hidden="true" />
         </button>
         <div className="qp-dropdown__menu mih-dropdown__menu" id={listboxId} role="listbox" aria-labelledby={labelId}>
-          {options.map((option, index) => (
+          {options.map((option, index) => option.group ? (
+            <div className="mih-dropdown__group" key={option.value} role="presentation">{option.label}</div>
+          ) : (
             <button
               ref={(node) => { optionRefs.current[index] = node }}
               className={`qp-dropdown__option${index === selectedIndex ? ' is-selected' : ''}${index === highlightedIndex ? ' is-highlighted' : ''}`}
@@ -320,7 +322,7 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
               aria-disabled={option.disabled || undefined}
               disabled={option.disabled}
               tabIndex={-1}
-              onMouseEnter={() => setHighlightedIndex(index)}
+              onMouseEnter={() => { if (!option.disabled) setHighlightedIndex(index) }}
               onClick={() => selectOption(index)}
             >
               {option.label}

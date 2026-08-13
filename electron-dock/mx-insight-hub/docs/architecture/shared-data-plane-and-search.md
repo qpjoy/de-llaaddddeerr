@@ -161,8 +161,9 @@ Night-All 回填：Night-All 侧的 `source_social_{platform}_contents` 已有 `
 Hub 内 Agent 已支持有序 OpenAI-compatible provider 链，但当前真正接进运行链路的
 只有两件事：
 
-1. **文件 mapping 建议**：只有管理员在 preview 显式传 `agent=true` 才调用；只发
-   列名、不发样例值，产出仍需版本化并人工批准。
+1. **文件结构识别与 mapping 建议**：管理台默认请求 Agent 增强；内置/已批准规则先
+   匹配，只有未命中时才调用模型。模型只接收列名和首部/中部/尾部的类型、缺失率与
+   聚合信号，不接收样例原值；产出仍需版本化并人工批准。
 2. **embedding 生成**：填充 `core.record_chunks` 与 ES `chunk` 索引。
 
 `classifyRecord()` 目前只是受约束的库能力，数据库 pull、Telegram 固定 v2 清洗和

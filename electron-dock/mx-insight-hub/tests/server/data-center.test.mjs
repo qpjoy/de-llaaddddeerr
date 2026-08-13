@@ -127,6 +127,100 @@ test('MemoryStore exposes an empty authoritative catalog', async () => {
   })
   assert.deepEqual(await store.getExternalSource('local-upload'), source)
   assert.deepEqual(await store.listExternalSources(), [source])
+  assert.deepEqual(await store.dataCenterRecords(), { items: [], hasMore: false, nextCursor: null })
+})
+
+test('Data Center record browser pages PostgreSQL and searches the ES projection', async () => {
+  const browseCalls = []
+  const searchCalls = []
+  const store = {
+    async dataCenterRecords(filters) {
+      browseCalls.push(filters)
+      return {
+        items: [{ id: 'record-1', datasetId: 'external.canyie.v1', body: '本地正文' }],
+        hasMore: true,
+        nextCursor: { sortTime: '2026-08-12T01:02:03.000Z', id: '11111111-1111-4111-8111-111111111111' },
+      }
+    },
+    async dataCenterRecordsByIds(ids) {
+      assert.deepEqual(ids, ['record-2'])
+      return [{
+        id: 'record-2', body: '完整、未脱敏正文',
+        stableFields: { source: { sourceKey: 'private-source' } },
+        extensions: { private_note: 'admin-visible' },
+      }]
+    },
+  }
+  const search = {
+    queries: {
+      async searchContent(query, options) {
+        searchCalls.push({ query, options })
+        return {
+          mode: 'elasticsearch',
+          items: [{ id: 'record-2', body: '命中的正文', highlight: { body: ['<em>命中</em>的正文'] } }],
+          hasMore: true,
+          nextCursor: { mode: 'elasticsearch', pitId: 'pit-1', searchAfter: [1, 'record-2'] },
+        }
+      },
+    },
+  }
+  const app = createApp({
+    service: {}, store, adapter: {}, search,
+    adminToken: ADMIN_TOKEN, listenerMode: 'combined', logger: quiet,
+  })
+  const server = createServer(app)
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const baseUrl = `http://127.0.0.1:${server.address().port}`
+  const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+  try {
+    const first = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?datasetId=external.canyie.v1&pageSize=25`,
+      { headers },
+    )
+    assert.equal(first.status, 200)
+    const firstBody = (await first.json()).data
+    assert.equal(firstBody.mode, 'postgres')
+    assert.equal(firstBody.pageInfo.hasMore, true)
+    assert.equal(typeof firstBody.pageInfo.nextCursor, 'string')
+    assert.deepEqual(browseCalls[0], {
+      datasetId: 'external.canyie.v1', platform: null, objectType: null, pageSize: 25, cursor: null,
+    })
+
+    const second = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?datasetId=external.canyie.v1&pageSize=25&cursor=${encodeURIComponent(firstBody.pageInfo.nextCursor)}`,
+      { headers },
+    )
+    assert.equal(second.status, 200)
+    assert.deepEqual(browseCalls[1].cursor, {
+      sortTime: '2026-08-12T01:02:03.000Z', id: '11111111-1111-4111-8111-111111111111',
+    })
+
+    const searched = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?q=%E5%91%BD%E4%B8%AD&platform=twitter&pageSize=10`,
+      { headers },
+    )
+    assert.equal(searched.status, 200)
+    const searchBody = (await searched.json()).data
+    assert.equal(searchBody.mode, 'elasticsearch')
+    assert.equal(searchBody.items[0].body, '完整、未脱敏正文')
+    assert.equal(searchBody.items[0].extensions.private_note, 'admin-visible')
+    assert.deepEqual(searchBody.items[0].highlight, { body: ['<em>命中</em>的正文'] })
+    assert.deepEqual(searchCalls[0], {
+      query: '命中',
+      options: {
+        datasetId: null, platform: 'twitter', objectType: null, size: 10, cursor: null,
+      },
+    })
+
+    const mismatched = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?datasetId=other&pageSize=25&cursor=${encodeURIComponent(firstBody.pageInfo.nextCursor)}`,
+      { headers },
+    )
+    assert.equal(mismatched.status, 400)
+    assert.equal((await mismatched.json()).error.code, 'invalid_cursor')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
 })
 
 test('PostgresStore aggregates canonical truth and returns only safe record fields', async () => {
@@ -214,4 +308,52 @@ test('PostgresStore aggregates canonical truth and returns only safe record fiel
   assert.match(calls[1].sql, /LIMIT \$4/)
   assert.doesNotMatch(calls.map((call) => call.sql).join('\n'), /\bbody\b|raw_payload|extensions|stable_fields|credential/i)
   assert.doesNotMatch(JSON.stringify(result.records), /must not escape/)
+})
+
+test('PostgresStore keyset-pages full canonical records for the Admin browser', async () => {
+  const calls = []
+  const store = new PostgresStore({
+    async query(sql, values) {
+      calls.push({ sql: sql.replace(/\s+/g, ' ').trim(), values })
+      return {
+        rows: [
+          {
+            id: '22222222-2222-4222-8222-222222222222',
+            dataset_id: 'external.canyie.v1', platform: 'twitter', object_type: 'post',
+            content_type: null, external_id: '1962355370623652093', url: 'https://x.com/canyie/status/1',
+            title: null, body: '正文一', author_external_id: '1192067927777742848', author_name: null,
+            current_revision: 1, event_time: '2025-09-01T03:22:33.000Z',
+            collected_at: '2025-11-21T03:14:24.000Z', deleted_at: null,
+            sort_time: '2025-09-01T03:22:33.000Z',
+          },
+          {
+            id: '11111111-1111-4111-8111-111111111111',
+            dataset_id: 'external.canyie.v1', platform: 'twitter', object_type: 'post',
+            content_type: null, external_id: 'older', url: null, title: null, body: '正文二',
+            author_external_id: null, author_name: null, current_revision: 1,
+            event_time: '2025-08-01T00:00:00.000Z', collected_at: null, deleted_at: null,
+            sort_time: '2025-08-01T00:00:00.000Z',
+          },
+        ],
+      }
+    },
+  })
+  const result = await store.dataCenterRecords({
+    datasetId: 'external.canyie.v1', platform: 'twitter', objectType: 'post', pageSize: 1,
+    cursor: { sortTime: '2026-01-01T00:00:00.000Z', id: '33333333-3333-4333-8333-333333333333' },
+  })
+  assert.equal(result.items.length, 1)
+  assert.equal(result.items[0].body, '正文一')
+  assert.equal(result.items[0].externalId, '1962355370623652093')
+  assert.equal(result.hasMore, true)
+  assert.deepEqual(result.nextCursor, {
+    sortTime: '2025-09-01T03:22:33.000Z', id: '22222222-2222-4222-8222-222222222222',
+  })
+  assert.deepEqual(calls[0].values, [
+    'external.canyie.v1', 'twitter', 'post',
+    '2026-01-01T00:00:00.000Z', '33333333-3333-4333-8333-333333333333', 2,
+  ])
+  assert.match(calls[0].sql, /^WITH page AS MATERIALIZED/)
+  assert.match(calls[0].sql, /JOIN core\.canonical_records r ON r\.id = page\.id/)
+  assert.match(calls[0].sql, /ORDER BY coalesce\(r\.event_time, r\.collected_at, r\.last_seen_at, r\.first_seen_at\) DESC, r\.id DESC/)
 })

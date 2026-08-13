@@ -147,3 +147,119 @@ test('redacted evidence removes normalized and original commands', () => {
     'artifact transport failures must pass the normalized step redaction policy into diagnosis'
   );
 });
+
+test('Internal tunnel-state credential material is streamed to SSH stdin, never argv', async () => {
+  const tunnelStateStdinTransport = Function(
+    `${functionSource(workerSource, 'tunnelStateStdinTransport')}; return tunnelStateStdinTransport;`
+  )();
+  const secretJson = JSON.stringify({ accounts: [{ authToken: 'SYSTEM_UNLIMITED_SECRET' }] });
+  const base64Payload = Buffer.from(secretJson).toString('base64');
+  const plannedRemoteCommand = `umask 077 && printf "%s" ${base64Payload} | base64 -d > /opt/mx/site-agent/.tunnel-state.json.tmp && chmod 600 /opt/mx/site-agent/.tunnel-state.json.tmp && mv -f /opt/mx/site-agent/.tunnel-state.json.tmp /opt/mx/site-agent/tunnel-state.json`;
+  const transport = tunnelStateStdinTransport(plannedRemoteCommand);
+  assert.ok(transport);
+  assert.equal(transport.base64Payload, base64Payload);
+  assert.equal(transport.remoteCommand.includes(base64Payload), false);
+  assert.equal(transport.remoteCommand.includes('SYSTEM_UNLIMITED_SECRET'), false);
+  assert.match(transport.remoteCommand, /^umask 077 && base64 -d >/);
+
+  let capturedInput = null;
+  let capturedArgs = null;
+  const execFileWithInput = Function(
+    'execFile',
+    `${functionSource(workerSource, 'execFileWithInput')}; return execFileWithInput;`
+  )((_file, args, _options, callback) => {
+    capturedArgs = args;
+    queueMicrotask(() => callback(null, 'ok', ''));
+    return {
+      stdin: { end: (value) => { capturedInput = value; } },
+      kill: () => {}
+    };
+  });
+  const result = await execFileWithInput(
+    'ssh',
+    ['root@203.0.113.21', transport.remoteCommand],
+    transport.base64Payload,
+    {}
+  );
+  assert.equal(result.stdout, 'ok');
+  assert.equal(capturedInput, base64Payload);
+  assert.equal(JSON.stringify(capturedArgs).includes(base64Payload), false);
+  assert.match(functionSource(workerSource, 'executeRemoteWorkerCommand'), /execFileWithInput\(/);
+});
+
+test('remote SSH worker rejects plan/profile target drift before artifact execution', () => {
+  const remoteSshGateFailures = Function(
+    'existsSync',
+    [
+      'function executableRemoteCommandKind() { return false; }',
+      'function allowedRemoteShellCommand() { return true; }',
+      functionSource(workerSource, 'normalizedSshBindingValue'),
+      functionSource(workerSource, 'normalizedSshHostValue'),
+      functionSource(workerSource, 'sshProfilePlanBindingFailures'),
+      functionSource(workerSource, 'remoteSshGateFailures'),
+      'return remoteSshGateFailures;'
+    ].join('\n')
+  )(() => true);
+  const job = {
+    jobId: 'job_oversea',
+    planId: 'plan_oversea',
+    siteId: 'mx-oversea-hk01',
+    kind: 'oversea',
+    status: 'ready',
+    mode: 'remote-ssh',
+    currentReportId: null,
+    approval: { required: true, status: 'recorded' },
+    changeWindow: { required: true, start: '2099-01-01T00:00:00.000Z', end: '2099-01-01T01:00:00.000Z' }
+  };
+  const plan = {
+    planId: job.planId,
+    siteId: job.siteId,
+    kind: job.kind,
+    host: '203.0.113.21',
+    ssh: { profileId: 'ssh_oversea', profileSource: 'config-center', user: 'root', port: 22 }
+  };
+  const profile = {
+    managedProfileId: plan.ssh.profileId,
+    managedProfileSiteId: plan.siteId,
+    managedProfileKind: plan.kind,
+    managedProfileStatus: 'active',
+    host: plan.host,
+    sshUser: plan.ssh.user,
+    sshPort: plan.ssh.port,
+    strictHostKeyChecking: 'yes',
+    batchMode: 'yes',
+    profileFilePath: null,
+    profileFileError: null,
+    identityFile: null,
+    knownHostsFile: null,
+    sshConfigFile: null
+  };
+  const evidence = { failures: [], transport: { repositoryRootSynced: false } };
+  const step = { command: 'record deployment intent' };
+
+  assert.deepEqual(remoteSshGateFailures(job, plan, step, evidence, 'deployment-intent', profile), []);
+  assert.match(
+    remoteSshGateFailures(job, plan, step, evidence, 'deployment-intent', {
+      ...profile,
+      host: '198.51.100.77'
+    }).join('\n'),
+    /plan host 203\.0\.113\.21 does not match effective profile host 198\.51\.100\.77/
+  );
+  assert.match(
+    remoteSshGateFailures(job, plan, step, evidence, 'deployment-intent', {
+      ...profile,
+      strictHostKeyChecking: 'no'
+    }).join('\n'),
+    /StrictHostKeyChecking=yes is required/
+  );
+  assert.match(
+    functionSource(workerSource, 'artifactPushRemoteSshStep'),
+    /remoteSshGateFailures\(job, plan, workerStep, evidence, commandKindValue, sshProfile\)/,
+    'the real artifact-push path must invoke the plan/profile binding gate immediately before execution'
+  );
+  assert.match(
+    workerSource,
+    /\(report\.status === 'failed' \|\| report\.status === 'blocked'\) && step\.stopOnFailure !== false/,
+    'a blocked required step must stop later remote mutations just like an executed failure'
+  );
+});

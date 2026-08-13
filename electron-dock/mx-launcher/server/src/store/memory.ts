@@ -45,6 +45,7 @@ import {
   launcherNetworkLeaseProfile,
   releaseLauncherNetworkLease,
   buildSiteSlotAccessAccount,
+  canonicalSiteSlotAccessAccountName,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
   buildSiteSlotDomesticRuntimeConfig,
@@ -2266,6 +2267,12 @@ export class MemoryStore implements PlatformStore {
   getLauncherNetworkMihomoSite(siteId: string): LauncherNetworkMihomoSite | null {
     const site = this.launcherNetworkMihomoSites.get(siteId) ?? null;
     return site ? normalizeLauncherNetworkMihomoSite(site) : null;
+  }
+
+  listLauncherNetworkMihomoSites(): LauncherNetworkMihomoSite[] {
+    return [...this.launcherNetworkMihomoSites.values()]
+      .map((site) => normalizeLauncherNetworkMihomoSite(site))
+      .sort((a, b) => a.siteId.localeCompare(b.siteId));
   }
 
   getLauncherNetworkMihomoReachability(siteId: string): LauncherNetworkReachabilityPlan | null {
@@ -4559,7 +4566,7 @@ function resolveIssueAccountNames(input: SiteSlotAccessAccountIssueInput, siteId
   const names = (input.issueDefaults === false && requested.length > 0)
     ? requested
     : [...defaultSiteSlotAccessAccountNames(siteId), ...requested];
-  return [...new Set(names.map((name) => String(name).trim().toLowerCase()).filter(Boolean))];
+  return [...new Set(names.map((name) => canonicalSiteSlotAccessAccountName(String(name))))];
 }
 
 function deleteMapValues<K, V>(values: Map<K, V>, predicate: (value: V) => boolean): number {

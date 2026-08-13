@@ -106,6 +106,45 @@ Successful responses preserve the stable Night-All data-search envelope and add:
 - `x-mx-insight-request-id`: durable Hub request ID;
 - `idempotent-replay: true|false`.
 
+## Hub canonical stored search
+
+```http
+POST /api/v1/data/stored/search
+Idempotency-Key: <caller-generated stable key>
+Content-Type: application/json
+
+{
+  "platform": "xiaohongshu",
+  "query": "AI Agent",
+  "datasetId": "night-all.search.v1",
+  "objectType": "post",
+  "pageSize": 20,
+  "cursor": "opaque-if-present"
+}
+```
+
+This route searches only Hub canonical data and never calls Night-All or another
+provider. `platform` and `query` are required. `datasetId` and `objectType` are
+optional exact logical filters. The strict body allowlist rejects physical
+database/index names, SQL, Elasticsearch DSL/scripts and arbitrary parameters.
+The response uses `contractVersion=mx-insight-hub.stored-search.v1` and reports
+`source=hub` both for the response and each returned item. Connector lineage,
+raw payloads, extensions and provider coordinates are not returned.
+
+Authorization is currently **platform-grant only**. `datasetId` narrows results;
+it is not a separate authorization grant. A consumer granted a platform can
+search the complete Hub canonical corpus for that platform. Dataset-level or
+tenant-row grants are not implemented and must not be inferred from this filter.
+
+Elasticsearch is the preferred ranked projection. A transport failure on the
+first page uses the existing PostgreSQL substring fallback and reports
+`searchMode=postgres` plus `search_projection_degraded`. A reachable cluster
+that rejects the request is an error rather than a silent fallback. Pagination
+uses an HMAC-signed opaque cursor bound to query, platform, datasetId, objectType
+and page size; a later page requires a new idempotency key. Grant, policy, quota,
+idempotency replay and usage evidence use the same per-platform ledger as
+`POST /api/v1/data/search`.
+
 ## Telegram stored data
 
 ### History

@@ -16,6 +16,17 @@
       `3434`，填 `3435` 或其它空闲 TCP 端口。Run Setup 会把它写入远端
       `HY2_EXPORT_FALLBACK_PORT` 并使用同一端口做 health smoke。
       Save Profile 只保存 SSH 凭据；这两个端口随 Create Plan / Shadow Setup / Run Setup 生效。
+3.1.3. Internal 下发合法的 `*-subscriptions` access account 后，同一个 Health TCP 端口还会
+      只读分发一个精确路径 `/peer_<account>.mihomo.yaml`。该文件使用独立 Basic Auth，
+      默认用户名是 `subscriptions`；默认密码复用这一个 system access account 的高熵 token。
+      Oversea 的受限 `users.csv`/YAML 因 Hysteria2 运行需要包含该 token，但 Caddy 容器只接收
+      bcrypt hash。YAML 固定使用本机 `mixed-port: 7890`，不会改动
+      MX-H2I/用户订阅现有的 `7788`。如果账户、token 或 bcrypt hash 缺失/非法，路径会切到
+      不存在的 disabled 路径，`/healthz` 与受保护的 `/clients.csv` 仍继续工作。
+      还要求 Internal/Oversea 已得到 TLS certificate fingerprint，避免生成只有
+      `skip-cert-verify`、没有证书 pin 的 direct-IP 节点。直接 IP 的 HTTP Basic 链路是兼容性
+      fallback，凭据和 YAML 在传输层不加密；仅在受控网络
+      使用并定期轮换，不要把带 `user:password@` 的完整 URL 写入日志或工单。
 3.2. Rotate 不勾选。
 3.3. 点 Bootstrap Key。
 3.4. 成功后它会自动保存 profile，并回填 Internal 默认的 Identity / Known Hosts 路径。

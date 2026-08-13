@@ -25,6 +25,11 @@ qp-tunnel-cli hdo enroll --internal-url 'http://127.0.0.1:18090' --product-id h2
 HDO_PASSWORD='...' qp-tunnel-cli hdo enroll --server-url 'https://domestic.example.com' --internal-url 'http://127.0.0.1:18090' --product-id h2o --username internal-i
 
 qp-tunnel-cli install --url 'http://user:pass@host:3434/peer_xxx.mihomo.yaml'
+# 独立给其他应用消费的系统订阅；不会改动现有 7788 默认实例
+npm i -g @qpjoy/tunnel-cli@2.0.8
+qp-tunnel-cli install --instance subscriptions --mixed-port 7890 \
+  --url 'http://user:pass@host:3434/peer_subscriptions.mihomo.yaml'
+qp-tunnel-cli status --instance subscriptions
 # Domestic bootstrap can use an Internal-pushed local YAML before WG relay reaches Internal.
 qp-tunnel-cli install --file '/opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml'
 

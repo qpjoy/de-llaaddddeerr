@@ -4573,9 +4573,11 @@ ops_site_slot() {
           requestId: "manage-site-slot-ssh-profile-upsert"
         };
         (async () => {
+          const opsToken = String(process.env.MX_INTERNAL_OPS_TOKEN || "").trim();
+          if (!opsToken) throw new Error("MX_INTERNAL_OPS_TOKEN is required to update an SSH profile");
           const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/site-slot-ssh-profiles`, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: { "content-type": "application/json", "x-mx-ops-token": opsToken },
             body: JSON.stringify(body)
           });
           const payload = await res.json();
@@ -4615,9 +4617,11 @@ ops_site_slot() {
           requestId: "manage-site-slot-ssh-profile-readiness"
         };
         (async () => {
+          const opsToken = String(process.env.MX_INTERNAL_OPS_TOKEN || "").trim();
+          if (!opsToken) throw new Error("MX_INTERNAL_OPS_TOKEN is required to probe an SSH profile");
           const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/site-slot-ssh-profiles/${encodeURIComponent(profileId)}/readiness-probe`, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: { "content-type": "application/json", "x-mx-ops-token": opsToken },
             body: JSON.stringify(body)
           });
           const payload = await res.json();
@@ -5189,9 +5193,11 @@ ops_site_slot() {
           requestId: "manage-site-slot-worker-report"
         };
         (async () => {
+          const headers = { "content-type": "application/json" };
+          if (process.env.MX_INTERNAL_OPS_TOKEN) headers["x-mx-ops-token"] = process.env.MX_INTERNAL_OPS_TOKEN;
           const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/worker-jobs/${encodeURIComponent(jobId)}/reports`, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers,
             body: JSON.stringify(body)
           });
           const payload = await res.json();

@@ -39,7 +39,7 @@ and surfaces `source_draining` or `source_busy` directly.
 Task cards show durable cursor/queue and import-run row/changed/deleted/rejected
 evidence without displaying raw rejected rows. Cloud/object/warehouse choices
 are not shown until their adapters and checkpoint semantics exist; today the
-implemented source types are PostgreSQL and direct CSV/TSV, JSONL/NDJSON,
+implemented source types are PostgreSQL and direct CSV/TSV, JSON/JSONL/NDJSON,
 TXT/MD and XLSX/XLSM files.
 Checkpoint reset is shown only for paused database sources and requires typing
 the exact source key. If a pull still owns the source advisory lock, the UI

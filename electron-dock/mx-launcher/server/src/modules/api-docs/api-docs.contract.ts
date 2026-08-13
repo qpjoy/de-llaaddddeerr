@@ -805,7 +805,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         summary: '列出 User Center 用户',
         description: 'Internal 管理面读取接口，返回权威用户目录。对外集成请用 `/internal/v1/sdk/users`，它有 scope 边界。',
         operationId: 'listInternalUserCenterUsers',
-        auth: 'internal',
+        auth: 'ops-token',
         response: { users: [userExample] }
       }),
       post: operation({
@@ -814,7 +814,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         description: '创建主体、本地登录凭据和可选的 Oversea 授权。'
           + '`defaultOverseaSiteIds` 省略时由平台默认站点决定（可在 admin 后台改，不再写死 oversea-main）。',
         operationId: 'createInternalUserCenterUser',
-        auth: 'internal',
+        auth: 'ops-token',
         request: {
           account: 'partner-alice',
           displayName: 'Alice',
@@ -828,6 +828,69 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         },
         required: ['account'],
         response: { user: userExample }
+      })
+    },
+    '/internal/v1/user-center/system-subscriptions': {
+      get: operation({
+        tag: 'Oversea Subscriptions',
+        summary: '列出置顶的系统订阅目录',
+        description: 'ops-token 管理接口。返回不可登录、不可删除的 subscriptions 虚拟系统账号和脱敏的 Direct-IP channel。'
+          + 'GET 永不返回 Hysteria2 token 或 Basic 密码；ready 还要求最新 Oversea 部署证据晚于账号变更。',
+        operationId: 'listSystemSubscriptions',
+        auth: 'ops-token',
+        response: {
+          catalog: {
+            account: { accountId: 'subscriptions', kind: 'system-subscription-catalog', loginAllowed: false, immutable: true, pinnedRank: 0 },
+            summary: { total: 1, ready: 1, pending: 0, blocked: 0 },
+            subscriptions: [{
+              subscriptionId: 'oversea-direct:mx-oversea-hk01',
+              siteId: 'mx-oversea-hk01',
+              status: 'ready',
+              delivery: { kind: 'oversea-direct-ip-http-basic', host: '203.0.113.21', port: 3434, urlMasked: 'http://subscriptions:***@203.0.113.21:3434/peer_mx-oversea-hk01-subscriptions.mihomo.yaml' },
+              client: { instance: 'subscriptions', mixedPort: 7890, explicitUseOnly: true },
+              trafficPolicy: { mode: 'unlimited', maxBytes: null, resetPeriod: null, expiresAt: null },
+              bandwidthHint: { down: '50 Mbps', up: '50 Mbps' }
+            }]
+          }
+        }
+      })
+    },
+    '/internal/v1/user-center/system-subscriptions/ensure': {
+      post: operation({
+        tag: 'Oversea Subscriptions',
+        summary: '确保系统订阅运行账号',
+        description: '只在 Internal 幂等创建非登录的 site access account，不执行远端部署。'
+          + '随后必须走普通 Oversea Install/Sync；这个边界确保现有用户 OAuth、7788 和 ensure-subscription 不被隐式修改。',
+        operationId: 'ensureSystemSubscriptions',
+        auth: 'ops-token',
+        request: { siteIds: ['mx-oversea-hk01'], requestedBy: 'desktop-admin', requestId: 'system-subscriptions-ensure-001' },
+        response: {
+          ensure: {
+            status: 'ensured',
+            accounts: [{ siteId: 'mx-oversea-hk01', accountId: 'slotacct_mx-oversea-hk01_mx-oversea-hk01-subscriptions', username: 'mx-oversea-hk01-subscriptions', status: 'active' }],
+            missingSiteIds: [],
+            nextAction: 'Run Oversea Install/Sync for each pending site before revealing its direct-IP URL.'
+          }
+        }
+      })
+    },
+    '/internal/v1/user-center/system-subscriptions/sites/{siteId}/reveal': {
+      post: operation({
+        tag: 'Oversea Subscriptions',
+        summary: '临时显示 Direct-IP 系统订阅凭据',
+        description: 'ops-token + no-store。只允许 ready channel；明文 URL 和命名实例安装命令仅在本次响应返回。'
+          + '命名实例使用 7890，不会覆盖默认 mihomo-client/7788；禁止把响应写入审计或日志。',
+        operationId: 'revealSystemSubscription',
+        auth: 'ops-token',
+        pathParams: ['siteId'],
+        response: {
+          subscription: {
+            subscriptionId: 'oversea-direct:mx-oversea-hk01',
+            siteId: 'mx-oversea-hk01',
+            url: 'http://subscriptions:<secret>@203.0.113.21:3434/peer_mx-oversea-hk01-subscriptions.mihomo.yaml',
+            installCommand: "qp-tunnel-cli install --instance subscriptions --mixed-port 7890 --url 'http://subscriptions:<secret>@203.0.113.21:3434/peer_mx-oversea-hk01-subscriptions.mihomo.yaml'"
+          }
+        }
       })
     },
     '/internal/v1/user-center/users/import': {
@@ -1040,7 +1103,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         scopes: ['oversea.subscription.ensure'],
         auth: 'internal-bearer',
         pathParams: ['userId'],
-        response: 'mixed-port: 7890\nproxies:\n  - name: oversea-main\n    type: hysteria2\n    server: oversea.example.com'
+        response: 'mixed-port: 7788\nproxies:\n  - name: oversea-main\n    type: hysteria2\n    server: oversea.example.com'
       })
     },
     '/internal/v1/user-center/users/{userId}/oversea/sync-runtime': {
@@ -1142,7 +1205,8 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         tag: 'Oversea Subscriptions',
         summary: '单站点单账号订阅',
         description: 'URL 即凭据的单节点订阅，用于只想连某一台机器的场景。'
-          + '想要多节点和可切换，用上面的聚合链接；这条不会随 entitlement 增减节点而变化。',
+          + '想要多节点和可切换，用上面的聚合链接；这条不会随 entitlement 增减节点而变化。'
+          + '该历史路由只服务普通 access account；`*-subscriptions` 系统账号固定返回 404，必须走 ops-token + no-store reveal 后消费 Oversea Direct-IP URL。',
         operationId: 'getSiteSlotHysteria2Subscription',
         auth: 'public',
         pathParams: ['siteId', 'username'],

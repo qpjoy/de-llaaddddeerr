@@ -11,10 +11,15 @@ const execFileAsync = promisify(execFile);
 const [baseArg, jobId, modeArg = 'simulate'] = process.argv.slice(2);
 const baseUrl = (baseArg || process.env.MX_INTERNAL_BASE_URL || 'http://127.0.0.1:18090').replace(/\/+$/, '');
 const mode = modeArg || 'simulate';
+const internalOpsToken = (process.env.MX_INTERNAL_OPS_TOKEN || '').trim();
 const allowedModes = new Set(['simulate', 'artifact-push-dry-run', 'artifact-push-remote-ssh-plan', 'remote-readonly-probe', 'artifact-push-remote-ssh', 'artifact-push-fake-transport', 'awx-shadow', 'awx-credential-sync', 'awx-object-sync', 'awx-launch', 'local-exec']);
 
 if (!jobId) {
   die('Usage: node server/scripts/site-slot-worker-run.mjs <base-url> <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec]');
+}
+
+if (!internalOpsToken) {
+  die('MX_INTERNAL_OPS_TOKEN is required to fetch unredacted worker commands and submit worker evidence.');
 }
 
 if (!allowedModes.has(mode)) {
@@ -82,8 +87,12 @@ try {
   }
   const { job } = await request(`/internal/v1/site-slots/worker-jobs/${encodeURIComponent(jobId)}`);
   if (!job) die(`Site slot worker job not found: ${jobId}`);
-  const managedSshProfile = mode === 'artifact-push-remote-ssh-plan' || mode === 'remote-readonly-probe' || mode === 'artifact-push-remote-ssh' || mode === 'artifact-push-fake-transport' || mode === 'awx-shadow'
-    ? await fetchManagedSshProfile(job)
+  const usesManagedSshProfile = mode === 'artifact-push-remote-ssh-plan' || mode === 'remote-readonly-probe' || mode === 'artifact-push-remote-ssh' || mode === 'artifact-push-fake-transport' || mode === 'awx-shadow';
+  const plan = usesManagedSshProfile
+    ? (await request(`/internal/v1/site-slots/plans/${encodeURIComponent(job.planId)}`)).plan ?? null
+    : null;
+  const managedSshProfile = usesManagedSshProfile
+    ? await fetchManagedSshProfile(job, plan)
     : null;
 
   const stepReports = [];
@@ -103,10 +112,10 @@ try {
       continue;
     }
 
-    const report = await workerStepReport(mode, step, job, managedSshProfile);
+    const report = await workerStepReport(mode, step, job, managedSshProfile, plan);
     stepReports.push(report);
 
-    if (report.status === 'failed' && step.stopOnFailure !== false) {
+    if ((report.status === 'failed' || report.status === 'blocked') && step.stopOnFailure !== false) {
       blockRemaining = true;
     }
   }
@@ -161,7 +170,9 @@ try {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(`${baseUrl}${path}`, options);
+  const headers = new Headers(options.headers || {});
+  if (internalOpsToken) headers.set('x-mx-ops-token', internalOpsToken);
+  const response = await fetch(`${baseUrl}${path}`, { ...options, headers });
   const text = await response.text();
   const payload = text ? parseJson(text) : {};
   if (!response.ok) {
@@ -289,8 +300,8 @@ async function runAwxLaunchAction(id) {
   }
 }
 
-async function fetchManagedSshProfile(job) {
-  const profileId = process.env.SITE_SLOT_SSH_PROFILE_ID;
+async function fetchManagedSshProfile(job, plan) {
+  const profileId = process.env.SITE_SLOT_SSH_PROFILE_ID || plan?.ssh?.profileId;
   const path = profileId
     ? `/internal/v1/config-center/site-slot-ssh-profiles/${encodeURIComponent(profileId)}`
     : `/internal/v1/config-center/site-slot-ssh-profiles/site/${encodeURIComponent(job.siteId)}`;
@@ -303,13 +314,13 @@ async function fetchManagedSshProfile(job) {
   }
 }
 
-async function workerStepReport(mode, step, job, managedSshProfile) {
+async function workerStepReport(mode, step, job, managedSshProfile, plan) {
   if (mode === 'simulate') return simulateStep(step);
   if (mode === 'artifact-push-dry-run') return artifactPushDryRunStep(step, job);
-  if (mode === 'artifact-push-remote-ssh-plan') return artifactPushRemoteSshPlanStep(step, job, managedSshProfile);
-  if (mode === 'remote-readonly-probe') return remoteReadonlyProbeStep(step, job, managedSshProfile);
-  if (mode === 'artifact-push-remote-ssh') return artifactPushRemoteSshStep(step, job, managedSshProfile);
-  if (mode === 'artifact-push-fake-transport') return artifactPushFakeTransportStep(step, job, managedSshProfile);
+  if (mode === 'artifact-push-remote-ssh-plan') return artifactPushRemoteSshPlanStep(step, job, managedSshProfile, plan);
+  if (mode === 'remote-readonly-probe') return remoteReadonlyProbeStep(step, job, managedSshProfile, plan);
+  if (mode === 'artifact-push-remote-ssh') return artifactPushRemoteSshStep(step, job, managedSshProfile, plan);
+  if (mode === 'artifact-push-fake-transport') return artifactPushFakeTransportStep(step, job, managedSshProfile, plan);
   if (mode === 'awx-shadow') return awxShadowStep(step, job, managedSshProfile);
   return executeStep(step);
 }
@@ -349,7 +360,7 @@ function artifactPushDryRunStep(step, job) {
   };
 }
 
-function artifactPushRemoteSshPlanStep(step, job, managedSshProfile) {
+function artifactPushRemoteSshPlanStep(step, job, managedSshProfile, plan) {
   const startedAt = new Date().toISOString();
   const workerStep = normalizeRemoteWorkerStep(step, job);
   const commandKindValue = commandKind(workerStep.command);
@@ -369,7 +380,7 @@ function artifactPushRemoteSshPlanStep(step, job, managedSshProfile) {
       reason: 'Plan-only mode records the final SSH/rsync/scp command after gates and SSH profile expansion.'
     }
   });
-  const gateFailures = remoteSshGateFailures(job, workerStep, evidence, commandKindValue, sshProfile);
+  const gateFailures = remoteSshGateFailures(job, plan, workerStep, evidence, commandKindValue, sshProfile);
   if (gateFailures.length > 0) {
     const blockedEvidence = {
       ...evidence,
@@ -425,7 +436,7 @@ function artifactPushRemoteSshPlanStep(step, job, managedSshProfile) {
   };
 }
 
-async function remoteReadonlyProbeStep(step, job, managedSshProfile) {
+async function remoteReadonlyProbeStep(step, job, managedSshProfile, plan) {
   const startedAt = new Date().toISOString();
   const sshProfile = buildSshProfile(job, managedSshProfile);
   const command = readOnlyProbeCommand(sshProfile);
@@ -457,7 +468,7 @@ async function remoteReadonlyProbeStep(step, job, managedSshProfile) {
     ],
     gateFailures: []
   };
-  const gateFailures = remoteReadonlyProbeGateFailures(job, sshProfile);
+  const gateFailures = remoteReadonlyProbeGateFailures(job, plan, sshProfile);
   if (gateFailures.length > 0) {
     return {
       stepId: step.stepId,
@@ -552,7 +563,7 @@ function remoteReadonlyProbeSkippedStep(step, job) {
   };
 }
 
-async function artifactPushRemoteSshStep(step, job, managedSshProfile) {
+async function artifactPushRemoteSshStep(step, job, managedSshProfile, plan) {
   const startedAt = new Date().toISOString();
   const workerStep = normalizeRemoteWorkerStep(step, job);
   const commandKindValue = commandKind(workerStep.command);
@@ -566,7 +577,7 @@ async function artifactPushRemoteSshStep(step, job, managedSshProfile) {
     effectiveCommand,
     sshProfile
   });
-  const gateFailures = remoteSshGateFailures(job, workerStep, evidence, commandKindValue, sshProfile);
+  const gateFailures = remoteSshGateFailures(job, plan, workerStep, evidence, commandKindValue, sshProfile);
   if (gateFailures.length > 0) {
     const blockedEvidence = {
       ...evidence,
@@ -648,7 +659,7 @@ async function artifactPushRemoteSshStep(step, job, managedSshProfile) {
   }
 }
 
-function artifactPushFakeTransportStep(step, job, managedSshProfile) {
+function artifactPushFakeTransportStep(step, job, managedSshProfile, plan) {
   const startedAt = new Date().toISOString();
   const workerStep = normalizeRemoteWorkerStep(step, job);
   const commandKindValue = commandKind(workerStep.command);
@@ -668,7 +679,7 @@ function artifactPushFakeTransportStep(step, job, managedSshProfile) {
       reason: 'HTTP smoke harness records worker report evidence without opening SSH/rsync/scp.'
     }
   });
-  const gateFailures = remoteSshGateFailures(job, workerStep, evidence, commandKindValue, sshProfile);
+  const gateFailures = remoteSshGateFailures(job, plan, workerStep, evidence, commandKindValue, sshProfile);
   if (gateFailures.length > 0) {
     const blockedEvidence = {
       ...evidence,
@@ -986,8 +997,8 @@ function awxJobTemplate(job) {
   return `mx-site-slot-${job.kind}-worker-v1`;
 }
 
-function remoteSshGateFailures(job, step, evidence, commandKindValue, sshProfile) {
-  const failures = [...evidence.failures];
+function remoteSshGateFailures(job, plan, step, evidence, commandKindValue, sshProfile) {
+  const failures = [...evidence.failures, ...sshProfilePlanBindingFailures(job, plan, sshProfile)];
   if (job.status !== 'ready') failures.push(`worker job is not ready: ${job.status}`);
   if (job.currentReportId) failures.push(`worker job already has report: ${job.currentReportId}`);
   if (job.mode !== 'remote-ssh') failures.push(`worker job mode must be remote-ssh, got ${job.mode}`);
@@ -1008,8 +1019,8 @@ function remoteSshGateFailures(job, step, evidence, commandKindValue, sshProfile
   return failures;
 }
 
-function remoteReadonlyProbeGateFailures(job, sshProfile) {
-  const failures = [];
+function remoteReadonlyProbeGateFailures(job, plan, sshProfile) {
+  const failures = sshProfilePlanBindingFailures(job, plan, sshProfile);
   if (job.status !== 'ready') failures.push(`worker job is not ready: ${job.status}`);
   if (job.currentReportId) failures.push(`worker job already has report: ${job.currentReportId}`);
   if (job.mode !== 'remote-ssh') failures.push(`worker job mode must be remote-ssh, got ${job.mode}`);
@@ -1031,6 +1042,48 @@ function remoteReadonlyProbeGateFailures(job, sshProfile) {
   if (sshProfile.strictHostKeyChecking !== 'yes') failures.push('StrictHostKeyChecking=yes is required before remote-readonly-probe');
   if (sshProfile.batchMode !== 'yes') failures.push('BatchMode=yes is required before remote-readonly-probe');
   return failures;
+}
+
+function sshProfilePlanBindingFailures(job, plan, sshProfile) {
+  const failures = [];
+  if (!plan) return ['site slot plan is required before remote SSH execution'];
+  if (job.planId !== plan.planId) failures.push(`SSH plan drift: worker plan ${job.planId} does not match fetched plan ${plan.planId}`);
+  if (job.siteId !== plan.siteId) failures.push(`SSH plan drift: worker site ${job.siteId} does not match plan site ${plan.siteId}`);
+  if (job.kind !== plan.kind) failures.push(`SSH plan drift: worker kind ${job.kind} does not match plan kind ${plan.kind}`);
+  if (plan.ssh?.profileSource !== 'config-center') {
+    failures.push(`SSH plan profile source must be config-center, got ${plan.ssh?.profileSource ?? '<missing>'}`);
+  }
+  if (!plan.ssh?.profileId) failures.push('managed SSH profile is required before remote SSH execution');
+  if (!sshProfile.managedProfileId) failures.push('managed SSH profile was not loaded before remote SSH execution');
+  if (plan.ssh?.profileId && sshProfile.managedProfileId !== plan.ssh.profileId) {
+    failures.push(`SSH profile drift: plan profile ${plan.ssh.profileId} does not match loaded profile ${sshProfile.managedProfileId ?? '<missing>'}`);
+  }
+  if (sshProfile.managedProfileSiteId !== plan.siteId) {
+    failures.push(`SSH profile drift: plan site ${plan.siteId} does not match loaded profile site ${sshProfile.managedProfileSiteId ?? '<missing>'}`);
+  }
+  if (sshProfile.managedProfileKind !== plan.kind) {
+    failures.push(`SSH profile drift: plan kind ${plan.kind} does not match loaded profile kind ${sshProfile.managedProfileKind ?? '<missing>'}`);
+  }
+  if (normalizedSshHostValue(sshProfile.host) !== normalizedSshHostValue(plan.host)) {
+    failures.push(`SSH profile drift: plan host ${plan.host ?? '<missing>'} does not match effective profile host ${sshProfile.host ?? '<missing>'}`);
+  }
+  if (normalizedSshBindingValue(sshProfile.sshUser) !== normalizedSshBindingValue(plan.ssh?.user)) {
+    failures.push(`SSH profile drift: plan user ${plan.ssh?.user ?? '<missing>'} does not match effective profile user ${sshProfile.sshUser ?? '<missing>'}`);
+  }
+  if (Number(sshProfile.sshPort) !== Number(plan.ssh?.port)) {
+    failures.push(`SSH profile drift: plan port ${plan.ssh?.port ?? '<missing>'} does not match effective profile port ${sshProfile.sshPort ?? '<missing>'}`);
+  }
+  if (sshProfile.strictHostKeyChecking !== 'yes') failures.push('StrictHostKeyChecking=yes is required before remote SSH execution');
+  if (sshProfile.batchMode !== 'yes') failures.push('BatchMode=yes is required before remote SSH execution');
+  return failures;
+}
+
+function normalizedSshBindingValue(value) {
+  return String(value ?? '').trim();
+}
+
+function normalizedSshHostValue(value) {
+  return normalizedSshBindingValue(value).toLowerCase();
 }
 
 function artifactEvidence(ref, failures) {
@@ -1175,6 +1228,19 @@ function allowedRemoteShellCommand(command) {
 async function executeRemoteWorkerCommand(step, sshProfile, effectiveCommand) {
   const remoteShell = remoteShellCommandFromPlan(step.command);
   if (remoteShell) {
+    const tunnelStateTransport = tunnelStateStdinTransport(remoteShell.remoteCommand);
+    if (tunnelStateTransport) {
+      return execFileWithInput(
+        'ssh',
+        sshArgv(sshProfile, tunnelStateTransport.remoteCommand),
+        tunnelStateTransport.base64Payload,
+        {
+          cwd: commandCwd,
+          timeout: positiveInt(step.timeoutSeconds, 60) * 1000,
+          maxBuffer
+        }
+      );
+    }
     return execFileAsync('ssh', sshArgv(sshProfile, remoteShell.remoteCommand), {
       cwd: commandCwd,
       timeout: positiveInt(step.timeoutSeconds, 60) * 1000,
@@ -1185,6 +1251,37 @@ async function executeRemoteWorkerCommand(step, sshProfile, effectiveCommand) {
     cwd: commandCwd,
     timeout: positiveInt(step.timeoutSeconds, 60) * 1000,
     maxBuffer
+  });
+}
+
+function tunnelStateStdinTransport(remoteCommand) {
+  const match = String(remoteCommand || '').match(
+    /^umask 077 && printf "%s" ([A-Za-z0-9+/=]+) \| base64 -d > \/opt\/mx\/site-agent\/\.tunnel-state\.json\.tmp && chmod 600 \/opt\/mx\/site-agent\/\.tunnel-state\.json\.tmp && mv -f \/opt\/mx\/site-agent\/\.tunnel-state\.json\.tmp \/opt\/mx\/site-agent\/tunnel-state\.json$/
+  );
+  if (!match) return null;
+  return {
+    base64Payload: match[1],
+    remoteCommand: 'umask 077 && base64 -d > /opt/mx/site-agent/.tunnel-state.json.tmp && chmod 600 /opt/mx/site-agent/.tunnel-state.json.tmp && mv -f /opt/mx/site-agent/.tunnel-state.json.tmp /opt/mx/site-agent/tunnel-state.json'
+  };
+}
+
+function execFileWithInput(file, args, input, options) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = execFile(file, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        rejectPromise(error);
+        return;
+      }
+      resolvePromise({ stdout, stderr });
+    });
+    if (!child.stdin) {
+      child.kill();
+      rejectPromise(new Error(`${file} stdin is unavailable`));
+      return;
+    }
+    child.stdin.end(input);
   });
 }
 
@@ -1211,6 +1308,8 @@ function buildSshProfile(job, managedSshProfile) {
   return {
     source: managedSshProfile ? 'config-center' : profileFilePath ? 'profile-file' : 'env-or-default',
     managedProfileId: managedSshProfile?.profileId ?? null,
+    managedProfileSiteId: managedSshProfile?.siteId ?? null,
+    managedProfileKind: managedSshProfile?.kind ?? null,
     managedProfileStatus: managedSshProfile?.status ?? null,
     managedProfileWarnings: managedSshProfile?.warnings ?? [],
     name: stringEnvOrProfile('SITE_SLOT_SSH_PROFILE_NAME', raw.name, `${job.kind}-${job.siteId}`),

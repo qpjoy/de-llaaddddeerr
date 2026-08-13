@@ -1074,7 +1074,7 @@ test('file preview stays local by default and Agent opt-in sends column names on
     const enhanced = await agentResponse.json()
     assert.equal(agentResponse.status, 200)
     assert.equal(enhanced.data.agentRequested, true)
-    assert.equal(enhanced.data.agentDataScope, 'column_names_only')
+    assert.equal(enhanced.data.agentDataScope, 'column_names_and_value_shapes')
     assert.deepEqual(agentCalls, [{ columns: preview.columns, sampleRows: [] }])
     assert.equal(JSON.stringify(agentCalls).includes('secret@example.test'), false)
   })

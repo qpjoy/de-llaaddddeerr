@@ -29,6 +29,27 @@ if (trustProxyHops) {
 app.useBodyParser('json', { limit: httpBodyLimit });
 app.useBodyParser('urlencoded', { limit: httpBodyLimit, extended: true });
 
+// Internal responses can vary from a redacted view to a full worker contract
+// based on x-mx-ops-token. Never let a browser or intermediary reuse the
+// privileged variant for a later unauthenticated request. Endpoints that serve
+// immutable release artifacts may still override this header explicitly.
+const internalApi = app.getHttpAdapter().getInstance() as {
+  use: (
+    handler: (
+      req: { originalUrl?: string; url?: string },
+      res: { setHeader: (name: string, value: string) => void },
+      next: () => void
+    ) => void
+  ) => void;
+};
+internalApi.use((req, res, next) => {
+  const pathname = (req.originalUrl ?? req.url ?? '').split('?')[0];
+  if (pathname.startsWith('/internal/')) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
+  next();
+});
+
 app.enableCors({
   origin: '*',
   allowedHeaders: [

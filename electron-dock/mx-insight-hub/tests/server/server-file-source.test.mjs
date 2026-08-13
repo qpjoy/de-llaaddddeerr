@@ -83,6 +83,29 @@ function serverPathSource(overrides = {}) {
   }
 }
 
+const CANYIE_FILE_STRUCTURE = {
+  parserFamily: 'delimited',
+  format: 'csv',
+  selector: 'header-row',
+  parserVersion: 'mxih-external.v1',
+  columns: [{ name: 'content_id', valueTypeFamilies: ['string'], required: true }],
+}
+const CANYIE_SCHEMA_FINGERPRINT = createHash('sha256')
+  .update(JSON.stringify(CANYIE_FILE_STRUCTURE))
+  .digest('hex')
+
+function canyieUploadSource() {
+  return serverPathSource({
+    datasetId: 'external.twitter.canyie.v1',
+    platform: 'twitter',
+    objectType: 'post',
+    connection: {
+      fileMode: 'upload',
+      preferredRuleKey: 'rule-twitter-canyie',
+    },
+  })
+}
+
 test('creating a server-path source stores only its safe locator', async () => {
   await withFileFixture(async ({ allowedRoot, sourcePath, reader }) => {
     let createdInput = null
@@ -156,6 +179,79 @@ test('server-file roots remain Admin Token-only and never disclose mount paths',
       })
       assert.equal(hidden.response.status, 404)
     })
+  })
+})
+
+test('mapping creation inherits the source preferred logical rule when the request omits it', async () => {
+  const source = canyieUploadSource()
+  let createdInput = null
+  const store = {
+    getExternalSource: async () => source,
+    listFileFormatRules: async () => [],
+    createSourceMapping: async (input) => {
+      createdInput = input
+      return { id: 'mapping-id', version: 1, approved: false, ...input }
+    },
+  }
+
+  await withServer({ store }, async (baseUrl) => {
+    const result = await call(
+      baseUrl,
+      '/internal/v1/admin/sources/weekly-server-file/mappings',
+      {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: {
+          fieldMap: { externalId: { from: 'content_id' } },
+          schemaFingerprint: CANYIE_SCHEMA_FINGERPRINT,
+          fileStructure: CANYIE_FILE_STRUCTURE,
+        },
+      },
+    )
+
+    assert.equal(result.response.status, 201)
+    assert.equal(createdInput.selectedRuleKey, 'rule-twitter-canyie')
+    assert.equal(result.payload.data.selectedRuleKey, 'rule-twitter-canyie')
+  })
+})
+
+test('mapping creation rejects a request rule that conflicts with the source preferred rule', async () => {
+  const source = canyieUploadSource()
+  let createCalls = 0
+  const store = {
+    getExternalSource: async () => source,
+    listFileFormatRules: async () => [{
+      ruleKey: 'rule-twitter-other',
+      displayName: 'Other Twitter rule',
+      datasetId: source.datasetId,
+      platform: source.platform,
+      objectType: source.objectType,
+    }],
+    createSourceMapping: async () => {
+      createCalls += 1
+      throw new Error('conflicting rules must fail before persistence')
+    },
+  }
+
+  await withServer({ store }, async (baseUrl) => {
+    const result = await call(
+      baseUrl,
+      '/internal/v1/admin/sources/weekly-server-file/mappings',
+      {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: {
+          fieldMap: { externalId: { from: 'content_id' } },
+          selectedRuleKey: 'rule-twitter-other',
+          schemaFingerprint: CANYIE_SCHEMA_FINGERPRINT,
+          fileStructure: CANYIE_FILE_STRUCTURE,
+        },
+      },
+    )
+
+    assert.equal(result.response.status, 409)
+    assert.equal(result.payload.error.code, 'file_format_rule_mismatch')
+    assert.equal(createCalls, 0)
   })
 })
 

@@ -175,7 +175,7 @@ timestamp assumption.
 
 ## Source-type boundary
 
-- Admin-managed PostgreSQL sources and direct CSV/TSV, JSONL/NDJSON, TXT/MD and
+- Admin-managed PostgreSQL sources and direct CSV/TSV, JSON/JSONL/NDJSON, TXT/MD and
   XLSX/XLSM file upload are
   implemented.
 - A direct file source uses file-content hash, mapping version and import-run

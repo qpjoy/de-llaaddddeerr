@@ -332,6 +332,7 @@ export interface PlatformStore {
   archiveLauncherNetworkMihomoSite(
     input: LauncherNetworkMihomoSiteArchiveInput
   ): MaybePromise<LauncherNetworkMihomoSiteArchiveResult>;
+  listLauncherNetworkMihomoSites(): MaybePromise<LauncherNetworkMihomoSite[]>;
   getLauncherNetworkMihomoSite(siteId: string): MaybePromise<LauncherNetworkMihomoSite | null>;
   getLauncherNetworkMihomoReachability(siteId: string): MaybePromise<LauncherNetworkReachabilityPlan | null>;
   listLauncherProductNetworks(): MaybePromise<LauncherProductNetwork[]>;

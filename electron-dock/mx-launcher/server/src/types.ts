@@ -2804,6 +2804,7 @@ export interface LauncherNetworkReachabilityPlan {
     domestic: number;
     internalReserved: number;
     hEndpoint: number;
+    operator: number;
   };
   executionOrder: string[];
   gates: {
@@ -2833,6 +2834,74 @@ export interface MihomoSubscriptionRender {
   yaml: string;
   reachability: LauncherNetworkMihomoSite['reachability'];
   generatedAt: string;
+}
+
+/**
+ * A read-only, non-login subject shown at the top of User Center.  It is kept
+ * deliberately separate from UserCenterUser so it can never acquire a local
+ * password, OAuth token, Feishu identity, or user-scoped Oversea entitlement.
+ */
+export interface SystemSubscriptionCatalog {
+  account: {
+    accountId: 'subscriptions';
+    kind: 'system-subscription-catalog';
+    displayName: 'Subscriptions';
+    status: 'active';
+    loginAllowed: false;
+    immutable: true;
+    pinnedRank: 0;
+  };
+  subscriptions: SystemSubscriptionItem[];
+  summary: {
+    total: number;
+    ready: number;
+    pending: number;
+    blocked: number;
+  };
+  generatedAt: string;
+}
+
+export type SystemSubscriptionStatus = 'ready' | 'pending-sync' | 'blocked' | 'disabled';
+
+export interface SystemSubscriptionItem {
+  subscriptionId: string;
+  label: string;
+  siteId: string;
+  status: SystemSubscriptionStatus;
+  statusReason: string;
+  recommended: boolean;
+  delivery: {
+    kind: 'oversea-direct-ip-http-basic';
+    scheme: 'http';
+    host: string | null;
+    port: number;
+    path: string;
+    urlMasked: string | null;
+    auth: {
+      type: 'basic';
+      username: 'subscriptions';
+      passwordAvailable: boolean;
+    };
+  };
+  client: {
+    instance: 'subscriptions';
+    mixedPort: 7890;
+    routingMode: 'cn-direct';
+    explicitUseOnly: true;
+  };
+  trafficPolicy: {
+    mode: 'unlimited';
+    maxBytes: null;
+    resetPeriod: null;
+    expiresAt: null;
+  };
+  bandwidthHint: {
+    down: '50 Mbps';
+    up: '50 Mbps';
+  };
+  runtimeAccountId: string | null;
+  runtimeUsername: string;
+  updatedAt: string;
 }
 
 export interface UserOverseaEntitlementInput {

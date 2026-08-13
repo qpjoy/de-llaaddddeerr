@@ -647,6 +647,18 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /file-format-rules:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: listFileFormatRules
+      summary: List logical file format rules and their immutable approved versions.
+      security:
+        - adminToken: []
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
   /sources/{sourceKey}/preview:
     servers:
       - url: /internal/v1/admin
@@ -670,7 +682,7 @@ paths:
         "503": { $ref: "#/components/responses/Error" }
     post:
       operationId: previewSourceFile
-      summary: Parse a file locally; optional Agent assistance receives column names only.
+      summary: Parse a file locally; Agent assistance receives only a value-free structural sample.
       security:
         - adminToken: []
       parameters:
@@ -679,6 +691,10 @@ paths:
           in: query
           required: false
           schema: { type: boolean, default: false }
+        - name: preferredRuleKey
+          in: query
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9][a-z0-9._-]*$" }
       requestBody:
         required: true
         content:
@@ -928,6 +944,45 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+  /data-center/records:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: browseDataCenterRecords
+      summary: Browse or search full canonical records for Admin evidence review.
+      description: >-
+        Break-glass Admin Token only. Empty q uses PostgreSQL keyset pagination;
+        q uses Elasticsearch ranking and highlight with the existing PostgreSQL
+        fallback. The Admin response is intentionally not redacted and may include
+        the current revision payload, extensions and lineage. Host paths and saved
+        connection credentials are never included.
+      security:
+        - adminToken: []
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 500 }
+        - name: datasetId
+          in: query
+          schema: { type: string, minLength: 1 }
+        - name: platform
+          in: query
+          schema: { type: string, minLength: 1 }
+        - name: objectType
+          in: query
+          schema: { type: string, minLength: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1 }
+      responses:
+        "200": { $ref: "#/components/responses/AdminData" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /data/capabilities:
     get:
       operationId: listCapabilities
@@ -1072,6 +1127,59 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /data/stored/search:
+    post:
+      operationId: searchStoredData
+      summary: Search Hub canonical data without calling Night-All.
+      description: >-
+        Requires the API key's explicit platform grant. datasetId and objectType
+        are exact logical filters, not separate authorization grants: every
+        consumer granted a platform can search the complete Hub canonical corpus
+        for that platform. Elasticsearch is the preferred ranked projection; a
+        transport failure on the first page falls back to PostgreSQL and is
+        reported explicitly. The strict request body does not accept a physical
+        database, index, SQL, Elasticsearch DSL/script or provider parameters.
+        Response and item source are always hub; connector lineage, raw payloads
+        and provider coordinates are excluded. The opaque cursor is HMAC-signed
+        and bound to the normalized query, filters and page size.
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields, idempotency_key_required, invalid_idempotency_key]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
+        "410": [search_cursor_expired]
+        "429": [quota_exceeded]
+        "503": [stored_search_unavailable, search_cursor_unavailable]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StoredSearchRequest"
+      responses:
+        "200":
+          description: Hub canonical stored-search response.
+          headers:
+            x-mx-insight-request-id:
+              schema: { type: string, format: uuid }
+            idempotent-replay:
+              schema: { type: string, enum: ["true", "false"] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoredSearchEnvelope"
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /data/telegram/chats:
     get:
       operationId: listTelegramMonitorChats
@@ -1329,7 +1437,7 @@ components:
       name: filename
       in: query
       required: true
-      description: Basename used to select the supported CSV/TSV, JSONL/NDJSON, TXT/MD or XLSX/XLSM parser; the request body contains the raw file bytes.
+      description: Basename used to select the supported CSV/TSV, JSON/JSONL/NDJSON, TXT/MD or XLSX/XLSM parser; the request body contains the raw file bytes.
       schema: { type: string, minLength: 1, maxLength: 255 }
     TelegramChatId:
       name: chatId
@@ -2203,6 +2311,11 @@ components:
         datasetId: { type: string, minLength: 1, maxLength: 200 }
         platform: { type: string, minLength: 1, maxLength: 100, default: external }
         objectType: { type: string, minLength: 1, maxLength: 100, default: record }
+        preferredRuleKey:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[a-z0-9][a-z0-9._-]*$"
     ExternalSourceCreate:
       oneOf:
         - $ref: "#/components/schemas/DatabaseSourceCreate"
@@ -2263,6 +2376,11 @@ components:
         schemaFingerprint: { type: [string, "null"], pattern: "^[0-9a-f]{64}$" }
         fileStructure: { type: [object, "null"], additionalProperties: true }
         formatRuleVersionId: { type: [string, "null"], format: uuid }
+        selectedRuleKey:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          pattern: "^[a-z0-9][a-z0-9._-]*$"
     FileSourceLocator:
       oneOf:
         - type: object
@@ -2270,6 +2388,7 @@ components:
           required: [fileMode]
           properties:
             fileMode: { type: string, const: upload }
+            preferredRuleKey: { type: string, pattern: "^[a-z0-9][a-z0-9._-]*$" }
         - type: object
           additionalProperties: false
           required: [fileMode, rootId, relativePath]
@@ -2277,6 +2396,7 @@ components:
             fileMode: { type: string, const: server_path }
             rootId: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" }
             relativePath: { type: string, minLength: 1, maxLength: 4096 }
+            preferredRuleKey: { type: string, pattern: "^[a-z0-9][a-z0-9._-]*$" }
     ServerFilePreviewRequest:
       type: object
       additionalProperties: false
@@ -2287,6 +2407,11 @@ components:
           maxLength: 4096
           description: Optional transient override; omitted uses the source's stored locator.
         agent: { type: boolean, default: false }
+        preferredRuleKey:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[a-z0-9][a-z0-9._-]*$"
     ServerFileImportRequest:
       type: object
       additionalProperties: false
@@ -2307,6 +2432,77 @@ components:
         query: { type: string, minLength: 1, maxLength: 500, description: Non-blank search query; surrounding whitespace is trimmed. }
         pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
         cursor: { type: string, minLength: 1, maxLength: 8192, description: Non-blank opaque cursor returned by the previous page; send it unchanged. Telegram cursors are signed and bound to the normalized request. }
+    StoredSearchRequest:
+      type: object
+      additionalProperties: false
+      required: [platform, query]
+      properties:
+        platform: { type: string, minLength: 1, maxLength: 64, description: One explicit granted platform; `all` and `*` are forbidden. }
+        query: { type: string, minLength: 1, maxLength: 500 }
+        datasetId: { type: string, minLength: 1, maxLength: 200, description: Optional exact logical filter; not a physical database or authorization grant. }
+        objectType: { type: string, minLength: 1, maxLength: 100, description: Optional exact canonical object-type filter. }
+        pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to query, platform, datasetId, objectType and page size. }
+    StoredSearchEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, source, query, filters, items, pageInfo, searchMode, warnings, durationMs]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.stored-search.v1 }
+            source: { type: string, const: hub }
+            query: { type: string }
+            filters:
+              type: object
+              additionalProperties: false
+              required: [platform, datasetId, objectType]
+              properties:
+                platform: { type: string }
+                datasetId: { type: [string, "null"] }
+                objectType: { type: [string, "null"] }
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/StoredSearchItem" }
+            pageInfo: { $ref: "#/components/schemas/NightAllDataSearchPageInfo" }
+            searchMode: { type: string, enum: [elasticsearch, postgres] }
+            warnings:
+              type: array
+              items: { $ref: "#/components/schemas/NightAllDataSearchWarning" }
+            durationMs: { type: integer, minimum: 0 }
+        requestId: { type: string, format: uuid }
+    StoredSearchItem:
+      type: object
+      additionalProperties: false
+      required: [id, datasetId, platform, objectType, source]
+      properties:
+        id: { type: string, format: uuid }
+        datasetId: { type: string }
+        platform: { type: string }
+        objectType: { type: string }
+        contentType: { type: [string, "null"] }
+        externalId: { type: string }
+        url: { type: [string, "null"] }
+        title: { type: [string, "null"] }
+        text: { type: [string, "null"] }
+        author:
+          type: object
+          additionalProperties: false
+          required: [id, name, username]
+          properties:
+            id: { type: [string, "null"] }
+            name: { type: [string, "null"] }
+            username: { type: [string, "null"] }
+        metrics:
+          type: object
+          additionalProperties: { type: [number, "null"] }
+        eventTime: { type: [string, "null"], format: date-time }
+        collectedAt: { type: [string, "null"], format: date-time }
+        score: { type: [number, "null"] }
+        source: { type: string, const: hub }
     TokenizeRequest:
       type: object
       additionalProperties: false

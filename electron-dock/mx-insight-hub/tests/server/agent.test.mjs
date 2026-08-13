@@ -357,6 +357,37 @@ test('mapping suggestion degrades to inference when every provider fails', async
   assert.ok(result.degradedReason, 'the degradation is reported rather than hidden')
 })
 
+test('file profile sends only value-free first/middle/last structure evidence', async () => {
+  let providerRequest = null
+  const agent = agentWith(async (_url, options) => {
+    providerRequest = JSON.parse(options.body)
+    return jsonResponse(chatReply(JSON.stringify({
+      platform: 'twitter',
+      objectType: 'post',
+      fieldMap: { externalId: { from: 'content_id' }, body: { from: 'text' } },
+    })))
+  })
+  const result = await agent.suggestFileProfile({
+    columns: ['content_id', 'text'],
+    sampling: {
+      strategy: 'head-middle-tail',
+      sourceRowCount: 100,
+      sampledRowCount: 9,
+      sampledPositions: [{ position: 'head', index: 0 }, { position: 'tail', index: 99 }],
+      columns: [{
+        name: 'content_id', presentCount: 2, nonEmptyCount: 2, valueTypeFamilies: ['string'],
+      }],
+      signals: { twitterPlatformCount: 2 },
+      items: [{ raw: { text: 'must-never-reach-agent', content_id: 'secret-id' } }],
+    },
+  })
+  assert.equal(result.platform, 'twitter')
+  assert.equal(result.objectType, 'post')
+  assert.equal(result.origin, 'agent')
+  assert.doesNotMatch(JSON.stringify(providerRequest), /must-never-reach-agent|secret-id|"raw"/)
+  assert.match(JSON.stringify(providerRequest), /head-middle-tail/)
+})
+
 test('hallucinated columns are dropped from a model mapping', async () => {
   const agent = agentWith(async () => jsonResponse(chatReply(JSON.stringify({
     externalId: { from: 'id' },

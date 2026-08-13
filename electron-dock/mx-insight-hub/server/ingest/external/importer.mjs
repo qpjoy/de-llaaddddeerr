@@ -2,6 +2,11 @@ import { createHash } from 'node:crypto'
 import { AppError } from '../../core/errors.mjs'
 import { parseFile } from './parsers.mjs'
 import { applyMapping, validateFieldMap, inferFieldMap, CHUNKER_VERSION } from './mapping.mjs'
+import {
+  buildDeterministicSamplingSummary,
+  detectExternalFile,
+  recognizeBuiltinFormatRule,
+} from './builtin-format-rules.mjs'
 
 // Orchestrates one external import: parse -> map -> write, with the rejected
 // rows and the run record kept as evidence either way.
@@ -15,6 +20,7 @@ function sha256(value) {
 const FILE_FORMATS = {
   '.csv': { parserFamily: 'delimited', format: 'csv', selector: 'header-row' },
   '.tsv': { parserFamily: 'delimited', format: 'tsv', selector: 'header-row' },
+  '.json': { parserFamily: 'json-document', format: 'json', selector: null },
   '.jsonl': { parserFamily: 'json-lines', format: 'jsonl', selector: 'line-object' },
   '.ndjson': { parserFamily: 'json-lines', format: 'ndjson', selector: 'line-object' },
   '.xlsx': { parserFamily: 'openxml-workbook', format: 'xlsx', selector: 'first-worksheet' },
@@ -66,9 +72,11 @@ function valueTypeFamily(value) {
  * Describe only the reusable shape of one parsed file. Content identity, row
  * count, filename and sample values deliberately stay out of this object.
  */
-export function buildFileStructure({ columns, records }, filename) {
+export function buildFileStructure({ columns, records, selector: parsedSelector = null }, filename) {
   const descriptor = FILE_FORMATS[extensionOf(filename)]
   if (!descriptor) throw new Error(`Cannot describe unsupported file format: ${filename}`)
+  const selector = descriptor.selector ?? parsedSelector
+  if (!selector) throw new Error(`Cannot describe ${descriptor.format} without a parser selector`)
   assertUnambiguousStructureColumns(columns)
 
   const profiledColumns = columns.map((column) => {
@@ -86,7 +94,7 @@ export function buildFileStructure({ columns, records }, filename) {
 
   // JSON object key order is not schema. parseJsonLines discovers columns in
   // first-seen order, so canonicalize it before hashing to avoid false drift.
-  if (descriptor.parserFamily === 'json-lines') {
+  if (descriptor.parserFamily === 'json-lines' || descriptor.parserFamily === 'json-document') {
     profiledColumns.sort((left, right) => {
       const leftKey = JSON.stringify(left)
       const rightKey = JSON.stringify(right)
@@ -94,11 +102,28 @@ export function buildFileStructure({ columns, records }, filename) {
     })
   }
 
-  return { ...descriptor, parserVersion: CHUNKER_VERSION, columns: profiledColumns }
+  return {
+    parserFamily: descriptor.parserFamily,
+    format: descriptor.format,
+    selector,
+    parserVersion: CHUNKER_VERSION,
+    columns: profiledColumns,
+  }
 }
 
 export function fingerprintFileStructure(fileStructure) {
   return sha256(JSON.stringify(fileStructure))
+}
+
+function mappedSourceColumns(fieldMap) {
+  const mapped = new Set()
+  for (const rule of Object.values(fieldMap)) {
+    const sources = Array.isArray(rule?.from) ? rule.from : [rule?.from]
+    for (const source of sources) {
+      if (typeof source === 'string') mapped.add(source)
+    }
+  }
+  return mapped
 }
 
 export class ExternalImporter {
@@ -116,26 +141,44 @@ export class ExternalImporter {
    * that catchable.
    */
   async preview(buffer, filename) {
-    const { columns, records } = parseFile(buffer, filename, { hash: sha256 })
-    const fieldMap = inferFieldMap(columns)
-    const fileStructure = buildFileStructure({ columns, records }, filename)
-    const sample = records.slice(0, 5).map((raw) => {
-      const { record, rejected } = applyMapping(raw, fieldMap, { platform: 'preview' })
+    const parsed = parseFile(buffer, filename, { hash: sha256 })
+    const { columns, records } = parsed
+    const sampling = buildDeterministicSamplingSummary({ columns, records })
+    const builtinFormatRule = recognizeBuiltinFormatRule({ columns, records, filename, sampling })
+    const detection = detectExternalFile({ columns, records, filename, sampling })
+    // A matched built-in layout is more specific than the generic alias
+    // matcher, but remains only the preview suggestion until normal approval.
+    const fieldMap = builtinFormatRule?.fieldMap ?? inferFieldMap(columns)
+    const previewScope = builtinFormatRule?.scope ?? {
+      platform: detection.platform ?? 'preview',
+      objectType: detection.objectType ?? 'record',
+    }
+    const fileStructure = buildFileStructure(parsed, filename)
+    const mapPreviewRecord = (raw) => {
+      const { record, rejected } = applyMapping(raw, fieldMap, previewScope)
       return rejected ? { rejected, raw } : { mapped: record, raw }
-    })
+    }
+    const sample = records.slice(0, 5).map(mapPreviewRecord)
+    const samplingItems = sampling.sampledPositions.map(({ position, index }) => ({
+      position,
+      rowIndex: index + 1,
+      ...mapPreviewRecord(records[index]),
+    }))
+    const mappedColumns = mappedSourceColumns(fieldMap)
     return {
       columns,
       rowCount: records.length,
       inputSha256: sha256(buffer),
       schemaFingerprint: fingerprintFileStructure(fileStructure),
       fileStructure,
+      sampling: { ...sampling, items: samplingItems },
+      detection,
+      builtinFormatRule,
       inferredFieldMap: fieldMap,
       // Columns the inference could not place. These are the ones that will
       // land in `extensions` — usually correct, occasionally the sign that the
       // real title column is named something unexpected.
-      unmappedColumns: columns.filter(
-        (column) => !Object.values(fieldMap).some((rule) => rule.from === column),
-      ),
+      unmappedColumns: columns.filter((column) => !mappedColumns.has(column)),
       sample,
     }
   }

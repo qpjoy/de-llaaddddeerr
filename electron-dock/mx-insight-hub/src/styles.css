@@ -416,9 +416,291 @@ select {
   overflow-y: auto;
 }
 
+.mih-dropdown__group {
+  position: sticky;
+  top: -6px;
+  z-index: 1;
+  margin: 4px -2px 2px;
+  border-bottom: 1px solid var(--qp-line);
+  padding: 7px 10px 5px;
+  background: color-mix(in srgb, var(--qp-bg-4) 94%, transparent);
+  color: var(--qp-text-4);
+  font-family: var(--qp-font-mono);
+  font-size: var(--qp-font-caption-1);
+  letter-spacing: 0.08em;
+}
+
 .mih-dropdown .qp-dropdown__trigger:disabled {
   cursor: not-allowed;
   opacity: 0.42;
+}
+
+.mih-file-rule-hint {
+  align-self: end;
+  margin: 0;
+  border-left: 2px solid color-mix(in srgb, var(--qp-primary) 70%, transparent);
+  padding: 8px 11px;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-file-rule-control {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.8fr) minmax(280px, 1.2fr) auto;
+  align-items: end;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 25%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  padding: 12px;
+  background: color-mix(in srgb, var(--qp-primary) 4%, var(--qp-bg-3));
+}
+
+.mih-file-rule-control > div:nth-child(2) {
+  display: grid;
+  align-self: center;
+  gap: 3px;
+}
+
+.mih-file-rule-control > div:nth-child(2) strong {
+  color: var(--qp-text-1);
+  font-weight: 500;
+}
+
+.mih-file-rule-control > div:nth-child(2) small {
+  color: var(--qp-text-4);
+  overflow-wrap: anywhere;
+}
+
+.mih-file-detection,
+.mih-file-samples {
+  display: grid;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--qp-info) 30%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  padding: 14px;
+  background: color-mix(in srgb, var(--qp-info) 5%, var(--qp-bg-3));
+}
+
+.mih-file-detection > header,
+.mih-file-samples > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mih-file-detection > header > div,
+.mih-file-samples > header {
+  min-width: 0;
+}
+
+.mih-file-detection > header strong,
+.mih-file-detection > header span,
+.mih-file-samples > header strong,
+.mih-file-samples > header span {
+  display: block;
+}
+
+.mih-file-detection > header strong,
+.mih-file-samples > header strong {
+  color: var(--qp-text-1);
+  font-weight: 500;
+}
+
+.mih-file-detection > header span,
+.mih-file-samples > header span {
+  margin-top: 3px;
+  color: var(--qp-text-4);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-file-detection dl {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  background: var(--qp-line);
+}
+
+.mih-file-detection dl > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px;
+  background: var(--qp-bg-3);
+}
+
+.mih-file-detection dt {
+  color: var(--qp-text-4);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-file-detection dd {
+  margin: 0;
+  color: var(--qp-text-1);
+  overflow-wrap: anywhere;
+}
+
+.mih-file-detection > p {
+  margin: 0;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-body-2);
+}
+
+.mih-file-samples > div {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mih-file-samples article {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-sm);
+  padding: 10px;
+  background: color-mix(in srgb, var(--qp-bg-1) 40%, transparent);
+}
+
+.mih-file-samples article > span {
+  color: var(--qp-primary);
+  font-family: var(--qp-font-mono);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-file-samples article > strong {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  font-weight: 500;
+}
+
+.mih-file-samples .mih-code-block {
+  max-height: 210px;
+  margin: 0;
+  font-size: 10px;
+}
+
+.mih-sample-rejected {
+  color: var(--qp-danger);
+}
+
+.mih-data-center-search {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.mih-search-input {
+  position: relative;
+  display: block;
+}
+
+.mih-search-input > svg {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  z-index: 1;
+  color: var(--qp-text-4);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.mih-search-input .qp-input {
+  width: 100%;
+  padding-left: 38px;
+}
+
+.mih-filter-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mih-record-cell {
+  min-width: 280px;
+  max-width: 620px;
+}
+
+.mih-record-cell p {
+  display: -webkit-box;
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.mih-record-cell mark {
+  border-radius: 2px;
+  padding: 0 2px;
+  background: color-mix(in srgb, var(--qp-warning) 28%, transparent);
+  color: var(--qp-text-1);
+}
+
+.mih-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--qp-line);
+  padding-top: 12px;
+  color: var(--qp-text-4);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-pagination > div {
+  display: flex;
+  gap: 8px;
+}
+
+.mih-record-detail {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
+
+.mih-record-highlight,
+.mih-record-body,
+.mih-record-json {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  padding: 14px;
+  background: var(--qp-bg-3);
+}
+
+.mih-record-highlight > strong,
+.mih-record-body > strong,
+.mih-record-json > strong {
+  color: var(--qp-text-1);
+  font-weight: 500;
+}
+
+.mih-record-highlight p {
+  margin: 0;
+  color: var(--qp-text-2);
+  line-height: 1.7;
+}
+
+.mih-record-highlight mark {
+  border-radius: 2px;
+  padding: 1px 3px;
+  background: color-mix(in srgb, var(--qp-warning) 30%, transparent);
+  color: var(--qp-text-1);
+}
+
+.mih-record-body pre,
+.mih-record-json pre {
+  max-height: none;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .mih-step-list {
@@ -1098,6 +1380,22 @@ select {
   .mih-filterbar--usage .mih-filter-field {
     width: 100%;
     max-width: none;
+  }
+
+  .mih-file-rule-control,
+  .mih-data-center-search,
+  .mih-filter-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .mih-file-detection dl,
+  .mih-file-samples > div {
+    grid-template-columns: 1fr;
+  }
+
+  .mih-pagination {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .mih-platform-context {

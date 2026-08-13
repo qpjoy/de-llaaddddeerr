@@ -1,9 +1,16 @@
-import { BadRequestException, Body, Controller, Get, Header, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Header, Headers, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { asRecord, nullableString } from '../../lib/http.js';
+import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
+import { siteSlotOpsAwareView as siteSlotApiView } from '../../lib/site-slot-credential-view.js';
+import {
+  isSystemSubscriptionAccessAccount,
+  SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH,
+  systemSubscriptionAccessAccountName
+} from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import { buildSiteSlotRemoteSshGate, buildSiteSlotRemoteSshReadOnlyProbe, buildSiteSlotRemoteSshWorkerHandoff } from './remote-ssh-gate.js';
@@ -70,18 +77,29 @@ export class SiteSlotsController {
   }
 
   @Get('internal/v1/site-slots/plans')
-  async listPlans() {
-    return { plans: await this.store.listSiteSlotPlans() };
+  async listPlans(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    return siteSlotApiView({ plans: await this.store.listSiteSlotPlans() }, opsToken);
   }
 
   @Post('internal/v1/site-slots/:siteId/access-accounts')
-  async issueAccessAccounts(@Param('siteId') siteId: string, @Body() rawBody: unknown) {
+  async issueAccessAccounts(
+    @Param('siteId') siteId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    // Every issuance response contains reusable Hysteria credentials. Keep the
+    // whole mutation behind the same Internal ops boundary instead of trying
+    // to predict which requested spelling will canonicalize to a privileged
+    // account inside the store.
+    assertInternalOpsToken(opsToken);
     const body = asRecord(rawBody);
+    const accountNames = accountNamesValue(body.accountNames ?? body.accounts);
+    const issueDefaults = booleanValue(body.issueDefaults);
     return this.store.issueSiteSlotAccessAccounts({
       siteId,
       service: nullableString(body.service) ?? 'hysteria2',
-      accountNames: accountNamesValue(body.accountNames ?? body.accounts),
-      issueDefaults: booleanValue(body.issueDefaults),
+      accountNames,
+      issueDefaults,
       publicHost: nullableString(body.publicHost),
       serverPorts: nullableString(body.serverPorts),
       tlsFingerprint: nullableString(body.tlsFingerprint),
@@ -91,7 +109,11 @@ export class SiteSlotsController {
   }
 
   @Get('internal/v1/site-slots/:siteId/access-accounts')
-  async listAccessAccounts(@Param('siteId') siteId: string) {
+  async listAccessAccounts(
+    @Param('siteId') siteId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
     const site = await this.store.getLauncherNetworkMihomoSite(siteId);
     return {
       site,
@@ -102,101 +124,146 @@ export class SiteSlotsController {
   @Get('internal/v1/site-slots/:siteId/subscriptions/hysteria2/:username.yaml')
   @Header('content-type', 'text/yaml; charset=utf-8')
   async getHysteria2MihomoSubscription(@Param('siteId') siteId: string, @Param('username') username: string) {
+    if (username === systemSubscriptionAccessAccountName(siteId)) {
+      throw new NotFoundException('System subscription is available only through its Oversea direct-IP channel');
+    }
     const subscription = await this.store.renderHysteria2MihomoSubscription(siteId, username);
     if (!subscription) throw new NotFoundException('Hysteria2 mihomo subscription not found');
     return subscription.yaml;
   }
 
   @Post('internal/v1/site-slots/plans')
-  async createPlan(@Body() rawBody: unknown) {
-    const input = await this.withDomesticBootstrapAccess(toSiteSlotPlanInput(asRecord(rawBody)));
+  async createPlan(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    const requestedInput = toSiteSlotPlanInput(asRecord(rawBody));
+    if (siteSlotPlanIssuesManagedAccessAccounts(requestedInput)) assertInternalOpsToken(opsToken);
+    const input = await this.withCurrentAccessAccountMaterial(requestedInput);
     const hostFailure = await this.domesticPlanHostValidationFailure(input);
     if (hostFailure) throw new BadRequestException(hostFailure);
     const plan = await this.store.createSiteSlotPlan(input);
     await this.materializeDomesticBootstrapSubscription(plan);
-    return { plan };
+    return siteSlotApiView({ plan }, opsToken);
   }
 
   @Get('internal/v1/site-slots/plans/:planId')
-  async getPlan(@Param('planId') planId: string) {
+  async getPlan(
+    @Param('planId') planId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
     const plan = await this.store.getSiteSlotPlan(planId);
     if (!plan) throw new NotFoundException('Site slot plan not found');
-    return { plan };
+    return siteSlotApiView({ plan }, opsToken);
   }
 
   @Get('internal/v1/site-slots/executions')
-  async listExecutions(@Query('planId') planId?: string) {
-    return { executions: await this.store.listSiteSlotExecutions(planId ?? null) };
+  async listExecutions(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Query('planId') planId?: string
+  ) {
+    return siteSlotApiView({ executions: await this.store.listSiteSlotExecutions(planId ?? null) }, opsToken);
   }
 
   @Post('internal/v1/site-slots/executions')
-  async createExecution(@Body() rawBody: unknown) {
-    return { execution: await this.createExecutionOr404(toSiteSlotExecutionInput(asRecord(rawBody))) };
+  async createExecution(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    return siteSlotApiView({ execution: await this.createExecutionOr404(toSiteSlotExecutionInput(asRecord(rawBody))) }, opsToken);
   }
 
   @Get('internal/v1/site-slots/runner-sessions')
-  async listRunnerSessions(@Query('runId') runId?: string) {
-    return { sessions: await this.store.listSiteSlotRunnerSessions(runId ?? null) };
+  async listRunnerSessions(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Query('runId') runId?: string
+  ) {
+    return siteSlotApiView({ sessions: await this.store.listSiteSlotRunnerSessions(runId ?? null) }, opsToken);
   }
 
   @Post('internal/v1/site-slots/executions/:runId/runner-sessions')
-  async startRunnerSession(@Param('runId') runId: string, @Body() rawBody: unknown) {
-    return {
+  async startRunnerSession(
+    @Param('runId') runId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    return siteSlotApiView({
       session: await this.startRunnerSessionOr404({
         ...toSiteSlotRunnerStartInput(asRecord(rawBody)),
         runId
       })
-    };
+    }, opsToken);
   }
 
   @Get('internal/v1/site-slots/runner-sessions/:sessionId')
-  async getRunnerSession(@Param('sessionId') sessionId: string) {
+  async getRunnerSession(
+    @Param('sessionId') sessionId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
     const session = await this.store.getSiteSlotRunnerSession(sessionId);
     if (!session) throw new NotFoundException('Site slot runner session not found');
-    return { session };
+    return siteSlotApiView({ session }, opsToken);
   }
 
   @Get('internal/v1/site-slots/worker-jobs')
-  async listWorkerJobs(@Query('sessionId') sessionId?: string) {
-    return { jobs: await this.store.listSiteSlotWorkerJobs(sessionId ?? null) };
+  async listWorkerJobs(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Query('sessionId') sessionId?: string
+  ) {
+    return siteSlotApiView({ jobs: await this.store.listSiteSlotWorkerJobs(sessionId ?? null) }, opsToken);
   }
 
   @Post('internal/v1/site-slots/runner-sessions/:sessionId/worker-jobs')
-  async createWorkerJob(@Param('sessionId') sessionId: string, @Body() rawBody: unknown) {
-    return {
+  async createWorkerJob(
+    @Param('sessionId') sessionId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    return siteSlotApiView({
       job: await this.createWorkerJobOr404({
         ...toSiteSlotWorkerJobInput(asRecord(rawBody)),
         sessionId
       })
-    };
+    }, opsToken);
   }
 
   @Get('internal/v1/site-slots/worker-jobs/:jobId')
-  async getWorkerJob(@Param('jobId') jobId: string) {
+  async getWorkerJob(
+    @Param('jobId') jobId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
     const job = await this.store.getSiteSlotWorkerJob(jobId);
     if (!job) throw new NotFoundException('Site slot worker job not found');
-    return { job };
+    return siteSlotApiView({ job }, opsToken);
   }
 
   @Post('internal/v1/site-slots/worker-jobs/:jobId/remote-ssh-gate')
-  async reviewWorkerRemoteSshGate(@Param('jobId') jobId: string, @Body() rawBody: unknown) {
+  async reviewWorkerRemoteSshGate(
+    @Param('jobId') jobId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
     const job = await this.store.getSiteSlotWorkerJob(jobId);
     if (!job) throw new NotFoundException('Site slot worker job not found');
     const plan = await this.store.getSiteSlotPlan(job.planId);
     if (plan) await this.materializeDomesticBootstrapSubscription(plan);
     const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
     const body = asRecord(rawBody);
-    return {
+    return siteSlotApiView({
       gate: buildSiteSlotRemoteSshGate(job, plan, sshProfile, {
         confirmRemoteExecution: booleanValue(body.confirmRemoteExecution) === true,
         requestedBy: nullableString(body.requestedBy),
         requestId: nullableString(body.requestId)
       })
-    };
+    }, opsToken);
   }
 
   @Post('internal/v1/site-slots/worker-jobs/:jobId/remote-ssh-readonly-probe')
-  async createWorkerRemoteSshReadOnlyProbe(@Param('jobId') jobId: string, @Body() rawBody: unknown) {
+  async createWorkerRemoteSshReadOnlyProbe(
+    @Param('jobId') jobId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
     const job = await this.store.getSiteSlotWorkerJob(jobId);
     if (!job) throw new NotFoundException('Site slot worker job not found');
     const plan = await this.store.getSiteSlotPlan(job.planId);
@@ -208,16 +275,20 @@ export class SiteSlotsController {
       requestedBy: nullableString(body.requestedBy),
       requestId: nullableString(body.requestId)
     });
-    return {
+    return siteSlotApiView({
       gate,
       readOnlyProbe: buildSiteSlotRemoteSshReadOnlyProbe(job, plan, sshProfile, gate, {
         confirmReadOnlyProbe: booleanValue(body.confirmReadOnlyProbe) === true
       })
-    };
+    }, opsToken);
   }
 
   @Post('internal/v1/site-slots/worker-jobs/:jobId/run-artifact-push-remote-ssh')
-  async createWorkerRemoteSshHandoff(@Param('jobId') jobId: string, @Body() rawBody: unknown) {
+  async createWorkerRemoteSshHandoff(
+    @Param('jobId') jobId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
     const job = await this.store.getSiteSlotWorkerJob(jobId);
     if (!job) throw new NotFoundException('Site slot worker job not found');
     const plan = await this.store.getSiteSlotPlan(job.planId);
@@ -229,108 +300,152 @@ export class SiteSlotsController {
       requestedBy: nullableString(body.requestedBy),
       requestId: nullableString(body.requestId)
     });
-    return {
+    return siteSlotApiView({
       gate,
       workerHandoff: buildSiteSlotRemoteSshWorkerHandoff(job, plan, gate, {
         internalBaseUrl: nullableString(body.internalBaseUrl),
         confirmWorkerHandoff: booleanValue(body.confirmWorkerHandoff) === true
       })
-    };
+    }, opsToken);
   }
 
   @Get('internal/v1/site-slots/worker-reports')
-  async listWorkerReports(@Query('jobId') jobId?: string) {
-    return { reports: await this.store.listSiteSlotWorkerReports(jobId ?? null) };
+  async listWorkerReports(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Query('jobId') jobId?: string
+  ) {
+    return siteSlotApiView({ reports: await this.store.listSiteSlotWorkerReports(jobId ?? null) }, opsToken);
   }
 
   @Post('internal/v1/site-slots/worker-jobs/:jobId/reports')
-  async recordWorkerReport(@Param('jobId') jobId: string, @Body() rawBody: unknown) {
-    return {
-      report: await this.recordWorkerReportOr404({
-        ...toSiteSlotWorkerReportInput(asRecord(rawBody)),
-        jobId
-      })
+  async recordWorkerReport(
+    @Param('jobId') jobId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
+    const input = {
+      ...toSiteSlotWorkerReportInput(asRecord(rawBody)),
+      jobId
     };
+    await this.assertCompleteRemoteWorkerEvidence(input);
+    return siteSlotApiView({
+      report: await this.recordWorkerReportOr404(input)
+    }, opsToken);
   }
 
   @Get('internal/v1/site-slots/worker-reports/:reportId')
-  async getWorkerReport(@Param('reportId') reportId: string) {
+  async getWorkerReport(
+    @Param('reportId') reportId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
     const report = await this.store.getSiteSlotWorkerReport(reportId);
     if (!report) throw new NotFoundException('Site slot worker report not found');
-    return { report };
+    return siteSlotApiView({ report }, opsToken);
   }
 
   @Get('internal/v1/site-slots/rollback-executions')
-  async listRollbackExecutions(@Query('reportId') reportId?: string) {
-    return { rollbackExecutions: await this.store.listSiteSlotRollbackExecutions(reportId ?? null) };
+  async listRollbackExecutions(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Query('reportId') reportId?: string
+  ) {
+    return siteSlotApiView({ rollbackExecutions: await this.store.listSiteSlotRollbackExecutions(reportId ?? null) }, opsToken);
   }
 
   @Post('internal/v1/site-slots/worker-reports/:reportId/rollback-executions')
-  async createRollbackExecution(@Param('reportId') reportId: string, @Body() rawBody: unknown) {
-    return {
+  async createRollbackExecution(
+    @Param('reportId') reportId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    return siteSlotApiView({
       rollbackExecution: await this.createRollbackExecutionOr404({
         ...toSiteSlotRollbackExecutionInput(asRecord(rawBody)),
         reportId
       })
-    };
+    }, opsToken);
   }
 
   @Get('internal/v1/site-slots/rollback-executions/:rollbackExecutionId')
-  async getRollbackExecution(@Param('rollbackExecutionId') rollbackExecutionId: string) {
+  async getRollbackExecution(
+    @Param('rollbackExecutionId') rollbackExecutionId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
     const rollbackExecution = await this.store.getSiteSlotRollbackExecution(rollbackExecutionId);
     if (!rollbackExecution) throw new NotFoundException('Site slot rollback execution not found');
-    return { rollbackExecution };
+    return siteSlotApiView({ rollbackExecution }, opsToken);
   }
 
   @Get('internal/v1/site-slots/rollback-reports')
-  async listRollbackReports(@Query('rollbackExecutionId') rollbackExecutionId?: string) {
-    return { rollbackReports: await this.store.listSiteSlotRollbackReports(rollbackExecutionId ?? null) };
+  async listRollbackReports(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Query('rollbackExecutionId') rollbackExecutionId?: string
+  ) {
+    return siteSlotApiView({ rollbackReports: await this.store.listSiteSlotRollbackReports(rollbackExecutionId ?? null) }, opsToken);
   }
 
   @Post('internal/v1/site-slots/rollback-executions/:rollbackExecutionId/reports')
-  async recordRollbackReport(@Param('rollbackExecutionId') rollbackExecutionId: string, @Body() rawBody: unknown) {
-    return {
+  async recordRollbackReport(
+    @Param('rollbackExecutionId') rollbackExecutionId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    return siteSlotApiView({
       rollbackReport: await this.recordRollbackReportOr404({
         ...toSiteSlotRollbackReportInput(asRecord(rawBody)),
         rollbackExecutionId
       })
-    };
+    }, opsToken);
   }
 
   @Get('internal/v1/site-slots/rollback-reports/:rollbackReportId')
-  async getRollbackReport(@Param('rollbackReportId') rollbackReportId: string) {
+  async getRollbackReport(
+    @Param('rollbackReportId') rollbackReportId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
     const rollbackReport = await this.store.getSiteSlotRollbackReport(rollbackReportId);
     if (!rollbackReport) throw new NotFoundException('Site slot rollback report not found');
-    return { rollbackReport };
+    return siteSlotApiView({ rollbackReport }, opsToken);
   }
 
   @Get('internal/v1/site-slots/executions/:runId')
-  async getExecution(@Param('runId') runId: string) {
+  async getExecution(
+    @Param('runId') runId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
     const execution = await this.store.getSiteSlotExecution(runId);
     if (!execution) throw new NotFoundException('Site slot execution not found');
-    return { execution };
+    return siteSlotApiView({ execution }, opsToken);
   }
 
   @Post('internal/v1/site-slots/plans/:planId/preflight')
-  async createPreflight(@Param('planId') planId: string, @Body() rawBody: unknown) {
-    return {
+  async createPreflight(
+    @Param('planId') planId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    return siteSlotApiView({
       execution: await this.createExecutionOr404({
         ...toSiteSlotExecutionInput(asRecord(rawBody)),
         planId,
         action: 'preflight'
       })
-    };
+    }, opsToken);
   }
 
   @Post('internal/v1/site-slots/plans/:planId/apply')
-  async createApply(@Param('planId') planId: string, @Body() rawBody: unknown) {
-    return {
+  async createApply(
+    @Param('planId') planId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    return siteSlotApiView({
       execution: await this.createExecutionOr404({
         ...toSiteSlotExecutionInput(asRecord(rawBody)),
         planId,
         action: 'apply'
       })
-    };
+    }, opsToken);
   }
 
   private async createExecutionOr404(input: SiteSlotExecutionInput) {
@@ -377,6 +492,27 @@ export class SiteSlotsController {
     }
   }
 
+  private async assertCompleteRemoteWorkerEvidence(input: SiteSlotWorkerReportInput): Promise<void> {
+    if (input.status !== 'passed' || !input.jobId) return;
+    const job = await this.store.getSiteSlotWorkerJob(input.jobId);
+    if (!job) throw new NotFoundException('Site slot worker job not found');
+    if (job.mode !== 'remote-ssh' || job.dryRun !== false) return;
+    const provided = input.stepReports ?? [];
+    const byStepId = new Map(provided.map((step) => [step.stepId, step]));
+    const complete = provided.length === job.steps.length
+      && byStepId.size === job.steps.length
+      && job.steps.every((step) => {
+        const report = byStepId.get(step.stepId);
+        return report?.status === 'passed'
+          && report.exitCode === 0
+          && Boolean(report.startedAt)
+          && Boolean(report.finishedAt);
+      });
+    if (!complete) {
+      throw new BadRequestException('A passing remote-ssh report must include explicit successful evidence for every worker step');
+    }
+  }
+
   private async createRollbackExecutionOr404(input: SiteSlotRollbackExecutionInput) {
     try {
       return await this.store.createSiteSlotRollbackExecution(input);
@@ -399,8 +535,28 @@ export class SiteSlotsController {
     }
   }
 
-  private async withDomesticBootstrapAccess(input: SiteSlotPlanInput): Promise<SiteSlotPlanInput> {
+  private async withCurrentAccessAccountMaterial(input: SiteSlotPlanInput): Promise<SiteSlotPlanInput> {
     const kind = input.kind === 'oversea' ? 'oversea' : 'domestic';
+    if (kind === 'oversea') {
+      const siteId = input.siteId?.trim() || 'oversea-main';
+      // Never create an executable Oversea plan with domain-layer placeholder
+      // tokens. The worker/Caddy credential must be the exact Internal-issued
+      // material that reveal later returns.
+      await this.store.issueSiteSlotAccessAccounts({
+        siteId,
+        service: 'hysteria2',
+        issueDefaults: true,
+        publicHost: input.host ?? undefined,
+        serverPorts: input.serverPorts,
+        requestedBy: input.createdBy ?? 'site-slots-controller',
+        requestId: `${input.requestId ?? 'site-slot-plan'}-oversea-access`
+      });
+      return {
+        ...input,
+        siteId,
+        accessAccounts: siteSlotPlanAccessAccountMaterial(await this.store.listSiteSlotAccessAccounts(siteId))
+      };
+    }
     if (kind !== 'domestic' || input.hasOutboundInternet === true) return input;
     const overseaSiteId = input.overseaSiteId?.trim() || 'oversea-main';
     if (input.accessAccounts?.length) return { ...input, overseaSiteId };
@@ -477,13 +633,18 @@ export class SiteSlotsController {
 function siteSlotPlanAccessAccountMaterial(accounts: SiteSlotAccessAccount[]): SiteSlotPlanInput['accessAccounts'] {
   return accounts
     .filter((account) => account.status === 'active')
-    .map((account) => ({
-      username: account.username,
-      authToken: account.authToken,
-      status: account.status,
-      upRate: '30 Mbps',
-      downRate: '30 Mbps'
-    }));
+    .map((account) => {
+      const bandwidth = isSystemSubscriptionAccessAccount(account)
+        ? SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH
+        : '30 Mbps';
+      return {
+        username: account.username,
+        authToken: account.authToken,
+        status: account.status,
+        upRate: bandwidth,
+        downRate: bandwidth
+      };
+    });
 }
 
 function domesticBootstrapAccount(accounts: SiteSlotAccessAccount[]): SiteSlotAccessAccount | null {
@@ -706,6 +867,12 @@ function accountNamesValue(value: unknown): string[] | string | null {
     return value.map((item) => String(item ?? '').trim()).filter(Boolean);
   }
   return nullableString(value);
+}
+
+function siteSlotPlanIssuesManagedAccessAccounts(input: SiteSlotPlanInput): boolean {
+  const kind = input.kind === 'oversea' ? 'oversea' : 'domestic';
+  return kind === 'oversea'
+    || (kind === 'domestic' && input.hasOutboundInternet !== true && !input.accessAccounts?.length);
 }
 
 function siteSlotPlanAccessAccountsValue(value: unknown): SiteSlotPlanInput['accessAccounts'] {

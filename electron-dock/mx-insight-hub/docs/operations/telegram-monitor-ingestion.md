@@ -429,7 +429,7 @@ local by default: parsing, field inference and sample rendering do not call a
 model. Agent assistance is opt-in with `agent=true`; even then the model receives
 only the column-name array and `sampleRows: []`, never file values. The response
 records `agentDataScope=column_names_only`. This direct file path is implemented
-for CSV/TSV, JSONL/NDJSON, TXT/MD and XLSX/XLSM uploads; it is not a watched directory, cloud bucket or cloud
+for CSV/TSV, JSON/JSONL/NDJSON, TXT/MD and XLSX/XLSM uploads; it is not a watched directory, cloud bucket or cloud
 warehouse adapter.
 
 The operator path is **Admin Console → 外部数据源 → 注册文件源 → 映射与导入**:
@@ -440,7 +440,7 @@ The operator path is **Admin Console → 外部数据源 → 注册文件源 →
 3. select the file again for the real import, then inspect the import-run
    evidence and Data Center counts.
 
-The raw-body upload limit is 64 MiB. Tabular/JSONL inputs are limited to
+The raw-body upload limit is 64 MiB. Tabular/JSON/JSONL inputs are limited to
 500,000 rows. XLSX/XLSM reads only the first worksheet and cached cell values;
 CSV/TSV is UTF-8. TXT/MD is split into non-empty paragraphs and deterministically
 emits a content-derived `externalId`. HanLP is not a file-parser
@@ -558,7 +558,7 @@ For each table independently:
 There is no safe bounded snapshot/canary mode in the current database puller:
 `batchSize` limits each transaction, not total rows, and continuations drain to
 the current end. Do not set `batchSize=3` expecting only three records. A
-one-time exported CSV/TSV, JSONL/NDJSON, TXT/MD or XLSX/XLSM can use the existing direct file importer, but
+one-time exported CSV/TSV, JSON/JSONL/NDJSON, TXT/MD or XLSX/XLSM can use the existing direct file importer, but
 that is a separately evidenced snapshot, not continuous database synchronization
 or a cloud/object-storage connector.
 

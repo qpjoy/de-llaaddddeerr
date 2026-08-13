@@ -87,6 +87,14 @@ Order:
    and run smoke checks;
 8. remove scoped temporary build/import artifacts.
 
+Only the Admin Pod receives the read-only `/shared_dir` hostPath. The current
+Internal host owns that directory with numeric group `10` (`wheel`), so the Pod
+adds GID 10 and does not chmod/chown operator files. The current node runtime
+does not support `supplementalGroupsPolicy: Strict`; enable it only after the
+runtime is upgraded and verified. Confirm the host group before moving this
+manifest to another node. Public, projector and ingest workloads receive
+neither the mount nor the supplemental group.
+
 The command is idempotent after an interrupted deployment. A migration Job is
 recreated; data and credentials remain in `mx-common`. The Hub deploy neither
 recreates nor deletes shared PVCs. Tagged containerd runtime/release images,

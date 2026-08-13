@@ -1,6 +1,7 @@
-import { BadRequestException, Body, Controller, Get, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 
 import { asRecord, nullableString } from '../../lib/http.js';
+import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE, RUNTIME_CONFIG } from '../../tokens.js';
 import type {
@@ -241,12 +242,20 @@ export class ConfigCenterController {
   }
 
   @Post('internal/v1/config-center/site-slot-ssh-profiles')
-  async upsertSiteSlotSshProfile(@Body() rawBody: unknown) {
+  async upsertSiteSlotSshProfile(
+    @Body() rawBody: unknown,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
     return { profile: await this.store.upsertSiteSlotSshProfile(toSshProfileInput(asRecord(rawBody))) };
   }
 
   @Post('internal/v1/config-center/site-slot-ssh-profiles/bootstrap')
-  async bootstrapSiteSlotSshProfile(@Body() rawBody: unknown) {
+  async bootstrapSiteSlotSshProfile(
+    @Body() rawBody: unknown,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
     const { profileInput, bootstrap } = await prepareSiteSlotSshProfileBootstrap(
       this.config,
       toSshProfileBootstrapInput(asRecord(rawBody))
@@ -258,7 +267,12 @@ export class ConfigCenterController {
   }
 
   @Post('internal/v1/config-center/site-slot-ssh-profiles/:profileId/readiness-probe')
-  async probeSiteSlotSshProfileReadiness(@Param('profileId') profileId: string, @Body() rawBody: unknown) {
+  async probeSiteSlotSshProfileReadiness(
+    @Param('profileId') profileId: string,
+    @Body() rawBody: unknown,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
     const profile = await this.store.getSiteSlotSshProfile(profileId);
     if (!profile) throw new NotFoundException('Site slot SSH profile not found');
     const body = asRecord(rawBody);

@@ -227,6 +227,7 @@ function remoteSshJobGateFailures(
     ...(plan ? [] : ['plan not found while building remote SSH gate']),
     ...(plan && !plan.host ? [`${plan.kind} host is required before remote SSH execution`] : []),
     ...(!plan?.ssh.profileId ? ['managed SSH profile is required before Admin remote SSH execution'] : []),
+    ...siteSlotSshProfilePlanBindingFailures(plan, sshProfile),
     ...(plan?.ssh.profileStatus === 'paused' || sshProfile?.status === 'paused' ? [`managed SSH profile is paused: ${plan?.ssh.profileId ?? sshProfile?.profileId ?? '<unknown>'}`] : []),
     ...(plan?.ssh.profileWarnings ?? []),
     ...(sshProfile?.identityFile ? [] : ['SSH identity file is required before artifact-push-remote-ssh can execute']),
@@ -235,6 +236,52 @@ function remoteSshJobGateFailures(
     ...(sshProfile?.knownHostsFile && knownHostsFileExists === false ? [`SSH known_hosts file does not exist: ${sshProfile.knownHostsFile}`] : []),
     ...(sshProfile?.sshConfigFile && sshConfigFileExists === false ? [`SSH config file does not exist: ${sshProfile.sshConfigFile}`] : [])
   ];
+}
+
+export function siteSlotSshProfilePlanBindingFailures(
+  plan: SiteSlotPlan | null,
+  sshProfile: SiteSlotSshProfile | null
+): string[] {
+  if (!plan) return [];
+  if (!sshProfile) return ['managed SSH profile not found while checking the plan target binding'];
+
+  const failures: string[] = [];
+  if (plan.ssh.profileSource !== 'config-center') {
+    failures.push(`SSH plan profile source must be config-center, got ${plan.ssh.profileSource}`);
+  }
+  if (plan.ssh.profileId !== sshProfile.profileId) {
+    failures.push(`SSH profile drift: plan profile ${plan.ssh.profileId ?? '<missing>'} does not match current profile ${sshProfile.profileId}`);
+  }
+  if (plan.siteId !== sshProfile.siteId) {
+    failures.push(`SSH profile drift: plan site ${plan.siteId} does not match current profile site ${sshProfile.siteId}`);
+  }
+  if (plan.kind !== sshProfile.kind) {
+    failures.push(`SSH profile drift: plan kind ${plan.kind} does not match current profile kind ${sshProfile.kind}`);
+  }
+  if (normalizedSshHostValue(plan.host) !== normalizedSshHostValue(sshProfile.host)) {
+    failures.push(`SSH profile drift: plan host ${plan.host ?? '<missing>'} does not match current profile host ${sshProfile.host ?? '<missing>'}`);
+  }
+  if (normalizedSshBindingValue(plan.ssh.user) !== normalizedSshBindingValue(sshProfile.sshUser)) {
+    failures.push(`SSH profile drift: plan user ${plan.ssh.user} does not match current profile user ${sshProfile.sshUser}`);
+  }
+  if (Number(plan.ssh.port) !== Number(sshProfile.sshPort)) {
+    failures.push(`SSH profile drift: plan port ${plan.ssh.port} does not match current profile port ${sshProfile.sshPort}`);
+  }
+  if (sshProfile.strictHostKeyChecking !== 'yes') {
+    failures.push('StrictHostKeyChecking=yes is required before remote SSH execution');
+  }
+  if (sshProfile.batchMode !== 'yes') {
+    failures.push('BatchMode=yes is required before remote SSH execution');
+  }
+  return failures;
+}
+
+function normalizedSshBindingValue(value: string | null | undefined): string {
+  return String(value ?? '').trim();
+}
+
+function normalizedSshHostValue(value: string | null | undefined): string {
+  return normalizedSshBindingValue(value).toLowerCase();
 }
 
 function artifactPushDryRunEvidence(

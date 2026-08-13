@@ -9,6 +9,8 @@ import { promisify } from 'node:util';
 import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 
 import { asRecord } from '../../lib/http.js';
+import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
+import { siteSlotOpsAwareView } from '../../lib/site-slot-credential-view.js';
 import { kubernetesRequest } from '../../store/kubernetes.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
@@ -31,6 +33,8 @@ import {
 import {
   MX_DEFAULT_APP_DNS_ZONE,
   MX_H2I_PRODUCT_ID,
+  isSystemSubscriptionAccessAccount,
+  SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH,
   tlsFingerprintFromSiteSlotOutput
 } from '../../store/domain.js';
 import type {
@@ -92,7 +96,8 @@ export class AdminController {
     @Headers('authorization') authorization?: string,
     @Query('limit') rawLimit?: string,
     @Query('token') rawToken?: string,
-    @Query('userId') rawUserId?: string
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
   ): Promise<AdminDashboardSnapshot> {
     const limit = numberValue(rawLimit, 10);
     const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
@@ -131,7 +136,7 @@ export class AdminController {
       domesticSecrets,
       generatedAt: new Date().toISOString()
     });
-    return {
+    return siteSlotOpsAwareView({
       generatedAt: launcherServiceVipSmokes.generatedAt,
       overview: overview as unknown as Record<string, unknown>,
       actionPolicy,
@@ -142,7 +147,7 @@ export class AdminController {
       runtimeFeaturePolicies,
       launcherServiceVipSmokes: launcherServiceVipSmokes.smokes,
       nextActions: adminDashboardNextActions(summaries)
-    };
+    }, opsToken);
   }
 
   @Post('launcher-service-vip-smokes/domestic-product-cidrs/sync')
@@ -336,7 +341,8 @@ export class AdminController {
     @Headers('authorization') authorization: string | undefined,
     @Body() rawBody: unknown,
     @Query('token') rawToken?: string,
-    @Query('userId') rawUserId?: string
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
   ) {
     const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
     const input = toAdminActionExecutionInput(asRecord(rawBody));
@@ -344,11 +350,17 @@ export class AdminController {
     if (!action) throw new BadRequestException('Admin action is not registered');
     if (!action.allowed) throw new ForbiddenException(action.reason);
     assertConfirmFields(action, input.body);
+    // Site-slot actions can issue credentials, create trusted worker reports,
+    // or execute remote commands. The historical shadow-admin principal is a
+    // UI compatibility aid, not authentication for those mutations.
+    if (action.category === 'site-slot') {
+      assertInternalOpsToken(opsToken);
+    }
     const result = await this.dispatchAdminAction(action.actionId, input.path, {
       ...input.body,
       requestedBy: stringValue(input.body.requestedBy) ?? actionPolicy.principal.principalId
     });
-    return {
+    return siteSlotOpsAwareView({
       actionResult: {
         actionId: action.actionId,
         path: input.path,
@@ -358,7 +370,7 @@ export class AdminController {
         executedAt: new Date().toISOString()
       },
       ...result
-    };
+    }, opsToken);
   }
 
   @Get('site-slots/pipelines')
@@ -366,18 +378,19 @@ export class AdminController {
     @Headers('authorization') authorization?: string,
     @Query('limit') rawLimit?: string,
     @Query('token') rawToken?: string,
-    @Query('userId') rawUserId?: string
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
   ) {
     const limit = numberValue(rawLimit, 20);
     const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
     const pipelines = await this.buildSiteSlotPipelines(actionPolicy);
-    return {
+    return siteSlotOpsAwareView({
       actionPolicy,
       pipelines: limitSiteSlotPipelines(pipelines, limit).map((pipeline) => ({
         summary: pipeline.summary,
         timeline: pipeline.timeline
       }))
-    };
+    }, opsToken);
   }
 
   @Get('site-slots/pipelines/:planId')
@@ -385,23 +398,25 @@ export class AdminController {
     @Headers('authorization') authorization: string | undefined,
     @Param('planId') planId: string,
     @Query('token') rawToken?: string,
-    @Query('userId') rawUserId?: string
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
   ) {
     const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
     const pipelines = await this.buildSiteSlotPipelines(actionPolicy, planId);
     const pipeline = pipelines[0];
     if (!pipeline) throw new NotFoundException('Admin site slot pipeline not found');
-    return { actionPolicy, pipeline };
+    return siteSlotOpsAwareView({ actionPolicy, pipeline }, opsToken);
   }
 
   @Get('oversea')
   async overseaControlOverview(
     @Headers('authorization') authorization?: string,
     @Query('token') rawToken?: string,
-    @Query('userId') rawUserId?: string
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
   ) {
     const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
-    return this.buildOverseaOverview(actionPolicy);
+    return siteSlotOpsAwareView(await this.buildOverseaOverview(actionPolicy), opsToken);
   }
 
   /**
@@ -415,9 +430,10 @@ export class AdminController {
     @Param('siteId') rawSiteId: string,
     @Body() rawBody: unknown,
     @Query('token') rawToken?: string,
-    @Query('userId') rawUserId?: string
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
   ) {
-    return this.setOverseaSiteArchived(true, authorization, rawSiteId, rawBody, rawToken, rawUserId);
+    return this.setOverseaSiteArchived(true, authorization, rawSiteId, rawBody, rawToken, rawUserId, opsToken);
   }
 
   @Post('oversea/:siteId/unarchive')
@@ -426,9 +442,10 @@ export class AdminController {
     @Param('siteId') rawSiteId: string,
     @Body() rawBody: unknown,
     @Query('token') rawToken?: string,
-    @Query('userId') rawUserId?: string
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
   ) {
-    return this.setOverseaSiteArchived(false, authorization, rawSiteId, rawBody, rawToken, rawUserId);
+    return this.setOverseaSiteArchived(false, authorization, rawSiteId, rawBody, rawToken, rawUserId, opsToken);
   }
 
   private async setOverseaSiteArchived(
@@ -437,8 +454,10 @@ export class AdminController {
     rawSiteId: string,
     rawBody: unknown,
     rawToken?: string,
-    rawUserId?: string
+    rawUserId?: string,
+    opsToken?: string
   ) {
+    assertInternalOpsToken(opsToken);
     const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
     assertPrincipalScope(actionPolicy, 'site-slot.manage');
     const body = asRecord(rawBody);
@@ -449,10 +468,10 @@ export class AdminController {
       requestedBy: stringValue(body.requestedBy) ?? actionPolicy.principal.principalId,
       requestId: stringValue(body.requestId) ?? `admin-oversea-${archived ? 'archive' : 'unarchive'}-${Date.now()}`
     });
-    return {
+    return siteSlotOpsAwareView({
       archive: result,
       overview: await this.buildOverseaOverview(actionPolicy)
-    };
+    }, opsToken);
   }
 
   @Post('oversea/:siteId/shadow-setup')
@@ -461,8 +480,10 @@ export class AdminController {
     @Param('siteId') rawSiteId: string,
     @Body() rawBody: unknown,
     @Query('token') rawToken?: string,
-    @Query('userId') rawUserId?: string
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
   ) {
+    assertInternalOpsToken(opsToken);
     const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
     assertPrincipalScope(actionPolicy, 'site-slot.manage');
     assertPrincipalScope(actionPolicy, 'site-slot.execute');
@@ -587,7 +608,7 @@ export class AdminController {
       })
       : null;
     const setup = overseaShadowSetupSummary(siteId, profile, access.site, provider, awxCheck, plan, preflight, apply, session, job, report);
-    return {
+    return siteSlotOpsAwareView({
       shadowSetup: setup,
       profile,
       mihomo: access.site,
@@ -601,7 +622,7 @@ export class AdminController {
       job,
       report,
       oversea: await this.buildOverseaOverview(actionPolicy, setup as unknown as Record<string, unknown>)
-    };
+    }, opsToken);
   }
 
   @Post('oversea/:siteId/ensure')
@@ -610,8 +631,10 @@ export class AdminController {
     @Param('siteId') rawSiteId: string,
     @Body() rawBody: unknown,
     @Query('token') rawToken?: string,
-    @Query('userId') rawUserId?: string
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
   ) {
+    assertInternalOpsToken(opsToken);
     const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
     assertPrincipalScope(actionPolicy, 'site-slot.execute');
     const body = asRecord(rawBody);
@@ -848,8 +871,10 @@ export class AdminController {
     @Param('siteId') rawSiteId: string,
     @Body() rawBody: unknown,
     @Query('token') rawToken?: string,
-    @Query('userId') rawUserId?: string
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
   ) {
+    assertInternalOpsToken(opsToken);
     const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
     assertPrincipalScope(actionPolicy, 'site-slot.execute');
     const body = asRecord(rawBody);
@@ -902,7 +927,7 @@ export class AdminController {
         startedAt: null,
         finishedAt: new Date().toISOString()
       };
-      return { terminal, oversea: await this.buildOverseaOverview(actionPolicy) };
+      return siteSlotOpsAwareView({ terminal, oversea: await this.buildOverseaOverview(actionPolicy) }, opsToken);
     }
     const startedAt = new Date().toISOString();
     try {
@@ -921,7 +946,7 @@ export class AdminController {
         finishedAt: new Date().toISOString()
       };
       await this.applyOverseaTerminalMihomoEvidence(siteId, `${stdout}\n${stderr}`, requestedBy, requestId);
-      return { terminal, oversea: await this.buildOverseaOverview(actionPolicy) };
+      return siteSlotOpsAwareView({ terminal, oversea: await this.buildOverseaOverview(actionPolicy) }, opsToken);
     } catch (error) {
       const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
       const diagnosis = sshFailureDiagnosis(execError.stderr ?? execError.message, execError.code) as Record<string, unknown>;
@@ -937,7 +962,7 @@ export class AdminController {
         startedAt,
         finishedAt: new Date().toISOString()
       };
-      return { terminal, oversea: await this.buildOverseaOverview(actionPolicy) };
+      return siteSlotOpsAwareView({ terminal, oversea: await this.buildOverseaOverview(actionPolicy) }, opsToken);
     }
   }
 
@@ -973,8 +998,28 @@ export class AdminController {
     )));
   }
 
-  private async withDomesticBootstrapAccess(input: SiteSlotPlanInput): Promise<SiteSlotPlanInput> {
+  private async withCurrentAccessAccountMaterial(input: SiteSlotPlanInput): Promise<SiteSlotPlanInput> {
     const kind = input.kind === 'oversea' ? 'oversea' : 'domestic';
+    if (kind === 'oversea') {
+      const siteId = input.siteId?.trim() || 'oversea-main';
+      // Oversea plans must carry the exact Internal-issued credentials. Domain
+      // placeholders are useful for design previews, but must never reach a
+      // runnable Admin worker plan because reveal returns the stored material.
+      await this.store.issueSiteSlotAccessAccounts({
+        siteId,
+        service: 'hysteria2',
+        issueDefaults: true,
+        publicHost: input.host ?? undefined,
+        serverPorts: input.serverPorts,
+        requestedBy: input.createdBy ?? 'admin-controller',
+        requestId: `${input.requestId ?? 'admin-site-slot-plan'}-oversea-access`
+      });
+      return {
+        ...input,
+        siteId,
+        accessAccounts: siteSlotPlanAccessAccountMaterial(await this.store.listSiteSlotAccessAccounts(siteId))
+      };
+    }
     if (kind !== 'domestic' || input.hasOutboundInternet === true) return input;
     const overseaSiteId = input.overseaSiteId?.trim() || 'oversea-main';
     if (input.accessAccounts?.length) return { ...input, overseaSiteId };
@@ -1703,7 +1748,7 @@ export class AdminController {
   private async dispatchAdminAction(actionId: string, path: string, body: Record<string, unknown>) {
     if (actionId === 'site-slot.plan.create') {
       if (path !== '/internal/v1/site-slots/plans') throw new BadRequestException('Admin site-slot plan path is invalid');
-      const input = await this.withDomesticBootstrapAccess(toSiteSlotPlanInput(body));
+      const input = await this.withCurrentAccessAccountMaterial(toSiteSlotPlanInput(body));
       const hostFailure = await this.domesticPlanHostValidationFailure(input);
       if (hostFailure) throw new BadRequestException(hostFailure);
       const plan = await this.store.createSiteSlotPlan(input);
@@ -2868,13 +2913,18 @@ function siteSlotPlanAccessAccountsValue(value: unknown): SiteSlotPlanInput['acc
 function siteSlotPlanAccessAccountMaterial(accounts: SiteSlotAccessAccount[]): SiteSlotPlanAccessAccountInput[] {
   return accounts
     .filter((account) => account.status === 'active')
-    .map((account) => ({
-      username: account.username,
-      authToken: account.authToken,
-      status: account.status,
-      upRate: '30 Mbps',
-      downRate: '30 Mbps'
-    }));
+    .map((account) => {
+      const bandwidth = isSystemSubscriptionAccessAccount(account)
+        ? SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH
+        : '30 Mbps';
+      return {
+        username: account.username,
+        authToken: account.authToken,
+        status: account.status,
+        upRate: bandwidth,
+        downRate: bandwidth
+      };
+    });
 }
 
 function domesticBootstrapAccount(accounts: SiteSlotAccessAccount[]): SiteSlotAccessAccount | null {

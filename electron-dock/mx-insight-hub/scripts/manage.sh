@@ -668,6 +668,7 @@ create_runtime_config() {
   # which is what keeps the Night-All path independent of the search rollout.
   local elasticsearch_url="${MX_COMMON_ELASTICSEARCH_URL:-http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200}"
   local redis_url="${MX_COMMON_REDIS_URL:-redis://mx-common-redis.mx-common.svc.cluster.local:6379}"
+  local server_file_roots="${MX_INSIGHT_SERVER_FILE_ROOTS:-{\"shared-dir\":\"/shared_dir\"}}"
   if [ "${MX_INSIGHT_SEARCH_READY:-0}" != "1" ] && [ -z "${MX_COMMON_ELASTICSEARCH_URL:-}" ]; then
     say "shared search is not ready; deploying with MX_COMMON_ELASTICSEARCH_URL unset (search degraded)"
     elasticsearch_url=""
@@ -683,6 +684,7 @@ create_runtime_config() {
     --from-literal=MX_COMMON_REDIS_URL="$redis_url" \
     --from-literal=MX_COMMON_HANLP_URL="${MX_COMMON_HANLP_URL:-}" \
     --from-literal=MX_COMMON_QUEUE_DRIVER="${MX_COMMON_QUEUE_DRIVER:-postgres}" \
+    --from-literal=MX_INSIGHT_SERVER_FILE_ROOTS="$server_file_roots" \
     --from-literal=MX_INSIGHT_EMBEDDING_MODEL="${MX_INSIGHT_EMBEDDING_MODEL:-}" \
     --from-literal=MX_INSIGHT_EMBEDDING_DIMENSIONS="${MX_INSIGHT_EMBEDDING_DIMENSIONS:-}" \
     --from-literal=MX_INSIGHT_LAUNCHER_URL="${MX_INSIGHT_LAUNCHER_URL:-}" \

@@ -10,6 +10,7 @@ const serverRoot = resolve(scriptDir, '..');
 const mxLauncherRoot = resolve(serverRoot, '..');
 const [baseArg, siteIdArg, hostArg, modeArg = 'pipeline'] = process.argv.slice(2);
 const baseUrl = (baseArg || process.env.MX_INTERNAL_BASE_URL || 'http://127.0.0.1:18090').replace(/\/+$/, '');
+const internalOpsToken = (process.env.MX_INTERNAL_OPS_TOKEN || '').trim();
 const siteId = siteIdArg || process.env.SITE_SLOT_ID || 'oversea-main';
 const host = hostArg || process.env.SITE_SLOT_HOST || process.env.SITE_SLOT_SSH_HOST || '';
 const mode = modeArg || 'pipeline';
@@ -25,6 +26,10 @@ const stageModes = {
 
 if (!host || !stageModes[mode]) {
   die('Usage: node server/scripts/site-slot-oversea-remote-test.mjs <base-url> <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute]');
+}
+
+if (!internalOpsToken) {
+  die('MX_INTERNAL_OPS_TOKEN is required for the managed Oversea deployment workflow.');
 }
 
 if (!process.env.SITE_SLOT_SSH_IDENTITY_FILE) {
@@ -240,9 +245,11 @@ async function runWorker(jobId, workerMode, id) {
 }
 
 async function request(path, options = {}) {
+  const headers = new Headers(options.body ? { 'content-type': 'application/json' } : undefined);
+  headers.set('x-mx-ops-token', internalOpsToken);
   const response = await fetch(`${baseUrl}${path}`, {
     method: options.method || 'GET',
-    headers: options.body ? { 'content-type': 'application/json' } : undefined,
+    headers,
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   const text = await response.text();

@@ -71,6 +71,16 @@ const searchResponse = {
   },
 }
 
+const storedSearchResponse = {
+  description: 'Hub canonical stored-search response.',
+  headers: searchResponse.headers,
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/StoredSearchEnvelope' },
+    },
+  },
+}
+
 export const PUBLIC_OPENAPI_DOCUMENT = {
   openapi: '3.1.0',
   info: {
@@ -150,6 +160,31 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
         },
         responses: { 200: searchResponse, ...publicErrors },
+      },
+    },
+    '/data/stored/search': {
+      post: {
+        tags: ['Search'],
+        operationId: 'searchStoredData',
+        summary: 'Search Hub canonical data without calling an upstream provider',
+        description: 'Requires the explicit platform grant. datasetId and objectType are exact filters, not separate authorization grants: every consumer granted a platform can search the complete Hub canonical corpus for that platform. Elasticsearch is preferred and transport failure falls back to PostgreSQL. Physical databases, indices and query DSL are not accepted.',
+        parameters: [idempotencyParameter],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/StoredSearchRequest' },
+              example: {
+                platform: 'xiaohongshu',
+                query: 'AI Agent',
+                datasetId: 'night-all.search.v1',
+                objectType: 'post',
+                pageSize: 20,
+              },
+            },
+          },
+        },
+        responses: { 200: storedSearchResponse, ...publicErrors },
       },
     },
     '/tools/tokenize': {
@@ -373,6 +408,19 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'Opaque nextCursor from the prior page.' },
         },
       },
+      StoredSearchRequest: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['platform', 'query'],
+        properties: {
+          platform: { type: 'string', minLength: 1, maxLength: 64, description: 'One explicit granted platform; wildcards and all are invalid.' },
+          query: { type: 'string', minLength: 1, maxLength: 500 },
+          datasetId: { type: 'string', minLength: 1, maxLength: 200, description: 'Optional exact logical dataset filter; not a physical database or authorization grant.' },
+          objectType: { type: 'string', minLength: 1, maxLength: 100, description: 'Optional exact canonical object-type filter.' },
+          pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed opaque nextCursor bound to the normalized query and filters.' },
+        },
+      },
       TokenizeRequest: {
         type: 'object',
         additionalProperties: false,
@@ -442,6 +490,61 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
           requestId: { type: 'string' },
           traceId: { type: 'string' },
+        },
+      },
+      StoredSearchItem: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'datasetId', 'platform', 'objectType', 'source'],
+        properties: {
+          id: { type: 'string', format: 'uuid' }, datasetId: { type: 'string' }, platform: { type: 'string' },
+          objectType: { type: 'string' }, contentType: { type: ['string', 'null'] }, externalId: { type: 'string' },
+          url: { type: ['string', 'null'] }, title: { type: ['string', 'null'] }, text: { type: ['string', 'null'] },
+          author: { type: 'object', additionalProperties: false, properties: {
+            id: { type: ['string', 'null'] }, name: { type: ['string', 'null'] }, username: { type: ['string', 'null'] },
+          } },
+          metrics: { type: 'object', additionalProperties: { type: ['number', 'null'] } },
+          eventTime: { type: ['string', 'null'], format: 'date-time' },
+          collectedAt: { type: ['string', 'null'], format: 'date-time' },
+          score: { type: ['number', 'null'] }, source: { type: 'string', const: 'hub' },
+        },
+      },
+      StoredSearchPageInfo: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['pageIndex', 'pageSize', 'returnedCount', 'hasMore', 'nextCursor', 'cursorType'],
+        properties: {
+          pageIndex: { type: 'integer', minimum: 1 }, pageSize: { type: 'integer', minimum: 1, maximum: 100 },
+          returnedCount: { type: 'integer', minimum: 0, maximum: 100 }, hasMore: { type: 'boolean' },
+          nextCursor: { type: ['string', 'null'], maxLength: 8192 },
+          cursorType: { type: 'string', enum: ['opaque', 'none'] },
+        },
+      },
+      StoredSearchEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['contractVersion', 'source', 'query', 'filters', 'items', 'pageInfo', 'searchMode', 'warnings', 'durationMs'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.stored-search.v1' },
+              source: { type: 'string', const: 'hub' }, query: { type: 'string' },
+              filters: { type: 'object', additionalProperties: false, required: ['platform', 'datasetId', 'objectType'], properties: {
+                platform: { type: 'string' }, datasetId: { type: ['string', 'null'] }, objectType: { type: ['string', 'null'] },
+              } },
+              items: { type: 'array', items: { $ref: '#/components/schemas/StoredSearchItem' } },
+              pageInfo: { $ref: '#/components/schemas/StoredSearchPageInfo' },
+              searchMode: { type: 'string', enum: ['elasticsearch', 'postgres'] },
+              warnings: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['code', 'message'], properties: {
+                code: { type: 'string' }, message: { type: 'string' },
+              } } },
+              durationMs: { type: 'integer', minimum: 0 },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
         },
       },
       TelegramRecord: {
@@ -707,6 +810,13 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   },
   "requestId": "00000000-0000-4000-8000-000000000003"
 }</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/stored/search</code></div><p>只搜索 Hub canonical 数据，不调用 Night-All。可按逻辑 <code>datasetId</code> 和 <code>objectType</code> 精确过滤；不接受数据库、索引、SQL 或 ES DSL。</p></div>
+    <div class="notice">授权边界仍是 <code>platform</code>：<code>datasetId</code> 只是过滤条件，不是独立授权。获得某平台授权的调用者当前可搜索该平台完整 canonical 语料。</div>
+    <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/stored/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: stored-$(uuidgen)" \
+  -d '{"platform":"xiaohongshu","query":"AI Agent","datasetId":"night-all.search.v1","objectType":"post","pageSize":20}' | jq</code></pre>
 
     <h2 id="tools">通用工具</h2>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/tools/tokenize</code></div><p>新建或从未配置的调用者默认获得 <code>nlp.tokenize</code>，管理员可显式停用；调用仍必须携带已签发的 API Key。默认按 consumer + capability 的 3600 秒滚动窗口限制 1000 次，同一调用者的所有 Key 共享上限。它不授予数据平台权限，响应会报告实际分词后端及降级状态。</p></div>

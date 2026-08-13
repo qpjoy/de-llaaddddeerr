@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const internalBaseUrl = normalizeBaseUrl(process.env.MX_INTERNAL_BASE_URL || 'http://127.0.0.1:18133');
+const internalOpsToken = process.env.MX_INTERNAL_OPS_TOKEN?.trim();
+if (!internalOpsToken) throw new Error('MX_INTERNAL_OPS_TOKEN is required for Admin site-slot smoke actions');
 const awxToken = process.env.SITE_SLOT_AWX_TOKEN || process.env.AWX_TOKEN || 'mx-awx-mock-token';
 const suffix = process.env.MX_AWX_SMOKE_SUFFIX || Date.now().toString(36);
 
@@ -265,7 +267,10 @@ async function executeAction(actionId, path, body) {
 async function fetchJson(path, options = {}) {
   const response = await fetch(`${internalBaseUrl}${path}`, {
     method: options.method || 'GET',
-    headers: options.body ? { 'content-type': 'application/json' } : undefined,
+    headers: {
+      'x-mx-ops-token': internalOpsToken,
+      ...(options.body ? { 'content-type': 'application/json' } : {})
+    },
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   const text = await response.text();

@@ -136,8 +136,50 @@ function truncate(value) {
 }
 
 // ---------------------------------------------------------------------------
-// JSON Lines and plain text
+// JSON documents, JSON Lines and plain text
 // ---------------------------------------------------------------------------
+
+const JSON_ENVELOPE_KEYS = ['items', 'records', 'data']
+
+function isJsonObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function jsonObjectRecords(records, selector) {
+  if (records.length > MAX_ROWS) throw new ParseError(`more than ${MAX_ROWS} rows`)
+  const columns = new Set()
+  for (const [index, record] of records.entries()) {
+    if (!isJsonObject(record)) {
+      throw new ParseError(`JSON record ${index + 1} is not an object`)
+    }
+    for (const key of Object.keys(record)) columns.add(key)
+  }
+  return { columns: [...columns], records, selector }
+}
+
+export function parseJson(text) {
+  let parsed
+  try {
+    parsed = JSON.parse(stripBom(text))
+  } catch (error) {
+    throw new ParseError(`not valid JSON: ${error.message}`)
+  }
+
+  if (Array.isArray(parsed)) return jsonObjectRecords(parsed, 'top-level-array')
+  if (!isJsonObject(parsed)) throw new ParseError('top-level JSON value is not an object or array of objects')
+
+  const envelopeKeys = JSON_ENVELOPE_KEYS.filter((key) => (
+    Array.isArray(parsed[key]) && parsed[key].every(isJsonObject)
+  ))
+  if (envelopeKeys.length > 1) {
+    throw new ParseError(`multiple object-array envelopes found: ${envelopeKeys.join(', ')}`)
+  }
+  if (envelopeKeys.length === 1) {
+    const key = envelopeKeys[0]
+    return jsonObjectRecords(parsed[key], `envelope:${key}`)
+  }
+  return jsonObjectRecords([parsed], 'top-level-object')
+}
 
 export function parseJsonLines(text) {
   const records = []
@@ -384,6 +426,7 @@ function decodeXml(value) {
 const EXTENSION_PARSERS = {
   '.csv': (buffer) => parseDelimited(buffer.toString('utf8'), { delimiter: ',' }),
   '.tsv': (buffer) => parseDelimited(buffer.toString('utf8'), { delimiter: '\t' }),
+  '.json': (buffer) => parseJson(buffer.toString('utf8')),
   '.jsonl': (buffer) => parseJsonLines(buffer.toString('utf8')),
   '.ndjson': (buffer) => parseJsonLines(buffer.toString('utf8')),
   '.xlsx': (buffer) => parseXlsx(buffer),

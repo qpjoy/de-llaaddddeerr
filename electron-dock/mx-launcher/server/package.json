@@ -29,6 +29,7 @@
     "release:publish": "node scripts/release-center-publish.mjs",
     "test:oversea-site-archive": "node --test --import tsx src/modules/launcher-network/oversea-site-archive.test.ts",
     "test:oversea-subscription-link": "node --test --import tsx src/modules/user-center/oversea-subscription-link.test.ts",
+    "test:system-subscriptions": "node --test --import tsx src/modules/user-center/system-subscriptions.test.ts src/modules/admin/admin-site-slot-credential-visibility.test.ts src/modules/config-center/site-slot-ssh-profile-auth.test.ts src/modules/site-slots/remote-ssh-profile-binding.test.ts",
     "test:user-oversea-entitlement": "node --test --import tsx src/modules/user-center/user-oversea-entitlement-assignment.test.ts",
     "test:api-docs": "node --test --import tsx src/modules/api-docs/api-docs.contract.test.ts"
   },
