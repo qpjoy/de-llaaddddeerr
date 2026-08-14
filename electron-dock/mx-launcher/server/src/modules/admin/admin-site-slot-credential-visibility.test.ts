@@ -457,6 +457,20 @@ test('Oversea Install/Sync and archive never cross the Domestic WG runtime bound
           .some((command) => command.includes('HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=7788')),
         'the fresh Oversea plan must carry the current system-subscription mixed port'
       );
+      const currentConfigure = createdPlans[0].deploymentPhases.find((phase) => phase.phaseId === 'configure-oversea-access');
+      assert.ok(currentConfigure);
+      assert.match(currentConfigure.commands[8] ?? '', /check-system-subscription/, 'the strict ready gate must remain step .9');
+      const fingerprintCommand = currentConfigure.commands[10] ?? '';
+      assert.match(
+        fingerprintCommand,
+        /\.\/manage\.sh status \| grep -E \"\^TLS fingerprint:/,
+        'the fresh plan must report TLS fingerprint through a dedicated read-only step .11'
+      );
+      const fingerprintWorkerStep = rawStore.listSiteSlotWorkerJobs()
+        .flatMap((job) => job.steps)
+        .find((step) => step.command === fingerprintCommand);
+      assert.equal(fingerprintWorkerStep?.sourceId, 'configure-oversea-access.11');
+      assert.equal(fingerprintWorkerStep?.redactOutput, false, 'public fingerprint evidence must survive worker redaction');
 
       const resynced = await controller.ensureOverseaSite(
         undefined,
@@ -475,6 +489,35 @@ test('Oversea Install/Sync and archive never cross the Domestic WG runtime bound
       assert.equal(resynced.ensure.status, 'passed');
       assert.equal(resynced.ensure.planId, ensured.ensure.planId, 'a current 7788 Oversea plan remains reusable');
       assert.equal(createdPlans.length, 1, 'resync must not replace an already current Oversea plan');
+
+      currentConfigure.commands = currentConfigure.commands.filter((command) => command !== fingerprintCommand);
+      const repairedEvidencePlan = await controller.ensureOverseaSite(
+        undefined,
+        'mx-oversea-hk01',
+        {
+          executeRemote: true,
+          confirmInstall: true,
+          force: true,
+          requestedBy: 'test',
+          requestId: 'oversea-domestic-isolation-missing-fingerprint-evidence'
+        },
+        undefined,
+        undefined,
+        OPS_TOKEN
+      );
+      assert.equal(repairedEvidencePlan.ensure.status, 'passed');
+      assert.notEqual(
+        repairedEvidencePlan.ensure.planId,
+        ensured.ensure.planId,
+        'a legacy plan without safe TLS fingerprint evidence must not be reused'
+      );
+      assert.equal(createdPlans.length, 2);
+      assert.ok(
+        createdPlans[1].deploymentPhases
+          .flatMap((phase) => phase.commands)
+          .some((command) => command.includes('./manage.sh status | grep -E "^TLS fingerprint:')),
+        'the replacement plan must restore the safe TLS fingerprint evidence step'
+      );
 
       const archived = await controller.archiveOverseaSite(
         undefined,
@@ -517,7 +560,7 @@ test('Oversea Install/Sync and archive never cross the Domestic WG runtime bound
     }
 
     const domesticAfter = rawStore.getSiteSlotDomesticWireGuardSecret(domesticPlan.siteId);
-    assert.deepEqual(createdPlanKinds, ['oversea']);
+    assert.deepEqual(createdPlanKinds, ['oversea', 'oversea']);
     assert.equal(existsSync(join(outputDir, 'oversea', 'manifest.json')), true);
     assert.equal(
       existsSync(join(outputDir, 'domestic')),

@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { loadConfig } from '../../config.js';
-import { hashToken, systemSubscriptionAccessAccountName } from '../../store/domain.js';
+import {
+  hashToken,
+  siteSlotWorkerReportTlsFingerprint,
+  systemSubscriptionAccessAccountName
+} from '../../store/domain.js';
 import { MemoryStore } from '../../store/memory.js';
 import type { SiteSlotPlan, SiteSlotWorkerJob, SiteSlotWorkerReport } from '../../types.js';
 import { SiteSlotsController } from '../site-slots/site-slots.controller.js';
@@ -14,6 +18,41 @@ test('system runtime usernames preserve the semantic suffix within the Oversea p
   const username = systemSubscriptionAccessAccountName(`oversea-${'very-long-site-'.repeat(8)}`);
   assert.ok(username.length <= 64);
   assert.ok(username.endsWith('-subscriptions'));
+});
+
+test('a dedicated non-secret worker step preserves TLS fingerprint evidence beside redacted verification output', () => {
+  const fingerprint = '2E:4A:D1:02:CF:A5:9D:5A:F0:13:F4:44:04:65:A6:D3:E3:18:DA:16:15:B3:26:01:72:B8:A3:5B:2E:62:B4:1A';
+  const report = {
+    reportId: 'slotreport-safe-fingerprint',
+    siteId: 'mx-oversea-hk01',
+    workerId: 'oversea-site-agent-test',
+    message: null,
+    stepReports: [{
+      sourceId: 'configure-oversea-access.9',
+      stdout: '[redacted output]',
+      stderr: null
+    }, {
+      sourceId: 'configure-oversea-access.11',
+      stdout: JSON.stringify({
+        execution: 'executed',
+        executionResult: { stdout: `TLS fingerprint: ${fingerprint}` }
+      }),
+      stderr: null
+    }]
+  } as SiteSlotWorkerReport;
+
+  assert.equal(siteSlotWorkerReportTlsFingerprint(report), fingerprint);
+
+  const { store } = seed({ tlsFingerprint: null });
+  const before = store.getLauncherNetworkMihomoSite('mx-oversea-hk01');
+  (store as unknown as {
+    applySiteSlotWorkerReportMihomoEvidence: (input: SiteSlotWorkerReport) => void;
+  }).applySiteSlotWorkerReportMihomoEvidence(report);
+  const after = store.getLauncherNetworkMihomoSite('mx-oversea-hk01');
+  assert.equal(after?.tlsFingerprint, fingerprint);
+  assert.equal(after?.publicHost, before?.publicHost);
+  assert.equal(after?.serverPorts, before?.serverPorts);
+  assert.equal(after?.status, before?.status);
 });
 
 async function withOpsToken<T>(run: () => Promise<T>): Promise<T> {

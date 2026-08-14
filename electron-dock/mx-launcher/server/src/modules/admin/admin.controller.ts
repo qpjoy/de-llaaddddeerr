@@ -6740,6 +6740,7 @@ function reusableOverseaPlanContract(plan: SiteSlotPlan): boolean {
     && commands.some((command) => command.includes(`HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=${SYSTEM_SUBSCRIPTION_MIXED_PORT}`))
     && commands.some((command) => command.includes('./manage.sh sync-internal-defaults'))
     && commands.some((command) => command.includes('./manage.sh docker-status'))
+    && commands.some((command) => command.includes('./manage.sh status | grep -E "^TLS fingerprint:'))
     && commands.some((command) => command.includes('slot services placeholder; no Docker services selected'))
     && commands.some((command) => command.includes('overseaConfigDelivery=internal-pushed'))
     && commands.some((command) => command.includes('overseaAccessAccountMaterial=internal-issued accounts='));

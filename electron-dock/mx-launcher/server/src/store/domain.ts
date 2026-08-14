@@ -7436,11 +7436,13 @@ function siteSlotDeploymentPhases(
           ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh reconcile-from-json --state-file /opt/mx/site-agent/tunnel-state.json --mode hysteria2-only`),
           overseaRegistrationCommand,
           ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh sync-internal-defaults && ./manage.sh docker-status && ./manage.sh check-system-subscription && curl -fsS http://127.0.0.1:${overseaExportPort}/healthz`),
-          overseaSystemSubscriptionCredentialMarker
+          overseaSystemSubscriptionCredentialMarker,
+          ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh status | grep -E "^TLS fingerprint: ([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}$"`)
         ],
         notes: [
           'Oversea runs hysteria2 only; Internal runs mihomo and stores subscription/account material.',
           `Port ${overseaExportPort} on Oversea is a protected delivery/health/evidence outlet for one exact system YAML path, clients.csv, and healthz; Internal remains the subscription authority.`,
+          'The final read-only fingerprint probe reports only public TLS certificate metadata; credential-bearing verification output remains redacted.',
           'H endpoints use WG relay only for Internal DNS and reserved/product routes; Domestic defaults to 10.88.0.1, cn-direct stays direct, and external traffic uses the Oversea hysteria2 subscription.'
         ]
       },
