@@ -348,7 +348,41 @@ test('Oversea Install/Sync and archive never cross the Domestic WG runtime bound
       requestedBy: 'test'
     });
 
+    const staleAccess = rawStore.issueSiteSlotAccessAccounts({
+      siteId: 'mx-oversea-hk01',
+      service: 'hysteria2',
+      issueDefaults: true,
+      publicHost: '203.0.113.21',
+      serverPorts: '51289',
+      requestedBy: 'test',
+      requestId: 'oversea-domestic-isolation-stale-access'
+    });
+    const stalePlan = rawStore.createSiteSlotPlan({
+      siteId: 'mx-oversea-hk01',
+      kind: 'oversea',
+      sshProfileId: 'sshprof_mx-oversea-hk01_isolation',
+      host: '203.0.113.21',
+      sshUser: 'root',
+      sshPort: 22,
+      rootAccess: true,
+      hasDocker: true,
+      hasOutboundInternet: true,
+      serverPorts: '51289',
+      exportPort: 3435,
+      workerInternalBaseUrl: 'http://127.0.0.1:18090',
+      accessAccounts: staleAccess.accounts,
+      createdBy: 'test',
+      requestId: 'oversea-domestic-isolation-stale-plan'
+    });
+    const staleConfigure = stalePlan.deploymentPhases.find((phase) => phase.phaseId === 'configure-oversea-access');
+    assert.ok(staleConfigure);
+    staleConfigure.commands = staleConfigure.commands.map((command) => (
+      command.replace('HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=7788', 'HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=7890')
+    ));
+    assert.ok(staleConfigure.commands.some((command) => command.includes('HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=7890')));
+
     const createdPlanKinds: SiteSlotKind[] = [];
+    const createdPlans: Awaited<ReturnType<MemoryStore['createSiteSlotPlan']>>[] = [];
     let domesticSecretWrites = 0;
     const store = new Proxy(rawStore, {
       get(target, property, receiver) {
@@ -357,7 +391,9 @@ test('Oversea Install/Sync and archive never cross the Domestic WG runtime bound
             const kind = input.kind === 'oversea' ? 'oversea' : 'domestic';
             createdPlanKinds.push(kind);
             assert.equal(kind, 'oversea', 'Oversea ensure must not create a Domestic plan');
-            return target.createSiteSlotPlan(input);
+            const plan = target.createSiteSlotPlan(input);
+            createdPlans.push(plan);
+            return plan;
           };
         }
         if (property === 'upsertSiteSlotDomesticWireGuardSecret') {
@@ -413,6 +449,32 @@ test('Oversea Install/Sync and archive never cross the Domestic WG runtime bound
         OPS_TOKEN
       );
       assert.equal(ensured.ensure.status, 'passed');
+      assert.notEqual(ensured.ensure.planId, stalePlan.planId, 'Install/Sync must not replay a stale Oversea plan');
+      assert.equal(createdPlans.length, 1);
+      assert.ok(
+        createdPlans[0].deploymentPhases
+          .flatMap((phase) => phase.commands)
+          .some((command) => command.includes('HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=7788')),
+        'the fresh Oversea plan must carry the current system-subscription mixed port'
+      );
+
+      const resynced = await controller.ensureOverseaSite(
+        undefined,
+        'mx-oversea-hk01',
+        {
+          executeRemote: true,
+          confirmInstall: true,
+          force: true,
+          requestedBy: 'test',
+          requestId: 'oversea-domestic-isolation-current-plan-resync'
+        },
+        undefined,
+        undefined,
+        OPS_TOKEN
+      );
+      assert.equal(resynced.ensure.status, 'passed');
+      assert.equal(resynced.ensure.planId, ensured.ensure.planId, 'a current 7788 Oversea plan remains reusable');
+      assert.equal(createdPlans.length, 1, 'resync must not replace an already current Oversea plan');
 
       const archived = await controller.archiveOverseaSite(
         undefined,

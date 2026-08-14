@@ -35,6 +35,7 @@ import {
   MX_H2I_PRODUCT_ID,
   isSystemSubscriptionAccessAccount,
   SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH,
+  SYSTEM_SUBSCRIPTION_MIXED_PORT,
   tlsFingerprintFromSiteSlotOutput
 } from '../../store/domain.js';
 import type {
@@ -6736,6 +6737,7 @@ function reusableOverseaPlanContract(plan: SiteSlotPlan): boolean {
   const commands = plan.deploymentPhases.flatMap((phase) => phase.commands ?? []);
   return (commands.some((command) => command.includes('/bin/qp-tunnel-cli register --internal'))
     || commands.some((command) => command.includes('oversea callback push-only; registration skipped')))
+    && commands.some((command) => command.includes(`HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=${SYSTEM_SUBSCRIPTION_MIXED_PORT}`))
     && commands.some((command) => command.includes('./manage.sh sync-internal-defaults'))
     && commands.some((command) => command.includes('./manage.sh docker-status'))
     && commands.some((command) => command.includes('slot services placeholder; no Docker services selected'))
