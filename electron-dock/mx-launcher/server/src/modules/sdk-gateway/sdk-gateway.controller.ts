@@ -22,7 +22,7 @@ import {
 import { authenticationRateLimitBucketKey } from '../../lib/auth-rate-limit.js';
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
-import { userMatchesLogin } from '../../store/domain.js';
+import { resolveUserCenterUserForLogin } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import type {
@@ -305,7 +305,7 @@ export class SdkGatewayController {
     const password = nullableString(body.password);
     if (!username || !password) throw new UnauthorizedException('username and password are required');
     const users = await this.store.listUserCenterUsers();
-    const user = users.find((item) => userMatchesLogin(item, username));
+    const user = resolveUserCenterUserForLogin(users, username);
     await this.assertOAuthAttemptRateLimit({
       grantType: 'password',
       sourceIp,

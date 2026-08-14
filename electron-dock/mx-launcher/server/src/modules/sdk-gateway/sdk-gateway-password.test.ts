@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import type { HttpException } from '@nestjs/common';
 
+import { loadConfig } from '../../config.js';
+import { MemoryStore } from '../../store/memory.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import type { PlatformPrincipal, TokenIntrospectionResult, UserPasswordUpdateInput } from '../../types.js';
 import { SdkGatewayController } from './sdk-gateway.controller.js';
@@ -20,6 +22,64 @@ const writerPrincipal: PlatformPrincipal = {
   roles: ['mx-service-account'],
   scopes: ['sdk.user.write']
 };
+
+test('SDK Gateway password login returns the exact-case user principal', async () => {
+  const store = new MemoryStore(loadConfig());
+  await store.bootstrapUserCenter();
+  await store.createUserCenterUser({
+    userId: 'usr_Test',
+    account: 'Test',
+    displayName: 'Upper Test',
+    password: 'Test123456',
+    roleIds: ['mx-user']
+  });
+  const controller = new SdkGatewayController(store, {} as FeishuAuthService);
+
+  const upper = await controller.token({
+    grant_type: 'password',
+    username: 'Test',
+    password: 'Test123456',
+    scope: 'sdk.identity.read sdk.user.read',
+    audience: 'mx-sdk'
+  }, '203.0.113.30');
+  const lower = await controller.token({
+    grant_type: 'password',
+    username: 'test',
+    password: 'test',
+    scope: 'sdk.identity.read sdk.user.read',
+    audience: 'mx-sdk'
+  }, '203.0.113.31');
+
+  assert.equal(upper.token.subject, 'user:usr_Test');
+  assert.equal((upper.token.principal as PlatformPrincipal).userId, 'usr_Test');
+  assert.equal(lower.token.subject, 'user:usr_test');
+  assert.equal((lower.token.principal as PlatformPrincipal).userId, 'usr_test');
+  await assert.rejects(
+    controller.token({
+      grant_type: 'password',
+      username: 'TEST',
+      password: 'Test123456'
+    }, '203.0.113.32'),
+    (error) => statusOf(error) === 401
+  );
+
+  const singleUserStore = new MemoryStore(loadConfig());
+  await singleUserStore.createUserCenterUser({
+    userId: 'usr_CaseOnly',
+    account: 'CaseOnly',
+    password: 'CaseOnly123',
+    roleIds: ['mx-user']
+  });
+  const singleUserController = new SdkGatewayController(singleUserStore, {} as FeishuAuthService);
+  await assert.rejects(
+    singleUserController.token({
+      grant_type: 'password',
+      username: 'caseonly',
+      password: 'CaseOnly123'
+    }, '203.0.113.33'),
+    (error) => statusOf(error) === 401
+  );
+});
 
 test('SDK Gateway password update requires an active Bearer writer', async () => {
   const harness = controllerHarness(activeAuth(writerPrincipal, ['sdk.user.write']));

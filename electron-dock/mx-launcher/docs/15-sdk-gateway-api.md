@@ -147,9 +147,12 @@ curl -sS "$BASE/internal/v1/sdk/oauth/token" \
   }'
 ```
 
-`username` 可以匹配 `userId`、`account`、`email`、`displayName` 或 legacy external id。
-密码模式会校验 User Center 保存的 `local-password` credential；导入旧系统账号时应把
-旧 `account/password/user_name` 写入 User Center，而不是继续让 Domestic 保存登录真相。
+`username` 可以匹配 `userId`、`account`、`email`、`displayName` 或 legacy external id；匹配
+会去掉首尾空白，但严格区分大小写，不做小写回退。`Test` 与 `test` 可以对应不同用户，
+token 的 subject 必须来自精确匹配的用户；大小写不准确或同一精确 alias 对应多个用户时统一
+返回 `invalid credentials`。密码模式会校验 User Center 保存的 `local-password` credential；
+导入旧系统账号时应把旧 `account/password/user_name` 写入 User Center，而不是继续让 Domestic
+保存登录真相。
 
 password grant 签发的用户 access token 默认有效 `604800` 秒（7 天），并以 7 天为上限；
 MX-H2I、Luopan 和其他未显式传入更短 `expires_in` 的 standalone 都使用这个周期。当前尚未

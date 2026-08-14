@@ -52,7 +52,7 @@ test('password aliases share one canonical user limiter before password verifica
   const harness = controllerHarness();
   const aliases = [
     'alice',
-    ' Alice ',
+    ' alice ',
     'alice@example.com',
     'usr_alice',
     'Alice Example'

@@ -427,14 +427,20 @@ export function verifyUserCenterCredential(password: string, credential: UserCen
 export function userMatchesLogin(user: UserCenterUser, login: string): boolean {
   const normalized = normalizeUserLogin(login);
   if (!normalized) return false;
-  return [
-    user.userId,
-    user.account,
-    user.email,
-    user.displayName,
-    user.profile?.externalIds?.legacyUserId,
-    user.profile?.externalIds?.legacyId
-  ].some((value) => normalizeUserLogin(value) === normalized);
+  return userLoginValues(user).some((value) => normalizeUserLogin(value) === normalized);
+}
+
+/** Resolve password-grant identities by exact case and fail closed on duplicate aliases. */
+export function resolveUserCenterUserForLogin(
+  users: readonly UserCenterUser[],
+  login: string
+): UserCenterUser | null {
+  const exact = exactUserLogin(login);
+  if (!exact) return null;
+  const exactMatches = users.filter((user) => (
+    userLoginValues(user).some((value) => exactUserLogin(value) === exact)
+  ));
+  return exactMatches.length === 1 ? exactMatches[0] ?? null : null;
 }
 
 export function userCenterDeleteProtectionReason(user: UserCenterUser, users: UserCenterUser[]): string | null {
@@ -602,8 +608,23 @@ function nullableTrimmed(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function userLoginValues(user: UserCenterUser): unknown[] {
+  return [
+    user.userId,
+    user.account,
+    user.email,
+    user.displayName,
+    user.profile?.externalIds?.legacyUserId,
+    user.profile?.externalIds?.legacyId
+  ];
+}
+
+function exactUserLogin(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 function normalizeUserLogin(value: unknown): string {
-  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return exactUserLogin(value).toLowerCase();
 }
 
 function normalizeOptionalAppId(value: unknown): string | null {

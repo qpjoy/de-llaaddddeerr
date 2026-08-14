@@ -200,7 +200,8 @@ flowchart LR
 
 - 用户中心是认证和授权真相，不承担所有平台 API 聚合。
 - 用户中心的用户主档以 `account` 为一等登录名，`email` 可为空；`profile` 承接姓名、
-  部门、地址、外部 id、来源系统属性和各业务系统需要的扩展字段。
+  部门、地址、外部 id、来源系统属性和各业务系统需要的扩展字段。password grant 对所有
+  登录 alias 做去首尾空白后的精确匹配并严格区分大小写，不能用列表顺序消解 `Test` / `test`。
 - `local-password` credential 与用户主档分表保存，列表只暴露 credential summary；
   SDK password grant 必须通过 User Center 校验，不允许 Domestic/Oversea 再保存登录真相。
 - 用户级 Oversea entitlement 也是 Internal 主数据。创建或导入用户时可以传入默认
