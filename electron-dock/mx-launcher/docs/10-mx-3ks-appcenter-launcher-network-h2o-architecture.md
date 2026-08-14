@@ -473,12 +473,15 @@ H2O 运行时订阅策略：
   `defaultUserOverseaSiteId()` 以 mx-h2i 这一条为准（不再取决于产品列表排序），并且仍会
   校验站点在役——默认站点被 archive 掉时自动降级到还在服役的站点。**只影响还没有
   entitlement 的用户**；已分配的用户要换站点走下面的批量迁移，或 User Center 里逐个勾选。
-- **存量用户批量迁移**：Site Registry 的 **Migrate users**（`POST /internal/v1/user-center/
-  oversea-entitlements/migrate`，ops token）。`mode: 'replace'` 把 from 换成 to，`'add'` 只追加；
-  **不带 `confirm: true` 是 dry-run**，只返回将要变更的名单。执行时逐个走
-  `upsertUserOverseaEntitlement`，审计/账号签发/runtimeSync 判定和手动改一个用户完全一致。
-  目标站点必须在役（archived / 无 publicHost 直接拒绝）。迁移只改 Internal 的授权，
-  **目标站点上的 hysteria2 账号还需要跑一次 Sync Runtime** 才会真正可用。
+- **存量用户批量迁移**：Site Registry 的 **Migrate subscriptions**（`POST /internal/v1/
+  user-center/oversea-entitlements/migrate`，ops token）采用蓝绿两阶段。先 Preview + **Add Target**
+  （`mode: 'add'`）保留源站并追加目标，再从同一页面点 **Sync Target**；只有当前 source/target、
+  当前用户集合在 15 分钟内完成一次真实目标站同步，而且全部目标账号显示 `synced`，界面才解锁
+  Preview + **Cut Over**（`mode: 'replace'`）移除源站。源服务器可以已经停机或归档：它只作为
+  Internal entitlement 的迁移来源，不需要 SSH；目标站必须在役并完成 Install / Sync。
+  **不带 `confirm: true` 是 dry-run**，Apply 固定使用 Preview 返回的 `userIds`，避免名单变化时
+  扫到未确认用户。整个流程只改 Oversea entitlement 和目标 Oversea runtime，不调用 Domestic /
+  Internal WG materialize、sync 或 restart。Cut Over 完成并抽查订阅后再 Archive 源站。
 - **`ensure-subscription` 不带 `siteIds` = 「不改分配」，不是「回到平台默认」。** Internal 只在
   用户**还没有任何 entitlement 记录**时才落到 `defaultUserOverseaSiteId()`；已有记录时原样
   保留 admin 在 User Center 勾的站点（勾成空 = 停用，也要保留，不能被刷新悄悄重新授权）。

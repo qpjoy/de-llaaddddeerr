@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { MemoryStore } from '../../store/memory.js';
 import { loadConfig } from '../../config.js';
@@ -7,6 +9,16 @@ import { renderUserOverseaMihomoSubscription } from '../../store/domain.js';
 import type { SiteSlotAccessAccount } from '../../types.js';
 
 const SITES = ['oversea-main', 'oversea-mx', 'oversea-sg-1'];
+
+function postgresMethodSource(methodName: string): string {
+  const source = readFileSync(fileURLToPath(new URL('../../store/postgres.ts', import.meta.url)), 'utf8');
+  const signature = new RegExp(`  (?:private )?async ${methodName}(?:<[^>]+>)?\\(`).exec(source);
+  const start = signature?.index ?? -1;
+  assert.ok(start >= 0, `PostgresStore.${methodName} must exist`);
+  const remainder = source.slice(start);
+  const nextMethod = remainder.slice(1).search(/\n  (?:async|private async) [a-zA-Z]/);
+  return nextMethod >= 0 ? remainder.slice(0, nextMethod + 1) : remainder;
+}
 
 function seedStore() {
   const store = new MemoryStore(loadConfig());
@@ -190,4 +202,30 @@ test('the default still resolves when every site is retired, so ensure can repor
   // is the layer that should surface "no usable oversea".
   assert.equal(entitlement.siteIds.length, 1);
   assert.deepEqual(subscriptionNodeNames(store, user.userId), [], 'but the subscription has no live proxies');
+});
+
+test('Postgres serializes site state and account issuance with one site-scoped transaction lock', () => {
+  const issue = postgresMethodSource('issueSiteSlotAccessAccounts');
+  const upsert = postgresMethodSource('upsertLauncherNetworkMihomoSite');
+  const archive = postgresMethodSource('archiveLauncherNetworkMihomoSite');
+  const lock = postgresMethodSource('withLauncherNetworkMihomoSiteWriteLock');
+
+  for (const method of [issue, upsert, archive]) {
+    assert.match(
+      method,
+      /this\.withLauncherNetworkMihomoSiteWriteLock\(siteId/,
+      'issue, upsert, archive, and unarchive must use the same site lock'
+    );
+  }
+  assert.match(issue, /this\.upsertLauncherNetworkMihomoSiteTo\(records/);
+  assert.match(issue, /site\.status === 'archived'/, 'account status is derived from the locked site state');
+  assert.doesNotMatch(
+    issue,
+    /this\.upsertLauncherNetworkMihomoSite\(/,
+    'issuance must not release the site lock between site upsert and account writes'
+  );
+  assert.match(lock, /this\.dataSource\.transaction/);
+  assert.match(lock, /pg_advisory_xact_lock/);
+  assert.match(lock, /mx-launcher:\$\{this\.config\.environment\}:launcher-network-mihomo-site/);
+  assert.match(lock, /siteId/);
 });

@@ -2168,12 +2168,23 @@ export class MemoryStore implements PlatformStore {
     const accounts = accountNames.map((username) => {
       const accountId = `slotacct_${siteId}_${username}`.replace(/[^a-zA-Z0-9._-]/g, '_');
       const previous = this.siteSlotAccessAccounts.get(accountId) ?? null;
-      const account = buildSiteSlotAccessAccount(this.config, {
+      const built = buildSiteSlotAccessAccount(this.config, {
         siteId,
         username,
         authToken: previous?.authToken || randomBytes(24).toString('base64url'),
         requestedBy: input.requestedBy
       }, previous);
+      // Issuance is idempotent credential maintenance, not an unarchive action.
+      // A stopped/archived source may still be referenced while users migrate
+      // away from it, but it must never reappear in their subscriptions.
+      const account: SiteSlotAccessAccount = site.status === 'archived'
+        ? {
+            ...built,
+            status: 'paused',
+            updatedBy: previous?.updatedBy ?? built.updatedBy,
+            updatedAt: previous?.updatedAt ?? built.updatedAt
+          }
+        : built;
       this.siteSlotAccessAccounts.set(account.accountId, account);
       return account;
     });

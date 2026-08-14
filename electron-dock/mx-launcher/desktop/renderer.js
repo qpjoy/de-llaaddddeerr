@@ -2951,10 +2951,14 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
   const normalizedMode = mode === 'create' ? 'create' : 'edit';
   const user = normalizedMode === 'edit' ? userCenterUserById(userId) : null;
   if (normalizedMode === 'edit' && !user) return;
+  const entitlement = user ? entitlementForUser(user.userId) : null;
   state.userCenter.drawer = {
     mode: normalizedMode,
     userId: user?.userId || '',
-    draft: createUserEditorDraft(normalizedMode, user?.userId || '')
+    draft: createUserEditorDraft(normalizedMode, user?.userId || ''),
+    // Keep unsaved checkbox choices across the async public-link metadata load,
+    // which re-renders the drawer shortly after it opens.
+    overseaSiteIds: user ? asArray(entitlement?.siteIds) : []
   };
   state.userCenter.openDropdown = null;
   state.userCenter.feedback = null;
@@ -3224,13 +3228,15 @@ async function deleteUserCenterUserFromEditor() {
   }
 }
 
-async function assignUserOverseaFromAdmin() {
+async function assignUserOverseaFromAdmin(input = {}) {
   if (state.userCenter.overseaBusy) return;
   const root = userCenterControlRoot();
   const userId = state.userCenter.drawer?.userId || blankToNull(root.querySelector('[data-oversea-user]')?.value);
-  const siteIds = [...root.querySelectorAll('[data-oversea-site]:checked')]
-    .map((item) => item.value)
-    .filter(Boolean);
+  const siteIds = Array.isArray(input.siteIds)
+    ? uniqueStringList(input.siteIds)
+    : [...root.querySelectorAll('[data-oversea-site]:checked')]
+        .map((item) => item.value)
+        .filter(Boolean);
   if (!userId) {
     state.userCenter.overseaFeedback = { kind: 'error', message: 'Select a user first' };
     renderUserCenterSurfaces();
@@ -3252,6 +3258,9 @@ async function assignUserOverseaFromAdmin() {
         requestId: `desktop-user-oversea-${Date.now()}`
       }
     });
+    if (state.userCenter.drawer?.userId === userId) {
+      state.userCenter.drawer.overseaSiteIds = asArray(payload.entitlement?.siteIds);
+    }
     const assignedCount = asArray(payload.entitlement?.siteIds).length;
     let syncPayload = null;
     if (assignedCount) {
@@ -3284,6 +3293,17 @@ async function assignUserOverseaFromAdmin() {
     state.userCenter.overseaBusy = false;
     renderUserCenterSurfaces();
   }
+}
+
+async function disableUserOverseaFromAdmin() {
+  const userId = state.userCenter.drawer?.userId;
+  const entitlement = entitlementForUser(userId);
+  if (!userId || entitlement?.status !== 'active' || !asArray(entitlement.siteIds).length) return;
+  if (!window.confirm(
+    `Disable Oversea access for ${userCenterUserById(userId)?.account || userId}?\n\n`
+    + 'All Oversea sites disappear from the next subscription refresh. You can explicitly enable a site again later.'
+  )) return;
+  await assignUserOverseaFromAdmin({ siteIds: [] });
 }
 
 async function runUserOverseaRuntimeSync(userId, siteIds, requestId) {
@@ -5678,10 +5698,12 @@ function domesticLegacyCleanupState(plan, summary = null) {
  */
 function renderOverseaDefaultSitePicker(sites) {
   const current = launcherProductById(MX_H2I_PRODUCT_ID)?.defaultOverseaSiteId || '';
-  const selectable = asArray(sites).filter((site) => site.status !== 'archived');
+  const selectable = asArray(sites).filter((site) => !site.archived && site.status === 'installed');
   const feedback = state.overseaDefaultSiteFeedback;
   const busy = state.overseaDefaultSiteBusy === true;
   const options = uniqueStringList([...selectable.map((site) => site.siteId), current].filter(Boolean));
+  const migrationSources = overseaMigrationSourceSiteIds(selectable);
+  const migrationTargets = overseaMigrationTargetSiteIds(selectable);
   return `
     <div class="oversea-default-site">
       <span>
@@ -5698,39 +5720,120 @@ function renderOverseaDefaultSitePicker(sites) {
       </button>
       ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
     </div>
-    ${renderOverseaMigration(options, current)}
+    ${renderOverseaMigration(migrationSources, migrationTargets, current)}
   `;
+}
+
+function overseaMigrationSourceSiteIds(activeSites) {
+  // The source is control-plane state, not a live SSH dependency. Entitlements
+  // keep a stopped/archived server selectable so users can still be rescued from
+  // it after the machine has already disappeared.
+  return uniqueStringList([
+    ...asArray(state.userCenter.overseaEntitlements).flatMap((entitlement) => asArray(entitlement.siteIds)),
+    ...asArray(activeSites).map((site) => site.siteId)
+  ]);
+}
+
+function overseaMigrationTargetSiteIds(activeSites) {
+  // A target, unlike a source, must already have a passing remote install.
+  return uniqueStringList(asArray(activeSites)
+    .filter((site) => !site.archived && site.status === 'installed')
+    .map((site) => site.siteId));
 }
 
 /**
  * 存量用户不会因为改了 Default site 就自动搬家——那只管新用户。
  * 站点退役/改用途时需要这个批量迁移：先 Preview 看清楚会动谁，再 Apply。
  */
-function renderOverseaMigration(siteIds, defaultSiteId) {
+function overseaMigrationTargetSyncSummary(fromSiteId, toSiteId) {
+  const matched = asArray(state.userCenter.overseaEntitlements)
+    .filter((entitlement) => asArray(entitlement.siteIds).includes(fromSiteId));
+  const synced = matched.filter((entitlement) => asArray(entitlement.accounts).some((account) => (
+    account.siteId === toSiteId
+    && account.status === 'active'
+    && account.runtimeSync?.status === 'synced'
+  ))).length;
+  return { total: matched.length, synced, ready: matched.length > 0 && synced === matched.length };
+}
+
+function overseaMigrationSourceUserIds(fromSiteId) {
+  return uniqueStringList(asArray(state.userCenter.overseaEntitlements)
+    .filter((entitlement) => asArray(entitlement.siteIds).includes(fromSiteId))
+    .map((entitlement) => entitlement.userId)).sort();
+}
+
+function overseaMigrationTargetSyncProofValid(migration, fromSiteId, toSiteId, sourceUserIds, now = Date.now()) {
+  const proof = migration?.targetSyncProof;
+  const proofUserIds = uniqueStringList(proof?.userIds).sort();
+  const expectedUserIds = uniqueStringList(sourceUserIds).sort();
+  return Boolean(
+    proof?.status === 'passed'
+    && proof.fromSiteId === fromSiteId
+    && proof.toSiteId === toSiteId
+    && Number.isFinite(proof.passedAt)
+    && now - proof.passedAt <= 15 * 60 * 1000
+    && proofUserIds.length === expectedUserIds.length
+    && proofUserIds.every((userId, index) => userId === expectedUserIds[index])
+  );
+}
+
+function renderOverseaMigration(sourceSiteIds, targetSiteIds, defaultSiteId) {
   const migration = state.overseaMigration || {};
-  const busy = migration.busy === true;
-  const result = migration.result || null;
-  const from = migration.fromSiteId || siteIds.find((siteId) => siteId !== defaultSiteId) || '';
-  const to = migration.toSiteId || defaultSiteId || '';
+  const busy = migration.busy === true || migration.syncBusy === true;
+  const mode = migration.mode === 'replace' ? 'replace' : 'add';
+  const preferredTarget = targetSiteIds.includes(state.selectedSiteId) ? state.selectedSiteId : '';
+  const from = sourceSiteIds.includes(migration.fromSiteId)
+    ? migration.fromSiteId
+    : sourceSiteIds.includes(defaultSiteId) && defaultSiteId !== preferredTarget
+      ? defaultSiteId
+      : sourceSiteIds.find((siteId) => siteId !== preferredTarget) || sourceSiteIds[0] || '';
+  const to = targetSiteIds.includes(migration.toSiteId)
+    ? migration.toSiteId
+    : [preferredTarget, defaultSiteId, ...targetSiteIds].find((siteId) => targetSiteIds.includes(siteId) && siteId !== from) || '';
+  const previewMatches = migration.preview?.mode === mode
+    && migration.preview?.fromSiteId === from
+    && migration.preview?.toSiteId === to;
+  const result = previewMatches ? migration.result || null : null;
+  const previewUserIds = uniqueStringList(migration.preview?.userIds);
+  const previewComplete = Boolean(result?.matched)
+    && previewUserIds.length === Number(result?.matched);
+  const targetSync = overseaMigrationTargetSyncSummary(from, to);
+  const sourceUserIds = overseaMigrationSourceUserIds(from);
+  const freshTargetSync = overseaMigrationTargetSyncProofValid(migration, from, to, sourceUserIds);
+  const pairInvalid = !from || !to || from === to;
+  const cutoverBlocked = mode === 'replace' && (!targetSync.ready || !freshTargetSync);
   const option = (siteId, selected) => `<option value="${escapeHtml(siteId)}" ${siteId === selected ? 'selected' : ''}>${escapeHtml(siteId)}</option>`;
   return `
     <div class="oversea-default-site oversea-migration">
       <span>
-        <strong>Migrate users</strong>
-        <small>把存量用户从一个站点搬到另一个；先 Preview 再 Apply</small>
+        <strong>Migrate subscriptions</strong>
+        <small>源站可以已停机；先 Add Target，再只同步目标；全部 synced 后才 Cut Over</small>
       </span>
-      <select data-oversea-migrate-from ${busy ? 'disabled' : ''}>
-        ${siteIds.map((siteId) => option(siteId, from)).join('')}
-      </select>
-      <select data-oversea-migrate-to ${busy ? 'disabled' : ''}>
-        ${siteIds.map((siteId) => option(siteId, to)).join('')}
-      </select>
-      <button class="secondary-button" type="button" data-oversea-migrate-preview ${busy ? 'disabled' : ''}>
-        ${busy ? 'Working' : 'Preview'}
-      </button>
-      <button class="secondary-button" type="button" data-oversea-migrate-apply ${busy || !result?.matched || result?.applied ? 'disabled' : ''}>
-        Apply${result?.matched && !result.applied ? ` (${result.matched})` : ''}
-      </button>
+      <div class="oversea-migration-controls">
+        <select data-oversea-migrate-mode ${busy ? 'disabled' : ''} aria-label="Migration phase">
+          <option value="add" ${mode === 'add' ? 'selected' : ''}>1 · Add Target (keep source)</option>
+          <option value="replace" ${mode === 'replace' ? 'selected' : ''}>2 · Cut Over (remove source)</option>
+        </select>
+        <select data-oversea-migrate-from ${busy ? 'disabled' : ''} aria-label="Migration source">
+          ${sourceSiteIds.map((siteId) => option(siteId, from)).join('')}
+        </select>
+        <span class="oversea-migration-arrow" aria-hidden="true">→</span>
+        <select data-oversea-migrate-to ${busy ? 'disabled' : ''} aria-label="Migration target">
+          ${targetSiteIds.map((siteId) => option(siteId, to)).join('')}
+        </select>
+        <button class="secondary-button" type="button" data-oversea-migrate-preview ${busy || pairInvalid ? 'disabled' : ''}>
+          ${migration.busy ? 'Working' : 'Preview'}
+        </button>
+        <button class="secondary-button" type="button" data-oversea-migrate-apply ${busy || pairInvalid || cutoverBlocked || !previewComplete || result?.applied ? 'disabled' : ''}>
+          ${mode === 'add' ? 'Add Target' : 'Cut Over'}${result?.matched && !result.applied ? ` (${result.matched})` : ''}
+        </button>
+        <button class="secondary-button" type="button" data-oversea-migrate-sync-target ${busy || !to ? 'disabled' : ''}>
+          ${migration.syncBusy ? 'Syncing Target' : 'Sync Target'}
+        </button>
+      </div>
+      <span class="oversea-migration-status" data-kind="${escapeHtml(targetSync.ready ? 'success' : 'warning')}">
+        Target runtime: ${escapeHtml(`${targetSync.synced}/${targetSync.total} source user(s) synced`)} · ${freshTargetSync ? 'fresh Sync Target passed' : 'fresh Sync Target required'}${cutoverBlocked ? ' · Cut Over locked' : ''}
+      </span>
       ${migration.feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(migration.feedback.kind)}">${escapeHtml(migration.feedback.message)}</span>` : ''}
       ${result?.changes?.length ? `
         <div class="oversea-migration-list">
@@ -5753,15 +5856,38 @@ async function runOverseaMigration(confirm) {
   if (migration.busy) return;
   const fromSiteId = migration.fromSiteId;
   const toSiteId = migration.toSiteId;
+  const mode = migration.mode === 'replace' ? 'replace' : 'add';
   if (!fromSiteId || !toSiteId || fromSiteId === toSiteId) {
     migration.feedback = { kind: 'error', message: '请选择两个不同的站点' };
     renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
     return;
   }
-  // Applying rewrites every matched user's entitlement, so make the count explicit.
-  if (confirm && !window.confirm(
-    `Migrate ${migration.result?.matched || 0} user(s) from ${fromSiteId} to ${toSiteId}?\n\n`
-    + 'Their subscriptions change immediately. Each migrated account still needs a remote sync on the target site.'
+  const previewMatches = migration.preview?.mode === mode
+    && migration.preview?.fromSiteId === fromSiteId
+    && migration.preview?.toSiteId === toSiteId;
+  const previewUserIds = uniqueStringList(migration.preview?.userIds);
+  const previewMatched = Number(migration.result?.matched || 0);
+  if (confirm && (!previewMatches || previewMatched <= 0 || previewUserIds.length !== previewMatched)) {
+    migration.result = null;
+    migration.preview = null;
+    migration.feedback = { kind: 'error', message: 'Preview 已失效或不完整，请重新 Preview 后再执行' };
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+    return;
+  }
+  const targetSync = overseaMigrationTargetSyncSummary(fromSiteId, toSiteId);
+  const sourceUserIds = overseaMigrationSourceUserIds(fromSiteId);
+  const freshTargetSync = overseaMigrationTargetSyncProofValid(migration, fromSiteId, toSiteId, sourceUserIds);
+  if (confirm && mode === 'replace' && (!targetSync.ready || !freshTargetSync)) {
+    migration.feedback = {
+      kind: 'error',
+      message: `Cut Over 已锁定：${toSiteId} 需本页 fresh Sync Target passed，且当前为 ${targetSync.synced}/${targetSync.total} 个源站用户 synced`
+    };
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+    return;
+  }
+  if (confirm && !window.confirm(mode === 'add'
+    ? `Add ${toSiteId} to ${migration.result?.matched || 0} user(s)?\n\n${fromSiteId} remains assigned. Then sync the target from this page before Cut Over.`
+    : `Cut over ${migration.result?.matched || 0} user(s) from ${fromSiteId} to ${toSiteId}?\n\nThe source is removed from their next subscription refresh.`
   )) return;
   migration.busy = true;
   migration.feedback = null;
@@ -5772,21 +5898,35 @@ async function runOverseaMigration(confirm) {
       body: {
         fromSiteId,
         toSiteId,
-        mode: 'replace',
+        mode,
         confirm: confirm === true,
+        userIds: confirm ? previewUserIds : undefined,
         requestedBy: 'desktop-admin',
         requestId: `desktop-oversea-migrate-${Date.now()}`
       }
     });
     const result = payload.migration || null;
     migration.result = result;
+    migration.preview = result
+      ? {
+          mode,
+          fromSiteId,
+          toSiteId,
+          userIds: uniqueStringList(asArray(result.changes).map((change) => change.userId))
+        }
+      : null;
+    if (result?.applied && mode === 'add') migration.targetSyncProof = null;
     migration.feedback = result
       ? {
           kind: result.failed ? 'error' : result.matched ? 'success' : 'info',
           message: result.applied
-            ? `已迁移 ${result.changed}/${result.matched} 人${result.failed ? `，${result.failed} 人失败` : ''}；请对目标站点跑一次 Sync Runtime`
+            ? mode === 'add'
+              ? `已为 ${result.changed}/${result.matched} 人追加 ${toSiteId}${result.failed ? `，${result.failed} 人失败` : ''}；源站保留，请点 Sync Target`
+              : `已切换 ${result.changed}/${result.matched} 人到 ${toSiteId}${result.failed ? `，${result.failed} 人失败` : ''}；确认订阅后再 Archive 源站`
             : result.matched
-              ? `预览：${result.matched} 人会从 ${fromSiteId} 换到 ${toSiteId}`
+              ? mode === 'add'
+                ? `预览：${result.matched} 人会追加 ${toSiteId}，${fromSiteId} 保留`
+                : `预览：${result.matched} 人会移除 ${fromSiteId} 并保留 ${toSiteId}`
               : `没有用户还在 ${fromSiteId}`
         }
       : { kind: 'error', message: 'Migration returned no result' };
@@ -5795,6 +5935,46 @@ async function runOverseaMigration(confirm) {
     migration.feedback = { kind: 'error', message: `迁移失败：${error.message}` };
   } finally {
     migration.busy = false;
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+  }
+}
+
+async function syncOverseaMigrationTarget() {
+  const migration = state.overseaMigration || (state.overseaMigration = {});
+  const targetSiteId = migration.toSiteId;
+  if (!targetSiteId || migration.syncBusy || state.overseaEnsureBusy) return;
+  const target = asArray(state.overseaOverview?.sites).find((site) => site.siteId === targetSiteId);
+  if (!target || target.archived || target.status !== 'installed') {
+    migration.feedback = { kind: 'error', message: '目标站点必须先完成 Install / Sync' };
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+    return;
+  }
+  migration.syncBusy = true;
+  migration.feedback = { kind: 'info', message: `正在从页面同步 ${targetSiteId}，不会操作 Domestic / Internal WG` };
+  state.selectedSiteId = targetSiteId;
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+  try {
+    await ensureSelectedOversea();
+    await refreshUserCenterPanels();
+    const result = state.overseaTerminalResult;
+    if (result?.status === 'passed') {
+      migration.targetSyncProof = {
+        status: 'passed',
+        fromSiteId: migration.fromSiteId,
+        toSiteId: targetSiteId,
+        userIds: overseaMigrationSourceUserIds(migration.fromSiteId),
+        passedAt: Date.now()
+      };
+      migration.feedback = { kind: 'success', message: `${targetSiteId} fresh Sync Target passed；请检查 Target runtime 计数后再 Cut Over` };
+    } else {
+      migration.targetSyncProof = null;
+      migration.feedback = { kind: 'error', message: `${targetSiteId} Sync Remote 未通过：${result?.stderr || result?.status || 'unknown'}` };
+    }
+  } catch (error) {
+    migration.targetSyncProof = null;
+    migration.feedback = { kind: 'error', message: `Sync Target 失败：${error.message}` };
+  } finally {
+    migration.syncBusy = false;
     renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
   }
 }
@@ -5943,13 +6123,30 @@ function renderOverseaWorkbench(pipelines) {
   }
   const migrateFrom = siteWorkbench.querySelector('[data-oversea-migrate-from]');
   const migrateTo = siteWorkbench.querySelector('[data-oversea-migrate-to]');
-  for (const [picker, field] of [[migrateFrom, 'fromSiteId'], [migrateTo, 'toSiteId']]) {
+  const migrateMode = siteWorkbench.querySelector('[data-oversea-migrate-mode]');
+  for (const [picker, field] of [[migrateMode, 'mode'], [migrateFrom, 'fromSiteId'], [migrateTo, 'toSiteId']]) {
     if (!picker) continue;
     state.overseaMigration = state.overseaMigration || {};
-    if (!state.overseaMigration[field]) state.overseaMigration[field] = picker.value || '';
+    const normalizedValue = picker.value || '';
+    if (state.overseaMigration[field] !== normalizedValue) {
+      // A site may disappear or become non-targetable after refresh. Persist the
+      // fallback actually shown in the picker and invalidate the old preview.
+      state.overseaMigration[field] = normalizedValue;
+      state.overseaMigration.result = null;
+      state.overseaMigration.preview = null;
+      state.overseaMigration.feedback = null;
+      if (field !== 'mode') state.overseaMigration.targetSyncProof = null;
+    }
     picker.addEventListener('change', () => {
       // A changed pair invalidates the preview: never let Apply act on stale counts.
-      state.overseaMigration = { ...state.overseaMigration, [field]: picker.value, result: null, feedback: null };
+      state.overseaMigration = {
+        ...state.overseaMigration,
+        [field]: picker.value,
+        result: null,
+        preview: null,
+        feedback: null,
+        ...(field === 'mode' ? {} : { targetSyncProof: null })
+      };
       renderDeploymentWorkbench(pipelines);
     });
   }
@@ -5957,6 +6154,8 @@ function renderOverseaWorkbench(pipelines) {
   if (migratePreview) migratePreview.addEventListener('click', () => void runOverseaMigration(false));
   const migrateApply = siteWorkbench.querySelector('[data-oversea-migrate-apply]');
   if (migrateApply) migrateApply.addEventListener('click', () => void runOverseaMigration(true));
+  const migrateSyncTarget = siteWorkbench.querySelector('[data-oversea-migrate-sync-target]');
+  if (migrateSyncTarget) migrateSyncTarget.addEventListener('click', () => void syncOverseaMigrationTarget());
   const ensureButton = siteWorkbench.querySelector('[data-oversea-ensure]');
   if (ensureButton) {
     ensureButton.addEventListener('click', () => {
@@ -8377,14 +8576,56 @@ function renderUserServiceSummary(user, draft) {
   `;
 }
 
+function userOverseaAccessActionState(currentSiteIds, desiredSiteIds, busy = false) {
+  const current = uniqueStringList(currentSiteIds);
+  const desired = uniqueStringList(desiredSiteIds);
+  return {
+    updateDisabled: busy || desired.length === 0,
+    updateLabel: busy
+      ? 'Saving Access'
+      : desired.length === 0
+        ? 'Select a site'
+        : current.length === 0
+          ? `Enable Access (${desired.length})`
+          : `Update Access (${desired.length})`,
+    disableDisabled: busy || current.length === 0
+  };
+}
+
+function updateUserOverseaAccessActions(root = userEditorDrawer) {
+  if (!root || state.userCenter.drawer?.mode !== 'edit') return;
+  const desiredSiteIds = [...root.querySelectorAll('[data-oversea-site]:checked')]
+    .map((item) => item.value)
+    .filter(Boolean);
+  state.userCenter.drawer.overseaSiteIds = desiredSiteIds;
+  const entitlement = entitlementForUser(state.userCenter.drawer.userId);
+  const action = userOverseaAccessActionState(
+    asArray(entitlement?.siteIds),
+    desiredSiteIds,
+    state.userCenter.overseaBusy === true
+  );
+  const update = root.querySelector('[data-oversea-assign]');
+  if (update) {
+    update.textContent = action.updateLabel;
+    update.disabled = action.updateDisabled;
+  }
+  const disable = root.querySelector('[data-oversea-disable]');
+  if (disable) disable.disabled = action.disableDisabled;
+}
+
 function renderUserOverseaEditor(user) {
   const userId = user?.userId || '';
   const sites = overseaAuthoritySites();
   const entitlement = entitlementForUser(userId);
-  const selectedSiteIds = new Set(asArray(entitlement?.siteIds));
+  const persistedSiteIds = asArray(entitlement?.siteIds);
+  const draftSiteIds = (state.userCenter.drawer?.userId === userId && Array.isArray(state.userCenter.drawer.overseaSiteIds)
+    ? state.userCenter.drawer.overseaSiteIds
+    : persistedSiteIds).filter((siteId) => sites.includes(siteId));
+  const selectedSiteIds = new Set(draftSiteIds);
   const accounts = asArray(entitlement?.accounts);
   const subscriptionUrl = entitlement?.status === 'active' ? userOverseaSubscriptionUrl(userId) : '';
   const feedback = state.userCenter.overseaFeedback;
+  const action = userOverseaAccessActionState(persistedSiteIds, draftSiteIds, state.userCenter.overseaBusy === true);
   return `
     <section class="app-drawer-section">
       <div class="app-section-title">
@@ -8400,8 +8641,11 @@ function renderUserOverseaEditor(user) {
         `).join('') || '<span class="oversea-boundary-note">No Oversea site is ready yet.</span>'}
       </div>
       <div class="foundation-operation-actions">
-        <button class="primary-button" type="button" data-oversea-assign ${state.userCenter.overseaBusy || !userId || !sites.length ? 'disabled' : ''}>
-          ${state.userCenter.overseaBusy ? 'Saving Access' : selectedSiteIds.size ? 'Update Access' : 'Disable Access'}
+        <button class="primary-button" type="button" data-oversea-assign ${action.updateDisabled || !userId || !sites.length ? 'disabled' : ''}>
+          ${escapeHtml(action.updateLabel)}
+        </button>
+        <button class="secondary-button danger-button" type="button" data-oversea-disable ${action.disableDisabled || !userId ? 'disabled' : ''}>
+          Disable Access
         </button>
         <button class="secondary-button" type="button" data-oversea-sync-user ${state.userCenter.overseaBusy || state.userCenter.overseaSyncBusy || !userId || !accounts.length ? 'disabled' : ''}>
           ${state.userCenter.overseaSyncBusy ? 'Syncing' : 'Sync Runtime'}
@@ -8865,6 +9109,11 @@ function bindUserEditorDrawerControls() {
   }
   const assignOversea = userEditorDrawer.querySelector('[data-oversea-assign]');
   if (assignOversea) assignOversea.addEventListener('click', () => void assignUserOverseaFromAdmin());
+  const disableOversea = userEditorDrawer.querySelector('[data-oversea-disable]');
+  if (disableOversea) disableOversea.addEventListener('click', () => void disableUserOverseaFromAdmin());
+  for (const site of userEditorDrawer.querySelectorAll('[data-oversea-site]')) {
+    site.addEventListener('change', () => updateUserOverseaAccessActions(userEditorDrawer));
+  }
   const syncOverseaUser = userEditorDrawer.querySelector('[data-oversea-sync-user]');
   if (syncOverseaUser) syncOverseaUser.addEventListener('click', () => void syncUserOverseaRuntimeFromAdmin());
   const issueLink = userEditorDrawer.querySelector('[data-oversea-link-issue]');
@@ -8880,14 +9129,9 @@ function bindUserEditorDrawerControls() {
 }
 
 function overseaAuthoritySites() {
-  const siteIds = new Set();
-  for (const site of asArray(state.overseaOverview?.sites)) {
-    if (site.siteId) siteIds.add(site.siteId);
-  }
-  for (const pipeline of asArray(state.dashboard?.siteSlotPipelines)) {
-    if (pipeline.kind === 'oversea' && pipeline.siteId) siteIds.add(pipeline.siteId);
-  }
-  return [...siteIds].sort();
+  return uniqueStringList(asArray(state.overseaOverview?.sites)
+    .filter((site) => site.siteId && !site.archived && site.status === 'installed')
+    .map((site) => site.siteId)).sort();
 }
 
 function cleanLauncherProductId(value) {

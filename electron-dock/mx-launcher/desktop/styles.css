@@ -3671,8 +3671,41 @@ select {
 }
 
 .oversea-migration {
-  grid-template-columns: 1fr auto auto auto auto;
+  grid-template-columns: minmax(0, 1fr);
   margin-top: 8px;
+}
+
+.oversea-migration-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.oversea-migration-controls select {
+  flex: 1 1 145px;
+  max-width: none;
+}
+
+.oversea-migration-arrow {
+  display: inline;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.oversea-migration-status {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.oversea-migration-status[data-kind='success'] {
+  color: var(--mx-success);
+}
+
+.oversea-migration-status[data-kind='warning'] {
+  color: var(--mx-warning);
 }
 
 .oversea-migration-list {

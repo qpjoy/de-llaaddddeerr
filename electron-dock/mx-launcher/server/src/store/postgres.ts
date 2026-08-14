@@ -2539,39 +2539,59 @@ export class PostgresStore implements PlatformStore {
 
   async issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): Promise<SiteSlotAccessAccountIssueResult> {
     const siteId = input.siteId?.trim() || 'oversea-main';
-    const site = await this.upsertLauncherNetworkMihomoSite({
-      siteId,
-      publicHost: input.publicHost,
-      serverPorts: input.serverPorts,
-      tlsFingerprint: input.tlsFingerprint,
-      requestedBy: input.requestedBy,
-      requestId: input.requestId
-    });
-    const accountNames = resolveIssueAccountNames(input, siteId);
-    const accounts: SiteSlotAccessAccount[] = [];
-    for (const username of accountNames) {
-      const accountId = `slotacct_${siteId}_${username}`.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const previous = await this.getRecord<SiteSlotAccessAccount>('site-slot-access-account', accountId);
-      const account = buildSiteSlotAccessAccount(this.config, {
+    return this.withLauncherNetworkMihomoSiteWriteLock(siteId, async (records) => {
+      const site = await this.upsertLauncherNetworkMihomoSiteTo(records, {
         siteId,
-        username,
-        authToken: previous?.authToken || randomBytes(24).toString('base64url'),
-        requestedBy: input.requestedBy
-      }, previous);
-      await this.saveRecord('site-slot-access-account', account.accountId, account, account.siteId);
-      accounts.push(account);
-    }
-    await this.recordAudit({
-      eventType: 'config.site_slot_access_accounts.issued',
-      actorKind: 'config-center',
-      requestId: input.requestId ?? null,
-      metadata: {
-        siteId,
-        service: 'hysteria2',
-        accounts: accounts.map((account) => ({ username: account.username, role: account.role }))
+        publicHost: input.publicHost,
+        serverPorts: input.serverPorts,
+        tlsFingerprint: input.tlsFingerprint,
+        requestedBy: input.requestedBy,
+        requestId: input.requestId
+      });
+      const accountNames = resolveIssueAccountNames(input, siteId);
+      const accounts: SiteSlotAccessAccount[] = [];
+      for (const username of accountNames) {
+        const accountId = `slotacct_${siteId}_${username}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const previousRow = await records.findOne({
+          where: {
+            kind: 'site-slot-access-account',
+            id: accountId,
+            environment: this.config.environment
+          }
+        });
+        const previous = previousRow?.data as SiteSlotAccessAccount | undefined;
+        const built = buildSiteSlotAccessAccount(this.config, {
+          siteId,
+          username,
+          authToken: previous?.authToken || randomBytes(24).toString('base64url'),
+          requestedBy: input.requestedBy
+        }, previous ?? null);
+        // Only the explicit unarchive mutation may reactivate a paused account.
+        // This keeps a retired/offline migration source out of user subscriptions
+        // while entitlement updates add and sync its replacement.
+        const account: SiteSlotAccessAccount = site.status === 'archived'
+          ? {
+              ...built,
+              status: 'paused',
+              updatedBy: previous?.updatedBy ?? built.updatedBy,
+              updatedAt: previous?.updatedAt ?? built.updatedAt
+            }
+          : built;
+        await this.saveRecordTo(records, 'site-slot-access-account', account.accountId, account, account.siteId);
+        accounts.push(account);
       }
+      await this.recordAuditTo(records, {
+        eventType: 'config.site_slot_access_accounts.issued',
+        actorKind: 'config-center',
+        requestId: input.requestId ?? null,
+        metadata: {
+          siteId,
+          service: 'hysteria2',
+          accounts: accounts.map((account) => ({ username: account.username, role: account.role }))
+        }
+      });
+      return { site, accounts };
     });
-    return { site, accounts };
   }
 
   async listSiteSlotAccessAccounts(siteId: string): Promise<SiteSlotAccessAccount[]> {
@@ -2587,11 +2607,29 @@ export class PostgresStore implements PlatformStore {
 
   async upsertLauncherNetworkMihomoSite(input: LauncherNetworkMihomoSiteInput): Promise<LauncherNetworkMihomoSite> {
     const siteId = input.siteId?.trim() || 'oversea-main';
-    const previous = await this.getLauncherNetworkMihomoSite(siteId);
-    const latestPlan = await this.latestSiteSlotPlanForSite(siteId);
+    return this.withLauncherNetworkMihomoSiteWriteLock(siteId, (records) => (
+      this.upsertLauncherNetworkMihomoSiteTo(records, { ...input, siteId })
+    ));
+  }
+
+  private async upsertLauncherNetworkMihomoSiteTo(
+    records: Repository<PlatformRecordRow>,
+    input: LauncherNetworkMihomoSiteInput
+  ): Promise<LauncherNetworkMihomoSite> {
+    const siteId = input.siteId?.trim() || 'oversea-main';
+    const previousRow = await records.findOne({
+      where: {
+        kind: 'launcher-network-mihomo-site',
+        id: siteId,
+        environment: this.config.environment
+      }
+    });
+    const storedPrevious = previousRow?.data as LauncherNetworkMihomoSite | undefined;
+    const previous = storedPrevious ? normalizeLauncherNetworkMihomoSite(storedPrevious) : null;
+    const latestPlan = await this.latestSiteSlotPlanForSite(siteId, records);
     const site = buildLauncherNetworkMihomoSite(this.config, input, previous, latestPlan?.host ?? null);
-    await this.saveRecord('launcher-network-mihomo-site', site.siteId, site, site.siteId);
-    await this.recordAudit({
+    await this.saveRecordTo(records, 'launcher-network-mihomo-site', site.siteId, site, site.siteId);
+    await this.recordAuditTo(records, {
       eventType: 'launcher_network.mihomo_site.upserted',
       actorKind: 'config-center',
       requestId: input.requestId ?? null,
@@ -2618,48 +2656,59 @@ export class PostgresStore implements PlatformStore {
   ): Promise<LauncherNetworkMihomoSiteArchiveResult> {
     const siteId = input.siteId?.trim();
     if (!siteId) throw new Error('siteId is required');
-    const previous = await this.getLauncherNetworkMihomoSite(siteId);
-    if (!previous) throw new Error(`Launcher Network mihomo site not found: ${siteId}`);
-    const requestedBy = input.requestedBy?.trim() || 'internal';
-    const now = new Date().toISOString();
-    const site = applyLauncherNetworkMihomoSiteArchive(previous, input.archived, requestedBy, now);
-    await this.saveRecord('launcher-network-mihomo-site', site.siteId, site, site.siteId);
+    return this.withLauncherNetworkMihomoSiteWriteLock(siteId, async (records) => {
+      const previousRow = await records.findOne({
+        where: {
+          kind: 'launcher-network-mihomo-site',
+          id: siteId,
+          environment: this.config.environment
+        }
+      });
+      const storedPrevious = previousRow?.data as LauncherNetworkMihomoSite | undefined;
+      if (!storedPrevious) throw new Error(`Launcher Network mihomo site not found: ${siteId}`);
+      const previous = normalizeLauncherNetworkMihomoSite(storedPrevious);
+      const requestedBy = input.requestedBy?.trim() || 'internal';
+      const now = new Date().toISOString();
+      const site = applyLauncherNetworkMihomoSiteArchive(previous, input.archived, requestedBy, now);
+      await this.saveRecordTo(records, 'launcher-network-mihomo-site', site.siteId, site, site.siteId);
 
-    const accounts = await this.listSiteSlotAccessAccounts(siteId);
-    const nextStatus = input.archived ? 'paused' : 'active';
-    const changed: SiteSlotAccessAccount[] = [];
-    for (const account of accounts) {
-      if (account.status === nextStatus) continue;
-      const updated: SiteSlotAccessAccount = { ...account, status: nextStatus, updatedBy: requestedBy, updatedAt: now };
-      await this.saveRecord('site-slot-access-account', updated.accountId, updated, updated.siteId);
-      changed.push(updated);
-    }
-
-    const entitlements = await this.listUserOverseaEntitlements();
-    const affectedUserIds = [...new Set(entitlements
-      .filter((entitlement) => entitlement.siteIds.includes(siteId))
-      .map((entitlement) => entitlement.userId))];
-
-    await this.recordAudit({
-      eventType: input.archived
-        ? 'launcher_network.mihomo_site.archived'
-        : 'launcher_network.mihomo_site.unarchived',
-      actorKind: 'config-center',
-      requestId: input.requestId ?? null,
-      metadata: {
-        siteId: site.siteId,
-        archivedBy: requestedBy,
-        accountsChanged: changed.length,
-        affectedUserIds
+      const accounts = (await this.listRecordsFrom<SiteSlotAccessAccount>(records, 'site-slot-access-account'))
+        .filter((account) => account.siteId === siteId);
+      const nextStatus = input.archived ? 'paused' : 'active';
+      const changed: SiteSlotAccessAccount[] = [];
+      for (const account of accounts) {
+        if (account.status === nextStatus) continue;
+        const updated: SiteSlotAccessAccount = { ...account, status: nextStatus, updatedBy: requestedBy, updatedAt: now };
+        await this.saveRecordTo(records, 'site-slot-access-account', updated.accountId, updated, updated.siteId);
+        changed.push(updated);
       }
-    });
 
-    return {
-      site,
-      pausedAccounts: input.archived ? changed : [],
-      reactivatedAccounts: input.archived ? [] : changed,
-      affectedUserIds
-    };
+      const entitlements = await this.listRecordsFrom<UserOverseaEntitlement>(records, 'user-oversea-entitlement');
+      const affectedUserIds = [...new Set(entitlements
+        .filter((entitlement) => entitlement.siteIds.includes(siteId))
+        .map((entitlement) => entitlement.userId))];
+
+      await this.recordAuditTo(records, {
+        eventType: input.archived
+          ? 'launcher_network.mihomo_site.archived'
+          : 'launcher_network.mihomo_site.unarchived',
+        actorKind: 'config-center',
+        requestId: input.requestId ?? null,
+        metadata: {
+          siteId: site.siteId,
+          archivedBy: requestedBy,
+          accountsChanged: changed.length,
+          affectedUserIds
+        }
+      });
+
+      return {
+        site,
+        pausedAccounts: input.archived ? changed : [],
+        reactivatedAccounts: input.archived ? [] : changed,
+        affectedUserIds
+      };
+    });
   }
 
   async getLauncherNetworkMihomoSite(siteId: string): Promise<LauncherNetworkMihomoSite | null> {
@@ -5656,9 +5705,27 @@ export class PostgresStore implements PlatformStore {
     return data;
   }
 
-  private async latestSiteSlotPlanForSite(siteId: string): Promise<SiteSlotPlan | null> {
-    const plans = await this.listSiteSlotPlans();
-    return plans.find((plan) => plan.siteId === siteId) ?? null;
+  private async latestSiteSlotPlanForSite(
+    siteId: string,
+    records: Repository<PlatformRecordRow> = this.records
+  ): Promise<SiteSlotPlan | null> {
+    const plans = await this.listRecordsFrom<SiteSlotPlan>(records, 'site-slot-plan');
+    return plans
+      .filter((plan) => plan.siteId === siteId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
+  }
+
+  private async withLauncherNetworkMihomoSiteWriteLock<T>(
+    siteId: string,
+    run: (records: Repository<PlatformRecordRow>) => Promise<T>
+  ): Promise<T> {
+    return this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+        [`mx-launcher:${this.config.environment}:launcher-network-mihomo-site`, siteId]
+      );
+      return run(manager.getRepository(PlatformRecordEntity));
+    });
   }
 
   private async defaultUserOverseaSiteIds(): Promise<string[]> {

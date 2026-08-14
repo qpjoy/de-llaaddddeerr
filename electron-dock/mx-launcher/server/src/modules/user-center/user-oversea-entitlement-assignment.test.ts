@@ -93,6 +93,19 @@ test('an explicit siteIds still reassigns, and an empty list still disables', ()
   const afterRefresh = store.upsertUserOverseaEntitlement({ userId: user.userId, requestedBy: 'mx-h2i-h2o' });
   assert.deepEqual(afterRefresh.siteIds, []);
   assert.equal(afterRefresh.status, 'disabled');
+
+  const reenabled = store.upsertUserOverseaEntitlement({
+    userId: user.userId,
+    siteIds: ['mx-oversea-hk01'],
+    requestedBy: 'desktop-admin'
+  });
+  assert.equal(reenabled.status, 'active', 'an explicit UI assignment restores a disabled entitlement');
+  assert.deepEqual(reenabled.siteIds, ['mx-oversea-hk01']);
+  assert.deepEqual(reenabled.accounts.map((account) => account.siteId), ['mx-oversea-hk01']);
+
+  const afterReenableRefresh = store.upsertUserOverseaEntitlement({ userId: user.userId, requestedBy: 'mx-h2i-h2o' });
+  assert.equal(afterReenableRefresh.status, 'active');
+  assert.deepEqual(afterReenableRefresh.siteIds, ['mx-oversea-hk01']);
 });
 
 test('the default site is listed first so the select group defaults to it', () => {
@@ -187,6 +200,43 @@ test('migration is a dry run until confirmed, then rewrites the matched users', 
   assert.equal(again.matched, 0, 're-running is a no-op once nobody is left on the old site');
 });
 
+test('migration apply only changes the userIds frozen by Preview', () => {
+  const { store, user } = seed();
+  const laterUser = store.createUserCenterUser({ account: 'lateruser', displayName: 'Later User' });
+  for (const userId of [user.userId, laterUser.userId]) {
+    store.upsertUserOverseaEntitlement({
+      userId,
+      siteIds: ['oversea-main'],
+      requestedBy: 'test'
+    });
+  }
+
+  const preview = store.migrateUserOverseaEntitlements({
+    fromSiteId: 'oversea-main',
+    toSiteId: 'mx-oversea-hk01',
+    requestedBy: 'desktop-admin'
+  });
+  assert.equal(preview.matched, 2, 'the unscoped Preview sees both current source users');
+
+  const applied = store.migrateUserOverseaEntitlements({
+    fromSiteId: 'oversea-main',
+    toSiteId: 'mx-oversea-hk01',
+    userIds: [user.userId],
+    confirm: true,
+    requestedBy: 'desktop-admin'
+  });
+
+  assert.equal(applied.matched, 1);
+  assert.equal(applied.changed, 1);
+  assert.deepEqual(applied.changes.map((change) => change.userId), [user.userId]);
+  assert.deepEqual(store.getUserOverseaEntitlement(user.userId)?.siteIds, ['mx-oversea-hk01']);
+  assert.deepEqual(
+    store.getUserOverseaEntitlement(laterUser.userId)?.siteIds,
+    ['oversea-main'],
+    'a source user outside the Preview scope is never swept into Apply'
+  );
+});
+
 test('migration in add mode keeps the old site, and refuses a dead target', () => {
   const { store, user } = seed();
   store.upsertUserOverseaEntitlement({ userId: user.userId, siteIds: ['oversea-main'], requestedBy: 'test' });
@@ -211,6 +261,41 @@ test('migration in add mode keeps the old site, and refuses a dead target', () =
     /not serviceable/,
     'never move users onto a retired site'
   );
+});
+
+test('an archived or stopped source stays paused while users are rescued onto a live target', () => {
+  const { store, user } = seed();
+  const assigned = store.upsertUserOverseaEntitlement({
+    userId: user.userId,
+    siteIds: ['oversea-main'],
+    requestedBy: 'test'
+  });
+  const sourceUsername = assigned.accounts[0]?.username;
+  assert.ok(sourceUsername);
+
+  store.archiveLauncherNetworkMihomoSite({ siteId: 'oversea-main', archived: true, requestedBy: 'test' });
+  const rescued = store.migrateUserOverseaEntitlements({
+    fromSiteId: 'oversea-main',
+    toSiteId: 'mx-oversea-hk01',
+    mode: 'add',
+    confirm: true,
+    requestedBy: 'desktop-admin'
+  });
+
+  assert.equal(rescued.failed, 0);
+  assert.deepEqual(
+    store.getUserOverseaEntitlement(user.userId)?.siteIds,
+    ['mx-oversea-hk01', 'oversea-main'],
+    'the offline source remains control-plane history until Cut Over'
+  );
+  assert.equal(
+    store.getSiteSlotAccessAccount('oversea-main', sourceUsername)?.status,
+    'paused',
+    'entitlement maintenance must not reactivate an archived source'
+  );
+  const yaml = store.renderUserOverseaMihomoSubscription(user.userId)?.yaml ?? '';
+  assert.match(yaml, /mx-oversea-hk01-hysteria2/);
+  assert.doesNotMatch(yaml, /oversea-main-hysteria2/, 'the stopped source stays out of generated subscriptions');
 });
 
 test('a multi-site assignment survives a refresh so the subscription stays multi-node', () => {
