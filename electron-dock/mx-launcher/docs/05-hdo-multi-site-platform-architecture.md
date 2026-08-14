@@ -233,9 +233,9 @@ flowchart LR
 | `GET /internal/v1/user-center/oversea-entitlements` | Internal modules / ops | 查看用户到 Oversea site 的 entitlement 和 runtime sync 状态 |
 | `POST /internal/v1/user-center/users/:userId/oversea` | Internal modules / ops | 手动分配或关闭用户级 Oversea access |
 | `POST /internal/v1/user-center/users/:userId/oversea/sync-runtime` | Internal modules / ops | 把用户级 hysteria2/mihomo access 同步到选定 Oversea runtime |
-| `GET /internal/v1/user-center/system-subscriptions` | Internal Admin / ops | 查看置顶、不可登录的 `subscriptions` 系统账号和脱敏 Direct-IP channel（YAML `mixed-port: 7788` / 无流量 quota） |
+| `GET /internal/v1/user-center/system-subscriptions` | Internal Admin / ops | 查看置顶、不可登录的 `subscriptions` 系统账号和脱敏 channel（YAML `mixed-port: 7788` / 无流量 quota） |
 | `POST /internal/v1/user-center/system-subscriptions/ensure` | Internal Admin / ops | 幂等建立系统 Hysteria2 账号；不会触发用户登录、现有 7788 或远端部署 |
-| `POST /internal/v1/user-center/system-subscriptions/sites/:siteId/reveal` | Internal Admin / ops | 对已完成 Oversea Install/Sync 的 channel 临时返回 Basic URL；不生成本地安装命令，响应 `no-store` |
+| `POST /internal/v1/user-center/system-subscriptions/sites/:siteId/reveal` | Internal Admin / ops | 对已完成 Oversea Install/Sync 的 channel 临时返回同一长期 Basic 账号的 Direct-IP HTTP 与公网域名 HTTPS URL；不生成本地安装命令，响应 `no-store` |
 | `GET /internal/v1/app-center/apps?userId=...&sourceAppId=...` | Launcher / AppCenter | 按应用访问策略过滤用户可见应用 |
 | `POST /internal/v1/sdk/gateway/access/evaluate` | SDK / 外部系统 | 可带 `appId/sourceAppId`，同时判断 SDK scope 和 app access policy |
 | `GET /internal/v1/user-center/service-accounts` | Internal modules / ops | 查看服务账号 |

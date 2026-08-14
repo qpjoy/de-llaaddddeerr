@@ -430,13 +430,21 @@ H2O 是用户体验和策略 UI；Launcher Network 是底层执行者。
 
 User Center 顶部的 `subscriptions` 是只读虚拟系统账号，不是 `UserCenterUser`，因此不能设置
 local password、不能 OAuth/飞书登录、不能被赋予用户 entitlement。它按 Oversea site 提供
-Direct-IP + HTTP Basic channel：默认 export port 是 3434，SSH profile 明确配置冲突替代端口时可为
-3435；订阅 YAML 固定 `mixed-port: 7788`，并显式表达 `maxBytes/resetPeriod/expiresAt = null`
+两种可复制 channel：兼容性优先的 Direct-IP + HTTP Basic（默认 export port 是 3434，SSH profile
+明确配置冲突替代端口时可为 3435），以及通过 active Domestic edge 公网域名提供的 HTTPS + Basic。
+两条 URL 复用同一个长期稳定的 site system credential，并返回同语义 system YAML；订阅 YAML
+固定 `mixed-port: 7788`，并显式表达 `maxBytes/resetPeriod/expiresAt = null`
 （无总流量 quota）。`50 Mbps` 是上下行提示，不等于总流量上限。
+域名配置缺失、暂停或读取失败时只禁用域名复制；Direct-IP URL、Oversea Caddy 精确路径和原凭据
+保持不变，不把 Domestic edge 的可用性变成 IP 直连 channel 的前置条件。
 
-操作顺序是：在系统订阅抽屉 **Ensure System Accounts** → 正常 Oversea **Install/Sync** →
-worker evidence passed 后 **Reveal**。GET 目录始终脱敏，明文 Basic URL 只由 ops-token `no-store`
-reveal 返回。MX 只提供和复制 URL，不生成 `qp-tunnel-cli install` 命令，也不安装、启动或修改任何
+正常 Oversea **Install/Sync** 会幂等创建或复用系统账号；只有卡片明确提示缺账号时才需要先点
+**Ensure System Accounts**，然后再执行该站点的 **Install/Sync**。worker evidence passed 后才能
+**Reveal**。GET 目录始终脱敏，明文 Direct-IP/域名 Basic URL 只由 ops-token `no-store` reveal
+返回；Admin 在同一页面、同一 server/ops-token 绑定期间会把已 Reveal 的值保留在内存里，关闭再打开
+抽屉仍可复制，但不会写入 localStorage、审计或服务端日志。域名 URL 的 HTTPS 保护客户端到 Domestic edge 这一段；它不改变
+Oversea Hysteria 节点自身的 TLS/fingerprint 校验。MX 只提供和复制 URL，不生成
+`qp-tunnel-cli install` 命令，也不安装、启动或修改任何
 本地 7788/7890 实例。管理员把 URL 手工添加到自行选择的现有应用；若应用把订阅当作完整配置加载，
 需要自行确认它如何处理 YAML 中的 `mixed-port: 7788`。现有用户仍走 Bearer `ensure-subscription`
 和既有 7788 路径；HTTPS public-token 链路也继续作为第三方客户端的兼容方案。
@@ -619,8 +627,9 @@ Domestic edge 目前是 `bootstrap-and-relay` 模式，nginx **只反代 `/healt
 
 hydrate（登录/刷新订阅）和 start（启动 mihomo 前预取）共用同一条链，取到的 YAML 通过
 `applyManagedConfig({ subscriptionContent })` 直接交给 mihomo，它自己不再下载。
-**要让公网路径可用，Domestic nginx 需要把 `/internal/v1/user-center/` 反代到 Internal** ——
-这是服务端待办，客户端已经准备好，一旦开通会自动切到候选 2。
+Bearer 版 `user-center/.../subscription.yaml` 不得整体暴露到公网。Domestic edge 只允许下面两类
+精确只读 GET：普通用户的 token-in-path 聚合订阅，以及 `subscriptions` 系统账号的单站点
+Basic 路径；其它 `/internal/v1/*`（包括整个 `/internal/v1/user-center/`）继续 fail closed。
 
 #### 例外：Clash 用的 public link 已经开在公网
 

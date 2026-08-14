@@ -92,14 +92,21 @@ test('the integration entry points third-party apps need are all present', () =>
   }
 });
 
-test('the system subscription contract is URL-only and does not provision a local 7890 instance', () => {
+test('the system subscription contract exposes both operator URLs without provisioning a local 7890 instance', () => {
   const catalog = JSON.stringify(paths['/internal/v1/user-center/system-subscriptions']?.get?.responses['200']);
   assert.match(catalog, /"mixedPort":7788/);
   assert.doesNotMatch(catalog, /"instance":"subscriptions"|7890/);
 
   const reveal = JSON.stringify(paths['/internal/v1/user-center/system-subscriptions/sites/{siteId}/reveal']?.post?.responses['200']);
   assert.match(reveal, /"url":/);
+  assert.match(reveal, /"directIp":/);
+  assert.match(reveal, /"domain":/);
   assert.doesNotMatch(reveal, /installCommand|qp-tunnel-cli|--instance|7890/);
+
+  const exactSystemYaml = paths['/internal/v1/site-slots/{siteId}/subscriptions/hysteria2/{username}.yaml']?.get;
+  assert.match(exactSystemYaml?.description ?? '', /Basic subscriptions:<active authToken>/);
+  assert.match(exactSystemYaml?.description ?? '', /一律 404/);
+  assert.match(exactSystemYaml?.description ?? '', /no-store\/no-referrer/);
 });
 
 test('both renderers produce output without throwing', () => {

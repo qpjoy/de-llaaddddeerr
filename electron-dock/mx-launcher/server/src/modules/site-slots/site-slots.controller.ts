@@ -8,12 +8,17 @@ import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/int
 import { siteSlotOpsAwareView as siteSlotApiView } from '../../lib/site-slot-credential-view.js';
 import {
   isSystemSubscriptionAccessAccount,
+  renderSystemHysteria2MihomoSubscription,
   SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH,
   systemSubscriptionAccessAccountName
 } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import { buildSiteSlotRemoteSshGate, buildSiteSlotRemoteSshReadOnlyProbe, buildSiteSlotRemoteSshWorkerHandoff } from './remote-ssh-gate.js';
+import {
+  buildSystemSubscriptionCatalog,
+  systemSubscriptionBasicAuthorizationMatches
+} from '../user-center/system-subscriptions.js';
 import type {
   SiteSlotExecutionAction,
   SiteSlotExecutionInput,
@@ -123,9 +128,38 @@ export class SiteSlotsController {
 
   @Get('internal/v1/site-slots/:siteId/subscriptions/hysteria2/:username.yaml')
   @Header('content-type', 'text/yaml; charset=utf-8')
-  async getHysteria2MihomoSubscription(@Param('siteId') siteId: string, @Param('username') username: string) {
+  @Header('Cache-Control', 'no-store')
+  @Header('Referrer-Policy', 'no-referrer')
+  async getHysteria2MihomoSubscription(
+    @Param('siteId') siteId: string,
+    @Param('username') username: string,
+    @Headers('authorization') authorization?: string
+  ) {
     if (username === systemSubscriptionAccessAccountName(siteId)) {
-      throw new NotFoundException('System subscription is available only through its Oversea direct-IP channel');
+      const [site, account] = await Promise.all([
+        this.store.getLauncherNetworkMihomoSite(siteId),
+        this.store.getSiteSlotAccessAccount(siteId, username)
+      ]);
+      if (
+        !site
+        || site.status !== 'active'
+        || !account
+        || account.status !== 'active'
+        || !systemSubscriptionBasicAuthorizationMatches(authorization, account)
+      ) {
+        // Keep every missing, stale and malformed credential indistinguishable.
+        throw new NotFoundException('Hysteria2 mihomo subscription not found');
+      }
+      // Only an authenticated caller may trigger the full deployment-evidence
+      // scan; anonymous probes must stay cheap.
+      const catalog = await buildSystemSubscriptionCatalog(this.store);
+      const ready = catalog.subscriptions.some((item) => (
+        item.siteId === siteId
+        && item.runtimeUsername === username
+        && item.status === 'ready'
+      ));
+      if (!ready) throw new NotFoundException('Hysteria2 mihomo subscription not found');
+      return renderSystemHysteria2MihomoSubscription(site, account).yaml;
     }
     const subscription = await this.store.renderHysteria2MihomoSubscription(siteId, username);
     if (!subscription) throw new NotFoundException('Hysteria2 mihomo subscription not found');

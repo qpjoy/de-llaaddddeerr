@@ -189,6 +189,7 @@ const state = {
     systemSubscriptionBusy: false,
     systemSubscriptionFeedback: null,
     systemSubscriptionSecrets: {},
+    systemSubscriptionSecretGeneration: 0,
     filter: {
       search: '',
       roleId: 'all',
@@ -2987,17 +2988,17 @@ function openSystemSubscriptionsDrawer() {
   state.userCenter.openDropdown = null;
   state.userCenter.feedback = null;
   state.userCenter.systemSubscriptionFeedback = null;
-  state.userCenter.systemSubscriptionSecrets = {};
   renderUserEditorDrawer();
 }
 
 function closeUserEditorDrawer() {
-  // The plaintext link is only ever held in memory; drop it when the drawer closes.
+  // Revealed system URLs stay available to the same in-memory Admin session
+  // across drawer closes. They are never persisted and are cleared whenever
+  // the bound server or ops credential changes.
   state.userCenter.overseaLink = null;
   state.userCenter.overseaLinkBusy = false;
   state.userCenter.overseaLinkLoading = false;
   state.userCenter.overseaLinkRequestGeneration += 1;
-  state.userCenter.systemSubscriptionSecrets = {};
   state.userCenter.systemSubscriptionFeedback = null;
   state.userCenter.systemSubscriptionBusy = false;
   state.userCenter.drawer = null;
@@ -4206,12 +4207,22 @@ function normalizedInternalServerEndpoint(value = serverInput.value) {
 function clearOpsToken() {
   if (opsTokenInput) opsTokenInput.value = '';
   opsTokenBinding = null;
+  clearSystemSubscriptionSecrets();
+}
+
+function clearSystemSubscriptionSecrets() {
+  state.userCenter.systemSubscriptionSecrets = {};
+  state.userCenter.systemSubscriptionSecretGeneration += 1;
+  state.userCenter.systemSubscriptionBusy = false;
+  state.userCenter.systemSubscriptionFeedback = null;
+  if (state.userCenter.drawer?.mode === 'system-subscriptions') renderUserEditorDrawer();
 }
 
 function bindOpsTokenToCurrentServer() {
   const token = String(opsTokenInput?.value || '').trim();
   if (!token) {
     opsTokenBinding = null;
+    clearSystemSubscriptionSecrets();
     return;
   }
   const endpoint = normalizedInternalServerEndpoint();
@@ -4219,11 +4230,20 @@ function bindOpsTokenToCurrentServer() {
     clearOpsToken();
     return;
   }
-  opsTokenBinding = {
+  const nextBinding = {
     token,
     serverBase: endpoint.base,
     origin: endpoint.origin
   };
+  if (
+    !opsTokenBinding
+    || opsTokenBinding.token !== nextBinding.token
+    || opsTokenBinding.serverBase !== nextBinding.serverBase
+    || opsTokenBinding.origin !== nextBinding.origin
+  ) {
+    clearSystemSubscriptionSecrets();
+  }
+  opsTokenBinding = nextBinding;
 }
 
 function clearOpsTokenIfServerBaseChanged() {
@@ -9015,6 +9035,7 @@ async function ensureSystemSubscriptionAccounts() {
 
 async function revealSystemSubscription(siteId) {
   if (!siteId || state.userCenter.systemSubscriptionBusy) return;
+  const secretGeneration = state.userCenter.systemSubscriptionSecretGeneration;
   state.userCenter.systemSubscriptionBusy = true;
   state.userCenter.systemSubscriptionFeedback = { kind: 'info', message: `Revealing ${siteId} for this session...` };
   renderUserEditorDrawer();
@@ -9023,6 +9044,7 @@ async function revealSystemSubscription(siteId) {
       method: 'POST',
       body: {}
     });
+    if (secretGeneration !== state.userCenter.systemSubscriptionSecretGeneration) return;
     const subscription = payload.subscription || null;
     state.userCenter.systemSubscriptionSecrets = {
       ...state.userCenter.systemSubscriptionSecrets,
@@ -9030,13 +9052,17 @@ async function revealSystemSubscription(siteId) {
     };
     state.userCenter.systemSubscriptionFeedback = {
       kind: 'success',
-      message: `${siteId} revealed in memory. Copy it before closing the drawer.`
+      message: `${siteId} revealed in Admin memory. The IP and HTTPS domain URLs remain available after closing this drawer until the server, ops token, or page changes.`
     };
   } catch (error) {
-    state.userCenter.systemSubscriptionFeedback = { kind: 'error', message: error.message };
+    if (secretGeneration === state.userCenter.systemSubscriptionSecretGeneration) {
+      state.userCenter.systemSubscriptionFeedback = { kind: 'error', message: error.message };
+    }
   } finally {
-    state.userCenter.systemSubscriptionBusy = false;
-    renderUserEditorDrawer();
+    if (secretGeneration === state.userCenter.systemSubscriptionSecretGeneration) {
+      state.userCenter.systemSubscriptionBusy = false;
+      renderUserEditorDrawer();
+    }
   }
 }
 
@@ -9085,16 +9111,19 @@ function renderSystemSubscriptionsDrawer() {
             <article><span>Traffic quota</span><strong>Unlimited</strong><small>no byte cap / reset / expiry</small></article>
             <article><span>Channels</span><strong>${escapeHtml(`${summary.ready || 0}/${summary.total || items.length} ready`)}</strong><small>Internal pushes, Oversea serves</small></article>
           </div>
-          <div class="system-subscription-warning">HTTP Basic over direct IP is intentionally available for application compatibility. Treat the URL as a secret. MX only reveals and copies the URL; the consuming application owns its local listener. This YAML declares 7788; use the consuming application's provider/override option if its existing 7890 listener must remain unchanged.</div>
+          <div class="system-subscription-warning">Each ready site uses one long-lived system Basic account for both the direct-IP URL and the HTTPS domain URL. Treat both URLs as secrets. MX only reveals and copies them; the consuming application owns its local listener. This YAML declares 7788; use the consuming application's provider/override option if its existing 7890 listener must remain unchanged.</div>
         </section>
         <section class="app-drawer-section">
-          <div class="app-section-title"><span>02</span><strong>Direct-IP subscription channels</strong></div>
+          <div class="app-section-title"><span>02</span><strong>System subscription channels</strong></div>
           <div class="system-subscription-list">
             ${items.map((item) => {
               const delivery = item.delivery || {};
               const client = item.client || {};
               const secret = state.userCenter.systemSubscriptionSecrets?.[item.siteId] || null;
-              const revealedValue = secret?.url || delivery.urlMasked || 'Endpoint pending configuration';
+              const directUrl = secret?.urls?.directIp || secret?.url || null;
+              const domainUrl = secret?.urls?.domain || null;
+              const directValue = directUrl || delivery.urlMasked || 'Endpoint pending configuration';
+              const domainValue = domainUrl || delivery.domainUrlMasked || (secret ? 'HTTPS domain is not configured' : 'Reveal to show the HTTPS domain URL');
               const canReveal = item.status === 'ready' && delivery.auth?.passwordAvailable;
               return `
                 <article class="system-subscription-card" data-state="${escapeHtml(item.status || 'blocked')}">
@@ -9104,18 +9133,24 @@ function renderSystemSubscriptionsDrawer() {
                   </header>
                   <div class="system-subscription-facts">
                     <span><small>Delivery</small><strong>Direct IP · HTTP Basic · :${escapeHtml(String(delivery.port || 3434))}</strong></span>
+                    <span><small>Domain</small><strong>HTTPS · same stable Basic account</strong></span>
                     <span><small>YAML</small><strong>mixed-port ${escapeHtml(String(client.mixedPort || 7788))} · manual URL import</strong></span>
                     <span><small>Policy</small><strong>Unlimited traffic · 50 Mbps hints</strong></span>
                   </div>
                   <div class="foundation-subscription-url">
-                    <span>${secret ? 'Revealed URL · clear text' : 'Masked URL'}</span>
-                    <code>${escapeHtml(revealedValue)}</code>
+                    <span>${secret ? 'IP URL · clear text' : 'IP URL · masked'}</span>
+                    <code>${escapeHtml(directValue)}</code>
+                  </div>
+                  <div class="foundation-subscription-url">
+                    <span>${domainUrl ? 'Domain URL · HTTPS · clear text' : 'Domain URL · HTTPS'}</span>
+                    <code>${escapeHtml(domainValue)}</code>
                   </div>
                   <p>${escapeHtml(item.statusReason || '')}</p>
                   <div class="foundation-operation-actions">
                     <button class="secondary-button" type="button" data-system-subscription-reveal="${escapeHtml(item.siteId)}" ${busy || !canReveal ? 'disabled' : ''}>${secret ? 'Reveal Again' : 'Reveal'}</button>
                     ${secret ? `
-                      <button class="secondary-button" type="button" data-system-subscription-copy-url="${escapeHtml(item.siteId)}">Copy URL</button>
+                      <button class="secondary-button" type="button" data-system-subscription-copy-ip="${escapeHtml(item.siteId)}" ${canReveal && directUrl ? '' : 'disabled'}>Copy IP</button>
+                      <button class="secondary-button" type="button" data-system-subscription-copy-domain="${escapeHtml(item.siteId)}" ${canReveal && domainUrl ? '' : 'disabled'}>Copy Domain</button>
                     ` : ''}
                   </div>
                 </article>
@@ -9144,10 +9179,16 @@ function renderSystemSubscriptionsDrawer() {
   for (const reveal of userEditorDrawer.querySelectorAll('[data-system-subscription-reveal]')) {
     reveal.addEventListener('click', () => void revealSystemSubscription(reveal.dataset.systemSubscriptionReveal));
   }
-  for (const copy of userEditorDrawer.querySelectorAll('[data-system-subscription-copy-url]')) {
+  for (const copy of userEditorDrawer.querySelectorAll('[data-system-subscription-copy-ip]')) {
     copy.addEventListener('click', () => {
-      const secret = state.userCenter.systemSubscriptionSecrets?.[copy.dataset.systemSubscriptionCopyUrl];
-      void copySystemSubscriptionValue(secret?.url, 'Subscription URL');
+      const secret = state.userCenter.systemSubscriptionSecrets?.[copy.dataset.systemSubscriptionCopyIp];
+      void copySystemSubscriptionValue(secret?.urls?.directIp || secret?.url, 'Direct-IP subscription URL');
+    });
+  }
+  for (const copy of userEditorDrawer.querySelectorAll('[data-system-subscription-copy-domain]')) {
+    copy.addEventListener('click', () => {
+      const secret = state.userCenter.systemSubscriptionSecrets?.[copy.dataset.systemSubscriptionCopyDomain];
+      void copySystemSubscriptionValue(secret?.urls?.domain, 'HTTPS domain subscription URL');
     });
   }
 }

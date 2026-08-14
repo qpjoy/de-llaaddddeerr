@@ -46,8 +46,18 @@ ${functionSource(rendererSource, 'isLocalStaticAdminBaseUrl')}
 ${functionSource(rendererSource, 'normalizeServerBaseValue')}
 function defaultServerBaseUrl() { return LOCAL_SERVER_BASE_URL; }
 let opsTokenBinding = null;
+let drawerRenderCount = 0;
+function renderUserEditorDrawer() { drawerRenderCount += 1; }
+const state = { userCenter: {
+  drawer: null,
+  systemSubscriptionBusy: false,
+  systemSubscriptionFeedback: null,
+  systemSubscriptionSecrets: {},
+  systemSubscriptionSecretGeneration: 0
+} };
 ${functionSource(rendererSource, 'isOpsProtectedInternalRequest')}
 ${functionSource(rendererSource, 'normalizedInternalServerEndpoint')}
+${functionSource(rendererSource, 'clearSystemSubscriptionSecrets')}
 ${functionSource(rendererSource, 'clearOpsToken')}
 ${functionSource(rendererSource, 'bindOpsTokenToCurrentServer')}
 ${functionSource(rendererSource, 'clearOpsTokenIfServerBaseChanged')}
@@ -57,7 +67,12 @@ return {
   clearOpsTokenIfServerBaseChanged,
   isOpsProtectedInternalRequest,
   opsTokenForRequest,
-  binding: () => opsTokenBinding
+  binding: () => opsTokenBinding,
+  secrets: () => state.userCenter.systemSubscriptionSecrets,
+  generation: () => state.userCenter.systemSubscriptionSecretGeneration,
+  drawerRenderCount: () => drawerRenderCount,
+  setSecrets: (value) => { state.userCenter.systemSubscriptionSecrets = value; },
+  setDrawer: (value) => { state.userCenter.drawer = value; }
 };
 `
 )(serverInput, opsTokenInput);
@@ -141,6 +156,10 @@ for (const [method, path] of [
 }
 
 serverInput.value = 'https://other-internal.example';
+security.setSecrets({ 'mx-oversea-jp01': { url: 'secret' } });
+security.setDrawer({ mode: 'system-subscriptions' });
+const previousGeneration = security.generation();
+const previousDrawerRenderCount = security.drawerRenderCount();
 assert.equal(
   security.clearOpsTokenIfServerBaseChanged(),
   true,
@@ -148,6 +167,48 @@ assert.equal(
 );
 assert.equal(opsTokenInput.value, '');
 assert.equal(security.binding(), null);
+assert.deepEqual(security.secrets(), {}, 'changing the bound Internal origin clears revealed system URLs');
+assert.equal(security.generation(), previousGeneration + 1, 'origin changes invalidate in-flight reveal responses');
+assert.equal(
+  security.drawerRenderCount(),
+  previousDrawerRenderCount + 1,
+  'an open system drawer is rerendered so stale plaintext leaves the DOM'
+);
+
+let resolveReveal;
+const revealResponse = new Promise((resolve) => { resolveReveal = resolve; });
+const revealRace = Function(
+  'revealResponse',
+  `
+let drawerRenderCount = 0;
+function renderUserEditorDrawer() { drawerRenderCount += 1; }
+async function fetchJson() { return revealResponse; }
+const state = { userCenter: {
+  drawer: { mode: 'system-subscriptions' },
+  systemSubscriptionBusy: false,
+  systemSubscriptionFeedback: null,
+  systemSubscriptionSecrets: {},
+  systemSubscriptionSecretGeneration: 0
+} };
+${functionSource(rendererSource, 'clearSystemSubscriptionSecrets')}
+async ${functionSource(rendererSource, 'revealSystemSubscription')}
+return {
+  run: revealSystemSubscription,
+  invalidate: clearSystemSubscriptionSecrets,
+  state: () => state.userCenter,
+  drawerRenderCount: () => drawerRenderCount
+};
+`
+)(revealResponse);
+const pendingReveal = revealRace.run('mx-oversea-jp01');
+assert.equal(revealRace.drawerRenderCount(), 1, 'reveal renders its busy state');
+revealRace.invalidate();
+assert.equal(revealRace.drawerRenderCount(), 2, 'credential invalidation immediately removes plaintext from the drawer');
+resolveReveal({ subscription: { url: 'http://old-origin.example/secret' } });
+await pendingReveal;
+assert.deepEqual(revealRace.state().systemSubscriptionSecrets, {}, 'an old-origin response cannot repopulate cleared plaintext');
+assert.equal(revealRace.state().systemSubscriptionFeedback, null, 'an old-origin response cannot overwrite the new session feedback');
+assert.equal(revealRace.drawerRenderCount(), 2, 'a discarded old-origin response does not rerender the current drawer');
 
 serverInput.value = 'https://internal.example';
 opsTokenInput.value = 'next-secret';

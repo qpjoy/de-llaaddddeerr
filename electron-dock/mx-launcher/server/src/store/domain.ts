@@ -8017,6 +8017,74 @@ export function renderHysteria2MihomoSubscription(
   };
 }
 
+/**
+ * Canonical Internal mirror of the system YAML written by the Oversea access
+ * stack. Keep this separate from the ordinary 30 Mbps user renderer: the
+ * system account is unmetered and its 50 Mbps values are client hints only.
+ */
+export function renderSystemHysteria2MihomoSubscription(
+  site: LauncherNetworkMihomoSite,
+  account: SiteSlotAccessAccount,
+  now = new Date().toISOString()
+): MihomoSubscriptionRender {
+  if (!isSystemSubscriptionAccessAccount(account)) {
+    throw new Error('Canonical system subscription account required');
+  }
+  if (!site.publicHost || !site.tlsFingerprint) {
+    throw new Error('Ready Oversea host and TLS fingerprint required');
+  }
+  const proxyName = `peer_${account.username}`;
+  const lines = [
+    `# Generated from the Internal-issued ${account.username} access account.`,
+    '# Unmetered traffic quota; 50 Mbps values are client bandwidth hints.',
+    `mixed-port: ${SYSTEM_SUBSCRIPTION_MIXED_PORT}`,
+    'allow-lan: false',
+    'mode: rule',
+    'log-level: info',
+    'geodata-mode: true',
+    'geo-auto-update: true',
+    'geo-update-interval: 24',
+    '',
+    'proxies:',
+    `  - name: ${yamlQuote(proxyName)}`,
+    '    type: hysteria2',
+    `    server: ${yamlQuote(site.publicHost)}`,
+    `    port: ${firstHysteriaPort(site.serverPorts)}`,
+    `    password: ${yamlQuote(account.authToken)}`,
+    `    down: ${yamlQuote(SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH)}`,
+    `    up: ${yamlQuote(SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH)}`,
+    '    skip-cert-verify: true',
+    `    fingerprint: ${yamlQuote(site.tlsFingerprint)}`,
+    '    alpn:',
+    `      - ${HYSTERIA2_CLIENT_ALPN}`,
+    '    dns:',
+    ...HYSTERIA2_CLIENT_DNS.map((server) => `      - ${yamlQuote(server)}`),
+    '',
+    'proxy-groups:',
+    '  - name: PROXY',
+    '    type: select',
+    '    proxies:',
+    `      - ${yamlQuote(proxyName)}`,
+    '      - DIRECT',
+    '',
+    'rules:',
+    ...HYSTERIA2_LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`),
+    '  - GEOSITE,CN,DIRECT',
+    '  - GEOIP,CN,DIRECT',
+    '  - MATCH,PROXY',
+    ''
+  ];
+  return {
+    siteId: site.siteId,
+    username: account.username,
+    accountId: account.accountId,
+    contentType: 'text/yaml',
+    yaml: lines.join('\n'),
+    reachability: site.reachability,
+    generatedAt: now
+  };
+}
+
 export function userOverseaAccountName(user: UserCenterUser, siteId: string): string {
   const subject = user.account || user.email || user.userId;
   return safeAccountName(`${siteId}-${subject}`).slice(0, 80);

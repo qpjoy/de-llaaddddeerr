@@ -29,6 +29,14 @@ async function withOpsToken<T>(run: () => Promise<T>): Promise<T> {
 
 function seed(options: { tlsFingerprint?: string | null } = {}) {
   const store = new MemoryStore(loadConfig());
+  store.upsertSiteSlotDomesticRuntimeConfig({
+    siteId: 'domestic-main',
+    status: 'active',
+    bootstrapProtocol: 'https',
+    bootstrapHost: 'h2i.example.com',
+    bootstrapPort: 443,
+    requestedBy: 'test'
+  });
   store.upsertSiteSlotSshProfile({
     profileId: 'profile-system-oversea',
     siteId: 'mx-oversea-hk01',
@@ -60,6 +68,15 @@ test('subscriptions is a virtual non-login account and ensure never leaks its to
     const account = store.getSiteSlotAccessAccount('mx-oversea-hk01', username);
 
     assert.ok(account?.authToken);
+    await controller.ensureSystemSubscriptions(OPS_TOKEN, {
+      requestedBy: 'test-repeat',
+      siteIds: ['mx-oversea-hk01']
+    });
+    assert.equal(
+      store.getSiteSlotAccessAccount('mx-oversea-hk01', username)?.authToken,
+      account!.authToken,
+      'idempotent Ensure keeps the long-lived system credential stable'
+    );
     assert.equal(ensured.catalog.account.loginAllowed, false);
     assert.equal(ensured.catalog.account.immutable, true);
     assert.equal(ensured.catalog.subscriptions[0]?.client.mixedPort, 7788);
@@ -72,6 +89,12 @@ test('subscriptions is a virtual non-login account and ensure never leaks its to
       controller.revealSystemSubscription('mx-oversea-hk01', OPS_TOKEN),
       /not ready/,
       'a merely Internal-issued account is not a consumable subscription yet'
+    );
+    const siteSlots = new SiteSlotsController(store);
+    await assert.rejects(
+      siteSlots.getHysteria2MihomoSubscription('mx-oversea-hk01', username, systemBasic(account!.authToken)),
+      /not found/,
+      'the HTTPS system YAML route uses the same strict deployment-ready gate'
     );
   });
 });
@@ -186,9 +209,81 @@ test('a direct URL is revealed only after the latest Oversea plan has passing de
     const revealed = await controller.revealSystemSubscription('mx-oversea-hk01', OPS_TOKEN);
     assert.match(revealed.subscription.url, /^http:\/\/subscriptions:[^@]+@203\.0\.113\.21:3435\/peer_/);
     assert.ok(revealed.subscription.url.includes(encodeURIComponent(account.authToken)));
+    assert.equal(revealed.subscription.urls.directIp, revealed.subscription.url, 'url remains the direct-IP compatibility alias');
+    assert.match(
+      revealed.subscription.urls.domain ?? '',
+      /^https:\/\/subscriptions:[^@]+@h2i\.example\.com\/internal\/v1\/site-slots\/mx-oversea-hk01\/subscriptions\/hysteria2\/mx-oversea-hk01-subscriptions\.yaml$/
+    );
+    assert.ok(revealed.subscription.urls.domain?.includes(encodeURIComponent(account.authToken)));
     assert.equal('installCommand' in revealed.subscription, false, 'reveal returns only the URL, not a local installer');
     assert.doesNotMatch(JSON.stringify(revealed), /qp-tunnel-cli|--instance|7890/);
     assert.match(revealed.subscription.note, /does not install or manage a local proxy instance/);
+
+    const listDomesticRuntimeConfigs = store.listSiteSlotDomesticRuntimeConfigs.bind(store);
+    store.listSiteSlotDomesticRuntimeConfigs = () => {
+      throw new Error('simulated Domestic config read failure');
+    };
+    try {
+      const withoutDomain = await controller.revealSystemSubscription('mx-oversea-hk01', OPS_TOKEN);
+      assert.equal(withoutDomain.subscription.url, revealed.subscription.url);
+      assert.equal(withoutDomain.subscription.urls.directIp, revealed.subscription.urls.directIp);
+      assert.equal(withoutDomain.subscription.urls.domain, null);
+    } finally {
+      store.listSiteSlotDomesticRuntimeConfigs = listDomesticRuntimeConfigs;
+    }
+
+    store.upsertSiteSlotDomesticRuntimeConfig({
+      siteId: 'domestic-main',
+      status: 'active',
+      bootstrapProtocol: 'https',
+      bootstrapHost: 'replacement-h2i.example.com',
+      bootstrapPort: 443,
+      requestedBy: 'test-domain-change'
+    });
+    const afterDomainChange = await controller.revealSystemSubscription('mx-oversea-hk01', OPS_TOKEN);
+    assert.equal(afterDomainChange.subscription.url, revealed.subscription.url);
+    assert.equal(afterDomainChange.subscription.urls.directIp, revealed.subscription.urls.directIp);
+    assert.match(afterDomainChange.subscription.urls.domain ?? '', /@replacement-h2i\.example\.com\//);
+    assert.ok(
+      afterDomainChange.subscription.urls.domain?.includes(encodeURIComponent(account.authToken)),
+      'changing only the domain reuses the same stable system credential'
+    );
+
+    const siteSlots = new SiteSlotsController(store);
+    let authenticatedPlanReads = 0;
+    store.listSiteSlotPlans = () => {
+      authenticatedPlanReads += 1;
+      return [plan];
+    };
+    for (const authorization of [
+      undefined,
+      `Bearer ${account.authToken}`,
+      systemBasic('wrong-token'),
+      `Basic ${Buffer.from(`operator:${account.authToken}`).toString('base64')}`
+    ]) {
+      await assert.rejects(
+        siteSlots.getHysteria2MihomoSubscription('mx-oversea-hk01', username, authorization),
+        /not found/,
+        'missing, Bearer and incorrect Basic credentials are indistinguishable'
+      );
+    }
+    assert.equal(authenticatedPlanReads, 0, 'unauthenticated probes do not trigger the deployment-evidence scan');
+    const yaml = await siteSlots.getHysteria2MihomoSubscription(
+      'mx-oversea-hk01',
+      username,
+      systemBasic(account.authToken)
+    );
+    assert.equal(authenticatedPlanReads, 1);
+    assert.match(yaml, /^# Generated from the Internal-issued mx-oversea-hk01-subscriptions access account\./);
+    assert.match(yaml, /mixed-port: 7788/);
+    assert.match(yaml, /down: "50 Mbps"/);
+    assert.match(yaml, /up: "50 Mbps"/);
+    assert.match(yaml, /name: "peer_mx-oversea-hk01-subscriptions"/);
+    assert.match(yaml, /fingerprint: "AA:BB:CC"/);
+    assert.match(yaml, /dns:\n(?:      - "[^"]+"\n){4}/);
+    assert.match(yaml, /name: PROXY/);
+    assert.match(yaml, /MATCH,PROXY/);
+    assert.doesNotMatch(yaml, /30 Mbps|name: Oversea|mixed-port: 7890/);
 
     store.upsertLauncherNetworkMihomoSite({
       siteId: 'mx-oversea-hk01',
@@ -210,6 +305,10 @@ test('a direct URL is revealed only after the latest Oversea plan has passing de
     );
   });
 });
+
+function systemBasic(password: string): string {
+  return `Basic ${Buffer.from(`subscriptions:${password}`, 'utf8').toString('base64')}`;
+}
 
 test('a hostname cannot masquerade as the direct-IP channel', async () => {
   await withOpsToken(async () => {
@@ -404,7 +503,8 @@ test('site-slot APIs protect system material and reject forged passing reports',
     );
     await assert.rejects(
       siteSlots.getHysteria2MihomoSubscription('mx-oversea-hk01', account.username),
-      /available only through its Oversea direct-IP channel/
+      /not found/,
+      'anonymous system YAML requests never reveal whether the account or deployment exists'
     );
 
     const execution = await store.createSiteSlotExecution({

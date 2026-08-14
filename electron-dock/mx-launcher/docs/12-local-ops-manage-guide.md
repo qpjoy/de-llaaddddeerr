@@ -310,7 +310,9 @@ Internal tunnel-state 中若存在与 `HY2_SYSTEM_SUBSCRIPTION_ACCOUNT` 一致�
 `-subscriptions` 结尾的 active access account，Oversea `manage.sh` 会从该账户原子物化
 唯一的 `peer_<account>.mihomo.yaml`。该 YAML 使用 `mixed-port: 7788`、`PROXY` 组、
 private/CN direct 规则和 50 Mbps 客户端提示；“unmetered”表示不设置累计字节 quota，
-不表示绕过 Hysteria2 进程现有的 server-wide bandwidth。系统目录只 Reveal/Copy URL，不负责
+不表示绕过 Hysteria2 进程现有的 server-wide bandwidth。系统目录 Reveal 后可分别复制
+Direct-IP HTTP URL 和经 Domestic edge 暴露的公网域名 HTTPS URL；两条 URL 使用同一个长期
+`subscriptions` Basic 账号、返回同语义 system YAML。系统目录不负责
 安装或管理本地 mihomo 实例；普通用户/Internal 的既有 7788 运行路径不变，`refresh_subscriptions`
 继续更新 `clients.csv` 且不会删除这一个受管文件。
 Caddy 只对 `.env` 中的精确 `HY2_SYSTEM_SUBSCRIPTION_PATH` 使用 system Basic Auth，不能

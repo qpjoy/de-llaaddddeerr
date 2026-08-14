@@ -869,7 +869,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             status: 'ensured',
             accounts: [{ siteId: 'mx-oversea-hk01', accountId: 'slotacct_mx-oversea-hk01_mx-oversea-hk01-subscriptions', username: 'mx-oversea-hk01-subscriptions', status: 'active' }],
             missingSiteIds: [],
-            nextAction: 'Run Oversea Install/Sync for each pending site before revealing its direct-IP URL.'
+            nextAction: 'Run Oversea Install/Sync for each pending site before revealing its system subscription URLs.'
           }
         }
       })
@@ -877,9 +877,9 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
     '/internal/v1/user-center/system-subscriptions/sites/{siteId}/reveal': {
       post: operation({
         tag: 'Oversea Subscriptions',
-        summary: '临时显示 Direct-IP 系统订阅凭据',
-        description: 'ops-token + no-store。只允许 ready channel；仅在本次响应返回明文 URL，不生成本地安装命令。'
-          + '调用方手工把 URL 添加到自行选择的应用；MX 不安装或管理 7788/7890 本地实例，禁止把响应写入审计或日志。',
+        summary: '显示 Direct-IP 与 H2I HTTPS 系统订阅凭据',
+        description: 'ops-token + no-store + no-referrer。只允许 ready channel；返回同一长期 system credential 的 Direct-IP HTTP 与 H2I HTTPS URL，不生成本地安装命令。'
+          + 'H2I 域名只来自 active Domestic runtime 的 HTTPS publicBaseUrl；调用方手工添加到自行选择的应用，MX 不安装或管理 7788/7890 本地实例。',
         operationId: 'revealSystemSubscription',
         auth: 'ops-token',
         pathParams: ['siteId'],
@@ -888,6 +888,10 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             subscriptionId: 'oversea-direct:mx-oversea-hk01',
             siteId: 'mx-oversea-hk01',
             url: 'http://subscriptions:<secret>@203.0.113.21:3434/peer_mx-oversea-hk01-subscriptions.mihomo.yaml',
+            urls: {
+              directIp: 'http://subscriptions:<secret>@203.0.113.21:3434/peer_mx-oversea-hk01-subscriptions.mihomo.yaml',
+              domain: 'https://subscriptions:<secret>@h2i.example.com/internal/v1/site-slots/mx-oversea-hk01/subscriptions/hysteria2/mx-oversea-hk01-subscriptions.yaml'
+            },
             note: 'Copy the URL into the operator-chosen application; MX does not install or manage a local proxy instance.'
           }
         }
@@ -1243,9 +1247,10 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       get: operation({
         tag: 'Oversea Subscriptions',
         summary: '单站点单账号订阅',
-        description: 'URL 即凭据的单节点订阅，用于只想连某一台机器的场景。'
+        description: '普通 access account 是单节点订阅，用于只想连某一台机器的场景。'
           + '想要多节点和可切换，用上面的聚合链接；这条不会随 entitlement 增减节点而变化。'
-          + '该历史路由只服务普通 access account；`*-subscriptions` 系统账号固定返回 404，必须走 ops-token + no-store reveal 后消费 Oversea Direct-IP URL。',
+          + '确定性的 `*-subscriptions` 系统账号仅在 channel 严格 ready 后接受 `Basic subscriptions:<active authToken>`，由 Internal 本地返回 canonical 7788/50 Mbps YAML。'
+          + '缺失/错误 Basic、Bearer 或 ops-token 一律 404；响应强制 no-store/no-referrer。系统明文 URL 仍须先走 ops-token reveal 获取。',
         operationId: 'getSiteSlotHysteria2Subscription',
         auth: 'public',
         pathParams: ['siteId', 'username'],

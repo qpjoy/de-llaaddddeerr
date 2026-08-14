@@ -202,7 +202,7 @@ try {
   );
   assert.match(
     manage,
-    /start_domestic_edge\(\)[\s\S]*docker network inspect "\$network"[\s\S]*compose_public_gateway up -d "\$@" domestic-edge/
+    /start_domestic_edge\(\)[\s\S]*docker network inspect "\$network"[\s\S]*compose_public_gateway up -d --force-recreate "\$@" domestic-edge/
   );
   assert.match(manage, /official Compass public gateway is enabled; public-tls must not compete for TCP 443/);
   assert.match(readme, /Compass nginx reaches this service at `http:\/\/mx-domestic-edge:8088`/);
