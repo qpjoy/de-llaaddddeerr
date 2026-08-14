@@ -5,6 +5,7 @@ import { MemoryStore } from '../../store/memory.js';
 import { loadConfig } from '../../config.js';
 import {
   USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE,
+  USER_OVERSEA_SUBSCRIPTION_LINK_TTL_SECONDS,
   USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE,
   isUserOverseaSubscriptionLinkToken,
   userOverseaSubscriptionLinkPath
@@ -33,6 +34,11 @@ test('an issued link resolves back to exactly its owner', () => {
   assert.equal(store.resolveUserOverseaSubscriptionLink(issued.token), user.userId);
   assert.equal(issued.record.audience, USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE);
   assert.deepEqual(issued.record.scopes, [USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE]);
+  assert.equal(
+    Date.parse(issued.record.expiresAt) - Date.parse(issued.record.issuedAt),
+    USER_OVERSEA_SUBSCRIPTION_LINK_TTL_SECONDS * 1000,
+    'new public links remain valid for 3650 days'
+  );
 });
 
 test('the token survives a URL path segment without escaping', () => {
@@ -59,6 +65,26 @@ test('revoking kills the link without touching the user session', () => {
   assert.equal(store.revokeUserOverseaSubscriptionLink(user.userId), 1);
   assert.equal(store.resolveUserOverseaSubscriptionLink(issued.token), null);
   assert.equal(store.revokeUserOverseaSubscriptionLink(user.userId), 0, 'revoking twice is a no-op');
+});
+
+test('a disabled user cannot use a long-lived public link', () => {
+  const { store, user } = seed();
+  const issued = store.issueUserOverseaSubscriptionLink(user.userId);
+
+  store.createUserCenterUser({
+    userId: user.userId,
+    account: user.account,
+    status: 'disabled',
+    requestedBy: 'admin'
+  });
+
+  assert.equal(store.resolveUserOverseaSubscriptionLink(issued.token), null);
+  assert.equal(store.renderUserOverseaMihomoSubscription(user.userId), null);
+  assert.equal(
+    store.describeUserOverseaSubscriptionLink(user.userId)?.issuedAt,
+    issued.record.issuedAt,
+    'disabling blocks delivery without silently rotating or revoking the durable link'
+  );
 });
 
 test('a login token cannot be used as a subscription link', () => {

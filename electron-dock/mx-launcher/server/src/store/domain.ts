@@ -146,6 +146,8 @@ import type {
   UserOverseaEntitlementMigrationInput,
   UserOverseaEntitlementMigrationChange,
   UserOverseaEntitlementMigrationResult,
+  UserOverseaEntitlementRolloutInput,
+  UserOverseaEntitlementRolloutResult,
   UserOverseaSubscriptionRender,
   TestStep,
   TestGateVerdict,
@@ -170,8 +172,8 @@ export const USER_OVERSEA_SUBSCRIPTION_SCOPE = 'oversea.subscription.ensure';
  */
 export const USER_OVERSEA_SUBSCRIPTION_LINK_AUDIENCE = 'mx-oversea-subscription';
 export const USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE = 'oversea.subscription.read';
-/** Clash refreshes on a slow timer; a year avoids silent breakage mid-quarter. */
-export const USER_OVERSEA_SUBSCRIPTION_LINK_TTL_SECONDS = 365 * 24 * 60 * 60;
+/** Clash keeps this bearer-in-path URL as durable client configuration; new links last 3650 days. */
+export const USER_OVERSEA_SUBSCRIPTION_LINK_TTL_SECONDS = 3650 * 24 * 60 * 60;
 
 export function userOverseaSubscriptionLinkPath(token: string): string {
   return `/internal/v1/oversea-subscriptions/${encodeURIComponent(token)}.yaml`;
@@ -1071,6 +1073,61 @@ export function buildUserOverseaMigrationResult(
     scanned,
     matched: changes.length,
     changed: changes.filter((change) => change.status === 'migrated').length,
+    failed: changes.filter((change) => change.status === 'failed').length,
+    changes,
+    generatedAt: now
+  };
+}
+
+export function assertUserOverseaRolloutInput(
+  input: UserOverseaEntitlementRolloutInput
+): { toSiteId: string; userIds: string[] | null } {
+  const toSiteId = input.toSiteId?.trim() ?? '';
+  if (!toSiteId) throw new Error('toSiteId is required');
+  const userIds = [...new Set((input.userIds ?? []).map((item) => String(item || '').trim()).filter(Boolean))];
+  if (input.confirm === true && userIds.length === 0) {
+    throw new Error('Apply requires the non-empty userIds frozen by Preview');
+  }
+  return { toSiteId, userIds: userIds.length ? userIds : null };
+}
+
+export function planUserOverseaEntitlementRollout(
+  users: Array<Pick<UserCenterUser, 'userId' | 'account' | 'roleIds' | 'status'>>,
+  entitlements: Array<Pick<UserOverseaEntitlement, 'userId' | 'siteIds'>>,
+  input: { toSiteId: string; userIds?: string[] | null }
+): Array<{ userId: string; account: string; before: string[]; after: string[] }> {
+  const scope = new Set((input.userIds ?? []).map((item) => String(item || '').trim()).filter(Boolean));
+  const entitlementsByUserId = new Map(entitlements.map((entitlement) => [entitlement.userId, entitlement]));
+  return users.flatMap((user) => {
+    if (user.status !== 'active' || user.roleIds.includes('mx-service-account')) return [];
+    if (scope.size > 0 && !scope.has(user.userId)) return [];
+    const before = [...new Set((entitlementsByUserId.get(user.userId)?.siteIds ?? [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean))].sort();
+    if (before.includes(input.toSiteId)) return [];
+    return [{
+      userId: user.userId,
+      account: user.account,
+      before,
+      after: [...before, input.toSiteId].sort()
+    }];
+  });
+}
+
+export function buildUserOverseaRolloutResult(
+  toSiteId: string,
+  applied: boolean,
+  scanned: number,
+  changes: UserOverseaEntitlementMigrationChange[],
+  now = new Date().toISOString()
+): UserOverseaEntitlementRolloutResult {
+  return {
+    toSiteId,
+    applied,
+    scanned,
+    matched: changes.length,
+    changed: changes.filter((change) => change.status === 'migrated').length,
+    skipped: changes.filter((change) => change.status === 'skipped').length,
     failed: changes.filter((change) => change.status === 'failed').length,
     changes,
     generatedAt: now

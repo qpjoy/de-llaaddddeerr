@@ -140,6 +140,8 @@ import type {
   UserOverseaEntitlementInput,
   UserOverseaEntitlementMigrationInput,
   UserOverseaEntitlementMigrationResult,
+  UserOverseaEntitlementRolloutInput,
+  UserOverseaEntitlementRolloutResult,
   UserOverseaAccountSyncReport,
   UserOverseaAccountSyncReportInput,
   UserCenterTokenRecord,
@@ -259,6 +261,9 @@ export interface PlatformStore {
   migrateUserOverseaEntitlements(
     input: UserOverseaEntitlementMigrationInput
   ): MaybePromise<UserOverseaEntitlementMigrationResult>;
+  rolloutUserOverseaEntitlements(
+    input: UserOverseaEntitlementRolloutInput
+  ): MaybePromise<UserOverseaEntitlementRolloutResult>;
   recordUserOverseaAccountSyncReport(input: UserOverseaAccountSyncReportInput): MaybePromise<UserOverseaAccountSyncReport>;
   listUserOverseaAccountSyncReports(userId?: string | null, siteId?: string | null): MaybePromise<UserOverseaAccountSyncReport[]>;
   renderUserOverseaMihomoSubscription(userId: string): MaybePromise<UserOverseaSubscriptionRender | null>;

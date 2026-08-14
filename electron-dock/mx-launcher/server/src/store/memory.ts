@@ -105,6 +105,9 @@ import {
   planUserOverseaEntitlementMigration,
   assertUserOverseaMigrationInput,
   buildUserOverseaMigrationResult,
+  planUserOverseaEntitlementRollout,
+  assertUserOverseaRolloutInput,
+  buildUserOverseaRolloutResult,
   normalizeUpdatePolicy,
   issueUserCenterServiceAccountCredential,
   siteSlotWorkerReportTlsFingerprint,
@@ -295,6 +298,8 @@ import type {
   UserOverseaEntitlementMigrationInput,
   UserOverseaEntitlementMigrationChange,
   UserOverseaEntitlementMigrationResult,
+  UserOverseaEntitlementRolloutInput,
+  UserOverseaEntitlementRolloutResult,
   UserOverseaEntitlementInput,
   UserOverseaAccountSyncReport,
   UserOverseaAccountSyncReportInput,
@@ -1286,11 +1291,20 @@ export class MemoryStore implements PlatformStore {
     if (!user) throw new Error(`User not found: ${userId}`);
     const previous = this.getUserOverseaEntitlement(user.userId);
     // 见 PostgresStore.upsertUserOverseaEntitlement：省略 siteIds = 保留已有分配。
-    const effectiveSiteIds = input.siteIds !== undefined && input.siteIds !== null
-      ? normalizeEntitlementSiteIds(input.siteIds)
-      : previous
-        ? normalizeEntitlementSiteIds(previous.siteIds)
-        : this.defaultUserOverseaSiteIds();
+    let effectiveSiteIds: string[];
+    if (input.assignmentMode === 'platform-default') {
+      const defaultSiteId = this.defaultUserOverseaSiteId();
+      if (!defaultSiteId || !this.overseaSiteIsServiceable(defaultSiteId)) {
+        throw new Error('No serviceable platform default Oversea site is available');
+      }
+      effectiveSiteIds = [defaultSiteId];
+    } else {
+      effectiveSiteIds = input.siteIds !== undefined && input.siteIds !== null
+        ? normalizeEntitlementSiteIds(input.siteIds)
+        : previous
+          ? normalizeEntitlementSiteIds(previous.siteIds)
+          : this.defaultUserOverseaSiteIds();
+    }
     const accounts = effectiveSiteIds.map((siteId) => {
       const accountName = userOverseaAccountName(user, siteId);
       const issued = this.issueSiteSlotAccessAccounts({
@@ -1384,6 +1398,74 @@ export class MemoryStore implements PlatformStore {
         applied,
         matched: result.matched,
         changed: result.changed,
+        failed: result.failed
+      }
+    });
+    return result;
+  }
+
+  rolloutUserOverseaEntitlements(
+    input: UserOverseaEntitlementRolloutInput
+  ): UserOverseaEntitlementRolloutResult {
+    const rollout = assertUserOverseaRolloutInput(input);
+    if (!this.overseaSiteIsServiceable(rollout.toSiteId)) {
+      throw new Error(`Target Oversea site is not serviceable: ${rollout.toSiteId}`);
+    }
+    const users = this.listUserCenterUsers();
+    const activeHumanUsers = users.filter((user) => user.status === 'active' && !user.roleIds.includes('mx-service-account'));
+    const applied = input.confirm === true;
+    const changes: UserOverseaEntitlementRolloutResult['changes'] = [];
+    if (!applied) {
+      const planned = planUserOverseaEntitlementRollout(
+        users,
+        this.listUserOverseaEntitlements(),
+        rollout
+      );
+      changes.push(...planned.map((item) => ({ ...item, status: 'planned' as const })));
+    } else {
+      for (const userId of rollout.userIds ?? []) {
+        const user = this.users.get(userId);
+        const current = this.getUserOverseaEntitlement(userId);
+        const before = normalizeEntitlementSiteIds(current?.siteIds ?? []);
+        const base = { userId, account: user?.account ?? userId, before, after: before };
+        if (!user || user.status !== 'active' || user.roleIds.includes('mx-service-account')) {
+          changes.push({ ...base, status: 'skipped', reason: 'User is not an active human account' });
+          continue;
+        }
+        if (before.includes(rollout.toSiteId)) {
+          changes.push({ ...base, status: 'skipped', reason: 'Target site is already assigned' });
+          continue;
+        }
+        const after = [...new Set([...before, rollout.toSiteId])].sort();
+        try {
+          const updated = this.upsertUserOverseaEntitlement({
+            userId,
+            siteIds: after,
+            requestedBy: input.requestedBy ?? 'oversea-rollout',
+            requestId: input.requestId ?? null
+          });
+          changes.push({ ...base, after: updated.siteIds, status: 'migrated' });
+        } catch (error) {
+          changes.push({ ...base, after, status: 'failed', reason: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    }
+    const result = buildUserOverseaRolloutResult(
+      rollout.toSiteId,
+      applied,
+      applied ? rollout.userIds?.length ?? 0 : activeHumanUsers.length,
+      changes
+    );
+    this.recordAudit({
+      eventType: 'iam.user_oversea_entitlement.rolled_out',
+      actorKind: 'user-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        toSiteId: rollout.toSiteId,
+        applied,
+        matched: result.matched,
+        changed: result.changed,
+        skipped: result.skipped,
         failed: result.failed
       }
     });
@@ -1517,13 +1599,15 @@ export class MemoryStore implements PlatformStore {
     if (!record.scopes.includes(USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE)) return null;
     if (record.subjectKind !== 'user') return null;
     if (Date.parse(record.expiresAt) <= Date.now()) return null;
+    const user = this.users.get(record.subjectId);
+    if (!user || user.status !== 'active') return null;
     return record.subjectId;
   }
 
   renderUserOverseaMihomoSubscription(userId: string): UserOverseaSubscriptionRender | null {
     const user = this.users.get(userId);
     const entitlement = this.getUserOverseaEntitlement(userId);
-    if (!user || !entitlement || entitlement.status !== 'active') return null;
+    if (!user || user.status !== 'active' || !entitlement || entitlement.status !== 'active') return null;
     const entries = entitlement.accounts
       .map((accountRef) => {
         const site = this.getLauncherNetworkMihomoSite(accountRef.siteId);

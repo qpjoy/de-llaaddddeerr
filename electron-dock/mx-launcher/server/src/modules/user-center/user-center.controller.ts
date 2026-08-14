@@ -303,6 +303,30 @@ export class UserCenterController {
     }
   }
 
+  /** Add one live Oversea site to existing users without removing any assignment. */
+  @Post('internal/v1/user-center/oversea-entitlements/rollout')
+  @Header('Cache-Control', 'no-store')
+  async rolloutUserOverseaEntitlements(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
+    const body = asRecord(rawBody);
+    try {
+      return {
+        rollout: await this.store.rolloutUserOverseaEntitlements({
+          toSiteId: nullableString(body.toSiteId),
+          confirm: booleanValue(body.confirm) === true,
+          userIds: stringArray(body.userIds),
+          requestedBy: nullableString(body.requestedBy) ?? 'desktop-admin',
+          requestId: nullableString(body.requestId) ?? `oversea-rollout-${Date.now()}`
+        })
+      };
+    } catch (error) {
+      throw userCenterMutationException(error);
+    }
+  }
+
   @Get('internal/v1/user-center/users/:userId/h2o/runtime-profile')
   async userH2oRuntimeProfile(
     @Param('userId') userId: string,
@@ -867,6 +891,7 @@ function toUserOverseaEntitlementInput(body: Record<string, unknown>): UserOvers
   return {
     userId: nullableString(body.userId),
     siteIds: body.siteIds === undefined || body.siteIds === null ? null : stringList(body.siteIds),
+    assignmentMode: nullableString(body.assignmentMode) === 'platform-default' ? 'platform-default' : null,
     requestedBy: nullableString(body.requestedBy),
     requestId: nullableString(body.requestId)
   };

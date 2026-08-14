@@ -79,6 +79,7 @@ test('the integration entry points third-party apps need are all present', () =>
     '/internal/v1/sdk/oauth/token',
     '/internal/v1/launcher-network/products/{productId}',
     '/internal/v1/user-center/users',
+    '/internal/v1/user-center/oversea-entitlements/rollout',
     '/internal/v1/user-center/system-subscriptions',
     '/internal/v1/user-center/system-subscriptions/ensure',
     '/internal/v1/user-center/system-subscriptions/sites/{siteId}/reveal',

@@ -97,6 +97,7 @@ for (const [method, path] of [
   ['GET', '/internal/v1/user-center/roles'],
   ['GET', '/internal/v1/user-center/system-subscriptions'],
   ['POST', '/internal/v1/user-center/bootstrap'],
+  ['POST', '/internal/v1/user-center/oversea-entitlements/rollout'],
   ['POST', '/internal/v1/user-center/system-subscriptions/ensure'],
   ['POST', '/internal/v1/user-center/system-subscriptions/sites/mx-oversea-hk01/reveal'],
   ['GET', '/internal/v1/site-slots/mx-oversea-hk01/access-accounts'],

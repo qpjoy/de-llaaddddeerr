@@ -164,6 +164,8 @@ import type {
   UserOverseaEntitlementMigrationInput,
   UserOverseaEntitlementMigrationChange,
   UserOverseaEntitlementMigrationResult,
+  UserOverseaEntitlementRolloutInput,
+  UserOverseaEntitlementRolloutResult,
   UserOverseaEntitlementInput,
   UserOverseaAccountSyncReport,
   UserOverseaAccountSyncReportInput,
@@ -267,6 +269,9 @@ import {
   planUserOverseaEntitlementMigration,
   assertUserOverseaMigrationInput,
   buildUserOverseaMigrationResult,
+  planUserOverseaEntitlementRollout,
+  assertUserOverseaRolloutInput,
+  buildUserOverseaRolloutResult,
   normalizeUpdatePolicy,
   issueUserCenterServiceAccountCredential,
   siteSlotWorkerReportTlsFingerprint,
@@ -1431,21 +1436,62 @@ export class PostgresStore implements PlatformStore {
   async upsertUserOverseaEntitlement(input: UserOverseaEntitlementInput): Promise<UserOverseaEntitlement> {
     const userId = input.userId?.trim();
     if (!userId) throw new Error('userId is required');
-    const user = await this.getRecord<UserCenterUser>('iam-user', userId);
+    const entitlement = await this.withUserOverseaEntitlementWriteLock(userId, (manager, records) => (
+      this.upsertUserOverseaEntitlementLocked(manager, records, { ...input, userId })
+    ));
+    return this.withUserOverseaRuntimeSync(entitlement);
+  }
+
+  /** Caller must hold the per-user entitlement advisory lock for this transaction. */
+  private async upsertUserOverseaEntitlementLocked(
+    manager: EntityManager,
+    records: Repository<PlatformRecordRow>,
+    input: UserOverseaEntitlementInput & { userId: string }
+  ): Promise<UserOverseaEntitlement> {
+    const userId = input.userId;
+    const userRow = await records.findOne({
+      where: {
+        kind: 'iam-user',
+        id: userId,
+        environment: this.config.environment
+      }
+    });
+    const user = userRow?.data as UserCenterUser | undefined;
     if (!user) throw new Error(`User not found: ${userId}`);
-    const previous = await this.getUserOverseaEntitlement(user.userId);
+    const previousRow = await records.findOne({
+      where: {
+        kind: 'user-oversea-entitlement',
+        id: userOverseaEntitlementId(user.userId),
+        environment: this.config.environment
+      }
+    });
+    const previous = previousRow?.data as UserOverseaEntitlement | undefined;
     // 省略 siteIds 只表示「不改分配」，不表示「回到平台默认」。
     // H2O 的 ensure-subscription 每次刷新都不带 siteIds，之前落到 defaultUserOverseaSiteIds()
     // 会把 admin 刚指派的站点悄悄改回默认站点，用户看到的仍旧是老节点。
-    const effectiveSiteIds = input.siteIds !== undefined && input.siteIds !== null
-      ? normalizeEntitlementSiteIds(input.siteIds)
-      : previous
-        ? normalizeEntitlementSiteIds(previous.siteIds)
-        : await this.defaultUserOverseaSiteIds();
+    let effectiveSiteIds: string[];
+    if (input.assignmentMode === 'platform-default') {
+      const defaultSiteId = await this.defaultUserOverseaSiteId();
+      if (!defaultSiteId || !await this.overseaSiteIsServiceable(defaultSiteId)) {
+        throw new Error('No serviceable platform default Oversea site is available');
+      }
+      effectiveSiteIds = [defaultSiteId];
+    } else {
+      effectiveSiteIds = input.siteIds !== undefined && input.siteIds !== null
+        ? normalizeEntitlementSiteIds(input.siteIds)
+        : previous
+          ? normalizeEntitlementSiteIds(previous.siteIds)
+          : await this.defaultUserOverseaSiteIds();
+    }
+    // Every entitlement writer takes site locks in the same stable order. This
+    // keeps a multi-site update atomic without creating cross-user deadlocks.
+    for (const siteId of effectiveSiteIds) {
+      await this.lockLauncherNetworkMihomoSite(manager, siteId);
+    }
     const accounts: UserOverseaEntitlement['accounts'] = [];
     for (const siteId of effectiveSiteIds) {
       const accountName = userOverseaAccountName(user, siteId);
-      const issued = await this.issueSiteSlotAccessAccounts({
+      const issued = await this.issueSiteSlotAccessAccountsTo(records, {
         siteId,
         accountNames: [accountName],
         issueDefaults: false,
@@ -1478,8 +1524,8 @@ export class PostgresStore implements PlatformStore {
       updatedBy: input.requestedBy ?? previous?.updatedBy ?? 'user-center',
       updatedAt: now
     };
-    await this.saveRecord('user-oversea-entitlement', entitlement.entitlementId, entitlement, this.config.siteId);
-    await this.recordAudit({
+    await this.saveRecordTo(records, 'user-oversea-entitlement', entitlement.entitlementId, entitlement, this.config.siteId);
+    await this.recordAuditTo(records, {
       eventType: 'iam.user_oversea_entitlement.upserted',
       actorKind: 'user-center',
       userId: user.userId,
@@ -1490,7 +1536,7 @@ export class PostgresStore implements PlatformStore {
         status: entitlement.status
       }
     });
-    return this.withUserOverseaRuntimeSync(entitlement);
+    return entitlement;
   }
 
   /**
@@ -1542,6 +1588,112 @@ export class PostgresStore implements PlatformStore {
         applied,
         matched: result.matched,
         changed: result.changed,
+        failed: result.failed
+      }
+    });
+    return result;
+  }
+
+  async rolloutUserOverseaEntitlements(
+    input: UserOverseaEntitlementRolloutInput
+  ): Promise<UserOverseaEntitlementRolloutResult> {
+    const rollout = assertUserOverseaRolloutInput(input);
+    if (!await this.overseaSiteIsServiceable(rollout.toSiteId)) {
+      throw new Error(`Target Oversea site is not serviceable: ${rollout.toSiteId}`);
+    }
+    const users = await this.listUserCenterUsers();
+    const activeHumanUsers = users.filter((user) => user.status === 'active' && !user.roleIds.includes('mx-service-account'));
+    const applied = input.confirm === true;
+    const changes: UserOverseaEntitlementRolloutResult['changes'] = [];
+    if (!applied) {
+      const planned = planUserOverseaEntitlementRollout(
+        users,
+        await this.listUserOverseaEntitlements(),
+        rollout
+      );
+      changes.push(...planned.map((item) => ({ ...item, status: 'planned' as const })));
+    } else {
+      for (const userId of rollout.userIds ?? []) {
+        let failureBase = { userId, account: userId, before: [] as string[], after: [] as string[] };
+        try {
+          const change = await this.withUserOverseaEntitlementWriteLock(userId, async (manager, records) => {
+            const userRow = await records.findOne({
+              where: {
+                kind: 'iam-user',
+                id: userId,
+                environment: this.config.environment
+              }
+            });
+            const user = userRow?.data as UserCenterUser | undefined;
+            const entitlementRow = await records.findOne({
+              where: {
+                kind: 'user-oversea-entitlement',
+                id: userOverseaEntitlementId(userId),
+                environment: this.config.environment
+              }
+            });
+            const current = entitlementRow?.data as UserOverseaEntitlement | undefined;
+            const before = normalizeEntitlementSiteIds(current?.siteIds ?? []);
+            const base = { userId, account: user?.account ?? userId, before, after: before };
+            failureBase = base;
+            if (!user || user.status !== 'active' || user.roleIds.includes('mx-service-account')) {
+              return { ...base, status: 'skipped' as const, reason: 'User is not an active human account' };
+            }
+            if (before.includes(rollout.toSiteId)) {
+              return { ...base, status: 'skipped' as const, reason: 'Target site is already assigned' };
+            }
+
+            const after = [...new Set([...before, rollout.toSiteId])].sort();
+            // Take every site lock in the same order as ordinary entitlement
+            // writes. Archive waits for this transaction and the next user
+            // fails closed instead of receiving a retired target.
+            for (const siteId of after) {
+              await this.lockLauncherNetworkMihomoSite(manager, siteId);
+            }
+            const targetRow = await records.findOne({
+              where: {
+                kind: 'launcher-network-mihomo-site',
+                id: rollout.toSiteId,
+                environment: this.config.environment
+              }
+            });
+            const target = targetRow?.data as LauncherNetworkMihomoSite | undefined;
+            const normalizedTarget = target ? normalizeLauncherNetworkMihomoSite(target) : null;
+            if (!normalizedTarget || normalizedTarget.status === 'archived' || !normalizedTarget.publicHost) {
+              throw new Error(`Target Oversea site is not serviceable: ${rollout.toSiteId}`);
+            }
+
+            failureBase = { ...base, after };
+            const updated = await this.upsertUserOverseaEntitlementLocked(manager, records, {
+              userId,
+              siteIds: after,
+              requestedBy: input.requestedBy ?? 'oversea-rollout',
+              requestId: input.requestId ?? null
+            });
+            return { ...base, after: updated.siteIds, status: 'migrated' as const };
+          });
+          changes.push(change);
+        } catch (error) {
+          changes.push({ ...failureBase, status: 'failed', reason: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    }
+    const result = buildUserOverseaRolloutResult(
+      rollout.toSiteId,
+      applied,
+      applied ? rollout.userIds?.length ?? 0 : activeHumanUsers.length,
+      changes
+    );
+    await this.recordAudit({
+      eventType: 'iam.user_oversea_entitlement.rolled_out',
+      actorKind: 'user-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        toSiteId: rollout.toSiteId,
+        applied,
+        matched: result.matched,
+        changed: result.changed,
+        skipped: result.skipped,
         failed: result.failed
       }
     });
@@ -1689,13 +1841,15 @@ export class PostgresStore implements PlatformStore {
     if (!record.scopes.includes(USER_OVERSEA_SUBSCRIPTION_LINK_SCOPE)) return null;
     if (record.subjectKind !== 'user') return null;
     if (Date.parse(record.expiresAt) <= Date.now()) return null;
+    const user = await this.getRecord<UserCenterUser>('iam-user', record.subjectId);
+    if (!user || user.status !== 'active') return null;
     return record.subjectId;
   }
 
   async renderUserOverseaMihomoSubscription(userId: string): Promise<UserOverseaSubscriptionRender | null> {
     const user = await this.getRecord<UserCenterUser>('iam-user', userId);
     const entitlement = await this.getUserOverseaEntitlement(userId);
-    if (!user || !entitlement || entitlement.status !== 'active') return null;
+    if (!user || user.status !== 'active' || !entitlement || entitlement.status !== 'active') return null;
     const entries = [];
     for (const accountRef of entitlement.accounts) {
       const site = await this.getLauncherNetworkMihomoSite(accountRef.siteId);
@@ -2539,59 +2693,68 @@ export class PostgresStore implements PlatformStore {
 
   async issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): Promise<SiteSlotAccessAccountIssueResult> {
     const siteId = input.siteId?.trim() || 'oversea-main';
-    return this.withLauncherNetworkMihomoSiteWriteLock(siteId, async (records) => {
-      const site = await this.upsertLauncherNetworkMihomoSiteTo(records, {
-        siteId,
-        publicHost: input.publicHost,
-        serverPorts: input.serverPorts,
-        tlsFingerprint: input.tlsFingerprint,
-        requestedBy: input.requestedBy,
-        requestId: input.requestId
-      });
-      const accountNames = resolveIssueAccountNames(input, siteId);
-      const accounts: SiteSlotAccessAccount[] = [];
-      for (const username of accountNames) {
-        const accountId = `slotacct_${siteId}_${username}`.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const previousRow = await records.findOne({
-          where: {
-            kind: 'site-slot-access-account',
-            id: accountId,
-            environment: this.config.environment
-          }
-        });
-        const previous = previousRow?.data as SiteSlotAccessAccount | undefined;
-        const built = buildSiteSlotAccessAccount(this.config, {
-          siteId,
-          username,
-          authToken: previous?.authToken || randomBytes(24).toString('base64url'),
-          requestedBy: input.requestedBy
-        }, previous ?? null);
-        // Only the explicit unarchive mutation may reactivate a paused account.
-        // This keeps a retired/offline migration source out of user subscriptions
-        // while entitlement updates add and sync its replacement.
-        const account: SiteSlotAccessAccount = site.status === 'archived'
-          ? {
-              ...built,
-              status: 'paused',
-              updatedBy: previous?.updatedBy ?? built.updatedBy,
-              updatedAt: previous?.updatedAt ?? built.updatedAt
-            }
-          : built;
-        await this.saveRecordTo(records, 'site-slot-access-account', account.accountId, account, account.siteId);
-        accounts.push(account);
-      }
-      await this.recordAuditTo(records, {
-        eventType: 'config.site_slot_access_accounts.issued',
-        actorKind: 'config-center',
-        requestId: input.requestId ?? null,
-        metadata: {
-          siteId,
-          service: 'hysteria2',
-          accounts: accounts.map((account) => ({ username: account.username, role: account.role }))
+    return this.withLauncherNetworkMihomoSiteWriteLock(siteId, (records) => (
+      this.issueSiteSlotAccessAccountsTo(records, { ...input, siteId })
+    ));
+  }
+
+  /** Caller must hold the site advisory lock in the transaction backing records. */
+  private async issueSiteSlotAccessAccountsTo(
+    records: Repository<PlatformRecordRow>,
+    input: SiteSlotAccessAccountIssueInput & { siteId: string }
+  ): Promise<SiteSlotAccessAccountIssueResult> {
+    const siteId = input.siteId;
+    const site = await this.upsertLauncherNetworkMihomoSiteTo(records, {
+      siteId,
+      publicHost: input.publicHost,
+      serverPorts: input.serverPorts,
+      tlsFingerprint: input.tlsFingerprint,
+      requestedBy: input.requestedBy,
+      requestId: input.requestId
+    });
+    const accountNames = resolveIssueAccountNames(input, siteId);
+    const accounts: SiteSlotAccessAccount[] = [];
+    for (const username of accountNames) {
+      const accountId = `slotacct_${siteId}_${username}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const previousRow = await records.findOne({
+        where: {
+          kind: 'site-slot-access-account',
+          id: accountId,
+          environment: this.config.environment
         }
       });
-      return { site, accounts };
+      const previous = previousRow?.data as SiteSlotAccessAccount | undefined;
+      const built = buildSiteSlotAccessAccount(this.config, {
+        siteId,
+        username,
+        authToken: previous?.authToken || randomBytes(24).toString('base64url'),
+        requestedBy: input.requestedBy
+      }, previous ?? null);
+      // Only the explicit unarchive mutation may reactivate a paused account.
+      // This keeps a retired/offline migration source out of user subscriptions
+      // while entitlement updates add and sync its replacement.
+      const account: SiteSlotAccessAccount = site.status === 'archived'
+        ? {
+            ...built,
+            status: 'paused',
+            updatedBy: previous?.updatedBy ?? built.updatedBy,
+            updatedAt: previous?.updatedAt ?? built.updatedAt
+          }
+        : built;
+      await this.saveRecordTo(records, 'site-slot-access-account', account.accountId, account, account.siteId);
+      accounts.push(account);
+    }
+    await this.recordAuditTo(records, {
+      eventType: 'config.site_slot_access_accounts.issued',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        siteId,
+        service: 'hysteria2',
+        accounts: accounts.map((account) => ({ username: account.username, role: account.role }))
+      }
     });
+    return { site, accounts };
   }
 
   async listSiteSlotAccessAccounts(siteId: string): Promise<SiteSlotAccessAccount[]> {
@@ -5720,11 +5883,28 @@ export class PostgresStore implements PlatformStore {
     run: (records: Repository<PlatformRecordRow>) => Promise<T>
   ): Promise<T> {
     return this.dataSource.transaction(async (manager) => {
+      await this.lockLauncherNetworkMihomoSite(manager, siteId);
+      return run(manager.getRepository(PlatformRecordEntity));
+    });
+  }
+
+  private async lockLauncherNetworkMihomoSite(manager: EntityManager, siteId: string): Promise<void> {
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`mx-launcher:${this.config.environment}:launcher-network-mihomo-site`, siteId]
+    );
+  }
+
+  private async withUserOverseaEntitlementWriteLock<T>(
+    userId: string,
+    run: (manager: EntityManager, records: Repository<PlatformRecordRow>) => Promise<T>
+  ): Promise<T> {
+    return this.dataSource.transaction(async (manager) => {
       await manager.query(
         'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
-        [`mx-launcher:${this.config.environment}:launcher-network-mihomo-site`, siteId]
+        [`mx-launcher:${this.config.environment}:user-oversea-entitlement`, userId]
       );
-      return run(manager.getRepository(PlatformRecordEntity));
+      return run(manager, manager.getRepository(PlatformRecordEntity));
     });
   }
 

@@ -473,6 +473,12 @@ H2O 运行时订阅策略：
   `defaultUserOverseaSiteId()` 以 mx-h2i 这一条为准（不再取决于产品列表排序），并且仍会
   校验站点在役——默认站点被 archive 掉时自动降级到还在服役的站点。**只影响还没有
   entitlement 的用户**；已分配的用户要换站点走下面的批量迁移，或 User Center 里逐个勾选。
+- **给全部现有用户追加一个新站点**：Site Registry 的 **Roll out to existing users**
+  （`POST /internal/v1/user-center/oversea-entitlements/rollout`，ops token）先 Preview 冻结活跃真人用户
+  清单，再执行 **Add to users & Sync**。它按执行时的最新 entitlement 做站点并集，包含原本无
+  entitlement 或已禁用 Oversea 的用户，但不删除任何旧站点，也不处理 service account。写入完成后
+  只对目标 Oversea 做一次 site-wide Sync Remote；失败时保留 Internal 分配供低峰重试，不逐用户 SSH，
+  更不调用 Domestic/Internal WG 的 materialize、sync 或 restart。
 - **存量用户批量迁移**：Site Registry 的 **Migrate subscriptions**（`POST /internal/v1/
   user-center/oversea-entitlements/migrate`，ops token）采用蓝绿两阶段。先 Preview + **Add Target**
   （`mode: 'add'`）保留源站并追加目标，再从同一页面点 **Sync Target**；只有当前 source/target、
@@ -487,6 +493,10 @@ H2O 运行时订阅策略：
   保留 admin 在 User Center 勾的站点（勾成空 = 停用，也要保留，不能被刷新悄悄重新授权）。
   客户端侧同样：`ensure-subscription` 的第一档候选是「已授权站点全集」而不是逐个站点，
   否则多站点授权会在服务端被裁成单站点，用户的节点列表随之变短。
+- H2O 的 **分配系统默认** 是上述规则的显式例外：按钮发送
+  `assignmentMode: 'platform-default'`，只在这一次操作中把当前用户替换为平台当前可服务的默认站点。
+  若默认站点不可用则直接失败，不回退已归档/停机的旧站点；登录、自动水合和普通刷新均不发送该
+  mode，因此仍保留 Admin 已有分配。
 - 如果 entitlement 已存在但账号缺失或 `runtimeSync` 不是 `synced`，H2O 水合 managed profile
   时也应优先调用 `ensure-subscription`，让一次请求同时补 entitlement、site access account、
   remote runtime sync 和 YAML 可渲染性；`/oversea/sync-runtime` 只作为已有 active account
@@ -635,7 +645,8 @@ allowlist 单独放行了这一条（`@publicOverseaAggregate`），所以它和
 
 所以 H2O 在默认订阅那一行直接标注「这条地址需要登录态」，并提供「生成 Clash 链接」
 按钮：用当前用户自己的 Bearer（scope `oversea.subscription.ensure`）调 subscription-link
-签发，明文 token 只在响应里出现一次，拿到即写进 runtime 供复制。重新生成会吊销旧链接。
+签发，明文 token 只在响应里出现一次，拿到即写进 runtime 供复制。新签发链接的有效期是
+3650 天（约 10 年）；重新生成会立即吊销旧链接，管理员也可以单独吊销，长有效期不替代泄漏后的轮换/吊销。
 
 admin UI 的 User Center → Oversea access → Public Link 会在签发后同时给出这两个地址，
 各带一个 Copy 按钮；外网那条必须走域名（裸 IP 的 https 在 Domestic ingress 上 SNI 握手

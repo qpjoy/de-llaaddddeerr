@@ -230,6 +230,8 @@ assert.match(
 );
 
 const isolatedSources = [
+  functionSource('runOverseaRollout'),
+  functionSource('syncOverseaRolloutTarget'),
   functionSource('runOverseaMigration'),
   functionSource('syncOverseaMigrationTarget'),
   functionSource('assignUserOverseaFromAdmin'),
@@ -239,6 +241,80 @@ assert.doesNotMatch(
   isolatedSources,
   /domestic-wg|internal-service-peer|host-runner|materialize-domestic/i,
   'Oversea entitlement and migration UI never calls a Domestic/Internal WG mutation'
+);
+
+const rolloutSource = functionSource('runOverseaRollout');
+assert.match(
+  rolloutSource,
+  /\/internal\/v1\/user-center\/oversea-entitlements\/rollout/,
+  'existing-user rollout uses the dedicated add-only endpoint'
+);
+assert.match(
+  rolloutSource,
+  /userIds: confirm \? previewUserIds : undefined/,
+  'rollout Apply is frozen to the exact Preview user IDs'
+);
+assert.match(
+  rolloutSource,
+  /await syncOverseaRolloutTarget\(\)/,
+  'a successful rollout performs one target-wide sync from the Admin UI'
+);
+assert.doesNotMatch(
+  rolloutSource,
+  /oversea\/sync-runtime/,
+  'rollout never starts one SSH sync per user'
+);
+assert.match(
+  functionSource('syncOverseaRolloutTarget'),
+  /await ensureSelectedOversea\(\)/,
+  'rollout reuses the WG-isolated Oversea Install / Sync operation'
+);
+assert.match(
+  functionSource('renderOverseaRollout'),
+  /Roll out to existing users[\s\S]*?Preview users[\s\S]*?Add to users & Sync/,
+  'the low-traffic rollout requires Preview before its explicit Add-and-Sync action'
+);
+assert.match(
+  functionSource('isOpsProtectedInternalRequest'),
+  /oversea-entitlements\\\/\(\?:migrate\|rollout\)/,
+  'the rollout endpoint receives the ops token only through the exact-origin allowlist'
+);
+
+const publicSubscriptionUrls = Function(`
+const state = {
+  domesticRuntime: {
+    selectedSiteId: 'domestic-main',
+    configs: [{ siteId: 'domestic-main', edge: { publicBaseUrl: 'https://edge.example.test/' } }]
+  }
+};
+function asArray(value) { return Array.isArray(value) ? value : []; }
+function normalizedServerBase() { return 'http://10.88.88.88:18090'; }
+${functionSource('overseaPublicSubscriptionBase')}
+${functionSource('overseaPublicSubscriptionUrls')}
+return overseaPublicSubscriptionUrls;
+`)();
+assert.deepEqual(
+  publicSubscriptionUrls('/internal/v1/oversea-subscriptions/mx-v1-token.yaml'),
+  [
+    { label: '内网', url: 'http://10.88.88.88:18090/internal/v1/oversea-subscriptions/mx-v1-token.yaml' },
+    { label: '外网', url: 'https://edge.example.test/internal/v1/oversea-subscriptions/mx-v1-token.yaml' }
+  ],
+  'Admin shows both the Internal URL and the configured public edge URL after explicit issuance'
+);
+assert.match(
+  functionSource('renderUserOverseaPublicLink'),
+  /External subscription URL[\s\S]*?10-year revocable link[\s\S]*?Generate 10-year Link/,
+  'Admin clearly labels the public address and its long-lived explicit credential action'
+);
+assert.match(
+  functionSource('bindUserEditorDrawerControls'),
+  /\[data-oversea-link-retry\][\s\S]*?retryUserOverseaPublicLinkMeta/,
+  'a metadata load failure has a working retry before any destructive link rotation'
+);
+assert.match(
+  functionSource('loadUserOverseaPublicLinkMeta'),
+  /userOverseaLinkRequestIsCurrent[\s\S]*?current\?\.issued[\s\S]*?\.\.\.current/,
+  'a stale metadata response cannot erase the one-time plaintext issue response'
 );
 
 console.log('OK Oversea access can be re-enabled and migrations stay two-phase, preview-scoped, and WG-isolated');

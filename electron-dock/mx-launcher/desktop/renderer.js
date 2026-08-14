@@ -156,6 +156,7 @@ const state = {
   overseaEnsureFeedback: null,
   overseaDefaultSiteBusy: false,
   overseaDefaultSiteFeedback: null,
+  overseaRollout: null,
   overseaMigration: null,
   overseaTerminalBusy: false,
   overseaTerminalCommand: '',
@@ -203,6 +204,8 @@ const state = {
     overseaBusy: false,
     overseaSyncBusy: false,
     overseaLinkBusy: false,
+    overseaLinkLoading: false,
+    overseaLinkRequestGeneration: 0,
     overseaLink: null,
     feedback: null,
     busy: false
@@ -2968,8 +2971,11 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
   // this one's metadata so an existing link is visible without rotating it.
   state.userCenter.overseaLink = null;
   state.userCenter.overseaLinkBusy = false;
+  state.userCenter.overseaLinkLoading = Boolean(user?.userId);
+  state.userCenter.overseaLinkRequestGeneration += 1;
+  const linkRequestGeneration = state.userCenter.overseaLinkRequestGeneration;
   renderUserEditorDrawer();
-  if (user?.userId) void loadUserOverseaPublicLinkMeta(user.userId);
+  if (user?.userId) void loadUserOverseaPublicLinkMeta(user.userId, linkRequestGeneration);
   requestAnimationFrame(() => {
     const firstField = userEditorDrawer?.querySelector('[data-user-editor-field="account"]:not([readonly]), [data-user-editor-field="displayName"]');
     firstField?.focus?.();
@@ -2989,6 +2995,8 @@ function closeUserEditorDrawer() {
   // The plaintext link is only ever held in memory; drop it when the drawer closes.
   state.userCenter.overseaLink = null;
   state.userCenter.overseaLinkBusy = false;
+  state.userCenter.overseaLinkLoading = false;
+  state.userCenter.overseaLinkRequestGeneration += 1;
   state.userCenter.systemSubscriptionSecrets = {};
   state.userCenter.systemSubscriptionFeedback = null;
   state.userCenter.systemSubscriptionBusy = false;
@@ -3320,8 +3328,10 @@ async function runUserOverseaRuntimeSync(userId, siteIds, requestId) {
 
 async function issueUserOverseaPublicLink() {
   const userId = state.userCenter.drawer?.userId;
-  if (!userId || state.userCenter.overseaLinkBusy) return;
+  if (!userId || state.userCenter.overseaLinkBusy || state.userCenter.overseaLinkLoading) return;
+  const generation = state.userCenter.overseaLinkRequestGeneration;
   const existing = state.userCenter.overseaLink?.userId === userId ? state.userCenter.overseaLink : null;
+  if (existing?.loadError) return;
   // Rotating silently invalidates whatever the user already pasted into Clash,
   // so make that consequence explicit rather than surprising them later.
   if ((existing?.meta || existing?.issued) && !window.confirm(
@@ -3334,6 +3344,7 @@ async function issueUserOverseaPublicLink() {
       method: 'POST',
       body: { requestedBy: 'desktop-admin', requestId: `desktop-oversea-link-${Date.now()}` }
     });
+    if (!userOverseaLinkRequestIsCurrent(userId, generation)) return;
     state.userCenter.overseaLink = {
       userId,
       issued: payload.link || null,
@@ -3341,6 +3352,7 @@ async function issueUserOverseaPublicLink() {
       feedback: { kind: 'success', message: 'Public link issued.' }
     };
   } catch (error) {
+    if (!userOverseaLinkRequestIsCurrent(userId, generation)) return;
     state.userCenter.overseaLink = {
       userId,
       issued: null,
@@ -3348,14 +3360,18 @@ async function issueUserOverseaPublicLink() {
       feedback: { kind: 'error', message: `Issue failed: ${error.message}` }
     };
   } finally {
-    state.userCenter.overseaLinkBusy = false;
-    renderUserEditorDrawer();
+    if (userOverseaLinkRequestIsCurrent(userId, generation)) {
+      state.userCenter.overseaLinkBusy = false;
+      renderUserEditorDrawer();
+    }
   }
 }
 
 async function revokeUserOverseaPublicLink() {
   const userId = state.userCenter.drawer?.userId;
-  if (!userId || state.userCenter.overseaLinkBusy) return;
+  if (!userId || state.userCenter.overseaLinkBusy || state.userCenter.overseaLinkLoading) return;
+  const generation = state.userCenter.overseaLinkRequestGeneration;
+  if (state.userCenter.overseaLink?.userId === userId && state.userCenter.overseaLink.loadError) return;
   if (!window.confirm('Revoke the public subscription link?\n\nAny Clash client using it stops updating immediately. H2O is unaffected.')) return;
   state.userCenter.overseaLinkBusy = true;
   renderUserEditorDrawer();
@@ -3363,6 +3379,7 @@ async function revokeUserOverseaPublicLink() {
     const payload = await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription-link`, {
       method: 'DELETE'
     });
+    if (!userOverseaLinkRequestIsCurrent(userId, generation)) return;
     state.userCenter.overseaLink = {
       userId,
       issued: null,
@@ -3370,6 +3387,7 @@ async function revokeUserOverseaPublicLink() {
       feedback: { kind: 'success', message: `Revoked ${Number(payload.revoked || 0)} link(s).` }
     };
   } catch (error) {
+    if (!userOverseaLinkRequestIsCurrent(userId, generation)) return;
     state.userCenter.overseaLink = {
       userId,
       issued: null,
@@ -3377,21 +3395,49 @@ async function revokeUserOverseaPublicLink() {
       feedback: { kind: 'error', message: `Revoke failed: ${error.message}` }
     };
   } finally {
-    state.userCenter.overseaLinkBusy = false;
-    renderUserEditorDrawer();
+    if (userOverseaLinkRequestIsCurrent(userId, generation)) {
+      state.userCenter.overseaLinkBusy = false;
+      renderUserEditorDrawer();
+    }
   }
 }
 
 /** Metadata only; the plaintext URL exists solely in the issue response. */
-async function loadUserOverseaPublicLinkMeta(userId) {
+async function loadUserOverseaPublicLinkMeta(userId, generation) {
   if (!userId) return;
+  let meta = null;
+  let loadError = null;
   try {
     const payload = await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription-link`);
-    state.userCenter.overseaLink = { userId, issued: null, meta: payload.link || null, feedback: null };
-  } catch {
-    state.userCenter.overseaLink = { userId, issued: null, meta: null, feedback: null };
+    meta = payload.link || null;
+  } catch (error) {
+    loadError = error instanceof Error ? error.message : String(error);
   }
+  if (!userOverseaLinkRequestIsCurrent(userId, generation)) return;
+  const current = state.userCenter.overseaLink?.userId === userId ? state.userCenter.overseaLink : null;
+  // Never erase the one-time plaintext issue response with a late metadata GET.
+  state.userCenter.overseaLink = current?.issued
+    ? { ...current, meta: meta || current.meta || null, loadError }
+    : { userId, issued: null, meta, loadError, feedback: null };
+  state.userCenter.overseaLinkLoading = false;
   renderUserEditorDrawer();
+}
+
+function retryUserOverseaPublicLinkMeta() {
+  const userId = state.userCenter.drawer?.userId;
+  if (!userId || state.userCenter.overseaLinkLoading || state.userCenter.overseaLinkBusy) return;
+  state.userCenter.overseaLinkRequestGeneration += 1;
+  const generation = state.userCenter.overseaLinkRequestGeneration;
+  state.userCenter.overseaLinkLoading = true;
+  state.userCenter.overseaLink = { userId, issued: null, meta: null, loadError: null, feedback: null };
+  renderUserEditorDrawer();
+  void loadUserOverseaPublicLinkMeta(userId, generation);
+}
+
+function userOverseaLinkRequestIsCurrent(userId, generation) {
+  return state.userCenter.drawer?.mode === 'edit'
+    && state.userCenter.drawer?.userId === userId
+    && state.userCenter.overseaLinkRequestGeneration === generation;
 }
 
 async function syncUserOverseaRuntimeFromAdmin(input = {}) {
@@ -4119,7 +4165,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || /^\/internal\/v1\/launcher-network\/leases(?:\/[^/]+)?$/.test(path);
   }
   if (verb === 'POST') {
-    return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue|oversea-entitlements\/migrate|system-subscriptions\/ensure)$/.test(path)
+    return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue|oversea-entitlements\/(?:migrate|rollout)|system-subscriptions\/ensure)$/.test(path)
       || /^\/internal\/v1\/user-center\/system-subscriptions\/sites\/[^/]+\/reveal$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:password|oversea|h2o\/runtime-profile|oversea\/sync-runtime|oversea\/subscription-link)$/.test(path)
       || /^\/internal\/v1\/sdk\/(?:users|service-accounts)$/.test(path)
@@ -5720,8 +5766,169 @@ function renderOverseaDefaultSitePicker(sites) {
       </button>
       ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
     </div>
+    ${renderOverseaRollout(migrationTargets, current)}
     ${renderOverseaMigration(migrationSources, migrationTargets, current)}
   `;
+}
+
+/**
+ * Set Default intentionally applies only to new users. This is the explicit,
+ * add-only rollout for existing users: Preview freezes the affected user IDs,
+ * Apply unions the target into their current assignments, then one site-wide
+ * Sync Remote publishes every new account. No source assignment is removed.
+ */
+function renderOverseaRollout(targetSiteIds, defaultSiteId) {
+  const rollout = state.overseaRollout || {};
+  const busy = rollout.busy === true || rollout.syncBusy === true;
+  const preferredTarget = targetSiteIds.includes(state.selectedSiteId) ? state.selectedSiteId : '';
+  const target = targetSiteIds.includes(rollout.toSiteId)
+    ? rollout.toSiteId
+    : [preferredTarget, defaultSiteId, ...targetSiteIds].find((siteId) => targetSiteIds.includes(siteId)) || '';
+  const previewMatches = rollout.preview?.toSiteId === target;
+  const result = previewMatches ? rollout.result || null : null;
+  const previewUserIds = uniqueStringList(rollout.preview?.userIds);
+  const previewComplete = Boolean(result?.matched)
+    && previewUserIds.length === Number(result?.matched);
+  const option = (siteId) => `<option value="${escapeHtml(siteId)}" ${siteId === target ? 'selected' : ''}>${escapeHtml(siteId)}</option>`;
+  return `
+    <div class="oversea-default-site oversea-migration oversea-rollout">
+      <span>
+        <strong>Roll out to existing users</strong>
+        <small>低峰操作：只追加目标站，不移除任何旧订阅；Apply 后仅同步一次目标 Oversea</small>
+      </span>
+      <div class="oversea-migration-controls">
+        <select data-oversea-rollout-target ${busy || !targetSiteIds.length ? 'disabled' : ''} aria-label="Rollout target">
+          ${targetSiteIds.map(option).join('')}
+        </select>
+        <button class="secondary-button" type="button" data-oversea-rollout-preview ${busy || !target ? 'disabled' : ''}>
+          ${rollout.busy ? 'Working' : 'Preview users'}
+        </button>
+        <button class="primary-button" type="button" data-oversea-rollout-apply ${busy || !previewComplete || result?.applied ? 'disabled' : ''}>
+          Add to users & Sync${result?.matched && !result.applied ? ` (${result.matched})` : ''}
+        </button>
+        <button class="secondary-button" type="button" data-oversea-rollout-sync ${busy || !target ? 'disabled' : ''}>
+          ${rollout.syncBusy ? 'Syncing site' : 'Retry site Sync'}
+        </button>
+      </div>
+      ${rollout.feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(rollout.feedback.kind)}">${escapeHtml(rollout.feedback.message)}</span>` : ''}
+      ${result ? `
+        <span class="oversea-migration-status" data-kind="${escapeHtml(result.failed ? 'warning' : result.applied ? 'success' : 'info')}">
+          ${escapeHtml(result.applied
+            ? `${result.changed}/${result.matched} user(s) updated${result.failed ? ` · ${result.failed} failed` : ''}`
+            : `${result.matched} active existing user(s) will receive ${target}; existing sites stay assigned`)}
+        </span>
+      ` : ''}
+      ${result?.changes?.length ? `
+        <div class="oversea-migration-list">
+          ${result.changes.slice(0, 40).map((change) => `
+            <article data-status="${escapeHtml(change.status)}">
+              <strong>${escapeHtml(change.account || change.userId)}</strong>
+              <small>${escapeHtml(asArray(change.before).join(', ') || '-')} → ${escapeHtml(asArray(change.after).join(', ') || '-')}</small>
+              <small>${escapeHtml(change.reason || change.status)}</small>
+            </article>
+          `).join('')}
+          ${result.changes.length > 40 ? `<div class="empty-state">… 共 ${escapeHtml(result.changes.length)} 人</div>` : ''}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+async function runOverseaRollout(confirm) {
+  const rollout = state.overseaRollout || (state.overseaRollout = {});
+  if (rollout.busy || rollout.syncBusy) return;
+  const toSiteId = String(rollout.toSiteId || '').trim();
+  if (!toSiteId) {
+    rollout.feedback = { kind: 'error', message: '请选择已完成 Install / Sync 的目标站点' };
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+    return;
+  }
+  const previewMatches = rollout.preview?.toSiteId === toSiteId;
+  const previewUserIds = uniqueStringList(rollout.preview?.userIds);
+  const previewMatched = Number(rollout.result?.matched || 0);
+  if (confirm && (!previewMatches || previewMatched <= 0 || previewUserIds.length !== previewMatched)) {
+    rollout.result = null;
+    rollout.preview = null;
+    rollout.feedback = { kind: 'error', message: 'Preview 已失效或不完整，请重新 Preview' };
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+    return;
+  }
+  if (confirm && !window.confirm(
+    `Add ${toSiteId} to ${previewMatched} active existing user(s), then sync that Oversea site once?\n\nAll current site assignments remain unchanged. Domestic / Internal WG is not touched.`
+  )) return;
+  rollout.busy = true;
+  rollout.feedback = null;
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+  try {
+    const payload = await fetchJson('/internal/v1/user-center/oversea-entitlements/rollout', {
+      method: 'POST',
+      body: {
+        toSiteId,
+        confirm: confirm === true,
+        userIds: confirm ? previewUserIds : undefined,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-oversea-rollout-${Date.now()}`
+      }
+    });
+    const result = payload.rollout || null;
+    rollout.result = result;
+    rollout.preview = result
+      ? {
+          toSiteId,
+          userIds: uniqueStringList(asArray(result.changes)
+            .filter((change) => change.status === 'planned')
+            .map((change) => change.userId))
+        }
+      : null;
+    rollout.feedback = result
+      ? {
+          kind: result.failed ? 'error' : result.matched ? 'success' : 'info',
+          message: result.applied
+            ? `已为 ${result.changed}/${result.matched} 人追加 ${toSiteId}${result.failed ? `，${result.failed} 人失败` : ''}；正在同步目标站`
+            : result.matched
+              ? `预览：${result.matched} 个现有用户会追加 ${toSiteId}，原有站点全部保留`
+              : `所有活跃用户都已分配 ${toSiteId}`
+        }
+      : { kind: 'error', message: 'Rollout returned no result' };
+    if (result?.applied) {
+      await refreshUserCenterPanels();
+      if (result.changed > 0) await syncOverseaRolloutTarget();
+    }
+  } catch (error) {
+    rollout.feedback = { kind: 'error', message: `批量追加失败：${error.message}` };
+  } finally {
+    rollout.busy = false;
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+  }
+}
+
+async function syncOverseaRolloutTarget() {
+  const rollout = state.overseaRollout || (state.overseaRollout = {});
+  const targetSiteId = String(rollout.toSiteId || '').trim();
+  if (!targetSiteId || rollout.syncBusy || state.overseaEnsureBusy) return;
+  const target = asArray(state.overseaOverview?.sites).find((site) => site.siteId === targetSiteId);
+  if (!target || target.archived || target.status !== 'installed') {
+    rollout.feedback = { kind: 'error', message: '目标站点必须处于 installed；请先完成 Install / Sync' };
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+    return;
+  }
+  rollout.syncBusy = true;
+  rollout.feedback = { kind: 'info', message: `正在同步 ${targetSiteId} 的全部 Internal-issued 账号；不会操作 Domestic / Internal WG` };
+  state.selectedSiteId = targetSiteId;
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+  try {
+    await ensureSelectedOversea();
+    await refreshUserCenterPanels();
+    const terminal = state.overseaTerminalResult;
+    rollout.feedback = terminal?.status === 'passed'
+      ? { kind: 'success', message: `${targetSiteId} site-wide Sync Remote passed；现有用户将在下次刷新订阅时看到该节点` }
+      : { kind: 'error', message: `${targetSiteId} Sync Remote 未通过；用户分配已安全保留，可在低峰点击 Retry site Sync` };
+  } catch (error) {
+    rollout.feedback = { kind: 'error', message: `目标站同步失败：${error.message}；用户分配未回滚` };
+  } finally {
+    rollout.syncBusy = false;
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines);
+  }
 }
 
 function overseaMigrationSourceSiteIds(activeSites) {
@@ -6121,6 +6328,33 @@ function renderOverseaWorkbench(pipelines) {
       void saveOverseaDefaultSite(picker?.value);
     });
   }
+  const rolloutTarget = siteWorkbench.querySelector('[data-oversea-rollout-target]');
+  if (rolloutTarget) {
+    state.overseaRollout = state.overseaRollout || {};
+    const normalizedTarget = rolloutTarget.value || '';
+    if (state.overseaRollout.toSiteId !== normalizedTarget) {
+      state.overseaRollout.toSiteId = normalizedTarget;
+      state.overseaRollout.result = null;
+      state.overseaRollout.preview = null;
+      state.overseaRollout.feedback = null;
+    }
+    rolloutTarget.addEventListener('change', () => {
+      state.overseaRollout = {
+        ...state.overseaRollout,
+        toSiteId: rolloutTarget.value,
+        result: null,
+        preview: null,
+        feedback: null
+      };
+      renderDeploymentWorkbench(pipelines);
+    });
+  }
+  const rolloutPreview = siteWorkbench.querySelector('[data-oversea-rollout-preview]');
+  if (rolloutPreview) rolloutPreview.addEventListener('click', () => void runOverseaRollout(false));
+  const rolloutApply = siteWorkbench.querySelector('[data-oversea-rollout-apply]');
+  if (rolloutApply) rolloutApply.addEventListener('click', () => void runOverseaRollout(true));
+  const rolloutSync = siteWorkbench.querySelector('[data-oversea-rollout-sync]');
+  if (rolloutSync) rolloutSync.addEventListener('click', () => void syncOverseaRolloutTarget());
   const migrateFrom = siteWorkbench.querySelector('[data-oversea-migrate-from]');
   const migrateTo = siteWorkbench.querySelector('[data-oversea-migrate-to]');
   const migrateMode = siteWorkbench.querySelector('[data-oversea-migrate-mode]');
@@ -8683,30 +8917,35 @@ function renderUserOverseaEditor(user) {
 function renderUserOverseaPublicLink(userId, hasSubscription) {
   const link = state.userCenter.overseaLink || {};
   const forUser = link.userId === userId ? link : {};
-  const busy = state.userCenter.overseaLinkBusy === true;
+  const loading = state.userCenter.overseaLinkLoading === true;
+  const busy = state.userCenter.overseaLinkBusy === true || loading;
   const issued = forUser.issued || null;
   const meta = forUser.meta || null;
+  const loadError = forUser.loadError || null;
   const urls = issued ? overseaPublicSubscriptionUrls(issued.path) : [];
   return `
     <div class="foundation-subscription-url">
-      <span>Public Link <small>Clash / 第三方客户端</small></span>
+      <span>External subscription URL <small>Clash / 第三方客户端 · 10-year revocable link</small></span>
       ${urls.length
         ? urls.map((item) => `
             <code data-oversea-public-url="${escapeHtml(item.url)}">${escapeHtml(item.label)} — ${escapeHtml(item.url)}</code>
           `).join('')
-        : `<code>${escapeHtml(meta
+        : `<code>${escapeHtml(loadError
+            ? `Unable to verify the current external link: ${loadError}. Retry before generating or rotating.`
+            : meta
             ? `A link is active (issued ${formatTime(meta.issuedAt)}, expires ${formatTime(meta.expiresAt)}). Rotate to reveal a new URL.`
             : hasSubscription
-              ? 'No public link yet. Issue one for Clash and other third-party clients.'
+              ? 'No external link yet. Generate one for Clash and other third-party clients.'
               : 'Assign Oversea access first.')}</code>`}
       <div class="foundation-operation-actions">
-        <button class="secondary-button" type="button" data-oversea-link-issue ${busy || !userId || !hasSubscription ? 'disabled' : ''}>
-          ${busy ? 'Working' : meta || issued ? 'Rotate Link' : 'Issue Link'}
+        <button class="secondary-button" type="button" data-oversea-link-issue ${busy || loadError || !userId || !hasSubscription ? 'disabled' : ''}>
+          ${loading ? 'Loading link state' : busy ? 'Working' : meta || issued ? 'Rotate 10-year Link' : 'Generate 10-year Link'}
         </button>
+        ${loadError ? '<button class="secondary-button" type="button" data-oversea-link-retry>Retry link state</button>' : ''}
         ${urls.map((item) => `
           <button class="secondary-button" type="button" data-oversea-link-copy="${escapeHtml(item.url)}">Copy ${escapeHtml(item.label)}</button>
         `).join('')}
-        ${meta || issued ? `<button class="secondary-button" type="button" data-oversea-link-revoke ${busy ? 'disabled' : ''}>Revoke</button>` : ''}
+        ${meta || issued ? `<button class="secondary-button" type="button" data-oversea-link-revoke ${busy || loadError ? 'disabled' : ''}>Revoke</button>` : ''}
         ${issued ? '<span class="profile-feedback" data-kind="warning">Copy it now; only metadata is retrievable afterwards.</span>' : ''}
         ${forUser.feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(forUser.feedback.kind)}">${escapeHtml(forUser.feedback.message)}</span>` : ''}
       </div>
@@ -8736,7 +8975,10 @@ function overseaPublicSubscriptionUrls(path) {
  * third-party client cannot reach.
  */
 function overseaPublicSubscriptionBase() {
-  const configured = String(state.config?.overseaPublicBaseUrl || '').trim();
+  const selected = state.domesticRuntime?.selectedSiteId;
+  const configs = asArray(state.domesticRuntime?.configs);
+  const config = configs.find((item) => item?.siteId === selected) || configs[0] || null;
+  const configured = String(config?.edge?.publicBaseUrl || '').trim();
   if (configured) return configured.replace(/\/+$/, '');
   return 'https://h2i.minsight-ai.com';
 }
@@ -9118,6 +9360,8 @@ function bindUserEditorDrawerControls() {
   if (syncOverseaUser) syncOverseaUser.addEventListener('click', () => void syncUserOverseaRuntimeFromAdmin());
   const issueLink = userEditorDrawer.querySelector('[data-oversea-link-issue]');
   if (issueLink) issueLink.addEventListener('click', () => void issueUserOverseaPublicLink());
+  const retryLink = userEditorDrawer.querySelector('[data-oversea-link-retry]');
+  if (retryLink) retryLink.addEventListener('click', () => retryUserOverseaPublicLinkMeta());
   const revokeLink = userEditorDrawer.querySelector('[data-oversea-link-revoke]');
   if (revokeLink) revokeLink.addEventListener('click', () => void revokeUserOverseaPublicLink());
   for (const copyLink of userEditorDrawer.querySelectorAll('[data-oversea-link-copy]')) {

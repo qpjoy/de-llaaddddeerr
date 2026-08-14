@@ -1707,7 +1707,13 @@ function registerIpc() {
     }
     try {
       await markH2oSystemSubscriptionInitializing(h2oPluginRuntime(runtime.apps.h2o.runtime), 'h2o oversea provision initializing');
-      const provisionResult = await provisionH2oOverseaForCurrentUser(input);
+      // This IPC is only reached from the explicit "分配系统默认" action. Background
+      // hydrate/refresh paths deliberately omit assignmentMode so they keep an
+      // admin-managed assignment instead of silently moving the user.
+      const provisionResult = await provisionH2oOverseaForCurrentUser({
+        ...(input && typeof input === 'object' ? input : {}),
+        assignmentMode: 'platform-default'
+      });
       const ready = h2oHasUsableSubscription(runtime.apps.h2o.runtime?.activeSubscription);
       const syncStatus = nullableString(provisionResult?.syncStatus);
       const syncMessage = syncStatus && syncStatus !== 'skipped' ? `返回 ${syncStatus}` : '仍未完成';
@@ -9205,18 +9211,26 @@ async function provisionH2oOverseaForCurrentUser(input = {}) {
     bootstrapResolveMode: input.bootstrapResolveMode
   });
   if (!userId) throw new Error('Internal OAuth token 没有返回 userId，无法分配 oversea 订阅。');
+  const assignmentMode = input?.assignmentMode === 'platform-default' ? 'platform-default' : null;
   // Read the current grant first so re-provisioning keeps whatever the admin set
   // in User Center instead of resetting the user to a client-side default.
-  const existingEntitlement = await h2oRequestInternalJson(
-    baseUrl,
-    `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`,
-    { timeoutMs: 5000, bootstrapResolveMode: input.bootstrapResolveMode, headers: appCenterCatalogHeaders() }
-  ).then((result) => result.payload?.entitlement || null).catch(() => null);
-  const siteAttempts = await h2oOverseaProvisionSiteAttempts(input, {
-    baseUrl,
-    bootstrapResolveMode: input.bootstrapResolveMode,
-    entitlementSiteIds: arrayValue(existingEntitlement?.siteIds, [])
-  });
+  // The explicit platform-default action is intentionally different: it does
+  // not reuse the old entitlement as a fallback and lets Internal resolve the
+  // current serviceable default authoritatively.
+  const existingEntitlement = assignmentMode
+    ? null
+    : await h2oRequestInternalJson(
+        baseUrl,
+        `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`,
+        { timeoutMs: 5000, bootstrapResolveMode: input.bootstrapResolveMode, headers: appCenterCatalogHeaders() }
+      ).then((result) => result.payload?.entitlement || null).catch(() => null);
+  const siteAttempts = assignmentMode
+    ? [[]]
+    : await h2oOverseaProvisionSiteAttempts(input, {
+        baseUrl,
+        bootstrapResolveMode: input.bootstrapResolveMode,
+        entitlementSiteIds: arrayValue(existingEntitlement?.siteIds, [])
+      });
   const requestedBy = 'mx-h2i-h2o';
   const requestId = makeRequestId('h2o-oversea');
   let entitlementPayload = null;
@@ -9234,6 +9248,7 @@ async function provisionH2oOverseaForCurrentUser(input = {}) {
           bootstrapResolveMode: input.bootstrapResolveMode,
           headers: appCenterCatalogHeaders(),
           body: {
+            ...(assignmentMode ? { assignmentMode } : {}),
             ...(siteIds.length ? { siteIds } : {}),
             syncRuntime: true,
             confirmRemoteExecution: true,

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { MemoryStore } from '../../store/memory.js';
@@ -72,6 +73,60 @@ test('re-provisioning without siteIds keeps the admin assignment', () => {
 
   assert.deepEqual(refreshed.siteIds, ['mx-oversea-hk01']);
   assert.deepEqual(refreshed.accounts.map((account) => account.siteId), ['mx-oversea-hk01']);
+});
+
+test('an explicit platform-default assignment replaces the old entitlement with the current default', () => {
+  const { store, user } = seed();
+  store.upsertUserOverseaEntitlement({
+    userId: user.userId,
+    siteIds: ['oversea-main'],
+    requestedBy: 'desktop-admin'
+  });
+  store.upsertLauncherProductNetwork({
+    productId: MX_H2I_PRODUCT_ID,
+    defaultOverseaSiteId: 'mx-oversea-hk01',
+    requestedBy: 'desktop-admin'
+  });
+
+  const reassigned = store.upsertUserOverseaEntitlement({
+    userId: user.userId,
+    assignmentMode: 'platform-default',
+    requestedBy: 'mx-h2i-h2o'
+  });
+
+  assert.deepEqual(reassigned.siteIds, ['mx-oversea-hk01']);
+  assert.deepEqual(reassigned.accounts.map((account) => account.siteId), ['mx-oversea-hk01']);
+});
+
+test('an explicit platform-default assignment fails when no serviceable default exists', () => {
+  const { store, user } = seed();
+  store.upsertUserOverseaEntitlement({
+    userId: user.userId,
+    siteIds: ['mx-oversea-hk01'],
+    requestedBy: 'desktop-admin'
+  });
+  store.upsertLauncherProductNetwork({
+    productId: MX_H2I_PRODUCT_ID,
+    defaultOverseaSiteId: 'mx-oversea-hk01',
+    requestedBy: 'desktop-admin'
+  });
+  for (const siteId of ['oversea-main', 'mx-oversea-hk01']) {
+    store.archiveLauncherNetworkMihomoSite({ siteId, archived: true, requestedBy: 'test' });
+  }
+
+  assert.throws(
+    () => store.upsertUserOverseaEntitlement({
+      userId: user.userId,
+      assignmentMode: 'platform-default',
+      requestedBy: 'mx-h2i-h2o'
+    }),
+    /No serviceable platform default Oversea site is available/
+  );
+  assert.deepEqual(
+    store.getUserOverseaEntitlement(user.userId)?.siteIds,
+    ['mx-oversea-hk01'],
+    'a failed explicit assignment does not rewrite the previous entitlement'
+  );
 });
 
 test('an explicit siteIds still reassigns, and an empty list still disables', () => {
@@ -160,6 +215,96 @@ test('a single-node subscription gets no auto group', () => {
   const yaml = store.renderUserOverseaMihomoSubscription(user.userId)?.yaml ?? '';
   assert.doesNotMatch(yaml, /Oversea-Auto/, 'one node has nothing to fail over to');
   assert.match(yaml, /- name: Oversea\s*\n\s+type: select/);
+});
+
+test('rollout Preview includes active users with no or disabled entitlement and excludes non-human users', () => {
+  const { store, user } = seed();
+  const noEntitlement = store.createUserCenterUser({ account: 'noentitlement', displayName: 'No Entitlement' });
+  const disabledEntitlement = store.createUserCenterUser({ account: 'disabledentitlement', displayName: 'Disabled Entitlement' });
+  const inactive = store.createUserCenterUser({ account: 'inactiveuser', displayName: 'Inactive', status: 'disabled' });
+  const legacyServiceUser = store.createUserCenterUser({
+    account: 'legacyserviceuser',
+    displayName: 'Legacy Service User',
+    roleIds: ['mx-service-account']
+  });
+  store.createUserCenterServiceAccount({ serviceAccountId: 'svc_rollout_test', displayName: 'Rollout Test Service' });
+  store.upsertUserOverseaEntitlement({ userId: user.userId, siteIds: ['oversea-main'], requestedBy: 'test' });
+  store.upsertUserOverseaEntitlement({ userId: disabledEntitlement.userId, siteIds: [], requestedBy: 'test' });
+
+  const preview = store.rolloutUserOverseaEntitlements({
+    toSiteId: 'mx-oversea-hk01',
+    requestedBy: 'desktop-admin'
+  });
+
+  assert.equal(preview.applied, false);
+  assert.equal(preview.scanned, 3, 'only active human users count toward the rollout');
+  assert.deepEqual(
+    preview.changes.map((change) => change.userId).sort(),
+    [user.userId, noEntitlement.userId, disabledEntitlement.userId].sort()
+  );
+  assert.equal(preview.changes.every((change) => change.status === 'planned'), true);
+  assert.equal(preview.changes.some((change) => change.userId === inactive.userId), false);
+  assert.equal(preview.changes.some((change) => change.userId === legacyServiceUser.userId), false);
+  assert.equal(store.getUserOverseaEntitlement(noEntitlement.userId), null, 'Preview never provisions an account');
+  assert.deepEqual(store.getUserOverseaEntitlement(disabledEntitlement.userId)?.siteIds, []);
+});
+
+test('rollout Apply requires frozen userIds, adds to the current assignment, and is scoped and idempotent', () => {
+  const { store, user } = seed();
+  const outsidePreviewScope = store.createUserCenterUser({ account: 'outsidescope', displayName: 'Outside Scope' });
+  store.upsertUserOverseaEntitlement({ userId: user.userId, siteIds: [], requestedBy: 'test' });
+
+  const preview = store.rolloutUserOverseaEntitlements({
+    toSiteId: 'mx-oversea-hk01',
+    requestedBy: 'desktop-admin'
+  });
+  assert.deepEqual(
+    preview.changes.map((change) => change.userId).sort(),
+    [user.userId, outsidePreviewScope.userId].sort()
+  );
+  assert.throws(
+    () => store.rolloutUserOverseaEntitlements({
+      toSiteId: 'mx-oversea-hk01',
+      confirm: true,
+      userIds: [],
+      requestedBy: 'desktop-admin'
+    }),
+    /non-empty userIds frozen by Preview/
+  );
+
+  // An operator adds another site after Preview. Apply must read this current
+  // value and take a union instead of writing Preview's stale `after` array.
+  store.upsertUserOverseaEntitlement({ userId: user.userId, siteIds: ['oversea-main'], requestedBy: 'test' });
+  const applied = store.rolloutUserOverseaEntitlements({
+    toSiteId: 'mx-oversea-hk01',
+    confirm: true,
+    userIds: [user.userId],
+    requestedBy: 'desktop-admin'
+  });
+  assert.equal(applied.changed, 1);
+  assert.deepEqual(store.getUserOverseaEntitlement(user.userId)?.siteIds, ['mx-oversea-hk01', 'oversea-main']);
+  assert.equal(
+    store.getUserOverseaEntitlement(outsidePreviewScope.userId),
+    null,
+    'Apply never sweeps in a user outside the frozen id list'
+  );
+
+  const again = store.rolloutUserOverseaEntitlements({
+    toSiteId: 'mx-oversea-hk01',
+    confirm: true,
+    userIds: [user.userId],
+    requestedBy: 'desktop-admin'
+  });
+  assert.equal(again.changed, 0);
+  assert.equal(again.skipped, 1);
+  assert.deepEqual(store.getUserOverseaEntitlement(user.userId)?.siteIds, ['mx-oversea-hk01', 'oversea-main']);
+
+  store.archiveLauncherNetworkMihomoSite({ siteId: 'mx-oversea-hk01', archived: true, requestedBy: 'test' });
+  assert.throws(
+    () => store.rolloutUserOverseaEntitlements({ toSiteId: 'mx-oversea-hk01' }),
+    /not serviceable/,
+    'Preview and Apply both reject an archived target'
+  );
 });
 
 test('migration is a dry run until confirmed, then rewrites the matched users', () => {
@@ -312,4 +457,43 @@ test('a multi-site assignment survives a refresh so the subscription stays multi
   const yaml = store.renderUserOverseaMihomoSubscription(user.userId)?.yaml ?? '';
   assert.match(yaml, /oversea-main-hysteria2/);
   assert.match(yaml, /mx-oversea-hk01-hysteria2/);
+});
+
+test('Postgres serializes ordinary and rollout entitlement writes on the same per-user lock', () => {
+  const source = readFileSync(new URL('../../store/postgres.ts', import.meta.url), 'utf8');
+  const section = (start: string, end: string) => {
+    const from = source.indexOf(start);
+    const to = source.indexOf(end, from + start.length);
+    assert.ok(from >= 0 && to > from, `expected Postgres source section ${start}`);
+    return source.slice(from, to);
+  };
+  const ordinaryUpsert = section(
+    'async upsertUserOverseaEntitlement(input:',
+    '/** Caller must hold the per-user entitlement advisory lock'
+  );
+  const lockedUpsert = section(
+    'private async upsertUserOverseaEntitlementLocked(',
+    '/**\n   * 把一批用户从一个出海站点搬到另一个'
+  );
+  const rollout = section(
+    'async rolloutUserOverseaEntitlements(',
+    'async recordUserOverseaAccountSyncReport('
+  );
+  const lock = section(
+    'private async withUserOverseaEntitlementWriteLock<T>(',
+    'private async defaultUserOverseaSiteIds('
+  );
+
+  assert.match(ordinaryUpsert, /withUserOverseaEntitlementWriteLock\(userId/);
+  assert.match(ordinaryUpsert, /upsertUserOverseaEntitlementLocked\(manager, records/);
+  assert.match(rollout, /withUserOverseaEntitlementWriteLock\(userId/);
+  assert.match(rollout, /upsertUserOverseaEntitlementLocked\(manager, records/);
+  assert.match(lock, /pg_advisory_xact_lock/);
+  assert.match(lock, /user-oversea-entitlement/);
+  assert.match(lockedUpsert, /issueSiteSlotAccessAccountsTo\(records/);
+  assert.doesNotMatch(
+    lockedUpsert,
+    /this\.issueSiteSlotAccessAccounts\(/,
+    'the lock-held upsert must not open a nested account-issuance transaction'
+  );
 });

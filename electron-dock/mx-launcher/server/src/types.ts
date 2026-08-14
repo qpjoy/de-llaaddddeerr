@@ -2906,6 +2906,13 @@ export interface SystemSubscriptionItem {
 export interface UserOverseaEntitlementInput {
   userId?: string | null;
   siteIds?: string[] | string | null;
+  /**
+   * Omitted means preserve the user's current assignment (or use the default
+   * only for a brand-new entitlement). `platform-default` is an explicit
+   * operator/user action that replaces the assignment with the current
+   * serviceable platform default.
+   */
+  assignmentMode?: 'platform-default' | null;
   requestedBy?: string | null;
   requestId?: string | null;
 }
@@ -2939,6 +2946,27 @@ export interface UserOverseaEntitlementMigrationResult {
   scanned: number;
   matched: number;
   changed: number;
+  failed: number;
+  changes: UserOverseaEntitlementMigrationChange[];
+  generatedAt: string;
+}
+
+export interface UserOverseaEntitlementRolloutInput {
+  toSiteId?: string | null;
+  /** 缺省是 Preview；Apply 必须显式 confirm 并带回 Preview 冻结的非空 userIds。 */
+  confirm?: boolean | null;
+  userIds?: string[] | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface UserOverseaEntitlementRolloutResult {
+  toSiteId: string;
+  applied: boolean;
+  scanned: number;
+  matched: number;
+  changed: number;
+  skipped: number;
   failed: number;
   changes: UserOverseaEntitlementMigrationChange[];
   generatedAt: string;

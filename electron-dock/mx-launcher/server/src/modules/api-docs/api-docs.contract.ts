@@ -1034,6 +1034,44 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         }
       })
     },
+    '/internal/v1/user-center/oversea-entitlements/rollout': {
+      post: operation({
+        tag: 'Internal User Operations',
+        summary: '把一个 Oversea 站点追加给全部现有用户',
+        description: '低峰批量操作。Preview 不写入，返回尚未分配目标站点的活跃真人用户；'
+          + 'Apply 必须显式 confirm=true 并带回 Preview 冻结的非空 userIds。'
+          + '执行时重新读取每个用户的当前 entitlement，并只做站点并集，不移除或覆盖已有站点。'
+          + '完成后由 Admin 对目标站点执行一次普通 Oversea Sync Remote；本接口不操作 Domestic/Internal WG。',
+        operationId: 'rolloutInternalUserOverseaEntitlements',
+        auth: 'internal',
+        request: {
+          toSiteId: 'mx-oversea-jp01',
+          confirm: false,
+          requestedBy: 'desktop-admin',
+          requestId: 'oversea-rollout-001'
+        },
+        required: ['toSiteId'],
+        response: {
+          rollout: {
+            toSiteId: 'mx-oversea-jp01',
+            applied: false,
+            scanned: 183,
+            matched: 181,
+            changed: 0,
+            skipped: 0,
+            failed: 0,
+            changes: [{
+              userId: 'usr_demo_user',
+              account: 'demo.user',
+              before: [],
+              after: ['mx-oversea-jp01'],
+              status: 'planned'
+            }],
+            generatedAt: '2026-08-14T10:00:00.000Z'
+          }
+        }
+      })
+    },
     '/internal/v1/user-center/users/{userId}/oversea': {
       get: operation({
         tag: 'Internal User Operations',
@@ -1064,13 +1102,13 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Internal User Operations',
         summary: '确保用户订阅与运行态就绪',
-        description: '真实 Bearer 鉴权接口。普通用户只能操作 token subject 对应的 userId，且需要 oversea.subscription.ensure；跨用户管理需要同时具备 site-slot.manage 与 site-slot.execute。',
+        description: '真实 Bearer 鉴权接口。普通刷新省略 siteIds 会保留已有分配；只有用户明确点击“分配系统默认”时才传 assignmentMode=platform-default，将分配替换为当前可服务的平台默认站点。普通用户只能操作 token subject 对应的 userId，且需要 oversea.subscription.ensure；跨用户管理需要同时具备 site-slot.manage 与 site-slot.execute。',
         operationId: 'ensureUserOverseaSubscription',
         scopes: ['oversea.subscription.ensure'],
         auth: 'internal-bearer',
         pathParams: ['userId'],
         request: {
-          siteIds: ['oversea-main'],
+          assignmentMode: 'platform-default',
           syncRuntime: true,
           includeYaml: false,
           requestedBy: 'mx-h2i',
@@ -1147,6 +1185,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         summary: '签发或轮换公开订阅链接',
         description: 'Clash 这类第三方客户端发不了 Bearer，所以给它一条 token 在路径里的只读地址。'
           + '**明文 token 只在本次响应返回**，之后只能读到元数据。轮换会立即吊销上一条链接。'
+          + '新签发链接的有效期为 3650 天；需要提前失效时仍应显式轮换或吊销。'
           + '返回的 path 需要自己拼域名：内网用 Internal origin，外网用公网 bootstrap 域名（裸 IP 的 https 在 Domestic ingress 上握手必失败）。',
         operationId: 'issueUserOverseaSubscriptionLink',
         scopes: ['oversea.subscription.ensure'],
@@ -1159,7 +1198,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             token: 'mx-v1-<仅本次响应返回的随机值>',
             tokenId: 'tok_0123456789abcdef',
             issuedAt: '2026-07-20T00:00:00.000Z',
-            expiresAt: '2026-10-18T00:00:00.000Z',
+            expiresAt: '2036-07-17T00:00:00.000Z',
             note: 'Copy this URL now; only its metadata is retrievable afterwards.'
           }
         }
@@ -1172,7 +1211,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         scopes: ['oversea.subscription.ensure'],
         auth: 'internal',
         pathParams: ['userId'],
-        response: { link: { issuedAt: '2026-07-20T00:00:00.000Z', expiresAt: '2026-10-18T00:00:00.000Z' } }
+        response: { link: { issuedAt: '2026-07-20T00:00:00.000Z', expiresAt: '2036-07-17T00:00:00.000Z' } }
       }),
       delete: operation({
         tag: 'Oversea Subscriptions',
