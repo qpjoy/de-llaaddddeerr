@@ -33,6 +33,15 @@ qp-tunnel-cli status --instance subscriptions
 # Domestic bootstrap can use an Internal-pushed local YAML before WG relay reaches Internal.
 qp-tunnel-cli install --file '/opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml'
 
+# 默认不加--instance subscriptions，加了--instance subscriptions，则只更新指定的实例，不更新系统默认7788实例
+qp-tunnel-cli install \
+  --instance subscriptions \
+  --mixed-port 7890 \
+  --url '<刚 Reveal 的完整 URL>'
+
+qp-tunnel-cli update-subscription --instance subscriptions
+qp-tunnel-cli status --instance subscriptions
+
 # 更新系统脚本和进程
 sudo qp-tunnel-cli install-script
 sudo qp-tunnel-cli upgrade-systemd
@@ -97,8 +106,10 @@ git -c http.proxy=http://127.0.0.1:7788 -c https.proxy=http://127.0.0.1:7788 pul
 # docker拿到代理
 systemctl show docker --property=Environment | tr ' ' '\n' | grep -i proxy
 
-# update-subscription
-qp-tunnel-cli update-subscription --url ''
+# subscriptions 首次安装（之后才能 update）
+qp-tunnel-cli install --instance subscriptions --mixed-port 7890 --url '<subscription-url>'
+# 刷新已保存的 URL；更换 URL 时再追加 --url '<subscription-url>'
+qp-tunnel-cli update-subscription --instance subscriptions
 
 # docker环境变量目录
 /etc/systemd/system/docker.service.d/

@@ -1265,6 +1265,13 @@ update_subscription_command() {
 	local no_auth="${5:-false}"
 	local -a normalized=()
 
+	if [[ "$MIHOMO_INSTANCE" != "default" ]] \
+		&& ! grep -q '^MIHOMO_MIXED_PORT=' "$MIHOMO_ENV_FILE" 2>/dev/null; then
+		local install_port="PORT"
+		[[ "$MIHOMO_INSTANCE" == "subscriptions" ]] && install_port="7890"
+		die "Mihomo instance '$MIHOMO_INSTANCE' is not installed. Run: qp-tunnel-cli install --instance $MIHOMO_INSTANCE --mixed-port $install_port --url '<subscription-url>'"
+	fi
+
 	load_env
 
 	if [[ -n "$file_path" ]]; then

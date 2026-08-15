@@ -297,6 +297,40 @@ install_command 'http://example.test/peer.yaml' '' '' latest false '' '' true ''
   assert.match(result.stderr, /first install of named instance 'subscriptions' requires --mixed-port PORT/);
 });
 
+test('update rejects an uninstalled named instance before downloading', () => {
+  const stateRoot = join(testRoot, 'uninstalled-named-update');
+  mkdirSync(stateRoot, { recursive: true });
+  const result = runLibrary(
+    [
+      'update-subscription',
+      '--instance',
+      'subscriptions',
+      '--url',
+      'http://fresh-user:fresh-password@example.test:3434/peer.yaml',
+    ],
+    String.raw`
+MIHOMO_HOME="$MIHOMO_TEST_STATE_ROOT/client"
+MIHOMO_ENV_FILE="$MIHOMO_HOME/client.env"
+MIHOMO_SUBSCRIPTION_FILE="$MIHOMO_HOME/subscription.yaml"
+MIHOMO_CONFIG_FILE="$MIHOMO_HOME/config.yaml"
+require_root() { :; }
+require_cmd() { :; }
+curl() {
+  touch "$MIHOMO_TEST_STATE_ROOT/curl-called"
+  return 0
+}
+main "$@"
+`,
+    { env: { MIHOMO_TEST_STATE_ROOT: stateRoot } },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /instance 'subscriptions' is not installed/i);
+  assert.match(result.stderr, /install --instance subscriptions --mixed-port 7890/);
+  assert.equal(existsSync(join(stateRoot, 'curl-called')), false);
+  assert.equal(existsSync(join(stateRoot, 'client')), false);
+});
+
 test('subscriptions is pinned to 7890 even while the default 7788 listener is stopped', () => {
   for (const command of [
     ['install', '--instance', 'subscriptions', '--mixed-port', '7788'],
