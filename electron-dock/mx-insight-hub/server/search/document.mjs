@@ -7,13 +7,20 @@ import { DATASET_ID } from '../ingest/normalizers.mjs'
 // facing, so that evidence is stripped again here rather than relying on it
 // having been stripped upstream.
 const LINEAGE_KEY = /(provider|credential|upstream|endpoint|business.?id|availability|billing|token|secret|password|auth)/i
+const COLLECTOR_OPERATION_KEYS = new Set([
+  'account_alias', 'account_phone', 'first_seen_account_id',
+])
+
+function customerSafeExtensionKey(key) {
+  return !LINEAGE_KEY.test(key) && !COLLECTOR_OPERATION_KEYS.has(String(key).toLowerCase())
+}
 
 function safeExtensionValue(value) {
   if (Array.isArray(value)) return value.map(safeExtensionValue)
   if (!value || typeof value !== 'object') return value
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => !LINEAGE_KEY.test(key))
+      .filter(([key]) => customerSafeExtensionKey(key))
       .map(([key, nested]) => [key, safeExtensionValue(nested)]),
   )
 }
@@ -22,7 +29,7 @@ function safeExtensions(extensions) {
   if (!extensions || typeof extensions !== 'object') return {}
   const result = {}
   for (const [key, value] of Object.entries(extensions)) {
-    if (LINEAGE_KEY.test(key)) continue
+    if (!customerSafeExtensionKey(key)) continue
     const safeValue = safeExtensionValue(value)
     // `flattened` indexes leaf values as keywords; deep objects still work but
     // arrays of objects lose structure. Stringify anything non-scalar rather
@@ -54,12 +61,27 @@ function finiteNonNegative(value) {
   return Number.isFinite(number) && number >= 0 ? number : null
 }
 
+function telegramMediaKind(mediaType) {
+  const suffix = asText(mediaType)?.match(/^MessageMedia(.+)$/u)?.[1]
+  if (!suffix) return null
+  const kind = suffix
+    .replace(/([a-z0-9])([A-Z])/gu, '$1_$2')
+    .toLowerCase()
+  if (kind === 'empty') return null
+  if (kind === 'photo') return 'image'
+  if (['geo', 'geo_live', 'venue'].includes(kind)) return 'location'
+  return kind
+}
+
 function mediaOf(stableFields) {
   const media = stableFields?.media
+  const mediaType = asText(stableFields?.attributes?.mediaType)
+  const inferredKind = telegramMediaKind(mediaType)
   const images = Array.isArray(media?.images) ? media.images : []
   const videos = Array.isArray(media?.videos) ? media.videos : []
   if (images.length > 0 || videos.length > 0) {
     return {
+      mediaType,
       mediaCount: images.length + videos.length,
       hasVideo: videos.length > 0,
       mediaKind: videos.length > 0 ? 'video' : 'image',
@@ -69,8 +91,9 @@ function mediaOf(stableFields) {
       mediaSizeBytes: null,
     }
   }
-  const kind = asText(media?.media_kind ?? media?.mediaKind)?.toLowerCase() ?? null
+  const kind = asText(media?.media_kind ?? media?.mediaKind)?.toLowerCase() ?? inferredKind
   return {
+    mediaType,
     mediaCount: kind ? 1 : 0,
     hasVideo: kind === 'video',
     mediaKind: kind,
@@ -110,11 +133,13 @@ export async function buildContentDocument(row, { segmenter }) {
   const stableFields = row.stable_fields || {}
   const authorName = row.author_name ?? stableFields.author?.name ?? null
   const username = stableFields.attributes?.username ?? stableFields.author?.handle ?? null
-  const [titleTokens, bodyTokens, authorNameTokens, usernameTokens] = await Promise.all([
+  const chatUsername = stableFields.attributes?.chatUsername ?? null
+  const [titleTokens, bodyTokens, authorNameTokens, usernameTokens, chatUsernameTokens] = await Promise.all([
     segmenter.segment(row.title || ''),
     segmenter.segment(row.body || ''),
     segmenter.segment(authorName || ''),
     segmenter.segment(username || ''),
+    segmenter.segment(chatUsername || ''),
   ])
   const media = mediaOf(stableFields)
   const entities = entitiesOf(stableFields)
@@ -147,6 +172,9 @@ export async function buildContentDocument(row, { segmenter }) {
     username,
     usernameHanlp: toPresegmentedText(usernameTokens),
     usernameSubstring: username,
+    chatUsername,
+    chatUsernameHanlp: toPresegmentedText(chatUsernameTokens),
+    chatUsernameSubstring: chatUsername,
     chatId: asText(stableFields.relations?.chatId),
     messageId: asText(stableFields.relations?.messageId),
     replyToMessageId: asText(stableFields.relations?.replyToMessageId),

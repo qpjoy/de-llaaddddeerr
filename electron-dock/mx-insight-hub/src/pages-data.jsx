@@ -448,7 +448,7 @@ function TelegramSqlitePipelineCard({ pipeline, loading, error, onOpen, onRetry 
         <div>
           <p className="qp-kicker">BUSINESS PIPELINE / TELEGRAM SQLITE API</p>
           <h2 id="telegram-sqlite-pipeline-title">Telegram SQLite API 清洗任务</h2>
-          <p>一套只读 HTTP 连接，固定协调 chats 与 messages 的全量、重叠窗口和每日对账。</p>
+          <p>首次或换库时全量对齐；平时追新增，凌晨只复扫上一自然日窗口。</p>
         </div>
       </div>
       {error && !pipeline ? (
@@ -567,7 +567,7 @@ function TelegramSqlitePipelineModal({
         setResetConfirmation('')
         return updated
       },
-      '两个 SQLite API 子任务的 Checkpoint 已统一重置；下次同步会从首次全量阶段幂等重放',
+      '一次性全量对齐已准备：两个 SQLite API 子任务的增量水位已重置；启用后点击立即同步执行完整幂等扫描',
     )
   }
 
@@ -633,11 +633,11 @@ function TelegramSqlitePipelineModal({
         </form>
       </Panel>
 
-      <Panel title="同步与数据保留策略" subtitle="远端 API 按页倒序返回数据，因此通过幂等重读和周期性全量对账实现最终一致">
+      <Panel title="同步与数据保留策略" subtitle="首次或换库时全量对齐；平时读取增量窗口，凌晨只对上一自然日，不定时扫描全部历史">
         <div className="mih-telegram-capabilities">
-          <div><strong>首次全量 + 日常重叠</strong><p>首次接入完整扫描；之后每轮覆盖最近 24 小时，允许重复读取，由 canonical identity 幂等吸收。</p></div>
-          <div><strong>每日全量对账</strong><p>每天重新扫描全量资源，补齐晚到、编辑和删除标记；Checkpoint 是运行证据，不代表远端精确 CDC 水位。</p></div>
-          <div><strong>原文与检索分层</strong><p>源响应原样保留，不做词汇规避或内容过滤；HanLP/CJK 只在 Elasticsearch 检索投影阶段生效。</p></div>
+          <div><strong>日常只追新增</strong><p>首次接入完整扫描；之后从 lastMessageAt 回退 2 小时读取到当前边界，重复记录由 canonical identity 幂等吸收。</p></div>
+          <div><strong>凌晨只对日窗口</strong><p>上海时区 02:00 后仅复扫上一自然日一次，不是扫描全部历史；更换 SQLite 时另由人工触发一次性全量对齐。</p></div>
+          <div><strong>原文、删除与检索分层</strong><p>源响应及带 deleted_at 的记录都写入 Hub PG，不做词汇规避或内容过滤；HanLP/CJK 只在 Elasticsearch 检索投影阶段生效。</p></div>
         </div>
         {pipeline.strategy ? <details className="mih-inline-details"><summary>查看当前策略证据</summary><pre className="mih-code-block">{JSON.stringify(pipeline.strategy, null, 2)}</pre></details> : null}
         {warnings.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">{warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul> : null}
@@ -654,7 +654,7 @@ function TelegramSqlitePipelineModal({
         {progress.error ? <ErrorState error={progress.error} onRetry={progress.refresh} /> : null}
       </Panel>
 
-      <Panel title="处理链路与索引能力" subtitle="远端只读响应先作为原始证据保留，再进入确定性 mapping、canonical 与可重建搜索投影">
+      <Panel title="处理链路与索引能力" subtitle="远端只读响应先作为原始证据保留；删除标记留在 canonical/revision，公共 ES 按 current-state tombstone 收敛">
         <div className="mih-telegram-flow" aria-label="Telegram SQLite API 数据处理链路">
           {['只读 HTTP API', '原始 PG', 'Canonical PG', 'Outbox', 'Elasticsearch'].map((step, index) => (
             <span key={step}>{index > 0 ? <b aria-hidden="true">→</b> : null}<em>{step}</em></span>
@@ -667,9 +667,9 @@ function TelegramSqlitePipelineModal({
           <div className="mih-source-danger__copy">
             <Warning size={24} weight="duotone" aria-hidden="true" />
             <div>
-              <h3 id="telegram-sqlite-checkpoint-reset-title">统一重置双任务 Checkpoint</h3>
-              <p>下一次同步会重新执行首次全量阶段。Canonical 仍会幂等去重，但远端分页读取、PG 写入和 ES 重投影负载会明显增加。</p>
-              <p>普通新增、24 小时重叠同步和每日全量对账不需要重置；仅在审计决定完整重放时使用。</p>
+              <h3 id="telegram-sqlite-checkpoint-reset-title">更换 SQLite / 一次性全量对齐</h3>
+              <p>本操作统一重置两个增量水位；启用任务后，下一次同步会完整扫描新库。Canonical 仍会幂等去重，但远端读取和 PG/ES 投影负载会明显增加。</p>
+              <p>仅用于同一逻辑数据集的换库或完整重放；源库缺席不会被推断为删除。无关的新语料必须使用新的 Dataset，不能覆盖本任务。</p>
             </div>
           </div>
           <form className="mih-source-danger__form" onSubmit={resetCheckpoints}>
@@ -679,7 +679,7 @@ function TelegramSqlitePipelineModal({
             </Field>
             <button className="qp-button qp-button--danger" type="submit"
               disabled={Boolean(busyAction) || resetConfirmation !== 'telegram-sqlite'}>
-              {busyAction === 'reset' ? '正在统一重置…' : '确认重置双任务 Checkpoint'}
+              {busyAction === 'reset' ? '正在准备全量对齐…' : '准备一次性全量对齐'}
             </button>
           </form>
         </section>
@@ -732,7 +732,7 @@ function TelegramSqliteTaskCard({ task, progress, configured }) {
         <div><span>只读诊断</span><strong>{checkedAt ? formatDate(checkedAt) : configured ? '等待首次核对' : '连接待配置'}</strong></div>
         <small className={issues.length > 0 ? 'mih-telegram-progress__warning' : undefined}>{issues.length > 0
           ? issues.join('；')
-          : diagnostic?.summary || diagnostic?.message || '采用 24 小时重叠读取与每日全量对账；重复记录由 Hub 幂等吸收。'}</small>
+          : diagnostic?.summary || diagnostic?.message || '正常运行读取 2 小时重叠增量；凌晨只对上一日窗口，换库时人工全量对齐。'}</small>
       </div>
       <footer>
         <span>最近运行：{latest ? formatDate(latest.finishedAt || latest.startedAt || latest.createdAt) : '尚未运行'}</span>

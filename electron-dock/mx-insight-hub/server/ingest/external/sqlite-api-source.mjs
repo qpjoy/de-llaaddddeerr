@@ -6,10 +6,23 @@ import { applyMapping, validateFieldMap, CHUNKER_VERSION } from './mapping.mjs'
 const MAX_PAGE_SIZE = 500
 const MAX_PREVIEW = 3
 const REQUEST_TIMEOUT_MS = 15_000
-const DEFAULT_OVERLAP_MS = 24 * 60 * 60 * 1_000
-const DEFAULT_RECONCILIATION_INTERVAL_MS = 24 * 60 * 60 * 1_000
+const DEFAULT_OVERLAP_MS = 2 * 60 * 60 * 1_000
+const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1_000
+const DAY_MS = 24 * 60 * 60 * 1_000
+const DAILY_WINDOW_START_HOUR = 2
 const CONNECTION_FIELDS = new Set(['baseUrl', 'token', 'resource', 'pageSize'])
 const RESOURCES = new Set(['chats', 'messages'])
+const REQUIRED_ROW_FIELDS = Object.freeze({
+  chats: ['chat_id', 'updated_at'],
+  messages: ['chat_id', 'message_id', 'message_at', 'captured_at', 'deleted_at'],
+})
+const ID_FIELDS = Object.freeze({
+  chats: ['chat_id'],
+  messages: [
+    'chat_id', 'message_id', 'sender_id', 'reply_to_message_id',
+    'thread_id', 'first_seen_account_id',
+  ],
+})
 
 const RESOURCE_COLUMNS = Object.freeze({
   chats: [
@@ -194,23 +207,42 @@ function pullInputName(sourceKey, cycle) {
   return `sqlite-api-pull:${sourceKey}:${sha256(canonicalJson(cycle)).slice(0, 16)}`
 }
 
-function createCycle({ connection, position, now, reconciliationIntervalMs, overlapMs, trigger, pageSize }) {
-  const endAt = now.toISOString()
+export function sqliteApiDailyWindowAt(now) {
+  const instant = now instanceof Date ? now : new Date(now)
+  if (Number.isNaN(instant.getTime())) throw new TypeError('now must be a valid date')
+  const shanghai = new Date(instant.getTime() + SHANGHAI_OFFSET_MS)
+  const endDate = shanghai.toISOString().slice(0, 10)
+  const date = new Date(Date.parse(`${endDate}T00:00:00.000Z`) - DAY_MS).toISOString().slice(0, 10)
+  return {
+    date,
+    startAt: `${date}T00:00:00.000+08:00`,
+    endAt: `${endDate}T00:00:00.000+08:00`,
+    available: shanghai.getUTCHours() >= DAILY_WINDOW_START_HOUR,
+  }
+}
+
+function createCycle({ position, now, overlapMs, trigger, pageSize }) {
+  const startedAt = now.toISOString()
+  const dailyWindow = sqliteApiDailyWindowAt(now)
   const forceReconciliation = trigger === 'reconciliation'
-  const lastReconciled = parseFiniteDate(position.lastReconciledAt)
-  const reconciliationDue = !lastReconciled
-    || now.getTime() - lastReconciled.getTime() >= reconciliationIntervalMs
-  const mode = connection.resource === 'chats' || forceReconciliation || reconciliationDue
+  const mode = forceReconciliation || !position.lastCompletedAt
     ? 'reconciliation'
-    : 'incremental'
+    : trigger === 'daily_window'
+      ? 'daily_window'
+      : 'incremental'
   const latestMessage = parseFiniteDate(position.lastMessageAt)
   const startAt = mode === 'incremental' && latestMessage
     ? new Date(latestMessage.getTime() - overlapMs).toISOString()
-    : null
+    : mode === 'daily_window' ? dailyWindow.startAt : null
+  const endAt = mode === 'daily_window' ? dailyWindow.endAt : startedAt
   return {
     mode,
+    startedAt,
     startAt,
     endAt,
+    ...(mode === 'daily_window' || (mode === 'reconciliation' && dailyWindow.available)
+      ? { dailyWindowDate: dailyWindow.date }
+      : {}),
     page: 1,
     pageSize,
     processedRows: 0,
@@ -224,12 +256,13 @@ function completedPosition(position, cycle, contractHash, mappingVersion) {
     ...withoutImportRun(position),
     contractHash,
     mappingVersion,
-    lastCompletedAt: cycle.endAt,
+    lastCompletedAt: cycle.startedAt ?? cycle.endAt,
     lastMessageAt: latestIso(position.lastMessageAt, cycle.maxMessageAt),
     lastSweepRows: Number(cycle.processedRows ?? 0),
     lastSweepTotal: Number(cycle.totalRows ?? cycle.processedRows ?? 0),
   }
-  if (cycle.mode === 'reconciliation') result.lastReconciledAt = cycle.endAt
+  if (cycle.mode === 'reconciliation') result.lastReconciledAt = cycle.startedAt ?? cycle.endAt
+  if (cycle.dailyWindowDate) result.lastDailyWindowDate = cycle.dailyWindowDate
   delete result.cycle
   return result
 }
@@ -245,6 +278,45 @@ function safePullError(error) {
   return wrapped
 }
 
+function isRetryableGetFailure(error) {
+  if (error?.code === 'sqlite_api_unavailable') return true
+  const status = Number(error?.status)
+  return error?.code === 'sqlite_api_request_failed'
+    && (status === 408 || status === 425 || status === 429 || status >= 500)
+}
+
+function isLosslessIntegerId(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value)
+  return typeof value === 'string' && /^-?\d+$/u.test(value)
+}
+
+function isValidResourceRow(resource, row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false
+  const required = REQUIRED_ROW_FIELDS[resource]
+  if (!required.every((field) => Object.hasOwn(row, field))) return false
+  if (required.some((field) => field !== 'deleted_at' && row[field] == null)) return false
+  if (!ID_FIELDS[resource].every((field) => (
+    !Object.hasOwn(row, field)
+    || row[field] == null
+    || isLosslessIntegerId(row[field])
+  ))) return false
+  const requiredTimes = resource === 'chats' ? ['updated_at'] : ['message_at', 'captured_at']
+  if (requiredTimes.some((field) => !parseFiniteDate(row[field]))) return false
+  if (resource === 'messages') {
+    if (['edited_at', 'deleted_at'].some((field) => row[field] != null && !parseFiniteDate(row[field]))) return false
+    const metadata = row.metadata
+    if (
+      metadata
+      && typeof metadata === 'object'
+      && !Array.isArray(metadata)
+      && Object.hasOwn(metadata, 'grouped_id')
+      && metadata.grouped_id != null
+      && !isLosslessIntegerId(metadata.grouped_id)
+    ) return false
+  }
+  return true
+}
+
 export class SQLiteApiSourcePuller {
   constructor({
     store,
@@ -254,7 +326,6 @@ export class SQLiteApiSourcePuller {
     now = () => new Date(),
     timeoutMs = REQUEST_TIMEOUT_MS,
     overlapMs = DEFAULT_OVERLAP_MS,
-    reconciliationIntervalMs = DEFAULT_RECONCILIATION_INTERVAL_MS,
   }) {
     this.store = store
     this.queue = queue
@@ -263,7 +334,6 @@ export class SQLiteApiSourcePuller {
     this.now = now
     this.timeoutMs = timeoutMs
     this.overlapMs = overlapMs
-    this.reconciliationIntervalMs = reconciliationIntervalMs
     this.sourceLocks = new Set()
   }
 
@@ -355,13 +425,21 @@ export class SQLiteApiSourcePuller {
       if (cycle?.endAt) params.end_at = cycle.endAt
     }
     const body = await this.#request(connection, `/v1/${connection.resource}`, { params })
-    if (!body || !Array.isArray(body.items) || !Number.isFinite(Number(body.total))) {
+    if (
+      !body
+      || !Array.isArray(body.items)
+      || !Number.isSafeInteger(body.total)
+      || body.total < 0
+      || !Number.isSafeInteger(body.page)
+      || body.page < 1
+      || !body.items.every((row) => isValidResourceRow(connection.resource, row))
+    ) {
       throw new AppError(503, 'sqlite_api_contract_mismatch', 'SQLite API page response does not match the documented contract')
     }
-    if (body.page != null && Number(body.page) !== Number(page)) {
+    if (body.page !== page) {
       throw new AppError(503, 'sqlite_api_page_mismatch', 'SQLite API returned a different page than requested')
     }
-    return { items: body.items, total: Number(body.total), page: Number(body.page ?? page) }
+    return { items: body.items, total: body.total, page: body.page }
   }
 
   async withSourceLock(sourceKey, operation) {
@@ -457,7 +535,7 @@ export class SQLiteApiSourcePuller {
     const warnings = [
       ...missingMappings.filter((message) => !message.startsWith('mapping externalId')),
       ...(connection.resource === 'messages'
-        ? ['source API has no change sequence; synchronization uses overlap polling plus full reconciliation']
+        ? ['source API has no change sequence; synchronization uses overlap polling, a bounded previous-day window, and operator-triggered full alignment']
         : []),
     ]
     return {
@@ -582,23 +660,28 @@ export class SQLiteApiSourcePuller {
     const position = cursor?.position ?? {}
     const cycle = position.cycle ?? null
     const page = await this.#page(connection, { page: 1, pageSize: 1, cycle })
+    const lastSweepTotal = Number(position.lastSweepTotal)
+    const totalRows = !cycle && position.lastCompletedAt && Number.isSafeInteger(lastSweepTotal) && lastSweepTotal >= 0
+      ? lastSweepTotal
+      : page.total
     const completedRows = cycle
-      ? Math.min(page.total, Math.max(0, Number(cycle.processedRows ?? 0)))
+      ? Math.min(totalRows, Math.max(0, Number(cycle.processedRows ?? 0)))
       : position.lastCompletedAt
-        ? Math.min(page.total, Math.max(0, Number(position.lastSweepRows ?? 0)))
+        ? Math.min(totalRows, Math.max(0, Number(position.lastSweepRows ?? 0)))
         : null
-    const remainingRows = completedRows == null ? null : Math.max(0, page.total - completedRows)
+    const remainingRows = completedRows == null ? null : Math.max(0, totalRows - completedRows)
     return {
-      totalRows: page.total,
+      totalRows,
+      sourceTotalRows: page.total,
       completedRows,
       remainingRows,
       percent: completedRows == null
         ? null
-        : page.total === 0 ? 100 : Math.round((completedRows / page.total) * 10_000) / 100,
+        : totalRows === 0 ? 100 : Math.round((completedRows / totalRows) * 10_000) / 100,
       cursor,
       blocker: connection.resource === 'messages' ? 'source_has_no_exact_change_cursor' : null,
       issues: connection.resource === 'messages'
-        ? ['message_at overlap requires periodic full reconciliation for late edits and deletions']
+        ? ['message_at overlap needs operator-triggered reconciliation for older edits and deletions']
         : [],
     }
   }
@@ -804,10 +887,8 @@ export class SQLiteApiSourcePuller {
     let cycle = position.cycle
     if (!run) {
       cycle = cycle ?? createCycle({
-        connection,
         position,
         now: this.now(),
-        reconciliationIntervalMs: this.reconciliationIntervalMs,
         overlapMs: this.overlapMs,
         trigger,
         pageSize: Math.min(batchSize, connection.pageSize, MAX_PAGE_SIZE),
@@ -988,6 +1069,7 @@ export class SQLiteApiSourcePuller {
       const preserveForRetry = batchCommitted
         || error?.externalFinalizationAttempted === true
         || ['external_commit_outcome_unknown', 'external_finalize_outcome_unknown'].includes(error?.code)
+        || isRetryableGetFailure(error)
       if (!preserveForRetry && run && !runFinished) {
         await this.#finalizeRun({
           source, cursorId, importRunId: run.id, position: workingPosition,

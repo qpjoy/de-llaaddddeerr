@@ -48,9 +48,13 @@ and migration; it must not be inferred from membership alone.
 The Admin data-source plane also includes a separate fixed Telegram SQLite
 read-API pipeline. It stores the fallback snapshot in
 `telegram.sqlite.chats.v1` / `telegram.sqlite.messages.v1`, keeps every HTTP row
-as raw evidence, and uses overlap polling plus periodic full reconciliation
-because the upstream page API does not expose an exact change cursor. It does
-not silently merge into the PostgreSQL-backed public Telegram datasets.
+as raw evidence, and uses an initial/manual full alignment followed by
+append-oriented overlap polling plus a bounded previous-day window because the
+upstream page API does not expose an exact change cursor. It never schedules an automatic historical full scan
+and does not silently merge into the PostgreSQL-backed public Telegram datasets. Rows
+carrying `deleted_at` remain in Hub PostgreSQL with their raw payload and
+revision history; deletion only retires them from the rebuildable public
+current-state search projection.
 
 ## Quick start
 
@@ -151,7 +155,7 @@ remain invalid substitutes for the unified source watermark.
 
 Start with [docs/README.md](docs/README.md) for architecture, security, operations, and roadmap decisions.
 
-The SQLite source setup and its explicit eventual-reconciliation semantics are
+The SQLite source setup and its explicit append-only/manual-alignment semantics are
 documented in the [Telegram SQLite read-API ingestion
 runbook](docs/operations/telegram-sqlite-api-ingestion.md).
 

@@ -147,10 +147,12 @@ Launcher、浏览器、MX-H2I 登录或网络配置；两个子任务分别写�
 `telegram.monitor.*` canonical 行互相覆盖。
 
 当前源 API 只有 `message_at DESC` 的页码分页，没有覆盖编辑、软删除和迟到回填的
-单调 change cursor。因此该管线采用首次全量、24 小时重叠读取和每日全量对账，只把
-显式 `deleted_at` 当作删除，管理面必须标为最终一致而不是精确增量。Hub 内部的 raw、
-revision、outbox 和 Elasticsearch 幂等链路保持不变，正文不做词汇过滤，检索投影继续
-优先 HanLP 并按既有链路降级。操作细节见
+单调 change cursor。因此该管线采用首次/换库时人工全量对齐，平时只按高水位做 2 小时
+重叠读取，并在上海时区凌晨 02:00 后只复扫上一自然日窗口，不会定时扫描整个历史库；只把显式 `deleted_at` 当作删除，管理面必须标为
+append-only 最终一致而不是精确 CDC。带删除标记的源行
+仍完整进入 Hub raw、canonical 与 revision；公共 Elasticsearch 只是可重建的 current-state
+投影。正文不做词汇过滤，chat/media 等结构化字段进入确定性 mapping 与专用索引，检索
+投影继续优先 HanLP 并按既有链路降级。操作细节见
 [Telegram SQLite read-API ingestion](../../mx-insight-hub/docs/operations/telegram-sqlite-api-ingestion.md)。
 
 公共响应只返回严格 allowlist 的 normalized chat/message 字段和 opaque keyset

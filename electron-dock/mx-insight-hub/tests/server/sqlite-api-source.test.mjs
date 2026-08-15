@@ -68,6 +68,7 @@ function rawMessage({
   text = '原文完整保留：敏感词与测试词均不改写',
   deletedAt = null,
   views = 7,
+  groupedId = '7001',
 } = {}) {
   return {
     chat_id: chatId,
@@ -91,16 +92,19 @@ function rawMessage({
     chat_title: 'chat',
     chat_username: 'chat_handle',
     message_url: `https://t.me/chat_handle/${messageId}`,
-    metadata: { views, forwards: 2, grouped_id: 'group-1', post_author: null, forward: null },
+    metadata: { views, forwards: 2, grouped_id: groupedId, post_author: null, forward: null },
   }
 }
 
-function createPullHarness({ source = messageSource(), mapping = messageMapping(), responses, failFirstAck = false, now }) {
+function createPullHarness({
+  source = messageSource(), mapping = messageMapping(), responses,
+  failFirstAck = false, now, initialCursor = null,
+}) {
   const requests = []
   const ingested = []
   const runs = new Map()
   const batches = new Map()
-  let cursor = null
+  let cursor = initialCursor == null ? null : structuredClone(initialCursor)
   let runNumber = 0
   let responseIndex = 0
   let failAck = failFirstAck
@@ -202,8 +206,6 @@ function createPullHarness({ source = messageSource(), mapping = messageMapping(
     queue,
     fetchImpl,
     now,
-    overlapMs: 60 * 60 * 1_000,
-    reconciliationIntervalMs: 24 * 60 * 60 * 1_000,
     logger: { warn() {} },
   })
   return {
@@ -343,7 +345,7 @@ test('message tombstones can only come from the explicit deleted_at field', asyn
   )
 })
 
-test('pullBatch performs full reconciliation, fixes the run end, preserves raw rows, then uses overlap polling', async () => {
+test('pullBatch runs an initial full scan, a two-hour overlap, then a bounded daily window', async () => {
   let clock = new Date('2026-08-15T13:00:00.000Z')
   const now = () => new Date(clock)
   const first = rawMessage({ messageId: 3, messageAt: '2026-08-15T12:00:00.000Z', views: 31 })
@@ -353,13 +355,15 @@ test('pullBatch performs full reconciliation, fixes the run end, preserves raw r
     messageAt: '2026-08-15T11:00:00.000Z',
     deletedAt: '2026-08-15T12:30:00.000Z',
   })
-  const incremental = rawMessage({ messageId: 4, messageAt: '2026-08-15T12:04:00.000Z' })
+  const incremental = rawMessage({ messageId: 4, messageAt: '2026-08-16T14:04:00.000Z' })
+  const manual = rawMessage({ messageId: 5, messageAt: '2026-08-16T14:30:00.000Z' })
   const harness = createPullHarness({
     now,
     responses: [
       { items: [first, second], total: 3, page: 1 },
       { items: [deleted], total: 3, page: 2 },
       { items: [incremental], total: 1, page: 1 },
+      { items: [manual], total: 1, page: 1 },
     ],
   })
 
@@ -380,19 +384,314 @@ test('pullBatch performs full reconciliation, fixes the run end, preserves raw r
   assert.equal(harness.requests[1].url.searchParams.get('end_at'), '2026-08-15T13:00:00.000Z')
   assert.equal(harness.getCursor().status, 'idle')
   assert.equal(harness.getCursor().position.lastReconciledAt, '2026-08-15T13:00:00.000Z')
+  assert.equal(harness.getCursor().position.lastDailyWindowDate, '2026-08-14')
   assert.equal(harness.getCursor().position.lastMessageAt, '2026-08-15T12:00:00.000Z')
   assert.deepEqual(harness.ingested[0].records[0].rawItem, first)
   assert.equal(harness.ingested[0].records[0].body, first.text)
   assert.equal(harness.ingested[0].records[0].externalId, '-1007:3')
   assert.equal(harness.ingested[0].records[0].metrics.views, 31)
-  assert.equal(harness.ingested[0].records[0].stableFields.relations.groupedId, 'group-1')
+  assert.equal(harness.ingested[0].records[0].stableFields.relations.groupedId, '7001')
 
-  clock = new Date('2026-08-15T13:05:00.000Z')
+  clock = new Date('2026-08-16T14:05:00.000Z')
   const overlap = await harness.puller.pullBatch('telegram-sqlite-api-messages')
   assert.equal(overlap.done, true)
-  assert.equal(harness.requests[2].url.searchParams.get('start_at'), '2026-08-15T11:00:00.000Z')
-  assert.equal(harness.requests[2].url.searchParams.get('end_at'), '2026-08-15T13:05:00.000Z')
-  assert.equal(harness.getCursor().position.lastMessageAt, '2026-08-15T12:04:00.000Z')
+  assert.equal(harness.requests[2].url.searchParams.get('start_at'), '2026-08-15T10:00:00.000Z')
+  assert.equal(harness.requests[2].url.searchParams.get('end_at'), '2026-08-16T14:05:00.000Z')
+  assert.equal(harness.getCursor().position.lastMessageAt, '2026-08-16T14:04:00.000Z')
+  assert.equal(harness.getCursor().position.lastReconciledAt, '2026-08-15T13:00:00.000Z')
+  assert.equal(harness.getCursor().position.lastDailyWindowDate, '2026-08-14')
+
+  clock = new Date('2026-08-16T18:05:00.000Z')
+  await harness.puller.pullBatch('telegram-sqlite-api-messages', { trigger: 'daily_window' })
+  assert.equal(harness.requests[3].url.searchParams.get('start_at'), '2026-08-16T00:00:00.000+08:00')
+  assert.equal(harness.requests[3].url.searchParams.get('end_at'), '2026-08-17T00:00:00.000+08:00')
+  assert.equal(harness.getCursor().position.lastDailyWindowDate, '2026-08-16')
+  assert.equal(harness.getCursor().position.lastReconciledAt, '2026-08-15T13:00:00.000Z')
+})
+
+test('manual sync remains an overlap sync after the daily-window hour', async () => {
+  const now = () => new Date('2026-08-16T18:05:00.000Z')
+  const harness = createPullHarness({
+    now,
+    initialCursor: {
+      status: 'idle',
+      updatedAt: '2026-08-16T18:00:00.000Z',
+      position: {
+        lastCompletedAt: '2026-08-16T17:55:00.000Z',
+        lastMessageAt: '2026-08-16T17:50:00.000Z',
+        lastDailyWindowDate: '2026-08-15',
+      },
+    },
+    responses: [{
+      items: [rawMessage({ messageId: 6, messageAt: '2026-08-16T18:04:00.000Z' })],
+      total: 1,
+      page: 1,
+    }],
+  })
+
+  await harness.puller.pullBatch('telegram-sqlite-api-messages', { trigger: 'manual' })
+
+  assert.equal(harness.requests[0].url.searchParams.get('start_at'), '2026-08-16T15:50:00.000Z')
+  assert.equal(harness.requests[0].url.searchParams.get('end_at'), '2026-08-16T18:05:00.000Z')
+  assert.equal(harness.getCursor().position.lastDailyWindowDate, '2026-08-15')
+})
+
+test('a full scan finishing before Shanghai 02:00 leaves the previous-day window due', async () => {
+  const now = () => new Date('2026-08-10T17:59:00.000Z')
+  const harness = createPullHarness({
+    now,
+    responses: [{ items: [], total: 0, page: 1 }],
+  })
+
+  await harness.puller.pullBatch('telegram-sqlite-api-messages')
+
+  assert.equal(harness.getCursor().position.lastCompletedAt, '2026-08-10T17:59:00.000Z')
+  assert.equal(harness.getCursor().position.lastDailyWindowDate, undefined)
+})
+
+test('the inclusive next-midnight boundary maps to the same canonical identity on overlap retry', async () => {
+  let clock = new Date('2026-08-16T18:05:00.000Z')
+  const now = () => new Date(clock)
+  const boundary = rawMessage({
+    messageId: 7,
+    messageAt: '2026-08-16T16:00:00.000Z',
+  })
+  const harness = createPullHarness({
+    now,
+    initialCursor: {
+      status: 'idle',
+      updatedAt: '2026-08-16T18:00:00.000Z',
+      position: {
+        lastCompletedAt: '2026-08-16T17:55:00.000Z',
+        lastMessageAt: '2026-08-16T15:59:00.000Z',
+        lastDailyWindowDate: '2026-08-15',
+      },
+    },
+    responses: [
+      { items: [boundary], total: 1, page: 1 },
+      { items: [boundary], total: 1, page: 1 },
+    ],
+  })
+
+  await harness.puller.pullBatch('telegram-sqlite-api-messages', { trigger: 'daily_window' })
+  clock = new Date('2026-08-16T18:10:00.000Z')
+  await harness.puller.pullBatch('telegram-sqlite-api-messages', { trigger: 'schedule' })
+
+  assert.equal(harness.requests[0].url.searchParams.get('end_at'), '2026-08-17T00:00:00.000+08:00')
+  assert.equal(harness.ingested[0].records[0].externalId, '-1007:7')
+  assert.equal(harness.ingested[1].records[0].externalId, '-1007:7')
+  assert.equal(harness.getCursor().position.lastMessageAt, boundary.message_at)
+})
+
+test('a temporary daily-window second-page failure keeps its fixed bounds for queue retry', async () => {
+  const now = () => new Date('2026-08-16T18:05:00.000Z')
+  const harness = createPullHarness({
+    now,
+    initialCursor: {
+      status: 'idle',
+      updatedAt: '2026-08-16T18:00:00.000Z',
+      position: {
+        lastCompletedAt: '2026-08-16T17:55:00.000Z',
+        lastMessageAt: '2026-08-16T17:50:00.000Z',
+        lastDailyWindowDate: '2026-08-15',
+      },
+    },
+    responses: [
+      {
+        items: [
+          rawMessage({ messageId: 3, messageAt: '2026-08-16T12:00:00.000Z' }),
+          rawMessage({ messageId: 2, messageAt: '2026-08-16T11:30:00.000Z' }),
+        ],
+        total: 3,
+        page: 1,
+      },
+      () => jsonResponse({ detail: 'temporary upstream failure' }, 503),
+      {
+        items: [rawMessage({ messageId: 1, messageAt: '2026-08-16T11:00:00.000Z' })],
+        total: 3,
+        page: 2,
+      },
+    ],
+  })
+
+  const first = await harness.puller.pullBatch('telegram-sqlite-api-messages', { trigger: 'daily_window' })
+  assert.equal(first.done, false)
+  assert.equal(harness.getCursor().position.cycle.page, 2)
+  assert.equal(harness.getCursor().position.cycle.startAt, '2026-08-16T00:00:00.000+08:00')
+  assert.equal(harness.getCursor().position.cycle.endAt, '2026-08-17T00:00:00.000+08:00')
+
+  await assert.rejects(
+    () => harness.puller.pullBatch('telegram-sqlite-api-messages', { importRunId: first.importRunId }),
+    (error) => error?.code === 'sqlite_api_request_failed' && error?.status === 503,
+  )
+  assert.equal(harness.getCursor().status, 'running')
+  assert.equal(harness.getCursor().position.importRunId, first.importRunId)
+  assert.equal(harness.getCursor().position.cycle.page, 2)
+  assert.equal(harness.runs.get(first.importRunId).status, 'running')
+
+  const retry = await harness.puller.pullBatch('telegram-sqlite-api-messages', {
+    importRunId: first.importRunId,
+  })
+  assert.equal(retry.stale, undefined)
+  assert.equal(retry.importRunId, first.importRunId)
+  assert.equal(retry.done, true)
+  assert.equal(harness.requests[1].url.searchParams.get('page'), '2')
+  assert.equal(harness.requests[2].url.searchParams.get('page'), '2')
+  assert.equal(harness.runs.get(first.importRunId).status, 'succeeded')
+  assert.equal(harness.getCursor().position.lastDailyWindowDate, '2026-08-16')
+})
+
+test('checkpoint reset makes the next pull a full reconciliation', async () => {
+  let clock = new Date('2026-08-15T13:00:00.000Z')
+  const now = () => new Date(clock)
+  const source = messageSource()
+  const harness = createPullHarness({
+    source,
+    now,
+    responses: [
+      { items: [rawMessage({ messageId: 1, messageAt: '2026-08-15T12:00:00.000Z' })], total: 1, page: 1 },
+      { items: [rawMessage({ messageId: 2, messageAt: '2026-08-16T12:00:00.000Z' })], total: 1, page: 1 },
+    ],
+  })
+
+  await harness.puller.pullBatch(source.sourceKey)
+  source.status = 'paused'
+  clock = new Date('2026-08-16T13:00:00.000Z')
+  await harness.puller.resetCheckpoint(source.sourceKey)
+  assert.equal(harness.getCursor().position.lastCompletedAt, undefined)
+  assert.equal(harness.getCursor().position.lastDailyWindowDate, undefined)
+  assert.equal(harness.getCursor().position.resetAt, '2026-08-16T13:00:00.000Z')
+
+  source.status = 'active'
+  await harness.puller.pullBatch(source.sourceKey)
+  assert.equal(harness.requests[1].url.searchParams.has('start_at'), false)
+  assert.equal(harness.requests[1].url.searchParams.get('end_at'), '2026-08-16T13:00:00.000Z')
+})
+
+test('page validation rejects malformed pagination, rows, required fields, and lossy numeric ids', async (t) => {
+  const message = rawMessage({ messageId: 1, messageAt: '2026-08-15T12:00:00.000Z' })
+  const chatSource = messageSource({
+    id: 'sqlite-chat-source-id',
+    sourceKey: 'telegram-sqlite-api-chats',
+    datasetId: 'telegram.sqlite.chats.v1',
+    objectType: 'chat',
+    connection: { ...messageSource().connection, resource: 'chats' },
+  })
+  const validChat = { chat_id: -1007, updated_at: '2026-08-15T12:00:00+00:00' }
+
+  const preview = (source, body) => new SQLiteApiSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => null,
+    },
+    queue: {},
+    fetchImpl: async () => jsonResponse(body),
+  }).preview(source.sourceKey, { limit: 1 })
+
+  const cases = [
+    ['negative total', messageSource(), { items: [], total: -1, page: 1 }],
+    ['fractional total', messageSource(), { items: [], total: 1.5, page: 1 }],
+    ['missing page', messageSource(), { items: [], total: 0 }],
+    ['zero page', messageSource(), { items: [], total: 0, page: 0 }],
+    ['non-object message row', messageSource(), { items: [null], total: 1, page: 1 }],
+    ['unsafe numeric chat id', messageSource(), {
+      items: [{ ...message, chat_id: Number.MAX_SAFE_INTEGER + 1 }], total: 1, page: 1,
+    }],
+    ['unsafe numeric message id', messageSource(), {
+      items: [{ ...message, message_id: Number.MAX_SAFE_INTEGER + 1 }], total: 1, page: 1,
+    }],
+    ['unsafe optional sender id', messageSource(), {
+      items: [{ ...message, sender_id: Number.MAX_SAFE_INTEGER + 1 }], total: 1, page: 1,
+    }],
+    ['unsafe numeric grouped id', messageSource(), {
+      items: [{
+        ...message,
+        metadata: { ...message.metadata, grouped_id: Number.MAX_SAFE_INTEGER + 1 },
+      }],
+      total: 1,
+      page: 1,
+    }],
+    ['non-integer string id', messageSource(), {
+      items: [{ ...message, message_id: '1.5' }], total: 1, page: 1,
+    }],
+    ['null required message id', messageSource(), {
+      items: [{ ...message, message_id: null }], total: 1, page: 1,
+    }],
+    ['chat missing chat_id', chatSource, { items: [{ updated_at: validChat.updated_at }], total: 1, page: 1 }],
+    ['chat missing updated_at', chatSource, { items: [{ chat_id: validChat.chat_id }], total: 1, page: 1 }],
+    ['chat invalid updated_at', chatSource, {
+      items: [{ ...validChat, updated_at: 'not-a-timestamp' }], total: 1, page: 1,
+    }],
+    ['message invalid message_at', messageSource(), {
+      items: [{ ...message, message_at: 'not-a-timestamp' }], total: 1, page: 1,
+    }],
+    ['message invalid captured_at', messageSource(), {
+      items: [{ ...message, captured_at: 'not-a-timestamp' }], total: 1, page: 1,
+    }],
+    ['message invalid edited_at', messageSource(), {
+      items: [{ ...message, edited_at: 'not-a-timestamp' }], total: 1, page: 1,
+    }],
+    ['message invalid deleted_at', messageSource(), {
+      items: [{ ...message, deleted_at: 'not-a-timestamp' }], total: 1, page: 1,
+    }],
+  ]
+  for (const field of ['chat_id', 'message_id', 'message_at', 'captured_at', 'deleted_at']) {
+    const row = { ...message }
+    delete row[field]
+    cases.push([`message missing ${field}`, messageSource(), { items: [row], total: 1, page: 1 }])
+  }
+
+  for (const [name, source, body] of cases) {
+    await t.test(name, async () => {
+      await assert.rejects(
+        () => preview(source, body),
+        (error) => error?.code === 'sqlite_api_contract_mismatch',
+      )
+    })
+  }
+
+  await t.test('integer strings preserve ids beyond the JavaScript safe range', async () => {
+    const row = rawMessage({
+      chatId: '-1009007199254740993',
+      messageId: '9007199254740993',
+      messageAt: '2026-08-15T12:00:00.000Z',
+      groupedId: '9007199254740994',
+    })
+    const result = await preview(messageSource(), { items: [row], total: 1, page: 1 })
+    assert.equal(result.sampleShapes[0].chat_id.jsonType, 'string')
+    assert.equal(result.sampleShapes[0].message_id.jsonType, 'string')
+  })
+})
+
+test('contract mismatches and row rejections remain terminal operator-action failures', async () => {
+  const now = () => new Date('2026-08-15T13:00:00.000Z')
+  const contractHarness = createPullHarness({
+    now,
+    responses: [{ items: [], total: -1, page: 1 }],
+  })
+  await assert.rejects(
+    () => contractHarness.puller.pullBatch('telegram-sqlite-api-messages'),
+    (error) => error?.code === 'sqlite_api_contract_mismatch',
+  )
+  assert.equal(contractHarness.getCursor().status, 'failed')
+  assert.equal(contractHarness.runs.get('sqlite-run-1').status, 'failed')
+  assert.equal(contractHarness.getCursor().position.importRunId, undefined)
+
+  const rejectionHarness = createPullHarness({
+    now,
+    mapping: messageMapping({ eventTime: { from: 'edited_at', type: 'timestamp' } }),
+    responses: [{
+      items: [rawMessage({ messageId: 1, messageAt: '2026-08-15T12:00:00.000Z' })],
+      total: 1,
+      page: 1,
+    }],
+  })
+  await assert.rejects(
+    () => rejectionHarness.puller.pullBatch('telegram-sqlite-api-messages'),
+    (error) => error?.code === 'row_rejections_detected',
+  )
+  assert.equal(rejectionHarness.getCursor().status, 'failed')
+  assert.equal(rejectionHarness.runs.get('sqlite-run-1').status, 'failed')
 })
 
 test('pullBatch fixes each cycle page size to the configured and worker batch limits', async () => {
@@ -424,10 +723,37 @@ test('progress reports the last completed reconciliation while preserving the no
   await harness.puller.pullBatch('telegram-sqlite-api-messages')
   const progress = await harness.puller.progress('telegram-sqlite-api-messages')
   assert.equal(progress.totalRows, 1)
+  assert.equal(progress.sourceTotalRows, 1)
   assert.equal(progress.completedRows, 1)
   assert.equal(progress.remainingRows, 0)
   assert.equal(progress.percent, 100)
   assert.equal(progress.blocker, 'source_has_no_exact_change_cursor')
+})
+
+test('idle progress reports the completed incremental sweep separately from the full source total', async () => {
+  let clock = new Date('2026-08-15T13:00:00.000Z')
+  const now = () => new Date(clock)
+  const full = rawMessage({ messageId: 1, messageAt: '2026-08-15T12:00:00.000Z' })
+  const incremental = rawMessage({ messageId: 2, messageAt: '2026-08-15T12:30:00.000Z' })
+  const harness = createPullHarness({
+    now,
+    responses: [
+      { items: [full], total: 1, page: 1 },
+      { items: [incremental], total: 1, page: 1 },
+      { items: [incremental], total: 621_000, page: 1 },
+    ],
+  })
+
+  await harness.puller.pullBatch('telegram-sqlite-api-messages')
+  clock = new Date('2026-08-15T13:05:00.000Z')
+  await harness.puller.pullBatch('telegram-sqlite-api-messages')
+  const progress = await harness.puller.progress('telegram-sqlite-api-messages')
+
+  assert.equal(progress.totalRows, 1)
+  assert.equal(progress.completedRows, 1)
+  assert.equal(progress.remainingRows, 0)
+  assert.equal(progress.percent, 100)
+  assert.equal(progress.sourceTotalRows, 621_000)
 })
 
 test('a committed page is replayed from batch evidence without refetching the mutable source page', async () => {

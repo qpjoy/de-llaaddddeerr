@@ -442,6 +442,48 @@ test('JSON mappings can read nested values without changing the preserved raw ob
   assert.deepEqual(record.extensions.metadata, raw.metadata)
 })
 
+test('Telegram SQLite v2 promotes chat and media fields while retaining deleted raw collector evidence', () => {
+  const raw = {
+    chat_id: -1007,
+    message_id: 42,
+    text: '原文完整保留：敏感词与测试词均不改写',
+    message_at: '2026-08-15T12:00:00Z',
+    deleted_at: '2026-08-15T12:30:00Z',
+    message_kind: 'media',
+    media_type: 'MessageMediaPhoto',
+    chat_title: '中文频道',
+    chat_username: 'zh_channel',
+    account_phone: '+8613800000003',
+    account_alias: '采集三号',
+    first_seen_account_id: 3,
+  }
+  const { record } = applyMapping(raw, {
+    externalId: { from: ['chat_id', 'message_id'], type: 'composite', separator: ':' },
+    contentType: { from: ['media_type', 'message_kind'] },
+    title: { from: 'chat_title' },
+    body: { from: 'text' },
+    eventTime: { from: 'message_at', type: 'timestamp' },
+    deletedAt: { from: 'deleted_at', type: 'timestamp' },
+    'attributes.chatUsername': { from: 'chat_username' },
+    'attributes.mediaType': { from: 'media_type' },
+  }, { platform: 'telegram', objectType: 'message' })
+
+  assert.equal(record.contentType, 'MessageMediaPhoto')
+  assert.equal(record.title, '中文频道')
+  assert.equal(record.body, raw.text)
+  assert.equal(record.deletedAt.toISOString(), '2026-08-15T12:30:00.000Z')
+  assert.deepEqual(record.stableFields.attributes, {
+    chatUsername: 'zh_channel',
+    mediaType: 'MessageMediaPhoto',
+  })
+  assert.deepEqual(record.rawItem, raw)
+  assert.deepEqual(record.extensions, {
+    account_phone: '+8613800000003',
+    account_alias: '采集三号',
+    first_seen_account_id: 3,
+  })
+})
+
 test('an exact dotted column name takes precedence over nested JSON lookup', () => {
   const { record } = applyMapping({
     id: '1',
@@ -2334,6 +2376,92 @@ test('periodic SQLite API scheduling atomically enqueues the due pair with a cap
     { sourceKey: 'telegram-sqlite-api-chats', batchSize: 500, trigger: 'schedule' },
     { sourceKey: 'telegram-sqlite-api-messages', batchSize: 500, trigger: 'schedule' },
   ])
+})
+
+test('SQLite daily-window scheduling uses Shanghai 02:00 and catches up checkpoint drift as a pair', async () => {
+  const sources = [
+    {
+      sourceKey: 'telegram-sqlite-api-chats', sourceKind: 'sqlite_api', status: 'active',
+      syncIntervalSeconds: 300,
+    },
+    {
+      sourceKey: 'telegram-sqlite-api-messages', sourceKind: 'sqlite_api', status: 'active',
+      syncIntervalSeconds: 300,
+    },
+  ]
+  const positions = new Map(sources.map((source) => [source.sourceKey, {
+    lastCompletedAt: '2026-08-10T17:59:00.000Z',
+  }]))
+  const enqueues = []
+  const client = {
+    query: async () => ({ rows: [] }),
+    release() {},
+  }
+  const queue = {
+    pool: { connect: async () => client },
+    getCursor: async (id) => {
+      const sourceKey = id.replace(/^external:/u, '')
+      return {
+        status: 'idle',
+        updatedAt: '2026-08-10T17:00:00.000Z',
+        position: positions.get(sourceKey),
+      }
+    },
+    enqueue: async (queueName, payload, options) => {
+      assert.equal(options.client, client)
+      enqueues.push([queueName, structuredClone(payload)])
+      return enqueues.length
+    },
+  }
+  const store = {
+    listExternalSources: async () => sources,
+    getLatestPipelineWriterContractAttestation: async () => null,
+  }
+  const scheduledAt = async (now) => {
+    const offset = enqueues.length
+    const result = await scheduleActiveDatabaseSources({ store, queue, now, batchSize: 500 })
+    assert.deepEqual(result, { active: 2, enqueued: 2 })
+    return enqueues.slice(offset).map(([, payload]) => payload.trigger)
+  }
+
+  assert.deepEqual(
+    await scheduledAt(new Date('2026-08-10T17:59:00.000Z')),
+    ['schedule', 'schedule'],
+  )
+  assert.deepEqual(
+    await scheduledAt(new Date('2026-08-10T18:00:00.000Z')),
+    ['daily_window', 'daily_window'],
+  )
+
+  for (const position of positions.values()) position.lastDailyWindowDate = '2026-08-10'
+  assert.deepEqual(
+    await scheduledAt(new Date('2026-08-10T18:05:00.000Z')),
+    ['schedule', 'schedule'],
+  )
+
+  positions.get('telegram-sqlite-api-chats').lastDailyWindowDate = '2026-08-09'
+  assert.deepEqual(
+    await scheduledAt(new Date('2026-08-10T18:10:00.000Z')),
+    ['daily_window', 'daily_window'],
+  )
+
+  for (const position of positions.values()) {
+    position.lastDailyWindowDate = '2026-08-10'
+    delete position.lastCompletedAt
+  }
+  assert.deepEqual(
+    await scheduledAt(new Date('2026-08-10T18:15:00.000Z')),
+    ['schedule', 'schedule'],
+  )
+
+  for (const position of positions.values()) {
+    position.lastCompletedAt = '2026-08-10T19:00:00.000Z'
+    position.lastDailyWindowDate = '2026-08-10'
+  }
+  assert.deepEqual(
+    await scheduledAt(new Date('2026-08-11T18:00:00.000Z')),
+    ['daily_window', 'daily_window'],
+  )
 })
 
 test('periodic Telegram scheduling rolls back both jobs when the second enqueue fails', async () => {

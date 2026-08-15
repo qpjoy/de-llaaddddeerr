@@ -1,14 +1,20 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { AppError } from '../../server/core/errors.mjs'
 import {
   TELEGRAM_SQLITE_INPUTS,
+  TELEGRAM_SQLITE_MAPPING_VERSION,
   TELEGRAM_SQLITE_PIPELINE_KEY,
   TELEGRAM_SQLITE_STRATEGY,
   TelegramSQLitePipeline,
 } from '../../server/ingest/telegram/sqlite-pipeline.mjs'
 
 const TOKEN = 'sqlite-api-test-secret'
+const V1_BUILT_IN_MAPPING_IDS = Object.freeze({
+  chats: 'e360ebf5-f353-4338-a16f-087a29290959',
+  messages: 'a89be04c-4a9c-4f75-b234-f9b75e89e56f',
+})
 
 function pipelineFixture() {
   const sources = new Map(TELEGRAM_SQLITE_INPUTS.map((input) => [input.sourceKey, {
@@ -166,6 +172,16 @@ test('Telegram SQLite pipeline exposes fixed inputs and never returns its bearer
     tokenConfigured: true,
   })
   assert.deepEqual(result.strategy, TELEGRAM_SQLITE_STRATEGY)
+  assert.equal(result.strategy.initialSync, 'full')
+  assert.equal(result.strategy.incrementalSync, '2h_overlap')
+  assert.equal(result.strategy.overlapSeconds, 7_200)
+  assert.deepEqual(result.strategy.dailyWindow, {
+    timezone: 'Asia/Shanghai',
+    hour: 2,
+    window: 'previous_calendar_day',
+  })
+  assert.equal(result.strategy.reconciliation, 'manual_full_align')
+  assert.equal(Object.hasOwn(result.strategy, 'fullReconcileIntervalSeconds'), false)
   assert.deepEqual(result.tasks.map((task) => ({
     role: task.role,
     sourceKey: task.sourceKey,
@@ -267,13 +283,45 @@ test('Telegram SQLite activation gates both mappings, probes and checkpoints und
   assert.deepEqual(approval[1], TELEGRAM_SQLITE_INPUTS.map((input) => ({
     mappingId: input.builtInMappingId,
     sourceId: `source-${input.role}`,
-    version: 1,
+    version: TELEGRAM_SQLITE_MAPPING_VERSION,
   })))
   assert.equal([...fixture.activeMappings.values()].every((mapping) => mapping.approved), true)
   assert.equal([...fixture.sources.values()].every((source) => source.status === 'active'), true)
   assert.deepEqual(
     fixture.calls.filter(([kind]) => kind === 'locks').at(-1)[1],
     TELEGRAM_SQLITE_INPUTS.map((input) => input.sourceKey),
+  )
+})
+
+test('Telegram SQLite activation upgrades only the known v1 built-in mappings', async () => {
+  const fixture = pipelineFixture()
+  for (const input of TELEGRAM_SQLITE_INPUTS) {
+    fixture.activeMappings.set(`source-${input.role}`, {
+      id: V1_BUILT_IN_MAPPING_IDS[input.role],
+      sourceId: `source-${input.role}`,
+      version: 1,
+      approved: true,
+    })
+  }
+
+  const result = await new TelegramSQLitePipeline(fixture).setStatus('active', {
+    approvedBy: 'mapping-upgrader',
+  })
+
+  assert.equal(result.status, 'active')
+  assert.deepEqual(
+    [...fixture.activeMappings.values()].map((mapping) => [mapping.id, mapping.version]),
+    TELEGRAM_SQLITE_INPUTS.map((input) => [input.builtInMappingId, TELEGRAM_SQLITE_MAPPING_VERSION]),
+  )
+  assert.equal(fixture.calls.find(([kind]) => kind === 'approveBatch')[2], 'mapping-upgrader')
+
+  const conflicted = pipelineFixture()
+  conflicted.activeMappings.set('source-messages', {
+    id: 'custom-mapping', sourceId: 'source-messages', version: 1, approved: true,
+  })
+  await assert.rejects(
+    () => new TelegramSQLitePipeline(conflicted).setStatus('active'),
+    (error) => error?.code === 'builtin_mapping_conflict',
   )
 })
 
@@ -352,7 +400,9 @@ test('Telegram SQLite reset uses both built-in mappings and progress aggregates 
   assert.deepEqual(resetCall[1], TELEGRAM_SQLITE_INPUTS.map((input) => input.sourceKey))
   assert.deepEqual(
     Object.entries(resetCall[2]).map(([sourceKey, mapping]) => [sourceKey, mapping.id, mapping.version]),
-    TELEGRAM_SQLITE_INPUTS.map((input) => [input.sourceKey, input.builtInMappingId, 1]),
+    TELEGRAM_SQLITE_INPUTS.map((input) => [
+      input.sourceKey, input.builtInMappingId, TELEGRAM_SQLITE_MAPPING_VERSION,
+    ]),
   )
 
   const progress = await pipeline.progress()
@@ -362,4 +412,24 @@ test('Telegram SQLite reset uses both built-in mappings and progress aggregates 
   assert.equal(progress.percent, 50)
   assert.deepEqual(progress.tasks.map((task) => task.role), ['chats', 'messages'])
   assert.equal(progress.tasks.every((task) => task.checkedAt === progress.checkedAt), true)
+})
+
+test('Telegram SQLite v2 migration promotes search fields and installs scoped query indexes', async () => {
+  const sql = await readFile(new URL('../../migrations/025_telegram_sqlite_search_mapping.sql', import.meta.url), 'utf8')
+
+  assert.match(sql, /"title":\{"from":"chat_title"\}/u)
+  assert.match(sql, /"contentType":\{"from":\["media_type","message_kind"\]\}/u)
+  assert.match(sql, /"attributes\.chatUsername":\{"from":"chat_username"\}/u)
+  assert.match(sql, /"attributes\.mediaType":\{"from":"media_type"\}/u)
+  for (const input of TELEGRAM_SQLITE_INPUTS) {
+    assert.match(sql, new RegExp(input.builtInMappingId, 'u'))
+  }
+  for (const indexName of [
+    'canonical_sqlite_tg_messages_chat_time_idx',
+    'canonical_sqlite_tg_messages_deleted_idx',
+    'canonical_sqlite_tg_messages_chat_username_trgm_idx',
+    'canonical_sqlite_tg_messages_media_type_idx',
+  ]) {
+    assert.match(sql, new RegExp(indexName, 'u'))
+  }
 })

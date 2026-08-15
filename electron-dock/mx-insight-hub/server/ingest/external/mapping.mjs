@@ -32,7 +32,10 @@ const METRIC_TARGETS = new Set([
   'metrics.likes', 'metrics.comments', 'metrics.shares', 'metrics.views', 'metrics.bookmarks',
   'metrics.members',
 ])
-const ATTRIBUTE_TARGETS = new Set(['attributes.username', 'attributes.chatType'])
+const ATTRIBUTE_TARGETS = new Set([
+  'attributes.username', 'attributes.chatType',
+  'attributes.chatUsername', 'attributes.mediaType',
+])
 const BOOLEAN_TARGETS = new Set(['attributes.isOutgoing'])
 const JSON_TARGETS = new Set(['media', 'entities', 'links'])
 const RELATION_TARGETS = new Set([

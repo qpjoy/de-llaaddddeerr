@@ -121,6 +121,15 @@ test('content search uses PIT search_after beyond the 10k window and ignores tot
     { eventTime: { order: 'desc', missing: '_last', format: 'strict_date_time' } },
     { id: { order: 'desc' } },
   ])
+  assert.deepEqual(search.body.query.bool.should[0].multi_match.fields, [
+    'title^3', 'body', 'chatUsername^2',
+  ])
+  assert.deepEqual(search.body.query.bool.should[1].multi_match.fields, [
+    'titleHanlp^3', 'bodyHanlp', 'chatUsernameHanlp^2',
+  ])
+  assert.deepEqual(search.body.highlight.fields.chatUsername, {})
+  assert.deepEqual(search.body.highlight.fields.chatUsernameHanlp, {})
+  assert.ok(search.body._source.excludes.includes('chatUsernameHanlp'))
   assert.equal(result.items.length, 2)
   assert.equal(result.hasMore, true)
   assert.equal(result.totalRelation, 'gte')
@@ -210,6 +219,10 @@ test('PostgreSQL content fallback uses the same stable null-aware keyset and nev
   })
   assert.equal(/\bOFFSET\b/i.test(captured.sql), false)
   assert.match(captured.sql, /ORDER BY event_time DESC NULLS LAST, id DESC/)
+  assert.match(
+    captured.sql,
+    /\(stable_fields #>> '\{attributes,chatUsername\}'\) ILIKE '%' \|\| \$1 \|\| '%'/,
+  )
   assert.equal(captured.values[9], '33333333-3333-4333-8333-333333333333')
   assert.equal(captured.values[10], null)
   assert.equal(result.hasMore, true)
@@ -285,9 +298,13 @@ test('content mapping carries the author fields the projector writes', () => {
   assert.ok(properties.username.fields.bigram, 'Telegram usernames use the ranked name mapping')
   assert.equal(properties.usernameHanlp.analyzer, 'mx_presegmented')
   assert.equal(properties.usernameSubstring.type, 'wildcard')
+  assert.ok(properties.chatUsername.fields.bigram, 'chat usernames use the ranked name mapping')
+  assert.equal(properties.chatUsernameHanlp.analyzer, 'mx_presegmented')
+  assert.equal(properties.chatUsernameSubstring.type, 'wildcard')
   assert.equal(properties.authorHandleSubstring.type, 'wildcard')
   assert.equal(properties.chatId.type, 'keyword')
   assert.equal(properties.replyToMessageId.type, 'keyword')
+  assert.equal(properties.mediaType.type, 'keyword')
   assert.equal(properties.mediaSizeBytes.type, 'long')
   assert.equal(properties.entityTypes.type, 'keyword')
 })
@@ -641,6 +658,9 @@ test('provider lineage never reaches the customer-facing projection', async () =
         providerId: 'tikhub',
         credentialId: 'cred-1',
         sourceEndpointId: 'ep-9',
+        account_phone: '+8613800000003',
+        account_alias: '采集三号',
+        first_seen_account_id: 3,
         noteRank: 4,
       },
     }),
@@ -655,12 +675,22 @@ test('SQLite API records keep the shared external stream in the ES projection', 
     platform: 'telegram',
     object_type: 'message',
     stable_fields: {
+      attributes: {
+        chatUsername: '中文频道',
+        mediaType: 'MessageMediaPhoto',
+      },
       source: { origin: 'sqlite_api', sourceKey: 'telegram-sqlite-api-messages' },
     },
   }), { segmenter })
 
   assert.equal(document.source.connectorId, 'external:telegram-sqlite-api-messages')
   assert.equal(document.source.streamId, 'telegram.external.v1')
+  assert.equal(document.chatUsername, '中文频道')
+  assert.equal(document.chatUsernameSubstring, '中文频道')
+  assert.ok(document.chatUsernameHanlp.includes(' '))
+  assert.equal(document.mediaType, 'MessageMediaPhoto')
+  assert.equal(document.mediaKind, 'image')
+  assert.equal(document.mediaCount, 1)
 })
 
 test('location is only emitted when both coordinates are known', async () => {

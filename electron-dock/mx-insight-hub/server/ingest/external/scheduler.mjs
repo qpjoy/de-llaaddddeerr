@@ -7,6 +7,7 @@ import {
   TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION,
 } from '../telegram/monitor-pipeline.mjs'
 import { TELEGRAM_SQLITE_INPUTS } from '../telegram/sqlite-pipeline.mjs'
+import { sqliteApiDailyWindowAt } from './sqlite-api-source.mjs'
 
 const TELEGRAM_SCHEDULE_ERRORS = Object.freeze({
   unavailable: {
@@ -45,12 +46,22 @@ function isDue(source, cursor, now) {
   return !updatedAt || now.getTime() - new Date(updatedAt).getTime() >= intervalMs
 }
 
-function scheduledJob(sourceKey, batchSize) {
+function scheduledJob(sourceKey, batchSize, trigger = 'schedule') {
   return {
     queue: EXTERNAL_PULL_QUEUE,
-    payload: { sourceKey, batchSize, trigger: 'schedule', chunk: 0 },
+    payload: { sourceKey, batchSize, trigger, chunk: 0 },
     options: { dedupeKey: `external-pull:${sourceKey}:0`, priority: 220 },
   }
+}
+
+function telegramSQLiteScheduleTrigger(cursors, now) {
+  const dailyWindow = sqliteApiDailyWindowAt(now)
+  if (!dailyWindow.available) return 'schedule'
+  const initialized = cursors.every((cursor) => cursor?.position?.lastCompletedAt)
+  const dailyWindowDue = cursors.some(
+    (cursor) => cursor?.position?.lastDailyWindowDate !== dailyWindow.date,
+  )
+  return initialized && dailyWindowDue ? 'daily_window' : 'schedule'
 }
 
 /** Schedule one incremental scan for every active foreign database source. */
@@ -105,9 +116,10 @@ export async function scheduleActiveDatabaseSources({ store, queue, batchSize = 
     ))
     if (sqliteSources.every((source, index) => isDue(source, cursors[index], now))) {
       const sqliteBatchSize = Math.min(batchSize, 500)
+      const trigger = telegramSQLiteScheduleTrigger(cursors, now)
       const jobIds = await enqueueJobsAtomically(
         queue,
-        sqliteSources.map((source) => scheduledJob(source.sourceKey, sqliteBatchSize)),
+        sqliteSources.map((source) => scheduledJob(source.sourceKey, sqliteBatchSize, trigger)),
         TELEGRAM_SQLITE_SCHEDULE_ERRORS,
       )
       enqueued += jobIds.filter((jobId) => jobId != null).length

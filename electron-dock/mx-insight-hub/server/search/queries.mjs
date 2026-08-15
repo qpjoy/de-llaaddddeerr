@@ -373,15 +373,25 @@ export class SearchQueries {
         query: {
           bool: {
             should: [
-              { multi_match: { query, fields: ['title^3', 'body'], type: 'best_fields' } },
-              { multi_match: { query: segmented, fields: ['titleHanlp^3', 'bodyHanlp'], type: 'best_fields' } },
+              { multi_match: { query, fields: ['title^3', 'body', 'chatUsername^2'], type: 'best_fields' } },
+              {
+                multi_match: {
+                  query: segmented,
+                  fields: ['titleHanlp^3', 'bodyHanlp', 'chatUsernameHanlp^2'],
+                  type: 'best_fields',
+                },
+              },
             ],
             minimum_should_match: 1,
             ...(filter.length ? { filter } : {}),
           },
         },
-        highlight: { fields: { title: {}, body: {}, titleHanlp: {}, bodyHanlp: {} } },
-        _source: { excludes: ['titleHanlp', 'bodyHanlp', 'tokens'] },
+        highlight: {
+          fields: {
+            title: {}, body: {}, chatUsername: {}, titleHanlp: {}, bodyHanlp: {}, chatUsernameHanlp: {},
+          },
+        },
+        _source: { excludes: ['titleHanlp', 'bodyHanlp', 'chatUsernameHanlp', 'tokens'] },
       })
       const hits = response.hits?.hits || []
       const hasMore = hits.length > limit
@@ -523,7 +533,11 @@ export class SearchQueries {
               event_time, collected_at, stable_fields
          FROM core.canonical_records
         WHERE deleted_at IS NULL
-          AND (title ILIKE '%' || $1 || '%' OR body ILIKE '%' || $1 || '%')
+          AND (
+            title ILIKE '%' || $1 || '%'
+            OR body ILIKE '%' || $1 || '%'
+            OR (stable_fields #>> '{attributes,chatUsername}') ILIKE '%' || $1 || '%'
+          )
           AND ($2::text IS NULL OR platform = $2)
           AND ($3::text IS NULL OR dataset_id = $3)
           AND ($4::text[] IS NULL OR dataset_id = ANY($4::text[]))

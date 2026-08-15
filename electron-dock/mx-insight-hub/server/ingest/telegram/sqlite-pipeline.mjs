@@ -3,7 +3,7 @@ import { enqueueJobsAtomically } from '../external/atomic-enqueue.mjs'
 import { EXTERNAL_PULL_QUEUE } from '../external/sync-job.mjs'
 
 export const TELEGRAM_SQLITE_PIPELINE_KEY = 'telegram-sqlite'
-export const TELEGRAM_SQLITE_MAPPING_VERSION = 1
+export const TELEGRAM_SQLITE_MAPPING_VERSION = 2
 
 export const TELEGRAM_SQLITE_INPUTS = Object.freeze([
   Object.freeze({
@@ -16,7 +16,7 @@ export const TELEGRAM_SQLITE_INPUTS = Object.freeze([
     dataset: 'telegram.sqlite.chats.v1',
     objectType: 'chat',
     builtInMappingVersion: TELEGRAM_SQLITE_MAPPING_VERSION,
-    builtInMappingId: 'e360ebf5-f353-4338-a16f-087a29290959',
+    builtInMappingId: '4362f414-75dc-4e81-bff9-29b58dab458a',
   }),
   Object.freeze({
     role: 'messages',
@@ -28,9 +28,18 @@ export const TELEGRAM_SQLITE_INPUTS = Object.freeze([
     dataset: 'telegram.sqlite.messages.v1',
     objectType: 'message',
     builtInMappingVersion: TELEGRAM_SQLITE_MAPPING_VERSION,
-    builtInMappingId: 'a89be04c-4a9c-4f75-b234-f9b75e89e56f',
+    builtInMappingId: 'd8150365-aebb-4291-80b0-436d83684026',
   }),
 ])
+
+const PREVIOUS_BUILT_IN_MAPPINGS = Object.freeze({
+  'telegram-sqlite-api-chats': Object.freeze([
+    Object.freeze({ id: 'e360ebf5-f353-4338-a16f-087a29290959', version: 1 }),
+  ]),
+  'telegram-sqlite-api-messages': Object.freeze([
+    Object.freeze({ id: 'a89be04c-4a9c-4f75-b234-f9b75e89e56f', version: 1 }),
+  ]),
+})
 
 export const TELEGRAM_SQLITE_SOURCE_KEYS = new Set(
   TELEGRAM_SQLITE_INPUTS.map((input) => input.sourceKey),
@@ -43,10 +52,14 @@ export const TELEGRAM_SQLITE_SOURCE_KEYS = new Set(
 export const TELEGRAM_SQLITE_STRATEGY = Object.freeze({
   consistency: 'eventual',
   initialSync: 'full',
-  incrementalSync: '24h_overlap',
-  overlapSeconds: 86_400,
-  reconciliation: 'daily_full',
-  fullReconcileIntervalSeconds: 86_400,
+  incrementalSync: '2h_overlap',
+  overlapSeconds: 7_200,
+  dailyWindow: Object.freeze({
+    timezone: 'Asia/Shanghai',
+    hour: 2,
+    window: 'previous_calendar_day',
+  }),
+  reconciliation: 'manual_full_align',
   deletionRule: 'explicit_deleted_at_only',
 })
 
@@ -437,11 +450,18 @@ export class TelegramSQLitePipeline {
         const input = TELEGRAM_SQLITE_INPUTS[index]
         const active = await this.store.getActiveMapping(source.id)
         if (active) {
-          if (active.id !== input.builtInMappingId || active.version !== input.builtInMappingVersion) {
+          const currentBuiltIn = active.id === input.builtInMappingId
+            && active.version === input.builtInMappingVersion
+          const previousBuiltIn = PREVIOUS_BUILT_IN_MAPPINGS[input.sourceKey].some((candidate) => (
+            candidate.id === active.id && candidate.version === active.version
+          ))
+          if (!currentBuiltIn && !previousBuiltIn) {
             throw new AppError(409, 'builtin_mapping_conflict', `A non-built-in mapping is active for ${input.sourceKey}`)
           }
-          targetMappings.push(active)
-          continue
+          if (currentBuiltIn) {
+            targetMappings.push(active)
+            continue
+          }
         }
         const builtIn = await this.#builtInMapping(source, input)
         targetMappings.push(builtIn)

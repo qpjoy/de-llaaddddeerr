@@ -96,6 +96,9 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
       username: rawNameField(),
       usernameHanlp: { type: 'text', analyzer: 'mx_presegmented', search_analyzer: 'mx_presegmented_search' },
       usernameSubstring: { type: 'wildcard' },
+      chatUsername: rawNameField(),
+      chatUsernameHanlp: { type: 'text', analyzer: 'mx_presegmented', search_analyzer: 'mx_presegmented_search' },
+      chatUsernameSubstring: { type: 'wildcard' },
       chatId: { type: 'keyword' },
       messageId: { type: 'keyword' },
       replyToMessageId: { type: 'keyword' },
@@ -107,6 +110,7 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
       // Telegram media/entities are promoted to stable typed fields now, before
       // the initial corpus build. Raw JSON remains in PostgreSQL; Elasticsearch
       // receives only bounded, query-oriented projections.
+      mediaType: { type: 'keyword' },
       mediaKind: { type: 'keyword' },
       mediaMimeType: { type: 'keyword' },
       mediaExtension: { type: 'keyword' },
