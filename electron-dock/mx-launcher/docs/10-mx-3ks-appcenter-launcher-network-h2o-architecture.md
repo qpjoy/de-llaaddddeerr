@@ -433,7 +433,7 @@ local password、不能 OAuth/飞书登录、不能被赋予用户 entitlement�
 两种可复制 channel：兼容性优先的 Direct-IP + HTTP Basic（默认 export port 是 3434，SSH profile
 明确配置冲突替代端口时可为 3435），以及通过 active Domestic edge 公网域名提供的 HTTPS + Basic。
 两条 URL 复用同一个长期稳定的 site system credential，并返回同语义 system YAML；订阅 YAML
-固定 `mixed-port: 7788`，并显式表达 `maxBytes/resetPeriod/expiresAt = null`
+作为客户端模板固定 `mixed-port: 7788`，并显式表达 `maxBytes/resetPeriod/expiresAt = null`
 （无总流量 quota）。`50 Mbps` 是上下行提示，不等于总流量上限。
 域名配置缺失、暂停或读取失败时只禁用域名复制；Direct-IP URL、Oversea Caddy 精确路径和原凭据
 保持不变，不把 Domestic edge 的可用性变成 IP 直连 channel 的前置条件。
@@ -444,10 +444,11 @@ local password、不能 OAuth/飞书登录、不能被赋予用户 entitlement�
 返回；Admin 在同一页面、同一 server/ops-token 绑定期间会把已 Reveal 的值保留在内存里，关闭再打开
 抽屉仍可复制，但不会写入 localStorage、审计或服务端日志。域名 URL 的 HTTPS 保护客户端到 Domestic edge 这一段；它不改变
 Oversea Hysteria 节点自身的 TLS/fingerprint 校验。MX 只提供和复制 URL，不生成
-`qp-tunnel-cli install` 命令，也不安装、启动或修改任何
-本地 7788/7890 实例。管理员把 URL 手工添加到自行选择的现有应用；若应用把订阅当作完整配置加载，
-需要自行确认它如何处理 YAML 中的 `mixed-port: 7788`。现有用户仍走 Bearer `ensure-subscription`
-和既有 7788 路径；HTTPS public-token 链路也继续作为第三方客户端的兼容方案。
+`qp-tunnel-cli install` 命令，也不安装、启动或修改任何本地 7788/7890 实例。`7788`
+只是订阅导入后的客户端本地 mixed listener 模板值，不是 Oversea Hysteria2 的 UDP 服务端口，
+也不要求管理员把现有 Clash 端口改成 7788。管理员把 URL 手工添加到自行选择的现有应用时，
+由该应用决定覆盖还是采用该值；MX-H2I/H2O 渲染本机 mihomo config 时则覆盖为它自己的 runtime
+端口。现有用户仍走 Bearer `ensure-subscription`；HTTPS public-token 链路也继续作为第三方客户端的兼容方案。
 
 ## Oversea 和 Mihomo 放置
 
@@ -725,6 +726,14 @@ allowlist 覆盖回去。
 - H2O 启动前会先用 launcher 网络栈把订阅 YAML 取回来，通过 `applyManagedConfig`
   的 `subscriptionContent` 直接交给 mihomo，避免它再发一次不带 SNI 的请求；
   预取失败时才回退到 mihomo 自己下载。
+- Oversea 主机把 Hysteria2 的长期 runtime state 固定在
+  `/opt/mx/state/hysteria2-access-stack`；`/opt/mx/releases/oversea-access-stack/<revision>`
+  及 `/opt/mx/current/hysteria2-access-stack` 只承载和切换发布代码，不因新 release 重新生成 TLS 身份。
+- Admin `Oversea -> Sync Remote` 每次都从稳定 state 中的 cert 重算 fingerprint，并校验运行中
+  Hysteria2 的 `/etc/hysteria` mount、容器创建时记录的 cert fingerprint、挂载 cert、磁盘 cert
+  和订阅 YAML `fingerprint:` 是否一致。
+  无法证明一致时只重建 Hysteria2 service 再校验；重建后仍不一致时 fail closed，
+  不向 Internal 回报 ready fingerprint。
 - 订阅 YAML 里的 `mixed-port` 只是上游模板值，H2O runtime 会在渲染本机 mihomo config 时
   覆盖成本地端口（默认 `23458`）。系统订阅能下载但不能连时，应优先检查 Internal 是否已经
   同步 Oversea `serverPorts` 和 `TLS fingerprint`；`Stack Status` / worker report 里的

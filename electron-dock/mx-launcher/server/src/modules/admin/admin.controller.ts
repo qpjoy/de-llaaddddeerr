@@ -6735,11 +6735,23 @@ function executableAdminRemoteCommandKind(value: string): boolean {
 
 function reusableOverseaPlanContract(plan: SiteSlotPlan): boolean {
   const commands = plan.deploymentPhases.flatMap((phase) => phase.commands ?? []);
+  const stableStateLinks = ['.env', 'config', 'data'].map((component) => (
+    `ln -sfnT /opt/mx/state/hysteria2-access-stack/${component} /opt/mx/releases/oversea-access-stack/__release_revision__/${component}`
+  ));
   return (commands.some((command) => command.includes('/bin/qp-tunnel-cli register --internal'))
     || commands.some((command) => command.includes('oversea callback push-only; registration skipped')))
+    && stableStateLinks.every((link) => commands.some((command) => command.includes(link)))
+    && commands.some((command) => (
+      command.includes('env_file=/opt/mx/state/hysteria2-access-stack/.env')
+      && command.includes('mv -f "$tmp_file" "$env_file"')
+      && !command.includes('"HY2_EXPORT_PASSWORD_HASH="')
+      && !command.includes('"HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH="')
+      && !command.includes('"HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256="')
+    ))
     && commands.some((command) => command.includes(`HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=${SYSTEM_SUBSCRIPTION_MIXED_PORT}`))
     && commands.some((command) => command.includes('./manage.sh sync-internal-defaults'))
     && commands.some((command) => command.includes('./manage.sh docker-status'))
+    && commands.some((command) => command.includes('./manage.sh check-system-subscription'))
     && commands.some((command) => command.includes('./manage.sh status | grep -E "^TLS fingerprint:'))
     && commands.some((command) => command.includes('slot services placeholder; no Docker services selected'))
     && commands.some((command) => command.includes('overseaConfigDelivery=internal-pushed'))

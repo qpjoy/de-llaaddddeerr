@@ -51,13 +51,27 @@ cp -R "$SOURCE_DIR/scripts" "$TEST_ROOT/scripts"
 			eval "$array_name=(${values[*]})"
 		}
 	fi
-	cp .env.example .env
+	EXPECTED_TLS_FINGERPRINT="D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58"
+	MISMATCH_TLS_FINGERPRINT="E6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58"
+	stable_env_dir="$TEST_ROOT/stable-state"
+	stable_env_file="$stable_env_dir/.env"
+	mkdir -p "$stable_env_dir"
+	cp .env.example "$stable_env_file"
+	ln -s "$stable_env_file" .env
+	env_link_target="$(readlink .env)"
+	assert_env_symlink_intact() {
+		[[ -L "$ENV_FILE" ]] || fail "atomic env update replaced the stable .env symlink"
+		[[ "$(readlink "$ENV_FILE")" == "$env_link_target" ]] \
+			|| fail "atomic env update changed the stable .env symlink target"
+	}
+	assert_env_symlink_intact
 	ensure_stack_dirs
 	ensure_users_file
 
 	set_env_value HY2_SERVER_HOST "198.51.100.8"
+	assert_env_symlink_intact
 	set_env_value HY2_SERVER_PORTS "52120"
-	set_env_value HY2_TLS_FINGERPRINT "D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58"
+	set_env_value HY2_TLS_FINGERPRINT "$EXPECTED_TLS_FINGERPRINT"
 	set_env_value HY2_EXPORT_PASSWORD_HASH '$2a$14$Zkx.HbQOScCQ1YI8Iu7/fO1M/ieGJqmXiF6Vq95PVIYzGKqG7SNU.'
 	set_env_value HY2_SYSTEM_SUBSCRIPTION_ACCOUNT "oversea-main-subscriptions"
 	set_env_value HY2_SYSTEM_SUBSCRIPTION_BASIC_USER "subscriptions"
@@ -185,6 +199,9 @@ JSON
 
 	reconcile_from_json_command --state-file tunnel-state.json
 	load_env
+	assert_env_symlink_intact
+	[[ "$(read_env_value_from_file "$stable_env_file" HY2_TLS_FINGERPRINT)" == "$EXPECTED_TLS_FINGERPRINT" ]] \
+		|| fail "atomic env update did not persist the TLS fingerprint in stable state"
 	assert_contains data/hysteria/users.csv "oversea-main-subscriptions,token-'one,50 Mbps,50 Mbps"
 	[[ "$(internal_defaults_drift_report)" == "passed" ]] \
 		|| fail "50 Mbps system account was incorrectly reported as Internal defaults drift"
@@ -202,7 +219,7 @@ JSON
 	assert_contains "$managed" "  - GEOIP,CN,DIRECT"
 	assert_contains "$managed" "  - MATCH,PROXY"
 	assert_not_contains "$managed" "listen: 127.0.0.1:1053"
-	assert_contains "$managed" "fingerprint: 'D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58'"
+	assert_contains "$managed" "fingerprint: '$EXPECTED_TLS_FINGERPRINT'"
 	[[ "$HY2_SYSTEM_SUBSCRIPTION_PATH" == "/peer_oversea-main-subscriptions.mihomo.yaml" ]] \
 		|| fail "Caddy path was not derived from the managed account"
 	[[ "$HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256" != "disabled" && -n "$HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256" ]] \
@@ -252,7 +269,76 @@ JSON
 		[[ -n "$output" ]] || return 1
 		cp "$managed" "$output"
 	}
-	check_system_subscription_command | grep -F "mixed-port 7788: passed" >/dev/null \
+	certificate_fingerprint() {
+		[[ "${1:-}" == "$CERT_CRT_PATH" ]] \
+			|| fail "system subscription gate inspected an unexpected certificate path"
+		printf "%s\n" "$EXPECTED_TLS_FINGERPRINT"
+	}
+	certificate_key_pair_matches() {
+		[[ "${1:-}" == "$CERT_CRT_PATH" && "${2:-}" == "$CERT_KEY_PATH" ]] \
+			|| fail "system subscription gate inspected an unexpected certificate/key path"
+		return 0
+	}
+	hysteria_runtime_mounts_match() {
+		return 0
+	}
+	subscriptions_runtime_mounts_match() {
+		return 0
+	}
+	hysteria_runtime_certificate_fingerprint() {
+		printf "%s\n" "$MISMATCH_TLS_FINGERPRINT"
+	}
+	hysteria_runtime_applied_certificate_fingerprint() {
+		printf "%s\n" "$EXPECTED_TLS_FINGERPRINT"
+	}
+	if mismatch_output="$(check_system_subscription_command 2>&1)"; then
+		fail "live Hysteria TLS identity mismatch did not block the system subscription gate"
+	fi
+	[[ "$mismatch_output" == *"stale release mount or TLS certificate"* ]] \
+		|| fail "live Hysteria TLS identity mismatch returned an unexpected error"
+	[[ ! -s "$readiness_trace" ]] \
+		|| fail "system subscription HTTP curl ran before the live TLS mismatch gate"
+
+	hysteria_runtime_certificate_fingerprint() {
+		return 1
+	}
+	if unavailable_output="$(check_system_subscription_command 2>&1)"; then
+		fail "unavailable live Hysteria TLS identity did not block the system subscription gate"
+	fi
+	[[ "$unavailable_output" == *"stale release mount or TLS certificate"* ]] \
+		|| fail "unavailable live Hysteria TLS identity returned an unexpected error"
+	[[ ! -s "$readiness_trace" ]] \
+		|| fail "system subscription HTTP curl ran before the unavailable live TLS gate"
+
+	hysteria_runtime_certificate_fingerprint() {
+		printf "%s\n" "$EXPECTED_TLS_FINGERPRINT"
+	}
+	hysteria_runtime_applied_certificate_fingerprint() {
+		printf "%s\n" "$MISMATCH_TLS_FINGERPRINT"
+	}
+	if applied_mismatch_output="$(check_system_subscription_command 2>&1)"; then
+		fail "container-start TLS fingerprint mismatch did not block the system subscription gate"
+	fi
+	[[ "$applied_mismatch_output" == *"stale release mount or TLS certificate"* ]] \
+		|| fail "container-start TLS fingerprint mismatch returned an unexpected error"
+	[[ ! -s "$readiness_trace" ]] \
+		|| fail "system subscription HTTP curl ran before the container-start TLS gate"
+
+	hysteria_runtime_applied_certificate_fingerprint() {
+		return 1
+	}
+	if applied_unavailable_output="$(check_system_subscription_command 2>&1)"; then
+		fail "missing container-start TLS fingerprint did not block the system subscription gate"
+	fi
+	[[ "$applied_unavailable_output" == *"stale release mount or TLS certificate"* ]] \
+		|| fail "missing container-start TLS fingerprint returned an unexpected error"
+	[[ ! -s "$readiness_trace" ]] \
+		|| fail "system subscription HTTP curl ran before the missing container-start TLS gate"
+
+	hysteria_runtime_applied_certificate_fingerprint() {
+		printf "%s\n" "$EXPECTED_TLS_FINGERPRINT"
+	}
+	check_system_subscription_command | grep -F "live Hysteria TLS identity: passed" >/dev/null \
 		|| fail "exact-path system subscription verification did not pass"
 	[[ "$(tr '\n' ' ' < "$readiness_trace")" == "healthz healthz healthz exact-path " ]] \
 		|| fail "system subscription readiness/exact-path curl order changed"
@@ -292,6 +378,38 @@ JSON
 	cd "$TEST_ROOT"
 	# shellcheck disable=SC1091
 	source ./manage.sh
+	env_link_target="$(readlink "$ENV_FILE")"
+	set_env_value HY2_TLS_FINGERPRINT "stale-before-cert-sync"
+	ensure_cert_material
+	first_fingerprint="$(certificate_fingerprint "$CERT_CRT_PATH")"
+	[[ "$(read_env_value_from_file "$(env_storage_file)" HY2_TLS_FINGERPRINT)" == "$first_fingerprint" ]] \
+		|| fail "disk certificate fingerprint did not replace stale env state"
+	set_env_value HY2_TLS_FINGERPRINT "stale-after-cert-sync"
+	ensure_cert_material
+	[[ "$(certificate_fingerprint "$CERT_CRT_PATH")" == "$first_fingerprint" ]] \
+		|| fail "fingerprint convergence unexpectedly rotated an existing certificate"
+	[[ "$(read_env_value_from_file "$(env_storage_file)" HY2_TLS_FINGERPRINT)" == "$first_fingerprint" ]] \
+		|| fail "existing disk certificate did not repair stale env fingerprint"
+	openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$CERT_KEY_PATH" >/dev/null 2>&1
+	if certificate_key_pair_matches "$CERT_CRT_PATH" "$CERT_KEY_PATH"; then
+		fail "mismatched certificate/private-key fixture unexpectedly passed validation"
+	fi
+	ensure_cert_material
+	certificate_key_pair_matches "$CERT_CRT_PATH" "$CERT_KEY_PATH" \
+		|| fail "mismatched certificate/private-key state was not repaired"
+	repaired_fingerprint="$(certificate_fingerprint "$CERT_CRT_PATH")"
+	[[ "$repaired_fingerprint" != "$first_fingerprint" ]] \
+		|| fail "mismatched certificate/private-key repair did not replace the certificate"
+	[[ "$(read_env_value_from_file "$(env_storage_file)" HY2_TLS_FINGERPRINT)" == "$repaired_fingerprint" ]] \
+		|| fail "certificate/private-key repair did not publish the replacement fingerprint"
+	[[ -L "$ENV_FILE" && "$(readlink "$ENV_FILE")" == "$env_link_target" ]] \
+		|| fail "certificate fingerprint convergence replaced the stable .env symlink"
+)
+
+(
+	cd "$TEST_ROOT"
+	# shellcheck disable=SC1091
+	source ./manage.sh
 	require_root() { return 0; }
 	detect_compose() { return 0; }
 	ensure_stack_dirs() { return 0; }
@@ -304,10 +422,39 @@ JSON
 	main docker-status --soft
 )
 
+(
+	cd "$TEST_ROOT"
+	# shellcheck disable=SC1091
+	source ./manage.sh
+	recreate_trace="$TEST_ROOT/hysteria-runtime-recreate-trace"
+	identity_checks=0
+	container_running() { return 0; }
+	hysteria_runtime_identity_matches() {
+		identity_checks=$((identity_checks + 1))
+		[[ "$identity_checks" -ge 2 ]]
+	}
+	render_runtime_files() { return 0; }
+	safe_recreate_service() {
+		[[ "${1:-}" == "hysteria" ]] || fail "runtime identity repair recreated an unexpected service"
+		printf "hysteria\n" >> "$recreate_trace"
+	}
+	wait_for_container() {
+		[[ "${1:-}" == "$HYSTERIA_CONTAINER" ]] || fail "runtime identity repair waited for an unexpected container"
+	}
+	ensure_hysteria_published_port() { return 0; }
+
+	ensure_hysteria_runtime_identity_current
+	[[ "$(wc -l < "$recreate_trace" | tr -d ' ')" == "1" ]] \
+		|| fail "runtime identity drift did not recreate Hysteria exactly once"
+	[[ "$identity_checks" == "2" ]] \
+		|| fail "runtime identity was not verified before and after Hysteria recreate"
+)
+
 assert_contains "$SOURCE_DIR/Caddyfile" '@systemSubscription path {$HY2_SYSTEM_SUBSCRIPTION_PATH:/__system-subscription-disabled__}'
 assert_not_contains "$SOURCE_DIR/Caddyfile" '@systemSubscription path /peer_*'
 assert_contains "$SOURCE_DIR/Caddyfile" '{$HY2_SYSTEM_SUBSCRIPTION_BASIC_USER} {$HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH}'
 assert_contains "$SOURCE_DIR/docker-compose.yml" '${HY2_EXPORT_FALLBACK_PORT}:8080'
+assert_contains "$SOURCE_DIR/docker-compose.yml" 'com.mx.hysteria2.tls-fingerprint: "${HY2_TLS_FINGERPRINT}"'
 assert_contains "$SOURCE_DIR/docker-compose.yml" 'HY2_SYSTEM_SUBSCRIPTION_PATH: ${HY2_SYSTEM_SUBSCRIPTION_PATH:-/__system-subscription-disabled__}'
 assert_contains "$SOURCE_DIR/.env.example" 'HY2_EXPORT_FALLBACK_PORT=3434'
 assert_contains "$SOURCE_DIR/.env.example" 'HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=7788'

@@ -779,6 +779,16 @@ artifact 和本地 apply 命令，不代表 API pod 已经远程安装 WireGuard
 Oversea 只接收 Docker hysteria2 access stack、site-agent/runner-worker artifact 和
 Internal 下发的 access account material，不保存 Config Center 权限真相。
 
+Oversea 主机上的发布与运行时边界固定如下：
+
+- `/opt/mx/releases/oversea-access-stack/<revision>` 是不可变的 release 代码目录；
+- `/opt/mx/current/hysteria2-access-stack` 只是当前 release 的代码入口；
+- `/opt/mx/state/hysteria2-access-stack` 是跨 release 保留的 runtime state，包括 `.env`、TLS cert/key、
+  Hysteria2 account material 和生成的 subscription/Caddy state。
+
+新 release 不得以新目录为理由重新生成 TLS cert 或发布新的身份 fingerprint；它只更换代码，
+再让新代码对同一份稳定 state 做幂等 reconcile。
+
 当前 oversea plan 的主要步骤是：
 
 1. `ssh-profile`：读取 active Oversea SSH Profile，检查 host、identity、known_hosts 和
@@ -795,7 +805,8 @@ Internal 下发的 access account material，不保存 Config Center 权限真�
    worker job；已经 `passed` 的 runner 表示上一轮 worker report 已结束，不能再复用。
 7. `worker-job`：创建 oversea worker job，展开每个 artifact-push/配置/健康检查命令。
 8. `remote-worker-run`：在 `executeRemote=true` 且 `confirmInstall=true` 时，通过 Internal
-   侧 worker 执行 SSH/rsync/scp，把 artifact 推到 Oversea 并运行远端脚本；成功后 worker
+   侧 worker 执行 SSH/rsync/scp，把只含代码的 artifact 推到 Oversea，切换 current release 并对稳定
+   runtime state 运行远端脚本；成功后 worker
    report 中应出现 `mode=artifact-push-remote-ssh`、`execution=executed`。
 
 如果 UI 显示
@@ -824,12 +835,21 @@ Internal 下发的 access account material，不保存 Config Center 权限真�
   host 必须临时 `tun-on` 时，把已知公网入口来源写入
   `MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS` 或
   `/etc/mihomo-client/tun-route-exclude-addresses.txt` 后再启用。
+- `Sync Remote` 在发布订阅前从稳定 state 的 cert 重算 fingerprint，并同时比较运行中
+  Hysteria2 `/etc/hysteria` mount、容器创建时记录的 fingerprint、挂载 cert、磁盘 cert 和生成
+  YAML 中的 `fingerprint:`。只有明确
+  一致时才沿用 `mx-oversea-hysteria2`；检测到漂移或无法证明一致时重建一次，重建后仍不一致则
+  `check-system-subscription` fail closed，worker 不得回报 ready fingerprint。
 - `Sync Remote` 对 Oversea 的端口同步发生在 `configure-oversea-access`：Internal 先把
   `HY2_SERVER_PORTS=<UI HY2 UDP>` 写入远端 `.env` 和 `/opt/mx/site-agent/tunnel-state.json`，
   再执行 `./manage.sh reconcile-from-json --mode hysteria2-only`，端口变化会触发
   `docker compose` 重建 `mx-oversea-hysteria2`。如果订阅 YAML 已显示 51289 但 Oversea
   `docker ps` 仍是 51288，应检查这个 reconcile 步骤和远端 `manage.sh` 版本，而不是只刷新
   Internal subscription。
+- 系统订阅中的 `mixed-port: 7788` 仅是客户端本地 mixed listener 模板值，与 Oversea
+  Hysteria2 的 512xx/UDP 端口和上述 cert reconcile 无关。MX-H2I/H2O 会在渲染本机 mihomo
+  config 时覆盖为自己的 runtime 端口；第三方 Clash 应用则按各自的导入/端口策略处理，
+  不需要为了使用该订阅把现有本地端口改成 7788。
 
 Internal API 可以跑在 k8s pod 里，但 WG runtime 必须跑在真实 Internal 宿主机上。当前
 默认 host-runner 是 native runner：macOS 用 LaunchAgent，Ubuntu/Linux 用 systemd，

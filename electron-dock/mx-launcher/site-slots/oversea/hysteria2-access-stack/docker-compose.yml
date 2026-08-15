@@ -6,6 +6,8 @@ services:
       - NET_ADMIN
     environment:
       TZ: ${TZ}
+    labels:
+      com.mx.hysteria2.tls-fingerprint: "${HY2_TLS_FINGERPRINT}"
     command: ["server", "-c", "/etc/hysteria/server.yaml"]
     volumes:
       - ./config/hysteria:/etc/hysteria

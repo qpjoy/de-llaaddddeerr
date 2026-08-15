@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -451,6 +452,27 @@ test('Oversea Install/Sync and archive never cross the Domestic WG runtime bound
       assert.equal(ensured.ensure.status, 'passed');
       assert.notEqual(ensured.ensure.planId, stalePlan.planId, 'Install/Sync must not replay a stale Oversea plan');
       assert.equal(createdPlans.length, 1);
+      const stableStateDir = '/opt/mx/state/hysteria2-access-stack';
+      const accessStackReleaseDir = '/opt/mx/releases/oversea-access-stack/__release_revision__';
+      const currentPrepare = createdPlans[0].deploymentPhases.find((phase) => phase.phaseId === 'prepare-access-stack');
+      assert.ok(currentPrepare);
+      const stableStatePrepareCommand = currentPrepare.commands.find((command) => (
+        command.includes(stableStateDir)
+        && command.includes(`ln -sfnT ${accessStackReleaseDir} /opt/mx/current/hysteria2-access-stack`)
+      ));
+      assert.ok(stableStatePrepareCommand, 'the fresh plan must prepare stable Oversea state before switching current');
+      for (const component of ['.env', 'config', 'data']) {
+        const stateLink = `ln -sfnT ${stableStateDir}/${component} ${accessStackReleaseDir}/${component}`;
+        assert.ok(
+          stableStatePrepareCommand.includes(stateLink),
+          `the fresh plan must link ${component} from the release to stable state`
+        );
+        assert.ok(
+          stableStatePrepareCommand.indexOf(stateLink)
+            < stableStatePrepareCommand.indexOf(`ln -sfnT ${accessStackReleaseDir} /opt/mx/current/hysteria2-access-stack`),
+          `${component} must be linked to stable state before current is switched`
+        );
+      }
       assert.ok(
         createdPlans[0].deploymentPhases
           .flatMap((phase) => phase.commands)
@@ -459,6 +481,57 @@ test('Oversea Install/Sync and archive never cross the Domestic WG runtime bound
       );
       const currentConfigure = createdPlans[0].deploymentPhases.find((phase) => phase.phaseId === 'configure-oversea-access');
       assert.ok(currentConfigure);
+      const stableEnvWriteCommand = currentConfigure.commands.find((command) => (
+        command.includes(`env_file=${stableStateDir}/.env`)
+        && command.includes('mv -f "$tmp_file" "$env_file"')
+        && command.includes('HY2_EXPORT_BASE_URL=http://203.0.113.21:3435')
+      ));
+      assert.ok(stableEnvWriteCommand, 'Internal-managed env must be written to the stable state file');
+      for (const runtimeOwnedKey of [
+        'HY2_EXPORT_PASSWORD_HASH',
+        'HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH',
+        'HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256'
+      ]) {
+        assert.ok(
+          !stableEnvWriteCommand.includes(`"${runtimeOwnedKey}="`),
+          `${runtimeOwnedKey} must remain runtime-owned across repeated Sync Remote runs`
+        );
+      }
+      const remoteEnvCommand = stableEnvWriteCommand.match(/'([\s\S]*)'$/)?.[1];
+      assert.ok(remoteEnvCommand, 'the stable env write command must remain a single remote shell command');
+      const envCommandStateDir = join(outputDir, 'stable-env-command');
+      const envCommandFile = join(envCommandStateDir, '.env');
+      mkdirSync(envCommandStateDir, { recursive: true });
+      const runtimeOwnedValues = new Map([
+        ['HY2_EXPORT_PASSWORD_HASH', 'preserve-export-hash'],
+        ['HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH', 'preserve-system-hash'],
+        ['HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256', 'preserve-system-token-digest']
+      ]);
+      writeFileSync(envCommandFile, [
+        'TZ=stale-one',
+        'TZ=stale-two',
+        ...Array.from(runtimeOwnedValues, ([key, value]) => `${key}=${value}`),
+        'UNMANAGED_SENTINEL=preserve-unmanaged-value',
+        ''
+      ].join('\n'), { mode: 0o600 });
+      execFileSync('/bin/bash', ['-c', remoteEnvCommand.replaceAll(stableStateDir, envCommandStateDir)]);
+      const renderedEnvLines = readFileSync(envCommandFile, 'utf8').trimEnd().split('\n');
+      for (const [key, value] of runtimeOwnedValues) {
+        assert.deepEqual(
+          renderedEnvLines.filter((line) => line.startsWith(`${key}=`)),
+          [`${key}=${value}`],
+          `${key} must survive the generated remote env command byte-for-byte`
+        );
+      }
+      assert.deepEqual(
+        renderedEnvLines.filter((line) => line.startsWith('TZ=')),
+        ['TZ=Asia/Shanghai'],
+        'the generated remote env command must replace duplicate Internal-managed keys exactly once'
+      );
+      assert.ok(
+        renderedEnvLines.includes('UNMANAGED_SENTINEL=preserve-unmanaged-value'),
+        'the generated remote env command must preserve unmanaged state'
+      );
       assert.match(currentConfigure.commands[8] ?? '', /check-system-subscription/, 'the strict ready gate must remain step .9');
       const fingerprintCommand = currentConfigure.commands[10] ?? '';
       assert.match(
@@ -519,6 +592,42 @@ test('Oversea Install/Sync and archive never cross the Domestic WG runtime bound
         'the replacement plan must restore the safe TLS fingerprint evidence step'
       );
 
+      for (const phase of createdPlans[1].deploymentPhases) {
+        phase.commands = phase.commands.map((command) => (
+          command.replace(
+            `ln -sfnT ${stableStateDir}/config ${accessStackReleaseDir}/config`,
+            `ln -sfnT /opt/mx/legacy/hysteria2-access-stack/config ${accessStackReleaseDir}/config`
+          )
+        ));
+      }
+      const repairedStableStatePlan = await controller.ensureOverseaSite(
+        undefined,
+        'mx-oversea-hk01',
+        {
+          executeRemote: true,
+          confirmInstall: true,
+          force: true,
+          requestedBy: 'test',
+          requestId: 'oversea-domestic-isolation-missing-stable-state-contract'
+        },
+        undefined,
+        undefined,
+        OPS_TOKEN
+      );
+      assert.equal(repairedStableStatePlan.ensure.status, 'passed');
+      assert.notEqual(
+        repairedStableStatePlan.ensure.planId,
+        repairedEvidencePlan.ensure.planId,
+        'a legacy plan missing any stable Oversea state link must not be reused'
+      );
+      assert.equal(createdPlans.length, 3);
+      assert.ok(
+        createdPlans[2].deploymentPhases
+          .flatMap((phase) => phase.commands)
+          .some((command) => command.includes(stableStateDir)),
+        'the replacement plan must restore stable Oversea state preparation'
+      );
+
       const archived = await controller.archiveOverseaSite(
         undefined,
         'mx-oversea-hk01',
@@ -560,7 +669,7 @@ test('Oversea Install/Sync and archive never cross the Domestic WG runtime bound
     }
 
     const domesticAfter = rawStore.getSiteSlotDomesticWireGuardSecret(domesticPlan.siteId);
-    assert.deepEqual(createdPlanKinds, ['oversea', 'oversea']);
+    assert.deepEqual(createdPlanKinds, ['oversea', 'oversea', 'oversea']);
     assert.equal(existsSync(join(outputDir, 'oversea', 'manifest.json')), true);
     assert.equal(
       existsSync(join(outputDir, 'domestic')),

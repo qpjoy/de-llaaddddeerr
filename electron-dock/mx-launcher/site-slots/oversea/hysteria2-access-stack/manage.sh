@@ -15,6 +15,7 @@ AUTH_SCRIPT_PATH="$STACK_DIR/config/hysteria/auth.sh"
 SERVER_CONFIG_PATH="$STACK_DIR/config/hysteria/server.yaml"
 HYSTERIA_CONTAINER="mx-oversea-hysteria2"
 SUBSCRIPTIONS_CONTAINER="mx-oversea-hysteria2-health"
+HYSTERIA_TLS_FINGERPRINT_LABEL="com.mx.hysteria2.tls-fingerprint"
 OLD_WG_STACK_DIR="$ROOT_DIR/docker/wg-mihomo-stack"
 OLD_WG_ENV_FILE="$OLD_WG_STACK_DIR/.env"
 SYSTEM_SUBSCRIPTION_DISABLED_PATH="/__system-subscription-disabled__"
@@ -166,14 +167,30 @@ quote_env_value() {
 	printf "'%s'" "$escaped"
 }
 
+env_storage_file() {
+	local link_target
+
+	if [[ ! -L "$ENV_FILE" ]]; then
+		printf "%s\n" "$ENV_FILE"
+		return 0
+	fi
+
+	link_target="$(readlink "$ENV_FILE")" || return 1
+	case "$link_target" in
+		/*) printf "%s\n" "$link_target" ;;
+		*) printf "%s/%s\n" "$(cd "$(dirname "$ENV_FILE")" && pwd -P)" "$link_target" ;;
+	esac
+}
+
 set_env_value() {
 	local key="$1"
 	local value="$2"
-	local tmp
+	local env_file tmp
 
 	value="$(quote_env_value "$value")"
+	env_file="$(env_storage_file)" || die "Cannot resolve environment state file: $ENV_FILE"
 
-	tmp="$(mktemp)"
+	tmp="$(mktemp "${env_file}.tmp.XXXXXX")"
 	awk -v key="$key" -v value="$value" '
 		BEGIN { updated = 0 }
 		$0 ~ "^" key "=" {
@@ -187,15 +204,17 @@ set_env_value() {
 				print key "=" value
 			}
 		}
-	' "$ENV_FILE" > "$tmp"
-	mv "$tmp" "$ENV_FILE"
+	' "$env_file" > "$tmp"
+	mv "$tmp" "$env_file"
+	chmod 600 "$env_file" 2>/dev/null || true
 }
 
 sanitize_env_file_for_source() {
-	local tmp line key value trimmed first last
+	local env_file tmp line key value trimmed first last
 
 	[[ -f "$ENV_FILE" ]] || return 0
-	tmp="$(mktemp)"
+	env_file="$(env_storage_file)" || die "Cannot resolve environment state file: $ENV_FILE"
+	tmp="$(mktemp "${env_file}.tmp.XXXXXX")"
 	while IFS= read -r line || [[ -n "$line" ]]; do
 		if [[ -z "$line" || "$line" == \#* ]]; then
 			printf "%s\n" "$line" >> "$tmp"
@@ -217,9 +236,9 @@ sanitize_env_file_for_source() {
 		fi
 
 		printf "%s\n" "$line" >> "$tmp"
-	done < "$ENV_FILE"
-	mv "$tmp" "$ENV_FILE"
-	chmod 600 "$ENV_FILE" 2>/dev/null || true
+	done < "$env_file"
+	mv "$tmp" "$env_file"
+	chmod 600 "$env_file" 2>/dev/null || true
 }
 
 normalize_password_hash_quotes() {
@@ -635,6 +654,93 @@ container_running() {
 	[[ "$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || true)" == "true" ]]
 }
 
+canonical_path() {
+	local path="$1"
+	local directory basename
+
+	if [[ -d "$path" ]]; then
+		(cd "$path" && pwd -P)
+		return
+	fi
+	directory="$(dirname "$path")"
+	basename="$(basename "$path")"
+	[[ -d "$directory" ]] || return 1
+	printf "%s/%s\n" "$(cd "$directory" && pwd -P)" "$basename"
+}
+
+container_mount_source() {
+	local container_name="$1"
+	local destination="$2"
+
+	docker inspect -f '{{range .Mounts}}{{printf "%s\t%s\n" .Destination .Source}}{{end}}' "$container_name" 2>/dev/null \
+		| awk -F '\t' -v destination="$destination" '$1 == destination { print $2; exit }'
+}
+
+container_mount_matches() {
+	local container_name="$1"
+	local destination="$2"
+	local expected_path="$3"
+	local actual expected pid runtime_path actual_identity expected_identity
+
+	expected="$(canonical_path "$expected_path")" || return 1
+	pid="$(docker inspect -f '{{.State.Pid}}' "$container_name" 2>/dev/null || true)"
+	runtime_path="/proc/${pid}/root${destination}"
+	if [[ "$pid" =~ ^[1-9][0-9]*$ && -e "$runtime_path" ]]; then
+		actual_identity="$(stat -Lc '%d:%i' "$runtime_path" 2>/dev/null || true)"
+		expected_identity="$(stat -Lc '%d:%i' "$expected" 2>/dev/null || true)"
+		[[ -n "$actual_identity" && "$actual_identity" == "$expected_identity" ]]
+		return
+	fi
+
+	actual="$(container_mount_source "$container_name" "$destination")"
+	[[ -n "$actual" ]] || return 1
+	actual="$(canonical_path "$actual")" || return 1
+	[[ "$actual" == "$expected" ]]
+}
+
+hysteria_runtime_mounts_match() {
+	container_running "$HYSTERIA_CONTAINER" || return 1
+	container_mount_matches "$HYSTERIA_CONTAINER" /etc/hysteria "$STACK_DIR/config/hysteria" \
+		&& container_mount_matches "$HYSTERIA_CONTAINER" /var/lib/hysteria "$STACK_DIR/data/hysteria"
+}
+
+hysteria_runtime_certificate_fingerprint() {
+	container_running "$HYSTERIA_CONTAINER" || return 1
+	docker exec "$HYSTERIA_CONTAINER" cat /etc/hysteria/certs/server.crt 2>/dev/null \
+		| fingerprint_from_pem
+}
+
+hysteria_runtime_applied_certificate_fingerprint() {
+	local fingerprint
+
+	container_running "$HYSTERIA_CONTAINER" || return 1
+	fingerprint="$(docker inspect -f "{{ index .Config.Labels \"$HYSTERIA_TLS_FINGERPRINT_LABEL\" }}" "$HYSTERIA_CONTAINER" 2>/dev/null || true)"
+	[[ "$fingerprint" =~ ^([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}$ ]] || return 1
+	printf "%s\n" "$fingerprint"
+}
+
+hysteria_runtime_certificate_matches() {
+	local expected mounted applied
+
+	container_running "$HYSTERIA_CONTAINER" || return 1
+	expected="$(certificate_fingerprint "$CERT_CRT_PATH")" || return 1
+	mounted="$(hysteria_runtime_certificate_fingerprint)" || return 1
+	applied="$(hysteria_runtime_applied_certificate_fingerprint)" || return 1
+	[[ "$mounted" == "$expected" && "$applied" == "$expected" ]]
+}
+
+hysteria_runtime_identity_matches() {
+	hysteria_runtime_mounts_match && hysteria_runtime_certificate_matches
+}
+
+subscriptions_runtime_mounts_match() {
+	container_running "$SUBSCRIPTIONS_CONTAINER" || return 1
+	container_mount_matches "$SUBSCRIPTIONS_CONTAINER" /etc/caddy/Caddyfile "$STACK_DIR/Caddyfile" \
+		&& container_mount_matches "$SUBSCRIPTIONS_CONTAINER" /srv/hy2 "$STACK_DIR/data/subscriptions" \
+		&& container_mount_matches "$SUBSCRIPTIONS_CONTAINER" /data "$STACK_DIR/data/caddy" \
+		&& container_mount_matches "$SUBSCRIPTIONS_CONTAINER" /config "$STACK_DIR/config/caddy"
+}
+
 hysteria_port_publish_check_supported() {
 	[[ "${HY2_SERVER_PORTS:-}" =~ ^[0-9]+$ ]]
 }
@@ -675,6 +781,22 @@ ensure_hysteria_runtime_users_current() {
 	ensure_hysteria_published_port
 	if ! hysteria_runtime_users_file_matches; then
 		die "Docker hysteria users.csv still differs after recreate; check bind mount source for $HYSTERIA_CONTAINER."
+	fi
+}
+
+ensure_hysteria_runtime_identity_current() {
+	container_running "$HYSTERIA_CONTAINER" || return 0
+	if hysteria_runtime_identity_matches; then
+		return 0
+	fi
+
+	echo "Docker Hysteria release mount or TLS certificate drift detected; recreating hysteria with stable runtime state."
+	render_runtime_files
+	safe_recreate_service hysteria
+	wait_for_container "$HYSTERIA_CONTAINER"
+	ensure_hysteria_published_port
+	if ! hysteria_runtime_identity_matches; then
+		die "Docker Hysteria runtime still differs from the current stable mount/certificate after recreate."
 	fi
 }
 
@@ -834,8 +956,45 @@ generate_self_signed_cert() {
 	chmod 600 "$CERT_KEY_PATH"
 	chmod 644 "$CERT_CRT_PATH"
 
-	fp="$(openssl x509 -noout -fingerprint -sha256 -in "$CERT_CRT_PATH" | cut -d= -f2)"
+	fp="$(certificate_fingerprint "$CERT_CRT_PATH")" \
+		|| die "Generated Hysteria TLS certificate has no valid SHA-256 fingerprint."
 	set_env_value HY2_TLS_FINGERPRINT "$fp"
+}
+
+fingerprint_from_pem() {
+	local fingerprint
+
+	fingerprint="$(openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)" || return 1
+	[[ "$fingerprint" =~ ^([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}$ ]] || return 1
+	printf "%s\n" "$fingerprint"
+}
+
+certificate_fingerprint() {
+	local certificate_path="$1"
+
+	[[ -f "$certificate_path" ]] || return 1
+	fingerprint_from_pem < "$certificate_path"
+}
+
+certificate_key_pair_matches() {
+	local certificate_path="$1"
+	local key_path="$2"
+	local certificate_key_digest private_key_digest
+
+	[[ -f "$certificate_path" && -f "$key_path" ]] || return 1
+	certificate_key_digest="$(
+		openssl x509 -in "$certificate_path" -pubkey -noout 2>/dev/null \
+			| openssl pkey -pubin -outform DER 2>/dev/null \
+			| openssl dgst -sha256 -r 2>/dev/null \
+			| awk '{print $1}'
+	)" || return 1
+	private_key_digest="$(
+		openssl pkey -in "$key_path" -pubout -outform DER 2>/dev/null \
+			| openssl dgst -sha256 -r 2>/dev/null \
+			| awk '{print $1}'
+	)" || return 1
+	[[ "$certificate_key_digest" =~ ^[0-9A-Fa-f]{64}$ \
+		&& "$certificate_key_digest" == "$private_key_digest" ]]
 }
 
 render_auth_script() {
@@ -909,19 +1068,27 @@ render_server_config() {
 }
 
 ensure_cert_material() {
+	local fingerprint
+
 	load_env
-	if [[ ! -f "$CERT_CRT_PATH" || ! -f "$CERT_KEY_PATH" ]]; then
+	if ! certificate_key_pair_matches "$CERT_CRT_PATH" "$CERT_KEY_PATH"; then
+		if [[ -f "$CERT_CRT_PATH" || -f "$CERT_KEY_PATH" ]]; then
+			echo "Hysteria TLS certificate/key state is incomplete or mismatched; generating a replacement pair." >&2
+		fi
 		generate_self_signed_cert "${HY2_SERVER_HOST}" "${HY2_TLS_SERVER_NAME:-$HY2_SERVER_HOST}"
-		load_env
 	fi
+	fingerprint="$(certificate_fingerprint "$CERT_CRT_PATH")" \
+		|| die "Hysteria TLS certificate is missing or invalid: $CERT_CRT_PATH"
+	if [[ "${HY2_TLS_FINGERPRINT:-}" != "$fingerprint" ]]; then
+		set_env_value HY2_TLS_FINGERPRINT "$fingerprint"
+	fi
+	load_env
 }
 
 render_runtime_files() {
 	load_env
 	ensure_users_file
 	ensure_export_auth_defaults
-	load_env
-	ensure_cert_material
 	load_env
 	materialize_system_subscription
 	load_env
@@ -1233,11 +1400,15 @@ ensure_system_subscription_caddy_current() {
 	container_running "$SUBSCRIPTIONS_CONTAINER" || return 0
 	expected="$(system_subscription_caddy_signature)"
 	applied="$(cat "$SYSTEM_SUBSCRIPTION_CADDY_SIGNATURE_FILE" 2>/dev/null || true)"
-	[[ -n "$expected" && "$expected" == "$applied" ]] && return 0
+	if [[ -n "$expected" && "$expected" == "$applied" ]] && subscriptions_runtime_mounts_match; then
+		return 0
+	fi
 
-	echo "System subscription Caddy credential/path changed; recreating the health/evidence outlet."
+	echo "System subscription Caddy credential/path or release mount changed; recreating the health/evidence outlet."
 	safe_recreate_service subscriptions
 	wait_for_container "$SUBSCRIPTIONS_CONTAINER"
+	subscriptions_runtime_mounts_match \
+		|| die "System subscription outlet still uses stale release mounts after recreate."
 }
 
 materialize_system_subscription() {
@@ -1247,6 +1418,8 @@ materialize_system_subscription() {
 
 	ensure_stack_dirs
 	ensure_users_file
+	ensure_cert_material
+	load_env
 	account="$(system_subscription_account_name || true)"
 	if [[ -z "$account" ]]; then
 		disable_system_subscription_artifact "Internal did not provide a valid *-subscriptions account"
@@ -1524,15 +1697,18 @@ stop_target() {
 }
 
 backup_generated_state() {
-	local backup_dir="$STACK_DIR/backups"
+	local env_file state_dir backup_dir
 	local stamp backup_file
 
+	env_file="$(env_storage_file)" || die "Cannot resolve environment state file: $ENV_FILE"
+	state_dir="$(dirname "$env_file")"
+	backup_dir="$state_dir/backups"
 	mkdir -p "$backup_dir"
 	stamp="$(date '+%Y%m%d-%H%M%S')"
 	backup_file="$backup_dir/hy2-access-stack-$stamp.tar.gz"
 
 	tar -czf "$backup_file" \
-		-C "$STACK_DIR" \
+		-C "$state_dir" \
 		--ignore-failed-read \
 		.env \
 		data \
@@ -1585,7 +1761,11 @@ destroy_stack_command() {
 	fi
 
 	if [[ "$wipe_env" == "true" ]]; then
-		rm -f "$ENV_FILE"
+		local env_file
+		env_file="$(env_storage_file)" || die "Cannot resolve environment state file: $ENV_FILE"
+		rm -f "$env_file"
+		cp "$ENV_EXAMPLE" "$env_file"
+		chmod 600 "$env_file"
 	fi
 
 	ensure_stack_dirs
@@ -1768,6 +1948,7 @@ docker_status_command() {
 	local soft="false"
 	local missing=0
 	local defaults_drift=0
+	local runtime_identity_drift=0
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -1809,6 +1990,23 @@ docker_status_command() {
 		fi
 		die "Docker hysteria2 access stack is not running; run setup or Internal Install / Sync."
 	fi
+	if ! hysteria_runtime_identity_matches; then
+		echo "drift: Hysteria container mount/certificate differs from current stable runtime state"
+		runtime_identity_drift=1
+	fi
+	if ! subscriptions_runtime_mounts_match; then
+		echo "drift: subscription outlet mounts differ from the current release/stable runtime state"
+		runtime_identity_drift=1
+	fi
+	if [[ "$runtime_identity_drift" != "0" ]]; then
+		if [[ "$soft" == "true" ]]; then
+			echo
+			echo "status: runtime-identity-drift"
+			echo "next action: run Internal Install / Sync to reconcile release mounts and the Hysteria TLS certificate."
+			return 0
+		fi
+		die "Docker hysteria2 runtime identity drift detected; run Internal Install / Sync."
+	fi
 	if [[ "$defaults_drift" != "0" ]]; then
 		if [[ "$soft" == "true" ]]; then
 			echo
@@ -1846,6 +2044,8 @@ sync_internal_defaults_command() {
 		recreate_full_stack
 	elif ! hysteria_published_port_matches_env; then
 		ensure_hysteria_published_port
+	elif ! hysteria_runtime_identity_matches; then
+		ensure_hysteria_runtime_identity_current
 	elif ! hysteria_runtime_users_file_matches; then
 		ensure_hysteria_runtime_users_current
 	else
@@ -1904,7 +2104,7 @@ check_subscription_auth_command() {
 }
 
 check_system_subscription_command() {
-	local account record auth_token ignored_up ignored_down basic_user public_path filename artifact downloaded
+	local account record auth_token ignored_up ignored_down basic_user public_path filename artifact downloaded fingerprint
 
 	load_env
 	account="$(system_subscription_account_name || true)"
@@ -1925,7 +2125,22 @@ check_system_subscription_command() {
 	[[ -f "$artifact" ]] || die "System subscription YAML is not materialized: $filename"
 	grep -Eq "^mixed-port:[[:space:]]*${SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}[[:space:]]*$" "$artifact" \
 		|| die "System subscription YAML does not advertise mixed-port ${SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}."
+	fingerprint="$(certificate_fingerprint "$CERT_CRT_PATH")" \
+		|| die "Current Hysteria TLS certificate is missing or invalid."
+	certificate_key_pair_matches "$CERT_CRT_PATH" "$CERT_KEY_PATH" \
+		|| die "Current Hysteria TLS certificate and private key do not match."
+	[[ "${HY2_TLS_FINGERPRINT:-}" == "$fingerprint" ]] \
+		|| die "Stored Hysteria TLS fingerprint differs from the current certificate."
+	[[ "$(grep -Ec '^[[:space:]]+fingerprint:' "$artifact" || true)" == "1" ]] \
+		|| die "System subscription YAML must contain exactly one TLS fingerprint."
+	grep -Fqx "    fingerprint: $(yaml_single_quote "$fingerprint")" "$artifact" \
+		|| die "System subscription fingerprint differs from the current Hysteria TLS certificate."
+	container_running "$HYSTERIA_CONTAINER" || die "Hysteria data-plane container is not running."
+	hysteria_runtime_identity_matches \
+		|| die "Hysteria data-plane container uses a stale release mount or TLS certificate."
 	container_running "$SUBSCRIPTIONS_CONTAINER" || die "System subscription outlet is not running."
+	subscriptions_runtime_mounts_match \
+		|| die "System subscription outlet uses stale release mounts."
 	basic_user="${HY2_SYSTEM_SUBSCRIPTION_BASIC_USER:-subscriptions}"
 	wait_for_subscription_http_ready "$HY2_EXPORT_FALLBACK_PORT"
 	downloaded="$(mktemp "$STACK_DIR/data/subscriptions/.system-subscription-check.XXXXXX")"
@@ -1941,7 +2156,7 @@ check_system_subscription_command() {
 		die "System subscription outlet returned content that differs from the managed YAML."
 	fi
 	rm -f "$downloaded"
-	echo "System subscription exact path, Basic Auth, and mixed-port ${SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}: passed"
+	echo "System subscription exact path, Basic Auth, mixed-port ${SYSTEM_SUBSCRIPTION_MIXED_PORT_DEFAULT}, and live Hysteria TLS identity: passed"
 }
 
 list_users_command() {
@@ -2353,6 +2568,8 @@ reconcile_from_json_command() {
 		recreate_full_stack
 	elif ! hysteria_published_port_matches_env; then
 		ensure_hysteria_published_port
+	elif ! hysteria_runtime_identity_matches; then
+		ensure_hysteria_runtime_identity_current
 	elif ! hysteria_runtime_users_file_matches; then
 		ensure_hysteria_runtime_users_current
 	else

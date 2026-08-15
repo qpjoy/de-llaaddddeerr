@@ -7011,6 +7011,7 @@ function siteSlotDeploymentPhases(
   const overseaAccessStackBundle = `${artifactRoot}/${overseaAccessStackBundleName}`;
   const overseaAccessStackReleaseDir = `${releaseRoot}/oversea-access-stack/${releaseRevision}`;
   const overseaAccessStackCurrentDir = `${currentRoot}/hysteria2-access-stack`;
+  const overseaAccessStackStateDir = '/opt/mx/state/hysteria2-access-stack';
   const domesticWireGuardConfig = `${artifactRoot}/mx-domestic-wg-relay.conf`;
   const domesticRelayEnv = `${artifactRoot}/mx-domestic-relay.env`;
   const internalServicePeerConfig = `${artifactRoot}/mx-internal-service-peer.conf`;
@@ -7035,6 +7036,17 @@ function siteSlotDeploymentPhases(
       `ln -sfnT ${releaseDir} ${currentDir}`
     ].join(' ');
   };
+  const prepareOverseaAccessStackState = [
+    `install -d -m 0700 ${overseaAccessStackStateDir} ${overseaAccessStackStateDir}/data ${overseaAccessStackStateDir}/config`,
+    `if ! test -e ${overseaAccessStackStateDir}/.initialized; then if test -f ${overseaAccessStackCurrentDir}/.env && ! test -L ${overseaAccessStackCurrentDir}/.env; then cp -a ${overseaAccessStackCurrentDir}/.env ${overseaAccessStackStateDir}/.env; fi; if test -d ${overseaAccessStackCurrentDir}/data && ! test -L ${overseaAccessStackCurrentDir}/data; then cp -a ${overseaAccessStackCurrentDir}/data/. ${overseaAccessStackStateDir}/data/; fi; if test -d ${overseaAccessStackCurrentDir}/config && ! test -L ${overseaAccessStackCurrentDir}/config; then cp -a ${overseaAccessStackCurrentDir}/config/. ${overseaAccessStackStateDir}/config/; fi; touch ${overseaAccessStackStateDir}/.initialized; chmod 0600 ${overseaAccessStackStateDir}/.initialized; fi`,
+    `if ! test -f ${overseaAccessStackStateDir}/.env; then cp ${overseaAccessStackReleaseDir}/.env.example ${overseaAccessStackStateDir}/.env; fi`,
+    `chmod 0600 ${overseaAccessStackStateDir}/.env`,
+    `rm -rf ${overseaAccessStackReleaseDir}/data ${overseaAccessStackReleaseDir}/config`,
+    `rm -f ${overseaAccessStackReleaseDir}/.env`,
+    `ln -sfnT ${overseaAccessStackStateDir}/data ${overseaAccessStackReleaseDir}/data`,
+    `ln -sfnT ${overseaAccessStackStateDir}/config ${overseaAccessStackReleaseDir}/config`,
+    `ln -sfnT ${overseaAccessStackStateDir}/.env ${overseaAccessStackReleaseDir}/.env`
+  ].join('; ');
   const workerInternalBaseUrl = siteSlotWorkerInternalBaseUrl(input) ?? '<worker-internal-base-url>';
   const overseaCallbackBaseUrl = kind === 'oversea'
     ? siteSlotOverseaCallbackBaseUrl(input)
@@ -7198,14 +7210,21 @@ function siteSlotDeploymentPhases(
     `HY2_EXPORT_BASE_URL=${overseaExportBaseUrl}`,
     `HY2_EXPORT_FALLBACK_PORT=${overseaExportPort}`,
     'HY2_EXPORT_USER=download',
-    'HY2_EXPORT_PASSWORD_HASH=',
     `HY2_SYSTEM_SUBSCRIPTION_ACCOUNT=${overseaSystemSubscriptionAccountName}`,
     `HY2_SYSTEM_SUBSCRIPTION_BASIC_USER=${SYSTEM_SUBSCRIPTIONS_SERVICE_ACCOUNT_ID}`,
-    'HY2_SYSTEM_SUBSCRIPTION_PASSWORD_HASH=',
-    'HY2_SYSTEM_SUBSCRIPTION_AUTH_TOKEN_SHA256=',
     `HY2_SYSTEM_SUBSCRIPTION_MIXED_PORT=${SYSTEM_SUBSCRIPTION_MIXED_PORT}`
   ];
-  const overseaEnvWriteCommand = `cd ${overseaAccessStackCurrentDir} && cp -n .env.example .env && printf "%s\\n" ${overseaEnvLines.map(shellDoubleQuote).join(' ')} >> .env`;
+  const overseaManagedEnvKeys = overseaEnvLines.map((line) => line.slice(0, line.indexOf('=')));
+  const overseaManagedEnvPattern = overseaManagedEnvKeys.join('|');
+  const overseaEnvWriteCommand = [
+    `env_file=${overseaAccessStackStateDir}/.env`,
+    'test -f "$env_file"',
+    'tmp_file="$(mktemp "${env_file}.internal.XXXXXX")"',
+    `sed -E "/^(${overseaManagedEnvPattern})=/d" "$env_file" > "$tmp_file"`,
+    `printf "%s\\n" ${overseaEnvLines.map(shellDoubleQuote).join(' ')} >> "$tmp_file"`,
+    'chmod 0600 "$tmp_file"',
+    'mv -f "$tmp_file" "$env_file"'
+  ].join(' && ');
   const overseaTunnelStateJson = JSON.stringify({
     revision: 'internal-shadow-1',
     node: {
@@ -7414,7 +7433,7 @@ function siteSlotDeploymentPhases(
       commands: [
         ssh(`install -d -m 0755 /opt/mx ${incomingDir} ${currentRoot} /opt/mx/site-agent ${overseaAccessStackReleaseDir}`),
         rsyncOverSsh(overseaAccessStackBundle, `${incomingDir}/`),
-        ssh(`tar -xzf ${incomingDir}/${overseaAccessStackBundleName} -C ${overseaAccessStackReleaseDir} && ${switchCurrentSymlink(overseaAccessStackReleaseDir, overseaAccessStackCurrentDir)}`),
+        ssh(`set -eu; tar -xzf ${incomingDir}/${overseaAccessStackBundleName} -C ${overseaAccessStackReleaseDir}; ${prepareOverseaAccessStackState}; ${switchCurrentSymlink(overseaAccessStackReleaseDir, overseaAccessStackCurrentDir)}`),
         ssh(`cd ${overseaAccessStackCurrentDir} && chmod +x manage.sh && test -f docker-compose.yml && test -f .env.example`)
       ],
       notes: ['Internal pushes the access stack over rsync/OpenSSH and falls back to scp; the Oversea host does not clone or pull source code.']
