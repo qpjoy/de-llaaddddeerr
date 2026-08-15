@@ -20,6 +20,10 @@ import {
   TelegramMonitorPipeline,
 } from './ingest/telegram/monitor-pipeline.mjs'
 import {
+  isTelegramSQLiteSourceKey,
+  TelegramSQLitePipeline,
+} from './ingest/telegram/sqlite-pipeline.mjs'
+import {
   adminTokenPrincipal,
   filterByTenantCapability,
   requireCapability,
@@ -149,12 +153,25 @@ function decodeDataCenterCursor(value, kind, binding) {
 }
 
 function assertGenericSourceMutable(sourceKey) {
-  if (!isTelegramMonitorSourceKey(sourceKey)) return
+  if (!isTelegramMonitorSourceKey(sourceKey) && !isTelegramSQLiteSourceKey(sourceKey)) return
+  const pipeline = isTelegramSQLiteSourceKey(sourceKey) ? 'telegram-sqlite' : 'telegram-monitor'
   throw new AppError(
     409,
     'pipeline_managed_source',
-    'Telegram monitor sources are managed through /internal/v1/admin/pipelines/telegram-monitor',
+    `Telegram sources are managed through /internal/v1/admin/pipelines/${pipeline}`,
   )
+}
+
+function adminSourceView(source) {
+  if (source?.sourceKind !== 'sqlite_api') return source
+  const { token, ...connection } = source.connection || {}
+  return {
+    ...source,
+    connection: {
+      ...connection,
+      tokenConfigured: typeof token === 'string' && token.length > 0,
+    },
+  }
 }
 
 // Best-effort client address for rate limiting and for forwarding upstream.
@@ -246,6 +263,7 @@ export function createApp({
   importer = null,
   serverFileReader = null,
   databasePuller = null,
+  sqliteApiPuller = null,
   telegramSourcePreparer = null,
   agent = null,
   search = null,
@@ -260,6 +278,11 @@ export function createApp({
     queue,
     databasePuller,
     sourcePreparer: telegramSourcePreparer,
+  })
+  const telegramSQLitePipeline = new TelegramSQLitePipeline({
+    store,
+    queue,
+    sqliteApiPuller,
   })
 
   /**
@@ -625,6 +648,32 @@ export function createApp({
     if (typeof databasePuller?.testSource !== 'function') {
       throw new AppError(503, 'source_validation_unavailable', 'Database source testing requires the PostgreSQL workload')
     }
+  }
+
+  function requireSQLiteApiPuller() {
+    if (!sqliteApiPuller || !queue) {
+      throw new AppError(503, 'sqlite_api_pull_unavailable', 'SQLite API pulls require the PostgreSQL store')
+    }
+  }
+
+  function requireExternalQueue() {
+    if (!queue) {
+      throw new AppError(503, 'external_queue_unavailable', 'External source status requires the PostgreSQL queue')
+    }
+  }
+
+  function pullerForSource(source) {
+    if (source.sourceKind === 'database') {
+      if (!databasePuller) {
+        throw new AppError(503, 'database_pull_unavailable', 'Database source pulls require the PostgreSQL store')
+      }
+      return databasePuller
+    }
+    if (source.sourceKind === 'sqlite_api') {
+      requireSQLiteApiPuller()
+      return sqliteApiPuller
+    }
+    throw new AppError(400, 'wrong_source_kind', 'This operation requires a database or SQLite API source')
   }
 
   async function withSourceLocks(keys, operation) {
@@ -1107,9 +1156,74 @@ export function createApp({
         return
       }
 
+      if (pathname === '/internal/v1/admin/pipelines/telegram-sqlite') {
+        requireSourceAdmin(principal)
+        requireSQLiteApiPuller()
+        if (request.method === 'GET') {
+          sendJson(response, 200, { data: await telegramSQLitePipeline.get(), requestId })
+          return
+        }
+        if (request.method === 'PUT') {
+          const body = await readJson(request)
+          sendJson(response, 200, { data: await telegramSQLitePipeline.configure(body), requestId })
+          return
+        }
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/telegram-sqlite/status') {
+        requireSourceAdmin(principal)
+        requireSQLiteApiPuller()
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'status')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported status fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await telegramSQLitePipeline.setStatus(body?.status, {
+            approvedBy: principal.memberId || 'admin-token',
+          }),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/telegram-sqlite/sync') {
+        requireSourceAdmin(principal)
+        requireSQLiteApiPuller()
+        sendJson(response, 202, {
+          data: await telegramSQLitePipeline.sync(await readJson(request)),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/pipelines/telegram-sqlite/progress') {
+        requireSourceAdmin(principal)
+        requireSQLiteApiPuller()
+        sendJson(response, 200, { data: await telegramSQLitePipeline.progress(), requestId })
+        return
+      }
+      if (
+        request.method === 'POST'
+        && pathname === '/internal/v1/admin/pipelines/telegram-sqlite/checkpoints/reset'
+      ) {
+        requireSourceAdmin(principal)
+        requireSQLiteApiPuller()
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'confirmPipelineKey')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported checkpoint reset fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await telegramSQLitePipeline.resetCheckpoints(body?.confirmPipelineKey),
+          requestId,
+        })
+        return
+      }
+
       if (request.method === 'GET' && pathname === '/internal/v1/admin/sources') {
         requireSourceAdmin(principal)
-        sendJson(response, 200, { data: await store.listExternalSources(), requestId })
+        sendJson(response, 200, {
+          data: (await store.listExternalSources()).map(adminSourceView),
+          requestId,
+        })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/server-file-roots') {
@@ -1228,7 +1342,7 @@ export function createApp({
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key')
       if (params && request.method === 'GET') {
         requireSourceAdmin(principal)
-        sendJson(response, 200, { data: await requireSource(params.key), requestId })
+        sendJson(response, 200, { data: adminSourceView(await requireSource(params.key)), requestId })
         return
       }
       if (params && request.method === 'PUT') {
@@ -1323,8 +1437,13 @@ export function createApp({
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/test')
       if (params && request.method === 'POST') {
         requireSourceAdmin(principal)
-        requireDatabaseSourceTester()
-        const data = await withSourceLocks([params.key], () => databasePuller.testSource(params.key))
+        const source = await requireSource(params.key)
+        const puller = pullerForSource(source)
+        if (typeof puller.testSource !== 'function') requireDatabaseSourceTester()
+        const test = () => puller.testSource(params.key)
+        const data = typeof puller.withSourceLocks === 'function'
+          ? await puller.withSourceLocks([params.key], test)
+          : await withSourceLocks([params.key], test)
         sendJson(response, 200, { data, requestId })
         return
       }
@@ -1430,9 +1549,10 @@ export function createApp({
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/preview')
       if (params && request.method === 'GET') {
         requireSourceAdmin(principal)
-        requireDatabasePuller()
+        const source = await requireSource(params.key)
+        const puller = pullerForSource(source)
         sendJson(response, 200, {
-          data: await databasePuller.preview(params.key, { limit: Number(searchParams.get('limit') || 3) }),
+          data: await puller.preview(params.key, { limit: Number(searchParams.get('limit') || 3) }),
           requestId,
         })
         return
@@ -1518,16 +1638,18 @@ export function createApp({
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/schema')
       if (params && request.method === 'GET') {
         requireSourceAdmin(principal)
-        requireDatabasePuller()
-        sendJson(response, 200, { data: await databasePuller.describe(params.key), requestId })
+        const source = await requireSource(params.key)
+        const puller = pullerForSource(source)
+        sendJson(response, 200, { data: await puller.describe(params.key), requestId })
         return
       }
 
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/sync')
       if (params && request.method === 'GET') {
         requireSourceAdmin(principal)
-        requireDatabasePuller()
         const source = await requireSource(params.key)
+        pullerForSource(source)
+        requireExternalQueue()
         const cursor = await queue.getCursor(`external:${params.key}`)
         const latestRun = (await store.listImportRuns(source.id, 1))[0] ?? null
         const cursorUpdatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
@@ -1546,8 +1668,8 @@ export function createApp({
       }
       if (params && request.method === 'POST') {
         requireSourceAdmin(principal)
-        requireDatabasePuller()
         assertGenericSourceMutable(params.key)
+        requireDatabasePuller()
         const source = await requireSource(params.key)
         if (source.sourceKind !== 'database') {
           throw new AppError(400, 'wrong_source_kind', 'This source is not a database source')
@@ -1589,8 +1711,8 @@ export function createApp({
       params = routeMatch(pathname, '/internal/v1/admin/sources/:key/checkpoint/reset')
       if (params && request.method === 'POST') {
         requireSourceAdmin(principal)
-        requireDatabasePuller()
         assertGenericSourceMutable(params.key)
+        requireDatabasePuller()
         const source = await requireSource(params.key)
         const body = await readJson(request)
         if (body?.confirmSourceKey !== source.sourceKey) {

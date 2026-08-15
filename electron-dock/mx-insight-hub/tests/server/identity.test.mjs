@@ -553,6 +553,12 @@ test('an allowlisted Launcher scope confers platform admin, and losing it revoke
   assert.equal(providerWrite.status, 403)
   assert.equal((await providerWrite.json()).error.code, 'admin_token_required')
   const sourceManagementRoutes = [
+    ['GET', '/internal/v1/admin/pipelines/telegram-sqlite'],
+    ['PUT', '/internal/v1/admin/pipelines/telegram-sqlite'],
+    ['POST', '/internal/v1/admin/pipelines/telegram-sqlite/status'],
+    ['POST', '/internal/v1/admin/pipelines/telegram-sqlite/sync'],
+    ['GET', '/internal/v1/admin/pipelines/telegram-sqlite/progress'],
+    ['POST', '/internal/v1/admin/pipelines/telegram-sqlite/checkpoints/reset'],
     ['GET', '/internal/v1/admin/sources'],
     ['POST', '/internal/v1/admin/sources'],
     ['GET', '/internal/v1/admin/sources/guard-probe'],

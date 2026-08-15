@@ -6,6 +6,7 @@ import {
   TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
   TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION,
 } from '../telegram/monitor-pipeline.mjs'
+import { TELEGRAM_SQLITE_INPUTS } from '../telegram/sqlite-pipeline.mjs'
 
 const TELEGRAM_SCHEDULE_ERRORS = Object.freeze({
   unavailable: {
@@ -19,6 +20,21 @@ const TELEGRAM_SCHEDULE_ERRORS = Object.freeze({
   outcomeUnknown: {
     code: 'telegram_schedule_outcome_unknown',
     message: 'The Telegram monitor scheduling outcome is unknown',
+  },
+})
+
+const TELEGRAM_SQLITE_SCHEDULE_ERRORS = Object.freeze({
+  unavailable: {
+    code: 'telegram_sqlite_schedule_unavailable',
+    message: 'Telegram SQLite API scheduling requires the PostgreSQL queue',
+  },
+  failed: {
+    code: 'telegram_sqlite_schedule_failed',
+    message: 'No Telegram SQLite API task was scheduled',
+  },
+  outcomeUnknown: {
+    code: 'telegram_sqlite_schedule_outcome_unknown',
+    message: 'The Telegram SQLite API scheduling outcome is unknown',
   },
 })
 
@@ -65,25 +81,46 @@ export async function scheduleActiveDatabaseSources({ store, queue, batchSize = 
     const attestation = await store.getLatestPipelineWriterContractAttestation?.('telegram-monitor')
     const attested = attestation?.contractVersion === TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION
       && attestation?.contractDigest === TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST
-    if (!attested) {
-      return {
-        active: sources.filter((source) => source.sourceKind === 'database' && source.status === 'active').length,
-        enqueued,
+    if (attested) {
+      const cursors = await Promise.all(telegramSources.map(
+        (source) => queue.getCursor(`external:${source.sourceKey}`),
+      ))
+      if (telegramSources.every((source, index) => isDue(source, cursors[index], now))) {
+        const jobIds = await enqueueJobsAtomically(
+          queue,
+          telegramSources.map((source) => scheduledJob(source.sourceKey, batchSize)),
+          TELEGRAM_SCHEDULE_ERRORS,
+        )
+        enqueued += jobIds.filter((jobId) => jobId != null).length
       }
     }
-    const cursors = await Promise.all(telegramSources.map(
+  }
+
+  const sqliteSources = TELEGRAM_SQLITE_INPUTS.map((input) => (
+    sources.find((source) => source.sourceKey === input.sourceKey)
+  ))
+  if (sqliteSources.every((source) => source?.sourceKind === 'sqlite_api' && source.status === 'active')) {
+    const cursors = await Promise.all(sqliteSources.map(
       (source) => queue.getCursor(`external:${source.sourceKey}`),
     ))
-    if (telegramSources.every((source, index) => isDue(source, cursors[index], now))) {
+    if (sqliteSources.every((source, index) => isDue(source, cursors[index], now))) {
+      const sqliteBatchSize = Math.min(batchSize, 500)
       const jobIds = await enqueueJobsAtomically(
         queue,
-        telegramSources.map((source) => scheduledJob(source.sourceKey, batchSize)),
-        TELEGRAM_SCHEDULE_ERRORS,
+        sqliteSources.map((source) => scheduledJob(source.sourceKey, sqliteBatchSize)),
+        TELEGRAM_SQLITE_SCHEDULE_ERRORS,
       )
       enqueued += jobIds.filter((jobId) => jobId != null).length
     }
   }
-  return { active: sources.filter((source) => source.sourceKind === 'database' && source.status === 'active').length, enqueued }
+
+  return {
+    active: sources.filter((source) => (
+      (source.sourceKind === 'database' || source.sourceKind === 'sqlite_api')
+      && source.status === 'active'
+    )).length,
+    enqueued,
+  }
 }
 
 function waitForNextScan(intervalMs, signal) {

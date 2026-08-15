@@ -93,15 +93,33 @@ export function validateFieldMap(fieldMap) {
   return true
 }
 
+function sourceValue(record, column) {
+  // Prefer an exact column name so PostgreSQL identifiers that contain dots
+  // keep their literal meaning. HTTP/JSON sources may then address a nested
+  // value such as metadata.views without flattening or mutating the raw row.
+  if (Object.prototype.hasOwnProperty.call(record, column)) return record[column]
+  if (!column.includes('.')) return undefined
+  let current = record
+  for (const segment of column.split('.')) {
+    if (
+      current == null
+      || typeof current !== 'object'
+      || !Object.prototype.hasOwnProperty.call(current, segment)
+    ) return undefined
+    current = current[segment]
+  }
+  return current
+}
+
 function pick(record, rule) {
   const sources = Array.isArray(rule?.from) ? rule.from : [rule?.from]
   if (rule?.type === 'composite') {
-    const values = sources.map((column) => record[column])
+    const values = sources.map((column) => sourceValue(record, column))
     if (values.some((value) => value === undefined || value === null || String(value).trim() === '')) return null
     return values.map((value) => String(value).trim()).join(rule.separator || ':')
   }
   for (const column of sources) {
-    const value = record[column]
+    const value = sourceValue(record, column)
     if (value === undefined || value === null) continue
     if (typeof value === 'string' && value.trim() === '') continue
     return value

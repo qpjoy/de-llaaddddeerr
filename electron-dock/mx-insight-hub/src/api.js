@@ -225,6 +225,22 @@ export const adminApi = {
   resetTelegramMonitorPipelineCheckpoints: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/telegram-monitor/checkpoints/reset`, { method: 'POST', body },
   ),
+  telegramSqlitePipeline: (token) => request(token, `${ADMIN_ROOT}/pipelines/telegram-sqlite`),
+  updateTelegramSqlitePipeline: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-sqlite`, { method: 'PUT', body },
+  ),
+  updateTelegramSqlitePipelineStatus: (token, status) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-sqlite/status`, { method: 'POST', body: { status } },
+  ),
+  runTelegramSqlitePipeline: (token, body = {}) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-sqlite/sync`, { method: 'POST', body },
+  ),
+  telegramSqlitePipelineProgress: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-sqlite/progress`,
+  ),
+  resetTelegramSqlitePipelineCheckpoints: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-sqlite/checkpoints/reset`, { method: 'POST', body },
+  ),
 
   // Backfill (P3), agent (P5) and retrieval (embedding pipeline).
   backfill: (token) => request(token, `${ADMIN_ROOT}/backfill`),

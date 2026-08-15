@@ -423,6 +423,38 @@ test('unmapped columns are preserved under extensions', () => {
   assert.deepEqual(record.extensions, { 省份: '上海' })
 })
 
+test('JSON mappings can read nested values without changing the preserved raw object', () => {
+  const raw = {
+    chat_id: '-1007',
+    message_id: 42,
+    metadata: { views: 1200, forwards: 18, grouped_id: 'album-1' },
+  }
+  const { record } = applyMapping(raw, {
+    externalId: { from: ['chat_id', 'message_id'], type: 'composite', separator: ':' },
+    'metrics.views': { from: 'metadata.views', type: 'number' },
+    'metrics.shares': { from: 'metadata.forwards', type: 'number' },
+    'relations.groupedId': { from: 'metadata.grouped_id' },
+  }, { platform: 'telegram' })
+
+  assert.deepEqual(record.metrics, { shares: 18, views: 1200 })
+  assert.equal(record.stableFields.relations.groupedId, 'album-1')
+  assert.deepEqual(record.rawItem, raw)
+  assert.deepEqual(record.extensions.metadata, raw.metadata)
+})
+
+test('an exact dotted column name takes precedence over nested JSON lookup', () => {
+  const { record } = applyMapping({
+    id: '1',
+    'metadata.views': 7,
+    metadata: { views: 99 },
+  }, {
+    externalId: { from: 'id' },
+    'metrics.views': { from: 'metadata.views', type: 'number' },
+  }, { platform: 'external' })
+
+  assert.equal(record.metrics.views, 7)
+})
+
 test('spreadsheet number formatting does not silently drop a metric', () => {
   const { record } = applyMapping({ id: '1', 点赞数: '1,234' }, fieldMap, { platform: 'external' })
   assert.equal(record.metrics.likes, 1234)
@@ -2227,6 +2259,80 @@ test('periodic Telegram scheduling waits for both inputs and commits the due pai
   assert.deepEqual(enqueues.map(([, payload]) => payload.sourceKey), [
     'telegram-monitor-chats',
     'telegram-monitor-messages',
+  ])
+})
+
+test('periodic SQLite API scheduling atomically enqueues the due pair with a capped batch', async () => {
+  const sources = [
+    { sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active' },
+    { sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active' },
+    {
+      sourceKey: 'telegram-sqlite-api-chats', sourceKind: 'sqlite_api', status: 'active',
+      syncIntervalSeconds: 300,
+    },
+    {
+      sourceKey: 'telegram-sqlite-api-messages', sourceKind: 'sqlite_api', status: 'active',
+      syncIntervalSeconds: 300,
+    },
+  ]
+  const statements = []
+  const enqueues = []
+  const client = {
+    query: async (sql) => { statements.push(sql); return { rows: [] } },
+    release() {},
+  }
+  let messageCursor = {
+    status: 'idle',
+    updatedAt: '2026-08-10T07:58:00.000Z',
+  }
+  const queue = {
+    pool: { connect: async () => client },
+    getCursor: async (id) => {
+      if (id === 'external:telegram-sqlite-api-chats') {
+        return { status: 'idle', updatedAt: '2026-08-10T07:50:00.000Z' }
+      }
+      if (id === 'external:telegram-sqlite-api-messages') return messageCursor
+      return { status: 'idle' }
+    },
+    enqueue: async (name, payload, options) => {
+      assert.equal(options.client, client)
+      enqueues.push([name, payload, options.dedupeKey])
+      return enqueues.length
+    },
+  }
+  const store = {
+    listExternalSources: async () => sources,
+    // An unattested PostgreSQL Telegram monitor must not suppress the
+    // independent SQLite API pipeline.
+    getLatestPipelineWriterContractAttestation: async () => null,
+  }
+
+  const early = await scheduleActiveDatabaseSources({
+    store, queue, now: new Date('2026-08-10T08:00:00.000Z'), batchSize: 1_000,
+  })
+  assert.deepEqual(early, { active: 4, enqueued: 0 })
+  assert.deepEqual(enqueues, [])
+
+  messageCursor = { status: 'running', updatedAt: '2026-08-10T07:50:00.000Z' }
+  const busy = await scheduleActiveDatabaseSources({
+    store, queue, now: new Date('2026-08-10T08:04:00.000Z'), batchSize: 1_000,
+  })
+  assert.deepEqual(busy, { active: 4, enqueued: 0 })
+  assert.deepEqual(enqueues, [])
+
+  messageCursor = { status: 'idle', updatedAt: '2026-08-10T07:50:00.000Z' }
+  const due = await scheduleActiveDatabaseSources({
+    store, queue, now: new Date('2026-08-10T08:04:00.000Z'), batchSize: 1_000,
+  })
+  assert.deepEqual(due, { active: 4, enqueued: 2 })
+  assert.deepEqual(statements, ['BEGIN', 'COMMIT'])
+  assert.deepEqual(enqueues.map(([, payload]) => ({
+    sourceKey: payload.sourceKey,
+    batchSize: payload.batchSize,
+    trigger: payload.trigger,
+  })), [
+    { sourceKey: 'telegram-sqlite-api-chats', batchSize: 500, trigger: 'schedule' },
+    { sourceKey: 'telegram-sqlite-api-messages', batchSize: 500, trigger: 'schedule' },
   ])
 })
 

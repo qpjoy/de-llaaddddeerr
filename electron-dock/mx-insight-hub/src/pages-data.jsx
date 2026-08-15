@@ -71,15 +71,18 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
   const state = useRemoteData(load, onUnauthorized)
   const loadTelegramPipeline = useCallback(() => adminApi.telegramMonitorPipeline(token), [token])
   const telegramPipeline = useRemoteData(loadTelegramPipeline, onUnauthorized)
+  const loadTelegramSqlitePipeline = useCallback(() => adminApi.telegramSqlitePipeline(token), [token])
+  const telegramSqlitePipeline = useRemoteData(loadTelegramSqlitePipeline, onUnauthorized)
   const [selected, setSelected] = useState(null)
   const [creating, setCreating] = useState(false)
   const [telegramOpen, setTelegramOpen] = useState(false)
+  const [telegramSqliteOpen, setTelegramSqliteOpen] = useState(false)
 
   if (state.loading && !state.data) return <LoadingState label="正在加载外部数据源" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
   const sources = asList(state.data)
-  const genericSources = sources.filter((source) => !TELEGRAM_MONITOR_SOURCE_KEYS.has(source.sourceKey))
+  const genericSources = sources.filter((source) => !PIPELINE_MANAGED_SOURCE_KEYS.has(source.sourceKey))
 
   const openTelegramTaskDetail = (task) => {
     const sourceKey = telegramTaskSourceKey(task)
@@ -123,11 +126,19 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         onRetry={telegramPipeline.refresh}
       />
 
+      <TelegramSqlitePipelineCard
+        pipeline={telegramSqlitePipeline.data}
+        loading={telegramSqlitePipeline.loading}
+        error={telegramSqlitePipeline.error}
+        onOpen={() => setTelegramSqliteOpen(true)}
+        onRetry={telegramSqlitePipeline.refresh}
+      />
+
       {genericSources.length === 0 ? (
         <EmptyState
           icon={Database}
           title="还没有注册通用数据源"
-          description="Telegram monitor 已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
+          description="Telegram monitor 与 SQLite API 已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
         />
       ) : (
         <Panel title="通用数据源" subtitle="每个源有独立的 dataset，不会与固定业务清洗任务混合">
@@ -191,6 +202,22 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
           onOpenAdvanced={openTelegramTaskDetail}
         />
       ) : null}
+      {telegramSqliteOpen && telegramSqlitePipeline.data ? (
+        <TelegramSqlitePipelineModal
+          token={token}
+          pipeline={telegramSqlitePipeline.data}
+          loading={telegramSqlitePipeline.loading}
+          onUnauthorized={onUnauthorized}
+          notify={notify}
+          onClose={() => setTelegramSqliteOpen(false)}
+          onRefresh={telegramSqlitePipeline.refresh}
+          onPipelineChanged={(updated) => {
+            if (updated?.tasks) telegramSqlitePipeline.setData(updated)
+            telegramSqlitePipeline.refresh()
+            state.refresh()
+          }}
+        />
+      ) : null}
       {selected ? (
         <SourceDetailModal
           token={token}
@@ -205,9 +232,11 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
   )
 }
 
-const TELEGRAM_MONITOR_SOURCE_KEYS = new Set([
+const PIPELINE_MANAGED_SOURCE_KEYS = new Set([
   'telegram-monitor-chats',
   'telegram-monitor-messages',
+  'telegram-sqlite-api-chats',
+  'telegram-sqlite-api-messages',
 ])
 
 const TELEGRAM_TASK_META = {
@@ -346,6 +375,370 @@ function TelegramPipelineCard({ pipeline, loading, error, onOpen, onRetry }) {
         </>
       )}
     </section>
+  )
+}
+
+const TELEGRAM_SQLITE_TASK_META = {
+  chats: {
+    label: '会话目录',
+    endpoint: '/v1/chats',
+    dataset: 'telegram.sqlite.chats.v1',
+    objectType: 'chat',
+    sourceKey: 'telegram-sqlite-api-chats',
+  },
+  messages: {
+    label: '消息事实',
+    endpoint: '/v1/messages?include_deleted=true',
+    dataset: 'telegram.sqlite.messages.v1',
+    objectType: 'message',
+    sourceKey: 'telegram-sqlite-api-messages',
+  },
+}
+
+function telegramSqliteTaskMeta(task) {
+  const sourceKey = telegramTaskSourceKey(task)
+  if (task?.role === 'chats' || sourceKey.endsWith('-chats')) return TELEGRAM_SQLITE_TASK_META.chats
+  return TELEGRAM_SQLITE_TASK_META.messages
+}
+
+function telegramSqlitePipelineConfigured(pipeline) {
+  if (pipeline?.configured != null) return Boolean(pipeline.configured)
+  return Boolean(pipeline?.connection?.baseUrl && pipeline?.connection?.tokenConfigured)
+}
+
+function telegramSqlitePipelineStatus(pipeline) {
+  if (telegramPipelineIsRunning(pipeline)) {
+    return {
+      status: 'warning',
+      label: pipeline?.status === 'paused' ? '暂停中 · 排空批次' : '正在运行',
+    }
+  }
+  if (pipeline?.status === 'active') return { status: 'active', label: '已启用' }
+  if (pipeline?.status === 'mixed') return { status: 'warning', label: '子任务状态不一致' }
+  return {
+    status: 'disabled',
+    label: telegramSqlitePipelineConfigured(pipeline) ? '已暂停' : '待配置',
+  }
+}
+
+function sqlitePipelineIssueMessages(...values) {
+  return values.flatMap((value) => {
+    if (value == null) return []
+    const items = Array.isArray(value) ? value : [value]
+    return items.map((item) => (
+      typeof item === 'string' ? item : item?.message || item?.reason || item?.code || JSON.stringify(item)
+    ))
+  }).filter(Boolean)
+}
+
+function TelegramSqlitePipelineCard({ pipeline, loading, error, onOpen, onRetry }) {
+  const status = telegramSqlitePipelineStatus(pipeline)
+  const tasks = pipeline?.tasks || []
+  const warnings = sqlitePipelineIssueMessages(pipeline?.warnings)
+  const latestRunAt = tasks
+    .map((task) => task.latestRun?.finishedAt || task.latestRun?.startedAt || task.latestRun?.createdAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1)
+
+  return (
+    <section className="qp-panel mih-telegram-card" aria-labelledby="telegram-sqlite-pipeline-title">
+      <div className="mih-telegram-card__identity">
+        <span className="mih-telegram-card__icon"><Database size={22} weight="duotone" aria-hidden="true" /></span>
+        <div>
+          <p className="qp-kicker">BUSINESS PIPELINE / TELEGRAM SQLITE API</p>
+          <h2 id="telegram-sqlite-pipeline-title">Telegram SQLite API 清洗任务</h2>
+          <p>一套只读 HTTP 连接，固定协调 chats 与 messages 的全量、重叠窗口和每日对账。</p>
+        </div>
+      </div>
+      {error && !pipeline ? (
+        <div className="mih-telegram-card__error"><ErrorState error={error} onRetry={onRetry} /></div>
+      ) : (
+        <>
+          <dl className="mih-telegram-card__facts mih-telegram-card__facts--sqlite">
+            <div><dt>运行状态</dt><dd><StatusBadge status={status.status} label={status.label} /></dd></div>
+            <div><dt>只读 API</dt><dd><code>{pipeline?.connection?.baseUrl || '尚未配置'}</code></dd></div>
+            <div><dt>访问凭据</dt><dd>{pipeline?.connection?.tokenConfigured ? 'Bearer Token 已配置' : 'Token 待配置'}</dd></div>
+            <div><dt>输入任务</dt><dd>{tasks.length || 2} 个固定资源</dd></div>
+            <div><dt>同步周期</dt><dd>{formatNumber(pipeline?.syncIntervalSeconds || 300)} 秒</dd></div>
+            <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
+          </dl>
+          <div className="mih-telegram-card__actions">
+            {warnings.length > 0 ? <span className="mih-telegram-card__alert"><Warning size={15} />{warnings[0]}</span> : null}
+            <button className="qp-button qp-button--ghost" type="button" disabled={loading || !pipeline} onClick={onOpen}>
+              {loading ? '正在刷新…' : '打开任务控制'}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+function TelegramSqlitePipelineModal({
+  token, pipeline, loading, onUnauthorized, notify, onClose, onRefresh, onPipelineChanged,
+}) {
+  const configured = telegramSqlitePipelineConfigured(pipeline)
+  const running = telegramPipelineIsRunning(pipeline)
+  const status = telegramSqlitePipelineStatus(pipeline)
+  const [form, setForm] = useState(() => ({
+    baseUrl: pipeline.connection?.baseUrl || '',
+    token: '',
+    syncIntervalSeconds: String(pipeline.syncIntervalSeconds || 300),
+  }))
+  const loadProgress = useCallback(
+    () => configured ? adminApi.telegramSqlitePipelineProgress(token) : Promise.resolve({ tasks: [] }),
+    [configured, token],
+  )
+  const progress = useRemoteData(loadProgress, onUnauthorized)
+  const [busyAction, setBusyAction] = useState(null)
+  const [resetConfirmation, setResetConfirmation] = useState('')
+  const warnings = sqlitePipelineIssueMessages(pipeline.warnings, pipeline.strategy?.warnings)
+  const progressTasks = Array.isArray(progress.data) ? progress.data : progress.data?.tasks || []
+  const connectionEditable = !running && !['active', 'draining'].includes(pipeline.status)
+
+  useEffect(() => {
+    if (!running || loading) return undefined
+    const timer = window.setTimeout(onRefresh, 2_000)
+    return () => window.clearTimeout(timer)
+  }, [loading, onRefresh, running])
+
+  const mutate = async (action, request, successMessage) => {
+    setBusyAction(action)
+    try {
+      const updated = await request()
+      if (updated?.tasks && updated?.status) onPipelineChanged(updated)
+      else onRefresh()
+      progress.refresh()
+      notify?.(successMessage, 'success')
+      return updated
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      notify?.(error.message, 'error')
+      return null
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  const save = (event) => {
+    event.preventDefault()
+    const nextToken = form.token.trim()
+    mutate(
+      'save',
+      async () => {
+        const updated = await adminApi.updateTelegramSqlitePipeline(token, {
+          connection: {
+            baseUrl: form.baseUrl.trim().replace(/\/$/, ''),
+            ...(nextToken ? { token: nextToken } : {}),
+          },
+          syncIntervalSeconds: Number(form.syncIntervalSeconds),
+        })
+        setForm((current) => ({ ...current, token: '' }))
+        return updated
+      },
+      'Telegram SQLite API 连接已验证并应用到两个固定任务',
+    )
+  }
+
+  const changeStatus = (nextStatus) => mutate(
+    `status-${nextStatus}`,
+    () => adminApi.updateTelegramSqlitePipelineStatus(token, nextStatus),
+    nextStatus === 'active'
+      ? 'Telegram SQLite API 清洗任务已启用'
+      : '已请求安全暂停，运行中批次会先完成收口',
+  )
+
+  const runSync = () => mutate(
+    'sync',
+    () => adminApi.runTelegramSqlitePipeline(token, { batchSize: 500 }),
+    'Telegram SQLite API 双任务同步已提交',
+  )
+
+  const resetCheckpoints = (event) => {
+    event.preventDefault()
+    if (resetConfirmation !== 'telegram-sqlite') return
+    mutate(
+      'reset',
+      async () => {
+        const updated = await adminApi.resetTelegramSqlitePipelineCheckpoints(token, {
+          confirmPipelineKey: resetConfirmation,
+        })
+        setResetConfirmation('')
+        return updated
+      },
+      '两个 SQLite API 子任务的 Checkpoint 已统一重置；下次同步会从首次全量阶段幂等重放',
+    )
+  }
+
+  const tasks = pipeline.tasks || []
+
+  return (
+    <Modal
+      title={pipeline.displayName || 'Telegram SQLite API 清洗任务'}
+      description="固定 Telegram SQLite 只读业务管线 · 共享 HTTP 连接与统一调度"
+      size="xlarge"
+      onClose={onClose}
+      footer={<button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭</button>}
+    >
+      <div className="mih-telegram-toolbar">
+        <div>
+          <StatusBadge status={status.status} label={status.label} />
+          <code>{pipeline.pipelineKey || 'telegram-sqlite'}</code>
+          <span className="mih-telegram-toolbar__warning"><Warning size={15} />最终一致管线，不宣称精确增量</span>
+        </div>
+        <div className="mih-page-actions">
+          {['active', 'mixed', 'draining'].includes(pipeline.status) ? (
+            <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)} onClick={() => changeStatus('paused')}>
+              <Pause size={16} />{busyAction === 'status-paused' ? '安全暂停中…' : '安全暂停'}
+            </button>
+          ) : (
+            <button className="qp-button qp-button--ghost" type="button"
+              disabled={Boolean(busyAction) || !configured || running}
+              title={!configured ? '先验证并保存只读 API 连接' : running ? '等待当前批次收口' : ''}
+              onClick={() => changeStatus('active')}>
+              <Play size={16} />{busyAction === 'status-active' ? '正在启用…' : '启用任务'}
+            </button>
+          )}
+          <button className="qp-button" type="button" disabled={Boolean(busyAction) || pipeline.status !== 'active'} onClick={runSync}>
+            <ArrowClockwise size={16} />{busyAction === 'sync' ? '正在提交…' : '立即同步'}
+          </button>
+        </div>
+      </div>
+
+      <Panel title="只读 API 与调度" subtitle="连接由 Hub 服务端使用；浏览器不会直接请求远端 SQLite API，也不会把 Bearer Token 放入 URL">
+        <p className="mih-inline-warning"><Key size={16} aria-hidden="true" />Token 留空表示保留已保存凭据；保存操作会先验证健康状态、认证和只读资源。</p>
+        <form className="mih-form mih-form--grid mih-telegram-config" onSubmit={save}>
+          <Field label="Base URL" hint="填写调用地址，例如 http://54.151.151.135:8780；0.0.0.0 只是远端监听地址" className="mih-form__wide">
+            <input className="qp-input" type="url" required value={form.baseUrl} placeholder="http://54.151.151.135:8780"
+              onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} />
+          </Field>
+          <Field label="Bearer Token" hint={pipeline.connection?.tokenConfigured ? '已配置；留空保持当前 Token' : '尚未配置 Token'}>
+            <input className="qp-input" type="password" autoComplete="new-password" value={form.token}
+              required={!pipeline.connection?.tokenConfigured} placeholder={pipeline.connection?.tokenConfigured ? '留空保持不变' : '输入 SQLite API Token'}
+              onChange={(event) => setForm({ ...form, token: event.target.value })} />
+          </Field>
+          <Field label="同步间隔（秒）" hint="60–86400；表示 Hub 判断任务是否到期的周期">
+            <input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds}
+              onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} />
+          </Field>
+          <div className="mih-page-actions mih-form__wide">
+            <StatusBadge status={pipeline.connection?.tokenConfigured ? 'active' : 'disabled'}
+              label={pipeline.connection?.tokenConfigured ? 'Token 已配置' : 'Token 待配置'} />
+            <button className="qp-button qp-button--ghost" type="submit" disabled={Boolean(busyAction) || !connectionEditable}
+              title={!connectionEditable ? '请先安全暂停并等待运行批次排空' : ''}>
+              {busyAction === 'save' ? '正在验证并保存…' : '验证并保存共享连接'}
+            </button>
+          </div>
+        </form>
+      </Panel>
+
+      <Panel title="同步与数据保留策略" subtitle="远端 API 按页倒序返回数据，因此通过幂等重读和周期性全量对账实现最终一致">
+        <div className="mih-telegram-capabilities">
+          <div><strong>首次全量 + 日常重叠</strong><p>首次接入完整扫描；之后每轮覆盖最近 24 小时，允许重复读取，由 canonical identity 幂等吸收。</p></div>
+          <div><strong>每日全量对账</strong><p>每天重新扫描全量资源，补齐晚到、编辑和删除标记；Checkpoint 是运行证据，不代表远端精确 CDC 水位。</p></div>
+          <div><strong>原文与检索分层</strong><p>源响应原样保留，不做词汇规避或内容过滤；HanLP/CJK 只在 Elasticsearch 检索投影阶段生效。</p></div>
+        </div>
+        {pipeline.strategy ? <details className="mih-inline-details"><summary>查看当前策略证据</summary><pre className="mih-code-block">{JSON.stringify(pipeline.strategy, null, 2)}</pre></details> : null}
+        {warnings.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">{warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul> : null}
+      </Panel>
+
+      <Panel title="固定资源与清洗状态" subtitle="两个 endpoint、Dataset 和映射由业务版本固定；诊断展示运行证据，不把倒序分页描述成精确增量"
+        actions={<button className="qp-button qp-button--ghost" type="button" disabled={progress.loading} onClick={progress.refresh}><ArrowClockwise size={16} />刷新两任务诊断</button>}>
+        <div className="mih-telegram-task-grid">
+          {(tasks.length ? tasks : [{ role: 'chats' }, { role: 'messages' }]).map((task) => (
+            <TelegramSqliteTaskCard key={task.role || telegramTaskSourceKey(task)} task={task} progress={progressTasks} configured={configured} />
+          ))}
+        </div>
+        {progress.loading && !progress.data ? <LoadingState label="正在读取 SQLite API 管线诊断" /> : null}
+        {progress.error ? <ErrorState error={progress.error} onRetry={progress.refresh} /> : null}
+      </Panel>
+
+      <Panel title="处理链路与索引能力" subtitle="远端只读响应先作为原始证据保留，再进入确定性 mapping、canonical 与可重建搜索投影">
+        <div className="mih-telegram-flow" aria-label="Telegram SQLite API 数据处理链路">
+          {['只读 HTTP API', '原始 PG', 'Canonical PG', 'Outbox', 'Elasticsearch'].map((step, index) => (
+            <span key={step}>{index > 0 ? <b aria-hidden="true">→</b> : null}<em>{step}</em></span>
+          ))}
+        </div>
+      </Panel>
+
+      {pipeline.status === 'paused' && !running ? (
+        <section className="mih-source-danger" aria-labelledby="telegram-sqlite-checkpoint-reset-title">
+          <div className="mih-source-danger__copy">
+            <Warning size={24} weight="duotone" aria-hidden="true" />
+            <div>
+              <h3 id="telegram-sqlite-checkpoint-reset-title">统一重置双任务 Checkpoint</h3>
+              <p>下一次同步会重新执行首次全量阶段。Canonical 仍会幂等去重，但远端分页读取、PG 写入和 ES 重投影负载会明显增加。</p>
+              <p>普通新增、24 小时重叠同步和每日全量对账不需要重置；仅在审计决定完整重放时使用。</p>
+            </div>
+          </div>
+          <form className="mih-source-danger__form" onSubmit={resetCheckpoints}>
+            <Field label="输入业务标识以确认" hint={<code>telegram-sqlite</code>}>
+              <input className="qp-input" value={resetConfirmation} autoComplete="off" spellCheck="false"
+                onChange={(event) => setResetConfirmation(event.target.value)} />
+            </Field>
+            <button className="qp-button qp-button--danger" type="submit"
+              disabled={Boolean(busyAction) || resetConfirmation !== 'telegram-sqlite'}>
+              {busyAction === 'reset' ? '正在统一重置…' : '确认重置双任务 Checkpoint'}
+            </button>
+          </form>
+        </section>
+      ) : null}
+    </Modal>
+  )
+}
+
+function TelegramSqliteTaskCard({ task, progress, configured }) {
+  const meta = telegramSqliteTaskMeta(task)
+  const sourceKey = telegramTaskSourceKey(task) || meta.sourceKey
+  const diagnostic = progress.find((entry) => entry.role === task.role || entry.sourceKey === sourceKey)
+  const latest = task.latestRun
+  const cursorStatus = task.cursor?.status || latest?.status || task.source?.status || 'idle'
+  const mappingVersion = task.activeMapping?.version ?? task.activeMapping ?? '—'
+  const endpoint = task.endpoint || task.source?.connection?.endpoint || meta.endpoint
+  const dataset = task.dataset || task.source?.datasetId || meta.dataset
+  const issues = sqlitePipelineIssueMessages(diagnostic?.blocker, diagnostic?.issues, diagnostic?.warnings, task.warnings)
+  const checkedAt = diagnostic?.checkedAt || diagnostic?.updatedAt
+  const stat = (names) => {
+    const key = names.find((name) => latest?.[name] != null)
+    return key ? latest[key] : 0
+  }
+
+  return (
+    <article className="mih-telegram-task">
+      <header>
+        <div><span className="mih-telegram-task__role">{meta.label}</span><code>{sourceKey}</code></div>
+        <StatusBadge status={cursorStatus === 'failed' ? 'down' : cursorStatus === 'running' ? 'warning' : task.source?.status || cursorStatus}
+          label={cursorStatus === 'running' ? '运行中' : undefined} />
+      </header>
+      <dl className="mih-telegram-task__definition">
+        <div><dt>只读 endpoint</dt><dd><code>{endpoint}</code></dd></div>
+        <div><dt>Dataset / 对象</dt><dd><code>{dataset}</code><small>telegram · {task.source?.objectType || meta.objectType}</small></dd></div>
+        <div><dt>映射</dt><dd>{mappingVersion === '—' ? '待配置' : `固定 v${mappingVersion}`}<small>原始字段完整保留</small></dd></div>
+        <div><dt>下次调度</dt><dd>{formatDate(task.nextDueAt)}</dd></div>
+      </dl>
+      <div className="mih-telegram-task__checkpoint"><span>Checkpoint</span><code>{compactCheckpoint(task.cursor?.position)}</code></div>
+      <div className="mih-telegram-task__run">
+        <span>最近批次</span>
+        <dl>
+          <div><dt>读取</dt><dd>{formatNumber(stat(['rowCount', 'inputRows', 'readRows', 'rowsRead', 'processedCount']))}</dd></div>
+          <div><dt>入库</dt><dd>{formatNumber(stat(['ingestedCount', 'ingested', 'ingestedRows', 'writtenRows']))}</dd></div>
+          <div><dt>变更</dt><dd>{formatNumber(stat(['changedCount', 'changed', 'changedRows', 'updatedRows']))}</dd></div>
+          <div><dt>删除</dt><dd>{formatNumber(stat(['deletedCount', 'deleted', 'deletedRows']))}</dd></div>
+          <div><dt>拒绝</dt><dd>{formatNumber(stat(['rejectedCount', 'rejected', 'rejectedRows']))}</dd></div>
+        </dl>
+      </div>
+      <div className="mih-telegram-progress">
+        <div><span>只读诊断</span><strong>{checkedAt ? formatDate(checkedAt) : configured ? '等待首次核对' : '连接待配置'}</strong></div>
+        <small className={issues.length > 0 ? 'mih-telegram-progress__warning' : undefined}>{issues.length > 0
+          ? issues.join('；')
+          : diagnostic?.summary || diagnostic?.message || '采用 24 小时重叠读取与每日全量对账；重复记录由 Hub 幂等吸收。'}</small>
+      </div>
+      <footer>
+        <span>最近运行：{latest ? formatDate(latest.finishedAt || latest.startedAt || latest.createdAt) : '尚未运行'}</span>
+        <code>最终一致</code>
+      </footer>
+    </article>
   )
 }
 
@@ -1192,7 +1585,7 @@ function CreateSourceModal({ token, onUnauthorized, notify, onClose, onCreated }
 }
 
 function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onSourceChanged }) {
-  const managedByPipeline = TELEGRAM_MONITOR_SOURCE_KEYS.has(source.sourceKey)
+  const managedByPipeline = PIPELINE_MANAGED_SOURCE_KEYS.has(source.sourceKey)
   const [currentSource, setCurrentSource] = useState(source)
   const isServerPathSource = currentSource.sourceKind === 'file'
     && currentSource.connection?.fileMode === 'server_path'

@@ -649,6 +649,20 @@ test('provider lineage never reaches the customer-facing projection', async () =
   assert.deepEqual(Object.keys(document.extensions), ['noteRank'])
 })
 
+test('SQLite API records keep the shared external stream in the ES projection', async () => {
+  const document = await buildContentDocument(canonicalRow({
+    dataset_id: 'telegram.sqlite.messages.v1',
+    platform: 'telegram',
+    object_type: 'message',
+    stable_fields: {
+      source: { origin: 'sqlite_api', sourceKey: 'telegram-sqlite-api-messages' },
+    },
+  }), { segmenter })
+
+  assert.equal(document.source.connectorId, 'external:telegram-sqlite-api-messages')
+  assert.equal(document.source.streamId, 'telegram.external.v1')
+})
+
 test('location is only emitted when both coordinates are known', async () => {
   const withoutGeo = await buildContentDocument(canonicalRow(), { segmenter })
   assert.equal(withoutGeo.location, undefined)

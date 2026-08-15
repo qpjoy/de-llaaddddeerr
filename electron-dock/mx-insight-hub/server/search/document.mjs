@@ -184,7 +184,7 @@ export async function buildContentDocument(row, { segmenter }) {
       connectorId: stableFields.source?.sourceKey
         ? `external:${stableFields.source.sourceKey}`
         : stableFields.connectorId ?? 'night-all',
-      streamId: stableFields.source?.origin === 'database'
+      streamId: ['database', 'sqlite_api'].includes(stableFields.source?.origin)
         ? `${row.platform}.external.v1`
         : `${row.platform}.search_posts.v1`,
       sourceKey: row.external_id,

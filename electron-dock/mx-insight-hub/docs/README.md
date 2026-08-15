@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-08-12.
+Last reviewed: 2026-08-15.
 
 This directory is the source of truth for MX Insight Hub. Night-All-specific implementation details remain in the Night-All repository; this project records only the stable dependency contract and ownership boundary.
 
@@ -19,6 +19,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | Unified identity | Launcher opaque-token sign-in/introspection, Hub-local external identity bindings, multi-tenant memberships, per-tenant roles, explicit platform-admin scope mapping and the global Admin Token break-glass path are implemented. Direct JWT/JWKS validation is not used because Launcher tokens are opaque. |
 | Data ingest and serving plane | Admin-token-only PostgreSQL/file source management, browser upload, allowlisted server-file paths, content observations, reusable immutable format rules, canonical records/revisions/tombstones, projection outbox, durable queues/cursors, interpretation-aware file idempotency, PostgreSQL external pull and import-run evidence are implemented. PostgreSQL credentials live directly in `catalog.external_sources.connection`; catalog backups are therefore sensitive. `/shared_dir` directory watcher/landing agent, immutable object/cloud storage adapters, prompt CRUD, a generic CDC connector and non-PostgreSQL database connectors are not. |
 | Telegram monitor sources | `telegram.monitor.chats.v1` and `telegram.monitor.messages.v1`, a fixed two-input business task, explicit idempotent source-contract preparation, source progress/import evidence, strict history, Night-All-v1-compatible stored search and fuzzy entity search are implemented. Preparation installs the database-enforced watermark/trigger/index contract with one-request DDL credentials while ordinary ingest stays read-only; activation remains fail-closed until probe and writer attestation pass. These canonical datasets have no `tenant_id`; all consumers with the `telegram` grant read the same corpus. |
+| Telegram SQLite read API | `telegram.sqlite.chats.v1` and `telegram.sqlite.messages.v1` are a separate fixed, Admin-managed GET-only pipeline. It preserves raw JSON, uses deterministic identities and Hub transaction idempotency, and performs overlap polling plus daily full reconciliation because the upstream page API has no exact change cursor. It is not merged into the PostgreSQL public Telegram datasets. |
 | Search/retrieval | Canonical projection outbox, projector, customer-safe Elasticsearch full-text/name fields, PostgreSQL degradation paths, Admin semantic search and shared `mx-common` search deployment are implemented. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
 | Private/public DNS routes | Deliberately not auto-created. They require route/TLS review and a deployed public Service. |
 | Billing, BI and Data Agent | Designed as later phases; the MVP has mutable request/usage evidence, not an append-only billing ledger or invoice engine. |
@@ -44,11 +45,12 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 15. [Local development](operations/local-development.md)
 16. [Internal K8s deployment](operations/internal-k8s-deployment.md)
 17. [Telegram monitor PostgreSQL ingestion](operations/telegram-monitor-ingestion.md)
-18. [Backup and restore](operations/backup-restore.md)
-19. [Observability and SLO](operations/observability-slo.md)
-20. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
-21. [Agent provider settings](operations/agent-provider-settings.md)
-22. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
+18. [Telegram SQLite read-API ingestion](operations/telegram-sqlite-api-ingestion.md)
+19. [Backup and restore](operations/backup-restore.md)
+20. [Observability and SLO](operations/observability-slo.md)
+21. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
+22. [Agent provider settings](operations/agent-provider-settings.md)
+23. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
 
 ## Decisions
 

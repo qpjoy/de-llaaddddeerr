@@ -45,6 +45,13 @@ datasets, subject to that consumer's own quota and usage ledger. A future
 tenant-specific Telegram subset requires an explicit dataset/row-scope model
 and migration; it must not be inferred from membership alone.
 
+The Admin data-source plane also includes a separate fixed Telegram SQLite
+read-API pipeline. It stores the fallback snapshot in
+`telegram.sqlite.chats.v1` / `telegram.sqlite.messages.v1`, keeps every HTTP row
+as raw evidence, and uses overlap polling plus periodic full reconciliation
+because the upstream page API does not expose an exact change cursor. It does
+not silently merge into the PostgreSQL-backed public Telegram datasets.
+
 ## Quick start
 
 ```bash
@@ -143,5 +150,9 @@ schema probing and writer attestation pass. `message_at` and `collected_at`
 remain invalid substitutes for the unified source watermark.
 
 Start with [docs/README.md](docs/README.md) for architecture, security, operations, and roadmap decisions.
+
+The SQLite source setup and its explicit eventual-reconciliation semantics are
+documented in the [Telegram SQLite read-API ingestion
+runbook](docs/operations/telegram-sqlite-api-ingestion.md).
 
 The detailed data-platform decisions start at [data-platform storage and serving](docs/architecture/data-platform-storage-and-serving.md), [ingestion/cache/fallback](docs/architecture/ingestion-cache-and-fallback.md), and the [`/shared_dir` ingestion runbook](docs/operations/shared-directory-ingestion.md).

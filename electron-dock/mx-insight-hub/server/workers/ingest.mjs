@@ -4,6 +4,8 @@ import { NightAllAdapter } from '../adapters/night-all.mjs'
 import { loadConfig } from '../config.mjs'
 import { NightAllBackfill } from '../ingest/backfill.mjs'
 import { DatabaseSourcePuller } from '../ingest/external/database-source.mjs'
+import { ExternalSourcePuller } from '../ingest/external/source-puller.mjs'
+import { SQLiteApiSourcePuller } from '../ingest/external/sqlite-api-source.mjs'
 import { runExternalPullScheduler } from '../ingest/external/scheduler.mjs'
 import { EXTERNAL_PULL_QUEUE, runExternalPullJob } from '../ingest/external/sync-job.mjs'
 import { createPostgresStore } from '../stores/postgres-store.mjs'
@@ -37,6 +39,14 @@ async function main() {
   const queue = createQueue({ ...config.common.queue, driver: 'postgres' }, { pool, logger })
   const backfill = new NightAllBackfill({ store, adapter, queue, logger })
   const databasePuller = new DatabaseSourcePuller({ store, queue, logger })
+  const sqliteApiPuller = new SQLiteApiSourcePuller({ store, queue, logger })
+  const externalSourcePuller = new ExternalSourcePuller({
+    store,
+    queue,
+    logger,
+    databasePuller,
+    sqliteApiPuller,
+  })
 
   const controller = new AbortController()
   const shutdown = (signal) => {
@@ -100,7 +110,7 @@ async function main() {
 
   async function handleExternalPull(payload, job) {
     return runExternalPullJob({
-      puller: databasePuller,
+      puller: externalSourcePuller,
       queue,
       payload,
       job,

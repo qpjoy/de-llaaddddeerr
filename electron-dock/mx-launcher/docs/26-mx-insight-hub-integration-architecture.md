@@ -138,6 +138,21 @@ timestamp watermark、复合索引、映射和数据最小化，再逐表启用 
 由当前前向游标自动传播。详细门禁见
 [Telegram monitor ingestion](../../mx-insight-hub/docs/operations/telegram-monitor-ingestion.md)。
 
+### Telegram SQLite 只读 API 数据路径
+
+当独立采集端只在本地 SQLite 留有 PostgreSQL 故障回退数据时，Hub 通过 Admin
+管理的固定 `telegram-sqlite` 管线在服务端调用 GET-only HTTP API。Token 不进入
+Launcher、浏览器、MX-H2I 登录或网络配置；两个子任务分别写入
+`telegram.sqlite.chats.v1` 与 `telegram.sqlite.messages.v1`，不会与现有
+`telegram.monitor.*` canonical 行互相覆盖。
+
+当前源 API 只有 `message_at DESC` 的页码分页，没有覆盖编辑、软删除和迟到回填的
+单调 change cursor。因此该管线采用首次全量、24 小时重叠读取和每日全量对账，只把
+显式 `deleted_at` 当作删除，管理面必须标为最终一致而不是精确增量。Hub 内部的 raw、
+revision、outbox 和 Elasticsearch 幂等链路保持不变，正文不做词汇过滤，检索投影继续
+优先 HanLP 并按既有链路降级。操作细节见
+[Telegram SQLite read-API ingestion](../../mx-insight-hub/docs/operations/telegram-sqlite-api-ingestion.md)。
+
 公共响应只返回严格 allowlist 的 normalized chat/message 字段和 opaque keyset
 cursor，不返回 DSN、source table、raw/extensions、provider、endpoint 或
 `businessId`。Hub public Service 只读 Hub 自己的 PostgreSQL，不获得 Night-All 通用
@@ -224,7 +239,7 @@ Hub 不获得 Launcher network lease，不注册 endpoint ProductNetwork，不�
   connect/disconnect、route、WG、PAC、NRPT、resolver 或 ownership 状态；
 - 公共 route 不能访问 Hub Admin、Kibana、Elasticsearch、Night-All raw/provider/credential route。
 
-Hub 的详细数据架构位于 sibling `../../mx-insight-hub/docs/`，重点参考 [数据存储与服务](../../mx-insight-hub/docs/architecture/data-platform-storage-and-serving.md)、[增量接入与缓存回退](../../mx-insight-hub/docs/architecture/ingestion-cache-and-fallback.md)、[Telegram monitor ingestion](../../mx-insight-hub/docs/operations/telegram-monitor-ingestion.md) 和 [`/shared_dir` 导入](../../mx-insight-hub/docs/operations/shared-directory-ingestion.md)。
+Hub 的详细数据架构位于 sibling `../../mx-insight-hub/docs/`，重点参考 [数据存储与服务](../../mx-insight-hub/docs/architecture/data-platform-storage-and-serving.md)、[增量接入与缓存回退](../../mx-insight-hub/docs/architecture/ingestion-cache-and-fallback.md)、[Telegram monitor ingestion](../../mx-insight-hub/docs/operations/telegram-monitor-ingestion.md)、[Telegram SQLite read-API ingestion](../../mx-insight-hub/docs/operations/telegram-sqlite-api-ingestion.md) 和 [`/shared_dir` 导入](../../mx-insight-hub/docs/operations/shared-directory-ingestion.md)。
 
 ## 11. 2026-08-12 Hub 管理台口径与文件源入口
 

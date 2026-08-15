@@ -13,6 +13,7 @@ import { createSearch } from './search/index.mjs'
 import { EmbeddingPipeline } from './embedding/pipeline.mjs'
 import { ExternalImporter } from './ingest/external/importer.mjs'
 import { DatabaseSourcePuller } from './ingest/external/database-source.mjs'
+import { SQLiteApiSourcePuller } from './ingest/external/sqlite-api-source.mjs'
 import { ServerFileReader } from './ingest/external/server-files.mjs'
 import { TelegramMonitorSourcePreparer } from './ingest/telegram/source-preparer.mjs'
 import { createIdentityService } from './identity/index.mjs'
@@ -43,6 +44,9 @@ export async function createRuntime(config = loadConfig()) {
     : await ServerFileReader.create({ roots: config.serverFiles?.roots || [] })
   const databasePuller = config.storeDriver === 'postgres'
     ? new DatabaseSourcePuller({ store, queue })
+    : null
+  const sqliteApiPuller = config.storeDriver === 'postgres'
+    ? new SQLiteApiSourcePuller({ store, queue })
     : null
   const telegramSourcePreparer = config.storeDriver === 'postgres'
     ? new TelegramMonitorSourcePreparer()
@@ -91,6 +95,7 @@ export async function createRuntime(config = loadConfig()) {
     importer,
     serverFileReader,
     databasePuller,
+    sqliteApiPuller,
     telegramSourcePreparer,
     agent,
     search,
@@ -103,7 +108,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
-    databasePuller, telegramSourcePreparer, agent, agentSettings, search, embedding,
+    databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings, search, embedding,
   }
 }
 
