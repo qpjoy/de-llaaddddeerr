@@ -8,6 +8,7 @@ import { ExternalSourcePuller } from '../ingest/external/source-puller.mjs'
 import { SQLiteApiSourcePuller } from '../ingest/external/sqlite-api-source.mjs'
 import { runExternalPullScheduler } from '../ingest/external/scheduler.mjs'
 import { EXTERNAL_PULL_QUEUE, runExternalPullJob } from '../ingest/external/sync-job.mjs'
+import { TELEGRAM_SQLITE_SOURCE_KEYS } from '../ingest/telegram/sqlite-pipeline.mjs'
 import { createPostgresStore } from '../stores/postgres-store.mjs'
 
 // Ingest worker: drains queued search results and runs Night-All backfills.
@@ -116,6 +117,9 @@ async function main() {
       job,
       signal: controller.signal,
       logger,
+      continuationDelayMs: TELEGRAM_SQLITE_SOURCE_KEYS.has(payload?.sourceKey)
+        ? config.externalPull.telegramSqlitePageDelayMs
+        : 0,
     })
   }
 

@@ -122,25 +122,46 @@ function locationOf(row) {
   return [row.longitude, row.latitude]
 }
 
+async function segmentFields(segmenter, values) {
+  const tokens = []
+  let fallbackSegmenter = null
+  for (const value of values) {
+    if (fallbackSegmenter) {
+      tokens.push(await fallbackSegmenter.segment(value))
+      continue
+    }
+    if (typeof segmenter.segmentWithMeta === 'function') {
+      const result = await segmenter.segmentWithMeta(value)
+      tokens.push(result.tokens)
+      if (result.degraded && typeof segmenter.fallbackSegmenter?.segment === 'function') {
+        fallbackSegmenter = segmenter.fallbackSegmenter
+      }
+      continue
+    }
+    tokens.push(await segmenter.segment(value))
+  }
+  return tokens
+}
+
 /**
  * Build the Elasticsearch document for one canonical record.
  *
- * Segmentation is awaited per document rather than batched because the HanLP
- * client already fails soft: a segmenter outage yields fallback tokens instead
- * of an exception, so there is no partial-batch state to unwind.
+ * Segmentation is awaited one field at a time. The local HanLP deployment has
+ * one inference slot, so parallelising fields only fills its short queue and
+ * turns otherwise valid work into 429 fallbacks; serial calls preserve the
+ * same throughput while keeping HanLP, rather than Jieba, as the normal path.
+ * Once a field degrades, the remaining fields use that segmenter's local
+ * fallback directly instead of paying another remote timeout per field.
  */
 export async function buildContentDocument(row, { segmenter }) {
   const stableFields = row.stable_fields || {}
   const authorName = row.author_name ?? stableFields.author?.name ?? null
   const username = stableFields.attributes?.username ?? stableFields.author?.handle ?? null
   const chatUsername = stableFields.attributes?.chatUsername ?? null
-  const [titleTokens, bodyTokens, authorNameTokens, usernameTokens, chatUsernameTokens] = await Promise.all([
-    segmenter.segment(row.title || ''),
-    segmenter.segment(row.body || ''),
-    segmenter.segment(authorName || ''),
-    segmenter.segment(username || ''),
-    segmenter.segment(chatUsername || ''),
-  ])
+  const [titleTokens, bodyTokens, authorNameTokens, usernameTokens, chatUsernameTokens] = await segmentFields(
+    segmenter,
+    [row.title || '', row.body || '', authorName || '', username || '', chatUsername || ''],
+  )
   const media = mediaOf(stableFields)
   const entities = entitiesOf(stableFields)
   const location = locationOf(row)

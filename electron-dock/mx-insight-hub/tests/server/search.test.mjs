@@ -597,6 +597,85 @@ test('content document carries author, metrics and segmented text', async () => 
   assert.equal(document.projectionRevision, 3)
 })
 
+test('content projection serializes field segmentation for a single-slot HanLP service', async () => {
+  let active = 0
+  let maxActive = 0
+  const calls = []
+  const serialSegmenter = {
+    async segmentWithMeta(text) {
+      calls.push(text)
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await new Promise((resolve) => setImmediate(resolve))
+      active -= 1
+      return {
+        tokens: fallbackSegment(text),
+        backendUsed: 'hanlp',
+        degraded: false,
+        errorCode: null,
+      }
+    },
+  }
+
+  await buildContentDocument(canonicalRow({
+    stable_fields: {
+      author: { handle: 'alice' },
+      attributes: { username: 'channel', chatUsername: 'chat' },
+    },
+  }), { segmenter: serialSegmenter })
+
+  assert.equal(maxActive, 1)
+  assert.deepEqual(calls, [
+    '建议都去学吴恩达的AI Agent',
+    '希望可以帮到你～ #大模型 #agent',
+    '美丽的AI搬运工',
+    'channel',
+    'chat',
+  ])
+})
+
+test('content projection stops retrying HanLP fields after one degraded result', async () => {
+  const calls = []
+  const fallbackCalls = []
+  const shortCircuitSegmenter = {
+    fallbackSegmenter: {
+      async segment(text) {
+        fallbackCalls.push(text)
+        return [`jieba:${text}`]
+      },
+    },
+    async segmentWithMeta(text) {
+      calls.push(text)
+      return {
+        tokens: [`jieba:${text}`],
+        backendUsed: 'jieba',
+        degraded: true,
+        errorCode: 'hanlp_timeout',
+      }
+    },
+  }
+
+  const document = await buildContentDocument(canonicalRow({
+    stable_fields: {
+      author: { handle: 'alice' },
+      attributes: { username: 'channel', chatUsername: 'chat' },
+    },
+  }), { segmenter: shortCircuitSegmenter })
+
+  assert.deepEqual(calls, ['建议都去学吴恩达的AI Agent'])
+  assert.deepEqual(fallbackCalls, [
+    '希望可以帮到你～ #大模型 #agent',
+    '美丽的AI搬运工',
+    'channel',
+    'chat',
+  ])
+  assert.equal(document.titleHanlp, 'jieba:建议都去学吴恩达的AI Agent')
+  assert.equal(document.bodyHanlp, 'jieba:希望可以帮到你～ #大模型 #agent')
+  assert.equal(document.authorNameHanlp, 'jieba:美丽的AI搬运工')
+  assert.equal(document.usernameHanlp, 'jieba:channel')
+  assert.equal(document.chatUsernameHanlp, 'jieba:chat')
+})
+
 test('Telegram document promotes fixed relation, media and entity fields before the initial index build', async () => {
   const editedAt = new Date('2026-08-09T10:20:30.000Z')
   const document = await buildContentDocument(canonicalRow({

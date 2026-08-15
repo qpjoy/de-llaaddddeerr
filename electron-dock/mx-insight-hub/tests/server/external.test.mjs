@@ -2036,6 +2036,50 @@ test('external pull worker hands an unfinished batch to a distinct continuation'
   ]])
 })
 
+test('external pull continuation can be durably paced without sleeping the worker', async () => {
+  const enqueued = []
+  const now = new Date('2026-08-16T00:00:00.000Z')
+  const result = await runExternalPullJob({
+    puller: {
+      pullBatch: async () => ({
+        pulled: 500, ingested: 500, changed: 500, rejected: 0,
+        importRunId: 'run-sqlite-full', done: false,
+      }),
+    },
+    queue: {
+      heartbeat: async () => {},
+      enqueue: async (...args) => enqueued.push(args),
+    },
+    payload: {
+      sourceKey: 'telegram-sqlite-api-messages',
+      batchSize: 500,
+      trigger: 'manual',
+      chunk: 98,
+    },
+    job: { id: 99 },
+    continuationDelayMs: 1_000,
+    now: () => now,
+    logger: { log() {} },
+  })
+
+  assert.equal(result.done, false)
+  assert.deepEqual(enqueued, [[
+    'external-pull',
+    {
+      sourceKey: 'telegram-sqlite-api-messages',
+      batchSize: 500,
+      trigger: 'manual',
+      chunk: 99,
+      importRunId: 'run-sqlite-full',
+    },
+    {
+      dedupeKey: 'external-pull:telegram-sqlite-api-messages:99',
+      priority: 220,
+      runAt: new Date('2026-08-16T00:00:01.000Z'),
+    },
+  ]])
+})
+
 test('an exhausted continuation enqueue marks its cursor failed while preserving the import run id', async () => {
   for (const [attempts, shouldClose] of [[4, false], [5, true]]) {
     const closed = []

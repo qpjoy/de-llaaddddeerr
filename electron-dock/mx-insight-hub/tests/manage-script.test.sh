@@ -797,6 +797,37 @@ grep -q 'must be a valid server-file root JSON object' "$invalid_roots_error"
 rm -f -- "$invalid_roots_error"
 printf 'ok - malformed server-file root JSON fails before ConfigMap mutation\n'
 
+# Reject an invalid SQLite page delay before kubectl can overwrite the last
+# known-good ConfigMap. The server validates this too, but deploy must fail
+# before mutating cluster state.
+for invalid_page_delay in -1 60001 1.5 invalid; do
+  invalid_delay_kubectl_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-delay.XXXXXX")"
+  invalid_delay_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-delay-error.XXXXXX")"
+  rm -f -- "$invalid_delay_kubectl_marker"
+  if INVALID_DELAY_KUBECTL_MARKER="$invalid_delay_kubectl_marker" \
+    MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS="$invalid_page_delay" \
+    bash -c '
+      set -euo pipefail
+      source "$1/scripts/manage.sh"
+      export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+      export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+      export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+      export NIGHT_ALL_BASE_URL="http://night-all.internal"
+      kubectl() { : >"$INVALID_DELAY_KUBECTL_MARKER"; }
+      create_runtime_config
+    ' _ "$ROOT_DIR" >/dev/null 2>"$invalid_delay_error"; then
+    printf 'not ok - invalid SQLite page delay %q was accepted\n' "$invalid_page_delay" >&2
+    exit 1
+  fi
+  if [ -e "$invalid_delay_kubectl_marker" ]; then
+    printf 'not ok - invalid SQLite page delay %q reached kubectl\n' "$invalid_page_delay" >&2
+    exit 1
+  fi
+  grep -q 'MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS must be an integer from 0 to 60000' "$invalid_delay_error"
+  rm -f -- "$invalid_delay_error"
+done
+printf 'ok - invalid SQLite page delays fail before ConfigMap mutation\n'
+
 # The foreign Telegram reader is optional, but when configured it must be
 # passed as a Secret key (never a ConfigMap value or terminal output).
 tg_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-tg-wired.XXXXXX")"
@@ -841,6 +872,7 @@ printf 'ok - optional Telegram reader is Secret-wired without output exposure\n'
 
 grep -q 'MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS.*60000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q '^  ingest:' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'server/workers/ingest.mjs' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_SERVER_FILE_GROUP_ID:-10' "$ROOT_DIR/deploy/compose/docker-compose.yml"
@@ -856,6 +888,7 @@ printf 'ok - server-file read group and mount stay scoped to Admin\n'
 printf 'ok - local Compose wires the periodic external-pull worker\n'
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS=' "$ROOT_DIR/scripts/manage.sh"
 printf 'ok - internal runtime ConfigMap wires external-pull scheduling controls\n'
 
 if rg -q 'MX_INSIGHT_PROVIDER_MASTER_KEY' \

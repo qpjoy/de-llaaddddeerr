@@ -18,9 +18,14 @@ export async function runExternalPullJob({
   heartbeatIntervalMs = 30_000,
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
+  continuationDelayMs = 0,
+  now = () => new Date(),
 }) {
   const sourceKey = payload?.sourceKey
   if (!sourceKey) throw new Error('external pull payload is missing sourceKey')
+  if (!Number.isInteger(continuationDelayMs) || continuationDelayMs < 0) {
+    throw new Error('continuationDelayMs must be a non-negative integer')
+  }
   const heartbeat = () => queue.heartbeat(job.id).catch(() => {})
   await heartbeat()
   const timer = setIntervalFn(heartbeat, heartbeatIntervalMs)
@@ -85,6 +90,9 @@ export async function runExternalPullJob({
     // leave no job for the next worker while the periodic scheduler correctly
     // refuses to overlap a running source.
     try {
+      const runAt = continuationDelayMs > 0
+        ? new Date(new Date(now()).getTime() + continuationDelayMs)
+        : null
       await queue.enqueue(
         EXTERNAL_PULL_QUEUE,
         {
@@ -92,7 +100,11 @@ export async function runExternalPullJob({
           ...(result.importRunId ? { importRunId: result.importRunId } : {}),
           chunk: nextChunk,
         },
-        { dedupeKey: `external-pull:${sourceKey}:${nextChunk}`, priority: 220 },
+        {
+          dedupeKey: `external-pull:${sourceKey}:${nextChunk}`,
+          priority: 220,
+          ...(runAt ? { runAt } : {}),
+        },
       )
     } catch (error) {
       const exhausted = Number(job?.attempts) >= Number(job?.max_attempts)

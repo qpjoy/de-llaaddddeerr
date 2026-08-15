@@ -13,6 +13,15 @@ function positiveInteger(value, fallback, name) {
   return parsed
 }
 
+function boundedNonNegativeInteger(value, fallback, name, maximum) {
+  if (value == null || value === '') return fallback
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > maximum) {
+    throw new AppError(500, 'invalid_configuration', `${name} must be an integer between 0 and ${maximum}`)
+  }
+  return parsed
+}
+
 function required(environment, name) {
   const value = environment[name]?.trim()
   if (!value) throw new AppError(500, 'invalid_configuration', `${name} is required`)
@@ -133,6 +142,12 @@ export function loadConfig(environment = process.env) {
         environment.MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE,
         1_000,
         'MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE',
+      ),
+      telegramSqlitePageDelayMs: boundedNonNegativeInteger(
+        environment.MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS,
+        1_000,
+        'MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS',
+        60_000,
       ),
     },
     serverFiles: {

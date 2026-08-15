@@ -117,6 +117,13 @@ Open `/admin/#sources`, then open **Telegram SQLite API 清洗任务**.
 5. Use **立即同步** for an operator-triggered run, or wait for the configured
    schedule.
 
+Each committed Telegram SQLite page is handed to its continuation through a
+durable queue `runAt` delay. `MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS` defaults
+to 1000 ms, accepts 0 to disable pacing, and is capped at 60000 ms. The delay
+does not hold a worker, change the fixed 500-row page width, create a new import
+run, or reset the checkpoint; it only gives PostgreSQL, the outbox projector and
+the local segmenter a bounded gap before the next source page.
+
 When the endpoint starts serving a different SQLite database, keep the
 pipeline paused, save and validate the connection, then use **一次性全量对齐**.
 That action clears both durable high-water marks; after enabling the pipeline,
@@ -138,9 +145,9 @@ control, logs, or documentation.
 `syncIntervalSeconds=300` is the minimum interval between completed source
 checks. The ingest scheduler wakes every 60 seconds by default, compares the
 durable cursor update time with each source interval, and atomically queues the
-two due SQLite tasks. Once a task starts, continuation pages run back-to-back
-until that sweep reaches its boundary; they do not sleep 300 seconds between
-pages. For messages, a normal due run requests only the high-water-mark overlap
+two due SQLite tasks. Once a task starts, continuation pages use the configured
+short durable delay until that sweep reaches its boundary; they do not sleep
+300 seconds between pages. For messages, a normal due run requests only the high-water-mark overlap
 window, not all historical rows. The chat directory is currently about 124
 rows and is refreshed in one bounded page. The first due run after 02:00
 Asia/Shanghai uses the previous-day window once; the cursor records that local

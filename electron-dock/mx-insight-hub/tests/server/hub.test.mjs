@@ -137,6 +137,23 @@ test('public listener does not require or receive an admin token', () => {
   )
 })
 
+test('Telegram SQLite page pacing has a bounded deployment default', () => {
+  const base = {
+    MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER,
+  }
+  assert.equal(loadConfig(base).externalPull.telegramSqlitePageDelayMs, 1_000)
+  assert.equal(loadConfig({
+    ...base,
+    MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS: '0',
+  }).externalPull.telegramSqlitePageDelayMs, 0)
+  assert.throws(
+    () => loadConfig({ ...base, MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS: '60001' }),
+    /must be an integer between 0 and 60000/,
+  )
+})
+
 test('Night-All adapter rejects invalid successful envelopes', async () => {
   const invalidAdapter = new NightAllAdapter({
     baseUrl: 'http://night-all.invalid',
