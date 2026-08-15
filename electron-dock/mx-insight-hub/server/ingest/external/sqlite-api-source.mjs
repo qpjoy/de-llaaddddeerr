@@ -339,7 +339,11 @@ function safePullError(error) {
 }
 
 function isRetryableGetFailure(error) {
-  if (error?.code === 'sqlite_api_unavailable') return true
+  if ([
+    'sqlite_api_unavailable',
+    'sqlite_api_response_read_failed',
+    'sqlite_api_invalid_json',
+  ].includes(error?.code)) return true
   const status = Number(error?.status)
   return error?.code === 'sqlite_api_request_failed'
     && (status === 408 || status === 425 || status === 429 || status >= 500)
@@ -440,33 +444,42 @@ export class SQLiteApiSourcePuller {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     timer.unref?.()
-    let response
     try {
-      response = await this.fetchImpl(url, {
-        method: 'GET',
-        headers: authenticated ? { Authorization: `Bearer ${connection.token}` } : {},
-        redirect: 'error',
-        signal: controller.signal,
-      })
-    } catch {
-      throw new AppError(503, 'sqlite_api_unavailable', 'SQLite API did not return a response')
+      let response
+      try {
+        response = await this.fetchImpl(url, {
+          method: 'GET',
+          headers: authenticated ? { Authorization: `Bearer ${connection.token}` } : {},
+          redirect: 'error',
+          signal: controller.signal,
+        })
+      } catch {
+        throw new AppError(503, 'sqlite_api_unavailable', 'SQLite API did not return a response')
+      }
+      if (!response?.ok) {
+        const status = Number(response?.status) || 503
+        const code = status === 401
+          ? 'sqlite_api_unauthorized'
+          : status === 422
+            ? 'sqlite_api_contract_rejected'
+            : 'sqlite_api_request_failed'
+        throw new AppError(status >= 400 && status < 600 ? status : 503, code, `SQLite API request failed with HTTP ${status}`)
+      }
+      let text
+      try {
+        text = await response.text()
+      } catch {
+        throw new AppError(503, 'sqlite_api_response_read_failed', 'SQLite API response body could not be read')
+      }
+      try {
+        return parseLosslessJson(text)
+      } catch (error) {
+        if (error instanceof AppError) throw error
+        if (!(error instanceof SyntaxError)) throw error
+        throw new AppError(503, 'sqlite_api_invalid_json', 'SQLite API returned an invalid JSON response')
+      }
     } finally {
       clearTimeout(timer)
-    }
-    if (!response?.ok) {
-      const status = Number(response?.status) || 503
-      const code = status === 401
-        ? 'sqlite_api_unauthorized'
-        : status === 422
-          ? 'sqlite_api_contract_rejected'
-          : 'sqlite_api_request_failed'
-      throw new AppError(status >= 400 && status < 600 ? status : 503, code, `SQLite API request failed with HTTP ${status}`)
-    }
-    try {
-      return parseLosslessJson(await response.text())
-    } catch (error) {
-      if (error instanceof AppError) throw error
-      throw new AppError(503, 'sqlite_api_invalid_json', 'SQLite API returned an invalid JSON response')
     }
   }
 

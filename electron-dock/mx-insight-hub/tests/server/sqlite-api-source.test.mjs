@@ -7,6 +7,7 @@ import {
   validateSqliteApiConnection,
 } from '../../server/ingest/external/sqlite-api-source.mjs'
 import { ExternalSourcePuller } from '../../server/ingest/external/source-puller.mjs'
+import { runExternalPullJob } from '../../server/ingest/external/sync-job.mjs'
 
 const SECRET_TOKEN = 'test-token-must-never-leave-the-adapter'
 
@@ -108,7 +109,7 @@ function rawMessage({
 
 function createPullHarness({
   source = messageSource(), mapping = messageMapping(), responses,
-  failFirstAck = false, now, initialCursor = null,
+  failFirstAck = false, now, initialCursor = null, timeoutMs = undefined,
 }) {
   const requests = []
   const ingested = []
@@ -216,6 +217,7 @@ function createPullHarness({
     queue,
     fetchImpl,
     now,
+    timeoutMs,
     logger: { warn() {} },
   })
   return {
@@ -704,6 +706,147 @@ test('a temporary daily-window second-page failure keeps its fixed bounds for qu
   assert.equal(harness.requests[2].url.searchParams.get('page'), '2')
   assert.equal(harness.runs.get(first.importRunId).status, 'succeeded')
   assert.equal(harness.getCursor().position.lastDailyWindowDate, '2026-08-16')
+})
+
+test('a malformed continuation response retries the same page and import run', async () => {
+  const now = () => new Date('2026-08-16T18:05:00.000Z')
+  const harness = createPullHarness({
+    now,
+    responses: [
+      {
+        items: [
+          rawMessage({ messageId: 3, messageAt: '2026-08-16T12:00:00.000Z' }),
+          rawMessage({ messageId: 2, messageAt: '2026-08-16T11:30:00.000Z' }),
+        ],
+        total: 3,
+        page: 1,
+      },
+      () => rawJsonResponse('{"items":['),
+      {
+        items: [rawMessage({ messageId: 1, messageAt: '2026-08-16T11:00:00.000Z' })],
+        total: 3,
+        page: 2,
+      },
+    ],
+  })
+  const continuations = []
+  harness.queue.heartbeat = async () => {}
+  harness.queue.enqueue = async (_queue, payload) => {
+    continuations.push(payload)
+    return continuations.length
+  }
+  const workerOptions = {
+    puller: harness.puller,
+    queue: harness.queue,
+    signal: { aborted: false },
+    logger: { log() {}, warn() {}, error() {} },
+    setIntervalFn: () => ({ unref() {} }),
+    clearIntervalFn: () => {},
+  }
+
+  const first = await runExternalPullJob({
+    ...workerOptions,
+    payload: {
+      sourceKey: 'telegram-sqlite-api-messages', batchSize: 2, trigger: 'manual', chunk: 0,
+    },
+    job: { id: 1, attempts: 1, max_attempts: 5 },
+  })
+  assert.equal(first.done, false)
+  assert.equal(continuations.length, 1)
+  const continuationPayload = continuations[0]
+  assert.equal(continuationPayload.importRunId, first.importRunId)
+
+  await assert.rejects(
+    () => runExternalPullJob({
+      ...workerOptions,
+      payload: continuationPayload,
+      job: { id: 2, attempts: 1, max_attempts: 5 },
+    }),
+    (error) => error?.code === 'sqlite_api_invalid_json',
+  )
+  assert.equal(harness.getCursor().status, 'running')
+  assert.equal(harness.getCursor().position.importRunId, first.importRunId)
+  assert.equal(harness.getCursor().position.cycle.page, 2)
+  assert.equal(harness.runs.get(first.importRunId).status, 'running')
+
+  const retried = await runExternalPullJob({
+    ...workerOptions,
+    payload: continuationPayload,
+    job: { id: 2, attempts: 2, max_attempts: 5 },
+  })
+  assert.equal(retried.done, true)
+  assert.equal(retried.importRunId, first.importRunId)
+  assert.equal(harness.runs.size, 1)
+  assert.equal(harness.runs.get(first.importRunId).status, 'succeeded')
+  assert.equal(harness.getCursor().status, 'idle')
+  assert.deepEqual(
+    harness.requests.map((request) => request.url.searchParams.get('page')),
+    ['1', '2', '2'],
+  )
+  assert.equal(harness.requests[1].url.searchParams.get('end_at'), harness.requests[2].url.searchParams.get('end_at'))
+})
+
+test('a response body that hangs after headers is aborted without losing its retry checkpoint', {
+  timeout: 1_000,
+}, async () => {
+  const now = () => new Date('2026-08-16T18:05:00.000Z')
+  let bodyAborted = false
+  const harness = createPullHarness({
+    now,
+    timeoutMs: 25,
+    responses: [
+      {
+        items: [
+          rawMessage({ messageId: 3, messageAt: '2026-08-16T12:00:00.000Z' }),
+          rawMessage({ messageId: 2, messageAt: '2026-08-16T11:30:00.000Z' }),
+        ],
+        total: 3,
+        page: 1,
+      },
+      (_url, options) => ({
+        ok: true,
+        status: 200,
+        text() {
+          return new Promise((_resolve, reject) => {
+            const abort = () => {
+              bodyAborted = true
+              const error = new Error('response body aborted')
+              error.name = 'AbortError'
+              reject(error)
+            }
+            if (options.signal.aborted) abort()
+            else options.signal.addEventListener('abort', abort, { once: true })
+          })
+        },
+      }),
+    ],
+  })
+  const first = await harness.puller.pullBatch('telegram-sqlite-api-messages', { batchSize: 2 })
+  assert.equal(first.done, false)
+
+  let watchdog
+  try {
+    await Promise.race([
+      assert.rejects(
+        () => harness.puller.pullBatch('telegram-sqlite-api-messages', {
+          batchSize: 2,
+          importRunId: first.importRunId,
+        }),
+        (error) => error?.status === 503 && error?.code === 'sqlite_api_response_read_failed',
+      ),
+      new Promise((_resolve, reject) => {
+        watchdog = setTimeout(() => reject(new Error('response body timeout did not abort the read')), 500)
+      }),
+    ])
+  } finally {
+    clearTimeout(watchdog)
+  }
+
+  assert.equal(bodyAborted, true)
+  assert.equal(harness.getCursor().status, 'running')
+  assert.equal(harness.getCursor().position.importRunId, first.importRunId)
+  assert.equal(harness.getCursor().position.cycle.page, 2)
+  assert.equal(harness.runs.get(first.importRunId).status, 'running')
 })
 
 test('checkpoint reset makes the next pull a full reconciliation', async () => {
