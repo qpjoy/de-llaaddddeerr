@@ -442,6 +442,42 @@ test('JSON mappings can read nested values without changing the preserved raw ob
   assert.deepEqual(record.extensions.metadata, raw.metadata)
 })
 
+test('numeric mappings never round preserved large integer strings', () => {
+  const raw = {
+    id: '1',
+    metadata: { views: '9223372036854775807' },
+  }
+  const { record } = applyMapping(raw, {
+    externalId: { from: 'id' },
+    'metrics.views': { from: 'metadata.views', type: 'number' },
+  }, { platform: 'telegram' })
+
+  assert.deepEqual(record.metrics, {})
+  assert.deepEqual(record.stableFields.metrics, {})
+  assert.equal(record.rawItem.metadata.views, '9223372036854775807')
+  assert.equal(record.extensions.metadata.views, '9223372036854775807')
+
+  for (const views of [
+    '1.00000000000000001',
+    '1000000000000000.01',
+    '9007199254740991.1',
+    '1e-400',
+  ]) {
+    const roundedFraction = applyMapping({ id: '2', views }, {
+      externalId: { from: 'id' },
+      'metrics.views': { from: 'views', type: 'number' },
+    }, { platform: 'telegram' }).record
+    assert.deepEqual(roundedFraction.metrics, {}, views)
+    assert.equal(roundedFraction.rawItem.views, views)
+  }
+
+  const exactExponent = applyMapping({ id: '3', views: '1e3' }, {
+    externalId: { from: 'id' },
+    'metrics.views': { from: 'views', type: 'number' },
+  }, { platform: 'telegram' }).record
+  assert.equal(exactExponent.metrics.views, 1_000)
+})
+
 test('Telegram SQLite v2 promotes chat and media fields while retaining deleted raw collector evidence', () => {
   const raw = {
     chat_id: -1007,

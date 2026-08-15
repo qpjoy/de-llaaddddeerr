@@ -714,7 +714,7 @@ function TelegramSqliteTaskCard({ task, progress, configured }) {
       <dl className="mih-telegram-task__definition">
         <div><dt>只读 endpoint</dt><dd><code>{endpoint}</code></dd></div>
         <div><dt>Dataset / 对象</dt><dd><code>{dataset}</code><small>telegram · {task.source?.objectType || meta.objectType}</small></dd></div>
-        <div><dt>映射</dt><dd>{mappingVersion === '—' ? '待配置' : `固定 v${mappingVersion}`}<small>原始字段完整保留</small></dd></div>
+        <div><dt>映射</dt><dd>{mappingVersion === '—' ? '待配置' : `固定 v${mappingVersion}`}<small>无损 JSON 值保留；大整数以原始十进制字符串保真</small></dd></div>
         <div><dt>下次调度</dt><dd>{formatDate(task.nextDueAt)}</dd></div>
       </dl>
       <div className="mih-telegram-task__checkpoint"><span>Checkpoint</span><code>{compactCheckpoint(task.cursor?.position)}</code></div>

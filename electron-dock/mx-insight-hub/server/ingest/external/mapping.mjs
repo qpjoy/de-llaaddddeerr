@@ -43,6 +43,8 @@ const RELATION_TARGETS = new Set([
   'relations.threadId', 'relations.groupedId',
 ])
 const DROP_TARGET = '_drop'
+const JSON_NUMBER_PARTS = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/u
+const MAX_EXACT_INTEGER_DIGITS = 128
 
 export class MappingError extends Error {
   constructor(message) {
@@ -130,13 +132,54 @@ function pick(record, rule) {
   return null
 }
 
+export function isExactSafeIntegerToken(source, parsed = Number(source)) {
+  if (typeof source !== 'string' || !Number.isSafeInteger(parsed)) return false
+  const match = JSON_NUMBER_PARTS.exec(source)
+  if (!match) return false
+  const [, sign, whole, fraction = '', exponentText = '0'] = match
+  const coefficientDigits = `${whole}${fraction}`
+  if (coefficientDigits.length > MAX_EXACT_INTEGER_DIGITS) return false
+  let coefficient = BigInt(coefficientDigits)
+  if (sign === '-') coefficient = -coefficient
+  if (coefficient === 0n) return parsed === 0
+
+  const exponentDigits = exponentText.replace(/^[+-]?0*/u, '')
+  if (exponentDigits.length > 3) return false
+  const exponent = Number(exponentText)
+  if (!Number.isSafeInteger(exponent)) return false
+  const decimalScale = exponent - fraction.length
+  let exactInteger
+  if (decimalScale >= 0) {
+    if (decimalScale > 15) return false
+    exactInteger = coefficient * (10n ** BigInt(decimalScale))
+  } else {
+    const divisorScale = -decimalScale
+    if (divisorScale > coefficientDigits.length) return false
+    const divisor = 10n ** BigInt(divisorScale)
+    if (coefficient % divisor !== 0n) return false
+    exactInteger = coefficient / divisor
+  }
+  return exactInteger === BigInt(parsed)
+}
+
 function asNumber(value) {
   if (value === null) return null
   // Spreadsheets routinely carry "1,234" and "12%". Strip grouping and trailing
   // symbols rather than yielding NaN, which would silently drop the metric.
   const cleaned = String(value).replace(/[,\s]/g, '').replace(/%$/, '')
   const parsed = Number(cleaned)
-  return Number.isFinite(parsed) ? parsed : null
+  if (!Number.isFinite(parsed)) return null
+  // JSON/CSV adapters may preserve an out-of-range integer as a decimal
+  // string. Canonical numeric fields and Elasticsearch metrics must not turn
+  // that exact value back into an already-rounded JavaScript Number. The raw
+  // source object remains available for exact string-based use.
+  if (Number.isInteger(parsed) && !Number.isSafeInteger(parsed)) return null
+  if (
+    /[.eE]/u.test(cleaned)
+    && Number.isInteger(parsed)
+    && !isExactSafeIntegerToken(cleaned, parsed)
+  ) return null
+  return parsed
 }
 
 function asTimestamp(value) {

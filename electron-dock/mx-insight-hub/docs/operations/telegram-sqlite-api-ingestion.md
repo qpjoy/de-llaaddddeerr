@@ -32,11 +32,19 @@ read-only HTTP row
   -> Elasticsearch projector
 ```
 
-The exact source JSON is retained in PostgreSQL. Mapping does not censor terms
-or filter message text. Unmapped fields remain available in `extensions` and
-the raw copy; the customer-facing ES projection still applies its credential
-and secret field allowlist. Chinese search continues through the shared
-HanLP-first segmenter, with Jieba and CJK bigrams as degradation fallbacks.
+PostgreSQL retains the losslessly parsed source value, not a byte-for-byte copy
+of the HTTP response. At the Hub HTTP boundary, safe integers and ordinary
+finite fractional values remain JSON numbers. Bare integer tokens outside
+JavaScript's safe range are retained at any nesting depth as their exact
+decimal token strings. Large decimal/exponent tokens that cannot be represented
+losslessly are rejected rather than rounded. If the runtime cannot provide
+primitive `context.source`, Hub fails closed with
+`sqlite_api_lossless_json_unsupported` rather than accept a rounded value.
+Mapping does not censor terms or filter message text. Unmapped fields remain
+available in `extensions` and the parsed raw copy; the customer-facing ES
+projection still applies its credential and secret field allowlist. Chinese
+search continues through the shared HanLP-first segmenter, with Jieba and CJK
+bigrams as degradation fallbacks.
 
 Rows with a non-null `deleted_at` are ingested rather than discarded. Their
 source object, canonical row, deletion timestamp and content revision remain in
@@ -168,10 +176,10 @@ an identical replay is absorbed.
 | `metadata.views`, `metadata.forwards` | `metrics.views`, `metrics.shares` |
 
 All remaining source fields, including `message_count`, media/account context
-and nested metadata, remain in extensions and the exact raw JSON. A non-null
-`deleted_at` selects the same message canonical row, retains its source/content
-evidence in PostgreSQL, and emits a current-state tombstone; it is never
-discarded during ingestion.
+and nested metadata, remain in extensions and the losslessly parsed raw value.
+A non-null `deleted_at` selects the same message canonical row, retains its
+source/content evidence in PostgreSQL, and emits a current-state tombstone; it
+is never discarded during ingestion.
 
 Chat title participates in the normal title + HanLP/CJK search fields; chat
 username and media type use typed Elasticsearch fields.
@@ -180,12 +188,23 @@ Hub PostgreSQL has dedicated indexes for SQLite chat/time traversal, deleted
 record audit, chat-username lookup and media-type filtering. Account
 alias/phone and first-seen collector ID remain in raw/canonical storage but are
 excluded from the customer-facing ES `extensions` projection; this does not
-modify or discard the source JSON.
+discard them from PostgreSQL's parsed raw representation.
 
-Telegram identifiers may originate from 64-bit fields. Numeric IDs must fit
-JavaScript's safe-integer range; larger values, especially `grouped_id`, must be
-serialized by the upstream API as decimal strings. Hub rejects an unsafe
-numeric representation instead of silently rounding the identity or raw JSON.
+Telegram identifiers may originate from 64-bit fields. Lossless parsing turns
+an integer token beyond JavaScript's safe range into its exact decimal token
+string before validation and mapping. This applies to root values, arrays,
+nested metadata and future fields, not only `metadata.grouped_id`. Canonical
+`externalId`, author IDs and typed relations remain strings, so PostgreSQL raw
+values and canonical identities preserve the exact digits. Canonical/ES number
+fields accept only exactly representable integers; an out-of-range count remains
+in raw PostgreSQL and is not rounded into a metric. This is value fidelity, not
+byte fidelity: HTTP whitespace, object-key order and the lexical spelling of
+safely representable numbers may be normalized.
+
+The decoder version is part of the source checkpoint contract and of each
+record's `parserVersion`. A decoder upgrade therefore cannot continue halfway
+through a page sequence under older numeric semantics: pause the pipeline,
+reset both checkpoints with **一次性全量对齐**, then start one full sync.
 
 The 2-hour overlap is deliberate for the observed source size: the source had
 more than 620,000 messages and roughly 48,000 captures in 24 hours during the

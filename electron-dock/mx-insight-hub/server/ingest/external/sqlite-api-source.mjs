@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../../core/errors.mjs'
 import { canonicalJson } from '../normalizers.mjs'
-import { applyMapping, validateFieldMap, CHUNKER_VERSION } from './mapping.mjs'
+import {
+  applyMapping,
+  validateFieldMap,
+  CHUNKER_VERSION,
+  isExactSafeIntegerToken,
+} from './mapping.mjs'
 
 const MAX_PAGE_SIZE = 500
 const MAX_PREVIEW = 3
@@ -10,6 +15,10 @@ const DEFAULT_OVERLAP_MS = 2 * 60 * 60 * 1_000
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1_000
 const DAY_MS = 24 * 60 * 60 * 1_000
 const DAILY_WINDOW_START_HOUR = 2
+const MAX_INTEGER_TOKEN_DIGITS = 128
+const MAX_NUMERIC_TOKEN_CHARACTERS = 256
+const JSON_INTEGER_TOKEN = /^-?(?:0|[1-9]\d*)$/u
+export const SQLITE_JSON_DECODER_VERSION = 'lossless-integer-v1'
 const CONNECTION_FIELDS = new Set(['baseUrl', 'token', 'resource', 'pageSize'])
 const RESOURCES = new Set(['chats', 'messages'])
 const REQUIRED_ROW_FIELDS = Object.freeze({
@@ -87,6 +96,56 @@ function latestIso(...values) {
     if (date && (!latest || date > latest)) latest = date
   }
   return latest?.toISOString() ?? null
+}
+
+function losslessNumberReviver(_key, value, context) {
+  if (typeof value !== 'number') return value
+  if (typeof context?.source !== 'string') {
+    throw new AppError(
+      503,
+      'sqlite_api_lossless_json_unsupported',
+      'The runtime cannot preserve large JSON integer tokens without precision loss',
+    )
+  }
+  const source = context.source
+  if (source.length > MAX_NUMERIC_TOKEN_CHARACTERS) {
+    throw new AppError(
+      503,
+      'sqlite_api_numeric_token_too_large',
+      `SQLite API numeric tokens may contain at most ${MAX_NUMERIC_TOKEN_CHARACTERS} characters`,
+    )
+  }
+  if (JSON_INTEGER_TOKEN.test(source)) {
+    const digitCount = source[0] === '-' ? source.length - 1 : source.length
+    if (digitCount > MAX_INTEGER_TOKEN_DIGITS) {
+      throw new AppError(
+        503,
+        'sqlite_api_numeric_token_too_large',
+        `SQLite API integer tokens may contain at most ${MAX_INTEGER_TOKEN_DIGITS} digits`,
+      )
+    }
+    return Number.isSafeInteger(value) ? value : source
+  }
+
+  // Decimal/exponent values remain ordinary numbers unless parsing turns one
+  // into an integer. In that case compare the exact base-10 value with the
+  // parsed safe integer so underflow or discarded fractional digits cannot
+  // masquerade as a valid ID, timestamp, metric, or nested value.
+  if (
+    !Number.isFinite(value)
+    || (Number.isInteger(value) && !isExactSafeIntegerToken(source, value))
+  ) {
+    throw new AppError(
+      503,
+      'sqlite_api_unsupported_numeric_token',
+      'A JSON decimal or exponent token would lose value when converted to an integer',
+    )
+  }
+  return value
+}
+
+export function parseLosslessJson(text, parseImpl = JSON.parse) {
+  return parseImpl(text, losslessNumberReviver)
 }
 
 function safeBaseUrl(value) {
@@ -180,6 +239,7 @@ function sourceContractHash(source, mapping) {
     platform: source.platform,
     objectType: source.objectType,
     mappingVersion: mapping.version,
+    jsonDecoderVersion: SQLITE_JSON_DECODER_VERSION,
   }))
 }
 
@@ -403,8 +463,9 @@ export class SQLiteApiSourcePuller {
       throw new AppError(status >= 400 && status < 600 ? status : 503, code, `SQLite API request failed with HTTP ${status}`)
     }
     try {
-      return await response.json()
-    } catch {
+      return parseLosslessJson(await response.text())
+    } catch (error) {
+      if (error instanceof AppError) throw error
       throw new AppError(503, 'sqlite_api_invalid_json', 'SQLite API returned an invalid JSON response')
     }
   }
@@ -480,12 +541,12 @@ export class SQLiteApiSourcePuller {
       throw new AppError(503, 'sqlite_api_contract_mismatch', 'SQLite API stats response does not match the documented contract')
     }
     const safeStats = {
-      chats: Number(stats.chats),
-      messages: Number(stats.messages),
-      activeMessages: Number(stats.active_messages),
-      last24Hours: Number(stats.last_24_hours),
+      chats: stats.chats,
+      messages: stats.messages,
+      activeMessages: stats.active_messages,
+      last24Hours: stats.last_24_hours,
     }
-    if (Object.values(safeStats).some((value) => !Number.isFinite(value) || value < 0)) {
+    if (Object.values(safeStats).some((value) => !Number.isSafeInteger(value) || value < 0)) {
       throw new AppError(503, 'sqlite_api_contract_mismatch', 'SQLite API stats response does not match the documented contract')
     }
     const page = await this.#page(connection, { page: 1, pageSize: 1 })
@@ -982,10 +1043,11 @@ export class SQLiteApiSourcePuller {
           rejections.push({ rowIndex: index + 1, reason: 'eventTime is required for Telegram serving', raw })
           continue
         }
-        // The exact upstream object is retained. No token, filtering, keyword
-        // rewriting, pagination metadata, or adapter-only fields enter it.
+        // Source values are retained without content filtering. Unsafe bare
+        // JSON integers are represented as exact decimal strings by the
+        // versioned decoder; rawItem is not a byte-for-byte response copy.
         record.rawItem = raw
-        record.parserVersion = `${CHUNKER_VERSION}:sqlite-api:map${mapping.version}`
+        record.parserVersion = `${CHUNKER_VERSION}:sqlite-api:${SQLITE_JSON_DECODER_VERSION}:map${mapping.version}`
         mapped.push(record)
       }
 

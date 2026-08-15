@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  parseLosslessJson,
+  SQLITE_JSON_DECODER_VERSION,
   SQLiteApiSourcePuller,
   validateSqliteApiConnection,
 } from '../../server/ingest/external/sqlite-api-source.mjs'
@@ -12,7 +14,15 @@ function jsonResponse(body, status = 200) {
   return {
     ok: status >= 200 && status < 300,
     status,
-    async json() { return body },
+    async text() { return JSON.stringify(body) },
+  }
+}
+
+function rawJsonResponse(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async text() { return body },
   }
 }
 
@@ -285,6 +295,26 @@ test('health HTTP 200 with a non-ok status and upstream auth bodies are safely r
       && !error.message.includes(SECRET_TOKEN)
       && !JSON.stringify(error).includes(SECRET_TOKEN),
   )
+
+  let statsCalls = 0
+  const unsafeStats = new SQLiteApiSourcePuller({
+    store: {},
+    queue: {},
+    fetchImpl: async () => {
+      statsCalls += 1
+      if (statsCalls === 1) return jsonResponse({ status: 'ok' })
+      return rawJsonResponse(`{
+        "chats": 4,
+        "messages": 9223372036854775807,
+        "active_messages": 11,
+        "last_24_hours": 3
+      }`)
+    },
+  })
+  await assert.rejects(
+    () => unsafeStats.testConnection(connection),
+    (error) => error?.code === 'sqlite_api_contract_mismatch',
+  )
 })
 
 test('connection validation allows only the fixed HTTP source contract', () => {
@@ -305,6 +335,141 @@ test('connection validation allows only the fixed HTTP source contract', () => {
     () => validateSqliteApiConnection({ ...messageSource().connection, pageSize: 501 }),
     (error) => error?.code === 'invalid_sqlite_api_page_size',
   )
+})
+
+test('lossless JSON parsing preserves unsafe integer tokens at every nesting level', () => {
+  const parsed = parseLosslessJson(`{
+    "chat_id": -1009007199254740993,
+    "safe": 9007199254740991,
+    "decimal": 1.25,
+    "scientificSafe": 1e3,
+    "metadata": {"grouped_id": 9223372036854775807},
+    "nested": [9007199254740993, {"negative": -9007199254740995}, 184467440737095516160]
+  }`)
+
+  assert.equal(parsed.chat_id, '-1009007199254740993')
+  assert.equal(parsed.safe, 9007199254740991)
+  assert.equal(parsed.decimal, 1.25)
+  assert.equal(parsed.scientificSafe, 1_000)
+  assert.equal(parsed.metadata.grouped_id, '9223372036854775807')
+  assert.deepEqual(parsed.nested, [
+    '9007199254740993',
+    { negative: '-9007199254740995' },
+    '184467440737095516160',
+  ])
+  assert.equal(parseLosslessJson('9007199254740992'), '9007199254740992')
+  assert.equal(parseLosslessJson('-9007199254740991'), -9007199254740991)
+  assert.equal(parseLosslessJson('-9007199254740992'), '-9007199254740992')
+  assert.equal(parseLosslessJson('9007199254740993'), '9007199254740993')
+})
+
+test('lossless JSON parsing rejects ambiguous large decimal and exponent tokens', () => {
+  for (const token of [
+    '1.00000000000000001',
+    '1000000000000000.01',
+    '1234567890123456.1',
+    '9007199254740991.1',
+    '9007199254740993.5',
+    '9007199254740993e0',
+    '1e400',
+    '1e-400',
+    '1.7976931348623157e308',
+  ]) {
+    assert.throws(
+      () => parseLosslessJson(`{"value":${token}}`),
+      (error) => error?.code === 'sqlite_api_unsupported_numeric_token',
+      token,
+    )
+  }
+  assert.deepEqual(parseLosslessJson('{"decimal":1.25,"scientificSafe":1e3}'), {
+    decimal: 1.25,
+    scientificSafe: 1_000,
+  })
+  assert.deepEqual(parseLosslessJson('{"decimalInteger":1.0,"zeroUnderflow":0e-400}'), {
+    decimalInteger: 1,
+    zeroUnderflow: 0,
+  })
+})
+
+test('lossless JSON parsing bounds integer tokens before conversion', () => {
+  assert.throws(
+    () => parseLosslessJson(`{"value":${'9'.repeat(129)}}`),
+    (error) => error?.code === 'sqlite_api_numeric_token_too_large',
+  )
+})
+
+test('lossless JSON parsing fails closed when the runtime omits primitive source context', () => {
+  const parseWithoutContext = (text, reviver) => JSON.parse(
+    text,
+    (key, value) => reviver(key, value),
+  )
+
+  assert.throws(
+    () => parseLosslessJson('{"message_id":9007199254740993}', parseWithoutContext),
+    (error) => error?.code === 'sqlite_api_lossless_json_unsupported',
+  )
+  assert.throws(
+    () => parseLosslessJson('{"message_id":7,"ratio":0.5}', parseWithoutContext),
+    (error) => error?.code === 'sqlite_api_lossless_json_unsupported',
+  )
+})
+
+test('a raw page containing large integer ids completes a full pull without precision loss', async () => {
+  const now = () => new Date('2026-08-15T13:00:00.000Z')
+  const page = `{
+    "items": [{
+      "chat_id": -1009007199254740993,
+      "message_id": 9007199254740993,
+      "sender_id": 9223372036854775807,
+      "sender_name": "sender",
+      "sender_username": "sender_handle",
+      "text": "source text",
+      "message_at": "2026-08-15T12:00:00.000Z",
+      "edited_at": null,
+      "captured_at": "2026-08-15T12:00:01.000Z",
+      "message_kind": "text",
+      "media_type": null,
+      "reply_to_message_id": null,
+      "thread_id": null,
+      "is_outgoing": false,
+      "deleted_at": null,
+      "first_seen_account_id": 184467440737095516160,
+      "account_alias": "collector",
+      "account_phone": null,
+      "chat_title": "chat",
+      "chat_username": "chat_handle",
+      "message_url": null,
+      "metadata": {
+        "views": 7,
+        "forwards": 2,
+        "grouped_id": 9223372036854775807,
+        "nested": [9007199254740995, -9007199254740997, 3, 0.25]
+      }
+    }],
+    "total": 1,
+    "page": 1
+  }`
+  const harness = createPullHarness({
+    now,
+    responses: [() => rawJsonResponse(page)],
+  })
+
+  const result = await harness.puller.pullBatch('telegram-sqlite-api-messages')
+  const record = harness.ingested[0].records[0]
+
+  assert.equal(result.done, true)
+  assert.equal(result.ingested, 1)
+  assert.equal(record.externalId, '-1009007199254740993:9007199254740993')
+  assert.equal(record.stableFields.author.externalId, '9223372036854775807')
+  assert.equal(record.stableFields.relations.groupedId, '9223372036854775807')
+  assert.equal(record.rawItem.first_seen_account_id, '184467440737095516160')
+  assert.equal(
+    record.parserVersion,
+    `mxih-external.v1:sqlite-api:${SQLITE_JSON_DECODER_VERSION}:map1`,
+  )
+  assert.deepEqual(record.rawItem.metadata.nested, [
+    '9007199254740995', '-9007199254740997', 3, 0.25,
+  ])
 })
 
 test('preview returns value-free shapes and never exposes raw text or credentials', async () => {
@@ -568,7 +733,7 @@ test('checkpoint reset makes the next pull a full reconciliation', async () => {
   assert.equal(harness.requests[1].url.searchParams.get('end_at'), '2026-08-16T13:00:00.000Z')
 })
 
-test('page validation rejects malformed pagination, rows, required fields, and lossy numeric ids', async (t) => {
+test('page validation rejects malformed pagination, rows, required fields, and non-integer ids', async (t) => {
   const message = rawMessage({ messageId: 1, messageAt: '2026-08-15T12:00:00.000Z' })
   const chatSource = messageSource({
     id: 'sqlite-chat-source-id',
@@ -594,22 +759,8 @@ test('page validation rejects malformed pagination, rows, required fields, and l
     ['missing page', messageSource(), { items: [], total: 0 }],
     ['zero page', messageSource(), { items: [], total: 0, page: 0 }],
     ['non-object message row', messageSource(), { items: [null], total: 1, page: 1 }],
-    ['unsafe numeric chat id', messageSource(), {
-      items: [{ ...message, chat_id: Number.MAX_SAFE_INTEGER + 1 }], total: 1, page: 1,
-    }],
-    ['unsafe numeric message id', messageSource(), {
-      items: [{ ...message, message_id: Number.MAX_SAFE_INTEGER + 1 }], total: 1, page: 1,
-    }],
-    ['unsafe optional sender id', messageSource(), {
-      items: [{ ...message, sender_id: Number.MAX_SAFE_INTEGER + 1 }], total: 1, page: 1,
-    }],
-    ['unsafe numeric grouped id', messageSource(), {
-      items: [{
-        ...message,
-        metadata: { ...message.metadata, grouped_id: Number.MAX_SAFE_INTEGER + 1 },
-      }],
-      total: 1,
-      page: 1,
+    ['fractional numeric message id', messageSource(), {
+      items: [{ ...message, message_id: 1.5 }], total: 1, page: 1,
     }],
     ['non-integer string id', messageSource(), {
       items: [{ ...message, message_id: '1.5' }], total: 1, page: 1,
