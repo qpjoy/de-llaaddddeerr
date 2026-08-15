@@ -390,6 +390,124 @@ fetch_subscription "$normalized_url" "$normalized_username" "$normalized_passwor
   assert.equal(existsSync(join(stateRoot, 'client/subscription.yaml')), true);
 });
 
+test('URL Basic Auth overrides credentials saved by an earlier subscription', () => {
+  const stateRoot = join(testRoot, 'update-url-auth-precedence');
+  mkdirSync(stateRoot, { recursive: true });
+  const result = runLibrary(
+    [
+      'update-subscription',
+      '--url',
+      'http://fresh-user:fresh-password@example.test:3434/peer.yaml',
+    ],
+    String.raw`
+MIHOMO_HOME="$MIHOMO_TEST_STATE_ROOT/client"
+MIHOMO_ENV_FILE="$MIHOMO_HOME/client.env"
+MIHOMO_SUBSCRIPTION_FILE="$MIHOMO_HOME/subscription.yaml"
+MIHOMO_CONFIG_FILE="$MIHOMO_HOME/config.yaml"
+MIHOMO_TUN_OVERLAY_FILE="$MIHOMO_HOME/tun-overlay.yaml"
+mkdir -p "$MIHOMO_HOME"
+set_env_value MIHOMO_SUBSCRIPTION_URL 'http://old.example.test/peer.yaml'
+set_env_value MIHOMO_SUBSCRIPTION_USER 'stale-user'
+set_env_value MIHOMO_SUBSCRIPTION_PASSWORD 'stale-password'
+require_root() { :; }
+require_cmd() { :; }
+service_is_active() { return 1; }
+mapfile() {
+  if [[ "$1" == '-t' ]]; then shift; fi
+  local target="$1"
+  local line
+  while IFS= read -r line; do
+    eval "$target+=(\"\$line\")"
+  done
+}
+curl() {
+  printf '%s\n' "$@" > "$MIHOMO_TEST_STATE_ROOT/curl.argv"
+  local config=""
+  local output=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --config) config="$2"; shift 2 ;;
+      -o) output="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  cp "$config" "$MIHOMO_TEST_STATE_ROOT/curl-config-snapshot"
+  printf '%s\n' 'mixed-port: 4567' 'mode: rule' > "$output"
+}
+main "$@"
+`,
+    { env: { MIHOMO_TEST_STATE_ROOT: stateRoot } },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const argv = readFileSync(join(stateRoot, 'curl.argv'), 'utf8');
+  assert.match(argv, /http:\/\/example\.test:3434\/peer\.yaml/);
+  assert.doesNotMatch(argv, /fresh-user|fresh-password|stale-user|stale-password/);
+  assert.equal(
+    readFileSync(join(stateRoot, 'curl-config-snapshot'), 'utf8'),
+    'user = "fresh-user:fresh-password"\n',
+  );
+  const saved = readFileSync(join(stateRoot, 'client/client.env'), 'utf8');
+  assert.match(saved, /^MIHOMO_SUBSCRIPTION_USER='fresh-user'$/m);
+  assert.match(saved, /^MIHOMO_SUBSCRIPTION_PASSWORD='fresh-password'$/m);
+});
+
+test('update --no-auth ignores URL userinfo and clears saved credentials', () => {
+  const stateRoot = join(testRoot, 'update-url-no-auth');
+  mkdirSync(stateRoot, { recursive: true });
+  const result = runLibrary(
+    [
+      'update-subscription',
+      '--url',
+      'http://ignored-user:ignored-password@example.test:3434/public.yaml',
+      '--no-auth',
+    ],
+    String.raw`
+MIHOMO_HOME="$MIHOMO_TEST_STATE_ROOT/client"
+MIHOMO_ENV_FILE="$MIHOMO_HOME/client.env"
+MIHOMO_SUBSCRIPTION_FILE="$MIHOMO_HOME/subscription.yaml"
+MIHOMO_CONFIG_FILE="$MIHOMO_HOME/config.yaml"
+MIHOMO_TUN_OVERLAY_FILE="$MIHOMO_HOME/tun-overlay.yaml"
+mkdir -p "$MIHOMO_HOME"
+set_env_value MIHOMO_SUBSCRIPTION_URL 'http://old.example.test/peer.yaml'
+set_env_value MIHOMO_SUBSCRIPTION_USER 'stale-user'
+set_env_value MIHOMO_SUBSCRIPTION_PASSWORD 'stale-password'
+require_root() { :; }
+require_cmd() { :; }
+service_is_active() { return 1; }
+mapfile() {
+  if [[ "$1" == '-t' ]]; then shift; fi
+  local target="$1"
+  local line
+  while IFS= read -r line; do
+    eval "$target+=(\"\$line\")"
+  done
+}
+curl() {
+  printf '%s\n' "$@" > "$MIHOMO_TEST_STATE_ROOT/curl.argv"
+  local output=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o) output="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  printf '%s\n' 'mixed-port: 4567' 'mode: rule' > "$output"
+}
+main "$@"
+`,
+    { env: { MIHOMO_TEST_STATE_ROOT: stateRoot } },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const argv = readFileSync(join(stateRoot, 'curl.argv'), 'utf8');
+  assert.match(argv, /http:\/\/example\.test:3434\/public\.yaml/);
+  assert.doesNotMatch(argv, /--config|-u|--user|ignored-user|ignored-password/);
+  const saved = readFileSync(join(stateRoot, 'client/client.env'), 'utf8');
+  assert.match(saved, /^MIHOMO_SUBSCRIPTION_USER=''$/m);
+  assert.match(saved, /^MIHOMO_SUBSCRIPTION_PASSWORD=''$/m);
+});
+
 test('Basic subscription temporary files are cleaned when curl fails', () => {
   const stateRoot = join(testRoot, 'fetch-basic-failure');
   mkdirSync(stateRoot, { recursive: true });

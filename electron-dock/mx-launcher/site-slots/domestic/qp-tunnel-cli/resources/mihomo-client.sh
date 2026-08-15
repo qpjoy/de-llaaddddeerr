@@ -1286,6 +1286,14 @@ update_subscription_command() {
 	fi
 
 	url="${url:-${MIHOMO_SUBSCRIPTION_URL:-}}"
+	# Normalize URL userinfo before falling back to persisted credentials. An
+	# explicit --url must not be stripped and then authenticated with credentials
+	# saved for an older subscription. Explicit --user/--password still win
+	# because normalize_subscription_inputs only fills empty values.
+	mapfile -t normalized < <(normalize_subscription_inputs "$url" "$username" "$password")
+	url="${normalized[0]}"
+	username="${normalized[1]}"
+	password="${normalized[2]}"
 	if [[ "$no_auth" == "true" ]]; then
 		username=""
 		password=""
@@ -1293,10 +1301,6 @@ update_subscription_command() {
 		username="${username:-${MIHOMO_SUBSCRIPTION_USER:-}}"
 		password="${password:-${MIHOMO_SUBSCRIPTION_PASSWORD:-}}"
 	fi
-	mapfile -t normalized < <(normalize_subscription_inputs "$url" "$username" "$password")
-	url="${normalized[0]}"
-	username="${normalized[1]}"
-	password="${normalized[2]}"
 
 	[[ -n "$url" ]] || die "No subscription URL configured. Use install or pass --url."
 
