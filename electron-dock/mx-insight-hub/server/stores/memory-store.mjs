@@ -444,7 +444,7 @@ export class MemoryStore {
   }
 
   async dataCenterRecords() {
-    return { items: [], hasMore: false, nextCursor: null }
+    return { items: [], total: 0, hasMore: false, nextCursor: null }
   }
 
   async dataCenterRecordsByIds() {

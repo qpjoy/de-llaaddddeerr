@@ -19,6 +19,14 @@ function clampSize(size) {
   return Math.min(Math.max(Number(size) || DEFAULT_SIZE, 1), MAX_SIZE)
 }
 
+function normalizeOffset(offset) {
+  if (offset == null) return null
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new AppError(400, 'invalid_search_offset', 'Search offset must be a non-negative integer')
+  }
+  return offset
+}
+
 function wildcardSubstring(term) {
   return `*${String(term).replace(/[\\*?]/g, '\\$&')}*`
 }
@@ -42,10 +50,10 @@ export function authorNameQuery(term, tokens) {
       should: [
         { term: { 'authorName.keyword': { value: term, boost: 10 } } },
         { match_phrase: { 'authorName.prefix': { query: term, boost: 5 } } },
-        { match: { authorNameHanlp: { query: toPresegmentedText(tokens), boost: 3 } } },
-        { match: { 'authorName.bigram': { query: term, boost: 2 } } },
+        { match: { authorNameHanlp: { query: toPresegmentedText(tokens), operator: 'and', boost: 3 } } },
+        { match: { 'authorName.bigram': { query: term, operator: 'and', boost: 2 } } },
         { match_phrase: { 'authorHandle.prefix': { query: term, boost: 4 } } },
-        { match: { 'authorHandle.bigram': { query: term, boost: 3 } } },
+        { match: { 'authorHandle.bigram': { query: term, operator: 'and', boost: 3 } } },
         { wildcard: { authorHandleSubstring: { value: wildcardSubstring(term), case_insensitive: true, boost: 3 } } },
       ],
       minimum_should_match: 1,
@@ -232,11 +240,11 @@ export class SearchQueries {
               { match_phrase: { 'username.prefix': { query: term, boost: 6 } } },
               // Prefix matching misses a Chinese substring that starts after
               // the first character (for example 文频 in 中文频道).
-              { match: { 'username.bigram': { query: term, boost: 5 } } },
-              { match: { usernameHanlp: { query: toPresegmentedText(tokens), boost: 4 } } },
+              { match: { 'username.bigram': { query: term, operator: 'and', boost: 5 } } },
+              { match: { usernameHanlp: { query: toPresegmentedText(tokens), operator: 'and', boost: 4 } } },
               { wildcard: { usernameSubstring: { value: wildcardSubstring(term), case_insensitive: true, boost: 4 } } },
               { match_phrase: { 'title.keyword': { query: term, boost: 8 } } },
-              { match: { title: { query: term, boost: 3 } } },
+              { match_phrase: { title: { query: term, boost: 3 } } },
             ],
             minimum_should_match: 1,
           },
@@ -306,13 +314,14 @@ export class SearchQueries {
   /**
    * Full-text content search over the projection.
    *
-   * Queries the raw and pre-segmented fields together: `best_fields` takes the
-   * single strongest match rather than summing, so a document is not rewarded
-   * merely for having the term in both the raw and segmented copy of the same
-   * text.
+   * Queries raw text as a phrase and pre-segmented text as an AND conjunction.
+   * The two branches are alternatives: an exact source substring survives a
+   * tokenizer-version change, while order-insensitive word matches retain
+   * recall without admitting a document that shares only one CJK character.
    */
   async searchContent(query, {
     platform = null,
+    platforms = null,
     datasetId = null,
     datasetIds = null,
     objectType = null,
@@ -322,14 +331,23 @@ export class SearchQueries {
     toTime = null,
     size = DEFAULT_SIZE,
     cursor = null,
+    offset = null,
+    strictRelevance = true,
+    trackTotalHits = false,
   } = {}) {
     const limit = clampSize(size)
+    const normalizedOffset = normalizeOffset(offset)
+    if (cursor && normalizedOffset != null) {
+      throw new AppError(400, 'incompatible_search_pagination', 'Search cursor and offset cannot be used together')
+    }
     if (!this.client && cursor?.mode === 'elasticsearch') {
       throw new AppError(503, 'search_cursor_unavailable', 'Elasticsearch is unavailable; retry the same cursor later')
     }
     if (!this.client || cursor?.mode === 'postgres') {
       return this.#searchContentPostgres(query, {
-        platform, datasetId, datasetIds, objectType, authorExternalId, chatId, fromTime, toTime, limit, cursor,
+        platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
+        fromTime, toTime, limit, cursor, offset: normalizedOffset,
+        includeTotal: trackTotalHits || normalizedOffset != null,
       })
     }
     let pitId = cursor?.pitId ?? null
@@ -346,6 +364,7 @@ export class SearchQueries {
       const segmented = toPresegmentedText(tokens)
       const filter = [
         ...(platform ? [{ term: { platform } }] : []),
+        ...(Array.isArray(platforms) && platforms.length > 0 ? [{ terms: { platform: platforms } }] : []),
         ...(datasetId ? [{ term: { datasetId } }] : []),
         ...(Array.isArray(datasetIds) && datasetIds.length > 0 ? [{ terms: { datasetId: datasetIds } }] : []),
         ...(objectType ? [{ term: { objectType } }] : []),
@@ -361,9 +380,11 @@ export class SearchQueries {
         }] : []),
       ]
       const response = await this.client.request('POST', '/_search', {
-        size: limit + 1,
+        size: normalizedOffset == null ? limit + 1 : limit,
+        ...((trackTotalHits || normalizedOffset != null) ? { track_total_hits: true } : {}),
         pit: { id: pitId, keep_alive: SEARCH_PIT_KEEP_ALIVE },
         ...(cursor?.searchAfter ? { search_after: cursor.searchAfter } : {}),
+        ...(normalizedOffset != null ? { from: normalizedOffset } : {}),
         track_scores: true,
         sort: [
           { _score: { order: 'desc' } },
@@ -373,12 +394,24 @@ export class SearchQueries {
         query: {
           bool: {
             should: [
-              { multi_match: { query, fields: ['title^3', 'body', 'chatUsername^2'], type: 'best_fields' } },
+              {
+                multi_match: {
+                  query,
+                  fields: ['title^3', 'body', 'chatUsername^2'],
+                  // The standard analyzer tokenizes Han text to individual
+                  // ideographs. An OR-style best_fields query therefore lets a
+                  // long Chinese query admit documents sharing one character.
+                  // A raw phrase is the precise substring path; the segmented
+                  // branch below supplies order-insensitive word recall.
+                  type: strictRelevance ? 'phrase' : 'best_fields',
+                },
+              },
               {
                 multi_match: {
                   query: segmented,
                   fields: ['titleHanlp^3', 'bodyHanlp', 'chatUsernameHanlp^2'],
                   type: 'best_fields',
+                  ...(strictRelevance ? { operator: 'and' } : {}),
                 },
               },
             ],
@@ -394,16 +427,21 @@ export class SearchQueries {
         _source: { excludes: ['titleHanlp', 'bodyHanlp', 'chatUsernameHanlp', 'tokens'] },
       })
       const hits = response.hits?.hits || []
-      const hasMore = hits.length > limit
-      const pageHits = hasMore ? hits.slice(0, limit) : hits
+      const total = response.hits?.total?.value ?? 0
+      const pageHits = hits.slice(0, limit)
+      const hasMore = normalizedOffset == null
+        ? hits.length > limit
+        : normalizedOffset + pageHits.length < total
       const currentPitId = response.pit_id ?? pitId
-      if (!hasMore) await this.#closeSearchPit(currentPitId)
+      // Offset pages do not hand the PIT back to the caller, so always close
+      // their one-request snapshot instead of leaking it until the TTL.
+      if (normalizedOffset != null || !hasMore) await this.#closeSearchPit(currentPitId)
       return {
         mode: 'elasticsearch',
-        total: response.hits?.total?.value ?? 0,
+        total,
         totalRelation: response.hits?.total?.relation ?? 'eq',
         hasMore,
-        nextCursor: hasMore ? {
+        nextCursor: hasMore && normalizedOffset == null ? {
           mode: 'elasticsearch',
           pitId: currentPitId,
           searchAfter: pageHits.at(-1)?.sort,
@@ -427,7 +465,9 @@ export class SearchQueries {
       if (error instanceof ElasticsearchUnavailableError) {
         this.logger?.warn?.('[search] Elasticsearch unavailable; falling back to PostgreSQL content search')
         return this.#searchContentPostgres(query, {
-          platform, datasetId, datasetIds, objectType, authorExternalId, chatId, fromTime, toTime, limit, cursor: null,
+          platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
+          fromTime, toTime, limit, cursor: null, offset: normalizedOffset,
+          includeTotal: trackTotalHits || normalizedOffset != null,
         })
       }
       throw error
@@ -468,8 +508,8 @@ export class SearchQueries {
       query: {
         bool: {
           should: [
-            { match: { content: { query } } },
-            { match: { contentHanlp: { query: toPresegmentedText(tokens) } } },
+            { match: { content: { query, operator: 'and' } } },
+            { match: { contentHanlp: { query: toPresegmentedText(tokens), operator: 'and' } } },
           ],
           minimum_should_match: 1,
           ...(filter.length ? { filter } : {}),
@@ -517,6 +557,7 @@ export class SearchQueries {
 
   async #searchContentPostgres(query, {
     platform,
+    platforms,
     datasetId,
     datasetIds,
     objectType,
@@ -526,27 +567,35 @@ export class SearchQueries {
     toTime,
     limit,
     cursor,
+    offset,
+    includeTotal,
   }) {
     const { rows } = await this.pool.query(
-      `SELECT id, dataset_id, platform, object_type, external_id, url, title, body,
-              author_external_id, author_name,
-              event_time, collected_at, stable_fields
-         FROM core.canonical_records
-        WHERE deleted_at IS NULL
-          AND (
-            title ILIKE '%' || $1 || '%'
-            OR body ILIKE '%' || $1 || '%'
-            OR (stable_fields #>> '{attributes,chatUsername}') ILIKE '%' || $1 || '%'
-          )
-          AND ($2::text IS NULL OR platform = $2)
-          AND ($3::text IS NULL OR dataset_id = $3)
-          AND ($4::text[] IS NULL OR dataset_id = ANY($4::text[]))
-          AND ($5::text IS NULL OR object_type = $5)
-          AND ($6::text IS NULL OR author_external_id = $6)
-          AND ($7::text IS NULL OR (stable_fields #>> '{relations,chatId}') = $7)
-          AND ($8::timestamptz IS NULL OR event_time >= $8::timestamptz)
-          AND ($9::timestamptz IS NULL OR event_time <= $9::timestamptz)
-          AND (
+      `WITH matching AS (
+         SELECT id, dataset_id, platform, object_type, external_id, url, title, body,
+                author_external_id, author_name,
+                event_time, collected_at, stable_fields
+                ${includeTotal ? ', count(*) OVER () AS total_count' : ''}
+           FROM core.canonical_records
+          WHERE deleted_at IS NULL
+            AND (
+              title ILIKE '%' || $1 || '%'
+              OR body ILIKE '%' || $1 || '%'
+              OR (stable_fields #>> '{attributes,chatUsername}') ILIKE '%' || $1 || '%'
+            )
+            AND ($2::text IS NULL OR platform = $2)
+            AND ($3::text IS NULL OR dataset_id = $3)
+            AND ($4::text[] IS NULL OR dataset_id = ANY($4::text[]))
+            AND ($5::text IS NULL OR object_type = $5)
+            AND ($6::text IS NULL OR author_external_id = $6)
+            AND ($7::text IS NULL OR (stable_fields #>> '{relations,chatId}') = $7)
+            AND ($8::timestamptz IS NULL OR event_time >= $8::timestamptz)
+            AND ($9::timestamptz IS NULL OR event_time <= $9::timestamptz)
+            AND ($12::text[] IS NULL OR platform = ANY($12::text[]))
+       )
+       SELECT *
+         FROM matching
+        WHERE (
             $10::uuid IS NULL
             OR (
               $11::timestamptz IS NULL
@@ -563,20 +612,38 @@ export class SearchQueries {
             )
           )
         ORDER BY event_time DESC NULLS LAST, id DESC
-        LIMIT $12`,
+        LIMIT $13
+        ${offset != null ? 'OFFSET $14' : ''}`,
       [
         query, platform, datasetId, datasetIds, objectType, authorExternalId, chatId,
         fromTime, toTime, cursor?.searchAfter?.[1] ?? null, cursor?.searchAfter?.[0] ?? null,
-        limit + 1,
+        Array.isArray(platforms) && platforms.length > 0 ? platforms : null,
+        offset == null ? limit + 1 : limit,
+        ...(offset != null ? [offset] : []),
       ],
     )
-    const hasMore = rows.length > limit
-    const pageRows = hasMore ? rows.slice(0, limit) : rows
+    let exactTotal = null
+    if (includeTotal) {
+      exactTotal = rows.length > 0
+        ? Number(rows[0].total_count)
+        : await this.#countContentPostgres(query, {
+            platform, platforms, datasetId, datasetIds, objectType,
+            authorExternalId, chatId, fromTime, toTime,
+          })
+    }
+    const pageRows = rows.slice(0, limit)
+    const hasMore = offset == null
+      ? rows.length > limit
+      : offset + pageRows.length < exactTotal
     const last = pageRows.at(-1)
     return {
       mode: 'postgres',
+      ...(includeTotal ? {
+        total: exactTotal,
+        totalRelation: 'eq',
+      } : {}),
       hasMore,
-      nextCursor: hasMore ? {
+      nextCursor: hasMore && offset == null ? {
         mode: 'postgres',
         pitId: null,
         searchAfter: [last.event_time ? new Date(last.event_time).toISOString() : null, last.id],
@@ -599,6 +666,44 @@ export class SearchQueries {
         highlight: null,
       })),
     }
+  }
+
+  async #countContentPostgres(query, {
+    platform,
+    platforms,
+    datasetId,
+    datasetIds,
+    objectType,
+    authorExternalId,
+    chatId,
+    fromTime,
+    toTime,
+  }) {
+    const { rows } = await this.pool.query(
+      `SELECT count(*)::bigint AS total_count
+         FROM core.canonical_records
+        WHERE deleted_at IS NULL
+          AND (
+            title ILIKE '%' || $1 || '%'
+            OR body ILIKE '%' || $1 || '%'
+            OR (stable_fields #>> '{attributes,chatUsername}') ILIKE '%' || $1 || '%'
+          )
+          AND ($2::text IS NULL OR platform = $2)
+          AND ($3::text IS NULL OR dataset_id = $3)
+          AND ($4::text[] IS NULL OR dataset_id = ANY($4::text[]))
+          AND ($5::text IS NULL OR object_type = $5)
+          AND ($6::text IS NULL OR author_external_id = $6)
+          AND ($7::text IS NULL OR (stable_fields #>> '{relations,chatId}') = $7)
+          AND ($8::timestamptz IS NULL OR event_time >= $8::timestamptz)
+          AND ($9::timestamptz IS NULL OR event_time <= $9::timestamptz)
+          AND ($10::text[] IS NULL OR platform = ANY($10::text[]))`,
+      [
+        query, platform, datasetId, datasetIds, objectType, authorExternalId,
+        chatId, fromTime, toTime,
+        Array.isArray(platforms) && platforms.length > 0 ? platforms : null,
+      ],
+    )
+    return Number(rows[0]?.total_count ?? 0)
   }
 
   async #closeSearchPit(pitId) {

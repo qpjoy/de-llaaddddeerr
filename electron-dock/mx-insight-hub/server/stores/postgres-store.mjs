@@ -1035,13 +1035,15 @@ export class PostgresStore {
   }
 
   /**
-   * Keyset page for the Admin Data Center record browser.
+   * Paginated page for the Admin Data Center record browser.
    *
    * This is deliberately separate from `dataCenter()`: the catalog/count query
    * is cheap and stable, while a user may walk many record pages. Only canonical
    * Admin operators need the canonical truth for diagnosis and curation, so
    * this page deliberately includes the current revision payload, extensions
-   * and lineage. Public API projections remain separately allowlisted.
+   * and lineage. Public API projections remain separately allowlisted. Cursor
+   * callers retain keyset pagination; the Admin UI may request a 1-based page
+   * and pay the offset cost needed for direct page jumps.
    */
   async dataCenterRecords({
     datasetId = null,
@@ -1049,18 +1051,21 @@ export class PostgresStore {
     objectType = null,
     pageSize = 50,
     cursor = null,
+    page = null,
   } = {}) {
-    const values = []
-    const clauses = []
+    const filterValues = []
+    const filterClauses = []
     for (const [column, value] of [
       ['r.dataset_id', datasetId],
       ['r.platform', platform],
       ['r.object_type', objectType],
     ]) {
       if (!value) continue
-      values.push(value)
-      clauses.push(`${column} = $${values.length}`)
+      filterValues.push(value)
+      filterClauses.push(`${column} = $${filterValues.length}`)
     }
+    const values = [...filterValues]
+    const clauses = [...filterClauses]
     if (cursor) {
       values.push(cursor.sortTime, cursor.id)
       clauses.push(
@@ -1069,15 +1074,30 @@ export class PostgresStore {
       )
     }
     values.push(pageSize + 1)
+    const limitParameter = values.length
+    let offset = ''
+    if (page != null) {
+      values.push((page - 1) * pageSize)
+      offset = `OFFSET $${values.length}`
+    }
+    const filterWhere = filterClauses.length ? `WHERE ${filterClauses.join(' AND ')}` : ''
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const { rows } = await this.pool.query(
-      `WITH page AS MATERIALIZED (
+    const [countResult, recordResult] = await Promise.all([
+      this.pool.query(
+        `SELECT count(*)::bigint AS total
+           FROM core.canonical_records r
+           ${filterWhere}`,
+        filterValues,
+      ),
+      this.pool.query(
+        `WITH page AS MATERIALIZED (
          SELECT r.id,
                 coalesce(r.event_time, r.collected_at, r.last_seen_at, r.first_seen_at) AS sort_time
            FROM core.canonical_records r
            ${where}
           ORDER BY coalesce(r.event_time, r.collected_at, r.last_seen_at, r.first_seen_at) DESC, r.id DESC
-          LIMIT $${values.length}
+          LIMIT $${limitParameter}
+          ${offset}
        )
        SELECT r.id, r.dataset_id, r.platform, r.object_type, r.external_id, r.identity_hash,
               r.schema_version, r.payload_sha256, r.content_type, r.url, r.title, r.body,
@@ -1094,13 +1114,17 @@ export class PostgresStore {
          LEFT JOIN core.record_revisions revision
            ON revision.record_id = r.id AND revision.revision = r.current_revision
         ORDER BY page.sort_time DESC, page.id DESC`,
-      values,
-    )
+        values,
+      ),
+    ])
+    const rows = recordResult.rows
+    const total = Number(countResult.rows[0]?.total ?? 0)
     const hasMore = rows.length > pageSize
     const pageRows = hasMore ? rows.slice(0, pageSize) : rows
     const last = pageRows.at(-1)
     return {
       items: pageRows.map(dataCenterRecordDetail),
+      total,
       hasMore,
       nextCursor: hasMore && last
         ? { sortTime: iso(last.sort_time), id: last.id }

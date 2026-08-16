@@ -16,6 +16,7 @@ import {
   MetricCard,
   Modal,
   PageHeading,
+  Pagination,
   StatusBadge,
   formatDate,
   formatNumber,
@@ -60,12 +61,20 @@ function recordPage(value, fallbackPageSize = 50) {
       ? value.items
       : asArray(value?.records)
   const nextCursor = pageInfo.nextCursor ?? value?.nextCursor ?? null
+  const numericValue = (candidate, { minimum = 0 } = {}) => {
+    if (candidate == null) return null
+    const number = Number(candidate)
+    return Number.isSafeInteger(number) && number >= minimum ? number : null
+  }
   return {
     items,
-    pageSize: Number(pageInfo.pageSize ?? value?.pageSize ?? fallbackPageSize),
+    page: numericValue(pageInfo.page ?? value?.page, { minimum: 1 }),
+    pageSize: numericValue(pageInfo.pageSize ?? value?.pageSize, { minimum: 1 }) ?? fallbackPageSize,
     hasMore: Boolean(pageInfo.hasMore ?? value?.hasMore ?? nextCursor),
     nextCursor,
-    total: pageInfo.total ?? value?.total ?? null,
+    total: numericValue(pageInfo.total ?? value?.total),
+    totalPages: numericValue(pageInfo.totalPages ?? value?.totalPages, { minimum: 1 }),
+    maxDirectPage: numericValue(pageInfo.maxDirectPage ?? value?.maxDirectPage, { minimum: 1 }),
   }
 }
 
@@ -112,6 +121,7 @@ export function DataCenterPage({ token, onUnauthorized }) {
   const [objectType, setObjectType] = useState('')
   const [queryDraft, setQueryDraft] = useState('')
   const [query, setQuery] = useState('')
+  const [page, setPage] = useState(1)
   const [cursor, setCursor] = useState(null)
   const [cursorHistory, setCursorHistory] = useState([])
   const [selectedRecord, setSelectedRecord] = useState(null)
@@ -128,6 +138,7 @@ export function DataCenterPage({ token, onUnauthorized }) {
       objectType: objectType || undefined,
       pageSize,
       cursor: cursor || undefined,
+      page: cursor ? undefined : page,
     }
     try {
       return await adminApi.dataCenterRecords(token, filters)
@@ -146,18 +157,23 @@ export function DataCenterPage({ token, onUnauthorized }) {
         pageInfo: { pageSize: legacy?.pageSize || pageSize, hasMore: false, nextCursor: null },
       }
     }
-  }, [cursor, datasetId, objectType, platform, query, searchRevision, token])
+  }, [cursor, datasetId, objectType, page, platform, query, searchRevision, token])
   const recordsState = useRemoteData(loadRecords, onUnauthorized)
 
   const data = state.data || {}
   const datasets = asArray(data.datasets)
   const recordsPage = recordPage(recordsState.data, pageSize)
   const records = recordsPage.items
+  const currentPage = recordsPage.page ?? cursorHistory.length + 1
+  const numberedPagination = recordsPage.page != null
+    && recordsPage.total != null
+    && recordsPage.totalPages != null
   const stats = data.stats || {}
   const platforms = useMemo(() => [...new Set(datasets.flatMap((dataset) => asArray(dataset.platforms)))].sort(), [datasets])
   const objectTypes = useMemo(() => [...new Set(datasets.flatMap((dataset) => asArray(dataset.objectTypes)))].sort(), [datasets])
 
   const resetPagination = () => {
+    setPage(1)
     setCursor(null)
     setCursorHistory([])
   }
@@ -175,16 +191,36 @@ export function DataCenterPage({ token, onUnauthorized }) {
   }
 
   const nextPage = () => {
+    if (numberedPagination) {
+      const lastPage = Math.min(recordsPage.totalPages, recordsPage.maxDirectPage ?? recordsPage.totalPages)
+      if (currentPage < lastPage) setPage(currentPage + 1)
+      return
+    }
     if (!recordsPage.nextCursor) return
     setCursorHistory((history) => [...history, cursor])
     setCursor(recordsPage.nextCursor)
   }
 
   const previousPage = () => {
+    if (numberedPagination) {
+      if (currentPage > 1) setPage(currentPage - 1)
+      return
+    }
     if (cursorHistory.length === 0) return
     const previous = cursorHistory.at(-1)
     setCursorHistory((history) => history.slice(0, -1))
     setCursor(previous)
+  }
+
+  const changeRecordsPage = (nextPageNumber) => {
+    if (numberedPagination) {
+      setCursor(null)
+      setCursorHistory([])
+      setPage(nextPageNumber)
+      return
+    }
+    if (nextPageNumber === currentPage - 1) previousPage()
+    if (nextPageNumber === currentPage + 1) nextPage()
   }
 
   if (state.loading && !state.data) return <LoadingState label="正在读取 canonical 数据目录" />
@@ -265,7 +301,7 @@ export function DataCenterPage({ token, onUnauthorized }) {
         <EmptyState icon={Stack} title="还没有 canonical 数据" description="先从外部数据源导入或运行已配置的业务清洗任务。" />
       )}
 
-      <Panel title="Canonical records" subtitle={`服务端分页 · 第 ${formatNumber(cursorHistory.length + 1)} 页 · 本页 ${formatNumber(records.length)} 条${recordsPage.total != null ? ` / 共 ${formatNumber(recordsPage.total)} 条` : ''}`}>
+      <Panel title="Canonical records" subtitle={`服务端分页 · 第 ${formatNumber(currentPage)}${recordsPage.totalPages != null ? ` / ${formatNumber(recordsPage.totalPages)}` : ''} 页 · 本页 ${formatNumber(records.length)} 条${recordsPage.total != null ? ` / 共 ${formatNumber(recordsPage.total)} 条` : ''}`}>
         {recordsState.error ? <ErrorState error={recordsState.error} onRetry={recordsState.refresh} /> : null}
         {!recordsState.error && recordsState.loading && !recordsState.data ? <LoadingState label="正在读取 canonical records" /> : null}
         {!recordsState.error && records.length ? (
@@ -298,15 +334,13 @@ export function DataCenterPage({ token, onUnauthorized }) {
           <EmptyState icon={FileText} title="当前搜索与筛选没有记录" description="调整关键词、Dataset、平台或对象类型后重试。" />
         ) : null}
         {!recordsState.error && recordsState.data ? (
-          <footer className="mih-pagination" aria-label="canonical records 分页">
-            <span>每页 {formatNumber(recordsPage.pageSize)} 条 · 第 {formatNumber(cursorHistory.length + 1)} 页</span>
-            <div>
-              <button className="qp-button qp-button--ghost" type="button" disabled={recordsState.loading || cursorHistory.length === 0}
-                onClick={previousPage}>上一页</button>
-              <button className="qp-button qp-button--ghost" type="button" disabled={recordsState.loading || !recordsPage.hasMore || !recordsPage.nextCursor}
-                onClick={nextPage}>下一页</button>
-            </div>
-          </footer>
+          <Pagination page={currentPage} pageSize={recordsPage.pageSize} total={recordsPage.total}
+            totalPages={recordsPage.totalPages} maxDirectPage={recordsPage.maxDirectPage}
+            hasMore={numberedPagination
+              ? recordsPage.hasMore && (recordsPage.maxDirectPage == null || currentPage < recordsPage.maxDirectPage)
+              : recordsPage.hasMore && Boolean(recordsPage.nextCursor)}
+            loading={recordsState.loading} onPageChange={changeRecordsPage}
+            label="canonical records 分页" />
         ) : null}
       </Panel>
 

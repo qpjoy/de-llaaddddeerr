@@ -77,6 +77,37 @@ Elastic classic plugin 会校验精确 ES 版本。现有社区 `elasticsearch-a
 
 索引时把 tokens 保存为独立预分词字段；查询时用同模型生成 query tokens。HanLP 失败时记录 `enrichment_pending`，原文和结构化数据仍发布。模型升级创建新 enrichment version，通过 shadow reindex/A-B relevance 验证后再切 alias。
 
+### 4.1 相关性语义与重建分词投影
+
+长中文查询后排出现“只命中一个字”的记录，根因不是 PostgreSQL
+`pg_trgm`，而是 ES 原文的标准 analyzer 与 CJK unigram/bigram 回退分词在
+OR 查询下放大了单字共现。正文检索现默认使用“原文 phrase 命中”
+或“预分词 token 全部命中”；作者、会话与 chunk 的词法分支也不再以单字
+命中作为宽松召回条件。
+
+已经以旧分词器发布的 current-state 投影可从 PostgreSQL canonical truth
+重建：
+
+```bash
+cd electron-dock/mx-insight-hub
+bash scripts/manage.sh reindex-search
+# 等价的显式命令：
+bash scripts/manage.sh ops internal-production reindex-search
+```
+
+该命令要求 projector 正好一个副本，并在现有 projector Pod 内执行一次性
+strict reconciler；不会 rollout 或重启常驻 projector。任务先验证当前部署
+要求的 HanLP/jieba 后端（显式 fallback 配置则为 bigram），随后每个待索引
+字段都校验实际分词 provenance。短暂错误每字段最多尝试 3 次（两次有界退避
+重试）；仍然得到 fallback、degraded 输出或 mapping
+冲突时，命令以非零状态退出且不会把该批伪报为成功。此前已经写入的、通过
+校验的批次仍是安全的，可在后端恢复后重跑。
+
+reconciler 从 PostgreSQL current truth 重放 content 与 chunk；只有需要新建
+投影时才原子切换 alias，既有 current index 允许同 source revision 覆盖旧
+分词字段。该操作不重启 Public/Admin API、ingest、Launcher、MX-H2I 登录
+或联网链路。执行前仍应在低峰期确认 ES 磁盘和 PG 读取余量。
+
 ## 5. 业务索引与日志索引隔离
 
 | 类型 | 内容 | Retention | 访问 |

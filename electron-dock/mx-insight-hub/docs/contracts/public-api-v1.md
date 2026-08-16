@@ -88,13 +88,13 @@ Content-Type: application/json
 }
 ```
 
-Current Hub v1 accepts one explicit platform per request. Platform names `all`
-(case-insensitive) and `*` are invalid. Night-All already has a grouped
-multi-platform response, but the Hub does not expose it yet because its grants,
-policies, idempotency and usage ledger are enforced per platform. A future
-bounded endpoint may return per-platform `results[]` and independent cursors;
-large/`all` fan-out belongs in a job API. It must not be represented as one
-fictional `multi` platform or one globally mixed cursor.
+This live/upstream-compatible route accepts one explicit platform per request.
+Platform names `all` (case-insensitive) and `*` are invalid. Multi-platform live
+fan-out still belongs in a bounded job because each provider call has its own
+cost, failure and continuation. This does not prevent the separate
+`/data/canonical/search` route from searching already-stored Hub data across
+granted platforms in one canonical index; that route performs no provider
+fan-out.
 
 `query` must be non-blank and at most 500 characters after trimming. `cursor`, when present, must be a non-blank opaque string of at most 8,192 characters. Clients must return the cursor from the previous response unchanged rather than constructing or decoding it.
 
@@ -145,6 +145,52 @@ and page size; a later page requires a new idempotency key. Grant, policy, quota
 idempotency replay and usage evidence use the same per-platform ledger as
 `POST /api/v1/data/search`.
 
+## Unified canonical search
+
+```http
+POST /api/v1/data/canonical/search
+Idempotency-Key: <caller-generated stable key>
+Content-Type: application/json
+
+{
+  "query": "AI Agent",
+  "platform": "telegram",
+  "objectType": "message",
+  "pageSize": 20,
+  "cursor": "opaque-if-present"
+}
+```
+
+Only `query` is required. Omitting `platform` searches every platform currently
+granted to the consumer; specifying it narrows the search and still requires
+that grant. `datasetId` and `objectType` are optional exact logical filters.
+The server always applies the authorized platform set in addition to those
+filters, so a dataset identifier can never expand access.
+
+The route runs one query over the shared canonical current-state projection. It
+does not call each source API and then concatenate per-source top-N lists. This
+gives all matching datasets one BM25 scoring context, one deterministic
+`_score/eventTime/id` ordering and one PIT/search-after cursor. Source identity
+is not an implicit relevance boost. Records intentionally preserved in separate
+datasets remain separate results even if they share an external ID; the search
+layer does not guess a cross-dataset survivor rule.
+If Elasticsearch is unavailable on the first page, the same authorized filters
+are applied to the PostgreSQL canonical table and the response reports
+`search_projection_degraded`.
+
+Responses use `contractVersion=mx-insight-hub.canonical-search.v1` and the same
+customer-safe item projection as stored search. `scope.platforms` records the
+actual sorted authorization scope. `pageInfo` includes `totalCount`,
+`totalRelation`, `totalPages`, and the stable opaque cursor. A cursor is signed
+over the query, filters, page size and platform scope; if grants change, restart
+from the first page. The operation is metered under the
+`data.canonical-search` usage scope. That bucket is independent of the legacy
+single-platform search bucket and always uses the strictest request/page limit
+and longest window across the consumer's complete current platform-grant set,
+even when this request narrows `platform`. This keeps one stable policy on one
+shared bucket instead of re-evaluating the same history against different
+limits.
+
 ## Telegram stored data
 
 ### History
@@ -161,6 +207,31 @@ from the physical Night-All tables on each request:
 | --- | --- | --- |
 | `chats` | `telegram.monitor.chats.v1` | `chat` |
 | `messages` | `telegram.monitor.messages.v1` | `message` |
+
+They intentionally remain monitor-specific compatibility APIs. SQLite imports
+are separate canonical datasets (`telegram.sqlite.chats.v1` and
+`telegram.sqlite.messages.v1`) and are not silently mixed into the history or
+Telegram-specific search contracts.
+
+Use the unified endpoint when the caller wants Telegram data regardless of
+ingestion source. Omitting `datasetId` is what combines monitor and SQLite
+records:
+
+```http
+POST /api/v1/data/canonical/search
+Idempotency-Key: <stable-key>
+Content-Type: application/json
+
+{
+  "platform": "telegram",
+  "objectType": "message",
+  "query": "agent",
+  "pageSize": 20
+}
+```
+
+Use `/api/v1/data/stored/search` with an exact `datasetId` when a caller
+deliberately wants just one Telegram source dataset.
 
 The API key's consumer must have the explicit `telegram` platform grant. A
 tenant ID, source-table name, provider, connector, database field, endpoint ID

@@ -235,10 +235,11 @@ Optional local search (independent from Hub startup):
 Internal Kubernetes:
   bash scripts/manage.sh deploy          # 全量幂等部署（= ops internal-production deploy）
   bash scripts/manage.sh verify          # 冒烟（= ops internal-production smoke）
+  bash scripts/manage.sh reindex-search  # 用当前 HanLP/jieba 重建可再生搜索投影
   bash scripts/manage.sh verify-data-path [api-key]
                                          # 端到端：search -> PG -> outbox -> ES
 
-  bash scripts/manage.sh ops internal-production plan|deploy|apply|status|smoke|logs|down
+  bash scripts/manage.sh ops internal-production plan|deploy|apply|status|smoke|logs|reindex-search|down
   bash scripts/manage.sh ops internal-production decommission-local-postgres
 
 PostgreSQL, Elasticsearch and Redis live in the shared mx-common data plane;
@@ -1375,6 +1376,46 @@ pg_count() {
     psql -U mx_common -d mx_insight_hub -tAc "$1" 2>/dev/null | tr -d ' \n' || printf '0'
 }
 
+# Re-run the projector's PostgreSQL -> Elasticsearch reconciliation inside its
+# existing Pod. The one-shot process wraps the configured tokenizer with a
+# fail-closed contract, while the normal projector remains fail-soft. No API,
+# Launcher, ingest, login, or long-running projector workload is restarted.
+reindex_search() {
+  local namespace="mx-insight-hub"
+  local deployment="mx-insight-hub-projector"
+  local replicas ready_replicas elasticsearch_url
+  need kubectl
+
+  replicas="$(
+    kubectl -n "$namespace" get deployment "$deployment" \
+      -o jsonpath='{.spec.replicas}' 2>/dev/null || true
+  )"
+  case "$replicas" in
+    1) : ;;
+    ''|*[!0-9]*|0) die "$deployment must be deployed with one replica before reindexing" ;;
+    *) die "$deployment has ${replicas} replicas; scale it to one before reindexing so the single-slot tokenizer is not rebuilt repeatedly" ;;
+  esac
+  ready_replicas="$(
+    kubectl -n "$namespace" get deployment "$deployment" \
+      -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true
+  )"
+  [ "$ready_replicas" = 1 ] \
+    || die "$deployment must have one Ready replica before reindexing (ready=${ready_replicas:-0})"
+  elasticsearch_url="$(
+    kubectl -n "$namespace" get configmap mx-insight-hub-config \
+      -o jsonpath='{.data.MX_COMMON_ELASTICSEARCH_URL}' 2>/dev/null || true
+  )"
+  [ -n "$elasticsearch_url" ] \
+    || die "MX_COMMON_ELASTICSEARCH_URL is empty in mx-insight-hub-config; there is no search projection to rebuild"
+
+  say "running one-shot reconciliation in ${deployment}; configured tokenizer fallback is forbidden"
+  if ! kubectl -n "$namespace" exec "deployment/${deployment}" -- \
+    node server/scripts/reindex-search.mjs; then
+    die "search reindex failed tokenizer integrity or projection checks; no fallback-token batch was accepted"
+  fi
+  say "search reindex completed with verified configured-tokenizer output"
+}
+
 ops_action() {
   local environment="${1:-}"
   local action="${2:-}"
@@ -1432,6 +1473,9 @@ ops_action() {
       kubectl -n mx-insight-hub logs deployment/mx-insight-hub-admin --tail=250
       kubectl -n mx-insight-hub logs deployment/mx-insight-hub-public --tail=250
       ;;
+    reindex-search)
+      reindex_search
+      ;;
     down)
       kubectl -n mx-insight-hub scale \
         deployment/mx-insight-hub-admin deployment/mx-insight-hub-public --replicas=0
@@ -1465,6 +1509,9 @@ main() {
       shift
       load_env_file "${ROOT_DIR}/.env.internal"
       verify_data_path "${1:-}"
+      ;;
+    reindex-search)
+      ops_action internal-production reindex-search
       ;;
     search)
       shift

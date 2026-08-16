@@ -101,4 +101,49 @@ psql "host=127.0.0.1 port=5432 dbname=night_all user=mx_data" \
 # 已有 Checkpoint 后换服务器、换数据库或源表被 DROP/重建；
 # 准备面板明确显示 requiresCheckpointReset；
 # 修复历史漏数后，明确决定从头全量重放。
+
+# 1. Admin 数据中心接口：查看完整数据和删除标记
+export HUB_ADMIN_URL="http://10.88.88.88:18151"
+
+curl -sS --get \
+  "$HUB_ADMIN_URL/internal/v1/admin/data-center/records" \
+  -H "x-mx-insight-admin-token: $MX_INSIGHT_ADMIN_TOKEN" \
+  --data-urlencode "datasetId=telegram.sqlite.messages.v1" \
+  --data-urlencode "platform=telegram" \
+  --data-urlencode "objectType=message" \
+  --data-urlencode "pageSize=50" | jq
+
+
+export HUB_PUBLIC_URL="http://10.88.88.88:18150"
+
+curl -sS -X POST \
+  "$HUB_PUBLIC_URL/api/v1/data/stored/search" \
+  -H "Authorization: Bearer $HUB_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: tg-sqlite-search-0001" \
+  -d '{
+    "platform": "telegram",
+    "datasetId": "telegram.sqlite.messages.v1",
+    "objectType": "message",
+    "query": "需要搜索的关键词",
+    "pageSize": 20
+  }' | jq
+```
+
+```bash
+# 重新索引数据
+bash scripts/manage.sh reindex-search
+
+# 搜索TG Monitor和sqlite数据源，TODO: 全部来源
+POST /api/v1/data/canonical/search
+Authorization: Bearer <API_KEY>
+Idempotency-Key: <stable-key>
+Content-Type: application/json
+
+{
+  "platform": "telegram",
+  "objectType": "message",
+  "query": "AI Agent",
+  "pageSize": 20
+}
 ```

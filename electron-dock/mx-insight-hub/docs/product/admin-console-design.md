@@ -1,6 +1,6 @@
 # Admin console design
 
-Status: implemented; direct data-source workflow updated on 2026-08-10.
+Status: implemented; Data Center pagination updated on 2026-08-16.
 
 ## Sources
 
@@ -19,6 +19,7 @@ The console intentionally keeps Sub2API-like operational clarity while using the
 | Business governance | API Keys | Issue one-time secrets with a 180-day default (configurable 1–730 days), distinguish effective expiry from revocation, filter keys and perform explicit revocation. |
 | Policy control | Plans and quotas | Explain and edit product-limit semantics. |
 | Policy control | Platforms | Grant concrete platforms and configure consumer-specific windows/page size. |
+| Data plane | Data Center | Browse PostgreSQL canonical truth, search the rebuildable ES projection, inspect full Admin records, and navigate exact numbered pages. |
 | Data plane | External sources | Register/test PostgreSQL connections; operate the fixed TG two-table pipeline; explicitly prepare its source-side cursor contract; inspect schema/value shapes, checkpoints, progress and import-run counts. Direct file upload remains supported. |
 | Observability | Usage | Inspect request evidence without exposing provider details. |
 | Observability | Runtime | Separate liveness, store readiness and Night-All readiness. |
@@ -45,6 +46,16 @@ Checkpoint reset is shown only for paused database sources and requires typing
 the exact source key. If a pull still owns the source advisory lock, the UI
 surfaces `409 source_busy`; the operator waits for that pull to exit and retries
 instead of racing its cursor acknowledgement.
+
+The Data Center record list reports exact `total` and `totalPages`, shows a
+compact page neighbourhood, and supports a 1-based direct jump. Unsearched
+canonical browsing counts and pages PostgreSQL directly; the legacy signed
+keyset cursor remains available to callers that prefer stable sequential reads.
+Keyword results are ranked by Elasticsearch and may jump directly within its
+first 10,000 ranked hits. The API returns `maxDirectPage`, the UI labels that
+boundary, and a request beyond it returns `search_page_out_of_range` instead of
+failing silently. Deep traversal remains cursor-based, while narrowing Dataset,
+platform or object type restores useful random access.
 
 The Telegram business card treats source preparation as a separate destructive
 workflow, not another deploy checkbox. It shows evidence for both fixed tables:

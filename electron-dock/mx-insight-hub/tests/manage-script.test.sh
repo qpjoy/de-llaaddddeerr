@@ -646,6 +646,68 @@ fi
 rm -f -- "$hanlp_empty_error"
 printf 'ok - HanLP smoke rejects nested empty token responses\n'
 
+# A segmentation rebuild runs as a strict one-shot process in the existing
+# projector Pod. It must not restart the fail-soft projector, API/login,
+# Launcher, or ingest workloads.
+reindex_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-reindex-events.XXXXXX")"
+reindex_output="$(REINDEX_EVENTS="$reindex_events" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    printf "%s\n" "$*" >>"$REINDEX_EVENTS"
+    case "$*" in
+      *"get deployment mx-insight-hub-projector"*) printf "1" ;;
+      *"get configmap mx-insight-hub-config"*"MX_COMMON_ELASTICSEARCH_URL"*)
+        printf "http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200"
+        ;;
+      *"exec deployment/mx-insight-hub-projector -- node server/scripts/reindex-search.mjs"*)
+        printf "[reindex] completed with verified tokenizer backend=hanlp\n"
+        ;;
+      *) return 0 ;;
+    esac
+  }
+  reindex_search
+' _ "$ROOT_DIR")"
+grep -Fq 'exec deployment/mx-insight-hub-projector -- node server/scripts/reindex-search.mjs' "$reindex_events"
+grep -Fq 'search reindex completed with verified configured-tokenizer output' <<<"$reindex_output"
+if grep -Eq 'rollout restart|scale deployment|mx-launcher' "$reindex_events"; then
+  printf 'not ok - search reindex restarted a user-facing or ingest workload\n' >&2
+  exit 1
+fi
+rm -f -- "$reindex_events"
+printf 'ok - strict search reindex runs without restarting login, ingest, or projector workloads\n'
+
+reindex_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-reindex-strict.XXXXXX")"
+if bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    case "$*" in
+      *"get deployment mx-insight-hub-projector"*) printf "1" ;;
+      *"get configmap mx-insight-hub-config"*"MX_COMMON_ELASTICSEARCH_URL"*)
+        printf "http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200"
+        ;;
+      *"exec deployment/mx-insight-hub-projector -- node server/scripts/reindex-search.mjs"*)
+        printf "[reindex] fatal: reindex requires hanlp tokens but received jieba\n" >&2
+        return 42
+        ;;
+      *) return 0 ;;
+    esac
+  }
+  reindex_search
+' _ "$ROOT_DIR" >"$reindex_error" 2>&1; then
+  printf 'not ok - HanLP reindex reported success after tokenizer degradation\n' >&2
+  exit 1
+fi
+grep -Fq 'reindex requires hanlp tokens but received jieba' "$reindex_error"
+grep -Fq 'search reindex failed tokenizer integrity' "$reindex_error"
+if grep -Fq 'search reindex completed with verified' "$reindex_error"; then
+  printf 'not ok - failed HanLP reindex emitted the success marker\n' >&2
+  exit 1
+fi
+rm -f -- "$reindex_error"
+printf 'ok - HanLP fallback makes reindex-search fail without a success marker\n'
+
 # Independent deployment is the safety default: neither secret sync nor a
 # Launcher rollout may issue kubectl mutations unless explicitly enabled.
 launcher_default="$(bash -c '

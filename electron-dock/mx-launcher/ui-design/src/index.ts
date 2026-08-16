@@ -36,6 +36,7 @@ export const classNames = {
   tag: 'qp-tag',
   menu: 'qp-menu',
   toast: 'qp-toast',
+  pagination: 'qp-pagination',
   projectCard: 'qp-project-card',
   userCard: 'qp-user-card',
   settingsView: 'qp-settings-view',

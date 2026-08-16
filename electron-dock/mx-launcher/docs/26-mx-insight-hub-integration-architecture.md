@@ -264,3 +264,13 @@ Hub 的详细数据架构位于 sibling `../../mx-insight-hub/docs/`，重点参
   和 `txt/md`；HanLP 在 canonical 入库后的 ES 投影阶段运行，不是文件导入
   前置条件。`/shared_dir` watcher/landing agent 仍是设计，不得将手册中的
   拟议批量命令当作已实现入口。
+
+## 12. 2026-08-16 Data Center 分页组件
+
+- Neon Void 设计包新增隔离命名的 `qp-pagination` 视觉契约，包含
+  总记录/总页数、页码邻域与省略号、上一页/下一页、跳转输入和
+  首末页 disabled 状态；`demos/ui-design-neon-void/buttons` 保留可交互样例。
+- Hub Data Center 的 React `Pagination` 复用该类名与 token，但数据请求、
+  Admin 授权和 ES 10,000 条直达窗口仍由 Hub 自己负责。这是纯增量
+  CSS/类名合同，不改 Launcher 登录会话、Internal 配置中心或 MX-H2I
+  联网状态机。

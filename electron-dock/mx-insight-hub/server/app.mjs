@@ -152,6 +152,35 @@ function decodeDataCenterCursor(value, kind, binding) {
   }
 }
 
+function dataCenterCursorState(cursor) {
+  if (!cursor) return { cursor: null, page: 1 }
+  const { page: encodedPage, ...value } = cursor
+  return {
+    cursor: value,
+    page: Number.isSafeInteger(encodedPage) && encodedPage >= 2 ? encodedPage : 2,
+  }
+}
+
+function dataCenterTotal(value) {
+  if (value == null) return null
+  const total = Number(value)
+  return Number.isSafeInteger(total) && total >= 0 ? total : null
+}
+
+const DATA_CENTER_SEARCH_RESULT_WINDOW = 10_000
+
+function dataCenterPageInfo({ page, pageSize, total, hasMore, nextCursor, maxDirectPage = null }) {
+  return {
+    page,
+    pageSize,
+    total,
+    totalPages: total == null ? null : Math.max(1, Math.ceil(total / pageSize)),
+    hasMore,
+    nextCursor,
+    ...(maxDirectPage == null ? {} : { maxDirectPage }),
+  }
+}
+
 function assertGenericSourceMutable(sourceKey) {
   if (!isTelegramMonitorSourceKey(sourceKey) && !isTelegramSQLiteSourceKey(sourceKey)) return
   const pipeline = isTelegramSQLiteSourceKey(sourceKey) ? 'telegram-sqlite' : 'telegram-monitor'
@@ -895,10 +924,27 @@ export function createApp({
         if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
           throw new AppError(400, 'invalid_page_size', 'pageSize must be an integer between 1 and 100')
         }
+        const rawPage = searchParams.get('page')
+        const requestedPage = rawPage == null || rawPage === '' ? null : Number(rawPage)
+        if (requestedPage != null && (
+          !Number.isSafeInteger(requestedPage)
+          || requestedPage < 1
+          || !Number.isSafeInteger((requestedPage - 1) * pageSize)
+        )) {
+          throw new AppError(400, 'invalid_page', 'page must be a positive integer with a safe offset')
+        }
         const optionalFilter = (name) => searchParams.get(name)?.trim() || null
         const query = optionalFilter('q')
         if (query && query.length > 500) {
           throw new AppError(400, 'invalid_request', 'q must not exceed 500 characters')
+        }
+        const requestedOffset = requestedPage == null ? null : (requestedPage - 1) * pageSize
+        if (query && requestedOffset != null && requestedOffset + pageSize > DATA_CENTER_SEARCH_RESULT_WINDOW) {
+          throw new AppError(
+            400,
+            'search_page_out_of_range',
+            `Keyword search direct page jumps are limited to the first ${DATA_CENTER_SEARCH_RESULT_WINDOW} ranked results; narrow the filters or use cursor pagination`,
+          )
         }
         const filters = {
           datasetId: optionalFilter('datasetId'),
@@ -907,15 +953,21 @@ export function createApp({
         }
         const binding = dataCenterCursorBinding({ query, ...filters, pageSize })
         const encodedCursor = optionalFilter('cursor')
+        if (requestedPage != null && encodedCursor) {
+          throw new AppError(400, 'invalid_request', 'page and cursor cannot be used together')
+        }
         if (query) {
           if (!search?.queries?.searchContent) {
             throw new AppError(503, 'stored_search_unavailable', 'Data Center search requires the canonical search layer')
           }
-          const cursor = decodeDataCenterCursor(encodedCursor, 'search', binding)
+          const cursorState = dataCenterCursorState(decodeDataCenterCursor(encodedCursor, 'search', binding))
+          const page = requestedPage ?? cursorState.page
           const result = await search.queries.searchContent(query, {
             ...filters,
             size: pageSize,
-            cursor,
+            cursor: cursorState.cursor,
+            offset: requestedOffset,
+            trackTotalHits: true,
           })
           let items = result.items
           if (typeof store.dataCenterRecordsByIds === 'function' && result.items.length > 0) {
@@ -927,15 +979,27 @@ export function createApp({
               highlight: item.highlight ?? null,
             }))
           }
+          const total = dataCenterTotal(result.total)
+          const maxDirectPage = Math.min(
+            total == null ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.ceil(total / pageSize)),
+            Math.floor(DATA_CENTER_SEARCH_RESULT_WINDOW / pageSize),
+          )
           sendJson(response, 200, {
             data: {
               items,
               mode: result.mode,
-              pageInfo: {
+              pageInfo: dataCenterPageInfo({
+                page,
                 pageSize,
+                total,
                 hasMore: result.hasMore,
-                nextCursor: encodeDataCenterCursor('search', result.nextCursor, binding),
-              },
+                maxDirectPage,
+                nextCursor: encodeDataCenterCursor(
+                  'search',
+                  result.nextCursor ? { ...result.nextCursor, page: page + 1 } : null,
+                  binding,
+                ),
+              }),
             },
             requestId,
           })
@@ -944,17 +1008,30 @@ export function createApp({
         if (typeof store.dataCenterRecords !== 'function') {
           throw new AppError(503, 'data_center_unavailable', 'Data Center record browsing requires the PostgreSQL store')
         }
-        const cursor = decodeDataCenterCursor(encodedCursor, 'browse', binding)
-        const result = await store.dataCenterRecords({ ...filters, pageSize, cursor })
+        const cursorState = dataCenterCursorState(decodeDataCenterCursor(encodedCursor, 'browse', binding))
+        const page = requestedPage ?? cursorState.page
+        const result = await store.dataCenterRecords({
+          ...filters,
+          pageSize,
+          cursor: cursorState.cursor,
+          page: requestedPage,
+        })
+        const total = dataCenterTotal(result.total)
         sendJson(response, 200, {
           data: {
             items: result.items,
             mode: 'postgres',
-            pageInfo: {
+            pageInfo: dataCenterPageInfo({
+              page,
               pageSize,
+              total,
               hasMore: result.hasMore,
-              nextCursor: encodeDataCenterCursor('browse', result.nextCursor, binding),
-            },
+              nextCursor: encodeDataCenterCursor(
+                'browse',
+                result.nextCursor ? { ...result.nextCursor, page: page + 1 } : null,
+                binding,
+              ),
+            }),
           },
           requestId,
         })
@@ -2013,6 +2090,19 @@ export function createApp({
       if (request.method === 'POST' && pathname === '/api/v1/data/stored/search') {
         const context = await requirePublic(request)
         const result = await service.storedSearch(context, {
+          body: await readJson(request),
+          idempotencyKey: request.headers['idempotency-key'],
+          path: pathname,
+        })
+        sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/api/v1/data/canonical/search') {
+        const context = await requirePublic(request)
+        const result = await service.canonicalSearch(context, {
           body: await readJson(request),
           idempotencyKey: request.headers['idempotency-key'],
           path: pathname,

@@ -9,7 +9,12 @@ import {
   telegramDataSearchResponse,
   telegramMonitorResource,
 } from './data/telegram-monitor.mjs'
-import { normalizeStoredSearchQuery, storedSearchResponse } from './data/stored-search.mjs'
+import {
+  canonicalSearchResponse,
+  normalizeCanonicalSearchQuery,
+  normalizeStoredSearchQuery,
+  storedSearchResponse,
+} from './data/stored-search.mjs'
 
 const DEFAULT_POLICY = Object.freeze({
   maxRequests: 1_000,
@@ -28,6 +33,7 @@ const PUBLIC_SEARCH_FIELDS = new Set(['platform', 'query', 'pageSize', 'cursor']
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const PUBLIC_CAPABILITIES = new Set(['nlp.tokenize'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
+const CANONICAL_SEARCH_USAGE_SCOPE = 'data.canonical-search'
 const TOKENIZE_MAX_TEXT_LENGTH = 4_096
 const TOKENIZE_MAX_TOKENS = 8_192
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -635,6 +641,136 @@ export class HubService {
         throw error
       }
       await this.store.releaseRequest(activeRequestId, 'stored_search_failed').catch(() => {})
+      throw error
+    }
+  }
+
+  async canonicalSearch(context, { body, idempotencyKey, path }) {
+    assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
+    assert(
+      typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
+      400,
+      'invalid_idempotency_key',
+      'Idempotency-Key must contain 8-128 safe characters',
+    )
+    assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
+    const grants = [...new Set(await this.store.listGrants(context.consumer.id))].sort()
+    assert(grants.length > 0, 403, 'platform_not_granted', 'At least one platform grant is required')
+    const platform = body.platform == null ? null : canonicalPlatform(body.platform)
+    if (platform) {
+      assert(!RESERVED_PLATFORM_NAMES.has(platform), 400, 'invalid_platform', 'A single explicit platform is required')
+      assert(grants.includes(platform), 403, 'platform_not_granted', 'Platform is not granted')
+    }
+    if (!this.searchQueries?.searchContent) {
+      throw new AppError(503, 'canonical_search_unavailable', 'Canonical search requires the PostgreSQL search layer')
+    }
+    const policies = await Promise.all(grants.map(async (name) => ({
+      ...this.defaultPolicy,
+      ...((await this.store.getPolicy(context.consumer.id, name)) || {}),
+    })))
+    // A unified read needs one stable, conservative quota policy. Its separate
+    // usage bucket always applies the strictest request/page limit and longest
+    // window across the consumer's complete current grant set. Using the same
+    // stable policy for explicit-platform and all-platform requests prevents a
+    // loose platform request from filling a bucket that is later evaluated
+    // against a different, stricter limit.
+    const policy = {
+      maxRequests: Math.min(...policies.map((entry) => entry.maxRequests)),
+      windowSeconds: Math.max(...policies.map((entry) => entry.windowSeconds)),
+      maxPageSize: Math.min(...policies.map((entry) => entry.maxPageSize)),
+    }
+    const query = normalizeCanonicalSearchQuery(
+      { ...body, platform },
+      {
+        platforms: grants,
+        maxPageSize: policy.maxPageSize,
+        cursorSecret: this.apiKeyPepper,
+      },
+    )
+    const fingerprintBody = {
+      query: query.query,
+      platform: query.platform,
+      platforms: query.platforms,
+      datasetId: query.datasetId,
+      objectType: query.objectType,
+      pageSize: query.pageSize,
+      cursor: query.cursorToken,
+    }
+    const requestId = randomUUID()
+    const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
+    await this.store.reapStaleReservations()
+    const reservation = await this.store.reserve({
+      requestId,
+      idempotencyKey,
+      fingerprint: requestFingerprint({ method: 'POST', path, body: fingerprintBody }),
+      tenantId: context.tenant.id,
+      consumerId: context.consumer.id,
+      apiKeyId: context.apiKey.id,
+      capability: CANONICAL_SEARCH_USAGE_SCOPE,
+      unitsReserved: 1,
+      leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
+      windowStart,
+      maxRequests: policy.maxRequests,
+    })
+
+    if (reservation.kind === 'conflict') {
+      throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
+    }
+    if (reservation.kind === 'in_progress') {
+      throw new AppError(409, 'request_in_progress', 'Request with this Idempotency-Key is in progress', {
+        requestId: reservation.request.id,
+      })
+    }
+    if (reservation.kind === 'unknown') {
+      throw new AppError(409, 'request_outcome_unknown', 'Previous request outcome is unknown', {
+        requestId: reservation.request.id,
+      })
+    }
+    if (reservation.kind === 'replay') {
+      return {
+        status: reservation.request.responseStatus,
+        body: reservation.request.responseBody,
+        requestId: reservation.request.id,
+        replay: true,
+      }
+    }
+
+    const activeRequestId = reservation.request.id
+    const startedAt = performance.now()
+    let commitAttempted = false
+    try {
+      // Dataset/object filters narrow the already-authorized platform set; they
+      // never replace it. The common projection produces one globally ranked
+      // result list rather than merging incomparable per-source scores.
+      const result = await this.searchQueries.searchContent(query.query, {
+        platforms: query.platforms,
+        datasetId: query.datasetId,
+        objectType: query.objectType,
+        size: query.pageSize,
+        cursor: query.cursor,
+        strictRelevance: true,
+        trackTotalHits: true,
+      })
+      const responseBody = canonicalSearchResponse({
+        query,
+        result,
+        durationMs: Math.round(performance.now() - startedAt),
+        cursorSecret: this.apiKeyPepper,
+      })
+      commitAttempted = true
+      await this.store.commitRequest(activeRequestId, {
+        responseStatus: 200,
+        responseBody,
+        unitsActual: Math.max(1, responseBody.data.items.length),
+        upstreamLatencyMs: Math.round(performance.now() - startedAt),
+      })
+      return { status: 200, body: responseBody, requestId: activeRequestId, replay: false }
+    } catch (error) {
+      if (commitAttempted) {
+        await this.store.markRequestUnknown(activeRequestId, 'usage_commit_ambiguous').catch(() => {})
+        throw error
+      }
+      await this.store.releaseRequest(activeRequestId, 'canonical_search_failed').catch(() => {})
       throw error
     }
   }

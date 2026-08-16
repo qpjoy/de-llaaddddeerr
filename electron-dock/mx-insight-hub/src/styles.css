@@ -642,22 +642,6 @@ select {
   color: var(--qp-text-1);
 }
 
-.mih-pagination {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border-top: 1px solid var(--qp-line);
-  padding-top: 12px;
-  color: var(--qp-text-4);
-  font-size: var(--qp-font-caption-1);
-}
-
-.mih-pagination > div {
-  display: flex;
-  gap: 8px;
-}
-
 .mih-record-detail {
   display: grid;
   align-content: start;
@@ -1391,11 +1375,6 @@ select {
   .mih-file-detection dl,
   .mih-file-samples > div {
     grid-template-columns: 1fr;
-  }
-
-  .mih-pagination {
-    align-items: stretch;
-    flex-direction: column;
   }
 
   .mih-platform-context {

@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-08-15.
+Last reviewed: 2026-08-16.
 
 This directory is the source of truth for MX Insight Hub. Night-All-specific implementation details remain in the Night-All repository; this project records only the stable dependency contract and ownership boundary.
 
@@ -11,7 +11,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | Modular monolith API | Implemented: multiple tenants, tenant rename, consumers, one-time API keys, explicit platform grants, per-platform limits, request idempotency, usage and health. Each consumer belongs to exactly one tenant. |
 | Admin console | Implemented with the shared MX Launcher Neon Void design package, including platform-admin tenant create/list/rename and explicit tenant selection when creating a consumer. |
 | Open capabilities | Implemented: platform-independent capability grants and quotas reuse the existing tenant/consumer/API Key lifecycle. `nlp.tokenize` is the first capability and reports the actual HanLP/Jieba/bigram backend plus degradation state. |
-| Data Center | Implemented as an Admin-Token-only PostgreSQL canonical catalog with dataset aggregates and a customer-safe recent-record field allowlist. Elasticsearch is not used as the authoritative count. |
+| Data Center | Implemented as an Admin-Token-only PostgreSQL canonical catalog with dataset aggregates, full Admin record detail, exact totals, numbered pages and direct page jumps. Elasticsearch supplies ranked search only; PostgreSQL remains the authoritative count. |
 | Night-All adapter | Implemented for the private `/api/v1/data/search` facade; provider details are filtered. |
 | Local lifecycle | Docker Compose, PostgreSQL, bootstrap and smoke commands. |
 | Internal K8s | One-click lifecycle and manifests implemented: independent Hub namespace, a dedicated Hub database/role provisioned inside shared `mx-common` PostgreSQL, migration Job, split public/Admin Deployments, projector/ingest workers, Services and NetworkPolicy. A retired Hub-local PostgreSQL is decommissioned only by an explicit destructive command. |
@@ -20,7 +20,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | Data ingest and serving plane | Admin-token-only PostgreSQL/file source management, browser upload, allowlisted server-file paths, content observations, reusable immutable format rules, canonical records/revisions/tombstones, projection outbox, durable queues/cursors, interpretation-aware file idempotency, PostgreSQL external pull and import-run evidence are implemented. PostgreSQL credentials live directly in `catalog.external_sources.connection`; catalog backups are therefore sensitive. `/shared_dir` directory watcher/landing agent, immutable object/cloud storage adapters, prompt CRUD, a generic CDC connector and non-PostgreSQL database connectors are not. |
 | Telegram monitor sources | `telegram.monitor.chats.v1` and `telegram.monitor.messages.v1`, a fixed two-input business task, explicit idempotent source-contract preparation, source progress/import evidence, strict history, Night-All-v1-compatible stored search and fuzzy entity search are implemented. Preparation installs the database-enforced watermark/trigger/index contract with one-request DDL credentials while ordinary ingest stays read-only; activation remains fail-closed until probe and writer attestation pass. These canonical datasets have no `tenant_id`; all consumers with the `telegram` grant read the same corpus. |
 | Telegram SQLite read API | `telegram.sqlite.chats.v1` and `telegram.sqlite.messages.v1` are a separate fixed, Admin-managed GET-only pipeline. It preserves raw JSON and deletion-marked rows in PostgreSQL, uses deterministic identities and Hub transaction idempotency, and performs an initial/manual full alignment followed by append-oriented overlap polling plus a bounded previous-day window at 02:00 Asia/Shanghai. It never schedules an automatic historical full scan and is not merged into the PostgreSQL public Telegram datasets. |
-| Search/retrieval | Canonical projection outbox, projector, customer-safe Elasticsearch full-text/name fields, PostgreSQL degradation paths, Admin semantic search and shared `mx-common` search deployment are implemented. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
+| Search/retrieval | Canonical projection outbox, projector, unified cross-platform stored search, strict Chinese relevance, PostgreSQL degradation paths, Admin semantic search and a guarded projector-only reindex command are implemented. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
 | Private/public DNS routes | Deliberately not auto-created. They require route/TLS review and a deployed public Service. |
 | Billing, BI and Data Agent | Designed as later phases; the MVP has mutable request/usage evidence, not an append-only billing ledger or invoice engine. |
 | Backup/PITR and ELK/SLO | Target runbooks are documented but automation/exporters are not implemented yet; these remain production release gates. |
@@ -62,3 +62,4 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 - [ADR-0006: idempotent ingestion and independent checkpoints](adr/0006-idempotent-ingestion-and-checkpoints.md)
 - [ADR-0007: managed data sources and change watermarks](adr/0007-managed-data-sources-and-change-watermarks.md)
 - [ADR-0008: open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
+- [ADR-0009: unified canonical search](adr/0009-unified-canonical-search.md)

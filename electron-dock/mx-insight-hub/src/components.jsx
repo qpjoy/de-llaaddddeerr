@@ -147,6 +147,102 @@ export function MetricCard({ icon: Icon, label, value, hint, tone = 'primary' })
   )
 }
 
+function paginationPages(page, totalPages) {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, index) => index + 1)
+  const candidates = [...new Set([1, page - 1, page, page + 1, totalPages])]
+    .filter((value) => value >= 1 && value <= totalPages)
+    .sort((left, right) => left - right)
+  const items = []
+  for (const value of candidates) {
+    const previous = items.at(-1)
+    if (typeof previous === 'number' && value - previous > 1) items.push(`ellipsis-${value}`)
+    items.push(value)
+  }
+  return items
+}
+
+export function Pagination({
+  page,
+  pageSize,
+  total = null,
+  totalPages = null,
+  maxDirectPage = null,
+  hasMore = false,
+  loading = false,
+  onPageChange,
+  className = '',
+  label = '分页',
+}) {
+  const currentPage = Math.max(1, Number(page) || 1)
+  const knownPages = Number.isSafeInteger(totalPages) && totalPages >= 1
+  const navigablePages = knownPages
+    ? Math.min(totalPages, Number.isSafeInteger(maxDirectPage) && maxDirectPage >= 1 ? maxDirectPage : totalPages)
+    : null
+  const directPageLimited = knownPages && navigablePages < totalPages
+  const [jumpDraft, setJumpDraft] = useState(String(currentPage))
+
+  useEffect(() => setJumpDraft(String(currentPage)), [currentPage])
+
+  const changePage = (nextPage) => {
+    if (loading || !onPageChange || !Number.isSafeInteger(nextPage) || nextPage < 1) return
+    if (knownPages && nextPage > navigablePages) return
+    if (nextPage !== currentPage) onPageChange(nextPage)
+  }
+
+  const submitJump = (event) => {
+    event.preventDefault()
+    const nextPage = Number(jumpDraft)
+    if (!Number.isSafeInteger(nextPage) || nextPage < 1 || (knownPages && nextPage > navigablePages)) {
+      setJumpDraft(String(currentPage))
+      return
+    }
+    changePage(nextPage)
+  }
+
+  return (
+    <footer className={`qp-pagination ${className}`.trim()} aria-label={label}>
+      <span className="qp-pagination__summary">
+        {total != null ? `共 ${formatNumber(total)} 条 · ` : ''}
+        每页 {formatNumber(pageSize)} 条 · 第 {formatNumber(currentPage)}
+        {knownPages ? ` / ${formatNumber(totalPages)} 页` : ' 页 · 总数未知'}
+        {directPageLimited ? ` · 可直达前 ${formatNumber(navigablePages)} 页` : ''}
+      </span>
+      <div className="qp-pagination__controls">
+        <button className="qp-button qp-button--ghost qp-button--sm" type="button"
+          disabled={loading || currentPage <= 1} onClick={() => changePage(currentPage - 1)}>
+          上一页
+        </button>
+        {knownPages ? (
+          <nav className="qp-pagination__pages" aria-label="页码">
+            {paginationPages(Math.min(currentPage, navigablePages), navigablePages).map((item) => typeof item === 'number' ? (
+              <button key={item} className={`qp-pagination__page${item === currentPage ? ' is-active' : ''}`}
+                type="button" aria-current={item === currentPage ? 'page' : undefined}
+                aria-label={`第 ${item} 页`} disabled={loading} onClick={() => changePage(item)}>
+                {item}
+              </button>
+            ) : <span key={item} className="qp-pagination__ellipsis" aria-hidden="true">…</span>)}
+          </nav>
+        ) : null}
+        <button className="qp-button qp-button--ghost qp-button--sm" type="button"
+          disabled={loading || !hasMore || (knownPages && currentPage >= navigablePages)}
+          onClick={() => changePage(currentPage + 1)}>
+          下一页
+        </button>
+        {knownPages ? (
+          <form className="qp-pagination__jump" onSubmit={submitJump}>
+            <span>跳至</span>
+            <input className="qp-input qp-input--sm" type="number" min="1" max={navigablePages}
+              value={jumpDraft} disabled={loading} aria-label="跳转页码"
+              onChange={(event) => setJumpDraft(event.target.value)} />
+            <span>页</span>
+            <button className="qp-button qp-button--outline qp-button--sm" type="submit" disabled={loading}>跳转</button>
+          </form>
+        ) : null}
+      </div>
+    </footer>
+  )
+}
+
 export function Field({ label, hint, children, className = '' }) {
   return (
     <label className={`qp-field ${className}`.trim()}>

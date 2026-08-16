@@ -790,6 +790,93 @@
   font-size: var(--qp-font-caption-1);
 }
 
+.qp-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--qp-space-3);
+  min-width: 0;
+  border-top: 1px solid var(--qp-line);
+  padding-top: var(--qp-space-3);
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.qp-pagination__summary {
+  flex: 1 1 auto;
+  min-width: 180px;
+}
+
+.qp-pagination__controls,
+.qp-pagination__pages,
+.qp-pagination__jump {
+  display: flex;
+  align-items: center;
+  gap: var(--qp-space-2);
+}
+
+.qp-pagination__controls {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.qp-pagination__pages {
+  gap: 4px;
+}
+
+.qp-pagination__page {
+  display: inline-grid;
+  place-items: center;
+  width: var(--qp-size-control-sm);
+  min-width: var(--qp-size-control-sm);
+  height: var(--qp-size-control-sm);
+  border: 1px solid transparent;
+  border-radius: var(--qp-radius-sm);
+  padding: 0;
+  background: transparent;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  font-weight: var(--qp-weight-semibold);
+  transition: background var(--qp-transition-fast), border-color var(--qp-transition-fast), color var(--qp-transition-fast);
+}
+
+.qp-pagination__page:hover:not(:disabled),
+.qp-pagination__page.is-active {
+  border-color: var(--qp-line-strong);
+  background: var(--qp-light-4);
+  color: var(--qp-text-1);
+}
+
+.qp-pagination__page.is-active {
+  border-color: color-mix(in srgb, var(--qp-primary) 62%, transparent);
+  background: color-mix(in srgb, var(--qp-primary) 12%, transparent);
+  color: var(--qp-primary);
+}
+
+.qp-pagination__page:disabled:not(.is-active) {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.qp-pagination__ellipsis {
+  display: inline-grid;
+  width: 18px;
+  place-items: center;
+  color: var(--qp-text-4);
+}
+
+.qp-pagination__jump {
+  margin-left: var(--qp-space-1);
+  white-space: nowrap;
+}
+
+.qp-pagination__jump .qp-input {
+  width: 64px;
+  text-align: center;
+}
+
 .qp-status {
   display: inline-flex;
   align-items: center;
@@ -1872,5 +1959,15 @@ svg.qp-icon--solid {
   .qp-anchor-grid__head,
   .qp-anchor-grid__side {
     display: none;
+  }
+
+  .qp-pagination {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .qp-pagination__controls {
+    justify-content: flex-start;
+    width: 100%;
   }
 }

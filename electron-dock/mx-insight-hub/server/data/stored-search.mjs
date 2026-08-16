@@ -49,6 +49,21 @@ function queryBinding(query) {
     .digest('base64url')
 }
 
+function canonicalQueryBinding(query) {
+  return createHash('sha256')
+    .update(JSON.stringify({
+      v: CURSOR_VERSION,
+      sort: SORT_VERSION,
+      query: query.query,
+      platform: query.platform,
+      platforms: query.platforms,
+      datasetId: query.datasetId,
+      objectType: query.objectType,
+      pageSize: query.pageSize,
+    }))
+    .digest('base64url')
+}
+
 function cursorSignature(payload, secret) {
   if (typeof secret !== 'string' || !secret) {
     throw new AppError(500, 'cursor_configuration_error', 'Stored search cursor signing is not configured')
@@ -160,6 +175,45 @@ export function normalizeStoredSearchQuery(input, maxPageSize = 100, cursorSecre
   }
 }
 
+export function normalizeCanonicalSearchQuery(input, {
+  platforms,
+  maxPageSize = 100,
+  cursorSecret,
+} = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new AppError(400, 'invalid_request', 'JSON object body is required')
+  }
+  const unsupported = Object.keys(input).filter((field) => !ALLOWED_FIELDS.has(field))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_fields', `Unsupported canonical search fields: ${unsupported.join(', ')}`)
+  }
+  const platformScope = [...new Set((platforms || []).map((value) => String(value).trim()).filter(Boolean))].sort()
+  if (platformScope.length === 0) {
+    throw new AppError(403, 'platform_not_granted', 'At least one platform grant is required')
+  }
+  const validPolicyMax = Number.isInteger(maxPageSize) && maxPageSize > 0 ? maxPageSize : 100
+  const platform = stringValue(input.platform, 'platform', 64)
+  if (platform && !platformScope.includes(platform)) {
+    throw new AppError(403, 'platform_not_granted', 'Platform is not granted')
+  }
+  const normalized = {
+    query: stringValue(input.query, 'query', 500, { required: true }),
+    platform,
+    platforms: platform ? [platform] : platformScope,
+    datasetId: stringValue(input.datasetId, 'datasetId', 200),
+    objectType: stringValue(input.objectType, 'objectType', 100),
+    pageSize: pageSizeValue(input.pageSize, Math.min(100, validPolicyMax)),
+  }
+  const cursorBinding = canonicalQueryBinding(normalized)
+  const cursorToken = stringValue(input.cursor, 'cursor', 8_192)
+  return {
+    ...normalized,
+    cursorBinding,
+    cursorToken,
+    cursor: decodeStoredSearchCursor(cursorToken, cursorBinding, cursorSecret),
+  }
+}
+
 function isoDate(value) {
   if (value == null) return null
   const date = new Date(value)
@@ -216,6 +270,55 @@ export function storedSearchResponse({ query, result, durationMs, cursorSecret }
         pageIndex: Math.floor(seen / query.pageSize) + 1,
         pageSize: query.pageSize,
         returnedCount: items.length,
+        hasMore,
+        nextCursor: hasMore
+          ? encodeStoredSearchCursor(
+              { ...result.nextCursor, seen: seen + items.length },
+              query.cursorBinding,
+              cursorSecret,
+            )
+          : null,
+        cursorType: hasMore ? 'opaque' : 'none',
+      },
+      searchMode: result.mode,
+      warnings: result.mode === 'postgres'
+        ? [{
+            code: 'search_projection_degraded',
+            message: 'Elasticsearch unavailable or disabled; PostgreSQL substring search was used.',
+          }]
+        : [],
+      durationMs,
+    },
+  }
+}
+
+export function canonicalSearchResponse({ query, result, durationMs, cursorSecret }) {
+  const items = (result.items || []).map(publicStoredSearchItem)
+  const seen = query.cursor?.seen ?? 0
+  const hasMore = Boolean(result.hasMore)
+  const totalCount = Number.isSafeInteger(result.total) && result.total >= 0 ? result.total : null
+  const totalRelation = totalCount == null
+    ? 'unknown'
+    : result.totalRelation === 'gte' ? 'gte' : 'eq'
+  return {
+    data: {
+      contractVersion: 'mx-insight-hub.canonical-search.v1',
+      source: 'hub',
+      query: query.query,
+      scope: { platforms: query.platforms },
+      filters: {
+        platform: query.platform,
+        datasetId: query.datasetId,
+        objectType: query.objectType,
+      },
+      items,
+      pageInfo: {
+        pageIndex: Math.floor(seen / query.pageSize) + 1,
+        pageSize: query.pageSize,
+        returnedCount: items.length,
+        totalCount,
+        totalRelation,
+        totalPages: totalRelation === 'eq' ? Math.ceil(totalCount / query.pageSize) : null,
         hasMore,
         nextCursor: hasMore
           ? encodeStoredSearchCursor(

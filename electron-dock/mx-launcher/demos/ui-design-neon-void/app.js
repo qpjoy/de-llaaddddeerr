@@ -6,6 +6,7 @@ const routeTitle = document.querySelector('#route-title');
 const routeKicker = document.querySelector('#route-kicker');
 const routeSections = Array.from(document.querySelectorAll('[data-route]'));
 const routeLinks = Array.from(document.querySelectorAll('[data-route-link]'));
+const paginationDemo = document.querySelector('[data-pagination-demo]');
 const basePath = '/demos/ui-design-neon-void';
 
 const routeMeta = {
@@ -160,6 +161,74 @@ for (const dropdown of dropdowns) {
       trigger?.focus();
     });
   }
+}
+
+function paginationItems(page, totalPages) {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, index) => index + 1);
+  const candidates = [...new Set([1, page - 1, page, page + 1, totalPages])]
+    .filter((value) => value >= 1 && value <= totalPages)
+    .sort((left, right) => left - right);
+  const items = [];
+  for (const value of candidates) {
+    const previous = items.at(-1);
+    if (typeof previous === 'number' && value - previous > 1) items.push(`ellipsis-${value}`);
+    items.push(value);
+  }
+  return items;
+}
+
+function renderPaginationDemo(page) {
+  if (!paginationDemo) return;
+  const total = Number(paginationDemo.dataset.total);
+  const pageSize = Number(paginationDemo.dataset.pageSize);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const requestedPage = Number.isSafeInteger(page) ? page : Number(paginationDemo.dataset.page) || 1;
+  const currentPage = Math.min(totalPages, Math.max(1, requestedPage));
+  paginationDemo.dataset.page = String(currentPage);
+  const summary = paginationDemo.querySelector('[data-pagination-summary]');
+  if (summary) summary.textContent = `${total.toLocaleString()} records · ${pageSize} per page · Page ${currentPage} / ${totalPages}`;
+  const pages = paginationDemo.querySelector('[data-pagination-pages]');
+  pages?.replaceChildren(...paginationItems(currentPage, totalPages).map((item) => {
+    if (typeof item !== 'number') {
+      const ellipsis = document.createElement('span');
+      ellipsis.className = 'qp-pagination__ellipsis';
+      ellipsis.textContent = '…';
+      ellipsis.setAttribute('aria-hidden', 'true');
+      return ellipsis;
+    }
+    const button = document.createElement('button');
+    button.className = `qp-pagination__page${item === currentPage ? ' is-active' : ''}`;
+    button.type = 'button';
+    button.textContent = String(item);
+    button.dataset.page = String(item);
+    button.setAttribute('aria-label', `Page ${item}`);
+    if (item === currentPage) button.setAttribute('aria-current', 'page');
+    return button;
+  }));
+  const previous = paginationDemo.querySelector('[data-pagination-previous]');
+  const next = paginationDemo.querySelector('[data-pagination-next]');
+  if (previous) previous.disabled = currentPage <= 1;
+  if (next) next.disabled = currentPage >= totalPages;
+  const input = paginationDemo.querySelector('[data-pagination-jump] input');
+  if (input) input.value = String(currentPage);
+}
+
+if (paginationDemo) {
+  paginationDemo.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const currentPage = Number(paginationDemo.dataset.page);
+    if (target.closest('[data-pagination-previous]')) renderPaginationDemo(currentPage - 1);
+    if (target.closest('[data-pagination-next]')) renderPaginationDemo(currentPage + 1);
+    const pageButton = target.closest('.qp-pagination__page[data-page]');
+    if (pageButton) renderPaginationDemo(Number(pageButton.dataset.page));
+  });
+  paginationDemo.querySelector('[data-pagination-jump]')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const input = paginationDemo.querySelector('[data-pagination-jump] input');
+    renderPaginationDemo(Number(input?.value));
+  });
+  renderPaginationDemo(Number(paginationDemo.dataset.page));
 }
 
 document.addEventListener('click', (event) => {

@@ -81,6 +81,16 @@ const storedSearchResponse = {
   },
 }
 
+const canonicalSearchResponse = {
+  description: 'Source-independent search across the caller\'s granted Hub canonical corpus.',
+  headers: searchResponse.headers,
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/CanonicalSearchEnvelope' },
+    },
+  },
+}
+
 export const PUBLIC_OPENAPI_DOCUMENT = {
   openapi: '3.1.0',
   info: {
@@ -185,6 +195,34 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
         },
         responses: { 200: storedSearchResponse, ...publicErrors },
+      },
+    },
+    '/data/canonical/search': {
+      post: {
+        tags: ['Search'],
+        operationId: 'searchCanonicalData',
+        summary: 'Search all authorized Hub canonical datasets in one ranked result set',
+        description: 'Searches the shared Hub canonical current-state projection once; it does not fan out to source APIs. Omitting platform searches all platforms currently granted to the consumer. platform, datasetId and objectType only narrow that authorized scope. The signed cursor is bound to the sorted platform-grant scope, query, filters and page size. The independent canonical-search usage bucket always uses the strictest limits across the consumer\'s complete current grant set. Elasticsearch is preferred and PostgreSQL is the explicit degradation path.',
+        parameters: [idempotencyParameter],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/CanonicalSearchRequest' },
+              examples: {
+                telegramAllSources: {
+                  summary: 'Telegram monitor and SQLite-import datasets together',
+                  value: { platform: 'telegram', query: 'AI Agent', objectType: 'message', pageSize: 20 },
+                },
+                allGrantedPlatforms: {
+                  summary: 'All platforms granted to this consumer',
+                  value: { query: 'AI Agent', pageSize: 20 },
+                },
+              },
+            },
+          },
+        },
+        responses: { 200: canonicalSearchResponse, ...publicErrors },
       },
     },
     '/tools/tokenize': {
@@ -421,6 +459,19 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed opaque nextCursor bound to the normalized query and filters.' },
         },
       },
+      CanonicalSearchRequest: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['query'],
+        properties: {
+          query: { type: 'string', minLength: 1, maxLength: 500 },
+          platform: { type: 'string', minLength: 1, maxLength: 64, description: 'Optional exact platform filter. It must already be granted; omit it to search every currently granted platform.' },
+          datasetId: { type: 'string', minLength: 1, maxLength: 200, description: 'Optional exact logical dataset filter; never a physical source selector or authorization grant.' },
+          objectType: { type: 'string', minLength: 1, maxLength: 100, description: 'Optional exact canonical object-type filter.' },
+          pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed opaque nextCursor bound to the query, filters, page size and authorized platform scope.' },
+        },
+      },
       TokenizeRequest: {
         type: 'object',
         additionalProperties: false,
@@ -520,6 +571,22 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           cursorType: { type: 'string', enum: ['opaque', 'none'] },
         },
       },
+      CanonicalSearchPageInfo: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['pageIndex', 'pageSize', 'returnedCount', 'totalCount', 'totalRelation', 'totalPages', 'hasMore', 'nextCursor', 'cursorType'],
+        properties: {
+          pageIndex: { type: 'integer', minimum: 1 },
+          pageSize: { type: 'integer', minimum: 1, maximum: 100 },
+          returnedCount: { type: 'integer', minimum: 0, maximum: 100 },
+          totalCount: { type: ['integer', 'null'], minimum: 0 },
+          totalRelation: { type: 'string', enum: ['eq', 'gte', 'unknown'] },
+          totalPages: { type: ['integer', 'null'], minimum: 0 },
+          hasMore: { type: 'boolean' },
+          nextCursor: { type: ['string', 'null'], maxLength: 8192 },
+          cursorType: { type: 'string', enum: ['opaque', 'none'] },
+        },
+      },
       StoredSearchEnvelope: {
         type: 'object',
         additionalProperties: false,
@@ -537,6 +604,43 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
               } },
               items: { type: 'array', items: { $ref: '#/components/schemas/StoredSearchItem' } },
               pageInfo: { $ref: '#/components/schemas/StoredSearchPageInfo' },
+              searchMode: { type: 'string', enum: ['elasticsearch', 'postgres'] },
+              warnings: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['code', 'message'], properties: {
+                code: { type: 'string' }, message: { type: 'string' },
+              } } },
+              durationMs: { type: 'integer', minimum: 0 },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      CanonicalSearchEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['contractVersion', 'source', 'query', 'scope', 'filters', 'items', 'pageInfo', 'searchMode', 'warnings', 'durationMs'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.canonical-search.v1' },
+              source: { type: 'string', const: 'hub' },
+              query: { type: 'string' },
+              scope: {
+                type: 'object', additionalProperties: false, required: ['platforms'],
+                properties: { platforms: { type: 'array', minItems: 1, items: { type: 'string' } } },
+              },
+              filters: {
+                type: 'object', additionalProperties: false, required: ['platform', 'datasetId', 'objectType'],
+                properties: {
+                  platform: { type: ['string', 'null'] },
+                  datasetId: { type: ['string', 'null'] },
+                  objectType: { type: ['string', 'null'] },
+                },
+              },
+              items: { type: 'array', items: { $ref: '#/components/schemas/StoredSearchItem' } },
+              pageInfo: { $ref: '#/components/schemas/CanonicalSearchPageInfo' },
               searchMode: { type: 'string', enum: ['elasticsearch', 'postgres'] },
               warnings: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['code', 'message'], properties: {
                 code: { type: 'string' }, message: { type: 'string' },
@@ -817,6 +921,13 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: stored-$(uuidgen)" \
   -d '{"platform":"xiaohongshu","query":"AI Agent","datasetId":"night-all.search.v1","objectType":"post","pageSize":20}' | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/canonical/search</code></div><p>来源无关的统一检索：在一份 canonical 全局索引中直接排序，不逐个调用来源后拼接。省略 <code>platform</code> 时搜索当前调用者已授权的全部平台；<code>datasetId</code> 与 <code>objectType</code> 只用于收窄。</p></div>
+    <div class="notice">统一接口只读取 Hub 已存数据，不触发第三方采集。响应的 <code>scope.platforms</code> 是本次实际授权范围；游标与该范围绑定，授权发生变化后应从第一页重新搜索。独立的 canonical-search 用量桶固定采用调用者当前全部平台授权中最严格的限额。</div>
+    <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/canonical/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: canonical-$(uuidgen)" \
+  -d '{"query":"AI Agent","pageSize":20}' | jq</code></pre>
 
     <h2 id="tools">通用工具</h2>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/tools/tokenize</code></div><p>新建或从未配置的调用者默认获得 <code>nlp.tokenize</code>，管理员可显式停用；调用仍必须携带已签发的 API Key。默认按 consumer + capability 的 3600 秒滚动窗口限制 1000 次，同一调用者的所有 Key 共享上限。它不授予数据平台权限，响应会报告实际分词后端及降级状态。</p></div>
@@ -838,7 +949,14 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
 
     <h2 id="telegram">Telegram 数据</h2>
     <div class="notice">授权 <code>telegram</code> 后，调用者读取的是同一份 Hub 全量规范化语料；当前没有按租户划分不同的 Telegram 行级数据子集。租户隔离作用于 API Key 所有权、平台授权、策略、配额和用量证据。</div>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/messages</code></div><p>消息历史；支持 <code>chatId</code>、<code>from</code>、<code>to</code>、<code>pageSize</code>、<code>cursor</code>。</p></div>
+    <table><thead><tr><th>调用目标</th><th>接口</th><th>实际数据范围</th></tr></thead><tbody>
+      <tr><td>Monitor 消息历史</td><td><code>GET /data/telegram/messages</code></td><td><code>telegram.monitor.messages.v1</code></td></tr>
+      <tr><td>Monitor 会话目录</td><td><code>GET /data/telegram/chats</code></td><td><code>telegram.monitor.chats.v1</code></td></tr>
+      <tr><td>Monitor 高级检索</td><td><code>POST /data/telegram/search</code></td><td>固定的 <code>telegram.monitor.*</code></td></tr>
+      <tr><td>Monitor + SQLite 统一检索</td><td><code>POST /data/canonical/search</code></td><td>授权范围内全部 Telegram canonical dataset</td></tr>
+      <tr><td>指定单个来源数据集</td><td><code>POST /data/stored/search</code></td><td>由 <code>datasetId</code> 精确收窄</td></tr>
+    </tbody></table>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/messages</code></div><p>Monitor 消息历史；支持 <code>chatId</code>、<code>from</code>、<code>to</code>、<code>pageSize</code>、<code>cursor</code>。该兼容接口不会隐式混入 SQLite。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/chats</code></div><p>会话目录，使用相同的时间和游标规则。</p></div>
     <pre><code>curl -sS "$HUB_URL/api/v1/data/telegram/messages?chatId=-1001234567890&amp;pageSize=20" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
@@ -848,6 +966,12 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: telegram-$(uuidgen)" \\
   -d '{"query":"AI Agent","scope":"all","from":"2026-08-01T00:00:00Z","pageSize":20}' | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/canonical/search</code></div><p>同时检索 Telegram monitor 与 SQLite 导入数据。省略 <code>datasetId</code> 是合并的关键；如果只要消息，可用 <code>objectType=message</code> 收窄。</p></div>
+    <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/canonical/search" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: telegram-all-sources-$(uuidgen)" \\
+  -d '{"platform":"telegram","objectType":"message","query":"AI Agent","pageSize":20}' | jq</code></pre>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/entities/search?query=example&amp;pageSize=20</code></div><p>模糊匹配作者名称/用户名和会话标题/用户名。</p></div>
     <div class="notice">如果搜索响应的 <code>warnings</code> 包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底；响应仍然有效。已有 Elasticsearch 游标不会在中途静默切换模式。</div>
 

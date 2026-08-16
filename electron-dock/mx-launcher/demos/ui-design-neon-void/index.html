@@ -304,6 +304,27 @@
                 <button class="qp-segmented__item is-active" type="button">Female</button>
               </div>
             </section>
+            <section class="qp-panel demo-control-panel">
+              <div>
+                <h3 class="qp-heading-2">Pagination</h3>
+                <p class="qp-caption">Exact totals, page neighbourhood, direct jump, and disabled boundary states.</p>
+              </div>
+              <footer class="qp-pagination" aria-label="Records pagination" data-pagination-demo
+                data-page="3" data-page-size="50" data-total="2460">
+                <span class="qp-pagination__summary" data-pagination-summary>2,460 records · 50 per page · Page 3 / 50</span>
+                <div class="qp-pagination__controls">
+                  <button class="qp-button qp-button--ghost qp-button--sm" type="button" data-pagination-previous>Previous</button>
+                  <nav class="qp-pagination__pages" aria-label="Pages" data-pagination-pages></nav>
+                  <button class="qp-button qp-button--ghost qp-button--sm" type="button" data-pagination-next>Next</button>
+                  <form class="qp-pagination__jump" data-pagination-jump>
+                    <span>Go to</span>
+                    <input class="qp-input qp-input--sm" type="number" min="1" max="50" value="3" aria-label="Page number" />
+                    <span>page</span>
+                    <button class="qp-button qp-button--outline qp-button--sm" type="submit">Go</button>
+                  </form>
+                </div>
+              </footer>
+            </section>
           </div>
         </section>
 

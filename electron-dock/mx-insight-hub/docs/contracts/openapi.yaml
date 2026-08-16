@@ -951,11 +951,15 @@ paths:
       operationId: browseDataCenterRecords
       summary: Browse or search full canonical records for Admin evidence review.
       description: >-
-        Break-glass Admin Token only. Empty q uses PostgreSQL keyset pagination;
-        q uses Elasticsearch ranking and highlight with the existing PostgreSQL
-        fallback. The Admin response is intentionally not redacted and may include
-        the current revision payload, extensions and lineage. Host paths and saved
-        connection credentials are never included.
+        Break-glass Admin Token only. The response pageInfo includes the 1-based
+        page, pageSize, exact total, totalPages, hasMore and nextCursor. Empty q
+        supports direct PostgreSQL pages and the legacy keyset cursor. q uses
+        Elasticsearch ranking/highlight with the existing PostgreSQL fallback;
+        direct page jumps are limited to the first 10,000 ranked hits and report
+        maxDirectPage, while cursor traversal remains available for deeper reads.
+        page and cursor are mutually exclusive. The Admin response is intentionally
+        not redacted and may include the current revision payload, extensions and
+        lineage. Host paths and saved connection credentials are never included.
       security:
         - adminToken: []
       parameters:
@@ -974,9 +978,14 @@ paths:
         - name: pageSize
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: page
+          in: query
+          description: Optional 1-based direct page; mutually exclusive with cursor.
+          schema: { type: integer, minimum: 1 }
         - name: cursor
           in: query
-          schema: { type: string, minLength: 1 }
+          description: Optional opaque keyset/search cursor; mutually exclusive with page.
+          schema: { type: string, minLength: 1, maxLength: 16384 }
       responses:
         "200": { $ref: "#/components/responses/AdminData" }
         "400": { $ref: "#/components/responses/Error" }
@@ -1173,6 +1182,67 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StoredSearchEnvelope"
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/canonical/search:
+    post:
+      operationId: searchCanonicalData
+      summary: Search all authorized Hub canonical datasets in one ranked result set.
+      description: >-
+        Runs one query against the Hub canonical current-state projection and
+        never fans out to source APIs. Omitting platform searches the current
+        consumer's complete granted-platform scope; platform, datasetId and
+        objectType only narrow that scope. The server always applies the sorted
+        grant set as an authorization filter. Elasticsearch uses one PIT and a
+        score/event-time/id ordering; PostgreSQL is the explicit degradation
+        path. The signed cursor is bound to the query, filters, page size and
+        platform scope. Its independent usage bucket always applies the
+        strictest limits across the consumer's complete current platform-grant
+        set. Public items use an allowlist and exclude raw payloads, extensions,
+        credentials and provider coordinates.
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, invalid_platform, page_size_exceeded, unsupported_fields, idempotency_key_required, invalid_idempotency_key]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
+        "410": [search_cursor_expired]
+        "429": [quota_exceeded]
+        "503": [canonical_search_unavailable, search_cursor_unavailable]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CanonicalSearchRequest"
+            examples:
+              telegramAllSources:
+                summary: Telegram monitor and SQLite-import messages together
+                value: { platform: telegram, objectType: message, query: "AI Agent", pageSize: 20 }
+              allGrantedPlatforms:
+                summary: All platforms currently granted to the consumer
+                value: { query: "AI Agent", pageSize: 20 }
+      responses:
+        "200":
+          description: Source-independent Hub canonical search response.
+          headers:
+            x-mx-insight-request-id:
+              schema: { type: string, format: uuid }
+            idempotent-replay:
+              schema: { type: string, enum: ["true", "false"] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanonicalSearchEnvelope"
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
@@ -2443,6 +2513,17 @@ components:
         objectType: { type: string, minLength: 1, maxLength: 100, description: Optional exact canonical object-type filter. }
         pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
         cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to query, platform, datasetId, objectType and page size. }
+    CanonicalSearchRequest:
+      type: object
+      additionalProperties: false
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 500 }
+        platform: { type: string, minLength: 1, maxLength: 64, description: Optional exact platform filter; it must be granted. Omit it to search every currently granted platform. }
+        datasetId: { type: string, minLength: 1, maxLength: 200, description: Optional exact logical dataset filter; never a physical source selector or authorization grant. }
+        objectType: { type: string, minLength: 1, maxLength: 100, description: Optional exact canonical object-type filter. }
+        pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to query, filters, page size and sorted authorized platform scope. }
     StoredSearchEnvelope:
       type: object
       additionalProperties: false
@@ -2503,6 +2584,60 @@ components:
         collectedAt: { type: [string, "null"], format: date-time }
         score: { type: [number, "null"] }
         source: { type: string, const: hub }
+    CanonicalSearchPageInfo:
+      type: object
+      additionalProperties: false
+      required: [pageIndex, pageSize, returnedCount, totalCount, totalRelation, totalPages, hasMore, nextCursor, cursorType]
+      properties:
+        pageIndex: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1, maximum: 100 }
+        returnedCount: { type: integer, minimum: 0, maximum: 100 }
+        totalCount: { type: [integer, "null"], minimum: 0 }
+        totalRelation: { type: string, enum: [eq, gte, unknown] }
+        totalPages: { type: [integer, "null"], minimum: 0 }
+        hasMore: { type: boolean }
+        nextCursor: { type: [string, "null"], maxLength: 8192 }
+        cursorType: { type: string, enum: [opaque, none] }
+    CanonicalSearchEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, source, query, scope, filters, items, pageInfo, searchMode, warnings, durationMs]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.canonical-search.v1 }
+            source: { type: string, const: hub }
+            query: { type: string }
+            scope:
+              type: object
+              additionalProperties: false
+              required: [platforms]
+              properties:
+                platforms:
+                  type: array
+                  minItems: 1
+                  items: { type: string }
+            filters:
+              type: object
+              additionalProperties: false
+              required: [platform, datasetId, objectType]
+              properties:
+                platform: { type: [string, "null"] }
+                datasetId: { type: [string, "null"] }
+                objectType: { type: [string, "null"] }
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/StoredSearchItem" }
+            pageInfo: { $ref: "#/components/schemas/CanonicalSearchPageInfo" }
+            searchMode: { type: string, enum: [elasticsearch, postgres] }
+            warnings:
+              type: array
+              items: { $ref: "#/components/schemas/NightAllDataSearchWarning" }
+            durationMs: { type: integer, minimum: 0 }
+        requestId: { type: string, format: uuid }
     TokenizeRequest:
       type: object
       additionalProperties: false

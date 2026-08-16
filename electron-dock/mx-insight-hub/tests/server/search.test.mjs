@@ -3,11 +3,19 @@ import test from 'node:test'
 import { fallbackSegment } from '@qpjoy/mx-common/segmenter'
 import { ElasticsearchError, ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
 import { contentIndex, chunkIndex } from '../../server/search/index-definitions.mjs'
-import { ensureCurrentChunkIndex, ensureCurrentContentIndex } from '../../server/search/index.mjs'
+import {
+  ensureCurrentChunkIndex,
+  ensureCurrentContentIndex,
+  ensureSearchIndices,
+} from '../../server/search/index.mjs'
 import { buildContentDocument } from '../../server/search/document.mjs'
 import { authorNameQuery, SearchQueries } from '../../server/search/queries.mjs'
 import { SearchProjector } from '../../server/search/projector.mjs'
 import { purgeStaleCurrentStateCopies } from '../../server/search/current-state.mjs'
+import {
+  requiredReindexBackend,
+  requireSegmenterBackend,
+} from '../../server/search/reindex-integrity.mjs'
 
 const segmenter = { segment: async (text) => fallbackSegment(text) }
 
@@ -93,6 +101,108 @@ test('fallback segmentation keeps latin hashtags and handles as single tokens', 
   assert.ok(tokens.includes('@user'))
 })
 
+test('strict reindex derives its required backend from the deployed process config', () => {
+  assert.equal(requiredReindexBackend({ hanlpUrl: 'http://hanlp:8000' }), 'hanlp')
+  assert.equal(requiredReindexBackend({}), 'jieba')
+  assert.equal(
+    requiredReindexBackend({ backend: 'jieba', hanlpUrl: 'http://hanlp:8000' }),
+    'jieba',
+    'an explicit backend overrides HanLP auto-discovery',
+  )
+  assert.equal(requiredReindexBackend({ backend: 'fallback', hanlpUrl: 'http://hanlp:8000' }), 'bigram')
+  assert.throws(
+    () => requiredReindexBackend({ backend: 'hanlp', hanlpUrl: null }),
+    /requires MX_COMMON_HANLP_URL/,
+  )
+})
+
+test('strict reindex segmentation retries transient HanLP degradation but never returns fallback tokens', async () => {
+  const responses = [
+    { tokens: ['jieba:first'], backendUsed: 'jieba', degraded: true, errorCode: 'hanlp_http_error' },
+    { tokens: ['jieba:second'], backendUsed: 'jieba', degraded: true, errorCode: 'hanlp_timeout' },
+    { tokens: ['人工智能'], backendUsed: 'hanlp', degraded: false, errorCode: null },
+  ]
+  const sleeps = []
+  const strict = requireSegmenterBackend({
+    async segmentWithMeta() { return responses.shift() },
+  }, {
+    expectedBackend: 'hanlp',
+    retryDelayMs: 5,
+    sleep: async (milliseconds) => sleeps.push(milliseconds),
+    logger: { warn() {} },
+  })
+
+  assert.deepEqual(await strict.segment('人工智能'), ['人工智能'])
+  assert.deepEqual(sleeps, [5, 10], 'retry delay is bounded and exponential')
+})
+
+test('strict reindex accepts tokenless punctuation without invoking a fallback backend', async () => {
+  let calls = 0
+  const strict = requireSegmenterBackend({
+    async segmentWithMeta() {
+      calls += 1
+      return { tokens: [], backendUsed: 'bigram', degraded: true, errorCode: 'hanlp_empty_response' }
+    },
+  }, { expectedBackend: 'hanlp', logger: { warn() {} } })
+
+  assert.deepEqual(await strict.segment('…… 🎉'), [])
+  assert.equal(calls, 0)
+})
+
+test('strict HanLP reindex fails closed after bounded fallback attempts', async () => {
+  let attempts = 0
+  const strict = requireSegmenterBackend({
+    async segmentWithMeta() {
+      attempts += 1
+      return { tokens: ['jieba'], backendUsed: 'jieba', degraded: true, errorCode: 'hanlp_http_error' }
+    },
+  }, {
+    expectedBackend: 'hanlp',
+    retryDelayMs: 0,
+    sleep: async () => {},
+    logger: { warn() {} },
+  })
+
+  await assert.rejects(
+    () => strict.segment('人工智能'),
+    (error) => error?.code === 'reindex_segmenter_degraded'
+      && error.expectedBackend === 'hanlp'
+      && error.actualBackend === 'jieba',
+  )
+  assert.equal(attempts, 3)
+})
+
+test('strict reindex projection rejects a degraded document before its bulk write', async () => {
+  const indexSet = contentIndex()
+  const harness = currentIndexHarness(indexSet, {
+    [indexSet.currentIndex]: {
+      [indexSet.readAlias]: {},
+      [indexSet.writeAlias]: { is_write_index: true },
+    },
+  })
+  harness.client.clusterHealth = async () => ({ status: 'yellow' })
+  const strict = requireSegmenterBackend({
+    async segmentWithMeta() {
+      return { tokens: ['jieba'], backendUsed: 'jieba', degraded: true, errorCode: 'hanlp_http_error' }
+    },
+  }, {
+    expectedBackend: 'hanlp',
+    maxAttempts: 1,
+    sleep: async () => {},
+    logger: { warn() {} },
+  })
+  const report = await ensureSearchIndices({
+    client: harness.client,
+    pool: currentSnapshotPool('FROM core.canonical_records', [canonicalRow()]).pool,
+    segmenter: strict,
+    indexSet,
+    chunkIndexSet: null,
+  }, { logger: { log() {}, error() {}, warn() {} } })
+
+  assert.match(report.error, /reindex requires hanlp tokens but received jieba/)
+  assert.equal(harness.calls.bulks.length, 0, 'fallback tokens never reach Elasticsearch')
+})
+
 test('content search uses PIT search_after beyond the 10k window and ignores total relation gte', async () => {
   const calls = []
   const hits = [
@@ -124,9 +234,11 @@ test('content search uses PIT search_after beyond the 10k window and ignores tot
   assert.deepEqual(search.body.query.bool.should[0].multi_match.fields, [
     'title^3', 'body', 'chatUsername^2',
   ])
+  assert.equal(search.body.query.bool.should[0].multi_match.type, 'phrase')
   assert.deepEqual(search.body.query.bool.should[1].multi_match.fields, [
     'titleHanlp^3', 'bodyHanlp', 'chatUsernameHanlp^2',
   ])
+  assert.equal(search.body.query.bool.should[1].multi_match.operator, 'and')
   assert.deepEqual(search.body.highlight.fields.chatUsername, {})
   assert.deepEqual(search.body.highlight.fields.chatUsernameHanlp, {})
   assert.ok(search.body._source.excludes.includes('chatUsernameHanlp'))
@@ -138,6 +250,133 @@ test('content search uses PIT search_after beyond the 10k window and ignores tot
     pitId: 'pit-renewed',
     searchAfter: hits[1].sort,
   })
+})
+
+test('offset content search asks Elasticsearch for an exact total and closes its one-page PIT', async () => {
+  const calls = []
+  const hits = [
+    searchHit('33333333-3333-4333-8333-333333333333', 9.5, '2026-08-03T00:00:00.000Z', 3),
+    searchHit('22222222-2222-4222-8222-222222222222', 8.5, '2026-08-02T00:00:00.000Z', 2),
+    searchHit('11111111-1111-4111-8111-111111111111', 7.5, '2026-08-01T00:00:00.000Z', 1),
+  ]
+  const client = {
+    async request(method, path, body) {
+      calls.push({ method, path, body })
+      if (path.includes('/_pit?')) return { id: 'pit-offset' }
+      if (path === '/_search') {
+        return { pit_id: 'pit-offset-renewed', hits: { total: { value: 237, relation: 'eq' }, hits } }
+      }
+      if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
+      throw new Error(`unexpected ${method} ${path}`)
+    },
+  }
+
+  const result = await contentSearch({ client }).searchContent('人工智能', {
+    size: 2,
+    offset: 40,
+    trackTotalHits: true,
+  })
+  const search = calls.find((entry) => entry.path === '/_search')
+  assert.equal(search.body.from, 40)
+  assert.equal(search.body.size, 2, 'offset pages must not request limit + 1 past max_result_window')
+  assert.equal(search.body.track_total_hits, true)
+  assert.equal(Object.hasOwn(search.body, 'search_after'), false)
+  assert.equal(result.total, 237)
+  assert.equal(result.totalRelation, 'eq')
+  assert.equal(result.hasMore, true)
+  assert.equal(result.items.length, 2)
+  assert.equal(result.nextCursor, null, 'offset pages never expose a cursor tied to a closed PIT')
+  assert.deepEqual(
+    calls.find((entry) => entry.method === 'DELETE' && entry.path === '/_pit')?.body,
+    { id: 'pit-offset-renewed' },
+  )
+})
+
+test('offset search stays inside the Elasticsearch 10k result-window boundary', async () => {
+  const calls = []
+  const hits = Array.from({ length: 50 }, (_, index) => (
+    searchHit(`record-${index}`, 100 - index, `2026-08-${String(28 - (index % 20)).padStart(2, '0')}T00:00:00.000Z`, index)
+  ))
+  const client = {
+    async request(method, path, body) {
+      calls.push({ method, path, body })
+      if (path.includes('/_pit?')) return { id: 'pit-window-boundary' }
+      if (path === '/_search') {
+        return {
+          pit_id: 'pit-window-boundary-renewed',
+          hits: { total: { value: 10_001, relation: 'eq' }, hits },
+        }
+      }
+      if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
+      throw new Error(`unexpected ${method} ${path}`)
+    },
+  }
+
+  const result = await contentSearch({ client }).searchContent('边界', { size: 50, offset: 9_950 })
+  const search = calls.find((entry) => entry.path === '/_search')
+  assert.equal(search.body.from, 9_950)
+  assert.equal(search.body.size, 50)
+  assert.equal(search.body.from + search.body.size, 10_000)
+  assert.equal(search.body.track_total_hits, true, 'offset mode always needs an exact total')
+  assert.equal(result.items.length, 50)
+  assert.equal(result.hasMore, true, 'exact total, not an extra hit, proves another result exists')
+})
+
+test('explicit relaxed relevance remains available while strict relevance is the default', async () => {
+  const searches = []
+  const client = {
+    async request(method, path, body) {
+      if (path.includes('/_pit?')) return { id: `pit-${searches.length}` }
+      if (path === '/_search') {
+        searches.push(body)
+        return { hits: { total: { value: 0, relation: 'eq' }, hits: [] } }
+      }
+      if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
+      throw new Error(`unexpected ${method} ${path}`)
+    },
+  }
+  const queries = contentSearch({ client })
+  await queries.searchContent('人工智能')
+  await queries.searchContent('人工智能', { strictRelevance: false })
+
+  assert.equal(searches[0].query.bool.should[0].multi_match.type, 'phrase')
+  assert.equal(searches[0].query.bool.should[1].multi_match.operator, 'and')
+  assert.equal(searches[1].query.bool.should[0].multi_match.type, 'best_fields')
+  assert.equal(searches[1].query.bool.should[1].multi_match.operator, undefined)
+})
+
+test('canonical content search applies the granted-platform intersection, strict terms and exact totals', async () => {
+  const calls = []
+  const client = {
+    async request(method, path, body) {
+      calls.push({ method, path, body })
+      if (path.includes('/_pit?')) return { id: 'canonical-pit' }
+      if (path === '/_search') {
+        return { pit_id: 'canonical-pit-2', hits: { total: { value: 23, relation: 'eq' }, hits: [] } }
+      }
+      if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
+      throw new Error(`unexpected ${method} ${path}`)
+    },
+  }
+
+  const result = await contentSearch({ client }).searchContent('人工 智能', {
+    platforms: ['telegram', 'xiaohongshu'],
+    datasetId: 'telegram.sqlite.messages.v1',
+    objectType: 'message',
+    strictRelevance: true,
+    trackTotalHits: true,
+  })
+  const search = calls.find((entry) => entry.path === '/_search')
+  assert.equal(search.body.track_total_hits, true)
+  assert.equal(search.body.query.bool.should[0].multi_match.type, 'phrase')
+  assert.equal(search.body.query.bool.should[1].multi_match.operator, 'and')
+  assert.deepEqual(search.body.query.bool.filter, [
+    { terms: { platform: ['telegram', 'xiaohongshu'] } },
+    { term: { datasetId: 'telegram.sqlite.messages.v1' } },
+    { term: { objectType: 'message' } },
+  ])
+  assert.equal(result.total, 23)
+  assert.equal(result.totalRelation, 'eq')
 })
 
 test('PIT pagination excludes records inserted between pages without duplicating or losing snapshot rows', async () => {
@@ -227,6 +466,119 @@ test('PostgreSQL content fallback uses the same stable null-aware keyset and nev
   assert.equal(captured.values[10], null)
   assert.equal(result.hasMore, true)
   assert.deepEqual(result.nextCursor.searchAfter, [null, rows[0].id])
+})
+
+test('PostgreSQL offset search returns an exact total without exposing a keyset cursor', async () => {
+  let captured
+  const rows = [
+    {
+      id: '22222222-2222-4222-8222-222222222222', dataset_id: 'telegram.sqlite.messages.v1',
+      platform: 'telegram', object_type: 'message', external_id: '-1007:2', event_time: null,
+      collected_at: null, stable_fields: {}, total_count: '57',
+    },
+    {
+      id: '11111111-1111-4111-8111-111111111111', dataset_id: 'telegram.sqlite.messages.v1',
+      platform: 'telegram', object_type: 'message', external_id: '-1007:1', event_time: null,
+      collected_at: null, stable_fields: {}, total_count: '57',
+    },
+  ]
+  const pool = {
+    async query(sql, values) {
+      captured = { sql, values }
+      return { rows }
+    },
+  }
+
+  const result = await contentSearch({ pool }).searchContent('人工智能', {
+    platform: 'telegram',
+    size: 1,
+    offset: 25,
+    trackTotalHits: true,
+  })
+  assert.match(captured.sql, /count\(\*\) OVER \(\) AS total_count/)
+  assert.match(captured.sql, /OFFSET \$14/)
+  assert.equal(captured.values[12], 1, 'offset pages fetch exactly the requested page size')
+  assert.equal(captured.values[13], 25)
+  assert.equal(result.total, 57)
+  assert.equal(result.totalRelation, 'eq')
+  assert.equal(result.hasMore, true)
+  assert.equal(result.nextCursor, null)
+  assert.equal(result.items.length, 1)
+})
+
+test('PostgreSQL offset search keeps the exact total when the requested page is empty', async () => {
+  const calls = []
+  const pool = {
+    async query(sql, values) {
+      calls.push({ sql, values })
+      if (/SELECT count\(\*\)::bigint AS total_count/.test(sql)) {
+        return { rows: [{ total_count: '57' }] }
+      }
+      return { rows: [] }
+    },
+  }
+
+  const result = await contentSearch({ pool }).searchContent('人工智能', {
+    platform: 'telegram',
+    size: 20,
+    offset: 80,
+    trackTotalHits: true,
+  })
+  assert.equal(calls.length, 2, 'only an empty page needs the exact-count fallback query')
+  assert.equal(result.total, 57)
+  assert.equal(result.totalRelation, 'eq')
+  assert.equal(result.hasMore, false)
+  assert.deepEqual(result.items, [])
+})
+
+test('content search rejects mixing offset and cursor pagination', async () => {
+  await assert.rejects(
+    () => contentSearch().searchContent('人工智能', {
+      offset: 20,
+      cursor: {
+        mode: 'postgres', pitId: null,
+        searchAfter: [null, '33333333-3333-4333-8333-333333333333'],
+      },
+    }),
+    (error) => error?.code === 'incompatible_search_pagination' && error?.status === 400,
+  )
+})
+
+test('PostgreSQL canonical fallback counts the full filtered set before applying its cursor', async () => {
+  let captured
+  const pool = {
+    async query(sql, values) {
+      captured = { sql, values }
+      return {
+        rows: [{
+          id: '11111111-1111-4111-8111-111111111111',
+          dataset_id: 'telegram.sqlite.messages.v1',
+          platform: 'telegram',
+          object_type: 'message',
+          external_id: '-1007:1',
+          event_time: new Date('2026-08-10T00:00:00.000Z'),
+          collected_at: new Date('2026-08-10T00:01:00.000Z'),
+          stable_fields: {},
+          total_count: '7',
+        }],
+      }
+    },
+  }
+  const result = await contentSearch({ pool }).searchContent('agent', {
+    platforms: ['telegram', 'xiaohongshu'],
+    datasetId: 'telegram.sqlite.messages.v1',
+    size: 20,
+    trackTotalHits: true,
+    cursor: {
+      mode: 'postgres', pitId: null,
+      searchAfter: ['2026-08-11T00:00:00.000Z', '22222222-2222-4222-8222-222222222222'],
+    },
+  })
+  assert.match(captured.sql, /count\(\*\) OVER \(\) AS total_count/)
+  assert.match(captured.sql, /\$12::text\[\] IS NULL OR platform = ANY\(\$12::text\[\]\)/)
+  assert.deepEqual(captured.values[11], ['telegram', 'xiaohongshu'])
+  assert.equal(result.total, 7)
+  assert.equal(result.totalRelation, 'eq')
 })
 
 test('an existing Elasticsearch cursor never silently degrades to PostgreSQL', async () => {
@@ -491,7 +843,7 @@ test('chunk current index rebuild reuses stored vectors and removes the legacy r
   const [action, document] = harness.calls.bulks[0]
   assert.equal(action.index._index, 'mx-insight-hub-chunk-v1-current')
   assert.equal(action.index._id, `${row.record_id}:0:v1`)
-  assert.equal(action.index.version_type, 'external')
+  assert.equal(action.index.version_type, 'external_gte')
   assert.deepEqual(document.embedding, row.vector, 'rebuild reads PostgreSQL vectors without invoking a model')
   assert.equal(document.sourceRevision, 7)
   assert.deepEqual(harness.calls.bulks[1], [{
@@ -506,6 +858,74 @@ test('chunk current index rebuild reuses stored vectors and removes the legacy r
   assert.doesNotMatch(deletionQuery.sql, /projected_at IS NULL/, 'acknowledged tombstones also rebuild current truth')
   assert.deepEqual(Object.keys(harness.aliasResponse(indexSet.readAlias)), [indexSet.currentIndex])
   assert.ok(harness.calls.aliasActions[0].some(({ remove }) => remove?.index === old && remove.alias === indexSet.readAlias))
+})
+
+test('same-revision chunk reindex replaces fallback contentHanlp with verified tokens', async () => {
+  const indexSet = chunkIndex({ dimensions: 3 })
+  const harness = currentIndexHarness(indexSet, {
+    [indexSet.currentIndex]: {
+      [indexSet.readAlias]: {},
+      [indexSet.writeAlias]: { is_write_index: true },
+    },
+  })
+  const row = {
+    id: '33333333-3333-4333-8333-333333333333',
+    record_id: canonicalRow().id,
+    chunk_index: 0,
+    content: '人工智能',
+    chunker_version: 'v1',
+    source_revision: 7,
+    embedding_model: 'local:model',
+    embedding_version: 1,
+    vector: [0.1, 0.2, 0.3],
+    created_at: new Date('2026-08-09T00:00:00.000Z'),
+    dataset_id: 'night-all.search.v1',
+    platform: 'telegram',
+    external_id: '42',
+    url: null,
+    title: 'title',
+    event_time: new Date('2026-08-09T00:00:00.000Z'),
+  }
+  const indexed = new Map()
+  harness.client.bulk = async (operations) => {
+    const items = []
+    for (let index = 0; index < operations.length; index += 1) {
+      const action = operations[index]
+      if (!action.index) continue
+      const document = operations[index + 1]
+      const previous = indexed.get(action.index._id)
+      const sameVersionAccepted = action.index.version_type === 'external_gte'
+      const accepted = !previous
+        || action.index.version > previous.version
+        || (action.index.version === previous.version && sameVersionAccepted)
+      if (accepted) {
+        indexed.set(action.index._id, { version: action.index.version, document })
+        items.push({ index: { status: 200 } })
+      } else {
+        items.push({ index: { status: 409, error: { type: 'version_conflict_engine_exception' } } })
+      }
+      index += 1
+    }
+    return { errors: items.some((item) => item.index.error), items }
+  }
+
+  const rebuild = (tokens) => ensureCurrentChunkIndex({
+    client: harness.client,
+    pool: currentSnapshotPool('FROM core.record_chunks', [row]).pool,
+    segmenter: { segment: async () => tokens },
+    indexSet,
+    logger: { info() {}, warn() {} },
+  })
+  const documentId = `${row.record_id}:0:v1`
+
+  await rebuild(['fallback-token'])
+  assert.equal(indexed.get(documentId).document.contentHanlp, 'fallback-token')
+  await rebuild(['人工智能'])
+  assert.equal(
+    indexed.get(documentId).document.contentHanlp,
+    '人工智能',
+    'external_gte accepts the same source revision so re-segmentation is not a no-op',
+  )
 })
 
 test('an active current index is reconciled after a crash between alias switch and second pass', async () => {
@@ -794,6 +1214,14 @@ test('author query confines substring wildcard matching to its native field and 
   assert.equal(exact.term['authorName.keyword'].boost, 10)
   assert.ok(serialized.includes('authorNameHanlp'), 'segmented matching uses the dedicated HanLP field')
   assert.ok(serialized.includes('authorHandle.bigram'), 'handles support a Chinese mid-string match')
+  assert.equal(
+    query.bool.should.find((clause) => clause.match?.authorNameHanlp).match.authorNameHanlp.operator,
+    'and',
+  )
+  assert.equal(
+    query.bool.should.find((clause) => clause.match?.['authorName.bigram']).match['authorName.bigram'].operator,
+    'and',
+  )
   const substring = query.bool.should.find((clause) => clause.wildcard?.authorHandleSubstring)
   assert.equal(substring.wildcard.authorHandleSubstring.value, '*admin*')
   assert.equal(substring.wildcard.authorHandleSubstring.case_insensitive, true)
@@ -817,6 +1245,32 @@ test('Telegram chat lookup uses raw exact/prefix fields and the dedicated userna
   assert.ok(serialized.includes('usernameHanlp'))
   assert.ok(serialized.includes('usernameSubstring'))
   assert.ok(!serialized.includes('"fuzzy"'))
+  assert.equal(
+    body.query.bool.should.find((clause) => clause.match?.usernameHanlp).match.usernameHanlp.operator,
+    'and',
+  )
+  assert.ok(body.query.bool.should.some((clause) => clause.match_phrase?.title))
+})
+
+test('chunk lexical retrieval requires every segmented term instead of matching one CJK character', async () => {
+  let body = null
+  const queries = new SearchQueries({
+    pool: { query: async () => ({ rows: [] }) },
+    client: {
+      async search(_index, request) {
+        body = request
+        return { hits: { hits: [] } }
+      },
+    },
+    segmenter,
+    indexSet: { readAlias: 'content' },
+    chunkIndexSet: { readAlias: 'chunks' },
+    logger: null,
+  })
+
+  await queries.semanticSearch('人工智能')
+  assert.equal(body.query.bool.should[0].match.content.operator, 'and')
+  assert.equal(body.query.bool.should[1].match.contentHanlp.operator, 'and')
 })
 
 // ---------------------------------------------------------------------------

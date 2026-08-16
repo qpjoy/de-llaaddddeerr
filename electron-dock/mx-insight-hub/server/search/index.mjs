@@ -413,7 +413,10 @@ async function reconcileChunkSnapshot({ connection, client, segmenter, index }) 
           _index: index,
           _id: `${row.record_id}:${row.chunk_index}:${row.chunker_version}`,
           version: Number(row.source_revision),
-          version_type: 'external',
+          // Re-segmentation changes contentHanlp without changing the source
+          // revision. Equal-version snapshots must therefore replace the old
+          // token projection instead of being rejected as a version conflict.
+          version_type: 'external_gte',
         },
       })
       operations.push(buildChunkDocument(row, {
