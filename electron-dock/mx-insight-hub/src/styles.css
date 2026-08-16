@@ -619,6 +619,190 @@ select {
   gap: 10px;
 }
 
+.mih-search-reindex {
+  display: grid;
+  gap: 12px;
+}
+
+.mih-search-reindex__facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  background: var(--qp-line);
+}
+
+.mih-search-reindex__facts > div {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  background: var(--qp-bg-3);
+}
+
+.mih-search-reindex__facts dt {
+  color: var(--qp-text-4);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-search-reindex__facts dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--qp-text-1);
+  overflow-wrap: anywhere;
+}
+
+.mih-search-reindex__note {
+  margin: 0;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-search-reindex__issues,
+.mih-search-reindex__failure {
+  display: grid;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--qp-warning) 40%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  padding: 12px;
+  background: color-mix(in srgb, var(--qp-warning) 6%, var(--qp-bg-3));
+  color: var(--qp-warning);
+}
+
+.mih-search-reindex__issues--danger,
+.mih-search-reindex__failure {
+  border-color: color-mix(in srgb, var(--qp-danger) 40%, var(--qp-line));
+  background: color-mix(in srgb, var(--qp-danger) 6%, var(--qp-bg-3));
+  color: var(--qp-danger);
+}
+
+.mih-search-reindex__issues ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.mih-search-reindex__issues li span,
+.mih-search-reindex__issues li small {
+  display: block;
+}
+
+.mih-search-reindex__issues li span {
+  color: var(--qp-text-2);
+}
+
+.mih-search-reindex__issues li code,
+.mih-search-reindex__issues li small,
+.mih-search-reindex__failure code {
+  color: inherit;
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-search-reindex__operation {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  padding: 12px;
+  background: color-mix(in srgb, var(--qp-bg-3) 86%, transparent);
+}
+
+.mih-search-reindex__operation > header,
+.mih-search-reindex__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mih-search-reindex__operation > header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.mih-search-reindex__operation > header small,
+.mih-search-reindex__operation > header > span,
+.mih-search-reindex__operation > p,
+.mih-search-reindex__actions > span {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-search-reindex__operation > p {
+  margin: 0;
+}
+
+.mih-search-reindex__progress {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--qp-bg-1);
+}
+
+.mih-search-reindex__progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--qp-info), var(--qp-primary));
+}
+
+.mih-search-reindex__progress.is-indeterminate i {
+  width: 34%;
+  animation: mih-search-reindex-progress 1.2s ease-in-out infinite;
+}
+
+@keyframes mih-search-reindex-progress {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(310%); }
+}
+
+.mih-search-reindex__failure strong,
+.mih-search-reindex__failure code {
+  overflow-wrap: anywhere;
+}
+
+.mih-search-reindex__logs {
+  max-height: 220px;
+  overflow: auto;
+  border-radius: var(--qp-radius-sm);
+  padding: 8px 10px;
+  background: var(--qp-bg-1);
+}
+
+.mih-search-reindex__logs p {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 8px;
+  margin: 0;
+  color: var(--qp-text-4);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.mih-search-reindex__logs code {
+  color: var(--qp-text-2);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.mih-search-reindex__actions {
+  padding-top: 4px;
+}
+
+.mih-search-reindex__actions > span {
+  flex: 1 1 auto;
+}
+
+.mih-search-reindex__confirm {
+  display: grid;
+  gap: 16px;
+}
+
 .mih-search-profile-summary {
   display: flex;
   align-items: center;
@@ -1270,6 +1454,10 @@ select {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .mih-search-reindex__facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .mih-shell {
     display: block;
     overflow: visible;
@@ -1390,6 +1578,20 @@ select {
   .mih-data-center-search,
   .mih-filter-bar {
     grid-template-columns: 1fr;
+  }
+
+  .mih-search-reindex__facts {
+    grid-template-columns: 1fr;
+  }
+
+  .mih-search-reindex__operation > header,
+  .mih-search-reindex__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mih-search-reindex__actions .qp-button {
+    width: 100%;
   }
 
   .mih-file-detection dl,

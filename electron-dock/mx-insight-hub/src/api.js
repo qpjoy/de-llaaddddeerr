@@ -147,6 +147,10 @@ export const adminApi = {
   listServerFileRoots: (token) => request(token, `${ADMIN_ROOT}/server-file-roots`),
   dataCenter: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center`, { query }),
   dataCenterRecords: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center/records`, { query }),
+  searchReindex: (token) => request(token, `${ADMIN_ROOT}/search/reindex`),
+  startSearchReindex: (token) => request(
+    token, `${ADMIN_ROOT}/search/reindex`, { method: 'POST', body: { confirmation: 'REINDEX' } },
+  ),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },

@@ -3,6 +3,10 @@ import { createPool, runCommonMigrations } from '@qpjoy/mx-common'
 import { loadConfig } from '../config.mjs'
 import { createSearch, ensureSearchIndices, runProjectorLoop } from '../search/index.mjs'
 import { requiredReindexBackend, requireSegmenterBackend } from '../search/reindex-integrity.mjs'
+import {
+  monitorSearchReindexLock,
+  requireSearchReindexLock,
+} from '../search/reindex-lock.mjs'
 import { createAgentRuntime } from '../agent/runtime.mjs'
 import { AgentSettingsStore } from '../agent/settings-store.mjs'
 import { EmbeddingPipeline, runEmbeddingLoop } from '../embedding/pipeline.mjs'
@@ -46,10 +50,26 @@ async function main() {
     expectedBackend: requiredReindexBackend(config.common.segmenter),
     logger,
   })
-  const report = await ensureSearchIndices({
-    ...search,
-    segmenter: strictStartupSegmenter,
-  }, { logger, failOnError: true })
+  const startupReindexLock = await requireSearchReindexLock(pool, {
+    busyMessage: 'an Admin or CLI full search reindex is running; exiting so the supervisor retries startup',
+  })
+  const lockHeartbeat = monitorSearchReindexLock(startupReindexLock)
+  let report
+  try {
+    await lockHeartbeat.pulse()
+    report = await ensureSearchIndices({
+      ...search,
+      segmenter: strictStartupSegmenter,
+    }, {
+      logger,
+      failOnError: true,
+      onProgress: () => lockHeartbeat.pulse(),
+    })
+    await lockHeartbeat.pulse()
+  } finally {
+    await lockHeartbeat.stop()
+    await startupReindexLock.release()
+  }
   // A failed reconciliation must not fall through to runProjectorLoop: that
   // loop retries outbox delivery, not schema/snapshot reconciliation. Let the
   // fatal handler exit non-zero so the Deployment restarts this startup phase

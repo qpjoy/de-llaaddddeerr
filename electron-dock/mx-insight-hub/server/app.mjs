@@ -305,6 +305,7 @@ export function createApp({
   telegramSourcePreparer = null,
   agent = null,
   search = null,
+  searchReindex = null,
   embedding = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
@@ -934,6 +935,34 @@ export function createApp({
           },
           requestId,
         })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/search/reindex') {
+        requireSourceAdmin(principal)
+        if (!searchReindex) {
+          throw new AppError(503, 'search_reindex_unavailable', 'Search reindex requires the PostgreSQL Admin runtime')
+        }
+        sendJson(response, 200, { data: await searchReindex.status(), requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/search/reindex') {
+        requireSourceAdmin(principal)
+        if (!searchReindex) {
+          throw new AppError(503, 'search_reindex_unavailable', 'Search reindex requires the PostgreSQL Admin runtime')
+        }
+        const body = await readJson(request)
+        if (body?.confirmation !== 'REINDEX' || Object.keys(body).some((key) => key !== 'confirmation')) {
+          throw new AppError(
+            400,
+            'search_reindex_confirmation_required',
+            'The request body must be exactly {"confirmation":"REINDEX"}',
+          )
+        }
+        const data = await searchReindex.start({
+          requestedBy: principal.memberId || principal.kind || 'admin-token',
+          requestId,
+        })
+        sendJson(response, 202, { data, requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/data-center/records') {

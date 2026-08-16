@@ -106,13 +106,45 @@ bash scripts/manage.sh reindex-search
 bash scripts/manage.sh ops internal-production reindex-search
 ```
 
-该命令要求 projector 正好一个副本，并在现有 projector Pod 内执行一次性
-strict reconciler；不会 rollout 或重启常驻 projector。任务先验证当前部署
+同一操作也可以从 Admin 控制台的“数据中心 → 搜索索引重建”发起。该入口只接受
+Admin Token：`GET /internal/v1/admin/search/reindex` 返回依赖预检和最近任务，
+`POST /internal/v1/admin/search/reindex` 仅接受
+`{"confirmation":"REINDEX"}`。任务脱离 HTTP 请求异步执行，阶段、处理数、有限日志、
+发起者和最终错误持久化在 `control.search_reindex_operations`；Admin、CLI 与
+Projector 启动 reconcile 共用同一 PostgreSQL advisory lock，因此不会并发执行两次
+全量重建。三条路径在整个 content + chunk 重建期间都保持独立的锁会话心跳，并在
+每批及完成前再次校验；连接丢失会 fail closed。Admin 进程中途退出时，下次轮询会在
+确认全局锁已经释放后把遗留任务标记为失败，操作员可以安全重试。
+
+该命令在 Ready 的 Admin Pod 内启动一个独立 Node 进程执行一次性 strict
+reconciler；不会 rollout 或重启 Admin API、常驻 projector 或其他工作负载。
+重建使用 PostgreSQL advisory lock 保证单飞，因此不依赖 projector 的副本数或
+Ready 状态。任务先验证当前部署
 要求的 HanLP/jieba 后端（显式 fallback 配置则为 bigram），随后每个待索引
 字段都校验实际分词 provenance。短暂错误每字段最多尝试 3 次（两次有界退避
 重试）；仍然得到 fallback、degraded 输出或 mapping
 冲突时，命令以非零状态退出且不会把该批伪报为成功。此前已经写入的、通过
 校验的批次仍是安全的，可在后端恢复后重跑。
+
+若 projector 显示 `ready=0`，它不会再挡住手工重建：Projector 启动本身也会执行
+strict reconcile，因此 ES、HanLP、mapping、镜像拉取或调度失败都可能先把它置为
+`CrashLoopBackOff`/Pending。命令会打印 warning、Deployment、Pod、当前与 previous
+container 日志及 namespace events，然后改由 Ready Admin Pod 执行。如果 Admin 也
+不是 Ready，则在启动重建前失败并打印 API rollout diagnostics。Admin/CLI 已持锁时，
+Projector 启动 reconcile 会退出并交给 Deployment backoff 重试，不会与恢复任务争抢
+单槽 HanLP。也可单独复查：
+
+```bash
+kubectl -n mx-insight-hub get deployment,pod \
+  -l app.kubernetes.io/name=mx-insight-hub-projector -o wide
+kubectl -n mx-insight-hub logs deployment/mx-insight-hub-projector \
+  --all-containers --previous --tail=200
+kubectl -n mx-insight-hub describe deployment mx-insight-hub-projector
+```
+
+Admin 进程仍执行相同的 ES/HanLP/mapping 严格校验：后台入口解决的是“没有 Ready
+projector 可供 exec”的循环依赖，并不能绕过真正的依赖故障。不得通过允许 fallback
+token 或跳过 mapping 校验来把失败伪装成成功。
 
 reconciler 从 PostgreSQL current truth 重放 content 与 chunk；只有需要新建
 投影时才原子切换 alias，既有 current index 允许同 source revision 覆盖旧

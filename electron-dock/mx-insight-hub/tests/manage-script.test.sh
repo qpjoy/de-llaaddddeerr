@@ -646,8 +646,8 @@ fi
 rm -f -- "$hanlp_empty_error"
 printf 'ok - HanLP smoke rejects nested empty token responses\n'
 
-# A segmentation rebuild runs as a strict one-shot process in the existing
-# projector Pod. It must not restart the fail-soft projector, API/login,
+# A segmentation rebuild runs as a strict one-shot process in the Ready Admin
+# Pod. It must not depend on or restart the fail-soft projector, API/login,
 # Launcher, or ingest workloads.
 reindex_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-reindex-events.XXXXXX")"
 reindex_output="$(REINDEX_EVENTS="$reindex_events" bash -c '
@@ -656,11 +656,13 @@ reindex_output="$(REINDEX_EVENTS="$reindex_events" bash -c '
   kubectl() {
     printf "%s\n" "$*" >>"$REINDEX_EVENTS"
     case "$*" in
-      *"get deployment mx-insight-hub-projector"*) printf "1" ;;
       *"get configmap mx-insight-hub-config"*"MX_COMMON_ELASTICSEARCH_URL"*)
         printf "http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200"
         ;;
-      *"exec deployment/mx-insight-hub-projector -- node server/scripts/reindex-search.mjs"*)
+      *"get deployment mx-insight-hub-admin"*".status.readyReplicas"*) printf "1" ;;
+      *"get deployment mx-insight-hub-projector"*".spec.replicas"*) printf "1" ;;
+      *"get deployment mx-insight-hub-projector"*".status.readyReplicas"*) printf "1" ;;
+      *"exec deployment/mx-insight-hub-admin -- node server/scripts/reindex-search.mjs"*)
         printf "[reindex] completed with verified tokenizer backend=hanlp\n"
         ;;
       *) return 0 ;;
@@ -668,7 +670,7 @@ reindex_output="$(REINDEX_EVENTS="$reindex_events" bash -c '
   }
   reindex_search
 ' _ "$ROOT_DIR")"
-grep -Fq 'exec deployment/mx-insight-hub-projector -- node server/scripts/reindex-search.mjs' "$reindex_events"
+grep -Fq 'exec deployment/mx-insight-hub-admin -- node server/scripts/reindex-search.mjs' "$reindex_events"
 grep -Fq 'search reindex completed with verified configured-tokenizer output' <<<"$reindex_output"
 if grep -Eq 'rollout restart|scale deployment|mx-launcher' "$reindex_events"; then
   printf 'not ok - search reindex restarted a user-facing or ingest workload\n' >&2
@@ -683,11 +685,13 @@ if bash -c '
   source "$1/scripts/manage.sh"
   kubectl() {
     case "$*" in
-      *"get deployment mx-insight-hub-projector"*) printf "1" ;;
       *"get configmap mx-insight-hub-config"*"MX_COMMON_ELASTICSEARCH_URL"*)
         printf "http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200"
         ;;
-      *"exec deployment/mx-insight-hub-projector -- node server/scripts/reindex-search.mjs"*)
+      *"get deployment mx-insight-hub-admin"*".status.readyReplicas"*) printf "1" ;;
+      *"get deployment mx-insight-hub-projector"*".spec.replicas"*) printf "1" ;;
+      *"get deployment mx-insight-hub-projector"*".status.readyReplicas"*) printf "1" ;;
+      *"exec deployment/mx-insight-hub-admin -- node server/scripts/reindex-search.mjs"*)
         printf "[reindex] fatal: reindex requires hanlp tokens but received jieba\n" >&2
         return 42
         ;;
@@ -707,6 +711,73 @@ if grep -Fq 'search reindex completed with verified' "$reindex_error"; then
 fi
 rm -f -- "$reindex_error"
 printf 'ok - HanLP fallback makes reindex-search fail without a success marker\n'
+
+# A non-ready projector must not block the independent Admin executor. Print
+# bounded current/previous logs and rollout events, then continue the reindex.
+reindex_not_ready_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-reindex-not-ready.XXXXXX")"
+reindex_not_ready_output="$(REINDEX_EVENTS="$reindex_not_ready_events" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    printf "%s\n" "$*" >>"$REINDEX_EVENTS"
+    case "$*" in
+      *"get configmap mx-insight-hub-config"*"MX_COMMON_ELASTICSEARCH_URL"*)
+        printf "http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200"
+        ;;
+      *"get deployment mx-insight-hub-admin"*".status.readyReplicas"*) printf "1" ;;
+      *"get deployment mx-insight-hub-projector"*".spec.replicas"*) printf "1" ;;
+      *"get deployment mx-insight-hub-projector"*".status.readyReplicas"*) printf "0" ;;
+      *"exec deployment/mx-insight-hub-admin -- node server/scripts/reindex-search.mjs"*)
+        printf "[reindex] completed with verified tokenizer backend=hanlp\n"
+        ;;
+      *) return 0 ;;
+    esac
+  }
+  reindex_search
+' _ "$ROOT_DIR" 2>&1)"
+grep -Fq 'projector diagnostics' <<<"$reindex_not_ready_output"
+grep -Fq 'projector is not Ready (desired=1, ready=0)' <<<"$reindex_not_ready_output"
+grep -Fq 'search reindex completed with verified configured-tokenizer output' <<<"$reindex_not_ready_output"
+grep -Fq 'logs deployment/mx-insight-hub-projector --all-containers --tail=200' "$reindex_not_ready_events"
+grep -Fq 'logs deployment/mx-insight-hub-projector --all-containers --previous --tail=200' "$reindex_not_ready_events"
+grep -Fq 'exec deployment/mx-insight-hub-admin -- node server/scripts/reindex-search.mjs' "$reindex_not_ready_events"
+if grep -Fq 'exec deployment/mx-insight-hub-projector' "$reindex_not_ready_events"; then
+  printf 'not ok - reindex-search used a non-ready projector instead of Admin\n' >&2
+  exit 1
+fi
+rm -f -- "$reindex_not_ready_events"
+printf 'ok - non-ready projector prints diagnostics and reindexes in Ready Admin\n'
+
+# If the Admin plane is also unavailable there is no safe in-cluster executor;
+# fail before trying either workload and print the API rollout diagnostics.
+reindex_admin_not_ready_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-reindex-admin-not-ready.XXXXXX")"
+reindex_admin_not_ready_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-reindex-admin-not-ready-error.XXXXXX")"
+if REINDEX_EVENTS="$reindex_admin_not_ready_events" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    printf "%s\n" "$*" >>"$REINDEX_EVENTS"
+    case "$*" in
+      *"get configmap mx-insight-hub-config"*"MX_COMMON_ELASTICSEARCH_URL"*)
+        printf "http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200"
+        ;;
+      *"get deployment mx-insight-hub-admin"*".status.readyReplicas"*) printf "0" ;;
+      *) return 0 ;;
+    esac
+  }
+  reindex_search
+' _ "$ROOT_DIR" >"$reindex_admin_not_ready_error" 2>&1; then
+  printf 'not ok - reindex-search accepted a non-ready Admin executor\n' >&2
+  exit 1
+fi
+grep -Fq 'API rollout diagnostics' "$reindex_admin_not_ready_error"
+grep -Fq 'mx-insight-hub-admin must have at least one Ready replica to host the reindex process (ready=0)' "$reindex_admin_not_ready_error"
+if grep -Fq 'exec deployment/' "$reindex_admin_not_ready_events"; then
+  printf 'not ok - reindex-search execed a workload without a Ready Admin\n' >&2
+  exit 1
+fi
+rm -f -- "$reindex_admin_not_ready_events" "$reindex_admin_not_ready_error"
+printf 'ok - non-ready Admin blocks reindex before kubectl exec\n'
 
 # Independent deployment is the safety default: neither secret sync nor a
 # Launcher rollout may issue kubectl mutations unless explicitly enabled.

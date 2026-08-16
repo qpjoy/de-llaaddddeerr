@@ -1176,6 +1176,7 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
     deleted_at: new Date('2026-08-10T00:00:00.000Z'),
   })
   const snapshot = currentSnapshotPool('FROM core.canonical_records', [live, deleted])
+  const progress = []
 
   const result = await ensureCurrentContentIndex({
     client: harness.client,
@@ -1183,6 +1184,7 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
     segmenter,
     indexSet,
     logger: { info() {}, warn() {} },
+    onProgress: async (event) => progress.push(event),
   })
 
   assert.equal(result.rebuilt, true)
@@ -1211,6 +1213,45 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
   assert.deepEqual(Object.keys(harness.aliasResponse(indexSet.readAlias)), [indexSet.currentIndex])
   assert.ok(snapshot.queries.some(({ sql }) => sql.includes('pg_advisory_lock')))
   assert.ok(snapshot.queries.some(({ sql }) => sql.includes('pg_advisory_unlock')))
+  assert.equal(snapshot.released, true)
+  assert.deepEqual(progress, [
+    { projection: 'content', pass: 'build', processed: 2 },
+    { projection: 'content', pass: 'catch-up', processed: 2 },
+  ])
+})
+
+test('Projector lock heartbeat loss aborts a rebuild before alias cutover', async () => {
+  const indexSet = contentIndex()
+  const oldIndex = 'mx-insight-hub-content-v3-current'
+  const harness = currentIndexHarness(indexSet, {
+    [oldIndex]: {
+      [indexSet.readAlias]: {},
+      'mx-insight-hub-content-v3': { is_write_index: true },
+    },
+  })
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [canonicalRow()])
+  const sessionLost = Object.assign(new Error('full-reindex lock session terminated'), { code: '57P01' })
+  let heartbeats = 0
+
+  await assert.rejects(
+    () => ensureCurrentContentIndex({
+      client: harness.client,
+      pool: snapshot.pool,
+      segmenter,
+      indexSet,
+      logger: { info() {}, warn() {} },
+      onProgress: async () => {
+        heartbeats += 1
+        throw sessionLost
+      },
+    }),
+    (error) => error === sessionLost,
+  )
+
+  assert.equal(heartbeats, 1)
+  assert.equal(harness.calls.bulks.length, 1, 'no later snapshot batch or pass runs after lock loss')
+  assert.equal(harness.calls.aliasActions.length, 0, 'a task without the global lock never cuts aliases over')
+  assert.deepEqual(Object.keys(harness.aliasResponse(indexSet.readAlias)), [oldIndex])
   assert.equal(snapshot.released, true)
 })
 

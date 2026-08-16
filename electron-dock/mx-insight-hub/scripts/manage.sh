@@ -976,6 +976,21 @@ k8s_api_diagnostics() {
   kubectl -n mx-insight-hub get events --sort-by=.lastTimestamp | tail -n 80 || true
 }
 
+k8s_projector_diagnostics() {
+  say "projector diagnostics"
+  kubectl -n mx-insight-hub get deployment,pod \
+    -l app.kubernetes.io/name=mx-insight-hub-projector -o wide || true
+  kubectl -n mx-insight-hub describe deployment mx-insight-hub-projector || true
+  kubectl -n mx-insight-hub logs deployment/mx-insight-hub-projector \
+    --all-containers --tail=200 || true
+  # CrashLoopBackOff commonly leaves the useful startup failure only in the
+  # previous container.  Keep this bounded and best-effort because there may be
+  # no previous container yet (for example while an image is still pulling).
+  kubectl -n mx-insight-hub logs deployment/mx-insight-hub-projector \
+    --all-containers --previous --tail=200 || true
+  kubectl -n mx-insight-hub get events --sort-by=.lastTimestamp | tail -n 80 || true
+}
+
 # A local PostgreSQL left over from a previous release keeps running and keeps
 # holding its PVC. Removing it automatically here would delete a database during
 # a routine deploy, so this only reports it.
@@ -1376,31 +1391,19 @@ pg_count() {
     psql -U mx_common -d mx_insight_hub -tAc "$1" 2>/dev/null | tr -d ' \n' || printf '0'
 }
 
-# Re-run the projector's PostgreSQL -> Elasticsearch reconciliation inside its
-# existing Pod. The one-shot process wraps the configured tokenizer with a
-# fail-closed contract, while the normal projector remains fail-soft. No API,
-# Launcher, ingest, login, or long-running projector workload is restarted.
+# Re-run the PostgreSQL -> Elasticsearch reconciliation as a second process in
+# the Ready Admin Pod. Admin carries the same DB/ES/HanLP configuration as the
+# projector but does not share its strict-startup CrashLoop failure mode. The
+# one-shot process is fail-closed and its PostgreSQL advisory lock provides
+# single-flight. No API, Launcher, ingest, login, or worker is restarted.
 reindex_search() {
   local namespace="mx-insight-hub"
-  local deployment="mx-insight-hub-projector"
-  local replicas ready_replicas elasticsearch_url
+  local projector_deployment="mx-insight-hub-projector"
+  local executor_deployment="mx-insight-hub-admin"
+  local projector_replicas projector_ready admin_ready elasticsearch_url
+  local projector_unready=0
   need kubectl
 
-  replicas="$(
-    kubectl -n "$namespace" get deployment "$deployment" \
-      -o jsonpath='{.spec.replicas}' 2>/dev/null || true
-  )"
-  case "$replicas" in
-    1) : ;;
-    ''|*[!0-9]*|0) die "$deployment must be deployed with one replica before reindexing" ;;
-    *) die "$deployment has ${replicas} replicas; scale it to one before reindexing so the single-slot tokenizer is not rebuilt repeatedly" ;;
-  esac
-  ready_replicas="$(
-    kubectl -n "$namespace" get deployment "$deployment" \
-      -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true
-  )"
-  [ "$ready_replicas" = 1 ] \
-    || die "$deployment must have one Ready replica before reindexing (ready=${ready_replicas:-0})"
   elasticsearch_url="$(
     kubectl -n "$namespace" get configmap mx-insight-hub-config \
       -o jsonpath='{.data.MX_COMMON_ELASTICSEARCH_URL}' 2>/dev/null || true
@@ -1408,12 +1411,42 @@ reindex_search() {
   [ -n "$elasticsearch_url" ] \
     || die "MX_COMMON_ELASTICSEARCH_URL is empty in mx-insight-hub-config; there is no search projection to rebuild"
 
-  say "running one-shot reconciliation in ${deployment}; configured tokenizer fallback is forbidden"
-  if ! kubectl -n "$namespace" exec "deployment/${deployment}" -- \
+  admin_ready="$(
+    kubectl -n "$namespace" get deployment "$executor_deployment" \
+      -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true
+  )"
+  case "$admin_ready" in
+    ''|*[!0-9]*|0)
+      k8s_api_diagnostics
+      die "$executor_deployment must have at least one Ready replica to host the reindex process (ready=${admin_ready:-0}); the projector is not used as the executor"
+      ;;
+  esac
+
+  projector_replicas="$(
+    kubectl -n "$namespace" get deployment "$projector_deployment" \
+      -o jsonpath='{.spec.replicas}' 2>/dev/null || true
+  )"
+  projector_ready="$(
+    kubectl -n "$namespace" get deployment "$projector_deployment" \
+      -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true
+  )"
+  case "$projector_ready" in
+    ''|*[!0-9]*|0)
+      projector_unready=1
+      say "WARNING: ${projector_deployment} is not Ready (desired=${projector_replicas:-unknown}, ready=${projector_ready:-0}); reindex will run independently in ${executor_deployment}." >&2
+      k8s_projector_diagnostics
+      ;;
+  esac
+
+  say "running one-shot reconciliation in ${executor_deployment}; configured tokenizer fallback is forbidden"
+  if ! kubectl -n "$namespace" exec "deployment/${executor_deployment}" -- \
     node server/scripts/reindex-search.mjs; then
     die "search reindex failed tokenizer integrity or projection checks; no fallback-token batch was accepted"
   fi
   say "search reindex completed with verified configured-tokenizer output"
+  if [ "$projector_unready" = 1 ]; then
+    say "Projector recovery is asynchronous; verify with: kubectl -n ${namespace} rollout status deployment/${projector_deployment} --timeout=180s"
+  fi
 }
 
 ops_action() {

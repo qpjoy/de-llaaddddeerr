@@ -154,14 +154,18 @@ Analyzer scope remains deliberately narrow:
 - edge-ngram is index-time and title-only in content v4. Search uses the plain
   query token; applying ngrams to both sides recreates broad, low-quality recall.
 
-The v4 migration uses the strict `reindex-search` reconciler: it requires exactly
-one ready projector, verifies the configured tokenizer for every field with
-bounded retry, fails on degraded/fallback output or mapping conflict, fills the
-new `v4-current` from PG, atomically switches aliases only after the first full
-pass, and runs the second pass to close the concurrent-write window. Public/Admin
-APIs, ingest, Launcher, MX-H2I login and networking are not restarted by this
-command. The prior v3 index remains the rollback target until count/hash,
-relevance, disk and latency checks pass.
+The v4 migration uses the strict `reindex-search` reconciler. The CLI starts its
+one-shot process in a Ready Admin Pod so a strict-startup Projector CrashLoop does
+not block recovery. The Admin job, CLI process, and Projector startup reconcile
+share one PostgreSQL advisory lock across the complete content+chunk rebuild and
+keep that lock session alive independently of batch duration. It
+verifies the configured tokenizer for every field with bounded retry, fails on
+degraded/fallback output or mapping conflict, fills the new `v4-current` from PG,
+atomically switches aliases only after the first full pass, and runs the second
+pass to close the concurrent-write window. Public/Admin APIs, Projector, ingest,
+Launcher, MX-H2I login and networking are not restarted by this command. The
+prior v3 index remains the rollback target until count/hash, relevance, disk and
+latency checks pass.
 
 ## Consequences
 

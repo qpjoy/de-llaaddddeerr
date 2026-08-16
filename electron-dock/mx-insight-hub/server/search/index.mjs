@@ -52,7 +52,11 @@ export function createSearch({ pool, config, logger = console }) {
  * the whole reconciliation instead of entering a loop that only drains outbox
  * events.
  */
-export async function ensureSearchIndices(search, { logger = console, failOnError = false } = {}) {
+export async function ensureSearchIndices(search, {
+  logger = console,
+  failOnError = false,
+  onProgress = null,
+} = {}) {
   if (!search.client) return { enabled: false, reason: 'MX_COMMON_ELASTICSEARCH_URL is not configured' }
   const report = { enabled: true, content: null, chunk: null, error: null }
   try {
@@ -63,6 +67,7 @@ export async function ensureSearchIndices(search, { logger = console, failOnErro
       segmenter: search.segmenter,
       indexSet: search.indexSet,
       logger,
+      onProgress,
     })
     if (failOnError && report.content?.mappingConflict) {
       throw new Error(`Content index mapping conflict: ${report.content.mappingConflict}`)
@@ -74,6 +79,7 @@ export async function ensureSearchIndices(search, { logger = console, failOnErro
         segmenter: search.segmenter,
         indexSet: search.chunkIndexSet,
         logger,
+        onProgress,
       })
       if (failOnError && report.chunk?.mappingConflict) {
         throw new Error(`Chunk index mapping conflict: ${report.chunk.mappingConflict}`)
@@ -98,25 +104,43 @@ const CURRENT_REBUILD_LOCK_PREFIX = 'mx-insight-hub:search:current-rebuild:'
  * schema versions and ILM generations, which is correct for append-only time
  * series but lets stale copies of mutable records survive edits and deletes.
  */
-export async function ensureCurrentContentIndex({ client, pool, segmenter, indexSet, logger = console }) {
+export async function ensureCurrentContentIndex({
+  client,
+  pool,
+  segmenter,
+  indexSet,
+  logger = console,
+  onProgress = null,
+}) {
   return ensureCurrentStateIndex({
     client,
     pool,
     segmenter,
     indexSet,
     logger,
+    onProgress,
+    projection: 'content',
     reconcileSnapshot: reconcileContentSnapshot,
   })
 }
 
 /** Rebuild the retrieval projection from vectors already stored in PostgreSQL. */
-export async function ensureCurrentChunkIndex({ client, pool, segmenter, indexSet, logger = console }) {
+export async function ensureCurrentChunkIndex({
+  client,
+  pool,
+  segmenter,
+  indexSet,
+  logger = console,
+  onProgress = null,
+}) {
   return ensureCurrentStateIndex({
     client,
     pool,
     segmenter,
     indexSet,
     logger,
+    onProgress,
+    projection: 'chunks',
     reconcileSnapshot: reconcileChunkSnapshot,
   })
 }
@@ -127,6 +151,8 @@ async function ensureCurrentStateIndex({
   segmenter,
   indexSet,
   logger,
+  onProgress,
+  projection,
   reconcileSnapshot,
 }) {
   if (!pool?.connect) throw new Error('A PostgreSQL pool is required to rebuild a current-state projection')
@@ -168,6 +194,7 @@ async function ensureCurrentStateIndex({
         client,
         segmenter,
         index: indexSet.currentIndex,
+        onProgress: progressReporter(onProgress, projection, 'reconcile'),
       })
       return currentEnsureReport(indexSet, {
         mappingConflict: null,
@@ -204,6 +231,7 @@ async function ensureCurrentStateIndex({
       client,
       segmenter,
       index: indexSet.currentIndex,
+      onProgress: progressReporter(onProgress, projection, 'build'),
     })
     const aliasState = await currentAliasState(client, indexSet)
     await switchCurrentAliases(client, indexSet, aliasState)
@@ -217,6 +245,7 @@ async function ensureCurrentStateIndex({
       client,
       segmenter,
       index: indexSet.currentIndex,
+      onProgress: progressReporter(onProgress, projection, 'catch-up'),
     })
     logger?.info?.(
       `[search] rebuilt ${indexSet.currentIndex}: first=${firstPass} second=${secondPass}`,
@@ -236,6 +265,11 @@ async function ensureCurrentStateIndex({
     }
     connection.release()
   }
+}
+
+function progressReporter(onProgress, projection, pass) {
+  if (typeof onProgress !== 'function') return null
+  return (processed) => onProgress({ projection, pass, processed })
 }
 
 function currentEnsureReport(indexSet, {
@@ -343,7 +377,7 @@ async function switchCurrentAliases(client, indexSet, state) {
   await client.request('POST', '/_aliases', { actions })
 }
 
-async function reconcileContentSnapshot({ connection, client, segmenter, index }) {
+async function reconcileContentSnapshot({ connection, client, segmenter, index, onProgress = null }) {
   let cursor = null
   let projected = 0
   while (true) {
@@ -386,13 +420,14 @@ async function reconcileContentSnapshot({ connection, client, segmenter, index }
     const response = await client.bulk(operations)
     assertSnapshotBulk(response, operationTypes, 'Content')
     projected += rows.length
+    await onProgress?.(projected)
     cursor = rows.at(-1).id
     if (rows.length < CURRENT_REBUILD_BATCH) break
   }
   return projected
 }
 
-async function reconcileChunkSnapshot({ connection, client, segmenter, index }) {
+async function reconcileChunkSnapshot({ connection, client, segmenter, index, onProgress = null }) {
   let cursor = null
   let projected = 0
   while (true) {
@@ -438,6 +473,7 @@ async function reconcileChunkSnapshot({ connection, client, segmenter, index }) 
     const response = await client.bulk(operations)
     assertSnapshotBulk(response, operationTypes, 'Chunk')
     projected += rows.length
+    await onProgress?.(projected)
     cursor = rows.at(-1).id
     if (rows.length < CURRENT_REBUILD_BATCH) break
   }
@@ -469,6 +505,7 @@ async function reconcileChunkSnapshot({ connection, client, segmenter, index }) 
     const response = await client.bulk(operations)
     assertSnapshotBulk(response, rows.map(() => 'delete'), 'Chunk deletion')
     projected += rows.length
+    await onProgress?.(projected)
     deletionCursor = rows.at(-1).document_id
     if (rows.length < CURRENT_REBUILD_BATCH) break
   }

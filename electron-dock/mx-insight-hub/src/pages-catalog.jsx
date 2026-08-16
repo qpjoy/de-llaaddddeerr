@@ -277,6 +277,227 @@ function SearchLab({ capabilities, selectedProfile, execution, recordsMode, quer
   )
 }
 
+const ACTIVE_REINDEX_STATUSES = new Set(['queued', 'running'])
+
+function reindexStatus(status) {
+  if (status === 'succeeded') return { badge: 'active', label: '已完成' }
+  if (status === 'failed') return { badge: 'down', label: '失败' }
+  if (status === 'running') return { badge: 'degraded', label: '运行中' }
+  if (status === 'queued') return { badge: 'unknown', label: '排队中' }
+  return { badge: 'unknown', label: status || '尚未运行' }
+}
+
+function reindexProgress(operation) {
+  const explicit = operation?.progress == null ? null : Number(operation.progress)
+  if (explicit != null && Number.isFinite(explicit)) {
+    return Math.min(100, Math.max(0, explicit <= 1 ? explicit * 100 : explicit))
+  }
+  const processed = Number(operation?.processed)
+  const total = Number(operation?.total)
+  if (Number.isFinite(processed) && Number.isFinite(total) && total > 0) {
+    return Math.min(100, Math.max(0, processed / total * 100))
+  }
+  return null
+}
+
+function reindexIssue(issue) {
+  if (typeof issue === 'string') return { message: issue }
+  return issue && typeof issue === 'object' ? issue : { message: String(issue || '未知问题') }
+}
+
+function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
+  const load = useCallback(() => adminApi.searchReindex(token), [token])
+  const state = useRemoteData(load, onUnauthorized)
+  const [confirmationOpen, setConfirmationOpen] = useState(false)
+  const [confirmation, setConfirmation] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState(null)
+  const preflight = state.data?.preflight || {}
+  const operation = state.data?.operation || null
+  const blockers = asArray(preflight.blockers).map(reindexIssue)
+  const warnings = asArray(preflight.warnings).map(reindexIssue)
+  const active = ACTIVE_REINDEX_STATUSES.has(operation?.status)
+  const status = reindexStatus(operation?.status)
+  const progress = reindexProgress(operation)
+  const logs = asArray(operation?.logs).slice(-100)
+  const canStart = preflight.ready === true && blockers.length === 0 && !active && !state.loading && !submitting
+
+  useEffect(() => {
+    if (!active || state.loading) return undefined
+    const timer = window.setTimeout(state.refresh, 2_000)
+    return () => window.clearTimeout(timer)
+  }, [active, state.loading, state.refresh])
+
+  const closeConfirmation = () => {
+    if (submitting) return
+    setConfirmationOpen(false)
+    setConfirmation('')
+    setSubmitError(null)
+  }
+
+  const start = async (event) => {
+    event.preventDefault()
+    if (!canStart || confirmation !== 'REINDEX') return
+    setSubmitting(true)
+    setSubmitError(null)
+    try {
+      const updated = await adminApi.startSearchReindex(token)
+      state.setData(updated)
+      setConfirmationOpen(false)
+      setConfirmation('')
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      setSubmitError(error)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  useEffect(() => {
+    if (operation?.status !== 'succeeded') return
+    onReindexed?.()
+  }, [onReindexed, operation?.id, operation?.status])
+
+  const buttonTitle = active
+    ? '已有搜索索引重建正在运行'
+    : blockers[0]?.message || (preflight.ready === false ? '前置检查未通过' : '')
+
+  return (
+    <Panel title="搜索索引重建" subtitle="从 PostgreSQL canonical truth 严格重建 Elasticsearch 投影；单任务运行，投影首轮快照完成后原子切换对应读别名">
+      {state.loading && !state.data ? <LoadingState label="正在执行搜索重建前置检查" /> : null}
+      {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
+      {state.data ? (
+        <div className="mih-search-reindex">
+          <dl className="mih-search-reindex__facts">
+            <div>
+              <dt>前置检查</dt>
+              <dd><StatusBadge status={preflight.ready ? 'ready' : 'not_ready'} label={preflight.ready ? '可以执行' : '存在阻断'} /></dd>
+            </div>
+            <div>
+              <dt>分词后端</dt>
+              <dd><code>{preflight.expectedBackend || '未公布'}</code></dd>
+            </div>
+            <div>
+              <dt>索引 Schema</dt>
+              <dd><code>{preflight.sourceIndexSchema || 'unavailable'} → {preflight.targetIndexSchema || '未公布'}</code></dd>
+            </div>
+            <div>
+              <dt>最近任务</dt>
+              <dd><StatusBadge status={status.badge} label={status.label} /></dd>
+            </div>
+          </dl>
+
+          {preflight.projectorRequired === false ? (
+            <p className="mih-search-reindex__note">
+              Admin 后台直接运行严格重建器，不依赖 <code>mx-insight-hub-projector</code> Ready 副本。
+            </p>
+          ) : null}
+
+          {blockers.length ? (
+            <section className="mih-search-reindex__issues mih-search-reindex__issues--danger" role="alert">
+              <strong>前置检查未通过</strong>
+              <ul>{blockers.map((issue, index) => (
+                <li key={`${issue.code || 'blocker'}:${index}`}>
+                  <span>{issue.message}</span>
+                  {issue.code ? <code>{issue.code}</code> : null}
+                  {issue.action ? <small>{issue.action}</small> : null}
+                </li>
+              ))}</ul>
+            </section>
+          ) : null}
+          {warnings.length ? (
+            <section className="mih-search-reindex__issues" role="status">
+              <strong>执行提示</strong>
+              <ul>{warnings.map((issue, index) => (
+                <li key={`${issue.code || 'warning'}:${index}`}>
+                  <span>{issue.message}</span>
+                  {issue.action ? <small>{issue.action}</small> : null}
+                </li>
+              ))}</ul>
+            </section>
+          ) : null}
+
+          {operation ? (
+            <section className="mih-search-reindex__operation" aria-live="polite">
+              <header>
+                <div>
+                  <strong>{status.label} · {operation.phase || '等待阶段信息'}</strong>
+                  <small>{operation.id ? `任务 ${operation.id}` : '任务 ID 未公布'}</small>
+                </div>
+                <span>{operation.startedAt ? `开始 ${formatDate(operation.startedAt)}` : '等待开始'}</span>
+              </header>
+              <div className={`mih-search-reindex__progress${progress == null && active ? ' is-indeterminate' : ''}`}>
+                <i style={progress == null ? undefined : { width: `${progress}%` }} />
+              </div>
+              <p>
+                已处理 {formatNumber(operation.processed || 0)}
+                {operation.total != null
+                  ? ` / ${formatNumber(operation.total)}`
+                  : active ? ' 条 · 总量统计中' : ' 条'}
+                {progress != null ? ` · ${Math.round(progress)}%` : ''}
+                {operation.finishedAt ? ` · 结束 ${formatDate(operation.finishedAt)}` : ''}
+              </p>
+              {operation.status === 'failed' ? (
+                <div className="mih-search-reindex__failure" role="alert">
+                  <strong>{operation.errorMessage || '搜索索引重建失败'}</strong>
+                  {operation.errorCode ? <code>{operation.errorCode}</code> : null}
+                </div>
+              ) : null}
+              <div className="mih-search-reindex__logs" aria-label="重建任务日志">
+                {logs.length ? logs.map((entry, index) => {
+                  const value = typeof entry === 'string' ? { message: entry } : entry || {}
+                  return <p key={`${value.at || index}:${index}`}>
+                    {value.at ? <time>{formatDate(value.at)}</time> : null}
+                    {value.level ? <span>{value.level}</span> : null}
+                    <code>{value.message || JSON.stringify(value)}</code>
+                  </p>
+                }) : <p><code>{active ? '等待服务器运行日志…' : '该任务没有运行日志。'}</code></p>}
+              </div>
+            </section>
+          ) : null}
+
+          <div className="mih-search-reindex__actions">
+            <span>
+              {active ? '运行期间不能再次提交；页面会自动刷新状态。' : canStart ? '前置检查通过，可以开始重建。' : '解决阻断项后刷新前置检查。'}
+            </span>
+            <button className="qp-button qp-button--ghost" type="button" disabled={state.loading || submitting}
+              onClick={state.refresh}>{state.loading ? '检查中…' : '重新检查'}</button>
+            <button className="qp-button" type="button" disabled={!canStart} title={buttonTitle}
+              onClick={() => { setConfirmation(''); setSubmitError(null); setConfirmationOpen(true) }}>
+              {active ? '重建运行中…' : '开始严格重建'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {confirmationOpen ? (
+        <Modal title="确认重建搜索索引" description="此操作会读取全部 canonical 数据并产生显著的 PostgreSQL、HanLP 与 Elasticsearch 负载。"
+          onClose={closeConfirmation}
+          footer={<>
+            <button className="qp-button qp-button--ghost" type="button" disabled={submitting} onClick={closeConfirmation}>取消</button>
+            <button className="qp-button qp-button--danger" type="submit" form="mih-search-reindex-confirm"
+              disabled={submitting || confirmation !== 'REINDEX'}>
+              {submitting ? '正在提交…' : '确认并开始'}
+            </button>
+          </>}>
+          <form id="mih-search-reindex-confirm" className="mih-search-reindex__confirm" onSubmit={start}>
+            <div className="mih-confirm-copy">
+              <WarningCircle size={22} weight="duotone" aria-hidden="true" />
+              <p>canonical 数据不会被修改。失败时请根据任务阶段和日志确认是否已有某个投影完成别名切换。</p>
+            </div>
+            <label className="qp-field">
+              <span className="qp-field__label">输入 <code>REINDEX</code> 以确认</span>
+              <input className="qp-input" autoFocus autoComplete="off" spellCheck="false" value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)} />
+            </label>
+            {submitError ? <ErrorState error={submitError} /> : null}
+          </form>
+        </Modal>
+      ) : null}
+    </Panel>
+  )
+}
+
 /**
  * Read-only view over PostgreSQL canonical truth.
  *
@@ -352,6 +573,10 @@ export function DataCenterPage({ token, onUnauthorized }) {
     }
   }, [cursor, datasetId, objectType, page, platform, query, requestedSearchProfile, searchRevision, token])
   const recordsState = useRemoteData(loadRecords, onUnauthorized)
+  const refreshAfterReindex = useCallback(() => {
+    state.refresh()
+    recordsState.refresh()
+  }, [recordsState.refresh, state.refresh])
 
   const recordsPage = recordPage(recordsState.data, pageSize)
   const records = recordsPage.items
@@ -461,6 +686,8 @@ export function DataCenterPage({ token, onUnauthorized }) {
         <MetricCard icon={ClockCounterClockwise} label="历史修订" value={formatNumber(stats.revisionCount ?? 0)} hint="可追溯版本" />
         <MetricCard icon={Archive} label="已删除记录" value={formatNumber(stats.deletedRecordCount ?? 0)} hint="源端 tombstone；Hub 保留证据而非物理删除" tone={stats.deletedRecordCount ? 'warning' : 'primary'} />
       </div>
+
+      <SearchReindexControl token={token} onUnauthorized={onUnauthorized} onReindexed={refreshAfterReindex} />
 
       <Panel title="检索与筛选" subtitle="浏览与游标分页走 PostgreSQL；关键词搜索优先 Elasticsearch、故障时回退 PostgreSQL，详情始终回读完整 canonical record">
         <form className="mih-data-center-search" onSubmit={search}>

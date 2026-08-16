@@ -10,6 +10,7 @@ import { HubService } from './hub-service.mjs'
 import { createAgentRuntime } from './agent/runtime.mjs'
 import { AgentSettingsStore } from './agent/settings-store.mjs'
 import { createSearch } from './search/index.mjs'
+import { AdminSearchReindex } from './search/admin-reindex.mjs'
 import { EmbeddingPipeline } from './embedding/pipeline.mjs'
 import { ExternalImporter } from './ingest/external/importer.mjs'
 import { DatabaseSourcePuller } from './ingest/external/database-source.mjs'
@@ -68,6 +69,9 @@ export async function createRuntime(config = loadConfig()) {
   // Read-only here. The API serves retrieval queries and reports pipeline
   // status; the writing stages belong to the projector workload.
   const search = pool ? createSearch({ pool, config: config.common }) : null
+  const searchReindex = search && config.listenerMode !== 'public'
+    ? new AdminSearchReindex({ search, segmenterConfig: config.common.segmenter })
+    : null
   const segmenter = search?.segmenter ?? createSegmenter(config.common.segmenter)
   const service = new HubService({
     store,
@@ -99,6 +103,7 @@ export async function createRuntime(config = loadConfig()) {
     telegramSourcePreparer,
     agent,
     search,
+    searchReindex,
     embedding,
     launcherAudience: config.launcher.audience,
     backfillPlatforms: config.backfill.platforms,
@@ -108,7 +113,8 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
-    databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings, search, embedding,
+    databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
+    search, searchReindex, embedding,
   }
 }
 
