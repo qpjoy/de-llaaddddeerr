@@ -1,6 +1,17 @@
 import { toPresegmentedText } from '@qpjoy/mx-common/segmenter'
 import { ElasticsearchError, ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
 import { AppError } from '../core/errors.mjs'
+import {
+  buildContentSearchPlan,
+  DEFAULT_SEARCH_PROFILE,
+  knownMatchBranches,
+  postgresSearchProfile,
+  publicSearchProfile,
+  resolveSearchProfile,
+  searchCapabilities as profileSearchCapabilities,
+  searchProfileNeedsSegmentation,
+  searchProfileRequiredIndexSchema,
+} from './profiles.mjs'
 
 // Read-side queries, with an explicit PostgreSQL degradation path.
 //
@@ -14,6 +25,14 @@ import { AppError } from '../core/errors.mjs'
 const DEFAULT_SIZE = 20
 const MAX_SIZE = 100
 const SEARCH_PIT_KEEP_ALIVE = '2m'
+const SEARCH_EXECUTION_TOKEN_LIMIT = 64
+const SEARCH_DEGRADED_TOKEN_BYTE_LIMIT = 512
+const SEARCH_DEGRADED_TOKEN_SCAN_LIMIT = 256
+const SEARCH_ANALYSIS_STATE_TOKEN_LIMIT = 512
+const SEARCH_ANALYSIS_STATE_CHARACTER_LIMIT = 2_048
+const SEARCH_ANALYSIS_STATE_VERSION = 1
+const SEARCH_BACKENDS = new Set(['hanlp', 'jieba', 'bigram'])
+const SEGMENTATION_DEGRADED_PROFILE = 'canonical.phrase.v1'
 
 function clampSize(size) {
   return Math.min(Math.max(Number(size) || DEFAULT_SIZE, 1), MAX_SIZE)
@@ -29,6 +48,202 @@ function normalizeOffset(offset) {
 
 function wildcardSubstring(term) {
   return `*${String(term).replace(/[\\*?]/g, '\\$&')}*`
+}
+
+function boundedQueryAnalysis(metadata, tokens, {
+  tokenCount = null,
+  truncated = false,
+} = {}) {
+  const safeTokens = (Array.isArray(tokens) ? tokens : [])
+    .filter((token) => typeof token === 'string' && token.trim())
+    .map((token) => token.trim())
+  const observedTokenCount = Number.isSafeInteger(tokenCount) && tokenCount >= safeTokens.length
+    ? tokenCount
+    : safeTokens.length
+  return {
+    tokens: safeTokens.slice(0, SEARCH_EXECUTION_TOKEN_LIMIT),
+    tokenCount: observedTokenCount,
+    truncated: Boolean(truncated || observedTokenCount > SEARCH_EXECUTION_TOKEN_LIMIT),
+    backendUsed: SEARCH_BACKENDS.has(metadata?.backendUsed) ? metadata.backendUsed : null,
+    degraded: Boolean(metadata?.degraded),
+    errorCode: typeof metadata?.errorCode === 'string' && metadata.errorCode.length <= 64
+      ? metadata.errorCode
+      : null,
+  }
+}
+
+function utf8Prefix(value, byteLimit) {
+  let bytes = 0
+  let prefix = ''
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, 'utf8')
+    if (bytes + characterBytes > byteLimit) break
+    prefix += character
+    bytes += characterBytes
+  }
+  return prefix
+}
+
+// Degraded tokenizer output is evidence only: the phrase fallback never uses
+// it to build the Elasticsearch query. Keep a small, UTF-8-safe sample
+// for diagnostics and the signed cursor instead of rejecting the search when
+// an unhealthy backend returns an unexpectedly large token list.
+function boundedDegradedTokenEvidence(value) {
+  const source = Array.isArray(value) ? value : []
+  const tokens = []
+  let remainingBytes = SEARCH_DEGRADED_TOKEN_BYTE_LIMIT
+  let clipped = false
+  const scanLimit = Math.min(source.length, SEARCH_DEGRADED_TOKEN_SCAN_LIMIT)
+  for (let index = 0; index < scanLimit; index += 1) {
+    if (tokens.length >= SEARCH_EXECUTION_TOKEN_LIMIT || remainingBytes <= 0) break
+    const token = source[index]
+    if (typeof token !== 'string' || !token.trim()) continue
+    const normalized = token.trim()
+    const prefix = utf8Prefix(normalized, remainingBytes)
+    if (!prefix) {
+      clipped = true
+      break
+    }
+    tokens.push(prefix)
+    remainingBytes -= Buffer.byteLength(prefix, 'utf8')
+    if (prefix !== normalized) {
+      clipped = true
+      break
+    }
+  }
+  return {
+    tokens,
+    tokenCount: source.length,
+    truncated: clipped || tokens.length < source.length,
+  }
+}
+
+function analysisTokens(value, { cursor = false } = {}) {
+  const invalid = () => {
+    throw new AppError(
+      cursor ? 400 : 503,
+      cursor ? 'invalid_cursor' : 'search_analysis_unavailable',
+      cursor
+        ? 'Search cursor analysis state is invalid; restart from the first page'
+        : 'The selected search profile produced invalid query terms',
+    )
+  }
+  if (!Array.isArray(value) || value.length > SEARCH_ANALYSIS_STATE_TOKEN_LIMIT) invalid()
+  const tokens = []
+  let characterCount = 0
+  for (const token of value) {
+    if (typeof token !== 'string') invalid()
+    const normalized = token.trim()
+    if (!normalized || [...normalized].length > 512) invalid()
+    characterCount += [...normalized].length
+    if (characterCount > SEARCH_ANALYSIS_STATE_CHARACTER_LIMIT) invalid()
+    tokens.push(normalized)
+  }
+  return tokens
+}
+
+function analysisState({ appliedProfile, tokens, queryAnalysis }) {
+  return {
+    v: SEARCH_ANALYSIS_STATE_VERSION,
+    appliedProfile: appliedProfile.id,
+    tokens: [...tokens],
+    backendUsed: queryAnalysis.backendUsed,
+    degraded: queryAnalysis.degraded,
+    errorCode: queryAnalysis.errorCode,
+  }
+}
+
+function invalidCursorAnalysis(message = 'Search cursor analysis state is invalid; restart from the first page') {
+  return new AppError(400, 'invalid_cursor', message)
+}
+
+function restoreAnalysisState(value, requestedProfile) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  if (value.v !== SEARCH_ANALYSIS_STATE_VERSION || typeof value.degraded !== 'boolean') {
+    throw invalidCursorAnalysis()
+  }
+  if (value.backendUsed !== null && !SEARCH_BACKENDS.has(value.backendUsed)) {
+    throw invalidCursorAnalysis()
+  }
+  if (value.errorCode !== null && (
+    typeof value.errorCode !== 'string' || !value.errorCode || value.errorCode.length > 64
+  )) {
+    throw invalidCursorAnalysis()
+  }
+  if (!searchProfileNeedsSegmentation(requestedProfile) && (
+    value.tokens?.length > 0 || value.backendUsed !== null || value.degraded || value.errorCode !== null
+  )) {
+    throw invalidCursorAnalysis()
+  }
+  let appliedProfile
+  try {
+    appliedProfile = resolveSearchProfile(value.appliedProfile, { audience: 'admin' })
+  } catch {
+    throw invalidCursorAnalysis()
+  }
+  const tokens = analysisTokens(value.tokens, { cursor: true })
+  const queryAnalysis = boundedQueryAnalysis({
+    backendUsed: value.backendUsed,
+    degraded: value.degraded,
+    errorCode: value.errorCode,
+  }, tokens)
+  const expectedAppliedProfile = searchProfileNeedsSegmentation(requestedProfile) && value.degraded
+    ? resolveSearchProfile(SEGMENTATION_DEGRADED_PROFILE, { audience: 'admin' })
+    : requestedProfile
+  if (appliedProfile.id !== expectedAppliedProfile.id) {
+    throw invalidCursorAnalysis('Search cursor profile state is invalid; restart from the first page')
+  }
+  return { appliedProfile, tokens, queryAnalysis }
+}
+
+function activeContentIndexSchema(readAlias, aliasResponse) {
+  const escaped = String(readAlias).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const matcher = new RegExp(`^${escaped}-v(\\d+)(?:-|$)`)
+  const versions = [...new Set(Object.keys(aliasResponse || {}).flatMap((index) => {
+    const match = matcher.exec(index)
+    return match ? [Number(match[1])] : []
+  }))]
+  if (versions.length === 0) return null
+  if (versions.length > 1) return 'mixed'
+  return `content-v${versions[0]}`
+}
+
+function matchedQueryNames(hit) {
+  if (Array.isArray(hit?.matched_queries)) return hit.matched_queries
+  if (hit?.matched_queries && typeof hit.matched_queries === 'object') {
+    return Object.keys(hit.matched_queries)
+  }
+  return []
+}
+
+function safeMatchEvidence(hit, allowedBranches) {
+  return [...new Set(matchedQueryNames(hit)
+    .filter((name) => typeof name === 'string' && allowedBranches.has(name)))]
+    .sort()
+}
+
+function degradedSegmentationWarning(queryAnalysis) {
+  const backend = queryAnalysis.backendUsed || 'an unverified fallback tokenizer'
+  const reason = queryAnalysis.errorCode ? ` (${queryAnalysis.errorCode})` : ''
+  return `Query segmentation degraded to ${backend}${reason}; ${SEGMENTATION_DEGRADED_PROFILE} was applied so fallback tokens are not compared with pre-segmented fields built under different tokenizer provenance.`
+}
+
+function searchExecution({
+  requestedProfile,
+  appliedProfile,
+  queryAnalysis,
+  matchedBranches = [],
+  warning = undefined,
+}) {
+  const applied = publicSearchProfile(appliedProfile)
+  return {
+    requestedProfile: requestedProfile.id,
+    appliedProfile: appliedProfile.id,
+    profile: applied,
+    queryAnalysis,
+    matchedBranches: [...new Set(matchedBranches)].sort(),
+    warning: warning === undefined ? (applied?.warning ?? null) : warning,
+  }
 }
 
 /**
@@ -99,6 +314,47 @@ export class SearchQueries {
 
   get available() {
     return Boolean(this.client)
+  }
+
+  async searchCapabilities({ audience = 'admin' } = {}) {
+    let activeIndexSchema = null
+    let readinessError = null
+    try {
+      activeIndexSchema = await this.#activeContentIndexSchema()
+    } catch (error) {
+      readinessError = 'search_projection_unavailable'
+      this.logger?.warn?.(`[search] unable to inspect content read alias: ${error.message}`)
+    }
+    return {
+      ...profileSearchCapabilities({ audience, activeIndexSchema }),
+      readinessError,
+    }
+  }
+
+  async #activeContentIndexSchema() {
+    if (!this.client) return null
+    if (typeof this.client.getAlias !== 'function') return null
+    try {
+      const aliases = await this.client.getAlias(this.indexSet.readAlias)
+      return activeContentIndexSchema(this.indexSet.readAlias, aliases)
+    } catch (error) {
+      if (error?.status === 404) return null
+      throw error
+    }
+  }
+
+  async #assertProfileIndexReady(profile) {
+    const requiredIndexSchema = searchProfileRequiredIndexSchema(profile)
+    if (!requiredIndexSchema) return
+    const activeIndexSchema = await this.#activeContentIndexSchema()
+    if (activeIndexSchema !== requiredIndexSchema) {
+      throw new AppError(
+        503,
+        'search_profile_unavailable',
+        `Search profile ${profile.id} requires ${requiredIndexSchema}, but the active read index is ${activeIndexSchema || 'not ready'}`,
+        { searchProfile: profile.id, requiredIndexSchema, activeIndexSchema },
+      )
+    }
   }
 
   /**
@@ -332,11 +588,19 @@ export class SearchQueries {
     size = DEFAULT_SIZE,
     cursor = null,
     offset = null,
-    strictRelevance = true,
+    searchProfile = null,
+    strictRelevance = undefined,
     trackTotalHits = false,
   } = {}) {
     const limit = clampSize(size)
     const normalizedOffset = normalizeOffset(offset)
+    // `strictRelevance:false` was an internal diagnostic switch before named
+    // profiles existed. Keep that exact behaviour available to old callers,
+    // while every omitted/true call resolves to the stable public default.
+    const requestedProfile = resolveSearchProfile(
+      searchProfile ?? (strictRelevance === false ? 'canonical.legacy-or.v1' : DEFAULT_SEARCH_PROFILE),
+      { audience: 'admin' },
+    )
     if (cursor && normalizedOffset != null) {
       throw new AppError(400, 'incompatible_search_pagination', 'Search cursor and offset cannot be used together')
     }
@@ -348,10 +612,47 @@ export class SearchQueries {
         platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
         fromTime, toTime, limit, cursor, offset: normalizedOffset,
         includeTotal: trackTotalHits || normalizedOffset != null,
+        requestedProfile,
       })
     }
     let pitId = cursor?.pitId ?? null
     try {
+      if (!pitId) await this.#assertProfileIndexReady(requestedProfile)
+      const restoredAnalysis = restoreAnalysisState(cursor?.analysisState, requestedProfile)
+      let segmentMetadata = null
+      let tokens = []
+      let queryAnalysis = null
+      let appliedProfile = requestedProfile
+      if (restoredAnalysis) {
+        tokens = restoredAnalysis.tokens
+        queryAnalysis = restoredAnalysis.queryAnalysis
+        appliedProfile = restoredAnalysis.appliedProfile
+      } else if (searchProfileNeedsSegmentation(requestedProfile)) {
+        if (typeof this.segmenter.segmentWithMeta === 'function') {
+          segmentMetadata = await this.segmenter.segmentWithMeta(query)
+          if (segmentMetadata?.degraded) {
+            const evidence = boundedDegradedTokenEvidence(segmentMetadata?.tokens)
+            tokens = evidence.tokens
+            queryAnalysis = boundedQueryAnalysis(segmentMetadata, tokens, evidence)
+          } else {
+            tokens = analysisTokens(segmentMetadata?.tokens || [])
+          }
+        } else {
+          tokens = analysisTokens(await this.segmenter.segment(query))
+        }
+      }
+      queryAnalysis ??= boundedQueryAnalysis(segmentMetadata, tokens)
+      const segmentationDegraded = searchProfileNeedsSegmentation(requestedProfile)
+        && queryAnalysis.degraded
+      if (!restoredAnalysis && segmentationDegraded) {
+        appliedProfile = resolveSearchProfile(SEGMENTATION_DEGRADED_PROFILE, { audience: 'admin' })
+      }
+      const executionWarning = segmentationDegraded
+        ? degradedSegmentationWarning(queryAnalysis)
+        : undefined
+      const cursorAnalysisState = analysisState({ appliedProfile, tokens, queryAnalysis })
+      const segmented = toPresegmentedText(tokens)
+      const plan = buildContentSearchPlan({ profile: appliedProfile, query, segmented })
       if (!pitId) {
         const opened = await this.client.request(
           'POST',
@@ -360,8 +661,6 @@ export class SearchQueries {
         pitId = opened?.id
         if (!pitId) throw new Error('Elasticsearch did not return a point-in-time id')
       }
-      const tokens = await this.segmenter.segment(query)
-      const segmented = toPresegmentedText(tokens)
       const filter = [
         ...(platform ? [{ term: { platform } }] : []),
         ...(Array.isArray(platforms) && platforms.length > 0 ? [{ terms: { platform: platforms } }] : []),
@@ -393,28 +692,7 @@ export class SearchQueries {
         ],
         query: {
           bool: {
-            should: [
-              {
-                multi_match: {
-                  query,
-                  fields: ['title^3', 'body', 'chatUsername^2'],
-                  // The standard analyzer tokenizes Han text to individual
-                  // ideographs. An OR-style best_fields query therefore lets a
-                  // long Chinese query admit documents sharing one character.
-                  // A raw phrase is the precise substring path; the segmented
-                  // branch below supplies order-insensitive word recall.
-                  type: strictRelevance ? 'phrase' : 'best_fields',
-                },
-              },
-              {
-                multi_match: {
-                  query: segmented,
-                  fields: ['titleHanlp^3', 'bodyHanlp', 'chatUsernameHanlp^2'],
-                  type: 'best_fields',
-                  ...(strictRelevance ? { operator: 'and' } : {}),
-                },
-              },
-            ],
+            should: plan.should,
             minimum_should_match: 1,
             ...(filter.length ? { filter } : {}),
           },
@@ -429,6 +707,8 @@ export class SearchQueries {
       const hits = response.hits?.hits || []
       const total = response.hits?.total?.value ?? 0
       const pageHits = hits.slice(0, limit)
+      const allowedBranches = knownMatchBranches(appliedProfile)
+      const evidence = pageHits.map((hit) => safeMatchEvidence(hit, allowedBranches))
       const hasMore = normalizedOffset == null
         ? hits.length > limit
         : normalizedOffset + pageHits.length < total
@@ -445,11 +725,20 @@ export class SearchQueries {
           mode: 'elasticsearch',
           pitId: currentPitId,
           searchAfter: pageHits.at(-1)?.sort,
+          analysisState: cursorAnalysisState,
         } : null,
-        items: pageHits.map((hit) => ({
+        searchExecution: searchExecution({
+          requestedProfile,
+          appliedProfile,
+          queryAnalysis,
+          matchedBranches: evidence.flat(),
+          warning: executionWarning,
+        }),
+        items: pageHits.map((hit, index) => ({
           ...hit._source,
           score: hit._score,
           highlight: hit.highlight ?? null,
+          matchEvidence: evidence[index],
         })),
       }
     } catch (error) {
@@ -468,6 +757,7 @@ export class SearchQueries {
           platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
           fromTime, toTime, limit, cursor: null, offset: normalizedOffset,
           includeTotal: trackTotalHits || normalizedOffset != null,
+          requestedProfile,
         })
       }
       throw error
@@ -569,6 +859,7 @@ export class SearchQueries {
     cursor,
     offset,
     includeTotal,
+    requestedProfile,
   }) {
     const { rows } = await this.pool.query(
       `WITH matching AS (
@@ -636,6 +927,7 @@ export class SearchQueries {
       ? rows.length > limit
       : offset + pageRows.length < exactTotal
     const last = pageRows.at(-1)
+    const appliedProfile = postgresSearchProfile()
     return {
       mode: 'postgres',
       ...(includeTotal ? {
@@ -648,6 +940,16 @@ export class SearchQueries {
         pitId: null,
         searchAfter: [last.event_time ? new Date(last.event_time).toISOString() : null, last.id],
       } : null,
+      searchExecution: searchExecution({
+        requestedProfile,
+        appliedProfile,
+        queryAnalysis: boundedQueryAnalysis({
+          backendUsed: null,
+          degraded: true,
+          errorCode: 'search_projection_degraded',
+        }, []),
+        matchedBranches: pageRows.length > 0 ? ['postgres_substring'] : [],
+      }),
       items: pageRows.map((row) => ({
         id: row.id,
         datasetId: row.dataset_id,
@@ -664,6 +966,7 @@ export class SearchQueries {
         metrics: row.stable_fields?.metrics ?? {},
         score: null,
         highlight: null,
+        matchEvidence: ['postgres_substring'],
       })),
     }
   }

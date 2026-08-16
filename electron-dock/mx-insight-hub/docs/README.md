@@ -20,10 +20,44 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | Data ingest and serving plane | Admin-token-only PostgreSQL/file source management, browser upload, allowlisted server-file paths, content observations, reusable immutable format rules, canonical records/revisions/tombstones, projection outbox, durable queues/cursors, interpretation-aware file idempotency, PostgreSQL external pull and import-run evidence are implemented. PostgreSQL credentials live directly in `catalog.external_sources.connection`; catalog backups are therefore sensitive. `/shared_dir` directory watcher/landing agent, immutable object/cloud storage adapters, prompt CRUD, a generic CDC connector and non-PostgreSQL database connectors are not. |
 | Telegram monitor sources | `telegram.monitor.chats.v1` and `telegram.monitor.messages.v1`, a fixed two-input business task, explicit idempotent source-contract preparation, source progress/import evidence, strict history, Night-All-v1-compatible stored search and fuzzy entity search are implemented. Preparation installs the database-enforced watermark/trigger/index contract with one-request DDL credentials while ordinary ingest stays read-only; activation remains fail-closed until probe and writer attestation pass. These canonical datasets have no `tenant_id`; all consumers with the `telegram` grant read the same corpus. |
 | Telegram SQLite read API | `telegram.sqlite.chats.v1` and `telegram.sqlite.messages.v1` are a separate fixed, Admin-managed GET-only pipeline. It preserves raw JSON and deletion-marked rows in PostgreSQL, uses deterministic identities and Hub transaction idempotency, and performs an initial/manual full alignment followed by append-oriented overlap polling plus a bounded previous-day window at 02:00 Asia/Shanghai. It never schedules an automatic historical full scan and is not merged into the PostgreSQL public Telegram datasets. |
-| Search/retrieval | Canonical projection outbox, projector, unified cross-platform stored search, strict Chinese relevance, PostgreSQL degradation paths, Admin semantic search and a guarded projector-only reindex command are implemented. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
+| Search/retrieval | Canonical projection outbox, projector, unified cross-platform stored search, strict Chinese relevance, PostgreSQL degradation paths, Admin semantic search and a guarded projector-only reindex command are implemented. The repository includes versioned allowlisted profiles and the content-v4 mapping; each deployed environment remains gated on its strict blue/green index validation. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
 | Private/public DNS routes | Deliberately not auto-created. They require route/TLS review and a deployed public Service. |
 | Billing, BI and Data Agent | Designed as later phases; the MVP has mutable request/usage evidence, not an append-only billing ledger or invoice engine. |
 | Backup/PITR and ELK/SLO | Target runbooks are documented but automation/exporters are not implemented yet; these remain production release gates. |
+
+## Search evolution boundary
+
+- The repository declares content v4; an environment whose read alias still
+  points to content v3 stays on v3 until a strict PG-to-ES rebuild has populated
+  and validated v4. The v4 capability set is deliberately bounded: raw
+  standard, HanLP coarse pre-segmented, title/body CJK bigram and title-only
+  edge-prefix fields.
+- Search behavior is expressed as immutable allowlisted profiles. The strict
+  baseline is `canonical.balanced.v1`; `canonical.phrase.v1`,
+  `canonical.terms-all.v1`, `canonical.zh-recall.v1` and
+  `canonical.title-prefix.v1` cover public product intents, while
+  `canonical.cjk-bigram.v1` and `canonical.legacy-or.v1` stay in the Admin
+  Search Lab for comparison.
+- Default `canonical.balanced.v1` still sends each first-page query to HanLP and,
+  when that primary backend is healthy, applies all generated terms to the
+  legacy-named `*Hanlp` pre-segmented fields with AND alongside raw phrase. If
+  HanLP degrades to Jieba/bigram, those incompatible fallback terms are reported
+  but are not compared with HanLP postings: the applied profile becomes
+  `canonical.phrase.v1`. The signed cursor preserves the first page's profile,
+  tokens and backend for every later page. CJK bigram only joins a healthy
+  `canonical.zh-recall.v1` query as a lower-weight branch.
+- Query-time scoring/operator/analyzer selection over existing compatible
+  postings does not require a rebuild. A new index-time token representation
+  always uses a schema-versioned blue/green rebuild; adding a multi-field without
+  replaying historical records is not considered complete.
+- Public callers never receive arbitrary Elasticsearch index, field, analyzer,
+  DSL, script, boost or full explain controls. The IK max-word/smart principle is
+  represented by separate MX token views plus a narrower query profile, without
+  installing IK or HanLP inside Elasticsearch.
+- The authoritative lifecycle and guardrails are documented in
+  [Data-platform storage and serving](architecture/data-platform-storage-and-serving.md#43-版本化搜索-profiles),
+  [Search and observability stack](operations/search-and-observability-stack.md#42-content-v4-与搜索-profile-变更手册),
+  and [ADR-0009](adr/0009-unified-canonical-search.md#search-profiles-and-analysis-lifecycle).
 
 ## Read in this order
 

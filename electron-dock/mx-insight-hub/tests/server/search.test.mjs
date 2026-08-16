@@ -10,6 +10,12 @@ import {
 } from '../../server/search/index.mjs'
 import { buildContentDocument } from '../../server/search/document.mjs'
 import { authorNameQuery, SearchQueries } from '../../server/search/queries.mjs'
+import {
+  DEFAULT_SEARCH_PROFILE,
+  POSTGRES_SEARCH_PROFILE,
+  resolveSearchProfile,
+  searchCapabilities,
+} from '../../server/search/profiles.mjs'
 import { SearchProjector } from '../../server/search/projector.mjs'
 import { purgeStaleCurrentStateCopies } from '../../server/search/current-state.mjs'
 import {
@@ -19,11 +25,12 @@ import {
 
 const segmenter = { segment: async (text) => fallbackSegment(text) }
 
-function searchHit(id, score, eventTime, shardDoc = 0) {
+function searchHit(id, score, eventTime, shardDoc = 0, matchedQueries = []) {
   return {
     _id: id,
     _score: score,
     sort: [score, eventTime, id, shardDoc],
+    matched_queries: matchedQueries,
     _source: { id, externalId: id, eventTime, body: 'keyword' },
   }
 }
@@ -203,6 +210,48 @@ test('strict reindex projection rejects a degraded document before its bulk writ
   assert.equal(harness.calls.bulks.length, 0, 'fallback tokens never reach Elasticsearch')
 })
 
+test('strict projector startup fails fast so reconciliation is retried by its supervisor', async () => {
+  const failure = new Error('cluster unavailable during startup')
+  const logger = { log() {}, error() {}, warn() {} }
+  await assert.rejects(
+    () => ensureSearchIndices({
+      client: { async clusterHealth() { throw failure } },
+    }, { logger, failOnError: true }),
+    (error) => error === failure,
+  )
+
+  assert.deepEqual(
+    await ensureSearchIndices({ client: null }, { logger, failOnError: true }),
+    { enabled: false, reason: 'MX_COMMON_ELASTICSEARCH_URL is not configured' },
+    'strict worker startup does not change the shared ES-optional contract',
+  )
+})
+
+test('strict projector startup also fails fast on a reported mapping conflict', async () => {
+  const indexSet = contentIndex()
+  const harness = currentIndexHarness(indexSet, {
+    [indexSet.currentIndex]: {
+      [indexSet.readAlias]: {},
+      [indexSet.writeAlias]: { is_write_index: true },
+    },
+  })
+  harness.client.clusterHealth = async () => ({ status: 'yellow' })
+  harness.client.putMapping = async () => {
+    throw new ElasticsearchError(400, { error: { reason: 'incompatible content field' } })
+  }
+
+  await assert.rejects(
+    () => ensureSearchIndices({
+      client: harness.client,
+      pool: currentSnapshotPool('FROM core.canonical_records', []).pool,
+      segmenter: { async segment() { return [] } },
+      indexSet,
+      chunkIndexSet: null,
+    }, { logger: { log() {}, error() {}, warn() {} }, failOnError: true }),
+    /Content index mapping conflict: incompatible content field/,
+  )
+})
+
 test('content search uses PIT search_after beyond the 10k window and ignores total relation gte', async () => {
   const calls = []
   const hits = [
@@ -249,6 +298,14 @@ test('content search uses PIT search_after beyond the 10k window and ignores tot
     mode: 'elasticsearch',
     pitId: 'pit-renewed',
     searchAfter: hits[1].sort,
+    analysisState: {
+      v: 1,
+      appliedProfile: DEFAULT_SEARCH_PROFILE,
+      tokens: ['keyword'],
+      backendUsed: null,
+      degraded: false,
+      errorCode: null,
+    },
   })
 })
 
@@ -343,6 +400,339 @@ test('explicit relaxed relevance remains available while strict relevance is the
   assert.equal(searches[0].query.bool.should[1].multi_match.operator, 'and')
   assert.equal(searches[1].query.bool.should[0].multi_match.type, 'best_fields')
   assert.equal(searches[1].query.bool.should[1].multi_match.operator, undefined)
+})
+
+test('search profile registry exposes a bounded public allowlist and keeps diagnostics admin-only', () => {
+  const publicCapabilities = searchCapabilities()
+  assert.equal(publicCapabilities.indexSchema, 'content-v4')
+  assert.equal(publicCapabilities.defaultProfile, DEFAULT_SEARCH_PROFILE)
+  assert.deepEqual(publicCapabilities.profiles.map((entry) => entry.id), [
+    'canonical.balanced.v1',
+    'canonical.phrase.v1',
+    'canonical.terms-all.v1',
+    'canonical.zh-recall.v1',
+    'canonical.title-prefix.v1',
+  ])
+  assert.match(
+    publicCapabilities.profiles.find((entry) => entry.id === DEFAULT_SEARCH_PROFILE).summary,
+    /HanLP\/pre-segmented.*AND/i,
+  )
+  assert.match(
+    publicCapabilities.profiles.find((entry) => entry.id === 'canonical.zh-recall.v1').summary,
+    /low-weight recall/i,
+  )
+  const prefixProfile = publicCapabilities.profiles.find((entry) => entry.id === 'canonical.title-prefix.v1')
+  assert.equal(prefixProfile.maxPrefixChars, 12)
+  assert.match(prefixProfile.warning, /12 characters/i)
+  assert.equal(
+    publicCapabilities.profiles.some((entry) => entry.id === 'canonical.legacy-or.v1'),
+    false,
+  )
+
+  const adminCapabilities = searchCapabilities({ audience: 'admin' })
+  assert.ok(adminCapabilities.profiles.some((entry) => entry.id === 'canonical.cjk-bigram.v1'))
+  assert.ok(adminCapabilities.profiles.some((entry) => entry.id === 'canonical.legacy-or.v1'))
+  assert.equal(adminCapabilities.fallbackProfile.id, POSTGRES_SEARCH_PROFILE)
+  assert.equal(resolveSearchProfile(null).id, DEFAULT_SEARCH_PROFILE)
+  assert.throws(
+    () => resolveSearchProfile('canonical.legacy-or.v1'),
+    (error) => error?.code === 'invalid_search_profile' && error?.status === 400,
+  )
+  assert.throws(
+    () => resolveSearchProfile('custom.analyzer'),
+    (error) => error?.code === 'invalid_search_profile' && error?.status === 400,
+  )
+})
+
+test('named content profiles compile to fixed fields and operators', async () => {
+  const searches = []
+  const client = {
+    async getAlias(alias) {
+      return { [`${alias}-v4-current`]: { aliases: { [alias]: {} } } }
+    },
+    async request(method, path, body) {
+      if (path.includes('/_pit?')) return { id: `pit-${searches.length}` }
+      if (path === '/_search') {
+        searches.push(body)
+        return { hits: { total: { value: 0, relation: 'eq' }, hits: [] } }
+      }
+      if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
+      throw new Error(`unexpected ${method} ${path}`)
+    },
+  }
+  const queries = contentSearch({ client })
+  const profileIds = [
+    'canonical.phrase.v1',
+    'canonical.terms-all.v1',
+    'canonical.zh-recall.v1',
+    'canonical.title-prefix.v1',
+    'canonical.cjk-bigram.v1',
+    'canonical.legacy-or.v1',
+  ]
+  for (const searchProfile of profileIds) {
+    await queries.searchContent('人工智能', { searchProfile })
+  }
+
+  assert.deepEqual(searches[0].query.bool.should.map((entry) => entry.multi_match._name), ['raw_phrase'])
+  assert.deepEqual(searches[1].query.bool.should.map((entry) => entry.multi_match._name), ['terms_all'])
+  assert.equal(searches[1].query.bool.should[0].multi_match.operator, 'and')
+  assert.deepEqual(searches[2].query.bool.should.map((entry) => entry.multi_match._name), [
+    'raw_phrase', 'terms_all', 'cjk_phrase',
+  ])
+  assert.equal(searches[2].query.bool.should[2].multi_match.boost, 0.75)
+  assert.ok(searches[2].query.bool.should[2].multi_match.fields.includes('body.cjk'))
+  assert.deepEqual(searches[3].query.bool.should.map((entry) => entry.multi_match._name), ['title_prefix'])
+  assert.deepEqual(searches[3].query.bool.should[0].multi_match.fields, [
+    'title.prefix^5', 'authorName.prefix^3', 'authorHandle.prefix^3',
+    'username.prefix^3', 'chatUsername.prefix^3',
+  ])
+  assert.deepEqual(searches[4].query.bool.should.map((entry) => entry.multi_match._name), ['cjk_phrase'])
+  assert.deepEqual(searches[5].query.bool.should.map((entry) => entry.multi_match._name), [
+    'legacy_raw_or', 'legacy_terms_or',
+  ])
+  assert.equal(searches[5].query.bool.should[0].multi_match.type, 'best_fields')
+  assert.equal(searches[5].query.bool.should[1].multi_match.operator, undefined)
+
+  await assert.rejects(
+    () => queries.searchContent('人工智能', { searchProfile: 'arbitrary.dsl' }),
+    (error) => error?.code === 'invalid_search_profile' && error?.status === 400,
+  )
+})
+
+test('v4-only profiles fail closed until the read alias serves content-v4', async () => {
+  let backing = 'mx-insight-hub-content-v3-current'
+  const client = {
+    async getAlias(alias) {
+      return { [backing]: { aliases: { [alias]: {} } } }
+    },
+    async request(method, path) {
+      if (path.includes('/_pit?')) return { id: 'pit-v4-ready' }
+      if (path === '/_search') return { hits: { total: { value: 0, relation: 'eq' }, hits: [] } }
+      if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
+      throw new Error(`unexpected ${method} ${path}`)
+    },
+  }
+  const queries = new SearchQueries({
+    pool: { query: async () => ({ rows: [] }) },
+    client,
+    segmenter,
+    indexSet: { readAlias: 'mx-insight-hub-content' },
+    logger: null,
+  })
+
+  const before = await queries.searchCapabilities({ audience: 'admin' })
+  assert.equal(before.activeIndexSchema, 'content-v3')
+  assert.equal(before.ready, false)
+  assert.equal(before.profiles.find((entry) => entry.id === DEFAULT_SEARCH_PROFILE).ready, true)
+  assert.equal(before.profiles.find((entry) => entry.id === 'canonical.zh-recall.v1').ready, false)
+  await assert.rejects(
+    () => queries.searchContent('人工智能', { searchProfile: 'canonical.zh-recall.v1' }),
+    (error) => error?.status === 503
+      && error?.code === 'search_profile_unavailable'
+      && error?.details?.requiredIndexSchema === 'content-v4',
+  )
+
+  backing = 'mx-insight-hub-content-v4-current'
+  const after = await queries.searchCapabilities({ audience: 'admin' })
+  assert.equal(after.activeIndexSchema, 'content-v4')
+  assert.equal(after.ready, true)
+  assert.equal(after.profiles.find((entry) => entry.id === 'canonical.zh-recall.v1').ready, true)
+  const result = await queries.searchContent('人工智能', { searchProfile: 'canonical.title-prefix.v1' })
+  assert.equal(result.searchExecution.appliedProfile, 'canonical.title-prefix.v1')
+})
+
+test('degraded query analysis is bounded and falls back to phrase without using incompatible tokens', async () => {
+  const tokens = Array.from({ length: 600 }, (_, index) => `词${index}${'长'.repeat(200)}`)
+  let searchBody = null
+  const queries = new SearchQueries({
+    pool: { query: async () => ({ rows: [] }) },
+    client: {
+      async request(method, path, body) {
+        if (path.includes('/_pit?')) return { id: 'pit-analysis' }
+        if (path === '/_search') {
+          searchBody = body
+          return {
+            hits: {
+              total: { value: 2, relation: 'eq' },
+              hits: [
+                searchHit(
+                  '11111111-1111-4111-8111-111111111111',
+                  9,
+                  '2026-08-01T00:00:00.000Z',
+                  1,
+                  ['raw_phrase', 'physical_index_name'],
+                ),
+                searchHit(
+                  '22222222-2222-4222-8222-222222222222',
+                  8,
+                  '2026-07-31T00:00:00.000Z',
+                  2,
+                  ['raw_phrase'],
+                ),
+              ],
+            },
+          }
+        }
+        if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
+        throw new Error(`unexpected ${method} ${path}`)
+      },
+    },
+    segmenter: {
+      async segmentWithMeta() {
+        return { tokens, backendUsed: 'hanlp', degraded: true, errorCode: 'hanlp_timeout' }
+      },
+    },
+    indexSet: { readAlias: 'content' },
+    logger: null,
+  })
+
+  const result = await queries.searchContent('人工智能', { size: 1 })
+  assert.equal(result.searchExecution.requestedProfile, DEFAULT_SEARCH_PROFILE)
+  assert.equal(result.searchExecution.appliedProfile, 'canonical.phrase.v1')
+  assert.equal(result.searchExecution.queryAnalysis.backendUsed, 'hanlp')
+  assert.equal(result.searchExecution.queryAnalysis.degraded, true)
+  assert.equal(result.searchExecution.queryAnalysis.errorCode, 'hanlp_timeout')
+  assert.equal(result.searchExecution.queryAnalysis.tokenCount, 600)
+  assert.ok(result.searchExecution.queryAnalysis.tokens.length <= 64)
+  assert.equal(result.searchExecution.queryAnalysis.truncated, true)
+  assert.equal(result.hasMore, true)
+  assert.ok(result.nextCursor.analysisState.tokens.length <= 64)
+  assert.ok(Buffer.byteLength(result.nextCursor.analysisState.tokens.join(''), 'utf8') <= 512)
+  assert.ok(Buffer.byteLength(JSON.stringify(result.nextCursor.analysisState), 'utf8') < 1_024)
+  assert.deepEqual(result.searchExecution.matchedBranches, ['raw_phrase'])
+  assert.deepEqual(result.items[0].matchEvidence, ['raw_phrase'])
+  assert.deepEqual(searchBody.query.bool.should.map((entry) => entry.multi_match._name), ['raw_phrase'])
+  assert.equal(JSON.stringify(searchBody.query).includes('titleHanlp'), false)
+  assert.match(result.searchExecution.warning, /pre-segmented fields built under different tokenizer provenance/)
+  assert.equal(JSON.stringify(result).includes('physical_index_name'), false)
+})
+
+test('every segmentation-dependent profile fails soft to the fixed phrase plan without querying HanLP fields', async () => {
+  const searches = []
+  const queries = new SearchQueries({
+    pool: { query: async () => ({ rows: [] }) },
+    client: {
+      async getAlias(alias) {
+        return { [`${alias}-v4-current`]: { aliases: { [alias]: {} } } }
+      },
+      async request(method, path, body) {
+        if (path.includes('/_pit?')) return { id: `pit-degraded-${searches.length}` }
+        if (path === '/_search') {
+          searches.push(body)
+          return { hits: { total: { value: 0, relation: 'eq' }, hits: [] } }
+        }
+        if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
+        throw new Error(`unexpected ${method} ${path}`)
+      },
+    },
+    segmenter: {
+      async segmentWithMeta() {
+        return {
+          tokens: ['人工', '智能'],
+          backendUsed: 'jieba',
+          degraded: true,
+          errorCode: 'hanlp_busy',
+        }
+      },
+    },
+    indexSet: { readAlias: 'content' },
+    logger: null,
+  })
+  const profiles = [
+    DEFAULT_SEARCH_PROFILE,
+    'canonical.terms-all.v1',
+    'canonical.zh-recall.v1',
+    'canonical.legacy-or.v1',
+  ]
+
+  for (const searchProfile of profiles) {
+    const result = await queries.searchContent('人工智能', { searchProfile })
+    assert.equal(result.searchExecution.requestedProfile, searchProfile)
+    assert.equal(result.searchExecution.appliedProfile, 'canonical.phrase.v1')
+    assert.equal(result.searchExecution.queryAnalysis.backendUsed, 'jieba')
+    assert.equal(result.searchExecution.queryAnalysis.degraded, true)
+    assert.equal(result.searchExecution.queryAnalysis.errorCode, 'hanlp_busy')
+    assert.match(result.searchExecution.warning, /canonical\.phrase\.v1 was applied/)
+  }
+  for (const body of searches) {
+    assert.deepEqual(body.query.bool.should.map((entry) => entry.multi_match._name), ['raw_phrase'])
+    assert.equal(JSON.stringify(body.query).includes('Hanlp'), false)
+  }
+})
+
+test('Elasticsearch cursor pages reuse the first analysis state without calling the segmenter again', async () => {
+  let segmentCalls = 0
+  const searchBodies = []
+  const hits = [
+    searchHit('22222222-2222-4222-8222-222222222222', 8, '2026-08-02T00:00:00.000Z', 2),
+    searchHit('11111111-1111-4111-8111-111111111111', 7, '2026-08-01T00:00:00.000Z', 1),
+  ]
+  const queries = new SearchQueries({
+    pool: { query: async () => ({ rows: [] }) },
+    client: {
+      async request(method, path, body) {
+        if (path.includes('/_pit?')) return { id: 'pit-frozen-analysis' }
+        if (path === '/_search') {
+          searchBodies.push(body)
+          return searchBodies.length === 1
+            ? { pit_id: 'pit-frozen-analysis', hits: { total: { value: 2, relation: 'eq' }, hits } }
+            : { pit_id: 'pit-frozen-analysis', hits: { total: { value: 2, relation: 'eq' }, hits: [] } }
+        }
+        if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
+        throw new Error(`unexpected ${method} ${path}`)
+      },
+    },
+    segmenter: {
+      async segmentWithMeta() {
+        segmentCalls += 1
+        if (segmentCalls > 1) throw new Error('segmenter must not run for a cursor page')
+        return { tokens: ['人工智能'], backendUsed: 'hanlp', degraded: false, errorCode: null }
+      },
+    },
+    indexSet: { readAlias: 'content' },
+    logger: null,
+  })
+
+  const first = await queries.searchContent('人工智能', { size: 1 })
+  const second = await queries.searchContent('人工智能', { size: 1, cursor: first.nextCursor })
+  assert.equal(segmentCalls, 1)
+  assert.equal(first.nextCursor.analysisState.appliedProfile, DEFAULT_SEARCH_PROFILE)
+  assert.deepEqual(first.nextCursor.analysisState.tokens, ['人工智能'])
+  assert.equal(second.searchExecution.queryAnalysis.backendUsed, 'hanlp')
+  assert.equal(second.searchExecution.appliedProfile, DEFAULT_SEARCH_PROFILE)
+  assert.deepEqual(searchBodies[1].search_after, first.nextCursor.searchAfter)
+  assert.equal(searchBodies[1].query.bool.should[1].multi_match.query, '人工智能')
+})
+
+test('analysis state rejects oversized tokenizer evidence before opening a PIT', async () => {
+  let elasticsearchCalls = 0
+  const queries = new SearchQueries({
+    pool: { query: async () => ({ rows: [] }) },
+    client: {
+      async request() {
+        elasticsearchCalls += 1
+        throw new Error('Elasticsearch must not be called for oversized analysis')
+      },
+    },
+    segmenter: {
+      async segmentWithMeta() {
+        return {
+          tokens: Array.from({ length: 5 }, (_, index) => `${index}${'词'.repeat(500)}`),
+          backendUsed: 'hanlp',
+          degraded: false,
+          errorCode: null,
+        }
+      },
+    },
+    indexSet: { readAlias: 'content' },
+    logger: null,
+  })
+
+  await assert.rejects(
+    () => queries.searchContent('人工智能'),
+    (error) => error?.status === 503 && error?.code === 'search_analysis_unavailable',
+  )
+  assert.equal(elasticsearchCalls, 0)
 })
 
 test('canonical content search applies the granted-platform intersection, strict terms and exact totals', async () => {
@@ -466,6 +856,13 @@ test('PostgreSQL content fallback uses the same stable null-aware keyset and nev
   assert.equal(captured.values[10], null)
   assert.equal(result.hasMore, true)
   assert.deepEqual(result.nextCursor.searchAfter, [null, rows[0].id])
+  assert.equal(result.searchExecution.requestedProfile, DEFAULT_SEARCH_PROFILE)
+  assert.equal(result.searchExecution.appliedProfile, POSTGRES_SEARCH_PROFILE)
+  assert.equal(result.searchExecution.queryAnalysis.backendUsed, null)
+  assert.equal(result.searchExecution.queryAnalysis.degraded, true)
+  assert.equal(result.searchExecution.queryAnalysis.errorCode, 'search_projection_degraded')
+  assert.match(result.searchExecution.warning, /PostgreSQL substring/i)
+  assert.deepEqual(result.items[0].matchEvidence, ['postgres_substring'])
 })
 
 test('PostgreSQL offset search returns an exact total without exposing a keyset cursor', async () => {
@@ -630,8 +1027,8 @@ test('an expired PIT is reported as an expired cursor instead of restarting on P
 test('content index derives read alias, write alias and bootstrap index', () => {
   const definition = contentIndex()
   assert.equal(definition.readAlias, 'mx-insight-hub-content')
-  assert.equal(definition.writeAlias, 'mx-insight-hub-content-v3')
-  assert.equal(definition.currentIndex, 'mx-insight-hub-content-v3-current')
+  assert.equal(definition.writeAlias, 'mx-insight-hub-content-v4')
+  assert.equal(definition.currentIndex, 'mx-insight-hub-content-v4-current')
   assert.equal(definition.bootstrapIndex, definition.currentIndex)
   assert.equal(definition.settings['index.lifecycle.name'], undefined)
   assert.equal(definition.settings['index.lifecycle.rollover_alias'], undefined)
@@ -639,6 +1036,10 @@ test('content index derives read alias, write alias and bootstrap index', () => 
 
 test('content mapping carries the author fields the projector writes', () => {
   const { properties } = contentIndex().mappings
+  assert.equal(properties.title.fields.prefix.analyzer, 'mx_edge_ngram')
+  assert.equal(properties.title.fields.prefix.search_analyzer, 'mx_edge_ngram_search')
+  assert.equal(properties.title.fields.cjk.analyzer, 'mx_cjk_bigram')
+  assert.equal(properties.body.fields.cjk.analyzer, 'mx_cjk_bigram')
   // The original template had no author fields at all, which under
   // `dynamic: strict` would have rejected every document.
   assert.ok(properties.authorName, 'authorName is mapped')
@@ -674,7 +1075,7 @@ function currentIndexHarness(indexSet, memberships) {
   const aliasesByIndex = new Map(
     Object.entries(memberships).map(([index, aliases]) => [index, new Map(Object.entries(aliases))]),
   )
-  const calls = { templates: [], creates: [], bulks: [], aliasActions: [] }
+  const calls = { templates: [], creates: [], bulks: [], aliasActions: [], readAliasesDuringBulk: [] }
   const existing = new Set(Object.keys(memberships))
   const aliasResponse = (pattern) => {
     const matches = pattern.endsWith('*')
@@ -711,6 +1112,7 @@ function currentIndexHarness(indexSet, memberships) {
     async putMapping() {},
     async bulk(operations) {
       calls.bulks.push(operations)
+      calls.readAliasesDuringBulk.push(Object.keys(aliasResponse(indexSet.readAlias)).sort())
       return {
         errors: false,
         items: operations
@@ -757,13 +1159,15 @@ function currentSnapshotPool(matchSql, rows, { deletions = [] } = {}) {
   }
 }
 
-test('content current index atomically replaces v1/v2 read memberships with v3 PostgreSQL truth', async () => {
+test('content current index atomically replaces v1-v3 read memberships with v4 PostgreSQL truth', async () => {
   const indexSet = contentIndex()
   const oldV1 = 'mx-insight-hub-content-v1-000001'
   const oldV2 = 'mx-insight-hub-content-v2-000001'
+  const oldV3 = 'mx-insight-hub-content-v3-current'
   const harness = currentIndexHarness(indexSet, {
     [oldV1]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v1': { is_write_index: true } },
     [oldV2]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v2': { is_write_index: true } },
+    [oldV3]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v3': { is_write_index: true } },
   })
   const live = canonicalRow()
   const deleted = canonicalRow({
@@ -782,12 +1186,18 @@ test('content current index atomically replaces v1/v2 read memberships with v3 P
   })
 
   assert.equal(result.rebuilt, true)
-  assert.equal(result.currentIndex, 'mx-insight-hub-content-v3-current')
+  assert.equal(result.currentIndex, 'mx-insight-hub-content-v4-current')
   assert.equal(harness.calls.templates.length, 1)
   assert.equal(harness.calls.templates[0].body.template.aliases, undefined, 'partial rebuild is never exposed by a template alias')
   assert.equal(harness.calls.templates[0].body.template.settings['index.lifecycle.name'], undefined)
   assert.equal(harness.calls.creates[0].index, indexSet.currentIndex)
   assert.equal(harness.calls.bulks.length, 2, 'snapshot is replayed after the alias cutover')
+  assert.deepEqual(
+    harness.calls.readAliasesDuringBulk[0],
+    [oldV1, oldV2, oldV3],
+    'v1-v3 remain readable until the first complete v4 snapshot has succeeded',
+  )
+  assert.deepEqual(harness.calls.readAliasesDuringBulk[1], [indexSet.currentIndex])
   assert.equal(harness.calls.bulks[0][0].index.version_type, 'external_gte')
   assert.equal(harness.calls.bulks[0][2].delete.version_type, 'external_gte')
 
@@ -795,7 +1205,9 @@ test('content current index atomically replaces v1/v2 read memberships with v3 P
   const actions = harness.calls.aliasActions[0]
   assert.ok(actions.some(({ remove }) => remove?.index === oldV1 && remove.alias === indexSet.readAlias))
   assert.ok(actions.some(({ remove }) => remove?.index === oldV2 && remove.alias === indexSet.readAlias))
+  assert.ok(actions.some(({ remove }) => remove?.index === oldV3 && remove.alias === indexSet.readAlias))
   assert.ok(actions.some(({ add }) => add?.index === indexSet.currentIndex && add.alias === 'mx-insight-hub-content-v1'))
+  assert.ok(actions.some(({ add }) => add?.index === indexSet.currentIndex && add.alias === 'mx-insight-hub-content-v3'))
   assert.deepEqual(Object.keys(harness.aliasResponse(indexSet.readAlias)), [indexSet.currentIndex])
   assert.ok(snapshot.queries.some(({ sql }) => sql.includes('pg_advisory_lock')))
   assert.ok(snapshot.queries.some(({ sql }) => sql.includes('pg_advisory_unlock')))
@@ -1346,6 +1758,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     'mx-insight-hub-content-v1-000001',
     'mx-insight-hub-content-v2-000001',
     'mx-insight-hub-content-v3-current',
+    'mx-insight-hub-content-v4-current',
   ]
   let cleanupRequest = null
   let bulkBody = null
@@ -1367,9 +1780,9 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     logger: { log() {}, warn() {}, error() {} },
     client: {
       async getAlias(alias) {
-        if (alias === 'mx-insight-hub-content-v3') {
+        if (alias === 'mx-insight-hub-content-v4') {
           return {
-            [backingIndices[2]]: {
+            [backingIndices[3]]: {
               aliases: { [alias]: { is_write_index: true } },
             },
           }
@@ -1398,7 +1811,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
   assert.equal(result.failed, 0)
   assert.deepEqual(delivered, [[8]])
   assert.equal(cleanupRequest.method, 'POST')
-  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001\/_delete_by_query/)
+  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current\/_delete_by_query/)
   assert.deepEqual(
     cleanupRequest.body.query.bool.should[0].bool.filter,
     [
@@ -1415,7 +1828,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     ],
   )
   assert.equal(bulkBody.length, 1)
-  assert.equal(bulkBody[0].delete._index, backingIndices[2])
+  assert.equal(bulkBody[0].delete._index, backingIndices[3])
   assert.equal(bulkBody[0].delete.version, 4, 'the tombstone uses current PostgreSQL state')
   assert.equal(bulkBody[0].delete.version_type, 'external_gte')
 })
@@ -1426,6 +1839,7 @@ test('projector turns a stale delete into the current restored document', async 
     'mx-insight-hub-content-v1-000001',
     'mx-insight-hub-content-v2-000001',
     'mx-insight-hub-content-v3-current',
+    'mx-insight-hub-content-v4-current',
   ]
   let cleanupRequest = null
   let bulkBody = null
@@ -1444,9 +1858,9 @@ test('projector turns a stale delete into the current restored document', async 
     logger: { log() {}, warn() {}, error() {} },
     client: {
       async getAlias(alias) {
-        if (alias === 'mx-insight-hub-content-v3') {
+        if (alias === 'mx-insight-hub-content-v4') {
           return {
-            [backingIndices[2]]: {
+            [backingIndices[3]]: {
               aliases: { [alias]: { is_write_index: true } },
             },
           }
@@ -1467,9 +1881,9 @@ test('projector turns a stale delete into the current restored document', async 
   const result = await projector.projectBatch()
   assert.equal(result.delivered, 1)
   assert.equal(result.failed, 0)
-  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001\/_delete_by_query/)
+  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current\/_delete_by_query/)
   assert.equal(bulkBody.length, 2)
-  assert.equal(bulkBody[0].index._index, backingIndices[2])
+  assert.equal(bulkBody[0].index._index, backingIndices[3])
   assert.equal(bulkBody[0].index.version, 5)
   assert.equal(bulkBody[0].index.version_type, 'external')
   assert.equal(bulkBody[1].id, row.id)

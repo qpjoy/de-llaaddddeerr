@@ -2,6 +2,7 @@ import process from 'node:process'
 import { createPool, runCommonMigrations } from '@qpjoy/mx-common'
 import { loadConfig } from '../config.mjs'
 import { createSearch, ensureSearchIndices, runProjectorLoop } from '../search/index.mjs'
+import { requiredReindexBackend, requireSegmenterBackend } from '../search/reindex-integrity.mjs'
 import { createAgentRuntime } from '../agent/runtime.mjs'
 import { AgentSettingsStore } from '../agent/settings-store.mjs'
 import { EmbeddingPipeline, runEmbeddingLoop } from '../embedding/pipeline.mjs'
@@ -35,12 +36,24 @@ async function main() {
   // own, without ordering it behind the API's migration Job.
   await runCommonMigrations({ connectionString: config.common.postgres.url, logger })
 
-  const report = await ensureSearchIndices(search, { logger })
-  if (report.error) {
-    // Do not exit: the cluster may be mid-restart, and a crash loop here would
-    // delay the projector's recovery rather than help it. The loop retries.
-    logger.warn(`[projector] starting with unreconciled indices: ${report.error}`)
-  }
+  // Startup reconciliation can replace an entire schema-versioned projection.
+  // Require one verified tokenizer backend for that snapshot so a transient
+  // tokenizer failure cannot mix backends into the schema's verified baseline
+  // snapshot. Live outbox projection below deliberately keeps the ordinary
+  // fail-soft segmenter: its per-event availability contract is distinct from
+  // the verified startup/reindex baseline.
+  const strictStartupSegmenter = requireSegmenterBackend(search.segmenter, {
+    expectedBackend: requiredReindexBackend(config.common.segmenter),
+    logger,
+  })
+  const report = await ensureSearchIndices({
+    ...search,
+    segmenter: strictStartupSegmenter,
+  }, { logger, failOnError: true })
+  // A failed reconciliation must not fall through to runProjectorLoop: that
+  // loop retries outbox delivery, not schema/snapshot reconciliation. Let the
+  // fatal handler exit non-zero so the Deployment restarts this startup phase
+  // with its normal backoff.
   if (report.content?.mappingConflict) {
     logger.warn(
       `[projector] mapping conflict on ${search.indexSet.writeAlias}: ${report.content.mappingConflict}. ` +

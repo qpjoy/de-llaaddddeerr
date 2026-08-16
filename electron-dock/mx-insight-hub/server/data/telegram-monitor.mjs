@@ -104,8 +104,13 @@ export function decodeTelegramCursor(value) {
   }
 }
 
-const SEARCH_CURSOR_VERSION = 2
+const SEARCH_CURSOR_VERSION = 3
 const SEARCH_SORT_VERSION = 'es-score-eventTime-id-sharddoc-pg-eventTime-id-v2'
+const SEARCH_ANALYSIS_STATE_VERSION = 1
+const SEARCH_ANALYSIS_BACKENDS = new Set(['hanlp', 'jieba', 'bigram'])
+const SEARCH_ANALYSIS_MAX_TOKENS = 512
+const SEARCH_ANALYSIS_MAX_TOKEN_LENGTH = 512
+const SEARCH_ANALYSIS_MAX_TOTAL_LENGTH = 2_048
 
 function telegramSearchBinding(query) {
   return createHash('sha256')
@@ -137,7 +142,50 @@ function signaturesMatch(left, right) {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer)
 }
 
-export function encodeTelegramSearchCursor({ mode, pitId = null, searchAfter, seen }, binding, secret) {
+function validSearchAnalysisState(mode, value) {
+  if (mode === 'postgres') return value === null
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  if (Object.keys(value).sort().join(',') !== 'appliedProfile,backendUsed,degraded,errorCode,tokens,v') {
+    return false
+  }
+  if (
+    value.v !== SEARCH_ANALYSIS_STATE_VERSION ||
+    typeof value.appliedProfile !== 'string' ||
+    !value.appliedProfile.trim() ||
+    value.appliedProfile.length > 128 ||
+    typeof value.degraded !== 'boolean' ||
+    !(value.backendUsed === null || SEARCH_ANALYSIS_BACKENDS.has(value.backendUsed)) ||
+    !(value.errorCode === null || (typeof value.errorCode === 'string' && value.errorCode.length <= 64)) ||
+    !Array.isArray(value.tokens) ||
+    value.tokens.length > SEARCH_ANALYSIS_MAX_TOKENS
+  ) {
+    return false
+  }
+  let totalLength = 0
+  for (const token of value.tokens) {
+    if (typeof token !== 'string' || !token.trim()) return false
+    const length = [...token].length
+    if (length > SEARCH_ANALYSIS_MAX_TOKEN_LENGTH) return false
+    totalLength += length
+    if (totalLength > SEARCH_ANALYSIS_MAX_TOTAL_LENGTH) return false
+  }
+  return true
+}
+
+export function encodeTelegramSearchCursor({
+  mode,
+  pitId = null,
+  searchAfter,
+  seen,
+  analysisState = null,
+}, binding, secret) {
+  if (!validSearchAnalysisState(mode, analysisState)) {
+    throw new AppError(
+      500,
+      'cursor_configuration_error',
+      'Telegram search cursor analysis state is missing or invalid',
+    )
+  }
   const payload = {
     v: SEARCH_CURSOR_VERSION,
     m: mode,
@@ -145,6 +193,7 @@ export function encodeTelegramSearchCursor({ mode, pitId = null, searchAfter, se
     a: searchAfter,
     n: seen,
     q: binding,
+    r: analysisState,
   }
   return Buffer.from(JSON.stringify({ ...payload, s: cursorSignature(payload, secret) }), 'utf8').toString('base64url')
 }
@@ -154,8 +203,16 @@ export function decodeTelegramSearchCursor(value, binding, secret) {
   try {
     const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
     const validKeys = parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
-      Object.keys(parsed).sort().join(',') === 'a,m,n,p,q,s,v'
-    const payload = { v: parsed?.v, m: parsed?.m, p: parsed?.p, a: parsed?.a, n: parsed?.n, q: parsed?.q }
+      Object.keys(parsed).sort().join(',') === 'a,m,n,p,q,r,s,v'
+    const payload = {
+      v: parsed?.v,
+      m: parsed?.m,
+      p: parsed?.p,
+      a: parsed?.a,
+      n: parsed?.n,
+      q: parsed?.q,
+      r: parsed?.r,
+    }
     const validMode = parsed?.m === 'elasticsearch' || parsed?.m === 'postgres'
     const validPit = parsed?.m === 'elasticsearch'
       ? typeof parsed?.p === 'string' && parsed.p.length > 0 && parsed.p.length <= 4_096
@@ -173,6 +230,7 @@ export function decodeTelegramSearchCursor(value, binding, secret) {
       !validKeys || parsed?.v !== SEARCH_CURSOR_VERSION || !validMode || !validPit ||
       !validSort || !validTime ||
       !UUID_PATTERN.test(id || '') || !Number.isSafeInteger(parsed?.n) || parsed.n < 1 ||
+      !validSearchAnalysisState(parsed.m, parsed.r) ||
       parsed?.q !== binding || typeof parsed?.s !== 'string' ||
       !signaturesMatch(parsed.s, cursorSignature(payload, secret))
     ) {
@@ -185,6 +243,9 @@ export function decodeTelegramSearchCursor(value, binding, secret) {
         ? [...parsed.a]
         : [sortTime, id],
       seen: parsed.n,
+      analysisState: parsed.r == null
+        ? null
+        : { ...parsed.r, tokens: [...parsed.r.tokens] },
     }
   } catch {
     throw new AppError(400, 'invalid_cursor', 'cursor is invalid; return the previous search cursor unchanged')
@@ -402,6 +463,24 @@ export function telegramDataSearchResponse({
         cursorSecret,
       )
     : null
+  const requestedProfile = result.searchExecution?.requestedProfile
+  const appliedProfile = result.searchExecution?.appliedProfile
+  const profileDegraded = result.mode === 'elasticsearch'
+    && typeof requestedProfile === 'string'
+    && typeof appliedProfile === 'string'
+    && requestedProfile !== appliedProfile
+  const warnings = result.mode === 'postgres'
+    ? [{
+        code: 'search_projection_degraded',
+        message: 'Elasticsearch unavailable or disabled; PostgreSQL substring search was used.',
+      }]
+    : []
+  if (profileDegraded) {
+    warnings.push({
+      code: 'search_profile_degraded',
+      message: `Requested search profile ${requestedProfile} was not available; ${appliedProfile} was applied.`,
+    })
+  }
   return {
     data: {
       contractVersion: 'night-all.data-search.v1',
@@ -417,12 +496,7 @@ export function telegramDataSearchResponse({
         cursorType: hasMore ? 'opaque' : 'none',
       },
       status: 'ok',
-      warnings: result.mode === 'postgres'
-        ? [{
-            code: 'search_projection_degraded',
-            message: 'Elasticsearch unavailable or disabled; PostgreSQL substring search was used.',
-          }]
-        : [],
+      warnings,
       meta: {
         capability: 'search_posts',
         capabilityStatus: 'ready',

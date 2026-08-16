@@ -1199,20 +1199,25 @@ paths:
         consumer's complete granted-platform scope; platform, datasetId and
         objectType only narrow that scope. The server always applies the sorted
         grant set as an authorization filter. Elasticsearch uses one PIT and a
-        score/event-time/id ordering; PostgreSQL is the explicit degradation
-        path. The signed cursor is bound to the query, filters, page size and
-        platform scope. Its independent usage bucket always applies the
+        score/event-time/id plus PIT `_shard_doc` ordering; PostgreSQL is the explicit degradation
+        path. The balanced profile uses HanLP/pre-segmented terms only while
+        query analysis is healthy; degraded Jieba/bigram terms switch the
+        applied profile to raw phrase. The signed cursor is bound to the query,
+        filters, page size, resolved versioned search profile, platform scope
+        and bounded first-page analysis state, so later pages do not re-segment. searchProfile
+        selects a server-owned query policy; arbitrary analyzers, tokenizers,
+        filters and Elasticsearch DSL are rejected. Its independent usage bucket always applies the
         strictest limits across the consumer's complete current platform-grant
         set. Public items use an allowlist and exclude raw payloads, extensions,
         credentials and provider coordinates.
       x-mx-error-codes:
-        "400": [invalid_request, invalid_cursor, invalid_platform, page_size_exceeded, unsupported_fields, idempotency_key_required, invalid_idempotency_key]
+        "400": [invalid_request, invalid_cursor, invalid_platform, invalid_search_profile, page_size_exceeded, unsupported_fields, idempotency_key_required, invalid_idempotency_key]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
         "410": [search_cursor_expired]
         "429": [quota_exceeded]
-        "503": [canonical_search_unavailable, search_cursor_unavailable]
+        "503": [canonical_search_unavailable, search_cursor_unavailable, search_profile_unavailable]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -1227,7 +1232,7 @@ paths:
             examples:
               telegramAllSources:
                 summary: Telegram monitor and SQLite-import messages together
-                value: { platform: telegram, objectType: message, query: "AI Agent", pageSize: 20 }
+                value: { platform: telegram, objectType: message, query: "AI Agent", searchProfile: canonical.balanced.v1, pageSize: 20 }
               allGrantedPlatforms:
                 summary: All platforms currently granted to the consumer
                 value: { query: "AI Agent", pageSize: 20 }
@@ -1342,9 +1347,10 @@ paths:
         physical source/provider identity and credentials are never returned.
         Night-All-v1 metrics are non-negative numbers or null; invalid or
         negative source sentinels are normalized to null. Pagination uses an
-        HMAC-signed version-2 opaque cursor bound to the normalized query,
-        filters and page size. Elasticsearch uses a renewable two-minute PIT,
-        _score/eventTime/id search_after and size plus one, independent of
+        HMAC-signed version-3 opaque cursor bound to the normalized query,
+        filters, page size and bounded first-page analysis state; later pages
+        do not re-segment. Elasticsearch uses a renewable two-minute PIT,
+        _score/eventTime/id/_shard_doc search_after and size plus one, independent of
         result totals and the 10,000-hit window. PostgreSQL fallback uses a
         NULL-aware event_time/id keyset and never OFFSET. First-page ES failure
         may select PostgreSQL with a warning; the selected cursor mode is sticky.
@@ -2522,8 +2528,13 @@ components:
         platform: { type: string, minLength: 1, maxLength: 64, description: Optional exact platform filter; it must be granted. Omit it to search every currently granted platform. }
         datasetId: { type: string, minLength: 1, maxLength: 200, description: Optional exact logical dataset filter; never a physical source selector or authorization grant. }
         objectType: { type: string, minLength: 1, maxLength: 100, description: Optional exact canonical object-type filter. }
+        searchProfile:
+          type: string
+          enum: [canonical.balanced.v1, canonical.phrase.v1, canonical.terms-all.v1, canonical.zh-recall.v1, canonical.title-prefix.v1]
+          default: canonical.balanced.v1
+          description: Versioned server-owned search policy. The balanced default uses raw phrase OR all healthy HanLP/pre-segmented terms; degraded Jieba/bigram query terms cause an explicit phrase-only applied profile. Callers cannot supply arbitrary analysis settings or ES DSL.
         pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
-        cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to query, filters, page size and sorted authorized platform scope. }
+        cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to query, filters, page size, resolved search profile, sorted authorized platform scope and bounded first-page analysis state. }
     StoredSearchEnvelope:
       type: object
       additionalProperties: false
@@ -2606,7 +2617,7 @@ components:
         data:
           type: object
           additionalProperties: false
-          required: [contractVersion, source, query, scope, filters, items, pageInfo, searchMode, warnings, durationMs]
+          required: [contractVersion, source, query, scope, filters, search, items, pageInfo, searchMode, warnings, durationMs]
           properties:
             contractVersion: { type: string, const: mx-insight-hub.canonical-search.v1 }
             source: { type: string, const: hub }
@@ -2628,6 +2639,14 @@ components:
                 platform: { type: [string, "null"] }
                 datasetId: { type: [string, "null"] }
                 objectType: { type: [string, "null"] }
+            search:
+              type: object
+              additionalProperties: false
+              required: [requestedProfile, appliedProfile, degraded]
+              properties:
+                requestedProfile: { type: string, enum: [canonical.balanced.v1, canonical.phrase.v1, canonical.terms-all.v1, canonical.zh-recall.v1, canonical.title-prefix.v1] }
+                appliedProfile: { type: string, enum: [canonical.balanced.v1, canonical.phrase.v1, canonical.terms-all.v1, canonical.zh-recall.v1, canonical.title-prefix.v1, postgres.substring.v1] }
+                degraded: { type: boolean }
             items:
               type: array
               items: { $ref: "#/components/schemas/StoredSearchItem" }
@@ -2685,7 +2704,7 @@ components:
           type: string
           minLength: 1
           maxLength: 8192
-          description: HMAC-signed version-2 opaque nextCursor bound to the normalized query, filters, match mode and page size; return unchanged.
+          description: HMAC-signed version-3 opaque nextCursor bound to the normalized query, filters, match mode, page size and bounded first-page analysis state; return unchanged.
     NightAllDataSearchEnvelope:
       type: object
       additionalProperties: false

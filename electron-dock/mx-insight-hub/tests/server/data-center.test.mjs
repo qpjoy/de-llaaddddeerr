@@ -4,6 +4,7 @@ import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
+import { DEFAULT_SEARCH_PROFILE, publicSearchProfile, resolveSearchProfile } from '../../server/search/profiles.mjs'
 
 const ADMIN_TOKEN = 'data-center-admin-token'
 const quiet = { error() {} }
@@ -56,12 +57,23 @@ test('Data Center route is admin-token-only, validates filters, and stays off th
       { headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN } },
     )
     assert.equal(response.status, 200)
-    assert.deepEqual((await response.json()).data, {
+    const responseData = (await response.json()).data
+    assert.deepEqual({ ...responseData, searchCapabilities: undefined }, {
       stats: { datasetCount: 0, activeRecordCount: 0, revisionCount: 0, deletedRecordCount: 0 },
       datasets: [],
       records: [],
       pageSize: 25,
+      searchCapabilities: undefined,
     })
+    assert.equal(responseData.searchCapabilities.indexSchema, 'content-v4')
+    assert.equal(responseData.searchCapabilities.activeIndexSchema, null)
+    assert.equal(responseData.searchCapabilities.ready, false)
+    assert.equal(responseData.searchCapabilities.defaultProfile, DEFAULT_SEARCH_PROFILE)
+    assert.ok(responseData.searchCapabilities.profiles.some((profile) => profile.id === 'canonical.legacy-or.v1'))
+    assert.equal(
+      responseData.searchCapabilities.profiles.find((profile) => profile.id === 'canonical.zh-recall.v1').ready,
+      false,
+    )
     assert.deepEqual(calls, [{
       datasetId: 'telegram.messages.v1',
       platform: 'telegram',
@@ -161,14 +173,31 @@ test('Data Center record browser pages PostgreSQL and searches the ES projection
     queries: {
       async searchContent(query, options) {
         searchCalls.push({ query, options })
+        const profile = resolveSearchProfile(options.searchProfile, { audience: 'admin' })
+        const matchedBranch = profile.queryPlan[0].branch
         return {
           mode: 'elasticsearch',
-          items: [{ id: 'record-2', body: '命中的正文', highlight: { body: ['<em>命中</em>的正文'] } }],
+          items: [{
+            id: 'record-2', body: '命中的正文',
+            highlight: { body: ['<em>命中</em>的正文'] },
+            matchEvidence: [matchedBranch],
+          }],
           total: 31,
           hasMore: options.offset !== 30,
           nextCursor: options.offset == null
             ? { mode: 'elasticsearch', pitId: 'pit-1', searchAfter: [1, 'record-2'] }
             : null,
+          searchExecution: {
+            requestedProfile: profile.id,
+            appliedProfile: profile.id,
+            profile: publicSearchProfile(profile),
+            queryAnalysis: {
+              tokens: ['命中'], tokenCount: 1, truncated: false,
+              backendUsed: 'hanlp', degraded: false, errorCode: null,
+            },
+            matchedBranches: [matchedBranch],
+            warning: profile.warning,
+          },
         }
       },
     },
@@ -236,11 +265,29 @@ test('Data Center record browser pages PostgreSQL and searches the ES projection
     assert.equal(searchBody.items[0].body, '完整、未脱敏正文')
     assert.equal(searchBody.items[0].extensions.private_note, 'admin-visible')
     assert.deepEqual(searchBody.items[0].highlight, { body: ['<em>命中</em>的正文'] })
+    assert.deepEqual(searchBody.items[0].matchEvidence, ['raw_phrase'])
+    assert.equal(searchBody.searchExecution.requestedProfile, DEFAULT_SEARCH_PROFILE)
+    assert.equal(searchBody.searchExecution.appliedProfile, DEFAULT_SEARCH_PROFILE)
+    assert.equal(searchBody.searchExecution.queryAnalysis.backendUsed, 'hanlp')
+    assert.equal(searchBody.searchExecution.queryAnalysis.degraded, false)
+    assert.deepEqual(searchBody.searchExecution.queryAnalysis.tokens, ['命中'])
+    assert.deepEqual(searchBody.searchExecution.matchedBranches, ['raw_phrase'])
+    assert.deepEqual(searchBody.searchExecution.sample.request, {
+      query: '命中',
+      searchProfile: DEFAULT_SEARCH_PROFILE,
+      platform: 'twitter',
+      datasetId: null,
+      objectType: null,
+      pageSize: 10,
+    })
+    assert.equal(searchBody.searchExecution.sample.response.items[0].text, '完整、未脱敏正文')
+    assert.equal(JSON.stringify(searchBody.searchExecution.sample).includes('private_note'), false)
+    assert.equal(JSON.stringify(searchBody.searchExecution.sample).includes('private-source'), false)
     assert.deepEqual(searchCalls[0], {
       query: '命中',
       options: {
         datasetId: null, platform: 'twitter', objectType: null, size: 10, cursor: null,
-        offset: null, trackTotalHits: true,
+        offset: null, searchProfile: DEFAULT_SEARCH_PROFILE, trackTotalHits: true,
       },
     })
     assert.deepEqual(searchBody.pageInfo, {
@@ -266,7 +313,7 @@ test('Data Center record browser pages PostgreSQL and searches the ES projection
       query: '命中',
       options: {
         datasetId: null, platform: 'twitter', objectType: null, size: 10, cursor: null,
-        offset: 20, trackTotalHits: true,
+        offset: 20, searchProfile: DEFAULT_SEARCH_PROFILE, trackTotalHits: true,
       },
     })
 
@@ -291,6 +338,35 @@ test('Data Center record browser pages PostgreSQL and searches the ES projection
     )
     assert.equal(deepSearchPage.status, 400)
     assert.equal((await deepSearchPage.json()).error.code, 'search_page_out_of_range')
+
+    const invalidProfile = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?q=%E5%91%BD%E4%B8%AD&searchProfile=custom.dsl`,
+      { headers },
+    )
+    assert.equal(invalidProfile.status, 400)
+    assert.equal((await invalidProfile.json()).error.code, 'invalid_search_profile')
+
+    const ignoredProfile = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?searchProfile=canonical.phrase.v1`,
+      { headers },
+    )
+    assert.equal(ignoredProfile.status, 400)
+    assert.equal((await ignoredProfile.json()).error.code, 'invalid_request')
+
+    const profileCursorMismatch = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?q=%E5%91%BD%E4%B8%AD&platform=twitter&pageSize=10&searchProfile=canonical.phrase.v1&cursor=${encodeURIComponent(searchBody.pageInfo.nextCursor)}`,
+      { headers },
+    )
+    assert.equal(profileCursorMismatch.status, 400)
+    assert.equal((await profileCursorMismatch.json()).error.code, 'invalid_cursor')
+
+    const adminProfile = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?q=%E5%91%BD%E4%B8%AD&searchProfile=canonical.cjk-bigram.v1&pageSize=10`,
+      { headers },
+    )
+    assert.equal(adminProfile.status, 200)
+    assert.equal((await adminProfile.json()).data.searchExecution.requestedProfile, 'canonical.cjk-bigram.v1')
+    assert.equal(searchCalls.at(-1).options.searchProfile, 'canonical.cjk-bigram.v1')
 
     const mismatched = await fetch(
       `${baseUrl}/internal/v1/admin/data-center/records?datasetId=other&pageSize=25&cursor=${encodeURIComponent(firstBody.pageInfo.nextCursor)}`,

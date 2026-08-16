@@ -175,9 +175,9 @@ current index 可直接从 PG canonical current state 重建。
 索引命名建议：
 
 ```text
-mx-insight-hub-content-v3-current  current concrete index
+mx-insight-hub-content-v4-current  current concrete index
 mx-insight-hub-content             read alias
-mx-insight-hub-content-v3          compatible write alias
+mx-insight-hub-content-v4          compatible write alias
 
 mx-insight-hub-chunk-v1-current    semantic current concrete index
 mx-insight-hub-chunk               read alias
@@ -198,6 +198,25 @@ version 使用 `keyword`；正文使用 `text`；经纬度使用 `geo_point`；�
 大小，以及 entity type/user/url 都是有界的 typed fields。源 JSON 仍只以 PG raw
 副本为权威，不允许 ES dynamic mapping 猜字段。
 
+content v4 是仓库为下一次全文能力升级声明的 schema，而不是对已部署 v3 mapping
+的原位改义。任何仍由 v3 alias 服务的环境都必须完成严格重建后才算升级。v4
+预先建立一组有界、职责单一的词项视图，使大部分后续相关性调整只改变查询
+profile：
+
+| 逻辑视图 | index-time 表示 | 查询用途与边界 |
+| --- | --- | --- |
+| `title` / `body` | raw `standard`，保留 positions | 原文 phrase、拉丁文本和顺序匹配；phrase 是查询类型，不另建“phrase analyzer” |
+| `titleHanlp` / `bodyHanlp` | HanLP coarse tokens，由 projector 预分词，ES 用 `whitespace` | 中文词级召回；模型、词典和 token provenance 必须版本化 |
+| `title.cjk` / `body.cjk` | 内置 CJK bigram | 不依赖 ES 插件的中文补召回；不得退回“任一单字命中” |
+| `title.prefix` | 有界 edge-ngram index analyzer，普通 search analyzer | 仅标题前缀/type-ahead；不在正文或查询侧生成 edge-ngram |
+
+这不是“把所有 analyzer 都加到每个字段”。长正文的 edge-ngram 会显著放大
+postings，chunk 与 content 同时增加 CJK bigram 也会重复索引长文本；因此 v4
+先覆盖 canonical content，chunk 只有在离线检索评估证明有收益后再扩展。
+每个 text multi-field 都会增加独立 postings/norms，发布前必须用代表性样本和
+Elasticsearch disk-usage 统计验证磁盘、merge、refresh 与查询 P95，而不能承诺
+固定膨胀比例。
+
 语义检索独立使用 chunk index。PG `record_chunks` 保存当前切片与已生成向量；
 内容缩短、chunker 变化、低于切片阈值或 canonical tombstone 时，同一 PG 事务
 先登记旧 chunk 文档 ID 到 durable delete queue，再删除/替换 authoritative
@@ -209,17 +228,77 @@ chunks。worker 在生成新 embedding 前投递 externally-versioned delete，�
 
 生产基线不把第三方 HanLP Elasticsearch 插件作为集群启动前置条件。Elastic 的 classic plugin 必须与 Elasticsearch 精确版本匹配，升级时会放大故障域。
 
-推荐流程：
+当前部署只提供一个固定的 HanLP coarse tokenizer；请求中的 `coarse` 意图并不
+代表服务端已经同时装载 fine/max-word 模型。推荐流程：
 
-1. 独立 HanLP enrichment service 对 title/body 生成粗细粒度 tokens、NER、关键词和语言版本。
-2. PG revision 保存 `nlp_model_version` 和结构化 enrichment；原文仍保留。
+1. 独立 HanLP enrichment service 先对 title/body 生成 coarse tokens；只有真实部署并版本化第二套模型后，才能声明提供 fine tokens、NER 或关键词。
+2. 目标 schema 在 PG revision 保存 `nlp_model_version` 和结构化 enrichment；当前
+   canonical row 尚未持久化逐字段 HanLP model digest，原文仍是可重建真相。
 3. ES 同时索引原文和预分词字段；预分词字段使用内置 `whitespace` analyzer，原文使用可升级的内置 analyzer。
 4. 查询服务对查询词使用同一 HanLP 模型处理，并对原文、tokens、实体字段做加权召回。
-5. HanLP 不可用时允许原文索引继续发布，记录 `enrichment_pending` 并后台补算；不能阻断 ingest/checkpoint。
+5. 当前 streaming projector 在 HanLP 不可用时允许原文继续发布，并可能把
+   Jieba/bigram fallback 写入历史命名的 pre-segmented 字段；严格全量 reconcile
+   会拒绝降级。下一 schema 应把 fallback/pending 与 HanLP 字段、model digest
+   分开并后台补算，不能阻断 ingest/checkpoint，也不能伪造 HanLP provenance。
+
+IK 的“索引用较宽的 max-word、搜索用较窄的 smart”理念可以保留，但不复制 IK
+插件实现：MX 用相互独立的 raw、HanLP coarse 与 CJK bigram 字段表达索引侧的
+候选能力，再由查询 profile 选择较窄的组合。不得把 coarse、fine、bigram 全部
+混进同一字段，否则 term frequency、positions 与 phrase 语义都不可解释；未来
+若增加 HanLP fine，必须有真实的、带模型 digest 的 enrichment 字段和迁移，不是
+在请求里声明一个实际上不存在的 analyzer。
 
 若未来必须使用 ES 内嵌 HanLP plugin，需为每个 ES patch 构建/验签兼容镜像，在隔离集群完成启动、reindex、rolling upgrade 和回滚测试后才能启用，且保留不依赖 plugin 的索引重建路径。
 
-### 4.3 PG 与 ES 查询协同
+### 4.3 版本化搜索 profiles
+
+查询方选择产品语义而不是 Elasticsearch 实现细节。服务端维护不可变、带版本的
+allowlist，并用逻辑默认值指向其中一个版本；公开调用者不能提交 index 名、字段
+列表、任意 analyzer、Query DSL、script 或任意 boost。当前严格相关性冻结为
+`canonical.balanced.v1` 的基线语义，content v4 为其他 profile 预建词项：
+
+| Profile | 可见范围 | 语义 |
+| --- | --- | --- |
+| `canonical.balanced.v1` | Public/Admin，默认 | raw phrase **或** HanLP coarse terms-all；保持当前严格行为 |
+| `canonical.phrase.v1` | Public/Admin | 只走原文 phrase，适合高精度顺序匹配 |
+| `canonical.terms-all.v1` | Public/Admin | 查询经 coarse 分词后，全部词项必须在目标预分词字段命中 |
+| `canonical.zh-recall.v1` | Public/Admin，v4 | phrase、HanLP terms-all 与低权重、保持顺序的 CJK bigram phrase 组合；禁止单字 OR |
+| `canonical.title-prefix.v1` | Public/Admin，v4 | 查 `title.prefix` 和已有的名称/handle/username prefix；index-time edge-ngram、search-time 普通分析 |
+| `canonical.cjk-bigram.v1` | Admin Search Lab | 隔离观察 CJK bigram 的 tokens 与排名，不作为公共默认 |
+| `canonical.legacy-or.v1` | Admin Search Lab | 仅用于和历史 OR 行为做受控对比，不能成为公共 profile 或默认 |
+
+默认 `canonical.balanced.v1` 在首屏调用当前配置的 segmenter；HanLP 健康时把
+query tokens 以空格拼接后对
+`titleHanlp`/`bodyHanlp`/`chatUsernameHanlp` 执行 `AND`，raw phrase 是并列的
+另一条严格分支。若结果降级为 Jieba/bigram，响应中的 query-analysis provenance
+保留实际 `backendUsed/degraded/errorCode`，但 applied profile 改为
+`canonical.phrase.v1`，fallback tokens 不会错查 HanLP postings。签名游标保存并
+复用首屏分析状态，后续页不重新调用分词服务。CJK bigram 不参与 balanced；它只在
+HanLP 健康的 `canonical.zh-recall.v1` 中作为低权重、有序的补充支路，或在
+Admin-only profile 中单独观察。
+
+profile 可以调整 query analyzer、phrase/slop、operator、minimum-should-match、
+字段 boost、过滤和 rescore，而无需重建，前提是它只使用索引中已经存在且词项兼容
+的字段。修改现有字段的 index analyzer，或新增 html-strip、delimiter、stem、
+edge-ngram、CJK/HanLP token representation，都会改变 postings；历史数据必须进入
+新的 schema-versioned `*-current` 索引并从 PG 做 blue/green 全量重建，校验后再
+原子切 read alias。给既有 mapping 新增 multi-field 虽然可被 ES 接受，但旧文档
+不会自动拥有该字段；禁止让新旧记录长期处于不同检索能力。
+
+`word_delimiter_graph` 只适合 handle、产品号、文件名等 identifier，配合
+`keyword`/`whitespace` tokenizer；不能把附件式 `standard + word_delimiter`
+当中文分词，也不能未经 position 验证把 `catenate_all`/`preserve_original` 用在
+phrase 字段。`html_strip` 只用于已确认是 markup 的 dataset/contentType，纯文本、
+代码和 Telegram 正文不能全局套用。Snowball/stemming 只放入语言已确认的英文
+专用字段/profile，不处理多语言正文和名称。
+
+逻辑默认 profile 的切换是有审计、可回滚的查询配置变更，不是修改 field mapping
+上的默认 analyzer。分页游标和幂等指纹必须绑定实际解析出的 immutable profile
+版本；即使默认指针在翻页期间改变，同一游标仍保持原来的排序语义。公开响应只可
+返回稳定的 profile 名、分词 provenance、named-branch 命中证据和 highlight；
+完整 ES `_explanation`/profile 输出只允许在受限 Admin Search Lab 中按小样本使用。
+
+### 4.4 PG 与 ES 查询协同
 
 - 结构化精确读取、授权、dataset version、详情和游标真相从 PG 获取。
 - 全文、facet、geo relevance 从 ES 获取 canonical IDs 和排序证据，再批量回 PG/serving snapshot 取授权后的稳定字段。
@@ -227,7 +306,7 @@ chunks。worker 在生成新 embedding 前投递 externally-versioned delete，�
 - ES 不可用时，精确 ID/时间/平台/区域等 PG 路径继续工作；全文接口返回明确 degraded 或最后物化结果。
 - ES 结果中的文档 revision 必须不高于已发布 dataset version，防止未发布数据越权露出。
 
-### 4.4 实体检索、模糊匹配与联想
+### 4.5 实体检索、模糊匹配与联想
 
 账号/用户检索与正文检索语义不同。当前实现先在 strict content 投影中
 显式加入 `authorName`/`authorHandle`，按作者聚合；Telegram chat 的

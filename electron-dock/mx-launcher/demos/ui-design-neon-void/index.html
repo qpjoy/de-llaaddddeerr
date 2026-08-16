@@ -373,6 +373,90 @@
                 <input class="qp-slider" type="range" value="66" min="0" max="100" />
               </label>
             </section>
+            <section class="qp-panel demo-control-panel">
+              <div class="qp-row qp-row--between">
+                <div>
+                  <h3 class="qp-heading-2">Search Profile Inspector</h3>
+                  <p class="qp-caption">A query workbench pattern with read-only index evidence and public-safe samples.</p>
+                </div>
+                <label class="qp-field">
+                  <span class="qp-field__label">Search profile</span>
+                  <select class="qp-select" aria-label="Search profile">
+                    <option>Precise · strict.v1</option>
+                    <option>Balanced · balanced.v1</option>
+                    <option>Broad · broad.v1</option>
+                  </select>
+                </label>
+              </div>
+              <details class="qp-search-lab" open>
+                <summary>
+                  <span class="qp-search-lab__title">
+                    <strong>Search Lab</strong>
+                    <small>HanLP/presegmented is the primary zh path; CJK zh-recall is a low-boost supplement</small>
+                  </span>
+                  <span class="qp-search-lab__badges" aria-label="Current search status">
+                    <span class="qp-tag qp-tag--primary">strict.v1</span>
+                    <span class="qp-tag">target content-v4</span>
+                    <span class="qp-tag">active content-v3</span>
+                    <span class="qp-tag qp-tag--danger">target schema pending</span>
+                    <span class="qp-tag">elasticsearch</span>
+                    <span class="qp-tag qp-tag--success">hanlp</span>
+                  </span>
+                </summary>
+                <div class="qp-search-lab__body">
+                  <section class="qp-search-lab__readiness" data-ready="false" role="status">
+                    <strong>Target index is not active</strong>
+                    <span>active content-v3 → target content-v4. Ready compatibility profiles remain available.</span>
+                    <code>search_index_schema_mismatch</code>
+                  </section>
+                  <div class="qp-search-lab__grid">
+                    <section>
+                      <h3>Index representations (read only)</h3>
+                      <ul class="qp-search-lab__facts">
+                        <li><strong>Raw text</strong><span>Standard analyzer for exact source phrases.</span><small>fields: title, body</small></li>
+                        <li><strong>Pre-segmented words</strong><span>HanLP tokens indexed without a second split.</span><small>fields: titleHanlp, bodyHanlp</small></li>
+                        <li><strong>CJK zh-recall</strong><span>Low-boost recall supplement, never a HanLP replacement.</span><small>fields: title.zhRecall, body.zhRecall</small></li>
+                      </ul>
+                    </section>
+                    <section>
+                      <h3>Query plan</h3>
+                      <ul class="qp-search-lab__facts">
+                        <li><strong>Raw phrase</strong><span>Phrase match over title and body.</span></li>
+                        <li><strong>All segmented terms</strong><span>AND match over titleHanlp/bodyHanlp pre-segmented fields.</span></li>
+                      </ul>
+                    </section>
+                  </div>
+                  <section class="qp-search-lab__analysis">
+                    <div class="qp-search-lab__section-heading">
+                      <h3>Query analysis</h3>
+                      <span class="qp-search-lab__execution">requestedProfile=strict.v1 · appliedProfile=strict.v1 · backendUsed=hanlp · degraded=false · errorCode=null</span>
+                    </div>
+                    <div class="qp-chip-list" role="list" aria-label="Query tokens">
+                      <span role="listitem">人工智能</span><span role="listitem">应用</span><span role="listitem">平台</span>
+                    </div>
+                  </section>
+                  <div class="qp-search-lab__samples">
+                    <section>
+                      <h3>Public API request</h3>
+                      <pre class="qp-code-block"><code>{
+  "query": "人工智能应用平台",
+  "searchProfile": "strict.v1",
+  "pageSize": 20
+}</code></pre>
+                    </section>
+                    <section>
+                      <h3>Public-safe response</h3>
+                      <pre class="qp-code-block"><code>{
+  "data": {
+    "searchProfile": "strict.v1",
+    "items": [{ "id": "record-42", "title": "AI platform" }]
+  }
+}</code></pre>
+                    </section>
+                  </div>
+                </div>
+              </details>
+            </section>
           </div>
         </section>
 

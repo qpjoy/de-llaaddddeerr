@@ -156,6 +156,7 @@ Content-Type: application/json
   "query": "AI Agent",
   "platform": "telegram",
   "objectType": "message",
+  "searchProfile": "canonical.balanced.v1",
   "pageSize": 20,
   "cursor": "opaque-if-present"
 }
@@ -167,23 +168,44 @@ that grant. `datasetId` and `objectType` are optional exact logical filters.
 The server always applies the authorized platform set in addition to those
 filters, so a dataset identifier can never expand access.
 
+`searchProfile` selects an immutable, server-owned query policy. It is not an
+Elasticsearch analyzer name and the API never accepts arbitrary analyzer,
+tokenizer, filter, index or DSL controls:
+
+| Profile | Indexed representation and query rule |
+| --- | --- |
+| `canonical.balanced.v1` (default) | Raw text phrase **or**, when HanLP is healthy, all HanLP query terms matched with AND against the pre-segmented `*Hanlp` representation. If query segmentation degrades to Jieba/bigram, the server applies `canonical.phrase.v1` instead of comparing incompatible terms with HanLP postings. CJK bigram does not replace HanLP here. |
+| `canonical.phrase.v1` | Ordered raw-text phrase only; highest precision. |
+| `canonical.terms-all.v1` | Every pre-segmented query term must match; word order may differ. |
+| `canonical.zh-recall.v1` | Balanced plus a lower-weight ordered CJK-bigram branch, providing segmentation-independent recall without returning to single-character OR. |
+| `canonical.title-prefix.v1` | Bounded prefix lookup over titles, author names, handles, usernames and chat names. |
+
+The current HanLP service loads one coarse model. A future “fine at index time,
+coarse at search time” policy requires separately versioned segmenter models and
+indexed fields; passing a request parameter cannot manufacture fine-grained
+terms that were never indexed.
+
 The route runs one query over the shared canonical current-state projection. It
 does not call each source API and then concatenate per-source top-N lists. This
 gives all matching datasets one BM25 scoring context, one deterministic
-`_score/eventTime/id` ordering and one PIT/search-after cursor. Source identity
+`_score/eventTime/id/_shard_doc` ordering and one PIT/search-after cursor. Source identity
 is not an implicit relevance boost. Records intentionally preserved in separate
 datasets remain separate results even if they share an external ID; the search
 layer does not guess a cross-dataset survivor rule.
 If Elasticsearch is unavailable on the first page, the same authorized filters
 are applied to the PostgreSQL canonical table and the response reports
-`search_projection_degraded`.
+`search_projection_degraded`, `search_profile_degraded`, and
+`search.appliedProfile=postgres.substring.v1`.
 
 Responses use `contractVersion=mx-insight-hub.canonical-search.v1` and the same
 customer-safe item projection as stored search. `scope.platforms` records the
 actual sorted authorization scope. `pageInfo` includes `totalCount`,
-`totalRelation`, `totalPages`, and the stable opaque cursor. A cursor is signed
-over the query, filters, page size and platform scope; if grants change, restart
-from the first page. The operation is metered under the
+`totalRelation`, `totalPages`, and the stable opaque cursor. The `search` object
+reports requested/applied profiles and degradation. A cursor is signed over the
+query, filters, page size, resolved profile, platform scope and bounded first-page
+analysis state. Later pages reuse the same applied profile and tokens rather than
+calling HanLP again; if grants or the profile change, restart from the first page.
+The operation is metered under the
 `data.canonical-search` usage scope. That bucket is independent of the legacy
 single-platform search bucket and always uses the strictest request/page limit
 and longest window across the consumer's complete current platform-grant set,
@@ -226,6 +248,7 @@ Content-Type: application/json
   "platform": "telegram",
   "objectType": "message",
   "query": "agent",
+  "searchProfile": "canonical.balanced.v1",
   "pageSize": 20
 }
 ```
@@ -384,15 +407,18 @@ never identify the registered PostgreSQL provider. Night-All-v1 metric keys are
 non-negative numbers or `null`; invalid/negative source sentinels are normalized
 to `null` instead of leaking a response that fails the compatibility schema.
 
-Search pagination uses a version-2, HMAC-signed opaque cursor, limited to 8,192
+Search pagination uses a version-3, HMAC-signed opaque cursor, limited to 8,192
 characters. The signature binds the cursor to the normalized query, scope,
-filters, match mode and page size. Do not decode or construct it, and do not
-change those inputs while paging. Each distinct page request needs its own
-stable idempotency key; replay that exact page body with the same key.
+filters, match mode, page size and bounded first-page analysis state. Later
+pages reuse the same applied profile, tokens and backend instead of calling the
+segmenter again. Do not decode or construct it, and do not change those inputs
+while paging. Each distinct page request needs its own stable idempotency key;
+replay that exact page body with the same key.
 
 Elasticsearch supplies ranked full-text results when available. It opens a PIT
 whose keep-alive is renewed for two minutes on each page, orders by
-`_score`, `eventTime`, then `id`, and advances with `search_after`. Hub requests
+`_score`, `eventTime`, then `id`, plus the PIT-provided `_shard_doc` tiebreaker,
+and advances with `search_after`. Hub requests
 `pageSize + 1` rows to determine `hasMore`; traversal neither uses a result
 `total` nor stops at the Elasticsearch 10,000-hit window. Clients should page
 promptly because an expired PIT returns `410 search_cursor_expired`; restart
@@ -410,6 +436,12 @@ is communicated only through `warnings`. Canonical availability and history
 are unchanged. This local search makes zero Night-All/provider calls, but it is
 still grant/policy/usage controlled and stores its response for idempotent
 replay.
+
+If Elasticsearch remains available but HanLP query analysis degrades, the
+server applies raw phrase instead of comparing fallback tokens with the
+pre-segmented field and includes `search_profile_degraded`. Telegram's public
+envelope intentionally reports only the warning; detailed tokens/backend stay
+on the Admin Data Center Search Lab.
 
 ### Fuzzy Telegram entities
 

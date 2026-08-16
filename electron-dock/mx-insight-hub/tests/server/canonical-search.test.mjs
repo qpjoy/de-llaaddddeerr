@@ -7,6 +7,10 @@ import {
   normalizeCanonicalSearchQuery,
 } from '../../server/data/stored-search.mjs'
 import { HubService } from '../../server/hub-service.mjs'
+import {
+  DEFAULT_SEARCH_PROFILE,
+  POSTGRES_SEARCH_PROFILE,
+} from '../../server/search/profiles.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 
 const ADMIN_TOKEN = 'canonical-search-admin-token'
@@ -69,6 +73,11 @@ test('canonical response exposes exact totals and withholds totalPages for a low
   assert.equal(exact.data.pageInfo.totalCount, 41)
   assert.equal(exact.data.pageInfo.totalRelation, 'eq')
   assert.equal(exact.data.pageInfo.totalPages, 3)
+  assert.deepEqual(exact.data.search, {
+    requestedProfile: DEFAULT_SEARCH_PROFILE,
+    appliedProfile: DEFAULT_SEARCH_PROFILE,
+    degraded: false,
+  })
 
   const lowerBound = canonicalSearchResponse({
     query,
@@ -79,6 +88,86 @@ test('canonical response exposes exact totals and withholds totalPages for a low
   assert.equal(lowerBound.data.pageInfo.totalCount, 10_000)
   assert.equal(lowerBound.data.pageInfo.totalRelation, 'gte')
   assert.equal(lowerBound.data.pageInfo.totalPages, null)
+
+  const fallback = canonicalSearchResponse({
+    query,
+    result: { mode: 'postgres', total: 2, totalRelation: 'eq', hasMore: false, items: [] },
+    durationMs: 2,
+    cursorSecret: PEPPER,
+  })
+  assert.deepEqual(fallback.data.search, {
+    requestedProfile: DEFAULT_SEARCH_PROFILE,
+    appliedProfile: POSTGRES_SEARCH_PROFILE,
+    degraded: true,
+  })
+  assert.deepEqual(
+    fallback.data.warnings.map((warning) => warning.code),
+    ['search_projection_degraded', 'search_profile_degraded'],
+  )
+})
+
+test('canonical profiles are allowlisted and are part of the signed cursor binding', () => {
+  const options = { platforms: ['telegram'], maxPageSize: 50, cursorSecret: PEPPER }
+  const query = normalizeCanonicalSearchQuery({ query: '人工智能', pageSize: 20 }, options)
+  assert.equal(query.searchProfile, DEFAULT_SEARCH_PROFILE)
+
+  const first = canonicalSearchResponse({
+    query,
+    result: {
+      mode: 'elasticsearch',
+      total: 21,
+      totalRelation: 'eq',
+      hasMore: true,
+      nextCursor: {
+        mode: 'elasticsearch',
+        pitId: 'profile-pit',
+        searchAfter: [1, '2026-08-10T00:00:00.000Z', FIRST_ID, 17],
+        analysisState: {
+          v: 1,
+          appliedProfile: DEFAULT_SEARCH_PROFILE,
+          tokens: ['人工', '智能'],
+          backendUsed: 'hanlp',
+          degraded: false,
+          errorCode: null,
+        },
+      },
+      items: [canonicalItem()],
+    },
+    durationMs: 1,
+    cursorSecret: PEPPER,
+  })
+
+  const continued = normalizeCanonicalSearchQuery({
+    query: '人工智能',
+    pageSize: 20,
+    cursor: first.data.pageInfo.nextCursor,
+  }, options)
+  assert.deepEqual(continued.cursor.analysisState, {
+    v: 1,
+    appliedProfile: DEFAULT_SEARCH_PROFILE,
+    tokens: ['人工', '智能'],
+    backendUsed: 'hanlp',
+    degraded: false,
+    errorCode: null,
+  })
+
+  assert.throws(
+    () => normalizeCanonicalSearchQuery({
+      query: '人工智能',
+      pageSize: 20,
+      searchProfile: 'canonical.phrase.v1',
+      cursor: first.data.pageInfo.nextCursor,
+    }, options),
+    (error) => error.status === 400 && error.code === 'invalid_cursor',
+  )
+  assert.throws(
+    () => normalizeCanonicalSearchQuery({ query: '人工智能', searchProfile: 'canonical.legacy-or.v1' }, options),
+    (error) => error.status === 400 && error.code === 'invalid_search_profile',
+  )
+  assert.throws(
+    () => normalizeCanonicalSearchQuery({ query: '人工智能', analyzer: 'custom-private' }, options),
+    (error) => error.status === 400 && error.code === 'unsupported_fields',
+  )
 })
 
 test('canonical endpoint searches one authorized global projection with filters, totals and scoped cursors', async () => {
@@ -103,7 +192,15 @@ test('canonical endpoint searches one authorized global projection with filters,
         nextCursor: global ? {
           mode: 'elasticsearch',
           pitId: 'canonical-pit',
-          searchAfter: [8.5, '2026-08-10T00:00:00.000Z', FIRST_ID],
+          searchAfter: [8.5, '2026-08-10T00:00:00.000Z', FIRST_ID, 17],
+          analysisState: {
+            v: 1,
+            appliedProfile: options.searchProfile,
+            tokens: ['agent', 'update'],
+            backendUsed: 'hanlp',
+            degraded: false,
+            errorCode: null,
+          },
         } : null,
         items: [canonicalItem()],
       }
@@ -192,13 +289,22 @@ test('canonical endpoint searches one authorized global projection with filters,
     assert.equal(loosePlatformCannotWidenBucket.response.status, 400)
     assert.equal(loosePlatformCannotWidenBucket.payload.error.code, 'page_size_exceeded')
 
-    const physicalControl = await call(baseUrl, '/api/v1/data/canonical/search', {
+    for (const field of ['analysis', 'analyzer', 'filter', 'tokenizer', 'index', 'dsl', 'script', 'boost']) {
+      const physicalControl = await call(baseUrl, '/api/v1/data/canonical/search', {
+        method: 'POST',
+        headers: { ...authorization, 'idempotency-key': `canonical-no-${field}` },
+        body: { ...body, [field]: 'private-control' },
+      })
+      assert.equal(physicalControl.response.status, 400)
+      assert.equal(physicalControl.payload.error.code, 'unsupported_fields')
+    }
+    const unknownProfile = await call(baseUrl, '/api/v1/data/canonical/search', {
       method: 'POST',
-      headers: { ...authorization, 'idempotency-key': 'canonical-no-index' },
-      body: { ...body, index: 'private-index' },
+      headers: { ...authorization, 'idempotency-key': 'canonical-unknown-profile' },
+      body: { ...body, searchProfile: 'canonical.user-defined.v1' },
     })
-    assert.equal(physicalControl.response.status, 400)
-    assert.equal(physicalControl.payload.error.code, 'unsupported_fields')
+    assert.equal(unknownProfile.response.status, 400)
+    assert.equal(unknownProfile.payload.error.code, 'invalid_search_profile')
     assert.equal(contentCalls.length, 0)
 
     const headers = { ...authorization, 'idempotency-key': 'canonical-page-one' }
@@ -218,6 +324,11 @@ test('canonical endpoint searches one authorized global projection with filters,
     assert.equal(first.payload.data.pageInfo.totalRelation, 'eq')
     assert.equal(first.payload.data.pageInfo.totalPages, 5)
     assert.ok(first.payload.data.pageInfo.nextCursor)
+    assert.deepEqual(first.payload.data.search, {
+      requestedProfile: DEFAULT_SEARCH_PROFILE,
+      appliedProfile: DEFAULT_SEARCH_PROFILE,
+      degraded: false,
+    })
     assert.equal(JSON.stringify(first.payload).includes('must-not-leak'), false)
     assert.deepEqual(contentCalls[0], {
       query: 'agent update',
@@ -227,7 +338,7 @@ test('canonical endpoint searches one authorized global projection with filters,
         objectType: 'message',
         size: 1,
         cursor: null,
-        strictRelevance: true,
+        searchProfile: DEFAULT_SEARCH_PROFILE,
         trackTotalHits: true,
       },
     })
@@ -243,6 +354,26 @@ test('canonical endpoint searches one authorized global projection with filters,
     assert.equal(replay.response.headers.get('idempotent-replay'), 'true')
     assert.equal(contentCalls.length, 1)
 
+    const changedProfileReplay = await call(baseUrl, '/api/v1/data/canonical/search', {
+      method: 'POST',
+      headers,
+      body: { ...body, searchProfile: 'canonical.phrase.v1' },
+    })
+    assert.equal(changedProfileReplay.response.status, 409)
+    assert.equal(changedProfileReplay.payload.error.code, 'idempotency_conflict')
+
+    const changedProfileCursor = await call(baseUrl, '/api/v1/data/canonical/search', {
+      method: 'POST',
+      headers: { ...authorization, 'idempotency-key': 'canonical-profile-cursor' },
+      body: {
+        ...body,
+        searchProfile: 'canonical.phrase.v1',
+        cursor: first.payload.data.pageInfo.nextCursor,
+      },
+    })
+    assert.equal(changedProfileCursor.response.status, 400)
+    assert.equal(changedProfileCursor.payload.error.code, 'invalid_cursor')
+
     const status = await call(baseUrl, `/api/v1/requests/${first.payload.requestId}`, {
       headers: authorization,
     })
@@ -252,10 +383,17 @@ test('canonical endpoint searches one authorized global projection with filters,
     const selected = await call(baseUrl, '/api/v1/data/canonical/search', {
       method: 'POST',
       headers: { ...authorization, 'idempotency-key': 'canonical-loose-platform-only' },
-      body: { ...body, platform: 'xiaohongshu', datasetId: 'night-all.search.v1' },
+      body: {
+        ...body,
+        platform: 'xiaohongshu',
+        datasetId: 'night-all.search.v1',
+        searchProfile: 'canonical.zh-recall.v1',
+      },
     })
     assert.equal(selected.response.status, 200)
     assert.deepEqual(contentCalls[1].options.platforms, ['xiaohongshu'])
+    assert.equal(contentCalls[1].options.searchProfile, 'canonical.zh-recall.v1')
+    assert.equal(selected.payload.data.search.appliedProfile, 'canonical.zh-recall.v1')
     assert.deepEqual(selected.payload.data.scope.platforms, ['xiaohongshu'])
 
     // Two xiaohongshu-only calls still use the stable canonical bucket's

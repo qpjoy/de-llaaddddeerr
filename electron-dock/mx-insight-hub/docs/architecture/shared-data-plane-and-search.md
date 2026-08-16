@@ -16,7 +16,7 @@ flowchart LR
   OB --> PJ["mx-insight-hub-projector\n（独立 Deployment）"]
   PJ --> SEG["mx-common segmenter\nHanLP / 内置回退"]
   SEG --> PJ
-  PJ --> ES1["Elasticsearch current state\ncontent-v3-current"]
+  PJ --> ES1["Elasticsearch current state\ncontent-v4-current"]
   PG --> CH["record_chunks + durable chunk deletes"]
   CH --> EP["embedding/delete loop"]
   EP --> ES2["Elasticsearch current state\nchunk-v1-current"]
@@ -47,8 +47,8 @@ flowchart LR
 
 ```
 全文读别名     mx-insight-hub-content
-兼容写别名     mx-insight-hub-content-v3
-当前全文索引   mx-insight-hub-content-v3-current
+兼容写别名     mx-insight-hub-content-v4
+当前全文索引   mx-insight-hub-content-v4-current
 
 语义读别名     mx-insight-hub-chunk
 兼容写别名     mx-insight-hub-chunk-v1
@@ -118,7 +118,8 @@ page size；调用方不能解码、拼装或在翻页时改变这些输入。`p
 条数给出的兼容字段，不代表底层用 OFFSET。
 
 ES 首页打开 PIT，每次翻页把 keep-alive 续到 2 分钟，按
-`_score DESC, eventTime DESC, id DESC` 用 `search_after` 前进。每页取
+`_score DESC, eventTime DESC, id DESC` 加 PIT 自动提供的 `_shard_doc` tie-breaker
+用 `search_after` 前进。每页取
 `size + 1` 判定 `hasMore`，不依赖 `total`，所以不会在 10,000 命中窗口停住。
 PIT 保证这一轮 ES 翻页看到固定快照；最后一页主动关闭，异常遗留由 TTL 回收。
 

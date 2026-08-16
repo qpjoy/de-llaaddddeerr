@@ -2,10 +2,10 @@ import { defineIndexSet, vectorField } from '@qpjoy/mx-common/elasticsearch'
 
 export const PRODUCT_ID = 'mx-insight-hub'
 
-// Bump only for a mapping change Elasticsearch cannot apply in place (a changed
-// field type, a changed analyzer on an existing field). Adding a field is
-// additive and does not need a version bump.
-export const CONTENT_SCHEMA_VERSION = 3
+// Bump for incompatible mappings and whenever a new searchable multi-field
+// must be populated for existing documents. Elasticsearch can add a mapping in
+// place, but it cannot retroactively analyze old `_source` into that field.
+export const CONTENT_SCHEMA_VERSION = 4
 export const CHUNK_SCHEMA_VERSION = 1
 
 // Human names arrive as raw source text. Keep that raw value in `_source` and
@@ -68,9 +68,20 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
       // field is what makes mixed zh/en content searchable with one query.
       title: {
         type: 'text',
-        fields: { keyword: { type: 'keyword', ignore_above: 256 } },
+        fields: {
+          keyword: { type: 'keyword', ignore_above: 256 },
+          prefix: {
+            type: 'text',
+            analyzer: 'mx_edge_ngram',
+            search_analyzer: 'mx_edge_ngram_search',
+          },
+          cjk: { type: 'text', analyzer: 'mx_cjk_bigram' },
+        },
       },
-      body: { type: 'text' },
+      body: {
+        type: 'text',
+        fields: { cjk: { type: 'text', analyzer: 'mx_cjk_bigram' } },
+      },
       titleHanlp: { type: 'text', analyzer: 'mx_presegmented', search_analyzer: 'mx_presegmented_search' },
       bodyHanlp: { type: 'text', analyzer: 'mx_presegmented', search_analyzer: 'mx_presegmented_search' },
 

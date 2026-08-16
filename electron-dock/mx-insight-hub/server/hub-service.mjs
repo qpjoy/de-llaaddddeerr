@@ -694,6 +694,7 @@ export class HubService {
       datasetId: query.datasetId,
       objectType: query.objectType,
       pageSize: query.pageSize,
+      searchProfile: query.searchProfile,
       cursor: query.cursorToken,
     }
     const requestId = randomUUID()
@@ -748,7 +749,7 @@ export class HubService {
         objectType: query.objectType,
         size: query.pageSize,
         cursor: query.cursor,
-        strictRelevance: true,
+        searchProfile: query.searchProfile,
         trackTotalHits: true,
       })
       const responseBody = canonicalSearchResponse({

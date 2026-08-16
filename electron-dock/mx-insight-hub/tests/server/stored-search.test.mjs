@@ -69,7 +69,15 @@ test('stored search cursor carries an Elasticsearch PIT without exposing it as a
       nextCursor: {
         mode: 'elasticsearch',
         pitId: 'opaque-pit-id',
-        searchAfter: [1.25, '2026-08-10T00:00:00.000Z', FIRST_ID],
+        searchAfter: [1.25, '2026-08-10T00:00:00.000Z', FIRST_ID, 17],
+        analysisState: {
+          v: 1,
+          appliedProfile: 'canonical.balanced.v1',
+          tokens: ['agent'],
+          backendUsed: 'hanlp',
+          degraded: false,
+          errorCode: null,
+        },
       },
       items: [canonicalItem(FIRST_ID)],
     },
@@ -87,11 +95,47 @@ test('stored search cursor carries an Elasticsearch PIT without exposing it as a
   assert.deepEqual(next.cursor, {
     mode: 'elasticsearch',
     pitId: 'opaque-pit-id',
-    searchAfter: [1.25, '2026-08-10T00:00:00.000Z', FIRST_ID],
+    searchAfter: [1.25, '2026-08-10T00:00:00.000Z', FIRST_ID, 17],
     seen: 1,
+    analysisState: {
+      v: 1,
+      appliedProfile: 'canonical.balanced.v1',
+      tokens: ['agent'],
+      backendUsed: 'hanlp',
+      degraded: false,
+      errorCode: null,
+    },
   })
   assert.deepEqual(response.data.warnings, [])
   assert.equal(response.data.searchMode, 'elasticsearch')
+})
+
+test('stored search reports Elasticsearch profile degradation without exposing search internals', () => {
+  const query = normalizeStoredSearchQuery({
+    platform: 'xiaohongshu', query: '人工智能', pageSize: 20,
+  }, 20, PEPPER)
+  const response = storedSearchResponse({
+    query,
+    result: {
+      mode: 'elasticsearch',
+      hasMore: false,
+      items: [canonicalItem(FIRST_ID)],
+      searchExecution: {
+        requestedProfile: 'canonical.balanced.v1',
+        appliedProfile: 'canonical.phrase.v1',
+        queryAnalysis: { tokens: ['private-fallback-token'] },
+      },
+    },
+    durationMs: 2,
+    cursorSecret: PEPPER,
+  })
+
+  assert.deepEqual(response.data.warnings, [{
+    code: 'search_profile_degraded',
+    message: 'Requested search profile canonical.balanced.v1 was not available; canonical.phrase.v1 was applied.',
+  }])
+  assert.equal(JSON.stringify(response).includes('private-fallback-token'), false)
+  assert.equal(JSON.stringify(response).includes('must-not-leak'), false)
 })
 
 test('stored search is platform-granted, idempotent, opaque and never accepts physical search controls', async () => {
@@ -270,6 +314,7 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
       pitId: null,
       searchAfter: ['2026-08-10T00:00:00.000Z', FIRST_ID],
       seen: 1,
+      analysisState: null,
     })
 
     const usage = await call(baseUrl, '/api/v1/usage', { headers: authorization })

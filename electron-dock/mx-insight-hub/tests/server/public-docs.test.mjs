@@ -40,6 +40,9 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/tools\/tokenize/)
     assert.match(html, /nlp\.tokenize/)
     assert.match(html, /actualBackend/)
+    assert.match(html, /canonical\.balanced\.v1/)
+    assert.match(html, /HanLP/)
+    assert.match(html, /search_profile_degraded/)
     assert.match(html, /\/api\/v1\/requests\/\{requestId\}/)
     assert.match(html, /\/api\/v1\/usage/)
     assert.match(html, /Idempotency-Key/)
@@ -92,12 +95,40 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(document.components.schemas.CanonicalSearchRequest.additionalProperties, false)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
+      document.components.schemas.CanonicalSearchRequest.properties.searchProfile.default,
+      'canonical.balanced.v1',
+    )
+    assert.deepEqual(
+      document.components.schemas.CanonicalSearchRequest.properties.searchProfile.enum,
+      [
+        'canonical.balanced.v1',
+        'canonical.phrase.v1',
+        'canonical.terms-all.v1',
+        'canonical.zh-recall.v1',
+        'canonical.title-prefix.v1',
+      ],
+    )
+    assert.equal(
       document.components.schemas.StoredSearchEnvelope.properties.data.properties.source.const,
       'hub',
     )
     assert.equal(
       document.components.schemas.CanonicalSearchEnvelope.properties.data.properties.source.const,
       'hub',
+    )
+    assert.ok(
+      document.components.schemas.CanonicalSearchEnvelope.properties.data.required.includes('search'),
+    )
+    assert.deepEqual(
+      document.components.schemas.CanonicalSearchEnvelope.properties.data.properties.search.properties.appliedProfile.enum,
+      [
+        'canonical.balanced.v1',
+        'canonical.phrase.v1',
+        'canonical.terms-all.v1',
+        'canonical.zh-recall.v1',
+        'canonical.title-prefix.v1',
+        'postgres.substring.v1',
+      ],
     )
   })
 })

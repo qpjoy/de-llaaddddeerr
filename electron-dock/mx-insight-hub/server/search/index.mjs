@@ -47,9 +47,12 @@ export function createSearch({ pool, config, logger = console }) {
  * Called from the projector worker on startup rather than from the API: the API
  * must start and serve even with an unreachable cluster, and putting a cluster
  * round trip on its startup path would turn a search outage into an API outage.
- * Returns a report instead of throwing, for the same reason.
+ * Returns a report instead of throwing by default, for the same reason. The
+ * dedicated projector can opt into fail-fast startup so its supervisor retries
+ * the whole reconciliation instead of entering a loop that only drains outbox
+ * events.
  */
-export async function ensureSearchIndices(search, { logger = console } = {}) {
+export async function ensureSearchIndices(search, { logger = console, failOnError = false } = {}) {
   if (!search.client) return { enabled: false, reason: 'MX_COMMON_ELASTICSEARCH_URL is not configured' }
   const report = { enabled: true, content: null, chunk: null, error: null }
   try {
@@ -61,6 +64,9 @@ export async function ensureSearchIndices(search, { logger = console } = {}) {
       indexSet: search.indexSet,
       logger,
     })
+    if (failOnError && report.content?.mappingConflict) {
+      throw new Error(`Content index mapping conflict: ${report.content.mappingConflict}`)
+    }
     if (search.chunkIndexSet) {
       report.chunk = await ensureCurrentChunkIndex({
         client: search.client,
@@ -69,11 +75,15 @@ export async function ensureSearchIndices(search, { logger = console } = {}) {
         indexSet: search.chunkIndexSet,
         logger,
       })
+      if (failOnError && report.chunk?.mappingConflict) {
+        throw new Error(`Chunk index mapping conflict: ${report.chunk.mappingConflict}`)
+      }
     }
     logger?.log?.(`[search] indices ready: ${search.indexSet.writeAlias}`)
   } catch (error) {
     report.error = error.message
     logger?.error?.(`[search] index reconcile failed: ${error.message}`)
+    if (failOnError) throw error
   }
   return report
 }

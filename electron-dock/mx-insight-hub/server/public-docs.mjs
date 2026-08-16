@@ -1,3 +1,13 @@
+import {
+  DEFAULT_SEARCH_PROFILE,
+  POSTGRES_SEARCH_PROFILE,
+  searchCapabilities,
+} from './search/profiles.mjs'
+
+const PUBLIC_SEARCH_PROFILE_IDS = Object.freeze(
+  searchCapabilities({ audience: 'public' }).profiles.map((profile) => profile.id),
+)
+
 const errorResponse = {
   description: 'Request failed. The response contains a stable error code and requestId.',
   content: {
@@ -202,7 +212,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Search'],
         operationId: 'searchCanonicalData',
         summary: 'Search all authorized Hub canonical datasets in one ranked result set',
-        description: 'Searches the shared Hub canonical current-state projection once; it does not fan out to source APIs. Omitting platform searches all platforms currently granted to the consumer. platform, datasetId and objectType only narrow that authorized scope. The signed cursor is bound to the sorted platform-grant scope, query, filters and page size. The independent canonical-search usage bucket always uses the strictest limits across the consumer\'s complete current grant set. Elasticsearch is preferred and PostgreSQL is the explicit degradation path.',
+        description: 'Searches the shared Hub canonical current-state projection once; it does not fan out to source APIs. Omitting platform searches all platforms currently granted to the consumer. platform, datasetId and objectType only narrow that authorized scope. searchProfile selects a versioned, server-owned query policy; callers cannot supply analyzers or Elasticsearch DSL. Balanced search uses HanLP/pre-segmented AND only while query segmentation is healthy; degraded Jieba/bigram terms switch the applied profile to raw phrase. The signed cursor is bound to the sorted platform-grant scope, query, filters, page size, resolved search profile and first-page analysis state so later pages do not re-segment. The independent canonical-search usage bucket always uses the strictest limits across the consumer\'s complete current grant set. Elasticsearch is preferred and PostgreSQL is the explicit degradation path.',
         parameters: [idempotencyParameter],
         requestBody: {
           required: true,
@@ -212,7 +222,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
               examples: {
                 telegramAllSources: {
                   summary: 'Telegram monitor and SQLite-import datasets together',
-                  value: { platform: 'telegram', query: 'AI Agent', objectType: 'message', pageSize: 20 },
+                  value: { platform: 'telegram', query: 'AI Agent', objectType: 'message', searchProfile: DEFAULT_SEARCH_PROFILE, pageSize: 20 },
                 },
                 allGrantedPlatforms: {
                   summary: 'All platforms granted to this consumer',
@@ -333,7 +343,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Telegram'],
         operationId: 'searchTelegram',
         summary: 'Advanced search across canonical Telegram messages and chats',
-        description: 'Requires the telegram grant. Ranked full-text search uses the governed search projection and a documented PostgreSQL fallback. The opaque cursor is bound to the query and filters.',
+        description: 'Requires the telegram grant. Ranked full-text search uses the governed search projection and a documented PostgreSQL fallback. The version-3 opaque cursor is bound to the query, filters and bounded first-page analysis state, so later pages do not call the segmenter again. HanLP degradation applies raw phrase and reports search_profile_degraded.',
         parameters: [idempotencyParameter],
         requestBody: {
           required: true,
@@ -468,8 +478,14 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           platform: { type: 'string', minLength: 1, maxLength: 64, description: 'Optional exact platform filter. It must already be granted; omit it to search every currently granted platform.' },
           datasetId: { type: 'string', minLength: 1, maxLength: 200, description: 'Optional exact logical dataset filter; never a physical source selector or authorization grant.' },
           objectType: { type: 'string', minLength: 1, maxLength: 100, description: 'Optional exact canonical object-type filter.' },
+          searchProfile: {
+            type: 'string',
+            enum: PUBLIC_SEARCH_PROFILE_IDS,
+            default: DEFAULT_SEARCH_PROFILE,
+            description: 'Versioned server-owned search policy. Healthy HanLP/pre-segmented terms drive the default AND branch; degraded fallback terms cause an explicit phrase-only applied profile. Arbitrary analyzers, tokenizers, filters and Elasticsearch DSL are not accepted.',
+          },
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
-          cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed opaque nextCursor bound to the query, filters, page size and authorized platform scope.' },
+          cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed opaque nextCursor bound to the query, filters, page size, resolved search profile, authorized platform scope and bounded first-page analysis state.' },
         },
       },
       TokenizeRequest: {
@@ -496,7 +512,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           to: { type: 'string', format: 'date-time' },
           matchMode: { type: 'string', enum: ['full_text'], default: 'full_text' },
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
-          cursor: { type: 'string', minLength: 1, maxLength: 8192 },
+          cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed version-3 cursor bound to query, filters and bounded first-page analysis state; return unchanged.' },
         },
       },
       PageInfo: {
@@ -622,7 +638,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           data: {
             type: 'object',
             additionalProperties: false,
-            required: ['contractVersion', 'source', 'query', 'scope', 'filters', 'items', 'pageInfo', 'searchMode', 'warnings', 'durationMs'],
+            required: ['contractVersion', 'source', 'query', 'scope', 'filters', 'search', 'items', 'pageInfo', 'searchMode', 'warnings', 'durationMs'],
             properties: {
               contractVersion: { type: 'string', const: 'mx-insight-hub.canonical-search.v1' },
               source: { type: 'string', const: 'hub' },
@@ -637,6 +653,16 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   platform: { type: ['string', 'null'] },
                   datasetId: { type: ['string', 'null'] },
                   objectType: { type: ['string', 'null'] },
+                },
+              },
+              search: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['requestedProfile', 'appliedProfile', 'degraded'],
+                properties: {
+                  requestedProfile: { type: 'string', enum: PUBLIC_SEARCH_PROFILE_IDS },
+                  appliedProfile: { type: 'string', enum: [...PUBLIC_SEARCH_PROFILE_IDS, POSTGRES_SEARCH_PROFILE] },
+                  degraded: { type: 'boolean' },
                 },
               },
               items: { type: 'array', items: { $ref: '#/components/schemas/StoredSearchItem' } },
@@ -921,13 +947,20 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: stored-$(uuidgen)" \
   -d '{"platform":"xiaohongshu","query":"AI Agent","datasetId":"night-all.search.v1","objectType":"post","pageSize":20}' | jq</code></pre>
-    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/canonical/search</code></div><p>来源无关的统一检索：在一份 canonical 全局索引中直接排序，不逐个调用来源后拼接。省略 <code>platform</code> 时搜索当前调用者已授权的全部平台；<code>datasetId</code> 与 <code>objectType</code> 只用于收窄。</p></div>
-    <div class="notice">统一接口只读取 Hub 已存数据，不触发第三方采集。响应的 <code>scope.platforms</code> 是本次实际授权范围；游标与该范围绑定，授权发生变化后应从第一页重新搜索。独立的 canonical-search 用量桶固定采用调用者当前全部平台授权中最严格的限额。</div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/canonical/search</code></div><p>来源无关的统一检索：在一份 canonical 全局索引中直接排序，不逐个调用来源后拼接。省略 <code>platform</code> 时搜索当前调用者已授权的全部平台；<code>datasetId</code> 与 <code>objectType</code> 只用于收窄。可用 <code>searchProfile</code> 选择版本化搜索策略；不接受任意 analyzer、tokenizer、filter 或 ES DSL。</p></div>
+    <div class="notice">统一接口只读取 Hub 已存数据，不触发第三方采集。响应的 <code>scope.platforms</code> 是本次实际授权范围；游标与该范围及首屏分词状态绑定，后续页不会再次调用 HanLP。授权或 profile 发生变化后应从第一页重新搜索。独立的 canonical-search 用量桶固定采用调用者当前全部平台授权中最严格的限额。</div>
+    <table><thead><tr><th>searchProfile</th><th>查询策略</th></tr></thead><tbody>
+      <tr><td><code>canonical.balanced.v1</code>（默认）</td><td>HanLP 健康时使用“原文 phrase 或全部 HanLP/presegmented 词命中（AND）”；若分词降级到 Jieba/bigram，则明确应用 phrase-only，绝不拿 fallback 词误查 HanLP 字段。</td></tr>
+      <tr><td><code>canonical.phrase.v1</code></td><td>只匹配保持语序的原文 phrase，精度优先。</td></tr>
+      <tr><td><code>canonical.terms-all.v1</code></td><td>所有预分词查询词都必须命中，允许词序变化。</td></tr>
+      <tr><td><code>canonical.zh-recall.v1</code></td><td>在默认策略上增加较低权重的 CJK bigram 召回。</td></tr>
+      <tr><td><code>canonical.title-prefix.v1</code></td><td>用于标题、作者、用户名和会话名的有界前缀检索。</td></tr>
+    </tbody></table>
     <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/canonical/search" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: canonical-$(uuidgen)" \
-  -d '{"query":"AI Agent","pageSize":20}' | jq</code></pre>
+  -d '{"query":"AI Agent","searchProfile":"canonical.balanced.v1","pageSize":20}' | jq</code></pre>
 
     <h2 id="tools">通用工具</h2>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/tools/tokenize</code></div><p>新建或从未配置的调用者默认获得 <code>nlp.tokenize</code>，管理员可显式停用；调用仍必须携带已签发的 API Key。默认按 consumer + capability 的 3600 秒滚动窗口限制 1000 次，同一调用者的所有 Key 共享上限。它不授予数据平台权限，响应会报告实际分词后端及降级状态。</p></div>
@@ -971,9 +1004,9 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: telegram-all-sources-$(uuidgen)" \\
-  -d '{"platform":"telegram","objectType":"message","query":"AI Agent","pageSize":20}' | jq</code></pre>
+  -d '{"platform":"telegram","objectType":"message","query":"AI Agent","searchProfile":"canonical.balanced.v1","pageSize":20}' | jq</code></pre>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/entities/search?query=example&amp;pageSize=20</code></div><p>模糊匹配作者名称/用户名和会话标题/用户名。</p></div>
-    <div class="notice">如果搜索响应的 <code>warnings</code> 包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底；响应仍然有效。已有 Elasticsearch 游标不会在中途静默切换模式。</div>
+    <div class="notice">如果搜索响应包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底。Canonical 接口还会以 <code>search.appliedProfile=postgres.substring.v1</code> 和 <code>search_profile_degraded</code> 明示策略变化；Telegram/Stored 兼容响应只保留投影告警。若 Elasticsearch 仍在线但 HanLP 查询降级，三个接口都会返回 <code>search_profile_degraded</code>。已有 Elasticsearch 游标会签名并复用首屏分词状态，不会中途切换模式或重新分词。</div>
 
     <h2 id="discovery">能力、请求状态与用量</h2>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>仅返回当前调用者已授权且可公开使用的平台与通用 capabilities。</p></div>

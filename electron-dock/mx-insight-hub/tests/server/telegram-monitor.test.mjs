@@ -23,6 +23,14 @@ import {
 
 const ADMIN_TOKEN = 'test-admin-token'
 const PEPPER = 'test-pepper-with-enough-entropy'
+const HANLP_ANALYSIS_STATE = Object.freeze({
+  v: 1,
+  appliedProfile: 'canonical.balanced.v1',
+  tokens: ['人工', '智能'],
+  backendUsed: 'hanlp',
+  degraded: false,
+  errorCode: null,
+})
 const WRITER_CONTRACT_ATTESTATION = Object.freeze({
   confirmed: true,
   contractVersion: TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION,
@@ -123,6 +131,38 @@ test('Night-All v1 Telegram search maps negative metric sentinels to null', () =
   })
 })
 
+test('Telegram search reports Elasticsearch profile degradation without leaking analysis details', () => {
+  const response = telegramDataSearchResponse({
+    query: '人工智能',
+    result: {
+      mode: 'elasticsearch',
+      hasMore: false,
+      items: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        externalId: '-1007:42',
+        objectType: 'message',
+        body: 'public result',
+      }],
+      searchExecution: {
+        requestedProfile: 'canonical.balanced.v1',
+        appliedProfile: 'canonical.phrase.v1',
+        queryAnalysis: { tokens: ['private-fallback-token'] },
+      },
+    },
+    pageSize: 20,
+    cursor: null,
+    cursorBinding: 'not-used-without-another-page',
+    cursorSecret: PEPPER,
+    durationMs: 1,
+  })
+
+  assert.deepEqual(response.data.warnings, [{
+    code: 'search_profile_degraded',
+    message: 'Requested search profile canonical.balanced.v1 was not available; canonical.phrase.v1 was applied.',
+  }])
+  assert.equal(JSON.stringify(response).includes('private-fallback-token'), false)
+})
+
 test('Telegram search cursors exceed 10k safely and are bound to the normalized query and filters', () => {
   const input = {
     query: 'keyword', scope: 'messages', chatId: '-1007', authorId: 'user-1',
@@ -141,12 +181,14 @@ test('Telegram search cursors exceed 10k safely and are bound to the normalized 
     '2026-08-05T00:00:00.000Z',
     '11111111-1111-4111-8111-111111111111',
   ])
+  assert.equal(resumed.cursor.analysisState, null)
 
   const esCursor = encodeTelegramSearchCursor({
     mode: 'elasticsearch',
     pitId: 'pit-renewed',
     searchAfter: [12.5, 9_223_372_036_854_775_000, '11111111-1111-4111-8111-111111111111', 42],
     seen: 100,
+    analysisState: HANLP_ANALYSIS_STATE,
   }, first.cursorBinding, PEPPER)
   assert.deepEqual(
     normalizeTelegramSearchQuery({ ...input, cursor: esCursor }, 100, PEPPER).cursor,
@@ -155,7 +197,25 @@ test('Telegram search cursors exceed 10k safely and are bound to the normalized 
       pitId: 'pit-renewed',
       searchAfter: [12.5, 9_223_372_036_854_775_000, '11111111-1111-4111-8111-111111111111', 42],
       seen: 100,
+      analysisState: HANLP_ANALYSIS_STATE,
     },
+  )
+
+  const tamperedEnvelope = JSON.parse(Buffer.from(esCursor, 'base64url').toString('utf8'))
+  tamperedEnvelope.r.tokens = ['篡改']
+  const tamperedCursor = Buffer.from(JSON.stringify(tamperedEnvelope), 'utf8').toString('base64url')
+  assert.throws(
+    () => normalizeTelegramSearchQuery({ ...input, cursor: tamperedCursor }, 100, PEPPER),
+    (error) => error?.code === 'invalid_cursor',
+  )
+  assert.throws(
+    () => encodeTelegramSearchCursor({
+      mode: 'elasticsearch',
+      pitId: 'pit-without-analysis',
+      searchAfter: [1, null, '11111111-1111-4111-8111-111111111111', 1],
+      seen: 1,
+    }, first.cursorBinding, PEPPER),
+    (error) => error?.code === 'cursor_configuration_error',
   )
 
   for (const changed of [
@@ -1741,13 +1801,21 @@ test('local Telegram search keeps Night-All v1 compatibility, idempotency and st
   const searchQueries = {
     searchContent: async (query, options) => {
       contentCalls.push({ query, options })
+      const elasticsearch = query === '人工智能'
       return {
-        mode: 'postgres',
+        mode: elasticsearch ? 'elasticsearch' : 'postgres',
         hasMore: true,
-        nextCursor: {
-          mode: 'postgres', pitId: null,
-          searchAfter: ['2026-08-10T00:00:00.000Z', '11111111-1111-4111-8111-111111111111'],
-        },
+        nextCursor: elasticsearch
+          ? {
+              mode: 'elasticsearch',
+              pitId: 'telegram-hanlp-pit',
+              searchAfter: [8.5, '2026-08-10T00:00:00.000Z', '11111111-1111-4111-8111-111111111111', 23],
+              analysisState: HANLP_ANALYSIS_STATE,
+            }
+          : {
+              mode: 'postgres', pitId: null,
+              searchAfter: ['2026-08-10T00:00:00.000Z', '11111111-1111-4111-8111-111111111111'],
+            },
         items: [{
           id: '11111111-1111-4111-8111-111111111111',
           externalId: '-1007:42',
@@ -1867,6 +1935,7 @@ test('local Telegram search keeps Night-All v1 compatibility, idempotency and st
       pitId: null,
       searchAfter: ['2026-08-10T00:00:00.000Z', '11111111-1111-4111-8111-111111111111'],
       seen: 1,
+      analysisState: null,
     })
 
     const generic = await call(baseUrl, '/api/v1/data/search', {
@@ -1877,6 +1946,29 @@ test('local Telegram search keeps Night-All v1 compatibility, idempotency and st
     assert.equal(generic.response.status, 200)
     assert.equal(generic.payload.data.platform, 'telegram')
     assert.equal(contentCalls[2].options.objectType, 'message')
+
+    const hanlpBody = { ...body, query: '人工智能' }
+    const hanlpFirst = await call(baseUrl, '/api/v1/data/telegram/search', {
+      method: 'POST',
+      headers: { ...authorization, 'idempotency-key': 'telegram-search-hanlp-0001' },
+      body: hanlpBody,
+    })
+    assert.equal(hanlpFirst.response.status, 200)
+    assert.ok(hanlpFirst.payload.data.pageInfo.nextCursor)
+
+    const hanlpSecond = await call(baseUrl, '/api/v1/data/telegram/search', {
+      method: 'POST',
+      headers: { ...authorization, 'idempotency-key': 'telegram-search-hanlp-0002' },
+      body: { ...hanlpBody, cursor: hanlpFirst.payload.data.pageInfo.nextCursor },
+    })
+    assert.equal(hanlpSecond.response.status, 200)
+    assert.deepEqual(contentCalls[4].options.cursor, {
+      mode: 'elasticsearch',
+      pitId: 'telegram-hanlp-pit',
+      searchAfter: [8.5, '2026-08-10T00:00:00.000Z', '11111111-1111-4111-8111-111111111111', 23],
+      seen: 1,
+      analysisState: HANLP_ANALYSIS_STATE,
+    })
 
     const entities = await call(baseUrl, '/api/v1/data/telegram/entities/search?query=alice&pageSize=5', {
       headers: authorization,

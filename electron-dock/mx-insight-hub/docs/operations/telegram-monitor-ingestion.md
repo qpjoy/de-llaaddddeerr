@@ -467,10 +467,11 @@ onto every message; such a design would also need fan-out reprojection whenever
 a chat changes. Public history/search expose the two fixed datasets and message
 chat IDs; a future join/enrichment must be an explicit versioned contract.
 
-Before the first full TG projection, content schema v3 fixes the fields that
+Content schema v4 fixes the fields that
 need real ES types:
 
-- title/body raw text plus `titleHanlp/bodyHanlp`;
+- title/body raw text plus `titleHanlp/bodyHanlp`, bounded title prefix and
+  title/body CJK-bigram subfields;
 - author/username raw values with exact, prefix and CJK-bigram subfields,
   dedicated ES `wildcard` typed fields for Latin mid-string handle lookup, plus
   `authorNameHanlp/usernameHanlp` for pre-segmented relevance;
@@ -481,7 +482,7 @@ need real ES types:
 
 The mapping stays `dynamic: strict`; extra source JSON remains in PostgreSQL
 raw/canonical extensions instead of creating arbitrary ES fields. On rollout,
-the projector creates `mx-insight-hub-content-v3-current`, rebuilds it from PG
+the projector creates `mx-insight-hub-content-v4-current`, rebuilds it from PG
 current truth under an advisory lock, atomically switches read/compatible write
 aliases, then runs a second reconciliation pass. PG remains authoritative and
 the old index is never used as the reindex source.

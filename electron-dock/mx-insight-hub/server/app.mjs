@@ -5,6 +5,7 @@ import { secureEqual } from './core/crypto.mjs'
 import { AppError } from './core/errors.mjs'
 import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson } from './core/http.mjs'
 import { PUBLIC_DOCS_HTML, PUBLIC_OPENAPI_DOCUMENT } from './public-docs.mjs'
+import { publicStoredSearchItem } from './data/stored-search.mjs'
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import {
   BUILTIN_FILE_FORMAT_RULES,
@@ -31,6 +32,11 @@ import {
   requireTenantCapability,
   scopeTenantCapability,
 } from './identity/index.mjs'
+import {
+  publicSearchProfile,
+  resolveSearchProfile,
+  searchCapabilities,
+} from './search/profiles.mjs'
 
 function queryFilters(searchParams) {
   return {
@@ -116,9 +122,12 @@ function requiredSourceKey(body) {
   return sourceKey
 }
 
-function dataCenterCursorBinding({ query, datasetId, platform, objectType, pageSize }) {
+function dataCenterCursorBinding({ query, datasetId, platform, objectType, pageSize, searchProfile = null }) {
   return createHash('sha256')
-    .update(JSON.stringify({ query, datasetId, platform, objectType, pageSize }))
+    .update(JSON.stringify({
+      query, datasetId, platform, objectType, pageSize,
+      ...(searchProfile ? { searchProfile } : {}),
+    }))
     .digest('base64url')
 }
 
@@ -906,13 +915,23 @@ export function createApp({
           throw new AppError(400, 'invalid_page_size', 'pageSize must be an integer between 1 and 100')
         }
         const optionalFilter = (name) => searchParams.get(name)?.trim() || null
+        const catalog = await store.dataCenter({
+          datasetId: optionalFilter('datasetId'),
+          platform: optionalFilter('platform'),
+          objectType: optionalFilter('objectType'),
+          pageSize,
+        })
+        const capabilities = typeof search?.queries?.searchCapabilities === 'function'
+          ? await search.queries.searchCapabilities({ audience: 'admin' })
+          : {
+              ...searchCapabilities({ audience: 'admin', activeIndexSchema: null }),
+              readinessError: 'search_projection_unavailable',
+            }
         sendJson(response, 200, {
-          data: await store.dataCenter({
-            datasetId: optionalFilter('datasetId'),
-            platform: optionalFilter('platform'),
-            objectType: optionalFilter('objectType'),
-            pageSize,
-          }),
+          data: {
+            ...catalog,
+            searchCapabilities: capabilities,
+          },
           requestId,
         })
         return
@@ -951,7 +970,19 @@ export function createApp({
           platform: optionalFilter('platform'),
           objectType: optionalFilter('objectType'),
         }
-        const binding = dataCenterCursorBinding({ query, ...filters, pageSize })
+        const requestedSearchProfile = optionalFilter('searchProfile')
+        if (!query && requestedSearchProfile) {
+          throw new AppError(400, 'invalid_request', 'searchProfile requires a non-blank q')
+        }
+        const profile = query
+          ? resolveSearchProfile(requestedSearchProfile, { audience: 'admin' })
+          : null
+        const binding = dataCenterCursorBinding({
+          query,
+          ...filters,
+          pageSize,
+          searchProfile: profile?.id ?? null,
+        })
         const encodedCursor = optionalFilter('cursor')
         if (requestedPage != null && encodedCursor) {
           throw new AppError(400, 'invalid_request', 'page and cursor cannot be used together')
@@ -967,6 +998,7 @@ export function createApp({
             size: pageSize,
             cursor: cursorState.cursor,
             offset: requestedOffset,
+            searchProfile: profile.id,
             trackTotalHits: true,
           })
           let items = result.items
@@ -977,6 +1009,7 @@ export function createApp({
               ...(fullById.get(item.id) || item),
               score: item.score ?? null,
               highlight: item.highlight ?? null,
+              matchEvidence: item.matchEvidence ?? [],
             }))
           }
           const total = dataCenterTotal(result.total)
@@ -984,10 +1017,43 @@ export function createApp({
             total == null ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.ceil(total / pageSize)),
             Math.floor(DATA_CENTER_SEARCH_RESULT_WINDOW / pageSize),
           )
+          const publicSample = items.length > 0 ? publicStoredSearchItem(items[0]) : null
+          const execution = result.searchExecution || {
+            requestedProfile: profile.id,
+            appliedProfile: profile.id,
+            profile: publicSearchProfile(profile),
+            queryAnalysis: {
+              tokens: [], tokenCount: 0, truncated: false,
+              backendUsed: null, degraded: false, errorCode: null,
+            },
+            matchedBranches: [],
+            warning: profile.warning,
+          }
           sendJson(response, 200, {
             data: {
               items,
               mode: result.mode,
+              searchExecution: {
+                ...execution,
+                sample: {
+                  request: {
+                    query,
+                    searchProfile: profile.id,
+                    platform: filters.platform,
+                    datasetId: filters.datasetId,
+                    objectType: filters.objectType,
+                    pageSize,
+                  },
+                  response: {
+                    searchMode: result.mode,
+                    searchProfile: {
+                      requested: execution.requestedProfile,
+                      applied: execution.appliedProfile,
+                    },
+                    items: publicSample ? [publicSample] : [],
+                  },
+                },
+              },
               pageInfo: dataCenterPageInfo({
                 page,
                 pageSize,

@@ -615,8 +615,24 @@ select {
 
 .mih-filter-bar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
+}
+
+.mih-search-profile-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  line-height: 1.5;
+}
+
+.mih-search-profile-summary strong {
+  color: var(--qp-text-1);
+  font-weight: 500;
 }
 
 .mih-record-cell {
@@ -1250,6 +1266,10 @@ select {
 }
 
 @media (max-width: 900px) {
+  .mih-filter-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .mih-shell {
     display: block;
     overflow: visible;

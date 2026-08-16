@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Archive,
   ClockCounterClockwise,
@@ -6,6 +6,7 @@ import {
   FileText,
   MagnifyingGlass,
   Stack,
+  WarningCircle,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import {
@@ -107,6 +108,175 @@ function HighlightedValue({ values, fallback }) {
   ))
 }
 
+function searchFact(item, index) {
+  if (item == null) return null
+  if (typeof item !== 'object') {
+    const value = String(item).trim()
+    return value ? { key: `${index}:${value}`, title: value, technical: true } : null
+  }
+  const title = item.label || item.name || item.id || item.branch || item.field || `配置 ${index + 1}`
+  const summary = item.summary || item.description || item.purpose || null
+  const fields = asArray(item.fields).filter(Boolean)
+  const metadata = [
+    item.analyzer ? `index analyzer: ${item.analyzer}` : null,
+    item.searchAnalyzer ? `search analyzer: ${item.searchAnalyzer}` : null,
+    fields.length ? `fields: ${fields.join(', ')}` : null,
+  ].filter(Boolean)
+  return { key: item.id || item.branch || `${index}:${title}`, title, summary, metadata }
+}
+
+function SearchFactList({ items, emptyLabel }) {
+  const facts = asArray(items).map(searchFact).filter(Boolean)
+  if (!facts.length) return <p className="qp-search-lab__empty">{emptyLabel}</p>
+  return (
+    <ul className="qp-search-lab__facts">
+      {facts.map((fact) => (
+        <li key={fact.key}>
+          {fact.technical ? <code>{fact.title}</code> : <strong>{fact.title}</strong>}
+          {fact.summary ? <span>{fact.summary}</span> : null}
+          {fact.metadata?.length ? <small>{fact.metadata.join(' · ')}</small> : null}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function JsonSample({ value, emptyLabel }) {
+  if (value == null) return <p className="qp-search-lab__empty">{emptyLabel}</p>
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  return <pre className="qp-code-block"><code>{text}</code></pre>
+}
+
+function SearchLab({ capabilities, selectedProfile, execution, recordsMode, query, safeSample }) {
+  const analysis = execution?.queryAnalysis && typeof execution.queryAnalysis === 'object'
+    ? execution.queryAnalysis
+    : {}
+  const hasQueryAnalysis = Boolean(execution?.queryAnalysis && typeof execution.queryAnalysis === 'object')
+  const tokens = asArray(analysis.tokens).filter((value) => value != null && String(value).trim())
+  const matchedBranches = asArray(execution?.matchedBranches).filter(Boolean)
+  const backend = analysis.backendUsed || analysis.backend || null
+  const mode = execution?.mode || recordsMode || null
+  const appliedProfile = execution?.appliedProfile || execution?.profile?.id || null
+  const availableRepresentations = asArray(capabilities.indexRepresentations)
+  const activeRepresentations = asArray(execution?.profile?.indexRepresentations).length
+    ? execution.profile.indexRepresentations
+    : selectedProfile?.indexRepresentations
+  const indexRepresentations = asArray(activeRepresentations).length
+    ? activeRepresentations.map((representation) => {
+      if (typeof representation !== 'string') return representation
+      return availableRepresentations.find((candidate) => candidate?.id === representation) || representation
+    })
+    : availableRepresentations
+  const queryPlan = asArray(execution?.queryPlan).length
+    ? execution.queryPlan
+    : asArray(execution?.profile?.queryPlan).length
+      ? execution.profile.queryPlan
+      : selectedProfile?.queryPlan
+  const sample = execution?.sample && typeof execution.sample === 'object'
+    ? execution.sample
+    : safeSample && typeof safeSample === 'object'
+      ? { response: safeSample }
+      : {}
+  const desiredIndexSchema = capabilities.indexSchema || null
+  const activeIndexSchema = capabilities.activeIndexSchema || null
+  const readinessKnown = typeof capabilities.ready === 'boolean'
+
+  return (
+    <details className="qp-search-lab">
+      <summary>
+        <span className="qp-search-lab__title">
+          <strong>Search Lab</strong>
+          <small>HanLP/presegmented 是中文主通道；CJK zh-recall 仅作低权重补充</small>
+        </span>
+        <span className="qp-search-lab__badges" aria-label="当前搜索状态">
+          {selectedProfile?.id ? <span className="qp-tag qp-tag--primary">requested {selectedProfile.id}</span> : null}
+          {appliedProfile && appliedProfile !== selectedProfile?.id
+            ? <span className="qp-tag qp-tag--danger">applied {appliedProfile}</span>
+            : null}
+          {desiredIndexSchema ? <span className="qp-tag">target {desiredIndexSchema}</span> : null}
+          {readinessKnown ? <span className="qp-tag">active {activeIndexSchema || 'unavailable'}</span> : null}
+          {capabilities.ready === true ? <span className="qp-tag qp-tag--success">projection ready</span> : null}
+          {capabilities.ready === false ? <span className="qp-tag qp-tag--danger">target schema pending</span> : null}
+          {mode ? <span className="qp-tag">{mode}</span> : null}
+          {backend ? <span className="qp-tag qp-tag--success">{backend}</span> : null}
+          {analysis.degraded ? <span className="qp-tag qp-tag--danger">已降级</span> : null}
+        </span>
+      </summary>
+      <div className="qp-search-lab__body">
+        {readinessKnown ? (
+          <section className="qp-search-lab__readiness" data-ready={capabilities.ready ? 'true' : 'false'}
+            role="status" aria-live="polite">
+            <strong>{capabilities.ready ? '搜索投影已就绪' : '目标索引尚未激活'}</strong>
+            <span>
+              active {activeIndexSchema || 'unavailable'} → target {desiredIndexSchema || '未公布'}。
+              {capabilities.ready
+                ? ' 当前索引支持全部已声明的搜索表示。'
+                : ' 标记为 ready 的兼容 profile 仍可使用；仅下拉中禁用的 profile 需要等待目标索引。'}
+            </span>
+            {capabilities.readinessError ? <code>{capabilities.readinessError}</code> : null}
+          </section>
+        ) : null}
+        <div className="qp-search-lab__grid">
+          <section>
+            <h3>索引表示（只读）</h3>
+            <SearchFactList items={indexRepresentations} emptyLabel="当前服务端未公布索引表示。" />
+          </section>
+          <section>
+            <h3>查询计划</h3>
+            <SearchFactList items={queryPlan} emptyLabel="当前 profile 未公布查询计划。" />
+          </section>
+        </div>
+
+        <section className="qp-search-lab__analysis" aria-labelledby="mih-query-analysis-title">
+          <div className="qp-search-lab__section-heading">
+            <h3 id="mih-query-analysis-title">本次 Query analysis · tokens</h3>
+            {query ? (
+              <span className="qp-search-lab__execution" role="status" aria-live="polite">
+                requestedProfile={execution?.requestedProfile || selectedProfile?.id || '服务端默认'}
+                {appliedProfile ? ` · appliedProfile=${appliedProfile}` : ''}
+                {` · backendUsed=${hasQueryAnalysis ? backend || 'null' : '未提供'}`}
+                {` · degraded=${hasQueryAnalysis ? String(Boolean(analysis.degraded)) : '未提供'}`}
+                {` · errorCode=${hasQueryAnalysis ? analysis.errorCode || 'null' : '未提供'}`}
+                {Number.isFinite(analysis.tokenCount) ? ` · tokenCount=${analysis.tokenCount}` : ''}
+                {analysis.truncated ? ' · tokens truncated' : ''}
+              </span>
+            ) : null}
+          </div>
+          {!query ? <p className="qp-search-lab__empty">输入关键词并搜索后显示实际 tokens 与分词后端。</p> : tokens.length ? (
+            <div className="qp-chip-list" role="list" aria-label="查询分词结果">
+              {tokens.map((value, index) => <span role="listitem" key={`${index}:${value}`}>{String(value)}</span>)}
+            </div>
+          ) : (
+            <p className="qp-search-lab__empty">
+              {mode && /postgres/iu.test(mode)
+                ? 'PostgreSQL fallback 不提供 Elasticsearch query tokens。'
+                : hasQueryAnalysis && analysis.tokenCount === 0 && backend == null
+                  ? '此 profile 不需要分词，服务端返回空 tokens。'
+                  : '本次响应未提供 query tokens。'}
+            </p>
+          )}
+          {matchedBranches.length ? (
+            <div className="qp-chip-list" role="list" aria-label="本页命中的查询分支">
+              {matchedBranches.map((value) => <span role="listitem" key={value}>matched: {value}</span>)}
+            </div>
+          ) : null}
+        </section>
+
+        <div className="qp-search-lab__samples">
+          <section>
+            <h3>公共 API 请求样例</h3>
+            <JsonSample value={sample.request} emptyLabel="当前服务端未提供公共请求样例。" />
+          </section>
+          <section>
+            <h3>公共安全响应样例</h3>
+            <JsonSample value={sample.response} emptyLabel="当前服务端未提供经公共 allowlist 投影的响应样例。" />
+          </section>
+        </div>
+      </div>
+    </details>
+  )
+}
+
 /**
  * Read-only view over PostgreSQL canonical truth.
  *
@@ -121,6 +291,7 @@ export function DataCenterPage({ token, onUnauthorized }) {
   const [objectType, setObjectType] = useState('')
   const [queryDraft, setQueryDraft] = useState('')
   const [query, setQuery] = useState('')
+  const [searchProfile, setSearchProfile] = useState('')
   const [page, setPage] = useState(1)
   const [cursor, setCursor] = useState(null)
   const [cursorHistory, setCursorHistory] = useState([])
@@ -130,12 +301,34 @@ export function DataCenterPage({ token, onUnauthorized }) {
 
   const loadCatalog = useCallback(() => adminApi.dataCenter(token, { pageSize: 1 }), [token])
   const state = useRemoteData(loadCatalog, onUnauthorized)
+  const data = state.data || {}
+  const datasets = asArray(data.datasets)
+  const searchCapabilities = data.searchCapabilities && typeof data.searchCapabilities === 'object'
+    ? data.searchCapabilities
+    : {}
+  const searchProfiles = asArray(searchCapabilities.profiles)
+    .filter((profile) => profile && typeof profile.id === 'string' && profile.id.trim())
+  const defaultSearchProfile = searchCapabilities.defaultProfile
+    || searchProfiles.find((profile) => profile.default)?.id
+    || searchProfiles[0]?.id
+    || ''
+  const readySearchProfiles = searchProfiles.filter((profile) => profile.ready !== false)
+  const fallbackSearchProfile = readySearchProfiles.find((profile) => profile.id === defaultSearchProfile)?.id
+    || readySearchProfiles[0]?.id
+    || ''
+  const requestedProfileMetadata = searchProfiles.find((profile) => profile.id === searchProfile)
+  const effectiveSearchProfile = requestedProfileMetadata && requestedProfileMetadata.ready !== false
+    ? requestedProfileMetadata.id
+    : fallbackSearchProfile
+  const selectedSearchProfile = searchProfiles.find((profile) => profile.id === effectiveSearchProfile) || null
+  const requestedSearchProfile = query ? effectiveSearchProfile : ''
   const loadRecords = useCallback(async () => {
     const filters = {
       q: query || undefined,
       datasetId: datasetId || undefined,
       platform: platform || undefined,
       objectType: objectType || undefined,
+      searchProfile: requestedSearchProfile || undefined,
       pageSize,
       cursor: cursor || undefined,
       page: cursor ? undefined : page,
@@ -157,13 +350,18 @@ export function DataCenterPage({ token, onUnauthorized }) {
         pageInfo: { pageSize: legacy?.pageSize || pageSize, hasMore: false, nextCursor: null },
       }
     }
-  }, [cursor, datasetId, objectType, page, platform, query, searchRevision, token])
+  }, [cursor, datasetId, objectType, page, platform, query, requestedSearchProfile, searchRevision, token])
   const recordsState = useRemoteData(loadRecords, onUnauthorized)
 
-  const data = state.data || {}
-  const datasets = asArray(data.datasets)
   const recordsPage = recordPage(recordsState.data, pageSize)
   const records = recordsPage.items
+  const searchExecution = recordsState.data?.searchExecution && typeof recordsState.data.searchExecution === 'object'
+    ? recordsState.data.searchExecution
+    : null
+  // `data.sample` is accepted only as a rolling-contract compatibility shape.
+  // The server contract guarantees that it has already passed the public
+  // allowlist; this UI never derives a public sample from an admin record.
+  const safeSearchSample = recordsState.data?.sample ?? null
   const currentPage = recordsPage.page ?? cursorHistory.length + 1
   const numberedPagination = recordsPage.page != null
     && recordsPage.total != null
@@ -171,6 +369,16 @@ export function DataCenterPage({ token, onUnauthorized }) {
   const stats = data.stats || {}
   const platforms = useMemo(() => [...new Set(datasets.flatMap((dataset) => asArray(dataset.platforms)))].sort(), [datasets])
   const objectTypes = useMemo(() => [...new Set(datasets.flatMap((dataset) => asArray(dataset.objectTypes)))].sort(), [datasets])
+  const searchProfileOptions = searchProfiles.length
+    ? searchProfiles.map((profile) => ({
+      value: profile.id,
+      label: `${profile.label || profile.id}${profile.id === defaultSearchProfile || profile.default ? '（默认）' : ''}${profile.ready === false ? `（未就绪${profile.requiredIndexSchema ? `：需 ${profile.requiredIndexSchema}` : ''}）` : ''}`,
+      disabled: profile.ready === false,
+    }))
+    : [{
+      value: defaultSearchProfile,
+      label: defaultSearchProfile ? `${defaultSearchProfile}（服务端默认）` : '服务端默认（兼容模式）',
+    }]
 
   const resetPagination = () => {
     setPage(1)
@@ -178,8 +386,19 @@ export function DataCenterPage({ token, onUnauthorized }) {
     setCursorHistory([])
   }
 
+  useEffect(() => {
+    if (!searchProfile || searchProfile === effectiveSearchProfile) return
+    setSearchProfile(effectiveSearchProfile)
+    resetPagination()
+  }, [effectiveSearchProfile, searchProfile])
+
   const changeFilter = (setter) => (value) => {
     setter(value)
+    resetPagination()
+  }
+
+  const changeSearchProfile = (value) => {
+    setSearchProfile(value)
     resetPagination()
   }
 
@@ -273,7 +492,34 @@ export function DataCenterPage({ token, onUnauthorized }) {
             { value: '', label: '全部类型' },
             ...objectTypes.map((value) => ({ value, label: value })),
           ]} />
+          <DropdownField label="搜索策略" value={effectiveSearchProfile} onChange={changeSearchProfile}
+            disabled={!searchProfiles.length} options={searchProfileOptions} />
         </div>
+        {selectedSearchProfile?.summary ? (
+          <p className="mih-search-profile-summary" role="status" aria-live="polite">
+            <span className="qp-tag qp-tag--primary">
+              {selectedSearchProfile.id === defaultSearchProfile || selectedSearchProfile.default ? 'API 默认' : '本次选择'}
+            </span>
+            <strong>{selectedSearchProfile.label || selectedSearchProfile.id}</strong>
+            <span>{selectedSearchProfile.summary}</span>
+          </p>
+        ) : null}
+        {[...new Set([
+          selectedSearchProfile?.warning,
+          searchExecution?.warning,
+          query && !searchExecution?.warning
+            && /postgres/iu.test(searchExecution?.mode || recordsState.data?.mode || '')
+            ? 'Elasticsearch 当前不可用，本次搜索已回退 PostgreSQL substring/trigram；所选 Elasticsearch profile 未完整应用。'
+            : null,
+        ].filter(Boolean))].map((warning) => (
+          <div className="mih-inline-warning" role="status" aria-live="polite" key={warning}>
+            <WarningCircle size={18} weight="duotone" aria-hidden="true" />
+            <span>{warning}</span>
+          </div>
+        ))}
+        <SearchLab capabilities={searchCapabilities} selectedProfile={selectedSearchProfile}
+          execution={searchExecution} recordsMode={recordsState.data?.mode} query={query}
+          safeSample={safeSearchSample} />
       </Panel>
 
       {datasets.length ? (
