@@ -4,6 +4,9 @@ import { parseServerFileRoots } from './ingest/external/server-files.mjs'
 
 export const PRODUCT_ID = 'mx-insight-hub'
 
+const KUBERNETES_ELASTICSEARCH_URL =
+  'http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200'
+
 function positiveInteger(value, fallback, name) {
   if (value == null || value === '') return fallback
   const parsed = Number(value)
@@ -50,7 +53,16 @@ export function loadConfig(environment = process.env) {
   // Shared data-plane configuration (Elasticsearch, queue, segmenter). Absent
   // values are not an error: every store described here is an optional
   // accelerator, and the Hub must start and serve without any of them.
-  const common = loadCommonConfig(PRODUCT_ID, environment)
+  // The owned Kubernetes topology has one stable mx-common Service address.
+  // Keep explicit configuration authoritative for external/TLS clusters, but
+  // do not persist a transiently empty ConfigMap value as a permanent loss of
+  // search discovery. Compose and manual runtimes have no equivalent reliable
+  // service contract, so they remain disabled unless configured explicitly.
+  const elasticsearchUrl = environment.MX_COMMON_ELASTICSEARCH_URL?.trim()
+  const commonEnvironment = !elasticsearchUrl && environment.KUBERNETES_SERVICE_HOST?.trim()
+    ? { ...environment, MX_COMMON_ELASTICSEARCH_URL: KUBERNETES_ELASTICSEARCH_URL }
+    : environment
+  const common = loadCommonConfig(PRODUCT_ID, commonEnvironment)
   common.postgres.url = databaseUrl
   common.queue.redisUrl = common.redis.url
   common.embedding = {

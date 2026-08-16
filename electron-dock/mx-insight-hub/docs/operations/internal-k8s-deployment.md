@@ -19,6 +19,15 @@ PostgreSQL instance; sharing an instance does not mean sharing another product's
 database or credentials. Elasticsearch/Redis are accelerators/queue services
 owned by the same shared plane.
 
+Elasticsearch endpoint resolution is runtime-scoped. A non-empty
+`MX_COMMON_ELASTICSEARCH_URL` is always authoritative, including external/TLS
+clusters. If it is missing or empty inside Kubernetes, the Hub uses the owned
+Service DNS `mx-common-elasticsearch.mx-common.svc.cluster.local:9200`; DNS keeps
+resolving the current Service endpoint if Elasticsearch becomes healthy after
+the Hub was deployed. This fallback is not enabled for Compose or manual Node
+runtimes, where the endpoint must remain explicit. Physical endpoint values are
+never returned by the Admin or public APIs.
+
 The current profile still uses local images with `imagePullPolicy: Never`, so
 `scripts/manage.sh` requires one Kubernetes node, builds with Docker and imports
 the Hub image into `k8s.io` containerd. Move to a signed registry and reviewed
@@ -99,6 +108,10 @@ The command is idempotent after an interrupted deployment. A migration Job is
 recreated; data and credentials remain in `mx-common`. The Hub deploy neither
 recreates nor deletes shared PVCs. Tagged containerd runtime/release images,
 Hub Secrets and shared data-plane assets are retained for runtime or rollback.
+If shared search was unhealthy during deployment, the projector is deliberately
+scaled to zero even though API/Admin Pods can later discover the recovered
+Service. After a successful Admin reindex, verify or restore the projector
+replica so subsequent outbox events continue to project.
 
 ### Retired Hub-local PostgreSQL
 

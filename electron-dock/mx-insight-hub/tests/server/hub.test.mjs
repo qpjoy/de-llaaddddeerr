@@ -137,6 +137,42 @@ test('public listener does not require or receive an admin token', () => {
   )
 })
 
+test('explicit Elasticsearch URL wins over the Kubernetes service fallback', () => {
+  const config = loadConfig({
+    MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER,
+    KUBERNETES_SERVICE_HOST: '10.96.0.1',
+    MX_COMMON_ELASTICSEARCH_URL: 'https://search.example.test:9243/',
+  })
+  assert.equal(config.common.elasticsearch.url, 'https://search.example.test:9243/')
+})
+
+test('Kubernetes runtime falls back to the owned mx-common Elasticsearch Service', () => {
+  const config = loadConfig({
+    MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER,
+    KUBERNETES_SERVICE_HOST: '10.96.0.1',
+    MX_COMMON_ELASTICSEARCH_URL: '',
+  })
+  assert.equal(
+    config.common.elasticsearch.url,
+    'http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200',
+  )
+  assert.equal(config.common.elasticsearch.enabled, true)
+})
+
+test('non-Kubernetes runtime keeps Elasticsearch disabled when no URL is configured', () => {
+  const config = loadConfig({
+    MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER,
+  })
+  assert.equal(config.common.elasticsearch.url, null)
+  assert.equal(config.common.elasticsearch.enabled, false)
+})
+
 test('Telegram SQLite page pacing has a bounded deployment default', () => {
   const base = {
     MX_INSIGHT_LISTENER_MODE: 'public',

@@ -679,6 +679,38 @@ fi
 rm -f -- "$reindex_events"
 printf 'ok - strict search reindex runs without restarting login, ingest, or projector workloads\n'
 
+# A stale empty ConfigMap must not block runtime discovery inside the Admin Pod.
+# The strict one-shot process owns final URL resolution and connectivity checks,
+# so the CLI warning is diagnostic rather than a second, conflicting gate.
+reindex_empty_url_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-reindex-empty-url-events.XXXXXX")"
+reindex_empty_url_output="$(REINDEX_EVENTS="$reindex_empty_url_events" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    printf "%s\n" "$*" >>"$REINDEX_EVENTS"
+    case "$*" in
+      *"get configmap mx-insight-hub-config"*"MX_COMMON_ELASTICSEARCH_URL"*) : ;;
+      *"get deployment mx-insight-hub-admin"*".status.readyReplicas"*) printf "1" ;;
+      *"get deployment mx-insight-hub-projector"*".spec.replicas"*) printf "1" ;;
+      *"get deployment mx-insight-hub-projector"*".status.readyReplicas"*) printf "1" ;;
+      *"exec deployment/mx-insight-hub-admin -- node server/scripts/reindex-search.mjs"*)
+        printf "[reindex] completed with verified tokenizer backend=hanlp\n"
+        ;;
+      *) return 0 ;;
+    esac
+  }
+  reindex_search
+' _ "$ROOT_DIR" 2>&1)"
+grep -Fq 'MX_COMMON_ELASTICSEARCH_URL is empty in mx-insight-hub-config; continuing' <<<"$reindex_empty_url_output"
+grep -Fq 'search reindex completed with verified configured-tokenizer output' <<<"$reindex_empty_url_output"
+grep -Fq 'exec deployment/mx-insight-hub-admin -- node server/scripts/reindex-search.mjs' "$reindex_empty_url_events"
+if grep -Fq 'there is no search projection to rebuild' <<<"$reindex_empty_url_output"; then
+  printf 'not ok - an empty ConfigMap URL still blocked Admin runtime discovery\n' >&2
+  exit 1
+fi
+rm -f -- "$reindex_empty_url_events"
+printf 'ok - empty ConfigMap URL defers discovery and connectivity checks to Admin runtime\n'
+
 reindex_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-reindex-strict.XXXXXX")"
 if bash -c '
   set -euo pipefail

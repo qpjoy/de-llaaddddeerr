@@ -41,7 +41,7 @@ flowchart LR
 
 `ensure` 失败**不会中断 Hub 部署**。ES 是可重建投影而非事实源，Night-All 调用、PostgreSQL 入库和计费都不依赖它，因为搜索不健康就让整个 Hub 部署失败，等于把「功能降级」升级成「服务中断」。需要反过来的环境设 `MX_INSIGHT_REQUIRE_SEARCH=1`。
 
-搜索不可用时 projector 会被缩容到 0 而不是留着 crash-loop——它在没有 `MX_COMMON_ELASTICSEARCH_URL` 时会 `exit(2)`。此时 outbox 事件正常堆积，等 projector 起来后一次性排空，这正是 outbox 的用途。
+部署检查发现搜索不可用时，projector 会被缩容到 0，而不是对已知故障的集群反复执行 strict reconcile。Hub 在 Kubernetes 中的解析顺序是：非空 `MX_COMMON_ELASTICSEARCH_URL` 优先，否则使用受信任的 `mx-common-elasticsearch.mx-common.svc.cluster.local:9200` Service DNS；因此 ES 晚于 Hub 恢复时，Admin 查询与严格重建无需等待 ConfigMap 再次写入 URL。非 Kubernetes 运行时仍要求显式 URL。projector 缩容期间 outbox 事件正常堆积，恢复副本后一次性排空，这正是 outbox 的用途。
 
 ### 1.2 多索引 current-state 命名
 

@@ -665,9 +665,11 @@ create_runtime_config() {
     secret_args+=(--from-literal=MX_INSIGHT_TG_MONITOR_DATABASE_URL="$MX_INSIGHT_TG_MONITOR_DATABASE_URL")
   fi
 
-  # Shared data-plane endpoints. Empty values are meaningful: an unset
-  # Elasticsearch URL makes the Hub run search-free rather than fail to start,
-  # which is what keeps the Night-All path independent of the search rollout.
+  # Shared data-plane endpoints. An explicit URL remains authoritative. When a
+  # transiently unhealthy search rollout leaves this value empty, Hub Pods in
+  # Kubernetes can still resolve the owned mx-common Service through cluster
+  # DNS after it recovers; non-Kubernetes runtimes keep requiring an explicit
+  # URL. Deploy-time health still controls whether the projector is started.
   local elasticsearch_url="${MX_COMMON_ELASTICSEARCH_URL:-http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200}"
   local redis_url="${MX_COMMON_REDIS_URL:-redis://mx-common-redis.mx-common.svc.cluster.local:6379}"
   # Keep the JSON default outside `${VAR:-word}`. A `}` inside `word` closes
@@ -1067,11 +1069,11 @@ apply_k8s() {
     die "Hub API workloads did not become ready"
   fi
 
-  # The projector is scaled to match search availability rather than deployed
-  # unconditionally: with no Elasticsearch URL it would exit(2) and crash-loop,
-  # turning "search is not configured" into a permanently red workload. Outbox
-  # events accumulate meanwhile and are drained once it is scaled back up --
-  # that is exactly what the outbox is for.
+  # The projector is scaled to match deploy-time search availability rather
+  # than starting a strict reconcile against a cluster already known to be
+  # unhealthy. API/Admin Pods retain the trusted Kubernetes DNS fallback for a
+  # later recovery; outbox events accumulate while the projector is scaled down
+  # and drain once it is scaled back up.
   if [ "${MX_INSIGHT_SEARCH_READY:-0}" = "1" ]; then
     kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-projector
     if ! kubectl -n "$namespace" rollout status \
@@ -1408,8 +1410,9 @@ reindex_search() {
     kubectl -n "$namespace" get configmap mx-insight-hub-config \
       -o jsonpath='{.data.MX_COMMON_ELASTICSEARCH_URL}' 2>/dev/null || true
   )"
-  [ -n "$elasticsearch_url" ] \
-    || die "MX_COMMON_ELASTICSEARCH_URL is empty in mx-insight-hub-config; there is no search projection to rebuild"
+  if [ -z "$elasticsearch_url" ]; then
+    say "WARNING: MX_COMMON_ELASTICSEARCH_URL is empty in mx-insight-hub-config; continuing so the Admin runtime can resolve Elasticsearch and run the strict connectivity check." >&2
+  fi
 
   admin_ready="$(
     kubectl -n "$namespace" get deployment "$executor_deployment" \

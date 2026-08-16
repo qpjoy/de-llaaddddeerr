@@ -116,6 +116,11 @@ Projector 启动 reconcile 共用同一 PostgreSQL advisory lock，因此不会�
 每批及完成前再次校验；连接丢失会 fail closed。Admin 进程中途退出时，下次轮询会在
 确认全局锁已经释放后把遗留任务标记为失败，操作员可以安全重试。
 
+Admin、CLI 与 Projector 使用同一运行时端点解析：显式非空
+`MX_COMMON_ELASTICSEARCH_URL` 优先；Kubernetes 中缺失或空值时使用固定的
+`mx-common` Elasticsearch Service DNS。后者只解决部署时 ConfigMap 留空、ES
+随后恢复的情况，不绕过 cluster-health 检查，也不会把物理 URL 返回给页面。
+
 该命令在 Ready 的 Admin Pod 内启动一个独立 Node 进程执行一次性 strict
 reconciler；不会 rollout 或重启 Admin API、常驻 projector 或其他工作负载。
 重建使用 PostgreSQL advisory lock 保证单飞，因此不依赖 projector 的副本数或
