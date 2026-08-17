@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-test-framework
+  namespace: mx-test-framework
+  labels:
+    app.kubernetes.io/name: mx-test-framework
+    app.kubernetes.io/part-of: mx-test-framework
+spec:
+  # One replica on purpose. The scheduler runs in-process; a second replica
+  # would tick the same due tasks concurrently and double-fire them. Scaling
+  # out means extracting the scheduler first, not raising this number.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-test-framework
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-test-framework
+        app.kubernetes.io/part-of: mx-test-framework
+    spec:
+      serviceAccountName: mx-test-framework
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: mx-test-framework:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8790
+          env:
+            - name: MXT_PORT
+              value: "8790"
+            - name: MXT_STORE
+              value: postgres
+            - name: MXT_ARTIFACTS_DIR
+              value: /data/artifacts
+            - name: MXT_NAMESPACE
+              value: mx-test-framework
+            # Runner Jobs report their result back to this address, so it must
+            # resolve from inside the cluster.
+            - name: MXT_SELF_URL
+              value: http://mx-test-framework
+            # Trust the API server's CA here rather than per-request, so no code
+            # path is ever tempted to disable verification.
+            - name: NODE_EXTRA_CA_CERTS
+              value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            - name: MXT_LAUNCHER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-test-framework-secrets
+                  key: MXT_LAUNCHER_URL
+                  optional: true
+            - name: MXT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-test-framework-secrets
+                  key: MXT_DATABASE_URL
+            - name: MXT_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-test-framework-secrets
+                  key: MXT_ADMIN_TOKEN
+          envFrom:
+            - configMapRef:
+                name: mx-test-framework-config
+                optional: true
+          volumeMounts:
+            - name: artifacts
+              mountPath: /data/artifacts
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            # /readyz touches the database; /healthz does not. A database blip
+            # should take the pod out of the Service, not restart it.
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: mx-test-framework-artifacts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-test-framework
+  namespace: mx-test-framework
+  labels:
+    app.kubernetes.io/part-of: mx-test-framework
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mx-test-framework
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

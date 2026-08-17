@@ -1,0 +1,207 @@
+openapi: 3.1.0
+info:
+  title: MX Test Framework API
+  version: "1.0"
+  description: |
+    内部 e2e 测试平台。两个面：
+
+    - `/api/v1/*` 控制面 —— 人和脚本用。凭据是 mx-launcher 用户 token
+      （登录后由 httpOnly cookie 携带）或服务 admin token。
+    - `/runner/v1/*` 执行面 —— 执行机用。两级凭据：runner token 只能认领，
+      run token 只能操作自己那一次执行，且随执行结束立即失效。
+
+    浏览器无法给 `<video src>` 加 Authorization 头，所以会话放在 cookie 里；
+    把 token 塞进查询串会泄漏到访问日志、浏览器历史和 Referer。
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+  - sessionCookie: []
+
+paths:
+  /api/v1:
+    get:
+      summary: 服务自述：这是什么、现在有什么、下一步做什么
+      security: []
+      responses:
+        "200": { description: OK }
+
+  /healthz:
+    get:
+      summary: 存活检查（不查数据库）
+      security: []
+      responses: { "200": { description: OK } }
+  /readyz:
+    get:
+      summary: 就绪检查（会查数据库）
+      security: []
+      responses: { "200": { description: OK } }
+
+  /api/v1/auth/login:
+    post:
+      summary: 用 mx-launcher 账号登录，返回 token 并设置会话 cookie
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "200": { description: 登录成功 }
+        "401": { description: 账号或密码不正确 }
+  /api/v1/auth/logout:
+    post: { summary: 退出并清除会话 cookie, security: [], responses: { "200": { description: OK } } }
+  /api/v1/auth/me:
+    get: { summary: 当前登录者与其权限, responses: { "200": { description: OK } } }
+
+  /api/v1/members:
+    get: { summary: 成员列表（需要 admin）, responses: { "200": { description: OK } } }
+  /api/v1/members/{principalId}:
+    patch:
+      summary: 调整成员权限（需要 admin）
+      parameters: [{ name: principalId, in: path, required: true, schema: { type: string } }]
+      responses: { "200": { description: OK } }
+
+  /api/v1/apps:
+    get: { summary: 应用列表, responses: { "200": { description: OK } } }
+    post: { summary: 注册应用（需要 admin）, responses: { "201": { description: 已创建 } } }
+  /api/v1/apps/{app}/suites:
+    parameters: [{ name: app, in: path, required: true, schema: { type: string } }]
+    get: { summary: 套件列表, responses: { "200": { description: OK } } }
+    post: { summary: 新建套件（需要 admin）, responses: { "201": { description: 已创建 } } }
+
+  /api/v1/apps/{app}/cases:
+    parameters: [{ name: app, in: path, required: true, schema: { type: string } }]
+    get:
+      summary: 用例目录，附带「是否已实现」与最近一次结果
+      responses: { "200": { description: OK } }
+    post:
+      summary: 在界面上登记一条用例（需要 operator）
+      description: |
+        登记后立刻成为目录的一部分。在有代码认领这个编号之前，它在每次执行里
+        都报 `notRun`——这正是「已定义、待实现」的表达方式，不需要额外状态机。
+      responses: { "201": { description: 已创建 } }
+  /api/v1/apps/{app}/cases/{caseId}:
+    parameters:
+      - { name: app, in: path, required: true, schema: { type: string } }
+      - { name: caseId, in: path, required: true, schema: { type: string } }
+    put:
+      summary: 修改界面登记的用例（需要 operator）
+      description: 来自代码仓库的用例不能在这里改——它们的真相在 git 里。
+      responses:
+        "200": { description: OK }
+        "409": { description: 该用例由代码仓库管理 }
+    delete: { summary: 退役一条用例（软删，历史执行仍可解析）, responses: { "200": { description: OK } } }
+  /api/v1/apps/{app}/cases/{caseId}/history:
+    parameters:
+      - { name: app, in: path, required: true, schema: { type: string } }
+      - { name: caseId, in: path, required: true, schema: { type: string } }
+    get: { summary: 单条用例最近若干次结果, responses: { "200": { description: OK } } }
+  /api/v1/apps/{app}/cases:export:
+    parameters: [{ name: app, in: path, required: true, schema: { type: string } }]
+    get:
+      summary: 导出界面登记的用例为仓库目录文件
+      description: 测试同学写完交给工程师提交进 git 并实现。
+      responses: { "200": { description: OK } }
+  /api/v1/apps/{app}/catalog:sync:
+    parameters: [{ name: app, in: path, required: true, schema: { type: string } }]
+    post:
+      summary: 从代码仓库同步用例目录（需要 operator）
+      description: |
+        只会退役同一个目录文件里消失的用例，因此不会动到界面登记的用例。
+        兼容 compass 现有的 schemaVersion 1。
+      responses: { "200": { description: 返回 added/updated/retired } }
+
+  /api/v1/tasks:
+    get: { summary: 任务列表, responses: { "200": { description: OK } } }
+    post:
+      summary: 新建任务（需要 operator）
+      description: schedule.kind 取 manual / once / cron。
+      responses: { "201": { description: 已创建 } }
+  /api/v1/tasks/{taskId}:
+    parameters: [{ name: taskId, in: path, required: true, schema: { type: string } }]
+    patch: { summary: 修改任务, responses: { "200": { description: OK } } }
+    delete: { summary: 删除任务（历史执行保留）, responses: { "204": { description: 已删除 } } }
+  /api/v1/tasks/{taskId}:run:
+    parameters: [{ name: taskId, in: path, required: true, schema: { type: string } }]
+    post:
+      summary: 立即执行一次
+      description: 对定时任务同样可用，不影响下次定时。
+      responses: { "202": { description: 已排队 } }
+
+  /api/v1/runs:
+    get: { summary: 执行记录列表, responses: { "200": { description: OK } } }
+  /api/v1/runs/{runId}:
+    parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+    get: { summary: 执行摘要、总数与目录比对, responses: { "200": { description: OK } } }
+  /api/v1/runs/{runId}/cases:
+    parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+    get: { summary: 用例级结果，含步骤时间轴, responses: { "200": { description: OK } } }
+  /api/v1/runs/{runId}/artifacts:
+    parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+    get: { summary: 产物清单, responses: { "200": { description: OK } } }
+  /api/v1/runs/{runId}/artifacts/{path}:
+    parameters:
+      - { name: runId, in: path, required: true, schema: { type: string } }
+      - { name: path, in: path, required: true, schema: { type: string } }
+    get:
+      summary: 下载或播放单个产物
+      description: 支持 HTTP Range，否则浏览器无法拖动录像进度条。
+      responses:
+        "200": { description: 完整文件 }
+        "206": { description: 部分内容 }
+        "404": { description: 不存在或已过期 }
+  /api/v1/runs/{runId}/report:
+    parameters:
+      - { name: runId, in: path, required: true, schema: { type: string } }
+      - name: redacted
+        in: query
+        schema: { type: boolean }
+        description: 生成对外脱敏版：去掉内网地址、spec 路径与错误堆栈，保留用例、步骤、录像与通过率。
+      - { name: brand, in: query, schema: { type: string } }
+    get:
+      summary: 服务端渲染的完整报告
+      responses: { "200": { description: HTML 报告 } }
+  /api/v1/runs/{runId}:cancel:
+    parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+    post: { summary: 取消尚未结束的执行, responses: { "200": { description: OK } } }
+
+  /api/v1/runners:
+    get: { summary: 执行机列表, responses: { "200": { description: OK } } }
+  /runner/v1/runners:register:
+    post:
+      summary: 注册一台执行机，返回长期 runner token（只出现一次）
+      responses: { "201": { description: 已注册 } }
+  /runner/v1/runs:claim:
+    post:
+      summary: 认领一个匹配本机能力的执行
+      description: 返回环境变量、命令与 run 作用域 token。无可执行任务时返回 204。
+      responses:
+        "200": { description: 已认领 }
+        "204": { description: 暂无匹配任务 }
+  /runner/v1/runs/{runId}/heartbeat:
+    parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+    post: { summary: 续租，防止被判定为超时, responses: { "200": { description: OK } } }
+  /runner/v1/runs/{runId}/artifacts/{path}:
+    parameters:
+      - { name: runId, in: path, required: true, schema: { type: string } }
+      - { name: path, in: path, required: true, schema: { type: string } }
+    put: { summary: 上传产物（原始字节）, responses: { "201": { description: 已保存 } } }
+  /runner/v1/runs/{runId}:complete:
+    parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+    post:
+      summary: 提交 summary.json 与退出码，结束执行
+      description: |
+        退出码与 summary.status 冲突时以退出码为准：崩溃的执行机可能留下写了一半的
+        `passed`。零用例一律判 blocked，永远不算通过。
+      responses: { "200": { description: 已结束 } }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+    sessionCookie: { type: apiKey, in: cookie, name: mxt_session }

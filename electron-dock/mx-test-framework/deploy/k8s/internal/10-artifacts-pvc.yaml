@@ -1,0 +1,35 @@
+# Artifact storage is deliberately its own volume, separate from the database
+# and from anything a production workload uses. Recordings are the one thing
+# here that grows without bound, so when it fills it must only affect testing.
+# See specs/10-deployment.md.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mx-test-framework-artifacts-pv
+  labels:
+    app.kubernetes.io/part-of: mx-test-framework
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: mx-test-framework-artifacts
+  hostPath:
+    path: /var/lib/mx-test-framework/artifacts
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mx-test-framework-artifacts
+  namespace: mx-test-framework
+  labels:
+    app.kubernetes.io/part-of: mx-test-framework
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: mx-test-framework-artifacts
+  resources:
+    requests:
+      storage: 50Gi

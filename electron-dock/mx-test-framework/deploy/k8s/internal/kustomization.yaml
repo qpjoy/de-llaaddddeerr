@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mx-test-framework
+resources:
+  - 00-namespace.yaml
+  - 05-serviceaccount.yaml
+  - 10-artifacts-pvc.yaml
+  - 20-migration-job.yaml
+  - 30-server.yaml
+  - 40-network-policy.yaml
