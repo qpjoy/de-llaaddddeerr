@@ -1,0 +1,25 @@
+{
+  "name": "@qpjoy/mx-test-framework",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Internal e2e test platform for MX products: create tasks, run them on demand or on a schedule, and keep the results, reports and recordings.",
+  "scripts": {
+    "predev": "node ../mx-launcher/ui-design/scripts/build.mjs",
+    "prestart": "node ../mx-launcher/ui-design/scripts/build.mjs",
+    "start": "node server/index.mjs",
+    "dev": "MXT_STORE=memory MXT_ARTIFACTS_DIR=.runtime/artifacts node server/index.mjs",
+    "migrate": "node server/migrate.mjs",
+    "verify": "node scripts/verify.mjs",
+    "test": "node scripts/check-syntax.mjs && node --test tests/*.test.mjs",
+    "lint": "node scripts/check-syntax.mjs"
+  },
+  "dependencies": {
+    "@qpjoy/mx-common": "file:../mx-common",
+    "pg": "8.22.0",
+    "@qpjoy/ui-design-neon-void": "file:../mx-launcher/ui-design"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

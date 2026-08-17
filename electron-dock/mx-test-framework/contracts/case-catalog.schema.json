@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mx.internal/schemas/mxt/case-catalog.v2.json",
+  "title": "MXT case catalog",
+  "description": "The list of cases that SHOULD exist, kept in the application repo and synced to the platform via POST /api/v1/apps/:app/catalog:sync. See specs/03-case-catalog.md. schemaVersion 1 catalogs (compass) are accepted; missing fields take defaults.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "application",
+    "cases"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "enum": [
+        1,
+        2
+      ]
+    },
+    "application": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "surface": {
+      "enum": [
+        "web",
+        "electron"
+      ],
+      "description": "Default surface for cases in this file. Decides whether runs go to the server runner pool or to a local machine."
+    },
+    "suite": {
+      "type": "string",
+      "maxLength": 96
+    },
+    "executionMode": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Free-text, informational. Kept for schemaVersion 1 compatibility."
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[A-Z0-9]{2,6}(-[A-Z0-9]+)+-\\d{3}$",
+            "description": "<APP>-<SURFACE>-<DOMAIN>-<NNN>. Unique per app, not globally — compass keeps its existing LP-FE-* ids. Never reuse a retired id."
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "priority": {
+            "enum": [
+              "P0",
+              "P1",
+              "P2",
+              "unprioritized"
+            ]
+          },
+          "spec": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "suite": {
+            "type": "string",
+            "maxLength": 96
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 80
+            }
+          },
+          "tracks": {
+            "type": "array",
+            "default": [
+              "functional"
+            ],
+            "items": {
+              "enum": [
+                "functional",
+                "demo"
+              ]
+            },
+            "description": "Which tracks this case participates in. Membership lives here, not in the spec's directory — that is what lets one spec serve both the functional and the review/demo track."
+          },
+          "requirementRef": {
+            "type": "string",
+            "maxLength": 96,
+            "description": "Requirement or story id. Without it, requirement coverage cannot be computed and must not be claimed."
+          },
+          "retired": {
+            "type": "boolean",
+            "default": false,
+            "description": "Soft delete. Keeps historical runs resolvable; the id stays reserved."
+          }
+        }
+      }
+    }
+  }
+}

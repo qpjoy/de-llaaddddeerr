@@ -1,5 +1,13 @@
 # Observable Automation Test Platform
 
+> **本文档描述的是 Launcher 自己的 HDOI 质量控制面**：跨 H/D/I/O 的链路测试、
+> synthetic probe 与发版门禁。它由 `mx-launcher/server` 的 test-center 承载，本文继续有效。
+>
+> 与之无关的另一件事是 `electron-dock/mx-test-framework`——一个**独立的通用 e2e 测试平台**
+> （建任务、跑 UI 用例、出报告和录像），不做门禁、不参与发版流程、不接管这里的 test-center。
+> 它只借用了本文的 run/case/step 记录结构。见
+> [mx-test-framework/specs/](../../mx-test-framework/specs/README.md)。
+
 本文档定义 MX Launcher / HDOI 的可观测自动化测试平台。这里的 HDOI 指：
 
 - H Endpoint: 安装 MX Launcher + Launcher Network + AppCenter + H2O 的用户或测试终端。

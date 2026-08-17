@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mx.internal/schemas/mxt/runner-summary.v2.json",
+  "title": "MXT runner summary",
+  "description": "Written by a runner to $MXT_ARTIFACTS_DIR/summary.json. See specs/04-runner-contract.md. Exit code wins over `status` when they disagree, because a crashed process may leave this file half-written.",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "app", "status", "totals"],
+  "additionalProperties": true,
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "runId": { "type": "string", "maxLength": 64 },
+    "app": { "type": "string", "maxLength": 64 },
+    "suite": { "type": "string", "maxLength": 96 },
+    "track": { "enum": ["functional", "demo"] },
+    "profile": { "enum": ["mock", "real"] },
+    "engine": { "enum": ["cypress", "playwright", "playwright-electron"] },
+    "status": {
+      "enum": ["passed", "failed", "blocked"],
+      "description": "Zero executed cases MUST be reported as `blocked`, never `passed`."
+    },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "targetUrl": {
+      "type": "string",
+      "description": "Origin and path only. Must not carry credentials, query string or fragment."
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tests": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "flaky": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "integer", "minimum": 0 },
+        "durationMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["caseId", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "caseId": { "type": "string", "maxLength": 64 },
+          "status": { "enum": ["passed", "failed", "skipped", "flaky", "notRun"] },
+          "attempts": { "type": "integer", "minimum": 1 },
+          "durationMs": { "type": "integer", "minimum": 0 },
+          "spec": { "type": "string", "maxLength": 240 },
+          "title": { "type": "string", "maxLength": 300 },
+          "error": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "Redacted by the runner; the platform redacts again on ingest."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["seq", "label"],
+              "additionalProperties": false,
+              "properties": {
+                "seq": { "type": "integer", "minimum": 1 },
+                "label": { "type": "string", "maxLength": 200 },
+                "status": { "enum": ["passed", "failed", "skipped"] },
+                "offsetMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Offset from the start of this case's recording. Drives the clickable step timeline in the report."
+                },
+                "durationMs": { "type": "integer", "minimum": 0 }
+              }
+            }
+          },
+          "artifacts": { "$ref": "#/$defs/artifactList" }
+        }
+      }
+    },
+    "artifacts": { "$ref": "#/$defs/artifactList" },
+    "blockedReason": { "type": ["string", "null"], "maxLength": 1000 }
+  },
+  "$defs": {
+    "artifactList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "path"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "enum": ["video", "screenshot", "report", "log", "summary"] },
+          "path": {
+            "type": "string",
+            "maxLength": 512,
+            "pattern": "^(?!/)(?!\\w+:)[^\\\\]+$",
+            "description": "Relative to $MXT_ARTIFACTS_DIR. Absolute paths and URLs are rejected — the platform relocates artifacts, so runners must not bake in locations."
+          },
+          "contentType": { "type": "string", "maxLength": 100 }
+        }
+      }
+    }
+  }
+}
