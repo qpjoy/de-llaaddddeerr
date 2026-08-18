@@ -15,7 +15,7 @@ COPY --from=ui_design src /workspace/mx-launcher/ui-design/src
 # them first made every edit to shared source re-run a ~70s network install.
 COPY --from=mx_common package.json package-lock.json /workspace/mx-common/
 COPY package.json package-lock.json ./
-RUN npm ci --registry="$NPM_REGISTRY"
+RUN npm ci --registry="$NPM_REGISTRY" --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=300000
 COPY --from=mx_common src /workspace/mx-common/src
 COPY --from=mx_common migrations /workspace/mx-common/migrations
 COPY . ./
@@ -40,13 +40,22 @@ COPY --from=mx_common package.json package-lock.json ./
 # first meant a one-line change to shared source invalidated the install and
 # went back to the registry for every dependency, turning a seconds-long
 # rebuild into a minutes-long one that can fail on its own.
-RUN npm ci --omit=dev --registry="$NPM_REGISTRY" && npm cache clean --force
+# Retries and an explicit timeout are load-bearing, not cosmetic. A mirror that
+# lacks one platform-specific optional package -- @node-rs/jieba ships prebuilt
+# binaries per platform -- leaves npm waiting on a host this network cannot
+# reach, and npm's own exit handler then fails with "Exit handler never called"
+# instead of naming the package. A bounded fetch fails as a fetch.
+RUN npm ci --omit=dev --registry="$NPM_REGISTRY" \
+      --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=300000 \
+ && npm cache clean --force
 COPY --from=mx_common src ./src
 COPY --from=mx_common migrations ./migrations
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --registry="$NPM_REGISTRY" && npm cache clean --force
+RUN npm ci --omit=dev --registry="$NPM_REGISTRY" \
+      --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=300000 \
+ && npm cache clean --force
 
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production \

@@ -953,9 +953,22 @@ build_and_import_image() {
       --load \
       "$ROOT_DIR"
   else
+    # BuildKit's default bridge is a different network than the host, and on a
+    # node whose egress crosses a tunnel it is a *worse* one: the bridge keeps a
+    # 1500-byte MTU, so registry metadata succeeds while package tarballs stall
+    # until npm times out -- surfacing as npm's own "Exit handler never called"
+    # rather than as a network error. Host networking sidesteps it without
+    # requiring the proxy the other branch exists for.
+    local build_network=""
+    case "${MX_INSIGHT_BUILD_NETWORK:-}" in
+      '') ;;
+      host) build_network="host" ;;
+      *) die "MX_INSIGHT_BUILD_NETWORK only accepts 'host'" ;;
+    esac
     docker build \
       --rm \
       --force-rm \
+      ${build_network:+--network "$build_network"} \
       --label dev.qpjoy.mx-insight-hub.project=mx-insight-hub \
       --label dev.qpjoy.mx-insight-hub.image=internal \
       --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \
