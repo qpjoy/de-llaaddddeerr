@@ -1596,6 +1596,10 @@ cmd_deploy_hanlp() {
   need docker
   need kubectl
   need ctr
+  # Without this the model PV is provisioned under the default root while the
+  # rest of the stack lives wherever a relocation moved it, leaving an empty
+  # decoy directory on the old volume and chowning the wrong path.
+  resolve_host_data_root
   require_local_single_k8s_node
   case "$HANLP_WAIT_TIMEOUT" in
     ''|*[!0-9]*) die "MX_COMMON_HANLP_WAIT_TIMEOUT must be an integer" ;;

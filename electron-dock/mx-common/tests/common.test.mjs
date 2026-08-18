@@ -537,11 +537,14 @@ test('HanLP image pins the compatible transformers line and infers during prefet
 
   assert.match(dockerfile, /ARG TRANSFORMERS_VERSION=4\.54\.1/)
   assert.match(dockerfile, /"transformers==\$\{TRANSFORMERS_VERSION\}"/)
-  const prefetch = dockerfile.slice(dockerfile.indexOf('RUN if [ "$PREFETCH_MODEL" = "1" ]'))
+  // The inference check moved into prefetch-models.py so that editing the
+  // server cannot invalidate the multi-gigabyte download layer above it.
+  assert.match(dockerfile, /python prefetch-models\.py/)
+  const prefetch = await readFile(resolve(here, '../deploy/hanlp/prefetch-models.py'), 'utf8')
   assert.match(prefetch, /hanlp\.load/)
-  assert.match(prefetch, /tokenizer\(\['\u5434\u6069\u8fbe\u4e0e\u4eba\u5de5\u667a\u80fd'\]\)/)
-  assert.match(prefetch, /any\(isinstance\(sentence, list\)/)
-  assert.match(prefetch, /any\(isinstance\(token, str\) and token\.strip\(\)/)
+  assert.match(prefetch, /WARMUP_TEXT = "\u5434\u6069\u8fbe\u4e0e\u4eba\u5de5\u667a\u80fd"/)
+  assert.match(prefetch, /any\(\s*\n\s*isinstance\(sentence, list\)/)
+  assert.match(prefetch, /isinstance\(token, str\) and token\.strip\(\)/)
 })
 
 test('HanLP publishes readiness after warm-up and serializes safe inference', async () => {
@@ -1199,4 +1202,61 @@ test('a tokenizer without the batch endpoint still yields HanLP tokens', async (
 
   await batching.segmentWithMeta('大模型')
   assert.equal(paths.filter((path) => path.endsWith('/batch')).length, 1)
+})
+
+
+test('the model prefetch layer is never invalidated by an application edit', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const dockerfile = await readFile(new URL('../deploy/hanlp/Dockerfile', import.meta.url), 'utf8')
+  // Compare directives, not prose: the rationale comment names both steps.
+  const lines = dockerfile.split('\n')
+  const prefetch = lines.findIndex((line) => line.startsWith('RUN if [ "$PREFETCH_MODEL"'))
+  const copySource = lines.findIndex((line) => line.startsWith('COPY server.py'))
+  assert.ok(prefetch >= 0 && copySource >= 0)
+  // A COPY above the prefetch busts a ~2GB download on every server.py edit,
+  // and a rebuild without PREFETCH_MODEL=1 then succeeds while silently
+  // shipping no model seed -- which only surfaces as an initContainer exit 1.
+  assert.ok(
+    prefetch < copySource,
+    'the model prefetch must precede the application source copy',
+  )
+  // And a prefetch that produces nothing must fail the build, not the pod.
+  assert.match(dockerfile, /model prefetch produced no manifest/)
+})
+
+
+test('the prefetch proves the model reached the seed directory, not merely that it loaded', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const dockerfile = await readFile(new URL('../deploy/hanlp/Dockerfile', import.meta.url), 'utf8')
+  const prefetch = await readFile(new URL('../deploy/hanlp/prefetch-models.py', import.meta.url), 'utf8')
+  const lines = dockerfile.split('\n')
+  const copyPrefetch = lines.findIndex((line) => line.startsWith('COPY prefetch-models.py'))
+  const runPrefetch = lines.findIndex((line) => line.startsWith('RUN if [ "$PREFETCH_MODEL"'))
+  const copyServer = lines.findIndex((line) => line.startsWith('COPY server.py'))
+  // The rarely-changing script may sit above the expensive layer; the server
+  // must not, or every edit re-downloads the model.
+  assert.ok(copyPrefetch < runPrefetch && runPrefetch < copyServer)
+  // Asserting successful inference is not enough: that passed while the seed
+  // directory stayed empty and shipped a zero-byte manifest.
+  assert.match(prefetch, /model prefetch left .* empty|left \{SEED_DIR\} empty/)
+  assert.match(prefetch, /resolved_cache_root/)
+  assert.match(prefetch, /copytree/)
+})
+
+test('the tokenizer pins its thread pools to the container CPU limit', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const manifest = await readFile(new URL('../deploy/k8s/optional/50-hanlp.yaml', import.meta.url), 'utf8')
+  // PyTorch reads the host CPU count, not the cgroup limit; unpinned it starts
+  // 128 threads inside a 16-CPU container and pays for every stack.
+  assert.match(manifest, /name: OMP_NUM_THREADS\n\s+value: "16"/)
+  assert.match(manifest, /cpu: "16"/)
+  // Parallelism belongs inside one batched pass, so the slot count stays at one.
+  assert.match(manifest, /name: MAX_CONCURRENT_INFERENCES\n\s+value: "1"/)
+})
+
+test('deploying HanLP resolves the same host root as the rest of the stack', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const manage = await readFile(new URL('../scripts/manage.sh', import.meta.url), 'utf8')
+  const body = manage.slice(manage.indexOf('cmd_deploy_hanlp()'))
+  assert.match(body.slice(0, 600), /resolve_host_data_root/)
 })

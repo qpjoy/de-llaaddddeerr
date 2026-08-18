@@ -47,16 +47,32 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
  && python -c \
       "import torch; assert '+cpu' in torch.__version__, torch.__version__; assert torch.version.cuda is None, torch.version.cuda"
 
-COPY server.py seed-models.sh ./
+# The model prefetch comes before any application source is copied.
+#
+# Layer order is load-bearing here, not cosmetic. This step downloads ~2GB and
+# is the expensive half of the build; putting a `COPY server.py` above it means
+# every edit to the server invalidates it. That is not merely slow -- if the
+# rebuild then runs without PREFETCH_MODEL=1, or without the network the
+# download needs, the `if` is simply skipped and the image is produced
+# *successfully* with no model seed at all. The failure then surfaces minutes
+# later and one layer away, as an initContainer exiting 1 because
+# /opt/hanlp-model-seed/.mx-common-manifest.sha256 does not exist.
+# Copied above the prefetch and nowhere near the server: this file changes about
+# once a year, so it can sit on top of the expensive layer without invalidating it.
+COPY prefetch-models.py ./
 
 RUN if [ "$PREFETCH_MODEL" = "1" ]; then \
-      mkdir -p /opt/hanlp-model-seed; \
-      HANLP_HOME=/opt/hanlp-model-seed python -c \
-        "import hanlp, os; tokenizer = hanlp.load(getattr(hanlp.pretrained.tok, os.environ['HANLP_MODEL'])); tokens = tokenizer(['吴恩达与人工智能']); assert isinstance(tokens, list) and any(isinstance(sentence, list) and any(isinstance(token, str) and token.strip() for token in sentence) for sentence in tokens), 'HanLP tokenizer inference returned no tokens'"; \
+      HANLP_SEED_DIR=/opt/hanlp-model-seed \
+      HANLP_HOME=/opt/hanlp-model-seed python prefetch-models.py; \
       cd /opt/hanlp-model-seed; \
       find . -type f ! -name .mx-common-manifest.sha256 -print0 \
         | sort -z | xargs -0 -r sha256sum > .mx-common-manifest.sha256; \
+      [ -s .mx-common-manifest.sha256 ] \
+        || { echo 'model prefetch produced no manifest' >&2; exit 1; }; \
     fi
+
+# Below the prefetch: editing these rebuilds seconds of layers, not gigabytes.
+COPY server.py seed-models.sh ./
 
 RUN chmod +x /app/seed-models.sh \
  && useradd --uid 1000 --create-home hanlp \

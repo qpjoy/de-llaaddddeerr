@@ -111,6 +111,19 @@ spec:
               value: "256"
             - name: MAX_BODY_BYTES
               value: "4194304"
+            # PyTorch sizes its thread pools from the *host* CPU count, not the
+            # cgroup limit, so on a 128-thread node it would start 128 threads
+            # inside a 16-CPU container: thrashing plus 128 thread stacks and
+            # per-thread allocator arenas, which is memory this pod was already
+            # being OOM-killed for. Pinned to the limit instead. This is also
+            # what makes one batched forward pass fast -- the parallelism lives
+            # inside the pass, which is why the inference slot stays at one.
+            - name: OMP_NUM_THREADS
+              value: "16"
+            - name: MKL_NUM_THREADS
+              value: "16"
+            - name: TORCH_NUM_THREADS
+              value: "16"
           # Model load can take minutes on a cold volume. The startup probe
           # keeps liveness from restarting it while readiness holds it out of
           # service until the tokenizer has actually loaded.
