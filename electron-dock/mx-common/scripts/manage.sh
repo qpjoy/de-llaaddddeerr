@@ -193,6 +193,31 @@ check_storage_headroom() {
   return 0
 }
 
+# Accept the root and the confirmation flag in either order.
+#
+# Positional parsing made `relocate --confirm` read the flag as a path, which
+# then failed the absolute-path check -- a confusing way to reject a command
+# that was written exactly as documented. Results land in PARSED_RELOCATION_*
+# because this shell targets POSIX-ish portability rather than nameref returns.
+PARSED_RELOCATION_ROOT=""
+PARSED_RELOCATION_CONFIRMED=0
+parse_relocation_args() {
+  PARSED_RELOCATION_ROOT=""
+  PARSED_RELOCATION_CONFIRMED=0
+  local argument
+  for argument in "$@"; do
+    case "$argument" in
+      '') ;;
+      --confirm) PARSED_RELOCATION_CONFIRMED=1 ;;
+      -*) die "unknown option: ${argument}" ;;
+      *)
+        [ -z "$PARSED_RELOCATION_ROOT" ] || die "only one host data root may be given"
+        PARSED_RELOCATION_ROOT="$argument"
+        ;;
+    esac
+  done
+}
+
 # Move every retained local PV to a new host root, without losing data.
 #
 # Order is the whole design. Workloads stop first so nothing writes during the
@@ -201,10 +226,11 @@ check_storage_headroom() {
 # source directory is never deleted -- reclaiming it stays a separate, human
 # decision made after the new root has proven itself.
 cmd_migrate_storage() {
-  local target_root="$1" confirmation="${2:-}"
   need kubectl
   need rsync
   resolve_host_data_root
+  parse_relocation_args "$@" || return 1
+  local target_root="$PARSED_RELOCATION_ROOT" confirmed="$PARSED_RELOCATION_CONFIRMED"
   [ -n "$target_root" ] || die "usage: manage.sh migrate-storage <new-host-data-root> [--confirm]"
   case "$target_root" in
     /*) ;;
@@ -249,7 +275,7 @@ cmd_migrate_storage() {
   awk -v free="$free" -v used="$used" 'BEGIN { exit !(free > used * 1.1) }' \
     || die "not enough free space on ${target_root}: need $(gib "$(awk -v u="$used" 'BEGIN{print u*1.1}')")GiB"
 
-  if [ "$confirmation" != "--confirm" ]; then
+  if [ "$confirmed" != 1 ]; then
     say ""
     say "This stops PostgreSQL, Elasticsearch and HanLP, copies their data to"
     say "${target_root}, and repoints every retained PV. The source is left in"
@@ -348,9 +374,13 @@ EOF
 # operator actually wants, so the sequencing is written down here rather than
 # left to be remembered under pressure.
 cmd_relocate() {
-  local target_root="${1:-/data/k8s/mx-runtime/mx-common/k8s}" confirmation="${2:-}"
-  if [ "$confirmation" != "--confirm" ]; then
-    cmd_migrate_storage "$target_root" ""
+  local target_root="" confirmed=0
+  parse_relocation_args "$@" || return 1
+  target_root="${PARSED_RELOCATION_ROOT:-/data/k8s/mx-runtime/mx-common/k8s}"
+  confirmed="$PARSED_RELOCATION_CONFIRMED"
+
+  if [ "$confirmed" != 1 ]; then
+    cmd_migrate_storage "$target_root"
     say ""
     say "Then this command will also redeploy the shared data plane. To run both:"
     say "  bash scripts/manage.sh relocate ${target_root} --confirm"
@@ -1668,8 +1698,8 @@ main() {
     provision) shift; cmd_provision "${1:-}" "${2:-}" ;;
     preload) cmd_preload ;;
     reset-storage) cmd_reset_storage ;;
-    migrate-storage) shift; cmd_migrate_storage "${1:-}" "${2:-}" ;;
-    relocate) shift; cmd_relocate "${1:-}" "${2:-}" ;;
+    migrate-storage) shift; cmd_migrate_storage "$@" ;;
+    relocate) shift; cmd_relocate "$@" ;;
     deploy) shift; cmd_deploy "$@" ;;
     snapshot) shift; cmd_snapshot "${1:-status}" ;;
     status) cmd_status ;;

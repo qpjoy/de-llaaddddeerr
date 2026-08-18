@@ -1104,3 +1104,18 @@ test('the HanLP deployment is sized and configured for batch rebuilds', async ()
   // A short batch would misalign tokens with records; it is refused, not padded.
   assert.match(server, /tokenizer returned a misaligned batch/)
 })
+
+
+test('the relocation flag is accepted wherever it appears', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const manage = await readFile(new URL('../scripts/manage.sh', import.meta.url), 'utf8')
+  // `relocate --confirm` used to read the flag as the target path and then
+  // reject it for not being absolute -- rejecting the command as documented.
+  assert.match(manage, /parse_relocation_args/)
+  assert.match(manage, /--confirm\) PARSED_RELOCATION_CONFIRMED=1/)
+  // Both entry points forward every argument rather than two fixed slots.
+  assert.match(manage, /migrate-storage\) shift; cmd_migrate_storage "\$@"/)
+  assert.match(manage, /relocate\) shift; cmd_relocate "\$@"/)
+  // An unrecognised flag is named, never silently taken for a path.
+  assert.match(manage, /unknown option: \$\{argument\}/)
+})
