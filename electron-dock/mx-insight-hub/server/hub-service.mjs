@@ -29,7 +29,39 @@ const PLATFORM_ALIASES = new Map([
   ['rednote', 'xiaohongshu'],
   ['xhs', 'xiaohongshu'],
 ])
-const PUBLIC_SEARCH_FIELDS = new Set(['platform', 'query', 'pageSize', 'cursor'])
+const PUBLIC_SEARCH_FIELDS = new Set(['platform', 'query', 'pageSize', 'cursor', 'type'])
+
+/**
+ * How long a committed response stays replayable.
+ *
+ * `fresh` is the default because the Hub indexes continuously: a caller asking
+ * the same question a minute later means "what is true now", not "show me what
+ * you said before". The window still covers a retry -- which is the only thing
+ * an Idempotency-Key was ever meant to make safe -- so a duplicate delivery is
+ * absorbed without charging or searching twice, while a genuinely later call
+ * sees genuinely later data.
+ *
+ * `stable` keeps the unbounded replay: one key names one immutable answer, for
+ * callers that need a snapshot to stay reproducible across a report, a paging
+ * sequence or an audit.
+ */
+const RESULT_TYPES = new Set(['fresh', 'stable'])
+const FRESH_REPLAY_WINDOW_MS = 120_000
+
+function resolveResultType(body) {
+  const value = body?.type ?? 'fresh'
+  assert(
+    typeof value === 'string' && RESULT_TYPES.has(value),
+    400,
+    'invalid_result_type',
+    "type must be 'fresh' (default) or 'stable'",
+  )
+  return value
+}
+
+function replayWindowFor(resultType) {
+  return resultType === 'stable' ? null : FRESH_REPLAY_WINDOW_MS
+}
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const PUBLIC_CAPABILITIES = new Set(['nlp.tokenize'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
@@ -367,6 +399,8 @@ export class HubService {
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
+      // No window: tokens are a pure function of the text, so replaying a
+      // committed result is always the same answer, never a stale one.
       maxRequests: policy.maxRequests,
     })
     if (reservation.kind === 'conflict') {
@@ -561,6 +595,9 @@ export class HubService {
       policy.maxPageSize,
       this.apiKeyPepper,
     )
+    // `resultType` joins the fingerprint so the same key cannot mean a frozen
+    // answer on one call and a live one on the next.
+    const resultType = resolveResultType(body)
     const fingerprintBody = {
       query: query.query,
       platform: query.platform,
@@ -568,6 +605,7 @@ export class HubService {
       objectType: query.objectType,
       pageSize: query.pageSize,
       cursor: query.cursorToken,
+      type: resultType,
     }
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
@@ -584,6 +622,7 @@ export class HubService {
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
       maxRequests: policy.maxRequests,
+      replayWindowMs: replayWindowFor(resultType),
     })
 
     if (reservation.kind === 'conflict') {
@@ -687,6 +726,7 @@ export class HubService {
         cursorSecret: this.apiKeyPepper,
       },
     )
+    const resultType = resolveResultType(body)
     const fingerprintBody = {
       query: query.query,
       platform: query.platform,
@@ -696,6 +736,7 @@ export class HubService {
       pageSize: query.pageSize,
       searchProfile: query.searchProfile,
       cursor: query.cursorToken,
+      type: resultType,
     }
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
@@ -712,6 +753,7 @@ export class HubService {
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
       maxRequests: policy.maxRequests,
+      replayWindowMs: replayWindowFor(resultType),
     })
 
     if (reservation.kind === 'conflict') {
@@ -900,10 +942,11 @@ export class HubService {
       pageSize,
       ...(cursor ? { cursor } : {}),
     }
+    const resultType = resolveResultType(body)
     const fingerprint = requestFingerprint({
       method: 'POST',
       path,
-      body: telegramQuery ?? upstreamBody,
+      body: { ...(telegramQuery ?? upstreamBody), type: resultType },
     })
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
@@ -920,6 +963,7 @@ export class HubService {
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
       maxRequests: policy.maxRequests,
+      replayWindowMs: replayWindowFor(resultType),
     })
 
     if (reservation.kind === 'conflict') {

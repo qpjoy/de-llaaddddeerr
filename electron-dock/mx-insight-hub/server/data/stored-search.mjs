@@ -7,7 +7,10 @@ import {
 } from '../search/profiles.mjs'
 
 const STORED_ALLOWED_FIELDS = new Set([
-  'cursor', 'datasetId', 'objectType', 'pageSize', 'platform', 'query',
+  // `type` selects result freshness and is consumed by the service layer; it is
+  // accepted here so a strict body check does not reject it, and deliberately
+  // excluded from the normalized query, which describes only what to search.
+  'cursor', 'datasetId', 'objectType', 'pageSize', 'platform', 'query', 'type',
 ])
 const CANONICAL_ALLOWED_FIELDS = new Set([...STORED_ALLOWED_FIELDS, 'searchProfile'])
 const CURSOR_VERSION = 2

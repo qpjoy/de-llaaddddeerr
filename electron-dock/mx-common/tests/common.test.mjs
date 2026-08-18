@@ -5,6 +5,12 @@ import { defineIndexSet, defaultIlmPolicy } from '../src/elasticsearch/index-man
 import { nameField, vectorField } from '../src/elasticsearch/analysis.mjs'
 import { dailySnapshotPolicy, s3Repository, snapshotHealth } from '../src/elasticsearch/snapshots.mjs'
 import { createQueue } from '../src/queue/index.mjs'
+import { batchingSegmenter, HanlpSegmenter } from '../src/segmenter/index.mjs'
+import {
+  describeClusterHealth,
+  ElasticsearchClient,
+  ElasticsearchError,
+} from '../src/elasticsearch/client.mjs'
 
 test('product id maps to a hyphen-free database name', () => {
   assert.equal(productDatabaseName('mx-insight-hub'), 'mx_insight_hub')
@@ -927,4 +933,174 @@ test('the HanLP image and HTTP service keep reproducibility and load bounds expl
   assert.match(manage, /except urllib\.error\.HTTPError as error:/)
   assert.match(manage, /error\.read\(2049\)/)
   assert.match(manage, /HanLP \/tokenize returned no tokens/)
+})
+
+
+test('a wait_for_status timeout is the cluster answering, not an outage', async () => {
+  const health = {
+    cluster_name: 'mx-common',
+    status: 'red',
+    timed_out: true,
+    number_of_nodes: 1,
+    unassigned_shards: 6,
+    initializing_shards: 0,
+  }
+  const client = new ElasticsearchClient({
+    url: 'http://elasticsearch:9200',
+    // ES answers a status it could not reach with 408 and the health document.
+    fetchImpl: async () => new Response(JSON.stringify(health), {
+      status: 408,
+      headers: { 'content-type': 'application/json' },
+    }),
+  })
+
+  const result = await client.clusterHealth({ waitForStatus: 'yellow', timeout: '3s' })
+  assert.equal(result.status, 'red')
+  assert.equal(result.timedOut, true)
+  assert.equal(result.unassigned_shards, 6)
+})
+
+test('a transport failure stays an outage rather than a health reading', async () => {
+  const client = new ElasticsearchClient({
+    url: 'http://elasticsearch:9200',
+    fetchImpl: async () => { throw new Error('connect ECONNREFUSED') },
+  })
+  await assert.rejects(
+    () => client.clusterHealth(),
+    (error) => error.name === 'ElasticsearchUnavailableError',
+  )
+})
+
+test('a 408 that is not a health document still throws', async () => {
+  const client = new ElasticsearchClient({
+    url: 'http://elasticsearch:9200',
+    fetchImpl: async () => new Response('<html>gateway timeout</html>', { status: 408 }),
+  })
+  await assert.rejects(() => client.clusterHealth(), ElasticsearchError)
+})
+
+test('a health document describes itself instead of reporting "unknown error"', () => {
+  const error = new ElasticsearchError(
+    408,
+    { cluster_name: 'mx-common', status: 'red', timed_out: true, unassigned_shards: 6 },
+    { method: 'GET', path: '/_cluster/health' },
+  )
+  assert.match(error.message, /status=red/)
+  assert.match(error.message, /unassigned_shards=6/)
+  assert.doesNotMatch(error.message, /unknown error/)
+  assert.equal(describeClusterHealth({ cluster_name: 'x', status: 'green', number_of_nodes: 3 }),
+    'status=green, nodes=3')
+})
+
+
+test('concurrent segmentation calls leave as one batch request', async () => {
+  const requests = []
+  const hanlp = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body)
+      requests.push({ url: String(url), count: body.texts.length })
+      return new Response(
+        JSON.stringify({ batch: body.texts.map((text) => [text]) }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    },
+  })
+  const batching = batchingSegmenter(hanlp)
+
+  const results = await Promise.all(
+    ['吴恩达', '人工智能', '大模型'].map((text) => batching.segmentWithMeta(text)),
+  )
+
+  // One forward pass instead of three: this is the difference between a rebuild
+  // measured in hours and one measured in days.
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].count, 3)
+  assert.match(requests[0].url, /\/tokenize\/batch$/)
+  // Results stay matched to their own input, with their own provenance.
+  assert.deepEqual(results.map((result) => result.tokens), [['吴恩达'], ['人工智能'], ['大模型']])
+  assert.deepEqual(results.map((result) => result.backendUsed), ['hanlp', 'hanlp', 'hanlp'])
+  assert.equal(results.every((result) => result.degraded === false), true)
+})
+
+test('a batch larger than the limit is split rather than truncated', async () => {
+  const sizes = []
+  const hanlp = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    fetchImpl: async (unused, options) => {
+      const body = JSON.parse(options.body)
+      sizes.push(body.texts.length)
+      return new Response(JSON.stringify({ batch: body.texts.map((text) => [text]) }), { status: 200 })
+    },
+  })
+  const batching = batchingSegmenter(hanlp, { maxBatch: 2 })
+
+  const texts = ['a', 'b', 'c', 'd', 'e']
+  const results = await Promise.all(texts.map((text) => batching.segmentWithMeta(text)))
+  assert.deepEqual(sizes, [2, 2, 1])
+  assert.deepEqual(results.map((result) => result.tokens), texts.map((text) => [text]))
+})
+
+test('a misaligned batch degrades every caller instead of misattributing tokens', async () => {
+  const hanlp = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    // Two texts in, one token list back.
+    fetchImpl: async () => new Response(JSON.stringify({ batch: [['吴恩达']] }), { status: 200 }),
+    fallbackSegmenter: {
+      async segmentWithMeta(text) {
+        return { tokens: [`jieba:${text}`], backendUsed: 'jieba', degraded: false, errorCode: null }
+      },
+    },
+  })
+
+  const results = await hanlp.segmentBatchWithMeta(['吴恩达', '人工智能'])
+  // Attaching one record's tokens to another is worse than degrading, so the
+  // whole batch falls back and every item is marked degraded for a strict
+  // caller to reject.
+  assert.equal(results.length, 2)
+  assert.equal(results.every((result) => result.degraded === true), true)
+  assert.equal(results.every((result) => result.backendUsed === 'jieba'), true)
+  assert.equal(results[0].errorCode, 'hanlp_misaligned_batch')
+})
+
+test('a segmenter without a batch API is passed through unchanged', () => {
+  const plain = { async segmentWithMeta() { return { tokens: [], backendUsed: 'jieba' } } }
+  assert.equal(batchingSegmenter(plain), plain)
+})
+
+
+test('the migration refuses every path that would touch another product', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const manage = await readFile(new URL('../scripts/manage.sh', import.meta.url), 'utf8')
+  // mx-launcher carries the running MX-H2I estate; rsync into a live PGDATA
+  // would corrupt a database this migration has no business touching.
+  assert.match(manage, /that volume belongs to mx-launcher/)
+  assert.match(manage, /refusing to write into/)
+  assert.match(manage, /refusing to write inside/)
+  assert.match(manage, /refusing a root that contains/)
+  // The source is verified before anything is deleted, and never deleted here.
+  assert.match(manage, /aborting before any PV is touched/)
+  assert.match(manage, /rsync -aHAXn --numeric-ids --checksum/)
+  // The old copy is only ever *printed* as a reclaim instruction, never run:
+  // deleting the source is a human decision made after the new root proves out.
+  for (const line of manage.split('\n')) {
+    if (!line.includes('HOST_DATA_ROOT_ORIGINAL') || !line.includes('rm -rf')) continue
+    assert.match(line.trim(), /^say "/, `the migration must not delete the source: ${line.trim()}`)
+  }
+  // The root is recovered from the cluster, so a forgotten export cannot
+  // strand freshly moved data.
+  assert.match(manage, /resolve_host_data_root/)
+  assert.match(manage, /jsonpath='\{\.spec\.hostPath\.path\}'/)
+})
+
+test('the HanLP deployment is sized and configured for batch rebuilds', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const manifest = await readFile(new URL('../deploy/k8s/optional/50-hanlp.yaml', import.meta.url), 'utf8')
+  const server = await readFile(new URL('../deploy/hanlp/server.py', import.meta.url), 'utf8')
+  assert.match(manifest, /name: MAX_BATCH_TEXTS/)
+  // The queue must outlast a batch, or callers see 429 for work that succeeded.
+  assert.match(manifest, /name: INFERENCE_QUEUE_TIMEOUT_SECONDS\n\s+value: "30"/)
+  assert.match(server, /tokenize\/batch|endswith\("\/batch"\)/)
+  // A short batch would misalign tokens with records; it is refused, not padded.
+  assert.match(server, /tokenizer returned a misaligned batch/)
 })

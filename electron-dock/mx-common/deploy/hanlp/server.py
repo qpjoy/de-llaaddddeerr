@@ -27,7 +27,13 @@ import traceback
 # search precision far more than it helps recall.
 MODEL_NAME = os.environ.get("HANLP_MODEL", "COARSE_ELECTRA_SMALL_ZH")
 PORT = int(os.environ.get("PORT", "8000"))
-MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", "65536"))
+MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", "1048576"))
+# A rebuild segments hundreds of thousands of records. HanLP's own API is
+# batch-shaped -- it takes a list of texts and returns a list of token lists --
+# so sending one text per HTTP request pays the model handoff, the HTTP round
+# trip and the Python dispatch once per record instead of once per batch. The
+# bound keeps a single caller from monopolising the inference slot.
+MAX_BATCH_TEXTS = int(os.environ.get("MAX_BATCH_TEXTS", "256"))
 # A HanLP component is one mutable Python object. Keep forward passes serialized
 # unless an operator has explicitly validated a particular model as thread-safe.
 # Waiting briefly is important: the Hub projector segments several fields in
@@ -126,32 +132,55 @@ class Handler(BaseHTTPRequestHandler):
             self._send(503, {"error": _load_error or "model is still loading"})
             return
 
-        text = request.get("text") or ""
-        if not isinstance(text, str):
-            self._send(400, {"error": "text must be a string"})
-            return
-        # Bound the input: a single oversized document must not stall the shared
-        # tokenizer for every other caller.
-        text = text[:20_000]
+        batch = self.path.rstrip("/").endswith("/batch")
+        if batch:
+            texts = request.get("texts")
+            if not isinstance(texts, list) or not all(isinstance(item, str) for item in texts):
+                self._send(400, {"error": "texts must be an array of strings"})
+                return
+            if len(texts) > MAX_BATCH_TEXTS:
+                self._send(400, {"error": f"texts exceeds {MAX_BATCH_TEXTS} items"})
+                return
+            if not texts:
+                self._send(200, {"batch": []})
+                return
+            # Same per-text bound as the single path: one oversized document
+            # must not stall the shared tokenizer for every other caller.
+            inputs = [item[:20_000] for item in texts]
+        else:
+            text = request.get("text") or ""
+            if not isinstance(text, str):
+                self._send(400, {"error": "text must be a string"})
+                return
+            inputs = [text[:20_000]]
+
         if not _inference_slots.acquire(timeout=INFERENCE_QUEUE_TIMEOUT_SECONDS):
             self._send(429, {"error": "tokenizer is busy"})
             return
         try:
             try:
-                # HanLP's native tokenizer API is batch-shaped. Keeping the
-                # one-item batch here also guarantees the HTTP contract remains
-                # a list of tokenized sentences.
-                tokens = _tokenizer([text])
+                # HanLP's native tokenizer API is batch-shaped, so a batch of N
+                # is one forward pass rather than N of them.
+                tokens = _tokenizer(inputs)
             except Exception as error:  # noqa: BLE001
                 _log_safe_traceback("tokenizer inference failed", error)
                 self._send(500, {"error": "tokenizer inference failed"})
                 return
         finally:
             _inference_slots.release()
+
         # Normalize to the list-of-sentences shape the Node client expects.
         if tokens and isinstance(tokens[0], str):
             tokens = [tokens]
-        self._send(200, tokens)
+        if not batch:
+            self._send(200, tokens)
+            return
+        # One token list per input, positionally. A short result would silently
+        # misalign tokens with records, so it is refused rather than padded.
+        if not isinstance(tokens, list) or len(tokens) != len(inputs):
+            self._send(500, {"error": "tokenizer returned a misaligned batch"})
+            return
+        self._send(200, {"batch": tokens})
 
     def log_message(self, *_args):
         # Default handler logs every request to stderr; too noisy for an

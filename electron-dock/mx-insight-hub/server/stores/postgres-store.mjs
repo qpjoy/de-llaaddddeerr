@@ -127,6 +127,23 @@ function capabilityPolicy(row) {
   }
 }
 
+/**
+ * Decide whether a committed request may still be replayed verbatim.
+ *
+ * An Idempotency-Key exists to make a retry safe, and a retry happens within
+ * seconds. Replaying forever quietly turns the key into a cache: a caller that
+ * reuses one keeps receiving a frozen answer while the data underneath moves,
+ * which is wrong for a search over a corpus that ingests continuously.
+ *
+ * A null window keeps the unbounded behaviour, which is what the `stable`
+ * result type is for -- there it is the point, not an accident.
+ */
+function replayExpired(existing, replayWindowMs) {
+  if (replayWindowMs == null) return false
+  if (!existing.completedAt) return false
+  return Date.now() - new Date(existing.completedAt).getTime() > replayWindowMs
+}
+
 export class PostgresStore {
   constructor(pool) {
     this.pool = pool
@@ -436,8 +453,9 @@ export class PostgresStore {
       if (existing) {
         let kind
         if (existing.fingerprint !== input.fingerprint) kind = 'conflict'
-        else if (existing.status === 'committed') kind = 'replay'
-        else if (existing.status === 'reserved') kind = 'in_progress'
+        else if (existing.status === 'committed' && !replayExpired(existing, input.replayWindowMs)) {
+          kind = 'replay'
+        } else if (existing.status === 'reserved') kind = 'in_progress'
         else if (existing.status === 'unknown') kind = 'unknown'
         else {
           await this.#assertQuota(client, input)

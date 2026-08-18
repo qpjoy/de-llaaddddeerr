@@ -338,6 +338,21 @@ function safePullError(error) {
   return wrapped
 }
 
+/**
+ * Describe a `fetch` transport failure in terms an operator can act on.
+ *
+ * Node reports the useful part in `error.cause.code` and hides it behind a
+ * generic "fetch failed" message, so the code is what gets surfaced.
+ */
+function transportReason(error, timeoutMs) {
+  if (error?.name === 'AbortError' || error?.name === 'TimeoutError') {
+    return `no response within ${timeoutMs}ms`
+  }
+  const code = error?.cause?.code || error?.code
+  if (typeof code === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(code)) return code
+  return 'transport failure'
+}
+
 function isRetryableGetFailure(error) {
   if ([
     'sqlite_api_unavailable',
@@ -453,8 +468,17 @@ export class SQLiteApiSourcePuller {
           redirect: 'error',
           signal: controller.signal,
         })
-      } catch {
-        throw new AppError(503, 'sqlite_api_unavailable', 'SQLite API did not return a response')
+      } catch (error) {
+        // Name the transport failure. "did not return a response" covers a DNS
+        // miss, a refused connection, a blocked egress and a timeout alike, and
+        // an operator cannot act on any of them without knowing which it was.
+        // The reason is derived from the error's own class and code, never from
+        // the URL or the Authorization header, so nothing secret is echoed.
+        throw new AppError(
+          503,
+          'sqlite_api_unavailable',
+          `SQLite API did not return a response (${transportReason(error, this.timeoutMs)})`,
+        )
       }
       if (!response?.ok) {
         const status = Number(response?.status) || 503
@@ -728,12 +752,46 @@ export class SQLiteApiSourcePuller {
     })
   }
 
+  /**
+   * Read one task's pipeline diagnostics.
+   *
+   * The remote row count is a probe, not the answer. Everything an operator
+   * needs first -- the durable cursor, the checkpoint, which cycle is open --
+   * lives in the Hub's own store and stays readable while the upstream API is
+   * down. So a failed probe degrades this report to its local half and names
+   * the failure, instead of throwing and taking the whole diagnostics panel
+   * with it: a page whose purpose is to explain an outage must survive one.
+   */
   async progress(sourceKey) {
     const { connection } = await this.#source(sourceKey)
     const cursor = await this.queue?.getCursor?.(`external:${sourceKey}`) ?? null
     const position = cursor?.position ?? {}
     const cycle = position.cycle ?? null
-    const page = await this.#page(connection, { page: 1, pageSize: 1, cycle })
+    let page = null
+    let probeError = null
+    try {
+      page = await this.#page(connection, { page: 1, pageSize: 1, cycle })
+    } catch (error) {
+      probeError = error instanceof AppError
+        ? { code: error.code, message: error.message }
+        : { code: safeFailureCode(error), message: 'SQLite API probe failed' }
+      this.logger?.warn?.(
+        `[sqlite-api] progress probe failed for ${sourceKey}: ${probeError.code}`,
+      )
+    }
+    if (!page) {
+      return {
+        totalRows: null,
+        sourceTotalRows: null,
+        completedRows: null,
+        remainingRows: null,
+        percent: null,
+        cursor,
+        probeError,
+        blocker: probeError.code,
+        issues: [`${probeError.message}; showing the last durable checkpoint only`],
+      }
+    }
     const lastSweepTotal = Number(position.lastSweepTotal)
     const totalRows = !cycle && position.lastCompletedAt && Number.isSafeInteger(lastSweepTotal) && lastSweepTotal >= 0
       ? lastSweepTotal
@@ -753,6 +811,7 @@ export class SQLiteApiSourcePuller {
         ? null
         : totalRows === 0 ? 100 : Math.round((completedRows / totalRows) * 10_000) / 100,
       cursor,
+      probeError: null,
       blocker: connection.resource === 'messages' ? 'source_has_no_exact_change_cursor' : null,
       issues: connection.resource === 'messages'
         ? ['message_at overlap needs operator-triggered reconciliation for older edits and deletions']

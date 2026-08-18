@@ -1441,6 +1441,31 @@ reindex_search() {
       ;;
   esac
 
+  # A rebuild writes a whole second copy of the projection before the aliases
+  # move. Past the high watermark Elasticsearch will not allocate the new
+  # index's shard at all, and the failure surfaces as an unrelated-looking
+  # connectivity error hours later. Check before spending the tokenizer time.
+  local disk_percent
+  disk_percent="$(
+    kubectl -n mx-common exec statefulset/mx-common-elasticsearch -c elasticsearch -- \
+      curl -fsS 'http://127.0.0.1:9200/_cat/allocation?h=disk.percent' 2>/dev/null \
+      | tr -d ' ' | grep -E '^[0-9]+$' | sort -rn | head -1 || true
+  )"
+  case "$disk_percent" in
+    ''|*[!0-9]*) say "WARNING: could not read Elasticsearch disk usage; continuing" >&2 ;;
+    *)
+      if [ "$disk_percent" -ge 90 ]; then
+        say "Elasticsearch data node is ${disk_percent}% full." >&2
+        say "  Past cluster.routing.allocation.disk.watermark.high, new shards will not be" >&2
+        say "  allocated and this rebuild cannot finish. Free disk or relocate the volume:" >&2
+        say "    bash ../mx-common/scripts/manage.sh migrate-storage /data/k8s/mx-runtime/mx-common/k8s" >&2
+        die "refusing to start a multi-hour rebuild that cannot be allocated"
+      fi
+      [ "$disk_percent" -ge 85 ] \
+        && say "WARNING: Elasticsearch data node is ${disk_percent}% full; the rebuild needs room for a second copy" >&2
+      ;;
+  esac
+
   say "running one-shot reconciliation in ${executor_deployment}; configured tokenizer fallback is forbidden"
   if ! kubectl -n "$namespace" exec "deployment/${executor_deployment}" -- \
     node server/scripts/reindex-search.mjs; then

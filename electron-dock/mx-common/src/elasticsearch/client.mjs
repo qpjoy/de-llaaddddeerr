@@ -6,9 +6,46 @@
 // REST calls, and staying on fetch means a cluster upgrade never forces a
 // coordinated client upgrade across products.
 
+/**
+ * Recognise a cluster health document.
+ *
+ * `_cluster/health` answers a `wait_for_status` timeout with HTTP 408 and the
+ * health document itself rather than an error envelope, so a body carrying a
+ * cluster name and a colour is a successful read of a cluster that has not
+ * settled -- not a malformed error.
+ */
+export function isClusterHealthBody(body) {
+  return Boolean(body)
+    && typeof body === 'object'
+    && typeof body.cluster_name === 'string'
+    && ['red', 'yellow', 'green'].includes(body.status)
+}
+
+/** One-line, log-safe summary of a cluster health document. */
+export function describeClusterHealth(health) {
+  if (!isClusterHealthBody(health)) return 'unknown cluster health'
+  const parts = [`status=${health.status}`]
+  if (health.timed_out === true) parts.push('timed_out')
+  for (const [label, key] of [
+    ['nodes', 'number_of_nodes'],
+    ['unassigned_shards', 'unassigned_shards'],
+    ['initializing_shards', 'initializing_shards'],
+    ['relocating_shards', 'relocating_shards'],
+  ]) {
+    if (Number.isFinite(health[key])) parts.push(`${label}=${health[key]}`)
+  }
+  return parts.join(', ')
+}
+
 export class ElasticsearchError extends Error {
   constructor(status, body, { method, path } = {}) {
-    const reason = body?.error?.reason || body?.error?.type || body?.message || 'unknown error'
+    // A health document has no `error` envelope. Falling through to
+    // "unknown error" there discards the only diagnostic the response carried.
+    const reason = body?.error?.reason
+      || body?.error?.type
+      || (isClusterHealthBody(body) ? describeClusterHealth(body) : null)
+      || body?.message
+      || 'unknown error'
     super(`Elasticsearch ${method || ''} ${path || ''} failed (${status}): ${reason}`)
     this.name = 'ElasticsearchError'
     this.status = status
@@ -83,13 +120,30 @@ export class ElasticsearchClient {
 
   // `waitForStatus` defaults to yellow: a single-node cluster with replicas
   // configured can never reach green, and gating deploy on green would hang.
-  clusterHealth({ waitForStatus = 'yellow', timeout = '30s' } = {}) {
-    return this.request(
-      'GET',
-      `/_cluster/health?wait_for_status=${waitForStatus}&timeout=${timeout}`,
-      undefined,
-      { timeoutMs: 45_000 },
-    )
+  //
+  // Not reaching that status is reported as HTTP 408 with the health document
+  // as the body. That is an answer, not a failure: the cluster was reached and
+  // told us its colour. Returning it -- flagged with `timedOut` -- keeps the
+  // distinction callers actually need, between a cluster that is unreachable
+  // and one that is reachable and unhealthy. Only the first is an outage.
+  async clusterHealth({ waitForStatus = 'yellow', timeout = '30s' } = {}) {
+    try {
+      return await this.request(
+        'GET',
+        `/_cluster/health?wait_for_status=${waitForStatus}&timeout=${timeout}`,
+        undefined,
+        { timeoutMs: 45_000 },
+      )
+    } catch (error) {
+      if (
+        error instanceof ElasticsearchError
+        && error.status === 408
+        && isClusterHealthBody(error.body)
+      ) {
+        return { ...error.body, timedOut: true }
+      }
+      throw error
+    }
   }
 
   async exists(path) {
@@ -144,6 +198,32 @@ export class ElasticsearchClient {
 
   getMapping(index) {
     return this.request('GET', `/${encodeURIComponent(index)}/_mapping`)
+  }
+
+  /**
+   * Ask the cluster why one shard is where it is.
+   *
+   * Returns null when there is nothing to explain -- every shard assigned, or
+   * the index not created yet -- because both are ordinary states rather than
+   * failures. When a shard *is* stuck, the deciders in the response name the
+   * exact cluster setting blocking it, which is the only form of this answer an
+   * operator can act on.
+   */
+  async allocationExplain({ index, shard = 0, primary = true } = {}) {
+    const body = index === undefined ? undefined : { index, shard, primary }
+    try {
+      return await this.request('POST', '/_cluster/allocation/explain', body)
+    } catch (error) {
+      if (error instanceof ElasticsearchError && (error.status === 400 || error.status === 404)) {
+        return null
+      }
+      throw error
+    }
+  }
+
+  /** Per-node shard and disk allocation, with byte counts rather than strings. */
+  catAllocation() {
+    return this.request('GET', '/_cat/allocation?format=json&bytes=b')
   }
 
   putSnapshotRepository(name, body) {

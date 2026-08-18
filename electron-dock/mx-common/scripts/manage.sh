@@ -18,6 +18,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 K8S_DIR="${ROOT_DIR}/deploy/k8s"
 NAMESPACE="mx-common"
 HOST_DATA_ROOT="${MX_COMMON_HOST_DATA_ROOT:-/var/lib/mx-common/k8s}"
+# Captured before any relocation rebinds HOST_DATA_ROOT, so the migration can
+# still name the directory the operator must reclaim by hand.
+HOST_DATA_ROOT_ORIGINAL="$HOST_DATA_ROOT"
 WAIT_TIMEOUT="${MX_COMMON_WAIT_TIMEOUT:-300}"
 HANLP_WAIT_TIMEOUT="${MX_COMMON_HANLP_WAIT_TIMEOUT:-900}"
 
@@ -61,6 +64,16 @@ Usage: bash scripts/manage.sh <command>
                   containerd. Use when the node cannot reach the registries
                   directly, or to avoid a slow pull during `ensure`.
   down            Scale shared workloads to zero. Data, PVCs and indices are kept.
+
+  migrate-storage <new-root> [--confirm]
+                  Move every retained local PV to another volume. Stops the
+                  shared workloads, copies with rsync, verifies byte-for-byte,
+                  repoints the PVs and restarts. The source is never deleted.
+                  Without --confirm it only reports what it would do.
+
+  relocate [<new-root>] [--confirm]
+                  migrate-storage followed by a full redeploy on the new volume.
+                  Defaults to /data/k8s/mx-runtime/mx-common/k8s.
   logs [service]  Tail logs (elasticsearch | redis | hanlp | postgres).
 
   snapshot status|run|list|apply
@@ -76,6 +89,7 @@ Optional components (off by default):
 
 Environment:
   MX_COMMON_HOST_DATA_ROOT      Host path for local PVs (default /var/lib/mx-common/k8s)
+  MX_COMMON_DISK_WARN_PERCENT   Warn above this disk usage during deploy (default 85)
   MX_COMMON_WAIT_TIMEOUT        Seconds to wait for readiness (default 300)
   MX_COMMON_SNAPSHOT_SCHEDULE   SLM cron (default "0 30 1 * * ?", 01:30 daily)
   MX_COMMON_SNAPSHOT_S3_BUCKET  Store snapshots off-node instead of on this host
@@ -92,6 +106,260 @@ Environment:
   MX_COMMON_ELASTICSEARCH_HEAP  JVM heap, Xms and Xmx together (default 4g, cap 31g)
   MX_COMMON_AUTO_PRELOAD=0      Do not preload images during ensure
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# Storage relocation
+# ---------------------------------------------------------------------------
+
+# Recover the host root from the cluster instead of from an operator's shell.
+#
+# A relocated deployment must not depend on someone remembering to export
+# MX_COMMON_HOST_DATA_ROOT: the next deploy would recreate PVs at the old path
+# and silently strand the data that was just moved. The PV itself already
+# records where the bytes are, so that is what gets believed. An explicit
+# environment variable still wins, for a first install or a deliberate override.
+resolve_host_data_root() {
+  [ -n "${MX_COMMON_HOST_DATA_ROOT:-}" ] && return 0
+  command -v kubectl >/dev/null 2>&1 || return 0
+  local recorded
+  recorded="$(kubectl get pv mx-common-postgres-data \
+    -o jsonpath='{.spec.hostPath.path}' 2>/dev/null || true)"
+  case "$recorded" in
+    */postgres/data)
+      HOST_DATA_ROOT="${recorded%/postgres/data}"
+      HOST_DATA_ROOT_ORIGINAL="$HOST_DATA_ROOT"
+      ;;
+  esac
+}
+
+# Every retained local PV, as: pv-name claim-name size sub-path owner mode.
+# Kept in one place so the migration can never drift from what `ensure_storage`
+# and `ensure_hanlp_storage` actually create.
+local_pv_inventory() {
+  cat <<'INVENTORY'
+mx-common-postgres-data data-mx-common-postgres-0 50Gi postgres/data 999:999 0700
+mx-common-elasticsearch-data data-mx-common-elasticsearch-0 50Gi elasticsearch/data 1000:0 0775
+mx-common-elasticsearch-snapshots mx-common-elasticsearch-snapshots 20Gi elasticsearch/snapshots 1000:0 0775
+mx-common-hanlp-models mx-common-hanlp-models 10Gi hanlp/models 1000:1000 0755
+INVENTORY
+}
+
+# Free bytes on the filesystem backing a path, walking up to the nearest parent
+# that exists so an unborn target can still be measured.
+free_bytes_for() {
+  local path="$1" probe="$1"
+  while [ ! -e "$probe" ] && [ "$probe" != / ]; do
+    probe="${probe%/*}"
+    [ -n "$probe" ] || probe=/
+  done
+  df -Pk "$probe" 2>/dev/null | awk 'NR == 2 { print $4 * 1024 }'
+}
+
+used_bytes_for() {
+  [ -d "$1" ] || { printf '0'; return 0; }
+  du -sk "$1" 2>/dev/null | awk '{ print $1 * 1024 }'
+}
+
+gib() {
+  awk -v bytes="${1:-0}" 'BEGIN { printf "%.1f", bytes / 1073741824 }'
+}
+
+# Refuse a deploy that is one ingest away from an unallocatable shard.
+#
+# Elasticsearch stops placing shards at cluster.routing.allocation.disk.
+# watermark.high, 90% by default, and the symptom is a red index with an
+# INDEX_CREATED shard that never assigns -- which reads as a connectivity
+# problem everywhere except in the allocation explain output. Catching it here
+# names the real cause while it is still cheap to fix.
+check_storage_headroom() {
+  local warn_percent="${MX_COMMON_DISK_WARN_PERCENT:-85}" percent probe="$HOST_DATA_ROOT"
+  while [ ! -e "$probe" ] && [ "$probe" != / ]; do
+    probe="${probe%/*}"
+    [ -n "$probe" ] || probe=/
+  done
+  percent="$(df -Pk "$probe" 2>/dev/null | awk 'NR == 2 { gsub(/%/, "", $5); print $5 }')"
+  case "$percent" in
+    ''|*[!0-9]*) warn "cannot measure disk usage for ${HOST_DATA_ROOT}"; return 0 ;;
+  esac
+  [ "$percent" -lt "$warn_percent" ] && return 0
+
+  warn "${HOST_DATA_ROOT} is on a filesystem that is ${percent}% full."
+  warn "  Elasticsearch refuses to allocate new shards past the 90% high watermark,"
+  warn "  and PostgreSQL has no watermark at all -- it simply fails to write."
+  warn "  Relocate the shared data to a larger volume:"
+  warn "    bash scripts/manage.sh migrate-storage /data/k8s/mx-runtime/mx-common/k8s"
+  [ "$percent" -ge 90 ] && warn "  Past the watermark already: new indices will not become allocatable."
+  return 0
+}
+
+# Move every retained local PV to a new host root, without losing data.
+#
+# Order is the whole design. Workloads stop first so nothing writes during the
+# copy; the copy is verified before anything is deleted; the PVs are Retain, so
+# removing the PVC and the PV detaches the claim without touching bytes; and the
+# source directory is never deleted -- reclaiming it stays a separate, human
+# decision made after the new root has proven itself.
+cmd_migrate_storage() {
+  local target_root="$1" confirmation="${2:-}"
+  need kubectl
+  need rsync
+  resolve_host_data_root
+  [ -n "$target_root" ] || die "usage: manage.sh migrate-storage <new-host-data-root> [--confirm]"
+  case "$target_root" in
+    /*) ;;
+    *) die "the new host data root must be an absolute path" ;;
+  esac
+  target_root="${target_root%/}"
+  [ "$target_root" != "$HOST_DATA_ROOT" ] \
+    || die "the new root is the current root (${HOST_DATA_ROOT}); nothing to do"
+  case "$target_root" in
+    "${HOST_DATA_ROOT}"/*) die "the new root must not live inside the current root" ;;
+  esac
+
+  # Other products keep their own retained volumes on the same disk. mx-launcher
+  # in particular carries the running MX-H2I estate, and rsync into a live PGDATA
+  # would corrupt a database this migration has no business touching. Refuse any
+  # target that lands on, inside, or above another product's data.
+  local reserved
+  for reserved in \
+      /data/k8s/mx-runtime/mx-launcher \
+      /data/k8s/mx-runtime/mx-launcher/k8s \
+      /data/k8s/mx-runtime/mx-launcher/k8s/postgres; do
+    [ "$target_root" = "$reserved" ] && die "refusing to write into ${reserved}: that volume belongs to mx-launcher"
+    case "$target_root" in
+      "${reserved}"/*) die "refusing to write inside ${reserved}: that volume belongs to mx-launcher" ;;
+    esac
+    case "$reserved" in
+      "${target_root}"/*) die "refusing a root that contains ${reserved}: that volume belongs to mx-launcher" ;;
+    esac
+  done
+  if [ -d "$target_root" ] && [ -n "$(ls -A "$target_root" 2>/dev/null)" ]; then
+    warn "${target_root} is not empty; rsync will merge into it"
+    ls -A "$target_root" | sed 's/^/    /' >&2
+  fi
+
+  local used free
+  used="$(used_bytes_for "$HOST_DATA_ROOT")"
+  free="$(free_bytes_for "$target_root")"
+  [ -n "$free" ] || die "cannot measure free space on ${target_root}"
+  say "source ${HOST_DATA_ROOT} holds $(gib "$used")GiB; ${target_root} has $(gib "$free")GiB free"
+  # A tenth over the measured size covers rsync's own overhead and any growth
+  # between measuring and copying.
+  awk -v free="$free" -v used="$used" 'BEGIN { exit !(free > used * 1.1) }' \
+    || die "not enough free space on ${target_root}: need $(gib "$(awk -v u="$used" 'BEGIN{print u*1.1}')")GiB"
+
+  if [ "$confirmation" != "--confirm" ]; then
+    say ""
+    say "This stops PostgreSQL, Elasticsearch and HanLP, copies their data to"
+    say "${target_root}, and repoints every retained PV. The source is left in"
+    say "place. Re-run with --confirm to proceed:"
+    say "  bash scripts/manage.sh migrate-storage ${target_root} --confirm"
+    return 0
+  fi
+
+  say "1/6 stopping shared workloads"
+  kubectl -n "$NAMESPACE" scale statefulset mx-common-postgres --replicas=0 >/dev/null 2>&1 || true
+  kubectl -n "$NAMESPACE" scale statefulset mx-common-elasticsearch --replicas=0 >/dev/null 2>&1 || true
+  kubectl -n "$NAMESPACE" scale deployment mx-common-hanlp --replicas=0 >/dev/null 2>&1 || true
+  kubectl -n "$NAMESPACE" scale deployment mx-common-redis --replicas=0 >/dev/null 2>&1 || true
+  local waited=0
+  while [ "$waited" -lt 180 ]; do
+    local remaining
+    remaining="$(kubectl -n "$NAMESPACE" get pods \
+      -l 'app.kubernetes.io/part-of=mx-common' --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    [ "${remaining:-0}" -eq 0 ] && break
+    sleep 3
+    waited=$((waited + 3))
+  done
+  [ "$waited" -lt 180 ] || die "shared pods did not terminate; nothing has been changed"
+  say "  all shared pods are gone"
+
+  say "2/6 copying data to ${target_root}"
+  mkdir -p "$target_root" 2>/dev/null || sudo -n mkdir -p "$target_root" \
+    || die "cannot create ${target_root}"
+  # Numeric ids and full attribute preservation: the pods run as fixed uids and
+  # hostPath ignores fsGroup, so a remapped owner is an unstartable database.
+  rsync -aHAX --numeric-ids --info=progress2 "${HOST_DATA_ROOT}/" "${target_root}/" \
+    || die "copy failed; the source is untouched and the workloads are still stopped"
+
+  say "3/6 verifying the copy"
+  local drift
+  drift="$(rsync -aHAXn --numeric-ids --checksum --itemize-changes \
+    "${HOST_DATA_ROOT}/" "${target_root}/" | head -20)"
+  if [ -n "$drift" ]; then
+    warn "the copy does not match the source:"
+    printf '%s\n' "$drift" >&2
+    die "aborting before any PV is touched; the source is intact"
+  fi
+  say "  byte-for-byte identical"
+
+  say "4/6 detaching claims from the old root"
+  # Reclaim policy is Retain, so this releases the binding and keeps the data.
+  local pv claim size sub owner mode
+  while read -r pv claim size sub owner mode; do
+    [ -n "$pv" ] || continue
+    kubectl -n "$NAMESPACE" delete pvc "$claim" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    kubectl delete pv "$pv" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  done <<EOF
+$(local_pv_inventory)
+EOF
+
+  say "5/6 recreating retained PVs under ${target_root}"
+  HOST_DATA_ROOT="$target_root"
+  while read -r pv claim size sub owner mode; do
+    [ -n "$pv" ] || continue
+    ensure_local_pv "$pv" "$claim" "$size" "$sub" "$owner" "$mode"
+  done <<EOF
+$(local_pv_inventory)
+EOF
+  # Standalone claims live in the manifests; the StatefulSet templates recreate
+  # theirs on scale-up.
+  kubectl apply -f deploy/k8s/common/ >/dev/null \
+    || die "could not reapply the shared manifests"
+
+  say "6/6 restarting shared workloads"
+  kubectl -n "$NAMESPACE" scale statefulset mx-common-postgres --replicas=1 >/dev/null
+  kubectl -n "$NAMESPACE" scale statefulset mx-common-elasticsearch --replicas=1 >/dev/null
+  kubectl -n "$NAMESPACE" scale deployment mx-common-redis --replicas=1 >/dev/null 2>&1 || true
+  kubectl -n "$NAMESPACE" scale deployment mx-common-hanlp --replicas=1 >/dev/null 2>&1 || true
+
+  say "  waiting for the shared data plane to come back"
+  kubectl -n "$NAMESPACE" rollout status statefulset/mx-common-postgres --timeout=300s >/dev/null \
+    || die "PostgreSQL did not become ready on the new volume; the old data is still at ${HOST_DATA_ROOT_ORIGINAL}"
+  kubectl -n "$NAMESPACE" rollout status statefulset/mx-common-elasticsearch --timeout=600s >/dev/null \
+    || die "Elasticsearch did not become ready on the new volume; the old data is still at ${HOST_DATA_ROOT_ORIGINAL}"
+
+  say ""
+  say "migration complete; both stores are ready on ${target_root}."
+  say "Future deploys read the root back from the PV, so nothing needs exporting."
+  say ""
+  say "The old copy is still at ${HOST_DATA_ROOT_ORIGINAL} and was not touched."
+  say "Verify, then reclaim it:"
+  say "  kubectl -n ${NAMESPACE} exec statefulset/mx-common-elasticsearch -c elasticsearch -- \\"
+  say "    curl -sS 'http://127.0.0.1:9200/_cluster/health?pretty'"
+  say "  sudo rm -rf ${HOST_DATA_ROOT_ORIGINAL}"
+}
+
+# Relocate and redeploy in one step.
+#
+# The two halves are separable on purpose -- a migration that succeeds should
+# not be undone by a deploy that fails -- but running them together is what an
+# operator actually wants, so the sequencing is written down here rather than
+# left to be remembered under pressure.
+cmd_relocate() {
+  local target_root="${1:-/data/k8s/mx-runtime/mx-common/k8s}" confirmation="${2:-}"
+  if [ "$confirmation" != "--confirm" ]; then
+    cmd_migrate_storage "$target_root" ""
+    say ""
+    say "Then this command will also redeploy the shared data plane. To run both:"
+    say "  bash scripts/manage.sh relocate ${target_root} --confirm"
+    return 0
+  fi
+  cmd_migrate_storage "$target_root" --confirm
+  say ""
+  say "reconciling the shared data plane on the new volume"
+  MX_COMMON_HOST_DATA_ROOT="$target_root" cmd_ensure
 }
 
 # ---------------------------------------------------------------------------
@@ -565,6 +833,7 @@ hanlp_is_healthy() {
 
 cmd_ensure() {
   need kubectl
+  resolve_host_data_root
   local target_namespaces="${MX_COMMON_CLIENT_NAMESPACES:-mx-insight-hub}"
 
   if [ "${MX_COMMON_HANLP_ENABLED:-0}" = "1" ]; then
@@ -578,6 +847,7 @@ cmd_ensure() {
   fi
 
   ensure_vm_max_map_count || warn "continuing; Elasticsearch may fail to start"
+  check_storage_headroom
   report_capacity
   report_image_readiness
   kubectl apply -f "${K8S_DIR}/common/00-namespace.yaml" >/dev/null
@@ -1398,6 +1668,8 @@ main() {
     provision) shift; cmd_provision "${1:-}" "${2:-}" ;;
     preload) cmd_preload ;;
     reset-storage) cmd_reset_storage ;;
+    migrate-storage) shift; cmd_migrate_storage "${1:-}" "${2:-}" ;;
+    relocate) shift; cmd_relocate "${1:-}" "${2:-}" ;;
     deploy) shift; cmd_deploy "$@" ;;
     snapshot) shift; cmd_snapshot "${1:-status}" ;;
     status) cmd_status ;;

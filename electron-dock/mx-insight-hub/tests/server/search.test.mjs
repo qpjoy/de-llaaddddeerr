@@ -4,6 +4,8 @@ import { fallbackSegment } from '@qpjoy/mx-common/segmenter'
 import { ElasticsearchError, ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
 import { contentIndex, chunkIndex } from '../../server/search/index-definitions.mjs'
 import {
+  cachingSegmenter,
+  mapWithConcurrency,
   ensureCurrentChunkIndex,
   ensureCurrentContentIndex,
   ensureSearchIndices,
@@ -135,12 +137,34 @@ test('strict reindex segmentation retries transient HanLP degradation but never 
   }, {
     expectedBackend: 'hanlp',
     retryDelayMs: 5,
+    busyRetryDelayMs: 5,
     sleep: async (milliseconds) => sleeps.push(milliseconds),
     logger: { warn() {} },
   })
 
   assert.deepEqual(await strict.segment('人工智能'), ['人工智能'])
   assert.deepEqual(sleeps, [5, 10], 'retry delay is bounded and exponential')
+})
+
+test('a busy tokenizer earns a longer wait than a malformed one', async () => {
+  const sleeps = []
+  const strict = requireSegmenterBackend({
+    async segmentWithMeta() {
+      return { tokens: ['jieba'], backendUsed: 'jieba', degraded: true, errorCode: 'hanlp_http_error' }
+    },
+  }, {
+    expectedBackend: 'hanlp',
+    maxAttempts: 3,
+    retryDelayMs: 10,
+    busyRetryDelayMs: 500,
+    sleep: async (milliseconds) => sleeps.push(milliseconds),
+    logger: { warn() {} },
+  })
+
+  await assert.rejects(() => strict.segment('人工智能'), /reindex requires hanlp/)
+  // Retrying at the malformed-response cadence would keep the inference queue
+  // full; backing off further is what lets it drain under concurrency.
+  assert.deepEqual(sleeps, [500, 1_000])
 })
 
 test('strict reindex accepts tokenless punctuation without invoking a fallback backend', async () => {
@@ -176,7 +200,10 @@ test('strict HanLP reindex fails closed after bounded fallback attempts', async 
       && error.expectedBackend === 'hanlp'
       && error.actualBackend === 'jieba',
   )
-  assert.equal(attempts, 3)
+  // Bounded, and deliberately more patient than before: a rebuild now issues
+  // several segmentation calls at once, so a transient queue must not be
+  // mistaken for a permanently degraded backend.
+  assert.equal(attempts, 6)
 })
 
 test('strict reindex projection rejects a degraded document before its bulk write', async () => {
@@ -1140,13 +1167,36 @@ function currentIndexHarness(indexSet, memberships) {
   return { client, calls, aliasResponse }
 }
 
-function currentSnapshotPool(matchSql, rows, { deletions = [] } = {}) {
+function currentSnapshotPool(matchSql, rows, {
+  deletions = [],
+  rebuildProgress = null,
+  changedRows = [],
+} = {}) {
   const queries = []
+  const served = new Set()
   let released = false
+  const buildStartedAt = new Date('2026-08-18T00:00:00.000Z')
   const connection = {
     async query(sql, values) {
       queries.push({ sql, values })
-      if (sql.includes(matchSql)) return { rows }
+      // The rebuild cursor: `SELECT` reports any resumable progress, `INSERT`
+      // opens a new one and returns the watermark the catch-up pass filters on.
+      if (sql.includes('FROM control.search_rebuild_progress')) {
+        return { rows: rebuildProgress ? [rebuildProgress] : [] }
+      }
+      if (sql.includes('INSERT INTO control.search_rebuild_progress')) {
+        return { rows: [{ build_started_at: buildStartedAt }] }
+      }
+      if (sql.includes('UPDATE control.search_rebuild_progress')) return { rows: [], rowCount: 1 }
+      if (sql.includes(matchSql)) {
+        // The catch-up pass is a delta scan keyed on the build watermark; it
+        // must not replay the whole corpus a second time. Each pass yields its
+        // page once, then reports exhaustion so paging terminates.
+        const delta = values?.[2] != null
+        if (served.has(delta)) return { rows: [] }
+        served.add(delta)
+        return { rows: delta ? changedRows : rows }
+      }
       if (sql.includes('FROM core.chunk_projection_deletes')) return { rows: deletions }
       return { rows: [], rowCount: 0 }
     },
@@ -1155,6 +1205,7 @@ function currentSnapshotPool(matchSql, rows, { deletions = [] } = {}) {
   return {
     pool: { async connect() { return connection } },
     queries,
+    buildStartedAt,
     get released() { return released },
   }
 }
@@ -1175,7 +1226,11 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
     projection_revision: 4,
     deleted_at: new Date('2026-08-10T00:00:00.000Z'),
   })
-  const snapshot = currentSnapshotPool('FROM core.canonical_records', [live, deleted])
+  // One record is written while the build pass is scanning; the catch-up pass
+  // exists to pick exactly that up once the aliases have moved.
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [live, deleted], {
+    changedRows: [live],
+  })
   const progress = []
 
   const result = await ensureCurrentContentIndex({
@@ -1193,7 +1248,16 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
   assert.equal(harness.calls.templates[0].body.template.aliases, undefined, 'partial rebuild is never exposed by a template alias')
   assert.equal(harness.calls.templates[0].body.template.settings['index.lifecycle.name'], undefined)
   assert.equal(harness.calls.creates[0].index, indexSet.currentIndex)
-  assert.equal(harness.calls.bulks.length, 2, 'snapshot is replayed after the alias cutover')
+  assert.equal(harness.calls.bulks.length, 2, 'the delta is replayed after the alias cutover')
+  // The second pass is bounded by the build watermark rather than rescanning
+  // the corpus: at this size a full second pass would double a multi-hour run.
+  const canonicalScans = snapshot.queries.filter((entry) => entry.sql.includes('FROM core.canonical_records'))
+  assert.equal(canonicalScans[0].values[2], null, 'the build pass scans everything')
+  assert.equal(
+    canonicalScans.at(-1).values[2].toISOString(),
+    snapshot.buildStartedAt.toISOString(),
+    'the catch-up pass scans only what changed after the build began',
+  )
   assert.deepEqual(
     harness.calls.readAliasesDuringBulk[0],
     [oldV1, oldV2, oldV3],
@@ -1216,7 +1280,8 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
   assert.equal(snapshot.released, true)
   assert.deepEqual(progress, [
     { projection: 'content', pass: 'build', processed: 2 },
-    { projection: 'content', pass: 'catch-up', processed: 2 },
+    // One changed record, not the whole corpus over again.
+    { projection: 'content', pass: 'catch-up', processed: 1 },
   ])
 })
 
@@ -1282,6 +1347,8 @@ test('chunk current index rebuild reuses stored vectors and removes the legacy r
   const deletion = { document_id: `${row.record_id}:2:old-chunker`, source_revision: 7 }
   const snapshot = currentSnapshotPool('FROM core.record_chunks', [row], {
     deletions: [deletion],
+    // The chunk was re-embedded while the build pass was scanning.
+    changedRows: [row],
   })
 
   await ensureCurrentChunkIndex({
@@ -2100,4 +2167,137 @@ test('projector returns the whole batch when the cluster is unreachable', async 
   const releaseUpdate = pool.queries.find(({ sql }) => sql.includes('attempts = GREATEST'))
   assert.match(releaseUpdate.sql, /status = 'claimed'/)
   assert.match(releaseUpdate.sql, /locked_by = \$2/)
+})
+
+
+test('an interrupted rebuild resumes from its cursor instead of discarding the partial index', async () => {
+  const indexSet = contentIndex()
+  const harness = currentIndexHarness(indexSet, {
+    'mx-insight-hub-content-v3-current': { [indexSet.readAlias]: {} },
+  })
+  // The partial v4 index survived the interruption; it serves no alias.
+  harness.client.indexExists = async (index) => index === indexSet.currentIndex
+  const remaining = canonicalRow({ id: '44444444-4444-4444-8444-444444444444' })
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [remaining], {
+    rebuildProgress: {
+      last_record_id: '11111111-1111-4111-8111-111111111111',
+      processed: 120_000,
+      build_started_at: new Date('2026-08-17T00:00:00.000Z'),
+    },
+  })
+  const progress = []
+
+  const result = await ensureCurrentContentIndex({
+    client: harness.client,
+    pool: snapshot.pool,
+    segmenter,
+    indexSet,
+    logger: { log() {}, info() {}, warn() {} },
+    onProgress: async (event) => progress.push(event),
+  })
+
+  assert.equal(result.rebuilt, true)
+  // The hours already spent are not thrown away.
+  assert.equal(harness.calls.creates.length, 0, 'a resumable partial index is never recreated')
+  const scans = snapshot.queries.filter((entry) => entry.sql.includes('FROM core.canonical_records'))
+  assert.equal(
+    scans[0].values[0],
+    '11111111-1111-4111-8111-111111111111',
+    'the build pass restarts after the last durably indexed record',
+  )
+  // Progress continues from the recorded count rather than resetting to zero.
+  assert.equal(progress[0].processed, 120_001)
+  // The catch-up watermark is the original build start, not this attempt's.
+  assert.equal(scans.at(-1).values[2].toISOString(), '2026-08-17T00:00:00.000Z')
+})
+
+test('a partial index with no recorded cursor is still rebuilt from scratch', async () => {
+  const indexSet = contentIndex()
+  const harness = currentIndexHarness(indexSet, {
+    'mx-insight-hub-content-v3-current': { [indexSet.readAlias]: {} },
+  })
+  let deleted = null
+  harness.client.indexExists = async (index) => index === indexSet.currentIndex
+  harness.client.request = async (method, path, body) => {
+    if (method === 'DELETE') { deleted = path; return { acknowledged: true } }
+    assert.equal(path, '/_aliases')
+    for (const action of body.actions) void action
+    return { acknowledged: true }
+  }
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [canonicalRow()])
+
+  await ensureCurrentContentIndex({
+    client: harness.client,
+    pool: snapshot.pool,
+    segmenter,
+    indexSet,
+    logger: { log() {}, info() {}, warn() {} },
+  })
+
+  // Unknown provenance: the snapshot could be partial in ways nothing recorded.
+  assert.equal(deleted, `/${indexSet.currentIndex}`)
+  assert.equal(harness.calls.creates[0].index, indexSet.currentIndex)
+})
+
+test('segmentation is memoised across records, passes and projections', async () => {
+  let calls = 0
+  const counting = {
+    async segmentWithMeta(text) {
+      calls += 1
+      return { tokens: [String(text)], backendUsed: 'hanlp', degraded: false, errorCode: null }
+    },
+    async segment(text) { return (await this.segmentWithMeta(text)).tokens },
+  }
+  const cached = cachingSegmenter(counting)
+
+  assert.deepEqual(await cached.segment('吴恩达'), ['吴恩达'])
+  assert.deepEqual(await cached.segment('吴恩达'), ['吴恩达'])
+  assert.deepEqual((await cached.segmentWithMeta('吴恩达')).tokens, ['吴恩达'])
+  // Repeating a HanLP round trip for identical input is the dominant waste in a
+  // rebuild; author names and chat titles repeat across every message.
+  assert.equal(calls, 1)
+
+  await cached.segment('人工智能')
+  assert.equal(calls, 2)
+  assert.equal(cached.stats().size, 2)
+})
+
+
+test('batch segmentation runs concurrently, in order, and never outruns its limit', async () => {
+  let inFlight = 0
+  let peak = 0
+  const order = []
+  const items = Array.from({ length: 12 }, (unused, index) => index)
+
+  const results = await mapWithConcurrency(items, 4, async (item) => {
+    inFlight += 1
+    peak = Math.max(peak, inFlight)
+    // Reverse the durations so completion order differs from input order.
+    await new Promise((resolve) => setTimeout(resolve, (12 - item) % 5))
+    order.push(item)
+    inFlight -= 1
+    return item * 2
+  })
+
+  // Order is load-bearing: the bulk body pairs each action line with the
+  // document line after it, so a shuffled result would mis-attach documents.
+  assert.deepEqual(results, items.map((item) => item * 2))
+  assert.notDeepEqual(order, items, 'the work really did overlap')
+  // Concurrency above the tokenizer's slot count only manufactures 429s.
+  assert.ok(peak > 1, 'work overlapped')
+  assert.ok(peak <= 4, `limit exceeded: ${peak}`)
+})
+
+test('a concurrency of one is exactly the previous serial behaviour', async () => {
+  let peak = 0
+  let inFlight = 0
+  const results = await mapWithConcurrency([1, 2, 3], 1, async (item) => {
+    inFlight += 1
+    peak = Math.max(peak, inFlight)
+    await new Promise((resolve) => setTimeout(resolve, 1))
+    inFlight -= 1
+    return item
+  })
+  assert.deepEqual(results, [1, 2, 3])
+  assert.equal(peak, 1)
 })

@@ -1,5 +1,9 @@
-import { createElasticsearchClient, ElasticsearchError } from '@qpjoy/mx-common/elasticsearch'
-import { createSegmenter } from '@qpjoy/mx-common/segmenter'
+import {
+  createElasticsearchClient,
+  describeClusterHealth,
+  ElasticsearchError,
+} from '@qpjoy/mx-common/elasticsearch'
+import { batchingSegmenter, createSegmenter } from '@qpjoy/mx-common/segmenter'
 import { buildChunkDocument } from '../embedding/document.mjs'
 import { contentIndex, chunkIndex } from './index-definitions.mjs'
 import { buildContentDocument } from './document.mjs'
@@ -34,6 +38,10 @@ export function createSearch({ pool, config, logger = console }) {
     segmenter,
     indexSet,
     chunkIndexSet: chunks,
+    // Only the bulk rebuild uses this; live projector traffic stays one call at
+    // a time so an interactive search never queues behind a rebuild's fan-out.
+    segmenterConcurrency: config.segmenter?.concurrency || 1,
+    segmenterBatchSize: config.segmenter?.batchSize || 64,
     queries: new SearchQueries({ pool, client, segmenter, indexSet, chunkIndexSet: chunks, logger }),
     projector: client
       ? new SearchProjector({ pool, client, segmenter, indexSet, logger })
@@ -58,14 +66,34 @@ export async function ensureSearchIndices(search, {
   onProgress = null,
 } = {}) {
   if (!search.client) return { enabled: false, reason: 'MX_COMMON_ELASTICSEARCH_URL is not configured' }
-  const report = { enabled: true, content: null, chunk: null, error: null }
+  const report = { enabled: true, content: null, chunk: null, error: null, clusterHealth: null }
   try {
-    await search.client.clusterHealth({ waitForStatus: 'yellow', timeout: '30s' })
+    // Waiting for yellow lets shards settle before index creation races them.
+    // Not reaching it is reported and then ignored: this reconciliation builds
+    // a new index from PostgreSQL rather than reading the existing projection,
+    // so a cluster held below yellow by the generation being replaced must not
+    // veto its own replacement.
+    const health = await search.client.clusterHealth({ waitForStatus: 'yellow', timeout: '30s' })
+    report.clusterHealth = health?.status || null
+    if (health?.status !== 'green' && health?.status !== 'yellow') {
+      logger?.warn?.(`[search] rebuilding against a degraded cluster: ${describeClusterHealth(health)}`)
+    }
+    // One cache for the whole reconciliation, shared by both projections and
+    // both passes. The catch-up pass and any resumed run therefore re-segment
+    // almost nothing.
+    // Order matters. The memo answers repeats without any request at all; what
+    // does reach the tokenizer is then coalesced, so the concurrent calls the
+    // batch builder makes leave as one forward pass instead of many.
+    const segmenter = cachingSegmenter(batchingSegmenter(search.segmenter, {
+      maxBatch: search.segmenterBatchSize,
+    }))
+    const concurrency = search.segmenterConcurrency || 1
     report.content = await ensureCurrentContentIndex({
       client: search.client,
       pool: search.pool,
-      segmenter: search.segmenter,
+      segmenter,
       indexSet: search.indexSet,
+      concurrency,
       logger,
       onProgress,
     })
@@ -76,8 +104,9 @@ export async function ensureSearchIndices(search, {
       report.chunk = await ensureCurrentChunkIndex({
         client: search.client,
         pool: search.pool,
-        segmenter: search.segmenter,
+        segmenter,
         indexSet: search.chunkIndexSet,
+        concurrency,
         logger,
         onProgress,
       })
@@ -85,6 +114,7 @@ export async function ensureSearchIndices(search, {
         throw new Error(`Chunk index mapping conflict: ${report.chunk.mappingConflict}`)
       }
     }
+    report.segmentCacheSize = segmenter.stats().size
     logger?.log?.(`[search] indices ready: ${search.indexSet.writeAlias}`)
   } catch (error) {
     report.error = error.message
@@ -96,6 +126,137 @@ export async function ensureSearchIndices(search, {
 
 const CURRENT_REBUILD_BATCH = 200
 const CURRENT_REBUILD_LOCK_PREFIX = 'mx-insight-hub:search:current-rebuild:'
+// Bounded so a rebuild cannot trade an Elasticsearch problem for an out-of-memory
+// one. Sized for the fields whose values actually repeat -- author names,
+// usernames and chat titles are drawn from a far smaller set than the messages
+// that carry them, so this absorbs most of the tokenizer traffic without
+// needing to hold every distinct message body.
+const SEGMENT_CACHE_MAX_ENTRIES = 200_000
+const SEGMENT_CACHE_MAX_TEXT_LENGTH = 2_048
+
+/**
+ * Memoise segmentation for the length of one rebuild.
+ *
+ * Every call is a round trip to a single-slot HanLP service, and it is the
+ * dominant cost of a rebuild by orders of magnitude. Identical input yields
+ * identical tokens, so repeating the call is pure waste -- and repetition is
+ * the norm here, not the exception: five fields are segmented per record and
+ * three of them (author name, username, chat username) repeat across every
+ * message from the same sender or chat.
+ *
+ * Deliberately per-rebuild and in-process. A persistent cache would also make
+ * retries cheap, but it would put a second copy of the corpus on the same disk
+ * whose exhaustion already stops rebuilds.
+ */
+export function cachingSegmenter(segmenter) {
+  const cache = new Map()
+  const remember = (key, value) => {
+    if (key === null) return value
+    // Insertion-ordered eviction: the oldest key is the first one Map yields.
+    if (cache.size >= SEGMENT_CACHE_MAX_ENTRIES) {
+      cache.delete(cache.keys().next().value)
+    }
+    cache.set(key, value)
+    return value
+  }
+  const keyOf = (text) => {
+    const value = String(text ?? '')
+    return value.length <= SEGMENT_CACHE_MAX_TEXT_LENGTH ? value : null
+  }
+
+  return {
+    stats: () => ({ size: cache.size }),
+    async segmentWithMeta(text) {
+      const key = keyOf(text)
+      if (key !== null && cache.has(key)) return cache.get(key)
+      return remember(key, await segmenter.segmentWithMeta(text))
+    },
+    async segment(text) {
+      const key = keyOf(text)
+      if (key !== null && cache.has(key)) return cache.get(key).tokens
+      return remember(key, await segmenter.segmentWithMeta(text)).tokens
+    },
+  }
+}
+
+/**
+ * Map with a fixed number of workers, preserving input order.
+ *
+ * Used to overlap segmentation across the records of one bulk batch. Order is
+ * preserved because the bulk body pairs each action line with the document line
+ * that follows it; shuffling would attach documents to the wrong ids.
+ *
+ * Workers pull from a shared index rather than the batch being split up front,
+ * so one slow document cannot leave the other workers idle.
+ */
+export async function mapWithConcurrency(items, limit, mapper) {
+  const width = Math.max(1, Math.min(Number(limit) || 1, items.length))
+  if (width === 1) {
+    const serial = []
+    for (const [index, item] of items.entries()) serial.push(await mapper(item, index))
+    return serial
+  }
+  const results = new Array(items.length)
+  let next = 0
+  const worker = async () => {
+    while (true) {
+      const index = next
+      next += 1
+      if (index >= items.length) return
+      results[index] = await mapper(items[index], index)
+    }
+  }
+  await Promise.all(Array.from({ length: width }, worker))
+  return results
+}
+
+async function readRebuildProgress(connection, indexName) {
+  const { rows } = await connection.query(
+    `SELECT last_record_id, processed, build_started_at
+       FROM control.search_rebuild_progress
+      WHERE index_name = $1 AND completed_at IS NULL`,
+    [indexName],
+  )
+  return rows[0] || null
+}
+
+async function beginRebuildProgress(connection, indexName, projection) {
+  const { rows } = await connection.query(
+    `INSERT INTO control.search_rebuild_progress (index_name, projection)
+     VALUES ($1, $2)
+     ON CONFLICT (index_name) DO UPDATE
+       SET projection = EXCLUDED.projection,
+           last_record_id = NULL,
+           processed = 0,
+           build_started_at = now(),
+           completed_at = NULL,
+           updated_at = now()
+     RETURNING build_started_at`,
+    [indexName, projection],
+  )
+  return rows[0].build_started_at
+}
+
+// Written after the batch is durably in Elasticsearch, never before. Saving
+// first would skip a batch on crash -- the failure mode that actually loses
+// documents, as opposed to replaying one, which `external_gte` absorbs.
+async function saveRebuildProgress(connection, indexName, lastRecordId, processed) {
+  await connection.query(
+    `UPDATE control.search_rebuild_progress
+        SET last_record_id = $2, processed = $3, updated_at = now()
+      WHERE index_name = $1`,
+    [indexName, lastRecordId, processed],
+  )
+}
+
+async function completeRebuildProgress(connection, indexName) {
+  await connection.query(
+    `UPDATE control.search_rebuild_progress
+        SET completed_at = now(), updated_at = now()
+      WHERE index_name = $1`,
+    [indexName],
+  )
+}
 
 /**
  * Reconcile a mutable content projection into one non-rollover concrete index.
@@ -109,6 +270,7 @@ export async function ensureCurrentContentIndex({
   pool,
   segmenter,
   indexSet,
+  concurrency = 1,
   logger = console,
   onProgress = null,
 }) {
@@ -117,6 +279,7 @@ export async function ensureCurrentContentIndex({
     pool,
     segmenter,
     indexSet,
+    concurrency,
     logger,
     onProgress,
     projection: 'content',
@@ -130,6 +293,7 @@ export async function ensureCurrentChunkIndex({
   pool,
   segmenter,
   indexSet,
+  concurrency = 1,
   logger = console,
   onProgress = null,
 }) {
@@ -138,6 +302,7 @@ export async function ensureCurrentChunkIndex({
     pool,
     segmenter,
     indexSet,
+    concurrency,
     logger,
     onProgress,
     projection: 'chunks',
@@ -150,6 +315,7 @@ async function ensureCurrentStateIndex({
   pool,
   segmenter,
   indexSet,
+  concurrency = 1,
   logger,
   onProgress,
   projection,
@@ -194,6 +360,7 @@ async function ensureCurrentStateIndex({
         client,
         segmenter,
         index: indexSet.currentIndex,
+        concurrency,
         onProgress: progressReporter(onProgress, projection, 'reconcile'),
       })
       return currentEnsureReport(indexSet, {
@@ -207,11 +374,26 @@ async function ensureCurrentStateIndex({
     let exists = await client.indexExists(indexSet.currentIndex)
     let created = false
     const currentWasServing = before.readIndices.includes(indexSet.currentIndex)
+    // A partial index left by an interrupted rebuild is invisible -- no alias
+    // points at it -- so it is safe to continue filling rather than to discard.
+    // Continuing is not an optimisation at this corpus size: a full pass is
+    // hours of single-slot tokenizer work, and restarting from the first row on
+    // every transient failure is how a rebuild becomes one that never finishes.
+    // The cursor is trusted only when it belongs to this exact index name, so a
+    // schema bump can never resume onto an incompatible mapping.
+    let resume = null
     if (exists && !currentWasServing) {
-      // A prior rebuild may have died before the atomic alias switch. It is not
-      // serving traffic, so recreate it rather than carrying a partial snapshot.
-      await client.request('DELETE', `/${encodeURIComponent(indexSet.currentIndex)}`)
-      exists = false
+      resume = await readRebuildProgress(connection, indexSet.currentIndex)
+      if (!resume) {
+        // No cursor means unknown provenance: the snapshot could be partial in
+        // ways nothing recorded, so it is rebuilt from scratch as before.
+        await client.request('DELETE', `/${encodeURIComponent(indexSet.currentIndex)}`)
+        exists = false
+      } else {
+        logger?.log?.(
+          `[search] resuming ${indexSet.currentIndex} after ${resume.processed} records`,
+        )
+      }
     }
     if (!exists) {
       await client.createIndex(indexSet.currentIndex, {
@@ -219,18 +401,29 @@ async function ensureCurrentStateIndex({
         mappings: indexSet.mappings,
       })
       created = true
-    } else {
+    } else if (!resume) {
       const mappingConflict = await updateCurrentMapping(client, indexSet, logger)
       if (mappingConflict) {
         return currentEnsureReport(indexSet, { mappingConflict, rebuilt: false, created: false })
       }
     }
 
+    const buildStartedAt = resume
+      ? resume.build_started_at
+      : await beginRebuildProgress(connection, indexSet.currentIndex, projection)
+    const alreadyProcessed = Number(resume?.processed || 0)
+
     const firstPass = await reconcileSnapshot({
       connection,
       client,
       segmenter,
       index: indexSet.currentIndex,
+      concurrency,
+      startAfter: resume?.last_record_id ?? null,
+      alreadyProcessed,
+      onCheckpoint: (lastId, processed) => saveRebuildProgress(
+        connection, indexSet.currentIndex, lastId, processed,
+      ),
       onProgress: progressReporter(onProgress, projection, 'build'),
     })
     const aliasState = await currentAliasState(client, indexSet)
@@ -240,15 +433,23 @@ async function ensureCurrentStateIndex({
     // write alias points at the new concrete index, replay PostgreSQL current
     // truth once more; external_gte prevents a late older snapshot row from
     // overwriting a newer projector write.
+    //
+    // Only what changed since the build began needs replaying. Rescanning the
+    // whole corpus would double a multi-hour rebuild to catch a delta measured
+    // in minutes of ingest. `last_seen_at` is bumped by every upsert, changed
+    // or not, so this is a superset of the writes that raced the build.
     const secondPass = await reconcileSnapshot({
       connection,
       client,
       segmenter,
       index: indexSet.currentIndex,
+      concurrency,
+      changedSince: buildStartedAt,
       onProgress: progressReporter(onProgress, projection, 'catch-up'),
     })
-    logger?.info?.(
-      `[search] rebuilt ${indexSet.currentIndex}: first=${firstPass} second=${secondPass}`,
+    await completeRebuildProgress(connection, indexSet.currentIndex)
+    logger?.log?.(
+      `[search] rebuilt ${indexSet.currentIndex}: first=${firstPass} catch-up=${secondPass}`,
     )
     return currentEnsureReport(indexSet, {
       mappingConflict: null,
@@ -377,22 +578,45 @@ async function switchCurrentAliases(client, indexSet, state) {
   await client.request('POST', '/_aliases', { actions })
 }
 
-async function reconcileContentSnapshot({ connection, client, segmenter, index, onProgress = null }) {
-  let cursor = null
-  let projected = 0
+async function reconcileContentSnapshot({
+  connection,
+  client,
+  segmenter,
+  index,
+  concurrency = 1,
+  startAfter = null,
+  changedSince = null,
+  alreadyProcessed = 0,
+  onCheckpoint = null,
+  onProgress = null,
+}) {
+  let cursor = startAfter
+  let projected = Number(alreadyProcessed) || 0
   while (true) {
     const { rows } = await connection.query(
       `SELECT * FROM core.canonical_records
         WHERE ($1::uuid IS NULL OR id > $1)
+          AND ($3::timestamptz IS NULL OR last_seen_at >= $3)
         ORDER BY id
         LIMIT $2`,
-      [cursor, CURRENT_REBUILD_BATCH],
+      [cursor, CURRENT_REBUILD_BATCH, changedSince],
     )
     if (rows.length === 0) break
 
+    // Segmentation dominates a rebuild, and every call waits on a remote
+    // service. Overlapping them across the batch keeps that service busy
+    // instead of leaving it idle between round trips. The strict wrapper still
+    // vets every result, so concurrency changes when tokens arrive, never which
+    // backend produced them.
+    const documents = await mapWithConcurrency(
+      rows,
+      concurrency,
+      (row) => (row.deleted_at != null ? null : buildContentDocument(row, { segmenter })),
+    )
+
     const operations = []
     const operationTypes = []
-    for (const row of rows) {
+    for (const [position, row] of rows.entries()) {
       const version = Number(row.projection_revision)
       if (row.deleted_at != null) {
         operations.push({
@@ -413,23 +637,36 @@ async function reconcileContentSnapshot({ connection, client, segmenter, index, 
             version_type: 'external_gte',
           },
         })
-        operations.push(await buildContentDocument(row, { segmenter }))
+        operations.push(documents[position])
         operationTypes.push('index')
       }
     }
     const response = await client.bulk(operations)
     assertSnapshotBulk(response, operationTypes, 'Content')
     projected += rows.length
-    await onProgress?.(projected)
     cursor = rows.at(-1).id
+    // Checkpoint only after the batch is acknowledged by Elasticsearch.
+    await onCheckpoint?.(cursor, projected)
+    await onProgress?.(projected)
     if (rows.length < CURRENT_REBUILD_BATCH) break
   }
   return projected
 }
 
-async function reconcileChunkSnapshot({ connection, client, segmenter, index, onProgress = null }) {
-  let cursor = null
-  let projected = 0
+async function reconcileChunkSnapshot({
+  connection,
+  client,
+  segmenter,
+  index,
+  concurrency = 1,
+  startAfter = null,
+  changedSince = null,
+  alreadyProcessed = 0,
+  onCheckpoint = null,
+  onProgress = null,
+}) {
+  let cursor = startAfter
+  let projected = Number(alreadyProcessed) || 0
   while (true) {
     const { rows } = await connection.query(
       `SELECT c.id, c.record_id, c.chunk_index, c.content, c.chunker_version,
@@ -443,16 +680,23 @@ async function reconcileChunkSnapshot({ connection, client, segmenter, index, on
           AND r.deleted_at IS NULL
           AND c.source_revision = r.current_revision
           AND ($1::uuid IS NULL OR c.id > $1)
+          AND ($3::timestamptz IS NULL OR r.last_seen_at >= $3)
         ORDER BY c.id
         LIMIT $2`,
-      [cursor, CURRENT_REBUILD_BATCH],
+      [cursor, CURRENT_REBUILD_BATCH, changedSince],
     )
     if (rows.length === 0) break
 
+    const tokenSets = await mapWithConcurrency(
+      rows,
+      concurrency,
+      (row) => segmenter.segment(row.content),
+    )
+
     const operations = []
     const operationTypes = []
-    for (const row of rows) {
-      const tokens = await segmenter.segment(row.content)
+    for (const [position, row] of rows.entries()) {
+      const tokens = tokenSets[position]
       operations.push({
         index: {
           _index: index,
@@ -473,8 +717,9 @@ async function reconcileChunkSnapshot({ connection, client, segmenter, index, on
     const response = await client.bulk(operations)
     assertSnapshotBulk(response, operationTypes, 'Chunk')
     projected += rows.length
-    await onProgress?.(projected)
     cursor = rows.at(-1).id
+    await onCheckpoint?.(cursor, projected)
+    await onProgress?.(projected)
     if (rows.length < CURRENT_REBUILD_BATCH) break
   }
 

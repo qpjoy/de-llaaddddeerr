@@ -1200,3 +1200,44 @@ test('ExternalSourcePuller routes SQLite and PostgreSQL sources without changing
   ])
   assert.deepEqual(await puller.testConnection({ baseUrl: 'http://example.test' }), { engine: 'sqlite_api' })
 })
+
+
+test('a failed remote probe degrades progress to the durable checkpoint instead of throwing', async () => {
+  const now = () => new Date('2026-08-15T13:00:00.000Z')
+  const row = rawMessage({ messageId: 1, messageAt: '2026-08-15T12:00:00.000Z' })
+  const harness = createPullHarness({
+    now,
+    responses: [
+      { items: [row], total: 1, page: 1 },
+      // The diagnostics probe: the upstream API has since gone away.
+      () => { throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } }) },
+    ],
+  })
+  await harness.puller.pullBatch('telegram-sqlite-api-messages')
+
+  // A diagnostics page whose job is to explain an outage must survive one.
+  const progress = await harness.puller.progress('telegram-sqlite-api-messages')
+  assert.equal(progress.blocker, 'sqlite_api_unavailable')
+  assert.equal(progress.probeError.code, 'sqlite_api_unavailable')
+  // The transport cause is named rather than swallowed.
+  assert.match(progress.probeError.message, /ECONNREFUSED/)
+  assert.equal(progress.totalRows, null)
+  assert.equal(progress.percent, null)
+  // The locally known half survives, which is the part worth reading.
+  assert.ok(progress.cursor, 'the durable checkpoint must still be reported')
+  assert.equal(progress.cursor.position.lastSweepRows, 1)
+})
+
+test('a probe timeout is reported as a timeout rather than a generic failure', async () => {
+  const now = () => new Date('2026-08-15T13:00:00.000Z')
+  const harness = createPullHarness({
+    now,
+    timeoutMs: 250,
+    // What `fetch` raises once the request controller aborts.
+    responses: [() => { throw Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }) }],
+  })
+
+  const progress = await harness.puller.progress('telegram-sqlite-api-messages')
+  assert.equal(progress.blocker, 'sqlite_api_unavailable')
+  assert.match(progress.probeError.message, /no response within 250ms/)
+})

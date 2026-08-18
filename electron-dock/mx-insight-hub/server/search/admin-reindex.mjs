@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { describeClusterHealth } from '@qpjoy/mx-common/elasticsearch'
 import { AppError } from '../core/errors.mjs'
 import { ensureSearchIndices } from './index.mjs'
 import { requiredReindexBackend, requireSegmenterBackend } from './reindex-integrity.mjs'
@@ -11,6 +12,9 @@ export { SEARCH_REINDEX_LOCK_NAME, tryAcquireSearchReindexLock } from './reindex
 
 const ACTIVE_STATUSES = new Set(['queued', 'running'])
 const PREFLIGHT_CACHE_MS = 15_000
+// Elasticsearch stops allocating new shards at the high watermark, 90% by
+// default. Warning below that leaves room to act before a rebuild is refused.
+const DISK_HEADROOM_WARN_PERCENT = 85
 
 function iso(value) {
   if (value == null) return null
@@ -115,15 +119,71 @@ export class AdminSearchReindex {
         'Set MX_COMMON_ELASTICSEARCH_URL in mx-insight-hub-config and redeploy the Admin API.',
       ))
     } else {
+      // Reachability blocks; cluster colour does not.
+      //
+      // A strict rebuild reads PostgreSQL canonical truth, writes a brand-new
+      // schema-versioned index and only then switches the aliases, so it never
+      // reads the index it replaces. When that stale index is precisely what
+      // holds the cluster below yellow -- the usual shape after a schema bump
+      // leaves the previous generation's shards unassigned -- blocking here
+      // would forbid the one operation that repairs the cluster.
       try {
-        await this.search.client.clusterHealth({ waitForStatus: 'yellow', timeout: '3s' })
-        const capabilities = await this.search.queries?.searchCapabilities?.({ audience: 'admin' })
-        sourceIndexSchema = capabilities?.activeIndexSchema || null
+        const health = await this.search.client.clusterHealth({
+          waitForStatus: 'yellow',
+          // Long enough to ride out shards that are merely initializing, so a
+          // settling cluster reports its real colour instead of a bare timeout.
+          timeout: '10s',
+        })
+        if (health?.status !== 'green' && health?.status !== 'yellow') {
+          // Distinguish the two shapes of "red" that matter here. If the shard
+          // this rebuild writes to is itself unassignable, the rebuild cannot
+          // repair anything -- it would create the index, fail every bulk write
+          // and leave a second dead generation behind. That is a blocker, and
+          // the cluster's own deciders say exactly why. Red for any other
+          // reason stays a warning, since the rebuild does not read those
+          // indices.
+          const stuck = await this.#unassignableTarget()
+          if (stuck) {
+            blockers.push(issue(
+              'search_index_unallocatable',
+              `Elasticsearch cannot allocate ${stuck.index} shard ${stuck.shard}: ${stuck.reason}`,
+              stuck.action,
+            ))
+          } else {
+            warnings.push(issue(
+              'elasticsearch_cluster_degraded',
+              `Elasticsearch is reachable but below yellow (${describeClusterHealth(health)}).`,
+              'The rebuild writes a new index and does not read the degraded ones; review them after it completes.',
+            ))
+          }
+        }
+        for (const warning of await this.#diskHeadroomWarnings()) warnings.push(warning)
       } catch (error) {
         blockers.push(issue(
           'elasticsearch_unavailable',
-          `Elasticsearch preflight failed: ${safeMessage(error)}`,
-          'Restore Elasticsearch connectivity and yellow-or-better cluster health, then retry.',
+          `Elasticsearch is unreachable: ${safeMessage(error)}`,
+          'Restore Elasticsearch connectivity from the Admin runtime, then retry.',
+        ))
+      }
+
+      // Reported separately: the active schema is a display field, and losing
+      // it to a degraded cluster should not hide which version is being left
+      // behind -- that is exactly what the operator is here to read.
+      try {
+        const capabilities = await this.search.queries?.searchCapabilities?.({ audience: 'admin' })
+        sourceIndexSchema = capabilities?.activeIndexSchema || null
+        if (capabilities?.readinessError) {
+          warnings.push(issue(
+            'elasticsearch_capabilities_unavailable',
+            `The active content read alias could not be inspected (${capabilities.readinessError}).`,
+            'The rebuild targets the configured schema version regardless of what the current alias reports.',
+          ))
+        }
+      } catch (error) {
+        warnings.push(issue(
+          'elasticsearch_capabilities_unavailable',
+          `The active index schema could not be read: ${safeMessage(error)}`,
+          'The rebuild targets the configured schema version regardless of what the current alias reports.',
         ))
       }
     }
@@ -244,11 +304,17 @@ export class AdminSearchReindex {
     const passProgress = new Map()
     try {
       lockHeartbeat.assertHealthy()
+      // A rebuild of this corpus runs for hours. Recording the denominator up
+      // front is what makes it observable rather than merely long: without it
+      // the UI can only show a rising count, which is indistinguishable from a
+      // stall.
+      const total = await this.#projectionTotal(lock.client)
       await this.#update(lock.client, id, {
         status: 'running',
         phase: 'preflight',
         started: true,
-        log: { level: 'info', message: `Strict ${preflight.expectedBackend} preflight passed; rebuilding projections` },
+        total,
+        log: { level: 'info', message: `Strict ${preflight.expectedBackend} preflight passed; rebuilding ${total ?? 'an unknown number of'} projections` },
       })
       const strictSegmenter = requireSegmenterBackend(this.search.segmenter, {
         expectedBackend: preflight.expectedBackend,
@@ -267,6 +333,7 @@ export class AdminSearchReindex {
           await this.#update(lock.client, id, {
             phase: projection,
             processed: cumulativeProcessed,
+            progress: total ? Math.min(1, cumulativeProcessed / total) : null,
             ...(lastPass === passKey ? {} : {
               log: { level: 'info', message: `${projection} ${pass} pass started` },
             }),
@@ -306,6 +373,7 @@ export class AdminSearchReindex {
     status = null,
     phase = null,
     processed = null,
+    total = null,
     progress = null,
     started = false,
     finished = false,
@@ -322,6 +390,7 @@ export class AdminSearchReindex {
           SET status = coalesce($2, status),
               phase = coalesce($3, phase),
               processed = coalesce($4, processed),
+              total = coalesce($12, total),
               progress = coalesce($5, progress),
               started_at = CASE WHEN $6 THEN coalesce(started_at, now()) ELSE started_at END,
               finished_at = CASE WHEN $7 THEN now() ELSE finished_at END,
@@ -334,9 +403,104 @@ export class AdminSearchReindex {
       [
         id, status, phase, processed, progress, started, finished,
         result == null ? null : JSON.stringify(result),
-        errorCode, errorMessage, entry,
+        errorCode, errorMessage, entry, total,
       ],
     )
+  }
+
+  /**
+   * Count what a rebuild will project.
+   *
+   * Both projections are included because `processed` accumulates across them;
+   * a denominator covering only records would run past 100% once chunks start.
+   * A failure here costs the progress bar, not the rebuild.
+   */
+  async #projectionTotal(connection) {
+    try {
+      const { rows } = await connection.query(
+        `SELECT (SELECT count(*) FROM core.canonical_records)
+              + (SELECT count(*) FROM core.record_chunks c
+                   JOIN core.canonical_records r ON r.id = c.record_id
+                  WHERE c.embedded_at IS NOT NULL AND c.vector IS NOT NULL
+                    AND r.deleted_at IS NULL
+                    AND c.source_revision = r.current_revision) AS total`,
+      )
+      const total = Number(rows[0]?.total)
+      return Number.isFinite(total) && total > 0 ? total : null
+    } catch (error) {
+      this.logger?.warn?.(`[search] could not size the rebuild: ${safeMessage(error)}`)
+      return null
+    }
+  }
+
+  /**
+   * Report the target index's primary shard when the cluster refuses to place it.
+   *
+   * Only an unassigned shard that Elasticsearch has decided it *cannot* place
+   * counts. A shard still being relocated or initialized will settle on its
+   * own and must not be turned into a permanent-looking blocker.
+   */
+  async #unassignableTarget() {
+    const index = this.search?.indexSet?.currentIndex
+    if (!index || typeof this.search.client?.allocationExplain !== 'function') return null
+    let explain
+    try {
+      explain = await this.search.client.allocationExplain({ index, shard: 0, primary: true })
+    } catch (error) {
+      this.logger?.warn?.(`[search] allocation explain failed: ${safeMessage(error)}`)
+      return null
+    }
+    if (!explain || explain.current_state !== 'unassigned') return null
+    if (explain.can_allocate !== 'no' && explain.can_allocate !== 'no_valid_shard_copy') return null
+
+    // Quote the cluster's own deciders. A paraphrase of "the node is above the
+    // high watermark, having less than the minimum required 102.3gb free" loses
+    // the two numbers the operator needs to size the fix.
+    const deciders = (explain.node_allocation_decisions || [])
+      .flatMap((node) => (node.deciders || [])
+        .filter((decider) => decider.decision === 'NO')
+        .map((decider) => `${decider.decider}: ${decider.explanation}`))
+    const reason = deciders.length > 0
+      ? deciders.join(' | ')
+      : explain.allocate_explanation || 'no node accepted the shard'
+    return {
+      index,
+      shard: 0,
+      reason: reason.slice(0, 1_500),
+      action: deciders.some((text) => text.startsWith('disk_threshold'))
+        ? 'Free disk on the Elasticsearch data node, or move its data directory to a larger volume, then retry. No rebuild can succeed while the shard cannot be placed.'
+        : 'Resolve the allocation decision above, then retry the preflight.',
+    }
+  }
+
+  /**
+   * Warn before the disk watermark becomes the next blocker.
+   *
+   * A rebuild writes a full second copy of the projection before the aliases
+   * move, so headroom that looks adequate at rest can disappear mid-run.
+   */
+  async #diskHeadroomWarnings() {
+    if (typeof this.search?.client?.catAllocation !== 'function') return []
+    let rows
+    try {
+      rows = await this.search.client.catAllocation()
+    } catch (error) {
+      this.logger?.warn?.(`[search] disk headroom probe failed: ${safeMessage(error)}`)
+      return []
+    }
+    const warnings = []
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const percent = Number(row?.['disk.percent'])
+      if (!Number.isFinite(percent) || percent < DISK_HEADROOM_WARN_PERCENT) continue
+      const available = Number(row?.['disk.avail'])
+      const free = Number.isFinite(available) ? `${(available / 1024 ** 3).toFixed(1)}GiB free` : 'free space unknown'
+      warnings.push(issue(
+        'elasticsearch_disk_pressure',
+        `Elasticsearch data node ${row.node || 'unknown'} is ${percent}% full (${free}).`,
+        'A rebuild writes a second full copy of the projection before switching aliases; free disk first or it will stop at the allocation watermark.',
+      ))
+    }
+    return warnings
   }
 
   async #activeOperation() {

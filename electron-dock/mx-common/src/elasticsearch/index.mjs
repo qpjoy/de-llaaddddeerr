@@ -3,6 +3,8 @@ export {
   ElasticsearchError,
   ElasticsearchUnavailableError,
   createElasticsearchClient,
+  describeClusterHealth,
+  isClusterHealthBody,
 } from './client.mjs'
 export { MX_ANALYSIS, nameField, vectorField } from './analysis.mjs'
 export {

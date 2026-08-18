@@ -41,10 +41,18 @@ export function requiredReindexBackend(config = {}) {
  * wrapper is created only by the one-shot reindex process, where accepting
  * fallback tokens would make a successful command lie about projection quality.
  */
+// A busy tokenizer is a queueing signal, not a verdict on the text. Under
+// concurrency it is also the expected way to discover the service's ceiling, so
+// it earns a longer, growing wait rather than counting against the same short
+// budget as a malformed response.
+const BUSY_ERROR_CODES = new Set(['hanlp_http_error', 'hanlp_timeout'])
+const BUSY_RETRY_DELAY_MS = 1_000
+
 export function requireSegmenterBackend(segmenter, {
   expectedBackend,
-  maxAttempts = 3,
+  maxAttempts = 6,
   retryDelayMs = 250,
+  busyRetryDelayMs = BUSY_RETRY_DELAY_MS,
   sleep = delay,
   logger = console,
 } = {}) {
@@ -96,7 +104,11 @@ export function requireSegmenterBackend(segmenter, {
           `[reindex] tokenizer attempt ${attempt}/${maxAttempts} rejected ` +
             `(expected=${expectedBackend}, actual=${actual}, reason=${reason}); retrying`,
         )
-        await sleep(retryDelayMs * (2 ** (attempt - 1)))
+        // Backing off further on a busy signal lets the inference queue drain.
+        // Retrying at the same cadence would keep the queue full and convert a
+        // momentary overload into a rebuild-ending failure.
+        const base = BUSY_ERROR_CODES.has(lastResult?.errorCode) ? busyRetryDelayMs : retryDelayMs
+        await sleep(base * (2 ** (attempt - 1)))
       }
     }
 

@@ -94,6 +94,19 @@ spec:
           env:
             - name: HANLP_HOME
               value: /models
+            # One HanLP component is a single mutable Python object, so forward
+            # passes stay serialized. Concurrency comes from batching -- many
+            # texts per pass -- not from parallel passes over a shared model.
+            - name: MAX_CONCURRENT_INFERENCES
+              value: "2"
+            # A coalesced batch of 64 takes materially longer than one text; the
+            # queue must outlast it or callers see 429 for work that succeeded.
+            - name: INFERENCE_QUEUE_TIMEOUT_SECONDS
+              value: "30"
+            - name: MAX_BATCH_TEXTS
+              value: "256"
+            - name: MAX_BODY_BYTES
+              value: "4194304"
           # Model load can take minutes on a cold volume. The startup probe
           # keeps liveness from restarting it while readiness holds it out of
           # service until the tokenizer has actually loaded.
@@ -119,13 +132,18 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 3
             failureThreshold: 3
+          # Sized for bulk rebuilds, which are the only workload that saturates
+          # this service. A batch is one PyTorch forward pass and scales across
+          # intra-op threads, so a 2-core ceiling left a 128-thread host mostly
+          # idle while a rebuild ran for hours. Requests stay small: outside a
+          # rebuild this pod is nearly idle and must not reserve a node.
           resources:
             requests:
-              cpu: 200m
+              cpu: 500m
               memory: 1Gi
             limits:
-              cpu: "2"
-              memory: 3Gi
+              cpu: "16"
+              memory: 8Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

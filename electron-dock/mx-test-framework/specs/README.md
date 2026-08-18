@@ -22,6 +22,7 @@ MX Test Framework（简称 **MXT**）是一个独立的 e2e 测试平台，位�
 | [10-deployment.md](10-deployment.md) | `manage.sh deploy` 一键部署、存储、清理 |
 | [11-runner-environments.md](11-runner-environments.md) | RHEL 无头 e2e 可行性、本地 runner、定时任务排队 |
 | [12-ui-and-onboarding.md](12-ui-and-onboarding.md) | 界面、新人引导、测试同学如何提供用例 |
+| [13-platform-review-and-redesign.md](13-platform-review-and-redesign.md) | **复盘与重构方案**：现有实现的问题清单、目标分层架构、Web/Electron 引擎选型、定时与运维、落地路线 |
 
 ## 架构决策记录
 

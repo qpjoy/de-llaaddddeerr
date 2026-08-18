@@ -594,12 +594,36 @@ export class TelegramSQLitePipeline {
     const secrets = sources
       .map((source) => source.connection?.token)
       .filter((token) => tokenConfigured(token))
-    const tasks = await Promise.all(TELEGRAM_SQLITE_INPUTS.map(async (input) => ({
-      role: input.role,
-      sourceKey: input.sourceKey,
-      ...(await this.sqliteApiPuller.progress(input.sourceKey)),
-      checkedAt,
-    })))
+    // One task's failure is that task's diagnosis, not the panel's. Both inputs
+    // are reported independently so a chats outage never hides what the
+    // messages task knows about itself, and vice versa.
+    const tasks = (await Promise.allSettled(
+      TELEGRAM_SQLITE_INPUTS.map(async (input) => ({
+        role: input.role,
+        sourceKey: input.sourceKey,
+        ...(await this.sqliteApiPuller.progress(input.sourceKey)),
+        checkedAt,
+      })),
+    )).map((settled, index) => {
+      if (settled.status === 'fulfilled') return settled.value
+      const input = TELEGRAM_SQLITE_INPUTS[index]
+      const error = settled.reason
+      const code = error instanceof AppError ? error.code : 'sqlite_api_progress_failed'
+      return {
+        role: input.role,
+        sourceKey: input.sourceKey,
+        totalRows: null,
+        sourceTotalRows: null,
+        completedRows: null,
+        remainingRows: null,
+        percent: null,
+        cursor: null,
+        probeError: { code, message: error instanceof AppError ? error.message : 'Task diagnostics failed' },
+        blocker: code,
+        issues: [error instanceof AppError ? error.message : 'Task diagnostics could not be read'],
+        checkedAt,
+      }
+    })
     const totalsKnown = tasks.every((task) => Number.isFinite(task.totalRows))
     const complete = totalsKnown && tasks.every((task) => (
       Number.isFinite(task.completedRows) && Number.isFinite(task.remainingRows)

@@ -120,6 +120,34 @@ export function loadCommonConfig(productId, environment = process.env) {
         5_000,
         'MX_COMMON_HANLP_TIMEOUT_MS',
       ),
+      // How many segmentation calls a bulk writer may have in flight.
+      //
+      // The HanLP service admits MAX_CONCURRENT_INFERENCES requests at a time
+      // (one by default) and queues the rest for INFERENCE_QUEUE_TIMEOUT_SECONDS
+      // before answering 429. A little client-side concurrency therefore costs
+      // nothing and wins real time: while one request occupies the inference
+      // slot, the next one's transfer, JSON parse and model handoff overlap
+      // instead of being paid end to end. Concurrency far above the service's
+      // slot count only manufactures 429s, which a strict rebuild must reject
+      // and retry -- slower than not having asked.
+      concurrency: requirePositiveInteger(
+        environment.MX_COMMON_SEGMENTER_CONCURRENCY,
+        16,
+        'MX_COMMON_SEGMENTER_CONCURRENCY',
+      ),
+      // How many coalesced texts travel in one batch request. Bounded by the
+      // service's MAX_BATCH_TEXTS; larger batches amortise the model handoff
+      // further but make each failure retry more work.
+      batchSize: requirePositiveInteger(
+        environment.MX_COMMON_SEGMENTER_BATCH_SIZE,
+        64,
+        'MX_COMMON_SEGMENTER_BATCH_SIZE',
+      ),
+      batchTimeoutMs: requirePositiveInteger(
+        environment.MX_COMMON_HANLP_BATCH_TIMEOUT_MS,
+        60_000,
+        'MX_COMMON_HANLP_BATCH_TIMEOUT_MS',
+      ),
     },
 
     queue: {

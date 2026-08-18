@@ -383,3 +383,128 @@ test('Admin reindex HTTP routes are admin-token-only and accept no execution par
     await new Promise((resolve) => server.close(resolve))
   }
 })
+
+
+test('a reachable but degraded cluster warns instead of vetoing its own replacement', async () => {
+  const { pool } = fakeDatabase()
+  const search = healthySearch(pool)
+  // The stale generation left shards unassigned, so the cluster never reaches
+  // yellow. The rebuild reads PostgreSQL and writes a new index, so this is a
+  // condition to report, not one that can be allowed to block the repair.
+  search.client.clusterHealth = async () => ({
+    cluster_name: 'mx-common',
+    status: 'red',
+    timed_out: true,
+    timedOut: true,
+    number_of_nodes: 1,
+    unassigned_shards: 6,
+  })
+  const reindex = new AdminSearchReindex({ search, segmenterConfig: { backend: 'hanlp', hanlpUrl: 'http://hanlp:8000' } })
+
+  const preflight = await reindex.preflight({ fresh: true })
+  assert.equal(preflight.ready, true)
+  assert.deepEqual(preflight.blockers, [])
+  const degraded = preflight.warnings.find((warning) => warning.code === 'elasticsearch_cluster_degraded')
+  assert.ok(degraded, 'the degraded cluster must still be reported')
+  assert.match(degraded.message, /status=red/)
+  assert.match(degraded.message, /unassigned_shards=6/)
+  // The active schema is still read, so the operator can see what is replaced.
+  assert.equal(preflight.sourceIndexSchema, 'content-v3')
+  assert.equal(preflight.targetIndexSchema, 'content-v4')
+})
+
+test('an unreachable cluster is the only Elasticsearch condition that blocks', async () => {
+  const { pool } = fakeDatabase()
+  const search = healthySearch(pool)
+  search.client.clusterHealth = async () => {
+    throw Object.assign(new Error('Elasticsearch is unreachable: connect ECONNREFUSED'), {
+      name: 'ElasticsearchUnavailableError',
+    })
+  }
+  const reindex = new AdminSearchReindex({ search, segmenterConfig: { backend: 'hanlp', hanlpUrl: 'http://hanlp:8000' } })
+
+  const preflight = await reindex.preflight({ fresh: true })
+  assert.equal(preflight.ready, false)
+  const blocker = preflight.blockers.find((entry) => entry.code === 'elasticsearch_unavailable')
+  assert.ok(blocker)
+  assert.match(blocker.message, /ECONNREFUSED/)
+  assert.match(blocker.action, /Restore Elasticsearch connectivity/)
+})
+
+test('losing the capability read degrades the schema display without blocking', async () => {
+  const { pool } = fakeDatabase()
+  const search = healthySearch(pool)
+  search.queries.searchCapabilities = async () => { throw new Error('search alias missing') }
+  const reindex = new AdminSearchReindex({ search, segmenterConfig: { backend: 'hanlp', hanlpUrl: 'http://hanlp:8000' } })
+
+  const preflight = await reindex.preflight({ fresh: true })
+  assert.equal(preflight.ready, true)
+  assert.equal(preflight.sourceIndexSchema, null)
+  assert.ok(preflight.warnings.some((warning) => warning.code === 'elasticsearch_capabilities_unavailable'))
+})
+
+
+test('a target shard the cluster refuses to place blocks with the deciders that refused it', async () => {
+  const { pool } = fakeDatabase()
+  const search = healthySearch(pool)
+  search.indexSet = { schemaVersion: 4, currentIndex: 'mx-insight-hub-content-v4-current' }
+  search.client.clusterHealth = async () => ({
+    cluster_name: 'mx-common', status: 'red', number_of_nodes: 1, unassigned_shards: 1,
+  })
+  // The shape Elasticsearch actually returns when disk stops an allocation.
+  search.client.allocationExplain = async ({ index, shard, primary }) => {
+    assert.equal(index, 'mx-insight-hub-content-v4-current')
+    assert.equal(shard, 0)
+    assert.equal(primary, true)
+    return {
+      index,
+      shard: 0,
+      primary: true,
+      current_state: 'unassigned',
+      unassigned_info: { reason: 'INDEX_CREATED', last_allocation_status: 'no' },
+      can_allocate: 'no',
+      allocate_explanation: "Elasticsearch isn't allowed to allocate this shard to any of the nodes",
+      node_allocation_decisions: [{
+        node_name: 'mx-common-elasticsearch-0',
+        node_decision: 'no',
+        deciders: [{
+          decider: 'disk_threshold',
+          decision: 'NO',
+          explanation: 'the node is above the high watermark cluster setting [cluster.routing.allocation.disk.watermark.high=90%], having less than the minimum required [102.3gb] free space, actual free: [77.5gb], actual used: [92.4%]',
+        }],
+      }],
+    }
+  }
+  const reindex = new AdminSearchReindex({ search, segmenterConfig: { backend: 'hanlp', hanlpUrl: 'http://hanlp:8000' } })
+
+  const preflight = await reindex.preflight({ fresh: true })
+  // A rebuild that cannot place its own shard repairs nothing; it must not start.
+  assert.equal(preflight.ready, false)
+  const blocker = preflight.blockers.find((entry) => entry.code === 'search_index_unallocatable')
+  assert.ok(blocker, 'the unallocatable target must block')
+  assert.match(blocker.message, /mx-insight-hub-content-v4-current shard 0/)
+  // The two numbers that size the fix survive into the message.
+  assert.match(blocker.message, /102\.3gb/)
+  assert.match(blocker.message, /77\.5gb/)
+  assert.match(blocker.action, /Free disk/)
+  // Not also reported as a vague "degraded cluster".
+  assert.equal(preflight.warnings.some((w) => w.code === 'elasticsearch_cluster_degraded'), false)
+})
+
+test('disk pressure is warned about before it becomes the next blocker', async () => {
+  const { pool } = fakeDatabase()
+  const search = healthySearch(pool)
+  search.client.catAllocation = async () => ([
+    { node: 'mx-common-elasticsearch-0', 'disk.percent': '92', 'disk.avail': String(83 * 1024 ** 3) },
+    { node: 'UNASSIGNED', 'disk.percent': null, 'disk.avail': null },
+  ])
+  const reindex = new AdminSearchReindex({ search, segmenterConfig: { backend: 'hanlp', hanlpUrl: 'http://hanlp:8000' } })
+
+  const preflight = await reindex.preflight({ fresh: true })
+  // Green cluster, so this informs rather than blocks.
+  assert.equal(preflight.ready, true)
+  const warning = preflight.warnings.find((entry) => entry.code === 'elasticsearch_disk_pressure')
+  assert.ok(warning)
+  assert.match(warning.message, /92% full/)
+  assert.match(warning.message, /83\.0GiB free/)
+})

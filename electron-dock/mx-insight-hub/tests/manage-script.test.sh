@@ -1126,3 +1126,19 @@ if [ -e "$tmp_root/work/runtime/internal-production-deploy.lock" ]; then
 fi
 rm -rf -- "$tmp_root"
 printf 'ok - failed deploy removes only its temp directory and lock\n'
+
+# ---------------------------------------------------------------------------
+# A rebuild that cannot be allocated must not be started
+# ---------------------------------------------------------------------------
+
+manage_source="$(cat "${ROOT_DIR}/scripts/manage.sh")"
+
+assert_eq \
+  "1" \
+  "$(printf '%s' "$manage_source" | grep -c 'refusing to start a multi-hour rebuild that cannot be allocated')" \
+  "reindex refuses to start past the Elasticsearch high watermark"
+
+assert_eq \
+  "1" \
+  "$(printf '%s' "$manage_source" | grep -c '_cat/allocation?h=disk.percent')" \
+  "reindex measures data node disk before spending hours of tokenizer time"

@@ -48,6 +48,11 @@ export class HanlpSegmenter {
     url,
     token,
     timeoutMs = 5_000,
+    // A batch is one forward pass over many texts, so it legitimately takes far
+    // longer than a single call. Reusing the interactive timeout here would
+    // abort batches that were about to succeed and degrade every caller in
+    // them -- the opposite of what batching is for.
+    batchTimeoutMs = 60_000,
     fetchImpl = globalThis.fetch,
     fallbackSegmenter = null,
     logger = console,
@@ -55,6 +60,7 @@ export class HanlpSegmenter {
     this.url = url.replace(/\/$/, '')
     this.token = token || null
     this.timeoutMs = timeoutMs
+    this.batchTimeoutMs = batchTimeoutMs
     this.fetchImpl = fetchImpl
     this.logger = logger
     this.fallbackSegmenter = fallbackSegmenter || new JiebaSegmenter({ logger })
@@ -64,6 +70,76 @@ export class HanlpSegmenter {
 
   async segment(text) {
     return (await this.segmentWithMeta(text)).tokens
+  }
+
+  /**
+   * Segment many texts in one forward pass.
+   *
+   * HanLP's own API takes a list, so a batch of N costs one model handoff and
+   * one round trip instead of N of each -- the difference between a rebuild
+   * measured in hours and one measured in days. Provenance stays per item, so
+   * a strict caller can still reject anything that did not come from HanLP.
+   *
+   * Alignment is checked rather than assumed: a short or reordered response
+   * would attach one record's tokens to another, which is worse than failing.
+   */
+  async segmentBatchWithMeta(texts) {
+    if (texts.length === 0) return []
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.batchTimeoutMs)
+    try {
+      const response = await this.fetchImpl(`${this.url}/tokenize/batch`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(this.token ? { authorization: `Basic ${this.token}` } : {}),
+        },
+        body: JSON.stringify({ texts, coarse: true }),
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        throw segmenterError('hanlp_http_error', `HanLP responded ${response.status}`)
+      }
+      let payload
+      try {
+        payload = await response.json()
+      } catch {
+        throw segmenterError('hanlp_invalid_json', 'HanLP returned invalid JSON')
+      }
+      const batch = payload?.batch
+      if (!Array.isArray(batch) || batch.length !== texts.length) {
+        throw segmenterError('hanlp_misaligned_batch', 'HanLP returned a misaligned batch')
+      }
+      const results = batch.map((sentence) => {
+        const tokens = normalizeHanlpResponse([sentence])
+        return tokens.length > 0 ? segmentResult(tokens, 'hanlp') : null
+      })
+      this.available = true
+      this.lastError = null
+      // An empty result is only legitimate for input with nothing to tokenize;
+      // anywhere else it is a degradation, resolved per item so one bad text
+      // does not condemn the batch.
+      return Promise.all(results.map(async (result, index) => {
+        if (result) return result
+        if (!texts[index]) return segmentResult([], 'hanlp')
+        const fallback = await this.fallbackSegmenter.segmentWithMeta(texts[index])
+        return segmentResult(fallback.tokens, fallback.backendUsed, true, 'hanlp_empty_response')
+      }))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const errorCode = controller.signal.aborted
+        ? 'hanlp_timeout'
+        : error?.segmenterCode || 'hanlp_request_error'
+      this.available = false
+      this.lastError = message
+      this.logger?.warn?.(`[mx-common] HanLP batch segmentation failed, using jieba fallback: ${message}`)
+      return Promise.all(texts.map(async (text) => {
+        const fallback = await this.fallbackSegmenter.segmentWithMeta(text)
+        return segmentResult(fallback.tokens, fallback.backendUsed, true, errorCode)
+      }))
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   async segmentWithMeta(text) {
@@ -293,10 +369,68 @@ export function createSegmenter(config, { logger = console } = {}) {
       url: config.hanlpUrl,
       token: config.hanlpToken,
       timeoutMs: config.timeoutMs,
+      batchTimeoutMs: config.batchTimeoutMs,
       logger,
     })
   }
   return new JiebaSegmenter({ logger })
+}
+
+/**
+ * Coalesce concurrent single-text calls into one batch request.
+ *
+ * Callers keep the `segmentWithMeta(text)` interface they already have -- the
+ * document builder, the strict reindex wrapper and the memo cache are all
+ * untouched -- while the calls they make in the same tick leave as one HTTP
+ * request. Batching is therefore an execution detail, not a contract change,
+ * which matters because the strict rebuild's guarantee is expressed per result:
+ * every item still carries its own backend and degraded flag, so a batch can
+ * never smuggle fallback tokens past a caller that rejects them.
+ *
+ * A batch is dispatched as soon as the current tick's callers have queued,
+ * or immediately once `maxBatch` is reached. There is no timer: waiting on a
+ * clock would add latency for the interactive path without adding throughput
+ * for the bulk one, since a bulk writer always has more work queued already.
+ */
+export function batchingSegmenter(segmenter, { maxBatch = 64 } = {}) {
+  if (typeof segmenter?.segmentBatchWithMeta !== 'function') return segmenter
+  let pending = []
+  let scheduled = false
+
+  const flush = async () => {
+    scheduled = false
+    while (pending.length > 0) {
+      const batch = pending.slice(0, maxBatch)
+      pending = pending.slice(maxBatch)
+      try {
+        const results = await segmenter.segmentBatchWithMeta(batch.map((entry) => entry.text))
+        // Defensive: a misaligned batch must fail its callers rather than hand
+        // any of them another record's tokens.
+        if (!Array.isArray(results) || results.length !== batch.length) {
+          throw new Error('segmenter returned a misaligned batch')
+        }
+        batch.forEach((entry, index) => entry.resolve(results[index]))
+      } catch (error) {
+        batch.forEach((entry) => entry.reject(error))
+      }
+    }
+  }
+
+  return {
+    async segmentWithMeta(text) {
+      if (!text) return segmentResult([], 'hanlp')
+      return new Promise((resolve, reject) => {
+        pending.push({ text, resolve, reject })
+        if (!scheduled) {
+          scheduled = true
+          queueMicrotask(flush)
+        }
+      })
+    },
+    async segment(text) {
+      return (await this.segmentWithMeta(text)).tokens
+    },
+  }
 }
 
 /** Join tokens into the whitespace-delimited form `mx_presegmented` expects. */

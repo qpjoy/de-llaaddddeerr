@@ -49,6 +49,13 @@ const telegramHistoryParameters = [
   },
 ]
 
+const resultTypeProperty = {
+  type: 'string',
+  enum: ['fresh', 'stable'],
+  default: 'fresh',
+  description: "Result freshness. 'fresh' always searches current data and replays a committed response only within 120 seconds, which covers a retry without turning the key into a cache. 'stable' replays the first response for that key indefinitely, for snapshots that must stay reproducible. Part of the request fingerprint.",
+}
+
 const idempotencyParameter = {
   name: 'Idempotency-Key',
   in: 'header',
@@ -454,6 +461,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           query: { type: 'string', minLength: 1, maxLength: 500 },
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'Opaque nextCursor from the prior page.' },
+          type: resultTypeProperty,
         },
       },
       StoredSearchRequest: {
@@ -467,6 +475,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           objectType: { type: 'string', minLength: 1, maxLength: 100, description: 'Optional exact canonical object-type filter.' },
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed opaque nextCursor bound to the normalized query and filters.' },
+          type: resultTypeProperty,
         },
       },
       CanonicalSearchRequest: {
@@ -486,6 +495,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed opaque nextCursor bound to the query, filters, page size, resolved search profile, authorized platform scope and bounded first-page analysis state.' },
+          type: resultTypeProperty,
         },
       },
       TokenizeRequest: {
@@ -914,6 +924,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
     <h3>幂等、游标与配额</h3>
     <table><thead><tr><th>规则</th><th>客户端行为</th></tr></thead><tbody>
       <tr><td>POST 搜索</td><td><code>Idempotency-Key</code> 在同一 consumer 内全局唯一。仅在重试完全相同的路径和规范化 body 时复用；新路径、新 body 或新页面必须使用新 Key。</td></tr>
+      <tr><td>结果新鲜度</td><td>可选 <code>type</code>：<code>fresh</code>（默认）表示始终检索当前数据，重放窗口为 120 秒，足以吸收一次重试而不会把 Key 变成缓存；<code>stable</code> 表示同一个 Key 永久返回首次的结果，用于报表、分页序列和审计等需要快照可复现的场景。<code>type</code> 参与请求指纹，同一个 Key 不能在两种语义之间切换。</td></tr>
       <tr><td>POST 分词</td><td>同样必须携带 <code>Idempotency-Key</code>；相同请求重放不会再次分词或重复计量。</td></tr>
       <tr><td>下一页</td><td>使用响应中的 <code>pageInfo.nextCursor</code>，不要解析或修改；因为 body 已变化，新页面必须使用新的幂等 Key。</td></tr>
       <tr><td>GET 历史/实体</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>

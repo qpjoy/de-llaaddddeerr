@@ -433,3 +433,32 @@ test('Telegram SQLite v2 migration promotes search fields and installs scoped qu
     assert.match(sql, new RegExp(indexName, 'u'))
   }
 })
+
+
+test('one task failing its diagnostics never blanks the other task', async () => {
+  const fixture = pipelineFixture()
+  fixture.sqliteApiPuller.progress = async (sourceKey) => {
+    if (sourceKey.endsWith('messages')) {
+      throw new AppError(503, 'sqlite_api_unavailable', 'SQLite API did not return a response (ECONNREFUSED)')
+    }
+    return { totalRows: 10, completedRows: 5, remainingRows: 5, percent: 50, cursor: null }
+  }
+
+  const progress = await new TelegramSQLitePipeline(fixture).progress()
+  const [chats, messages] = progress.tasks
+  assert.deepEqual(progress.tasks.map((task) => task.role), ['chats', 'messages'])
+
+  // The healthy task keeps reporting everything it knows.
+  assert.equal(chats.totalRows, 10)
+  assert.equal(chats.percent, 50)
+
+  // The failed one carries its own diagnosis rather than a 503 for the page.
+  assert.equal(messages.blocker, 'sqlite_api_unavailable')
+  assert.match(messages.probeError.message, /ECONNREFUSED/)
+  assert.equal(messages.totalRows, null)
+
+  // Aggregates stay honest: an unknown total is not silently counted as zero.
+  assert.equal(progress.totalRows, null)
+  assert.equal(progress.percent, null)
+  assert.equal(progress.tasks.every((task) => task.checkedAt === progress.checkedAt), true)
+})
