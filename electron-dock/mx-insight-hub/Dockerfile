@@ -9,12 +9,15 @@ COPY --from=ui_design package.json /workspace/mx-launcher/ui-design/package.json
 COPY --from=ui_design scripts /workspace/mx-launcher/ui-design/scripts
 COPY --from=ui_design src /workspace/mx-launcher/ui-design/src
 # `@qpjoy/mx-common` is a `file:` dependency, so npm needs the package present at
-# the resolved relative path before install, not after.
+# the resolved relative path before install -- but only its manifest. Its `src`
+# and `migrations` are copied *after* the install, because a linked package's
+# sources are read at build and run time, never at install time, and copying
+# them first made every edit to shared source re-run a ~70s network install.
 COPY --from=mx_common package.json package-lock.json /workspace/mx-common/
-COPY --from=mx_common src /workspace/mx-common/src
-COPY --from=mx_common migrations /workspace/mx-common/migrations
 COPY package.json package-lock.json ./
 RUN npm ci --registry="$NPM_REGISTRY"
+COPY --from=mx_common src /workspace/mx-common/src
+COPY --from=mx_common migrations /workspace/mx-common/migrations
 COPY . ./
 RUN npm run build
 
@@ -27,13 +30,19 @@ ARG NPM_REGISTRY=https://registry.npmmirror.com
 # /app/node_modules would leave `import 'pg'` unresolvable at runtime.
 WORKDIR /mx-common
 COPY --from=mx_common package.json package-lock.json ./
-COPY --from=mx_common src ./src
-COPY --from=mx_common migrations ./migrations
 # Optional dependencies are installed on purpose. mx-common's default Chinese
 # segmenter is @node-rs/jieba, declared optional so a platform without prebuilt
 # binaries still installs; omitting it here would silently downgrade every
 # deployment to the bigram fallback with only a log line to show for it.
+#
+# This install reads the lockfile and nothing else -- mx-common declares no
+# install lifecycle scripts -- so the sources land afterwards. Ordering them
+# first meant a one-line change to shared source invalidated the install and
+# went back to the registry for every dependency, turning a seconds-long
+# rebuild into a minutes-long one that can fail on its own.
 RUN npm ci --omit=dev --registry="$NPM_REGISTRY" && npm cache clean --force
+COPY --from=mx_common src ./src
+COPY --from=mx_common migrations ./migrations
 
 WORKDIR /app
 COPY package.json package-lock.json ./

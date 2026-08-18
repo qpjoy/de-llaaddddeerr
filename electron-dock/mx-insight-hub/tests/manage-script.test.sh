@@ -1142,3 +1142,21 @@ assert_eq \
   "1" \
   "$(printf '%s' "$manage_source" | grep -c '_cat/allocation?h=disk.percent')" \
   "reindex measures data node disk before spending hours of tokenizer time"
+
+# ---------------------------------------------------------------------------
+# Shared source must not invalidate the dependency install
+# ---------------------------------------------------------------------------
+
+dockerfile_source="$(cat "${ROOT_DIR}/Dockerfile")"
+
+# A `file:` dependency is linked by manifest; its sources are read at build and
+# run time, never at install time. Copying them above the install sent a one-line
+# shared-source edit back to the registry for every dependency.
+for stage_marker in "/workspace/mx-common/src" "COPY --from=mx_common src ./src"; do
+  install_line="$(printf '%s' "$dockerfile_source" | grep -n 'RUN npm ci' | head -1 | cut -d: -f1)"
+  source_line="$(printf '%s' "$dockerfile_source" | grep -Fn "$stage_marker" | head -1 | cut -d: -f1)"
+  assert_eq \
+    "after" \
+    "$([ "$source_line" -gt "$install_line" ] && echo after || echo before)" \
+    "shared source (${stage_marker}) is copied after the first npm ci"
+done
