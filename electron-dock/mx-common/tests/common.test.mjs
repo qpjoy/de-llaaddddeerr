@@ -1119,3 +1119,23 @@ test('the relocation flag is accepted wherever it appears', async () => {
   // An unrecognised flag is named, never silently taken for a path.
   assert.match(manage, /unknown option: \$\{argument\}/)
 })
+
+
+test('relocating storage restores the HanLP claim it detached', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const manage = await readFile(new URL('../scripts/manage.sh', import.meta.url), 'utf8')
+  // The HanLP PVC is declared in optional/, so migrating it without reapplying
+  // that file leaves the pod Pending. The Hub then discovers no endpoint and
+  // configures jieba -- a silent downgrade that only shows up as bad tokens.
+  assert.match(manage, /hanlp_is_deployed/)
+  assert.match(manage, /ensure_local_pvc mx-common-hanlp-models/)
+  assert.match(manage, /rollout status deployment\/mx-common-hanlp/)
+  // Never the whole HanLP manifest: it carries a nodeSelector placeholder that
+  // only render_manifest fills in, so applying it raw would pin the pod to a
+  // node named MX_COMMON_HANLP_NODE_NAME_PLACEHOLDER and strand it forever.
+  const migrationStart = manage.indexOf('cmd_migrate_storage()')
+  const migration = manage.slice(migrationStart, manage.indexOf('cmd_relocate()', migrationStart))
+  assert.ok(migration.length > 0, 'the migration body must be locatable')
+  assert.doesNotMatch(migration, /kubectl apply -f "\$\{K8S_DIR\}\/optional/)
+  assert.doesNotMatch(migration, /50-hanlp\.yaml/)
+})

@@ -1310,6 +1310,12 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/telegram-monitor/resume') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, { data: await telegramMonitorPipeline.resumeFailedTasks(), requestId })
+        return
+      }
       if (
         request.method === 'POST'
         && pathname === '/internal/v1/admin/pipelines/telegram-monitor/checkpoints/reset'
@@ -1370,6 +1376,12 @@ export function createApp({
         requireSourceAdmin(principal)
         requireSQLiteApiPuller()
         sendJson(response, 200, { data: await telegramSQLitePipeline.progress(), requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/telegram-sqlite/resume') {
+        requireSourceAdmin(principal)
+        requireSQLiteApiPuller()
+        sendJson(response, 200, { data: await telegramSQLitePipeline.resumeFailedTasks(), requestId })
         return
       }
       if (

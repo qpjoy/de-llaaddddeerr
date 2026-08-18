@@ -462,3 +462,52 @@ test('one task failing its diagnostics never blanks the other task', async () =>
   assert.equal(progress.percent, null)
   assert.equal(progress.tasks.every((task) => task.checkedAt === progress.checkedAt), true)
 })
+
+
+test('resuming a failed task clears the status without replaying its checkpoint', async () => {
+  const fixture = pipelineFixture()
+  const checkpoint = { cycle: null, lastMessageAt: '2026-08-17T00:00:00.000Z', lastSweepRows: 23_000 }
+  fixture.cursors.set('external:telegram-sqlite-api-chats', {
+    id: 'external:telegram-sqlite-api-chats', status: 'idle', position: { lastSweepRows: 124 },
+  })
+  fixture.cursors.set('external:telegram-sqlite-api-messages', {
+    id: 'external:telegram-sqlite-api-messages',
+    status: 'failed',
+    position: checkpoint,
+    error: 'sqlite_api_unavailable',
+  })
+  const saved = []
+  fixture.queue.saveCursor = async (id, position, options) => {
+    saved.push({ id, position, options })
+    return { id, position, ...options }
+  }
+
+  const result = await new TelegramSQLitePipeline(fixture).resumeFailedTasks()
+
+  // Only the failed task is touched.
+  assert.equal(saved.length, 1)
+  assert.equal(saved[0].id, 'external:telegram-sqlite-api-messages')
+  assert.equal(saved[0].options.status, 'idle')
+  assert.equal(saved[0].options.error, null)
+  // The durable position survives: recovering from a network blip must not cost
+  // a full re-read, which is what a checkpoint reset would have meant.
+  assert.deepEqual(saved[0].position, checkpoint)
+  assert.equal(saved[0].options.processedDelta, 0)
+
+  const messages = result.tasks.find((task) => task.sourceKey.endsWith('messages'))
+  assert.equal(messages.resumed, true)
+  assert.equal(messages.clearedError, 'sqlite_api_unavailable')
+  const chats = result.tasks.find((task) => task.sourceKey.endsWith('chats'))
+  assert.equal(chats.resumed, false)
+})
+
+test('a draining task is never resumed out from under itself', async () => {
+  const fixture = pipelineFixture()
+  fixture.cursors.set('external:telegram-sqlite-api-messages', {
+    id: 'external:telegram-sqlite-api-messages', status: 'running', position: {},
+  })
+  await assert.rejects(
+    () => new TelegramSQLitePipeline(fixture).resumeFailedTasks(),
+    (error) => error.code === 'source_draining',
+  )
+})

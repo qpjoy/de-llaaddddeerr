@@ -536,6 +536,57 @@ export class TelegramSQLitePipeline {
     return { pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY, strategy: TELEGRAM_SQLITE_STRATEGY, resets }
   }
 
+  /**
+   * Clear a failed cursor so scheduling can resume, without replaying anything.
+   *
+   * A transient upstream outage leaves the cursor `failed`, and the scheduler
+   * treats anything other than `idle` as not due -- deliberately, so a
+   * deterministic mapping fault cannot become an alert storm. Nothing, however,
+   * ever moved a cursor back, so the pipeline stayed frozen after the outage
+   * ended. Worse, both tasks are scheduled together, so one failed cursor
+   * stopped the healthy one too.
+   *
+   * The only previous way out was a full checkpoint reset: paying for a
+   * complete re-read to recover from a network blip. This resumes from the
+   * durable position instead and touches nothing else -- the checkpoint, the
+   * mapping and the source status are all left exactly as they were.
+   */
+  async resumeFailedTasks() {
+    return this.#withLocks(async () => {
+      const sources = await this.#sources()
+      const cursors = await Promise.all(sources.map((source) => this.#cursor(source.sourceKey)))
+      if (cursors.some((cursor) => cursor?.status === 'running')) {
+        throw new AppError(409, 'source_draining', 'Wait for both Telegram SQLite tasks to reach a checkpoint')
+      }
+      const resumed = []
+      for (const [index, source] of sources.entries()) {
+        const cursor = cursors[index]
+        if (cursor?.status !== 'failed') {
+          resumed.push({ sourceKey: source.sourceKey, status: cursor?.status ?? 'idle', resumed: false })
+          continue
+        }
+        // Same position, cleared status: the next scheduled run continues from
+        // the last durable checkpoint rather than re-reading the source.
+        await this.queue.saveCursor(
+          `external:${source.sourceKey}`,
+          cursor.position ?? {},
+          { status: 'idle', processedDelta: 0, error: null },
+        )
+        resumed.push({
+          sourceKey: source.sourceKey,
+          status: 'idle',
+          resumed: true,
+          clearedError: cursor.error ?? null,
+        })
+      }
+      return {
+        pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY,
+        strategy: TELEGRAM_SQLITE_STRATEGY,
+        tasks: resumed,
+      }
+    })
+  }
+
   async sync(body = {}) {
     const unsupported = unsupportedFields(body, new Set(['batchSize']))
     if (unsupported.length > 0) {

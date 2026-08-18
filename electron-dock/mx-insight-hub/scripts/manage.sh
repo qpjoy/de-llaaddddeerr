@@ -522,7 +522,23 @@ discover_hanlp_url() {
     say "discovered ready HanLP tokenizer: ${MX_COMMON_HANLP_URL}"
   else
     MX_COMMON_HANLP_URL=""
-    say "no ready HanLP endpoint found; using local jieba"
+    # Loud on purpose. This is not a soft degradation: the strict search rebuild
+    # derives its required backend from this very URL, so an empty value does
+    # not fail a rebuild -- it silently changes what a rebuild produces, and the
+    # jieba tokens it writes look completely normal until search quality drops.
+    local previous
+    previous="$(
+      kubectl -n mx-insight-hub get configmap mx-insight-hub-config \
+        -o jsonpath='{.data.MX_COMMON_HANLP_URL}' 2>/dev/null || true
+    )"
+    say "WARNING: no ready HanLP endpoint; this deploy will configure jieba." >&2
+    if [ -n "$previous" ]; then
+      say "  This deployment previously used ${previous}." >&2
+      say "  A search rebuild started now would write jieba tokens, not HanLP." >&2
+      say "  Check the tokenizer before deploying:" >&2
+      say "    kubectl -n mx-common rollout status deployment/mx-common-hanlp" >&2
+      say "    kubectl -n mx-common describe pod -l app.kubernetes.io/name=mx-common-hanlp" >&2
+    fi
   fi
   export MX_COMMON_HANLP_URL
 }

@@ -602,6 +602,45 @@ export class TelegramMonitorPipeline {
     })
   }
 
+  /**
+   * Clear a failed cursor so scheduling can resume, without replaying anything.
+   *
+   * Both monitor tasks are scheduled together and the scheduler treats any
+   * cursor that is not `idle` as not due, so one task left `failed` by a
+   * transient fault froze the pair. See the SQLite pipeline for the same
+   * recovery; the position, mapping and source status are untouched here too.
+   */
+  async resumeFailedTasks() {
+    const keys = TELEGRAM_MONITOR_INPUTS.map((input) => input.sourceKey)
+    return this.#withLocks(keys, async () => {
+      const sources = await this.#sources()
+      const cursors = await Promise.all(keys.map((key) => this.#cursor(key)))
+      if (cursors.some((cursor) => cursor?.status === 'running')) {
+        throw new AppError(409, 'source_draining', 'Wait for both Telegram monitor tasks to reach a checkpoint')
+      }
+      const resumed = []
+      for (const [index, source] of sources.entries()) {
+        const cursor = cursors[index]
+        if (cursor?.status !== 'failed') {
+          resumed.push({ sourceKey: source.sourceKey, status: cursor?.status ?? 'idle', resumed: false })
+          continue
+        }
+        await this.queue.saveCursor(
+          `external:${source.sourceKey}`,
+          cursor.position ?? {},
+          { status: 'idle', processedDelta: 0, error: null },
+        )
+        resumed.push({
+          sourceKey: source.sourceKey,
+          status: 'idle',
+          resumed: true,
+          clearedError: cursor.error ?? null,
+        })
+      }
+      return { pipelineKey: 'telegram-monitor', tasks: resumed }
+    })
+  }
+
   async resetCheckpoints(confirmPipelineKey) {
     if (confirmPipelineKey !== 'telegram-monitor') {
       throw new AppError(400, 'checkpoint_reset_confirmation_required', 'confirmPipelineKey must be telegram-monitor')

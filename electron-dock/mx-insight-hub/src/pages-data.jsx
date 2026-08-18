@@ -260,6 +260,10 @@ function telegramTaskMeta(task) {
   return TELEGRAM_TASK_META.messages
 }
 
+function telegramTaskCursorStatus(task) {
+  return task?.cursor?.status || task?.latestRun?.status || task?.source?.status || 'idle'
+}
+
 function telegramTaskSourceKey(task) {
   if (typeof task?.source === 'string') return task.source
   return task?.source?.sourceKey || task?.sourceKey || ''
@@ -555,6 +559,12 @@ function TelegramSqlitePipelineModal({
     'Telegram SQLite API 双任务同步已提交',
   )
 
+  const resumeFailed = () => mutate(
+    'resume',
+    () => adminApi.resumeTelegramSqlitePipeline(token),
+    '失败游标已清除；两个任务将从各自的 checkpoint 继续，未重放任何数据',
+  )
+
   const resetCheckpoints = (event) => {
     event.preventDefault()
     if (resetConfirmation !== 'telegram-sqlite') return
@@ -572,6 +582,9 @@ function TelegramSqlitePipelineModal({
   }
 
   const tasks = pipeline.tasks || []
+  // The scheduler treats any cursor that is not idle as not due, and both tasks
+  // are enqueued together, so one failed cursor silently freezes the pair.
+  const failedTasks = tasks.filter((task) => telegramTaskCursorStatus(task) === 'failed')
 
   return (
     <Modal
@@ -600,11 +613,26 @@ function TelegramSqlitePipelineModal({
               <Play size={16} />{busyAction === 'status-active' ? '正在启用…' : '启用任务'}
             </button>
           )}
+          {failedTasks.length > 0 ? (
+            <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)}
+              title="仅清除失败状态，从上次 checkpoint 继续；不会重放数据" onClick={resumeFailed}>
+              <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '从失败恢复'}
+            </button>
+          ) : null}
           <button className="qp-button" type="button" disabled={Boolean(busyAction) || pipeline.status !== 'active'} onClick={runSync}>
             <ArrowClockwise size={16} />{busyAction === 'sync' ? '正在提交…' : '立即同步'}
           </button>
         </div>
       </div>
+
+      {failedTasks.length > 0 ? (
+        <p className="mih-inline-warning">
+          <Warning size={16} aria-hidden="true" />
+          {failedTasks.map((task) => telegramSqliteTaskMeta(task).label).join('、')} 的游标停在 failed。
+          两个任务同批调度，所以一个失败会连带另一个一起停止排程，直到人工恢复。
+          「从失败恢复」只清除失败状态并从各自 checkpoint 继续，不重放数据，也不重置 Checkpoint。
+        </p>
+      ) : null}
 
       <Panel title="只读 API 与调度" subtitle="连接由 Hub 服务端使用；浏览器不会直接请求远端 SQLite API，也不会把 Bearer Token 放入 URL">
         <p className="mih-inline-warning"><Key size={16} aria-hidden="true" />Token 留空表示保留已保存凭据；保存操作会先验证健康状态、认证和只读资源。</p>
@@ -653,6 +681,9 @@ function TelegramSqlitePipelineModal({
         {progress.loading && !progress.data ? <LoadingState label="正在读取 SQLite API 管线诊断" /> : null}
         {progress.error ? <ErrorState error={progress.error} onRetry={progress.refresh} /> : null}
       </Panel>
+
+      <PipelineRunHistory token={token} tasks={tasks} onUnauthorized={onUnauthorized}
+        labelOf={(sourceKey) => (sourceKey?.endsWith('chats') ? '会话目录' : '消息事实')} />
 
       <Panel title="处理链路与索引能力" subtitle="远端只读响应先作为原始证据保留；删除标记留在 canonical/revision，公共 ES 按 current-state tombstone 收敛">
         <div className="mih-telegram-flow" aria-label="Telegram SQLite API 数据处理链路">
@@ -829,6 +860,18 @@ function TelegramPipelineModal({
     '双表同步任务已提交',
   )
 
+  const resumeFailed = () => mutate(
+    'resume',
+    () => adminApi.resumeTelegramMonitorPipeline(token),
+    '失败游标已清除；两个任务将从各自的 checkpoint 继续，未重放任何数据',
+  )
+
+  // One failed cursor stops the pair, because both tasks are scheduled together
+  // and the scheduler skips any cursor that is not idle.
+  const failedTasks = (pipeline.tasks || []).filter(
+    (task) => telegramTaskCursorStatus(task) === 'failed',
+  )
+
   const resetCheckpoints = (event) => {
     event.preventDefault()
     if (resetConfirmation !== 'telegram-monitor') return
@@ -875,11 +918,26 @@ function TelegramPipelineModal({
               <Play size={16} />{busyAction === 'status-active' ? '正在启用…' : '启用任务'}
             </button>
           )}
+          {failedTasks.length > 0 ? (
+            <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)}
+              title="仅清除失败状态，从上次 checkpoint 继续；不会重放数据" onClick={resumeFailed}>
+              <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '从失败恢复'}
+            </button>
+          ) : null}
           <button className="qp-button" type="button" disabled={Boolean(busyAction) || pipeline.status !== 'active'} onClick={runSync}>
             <ArrowClockwise size={16} />{busyAction === 'sync' ? '正在提交…' : '立即同步'}
           </button>
         </div>
       </div>
+
+      {failedTasks.length > 0 ? (
+        <p className="mih-inline-warning">
+          <Warning size={16} aria-hidden="true" />
+          {failedTasks.map((task) => telegramTaskMeta(task).label).join('、')} 的游标停在 failed。
+          两个任务同批调度，所以一个失败会连带另一个一起停止排程，直到人工恢复。
+          「从失败恢复」只清除失败状态并从各自 checkpoint 继续，不重放数据，也不重置 Checkpoint。
+        </p>
+      ) : null}
 
       <Panel title="源库与调度" subtitle="只填写一次连接；Hub 会验证只读权限，并把同一连接应用到两个固定输入表">
         <p className="mih-inline-warning"><Key size={16} aria-hidden="true" />连接与明文密码仅 Admin Token 管理面可读取和修改，不需要额外 Provider Key。</p>
@@ -959,6 +1017,9 @@ function TelegramPipelineModal({
         {progress.loading && !progress.data ? <LoadingState label="正在精确统计源表进度" /> : null}
         {progress.error ? <ErrorState error={progress.error} onRetry={progress.refresh} /> : null}
       </Panel>
+
+      <PipelineRunHistory token={token} tasks={pipeline.tasks || []} onUnauthorized={onUnauthorized}
+        labelOf={(sourceKey) => (sourceKey?.endsWith('chats') ? '会话目录' : '消息事实')} />
 
       <Panel title="处理链路与索引能力" subtitle="业务映射与运行基础设施分层，确保重试和 ES 重建不会重复污染规范数据">
         <div className="mih-telegram-flow" aria-label="Telegram 数据处理链路">
@@ -1118,7 +1179,8 @@ function TelegramSourcePreparationPanel({
           { role: 'chats', table: 'public.tg_monitor_chats' },
           { role: 'messages', table: 'public.tg_monitor_messages' },
         ]).map((table) => (
-          <TelegramPreparationTable key={table.role || table.table} table={table} contract={data.contract} />
+          <TelegramPreparationTable key={table.role || table.table} table={table}
+            contract={data.contract} probed={tables.length > 0} />
         ))}
       </div>
 
@@ -1173,7 +1235,7 @@ function TelegramSourcePreparationPanel({
   )
 }
 
-function TelegramPreparationTable({ table, contract }) {
+function TelegramPreparationTable({ table, contract, probed = true }) {
   const name = table.table || table.tableName || table.qualifiedName || (table.role === 'chats' ? 'public.tg_monitor_chats' : 'public.tg_monitor_messages')
   const updatedAtType = String(table.updatedAt?.type || '').toLowerCase()
   const updatedAtReady = table.updatedAt?.ready ?? Boolean(table.updatedAt?.exists && !table.updatedAt?.nullable && ['timestamptz', 'timestamp with time zone'].includes(updatedAtType))
@@ -1184,7 +1246,14 @@ function TelegramPreparationTable({ table, contract }) {
   const deleteGuardReady = Boolean(table.deleteGuard?.installed && table.deleteGuard?.enabledAlways)
   const tableReady = Boolean(table.exists && updatedAtReady && stableIdReady && triggerReady && indexReady && deleteGuardReady)
   const contractReady = tableReady && contract?.installedVersion === contract?.version
-  const checks = [
+  // An inspection that never ran knows nothing. Deriving these rows from an
+  // empty response renders every check as "待安装" -- reporting absence where
+  // the truth is ignorance, which reads as a source that lost its triggers when
+  // in fact nothing was ever probed. A null value renders as 待探测 instead.
+  const checks = !probed ? [
+    ['updated_at', null], ['稳定 ID', null], ['强制触发器', null],
+    ['游标索引', null], ['硬删除保护', null], ['表合同', null],
+  ] : [
     ['updated_at', { ready: updatedAtReady, label: table.updatedAt?.exists ? `${table.updatedAt.type || 'timestamp'} · ${table.updatedAt.nullable ? '允许 NULL' : 'NOT NULL'}` : '列待安装' }],
     ['稳定 ID', { ready: stableIdReady, label: table.stableId?.exists ? table.stableId.ready ? 'NOT NULL · UNIQUE' : '存在但不满足唯一非空' : '列待核验' }],
     ['强制触发器', { ready: triggerReady, label: table.trigger?.installed ? !table.trigger.enabledAlways ? '已安装 · 未启用 ALWAYS' : competingTriggers.length ? `存在后置竞争触发器：${competingTriggers.join('、')}` : '已安装 · ENABLE ALWAYS' : '触发器待安装' }],
@@ -2397,6 +2466,69 @@ function DatabaseSourceControl({
         ) : null}
       </Panel>
     </>
+  )
+}
+
+/**
+ * Merge the run history of a fixed pipeline's two tasks into one timeline.
+ *
+ * The generic source modal has shown this table all along; the two fixed
+ * pipelines only ever rendered `latestRun`, so the per-sync time and row counts
+ * an operator remembers were simply not on this screen. Both tasks are read
+ * from the same per-source endpoint and interleaved, because they are scheduled
+ * as a pair -- reading them apart hides exactly the case worth seeing, where
+ * one task stopped and the other kept going.
+ */
+function PipelineRunHistory({ token, tasks, onUnauthorized, labelOf }) {
+  const sourceKeys = tasks.map((task) => telegramTaskSourceKey(task)).filter(Boolean)
+  const signature = sourceKeys.join(',')
+  const load = useCallback(
+    async () => {
+      if (!signature) return []
+      const keys = signature.split(',')
+      const perTask = await Promise.all(keys.map(async (key) => {
+        // One task's history must not be lost to the other's failure.
+        try {
+          const runs = await adminApi.importRuns(token, key)
+          return asList(runs).map((run) => ({ ...run, sourceKey: key }))
+        } catch {
+          return []
+        }
+      }))
+      return perTask.flat().sort((left, right) => (
+        String(right.startedAt || right.createdAt || '').localeCompare(String(left.startedAt || left.createdAt || ''))
+      ))
+    },
+    [signature, token],
+  )
+  const runs = useRemoteData(load, onUnauthorized)
+  const items = asList(runs.data)
+
+  return (
+    <Panel title="任务与清洗记录" subtitle="两个子任务合并的运行时间线：每次运行的读取、入库、变更、删除、拒绝与失败原因"
+      actions={<button className="qp-button qp-button--ghost" type="button" disabled={runs.loading} onClick={runs.refresh}>
+        <ArrowClockwise size={16} />刷新记录
+      </button>}>
+      {runs.loading && !runs.data ? <LoadingState label="正在加载任务记录" /> : null}
+      {runs.error ? <ErrorState error={runs.error} onRetry={runs.refresh} /> : null}
+      {items.length === 0 && !runs.loading && !runs.error
+        ? <EmptyState icon={Database} title="还没有任务记录" description="同步执行后，这里会出现每次运行的可审计证据。" />
+        : null}
+      {items.length > 0 ? <DataTable label="固定管线运行历史">
+        <thead><tr><th>开始时间</th><th>任务</th><th>状态</th><th>读取</th><th>入库</th><th>变更</th><th>删除</th><th>拒绝</th><th>错误</th></tr></thead>
+        <tbody>{items.map((run) => <tr key={run.id}>
+          <td>{formatDate(run.startedAt || run.createdAt)}<small>{formatDate(run.finishedAt) !== '—' ? `结束 ${formatDate(run.finishedAt)}` : '运行中'}</small></td>
+          <td>{labelOf(run.sourceKey)}<small><code>{run.sourceKey}</code></small></td>
+          <td><StatusBadge status={run.status === 'succeeded' ? 'active' : run.status === 'failed' ? 'down' : run.status} label={run.status} /></td>
+          <td>{formatNumber(run.rowCount || 0)}</td>
+          <td>{formatNumber(run.ingestedCount || 0)}</td>
+          <td>{formatNumber(run.changedCount || 0)}</td>
+          <td>{formatNumber(run.deletedCount || 0)}</td>
+          <td>{formatNumber(run.rejectedCount || 0)}</td>
+          <td><code>{run.lastError || run.error || '—'}</code></td>
+        </tr>)}</tbody>
+      </DataTable> : null}
+    </Panel>
   )
 }
 

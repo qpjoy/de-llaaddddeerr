@@ -245,6 +245,13 @@ export const adminApi = {
   resetTelegramSqlitePipelineCheckpoints: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/telegram-sqlite/checkpoints/reset`, { method: 'POST', body },
   ),
+  // Clears a failed cursor so scheduling resumes; the checkpoint is untouched.
+  resumeTelegramSqlitePipeline: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-sqlite/resume`, { method: 'POST' },
+  ),
+  resumeTelegramMonitorPipeline: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/telegram-monitor/resume`, { method: 'POST' },
+  ),
 
   // Backfill (P3), agent (P5) and retrieval (embedding pipeline).
   backfill: (token) => request(token, `${ADMIN_ROOT}/backfill`),

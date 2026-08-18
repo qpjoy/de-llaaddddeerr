@@ -136,13 +136,47 @@ resolve_host_data_root() {
 # Every retained local PV, as: pv-name claim-name size sub-path owner mode.
 # Kept in one place so the migration can never drift from what `ensure_storage`
 # and `ensure_hanlp_storage` actually create.
+#
+# HanLP is listed only when it is actually deployed. Its PVC is declared in
+# deploy/k8s/optional/, so migrating it means that directory must be reapplied
+# too -- deleting the claim and restoring only the common manifests would leave
+# the pod Pending forever. That failure is quiet and expensive: the Hub picks
+# its tokenizer by probing for a ready HanLP endpoint, so a Pending pod makes
+# the next deploy bake jieba into the config and every rebuild after it produce
+# jieba tokens.
 local_pv_inventory() {
   cat <<'INVENTORY'
 mx-common-postgres-data data-mx-common-postgres-0 50Gi postgres/data 999:999 0700
 mx-common-elasticsearch-data data-mx-common-elasticsearch-0 50Gi elasticsearch/data 1000:0 0775
 mx-common-elasticsearch-snapshots mx-common-elasticsearch-snapshots 20Gi elasticsearch/snapshots 1000:0 0775
-mx-common-hanlp-models mx-common-hanlp-models 10Gi hanlp/models 1000:1000 0755
 INVENTORY
+  hanlp_is_deployed && printf '%s\n' \
+    'mx-common-hanlp-models mx-common-hanlp-models 10Gi hanlp/models 1000:1000 0755'
+}
+
+hanlp_is_deployed() {
+  kubectl -n "$NAMESPACE" get deployment mx-common-hanlp >/dev/null 2>&1
+}
+
+# Recreate a standalone claim so it rebinds to its pre-created retained PV.
+#
+# Written out here rather than reapplied from the manifest it normally lives in,
+# because that manifest also carries a templated Deployment; see the call site.
+ensure_local_pvc() {
+  local claim_name="$1" size="$2"
+  kubectl apply -f - <<EOF >/dev/null
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${claim_name}
+  namespace: ${NAMESPACE}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ""
+  resources:
+    requests:
+      storage: ${size}
+EOF
 }
 
 # Free bytes on the filesystem backing a path, walking up to the nearest parent
@@ -284,6 +318,9 @@ cmd_migrate_storage() {
     return 0
   fi
 
+  local hanlp_present=0
+  hanlp_is_deployed && hanlp_present=1
+
   say "1/6 stopping shared workloads"
   kubectl -n "$NAMESPACE" scale statefulset mx-common-postgres --replicas=0 >/dev/null 2>&1 || true
   kubectl -n "$NAMESPACE" scale statefulset mx-common-elasticsearch --replicas=0 >/dev/null 2>&1 || true
@@ -341,8 +378,21 @@ $(local_pv_inventory)
 EOF
   # Standalone claims live in the manifests; the StatefulSet templates recreate
   # theirs on scale-up.
-  kubectl apply -f deploy/k8s/common/ >/dev/null \
+  kubectl apply -f "${K8S_DIR}/common/" >/dev/null \
     || die "could not reapply the shared manifests"
+  if [ "$hanlp_present" = 1 ]; then
+    # Only the claim, never the whole HanLP manifest. That file carries
+    # placeholders -- an image tag and, decisively, a
+    # kubernetes.io/hostname nodeSelector -- which only `render_manifest` fills
+    # in, and only after `require_local_single_k8s_node` has resolved the node.
+    # Applying it raw here would pin the pod to a node literally named
+    # MX_COMMON_HANLP_NODE_NAME_PLACEHOLDER and leave it permanently
+    # unschedulable. The claim itself has no placeholders, so it is recreated
+    # directly and the running Deployment is left exactly as `deploy hanlp`
+    # rendered it.
+    ensure_local_pvc mx-common-hanlp-models 10Gi \
+      || die "could not recreate the HanLP model claim"
+  fi
 
   say "6/6 restarting shared workloads"
   kubectl -n "$NAMESPACE" scale statefulset mx-common-postgres --replicas=1 >/dev/null
@@ -355,6 +405,18 @@ EOF
     || die "PostgreSQL did not become ready on the new volume; the old data is still at ${HOST_DATA_ROOT_ORIGINAL}"
   kubectl -n "$NAMESPACE" rollout status statefulset/mx-common-elasticsearch --timeout=600s >/dev/null \
     || die "Elasticsearch did not become ready on the new volume; the old data is still at ${HOST_DATA_ROOT_ORIGINAL}"
+  if [ "$hanlp_present" = 1 ]; then
+    # Waited for explicitly: a Hub deploy that runs while this is Pending will
+    # write an empty MX_COMMON_HANLP_URL and quietly switch every rebuild to
+    # jieba, which is not a failure anyone sees until the tokens are wrong.
+    if ! kubectl -n "$NAMESPACE" rollout status deployment/mx-common-hanlp --timeout=900s >/dev/null; then
+      warn "HanLP did not become ready. Deploying the Hub now would discover no"
+      warn "  endpoint and fall back to jieba. Investigate before deploying:"
+      warn "    kubectl -n ${NAMESPACE} describe pod -l app.kubernetes.io/name=mx-common-hanlp"
+      die "HanLP is not ready on the new volume"
+    fi
+    say "  HanLP is ready; the Hub will discover it and keep hanlp tokens"
+  fi
 
   say ""
   say "migration complete; both stores are ready on ${target_root}."
