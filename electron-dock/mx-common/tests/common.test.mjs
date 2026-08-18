@@ -1141,15 +1141,22 @@ test('the relocation flag is accepted wherever it appears', async () => {
 })
 
 
-test('relocating storage restores the HanLP claim it detached', async () => {
+test('relocating storage leaves the HanLP cache alone', async () => {
   const { readFile } = await import('node:fs/promises')
   const manage = await readFile(new URL('../scripts/manage.sh', import.meta.url), 'utf8')
   // The HanLP PVC is declared in optional/, so migrating it without reapplying
   // that file leaves the pod Pending. The Hub then discovers no endpoint and
   // configures jieba -- a silent downgrade that only shows up as bad tokens.
-  assert.match(manage, /hanlp_is_deployed/)
-  assert.match(manage, /ensure_local_pvc mx-common-hanlp-models/)
-  assert.match(manage, /rollout status deployment\/mx-common-hanlp/)
+  // HanLP's cache is a cache: excluded from the move, so its bound claim -- whose
+  // spec is immutable and owned by `deploy hanlp` -- is never rewritten here.
+  // `ensure_hanlp_storage` still declares it; only the migration must not.
+  const inventoryStart = manage.indexOf('local_pv_inventory()')
+  const inventory = manage.slice(inventoryStart, manage.indexOf('}', manage.indexOf('INVENTORY', inventoryStart)))
+  assert.doesNotMatch(inventory, /hanlp/)
+  assert.match(manage, /--exclude='hanlp\/'/)
+  // The reclaim instruction must not delete a volume that is still serving.
+  assert.doesNotMatch(manage, /rm -rf \$\{HOST_DATA_ROOT_ORIGINAL\}"/)
+  assert.match(manage, /HOST_DATA_ROOT_ORIGINAL\}\/postgres \$\{HOST_DATA_ROOT_ORIGINAL\}\/elasticsearch/)
   // Never the whole HanLP manifest: it carries a nodeSelector placeholder that
   // only render_manifest fills in, so applying it raw would pin the pod to a
   // node named MX_COMMON_HANLP_NODE_NAME_PLACEHOLDER and strand it forever.
