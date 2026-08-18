@@ -2301,3 +2301,37 @@ test('a concurrency of one is exactly the previous serial behaviour', async () =
   assert.deepEqual(results, [1, 2, 3])
   assert.equal(peak, 1)
 })
+
+
+test('a strict tokenizer failure names the status behind the category', async () => {
+  const strict = requireSegmenterBackend({
+    async segmentWithMeta() {
+      return {
+        tokens: ['jieba'],
+        backendUsed: 'jieba',
+        degraded: true,
+        errorCode: 'hanlp_http_error',
+        errorDetail: 'HanLP responded 503: {"error": "model is still loading"}',
+      }
+    },
+  }, {
+    expectedBackend: 'hanlp',
+    maxAttempts: 2,
+    retryDelayMs: 0,
+    busyRetryDelayMs: 0,
+    sleep: async () => {},
+    logger: { warn() {} },
+  })
+
+  await assert.rejects(
+    () => strict.segment('人工智能'),
+    (error) => {
+      // "hanlp_http_error" alone cannot tell an operator whether to wait for a
+      // model load, lower concurrency, or fix a broken deployment.
+      assert.match(error.message, /503/)
+      assert.match(error.message, /model is still loading/)
+      assert.equal(error.code, 'reindex_segmenter_degraded')
+      return true
+    },
+  )
+})

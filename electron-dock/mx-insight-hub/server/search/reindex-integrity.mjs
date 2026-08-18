@@ -5,8 +5,14 @@ function delay(milliseconds) {
 }
 
 export class ReindexSegmenterIntegrityError extends Error {
-  constructor(expectedBackend, actualBackend, errorCode, cause = null) {
-    const detail = cause?.message || errorCode || 'the tokenizer reported degraded output'
+  constructor(expectedBackend, actualBackend, errorCode, cause = null, errorDetail = null) {
+    // Prefer the tokenizer's own words. "hanlp_http_error" is a category; the
+    // operator needs the status behind it, because 503-still-loading means wait,
+    // 429 means lower concurrency and 404 means the deployment is wrong.
+    const detail = cause?.message
+      || errorDetail
+      || errorCode
+      || 'the tokenizer reported degraded output'
     super(
       `reindex requires ${expectedBackend} tokens but received ${actualBackend || 'no verified backend'}: ${detail}`,
       cause ? { cause } : undefined,
@@ -117,6 +123,7 @@ export function requireSegmenterBackend(segmenter, {
       lastResult?.backendUsed,
       lastResult?.errorCode,
       lastError,
+      lastResult?.errorDetail,
     )
   }
 

@@ -277,6 +277,7 @@ test('segmentWithMeta reports HanLP success and segment keeps its array contract
     backendUsed: 'hanlp',
     degraded: false,
     errorCode: null,
+    errorDetail: null,
   })
   assert.deepEqual(await segmenter.segment('吴恩达与人工智能'), ['吴恩达', '与', '人工智能'])
   assert.equal(fallbackCalls, 0)
@@ -288,7 +289,14 @@ test('HanLP failures report stable per-call codes and degrade to jieba', async (
     {
       name: 'HTTP error',
       expected: 'hanlp_http_error',
-      fetchImpl: async () => ({ ok: false, status: 500 }),
+      detail: /HanLP responded 503: .*model is still loading/,
+      fetchImpl: async () => ({
+        ok: false,
+        status: 503,
+        // The tokenizer explains itself in the body; a cold model load must be
+        // distinguishable from a broken deployment.
+        text: async () => '{"error": "model is still loading"}',
+      }),
     },
     {
       name: 'invalid JSON',
@@ -327,12 +335,15 @@ test('HanLP failures report stable per-call codes and degrade to jieba', async (
         logger: { warn() {} },
       })
 
-      assert.deepEqual(await segmenter.segmentWithMeta('吴恩达与人工智能'), {
-        tokens: ['吴恩达', '人工智能'],
-        backendUsed: 'jieba',
-        degraded: true,
-        errorCode: candidate.expected,
-      })
+      const result = await segmenter.segmentWithMeta('吴恩达与人工智能')
+      assert.deepEqual(result.tokens, ['吴恩达', '人工智能'])
+      assert.equal(result.backendUsed, 'jieba')
+      assert.equal(result.degraded, true)
+      assert.equal(result.errorCode, candidate.expected)
+      // The status code is the fact that decides what an operator does next, so
+      // it must survive alongside the stable code rather than being collapsed
+      // into it.
+      if (candidate.detail) assert.match(result.errorDetail, candidate.detail)
       assert.deepEqual(fallbackInputs, ['吴恩达与人工智能'])
     })
   }
@@ -361,6 +372,7 @@ test('HanLP timeout degrades to jieba without borrowing shared status', async ()
     backendUsed: 'jieba',
     degraded: true,
     errorCode: 'hanlp_timeout',
+    errorDetail: 'aborted',
   })
 })
 
@@ -378,6 +390,7 @@ test('jieba reports its backend and falls back to CJK bigrams on failure', async
       backendUsed: 'jieba',
       degraded: false,
       errorCode: null,
+      errorDetail: null,
     })
   })
 
@@ -391,6 +404,7 @@ test('jieba reports its backend and falls back to CJK bigrams on failure', async
       backendUsed: 'bigram',
       degraded: true,
       errorCode: 'jieba_unavailable',
+      errorDetail: null,
     })
   })
 
@@ -404,6 +418,7 @@ test('jieba reports its backend and falls back to CJK bigrams on failure', async
       backendUsed: 'bigram',
       degraded: true,
       errorCode: 'jieba_inference_error',
+      errorDetail: null,
     })
   })
 
@@ -418,6 +433,7 @@ test('jieba reports its backend and falls back to CJK bigrams on failure', async
         backendUsed: 'bigram',
         degraded: true,
         errorCode: 'jieba_empty_response',
+        errorDetail: null,
       })
     })
   }
@@ -442,6 +458,7 @@ test('HanLP falls through a failed jieba backend to CJK bigrams', async () => {
     backendUsed: 'bigram',
     degraded: true,
     errorCode: 'hanlp_http_error',
+    errorDetail: 'HanLP responded 503',
   })
 })
 
@@ -469,6 +486,7 @@ test('HanLP recovers and concurrent calls keep their own backend provenance', as
     backendUsed: 'hanlp',
     degraded: false,
     errorCode: null,
+    errorDetail: null,
   })
   assert.equal(recovering.available, true)
   assert.equal(recovering.lastError, null)
@@ -499,12 +517,14 @@ test('HanLP recovers and concurrent calls keep their own backend provenance', as
     backendUsed: 'hanlp',
     degraded: false,
     errorCode: null,
+    errorDetail: null,
   })
   assert.deepEqual(failureResult, {
     tokens: ['jieba:慢失败'],
     backendUsed: 'jieba',
     degraded: true,
     errorCode: 'hanlp_http_error',
+    errorDetail: 'HanLP responded 500',
   })
 })
 
@@ -1138,4 +1158,38 @@ test('relocating storage restores the HanLP claim it detached', async () => {
   assert.ok(migration.length > 0, 'the migration body must be locatable')
   assert.doesNotMatch(migration, /kubectl apply -f "\$\{K8S_DIR\}\/optional/)
   assert.doesNotMatch(migration, /50-hanlp\.yaml/)
+})
+
+
+test('a tokenizer without the batch endpoint still yields HanLP tokens', async () => {
+  const { HanlpSegmenter, batchingSegmenter } = await import('../src/segmenter/index.mjs')
+  const paths = []
+  const hanlp = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    fetchImpl: async (url, options) => {
+      const path = new URL(String(url)).pathname
+      paths.push(path)
+      // The deployed image predates /tokenize/batch.
+      if (path.endsWith('/batch')) return new Response('not found', { status: 404 })
+      const body = JSON.parse(options.body)
+      return new Response(JSON.stringify([[body.text]]), { status: 200 })
+    },
+    logger: { warn() {} },
+  })
+  const batching = batchingSegmenter(hanlp)
+
+  const results = await Promise.all(
+    ['吴恩达', '人工智能'].map((text) => batching.segmentWithMeta(text)),
+  )
+
+  // Version skew costs speed, never quality: a strict rebuild would reject
+  // anything that was not produced by HanLP.
+  assert.deepEqual(results.map((result) => result.tokens), [['吴恩达'], ['人工智能']])
+  assert.equal(results.every((result) => result.backendUsed === 'hanlp'), true)
+  assert.equal(results.every((result) => result.degraded === false), true)
+  // Discovered once, then remembered.
+  assert.equal(paths.filter((path) => path.endsWith('/batch')).length, 1)
+
+  await batching.segmentWithMeta('大模型')
+  assert.equal(paths.filter((path) => path.endsWith('/batch')).length, 1)
 })

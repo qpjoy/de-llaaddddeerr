@@ -35,12 +35,34 @@ const LATIN_TOKEN = /[#@]?[A-Za-z0-9_][A-Za-z0-9_'\-.]*/g
 
 // Per-call provenance is returned with the tokens so concurrent requests never
 // have to infer their backend from the shared `available`/`lastError` snapshot.
-function segmentResult(tokens, backendUsed, degraded = false, errorCode = null) {
-  return { tokens, backendUsed, degraded, errorCode }
+// `errorDetail` carries the one fact `errorCode` cannot: which HTTP status the
+// tokenizer answered with. 503-still-loading, 429-busy, 413-too-large and
+// 404-wrong-path all collapse into `hanlp_http_error`, and they need completely
+// different responses from an operator. Only server-derived text goes in here,
+// never the input being segmented.
+function segmentResult(tokens, backendUsed, degraded = false, errorCode = null, errorDetail = null) {
+  return { tokens, backendUsed, degraded, errorCode, errorDetail }
 }
 
 function segmenterError(code, message) {
   return Object.assign(new Error(message), { segmenterCode: code })
+}
+
+/**
+ * Quote the tokenizer's own explanation of a non-2xx answer.
+ *
+ * The service says "model is still loading" or "tokenizer is busy" in the body;
+ * without it a 503 during a cold model load is indistinguishable from a broken
+ * deployment. Bounded and read only from the error response, so nothing large
+ * or caller-supplied can reach a log line.
+ */
+async function hanlpErrorSuffix(response) {
+  try {
+    const text = (await response.text()).slice(0, 200).replace(/\s+/gu, ' ').trim()
+    return text ? `: ${text}` : ''
+  } catch {
+    return ''
+  }
 }
 
 export class HanlpSegmenter {
@@ -66,6 +88,11 @@ export class HanlpSegmenter {
     this.fallbackSegmenter = fallbackSegmenter || new JiebaSegmenter({ logger })
     this.available = true
     this.lastError = null
+    // The Hub and the tokenizer image are deployed independently, so a Hub that
+    // knows about batching will meet services that do not. Discovered once, on
+    // the first 404, rather than configured: an operator should never have to
+    // keep a client flag in step with an image tag.
+    this.batchSupported = true
   }
 
   async segment(text) {
@@ -85,6 +112,14 @@ export class HanlpSegmenter {
    */
   async segmentBatchWithMeta(texts) {
     if (texts.length === 0) return []
+    // An older tokenizer has no /tokenize/batch. Falling back to the per-text
+    // endpoint keeps full HanLP provenance -- only the request shape changes --
+    // whereas letting the 404 through would degrade every item to jieba and, in
+    // a strict rebuild, fail the whole run on a version skew that costs nothing
+    // but speed.
+    if (!this.batchSupported) {
+      return Promise.all(texts.map((text) => this.segmentWithMeta(text)))
+    }
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.batchTimeoutMs)
     try {
@@ -97,8 +132,14 @@ export class HanlpSegmenter {
         body: JSON.stringify({ texts, coarse: true }),
         signal: controller.signal,
       })
+      if (response.status === 404) {
+        this.batchSupported = false
+        this.logger?.warn?.('[mx-common] HanLP has no /tokenize/batch; using per-text calls')
+        clearTimeout(timer)
+        return Promise.all(texts.map((text) => this.segmentWithMeta(text)))
+      }
       if (!response.ok) {
-        throw segmenterError('hanlp_http_error', `HanLP responded ${response.status}`)
+        throw segmenterError('hanlp_http_error', `HanLP responded ${response.status}${await hanlpErrorSuffix(response)}`)
       }
       let payload
       try {
@@ -135,7 +176,7 @@ export class HanlpSegmenter {
       this.logger?.warn?.(`[mx-common] HanLP batch segmentation failed, using jieba fallback: ${message}`)
       return Promise.all(texts.map(async (text) => {
         const fallback = await this.fallbackSegmenter.segmentWithMeta(text)
-        return segmentResult(fallback.tokens, fallback.backendUsed, true, errorCode)
+        return segmentResult(fallback.tokens, fallback.backendUsed, true, errorCode, message)
       }))
     } finally {
       clearTimeout(timer)
@@ -160,7 +201,7 @@ export class HanlpSegmenter {
         signal: controller.signal,
       })
       if (!response.ok) {
-        throw segmenterError('hanlp_http_error', `HanLP responded ${response.status}`)
+        throw segmenterError('hanlp_http_error', `HanLP responded ${response.status}${await hanlpErrorSuffix(response)}`)
       }
       let payload
       try {
@@ -185,7 +226,7 @@ export class HanlpSegmenter {
       this.lastError = message
       this.logger?.warn?.(`[mx-common] HanLP segmentation failed, using jieba fallback: ${message}`)
       const fallback = await this.fallbackSegmenter.segmentWithMeta(text)
-      return segmentResult(fallback.tokens, fallback.backendUsed, true, errorCode)
+      return segmentResult(fallback.tokens, fallback.backendUsed, true, errorCode, message)
     } finally {
       clearTimeout(timer)
     }

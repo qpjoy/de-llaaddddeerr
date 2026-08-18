@@ -94,11 +94,15 @@ spec:
           env:
             - name: HANLP_HOME
               value: /models
-            # One HanLP component is a single mutable Python object, so forward
-            # passes stay serialized. Concurrency comes from batching -- many
-            # texts per pass -- not from parallel passes over a shared model.
+            # Left at the default of one on purpose. A HanLP component is a
+            # single mutable Python object, and server.py says as much: forward
+            # passes stay serialized unless an operator has validated a specific
+            # model as thread-safe. Nobody has. Throughput here comes from
+            # batching -- many texts in one pass -- which needs no extra slot,
+            # so raising this would buy nothing and risk concurrent mutation of
+            # shared model state.
             - name: MAX_CONCURRENT_INFERENCES
-              value: "2"
+              value: "1"
             # A coalesced batch of 64 takes materially longer than one text; the
             # queue must outlast it or callers see 429 for work that succeeded.
             - name: INFERENCE_QUEUE_TIMEOUT_SECONDS
