@@ -82,13 +82,17 @@ spec:
                 secretKeyRef:
                   name: mx-insight-hub-secrets
                   key: MX_INSIGHT_API_KEY_PEPPER
+          # Sized for the startup rebuild, which is the heaviest thing this
+          # process does: a bounded segmentation memo plus in-flight bulk bodies
+          # for the whole corpus. 768Mi with a 200k-entry memo left no headroom,
+          # and one CPU had to serve both the batch fan-out and the outbox loop.
           resources:
             requests:
-              cpu: 100m
-              memory: 192Mi
+              cpu: 200m
+              memory: 256Mi
             limits:
-              cpu: "1"
-              memory: 768Mi
+              cpu: "4"
+              memory: 2Gi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

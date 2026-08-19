@@ -1171,6 +1171,7 @@ function currentSnapshotPool(matchSql, rows, {
   deletions = [],
   rebuildProgress = null,
   changedRows = [],
+  reconciledThrough = null,
 } = {}) {
   const queries = []
   const served = new Set()
@@ -1181,6 +1182,9 @@ function currentSnapshotPool(matchSql, rows, {
       queries.push({ sql, values })
       // The rebuild cursor: `SELECT` reports any resumable progress, `INSERT`
       // opens a new one and returns the watermark the catch-up pass filters on.
+      if (sql.includes('reconciled_through FROM control.search_rebuild_progress')) {
+        return { rows: [{ reconciled_through: reconciledThrough }] }
+      }
       if (sql.includes('FROM control.search_rebuild_progress')) {
         return { rows: rebuildProgress ? [rebuildProgress] : [] }
       }
@@ -1188,6 +1192,10 @@ function currentSnapshotPool(matchSql, rows, {
         return { rows: [{ build_started_at: buildStartedAt }] }
       }
       if (sql.includes('UPDATE control.search_rebuild_progress')) return { rows: [], rowCount: 1 }
+      if (sql.includes('reconciled_through')) return { rows: [], rowCount: 1 }
+      // The progress line's denominator. Answered before the scan branch below,
+      // which keys on the same table name.
+      if (sql.includes('count(*)')) return { rows: [{ total: String(rows.length) }] }
       if (sql.includes(matchSql)) {
         // The catch-up pass is a delta scan keyed on the build watermark; it
         // must not replay the whole corpus a second time. Each pass yields its
@@ -1251,7 +1259,9 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
   assert.equal(harness.calls.bulks.length, 2, 'the delta is replayed after the alias cutover')
   // The second pass is bounded by the build watermark rather than rescanning
   // the corpus: at this size a full second pass would double a multi-hour run.
-  const canonicalScans = snapshot.queries.filter((entry) => entry.sql.includes('FROM core.canonical_records'))
+  const canonicalScans = snapshot.queries.filter((entry) => (
+    entry.sql.includes('FROM core.canonical_records') && !entry.sql.includes('count(*)')
+  ))
   assert.equal(canonicalScans[0].values[2], null, 'the build pass scans everything')
   assert.equal(
     canonicalScans.at(-1).values[2].toISOString(),
@@ -2199,7 +2209,9 @@ test('an interrupted rebuild resumes from its cursor instead of discarding the p
   assert.equal(result.rebuilt, true)
   // The hours already spent are not thrown away.
   assert.equal(harness.calls.creates.length, 0, 'a resumable partial index is never recreated')
-  const scans = snapshot.queries.filter((entry) => entry.sql.includes('FROM core.canonical_records'))
+  const scans = snapshot.queries.filter((entry) => (
+    entry.sql.includes('FROM core.canonical_records') && !entry.sql.includes('count(*)')
+  ))
   assert.equal(
     scans[0].values[0],
     '11111111-1111-4111-8111-111111111111',
@@ -2334,4 +2346,74 @@ test('a strict tokenizer failure names the status behind the category', async ()
       return true
     },
   )
+})
+
+
+test('an ordinary restart replays the delta, not the corpus', async () => {
+  const indexSet = contentIndex()
+  // v4 already serves every alias: the active startup path.
+  const harness = currentIndexHarness(indexSet, {
+    [indexSet.currentIndex]: {
+      [indexSet.readAlias]: {},
+      'mx-insight-hub-content-v1': { is_write_index: true },
+      [indexSet.writeAlias]: { is_write_index: true },
+    },
+  })
+  const watermark = new Date('2026-08-18T14:29:29.000Z')
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [canonicalRow()], {
+    reconciledThrough: watermark,
+  })
+  const logs = []
+
+  await ensureCurrentContentIndex({
+    client: harness.client,
+    pool: snapshot.pool,
+    segmenter,
+    indexSet,
+    logger: { log: (line) => logs.push(line), info() {}, warn() {} },
+  })
+
+  const scans = snapshot.queries.filter((entry) => (
+    entry.sql.includes('FROM core.canonical_records') && !entry.sql.includes('count(*)')
+  ))
+  // Re-segmenting ~880k records through a single-slot tokenizer takes hours; a
+  // deploy must not pay that to close a narrow crash window.
+  assert.equal(
+    scans[0].values[2].toISOString(),
+    watermark.toISOString(),
+    'the active startup pass is bounded by the watermark',
+  )
+  // The watermark advances only after the pass completed.
+  const saved = snapshot.queries.filter((entry) => entry.sql.includes('reconciled_through'))
+  assert.ok(saved.some((entry) => entry.sql.includes('INSERT INTO control.search_rebuild_progress')))
+  assert.ok(logs.some((line) => line.includes('replaying changes since')))
+})
+
+test('a serving index with no watermark is still replayed in full', async () => {
+  const indexSet = contentIndex()
+  const harness = currentIndexHarness(indexSet, {
+    [indexSet.currentIndex]: {
+      [indexSet.readAlias]: {},
+      'mx-insight-hub-content-v1': { is_write_index: true },
+      [indexSet.writeAlias]: { is_write_index: true },
+    },
+  })
+  // No watermark means the crash window is unaccounted for, so nothing may be
+  // assumed already projected.
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [canonicalRow()])
+  const logs = []
+
+  await ensureCurrentContentIndex({
+    client: harness.client,
+    pool: snapshot.pool,
+    segmenter,
+    indexSet,
+    logger: { log: (line) => logs.push(line), info() {}, warn() {} },
+  })
+
+  const scans = snapshot.queries.filter((entry) => (
+    entry.sql.includes('FROM core.canonical_records') && !entry.sql.includes('count(*)')
+  ))
+  assert.equal(scans[0].values[2], null, 'an unknown watermark replays everything')
+  assert.ok(logs.some((line) => line.includes('no reconciliation watermark')))
 })

@@ -338,6 +338,9 @@ test('canonical endpoint searches one authorized global projection with filters,
         objectType: 'message',
         size: 1,
         cursor: null,
+        // Newest-first by default, matching the Data Center console: two
+        // surfaces over one index must not order differently.
+        sort: 'newest',
         searchProfile: DEFAULT_SEARCH_PROFILE,
         trackTotalHits: true,
       },

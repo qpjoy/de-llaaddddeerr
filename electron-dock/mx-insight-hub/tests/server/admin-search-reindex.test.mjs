@@ -508,3 +508,97 @@ test('disk pressure is warned about before it becomes the next blocker', async (
   assert.match(warning.message, /92% full/)
   assert.match(warning.message, /83\.0GiB free/)
 })
+
+
+test('a rebuild that would downgrade the tokenizer says so and refuses one click', async () => {
+  const { pool } = fakeDatabase()
+  const search = healthySearch(pool)
+  // Exactly the 14:23 shape: no HanLP URL, so the required backend resolves to
+  // jieba and strict verification would pass on jieba tokens.
+  search.segmenter.segmentWithMeta = async (text) => (
+    { tokens: [text], backendUsed: 'jieba', degraded: false, errorCode: null }
+  )
+  const reindex = new AdminSearchReindex({ search, segmenterConfig: {} })
+
+  const preflight = await reindex.preflight({ fresh: true })
+  assert.equal(preflight.expectedBackend, 'jieba')
+  assert.equal(preflight.ready, true, 'jieba is a valid configuration, just not a silent one')
+  assert.equal(preflight.requiresBackendAcknowledgement, true)
+  const warning = preflight.warnings.find((entry) => entry.code === 'tokenizer_downgrade')
+  assert.ok(warning)
+  assert.match(warning.message, /would produce a jieba index/)
+  assert.match(warning.action, /MX_COMMON_HANLP_URL is empty/)
+
+  // A single confirmed click must not be enough to rebuild the whole corpus
+  // into a lower-quality index.
+  await assert.rejects(
+    () => reindex.start({ requestedBy: 'admin' }),
+    (error) => {
+      assert.equal(error.code, 'tokenizer_acknowledgement_required')
+      assert.equal(error.details.expectedBackend, 'jieba')
+      return true
+    },
+  )
+})
+
+test('acknowledging the backend lets a deliberate downgrade proceed', async () => {
+  const { pool } = fakeDatabase()
+  const search = healthySearch(pool)
+  search.segmenter.segmentWithMeta = async (text) => (
+    { tokens: [text], backendUsed: 'jieba', degraded: false, errorCode: null }
+  )
+  const reindex = new AdminSearchReindex({
+    search,
+    segmenterConfig: {},
+    reconcile: async () => ({ content: { indexed: 1 } }),
+  })
+
+  const result = await reindex.start({ requestedBy: 'admin', acknowledgeBackend: 'jieba' })
+  assert.ok(result.operation.id)
+})
+
+test('a HanLP rebuild needs no extra acknowledgement', async () => {
+  const { pool } = fakeDatabase()
+  const reindex = new AdminSearchReindex({
+    search: healthySearch(pool),
+    segmenterConfig: { backend: 'hanlp', hanlpUrl: 'http://hanlp:8000' },
+  })
+  const preflight = await reindex.preflight({ fresh: true })
+  assert.equal(preflight.expectedBackend, 'hanlp')
+  assert.equal(preflight.requiresBackendAcknowledgement, false)
+  assert.equal(preflight.warnings.some((entry) => entry.code === 'tokenizer_downgrade'), false)
+})
+
+
+test('a projector restart serves instead of replaying when the switch is off', async () => {
+  const { pool, state } = fakeDatabase()
+  const search = healthySearch(pool)
+  let schemaOnly = null
+  const reindex = new AdminSearchReindex({
+    search,
+    segmenterConfig: { backend: 'hanlp', hanlpUrl: 'http://hanlp:8000' },
+    reconcile: async (unused, options) => { schemaOnly = options.schemaOnly; return {} },
+  })
+  void state
+
+  // The setting is what the projector reads; the default is off, so a restart
+  // reconciles schema and starts serving rather than spending hours replaying.
+  const preflight = await reindex.preflight({ fresh: true })
+  assert.equal(preflight.startupRebuild, false)
+  assert.equal(schemaOnly, null, 'preflight never rebuilds anything')
+})
+
+test('cancelling a running rebuild stops it at a batch boundary', async () => {
+  const { pool } = fakeDatabase()
+  const search = healthySearch(pool)
+  const reindex = new AdminSearchReindex({
+    search,
+    segmenterConfig: { backend: 'hanlp', hanlpUrl: 'http://hanlp:8000' },
+  })
+
+  // Nothing running: cancelling is a state error, not a silent no-op.
+  await assert.rejects(
+    () => reindex.cancel({ requestedBy: 'admin' }),
+    (error) => error.code === 'search_reindex_not_running',
+  )
+})

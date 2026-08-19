@@ -87,7 +87,11 @@ export function requireSegmenterBackend(segmenter, {
     let lastError = null
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        lastResult = await segmenter.segmentWithMeta(text)
+        // No fallback: this wrapper rejects anything but the expected backend, so
+        // asking the runtime segmenter to compute a fallback produces tokens that
+        // are discarded on arrival. Under batching that was a burst of native
+        // jieba calls per failed batch, which segfaulted the process outright.
+        lastResult = await segmenter.segmentWithMeta(text, { allowFallback: false })
         lastError = null
         const hasVerifiedTokens = Array.isArray(lastResult?.tokens)
           && (!String(text ?? '').trim() || lastResult.tokens.length > 0)

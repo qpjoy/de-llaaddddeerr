@@ -148,8 +148,26 @@ export const adminApi = {
   dataCenter: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center`, { query }),
   dataCenterRecords: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center/records`, { query }),
   searchReindex: (token) => request(token, `${ADMIN_ROOT}/search/reindex`),
-  startSearchReindex: (token) => request(
-    token, `${ADMIN_ROOT}/search/reindex`, { method: 'POST', body: { confirmation: 'REINDEX' } },
+  cancelSearchReindex: (token) => request(
+    token, `${ADMIN_ROOT}/search/reindex/cancel`, { method: 'POST' },
+  ),
+  // Whether a projector restart replays the corpus. Off means it comes up,
+  // reconciles schema and serves.
+  setSearchStartupRebuild: (token, enabled) => request(
+    token, `${ADMIN_ROOT}/search/startup-rebuild`, { method: 'PUT', body: { enabled } },
+  ),
+  // acknowledgeBackend is sent only for a deliberate non-HanLP rebuild; the
+  // server refuses the downgrade without it.
+  startSearchReindex: (token, acknowledgeBackend = null) => request(
+    token,
+    `${ADMIN_ROOT}/search/reindex`,
+    {
+      method: 'POST',
+      body: {
+        confirmation: 'REINDEX',
+        ...(acknowledgeBackend ? { acknowledgeBackend } : {}),
+      },
+    },
   ),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(

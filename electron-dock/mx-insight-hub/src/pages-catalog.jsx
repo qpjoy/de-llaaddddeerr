@@ -279,6 +279,35 @@ function SearchLab({ capabilities, selectedProfile, execution, recordsMode, quer
 
 const ACTIVE_REINDEX_STATUSES = new Set(['queued', 'running'])
 
+/**
+ * Cycle the time column between newest, oldest and relevance.
+ *
+ * Relevance is only offered while a keyword query is active, because without
+ * one every row scores the same and the option would just be a third way to
+ * produce the default order.
+ */
+function nextSort(sort, query) {
+  if (sort === 'newest') return 'oldest'
+  if (sort === 'oldest') return query ? 'relevance' : 'newest'
+  return 'newest'
+}
+
+function sortGlyph(sort) {
+  if (sort === 'newest') return ' ↓'
+  if (sort === 'oldest') return ' ↑'
+  return ' ≡'
+}
+
+function sortLabel(sort) {
+  if (sort === 'newest') return '从新到旧'
+  if (sort === 'oldest') return '从旧到新'
+  return '按相关性'
+}
+
+function sortHint(sort) {
+  return `当前${sortLabel(sort)}，点击切换排序`
+}
+
 function reindexStatus(status) {
   if (status === 'succeeded') return { badge: 'active', label: '已完成' }
   if (status === 'failed') return { badge: 'down', label: '失败' }
@@ -317,6 +346,39 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
   const blockers = asArray(preflight.blockers).map(reindexIssue)
   const warnings = asArray(preflight.warnings).map(reindexIssue)
   const active = ACTIVE_REINDEX_STATUSES.has(operation?.status)
+  const needsBackendAck = preflight.requiresBackendAcknowledgement === true
+  const [backendAcknowledged, setBackendAcknowledged] = useState(false)
+  const [toggling, setToggling] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const startupRebuild = preflight.startupRebuild === true
+
+  const toggleStartupRebuild = async () => {
+    setToggling(true)
+    setSubmitError(null)
+    try {
+      await adminApi.setSearchStartupRebuild(token, !startupRebuild)
+      await state.refresh()
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      setSubmitError(error)
+    } finally {
+      setToggling(false)
+    }
+  }
+
+  const cancelRebuild = async () => {
+    setCancelling(true)
+    setSubmitError(null)
+    try {
+      await adminApi.cancelSearchReindex(token)
+      await state.refresh()
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      setSubmitError(error)
+    } finally {
+      setCancelling(false)
+    }
+  }
   const status = reindexStatus(operation?.status)
   const progress = reindexProgress(operation)
   const logs = asArray(operation?.logs).slice(-100)
@@ -337,14 +399,15 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
 
   const start = async (event) => {
     event.preventDefault()
-    if (!canStart || confirmation !== 'REINDEX') return
+    if (!canStart || confirmation !== 'REINDEX' || !backendAcknowledged) return
     setSubmitting(true)
     setSubmitError(null)
     try {
-      const updated = await adminApi.startSearchReindex(token)
+      const updated = await adminApi.startSearchReindex(token, needsBackendAck ? preflight.expectedBackend : null)
       state.setData(updated)
       setConfirmationOpen(false)
       setConfirmation('')
+      setBackendAcknowledged(false)
     } catch (error) {
       if (error?.status === 401) onUnauthorized?.(error)
       setSubmitError(error)
@@ -375,7 +438,16 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
             </div>
             <div>
               <dt>分词后端</dt>
-              <dd><code>{preflight.expectedBackend || '未公布'}</code></dd>
+              <dd>
+                <code>{preflight.expectedBackend || '未公布'}</code>
+                {/* What the live index is made of, which is not always what this
+                    runtime is configured to produce. */}
+                <small>{preflight.activeBackend
+                  ? preflight.activeBackend === preflight.expectedBackend
+                    ? `当前索引同为 ${preflight.activeBackend}`
+                    : `当前索引由 ${preflight.activeBackend} 构建`
+                  : '当前索引来源未记录'}</small>
+              </dd>
             </div>
             <div>
               <dt>索引 Schema</dt>
@@ -386,6 +458,20 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
               <dd><StatusBadge status={status.badge} label={status.label} /></dd>
             </div>
           </dl>
+
+          <div className="mih-search-reindex__switch">
+            <label>
+              <input type="checkbox" checked={startupRebuild} disabled={toggling}
+                onChange={toggleStartupRebuild} />
+              <span>projector 重启时自动全量重建</span>
+            </label>
+            {/* Off is the safe default: a restart should serve, not embark on
+                hours of work. The outbox keeps the projection fresh either way;
+                only re-segmenting existing records needs this pass. */}
+            <small>{startupRebuild
+              ? '已开启：每次 projector 重启都会先重放全部 canonical 记录，期间持有全局重建锁。'
+              : '已关闭：projector 重启后只校对索引与别名，随即开始服务并消费 outbox；全量重建改由本页手动触发。'}</small>
+          </div>
 
           {preflight.projectorRequired === false ? (
             <p className="mih-search-reindex__note">
@@ -460,6 +546,11 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
             <span>
               {active ? '运行期间不能再次提交；页面会自动刷新状态。' : canStart ? '前置检查通过，可以开始重建。' : '解决阻断项后刷新前置检查。'}
             </span>
+            {active ? (
+              <button className="qp-button qp-button--danger" type="button" disabled={cancelling}
+                title="在下一个批次边界停止；已写入的文档保持不变，别名不会切到半成品索引"
+                onClick={cancelRebuild}>{cancelling ? '正在请求停止…' : '停止重建'}</button>
+            ) : null}
             <button className="qp-button qp-button--ghost" type="button" disabled={state.loading || submitting}
               onClick={state.refresh}>{state.loading ? '检查中…' : '重新检查'}</button>
             <button className="qp-button" type="button" disabled={!canStart} title={buttonTitle}
@@ -476,7 +567,7 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
           footer={<>
             <button className="qp-button qp-button--ghost" type="button" disabled={submitting} onClick={closeConfirmation}>取消</button>
             <button className="qp-button qp-button--danger" type="submit" form="mih-search-reindex-confirm"
-              disabled={submitting || confirmation !== 'REINDEX'}>
+              disabled={submitting || confirmation !== 'REINDEX' || !backendAcknowledged}>
               {submitting ? '正在提交…' : '确认并开始'}
             </button>
           </>}>
@@ -485,6 +576,21 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
               <WarningCircle size={22} weight="duotone" aria-hidden="true" />
               <p>canonical 数据不会被修改。失败时请根据任务阶段和日志确认是否已有某个投影完成别名切换。</p>
             </div>
+            {/* Strict verification proves the tokens match the configured
+                backend; it cannot know the configuration was intended. Saying
+                which index this produces is what catches a silent downgrade. */}
+            {needsBackendAck ? (
+              <label className="mih-confirm-acknowledge">
+                <input type="checkbox" checked={backendAcknowledged}
+                  onChange={(event) => setBackendAcknowledged(event.target.checked)} />
+                <span>
+                  本次重建将产出 <code>{preflight.expectedBackend}</code> 分词的索引，而不是 HanLP
+                  {preflight.activeBackend && preflight.activeBackend !== preflight.expectedBackend
+                    ? `（当前索引由 ${preflight.activeBackend} 构建）` : ''}。
+                  检索质量会明显下降，且需要再跑一次完整重建才能恢复。我确认要这样做。
+                </span>
+              </label>
+            ) : null}
             <label className="qp-field">
               <span className="qp-field__label">输入 <code>REINDEX</code> 以确认</span>
               <input className="qp-input" autoFocus autoComplete="off" spellCheck="false" value={confirmation}
@@ -515,6 +621,9 @@ export function DataCenterPage({ token, onUnauthorized }) {
   const [searchProfile, setSearchProfile] = useState('')
   const [page, setPage] = useState(1)
   const [cursor, setCursor] = useState(null)
+  // Newest-first by default. Relevance stays reachable, but it has to be asked
+  // for: ranked rows under a 时间 column are indistinguishable from unsorted ones.
+  const [sort, setSort] = useState('newest')
   const [cursorHistory, setCursorHistory] = useState([])
   const [selectedRecord, setSelectedRecord] = useState(null)
   const [searchRevision, setSearchRevision] = useState(0)
@@ -550,6 +659,7 @@ export function DataCenterPage({ token, onUnauthorized }) {
       platform: platform || undefined,
       objectType: objectType || undefined,
       searchProfile: requestedSearchProfile || undefined,
+      sort,
       pageSize,
       cursor: cursor || undefined,
       page: cursor ? undefined : page,
@@ -779,7 +889,18 @@ export function DataCenterPage({ token, onUnauthorized }) {
         {!recordsState.error && recordsState.loading && !recordsState.data ? <LoadingState label="正在读取 canonical records" /> : null}
         {!recordsState.error && records.length ? (
           <DataTable label="canonical records">
-            <thead><tr><th>记录</th><th>Dataset</th><th>平台 / 类型</th><th>版本</th><th>时间</th><th>状态</th><th /></tr></thead>
+            <thead><tr>
+              <th>记录</th><th>Dataset</th><th>平台 / 类型</th><th>版本</th>
+              <th>
+                <button className="mih-sort-toggle" type="button"
+                  onClick={() => { setSort(nextSort(sort, query)); setPage(1); setCursor(null) }}
+                  title={sortHint(sort)}
+                  aria-label={`时间排序：${sortLabel(sort)}，点击切换`}>
+                  时间<span aria-hidden="true">{sortGlyph(sort)}</span>
+                </button>
+              </th>
+              <th>状态</th><th />
+            </tr></thead>
             <tbody>
               {records.map((record) => {
                 const titleHighlights = highlightValues(record, 'title')

@@ -1,7 +1,12 @@
 import process from 'node:process'
 import { createPool, runCommonMigrations } from '@qpjoy/mx-common'
 import { loadConfig } from '../config.mjs'
-import { createSearch, ensureSearchIndices, runProjectorLoop } from '../search/index.mjs'
+import {
+  createSearch,
+  ensureSearchIndices,
+  runProjectorLoop,
+  startupRebuildEnabled,
+} from '../search/index.mjs'
 import { requiredReindexBackend, requireSegmenterBackend } from '../search/reindex-integrity.mjs'
 import {
   monitorSearchReindexLock,
@@ -50,6 +55,13 @@ async function main() {
     expectedBackend: requiredReindexBackend(config.common.segmenter),
     logger,
   })
+  // Whether this restart replays the corpus is an operator setting, not a
+  // consequence of restarting. Read before taking the lock: a schema-only pass
+  // is milliseconds and must not queue behind, or block, anything.
+  const rebuildOnStartup = await startupRebuildEnabled(pool)
+  if (!rebuildOnStartup) {
+    logger.log('[projector] startup rebuild is disabled; reconciling schema only and serving')
+  }
   const startupReindexLock = await requireSearchReindexLock(pool, {
     busyMessage: 'an Admin or CLI full search reindex is running; exiting so the supervisor retries startup',
   })
@@ -63,6 +75,7 @@ async function main() {
     }, {
       logger,
       failOnError: true,
+      schemaOnly: !rebuildOnStartup,
       onProgress: () => lockHeartbeat.pulse(),
     })
     await lockHeartbeat.pulse()

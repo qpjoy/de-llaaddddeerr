@@ -60,10 +60,43 @@ export function createSearch({ pool, config, logger = console }) {
  * the whole reconciliation instead of entering a loop that only drains outbox
  * events.
  */
+/**
+ * Read whether a restart should replay the corpus.
+ *
+ * Absent table or row means "no": a deployment that has not been asked to
+ * rebuild should come up and serve.
+ */
+export async function startupRebuildEnabled(pool) {
+  if (!pool?.query) return false
+  try {
+    const { rows } = await pool.query('SELECT startup_rebuild FROM control.search_settings WHERE id')
+    return rows[0]?.startup_rebuild === true
+  } catch {
+    return false
+  }
+}
+
+export async function setStartupRebuild(pool, enabled, updatedBy = null) {
+  await pool.query(
+    `INSERT INTO control.search_settings (id, startup_rebuild, updated_by, updated_at)
+     VALUES (true, $1, $2, now())
+     ON CONFLICT (id) DO UPDATE
+       SET startup_rebuild = EXCLUDED.startup_rebuild,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = now()`,
+    [Boolean(enabled), updatedBy],
+  )
+  return { startupRebuild: Boolean(enabled) }
+}
+
 export async function ensureSearchIndices(search, {
   logger = console,
   failOnError = false,
   onProgress = null,
+  // Skip the corpus replay and only guarantee the index, template and aliases
+  // exist. That is all the projector needs to start serving and draining its
+  // outbox; the replay is a separate, deliberate operation.
+  schemaOnly = false,
 } = {}) {
   if (!search.client) return { enabled: false, reason: 'MX_COMMON_ELASTICSEARCH_URL is not configured' }
   const report = { enabled: true, content: null, chunk: null, error: null, clusterHealth: null }
@@ -88,12 +121,16 @@ export async function ensureSearchIndices(search, {
       maxBatch: search.segmenterBatchSize,
     }))
     const concurrency = search.segmenterConcurrency || 1
+    if (schemaOnly) {
+      logger?.log?.('[search] schema-only reconcile: the corpus replay is not part of startup')
+    }
     report.content = await ensureCurrentContentIndex({
       client: search.client,
       pool: search.pool,
       segmenter,
       indexSet: search.indexSet,
       concurrency,
+      schemaOnly,
       logger,
       onProgress,
     })
@@ -107,6 +144,7 @@ export async function ensureSearchIndices(search, {
         segmenter,
         indexSet: search.chunkIndexSet,
         concurrency,
+        schemaOnly,
         logger,
         onProgress,
       })
@@ -131,7 +169,11 @@ const CURRENT_REBUILD_LOCK_PREFIX = 'mx-insight-hub:search:current-rebuild:'
 // usernames and chat titles are drawn from a far smaller set than the messages
 // that carry them, so this absorbs most of the tokenizer traffic without
 // needing to hold every distinct message body.
-const SEGMENT_CACHE_MAX_ENTRIES = 200_000
+// Sized against the projector's memory limit rather than against how many
+// distinct strings exist. The win comes from the fields that repeat heavily --
+// author names, usernames, chat titles -- whose cardinality is far below this,
+// so a smaller cap keeps almost all of the benefit at a fraction of the heap.
+const SEGMENT_CACHE_MAX_ENTRIES = Number(process.env.MX_INSIGHT_SEGMENT_CACHE_ENTRIES) || 50_000
 const SEGMENT_CACHE_MAX_TEXT_LENGTH = 2_048
 
 /**
@@ -164,17 +206,23 @@ export function cachingSegmenter(segmenter) {
     return value.length <= SEGMENT_CACHE_MAX_TEXT_LENGTH ? value : null
   }
 
+  // Only verified results are cached. A degraded result is transient by nature --
+  // the strict caller is about to retry it -- so remembering one would turn a
+  // momentary tokenizer failure into a permanent hole for that text.
+  const cacheable = (result) => result?.degraded === false
+  const store = (key, result) => (cacheable(result) ? remember(key, result) : result)
+
   return {
     stats: () => ({ size: cache.size }),
-    async segmentWithMeta(text) {
+    async segmentWithMeta(text, options = {}) {
       const key = keyOf(text)
       if (key !== null && cache.has(key)) return cache.get(key)
-      return remember(key, await segmenter.segmentWithMeta(text))
+      return store(key, await segmenter.segmentWithMeta(text, options))
     },
-    async segment(text) {
+    async segment(text, options = {}) {
       const key = keyOf(text)
       if (key !== null && cache.has(key)) return cache.get(key).tokens
-      return remember(key, await segmenter.segmentWithMeta(text)).tokens
+      return store(key, await segmenter.segmentWithMeta(text, options)).tokens
     },
   }
 }
@@ -218,6 +266,70 @@ async function readRebuildProgress(connection, indexName) {
     [indexName],
   )
   return rows[0] || null
+}
+
+/**
+ * How far canonical truth is already projected into a serving index.
+ *
+ * NULL -- no row, or a row that never completed cleanly -- means unknown, and
+ * unknown must be treated as "replay everything". That is what preserves the
+ * crash-window guarantee while letting an ordinary restart replay minutes
+ * instead of the whole corpus.
+ */
+async function readReconciledThrough(connection, indexName) {
+  const { rows } = await connection.query(
+    `SELECT reconciled_through FROM control.search_rebuild_progress
+      WHERE index_name = $1`,
+    [indexName],
+  )
+  return rows[0]?.reconciled_through ?? null
+}
+
+/** Which tokenizer's verified output the live projection is made of. */
+export async function readIndexBackend(pool, indexName) {
+  if (!pool?.query || !indexName) return null
+  try {
+    const { rows } = await pool.query(
+      `SELECT segmenter_backend FROM control.search_rebuild_progress
+        WHERE index_name = $1`,
+      [indexName],
+    )
+    return rows[0]?.segmenter_backend ?? null
+  } catch {
+    // Provenance is reporting, never a precondition.
+    return null
+  }
+}
+
+// Written only after the pass it describes has fully succeeded. Recording it
+// earlier would let a crash mid-pass claim ground it never covered.
+async function saveReconciledThrough(connection, indexName, projection, through, backend) {
+  await connection.query(
+    `INSERT INTO control.search_rebuild_progress
+       (index_name, projection, reconciled_through, segmenter_backend, completed_at)
+     VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT (index_name) DO UPDATE
+       SET reconciled_through = EXCLUDED.reconciled_through,
+           segmenter_backend = coalesce(EXCLUDED.segmenter_backend, control.search_rebuild_progress.segmenter_backend),
+           projection = EXCLUDED.projection,
+           updated_at = now()`,
+    [indexName, projection, through, backend],
+  )
+}
+
+/**
+ * Name the backend a pass actually used, from the tokens it produced.
+ *
+ * Taken from a real segmentation rather than from configuration: configuration
+ * is what this process intends, provenance must be what the index received.
+ */
+async function observedBackend(segmenter) {
+  try {
+    const result = await segmenter?.segmentWithMeta?.('吴恩达与人工智能')
+    return typeof result?.backendUsed === 'string' ? result.backendUsed : null
+  } catch {
+    return null
+  }
 }
 
 async function beginRebuildProgress(connection, indexName, projection) {
@@ -271,6 +383,7 @@ export async function ensureCurrentContentIndex({
   segmenter,
   indexSet,
   concurrency = 1,
+  schemaOnly = false,
   logger = console,
   onProgress = null,
 }) {
@@ -280,6 +393,7 @@ export async function ensureCurrentContentIndex({
     segmenter,
     indexSet,
     concurrency,
+    schemaOnly,
     logger,
     onProgress,
     projection: 'content',
@@ -294,6 +408,7 @@ export async function ensureCurrentChunkIndex({
   segmenter,
   indexSet,
   concurrency = 1,
+  schemaOnly = false,
   logger = console,
   onProgress = null,
 }) {
@@ -303,6 +418,7 @@ export async function ensureCurrentChunkIndex({
     segmenter,
     indexSet,
     concurrency,
+    schemaOnly,
     logger,
     onProgress,
     projection: 'chunks',
@@ -316,6 +432,7 @@ async function ensureCurrentStateIndex({
   segmenter,
   indexSet,
   concurrency = 1,
+  schemaOnly = false,
   logger,
   onProgress,
   projection,
@@ -352,17 +469,44 @@ async function ensureCurrentStateIndex({
         return currentEnsureReport(indexSet, { mappingConflict, rebuilt: false, created: false })
       }
       // The previous process may have died after the atomic alias switch but
-      // before its second reconciliation pass.  Replaying PostgreSQL truth on
-      // every active startup closes that crash window; external_gte makes the
-      // pass safe alongside live projectors.
+      // before its second reconciliation pass, so PostgreSQL truth is replayed
+      // on startup to close that crash window; external_gte makes the pass safe
+      // alongside live projectors.
+      //
+      // Replayed from a watermark rather than from the beginning. The window
+      // this protects against is narrow, while re-segmenting the whole corpus
+      // through a single-slot tokenizer takes hours -- a cost that used to be
+      // charged on every ordinary deploy. An unclean exit leaves the watermark
+      // unmoved, so the guarantee survives: what is uncertain is still replayed,
+      // and only what is certain is skipped.
+      if (schemaOnly) {
+        return currentEnsureReport(indexSet, {
+          mappingConflict: null, rebuilt: false, created: false, indexed: 0,
+        })
+      }
+      const startedAt = new Date()
+      const reconciledThrough = await readReconciledThrough(connection, indexSet.currentIndex)
+      if (reconciledThrough) {
+        logger?.log?.(
+          `[search] ${indexSet.currentIndex} replaying changes since ${reconciledThrough.toISOString()}`,
+        )
+      } else {
+        logger?.log?.(`[search] ${indexSet.currentIndex} has no reconciliation watermark; replaying in full`)
+      }
       const indexed = await reconcileSnapshot({
         connection,
         client,
         segmenter,
         index: indexSet.currentIndex,
         concurrency,
-        onProgress: progressReporter(onProgress, projection, 'reconcile'),
+        changedSince: reconciledThrough,
+        onProgress: progressReporter(onProgress, projection, 'reconcile', { logger }),
       })
+      // Only now: the pass is complete, so this instant is genuinely covered.
+      await saveReconciledThrough(
+        connection, indexSet.currentIndex, projection, startedAt, await observedBackend(segmenter),
+      )
+      logger?.log?.(`[search] ${indexSet.currentIndex} reconciled ${indexed} record(s)`)
       return currentEnsureReport(indexSet, {
         mappingConflict: null,
         rebuilt: false,
@@ -408,10 +552,32 @@ async function ensureCurrentStateIndex({
       }
     }
 
+    if (schemaOnly) {
+      // Deliberately not skipped here. This index serves no alias yet, so there
+      // is nothing to preserve by returning early -- and the aliases must not be
+      // switched onto an unpopulated index. Startup creates it and stops; the
+      // replay that fills it is the operator's call.
+      logger?.warn?.(
+        `[search] ${indexSet.currentIndex} exists but serves no alias; run a rebuild to populate and publish it`,
+      )
+      return currentEnsureReport(indexSet, {
+        mappingConflict: null, rebuilt: false, created, indexed: 0,
+      })
+    }
     const buildStartedAt = resume
       ? resume.build_started_at
       : await beginRebuildProgress(connection, indexSet.currentIndex, projection)
     const alreadyProcessed = Number(resume?.processed || 0)
+    // Best-effort denominator for the progress line. A failure here costs the
+    // percentage, never the rebuild.
+    let total = null
+    try {
+      const { rows } = await connection.query(countStatement(projection))
+      const counted = Number(rows[0]?.total)
+      if (Number.isFinite(counted) && counted > 0) total = counted
+    } catch (error) {
+      logger?.warn?.(`[search] could not size the ${projection} rebuild: ${error.message}`)
+    }
 
     const firstPass = await reconcileSnapshot({
       connection,
@@ -424,7 +590,7 @@ async function ensureCurrentStateIndex({
       onCheckpoint: (lastId, processed) => saveRebuildProgress(
         connection, indexSet.currentIndex, lastId, processed,
       ),
-      onProgress: progressReporter(onProgress, projection, 'build'),
+      onProgress: progressReporter(onProgress, projection, 'build', { logger, total }),
     })
     const aliasState = await currentAliasState(client, indexSet)
     await switchCurrentAliases(client, indexSet, aliasState)
@@ -445,9 +611,14 @@ async function ensureCurrentStateIndex({
       index: indexSet.currentIndex,
       concurrency,
       changedSince: buildStartedAt,
-      onProgress: progressReporter(onProgress, projection, 'catch-up'),
+      onProgress: progressReporter(onProgress, projection, 'catch-up', { logger }),
     })
     await completeRebuildProgress(connection, indexSet.currentIndex)
+    // A finished build has projected everything up to when it began, so the next
+    // startup can replay the delta rather than the corpus.
+    await saveReconciledThrough(
+      connection, indexSet.currentIndex, projection, buildStartedAt, await observedBackend(segmenter),
+    )
     logger?.log?.(
       `[search] rebuilt ${indexSet.currentIndex}: first=${firstPass} catch-up=${secondPass}`,
     )
@@ -468,9 +639,46 @@ async function ensureCurrentStateIndex({
   }
 }
 
-function progressReporter(onProgress, projection, pass) {
-  if (typeof onProgress !== 'function') return null
-  return (processed) => onProgress({ projection, pass, processed })
+// A rebuild of this corpus runs for hours and, until now, logged nothing until
+// it finished: `onProgress` only pulsed a lock heartbeat. The only way to tell a
+// working rebuild from a wedged one was to read Elasticsearch's internal
+// counters and reason backwards. One throttled line per interval is enough to
+// answer "is it alive, how far, how fast" from `kubectl logs`.
+const PROGRESS_LOG_INTERVAL_MS = 60_000
+
+function countStatement(projection) {
+  return projection === 'chunks'
+    ? `SELECT count(*)::bigint AS total FROM core.record_chunks c
+         JOIN core.canonical_records r ON r.id = c.record_id
+        WHERE c.embedded_at IS NOT NULL AND c.vector IS NOT NULL
+          AND r.deleted_at IS NULL AND c.source_revision = r.current_revision`
+    : 'SELECT count(*)::bigint AS total FROM core.canonical_records'
+}
+
+function progressReporter(onProgress, projection, pass, { logger = null, total = null } = {}) {
+  const startedAt = Date.now()
+  let lastLoggedAt = startedAt
+  let lastLoggedCount = 0
+  const log = (processed) => {
+    if (!logger?.log) return
+    const now = Date.now()
+    if (now - lastLoggedAt < PROGRESS_LOG_INTERVAL_MS) return
+    const rate = Math.round(((processed - lastLoggedCount) * 1_000) / (now - lastLoggedAt))
+    const share = total ? ` of ${total} (${Math.round((processed / total) * 100)}%)` : ''
+    const eta = total && rate > 0
+      ? `, eta ${Math.round((total - processed) / rate / 60)}m`
+      : ''
+    logger.log(`[search] ${projection} ${pass}: ${processed}${share} at ${rate}/s${eta}`)
+    lastLoggedAt = now
+    lastLoggedCount = processed
+  }
+  if (typeof onProgress !== 'function') {
+    return logger?.log ? (processed) => log(processed) : null
+  }
+  return async (processed) => {
+    log(processed)
+    await onProgress({ projection, pass, processed })
+  }
 }
 
 function currentEnsureReport(indexSet, {

@@ -287,7 +287,9 @@ test('Data Center record browser pages PostgreSQL and searches the ES projection
       query: '命中',
       options: {
         datasetId: null, platform: 'twitter', objectType: null, size: 10, cursor: null,
-        offset: null, searchProfile: DEFAULT_SEARCH_PROFILE, trackTotalHits: true,
+        // Newest-first by default: relevance ranking under a 时间 column reads
+        // as unsorted data rather than as ranked data.
+        offset: null, sort: 'newest', searchProfile: DEFAULT_SEARCH_PROFILE, trackTotalHits: true,
       },
     })
     assert.deepEqual(searchBody.pageInfo, {
@@ -313,7 +315,7 @@ test('Data Center record browser pages PostgreSQL and searches the ES projection
       query: '命中',
       options: {
         datasetId: null, platform: 'twitter', objectType: null, size: 10, cursor: null,
-        offset: 20, searchProfile: DEFAULT_SEARCH_PROFILE, trackTotalHits: true,
+        offset: 20, sort: 'newest', searchProfile: DEFAULT_SEARCH_PROFILE, trackTotalHits: true,
       },
     })
 

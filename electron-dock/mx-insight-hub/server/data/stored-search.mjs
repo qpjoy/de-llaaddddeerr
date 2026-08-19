@@ -12,7 +12,9 @@ const STORED_ALLOWED_FIELDS = new Set([
   // excluded from the normalized query, which describes only what to search.
   'cursor', 'datasetId', 'objectType', 'pageSize', 'platform', 'query', 'type',
 ])
-const CANONICAL_ALLOWED_FIELDS = new Set([...STORED_ALLOWED_FIELDS, 'searchProfile'])
+const CANONICAL_ALLOWED_FIELDS = new Set([...STORED_ALLOWED_FIELDS, 'searchProfile', 'sort'])
+// `id` terminates every ordering, so all three are total and page deterministically.
+const CANONICAL_SORTS = new Set(['newest', 'oldest', 'relevance'])
 const CURSOR_VERSION = 2
 const SORT_VERSION = 'score-eventTime-id-sharddoc-or-eventTime-id-v2'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -75,8 +77,28 @@ function canonicalQueryBinding(query) {
       objectType: query.objectType,
       pageSize: query.pageSize,
       searchProfile: query.searchProfile,
+      // The requested ordering is part of what a cursor means. Omitting it would
+      // let a caller flip the order and keep paging from a position computed
+      // under the previous one, silently skipping and repeating rows.
+      requestedSort: query.sort,
     }))
     .digest('base64url')
+}
+
+/**
+ * Newest-first by default, matching the Data Center console.
+ *
+ * Relevance remains available by name. It is not the default because a caller
+ * scanning a corpus reads an unexplained score order as unsorted data, and
+ * because two surfaces over the same index answering differently is a trap.
+ */
+function sortValue(value) {
+  if (value == null || value === '') return 'newest'
+  const normalized = String(value).trim()
+  if (!CANONICAL_SORTS.has(normalized)) {
+    throw new AppError(400, 'invalid_sort', `sort must be one of ${[...CANONICAL_SORTS].join(', ')}`)
+  }
+  return normalized
 }
 
 function cursorSignature(payload, secret) {
@@ -276,6 +298,7 @@ export function normalizeCanonicalSearchQuery(input, {
       input.searchProfile ?? DEFAULT_SEARCH_PROFILE,
       { audience: 'public' },
     ).id,
+    sort: sortValue(input.sort),
   }
   const cursorBinding = canonicalQueryBinding(normalized)
   const cursorToken = stringValue(input.cursor, 'cursor', 8_192)

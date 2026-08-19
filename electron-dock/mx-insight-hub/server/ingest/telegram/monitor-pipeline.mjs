@@ -126,6 +126,24 @@ function sourceCoordinates(connection = {}) {
   }
 }
 
+// Ten sync cycles, floored at 15 minutes. Kept identical to the SQLite pipeline:
+// two different bars for the same judgement would be a trap, not a feature.
+const ABANDONED_RUN_CYCLES = 10
+const ABANDONED_RUN_FLOOR_MS = 15 * 60 * 1_000
+
+function cursorSilenceMs(cursor) {
+  const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
+  if (!updatedAt) return null
+  return Date.now() - new Date(updatedAt).getTime()
+}
+
+function abandonedRun(source, cursor) {
+  const silence = cursorSilenceMs(cursor)
+  if (silence == null) return false
+  const cadence = Number(source?.syncIntervalSeconds || 300) * 1_000
+  return silence >= Math.max(cadence * ABANDONED_RUN_CYCLES, ABANDONED_RUN_FLOOR_MS)
+}
+
 function nextDueAt(source, cursor) {
   const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
   if (!updatedAt || source.syncIntervalSeconds == null) return null
@@ -615,13 +633,26 @@ export class TelegramMonitorPipeline {
     return this.#withLocks(keys, async () => {
       const sources = await this.#sources()
       const cursors = await Promise.all(keys.map((key) => this.#cursor(key)))
-      if (cursors.some((cursor) => cursor?.status === 'running')) {
-        throw new AppError(409, 'source_draining', 'Wait for both Telegram monitor tasks to reach a checkpoint')
+      // Same bar as the SQLite pipeline: a live batch is untouchable, a run that
+      // has been silent for ten cycles has no worker left to protect.
+      const draining = sources
+        .map((source, index) => ({ source, cursor: cursors[index] }))
+        .filter(({ source, cursor }) => (
+          cursor?.status === 'running' && !abandonedRun(source, cursor)
+        ))
+      if (draining.length > 0) {
+        throw new AppError(
+          409,
+          'source_draining',
+          'Wait for both Telegram monitor tasks to reach a checkpoint',
+          { sourceKeys: draining.map(({ source }) => source.sourceKey) },
+        )
       }
       const resumed = []
       for (const [index, source] of sources.entries()) {
         const cursor = cursors[index]
-        if (cursor?.status !== 'failed') {
+        const abandoned = cursor?.status === 'running' && abandonedRun(source, cursor)
+        if (cursor?.status !== 'failed' && !abandoned) {
           resumed.push({ sourceKey: source.sourceKey, status: cursor?.status ?? 'idle', resumed: false })
           continue
         }
@@ -634,6 +665,8 @@ export class TelegramMonitorPipeline {
           sourceKey: source.sourceKey,
           status: 'idle',
           resumed: true,
+          from: abandoned ? 'abandoned_run' : 'failed',
+          silentForMs: abandoned ? cursorSilenceMs(cursor) : null,
           clearedError: cursor.error ?? null,
         })
       }

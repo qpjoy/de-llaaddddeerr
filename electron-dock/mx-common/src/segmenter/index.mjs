@@ -110,7 +110,7 @@ export class HanlpSegmenter {
    * Alignment is checked rather than assumed: a short or reordered response
    * would attach one record's tokens to another, which is worse than failing.
    */
-  async segmentBatchWithMeta(texts) {
+  async segmentBatchWithMeta(texts, { allowFallback = true } = {}) {
     if (texts.length === 0) return []
     // An older tokenizer has no /tokenize/batch. Falling back to the per-text
     // endpoint keeps full HanLP provenance -- only the request shape changes --
@@ -163,6 +163,7 @@ export class HanlpSegmenter {
       return Promise.all(results.map(async (result, index) => {
         if (result) return result
         if (!texts[index]) return segmentResult([], 'hanlp')
+        if (!allowFallback) return segmentResult([], null, true, 'hanlp_empty_response')
         const fallback = await this.fallbackSegmenter.segmentWithMeta(texts[index])
         return segmentResult(fallback.tokens, fallback.backendUsed, true, 'hanlp_empty_response')
       }))
@@ -173,6 +174,14 @@ export class HanlpSegmenter {
         : error?.segmenterCode || 'hanlp_request_error'
       this.available = false
       this.lastError = message
+      // A strict caller discards fallback tokens by definition, so computing
+      // them is pure waste -- and under batching it is a burst of up to one
+      // native jieba call per text, concurrently, for results nobody will use.
+      // That burst is what segfaulted the projector once an hour.
+      if (!allowFallback) {
+        this.logger?.warn?.(`[mx-common] HanLP batch segmentation failed, no fallback requested: ${message}`)
+        return texts.map(() => segmentResult([], null, true, errorCode, message))
+      }
       this.logger?.warn?.(`[mx-common] HanLP batch segmentation failed, using jieba fallback: ${message}`)
       return Promise.all(texts.map(async (text) => {
         const fallback = await this.fallbackSegmenter.segmentWithMeta(text)
@@ -183,7 +192,7 @@ export class HanlpSegmenter {
     }
   }
 
-  async segmentWithMeta(text) {
+  async segmentWithMeta(text, { allowFallback = true } = {}) {
     if (!text) return segmentResult([], 'hanlp')
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
@@ -224,6 +233,10 @@ export class HanlpSegmenter {
         : error?.segmenterCode || 'hanlp_request_error'
       this.available = false
       this.lastError = message
+      if (!allowFallback) {
+        this.logger?.warn?.(`[mx-common] HanLP segmentation failed, no fallback requested: ${message}`)
+        return segmentResult([], null, true, errorCode, message)
+      }
       this.logger?.warn?.(`[mx-common] HanLP segmentation failed, using jieba fallback: ${message}`)
       const fallback = await this.fallbackSegmenter.segmentWithMeta(text)
       return segmentResult(fallback.tokens, fallback.backendUsed, true, errorCode, message)
@@ -304,6 +317,7 @@ async function loadDefaultJieba() {
 export class JiebaSegmenter {
   #instance = null
   #loading = null
+  #queue = Promise.resolve()
 
   constructor({ logger = console, loadImpl = loadDefaultJieba } = {}) {
     this.logger = logger
@@ -343,6 +357,22 @@ export class JiebaSegmenter {
 
   async segmentWithMeta(text) {
     if (!text) return segmentResult([], 'jieba')
+    // Native calls are serialized. @node-rs/jieba is a Rust binding, and driving
+    // `cutAsync` from many concurrent callers segfaulted the projector process
+    // (exit 139) roughly once an hour. Serializing costs throughput only on the
+    // fallback path, which is by definition already degraded.
+    const previous = this.#queue
+    let release
+    this.#queue = new Promise((resolve) => { release = resolve })
+    await previous
+    try {
+      return await this.#segmentSerialized(text)
+    } finally {
+      release()
+    }
+  }
+
+  async #segmentSerialized(text) {
     const jieba = await this.#load()
     if (!jieba) {
       return segmentResult(fallbackSegment(text), 'bigram', true, 'jieba_unavailable')
@@ -444,7 +474,14 @@ export function batchingSegmenter(segmenter, { maxBatch = 64 } = {}) {
       const batch = pending.slice(0, maxBatch)
       pending = pending.slice(maxBatch)
       try {
-        const results = await segmenter.segmentBatchWithMeta(batch.map((entry) => entry.text))
+        // Every entry in a coalesced batch shares one request, so the strictest
+        // choice in it wins: never compute a fallback someone in this batch
+        // would reject.
+        const allowFallback = batch.every((entry) => entry.options?.allowFallback !== false)
+        const results = await segmenter.segmentBatchWithMeta(
+          batch.map((entry) => entry.text),
+          { allowFallback },
+        )
         // Defensive: a misaligned batch must fail its callers rather than hand
         // any of them another record's tokens.
         if (!Array.isArray(results) || results.length !== batch.length) {
@@ -458,18 +495,18 @@ export function batchingSegmenter(segmenter, { maxBatch = 64 } = {}) {
   }
 
   return {
-    async segmentWithMeta(text) {
+    async segmentWithMeta(text, options = {}) {
       if (!text) return segmentResult([], 'hanlp')
       return new Promise((resolve, reject) => {
-        pending.push({ text, resolve, reject })
+        pending.push({ text, resolve, reject, options })
         if (!scheduled) {
           scheduled = true
           queueMicrotask(flush)
         }
       })
     },
-    async segment(text) {
-      return (await this.segmentWithMeta(text)).tokens
+    async segment(text, options = {}) {
+      return (await this.segmentWithMeta(text, options)).tokens
     },
   }
 }

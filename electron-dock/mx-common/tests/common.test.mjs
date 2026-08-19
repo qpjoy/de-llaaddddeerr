@@ -1260,3 +1260,77 @@ test('deploying HanLP resolves the same host root as the rest of the stack', asy
   const body = manage.slice(manage.indexOf('cmd_deploy_hanlp()'))
   assert.match(body.slice(0, 600), /resolve_host_data_root/)
 })
+
+
+test('a strict caller never triggers the native fallback it would discard', async () => {
+  const { HanlpSegmenter, batchingSegmenter } = await import('../src/segmenter/index.mjs')
+  let fallbackCalls = 0
+  const hanlp = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    fetchImpl: async () => new Response('{"error":"tokenizer is busy"}', { status: 429 }),
+    fallbackSegmenter: {
+      async segmentWithMeta(text) {
+        fallbackCalls += 1
+        return { tokens: [`jieba:${text}`], backendUsed: 'jieba', degraded: false, errorCode: null }
+      },
+    },
+    logger: { warn() {} },
+  })
+  const batching = batchingSegmenter(hanlp)
+
+  const results = await Promise.all(
+    ['a', 'b', 'c'].map((text) => batching.segmentWithMeta(text, { allowFallback: false })),
+  )
+
+  // @node-rs/jieba is a native binding; a failed batch used to fan out one
+  // concurrent native call per text for tokens the strict caller rejects on
+  // arrival, and that burst segfaulted the process.
+  assert.equal(fallbackCalls, 0)
+  assert.equal(results.every((result) => result.degraded === true), true)
+  assert.equal(results.every((result) => result.backendUsed === null), true)
+  assert.equal(results.every((result) => result.tokens.length === 0), true)
+})
+
+test('the fallback still runs for callers that accept degraded tokens', async () => {
+  const { HanlpSegmenter } = await import('../src/segmenter/index.mjs')
+  let fallbackCalls = 0
+  const hanlp = new HanlpSegmenter({
+    url: 'http://hanlp:8000',
+    fetchImpl: async () => new Response('{"error":"busy"}', { status: 429 }),
+    fallbackSegmenter: {
+      async segmentWithMeta() {
+        fallbackCalls += 1
+        return { tokens: ['jieba'], backendUsed: 'jieba', degraded: false, errorCode: null }
+      },
+    },
+    logger: { warn() {} },
+  })
+
+  // Live ingest must keep flowing on degraded tokens; only a rebuild refuses them.
+  const result = await hanlp.segmentWithMeta('人工智能')
+  assert.equal(fallbackCalls, 1)
+  assert.equal(result.backendUsed, 'jieba')
+  assert.equal(result.degraded, true)
+})
+
+test('native jieba calls are serialized', async () => {
+  const { JiebaSegmenter } = await import('../src/segmenter/index.mjs')
+  let inFlight = 0
+  let peak = 0
+  const segmenter = new JiebaSegmenter({
+    logger: { warn() {} },
+    loadImpl: async () => ({
+      async cutAsync(text) {
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        await new Promise((resolve) => setTimeout(resolve, 2))
+        inFlight -= 1
+        return [text]
+      },
+    }),
+  })
+
+  await Promise.all(['a', 'b', 'c', 'd'].map((text) => segmenter.segment(text)))
+  // Concurrent cutAsync crashed the process with SIGSEGV once an hour.
+  assert.equal(peak, 1)
+})

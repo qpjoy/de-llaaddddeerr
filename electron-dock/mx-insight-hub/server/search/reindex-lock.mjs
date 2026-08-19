@@ -116,3 +116,41 @@ export function monitorSearchReindexLock(lock, { intervalMs = 10_000 } = {}) {
     },
   }
 }
+
+/**
+ * Name whoever currently holds the global rebuild lock.
+ *
+ * "Another CLI or Admin search reindex holds the lock" is true and useless: the
+ * projector takes the same lock for its startup reconciliation and writes no
+ * operation row, so the page reported a busy system with no way to learn who
+ * was busy or for how long. PostgreSQL already knows both.
+ *
+ * Reported, never enforced -- a failure to introspect must not turn a working
+ * rebuild into an error.
+ */
+export async function describeSearchReindexLockHolder(pool) {
+  if (!pool?.query) return null
+  try {
+    const { rows } = await pool.query(
+      `SELECT a.application_name AS holder,
+              a.state,
+              extract(epoch FROM now() - a.backend_start)::bigint AS held_seconds
+         FROM pg_locks l
+         JOIN pg_stat_activity a ON a.pid = l.pid
+        WHERE l.locktype = 'advisory'
+          AND l.granted
+          AND a.pid <> pg_backend_pid()
+        ORDER BY a.backend_start
+        LIMIT 1`,
+    )
+    const row = rows[0]
+    if (!row) return null
+    return {
+      holder: row.holder || 'unknown',
+      state: row.state || null,
+      heldSeconds: Number(row.held_seconds) || 0,
+    }
+  } catch {
+    return null
+  }
+}

@@ -736,6 +736,7 @@ export class HubService {
       pageSize: query.pageSize,
       searchProfile: query.searchProfile,
       cursor: query.cursorToken,
+      sort: query.sort,
       type: resultType,
     }
     const requestId = randomUUID()
@@ -786,6 +787,7 @@ export class HubService {
       // never replace it. The common projection produces one globally ranked
       // result list rather than merging incomparable per-source scores.
       const result = await this.searchQueries.searchContent(query.query, {
+        sort: query.sort,
         platforms: query.platforms,
         datasetId: query.datasetId,
         objectType: query.objectType,

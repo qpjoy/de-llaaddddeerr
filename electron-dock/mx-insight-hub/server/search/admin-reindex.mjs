@@ -1,9 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { describeClusterHealth } from '@qpjoy/mx-common/elasticsearch'
 import { AppError } from '../core/errors.mjs'
-import { ensureSearchIndices } from './index.mjs'
+import {
+  ensureSearchIndices,
+  readIndexBackend,
+  setStartupRebuild,
+  startupRebuildEnabled,
+} from './index.mjs'
 import { requiredReindexBackend, requireSegmenterBackend } from './reindex-integrity.mjs'
 import {
+  describeSearchReindexLockHolder,
   monitorSearchReindexLock,
   tryAcquireSearchReindexLock,
 } from './reindex-lock.mjs'
@@ -64,6 +70,48 @@ export class AdminSearchReindex {
     this.preflightCache = null
   }
 
+  /** Ask a running rebuild to stop at its next batch boundary. */
+  async cancel({ requestedBy = 'admin-token' } = {}) {
+    const active = await this.#activeOperation()
+    if (!active) {
+      throw new AppError(409, 'search_reindex_not_running', 'No search reindex is running')
+    }
+    await this.pool.query(
+      `UPDATE control.search_reindex_operations
+          SET cancel_requested_at = coalesce(cancel_requested_at, now()), updated_at = now()
+        WHERE id = $1 AND status IN ('queued', 'running')`,
+      [active.id],
+    )
+    this.logger?.log?.(`[search] cancel requested for reindex ${active.id} by ${requestedBy}`)
+    // Cooperative on purpose: the runner stops between batches so every
+    // document already written stays durable and the aliases are never left
+    // pointing at a half-built index.
+    return { operation: publicOperation(await this.#latestOperation(), { cancelRequested: true }) }
+  }
+
+  async startupRebuild() {
+    return { startupRebuild: await startupRebuildEnabled(this.pool) }
+  }
+
+  async setStartupRebuild(enabled, { requestedBy = 'admin-token' } = {}) {
+    if (typeof enabled !== 'boolean') {
+      throw new AppError(400, 'invalid_request', 'enabled must be a boolean')
+    }
+    return setStartupRebuild(this.pool, enabled, requestedBy)
+  }
+
+  async #cancelRequested(id) {
+    try {
+      const { rows } = await this.pool.query(
+        'SELECT cancel_requested_at FROM control.search_reindex_operations WHERE id = $1',
+        [id],
+      )
+      return rows[0]?.cancel_requested_at != null
+    } catch {
+      return false
+    }
+  }
+
   async status() {
     let row = await this.#latestOperation()
     if (ACTIVE_STATUSES.has(row?.status)) {
@@ -90,6 +138,9 @@ export class AdminSearchReindex {
     )]
     let expectedBackend = null
     let sourceIndexSchema = null
+    // What the live projection is made of, as opposed to what this process is
+    // configured to produce. They diverged once already, silently.
+    const activeBackend = await readIndexBackend(this.pool, this.search?.indexSet?.currentIndex)
     const targetIndexSchema = this.search?.indexSet?.schemaVersion == null
       ? null
       : `content-v${this.search.indexSet.schemaVersion}`
@@ -204,10 +255,38 @@ export class AdminSearchReindex {
       ))
     }
 
+    // Strict verification proves tokens came from the *configured* backend. It
+    // cannot know that the configuration was intended. An empty HanLP URL once
+    // resolved the requirement to jieba, passed every check, and rebuilt the
+    // whole corpus in six minutes -- fast because nothing was ever segmented by
+    // HanLP. Saying so out loud is the only thing that catches that class of
+    // mistake, because every other signal looked healthy.
+    if (expectedBackend && expectedBackend !== 'hanlp') {
+      warnings.push(issue(
+        'tokenizer_downgrade',
+        `This rebuild would produce a ${expectedBackend} index, not a HanLP one.`,
+        this.segmenterConfig?.hanlpUrl
+          ? `MX_COMMON_SEGMENTER pins ${expectedBackend}; clear it to use HanLP.`
+          : 'MX_COMMON_HANLP_URL is empty in this runtime, so HanLP cannot be required. Restore it before rebuilding unless a lower-quality index is intended.',
+      ))
+    }
+    if (activeBackend && expectedBackend && activeBackend !== expectedBackend) {
+      warnings.push(issue(
+        'tokenizer_backend_change',
+        `The live index was built with ${activeBackend}; this rebuild would replace it with ${expectedBackend}.`,
+        'Confirm this is the direction you want before starting.',
+      ))
+    }
+
     const value = {
       ready: blockers.length === 0,
       blockers,
       warnings,
+      activeBackend,
+      startupRebuild: await startupRebuildEnabled(this.pool),
+      // Acknowledgement is required for anything but HanLP, so the UI can ask
+      // rather than let a downgrade through on a single click.
+      requiresBackendAcknowledgement: Boolean(expectedBackend && expectedBackend !== 'hanlp'),
       projectorRequired: false,
       projectorReadyReplicas: null,
       expectedBackend,
@@ -218,7 +297,7 @@ export class AdminSearchReindex {
     return value
   }
 
-  async start({ requestedBy, requestId = null }) {
+  async start({ requestedBy, requestId = null, acknowledgeBackend = null }) {
     const lock = await tryAcquireSearchReindexLock(this.pool)
     if (!lock) {
       const active = await this.#activeOperation()
@@ -228,11 +307,23 @@ export class AdminSearchReindex {
           operation: publicOperation(active, { alreadyRunning: true }),
         }
       }
+      // The projector takes this same lock for its startup reconciliation and
+      // writes no operation row, so "something else is running" was previously
+      // the whole story. Name it.
+      const owner = await describeSearchReindexLockHolder(this.pool)
+      const minutes = owner ? Math.round(owner.heldSeconds / 60) : null
       throw new AppError(
         409,
         'search_reindex_busy',
-        'Another CLI or Admin search reindex holds the global rebuild lock',
-        { action: 'Wait for the running rebuild to finish, then refresh this page.' },
+        owner
+          ? `${owner.holder} has held the global rebuild lock for ${minutes} minute(s)`
+          : 'Another CLI or Admin search reindex holds the global rebuild lock',
+        {
+          ...(owner ? { holder: owner.holder, heldSeconds: owner.heldSeconds } : {}),
+          action: owner?.holder?.includes('projector')
+            ? 'The projector rebuilds on startup and does the same strict work; let it finish, or scale it to zero to run this from the Admin UI instead.'
+            : 'Wait for the running rebuild to finish, then refresh this page.',
+        },
       )
     }
     const lockHeartbeat = monitorSearchReindexLock(lock)
@@ -243,6 +334,18 @@ export class AdminSearchReindex {
       // the single-slot HanLP backend, so a losing POST must not create the very
       // tokenizer contention the lock is intended to prevent.
       preflight = await this.preflight({ fresh: true })
+      if (preflight.requiresBackendAcknowledgement && acknowledgeBackend !== preflight.expectedBackend) {
+        throw new AppError(
+          409,
+          'tokenizer_acknowledgement_required',
+          `This rebuild produces ${preflight.expectedBackend} tokens; acknowledge the backend to proceed`,
+          {
+            expectedBackend: preflight.expectedBackend,
+            activeBackend: preflight.activeBackend,
+            action: `Resend with acknowledgeBackend="${preflight.expectedBackend}", or restore HanLP first.`,
+          },
+        )
+      }
       if (!preflight.ready) {
         throw new AppError(
           409,
@@ -326,6 +429,13 @@ export class AdminSearchReindex {
         failOnError: true,
         onProgress: async ({ projection, pass, processed }) => {
           lockHeartbeat.assertHealthy()
+          if (await this.#cancelRequested(id)) {
+            throw new AppError(
+              409,
+              'search_reindex_cancelled',
+              `Search reindex cancelled after ${processed} record(s)`,
+            )
+          }
           const passKey = `${projection}:${pass}`
           passProgress.set(passKey, processed)
           const cumulativeProcessed = [...passProgress.values()]
@@ -352,14 +462,16 @@ export class AdminSearchReindex {
       })
       this.preflightCache = null
     } catch (error) {
-      this.logger?.error?.(`[search] Admin reindex failed: ${safeMessage(error)}`)
+      const cancelled = error?.code === 'search_reindex_cancelled'
+      const report = cancelled ? this.logger?.log : this.logger?.error
+      report?.call(this.logger, `[search] Admin reindex ${cancelled ? 'cancelled' : 'failed'}: ${safeMessage(error)}`)
       await this.#update(lock.client, id, {
         status: 'failed',
         phase: 'failed',
         finished: true,
         errorCode: error?.code || 'search_reindex_failed',
         errorMessage: safeMessage(error),
-        log: { level: 'error', message: safeMessage(error) },
+        log: { level: cancelled ? 'info' : 'error', message: safeMessage(error) },
       }).catch((updateError) => {
         this.logger?.error?.(`[search] could not persist Admin reindex failure: ${safeMessage(updateError)}`)
       })

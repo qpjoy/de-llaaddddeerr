@@ -264,6 +264,44 @@ function telegramTaskCursorStatus(task) {
   return task?.cursor?.status || task?.latestRun?.status || task?.source?.status || 'idle'
 }
 
+// Ten sync cycles, floored at 15 minutes -- the same bar the server applies.
+const ABANDONED_RUN_CYCLES = 10
+const ABANDONED_RUN_FLOOR_MS = 15 * 60 * 1_000
+
+function telegramTaskSilenceMs(task) {
+  const updatedAt = task?.cursor?.updatedAt || task?.cursor?.updated_at
+  if (!updatedAt) return null
+  const silence = Date.now() - new Date(updatedAt).getTime()
+  return Number.isFinite(silence) ? silence : null
+}
+
+/**
+ * A task the scheduler will never pick up again without help.
+ *
+ * `failed` is the obvious case. A `running` cursor whose worker died is the
+ * quiet one: it also makes isDue false, it also freezes the paired task, and
+ * nothing ever moves it back on its own.
+ */
+function telegramTaskStuck(task) {
+  const status = telegramTaskCursorStatus(task)
+  if (status === 'failed') return true
+  if (status !== 'running') return false
+  const silence = telegramTaskSilenceMs(task)
+  if (silence == null) return false
+  const cadence = Number(task?.source?.syncIntervalSeconds || 300) * 1_000
+  return silence >= Math.max(cadence * ABANDONED_RUN_CYCLES, ABANDONED_RUN_FLOOR_MS)
+}
+
+function telegramStuckDescription(task) {
+  const status = telegramTaskCursorStatus(task)
+  if (status === 'failed') return '游标停在 failed'
+  const silence = telegramTaskSilenceMs(task)
+  const minutes = silence == null ? null : Math.round(silence / 60_000)
+  return minutes == null
+    ? '运行中但已静默'
+    : `运行中但已静默 ${minutes >= 120 ? `${Math.round(minutes / 60)} 小时` : `${minutes} 分钟`}`
+}
+
 function telegramTaskSourceKey(task) {
   if (typeof task?.source === 'string') return task.source
   return task?.source?.sourceKey || task?.sourceKey || ''
@@ -584,7 +622,7 @@ function TelegramSqlitePipelineModal({
   const tasks = pipeline.tasks || []
   // The scheduler treats any cursor that is not idle as not due, and both tasks
   // are enqueued together, so one failed cursor silently freezes the pair.
-  const failedTasks = tasks.filter((task) => telegramTaskCursorStatus(task) === 'failed')
+  const failedTasks = tasks.filter((task) => telegramTaskStuck(task))
 
   return (
     <Modal
@@ -615,8 +653,8 @@ function TelegramSqlitePipelineModal({
           )}
           {failedTasks.length > 0 ? (
             <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)}
-              title="仅清除失败状态，从上次 checkpoint 继续；不会重放数据" onClick={resumeFailed}>
-              <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '从失败恢复'}
+              title="清除失败或已静默的运行状态，从上次 checkpoint 继续；不会重放数据" onClick={resumeFailed}>
+              <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '恢复卡住的任务'}
             </button>
           ) : null}
           <button className="qp-button" type="button" disabled={Boolean(busyAction) || pipeline.status !== 'active'} onClick={runSync}>
@@ -628,9 +666,10 @@ function TelegramSqlitePipelineModal({
       {failedTasks.length > 0 ? (
         <p className="mih-inline-warning">
           <Warning size={16} aria-hidden="true" />
-          {failedTasks.map((task) => telegramSqliteTaskMeta(task).label).join('、')} 的游标停在 failed。
-          两个任务同批调度，所以一个失败会连带另一个一起停止排程，直到人工恢复。
-          「从失败恢复」只清除失败状态并从各自 checkpoint 继续，不重放数据，也不重置 Checkpoint。
+          {failedTasks.map((task) => `${telegramSqliteTaskMeta(task).label}（${telegramStuckDescription(task)}）`).join('、')}。
+          两个任务同批调度，所以一个卡住会连带另一个一起停止排程，直到人工恢复。
+          「恢复卡住的任务」只清除卡住状态并从各自 checkpoint 继续，不重放数据，也不重置 Checkpoint。
+          判定标准是静默超过 10 个同步周期（默认 50 分钟）；仍在推进的批次不会被打断。
         </p>
       ) : null}
 
@@ -868,9 +907,7 @@ function TelegramPipelineModal({
 
   // One failed cursor stops the pair, because both tasks are scheduled together
   // and the scheduler skips any cursor that is not idle.
-  const failedTasks = (pipeline.tasks || []).filter(
-    (task) => telegramTaskCursorStatus(task) === 'failed',
-  )
+  const failedTasks = (pipeline.tasks || []).filter((task) => telegramTaskStuck(task))
 
   const resetCheckpoints = (event) => {
     event.preventDefault()
@@ -920,8 +957,8 @@ function TelegramPipelineModal({
           )}
           {failedTasks.length > 0 ? (
             <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)}
-              title="仅清除失败状态，从上次 checkpoint 继续；不会重放数据" onClick={resumeFailed}>
-              <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '从失败恢复'}
+              title="清除失败或已静默的运行状态，从上次 checkpoint 继续；不会重放数据" onClick={resumeFailed}>
+              <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '恢复卡住的任务'}
             </button>
           ) : null}
           <button className="qp-button" type="button" disabled={Boolean(busyAction) || pipeline.status !== 'active'} onClick={runSync}>
@@ -933,9 +970,10 @@ function TelegramPipelineModal({
       {failedTasks.length > 0 ? (
         <p className="mih-inline-warning">
           <Warning size={16} aria-hidden="true" />
-          {failedTasks.map((task) => telegramTaskMeta(task).label).join('、')} 的游标停在 failed。
-          两个任务同批调度，所以一个失败会连带另一个一起停止排程，直到人工恢复。
-          「从失败恢复」只清除失败状态并从各自 checkpoint 继续，不重放数据，也不重置 Checkpoint。
+          {failedTasks.map((task) => `${telegramTaskMeta(task).label}（${telegramStuckDescription(task)}）`).join('、')}。
+          两个任务同批调度，所以一个卡住会连带另一个一起停止排程，直到人工恢复。
+          「恢复卡住的任务」只清除卡住状态并从各自 checkpoint 继续，不重放数据，也不重置 Checkpoint。
+          判定标准是静默超过 10 个同步周期（默认 50 分钟）；仍在推进的批次不会被打断。
         </p>
       ) : null}
 

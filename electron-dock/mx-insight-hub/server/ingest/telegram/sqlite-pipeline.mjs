@@ -5,6 +5,13 @@ import { EXTERNAL_PULL_QUEUE } from '../external/sync-job.mjs'
 export const TELEGRAM_SQLITE_PIPELINE_KEY = 'telegram-sqlite'
 export const TELEGRAM_SQLITE_MAPPING_VERSION = 2
 
+// A run silent for ten sync cycles -- 50 minutes at the default 300s cadence --
+// is treated as lost. Ten cycles is well beyond any healthy batch, and the floor
+// keeps a very short interval from lowering the bar to something a live worker
+// could cross between checkpoints.
+const ABANDONED_RUN_CYCLES = 10
+const ABANDONED_RUN_FLOOR_MS = 15 * 60 * 1_000
+
 export const TELEGRAM_SQLITE_INPUTS = Object.freeze([
   Object.freeze({
     role: 'chats',
@@ -236,6 +243,25 @@ export class TelegramSQLitePipeline {
 
   async #cursor(sourceKey) {
     return this.queue?.getCursor?.(`external:${sourceKey}`) ?? null
+  }
+
+  #cursorSilenceMs(cursor) {
+    const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
+    if (!updatedAt) return null
+    return Date.now() - new Date(updatedAt).getTime()
+  }
+
+  /**
+   * Has this `running` cursor been silent long enough to call its run lost?
+   *
+   * Scaled to the source's own cadence rather than a flat constant, with a floor
+   * so a minimal interval cannot make the bar trivially low.
+   */
+  #cursorAbandoned(source, cursor) {
+    const silence = this.#cursorSilenceMs(cursor)
+    if (silence == null) return false
+    const cadence = Number(source?.syncIntervalSeconds || 300) * 1_000
+    return silence >= Math.max(cadence * ABANDONED_RUN_CYCLES, ABANDONED_RUN_FLOOR_MS)
   }
 
   async #withLocks(operation) {
@@ -555,13 +581,30 @@ export class TelegramSQLitePipeline {
     return this.#withLocks(async () => {
       const sources = await this.#sources()
       const cursors = await Promise.all(sources.map((source) => this.#cursor(source.sourceKey)))
-      if (cursors.some((cursor) => cursor?.status === 'running')) {
-        throw new AppError(409, 'source_draining', 'Wait for both Telegram SQLite tasks to reach a checkpoint')
+      // A `running` cursor that is still being written is someone else's work.
+      // One that has been silent far longer than a sync cycle is a run whose
+      // worker died -- the cursor table records no lease or heartbeat, so
+      // silence is the only evidence available. Resuming a live run would not
+      // corrupt anything (canonical identity absorbs the replay) but it would
+      // waste a full remote read, so the bar is deliberately high.
+      const draining = sources
+        .map((source, index) => ({ source, cursor: cursors[index] }))
+        .filter(({ source, cursor }) => (
+          cursor?.status === 'running' && !this.#cursorAbandoned(source, cursor)
+        ))
+      if (draining.length > 0) {
+        throw new AppError(
+          409,
+          'source_draining',
+          'Wait for both Telegram SQLite tasks to reach a checkpoint',
+          { sourceKeys: draining.map(({ source }) => source.sourceKey) },
+        )
       }
       const resumed = []
       for (const [index, source] of sources.entries()) {
         const cursor = cursors[index]
-        if (cursor?.status !== 'failed') {
+        const abandoned = cursor?.status === 'running' && this.#cursorAbandoned(source, cursor)
+        if (cursor?.status !== 'failed' && !abandoned) {
           resumed.push({ sourceKey: source.sourceKey, status: cursor?.status ?? 'idle', resumed: false })
           continue
         }
@@ -576,6 +619,8 @@ export class TelegramSQLitePipeline {
           sourceKey: source.sourceKey,
           status: 'idle',
           resumed: true,
+          from: abandoned ? 'abandoned_run' : 'failed',
+          silentForMs: abandoned ? this.#cursorSilenceMs(cursor) : null,
           clearedError: cursor.error ?? null,
         })
       }

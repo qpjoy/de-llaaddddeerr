@@ -511,3 +511,58 @@ test('a draining task is never resumed out from under itself', async () => {
     (error) => error.code === 'source_draining',
   )
 })
+
+
+test('a run silent past the threshold is recovered from its checkpoint', async () => {
+  const fixture = pipelineFixture()
+  const checkpoint = { cycle: { mode: 'incremental', page: 47 }, lastSweepRows: 23_000 }
+  fixture.cursors.set('external:telegram-sqlite-api-chats', {
+    id: 'external:telegram-sqlite-api-chats', status: 'idle', position: {},
+    updated_at: new Date().toISOString(),
+  })
+  // The worker died two days ago; the cursor still claims to be running, which
+  // makes isDue false and freezes the paired task too.
+  fixture.cursors.set('external:telegram-sqlite-api-messages', {
+    id: 'external:telegram-sqlite-api-messages',
+    status: 'running',
+    position: checkpoint,
+    updated_at: new Date(Date.now() - 48 * 3_600_000).toISOString(),
+  })
+  const saved = []
+  fixture.queue.saveCursor = async (id, position, options) => {
+    saved.push({ id, position, options })
+    return { id, position, ...options }
+  }
+
+  const result = await new TelegramSQLitePipeline(fixture).resumeFailedTasks()
+
+  assert.equal(saved.length, 1)
+  assert.equal(saved[0].options.status, 'idle')
+  // The durable checkpoint is what makes this cheap: no re-read, no reset.
+  assert.deepEqual(saved[0].position, checkpoint)
+  const messages = result.tasks.find((task) => task.sourceKey.endsWith('messages'))
+  assert.equal(messages.resumed, true)
+  assert.equal(messages.from, 'abandoned_run')
+  assert.ok(messages.silentForMs > 47 * 3_600_000)
+})
+
+test('a run still within the threshold is left alone', async () => {
+  const fixture = pipelineFixture()
+  fixture.cursors.set('external:telegram-sqlite-api-messages', {
+    id: 'external:telegram-sqlite-api-messages',
+    status: 'running',
+    position: {},
+    // One cycle old: this is a live batch, not a lost one.
+    updated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+  })
+
+  await assert.rejects(
+    () => new TelegramSQLitePipeline(fixture).resumeFailedTasks(),
+    (error) => {
+      assert.equal(error.code, 'source_draining')
+      // Naming the task saves an operator from guessing which half is busy.
+      assert.deepEqual(error.details.sourceKeys, ['telegram-sqlite-api-messages'])
+      return true
+    },
+  )
+})

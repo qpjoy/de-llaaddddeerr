@@ -122,11 +122,16 @@ function requiredSourceKey(body) {
   return sourceKey
 }
 
-function dataCenterCursorBinding({ query, datasetId, platform, objectType, pageSize, searchProfile = null }) {
+function dataCenterCursorBinding({
+  query, datasetId, platform, objectType, pageSize, searchProfile = null, sort = null,
+}) {
   return createHash('sha256')
     .update(JSON.stringify({
       query, datasetId, platform, objectType, pageSize,
       ...(searchProfile ? { searchProfile } : {}),
+      // The sort is part of what a cursor means. Without it, flipping the order
+      // and paging on would resume from a position computed under the old one.
+      ...(sort ? { sort } : {}),
     }))
     .digest('base64url')
 }
@@ -951,18 +956,50 @@ export function createApp({
           throw new AppError(503, 'search_reindex_unavailable', 'Search reindex requires the PostgreSQL Admin runtime')
         }
         const body = await readJson(request)
-        if (body?.confirmation !== 'REINDEX' || Object.keys(body).some((key) => key !== 'confirmation')) {
+        const allowed = new Set(['confirmation', 'acknowledgeBackend'])
+        if (body?.confirmation !== 'REINDEX' || Object.keys(body || {}).some((key) => !allowed.has(key))) {
           throw new AppError(
             400,
             'search_reindex_confirmation_required',
-            'The request body must be exactly {"confirmation":"REINDEX"}',
+            'The request body must be {"confirmation":"REINDEX"} with an optional acknowledgeBackend',
           )
         }
         const data = await searchReindex.start({
           requestedBy: principal.memberId || principal.kind || 'admin-token',
           requestId,
+          acknowledgeBackend: body?.acknowledgeBackend ?? null,
         })
         sendJson(response, 202, { data, requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/search/reindex/cancel') {
+        requireSourceAdmin(principal)
+        if (!searchReindex) {
+          throw new AppError(503, 'search_reindex_unavailable', 'Search reindex requires the PostgreSQL Admin runtime')
+        }
+        sendJson(response, 200, {
+          data: await searchReindex.cancel({
+            requestedBy: principal.memberId || principal.kind || 'admin-token',
+          }),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'PUT' && pathname === '/internal/v1/admin/search/startup-rebuild') {
+        requireSourceAdmin(principal)
+        if (!searchReindex) {
+          throw new AppError(503, 'search_reindex_unavailable', 'Search reindex requires the PostgreSQL Admin runtime')
+        }
+        const body = await readJson(request)
+        if (Object.keys(body || {}).some((key) => key !== 'enabled')) {
+          throw new AppError(400, 'unsupported_fields', 'Only enabled is accepted')
+        }
+        sendJson(response, 200, {
+          data: await searchReindex.setStartupRebuild(body?.enabled, {
+            requestedBy: principal.memberId || principal.kind || 'admin-token',
+          }),
+          requestId,
+        })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/data-center/records') {
@@ -999,6 +1036,12 @@ export function createApp({
           platform: optionalFilter('platform'),
           objectType: optionalFilter('objectType'),
         }
+        // Default to newest-first. A relevance-ranked list under a 时间 column
+        // reads as unsorted; ranking is still available, but by choice.
+        const sort = optionalFilter('sort') || 'newest'
+        if (!['relevance', 'newest', 'oldest'].includes(sort)) {
+          throw new AppError(400, 'invalid_sort', "sort must be relevance, newest or oldest")
+        }
         const requestedSearchProfile = optionalFilter('searchProfile')
         if (!query && requestedSearchProfile) {
           throw new AppError(400, 'invalid_request', 'searchProfile requires a non-blank q')
@@ -1010,6 +1053,7 @@ export function createApp({
           query,
           ...filters,
           pageSize,
+          sort,
           searchProfile: profile?.id ?? null,
         })
         const encodedCursor = optionalFilter('cursor')
@@ -1024,6 +1068,7 @@ export function createApp({
           const page = requestedPage ?? cursorState.page
           const result = await search.queries.searchContent(query, {
             ...filters,
+            sort,
             size: pageSize,
             cursor: cursorState.cursor,
             offset: requestedOffset,

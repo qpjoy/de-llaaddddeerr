@@ -33,6 +33,22 @@ const SEARCH_ANALYSIS_STATE_CHARACTER_LIMIT = 2_048
 const SEARCH_ANALYSIS_STATE_VERSION = 1
 const SEARCH_BACKENDS = new Set(['hanlp', 'jieba', 'bigram'])
 const SEGMENTATION_DEGRADED_PROFILE = 'canonical.phrase.v1'
+export const SEARCH_SORTS = Object.freeze(['relevance', 'newest', 'oldest'])
+
+/**
+ * Build a total ordering for a search page.
+ *
+ * Relevance stays available because it is the right default for a question like
+ * "where is this phrase", but a reviewer scanning a corpus usually wants time
+ * order, and mixing the two silently -- ranking by score while the column header
+ * says 时间 -- reads as unsorted data rather than as ranked data.
+ */
+function sortClause(sort) {
+  const time = (order) => ({ eventTime: { order, missing: '_last', format: 'strict_date_time' } })
+  if (sort === 'newest') return [time('desc'), { id: { order: 'desc' } }]
+  if (sort === 'oldest') return [time('asc'), { id: { order: 'asc' } }]
+  return [{ _score: { order: 'desc' } }, time('desc'), { id: { order: 'desc' } }]
+}
 
 function clampSize(size) {
   return Math.min(Math.max(Number(size) || DEFAULT_SIZE, 1), MAX_SIZE)
@@ -591,6 +607,7 @@ export class SearchQueries {
     searchProfile = null,
     strictRelevance = undefined,
     trackTotalHits = false,
+    sort = 'relevance',
   } = {}) {
     const limit = clampSize(size)
     const normalizedOffset = normalizeOffset(offset)
@@ -685,11 +702,10 @@ export class SearchQueries {
         ...(cursor?.searchAfter ? { search_after: cursor.searchAfter } : {}),
         ...(normalizedOffset != null ? { from: normalizedOffset } : {}),
         track_scores: true,
-        sort: [
-          { _score: { order: 'desc' } },
-          { eventTime: { order: 'desc', missing: '_last', format: 'strict_date_time' } },
-          { id: { order: 'desc' } },
-        ],
+        // `id` always terminates the sort so every ordering is total: a tie on
+        // score or on timestamp must still page deterministically, or
+        // search_after silently skips or repeats rows across pages.
+        sort: sortClause(sort),
         query: {
           bool: {
             should: plan.should,
