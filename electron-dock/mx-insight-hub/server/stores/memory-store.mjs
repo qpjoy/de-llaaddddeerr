@@ -341,6 +341,11 @@ export class MemoryStore {
     return clone([...this.capabilityPolicies.values()].filter((record) => record.consumerId === consumerId))
   }
 
+  async getUsageRequestByIdempotencyKey(consumerId, idempotencyKey) {
+    const id = this.requestsByScope.get(`${consumerId}:${idempotencyKey}`)
+    return clone(id ? this.requests.get(id) : null)
+  }
+
   async reserve({
     requestId,
     idempotencyKey,

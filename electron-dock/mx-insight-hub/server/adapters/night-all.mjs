@@ -1,6 +1,7 @@
 import { UpstreamAmbiguousError, UpstreamRejectedError } from '../core/errors.mjs'
 import { isNightAllDataSearchV1Envelope } from '../contracts/night-all-data-search.mjs'
 import {
+  buildNightAllLegacySearchCapabilities,
   isNightAllLegacyEnvelope,
   NIGHT_ALL_LEGACY_OPERATIONS,
 } from '../contracts/night-all-legacy.mjs'
@@ -174,7 +175,17 @@ export class NightAllAdapter {
         allow.has(typeof entry === 'string' ? entry : entry.platform),
       )
     }
-    return payload
+    return {
+      ...payload,
+      data: {
+        ...payload.data,
+        legacySearch: await this.legacySearchCapabilities(allowedPlatforms),
+      },
+    }
+  }
+
+  async legacySearchCapabilities(allowedPlatforms) {
+    return buildNightAllLegacySearchCapabilities(allowedPlatforms)
   }
 
   /**

@@ -176,7 +176,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Discovery'],
         operationId: 'listPublicCapabilities',
         summary: 'List capabilities granted to the authenticated consumer',
-        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. Each entry must be both granted and ready.',
+        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for the three Night-All compatibility operations: it is compiled into the deployed Hub contract rather than discovered from Night-All at request time. A platform must appear in both supportedPlatforms and readyPlatforms before dispatch. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for Night-All compatibility; compatibility calls then fail closed.',
         responses: {
           200: {
             description: 'Granted public capabilities.',
@@ -185,11 +185,34 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                 schema: { $ref: '#/components/schemas/CapabilitiesEnvelope' },
                 example: {
                   data: {
-                    platforms: [{
-                      platform: 'telegram',
-                      ready: true,
-                      capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search'],
-                    }],
+                    platforms: [
+                      {
+                        platform: 'telegram',
+                        ready: true,
+                        capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search'],
+                        source: 'hub',
+                        servingMode: 'stored',
+                      },
+                      { platform: 'xiaohongshu', ready: true },
+                      { platform: 'twitter', ready: true },
+                    ],
+                    legacySearch: {
+                      contractVersion: 'night-all.legacy-search-capabilities.v1',
+                      operations: {
+                        raw: {
+                          supportedPlatforms: ['twitter', 'xiaohongshu'],
+                          readyPlatforms: ['twitter', 'xiaohongshu'],
+                        },
+                        crawl: {
+                          supportedPlatforms: ['twitter', 'xiaohongshu'],
+                          readyPlatforms: ['twitter', 'xiaohongshu'],
+                        },
+                        'user-info': {
+                          supportedPlatforms: ['twitter', 'xiaohongshu'],
+                          readyPlatforms: ['twitter', 'xiaohongshu'],
+                        },
+                      },
+                    },
                     capabilities: [{ capability: 'nlp.tokenize', ready: true }],
                   },
                   requestId: '00000000-0000-4000-8000-000000000001',
@@ -234,15 +257,17 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Compatibility'],
         operationId: 'searchNightAllCompatibility',
         summary: 'Call one of the three Night-All legacy search operations',
-        description: 'The Hub authenticates and authorizes the platform, injects its consumer businessId, records the attempt, and stores complete responses as exact last-good snapshots. Network/timeout ambiguity, an unusable HTTP 2xx content-type/JSON/envelope, or a real non-2xx HTTP 502/503/504 may return that exact snapshot. An unusable 2xx is outcome-unknown because paid work may already have happened. The response body retains Night-All data fields unchanged. Provider/token/credential/endpoint/capability/moduleCode routing controls and archive/fullArchive/allTweets/archiveLimit/totalCount/max*Pages/pageCount/chunkSize/budget/crawlDepth cost-amplification controls are rejected; they require a separately granted capability and server policy. Work-budget arithmetic bounds returned/processed item work, not Night-All provider calls or billing.',
+        description: 'The Hub authenticates and authorizes the platform, then checks the Hub-pinned, grant-filtered data.legacySearch dispatch matrix returned by GET /data/capabilities. The selected platform must appear in both supportedPlatforms and readyPlatforms; a data.platforms entry alone, including telegram, does not grant a legacy operation. The matrix is owned by the deployed Hub release and is not fetched from Night-All at request time. readyPlatforms means Hub permits dispatch under that pinned contract; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. A null or invalid matrix fails closed before dispatch. The Hub injects its consumer businessId, records the attempt, and stores complete responses as exact last-good snapshots. Network/timeout ambiguity, an unusable HTTP 2xx content-type/JSON/envelope, or a real non-2xx HTTP 502/503/504 may return that exact snapshot. An unusable 2xx is outcome-unknown because paid work may already have happened. The response body retains Night-All data fields unchanged. Provider/token/credential/endpoint/capability/moduleCode routing controls and archive/fullArchive/allTweets/archiveLimit/totalCount/max*Pages/pageCount/chunkSize/budget/crawlDepth cost-amplification controls are rejected; they require a separately granted capability and server policy. Work-budget arithmetic bounds returned/processed item work, not Night-All provider calls or billing.',
         'x-mx-error-codes': {
-          400: ['invalid_request', 'invalid_cursor', 'invalid_platform', 'page_size_exceeded', 'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch', 'idempotency_key_required', 'invalid_idempotency_key'],
+          400: ['invalid_request', 'invalid_cursor', 'invalid_platform', 'page_size_exceeded', 'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch', 'idempotency_key_required', 'invalid_idempotency_key', 'platform_operation_unsupported', 'night_all_rejected'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
-          404: ['not_found'],
-          409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown'],
-          429: ['quota_exceeded'],
+          404: ['not_found', 'night_all_rejected'],
+          409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'night_all_rejected'],
+          422: ['night_all_rejected'],
+          429: ['quota_exceeded', 'night_all_rejected'],
           502: ['night_all_rejected', 'upstream_outcome_unknown'],
+          503: ['platform_operation_unavailable', 'compatibility_capabilities_unavailable', 'compatibility_store_unavailable'],
         },
         parameters: [
           {
@@ -264,7 +289,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             },
           },
         },
-        responses: { 200: nightAllCompatibilityResponse, ...publicErrors },
+        responses: { 200: nightAllCompatibilityResponse, ...publicErrors, 422: errorResponse },
       },
     },
     '/data/stored/search': {
@@ -546,12 +571,12 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         type: 'object',
         additionalProperties: false,
         required: ['platform'],
-        description: 'Shared schema for the operation path parameter. The x-mx-operation-fields allowlists mirror runtime exactly: raw requires one singular string or plural string-array query field; crawl and user-info require a supported user/channel identifier. Canonical decimal strings are accepted for integer fields normalized by runtime. Server-owned routing, credential and cost-amplification controls are rejected, including when nested in params.',
+        description: 'Shared schema for the operation path parameter. The x-mx-operation-fields allowlists mirror runtime exactly: raw requires one singular string or plural string-array query field; crawl and user-info require a supported user/channel identifier. LinkedIn user-info requires complete /in/ personal profile URLs in url, profileUrl, profile_url, or urls; company URLs and bare slugs are rejected. Canonical decimal strings are accepted for integer fields normalized by runtime. Server-owned routing, credential and cost-amplification controls are rejected, including when nested in params.',
         'x-mx-common-fields': ['businessId', 'business_id', 'platform', 'count', 'pageSize', 'limit', 'page', 'cursor', 'concurrency', 'params', 'includeRaw'],
         'x-mx-operation-fields': {
           raw: ['keyword', 'query', 'keywords', 'queries', 'disableAutoDetails', 'includeDetails', 'includeComments', 'commentLimit', 'cacheMaxAgeHours', 'maxEnrichItems', 'commentCursor', 'enrichConcurrency'],
           crawl: ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid', 'channelUrl', 'channel_url', 'channelId', 'channel_id', 'url', 'urls', 'activityTypes', 'cacheMaxAgeHours'],
-          'user-info': ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid'],
+          'user-info': ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid', 'url', 'profileUrl', 'profile_url', 'urls'],
         },
         'x-mx-rejected-params': ['provider', 'endpoint', 'credential', 'token/auth', 'timeout', 'capability', 'moduleCode', 'archive', 'fullArchive', 'allTweets', 'archiveLimit', 'totalCount', 'max*Pages', 'pageCount', 'chunkSize', 'budget', 'crawlDepth', 'count', 'limit', 'pageSize', 'page', 'pageNumber', 'pageNo', 'concurrency', 'includeDetails', 'includeComments', 'disableAutoDetails', 'commentLimit', 'maxEnrichItems', 'enrichConcurrency', 'cacheMaxAgeHours'],
         'x-mx-params-limits': {
@@ -588,6 +613,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           channelId: { type: ['string', 'number'], minLength: 1, maxLength: 2048 },
           channel_id: { type: ['string', 'number'], minLength: 1, maxLength: 2048 },
           url: { type: 'string', minLength: 1, maxLength: 2048 },
+          profileUrl: { type: 'string', minLength: 1, maxLength: 2048 },
+          profile_url: { type: 'string', minLength: 1, maxLength: 2048 },
           urls: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 2048 } },
           count: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]*$' }] },
           pageSize: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]*$' }] },
@@ -888,12 +915,47 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           requestId: { type: 'string' },
         },
       },
+      NightAllLegacyOperationAvailability: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['supportedPlatforms', 'readyPlatforms'],
+        description: 'Hub-pinned, grant-filtered Night-All operation dispatch entry. readyPlatforms is always a subset of supportedPlatforms and means the deployed Hub contract permits dispatch. It is not populated by live Night-All discovery and does not prove handler, endpoint, provider, credential, or upstream health. A caller may dispatch only when its platform appears in both arrays.',
+        properties: {
+          supportedPlatforms: {
+            type: 'array', uniqueItems: true,
+            items: { type: 'string', minLength: 1, maxLength: 64 },
+          },
+          readyPlatforms: {
+            type: 'array', uniqueItems: true,
+            items: { type: 'string', minLength: 1, maxLength: 64 },
+          },
+        },
+      },
+      NightAllLegacySearchCapabilities: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['contractVersion', 'operations'],
+        properties: {
+          contractVersion: { type: 'string', const: 'night-all.legacy-search-capabilities.v1' },
+          operations: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['raw', 'crawl', 'user-info'],
+            properties: {
+              raw: { $ref: '#/components/schemas/NightAllLegacyOperationAvailability' },
+              crawl: { $ref: '#/components/schemas/NightAllLegacyOperationAvailability' },
+              'user-info': { $ref: '#/components/schemas/NightAllLegacyOperationAvailability' },
+            },
+          },
+        },
+      },
       CapabilitiesEnvelope: {
         type: 'object',
         required: ['data', 'requestId'],
         properties: {
           data: {
             type: 'object',
+            required: ['platforms', 'legacySearch', 'capabilities'],
             properties: {
               platforms: {
                 type: 'array',
@@ -903,8 +965,17 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   properties: {
                     platform: { type: 'string' }, ready: { type: 'boolean' },
                     capabilities: { type: 'array', items: { type: 'string' } },
+                    source: { type: 'string', enum: ['hub'], description: 'Present for Hub-owned platform entries.' },
+                    servingMode: { type: 'string', enum: ['stored'], description: 'Present for Hub-owned stored-data entries.' },
                   },
                 },
+              },
+              legacySearch: {
+                description: 'Hub-pinned, grant-filtered dispatch matrix, or null when the consumer has no granted platform eligible for Night-All compatibility. It is authoritative only for Hub routing and is not a live Night-All capability or provider-readiness result. Null fails closed for every compatibility operation.',
+                oneOf: [
+                  { $ref: '#/components/schemas/NightAllLegacySearchCapabilities' },
+                  { type: 'null' },
+                ],
               },
               capabilities: {
                 type: 'array',
@@ -1075,7 +1146,7 @@ export const PUBLIC_DOCS_HTML = `<!doctype html>
     <div class="brand"><div class="mark">MX</div><div><strong>MX Insight Hub</strong><span>Open API</span></div></div>
     <nav aria-label="文档目录">
       <a href="#start">开始调用</a><a href="#rules">认证与调用规则</a><a href="#search">通用搜索</a>
-      <a href="#tools">通用工具</a><a href="#telegram">Telegram</a><a href="#discovery">能力与证据</a><a href="#errors">错误与重试</a>
+      <a href="#night-all">Night-All 兼容层</a><a href="#tools">通用工具</a><a href="#telegram">Telegram</a><a href="#discovery">能力与证据</a><a href="#errors">错误与重试</a>
       <a href="/docs/openapi.json">OpenAPI JSON ↗</a>
     </nav>
   </aside>
@@ -1086,7 +1157,7 @@ export const PUBLIC_DOCS_HTML = `<!doctype html>
 
     <h2 id="rules">认证与调用规则</h2>
     <h3>认证及显式授权</h3>
-    <p>每个请求必须携带已签发的调用者 API Key。建议使用 Bearer；不要把 Key 放进 URL、日志或前端代码。Key 只能调用后台为其调用者显式启用的平台或通用 capability；先调用 capabilities 确认授权与就绪状态。</p>
+    <p>每个请求必须携带已签发的调用者 API Key。建议使用 Bearer；不要把 Key 放进 URL、日志或前端代码。Key 只能调用后台为其调用者显式启用的平台或通用 capability；先调用 capabilities 确认授权与 Hub dispatch eligibility。</p>
     <pre><code>export HUB_URL="https://hub.example.com"
 export MX_INSIGHT_API_KEY="&lt;issued-api-key&gt;"
 
@@ -1122,13 +1193,6 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   },
   "requestId": "00000000-0000-4000-8000-000000000003"
 }</code></pre>
-    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/night-all/search/{raw|crawl|user-info}</code></div><p>迁移期 Night-All 兼容层：响应 body 保留 Night-All 当前字段，不在此层脱敏。Hub 通过响应头返回 durable request ID、<code>live|stale</code> 和采集时间；网络/超时、不可用的 2xx content-type/JSON/envelope，或真实非 2xx 的 502/503/504 才会回放完全相同请求的 last-good 快照。不可用 2xx 记为 outcome unknown。</p></div>
-    <pre><code>curl -i -sS -X POST "$HUB_URL/api/v1/night-all/search/raw" \
-  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: night-all-$(uuidgen)" \
-  -d '{"platform":"xiaohongshu","keyword":"AI Agent","count":20}'</code></pre>
-    <p><code>Idempotency-Key</code> 永久绑定一次付费 dispatch；重用永远回放该结果，新鲜调用必须换新 key。legacy <code>includeRaw:false</code> 可接受但会在上游 dispatch 前移除，<code>true</code> 被拒绝。调用方不能通过 body 或嵌套 <code>params</code> 注入 provider、token、credential、endpoint、capability/moduleCode、timeout 或工作量覆盖；archive/fullArchive/allTweets、archiveLimit/totalCount、max*Pages、pageCount/chunkSize/budget/crawlDepth 等成本放大控制也会被拒绝，后续必须走独立 capability/policy。work budget 只限制返回/处理 item，不代表 Night-All provider call 或计费次数。未来脱敏应通过独立、版本化的 Hub projection/API 提供，不静默改变这三条兼容路由。</p>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/stored/search</code></div><p>只搜索 Hub canonical 数据，不调用 Night-All。可按逻辑 <code>datasetId</code> 和 <code>objectType</code> 精确过滤；不接受数据库、索引、SQL 或 ES DSL。</p></div>
     <div class="notice">授权边界仍是 <code>platform</code>：<code>datasetId</code> 只是过滤条件，不是独立授权。获得某平台授权的调用者当前可搜索该平台完整 canonical 语料。</div>
     <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/stored/search" \
@@ -1150,6 +1214,42 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: canonical-$(uuidgen)" \
   -d '{"query":"AI Agent","searchProfile":"canonical.balanced.v1","pageSize":20}' | jq</code></pre>
+
+    <h2 id="night-all">Night-All 兼容层</h2>
+    <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面三条 compatibility route；请使用本页 Telegram 专用 Hub API。</div>
+    <p>每次调用前读取 <code>GET /api/v1/data/capabilities</code>。<code>data.legacySearch</code> 是由当前 Hub 发布版本固定（<code>Hub-pinned</code>）、再按 consumer grants 过滤的 operation dispatch 矩阵，contractVersion 固定为 <code>night-all.legacy-search-capabilities.v1</code>。它不会在请求时从 Night-All 的 capability 接口实时发现。只有平台同时出现在相应 operation 的 <code>supportedPlatforms</code> 和 <code>readyPlatforms</code> 中，Hub 才会 dispatch；这里的 <code>readyPlatforms</code> 仅表示 Hub 在固定契约下允许 dispatch，不证明 Night-All 当前 handler、endpoint、provider、credential 或上游健康。没有可用于 Night-All compatibility 的 platform grant 时该字段为 <code>null</code>，三条兼容路由全部 fail closed。</p>
+    <table><thead><tr><th>operation</th><th>示例</th><th>运行时判断字段</th></tr></thead><tbody>
+      <tr><td><code>raw</code></td><td><code>xiaohongshu + query</code></td><td><code>data.legacySearch.operations.raw</code></td></tr>
+      <tr><td><code>crawl</code></td><td><code>twitter + username=openai</code></td><td><code>data.legacySearch.operations.crawl</code></td></tr>
+      <tr><td><code>user-info</code></td><td><code>twitter + username=openai</code></td><td><code>data.legacySearch.operations["user-info"]</code></td></tr>
+    </tbody></table>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/night-all/search/raw</code></div><p>按关键词搜索平台内容。</p></div>
+    <pre><code>curl -i -sS -X POST "$HUB_URL/api/v1/night-all/search/raw" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: night-all-raw-$(uuidgen)" \\
+  -d '{"platform":"xiaohongshu","query":"AI Agent","count":20,"includeRaw":false}'</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/night-all/search/crawl</code></div><p>抓取一个账号公开发布的内容。</p></div>
+    <pre><code>curl -i -sS -X POST "$HUB_URL/api/v1/night-all/search/crawl" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: night-all-crawl-$(uuidgen)" \\
+  -d '{"platform":"twitter","username":"openai","count":20,"activityTypes":["posts"]}'</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/night-all/search/user-info</code></div><p>读取账号资料。LinkedIn 必须使用完整的 <code>/in/</code> 个人 profile URL（<code>url</code>、<code>profileUrl</code>、<code>profile_url</code> 或 <code>urls</code>）；公司 URL 和裸 slug 会被拒绝。</p></div>
+    <pre><code>curl -i -sS -X POST "$HUB_URL/api/v1/night-all/search/user-info" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: night-all-user-info-$(uuidgen)" \\
+  -d '{"platform":"twitter","username":"openai"}'</code></pre>
+    <p>响应 body 保留 Night-All 当前业务字段，不在此层脱敏。Hub 通过响应头返回 durable request ID、<code>live|stale</code> 和采集时间；网络/超时、不可用的 2xx content-type/JSON/envelope，或真实非 2xx 的 502/503/504 才会回放完全相同请求的 last-good 快照。不可用 2xx 记为 outcome unknown。</p>
+    <p><code>Idempotency-Key</code> 永久绑定一次付费 dispatch；重用永远回放该结果，新鲜调用必须换新 key。legacy <code>includeRaw:false</code> 可接受但会在 dispatch 前移除，<code>true</code> 被拒绝。调用方不能通过 body 或嵌套 <code>params</code> 注入 provider、token、credential、endpoint、capability/moduleCode、timeout 或工作量覆盖；archive/fullArchive/allTweets、archiveLimit/totalCount、max*Pages、pageCount/chunkSize/budget/crawlDepth 等成本放大控制也会被拒绝。work budget 只限制返回/处理 item，不代表 Night-All provider call 或计费次数。未来脱敏应通过独立、版本化的 Hub projection/API 提供。</p>
+    <table><thead><tr><th>HTTP / code</th><th>含义</th></tr></thead><tbody>
+      <tr><td><code>400 platform_operation_unsupported</code></td><td>平台不在该 operation 的 <code>supportedPlatforms</code>；Telegram 会走此分支。</td></tr>
+      <tr><td><code>503 platform_operation_unavailable</code></td><td>平台在固定支持集内，但当前 Hub dispatch 矩阵未将其列入 <code>readyPlatforms</code>；这不是 provider 健康状态。</td></tr>
+      <tr><td><code>503 compatibility_capabilities_unavailable</code></td><td>Hub-pinned legacySearch dispatch 矩阵缺失或无效，Hub fail closed，尚未 dispatch。</td></tr>
+      <tr><td><code>503 compatibility_store_unavailable</code></td><td>fallback 所需的 Hub compatibility store 暂不可用。</td></tr>
+      <tr><td><code>400/404/409/422/429 night_all_rejected</code></td><td>Night-All 明确拒绝；Hub 保留这些可安全转发的 HTTP 状态。其他明确拒绝映射为 502。</td></tr>
+    </tbody></table>
 
     <h2 id="tools">通用工具</h2>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/tools/tokenize</code></div><p>新建或从未配置的调用者默认获得 <code>nlp.tokenize</code>，管理员可显式停用；调用仍必须携带已签发的 API Key。默认按 consumer + capability 的 3600 秒滚动窗口限制 1000 次，同一调用者的所有 Key 共享上限。它不授予数据平台权限，响应会报告实际分词后端及降级状态。</p></div>
@@ -1198,7 +1298,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
     <div class="notice">如果搜索响应包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底。Canonical 接口还会以 <code>search.appliedProfile=postgres.substring.v1</code> 和 <code>search_profile_degraded</code> 明示策略变化；Telegram/Stored 兼容响应只保留投影告警。若 Elasticsearch 仍在线但 HanLP 查询降级，三个接口都会返回 <code>search_profile_degraded</code>。已有 Elasticsearch 游标会签名并复用首屏分词状态，不会中途切换模式或重新分词。</div>
 
     <h2 id="discovery">能力、请求状态与用量</h2>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>仅返回当前调用者已授权且可公开使用的平台与通用 capabilities。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它不代表 Night-All compatibility。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/requests/{requestId}</code></div><p>查询当前调用者拥有的持久请求记录。requestId 来自搜索响应头 <code>x-mx-insight-request-id</code>。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/usage?from=...&amp;to=...</code></div><p>读取当前调用者的请求、提交、释放、未知状态与计费单元汇总。</p></div>
 

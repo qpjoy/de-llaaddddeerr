@@ -535,6 +535,15 @@ export class PostgresStore {
     return rows.map(capabilityPolicy)
   }
 
+  async getUsageRequestByIdempotencyKey(consumerId, idempotencyKey) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM usage_requests
+       WHERE consumer_id = $1 AND idempotency_key = $2`,
+      [consumerId, idempotencyKey],
+    )
+    return requestRecord(rows[0]) || null
+  }
+
   async reserve(input) {
     if (Boolean(input.platform) === Boolean(input.capability)) {
       throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')

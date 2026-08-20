@@ -114,6 +114,9 @@ before(async () => {
         },
       })
     }
+    if (pathname === '/api/v1/search/capabilities') {
+      assert.fail('Hub-only compatibility must not call Night-All capability discovery')
+    }
     if (pathname.startsWith('/api/v1/search/')) {
       const body = JSON.parse(options.body)
       const key = `${pathname}:${body.platform}:${body.keyword || body.username || body.userId || body.uid}`
@@ -697,6 +700,33 @@ test('Night-All compatibility route preserves the envelope and serves only an ex
   assert.ok(live.response.headers.get('x-mx-insight-captured-at'))
   assert.equal(JSON.stringify(live.payload).includes('must-not-leak'), true)
   assert.equal(upstreamBodies.at(-1).businessId, consumer.businessId)
+
+  const liveUpstreamCalls = legacyUpstreamCalls.get('/api/v1/search/raw:xiaohongshu:compat-cache')
+  const replay = await call('/api/v1/night-all/search/raw', {
+    method: 'POST',
+    headers: { authorization, 'idempotency-key': 'compat-live-one' },
+    body,
+  })
+  assert.equal(replay.response.status, 200)
+  assert.deepEqual(replay.payload, live.payload)
+  assert.equal(replay.response.headers.get('idempotent-replay'), 'true')
+  assert.equal(
+    replay.response.headers.get('x-mx-insight-request-id'),
+    live.response.headers.get('x-mx-insight-request-id'),
+  )
+  assert.equal(
+    replay.response.headers.get('x-mx-insight-source-mode'),
+    live.response.headers.get('x-mx-insight-source-mode'),
+  )
+  assert.equal(
+    replay.response.headers.get('x-mx-insight-captured-at'),
+    live.response.headers.get('x-mx-insight-captured-at'),
+  )
+  assert.equal(replay.response.headers.get('age'), live.response.headers.get('age'))
+  assert.equal(
+    legacyUpstreamCalls.get('/api/v1/search/raw:xiaohongshu:compat-cache'),
+    liveUpstreamCalls,
+  )
 
   const stale = await call('/api/v1/night-all/search/raw', {
     method: 'POST',

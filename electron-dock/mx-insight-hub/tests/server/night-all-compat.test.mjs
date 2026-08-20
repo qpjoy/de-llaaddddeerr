@@ -2,6 +2,10 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { NightAllAdapter } from '../../server/adapters/night-all.mjs'
 import {
+  buildNightAllLegacySearchCapabilities,
+  NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS,
+} from '../../server/contracts/night-all-legacy.mjs'
+import {
   canUseNightAllCompatibilityFallback,
   nightAllCompatibilityBusinessOutcome,
   normalizeNightAllCompatibilityRequest,
@@ -51,6 +55,24 @@ function envelope({ warning = false } = {}) {
     },
     requestId: 'night-all-request',
     traceId: 'night-all-trace',
+  }
+}
+
+function legacySearchCapabilities({
+  rawSupported = ['xiaohongshu'],
+  rawReady = rawSupported,
+  crawlSupported = ['xiaohongshu'],
+  crawlReady = crawlSupported,
+  userInfoSupported = ['xiaohongshu'],
+  userInfoReady = userInfoSupported,
+} = {}) {
+  return {
+    contractVersion: 'night-all.legacy-search-capabilities.v1',
+    operations: {
+      raw: { supportedPlatforms: rawSupported, readyPlatforms: rawReady },
+      crawl: { supportedPlatforms: crawlSupported, readyPlatforms: crawlReady },
+      'user-info': { supportedPlatforms: userInfoSupported, readyPlatforms: userInfoReady },
+    },
   }
 }
 
@@ -118,6 +140,66 @@ test('legacy adapter deadline covers a response body that stalls after headers',
     }),
     (error) => error?.name === 'UpstreamAmbiguousError',
   )
+})
+
+test('capabilities adapter uses the Hub-pinned legacy matrix without Night-All discovery', async () => {
+  const requestedPaths = []
+  const adapter = new NightAllAdapter({
+    baseUrl: 'http://night-all.invalid',
+    fetchImpl: async (url) => {
+      const pathname = new URL(url).pathname
+      requestedPaths.push(pathname)
+      assert.equal(pathname, '/api/v1/data/capabilities')
+      return response({
+        data: {
+          platforms: [
+            { platform: 'xiaohongshu', ready: true },
+            { platform: 'twitter', ready: true },
+            { platform: 'facebook', ready: false },
+          ],
+        },
+      })
+    },
+  })
+
+  const payload = await adapter.capabilities(['xiaohongshu', 'facebook'])
+  assert.deepEqual(requestedPaths, ['/api/v1/data/capabilities'])
+  assert.deepEqual(payload.data.platforms.map((entry) => entry.platform), ['xiaohongshu', 'facebook'])
+  assert.deepEqual(payload.data.legacySearch.operations, {
+    raw: {
+      supportedPlatforms: ['facebook', 'xiaohongshu'],
+      readyPlatforms: ['facebook', 'xiaohongshu'],
+    },
+    crawl: {
+      supportedPlatforms: ['facebook', 'xiaohongshu'],
+      readyPlatforms: ['facebook', 'xiaohongshu'],
+    },
+    'user-info': {
+      supportedPlatforms: ['facebook', 'xiaohongshu'],
+      readyPlatforms: ['facebook', 'xiaohongshu'],
+    },
+  })
+})
+
+test('Hub-pinned legacy capabilities expose every operation and filter caller grants', () => {
+  const matrix = buildNightAllLegacySearchCapabilities(['xhs', 'xiaohongshu', 'telegram', 'twitter'])
+  assert.deepEqual(Object.keys(matrix.operations), ['raw', 'crawl', 'user-info'])
+  assert.deepEqual(matrix.operations.raw, {
+    supportedPlatforms: ['twitter', 'xiaohongshu'],
+    readyPlatforms: ['twitter', 'xiaohongshu'],
+  })
+  assert.deepEqual(matrix.operations.crawl, {
+    supportedPlatforms: ['twitter', 'xiaohongshu'],
+    readyPlatforms: ['twitter', 'xiaohongshu'],
+  })
+  assert.deepEqual(matrix.operations['user-info'], {
+    supportedPlatforms: ['twitter', 'xiaohongshu'],
+    readyPlatforms: ['twitter', 'xiaohongshu'],
+  })
+  assert.equal(Object.values(matrix.operations).some(({ supportedPlatforms }) => (
+    supportedPlatforms.includes('telegram')
+  )), false)
+  assert.equal(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.raw.includes('telegram'), false)
 })
 
 test('compatibility request keeps legacy aliases but enforces the Hub trust boundary', () => {
@@ -245,6 +327,37 @@ test('compatibility request keeps legacy aliases but enforces the Hub trust boun
   assert.equal(coerced.upstreamBody.page, 2)
   assert.equal(coerced.upstreamBody.concurrency, 3)
 
+  for (const field of ['url', 'profileUrl', 'profile_url']) {
+    const profileUrl = `https://www.linkedin.com/in/${field}`
+    const linkedIn = normalizeNightAllCompatibilityRequest('user-info', {
+      platform: 'linkedin',
+      [field]: profileUrl,
+    }, options)
+    assert.equal(linkedIn.upstreamBody.username, profileUrl)
+    assert.equal(linkedIn.upstreamBody[field], undefined)
+  }
+  const linkedInBatch = normalizeNightAllCompatibilityRequest('user-info', {
+    platform: 'linkedin',
+    urls: ['https://www.linkedin.com/in/one', 'https://www.linkedin.com/in/two'],
+  }, options)
+  assert.deepEqual(linkedInBatch.upstreamBody.usernames, [
+    'https://www.linkedin.com/in/one',
+    'https://www.linkedin.com/in/two',
+  ])
+  assert.equal(linkedInBatch.upstreamBody.urls, undefined)
+  for (const invalidLinkedInIdentifier of [
+    { username: 'satyanadella' },
+    { url: 'https://www.linkedin.com/company/microsoft' },
+  ]) {
+    assert.throws(
+      () => normalizeNightAllCompatibilityRequest('user-info', {
+        platform: 'linkedin',
+        ...invalidLinkedInIdentifier,
+      }, options),
+      (error) => error?.code === 'invalid_request',
+    )
+  }
+
   const enriched = normalizeNightAllCompatibilityRequest('raw', {
     platform: 'twitter', keyword: 'AI', cacheMaxAgeHours: 24,
     maxEnrichItems: 10, commentCursor: 'next-comment', enrichConcurrency: 2,
@@ -324,7 +437,7 @@ test('legacy raw/profile records enter one canonical compatibility dataset', () 
   assert.equal(fullTextPost.body, 'complete message body')
 })
 
-async function compatibilityFixture() {
+async function compatibilityFixture({ grants = ['xiaohongshu'] } = {}) {
   const store = new MemoryStore()
   const jobs = []
   const commitLive = store.commitCompatibilityLiveDelivery.bind(store)
@@ -338,19 +451,29 @@ async function compatibilityFixture() {
     name: 'Consumer',
     businessId: 'compat-consumer',
   })
-  await store.replaceGrants(consumer.id, ['xiaohongshu'])
-  await store.putPolicy({
-    tenantId: tenant.id,
-    consumerId: consumer.id,
-    platform: 'xiaohongshu',
-    maxRequests: 100,
-    windowSeconds: 3_600,
-    maxPageSize: 100,
-  })
+  await store.replaceGrants(consumer.id, grants)
+  for (const platform of grants) {
+    await store.putPolicy({
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      platform,
+      maxRequests: 100,
+      windowSeconds: 3_600,
+      maxPageSize: 100,
+    })
+  }
 
   let mode = 'complete'
   let calls = 0
+  let compatibilityCapabilities = legacySearchCapabilities()
+  let compatibilityCapabilitiesError = null
+  let capabilityCalls = 0
   const adapter = {
+    async legacySearchCapabilities() {
+      capabilityCalls += 1
+      if (compatibilityCapabilitiesError) throw compatibilityCapabilitiesError
+      return structuredClone(compatibilityCapabilities)
+    },
     async legacySearch({ body, businessId }) {
       calls += 1
       assert.equal(businessId, 'compat-consumer')
@@ -383,10 +506,117 @@ async function compatibilityFixture() {
     service,
     context,
     setMode(value) { mode = value },
+    setCompatibilityCapabilities(value) { compatibilityCapabilities = value },
+    setCompatibilityCapabilitiesError(value) { compatibilityCapabilitiesError = value },
+    capabilityCalls() { return capabilityCalls },
     calls() { return calls },
     jobs,
   }
 }
+
+test('compatibility rejects unsupported and unavailable platform operations before durable dispatch', async () => {
+  const fixture = await compatibilityFixture()
+  fixture.setCompatibilityCapabilities(legacySearchCapabilities({ rawSupported: [], rawReady: [] }))
+  await assert.rejects(
+    () => compatibilityCall(fixture, 'compat-unsupported-001'),
+    (error) => error?.status === 400 && error?.code === 'platform_operation_unsupported',
+  )
+  assert.equal(fixture.calls(), 0)
+  assert.equal(fixture.store.requests.size, 0)
+  assert.equal(fixture.store.connectorCalls.size, 0)
+
+  fixture.setCompatibilityCapabilities(legacySearchCapabilities({ rawReady: [] }))
+  await assert.rejects(
+    () => compatibilityCall(fixture, 'compat-unavailable-001'),
+    (error) => error?.status === 503 && error?.code === 'platform_operation_unavailable',
+  )
+  assert.equal(fixture.calls(), 0)
+  assert.equal(fixture.store.requests.size, 0)
+  assert.equal(fixture.store.connectorCalls.size, 0)
+})
+
+test('compatibility fails closed on a missing matrix and never redirects local Telegram to stored search', async () => {
+  const missing = await compatibilityFixture()
+  missing.setCompatibilityCapabilities(null)
+  await assert.rejects(
+    () => compatibilityCall(missing, 'compat-matrix-missing-001'),
+    (error) => error?.status === 503 && error?.code === 'compatibility_capabilities_unavailable',
+  )
+  assert.equal(missing.calls(), 0)
+  assert.equal(missing.store.requests.size, 0)
+
+  const incomplete = await compatibilityFixture()
+  const incompleteMatrix = legacySearchCapabilities()
+  delete incompleteMatrix.operations.crawl
+  incomplete.setCompatibilityCapabilities(incompleteMatrix)
+  await assert.rejects(
+    () => compatibilityCall(incomplete, 'compat-matrix-incomplete-001'),
+    (error) => error?.status === 503 && error?.code === 'compatibility_capabilities_unavailable',
+  )
+  assert.equal(incomplete.calls(), 0)
+  assert.equal(incomplete.store.requests.size, 0)
+
+  const telegram = await compatibilityFixture({ grants: ['telegram'] })
+  telegram.setCompatibilityCapabilities(legacySearchCapabilities())
+  await assert.rejects(
+    () => telegram.service.nightAllCompatibilitySearch(telegram.context, {
+      operation: 'raw',
+      path: '/api/v1/night-all/search/raw',
+      idempotencyKey: 'compat-telegram-local-001',
+      body: { platform: 'telegram', keyword: 'AI', count: 20 },
+    }),
+    (error) => error?.status === 400 && error?.code === 'platform_operation_unsupported',
+  )
+  assert.equal(telegram.calls(), 0)
+  assert.equal(telegram.store.requests.size, 0)
+  assert.equal(telegram.store.connectorCalls.size, 0)
+})
+
+test('public capabilities identify Hub-local Telegram without adding it to Night-All legacy support', async () => {
+  const service = new HubService({
+    store: {
+      async listGrants() { return ['telegram'] },
+      async listCanonicalRecords() { return [] },
+      async listCapabilityGrants() { return [] },
+    },
+    adapter: {
+      async capabilities() {
+        assert.fail('Telegram-only discovery must not call Night-All')
+      },
+    },
+    apiKeyPepper: 'test-pepper',
+  })
+
+  const payload = await service.capabilities({ consumer: { id: 'consumer' } })
+  assert.deepEqual(payload.data.platforms, [{
+    platform: 'telegram',
+    ready: true,
+    source: 'hub',
+    servingMode: 'stored',
+    capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search'],
+  }])
+  assert.equal(payload.data.legacySearch, null)
+})
+
+test('public capabilities canonicalize platform grant aliases before Night-All filtering', async () => {
+  let allowedPlatforms
+  const service = new HubService({
+    store: {
+      async listGrants() { return ['xhs'] },
+      async listCapabilityGrants() { return [] },
+    },
+    adapter: {
+      async capabilities(allowed) {
+        allowedPlatforms = allowed
+        return { data: { platforms: [], legacySearch: legacySearchCapabilities() } }
+      },
+    },
+    apiKeyPepper: 'test-pepper',
+  })
+
+  await service.capabilities({ consumer: { id: 'consumer-1' } })
+  assert.deepEqual(allowedPlatforms, ['xiaohongshu'])
+})
 
 function compatibilityCall(fixture, idempotencyKey, query = 'AI') {
   return fixture.service.nightAllCompatibilitySearch(fixture.context, {
@@ -431,12 +661,95 @@ test('a compatibility idempotency key permanently replays its one paid dispatch'
   const [request] = fixture.store.requests.values()
   request.completedAt = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString()
   fixture.setMode('unavailable')
+  fixture.setCompatibilityCapabilitiesError(new TypeError('capability endpoint unavailable'))
 
   const replay = await compatibilityCall(fixture, 'compat-permanent-replay')
   assert.equal(replay.replay, true)
   assert.deepEqual(replay.body, live.body)
+  assert.equal(replay.sourceMode, live.sourceMode)
+  assert.equal(replay.capturedAt, live.capturedAt)
+  assert.equal(fixture.capabilityCalls(), 1)
   assert.equal(fixture.calls(), 1)
   assert.equal(fixture.store.connectorCalls.size, 1)
+})
+
+test('a capability failure rechecks an idempotency key inserted after the initial lookup', async () => {
+  const fixture = await compatibilityFixture()
+  const live = await compatibilityCall(fixture, 'compat-raced-replay')
+  const lookup = fixture.store.getUsageRequestByIdempotencyKey.bind(fixture.store)
+  let lookups = 0
+  fixture.store.getUsageRequestByIdempotencyKey = async (...args) => {
+    lookups += 1
+    if (lookups === 1) return null
+    return lookup(...args)
+  }
+  fixture.setCompatibilityCapabilitiesError(new TypeError('capability endpoint unavailable'))
+
+  const replay = await compatibilityCall(fixture, 'compat-raced-replay')
+  assert.equal(lookups, 2)
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, live.body)
+  assert.equal(fixture.calls(), 1)
+})
+
+test('a released compatibility key must pass capability precheck before redispatch', async () => {
+  for (const capabilityMode of ['down', 'unsupported']) {
+    const fixture = await compatibilityFixture()
+    fixture.setMode('unavailable')
+    await assert.rejects(
+      () => compatibilityCall(fixture, `compat-released-${capabilityMode}`),
+      (error) => error?.code === 'night_all_rejected',
+    )
+    const [request] = fixture.store.requests.values()
+    assert.equal(request.status, 'released')
+    assert.equal(fixture.calls(), 1)
+
+    fixture.setMode('complete')
+    if (capabilityMode === 'down') {
+      fixture.setCompatibilityCapabilitiesError(new TypeError('capability endpoint unavailable'))
+    } else {
+      fixture.setCompatibilityCapabilities(legacySearchCapabilities({ rawSupported: [], rawReady: [] }))
+    }
+    await assert.rejects(
+      () => compatibilityCall(fixture, `compat-released-${capabilityMode}`),
+      (error) => capabilityMode === 'down'
+        ? error?.code === 'compatibility_capabilities_unavailable'
+        : error?.code === 'platform_operation_unsupported',
+    )
+    assert.equal(request.status, 'released')
+    assert.equal(fixture.calls(), 1)
+    assert.equal(fixture.store.connectorCalls.size, 1)
+    assert.equal(fixture.capabilityCalls(), 2)
+  }
+})
+
+test('decisive idempotency states remain independent of capability availability', async () => {
+  for (const [status, code] of [
+    ['reserved', 'request_in_progress'],
+    ['unknown', 'request_outcome_unknown'],
+  ]) {
+    const fixture = await compatibilityFixture()
+    await compatibilityCall(fixture, `compat-existing-${status}`)
+    const [request] = fixture.store.requests.values()
+    request.status = status
+    fixture.setCompatibilityCapabilitiesError(new TypeError('capability endpoint unavailable'))
+    await assert.rejects(
+      () => compatibilityCall(fixture, `compat-existing-${status}`),
+      (error) => error?.code === code,
+    )
+    assert.equal(fixture.capabilityCalls(), 1)
+    assert.equal(fixture.calls(), 1)
+  }
+
+  const conflict = await compatibilityFixture()
+  await compatibilityCall(conflict, 'compat-existing-conflict', 'first')
+  conflict.setCompatibilityCapabilitiesError(new TypeError('capability endpoint unavailable'))
+  await assert.rejects(
+    () => compatibilityCall(conflict, 'compat-existing-conflict', 'different'),
+    (error) => error?.code === 'idempotency_conflict',
+  )
+  assert.equal(conflict.capabilityCalls(), 1)
+  assert.equal(conflict.calls(), 1)
 })
 
 test('an invalid HTTP 2xx envelope is unknown and cannot redispatch the same key', async () => {

@@ -22,7 +22,10 @@ const NIGHT_ALL_OPERATION_FIELDS = {
     'channelUrl', 'channel_url', 'channelId', 'channel_id', 'url', 'urls',
     'activityTypes', 'cacheMaxAgeHours',
   ],
-  'user-info': ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid'],
+  'user-info': [
+    'username', 'usernames', 'userId', 'userIds', 'user_id', 'uid',
+    'url', 'profileUrl', 'profile_url', 'urls',
+  ],
 }
 const NIGHT_ALL_REJECTED_PARAMS = [
   'provider', 'endpoint', 'credential', 'token/auth', 'timeout', 'capability',
@@ -32,6 +35,32 @@ const NIGHT_ALL_REJECTED_PARAMS = [
   'includeDetails', 'includeComments', 'disableAutoDetails', 'commentLimit',
   'maxEnrichItems', 'enrichConcurrency', 'cacheMaxAgeHours',
 ]
+const NIGHT_ALL_LEGACY_SEARCH_CONTRACT_VERSION = 'night-all.legacy-search-capabilities.v1'
+const NIGHT_ALL_COMPATIBILITY_EXAMPLES = {
+  raw: { value: { platform: 'xiaohongshu', keyword: 'AI Agent', count: 20 } },
+  crawl: { value: { platform: 'twitter', username: 'openai', count: 20 } },
+  userInfo: { value: { platform: 'twitter', username: 'openai' } },
+}
+const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
+  400: [
+    'invalid_request', 'invalid_cursor', 'invalid_platform', 'page_size_exceeded',
+    'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch',
+    'idempotency_key_required', 'invalid_idempotency_key',
+    'platform_operation_unsupported', 'night_all_rejected',
+  ],
+  401: ['api_key_required', 'invalid_api_key'],
+  403: ['platform_not_granted'],
+  404: ['not_found', 'night_all_rejected'],
+  409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown', 'night_all_rejected'],
+  422: ['night_all_rejected'],
+  429: ['quota_exceeded', 'night_all_rejected'],
+  502: ['night_all_rejected', 'upstream_outcome_unknown'],
+  503: [
+    'platform_operation_unavailable',
+    'compatibility_capabilities_unavailable',
+    'compatibility_store_unavailable',
+  ],
+}
 
 function assertNightAllCompatibilityRequestSchema(schema) {
   assert.equal(schema.type, 'object')
@@ -65,7 +94,7 @@ function assertNightAllCompatibilityRequestSchema(schema) {
   for (const field of ['username', 'userId', 'user_id', 'uid', 'channelId', 'channel_id']) {
     assert.deepEqual(schema.properties[field].type, ['string', 'number'], field)
   }
-  for (const field of ['channelUrl', 'channel_url', 'url', 'commentCursor']) {
+  for (const field of ['channelUrl', 'channel_url', 'url', 'profileUrl', 'profile_url', 'commentCursor']) {
     assert.equal(schema.properties[field].type, 'string', field)
   }
 
@@ -84,6 +113,91 @@ function assertNightAllCompatibilityRequestSchema(schema) {
   assert.equal(schema.properties.cacheMaxAgeHours.maximum, 720)
   assert.equal(schema.properties.maxEnrichItems.oneOf[0].maximum, 20)
   assert.equal(schema.properties.enrichConcurrency.oneOf[0].maximum, 5)
+}
+
+function resolveSchema(document, schema) {
+  if (!schema?.$ref) return schema
+  return document.components.schemas[schema.$ref.split('/').at(-1)]
+}
+
+function assertNightAllPublicContract(document) {
+  const compatibility = document.paths['/night-all/search/{operation}'].post
+  const compatibilityContent = compatibility.requestBody.content['application/json']
+  assert.equal(compatibilityContent.schema.$ref, '#/components/schemas/NightAllLegacyRequest')
+  assert.deepEqual(compatibilityContent.examples, NIGHT_ALL_COMPATIBILITY_EXAMPLES)
+  assert.deepEqual(compatibility['x-mx-error-codes'], NIGHT_ALL_COMPATIBILITY_ERROR_CODES)
+  assert.ok(compatibility.responses[422])
+  assert.ok(compatibility.responses[503])
+  assert.match(compatibility.description, /data\.legacySearch/)
+  assert.match(compatibility.description, /telegram/i)
+  assert.match(compatibility.description, /Hub-pinned/i)
+  assert.match(compatibility.description, /grant-filtered/i)
+  assert.match(compatibility.description, /not fetched from Night-All at request time/i)
+  assert.match(compatibility.description, /does not prove current Night-All handler, endpoint, provider, credential, or upstream health/i)
+  assert.match(compatibility.responses[200].description, /not masked|retain/i)
+
+  assertNightAllCompatibilityRequestSchema(document.components.schemas.NightAllLegacyRequest)
+  const availability = document.components.schemas.NightAllLegacyOperationAvailability
+  assert.deepEqual(availability.required, ['supportedPlatforms', 'readyPlatforms'])
+  assert.equal(availability.additionalProperties, false)
+  assert.equal(availability.properties.supportedPlatforms.uniqueItems, true)
+  assert.equal(availability.properties.readyPlatforms.uniqueItems, true)
+  assert.match(availability.description, /subset of supportedPlatforms/)
+  assert.match(availability.description, /Hub-pinned/i)
+  assert.match(availability.description, /deployed Hub contract permits dispatch/i)
+  assert.match(availability.description, /not populated by live Night-All discovery/i)
+  assert.match(availability.description, /does not prove handler, endpoint, provider, credential, or upstream health/i)
+  assert.doesNotMatch(availability.description, /executable handler or endpoint candidate/i)
+
+  const legacySearch = document.components.schemas.NightAllLegacySearchCapabilities
+  assert.equal(legacySearch.properties.contractVersion.const, NIGHT_ALL_LEGACY_SEARCH_CONTRACT_VERSION)
+  assert.deepEqual(legacySearch.properties.operations.required, ['raw', 'crawl', 'user-info'])
+  for (const operation of ['raw', 'crawl', 'user-info']) {
+    assert.equal(
+      legacySearch.properties.operations.properties[operation].$ref,
+      '#/components/schemas/NightAllLegacyOperationAvailability',
+    )
+  }
+
+  const capabilitiesContent = document.paths['/data/capabilities'].get.responses[200]
+    .content['application/json']
+  const capabilitiesEnvelope = resolveSchema(document, capabilitiesContent.schema)
+  const dataSchema = capabilitiesEnvelope.properties.data
+  assert.ok(dataSchema.required.includes('legacySearch'))
+  const discoveryProperty = dataSchema.properties.legacySearch
+  assert.equal(
+    discoveryProperty.oneOf[0].$ref,
+    '#/components/schemas/NightAllLegacySearchCapabilities',
+  )
+  assert.deepEqual(discoveryProperty.oneOf[1], { type: 'null' })
+  assert.match(discoveryProperty.description, /Hub-pinned/i)
+  assert.match(discoveryProperty.description, /authoritative only for Hub routing/i)
+  assert.match(discoveryProperty.description, /not a live Night-All capability or provider-readiness result/i)
+  assert.match(discoveryProperty.description, /Null fails closed/i)
+
+  const platformProperties = dataSchema.properties.platforms.items.properties
+  assert.deepEqual(platformProperties.source.enum, ['hub'])
+  assert.deepEqual(platformProperties.servingMode.enum, ['stored'])
+
+  const capabilitiesExample = capabilitiesContent.example
+  const telegram = capabilitiesExample.data.platforms.find(({ platform }) => platform === 'telegram')
+  assert.equal(telegram.source, 'hub')
+  assert.equal(telegram.servingMode, 'stored')
+  for (const platform of ['xiaohongshu', 'twitter']) {
+    const entry = capabilitiesExample.data.platforms.find((candidate) => candidate.platform === platform)
+    assert.equal(entry.capabilities, undefined)
+  }
+  assert.equal(
+    capabilitiesExample.data.legacySearch.contractVersion,
+    NIGHT_ALL_LEGACY_SEARCH_CONTRACT_VERSION,
+  )
+  for (const operation of ['raw', 'crawl', 'user-info']) {
+    const operationExample = capabilitiesExample.data.legacySearch.operations[operation]
+    assert.ok(operationExample.supportedPlatforms.includes('twitter'))
+    assert.ok(operationExample.readyPlatforms.includes('twitter'))
+    assert.equal(operationExample.supportedPlatforms.includes('telegram'), false)
+    assert.equal(operationExample.readyPlatforms.includes('telegram'), false)
+  }
 }
 
 async function withServer(listenerMode, run) {
@@ -113,7 +227,29 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(response.headers.get('content-security-policy'), /default-src 'none'/)
     assert.match(html, /MX Insight Hub/)
     assert.match(html, /\/api\/v1\/data\/search/)
-    assert.match(html, /\/api\/v1\/night-all\/search\/\{raw\|crawl\|user-info\}/)
+    assert.match(html, /href="#night-all"/)
+    assert.match(html, /<h2 id="night-all">Night-All 兼容层<\/h2>/)
+    assert.match(html, /\/api\/v1\/night-all\/search\/raw/)
+    assert.match(html, /\/api\/v1\/night-all\/search\/crawl/)
+    assert.match(html, /\/api\/v1\/night-all\/search\/user-info/)
+    assert.match(html, /night-all-raw-\$\(uuidgen\)/)
+    assert.match(html, /night-all-crawl-\$\(uuidgen\)/)
+    assert.match(html, /night-all-user-info-\$\(uuidgen\)/)
+    assert.match(html, /data\.legacySearch/)
+    assert.match(html, /night-all\.legacy-search-capabilities\.v1/)
+    assert.match(html, /supportedPlatforms/)
+    assert.match(html, /readyPlatforms/)
+    assert.match(html, /Hub-pinned/)
+    assert.match(html, /不会在请求时从 Night-All 的 capability 接口实时发现/)
+    assert.match(html, /不证明 Night-All 当前 handler、endpoint、provider、credential 或上游健康/)
+    assert.doesNotMatch(html, /默认 provider 已启用并配置凭据/)
+    assert.match(html, /Telegram 不支持/)
+    assert.match(html, /source=hub/)
+    assert.match(html, /servingMode=stored/)
+    assert.match(html, /platform_operation_unsupported/)
+    assert.match(html, /platform_operation_unavailable/)
+    assert.match(html, /compatibility_capabilities_unavailable/)
+    assert.match(html, /compatibility_store_unavailable/)
     assert.match(html, /\/api\/v1\/data\/stored\/search/)
     assert.match(html, /\/api\/v1\/data\/canonical\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
@@ -176,15 +312,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(document.components.schemas.TokenizeRequest.additionalProperties, false)
     assert.equal(document.components.schemas.StoredSearchRequest.additionalProperties, false)
     assert.equal(document.components.schemas.CanonicalSearchRequest.additionalProperties, false)
-    assertNightAllCompatibilityRequestSchema(document.components.schemas.NightAllLegacyRequest)
-    assert.equal(
-      document.paths['/night-all/search/{operation}'].post.requestBody.content['application/json'].schema.$ref,
-      '#/components/schemas/NightAllLegacyRequest',
-    )
-    assert.match(
-      document.paths['/night-all/search/{operation}'].post.responses[200].description,
-      /not masked|retain/i,
-    )
+    assertNightAllPublicContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
       document.components.schemas.CanonicalSearchRequest.properties.searchProfile.default,
@@ -241,11 +369,20 @@ test('static OpenAPI YAML parses and mirrors the dynamic Night-All compatibility
   assert.equal(parsed.status, 0, parsed.stderr)
   const document = JSON.parse(parsed.stdout)
   assert.equal(document.openapi, '3.1.0')
-  assertNightAllCompatibilityRequestSchema(document.components.schemas.NightAllLegacyRequest)
-  assert.equal(
-    document.paths['/night-all/search/{operation}'].post.requestBody.content['application/json'].schema.$ref,
-    '#/components/schemas/NightAllLegacyRequest',
+  assertNightAllPublicContract(document)
+})
+
+test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy', async () => {
+  const guide = await readFile(
+    fileURLToPath(new URL('../../docs/public-api-curl.md', import.meta.url)),
+    'utf8',
   )
+  assert.match(guide, /Hub-pinned/)
+  assert.match(guide, /不会在请求时从\s*Night-All `\/api\/v1\/search\/capabilities` 实时发现/)
+  assert.match(guide, /readyPlatforms[^。]*仅表示 Hub 在当前固定兼容契约下允许 dispatch/)
+  assert.match(guide, /不证明 handler、endpoint、provider、credential/)
+  assert.doesNotMatch(guide, /默认 provider 已启用且配置了凭据/)
+  assert.doesNotMatch(guide, /存在可执行 handler 或 endpoint candidate/)
 })
 
 test('admin-only listener does not expose public documentation', async () => {

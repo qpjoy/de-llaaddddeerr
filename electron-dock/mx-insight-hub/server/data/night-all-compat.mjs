@@ -19,6 +19,7 @@ const OPERATION_FIELDS = {
   ]),
   'user-info': new Set([
     'username', 'usernames', 'userId', 'userIds', 'user_id', 'uid',
+    'url', 'profileUrl', 'profile_url', 'urls',
   ]),
 }
 
@@ -49,6 +50,18 @@ function hasValue(value) {
   if (typeof value === 'string') return Boolean(value.trim())
   if (typeof value === 'number') return Number.isFinite(value)
   return Array.isArray(value) && value.length > 0
+}
+
+function isLinkedInPersonalProfileUrl(value) {
+  if (typeof value !== 'string') return false
+  try {
+    const parsed = new URL(value)
+    return ['http:', 'https:'].includes(parsed.protocol)
+      && (parsed.hostname === 'linkedin.com' || parsed.hostname.endsWith('.linkedin.com'))
+      && /^\/in\/[^/]+/u.test(parsed.pathname)
+  } catch {
+    return false
+  }
 }
 
 function normalizeIdentifier(value, field, { allowNumber = false } = {}) {
@@ -262,7 +275,7 @@ export function normalizeNightAllCompatibilityRequest(operation, body, {
   } else {
     const fields = operation === 'crawl'
       ? ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid', 'channelUrl', 'channel_url', 'channelId', 'channel_id', 'url', 'urls']
-      : ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid']
+      : ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid', 'url', 'profileUrl', 'profile_url', 'urls']
     const supplied = fields.filter((field) => hasValue(upstreamBody[field]))
     assert(supplied.length > 0, 400, 'invalid_request', 'A user or channel identifier is required')
     const arrays = new Set(['usernames', 'userIds', 'urls'])
@@ -276,6 +289,24 @@ export function normalizeNightAllCompatibilityRequest(operation, body, {
       (sum, field) => sum + (arrays.has(field) ? upstreamBody[field].length : 1),
       0,
     )
+    if (operation === 'user-info' && platform === 'linkedin') {
+      const identifiers = supplied.flatMap((field) => (
+        arrays.has(field) ? upstreamBody[field] : [upstreamBody[field]]
+      ))
+      assert(
+        identifiers.every(isLinkedInPersonalProfileUrl),
+        400,
+        'invalid_request',
+        'LinkedIn user-info requires a complete /in/ personal profile URL',
+      )
+      // The deployed Night-All contract accepts these URLs through its legacy
+      // username fields and maps HTTP values to the provider's `url` parameter.
+      // Keep the newer aliases at the Hub edge without requiring an upstream
+      // schema change.
+      for (const field of fields) delete upstreamBody[field]
+      if (identifiers.length === 1) upstreamBody.username = identifiers[0]
+      else upstreamBody.usernames = identifiers
+    }
     assert(identifierCount <= MAX_MULTI_VALUE_COUNT, 400, 'work_budget_exceeded', `Identifier count must not exceed ${MAX_MULTI_VALUE_COUNT}`)
     if (operation === 'crawl') {
       const activityTypeCount = upstreamBody.activityTypes?.length || 1

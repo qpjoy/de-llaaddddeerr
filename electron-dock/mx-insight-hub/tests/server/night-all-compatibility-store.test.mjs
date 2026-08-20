@@ -41,6 +41,57 @@ async function begin(store, consumerId, requestId) {
   })
 }
 
+test('MemoryStore idempotency lookup returns the full scoped request without exposing other consumers', async () => {
+  const fixture = await memoryFixture()
+  const reservation = await reserve(fixture.store, fixture, 'compat-full-lookup')
+  const responseBody = { data: { raw_data: [{ id: 'stored' }] } }
+  await fixture.store.commitRequest(reservation.request.id, {
+    responseStatus: 200,
+    responseBody,
+    unitsActual: 1,
+    upstreamLatencyMs: 12,
+  })
+
+  const record = await fixture.store.getUsageRequestByIdempotencyKey(
+    fixture.consumer.id,
+    'compat-full-lookup',
+  )
+  assert.equal(record.fingerprint, FINGERPRINT)
+  assert.deepEqual(record.responseBody, responseBody)
+  assert.equal(
+    await fixture.store.getUsageRequestByIdempotencyKey(randomUUID(), 'compat-full-lookup'),
+    null,
+  )
+})
+
+test('PostgresStore idempotency lookup is consumer scoped and returns the full request record', async () => {
+  const consumerId = randomUUID()
+  const idempotencyKey = 'compat-pg-full-lookup'
+  const responseBody = { data: { raw_data: [{ id: 'stored' }] } }
+  let query
+  const store = new PostgresStore({
+    async query(sql, values) {
+      query = { sql, values }
+      return { rows: [{
+        id: randomUUID(),
+        consumer_id: consumerId,
+        idempotency_key: idempotencyKey,
+        fingerprint: FINGERPRINT,
+        status: 'committed',
+        response_status: 200,
+        response_body: responseBody,
+        created_at: new Date('2026-08-20T00:00:00.000Z'),
+      }] }
+    },
+  })
+
+  const record = await store.getUsageRequestByIdempotencyKey(consumerId, idempotencyKey)
+  assert.deepEqual(query.values, [consumerId, idempotencyKey])
+  assert.match(query.sql, /WHERE consumer_id = \$1 AND idempotency_key = \$2/)
+  assert.equal(record.fingerprint, FINGERPRINT)
+  assert.deepEqual(record.responseBody, responseBody)
+})
+
 test('complete live delivery stores last-good but a later partial delivery cannot replace it', async () => {
   const fixture = await memoryFixture()
   const first = await reserve(fixture.store, fixture, 'compat-complete-1')

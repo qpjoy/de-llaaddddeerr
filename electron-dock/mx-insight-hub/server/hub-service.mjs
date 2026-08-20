@@ -183,6 +183,37 @@ function compatibilityPublicStatus(error) {
   return 502
 }
 
+function compatibilityOperationState(matrix, operation, platform) {
+  if (
+    matrix?.contractVersion !== 'night-all.legacy-search-capabilities.v1'
+    || !matrix.operations
+    || typeof matrix.operations !== 'object'
+    || Array.isArray(matrix.operations)
+  ) return 'invalid'
+  for (const requiredOperation of NIGHT_ALL_LEGACY_OPERATIONS) {
+    if (matrix.operations[requiredOperation] == null) return 'invalid'
+  }
+  const capability = matrix.operations[operation]
+  if (
+    !capability
+    || typeof capability !== 'object'
+    || !Array.isArray(capability.supportedPlatforms)
+    || !Array.isArray(capability.readyPlatforms)
+    || capability.supportedPlatforms.some((entry) => typeof entry !== 'string')
+    || capability.readyPlatforms.some((entry) => typeof entry !== 'string')
+  ) return 'invalid'
+  const supported = new Set(capability.supportedPlatforms)
+  if (capability.readyPlatforms.some((entry) => !supported.has(entry))) return 'invalid'
+  if (!supported.has(platform)) return 'unsupported'
+  return capability.readyPlatforms.includes(platform) ? 'ready' : 'unavailable'
+}
+
+function compatibilityIdempotencyStateIsDecisive(record, fingerprint) {
+  if (!record) return false
+  return record.fingerprint !== fingerprint
+    || ['committed', 'reserved', 'unknown'].includes(record.status)
+}
+
 export class HubService {
   constructor({
     store,
@@ -369,15 +400,19 @@ export class HubService {
 
   async capabilities(context) {
     const grants = await this.store.listGrants(context.consumer.id)
-    const payload = grants.length > 0
-      ? await this.adapter.capabilities(grants)
-      : { data: { platforms: [] } }
-    if (grants.includes('telegram') && typeof this.store.listCanonicalRecords === 'function') {
+    const canonicalGrants = [...new Set(grants.map((grant) => canonicalPlatform(grant)))]
+    const nightAllGrants = canonicalGrants.filter((platform) => platform !== 'telegram')
+    const payload = nightAllGrants.length > 0
+      ? await this.adapter.capabilities(nightAllGrants)
+      : { data: { platforms: [], legacySearch: null } }
+    if (canonicalGrants.includes('telegram') && typeof this.store.listCanonicalRecords === 'function') {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === 'telegram')) {
         platforms.push({
           platform: 'telegram',
           ready: true,
+          source: 'hub',
+          servingMode: 'stored',
           capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search'],
         })
       }
@@ -975,8 +1010,7 @@ export class HubService {
     })
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
-    const reservation = await this.store.reserve({
+    const reservationInput = {
       requestId,
       idempotencyKey,
       fingerprint,
@@ -992,7 +1026,65 @@ export class HubService {
       // Reusing its usage row after two minutes would overwrite billing
       // evidence and let repeated upstream calls count as one quota request.
       replayWindowMs: null,
-    })
+    }
+
+    await this.store.reapStaleReservations()
+    let reservation
+    const existing = await this.store.getUsageRequestByIdempotencyKey(
+      context.consumer.id,
+      idempotencyKey,
+    )
+    if (compatibilityIdempotencyStateIsDecisive(existing, fingerprint)) {
+      reservation = await this.store.reserve(reservationInput)
+    } else {
+      let precheckError = null
+      let compatibilityCapabilities
+      try {
+        compatibilityCapabilities = await this.adapter.legacySearchCapabilities([normalized.platform])
+      } catch (_error) {
+        precheckError = new AppError(
+          503,
+          'compatibility_capabilities_unavailable',
+          'Night-All compatibility capabilities are unavailable',
+        )
+      }
+      if (!precheckError) {
+        const operationState = compatibilityOperationState(
+          compatibilityCapabilities,
+          operation,
+          normalized.platform,
+        )
+        if (operationState === 'invalid') {
+          precheckError = new AppError(
+            503,
+            'compatibility_capabilities_unavailable',
+            'Night-All compatibility capabilities are unavailable',
+          )
+        } else if (operationState === 'unsupported') {
+          precheckError = new AppError(
+            400,
+            'platform_operation_unsupported',
+            'The platform does not support this Night-All compatibility operation',
+            { platform: normalized.platform, operation },
+          )
+        } else if (operationState === 'unavailable') {
+          precheckError = new AppError(
+            503,
+            'platform_operation_unavailable',
+            'The platform operation is not currently ready in Night-All',
+            { platform: normalized.platform, operation },
+          )
+        }
+      }
+      if (precheckError) {
+        const raced = await this.store.getUsageRequestByIdempotencyKey(
+          context.consumer.id,
+          idempotencyKey,
+        )
+        if (!compatibilityIdempotencyStateIsDecisive(raced, fingerprint)) throw precheckError
+      }
+      reservation = await this.store.reserve(reservationInput)
+    }
 
     if (reservation.kind === 'conflict') {
       throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
