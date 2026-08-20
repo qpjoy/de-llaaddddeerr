@@ -3,6 +3,11 @@ import { createPool, createQueue, runCommonMigrations, startWorker } from '@qpjo
 import { NightAllAdapter } from '../adapters/night-all.mjs'
 import { loadConfig } from '../config.mjs'
 import { NightAllBackfill } from '../ingest/backfill.mjs'
+import {
+  NIGHT_ALL_COMPAT_CONNECTOR_ID,
+  NIGHT_ALL_COMPAT_DATASET_ID,
+  normalizeNightAllLegacyPayload,
+} from '../ingest/legacy-night-all.mjs'
 import { DatabaseSourcePuller } from '../ingest/external/database-source.mjs'
 import { ExternalSourcePuller } from '../ingest/external/source-puller.mjs'
 import { SQLiteApiSourcePuller } from '../ingest/external/sqlite-api-source.mjs'
@@ -58,18 +63,42 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'))
 
   async function handleIngest(payload) {
-    if (payload?.kind !== 'search-result') {
-      throw new Error(`Unknown ingest payload kind: ${payload?.kind}`)
+    if (payload?.kind === 'night-all-compat-result') {
+      const normalized = normalizeNightAllLegacyPayload(
+        payload.rawPayload,
+        payload.platform,
+        payload.operation,
+      )
+      const result = await store.ingestExternalRecords({
+        datasetId: NIGHT_ALL_COMPAT_DATASET_ID,
+        platform: payload.platform,
+        records: normalized.records,
+        importRunId: null,
+        connectorId: NIGHT_ALL_COMPAT_CONNECTOR_ID,
+        apiSearchLineage: {
+          requestId: payload.requestId ?? null,
+          queryFingerprint: payload.queryFingerprint ?? null,
+          connectorCallId: payload.connectorCallId ?? null,
+        },
+      })
+      logger.log(
+        `[ingest] ${payload.platform}/${payload.operation} request=${payload.requestId} ingested=${result.ingested} changed=${result.changed} skipped=${normalized.skipped}`,
+      )
+      return
     }
-    const result = await store.ingestSearchResult({
-      platform: payload.platform,
-      rawPayload: payload.rawPayload,
-      queryFingerprint: payload.queryFingerprint ?? null,
-      requestId: payload.requestId ?? null,
-    })
-    logger.log(
-      `[ingest] ${payload.platform} request=${payload.requestId} ingested=${result.ingested} changed=${result.changed} skipped=${result.skipped}`,
-    )
+    if (payload?.kind === 'search-result') {
+      const result = await store.ingestSearchResult({
+        platform: payload.platform,
+        rawPayload: payload.rawPayload,
+        queryFingerprint: payload.queryFingerprint ?? null,
+        requestId: payload.requestId ?? null,
+      })
+      logger.log(
+        `[ingest] ${payload.platform} request=${payload.requestId} ingested=${result.ingested} changed=${result.changed} skipped=${result.skipped}`,
+      )
+      return
+    }
+    throw new Error(`Unknown ingest payload kind: ${payload?.kind}`)
   }
 
   async function handleBackfill(payload, job) {

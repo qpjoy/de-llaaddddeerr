@@ -106,6 +106,150 @@ Successful responses preserve the stable Night-All data-search envelope and add:
 - `x-mx-insight-request-id`: durable Hub request ID;
 - `idempotent-replay: true|false`.
 
+## Night-All legacy compatibility facade
+
+These transitional routes preserve the three existing Night-All request aliases
+and standard raw response envelope behind the Hub trust boundary:
+
+| Hub route | Private Night-All operation | Required selector | Complete snapshot window |
+| --- | --- | --- | ---: |
+| `POST /api/v1/night-all/search/raw` | `/api/v1/search/raw` | `keyword`, `query`, `keywords` or `queries` | 15 minutes |
+| `POST /api/v1/night-all/search/crawl` | `/api/v1/search/crawl` | a user/channel identifier | 1 hour |
+| `POST /api/v1/night-all/search/user-info` | `/api/v1/search/user-info` | a user identifier | 1 hour |
+
+All three require `Authorization: Bearer <mx key>` (or `x-api-key`), an
+`Idempotency-Key` of 8–128 safe characters, one explicit platform, and that
+platform's consumer grant. `all` and `*` are invalid. For example:
+
+```http
+POST /api/v1/night-all/search/raw
+Authorization: Bearer <mx key>
+Idempotency-Key: legacy-search-0001
+Content-Type: application/json
+
+{
+  "platform": "xiaohongshu",
+  "query": "AI Agent",
+  "count": 20
+}
+```
+
+The Hub derives Night-All `businessId` from the authenticated consumer. Omitting
+it is preferred; a legacy client may send `businessId` or `business_id` only when
+the value exactly matches that consumer. It is never an authentication input.
+The private-hop service token and provider routing remain server-owned.
+An administrator can bind a unique legacy `businessId` (maximum 128 characters)
+when creating the Hub consumer; otherwise Hub generates one and the migrating
+client must omit its former value. This initial binding has no public update API.
+
+The body has an operation-specific allowlist. `raw` accepts the documented
+keyword/query aliases and detail/comment flags; `crawl` accepts documented
+user/channel aliases, activity types and `cacheMaxAgeHours`; `user-info` accepts
+documented user aliases. Common pagination aliases are retained. `params` may
+carry safe platform continuation values, but provider, credential, endpoint,
+capability/moduleCode, business identity, availability, billing, token/auth,
+timeout, debug and similar controls are rejected recursively. Legacy
+`includeRaw:false` is accepted and removed before dispatch; `includeRaw:true` is
+rejected. `params` also cannot override count/page size, concurrency, enrichment
+or comment work.
+Archive/fullArchive/allTweets, archiveLimit/totalCount, max*Pages,
+pageCount/chunkSize/budget/crawlDepth and equivalent cost-amplification controls
+also require a separate granted capability/policy and are rejected. Unknown
+top-level fields are rejected.
+The effective page size must not exceed the consumer's platform policy; the
+upstream reference contract additionally caps `crawl` and `user-info` at 100.
+Raw query count × page size and crawl identity count × page size × activity-type
+count must also fit the policy work budget or the Hub returns
+`400 work_budget_exceeded`. This bounds processed item work, not the exact number
+of paid provider calls.
+
+The response body preserves the Night-All legacy envelope:
+
+```json
+{
+  "data": {
+    "raw_info": "[]",
+    "raw_data": "[]",
+    "page": {
+      "page": 1,
+      "pageSize": 20,
+      "returnedCount": 0,
+      "hasMore": false,
+      "nextCursor": null
+    },
+    "meta": { "resultCount": 0 }
+  },
+  "requestId": "night-all-request-id",
+  "traceId": "night-all-trace-id"
+}
+```
+
+`raw_info` and `raw_data` intentionally remain JSON strings. For these three
+namespaced compatibility routes Hub currently performs no response-field
+desensitization: provider, endpoint and other fields returned by Night-All remain
+in the outer envelope and in objects encoded in those strings. This is separate
+from the request-side rule above, which still rejects caller injection of
+provider/token/credential controls. The body retains Night-All's `requestId` and
+`traceId`; the current durable Hub request ID is separate:
+
+- `x-mx-insight-request-id: <hub request UUID>`;
+- `idempotent-replay: true|false`;
+- `x-mx-insight-source-mode: live|stale`;
+- `x-mx-insight-captured-at: <RFC3339 capture time>`;
+- `Age: 0` for live delivery or the snapshot age for stale delivery;
+- `Warning: 110 - "Response is stale"` only for stale delivery.
+
+Every actual dispatch records separate Hub call evidence, including operation,
+consumer, exact fingerprint, platform, latency, HTTP/business outcome, bounded
+failure kind and Night-All correlation IDs. Night-All HTTP 200 with a substantive
+warning or per-result error/`success=false` is a `partial` live success: it is
+returned but never creates or replaces a compatibility snapshot. A lone
+`STANDARD_PAYLOAD_EMPTY` warning is a deterministic complete empty result and does
+replace last-good, preventing an older non-empty snapshot from resurfacing. Only
+`complete` responses write last-good.
+
+Each new `Idempotency-Key` may dispatch once; a committed live or stale delivery
+is permanently replayed by that key, and a deliberately new live call needs a
+new key. After network/timeout ambiguity, an unusable HTTP 2xx
+content-type/JSON/envelope, or a definite upstream `502`, `503` or `504`, Hub may
+return HTTP 200 from an unexpired complete snapshot for the exact consumer,
+operation and full normalized request fingerprint. The snapshot retains the same
+original Night-All application fields as the live response. Hub never uses a
+similar query, another cursor/page, another consumer, a partial response,
+canonical search records or a separately desensitized projection. The
+body—including its Night-All request/trace IDs—is the historical snapshot; the
+headers identify the current Hub request and capture age. The failed live attempt
+remains separate evidence.
+
+Without that exact snapshot:
+
+| Upstream result | Public result |
+| --- | --- |
+| definite `400`, `404`, `409`, `422`, `429` | same HTTP status, safe `night_all_rejected` error |
+| other definite non-2xx HTTP rejection | `502 night_all_rejected` |
+| network error, Hub timeout, or unusable HTTP 2xx contract after dispatch | `502 upstream_outcome_unknown`; request becomes `unknown` |
+
+An ambiguous request must not be automatically retried with a new key. A
+dispatched compatibility error includes the durable Hub ID as
+`error.details.requestId`; successful live/stale delivery carries it in
+`x-mx-insight-request-id`. Use that ID with
+`GET /api/v1/requests/{hub-request-id}`. A replay with the same key reports the
+held unknown outcome. Hub does not emit `504` for its own timeout because it cannot
+prove that a paid upstream did no work.
+
+This facade is distinct from `/api/v1/data/search` and from canonical stored
+search. Its complete/partial live payloads also enter the governed
+`night-all.compat.v1` ingest dataset asynchronously in their original,
+non-desensitized form, but ingest/search state never changes the already-delivered
+legacy response. Response, exact snapshot and raw ingest therefore retain the same
+unmasked source evidence in this compatibility slice. See
+[ADR-0010](../adr/0010-night-all-compatibility-facade.md).
+
+Future Hub desensitization must be a separate versioned processing/projection and
+API contract. It cannot mutate or replace this compatibility response/snapshot.
+This response-preservation rule applies only to the three namespaced routes and
+does not change the `/api/v1/data/search` contract documented above.
+
 ## Hub canonical stored search
 
 ```http
@@ -356,6 +500,45 @@ retry is a new request and may consume another quota slot.
 Mapped source tombstones remain in canonical/revision evidence but are excluded
 from history, content search and entity search.
 
+### Telegram chronological context (planned versioned projection)
+
+Some upstream records contain `prev_message`, `current_message` and
+`next_message`. These mean “observed chronological neighbor” only. They are not a
+reply chain, thread/topic or media-album relation. Current compatibility ingest
+indexes the top-level record and retains embedded neighbors as raw lineage; the
+current v1 history/search projections above do **not** expose a `contextWindow` and
+do not index the embedded objects as duplicate messages.
+
+The target projector will upsert conversation nodes by the internal identity
+`(platform, conversationKey, messageId)` and create explicit directed
+`chronological_next` edges `prev -> current -> next`. A context-only node is a
+stub, later promotable by a full observation. An edge is accepted only when both
+stable message IDs resolve to the same conversation; reply/thread fields remain
+independent. Missing prev/next means “not observed”, not first/last message, and
+the Hub never guesses a neighbor from numeric message-ID adjacency.
+
+A future public contract may project verified edges as a generalized window:
+
+```json
+{
+  "contextWindow": {
+    "before": [],
+    "current": { "id": "opaque-message-id" },
+    "after": [],
+    "completeness": { "before": "unknown", "after": "unknown" }
+  }
+}
+```
+
+That field requires a new version; this example is a design direction, not a v1
+response promise. Importers remove at most one leading UTF-8 BOM (`U+FEFF`) before
+parsing while retaining the original bytes/hash as lineage. `groupName="私人群组"`
+is display text and cannot identify a conversation: multiple private groups share
+it. Prefer a normalized Telegram chat ID, then a validated public handle. A
+private `t.me/c/<chat-id>` or `rawGroupName` is source-scoped internal key material
+and must be exposed, if ever authorized, only as an opaque Hub conversation ID.
+Unstable/conflicting keys keep neighbor data as raw evidence and create no edge.
+
 ### Night-All-v1-compatible stored search
 
 The standard search route recognizes `platform=telegram` and serves stored Hub
@@ -505,10 +688,19 @@ under `byPlatform`; generic tools are reported separately under `byCapability`.
 | `409` | Idempotency conflict, in-progress request, or unknown prior outcome. |
 | `410` | A search cursor's Elasticsearch PIT has expired; restart from the first page. |
 | `429` | Request/concurrency/period quota exhausted. |
-| `502` | Definite Night-All rejection or ambiguous upstream outcome. |
+| `502` | Safe Night-All 5xx/contract rejection, or ambiguous upstream outcome. |
 | `503` | A required stored-data or tokenizer runtime is unavailable. |
 
 Clients should retry only safe `GET` operations and documented pre-dispatch failures. Costly `POST` retry always reuses the same idempotency key.
+
+For the Night-All compatibility facade specifically, upstream
+`400/404/409/422/429` keeps its status, while other definite upstream errors map to
+`502 night_all_rejected`. A network error, Hub timeout, or unusable HTTP 2xx
+content-type/JSON/envelope maps to `502 upstream_outcome_unknown`, not `504`; the
+request becomes `unknown`. When an unexpired exact complete snapshot exists, those
+ambiguous outcomes or a real non-2xx `502/503/504` instead return a successful
+stale response with the source/age headers documented above. Partial HTTP 200 is
+returned live and never replaced by stale.
 
 Tokenizer errors add `capability_not_granted`, `tokenizer_unavailable` and
 `tokenizer_invalid_response`. Any segmenter exception is mapped to a fixed safe

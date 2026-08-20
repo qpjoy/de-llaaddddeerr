@@ -12,7 +12,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | Admin console | Implemented with the shared MX Launcher Neon Void design package, including platform-admin tenant create/list/rename and explicit tenant selection when creating a consumer. |
 | Open capabilities | Implemented: platform-independent capability grants and quotas reuse the existing tenant/consumer/API Key lifecycle. `nlp.tokenize` is the first capability and reports the actual HanLP/Jieba/bigram backend plus degradation state. |
 | Data Center | Implemented as an Admin-Token-only PostgreSQL canonical catalog with dataset aggregates, full Admin record detail, exact totals, numbered pages and direct page jumps. Elasticsearch supplies ranked search only; PostgreSQL remains the authoritative count. |
-| Night-All adapter | Implemented for the private `/api/v1/data/search` facade; provider details are filtered. |
+| Night-All adapter | Implemented for the private `/api/v1/data/search` facade, where provider details remain filtered, plus the three explicit `/api/v1/night-all/search/{raw,crawl,user-info}` migration routes. Those compatibility routes preserve the Night-All response, exact snapshot and asynchronously ingested source payload without Hub desensitization. |
 | Local lifecycle | Docker Compose, PostgreSQL, bootstrap and smoke commands. |
 | Internal K8s | One-click lifecycle and manifests implemented: independent Hub namespace, a dedicated Hub database/role provisioned inside shared `mx-common` PostgreSQL, migration Job, split public/Admin Deployments, projector/ingest workers, Services and NetworkPolicy. A retired Hub-local PostgreSQL is decommissioned only by an explicit destructive command. |
 | Launcher integration | Lifecycle delegation, offline-safe status summary and AppCenter entrypoint. |
@@ -97,3 +97,4 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 - [ADR-0007: managed data sources and change watermarks](adr/0007-managed-data-sources-and-change-watermarks.md)
 - [ADR-0008: open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
 - [ADR-0009: unified canonical search](adr/0009-unified-canonical-search.md)
+- [ADR-0010: Night-All compatibility facade and exact snapshot fallback](adr/0010-night-all-compatibility-facade.md)

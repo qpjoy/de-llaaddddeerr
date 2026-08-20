@@ -26,4 +26,6 @@ docker run --rm --entrypoint sh mx-common-hanlp:local -c 'wc -c /opt/hanlp-model
 # 迁移common pvc
 bash scripts/manage.sh relocate --confirm
 
+# MTU丢包查看
+ip route get 2400::1 2>/dev/null | head -2; ip -o link show | awk -F': ' '{print $2}' | while read i; do printf '%s mtu=%s\n' "$i" "$(cat /sys/class/net/$i/mtu 2>/dev/null)"; done | grep -Ev '^lo '
 ```

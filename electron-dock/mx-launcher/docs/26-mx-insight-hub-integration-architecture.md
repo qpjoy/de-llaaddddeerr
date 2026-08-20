@@ -168,7 +168,7 @@ membership 自动推导。
 
 ## 6. 绝不能影响的 MX-H2I 链路
 
-Hub 不获得 Launcher network lease，不注册 endpoint ProductNetwork，不创建 WireGuard peer，不修改 route plan，也不拥有系统 PAC/DNS/NRPT/resolver。
+Hub 不获得 Launcher network lease，不注册 endpoint ProductNetwork，不创建 WireGuard peer，不修改 route plan，也不拥有系统 PAC/DNS/NRPT/resolver。AppCenter 中的 `mx-insight-hub` 必须继续保持数据应用身份：不得为它新增 ProductNetwork、`launcher-network` capability、网络类 permission 或独立/复用的本机 data-plane owner；现有 `productNetworkId` 展示元数据也不能作为补注册 ProductNetwork 的理由。
 
 以下文件和状态机属于联网红线，Hub 功能不应修改：
 
@@ -189,9 +189,42 @@ Hub 不获得 Launcher network lease，不注册 endpoint ProductNetwork，不�
 - public/admin listener 使用不同 Deployment/Service，公共路由永远不能到 admin；
 - ingest/search/ES/Kibana 都是 Hub 自己的 optional workload，不加入 Launcher readiness；
 - Launcher health proxy 使用短 timeout，Hub down 返回 offline summary；
-- 独立 Hub deploy 不 rollout Launcher；只有明确 managed sync 才同步 token/entrypoint；
-- Hub `down` 只缩容 Hub workloads，保留数据，不停止 Night-All/Launcher；
+- 普通 Hub 发布必须显式保持 `MX_INSIGHT_SYNC_LAUNCHER=0`，只更新 Hub namespace，
+  不同步 Launcher Secret/ConfigMap，也不 rollout Launcher；
+- `MX_INSIGHT_SYNC_LAUNCHER=1` 是 managed sync，而不是普通 deploy。当前实现会同步
+  `mx-insight-hub-admin`/可选 Admin entrypoint，并执行
+  `rollout restart deployment/mx-launcher-internal`；只能在 token/entrypoint 确有变化、
+  已安排维护窗口且登录/联网回归可立即执行时使用；
+- 当前 Hub `down` 只把 public/admin API 缩容为零，不停止 ingest/projector，也不停止
+  PostgreSQL、Night-All 或 Launcher。验证“Hub 完全不运行”或资源隔离时，必须另外显式
+  检查并缩容 worker，不能把 `down` 的成功输出当成全部 workload 已停止；
 - 路由变更 additive、host-specific，可独立回滚；不修改现有 MX-H2I host/route。
+
+### 7.1 兼容 API 发布硬门禁
+
+本次 `/api/v1/night-all/search/raw`、`/api/v1/night-all/search/crawl`、
+`/api/v1/night-all/search/user-info` 及其 Hub 聚合/缓存回退实现都属于 Hub 数据面发布；
+接口兼容要求不能扩大为 Launcher 网络、身份数据库或 endpoint 系统配置变更。
+
+| 边界 | 必须满足 | 直接拒绝发布的情况 |
+| --- | --- | --- |
+| Launcher 变更面 | 普通发布只变更 `mx-insight-hub` namespace，`MX_INSIGHT_SYNC_LAUNCHER=0`；发布前后 Launcher Deployment generation/ReplicaSet/Pod UID 无变化 | 普通 Hub deploy 触发 Launcher Secret/ConfigMap patch、rollout 或 migration |
+| 网络 owner | Hub 只使用数据 API，不申请 lease，不写 WG/route/PAC/NRPT/resolver/ownership | 新增 Hub ProductNetwork、`launcher-network` capability、network permission 或第三个 endpoint owner |
+| 端口 | Hub 生产只占 `18150` public、`18151` admin；本地 combined 模式只用 `18180`。保留 MX-H2I `17891`、`18090`、`2053`、Internal host runner `19190` 和 Domestic WG UDP `51280` | Hub 或其 sidecar/listener 占用保留端口，或把 Night-All `13141/18141` 直接暴露成平台路由 |
+| Admin ingress | `18151` 只能由受控 Internal edge/Launcher 访问；edge 必须丢弃外来 `X-Forwarded-For` 并重写可信 client IP；主机防火墙是必需控制 | 仅依赖 Kubernetes NetworkPolicy 保护 `hostNetwork` Pod、允许客户端直连 `18151`，或透传任意 XFF |
+| 登录隔离 | Hub Admin sign-in 对 Launcher `/internal/v1/sdk/oauth/token` 的调用有独立暴露面、速率预算和审计，不能耗尽 MX-H2I 密码登录的 source/subject bucket | Hub sign-in 压测或恶意请求能让 MX-H2I 用户收到 429/无法登录 |
+| 资源隔离 | 发布前记录节点 CPU、内存、磁盘 IO 和 Launcher API P50/P95；ingest/backfill/reindex 有并发与速率上限，Launcher 保留资源余量 | ES/projector/ingest 压力导致 Launcher readiness 抖动、OAuth/Feishu/lease 超时或节点 memory/disk pressure |
+| 故障隔离 | Hub、Night-All、ES、Redis 和任一平台失败只降级 Hub，Launcher 登录、租约和 endpoint 网络状态不变 | 任一 Hub 依赖进入 Launcher readiness/connect gate，或 Hub 故障触发 MX-H2I 网络修复/teardown |
+
+Public/Admin Pod 当前使用 `hostNetwork` 并监听 `0.0.0.0:18150/18151`。NetworkPolicy
+是否覆盖 host-network 流量取决于 CNI，因此它只能作为纵深控制，不能替代节点防火墙、
+精确 host/method/path 路由和受控代理的 XFF 重写。尤其 Admin sign-in 会把密码认证转发到
+Launcher，并与 MX-H2I 密码登录共享 Launcher 的认证限流存储；`18151` 的边界错误会直接
+扩大登录可用性风险。
+
+Hub 与 Launcher 虽不共享数据库，但当前可部署在同一控制平面节点。`mx-common`
+Elasticsearch、Hub projector、ingest/backfill/reindex 的资源峰值仍可能通过 CPU、内存、
+磁盘或连接数争抢间接影响 Launcher。数据库逻辑隔离不能代替节点容量和 workload 资源隔离。
 
 生产 Night-All 继续宿主单写者，Hub 经 workload-authenticated host facade 访问。Docker full Night-All 只用于本地受控快照和解析测试，不能作为第二个生产 writer。
 
@@ -224,7 +257,23 @@ Hub 不获得 Launcher network lease，不注册 endpoint ProductNetwork，不�
 
 ## 10. 回归门槛
 
-- Hub namespace 删除、Hub Admin 超时、Night-All/ES/Redis down 时，MX-H2I guest/staff connect/disconnect 全部通过；
+- 以下矩阵必须在隔离/预发布环境执行并保留机器可读证据；不能在生产通过删除 namespace、
+  伪造登录攻击或无上限压测来验证：
+
+| 场景 | 必须通过的 MX-H2I 行为 | 必须保存的证据 |
+| --- | --- | --- |
+| 发布前基线；Hub namespace 不存在 | guest connect、密码 staff login、飞书 login、guest → staff、reconnect、disconnect、正常退出 | Launcher `/healthz`/`readyz`、OAuth/Feishu/lease 响应，网络状态基线快照 |
+| 普通 Hub deploy，`MX_INSIGHT_SYNC_LAUNCHER=0` | 上述全流程连续可用；已有 staff/guest 会话不断开 | Launcher Deployment generation/ReplicaSet/Pod UID 前后相同；Hub 仅自身 namespace 发生变化 |
+| managed sync，`MX_INSIGHT_SYNC_LAUNCHER=1` | 明确认知会 rollout Launcher；旧 Pod 排空、新 Pod ready 后，密码/飞书登录、lease 和 connect 全部通过；受控的在途 OAuth/Feishu exchange 不丢失或能按既有契约安全重试 | rollout 时间线、ready endpoint、在途请求结果、登录与联网回归报告；失败则回滚并停止联合发布 |
+| Hub Admin timeout/down；Hub public down | Launcher overview 快速 offline；MX-H2I 全流程和已有连接不变 | overview timeout、Launcher readiness、connect/disconnect 结果，网络状态 diff |
+| Night-All、ES、Redis、单平台分别 down | 只有 Hub 对应 capability fresh/stale/202/503 语义变化；MX-H2I 登录和联网不变 | Hub 降级响应、Launcher 零 5xx/429、网络状态 diff |
+| `Hub down` 后 | public/admin 为零；先确认 ingest/projector 是否仍运行。API down 与 worker 继续运行两种状态下 MX-H2I 均正常 | 各 Deployment replica/Pod 清单、节点资源、Launcher 登录/联网结果 |
+| `18151` 直连、伪造 XFF、Admin sign-in 限流测试 | 非受控来源在 edge/防火墙被拒绝；Hub 尝试不能耗尽同一测试用户的 MX-H2I password subject/source bucket | 防火墙/edge 日志、Hub/Launcher 限流审计、随后 MX-H2I 成功登录；只能使用隔离测试账号 |
+| ingest/backfill/reindex 与 ES 压力 | 已有连接不断开；guest/staff/飞书/lease 无超时或 5xx/429，Launcher P95 不越过发布前约定 SLO | 节点 CPU/内存/disk/conn、Pod throttling/OOM、Launcher P50/P95/错误率 |
+| MX-H2I staff 在线时 Luopan connect/disconnect | MX-H2I 保持 staff；Luopan 仅拥有 `10.91/16` 与 `10.88.100.3/32`，不接管 PAC/2053 | 两个 owner、WG profile、route 和 lease 快照 |
+| Windows/macOS teardown | Windows 保持 PAC → WG → route/NRPT → local edge → ownership；macOS LaunchDaemon/resolver/route 完整回滚 | 按阶段时间线与 live readback，任一步失败不得误报 idle/disconnected |
+
+- Hub namespace absent、Hub Admin 超时、Night-All/ES/Redis down 时，MX-H2I guest/staff connect/disconnect 全部通过；
 - route plan、lease、WireGuard config、PAC、NRPT、resolver、2053 listener 在 Hub 发布前后 diff 为零；
 - Windows PAC → WG → route/NRPT → local edge → ownership teardown 顺序测试通过；
 - macOS LaunchDaemon、supplemental resolver 和 route 回滚通过；

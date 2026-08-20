@@ -2,7 +2,11 @@ openapi: 3.1.0
 info:
   title: MX Insight Hub Public and Admin API
   version: 1.0.0-alpha
-  description: Stable consumer contract. Night-All and provider details are private implementation concerns.
+  description: >-
+    Stable consumer contract. Night-All and provider details are normally
+    private implementation concerns; the three explicitly namespaced
+    /night-all/search compatibility routes are the documented exception and
+    preserve the current upstream application payload unchanged.
 servers:
   - url: /api/v1
 security:
@@ -1136,6 +1140,79 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /night-all/search/{operation}:
+    post:
+      operationId: searchNightAllCompatibility
+      summary: Call one of the three Night-All legacy search operations.
+      description: >-
+        The Hub authenticates the consumer, enforces the platform grant and
+        policy, injects its owned businessId, records the upstream attempt, and
+        stores complete responses as exact last-good snapshots. A network or
+        timeout ambiguity, an unusable HTTP 2xx content-type/JSON/envelope, or a
+        real non-2xx HTTP 502/503/504 may return that exact snapshot. An unusable
+        2xx is outcome-unknown because paid work may already have happened. The
+        response body retains Night-All data fields unchanged;
+        provider, token, credential, endpoint, capability/moduleCode and timeout
+        routing controls remain server-owned. Archive/fullArchive/allTweets,
+        archiveLimit/totalCount, max*Pages, pageCount/chunkSize/budget/crawlDepth
+        and equivalent cost-amplification controls are also rejected; they require
+        a separately granted capability and server policy.
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, invalid_platform, page_size_exceeded, work_budget_exceeded, unsupported_fields, business_id_mismatch, idempotency_key_required, invalid_idempotency_key]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "404": [not_found]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
+        "429": [quota_exceeded]
+        "502": [night_all_rejected, upstream_outcome_unknown]
+      parameters:
+        - name: operation
+          in: path
+          required: true
+          schema: { type: string, enum: [raw, crawl, user-info] }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >-
+            Permanently names one immutable paid dispatch for this exact path and
+            normalized body. Reuse always replays that result; use a new key only
+            when intentionally requesting a new live call.
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NightAllLegacyRequest" }
+      responses:
+        "200":
+          description: >-
+            Night-All legacy envelope, either live or the exact last-good
+            upstream application payload. The body is not masked by this route.
+          headers:
+            x-mx-insight-request-id:
+              description: Durable Hub request identifier for status lookup.
+              schema: { type: string, format: uuid }
+            x-mx-insight-source-mode:
+              schema: { type: string, enum: [live, stale] }
+            x-mx-insight-captured-at:
+              schema: { type: string, format: date-time }
+            Age:
+              schema: { type: integer, minimum: 0 }
+            Warning:
+              description: HTTP Warning 110 is present for a stale delivery.
+              schema: { type: string }
+            idempotent-replay:
+              schema: { type: string, enum: ["true", "false"] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NightAllLegacyEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
   /data/stored/search:
     post:
       operationId: searchStoredData
@@ -2508,6 +2585,112 @@ components:
         query: { type: string, minLength: 1, maxLength: 500, description: Non-blank search query; surrounding whitespace is trimmed. }
         pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
         cursor: { type: string, minLength: 1, maxLength: 8192, description: Non-blank opaque cursor returned by the previous page; send it unchanged. Telegram cursors are signed and bound to the normalized request. }
+    NightAllLegacyRequest:
+      type: object
+      additionalProperties: false
+      required: [platform]
+      description: >-
+        Shared schema for the operation path parameter. The x-mx-operation-fields
+        allowlists mirror runtime exactly: raw requires one singular string or
+        plural string-array query field; crawl and user-info require a supported
+        user/channel identifier. Canonical decimal strings are accepted for the
+        integer fields normalized by runtime. Server-owned routing and credential
+        controls are rejected, including when nested in params.
+      x-mx-common-fields: [businessId, business_id, platform, count, pageSize, limit, page, cursor, concurrency, params, includeRaw]
+      x-mx-operation-fields:
+        raw: [keyword, query, keywords, queries, disableAutoDetails, includeDetails, includeComments, commentLimit, cacheMaxAgeHours, maxEnrichItems, commentCursor, enrichConcurrency]
+        crawl: [username, usernames, userId, userIds, user_id, uid, channelUrl, channel_url, channelId, channel_id, url, urls, activityTypes, cacheMaxAgeHours]
+        user-info: [username, usernames, userId, userIds, user_id, uid]
+      x-mx-rejected-params: [provider, endpoint, credential, token/auth, timeout, capability, moduleCode, archive, fullArchive, allTweets, archiveLimit, totalCount, max*Pages, pageCount, chunkSize, budget, crawlDepth, count, limit, pageSize, page, pageNumber, pageNo, concurrency, includeDetails, includeComments, disableAutoDetails, commentLimit, maxEnrichItems, enrichConcurrency, cacheMaxAgeHours]
+      x-mx-params-limits:
+        maxDepth: 8
+        maxNodes: 1000
+        maxStringLength: 8192
+        arrayMaxItems: consumer effective platform maxPageSize
+      x-mx-work-budget:
+        maxRawQueries: 50
+        maxCrawlIdentifiers: 50
+        raw: queryCount * effective pageSize <= consumer effective platform maxPageSize
+        crawl: identifierCount * effective pageSize * activityTypeCount <= consumer effective platform maxPageSize
+        user-info: no multiplication rule; identifier collections remain bounded
+        description: Bounds returned/processed item work; it is not a provider-call or billing-count claim because Night-All owns provider/token policy.
+      properties:
+        platform: { type: string, minLength: 1, maxLength: 64 }
+        businessId: { type: string, maxLength: 128, description: When present, must equal the authenticated consumer businessId. }
+        business_id: { type: string, maxLength: 128 }
+        includeRaw: { type: boolean, enum: [false], description: Legacy false is accepted then removed before dispatch; true is rejected. }
+        keyword: { type: string, minLength: 1, maxLength: 2048 }
+        query: { type: string, minLength: 1, maxLength: 2048 }
+        keywords: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 2048 } }
+        queries: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 2048 } }
+        username: { type: [string, number], minLength: 1, maxLength: 2048 }
+        usernames: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 2048 } }
+        userId: { type: [string, number], minLength: 1, maxLength: 2048 }
+        userIds: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 2048 } }
+        user_id: { type: [string, number], minLength: 1, maxLength: 2048 }
+        uid: { type: [string, number], minLength: 1, maxLength: 2048 }
+        channelUrl: { type: string, minLength: 1, maxLength: 2048 }
+        channel_url: { type: string, minLength: 1, maxLength: 2048 }
+        channelId: { type: [string, number], minLength: 1, maxLength: 2048 }
+        channel_id: { type: [string, number], minLength: 1, maxLength: 2048 }
+        url: { type: string, minLength: 1, maxLength: 2048 }
+        urls: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 2048 } }
+        count:
+          oneOf:
+            - { type: integer, minimum: 1 }
+            - { type: string, pattern: "^[1-9][0-9]*$" }
+        pageSize:
+          oneOf:
+            - { type: integer, minimum: 1 }
+            - { type: string, pattern: "^[1-9][0-9]*$" }
+        limit:
+          oneOf:
+            - { type: integer, minimum: 1 }
+            - { type: string, pattern: "^[1-9][0-9]*$" }
+        page:
+          oneOf:
+            - { type: integer, minimum: 1, maximum: 1000 }
+            - { type: string, pattern: "^(?:[1-9]|[1-9][0-9]{1,2}|1000)$" }
+        cursor: { type: string, minLength: 1, maxLength: 8192 }
+        concurrency:
+          oneOf:
+            - { type: integer, minimum: 1, maximum: 20 }
+            - { type: string, pattern: "^(?:[1-9]|1[0-9]|20)$" }
+        cacheMaxAgeHours: { type: number, minimum: 0, maximum: 720, description: raw and crawl only. }
+        disableAutoDetails: { type: boolean }
+        includeDetails: { type: boolean }
+        includeComments: { type: boolean }
+        commentLimit:
+          oneOf:
+            - { type: integer, minimum: 1, maximum: 100 }
+            - { type: string, pattern: "^(?:[1-9]|[1-9][0-9]|100)$" }
+        maxEnrichItems:
+          oneOf:
+            - { type: integer, minimum: 1, maximum: 20 }
+            - { type: string, pattern: "^(?:[1-9]|1[0-9]|20)$" }
+        commentCursor: { type: string, minLength: 1, maxLength: 8192 }
+        enrichConcurrency:
+          oneOf:
+            - { type: integer, minimum: 1, maximum: 5 }
+            - { type: string, pattern: "^[1-5]$" }
+        activityTypes: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        params: { type: object, additionalProperties: true, description: Platform continuation values only. Rejected keys and workload overrides are listed by x-mx-rejected-params; nested strings are at most 8192 characters and arrays are bounded by the consumer effective platform maxPageSize. }
+    NightAllLegacyEnvelope:
+      type: object
+      additionalProperties: true
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: true
+          required: [raw_info, raw_data, page, meta]
+          properties:
+            raw_info: { type: string, contentMediaType: application/json, description: Night-All JSON-string array retained unchanged. }
+            raw_data: { type: string, contentMediaType: application/json, description: Night-All JSON-string array retained unchanged. }
+            page: { type: object, additionalProperties: true }
+            meta: { type: object, additionalProperties: true }
+        requestId: { type: string }
+        traceId: { type: string }
     StoredSearchRequest:
       type: object
       additionalProperties: false
@@ -2870,6 +3053,8 @@ components:
         status: { type: string, enum: [reserved, committed, released, unknown] }
         units: { type: [integer, "null"] }
         errorCode: { type: [string, "null"] }
+        sourceMode: { type: string, enum: [live, stale] }
+        capturedAt: { type: string, format: date-time }
         reservedAt: { type: string, format: date-time }
         completedAt: { type: [string, "null"], format: date-time }
     TelegramRecord:

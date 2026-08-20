@@ -559,7 +559,7 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState(null)
-  const [form, setForm] = useState({ tenantId: '', tenantName: '', name: '' })
+  const [form, setForm] = useState({ tenantId: '', tenantName: '', name: '', businessId: '' })
   const [tenantDialog, setTenantDialog] = useState(null)
   const [tenantSaving, setTenantSaving] = useState(false)
   const [tenantError, setTenantError] = useState(null)
@@ -581,7 +581,7 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
     const selectedTenantId = consumerTenants.some((tenant) => tenant.id === tenantId)
       ? tenantId
       : consumerTenants[0]?.id || ''
-    setForm({ tenantId: selectedTenantId, tenantName: '', name: '' })
+    setForm({ tenantId: selectedTenantId, tenantName: '', name: '', businessId: '' })
     setFormError(null)
     setOpen(true)
   }
@@ -623,7 +623,11 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
         const tenant = await adminApi.createTenant(token, { name: form.tenantName })
         targetTenantId = tenant.id
       }
-      await adminApi.createConsumer(token, { tenantId: targetTenantId, name: form.name })
+      await adminApi.createConsumer(token, {
+        tenantId: targetTenantId,
+        name: form.name,
+        ...(form.businessId.trim() ? { businessId: form.businessId.trim() } : {}),
+      })
       setOpen(false)
       if (targetTenantId !== tenantId) setQuery({ tenantId: targetTenantId })
       else state.refresh()
@@ -705,12 +709,13 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
       <Panel title="调用者" subtitle={`${visibleConsumers.length} 条记录`}>
         {visibleConsumers.length ? (
           <Table label="调用者列表">
-            <thead><tr><th>名称</th><th>租户</th><th>状态</th><th>创建时间</th><th>Consumer ID</th></tr></thead>
+            <thead><tr><th>名称</th><th>租户</th><th>Night-All Business ID</th><th>状态</th><th>创建时间</th><th>Consumer ID</th></tr></thead>
             <tbody>
               {visibleConsumers.map((consumer) => (
                 <tr key={consumer.id}>
                   <td><strong>{consumer.name}</strong><small>独立权限与用量归属</small></td>
                   <td>{tenantNames.get(consumer.tenantId) || consumer.tenantId}</td>
+                  <td><code className="mih-mono">{consumer.businessId}</code></td>
                   <td><StatusBadge status={consumer.status} /></td>
                   <td>{formatDate(consumer.createdAt)}</td>
                   <td><code className="mih-mono">{consumer.id}</code></td>
@@ -754,6 +759,9 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
             )}
             <Field label="调用者名称">
               <input className="qp-input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：市场研究团队" required />
+            </Field>
+            <Field label="Night-All Business ID（可选）" hint="迁移旧调用方时填写原 businessId；创建后作为不可变调用归属。留空则由 Hub 自动生成。">
+              <input className="qp-input" value={form.businessId} onChange={(event) => setForm({ ...form, businessId: event.target.value })} maxLength={128} placeholder="例如：risk-console" />
             </Field>
             {formError ? <ErrorState error={formError} /> : null}
           </form>

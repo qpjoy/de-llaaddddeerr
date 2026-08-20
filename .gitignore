@@ -61,3 +61,5 @@ deploy-demo/
 electron-dock/mx-launcher/demos/*/.dev-mode.json
 electron-dock/mx-launcher/demos/*/pnpm-lock.yaml
 electron-dock/mx-launcher/demos/*/pnpm-workspace.yaml
+
+spec_docs/

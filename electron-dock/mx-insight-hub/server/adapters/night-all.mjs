@@ -1,5 +1,9 @@
 import { UpstreamAmbiguousError, UpstreamRejectedError } from '../core/errors.mjs'
 import { isNightAllDataSearchV1Envelope } from '../contracts/night-all-data-search.mjs'
+import {
+  isNightAllLegacyEnvelope,
+  NIGHT_ALL_LEGACY_OPERATIONS,
+} from '../contracts/night-all-legacy.mjs'
 
 const BLOCKED_KEYS = new Set([
   'provider',
@@ -18,6 +22,13 @@ const BLOCKED_KEYS = new Set([
   'upstreamUrl',
   'baseUrl',
 ])
+
+function invalidUpstreamResponse(code) {
+  const error = new Error(code)
+  error.name = 'InvalidUpstreamResponseError'
+  error.code = code
+  return error
+}
 
 export function stripProviderMetadata(value) {
   if (Array.isArray(value)) return value.map(stripProviderMetadata)
@@ -62,9 +73,10 @@ export class NightAllAdapter {
     this.exportToken = exportToken || null
   }
 
-  // `keepRaw` returns the pre-redaction payload alongside the public one.
-  // Provider/endpoint identifiers are ingest lineage evidence; they are stored,
-  // never served, so the redacted copy remains the only thing callers can see.
+  // `keepRaw` returns the pre-serving-projection payload alongside the public
+  // one. Most adapter methods remove private provider metadata; the three
+  // explicitly namespaced compatibility routes opt into an identity projection
+  // so their legacy response body remains field-for-field compatible.
   async #request(method, path, body, validate, {
     keepRaw = false,
     token,
@@ -73,41 +85,66 @@ export class NightAllAdapter {
   } = {}) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs || this.timeoutMs)
-    let response
     try {
-      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        method,
-        headers: {
-          ...(body ? { 'content-type': 'application/json' } : {}),
-          ...(token || this.serviceToken
-            ? { authorization: `Bearer ${token || this.serviceToken}` }
-            : {}),
-        },
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      })
-    } catch (error) {
-      throw new UpstreamAmbiguousError('Night-All outcome is unknown', error)
+      let response
+      try {
+        response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+          method,
+          headers: {
+            ...(body ? { 'content-type': 'application/json' } : {}),
+            ...(token || this.serviceToken
+              ? { authorization: `Bearer ${token || this.serviceToken}` }
+              : {}),
+          },
+          body: body ? JSON.stringify(body) : undefined,
+          signal: controller.signal,
+        })
+      } catch (error) {
+        throw new UpstreamAmbiguousError('Night-All outcome is unknown', error)
+      }
+
+      const contentType = response.headers.get('content-type') || ''
+      if (!contentType.toLowerCase().includes('application/json')) {
+        if (response.ok) {
+          throw new UpstreamAmbiguousError(
+            'Night-All returned an unusable successful response; outcome is unknown',
+            invalidUpstreamResponse('invalid_upstream_content_type'),
+          )
+        }
+        throw new UpstreamRejectedError(response.status, { code: 'invalid_upstream_content_type' })
+      }
+      let payload
+      try {
+        payload = await response.json()
+      } catch (error) {
+        if (controller.signal.aborted || error?.name === 'AbortError') {
+          throw new UpstreamAmbiguousError('Night-All outcome is unknown', error)
+        }
+        // Invalid JSON is a definite upstream contract failure. Other body
+        // stream failures can happen after Night-All accepted the POST, so the
+        // outcome must remain unknown rather than being retried as a 502.
+        if (error instanceof SyntaxError && response.ok) {
+          throw new UpstreamAmbiguousError(
+            'Night-All returned invalid JSON after accepting the request; outcome is unknown',
+            invalidUpstreamResponse('invalid_upstream_json'),
+          )
+        }
+        if (error instanceof SyntaxError) payload = null
+        else throw new UpstreamAmbiguousError('Night-All outcome is unknown', error)
+      }
+      if (!response.ok) throw new UpstreamRejectedError(response.status, payload)
+      if (!payload || typeof payload !== 'object' || (validate && !validate(payload))) {
+        throw new UpstreamAmbiguousError(
+          'Night-All returned an invalid success envelope; outcome is unknown',
+          invalidUpstreamResponse('invalid_upstream_contract'),
+        )
+      }
+      const redacted = redact(payload)
+      return keepRaw ? { payload: redacted, raw: payload } : redacted
     } finally {
+      // The deadline covers both response headers and the entire JSON body.
       clearTimeout(timer)
     }
-
-    const contentType = response.headers.get('content-type') || ''
-    if (!contentType.toLowerCase().includes('application/json')) {
-      throw new UpstreamRejectedError(502, { code: 'invalid_upstream_content_type' })
-    }
-    let payload
-    try {
-      payload = await response.json()
-    } catch {
-      payload = null
-    }
-    if (!response.ok) throw new UpstreamRejectedError(response.status, payload)
-    if (!payload || typeof payload !== 'object' || (validate && !validate(payload))) {
-      throw new UpstreamRejectedError(502, { code: 'invalid_upstream_contract' })
-    }
-    const redacted = redact(payload)
-    return keepRaw ? { payload: redacted, raw: payload } : redacted
   }
 
   async dependencies() {
@@ -186,6 +223,21 @@ export class NightAllAdapter {
       },
       isNightAllDataSearchV1Envelope,
       { keepRaw: true, redact: redactNightAllDataSearchResponse },
+    )
+  }
+
+  legacySearch({ operation, body, businessId }) {
+    if (!NIGHT_ALL_LEGACY_OPERATIONS.has(operation)) {
+      throw new TypeError(`Unsupported Night-All legacy operation: ${operation}`)
+    }
+    return this.#request(
+      'POST',
+      `/api/v1/search/${operation}`,
+      { ...body, businessId },
+      isNightAllLegacyEnvelope,
+      // Compatibility responses intentionally retain Night-All's current data
+      // fields. Hub-level masking is a separate, future serving policy.
+      { keepRaw: true, redact: (payload) => payload },
     )
   }
 }

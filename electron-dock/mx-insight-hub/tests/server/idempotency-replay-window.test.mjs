@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 
 const CONSUMER = '33333333-3333-4333-8333-333333333333'
@@ -25,7 +26,7 @@ function storeWithCommittedRequest({ completedAt }) {
   }
   const client = {
     async query(sql, values) {
-      statements.push(sql.trim().split('\n')[0].trim())
+      statements.push(sql.trim())
       if (sql.includes('FROM usage_requests')) return { rows: [committed] }
       if (sql.startsWith('UPDATE usage_requests')) {
         return { rows: [{ ...committed, status: 'reserved', response_body: null, completed_at: null }] }
@@ -90,10 +91,47 @@ test('re-executing after the window still re-checks quota', async () => {
   // and it reuses the existing row rather than orphaning the key.
   assert.ok(statements.some((statement) => statement.startsWith('UPDATE usage_requests')))
   assert.ok(statements.some((statement) => statement.startsWith('COMMIT')))
+  const update = statements.find((statement) => statement.startsWith('UPDATE usage_requests'))
+  assert.match(update, /api_key_id = \$2/)
+  assert.match(update, /response_status = NULL/)
+  assert.match(update, /response_body = NULL/)
+  assert.match(update, /delivery_source_mode = NULL/)
+  assert.match(update, /response_captured_at = NULL/)
+  assert.match(update, /compatibility_snapshot_id = NULL/)
 })
 
 test('a different body under the same key is still a conflict, window or not', async () => {
   const { store } = storeWithCommittedRequest({ completedAt: new Date(Date.now() - 3_600_000) })
   const reservation = await store.reserve(input({ fingerprint: 'fp-2', replayWindowMs: 120_000 }))
   assert.equal(reservation.kind, 'conflict')
+})
+
+test('MemoryStore mirrors replay expiry and clears the previous delivery metadata', async () => {
+  const store = new MemoryStore()
+  const first = await store.reserve(input({ replayWindowMs: 120_000 }))
+  await store.commitRequest(first.request.id, {
+    responseStatus: 200,
+    responseBody: { data: { items: ['old'] } },
+    unitsActual: 1,
+    upstreamLatencyMs: 10,
+  })
+  Object.assign(store.requests.get(first.request.id), {
+    completedAt: new Date(Date.now() - 3_600_000).toISOString(),
+    deliverySourceMode: 'stale',
+    capturedAt: new Date(Date.now() - 4_000_000).toISOString(),
+    snapshotId: '88888888-8888-4888-8888-888888888888',
+  })
+
+  const currentApiKeyId = '99999999-9999-4999-8999-999999999999'
+  const reservation = await store.reserve(input({
+    apiKeyId: currentApiKeyId,
+    replayWindowMs: 120_000,
+  }))
+  assert.equal(reservation.kind, 'reserved')
+  assert.equal(reservation.request.apiKeyId, currentApiKeyId)
+  assert.equal(reservation.request.responseStatus, null)
+  assert.equal(reservation.request.responseBody, null)
+  assert.equal(reservation.request.deliverySourceMode, null)
+  assert.equal(reservation.request.capturedAt, null)
+  assert.equal(reservation.request.snapshotId, null)
 })

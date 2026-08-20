@@ -1,9 +1,90 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { createApp } from '../../server/app.mjs'
 
-const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|businessId|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi|justone/i
+const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi|justone/i
+const NIGHT_ALL_COMMON_FIELDS = [
+  'businessId', 'business_id', 'platform', 'count', 'pageSize', 'limit', 'page',
+  'cursor', 'concurrency', 'params', 'includeRaw',
+]
+const NIGHT_ALL_OPERATION_FIELDS = {
+  raw: [
+    'keyword', 'query', 'keywords', 'queries', 'disableAutoDetails',
+    'includeDetails', 'includeComments', 'commentLimit', 'cacheMaxAgeHours',
+    'maxEnrichItems', 'commentCursor', 'enrichConcurrency',
+  ],
+  crawl: [
+    'username', 'usernames', 'userId', 'userIds', 'user_id', 'uid',
+    'channelUrl', 'channel_url', 'channelId', 'channel_id', 'url', 'urls',
+    'activityTypes', 'cacheMaxAgeHours',
+  ],
+  'user-info': ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid'],
+}
+const NIGHT_ALL_REJECTED_PARAMS = [
+  'provider', 'endpoint', 'credential', 'token/auth', 'timeout', 'capability',
+  'moduleCode', 'archive', 'fullArchive', 'allTweets', 'archiveLimit',
+  'totalCount', 'max*Pages', 'pageCount', 'chunkSize', 'budget', 'crawlDepth',
+  'count', 'limit', 'pageSize', 'page', 'pageNumber', 'pageNo', 'concurrency',
+  'includeDetails', 'includeComments', 'disableAutoDetails', 'commentLimit',
+  'maxEnrichItems', 'enrichConcurrency', 'cacheMaxAgeHours',
+]
+
+function assertNightAllCompatibilityRequestSchema(schema) {
+  assert.equal(schema.type, 'object')
+  assert.equal(schema.additionalProperties, false)
+  assert.deepEqual(schema.required, ['platform'])
+  assert.deepEqual(schema['x-mx-common-fields'], NIGHT_ALL_COMMON_FIELDS)
+  assert.deepEqual(schema['x-mx-operation-fields'], NIGHT_ALL_OPERATION_FIELDS)
+  assert.deepEqual(schema['x-mx-rejected-params'], NIGHT_ALL_REJECTED_PARAMS)
+  assert.equal(schema['x-mx-params-limits'].maxDepth, 8)
+  assert.equal(schema['x-mx-params-limits'].maxNodes, 1000)
+  assert.equal(schema['x-mx-params-limits'].maxStringLength, 8192)
+  assert.equal(schema['x-mx-work-budget'].maxRawQueries, 50)
+  assert.equal(schema['x-mx-work-budget'].maxCrawlIdentifiers, 50)
+  assert.match(schema['x-mx-work-budget'].raw, /queryCount \* effective pageSize/)
+  assert.match(schema['x-mx-work-budget'].crawl, /identifierCount \* effective pageSize \* activityTypeCount/)
+
+  const expectedProperties = [...new Set([
+    ...NIGHT_ALL_COMMON_FIELDS,
+    ...Object.values(NIGHT_ALL_OPERATION_FIELDS).flat(),
+  ])].sort()
+  assert.deepEqual(Object.keys(schema.properties).sort(), expectedProperties)
+
+  assert.equal(schema.properties.keyword.type, 'string')
+  assert.equal(schema.properties.query.type, 'string')
+  assert.deepEqual(schema.properties.includeRaw.enum, [false])
+  for (const field of ['keywords', 'queries', 'usernames', 'userIds', 'urls']) {
+    assert.equal(schema.properties[field].type, 'array', field)
+    assert.equal(schema.properties[field].items.type, 'string', field)
+    assert.equal(schema.properties[field].maxItems, 100, field)
+  }
+  for (const field of ['username', 'userId', 'user_id', 'uid', 'channelId', 'channel_id']) {
+    assert.deepEqual(schema.properties[field].type, ['string', 'number'], field)
+  }
+  for (const field of ['channelUrl', 'channel_url', 'url', 'commentCursor']) {
+    assert.equal(schema.properties[field].type, 'string', field)
+  }
+
+  for (const field of [
+    'count', 'pageSize', 'limit', 'page', 'concurrency', 'commentLimit',
+    'maxEnrichItems', 'enrichConcurrency',
+  ]) {
+    assert.deepEqual(schema.properties[field].oneOf.map((entry) => entry.type), ['integer', 'string'], field)
+    assert.ok(new RegExp(schema.properties[field].oneOf[1].pattern).test('1'), field)
+  }
+  assert.equal(schema.properties.commentLimit.oneOf[0].minimum, 1)
+  assert.equal(schema.properties.commentLimit.oneOf[0].maximum, 100)
+  assert.match('100', new RegExp(schema.properties.commentLimit.oneOf[1].pattern))
+  assert.doesNotMatch('101', new RegExp(schema.properties.commentLimit.oneOf[1].pattern))
+  assert.equal(schema.properties.cacheMaxAgeHours.minimum, 0)
+  assert.equal(schema.properties.cacheMaxAgeHours.maximum, 720)
+  assert.equal(schema.properties.maxEnrichItems.oneOf[0].maximum, 20)
+  assert.equal(schema.properties.enrichConcurrency.oneOf[0].maximum, 5)
+}
 
 async function withServer(listenerMode, run) {
   const app = createApp({
@@ -32,6 +113,7 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(response.headers.get('content-security-policy'), /default-src 'none'/)
     assert.match(html, /MX Insight Hub/)
     assert.match(html, /\/api\/v1\/data\/search/)
+    assert.match(html, /\/api\/v1\/night-all\/search\/\{raw\|crawl\|user-info\}/)
     assert.match(html, /\/api\/v1\/data\/stored\/search/)
     assert.match(html, /\/api\/v1\/data\/canonical\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
@@ -71,6 +153,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/telegram/entities/search',
       '/data/telegram/messages',
       '/data/telegram/search',
+      '/night-all/search/{operation}',
       '/requests/{requestId}',
       '/tools/tokenize',
       '/usage',
@@ -93,6 +176,15 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(document.components.schemas.TokenizeRequest.additionalProperties, false)
     assert.equal(document.components.schemas.StoredSearchRequest.additionalProperties, false)
     assert.equal(document.components.schemas.CanonicalSearchRequest.additionalProperties, false)
+    assertNightAllCompatibilityRequestSchema(document.components.schemas.NightAllLegacyRequest)
+    assert.equal(
+      document.paths['/night-all/search/{operation}'].post.requestBody.content['application/json'].schema.$ref,
+      '#/components/schemas/NightAllLegacyRequest',
+    )
+    assert.match(
+      document.paths['/night-all/search/{operation}'].post.responses[200].description,
+      /not masked|retain/i,
+    )
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
       document.components.schemas.CanonicalSearchRequest.properties.searchProfile.default,
@@ -131,6 +223,29 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       ],
     )
   })
+})
+
+test('static OpenAPI YAML parses and mirrors the dynamic Night-All compatibility schema', async () => {
+  const source = await readFile(
+    fileURLToPath(new URL('../../docs/contracts/openapi.yaml', import.meta.url)),
+    'utf8',
+  )
+  const parsed = spawnSync('python3', ['-c', [
+    'import json, sys',
+    'import yaml',
+    'json.dump(yaml.safe_load(sys.stdin.read()), sys.stdout)',
+  ].join('; ')], {
+    encoding: 'utf8',
+    input: source,
+  })
+  assert.equal(parsed.status, 0, parsed.stderr)
+  const document = JSON.parse(parsed.stdout)
+  assert.equal(document.openapi, '3.1.0')
+  assertNightAllCompatibilityRequestSchema(document.components.schemas.NightAllLegacyRequest)
+  assert.equal(
+    document.paths['/night-all/search/{operation}'].post.requestBody.content['application/json'].schema.$ref,
+    '#/components/schemas/NightAllLegacyRequest',
+  )
 })
 
 test('admin-only listener does not expose public documentation', async () => {

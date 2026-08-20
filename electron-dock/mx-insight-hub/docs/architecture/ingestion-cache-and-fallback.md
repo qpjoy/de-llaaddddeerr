@@ -1,6 +1,6 @@
 # 数据接入、增量游标、缓存与稳定性
 
-状态：目标设计。当前 Hub 的 `/api/v1/data/search` 每次调用 Night-All，没有持久查询缓存、相同请求合并、历史发布层或异步刷新 worker。
+状态：整体仍是目标设计。当前 `/api/v1/data/search` 没有通用持久查询缓存或相同请求合并；已实现的窄例外是三个 `/api/v1/night-all/search/*` 兼容路由的调用证据和 complete-only exact last-good 快照。本文件会分别标注“已实现兼容层”和“后续通用缓存”，不能把后者当成当前运行语义。
 
 ## 1. Connector contract
 
@@ -163,6 +163,35 @@ response schema version + freshness class
 
 Redis 可持有短租约和热 payload，PG 保存 durable job、dispatch、结果引用和未知状态。Redis 丢失不能造成同一客户账本重复提交。
 
+### 4.4 已实现：Night-All 兼容路由 exact last-good
+
+以下规则只适用于：
+
+```text
+POST /api/v1/night-all/search/raw
+POST /api/v1/night-all/search/crawl
+POST /api/v1/night-all/search/user-info
+```
+
+它不是 4.2/4.3 所述的通用 fresh cache 或 singleflight。每个新的 `Idempotency-Key` 先调用 live Night-All；一旦 live/stale delivery 提交，该 key 永久回放这一次付费 dispatch，要发起新的 live 调用必须使用新 key。只有 live 失败后才查 last-good。快照 lookup 固定为
+`consumer_id + operation + exact request fingerprint`，其中 fingerprint 包含路由、兼容 contract version 和规范化后的完整上游请求。平台、关键词/账号、cursor、page/count、filter 或任意语义字段不同都不能命中，也不能跨 consumer、operation 或授权域复用。
+
+| 规则 | 当前行为 |
+| --- | --- |
+| 可写快照的成功 | HTTP 200 且没有 substantive warning/per-result error 的 `complete`；只有 `STANDARD_PAYLOAD_EMPTY` warning 的确定性空结果也是 complete，并覆盖旧快照 |
+| partial 成功 | HTTP 200 原样返回并记证据；不创建、不覆盖已有 complete 快照 |
+| 允许 fallback 的失败 | network、timeout、不可用的 HTTP 2xx content-type/JSON/envelope，或 definite non-2xx upstream `502/503/504` |
+| 不允许 fallback | upstream `400/404/409/422/429`、不同 fingerprint、过期/不存在快照 |
+| stale window | `raw=15m`；`crawl=1h`；`user-info=1h` |
+| stale payload | 保存过的原始 Night-All legacy response application fields；绝不由 canonical search 或脱敏 projection 拼装 |
+| stale 标记 | HTTP 200；`x-mx-insight-source-mode=stale`、`x-mx-insight-captured-at`、`Age`、`Warning: 110` |
+
+兼容 body 保留快照中的 Night-All `requestId`/`traceId`；当前 Hub 请求 ID 只在 `x-mx-insight-request-id`。因此 stale body 的 Night-All correlation 也属于历史捕获，不代表这次失败的 live attempt；本次 attempt 的失败和上游 correlation 记录在 connector-call evidence。
+
+每次 dispatch 前先建一条 call evidence，结束时写入 consumer、operation、fingerprint、platform、`live|stale`、`complete|partial|failed|unknown`、HTTP/business status、failure kind、latency、safe error code 和 Night-All request/trace ID。HTTP 502/503/504 是 definite `failed`；网络/timeout 和不可用的 HTTP 2xx contract 是 `unknown`，因为 Night-All 可能已经扣费或写入。即使最终向客户交付 stale，live attempt 也不会被覆盖。兼容快照保存与 live response 相同的上游 application payload，当前不做字段脱敏；同一 original payload 也进入受治理的 ingest/lineage 路径。未来脱敏必须输出独立版本的 projection，不能改写兼容 response/snapshot。
+
+没有可用 exact 快照时，明确的 upstream `400/404/409/422/429` 保留 HTTP status、统一为安全的 `night_all_rejected`；其他明确 upstream 错误映射 `502`。network/timeout 或不可用的 HTTP 2xx contract 在 dispatch 后结果不确定，返回 `502 upstream_outcome_unknown` 并把 usage request 标记 `unknown`，同一个 key 不会再次 dispatch，客户也不得换新 idempotency key 自动重试。该 timeout 语义不是 HTTP `504`，因为 Hub 无法证明付费上游没有执行。
+
 ## 5. Fresh/stale/live 决策
 
 ```mermaid
@@ -184,9 +213,9 @@ flowchart TD
 
 - 新查询不能返回“相似关键词”的历史结果并伪装为实时；只能返回同 fingerprint 的缓存，或明确的 `historical` 搜索结果集合。
 - `fresh=required` 也有服务端最大等待预算；长任务必须 job 化。
-- Night-All 失败时可以回退最后一次成功发布，但 `sourceMode=stale`、age、partial/error 必须可见。
+- Night-All 失败时只有 exact complete last-good 可作为兼容 stale；`sourceMode=stale` 和 age 必须可见，失败 attempt 保留独立 evidence。partial live 不能被旧快照遮盖。
 - `platform=all` 或多平台 fan-out 默认创建 job，设置总 deadline、每租户并发、取消、checkpoint 和 partial result。
-- 公共客户不能选择 provider、availability mode、raw、businessId 或任意 timeout。
+- 公共客户不能选择 provider、availability mode、raw、businessId 或任意 timeout；兼容 body 如为迁移而带 `businessId`，只能等于已认证 consumer 的服务端归属，不能覆盖它。
 
 ## 6. Night-All 故障隔离
 
@@ -226,6 +255,10 @@ Hub 的 read path 只依赖已发布 dataset，不依赖 connector 实时在线�
 - Night-All 2.0 作为新 connector 并行 shadow ingest，比较 hash/质量/覆盖后切换 active source；
 - 切换只更新 dataset source policy，不改变公共 API、客户 key 或 Launcher 登录；
 - 新来源不能直接写 ES，必须走 raw -> PG canonical -> outbox -> projection。
+
+TikHub、JustOne 也可按 `platform + operation` 逐步成为 Hub direct connector，但不是把 provider 参数开放给客户。迁移时保持三个兼容路由和 legacy envelope 不变：先实现统一 connector/evidence contract，以批准的 bounded fixture/call 对比原始兼容响应与 canonical 记录，再由服务端 routing policy 灰度切换并保留 rollback。平台层、付费 token 或业务策略仍依赖 Night-All 的范围继续走 Night-All；direct connector 同样必须生成 call evidence，并经过 raw -> PG canonical -> outbox -> projection。
+
+兼容 snapshot 与 canonical dataset 是两种产品语义。前者只回放 exact legacy response；后者通过 `/api/v1/data/canonical/search` 对 Hub 已存规范化数据做全局授权检索。canonical search 不能用来填充 legacy stale，legacy snapshot 也不能进入 canonical 排序冒充当前全局索引。
 
 ## 9. 验收场景
 

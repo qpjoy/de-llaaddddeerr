@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { hmacSecret, issueApiKey, requestFingerprint } from './core/crypto.mjs'
 import { AppError, UpstreamAmbiguousError, UpstreamRejectedError, assert } from './core/errors.mjs'
+import { NIGHT_ALL_LEGACY_OPERATIONS } from './contracts/night-all-legacy.mjs'
 import {
   normalizeTelegramMonitorQuery,
   normalizeTelegramEntityQuery,
@@ -15,6 +16,15 @@ import {
   normalizeStoredSearchQuery,
   storedSearchResponse,
 } from './data/stored-search.mjs'
+import {
+  canUseNightAllCompatibilityFallback,
+  compatibilityUpstreamEvidence,
+  nightAllCompatibilityBusinessOutcome,
+  nightAllCompatibilityFallbackWindowMs,
+  nightAllCompatibilityItemCount,
+  normalizeNightAllCompatibilityRequest,
+  staleSnapshotAgeSeconds,
+} from './data/night-all-compat.mjs'
 
 const DEFAULT_POLICY = Object.freeze({
   maxRequests: 1_000,
@@ -25,9 +35,17 @@ const DEFAULT_API_KEY_LIFETIME_DAYS = 180
 const MAX_API_KEY_LIFETIME_DAYS = 730
 
 const PLATFORM_ALIASES = new Map([
+  ['x', 'twitter'],
+  ['fb', 'facebook'],
+  ['ig', 'instagram'],
+  ['ins', 'instagram'],
+  ['insta', 'instagram'],
+  ['li', 'linkedin'],
   ['red', 'xiaohongshu'],
   ['rednote', 'xiaohongshu'],
   ['xhs', 'xiaohongshu'],
+  ['wechat', 'wechat_search'],
+  ['weixin', 'wechat_search'],
 ])
 const PUBLIC_SEARCH_FIELDS = new Set(['platform', 'query', 'pageSize', 'cursor', 'type'])
 
@@ -139,6 +157,32 @@ function apiKeyLifetimeDays(value) {
   return days
 }
 
+function optionalNightAllBusinessId(value) {
+  if (value == null || value === '') return undefined
+  const businessId = requiredString(value, 'businessId')
+  assert(
+    businessId.length <= 128 && !/[\u0000-\u001f\u007f]/u.test(businessId),
+    400,
+    'invalid_business_id',
+    'businessId must be at most 128 characters and contain no control characters',
+  )
+  return businessId
+}
+
+function compatibilityFailureKind(error) {
+  if (error instanceof UpstreamRejectedError) return 'http'
+  if (error instanceof UpstreamAmbiguousError && error.cause?.name === 'AbortError') return 'timeout'
+  if (error instanceof UpstreamAmbiguousError && error.cause?.name === 'InvalidUpstreamResponseError') return 'contract'
+  if (error instanceof UpstreamAmbiguousError) return 'network'
+  return 'internal'
+}
+
+function compatibilityPublicStatus(error) {
+  if (!(error instanceof UpstreamRejectedError)) return 502
+  if ([400, 404, 409, 422, 429].includes(error.status)) return error.status
+  return 502
+}
+
 export class HubService {
   constructor({
     store,
@@ -190,6 +234,7 @@ export class HubService {
       tenantId,
       name: requiredString(body.name, 'name'),
       status: validateStatus(body.status),
+      businessId: optionalNightAllBusinessId(body.businessId),
       defaultCapabilityPolicy: {
         capability: TOKENIZE_CAPABILITY,
         maxRequests: this.defaultPolicy.maxRequests,
@@ -887,8 +932,304 @@ export class HubService {
       ...(record.capability ? { capability: record.capability } : {}),
       units: record.status === 'committed' ? record.unitsActual : null,
       errorCode: record.errorCode,
+      ...(record.deliverySourceMode ? { sourceMode: record.deliverySourceMode } : {}),
+      ...(record.capturedAt ? { capturedAt: record.capturedAt } : {}),
       reservedAt: record.reservedAt,
       completedAt: record.completedAt,
+    }
+  }
+
+  async nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path }) {
+    assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation), 404, 'not_found', 'Route not found')
+    assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
+    assert(
+      typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
+      400,
+      'invalid_idempotency_key',
+      'Idempotency-Key must contain 8-128 safe characters',
+    )
+    assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
+
+    const requestedPlatform = canonicalPlatform(body.platform)
+    assert(!RESERVED_PLATFORM_NAMES.has(requestedPlatform), 400, 'invalid_platform', 'A single explicit platform is required')
+    const grants = await this.store.listGrants(context.consumer.id)
+    const matchingGrant = grants.find((grant) => canonicalPlatform(grant) === requestedPlatform)
+    assert(matchingGrant, 403, 'platform_not_granted', 'Platform is not granted')
+    const storedPolicy = (await this.store.getPolicy(context.consumer.id, requestedPlatform))
+      || (matchingGrant !== requestedPlatform
+        ? await this.store.getPolicy(context.consumer.id, matchingGrant)
+        : null)
+    const policy = {
+      ...this.defaultPolicy,
+      ...(storedPolicy || {}),
+    }
+    const normalized = normalizeNightAllCompatibilityRequest(operation, body, {
+      businessId: context.consumer.businessId,
+      canonicalizePlatform: canonicalPlatform,
+      maxPageSize: policy.maxPageSize,
+    })
+    const fingerprint = requestFingerprint({
+      method: 'POST',
+      path,
+      body: { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...normalized.upstreamBody },
+    })
+    const requestId = randomUUID()
+    const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
+    await this.store.reapStaleReservations()
+    const reservation = await this.store.reserve({
+      requestId,
+      idempotencyKey,
+      fingerprint,
+      tenantId: context.tenant.id,
+      consumerId: context.consumer.id,
+      apiKeyId: context.apiKey.id,
+      platform: normalized.platform,
+      unitsReserved: 1,
+      leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
+      windowStart,
+      maxRequests: policy.maxRequests,
+      // A compatibility Idempotency-Key names one immutable paid dispatch.
+      // Reusing its usage row after two minutes would overwrite billing
+      // evidence and let repeated upstream calls count as one quota request.
+      replayWindowMs: null,
+    })
+
+    if (reservation.kind === 'conflict') {
+      throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
+    }
+    if (reservation.kind === 'in_progress') {
+      throw new AppError(409, 'request_in_progress', 'Request with this Idempotency-Key is in progress', {
+        requestId: reservation.request.id,
+      })
+    }
+    if (reservation.kind === 'unknown') {
+      throw new AppError(409, 'request_outcome_unknown', 'Previous request outcome is unknown', {
+        requestId: reservation.request.id,
+      })
+    }
+    if (reservation.kind === 'replay') {
+      const sourceMode = reservation.request.deliverySourceMode || 'live'
+      const capturedAt = reservation.request.capturedAt || null
+      return {
+        status: reservation.request.responseStatus,
+        body: reservation.request.responseBody,
+        requestId: reservation.request.id,
+        replay: true,
+        sourceMode,
+        capturedAt,
+        staleAgeSeconds: sourceMode === 'stale' && capturedAt
+          ? Math.max(0, Math.floor((Date.now() - new Date(capturedAt).getTime()) / 1_000))
+          : 0,
+      }
+    }
+
+    const activeRequestId = reservation.request.id
+    let call
+    try {
+      call = await this.store.beginConnectorCall({
+        consumerId: context.consumer.id,
+        requestId: activeRequestId,
+        operation,
+        fingerprint,
+        platform: normalized.platform,
+        sourceMode: 'live',
+      })
+    } catch (error) {
+      await this.store.releaseRequest(activeRequestId, 'connector_call_evidence_failed').catch(() => {})
+      throw error
+    }
+
+    const startedAt = performance.now()
+    let commitAttempted = false
+    let commitEvidence = null
+    try {
+      const upstream = await this.adapter.legacySearch({
+        operation,
+        body: normalized.upstreamBody,
+        businessId: context.consumer.businessId,
+      })
+      const businessOutcome = nightAllCompatibilityBusinessOutcome(upstream.payload)
+      const capturedAt = new Date()
+      const staleUntil = new Date(capturedAt.getTime() + nightAllCompatibilityFallbackWindowMs(operation))
+      const upstreamLatencyMs = Math.round(performance.now() - startedAt)
+      const unitsActual = nightAllCompatibilityItemCount(upstream.payload)
+      commitEvidence = {
+        outcome: businessOutcome,
+        httpStatus: 200,
+        businessStatus: businessOutcome,
+        failureKind: businessOutcome === 'partial' ? 'business' : null,
+        upstreamLatencyMs,
+        errorCode: businessOutcome === 'partial' ? 'night_all_partial_result' : null,
+        sourceMode: 'live',
+        nightAllRequestId: upstream.raw?.requestId ?? null,
+        nightAllTraceId: upstream.raw?.traceId ?? null,
+      }
+      commitAttempted = true
+      await this.store.commitCompatibilityLiveDelivery(call.id, {
+        ...commitEvidence,
+        responseStatus: 200,
+        responseBody: upstream.payload,
+        unitsActual,
+        capturedAt,
+        staleUntil,
+        job: {
+          queue: this.ingestQueueName,
+          payload: {
+            kind: 'night-all-compat-result',
+            platform: normalized.platform,
+            operation,
+            rawPayload: upstream.raw,
+            queryFingerprint: fingerprint,
+            requestId: activeRequestId,
+            connectorCallId: call.id,
+          },
+          // Every real dispatch has a unique connector call. Keying ingestion
+          // by that immutable call keeps observation lineage exact and also
+          // avoids collisions if a future policy permits a fresh dispatch.
+          dedupeKey: `night-all-compat-result:${call.id}`,
+          priority: 100,
+        },
+      })
+      return {
+        status: 200,
+        body: upstream.payload,
+        requestId: activeRequestId,
+        replay: false,
+        sourceMode: 'live',
+        capturedAt: capturedAt.toISOString(),
+        staleAgeSeconds: 0,
+      }
+    } catch (error) {
+      if (canUseNightAllCompatibilityFallback(error)) {
+        let snapshot
+        try {
+          snapshot = await this.store.findUsableCompatibilitySnapshot({
+            consumerId: context.consumer.id,
+            operation,
+            fingerprint,
+          })
+        } catch (_snapshotLookupError) {
+          const evidence = compatibilityUpstreamEvidence(error)
+          await this.store.finishConnectorCall(call.id, {
+            outcome: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
+            httpStatus: error instanceof UpstreamRejectedError ? error.status : null,
+            businessStatus: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
+            upstreamLatencyMs: Math.round(performance.now() - startedAt),
+            errorCode: evidence.errorCode,
+            failureKind: compatibilityFailureKind(error),
+            sourceMode: 'live',
+            nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? null : null,
+            nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? null : null,
+          }).catch(() => {})
+          if (error instanceof UpstreamAmbiguousError) {
+            await this.store.markRequestUnknown(activeRequestId, 'night_all_outcome_unknown').catch(() => {})
+          } else {
+            await this.store.releaseRequest(activeRequestId, 'compatibility_snapshot_lookup_failed').catch(() => {})
+          }
+          throw new AppError(
+            503,
+            'compatibility_store_unavailable',
+            'Night-All fallback store is temporarily unavailable',
+            { requestId: activeRequestId },
+          )
+        }
+        if (snapshot) {
+          const evidence = compatibilityUpstreamEvidence(error)
+          const upstreamLatencyMs = Math.round(performance.now() - startedAt)
+          const staleAgeSeconds = staleSnapshotAgeSeconds(snapshot)
+          commitEvidence = {
+            outcome: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
+            httpStatus: error instanceof UpstreamRejectedError ? error.status : null,
+            businessStatus: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
+            upstreamLatencyMs,
+            errorCode: evidence.errorCode,
+            failureKind: compatibilityFailureKind(error),
+            sourceMode: 'live',
+            nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? null : null,
+            nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? null : null,
+          }
+          commitAttempted = true
+          try {
+            await this.store.commitCompatibilityStaleDelivery(call.id, {
+              snapshotId: snapshot.id,
+              responseStatus: 200,
+              unitsActual: nightAllCompatibilityItemCount(snapshot.responseBody),
+              httpStatus: commitEvidence.httpStatus,
+              businessStatus: commitEvidence.businessStatus,
+              upstreamLatencyMs,
+              errorCode: evidence.errorCode,
+              failureKind: commitEvidence.failureKind,
+              nightAllRequestId: commitEvidence.nightAllRequestId,
+              nightAllTraceId: commitEvidence.nightAllTraceId,
+            })
+          } catch (persistenceError) {
+            await this.store.finishConnectorCall(call.id, {
+              ...commitEvidence,
+              errorCode: 'compatibility_persistence_failed',
+            }).catch(() => {})
+            await this.store.markRequestUnknown(activeRequestId, 'compatibility_commit_ambiguous').catch(() => {})
+            throw persistenceError
+          }
+          return {
+            status: 200,
+            body: snapshot.responseBody,
+            requestId: activeRequestId,
+            replay: false,
+            sourceMode: 'stale',
+            capturedAt: snapshot.capturedAt,
+            staleAgeSeconds,
+          }
+        }
+      }
+
+      if (error instanceof UpstreamRejectedError || error instanceof UpstreamAmbiguousError) {
+        const evidence = compatibilityUpstreamEvidence(error)
+        await this.store.finishConnectorCall(call.id, {
+          outcome: error instanceof UpstreamAmbiguousError ? 'unknown' : 'failed',
+          httpStatus: error instanceof UpstreamRejectedError ? error.status : null,
+          businessStatus: error instanceof UpstreamAmbiguousError ? 'unknown' : 'failed',
+          upstreamLatencyMs: Math.round(performance.now() - startedAt),
+          errorCode: evidence.errorCode,
+          failureKind: compatibilityFailureKind(error),
+          sourceMode: 'live',
+          nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? null : null,
+          nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? null : null,
+        }).catch(() => {})
+      }
+      if (error instanceof UpstreamRejectedError) {
+        await this.store.releaseRequest(activeRequestId, `night_all_http_${error.status}`)
+        throw new AppError(
+          compatibilityPublicStatus(error),
+          'night_all_rejected',
+          'Night-All rejected the request',
+          { requestId: activeRequestId, upstreamStatus: error.status },
+        )
+      }
+      if (error instanceof UpstreamAmbiguousError) {
+        await this.store.markRequestUnknown(activeRequestId, 'night_all_outcome_unknown')
+        throw new AppError(502, 'upstream_outcome_unknown', 'Night-All outcome is unknown; do not retry automatically', {
+          requestId: activeRequestId,
+        })
+      }
+      if (commitAttempted) {
+        if (commitEvidence) {
+          await this.store.finishConnectorCall(call.id, {
+            ...commitEvidence,
+            errorCode: 'compatibility_persistence_failed',
+          }).catch(() => {})
+        }
+        await this.store.markRequestUnknown(activeRequestId, 'compatibility_commit_ambiguous').catch(() => {})
+        throw error
+      }
+      await this.store.finishConnectorCall(call.id, {
+        outcome: 'failed',
+        upstreamLatencyMs: Math.round(performance.now() - startedAt),
+        errorCode: 'internal_error',
+        failureKind: 'internal',
+        sourceMode: 'live',
+      }).catch(() => {})
+      await this.store.releaseRequest(activeRequestId, 'internal_error')
+      throw error
     }
   }
 

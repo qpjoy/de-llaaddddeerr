@@ -18,6 +18,7 @@ let service
 let adapter
 let upstreamCalls
 let upstreamBodies
+let legacyUpstreamCalls
 
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -72,10 +73,33 @@ function nightAllSearchEnvelope({ platform = 'xiaohongshu', query = 'AI', pageSi
   }
 }
 
+function nightAllLegacyEnvelope({ call = 1 } = {}) {
+  return {
+    data: {
+      raw_info: JSON.stringify([{
+        user_id: 'author-one',
+        username: 'alice',
+        provider: 'must-not-leak',
+      }]),
+      raw_data: JSON.stringify([{
+        content_id: 'post-one',
+        text: 'compatibility result',
+        author_id: 'author-one',
+        credentialId: 'must-not-leak',
+      }]),
+      page: { page: 1, count: 1 },
+      meta: { call, endpointId: 'must-not-leak' },
+    },
+    requestId: `night-all-legacy-${call}`,
+    traceId: `night-all-legacy-trace-${call}`,
+  }
+}
+
 before(async () => {
   store = new MemoryStore()
   upstreamCalls = new Map()
   upstreamBodies = []
+  legacyUpstreamCalls = new Map()
   const fetchImpl = async (url, options = {}) => {
     const pathname = new URL(url).pathname
     if (pathname === '/api/v1/health') return jsonResponse({ data: { ok: true, version: '1.0.0' } })
@@ -89,6 +113,15 @@ before(async () => {
           ],
         },
       })
+    }
+    if (pathname.startsWith('/api/v1/search/')) {
+      const body = JSON.parse(options.body)
+      const key = `${pathname}:${body.platform}:${body.keyword || body.username || body.userId || body.uid}`
+      const call = (legacyUpstreamCalls.get(key) || 0) + 1
+      legacyUpstreamCalls.set(key, call)
+      upstreamBodies.push(body)
+      if (body.keyword === 'compat-cache' && call > 1) throw new TypeError('connection reset')
+      return jsonResponse(nightAllLegacyEnvelope({ call }))
     }
     if (pathname !== '/api/v1/data/search') return jsonResponse({ error: 'not found' }, 404)
     const body = JSON.parse(options.body)
@@ -190,7 +223,7 @@ test('Telegram SQLite page pacing has a bounded deployment default', () => {
   )
 })
 
-test('Night-All adapter rejects invalid successful envelopes', async () => {
+test('Night-All adapter treats invalid successful envelopes as outcome unknown', async () => {
   const invalidAdapter = new NightAllAdapter({
     baseUrl: 'http://night-all.invalid',
     fetchImpl: async () => new Response('<html>proxy error</html>', {
@@ -200,7 +233,10 @@ test('Night-All adapter rejects invalid successful envelopes', async () => {
   })
   await assert.rejects(
     () => invalidAdapter.search({ body: { platform: 'xiaohongshu', query: 'AI', pageSize: 1 }, businessId: 'test' }),
-    (error) => error?.name === 'UpstreamRejectedError' && error?.status === 502,
+    (error) => (
+      error?.name === 'UpstreamAmbiguousError'
+      && error?.cause?.code === 'invalid_upstream_content_type'
+    ),
   )
 
   const missingSource = nightAllSearchEnvelope({ pageSize: 1 })
@@ -212,9 +248,8 @@ test('Night-All adapter rejects invalid successful envelopes', async () => {
   await assert.rejects(
     () => invalidContractAdapter.search({ body: { platform: 'xiaohongshu', query: 'AI', pageSize: 1 }, businessId: 'test' }),
     (error) => (
-      error?.name === 'UpstreamRejectedError'
-      && error?.status === 502
-      && error?.body?.code === 'invalid_upstream_contract'
+      error?.name === 'UpstreamAmbiguousError'
+      && error?.cause?.code === 'invalid_upstream_contract'
     ),
   )
 })
@@ -391,6 +426,38 @@ test('API keys default to 180 days, allow bounded expiry, and reject expired aut
   assert.equal(stored.lastUsedAt, null)
   assert.equal((await isolatedService.listApiKeys(consumer.id)).find((key) => key.id === defaultKey.id).effectiveStatus, 'expired')
   assert.equal((await isolatedStore.dashboard()).activeApiKeys, 1)
+})
+
+test('consumer provisioning can bind one immutable legacy Night-All businessId', async () => {
+  const isolatedStore = new MemoryStore()
+  const isolatedService = new HubService({
+    store: isolatedStore,
+    adapter: {},
+    apiKeyPepper: PEPPER,
+  })
+  const tenant = await isolatedService.createTenant({ name: 'Migration tenant' })
+  const consumer = await isolatedService.createConsumer({
+    tenantId: tenant.id,
+    name: 'Legacy caller',
+    businessId: 'risk-console',
+  })
+  assert.equal(consumer.businessId, 'risk-console')
+  await assert.rejects(
+    () => isolatedService.createConsumer({
+      tenantId: tenant.id,
+      name: 'Duplicate caller',
+      businessId: 'risk-console',
+    }),
+    (error) => error?.status === 409 && error?.code === 'business_id_conflict',
+  )
+  await assert.rejects(
+    () => isolatedService.createConsumer({
+      tenantId: tenant.id,
+      name: 'Invalid caller',
+      businessId: 'x'.repeat(129),
+    }),
+    (error) => error?.status === 400 && error?.code === 'invalid_business_id',
+  )
 })
 
 test('health reports liveness and dependencies', async () => {
@@ -604,6 +671,52 @@ test('admin provisioning, grants, authenticated search, idempotency, usage, and 
   assert.equal(revoke.payload.data.status, 'revoked')
   const rejected = await call('/api/v1/usage', { headers: publicHeaders })
   assert.equal(rejected.response.status, 401)
+})
+
+test('Night-All compatibility route preserves the envelope and serves only an exact stale snapshot', async () => {
+  const tenant = (await store.listTenants())[0]
+  const consumer = (await store.listConsumers(tenant.id))[0]
+  const issued = await call('/internal/v1/admin/api-keys', {
+    method: 'POST',
+    headers: adminHeaders,
+    body: { consumerId: consumer.id, name: 'Compatibility test key' },
+  })
+  const authorization = `Bearer ${issued.payload.data.secret}`
+  const body = { platform: 'xhs', keyword: 'compat-cache', count: 1 }
+
+  const live = await call('/api/v1/night-all/search/raw', {
+    method: 'POST',
+    headers: { authorization, 'idempotency-key': 'compat-live-one' },
+    body,
+  })
+  assert.equal(live.response.status, 200)
+  assert.equal(live.payload.requestId, 'night-all-legacy-1')
+  assert.equal(live.payload.traceId, 'night-all-legacy-trace-1')
+  assert.equal(live.response.headers.get('x-mx-insight-source-mode'), 'live')
+  assert.match(live.response.headers.get('x-mx-insight-request-id'), /^[0-9a-f-]{36}$/)
+  assert.ok(live.response.headers.get('x-mx-insight-captured-at'))
+  assert.equal(JSON.stringify(live.payload).includes('must-not-leak'), true)
+  assert.equal(upstreamBodies.at(-1).businessId, consumer.businessId)
+
+  const stale = await call('/api/v1/night-all/search/raw', {
+    method: 'POST',
+    headers: { authorization, 'idempotency-key': 'compat-stale-one' },
+    body,
+  })
+  assert.equal(stale.response.status, 200)
+  assert.deepEqual(stale.payload, live.payload)
+  assert.equal(stale.response.headers.get('x-mx-insight-source-mode'), 'stale')
+  assert.match(stale.response.headers.get('warning'), /^110 /)
+  assert.ok(Number(stale.response.headers.get('age')) >= 0)
+
+  const hubRequestId = stale.response.headers.get('x-mx-insight-request-id')
+  const status = await call(`/api/v1/requests/${hubRequestId}`, {
+    headers: { authorization },
+  })
+  assert.equal(status.payload.data.status, 'committed')
+  assert.equal(status.payload.data.sourceMode, 'stale')
+  assert.equal(status.payload.data.capturedAt, live.response.headers.get('x-mx-insight-captured-at'))
+  assert.equal([...store.connectorCalls.values()].at(-1).sourceMode, 'stale')
 })
 
 test('ambiguous POST is called once and held in unknown state', async () => {

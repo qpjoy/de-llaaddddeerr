@@ -199,12 +199,13 @@ export function normalizeSearchPayload(payload, platform) {
 
 // Observation identity: same batch replayed => same hash => idempotent insert.
 // A later crawl has a different collectedAt/metrics, so it is a new sighting.
-export function observationHash(record, queryFingerprint) {
+export function observationHash(record, queryFingerprint, sourceEventId = null) {
   return sha256(
     canonicalJson({
       externalId: record.externalId,
       platform: record.platform,
       queryFingerprint: queryFingerprint || null,
+      sourceEventId,
       rank: record.rank ?? null,
       metrics: record.metrics || {},
       collectedAt: record.collectedAt ? record.collectedAt.toISOString() : null,

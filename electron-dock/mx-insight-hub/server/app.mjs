@@ -2218,6 +2218,27 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/api/v1/night-all/search/:operation')
+      if (request.method === 'POST' && params) {
+        const context = await requirePublic(request)
+        const result = await service.nightAllCompatibilitySearch(context, {
+          operation: params.operation,
+          body: await readJson(request),
+          idempotencyKey: request.headers['idempotency-key'],
+          path: pathname,
+        })
+        // Keep Night-All's own requestId and legacy envelope in the body. The
+        // Hub request id is transport metadata exposed by the response header.
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
+          ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
+          ...(result.sourceMode === 'stale' ? { warning: '110 - "Response is stale"' } : {}),
+        })
+        return
+      }
       if (request.method === 'GET' && pathname === '/api/v1/data/telegram/entities/search') {
         const context = await requirePublic(request)
         sendJson(response, 200, {

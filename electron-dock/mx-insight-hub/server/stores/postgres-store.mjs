@@ -15,6 +15,50 @@ function iso(value) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
 }
 
+const connectorCallOutcomes = new Set(['complete', 'partial', 'failed', 'unknown'])
+const connectorSourceModes = new Set(['live', 'stale'])
+const connectorFailureKinds = new Set(['network', 'timeout', 'http', 'contract', 'business', 'internal', 'unknown'])
+const transientHttpStatuses = new Set([502, 503, 504])
+
+function compatibilityTimestamp(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(date.getTime())) {
+    throw new AppError(400, 'invalid_compatibility_timestamp', 'Compatibility timestamp is invalid')
+  }
+  return date
+}
+
+function assertConnectorOutcome(outcome) {
+  if (!connectorCallOutcomes.has(outcome)) {
+    throw new AppError(400, 'invalid_connector_outcome', 'Connector outcome is invalid')
+  }
+}
+
+function assertConnectorSourceMode(sourceMode) {
+  if (!connectorSourceModes.has(sourceMode)) {
+    throw new AppError(400, 'invalid_connector_source_mode', 'Connector source mode is invalid')
+  }
+}
+
+function assertConnectorFailureKind(failureKind) {
+  if (failureKind != null && !connectorFailureKinds.has(failureKind)) {
+    throw new AppError(400, 'invalid_connector_failure_kind', 'Connector failure kind is invalid')
+  }
+}
+
+function assertTransientFallback({ failureKind, httpStatus }) {
+  const eligible = ((failureKind === 'network' || failureKind === 'timeout') && httpStatus == null)
+    || (failureKind === 'contract' && httpStatus == null)
+    || (failureKind === 'http' && transientHttpStatuses.has(httpStatus))
+  if (!eligible) {
+    throw new AppError(
+      409,
+      'compatibility_fallback_not_allowed',
+      'Only network, timeout, invalid-success-contract, or HTTP 502/503/504 failures may use a compatibility snapshot',
+    )
+  }
+}
+
 // Format rules are shared across files whose concrete header spelling may
 // differ only by case, Unicode width or whitespace.  Source mappings retain
 // the concrete parser column names used for that source; rule versions store
@@ -97,10 +141,53 @@ function requestRecord(row) {
     errorCode: row.error_code,
     capability: row.capability,
     upstreamLatencyMs: row.upstream_latency_ms,
+    deliverySourceMode: row.delivery_source_mode,
+    capturedAt: iso(row.response_captured_at),
+    snapshotId: row.compatibility_snapshot_id,
     reservedAt: iso(row.reserved_at),
     leaseExpiresAt: iso(row.lease_expires_at),
     completedAt: iso(row.completed_at),
     createdAt: iso(row.created_at),
+  }
+}
+
+function connectorCallRecord(row) {
+  return row && {
+    id: row.id,
+    consumerId: row.consumer_id,
+    requestId: row.usage_request_id,
+    operation: row.operation,
+    fingerprint: row.request_fingerprint,
+    platform: row.platform,
+    sourceMode: row.source_mode,
+    outcome: row.outcome,
+    httpStatus: row.http_status,
+    businessStatus: row.business_status,
+    failureKind: row.failure_kind,
+    upstreamLatencyMs: row.upstream_latency_ms,
+    errorCode: row.error_code,
+    nightAllRequestId: row.upstream_request_id,
+    nightAllTraceId: row.upstream_trace_id,
+    startedAt: iso(row.started_at),
+    completedAt: iso(row.completed_at),
+    createdAt: iso(row.created_at),
+  }
+}
+
+function compatibilitySnapshotRecord(row) {
+  return row && {
+    id: row.id,
+    consumerId: row.consumer_id,
+    operation: row.operation,
+    fingerprint: row.request_fingerprint,
+    platform: row.platform,
+    responseBody: row.response_body,
+    capturedAt: iso(row.captured_at),
+    staleUntil: iso(row.stale_until),
+    lastSuccessCallId: row.last_success_call_id,
+    supersededAt: iso(row.superseded_at),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
   }
 }
 
@@ -159,12 +246,23 @@ export class PostgresStore {
   }
 
   async reapStaleReservations() {
-    const { rowCount } = await this.pool.query(
-      `UPDATE usage_requests SET
-         status = 'unknown', error_code = 'reservation_lease_expired', completed_at = now()
-       WHERE status = 'reserved' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()`,
+    const { rows } = await this.pool.query(
+      `WITH reaped AS (
+         UPDATE usage_requests SET
+           status = 'unknown', error_code = 'reservation_lease_expired', completed_at = now()
+         WHERE status = 'reserved' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()
+         RETURNING id
+       ), closed_calls AS (
+         UPDATE serving.connector_calls call SET
+           outcome = 'unknown', business_status = 'unknown', failure_kind = 'unknown',
+           error_code = 'reservation_lease_expired', completed_at = now()
+         FROM reaped
+         WHERE call.usage_request_id = reaped.id AND call.outcome IS NULL
+         RETURNING call.id
+       )
+       SELECT count(*)::integer AS reaped FROM reaped`,
     )
-    return rowCount || 0
+    return Number(rows[0]?.reaped || 0)
   }
 
   async createTenant({ name, status = 'active' }) {
@@ -220,6 +318,9 @@ export class PostgresStore {
       return consumer(rows[0])
     } catch (error) {
       await client.query('ROLLBACK')
+      if (error?.code === '23505' && /business_id/i.test(error?.constraint || error?.detail || '')) {
+        throw new AppError(409, 'business_id_conflict', 'businessId is already assigned to another consumer')
+      }
       throw error
     } finally {
       client.release()
@@ -461,10 +562,14 @@ export class PostgresStore {
           await this.#assertQuota(client, input)
           const updated = await client.query(
             `UPDATE usage_requests SET
-               status = 'reserved', units_reserved = $2, reserved_at = now(),
-               lease_expires_at = $3, completed_at = NULL, error_code = NULL
+               status = 'reserved', api_key_id = $2, units_reserved = $3,
+               reserved_at = now(), lease_expires_at = $4,
+               units_actual = NULL, response_status = NULL, response_body = NULL,
+               upstream_latency_ms = NULL, delivery_source_mode = NULL,
+               response_captured_at = NULL, compatibility_snapshot_id = NULL,
+               completed_at = NULL, error_code = NULL
              WHERE id = $1 RETURNING *`,
-            [existing.id, input.unitsReserved, input.leaseExpiresAt],
+            [existing.id, input.apiKeyId, input.unitsReserved, input.leaseExpiresAt],
           )
           await client.query('COMMIT')
           return { kind: 'reserved', request: requestRecord(updated.rows[0]) }
@@ -530,6 +635,290 @@ export class PostgresStore {
        WHERE id = $1 AND status = 'reserved' RETURNING *`,
       [id, responseStatus, responseBody, unitsActual, upstreamLatencyMs],
     )
+  }
+
+  async beginConnectorCall({
+    id = randomUUID(),
+    consumerId,
+    requestId = null,
+    operation,
+    fingerprint,
+    platform = null,
+    sourceMode = 'live',
+  }) {
+    if (!/^[a-z][a-z0-9._-]{0,127}$/.test(operation || '')) {
+      throw new AppError(400, 'invalid_connector_operation', 'Connector operation is invalid')
+    }
+    if (!/^[0-9a-f]{64}$/.test(fingerprint || '')) {
+      throw new AppError(400, 'invalid_connector_fingerprint', 'Connector fingerprint is invalid')
+    }
+    assertConnectorSourceMode(sourceMode)
+    const { rows } = await this.pool.query(
+      `INSERT INTO serving.connector_calls
+         (id, consumer_id, usage_request_id, operation, request_fingerprint,
+          platform, source_mode)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [id, consumerId, requestId, operation, fingerprint, platform, sourceMode],
+    )
+    return connectorCallRecord(rows[0])
+  }
+
+  async finishConnectorCall(id, {
+    outcome,
+    httpStatus = null,
+    businessStatus = null,
+    failureKind = null,
+    upstreamLatencyMs = null,
+    errorCode = null,
+    sourceMode = 'live',
+    nightAllRequestId = null,
+    nightAllTraceId = null,
+  }) {
+    assertConnectorOutcome(outcome)
+    assertConnectorSourceMode(sourceMode)
+    assertConnectorFailureKind(failureKind)
+    const { rows } = await this.pool.query(
+      `UPDATE serving.connector_calls SET
+         outcome = $2, http_status = $3, business_status = $4,
+         failure_kind = $5, upstream_latency_ms = $6, error_code = $7,
+         source_mode = $8, upstream_request_id = $9, upstream_trace_id = $10,
+         completed_at = now()
+       WHERE id = $1 AND outcome IS NULL
+       RETURNING *`,
+      [
+        id, outcome, httpStatus, businessStatus, failureKind, upstreamLatencyMs,
+        errorCode, sourceMode, nightAllRequestId, nightAllTraceId,
+      ],
+    )
+    if (!rows[0]) throw new AppError(404, 'connector_call_not_found', 'Connector call not found')
+    return connectorCallRecord(rows[0])
+  }
+
+  async commitCompatibilityLiveDelivery(id, {
+    outcome,
+    responseStatus = 200,
+    responseBody,
+    unitsActual = 1,
+    httpStatus = 200,
+    businessStatus = null,
+    failureKind = null,
+    upstreamLatencyMs = null,
+    errorCode = null,
+    nightAllRequestId = null,
+    nightAllTraceId = null,
+    capturedAt = new Date(),
+    staleUntil = null,
+    job = null,
+  }) {
+    if (!['complete', 'partial'].includes(outcome)) {
+      throw new AppError(400, 'invalid_live_delivery_outcome', 'Live delivery must be complete or partial')
+    }
+    if (responseBody === undefined) {
+      throw new AppError(400, 'compatibility_response_required', 'Live delivery requires a response body')
+    }
+    assertConnectorFailureKind(failureKind)
+    const captured = compatibilityTimestamp(capturedAt)
+    let stale = null
+    if (outcome === 'complete') {
+      if (staleUntil == null) {
+        throw new AppError(400, 'compatibility_stale_until_required', 'Complete live delivery requires staleUntil')
+      }
+      stale = compatibilityTimestamp(staleUntil)
+      if (stale < captured) {
+        throw new AppError(400, 'invalid_compatibility_stale_until', 'staleUntil must not precede capturedAt')
+      }
+    }
+
+    return withPgTransaction(this.pool, async (client) => {
+      const locked = await client.query(
+        `SELECT * FROM serving.connector_calls
+         WHERE id = $1 AND outcome IS NULL
+         FOR UPDATE`,
+        [id],
+      )
+      const call = locked.rows[0]
+      if (!call) throw new AppError(404, 'connector_call_not_found', 'Connector call not found')
+
+      let snapshot = null
+      if (outcome === 'complete') {
+        const snapshotLockKey = `${call.consumer_id}:${call.operation}:${call.request_fingerprint}`
+        await client.query(
+          'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+          [snapshotLockKey],
+        )
+        const current = await client.query(
+          `SELECT * FROM serving.compatibility_snapshots
+           WHERE consumer_id = $1 AND operation = $2 AND request_fingerprint = $3
+             AND superseded_at IS NULL
+           FOR UPDATE`,
+          [call.consumer_id, call.operation, call.request_fingerprint],
+        )
+        const currentSnapshot = current.rows[0] || null
+        if (!currentSnapshot || new Date(currentSnapshot.captured_at) <= captured) {
+          if (currentSnapshot) {
+            await client.query(
+              `UPDATE serving.compatibility_snapshots
+               SET superseded_at = now(), updated_at = now()
+               WHERE id = $1 AND superseded_at IS NULL`,
+              [currentSnapshot.id],
+            )
+          }
+          const stored = await client.query(
+            `INSERT INTO serving.compatibility_snapshots
+               (id, consumer_id, operation, request_fingerprint, platform,
+                response_body, captured_at, stale_until, last_success_call_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             RETURNING *`,
+            [
+              randomUUID(), call.consumer_id, call.operation, call.request_fingerprint,
+              call.platform, responseBody, captured, stale, id,
+            ],
+          )
+          snapshot = stored.rows[0] || null
+        }
+      }
+
+      const committed = await client.query(
+        `UPDATE usage_requests SET
+           status = 'committed', response_status = $2, response_body = $3,
+           units_actual = $4, upstream_latency_ms = $5,
+           delivery_source_mode = 'live', response_captured_at = $6,
+           compatibility_snapshot_id = $7, completed_at = now()
+         WHERE id = $1 AND consumer_id = $8 AND status = 'reserved'
+         RETURNING *`,
+        [
+          call.usage_request_id, responseStatus, responseBody, unitsActual,
+          upstreamLatencyMs, captured, snapshot?.id || null, call.consumer_id,
+        ],
+      )
+      if (!committed.rows[0]) throw new AppError(404, 'request_not_found', 'Request not found')
+
+      const completed = await client.query(
+        `UPDATE serving.connector_calls SET
+           outcome = $2, http_status = $3, business_status = $4,
+           failure_kind = $5, upstream_latency_ms = $6, error_code = $7,
+           source_mode = 'live', upstream_request_id = $8, upstream_trace_id = $9,
+           completed_at = now()
+         WHERE id = $1 AND outcome IS NULL
+         RETURNING *`,
+        [
+          id, outcome, httpStatus, businessStatus, failureKind, upstreamLatencyMs,
+          errorCode, nightAllRequestId, nightAllTraceId,
+        ],
+      )
+      if (!completed.rows[0]) {
+        throw new AppError(409, 'connector_call_state_conflict', 'Connector call is already complete')
+      }
+
+      if (job) {
+        await client.query(
+          `INSERT INTO mxq.jobs (queue, payload, dedupe_key, priority)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (queue, dedupe_key) WHERE dedupe_key IS NOT NULL AND status IN ('pending','running')
+           DO NOTHING`,
+          [job.queue, job.payload, job.dedupeKey, job.priority ?? 100],
+        )
+      }
+
+      return {
+        request: requestRecord(committed.rows[0]),
+        call: connectorCallRecord(completed.rows[0]),
+        snapshot: compatibilitySnapshotRecord(snapshot),
+      }
+    }, { outcomeUnknownCode: 'compatibility_delivery_outcome_unknown' })
+  }
+
+  async findUsableCompatibilitySnapshot({ consumerId, operation, fingerprint, at = new Date() }) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM serving.compatibility_snapshots
+       WHERE consumer_id = $1 AND operation = $2 AND request_fingerprint = $3
+         AND superseded_at IS NULL AND stale_until >= $4`,
+      [consumerId, operation, fingerprint, compatibilityTimestamp(at)],
+    )
+    return compatibilitySnapshotRecord(rows[0]) || null
+  }
+
+  async commitCompatibilityStaleDelivery(id, {
+    snapshotId,
+    responseStatus = 200,
+    unitsActual = 1,
+    httpStatus = null,
+    businessStatus = null,
+    failureKind,
+    upstreamLatencyMs = null,
+    errorCode = null,
+    nightAllRequestId = null,
+    nightAllTraceId = null,
+    at = new Date(),
+  }) {
+    assertTransientFallback({ failureKind, httpStatus })
+    const deliveredAt = compatibilityTimestamp(at)
+    return withPgTransaction(this.pool, async (client) => {
+      const locked = await client.query(
+        `SELECT * FROM serving.connector_calls
+         WHERE id = $1 AND outcome IS NULL
+         FOR UPDATE`,
+        [id],
+      )
+      const call = locked.rows[0]
+      if (!call) throw new AppError(404, 'connector_call_not_found', 'Connector call not found')
+
+      const found = await client.query(
+        `SELECT * FROM serving.compatibility_snapshots
+         WHERE id = $1 AND consumer_id = $2 AND operation = $3
+           AND request_fingerprint = $4 AND stale_until >= $5
+         FOR SHARE`,
+        [
+          snapshotId, call.consumer_id, call.operation, call.request_fingerprint,
+          deliveredAt,
+        ],
+      )
+      const snapshot = found.rows[0]
+      if (!snapshot) {
+        throw new AppError(409, 'compatibility_snapshot_unavailable', 'Compatibility snapshot is unavailable')
+      }
+
+      const committed = await client.query(
+        `UPDATE usage_requests SET
+           status = 'committed', response_status = $2, response_body = $3,
+           units_actual = $4, upstream_latency_ms = $5,
+           delivery_source_mode = 'stale', response_captured_at = $6,
+           compatibility_snapshot_id = $7, completed_at = $8
+         WHERE id = $1 AND consumer_id = $9 AND status = 'reserved'
+         RETURNING *`,
+        [
+          call.usage_request_id, responseStatus, snapshot.response_body, unitsActual,
+          upstreamLatencyMs, snapshot.captured_at, snapshot.id, deliveredAt,
+          call.consumer_id,
+        ],
+      )
+      if (!committed.rows[0]) throw new AppError(404, 'request_not_found', 'Request not found')
+
+      const completed = await client.query(
+        `UPDATE serving.connector_calls SET
+           outcome = $2, http_status = $3, business_status = $4,
+           failure_kind = $5, upstream_latency_ms = $6, error_code = $7,
+           source_mode = 'stale', upstream_request_id = $8, upstream_trace_id = $9,
+           completed_at = $10
+         WHERE id = $1 AND outcome IS NULL
+         RETURNING *`,
+        [
+          id, failureKind === 'http' ? 'failed' : 'unknown',
+          httpStatus, businessStatus, failureKind, upstreamLatencyMs, errorCode,
+          nightAllRequestId, nightAllTraceId, deliveredAt,
+        ],
+      )
+      if (!completed.rows[0]) {
+        throw new AppError(409, 'connector_call_state_conflict', 'Connector call is already complete')
+      }
+
+      return {
+        request: requestRecord(committed.rows[0]),
+        call: connectorCallRecord(completed.rows[0]),
+        snapshot: compatibilitySnapshotRecord(snapshot),
+      }
+    }, { outcomeUnknownCode: 'compatibility_delivery_outcome_unknown' })
   }
 
   releaseRequest(id, errorCode) {
@@ -739,17 +1128,85 @@ export class PostgresStore {
     connectorId,
     batch = null,
     sessionClient = null,
+    apiSearchLineage = null,
   }) {
-    if (records.length === 0) return { ingested: 0, changed: 0 }
-    const stream = `${platform}.external.v1`
+    if (records.length === 0 && !apiSearchLineage) return { ingested: 0, changed: 0 }
+    if (apiSearchLineage && importRunId) {
+      throw new AppError(400, 'ambiguous_ingest_lineage', 'API search and external import lineage cannot be combined')
+    }
+    if (apiSearchLineage && (
+      !apiSearchLineage.requestId
+      || !apiSearchLineage.queryFingerprint
+      || !apiSearchLineage.connectorCallId
+    )) {
+      throw new AppError(400, 'incomplete_api_search_lineage', 'API search lineage is incomplete')
+    }
+    const stream = apiSearchLineage
+      ? `${platform}.night-all-compat.v1`
+      : `${platform}.external.v1`
     const client = sessionClient ?? await this.pool.connect()
     let changed = 0
     let deleted = 0
+    let ingestRunId = null
     let commitStarted = false
     let committed = false
     let releaseError = null
     try {
       await client.query('BEGIN')
+      if (apiSearchLineage) {
+        const runId = randomUUID()
+        const inserted = await client.query(
+          `INSERT INTO ingest.ingest_runs
+             (id, connector_id, stream_id, trigger, request_id, query_fingerprint,
+              connector_call_id)
+           SELECT $1, $2, $3, 'api_search', $4, $5, $6
+             FROM serving.connector_calls call
+            WHERE call.id = $6
+              AND call.usage_request_id = $4
+              AND call.request_fingerprint = $5
+              AND call.outcome IN ('complete', 'partial')
+           ON CONFLICT (connector_call_id) WHERE connector_call_id IS NOT NULL
+           DO NOTHING
+           RETURNING id`,
+          [
+            runId, connectorId, stream, apiSearchLineage.requestId,
+            apiSearchLineage.queryFingerprint, apiSearchLineage.connectorCallId,
+          ],
+        )
+        ingestRunId = inserted.rows[0]?.id || null
+        if (!ingestRunId) {
+          const existingResult = await client.query(
+            `SELECT id, request_id, query_fingerprint, item_count, finished_at
+               FROM ingest.ingest_runs
+              WHERE connector_call_id = $1`,
+            [apiSearchLineage.connectorCallId],
+          )
+          const existing = existingResult.rows[0]
+          if (!existing
+            || existing.request_id !== apiSearchLineage.requestId
+            || existing.query_fingerprint !== apiSearchLineage.queryFingerprint) {
+            throw new AppError(
+              409,
+              'api_search_lineage_mismatch',
+              'Connector call does not match this API search lineage',
+            )
+          }
+          if (!existing.finished_at) {
+            throw new AppError(409, 'api_search_ingest_in_progress', 'API search ingestion is already in progress')
+          }
+          commitStarted = true
+          await client.query('COMMIT')
+          committed = true
+          return {
+            ingested: Number(existing.item_count),
+            changed: 0,
+            deleted: 0,
+            rowCount: Number(existing.item_count),
+            replayed: true,
+            runId: existing.id,
+          }
+        }
+      }
       if (importRunId) {
         const runResult = await client.query(
           `SELECT id, source_id, status
@@ -804,22 +1261,24 @@ export class PostgresStore {
         }
       }
 
+      const sourceRunColumn = apiSearchLineage ? 'ingest_run_id' : 'external_import_run_id'
+      const sourceRunId = apiSearchLineage ? ingestRunId : importRunId
       for (const record of records) {
         if (record.deletedAt != null) deleted += 1
         await client.query(
           `INSERT INTO ingest.source_objects
              (id, connector_id, stream_id, object_type, source_key,
-              payload_sha256, raw_payload, source_updated_at, external_import_run_id)
+              payload_sha256, raw_payload, source_updated_at, ${sourceRunColumn})
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            ON CONFLICT (connector_id, stream_id, object_type, source_key) DO UPDATE SET
              payload_sha256 = EXCLUDED.payload_sha256,
              raw_payload = EXCLUDED.raw_payload,
              source_updated_at = EXCLUDED.source_updated_at,
-             external_import_run_id = EXCLUDED.external_import_run_id,
+             ${sourceRunColumn} = EXCLUDED.${sourceRunColumn},
              last_seen_at = now()`,
           [
             randomUUID(), connectorId, stream, record.objectType, record.externalId,
-            record.payloadSha256, record.rawItem, record.collectedAt, importRunId,
+            record.payloadSha256, record.rawItem, record.collectedAt, sourceRunId,
           ],
         )
 
@@ -869,12 +1328,30 @@ export class PostgresStore {
 
         const revisionInsert = await client.query(
           `INSERT INTO core.record_revisions
-             (record_id, revision, payload_sha256, normalized_payload, parser_version, external_import_run_id)
+             (record_id, revision, payload_sha256, normalized_payload, parser_version, ${sourceRunColumn})
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (record_id, revision) DO NOTHING`,
-          [id, revision, record.payloadSha256, record.rawItem, record.parserVersion, importRunId],
+          [id, revision, record.payloadSha256, record.rawItem, record.parserVersion, sourceRunId],
         )
         if (revisionInsert.rowCount > 0) changed += 1
+
+        if (apiSearchLineage) {
+          const sourceEventId = `${apiSearchLineage.connectorCallId}:${record.objectType}:${record.externalId}`
+          await client.query(
+            `INSERT INTO core.observations
+               (id, record_id, connector_id, source_event_id, query_fingerprint,
+                rank, metrics, observation_hash, ingest_run_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (record_id, observation_hash) DO NOTHING`,
+            [
+              randomUUID(), id, connectorId, sourceEventId,
+              apiSearchLineage.queryFingerprint, record.rank ?? null,
+              record.metrics || {},
+              observationHash(record, apiSearchLineage.queryFingerprint, sourceEventId),
+              ingestRunId,
+            ],
+          )
+        }
 
         // Same outbox contract as the Night-All path: the projector cannot tell
         // (and must not care) which ingest route produced the event.
@@ -889,6 +1366,15 @@ export class PostgresStore {
             record.deletedAt ? 'delete' : 'upsert',
             { datasetId, platform, objectType: record.objectType },
           ],
+        )
+      }
+
+      if (ingestRunId) {
+        await client.query(
+          `UPDATE ingest.ingest_runs
+              SET item_count = $2, finished_at = now()
+            WHERE id = $1`,
+          [ingestRunId, records.length],
         )
       }
 
@@ -931,14 +1417,17 @@ export class PostgresStore {
         deleted,
         cursorEnd: batch?.cursorEnd ?? null,
         rowCount: batch?.rowCount ?? records.length,
+        ...(ingestRunId ? { runId: ingestRunId } : {}),
       }
     } catch (error) {
       if (commitStarted && !committed) {
         releaseError = error
         const unknown = new AppError(
           503,
-          'external_commit_outcome_unknown',
-          'The external batch commit outcome is unknown; retry the same run and batch',
+          apiSearchLineage ? 'api_search_ingest_outcome_unknown' : 'external_commit_outcome_unknown',
+          apiSearchLineage
+            ? 'The API search ingest outcome is unknown; retry the same connector call'
+            : 'The external batch commit outcome is unknown; retry the same run and batch',
         )
         unknown.cause = error
         throw unknown
@@ -1126,11 +1615,31 @@ export class PostgresStore {
               revision.normalized_payload AS raw_payload,
               revision.parser_version, revision.ingest_run_id,
               revision.external_import_run_id,
+              observation.id AS observation_id,
+              observation.ingest_run_id AS observation_ingest_run_id,
+              observation.connector_id AS observation_connector_id,
+              observation.source_event_id AS observation_source_event_id,
+              observation.query_fingerprint AS observation_query_fingerprint,
+              observation_run.request_id AS observation_request_id,
+              observation_run.connector_call_id,
+              connector_call.operation AS connector_operation,
               page.sort_time
          FROM page
          JOIN core.canonical_records r ON r.id = page.id
          LEFT JOIN core.record_revisions revision
            ON revision.record_id = r.id AND revision.revision = r.current_revision
+         LEFT JOIN LATERAL (
+           SELECT o.id, o.ingest_run_id, o.connector_id, o.source_event_id,
+                  o.query_fingerprint, o.observed_at
+             FROM core.observations o
+            WHERE o.record_id = r.id
+            ORDER BY o.observed_at DESC, o.id DESC
+            LIMIT 1
+         ) observation ON true
+         LEFT JOIN ingest.ingest_runs observation_run
+           ON observation_run.id = observation.ingest_run_id
+         LEFT JOIN serving.connector_calls connector_call
+           ON connector_call.id = observation_run.connector_call_id
         ORDER BY page.sort_time DESC, page.id DESC`,
         values,
       ),
@@ -1161,10 +1670,30 @@ export class PostgresStore {
               r.first_seen_at, r.last_seen_at, r.deleted_at,
               revision.normalized_payload AS raw_payload,
               revision.parser_version, revision.ingest_run_id,
-              revision.external_import_run_id
+              revision.external_import_run_id,
+              observation.id AS observation_id,
+              observation.ingest_run_id AS observation_ingest_run_id,
+              observation.connector_id AS observation_connector_id,
+              observation.source_event_id AS observation_source_event_id,
+              observation.query_fingerprint AS observation_query_fingerprint,
+              observation_run.request_id AS observation_request_id,
+              observation_run.connector_call_id,
+              connector_call.operation AS connector_operation
          FROM core.canonical_records r
          LEFT JOIN core.record_revisions revision
            ON revision.record_id = r.id AND revision.revision = r.current_revision
+         LEFT JOIN LATERAL (
+           SELECT o.id, o.ingest_run_id, o.connector_id, o.source_event_id,
+                  o.query_fingerprint, o.observed_at
+             FROM core.observations o
+            WHERE o.record_id = r.id
+            ORDER BY o.observed_at DESC, o.id DESC
+            LIMIT 1
+         ) observation ON true
+         LEFT JOIN ingest.ingest_runs observation_run
+           ON observation_run.id = observation.ingest_run_id
+         LEFT JOIN serving.connector_calls connector_call
+           ON connector_call.id = observation_run.connector_call_id
         WHERE r.id = ANY($1::uuid[])`,
       [ids],
     )
@@ -2448,6 +2977,16 @@ function dataCenterRecordDetail(row) {
       parserVersion: row.parser_version ?? null,
       ingestRunId: row.ingest_run_id ?? null,
       externalImportRunId: row.external_import_run_id ?? null,
+      latestObservation: row.observation_id ? {
+        id: row.observation_id,
+        ingestRunId: row.observation_ingest_run_id ?? null,
+        connectorId: row.observation_connector_id ?? null,
+        sourceEventId: row.observation_source_event_id ?? null,
+        queryFingerprint: row.observation_query_fingerprint ?? null,
+        requestId: row.observation_request_id ?? null,
+        connectorCallId: row.connector_call_id ?? null,
+        operation: row.connector_operation ?? null,
+      } : null,
     },
     projectionRevision: Number(row.projection_revision || 0),
     firstSeenAt: iso(row.first_seen_at),

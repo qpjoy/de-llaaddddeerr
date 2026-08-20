@@ -13,6 +13,59 @@ function active(record) {
   return record?.status === 'active'
 }
 
+const connectorCallOutcomes = new Set(['complete', 'partial', 'failed', 'unknown'])
+const connectorSourceModes = new Set(['live', 'stale'])
+const connectorFailureKinds = new Set(['network', 'timeout', 'http', 'contract', 'business', 'internal', 'unknown'])
+const transientHttpStatuses = new Set([502, 503, 504])
+
+function compatibilitySnapshotKey(consumerId, operation, fingerprint) {
+  return `${consumerId}\u0000${operation}\u0000${fingerprint}`
+}
+
+function timestamp(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(date.getTime())) {
+    throw new AppError(400, 'invalid_compatibility_timestamp', 'Compatibility timestamp is invalid')
+  }
+  return date.toISOString()
+}
+
+function replayExpired(record, replayWindowMs) {
+  if (replayWindowMs == null || !record.completedAt) return false
+  return Date.now() - new Date(record.completedAt).getTime() > replayWindowMs
+}
+
+function assertConnectorOutcome(outcome) {
+  if (!connectorCallOutcomes.has(outcome)) {
+    throw new AppError(400, 'invalid_connector_outcome', 'Connector outcome is invalid')
+  }
+}
+
+function assertSourceMode(sourceMode) {
+  if (!connectorSourceModes.has(sourceMode)) {
+    throw new AppError(400, 'invalid_connector_source_mode', 'Connector source mode is invalid')
+  }
+}
+
+function assertFailureKind(failureKind) {
+  if (failureKind != null && !connectorFailureKinds.has(failureKind)) {
+    throw new AppError(400, 'invalid_connector_failure_kind', 'Connector failure kind is invalid')
+  }
+}
+
+function assertTransientFallback({ failureKind, httpStatus }) {
+  const eligible = ((failureKind === 'network' || failureKind === 'timeout') && httpStatus == null)
+    || (failureKind === 'contract' && httpStatus == null)
+    || (failureKind === 'http' && transientHttpStatuses.has(httpStatus))
+  if (!eligible) {
+    throw new AppError(
+      409,
+      'compatibility_fallback_not_allowed',
+      'Only network, timeout, invalid-success-contract, or HTTP 502/503/504 failures may use a compatibility snapshot',
+    )
+  }
+}
+
 export class MemoryStore {
   constructor() {
     this.tenants = new Map()
@@ -25,6 +78,9 @@ export class MemoryStore {
     this.capabilityPolicies = new Map()
     this.requests = new Map()
     this.requestsByScope = new Map()
+    this.connectorCalls = new Map()
+    this.compatibilitySnapshots = new Map()
+    this.compatibilitySnapshotsByKey = new Map()
     // File/source administration is durable only in PostgreSQL. Keeping a
     // small in-memory catalog makes the local UI and focused HTTP tests honest
     // enough to exercise registration without pretending imports are durable.
@@ -46,6 +102,16 @@ export class MemoryStore {
           errorCode: 'reservation_lease_expired',
           completedAt: now.toISOString(),
         })
+        for (const call of this.connectorCalls.values()) {
+          if (call.requestId !== record.id || call.outcome != null) continue
+          Object.assign(call, {
+            outcome: 'unknown',
+            businessStatus: 'unknown',
+            failureKind: 'unknown',
+            errorCode: 'reservation_lease_expired',
+            completedAt: now.toISOString(),
+          })
+        }
         reaped += 1
       }
     }
@@ -76,6 +142,9 @@ export class MemoryStore {
 
   async createConsumer({ tenantId, name, status = 'active', businessId, defaultCapabilityPolicy = null }) {
     if (!this.tenants.has(tenantId)) throw new AppError(404, 'tenant_not_found', 'Tenant not found')
+    if (businessId && [...this.consumers.values()].some((consumer) => consumer.businessId === businessId)) {
+      throw new AppError(409, 'business_id_conflict', 'businessId is already assigned to another consumer')
+    }
     const id = randomUUID()
     const createdAt = nowIso()
     const record = {
@@ -285,6 +354,7 @@ export class MemoryStore {
     leaseExpiresAt,
     windowStart,
     maxRequests,
+    replayWindowMs = null,
   }) {
     if (Boolean(platform) === Boolean(capability)) {
       throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')
@@ -294,14 +364,24 @@ export class MemoryStore {
     if (existingId) {
       const existing = this.requests.get(existingId)
       if (existing.fingerprint !== fingerprint) return { kind: 'conflict', request: clone(existing) }
-      if (existing.status === 'committed') return { kind: 'replay', request: clone(existing) }
+      if (existing.status === 'committed' && !replayExpired(existing, replayWindowMs)) {
+        return { kind: 'replay', request: clone(existing) }
+      }
       if (existing.status === 'reserved') return { kind: 'in_progress', request: clone(existing) }
       if (existing.status === 'unknown') return { kind: 'unknown', request: clone(existing) }
-      if (existing.status === 'released') {
+      if (existing.status === 'released' || existing.status === 'committed') {
         this.#assertQuota({ tenantId, consumerId, platform, capability, windowStart, maxRequests })
         Object.assign(existing, {
           status: 'reserved',
+          apiKeyId,
           unitsReserved,
+          unitsActual: null,
+          responseStatus: null,
+          responseBody: null,
+          upstreamLatencyMs: null,
+          deliverySourceMode: null,
+          capturedAt: null,
+          snapshotId: null,
           reservedAt: nowIso(),
           leaseExpiresAt: new Date(leaseExpiresAt).toISOString(),
           completedAt: null,
@@ -328,6 +408,9 @@ export class MemoryStore {
       responseBody: null,
       errorCode: null,
       upstreamLatencyMs: null,
+      deliverySourceMode: null,
+      capturedAt: null,
+      snapshotId: null,
       reservedAt: nowIso(),
       leaseExpiresAt: new Date(leaseExpiresAt).toISOString(),
       completedAt: null,
@@ -370,6 +453,242 @@ export class MemoryStore {
     return clone(record)
   }
 
+  async beginConnectorCall({
+    id = randomUUID(),
+    consumerId,
+    requestId = null,
+    operation,
+    fingerprint,
+    platform = null,
+    sourceMode = 'live',
+  }) {
+    if (!this.consumers.has(consumerId)) {
+      throw new AppError(404, 'consumer_not_found', 'Consumer not found')
+    }
+    if (requestId != null) {
+      const request = this.#request(requestId)
+      if (request.consumerId !== consumerId) {
+        throw new AppError(409, 'connector_request_scope_mismatch', 'Connector call and request scopes differ')
+      }
+    }
+    if (!/^[a-z][a-z0-9._-]{0,127}$/.test(operation || '')) {
+      throw new AppError(400, 'invalid_connector_operation', 'Connector operation is invalid')
+    }
+    if (!/^[0-9a-f]{64}$/.test(fingerprint || '')) {
+      throw new AppError(400, 'invalid_connector_fingerprint', 'Connector fingerprint is invalid')
+    }
+    assertSourceMode(sourceMode)
+    if (this.connectorCalls.has(id)) {
+      throw new AppError(409, 'connector_call_exists', 'Connector call already exists')
+    }
+
+    const startedAt = nowIso()
+    const record = {
+      id, consumerId, requestId, operation, fingerprint, platform, sourceMode,
+      outcome: null, httpStatus: null, businessStatus: null, failureKind: null,
+      upstreamLatencyMs: null, errorCode: null, nightAllRequestId: null,
+      nightAllTraceId: null, startedAt, completedAt: null, createdAt: startedAt,
+    }
+    this.connectorCalls.set(id, record)
+    return clone(record)
+  }
+
+  async finishConnectorCall(id, {
+    outcome,
+    httpStatus = null,
+    businessStatus = null,
+    failureKind = null,
+    upstreamLatencyMs = null,
+    errorCode = null,
+    sourceMode = 'live',
+    nightAllRequestId = null,
+    nightAllTraceId = null,
+  }) {
+    assertConnectorOutcome(outcome)
+    assertSourceMode(sourceMode)
+    assertFailureKind(failureKind)
+    const record = this.#connectorCallInProgress(id)
+    Object.assign(record, {
+      outcome, httpStatus, businessStatus, failureKind, upstreamLatencyMs,
+      errorCode, sourceMode, nightAllRequestId, nightAllTraceId,
+      completedAt: nowIso(),
+    })
+    return clone(record)
+  }
+
+  async commitCompatibilityLiveDelivery(id, {
+    outcome,
+    responseStatus = 200,
+    responseBody,
+    unitsActual = 1,
+    httpStatus = 200,
+    businessStatus = null,
+    failureKind = null,
+    upstreamLatencyMs = null,
+    errorCode = null,
+    nightAllRequestId = null,
+    nightAllTraceId = null,
+    capturedAt = new Date(),
+    staleUntil = null,
+    job: _job = null,
+  }) {
+    if (!['complete', 'partial'].includes(outcome)) {
+      throw new AppError(400, 'invalid_live_delivery_outcome', 'Live delivery must be complete or partial')
+    }
+    if (responseBody === undefined) {
+      throw new AppError(400, 'compatibility_response_required', 'Live delivery requires a response body')
+    }
+    assertFailureKind(failureKind)
+    const call = this.#connectorCallInProgress(id)
+    const request = this.#requestInState(call.requestId, ['reserved'])
+    if (request.consumerId !== call.consumerId) {
+      throw new AppError(409, 'connector_request_scope_mismatch', 'Connector call and request scopes differ')
+    }
+
+    const captured = timestamp(capturedAt)
+    let storedSnapshot = null
+    if (outcome === 'complete') {
+      if (staleUntil == null) {
+        throw new AppError(400, 'compatibility_stale_until_required', 'Complete live delivery requires staleUntil')
+      }
+      const stale = timestamp(staleUntil)
+      if (new Date(stale) < new Date(captured)) {
+        throw new AppError(400, 'invalid_compatibility_stale_until', 'staleUntil must not precede capturedAt')
+      }
+      const key = compatibilitySnapshotKey(call.consumerId, call.operation, call.fingerprint)
+      const existingId = this.compatibilitySnapshotsByKey.get(key)
+      const existing = existingId ? this.compatibilitySnapshots.get(existingId) : null
+      if (!existing || new Date(existing.capturedAt) <= new Date(captured)) {
+        const updatedAt = nowIso()
+        if (existing) {
+          this.compatibilitySnapshots.set(existing.id, {
+            ...existing,
+            supersededAt: updatedAt,
+            updatedAt,
+          })
+        }
+        storedSnapshot = {
+          id: randomUUID(),
+          consumerId: call.consumerId,
+          operation: call.operation,
+          fingerprint: call.fingerprint,
+          platform: call.platform,
+          responseBody: clone(responseBody),
+          capturedAt: captured,
+          staleUntil: stale,
+          lastSuccessCallId: call.id,
+          supersededAt: null,
+          createdAt: updatedAt,
+          updatedAt,
+        }
+        this.compatibilitySnapshots.set(storedSnapshot.id, storedSnapshot)
+        this.compatibilitySnapshotsByKey.set(key, storedSnapshot.id)
+      }
+    }
+
+    const completedAt = nowIso()
+    const committedRequest = {
+      ...request,
+      status: 'committed',
+      responseStatus,
+      responseBody: clone(responseBody),
+      unitsActual,
+      upstreamLatencyMs,
+      deliverySourceMode: 'live',
+      capturedAt: captured,
+      snapshotId: storedSnapshot?.id || null,
+      completedAt,
+    }
+    const completedCall = {
+      ...call,
+      outcome,
+      httpStatus,
+      businessStatus,
+      failureKind,
+      upstreamLatencyMs,
+      errorCode,
+      sourceMode: 'live',
+      nightAllRequestId,
+      nightAllTraceId,
+      completedAt,
+    }
+    this.requests.set(request.id, committedRequest)
+    this.connectorCalls.set(call.id, completedCall)
+    return {
+      request: clone(committedRequest),
+      call: clone(completedCall),
+      snapshot: clone(storedSnapshot),
+    }
+  }
+
+  async findUsableCompatibilitySnapshot({ consumerId, operation, fingerprint, at = new Date() }) {
+    const key = compatibilitySnapshotKey(consumerId, operation, fingerprint)
+    const id = this.compatibilitySnapshotsByKey.get(key)
+    const record = id ? this.compatibilitySnapshots.get(id) : null
+    if (!record || new Date(record.staleUntil) < new Date(timestamp(at))) return null
+    return clone(record)
+  }
+
+  async commitCompatibilityStaleDelivery(id, {
+    snapshotId,
+    responseStatus = 200,
+    unitsActual = 1,
+    httpStatus = null,
+    businessStatus = null,
+    failureKind,
+    upstreamLatencyMs = null,
+    errorCode,
+    nightAllRequestId = null,
+    nightAllTraceId = null,
+    at = new Date(),
+  }) {
+    assertTransientFallback({ failureKind, httpStatus })
+    const call = this.#connectorCallInProgress(id)
+    const request = this.#requestInState(call.requestId, ['reserved'])
+    const snapshot = this.compatibilitySnapshots.get(snapshotId)
+    const deliveredAt = timestamp(at)
+    if (!snapshot
+      || snapshot.consumerId !== call.consumerId
+      || snapshot.operation !== call.operation
+      || snapshot.fingerprint !== call.fingerprint
+      || new Date(snapshot.staleUntil) < new Date(deliveredAt)) {
+      throw new AppError(409, 'compatibility_snapshot_unavailable', 'Compatibility snapshot is unavailable')
+    }
+
+    const committedRequest = {
+      ...request,
+      status: 'committed',
+      responseStatus,
+      responseBody: clone(snapshot.responseBody),
+      unitsActual,
+      upstreamLatencyMs,
+      deliverySourceMode: 'stale',
+      capturedAt: snapshot.capturedAt,
+      snapshotId: snapshot.id,
+      completedAt: deliveredAt,
+    }
+    const completedCall = {
+      ...call,
+      outcome: failureKind === 'http' ? 'failed' : 'unknown',
+      httpStatus,
+      businessStatus,
+      failureKind,
+      upstreamLatencyMs,
+      errorCode,
+      sourceMode: 'stale',
+      nightAllRequestId,
+      nightAllTraceId,
+      completedAt: deliveredAt,
+    }
+    this.requests.set(request.id, committedRequest)
+    this.connectorCalls.set(call.id, completedCall)
+    return {
+      request: clone(committedRequest),
+      call: clone(completedCall),
+      snapshot: clone(snapshot),
+    }
+  }
+
   async releaseRequest(id, errorCode) {
     const record = this.#requestInState(id, ['reserved'])
     Object.assign(record, { status: 'released', errorCode, completedAt: nowIso() })
@@ -396,6 +715,15 @@ export class MemoryStore {
         'request_state_conflict',
         `Request in ${record.status} state cannot transition from ${allowedStatuses.join(' or ')}`,
       )
+    }
+    return record
+  }
+
+  #connectorCallInProgress(id) {
+    const record = this.connectorCalls.get(id)
+    if (!record) throw new AppError(404, 'connector_call_not_found', 'Connector call not found')
+    if (record.outcome != null) {
+      throw new AppError(409, 'connector_call_state_conflict', 'Connector call is already complete')
     }
     return record
   }

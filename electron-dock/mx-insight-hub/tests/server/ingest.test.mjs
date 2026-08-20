@@ -129,6 +129,17 @@ test('observation hash is stable for a replayed batch and distinct for a later c
 
   // A different query that returned the same post is a separate sighting.
   assert.notEqual(observationHash(record, 'fp'), observationHash(record, 'other-fp'))
+
+  // API-search sightings from separate connector calls must remain independently
+  // traceable even when the returned payload and query are identical.
+  assert.equal(
+    observationHash(record, 'fp', 'call-1:post:1'),
+    observationHash(replay, 'fp', 'call-1:post:1'),
+  )
+  assert.notEqual(
+    observationHash(record, 'fp', 'call-1:post:1'),
+    observationHash(record, 'fp', 'call-2:post:1'),
+  )
 })
 
 test('canonical json sorts keys deterministically', () => {

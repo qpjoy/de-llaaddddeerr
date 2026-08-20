@@ -69,6 +69,11 @@ const idempotencyParameter = {
   },
 }
 
+const nightAllCompatibilityIdempotencyParameter = {
+  ...idempotencyParameter,
+  description: 'Permanently names one immutable paid dispatch for this exact path and normalized body. Reuse always replays that result; use a new key only when intentionally requesting a new live call.',
+}
+
 const searchResponse = {
   description: 'Stable data-search response.',
   headers: {
@@ -84,6 +89,40 @@ const searchResponse = {
   content: {
     'application/json': {
       schema: { $ref: '#/components/schemas/SearchEnvelope' },
+    },
+  },
+}
+
+const nightAllCompatibilityResponse = {
+  description: 'Night-All legacy envelope. The response body and any stale snapshot retain the upstream data fields unchanged.',
+  headers: {
+    'x-mx-insight-request-id': {
+      description: 'Durable Hub request identifier for status lookup.',
+      schema: { type: 'string', format: 'uuid' },
+    },
+    'x-mx-insight-source-mode': {
+      description: 'live for the current Night-All result; stale for an exact last-good Hub snapshot.',
+      schema: { type: 'string', enum: ['live', 'stale'] },
+    },
+    'x-mx-insight-captured-at': {
+      description: 'When the delivered Night-All response was captured.',
+      schema: { type: 'string', format: 'date-time' },
+    },
+    Age: {
+      description: 'Age of the delivered snapshot in seconds.',
+      schema: { type: 'integer', minimum: 0 },
+    },
+    Warning: {
+      description: 'Present as HTTP Warning 110 when source mode is stale.',
+      schema: { type: 'string' },
+    },
+    'idempotent-replay': {
+      schema: { type: 'string', enum: ['true', 'false'] },
+    },
+  },
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/NightAllLegacyEnvelope' },
     },
   },
 }
@@ -115,13 +154,14 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     version: '1.0.0',
     description: [
       'Consumer-facing data and tool access only. All endpoints require an issued API key and enforce the consumer\'s explicit platform or capability grants, policy and usage quota.',
-      'No management endpoints, physical data-source coordinates, credentials or raw source rows are part of this contract.',
+      'The three explicitly named Night-All compatibility routes retain the current upstream legacy data envelope; other public routes do not expose raw source rows or management coordinates.',
     ].join('\n\n'),
   },
   servers: [{ url: '/api/v1', description: 'Same-origin public API' }],
   tags: [
     { name: 'Discovery', description: 'Discover the caller\'s granted platform capabilities.' },
     { name: 'Search', description: 'Idempotent content search.' },
+    { name: 'Compatibility', description: 'Temporary Night-All legacy routes with durable Hub evidence and exact last-good fallback.' },
     { name: 'Tools', description: 'Granted platform-independent processing capabilities.' },
     {
       name: 'Telegram',
@@ -187,6 +227,44 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
         },
         responses: { 200: searchResponse, ...publicErrors },
+      },
+    },
+    '/night-all/search/{operation}': {
+      post: {
+        tags: ['Compatibility'],
+        operationId: 'searchNightAllCompatibility',
+        summary: 'Call one of the three Night-All legacy search operations',
+        description: 'The Hub authenticates and authorizes the platform, injects its consumer businessId, records the attempt, and stores complete responses as exact last-good snapshots. Network/timeout ambiguity, an unusable HTTP 2xx content-type/JSON/envelope, or a real non-2xx HTTP 502/503/504 may return that exact snapshot. An unusable 2xx is outcome-unknown because paid work may already have happened. The response body retains Night-All data fields unchanged. Provider/token/credential/endpoint/capability/moduleCode routing controls and archive/fullArchive/allTweets/archiveLimit/totalCount/max*Pages/pageCount/chunkSize/budget/crawlDepth cost-amplification controls are rejected; they require a separately granted capability and server policy. Work-budget arithmetic bounds returned/processed item work, not Night-All provider calls or billing.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'invalid_platform', 'page_size_exceeded', 'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch', 'idempotency_key_required', 'invalid_idempotency_key'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          404: ['not_found'],
+          409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown'],
+          429: ['quota_exceeded'],
+          502: ['night_all_rejected', 'upstream_outcome_unknown'],
+        },
+        parameters: [
+          {
+            name: 'operation', in: 'path', required: true,
+            schema: { type: 'string', enum: ['raw', 'crawl', 'user-info'] },
+          },
+          nightAllCompatibilityIdempotencyParameter,
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/NightAllLegacyRequest' },
+              examples: {
+                raw: { value: { platform: 'xiaohongshu', keyword: 'AI Agent', count: 20 } },
+                crawl: { value: { platform: 'twitter', username: 'openai', count: 20 } },
+                userInfo: { value: { platform: 'twitter', username: 'openai' } },
+              },
+            },
+          },
+        },
+        responses: { 200: nightAllCompatibilityResponse, ...publicErrors },
       },
     },
     '/data/stored/search': {
@@ -464,6 +542,71 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           type: resultTypeProperty,
         },
       },
+      NightAllLegacyRequest: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['platform'],
+        description: 'Shared schema for the operation path parameter. The x-mx-operation-fields allowlists mirror runtime exactly: raw requires one singular string or plural string-array query field; crawl and user-info require a supported user/channel identifier. Canonical decimal strings are accepted for integer fields normalized by runtime. Server-owned routing, credential and cost-amplification controls are rejected, including when nested in params.',
+        'x-mx-common-fields': ['businessId', 'business_id', 'platform', 'count', 'pageSize', 'limit', 'page', 'cursor', 'concurrency', 'params', 'includeRaw'],
+        'x-mx-operation-fields': {
+          raw: ['keyword', 'query', 'keywords', 'queries', 'disableAutoDetails', 'includeDetails', 'includeComments', 'commentLimit', 'cacheMaxAgeHours', 'maxEnrichItems', 'commentCursor', 'enrichConcurrency'],
+          crawl: ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid', 'channelUrl', 'channel_url', 'channelId', 'channel_id', 'url', 'urls', 'activityTypes', 'cacheMaxAgeHours'],
+          'user-info': ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid'],
+        },
+        'x-mx-rejected-params': ['provider', 'endpoint', 'credential', 'token/auth', 'timeout', 'capability', 'moduleCode', 'archive', 'fullArchive', 'allTweets', 'archiveLimit', 'totalCount', 'max*Pages', 'pageCount', 'chunkSize', 'budget', 'crawlDepth', 'count', 'limit', 'pageSize', 'page', 'pageNumber', 'pageNo', 'concurrency', 'includeDetails', 'includeComments', 'disableAutoDetails', 'commentLimit', 'maxEnrichItems', 'enrichConcurrency', 'cacheMaxAgeHours'],
+        'x-mx-params-limits': {
+          maxDepth: 8,
+          maxNodes: 1000,
+          maxStringLength: 8192,
+          arrayMaxItems: 'consumer effective platform maxPageSize',
+        },
+        'x-mx-work-budget': {
+          maxRawQueries: 50,
+          maxCrawlIdentifiers: 50,
+          raw: 'queryCount * effective pageSize <= consumer effective platform maxPageSize',
+          crawl: 'identifierCount * effective pageSize * activityTypeCount <= consumer effective platform maxPageSize',
+          'user-info': 'no multiplication rule; identifier collections remain bounded',
+          description: 'Bounds returned/processed item work; it is not a provider-call or billing-count claim because Night-All owns provider/token policy.',
+        },
+        properties: {
+          platform: { type: 'string', minLength: 1, maxLength: 64 },
+          businessId: { type: 'string', maxLength: 128, description: 'Optional migration field; when present it must equal the authenticated consumer businessId.' },
+          business_id: { type: 'string', maxLength: 128 },
+          includeRaw: { type: 'boolean', enum: [false], description: 'Legacy false is accepted then removed before dispatch; true is rejected.' },
+          keyword: { type: 'string', minLength: 1, maxLength: 2048 },
+          query: { type: 'string', minLength: 1, maxLength: 2048 },
+          keywords: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 2048 } },
+          queries: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 2048 } },
+          username: { type: ['string', 'number'], minLength: 1, maxLength: 2048 },
+          usernames: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 2048 } },
+          userId: { type: ['string', 'number'], minLength: 1, maxLength: 2048 },
+          userIds: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 2048 } },
+          user_id: { type: ['string', 'number'], minLength: 1, maxLength: 2048 },
+          uid: { type: ['string', 'number'], minLength: 1, maxLength: 2048 },
+          channelUrl: { type: 'string', minLength: 1, maxLength: 2048 },
+          channel_url: { type: 'string', minLength: 1, maxLength: 2048 },
+          channelId: { type: ['string', 'number'], minLength: 1, maxLength: 2048 },
+          channel_id: { type: ['string', 'number'], minLength: 1, maxLength: 2048 },
+          url: { type: 'string', minLength: 1, maxLength: 2048 },
+          urls: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 2048 } },
+          count: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]*$' }] },
+          pageSize: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]*$' }] },
+          limit: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]*$' }] },
+          page: { oneOf: [{ type: 'integer', minimum: 1, maximum: 1000 }, { type: 'string', pattern: '^(?:[1-9]|[1-9][0-9]{1,2}|1000)$' }] },
+          cursor: { type: 'string', minLength: 1, maxLength: 8192 },
+          concurrency: { oneOf: [{ type: 'integer', minimum: 1, maximum: 20 }, { type: 'string', pattern: '^(?:[1-9]|1[0-9]|20)$' }] },
+          cacheMaxAgeHours: { type: 'number', minimum: 0, maximum: 720, description: 'raw and crawl only.' },
+          disableAutoDetails: { type: 'boolean' },
+          includeDetails: { type: 'boolean' },
+          includeComments: { type: 'boolean' },
+          commentLimit: { oneOf: [{ type: 'integer', minimum: 1, maximum: 100 }, { type: 'string', pattern: '^(?:[1-9]|[1-9][0-9]|100)$' }] },
+          maxEnrichItems: { oneOf: [{ type: 'integer', minimum: 1, maximum: 20 }, { type: 'string', pattern: '^(?:[1-9]|1[0-9]|20)$' }] },
+          commentCursor: { type: 'string', minLength: 1, maxLength: 8192 },
+          enrichConcurrency: { oneOf: [{ type: 'integer', minimum: 1, maximum: 5 }, { type: 'string', pattern: '^[1-5]$' }] },
+          activityTypes: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 128 } },
+          params: { type: 'object', additionalProperties: true, description: 'Platform continuation values only. Rejected keys and workload overrides are listed by x-mx-rejected-params; nested strings are at most 8192 characters and arrays are bounded by the consumer effective platform maxPageSize.' },
+        },
+      },
       StoredSearchRequest: {
         type: 'object',
         additionalProperties: false,
@@ -568,6 +711,26 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
               items: { type: 'array', items: { $ref: '#/components/schemas/SearchItem' } },
               pageInfo: { $ref: '#/components/schemas/PageInfo' },
               status: { type: 'string' }, warnings: { type: 'array', items: { type: 'string' } },
+              meta: { type: 'object', additionalProperties: true },
+            },
+          },
+          requestId: { type: 'string' },
+          traceId: { type: 'string' },
+        },
+      },
+      NightAllLegacyEnvelope: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['data'],
+        properties: {
+          data: {
+            type: 'object',
+            additionalProperties: true,
+            required: ['raw_info', 'raw_data', 'page', 'meta'],
+            properties: {
+              raw_info: { type: 'string', contentMediaType: 'application/json', description: 'Night-All JSON-string array, retained unchanged.' },
+              raw_data: { type: 'string', contentMediaType: 'application/json', description: 'Night-All JSON-string array, retained unchanged.' },
+              page: { type: 'object', additionalProperties: true },
               meta: { type: 'object', additionalProperties: true },
             },
           },
@@ -792,6 +955,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
               status: { type: 'string', enum: ['reserved', 'committed', 'released', 'unknown'] },
               platform: { type: 'string' }, units: { type: ['integer', 'null'] },
               capability: { type: 'string' },
+              sourceMode: { type: 'string', enum: ['live', 'stale'] },
+              capturedAt: { type: 'string', format: 'date-time' },
               errorCode: { type: ['string', 'null'] }, reservedAt: { type: 'string', format: 'date-time' },
               completedAt: { type: ['string', 'null'], format: 'date-time' },
             },
@@ -957,6 +1122,13 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   },
   "requestId": "00000000-0000-4000-8000-000000000003"
 }</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/night-all/search/{raw|crawl|user-info}</code></div><p>迁移期 Night-All 兼容层：响应 body 保留 Night-All 当前字段，不在此层脱敏。Hub 通过响应头返回 durable request ID、<code>live|stale</code> 和采集时间；网络/超时、不可用的 2xx content-type/JSON/envelope，或真实非 2xx 的 502/503/504 才会回放完全相同请求的 last-good 快照。不可用 2xx 记为 outcome unknown。</p></div>
+    <pre><code>curl -i -sS -X POST "$HUB_URL/api/v1/night-all/search/raw" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: night-all-$(uuidgen)" \
+  -d '{"platform":"xiaohongshu","keyword":"AI Agent","count":20}'</code></pre>
+    <p><code>Idempotency-Key</code> 永久绑定一次付费 dispatch；重用永远回放该结果，新鲜调用必须换新 key。legacy <code>includeRaw:false</code> 可接受但会在上游 dispatch 前移除，<code>true</code> 被拒绝。调用方不能通过 body 或嵌套 <code>params</code> 注入 provider、token、credential、endpoint、capability/moduleCode、timeout 或工作量覆盖；archive/fullArchive/allTweets、archiveLimit/totalCount、max*Pages、pageCount/chunkSize/budget/crawlDepth 等成本放大控制也会被拒绝，后续必须走独立 capability/policy。work budget 只限制返回/处理 item，不代表 Night-All provider call 或计费次数。未来脱敏应通过独立、版本化的 Hub projection/API 提供，不静默改变这三条兼容路由。</p>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/stored/search</code></div><p>只搜索 Hub canonical 数据，不调用 Night-All。可按逻辑 <code>datasetId</code> 和 <code>objectType</code> 精确过滤；不接受数据库、索引、SQL 或 ES DSL。</p></div>
     <div class="notice">授权边界仍是 <code>platform</code>：<code>datasetId</code> 只是过滤条件，不是独立授权。获得某平台授权的调用者当前可搜索该平台完整 canonical 语料。</div>
     <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/stored/search" \
