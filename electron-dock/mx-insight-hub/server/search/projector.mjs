@@ -2,7 +2,11 @@ import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
 import { buildContentDocument } from './document.mjs'
-import { purgeStaleCurrentStateCopies } from './current-state.mjs'
+import {
+  purgeStaleCurrentStateCopies,
+  withCurrentStateWriteFence,
+} from './current-state.mjs'
+import { isRetryableSegmenterIntegrityError } from './reindex-integrity.mjs'
 
 // Outbox -> Elasticsearch projector.
 //
@@ -127,11 +131,12 @@ export class SearchProjector {
   }
 
   /**
-   * Project one batch. Returns counts; never throws for per-document problems.
+   * Project one batch. Returns counts; never throws for permanent per-document problems.
    *
-   * Throws only for a cluster-level outage, which the caller turns into a backoff
-   * rather than a per-event failure — marking 200 events failed because the
-   * cluster was briefly down would burn their retry budget for no reason.
+   * Throws for retryable shared-dependency outages, which the caller turns into
+   * a backoff rather than a per-event failure. Marking 200 events failed because
+   * Elasticsearch or the required tokenizer was briefly down would burn their
+   * retry budget for no reason.
    */
   async projectBatch() {
     const events = await this.#claim()
@@ -148,6 +153,8 @@ export class SearchProjector {
     }
     const failures = new Map()
     const projections = []
+    let retryableTokenizerError = null
+    const retryableTokenizerEventIds = []
 
     for (const [aggregateId, aggregateEvents] of eventsByAggregate) {
       const record = records.get(aggregateId)
@@ -161,12 +168,24 @@ export class SearchProjector {
         document: null,
         deleted: !record || record.deleted_at != null,
       }
+      // One verified shared-dependency outage is enough evidence for this
+      // batch. Do not spend another strict retry window on every remaining
+      // upsert; keep scanning only so tokenizer-independent tombstones proceed.
+      if (retryableTokenizerError && !projection.deleted) {
+        retryableTokenizerEventIds.push(...aggregateEvents.map((event) => event.id))
+        continue
+      }
       try {
         if (!projection.deleted) {
           projection.document = await buildContentDocument(record, { segmenter: this.segmenter })
         }
         projections.push(projection)
       } catch (error) {
+        if (isRetryableSegmenterIntegrityError(error)) {
+          retryableTokenizerError ||= error
+          retryableTokenizerEventIds.push(...aggregateEvents.map((event) => event.id))
+          continue
+        }
         for (const event of aggregateEvents) {
           failures.set(event.id, { attempts: event.attempts, error: error.message })
         }
@@ -180,55 +199,68 @@ export class SearchProjector {
         // behind one read alias. `_id` and external versions are index-local, so
         // first remove only obsolete copies whose revision is not newer than the
         // PostgreSQL truth, then write that truth to the concrete current index.
-        const { currentIndex } = await purgeStaleCurrentStateCopies({
-          client: this.client,
+        await withCurrentStateWriteFence({
+          pool: this.pool,
           indexSet: this.indexSet,
-          documents: projections.map((projection) => ({
-            id: projection.aggregateId,
-            version: projection.projectionRevision,
-          })),
-          versionField: 'projectionRevision',
-        })
-        const operations = []
-        const descriptors = []
-        for (const projection of projections) {
-          if (projection.deleted) {
+        }, async (connection) => {
+          const { writeTarget } = await purgeStaleCurrentStateCopies({
+            client: this.client,
+            pool: connection,
+            indexSet: this.indexSet,
+            documents: projections.map((projection) => ({
+              id: projection.aggregateId,
+              version: projection.projectionRevision,
+            })),
+            versionField: 'projectionRevision',
+            expectedBackend: this.segmenter?.expectedBackend,
+          })
+          const operations = []
+          const descriptors = []
+          for (const projection of projections) {
+            if (projection.deleted) {
+              operations.push({
+                delete: {
+                  _index: writeTarget,
+                  _id: projection.aggregateId,
+                  version: projection.projectionRevision,
+                  // A retried tombstone at the same revision must remain a
+                  // successful delete rather than depend on conflict handling.
+                  version_type: 'external_gte',
+                },
+              })
+              descriptors.push({ ...projection, operation: 'delete' })
+              continue
+            }
             operations.push({
-              delete: {
-                _index: currentIndex,
+              index: {
+                _index: writeTarget,
                 _id: projection.aggregateId,
                 version: projection.projectionRevision,
-                // A retried tombstone at the same revision must remain a
-                // successful delete rather than depend on conflict handling.
-                version_type: 'external_gte',
+                version_type: 'external',
               },
             })
-            descriptors.push({ ...projection, operation: 'delete' })
-            continue
+            operations.push(projection.document)
+            descriptors.push({ ...projection, operation: 'index' })
           }
-          operations.push({
-            index: {
-              _index: currentIndex,
-              _id: projection.aggregateId,
-              version: projection.projectionRevision,
-              version_type: 'external',
-            },
-          })
-          operations.push(projection.document)
-          descriptors.push({ ...projection, operation: 'index' })
-        }
-        const response = await this.client.bulk(operations)
-        this.#recordBulkOutcomes(response, descriptors, failures)
+          const response = await this.client.bulk(operations)
+          this.#recordBulkOutcomes(response, descriptors, failures)
 
-        for (const projection of projections) {
-          if (!projection.aggregateEvents.some((event) => failures.has(event.id))) {
-            delivered.push(...projection.aggregateEvents.map((event) => event.id))
+          for (const projection of projections) {
+            if (!projection.aggregateEvents.some((event) => failures.has(event.id))) {
+              delivered.push(...projection.aggregateEvents.map((event) => event.id))
+            }
           }
-        }
+        })
       } catch (error) {
-        if (!(error instanceof ElasticsearchUnavailableError)) throw error
+        const retryableControlError = [
+          'search_alias_changed',
+          'search_alias_ambiguous',
+          'search_index_backend_mismatch',
+        ].includes(error?.code)
+        if (!(error instanceof ElasticsearchUnavailableError) && !retryableControlError) throw error
         // Give the whole batch back untouched; purge/index are idempotent, and a
-        // transport failure does not belong in any individual event's budget.
+        // transport/topology/provenance failure does not belong in any
+        // individual event's budget.
         await this.#releaseClaim(events.map((event) => event.id))
         await this.#finishRun(runId, { delivered: 0, failed: 0, error: error.message })
         throw error
@@ -237,7 +269,16 @@ export class SearchProjector {
 
     const deliveredCount = await this.#markDelivered(delivered)
     const failedCount = await this.#markFailed(failures)
-    await this.#finishRun(runId, { delivered: deliveredCount, failed: failedCount, error: null })
+    // Only tokenizer-dependent upserts wait for a shared HanLP outage. Deletes
+    // and healthy documents in the same batch are already safe to acknowledge.
+    await this.#releaseClaim(retryableTokenizerEventIds)
+    await this.#finishRun(runId, {
+      delivered: deliveredCount,
+      failed: failedCount,
+      error: retryableTokenizerError?.message || null,
+    })
+
+    if (retryableTokenizerError) throw retryableTokenizerError
 
     return { claimed: events.length, delivered: deliveredCount, failed: failedCount }
   }

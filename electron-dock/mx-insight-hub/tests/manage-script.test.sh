@@ -544,11 +544,56 @@ hanlp_absent="$(bash -c '
   source "$1/scripts/manage.sh"
   say() { :; }
   unset MX_COMMON_HANLP_URL
-  kubectl() { return 1; }
+  kubectl() {
+    case " $* " in
+      *" get endpoints mx-common-hanlp "*|*" get configmap mx-insight-hub-config "*) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
   discover_hanlp_url
   printf "%s" "$MX_COMMON_HANLP_URL"
 ' _ "$ROOT_DIR")"
-assert_eq '' "$hanlp_absent" 'missing HanLP Endpoint keeps local jieba'
+assert_eq '' "$hanlp_absent" 'first deploy without HanLP keeps local jieba'
+
+# A transiently empty Endpoint must not turn a deployed HanLP-backed Hub into a
+# jieba deployment. Discovery runs before ConfigMap creation and every workload
+# rollout, so failing here preserves the current runtime and cannot reach the
+# optional Launcher synchronization path even if an operator enabled it.
+hanlp_fail_closed_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-hanlp-fail-closed.XXXXXX")"
+hanlp_fail_closed_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-hanlp-fail-closed-error.XXXXXX")"
+if HANLP_FAIL_CLOSED_EVENTS="$hanlp_fail_closed_events" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  unset MX_COMMON_HANLP_URL
+  export MX_INSIGHT_SYNC_LAUNCHER=1
+  kubectl() {
+    printf "kubectl:%s\n" "$*" >>"$HANLP_FAIL_CLOSED_EVENTS"
+    case " $* " in
+      *" get endpoints mx-common-hanlp "*) return 0 ;;
+      *" get configmap mx-insight-hub-config "*".data.MX_COMMON_HANLP_URL"*)
+        printf "http://mx-common-hanlp.mx-common.svc.cluster.local:8000"
+        ;;
+      *) return 0 ;;
+    esac
+  }
+  validate_existing_runtime_secret() { :; }
+  create_runtime_config() { printf "runtime-config\n" >>"$HANLP_FAIL_CLOSED_EVENTS"; }
+  create_model_key_secret() { printf "model-secret\n" >>"$HANLP_FAIL_CLOSED_EVENTS"; }
+  sync_launcher_secret() { printf "launcher-sync\n" >>"$HANLP_FAIL_CLOSED_EVENTS"; }
+  refresh_launcher_workload() { printf "launcher-rollout\n" >>"$HANLP_FAIL_CLOSED_EVENTS"; }
+  warn_local_postgres_present() { :; }
+  apply_k8s
+' _ "$ROOT_DIR" >"$hanlp_fail_closed_error" 2>&1; then
+  printf 'not ok - transient HanLP Endpoint loss downgraded the deployed Hub\n' >&2
+  exit 1
+fi
+grep -Fq 'refusing to clear an existing HanLP URL while its Endpoint is temporarily unavailable' "$hanlp_fail_closed_error"
+if grep -Eq 'runtime-config|rollout restart|launcher|mx-launcher' "$hanlp_fail_closed_events"; then
+  printf 'not ok - failed HanLP discovery changed runtime config, workloads, or Launcher\n' >&2
+  exit 1
+fi
+rm -f -- "$hanlp_fail_closed_events" "$hanlp_fail_closed_error"
+printf 'ok - transient HanLP Endpoint loss preserves the deployed config before any rollout or Launcher sync\n'
 
 grep -q '^    mx-common\.io/client: allowed$' \
   "$ROOT_DIR/deploy/k8s/internal/00-namespace.yaml"
@@ -823,6 +868,17 @@ launcher_default="$(bash -c '
   refresh_launcher_workload
 ' _ "$ROOT_DIR")"
 assert_eq '' "$launcher_default" 'default deploy does not mutate Launcher'
+
+launcher_cli_override="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_SYNC_LAUNCHER=0
+  load_env_file() { MX_INSIGHT_SYNC_LAUNCHER=1; export MX_INSIGHT_SYNC_LAUNCHER; }
+  need() { :; }
+  kubectl() { printf "%s" "$MX_INSIGHT_SYNC_LAUNCHER"; }
+  ops_action internal-production status
+' _ "$ROOT_DIR")"
+assert_eq '00' "$launcher_cli_override" 'explicit Hub-only deploy flag overrides a persisted Launcher sync setting'
 
 # ---------------------------------------------------------------------------
 # Database provisioning

@@ -36,7 +36,7 @@ bash scripts/manage.sh status
 | `vm.max_map_count` 提不上去 | 脚本会打印需要 root 执行的命令 |
 | `creating retained local PV` | 正常，无默认 StorageClass 时自动建 Retain 本地 PV |
 | PG `Permission denied` / ES `node.lock AccessDeniedException` | hostPath 目录属主不对。**`fsGroup` 对 hostPath 卷不生效**，`ensure` 会按各 Pod 的 runAsUser 修正（PG 999:999 0700，ES 1000:0 0775）并重启崩溃的 Pod |
-| `hanlp: disabled` | **正常**。HanLP 是可选的独立服务（不是 ES 插件），默认关闭。分词默认走 jieba 词典分词，质量已经够用；只有语料以人名机构名为主时才值得部署 HanLP |
+| `hanlp: disabled` | 仅在明确接受本地 Jieba 的开发/受控降级环境中正常；生产索引基线要求先部署 HanLP。content/chunk writer 严格使用配置后端，不会在 HanLP 瞬时故障时把 fallback 写进 `*Hanlp` |
 | 首次 `Pulling` 耗时几十分钟 | ES 镜像约 890MB，境外 registry 很慢。`ensure` 现在会先用 Docker 预热 |
 
 单节点上这台机器同时跑 Night-All、Hub 及其 worker，ES 默认请求 2Gi / 上限 3Gi / 堆 1g。堆和内存请求要一起调——只调其中一个会让两者不一致，Pod 会 OOM。请求量大约取堆的两倍，剩下是 Lucene 读段用的堆外 page cache。

@@ -124,11 +124,18 @@ This carries forward the useful idea behind IK `max_word` at index time and
 HanLP coarse and CJK views, then lets a narrower profile choose among them.
 The target model keeps coarse, fine and bigram tokens out of the same field
 because mixing them makes term frequency, positions and phrase evidence
-ambiguous. The current legacy-named `*Hanlp` field is only a pre-segmented
-channel: live fail-soft projection may still place Jieba/bigram fallback terms
-there, while strict full reconciliation rejects them. A future immutable HanLP
-view therefore requires a dedicated versioned field plus model digest/pending
-state. The current HanLP service has one fixed coarse model; a future
+ambiguous. The current legacy-named `*Hanlp` field is a pre-segmented channel.
+Both live content/chunk index writers and strict full reconciliation require the
+configured backend (HanLP in production). For live writers, shared transient
+failures leave work pending without consuming its durable budget; permanent or
+record-specific failures become content dead/chunk quarantine after five
+attempts. A strict full rebuild instead tries a transient field failure at most
+six times and then fails the operation; it neither writes fallback nor clears
+existing PostgreSQL dead/quarantine state. Query segmentation alone remains
+fail-soft. An explicit operator
+downgrade can change the configured backend, so a future immutable HanLP view
+still requires a dedicated versioned field plus model digest/pending state. The
+current HanLP service has one fixed coarse model; a future
 fine/max-word field requires a real model and enrichment migration, not a
 request flag.
 
@@ -155,16 +162,20 @@ Analyzer scope remains deliberately narrow:
   query token; applying ngrams to both sides recreates broad, low-quality recall.
 
 The v4 migration uses the strict `reindex-search` reconciler. The CLI starts its
-one-shot process in a Ready Admin Pod so a strict-startup Projector CrashLoop does
-not block recovery. The Admin job, CLI process, and Projector startup reconcile
-share one PostgreSQL advisory lock across the complete content+chunk rebuild and
-keep that lock session alive independently of batch duration. It
-verifies the configured tokenizer for every field with bounded retry, fails on
-degraded/fallback output or mapping conflict, fills the new `v4-current` from PG,
-atomically switches aliases only after the first full pass, and runs the second
-pass to close the concurrent-write window. Public/Admin APIs, Projector, ingest,
-Launcher, MX-H2I login and networking are not restarted by this command. The
-prior v3 index remains the rollback target until count/hash, relevance, disk and
+one-shot process in a Ready Admin Pod so a Projector running an explicitly
+enabled startup rebuild cannot block recovery. Explicit Admin/CLI requests and
+`startupRebuild=true` run the same forced full rebuild; ordinary Projector
+startup is schema-only. All paths share one PostgreSQL advisory lock across the
+complete content+chunk operation and keep that lock session alive independently
+of batch duration. Even at the same schema, a full rebuild fills the inactive
+`current/rebuild` A/B slot from PG. It finishes content first pass, atomically
+switches the content aliases, and performs content catch-up before independently
+repeating those steps for chunk. The two projection cutovers are not one joint
+Elasticsearch alias transaction. Degraded/fallback output or mapping conflict
+fails the operation, and success does not clear PostgreSQL dead/quarantine
+evidence. Public/Admin APIs, the resident Projector, ingest, Launcher, MX-H2I
+login and networking are not restarted by this command. The prior serving slot
+remains the rollback/inactive target until count/hash, relevance, disk and
 latency checks pass.
 
 ## Consequences

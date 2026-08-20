@@ -186,9 +186,12 @@ logs-mx-insight-*                observability data stream
 ```
 
 content/chunk 都是 mutable current-state projection，不使用 ILM rollover。
-启动 reconcile 在 PG advisory lock 下把 PG current truth 扫入唯一 `*-current`，
-原子切换 read/兼容 write alias 后再扫第二遍；这避免相同 `_id` 残留在多个
-backing index，被 read alias 继续命中。mapping 使用 `dynamic: strict`；provider
+普通 projector 启动默认只校准 schema，不扫描全量 PG。显式 Admin/CLI 重建或
+`startupRebuild=true` 才把 PG current truth 写入同 schema 的 inactive A/B slot：
+content 第一遍完成后切换自己的 read/兼容 write aliases 并 catch-up，随后 chunk
+独立执行相同步骤；两个投影的切换不是同一个 alias 事务。这避免同一投影的相同
+`_id` 残留在多个 backing index，被 read alias 继续命中。mapping 使用
+`dynamic: strict`；provider
 扩展如确需检索放入 `flattened`，避免 mapping explosion。平台、对象类型、schema
 version 使用 `keyword`；正文使用 `text`；经纬度使用 `geo_point`；时间使用
 `date`。content v3 在首次 Telegram 全量发布前固定了名称与消息结构：作者名和
@@ -206,7 +209,7 @@ profile：
 | 逻辑视图 | index-time 表示 | 查询用途与边界 |
 | --- | --- | --- |
 | `title` / `body` | raw `standard`，保留 positions | 原文 phrase、拉丁文本和顺序匹配；phrase 是查询类型，不另建“phrase analyzer” |
-| `titleHanlp` / `bodyHanlp` | HanLP coarse tokens，由 projector 预分词，ES 用 `whitespace` | 中文词级召回；模型、词典和 token provenance 必须版本化 |
+| `titleHanlp` / `bodyHanlp` | 配置后端 tokens（生产为 HanLP coarse），由 projector 预分词，ES 用 `whitespace` | 中文词级召回；模型、词典和 token provenance 必须版本化 |
 | `title.cjk` / `body.cjk` | 内置 CJK bigram | 不依赖 ES 插件的中文补召回；不得退回“任一单字命中” |
 | `title.prefix` | 有界 edge-ngram index analyzer，普通 search analyzer | 仅标题前缀/type-ahead；不在正文或查询侧生成 edge-ngram |
 
@@ -235,11 +238,14 @@ chunks。worker 在生成新 embedding 前投递 externally-versioned delete，�
 2. 目标 schema 在 PG revision 保存 `nlp_model_version` 和结构化 enrichment；当前
    canonical row 尚未持久化逐字段 HanLP model digest，原文仍是可重建真相。
 3. ES 同时索引原文和预分词字段；预分词字段使用内置 `whitespace` analyzer，原文使用可升级的内置 analyzer。
-4. 查询服务对查询词使用同一 HanLP 模型处理，并对原文、tokens、实体字段做加权召回。
-5. 当前 streaming projector 在 HanLP 不可用时允许原文继续发布，并可能把
-   Jieba/bigram fallback 写入历史命名的 pre-segmented 字段；严格全量 reconcile
-   会拒绝降级。下一 schema 应把 fallback/pending 与 HanLP 字段、model digest
-   分开并后台补算，不能阻断 ingest/checkpoint，也不能伪造 HanLP provenance。
+4. 查询服务对查询词使用同一配置主后端（生产为 HanLP）处理，并对原文、tokens、实体字段做加权召回。
+5. canonical ingest/checkpoint 不等待 HanLP；content 与 chunk 的 ES index writer
+   则严格要求当前配置后端（生产为 HanLP）。网络、timeout、429/5xx 等共享瞬时故障
+   使投影保持 pending 并退避，服务恢复后自动补投影；永久无效响应或记录级错误使用
+   5 次有界预算后进入 dead/quarantine，避免毒丸饿死整个队列。两类错误都不会把
+   Jieba/bigram fallback 写入历史命名的 `*Hanlp` 字段。查询分词仍 fail-soft，并在降级时切到兼容的
+   phrase 路径；ES 不可用时另走 PG。操作者仍可显式把配置后端降为 Jieba/bigram，但这属于受控配置
+   变更，不是 HanLP 请求失败时的隐式写入；逐字段 model digest 仍需后续 schema。
 
 IK 的“索引用较宽的 max-word、搜索用较窄的 smart”理念可以保留，但不复制 IK
 插件实现：MX 用相互独立的 raw、HanLP coarse 与 CJK bigram 字段表达索引侧的
@@ -397,7 +403,7 @@ mx-insight-entity-v1-000001      write alias: mx-insight-entity-v1-write
 - PG 唯一键和重复重放测试证明同一批次重复 3 次不增加 canonical 记录；
 - checkpoint 只在 PG + outbox 提交后推进，worker 崩溃可安全重跑；
 - ES 清空后可从 PG/object snapshot 全量重建并校验记录数/hash；
-- HanLP 停止时 ingest 和原文搜索仍可工作，恢复后 enrichment 可补算；
+- HanLP 瞬时停止时 canonical ingest 和原文/PG 搜索仍可工作，content/chunk 投影保持 pending，恢复后自动补算；永久或记录级错误进入有界 dead/quarantine 且不阻塞后续记录；
 - PostGIS 半径/行政区查询与预聚合有真实数据量下的 EXPLAIN/延迟基线；
 - Night-All、ES、Redis 任一不可用均不影响 Launcher 启动、MX-H2I 连接或现有 DNS/WireGuard/PAC；
 - 备份恢复、权限过滤、字段脱敏和跨租户隔离通过自动化测试。

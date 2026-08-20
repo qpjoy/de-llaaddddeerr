@@ -5,7 +5,7 @@ HanLP、Hub Agent 和向量检索是三条独立链路。HanLP 安装成功只�
 
 | 能力 | 必要前置 | 当前接线 |
 | --- | --- | --- |
-| 中文分词 | `mx-common-hanlp` Ready，Hub 的 `MX_COMMON_HANLP_URL` 指向该 Service | 索引和查询边界使用；失败时仍保留原文和确定性 fallback |
+| 中文分词 | `mx-common-hanlp` Ready，Hub 的 `MX_COMMON_HANLP_URL` 指向该 Service | canonical 入库不阻塞；content/chunk 索引写入严格要求配置后端（生产 HanLP）：瞬时故障 pending/backoff 并自动恢复，永久/记录级错误累计 5 次后 dead/quarantine；只有查询分词 fail-soft |
 | 文件字段映射建议 | 至少一个 Chat provider | 管理员在文件预览时显式选择 Agent；模型只收到列名，建议仍需人工批准 |
 | 记录分类 | Chat provider | 能力已实现，但尚未接入通用 ingest；配置模型不会让所有入库数据自动送模 |
 | 向量检索 | Elasticsearch、projector、固定的 `MX_INSIGHT_EMBEDDING_DIMENSIONS`、同维度 embedding provider | projector 异步生成向量；模型不可用不阻塞 canonical 入库和删除投影 |

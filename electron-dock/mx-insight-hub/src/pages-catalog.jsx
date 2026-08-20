@@ -9,6 +9,7 @@ import {
   WarningCircle,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
+import { canConfirmSearchReindex } from './search-reindex-confirmation.js'
 import {
   EmptyState,
   DropdownField,
@@ -394,12 +395,19 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
     if (submitting) return
     setConfirmationOpen(false)
     setConfirmation('')
+    setBackendAcknowledged(false)
     setSubmitError(null)
   }
 
+  const confirmationReady = canConfirmSearchReindex({
+    confirmation,
+    requiresBackendAcknowledgement: needsBackendAck,
+    backendAcknowledged,
+  })
+
   const start = async (event) => {
     event.preventDefault()
-    if (!canStart || confirmation !== 'REINDEX' || !backendAcknowledged) return
+    if (!canStart || !confirmationReady) return
     setSubmitting(true)
     setSubmitError(null)
     try {
@@ -554,7 +562,12 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
             <button className="qp-button qp-button--ghost" type="button" disabled={state.loading || submitting}
               onClick={state.refresh}>{state.loading ? '检查中…' : '重新检查'}</button>
             <button className="qp-button" type="button" disabled={!canStart} title={buttonTitle}
-              onClick={() => { setConfirmation(''); setSubmitError(null); setConfirmationOpen(true) }}>
+              onClick={() => {
+                setConfirmation('')
+                setBackendAcknowledged(false)
+                setSubmitError(null)
+                setConfirmationOpen(true)
+              }}>
               {active ? '重建运行中…' : '开始严格重建'}
             </button>
           </div>
@@ -567,7 +580,7 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
           footer={<>
             <button className="qp-button qp-button--ghost" type="button" disabled={submitting} onClick={closeConfirmation}>取消</button>
             <button className="qp-button qp-button--danger" type="submit" form="mih-search-reindex-confirm"
-              disabled={submitting || confirmation !== 'REINDEX' || !backendAcknowledged}>
+              disabled={submitting || !confirmationReady}>
               {submitting ? '正在提交…' : '确认并开始'}
             </button>
           </>}>

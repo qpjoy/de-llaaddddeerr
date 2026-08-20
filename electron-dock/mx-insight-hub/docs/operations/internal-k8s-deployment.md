@@ -148,10 +148,16 @@ single node's `k8s.io` containerd, seeds and verifies the retained model PVC,
 and requires both `/health` and `/tokenize` to pass. The Hub deploy discovers
 the service only when Kubernetes has a ready Endpoint and writes its stable DNS
 URL into `mx-insight-hub-config`, then verifies `/tokenize` through a real Hub
-projector pod so DNS and namespace NetworkPolicy are covered. A transient smoke
-failure is reported and safely degrades to local jieba rather than failing the
-Hub deploy. An explicitly configured
-`MX_COMMON_HANLP_URL` wins; an explicitly empty value disables discovery.
+projector pod so DNS and namespace NetworkPolicy are covered. If no ready
+Endpoint is found while the existing ConfigMap still has a non-empty HanLP URL,
+deploy fails before rewriting runtime configuration or rolling workloads; the
+known production backend is retained instead of being silently downgraded.
+On a first/unconfigured install with no retained URL, Hub can still be configured
+for the local backend. An explicitly configured `MX_COMMON_HANLP_URL` wins; an
+explicitly empty value disables discovery and is the operator-controlled
+downgrade path. Regardless of backend choice, content/chunk index writers require
+that configured backend and leave work pending on transient failure; canonical
+PostgreSQL ingest continues.
 
 This independent path leaves `MX_INSIGHT_SYNC_LAUNCHER` at its default `0` and
 does not modify or roll out Launcher.

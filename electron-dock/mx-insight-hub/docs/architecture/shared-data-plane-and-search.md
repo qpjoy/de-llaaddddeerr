@@ -14,12 +14,13 @@ flowchart LR
   API --> PG["PostgreSQL\ncore.canonical_records"]
   PG --> OB["outbox.projection_events"]
   OB --> PJ["mx-insight-hub-projector\n（独立 Deployment）"]
-  PJ --> SEG["mx-common segmenter\nHanLP / 内置回退"]
+  PJ -->|"索引写入严格要求配置后端"| SEG["mx-common segmenter\n生产配置为 HanLP"]
   SEG --> PJ
   PJ --> ES1["Elasticsearch current state\ncontent-v4-current"]
   PG --> CH["record_chunks + durable chunk deletes"]
   CH --> EP["embedding/delete loop"]
   EP --> ES2["Elasticsearch current state\nchunk-v1-current"]
+  API -. "查询分词 fail-soft" .-> SEG
   API -. "ES 不可用时降级" .-> PG
 ```
 
@@ -57,10 +58,17 @@ flowchart LR
 
 这两个投影都表示**当前状态**，不能使用 ILM rollover：同一 `_id` 若残留在多个
 backing index，更新/删除写 alias 只能改其中一个，旧内容仍会被 read alias 命中。
-启动 reconcile 在 PG advisory lock 下创建/清理唯一 `*-current`，从 PG 当前
-canonical/chunk 全量扫一遍，原子切 read/所有兼容 write alias，再扫第二遍关闭
-并发写窗口。不兼容 mapping 变更 bump schema version；旧 alias 中可见的副本按
-各自 revision 上限清除，不能让多代索引共同承担 current truth。
+普通 projector 启动默认只校准 template/mapping 与既有 serving alias，不扫描全量
+PG，也不会把尚未填充的新索引发布到 read alias。只有显式 Admin/CLI 重建，或操作者
+启用 `startupRebuild` 后的 projector 启动，才在全局 PG advisory lock 下执行同一套
+全量流程：即使 schema 未变化，也先写同 schema 的 inactive `current/rebuild` A/B
+slot，第一遍完整成功后切换该投影的 read/兼容 write aliases，再做第二遍 catch-up。
+content 先完成自己的切换与 catch-up，chunk 随后独立执行；每个投影的 alias 切换各自
+原子，但两者不是同一个 Elasticsearch alias 事务。不兼容 mapping 变更仍需 bump
+schema version，不能让多代索引共同承担 current truth。常驻 writer 在解析 serving
+index、校验 tokenizer provenance 和完成 bulk 的短窗口持 shared advisory fence；
+alias 切换在同一 key 上持 exclusive fence。全量扫描不持该 fence，因此不会长时间
+阻塞新增投影，同时也不会让旧后端 token 越过 A/B 切换混入新索引。
 
 ### 1.3 乱序与重投递
 
@@ -79,11 +87,12 @@ projector 把同一批里同 aggregate 的事件聚合为一次操作，并重�
 | --- | --- |
 | projector pod 被 rollout/OOM 杀掉 | 租约过期，下一轮 sweep 把事件退回 `pending`，自动续投 |
 | ES 整体不可达 | 整批事件原样退回并回滚 attempts 计数，指数退避重试。长时间宕机不会把健康积压打成死信 |
-| 单条文档被 ES 拒绝 | 只有该事件计入失败，超过 5 次进 `dead` 并保留证据 |
+| 单条文档被 ES 拒绝 | 只有该事件计入失败，累计 5 次进 `dead` 并保留证据 |
 | canonical 行已不存在或已 tombstone | 按 PostgreSQL 当前真相发 externally-versioned delete；同 aggregate 已认领事件共同完成 |
 | record 缩短、chunker 变化或 canonical tombstone | PG 事务先登记旧 chunk document ID，再删/换 authoritative chunk；embedding loop 先投递 delete，后生成/投递新 chunk |
 | embedding provider 不可用 | 新向量暂停；durable chunk delete 仍继续，已删内容不会因模型故障留在语义检索 |
-| HanLP 不可达 | 回退分词器接管，入库继续，质量降级 |
+| HanLP 瞬时不可达/繁忙 | canonical PG 入库继续；content/chunk 索引写入保持 pending 并退避，恢复后自动补投影，不把 Jieba/CJK fallback 写入 `*Hanlp`；查询分词仍可 fail-soft |
+| 分词结果永久无效或记录级错误 | 不写 fallback；content 事件和 chunk 投影分别使用 5 次有界预算后进入 dead/quarantine，避免毒丸饿死后续记录。修复输入并产生新 revision 可恢复常驻投影；严格全量重建可以从 PG 修复 ES，但不会自动清除 PG 中的 outbox dead 或 chunk quarantine 证据 |
 | ES 宕机时用户查询 | `queries.mjs` 走 PG trigram 路径；内部/entity 结果可带 `mode: "postgres"`，Night-All-v1 Telegram wrapper 只在 `warnings` 加 `search_projection_degraded`，不添加 `meta.searchMode` |
 
 ### 1.5 chunk 删除与可重建性
@@ -95,15 +104,16 @@ projector 把同一批里同 aggregate 的事件聚合为一次操作，并重�
 `source_revision` 幂等更新，并在 ES externally-versioned delete 成功/409 后才
 标记 `projected_at`。因此 worker 崩溃可续投，模型 provider 故障也不阻塞删除。
 
-启动时 content 从 `core.canonical_records` 重建；chunk 从仍属于当前 revision、
-已有 vector 的 `core.record_chunks` 重建。两者都使用两遍 PG current snapshot +
-alias 原子切换，而不是依赖 ES 旧索引或快照成为唯一真相。
+显式 Admin/CLI 重建或 `startupRebuild=true` 时，content 从
+`core.canonical_records` 全量重建；chunk 从仍属于当前 revision、已有 vector 的
+`core.record_chunks` 全量重建。两者依次使用两遍 PG current snapshot，并分别切换
+自己的 alias，而不是依赖 ES 旧索引或快照成为唯一真相；普通启动不做这次全量回放。
 
 ### 1.6 模糊搜索用户名
 
 content v3 将名称原文与预分词文本分开：`authorName`/`username` 保留原文并提供
 `keyword`（精确）、`prefix`（edge_ngram）和 `bigram`（CJK 任意位置子串）；
-`authorNameHanlp`/`usernameHanlp` 保存同一分词器生成的空格分隔 tokens，负责相关性
+`authorNameHanlp`/`usernameHanlp` 保存索引写入所配置后端生成的空格分隔 tokens，负责相关性
 召回。handle/username 的拉丁任意位置子串落在 ES 专用 `wildcard` field；查询不会
 对普通 keyword 字段做通配词典扫描，也不用对中文没有意义的 edit-distance fuzzy。
 查询用 `bool.should` 并行打分，exact 仍具有最高权重。

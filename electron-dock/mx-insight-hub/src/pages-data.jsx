@@ -3086,8 +3086,16 @@ export function RetrievalPage({ token, onUnauthorized, notify }) {
         <MetricCard label="待切分记录" value={formatNumber(status.records_pending_chunks ?? 0)} />
         <MetricCard label="待向量化" value={formatNumber(status.chunks_pending_embedding ?? 0)} />
         <MetricCard label="待写入索引" value={formatNumber(status.chunks_pending_projection ?? 0)} />
+        <MetricCard label="投影隔离" value={formatNumber(status.chunks_projection_failed ?? 0)} />
         <MetricCard label="切片总数" value={formatNumber(status.chunks_total ?? 0)} />
       </div>
+
+      {(status.chunks_projection_failed ?? 0) > 0 ? (
+        <p className="mih-inline-warning">
+          <Warning size={16} aria-hidden="true" />
+          {formatNumber(status.chunks_projection_failed)} 个切片因永久分词或索引错误已隔离；修正源内容使 revision 更新后会重新进入严格 HanLP 投影。
+        </p>
+      ) : null}
 
       {status.mixedEmbeddingModels ? (
         // Vectors from different models are not comparable; recall degrades

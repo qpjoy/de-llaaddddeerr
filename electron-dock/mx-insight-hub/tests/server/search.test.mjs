@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { fallbackSegment } from '@qpjoy/mx-common/segmenter'
 import { ElasticsearchError, ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
@@ -9,6 +10,7 @@ import {
   ensureCurrentChunkIndex,
   ensureCurrentContentIndex,
   ensureSearchIndices,
+  fullRebuildTargetIndex,
 } from '../../server/search/index.mjs'
 import { buildContentDocument } from '../../server/search/document.mjs'
 import { authorNameQuery, SearchQueries } from '../../server/search/queries.mjs'
@@ -19,8 +21,14 @@ import {
   searchCapabilities,
 } from '../../server/search/profiles.mjs'
 import { SearchProjector } from '../../server/search/projector.mjs'
-import { purgeStaleCurrentStateCopies } from '../../server/search/current-state.mjs'
 import {
+  currentStateCutoverLockName,
+  purgeStaleCurrentStateCopies,
+  withCurrentStateCutoverFence,
+  withCurrentStateWriteFence,
+} from '../../server/search/current-state.mjs'
+import {
+  isRetryableSegmenterIntegrityError,
   requiredReindexBackend,
   requireSegmenterBackend,
 } from '../../server/search/reindex-integrity.mjs'
@@ -127,7 +135,10 @@ test('strict reindex derives its required backend from the deployed process conf
 
 test('strict reindex segmentation retries transient HanLP degradation but never returns fallback tokens', async () => {
   const responses = [
-    { tokens: ['jieba:first'], backendUsed: 'jieba', degraded: true, errorCode: 'hanlp_http_error' },
+    {
+      tokens: ['jieba:first'], backendUsed: 'jieba', degraded: true,
+      errorCode: 'hanlp_http_error', errorDetail: 'HanLP responded 429: busy',
+    },
     { tokens: ['jieba:second'], backendUsed: 'jieba', degraded: true, errorCode: 'hanlp_timeout' },
     { tokens: ['人工智能'], backendUsed: 'hanlp', degraded: false, errorCode: null },
   ]
@@ -150,7 +161,10 @@ test('a busy tokenizer earns a longer wait than a malformed one', async () => {
   const sleeps = []
   const strict = requireSegmenterBackend({
     async segmentWithMeta() {
-      return { tokens: ['jieba'], backendUsed: 'jieba', degraded: true, errorCode: 'hanlp_http_error' }
+      return {
+        tokens: ['jieba'], backendUsed: 'jieba', degraded: true,
+        errorCode: 'hanlp_http_error', errorDetail: 'HanLP responded 429: busy',
+      }
     },
   }, {
     expectedBackend: 'hanlp',
@@ -185,7 +199,10 @@ test('strict HanLP reindex fails closed after bounded fallback attempts', async 
   const strict = requireSegmenterBackend({
     async segmentWithMeta() {
       attempts += 1
-      return { tokens: ['jieba'], backendUsed: 'jieba', degraded: true, errorCode: 'hanlp_http_error' }
+      return {
+        tokens: ['jieba'], backendUsed: 'jieba', degraded: true,
+        errorCode: 'hanlp_http_error', errorDetail: 'HanLP responded 503: loading',
+      }
     },
   }, {
     expectedBackend: 'hanlp',
@@ -204,6 +221,140 @@ test('strict HanLP reindex fails closed after bounded fallback attempts', async 
   // several segmentation calls at once, so a transient queue must not be
   // mistaken for a permanently degraded backend.
   assert.equal(attempts, 6)
+})
+
+test('permanent tokenizer failures do not consume the shared outage retry window', async () => {
+  for (const response of [
+    {
+      tokens: ['jieba'], backendUsed: 'jieba', degraded: true,
+      errorCode: 'hanlp_http_error', errorDetail: 'HanLP responded 400: invalid request',
+    },
+    { tokens: [], backendUsed: null, degraded: true, errorCode: 'hanlp_empty_response' },
+    { tokens: ['jieba'], backendUsed: 'jieba', degraded: false, errorCode: null },
+  ]) {
+    let calls = 0
+    const sleeps = []
+    const strict = requireSegmenterBackend({
+      async segmentWithMeta() { calls += 1; return response },
+    }, {
+      expectedBackend: 'hanlp',
+      sleep: async (milliseconds) => sleeps.push(milliseconds),
+      logger: { warn() {} },
+    })
+
+    await assert.rejects(() => strict.segment('人工智能'), /reindex requires hanlp/)
+    assert.equal(calls, 1)
+    assert.deepEqual(sleeps, [])
+  }
+})
+
+test('strict verification batches raw HanLP calls while isolating per-item failures and retries', async () => {
+  const batches = []
+  let transientAttempts = 0
+  const raw = {
+    async segmentBatchWithMeta(texts, options) {
+      batches.push([...texts])
+      assert.equal(options.allowFallback, false)
+      return texts.map((text) => {
+        if (text === 'poison') {
+          return {
+            tokens: [], backendUsed: null, degraded: true,
+            errorCode: 'hanlp_empty_response',
+          }
+        }
+        if (text === 'transient' && transientAttempts++ === 0) {
+          return {
+            tokens: [], backendUsed: null, degraded: true,
+            errorCode: 'hanlp_unavailable',
+          }
+        }
+        return { tokens: [text], backendUsed: 'hanlp', degraded: false }
+      })
+    },
+    async segmentWithMeta() {
+      throw new Error('concurrent strict calls should use the batch endpoint')
+    },
+  }
+  const strict = requireSegmenterBackend(raw, {
+    expectedBackend: 'hanlp',
+    maxAttempts: 2,
+    retryDelayMs: 0,
+    busyRetryDelayMs: 0,
+    sleep: async () => {},
+    logger: { warn() {} },
+  })
+
+  const results = await Promise.allSettled([
+    strict.segmentWithMeta('healthy'),
+    strict.segmentWithMeta('poison'),
+    strict.segmentWithMeta('transient'),
+  ])
+
+  assert.equal(results[0].status, 'fulfilled')
+  assert.equal(results[1].status, 'rejected')
+  assert.equal(results[1].reason.code, 'reindex_segmenter_degraded')
+  assert.equal(results[2].status, 'fulfilled')
+  assert.deepEqual(batches, [
+    ['healthy', 'poison', 'transient'],
+    ['transient'],
+  ])
+})
+
+test('only shared transient tokenizer failures bypass the projection dead-letter budget', async () => {
+  const failure = async ({ errorCode, errorDetail = null, backendUsed = null, cause = null }) => {
+    const strict = requireSegmenterBackend({
+      async segmentWithMeta() {
+        if (cause) throw cause
+        return {
+          tokens: [], backendUsed, degraded: true, errorCode, errorDetail,
+        }
+      },
+    }, {
+      expectedBackend: 'hanlp',
+      maxAttempts: 1,
+      logger: { warn() {} },
+    })
+    try {
+      await strict.segment('人工智能')
+      assert.fail('strict segmentation should fail')
+    } catch (error) {
+      return error
+    }
+  }
+
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({ errorCode: 'hanlp_timeout' })), true)
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({
+    errorCode: 'hanlp_request_error', errorDetail: 'fetch failed',
+  })), true)
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({
+    errorCode: 'hanlp_request_error', errorDetail: 'Failed to parse URL from ::bad-url',
+  })), false)
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({
+    errorCode: null,
+    cause: Object.assign(new Error('connect failed'), { code: 'ECONNREFUSED' }),
+  })), true)
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({
+    errorCode: null,
+    cause: new Error('fetch failed'),
+  })), true)
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({
+    errorCode: 'hanlp_http_error', errorDetail: 'HanLP responded 429: busy',
+  })), true)
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({
+    errorCode: 'hanlp_http_error', errorDetail: 'HanLP responded 503: loading',
+  })), true)
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({
+    errorCode: 'hanlp_http_error', errorDetail: 'HanLP responded 400: invalid request',
+  })), false)
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({
+    errorCode: 'hanlp_empty_response', backendUsed: 'jieba',
+  })), false)
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({
+    errorCode: 'hanlp_invalid_json',
+  })), false)
+  assert.equal(isRetryableSegmenterIntegrityError(await failure({
+    errorCode: null, backendUsed: 'jieba',
+  })), false, 'a backend mismatch is not an unlimited shared-dependency retry')
 })
 
 test('strict reindex projection rejects a degraded document before its bulk write', async () => {
@@ -277,6 +428,15 @@ test('strict projector startup also fails fast on a reported mapping conflict', 
     }, { logger: { log() {}, error() {}, warn() {} }, failOnError: true }),
     /Content index mapping conflict: incompatible content field/,
   )
+})
+
+test('CLI and explicit startup rebuilds request a full A/B corpus scan', async () => {
+  const [cli, worker] = await Promise.all([
+    readFile(new URL('../../server/scripts/reindex-search.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../../server/workers/projector.mjs', import.meta.url), 'utf8'),
+  ])
+  assert.match(cli, /forceFull:\s*true/)
+  assert.match(worker, /schemaOnly:\s*!rebuildOnStartup,[\s\S]*?forceFull:\s*rebuildOnStartup/)
 })
 
 test('content search uses PIT search_after beyond the 10k window and ignores total relation gte', async () => {
@@ -1386,6 +1546,14 @@ test('chunk current index rebuild reuses stored vectors and removes the legacy r
   }])
   const deletionQuery = snapshot.queries.find(({ sql }) => sql.includes('FROM core.chunk_projection_deletes'))
   assert.doesNotMatch(deletionQuery.sql, /projected_at IS NULL/, 'acknowledged tombstones also rebuild current truth')
+  const chunkScan = snapshot.queries.find(({ sql }) => (
+    sql.includes('FROM core.record_chunks') && !sql.includes('count(*)')
+  ))
+  assert.match(
+    chunkScan.sql,
+    /r\.last_seen_at >= \$3\s+OR c\.embedded_at >= \$3/,
+    'catch-up includes old canonical records whose chunks finished embedding during the rebuild',
+  )
   assert.deepEqual(Object.keys(harness.aliasResponse(indexSet.readAlias)), [indexSet.currentIndex])
   assert.ok(harness.calls.aliasActions[0].some(({ remove }) => remove?.index === old && remove.alias === indexSet.readAlias))
 })
@@ -1516,6 +1684,7 @@ test('current-state cleanup supports a caller-selected revision field', async ()
     versionField: 'sourceRevision',
   })
   assert.equal(result.currentIndex, 'chunks-v1-000002')
+  assert.equal(result.writeTarget, indexSet.writeAlias)
   assert.deepEqual(result.staleIndices, ['chunks-v1-000001'])
   assert.deepEqual(
     requestBody.query.bool.should[0].bool.filter[1],
@@ -1529,6 +1698,155 @@ test('current-state cleanup supports a caller-selected revision field', async ()
       },
     },
   )
+})
+
+test('current-state cleanup retries an alias cutover snapshot and never purges the new generation', async () => {
+  const indexSet = {
+    readAlias: 'content',
+    writeAlias: 'content-v4',
+    currentIndex: 'content-v4-current',
+  }
+  const alternate = 'content-v4-rebuild'
+  let writeReads = 0
+  let purgeCalls = 0
+  const client = {
+    async getAlias(alias) {
+      if (alias === indexSet.writeAlias) {
+        writeReads += 1
+        const index = writeReads === 1 ? indexSet.currentIndex : alternate
+        return { [index]: { aliases: { [alias]: { is_write_index: true } } } }
+      }
+      return { [alternate]: { aliases: { [alias]: {} } } }
+    },
+    async request() {
+      purgeCalls += 1
+      return { failures: [] }
+    },
+  }
+
+  const result = await purgeStaleCurrentStateCopies({
+    client,
+    indexSet,
+    documents: [{ id: 'record-1', version: 7 }],
+    versionField: 'projectionRevision',
+  })
+
+  assert.equal(writeReads, 2, 'a split A/B snapshot is re-read before any deletion')
+  assert.equal(result.currentIndex, alternate)
+  assert.equal(result.writeTarget, indexSet.writeAlias)
+  assert.deepEqual(result.staleIndices, [])
+  assert.equal(purgeCalls, 0, 'the newly serving generation is never classified as stale')
+})
+
+test('live current-state writes refuse to mix a different tokenizer backend', async () => {
+  let purgeCalls = 0
+  const indexSet = {
+    readAlias: 'content',
+    writeAlias: 'content-v4',
+    currentIndex: 'content-v4-current',
+  }
+  const client = {
+    async getAlias(alias) {
+      return {
+        [indexSet.currentIndex]: {
+          aliases: {
+            [alias]: alias === indexSet.writeAlias ? { is_write_index: true } : {},
+          },
+        },
+      }
+    },
+    async request() {
+      purgeCalls += 1
+      return { failures: [] }
+    },
+  }
+  const pool = {
+    async query() {
+      return { rows: [{ segmenter_backend: 'jieba' }] }
+    },
+  }
+
+  await assert.rejects(
+    () => purgeStaleCurrentStateCopies({
+      client,
+      pool,
+      indexSet,
+      documents: [{ id: 'record-1', version: 7 }],
+      versionField: 'projectionRevision',
+      expectedBackend: 'hanlp',
+    }),
+    (error) => error?.code === 'search_index_backend_mismatch',
+  )
+  assert.equal(purgeCalls, 0)
+})
+
+test('live writes and A/B cutover hold opposite modes of the same advisory fence', async () => {
+  const indexSet = { readAlias: 'content', writeAlias: 'content-v4' }
+  const events = []
+  const values = []
+  const statements = []
+  const writeConnection = {
+    async query(sql, params) {
+      statements.push(sql)
+      events.push(sql.includes('unlock') ? 'write-unlock' : 'write-lock')
+      values.push(params[0])
+      return { rows: [] }
+    },
+    release() {
+      events.push('write-release')
+    },
+  }
+  await withCurrentStateWriteFence({
+    pool: { connect: async () => writeConnection },
+    indexSet,
+  }, async () => {
+    events.push('bulk')
+  })
+
+  const cutoverConnection = {
+    async query(sql, params) {
+      statements.push(sql)
+      events.push(sql.includes('unlock') ? 'cutover-unlock' : 'cutover-lock')
+      values.push(params[0])
+      return { rows: [] }
+    },
+  }
+  await withCurrentStateCutoverFence({ connection: cutoverConnection, indexSet }, async () => {
+    events.push('alias-switch')
+  })
+
+  assert.deepEqual(events, [
+    'write-lock', 'bulk', 'write-unlock', 'write-release',
+    'cutover-lock', 'alias-switch', 'cutover-unlock',
+  ])
+  assert.ok(values.every((value) => value === currentStateCutoverLockName(indexSet)))
+  assert.match(statements[0], /pg_advisory_lock_shared/)
+  assert.match(statements[1], /pg_advisory_unlock_shared/)
+  assert.match(statements[2], /pg_advisory_lock\(/)
+  assert.match(statements[3], /pg_advisory_unlock\(/)
+})
+
+test('a failed advisory unlock destroys the pooled live-writer connection', async () => {
+  const unlockError = new Error('connection lost while unlocking')
+  let releasedWith = null
+  const connection = {
+    async query(sql) {
+      if (sql.includes('unlock')) throw unlockError
+      return { rows: [] }
+    },
+    release(error) {
+      releasedWith = error
+    },
+  }
+
+  await assert.rejects(
+    () => withCurrentStateWriteFence({
+      pool: { connect: async () => connection },
+      indexSet: { readAlias: 'content', writeAlias: 'content-v4' },
+    }, async () => {}),
+    unlockError,
+  )
+  assert.equal(releasedWith, unlockError)
 })
 
 // ---------------------------------------------------------------------------
@@ -1808,7 +2126,7 @@ test('chunk lexical retrieval requires every segmented term instead of matching 
 // ---------------------------------------------------------------------------
 
 function fakePool(handlers) {
-  return {
+  const pool = {
     queries: [],
     async query(sql, values) {
       this.queries.push({ sql, values })
@@ -1818,6 +2136,11 @@ function fakePool(handlers) {
       return { rows: [], rowCount: 0 }
     },
   }
+  pool.connect = async () => ({
+    query: pool.query.bind(pool),
+    release() {},
+  })
+  return pool
 }
 
 test('projector treats a version conflict as delivered, not failed', async () => {
@@ -1946,7 +2269,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     ],
   )
   assert.equal(bulkBody.length, 1)
-  assert.equal(bulkBody[0].delete._index, backingIndices[3])
+  assert.equal(bulkBody[0].delete._index, 'mx-insight-hub-content-v4')
   assert.equal(bulkBody[0].delete.version, 4, 'the tombstone uses current PostgreSQL state')
   assert.equal(bulkBody[0].delete.version_type, 'external_gte')
 })
@@ -2001,7 +2324,7 @@ test('projector turns a stale delete into the current restored document', async 
   assert.equal(result.failed, 0)
   assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current\/_delete_by_query/)
   assert.equal(bulkBody.length, 2)
-  assert.equal(bulkBody[0].index._index, backingIndices[3])
+  assert.equal(bulkBody[0].index._index, 'mx-insight-hub-content-v4')
   assert.equal(bulkBody[0].index.version, 5)
   assert.equal(bulkBody[0].index.version_type, 'external')
   assert.equal(bulkBody[1].id, row.id)
@@ -2179,6 +2502,151 @@ test('projector returns the whole batch when the cluster is unreachable', async 
   assert.match(releaseUpdate.sql, /locked_by = \$2/)
 })
 
+test('projector releases only transient-tokenizer upserts while still delivering tombstones', async () => {
+  const row = canonicalRow()
+  const deferred = canonicalRow({ id: '44444444-4444-4444-8444-444444444444' })
+  const tombstoneId = '22222222-2222-4222-8222-222222222222'
+  let hanlpReady = false
+  let claimCalls = 0
+  let segmentCalls = 0
+  const bulkBodies = []
+  const released = []
+  const delivered = []
+  const pool = fakePool([
+    ["SET status = 'claimed'", () => ({
+      rows: claimCalls++ === 0
+        ? [
+            { id: 15, aggregate_id: row.id, event_type: 'upsert', projection_revision: 3, attempts: 1 },
+            { id: 17, aggregate_id: deferred.id, event_type: 'upsert', projection_revision: 3, attempts: 1 },
+            { id: 16, aggregate_id: tombstoneId, event_type: 'delete', projection_revision: 4, attempts: 1 },
+          ]
+        : [
+            { id: 15, aggregate_id: row.id, event_type: 'upsert', projection_revision: 3, attempts: 1 },
+            { id: 17, aggregate_id: deferred.id, event_type: 'upsert', projection_revision: 3, attempts: 1 },
+          ],
+    })],
+    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [row, deferred] })],
+    ['FROM control.search_rebuild_progress', () => ({ rows: [{ segmenter_backend: 'hanlp' }] })],
+    ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
+    ["SET status = 'pending', leased_until = NULL, locked_by = NULL,\n              attempts = GREATEST", (values) => {
+      released.push(values)
+      return { rows: [], rowCount: 1 }
+    }],
+    ["SET status = 'delivered'", (values) => {
+      delivered.push(values[0])
+      return { rows: [], rowCount: values[0].length }
+    }],
+  ])
+  const strict = requireSegmenterBackend({
+    async segmentWithMeta(text) {
+      segmentCalls += 1
+      return hanlpReady
+        ? { tokens: [String(text)], backendUsed: 'hanlp', degraded: false, errorCode: null }
+        : { tokens: ['jieba'], backendUsed: 'jieba', degraded: true, errorCode: 'hanlp_timeout' }
+    },
+  }, {
+    expectedBackend: 'hanlp',
+    maxAttempts: 1,
+    logger: { warn() {} },
+  })
+  const projector = new SearchProjector({
+    pool,
+    segmenter: strict,
+    indexSet: contentIndex(),
+    logger: { log() {}, warn() {}, error() {} },
+    client: {
+      async bulk(operations) {
+        bulkBodies.push(operations)
+        return {
+          items: operations
+            .filter((operation) => operation.index || operation.delete)
+            .map((operation) => operation.index
+              ? { index: { _id: operation.index._id, status: 200 } }
+              : { delete: { _id: operation.delete._id, status: 200 } }),
+        }
+      },
+    },
+  })
+
+  await assert.rejects(
+    () => projector.projectBatch(),
+    (error) => error?.code === 'reindex_segmenter_degraded',
+  )
+  assert.deepEqual(released, [[[15, 17], projector.workerId]])
+  assert.equal(segmentCalls, 1, 'one shared outage skips strict retries for later upserts')
+  assert.deepEqual(delivered, [[16]], 'the tokenizer-independent tombstone is not delayed')
+  assert.equal(bulkBodies.length, 1)
+  assert.equal(bulkBodies[0][0].delete._id, tombstoneId)
+  assert.equal(
+    pool.queries.some(({ sql }) => sql.includes('SET status = $2')),
+    false,
+    'a tokenizer outage never enters the five-attempt dead-letter budget',
+  )
+
+  hanlpReady = true
+  const recovered = await projector.projectBatch()
+  assert.deepEqual(recovered, { claimed: 2, delivered: 2, failed: 0 })
+  assert.equal(bulkBodies.length, 2)
+  assert.deepEqual(delivered, [[16], [15, 17]])
+})
+
+test('projector budgets a permanent tokenizer poison per aggregate and continues the batch', async () => {
+  const poison = canonicalRow({ title: '毒丸', body: null })
+  const healthy = canonicalRow({
+    id: '33333333-3333-4333-8333-333333333333',
+    title: '健康记录',
+  })
+  const failed = []
+  const delivered = []
+  let bulkBody = null
+  const pool = fakePool([
+    ["SET status = 'claimed'", () => ({ rows: [
+      { id: 21, aggregate_id: poison.id, event_type: 'upsert', projection_revision: 3, attempts: 5 },
+      { id: 22, aggregate_id: healthy.id, event_type: 'upsert', projection_revision: 3, attempts: 1 },
+    ] })],
+    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [poison, healthy] })],
+    ['FROM control.search_rebuild_progress', () => ({ rows: [{ segmenter_backend: 'hanlp' }] })],
+    ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
+    ['SET status = $2', (values) => {
+      failed.push(values)
+      return { rows: [], rowCount: 1 }
+    }],
+    ["SET status = 'delivered'", (values) => {
+      delivered.push(values[0])
+      return { rows: [], rowCount: values[0].length }
+    }],
+  ])
+  const strict = requireSegmenterBackend({
+    async segmentWithMeta(text) {
+      return String(text).includes('毒丸')
+        ? { tokens: [], backendUsed: null, degraded: true, errorCode: 'hanlp_empty_response' }
+        : { tokens: [String(text)], backendUsed: 'hanlp', degraded: false, errorCode: null }
+    },
+  }, { expectedBackend: 'hanlp', maxAttempts: 1, logger: { warn() {} } })
+  const projector = new SearchProjector({
+    pool,
+    segmenter: strict,
+    indexSet: contentIndex(),
+    logger: { log() {}, warn() {}, error() {} },
+    client: {
+      async bulk(operations) {
+        bulkBody = operations
+        return { items: [{ index: { _id: healthy.id, status: 200 } }] }
+      },
+    },
+  })
+
+  assert.deepEqual(
+    await projector.projectBatch(),
+    { claimed: 2, delivered: 1, failed: 1 },
+  )
+  assert.deepEqual(delivered, [[22]])
+  assert.equal(failed[0][0], 21)
+  assert.equal(failed[0][1], 'dead')
+  assert.match(failed[0][2], /no verified backend/)
+  assert.equal(pool.queries.some(({ sql }) => sql.includes('attempts = GREATEST')), false)
+  assert.equal(bulkBody[0].index._id, healthy.id)
+})
 
 test('an interrupted rebuild resumes from its cursor instead of discarding the partial index', async () => {
   const indexSet = contentIndex()
@@ -2193,6 +2661,7 @@ test('an interrupted rebuild resumes from its cursor instead of discarding the p
       last_record_id: '11111111-1111-4111-8111-111111111111',
       processed: 120_000,
       build_started_at: new Date('2026-08-17T00:00:00.000Z'),
+      segmenter_backend: null,
     },
   })
   const progress = []
@@ -2221,6 +2690,51 @@ test('an interrupted rebuild resumes from its cursor instead of discarding the p
   assert.equal(progress[0].processed, 120_001)
   // The catch-up watermark is the original build start, not this attempt's.
   assert.equal(scans.at(-1).values[2].toISOString(), '2026-08-17T00:00:00.000Z')
+})
+
+test('an inactive partial rebuild never resumes across tokenizer backends', async () => {
+  const indexSet = contentIndex()
+  const harness = currentIndexHarness(indexSet, {
+    'mx-insight-hub-content-v3-current': { [indexSet.readAlias]: {} },
+  })
+  harness.client.indexExists = async (index) => index === indexSet.currentIndex
+  const deleted = []
+  const originalRequest = harness.client.request
+  harness.client.request = async (method, path, body) => {
+    if (method === 'DELETE') {
+      deleted.push(path)
+      return { acknowledged: true }
+    }
+    return originalRequest(method, path, body)
+  }
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [canonicalRow()], {
+    rebuildProgress: {
+      last_record_id: '11111111-1111-4111-8111-111111111111',
+      processed: 120_000,
+      build_started_at: new Date('2026-08-17T00:00:00.000Z'),
+      segmenter_backend: 'jieba',
+    },
+  })
+
+  await ensureCurrentContentIndex({
+    client: harness.client,
+    pool: snapshot.pool,
+    segmenter,
+    segmenterBackend: 'hanlp',
+    indexSet,
+    logger: { log() {}, info() {}, warn() {} },
+  })
+
+  assert.deepEqual(deleted, [`/${indexSet.currentIndex}`])
+  const firstScan = snapshot.queries.find((entry) => (
+    entry.sql.includes('FROM core.canonical_records') && !entry.sql.includes('count(*)')
+  ))
+  assert.equal(firstScan.values[0], null, 'backend changes restart the first pass from the beginning')
+  const begin = snapshot.queries.find((entry) => (
+    entry.sql.includes('INSERT INTO control.search_rebuild_progress')
+      && entry.sql.includes('segmenter_backend')
+  ))
+  assert.equal(begin.values[2], 'hanlp')
 })
 
 test('a partial index with no recorded cursor is still rebuilt from scratch', async () => {
@@ -2387,6 +2901,241 @@ test('an ordinary restart replays the delta, not the corpus', async () => {
   const saved = snapshot.queries.filter((entry) => entry.sql.includes('reconciled_through'))
   assert.ok(saved.some((entry) => entry.sql.includes('INSERT INTO control.search_rebuild_progress')))
   assert.ok(logs.some((line) => line.includes('replaying changes since')))
+})
+
+test('an explicit same-schema reindex builds a full inactive generation before alias cutover', async () => {
+  const indexSet = contentIndex()
+  const inactive = fullRebuildTargetIndex(indexSet, indexSet.currentIndex)
+  const harness = currentIndexHarness(indexSet, {
+    [indexSet.currentIndex]: {
+      [indexSet.readAlias]: {},
+      'mx-insight-hub-content-v1': { is_write_index: true },
+      [indexSet.writeAlias]: { is_write_index: true },
+    },
+  })
+  const watermark = new Date('2026-08-18T14:29:29.000Z')
+  const row = canonicalRow()
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [row], {
+    reconciledThrough: watermark,
+    changedRows: [row],
+  })
+
+  const result = await ensureCurrentContentIndex({
+    client: harness.client,
+    pool: snapshot.pool,
+    segmenter,
+    indexSet,
+    forceFull: true,
+    logger: { log() {}, info() {}, warn() {} },
+  })
+
+  assert.equal(result.rebuilt, true)
+  assert.equal(result.currentIndex, inactive)
+  assert.equal(harness.calls.creates[0].index, inactive)
+  const scans = snapshot.queries.filter((entry) => (
+    entry.sql.includes('FROM core.canonical_records') && !entry.sql.includes('count(*)')
+  ))
+  assert.equal(scans[0].values[2], null, 'the explicit build ignores the serving watermark')
+  assert.equal(
+    scans.at(-1).values[2].toISOString(),
+    snapshot.buildStartedAt.toISOString(),
+    'only the post-cutover catch-up is bounded by the build watermark',
+  )
+  assert.deepEqual(
+    harness.calls.readAliasesDuringBulk[0],
+    [indexSet.currentIndex],
+    'the old generation stays readable until the complete first pass succeeds',
+  )
+  assert.deepEqual(harness.calls.readAliasesDuringBulk.at(-1), [inactive])
+  assert.equal(harness.calls.aliasActions.length, 1)
+  assert.deepEqual(Object.keys(harness.aliasResponse(indexSet.readAlias)), [inactive])
+})
+
+test('a forced rebuild refuses ambiguous A/B alias topology instead of overwriting a live slot', async () => {
+  const indexSet = contentIndex()
+  const alternate = fullRebuildTargetIndex(indexSet, indexSet.currentIndex)
+  const cases = [
+    {
+      [indexSet.currentIndex]: {
+        [indexSet.readAlias]: {},
+        [indexSet.writeAlias]: { is_write_index: true },
+      },
+      [alternate]: { [indexSet.readAlias]: {} },
+    },
+    {
+      [indexSet.currentIndex]: { [indexSet.writeAlias]: { is_write_index: true } },
+      [alternate]: { [indexSet.readAlias]: {} },
+    },
+  ]
+
+  for (const memberships of cases) {
+    const harness = currentIndexHarness(indexSet, memberships)
+    await assert.rejects(
+      () => ensureCurrentContentIndex({
+        client: harness.client,
+        pool: currentSnapshotPool('FROM core.canonical_records', [canonicalRow()]).pool,
+        segmenter,
+        indexSet,
+        forceFull: true,
+        logger: { log() {}, info() {}, warn() {} },
+      }),
+      (error) => error?.code === 'search_alias_ambiguous',
+    )
+    assert.equal(harness.calls.creates.length, 0)
+    assert.equal(harness.calls.bulks.length, 0)
+    assert.equal(harness.calls.aliasActions.length, 0)
+  }
+})
+
+test('ordinary startup recognises the serving rebuild slot and keeps its delta watermark', async () => {
+  const indexSet = contentIndex()
+  const serving = fullRebuildTargetIndex(indexSet, indexSet.currentIndex)
+  const harness = currentIndexHarness(indexSet, {
+    [serving]: {
+      [indexSet.readAlias]: {},
+      'mx-insight-hub-content-v1': { is_write_index: true },
+      [indexSet.writeAlias]: { is_write_index: true },
+    },
+  })
+  const watermark = new Date('2026-08-19T09:00:00.000Z')
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [canonicalRow()], {
+    reconciledThrough: watermark,
+  })
+
+  const result = await ensureCurrentContentIndex({
+    client: harness.client,
+    pool: snapshot.pool,
+    segmenter,
+    indexSet,
+    logger: { log() {}, info() {}, warn() {} },
+  })
+
+  assert.equal(result.currentIndex, serving)
+  assert.equal(result.rebuilt, false)
+  assert.equal(harness.calls.creates.length, 0)
+  assert.equal(harness.calls.aliasActions.length, 0)
+  const scan = snapshot.queries.find((entry) => (
+    entry.sql.includes('FROM core.canonical_records') && !entry.sql.includes('count(*)')
+  ))
+  assert.equal(scan.values[2].toISOString(), watermark.toISOString())
+})
+
+test('retry completes the serving generation catch-up instead of starting the opposite slot', async () => {
+  const indexSet = contentIndex()
+  const serving = fullRebuildTargetIndex(indexSet, indexSet.currentIndex)
+  const harness = currentIndexHarness(indexSet, {
+    [serving]: {
+      [indexSet.readAlias]: {},
+      'mx-insight-hub-content-v1': { is_write_index: true },
+      [indexSet.writeAlias]: { is_write_index: true },
+    },
+  })
+  const buildStartedAt = new Date('2026-08-19T10:00:00.000Z')
+  const row = canonicalRow({ title: 'committed while the inactive generation was building' })
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [], {
+    rebuildProgress: {
+      last_record_id: row.id,
+      processed: 880_000,
+      build_started_at: buildStartedAt,
+      aliases_switched_at: new Date('2026-08-19T11:00:00.000Z'),
+    },
+    changedRows: [row],
+  })
+
+  const result = await ensureCurrentContentIndex({
+    client: harness.client,
+    pool: snapshot.pool,
+    segmenter,
+    indexSet,
+    forceFull: true,
+    logger: { log() {}, info() {}, warn() {} },
+  })
+
+  assert.equal(result.currentIndex, serving)
+  assert.equal(result.rebuilt, true)
+  assert.equal(harness.calls.creates.length, 0, 'recovery never starts the opposite A/B slot')
+  assert.equal(harness.calls.aliasActions.length, 0, 'the interrupted cutover already serves this slot')
+  assert.equal(harness.calls.bulks.length, 1)
+  const scan = snapshot.queries.find((entry) => (
+    entry.sql.includes('FROM core.canonical_records') && !entry.sql.includes('count(*)')
+  ))
+  assert.equal(scan.values[0], null, 'catch-up is not resumed from the first-pass UUID cursor')
+  assert.equal(scan.values[2].toISOString(), buildStartedAt.toISOString())
+  assert.ok(snapshot.queries.some((entry) => (
+    entry.sql.includes('SET completed_at = now()') && entry.values[0] === serving
+  )))
+})
+
+test('cutover recovery refuses split read and write aliases instead of reporting success', async () => {
+  const indexSet = contentIndex()
+  const serving = fullRebuildTargetIndex(indexSet, indexSet.currentIndex)
+  const harness = currentIndexHarness(indexSet, {
+    [indexSet.currentIndex]: {
+      [indexSet.writeAlias]: { is_write_index: true },
+    },
+    [serving]: {
+      [indexSet.readAlias]: {},
+    },
+  })
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [], {
+    rebuildProgress: {
+      last_record_id: canonicalRow().id,
+      processed: 880_000,
+      build_started_at: new Date('2026-08-19T10:00:00.000Z'),
+      aliases_switched_at: new Date('2026-08-19T11:00:00.000Z'),
+    },
+  })
+
+  await assert.rejects(
+    () => ensureCurrentContentIndex({
+      client: harness.client,
+      pool: snapshot.pool,
+      segmenter,
+      indexSet,
+      forceFull: true,
+      logger: { log() {}, info() {}, warn() {} },
+    }),
+    (error) => error?.code === 'search_alias_ambiguous',
+  )
+
+  assert.equal(harness.calls.bulks.length, 0)
+  assert.equal(harness.calls.aliasActions.length, 0)
+})
+
+test('cutover recovery refuses a different tokenizer backend', async () => {
+  const indexSet = contentIndex()
+  const serving = fullRebuildTargetIndex(indexSet, indexSet.currentIndex)
+  const harness = currentIndexHarness(indexSet, {
+    [serving]: {
+      [indexSet.readAlias]: {},
+      [indexSet.writeAlias]: { is_write_index: true },
+    },
+  })
+  const snapshot = currentSnapshotPool('FROM core.canonical_records', [], {
+    rebuildProgress: {
+      last_record_id: canonicalRow().id,
+      processed: 880_000,
+      build_started_at: new Date('2026-08-19T10:00:00.000Z'),
+      aliases_switched_at: new Date('2026-08-19T11:00:00.000Z'),
+      segmenter_backend: 'hanlp',
+    },
+  })
+
+  await assert.rejects(
+    () => ensureCurrentContentIndex({
+      client: harness.client,
+      pool: snapshot.pool,
+      segmenter,
+      segmenterBackend: 'jieba',
+      indexSet,
+      forceFull: true,
+      logger: { log() {}, info() {}, warn() {} },
+    }),
+    (error) => error?.code === 'search_rebuild_backend_mismatch',
+  )
+
+  assert.equal(harness.calls.bulks.length, 0)
+  assert.equal(harness.calls.aliasActions.length, 0)
 })
 
 test('a serving index with no watermark is still replayed in full', async () => {

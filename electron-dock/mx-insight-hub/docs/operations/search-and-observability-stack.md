@@ -52,12 +52,12 @@ bash scripts/manage.sh search down
 - `mx-insight-logs-policy` 和日志 data-stream template；
 - 本地 fs snapshot repository。
 
-Compose bootstrap 本身不搬业务数据；当前 projector 启动后会 reconcile
-content 与（配置 embedding dimensions 时）chunk 的唯一 `*-current` 索引，
-从 PostgreSQL 扫描 current truth、原子切 alias，再异步排空 outbox/delete queue。
-启动 reconcile 使用严格 tokenizer provenance；若 ES、HanLP 或 mapping 校验失败，
-projector 以非零状态退出，由 Deployment restart/backoff 重新执行整个 reconcile，
-不会错误进入一个只重试 outbox、却永远不再尝试 schema/alias 迁移的循环。
+Compose bootstrap 本身不搬业务数据。projector 普通启动默认只校准 content 与
+（配置 embedding dimensions 时）chunk 的 template/mapping 和既有 serving alias，
+不扫描全量 PostgreSQL；随后异步排空 outbox/delete queue。只有操作者启用
+`startupRebuild` 时，启动路径才执行与 Admin/CLI 相同的 strict 全量 A/B 重建；该
+模式下 ES、HanLP 或 mapping 校验失败会让 projector 非零退出并由 Deployment
+restart/backoff 重试。默认 schema-only 启动不因语料分词而阻塞服务。
 
 ## 4. HanLP 集成
 
@@ -80,13 +80,19 @@ Elastic classic plugin 会校验精确 ES 版本。现有社区 `elasticsearch-a
 ```
 
 索引时把 tokens 保存为独立预分词字段；查询时用同模型生成 query tokens。现有
-`*Hanlp` 是历史命名的 pre-segmented 字段：HanLP 是配置了服务时的主后端，但常驻
-streaming projector 为了不阻断 outbox，在请求失败时仍可能写入 Jieba/bigram
-fallback，且当前文档没有持久化逐字段 model digest。严格启动 reconcile 与
-`reindex-search` 会拒绝这种降级结果，因此可保证一次完整基线重建的后端一致性；
-若要让后续增量也具有可证明的 HanLP provenance，下一 schema 必须把 HanLP、
-fallback/pending 拆成独立字段并保存模型 digest，而不是只依赖字段名。模型升级创建
-新 enrichment version，通过 shadow reindex/A-B relevance 验证后再切 alias。
+`*Hanlp` 是历史命名的 pre-segmented 字段。content 与 chunk 的常驻 ES index writer
+和严格全量 reconcile 都要求当前配置后端（生产为 HanLP）。对常驻 writer，网络、
+timeout、429/5xx 等共享瞬时故障不写 ES，也不消耗 durable 失败预算；工作保持
+pending 并退避，服务恢复后自动补投影。普通 4xx、无效响应、实际后端不符或记录级
+错误同样不写 fallback，但累计 5 次后分别进入 content dead/chunk quarantine，避免
+毒丸永久阻塞后续记录。严格全量重建不使用这两个队列状态：每字段对瞬时错误最多
+尝试 6 次，仍失败就终止整个操作，也不会自动清除 PG 中已有的 dead/quarantine。
+Admin 状态中的 `chunks_projection_failed` 用于暴露 chunk 隔离数量。
+canonical PostgreSQL ingest/checkpoint 不受阻塞。查询分词仍 fail-soft；降级 tokens
+只用于报告并切到兼容的 phrase 路径（ES 不可用时另走 PG），不会写入或查询 HanLP postings。操作者可显式
+把配置后端降为 Jieba/bigram，但这属于受控配置变更；当前文档仍未持久化逐字段 model
+digest。模型升级创建新 enrichment version，通过 shadow reindex/A-B relevance 验证
+后再切 alias。
 
 ### 4.1 相关性语义与重建分词投影
 
@@ -111,10 +117,11 @@ Admin Token：`GET /internal/v1/admin/search/reindex` 返回依赖预检和最�
 `POST /internal/v1/admin/search/reindex` 仅接受
 `{"confirmation":"REINDEX"}`。任务脱离 HTTP 请求异步执行，阶段、处理数、有限日志、
 发起者和最终错误持久化在 `control.search_reindex_operations`；Admin、CLI 与
-Projector 启动 reconcile 共用同一 PostgreSQL advisory lock，因此不会并发执行两次
-全量重建。三条路径在整个 content + chunk 重建期间都保持独立的锁会话心跳，并在
-每批及完成前再次校验；连接丢失会 fail closed。Admin 进程中途退出时，下次轮询会在
-确认全局锁已经释放后把遗留任务标记为失败，操作员可以安全重试。
+Projector 启动路径共用同一 PostgreSQL advisory lock，因此不会并发执行两次全量
+重建。Admin/CLI 始终请求全量；Projector 只有 `startupRebuild=true` 时请求全量，
+默认启动仅做 schema-only 校准。全量路径在整个 content + chunk 重建期间都保持独立
+的锁会话心跳，并在每批及完成前再次校验；连接丢失会 fail closed。Admin 进程中途
+退出时，下次轮询会在确认全局锁已经释放后把遗留任务标记为失败，操作员可以安全重试。
 
 Admin、CLI 与 Projector 使用同一运行时端点解析：显式非空
 `MX_COMMON_ELASTICSEARCH_URL` 优先；Kubernetes 中缺失或空值时使用固定的
@@ -125,19 +132,20 @@ Admin、CLI 与 Projector 使用同一运行时端点解析：显式非空
 reconciler；不会 rollout 或重启 Admin API、常驻 projector 或其他工作负载。
 重建使用 PostgreSQL advisory lock 保证单飞，因此不依赖 projector 的副本数或
 Ready 状态。任务先验证当前部署
-要求的 HanLP/jieba 后端（显式 fallback 配置则为 bigram），随后每个待索引
-字段都校验实际分词 provenance。短暂错误每字段最多尝试 3 次（两次有界退避
-重试）；仍然得到 fallback、degraded 输出或 mapping
+要求的 HanLP/jieba 后端（显式 fallback 配置则为 bigram）。启动任务所用的 fresh
+preflight 对瞬时错误最多尝试 3 次；正式重建随后对每个待索引字段校验实际分词
+provenance，并对瞬时错误最多尝试 6 次。仍然得到 fallback、degraded 输出或 mapping
 冲突时，命令以非零状态退出且不会把该批伪报为成功。此前已经写入的、通过
 校验的批次仍是安全的，可在后端恢复后重跑。
 
-若 projector 显示 `ready=0`，它不会再挡住手工重建：Projector 启动本身也会执行
-strict reconcile，因此 ES、HanLP、mapping、镜像拉取或调度失败都可能先把它置为
-`CrashLoopBackOff`/Pending。命令会打印 warning、Deployment、Pod、当前与 previous
+若 projector 显示 `ready=0`，它不会再挡住手工重建。`startupRebuild=true` 时，
+Projector 启动会执行 strict 全量 reconcile，ES、HanLP 或 mapping 失败可能先把它
+置为 `CrashLoopBackOff`；默认 schema-only 启动不扫描语料，也不因 HanLP 单槽忙而
+失败。镜像拉取或调度问题仍可能令 Pod Pending。命令会打印 warning、Deployment、Pod、当前与 previous
 container 日志及 namespace events，然后改由 Ready Admin Pod 执行。如果 Admin 也
 不是 Ready，则在启动重建前失败并打印 API rollout diagnostics。Admin/CLI 已持锁时，
-Projector 启动 reconcile 会退出并交给 Deployment backoff 重试，不会与恢复任务争抢
-单槽 HanLP。也可单独复查：
+Projector 启动 reconcile 会退出并交给 Deployment backoff 重试，不会与恢复任务并发
+修改 schema/alias。也可单独复查：
 
 ```bash
 kubectl -n mx-insight-hub get deployment,pod \
@@ -151,10 +159,16 @@ Admin 进程仍执行相同的 ES/HanLP/mapping 严格校验：后台入口解�
 projector 可供 exec”的循环依赖，并不能绕过真正的依赖故障。不得通过允许 fallback
 token 或跳过 mapping 校验来把失败伪装成成功。
 
-reconciler 从 PostgreSQL current truth 重放 content 与 chunk；只有需要新建
-投影时才原子切换 alias，既有 current index 允许同 source revision 覆盖旧
-分词字段。该操作不重启 Public/Admin API、ingest、Launcher、MX-H2I 登录
-或联网链路。执行前仍应在低峰期确认 ES 磁盘和 PG 读取余量。
+显式 Admin/CLI 与 `startupRebuild=true` 都强制从 PostgreSQL current truth 全量
+重放，即使当前 schema 已经在服务。reconciler 先把 content 写入同 schema 的 inactive
+`current/rebuild` A/B slot，完整第一遍后原子切换 content aliases，再做 content
+catch-up；随后才对 chunk 执行独立的第一遍、chunk alias 切换与 catch-up。全局 PG
+锁覆盖整个操作，但 content 与 chunk 的 alias 切换不是同一个 Elasticsearch 原子
+事务。实时 writer 的 resolve/provenance/bulk 与 alias 切换使用同一短时 shared/
+exclusive advisory fence；扫描阶段不持该 fence。成功会修复 ES 投影，不会自动把
+PG 中已有的 outbox dead 或 `projection_failed_at` quarantine 清零。该操作不重启 Public/Admin API、常驻
+projector、ingest、Launcher、MX-H2I 登录或联网链路。执行前仍应在低峰期确认 ES
+磁盘和 PG 读取余量。
 
 ### 4.2 content v4 与搜索 profile 变更手册
 
@@ -212,8 +226,9 @@ IK `max_word` index / `smart` search 的职责分离在 MX 中对应为“索引
 
 content v4 发布时，先让代码声明新的 `mx-insight-hub-content-v4-current`，再执行
 本节 4.1 的严格命令。strict reconciler 使用部署所要求的同一 tokenizer 对 PG
-current truth 做第一遍扫描；只有完整成功后才把 read/兼容 write aliases 从 v3
-原子切到 v4，然后做第二遍扫描关闭并发写窗口。不要在 v3 原位修改 analyzer，
+current truth 做第一遍扫描；只有完整成功后才把 content 的 read/兼容 write aliases
+从 v3 原子切到 v4，然后做 content catch-up。若启用了 chunk 投影，content 完成后
+chunk 再独立构建和切换；两者不共同原子。不要在 v3 原位修改 analyzer，
 也不要把只覆盖新写入的 multi-field 当作迁移完成。mapping conflict、HanLP busy/
 timeout、意外 jieba/bigram fallback 或 degraded provenance 都必须让命令非零退出；
 旧 v3 索引保留到 count/hash、代表性查询、磁盘和延迟验收完成，供 alias 回滚。

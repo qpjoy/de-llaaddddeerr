@@ -445,8 +445,11 @@ The raw-body upload limit is 64 MiB. Tabular/JSON/JSONL inputs are limited to
 CSV/TSV is UTF-8. TXT/MD is split into non-empty paragraphs and deterministically
 emits a content-derived `externalId`. HanLP is not a file-parser
 setting: canonical PostgreSQL ingest commits first, then the Elasticsearch
-projector applies HanLP (with Jieba/CJK fallback) to searchable text. A HanLP
-outage therefore degrades tokenization but does not block file ingestion.
+projector requires the configured backend (production HanLP) for searchable
+text. A transient HanLP outage therefore leaves projection work pending with
+backoff and automatic recovery; permanent or record-level failures use five
+durable attempts before content dead/chunk quarantine. Neither path writes
+Jieba/CJK fallback into `*Hanlp`, and neither blocks file ingestion.
 
 ### 4.3 Fixed cleaning and search projection
 
@@ -481,11 +484,13 @@ need real ES types:
 - metrics and event/edited/collection times.
 
 The mapping stays `dynamic: strict`; extra source JSON remains in PostgreSQL
-raw/canonical extensions instead of creating arbitrary ES fields. On rollout,
-the projector creates `mx-insight-hub-content-v4-current`, rebuilds it from PG
-current truth under an advisory lock, atomically switches read/compatible write
-aliases, then runs a second reconciliation pass. PG remains authoritative and
-the old index is never used as the reindex source.
+raw/canonical extensions instead of creating arbitrary ES fields. An ordinary
+Projector rollout performs schema-only reconciliation and does not replay the
+corpus. An explicit Admin/CLI rebuild, or `startupRebuild=true`, fills the
+inactive same-schema A/B content slot from PG current truth under an advisory
+lock, switches content read/compatible write aliases only after the full first
+pass, then runs its catch-up pass. PG remains authoritative and the old index is
+never used as the reindex source.
 
 The fixed TG v2 path does not call an LLM per row. Today Agent is used only for
 explicit `agent=true` file-column mapping suggestions (column names only), while

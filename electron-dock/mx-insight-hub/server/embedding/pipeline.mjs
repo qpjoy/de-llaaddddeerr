@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
-import { purgeStaleCurrentStateCopies } from '../search/current-state.mjs'
+import {
+  purgeStaleCurrentStateCopies,
+  withCurrentStateWriteFence,
+} from '../search/current-state.mjs'
+import { isRetryableSegmenterIntegrityError } from '../search/reindex-integrity.mjs'
 import { CHUNKER_VERSION, chunkRecord } from './chunker.mjs'
 import { buildChunkDocument } from './document.mjs'
 
@@ -18,6 +22,7 @@ import { buildChunkDocument } from './document.mjs'
 
 const CHUNK_BATCH = 200
 const EMBED_BATCH = 32
+const CHUNK_PROJECTION_MAX_ATTEMPTS = 5
 
 export class EmbeddingPipeline {
   constructor({ pool, agent, client, segmenter, chunkIndexSet, logger = console }) {
@@ -168,7 +173,10 @@ export class EmbeddingPipeline {
                embedding_model = NULL,
                embedding_version = NULL,
                embedded_at = NULL,
-               projected_at = NULL
+               projected_at = NULL,
+               projection_attempts = 0,
+               projection_last_error = NULL,
+               projection_failed_at = NULL
              WHERE existing.source_revision IS DISTINCT FROM EXCLUDED.source_revision
                 OR existing.content IS DISTINCT FROM EXCLUDED.content
                 OR existing.token_count IS DISTINCT FROM EXCLUDED.token_count`,
@@ -304,6 +312,7 @@ export class EmbeddingPipeline {
          FROM core.record_chunks c
          JOIN core.canonical_records r ON r.id = c.record_id
         WHERE c.embedded_at IS NOT NULL AND c.projected_at IS NULL
+          AND c.projection_failed_at IS NULL
           AND r.deleted_at IS NULL
           AND c.source_revision = r.current_revision
         ORDER BY c.embedded_at
@@ -313,58 +322,81 @@ export class EmbeddingPipeline {
     if (rows.length === 0) return { projected: 0 }
 
     const projections = []
+    let failedCount = 0
     for (const row of rows) {
-      const tokens = await this.segmenter.segment(row.content)
-      projections.push({
-        id: `${row.record_id}:${row.chunk_index}:${row.chunker_version}`,
-        version: Number(row.source_revision),
-        row,
-        document: buildChunkDocument(row, {
-          tokens,
-          createdAt: new Date().toISOString(),
-        }),
-      })
+      try {
+        const tokens = await this.segmenter.segment(row.content)
+        projections.push({
+          id: `${row.record_id}:${row.chunk_index}:${row.chunker_version}`,
+          version: Number(row.source_revision),
+          row,
+          document: buildChunkDocument(row, {
+            tokens,
+            createdAt: new Date().toISOString(),
+          }),
+        })
+      } catch (error) {
+        if (isRetryableSegmenterIntegrityError(error)) throw error
+        await this.#markProjectionFailure(row, error)
+        failedCount += 1
+      }
     }
 
-    const { currentIndex } = await purgeStaleCurrentStateCopies({
-      client: this.client,
-      indexSet: this.chunkIndexSet,
-      documents: projections,
-      versionField: 'sourceRevision',
-    })
-    const operations = []
-    for (const projection of projections) {
-      operations.push({
-        index: {
-          _index: currentIndex,
-          _id: projection.id,
-          version: projection.version,
-          // Strict external versioning makes a same-revision tombstone win over
-          // an in-flight stale index operation (notably across chunker changes).
-          version_type: 'external',
-        },
-      })
-      operations.push(projection.document)
-    }
-    const response = await this.client.bulk(operations)
+    if (projections.length === 0) return { projected: 0, failed: failedCount }
+
     const projected = []
-    const failed = []
-    for (const [index, item] of (response.items || []).entries()) {
-      const action = item.index
-      if (!action || (action.error && action.status !== 409)) {
-        const error = action?.error
-          ? JSON.stringify(action.error).slice(0, 500)
-          : 'missing index result from Elasticsearch bulk response'
-        failed.push({ id: rows[index].id, error })
+    let retryableBulkError = null
+    await withCurrentStateWriteFence({
+      pool: this.pool,
+      indexSet: this.chunkIndexSet,
+    }, async (connection) => {
+      const { writeTarget } = await purgeStaleCurrentStateCopies({
+        client: this.client,
+        pool: connection,
+        indexSet: this.chunkIndexSet,
+        documents: projections,
+        versionField: 'sourceRevision',
+        expectedBackend: this.segmenter?.expectedBackend,
+      })
+      const operations = []
+      for (const projection of projections) {
+        operations.push({
+          index: {
+            _index: writeTarget,
+            _id: projection.id,
+            version: projection.version,
+            // Strict external versioning makes a same-revision tombstone win over
+            // an in-flight stale index operation (notably across chunker changes).
+            version_type: 'external',
+          },
+        })
+        operations.push(projection.document)
       }
-      else projected.push(rows[index])
-    }
+      const response = await this.client.bulk(operations)
+      for (const [index, projection] of projections.entries()) {
+        const item = response.items?.[index]
+        const action = item?.index
+        if (!action || (action.error && action.status !== 409)) {
+          const error = action?.error
+            ? JSON.stringify(action.error).slice(0, 500)
+            : 'missing index result from Elasticsearch bulk response'
+          if (action?.status === 408 || action?.status === 425 || action?.status === 429 || action?.status >= 500) {
+            retryableBulkError ||= new ElasticsearchUnavailableError(new Error(error))
+          } else {
+            await this.#markProjectionFailure(projection.row, new Error(error))
+            failedCount += 1
+          }
+        }
+        else projected.push(projection.row)
+      }
+    })
 
     let acknowledged = 0
     if (projected.length > 0) {
       const result = await this.pool.query(
         `UPDATE core.record_chunks AS chunk
-            SET projected_at = now()
+            SET projected_at = now(), projection_attempts = 0,
+                projection_last_error = NULL, projection_failed_at = NULL
            FROM unnest($1::uuid[], $2::bigint[]) AS done(id, source_revision)
           WHERE chunk.id = done.id
             AND chunk.source_revision = done.source_revision`,
@@ -375,12 +407,33 @@ export class EmbeddingPipeline {
       )
       acknowledged = result.rowCount
     }
-    if (failed.length > 0) {
-      // Left unmarked so the next pass retries them. The vector is already paid
-      // for and stored, so a retry costs only the indexing call.
-      this.logger?.error?.(`[embed] ${failed.length} chunk(s) rejected by Elasticsearch: ${failed[0].error}`)
+    if (retryableBulkError) throw retryableBulkError
+    return { projected: acknowledged, failed: failedCount }
+  }
+
+  async #markProjectionFailure(row, error) {
+    const message = String(error?.message || error).slice(0, 2_000)
+    const { rows = [] } = await this.pool.query(
+      `UPDATE core.record_chunks AS chunk
+          SET projection_attempts = chunk.projection_attempts + 1,
+              projection_last_error = $3,
+              projection_failed_at = CASE
+                WHEN chunk.projection_attempts + 1 >= $4 THEN now()
+                ELSE NULL
+              END
+        WHERE chunk.id = $1
+          AND chunk.source_revision = $2
+          AND chunk.projected_at IS NULL
+        RETURNING chunk.projection_failed_at`,
+      [row.id, row.source_revision, message, CHUNK_PROJECTION_MAX_ATTEMPTS],
+    )
+    if (rows[0]?.projection_failed_at) {
+      this.logger?.error?.(
+        `[embed] chunk ${row.id} quarantined after ${CHUNK_PROJECTION_MAX_ATTEMPTS} projection failures: ${message}`,
+      )
+    } else {
+      this.logger?.error?.(`[embed] chunk ${row.id} projection failed: ${message}`)
     }
-    return { projected: acknowledged, failed: failed.length }
   }
 
   /** Project durable chunk tombstones before replacement documents. */
@@ -402,21 +455,28 @@ export class EmbeddingPipeline {
       id: row.document_id,
       version: Number(row.source_revision),
     }))
-    const { currentIndex } = await purgeStaleCurrentStateCopies({
-      client: this.client,
+    let response = null
+    await withCurrentStateWriteFence({
+      pool: this.pool,
       indexSet: this.chunkIndexSet,
-      documents,
-      versionField: 'sourceRevision',
+    }, async (connection) => {
+      const { writeTarget } = await purgeStaleCurrentStateCopies({
+        client: this.client,
+        pool: connection,
+        indexSet: this.chunkIndexSet,
+        documents,
+        versionField: 'sourceRevision',
+      })
+      const operations = documents.map((document) => ({
+        delete: {
+          _index: writeTarget,
+          _id: document.id,
+          version: document.version,
+          version_type: 'external_gte',
+        },
+      }))
+      response = await this.client.bulk(operations)
     })
-    const operations = documents.map((document) => ({
-      delete: {
-        _index: currentIndex,
-        _id: document.id,
-        version: document.version,
-        version_type: 'external_gte',
-      },
-    }))
-    const response = await this.client.bulk(operations)
     const projected = []
     const failed = []
     for (const [index, item] of (response.items || []).entries()) {
@@ -474,7 +534,10 @@ export class EmbeddingPipeline {
       SELECT
         (SELECT count(*) FROM core.records_needing_chunks)::int AS records_pending_chunks,
         (SELECT count(*) FROM core.record_chunks WHERE embedded_at IS NULL)::int AS chunks_pending_embedding,
-        (SELECT count(*) FROM core.record_chunks WHERE embedded_at IS NOT NULL AND projected_at IS NULL)::int AS chunks_pending_projection,
+        (SELECT count(*) FROM core.record_chunks
+          WHERE embedded_at IS NOT NULL AND projected_at IS NULL
+            AND projection_failed_at IS NULL)::int AS chunks_pending_projection,
+        (SELECT count(*) FROM core.record_chunks WHERE projection_failed_at IS NOT NULL)::int AS chunks_projection_failed,
         (SELECT count(*) FROM core.chunk_projection_deletes WHERE projected_at IS NULL)::int AS chunks_pending_deletion,
         (SELECT count(*) FROM core.record_chunks)::int AS chunks_total,
         (SELECT count(DISTINCT embedding_model) FROM core.record_chunks WHERE embedding_model IS NOT NULL)::int AS distinct_models

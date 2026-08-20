@@ -142,6 +142,7 @@ test('Admin search reindex is durable single-flight work with progress and audit
   const { pool, state } = fakeDatabase()
   let finishReconcile
   let reconcileStarted
+  let reconcileOptions = null
   const started = new Promise((resolve) => { reconcileStarted = resolve })
   const finish = new Promise((resolve) => { finishReconcile = resolve })
   const manager = new AdminSearchReindex({
@@ -149,6 +150,7 @@ test('Admin search reindex is durable single-flight work with progress and audit
     segmenterConfig: { backend: 'hanlp', hanlpUrl: 'http://hanlp.invalid' },
     logger: quiet,
     reconcile: async (_search, options) => {
+      reconcileOptions = options
       await options.onProgress({ projection: 'content', pass: 'build', processed: 200 })
       reconcileStarted()
       await finish
@@ -185,6 +187,7 @@ test('Admin search reindex is durable single-flight work with progress and audit
   assert.equal(completed.operation.phase, 'completed')
   assert.equal(completed.operation.progress, 1)
   assert.equal(completed.operation.processed, 231)
+  assert.equal(reconcileOptions.forceFull, true, 'Admin REINDEX always scans the complete corpus')
   assert.equal(state.locked, false)
 })
 
@@ -567,6 +570,37 @@ test('a HanLP rebuild needs no extra acknowledgement', async () => {
   assert.equal(preflight.expectedBackend, 'hanlp')
   assert.equal(preflight.requiresBackendAcknowledgement, false)
   assert.equal(preflight.warnings.some((entry) => entry.code === 'tokenizer_downgrade'), false)
+})
+
+test('preflight reads tokenizer provenance from the actual serving A/B generation', async () => {
+  const database = fakeDatabase()
+  const originalQuery = database.pool.query
+  database.pool.query = async (sql, values = []) => {
+    if (sql.includes('SELECT segmenter_backend FROM control.search_rebuild_progress')) {
+      return { rows: [{ segmenter_backend: values[0].endsWith('-rebuild') ? 'hanlp' : 'jieba' }] }
+    }
+    return originalQuery(sql, values)
+  }
+  const search = healthySearch(database.pool)
+  search.indexSet = {
+    schemaVersion: 4,
+    readAlias: 'mx-insight-hub-content',
+    writeAlias: 'mx-insight-hub-content-v4',
+    currentIndex: 'mx-insight-hub-content-v4-current',
+  }
+  const serving = 'mx-insight-hub-content-v4-rebuild'
+  search.client.getAlias = async (alias) => ({
+    [serving]: { aliases: { [alias]: { is_write_index: true } } },
+  })
+  const reindex = new AdminSearchReindex({
+    search,
+    segmenterConfig: { backend: 'hanlp', hanlpUrl: 'http://hanlp:8000' },
+  })
+
+  const preflight = await reindex.preflight({ fresh: true })
+  assert.equal(preflight.activeIndex, serving)
+  assert.equal(preflight.targetIndex, search.indexSet.currentIndex)
+  assert.equal(preflight.activeBackend, 'hanlp')
 })
 
 

@@ -513,32 +513,38 @@ discover_hanlp_url() {
   fi
 
   local ready_endpoint
-  ready_endpoint="$(
+  if ! ready_endpoint="$(
     kubectl -n mx-common get endpoints mx-common-hanlp \
-      -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true
-  )"
+      --ignore-not-found \
+      -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null
+  )"; then
+    die "could not inspect the HanLP Endpoint; refusing to change tokenizer configuration"
+  fi
   if [ -n "$ready_endpoint" ]; then
     MX_COMMON_HANLP_URL="http://mx-common-hanlp.mx-common.svc.cluster.local:8000"
     say "discovered ready HanLP tokenizer: ${MX_COMMON_HANLP_URL}"
   else
-    MX_COMMON_HANLP_URL=""
-    # Loud on purpose. This is not a soft degradation: the strict search rebuild
-    # derives its required backend from this very URL, so an empty value does
-    # not fail a rebuild -- it silently changes what a rebuild produces, and the
-    # jieba tokens it writes look completely normal until search quality drops.
     local previous
-    previous="$(
+    if ! previous="$(
       kubectl -n mx-insight-hub get configmap mx-insight-hub-config \
-        -o jsonpath='{.data.MX_COMMON_HANLP_URL}' 2>/dev/null || true
-    )"
-    say "WARNING: no ready HanLP endpoint; this deploy will configure jieba." >&2
+        --ignore-not-found \
+        -o jsonpath='{.data.MX_COMMON_HANLP_URL}' 2>/dev/null
+    )"; then
+      die "could not inspect the deployed HanLP configuration; refusing to change tokenizer configuration"
+    fi
     if [ -n "$previous" ]; then
-      say "  This deployment previously used ${previous}." >&2
-      say "  A search rebuild started now would write jieba tokens, not HanLP." >&2
-      say "  Check the tokenizer before deploying:" >&2
+      say "ERROR: no ready HanLP Endpoint; the deployed Hub still requires ${previous}." >&2
+      say "  The existing ConfigMap and workloads have not been replaced with jieba configuration." >&2
+      say "  Restore HanLP before deploying:" >&2
       say "    kubectl -n mx-common rollout status deployment/mx-common-hanlp" >&2
       say "    kubectl -n mx-common describe pod -l app.kubernetes.io/name=mx-common-hanlp" >&2
+      die "refusing to clear an existing HanLP URL while its Endpoint is temporarily unavailable"
     fi
+    # With no retained configuration this is a first/unconfigured deployment.
+    # An explicit empty MX_COMMON_HANLP_URL is handled above as an operator
+    # decision; auto-discovery must never silently downgrade an existing Hub.
+    MX_COMMON_HANLP_URL=""
+    say "WARNING: no ready HanLP Endpoint and no retained HanLP URL; configuring local jieba." >&2
   fi
   export MX_COMMON_HANLP_URL
 }
@@ -591,7 +597,7 @@ verify_hanlp_from_hub() {
           process.exitCode = 1
         }
       ' "$MX_COMMON_HANLP_URL"; then
-    say "WARNING: HanLP /tokenize contract failed from the projector; Hub will degrade to local jieba." >&2
+    say "WARNING: HanLP /tokenize contract failed from the projector; strict index writers will not use local jieba fallback. Diagnose the configured backend before reindexing." >&2
     return 1
   fi
   say "HanLP tokenizer verified from the Hub namespace."
@@ -1509,9 +1515,22 @@ reindex_search() {
 ops_action() {
   local environment="${1:-}"
   local action="${2:-}"
+  local sync_launcher_override_set=0
+  local sync_launcher_override=""
   [ "$environment" = internal-production ] || die "Only ops internal-production is supported"
   need kubectl
+  if [ "${MX_INSIGHT_SYNC_LAUNCHER+x}" = x ]; then
+    sync_launcher_override_set=1
+    sync_launcher_override="$MX_INSIGHT_SYNC_LAUNCHER"
+  fi
   load_env_file "${ROOT_DIR}/.env.internal"
+  # A one-shot safety choice on the command line must beat the persisted env
+  # file. The Launcher delegator explicitly passes 1; an independent Hub deploy
+  # explicitly passes 0 so it cannot unexpectedly roll the login control plane.
+  if [ "$sync_launcher_override_set" = 1 ]; then
+    MX_INSIGHT_SYNC_LAUNCHER="$sync_launcher_override"
+    export MX_INSIGHT_SYNC_LAUNCHER
+  fi
   case "$action" in
     plan)
       for file in 00-namespace.yaml 05-serviceaccount.yaml 20-migration-job.yaml 30-public-api.yaml 31-admin-api.yaml 32-projector.yaml 33-ingest.yaml 40-network-policy.yaml; do

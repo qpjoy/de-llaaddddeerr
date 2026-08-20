@@ -65,8 +65,13 @@ HanLP -> Jieba -> CJK bigram
 ```
 
 `backendUsed` 属于这一次调用，不能从共享的 `available`/`lastError` 推导。非空输入得到
-空数组或非法 token shape 视为上游失败并继续降级。生产搜索仍 fail-soft；公共分词
-接口如返回降级结果，必须明确 `degraded: true`。
+空数组或非法 token shape 视为上游失败并继续降级。查询时的搜索分析和公共分词接口
+仍 fail-soft；公共分词接口如返回降级结果，必须明确 `degraded: true`。content/chunk
+ES index writer 不复用这一降级语义：它严格要求当前配置后端（生产为 HanLP）。共享
+瞬时故障保持任务 pending 并退避，恢复后自动补投影；永久或记录级错误累计 5 次后
+进入 dead/quarantine，既不写 fallback，也不允许毒丸饿死后续记录。显式严格全量
+重建对瞬时分词错误每字段最多尝试 6 次，失败即终止操作；它可从 PG 重建 ES，但不会
+自动清除 PG 中已有的 dead/quarantine 证据。
 
 ### 3. 数据中心读 PostgreSQL 权威数据
 
@@ -168,13 +173,15 @@ version` 和 `classified_at`。Night-All 的“数据源分类”可作为 taxon
 
 ### 9. 搜索与高亮
 
-现有 ES 投影继续同时保存原文与预分词字段，混合查询 raw、HanLP/Jieba token、CJK
-bigram、edge-ngram、wildcard identifier 和 keyword exact；PostgreSQL `pg_trgm` 提供 ES
-故障时的较窄模糊降级。公共搜索响应保留 `mode`，让调用者知道结果来自 ES 还是 PG。
+现有 ES 投影继续同时保存原文与预分词字段。index writer 只接受当前配置后端生成且
+未降级的 token；生产 HanLP 暂时不可用时不把 Jieba/CJK fallback 写入 `*Hanlp`。
+查询侧仍可 fail-soft，混合使用兼容的 raw、HanLP、CJK bigram、edge-ngram、wildcard
+identifier 和 keyword exact 分支；PostgreSQL `pg_trgm` 提供 ES 故障时的较窄模糊降级。
+公共搜索响应保留 `mode`，让调用者知道结果来自 ES 还是 PG。
 
 高亮只针对可返回的 customer-safe 字段生成；不能从 `extensions`、raw payload 或不可见
-字段通过 highlight 侧漏。分词字段名称后续应从历史 `*Hanlp` 迁移到中性 `*Segmented`
-版本，避免 Jieba/bigram 降级时产生错误 provenance。
+字段通过 highlight 侧漏。分词字段名称后续仍应从历史 `*Hanlp` 迁移到中性
+`*Segmented` 版本并保存 model digest，以准确表达操作者显式降级配置的 provenance。
 
 ## 分阶段交付
 

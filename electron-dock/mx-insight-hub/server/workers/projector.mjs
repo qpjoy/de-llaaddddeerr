@@ -45,16 +45,16 @@ async function main() {
   // own, without ordering it behind the API's migration Job.
   await runCommonMigrations({ connectionString: config.common.postgres.url, logger })
 
-  // Startup reconciliation can replace an entire schema-versioned projection.
-  // Require one verified tokenizer backend for that snapshot so a transient
-  // tokenizer failure cannot mix backends into the schema's verified baseline
-  // snapshot. Live outbox projection below deliberately keeps the ordinary
-  // fail-soft segmenter: its per-event availability contract is distinct from
-  // the verified startup/reindex baseline.
-  const strictStartupSegmenter = requireSegmenterBackend(search.segmenter, {
+  // Every index writer requires one verified tokenizer backend. Canonical
+  // ingest remains independent in PostgreSQL, while projection waits and
+  // retries instead of mixing HanLP and downgraded tokens in one index.
+  // Request-side query segmentation deliberately keeps the fail-soft segmenter.
+  const strictProjectionSegmenter = requireSegmenterBackend(search.segmenter, {
     expectedBackend: requiredReindexBackend(config.common.segmenter),
+    maxBatch: search.segmenterBatchSize,
     logger,
   })
+  search.projector.segmenter = strictProjectionSegmenter
   // Whether this restart replays the corpus is an operator setting, not a
   // consequence of restarting. Read before taking the lock: a schema-only pass
   // is milliseconds and must not queue behind, or block, anything.
@@ -71,11 +71,12 @@ async function main() {
     await lockHeartbeat.pulse()
     report = await ensureSearchIndices({
       ...search,
-      segmenter: strictStartupSegmenter,
+      segmenter: strictProjectionSegmenter,
     }, {
       logger,
       failOnError: true,
       schemaOnly: !rebuildOnStartup,
+      forceFull: rebuildOnStartup,
       onProgress: () => lockHeartbeat.pulse(),
     })
     await lockHeartbeat.pulse()
@@ -104,8 +105,8 @@ async function main() {
 
   // The embedding pipeline shares this workload because both write to
   // Elasticsearch through the same client and index definitions. They run as
-  // independent loops so a stalled model provider cannot hold up the content
-  // projection, which has no external dependency at all.
+  // independent loops so a stalled model provider cannot hold up content
+  // projection. Both writers share the strict tokenizer contract.
   const agent = await createAgentRuntime({
     config,
     settingsStore: new AgentSettingsStore(pool),
@@ -116,7 +117,7 @@ async function main() {
     pool,
     agent,
     client: search.client,
-    segmenter: search.segmenter,
+    segmenter: strictProjectionSegmenter,
     chunkIndexSet: search.chunkIndexSet,
     logger,
   })

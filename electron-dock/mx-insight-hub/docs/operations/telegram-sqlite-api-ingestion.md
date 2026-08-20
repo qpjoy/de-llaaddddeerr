@@ -43,8 +43,11 @@ primitive `context.source`, Hub fails closed with
 Mapping does not censor terms or filter message text. Unmapped fields remain
 available in `extensions` and the parsed raw copy; the customer-facing ES
 projection still applies its credential and secret field allowlist. Chinese
-search continues through the shared HanLP-first segmenter, with Jieba and CJK
-bigrams as degradation fallbacks.
+index projection strictly waits for the configured backend (production HanLP):
+transient failures remain pending and retry after recovery, while permanent or
+record-level failures use five durable attempts before dead/quarantine. It never
+writes Jieba/CJK fallback into `*Hanlp`; only query analysis remains fail-soft
+and reports its actual backend.
 
 Rows with a non-null `deleted_at` are ingested rather than discarded. Their
 source object, canonical row, deletion timestamp and content revision remain in
@@ -121,8 +124,8 @@ Each committed Telegram SQLite page is handed to its continuation through a
 durable queue `runAt` delay. `MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS` defaults
 to 1000 ms, accepts 0 to disable pacing, and is capped at 60000 ms. The delay
 does not hold a worker, change the fixed 500-row page width, create a new import
-run, or reset the checkpoint; it only gives PostgreSQL, the outbox projector and
-the local segmenter a bounded gap before the next source page.
+run, or reset the checkpoint; it only gives PostgreSQL and asynchronous search
+projection a bounded gap before the next source page.
 
 When the endpoint starts serving a different SQLite database, keep the
 pipeline paused, save and validate the connection, then use **一次性全量对齐**.

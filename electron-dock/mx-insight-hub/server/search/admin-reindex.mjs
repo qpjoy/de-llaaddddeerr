@@ -3,7 +3,9 @@ import { describeClusterHealth } from '@qpjoy/mx-common/elasticsearch'
 import { AppError } from '../core/errors.mjs'
 import {
   ensureSearchIndices,
+  fullRebuildTargetIndex,
   readIndexBackend,
+  resolveCurrentStateBackings,
   setStartupRebuild,
   startupRebuildEnabled,
 } from './index.mjs'
@@ -138,9 +140,24 @@ export class AdminSearchReindex {
     )]
     let expectedBackend = null
     let sourceIndexSchema = null
+    let activeIndex = this.search?.indexSet?.currentIndex || null
+    if (this.search?.client && this.search?.indexSet?.writeAlias) {
+      try {
+        activeIndex = (await resolveCurrentStateBackings({
+          client: this.search.client,
+          indexSet: this.search.indexSet,
+        })).currentIndex || activeIndex
+      } catch {
+        // Alias readiness is reported separately below. Provenance lookup must
+        // remain best-effort so it cannot hide the actionable preflight issue.
+      }
+    }
+    const targetIndex = this.search?.indexSet?.writeAlias
+      ? fullRebuildTargetIndex(this.search.indexSet, activeIndex)
+      : this.search?.indexSet?.currentIndex || null
     // What the live projection is made of, as opposed to what this process is
     // configured to produce. They diverged once already, silently.
-    const activeBackend = await readIndexBackend(this.pool, this.search?.indexSet?.currentIndex)
+    const activeBackend = await readIndexBackend(this.pool, activeIndex)
     const targetIndexSchema = this.search?.indexSet?.schemaVersion == null
       ? null
       : `content-v${this.search.indexSet.schemaVersion}`
@@ -193,7 +210,7 @@ export class AdminSearchReindex {
           // the cluster's own deciders say exactly why. Red for any other
           // reason stays a warning, since the rebuild does not read those
           // indices.
-          const stuck = await this.#unassignableTarget()
+          const stuck = await this.#unassignableTarget(targetIndex)
           if (stuck) {
             blockers.push(issue(
               'search_index_unallocatable',
@@ -243,6 +260,7 @@ export class AdminSearchReindex {
       expectedBackend = requiredReindexBackend(this.segmenterConfig)
       const strictSegmenter = requireSegmenterBackend(this.search?.segmenter, {
         expectedBackend,
+        maxBatch: this.search?.segmenterBatchSize,
         maxAttempts: fresh ? 3 : 1,
         logger: this.logger,
       })
@@ -283,6 +301,8 @@ export class AdminSearchReindex {
       blockers,
       warnings,
       activeBackend,
+      activeIndex,
+      targetIndex,
       startupRebuild: await startupRebuildEnabled(this.pool),
       // Acknowledgement is required for anything but HanLP, so the UI can ask
       // rather than let a downgrade through on a single click.
@@ -421,12 +441,14 @@ export class AdminSearchReindex {
       })
       const strictSegmenter = requireSegmenterBackend(this.search.segmenter, {
         expectedBackend: preflight.expectedBackend,
+        maxBatch: this.search.segmenterBatchSize,
         logger: this.logger,
       })
       lockHeartbeat.assertHealthy()
       const report = await this.reconcile({ ...this.search, segmenter: strictSegmenter }, {
         logger: this.logger,
         failOnError: true,
+        forceFull: true,
         onProgress: async ({ projection, pass, processed }) => {
           lockHeartbeat.assertHealthy()
           if (await this.#cancelRequested(id)) {
@@ -552,8 +574,8 @@ export class AdminSearchReindex {
    * counts. A shard still being relocated or initialized will settle on its
    * own and must not be turned into a permanent-looking blocker.
    */
-  async #unassignableTarget() {
-    const index = this.search?.indexSet?.currentIndex
+  async #unassignableTarget(targetIndex = null) {
+    const index = targetIndex || this.search?.indexSet?.currentIndex
     if (!index || typeof this.search.client?.allocationExplain !== 'function') return null
     let explain
     try {

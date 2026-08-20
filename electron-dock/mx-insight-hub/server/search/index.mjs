@@ -9,11 +9,17 @@ import { contentIndex, chunkIndex } from './index-definitions.mjs'
 import { buildContentDocument } from './document.mjs'
 import { SearchQueries } from './queries.mjs'
 import { SearchProjector } from './projector.mjs'
+import { withCurrentStateCutoverFence } from './current-state.mjs'
 
 export { SearchProjector, runProjectorLoop } from './projector.mjs'
 export { SearchQueries } from './queries.mjs'
 export { contentIndex, chunkIndex } from './index-definitions.mjs'
-export { resolveCurrentStateBackings, purgeStaleCurrentStateCopies } from './current-state.mjs'
+export {
+  resolveCurrentStateBackings,
+  purgeStaleCurrentStateCopies,
+  withCurrentStateWriteFence,
+  withCurrentStateCutoverFence,
+} from './current-state.mjs'
 
 /**
  * Build the search subsystem.
@@ -97,6 +103,10 @@ export async function ensureSearchIndices(search, {
   // exist. That is all the projector needs to start serving and draining its
   // outbox; the replay is a separate, deliberate operation.
   schemaOnly = false,
+  // An operator-requested REINDEX must scan the entire canonical corpus even
+  // when the configured schema version already serves traffic. Build into the
+  // inactive A/B slot and move aliases only after the first pass succeeds.
+  forceFull = false,
 } = {}) {
   if (!search.client) return { enabled: false, reason: 'MX_COMMON_ELASTICSEARCH_URL is not configured' }
   const report = { enabled: true, content: null, chunk: null, error: null, clusterHealth: null }
@@ -120,6 +130,8 @@ export async function ensureSearchIndices(search, {
     const segmenter = cachingSegmenter(batchingSegmenter(search.segmenter, {
       maxBatch: search.segmenterBatchSize,
     }))
+    const segmenterBackend = search.segmenter?.expectedBackend
+      || await observedBackend(search.segmenter)
     const concurrency = search.segmenterConcurrency || 1
     if (schemaOnly) {
       logger?.log?.('[search] schema-only reconcile: the corpus replay is not part of startup')
@@ -131,6 +143,8 @@ export async function ensureSearchIndices(search, {
       indexSet: search.indexSet,
       concurrency,
       schemaOnly,
+      forceFull,
+      segmenterBackend,
       logger,
       onProgress,
     })
@@ -145,6 +159,8 @@ export async function ensureSearchIndices(search, {
         indexSet: search.chunkIndexSet,
         concurrency,
         schemaOnly,
+        forceFull,
+        segmenterBackend,
         logger,
         onProgress,
       })
@@ -260,12 +276,15 @@ export async function mapWithConcurrency(items, limit, mapper) {
 
 async function readRebuildProgress(connection, indexName) {
   const { rows } = await connection.query(
-    `SELECT last_record_id, processed, build_started_at
+    `SELECT last_record_id, processed, build_started_at, aliases_switched_at,
+            segmenter_backend
        FROM control.search_rebuild_progress
       WHERE index_name = $1 AND completed_at IS NULL`,
     [indexName],
   )
-  return rows[0] || null
+  return rows[0]
+    ? { ...rows[0], segmenter_backend: rows[0].segmenter_backend ?? null }
+    : null
 }
 
 /**
@@ -332,21 +351,33 @@ async function observedBackend(segmenter) {
   }
 }
 
-async function beginRebuildProgress(connection, indexName, projection) {
+async function beginRebuildProgress(connection, indexName, projection, backend) {
   const { rows } = await connection.query(
-    `INSERT INTO control.search_rebuild_progress (index_name, projection)
-     VALUES ($1, $2)
+    `INSERT INTO control.search_rebuild_progress
+       (index_name, projection, segmenter_backend)
+     VALUES ($1, $2, $3)
      ON CONFLICT (index_name) DO UPDATE
        SET projection = EXCLUDED.projection,
+           segmenter_backend = EXCLUDED.segmenter_backend,
            last_record_id = NULL,
            processed = 0,
            build_started_at = now(),
+           aliases_switched_at = NULL,
            completed_at = NULL,
            updated_at = now()
      RETURNING build_started_at`,
-    [indexName, projection],
+    [indexName, projection, backend],
   )
   return rows[0].build_started_at
+}
+
+async function markRebuildAliasesSwitched(connection, indexName) {
+  await connection.query(
+    `UPDATE control.search_rebuild_progress
+        SET aliases_switched_at = now(), updated_at = now()
+      WHERE index_name = $1 AND completed_at IS NULL`,
+    [indexName],
+  )
 }
 
 // Written after the batch is durably in Elasticsearch, never before. Saving
@@ -384,6 +415,8 @@ export async function ensureCurrentContentIndex({
   indexSet,
   concurrency = 1,
   schemaOnly = false,
+  forceFull = false,
+  segmenterBackend = null,
   logger = console,
   onProgress = null,
 }) {
@@ -394,6 +427,8 @@ export async function ensureCurrentContentIndex({
     indexSet,
     concurrency,
     schemaOnly,
+    forceFull,
+    segmenterBackend,
     logger,
     onProgress,
     projection: 'content',
@@ -409,6 +444,8 @@ export async function ensureCurrentChunkIndex({
   indexSet,
   concurrency = 1,
   schemaOnly = false,
+  forceFull = false,
+  segmenterBackend = null,
   logger = console,
   onProgress = null,
 }) {
@@ -419,11 +456,43 @@ export async function ensureCurrentChunkIndex({
     indexSet,
     concurrency,
     schemaOnly,
+    forceFull,
+    segmenterBackend,
     logger,
     onProgress,
     projection: 'chunks',
     reconcileSnapshot: reconcileChunkSnapshot,
   })
+}
+
+const rebuildSlotIndex = (indexSet) => `${indexSet.writeAlias}-rebuild`
+
+/**
+ * Pick the inactive physical slot for an operator-requested full rebuild.
+ *
+ * Two stable names bound disk/orphan growth and make an interrupted rebuild
+ * resumable from PostgreSQL. The serving slot is never deleted or overwritten;
+ * aliases move only after the inactive slot contains a complete first pass.
+ */
+export function fullRebuildTargetIndex(indexSet, servingIndex = null) {
+  if (!indexSet?.currentIndex || !indexSet?.writeAlias) {
+    throw new TypeError('A current-state index definition is required')
+  }
+  return servingIndex === indexSet.currentIndex
+    ? rebuildSlotIndex(indexSet)
+    : indexSet.currentIndex
+}
+
+/** Resolve a serving A/B generation for this exact schema version. */
+function servingGeneration(aliasState, indexSet) {
+  if (aliasState.readIndices.length !== 1) return null
+  const readIndex = aliasState.readIndices[0]
+  // The read alias is the customer-visible truth. Even if a damaged write
+  // alias is missing or split, a forced rebuild must select the other slot and
+  // must never overwrite the index customers are still reading.
+  return readIndex === indexSet.currentIndex || readIndex === rebuildSlotIndex(indexSet)
+    ? readIndex
+    : null
 }
 
 async function ensureCurrentStateIndex({
@@ -433,6 +502,8 @@ async function ensureCurrentStateIndex({
   indexSet,
   concurrency = 1,
   schemaOnly = false,
+  forceFull = false,
+  segmenterBackend = null,
   logger,
   onProgress,
   projection,
@@ -456,17 +527,96 @@ async function ensureCurrentStateIndex({
     await putCurrentIndexTemplate(client, indexSet)
 
     const before = await currentAliasState(client, indexSet)
-    const active = before.readIndices.length === 1
-      && before.readIndices[0] === indexSet.currentIndex
+    const servingIndex = servingGeneration(before, indexSet)
+    const servingProgress = servingIndex
+      ? await readRebuildProgress(connection, servingIndex)
+      : null
+    const recoveringCutover = Boolean(servingProgress?.aliases_switched_at)
+    const targetIndex = recoveringCutover
+      ? servingIndex
+      : (forceFull
+          ? fullRebuildTargetIndex(indexSet, servingIndex)
+          : (servingIndex || indexSet.currentIndex))
+    const targetAliases = before.memberships.get(targetIndex)
+    if (forceFull && !recoveringCutover && targetAliases?.size > 0) {
+      const error = new Error(
+        `Cannot select an inactive rebuild slot for ${indexSet.readAlias}; ` +
+          `${targetIndex} still serves alias(es): ${[...targetAliases].join(', ')}`,
+      )
+      error.code = 'search_alias_ambiguous'
+      throw error
+    }
+    const targetIndexSet = targetIndex === indexSet.currentIndex
+      ? indexSet
+      : { ...indexSet, currentIndex: targetIndex, bootstrapIndex: targetIndex }
+    const passBackend = segmenterBackend
+      || segmenter?.expectedBackend
+      || await observedBackend(segmenter)
+    const targetServesAllAliases = before.readIndices.length === 1
+      && before.readIndices[0] === targetIndexSet.currentIndex
       && before.aliasesToMove.every((alias) => {
         const indices = before.aliasIndices.get(alias)
-        return indices?.length === 1 && indices[0] === indexSet.currentIndex
+        return indices?.length === 1 && indices[0] === targetIndexSet.currentIndex
       })
 
-    if (active) {
-      const mappingConflict = await updateCurrentMapping(client, indexSet, logger)
+    // A process can die after the atomic alias switch and before the catch-up
+    // pass completes. The serving physical index plus this durable phase marker
+    // proves that its first full pass finished. Complete that exact generation
+    // before considering another A/B build; otherwise writes acknowledged on
+    // the old slot during the first pass could be missing forever.
+    if (recoveringCutover) {
+      if (!targetServesAllAliases) {
+        const error = new Error(
+          `Cannot resume ${targetIndexSet.currentIndex}; read and version write aliases ` +
+            'do not converge on the same rebuild generation',
+        )
+        error.code = 'search_alias_ambiguous'
+        throw error
+      }
+      if (servingProgress.segmenter_backend !== passBackend) {
+        const error = new Error(
+          `Cannot resume ${targetIndexSet.currentIndex} with tokenizer ` +
+            `${passBackend || 'unknown'}; its first pass used ` +
+            `${servingProgress.segmenter_backend || 'unknown'}`,
+        )
+        error.code = 'search_rebuild_backend_mismatch'
+        throw error
+      }
+      const mappingConflict = await updateCurrentMapping(client, targetIndexSet, logger)
       if (mappingConflict) {
-        return currentEnsureReport(indexSet, { mappingConflict, rebuilt: false, created: false })
+        return currentEnsureReport(targetIndexSet, { mappingConflict, rebuilt: false, created: false })
+      }
+      const indexed = await reconcileSnapshot({
+        connection,
+        client,
+        segmenter,
+        index: targetIndexSet.currentIndex,
+        concurrency,
+        changedSince: servingProgress.build_started_at,
+        onProgress: progressReporter(onProgress, projection, 'catch-up', { logger }),
+      })
+      await completeRebuildProgress(connection, targetIndexSet.currentIndex)
+      await saveReconciledThrough(
+        connection,
+        targetIndexSet.currentIndex,
+        projection,
+        servingProgress.build_started_at,
+        passBackend,
+      )
+      logger?.log?.(`[search] completed interrupted catch-up for ${targetIndexSet.currentIndex}`)
+      return currentEnsureReport(targetIndexSet, {
+        mappingConflict: null,
+        rebuilt: true,
+        created: false,
+        indexed,
+      })
+    }
+    const active = targetServesAllAliases
+
+    if (active) {
+      const mappingConflict = await updateCurrentMapping(client, targetIndexSet, logger)
+      if (mappingConflict) {
+        return currentEnsureReport(targetIndexSet, { mappingConflict, rebuilt: false, created: false })
       }
       // The previous process may have died after the atomic alias switch but
       // before its second reconciliation pass, so PostgreSQL truth is replayed
@@ -480,34 +630,34 @@ async function ensureCurrentStateIndex({
       // unmoved, so the guarantee survives: what is uncertain is still replayed,
       // and only what is certain is skipped.
       if (schemaOnly) {
-        return currentEnsureReport(indexSet, {
+        return currentEnsureReport(targetIndexSet, {
           mappingConflict: null, rebuilt: false, created: false, indexed: 0,
         })
       }
       const startedAt = new Date()
-      const reconciledThrough = await readReconciledThrough(connection, indexSet.currentIndex)
+      const reconciledThrough = await readReconciledThrough(connection, targetIndexSet.currentIndex)
       if (reconciledThrough) {
         logger?.log?.(
-          `[search] ${indexSet.currentIndex} replaying changes since ${reconciledThrough.toISOString()}`,
+          `[search] ${targetIndexSet.currentIndex} replaying changes since ${reconciledThrough.toISOString()}`,
         )
       } else {
-        logger?.log?.(`[search] ${indexSet.currentIndex} has no reconciliation watermark; replaying in full`)
+        logger?.log?.(`[search] ${targetIndexSet.currentIndex} has no reconciliation watermark; replaying in full`)
       }
       const indexed = await reconcileSnapshot({
         connection,
         client,
         segmenter,
-        index: indexSet.currentIndex,
+        index: targetIndexSet.currentIndex,
         concurrency,
         changedSince: reconciledThrough,
         onProgress: progressReporter(onProgress, projection, 'reconcile', { logger }),
       })
       // Only now: the pass is complete, so this instant is genuinely covered.
       await saveReconciledThrough(
-        connection, indexSet.currentIndex, projection, startedAt, await observedBackend(segmenter),
+        connection, targetIndexSet.currentIndex, projection, startedAt, passBackend,
       )
-      logger?.log?.(`[search] ${indexSet.currentIndex} reconciled ${indexed} record(s)`)
-      return currentEnsureReport(indexSet, {
+      logger?.log?.(`[search] ${targetIndexSet.currentIndex} reconciled ${indexed} record(s)`)
+      return currentEnsureReport(targetIndexSet, {
         mappingConflict: null,
         rebuilt: false,
         created: false,
@@ -515,9 +665,9 @@ async function ensureCurrentStateIndex({
       })
     }
 
-    let exists = await client.indexExists(indexSet.currentIndex)
+    let exists = await client.indexExists(targetIndexSet.currentIndex)
     let created = false
-    const currentWasServing = before.readIndices.includes(indexSet.currentIndex)
+    const currentWasServing = before.readIndices.includes(targetIndexSet.currentIndex)
     // A partial index left by an interrupted rebuild is invisible -- no alias
     // points at it -- so it is safe to continue filling rather than to discard.
     // Continuing is not an optimisation at this corpus size: a full pass is
@@ -527,28 +677,36 @@ async function ensureCurrentStateIndex({
     // schema bump can never resume onto an incompatible mapping.
     let resume = null
     if (exists && !currentWasServing) {
-      resume = await readRebuildProgress(connection, indexSet.currentIndex)
+      resume = await readRebuildProgress(connection, targetIndexSet.currentIndex)
       if (!resume) {
         // No cursor means unknown provenance: the snapshot could be partial in
         // ways nothing recorded, so it is rebuilt from scratch as before.
-        await client.request('DELETE', `/${encodeURIComponent(indexSet.currentIndex)}`)
+        await client.request('DELETE', `/${encodeURIComponent(targetIndexSet.currentIndex)}`)
         exists = false
+      } else if (resume.segmenter_backend !== passBackend) {
+        logger?.warn?.(
+          `[search] discarding partial ${targetIndexSet.currentIndex}: tokenizer changed ` +
+            `from ${resume.segmenter_backend || 'unknown'} to ${passBackend || 'unknown'}`,
+        )
+        await client.request('DELETE', `/${encodeURIComponent(targetIndexSet.currentIndex)}`)
+        exists = false
+        resume = null
       } else {
         logger?.log?.(
-          `[search] resuming ${indexSet.currentIndex} after ${resume.processed} records`,
+          `[search] resuming ${targetIndexSet.currentIndex} after ${resume.processed} records`,
         )
       }
     }
     if (!exists) {
-      await client.createIndex(indexSet.currentIndex, {
-        settings: indexSet.settings,
-        mappings: indexSet.mappings,
+      await client.createIndex(targetIndexSet.currentIndex, {
+        settings: targetIndexSet.settings,
+        mappings: targetIndexSet.mappings,
       })
       created = true
     } else if (!resume) {
-      const mappingConflict = await updateCurrentMapping(client, indexSet, logger)
+      const mappingConflict = await updateCurrentMapping(client, targetIndexSet, logger)
       if (mappingConflict) {
-        return currentEnsureReport(indexSet, { mappingConflict, rebuilt: false, created: false })
+        return currentEnsureReport(targetIndexSet, { mappingConflict, rebuilt: false, created: false })
       }
     }
 
@@ -558,15 +716,17 @@ async function ensureCurrentStateIndex({
       // switched onto an unpopulated index. Startup creates it and stops; the
       // replay that fills it is the operator's call.
       logger?.warn?.(
-        `[search] ${indexSet.currentIndex} exists but serves no alias; run a rebuild to populate and publish it`,
+        `[search] ${targetIndexSet.currentIndex} exists but serves no alias; run a rebuild to populate and publish it`,
       )
-      return currentEnsureReport(indexSet, {
+      return currentEnsureReport(targetIndexSet, {
         mappingConflict: null, rebuilt: false, created, indexed: 0,
       })
     }
     const buildStartedAt = resume
       ? resume.build_started_at
-      : await beginRebuildProgress(connection, indexSet.currentIndex, projection)
+      : await beginRebuildProgress(
+          connection, targetIndexSet.currentIndex, projection, passBackend,
+        )
     const alreadyProcessed = Number(resume?.processed || 0)
     // Best-effort denominator for the progress line. A failure here costs the
     // percentage, never the rebuild.
@@ -583,17 +743,20 @@ async function ensureCurrentStateIndex({
       connection,
       client,
       segmenter,
-      index: indexSet.currentIndex,
+      index: targetIndexSet.currentIndex,
       concurrency,
       startAfter: resume?.last_record_id ?? null,
       alreadyProcessed,
       onCheckpoint: (lastId, processed) => saveRebuildProgress(
-        connection, indexSet.currentIndex, lastId, processed,
+        connection, targetIndexSet.currentIndex, lastId, processed,
       ),
       onProgress: progressReporter(onProgress, projection, 'build', { logger, total }),
     })
-    const aliasState = await currentAliasState(client, indexSet)
-    await switchCurrentAliases(client, indexSet, aliasState)
+    await withCurrentStateCutoverFence({ connection, indexSet: targetIndexSet }, async () => {
+      const aliasState = await currentAliasState(client, targetIndexSet)
+      await markRebuildAliasesSwitched(connection, targetIndexSet.currentIndex)
+      await switchCurrentAliases(client, targetIndexSet, aliasState)
+    })
 
     // Writes can commit while the first pass is scanning. Once every legacy
     // write alias points at the new concrete index, replay PostgreSQL current
@@ -608,21 +771,21 @@ async function ensureCurrentStateIndex({
       connection,
       client,
       segmenter,
-      index: indexSet.currentIndex,
+      index: targetIndexSet.currentIndex,
       concurrency,
       changedSince: buildStartedAt,
       onProgress: progressReporter(onProgress, projection, 'catch-up', { logger }),
     })
-    await completeRebuildProgress(connection, indexSet.currentIndex)
+    await completeRebuildProgress(connection, targetIndexSet.currentIndex)
     // A finished build has projected everything up to when it began, so the next
     // startup can replay the delta rather than the corpus.
     await saveReconciledThrough(
-      connection, indexSet.currentIndex, projection, buildStartedAt, await observedBackend(segmenter),
+      connection, targetIndexSet.currentIndex, projection, buildStartedAt, passBackend,
     )
     logger?.log?.(
-      `[search] rebuilt ${indexSet.currentIndex}: first=${firstPass} catch-up=${secondPass}`,
+      `[search] rebuilt ${targetIndexSet.currentIndex}: first=${firstPass} catch-up=${secondPass}`,
     )
-    return currentEnsureReport(indexSet, {
+    return currentEnsureReport(targetIndexSet, {
       mappingConflict: null,
       rebuilt: true,
       created,
@@ -888,7 +1051,9 @@ async function reconcileChunkSnapshot({
           AND r.deleted_at IS NULL
           AND c.source_revision = r.current_revision
           AND ($1::uuid IS NULL OR c.id > $1)
-          AND ($3::timestamptz IS NULL OR r.last_seen_at >= $3)
+          AND ($3::timestamptz IS NULL
+            OR r.last_seen_at >= $3
+            OR c.embedded_at >= $3)
         ORDER BY c.id
         LIMIT $2`,
       [cursor, CURRENT_REBUILD_BATCH, changedSince],

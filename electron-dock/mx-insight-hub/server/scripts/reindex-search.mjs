@@ -32,6 +32,7 @@ async function main() {
 
     const strictSegmenter = requireSegmenterBackend(search.segmenter, {
       expectedBackend,
+      maxBatch: search.segmenterBatchSize,
       logger,
     })
     // Verify provenance even for an empty database, where the snapshot itself
@@ -44,6 +45,7 @@ async function main() {
       segmenter: strictSegmenter,
     }, {
       logger,
+      forceFull: true,
       onProgress: () => lockHeartbeat.pulse(),
     })
     await lockHeartbeat.pulse()
