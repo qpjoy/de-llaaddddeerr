@@ -1237,6 +1237,61 @@ button:disabled {
   font-size: 16px;
 }
 
+.anonymous-access-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(43, 246, 210, 0.24);
+  border-radius: 10px;
+  padding: 14px;
+  background: rgba(43, 246, 210, 0.055);
+}
+
+.anonymous-access-panel .panel-head {
+  align-items: flex-start;
+}
+
+.anonymous-access-panel .panel-head p,
+.anonymous-access-note {
+  margin-top: 3px;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.anonymous-access-note {
+  border: 1px solid rgba(248, 208, 108, 0.32);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: rgba(248, 208, 108, 0.08);
+}
+
+.anonymous-access-address {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(163, 182, 233, 0.12);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: rgba(12, 16, 29, 0.32);
+}
+
+.anonymous-access-address span {
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.anonymous-access-address strong {
+  color: var(--primary);
+  font-size: 13px;
+}
+
+.anonymous-access-actions {
+  display: grid;
+  gap: 8px;
+}
+
 .installation-identity-panel {
   display: grid;
   gap: 12px;

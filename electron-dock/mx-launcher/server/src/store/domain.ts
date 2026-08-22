@@ -51,6 +51,8 @@ import type {
   ImportUserCenterUsersInput,
   IssueServiceAccountCredentialInput,
   IssueTokenInput,
+  LauncherAnonymousEnrollmentPolicy,
+  LauncherAnonymousUiVisibility,
   LauncherLeaseProfile,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
@@ -1219,6 +1221,58 @@ export function assertLauncherNetworkLeaseEntitlement(
   if (missing.length > 0) {
     throw new Error(`Launcher app ${app.appId} lacks required capabilities: ${missing.join(', ')}`);
   }
+}
+
+export class LauncherAnonymousEnrollmentPolicyError extends Error {
+  readonly code: 'launcher_anonymous_enrollment_draining' | 'launcher_anonymous_enrollment_disabled';
+
+  constructor(
+    code: 'launcher_anonymous_enrollment_draining' | 'launcher_anonymous_enrollment_disabled',
+    productId: string
+  ) {
+    super(
+      code === 'launcher_anonymous_enrollment_draining'
+        ? `Launcher product ${productId} is draining anonymous enrollment; only an authorized active lease may renew`
+        : `Launcher product ${productId} has disabled anonymous enrollment`
+    );
+    this.name = 'LauncherAnonymousEnrollmentPolicyError';
+    this.code = code;
+  }
+}
+
+/**
+ * Enforce anonymous admission separately from the general app entitlement so
+ * employee/Feishu leases never share this gate. `anonymousRenewalLeaseId` is a
+ * server-derived proof; a public request body's value must never be forwarded.
+ */
+export function assertLauncherAnonymousEnrollmentPolicy(
+  input: LauncherNetworkLeaseInput,
+  requestedProduct: LauncherProductNetwork,
+  previous: LauncherNetworkLease | null,
+  now = new Date()
+): void {
+  const identityKind = launcherNetworkIdentityKind(input.identityKind, input.userId);
+  if (identityKind !== 'anonymous') return;
+  const policy = launcherAnonymousEnrollmentPolicy(requestedProduct.anonymousEnrollmentPolicy);
+  if (policy === 'enabled') return;
+  if (policy === 'disabled') {
+    throw new LauncherAnonymousEnrollmentPolicyError(
+      'launcher_anonymous_enrollment_disabled',
+      requestedProduct.productId
+    );
+  }
+  const authorizedRenewalLeaseId = input.anonymousRenewalLeaseId?.trim() || '';
+  if (
+    previous
+    && authorizedRenewalLeaseId === previous.leaseId
+    && launcherNetworkLeaseIsActive(previous, now)
+  ) {
+    return;
+  }
+  throw new LauncherAnonymousEnrollmentPolicyError(
+    'launcher_anonymous_enrollment_draining',
+    requestedProduct.productId
+  );
 }
 
 function booleanish(value: unknown): boolean {
@@ -2408,6 +2462,13 @@ export function buildLauncherProductNetwork(
     rateLimitProfile: input.rateLimitProfile?.trim() || previous?.rateLimitProfile || defaults.rateLimitProfile,
     dnsPolicyId: input.dnsPolicyId?.trim() || previous?.dnsPolicyId || 'internal-default',
     licensePolicyId: input.licensePolicyId?.trim() || previous?.licensePolicyId || `${productId}-default`,
+    anonymousEnrollmentPolicy: launcherAnonymousEnrollmentPolicy(
+      input.anonymousEnrollmentPolicy ?? previous?.anonymousEnrollmentPolicy
+    ),
+    anonymousUiVisibility: launcherAnonymousUiVisibility(
+      input.anonymousUiVisibility ?? previous?.anonymousUiVisibility,
+      productId
+    ),
     enabled: typeof input.enabled === 'boolean' ? input.enabled : previous?.enabled ?? true,
     notes: launcherProductNetworkNotes(mode, networkScope),
     createdBy: previous?.createdBy ?? updatedBy,
@@ -2528,6 +2589,7 @@ export function buildLauncherNetworkLease(
     leaseId: previous?.leaseId ?? launcherNetworkLeaseId(leaseKey),
     leaseKey,
     environment: config.environment,
+    appId: input.appId?.trim() || previous?.appId || product.productId,
     productId: product.productId,
     launcherMode,
     identityKind,
@@ -2550,6 +2612,7 @@ export function buildLauncherNetworkLease(
     deviceModel: input.deviceModel?.trim() || previous?.deviceModel || null,
     osVersion: input.osVersion?.trim() || previous?.osVersion || null,
     appVersion: input.appVersion?.trim() || previous?.appVersion || null,
+    sourceIp: input.sourceIp?.trim() || previous?.sourceIp || null,
     status: 'active',
     expiresAt,
     releasedAt: null,
@@ -3448,6 +3511,21 @@ function productRelayCidrs(input: string[] | null | undefined, previous: string[
 
 function launcherProductMode(value: LauncherProductNetworkInput['mode']): LauncherProductMode {
   return value === 'standalone' ? 'standalone' : 'embed';
+}
+
+export function launcherAnonymousEnrollmentPolicy(
+  value: LauncherProductNetworkInput['anonymousEnrollmentPolicy']
+): LauncherAnonymousEnrollmentPolicy {
+  if (value === 'drain' || value === 'disabled') return value;
+  return 'enabled';
+}
+
+export function launcherAnonymousUiVisibility(
+  value: LauncherProductNetworkInput['anonymousUiVisibility'],
+  productId: string
+): LauncherAnonymousUiVisibility {
+  if (value === 'primary' || value === 'advanced' || value === 'hidden') return value;
+  return productId === MX_H2I_PRODUCT_ID ? 'advanced' : 'primary';
 }
 
 function launcherNetworkScope(

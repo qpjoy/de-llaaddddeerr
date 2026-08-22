@@ -41,8 +41,8 @@ assert.match(
 );
 assert.match(
   source,
-  /recovering \? retainedConnectionActionLabel\(\) : '连接'/,
-  'retained tunnel or lease states must not fall back to a reconnect label'
+  /renewalBlocked[\s\S]*recovering[\s\S]*retainedConnectionActionLabel\(connection\)/,
+  'retained tunnel or lease states must keep an explicit recovery label unless product policy blocks renewal'
 );
 assert.doesNotMatch(
   source,

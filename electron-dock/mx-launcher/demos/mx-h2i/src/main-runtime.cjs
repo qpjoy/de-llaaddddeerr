@@ -222,6 +222,7 @@ let lastSystemPacReverseProxyRoutesWarningAt = 0;
 let lastNetworkEnvironmentSignature = null;
 let lastDarwinEndpointRouteRepairAt = 0;
 let releaseUpdateCheckInFlight = null;
+let launcherProductPresentationRefreshInFlight = null;
 let postConnectUpdateTimer = null;
 let diagnosticLogQueue = Promise.resolve();
 let diagnosticLogBytes = null;
@@ -288,6 +289,7 @@ if (gotSingleInstanceLock) {
     registerIpc();
     createTray();
     createMainWindow();
+    void refreshLauncherProductPresentation('app-startup');
     void restoreH2oRuntimeAfterStartup().catch((err) => {
       console.warn('[mx-h2i] H2O startup restore failed:', errorMessage(err));
       queueDiagnosticError('startup.h2o-restore', err);
@@ -580,6 +582,9 @@ function createMainWindow() {
   }
   mainWindow.once('closed', () => {
     mainWindow = null;
+  });
+  mainWindow.on('focus', () => {
+    void refreshLauncherProductPresentation('window-focus');
   });
   attachWindowBoundsTracking();
   rememberWindowBoundsForMode('launcher', mainWindow.getBounds());
@@ -6753,12 +6758,40 @@ async function normalizeRuntime(input) {
     apps: normalizeApps(row.apps),
     update: normalizeUpdate(reconciledUpdate, config),
     launcherContract: await launcherContract(config),
+    launcherProductPresentation: normalizeLauncherProductPresentation(
+      row.launcherProductPresentation,
+      config
+    ),
     window: normalizeWindowState(row.window),
     feedback: null,
     networkEvent: normalizeNetworkModeEvent(row.networkEvent),
     activity: Array.isArray(row.activity) ? row.activity.slice(0, 8) : defaultActivity(),
     updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : nowIso()
   };
+}
+
+function normalizeLauncherProductPresentation(input, config) {
+  const row = input && typeof input === 'object' ? input : {};
+  const productId = normalizeLauncherProductId(config?.productId || PRODUCT_ID);
+  const matchesProduct = nullableString(row.productId) === productId;
+  return {
+    productId,
+    anonymousEnrollmentPolicy: matchesProduct
+      ? normalizeLauncherAnonymousEnrollmentPolicy(row.anonymousEnrollmentPolicy)
+      : 'enabled',
+    anonymousUiVisibility: matchesProduct
+      ? normalizeLauncherAnonymousUiVisibility(row.anonymousUiVisibility)
+      : 'advanced',
+    syncedAt: matchesProduct ? nullableString(row.syncedAt) : null
+  };
+}
+
+function normalizeLauncherAnonymousEnrollmentPolicy(value) {
+  return ['enabled', 'drain', 'disabled'].includes(value) ? value : 'enabled';
+}
+
+function normalizeLauncherAnonymousUiVisibility(value) {
+  return ['primary', 'advanced', 'hidden'].includes(value) ? value : 'advanced';
 }
 
 function normalizeCredentialStorageFailure(input) {
@@ -12713,8 +12746,77 @@ async function launcherContext() {
     publicKey: installation.keyPair.publicKey,
     deviceLabel: installation.deviceLabel
   });
-  await ensureLauncherProduct(launcher, productId, productDisplayName);
-  return { baseUrl, bootstrap, installation, launcher, productId, productDisplayName };
+  const productNetwork = await ensureLauncherProduct(launcher, productId, productDisplayName);
+  applyLauncherProductPresentation(productNetwork);
+  return { baseUrl, bootstrap, installation, launcher, productId, productDisplayName, productNetwork };
+}
+
+async function refreshLauncherProductPresentation(reason) {
+  if (launcherProductPresentationRefreshInFlight) {
+    return launcherProductPresentationRefreshInFlight;
+  }
+  const task = (async () => {
+    const bootstrap = await resolveBootstrapEndpoint(runtime.config);
+    const productId = launcherProductId();
+    const mod = await importInstalledPackage('@qpjoy/electron-launcher');
+    const launcher = mod.createElectronLauncher({
+      baseUrl: bootstrap.baseUrl,
+      fetchImpl: launcherFetchForBootstrap(bootstrap.resolveMode),
+      productId,
+      mode: 'standalone'
+    });
+    const product = await launcher.getProduct(productId);
+    if (!applyLauncherProductPresentation(product)) return runtime.launcherProductPresentation;
+    try {
+      await saveRuntime(runtime);
+    } catch (err) {
+      queueDiagnosticLog('warning', 'launcher.product-presentation-save-failed', errorMessage(err), {
+        reason,
+        productId
+      });
+    }
+    broadcastState();
+    return runtime.launcherProductPresentation;
+  })();
+  launcherProductPresentationRefreshInFlight = task;
+  try {
+    return await task;
+  } catch (err) {
+    queueDiagnosticLog('warning', 'launcher.product-presentation-refresh-failed', errorMessage(err), {
+      reason,
+      productId: launcherProductId()
+    });
+    return runtime.launcherProductPresentation;
+  } finally {
+    if (launcherProductPresentationRefreshInFlight === task) {
+      launcherProductPresentationRefreshInFlight = null;
+    }
+  }
+}
+
+function applyLauncherProductPresentation(product) {
+  const productId = normalizeLauncherProductId(product?.productId || launcherProductId());
+  if (productId !== launcherProductId()) return false;
+  const next = {
+    productId,
+    anonymousEnrollmentPolicy: normalizeLauncherAnonymousEnrollmentPolicy(product?.anonymousEnrollmentPolicy),
+    anonymousUiVisibility: normalizeLauncherAnonymousUiVisibility(product?.anonymousUiVisibility),
+    syncedAt: nullableString(product?.updatedAt) || nowIso()
+  };
+  const previous = normalizeLauncherProductPresentation(
+    runtime.launcherProductPresentation,
+    runtime.config
+  );
+  if (
+    previous.productId === next.productId
+    && previous.anonymousEnrollmentPolicy === next.anonymousEnrollmentPolicy
+    && previous.anonymousUiVisibility === next.anonymousUiVisibility
+    && previous.syncedAt === next.syncedAt
+  ) {
+    return false;
+  }
+  runtime.launcherProductPresentation = next;
+  return true;
 }
 
 async function ensureInstallation() {
@@ -12875,6 +12977,8 @@ async function ensureLauncherProduct(launcher, productId, productDisplayName) {
     defaultDomesticSiteId: 'domestic-main',
     defaultOverseaSiteId: 'oversea-main',
     updatePolicy: 'launcher-managed',
+    anonymousEnrollmentPolicy: 'enabled',
+    anonymousUiVisibility: 'advanced',
     enabled: true,
     requestedBy: REQUESTED_BY,
     requestId: makeRequestId('product')
@@ -16786,7 +16890,10 @@ function visibleConnection(input) {
     retainedMode: _retainedMode,
     ...safe
   } = input;
-  return safe;
+  return {
+    ...safe,
+    hasLeaseCapability: Boolean(nullableString(input.leaseCapability))
+  };
 }
 
 function visibleInstallation(input) {

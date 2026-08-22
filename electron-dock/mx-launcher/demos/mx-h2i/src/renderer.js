@@ -42,7 +42,7 @@ const H2O_RULE_PACKS = [
 let state = null;
 let busyAction = '';
 let screen = 'launcher';
-let modeDraft = 'guest';
+let modeDraft = 'employee';
 let windowDrag = null;
 let windowDragSequence = 0;
 let appSearch = '';
@@ -71,12 +71,13 @@ void boot();
 async function boot() {
   state = await api.getState();
   if (isWindows) await api.setWindowMode?.('launcher');
-  modeDraft = state.connection?.mode === 'employee' ? 'employee' : 'guest';
+  modeDraft = preferredLauncherMode();
   syncEmployeeLoginDraftFromState();
   render();
   if (typeof api.onState === 'function') {
     api.onState((next) => {
       state = next;
+      if (state.connection?.state === 'idle') modeDraft = 'employee';
       syncEmployeeLoginDraftFromState();
       render();
     });
@@ -758,6 +759,9 @@ async function runAction(action, payload) {
     }
   } finally {
     busyAction = '';
+    if (['connectGuest', 'disconnect', 'resetLocalNetworkIdentity'].includes(action) && !isGuestConnectionActive()) {
+      modeDraft = 'employee';
+    }
     render();
   }
 }
@@ -777,12 +781,12 @@ function handlePhoneBack() {
   phoneMenuOpen = false;
   appShellMenuOpen = false;
   if (screen === 'advanced') {
+    modeDraft = preferredLauncherMode();
     void setScreen('launcher');
     return;
   }
   if (isEmployeeLoginVisible()) {
-    modeDraft = state.connection?.mode === 'employee' ? 'employee' : 'guest';
-    if (modeDraft === 'employee' && state.connection?.state !== 'connected') modeDraft = 'guest';
+    modeDraft = preferredLauncherMode();
     render();
     return;
   }
@@ -844,6 +848,56 @@ function isGuestConnectionActive() {
   const connection = state?.connection || {};
   return connection.mode === 'guest'
     && ['connecting', 'connected', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection.state);
+}
+
+function preferredLauncherMode() {
+  return isGuestConnectionActive() ? 'guest' : 'employee';
+}
+
+function anonymousUiVisibility() {
+  const presentation = state?.launcherProductPresentation;
+  const currentProductId = state?.config?.productId || 'mx-h2i';
+  if (presentation?.productId && presentation.productId !== currentProductId) return 'advanced';
+  return ['primary', 'advanced', 'hidden'].includes(presentation?.anonymousUiVisibility)
+    ? presentation.anonymousUiVisibility
+    : 'advanced';
+}
+
+function anonymousEnrollmentPolicy() {
+  const policy = state?.launcherProductPresentation?.anonymousEnrollmentPolicy;
+  return ['enabled', 'drain', 'disabled'].includes(policy) ? policy : 'enabled';
+}
+
+function shouldRenderPrimaryAnonymousEntry() {
+  return !isGuestConnectionActive() && anonymousUiVisibility() === 'primary';
+}
+
+function shouldRenderAnonymousAccessPanel() {
+  return isGuestConnectionActive() || anonymousUiVisibility() === 'advanced';
+}
+
+function canStartAnonymousEnrollment() {
+  return anonymousEnrollmentPolicy() === 'enabled';
+}
+
+function canRenewAnonymousEnrollment() {
+  const policy = anonymousEnrollmentPolicy();
+  if (policy === 'enabled') return true;
+  if (policy === 'disabled') return false;
+  return state?.connection?.hasLeaseCapability === true;
+}
+
+function anonymousPolicyMessage() {
+  if (anonymousEnrollmentPolicy() === 'disabled') {
+    return '管理员已停用 MX-H2I 匿名 enroll；现有匿名连接仍可查看并明确断开。';
+  }
+  if (anonymousEnrollmentPolicy() === 'drain') {
+    if (isGuestConnectionActive() && state?.connection?.hasLeaseCapability !== true) {
+      return '匿名连接正在收敛；当前保留连接缺少 lease capability，不能续租，但仍可查看并清理本地连接。';
+    }
+    return '匿名连接正在收敛：不接受新连接，仅持有有效 lease capability 的已有匿名连接可以续租。';
+  }
+  return '匿名 enroll 由 MX-H2I 产品策略独立控制；员工账号和飞书登录仍是默认入口。';
 }
 
 function guestConnectionPrompt() {
@@ -1071,9 +1125,20 @@ function renderGuestConnect(connected, connecting, retainedConnection = false) {
   const retainedGuest = state.connection?.mode === 'guest'
     && ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(state.connection?.state);
   const recovering = retainedConnection && !disconnectable;
-  const label = disconnecting ? '正在断开' : disconnectable ? '断开连接' : connecting ? pendingConnectionLabel() : recovering ? retainedConnectionActionLabel() : '连接';
+  const renewalBlocked = retainedGuest && !canRenewAnonymousEnrollment();
+  const label = disconnecting
+    ? '正在断开'
+    : disconnectable
+      ? '断开连接'
+      : connecting
+        ? pendingConnectionLabel()
+        : renewalBlocked
+          ? '匿名续租已停用'
+          : recovering
+            ? retainedConnectionActionLabel()
+            : '连接';
   const action = disconnectable ? 'disconnect' : 'connectGuest';
-  const disabled = connecting || disconnecting;
+  const disabled = connecting || disconnecting || renewalBlocked;
   return `
     <section class="connect-panel">
       <button class="connect-dial ${disconnectable ? 'is-connected' : ''} ${connecting ? 'is-connecting' : ''} ${recovering ? 'is-recovering' : ''} ${disconnecting ? 'is-disconnecting' : ''}" type="button" data-action="${action}" aria-busy="${(disabled || recovering) ? 'true' : 'false'}" ${disabled ? 'disabled' : ''}>
@@ -1203,10 +1268,26 @@ function renderEmployeeLogin(connecting) {
       <button class="secondary-button block-button" type="button" data-action="${feishuAction}" aria-busy="${feishuPending && !feishuCancelable ? 'true' : 'false'}" ${feishuDisabled ? 'disabled' : ''}>
         ${escapeHtml(feishuLabel)}
       </button>
-      <button class="secondary-button block-button" type="button" data-action="${guestActive ? 'disconnect' : 'connectGuest'}" ${connecting || feishuPending ? 'disabled' : ''}>
-        ${guestActive ? '仅断开访客模式' : '使用访客连接'}
-      </button>
+      ${renderPrimaryAnonymousEntry(connecting, feishuPending)}
+      ${guestActive ? `
+        <button class="secondary-button block-button" type="button" data-action="disconnect" ${connecting || feishuPending || busyAction === 'disconnect' ? 'disabled' : ''}>
+          ${busyAction === 'disconnect' ? '正在断开访客模式' : '仅断开访客模式'}
+        </button>
+      ` : ''}
+      <button class="secondary-button block-button" type="button" data-action="show-advanced">高级选项</button>
     </form>
+  `;
+}
+
+function renderPrimaryAnonymousEntry(connecting, feishuPending) {
+  if (!shouldRenderPrimaryAnonymousEntry()) return '';
+  if (!canStartAnonymousEnrollment()) {
+    return `<div class="login-notice" role="status">${escapeHtml(anonymousPolicyMessage())}</div>`;
+  }
+  return `
+    <button class="secondary-button block-button" type="button" data-action="connectGuest" ${connecting || feishuPending ? 'disabled' : ''}>
+      匿名连接
+    </button>
   `;
 }
 
@@ -1273,10 +1354,99 @@ function renderAdvancedPhone() {
         ${renderAdvancedRow('应用设置', 'AppCenter / H2O embed defaults', '⚙')}
         ${renderAdvancedRow('更多设置', 'network, release, diagnostics', '…')}
       </section>
+      ${renderAnonymousAccessPanel()}
       ${renderInstallationIdentityPanel()}
       ${renderDiagnosticLogPanel()}
       ${renderWireGuardDiagnostics()}
       ${renderConfigForm()}
+    </section>
+  `;
+}
+
+function renderAnonymousAccessPanel() {
+  if (!shouldRenderAnonymousAccessPanel()) return '';
+  const connection = state.connection || {};
+  const guestActive = isGuestConnectionActive();
+  const connected = guestActive && connection.state === 'connected';
+  const connecting = busyAction === 'connectGuest'
+    || (guestActive && connection.state === 'connecting');
+  const retainedGuest = guestActive
+    && ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection.state);
+  const disconnecting = busyAction === 'disconnect';
+  const cleaning = busyAction === 'resetLocalNetworkIdentity';
+  const policy = anonymousEnrollmentPolicy();
+  const enrollmentAllowed = retainedGuest
+    ? canRenewAnonymousEnrollment()
+    : canStartAnonymousEnrollment();
+  const employeeActive = connection.mode === 'employee'
+    && ['connecting', 'connected', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable'].includes(connection.state);
+  const status = connected
+    ? 'connected'
+    : connecting
+      ? 'connecting'
+      : retainedGuest
+        ? 'reserved'
+        : policy === 'disabled'
+          ? 'blocked'
+          : policy === 'drain'
+            ? 'reserved'
+            : 'idle';
+  const statusLabel = connected
+    ? '已连接'
+    : connecting
+      ? '连接中'
+      : retainedGuest
+        ? '待恢复'
+        : policy === 'disabled'
+          ? '已停用'
+          : policy === 'drain'
+            ? '仅已有连接续租'
+            : employeeActive
+              ? '员工模式使用中'
+              : '未连接';
+  const action = connected ? 'disconnect' : 'connectGuest';
+  const actionLabel = disconnecting
+    ? '正在断开匿名连接'
+    : connected
+      ? '断开匿名连接'
+      : connecting
+        ? pendingConnectionLabel()
+        : retainedGuest && !enrollmentAllowed
+          ? '匿名续租已停用'
+          : retainedGuest
+            ? retainedConnectionActionLabel(connection)
+            : policy === 'disabled'
+              ? '匿名连接已停用'
+              : policy === 'drain'
+                ? '不接受新匿名连接'
+                : '连接匿名模式';
+  const actionDisabled = connecting
+    || disconnecting
+    || cleaning
+    || employeeActive
+    || (!connected && !enrollmentAllowed);
+  return `
+    <section class="settings-panel anonymous-access-panel" data-state="${escapeAttr(status)}">
+      <div class="panel-head">
+        <div>
+          <h2>匿名连接</h2>
+          <p>${escapeHtml(anonymousPolicyMessage())}</p>
+        </div>
+        <span class="status-pill" data-state="${escapeAttr(status)}">${escapeHtml(statusLabel)}</span>
+      </div>
+      ${employeeActive ? '<p class="anonymous-access-note">员工网络正在使用中。为避免影响现有员工连接，请先从主界面明确断开员工模式。</p>' : ''}
+      ${guestActive && connection.localIp ? `<div class="anonymous-access-address"><span>访客 IP</span><strong>${escapeHtml(connection.localIp)}</strong></div>` : ''}
+      ${renderConnectionRecoverySteps(retainedGuest)}
+      <div class="anonymous-access-actions">
+        <button class="${connected || !enrollmentAllowed ? 'secondary-button' : 'primary-button'} block-button" type="button" data-action="${action}" aria-busy="${connecting || disconnecting ? 'true' : 'false'}" ${actionDisabled ? 'disabled' : ''}>
+          ${escapeHtml(actionLabel)}
+        </button>
+        ${retainedGuest ? `
+          <button class="secondary-button block-button" type="button" data-action="resetLocalNetworkIdentity" ${connecting || disconnecting || cleaning ? 'disabled' : ''}>
+            ${cleaning ? '正在清理旧连接' : '清理旧连接'}
+          </button>
+        ` : ''}
+      </div>
     </section>
   `;
 }
@@ -3834,6 +4004,7 @@ function createMockApi() {
     connection: {
       state: 'idle',
       mode: 'guest',
+      hasLeaseCapability: false,
       localIp: null,
       routePolicy: 'none',
       subject: null,
@@ -4000,6 +4171,12 @@ function createMockApi() {
           { productId: 'luopan', displayName: 'Luopan', state: 'registered', serviceVip: '10.88.100.3' }
         ]
       }
+    },
+    launcherProductPresentation: {
+      productId: 'mx-h2i',
+      anonymousEnrollmentPolicy: 'enabled',
+      anonymousUiVisibility: 'advanced',
+      syncedAt: new Date().toISOString()
     },
     diagnosticLog: {
       enabled: true,

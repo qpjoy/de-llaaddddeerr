@@ -12,6 +12,9 @@ const MX_LOCAL_EDGE_DNS = '127.0.0.1:2053';
 const MX_DEFAULT_APP_DNS_ZONE = 'mxinfo-inc.cn';
 const MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST = 'h2i.minsight-ai.com';
 const INTERNAL_PEER_STATUS_AUTO_REFRESH_MS = 30000;
+const MX_H2I_TOPOLOGY_CLIENT_LIMIT = 8;
+const MX_H2I_LEASE_PAGE_SIZE = 100;
+const LAUNCHER_NETWORK_LEASE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 
 function isLocalStaticAdminBaseUrl(value) {
   try {
@@ -295,6 +298,14 @@ const state = {
   launcherProductsError: null,
   launcherLeases: [],
   launcherLeasesError: null,
+  mxH2iLeaseFilter: {
+    query: '',
+    identity: 'all',
+    page: 1
+  },
+  anonymousPolicyBusyProductId: null,
+  anonymousPolicyFeedback: null,
+  mxH2iTopology: null,
   awxRuntimePolicies: [],
   awxRuntimePolicyBusy: false,
   awxRuntimePolicyFeedback: null,
@@ -903,6 +914,8 @@ async function boot() {
   renderStatus(status);
 }
 
+window.addEventListener('beforeunload', () => disposeMxH2iTopology());
+
 function adminNavFromElement(element) {
   return {
     menu: element.dataset.adminMenu,
@@ -928,6 +941,7 @@ function previewCollapsedAdminSubnav(tab) {
 }
 
 function setActiveView(view, nav = {}, options = {}) {
+  if (view === 'admin') disposeMxH2iTopology();
   if (view !== 'admin' && state.setupRun.active) {
     clearSetupRun('Stopped because the operator left I-HDO.', 'stopped');
   }
@@ -9967,6 +9981,8 @@ function fallbackLauncherProduct(productId) {
       feishuLeaseEnd: '10.89.99.254',
       anonymousLeaseStart: '10.89.100.1',
       anonymousLeaseEnd: '10.89.254.254',
+      anonymousEnrollmentPolicy: 'enabled',
+      anonymousUiVisibility: productId === MX_H2I_PRODUCT_ID ? 'advanced' : 'primary',
       defaultDomesticSiteId: 'domestic-main',
       updatePolicy: 'launcher-managed'
     };
@@ -9987,6 +10003,8 @@ function fallbackLauncherProduct(productId) {
       feishuLeaseEnd: '10.92.99.254',
       anonymousLeaseStart: '10.92.100.1',
       anonymousLeaseEnd: '10.92.254.254',
+      anonymousEnrollmentPolicy: 'enabled',
+      anonymousUiVisibility: 'primary',
       defaultDomesticSiteId: 'domestic-main',
       updatePolicy: 'launcher-managed'
     };
@@ -10007,6 +10025,8 @@ function fallbackLauncherProduct(productId) {
       feishuLeaseEnd: '10.90.99.254',
       anonymousLeaseStart: '10.90.100.1',
       anonymousLeaseEnd: '10.90.254.254',
+      anonymousEnrollmentPolicy: 'enabled',
+      anonymousUiVisibility: 'primary',
       defaultDomesticSiteId: 'domestic-main',
       updatePolicy: 'launcher-managed'
     };
@@ -10026,6 +10046,8 @@ function fallbackLauncherProduct(productId) {
     feishuLeaseEnd: '',
     anonymousLeaseStart: '',
     anonymousLeaseEnd: '',
+    anonymousEnrollmentPolicy: 'enabled',
+    anonymousUiVisibility: 'primary',
     defaultDomesticSiteId: 'domestic-main',
     updatePolicy: 'launcher-managed'
   };
@@ -11462,7 +11484,294 @@ function launcherLeaseRuntimeMetadataLabel(lease) {
   ].join(' / ');
 }
 
+function anonymousEnrollmentPolicyForProduct(product) {
+  const value = String(product?.anonymousEnrollmentPolicy || '').trim();
+  return ['enabled', 'drain', 'disabled'].includes(value) ? value : 'enabled';
+}
+
+function anonymousUiVisibilityForProduct(product) {
+  const value = String(product?.anonymousUiVisibility || '').trim();
+  if (['primary', 'advanced', 'hidden'].includes(value)) return value;
+  return product?.productId === MX_H2I_PRODUCT_ID ? 'advanced' : 'primary';
+}
+
+function mxH2iLeaseIdentityGroup(lease) {
+  if (lease?.identityKind === 'user') return 'employee';
+  if (lease?.identityKind === 'anonymous') return 'anonymous';
+  const thirdOctet = Number(String(lease?.leaseIp || '').split('.')[2]);
+  return Number.isInteger(thirdOctet) && thirdOctet < 100 ? 'employee' : 'anonymous';
+}
+
+function mxH2iLeaseIdentityLabel(lease) {
+  if (mxH2iLeaseIdentityGroup(lease) === 'anonymous') return 'Anonymous';
+  return lease?.leaseProfile === 'feishu' ? 'Employee · Feishu' : 'Employee · Password';
+}
+
+function mxH2iLeaseSubject(lease) {
+  if (mxH2iLeaseIdentityGroup(lease) === 'anonymous') return 'anonymous';
+  return String(lease?.userId || lease?.subject || lease?.account || 'employee');
+}
+
+function mxH2iLeaseSourceIp(lease) {
+  return String(lease?.sourceIp || '').trim() || 'not recorded';
+}
+
+function mxH2iLeaseDevice(lease) {
+  return String(lease?.deviceLabel || lease?.deviceModel || lease?.deviceId || lease?.installId || '-');
+}
+
+function mxH2iLeasePlatform(lease) {
+  return [lease?.platform, lease?.osVersion, lease?.appVersion ? `app ${lease.appVersion}` : '']
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join(' / ') || '-';
+}
+
+function mxH2iLeaseObservedAt(lease) {
+  return lease?.lastSeenAt || lease?.lastHandshakeAt || null;
+}
+
+function mxH2iLeaseRecordUpdatedAt(lease) {
+  return lease?.updatedAt || lease?.createdAt || null;
+}
+
+function mxH2iLeaseExpiryAt(lease) {
+  return lease?.expiresAt || null;
+}
+
+function mxH2iLeaseSearchText(lease) {
+  return [
+    mxH2iLeaseIdentityLabel(lease),
+    mxH2iLeaseSubject(lease),
+    mxH2iLeaseSourceIp(lease),
+    lease?.leaseIp,
+    mxH2iLeaseDevice(lease),
+    mxH2iLeasePlatform(lease),
+    lease?.leaseId,
+    lease?.appId
+  ].map((value) => String(value || '').toLowerCase()).join(' ');
+}
+
+function mxH2iLeasePage(leases, filter = {}) {
+  const query = String(filter.query || '').trim().toLowerCase();
+  const identity = ['employee', 'anonymous'].includes(filter.identity) ? filter.identity : 'all';
+  const filtered = asArray(leases).filter((lease) => (
+    (identity === 'all' || mxH2iLeaseIdentityGroup(lease) === identity)
+    && (!query || mxH2iLeaseSearchText(lease).includes(query))
+  ));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / MX_H2I_LEASE_PAGE_SIZE));
+  const requestedPage = Number.parseInt(filter.page, 10);
+  const page = Math.min(Math.max(Number.isFinite(requestedPage) ? requestedPage : 1, 1), totalPages);
+  const startIndex = (page - 1) * MX_H2I_LEASE_PAGE_SIZE;
+  return {
+    rows: filtered.slice(startIndex, startIndex + MX_H2I_LEASE_PAGE_SIZE),
+    page,
+    totalPages,
+    filteredCount: filtered.length,
+    totalCount: asArray(leases).length,
+    rangeStart: filtered.length ? startIndex + 1 : 0,
+    rangeEnd: Math.min(startIndex + MX_H2I_LEASE_PAGE_SIZE, filtered.length)
+  };
+}
+
+function renderMxH2iLeaseTableRow(lease) {
+  const identity = mxH2iLeaseIdentityGroup(lease);
+  const observedAt = mxH2iLeaseObservedAt(lease);
+  const recordUpdatedAt = mxH2iLeaseRecordUpdatedAt(lease);
+  const sourceIp = mxH2iLeaseSourceIp(lease);
+  const expiresAt = mxH2iLeaseExpiryAt(lease);
+  return `
+    <tr data-mx-h2i-lease-row data-identity="${escapeHtml(identity)}" data-search="${escapeHtml(mxH2iLeaseSearchText(lease))}">
+      <td><strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong><small>${escapeHtml(mxH2iLeaseIdentityLabel(lease))}</small></td>
+      <td><strong>${escapeHtml(sourceIp)}</strong><small>${sourceIp === 'not recorded' ? 'legacy lease' : 'enrollment / renewal HTTP source'}</small></td>
+      <td><strong>${escapeHtml(lease.leaseIp || '-')}</strong><small>${escapeHtml(lease.leaseId || '-')}</small></td>
+      <td><strong>${escapeHtml(mxH2iLeaseDevice(lease))}</strong><small>${escapeHtml(lease.installId || lease.deviceId || '-')}</small></td>
+      <td><strong>${escapeHtml(mxH2iLeasePlatform(lease))}</strong><small>${escapeHtml(lease.appId || MX_H2I_PRODUCT_ID)}</small></td>
+      <td><strong>${escapeHtml(observedAt ? formatTime(observedAt) : 'not observed')}</strong><small>${escapeHtml(recordUpdatedAt ? `record updated ${formatTime(recordUpdatedAt)}` : 'no runtime observation')}</small></td>
+      <td><strong>${escapeHtml(expiresAt ? formatTime(expiresAt) : '-')}</strong><small>${escapeHtml(lease.status || 'active')}</small></td>
+    </tr>
+  `;
+}
+
+function mxH2iLeasePageSummary(page) {
+  return `${page.rangeStart}-${page.rangeEnd} of ${page.filteredCount} matched · ${page.totalCount} total active · page ${page.page}/${page.totalPages}`;
+}
+
+function renderMxH2iTopologyFallback(leases, product) {
+  const visibleLeases = asArray(leases).slice(0, MX_H2I_TOPOLOGY_CLIENT_LIMIT);
+  const omitted = Math.max(0, leases.length - visibleLeases.length);
+  return `
+    <div class="mx-h2i-topology-fallback" data-mx-h2i-topology-fallback>
+      <div class="mx-h2i-topology-fallback-head">
+        <strong>Topology table fallback</strong>
+        <span>always available · static lease paths</span>
+      </div>
+      <div class="mx-h2i-topology-paths" role="table" aria-label="MX-H2I topology table fallback">
+        ${visibleLeases.map((lease) => `
+          <div role="row">
+            <strong role="cell">${escapeHtml(mxH2iLeaseDevice(lease))}</strong>
+            <span role="cell">${escapeHtml(lease.leaseIp || '-')}</span>
+            <small role="cell">client lease → Domestic</small>
+          </div>
+        `).join('') || '<div role="row"><strong role="cell">No client lease</strong><span role="cell">-</span><small role="cell">waiting for a static lease record</small></div>'}
+        ${omitted ? `<div role="row"><strong role="cell">+${escapeHtml(String(omitted))} more</strong><span role="cell">node cap</span><small role="cell">available in the detailed table</small></div>` : ''}
+        <div role="row"><strong role="cell">Domestic</strong><span role="cell">${escapeHtml(product?.domesticGatewayIp || MX_DOMESTIC_RELAY_IP)}</span><small role="cell">relay → Internal</small></div>
+        <div role="row"><strong role="cell">Internal</strong><span role="cell">${escapeHtml(product?.internalControlIp || MX_INTERNAL_DNS_IP)}</span><small role="cell">control / service plane</small></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderStandaloneAnonymousPolicy(product, options = {}) {
+  const productId = normalizeLauncherProductId(product?.productId || options.productId || MX_H2I_PRODUCT_ID);
+  const displayName = launcherProductDisplayName(productId, product);
+  const policy = anonymousEnrollmentPolicyForProduct(product);
+  const visibility = anonymousUiVisibilityForProduct(product);
+  const busy = state.anonymousPolicyBusyProductId === productId;
+  const feedback = state.anonymousPolicyFeedback?.productId === productId
+    ? state.anonymousPolicyFeedback
+    : null;
+  const sectionId = options.sectionId || 'standalone-anonymous-policy';
+  const description = options.description
+    || `This saves only ${displayName} ProductNetwork policy (${productId}). Embed apps inherit their standalone channel and cannot edit its policy from an embed detail.`;
+  return `
+    <section id="${escapeHtml(sectionId)}" class="mx-h2i-operations-panel standalone-anonymous-policy" aria-labelledby="${escapeHtml(`${sectionId}-title`)}">
+      <div class="mx-h2i-operations-head">
+        <div>
+          <span class="site-kind">Product-scoped governance</span>
+          <h4 id="${escapeHtml(`${sectionId}-title`)}">Anonymous enrollment policy</h4>
+          <p>${escapeHtml(description)}</p>
+        </div>
+        <span class="health-chip" data-health="${policy === 'enabled' ? 'passed' : policy === 'drain' ? 'ready' : 'blocked'}">${escapeHtml(policy)}</span>
+      </div>
+      <div class="standalone-anonymous-policy-grid" data-standalone-anonymous-policy-product="${escapeHtml(productId)}">
+        <label>
+          <span>Enrollment policy</span>
+          <select data-standalone-anonymous-policy ${busy ? 'disabled' : ''}>
+            <option value="enabled" ${policy === 'enabled' ? 'selected' : ''}>enabled · allow new anonymous enroll</option>
+            <option value="drain" ${policy === 'drain' ? 'selected' : ''}>drain · deny new enroll; capable existing lease may renew</option>
+            <option value="disabled" ${policy === 'disabled' ? 'selected' : ''}>disabled · deny anonymous enroll</option>
+          </select>
+        </label>
+        <label>
+          <span>Client UI visibility</span>
+          <select data-standalone-anonymous-visibility ${busy ? 'disabled' : ''}>
+            <option value="primary" ${visibility === 'primary' ? 'selected' : ''}>primary</option>
+            <option value="advanced" ${visibility === 'advanced' ? 'selected' : ''}>advanced${productId === MX_H2I_PRODUCT_ID ? ' · MX-H2I default' : ''}</option>
+            <option value="hidden" ${visibility === 'hidden' ? 'selected' : ''}>hidden</option>
+          </select>
+        </label>
+        <button class="primary-button" type="button" data-standalone-anonymous-policy-save data-product-id="${escapeHtml(productId)}" ${busy ? 'disabled' : ''}>${busy ? 'Saving policy' : `Save ${escapeHtml(displayName)} policy`}</button>
+      </div>
+      <div class="standalone-anonymous-policy-warning" role="note">
+        <strong>No automatic peer removal</strong>
+        <span>Changing enabled, drain, disabled, or UI visibility does not release leases, delete peers, disconnect clients, or alter employee enrollment. In drain, only a capability-authenticated existing anonymous lease may renew.</span>
+      </div>
+      ${feedback ? `<p class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</p>` : ''}
+    </section>
+  `;
+}
+
+function renderMxH2iOperationsScreen(product, leases) {
+  const activeLeases = asArray(leases);
+  const employeeLeases = activeLeases.filter((lease) => mxH2iLeaseIdentityGroup(lease) === 'employee');
+  const anonymousLeases = activeLeases.filter((lease) => mxH2iLeaseIdentityGroup(lease) === 'anonymous');
+  const sourceIpCount = activeLeases.filter((lease) => mxH2iLeaseSourceIp(lease) !== 'not recorded').length;
+  const leasePage = mxH2iLeasePage(activeLeases, state.mxH2iLeaseFilter);
+  return `
+    <nav class="mx-h2i-local-nav" aria-label="MX-H2I operations sections">
+      <a href="#mx-h2i-lease-overview">Overview</a>
+      <a href="#mx-h2i-topology">Topology</a>
+      <a href="#mx-h2i-connections">Connections</a>
+      <a href="#mx-h2i-policy">Anonymous policy</a>
+    </nav>
+
+    <section id="mx-h2i-lease-overview" class="mx-h2i-operations-panel" aria-labelledby="mx-h2i-lease-overview-title">
+      <div class="mx-h2i-operations-head">
+        <div>
+          <span class="site-kind">MX-H2I Operations</span>
+          <h4 id="mx-h2i-lease-overview-title">Lease control surface</h4>
+          <p>Active lease records are control-plane allocations. They are not proof of a live WireGuard session or a currently online client.</p>
+        </div>
+        <span class="health-chip" data-health="ready">STATIC DATA</span>
+      </div>
+      <div class="mx-h2i-lease-metrics">
+        <span><strong>${escapeHtml(String(activeLeases.length))}</strong><small>active lease records</small></span>
+        <span><strong>${escapeHtml(String(employeeLeases.length))}</strong><small>employees</small></span>
+        <span><strong>${escapeHtml(String(anonymousLeases.length))}</strong><small>anonymous</small></span>
+        <span><strong>${escapeHtml(String(sourceIpCount))}</strong><small>source IP recorded</small></span>
+      </div>
+      <div class="mx-h2i-static-data-notice" role="note">
+        <strong>Static lease ≠ real-time online</strong>
+        <span>sourceIp is the most recent enrollment or renewal HTTP source IP, not a WireGuard endpoint. “Last seen” remains not observed until runtime telemetry exists.</span>
+      </div>
+      <div class="product-network-actions">
+        <button class="secondary-button" type="button" data-selected-app-domestic>Domestic Setup</button>
+      </div>
+    </section>
+
+    <section id="mx-h2i-topology" class="mx-h2i-operations-panel" aria-labelledby="mx-h2i-topology-title">
+      <div class="mx-h2i-operations-head">
+        <div>
+          <span class="site-kind">3D Topology</span>
+          <h4 id="mx-h2i-topology-title">Client lease → Domestic → Internal</h4>
+          <p>Up to ${escapeHtml(String(MX_H2I_TOPOLOGY_CLIENT_LIMIT))} client lease nodes are rendered. Remaining leases stay available in the table.</p>
+        </div>
+        <span class="health-chip" data-health="ready" data-mx-h2i-topology-status>INITIALIZING</span>
+      </div>
+      <div class="mx-h2i-topology-layout">
+        <div class="mx-h2i-topology-stage">
+          <canvas data-mx-h2i-topology-canvas aria-hidden="true"></canvas>
+          <div class="mx-h2i-topology-overlay" aria-hidden="true">
+            <span>CLIENTS</span><span>DOMESTIC</span><span>INTERNAL</span>
+          </div>
+        </div>
+        ${renderMxH2iTopologyFallback(activeLeases, product)}
+      </div>
+    </section>
+
+    <section id="mx-h2i-connections" class="mx-h2i-operations-panel" aria-labelledby="mx-h2i-connections-title">
+      <div class="mx-h2i-operations-head">
+        <div>
+          <span class="site-kind">Lease inventory</span>
+          <h4 id="mx-h2i-connections-title">Detailed client lease records</h4>
+          <p>Filter static active leases by identity, user, IP, device, platform, lease ID, or app ID.</p>
+        </div>
+        <span class="mx-h2i-filter-count" data-mx-h2i-filter-count>${escapeHtml(mxH2iLeasePageSummary(leasePage))}</span>
+      </div>
+      <div class="mx-h2i-lease-filters">
+        <input type="search" data-mx-h2i-lease-query value="${escapeHtml(state.mxH2iLeaseFilter.query)}" placeholder="Search user, source IP, assigned IP, device…" aria-label="Search MX-H2I leases" />
+        <select data-mx-h2i-lease-identity aria-label="Filter MX-H2I leases by identity">
+          <option value="all" ${state.mxH2iLeaseFilter.identity === 'all' ? 'selected' : ''}>All identities</option>
+          <option value="employee" ${state.mxH2iLeaseFilter.identity === 'employee' ? 'selected' : ''}>Employees</option>
+          <option value="anonymous" ${state.mxH2iLeaseFilter.identity === 'anonymous' ? 'selected' : ''}>Anonymous</option>
+        </select>
+      </div>
+      <div class="mx-h2i-lease-table-wrap">
+        <table class="mx-h2i-lease-table">
+          <thead><tr><th>Identity / user</th><th>Source IP</th><th>Assigned IP</th><th>Device</th><th>Platform</th><th>Last seen / record</th><th>Expiry / status</th></tr></thead>
+          <tbody data-mx-h2i-lease-body>
+            ${leasePage.rows.map((lease) => renderMxH2iLeaseTableRow(lease)).join('')}
+          </tbody>
+        </table>
+        <div class="empty-state" data-mx-h2i-filter-empty ${leasePage.filteredCount ? 'hidden' : ''}>No active MX-H2I lease record matches this filter.</div>
+      </div>
+      <div class="mx-h2i-lease-pagination" aria-label="MX-H2I lease table pagination">
+        <button class="secondary-button" type="button" data-mx-h2i-lease-page="previous" ${leasePage.page <= 1 ? 'disabled' : ''}>Previous 100</button>
+        <span data-mx-h2i-page-label>Page ${escapeHtml(String(leasePage.page))} of ${escapeHtml(String(leasePage.totalPages))}</span>
+        <button class="secondary-button" type="button" data-mx-h2i-lease-page="next" ${leasePage.page >= leasePage.totalPages ? 'disabled' : ''}>Next 100</button>
+      </div>
+    </section>
+
+    ${renderStandaloneAnonymousPolicy(product, {
+      sectionId: 'mx-h2i-policy',
+      description: 'This saves only MX-H2I ProductNetwork policy. Luopan and other standalone apps keep their own values.'
+    })}
+  `;
+}
+
 function renderSelectedAppDetail() {
+  disposeMxH2iTopology();
   if (!appSelectedDetail) return;
   const app = activeAppCenterApp();
   const mode = launcherModeForApp(app);
@@ -11470,7 +11779,11 @@ function renderSelectedAppDetail() {
   const product = launcherProductNetwork(productId);
   const channelProductId = standaloneChannelIdForApp(app);
   const channelProduct = launcherProductNetwork(channelProductId);
-  const leases = launcherLeasesForProduct(channelProductId).filter((lease) => launcherLeaseIsRuntimeClient(lease));
+  const leases = launcherLeasesForProduct(channelProductId).filter((lease) => (
+    app.appId === MX_H2I_PRODUCT_ID
+      ? launcherLeaseIsActiveClientRecord(lease)
+      : launcherLeaseIsRuntimeClient(lease)
+  ));
   const mxH2iSmokeLeases = launcherLeasesForProduct(MX_H2I_PRODUCT_ID);
   const latestLease = leases[0] || null;
   const error = state.appCenterAppsError || state.launcherProductsError || state.launcherLeasesError || '';
@@ -11514,6 +11827,8 @@ function renderSelectedAppDetail() {
 
       ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
 
+      ${app.appId === MX_H2I_PRODUCT_ID ? renderMxH2iOperationsScreen(product, leases) : ''}
+
       ${renderInsightHubOverviewCard(app)}
 
       <section class="product-network-panel app-workbench-network" aria-label="Selected application network">
@@ -11534,6 +11849,10 @@ function renderSelectedAppDetail() {
           <span><strong>${escapeHtml(formatLeaseRange(channelProduct?.feishuLeaseStart, channelProduct?.feishuLeaseEnd))}</strong><small>Feishu employees</small></span>
         </div>
       </section>
+
+      ${mode === 'standalone' && app.appId !== MX_H2I_PRODUCT_ID
+        ? renderStandaloneAnonymousPolicy(product)
+        : ''}
 
       ${renderSelectedAppServiceVipSmoke(app)}
 
@@ -11599,30 +11918,32 @@ function renderSelectedAppDetail() {
           <span><strong>${escapeHtml(`${app.appId || 'app'}.launcher`)}</strong><small>sdk namespace</small></span>
           <span><strong>${escapeHtml(channelProduct.defaultDomesticSiteId || 'domestic-main')}</strong><small>domestic relay</small></span>
           <span><strong>${escapeHtml(product.updatePolicy || 'launcher-managed')}</strong><small>update policy</small></span>
-          <span><strong>${escapeHtml(String(leases.length))}</strong><small>runtime leases</small></span>
+          <span><strong>${escapeHtml(String(leases.length))}</strong><small>${app.appId === MX_H2I_PRODUCT_ID ? 'active lease records' : 'runtime leases'}</small></span>
         </div>
       </section>
 
-      <section class="product-network-panel app-workbench-leases" aria-label="Launcher leases">
-        <div class="product-network-head">
-          <div>
-            <strong>Runtime Leases</strong>
-            <span>${escapeHtml(channelLabel)} channel clients</span>
+      ${app.appId === MX_H2I_PRODUCT_ID ? '' : `
+        <section class="product-network-panel app-workbench-leases" aria-label="Launcher leases">
+          <div class="product-network-head">
+            <div>
+              <strong>Runtime Leases</strong>
+              <span>${escapeHtml(channelLabel)} channel clients</span>
+            </div>
           </div>
-        </div>
-        <div class="product-lease-list">
-          ${leases.slice(0, 4).map((lease) => `
-            <article>
-              <strong>${escapeHtml(lease.leaseIp || '-')}</strong>
-              <span>${escapeHtml(`${lease.identityKind || 'identity'} / ${lease.leaseProfile || 'legacy-profile'} / ${lease.launcherMode || 'mode'} / ${lease.deviceLabel || lease.deviceId || '-'}`)}</span>
-              <small title="${escapeHtml(launcherLeaseRuntimeMetadataLabel(lease))}">${escapeHtml(launcherLeaseRuntimeMetadataLabel(lease))}</small>
-            </article>
-          `).join('') || '<div class="empty-state">No Launcher client lease yet.</div>'}
-        </div>
-        <div class="product-network-actions">
-          <button class="secondary-button" type="button" data-selected-app-domestic>Domestic Setup</button>
-        </div>
-      </section>
+          <div class="product-lease-list">
+            ${leases.slice(0, 4).map((lease) => `
+              <article>
+                <strong>${escapeHtml(lease.leaseIp || '-')}</strong>
+                <span>${escapeHtml(`${lease.identityKind || 'identity'} / ${lease.leaseProfile || 'legacy-profile'} / ${lease.launcherMode || 'mode'} / ${lease.deviceLabel || lease.deviceId || '-'}`)}</span>
+                <small title="${escapeHtml(launcherLeaseRuntimeMetadataLabel(lease))}">${escapeHtml(launcherLeaseRuntimeMetadataLabel(lease))}</small>
+              </article>
+            `).join('') || '<div class="empty-state">No Launcher client lease yet.</div>'}
+          </div>
+          <div class="product-network-actions">
+            <button class="secondary-button" type="button" data-selected-app-domestic>Domestic Setup</button>
+          </div>
+        </section>
+      `}
 
       ${app.appId === MX_H2I_PRODUCT_ID ? `
         <details class="product-network-advanced" ${mxH2iSmokeLeases.length ? '' : 'open'}>
@@ -11699,6 +12020,114 @@ function renderSelectedAppDetail() {
     domesticSetupButton.addEventListener('click', () => {
       openDomesticSetupFromServiceVip(app);
     });
+  }
+  if (mode === 'standalone') bindStandaloneAnonymousPolicyControls(appSelectedDetail);
+  if (app.appId === MX_H2I_PRODUCT_ID) {
+    bindMxH2iOperationsControls(appSelectedDetail, leases);
+    const mxH2iTopologyCanvas = appSelectedDetail.querySelector('[data-mx-h2i-topology-canvas]');
+    requestAnimationFrame(() => {
+      if (mxH2iTopologyCanvas?.isConnected
+        && mxH2iTopologyCanvas === appSelectedDetail.querySelector('[data-mx-h2i-topology-canvas]')
+        && state.activeView === 'app-center'
+        && state.activeAppNode === MX_H2I_PRODUCT_ID) {
+        initMxH2iTopology(appSelectedDetail, leases);
+      }
+    });
+  }
+}
+
+function applyMxH2iLeaseFilters(root, leases) {
+  const page = mxH2iLeasePage(leases, state.mxH2iLeaseFilter);
+  state.mxH2iLeaseFilter.page = page.page;
+  const body = root.querySelector('[data-mx-h2i-lease-body]');
+  if (body) body.innerHTML = page.rows.map((lease) => renderMxH2iLeaseTableRow(lease)).join('');
+  const count = root.querySelector('[data-mx-h2i-filter-count]');
+  if (count) count.textContent = mxH2iLeasePageSummary(page);
+  const empty = root.querySelector('[data-mx-h2i-filter-empty]');
+  if (empty) empty.hidden = page.filteredCount > 0;
+  const label = root.querySelector('[data-mx-h2i-page-label]');
+  if (label) label.textContent = `Page ${page.page} of ${page.totalPages}`;
+  const previous = root.querySelector('[data-mx-h2i-lease-page="previous"]');
+  if (previous) previous.disabled = page.page <= 1;
+  const next = root.querySelector('[data-mx-h2i-lease-page="next"]');
+  if (next) next.disabled = page.page >= page.totalPages;
+}
+
+function bindMxH2iOperationsControls(root, leases) {
+  const query = root.querySelector('[data-mx-h2i-lease-query]');
+  if (query) {
+    query.addEventListener('input', () => {
+      state.mxH2iLeaseFilter.query = query.value || '';
+      state.mxH2iLeaseFilter.page = 1;
+      applyMxH2iLeaseFilters(root, leases);
+    });
+  }
+  const identity = root.querySelector('[data-mx-h2i-lease-identity]');
+  if (identity) {
+    identity.addEventListener('change', () => {
+      state.mxH2iLeaseFilter.identity = ['employee', 'anonymous'].includes(identity.value) ? identity.value : 'all';
+      state.mxH2iLeaseFilter.page = 1;
+      applyMxH2iLeaseFilters(root, leases);
+    });
+  }
+  for (const button of root.querySelectorAll('[data-mx-h2i-lease-page]')) {
+    button.addEventListener('click', () => {
+      state.mxH2iLeaseFilter.page += button.dataset.mxH2iLeasePage === 'next' ? 1 : -1;
+      applyMxH2iLeaseFilters(root, leases);
+    });
+  }
+  state.mxH2iLeaseFilter.page = mxH2iLeasePage(leases, state.mxH2iLeaseFilter).page;
+}
+
+function bindStandaloneAnonymousPolicyControls(root) {
+  const save = root.querySelector('[data-standalone-anonymous-policy-save]');
+  if (save) save.addEventListener('click', () => void saveStandaloneAnonymousPolicy(root, save.dataset.productId));
+}
+
+async function saveStandaloneAnonymousPolicy(root, productId) {
+  if (state.anonymousPolicyBusyProductId) return;
+  const normalizedProductId = normalizeLauncherProductId(productId);
+  const current = launcherProductNetwork(normalizedProductId);
+  const policyValue = root.querySelector('[data-standalone-anonymous-policy]')?.value;
+  const visibilityValue = root.querySelector('[data-standalone-anonymous-visibility]')?.value;
+  const anonymousEnrollmentPolicy = ['enabled', 'drain', 'disabled'].includes(policyValue) ? policyValue : 'enabled';
+  const anonymousUiVisibility = ['primary', 'advanced', 'hidden'].includes(visibilityValue)
+    ? visibilityValue
+    : anonymousUiVisibilityForProduct(current);
+  state.anonymousPolicyBusyProductId = normalizedProductId;
+  state.anonymousPolicyFeedback = {
+    productId: normalizedProductId,
+    kind: 'info',
+    message: `Saving ${normalizedProductId} anonymous policy without changing leases or peers.`
+  };
+  renderSelectedAppDetail();
+  try {
+    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(normalizedProductId)}`, {
+      method: 'POST',
+      body: {
+        anonymousEnrollmentPolicy,
+        anonymousUiVisibility,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-anonymous-policy-${Date.now()}`
+      }
+    });
+    upsertLocalLauncherProduct({
+      ...current,
+      ...(payload?.product || {}),
+      productId: normalizedProductId,
+      anonymousEnrollmentPolicy: payload?.product?.anonymousEnrollmentPolicy || anonymousEnrollmentPolicy,
+      anonymousUiVisibility: payload?.product?.anonymousUiVisibility || anonymousUiVisibility
+    });
+    state.anonymousPolicyFeedback = {
+      productId: normalizedProductId,
+      kind: 'success',
+      message: `${launcherProductDisplayName(normalizedProductId, payload?.product)} saved: ${anonymousEnrollmentPolicy} / ${anonymousUiVisibility}. Existing leases and peers were not changed.`
+    };
+  } catch (error) {
+    state.anonymousPolicyFeedback = { productId: normalizedProductId, kind: 'error', message: error.message };
+  } finally {
+    state.anonymousPolicyBusyProductId = null;
+    renderSelectedAppDetail();
   }
 }
 
@@ -16283,8 +16712,7 @@ function leaseLooksGeneratedBySmoke(lease) {
     lease?.updatedBy,
     lease?.leaseKey
   ].map((value) => String(value || '').toLowerCase());
-  return values.some((value) => value.startsWith('dev_')
-    || value.startsWith('desktop-admin')
+  return values.some((value) => value.startsWith('desktop-admin')
     || value.includes('desktop-admin')
     || value.includes('http-smoke')
     || value.includes('smoke'));
@@ -16297,6 +16725,19 @@ function launcherLeaseIsRuntimeClient(lease) {
     && lease?.publicKey
     && lease?.status === 'active'
     && !leaseLooksGeneratedBySmoke(lease);
+}
+
+function launcherLeaseIsActiveClientRecord(lease, now = new Date()) {
+  if (!launcherLeaseIsStandalone(lease)
+    || !lease?.leaseId
+    || !lease?.leaseIp
+    || lease?.status !== 'active'
+    || leaseLooksGeneratedBySmoke(lease)) return false;
+  const nowMs = now.getTime();
+  const expiresAt = Date.parse(lease.expiresAt || '');
+  if (Number.isFinite(expiresAt)) return expiresAt > nowMs;
+  const updatedAt = Date.parse(lease.updatedAt || lease.createdAt || '');
+  return Number.isFinite(updatedAt) ? updatedAt + LAUNCHER_NETWORK_LEASE_TTL_MS > nowMs : true;
 }
 
 function selectableLauncherLeases() {
@@ -16999,6 +17440,261 @@ function sameAction(a, b) {
 
 function formatJson(value) {
   return JSON.stringify(value, null, 2);
+}
+
+function mxH2iTopologyGraph(leases) {
+  const clients = asArray(leases)
+    .slice()
+    .sort((left, right) => String(left?.leaseIp || left?.leaseId || '').localeCompare(String(right?.leaseIp || right?.leaseId || '')))
+    .slice(0, MX_H2I_TOPOLOGY_CLIENT_LIMIT);
+  const center = (clients.length - 1) / 2;
+  const nodes = clients.map((lease, index) => ({
+    id: `client:${lease.leaseId || lease.leaseIp || index}`,
+    kind: mxH2iLeaseIdentityGroup(lease),
+    label: String(lease.leaseIp || 'C').split('.').pop() || 'C',
+    name: mxH2iLeaseDevice(lease),
+    position: [-4.8, (center - index) * Math.min(1.05, 4.6 / Math.max(1, clients.length - 1)), (index % 2 ? -0.35 : 0.35)],
+    lease
+  }));
+  nodes.push(
+    { id: 'domestic', kind: 'domestic', label: 'D', name: 'Domestic', position: [0, 0.5, 0] },
+    { id: 'internal', kind: 'internal', label: 'I', name: 'Internal', position: [4.5, -0.35, 0] }
+  );
+  return {
+    nodes,
+    links: [
+      ...clients.map((lease, index) => ({
+        from: `client:${lease.leaseId || lease.leaseIp || index}`,
+        to: 'domestic',
+        kind: mxH2iLeaseIdentityGroup(lease)
+      })),
+      { from: 'domestic', to: 'internal', kind: 'internal' }
+    ],
+    omitted: Math.max(0, asArray(leases).length - clients.length)
+  };
+}
+
+function mxH2iTopologyColor(kind, theme = topologyTheme()) {
+  if (kind === 'employee') return theme.info;
+  if (kind === 'anonymous') return theme.archetype;
+  if (kind === 'domestic') return theme.success;
+  return theme.primary;
+}
+
+function initMxH2iTopology(root, leases) {
+  const canvas = root?.querySelector?.('[data-mx-h2i-topology-canvas]');
+  const status = root?.querySelector?.('[data-mx-h2i-topology-status]');
+  if (!canvas || !canvas.isConnected) return;
+  disposeMxH2iTopology();
+  let instance = null;
+  let renderer = null;
+  let scene = null;
+  try {
+    const theme = topologyTheme();
+    renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      alpha: true
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(theme.canvas, 0);
+    scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
+    camera.position.set(0, 3.7, 13.5);
+    camera.lookAt(0, 0, 0);
+    const sceneRoot = new THREE.Group();
+    scene.add(sceneRoot);
+    scene.add(new THREE.AmbientLight(0xffffff, 1.15));
+    const key = new THREE.DirectionalLight(0xffffff, 1.5);
+    key.position.set(2, 4, 5);
+    scene.add(key);
+
+    const graph = mxH2iTopologyGraph(leases);
+    const nodes = new Map();
+    for (const spec of graph.nodes) {
+      const color = mxH2iTopologyColor(spec.kind, theme);
+      const group = new THREE.Group();
+      group.position.set(...spec.position);
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(spec.kind === 'employee' || spec.kind === 'anonymous' ? 0.28 : 0.46, 24, 16),
+        new THREE.MeshStandardMaterial({
+          color,
+          roughness: 0.3,
+          metalness: 0.28,
+          emissive: color,
+          emissiveIntensity: 0.18
+        })
+      );
+      const halo = new THREE.Mesh(
+        new THREE.SphereGeometry(spec.kind === 'employee' || spec.kind === 'anonymous' ? 0.46 : 0.76, 24, 16),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.11, depthWrite: false })
+      );
+      const label = createTopologyLabel(spec.label, spec.name, theme);
+      label.position.set(0, spec.kind === 'employee' || spec.kind === 'anonymous' ? -0.62 : -0.92, 0);
+      label.scale.multiplyScalar(spec.kind === 'employee' || spec.kind === 'anonymous' ? 0.74 : 1);
+      group.add(halo, sphere, label);
+      group.userData = { id: spec.id, kind: spec.kind, sphere, halo };
+      sceneRoot.add(group);
+      nodes.set(spec.id, group);
+    }
+
+    const links = graph.links.map((spec) => createTopologyLink(
+      nodes.get(spec.from),
+      nodes.get(spec.to),
+      mxH2iTopologyColor(spec.kind, theme)
+    ));
+    for (const link of links) sceneRoot.add(link.group);
+
+    const reducedMotionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)') || null;
+    instance = {
+      renderer,
+      scene,
+      camera,
+      root: sceneRoot,
+      canvas,
+      status,
+      nodes,
+      links,
+      graph,
+      animationFrameId: null,
+      resizeObserver: null,
+      resizeFallback: null,
+      reducedMotionQuery,
+      reducedMotion: reducedMotionQuery?.matches === true,
+      visibilityHandler: null,
+      motionHandler: null,
+      disposed: false,
+      lastWidth: 0,
+      lastHeight: 0
+    };
+    state.mxH2iTopology = instance;
+    instance.visibilityHandler = () => syncMxH2iTopologyAnimation(instance);
+    instance.motionHandler = () => {
+      instance.reducedMotion = instance.reducedMotionQuery?.matches === true;
+      if (instance.status) instance.status.textContent = instance.reducedMotion ? 'STATIC · REDUCED MOTION' : 'STATIC LEASE 3D';
+      syncMxH2iTopologyAnimation(instance);
+      if (instance.reducedMotion) renderMxH2iTopologyFrame(instance, 0);
+    };
+    document.addEventListener('visibilitychange', instance.visibilityHandler);
+    instance.reducedMotionQuery?.addEventListener?.('change', instance.motionHandler);
+    if (typeof window.ResizeObserver === 'function') {
+      instance.resizeObserver = new window.ResizeObserver(() => resizeMxH2iTopology(instance));
+      instance.resizeObserver.observe(canvas.parentElement || canvas);
+    } else {
+      instance.resizeFallback = () => resizeMxH2iTopology(instance);
+      window.addEventListener('resize', instance.resizeFallback);
+    }
+    resizeMxH2iTopology(instance);
+    renderMxH2iTopologyFrame(instance, 0);
+    syncMxH2iTopologyAnimation(instance);
+    if (status) status.textContent = instance.reducedMotion ? 'STATIC · REDUCED MOTION' : 'STATIC LEASE 3D';
+  } catch {
+    if (instance) {
+      disposeMxH2iTopologyInstance(instance);
+      if (state.mxH2iTopology === instance) state.mxH2iTopology = null;
+    } else if (renderer || scene) {
+      disposeMxH2iTopologyInstance({ renderer, scene, animationFrameId: null, disposed: false });
+    }
+    canvas.hidden = true;
+    if (status) {
+      status.dataset.health = 'blocked';
+      status.textContent = 'TABLE FALLBACK';
+      status.title = 'WebGL unavailable; the topology and connection tables remain available.';
+    }
+  }
+}
+
+function renderMxH2iTopologyFrame(instance, elapsed = 0) {
+  if (!instance || instance.disposed) return;
+  instance.root.rotation.y = instance.reducedMotion ? 0.02 : Math.sin(elapsed * 0.2) * 0.065;
+  for (const node of instance.nodes.values()) {
+    const pulse = instance.reducedMotion ? 1 : 1 + Math.sin(elapsed * 2.2 + node.position.x) * 0.025;
+    node.scale.setScalar(pulse);
+  }
+  for (const link of instance.links) {
+    for (const particle of link.particles) {
+      const t = instance.reducedMotion
+        ? particle.userData.offset
+        : (elapsed * 0.16 + particle.userData.offset) % 1;
+      particle.position.copy(link.curve.getPointAt(t));
+    }
+  }
+  instance.renderer.render(instance.scene, instance.camera);
+}
+
+function mxH2iTopologyCanAnimate(instance) {
+  return Boolean(instance)
+    && !instance.disposed
+    && !instance.reducedMotion
+    && !document.hidden
+    && state.activeView === 'app-center'
+    && state.activeAppNode === MX_H2I_PRODUCT_ID
+    && instance.canvas.isConnected;
+}
+
+function syncMxH2iTopologyAnimation(instance = state.mxH2iTopology) {
+  if (!instance || instance.disposed) return;
+  if (!mxH2iTopologyCanAnimate(instance)) {
+    if (instance.animationFrameId !== null) {
+      cancelAnimationFrame(instance.animationFrameId);
+      instance.animationFrameId = null;
+    }
+    return;
+  }
+  if (instance.animationFrameId !== null) return;
+  instance.animationFrameId = requestAnimationFrame((timestamp) => {
+    instance.animationFrameId = null;
+    if (!mxH2iTopologyCanAnimate(instance)) return;
+    renderMxH2iTopologyFrame(instance, timestamp / 1000);
+    syncMxH2iTopologyAnimation(instance);
+  });
+}
+
+function resizeMxH2iTopology(instance = state.mxH2iTopology) {
+  if (!instance || instance.disposed || !instance.canvas.isConnected) return;
+  const rect = instance.canvas.getBoundingClientRect();
+  const width = Math.floor(rect.width);
+  const height = Math.floor(rect.height);
+  if (width <= 0 || height <= 0) return;
+  if (width !== instance.lastWidth || height !== instance.lastHeight) {
+    instance.lastWidth = width;
+    instance.lastHeight = height;
+    instance.renderer.setSize(width, height, false);
+    instance.camera.aspect = width / height;
+    instance.camera.updateProjectionMatrix();
+  }
+  if (instance.animationFrameId === null) renderMxH2iTopologyFrame(instance, 0);
+}
+
+function disposeMxH2iTopologyInstance(instance) {
+  if (!instance || instance.disposed) return;
+  instance.disposed = true;
+  if (instance.animationFrameId !== null) cancelAnimationFrame(instance.animationFrameId);
+  instance.animationFrameId = null;
+  instance.resizeObserver?.disconnect?.();
+  if (instance.resizeFallback) window.removeEventListener('resize', instance.resizeFallback);
+  if (instance.visibilityHandler) document.removeEventListener('visibilitychange', instance.visibilityHandler);
+  instance.reducedMotionQuery?.removeEventListener?.('change', instance.motionHandler);
+  instance.scene?.traverse?.((object) => {
+    object.geometry?.dispose?.();
+    const materials = Array.isArray(object.material) ? object.material : object.material ? [object.material] : [];
+    for (const material of materials) {
+      for (const value of Object.values(material)) {
+        if (value?.isTexture) value.dispose();
+      }
+      material.dispose?.();
+    }
+  });
+  instance.renderer?.renderLists?.dispose?.();
+  instance.renderer?.dispose?.();
+  instance.renderer?.forceContextLoss?.();
+}
+
+function disposeMxH2iTopology() {
+  const instance = state.mxH2iTopology;
+  if (!instance) return;
+  disposeMxH2iTopologyInstance(instance);
+  if (state.mxH2iTopology === instance) state.mxH2iTopology = null;
 }
 
 function initTopologyScene() {

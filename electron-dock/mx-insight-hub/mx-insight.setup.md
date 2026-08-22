@@ -148,6 +148,19 @@ Content-Type: application/json
 }
 ```
 
+```bash
+# 重建索引
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+
+MX_INSIGHT_SYNC_LAUNCHER=0 \
+  bash scripts/manage.sh ops internal-production deploy
+
+kubectl -n mx-insight-hub rollout status \
+  deployment/mx-insight-hub-projector --timeout=180s
+
+bash scripts/manage.sh reindex-search
+```
+
 
 ```bash
 # Hub API 参考

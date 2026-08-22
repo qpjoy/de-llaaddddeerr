@@ -5,9 +5,11 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Headers,
   Inject,
+  Ip,
   NotFoundException,
   Param,
   Post,
@@ -25,6 +27,7 @@ import {
   mintLauncherLeaseCapability
 } from '../../lib/launcher-lease-auth.js';
 import {
+  LauncherAnonymousEnrollmentPolicyError,
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseMatchesProfile,
   launcherNetworkLeaseProfile,
@@ -124,7 +127,8 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     @Headers('authorization') authorization: string | undefined,
     @Body() rawBody: unknown,
     @Headers(LAUNCHER_LEASE_CAPABILITY_HEADER) leaseCapability?: string,
-    @Headers(NEW_LAUNCHER_LEASE_CAPABILITY_HEADER) newLeaseCapability?: string
+    @Headers(NEW_LAUNCHER_LEASE_CAPABILITY_HEADER) newLeaseCapability?: string,
+    @Ip() sourceIp?: string
   ) {
     const body = asRecord(rawBody);
     const requestedUserId = nullableString(body.userId);
@@ -274,31 +278,43 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     const capabilityExpiresAt = new Date(
       Date.now() + 180 * 24 * 60 * 60 * 1000
     ).toISOString();
-    const lease = await this.store.enrollLauncherNetworkLease({
-      appId: nullableString(body.appId),
-      productId: nullableString(body.productId),
-      mode: nullableString(body.mode),
-      identityKind: nullableString(body.identityKind),
-      leaseProfile: auth.leaseProfile,
-      installId: requestedInstallId,
-      deviceId: requestedDeviceId,
-      siteId: nullableString(body.siteId),
-      userId: auth.userId,
-      publicKey: requestedPublicKey,
-      deviceLabel: nullableString(body.deviceLabel),
-      platform: nullableString(body.platform),
-      deviceModel: nullableString(body.deviceModel),
-      osVersion: nullableString(body.osVersion),
-      appVersion: nullableString(body.appVersion),
-      requestedBy: nullableString(body.requestedBy),
-      requestId: nullableString(body.requestId),
-      sdkTestMode: body.sdkTestMode === true ? true : nullableString(body.sdkTestMode),
-      capabilityDigest: capability.digest,
-      capabilityVersion: capability.version,
-      capabilityExpiresAt,
-      legacyCapabilityClaimLeaseIds,
-      replacementForLeaseId
-    });
+    const anonymousRenewalLeaseId = !auth.userId
+      && previousAnonymousLease
+      && Boolean(previousAnonymousLease.capabilityDigest)
+      ? previousAnonymousLease.leaseId
+      : null;
+    let lease: LauncherNetworkLease;
+    try {
+      lease = await this.store.enrollLauncherNetworkLease({
+        appId: nullableString(body.appId),
+        productId: nullableString(body.productId),
+        mode: nullableString(body.mode),
+        identityKind: nullableString(body.identityKind),
+        leaseProfile: auth.leaseProfile,
+        installId: requestedInstallId,
+        deviceId: requestedDeviceId,
+        siteId: nullableString(body.siteId),
+        userId: auth.userId,
+        publicKey: requestedPublicKey,
+        deviceLabel: nullableString(body.deviceLabel),
+        platform: nullableString(body.platform),
+        deviceModel: nullableString(body.deviceModel),
+        osVersion: nullableString(body.osVersion),
+        appVersion: nullableString(body.appVersion),
+        sourceIp: sourceIp?.trim() || null,
+        requestedBy: nullableString(body.requestedBy),
+        requestId: nullableString(body.requestId),
+        sdkTestMode: body.sdkTestMode === true ? true : nullableString(body.sdkTestMode),
+        capabilityDigest: capability.digest,
+        capabilityVersion: capability.version,
+        capabilityExpiresAt,
+        legacyCapabilityClaimLeaseIds,
+        replacementForLeaseId,
+        anonymousRenewalLeaseId
+      });
+    } catch (error) {
+      rethrowAnonymousEnrollmentPolicyError(error);
+    }
     const handoverLeases = (await Promise.all(
       ownedPublicKeyLeases
         .filter((candidate) => candidate.leaseId !== lease.leaseId)
@@ -325,7 +341,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
   async listLeases(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
     assertInternalOpsToken(opsToken);
     return {
-      leases: (await this.store.listLauncherNetworkLeases()).map((lease) => publicLauncherLease(lease))
+      leases: (await this.store.listLauncherNetworkLeases()).map((lease) => opsLauncherLease(lease))
     };
   }
 
@@ -337,7 +353,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     assertInternalOpsToken(opsToken);
     const lease = await this.store.getLauncherNetworkLease(leaseId);
     if (!lease) throw new NotFoundException('Launcher network lease not found');
-    return { lease: publicLauncherLease(lease) };
+    return { lease: opsLauncherLease(lease) };
   }
 
   @Post('leases/:leaseId/release')
@@ -508,6 +524,8 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
         rateLimitProfile: nullableString(body.rateLimitProfile),
         dnsPolicyId: nullableString(body.dnsPolicyId),
         licensePolicyId: nullableString(body.licensePolicyId),
+        anonymousEnrollmentPolicy: launcherAnonymousEnrollmentPolicyInput(body.anonymousEnrollmentPolicy),
+        anonymousUiVisibility: launcherAnonymousUiVisibilityInput(body.anonymousUiVisibility),
         enabled: typeof body.enabled === 'boolean' ? body.enabled : null,
         requestedBy: nullableString(body.requestedBy),
         requestId: nullableString(body.requestId)
@@ -988,18 +1006,59 @@ function launcherPeerSyncError(result: {
   return 'Launcher peer sync did not pass';
 }
 
+function rethrowAnonymousEnrollmentPolicyError(error: unknown): never {
+  if (error instanceof LauncherAnonymousEnrollmentPolicyError) {
+    throw new ForbiddenException({
+      code: error.code,
+      message: error.message
+    });
+  }
+  throw error;
+}
+
 function publicLauncherLease(
   lease: LauncherNetworkLease,
   capability?: string
-): Omit<LauncherNetworkLease, 'capabilityDigest' | 'capabilityVersion' | 'capabilityExpiresAt'>
+): Omit<LauncherNetworkLease, 'capabilityDigest' | 'capabilityVersion' | 'capabilityExpiresAt' | 'sourceIp'>
   & { capability?: string } {
+  const {
+    capabilityDigest: _capabilityDigest,
+    capabilityVersion: _capabilityVersion,
+    capabilityExpiresAt: _capabilityExpiresAt,
+    sourceIp: _sourceIp,
+    ...safeLease
+  } = lease;
+  return capability ? { ...safeLease, capability } : safeLease;
+}
+
+function opsLauncherLease(
+  lease: LauncherNetworkLease
+): Omit<LauncherNetworkLease, 'capabilityDigest' | 'capabilityVersion' | 'capabilityExpiresAt'> {
   const {
     capabilityDigest: _capabilityDigest,
     capabilityVersion: _capabilityVersion,
     capabilityExpiresAt: _capabilityExpiresAt,
     ...safeLease
   } = lease;
-  return capability ? { ...safeLease, capability } : safeLease;
+  return safeLease;
+}
+
+function launcherAnonymousEnrollmentPolicyInput(
+  value: unknown
+): 'enabled' | 'drain' | 'disabled' | null {
+  if (value === undefined || value === null) return null;
+  const policy = typeof value === 'string' ? value.trim() : '';
+  if (policy === 'enabled' || policy === 'drain' || policy === 'disabled') return policy;
+  throw new BadRequestException('anonymousEnrollmentPolicy must be enabled, drain, or disabled');
+}
+
+function launcherAnonymousUiVisibilityInput(
+  value: unknown
+): 'primary' | 'advanced' | 'hidden' | null {
+  if (value === undefined || value === null) return null;
+  const visibility = typeof value === 'string' ? value.trim() : '';
+  if (visibility === 'primary' || visibility === 'advanced' || visibility === 'hidden') return visibility;
+  throw new BadRequestException('anonymousUiVisibility must be primary, advanced, or hidden');
 }
 
 async function authorizedLeaseIdentity(

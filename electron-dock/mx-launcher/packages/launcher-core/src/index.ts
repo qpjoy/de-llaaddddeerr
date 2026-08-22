@@ -3,6 +3,8 @@ export type LauncherIdentityKind = 'user' | 'anonymous';
 export type LauncherLeaseProfile = 'employee' | 'feishu' | 'anonymous';
 export type LauncherProductUpdatePolicy = 'launcher-managed' | 'app-managed' | 'host-managed';
 export type LauncherNetworkScope = 'owner' | 'broker-session';
+export type LauncherAnonymousEnrollmentPolicy = 'enabled' | 'drain' | 'disabled';
+export type LauncherAnonymousUiVisibility = 'primary' | 'advanced' | 'hidden';
 
 export const launcherProtocolVersion = '2';
 export const launcherProtocolMajor = 2;
@@ -323,6 +325,8 @@ export interface LauncherProductNetworkInput {
   rateLimitProfile?: string | null;
   dnsPolicyId?: string | null;
   licensePolicyId?: string | null;
+  anonymousEnrollmentPolicy?: LauncherAnonymousEnrollmentPolicy | string | null;
+  anonymousUiVisibility?: LauncherAnonymousUiVisibility | string | null;
   enabled?: boolean | null;
   requestedBy?: string | null;
   requestId?: string | null;
@@ -354,6 +358,8 @@ export interface LauncherProductNetwork {
   rateLimitProfile: string;
   dnsPolicyId: string;
   licensePolicyId: string;
+  anonymousEnrollmentPolicy: LauncherAnonymousEnrollmentPolicy;
+  anonymousUiVisibility: LauncherAnonymousUiVisibility;
   enabled: boolean;
   notes: string[];
   createdBy: string;
@@ -368,6 +374,7 @@ export interface LauncherNetworkLease {
   capability?: string;
   handoverLeases?: LauncherNetworkLease[];
   environment: string;
+  appId?: string | null;
   productId: string;
   launcherMode: LauncherProductMode;
   identityKind: LauncherIdentityKind;

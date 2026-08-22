@@ -1049,9 +1049,20 @@ assert.match(
 const employeeUiSource = functionSource(rendererSource, 'renderEmployeeLogin');
 assert.match(employeeUiSource, /data-action="\$\{feishuAction\}"/);
 assert.match(employeeUiSource, /使用飞书登录/);
-assert.match(employeeUiSource, /data-action="\$\{guestActive \? 'disconnect' : 'connectGuest'\}"/);
-assert.match(employeeUiSource, /使用访客连接/);
+assert.doesNotMatch(
+  employeeUiSource,
+  /connectGuest|使用访客连接/,
+  'the default employee login must not expose idle anonymous enrollment'
+);
+assert.match(employeeUiSource, /data-action="disconnect"/);
 assert.match(employeeUiSource, /仅断开访客模式/);
 assert.match(employeeUiSource, /当前访客 IP/);
+assert.match(employeeUiSource, /data-action="show-advanced"/);
 
-console.log('Feishu loopback OAuth and guest-preserving UI safety tests passed');
+const anonymousUiSource = functionSource(rendererSource, 'renderAnonymousAccessPanel');
+assert.match(anonymousUiSource, /const action = connected \? 'disconnect' : 'connectGuest'/);
+assert.match(anonymousUiSource, /renderConnectionRecoverySteps\(retainedGuest\)/);
+assert.match(anonymousUiSource, /data-action="resetLocalNetworkIdentity"/);
+assert.match(anonymousUiSource, /员工网络正在使用中/);
+
+console.log('Feishu loopback OAuth and advanced anonymous-entry safety tests passed');

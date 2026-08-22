@@ -201,6 +201,7 @@ import {
   buildLauncherNetworkTopology,
   buildLauncherNetworkReachabilityPlan,
   buildLauncherNetworkLease,
+  assertLauncherAnonymousEnrollmentPolicy,
   nextAvailableLauncherNetworkLeaseSequence,
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseKey,
@@ -870,6 +871,7 @@ export class PostgresStore implements PlatformStore {
       publicKey: input.publicKey,
       deviceLabel: input.deviceLabel,
       platform: input.platform,
+      sourceIp: input.sourceIp,
       requestedBy: 'anonymous-enrollment',
       requestId: input.requestId
     });
@@ -903,6 +905,7 @@ export class PostgresStore implements PlatformStore {
       metadata: {
         platform: input.platform ?? null,
         deviceLabel: input.deviceLabel ?? null,
+        sourceIp: input.sourceIp ?? null,
         hasPublicKey: Boolean(input.publicKey)
       }
     });
@@ -2901,16 +2904,24 @@ export class PostgresStore implements PlatformStore {
   }
 
   async upsertLauncherProductNetwork(input: LauncherProductNetworkInput): Promise<LauncherProductNetwork> {
-    const previous = input.productId ? await this.getLauncherProductNetwork(input.productId) : null;
-    const product = buildLauncherProductNetwork(this.config, input, previous);
-    assertLauncherProductLeaseIsolation(product, await this.listLauncherProductNetworks());
-    if (product.mode === 'embed') {
-      const channel = await this.getLauncherProductNetwork(product.standaloneChannelProductId);
-      if (!channel || channel.mode !== 'standalone' || !channel.enabled) {
-        throw new Error(`Embed product ${product.productId} requires an enabled launcher standalone channel: ${product.standaloneChannelProductId}`);
+    const productId = input.productId?.trim().toLowerCase();
+    if (!productId) throw new Error('Launcher product network requires productId');
+    const product = await this.dataSource.transaction(async (manager) => {
+      await this.lockLauncherProductNetwork(manager, productId);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const products = await this.listRecordsFrom<LauncherProductNetwork>(records, 'launcher-product-network');
+      const previous = products.find((candidate) => candidate.productId === productId) ?? null;
+      const next = buildLauncherProductNetwork(this.config, input, previous);
+      assertLauncherProductLeaseIsolation(next, products);
+      if (next.mode === 'embed') {
+        const channel = products.find((candidate) => candidate.productId === next.standaloneChannelProductId);
+        if (!channel || channel.mode !== 'standalone' || !channel.enabled) {
+          throw new Error(`Embed product ${next.productId} requires an enabled launcher standalone channel: ${next.standaloneChannelProductId}`);
+        }
       }
-    }
-    await this.saveRecord('launcher-product-network', product.productId, product, this.config.siteId);
+      await this.saveRecordTo(records, 'launcher-product-network', next.productId, next, this.config.siteId);
+      return next;
+    });
     await this.recordAudit({
       eventType: 'launcher_network.product_network.upserted',
       actorKind: 'config-center',
@@ -2927,7 +2938,9 @@ export class PostgresStore implements PlatformStore {
         userLeaseRange: [product.userLeaseStart, product.userLeaseEnd],
         feishuLeaseRange: [product.feishuLeaseStart, product.feishuLeaseEnd],
         anonymousLeaseRange: [product.anonymousLeaseStart, product.anonymousLeaseEnd],
-        updatePolicy: product.updatePolicy
+        updatePolicy: product.updatePolicy,
+        anonymousEnrollmentPolicy: product.anonymousEnrollmentPolicy,
+        anonymousUiVisibility: product.anonymousUiVisibility
       }
     });
     return product;
@@ -3072,6 +3085,7 @@ export class PostgresStore implements PlatformStore {
     };
     const allocation = await this.dataSource.transaction(async (manager) => {
       const records = manager.getRepository(PlatformRecordEntity);
+      await this.lockLauncherProductNetwork(manager, product.productId);
       await this.lockLauncherNetworkLeasePool(manager, product.productId, leaseProfile);
       if (normalizedInput.publicKey?.trim()) {
         await this.lockLauncherNetworkPublicKey(manager, normalizedInput.publicKey.trim());
@@ -3079,8 +3093,31 @@ export class PostgresStore implements PlatformStore {
       const leaseKey = launcherNetworkLeaseKey(normalizedInput, product);
       const now = new Date();
       const nowIso = now.toISOString();
+      const currentProducts = await this.listRecordsFrom<LauncherProductNetwork>(records, 'launcher-product-network');
+      const admissionProduct = currentProducts.find((candidate) => candidate.productId === product.productId)
+        ?? product;
       const allLeases = await this.listRecordsFrom<LauncherNetworkLease>(records, 'launcher-network-lease');
       const leases = allLeases.filter((lease) => lease.productId === product.productId);
+      const previous = leases.find((lease) => (
+        launcherNetworkLeaseIsActive(lease, now)
+        && launcherNetworkLeaseProfile(lease.leaseProfile, lease.identityKind) === leaseProfile
+        && launcherNetworkLeaseMatchesProfile(product, leaseProfile, lease)
+        && (
+          lease.leaseKey === leaseKey
+          || (
+            !lease.leaseProfile
+            && lease.identityKind === identityKind
+            && lease.installId === installId
+            && (identityKind === 'anonymous' || lease.userId === normalizedInput.userId)
+          )
+        )
+      )) ?? null;
+      assertLauncherAnonymousEnrollmentPolicy(
+        normalizedInput,
+        admissionProduct,
+        previous,
+        now
+      );
       const legacyCapabilityClaimLeaseIds = [...new Set(
         normalizedInput.legacyCapabilityClaimLeaseIds?.map((leaseId) => leaseId.trim()).filter(Boolean) ?? []
       )];
@@ -3143,20 +3180,6 @@ export class PostgresStore implements PlatformStore {
       if (publicKeyConflict) {
         throw new Error(`WireGuard publicKey is already owned by ${publicKeyConflict.installId}/${publicKeyConflict.deviceId}`);
       }
-      const previous = leases.find((lease) => (
-        launcherNetworkLeaseIsActive(lease, now)
-        && launcherNetworkLeaseProfile(lease.leaseProfile, lease.identityKind) === leaseProfile
-        && launcherNetworkLeaseMatchesProfile(product, leaseProfile, lease)
-        && (
-          lease.leaseKey === leaseKey
-          || (
-            !lease.leaseProfile
-            && lease.identityKind === identityKind
-            && lease.installId === installId
-            && (identityKind === 'anonymous' || lease.userId === normalizedInput.userId)
-          )
-        )
-      )) ?? null;
       if (
         previous?.publicKey
         && normalizedInput.publicKey?.trim()
@@ -3215,6 +3238,7 @@ export class PostgresStore implements PlatformStore {
         deviceModel: lease.deviceModel,
         osVersion: lease.osVersion,
         appVersion: lease.appVersion,
+        sourceIp: lease.sourceIp,
         sdkTestMode
       }
     });
@@ -5639,7 +5663,25 @@ export class PostgresStore implements PlatformStore {
         || existing.anonymousLeaseStart !== product.anonymousLeaseStart
         || existing.anonymousLeaseEnd !== product.anonymousLeaseEnd
       );
+      const anonymousPolicyNeedsBackfill = ![
+        'enabled',
+        'drain',
+        'disabled'
+      ].includes(existing.anonymousEnrollmentPolicy)
+        || !['primary', 'advanced', 'hidden'].includes(existing.anonymousUiVisibility);
       if (hasCompleteFeishuPool && !automatedPoolMigrationNeedsRepair) {
+        if (anonymousPolicyNeedsBackfill) {
+          const migrated = buildLauncherProductNetwork(this.config, {
+            productId: existing.productId,
+            requestedBy: 'builtin-anonymous-policy-backfill'
+          }, existing);
+          await this.saveRecord(
+            'launcher-product-network',
+            migrated.productId,
+            migrated,
+            this.config.siteId
+          );
+        }
         continue;
       }
       const migrated = buildLauncherProductNetwork(this.config, {
@@ -5664,18 +5706,23 @@ export class PostgresStore implements PlatformStore {
     }
     const persistedProducts = await this.listRecords<LauncherProductNetwork>('launcher-product-network');
     for (const existing of persistedProducts) {
-      if (
+      const hasCompleteFeishuPool = Boolean(
         existing.feishuCidr
         && existing.feishuLeaseStart
         && existing.feishuLeaseEnd
-      ) {
+      );
+      const hasAnonymousPolicy = ['enabled', 'drain', 'disabled'].includes(existing.anonymousEnrollmentPolicy)
+        && ['primary', 'advanced', 'hidden'].includes(existing.anonymousUiVisibility);
+      if (hasCompleteFeishuPool && hasAnonymousPolicy) {
         continue;
       }
       let migrated: LauncherProductNetwork;
       try {
         migrated = buildLauncherProductNetwork(this.config, {
           productId: existing.productId,
-          requestedBy: 'persisted-feishu-pool-migration'
+          requestedBy: hasCompleteFeishuPool
+            ? 'persisted-anonymous-policy-backfill'
+            : 'persisted-feishu-pool-migration'
         }, existing);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -5833,6 +5880,16 @@ export class PostgresStore implements PlatformStore {
     await manager.query(
       'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
       [`mx-launcher:${this.config.environment}:${productId}`, `launcher-network-lease:${leaseProfile}`]
+    );
+  }
+
+  private async lockLauncherProductNetwork(
+    manager: EntityManager,
+    productId: string
+  ): Promise<void> {
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`mx-launcher:${this.config.environment}`, `launcher-product-network:${productId}`]
     );
   }
 

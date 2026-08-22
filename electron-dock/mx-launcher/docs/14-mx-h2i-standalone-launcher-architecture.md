@@ -2,6 +2,8 @@
 
 > 访客 / 员工快速切换、互斥规则、跨进程事件与实测性能基线见
 > [21-network-mode-switch-events-and-performance.md](./21-network-mode-switch-events-and-performance.md)。
+> MX-H2I 专属运营控制面、ProductNetwork 匿名准入、实时连接/3D 拓扑与未来安全下线见
+> [28-mx-h2i-connection-operations-and-anonymous-governance.md](./28-mx-h2i-connection-operations-and-anonymous-governance.md)。
 
 本文档定义新的 MX-H2I 客户端、Launcher standalone/embed 两种运行模式、AppCenter/H2O
 接入方式、Mesh/IP 规划，以及本地开发、npm 发版和桌面打包方案。

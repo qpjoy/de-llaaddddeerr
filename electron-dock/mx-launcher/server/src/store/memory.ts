@@ -128,6 +128,7 @@ import {
   verifyUserCenterServiceAccountSecret,
   required,
   MX_H2I_PRODUCT_ID,
+  assertLauncherAnonymousEnrollmentPolicy,
   assertLauncherNetworkLeaseEntitlement,
   launcherNetworkAppIdForLeaseInput,
   launcherNetworkLeaseProductId,
@@ -773,6 +774,7 @@ export class MemoryStore implements PlatformStore {
       publicKey: input.publicKey,
       deviceLabel: input.deviceLabel,
       platform: input.platform,
+      sourceIp: input.sourceIp,
       requestedBy: 'anonymous-enrollment',
       requestId: input.requestId
     });
@@ -806,6 +808,7 @@ export class MemoryStore implements PlatformStore {
       metadata: {
         platform: input.platform ?? null,
         deviceLabel: input.deviceLabel ?? null,
+        sourceIp: input.sourceIp ?? null,
         hasPublicKey: Boolean(input.publicKey)
       }
     });
@@ -2416,7 +2419,9 @@ export class MemoryStore implements PlatformStore {
         userLeaseRange: [product.userLeaseStart, product.userLeaseEnd],
         feishuLeaseRange: [product.feishuLeaseStart, product.feishuLeaseEnd],
         anonymousLeaseRange: [product.anonymousLeaseStart, product.anonymousLeaseEnd],
-        updatePolicy: product.updatePolicy
+        updatePolicy: product.updatePolicy,
+        anonymousEnrollmentPolicy: product.anonymousEnrollmentPolicy,
+        anonymousUiVisibility: product.anonymousUiVisibility
       }
     });
     return product;
@@ -2515,6 +2520,26 @@ export class MemoryStore implements PlatformStore {
     const now = new Date();
     const allLeases = [...this.launcherNetworkLeases.values()];
     const leases = allLeases.filter((lease) => lease.productId === product.productId);
+    const previous = leases.find((lease) => (
+      launcherNetworkLeaseIsActive(lease, now)
+      && launcherNetworkLeaseProfile(lease.leaseProfile, lease.identityKind) === leaseProfile
+      && launcherNetworkLeaseMatchesProfile(product, leaseProfile, lease)
+      && (
+        lease.leaseKey === leaseKey
+        || (
+          !lease.leaseProfile
+          && lease.identityKind === identityKind
+          && lease.installId === installId
+          && (identityKind === 'anonymous' || lease.userId === normalizedInput.userId)
+        )
+      )
+    )) ?? null;
+    assertLauncherAnonymousEnrollmentPolicy(
+      normalizedInput,
+      requestedProduct.mode === 'standalone' ? requestedProduct : product,
+      previous,
+      now
+    );
     const legacyCapabilityClaimLeaseIds = [...new Set(
       normalizedInput.legacyCapabilityClaimLeaseIds?.map((leaseId) => leaseId.trim()).filter(Boolean) ?? []
     )];
@@ -2563,20 +2588,6 @@ export class MemoryStore implements PlatformStore {
     if (publicKeyConflict) {
       throw new Error(`WireGuard publicKey is already owned by ${publicKeyConflict.installId}/${publicKeyConflict.deviceId}`);
     }
-    const previous = leases.find((lease) => (
-      launcherNetworkLeaseIsActive(lease, now)
-      && launcherNetworkLeaseProfile(lease.leaseProfile, lease.identityKind) === leaseProfile
-      && launcherNetworkLeaseMatchesProfile(product, leaseProfile, lease)
-      && (
-        lease.leaseKey === leaseKey
-        || (
-          !lease.leaseProfile
-          && lease.identityKind === identityKind
-          && lease.installId === installId
-          && (identityKind === 'anonymous' || lease.userId === normalizedInput.userId)
-        )
-      )
-    )) ?? null;
     if (
       previous?.publicKey
       && normalizedInput.publicKey?.trim()
@@ -2626,6 +2637,7 @@ export class MemoryStore implements PlatformStore {
         deviceModel: lease.deviceModel,
         osVersion: lease.osVersion,
         appVersion: lease.appVersion,
+        sourceIp: lease.sourceIp,
         sdkTestMode
       }
     });

@@ -707,6 +707,8 @@ export interface AnonymousEnrollmentRequest {
   publicKey?: string;
   relayMode?: string;
   requestId?: string;
+  /** Server-derived request IP; never copied from the enrollment body. */
+  sourceIp?: string;
 }
 
 export interface AnonymousEnrollment {
@@ -2277,6 +2279,8 @@ export type LauncherIdentityKind = 'user' | 'anonymous';
 export type LauncherLeaseProfile = 'employee' | 'feishu' | 'anonymous';
 export type LauncherProductUpdatePolicy = 'launcher-managed' | 'app-managed' | 'host-managed';
 export type LauncherNetworkScope = 'owner' | 'broker-session';
+export type LauncherAnonymousEnrollmentPolicy = 'enabled' | 'drain' | 'disabled';
+export type LauncherAnonymousUiVisibility = 'primary' | 'advanced' | 'hidden';
 
 export interface LauncherProductNetworkInput {
   productId?: string | null;
@@ -2304,6 +2308,8 @@ export interface LauncherProductNetworkInput {
   rateLimitProfile?: string | null;
   dnsPolicyId?: string | null;
   licensePolicyId?: string | null;
+  anonymousEnrollmentPolicy?: LauncherAnonymousEnrollmentPolicy | string | null;
+  anonymousUiVisibility?: LauncherAnonymousUiVisibility | string | null;
   enabled?: boolean | null;
   requestedBy?: string | null;
   requestId?: string | null;
@@ -2336,6 +2342,8 @@ export interface LauncherProductNetwork {
   rateLimitProfile: string;
   dnsPolicyId: string;
   licensePolicyId: string;
+  anonymousEnrollmentPolicy: LauncherAnonymousEnrollmentPolicy;
+  anonymousUiVisibility: LauncherAnonymousUiVisibility;
   enabled: boolean;
   notes: string[];
   createdBy: string;
@@ -2360,6 +2368,7 @@ export interface LauncherNetworkLeaseInput {
   deviceModel?: string | null;
   osVersion?: string | null;
   appVersion?: string | null;
+  sourceIp?: string | null;
   requestedBy?: string | null;
   requestId?: string | null;
   sdkTestMode?: boolean | string | null;
@@ -2369,6 +2378,12 @@ export interface LauncherNetworkLeaseInput {
   generation?: number | null;
   legacyCapabilityClaimLeaseIds?: string[];
   replacementForLeaseId?: string | null;
+  /**
+   * Server-internal proof that the request renewed an already-authorized
+   * anonymous lease. Controllers must derive this from the stored lease and
+   * capability validation; request bodies are never copied into this field.
+   */
+  anonymousRenewalLeaseId?: string | null;
 }
 
 export interface LauncherNetworkLeaseReleaseInput {
@@ -2380,6 +2395,8 @@ export interface LauncherNetworkLease {
   leaseId: string;
   leaseKey: string;
   environment: string;
+  /** App that requested the lease. Older records may not contain this field. */
+  appId?: string | null;
   productId: string;
   launcherMode: LauncherProductMode;
   identityKind: LauncherIdentityKind;
@@ -2402,6 +2419,8 @@ export interface LauncherNetworkLease {
   deviceModel?: string | null;
   osVersion?: string | null;
   appVersion?: string | null;
+  /** HTTP enrollment source captured by Internal; never accepted from public request bodies. */
+  sourceIp?: string | null;
   status: 'active' | 'released';
   expiresAt: string;
   releasedAt: string | null;
