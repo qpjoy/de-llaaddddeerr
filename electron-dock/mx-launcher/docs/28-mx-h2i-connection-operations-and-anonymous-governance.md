@@ -1,10 +1,12 @@
 # MX-H2I 连接运营控制面、匿名准入与安全下线设计
 
-> 状态：目标架构与分阶段实施约束。
+> 状态：仓库当前实现基线 + 后续目标架构与分阶段实施约束。
 >
 > 本文定义 MX-H2I 专属运营工作区、按 ProductNetwork 管理的匿名准入策略、实时连接
 > 观测、3D 拓扑，以及未来批量下线匿名 WireGuard peer 时必须满足的安全状态机。
-> 本文不表示所有 API 和 UI 已经实现；“当前基线”和“目标能力”会分别说明。
+> 截至 2026-08-22，专属 Dashboard、静态连接表/抽屉、ProductNetwork 匿名策略、
+> 产品级用户 ban/unban 与 blocked inventory 已进入仓库实现；runtime collector、真实在线
+> 拓扑、peer-safe revoke、流量与端口策略仍是目标能力。实现与目标在下文分别说明。
 >
 > V1/V2、standalone/embed、IP 与系统网络 owner 的权威边界仍以
 > [14-mx-h2i-standalone-launcher-architecture.md](./14-mx-h2i-standalone-launcher-architecture.md)
@@ -37,18 +39,33 @@
    endpoint、latest handshake 和 transfer 观测关联。
 10. enrollment `sourceIp` 只能由服务端从可信 HTTP 请求上下文捕获，不能接受请求体伪造；
     当前 WG endpoint 应另建字段，并标为“观测到的 NAT endpoint”。
+11. 产品级用户 ban 只改变指定 ProductNetwork 的 admission，并 release 该产品匹配的
+    active 控制面 lease；它不禁用全局用户、不撤销用户 token，也不表示 WG peer 已移除。
+12. 匿名连接没有 `userId`，当前连接抽屉不得把用户 ban 伪装成匿名单客户端封禁；匿名新
+    准入使用 ProductNetwork 策略，已有 peer 的安全下线仍走后续 revoke saga。
 
 ## 2. 本期范围与明确非目标
 
-### 2.1 本期可以落地
+### 2.1 仓库当前实现基线
 
-- 在 ProductNetwork 上保存、读取和审计匿名准入与 UI visibility。
-- MX-H2I 将“新建访客连接”入口移到高级选项。
-- 服务端在匿名 enrollment/renewal 边界执行 ProductNetwork 策略；已有 snapshot 继续由
-  lease capability 保护，直到后续受控 revoke，策略切换本身不冒充断线动作。
-- Admin 按应用解析有效 ProductNetwork，显示策略、静态 lease、源 IP 和风险提示。
-- 建立只读实时连接 snapshot 与 3D 拓扑的数据契约。
-- 提供未来 bulk revoke 的 dry-run 设计和安全状态机，不执行自动 peer 删除。
+- ProductNetwork 已保存并返回 `anonymousEnrollmentPolicy` 与
+  `anonymousUiVisibility`；服务端在匿名 enrollment/renewal 边界强制执行。
+- MX-H2I 默认把新建访客入口放在高级选项；员工密码、飞书登录和已连接访客的断开路径
+  保持原行为。
+- Desktop 左侧已有独立 `MX-H2I Dashboard` 入口。Dashboard 汇总静态 active lease、
+  employee/anonymous/source IP/blocked-user 数量，提供静态 3D lease 路径和 table fallback。
+- Connections 表支持完整静态 inventory 的搜索、身份过滤和每页 100 条分页；行可打开
+  连接抽屉。抽屉明确区分 HTTP source IP、数据库更新时间和尚未观测的 WG runtime。
+- 员工连接抽屉可执行 `mx-h2i` ProductNetwork 范围的用户 ban/unban；被 ban 的用户保留
+  在 blocked inventory 中，即使其 active MX-H2I lease 已被 release，仍可从 Admin unban。
+- Dashboard 的匿名快速开关固定写入 `productId=mx-h2i`；Luopan 的 standalone 产品页写
+  `productId=luopan`，两者不是 Launcher 全局开关。
+- 当前产品级 ban、lease release 与匿名策略切换都不会执行或确认 Domestic/Internal
+  WireGuard peer removal；API 与 UI 均返回/显示该边界。
+
+当前 Dashboard 数据仍是 Internal DB 静态记录，不是实时在线面。runtime collector、真实
+handshake/RX/TX/endpoint、peer-safe revoke、细粒度敏感字段 RBAC/掩码以及流量/端口控制
+仍按 §8–§12 的目标设计实施。
 
 ### 2.2 本期明确不做
 
@@ -288,6 +305,39 @@ CLI 与 GUI 使用同一 V2 Launcher Network enrollment。`requestedBy`、User-A
 HTTP sourceIp 只说明 enrollment 请求来自哪里，不证明 WireGuard 当前 endpoint，更不能作为
 稳定设备身份、授权条件或未来流控主键。
 
+### 5.5 当前产品级用户访问 API
+
+当前 Admin 使用以下 Internal ops 接口；三条接口都必须携带有效 `x-mx-ops-token`：
+
+| 接口 | 语义 |
+| --- | --- |
+| `GET /internal/v1/launcher-network/products/{productId}/user-access` | 列出该 ProductNetwork 的 blocked users inventory |
+| `GET /internal/v1/launcher-network/products/{productId}/users/{userId}/access` | 读取指定用户在该 ProductNetwork 的 admission 状态与最近 lease 摘要 |
+| `POST /internal/v1/launcher-network/products/{productId}/users/{userId}/access` | 以严格 boolean `blocked` 设置 ban/unban；可带 `reason`、`requestId` |
+
+inventory 与单用户响应都返回 `controlPlane` 和 `runtimePeerRemoval`；即使最近 lease 已是
+`released`，也必须继续明确 `runtimePeerRemoval=not-performed`，不能让 API 消费者推断 peer 已删除。
+
+ban 使用 `UserCenterUser.appAccess.deniedAppIds` 保存精确 ProductNetwork ID，并在 enrollment、
+snapshot 与用户持有的 peer 操作入口执行。拒绝为 HTTP 403，稳定 code 是
+`launcher_product_user_access_denied`，响应包含被拒绝的 `productId` 与 `userId`。
+
+`blocked=true` 的当前语义是：
+
+1. 只把目标 ProductNetwork 加入该用户的 denied set；
+2. release 该用户在目标 ProductNetwork 的 active 控制面 leases；
+3. 保持 User Center 用户 `status=active`，不撤销已有 token；
+4. 不 release 其他 ProductNetwork 的 lease；
+5. `runtimePeerRemoval.status/domestic/internalDirect` 明确为 `not-performed`。
+
+`blocked=false` 只恢复该 ProductNetwork 的 admission，不重新创建 lease、capability 或 peer。
+重复 ban/unban 必须幂等并写 audit。对 `mx-h2i` 执行 ban 后，同一用户仍可使用 Luopan；
+反向亦然。这里的作用域是 standalone channel ProductNetwork：共享 `mx-h2i` channel 的 embed
+网络 lease 仍属于 `mx-h2i`，业务应用自身授权应继续使用 AppCenter/RBAC。
+
+匿名 lease 没有 User Center `userId`，所以当前接口不提供匿名单客户端 ban。Admin 对匿名
+行只引导到 MX-H2I anonymous policy，不得声称已经封禁或移除该客户端 peer。
+
 ## 6. MX-H2I 客户端体验
 
 ### 6.1 主连接页
@@ -327,7 +377,50 @@ MX-H2I 默认 `advanced` 后：
 
 ## 7. MX-H2I 专属 Admin 工作区
 
-### 7.1 信息架构
+### 7.1 当前专属 Dashboard
+
+Desktop 左侧把 `MX-H2I Dashboard` 作为独立一级入口，不再要求操作员先在通用 Apps 树中
+寻找 MX-H2I。当前 Dashboard 包含：
+
+- 显式标注 `mx-h2i only` 的匿名 admission 状态和 enable/disable 快速操作；
+- 静态 active lease、employee、anonymous、已记录 source IP、blocked-user 指标；
+- `Client lease -> Domestic -> Internal` 静态 3D 图，最多渲染 8 个客户端节点，并始终保留
+  table fallback；
+- 可搜索、按身份过滤、分页的 Connections 表；
+- 被 MX-H2I ban 的用户 inventory；
+- 完整 `enabled | drain | disabled` 与 `primary | advanced | hidden` 策略编辑器；
+- 回到通用 Product settings、Domestic Setup 和刷新入口。
+
+Dashboard 的 `STATIC DATA`、`Static lease != real-time online` 提示是产品契约，不得为了
+视觉“大屏”效果去掉。Three.js 节点和动画不能产生在线、已断开或 peer 已删除的结论。
+
+### 7.2 当前 Connections 抽屉与用户控制
+
+Connections 行支持点击、Enter 和 Space 打开 `role=dialog` 的抽屉；抽屉支持 Close、
+backdrop 和 Escape 关闭，并应把焦点还给触发行。后续修改必须继续验证焦点约束和键盘
+可达性，不能只验鼠标路径。
+
+抽屉展示 identity/user、assigned IP、source IP、lease/install/device、platform、记录时间
+和 expiry，但不返回 capability、private key 或完整 public key。当前 source IP 仅在持有
+ops token 的 Admin 中显示；默认掩码与独立 sensitive-read 权限仍是 §13 的目标能力。
+
+员工行的 ban/unban confirmation 必须同时写明：
+
+- 作用域只有 ProductNetwork `mx-h2i`，Luopan 不受影响；
+- ban 会 release 匹配的 active 控制面 leases；
+- token 和全局用户状态不变；
+- WireGuard peer removal 未执行、未确认；
+- unban 只恢复 admission，不重建 lease/peer。
+
+匿名行不展示伪造的“Ban user”动作，只能打开 MX-H2I anonymous policy。未来 Revoke WG
+peer、Traffic limits、Port policy 在没有后端 reconcile/evidence 前只能是 disabled planned
+controls，不能成为无效或误导性的按钮。
+
+blocked inventory 是可恢复操作面：ban 后 active row 会从 active Connections 消失，但用户
+仍必须在 inventory 中可打开并 unban；即使用户从未拥有 MX-H2I lease，也不能要求数据库
+手工恢复。
+
+### 7.3 目标信息架构
 
 MX-H2I 不应只埋在通用 Apps 树下。建议顶层工作区：
 
@@ -342,7 +435,7 @@ MX-H2I 不应只埋在通用 Apps 树下。建议顶层工作区：
 通用 Apps 页面继续负责 app 注册、mode、channel、capabilities、RBAC 和发布；MX-H2I
 工作区负责网络产品运营。
 
-### 7.2 Overview
+### 7.4 目标 Overview
 
 建议至少显示：
 
@@ -357,7 +450,7 @@ MX-H2I 不应只埋在通用 Apps 树下。建议顶层工作区：
 
 所有卡片必须标注数据时间和来源，不能把不同 freshness 的数字拼成同一个“实时”总数。
 
-### 7.3 Connections 表
+### 7.5 目标 Connections 表
 
 表格是运维事实的主要入口，3D 不是表格替代品。建议字段：
 
@@ -770,6 +863,18 @@ Internal desired policy
 | V1 HDO | `100.*` 用户、匿名、DNS、插件和在线连接不变 |
 | 后续 standalone | 只读取自己的 ProductNetwork 策略 |
 
+产品级用户访问还必须覆盖：
+
+| 场景 | 必须结果 |
+| --- | --- |
+| 同一用户同时有 MX-H2I 与 Luopan active lease，ban `mx-h2i` | 只 release MX-H2I 控制面 lease；Luopan lease/renew/enroll 保持可用 |
+| ban `mx-h2i` 后重新登录/换设备 enroll | MX-H2I 返回 `launcher_product_user_access_denied`；用户 token 与全局 `status` 仍 active |
+| MX-H2I password 与 Feishu 身份 | 同一 Internal userId 都受该产品 ban；未 ban 用户的两类登录不回归 |
+| unban `mx-h2i` | admission 恢复；不自动创建 lease、capability 或 WG peer |
+| 重复 ban / 重复 unban | 幂等、有 audit，不重复影响 Luopan 或其他用户 |
+| 匿名 Connections 行 | 不显示用户 ban 成功语义；只进入 ProductNetwork anonymous policy |
+| blocked inventory 无 active/历史 lease | 仍可读取状态并 unban，不依赖 active row |
+
 ### 16.3 网络与切换
 
 - guest → employee/Feishu 认证失败、取消、超时保留 guest；
@@ -804,16 +909,22 @@ Internal desired policy
 
 本期验收至少满足：
 
-1. MX-H2I 新建访客入口默认只在高级选项；
-2. ProductNetwork 可独立保存 admission 与 visibility；
-3. MX-H2I 与 Luopan 策略互不影响；
-4. disabled 在服务端拒绝 GUI、旧客户端和 CLI anonymous enrollment；
-5. employee/Feishu 登录和现有连接切换测试全部通过；
-6. Admin 明确区分 policy、lease 和 live peer；
-7. sourceIp 由服务端捕获，body 无法覆盖；
-8. 文档、UI 和 API 不宣称本期会自动删除 peer；
-9. 未来 bulk revoke 设计具备 revoking、saga、双平面确认和共享 key 保护；
-10. V1 HDO、Luopan、embed apps、MX Insight Hub 的不回归证据完整。
+1. 左侧存在清晰、独立的 MX-H2I Dashboard 入口；
+2. Connections 行可用鼠标与键盘打开抽屉，ban 后可从 blocked inventory unban；
+3. MX-H2I 新建访客入口默认只在高级选项；
+4. ProductNetwork 可独立保存 admission 与 visibility；Dashboard 快速开关精确写
+   `productId=mx-h2i`；
+5. MX-H2I 与 Luopan 的匿名策略及用户 ban 互不影响；
+6. disabled 在服务端拒绝 GUI、旧客户端和 CLI anonymous enrollment；
+7. product user ban 在服务端拒绝 MX-H2I enrollment/snapshot/peer action，但保持用户
+   status/token 与 Luopan 可用；
+8. employee/Feishu 登录和现有连接切换测试全部通过；
+9. Admin 明确区分 policy、lease、控制面 release 和 live peer；
+10. sourceIp 由服务端捕获，body 无法覆盖；
+11. UI/API 的 `controlPlane` 与 `runtimePeerRemoval` 不宣称数据库 release 已删除 peer；
+12. 匿名行不提供虚假的用户 ban；
+13. 未来 bulk revoke 设计具备 revoking、saga、双平面确认和共享 key 保护；
+14. V1 HDO、Luopan、embed apps、MX Insight Hub 的不回归证据完整。
 
 ## 18. 相关文档
 

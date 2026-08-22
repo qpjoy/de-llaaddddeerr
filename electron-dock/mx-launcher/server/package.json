@@ -21,7 +21,7 @@
     "test:site-slot-artifact-seed": "node --test scripts/seed-site-slot-artifacts.test.mjs",
     "test:site-slot-worker": "node --test scripts/site-slot-worker-run.test.mjs",
     "test:internal-service-peer-observation": "node --test --import tsx src/modules/admin/internal-service-peer-observation.test.ts",
-    "test:launcher-anonymous-policy": "node --test --import tsx src/modules/launcher-network/anonymous-enrollment-policy.test.ts",
+    "test:launcher-anonymous-policy": "node --test --import tsx src/modules/launcher-network/anonymous-enrollment-policy.test.ts src/modules/launcher-network/product-user-access.test.ts",
     "test:insight-hub": "node --test --import tsx src/modules/insight-hub/insight-hub.client.test.ts",
     "smoke:http": "node scripts/http-smoke.mjs",
     "smoke:release-center": "node scripts/release-center-smoke.mjs",

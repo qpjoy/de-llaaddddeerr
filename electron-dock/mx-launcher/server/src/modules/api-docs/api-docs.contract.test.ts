@@ -92,6 +92,22 @@ test('the integration entry points third-party apps need are all present', () =>
   }
 });
 
+test('product user access is ops-only and never claims database release removed WireGuard peers', () => {
+  const list = paths['/internal/v1/launcher-network/products/{productId}/user-access']?.get;
+  const accessPath = paths['/internal/v1/launcher-network/products/{productId}/users/{userId}/access'];
+  assert.match(list?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
+  assert.match(accessPath?.get?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
+  assert.match(accessPath?.post?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
+  const inventory = JSON.stringify(list?.responses['200']);
+  assert.match(inventory, /"admission":"blocked"/);
+  assert.match(inventory, /"status":"not-performed"/);
+  const mutation = JSON.stringify(accessPath?.post?.responses['200']);
+  assert.match(mutation, /"userStatusChanged":false/);
+  assert.match(mutation, /"tokensRevoked":0/);
+  assert.match(mutation, /"status":"not-performed"/);
+  assert.match(mutation, /WireGuard peer removal was not performed or confirmed/);
+});
+
 test('the system subscription contract exposes both operator URLs without provisioning a local 7890 instance', () => {
   const catalog = JSON.stringify(paths['/internal/v1/user-center/system-subscriptions']?.get?.responses['200']);
   assert.match(catalog, /"mixedPort":7788/);

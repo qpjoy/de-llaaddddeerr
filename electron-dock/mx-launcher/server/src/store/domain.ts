@@ -61,6 +61,7 @@ import type {
   LauncherNetworkMihomoSiteInput,
   LauncherProductNetwork,
   LauncherProductNetworkInput,
+  LauncherProductUserAccessInput,
   LauncherProductMode,
   LauncherNetworkScope,
   LauncherProductUpdatePolicy,
@@ -397,6 +398,66 @@ export function emptyUserAppAccess(): UserCenterAppAccess {
     registeredByAppId: null,
     allowedAppIds: [],
     deniedAppIds: []
+  };
+}
+
+export class LauncherProductUserAccessDeniedError extends Error {
+  readonly code = 'launcher_product_user_access_denied';
+
+  constructor(readonly productId: string, readonly userId: string) {
+    super(`User ${userId} is blocked from launcher product ${productId}`);
+    this.name = 'LauncherProductUserAccessDeniedError';
+  }
+}
+
+export function launcherProductUserAccessBlocked(
+  user: UserCenterUser | null | undefined,
+  productId: string
+): boolean {
+  if (!user) return false;
+  const normalizedProductId = normalizeLauncherNetworkProductId(productId);
+  return (user.appAccess?.deniedAppIds ?? [])
+    .map((item) => normalizeLauncherNetworkProductId(item))
+    .includes(normalizedProductId);
+}
+
+export function assertLauncherProductUserAccess(
+  user: UserCenterUser | null | undefined,
+  productId: string
+): void {
+  if (user && launcherProductUserAccessBlocked(user, productId)) {
+    throw new LauncherProductUserAccessDeniedError(
+      normalizeLauncherNetworkProductId(productId),
+      user.userId
+    );
+  }
+}
+
+export function updateLauncherProductUserAccess(
+  user: UserCenterUser,
+  input: Pick<LauncherProductUserAccessInput, 'productId' | 'blocked'>,
+  now = new Date().toISOString()
+): { user: UserCenterUser; changed: boolean; productId: string } {
+  const productId = normalizeLauncherNetworkProductId(input.productId);
+  const previousDeniedAppIds = uniqueAppIds(user.appAccess?.deniedAppIds ?? []);
+  const wasBlocked = previousDeniedAppIds.includes(productId);
+  const deniedAppIds = input.blocked
+    ? uniqueAppIds([...previousDeniedAppIds, productId])
+    : previousDeniedAppIds.filter((appId) => appId !== productId);
+  const changed = wasBlocked !== input.blocked;
+  return {
+    productId,
+    changed,
+    user: changed
+      ? {
+          ...user,
+          appAccess: {
+            ...(user.appAccess ?? emptyUserAppAccess()),
+            deniedAppIds
+          },
+          updatedAt: now
+        }
+      : user
   };
 }
 

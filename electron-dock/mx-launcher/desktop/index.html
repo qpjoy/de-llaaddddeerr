@@ -22,7 +22,13 @@
         </div>
 
         <nav class="nav-tabs" aria-label="Primary">
-          <section id="nav-group-apps" class="nav-group is-active" aria-label="Applications" data-nav-group="apps">
+          <section id="nav-group-mx-h2i-dashboard" class="nav-group mx-h2i-dashboard-nav-group is-active" aria-label="MX-H2I Dashboard">
+            <button id="tab-mx-h2i-dashboard" class="nav-tab mx-h2i-dashboard-nav is-active" type="button" data-view="app-center" data-app-node="mx-h2i" data-app-surface="dashboard" data-short="OPS">
+              <strong>MX-H2I Dashboard</strong>
+              <span>连接、拓扑与策略控制</span>
+            </button>
+          </section>
+          <section id="nav-group-apps" class="nav-group" aria-label="Applications" data-nav-group="apps">
             <button id="app-nav-toggle" class="nav-group-title nav-group-toggle" type="button" aria-expanded="true" aria-controls="app-nav-tree">
               <span>
                 <strong>应用 App</strong>
@@ -31,7 +37,7 @@
               <b aria-hidden="true">⌃</b>
             </button>
             <div id="app-nav-tree" class="nav-tree">
-              <button id="tab-mx-h2i" class="nav-tab is-active" type="button" data-view="app-center" data-app-node="mx-h2i" data-short="H2I">
+              <button id="tab-mx-h2i" class="nav-tab" type="button" data-view="app-center" data-app-node="mx-h2i" data-short="H2I">
                 <strong>MX-H2I</strong>
                 <span>VPN / standalone launcher</span>
               </button>
@@ -592,6 +598,8 @@
     <aside id="app-editor-drawer" class="app-editor-drawer" aria-labelledby="app-editor-title" aria-modal="true" role="dialog" hidden></aside>
     <div id="user-editor-backdrop" class="app-editor-backdrop user-editor-backdrop" hidden></div>
     <aside id="user-editor-drawer" class="app-editor-drawer user-editor-drawer" aria-labelledby="user-editor-title" aria-modal="true" role="dialog" hidden></aside>
+    <div id="mx-h2i-lease-backdrop" class="app-editor-backdrop mx-h2i-lease-backdrop" hidden></div>
+    <aside id="mx-h2i-lease-drawer" class="app-editor-drawer mx-h2i-lease-drawer" aria-labelledby="mx-h2i-lease-drawer-title" aria-modal="true" role="dialog" tabindex="-1" hidden></aside>
     <div id="evidence-backdrop" class="evidence-backdrop" hidden></div>
     <aside id="evidence-drawer" class="evidence-drawer" aria-labelledby="evidence-title" hidden>
       <header class="evidence-header">

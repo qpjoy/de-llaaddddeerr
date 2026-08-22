@@ -2352,6 +2352,26 @@ export interface LauncherProductNetwork {
   updatedAt: string;
 }
 
+export interface LauncherProductUserAccessInput {
+  productId: string;
+  userId: string;
+  blocked: boolean;
+  reason?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface LauncherProductUserAccessResult {
+  productId: string;
+  userId: string;
+  blocked: boolean;
+  changed: boolean;
+  reason: string | null;
+  user: UserCenterUser;
+  releasedLeases: LauncherNetworkLease[];
+  updatedAt: string;
+}
+
 export interface LauncherNetworkLeaseInput {
   appId?: string | null;
   productId?: string | null;

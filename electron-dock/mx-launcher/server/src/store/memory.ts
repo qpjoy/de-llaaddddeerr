@@ -130,11 +130,13 @@ import {
   MX_H2I_PRODUCT_ID,
   assertLauncherAnonymousEnrollmentPolicy,
   assertLauncherNetworkLeaseEntitlement,
+  assertLauncherProductUserAccess,
   launcherNetworkAppIdForLeaseInput,
   launcherNetworkLeaseProductId,
   launcherNetworkProductIsStandaloneDefault,
   launcherNetworkSdkTestModeAllowed,
-  normalizeLauncherNetworkProductId
+  normalizeLauncherNetworkProductId,
+  updateLauncherProductUserAccess
 } from './domain.js';
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
 import { applyCoreDnsConfigMapToKubernetes, applyGatewayConfigMapToKubernetes } from './kubernetes.js';
@@ -216,6 +218,8 @@ import type {
   LauncherNetworkReachabilityPlan,
   LauncherProductNetwork,
   LauncherProductNetworkInput,
+  LauncherProductUserAccessInput,
+  LauncherProductUserAccessResult,
   LogEntryInput,
   MihomoSubscriptionRender,
   PermissionGrant,
@@ -2427,6 +2431,63 @@ export class MemoryStore implements PlatformStore {
     return product;
   }
 
+  setLauncherProductUserAccess(input: LauncherProductUserAccessInput): LauncherProductUserAccessResult {
+    const productId = normalizeLauncherNetworkProductId(input.productId);
+    const userId = input.userId?.trim();
+    if (!userId) throw new Error('Launcher product user access requires userId');
+    if (!this.getLauncherProductNetwork(productId)) {
+      throw new Error(`Launcher product not found: ${productId}`);
+    }
+    const previous = this.users.get(userId);
+    if (!previous) throw new Error(`User not found: ${userId}`);
+    const now = new Date().toISOString();
+    const access = updateLauncherProductUserAccess(previous, { productId, blocked: input.blocked }, now);
+    if (access.changed) this.users.set(userId, access.user);
+    const releasedLeases = input.blocked
+      ? [...this.launcherNetworkLeases.values()]
+        .filter((lease) => (
+          lease.productId === productId
+          && lease.identityKind === 'user'
+          && lease.userId === userId
+          && launcherNetworkLeaseIsActive(lease)
+        ))
+        .map((lease) => {
+          const released = releaseLauncherNetworkLease(lease, input, now);
+          this.launcherNetworkLeases.set(released.leaseId, released);
+          return released;
+        })
+      : [];
+    const reason = input.reason?.trim() || null;
+    this.recordAudit({
+      eventType: input.blocked
+        ? 'launcher_network.product_user_access.blocked'
+        : 'launcher_network.product_user_access.allowed',
+      actorKind: 'user-center',
+      userId,
+      productId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        requestedBy: input.requestedBy ?? 'launcher-network-admin',
+        reason,
+        changed: access.changed,
+        releasedLeaseIds: releasedLeases.map((lease) => lease.leaseId),
+        runtimePeerRemoval: 'not-performed',
+        userStatus: access.user.status,
+        tokensRevoked: 0
+      }
+    });
+    return {
+      productId,
+      userId,
+      blocked: input.blocked,
+      changed: access.changed,
+      reason,
+      user: access.user,
+      releasedLeases,
+      updatedAt: now
+    };
+  }
+
   listLauncherNetworkLeases(productId?: string | null): LauncherNetworkLease[] {
     const normalizedProductId = productId?.trim().toLowerCase() || null;
     return [...this.launcherNetworkLeases.values()]
@@ -2516,6 +2577,10 @@ export class MemoryStore implements PlatformStore {
       installId,
       deviceId
     };
+    assertLauncherProductUserAccess(
+      normalizedInput.userId ? this.users.get(normalizedInput.userId) : null,
+      product.productId
+    );
     const leaseKey = launcherNetworkLeaseKey(normalizedInput, product);
     const now = new Date();
     const allLeases = [...this.launcherNetworkLeases.values()];
@@ -3304,6 +3369,11 @@ export class MemoryStore implements PlatformStore {
     ) {
       throw new Error('Launcher network lease user does not match snapshot userId');
     }
+    const snapshotUserId = requestedLease?.userId ?? input.userId?.trim() ?? null;
+    assertLauncherProductUserAccess(
+      snapshotUserId ? this.users.get(snapshotUserId) : null,
+      requestedLease?.productId ?? appId
+    );
     if (requestedLease) {
       const storedLeaseProfile = requestedLease.leaseProfile
         ?? (requestedLease.identityKind === 'user' ? 'employee' : 'anonymous');

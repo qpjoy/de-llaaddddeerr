@@ -59,6 +59,8 @@ import type {
   LauncherNetworkReachabilityPlan,
   LauncherProductNetwork,
   LauncherProductNetworkInput,
+  LauncherProductUserAccessInput,
+  LauncherProductUserAccessResult,
   LogEntryInput,
   MihomoSubscriptionRender,
   PermissionGrant,
@@ -343,6 +345,7 @@ export interface PlatformStore {
   listLauncherProductNetworks(): MaybePromise<LauncherProductNetwork[]>;
   getLauncherProductNetwork(productId: string): MaybePromise<LauncherProductNetwork | null>;
   upsertLauncherProductNetwork(input: LauncherProductNetworkInput): MaybePromise<LauncherProductNetwork>;
+  setLauncherProductUserAccess(input: LauncherProductUserAccessInput): MaybePromise<LauncherProductUserAccessResult>;
   listLauncherNetworkLeases(productId?: string | null): MaybePromise<LauncherNetworkLease[]>;
   getLauncherNetworkLease(leaseId: string): MaybePromise<LauncherNetworkLease | null>;
   enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): MaybePromise<LauncherNetworkLease>;

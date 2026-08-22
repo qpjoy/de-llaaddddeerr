@@ -121,6 +121,29 @@ test('disabled rejects anonymous leases without affecting employee or Feishu lea
   assert.equal(feishu.leaseProfile, 'feishu');
 });
 
+test('disabling MX-H2I anonymous admission does not affect Luopan anonymous leases', () => {
+  const store = new MemoryStore(config);
+  store.upsertLauncherProductNetwork({
+    productId: 'mx-h2i',
+    anonymousEnrollmentPolicy: 'disabled',
+    requestedBy: 'anonymous-policy-isolation-test'
+  });
+
+  const luopanInput: LauncherNetworkLeaseInput = {
+    ...anonymousInput('luopan-isolation'),
+    appId: 'luopan',
+    productId: 'luopan'
+  };
+  const enrolled = store.enrollLauncherNetworkLease(luopanInput);
+  const renewed = store.enrollLauncherNetworkLease(luopanInput);
+
+  assert.equal(requiredProduct(store, 'mx-h2i').anonymousEnrollmentPolicy, 'disabled');
+  assert.equal(requiredProduct(store, 'luopan').anonymousEnrollmentPolicy, 'enabled');
+  assert.equal(enrolled.productId, 'luopan');
+  assert.match(enrolled.leaseIp, /^10\.91\./);
+  assert.equal(renewed.leaseId, enrolled.leaseId);
+});
+
 test('drain admits only a matching active anonymous renewal', () => {
   const store = new MemoryStore(config);
   const originalInput = anonymousInput('drain-existing');

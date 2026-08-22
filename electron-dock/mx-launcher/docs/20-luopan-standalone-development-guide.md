@@ -7,6 +7,9 @@
 > Luopan 的匿名准入属于自己的 ProductNetwork，默认保持 `enabled + primary`，不继承
 > MX-H2I 的开关；多应用策略与隔离验收见
 > [28-mx-h2i-connection-operations-and-anonymous-governance.md](./28-mx-h2i-connection-operations-and-anonymous-governance.md)。
+> MX-H2I Admin 的用户 ban 同样按 ProductNetwork 保存；ban `mx-h2i` 不得 release、阻止
+> 或重新配置该用户的 `luopan` lease/WireGuard 路径。数据库 lease release 也不等于远端
+> WireGuard peer 已移除。
 
 给接手 Luopan 的开发者。目标：读完本文 + 跑通 `demos/luopan`，你能理解 V2 MX-H2I
 的完整工作原理，并在此基础上独立开发 Luopan——**不管 Luopan 要不要承载 embed

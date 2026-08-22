@@ -75,6 +75,7 @@ let internalPeerAutoRefreshTimer = null;
 const state = {
   activeView: 'app-center',
   activeAppNode: MX_H2I_PRODUCT_ID,
+  mxH2iSurface: 'dashboard',
   appNavCollapsed: false,
   appCenterApps: [],
   appCenterAppsError: null,
@@ -298,13 +299,17 @@ const state = {
   launcherProductsError: null,
   launcherLeases: [],
   launcherLeasesError: null,
+  mxH2iProductUserAccess: null,
+  mxH2iProductUserAccessError: null,
   mxH2iLeaseFilter: {
     query: '',
     identity: 'all',
     page: 1
   },
+  mxH2iLeaseDrawer: null,
   anonymousPolicyBusyProductId: null,
   anonymousPolicyFeedback: null,
+  mxH2iAnonymousQuickConfirmation: null,
   mxH2iTopology: null,
   awxRuntimePolicies: [],
   awxRuntimePolicyBusy: false,
@@ -595,6 +600,8 @@ const appEditorBackdrop = document.getElementById('app-editor-backdrop');
 const appEditorDrawer = document.getElementById('app-editor-drawer');
 const userEditorBackdrop = document.getElementById('user-editor-backdrop');
 const userEditorDrawer = document.getElementById('user-editor-drawer');
+const mxH2iLeaseBackdrop = document.getElementById('mx-h2i-lease-backdrop');
+const mxH2iLeaseDrawer = document.getElementById('mx-h2i-lease-drawer');
 const evidenceBackdrop = document.getElementById('evidence-backdrop');
 const evidenceDrawer = document.getElementById('evidence-drawer');
 const evidenceClose = document.getElementById('evidence-close');
@@ -610,6 +617,19 @@ const views = Array.from(document.querySelectorAll('.view'));
 const navGroups = Array.from(document.querySelectorAll('.nav-group'));
 const boundNavTabs = new WeakSet();
 
+function appSurfaceForTab(tab) {
+  return tab?.dataset?.appSurface === 'dashboard' ? 'dashboard' : 'product';
+}
+
+function primaryNavTabIsActive(tab) {
+  if (state.activeView === 'app-center') {
+    const appId = tab.dataset.appNode || APP_CENTER_PRODUCT_ID;
+    if (tab.dataset.view !== 'app-center' || appId !== state.activeAppNode) return false;
+    return appId !== MX_H2I_PRODUCT_ID || appSurfaceForTab(tab) === state.mxH2iSurface;
+  }
+  return tab.dataset.view === 'admin' && adminMenuFromElement(tab) === state.adminMenu;
+}
+
 function handlePrimaryNavTabClick(tab) {
   state.hoverAdminMenu = null;
   if (tab.dataset.view === 'admin') {
@@ -621,10 +641,16 @@ function handlePrimaryNavTabClick(tab) {
       return;
     }
     state.adminNavCollapsed[menuName] = false;
-    setActiveView(tab.dataset.view, adminNavFromElement(tab), { appNode: tab.dataset.appNode });
+    setActiveView(tab.dataset.view, adminNavFromElement(tab), {
+      appNode: tab.dataset.appNode,
+      appSurface: appSurfaceForTab(tab)
+    });
     return;
   }
-  setActiveView(tab.dataset.view, adminNavFromElement(tab), { appNode: tab.dataset.appNode });
+  setActiveView(tab.dataset.view, adminNavFromElement(tab), {
+    appNode: tab.dataset.appNode,
+    appSurface: appSurfaceForTab(tab)
+  });
 }
 
 function bindPrimaryNavTab(tab) {
@@ -871,6 +897,10 @@ if (userEditorBackdrop) {
   });
 }
 
+if (mxH2iLeaseBackdrop) {
+  mxH2iLeaseBackdrop.addEventListener('click', () => closeMxH2iLeaseDrawer());
+}
+
 document.addEventListener('click', (event) => {
   if (!state.userCenter.openDropdown) return;
   if (event.target?.closest?.('[data-user-dropdown-root]')) return;
@@ -878,6 +908,15 @@ document.addEventListener('click', (event) => {
 });
 
 window.addEventListener('keydown', (event) => {
+  if (event.key === 'Tab' && mxH2iLeaseDrawer && !mxH2iLeaseDrawer.hidden) {
+    trapMxH2iLeaseDrawerFocus(event);
+    return;
+  }
+  if (event.key === 'Escape' && mxH2iLeaseDrawer && !mxH2iLeaseDrawer.hidden) {
+    event.preventDefault();
+    closeMxH2iLeaseDrawer();
+    return;
+  }
   if (event.key === 'Escape' && state.userCenter.openDropdown) {
     event.preventDefault();
     closeUserCenterDropdown();
@@ -941,7 +980,11 @@ function previewCollapsedAdminSubnav(tab) {
 }
 
 function setActiveView(view, nav = {}, options = {}) {
-  if (view === 'admin') disposeMxH2iTopology();
+  const nextAppNode = options.appNode || state.activeAppNode || 'appcenter';
+  const nextMxH2iSurface = options.appSurface === 'dashboard' ? 'dashboard' : 'product';
+  if (view === 'admin' || nextAppNode !== MX_H2I_PRODUCT_ID || nextMxH2iSurface !== 'dashboard') {
+    disposeMxH2iTopology();
+  }
   if (view !== 'admin' && state.setupRun.active) {
     clearSetupRun('Stopped because the operator left I-HDO.', 'stopped');
   }
@@ -951,7 +994,13 @@ function setActiveView(view, nav = {}, options = {}) {
   }
   state.activeView = view === 'admin' ? 'admin' : 'app-center';
   if (state.activeView === 'app-center') {
-    state.activeAppNode = options.appNode || state.activeAppNode || 'appcenter';
+    state.activeAppNode = nextAppNode;
+    state.mxH2iSurface = state.activeAppNode === MX_H2I_PRODUCT_ID ? nextMxH2iSurface : 'product';
+  }
+  if (state.activeView !== 'app-center'
+    || state.activeAppNode !== MX_H2I_PRODUCT_ID
+    || state.mxH2iSurface !== 'dashboard') {
+    closeMxH2iLeaseDrawer({ restoreFocus: false });
   }
   if (state.activeView !== 'admin') {
     state.hoverAdminMenu = null;
@@ -960,10 +1009,7 @@ function setActiveView(view, nav = {}, options = {}) {
     sidebar.classList.toggle('is-subnav-open', state.sidebarCollapsed);
   }
   for (const tab of tabs) {
-    const active = state.activeView === 'app-center'
-      ? tab.dataset.view === 'app-center' && (tab.dataset.appNode || APP_CENTER_PRODUCT_ID) === state.activeAppNode
-      : tab.dataset.view === 'admin' && adminMenuFromElement(tab) === state.adminMenu;
-    tab.classList.toggle('is-active', active);
+    tab.classList.toggle('is-active', primaryNavTabIsActive(tab));
   }
   for (const item of views) {
     item.classList.toggle('is-active', item.id === `view-${state.activeView}`);
@@ -1028,10 +1074,11 @@ async function refreshProducts() {
 }
 
 async function refreshAppCenterNetwork() {
-  const [appPayload, productPayload, leasePayload, dnsRoutesPayload, templatesPayload, serviceVipSmokePayload] = await Promise.all([
+  const [appPayload, productPayload, leasePayload, productUserAccessPayload, dnsRoutesPayload, templatesPayload, serviceVipSmokePayload] = await Promise.all([
     loadAppCenterApps(),
     loadLauncherProductNetworks(),
     loadLauncherNetworkLeases(),
+    loadMxH2iProductUserAccessList(),
     loadDnsReverseProxyRoutes(),
     loadAppOnboardingTemplates(),
     loadLauncherServiceVipSmokes()
@@ -1046,6 +1093,8 @@ async function refreshAppCenterNetwork() {
   state.launcherProductsError = productPayload.error || null;
   state.launcherLeases = asArray(leasePayload.leases);
   state.launcherLeasesError = leasePayload.error || null;
+  state.mxH2iProductUserAccess = productUserAccessPayload.productUserAccess || null;
+  state.mxH2iProductUserAccessError = productUserAccessPayload.error || null;
   state.dnsCenter.routes = asArray(dnsRoutesPayload.routes);
   state.dnsCenter.routesError = dnsRoutesPayload.error || null;
   renderLauncherFoundationOverview();
@@ -1088,6 +1137,7 @@ async function refreshAdmin() {
       appOnboardingTemplatesPayload,
       launcherProductsPayload,
       launcherLeasesPayload,
+      mxH2iProductUserAccessPayload,
       domesticRuntimePayload,
       secretCenterPayload,
       dnsPolicyPayload,
@@ -1103,6 +1153,7 @@ async function refreshAdmin() {
       loadAppOnboardingTemplates(),
       loadLauncherProductNetworks(),
       loadLauncherNetworkLeases(),
+      loadMxH2iProductUserAccessList(),
       loadDomesticRuntimeConfigs(),
       loadSecretCenter(),
       loadDnsPolicyCenter(),
@@ -1132,6 +1183,8 @@ async function refreshAdmin() {
     state.launcherProductsError = launcherProductsPayload.error || null;
     state.launcherLeases = asArray(launcherLeasesPayload.leases);
     state.launcherLeasesError = launcherLeasesPayload.error || null;
+    state.mxH2iProductUserAccess = mxH2iProductUserAccessPayload.productUserAccess || null;
+    state.mxH2iProductUserAccessError = mxH2iProductUserAccessPayload.error || null;
     state.domesticRuntime.configs = asArray(domesticRuntimePayload.configs);
     state.domesticRuntime.error = domesticRuntimePayload.error || null;
     applySecretCenterPayload(secretCenterPayload);
@@ -1180,6 +1233,8 @@ async function refreshAdmin() {
     state.launcherProductsError = error.message;
     state.launcherLeases = [];
     state.launcherLeasesError = error.message;
+    state.mxH2iProductUserAccess = null;
+    state.mxH2iProductUserAccessError = error.message;
     state.domesticRuntime.configs = [];
     state.domesticRuntime.error = error.message;
     state.secretCenter.providers = [];
@@ -1222,6 +1277,15 @@ async function loadLauncherNetworkLeases() {
     return { leases: asArray(payload.leases), error: null };
   } catch (error) {
     return { leases: [], error: error.message };
+  }
+}
+
+async function loadMxH2iProductUserAccessList() {
+  try {
+    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(MX_H2I_PRODUCT_ID)}/user-access`);
+    return { productUserAccess: payload.productUserAccess || null, error: null };
+  } catch (error) {
+    return { productUserAccess: null, error: error.message };
   }
 }
 
@@ -4177,7 +4241,9 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || /^\/internal\/v1\/site-slots\/[^/]+\/access-accounts$/.test(path)
       || path === '/internal/v1/admin/oversea'
       || /^\/internal\/v1\/admin\/site-slots\/pipelines\/[^/]+$/.test(path)
-      || /^\/internal\/v1\/launcher-network\/leases(?:\/[^/]+)?$/.test(path);
+      || /^\/internal\/v1\/launcher-network\/leases(?:\/[^/]+)?$/.test(path)
+      || /^\/internal\/v1\/launcher-network\/products\/[^/]+\/user-access$/.test(path)
+      || /^\/internal\/v1\/launcher-network\/products\/[^/]+\/users\/[^/]+\/access$/.test(path);
   }
   if (verb === 'POST') {
     return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue|oversea-entitlements\/(?:migrate|rollout)|system-subscriptions\/ensure)$/.test(path)
@@ -4194,6 +4260,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || /^\/internal\/v1\/release-management\/plans(?:\/[^/]+\/gate)?$/.test(path)
       || path === '/internal/v1/release-artifacts'
       || /^\/internal\/v1\/launcher-network\/leases\/[^/]+\/(?:release|domestic-peer\/sync|domestic-relay\/diagnostics|internal-direct-peer\/sync)$/.test(path)
+      || /^\/internal\/v1\/launcher-network\/products\/[^/]+\/users\/[^/]+\/access$/.test(path)
       || /^\/internal\/v1\/launcher-network\/(?:products\/[^/]+|mihomo\/sites\/[^/]+)$/.test(path);
   }
   if (verb === 'PATCH') {
@@ -4359,9 +4426,7 @@ function renderPrimaryNav() {
     group.classList.remove('is-active');
   }
   for (const tab of tabs) {
-    const active = state.activeView === 'app-center'
-      ? tab.dataset.view === 'app-center' && (tab.dataset.appNode || APP_CENTER_PRODUCT_ID) === state.activeAppNode
-      : tab.dataset.view === 'admin' && adminMenuFromElement(tab) === state.adminMenu;
+    const active = primaryNavTabIsActive(tab);
     tab.classList.toggle('is-active', active);
     const group = tab.closest('.nav-group');
     if (active && group) group.classList.add('is-active');
@@ -10228,13 +10293,16 @@ function groupedAppNavItems() {
 
 function renderAppNavButton(app, level) {
   const appId = normalizeLauncherProductId(app?.appId || MX_H2I_PRODUCT_ID);
-  const active = state.activeView === 'app-center' && state.activeAppNode === appId;
+  const active = state.activeView === 'app-center'
+    && state.activeAppNode === appId
+    && (appId !== MX_H2I_PRODUCT_ID || state.mxH2iSurface === 'product');
   return `
     <button
       class="nav-tab app-nav-item app-nav-level-${escapeHtml(String(level))} ${active ? 'is-active' : ''}"
       type="button"
       data-view="app-center"
       data-app-node="${escapeHtml(appId)}"
+      data-app-surface="product"
       data-short="${escapeHtml(appNavShortLabel(app))}"
     >
       <strong>${escapeHtml(app?.displayName || launcherProductDisplayName(appId, null))}</strong>
@@ -10262,7 +10330,7 @@ function renderAppNav() {
   `).join('');
   refreshNavTabs();
   if (appGroup) {
-    appGroup.classList.toggle('is-active', state.activeView === 'app-center');
+    appGroup.classList.toggle('is-active', state.activeView === 'app-center' && state.mxH2iSurface !== 'dashboard');
     appGroup.classList.toggle('is-group-collapsed', state.appNavCollapsed && !state.sidebarCollapsed);
   }
   renderPrimaryNav();
@@ -10272,12 +10340,21 @@ function renderAppCenterShell() {
   const app = activeAppCenterApp();
   const mode = launcherModeForApp(app);
   const channelId = standaloneChannelIdForApp(app);
-  if (appCenterHeading) appCenterHeading.textContent = app.displayName || launcherProductDisplayName(app.appId, null);
+  const isMxH2iDashboard = app?.appId === MX_H2I_PRODUCT_ID && state.mxH2iSurface === 'dashboard';
+  if (appCenterHeading) {
+    appCenterHeading.textContent = isMxH2iDashboard
+      ? 'MX-H2I Dashboard'
+      : app.displayName || launcherProductDisplayName(app.appId, null);
+  }
   if (appCenterSubtitle) {
-    appCenterSubtitle.textContent = mode === 'standalone'
+    appCenterSubtitle.textContent = isMxH2iDashboard
+      ? '连接清单、三维拓扑、用户访问与应用级匿名准入。'
+      : mode === 'standalone'
       ? 'VPN product / launcher standalone channel.'
       : `${launcherProductDisplayName(app.appId, null)} embeds launcher and uses ${launcherProductDisplayName(channelId, launcherProductNetwork(channelId))}.`;
   }
+  if (launcherFoundationOverview) launcherFoundationOverview.hidden = isMxH2iDashboard;
+  if (appProductsPanel) appProductsPanel.hidden = isMxH2iDashboard;
   renderLauncherFoundationOverview();
   renderAppCatalogPanel();
   renderSelectedAppDetail();
@@ -11180,11 +11257,9 @@ function bindAppCatalogControls() {
 function selectAppNode(appId) {
   const normalized = normalizeLauncherProductId(appId);
   state.activeAppNode = normalized;
+  state.mxH2iSurface = 'product';
   state.appCatalogFeedback = null;
-  for (const tab of tabs) {
-    const active = tab.dataset.view === 'app-center' && (tab.dataset.appNode || APP_CENTER_PRODUCT_ID) === normalized;
-    tab.classList.toggle('is-active', active);
-  }
+  closeMxH2iLeaseDrawer({ restoreFocus: false });
   renderAppCenterShell();
   if (normalized === MX_INSIGHT_HUB_APP_ID) void loadInsightHubOverview();
 }
@@ -11580,8 +11655,9 @@ function renderMxH2iLeaseTableRow(lease) {
   const recordUpdatedAt = mxH2iLeaseRecordUpdatedAt(lease);
   const sourceIp = mxH2iLeaseSourceIp(lease);
   const expiresAt = mxH2iLeaseExpiryAt(lease);
+  const leaseKey = String(lease?.leaseId || lease?.leaseIp || lease?.installId || '').trim();
   return `
-    <tr data-mx-h2i-lease-row data-identity="${escapeHtml(identity)}" data-search="${escapeHtml(mxH2iLeaseSearchText(lease))}">
+    <tr data-mx-h2i-lease-row data-mx-h2i-lease-open="${escapeHtml(leaseKey)}" data-identity="${escapeHtml(identity)}" data-search="${escapeHtml(mxH2iLeaseSearchText(lease))}" tabindex="0" aria-label="Open ${escapeHtml(mxH2iLeaseSubject(lease))} connection details">
       <td><strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong><small>${escapeHtml(mxH2iLeaseIdentityLabel(lease))}</small></td>
       <td><strong>${escapeHtml(sourceIp)}</strong><small>${sourceIp === 'not recorded' ? 'legacy lease' : 'enrollment / renewal HTTP source'}</small></td>
       <td><strong>${escapeHtml(lease.leaseIp || '-')}</strong><small>${escapeHtml(lease.leaseId || '-')}</small></td>
@@ -11628,6 +11704,8 @@ function renderStandaloneAnonymousPolicy(product, options = {}) {
   const policy = anonymousEnrollmentPolicyForProduct(product);
   const visibility = anonymousUiVisibilityForProduct(product);
   const busy = state.anonymousPolicyBusyProductId === productId;
+  const unavailable = options.unavailable === true;
+  const disabled = busy || unavailable;
   const feedback = state.anonymousPolicyFeedback?.productId === productId
     ? state.anonymousPolicyFeedback
     : null;
@@ -11642,12 +11720,12 @@ function renderStandaloneAnonymousPolicy(product, options = {}) {
           <h4 id="${escapeHtml(`${sectionId}-title`)}">Anonymous enrollment policy</h4>
           <p>${escapeHtml(description)}</p>
         </div>
-        <span class="health-chip" data-health="${policy === 'enabled' ? 'passed' : policy === 'drain' ? 'ready' : 'blocked'}">${escapeHtml(policy)}</span>
+        <span class="health-chip" data-health="${unavailable ? 'unknown' : policy === 'enabled' ? 'passed' : policy === 'drain' ? 'ready' : 'blocked'}">${unavailable ? 'unavailable' : escapeHtml(policy)}</span>
       </div>
       <div class="standalone-anonymous-policy-grid" data-standalone-anonymous-policy-product="${escapeHtml(productId)}">
         <label>
           <span>Enrollment policy</span>
-          <select data-standalone-anonymous-policy ${busy ? 'disabled' : ''}>
+          <select data-standalone-anonymous-policy ${disabled ? 'disabled' : ''}>
             <option value="enabled" ${policy === 'enabled' ? 'selected' : ''}>enabled · allow new anonymous enroll</option>
             <option value="drain" ${policy === 'drain' ? 'selected' : ''}>drain · deny new enroll; capable existing lease may renew</option>
             <option value="disabled" ${policy === 'disabled' ? 'selected' : ''}>disabled · deny anonymous enroll</option>
@@ -11655,14 +11733,15 @@ function renderStandaloneAnonymousPolicy(product, options = {}) {
         </label>
         <label>
           <span>Client UI visibility</span>
-          <select data-standalone-anonymous-visibility ${busy ? 'disabled' : ''}>
+          <select data-standalone-anonymous-visibility ${disabled ? 'disabled' : ''}>
             <option value="primary" ${visibility === 'primary' ? 'selected' : ''}>primary</option>
             <option value="advanced" ${visibility === 'advanced' ? 'selected' : ''}>advanced${productId === MX_H2I_PRODUCT_ID ? ' · MX-H2I default' : ''}</option>
             <option value="hidden" ${visibility === 'hidden' ? 'selected' : ''}>hidden</option>
           </select>
         </label>
-        <button class="primary-button" type="button" data-standalone-anonymous-policy-save data-product-id="${escapeHtml(productId)}" ${busy ? 'disabled' : ''}>${busy ? 'Saving policy' : `Save ${escapeHtml(displayName)} policy`}</button>
+        <button class="primary-button" type="button" data-standalone-anonymous-policy-save data-product-id="${escapeHtml(productId)}" ${disabled ? 'disabled' : ''}>${busy ? 'Saving policy' : unavailable ? 'Policy data unavailable' : `Save ${escapeHtml(displayName)} policy`}</button>
       </div>
+      ${unavailable ? `<div class="feedback error">${escapeHtml(options.unavailableMessage || 'The registered ProductNetwork could not be loaded. Refresh before changing this policy.')}</div>` : ''}
       <div class="standalone-anonymous-policy-warning" role="note">
         <strong>No automatic peer removal</strong>
         <span>Changing enabled, drain, disabled, or UI visibility does not release leases, delete peers, disconnect clients, or alter employee enrollment. In drain, only a capability-authenticated existing anonymous lease may renew.</span>
@@ -11672,17 +11751,56 @@ function renderStandaloneAnonymousPolicy(product, options = {}) {
   `;
 }
 
-function renderMxH2iOperationsScreen(product, leases) {
+function mxH2iBlockedUserAccessRows() {
+  return asArray(state.mxH2iProductUserAccess?.blockedUsers)
+    .filter((item) => item?.blocked === true && item?.userId)
+    .slice()
+    .sort((left, right) => String(left.displayName || left.account || left.userId)
+      .localeCompare(String(right.displayName || right.account || right.userId)));
+}
+
+function renderMxH2iBlockedUsersPanel() {
+  const blockedUsers = mxH2iBlockedUserAccessRows();
+  const inventoryAvailable = !state.mxH2iProductUserAccessError && Boolean(state.mxH2iProductUserAccess);
+  return `
+    <section id="mx-h2i-banned-users" class="mx-h2i-operations-panel mx-h2i-banned-users" aria-labelledby="mx-h2i-banned-users-title">
+      <div class="mx-h2i-operations-head">
+        <div>
+          <span class="site-kind">Product-scoped access</span>
+          <h4 id="mx-h2i-banned-users-title">Banned from MX-H2I</h4>
+          <p>These users are blocked only from MX-H2I. They remain visible here after their active MX-H2I leases are released, so an operator can inspect and unban them without database access.</p>
+        </div>
+        <span class="mx-h2i-filter-count">${inventoryAvailable ? `${escapeHtml(String(blockedUsers.length))} banned` : 'inventory unavailable'}</span>
+      </div>
+      ${state.mxH2iProductUserAccessError ? `<div class="feedback error">Banned-user inventory unavailable: ${escapeHtml(state.mxH2iProductUserAccessError)}</div>` : ''}
+      <div class="mx-h2i-banned-user-list">
+        ${blockedUsers.map((access) => `
+          <button class="mx-h2i-banned-user-row" type="button" data-mx-h2i-blocked-user-open="${escapeHtml(access.userId)}">
+            <span><strong>${escapeHtml(access.displayName || access.account || access.userId)}</strong><small>${escapeHtml(access.account || access.userId)}</small></span>
+            <span><strong>${escapeHtml(access.lastLease?.leaseIp || 'no active lease')}</strong><small>${escapeHtml(access.lastLease?.deviceLabel || access.lastLease?.deviceId || 'last device not recorded')}</small></span>
+            <span><strong>MX-H2I banned</strong><small>Luopan unaffected · open to unban</small></span>
+          </button>
+        `).join('') || `<div class="empty-state">${inventoryAvailable ? 'No user is currently banned from MX-H2I.' : 'Banned-user inventory has not loaded.'}</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderMxH2iOperationsScreen(product, leases, options = {}) {
+  const leaseDataAvailable = options.leaseDataAvailable !== false;
   const activeLeases = asArray(leases);
   const employeeLeases = activeLeases.filter((lease) => mxH2iLeaseIdentityGroup(lease) === 'employee');
   const anonymousLeases = activeLeases.filter((lease) => mxH2iLeaseIdentityGroup(lease) === 'anonymous');
   const sourceIpCount = activeLeases.filter((lease) => mxH2iLeaseSourceIp(lease) !== 'not recorded').length;
+  const blockedUserCount = mxH2iBlockedUserAccessRows().length;
+  const blockedUserDataAvailable = !state.mxH2iProductUserAccessError && Boolean(state.mxH2iProductUserAccess);
   const leasePage = mxH2iLeasePage(activeLeases, state.mxH2iLeaseFilter);
   return `
     <nav class="mx-h2i-local-nav" aria-label="MX-H2I operations sections">
       <a href="#mx-h2i-lease-overview">Overview</a>
       <a href="#mx-h2i-topology">Topology</a>
       <a href="#mx-h2i-connections">Connections</a>
+      <a href="#mx-h2i-banned-users">Banned users</a>
       <a href="#mx-h2i-policy">Anonymous policy</a>
     </nav>
 
@@ -11693,13 +11811,15 @@ function renderMxH2iOperationsScreen(product, leases) {
           <h4 id="mx-h2i-lease-overview-title">Lease control surface</h4>
           <p>Active lease records are control-plane allocations. They are not proof of a live WireGuard session or a currently online client.</p>
         </div>
-        <span class="health-chip" data-health="ready">STATIC DATA</span>
+        <span class="health-chip" data-health="${leaseDataAvailable ? 'ready' : 'unknown'}">${leaseDataAvailable ? 'STATIC DATA' : 'DATA UNAVAILABLE'}</span>
       </div>
+      ${leaseDataAvailable ? '' : `<div class="feedback error">Lease inventory unavailable: ${escapeHtml(state.launcherLeasesError || 'MX-H2I ProductNetwork data has not loaded.')}</div>`}
       <div class="mx-h2i-lease-metrics">
-        <span><strong>${escapeHtml(String(activeLeases.length))}</strong><small>active lease records</small></span>
-        <span><strong>${escapeHtml(String(employeeLeases.length))}</strong><small>employees</small></span>
-        <span><strong>${escapeHtml(String(anonymousLeases.length))}</strong><small>anonymous</small></span>
-        <span><strong>${escapeHtml(String(sourceIpCount))}</strong><small>source IP recorded</small></span>
+        <span><strong>${leaseDataAvailable ? escapeHtml(String(activeLeases.length)) : '—'}</strong><small>active lease records</small></span>
+        <span><strong>${leaseDataAvailable ? escapeHtml(String(employeeLeases.length)) : '—'}</strong><small>employees</small></span>
+        <span><strong>${leaseDataAvailable ? escapeHtml(String(anonymousLeases.length)) : '—'}</strong><small>anonymous</small></span>
+        <span><strong>${leaseDataAvailable ? escapeHtml(String(sourceIpCount)) : '—'}</strong><small>source IP recorded</small></span>
+        <span><strong>${blockedUserDataAvailable ? escapeHtml(String(blockedUserCount)) : '—'}</strong><small>${blockedUserDataAvailable ? 'MX-H2I banned users' : 'ban inventory unavailable'}</small></span>
       </div>
       <div class="mx-h2i-static-data-notice" role="note">
         <strong>Static lease ≠ real-time online</strong>
@@ -11715,19 +11835,27 @@ function renderMxH2iOperationsScreen(product, leases) {
         <div>
           <span class="site-kind">3D Topology</span>
           <h4 id="mx-h2i-topology-title">Client lease → Domestic → Internal</h4>
-          <p>Up to ${escapeHtml(String(MX_H2I_TOPOLOGY_CLIENT_LIMIT))} client lease nodes are rendered. Remaining leases stay available in the table.</p>
+          <p>${leaseDataAvailable
+            ? `Up to ${escapeHtml(String(MX_H2I_TOPOLOGY_CLIENT_LIMIT))} client lease nodes are rendered. Remaining leases stay available in the table.`
+            : 'Lease inventory is unavailable, so no topology is inferred or rendered.'}</p>
         </div>
-        <span class="health-chip" data-health="ready" data-mx-h2i-topology-status>INITIALIZING</span>
+        <span class="health-chip" data-health="${leaseDataAvailable ? 'ready' : 'unknown'}" data-mx-h2i-topology-status>${leaseDataAvailable ? 'INITIALIZING' : 'DATA UNAVAILABLE'}</span>
       </div>
-      <div class="mx-h2i-topology-layout">
-        <div class="mx-h2i-topology-stage">
-          <canvas data-mx-h2i-topology-canvas aria-hidden="true"></canvas>
-          <div class="mx-h2i-topology-overlay" aria-hidden="true">
-            <span>CLIENTS</span><span>DOMESTIC</span><span>INTERNAL</span>
+      ${leaseDataAvailable ? `
+        <div class="mx-h2i-topology-layout">
+          <div class="mx-h2i-topology-stage">
+            <canvas data-mx-h2i-topology-canvas aria-hidden="true"></canvas>
+            <div class="mx-h2i-topology-overlay" aria-hidden="true">
+              <span>CLIENTS</span><span>DOMESTIC</span><span>INTERNAL</span>
+            </div>
           </div>
+          ${renderMxH2iTopologyFallback(activeLeases, product)}
         </div>
-        ${renderMxH2iTopologyFallback(activeLeases, product)}
-      </div>
+      ` : `
+        <div class="mx-h2i-topology-fallback" data-mx-h2i-topology-fallback>
+          <div class="empty-state">Topology data could not be loaded. Refresh data before interpreting client, Domestic, or Internal paths.</div>
+        </div>
+      `}
     </section>
 
     <section id="mx-h2i-connections" class="mx-h2i-operations-panel" aria-labelledby="mx-h2i-connections-title">
@@ -11737,7 +11865,7 @@ function renderMxH2iOperationsScreen(product, leases) {
           <h4 id="mx-h2i-connections-title">Detailed client lease records</h4>
           <p>Filter static active leases by identity, user, IP, device, platform, lease ID, or app ID.</p>
         </div>
-        <span class="mx-h2i-filter-count" data-mx-h2i-filter-count>${escapeHtml(mxH2iLeasePageSummary(leasePage))}</span>
+        <span class="mx-h2i-filter-count" data-mx-h2i-filter-count>${leaseDataAvailable ? escapeHtml(mxH2iLeasePageSummary(leasePage)) : 'Lease inventory unavailable'}</span>
       </div>
       <div class="mx-h2i-lease-filters">
         <input type="search" data-mx-h2i-lease-query value="${escapeHtml(state.mxH2iLeaseFilter.query)}" placeholder="Search user, source IP, assigned IP, device…" aria-label="Search MX-H2I leases" />
@@ -11754,7 +11882,7 @@ function renderMxH2iOperationsScreen(product, leases) {
             ${leasePage.rows.map((lease) => renderMxH2iLeaseTableRow(lease)).join('')}
           </tbody>
         </table>
-        <div class="empty-state" data-mx-h2i-filter-empty ${leasePage.filteredCount ? 'hidden' : ''}>No active MX-H2I lease record matches this filter.</div>
+        <div class="empty-state" data-mx-h2i-filter-empty ${leasePage.filteredCount ? 'hidden' : ''}>${leaseDataAvailable ? 'No active MX-H2I lease record matches this filter.' : 'Lease inventory could not be loaded. Refresh data before acting on a connection.'}</div>
       </div>
       <div class="mx-h2i-lease-pagination" aria-label="MX-H2I lease table pagination">
         <button class="secondary-button" type="button" data-mx-h2i-lease-page="previous" ${leasePage.page <= 1 ? 'disabled' : ''}>Previous 100</button>
@@ -11763,11 +11891,164 @@ function renderMxH2iOperationsScreen(product, leases) {
       </div>
     </section>
 
+    ${renderMxH2iBlockedUsersPanel()}
+
     ${renderStandaloneAnonymousPolicy(product, {
       sectionId: 'mx-h2i-policy',
-      description: 'This saves only MX-H2I ProductNetwork policy. Luopan and other standalone apps keep their own values.'
+      description: 'This saves only MX-H2I ProductNetwork policy. Luopan and other standalone apps keep their own values.',
+      unavailable: options.productDataAvailable === false,
+      unavailableMessage: state.launcherProductsError || 'The registered MX-H2I ProductNetwork is unavailable.'
     })}
   `;
+}
+
+function renderMxH2iDashboard(product, leases) {
+  const registeredProduct = launcherProductById(MX_H2I_PRODUCT_ID);
+  const productDataAvailable = !state.launcherProductsError && Boolean(registeredProduct);
+  const leaseDataAvailable = productDataAvailable && !state.launcherLeasesError;
+  const policy = productDataAvailable ? anonymousEnrollmentPolicyForProduct(registeredProduct) : null;
+  const policyBusy = state.anonymousPolicyBusyProductId === MX_H2I_PRODUCT_ID;
+  const quickTarget = policy ? (policy === 'disabled' ? 'enabled' : 'disabled') : null;
+  const policyFeedback = state.anonymousPolicyFeedback?.productId === MX_H2I_PRODUCT_ID
+    ? state.anonymousPolicyFeedback
+    : null;
+  const policyLabel = !policy
+    ? 'Anonymous policy unavailable'
+    : policy === 'enabled'
+    ? 'Anonymous enroll enabled'
+    : policy === 'drain'
+      ? 'Anonymous enroll draining'
+      : 'Anonymous enroll disabled';
+  return `
+    <section class="mx-h2i-dashboard" aria-labelledby="mx-h2i-dashboard-title">
+      <header class="mx-h2i-dashboard-hero">
+        <div class="mx-h2i-dashboard-title">
+          <span class="site-kind">MX-H2I Control Room</span>
+          <h3 id="mx-h2i-dashboard-title">Connections &amp; Network Operations</h3>
+          <p>以 MX-H2I ProductNetwork 为边界查看连接分配、客户端拓扑和匿名准入；Luopan 使用自己的独立策略。</p>
+        </div>
+        <div class="mx-h2i-dashboard-status" aria-label="MX-H2I dashboard status">
+          <span><strong>${leaseDataAvailable ? escapeHtml(String(asArray(leases).length)) : '—'}</strong><small>${leaseDataAvailable ? 'active lease records' : 'lease data unavailable'}</small></span>
+          <span data-policy="${escapeHtml(policy || 'unavailable')}"><strong>${escapeHtml(policyLabel)}</strong><small>mx-h2i only</small></span>
+        </div>
+        <div class="action-row mx-h2i-dashboard-actions">
+          <button class="primary-button" type="button" data-mx-h2i-jump="connections">Open connections</button>
+          <button class="secondary-button" type="button" data-mx-h2i-jump="policy">Anonymous policy</button>
+          <button class="${quickTarget === 'disabled' ? 'secondary-button danger-button' : 'secondary-button'}" type="button" ${quickTarget ? `data-mx-h2i-anonymous-quick-request="${escapeHtml(quickTarget)}"` : ''} ${policyBusy || !productDataAvailable ? 'disabled' : ''}>${!quickTarget ? 'Anonymous policy unavailable' : quickTarget === 'disabled' ? 'Disable MX-H2I anonymous login' : 'Enable MX-H2I anonymous login'}</button>
+          <button class="secondary-button" type="button" data-mx-h2i-open-product>Product settings</button>
+          <button class="secondary-button" type="button" data-mx-h2i-refresh-dashboard>Refresh data</button>
+        </div>
+        ${quickTarget && state.mxH2iAnonymousQuickConfirmation === quickTarget ? `
+          <div class="mx-h2i-quick-policy-confirmation" role="alert">
+            <div>
+              <strong>Confirm ${escapeHtml(quickTarget)} for MX-H2I anonymous login?</strong>
+              <span>This writes only ProductNetwork <code>mx-h2i</code>; Luopan remains unchanged. Existing leases and WireGuard peers are not removed by this switch.</span>
+            </div>
+            <button class="${quickTarget === 'disabled' ? 'secondary-button danger-button' : 'primary-button'}" type="button" data-mx-h2i-anonymous-quick-confirm="${escapeHtml(quickTarget)}" ${policyBusy ? 'disabled' : ''}>${policyBusy ? 'Saving…' : `Confirm ${escapeHtml(quickTarget)}`}</button>
+            <button class="secondary-button" type="button" data-mx-h2i-anonymous-quick-cancel ${policyBusy ? 'disabled' : ''}>Cancel</button>
+          </div>
+        ` : ''}
+        ${productDataAvailable && leaseDataAvailable ? '' : `<div class="feedback error mx-h2i-dashboard-feedback">${escapeHtml(state.launcherProductsError || state.launcherLeasesError || 'The registered MX-H2I ProductNetwork has not loaded. Refresh before changing connection or anonymous policy state.')}</div>`}
+        ${policyFeedback ? `<div class="feedback ${escapeHtml(policyFeedback.kind || 'info')} mx-h2i-dashboard-feedback">${escapeHtml(policyFeedback.message || '')}</div>` : ''}
+      </header>
+      ${renderMxH2iOperationsScreen(product, leases, { productDataAvailable, leaseDataAvailable })}
+    </section>
+  `;
+}
+
+function bindMxH2iDashboardControls(root, leases) {
+  bindMxH2iOperationsControls(root, leases);
+  bindStandaloneAnonymousPolicyControls(root);
+  const productButton = root.querySelector('[data-mx-h2i-open-product]');
+  if (productButton) {
+    productButton.addEventListener('click', () => {
+      state.mxH2iSurface = 'product';
+      closeMxH2iLeaseDrawer({ restoreFocus: false });
+      renderAppCenterShell();
+    });
+  }
+  const refresh = root.querySelector('[data-mx-h2i-refresh-dashboard]');
+  if (refresh) refresh.addEventListener('click', () => void refreshProducts());
+  root.querySelector('[data-mx-h2i-anonymous-quick-request]')?.addEventListener('click', (event) => {
+    state.mxH2iAnonymousQuickConfirmation = event.currentTarget.dataset.mxH2iAnonymousQuickRequest;
+    renderSelectedAppDetail();
+  });
+  root.querySelector('[data-mx-h2i-anonymous-quick-cancel]')?.addEventListener('click', () => {
+    state.mxH2iAnonymousQuickConfirmation = null;
+    renderSelectedAppDetail();
+  });
+  root.querySelector('[data-mx-h2i-anonymous-quick-confirm]')?.addEventListener('click', (event) => {
+    void saveMxH2iAnonymousQuickPolicy(event.currentTarget.dataset.mxH2iAnonymousQuickConfirm);
+  });
+  for (const jump of root.querySelectorAll('[data-mx-h2i-jump]')) {
+    jump.addEventListener('click', () => {
+      const targetId = jump.dataset.mxH2iJump === 'policy' ? 'mx-h2i-policy' : 'mx-h2i-connections';
+      root.querySelector(`#${targetId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+  const canvas = root.querySelector('[data-mx-h2i-topology-canvas]');
+  requestAnimationFrame(() => {
+    if (canvas?.isConnected
+      && canvas === root.querySelector('[data-mx-h2i-topology-canvas]')
+      && state.activeView === 'app-center'
+      && state.activeAppNode === MX_H2I_PRODUCT_ID
+      && state.mxH2iSurface === 'dashboard') {
+      initMxH2iTopology(root, leases);
+    }
+  });
+}
+
+async function saveMxH2iAnonymousQuickPolicy(targetPolicy) {
+  if (state.anonymousPolicyBusyProductId) return;
+  const anonymousEnrollmentPolicy = targetPolicy === 'enabled' ? 'enabled' : 'disabled';
+  const current = launcherProductById(MX_H2I_PRODUCT_ID);
+  if (!current || state.launcherProductsError) {
+    state.mxH2iAnonymousQuickConfirmation = null;
+    state.anonymousPolicyFeedback = {
+      productId: MX_H2I_PRODUCT_ID,
+      kind: 'error',
+      message: 'MX-H2I ProductNetwork policy is unavailable. Refresh data before changing anonymous admission.'
+    };
+    renderSelectedAppDetail();
+    return;
+  }
+  const anonymousUiVisibility = anonymousUiVisibilityForProduct(current);
+  state.anonymousPolicyBusyProductId = MX_H2I_PRODUCT_ID;
+  state.anonymousPolicyFeedback = {
+    productId: MX_H2I_PRODUCT_ID,
+    kind: 'info',
+    message: `Saving MX-H2I anonymous admission as ${anonymousEnrollmentPolicy}; Luopan is unchanged.`
+  };
+  renderSelectedAppDetail();
+  try {
+    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(MX_H2I_PRODUCT_ID)}`, {
+      method: 'POST',
+      body: {
+        anonymousEnrollmentPolicy,
+        anonymousUiVisibility,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-mx-h2i-anonymous-quick-${Date.now()}`
+      }
+    });
+    upsertLocalLauncherProduct({
+      ...current,
+      ...(payload?.product || {}),
+      productId: MX_H2I_PRODUCT_ID,
+      anonymousEnrollmentPolicy: payload?.product?.anonymousEnrollmentPolicy || anonymousEnrollmentPolicy,
+      anonymousUiVisibility: payload?.product?.anonymousUiVisibility || anonymousUiVisibility
+    });
+    state.mxH2iAnonymousQuickConfirmation = null;
+    state.anonymousPolicyFeedback = {
+      productId: MX_H2I_PRODUCT_ID,
+      kind: 'success',
+      message: `MX-H2I anonymous admission is ${anonymousEnrollmentPolicy}. Luopan, employee login, existing leases, and WireGuard peers were not changed.`
+    };
+  } catch (error) {
+    state.anonymousPolicyFeedback = { productId: MX_H2I_PRODUCT_ID, kind: 'error', message: error.message };
+  } finally {
+    state.anonymousPolicyBusyProductId = null;
+    renderSelectedAppDetail();
+  }
 }
 
 function renderSelectedAppDetail() {
@@ -11808,6 +12089,12 @@ function renderSelectedAppDetail() {
   const insightHubAdminEntrypoint = app.appId === MX_INSIGHT_HUB_APP_ID
     ? safeHttpEntrypoint(app.entrypoints?.admin)
     : null;
+  if (app.appId === MX_H2I_PRODUCT_ID && state.mxH2iSurface === 'dashboard') {
+    appSelectedDetail.innerHTML = renderMxH2iDashboard(product, leases);
+    bindMxH2iDashboardControls(appSelectedDetail, leases);
+    renderMxH2iLeaseDrawer();
+    return;
+  }
   appSelectedDetail.innerHTML = `
     <section class="app-workbench" aria-labelledby="selected-app-title">
       <header class="app-workbench-hero">
@@ -11826,8 +12113,6 @@ function renderSelectedAppDetail() {
       </header>
 
       ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
-
-      ${app.appId === MX_H2I_PRODUCT_ID ? renderMxH2iOperationsScreen(product, leases) : ''}
 
       ${renderInsightHubOverviewCard(app)}
 
@@ -12022,18 +12307,6 @@ function renderSelectedAppDetail() {
     });
   }
   if (mode === 'standalone') bindStandaloneAnonymousPolicyControls(appSelectedDetail);
-  if (app.appId === MX_H2I_PRODUCT_ID) {
-    bindMxH2iOperationsControls(appSelectedDetail, leases);
-    const mxH2iTopologyCanvas = appSelectedDetail.querySelector('[data-mx-h2i-topology-canvas]');
-    requestAnimationFrame(() => {
-      if (mxH2iTopologyCanvas?.isConnected
-        && mxH2iTopologyCanvas === appSelectedDetail.querySelector('[data-mx-h2i-topology-canvas]')
-        && state.activeView === 'app-center'
-        && state.activeAppNode === MX_H2I_PRODUCT_ID) {
-        initMxH2iTopology(appSelectedDetail, leases);
-      }
-    });
-  }
 }
 
 function applyMxH2iLeaseFilters(root, leases) {
@@ -12076,7 +12349,377 @@ function bindMxH2iOperationsControls(root, leases) {
       applyMxH2iLeaseFilters(root, leases);
     });
   }
+  const openLease = (event) => {
+    const blockedUser = event.target?.closest?.('[data-mx-h2i-blocked-user-open]');
+    if (blockedUser && root.contains(blockedUser)) {
+      openMxH2iBlockedUserDrawer(blockedUser.dataset.mxH2iBlockedUserOpen, blockedUser);
+      return;
+    }
+    const row = event.target?.closest?.('[data-mx-h2i-lease-open]');
+    if (!row || !root.contains(row)) return;
+    openMxH2iLeaseDrawer(row.dataset.mxH2iLeaseOpen, row);
+  };
+  root.addEventListener('click', openLease);
+  root.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const row = event.target?.closest?.('[data-mx-h2i-lease-open]');
+    if (!row || !root.contains(row)) return;
+    event.preventDefault();
+    openLease(event);
+  });
   state.mxH2iLeaseFilter.page = mxH2iLeasePage(leases, state.mxH2iLeaseFilter).page;
+}
+
+let mxH2iLeaseDrawerReturnFocus = null;
+
+function mxH2iLeaseDrawerKey(lease) {
+  return String(lease?.leaseId || lease?.leaseIp || lease?.installId || '').trim();
+}
+
+function mxH2iLeaseForDrawer(key = state.mxH2iLeaseDrawer?.leaseKey) {
+  const normalized = String(key || '').trim();
+  const recordedLease = launcherLeasesForProduct(MX_H2I_PRODUCT_ID)
+    .find((lease) => mxH2iLeaseDrawerKey(lease) === normalized) || null;
+  if (recordedLease) return recordedLease;
+  const access = state.mxH2iLeaseDrawer?.productUserAccess;
+  if (!access?.userId) return null;
+  return {
+    ...(access.lastLease || {}),
+    leaseId: access.lastLease?.leaseId || '',
+    productId: MX_H2I_PRODUCT_ID,
+    userId: access.userId,
+    subject: access.displayName || access.account || access.userId,
+    identityKind: 'user',
+    status: access.lastLease?.status || 'no lease allocated'
+  };
+}
+
+function mxH2iBlockedUserAccessById(userId) {
+  return mxH2iBlockedUserAccessRows().find((access) => access.userId === userId) || null;
+}
+
+function openMxH2iLeaseDrawer(leaseKey, returnFocus = null) {
+  const lease = mxH2iLeaseForDrawer(leaseKey);
+  if (!lease || !mxH2iLeaseDrawer || !mxH2iLeaseBackdrop) return;
+  mxH2iLeaseDrawerReturnFocus = returnFocus instanceof HTMLElement ? returnFocus : document.activeElement;
+  state.mxH2iLeaseDrawer = {
+    leaseKey: mxH2iLeaseDrawerKey(lease),
+    userId: String(lease.userId || '').trim() || null,
+    productUserAccess: null,
+    accessLoading: false,
+    accessError: null,
+    actionBusy: false,
+    confirmation: null,
+    reason: '',
+    feedback: null
+  };
+  renderMxH2iLeaseDrawer();
+  if (state.mxH2iLeaseDrawer.userId && mxH2iLeaseIdentityGroup(lease) === 'employee') {
+    void loadMxH2iProductUserAccess(state.mxH2iLeaseDrawer.userId);
+  }
+  mxH2iLeaseDrawer.querySelector('[data-mx-h2i-lease-drawer-close]')?.focus();
+}
+
+function openMxH2iBlockedUserDrawer(userId, returnFocus = null) {
+  const access = mxH2iBlockedUserAccessById(String(userId || '').trim());
+  if (!access || !mxH2iLeaseDrawer || !mxH2iLeaseBackdrop) return;
+  mxH2iLeaseDrawerReturnFocus = returnFocus instanceof HTMLElement ? returnFocus : document.activeElement;
+  state.mxH2iLeaseDrawer = {
+    leaseKey: mxH2iLeaseDrawerKey(access.lastLease) || `blocked-user:${access.userId}`,
+    userId: access.userId,
+    productUserAccess: access,
+    accessLoading: false,
+    accessError: null,
+    actionBusy: false,
+    confirmation: null,
+    reason: '',
+    feedback: null
+  };
+  renderMxH2iLeaseDrawer();
+  void loadMxH2iProductUserAccess(access.userId);
+  mxH2iLeaseDrawer.querySelector('[data-mx-h2i-lease-drawer-close]')?.focus();
+}
+
+function closeMxH2iLeaseDrawer(options = {}) {
+  if (!mxH2iLeaseDrawer || !mxH2iLeaseBackdrop) return;
+  const restoreFocus = options.restoreFocus !== false;
+  const closingDrawer = state.mxH2iLeaseDrawer;
+  state.mxH2iLeaseDrawer = null;
+  mxH2iLeaseDrawer.hidden = true;
+  mxH2iLeaseBackdrop.hidden = true;
+  mxH2iLeaseDrawer.innerHTML = '';
+  if (restoreFocus) {
+    const blockedUserButton = Array.from(document.querySelectorAll('[data-mx-h2i-blocked-user-open]'))
+      .find((button) => button.dataset.mxH2iBlockedUserOpen === closingDrawer?.userId);
+    const leaseRow = Array.from(document.querySelectorAll('[data-mx-h2i-lease-open]'))
+      .find((row) => row.dataset.mxH2iLeaseOpen === closingDrawer?.leaseKey);
+    const fallback = blockedUserButton
+      || leaseRow
+      || document.querySelector('[data-mx-h2i-jump="connections"]')
+      || document.getElementById('app-refresh');
+    if (mxH2iLeaseDrawerReturnFocus?.isConnected) mxH2iLeaseDrawerReturnFocus.focus();
+    else fallback?.focus();
+  }
+  mxH2iLeaseDrawerReturnFocus = null;
+}
+
+function trapMxH2iLeaseDrawerFocus(event) {
+  if (!mxH2iLeaseDrawer || mxH2iLeaseDrawer.hidden) return;
+  const focusable = Array.from(mxH2iLeaseDrawer.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )).filter((element) => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+  if (!focusable.length) {
+    event.preventDefault();
+    mxH2iLeaseDrawer.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || !mxH2iLeaseDrawer.contains(active))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (active === last || !mxH2iLeaseDrawer.contains(active))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function mxH2iProductUserAccessFromPayload(payload) {
+  return payload?.productUserAccess || payload?.access || null;
+}
+
+async function loadMxH2iProductUserAccess(userId) {
+  const drawer = state.mxH2iLeaseDrawer;
+  if (!drawer || drawer.accessLoading || drawer.userId !== userId) return;
+  drawer.accessLoading = true;
+  drawer.accessError = null;
+  renderMxH2iLeaseDrawer();
+  try {
+    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(MX_H2I_PRODUCT_ID)}/users/${encodeURIComponent(userId)}/access`);
+    if (!state.mxH2iLeaseDrawer || state.mxH2iLeaseDrawer.userId !== userId) return;
+    state.mxH2iLeaseDrawer.productUserAccess = {
+      ...(state.mxH2iLeaseDrawer.productUserAccess || {}),
+      ...(mxH2iProductUserAccessFromPayload(payload) || {})
+    };
+  } catch (error) {
+    if (!state.mxH2iLeaseDrawer || state.mxH2iLeaseDrawer.userId !== userId) return;
+    state.mxH2iLeaseDrawer.accessError = error.message;
+  } finally {
+    if (state.mxH2iLeaseDrawer?.userId === userId) {
+      state.mxH2iLeaseDrawer.accessLoading = false;
+      renderMxH2iLeaseDrawer();
+    }
+  }
+}
+
+async function saveMxH2iProductUserAccess(blocked) {
+  const drawer = state.mxH2iLeaseDrawer;
+  if (!drawer?.userId || drawer.actionBusy) return;
+  const userId = drawer.userId;
+  drawer.actionBusy = true;
+  drawer.feedback = {
+    kind: 'info',
+    message: blocked ? 'Banning this user from MX-H2I…' : 'Removing the MX-H2I user ban…'
+  };
+  renderMxH2iLeaseDrawer();
+  try {
+    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(MX_H2I_PRODUCT_ID)}/users/${encodeURIComponent(userId)}/access`, {
+      method: 'POST',
+      body: {
+        blocked,
+        reason: String(drawer.reason || '').trim() || null,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-mx-h2i-user-access-${Date.now()}`
+      }
+    });
+    const access = {
+      ...(drawer.productUserAccess || {}),
+      ...(mxH2iProductUserAccessFromPayload(payload) || {})
+    };
+    const activeDrawer = state.mxH2iLeaseDrawer?.userId === userId ? state.mxH2iLeaseDrawer : null;
+    if (activeDrawer) {
+      activeDrawer.productUserAccess = access;
+      activeDrawer.confirmation = null;
+      activeDrawer.feedback = {
+        kind: 'success',
+        message: blocked
+          ? `Banned from MX-H2I. ${access?.controlPlane?.releasedLeaseCount || 0} control-plane lease(s) released; WireGuard peer removal is not claimed.`
+          : 'MX-H2I user ban removed. No lease or WireGuard peer was recreated.'
+      };
+    }
+    await refreshAppCenterNetwork();
+  } catch (error) {
+    if (state.mxH2iLeaseDrawer?.userId === userId) {
+      state.mxH2iLeaseDrawer.feedback = { kind: 'error', message: error.message };
+    }
+  } finally {
+    if (state.mxH2iLeaseDrawer?.userId === userId) {
+      state.mxH2iLeaseDrawer.actionBusy = false;
+      renderMxH2iLeaseDrawer();
+    }
+  }
+}
+
+function renderMxH2iLeaseDrawer() {
+  if (!mxH2iLeaseDrawer || !mxH2iLeaseBackdrop) return;
+  const drawer = state.mxH2iLeaseDrawer;
+  if (!drawer) {
+    mxH2iLeaseDrawer.hidden = true;
+    mxH2iLeaseBackdrop.hidden = true;
+    return;
+  }
+  const lease = mxH2iLeaseForDrawer(drawer.leaseKey);
+  if (!lease) {
+    closeMxH2iLeaseDrawer({ restoreFocus: false });
+    return;
+  }
+  const previousFocusKey = mxH2iLeaseDrawer.contains(document.activeElement)
+    ? document.activeElement?.dataset?.mxH2iDrawerFocus || null
+    : null;
+  const identity = mxH2iLeaseIdentityGroup(lease);
+  const employee = identity === 'employee' && Boolean(drawer.userId);
+  const access = drawer.productUserAccess;
+  const blocked = access?.blocked === true;
+  const displaySubject = access?.displayName || access?.account || mxH2iLeaseSubject(lease);
+  const nextAction = blocked ? 'unban' : 'ban';
+  const runtimePeerRemoval = access?.runtimePeerRemoval || null;
+  const hasLeaseRecord = Boolean(lease.leaseId || lease.leaseIp || lease.installId || access?.lastLease);
+  const observedAt = mxH2iLeaseObservedAt(lease);
+  const recordUpdatedAt = mxH2iLeaseRecordUpdatedAt(lease);
+  const expiresAt = mxH2iLeaseExpiryAt(lease);
+  mxH2iLeaseBackdrop.hidden = false;
+  mxH2iLeaseDrawer.hidden = false;
+  mxH2iLeaseDrawer.innerHTML = `
+    <div class="app-editor-form mx-h2i-lease-drawer-layout">
+      <header class="app-drawer-header">
+        <div>
+          <span class="site-kind">${hasLeaseRecord ? 'MX-H2I Connection' : 'MX-H2I User Access'}</span>
+          <h2 id="mx-h2i-lease-drawer-title">${escapeHtml(displaySubject)}</h2>
+          <p>${hasLeaseRecord
+            ? `${escapeHtml(lease.leaseIp || '-')} · static control-plane lease · ${escapeHtml(mxH2iLeaseIdentityLabel(lease))}`
+            : `No lease allocated · product-scoped user access · ${escapeHtml(mxH2iLeaseIdentityLabel(lease))}`}</p>
+        </div>
+        <button class="secondary-button app-drawer-close" type="button" data-mx-h2i-lease-drawer-close data-mx-h2i-drawer-focus="close-header">Close</button>
+      </header>
+      <div class="app-drawer-scroll">
+        <div class="mx-h2i-static-data-notice" role="note">
+          ${hasLeaseRecord ? `
+            <strong>Lease record ≠ live tunnel</strong>
+            <span>This drawer does not call a lease “online” without runtime WireGuard telemetry. Enrollment source IP is not the observed NAT endpoint.</span>
+          ` : `
+            <strong>No lease allocated</strong>
+            <span>This user-access record remains visible so the product-scoped MX-H2I ban can be safely reviewed or removed. No connection or released lease is inferred.</span>
+          `}
+        </div>
+        <div class="mx-h2i-lease-drawer-summary">
+          <article><span>Identity</span><strong>${escapeHtml(mxH2iLeaseIdentityLabel(lease))}</strong><small>${escapeHtml(drawer.userId || 'no user identity')}</small></article>
+          <article><span>Assigned IP</span><strong>${hasLeaseRecord ? escapeHtml(lease.leaseIp || '-') : 'no lease allocated'}</strong><small>${hasLeaseRecord ? escapeHtml(lease.status || 'active') : 'user access only'}</small></article>
+          <article><span>Source IP</span><strong>${hasLeaseRecord ? escapeHtml(mxH2iLeaseSourceIp(lease)) : 'not recorded'}</strong><small>${hasLeaseRecord ? 'enrollment / renewal HTTP' : 'no enrollment lease'}</small></article>
+          <article><span>Application</span><strong>${escapeHtml(lease.appId || MX_H2I_PRODUCT_ID)}</strong><small>ProductNetwork ${escapeHtml(MX_H2I_PRODUCT_ID)}</small></article>
+        </div>
+        <section class="app-drawer-section">
+          <div class="app-section-title"><span>01</span><strong>${hasLeaseRecord ? 'Connection identity' : 'User access identity'}</strong></div>
+          <dl class="mx-h2i-lease-detail-grid">
+            <div><dt>User / subject</dt><dd>${escapeHtml(displaySubject)}</dd></div>
+            <div><dt>Lease ID</dt><dd>${escapeHtml(lease.leaseId || '-')}</dd></div>
+            <div><dt>Install ID</dt><dd>${escapeHtml(lease.installId || '-')}</dd></div>
+            <div><dt>Device ID</dt><dd>${escapeHtml(lease.deviceId || '-')}</dd></div>
+            <div><dt>Device</dt><dd>${escapeHtml(mxH2iLeaseDevice(lease))}</dd></div>
+            <div><dt>Platform</dt><dd>${escapeHtml(mxH2iLeasePlatform(lease))}</dd></div>
+          </dl>
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title"><span>02</span><strong>Observation &amp; lifecycle</strong></div>
+          <dl class="mx-h2i-lease-detail-grid">
+            <div><dt>Last runtime observation</dt><dd>${escapeHtml(observedAt ? formatTime(observedAt) : 'not observed')}</dd></div>
+            <div><dt>Record updated</dt><dd>${escapeHtml(recordUpdatedAt ? formatTime(recordUpdatedAt) : '-')}</dd></div>
+            <div><dt>Expires</dt><dd>${escapeHtml(expiresAt ? formatTime(expiresAt) : '-')}</dd></div>
+            <div><dt>Observed NAT endpoint</dt><dd>not observed</dd></div>
+          </dl>
+        </section>
+        <section class="app-drawer-section mx-h2i-control-section">
+          <div class="app-section-title"><span>03</span><strong>MX-H2I user access</strong></div>
+          ${employee ? `
+            <div class="mx-h2i-product-access-state">
+              <span class="health-chip" data-health="${blocked ? 'blocked' : 'passed'}">${drawer.accessLoading ? 'checking' : blocked ? 'banned' : 'allowed'}</span>
+              <p>Only <strong>mx-h2i</strong> is changed. Luopan and other ProductNetworks are not affected. A ban releases matching control-plane leases, but does not claim the WireGuard peer has been removed.</p>
+            </div>
+            ${drawer.accessError ? `<div class="feedback error">${escapeHtml(drawer.accessError)}</div>` : ''}
+            ${drawer.feedback ? `<div class="feedback ${escapeHtml(drawer.feedback.kind || 'info')}">${escapeHtml(drawer.feedback.message || '')}</div>` : ''}
+            ${runtimePeerRemoval ? `
+              <div class="mx-h2i-runtime-removal-state">
+                <strong>Runtime peer removal: ${escapeHtml(runtimePeerRemoval.status || 'not-performed')}</strong>
+                <span>${escapeHtml(runtimePeerRemoval.message || 'No runtime peer removal was claimed.')}</span>
+              </div>
+            ` : ''}
+            ${drawer.confirmation === nextAction ? `
+              <div class="mx-h2i-access-confirmation" role="alert">
+                <strong>${blocked ? 'Confirm unban from MX-H2I?' : 'Confirm ban from MX-H2I?'}</strong>
+                <span>${blocked ? 'This restores admission only; it does not recreate a lease or peer.' : 'This blocks MX-H2I admission and releases matching active control-plane leases. Runtime peer removal remains separate.'}</span>
+                <label><span>Reason (optional)</span><input data-mx-h2i-access-reason data-mx-h2i-drawer-focus="access-reason" value="${escapeHtml(drawer.reason || '')}" placeholder="Operator reason" /></label>
+                <div class="action-row">
+                  <button class="${blocked ? 'primary-button' : 'secondary-button danger-button'}" type="button" data-mx-h2i-access-confirm="${escapeHtml(nextAction)}" data-mx-h2i-drawer-focus="access-confirm" ${drawer.actionBusy ? 'disabled' : ''}>${drawer.actionBusy ? 'Working…' : blocked ? 'Confirm unban' : 'Confirm ban'}</button>
+                  <button class="secondary-button" type="button" data-mx-h2i-access-cancel data-mx-h2i-drawer-focus="access-cancel" ${drawer.actionBusy ? 'disabled' : ''}>Cancel</button>
+                </div>
+              </div>
+            ` : `
+              <button class="${blocked ? 'secondary-button' : 'secondary-button danger-button'}" type="button" data-mx-h2i-access-request="${escapeHtml(nextAction)}" data-mx-h2i-drawer-focus="access-request" ${drawer.accessLoading || drawer.actionBusy || !access ? 'disabled' : ''}>${blocked ? 'Unban from MX-H2I' : 'Ban from MX-H2I'}</button>
+            `}
+          ` : `
+            <div class="mx-h2i-product-access-state">
+              <span class="health-chip" data-health="ready">anonymous</span>
+              <p>This record has no user identity. Reliable single-client ban is not available until peer-safe revoke exists. Manage new anonymous admission with the MX-H2I application policy.</p>
+            </div>
+            <button class="secondary-button" type="button" data-mx-h2i-drawer-open-policy data-mx-h2i-drawer-focus="anonymous-policy">Open MX-H2I anonymous policy</button>
+          `}
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title"><span>04</span><strong>Planned controls</strong></div>
+          <p class="app-section-copy">These controls require runtime evidence and safe reconciliation before they can mutate a live tunnel.</p>
+          <div class="mx-h2i-future-controls">
+            <button class="secondary-button" type="button" disabled title="Requires peer-safe revoke saga">Revoke WG peer</button>
+            <button class="secondary-button" type="button" disabled title="Traffic policy backend is not available">Traffic limits</button>
+            <button class="secondary-button" type="button" disabled title="Port policy backend is not available">Port policy</button>
+          </div>
+        </section>
+      </div>
+      <footer class="app-drawer-actions">
+        <span class="user-drawer-action-spacer"></span>
+        <button class="secondary-button" type="button" data-mx-h2i-lease-drawer-close data-mx-h2i-drawer-focus="close-footer">Close</button>
+      </footer>
+    </div>
+  `;
+  for (const close of mxH2iLeaseDrawer.querySelectorAll('[data-mx-h2i-lease-drawer-close]')) {
+    close.addEventListener('click', () => closeMxH2iLeaseDrawer());
+  }
+  mxH2iLeaseDrawer.querySelector('[data-mx-h2i-drawer-open-policy]')?.addEventListener('click', () => {
+    closeMxH2iLeaseDrawer();
+    requestAnimationFrame(() => document.getElementById('mx-h2i-policy')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  });
+  mxH2iLeaseDrawer.querySelector('[data-mx-h2i-access-request]')?.addEventListener('click', (event) => {
+    if (!state.mxH2iLeaseDrawer) return;
+    state.mxH2iLeaseDrawer.confirmation = event.currentTarget.dataset.mxH2iAccessRequest;
+    state.mxH2iLeaseDrawer.feedback = null;
+    renderMxH2iLeaseDrawer();
+    mxH2iLeaseDrawer.querySelector('[data-mx-h2i-access-confirm]')?.focus();
+  });
+  mxH2iLeaseDrawer.querySelector('[data-mx-h2i-access-cancel]')?.addEventListener('click', () => {
+    if (!state.mxH2iLeaseDrawer) return;
+    state.mxH2iLeaseDrawer.confirmation = null;
+    renderMxH2iLeaseDrawer();
+    mxH2iLeaseDrawer.querySelector('[data-mx-h2i-access-request]')?.focus();
+  });
+  mxH2iLeaseDrawer.querySelector('[data-mx-h2i-access-confirm]')?.addEventListener('click', (event) => {
+    if (!state.mxH2iLeaseDrawer) return;
+    state.mxH2iLeaseDrawer.reason = mxH2iLeaseDrawer.querySelector('[data-mx-h2i-access-reason]')?.value || '';
+    void saveMxH2iProductUserAccess(event.currentTarget.dataset.mxH2iAccessConfirm === 'ban');
+  });
+  if (previousFocusKey) {
+    const replacement = mxH2iLeaseDrawer.querySelector(`[data-mx-h2i-drawer-focus="${previousFocusKey}"]`);
+    if (replacement && !replacement.disabled) replacement.focus();
+    else mxH2iLeaseDrawer.querySelector('[data-mx-h2i-lease-drawer-close]')?.focus();
+  }
 }
 
 function bindStandaloneAnonymousPolicyControls(root) {
@@ -12087,7 +12730,16 @@ function bindStandaloneAnonymousPolicyControls(root) {
 async function saveStandaloneAnonymousPolicy(root, productId) {
   if (state.anonymousPolicyBusyProductId) return;
   const normalizedProductId = normalizeLauncherProductId(productId);
-  const current = launcherProductNetwork(normalizedProductId);
+  const current = launcherProductById(normalizedProductId);
+  if (!current) {
+    state.anonymousPolicyFeedback = {
+      productId: normalizedProductId,
+      kind: 'error',
+      message: `${normalizedProductId} ProductNetwork policy is unavailable. Refresh data before saving.`
+    };
+    renderSelectedAppDetail();
+    return;
+  }
   const policyValue = root.querySelector('[data-standalone-anonymous-policy]')?.value;
   const visibilityValue = root.querySelector('[data-standalone-anonymous-visibility]')?.value;
   const anonymousEnrollmentPolicy = ['enabled', 'drain', 'disabled'].includes(policyValue) ? policyValue : 'enabled';
@@ -12118,6 +12770,7 @@ async function saveStandaloneAnonymousPolicy(root, productId) {
       anonymousEnrollmentPolicy: payload?.product?.anonymousEnrollmentPolicy || anonymousEnrollmentPolicy,
       anonymousUiVisibility: payload?.product?.anonymousUiVisibility || anonymousUiVisibility
     });
+    if (normalizedProductId === MX_H2I_PRODUCT_ID) state.mxH2iAnonymousQuickConfirmation = null;
     state.anonymousPolicyFeedback = {
       productId: normalizedProductId,
       kind: 'success',
@@ -17629,6 +18282,7 @@ function mxH2iTopologyCanAnimate(instance) {
     && !document.hidden
     && state.activeView === 'app-center'
     && state.activeAppNode === MX_H2I_PRODUCT_ID
+    && state.mxH2iSurface === 'dashboard'
     && instance.canvas.isConnected;
 }
 

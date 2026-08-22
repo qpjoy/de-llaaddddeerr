@@ -8,7 +8,8 @@
 2. [21-network-mode-switch-events-and-performance.md](./21-network-mode-switch-events-and-performance.md)：
    当前访客/员工切换、事件和性能不回归基线。
 3. [28-mx-h2i-connection-operations-and-anonymous-governance.md](./28-mx-h2i-connection-operations-and-anonymous-governance.md)：
-   MX-H2I 运营控制面、匿名准入、实时连接、3D 拓扑与未来安全下线。
+   当前 MX-H2I 专属 Dashboard、连接抽屉、产品级用户 ban/unban、匿名准入隔离，以及
+   实时连接、3D 拓扑和未来 peer-safe 下线边界。
 
 相关专题：
 
@@ -23,4 +24,3 @@
 
 带“目标架构”或“后续”状态的文档不代表代码已经实现。运行时能力必须以实现、测试和
 部署证据为准。
-

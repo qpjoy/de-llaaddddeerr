@@ -291,6 +291,140 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         }
       })
     },
+    '/internal/v1/launcher-network/products/{productId}/user-access': {
+      get: operation({
+        tag: 'Launcher Network',
+        summary: '列出产品级封禁用户',
+        description: '要求 x-mx-ops-token。只返回该 ProductNetwork 的 blocked users，并保留最后一条 released lease 摘要，确保 active lease 被释放后管理员仍能找到并恢复用户。mx-h2i 与 luopan 的记录相互隔离。',
+        operationId: 'listLauncherProductUserAccess',
+        auth: 'ops-token',
+        pathParams: ['productId'],
+        response: {
+          productUserAccess: {
+            productId: 'mx-h2i',
+            blockedUsers: [{
+              productId: 'mx-h2i',
+              userId: 'usr_partner_alice',
+              blocked: true,
+              account: 'partner-alice',
+              displayName: 'Alice',
+              userStatus: 'active',
+              userUpdatedAt: '2026-07-20T00:00:00.000Z',
+              activeLeaseIds: [],
+              lastLease: {
+                leaseId: 'lnlease_example',
+                status: 'released',
+                leaseIp: '10.89.50.2',
+                sourceIp: '198.51.100.20',
+                installId: 'inst_example',
+                deviceId: 'device_example',
+                deviceLabel: 'MX-H2I Desktop',
+                platform: 'darwin',
+                appVersion: '2.1.18',
+                updatedAt: '2026-07-20T00:00:00.000Z',
+                releasedAt: '2026-07-20T00:00:00.000Z'
+              },
+              controlPlane: {
+                admission: 'blocked',
+                activeLeaseIds: [],
+                releasedLeaseIds: [],
+                releasedLeaseCount: 0,
+                userStatusChanged: false,
+                tokensRevoked: 0
+              },
+              runtimePeerRemoval: {
+                status: 'not-performed',
+                domestic: 'not-performed',
+                internalDirect: 'not-performed',
+                message: 'Control-plane admission is blocked; WireGuard peer removal was not performed or confirmed.'
+              }
+            }],
+            blockedUserCount: 1,
+            generatedAt: '2026-07-20T00:00:00.000Z'
+          }
+        }
+      })
+    },
+    '/internal/v1/launcher-network/products/{productId}/users/{userId}/access': {
+      get: operation({
+        tag: 'Launcher Network',
+        summary: '读取用户的产品级网络访问状态',
+        description: '要求 x-mx-ops-token。状态来自 User Center 的 product-scoped deny，不修改全局 user.status；因此封禁 mx-h2i 不会封禁 Luopan。',
+        operationId: 'getLauncherProductUserAccess',
+        auth: 'ops-token',
+        pathParams: ['productId', 'userId'],
+        response: {
+          productUserAccess: {
+            productId: 'mx-h2i',
+            userId: 'usr_partner_alice',
+            blocked: true,
+            account: 'partner-alice',
+            displayName: 'Alice',
+            userStatus: 'active',
+            activeLeaseIds: [],
+            lastLease: null,
+            changed: false,
+            reason: null,
+            controlPlane: {
+              admission: 'blocked',
+              activeLeaseIds: [],
+              releasedLeaseIds: [],
+              releasedLeaseCount: 0,
+              userStatusChanged: false,
+              tokensRevoked: 0
+            },
+            runtimePeerRemoval: {
+              status: 'not-performed',
+              domestic: 'not-performed',
+              internalDirect: 'not-performed',
+              message: 'Control-plane admission is blocked; WireGuard peer removal was not performed or confirmed.'
+            }
+          }
+        }
+      }),
+      post: operation({
+        tag: 'Launcher Network',
+        summary: '封禁或恢复用户的产品级网络访问',
+        description: '要求 x-mx-ops-token。blocked=true 会先持久化 product+user admission deny，并原子释放该产品下该用户的 active DB leases；不会修改全局 user.status、不会撤销可供其他产品使用的 token，也不会声称已删除 Domestic/Internal WireGuard peer。blocked=false 只恢复该产品的 admission。',
+        operationId: 'setLauncherProductUserAccess',
+        auth: 'ops-token',
+        pathParams: ['productId', 'userId'],
+        request: {
+          blocked: true,
+          reason: 'Operator blocked this MX-H2I user from the connection drawer.',
+          requestedBy: 'desktop-admin',
+          requestId: 'mx-h2i-user-block-001'
+        },
+        required: ['blocked'],
+        response: {
+          productUserAccess: {
+            productId: 'mx-h2i',
+            userId: 'usr_partner_alice',
+            blocked: true,
+            account: 'partner-alice',
+            displayName: 'Alice',
+            userStatus: 'active',
+            activeLeaseIds: [],
+            changed: true,
+            reason: 'Operator blocked this MX-H2I user from the connection drawer.',
+            controlPlane: {
+              admission: 'blocked',
+              activeLeaseIds: [],
+              releasedLeaseIds: ['lnlease_example'],
+              releasedLeaseCount: 1,
+              userStatusChanged: false,
+              tokensRevoked: 0
+            },
+            runtimePeerRemoval: {
+              status: 'not-performed',
+              domestic: 'not-performed',
+              internalDirect: 'not-performed',
+              message: 'Control-plane admission is blocked and active database leases were released; WireGuard peer removal was not performed or confirmed.'
+            }
+          }
+        }
+      })
+    },
     '/internal/v1/sdk/gateway/manifest': {
       get: operation({
         tag: 'Discovery',

@@ -79,6 +79,8 @@ import type {
   LauncherNetworkReachabilityPlan,
   LauncherProductNetwork,
   LauncherProductNetworkInput,
+  LauncherProductUserAccessInput,
+  LauncherProductUserAccessResult,
   LogEntryInput,
   MihomoSubscriptionRender,
   PermissionGrant,
@@ -295,11 +297,13 @@ import {
   required,
   MX_H2I_PRODUCT_ID,
   assertLauncherNetworkLeaseEntitlement,
+  assertLauncherProductUserAccess,
   launcherNetworkAppIdForLeaseInput,
   launcherNetworkLeaseProductId,
   launcherNetworkProductIsStandaloneDefault,
   launcherNetworkSdkTestModeAllowed,
-  normalizeLauncherNetworkProductId
+  normalizeLauncherNetworkProductId,
+  updateLauncherProductUserAccess
 } from './domain.js';
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
 import { applyCoreDnsConfigMapToKubernetes, applyGatewayConfigMapToKubernetes } from './kubernetes.js';
@@ -2946,6 +2950,84 @@ export class PostgresStore implements PlatformStore {
     return product;
   }
 
+  async setLauncherProductUserAccess(
+    input: LauncherProductUserAccessInput
+  ): Promise<LauncherProductUserAccessResult> {
+    const productId = normalizeLauncherNetworkProductId(input.productId);
+    const userId = input.userId?.trim();
+    if (!userId) throw new Error('Launcher product user access requires userId');
+    const now = new Date().toISOString();
+    const result = await this.dataSource.transaction(async (manager) => {
+      await this.lockLauncherProductNetwork(manager, productId);
+      await this.lockLauncherProductUserAccess(manager, productId, userId);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const productRow = await records.findOne({
+        where: {
+          kind: 'launcher-product-network',
+          id: productId,
+          environment: this.config.environment
+        }
+      });
+      if (!productRow) throw new Error(`Launcher product not found: ${productId}`);
+      const userRow = await records.findOne({
+        where: {
+          kind: 'iam-user',
+          id: userId,
+          environment: this.config.environment
+        }
+      });
+      if (!userRow) throw new Error(`User not found: ${userId}`);
+      const previous = userRow.data as unknown as UserCenterUser;
+      const access = updateLauncherProductUserAccess(previous, { productId, blocked: input.blocked }, now);
+      if (access.changed) {
+        await this.saveRecordTo(records, 'iam-user', userId, access.user, this.config.siteId);
+      }
+      const releasedLeases = input.blocked
+        ? (await this.listRecordsFrom<LauncherNetworkLease>(records, 'launcher-network-lease'))
+          .filter((lease) => (
+            lease.productId === productId
+            && lease.identityKind === 'user'
+            && lease.userId === userId
+            && launcherNetworkLeaseIsActive(lease)
+          ))
+          .map((lease) => releaseLauncherNetworkLease(lease, input, now))
+        : [];
+      for (const lease of releasedLeases) {
+        await this.saveRecordTo(records, 'launcher-network-lease', lease.leaseId, lease, lease.siteId);
+      }
+      return { access, releasedLeases };
+    });
+    const reason = input.reason?.trim() || null;
+    await this.recordAudit({
+      eventType: input.blocked
+        ? 'launcher_network.product_user_access.blocked'
+        : 'launcher_network.product_user_access.allowed',
+      actorKind: 'user-center',
+      userId,
+      productId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        requestedBy: input.requestedBy ?? 'launcher-network-admin',
+        reason,
+        changed: result.access.changed,
+        releasedLeaseIds: result.releasedLeases.map((lease) => lease.leaseId),
+        runtimePeerRemoval: 'not-performed',
+        userStatus: result.access.user.status,
+        tokensRevoked: 0
+      }
+    });
+    return {
+      productId,
+      userId,
+      blocked: input.blocked,
+      changed: result.access.changed,
+      reason,
+      user: result.access.user,
+      releasedLeases: result.releasedLeases,
+      updatedAt: now
+    };
+  }
+
   async listLauncherNetworkLeases(productId?: string | null): Promise<LauncherNetworkLease[]> {
     const normalizedProductId = productId?.trim().toLowerCase() || null;
     const leases = await this.listRecords<LauncherNetworkLease>('launcher-network-lease');
@@ -3086,6 +3168,20 @@ export class PostgresStore implements PlatformStore {
     const allocation = await this.dataSource.transaction(async (manager) => {
       const records = manager.getRepository(PlatformRecordEntity);
       await this.lockLauncherProductNetwork(manager, product.productId);
+      if (normalizedInput.userId) {
+        await this.lockLauncherProductUserAccess(manager, product.productId, normalizedInput.userId);
+        const userRow = await records.findOne({
+          where: {
+            kind: 'iam-user',
+            id: normalizedInput.userId,
+            environment: this.config.environment
+          }
+        });
+        assertLauncherProductUserAccess(
+          userRow?.data as unknown as UserCenterUser | undefined,
+          product.productId
+        );
+      }
       await this.lockLauncherNetworkLeasePool(manager, product.productId, leaseProfile);
       if (normalizedInput.publicKey?.trim()) {
         await this.lockLauncherNetworkPublicKey(manager, normalizedInput.publicKey.trim());
@@ -3945,6 +4041,11 @@ export class PostgresStore implements PlatformStore {
     ) {
       throw new Error('Launcher network lease user does not match snapshot userId');
     }
+    const snapshotUserId = requestedLease?.userId ?? input.userId?.trim() ?? null;
+    assertLauncherProductUserAccess(
+      snapshotUserId ? await this.getRecord<UserCenterUser>('iam-user', snapshotUserId) : null,
+      requestedLease?.productId ?? appId
+    );
     if (requestedLease) {
       const storedLeaseProfile = requestedLease.leaseProfile
         ?? (requestedLease.identityKind === 'user' ? 'employee' : 'anonymous');
@@ -5890,6 +5991,17 @@ export class PostgresStore implements PlatformStore {
     await manager.query(
       'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
       [`mx-launcher:${this.config.environment}`, `launcher-product-network:${productId}`]
+    );
+  }
+
+  private async lockLauncherProductUserAccess(
+    manager: EntityManager,
+    productId: string,
+    userId: string
+  ): Promise<void> {
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`mx-launcher:${this.config.environment}:launcher-product-user-access`, `${productId}:${userId}`]
     );
   }
 

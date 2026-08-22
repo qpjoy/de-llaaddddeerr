@@ -28,10 +28,14 @@ import {
 } from '../../lib/launcher-lease-auth.js';
 import {
   LauncherAnonymousEnrollmentPolicyError,
+  LauncherProductUserAccessDeniedError,
+  assertLauncherProductUserAccess,
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseMatchesProfile,
   launcherNetworkLeaseProfile,
   launcherNetworkLeaseProductId,
+  launcherProductUserAccessBlocked,
+  normalizeLauncherNetworkProductId,
   MX_H2I_PRODUCT_ID
 } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
@@ -40,9 +44,11 @@ import type { RuntimeConfig } from '../../types.js';
 import type {
   LauncherNetworkHandover,
   LauncherNetworkLease,
+  LauncherProductUserAccessResult,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotPlan,
-  SiteSlotSshProfile
+  SiteSlotSshProfile,
+  UserCenterUser
 } from '../../types.js';
 
 const execFileAsync = promisify(execFile);
@@ -106,20 +112,29 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       existingLease?.identityKind === 'user' || Boolean(requestedUserId),
       this.config.launcherNetworkLegacyUnauthenticatedUserLeasesEnabled
     );
-    return {
-      snapshot: await this.store.createLauncherNetworkSnapshot({
-        leaseId,
-        installId: nullableString(body.installId) ?? undefined,
-        deviceId: nullableString(body.deviceId) ?? undefined,
-        siteId: nullableString(body.siteId),
-        userId: auth.userId,
-        leaseProfile: auth.leaseProfile,
-        publicKey: nullableString(body.publicKey),
-        appId: nullableString(body.appId) ?? MX_H2I_PRODUCT_ID,
-        launcherMode: launcherProductMode(nullableString(body.launcherMode)),
-        requestId: nullableString(body.requestId) ?? undefined
-      })
-    };
+    if (auth.userId && existingLease && !internalOpsTokenMatches(opsToken)) {
+      const user = (await this.store.listUserCenterUsers())
+        .find((candidate) => candidate.userId === auth.userId);
+      this.assertProductUserAccess(user, existingLease.productId);
+    }
+    try {
+      return {
+        snapshot: await this.store.createLauncherNetworkSnapshot({
+          leaseId,
+          installId: nullableString(body.installId) ?? undefined,
+          deviceId: nullableString(body.deviceId) ?? undefined,
+          siteId: nullableString(body.siteId),
+          userId: auth.userId,
+          leaseProfile: auth.leaseProfile,
+          publicKey: nullableString(body.publicKey),
+          appId: nullableString(body.appId) ?? MX_H2I_PRODUCT_ID,
+          launcherMode: launcherProductMode(nullableString(body.launcherMode)),
+          requestId: nullableString(body.requestId) ?? undefined
+        })
+      };
+    } catch (error) {
+      rethrowLauncherNetworkPolicyError(error);
+    }
   }
 
   @Post('enrollments')
@@ -313,7 +328,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
         anonymousRenewalLeaseId
       });
     } catch (error) {
-      rethrowAnonymousEnrollmentPolicyError(error);
+      rethrowLauncherNetworkPolicyError(error);
     }
     const handoverLeases = (await Promise.all(
       ownedPublicKeyLeases
@@ -482,6 +497,106 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     };
   }
 
+  @Get('products/:productId/user-access')
+  async listProductUserAccess(
+    @Param('productId') rawProductId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
+    const productId = normalizeLauncherNetworkProductId(rawProductId);
+    const product = await this.store.getLauncherProductNetwork(productId);
+    if (!product) throw new NotFoundException('Launcher product network not found');
+    const [users, leases] = await Promise.all([
+      this.store.listUserCenterUsers(),
+      this.store.listLauncherNetworkLeases(productId)
+    ]);
+    const entries = users
+      .filter((user) => launcherProductUserAccessBlocked(user, productId))
+      .map((user) => productUserAccessView(
+        productUserAccessEntry(user, productId, leases),
+        null
+      ))
+      .sort((left, right) => left.displayName.localeCompare(right.displayName) || left.userId.localeCompare(right.userId));
+    return {
+      productUserAccess: {
+        productId,
+        blockedUsers: entries,
+        blockedUserCount: entries.length,
+        generatedAt: new Date().toISOString()
+      }
+    };
+  }
+
+  @Get('products/:productId/users/:userId/access')
+  async getProductUserAccess(
+    @Param('productId') rawProductId: string,
+    @Param('userId') userId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
+    const productId = normalizeLauncherNetworkProductId(rawProductId);
+    if (!await this.store.getLauncherProductNetwork(productId)) {
+      throw new NotFoundException('Launcher product network not found');
+    }
+    const [users, leases] = await Promise.all([
+      this.store.listUserCenterUsers(),
+      this.store.listLauncherNetworkLeases(productId)
+    ]);
+    const user = users.find((candidate) => candidate.userId === userId);
+    if (!user) throw new NotFoundException('User not found');
+    return {
+      productUserAccess: productUserAccessView(
+        productUserAccessEntry(user, productId, leases),
+        null
+      )
+    };
+  }
+
+  @Post('products/:productId/users/:userId/access')
+  async setProductUserAccess(
+    @Param('productId') productId: string,
+    @Param('userId') userId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
+    const body = asRecord(rawBody);
+    if (typeof body.blocked !== 'boolean') {
+      throw new BadRequestException('blocked must be a boolean');
+    }
+    const reason = nullableString(body.reason);
+    if (reason && reason.length > 500) {
+      throw new BadRequestException('reason must be 500 characters or fewer');
+    }
+    let result: LauncherProductUserAccessResult;
+    try {
+      result = await this.store.setLauncherProductUserAccess({
+        productId,
+        userId,
+        blocked: body.blocked,
+        reason,
+        requestedBy: nullableString(body.requestedBy) ?? 'desktop-admin',
+        requestId: nullableString(body.requestId) ?? `launcher-product-user-access-${Date.now()}`
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith('Launcher product not found:')) {
+        throw new NotFoundException(message);
+      }
+      if (message.startsWith('User not found:')) {
+        throw new NotFoundException(message);
+      }
+      throw error;
+    }
+    const leases = await this.store.listLauncherNetworkLeases(result.productId);
+    return {
+      productUserAccess: productUserAccessView(
+        productUserAccessEntry(result.user, result.productId, leases),
+        result
+      )
+    };
+  }
+
   @Get('products/:productId')
   async getProductNetwork(@Param('productId') productId: string) {
     const product = await this.store.getLauncherProductNetwork(productId);
@@ -581,6 +696,16 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
   ): Promise<LauncherNetworkLease> {
     const lease = await this.store.getLauncherNetworkLease(leaseId);
     if (!lease) throw new NotFoundException('Launcher network lease not found');
+    if (
+      lease.identityKind === 'user'
+      && lease.userId
+      && options.allowInactiveUserCapability !== true
+      && !internalOpsTokenMatches(opsToken)
+    ) {
+      const user = (await this.store.listUserCenterUsers())
+        .find((candidate) => candidate.userId === lease.userId);
+      this.assertProductUserAccess(user, lease.productId);
+    }
     if (!launcherNetworkLeaseIsActive(lease)) {
       if (
         options.allowReleasedCapability === true
@@ -607,6 +732,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
         if (!user || user.status !== 'active') {
           throw new UnauthorizedException('Launcher lease user is disabled or no longer exists');
         }
+        this.assertProductUserAccess(user, lease.productId);
       }
       return lease;
     }
@@ -625,7 +751,23 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     ) {
       throw new UnauthorizedException('Launcher lease token is inactive or does not own this lease');
     }
+    if (options.allowInactiveUserCapability !== true) {
+      const user = (await this.store.listUserCenterUsers())
+        .find((candidate) => candidate.userId === lease.userId);
+      this.assertProductUserAccess(user, lease.productId);
+    }
     return lease;
+  }
+
+  private assertProductUserAccess(
+    user: UserCenterUser | undefined,
+    productId: string
+  ): void {
+    try {
+      assertLauncherProductUserAccess(user, productId);
+    } catch (error) {
+      rethrowLauncherNetworkPolicyError(error);
+    }
   }
 
   private async resolvePeerHandover(
@@ -1006,11 +1148,19 @@ function launcherPeerSyncError(result: {
   return 'Launcher peer sync did not pass';
 }
 
-function rethrowAnonymousEnrollmentPolicyError(error: unknown): never {
+function rethrowLauncherNetworkPolicyError(error: unknown): never {
   if (error instanceof LauncherAnonymousEnrollmentPolicyError) {
     throw new ForbiddenException({
       code: error.code,
       message: error.message
+    });
+  }
+  if (error instanceof LauncherProductUserAccessDeniedError) {
+    throw new ForbiddenException({
+      code: error.code,
+      message: error.message,
+      productId: error.productId,
+      userId: error.userId
     });
   }
   throw error;
@@ -1041,6 +1191,71 @@ function opsLauncherLease(
     ...safeLease
   } = lease;
   return safeLease;
+}
+
+function productUserAccessEntry(
+  user: UserCenterUser,
+  productId: string,
+  leases: LauncherNetworkLease[]
+) {
+  const userLeases = leases
+    .filter((lease) => lease.identityKind === 'user' && lease.userId === user.userId)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  const lastLease = userLeases[0] ?? null;
+  return {
+    productId,
+    userId: user.userId,
+    blocked: launcherProductUserAccessBlocked(user, productId),
+    account: user.account,
+    displayName: user.displayName,
+    userStatus: user.status,
+    userUpdatedAt: user.updatedAt,
+    activeLeaseIds: userLeases
+      .filter((lease) => launcherNetworkLeaseIsActive(lease))
+      .map((lease) => lease.leaseId),
+    lastLease: lastLease ? {
+      leaseId: lastLease.leaseId,
+      status: lastLease.status,
+      leaseIp: lastLease.leaseIp,
+      sourceIp: lastLease.sourceIp ?? null,
+      installId: lastLease.installId,
+      deviceId: lastLease.deviceId,
+      deviceLabel: lastLease.deviceLabel,
+      platform: lastLease.platform,
+      appVersion: lastLease.appVersion ?? null,
+      updatedAt: lastLease.updatedAt,
+      releasedAt: lastLease.releasedAt ?? null
+    } : null
+  };
+}
+
+function productUserAccessView(
+  entry: ReturnType<typeof productUserAccessEntry>,
+  result: LauncherProductUserAccessResult | null
+) {
+  const releasedLeaseIds = result?.releasedLeases.map((lease) => lease.leaseId) ?? [];
+  return {
+    ...entry,
+    changed: result?.changed ?? false,
+    reason: result?.reason ?? null,
+    updatedAt: result?.updatedAt ?? entry.userUpdatedAt,
+    controlPlane: {
+      admission: entry.blocked ? 'blocked' : 'allowed',
+      activeLeaseIds: entry.activeLeaseIds,
+      releasedLeaseIds,
+      releasedLeaseCount: releasedLeaseIds.length,
+      userStatusChanged: false,
+      tokensRevoked: 0
+    },
+    runtimePeerRemoval: {
+      status: entry.blocked ? 'not-performed' : 'not-requested',
+      domestic: 'not-performed',
+      internalDirect: 'not-performed',
+      message: entry.blocked
+        ? 'Control-plane admission is blocked and active database leases were released; WireGuard peer removal was not performed or confirmed.'
+        : 'No WireGuard peer removal was requested by this product access operation.'
+    }
+  };
 }
 
 function launcherAnonymousEnrollmentPolicyInput(

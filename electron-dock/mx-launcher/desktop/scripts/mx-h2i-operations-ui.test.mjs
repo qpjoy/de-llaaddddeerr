@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const rendererSource = readFileSync(fileURLToPath(new URL('../renderer.js', import.meta.url)), 'utf8');
 const stylesSource = readFileSync(fileURLToPath(new URL('../styles.css', import.meta.url)), 'utf8');
+const indexSource = readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
 const packageSource = readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8');
 
 assert.match(rendererSource, /const MX_H2I_TOPOLOGY_CLIENT_LIMIT = 8;/);
@@ -156,6 +157,9 @@ assert.match(operationsSource, /mxH2iLeasePage\(activeLeases, state\.mxH2iLeaseF
 assert.match(operationsSource, /leasePage\.rows\.map/);
 assert.match(operationsSource, /data-mx-h2i-lease-page="previous"/);
 assert.match(operationsSource, /data-mx-h2i-lease-page="next"/);
+assert.match(operationsSource, /renderMxH2iBlockedUsersPanel\(\)/);
+assert.match(operationsSource, /Lease inventory is unavailable, so no topology is inferred or rendered/);
+assert.match(operationsSource, /DATA UNAVAILABLE/);
 assert.match(operationsSource, /renderStandaloneAnonymousPolicy\(product/);
 assert.doesNotMatch(operationsSource, /online clients|online leases/i);
 
@@ -188,13 +192,115 @@ assert.match(mxH2iPolicyCard, /value="advanced" selected/);
 const selectedDetailSource = functionSource(rendererSource, 'renderSelectedAppDetail');
 const disposeIndex = selectedDetailSource.indexOf('disposeMxH2iTopology();');
 const replaceIndex = selectedDetailSource.indexOf('appSelectedDetail.innerHTML =');
-const initIndex = selectedDetailSource.indexOf('initMxH2iTopology(appSelectedDetail, leases)');
 assert.ok(disposeIndex >= 0 && disposeIndex < replaceIndex, 'old dynamic Three resources are disposed before innerHTML replacement');
-assert.ok(initIndex > replaceIndex, 'the MX-H2I Three scene initializes only after its canvas exists');
-assert.match(selectedDetailSource, /app\.appId === MX_H2I_PRODUCT_ID \? renderMxH2iOperationsScreen\(product, leases\) : ''/);
+assert.match(selectedDetailSource, /state\.mxH2iSurface === 'dashboard'/);
+assert.match(selectedDetailSource, /appSelectedDetail\.innerHTML = renderMxH2iDashboard\(product, leases\)/);
+assert.match(selectedDetailSource, /bindMxH2iDashboardControls\(appSelectedDetail, leases\)/);
 assert.match(selectedDetailSource, /app\.appId === MX_H2I_PRODUCT_ID[\s\S]*launcherLeaseIsActiveClientRecord\(lease\)/);
 assert.match(selectedDetailSource, /mode === 'standalone' && app\.appId !== MX_H2I_PRODUCT_ID[\s\S]*renderStandaloneAnonymousPolicy\(product\)/);
 assert.match(selectedDetailSource, /if \(mode === 'standalone'\) bindStandaloneAnonymousPolicyControls/);
+
+const dashboardSource = functionSource(rendererSource, 'renderMxH2iDashboard');
+assert.match(dashboardSource, /MX-H2I Control Room/);
+assert.match(dashboardSource, /data-mx-h2i-anonymous-quick-request/);
+assert.match(dashboardSource, /Luopan remains unchanged/);
+assert.match(dashboardSource, /Existing leases and WireGuard peers are not removed/);
+assert.match(dashboardSource, /launcherProductById\(MX_H2I_PRODUCT_ID\)/);
+assert.match(dashboardSource, /productDataAvailable/);
+assert.match(dashboardSource, /leaseDataAvailable/);
+assert.match(dashboardSource, /Anonymous policy unavailable/);
+const dashboardBindingSource = functionSource(rendererSource, 'bindMxH2iDashboardControls');
+const canvasIndex = dashboardBindingSource.indexOf("root.querySelector('[data-mx-h2i-topology-canvas]')");
+const initIndex = dashboardBindingSource.indexOf('initMxH2iTopology(root, leases)');
+assert.ok(canvasIndex >= 0 && initIndex > canvasIndex, 'the dedicated dashboard initializes Three only after resolving its canvas');
+
+const blockedPanelSource = functionSource(rendererSource, 'renderMxH2iBlockedUsersPanel');
+assert.match(blockedPanelSource, /data-mx-h2i-blocked-user-open/);
+assert.match(blockedPanelSource, /Luopan unaffected/);
+assert.match(blockedPanelSource, /inventoryAvailable/);
+const operationsBindingSource = functionSource(rendererSource, 'bindMxH2iOperationsControls');
+assert.match(operationsBindingSource, /openMxH2iLeaseDrawer/);
+assert.match(operationsBindingSource, /openMxH2iBlockedUserDrawer/);
+
+const leaseRowSource = functionSource(rendererSource, 'renderMxH2iLeaseTableRow');
+assert.match(leaseRowSource, /data-mx-h2i-lease-open/);
+assert.match(leaseRowSource, /tabindex="0"/);
+
+const leaseDrawerSource = functionSource(rendererSource, 'renderMxH2iLeaseDrawer');
+assert.match(leaseDrawerSource, /Lease record ≠ live tunnel/);
+assert.match(leaseDrawerSource, /MX-H2I User Access/);
+assert.match(leaseDrawerSource, /No connection or released lease is inferred/);
+assert.match(leaseDrawerSource, /Ban from MX-H2I/);
+assert.match(leaseDrawerSource, /Unban from MX-H2I/);
+assert.match(leaseDrawerSource, /Luopan and other ProductNetworks are not affected/);
+assert.match(leaseDrawerSource, /Reliable single-client ban is not available until peer-safe revoke exists/);
+assert.match(leaseDrawerSource, /Runtime peer removal/);
+assert.match(leaseDrawerSource, /previousFocusKey/);
+const focusTrapSource = functionSource(rendererSource, 'trapMxH2iLeaseDrawerFocus');
+assert.match(focusTrapSource, /event\.shiftKey/);
+assert.match(focusTrapSource, /event\.preventDefault\(\)/);
+const closeDrawerSource = functionSource(rendererSource, 'closeMxH2iLeaseDrawer');
+assert.match(closeDrawerSource, /data-mx-h2i-blocked-user-open/);
+assert.match(closeDrawerSource, /data-mx-h2i-lease-open/);
+assert.match(closeDrawerSource, /data-mx-h2i-jump="connections"/);
+
+const blockedUserWithoutLease = Function(
+  'state',
+  'MX_H2I_PRODUCT_ID',
+  'launcherLeasesForProduct',
+  `${functionSource(rendererSource, 'mxH2iLeaseDrawerKey')}
+${functionSource(rendererSource, 'mxH2iLeaseForDrawer')}
+return mxH2iLeaseForDrawer;`
+)(
+  {
+    mxH2iLeaseDrawer: {
+      leaseKey: 'blocked-user:usr-no-lease',
+      productUserAccess: {
+        productId: 'mx-h2i',
+        userId: 'usr-no-lease',
+        blocked: true,
+        displayName: 'No Lease User',
+        lastLease: null
+      }
+    }
+  },
+  'mx-h2i',
+  () => []
+);
+assert.deepEqual(
+  blockedUserWithoutLease(),
+  {
+    leaseId: '',
+    productId: 'mx-h2i',
+    userId: 'usr-no-lease',
+    subject: 'No Lease User',
+    identityKind: 'user',
+    status: 'no lease allocated'
+  },
+  'a blocked user with no historical lease still gets a drawer model and can be unbanned'
+);
+
+const saveProductUserAccessSource = functionSource(rendererSource, 'saveMxH2iProductUserAccess');
+assert.match(saveProductUserAccessSource, /products\/\$\{encodeURIComponent\(MX_H2I_PRODUCT_ID\)\}\/users\/\$\{encodeURIComponent\(userId\)\}\/access/);
+assert.match(saveProductUserAccessSource, /blocked,[\s\S]*requestedBy: 'desktop-admin'/);
+assert.match(saveProductUserAccessSource, /WireGuard peer removal is not claimed/);
+assert.match(saveProductUserAccessSource, /const activeDrawer = state\.mxH2iLeaseDrawer\?\.userId === userId/);
+assert.ok(
+  saveProductUserAccessSource.indexOf('await refreshAppCenterNetwork();') > saveProductUserAccessSource.indexOf('if (activeDrawer)'),
+  'a successful product-scoped access mutation refreshes inventory even if its drawer was closed'
+);
+assert.doesNotMatch(saveProductUserAccessSource, /user-center|user\.status|status:\s*'disabled'/);
+
+const quickPolicySource = functionSource(rendererSource, 'saveMxH2iAnonymousQuickPolicy');
+assert.match(quickPolicySource, /products\/\$\{encodeURIComponent\(MX_H2I_PRODUCT_ID\)\}/);
+assert.match(quickPolicySource, /anonymousUiVisibility/);
+assert.match(quickPolicySource, /const current = launcherProductById\(MX_H2I_PRODUCT_ID\)/);
+assert.match(quickPolicySource, /if \(!current \|\| state\.launcherProductsError\)/);
+assert.match(quickPolicySource, /Luopan, employee login, existing leases, and WireGuard peers were not changed/);
+
+const opsProtectionSource = functionSource(rendererSource, 'isOpsProtectedInternalRequest');
+assert.match(opsProtectionSource, /products\\\/\[\^\/\]\+\\\/user-access/);
+assert.match(opsProtectionSource, /products\\\/\[\^\/\]\+\\\/users\\\/\[\^\/\]\+\\\/access/);
 
 const savePolicySource = functionSource(rendererSource, 'saveStandaloneAnonymousPolicy');
 assert.match(savePolicySource, /\/internal\/v1\/launcher-network\/products\/\$\{encodeURIComponent\(normalizedProductId\)\}/);
@@ -213,6 +319,7 @@ const animationGuardSource = functionSource(rendererSource, 'mxH2iTopologyCanAni
 assert.match(animationGuardSource, /!document\.hidden/);
 assert.match(animationGuardSource, /state\.activeView === 'app-center'/);
 assert.match(animationGuardSource, /state\.activeAppNode === MX_H2I_PRODUCT_ID/);
+assert.match(animationGuardSource, /state\.mxH2iSurface === 'dashboard'/);
 assert.match(animationGuardSource, /instance\.canvas\.isConnected/);
 
 const disposeSource = functionSource(rendererSource, 'disposeMxH2iTopologyInstance');
@@ -230,6 +337,11 @@ assert.match(stylesSource, /\.mx-h2i-topology-fallback\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-lease-table\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-lease-pagination\s*\{/);
 assert.match(stylesSource, /\.standalone-anonymous-policy-grid\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-dashboard-hero\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-banned-user-row\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-lease-drawer\s*\{/);
+assert.match(indexSource, /id="tab-mx-h2i-dashboard"[\s\S]*data-app-surface="dashboard"/);
+assert.match(indexSource, /id="mx-h2i-lease-drawer"/);
 assert.match(packageSource, /node scripts\/mx-h2i-operations-ui\.test\.mjs/);
 
-console.log('OK MX-H2I desktop operations UI keeps active lease truth bounded, paginates full filters, scopes standalone policy, and disposes Three resources');
+console.log('OK MX-H2I dashboard keeps lease truth bounded, exposes recoverable product-scoped controls, scopes anonymous policy, and disposes Three resources');

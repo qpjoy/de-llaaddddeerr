@@ -69,6 +69,19 @@ MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2 \
 MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
 MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
 bash scripts/manage.sh ops internal-production deploy
+# MX_SHADOW_BUILD_NETWORK=host
+
+# 7788代理
+TMPDIR=/data/tmp \
+MX_K8S_OS_HOSTNAME=mx-internal-server \
+MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2 \
+MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
+MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
+MX_SHADOW_BUILD_NETWORK=host \
+BUILD_CONTAINER_HTTP_PROXY=http://127.0.0.1:7788 \
+BUILD_CONTAINER_HTTPS_PROXY=http://127.0.0.1:7788 \
+bash scripts/manage.sh ops internal-production deploy
+
 # deploy 会先把 192.168.1.2 和 K8s 本地网段加入 NO_PROXY/no_proxy，
 # 再探活 kube-apiserver；不会先花时间构建、最后才在 Flannel apply 阶段暴露 API 不可达。
 # 检查：
