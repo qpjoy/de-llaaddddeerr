@@ -895,7 +895,8 @@ assert.match(
   preloadSource,
   /resetLocalNetworkIdentity: \(\) => ipcRenderer\.invoke\('mx-h2i:reset-local-network-identity'\)/
 );
-assert.match(rendererSource, /data-action="resetLocalNetworkIdentity">清理旧连接/);
+assert.match(rendererSource, /data-action="resetLocalNetworkIdentity"/);
+assert.match(rendererSource, /请先断开匿名连接/);
 assert.doesNotMatch(rendererSource, /data-action="disconnect">清理旧连接/);
 
 const retainedRuntime = {
@@ -926,6 +927,10 @@ const applyConnectionError = Function(
   'retainableConnectionSnapshot',
   'classifyConnectionError',
   'queueDiagnosticError',
+  'authoritativeAnonymousEnrollmentDisabledError',
+  'applyAuthoritativeAnonymousEnrollmentDisabledState',
+  'anonymousRecoveryBlockedByPolicy',
+  'applyAnonymousLoginDisabledState',
   'applyLocalRuntimePersistenceError',
   'idleConnection',
   'nowIso',
@@ -935,6 +940,10 @@ const applyConnectionError = Function(
   retainedRuntime,
   (connection) => connection,
   () => localPersistenceClassification,
+  () => undefined,
+  () => false,
+  () => undefined,
+  () => false,
   () => undefined,
   applyLocalRuntimePersistenceError,
   () => ({ state: 'idle', mode: 'guest', diagnostics: {} }),
@@ -1060,7 +1069,7 @@ assert.match(employeeUiSource, /当前访客 IP/);
 assert.match(employeeUiSource, /data-action="show-advanced"/);
 
 const anonymousUiSource = functionSource(rendererSource, 'renderAnonymousAccessPanel');
-assert.match(anonymousUiSource, /const action = connected \? 'disconnect' : 'connectGuest'/);
+assert.match(anonymousUiSource, /const action = disconnectable \? 'disconnect' : 'connectGuest'/);
 assert.match(anonymousUiSource, /renderConnectionRecoverySteps\(retainedGuest\)/);
 assert.match(anonymousUiSource, /data-action="resetLocalNetworkIdentity"/);
 assert.match(anonymousUiSource, /员工网络正在使用中/);

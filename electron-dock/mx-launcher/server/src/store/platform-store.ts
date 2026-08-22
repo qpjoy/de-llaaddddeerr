@@ -14,6 +14,7 @@ import type {
   AppOnboardingTemplate,
   AuditEvent,
   AuditEventInput,
+  AuditEventListFilter,
   AwxProviderConfig,
   AwxProviderConfigInput,
   ConfigPolicySnapshot,
@@ -365,6 +366,7 @@ export interface PlatformStore {
   listTasks(installId: string): MaybePromise<ReleaseTask[]>;
   recordReleaseReport(input: ReleaseReportInput): MaybePromise<AuditEvent>;
   recordAudit(input: AuditEventInput): MaybePromise<AuditEvent>;
+  listAuditEvents(filter: AuditEventListFilter): MaybePromise<AuditEvent[]>;
   recordLogs(entries: LogEntryInput[]): MaybePromise<{ accepted: number; sinks: RuntimeConfig['observabilitySinks'] }>;
   observabilitySinks(): MaybePromise<RuntimeConfig['observabilitySinks']>;
   listAppOnboardingTemplates(): MaybePromise<AppOnboardingTemplate[]>;

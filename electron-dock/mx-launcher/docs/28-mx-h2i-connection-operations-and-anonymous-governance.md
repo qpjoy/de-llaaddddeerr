@@ -361,6 +361,9 @@ MX-H2I 默认 `advanced` 后：
 - 新建访客按钮，仅在 visibility 允许且 admission=enabled 时可用；
 - drain cohort 的当前设备若可续租，显示“续用现有访客连接”，不显示“创建新访客”；
 - disabled 时显示稳定错误和员工登录入口；
+- disabled 且 guest 已不再完整 ready 时，不显示“正在原位恢复连接”或“修复网络”，也不再调度
+  WireGuard、route、PAC、DNS 的自动/手动修复；已经完整 ready 的 guest 不被开关主动断开，仍保留
+  状态与主动断开入口；
 - install/device 标识的脱敏摘要；
 - 复制诊断信息，不包含 capability/private key/token。
 
@@ -384,8 +387,17 @@ Desktop 左侧把 `MX-H2I Dashboard` 作为独立一级入口，不再要求操�
 
 - 显式标注 `mx-h2i only` 的匿名 admission 状态和 enable/disable 快速操作；
 - 静态 active lease、employee、anonymous、已记录 source IP、blocked-user 指标；
-- `Client lease -> Domestic -> Internal` 静态 3D 图，最多渲染 8 个客户端节点，并始终保留
-  table fallback；
+- `Client lease record -> identity group -> Domestic -> Internal` 交互式静态 3D 图；每个 client
+  节点代表一条静态 lease，不冒充一台物理机器；每个视窗
+  最多渲染 48 条 lease，通过全量搜索、身份过滤和分页覆盖所有记录，不再用含义不明的
+  `+N more` 节点隐藏剩余集合；
+- 拖拽旋转、Shift/右键拖拽平移、滚轮缩放、reset/fit、标签开关，以及等价键盘操作；
+- client、identity group、Domestic、Internal 全部支持 hover/select；client 可进入现有 Connections
+  抽屉，group 可直接套用过滤，Domestic/Internal 只提供安全导航，不在 3D 内伪造 destructive
+  action；
+- 选中 client 后按 exact lease ID 读取最多 50 条服务端可信、脱敏的控制面审计活动；该活动不是
+  runtime log、流量、handshake 或在线证明；
+- 始终保留可键盘操作的列表 fallback；
 - 可搜索、按身份过滤、分页的 Connections 表；
 - 被 MX-H2I ban 的用户 inventory；
 - 完整 `enabled | drain | disabled` 与 `primary | advanced | hidden` 策略编辑器；
@@ -403,6 +415,11 @@ backdrop 和 Escape 关闭，并应把焦点还给触发行。后续修改必须
 抽屉展示 identity/user、assigned IP、source IP、lease/install/device、platform、记录时间
 和 expiry，但不返回 capability、private key 或完整 public key。当前 source IP 仅在持有
 ops token 的 Admin 中显示；默认掩码与独立 sensitive-read 权限仍是 §13 的目标能力。
+
+拓扑所称“device identities”是以 `deviceId/installId` 为主、以现有租约身份作降级的 best-effort
+去重，不等于可靠硬件资产数。`sourceIp` 是 enrollment/renewal HTTP 来源，不得映射成“登录地点”。
+当前没有客户端 GPS/GeoIP 证据，也没有客户端 runtime log；UI 必须显示 `not collected`，不能用
+私网/NAT/代理地址推断城市或国家。
 
 员工行的 ban/unban confirmation 必须同时写明：
 
@@ -565,11 +582,16 @@ desktop 已有 Three.js H/D/I/O 场景，适合继续作为部署与站点健康
 
 ### 9.3 交互与可访问性
 
-- hover 只显示脱敏摘要；
-- click 打开 Inspector 和对应表格行；
-- 筛选条件在 3D 与表格同步；
-- 大规模客户端先 cluster，禁止一万台设备各建高面数 sphere；
-- 提供 2D/table fallback、键盘操作和 reduced-motion；
+- hover 只显示脱敏摘要；click 选中节点，double-click/Enter 执行该节点的安全主操作；
+- 拖拽旋转、Shift/右键拖拽平移、滚轮或 `+/-` 缩放，并提供 reset/fit；
+- client 节点打开 Inspector/Connections 抽屉，identity group 节点切换过滤，基础设施节点只做
+  安全导航；
+- search、identity filter 与 48 条窗口分页覆盖完整 lease inventory；selected path 高亮，但不以
+  动画或颜色伪造在线状态；
+- 大规模客户端先窗口化/cluster，禁止一万台设备各建高面数 sphere；
+- 提供 2D/table fallback、键盘操作和 reduced-motion；WebGL 失败只降级视图；
+- 选中 lease 的 activity 只展示服务端 provenance 的字段白名单审计事件，exact match
+  `metadata.leaseId`，并处理 loading/empty/error/stale response；
 - WebGL 初始化或渲染失败不影响 Admin 其他操作；
 - 3D 场景不直接承载 destructive action，revoke 必须进入独立确认流程。
 
@@ -608,6 +630,9 @@ Admin 保存前展示：
 
 - 新客户端可读取 policy，用于优化 UI；
 - 旧客户端即使仍显示访客按钮，也由服务端拒绝；
+- `disabled` 下非 ready guest 不进入 retained repair，不调度自动重试，也不显示手动修复；
+- policy 切换本身不 `stop` 已完整 ready 的 guest，本期也不自动 release lease/remove peer；
+- `drain` 仍仅允许持有匹配 active lease capability 的既有设备续租/恢复；
 - 客户端收到 disabled/drain 拒绝后不自动匿名重试；
 - 员工登录失败不能偷偷 fallback 为 guest；
 - 已连接 guest 在本期可能继续传输，直到自然失效、手工处理或未来 revoke；
@@ -847,7 +872,8 @@ Internal desired policy
 | MX-H2I enabled + advanced | 高级页可新建访客，主页面员工登录正常 |
 | MX-H2I drain，新 install | 稳定拒绝，不分配 lease/peer |
 | MX-H2I drain，精确 cohort capability | 保留原 identity/key/IP 续租 |
-| MX-H2I disabled，GUI guest | 稳定拒绝，不自动重试 |
+| MX-H2I disabled，non-ready GUI guest | 稳定拒绝，不自动重试/修复，也不通过“重新诊断”重写 Domestic/Internal peer |
+| MX-H2I disabled，已有 fully-ready guest | 开关不主动 stop；状态与主动断开仍可见，后续降级后不再修复 |
 | MX-H2I disabled，CLI `--anonymous` | 同样拒绝，`requestedBy` 无法绕过 |
 | MX-H2I disabled，员工密码 | 登录和 employee lease 正常 |
 | MX-H2I disabled，飞书 | 可信 HTTPS bootstrap 下可直接登录并取得 Feishu lease |

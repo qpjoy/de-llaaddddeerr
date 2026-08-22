@@ -169,6 +169,7 @@ import type {
   AppOnboardingTemplate,
   AuditEvent,
   AuditEventInput,
+  AuditEventListFilter,
   AwxProviderConfig,
   AwxProviderConfigInput,
   ConfigPolicySnapshot,
@@ -2848,6 +2849,7 @@ export class MemoryStore implements PlatformStore {
 
   recordAudit(input: AuditEventInput): AuditEvent {
     const row: AuditEvent = {
+      provenance: input.provenance === undefined ? 'server' : input.provenance,
       eventId: `aud_${randomUUID()}`,
       eventType: input.eventType ?? 'unknown',
       actorKind: input.actorKind ?? 'system',
@@ -2867,6 +2869,20 @@ export class MemoryStore implements PlatformStore {
     };
     this.auditEvents.push(row);
     return row;
+  }
+
+  listAuditEvents(filter: AuditEventListFilter): AuditEvent[] {
+    const metadataLeaseId = filter.metadataLeaseId.trim();
+    if (!metadataLeaseId) return [];
+    const limit = Math.min(50, Math.max(1, Math.floor(filter.limit ?? 50)));
+    return this.auditEvents
+      .filter((event) => (
+        event.provenance === 'server'
+        && event.metadata?.leaseId === metadataLeaseId
+      ))
+      .slice()
+      .reverse()
+      .slice(0, limit);
   }
 
   recordLogs(entries: LogEntryInput[]): { accepted: number; sinks: RuntimeConfig['observabilitySinks'] } {

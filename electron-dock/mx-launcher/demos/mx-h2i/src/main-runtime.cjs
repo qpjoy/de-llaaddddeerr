@@ -70,6 +70,7 @@ const DIAGNOSTIC_RECENT_LIMIT = 40;
 const WINDOWS_PRIVATE_JSON_RENAME_RETRY_DELAYS_MS = Object.freeze([25, 75, 150, 300]);
 const PRODUCT_ID = 'mx-h2i';
 const PRODUCT_DISPLAY_NAME = 'MX-H2I';
+const ANONYMOUS_LOGIN_DISABLED_MESSAGE = 'MX-H2I 已禁止匿名登录，请使用员工登录或由管理员重新启用';
 const REQUESTED_BY = 'mx-h2i-desktop';
 const WIREGUARD_PROFILE_NAME = 'mx-h2i.conf';
 const INTERNAL_PEER_IP = '10.88.88.88';
@@ -280,6 +281,7 @@ if (gotSingleInstanceLock) {
     if (credentialStorageRecovery.blocked !== true) {
       await reconcileExistingWireGuardAfterStartup();
       await reconcilePendingNetworkHandoverAfterStartup();
+      await settleAnonymousLoginDisabledAfterStartup();
       await refreshSystemDomainProxyForRuntime('app-startup');
       startSystemDomainProxyRefreshWatcher();
     }
@@ -672,6 +674,15 @@ function registerIpc() {
         await saveAndBroadcast();
         return visibleRuntime();
       }
+    }
+    if (anonymousGuestConnectBlockedByPolicy(runtime.connection)) {
+      applyAnonymousLoginDisabledState('visit connect blocked: anonymous enrollment disabled');
+      await publishNetworkModeEvent('visit:connect', 'skipped', {
+        reason: 'anonymous-enrollment-disabled',
+        transitionId
+      });
+      await saveAndBroadcast();
+      return visibleRuntime();
     }
     const guestEndpointRouteRepair = await repairDarwinEndpointRouteBeforeBootstrap('guest-pre-bootstrap');
     if (guestEndpointRouteRepair?.stale === true && guestEndpointRouteRepair?.repaired !== true) {
@@ -1144,6 +1155,15 @@ function registerIpc() {
   });
   ipcMain.handle('mx-h2i:reset-local-network-identity', async () => {
     if (wireGuardDisconnectInFlight) return visibleRuntime();
+    if (guestConnectionRequiresDisconnectBeforeIdentityReset(runtime?.connection)) {
+      runtime.feedback = {
+        tone: 'warning',
+        message: '匿名 WireGuard 仍在运行；请先明确断开连接，再清理旧的本机网络身份。'
+      };
+      touchRuntime('local identity reset blocked by active anonymous tunnel');
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
     clearPendingFeishuLogin('local-identity-reset');
     networkMutationEpoch += 1;
     const previousMode = runtime.connection?.mode === 'employee' ? 'employee' : 'guest';
@@ -1151,6 +1171,15 @@ function registerIpc() {
     try {
       await drainWireGuardConnectOperations();
       await drainWireGuardRecoveryOperation();
+      if (guestConnectionRequiresDisconnectBeforeIdentityReset(runtime?.connection)) {
+        runtime.feedback = {
+          tone: 'warning',
+          message: '匿名 WireGuard 仍在运行；请先明确断开连接，再清理旧的本机网络身份。'
+        };
+        touchRuntime('local identity reset blocked after active operation drain');
+        await saveAndBroadcast();
+        return visibleRuntime();
+      }
       const standaloneOwnership = await releaseStandaloneOwnershipForRuntime('local-identity-reset');
       const systemDomainProxy = await disableSystemDomainProxyForRuntime('local-identity-reset');
       const rotation = await rotateLocalLauncherIdentity('manual-clear-old-connection', {
@@ -1796,6 +1825,11 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:refresh-diagnostics', async () => {
+    if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) {
+      applyAnonymousLoginDisabledState('diagnostics skipped: anonymous enrollment disabled');
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
     await recoverWireGuardForRuntime('manual-diagnostics', { allowPrivileged: false });
     await refreshWireGuardDiagnostics();
     await refreshNetworkEnvironmentDiagnostics('manual-diagnostics', { persist: false });
@@ -1982,6 +2016,8 @@ async function promoteEmployeeConnection(options = {}) {
   const providerLabel = provider === 'feishu' ? '飞书' : '员工账号';
   const accountHint = nullableString(options.account);
   try {
+    assertNetworkTransitionCurrent(lifecycleEpoch);
+    await drainWireGuardRecoveryOperation();
     assertNetworkTransitionCurrent(lifecycleEpoch);
     await ensureCredentialStorageRecoveryReady();
     const employeeEndpointRouteRepair = await repairDarwinEndpointRouteBeforeBootstrap(
@@ -3216,11 +3252,15 @@ function startWireGuardRecoveryWatcher() {
 function stopWireGuardRecoveryWatcher() {
   if (wireGuardRecoveryInterval) clearInterval(wireGuardRecoveryInterval);
   wireGuardRecoveryInterval = null;
+  cancelScheduledWireGuardRecovery();
+  powerMonitor?.off?.('resume', onPowerResume);
+  powerMonitor?.off?.('unlock-screen', onUnlockScreen);
+}
+
+function cancelScheduledWireGuardRecovery() {
   while (wireGuardRecoveryTimers.length) {
     clearTimeout(wireGuardRecoveryTimers.pop());
   }
-  powerMonitor?.off?.('resume', onPowerResume);
-  powerMonitor?.off?.('unlock-screen', onUnlockScreen);
 }
 
 function onPowerResume() {
@@ -3232,6 +3272,7 @@ function onUnlockScreen() {
 }
 
 function scheduleWireGuardRecovery(reason, delays = [2500, 12_000, 25_000], options = {}) {
+  if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) return;
   const allowPrivileged = options.allowPrivileged === true;
   for (const delay of delays) {
     const timer = setTimeout(() => {
@@ -3294,6 +3335,7 @@ function scheduleNetworkChangeRecovery(reason) {
 }
 
 async function handleNetworkChange(reason) {
+  if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) return;
   const recoveryReason = `network-change-${reason || 'detected'}`;
   const endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(recoveryReason, { force: true });
   await recordDarwinEndpointRouteRepairDiagnostics(endpointRouteRepair, recoveryReason);
@@ -4143,6 +4185,14 @@ async function refreshSystemDomainProxyForRuntime(reason = 'manual') {
       skipReason: 'disconnect-in-flight'
     };
   }
+  if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) {
+    return {
+      supported: true,
+      skipped: true,
+      reason,
+      skipReason: 'anonymous-enrollment-disabled'
+    };
+  }
   if (systemDomainProxyRefreshInFlight || !systemDomainProxyManager) return null;
   if (!systemDomainProxyRuntimeEligible()) {
     if (process.platform !== 'win32') return null;
@@ -4537,6 +4587,14 @@ function windowsNrptResolutionHint(windowsNrpt) {
 }
 
 async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
+  if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) {
+    applyAnonymousLoginDisabledState(`system network repair blocked: ${reason}`);
+    return {
+      skipped: true,
+      reason: 'anonymous-enrollment-disabled',
+      message: ANONYMOUS_LOGIN_DISABLED_MESSAGE
+    };
+  }
   const before = await collectNetworkEnvironmentDiagnostics(`${reason}-before`);
   // User-triggered repair: allow one macOS admin prompt to delete stale
   // endpoint routes (route delete needs root). Background recovery paths keep
@@ -6788,6 +6846,178 @@ function normalizeLauncherProductPresentation(input, config) {
 
 function normalizeLauncherAnonymousEnrollmentPolicy(value) {
   return ['enabled', 'drain', 'disabled'].includes(value) ? value : 'enabled';
+}
+
+function effectiveLauncherAnonymousEnrollmentPolicy() {
+  return normalizeLauncherProductPresentation(
+    runtime?.launcherProductPresentation,
+    runtime?.config
+  ).anonymousEnrollmentPolicy;
+}
+
+function launcherAnonymousEnrollmentDisabled() {
+  return effectiveLauncherAnonymousEnrollmentPolicy() === 'disabled';
+}
+
+function readyAnonymousConnection(connection = runtime?.connection) {
+  return connection?.mode === 'guest' && connectionHasReadyNetworkProof(connection);
+}
+
+function guestConnectionHasRecoveryState(connection = runtime?.connection) {
+  return connection?.mode === 'guest'
+    && (connection?.state === 'connecting' || isRetainedConnectionState(connection?.state));
+}
+
+function anonymousRecoveryBlockedByPolicy(connection = runtime?.connection) {
+  return launcherAnonymousEnrollmentDisabled()
+    && guestConnectionHasRecoveryState(connection)
+    && !readyAnonymousConnection(connection);
+}
+
+function anonymousGuestConnectBlockedByPolicy(connection = runtime?.connection) {
+  return launcherAnonymousEnrollmentDisabled() && !readyAnonymousConnection(connection);
+}
+
+function authoritativeAnonymousEnrollmentDisabledError(err) {
+  const status = Number(err?.status || err?.statusCode || err?.payload?.statusCode || 0);
+  return status === 403
+    && err?.payload?.code === 'launcher_anonymous_enrollment_disabled';
+}
+
+function launcherAnonymousEnrollmentDisabledError() {
+  const err = new Error(ANONYMOUS_LOGIN_DISABLED_MESSAGE);
+  err.status = 403;
+  err.payload = {
+    statusCode: 403,
+    code: 'launcher_anonymous_enrollment_disabled',
+    message: ANONYMOUS_LOGIN_DISABLED_MESSAGE
+  };
+  return err;
+}
+
+function applyAuthoritativeAnonymousEnrollmentDisabledState(reason) {
+  const current = normalizeLauncherProductPresentation(
+    runtime?.launcherProductPresentation,
+    runtime?.config
+  );
+  runtime.launcherProductPresentation = {
+    ...current,
+    productId: launcherProductId(),
+    anonymousEnrollmentPolicy: 'disabled',
+    syncedAt: nowIso()
+  };
+  applyAnonymousLoginDisabledState(reason || 'anonymous enrollment disabled by authoritative response');
+}
+
+function applyAnonymousLoginDisabledState(reason) {
+  const connection = runtime?.connection;
+  if (guestConnectionHasRecoveryState(connection) && !readyAnonymousConnection(connection)) {
+    cancelScheduledWireGuardRecovery();
+    runtime.connection = {
+      ...connection,
+      state: 'forbidden',
+      diagnostics: {
+        ...(connection.diagnostics || {}),
+        anonymousEnrollmentPolicy: {
+          policy: 'disabled',
+          recoveryBlocked: true,
+          updatedAt: nowIso()
+        },
+        updatedAt: nowIso()
+      }
+    };
+  }
+  runtime.feedback = {
+    tone: 'warning',
+    message: ANONYMOUS_LOGIN_DISABLED_MESSAGE
+  };
+  touchRuntime(reason || 'anonymous enrollment disabled');
+}
+
+async function settleAnonymousLoginDisabledAfterStartup() {
+  if (!anonymousRecoveryBlockedByPolicy(runtime?.connection)) return false;
+  applyAnonymousLoginDisabledState('startup retained anonymous recovery blocked by product policy');
+  await saveRuntime(runtime);
+  return true;
+}
+
+function wireGuardRecoveryIdentity(connection = runtime?.connection) {
+  return {
+    mode: connection?.mode === 'employee' ? 'employee' : 'guest',
+    subject: nullableString(connection?.subject),
+    leaseId: nullableString(connection?.leaseId),
+    snapshotId: nullableString(connection?.snapshotId),
+    localIp: nullableString(connection?.localIp),
+    connectedAt: nullableString(connection?.connectedAt),
+    productId: nullableString(connection?.productId),
+    publicKey: nullableString(connection?.publicKey),
+    identityKind: nullableString(runtime?.identity?.kind),
+    identityProvider: nullableString(runtime?.identity?.provider),
+    identityAccount: nullableString(runtime?.identity?.account),
+    installId: nullableString(runtime?.installation?.installId),
+    installationPublicKey: nullableString(runtime?.installation?.keyPair?.publicKey),
+    transitionId: nullableString(runtime?.networkEvent?.transitionId)
+  };
+}
+
+function wireGuardRecoveryIdentityIsCurrent(identity) {
+  if (!identity || typeof identity !== 'object') return false;
+  const current = wireGuardRecoveryIdentity(runtime?.connection);
+  return [
+    'mode',
+    'subject',
+    'leaseId',
+    'snapshotId',
+    'localIp',
+    'connectedAt',
+    'productId',
+    'publicKey',
+    'identityKind',
+    'identityProvider',
+    'identityAccount',
+    'installId',
+    'installationPublicKey',
+    'transitionId'
+  ].every((key) => current[key] === identity[key]);
+}
+
+function guestConnectionRequiresDisconnectBeforeIdentityReset(connection = runtime?.connection) {
+  const ownsGuestTunnel = connection?.mode === 'guest' || connection?.retainedMode === 'guest';
+  return ownsGuestTunnel
+    && (
+      connection?.state === 'connected'
+      || connection?.state === 'tunnel-only'
+      || connection?.wireGuard?.active === true
+    );
+}
+
+async function settleAnonymousRecoveryBlockedByPolicy(connection, wireGuardResult, reason, recoveryIdentity) {
+  if (!wireGuardRecoveryIdentityIsCurrent(recoveryIdentity)) return false;
+  const observedConnection = {
+    ...connection,
+    state: wireGuardResult.state,
+    health: wireGuardResult.health,
+    wireGuard: wireGuardResult.wireGuard,
+    diagnostics: {
+      ...(connection?.diagnostics || {}),
+      ...(wireGuardResult.diagnostics || {})
+    }
+  };
+  const currentBlocked = anonymousRecoveryBlockedByPolicy(runtime?.connection);
+  if (!currentBlocked && !anonymousRecoveryBlockedByPolicy(observedConnection)) return false;
+  const preservedConnection = currentBlocked ? runtime.connection : observedConnection;
+  runtime.connection = {
+    ...preservedConnection,
+    health: wireGuardResult.health,
+    wireGuard: wireGuardResult.wireGuard,
+    diagnostics: {
+      ...(preservedConnection?.diagnostics || {}),
+      ...(wireGuardResult.diagnostics || {})
+    }
+  };
+  applyAnonymousLoginDisabledState(`anonymous recovery stopped: ${reason}`);
+  await saveAndBroadcast();
+  return true;
 }
 
 function normalizeLauncherAnonymousUiVisibility(value) {
@@ -12594,6 +12824,10 @@ function setConnecting(mode, options = {}) {
 async function connectLauncherNetwork(input) {
   await ensureCredentialStorageRecoveryReady();
   const context = await launcherContext();
+  if (input.identityKind === 'anonymous' && launcherAnonymousEnrollmentDisabled()) {
+    applyAnonymousLoginDisabledState('anonymous enrollment stopped after product policy refresh');
+    throw launcherAnonymousEnrollmentDisabledError();
+  }
   await assertLiveSecureLauncherCapabilityTransport(context.bootstrap, 'lease capability 传输');
   const requestTag = stringValue(input.requestTag, 'connect');
   const newLeaseCapability = ensurePendingLeaseCapability(input);
@@ -12816,6 +13050,9 @@ function applyLauncherProductPresentation(product) {
     return false;
   }
   runtime.launcherProductPresentation = next;
+  if (anonymousRecoveryBlockedByPolicy(runtime.connection)) {
+    applyAnonymousLoginDisabledState('anonymous enrollment disabled by product policy');
+  }
   return true;
 }
 
@@ -13524,6 +13761,19 @@ async function applyConnectionError(label, err) {
     previousMode: previous?.mode,
     previousState: previous?.state
   });
+  if (
+    runtime.connection?.mode === 'guest'
+    && authoritativeAnonymousEnrollmentDisabledError(err)
+  ) {
+    applyAuthoritativeAnonymousEnrollmentDisabledState(
+      `${label} blocked by authoritative anonymous enrollment policy`
+    );
+    return;
+  }
+  if (anonymousRecoveryBlockedByPolicy(runtime.connection)) {
+    applyAnonymousLoginDisabledState(`${label} blocked: anonymous enrollment disabled`);
+    return;
+  }
   if (classified.state === 'local-storage-error') {
     applyLocalRuntimePersistenceError(label, classified, previous);
     return;
@@ -13870,7 +14120,7 @@ async function probeWireGuardForConnection(input) {
       routeReady,
       internalApiReady,
       splitDnsReady
-    })) {
+    }) && !anonymousRecoveryBlockedByPolicy(connection)) {
       standaloneOwnershipRegistry = await upsertStandaloneOwnershipForRoutePlan(
         routePlan,
         connection,
@@ -14433,6 +14683,10 @@ function scheduleDomesticRelayDiagnostics(lease, options = {}) {
 }
 
 async function refreshWireGuardDiagnostics() {
+  if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) {
+    applyAnonymousLoginDisabledState('wireguard diagnostics skipped: anonymous enrollment disabled');
+    return { skipped: true, reason: 'anonymous-enrollment-disabled' };
+  }
   const connection = runtime.connection || {};
   const routePlan = normalizeRoutePlan(connection.routePlan);
   if (!routePlan || !connection.leaseId) {
@@ -14525,16 +14779,37 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
   const allowPrivileged = options.allowPrivileged !== false;
   wireGuardRecoveryInFlight = (async () => {
     const connection = runtime.connection || {};
+    const recoveryIdentity = wireGuardRecoveryIdentity(connection);
     const routePlan = normalizeRoutePlan(connection.routePlan);
     if (!routePlan) return { ok: true, skipped: true, reason: 'missing-route-plan' };
     try {
       const mod = await importInstalledPackage('@qpjoy/electron-launcher/wireguard');
+      if (!wireGuardRecoveryIdentityIsCurrent(recoveryIdentity)) {
+        return { ok: true, skipped: true, reason: 'connection-transition-superseded' };
+      }
+      if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) {
+        return { ok: true, skipped: true, reason: 'anonymous-enrollment-disabled' };
+      }
       if (!allowPrivileged) {
         const wireGuardResult = await probeWireGuardForConnection({
           connection,
           routePlan,
           internalBaseUrl: connection.internalBaseUrl
         });
+        if (!wireGuardRecoveryIdentityIsCurrent(recoveryIdentity)) {
+          return { ok: true, skipped: true, reason: 'connection-transition-superseded' };
+        }
+        if (await settleAnonymousRecoveryBlockedByPolicy(
+          connection,
+          wireGuardResult,
+          reason,
+          recoveryIdentity
+        )) {
+          return { ok: true, skipped: true, reason: 'anonymous-enrollment-disabled' };
+        }
+        if (!wireGuardRecoveryIdentityIsCurrent(recoveryIdentity)) {
+          return { ok: true, skipped: true, reason: 'connection-transition-superseded' };
+        }
         if (wireGuardResult.ready) {
           wireGuardBackgroundProbeFailures = 0;
         } else if (!manual && connection.state === 'connected') {
@@ -14687,11 +14962,31 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
         reason
       });
       if (recovered?.skipped) return recovered;
+      if (!wireGuardRecoveryIdentityIsCurrent(recoveryIdentity)) {
+        return { ok: true, skipped: true, reason: 'connection-transition-superseded' };
+      }
+      if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) {
+        return { ok: true, skipped: true, reason: 'anonymous-enrollment-disabled' };
+      }
       const wireGuardResult = await probeWireGuardForConnection({
         connection,
         routePlan,
         internalBaseUrl: connection.internalBaseUrl
       });
+      if (!wireGuardRecoveryIdentityIsCurrent(recoveryIdentity)) {
+        return { ok: true, skipped: true, reason: 'connection-transition-superseded' };
+      }
+      if (await settleAnonymousRecoveryBlockedByPolicy(
+        connection,
+        wireGuardResult,
+        reason,
+        recoveryIdentity
+      )) {
+        return { ok: true, skipped: true, reason: 'anonymous-enrollment-disabled' };
+      }
+      if (!wireGuardRecoveryIdentityIsCurrent(recoveryIdentity)) {
+        return { ok: true, skipped: true, reason: 'connection-transition-superseded' };
+      }
       if (wireGuardResult.ready) {
         wireGuardBackgroundProbeFailures = 0;
       }
@@ -14733,6 +15028,12 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
       };
     } catch (err) {
       lastWireGuardRecoveryFailureAt = Date.now();
+      if (!wireGuardRecoveryIdentityIsCurrent(recoveryIdentity)) {
+        return { ok: true, skipped: true, reason: 'connection-transition-superseded' };
+      }
+      if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) {
+        return { ok: true, skipped: true, reason: 'anonymous-enrollment-disabled' };
+      }
       if (manual) {
         runtime.feedback = {
           tone: 'warning',
@@ -14750,6 +15051,7 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
 }
 
 function shouldRecoverWireGuardConnection(connection) {
+  if (anonymousRecoveryBlockedByPolicy(connection)) return false;
   if (pendingWindowsCleanupDiagnostic(connection)) return false;
   const state = connection?.state;
   return (state === 'connected' || state === 'tunnel-only' || state === 'lease-only' || state === 'server-unavailable' || state === 'network-unavailable')

@@ -32,6 +32,7 @@ import type {
   AppOnboardingTemplate,
   AuditEvent,
   AuditEventInput,
+  AuditEventListFilter,
   AwxProviderConfig,
   AwxProviderConfigInput,
   ConfigPolicySnapshot,
@@ -3485,11 +3486,32 @@ export class PostgresStore implements PlatformStore {
     return this.recordAuditTo(this.records, input);
   }
 
+  async listAuditEvents(filter: AuditEventListFilter): Promise<AuditEvent[]> {
+    const metadataLeaseId = filter.metadataLeaseId.trim();
+    if (!metadataLeaseId) return [];
+    const limit = Math.min(50, Math.max(1, Math.floor(filter.limit ?? 50)));
+    const rows = await this.records.createQueryBuilder('record')
+      .where('record.kind = :kind', { kind: 'audit-event' })
+      .andWhere('record.environment = :environment', { environment: this.config.environment })
+      .andWhere('record.data @> CAST(:metadataFilter AS jsonb)', {
+        metadataFilter: JSON.stringify({
+          provenance: 'server',
+          metadata: { leaseId: metadataLeaseId }
+        })
+      })
+      .orderBy('record.createdAt', 'DESC')
+      .addOrderBy('record.id', 'DESC')
+      .limit(limit)
+      .getMany();
+    return rows.map((row) => row.data as unknown as AuditEvent);
+  }
+
   private async recordAuditTo(
     records: Repository<PlatformRecordRow>,
     input: AuditEventInput
   ): Promise<AuditEvent> {
     const row: AuditEvent = {
+      provenance: input.provenance === undefined ? 'server' : input.provenance,
       eventId: `aud_${randomUUID()}`,
       eventType: input.eventType ?? 'unknown',
       actorKind: input.actorKind ?? 'system',

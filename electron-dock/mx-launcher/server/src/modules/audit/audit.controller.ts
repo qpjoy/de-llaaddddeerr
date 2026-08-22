@@ -18,6 +18,9 @@ export class AuditController {
 
 function toAuditInput(body: Record<string, unknown>): AuditEventInput {
   return {
+    // Never accept provenance from the request body. SDK-ingested audit records are
+    // useful for diagnostics but are not trusted server evidence.
+    provenance: 'client',
     eventType: nullableString(body.eventType) ?? undefined,
     actorKind: nullableString(body.actorKind) ?? undefined,
     userId: nullableString(body.userId),

@@ -108,6 +108,24 @@ test('product user access is ops-only and never claims database release removed 
   assert.match(mutation, /WireGuard peer removal was not performed or confirmed/);
 });
 
+test('lease activity is ops-only, exact-linked audit data with a redacted response', () => {
+  const activity = paths['/internal/v1/launcher-network/leases/{leaseId}/activity']?.get;
+  assert.match(activity?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
+  assert.match(activity?.description ?? '', /metadata\.leaseId 精确匹配/);
+  assert.match(activity?.description ?? '', /最多 50 条/);
+  assert.match(activity?.description ?? '', /server provenance/);
+  assert.match(activity?.description ?? '', /client provenance/);
+  assert.match(activity?.description ?? '', /旧记录缺省 provenance/);
+  assert.match(activity?.description ?? '', /不是 WireGuard 在线状态或 runtime logs/);
+  const response = JSON.stringify(activity?.responses['200']);
+  assert.match(response, /"source":"audit-events"/);
+  assert.match(response, /"eventType":"launcher_network\.domestic_peer\.synced"/);
+  assert.match(response, /"summary":"Domestic WireGuard peer synchronized"/);
+  assert.match(response, /"status":"passed"/);
+  assert.match(response, /"plane":"domestic"/);
+  assert.doesNotMatch(response, /"(?:provenance|metadata|publicKey|token|capability|sourceIp|stdout|stderr)"/);
+});
+
 test('the system subscription contract exposes both operator URLs without provisioning a local 7890 instance', () => {
   const catalog = JSON.stringify(paths['/internal/v1/user-center/system-subscriptions']?.get?.responses['200']);
   assert.match(catalog, /"mixedPort":7788/);

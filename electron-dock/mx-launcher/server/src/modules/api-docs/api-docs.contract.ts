@@ -425,6 +425,31 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         }
       })
     },
+    '/internal/v1/launcher-network/leases/{leaseId}/activity': {
+      get: operation({
+        tag: 'Launcher Network',
+        summary: '读取节点的已验证脱敏审计活动',
+        description: '要求 x-mx-ops-token。先确认 lease 存在，再只按 audit metadata.leaseId 精确匹配，倒序返回最近最多 50 条。仅返回带 server provenance 的已验证服务端来源事件；外部 SDK 写入的 client provenance 与旧记录缺省 provenance 均不会进入 evidence feed。响应不是 WireGuard 在线状态或 runtime logs；不会返回 provenance、metadata、publicKey、token、capability、sourceIp 或原始 stdout/stderr。',
+        operationId: 'getLauncherNetworkLeaseActivity',
+        auth: 'ops-token',
+        pathParams: ['leaseId'],
+        response: {
+          leaseId: 'lnlease_example',
+          source: 'audit-events',
+          count: 1,
+          activity: [{
+            eventId: 'aud_example',
+            eventType: 'launcher_network.domestic_peer.synced',
+            createdAt: '2026-07-20T00:00:00.000Z',
+            siteId: 'domestic-main',
+            requestId: 'mx-h2i-peer-sync-001',
+            summary: 'Domestic WireGuard peer synchronized',
+            status: 'passed',
+            plane: 'domestic'
+          }]
+        }
+      })
+    },
     '/internal/v1/sdk/gateway/manifest': {
       get: operation({
         tag: 'Discovery',

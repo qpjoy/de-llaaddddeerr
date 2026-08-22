@@ -12,7 +12,7 @@ const MX_LOCAL_EDGE_DNS = '127.0.0.1:2053';
 const MX_DEFAULT_APP_DNS_ZONE = 'mxinfo-inc.cn';
 const MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST = 'h2i.minsight-ai.com';
 const INTERNAL_PEER_STATUS_AUTO_REFRESH_MS = 30000;
-const MX_H2I_TOPOLOGY_CLIENT_LIMIT = 8;
+const MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE = 48;
 const MX_H2I_LEASE_PAGE_SIZE = 100;
 const LAUNCHER_NETWORK_LEASE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 
@@ -307,6 +307,21 @@ const state = {
     page: 1
   },
   mxH2iLeaseDrawer: null,
+  mxH2iTopologyView: {
+    query: '',
+    identity: 'all',
+    page: 1,
+    labelsVisible: true,
+    selectedLeaseKey: null,
+    selectedNodeId: null
+  },
+  mxH2iTopologyActivity: {
+    leaseId: null,
+    loading: false,
+    error: null,
+    activity: [],
+    requestSequence: 0
+  },
   anonymousPolicyBusyProductId: null,
   anonymousPolicyFeedback: null,
   mxH2iAnonymousQuickConfirmation: null,
@@ -4242,6 +4257,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || path === '/internal/v1/admin/oversea'
       || /^\/internal\/v1\/admin\/site-slots\/pipelines\/[^/]+$/.test(path)
       || /^\/internal\/v1\/launcher-network\/leases(?:\/[^/]+)?$/.test(path)
+      || /^\/internal\/v1\/launcher-network\/leases\/[^/]+\/activity$/.test(path)
       || /^\/internal\/v1\/launcher-network\/products\/[^/]+\/user-access$/.test(path)
       || /^\/internal\/v1\/launcher-network\/products\/[^/]+\/users\/[^/]+\/access$/.test(path);
   }
@@ -11673,28 +11689,338 @@ function mxH2iLeasePageSummary(page) {
   return `${page.rangeStart}-${page.rangeEnd} of ${page.filteredCount} matched · ${page.totalCount} total active · page ${page.page}/${page.totalPages}`;
 }
 
+function mxH2iTopologyLeaseGroup(lease) {
+  if (mxH2iLeaseIdentityGroup(lease) === 'anonymous') return 'anonymous';
+  return lease?.leaseProfile === 'feishu' ? 'feishu' : 'employee';
+}
+
+function mxH2iTopologyGroupLabel(group) {
+  if (group === 'feishu') return 'Feishu employee';
+  if (group === 'anonymous') return 'Anonymous';
+  return 'Employee · Password';
+}
+
+function mxH2iTopologyMachineKey(lease) {
+  return String(
+    lease?.deviceId
+    || lease?.installId
+    || lease?.publicKey
+    || lease?.leaseId
+    || lease?.leaseIp
+    || ''
+  ).trim();
+}
+
+function mxH2iTopologyInventorySummary(leases) {
+  const rows = asArray(leases);
+  const groups = { employee: 0, feishu: 0, anonymous: 0 };
+  const machines = new Set();
+  const machinesByGroup = {
+    employee: new Set(),
+    feishu: new Set(),
+    anonymous: new Set()
+  };
+  for (const lease of rows) {
+    const group = mxH2iTopologyLeaseGroup(lease);
+    groups[group] += 1;
+    const machineKey = mxH2iTopologyMachineKey(lease);
+    if (machineKey) {
+      machines.add(machineKey);
+      machinesByGroup[group].add(machineKey);
+    }
+  }
+  return {
+    leaseCount: rows.length,
+    machineCount: machines.size,
+    groups,
+    groupMachines: {
+      employee: machinesByGroup.employee.size,
+      feishu: machinesByGroup.feishu.size,
+      anonymous: machinesByGroup.anonymous.size
+    }
+  };
+}
+
+function mxH2iTopologyWindow(leases, view = state.mxH2iTopologyView) {
+  const rows = asArray(leases);
+  const query = String(view?.query || '').trim().toLowerCase();
+  const identity = ['employee', 'feishu', 'anonymous'].includes(view?.identity) ? view.identity : 'all';
+  const filtered = rows
+    .filter((lease) => (
+      (identity === 'all' || mxH2iTopologyLeaseGroup(lease) === identity)
+      && (!query || `${mxH2iTopologyGroupLabel(mxH2iTopologyLeaseGroup(lease))} ${mxH2iLeaseSearchText(lease)}`.toLowerCase().includes(query))
+    ))
+    .slice()
+    .sort((left, right) => (
+      mxH2iTopologyLeaseGroup(left).localeCompare(mxH2iTopologyLeaseGroup(right))
+      || String(left?.leaseIp || left?.leaseId || '').localeCompare(String(right?.leaseIp || right?.leaseId || ''))
+    ));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE));
+  const requestedPage = Number.parseInt(view?.page, 10);
+  const page = Math.min(Math.max(Number.isFinite(requestedPage) ? requestedPage : 1, 1), totalPages);
+  const startIndex = (page - 1) * MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE;
+  return {
+    rows: filtered.slice(startIndex, startIndex + MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE),
+    page,
+    totalPages,
+    filteredCount: filtered.length,
+    totalCount: rows.length,
+    rangeStart: filtered.length ? startIndex + 1 : 0,
+    rangeEnd: Math.min(startIndex + MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE, filtered.length),
+    all: mxH2iTopologyInventorySummary(rows),
+    matched: mxH2iTopologyInventorySummary(filtered)
+  };
+}
+
+function renderMxH2iTopologySelectedLease(lease) {
+  if (!lease) {
+    return `
+      <div class="mx-h2i-topology-selection-empty">
+        <strong>No lease selected</strong>
+        <span>Hover a 3D node for a summary, or select a node/list row to inspect its static lease record.</span>
+      </div>
+    `;
+  }
+  const observedAt = mxH2iLeaseObservedAt(lease);
+  const recordUpdatedAt = mxH2iLeaseRecordUpdatedAt(lease);
+  const expiresAt = mxH2iLeaseExpiryAt(lease);
+  return `
+    <div class="mx-h2i-topology-selection-head">
+      <div>
+        <span>${escapeHtml(mxH2iTopologyGroupLabel(mxH2iTopologyLeaseGroup(lease)))}</span>
+        <strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong>
+        <small>${escapeHtml(lease.leaseId || 'lease ID not recorded')}</small>
+      </div>
+      <button class="primary-button" type="button" data-mx-h2i-topology-open-selected="${escapeHtml(mxH2iLeaseDrawerKey(lease))}">Open connection drawer</button>
+    </div>
+    <dl class="mx-h2i-topology-selection-grid">
+      <div><dt>Assigned IP</dt><dd>${escapeHtml(lease.leaseIp || 'not recorded')}</dd></div>
+      <div><dt>Source IP</dt><dd>${escapeHtml(mxH2iLeaseSourceIp(lease))}</dd><small>enrollment / renewal HTTP source</small></div>
+      <div><dt>Device</dt><dd>${escapeHtml(mxH2iLeaseDevice(lease))}</dd></div>
+      <div><dt>Platform</dt><dd>${escapeHtml(mxH2iLeasePlatform(lease))}</dd></div>
+      <div><dt>Record updated</dt><dd>${escapeHtml(recordUpdatedAt ? formatTime(recordUpdatedAt) : 'not recorded')}</dd></div>
+      <div><dt>Expires</dt><dd>${escapeHtml(expiresAt ? formatTime(expiresAt) : 'not recorded')}</dd></div>
+      <div><dt>Online / handshake</dt><dd>${escapeHtml(observedAt ? `runtime observation ${formatTime(observedAt)}` : 'not observed')}</dd><small>no online claim from a static lease</small></div>
+      <div><dt>Location / logs</dt><dd>not collected</dd><small>no client position or log telemetry</small></div>
+    </dl>
+    ${renderMxH2iTopologyActivity(lease)}
+  `;
+}
+
+function renderMxH2iTopologyActivity(lease) {
+  const leaseId = String(lease?.leaseId || '').trim();
+  const activityState = state.mxH2iTopologyActivity;
+  const current = leaseId && activityState?.leaseId === leaseId;
+  const items = current ? asArray(activityState.activity) : [];
+  let content = '<div class="empty-state">Control-plane activity will load for this lease.</div>';
+  if (!leaseId) {
+    content = '<div class="empty-state">Control-plane activity unavailable: lease ID was not recorded.</div>';
+  } else if (current && activityState.loading) {
+    content = '<div class="empty-state">Loading recent control-plane activity…</div>';
+  } else if (current && activityState.error) {
+    content = `<div class="feedback error">Activity unavailable: ${escapeHtml(activityState.error)}</div>`;
+  } else if (current && !items.length) {
+    content = '<div class="empty-state">No audit event was found for this exact lease ID.</div>';
+  } else if (current) {
+    content = `
+      <div class="mx-h2i-topology-activity-list">
+        ${items.map((item) => `
+          <article>
+            <div><strong>${escapeHtml(item.eventType || 'control-plane event')}</strong><span>${escapeHtml(item.summary || 'No summary recorded')}</span></div>
+            <small>${escapeHtml(item.createdAt ? formatTime(item.createdAt) : 'time not recorded')} · ${escapeHtml(item.siteId || 'site not recorded')} · ${escapeHtml(item.plane || 'plane not recorded')} · ${escapeHtml(item.status || 'status not recorded')}</small>
+          </article>
+        `).join('')}
+      </div>
+    `;
+  }
+  return `
+    <section class="mx-h2i-topology-activity" data-mx-h2i-topology-activity aria-live="polite">
+      <div class="mx-h2i-topology-activity-head">
+        <strong>Recent control-plane audit activity</strong>
+        <span>Exact lease-ID audit events · not runtime logs, traffic, handshake telemetry, or proof of online state.</span>
+      </div>
+      ${content}
+    </section>
+  `;
+}
+
+function mxH2iTopologyActivityItems(payload, leaseId) {
+  const responseLeaseId = String(payload?.leaseId || '').trim();
+  if (responseLeaseId !== leaseId) {
+    throw new Error('Activity response lease ID did not match the selected lease.');
+  }
+  if (payload?.source !== 'audit-events') {
+    throw new Error('Activity response did not identify the audit-event source.');
+  }
+  return asArray(payload?.activity).slice(0, 50);
+}
+
+function renderMxH2iTopologySelectedNode(nodeId, leases, product) {
+  const normalized = String(nodeId || '').trim();
+  const viewport = mxH2iTopologyWindow(leases);
+  const selectedLease = viewport.rows.find((lease) => (
+    `client:${mxH2iLeaseDrawerKey(lease)}` === normalized
+  )) || null;
+  if (selectedLease) return renderMxH2iTopologySelectedLease(selectedLease);
+  if (normalized.startsWith('group:')) {
+    const group = normalized.slice('group:'.length);
+    if (!['employee', 'feishu', 'anonymous'].includes(group)) return renderMxH2iTopologySelectedLease(null);
+    const groupViewport = mxH2iTopologyWindow(leases, {
+      ...state.mxH2iTopologyView,
+      identity: group,
+      page: 1
+    });
+    return `
+      <div class="mx-h2i-topology-selection-head">
+        <div>
+          <span>Identity aggregate</span>
+          <strong>${escapeHtml(mxH2iTopologyGroupLabel(group))}</strong>
+          <small>${escapeHtml(String(groupViewport.filteredCount))} matched static lease records · ${escapeHtml(String(groupViewport.matched.machineCount))} device identities (best effort)</small>
+        </div>
+        <button class="primary-button" type="button" data-mx-h2i-topology-apply-group="${escapeHtml(group)}">Filter to this group</button>
+      </div>
+      <div class="mx-h2i-static-data-notice" role="note">
+        <strong>Aggregate, not a live network node</strong>
+        <span>This node groups the current topology search results. Online state, handshake health, client location, and logs are not collected here.</span>
+      </div>
+    `;
+  }
+  if (normalized === 'domestic' || normalized === 'internal') {
+    const domestic = normalized === 'domestic';
+    const label = domestic ? 'Domestic' : 'Internal';
+    const address = domestic
+      ? product?.domesticGatewayIp || MX_DOMESTIC_RELAY_IP
+      : product?.internalControlIp || MX_INTERNAL_DNS_IP;
+    return `
+      <div class="mx-h2i-topology-selection-head">
+        <div>
+          <span>Static topology role</span>
+          <strong>${label}</strong>
+          <small>${escapeHtml(address)} · ${domestic ? 'relay path' : 'control / service plane'}</small>
+        </div>
+        <button class="primary-button" type="button" data-mx-h2i-topology-${domestic ? 'open-domestic' : 'open-product'}>${domestic ? 'Open Domestic setup' : 'Open product settings'}</button>
+      </div>
+      <div class="mx-h2i-static-data-notice" role="note">
+        <strong>Runtime state not collected</strong>
+        <span>This diagram records the configured path role only. It does not prove reachability, tunnel health, traffic, location, or logs.</span>
+      </div>
+    `;
+  }
+  return renderMxH2iTopologySelectedLease(null);
+}
+
 function renderMxH2iTopologyFallback(leases, product) {
-  const visibleLeases = asArray(leases).slice(0, MX_H2I_TOPOLOGY_CLIENT_LIMIT);
-  const omitted = Math.max(0, leases.length - visibleLeases.length);
+  const viewport = mxH2iTopologyWindow(leases);
   return `
     <div class="mx-h2i-topology-fallback" data-mx-h2i-topology-fallback>
-      <div class="mx-h2i-topology-fallback-head">
-        <strong>Topology table fallback</strong>
-        <span>always available · static lease paths</span>
+      <div class="mx-h2i-topology-selection" data-mx-h2i-topology-selection aria-live="polite">
+        ${renderMxH2iTopologySelectedNode(state.mxH2iTopologyView.selectedNodeId, leases, product)}
       </div>
-      <div class="mx-h2i-topology-paths" role="table" aria-label="MX-H2I topology table fallback">
-        ${visibleLeases.map((lease) => `
-          <div role="row">
-            <strong role="cell">${escapeHtml(mxH2iLeaseDevice(lease))}</strong>
-            <span role="cell">${escapeHtml(lease.leaseIp || '-')}</span>
-            <small role="cell">client lease → Domestic</small>
-          </div>
-        `).join('') || '<div role="row"><strong role="cell">No client lease</strong><span role="cell">-</span><small role="cell">waiting for a static lease record</small></div>'}
-        ${omitted ? `<div role="row"><strong role="cell">+${escapeHtml(String(omitted))} more</strong><span role="cell">node cap</span><small role="cell">available in the detailed table</small></div>` : ''}
-        <div role="row"><strong role="cell">Domestic</strong><span role="cell">${escapeHtml(product?.domesticGatewayIp || MX_DOMESTIC_RELAY_IP)}</span><small role="cell">relay → Internal</small></div>
-        <div role="row"><strong role="cell">Internal</strong><span role="cell">${escapeHtml(product?.internalControlIp || MX_INTERNAL_DNS_IP)}</span><small role="cell">control / service plane</small></div>
+      <div class="mx-h2i-topology-fallback-head">
+        <strong>Accessible lease window</strong>
+        <span>${viewport.rangeStart}-${viewport.rangeEnd} of ${viewport.filteredCount} matched · ${viewport.totalCount} total active lease records</span>
+      </div>
+      <div class="mx-h2i-topology-paths" aria-label="MX-H2I topology static lease window">
+        ${viewport.rows.map((lease) => {
+          const leaseKey = mxH2iLeaseDrawerKey(lease);
+          const selected = leaseKey === state.mxH2iTopologyView.selectedLeaseKey;
+          return `
+            <button type="button" data-mx-h2i-topology-node="${escapeHtml(`client:${leaseKey}`)}" data-mx-h2i-topology-lease="${escapeHtml(leaseKey)}" aria-pressed="${selected ? 'true' : 'false'}">
+              <span><strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong><small>${escapeHtml(mxH2iTopologyGroupLabel(mxH2iTopologyLeaseGroup(lease)))}</small></span>
+              <span><strong>${escapeHtml(lease.leaseIp || 'not recorded')}</strong><small>assigned IP</small></span>
+              <span><strong>${escapeHtml(mxH2iLeaseDevice(lease))}</strong><small>${escapeHtml(mxH2iLeasePlatform(lease))}</small></span>
+            </button>
+          `;
+        }).join('') || '<div class="empty-state">No static active lease matches this topology filter.</div>'}
+      </div>
+      <div class="mx-h2i-topology-window-pagination" aria-label="Topology lease window pagination">
+        <button class="secondary-button" type="button" data-mx-h2i-topology-page="previous" ${viewport.page <= 1 ? 'disabled' : ''}>Previous ${MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE}</button>
+        <span data-mx-h2i-topology-page-label tabindex="-1">Page ${viewport.page} of ${viewport.totalPages}</span>
+        <button class="secondary-button" type="button" data-mx-h2i-topology-page="next" ${viewport.page >= viewport.totalPages ? 'disabled' : ''}>Next ${MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE}</button>
+      </div>
+      <div class="mx-h2i-topology-route-summary">
+        <button type="button" data-mx-h2i-topology-node="domestic" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'domestic' ? 'true' : 'false'}"><strong>Domestic</strong><small>${escapeHtml(product?.domesticGatewayIp || MX_DOMESTIC_RELAY_IP)} · relay path, runtime state not collected here</small></button>
+        <button type="button" data-mx-h2i-topology-node="internal" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'internal' ? 'true' : 'false'}"><strong>Internal</strong><small>${escapeHtml(product?.internalControlIp || MX_INTERNAL_DNS_IP)} · control/service plane, runtime state not collected here</small></button>
       </div>
     </div>
+  `;
+}
+
+function renderMxH2iTopologyExplorer(leases, product, options = {}) {
+  const leaseDataAvailable = options.leaseDataAvailable !== false;
+  if (!leaseDataAvailable) {
+    return `
+      <section id="mx-h2i-topology" class="mx-h2i-operations-panel" aria-labelledby="mx-h2i-topology-title">
+        <div class="mx-h2i-operations-head">
+          <div>
+            <span class="site-kind">3D Topology</span>
+            <h4 id="mx-h2i-topology-title">Client lease → Domestic → Internal</h4>
+            <p>Lease inventory is unavailable, so no topology is inferred or rendered.</p>
+          </div>
+          <span class="health-chip" data-health="unknown" data-mx-h2i-topology-status>DATA UNAVAILABLE</span>
+        </div>
+        <div class="mx-h2i-topology-fallback" data-mx-h2i-topology-fallback>
+          <div class="empty-state">Topology data could not be loaded. Refresh data before interpreting client, Domestic, or Internal paths.</div>
+        </div>
+      </section>
+    `;
+  }
+  const viewport = mxH2iTopologyWindow(leases);
+  state.mxH2iTopologyView.page = viewport.page;
+  const selectedNodeId = String(state.mxH2iTopologyView.selectedNodeId || '');
+  const selectedClientVisible = viewport.rows.some((lease) => (
+    `client:${mxH2iLeaseDrawerKey(lease)}` === selectedNodeId
+  ));
+  const selectedGroupVisible = selectedNodeId.startsWith('group:')
+    && viewport.matched.groups[selectedNodeId.slice('group:'.length)] > 0;
+  if (selectedNodeId && !selectedClientVisible && !selectedGroupVisible && !['domestic', 'internal'].includes(selectedNodeId)) {
+    state.mxH2iTopologyView.selectedNodeId = null;
+    state.mxH2iTopologyView.selectedLeaseKey = null;
+  }
+  const summary = viewport.all;
+  return `
+    <section id="mx-h2i-topology" class="mx-h2i-operations-panel" aria-labelledby="mx-h2i-topology-title">
+      <div class="mx-h2i-operations-head">
+        <div>
+          <span class="site-kind">Interactive static-lease topology</span>
+          <h4 id="mx-h2i-topology-title">Client lease records → identity groups → Domestic → Internal</h4>
+          <p>Each 3D client node is one static lease record, not one physical machine. The scene renders one ${MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE}-lease window at a time. Search, filter, and page cover all active lease records.</p>
+        </div>
+        <span class="health-chip" data-health="ready" data-mx-h2i-topology-status>INITIALIZING</span>
+      </div>
+      <div class="mx-h2i-topology-metrics" aria-label="MX-H2I topology inventory summary">
+        <span><strong>${escapeHtml(String(summary.machineCount))}</strong><small>device identities (best effort) · ${escapeHtml(String(summary.leaseCount))} active lease records</small></span>
+        <button type="button" data-group="employee" data-mx-h2i-topology-node="group:employee" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'group:employee' ? 'true' : 'false'}"><strong>${escapeHtml(String(summary.groups.employee))}</strong><small>employee · password</small></button>
+        <button type="button" data-group="feishu" data-mx-h2i-topology-node="group:feishu" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'group:feishu' ? 'true' : 'false'}"><strong>${escapeHtml(String(summary.groups.feishu))}</strong><small>employee · Feishu</small></button>
+        <button type="button" data-group="anonymous" data-mx-h2i-topology-node="group:anonymous" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'group:anonymous' ? 'true' : 'false'}"><strong>${escapeHtml(String(summary.groups.anonymous))}</strong><small>anonymous</small></button>
+      </div>
+      <div class="mx-h2i-topology-toolbar" role="group" aria-label="Topology controls">
+        <input type="search" value="${escapeHtml(state.mxH2iTopologyView.query)}" data-mx-h2i-topology-query placeholder="Search user, assigned/source IP, device, platform…" aria-label="Search all MX-H2I topology leases" />
+        <select data-mx-h2i-topology-identity aria-label="Filter topology by identity group">
+          <option value="all" ${state.mxH2iTopologyView.identity === 'all' ? 'selected' : ''}>All identity groups</option>
+          <option value="employee" ${state.mxH2iTopologyView.identity === 'employee' ? 'selected' : ''}>Employee · Password</option>
+          <option value="feishu" ${state.mxH2iTopologyView.identity === 'feishu' ? 'selected' : ''}>Employee · Feishu</option>
+          <option value="anonymous" ${state.mxH2iTopologyView.identity === 'anonymous' ? 'selected' : ''}>Anonymous</option>
+        </select>
+        <button class="secondary-button" type="button" data-mx-h2i-topology-camera="reset">Reset view</button>
+        <button class="secondary-button" type="button" data-mx-h2i-topology-camera="fit">Fit window</button>
+        <button class="secondary-button" type="button" data-mx-h2i-topology-labels aria-pressed="${state.mxH2iTopologyView.labelsVisible ? 'true' : 'false'}">${state.mxH2iTopologyView.labelsVisible ? 'Hide labels' : 'Show labels'}</button>
+      </div>
+      <div class="mx-h2i-topology-filter-summary" aria-live="polite">
+        Showing ${viewport.rangeStart}-${viewport.rangeEnd} of ${viewport.filteredCount} matched active lease records · ${viewport.matched.machineCount} matched device identities (best effort) · page ${viewport.page}/${viewport.totalPages}
+      </div>
+      <div class="mx-h2i-topology-layout">
+        <div class="mx-h2i-topology-stage">
+          <canvas data-mx-h2i-topology-canvas tabindex="0" aria-label="Interactive MX-H2I static lease topology. Drag to rotate, Shift-drag or right-drag to pan, wheel to zoom, and use arrow or plus/minus keys."></canvas>
+          <div class="mx-h2i-topology-tooltip" data-mx-h2i-topology-tooltip hidden></div>
+          <div class="mx-h2i-topology-overlay" aria-hidden="true">
+            <span>LEASES</span><span>IDENTITIES / DOMESTIC</span><span>INTERNAL</span>
+          </div>
+          <p class="mx-h2i-topology-help">Static control-plane leases only · drag rotate · Shift/right drag pan · wheel zoom · click node select</p>
+        </div>
+        ${renderMxH2iTopologyFallback(leases, product)}
+      </div>
+    </section>
   `;
 }
 
@@ -11830,33 +12156,7 @@ function renderMxH2iOperationsScreen(product, leases, options = {}) {
       </div>
     </section>
 
-    <section id="mx-h2i-topology" class="mx-h2i-operations-panel" aria-labelledby="mx-h2i-topology-title">
-      <div class="mx-h2i-operations-head">
-        <div>
-          <span class="site-kind">3D Topology</span>
-          <h4 id="mx-h2i-topology-title">Client lease → Domestic → Internal</h4>
-          <p>${leaseDataAvailable
-            ? `Up to ${escapeHtml(String(MX_H2I_TOPOLOGY_CLIENT_LIMIT))} client lease nodes are rendered. Remaining leases stay available in the table.`
-            : 'Lease inventory is unavailable, so no topology is inferred or rendered.'}</p>
-        </div>
-        <span class="health-chip" data-health="${leaseDataAvailable ? 'ready' : 'unknown'}" data-mx-h2i-topology-status>${leaseDataAvailable ? 'INITIALIZING' : 'DATA UNAVAILABLE'}</span>
-      </div>
-      ${leaseDataAvailable ? `
-        <div class="mx-h2i-topology-layout">
-          <div class="mx-h2i-topology-stage">
-            <canvas data-mx-h2i-topology-canvas aria-hidden="true"></canvas>
-            <div class="mx-h2i-topology-overlay" aria-hidden="true">
-              <span>CLIENTS</span><span>DOMESTIC</span><span>INTERNAL</span>
-            </div>
-          </div>
-          ${renderMxH2iTopologyFallback(activeLeases, product)}
-        </div>
-      ` : `
-        <div class="mx-h2i-topology-fallback" data-mx-h2i-topology-fallback>
-          <div class="empty-state">Topology data could not be loaded. Refresh data before interpreting client, Domestic, or Internal paths.</div>
-        </div>
-      `}
-    </section>
+    ${renderMxH2iTopologyExplorer(activeLeases, product, { leaseDataAvailable })}
 
     <section id="mx-h2i-connections" class="mx-h2i-operations-panel" aria-labelledby="mx-h2i-connections-title">
       <div class="mx-h2i-operations-head">
@@ -11956,7 +12256,7 @@ function renderMxH2iDashboard(product, leases) {
   `;
 }
 
-function bindMxH2iDashboardControls(root, leases) {
+function bindMxH2iDashboardControls(root, leases, product) {
   bindMxH2iOperationsControls(root, leases);
   bindStandaloneAnonymousPolicyControls(root);
   const productButton = root.querySelector('[data-mx-h2i-open-product]');
@@ -11986,16 +12286,241 @@ function bindMxH2iDashboardControls(root, leases) {
       root.querySelector(`#${targetId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   }
-  const canvas = root.querySelector('[data-mx-h2i-topology-canvas]');
+  bindMxH2iTopologyControls(root, leases, product);
+}
+
+function refreshMxH2iTopologyExplorer(root, leases, product, focus = null) {
+  const current = root?.querySelector?.('#mx-h2i-topology');
+  if (!current) return;
+  disposeMxH2iTopology();
+  current.outerHTML = renderMxH2iTopologyExplorer(leases, product, { leaseDataAvailable: true });
+  bindMxH2iTopologyControls(root, leases, product);
+  if (!focus?.selector) return;
+  requestAnimationFrame(() => {
+    const target = root.querySelector(focus.selector);
+    target?.focus?.();
+    if (target instanceof HTMLInputElement && Number.isInteger(focus.cursor)) {
+      target.setSelectionRange(focus.cursor, focus.cursor);
+    }
+  });
+}
+
+function mxH2iTopologyLeaseForNode(leases, nodeId) {
+  const viewport = mxH2iTopologyWindow(leases);
+  const normalized = String(nodeId || '').trim();
+  return viewport.rows.find((lease) => `client:${mxH2iLeaseDrawerKey(lease)}` === normalized) || null;
+}
+
+function activateMxH2iTopologyNode(root, leases, product, nodeId, returnFocus = null) {
+  const normalized = String(nodeId || '').trim();
+  const lease = mxH2iTopologyLeaseForNode(leases, normalized);
+  if (lease) {
+    openMxH2iLeaseDrawer(mxH2iLeaseDrawerKey(lease), returnFocus);
+    return;
+  }
+  if (normalized.startsWith('group:')) {
+    const group = normalized.slice('group:'.length);
+    if (!['employee', 'feishu', 'anonymous'].includes(group)) return;
+    state.mxH2iTopologyView.identity = group;
+    state.mxH2iTopologyView.page = 1;
+    state.mxH2iTopologyView.selectedNodeId = normalized;
+    state.mxH2iTopologyView.selectedLeaseKey = null;
+    refreshMxH2iTopologyExplorer(root, leases, product, { selector: '[data-mx-h2i-topology-identity]' });
+    return;
+  }
+  if (normalized === 'domestic') {
+    setActiveView('admin', {
+      menu: 'operations',
+      section: 'deployment',
+      subsection: 'domestic',
+      deploymentKind: 'domestic'
+    });
+    return;
+  }
+  if (normalized === 'internal') {
+    state.mxH2iSurface = 'product';
+    closeMxH2iLeaseDrawer({ restoreFocus: false });
+    renderAppCenterShell();
+  }
+}
+
+function bindMxH2iTopologySelectionActions(root, leases, product) {
+  const section = root?.querySelector?.('#mx-h2i-topology');
+  if (!section) return;
+  section.querySelector('[data-mx-h2i-topology-open-selected]')?.addEventListener('click', (event) => {
+    activateMxH2iTopologyNode(
+      root,
+      leases,
+      product,
+      `client:${event.currentTarget.dataset.mxH2iTopologyOpenSelected}`,
+      event.currentTarget
+    );
+  });
+  section.querySelector('[data-mx-h2i-topology-apply-group]')?.addEventListener('click', (event) => {
+    activateMxH2iTopologyNode(root, leases, product, `group:${event.currentTarget.dataset.mxH2iTopologyApplyGroup}`, event.currentTarget);
+  });
+  section.querySelector('[data-mx-h2i-topology-open-domestic]')?.addEventListener('click', (event) => {
+    activateMxH2iTopologyNode(root, leases, product, 'domestic', event.currentTarget);
+  });
+  section.querySelector('[data-mx-h2i-topology-open-product]')?.addEventListener('click', (event) => {
+    activateMxH2iTopologyNode(root, leases, product, 'internal', event.currentTarget);
+  });
+}
+
+function renderMxH2iTopologySelection(root, leases, product, nodeId) {
+  const section = root?.querySelector?.('#mx-h2i-topology');
+  if (!section) return;
+  const normalized = String(nodeId || '').trim();
+  const selectedLease = mxH2iTopologyLeaseForNode(leases, normalized);
+  const group = normalized.startsWith('group:') ? normalized.slice('group:'.length) : null;
+  const valid = Boolean(selectedLease)
+    || ['employee', 'feishu', 'anonymous'].includes(group)
+    || ['domestic', 'internal'].includes(normalized);
+  state.mxH2iTopologyView.selectedNodeId = valid ? normalized : null;
+  state.mxH2iTopologyView.selectedLeaseKey = selectedLease ? mxH2iLeaseDrawerKey(selectedLease) : null;
+  const selection = section.querySelector('[data-mx-h2i-topology-selection]');
+  if (selection) {
+    selection.innerHTML = renderMxH2iTopologySelectedNode(
+      state.mxH2iTopologyView.selectedNodeId,
+      leases,
+      product
+    );
+  }
+  for (const button of section.querySelectorAll('[data-mx-h2i-topology-node]')) {
+    button.setAttribute('aria-pressed', button.dataset.mxH2iTopologyNode === state.mxH2iTopologyView.selectedNodeId ? 'true' : 'false');
+  }
+  bindMxH2iTopologySelectionActions(root, leases, product);
+  setMxH2iTopologyNodeSelection(state.mxH2iTopology, state.mxH2iTopologyView.selectedNodeId);
+  if (selectedLease) void loadMxH2iTopologyActivity(section, selectedLease);
+}
+
+async function loadMxH2iTopologyActivity(section, lease) {
+  const leaseId = String(lease?.leaseId || '').trim();
+  if (!leaseId || !section?.isConnected) return;
+  const requestSequence = Number(state.mxH2iTopologyActivity.requestSequence || 0) + 1;
+  state.mxH2iTopologyActivity = {
+    leaseId,
+    loading: true,
+    error: null,
+    activity: [],
+    requestSequence
+  };
+  const renderActivity = () => {
+    if (!section.isConnected
+      || state.mxH2iTopologyActivity.requestSequence !== requestSequence
+      || state.mxH2iTopologyView.selectedLeaseKey !== mxH2iLeaseDrawerKey(lease)) return;
+    const activityRoot = section.querySelector('[data-mx-h2i-topology-activity]');
+    if (activityRoot) activityRoot.outerHTML = renderMxH2iTopologyActivity(lease);
+  };
+  renderActivity();
+  try {
+    const payload = await fetchJson(`/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/activity`);
+    if (state.mxH2iTopologyActivity.requestSequence !== requestSequence
+      || state.mxH2iTopologyView.selectedLeaseKey !== mxH2iLeaseDrawerKey(lease)
+      || !section.isConnected) return;
+    state.mxH2iTopologyActivity = {
+      leaseId,
+      loading: false,
+      error: null,
+      activity: mxH2iTopologyActivityItems(payload, leaseId),
+      requestSequence
+    };
+    renderActivity();
+  } catch (error) {
+    if (state.mxH2iTopologyActivity.requestSequence !== requestSequence
+      || state.mxH2iTopologyView.selectedLeaseKey !== mxH2iLeaseDrawerKey(lease)
+      || !section.isConnected) return;
+    state.mxH2iTopologyActivity = {
+      leaseId,
+      loading: false,
+      error: error.message,
+      activity: [],
+      requestSequence
+    };
+    renderActivity();
+  }
+}
+
+function mxH2iTopologyPageFocusSelector(direction, viewport) {
+  const normalized = direction === 'next' ? 'next' : 'previous';
+  const reachedBoundary = normalized === 'next'
+    ? viewport.page >= viewport.totalPages
+    : viewport.page <= 1;
+  return reachedBoundary
+    ? '[data-mx-h2i-topology-page-label]'
+    : `[data-mx-h2i-topology-page="${normalized}"]`;
+}
+
+function bindMxH2iTopologyControls(root, leases, product) {
+  const section = root?.querySelector?.('#mx-h2i-topology');
+  if (!section) return;
+  const query = section.querySelector('[data-mx-h2i-topology-query]');
+  if (query) {
+    let queryTimer = null;
+    query.addEventListener('input', () => {
+      state.mxH2iTopologyView.query = query.value || '';
+      state.mxH2iTopologyView.page = 1;
+      if (queryTimer !== null) clearTimeout(queryTimer);
+      queryTimer = setTimeout(() => {
+        refreshMxH2iTopologyExplorer(root, leases, product, {
+          selector: '[data-mx-h2i-topology-query]',
+          cursor: query.selectionStart
+        });
+      }, 160);
+    });
+  }
+  section.querySelector('[data-mx-h2i-topology-identity]')?.addEventListener('change', (event) => {
+    state.mxH2iTopologyView.identity = ['employee', 'feishu', 'anonymous'].includes(event.currentTarget.value)
+      ? event.currentTarget.value
+      : 'all';
+    state.mxH2iTopologyView.page = 1;
+    refreshMxH2iTopologyExplorer(root, leases, product, { selector: '[data-mx-h2i-topology-identity]' });
+  });
+  for (const pageButton of section.querySelectorAll('[data-mx-h2i-topology-page]')) {
+    pageButton.addEventListener('click', () => {
+      const direction = pageButton.dataset.mxH2iTopologyPage === 'next' ? 'next' : 'previous';
+      state.mxH2iTopologyView.page += direction === 'next' ? 1 : -1;
+      const viewport = mxH2iTopologyWindow(leases);
+      state.mxH2iTopologyView.page = viewport.page;
+      refreshMxH2iTopologyExplorer(root, leases, product, {
+        selector: mxH2iTopologyPageFocusSelector(direction, viewport)
+      });
+    });
+  }
+  for (const nodeButton of section.querySelectorAll('[data-mx-h2i-topology-node]')) {
+    nodeButton.addEventListener('click', () => {
+      renderMxH2iTopologySelection(root, leases, product, nodeButton.dataset.mxH2iTopologyNode);
+    });
+  }
+  bindMxH2iTopologySelectionActions(root, leases, product);
+  section.querySelector('[data-mx-h2i-topology-camera="reset"]')?.addEventListener('click', () => {
+    resetMxH2iTopologyCamera();
+  });
+  section.querySelector('[data-mx-h2i-topology-camera="fit"]')?.addEventListener('click', () => {
+    fitMxH2iTopologyCamera();
+  });
+  section.querySelector('[data-mx-h2i-topology-labels]')?.addEventListener('click', (event) => {
+    state.mxH2iTopologyView.labelsVisible = !state.mxH2iTopologyView.labelsVisible;
+    event.currentTarget.setAttribute('aria-pressed', state.mxH2iTopologyView.labelsVisible ? 'true' : 'false');
+    event.currentTarget.textContent = state.mxH2iTopologyView.labelsVisible ? 'Hide labels' : 'Show labels';
+    setMxH2iTopologyLabels(state.mxH2iTopology, state.mxH2iTopologyView.labelsVisible);
+  });
+  const canvas = section.querySelector('[data-mx-h2i-topology-canvas]');
   requestAnimationFrame(() => {
     if (canvas?.isConnected
-      && canvas === root.querySelector('[data-mx-h2i-topology-canvas]')
+      && canvas === section.querySelector('[data-mx-h2i-topology-canvas]')
       && state.activeView === 'app-center'
       && state.activeAppNode === MX_H2I_PRODUCT_ID
       && state.mxH2iSurface === 'dashboard') {
-      initMxH2iTopology(root, leases);
+      initMxH2iTopology(section, leases, {
+        product,
+        onSelect: (nodeId) => renderMxH2iTopologySelection(root, leases, product, nodeId),
+        onActivate: (nodeId, returnFocus) => activateMxH2iTopologyNode(root, leases, product, nodeId, returnFocus)
+      });
     }
   });
+  const selectedLease = mxH2iTopologyLeaseForNode(leases, state.mxH2iTopologyView.selectedNodeId);
+  if (selectedLease) void loadMxH2iTopologyActivity(section, selectedLease);
 }
 
 async function saveMxH2iAnonymousQuickPolicy(targetPolicy) {
@@ -12091,7 +12616,7 @@ function renderSelectedAppDetail() {
     : null;
   if (app.appId === MX_H2I_PRODUCT_ID && state.mxH2iSurface === 'dashboard') {
     appSelectedDetail.innerHTML = renderMxH2iDashboard(product, leases);
-    bindMxH2iDashboardControls(appSelectedDetail, leases);
+    bindMxH2iDashboardControls(appSelectedDetail, leases, product);
     renderMxH2iLeaseDrawer();
     return;
   }
@@ -18096,45 +18621,81 @@ function formatJson(value) {
 }
 
 function mxH2iTopologyGraph(leases) {
-  const clients = asArray(leases)
-    .slice()
-    .sort((left, right) => String(left?.leaseIp || left?.leaseId || '').localeCompare(String(right?.leaseIp || right?.leaseId || '')))
-    .slice(0, MX_H2I_TOPOLOGY_CLIENT_LIMIT);
-  const center = (clients.length - 1) / 2;
-  const nodes = clients.map((lease, index) => ({
-    id: `client:${lease.leaseId || lease.leaseIp || index}`,
-    kind: mxH2iLeaseIdentityGroup(lease),
-    label: String(lease.leaseIp || 'C').split('.').pop() || 'C',
-    name: mxH2iLeaseDevice(lease),
-    position: [-4.8, (center - index) * Math.min(1.05, 4.6 / Math.max(1, clients.length - 1)), (index % 2 ? -0.35 : 0.35)],
-    lease
-  }));
+  const viewport = mxH2iTopologyWindow(leases);
+  const groupPositions = {
+    employee: [-1.35, 2.15, 0],
+    feishu: [-1.35, 0, 0],
+    anonymous: [-1.35, -2.15, 0]
+  };
+  const nodes = [];
+  for (const group of ['employee', 'feishu', 'anonymous']) {
+    const count = viewport.matched.groups[group];
+    if (!count) continue;
+    nodes.push({
+      id: `group:${group}`,
+      kind: `${group}-group`,
+      group,
+      label: String(count),
+      name: mxH2iTopologyGroupLabel(group),
+      position: groupPositions[group],
+      aggregateCount: count,
+      machineCount: viewport.matched.groupMachines[group]
+    });
+  }
+  for (const group of ['employee', 'feishu', 'anonymous']) {
+    const clients = viewport.rows.filter((lease) => mxH2iTopologyLeaseGroup(lease) === group);
+    const columns = Math.min(8, Math.max(1, Math.ceil(Math.sqrt(clients.length * 1.6))));
+    const rows = Math.ceil(clients.length / columns);
+    clients.forEach((lease, index) => {
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      const leaseKey = mxH2iLeaseDrawerKey(lease);
+      nodes.push({
+        id: `client:${leaseKey || `${group}-${index}`}`,
+        kind: group,
+        group,
+        label: String(lease.leaseIp || 'C').split('.').pop() || 'C',
+        name: mxH2iLeaseDevice(lease),
+        position: [
+          -5.8 + column * 0.48,
+          groupPositions[group][1] + (row - (rows - 1) / 2) * 0.42,
+          (column % 2 ? -0.28 : 0.28)
+        ],
+        leaseKey,
+        lease
+      });
+    });
+  }
   nodes.push(
-    { id: 'domestic', kind: 'domestic', label: 'D', name: 'Domestic', position: [0, 0.5, 0] },
-    { id: 'internal', kind: 'internal', label: 'I', name: 'Internal', position: [4.5, -0.35, 0] }
+    { id: 'domestic', kind: 'domestic', label: 'D', name: 'Domestic', position: [2.15, 0.45, 0] },
+    { id: 'internal', kind: 'internal', label: 'I', name: 'Internal', position: [5.25, -0.25, 0] }
   );
   return {
     nodes,
     links: [
-      ...clients.map((lease, index) => ({
-        from: `client:${lease.leaseId || lease.leaseIp || index}`,
-        to: 'domestic',
-        kind: mxH2iLeaseIdentityGroup(lease)
+      ...nodes.filter((node) => node.lease).map((node) => ({
+        from: node.id,
+        to: `group:${node.group}`,
+        kind: node.group
       })),
+      ...['employee', 'feishu', 'anonymous']
+        .filter((group) => viewport.matched.groups[group] > 0)
+        .map((group) => ({ from: `group:${group}`, to: 'domestic', kind: group })),
       { from: 'domestic', to: 'internal', kind: 'internal' }
     ],
-    omitted: Math.max(0, asArray(leases).length - clients.length)
+    viewport
   };
 }
 
 function mxH2iTopologyColor(kind, theme = topologyTheme()) {
-  if (kind === 'employee') return theme.info;
-  if (kind === 'anonymous') return theme.archetype;
+  if (kind === 'employee' || kind === 'employee-group') return theme.info;
+  if (kind === 'feishu' || kind === 'feishu-group') return theme.warning;
+  if (kind === 'anonymous' || kind === 'anonymous-group') return theme.archetype;
   if (kind === 'domestic') return theme.success;
   return theme.primary;
 }
 
-function initMxH2iTopology(root, leases) {
+function initMxH2iTopology(root, leases, options = {}) {
   const canvas = root?.querySelector?.('[data-mx-h2i-topology-canvas]');
   const status = root?.querySelector?.('[data-mx-h2i-topology-status]');
   if (!canvas || !canvas.isConnected) return;
@@ -18164,12 +18725,17 @@ function initMxH2iTopology(root, leases) {
 
     const graph = mxH2iTopologyGraph(leases);
     const nodes = new Map();
+    const labels = [];
+    const raycastTargets = [];
     for (const spec of graph.nodes) {
       const color = mxH2iTopologyColor(spec.kind, theme);
+      const isClient = Boolean(spec.lease);
+      const isAggregate = Number.isFinite(spec.aggregateCount);
+      const radius = isClient ? 0.19 : isAggregate ? 0.38 : 0.48;
       const group = new THREE.Group();
       group.position.set(...spec.position);
       const sphere = new THREE.Mesh(
-        new THREE.SphereGeometry(spec.kind === 'employee' || spec.kind === 'anonymous' ? 0.28 : 0.46, 24, 16),
+        new THREE.SphereGeometry(radius, isClient ? 16 : 22, isClient ? 12 : 16),
         new THREE.MeshStandardMaterial({
           color,
           roughness: 0.3,
@@ -18179,23 +18745,32 @@ function initMxH2iTopology(root, leases) {
         })
       );
       const halo = new THREE.Mesh(
-        new THREE.SphereGeometry(spec.kind === 'employee' || spec.kind === 'anonymous' ? 0.46 : 0.76, 24, 16),
+        new THREE.SphereGeometry(radius * 1.62, isClient ? 16 : 22, isClient ? 12 : 16),
         new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.11, depthWrite: false })
       );
       const label = createTopologyLabel(spec.label, spec.name, theme);
-      label.position.set(0, spec.kind === 'employee' || spec.kind === 'anonymous' ? -0.62 : -0.92, 0);
-      label.scale.multiplyScalar(spec.kind === 'employee' || spec.kind === 'anonymous' ? 0.74 : 1);
+      label.position.set(0, isClient ? -0.46 : -0.84, 0);
+      label.scale.multiplyScalar(isClient ? 0.58 : 0.92);
+      label.visible = state.mxH2iTopologyView.labelsVisible;
       group.add(halo, sphere, label);
-      group.userData = { id: spec.id, kind: spec.kind, sphere, halo };
+      group.userData = { id: spec.id, kind: spec.kind, spec, sphere, halo, label, visualScale: 1 };
+      sphere.userData.topologyNodeId = spec.id;
       sceneRoot.add(group);
       nodes.set(spec.id, group);
+      labels.push(label);
+      raycastTargets.push(sphere);
     }
 
-    const links = graph.links.map((spec) => createTopologyLink(
-      nodes.get(spec.from),
-      nodes.get(spec.to),
-      mxH2iTopologyColor(spec.kind, theme)
-    ));
+    const links = graph.links.map((spec) => {
+      const link = createTopologyLink(
+        nodes.get(spec.from),
+        nodes.get(spec.to),
+        mxH2iTopologyColor(spec.kind, theme)
+      );
+      link.spec = spec;
+      for (const particle of link.particles) particle.visible = false;
+      return link;
+    });
     for (const link of links) sceneRoot.add(link.group);
 
     const reducedMotionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)') || null;
@@ -18207,8 +18782,26 @@ function initMxH2iTopology(root, leases) {
       canvas,
       status,
       nodes,
+      labels,
       links,
       graph,
+      raycastTargets,
+      raycaster: new THREE.Raycaster(),
+      pointer: new THREE.Vector2(),
+      tooltip: root.querySelector('[data-mx-h2i-topology-tooltip]'),
+      product: options.product || null,
+      onSelect: typeof options.onSelect === 'function' ? options.onSelect : null,
+      onActivate: typeof options.onActivate === 'function' ? options.onActivate : null,
+      selectedNodeId: null,
+      hoverNodeId: null,
+      controls: {
+        target: new THREE.Vector3(0, 0, 0),
+        radius: 13.8,
+        theta: 0,
+        phi: 1.3,
+        drag: null
+      },
+      eventCleanup: [],
       animationFrameId: null,
       resizeObserver: null,
       resizeFallback: null,
@@ -18221,12 +18814,13 @@ function initMxH2iTopology(root, leases) {
       lastHeight: 0
     };
     state.mxH2iTopology = instance;
-    instance.visibilityHandler = () => syncMxH2iTopologyAnimation(instance);
+    instance.visibilityHandler = () => {
+      if (!document.hidden) renderMxH2iTopologyFrame(instance, 0);
+    };
     instance.motionHandler = () => {
       instance.reducedMotion = instance.reducedMotionQuery?.matches === true;
-      if (instance.status) instance.status.textContent = instance.reducedMotion ? 'STATIC · REDUCED MOTION' : 'STATIC LEASE 3D';
-      syncMxH2iTopologyAnimation(instance);
-      if (instance.reducedMotion) renderMxH2iTopologyFrame(instance, 0);
+      if (instance.status) instance.status.textContent = instance.reducedMotion ? 'STATIC · REDUCED MOTION' : 'STATIC LEASE GRAPH';
+      renderMxH2iTopologyFrame(instance, 0);
     };
     document.addEventListener('visibilitychange', instance.visibilityHandler);
     instance.reducedMotionQuery?.addEventListener?.('change', instance.motionHandler);
@@ -18238,9 +18832,16 @@ function initMxH2iTopology(root, leases) {
       window.addEventListener('resize', instance.resizeFallback);
     }
     resizeMxH2iTopology(instance);
+    resetMxH2iTopologyCamera(instance);
+    fitMxH2iTopologyCamera(instance);
+    installMxH2iTopologyInteractions(instance);
+    setMxH2iTopologyLabels(instance, state.mxH2iTopologyView.labelsVisible);
+    setMxH2iTopologyNodeSelection(instance, state.mxH2iTopologyView.selectedNodeId);
     renderMxH2iTopologyFrame(instance, 0);
-    syncMxH2iTopologyAnimation(instance);
-    if (status) status.textContent = instance.reducedMotion ? 'STATIC · REDUCED MOTION' : 'STATIC LEASE 3D';
+    if (status) {
+      status.textContent = instance.reducedMotion ? 'STATIC · REDUCED MOTION' : 'STATIC LEASE GRAPH';
+      status.title = `${graph.viewport.rangeStart}-${graph.viewport.rangeEnd} of ${graph.viewport.filteredCount} matched static active lease records`;
+    }
   } catch {
     if (instance) {
       disposeMxH2iTopologyInstance(instance);
@@ -18257,51 +18858,290 @@ function initMxH2iTopology(root, leases) {
   }
 }
 
-function renderMxH2iTopologyFrame(instance, elapsed = 0) {
+function updateMxH2iTopologyCamera(instance = state.mxH2iTopology) {
   if (!instance || instance.disposed) return;
-  instance.root.rotation.y = instance.reducedMotion ? 0.02 : Math.sin(elapsed * 0.2) * 0.065;
-  for (const node of instance.nodes.values()) {
-    const pulse = instance.reducedMotion ? 1 : 1 + Math.sin(elapsed * 2.2 + node.position.x) * 0.025;
-    node.scale.setScalar(pulse);
-  }
-  for (const link of instance.links) {
-    for (const particle of link.particles) {
-      const t = instance.reducedMotion
-        ? particle.userData.offset
-        : (elapsed * 0.16 + particle.userData.offset) % 1;
-      particle.position.copy(link.curve.getPointAt(t));
-    }
-  }
-  instance.renderer.render(instance.scene, instance.camera);
+  const controls = instance.controls;
+  controls.radius = THREE.MathUtils.clamp(controls.radius, 4.5, 32);
+  controls.phi = THREE.MathUtils.clamp(controls.phi, 0.22, Math.PI - 0.22);
+  const sinPhi = Math.sin(controls.phi);
+  instance.camera.position.set(
+    controls.target.x + controls.radius * sinPhi * Math.sin(controls.theta),
+    controls.target.y + controls.radius * Math.cos(controls.phi),
+    controls.target.z + controls.radius * sinPhi * Math.cos(controls.theta)
+  );
+  instance.camera.lookAt(controls.target);
+  renderMxH2iTopologyFrame(instance, 0);
 }
 
-function mxH2iTopologyCanAnimate(instance) {
-  return Boolean(instance)
-    && !instance.disposed
-    && !instance.reducedMotion
-    && !document.hidden
-    && state.activeView === 'app-center'
-    && state.activeAppNode === MX_H2I_PRODUCT_ID
-    && state.mxH2iSurface === 'dashboard'
-    && instance.canvas.isConnected;
+function resetMxH2iTopologyCamera(instance = state.mxH2iTopology) {
+  if (!instance || instance.disposed) return;
+  instance.controls.target.set(0, 0, 0);
+  instance.controls.radius = 13.8;
+  instance.controls.theta = 0;
+  instance.controls.phi = 1.3;
+  updateMxH2iTopologyCamera(instance);
 }
 
-function syncMxH2iTopologyAnimation(instance = state.mxH2iTopology) {
+function fitMxH2iTopologyCamera(instance = state.mxH2iTopology) {
   if (!instance || instance.disposed) return;
-  if (!mxH2iTopologyCanAnimate(instance)) {
-    if (instance.animationFrameId !== null) {
-      cancelAnimationFrame(instance.animationFrameId);
-      instance.animationFrameId = null;
-    }
+  const bounds = new THREE.Box3().setFromObject(instance.root);
+  if (bounds.isEmpty()) {
+    resetMxH2iTopologyCamera(instance);
     return;
   }
-  if (instance.animationFrameId !== null) return;
-  instance.animationFrameId = requestAnimationFrame((timestamp) => {
-    instance.animationFrameId = null;
-    if (!mxH2iTopologyCanAnimate(instance)) return;
-    renderMxH2iTopologyFrame(instance, timestamp / 1000);
-    syncMxH2iTopologyAnimation(instance);
+  const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+  const verticalFov = THREE.MathUtils.degToRad(instance.camera.fov);
+  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * Math.max(instance.camera.aspect, 0.1));
+  const limitingFov = Math.min(verticalFov, horizontalFov);
+  instance.controls.target.copy(sphere.center);
+  instance.controls.radius = THREE.MathUtils.clamp((sphere.radius / Math.sin(limitingFov / 2)) * 1.12, 7.5, 28);
+  instance.controls.theta = 0;
+  instance.controls.phi = 1.3;
+  updateMxH2iTopologyCamera(instance);
+}
+
+function setMxH2iTopologyLabels(instance = state.mxH2iTopology, visible = true) {
+  if (!instance || instance.disposed) return;
+  for (const label of instance.labels || []) label.visible = visible;
+  renderMxH2iTopologyFrame(instance, 0);
+}
+
+function applyMxH2iTopologyHighlight(instance = state.mxH2iTopology) {
+  if (!instance || instance.disposed) return;
+  const selected = instance.nodes.get(instance.selectedNodeId) || null;
+  const selectedGroupId = selected?.userData?.spec?.group ? `group:${selected.userData.spec.group}` : null;
+  const pathNodes = new Set(selected ? [selected.userData.id, selectedGroupId, 'domestic', 'internal'] : []);
+  for (const node of instance.nodes.values()) {
+    const selectedNode = node.userData.id === instance.selectedNodeId;
+    const hoveredNode = node.userData.id === instance.hoverNodeId;
+    const onPath = pathNodes.has(node.userData.id);
+    node.userData.visualScale = selectedNode ? 1.34 : hoveredNode ? 1.18 : onPath ? 1.08 : 1;
+    node.userData.sphere.material.emissiveIntensity = selectedNode ? 0.72 : hoveredNode ? 0.48 : onPath ? 0.32 : 0.18;
+    node.userData.halo.material.opacity = selectedNode ? 0.34 : hoveredNode ? 0.24 : onPath ? 0.18 : selected ? 0.055 : 0.11;
+  }
+  for (const link of instance.links) {
+    const onSelectedPath = !selected
+      || link.spec.from === instance.selectedNodeId
+      || (link.spec.from === selectedGroupId && link.spec.to === 'domestic')
+      || (link.spec.from === 'domestic' && link.spec.to === 'internal');
+    link.line.material.opacity = selected ? (onSelectedPath ? 0.94 : 0.08) : 0.4;
+  }
+  renderMxH2iTopologyFrame(instance, 0);
+}
+
+function setMxH2iTopologyNodeSelection(instance = state.mxH2iTopology, nodeId = null) {
+  if (!instance || instance.disposed) return;
+  const normalized = String(nodeId || '').trim();
+  instance.selectedNodeId = instance.nodes.has(normalized) ? normalized : null;
+  applyMxH2iTopologyHighlight(instance);
+}
+
+function mxH2iTopologyNodeAtPointer(instance, event) {
+  if (!instance || instance.disposed) return null;
+  const rect = instance.canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  instance.pointer.set(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  instance.raycaster.setFromCamera(instance.pointer, instance.camera);
+  const intersection = instance.raycaster.intersectObjects(instance.raycastTargets, false)[0];
+  const nodeId = intersection?.object?.userData?.topologyNodeId;
+  return nodeId ? instance.nodes.get(nodeId) || null : null;
+}
+
+function updateMxH2iTopologyTooltip(instance, node, event = null) {
+  const tooltip = instance?.tooltip;
+  if (!tooltip) return;
+  const spec = node?.userData?.spec || null;
+  const lease = node?.userData?.spec?.lease || null;
+  if (!spec || !event) {
+    tooltip.hidden = true;
+    tooltip.innerHTML = '';
+    return;
+  }
+  if (lease) {
+    tooltip.innerHTML = `
+      <strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong>
+      <span>${escapeHtml(mxH2iTopologyGroupLabel(mxH2iTopologyLeaseGroup(lease)))}</span>
+      <small>${escapeHtml(lease.leaseIp || 'assigned IP not recorded')} · source ${escapeHtml(mxH2iLeaseSourceIp(lease))}</small>
+      <small>${escapeHtml(mxH2iLeaseDevice(lease))} · ${escapeHtml(mxH2iLeasePlatform(lease))}</small>
+      <small>Online/location/logs: not observed or not collected</small>
+    `;
+  } else if (Number.isFinite(spec.aggregateCount)) {
+    tooltip.innerHTML = `
+      <strong>${escapeHtml(spec.name)}</strong>
+      <span>Identity aggregate · ${escapeHtml(String(spec.aggregateCount))} matched lease records</span>
+      <small>${escapeHtml(String(spec.machineCount || 0))} matched device identities (best effort)</small>
+      <small>Online/location/logs: not collected for this aggregate</small>
+    `;
+  } else {
+    const domestic = spec.id === 'domestic';
+    const address = domestic
+      ? instance.product?.domesticGatewayIp || MX_DOMESTIC_RELAY_IP
+      : instance.product?.internalControlIp || MX_INTERNAL_DNS_IP;
+    tooltip.innerHTML = `
+      <strong>${escapeHtml(spec.name)}</strong>
+      <span>${domestic ? 'Relay path' : 'Control / service plane'} · ${escapeHtml(address)}</span>
+      <small>Configured topology role; runtime reachability is not collected</small>
+      <small>Traffic/location/logs: not collected</small>
+    `;
+  }
+  const stageRect = instance.canvas.parentElement?.getBoundingClientRect() || instance.canvas.getBoundingClientRect();
+  tooltip.style.left = `${Math.max(10, Math.min(event.clientX - stageRect.left + 14, stageRect.width - 260))}px`;
+  tooltip.style.top = `${Math.max(10, Math.min(event.clientY - stageRect.top + 14, stageRect.height - 132))}px`;
+  tooltip.hidden = false;
+}
+
+function setMxH2iTopologyHover(instance, node, event = null) {
+  if (!instance || instance.disposed) return;
+  const nextNodeId = node?.userData?.id || null;
+  if (instance.hoverNodeId !== nextNodeId) {
+    instance.hoverNodeId = nextNodeId;
+    instance.canvas.style.cursor = nextNodeId ? 'pointer' : 'grab';
+    applyMxH2iTopologyHighlight(instance);
+  }
+  updateMxH2iTopologyTooltip(instance, node, event);
+}
+
+function panMxH2iTopologyCamera(instance, deltaX, deltaY) {
+  const direction = new THREE.Vector3();
+  instance.camera.getWorldDirection(direction);
+  const right = new THREE.Vector3().crossVectors(direction, instance.camera.up).normalize();
+  const up = new THREE.Vector3().crossVectors(right, direction).normalize();
+  const scale = instance.controls.radius * 0.0018;
+  instance.controls.target.addScaledVector(right, -deltaX * scale);
+  instance.controls.target.addScaledVector(up, deltaY * scale);
+  updateMxH2iTopologyCamera(instance);
+}
+
+function listenMxH2iTopology(instance, target, type, handler, options) {
+  target.addEventListener(type, handler, options);
+  instance.eventCleanup.push(() => target.removeEventListener(type, handler, options));
+}
+
+function mxH2iTopologyDragExceededThreshold(drag, clientX, clientY) {
+  return Math.hypot(clientX - drag.startX, clientY - drag.startY) > 2;
+}
+
+function installMxH2iTopologyInteractions(instance) {
+  const canvas = instance.canvas;
+  const controls = instance.controls;
+  const pointerDown = (event) => {
+    if (![0, 1, 2].includes(event.button)) return;
+    controls.drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      x: event.clientX,
+      y: event.clientY,
+      moved: false,
+      mode: event.shiftKey || event.button === 1 || event.button === 2 ? 'pan' : 'rotate'
+    };
+    canvas.setPointerCapture?.(event.pointerId);
+    canvas.style.cursor = controls.drag.mode === 'pan' ? 'move' : 'grabbing';
+    updateMxH2iTopologyTooltip(instance, null);
+  };
+  const pointerMove = (event) => {
+    const drag = controls.drag;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      setMxH2iTopologyHover(instance, mxH2iTopologyNodeAtPointer(instance, event), event);
+      return;
+    }
+    const deltaX = event.clientX - drag.x;
+    const deltaY = event.clientY - drag.y;
+    if (mxH2iTopologyDragExceededThreshold(drag, event.clientX, event.clientY)) drag.moved = true;
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    if (drag.mode === 'pan') {
+      panMxH2iTopologyCamera(instance, deltaX, deltaY);
+    } else {
+      controls.theta -= deltaX * 0.008;
+      controls.phi += deltaY * 0.008;
+      updateMxH2iTopologyCamera(instance);
+    }
+  };
+  const pointerUp = (event, allowSelection = true) => {
+    const drag = controls.drag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (allowSelection && !drag.moved && event.button === 0) {
+      const node = mxH2iTopologyNodeAtPointer(instance, event);
+      const nodeId = node?.userData?.id || null;
+      if (nodeId) instance.onSelect?.(nodeId);
+    }
+    canvas.releasePointerCapture?.(event.pointerId);
+    controls.drag = null;
+    canvas.style.cursor = instance.hoverNodeId ? 'pointer' : 'grab';
+  };
+  const wheel = (event) => {
+    event.preventDefault();
+    controls.radius *= Math.exp(event.deltaY * 0.0012);
+    updateMxH2iTopologyCamera(instance);
+  };
+  const keydown = (event) => {
+    const step = event.shiftKey ? 0.34 : 0.12;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      if (event.shiftKey) panMxH2iTopologyCamera(instance, event.key === 'ArrowLeft' ? 28 : -28, 0);
+      else {
+        controls.theta += event.key === 'ArrowLeft' ? step : -step;
+        updateMxH2iTopologyCamera(instance);
+      }
+    } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      if (event.shiftKey) panMxH2iTopologyCamera(instance, 0, event.key === 'ArrowUp' ? 28 : -28);
+      else {
+        controls.phi += event.key === 'ArrowUp' ? -step : step;
+        updateMxH2iTopologyCamera(instance);
+      }
+    } else if (event.key === '+' || event.key === '=') {
+      event.preventDefault();
+      controls.radius *= 0.86;
+      updateMxH2iTopologyCamera(instance);
+    } else if (event.key === '-' || event.key === '_') {
+      event.preventDefault();
+      controls.radius *= 1.16;
+      updateMxH2iTopologyCamera(instance);
+    } else if (event.key.toLowerCase() === 'r') {
+      event.preventDefault();
+      resetMxH2iTopologyCamera(instance);
+    } else if (event.key.toLowerCase() === 'f') {
+      event.preventDefault();
+      fitMxH2iTopologyCamera(instance);
+    } else if (event.key === 'Enter') {
+      const selected = instance.nodes.get(instance.selectedNodeId);
+      const nodeId = selected?.userData?.id;
+      if (nodeId) {
+        event.preventDefault();
+        instance.onActivate?.(nodeId, canvas);
+      }
+    }
+  };
+  listenMxH2iTopology(instance, canvas, 'pointerdown', pointerDown);
+  listenMxH2iTopology(instance, canvas, 'pointermove', pointerMove);
+  listenMxH2iTopology(instance, canvas, 'pointerup', pointerUp);
+  listenMxH2iTopology(instance, canvas, 'pointercancel', (event) => pointerUp(event, false));
+  listenMxH2iTopology(instance, canvas, 'pointerleave', () => {
+    if (!controls.drag) setMxH2iTopologyHover(instance, null);
   });
+  listenMxH2iTopology(instance, canvas, 'wheel', wheel, { passive: false });
+  listenMxH2iTopology(instance, canvas, 'keydown', keydown);
+  listenMxH2iTopology(instance, canvas, 'contextmenu', (event) => event.preventDefault());
+  listenMxH2iTopology(instance, canvas, 'dblclick', (event) => {
+    const node = mxH2iTopologyNodeAtPointer(instance, event);
+    const nodeId = node?.userData?.id;
+    if (nodeId) instance.onActivate?.(nodeId, canvas);
+  });
+  canvas.style.cursor = 'grab';
+}
+
+function renderMxH2iTopologyFrame(instance, elapsed = 0) {
+  if (!instance || instance.disposed) return;
+  instance.root.rotation.y = 0;
+  for (const node of instance.nodes.values()) {
+    node.scale.setScalar(node.userData.visualScale || 1);
+  }
+  instance.renderer.render(instance.scene, instance.camera);
 }
 
 function resizeMxH2iTopology(instance = state.mxH2iTopology) {
@@ -18325,6 +19165,8 @@ function disposeMxH2iTopologyInstance(instance) {
   instance.disposed = true;
   if (instance.animationFrameId !== null) cancelAnimationFrame(instance.animationFrameId);
   instance.animationFrameId = null;
+  for (const cleanup of instance.eventCleanup || []) cleanup();
+  instance.eventCleanup = [];
   instance.resizeObserver?.disconnect?.();
   if (instance.resizeFallback) window.removeEventListener('resize', instance.resizeFallback);
   if (instance.visibilityHandler) document.removeEventListener('visibilitychange', instance.visibilityHandler);

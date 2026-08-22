@@ -1829,6 +1829,11 @@ export interface ConfigPolicySnapshot {
 }
 
 export interface AuditEventInput {
+  /**
+   * Trust boundary marker. Internal call paths omit this and are recorded as server-origin;
+   * transport controllers must set it explicitly instead of accepting a request-body value.
+   */
+  provenance?: 'server' | 'client';
   eventType?: string;
   actorKind?: string;
   userId?: string | null;
@@ -1849,6 +1854,12 @@ export interface AuditEvent extends Required<Omit<AuditEventInput, 'metadata'>> 
   environment: string;
   metadata: Record<string, unknown> | null;
   createdAt: string;
+}
+
+export interface AuditEventListFilter {
+  /** Exact metadata.leaseId match; callers must not substitute identity or IP heuristics. */
+  metadataLeaseId: string;
+  limit?: number | null;
 }
 
 export interface LogEntryInput {

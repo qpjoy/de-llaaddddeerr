@@ -7,7 +7,7 @@ const stylesSource = readFileSync(fileURLToPath(new URL('../styles.css', import.
 const indexSource = readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
 const packageSource = readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8');
 
-assert.match(rendererSource, /const MX_H2I_TOPOLOGY_CLIENT_LIMIT = 8;/);
+assert.match(rendererSource, /const MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE = 48;/);
 assert.match(rendererSource, /const MX_H2I_LEASE_PAGE_SIZE = 100;/);
 assert.match(rendererSource, /const LAUNCHER_NETWORK_LEASE_TTL_MS = 180 \* 24 \* 60 \* 60 \* 1000;/);
 
@@ -125,32 +125,75 @@ const tailSearchPage = leasePaginator(leaseInventory, { query: '203.0.113.250', 
 assert.equal(tailSearchPage.filteredCount, 1, 'search reaches records beyond the first rendered page');
 assert.equal(tailSearchPage.rows[0].leaseId, 'lease-249');
 
-const topologyGraph = Function(
-  'MX_H2I_TOPOLOGY_CLIENT_LIMIT',
+const topologyRuntime = Function(
+  'MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE',
+  'state',
   `function asArray(value) { return Array.isArray(value) ? value : []; }
 ${functionSource(rendererSource, 'mxH2iLeaseIdentityGroup')}
+${functionSource(rendererSource, 'mxH2iLeaseIdentityLabel')}
+${functionSource(rendererSource, 'mxH2iLeaseSubject')}
+${functionSource(rendererSource, 'mxH2iLeaseSourceIp')}
 ${functionSource(rendererSource, 'mxH2iLeaseDevice')}
+${functionSource(rendererSource, 'mxH2iLeasePlatform')}
+${functionSource(rendererSource, 'mxH2iLeaseSearchText')}
+${functionSource(rendererSource, 'mxH2iLeaseDrawerKey')}
+${functionSource(rendererSource, 'mxH2iTopologyLeaseGroup')}
+${functionSource(rendererSource, 'mxH2iTopologyGroupLabel')}
+${functionSource(rendererSource, 'mxH2iTopologyMachineKey')}
+${functionSource(rendererSource, 'mxH2iTopologyInventorySummary')}
+${functionSource(rendererSource, 'mxH2iTopologyWindow')}
 ${functionSource(rendererSource, 'mxH2iTopologyGraph')}
-return mxH2iTopologyGraph;`
-)(8);
-const graph = topologyGraph(Array.from({ length: 20 }, (_, index) => ({
+return { mxH2iTopologyGraph, mxH2iTopologyWindow };`
+)(48, {
+  mxH2iTopologyView: { query: '', identity: 'all', page: 1 }
+});
+const topologyInventory = Array.from({ length: 120 }, (_, index) => ({
   leaseId: `lease-${index}`,
   leaseIp: `10.89.0.${index + 1}`,
-  identityKind: index % 2 ? 'anonymous' : 'user',
-  deviceId: `device-${index}`
-})));
-assert.equal(graph.nodes.filter((node) => node.id.startsWith('client:')).length, 8, '3D client nodes are capped');
-assert.equal(graph.nodes.length, 10, 'the capped client nodes plus Domestic and Internal are the complete graph');
-assert.equal(graph.omitted, 12);
+  identityKind: index % 3 === 2 ? 'anonymous' : 'user',
+  leaseProfile: index % 3 === 1 ? 'feishu' : index % 3 === 2 ? 'anonymous' : 'employee',
+  userId: `employee-${index}`,
+  sourceIp: `203.0.113.${index + 1}`,
+  deviceId: `device-${index}`,
+  platform: index % 2 ? 'darwin' : 'win32'
+}));
+const graph = topologyRuntime.mxH2iTopologyGraph(topologyInventory);
+assert.equal(graph.nodes.filter((node) => node.id.startsWith('client:')).length, 48, '3D renders only one bounded lease window');
+assert.equal(graph.nodes.filter((node) => node.id.startsWith('group:')).length, 3, 'all identity groups remain explicit aggregate nodes');
+assert.equal(graph.viewport.filteredCount, 120);
+assert.equal(graph.viewport.totalPages, 3);
+assert.equal(graph.viewport.rangeStart, 1);
+assert.equal(graph.viewport.rangeEnd, 48);
+assert.equal(graph.viewport.all.machineCount, 120);
+assert.equal(graph.viewport.all.groups.employee, 40);
+assert.equal(graph.viewport.all.groups.feishu, 40);
+assert.equal(graph.viewport.all.groups.anonymous, 40);
+assert.equal(graph.viewport.all.groupMachines.employee, 40);
+assert.equal(graph.viewport.all.groupMachines.feishu, 40);
+assert.equal(graph.viewport.all.groupMachines.anonymous, 40);
+assert.equal('omitted' in graph, false, 'the old ambiguous omitted/+N model is removed');
 assert.ok(graph.links.some((link) => link.from === 'domestic' && link.to === 'internal'));
-assert.ok(graph.links.filter((link) => link.from.startsWith('client:')).every((link) => link.to === 'domestic'));
+assert.ok(graph.links.filter((link) => link.from.startsWith('client:')).every((link) => link.to.startsWith('group:')));
+const tailTopologyWindow = topologyRuntime.mxH2iTopologyWindow(topologyInventory, {
+  query: '203.0.113.120',
+  identity: 'all',
+  page: 1
+});
+assert.equal(tailTopologyWindow.filteredCount, 1, 'topology search covers leases outside the first 3D window');
+assert.equal(tailTopologyWindow.rows[0].leaseId, 'lease-119');
+const feishuTopologyWindow = topologyRuntime.mxH2iTopologyWindow(topologyInventory, {
+  query: '',
+  identity: 'feishu',
+  page: 1
+});
+assert.equal(feishuTopologyWindow.filteredCount, 40, 'Feishu has its own complete topology filter group');
 assert.doesNotMatch(JSON.stringify(graph), /oversea/i);
 
 const operationsSource = functionSource(rendererSource, 'renderMxH2iOperationsScreen');
 assert.match(operationsSource, /Static lease ≠ real-time online/);
 assert.match(operationsSource, /sourceIp is the most recent enrollment or renewal HTTP source IP, not a WireGuard endpoint/);
 assert.match(operationsSource, /Last seen \/ record/);
-assert.match(operationsSource, /renderMxH2iTopologyFallback\(activeLeases, product\)/);
+assert.match(operationsSource, /renderMxH2iTopologyExplorer\(activeLeases, product, \{ leaseDataAvailable \}\)/);
 assert.match(operationsSource, /data-mx-h2i-lease-query/);
 assert.match(operationsSource, /data-mx-h2i-lease-identity/);
 assert.match(operationsSource, /mxH2iLeasePage\(activeLeases, state\.mxH2iLeaseFilter\)/);
@@ -158,10 +201,61 @@ assert.match(operationsSource, /leasePage\.rows\.map/);
 assert.match(operationsSource, /data-mx-h2i-lease-page="previous"/);
 assert.match(operationsSource, /data-mx-h2i-lease-page="next"/);
 assert.match(operationsSource, /renderMxH2iBlockedUsersPanel\(\)/);
-assert.match(operationsSource, /Lease inventory is unavailable, so no topology is inferred or rendered/);
 assert.match(operationsSource, /DATA UNAVAILABLE/);
 assert.match(operationsSource, /renderStandaloneAnonymousPolicy\(product/);
 assert.doesNotMatch(operationsSource, /online clients|online leases/i);
+
+const topologyExplorerSource = functionSource(rendererSource, 'renderMxH2iTopologyExplorer');
+assert.match(topologyExplorerSource, /Lease inventory is unavailable, so no topology is inferred or rendered/);
+assert.match(topologyExplorerSource, /DATA UNAVAILABLE/);
+assert.match(topologyExplorerSource, /Client lease records → identity groups → Domestic → Internal/);
+assert.match(topologyExplorerSource, /Each 3D client node is one static lease record, not one physical machine/);
+assert.match(topologyExplorerSource, /<span>LEASES<\/span>/);
+assert.doesNotMatch(topologyExplorerSource, /Device identities →|<span>DEVICES<\/span>/);
+assert.match(topologyExplorerSource, /device identities \(best effort\)/);
+assert.match(topologyExplorerSource, /Search, filter, and page cover all active lease records/);
+assert.match(topologyExplorerSource, /data-mx-h2i-topology-query/);
+assert.match(topologyExplorerSource, /data-mx-h2i-topology-identity/);
+assert.match(topologyExplorerSource, /data-mx-h2i-topology-camera="reset"/);
+assert.match(topologyExplorerSource, /data-mx-h2i-topology-camera="fit"/);
+assert.match(topologyExplorerSource, /data-mx-h2i-topology-labels/);
+assert.match(topologyExplorerSource, /data-mx-h2i-topology-node="group:employee"/);
+assert.match(topologyExplorerSource, /data-mx-h2i-topology-node="group:feishu"/);
+assert.match(topologyExplorerSource, /data-mx-h2i-topology-node="group:anonymous"/);
+assert.match(topologyExplorerSource, /tabindex="0"/);
+assert.doesNotMatch(topologyExplorerSource, /\+[^\n]*more/i);
+
+const topologySelectionSource = functionSource(rendererSource, 'renderMxH2iTopologySelectedLease');
+assert.match(topologySelectionSource, /Identity|mxH2iTopologyGroupLabel/);
+assert.match(topologySelectionSource, /Assigned IP/);
+assert.match(topologySelectionSource, /Source IP/);
+assert.match(topologySelectionSource, /Device/);
+assert.match(topologySelectionSource, /Platform/);
+assert.match(topologySelectionSource, /Record updated/);
+assert.match(topologySelectionSource, /Expires/);
+assert.match(topologySelectionSource, /Online \/ handshake/);
+assert.match(topologySelectionSource, /Location \/ logs/);
+assert.match(topologySelectionSource, /not collected/);
+assert.match(topologySelectionSource, /Open connection drawer/);
+assert.match(topologySelectionSource, /renderMxH2iTopologyActivity\(lease\)/);
+
+const topologySelectedNodeSource = functionSource(rendererSource, 'renderMxH2iTopologySelectedNode');
+assert.match(topologySelectedNodeSource, /Identity aggregate/);
+assert.match(topologySelectedNodeSource, /Filter to this group/);
+assert.match(topologySelectedNodeSource, /Aggregate, not a live network node/);
+assert.match(topologySelectedNodeSource, /Open Domestic setup/);
+assert.match(topologySelectedNodeSource, /Open product settings/);
+assert.match(topologySelectedNodeSource, /Runtime state not collected/);
+
+const topologyActivityRenderSource = functionSource(rendererSource, 'renderMxH2iTopologyActivity');
+assert.match(topologyActivityRenderSource, /Recent control-plane audit activity/);
+assert.match(topologyActivityRenderSource, /not runtime logs, traffic, handshake telemetry, or proof of online state/);
+assert.match(topologyActivityRenderSource, /Loading recent control-plane activity/);
+assert.match(topologyActivityRenderSource, /No audit event was found for this exact lease ID/);
+assert.match(topologyActivityRenderSource, /Activity unavailable/);
+assert.match(topologyActivityRenderSource, /escapeHtml\(item\.eventType/);
+assert.match(topologyActivityRenderSource, /escapeHtml\(item\.summary/);
+assert.doesNotMatch(topologyActivityRenderSource, /item\.eventId|item\.requestId|metadata/);
 
 const policyCardSource = functionSource(rendererSource, 'renderStandaloneAnonymousPolicy');
 assert.match(policyCardSource, /data-standalone-anonymous-policy-product/);
@@ -195,7 +289,7 @@ const replaceIndex = selectedDetailSource.indexOf('appSelectedDetail.innerHTML =
 assert.ok(disposeIndex >= 0 && disposeIndex < replaceIndex, 'old dynamic Three resources are disposed before innerHTML replacement');
 assert.match(selectedDetailSource, /state\.mxH2iSurface === 'dashboard'/);
 assert.match(selectedDetailSource, /appSelectedDetail\.innerHTML = renderMxH2iDashboard\(product, leases\)/);
-assert.match(selectedDetailSource, /bindMxH2iDashboardControls\(appSelectedDetail, leases\)/);
+assert.match(selectedDetailSource, /bindMxH2iDashboardControls\(appSelectedDetail, leases, product\)/);
 assert.match(selectedDetailSource, /app\.appId === MX_H2I_PRODUCT_ID[\s\S]*launcherLeaseIsActiveClientRecord\(lease\)/);
 assert.match(selectedDetailSource, /mode === 'standalone' && app\.appId !== MX_H2I_PRODUCT_ID[\s\S]*renderStandaloneAnonymousPolicy\(product\)/);
 assert.match(selectedDetailSource, /if \(mode === 'standalone'\) bindStandaloneAnonymousPolicyControls/);
@@ -210,9 +304,12 @@ assert.match(dashboardSource, /productDataAvailable/);
 assert.match(dashboardSource, /leaseDataAvailable/);
 assert.match(dashboardSource, /Anonymous policy unavailable/);
 const dashboardBindingSource = functionSource(rendererSource, 'bindMxH2iDashboardControls');
-const canvasIndex = dashboardBindingSource.indexOf("root.querySelector('[data-mx-h2i-topology-canvas]')");
-const initIndex = dashboardBindingSource.indexOf('initMxH2iTopology(root, leases)');
+assert.match(dashboardBindingSource, /bindMxH2iTopologyControls\(root, leases, product\)/);
+const topologyBindingSource = functionSource(rendererSource, 'bindMxH2iTopologyControls');
+const canvasIndex = topologyBindingSource.indexOf("section.querySelector('[data-mx-h2i-topology-canvas]')");
+const initIndex = topologyBindingSource.indexOf('initMxH2iTopology(section, leases, {');
 assert.ok(canvasIndex >= 0 && initIndex > canvasIndex, 'the dedicated dashboard initializes Three only after resolving its canvas');
+assert.match(topologyBindingSource, /mxH2iTopologyPageFocusSelector\(direction, viewport\)/);
 
 const blockedPanelSource = functionSource(rendererSource, 'renderMxH2iBlockedUsersPanel');
 assert.match(blockedPanelSource, /data-mx-h2i-blocked-user-open/);
@@ -301,6 +398,65 @@ assert.match(quickPolicySource, /Luopan, employee login, existing leases, and Wi
 const opsProtectionSource = functionSource(rendererSource, 'isOpsProtectedInternalRequest');
 assert.match(opsProtectionSource, /products\\\/\[\^\/\]\+\\\/user-access/);
 assert.match(opsProtectionSource, /products\\\/\[\^\/\]\+\\\/users\\\/\[\^\/\]\+\\\/access/);
+assert.match(opsProtectionSource, /leases\\\/\[\^\/\]\+\\\/activity/);
+
+const topologyActivityLoadSource = functionSource(rendererSource, 'loadMxH2iTopologyActivity');
+assert.match(topologyActivityLoadSource, /launcher-network\/leases\/\$\{encodeURIComponent\(leaseId\)\}\/activity/);
+assert.match(topologyActivityLoadSource, /requestSequence/);
+assert.match(topologyActivityLoadSource, /section\.isConnected/);
+assert.match(topologyActivityLoadSource, /state\.mxH2iTopologyView\.selectedLeaseKey/);
+assert.match(topologyActivityLoadSource, /mxH2iTopologyActivityItems\(payload, leaseId\)/);
+const topologyActivityItems = Function(
+  `function asArray(value) { return Array.isArray(value) ? value : []; }
+${functionSource(rendererSource, 'mxH2iTopologyActivityItems')}
+return mxH2iTopologyActivityItems;`
+)();
+assert.throws(
+  () => topologyActivityItems({ source: 'audit-events', activity: [] }, 'lease-selected'),
+  /did not match the selected lease/,
+  'an activity response without a lease ID fails closed'
+);
+assert.throws(
+  () => topologyActivityItems({ leaseId: 'lease-other', source: 'audit-events', activity: [] }, 'lease-selected'),
+  /did not match the selected lease/,
+  'activity from another lease is rejected'
+);
+assert.throws(
+  () => topologyActivityItems({ leaseId: 'lease-selected', source: 'other', activity: [] }, 'lease-selected'),
+  /did not identify the audit-event source/
+);
+assert.equal(
+  topologyActivityItems({
+    leaseId: 'lease-selected',
+    source: 'audit-events',
+    activity: Array.from({ length: 60 }, (_, index) => ({ eventId: index }))
+  }, 'lease-selected').length,
+  50,
+  'validated activity remains bounded'
+);
+
+const topologyPageFocusSelector = Function(
+  `${functionSource(rendererSource, 'mxH2iTopologyPageFocusSelector')}
+return mxH2iTopologyPageFocusSelector;`
+)();
+assert.equal(
+  topologyPageFocusSelector('next', { page: 2, totalPages: 2 }),
+  '[data-mx-h2i-topology-page-label]',
+  'the last-page transition focuses the programmatic page label instead of a disabled Next button'
+);
+assert.equal(
+  topologyPageFocusSelector('previous', { page: 1, totalPages: 2 }),
+  '[data-mx-h2i-topology-page-label]',
+  'the first-page transition focuses the programmatic page label instead of a disabled Previous button'
+);
+assert.equal(
+  topologyPageFocusSelector('next', { page: 2, totalPages: 3 }),
+  '[data-mx-h2i-topology-page="next"]'
+);
+assert.match(
+  functionSource(rendererSource, 'renderMxH2iTopologyFallback'),
+  /data-mx-h2i-topology-page-label tabindex="-1"/
+);
 
 const savePolicySource = functionSource(rendererSource, 'saveStandaloneAnonymousPolicy');
 assert.match(savePolicySource, /\/internal\/v1\/launcher-network\/products\/\$\{encodeURIComponent\(normalizedProductId\)\}/);
@@ -313,17 +469,67 @@ const initTopologySource = functionSource(rendererSource, 'initMxH2iTopology');
 assert.match(initTopologySource, /prefers-reduced-motion: reduce/);
 assert.match(initTopologySource, /ResizeObserver/);
 assert.match(initTopologySource, /TABLE FALLBACK/);
+assert.match(initTopologySource, /new THREE\.Raycaster\(\)/);
+assert.match(initTopologySource, /raycastTargets/);
+assert.match(initTopologySource, /installMxH2iTopologyInteractions\(instance\)/);
+assert.match(initTopologySource, /setMxH2iTopologyNodeSelection\(instance, state\.mxH2iTopologyView\.selectedNodeId\)/);
+assert.match(initTopologySource, /raycastTargets\.push\(sphere\)/);
+assert.doesNotMatch(initTopologySource, /if \(isClient\) raycastTargets\.push/);
+assert.match(initTopologySource, /STATIC LEASE GRAPH/);
 assert.doesNotMatch(initTopologySource, /preserveDrawingBuffer/);
+assert.doesNotMatch(initTopologySource, /syncMxH2iTopologyAnimation/);
 
-const animationGuardSource = functionSource(rendererSource, 'mxH2iTopologyCanAnimate');
-assert.match(animationGuardSource, /!document\.hidden/);
-assert.match(animationGuardSource, /state\.activeView === 'app-center'/);
-assert.match(animationGuardSource, /state\.activeAppNode === MX_H2I_PRODUCT_ID/);
-assert.match(animationGuardSource, /state\.mxH2iSurface === 'dashboard'/);
-assert.match(animationGuardSource, /instance\.canvas\.isConnected/);
+const topologyInteractionSource = functionSource(rendererSource, 'installMxH2iTopologyInteractions');
+assert.match(topologyInteractionSource, /pointerdown/);
+assert.match(topologyInteractionSource, /pointermove/);
+assert.match(topologyInteractionSource, /wheel/);
+assert.match(topologyInteractionSource, /keydown/);
+assert.match(topologyInteractionSource, /setPointerCapture/);
+assert.match(topologyInteractionSource, /instance\.onSelect/);
+assert.match(topologyInteractionSource, /instance\.onActivate/);
+assert.match(topologyInteractionSource, /node\?\.userData\?\.id/);
+assert.match(topologyInteractionSource, /event\.shiftKey/);
+assert.match(topologyInteractionSource, /resetMxH2iTopologyCamera/);
+assert.match(topologyInteractionSource, /fitMxH2iTopologyCamera/);
+assert.match(topologyInteractionSource, /startX: event\.clientX/);
+assert.match(topologyInteractionSource, /startY: event\.clientY/);
+assert.match(topologyInteractionSource, /mxH2iTopologyDragExceededThreshold/);
+assert.doesNotMatch(topologyInteractionSource, /Math\.abs\(deltaX\).*Math\.abs\(deltaY\)/);
+const topologyDragExceededThreshold = Function(
+  `${functionSource(rendererSource, 'mxH2iTopologyDragExceededThreshold')}
+return mxH2iTopologyDragExceededThreshold;`
+)();
+const slowDrag = { startX: 10, startY: 10 };
+assert.equal(topologyDragExceededThreshold(slowDrag, 11, 11), false);
+assert.equal(topologyDragExceededThreshold(slowDrag, 12, 10), false);
+assert.equal(
+  topologyDragExceededThreshold(slowDrag, 12, 12),
+  true,
+  'drag classification uses cumulative distance from pointerdown, so repeated sub-threshold moves eventually become a drag'
+);
+
+const topologyRaycastSource = functionSource(rendererSource, 'mxH2iTopologyNodeAtPointer');
+assert.match(topologyRaycastSource, /raycaster\.setFromCamera/);
+assert.match(topologyRaycastSource, /intersectObjects\(instance\.raycastTargets/);
+const topologyFitSource = functionSource(rendererSource, 'fitMxH2iTopologyCamera');
+assert.match(topologyFitSource, /new THREE\.Box3\(\)\.setFromObject/);
+assert.match(topologyFitSource, /getBoundingSphere/);
+const topologyHighlightSource = functionSource(rendererSource, 'applyMxH2iTopologyHighlight');
+assert.match(topologyHighlightSource, /selectedGroupId/);
+assert.match(topologyHighlightSource, /'domestic', 'internal'/);
+assert.match(topologyHighlightSource, /onSelectedPath/);
+assert.doesNotMatch(rendererSource, /function mxH2iTopologyCanAnimate|function syncMxH2iTopologyAnimation/);
+
+const topologyActivateSource = functionSource(rendererSource, 'activateMxH2iTopologyNode');
+assert.match(topologyActivateSource, /openMxH2iLeaseDrawer/);
+assert.match(topologyActivateSource, /group:/);
+assert.match(topologyActivateSource, /subsection: 'domestic'/);
+assert.match(topologyActivateSource, /state\.mxH2iSurface = 'product'/);
+assert.doesNotMatch(topologyActivateSource, /fetchJson|method:\s*'DELETE'|release|ban/i);
 
 const disposeSource = functionSource(rendererSource, 'disposeMxH2iTopologyInstance');
 assert.match(disposeSource, /cancelAnimationFrame/);
+assert.match(disposeSource, /instance\.eventCleanup/);
 assert.match(disposeSource, /resizeObserver\?\.disconnect/);
 assert.match(disposeSource, /removeEventListener\('visibilitychange'/);
 assert.match(disposeSource, /value\?\.isTexture/);
@@ -334,6 +540,14 @@ assert.match(disposeSource, /forceContextLoss/);
 
 assert.match(stylesSource, /\.mx-h2i-operations-panel\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-topology-fallback\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-topology-metrics\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-topology-toolbar\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-topology-tooltip\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-topology-selection-grid\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-topology-window-pagination\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-topology-window-pagination span:focus-visible\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-topology-activity\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-topology-activity-list\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-lease-table\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-lease-pagination\s*\{/);
 assert.match(stylesSource, /\.standalone-anonymous-policy-grid\s*\{/);
@@ -344,4 +558,4 @@ assert.match(indexSource, /id="tab-mx-h2i-dashboard"[\s\S]*data-app-surface="das
 assert.match(indexSource, /id="mx-h2i-lease-drawer"/);
 assert.match(packageSource, /node scripts\/mx-h2i-operations-ui\.test\.mjs/);
 
-console.log('OK MX-H2I dashboard keeps lease truth bounded, exposes recoverable product-scoped controls, scopes anonymous policy, and disposes Three resources');
+console.log('OK MX-H2I dashboard keeps static lease truth bounded and fully reachable, supports interactive topology controls, preserves product-scoped access, and disposes Three resources');

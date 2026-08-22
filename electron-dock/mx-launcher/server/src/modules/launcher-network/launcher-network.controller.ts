@@ -42,6 +42,7 @@ import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE, RUNTIME_CONFIG } from '../../tokens.js';
 import type { RuntimeConfig } from '../../types.js';
 import type {
+  AuditEvent,
   LauncherNetworkHandover,
   LauncherNetworkLease,
   LauncherProductUserAccessResult,
@@ -369,6 +370,26 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     const lease = await this.store.getLauncherNetworkLease(leaseId);
     if (!lease) throw new NotFoundException('Launcher network lease not found');
     return { lease: opsLauncherLease(lease) };
+  }
+
+  @Get('leases/:leaseId/activity')
+  async getLeaseActivity(
+    @Param('leaseId') leaseId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
+    const lease = await this.store.getLauncherNetworkLease(leaseId);
+    if (!lease) throw new NotFoundException('Launcher network lease not found');
+    const activity = (await this.store.listAuditEvents({
+      metadataLeaseId: lease.leaseId,
+      limit: 50
+    })).map(launcherLeaseActivityView);
+    return {
+      leaseId: lease.leaseId,
+      source: 'audit-events' as const,
+      count: activity.length,
+      activity
+    };
   }
 
   @Post('leases/:leaseId/release')
@@ -1191,6 +1212,59 @@ function opsLauncherLease(
     ...safeLease
   } = lease;
   return safeLease;
+}
+
+function launcherLeaseActivityView(event: AuditEvent) {
+  const known = launcherLeaseActivityPresentation(event);
+  return {
+    eventId: event.eventId,
+    eventType: event.eventType,
+    createdAt: event.createdAt,
+    siteId: event.siteId,
+    requestId: event.requestId,
+    summary: known.summary,
+    status: known.status,
+    plane: known.plane
+  };
+}
+
+function launcherLeaseActivityPresentation(event: AuditEvent): {
+  summary: string;
+  status: 'passed' | 'blocked' | 'recorded';
+  plane: 'control-plane' | 'domestic' | 'internal-direct' | 'audit';
+} {
+  if (event.eventType === 'launcher_network.lease.enrolled') {
+    return { summary: 'Lease enrolled', status: 'recorded', plane: 'control-plane' };
+  }
+  if (event.eventType === 'launcher_network.lease.refreshed') {
+    return { summary: 'Lease renewed', status: 'recorded', plane: 'control-plane' };
+  }
+  if (event.eventType === 'launcher_network.lease.released') {
+    return { summary: 'Lease released', status: 'recorded', plane: 'control-plane' };
+  }
+  if (event.eventType === 'launcher_network.domestic_peer.synced') {
+    return { summary: 'Domestic WireGuard peer synchronized', status: 'passed', plane: 'domestic' };
+  }
+  if (event.eventType === 'launcher_network.domestic_relay.diagnosed') {
+    return {
+      summary: 'Domestic relay diagnostics recorded',
+      status: launcherLeaseActivityRecordedStatus(event),
+      plane: 'domestic'
+    };
+  }
+  if (event.eventType === 'launcher_network.internal_direct_peer.synced') {
+    return {
+      summary: 'Internal direct WireGuard peer synchronized',
+      status: launcherLeaseActivityRecordedStatus(event),
+      plane: 'internal-direct'
+    };
+  }
+  return { summary: 'Lease-linked audit event', status: 'recorded', plane: 'audit' };
+}
+
+function launcherLeaseActivityRecordedStatus(event: AuditEvent): 'passed' | 'blocked' | 'recorded' {
+  const status = event.metadata?.status;
+  return status === 'passed' || status === 'blocked' ? status : 'recorded';
 }
 
 function productUserAccessEntry(

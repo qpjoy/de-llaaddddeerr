@@ -6,6 +6,7 @@ const renderReleaseNotesMarkdown = window.MxReleaseNotesMarkdown?.renderReleaseN
 const isWindows = api.platform === 'win32';
 document.documentElement.dataset.platform = api.platform || 'browser';
 const H2O_DEFAULT_TEST_URL = 'https://www.google.com';
+const ANONYMOUS_LOGIN_DISABLED_MESSAGE = 'MX-H2I 已禁止匿名登录，请使用员工登录或由管理员重新启用';
 const H2O_TEST_PRESETS = [
   { id: 'google', label: 'Google', url: H2O_DEFAULT_TEST_URL },
   { id: 'youtube', label: 'YouTube', url: 'https://www.youtube.com' },
@@ -868,6 +869,33 @@ function anonymousEnrollmentPolicy() {
   return ['enabled', 'drain', 'disabled'].includes(policy) ? policy : 'enabled';
 }
 
+function isGuestConnectionReady(connection = state?.connection) {
+  return connection?.mode === 'guest'
+    && connection?.state === 'connected'
+    && connection?.health?.wireGuard === 'ready'
+    && connection?.health?.internalApi === 'ready'
+    && connection?.health?.splitDns === 'ready'
+    && connection?.wireGuard?.active === true
+    && connection?.diagnostics?.route?.ok === true
+    && connection?.diagnostics?.internalApi?.ok === true;
+}
+
+function isGuestTunnelActive(connection = state?.connection) {
+  return connection?.mode === 'guest'
+    && (
+      connection?.wireGuard?.active === true
+      || connection?.state === 'tunnel-only'
+      || isGuestConnectionReady(connection)
+    );
+}
+
+function anonymousRecoveryBlockedByPolicy(connection = state?.connection) {
+  return anonymousEnrollmentPolicy() === 'disabled'
+    && connection?.mode === 'guest'
+    && ['connecting', 'connected', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection?.state)
+    && !isGuestConnectionReady(connection);
+}
+
 function shouldRenderPrimaryAnonymousEntry() {
   return !isGuestConnectionActive() && anonymousUiVisibility() === 'primary';
 }
@@ -889,7 +917,9 @@ function canRenewAnonymousEnrollment() {
 
 function anonymousPolicyMessage() {
   if (anonymousEnrollmentPolicy() === 'disabled') {
-    return '管理员已停用 MX-H2I 匿名 enroll；现有匿名连接仍可查看并明确断开。';
+    return isGuestConnectionReady()
+      ? '管理员已停用 MX-H2I 匿名 enroll；现有匿名连接仍可查看并明确断开。'
+      : ANONYMOUS_LOGIN_DISABLED_MESSAGE;
   }
   if (anonymousEnrollmentPolicy() === 'drain') {
     if (isGuestConnectionActive() && state?.connection?.hasLeaseCapability !== true) {
@@ -1079,10 +1109,13 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
   const showEmployeeLogin = isEmployeeLoginVisible();
   const disconnecting = busyAction === 'disconnect';
   const pendingMode = busyAction === 'login-employee' ? 'employee' : state.connection?.mode;
+  const anonymousRecoveryBlocked = anonymousRecoveryBlockedByPolicy();
   const modeTitle = disconnecting
     ? `${state.connection?.mode === 'employee' ? '员工' : '访客'}模式 正在断开`
     : connecting
     ? `${pendingMode === 'employee' ? '员工' : '访客'}模式 连接中`
+    : anonymousRecoveryBlocked
+      ? '匿名登录已禁止'
     : connected
     ? showEmployeeLogin
       ? '员工模式'
@@ -1121,41 +1154,45 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
 
 function renderGuestConnect(connected, connecting, retainedConnection = false) {
   const disconnecting = busyAction === 'disconnect';
-  const disconnectable = connected;
+  const disconnectable = connected || isGuestTunnelActive();
   const retainedGuest = state.connection?.mode === 'guest'
     && ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(state.connection?.state);
-  const recovering = retainedConnection && !disconnectable;
   const renewalBlocked = retainedGuest && !canRenewAnonymousEnrollment();
+  const policyBlocked = anonymousRecoveryBlockedByPolicy();
+  const recovering = retainedConnection && !disconnectable && !policyBlocked;
   const label = disconnecting
     ? '正在断开'
     : disconnectable
       ? '断开连接'
       : connecting
         ? pendingConnectionLabel()
+        : policyBlocked
+          ? '匿名登录已禁止'
         : renewalBlocked
           ? '匿名续租已停用'
           : recovering
             ? retainedConnectionActionLabel()
             : '连接';
   const action = disconnectable ? 'disconnect' : 'connectGuest';
-  const disabled = connecting || disconnecting || renewalBlocked;
+  const disabled = connecting || disconnecting || (!disconnectable && renewalBlocked);
   return `
     <section class="connect-panel">
-      <button class="connect-dial ${disconnectable ? 'is-connected' : ''} ${connecting ? 'is-connecting' : ''} ${recovering ? 'is-recovering' : ''} ${disconnecting ? 'is-disconnecting' : ''}" type="button" data-action="${action}" aria-busy="${(disabled || recovering) ? 'true' : 'false'}" ${disabled ? 'disabled' : ''}>
+      <button class="connect-dial ${disconnectable ? 'is-connected' : ''} ${connecting ? 'is-connecting' : ''} ${recovering ? 'is-recovering' : ''} ${disconnecting ? 'is-disconnecting' : ''}" type="button" data-action="${action}" aria-busy="${(connecting || disconnecting || recovering) ? 'true' : 'false'}" ${disabled ? 'disabled' : ''}>
         <span>${escapeHtml(label)}</span>
       </button>
+      ${policyBlocked ? `<p class="anonymous-access-note">${escapeHtml(ANONYMOUS_LOGIN_DISABLED_MESSAGE)}</p>` : ''}
       <div class="connect-actions">
         <button class="text-button" type="button" data-action="select-mode" data-mode="employee">员工登录</button>
         ${renderCheckUpdatesButton('text-button')}
         <button class="text-button" type="button" data-action="show-advanced">高级选项</button>
-        ${retainedGuest ? '<button class="text-button" type="button" data-action="resetLocalNetworkIdentity">清理旧连接</button>' : ''}
+        ${retainedGuest ? `<button class="text-button" type="button" data-action="resetLocalNetworkIdentity" ${disconnectable ? 'disabled' : ''}>${disconnectable ? '请先断开后清理' : '清理旧连接'}</button>` : ''}
       </div>
     </section>
   `;
 }
 
 function renderConnectionRecoverySteps(show) {
-  if (!show) return '';
+  if (!show || anonymousRecoveryBlockedByPolicy()) return '';
   const connection = state.connection || {};
   const health = connection.health || {};
   const diagnostics = connection.diagnostics || {};
@@ -1368,6 +1405,7 @@ function renderAnonymousAccessPanel() {
   const connection = state.connection || {};
   const guestActive = isGuestConnectionActive();
   const connected = guestActive && connection.state === 'connected';
+  const disconnectable = connected || isGuestTunnelActive(connection);
   const connecting = busyAction === 'connectGuest'
     || (guestActive && connection.state === 'connecting');
   const retainedGuest = guestActive
@@ -1375,6 +1413,7 @@ function renderAnonymousAccessPanel() {
   const disconnecting = busyAction === 'disconnect';
   const cleaning = busyAction === 'resetLocalNetworkIdentity';
   const policy = anonymousEnrollmentPolicy();
+  const policyBlocked = anonymousRecoveryBlockedByPolicy(connection);
   const enrollmentAllowed = retainedGuest
     ? canRenewAnonymousEnrollment()
     : canStartAnonymousEnrollment();
@@ -1384,6 +1423,8 @@ function renderAnonymousAccessPanel() {
     ? 'connected'
     : connecting
       ? 'connecting'
+      : policyBlocked
+        ? 'blocked'
       : retainedGuest
         ? 'reserved'
         : policy === 'disabled'
@@ -1395,6 +1436,8 @@ function renderAnonymousAccessPanel() {
     ? '已连接'
     : connecting
       ? '连接中'
+      : policyBlocked
+        ? '已停用'
       : retainedGuest
         ? '待恢复'
         : policy === 'disabled'
@@ -1404,13 +1447,15 @@ function renderAnonymousAccessPanel() {
             : employeeActive
               ? '员工模式使用中'
               : '未连接';
-  const action = connected ? 'disconnect' : 'connectGuest';
+  const action = disconnectable ? 'disconnect' : 'connectGuest';
   const actionLabel = disconnecting
     ? '正在断开匿名连接'
-    : connected
+    : disconnectable
       ? '断开匿名连接'
       : connecting
         ? pendingConnectionLabel()
+        : policyBlocked
+          ? '匿名登录已禁止'
         : retainedGuest && !enrollmentAllowed
           ? '匿名续租已停用'
           : retainedGuest
@@ -1424,7 +1469,7 @@ function renderAnonymousAccessPanel() {
     || disconnecting
     || cleaning
     || employeeActive
-    || (!connected && !enrollmentAllowed);
+    || (!disconnectable && !enrollmentAllowed);
   return `
     <section class="settings-panel anonymous-access-panel" data-state="${escapeAttr(status)}">
       <div class="panel-head">
@@ -1438,12 +1483,12 @@ function renderAnonymousAccessPanel() {
       ${guestActive && connection.localIp ? `<div class="anonymous-access-address"><span>访客 IP</span><strong>${escapeHtml(connection.localIp)}</strong></div>` : ''}
       ${renderConnectionRecoverySteps(retainedGuest)}
       <div class="anonymous-access-actions">
-        <button class="${connected || !enrollmentAllowed ? 'secondary-button' : 'primary-button'} block-button" type="button" data-action="${action}" aria-busy="${connecting || disconnecting ? 'true' : 'false'}" ${actionDisabled ? 'disabled' : ''}>
+        <button class="${disconnectable || !enrollmentAllowed ? 'secondary-button' : 'primary-button'} block-button" type="button" data-action="${action}" aria-busy="${connecting || disconnecting ? 'true' : 'false'}" ${actionDisabled ? 'disabled' : ''}>
           ${escapeHtml(actionLabel)}
         </button>
         ${retainedGuest ? `
-          <button class="secondary-button block-button" type="button" data-action="resetLocalNetworkIdentity" ${connecting || disconnecting || cleaning ? 'disabled' : ''}>
-            ${cleaning ? '正在清理旧连接' : '清理旧连接'}
+          <button class="secondary-button block-button" type="button" data-action="resetLocalNetworkIdentity" ${connecting || disconnecting || cleaning || disconnectable ? 'disabled' : ''}>
+            ${cleaning ? '正在清理旧连接' : disconnectable ? '请先断开匿名连接' : '清理旧连接'}
           </button>
         ` : ''}
       </div>
@@ -1773,8 +1818,10 @@ function renderWireGuardDiagnostics() {
           <p>route proof / overlay health</p>
         </div>
         <div class="toolbar-actions">
-          <button class="secondary-button" type="button" data-action="repairSystemNetwork" ${busyAction === 'repairSystemNetwork' ? 'disabled' : ''}>修复网络</button>
-          <button class="secondary-button" type="button" data-action="refreshDiagnostics" ${busyAction === 'refreshDiagnostics' ? 'disabled' : ''}>重新诊断</button>
+          ${anonymousRecoveryBlockedByPolicy() ? '' : `
+            <button class="secondary-button" type="button" data-action="repairSystemNetwork" ${busyAction === 'repairSystemNetwork' ? 'disabled' : ''}>修复网络</button>
+            <button class="secondary-button" type="button" data-action="refreshDiagnostics" ${busyAction === 'refreshDiagnostics' ? 'disabled' : ''}>重新诊断</button>
+          `}
         </div>
       </div>
       <div class="metric-grid">
@@ -3856,6 +3903,7 @@ function compactText(value, limit = 90) {
 function connectionCaption() {
   const connection = state.connection || {};
   if (busyAction === 'disconnect') return '正在等待一次系统授权，以原子停止 WireGuard 并恢复 PAC / split DNS';
+  if (anonymousRecoveryBlockedByPolicy()) return ANONYMOUS_LOGIN_DISABLED_MESSAGE;
   if (feishuAuthFlow() && feishuAuthStage() !== 'connecting') {
     return connection.mode === 'guest' && connection.localIp
       ? `${connection.localIp} / 等待飞书授权，访客连接保持中`
