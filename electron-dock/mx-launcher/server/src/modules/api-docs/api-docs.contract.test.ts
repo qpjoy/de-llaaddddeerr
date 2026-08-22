@@ -98,6 +98,12 @@ test('product user access is ops-only and never claims database release removed 
   assert.match(list?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
   assert.match(accessPath?.get?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
   assert.match(accessPath?.post?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
+  assert.match(list?.description ?? '', /LauncherProductUserAccess/);
+  assert.match(list?.description ?? '', /appAccess\.deniedAppIds/);
+  assert.match(accessPath?.get?.description ?? '', /\u4e0d\u4fee\u6539 user\.status\u3001token \u6216 UserCenterUser\.appAccess/);
+  assert.match(accessPath?.get?.description ?? '', /\u4e0d\u4f1a\u53ea\u51ed\u5386\u53f2 deniedAppIds \u63a8\u65ad/);
+  assert.match(accessPath?.get?.description ?? '', /\u53ef\u4fe1 server exact blocked\/allowed audit/);
+  assert.match(accessPath?.post?.description ?? '', /\u7edd\u4e0d\u4fee\u6539 user\.status\u3001token \u6216 UserCenterUser\.appAccess/);
   const inventory = JSON.stringify(list?.responses['200']);
   assert.match(inventory, /"admission":"blocked"/);
   assert.match(inventory, /"status":"not-performed"/);
@@ -124,6 +130,22 @@ test('lease activity is ops-only, exact-linked audit data with a redacted respon
   assert.match(response, /"status":"passed"/);
   assert.match(response, /"plane":"domestic"/);
   assert.doesNotMatch(response, /"(?:provenance|metadata|publicKey|token|capability|sourceIp|stdout|stderr)"/);
+});
+
+test('manual lease runtime observation is ops-only, Domestic-only, and strictly redacted', () => {
+  const observation = paths['/internal/v1/launcher-network/leases/{leaseId}/runtime-observation']?.post;
+  assert.match(observation?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
+  assert.match(observation?.description ?? '', /只接受 active lease/);
+  assert.match(observation?.description ?? '', /不是 online、端到端连通性、当前网速或 Internal direct 状态/);
+  assert.match(observation?.description ?? '', /累计 counter/);
+  const response = JSON.stringify(observation?.responses['200']);
+  assert.match(response, /"source":"domestic-relay-manual"/);
+  assert.match(response, /"plane":"domestic"/);
+  assert.match(response, /"peerConfigured":"yes"/);
+  assert.match(response, /"latestHandshakeEpoch":1784505600/);
+  assert.match(response, /"rxBytes":123456/);
+  assert.match(response, /"txBytes":654321/);
+  assert.doesNotMatch(response, /"(?:stdout|stderr|result|summary|publicKey|endpoint)"/);
 });
 
 test('the system subscription contract exposes both operator URLs without provisioning a local 7890 instance', () => {

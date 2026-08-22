@@ -38,6 +38,7 @@ import {
   buildLauncherNetworkTopology,
   buildLauncherNetworkReachabilityPlan,
   buildLauncherNetworkLease,
+  buildLauncherProductUserAccess,
   nextAvailableLauncherNetworkLeaseSequence,
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseKey,
@@ -136,7 +137,7 @@ import {
   launcherNetworkProductIsStandaloneDefault,
   launcherNetworkSdkTestModeAllowed,
   normalizeLauncherNetworkProductId,
-  updateLauncherProductUserAccess,
+  launcherProductUserAccessId,
   userCenterUserIdentity
 } from './domain.js';
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
@@ -220,6 +221,7 @@ import type {
   LauncherNetworkReachabilityPlan,
   LauncherProductNetwork,
   LauncherProductNetworkInput,
+  LauncherProductUserAccess,
   LauncherProductUserAccessInput,
   LauncherProductUserAccessResult,
   LogEntryInput,
@@ -370,6 +372,7 @@ export class MemoryStore implements PlatformStore {
   private readonly siteSlotAccessAccounts = new Map<string, SiteSlotAccessAccount>();
   private readonly launcherNetworkMihomoSites = new Map<string, LauncherNetworkMihomoSite>();
   private readonly launcherProductNetworks = new Map<string, LauncherProductNetwork>();
+  private readonly launcherProductUserAccess = new Map<string, LauncherProductUserAccess>();
   private readonly launcherNetworkLeases = new Map<string, LauncherNetworkLease>();
   private readonly launcherNetworkHandovers = new Map<string, LauncherNetworkHandover>();
   private launcherNetworkLeaseGeneration = 0;
@@ -2440,6 +2443,21 @@ export class MemoryStore implements PlatformStore {
     return product;
   }
 
+  listLauncherProductUserAccess(productId?: string | null): LauncherProductUserAccess[] {
+    const normalizedProductId = productId?.trim()
+      ? normalizeLauncherNetworkProductId(productId)
+      : null;
+    return [...this.launcherProductUserAccess.values()]
+      .filter((access) => !normalizedProductId || access.productId === normalizedProductId)
+      .sort((left, right) => left.productId.localeCompare(right.productId) || left.userId.localeCompare(right.userId));
+  }
+
+  getLauncherProductUserAccess(productId: string, userId: string): LauncherProductUserAccess | null {
+    return this.launcherProductUserAccess.get(
+      launcherProductUserAccessId(productId, userId)
+    ) ?? null;
+  }
+
   setLauncherProductUserAccess(input: LauncherProductUserAccessInput): LauncherProductUserAccessResult {
     const productId = normalizeLauncherNetworkProductId(input.productId);
     const userId = input.userId?.trim();
@@ -2450,8 +2468,13 @@ export class MemoryStore implements PlatformStore {
     const previous = this.users.get(userId);
     if (!previous) throw new Error(`User not found: ${userId}`);
     const now = new Date().toISOString();
-    const access = updateLauncherProductUserAccess(previous, { productId, blocked: input.blocked }, now);
-    if (access.changed) this.users.set(userId, access.user);
+    const access = buildLauncherProductUserAccess(
+      this.config.environment,
+      { ...input, productId, userId },
+      this.getLauncherProductUserAccess(productId, userId),
+      now
+    );
+    this.launcherProductUserAccess.set(access.access.accessId, access.access);
     const releasedLeases = input.blocked
       ? [...this.launcherNetworkLeases.values()]
         .filter((lease) => (
@@ -2481,7 +2504,7 @@ export class MemoryStore implements PlatformStore {
         changed: access.changed,
         releasedLeaseIds: releasedLeases.map((lease) => lease.leaseId),
         runtimePeerRemoval: 'not-performed',
-        userStatus: access.user.status,
+        userStatus: previous.status,
         tokensRevoked: 0
       }
     });
@@ -2491,7 +2514,8 @@ export class MemoryStore implements PlatformStore {
       blocked: input.blocked,
       changed: access.changed,
       reason,
-      user: access.user,
+      access: access.access,
+      user: previous,
       releasedLeases,
       updatedAt: now
     };
@@ -2587,8 +2611,11 @@ export class MemoryStore implements PlatformStore {
       deviceId
     };
     assertLauncherProductUserAccess(
-      normalizedInput.userId ? this.users.get(normalizedInput.userId) : null,
-      product.productId
+      normalizedInput.userId
+        ? this.getLauncherProductUserAccess(product.productId, normalizedInput.userId)
+        : null,
+      product.productId,
+      normalizedInput.userId ?? ''
     );
     const leaseKey = launcherNetworkLeaseKey(normalizedInput, product);
     const now = new Date();
@@ -3395,8 +3422,11 @@ export class MemoryStore implements PlatformStore {
     }
     const snapshotUserId = requestedLease?.userId ?? input.userId?.trim() ?? null;
     assertLauncherProductUserAccess(
-      snapshotUserId ? this.users.get(snapshotUserId) : null,
-      requestedLease?.productId ?? appId
+      snapshotUserId
+        ? this.getLauncherProductUserAccess(requestedLease?.productId ?? appId, snapshotUserId)
+        : null,
+      requestedLease?.productId ?? appId,
+      snapshotUserId ?? ''
     );
     if (requestedLease) {
       const storedLeaseProfile = requestedLease.leaseProfile

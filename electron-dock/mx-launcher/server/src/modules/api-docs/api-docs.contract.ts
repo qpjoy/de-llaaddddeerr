@@ -295,7 +295,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       get: operation({
         tag: 'Launcher Network',
         summary: '列出产品级封禁用户',
-        description: '要求 x-mx-ops-token。只返回该 ProductNetwork 的 blocked users，并保留最后一条 released lease 摘要，确保 active lease 被释放后管理员仍能找到并恢复用户。mx-h2i 与 luopan 的记录相互隔离。',
+        description: '要求 x-mx-ops-token。只返回该 ProductNetwork 的独立 LauncherProductUserAccess blocked 记录，并保留最后一条 released lease 摘要，确保 active lease 被释放后管理员仍能找到并恢复用户。正常 API 不读取或写入 UserCenterUser.appAccess.deniedAppIds；一次性启动 backfill 也必须先有可信 server exact audit 候选，绝不只凭 deniedAppIds 推断 Network ban。mx-h2i 与 luopan 的记录相互隔离。',
         operationId: 'listLauncherProductUserAccess',
         auth: 'ops-token',
         pathParams: ['productId'],
@@ -306,6 +306,8 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
               productId: 'mx-h2i',
               userId: 'usr_partner_alice',
               blocked: true,
+              accessRevision: 1,
+              accessUpdatedAt: '2026-07-20T00:00:00.000Z',
               account: 'partner-alice',
               displayName: 'Alice',
               userStatus: 'active',
@@ -349,7 +351,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       get: operation({
         tag: 'Launcher Network',
         summary: '读取用户的产品级网络访问状态',
-        description: '要求 x-mx-ops-token。状态来自 User Center 的 product-scoped deny，不修改全局 user.status；因此封禁 mx-h2i 不会封禁 Luopan。',
+        description: '要求 x-mx-ops-token。状态来自独立的 LauncherProductUserAccess 记录，不修改 user.status、token 或 UserCenterUser.appAccess，也不会只凭历史 deniedAppIds 推断网络封禁；一次性兼容 backfill 还要求同 product+user 的可信 server exact blocked/allowed audit 候选。因此封禁 mx-h2i 不会封禁 Luopan。',
         operationId: 'getLauncherProductUserAccess',
         auth: 'ops-token',
         pathParams: ['productId', 'userId'],
@@ -358,6 +360,8 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             productId: 'mx-h2i',
             userId: 'usr_partner_alice',
             blocked: true,
+            accessRevision: 1,
+            accessUpdatedAt: '2026-07-20T00:00:00.000Z',
             account: 'partner-alice',
             displayName: 'Alice',
             userStatus: 'active',
@@ -385,7 +389,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Launcher Network',
         summary: '封禁或恢复用户的产品级网络访问',
-        description: '要求 x-mx-ops-token。blocked=true 会先持久化 product+user admission deny，并原子释放该产品下该用户的 active DB leases；不会修改全局 user.status、不会撤销可供其他产品使用的 token，也不会声称已删除 Domestic/Internal WireGuard peer。blocked=false 只恢复该产品的 admission。',
+        description: '要求 x-mx-ops-token。blocked=true 会先持久化独立 product+user admission deny，并原子释放该产品下该用户的 active DB leases；绝不修改 user.status、token 或 UserCenterUser.appAccess。历史 appAccess.deniedAppIds 仍保留 AppCenter 语义，启动兼容 backfill 只对有可信 server exact audit 的 pair 保留旧 admission，绝不按 membership 单独推断；本接口也不会声称已删除 Domestic/Internal WireGuard peer。blocked=false 只恢复该产品的 admission。',
         operationId: 'setLauncherProductUserAccess',
         auth: 'ops-token',
         pathParams: ['productId', 'userId'],
@@ -401,6 +405,8 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             productId: 'mx-h2i',
             userId: 'usr_partner_alice',
             blocked: true,
+            accessRevision: 1,
+            accessUpdatedAt: '2026-07-20T00:00:00.000Z',
             account: 'partner-alice',
             displayName: 'Alice',
             userStatus: 'active',
@@ -447,6 +453,38 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             status: 'passed',
             plane: 'domestic'
           }]
+        }
+      })
+    },
+    '/internal/v1/launcher-network/leases/{leaseId}/runtime-observation': {
+      post: operation({
+        tag: 'Launcher Network',
+        summary: '手动读取单个 lease 的 Domestic WireGuard 观测',
+        description: '要求 x-mx-ops-token，且只接受 active lease。每次请求只在 Domestic relay 读取所选 lease 对应 peer 的配置状态、最近握手 epoch 和累计收发字节。'
+          + 'status=observed 表示这次 Domestic 命令已执行且白名单字段通过严格解析；status=unavailable/failed 不提供可复用的计数。stale=true 只表示没有完成一次新的命令执行。'
+          + '这是 Domestic 单平面、手动、时间点观测，不是 online、端到端连通性、当前网速或 Internal direct 状态。observedAt 是远端 WG counter 命令完成的时间；rxBytes/txBytes 是 WireGuard relay 侧累计 counter；调用方若展示速率，必须对同一 lease 的两次成功样本按时间求差。'
+          + '响应严格不返回 raw stdout/stderr、publicKey、endpoint、诊断 summary 或其他 peer 信息。',
+        operationId: 'observeLauncherNetworkLeaseRuntime',
+        auth: 'ops-token',
+        pathParams: ['leaseId'],
+        request: {
+          requestedBy: 'desktop-admin',
+          requestId: 'launcher-runtime-observation-001'
+        },
+        response: {
+          runtimeObservation: {
+            leaseId: 'lnlease_example',
+            productId: 'mx-h2i',
+            observedAt: '2026-07-20T00:00:00.000Z',
+            source: 'domestic-relay-manual',
+            plane: 'domestic',
+            status: 'observed',
+            stale: false,
+            peerConfigured: 'yes',
+            latestHandshakeEpoch: 1784505600,
+            rxBytes: 123456,
+            txBytes: 654321
+          }
         }
       })
     },

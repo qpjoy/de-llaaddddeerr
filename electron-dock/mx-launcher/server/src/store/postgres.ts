@@ -80,6 +80,7 @@ import type {
   LauncherNetworkReachabilityPlan,
   LauncherProductNetwork,
   LauncherProductNetworkInput,
+  LauncherProductUserAccess,
   LauncherProductUserAccessInput,
   LauncherProductUserAccessResult,
   LogEntryInput,
@@ -205,6 +206,8 @@ import {
   buildLauncherNetworkTopology,
   buildLauncherNetworkReachabilityPlan,
   buildLauncherNetworkLease,
+  buildLauncherProductUserAccess,
+  planLauncherProductUserAccessBackfill,
   assertLauncherAnonymousEnrollmentPolicy,
   nextAvailableLauncherNetworkLeaseSequence,
   launcherNetworkLeaseIsActive,
@@ -305,7 +308,7 @@ import {
   launcherNetworkProductIsStandaloneDefault,
   launcherNetworkSdkTestModeAllowed,
   normalizeLauncherNetworkProductId,
-  updateLauncherProductUserAccess,
+  launcherProductUserAccessId,
   userCenterUserIdentity
 } from './domain.js';
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
@@ -401,6 +404,8 @@ type RecordKind =
   | 'site-slot-access-account'
   | 'launcher-network-mihomo-site'
   | 'launcher-product-network'
+  | 'launcher-product-user-access'
+  | 'launcher-product-user-access-backfill'
   | 'launcher-network-lease'
   | 'launcher-network-handover'
   | 'runtime-feature-policy'
@@ -435,6 +440,7 @@ export class PostgresStore implements PlatformStore {
     await store.registerBuiltinDomesticRuntimeConfigs();
     await store.registerBuiltinSecretRegistry();
     await store.bootstrapUserCenter();
+    await store.backfillLegacyLauncherProductUserAccess();
     await store.ensureEnabledAppPublisherServiceAccounts();
     await store.importConfiguredLegacyServiceAccountCredentials();
     return store;
@@ -2959,6 +2965,131 @@ export class PostgresStore implements PlatformStore {
     return product;
   }
 
+  async listLauncherProductUserAccess(
+    productId?: string | null
+  ): Promise<LauncherProductUserAccess[]> {
+    const normalizedProductId = productId?.trim()
+      ? normalizeLauncherNetworkProductId(productId)
+      : null;
+    const entries = await this.listRecords<LauncherProductUserAccess>('launcher-product-user-access');
+    return entries
+      .filter((access) => !normalizedProductId || access.productId === normalizedProductId)
+      .sort((left, right) => left.productId.localeCompare(right.productId) || left.userId.localeCompare(right.userId));
+  }
+
+  async getLauncherProductUserAccess(
+    productId: string,
+    userId: string
+  ): Promise<LauncherProductUserAccess | null> {
+    return this.getRecord<LauncherProductUserAccess>(
+      'launcher-product-user-access',
+      launcherProductUserAccessId(productId, userId)
+    );
+  }
+
+  private async backfillLegacyLauncherProductUserAccess(): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+        [
+          `mx-launcher:${this.config.environment}:launcher-product-user-access`,
+          'legacy-audit-backfill-v1'
+        ]
+      );
+      const records = manager.getRepository(PlatformRecordEntity);
+      const migrationId = 'legacy-audit-backfill-v1';
+      const completed = await records.findOne({
+        where: {
+          kind: 'launcher-product-user-access-backfill',
+          id: migrationId,
+          environment: this.config.environment
+        }
+      });
+      if (completed) return;
+      const auditRows = await records.createQueryBuilder('record')
+        .where('record.kind = :kind', { kind: 'audit-event' })
+        .andWhere('record.environment = :environment', { environment: this.config.environment })
+        .andWhere("record.data ->> 'provenance' = :provenance", { provenance: 'server' })
+        .andWhere("record.data ->> 'eventType' IN (:...eventTypes)", {
+          eventTypes: [
+            'launcher_network.product_user_access.blocked',
+            'launcher_network.product_user_access.allowed'
+          ]
+        })
+        .andWhere("NULLIF(BTRIM(record.data ->> 'productId'), '') IS NOT NULL")
+        .andWhere("NULLIF(BTRIM(record.data ->> 'userId'), '') IS NOT NULL")
+        .getMany();
+      const auditEvents = auditRows.map((row) => row.data as unknown as AuditEvent);
+      const preflight = planLauncherProductUserAccessBackfill({
+        environment: this.config.environment,
+        auditEvents,
+        users: [],
+        products: [],
+        existingAccess: []
+      });
+      for (const pair of preflight.lockPairs) {
+        await this.lockLauncherProductNetwork(manager, pair.productId);
+        await this.lockLauncherProductUserAccess(manager, pair.productId, pair.userId);
+      }
+      const candidateUserIds = [...new Set(preflight.lockPairs.map((pair) => pair.userId))];
+      const userRows = candidateUserIds.length > 0
+        ? await manager.query(
+            `SELECT data
+             FROM mx_platform_records
+             WHERE kind = 'iam-user'
+               AND environment = $1
+               AND id = ANY($2::varchar[])
+             FOR UPDATE`,
+            [this.config.environment, candidateUserIds]
+          ) as Array<{ data: UserCenterUser }>
+        : [];
+      const users = userRows.map((row) => row.data);
+      const products = preflight.lockPairs.length > 0
+        ? await this.listRecordsFrom<LauncherProductNetwork>(records, 'launcher-product-network')
+        : [];
+      const existingAccess = preflight.lockPairs.length > 0
+        ? await this.listRecordsFrom<LauncherProductUserAccess>(records, 'launcher-product-user-access')
+        : [];
+      const plan = planLauncherProductUserAccessBackfill({
+        environment: this.config.environment,
+        auditEvents,
+        users,
+        products,
+        existingAccess
+      });
+      for (const access of plan.accesses) {
+        await this.saveRecordTo(
+          records,
+          'launcher-product-user-access',
+          access.accessId,
+          access,
+          this.config.siteId
+        );
+      }
+      const completedAt = new Date().toISOString();
+      await this.saveRecordTo(
+        records,
+        'launcher-product-user-access-backfill',
+        migrationId,
+        {
+          migrationId,
+          environment: this.config.environment,
+          counts: plan.counts,
+          completedAt
+        },
+        this.config.siteId
+      );
+      if (plan.counts.candidatePairs > 0) {
+        await this.recordAuditTo(records, {
+          eventType: 'launcher_network.product_user_access_backfill.completed',
+          actorKind: 'migration',
+          requestId: migrationId,
+          metadata: { ...plan.counts, migrationId }
+        });
+      }
+    });
+  }
+
   async setLauncherProductUserAccess(
     input: LauncherProductUserAccessInput
   ): Promise<LauncherProductUserAccessResult> {
@@ -2986,11 +3117,28 @@ export class PostgresStore implements PlatformStore {
         }
       });
       if (!userRow) throw new Error(`User not found: ${userId}`);
-      const previous = userRow.data as unknown as UserCenterUser;
-      const access = updateLauncherProductUserAccess(previous, { productId, blocked: input.blocked }, now);
-      if (access.changed) {
-        await this.saveRecordTo(records, 'iam-user', userId, access.user, this.config.siteId);
-      }
+      const user = userRow.data as unknown as UserCenterUser;
+      const accessId = launcherProductUserAccessId(productId, userId);
+      const accessRow = await records.findOne({
+        where: {
+          kind: 'launcher-product-user-access',
+          id: accessId,
+          environment: this.config.environment
+        }
+      });
+      const access = buildLauncherProductUserAccess(
+        this.config.environment,
+        { ...input, productId, userId },
+        accessRow?.data as unknown as LauncherProductUserAccess | null,
+        now
+      );
+      await this.saveRecordTo(
+        records,
+        'launcher-product-user-access',
+        access.access.accessId,
+        access.access,
+        this.config.siteId
+      );
       const releasedLeases = input.blocked
         ? (await this.listRecordsFrom<LauncherNetworkLease>(records, 'launcher-network-lease'))
           .filter((lease) => (
@@ -3004,7 +3152,7 @@ export class PostgresStore implements PlatformStore {
       for (const lease of releasedLeases) {
         await this.saveRecordTo(records, 'launcher-network-lease', lease.leaseId, lease, lease.siteId);
       }
-      return { access, releasedLeases };
+      return { access, user, releasedLeases };
     });
     const reason = input.reason?.trim() || null;
     await this.recordAudit({
@@ -3021,7 +3169,7 @@ export class PostgresStore implements PlatformStore {
         changed: result.access.changed,
         releasedLeaseIds: result.releasedLeases.map((lease) => lease.leaseId),
         runtimePeerRemoval: 'not-performed',
-        userStatus: result.access.user.status,
+        userStatus: result.user.status,
         tokensRevoked: 0
       }
     });
@@ -3031,7 +3179,8 @@ export class PostgresStore implements PlatformStore {
       blocked: input.blocked,
       changed: result.access.changed,
       reason,
-      user: result.access.user,
+      access: result.access.access,
+      user: result.user,
       releasedLeases: result.releasedLeases,
       updatedAt: now
     };
@@ -3186,9 +3335,18 @@ export class PostgresStore implements PlatformStore {
             environment: this.config.environment
           }
         });
+        if (!userRow) throw new Error(`User not found: ${normalizedInput.userId}`);
+        const accessRow = await records.findOne({
+          where: {
+            kind: 'launcher-product-user-access',
+            id: launcherProductUserAccessId(product.productId, normalizedInput.userId),
+            environment: this.config.environment
+          }
+        });
         assertLauncherProductUserAccess(
-          userRow?.data as unknown as UserCenterUser | undefined,
-          product.productId
+          accessRow?.data as unknown as LauncherProductUserAccess | undefined,
+          product.productId,
+          normalizedInput.userId
         );
       }
       await this.lockLauncherNetworkLeasePool(manager, product.productId, leaseProfile);
@@ -4073,8 +4231,11 @@ export class PostgresStore implements PlatformStore {
     }
     const snapshotUserId = requestedLease?.userId ?? input.userId?.trim() ?? null;
     assertLauncherProductUserAccess(
-      snapshotUserId ? await this.getRecord<UserCenterUser>('iam-user', snapshotUserId) : null,
-      requestedLease?.productId ?? appId
+      snapshotUserId
+        ? await this.getLauncherProductUserAccess(requestedLease?.productId ?? appId, snapshotUserId)
+        : null,
+      requestedLease?.productId ?? appId,
+      snapshotUserId ?? ''
     );
     if (requestedLease) {
       const storedLeaseProfile = requestedLease.leaseProfile

@@ -387,15 +387,33 @@ HTTP sourceIp 只说明 enrollment 请求来自哪里，不证明 WireGuard 当�
 inventory 与单用户响应都返回 `controlPlane` 和 `runtimePeerRemoval`；即使最近 lease 已是
 `released`，也必须继续明确 `runtimePeerRemoval=not-performed`，不能让 API 消费者推断 peer 已删除。
 
-ban 使用 `UserCenterUser.appAccess.deniedAppIds` 保存精确 ProductNetwork ID，并在 enrollment、
-snapshot 与用户持有的 peer 操作入口执行。拒绝为 HTTP 403，稳定 code 是
+ban 使用独立的 `LauncherProductUserAccess` generic record 保存精确 `productId + userId`、
+`blocked`、reason 和 revision，并在 enrollment、snapshot 与用户持有的 peer 操作入口执行。
+正常读写不读取或修改 `UserCenterUser.appAccess.deniedAppIds`；后者继续表达 AppCenter 应用访问。
+升级兼容 backfill 也绝不只凭 `deniedAppIds` 推断 Network ban：只有同一 top-level
+`productId + userId` 存在 provenance=`server` 且 eventType 精确为 blocked/allowed 的历史 audit，
+才形成一次性候选。拒绝为 HTTP 403，稳定 code 是
 `launcher_product_user_access_denied`，响应包含被拒绝的 `productId` 与 `userId`。
+
+Postgres 首次启动的兼容 backfill 在一个 transaction 与全局 advisory xact lock 内执行，并按
+`product -> product+user` 获取与正常写入相同的锁，锁后重读 user/access；已有独立 access 永不
+覆盖，缺 user/product 跳过，明确 allowed 也写入 `blocked=false` marker。最新可信 audit 与当前
+`deniedAppIds` membership 冲突时，记录 conflict 并以 membership 写 marker，因为它是旧版本
+实际执行 admission 的状态，从而不在升级瞬间静默放行或误封。完成 counts 保存到确定性 migration
+summary；仅存在 candidate 时额外写一次 completed audit，多副本启动不会重复扫描全量 audit 或
+重复写 completion。
+
+这是单阶段旧数据转换，不是新旧 writer 的在线协调协议。虽然 Internal API 默认只有一个 replica，
+RollingUpdate 仍可能让 surge 新 Pod 与旧 Pod 同时接流量。若可信历史 audit 的
+`candidatePairs > 0`，首次切换前必须二选一：在维护窗口 quiesce 旧 API writer，或先发布同时写
+旧 membership 与新 access 的双写版本；只有已确认历史候选为 0 时才可直接滚动。这里不通过修改
+Deployment strategy 制造登录停机。
 
 `blocked=true` 的当前语义是：
 
-1. 只把目标 ProductNetwork 加入该用户的 denied set；
+1. 只更新目标 ProductNetwork 的独立 `LauncherProductUserAccess` admission record；
 2. release 该用户在目标 ProductNetwork 的 active 控制面 leases；
-3. 保持 User Center 用户 `status=active`，不撤销已有 token；
+3. 不修改 User Center 用户 `status`、token 或 `appAccess`，也不改变 AppCenter 登录/授权；
 4. 不 release 其他 ProductNetwork 的 lease；
 5. `runtimePeerRemoval.status/domestic/internalDirect` 明确为 `not-performed`。
 
@@ -641,7 +659,20 @@ lease `productId`，再关联 ProductNetwork；不从 VIP 或 IP 前缀反向猜
 
 ### 8.2 实时采集
 
-服务端或受控 site-agent 应每 5–15 秒批量采集一次：
+当前已提供 ops-only 的手动单节点观测：
+
+`POST /internal/v1/launcher-network/leases/{leaseId}/runtime-observation`
+
+它只接受 active lease，在服务端读取 Domestic relay 的目标 peer，并以严格白名单返回
+`leaseId/productId/observedAt/source/plane/status/stale/peerConfigured/latestHandshakeEpoch/`
+`rxBytes/txBytes`。它不返回 raw stdout/stderr、完整 public key、endpoint 或其他 peer 数据，
+也不推导 online。Admin 只在操作员选中节点并点击刷新时调用；同一 lease 的两次合法累计
+counter 可计算区间平均 RX/TX，但必须标为 Domestic 手动区间估算，而不是实时或端到端网速。
+`observedAt` 以远端 `wg` counter 读取完成时刻为准，不使用 SSH 请求开始时刻，
+避免两次查询延迟不同时扭曲差分速率。
+
+这条手动路径用于当前节点排障，不替代后续批量采集。规模化实时展示仍应由服务端或受控
+site-agent 每 5–15 秒批量采集一次：
 
 - `wg show mx-domestic dump` 或等价的 peers/endpoints；
 - allowed IPs；
@@ -735,6 +766,10 @@ ProductNetwork 作为独立产品分支连入共享 fabric。切换到单产品�
 - search、product/app/identity filter 与 48 条窗口分页覆盖完整 lease inventory；
   selected path 高亮，但不以
   动画或颜色伪造在线状态；
+- 选中 client 节点的右侧 Inspector 提供静态信息、exact lease audit、手动 Domestic WG
+  观测和进入产品级 Ban/Unban 抽屉；匿名节点不伪造单用户 ban；
+- 尚无双平面 peer-safe reconcile 或 tc/nft enforcement 时，Disconnect、持续 Live speed、
+  Traffic limit 与 Port policy 必须保持 disabled，并说明缺少的 backend；
 - 大规模客户端先窗口化/cluster，禁止一万台设备各建高面数 sphere；
 - 提供 2D/table fallback、键盘操作和 reduced-motion；WebGL 失败只降级视图；
 - 选中 lease 的 activity 只展示服务端 provenance 的字段白名单审计事件，exact match
@@ -1110,8 +1145,9 @@ Launcher Network 归属、显示名与基础设施还必须覆盖：
    单一 product 后写入该精确 `productId`，All 视图不存在全局 anonymous toggle；
 5. MX-H2I 与 Luopan 的匿名策略及用户 ban 互不影响；
 6. disabled 在服务端拒绝 GUI、旧客户端和 CLI anonymous enrollment；
-7. product user ban 在服务端拒绝 MX-H2I enrollment/snapshot/peer action，但保持用户
-   status/token 与 Luopan 可用；
+7. product user ban 使用独立 `LauncherProductUserAccess`，在服务端拒绝目标产品的
+   enrollment/snapshot/peer action，但保持用户 status/token、AppCenter `appAccess` 与
+   Luopan 可用；
 8. employee/Feishu 登录和现有连接切换测试全部通过；
 9. Admin 明确区分 policy、lease、控制面 release 和 live peer；
 10. sourceIp 由服务端捕获，body 无法覆盖；
@@ -1125,6 +1161,10 @@ Launcher Network 归属、显示名与基础设施还必须覆盖：
     account/userId 作为可审计次级标识。
 17. All topology 只画一套 shared Domestic/Internal 基础设施，每个 standalone
     分支独立显示 channel、lease CIDR 和 VIP；配置值不伪装成 runtime reachability。
+18. 选中 active lease 可手动读取严格脱敏的 Domestic WG peer/handshake/累计 RX/TX；两次
+    合法样本只显示区间平均值，不声称 online、实时或端到端网速。
+19. 无 peer-safe 双平面 reconcile 与 tc/nft enforcement 时，Disconnect、持续 Live speed、
+    Traffic/Port policy 不可执行，也不得伪造成功。
 
 ## 18. 相关文档
 

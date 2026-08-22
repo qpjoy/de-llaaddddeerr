@@ -31,7 +31,20 @@ test('product user ban is ops-only, releases only matching leases, and keeps Luo
     requestedBy: 'product-user-access-test'
   });
   const blockedToken = issueUserToken(store, blockedUser.userId);
+  const feishuToken = store.issueUserCenterToken({
+    subjectKind: 'user',
+    subjectId: blockedUser.userId,
+    audience: 'mx-sdk',
+    scopes: ['auth.read'],
+    authProvider: 'feishu',
+    requestId: `feishu-token-${blockedUser.userId}`
+  }).token;
   const otherToken = issueUserToken(store, otherUser.userId);
+  const appAccessBefore = structuredClone(blockedUser.appAccess);
+  const mxH2iAppDecisionBefore = store.evaluateAppCenterAccess({
+    appId: 'mx-h2i',
+    userId: blockedUser.userId
+  });
 
   const mxH2i = await enrollUser(controller, blockedToken, blockedUser.userId, 'mx-h2i', 'blocked-mx-h2i');
   const luopan = await enrollUser(controller, blockedToken, blockedUser.userId, 'luopan', 'blocked-luopan');
@@ -63,8 +76,15 @@ test('product user ban is ops-only, releases only matching leases, and keeps Luo
 
   const storedUser = store.listUserCenterUsers().find((user) => user.userId === blockedUser.userId);
   assert.equal(storedUser?.status, 'active', 'product ban must not globally disable the user');
-  assert.deepEqual(storedUser?.appAccess.deniedAppIds, ['mx-h2i']);
+  assert.deepEqual(storedUser?.appAccess, appAccessBefore, 'network ban must not modify AppCenter access');
+  assert.deepEqual(
+    store.evaluateAppCenterAccess({ appId: 'mx-h2i', userId: blockedUser.userId }),
+    mxH2iAppDecisionBefore,
+    'network ban must not change the AppCenter decision for the same product ID'
+  );
   assert.equal(store.introspectToken({ token: blockedToken, audience: 'mx-sdk' }).active, true);
+  assert.equal(store.introspectToken({ token: feishuToken, audience: 'mx-sdk' }).active, true);
+  assert.equal(store.getLauncherProductUserAccess('mx-h2i', blockedUser.userId)?.blocked, true);
   assert.equal(store.getLauncherNetworkLease(mxH2i.lease.leaseId)?.status, 'released');
   assert.equal(launcherNetworkLeaseIsActive(store.getLauncherNetworkLease(luopan.lease.leaseId)!), true);
   assert.equal(launcherNetworkLeaseIsActive(store.getLauncherNetworkLease(otherMxH2i.lease.leaseId)!), true);
@@ -164,8 +184,12 @@ test('product user ban is ops-only, releases only matching leases, and keeps Luo
   assert.deepEqual(unbanned.productUserAccess.controlPlane.releasedLeaseIds, []);
   assert.equal(unbanned.productUserAccess.runtimePeerRemoval.status, 'not-requested');
   assert.equal(
-    store.listUserCenterUsers().find((user) => user.userId === blockedUser.userId)?.appAccess.deniedAppIds.length,
-    0
+    store.getLauncherProductUserAccess('mx-h2i', blockedUser.userId)?.blocked,
+    false
+  );
+  assert.deepEqual(
+    store.listUserCenterUsers().find((user) => user.userId === blockedUser.userId)?.appAccess,
+    appAccessBefore
   );
 
   const reconnected = await enrollUser(
@@ -216,6 +240,48 @@ test('product access endpoint validates boolean input and preserves an idempoten
   );
   assert.equal(repeated.productUserAccess.changed, false);
   assert.equal(repeated.productUserAccess.blocked, true);
+  assert.equal(store.listLauncherProductUserAccess('mx-h2i').length, 1);
+  assert.equal(store.getLauncherProductUserAccess('mx-h2i', user.userId)?.revision, 1);
+
+  const reasonUpdated = await controller.setProductUserAccess(
+    'mx-h2i',
+    user.userId,
+    'product-user-access-validation-test',
+    { blocked: true, reason: 'operator note' }
+  );
+  assert.equal(reasonUpdated.productUserAccess.changed, false, 'reason-only updates do not change admission');
+  assert.equal(reasonUpdated.productUserAccess.reason, 'operator note');
+  assert.equal(reasonUpdated.productUserAccess.accessRevision, 2);
+  const readBack = await controller.getProductUserAccess(
+    'mx-h2i',
+    user.userId,
+    'product-user-access-validation-test'
+  );
+  assert.equal(readBack.productUserAccess.reason, 'operator note');
+  assert.equal(readBack.productUserAccess.accessRevision, 2);
+});
+
+test('legacy AppCenter deniedAppIds without trusted network audit remains app-only', async () => {
+  const store = new MemoryStore(config);
+  const controller = new LauncherNetworkController(store, config);
+  const user = store.createUserCenterUser({
+    userId: 'usr_legacy_app_deny',
+    account: 'legacy-app-deny',
+    password: 'legacy-app-deny-password',
+    deniedAppIds: ['mx-h2i']
+  });
+  const token = issueUserToken(store, user.userId);
+
+  assert.equal(
+    store.evaluateAppCenterAccess({ appId: 'mx-h2i', userId: user.userId }).allowed,
+    false,
+    'legacy deniedAppIds keeps its AppCenter meaning'
+  );
+  assert.equal(store.getLauncherProductUserAccess('mx-h2i', user.userId), null);
+
+  const enrolled = await enrollUser(controller, token, user.userId, 'mx-h2i', 'legacy-app-deny');
+  assert.equal(enrolled.lease.status, 'active', 'AppCenter deny must not become a ProductNetwork ban');
+  assert.equal(store.getLauncherProductUserAccess('mx-h2i', user.userId), null);
 });
 
 function issueUserToken(store: MemoryStore, userId: string): string {

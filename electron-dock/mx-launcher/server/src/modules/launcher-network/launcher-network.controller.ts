@@ -46,6 +46,7 @@ import type {
   LauncherNetworkHandover,
   LauncherNetworkLease,
   OpsLauncherNetworkLease,
+  LauncherProductUserAccess,
   LauncherProductUserAccessResult,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotPlan,
@@ -116,9 +117,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       this.config.launcherNetworkLegacyUnauthenticatedUserLeasesEnabled
     );
     if (auth.userId && existingLease && !internalOpsTokenMatches(opsToken)) {
-      const user = (await this.store.listUserCenterUsers())
-        .find((candidate) => candidate.userId === auth.userId);
-      this.assertProductUserAccess(user, existingLease.productId);
+      await this.assertProductUserAccess(auth.userId, existingLease.productId);
     }
     try {
       return {
@@ -405,6 +404,24 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     };
   }
 
+  @Post('leases/:leaseId/runtime-observation')
+  async observeLeaseRuntime(
+    @Param('leaseId') leaseId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
+    const body = asRecord(rawBody);
+    const lease = await this.requireLeaseAccess(leaseId, undefined, undefined, opsToken);
+    const diagnostics = await diagnoseDomesticRelayForLease(this.store, lease, {
+      requestedBy: nullableString(body.requestedBy) ?? 'desktop-admin',
+      requestId: nullableString(body.requestId)
+    });
+    return {
+      runtimeObservation: launcherNetworkDomesticRuntimeObservation(lease, diagnostics)
+    };
+  }
+
   @Post('leases/:leaseId/release')
   async releaseLease(
     @Param('leaseId') leaseId: string,
@@ -540,14 +557,18 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     const productId = normalizeLauncherNetworkProductId(rawProductId);
     const product = await this.store.getLauncherProductNetwork(productId);
     if (!product) throw new NotFoundException('Launcher product network not found');
-    const [users, leases] = await Promise.all([
+    const [users, leases, accesses] = await Promise.all([
       this.store.listUserCenterUserIdentities(),
-      this.store.listLauncherNetworkLeases(productId)
+      this.store.listLauncherNetworkLeases(productId),
+      this.store.listLauncherProductUserAccess(productId)
     ]);
+    const blockedByUserId = new Map(
+      accesses.filter((access) => access.blocked).map((access) => [access.userId, access])
+    );
     const entries = users
-      .filter((user) => launcherProductUserAccessBlocked(user, productId))
+      .filter((user) => blockedByUserId.has(user.userId))
       .map((user) => productUserAccessView(
-        productUserAccessEntry(user, productId, leases),
+        productUserAccessEntry(user, productId, leases, blockedByUserId.get(user.userId) ?? null),
         null
       ))
       .sort((left, right) => left.displayName.localeCompare(right.displayName) || left.userId.localeCompare(right.userId));
@@ -572,15 +593,16 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     if (!await this.store.getLauncherProductNetwork(productId)) {
       throw new NotFoundException('Launcher product network not found');
     }
-    const [users, leases] = await Promise.all([
+    const [users, leases, access] = await Promise.all([
       this.store.listUserCenterUserIdentities(),
-      this.store.listLauncherNetworkLeases(productId)
+      this.store.listLauncherNetworkLeases(productId),
+      this.store.getLauncherProductUserAccess(productId, userId)
     ]);
     const user = users.find((candidate) => candidate.userId === userId);
     if (!user) throw new NotFoundException('User not found');
     return {
       productUserAccess: productUserAccessView(
-        productUserAccessEntry(user, productId, leases),
+        productUserAccessEntry(user, productId, leases, access),
         null
       )
     };
@@ -625,7 +647,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     const leases = await this.store.listLauncherNetworkLeases(result.productId);
     return {
       productUserAccess: productUserAccessView(
-        productUserAccessEntry(result.user, result.productId, leases),
+        productUserAccessEntry(result.user, result.productId, leases, result.access),
         result
       )
     };
@@ -736,9 +758,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       && options.allowInactiveUserCapability !== true
       && !internalOpsTokenMatches(opsToken)
     ) {
-      const user = (await this.store.listUserCenterUsers())
-        .find((candidate) => candidate.userId === lease.userId);
-      this.assertProductUserAccess(user, lease.productId);
+      await this.assertProductUserAccess(lease.userId, lease.productId);
     }
     if (!launcherNetworkLeaseIsActive(lease)) {
       if (
@@ -766,7 +786,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
         if (!user || user.status !== 'active') {
           throw new UnauthorizedException('Launcher lease user is disabled or no longer exists');
         }
-        this.assertProductUserAccess(user, lease.productId);
+        await this.assertProductUserAccess(lease.userId, lease.productId);
       }
       return lease;
     }
@@ -786,19 +806,21 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       throw new UnauthorizedException('Launcher lease token is inactive or does not own this lease');
     }
     if (options.allowInactiveUserCapability !== true) {
-      const user = (await this.store.listUserCenterUsers())
-        .find((candidate) => candidate.userId === lease.userId);
-      this.assertProductUserAccess(user, lease.productId);
+      await this.assertProductUserAccess(lease.userId, lease.productId);
     }
     return lease;
   }
 
-  private assertProductUserAccess(
-    user: UserCenterUser | undefined,
+  private async assertProductUserAccess(
+    userId: string,
     productId: string
-  ): void {
+  ): Promise<void> {
     try {
-      assertLauncherProductUserAccess(user, productId);
+      assertLauncherProductUserAccess(
+        await this.store.getLauncherProductUserAccess(productId, userId),
+        productId,
+        userId
+      );
     } catch (error) {
       rethrowLauncherNetworkPolicyError(error);
     }
@@ -1288,7 +1310,8 @@ function launcherLeaseActivityRecordedStatus(event: AuditEvent): 'passed' | 'blo
 function productUserAccessEntry(
   user: UserCenterUserIdentity,
   productId: string,
-  leases: LauncherNetworkLease[]
+  leases: LauncherNetworkLease[],
+  access: LauncherProductUserAccess | null
 ) {
   const userLeases = leases
     .filter((lease) => lease.identityKind === 'user' && lease.userId === user.userId)
@@ -1297,7 +1320,10 @@ function productUserAccessEntry(
   return {
     productId,
     userId: user.userId,
-    blocked: launcherProductUserAccessBlocked(user, productId),
+    blocked: launcherProductUserAccessBlocked(access),
+    accessRevision: access?.revision ?? 0,
+    accessUpdatedAt: access?.updatedAt ?? null,
+    reason: access?.reason ?? null,
     account: user.account,
     displayName: user.displayName,
     userStatus: user.status,
@@ -1329,8 +1355,8 @@ function productUserAccessView(
   return {
     ...entry,
     changed: result?.changed ?? false,
-    reason: result?.reason ?? null,
-    updatedAt: result?.updatedAt ?? entry.userUpdatedAt,
+    reason: result?.reason ?? entry.reason,
+    updatedAt: result?.updatedAt ?? entry.accessUpdatedAt ?? entry.userUpdatedAt,
     controlPlane: {
       admission: entry.blocked ? 'blocked' : 'allowed',
       activeLeaseIds: entry.activeLeaseIds,
@@ -1615,6 +1641,10 @@ async function diagnoseDomesticRelayForLease(
       timeout: (effectiveSshConnectTimeoutSeconds(profile?.connectTimeoutSeconds) + 45) * 1000,
       maxBuffer: 4 * 1024 * 1024
     });
+    // WireGuard counters are sampled by the remote command. Timestamp the
+    // completed read, not the request start, so two samples have a meaningful
+    // interval even when SSH latency varies.
+    const sampledAt = new Date().toISOString();
     const summary = summarizeDomesticRelayDiagnostics(result.stdout, lease, secret);
     const blockedReasons = domesticRelayDiagnosticBlockedReasons(summary);
     await store.recordAudit({
@@ -1637,7 +1667,8 @@ async function diagnoseDomesticRelayForLease(
     return {
       status: blockedReasons.length > 0 ? 'blocked' as const : 'passed' as const,
       execution: 'executed' as const,
-      checkedAt,
+      checkedAt: sampledAt,
+      sampledAt,
       lease: domesticRelayLeaseEvidence(lease),
       domesticRelay: domesticRelayPlanEvidence(plan, profile),
       summary,
@@ -1650,10 +1681,11 @@ async function diagnoseDomesticRelayForLease(
     };
   } catch (error) {
     const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
+    const failedAt = new Date().toISOString();
     return {
       status: 'failed' as const,
       execution: 'failed' as const,
-      checkedAt,
+      checkedAt: failedAt,
       lease: domesticRelayLeaseEvidence(lease),
       domesticRelay: domesticRelayPlanEvidence(plan, profile),
       summary: summarizeDomesticRelayDiagnostics(execError.stdout ?? '', lease, secret),
@@ -1665,6 +1697,100 @@ async function diagnoseDomesticRelayForLease(
       failures: [sshFailureSummary(execError.stderr ?? execError.message, execError.code)]
     };
   }
+}
+
+export function launcherNetworkDomesticRuntimeObservation(
+  lease: Pick<LauncherNetworkLease, 'leaseId' | 'productId'>,
+  rawDiagnostics: unknown
+) {
+  const diagnostics = asRecord(rawDiagnostics);
+  const summary = diagnostics.summary && typeof diagnostics.summary === 'object'
+    ? asRecord(diagnostics.summary)
+    : {};
+  const execution = diagnostics.execution;
+  const sampledAt = validObservationTimestamp(diagnostics.sampledAt);
+  const observationTimestamp = sampledAt ?? validObservationTimestamp(diagnostics.checkedAt);
+  const peerConfigured = summary.clientPeerConfigured === 'yes'
+    ? 'yes' as const
+    : summary.clientPeerConfigured === 'no'
+      ? 'no' as const
+      : 'unknown' as const;
+  const handshake = wireGuardHandshakeEpoch(summary.clientLatestHandshake, observationTimestamp);
+  const transfer = wireGuardTransferCounters(summary.clientTransfer);
+  const peerAbsentTransfer = peerConfigured === 'no'
+    && (summary.clientTransfer === null || summary.clientTransfer === undefined || summary.clientTransfer === '');
+  const peerAbsentHandshake = peerConfigured === 'no'
+    && handshake.valid
+    && handshake.value === null;
+  const runtimeFieldsValid = peerConfigured === 'yes'
+    ? handshake.valid && transfer !== null
+    : peerAbsentTransfer && peerAbsentHandshake;
+  const fresh = execution === 'executed' && sampledAt !== null;
+  const status = execution === 'failed'
+    ? 'failed' as const
+    : fresh && runtimeFieldsValid
+      ? 'observed' as const
+      : 'unavailable' as const;
+  const exposePeerMetrics = status === 'observed' && peerConfigured === 'yes';
+
+  return {
+    leaseId: lease.leaseId,
+    productId: lease.productId,
+    observedAt: sampledAt
+      ?? observationTimestamp
+      ?? new Date().toISOString(),
+    source: 'domestic-relay-manual' as const,
+    plane: 'domestic' as const,
+    status,
+    stale: !fresh,
+    peerConfigured,
+    latestHandshakeEpoch: exposePeerMetrics ? handshake.value : null,
+    rxBytes: exposePeerMetrics ? transfer?.rxBytes ?? null : null,
+    txBytes: exposePeerMetrics ? transfer?.txBytes ?? null : null
+  };
+}
+
+function validObservationTimestamp(value: unknown): string | null {
+  if (typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value))) {
+    return value;
+  }
+  return null;
+}
+
+function wireGuardHandshakeEpoch(
+  value: unknown,
+  observationTimestamp: string | null
+): { valid: boolean; value: number | null } {
+  if (value === null || value === undefined || value === '') {
+    return { valid: true, value: null };
+  }
+  const parsed = nonNegativeSafeInteger(value);
+  if (parsed === null) return { valid: false, value: null };
+  if (parsed === 0) return { valid: true, value: null };
+  const observedAtMs = observationTimestamp ? Date.parse(observationTimestamp) : Number.NaN;
+  const handshakeMs = parsed * 1000;
+  if (!Number.isFinite(observedAtMs)
+    || !Number.isFinite(handshakeMs)
+    || !Number.isFinite(new Date(handshakeMs).getTime())
+    || handshakeMs > observedAtMs + (5 * 60 * 1000)) {
+    return { valid: false, value: null };
+  }
+  return { valid: true, value: parsed };
+}
+
+function wireGuardTransferCounters(value: unknown): { rxBytes: number; txBytes: number } | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(0|[1-9]\d*)\/(0|[1-9]\d*)$/.exec(value);
+  if (!match) return null;
+  const rxBytes = nonNegativeSafeInteger(match[1]);
+  const txBytes = nonNegativeSafeInteger(match[2]);
+  return rxBytes === null || txBytes === null ? null : { rxBytes, txBytes };
+}
+
+function nonNegativeSafeInteger(value: unknown): number | null {
+  if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 async function syncInternalDirectPeerForLease(

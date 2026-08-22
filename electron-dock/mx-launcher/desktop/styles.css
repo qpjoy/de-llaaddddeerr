@@ -2814,6 +2814,69 @@ select {
   font-size: 10px;
 }
 
+.mx-h2i-topology-node-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+
+.mx-h2i-topology-node-actions article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--mx-bg-elevated);
+}
+
+.mx-h2i-topology-node-actions article[data-available="false"] {
+  background: color-mix(in srgb, var(--panel-quiet) 86%, transparent);
+}
+
+.mx-h2i-topology-node-actions article > div,
+.mx-h2i-topology-runtime-head > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.mx-h2i-topology-node-actions strong,
+.mx-h2i-topology-runtime-head strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.mx-h2i-topology-node-actions span,
+.mx-h2i-topology-runtime-head span {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.mx-h2i-topology-node-actions button,
+.mx-h2i-topology-runtime-head button {
+  min-height: 32px;
+  padding: 6px 9px;
+  font-size: 10px;
+}
+
+.mx-h2i-topology-runtime {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.mx-h2i-topology-runtime-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
 .mx-h2i-topology-activity {
   display: grid;
   gap: 8px;
@@ -7619,7 +7682,13 @@ select {
   .mx-h2i-topology-metrics,
   .mx-h2i-topology-toolbar,
   .mx-h2i-topology-selection-grid,
-  .mx-h2i-topology-selection-head {
+  .mx-h2i-topology-selection-head,
+  .mx-h2i-topology-node-actions,
+  .mx-h2i-topology-runtime-head {
+    grid-template-columns: 1fr;
+  }
+
+  .mx-h2i-topology-node-actions article {
     grid-template-columns: 1fr;
   }
 

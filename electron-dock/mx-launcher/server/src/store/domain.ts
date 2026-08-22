@@ -16,6 +16,7 @@ import type {
   AppOnboardingDefaults,
   AppOnboardingDefaultsInput,
   AppOnboardingTemplate,
+  AuditEvent,
   AwxProviderConfig,
   AwxProviderConfigInput,
   AwxProviderKind,
@@ -61,6 +62,7 @@ import type {
   LauncherNetworkMihomoSiteInput,
   LauncherProductNetwork,
   LauncherProductNetworkInput,
+  LauncherProductUserAccess,
   LauncherProductUserAccessInput,
   LauncherProductMode,
   LauncherNetworkScope,
@@ -429,54 +431,204 @@ export class LauncherProductUserAccessDeniedError extends Error {
 }
 
 export function launcherProductUserAccessBlocked(
-  user: Pick<UserCenterUser, 'appAccess'> | null | undefined,
-  productId: string
+  access: Pick<LauncherProductUserAccess, 'blocked'> | null | undefined
 ): boolean {
-  if (!user) return false;
-  const normalizedProductId = normalizeLauncherNetworkProductId(productId);
-  return (user.appAccess?.deniedAppIds ?? [])
-    .map((item) => normalizeLauncherNetworkProductId(item))
-    .includes(normalizedProductId);
+  return access?.blocked === true;
 }
 
 export function assertLauncherProductUserAccess(
-  user: Pick<UserCenterUser, 'userId' | 'appAccess'> | null | undefined,
-  productId: string
+  access: Pick<LauncherProductUserAccess, 'productId' | 'userId' | 'blocked'> | null | undefined,
+  productId: string,
+  userId: string
 ): void {
-  if (user && launcherProductUserAccessBlocked(user, productId)) {
+  if (launcherProductUserAccessBlocked(access)) {
     throw new LauncherProductUserAccessDeniedError(
       normalizeLauncherNetworkProductId(productId),
-      user.userId
+      userId
     );
   }
 }
 
-export function updateLauncherProductUserAccess(
-  user: UserCenterUser,
-  input: Pick<LauncherProductUserAccessInput, 'productId' | 'blocked'>,
+export function launcherProductUserAccessId(productId: string, userId: string): string {
+  const material = `${normalizeLauncherNetworkProductId(productId)}\0${userId.trim()}`;
+  return `lnaccess_${createHash('sha256').update(material).digest('hex').slice(0, 32)}`;
+}
+
+export function buildLauncherProductUserAccess(
+  environment: string,
+  input: LauncherProductUserAccessInput,
+  previous: LauncherProductUserAccess | null,
   now = new Date().toISOString()
-): { user: UserCenterUser; changed: boolean; productId: string } {
+): { access: LauncherProductUserAccess; changed: boolean } {
   const productId = normalizeLauncherNetworkProductId(input.productId);
-  const previousDeniedAppIds = uniqueAppIds(user.appAccess?.deniedAppIds ?? []);
-  const wasBlocked = previousDeniedAppIds.includes(productId);
-  const deniedAppIds = input.blocked
-    ? uniqueAppIds([...previousDeniedAppIds, productId])
-    : previousDeniedAppIds.filter((appId) => appId !== productId);
-  const changed = wasBlocked !== input.blocked;
+  const userId = input.userId.trim();
+  const updatedBy = input.requestedBy?.trim() || 'launcher-network-admin';
+  const reason = input.reason?.trim() || null;
+  const changed = previous?.blocked !== input.blocked;
+  const recordChanged = changed || previous?.reason !== reason;
   return {
-    productId,
     changed,
-    user: changed
-      ? {
-          ...user,
-          appAccess: {
-            ...(user.appAccess ?? emptyUserAppAccess()),
-            deniedAppIds
-          },
-          updatedAt: now
-        }
-      : user
+    access: {
+      accessId: previous?.accessId ?? launcherProductUserAccessId(productId, userId),
+      environment,
+      productId,
+      userId,
+      blocked: input.blocked,
+      reason,
+      revision: recordChanged ? (previous?.revision ?? 0) + 1 : previous?.revision ?? 1,
+      lastRequestId: input.requestId?.trim() || null,
+      createdBy: previous?.createdBy ?? updatedBy,
+      createdAt: previous?.createdAt ?? now,
+      updatedBy,
+      updatedAt: recordChanged ? now : previous?.updatedAt ?? now
+    }
   };
+}
+
+export interface LauncherProductUserAccessBackfillCounts {
+  auditEventsScanned: number;
+  trustedStateEvents: number;
+  candidatePairs: number;
+  migratedBlocked: number;
+  migratedAllowed: number;
+  skippedExisting: number;
+  skippedMissingProduct: number;
+  skippedMissingUser: number;
+  conflicts: number;
+}
+
+export interface LauncherProductUserAccessBackfillPlan {
+  accesses: LauncherProductUserAccess[];
+  lockPairs: Array<{ productId: string; userId: string }>;
+  counts: LauncherProductUserAccessBackfillCounts;
+}
+
+/**
+ * Recover the old product-network admission state only when an exact trusted
+ * server audit identifies the product+user pair. Membership alone is AppCenter
+ * state and is never a migration candidate. Compare the latest audit with the
+ * user's legacy deniedAppIds membership; on conflict preserve membership
+ * because it was the legacy runtime admission source, while making the conflict
+ * explicit in counts and the record reason.
+ */
+export function planLauncherProductUserAccessBackfill(input: {
+  environment: string;
+  auditEvents: readonly AuditEvent[];
+  users: readonly UserCenterUser[];
+  products: readonly LauncherProductNetwork[];
+  existingAccess: readonly LauncherProductUserAccess[];
+  now?: string;
+}): LauncherProductUserAccessBackfillPlan {
+  const now = input.now ?? new Date().toISOString();
+  const latestByPair = new Map<string, {
+    event: AuditEvent;
+    productId: string;
+    userId: string;
+    blocked: boolean;
+  }>();
+  let trustedStateEvents = 0;
+
+  for (const event of input.auditEvents) {
+    if (event.provenance !== 'server') continue;
+    if (
+      event.eventType !== 'launcher_network.product_user_access.blocked'
+      && event.eventType !== 'launcher_network.product_user_access.allowed'
+    ) continue;
+    const rawProductId = typeof event.productId === 'string' ? event.productId.trim() : '';
+    const userId = typeof event.userId === 'string' ? event.userId.trim() : '';
+    if (!rawProductId || !userId || !Number.isFinite(Date.parse(event.createdAt))) continue;
+    const productId = normalizeLauncherNetworkProductId(rawProductId);
+    const pairKey = `${productId}\0${userId}`;
+    const candidate = {
+      event,
+      productId,
+      userId,
+      blocked: event.eventType === 'launcher_network.product_user_access.blocked'
+    };
+    trustedStateEvents += 1;
+    const previous = latestByPair.get(pairKey);
+    if (!previous || launcherProductUserAccessAuditIsLater(event, previous.event)) {
+      latestByPair.set(pairKey, candidate);
+    }
+  }
+
+  const products = new Set(input.products.map((product) => product.productId));
+  const users = new Map(input.users.map((user) => [user.userId, user]));
+  const existing = new Set(input.existingAccess.map((access) => `${access.productId}\0${access.userId}`));
+  const counts: LauncherProductUserAccessBackfillCounts = {
+    auditEventsScanned: input.auditEvents.length,
+    trustedStateEvents,
+    candidatePairs: latestByPair.size,
+    migratedBlocked: 0,
+    migratedAllowed: 0,
+    skippedExisting: 0,
+    skippedMissingProduct: 0,
+    skippedMissingUser: 0,
+    conflicts: 0
+  };
+  const accesses: LauncherProductUserAccess[] = [];
+
+  for (const [pairKey, candidate] of [...latestByPair.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    if (existing.has(pairKey)) {
+      counts.skippedExisting += 1;
+      continue;
+    }
+    if (!products.has(candidate.productId)) {
+      counts.skippedMissingProduct += 1;
+      continue;
+    }
+    const user = users.get(candidate.userId);
+    if (!user) {
+      counts.skippedMissingUser += 1;
+      continue;
+    }
+    const deniedMembership = (user.appAccess?.deniedAppIds ?? []).some((appId) => (
+      typeof appId === 'string'
+      && appId.trim().length > 0
+      && normalizeLauncherNetworkProductId(appId) === candidate.productId
+    ));
+    const conflicted = deniedMembership !== candidate.blocked;
+    if (conflicted) counts.conflicts += 1;
+    const auditReason = typeof candidate.event.metadata?.reason === 'string'
+      ? candidate.event.metadata.reason.trim() || null
+      : null;
+    const reason = conflicted
+      ? `Legacy backfill conflict: latest server audit=${candidate.blocked ? 'blocked' : 'allowed'}; preserved deniedAppIds membership=${deniedMembership ? 'blocked' : 'allowed'}`
+      : auditReason;
+    const access = buildLauncherProductUserAccess(
+      input.environment,
+      {
+        productId: candidate.productId,
+        userId: candidate.userId,
+        blocked: deniedMembership,
+        reason,
+        requestedBy: 'launcher-product-user-access-backfill',
+        requestId: candidate.event.requestId
+      },
+      null,
+      now
+    ).access;
+    accesses.push(access);
+    if (deniedMembership) counts.migratedBlocked += 1;
+    else counts.migratedAllowed += 1;
+  }
+
+  return {
+    accesses,
+    lockPairs: [...latestByPair.values()]
+      .map(({ productId, userId }) => ({ productId, userId }))
+      .sort((left, right) => (
+        left.productId.localeCompare(right.productId)
+        || left.userId.localeCompare(right.userId)
+      )),
+    counts
+  };
+}
+
+function launcherProductUserAccessAuditIsLater(left: AuditEvent, right: AuditEvent): boolean {
+  const timeDifference = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+  if (timeDifference !== 0) return timeDifference > 0;
+  return left.eventId.localeCompare(right.eventId) > 0;
 }
 
 export function createUserCenterUserCredential(

@@ -2386,12 +2386,34 @@ export interface LauncherProductUserAccessInput {
   requestId?: string | null;
 }
 
+/**
+ * ProductNetwork admission is intentionally independent from AppCenter app
+ * access. Runtime reads and writes never project this record into appAccess.
+ * A one-time compatibility backfill may preserve legacy deniedAppIds state,
+ * but only for a product+user pair proven by an exact trusted server audit.
+ */
+export interface LauncherProductUserAccess {
+  accessId: string;
+  environment: string;
+  productId: string;
+  userId: string;
+  blocked: boolean;
+  reason: string | null;
+  revision: number;
+  lastRequestId: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
 export interface LauncherProductUserAccessResult {
   productId: string;
   userId: string;
   blocked: boolean;
   changed: boolean;
   reason: string | null;
+  access: LauncherProductUserAccess;
   user: UserCenterUser;
   releasedLeases: LauncherNetworkLease[];
   updatedAt: string;

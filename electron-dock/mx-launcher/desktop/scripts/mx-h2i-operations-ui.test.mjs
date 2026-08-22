@@ -339,8 +339,34 @@ assert.match(topologySelectionSource, /Expires/);
 assert.match(topologySelectionSource, /Online \/ handshake/);
 assert.match(topologySelectionSource, /Location \/ logs/);
 assert.match(topologySelectionSource, /not collected/);
-assert.match(topologySelectionSource, /Open connection drawer/);
+assert.match(topologySelectionSource, /renderMxH2iTopologyNodeActions\(lease\)/);
+assert.match(topologySelectionSource, /renderMxH2iTopologyRuntimeObservation\(lease\)/);
 assert.match(topologySelectionSource, /renderMxH2iTopologyActivity\(lease\)/);
+
+const topologyNodeActionsSource = functionSource(rendererSource, 'renderMxH2iTopologyNodeActions');
+assert.match(topologyNodeActionsSource, /Open Ban \/ Unban controls/);
+assert.match(topologyNodeActionsSource, /Anonymous leases do not have a user identity that can be individually banned/);
+assert.match(topologyNodeActionsSource, /Disconnect tunnel/);
+assert.match(topologyNodeActionsSource, /peer-safe WG removal and admission reconciliation/);
+assert.match(topologyNodeActionsSource, /Live speed/);
+assert.match(topologyNodeActionsSource, /single WG counter is not a speed measurement/);
+assert.match(topologyNodeActionsSource, /Traffic limit/);
+assert.match(topologyNodeActionsSource, /disabled/);
+assert.doesNotMatch(topologyNodeActionsSource, /fetchJson|saveMxH2iProductUserAccess/);
+
+const topologyRuntimeRenderSource = functionSource(rendererSource, 'renderMxH2iTopologyRuntimeObservation');
+assert.match(topologyRuntimeRenderSource, /Domestic WireGuard evidence/);
+assert.match(topologyRuntimeRenderSource, /Manual, Domestic-only sample/);
+assert.match(topologyRuntimeRenderSource, /cumulative RX\/TX do not prove the client is currently online/);
+assert.match(topologyRuntimeRenderSource, /requires two valid manual samples/);
+assert.match(topologyRuntimeRenderSource, /not end-to-end speed/);
+assert.match(topologyRuntimeRenderSource, /Cumulative Domestic RX/);
+assert.match(topologyRuntimeRenderSource, /Cumulative Domestic TX/);
+assert.match(topologyRuntimeRenderSource, /Domestic average RX/);
+assert.match(topologyRuntimeRenderSource, /Domestic average TX/);
+assert.match(topologyRuntimeRenderSource, /counter resets are rejected/);
+assert.match(topologyRuntimeRenderSource, /Refresh WG status/);
+assert.doesNotMatch(topologyRuntimeRenderSource, /\.stdout|\.stderr|\.result|\.publicKey|\.endpoint/);
 
 const topologySelectedNodeSource = functionSource(rendererSource, 'renderMxH2iTopologySelectedNode');
 assert.match(topologySelectedNodeSource, /Identity aggregate/);
@@ -686,7 +712,8 @@ const synchronizeServerScope = Function(
   'closeMxH2iLeaseDrawer',
   'renderSelectedAppDetail',
   'MX_H2I_PRODUCT_ID',
-  `${functionSource(rendererSource, 'synchronizeLauncherNetworkServerScope')}
+  `${functionSource(rendererSource, 'resetMxH2iTopologyRuntimeObservation')}
+${functionSource(rendererSource, 'synchronizeLauncherNetworkServerScope')}
 return synchronizeLauncherNetworkServerScope;`
 )(
   serverSwitchState,
@@ -843,6 +870,11 @@ assert.match(leaseDrawerSource, /Other ProductNetworks are not affected/);
 assert.match(leaseDrawerSource, /All-products mode never mutates anonymous policy or user access/);
 assert.match(leaseDrawerSource, /Reliable single-client ban is not available until peer-safe revoke exists/);
 assert.match(leaseDrawerSource, /Runtime peer removal/);
+assert.match(leaseDrawerSource, /No disabled control reports success/);
+assert.match(leaseDrawerSource, /Disconnect WG peer/);
+assert.match(leaseDrawerSource, /Live speed/);
+assert.match(leaseDrawerSource, /Traffic limits/);
+assert.match(leaseDrawerSource, /Port policy/);
 assert.match(leaseDrawerSource, /previousFocusKey/);
 const focusTrapSource = functionSource(rendererSource, 'trapMxH2iLeaseDrawerFocus');
 assert.match(focusTrapSource, /event\.shiftKey/);
@@ -1039,6 +1071,7 @@ const opsProtectionSource = functionSource(rendererSource, 'isOpsProtectedIntern
 assert.match(opsProtectionSource, /products\\\/\[\^\/\]\+\\\/user-access/);
 assert.match(opsProtectionSource, /products\\\/\[\^\/\]\+\\\/users\\\/\[\^\/\]\+\\\/access/);
 assert.match(opsProtectionSource, /leases\\\/\[\^\/\]\+\\\/activity/);
+assert.match(opsProtectionSource, /runtime-observation/);
 
 const topologyActivityLoadSource = functionSource(rendererSource, 'loadMxH2iTopologyActivity');
 assert.match(topologyActivityLoadSource, /launcher-network\/leases\/\$\{encodeURIComponent\(leaseId\)\}\/activity/);
@@ -1074,6 +1107,122 @@ assert.equal(
   50,
   'validated activity remains bounded'
 );
+
+const topologyRuntimePayload = Function(
+  'mxH2iTopologyProductId',
+  `${functionSource(rendererSource, 'mxH2iRuntimeObservationFromPayload')}
+return mxH2iRuntimeObservationFromPayload;`
+)(
+  (lease) => String(lease?.productId || '').trim().toLowerCase()
+);
+const safeObservation = topologyRuntimePayload({
+  runtimeObservation: {
+    leaseId: 'lease-selected',
+    productId: 'luopan',
+    observedAt: '2026-08-22T10:00:00.000Z',
+    source: 'domestic-relay-manual',
+    plane: 'domestic',
+    status: 'observed',
+    stale: false,
+    peerConfigured: 'yes',
+    latestHandshakeEpoch: 1787380000,
+    rxBytes: 1024,
+    txBytes: 2048,
+    result: { stdout: 'must never reach the UI' },
+    publicKey: 'must never reach the UI',
+    endpoint: 'must never reach the UI'
+  }
+}, { leaseId: 'lease-selected', productId: 'luopan' });
+assert.deepEqual(safeObservation, {
+  leaseId: 'lease-selected',
+  productId: 'luopan',
+  observedAt: '2026-08-22T10:00:00.000Z',
+  observedAtMs: Date.parse('2026-08-22T10:00:00.000Z'),
+  source: 'domestic-relay-manual',
+  plane: 'domestic',
+  status: 'observed',
+  stale: false,
+  peerConfigured: 'yes',
+  latestHandshakeEpoch: 1787380000,
+  rxBytes: 1024,
+  txBytes: 2048
+});
+assert.equal('result' in safeObservation, false, 'raw execution output is discarded');
+assert.equal('publicKey' in safeObservation, false, 'the public key is not consumed by the inspector');
+assert.equal('endpoint' in safeObservation, false, 'the endpoint is not consumed by the inspector');
+assert.throws(
+  () => topologyRuntimePayload({
+    runtimeObservation: {
+      leaseId: 'lease-selected', productId: 'luopan', observedAt: '2026-08-22T10:00:00.000Z',
+      source: 'domestic-relay-manual', plane: 'domestic', status: 'observed', stale: false,
+      peerConfigured: 'yes', latestHandshakeEpoch: 9007199254740991, rxBytes: 0, txBytes: 0
+    }
+  }, { leaseId: 'lease-selected', productId: 'luopan' }),
+  /invalid sample counters or time/,
+  'an out-of-range handshake timestamp fails closed before rendering'
+);
+assert.throws(
+  () => topologyRuntimePayload({
+    runtimeObservation: {
+      leaseId: 'lease-other', productId: 'luopan', observedAt: '2026-08-22T10:00:00.000Z',
+      source: 'domestic-relay-manual', plane: 'domestic', rxBytes: 0, txBytes: 0
+    }
+  }, { leaseId: 'lease-selected', productId: 'luopan' }),
+  /did not match the selected lease/
+);
+assert.throws(
+  () => topologyRuntimePayload({
+    runtimeObservation: {
+      leaseId: 'lease-selected', productId: 'mx-h2i', observedAt: '2026-08-22T10:00:00.000Z',
+      source: 'domestic-relay-manual', plane: 'domestic', rxBytes: 0, txBytes: 0
+    }
+  }, { leaseId: 'lease-selected', productId: 'luopan' }),
+  /did not match the selected ProductNetwork/
+);
+assert.throws(
+  () => topologyRuntimePayload({
+    runtimeObservation: {
+      leaseId: 'lease-selected', productId: 'luopan', observedAt: '2026-08-22T10:00:00.000Z',
+      source: 'other', plane: 'internal', rxBytes: 0, txBytes: 0
+    }
+  }, { leaseId: 'lease-selected', productId: 'luopan' }),
+  /did not identify the Domestic manual source/
+);
+
+const topologyRuntimeAverage = Function(
+  'asArray',
+  `${functionSource(rendererSource, 'mxH2iRuntimeAverage')}
+return mxH2iRuntimeAverage;`
+)((value) => Array.isArray(value) ? value : []);
+assert.deepEqual(topologyRuntimeAverage([
+  { observedAtMs: 1000, status: 'observed', stale: false, rxBytes: 100, txBytes: 200 },
+  { observedAtMs: 3000, status: 'observed', stale: false, rxBytes: 300, txBytes: 500 }
+]), { elapsedSeconds: 2, rxBytesPerSecond: 100, txBytesPerSecond: 150 });
+assert.equal(topologyRuntimeAverage([
+  { observedAtMs: 1000, status: 'observed', stale: false, rxBytes: 300, txBytes: 500 },
+  { observedAtMs: 3000, status: 'observed', stale: false, rxBytes: 100, txBytes: 200 }
+]), null, 'counter resets cannot produce a negative rate');
+assert.equal(topologyRuntimeAverage([
+  { observedAtMs: 3000, status: 'observed', stale: false, rxBytes: 100, txBytes: 200 },
+  { observedAtMs: 3000, status: 'observed', stale: false, rxBytes: 300, txBytes: 500 }
+]), null, 'a zero-duration interval cannot produce a rate');
+assert.equal(topologyRuntimeAverage([
+  { observedAtMs: 1000, status: 'unavailable', stale: true, rxBytes: null, txBytes: null },
+  { observedAtMs: 3000, status: 'unavailable', stale: true, rxBytes: null, txBytes: null }
+]), null, 'missing counters cannot produce a rate');
+
+const topologyRuntimeLoadSource = functionSource(rendererSource, 'loadMxH2iTopologyRuntimeObservation');
+assert.match(topologyRuntimeLoadSource, /runtime-observation/);
+assert.match(topologyRuntimeLoadSource, /method: 'POST'/);
+assert.match(topologyRuntimeLoadSource, /captureLauncherNetworkRequestScope\(\)/);
+assert.match(topologyRuntimeLoadSource, /isLauncherNetworkRequestScopeCurrent\(requestScope\)/);
+assert.match(topologyRuntimeLoadSource, /mxH2iTopologyRuntimeObservation\.leaseId === leaseId/);
+assert.match(topologyRuntimeLoadSource, /mxH2iTopologyRuntimeObservation\.productId === productId/);
+assert.match(topologyRuntimeLoadSource, /mxH2iTopologyView\.selectedLeaseKey === leaseKey/);
+assert.match(topologyRuntimeLoadSource, /section\.isConnected/);
+assert.match(topologyRuntimeLoadSource, /mxH2iRuntimeObservationFromPayload\(payload, lease\)/);
+assert.match(topologyRuntimeLoadSource, /\.slice\(-2\)/);
+assert.doesNotMatch(topologyRuntimeLoadSource, /setInterval|setTimeout|domestic-relay\/diagnostics/);
 
 const topologyPageFocusSelector = Function(
   `${functionSource(rendererSource, 'mxH2iTopologyPageFocusSelector')}

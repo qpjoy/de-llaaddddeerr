@@ -332,6 +332,14 @@ const state = {
     activity: [],
     requestSequence: 0
   },
+  mxH2iTopologyRuntimeObservation: {
+    leaseId: null,
+    productId: null,
+    loading: false,
+    error: null,
+    samples: [],
+    requestSequence: 0
+  },
   anonymousPolicyBusyProductId: null,
   anonymousPolicyFeedback: null,
   mxH2iAnonymousQuickConfirmation: null,
@@ -4364,7 +4372,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || /^\/internal\/v1\/app-center\/apps(?:\/[^/]+)?$/.test(path)
       || /^\/internal\/v1\/release-management\/plans(?:\/[^/]+\/gate)?$/.test(path)
       || path === '/internal/v1/release-artifacts'
-      || /^\/internal\/v1\/launcher-network\/leases\/[^/]+\/(?:release|domestic-peer\/sync|domestic-relay\/diagnostics|internal-direct-peer\/sync)$/.test(path)
+      || /^\/internal\/v1\/launcher-network\/leases\/[^/]+\/(?:release|domestic-peer\/sync|domestic-relay\/diagnostics|runtime-observation|internal-direct-peer\/sync)$/.test(path)
       || /^\/internal\/v1\/launcher-network\/products\/[^/]+\/users\/[^/]+\/access$/.test(path)
       || /^\/internal\/v1\/launcher-network\/(?:products\/[^/]+|mihomo\/sites\/[^/]+)$/.test(path);
   }
@@ -4418,6 +4426,17 @@ function launcherProductUserAccessRequestKey(productId, requestScope = captureLa
   return `${requestScope.generation}:${requestScope.origin}:${requestScope.base}:${productId}`;
 }
 
+function resetMxH2iTopologyRuntimeObservation() {
+  state.mxH2iTopologyRuntimeObservation = {
+    leaseId: null,
+    productId: null,
+    loading: false,
+    error: null,
+    samples: [],
+    requestSequence: Number(state.mxH2iTopologyRuntimeObservation?.requestSequence || 0) + 1
+  };
+}
+
 function synchronizeLauncherNetworkServerScope(value) {
   const next = launcherNetworkServerIdentity(value);
   if (next.base === state.launcherNetworkServerBase && next.origin === state.launcherNetworkServerOrigin) return false;
@@ -4435,6 +4454,7 @@ function synchronizeLauncherNetworkServerScope(value) {
   state.launcherProductUserAccessErrors = {};
   state.mxH2iProductUserAccess = null;
   state.mxH2iProductUserAccessError = null;
+  resetMxH2iTopologyRuntimeObservation();
   launcherProductUserAccessRequests.clear();
   state.anonymousPolicyBusyProductId = null;
   state.anonymousPolicyFeedback = null;
@@ -12008,6 +12028,193 @@ function mxH2iTopologyWindow(leases, view = state.mxH2iTopologyView) {
   };
 }
 
+function mxH2iRuntimeObservationFromPayload(payload, lease) {
+  const leaseId = String(lease?.leaseId || '').trim();
+  const productId = mxH2iTopologyProductId(lease);
+  const observation = payload?.runtimeObservation;
+  if (!observation || typeof observation !== 'object') {
+    throw new Error('Runtime observation response was missing its evidence envelope.');
+  }
+  if (!leaseId || String(observation.leaseId || '').trim() !== leaseId) {
+    throw new Error('Runtime observation response did not match the selected lease.');
+  }
+  if (String(observation.productId || '').trim().toLowerCase() !== productId) {
+    throw new Error('Runtime observation response did not match the selected ProductNetwork.');
+  }
+  if (observation.source !== 'domestic-relay-manual' || observation.plane !== 'domestic') {
+    throw new Error('Runtime observation response did not identify the Domestic manual source.');
+  }
+  const observedAt = String(observation.observedAt || '');
+  const observedAtMs = Date.parse(observedAt);
+  const status = String(observation.status || '');
+  const peerConfigured = String(observation.peerConfigured || '');
+  const latestHandshakeEpoch = observation.latestHandshakeEpoch;
+  const rxBytes = observation.rxBytes;
+  const txBytes = observation.txBytes;
+  if (!Number.isFinite(observedAtMs)
+    || !['observed', 'unavailable', 'failed'].includes(status)
+    || typeof observation.stale !== 'boolean'
+    || !['yes', 'no', 'unknown'].includes(peerConfigured)
+    || (latestHandshakeEpoch !== null
+      && (!Number.isSafeInteger(latestHandshakeEpoch)
+        || latestHandshakeEpoch < 0
+        || !Number.isFinite(new Date(latestHandshakeEpoch * 1000).getTime())
+        || (latestHandshakeEpoch * 1000) > observedAtMs + (5 * 60 * 1000)))
+    || (rxBytes !== null && (!Number.isSafeInteger(rxBytes) || rxBytes < 0))
+    || (txBytes !== null && (!Number.isSafeInteger(txBytes) || txBytes < 0))) {
+    throw new Error('Runtime observation response contained invalid sample counters or time.');
+  }
+  return {
+    leaseId,
+    productId,
+    observedAt,
+    observedAtMs,
+    source: 'domestic-relay-manual',
+    plane: 'domestic',
+    status,
+    stale: observation.stale,
+    peerConfigured,
+    latestHandshakeEpoch,
+    rxBytes,
+    txBytes
+  };
+}
+
+function mxH2iRuntimeAverage(samples) {
+  const [previous, current] = asArray(samples).slice(-2);
+  if (!previous || !current) return null;
+  if (previous.status !== 'observed' || current.status !== 'observed' || previous.stale || current.stale) return null;
+  if (![previous.rxBytes, previous.txBytes, current.rxBytes, current.txBytes]
+    .every((value) => Number.isSafeInteger(value) && value >= 0)) return null;
+  const elapsedSeconds = (Number(current.observedAtMs) - Number(previous.observedAtMs)) / 1000;
+  const rxDelta = Number(current.rxBytes) - Number(previous.rxBytes);
+  const txDelta = Number(current.txBytes) - Number(previous.txBytes);
+  if (!Number.isFinite(elapsedSeconds)
+    || elapsedSeconds <= 0
+    || !Number.isFinite(rxDelta)
+    || rxDelta < 0
+    || !Number.isFinite(txDelta)
+    || txDelta < 0) return null;
+  return {
+    elapsedSeconds,
+    rxBytesPerSecond: rxDelta / elapsedSeconds,
+    txBytesPerSecond: txDelta / elapsedSeconds
+  };
+}
+
+function mxH2iByteCount(value) {
+  if (value === null || value === undefined) return 'not observed';
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return 'not observed';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+  let amount = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && amount >= 1024; index += 1) {
+    amount /= 1024;
+    unit = units[index];
+  }
+  return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${unit}`;
+}
+
+function mxH2iByteRate(value) {
+  const bytesPerSecond = Number(value);
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond < 0) return 'not calculated';
+  if (bytesPerSecond < 1024) {
+    return `${bytesPerSecond >= 10 ? bytesPerSecond.toFixed(1) : bytesPerSecond.toFixed(2)} B/s`;
+  }
+  const units = ['KiB/s', 'MiB/s', 'GiB/s', 'TiB/s'];
+  let amount = bytesPerSecond / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && amount >= 1024; index += 1) {
+    amount /= 1024;
+    unit = units[index];
+  }
+  return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${unit}`;
+}
+
+function mxH2iDomesticHandshake(value) {
+  const epochSeconds = Number(value);
+  if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return 'not observed';
+  const handshake = new Date(epochSeconds * 1000);
+  if (!Number.isFinite(handshake.getTime())) return 'not observed';
+  return formatTime(handshake.toISOString());
+}
+
+function renderMxH2iTopologyNodeActions(lease) {
+  const productId = mxH2iTopologyProductId(lease);
+  const productName = launcherProductDisplayName(productId, launcherProductById(productId));
+  const employee = mxH2iLeaseIdentityGroup(lease) === 'employee' && Boolean(lease?.userId);
+  const productSelected = launcherNetworkSelectedProductId() === productId;
+  const nodeId = mxH2iTopologyClientNodeId(lease);
+  return `
+    <section class="mx-h2i-topology-node-actions" aria-label="Selected node actions">
+      <article>
+        <div><strong>${employee ? `${escapeHtml(productName)} user access` : 'Connection details'}</strong><span>${employee
+          ? productSelected
+            ? 'Product-scoped Ban / Unban is available in the confirmation drawer.'
+            : `Select ${escapeHtml(productName)} in the drawer before changing product-scoped access.`
+          : 'Anonymous leases do not have a user identity that can be individually banned.'}</span></div>
+        <button class="primary-button" type="button" data-mx-h2i-topology-open-selected="${escapeHtml(nodeId)}">${employee ? 'Open Ban / Unban controls' : 'Open connection details'}</button>
+      </article>
+      <article data-available="false">
+        <div><strong>Disconnect tunnel</strong><span>Unavailable until peer-safe WG removal and admission reconciliation are implemented.</span></div>
+        <button class="secondary-button" type="button" disabled title="Requires peer-safe WG removal and admission reconciliation">Unavailable</button>
+      </article>
+      <article data-available="false">
+        <div><strong>Live speed</strong><span>Unavailable without repeated, timestamped runtime samples. A single WG counter is not a speed measurement.</span></div>
+        <button class="secondary-button" type="button" disabled title="Requires a timestamped runtime telemetry sampler">Needs telemetry</button>
+      </article>
+      <article data-available="false">
+        <div><strong>Traffic limit</strong><span>Unavailable until a product- and peer-scoped enforcement backend exists.</span></div>
+        <button class="secondary-button" type="button" disabled title="Traffic policy enforcement backend is not available">Needs backend</button>
+      </article>
+    </section>
+  `;
+}
+
+function renderMxH2iTopologyRuntimeObservation(lease) {
+  const leaseId = String(lease?.leaseId || '').trim();
+  const productId = mxH2iTopologyProductId(lease);
+  const current = leaseId
+    && state.mxH2iTopologyRuntimeObservation.leaseId === leaseId
+    && state.mxH2iTopologyRuntimeObservation.productId === productId;
+  const observationState = current ? state.mxH2iTopologyRuntimeObservation : null;
+  const samples = asArray(observationState?.samples);
+  const observation = samples.at(-1) || null;
+  const average = mxH2iRuntimeAverage(samples);
+  let content = '<div class="empty-state">Not checked. Refresh manually to read this peer from Domestic.</div>';
+  if (!leaseId) {
+    content = '<div class="empty-state">Domestic WG evidence is unavailable because the lease ID was not recorded.</div>';
+  } else if (observationState?.loading) {
+    content = '<div class="empty-state">Reading WireGuard evidence from Domestic…</div>';
+  } else if (observationState?.error) {
+    content = `<div class="feedback error">Domestic WG evidence unavailable: ${escapeHtml(observationState.error)}</div>`;
+  } else if (observation) {
+    content = `
+      <dl class="mx-h2i-topology-selection-grid">
+        <div><dt>Peer on Domestic</dt><dd>${escapeHtml(observation.peerConfigured === 'yes' ? 'configured' : observation.peerConfigured === 'no' ? 'not configured' : 'not observed')}</dd></div>
+        <div><dt>Latest Domestic handshake</dt><dd>${escapeHtml(mxH2iDomesticHandshake(observation.latestHandshakeEpoch))}</dd></div>
+        <div><dt>Cumulative Domestic RX</dt><dd>${escapeHtml(mxH2iByteCount(observation.rxBytes))}</dd><small>WG counter on Domestic</small></div>
+        <div><dt>Cumulative Domestic TX</dt><dd>${escapeHtml(mxH2iByteCount(observation.txBytes))}</dd><small>WG counter on Domestic</small></div>
+        <div><dt>Domestic average RX</dt><dd>${escapeHtml(average ? mxH2iByteRate(average.rxBytesPerSecond) : 'needs two valid samples')}</dd><small>${average ? `manual ${escapeHtml(average.elapsedSeconds.toFixed(1))}s interval` : 'refresh again later; counter resets are rejected'}</small></div>
+        <div><dt>Domestic average TX</dt><dd>${escapeHtml(average ? mxH2iByteRate(average.txBytesPerSecond) : 'needs two valid samples')}</dd><small>interval estimate, not endpoint or app throughput</small></div>
+        <div><dt>Evidence status</dt><dd>${escapeHtml(observation.status)}</dd><small>${observation.stale ? 'server marked stale' : 'fresh Domestic command completed'}</small></div>
+        <div><dt>Sampled at</dt><dd>${escapeHtml(formatTime(observation.observedAt))}</dd></div>
+      </dl>
+    `;
+  }
+  return `
+    <section class="mx-h2i-topology-runtime" data-mx-h2i-topology-runtime-observation aria-live="polite">
+      <div class="mx-h2i-topology-runtime-head">
+        <div><strong>Domestic WireGuard evidence</strong><span>Manual, Domestic-only sample. Handshake and cumulative RX/TX do not prove the client is currently online. Average RX/TX requires two valid manual samples and is not end-to-end speed.</span></div>
+        <button class="secondary-button" type="button" data-mx-h2i-topology-observe-selected="${escapeHtml(mxH2iTopologyClientNodeId(lease))}" ${!leaseId || observationState?.loading ? 'disabled' : ''}>${observationState?.loading ? 'Refreshing…' : 'Refresh WG status'}</button>
+      </div>
+      ${content}
+    </section>
+  `;
+}
+
 function renderMxH2iTopologySelectedLease(lease) {
   if (!lease) {
     return `
@@ -12027,7 +12234,6 @@ function renderMxH2iTopologySelectedLease(lease) {
         <strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong>
         <small>${escapeHtml([mxH2iLeaseAuditIdentity(lease), lease.productId, lease.leaseId || 'lease ID not recorded'].filter(Boolean).join(' · '))}</small>
       </div>
-      <button class="primary-button" type="button" data-mx-h2i-topology-open-selected="${escapeHtml(mxH2iTopologyClientNodeId(lease))}">Open connection drawer</button>
     </div>
     <dl class="mx-h2i-topology-selection-grid">
       <div><dt>Assigned IP</dt><dd>${escapeHtml(lease.leaseIp || 'not recorded')}</dd></div>
@@ -12040,6 +12246,8 @@ function renderMxH2iTopologySelectedLease(lease) {
       <div><dt>Online / handshake</dt><dd>${escapeHtml(observedAt ? `runtime observation ${formatTime(observedAt)}` : 'not observed')}</dd><small>no online claim from a static lease</small></div>
       <div><dt>Location / logs</dt><dd>not collected</dd><small>no client position or log telemetry</small></div>
     </dl>
+    ${renderMxH2iTopologyNodeActions(lease)}
+    ${renderMxH2iTopologyRuntimeObservation(lease)}
     ${renderMxH2iTopologyActivity(lease)}
   `;
 }
@@ -12605,6 +12813,7 @@ function selectLauncherNetworkProduct(productId) {
   state.mxH2iTopologyActivity.requestSequence += 1;
   state.mxH2iTopologyActivity.leaseId = null;
   state.mxH2iTopologyActivity.activity = [];
+  resetMxH2iTopologyRuntimeObservation();
   state.mxH2iAnonymousQuickConfirmation = null;
   closeMxH2iLeaseDrawer({ restoreFocus: false });
   disposeMxH2iTopology();
@@ -12754,6 +12963,13 @@ function bindMxH2iTopologySelectionActions(root, leases, product) {
       event.currentTarget
     );
   });
+  section.querySelector('[data-mx-h2i-topology-observe-selected]')?.addEventListener('click', (event) => {
+    const lease = mxH2iTopologyLeaseForNode(
+      leases,
+      event.currentTarget.dataset.mxH2iTopologyObserveSelected
+    );
+    if (lease) void loadMxH2iTopologyRuntimeObservation(root, section, leases, product, lease);
+  });
   section.querySelector('[data-mx-h2i-topology-apply-group]')?.addEventListener('click', (event) => {
     activateMxH2iTopologyNode(root, leases, product, event.currentTarget.dataset.mxH2iTopologyApplyGroup, event.currentTarget);
   });
@@ -12780,8 +12996,12 @@ function renderMxH2iTopologySelection(root, leases, product, nodeId) {
     || Boolean(groupNode)
     || productNode
     || ['domestic', 'internal'].includes(normalized);
+  const nextLeaseKey = selectedLease ? mxH2iLeaseDrawerKey(selectedLease) : null;
+  if (state.mxH2iTopologyView.selectedLeaseKey !== nextLeaseKey) {
+    resetMxH2iTopologyRuntimeObservation();
+  }
   state.mxH2iTopologyView.selectedNodeId = valid ? normalized : null;
-  state.mxH2iTopologyView.selectedLeaseKey = selectedLease ? mxH2iLeaseDrawerKey(selectedLease) : null;
+  state.mxH2iTopologyView.selectedLeaseKey = nextLeaseKey;
   const selection = section.querySelector('[data-mx-h2i-topology-selection]');
   if (selection) {
     selection.innerHTML = renderMxH2iTopologySelectedNode(
@@ -12796,6 +13016,77 @@ function renderMxH2iTopologySelection(root, leases, product, nodeId) {
   bindMxH2iTopologySelectionActions(root, leases, product);
   setMxH2iTopologyNodeSelection(state.mxH2iTopology, state.mxH2iTopologyView.selectedNodeId);
   if (selectedLease) void loadMxH2iTopologyActivity(section, selectedLease);
+}
+
+async function loadMxH2iTopologyRuntimeObservation(root, section, leases, product, lease) {
+  const leaseId = String(lease?.leaseId || '').trim();
+  const productId = mxH2iTopologyProductId(lease);
+  const leaseKey = mxH2iLeaseDrawerKey(lease);
+  if (!leaseId || !productId || !section?.isConnected) return;
+  const requestScope = captureLauncherNetworkRequestScope();
+  const previousSamples = state.mxH2iTopologyRuntimeObservation.leaseId === leaseId
+    && state.mxH2iTopologyRuntimeObservation.productId === productId
+    ? asArray(state.mxH2iTopologyRuntimeObservation.samples)
+    : [];
+  const requestSequence = Number(state.mxH2iTopologyRuntimeObservation.requestSequence || 0) + 1;
+  state.mxH2iTopologyRuntimeObservation = {
+    leaseId,
+    productId,
+    loading: true,
+    error: null,
+    samples: previousSamples,
+    requestSequence
+  };
+  const requestIsCurrent = () => (
+    section.isConnected
+    && isLauncherNetworkRequestScopeCurrent(requestScope)
+    && state.mxH2iTopologyRuntimeObservation.requestSequence === requestSequence
+    && state.mxH2iTopologyRuntimeObservation.leaseId === leaseId
+    && state.mxH2iTopologyRuntimeObservation.productId === productId
+    && state.mxH2iTopologyView.selectedLeaseKey === leaseKey
+  );
+  const renderSelection = () => {
+    if (!requestIsCurrent()) return;
+    const selection = section.querySelector('[data-mx-h2i-topology-selection]');
+    if (!selection) return;
+    selection.innerHTML = renderMxH2iTopologySelectedNode(
+      state.mxH2iTopologyView.selectedNodeId,
+      leases,
+      product
+    );
+    bindMxH2iTopologySelectionActions(root, leases, product);
+  };
+  renderSelection();
+  try {
+    const payload = await fetchJson(`/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/runtime-observation`, {
+      method: 'POST',
+      body: {
+        requestedBy: 'launcher-network-node-inspector'
+      }
+    });
+    if (!requestIsCurrent()) return;
+    const observation = mxH2iRuntimeObservationFromPayload(payload, lease);
+    state.mxH2iTopologyRuntimeObservation = {
+      leaseId,
+      productId,
+      loading: false,
+      error: null,
+      samples: [...previousSamples, observation].slice(-2),
+      requestSequence
+    };
+    renderSelection();
+  } catch (error) {
+    if (!requestIsCurrent()) return;
+    state.mxH2iTopologyRuntimeObservation = {
+      leaseId,
+      productId,
+      loading: false,
+      error: error.message,
+      samples: previousSamples,
+      requestSequence
+    };
+    renderSelection();
+  }
 }
 
 async function loadMxH2iTopologyActivity(section, lease) {
@@ -13705,11 +13996,12 @@ function renderMxH2iLeaseDrawer() {
           `}
         </section>
         <section class="app-drawer-section">
-          <div class="app-section-title"><span>04</span><strong>Planned controls</strong></div>
-          <p class="app-section-copy">These controls require runtime evidence and safe reconciliation before they can mutate a live tunnel.</p>
+          <div class="app-section-title"><span>04</span><strong>Runtime controls</strong></div>
+          <p class="app-section-copy">These actions remain unavailable until their runtime telemetry and safe data-plane reconciliation backends exist. No disabled control reports success.</p>
           <div class="mx-h2i-future-controls">
-            <button class="secondary-button" type="button" disabled title="Requires peer-safe revoke saga">Revoke WG peer</button>
-            <button class="secondary-button" type="button" disabled title="Traffic policy backend is not available">Traffic limits</button>
+            <button class="secondary-button" type="button" disabled title="Requires peer-safe WG removal and admission reconciliation">Disconnect WG peer</button>
+            <button class="secondary-button" type="button" disabled title="Requires a timestamped runtime telemetry sampler">Live speed</button>
+            <button class="secondary-button" type="button" disabled title="Traffic policy enforcement backend is not available">Traffic limits</button>
             <button class="secondary-button" type="button" disabled title="Port policy backend is not available">Port policy</button>
           </div>
         </section>

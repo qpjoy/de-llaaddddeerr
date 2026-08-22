@@ -60,6 +60,7 @@ import type {
   LauncherNetworkReachabilityPlan,
   LauncherProductNetwork,
   LauncherProductNetworkInput,
+  LauncherProductUserAccess,
   LauncherProductUserAccessInput,
   LauncherProductUserAccessResult,
   LogEntryInput,
@@ -348,6 +349,8 @@ export interface PlatformStore {
   listLauncherProductNetworks(): MaybePromise<LauncherProductNetwork[]>;
   getLauncherProductNetwork(productId: string): MaybePromise<LauncherProductNetwork | null>;
   upsertLauncherProductNetwork(input: LauncherProductNetworkInput): MaybePromise<LauncherProductNetwork>;
+  listLauncherProductUserAccess(productId?: string | null): MaybePromise<LauncherProductUserAccess[]>;
+  getLauncherProductUserAccess(productId: string, userId: string): MaybePromise<LauncherProductUserAccess | null>;
   setLauncherProductUserAccess(input: LauncherProductUserAccessInput): MaybePromise<LauncherProductUserAccessResult>;
   listLauncherNetworkLeases(productId?: string | null): MaybePromise<LauncherNetworkLease[]>;
   getLauncherNetworkLease(leaseId: string): MaybePromise<LauncherNetworkLease | null>;
