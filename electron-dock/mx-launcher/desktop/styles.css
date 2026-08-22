@@ -2264,6 +2264,25 @@ select {
   line-height: 1.6;
 }
 
+.launcher-network-product-filter {
+  display: grid;
+  max-width: 680px;
+  gap: 6px;
+  margin-top: 14px;
+  color: var(--mx-text-soft);
+  font-size: 11px;
+}
+
+.launcher-network-product-filter select {
+  min-width: 0;
+  min-height: 40px;
+  border: 1px solid color-mix(in srgb, var(--mx-primary) 45%, var(--line));
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--mx-bg-input);
+  color: var(--text);
+}
+
 .mx-h2i-dashboard-status {
   display: grid;
   grid-template-columns: minmax(120px, 0.36fr) minmax(0, 0.64fr);
@@ -2388,6 +2407,73 @@ select {
   min-width: 0;
 }
 
+.launcher-network-product-scope {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  gap: 9px;
+}
+
+.launcher-network-product-scope > button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(110px, 0.7fr) minmax(95px, 0.45fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-quiet);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.launcher-network-product-scope > button:hover,
+.launcher-network-product-scope > button:focus-visible,
+.launcher-network-product-scope > button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--mx-primary) 62%, var(--line));
+  background: color-mix(in srgb, var(--mx-primary) 8%, var(--panel-quiet));
+}
+
+.launcher-network-product-scope span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.launcher-network-product-scope strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.launcher-network-product-scope small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.launcher-network-all-safety {
+  border-color: color-mix(in srgb, var(--mx-warning) 38%, var(--line));
+}
+
+.launcher-network-all-safety strong,
+.launcher-network-all-safety span {
+  display: block;
+}
+
+.launcher-network-all-safety strong {
+  color: var(--mx-warning);
+  font-size: 13px;
+}
+
+.launcher-network-all-safety span {
+  margin-top: 4px;
+  color: var(--mx-text-soft);
+  font-size: 11px;
+}
+
 .mx-h2i-operations-head > div {
   min-width: 0;
 }
@@ -2408,7 +2494,7 @@ select {
 
 .mx-h2i-lease-metrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -2574,7 +2660,7 @@ select {
   position: absolute;
   inset: auto 14px 12px;
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(4, 1fr);
   pointer-events: none;
 }
 
@@ -2904,7 +2990,7 @@ select {
 
 .mx-h2i-lease-filters {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) minmax(180px, 0.32fr);
+  grid-template-columns: minmax(240px, 1fr) repeat(2, minmax(180px, 0.32fr));
   gap: 10px;
 }
 
@@ -7352,7 +7438,9 @@ select {
   .mx-h2i-dashboard-hero,
   .mx-h2i-dashboard-status,
   .mx-h2i-quick-policy-confirmation,
-  .mx-h2i-banned-user-row {
+  .mx-h2i-banned-user-row,
+  .launcher-network-product-scope,
+  .launcher-network-product-scope > button {
     grid-template-columns: 1fr;
   }
 

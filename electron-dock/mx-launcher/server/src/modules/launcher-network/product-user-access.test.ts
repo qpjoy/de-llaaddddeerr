@@ -69,20 +69,28 @@ test('product user ban is ops-only, releases only matching leases, and keeps Luo
   assert.equal(launcherNetworkLeaseIsActive(store.getLauncherNetworkLease(luopan.lease.leaseId)!), true);
   assert.equal(launcherNetworkLeaseIsActive(store.getLauncherNetworkLease(otherMxH2i.lease.leaseId)!), true);
 
-  const list = await controller.listProductUserAccess('mx-h2i', 'product-user-access-test');
-  assert.equal(list.productUserAccess.blockedUserCount, 1);
-  assert.equal(list.productUserAccess.blockedUsers[0]?.userId, blockedUser.userId);
-  assert.equal(list.productUserAccess.blockedUsers[0]?.lastLease?.leaseId, mxH2i.lease.leaseId);
-  assert.equal(list.productUserAccess.blockedUsers[0]?.lastLease?.status, 'released');
-  assert.equal(list.productUserAccess.blockedUsers[0]?.controlPlane.admission, 'blocked');
-  assert.equal(list.productUserAccess.blockedUsers[0]?.runtimePeerRemoval.status, 'not-performed');
-  const blockedAccess = await controller.getProductUserAccess(
-    'mx-h2i',
-    blockedUser.userId,
-    'product-user-access-test'
-  );
-  assert.equal(blockedAccess.productUserAccess.blocked, true);
-  assert.equal(blockedAccess.productUserAccess.runtimePeerRemoval.status, 'not-performed');
+  const listUserCenterUsers = store.listUserCenterUsers.bind(store);
+  store.listUserCenterUsers = () => {
+    throw new Error('product access reads must not load credential summaries');
+  };
+  try {
+    const list = await controller.listProductUserAccess('mx-h2i', 'product-user-access-test');
+    assert.equal(list.productUserAccess.blockedUserCount, 1);
+    assert.equal(list.productUserAccess.blockedUsers[0]?.userId, blockedUser.userId);
+    assert.equal(list.productUserAccess.blockedUsers[0]?.lastLease?.leaseId, mxH2i.lease.leaseId);
+    assert.equal(list.productUserAccess.blockedUsers[0]?.lastLease?.status, 'released');
+    assert.equal(list.productUserAccess.blockedUsers[0]?.controlPlane.admission, 'blocked');
+    assert.equal(list.productUserAccess.blockedUsers[0]?.runtimePeerRemoval.status, 'not-performed');
+    const blockedAccess = await controller.getProductUserAccess(
+      'mx-h2i',
+      blockedUser.userId,
+      'product-user-access-test'
+    );
+    assert.equal(blockedAccess.productUserAccess.blocked, true);
+    assert.equal(blockedAccess.productUserAccess.runtimePeerRemoval.status, 'not-performed');
+  } finally {
+    store.listUserCenterUsers = listUserCenterUsers;
+  }
 
   await assert.rejects(
     enrollUser(controller, blockedToken, blockedUser.userId, 'mx-h2i', 'blocked-mx-h2i-new'),

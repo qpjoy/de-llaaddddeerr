@@ -1,10 +1,12 @@
-# MX-H2I 连接运营控制面、匿名准入与安全下线设计
+# Launcher Network 多产品连接运营、MX-H2I 匿名准入与安全下线设计
 
 > 状态：仓库当前实现基线 + 后续目标架构与分阶段实施约束。
 >
-> 本文定义 MX-H2I 专属运营工作区、按 ProductNetwork 管理的匿名准入策略、实时连接
-> 观测、3D 拓扑，以及未来批量下线匿名 WireGuard peer 时必须满足的安全状态机。
-> 截至 2026-08-22，专属 Dashboard、静态连接表/抽屉、ProductNetwork 匿名策略、
+> 本文定义 Launcher Network 多 standalone channel 运营工作区、按 ProductNetwork
+> 管理的匿名准入策略、实时连接观测、3D 拓扑，以及未来批量下线匿名
+> WireGuard peer 时必须满足的安全状态机。MX-H2I 仍是一个独立网络产品，不等于
+> Launcher Network 平台本身。
+> 截至 2026-08-22，Launcher Network Dashboard、静态连接表/抽屉、ProductNetwork 匿名策略、
 > 产品级用户 ban/unban 与 blocked inventory 已进入仓库实现；runtime collector、真实在线
 > 拓扑、peer-safe revoke、流量与端口策略仍是目标能力。实现与目标在下文分别说明。
 >
@@ -43,6 +45,14 @@
     active 控制面 lease；它不禁用全局用户、不撤销用户 token，也不表示 WG peer 已移除。
 12. 匿名连接没有 `userId`，当前连接抽屉不得把用户 ban 伪装成匿名单客户端封禁；匿名新
     准入使用 ProductNetwork 策略，已有 peer 的安全下线仍走后续 revoke saga。
+13. Dashboard 的网络归属以 lease `productId` 为准；该字段是服务端解析后的实际
+    standalone channel。`appId` 只表示请求 lease 的 app，旧记录可能缺失；
+    `launcherMode` 不能用来判断是否由 embed app 发起。
+14. 产品 `serviceVip` 是 channel 共享的 Internal 服务地址，不是每个用户或安装实例的
+    lease IP；客户端实例拿到的是 `leaseIp`。拓扑和文案必须分开这两种地址。
+15. Domestic relay fabric 和 Internal service peer 是可由多个 standalone 产品共用的
+    站点基础设施；客户端 lease CIDR、产品 VIP、AllowedIPs/materialization 和策略仍按
+    ProductNetwork 隔离。界面不得画成每个产品都有一套物理 Domestic/Internal。
 
 ## 2. 本期范围与明确非目标
 
@@ -52,14 +62,18 @@
   `anonymousUiVisibility`；服务端在匿名 enrollment/renewal 边界强制执行。
 - MX-H2I 默认把新建访客入口放在高级选项；员工密码、飞书登录和已连接访客的断开路径
   保持原行为。
-- Desktop 左侧已有独立 `MX-H2I Dashboard` 入口。Dashboard 汇总静态 active lease、
-  employee/anonymous/source IP/blocked-user 数量，提供静态 3D lease 路径和 table fallback。
+- Desktop 左侧将连接运营入口命名为 `Launcher Network`。工作区以全部已注册
+  standalone ProductNetwork 为总览，可切换 MX-H2I、Luopan 及后续 channel；产品策略和操作
+  始终绑定当前选中的 `productId`。
+- Dashboard 汇总静态 active lease、employee/Feishu/anonymous/source IP/blocked-user 数量，
+  提供多产品静态 3D lease 路径和 table fallback；它不把它们称为实时在线客户端。
 - Connections 表支持完整静态 inventory 的搜索、身份过滤和每页 100 条分页；行可打开
   连接抽屉。抽屉明确区分 HTTP source IP、数据库更新时间和尚未观测的 WG runtime。
-- 员工连接抽屉可执行 `mx-h2i` ProductNetwork 范围的用户 ban/unban；被 ban 的用户保留
-  在 blocked inventory 中，即使其 active MX-H2I lease 已被 release，仍可从 Admin unban。
-- Dashboard 的匿名快速开关固定写入 `productId=mx-h2i`；Luopan 的 standalone 产品页写
-  `productId=luopan`，两者不是 Launcher 全局开关。
+- 员工连接抽屉可执行当前选中 ProductNetwork 范围的用户 ban/unban；被 ban 的用户保留
+  在对应产品的 blocked inventory 中，即使其 active lease 已被 release，仍可从 Admin unban。
+- Dashboard 的匿名快速开关写入当前选中的 standalone `productId`；选中
+  MX-H2I 时只写 `mx-h2i`，选中 Luopan 时只写 `luopan`，两者不是 Launcher
+  全局开关。全部产品总览不提供模糊的全局 anonymous toggle。
 - 当前产品级 ban、lease release 与匿名策略切换都不会执行或确认 Domestic/Internal
   WireGuard peer removal；API 与 UI 均返回/显示该边界。
 
@@ -73,7 +87,9 @@ handshake/RX/TX/endpoint、peer-safe revoke、细粒度敏感字段 RBAC/掩码�
 - 因为隐藏匿名入口而断开当前已连接的访客。
 - 用 `app.enabled=false`、`product.enabled=false` 或禁用 Launcher channel 代替匿名策略。
 - 修改 V1 HDO、`electron-server`、`electron-plugin-hdo` 或其 `100.*` 网络。
-- 让 MX Insight Hub、H2O、AppCenter 等 embed 应用注册独立 ProductNetwork 或 peer。
+- 让 MX Insight Hub、H2O、AppCenter 等 embed 应用拥有独立 standalone 网络 owner、
+  endpoint lease 或 peer。embed registry 记录即使带有应用级 VIP 字段，也不改变其
+  `broker-session` 语义。
 - 立即实现客户端级限速、端口 ACL、流量计费或深度包检测。
 - 把 Three.js 动画、数据库 lease 数量或 HTTP source IP 当作实时在线证明。
 
@@ -144,6 +160,59 @@ embed 应用使用 `standaloneChannelProductId` 指向已有通道：
 MX Insight Hub 必须继续是 embed/private 数据应用：没有 ProductNetwork、WG peer、
 route plan、PAC/DNS/NRPT owner。它的 API key、tenant、quota 和数据字段授权不属于本文
 匿名网络策略。
+
+### 3.5 VIP、lease 与多产品归属的精确语义
+
+“每个 standalone launcher 有自己的 VIP/lease”需要分三层理解：
+
+| 层 | 权威字段 | 基数 | 语义 |
+| --- | --- | --- | --- |
+| standalone channel | `LauncherProductNetwork.productId` | 每个正式 standalone 产品一条 | 网络策略、地址池和运行时归属边界 |
+| 产品服务地址 | `LauncherProductNetwork.serviceVip` | 每个 channel 一个当前配置值 | 产品共享的 Internal control/DNS/proxy/service 地址，不属于某个用户 |
+| 客户端租约 | `LauncherNetworkLease.leaseIp` | 每个 install/identity/profile 可有一条 active 记录 | 从当前 channel 的 employee/Feishu/anonymous 池分配的 overlay IP |
+
+因此，不应说“每台 Luopan 有一个 VIP”。更准确的表述是：Luopan ProductNetwork
+当前配置产品 VIP `10.88.100.3`；每个 Luopan 安装实例从 `10.91/16` 的相应
+profile 池拿到 `leaseIp`。MX-H2I 对应的当前内置值是 VIP `10.88.100.1` 和
+`10.89/16` lease 段。ProductNetwork 记录存在只证明 desired state 已注册；在
+Domestic `productRelayCidrs`、Internal service peer 和 gateway/DNS 没有 reconcile 证据前，
+Dashboard 不得声称该 VIP 已可达。
+
+当前服务端会在 ProductNetwork upsert 时拒绝 enabled standalone 之间重叠的 lease
+range，但还没有等价的跨产品 `serviceVip` 唯一性强校验。因此“每个 standalone
+有自己的 VIP”是正式注册契约，不是对任意手工写入记录的已证明事实。内置
+MX-H2I/Luopan 当前值相互独立；对后续产品，onboarding 和 Dashboard 应检测重复
+VIP 并标为 conflict，在服务端唯一性约束落地前不宣称隔离健康。
+
+Internal 全量 lease inventory 的归属规则如下：
+
+| 需求 | 应使用的字段 | 不应使用 |
+| --- | --- | --- |
+| 列出通过 Luopan channel 获取内网 lease 的记录 | `lease.productId === "luopan"` | IP 前缀猜测、device label 文案 |
+| 列出其中的登录用户 | 再限定 `identityKind === "user"`，并以 `userId` 关联 User Center | 把 anonymous install 推断成用户 |
+| 区分 employee / Feishu / anonymous | `leaseProfile` | 仅根据 `leaseIp` 手工切段 |
+| 区分哪个 app 发起请求 | `appId` | `launcherMode` |
+| 识别 embed 借用哪个 channel | lease `productId` + AppCenter/ProductNetwork 绑定 | 为 embed 创建虚假 endpoint lease |
+
+服务端在 enrollment 时会把 lease `productId` 规范化为实际 standalone channel；即使
+请求来自绑定 Luopan 的 embed app，lease `productId` 仍是 `luopan`，`appId` 保留发起
+app。旧 lease 可能没有 `appId`，此时 UI 只能标为 `legacy / requesting app unknown`，
+不能回填成 MX-H2I 或 Luopan。`launcherMode` 在 lease 建立时会跟随实际 channel 模式，
+因此不是 embed 请求者的可靠识别字段。
+
+同一个已认证 Internal 用户同时拥有 MX-H2I 和 Luopan lease 时，可以用相同
+`userId` 做跨产品关联。匿名 lease 没有 `userId`；`installId/deviceId` 也可能是应用内
+独立生成，不得用它们将 MX-H2I 和 Luopan 的匿名记录合并成“同一人”。
+
+Domestic/Internal 的可视化同样需要分开物理面和产品面：
+
+- 当前主线上，MX-H2I 与 Luopan 可以共用 `mx-domestic` relay fabric、站点 Domestic
+  gateway 和 `mx-internal-svc` Internal service peer；
+- 每个 standalone 的 lease CIDR、service/control/DNS VIP `/32`、ProductNetwork 策略和
+  客户端 WG profile 仍独立；
+- shared Internal service peer 的 route/AllowedIPs 是所有已 reconcile channel 网段的并集，
+  不代表这些产品共用 VIP 或 admission；
+- embed app 只沿其 `standaloneChannelProductId` 所属分支显示，不另画 Domestic/Internal peer。
 
 ## 4. ProductNetwork 策略模型
 
@@ -378,32 +447,46 @@ MX-H2I 默认 `advanced` 后：
 - 查看不含秘密的诊断；
 - 理解“服务端已禁止续租，但现有数据面可能暂时仍存在”。
 
-## 7. MX-H2I 专属 Admin 工作区
+## 7. Launcher Network 多产品 Admin 工作区
 
-### 7.1 当前专属 Dashboard
+### 7.1 导航命名、选择作用域与当前 Dashboard
 
-Desktop 左侧把 `MX-H2I Dashboard` 作为独立一级入口，不再要求操作员先在通用 Apps 树中
-寻找 MX-H2I。当前 Dashboard 包含：
+Desktop 左侧一级入口使用 `Launcher Network`，而不是 `MX-H2I Dashboard`。
+原因是该工作区的 inventory 来自所有 standalone ProductNetwork；MX-H2I 只是其中一个
+channel。左侧导航不应与通用 Apps 树重复枚举产品，产品切换由 Dashboard 内的
+ProductNetwork selector/filter 承担。
 
-- 显式标注 `mx-h2i only` 的匿名 admission 状态和 enable/disable 快速操作；
-- 静态 active lease、employee、anonymous、已记录 source IP、blocked-user 指标；
-- `Client lease record -> identity group -> Domestic -> Internal` 交互式静态 3D 图；每个 client
+工作区必须始终显示当前作用域：
+
+- `All standalone channels`：跨产品只读运营总览；不显示全局 anonymous/ban 操作；
+- `MX-H2I / productId=mx-h2i`：显示 MX-H2I 租约、VIP、策略和产品级操作；
+- `Luopan / productId=luopan`：显示 Luopan channel 的同类数据；MX-H2I 匿名策略不带入；
+- 后续 standalone：从已注册且 `mode=standalone` 的 ProductNetwork 动态生成，不写死产品名单。
+
+当前 Dashboard 包含：
+
+- 显式标注当前 `productId` 的匿名 admission 状态和 enable/disable 快速操作；
+  `All` 作用域下仅展示各产品状态，不提供批量改写；
+- 静态 active lease、employee、Feishu、anonymous、已记录 source IP、blocked-user
+  指标，且指标必须跟随当前 product filter；
+- `Client lease record -> product-scoped identity group -> ProductNetwork/channel (VIP) -> shared Domestic -> shared Internal`
+  交互式静态 3D 图；可选显示 identity group 聚合层。每个 client
   节点代表一条静态 lease，不冒充一台物理机器；每个视窗
   最多渲染 48 条 lease，通过全量搜索、身份过滤和分页覆盖所有记录，不再用含义不明的
   `+N more` 节点隐藏剩余集合；
 - 拖拽旋转、Shift/右键拖拽平移、滚轮缩放、reset/fit、标签开关，以及等价键盘操作；
-- client、identity group、Domestic、Internal 全部支持 hover/select；client 可进入现有 Connections
-  抽屉，group 可直接套用过滤，Domestic/Internal 只提供安全导航，不在 3D 内伪造 destructive
-  action；
+- client、identity group、ProductNetwork/VIP、Domestic、Internal 都支持
+  hover/select；client 可进入 Connections 抽屉，group/ProductNetwork 可直接套用过滤，
+  Domestic/Internal 只提供安全基础设施导航，不在 3D 内伪造 destructive action；
 - 选中 client 后按 exact lease ID 读取最多 50 条服务端可信、脱敏的控制面审计活动；该活动不是
   runtime log、流量、handshake 或在线证明；
 - 始终保留可键盘操作的列表 fallback；
-- 可搜索、按身份过滤、分页的 Connections 表；
-- 被 MX-H2I ban 的用户 inventory；
+- 可搜索，按 product/channel、requesting app、identity/profile 过滤并分页的 Connections 表；
+- 按当前 ProductNetwork 列出的 blocked users inventory；
 - 完整 `enabled | drain | disabled` 与 `primary | advanced | hidden` 策略编辑器；
-- 回到通用 Product settings、Domestic Setup 和刷新入口。
+- 回到通用 Product settings、shared Domestic/Internal infrastructure 和刷新入口。
 
-Dashboard 的 `STATIC DATA`、`Static lease != real-time online` 提示是产品契约，不得为了
+Dashboard 的 `STATIC DATA`、`Static lease != real-time online` 提示是平台契约，不得为了
 视觉“大屏”效果去掉。Three.js 节点和动画不能产生在线、已断开或 peer 已删除的结论。
 
 ### 7.2 当前 Connections 抽屉与用户控制
@@ -413,49 +496,92 @@ backdrop 和 Escape 关闭，并应把焦点还给触发行。后续修改必须
 可达性，不能只验鼠标路径。
 
 抽屉展示 identity/user、assigned IP、source IP、lease/install/device、platform、记录时间
-和 expiry，但不返回 capability、private key 或完整 public key。当前 source IP 仅在持有
+和 expiry；Admin 抽屉与拓扑不展示 capability、private key 或完整 public key。当前
+internal ops lease DTO 仍包含 `publicKey`，不能把“UI 未展示”写成“API 未返回”；后续应按
+用途拆分最小 DTO，并用独立 sensitive-read RBAC 控制密钥标识。当前 source IP 仅在持有
 ops token 的 Admin 中显示；默认掩码与独立 sensitive-read 权限仍是 §13 的目标能力。
+
+lease 持久记录只保存 `userId`，不保存人类可读姓名。Internal ops-only
+lease list/get 在服务端用 `userId` 精确关联 User Center，返回临时展示字段
+`userDisplayName` 和 `userAccount`；它们不写回 lease，普通 enroll/renew 响应也不包含。
+Admin 显示优先级为：
+
+1. `userDisplayName`（来自 `UserCenterUser.displayName`）作为主标题；
+2. `userAccount` 和 `userId` 作为次级、可审计技术标识；
+3. 无法 exact join 时主标题显示“姓名不可用”，仍保留 `userId` 技术标识，但不把它伪装成姓名。
+
+对 Feishu profile，自动开通时的 `displayName` 来自 Feishu user-info 的 `name`，其次
+`en_name`，再次才是带短哈希的稳定 fallback。因此拓扑、表格、tooltip 和抽屉应以
+例如“张三”的 User Center display name 为主标题，以 `usr_feishu_*` 为次级技术标识。
+`profile.externalIds.feishuSubject` 是身份绑定字段，不应作为姓名展示或返回到普通前端。
+
+当前 Feishu 已绑定用户在每次 OAuth 登录时不会自动覆盖 User Center `displayName`。
+该值可能是首次开通时的 Feishu 姓名，也可能是管理员后续修改的显示名，不应标成
+“实时 Feishu 目录名”。如果后续需要跟随 Feishu 改名，应建立独立的目录同步、来源
+优先级和人工 override 规则。User Center 暂时不可用时，UI 显示“姓名不可用”
+和 `userId`，不根据 Feishu ID 哈希猜测姓名。
 
 拓扑所称“device identities”是以 `deviceId/installId` 为主、以现有租约身份作降级的 best-effort
 去重，不等于可靠硬件资产数。`sourceIp` 是 enrollment/renewal HTTP 来源，不得映射成“登录地点”。
 当前没有客户端 GPS/GeoIP 证据，也没有客户端 runtime log；UI 必须显示 `not collected`，不能用
 私网/NAT/代理地址推断城市或国家。
 
-员工行的 ban/unban confirmation 必须同时写明：
+登录用户行的 ban/unban confirmation 必须同时写明：
 
-- 作用域只有 ProductNetwork `mx-h2i`，Luopan 不受影响；
+- 作用域只有当前明确选中的 ProductNetwork，并显示精确 `productId`；
+- 例如 ban `mx-h2i` 时 Luopan 不受影响，ban `luopan` 时 MX-H2I 不受影响；
 - ban 会 release 匹配的 active 控制面 leases；
 - token 和全局用户状态不变；
 - WireGuard peer removal 未执行、未确认；
 - unban 只恢复 admission，不重建 lease/peer。
 
-匿名行不展示伪造的“Ban user”动作，只能打开 MX-H2I anonymous policy。未来 Revoke WG
+匿名行不展示伪造的“Ban user”动作，只能打开当前 ProductNetwork 的
+anonymous policy。未来 Revoke WG
 peer、Traffic limits、Port policy 在没有后端 reconcile/evidence 前只能是 disabled planned
 controls，不能成为无效或误导性的按钮。
 
-blocked inventory 是可恢复操作面：ban 后 active row 会从 active Connections 消失，但用户
-仍必须在 inventory 中可打开并 unban；即使用户从未拥有 MX-H2I lease，也不能要求数据库
-手工恢复。
+blocked inventory 是产品级可恢复操作面：ban 后 active row 会从当前产品的
+active Connections 消失，但用户仍必须在同一 `productId` inventory 中可打开并
+unban；即使用户从未拥有该产品 lease，也不能要求数据库手工恢复。
 
-### 7.3 目标信息架构
+### 7.3 多产品信息架构与操作边界
 
-MX-H2I 不应只埋在通用 Apps 树下。建议顶层工作区：
+Launcher Network 不应只埋在通用 Apps 树下。顶层工作区使用统一 product/channel
+filter，再提供：
 
-1. `Overview`：关键指标、策略、站点健康、异常摘要；
-2. `Connections`：精确客户端表、过滤、排序、导出；
-3. `Topology`：3D 客户端—Domestic—Internal—服务拓扑；
-4. `Anonymous Governance`：admission、visibility、dry-run 和风险说明；
+1. `Overview`：全部/单产品关键指标、策略、站点健康、异常摘要；
+2. `Connections`：精确客户端 lease 表、跨产品搜索、过滤、排序、导出；
+3. `Topology`：3D lease—product-scoped identity—ProductNetwork/VIP—shared Domestic—shared Internal 拓扑；
+4. `Product Policies`：仅在选定一个 standalone channel 后编辑 anonymous admission、
+   visibility 与 blocked users；
 5. `Leases & Revocation`：静态 lease、handover、未来 revoke saga；
-6. `Diagnostics`：单连接与站点证据；
-7. `Traffic & Port Policies`：未来能力占位，未实现时不出现可执行按钮。
+6. `Infrastructure`：Domestic/Internal 共享基础设施和各产品 materialization 证据；
+7. `Diagnostics`：单连接、单产品与站点证据；
+8. `Traffic & Port Policies`：未来能力占位，未实现时不出现可执行按钮。
 
 通用 Apps 页面继续负责 app 注册、mode、channel、capabilities、RBAC 和发布；MX-H2I
-工作区负责网络产品运营。
+与 Luopan 的连接运营收敛在 Launcher Network 工作区。
+
+操作必须按节点类型收敛：
+
+| 节点/对象 | 拓扑内允许 | 详细抽屉/页允许 | 禁止语义 |
+| --- | --- | --- | --- |
+| lease/client | select、focus、打开 connection drawer | 查看脱敏细节、服务端 audit；对登录用户进入产品级 ban | 匿名行伪造 Ban user；把 release 说成 peer 已删 |
+| identity/profile group | 套用过滤 | 查看统计和过滤后 inventory | 直接批量 revoke |
+| ProductNetwork/channel + VIP 属性 | 切换 product filter、查看 VIP/CIDR/policy 摘要 | 单 `productId` 匿名策略、blocked inventory、reconcile 证据、VIP smoke | 不明确 productId 的全局开关；把 VIP 伪造成 Internal 后的物理节点 |
+| requesting embed app | 应用过滤、导航 AppCenter | AppCenter/RBAC/service dependency | 独立 endpoint lease 或 peer 操作 |
+| Domestic/Internal | 查看 shared infrastructure 摘要 | 基础设施详情和带 blast-radius 的 reconcile 工作流 | 伪装成只影响当前产品的操作 |
+
+Domestic/Internal reconcile 可能重新 materialize 共享 interface 及所有
+`productRelayCidrs`，不是普通的 product-local action。执行前必须展示所有受影响
+channel、目标 CIDR/VIP 并走现有 Admin 确认/证据链，不能把它塞进单个客户端节点的
+快捷菜单。
 
 ### 7.4 目标 Overview
 
 建议至少显示：
 
+- standalone channel 数、当前 product filter、每产品 service VIP 与 materialization 状态；
 - employee / Feishu / anonymous active lease 数；
 - runtime online / idle / offline / stale 数；
 - Domestic 与 Internal direct 的 peer/materialization 健康；
@@ -465,13 +591,15 @@ MX-H2I 不应只埋在通用 Apps 树下。建议顶层工作区：
 - 最近策略变更、失败 saga、采集 freshness；
 - 用户登录与 enrollment 错误率。
 
-所有卡片必须标注数据时间和来源，不能把不同 freshness 的数字拼成同一个“实时”总数。
+所有卡片必须标注 product 作用域、数据时间和来源，不能把不同 ProductNetwork
+或不同 freshness 的数字拼成同一个“实时”总数。`All` 可汇总只读统计，但必须能下钻
+到每个 `productId`。
 
 ### 7.5 目标 Connections 表
 
 表格是运维事实的主要入口，3D 不是表格替代品。建议字段：
 
-- product/channel、leaseId；
+- product/channel、requesting app、leaseId；
 - identity/profile、user/display name；
 - installId、deviceId、device label；
 - platform、model、OS、app version；
@@ -487,7 +615,11 @@ MX-H2I 不应只埋在通用 Apps 树下。建议顶层工作区：
 - site、采集时间、stale 标记；
 - handover/revoke operation 状态。
 
-支持按 product、profile、site、online state、异常类型、客户端版本过滤。大量连接使用
+支持按 product/channel、requesting app、identity/profile、site、online state、异常类型、
+客户端版本、legacy `appId` 缺失过滤。文本搜索索引 User Center display name、account、
+userId、source/assigned IP、install/device/lease ID，但归属筛选仍以结构化字段为准。
+“Luopan 网络上的登录用户”等价于 `productId=luopan AND identityKind=user`；如需只看 Feishu，
+再加 `leaseProfile=feishu`。大量连接使用
 virtualized table；导出同样受 RBAC、脱敏和审计约束。
 
 ## 8. 静态 lease 与实时连接模型
@@ -496,11 +628,15 @@ virtualized table；导出同样受 RBAC、脱敏和审计约束。
 
 | 事实 | 来源 | 能回答 | 不能回答 |
 | --- | --- | --- | --- |
+| ProductNetwork | Internal registry | channel 的 mode、VIP、lease pool、site 和 desired policy | 该 VIP 当前已 materialize/可达 |
 | lease | Internal DB | 谁被分配了哪个 IP、identity/profile、期限 | 当前是否在线 |
+| requesting app | lease `appId` + AppCenter | 哪个 app 请求该 channel lease（新记录） | legacy `appId` 缺失时的原始 app |
+| user presentation | User Center exact `userId` join | display name、account、用户状态 | 实时 Feishu 目录名、匿名记录的人类身份 |
 | enrollment sourceIp | Internal HTTP 请求上下文 | enroll 时看到的来源 | 当前 NAT endpoint |
 | WG runtime | Domestic/Internal direct `wg show` | peer、endpoint、handshake、流量 | 用户/RBAC 真相 |
 
-必须按 public key fingerprint、assigned `/32`、product 和 plane 关联这些事实。任何一个来源
+必须按 public key fingerprint、assigned `/32`、product 和 plane 关联这些事实。产品归属先用
+lease `productId`，再关联 ProductNetwork；不从 VIP 或 IP 前缀反向猜产品。任何一个来源
 缺失都应成为可解释状态，不能默认为 offline 或 healthy。
 
 ### 8.2 实时采集
@@ -551,8 +687,13 @@ desktop 已有 Three.js H/D/I/O 场景，适合继续作为部署与站点健康
 需要单独的数据层：
 
 - 原 H/D/I/O 图：部署流水线、site slot、Domestic/Internal/Oversea 健康；
-- MX-H2I connection graph：用户/设备 → Domestic → Internal → service/app；
+- Launcher Network graph：lease/用户 → product-scoped identity group → standalone
+  ProductNetwork（VIP 是该节点属性）→ shared Domestic → shared Internal；
 - 两者可以共享视觉 token、相机和 Inspector，不共享“online”判定。
+
+在 `All` 视图中，Domestic 和 Internal 基础设施节点只画一次；MX-H2I、Luopan 等
+ProductNetwork 作为独立产品分支连入共享 fabric。切换到单产品时，可聚焦该分支，
+但不应复制一套虚假 Domestic/Internal 节点让人误以为物理隔离。
 
 ### 9.2 图模型
 
@@ -560,17 +701,21 @@ desktop 已有 Three.js H/D/I/O 场景，适合继续作为部署与站点健康
 
 - client cluster：按 site、profile、状态、版本聚合；
 - selected client：展开 user/install/device/assigned IP；
-- Domestic relay；
-- Internal direct（存在时）；
-- Internal control/service VIP；
-- embed services/app routes，只显示服务依赖，不伪造 endpoint peer。
+- identity/profile group：employee、Feishu、anonymous；
+- standalone ProductNetwork/channel：`productId`、display name、lease count、策略摘要；
+  `serviceVip` 是该节点的属性，同一节点内分开显示 configured 和 materialized/reachable evidence；
+- shared Domestic relay fabric；
+- shared Internal service peer/gateway；
+- Internal direct（如为某产品/租约配置）；
+- embed services/app routes：挂在所选 channel/VIP 下，只显示服务依赖，不伪造 endpoint peer。
 
 建议边：
 
 - enrollment/bootstrap；
-- Domestic relay WG；
-- Internal direct WG；
-- Internal service reachability；
+- lease 到 product-scoped identity group，再到 ProductNetwork/channel 的归属；
+- ProductNetwork 的 Domestic relay WG 路径；
+- 可选 Internal direct WG；
+- shared Internal service peer 对产品 CIDR/VIP 的 materialization/reachability；
 - app/service dependency。
 
 边颜色必须来自 runtime/evidence，而不是硬编码动画：
@@ -584,9 +729,11 @@ desktop 已有 Three.js H/D/I/O 场景，适合继续作为部署与站点健康
 
 - hover 只显示脱敏摘要；click 选中节点，double-click/Enter 执行该节点的安全主操作；
 - 拖拽旋转、Shift/右键拖拽平移、滚轮或 `+/-` 缩放，并提供 reset/fit；
-- client 节点打开 Inspector/Connections 抽屉，identity group 节点切换过滤，基础设施节点只做
-  安全导航；
-- search、identity filter 与 48 条窗口分页覆盖完整 lease inventory；selected path 高亮，但不以
+- client 节点打开 Inspector/Connections 抽屉，identity group 节点切换身份过滤，
+  ProductNetwork 节点切换 product filter，requesting app 节点打开 AppCenter；基础设施节点
+  只做安全导航；
+- search、product/app/identity filter 与 48 条窗口分页覆盖完整 lease inventory；
+  selected path 高亮，但不以
   动画或颜色伪造在线状态；
 - 大规模客户端先窗口化/cluster，禁止一万台设备各建高面数 sphere；
 - 提供 2D/table fallback、键盘操作和 reduced-motion；WebGL 失败只降级视图；
@@ -889,6 +1036,23 @@ Internal desired policy
 | V1 HDO | `100.*` 用户、匿名、DNS、插件和在线连接不变 |
 | 后续 standalone | 只读取自己的 ProductNetwork 策略 |
 
+Launcher Network 归属、显示名与基础设施还必须覆盖：
+
+| 场景 | 必须结果 |
+| --- | --- |
+| product filter=`luopan` | 只出现 `lease.productId=luopan` 记录；MX-H2I 记录不依赖 IP 前缀猜测被排除 |
+| `luopan` + `identityKind=user` | 列出通过 Luopan channel 取得 lease 的登录用户；anonymous 不被误归为用户 |
+| embed app 绑定 Luopan 发起 lease | lease 归属 `productId=luopan`，`appId` 显示 requesting app；不创建 embed peer |
+| legacy lease 缺少 `appId` | 显示 requesting app unknown；不由 `launcherMode`、label 或 IP 伪造 app |
+| 同一 Internal user 同时有 MX-H2I/Luopan lease | 可按 exact `userId` 跨产品查看；两条 lease 和两个策略作用域仍独立 |
+| MX-H2I/Luopan anonymous install 拥有相似设备文案 | 不根据 label/installId/deviceId 跨产品合并为同一人 |
+| Feishu lease 能 exact join User Center | 主标题显示 `displayName`，account/userId 作为次级标识；搜索能命中姓名 |
+| Feishu lease 无用户记录/目录暂时不可用 | 显示“姓名不可用”和次级 `userId`，不猜测或泄露 `feishuSubject` |
+| 用户在 Feishu 改名但 User Center 未同步 | 标为 User Center display name，不声称实时 Feishu 目录名 |
+| All channels topology | Domestic/Internal 共享节点只画一次；产品分支显示各自 lease CIDR/VIP |
+| ProductNetwork 已配 VIP 但 reconcile/smoke 无证据 | 显示 configured/unknown 或 blocked，不显示 reachable/healthy |
+| 从 Domestic/Internal 节点执行 reconcile | 进入显示所有受影响 channel/CIDR/VIP 的 shared-infrastructure 确认流程 |
+
 产品级用户访问还必须覆盖：
 
 | 场景 | 必须结果 |
@@ -935,11 +1099,15 @@ Internal desired policy
 
 本期验收至少满足：
 
-1. 左侧存在清晰、独立的 MX-H2I Dashboard 入口；
-2. Connections 行可用鼠标与键盘打开抽屉，ban 后可从 blocked inventory unban；
+1. 左侧存在清晰、独立的 `Launcher Network` 入口，Dashboard 可在 All、MX-H2I、
+   Luopan 及其他已注册 standalone ProductNetwork 间切换；
+2. Connections 行可用鼠标与键盘打开抽屉；product 是全工作区作用域，同时影响表格、
+   拓扑、指标和 blocked inventory；Connections 的 requester app 与 identity/profile
+   过滤只影响表格，Topology 使用独立的 query/identity 过滤；ban 后可从同 product
+   inventory unban；
 3. MX-H2I 新建访客入口默认只在高级选项；
-4. ProductNetwork 可独立保存 admission 与 visibility；Dashboard 快速开关精确写
-   `productId=mx-h2i`；
+4. ProductNetwork 可独立保存 admission 与 visibility；Dashboard 快速开关只能在选定
+   单一 product 后写入该精确 `productId`，All 视图不存在全局 anonymous toggle；
 5. MX-H2I 与 Luopan 的匿名策略及用户 ban 互不影响；
 6. disabled 在服务端拒绝 GUI、旧客户端和 CLI anonymous enrollment；
 7. product user ban 在服务端拒绝 MX-H2I enrollment/snapshot/peer action，但保持用户
@@ -951,6 +1119,12 @@ Internal desired policy
 12. 匿名行不提供虚假的用户 ban；
 13. 未来 bulk revoke 设计具备 revoking、saga、双平面确认和共享 key 保护；
 14. V1 HDO、Luopan、embed apps、MX Insight Hub 的不回归证据完整。
+15. Luopan 网络用户可用 `productId=luopan AND identityKind=user` 精确列出；旧
+    `appId` 缺失不会被误归属。
+16. Feishu lease 通过 exact `userId` join 优先显示 User Center `displayName`，并保留
+    account/userId 作为可审计次级标识。
+17. All topology 只画一套 shared Domestic/Internal 基础设施，每个 standalone
+    分支独立显示 channel、lease CIDR 和 VIP；配置值不伪装成 runtime reachability。
 
 ## 18. 相关文档
 

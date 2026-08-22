@@ -23,6 +23,7 @@
     "test:internal-service-peer-observation": "node --test --import tsx src/modules/admin/internal-service-peer-observation.test.ts",
     "test:launcher-anonymous-policy": "node --test --import tsx src/modules/launcher-network/anonymous-enrollment-policy.test.ts src/modules/launcher-network/product-user-access.test.ts",
     "test:launcher-lease-activity": "node --test --import tsx src/modules/launcher-network/lease-activity.test.ts",
+    "test:launcher-lease-identity": "node --test --import tsx src/modules/launcher-network/lease-user-identity.test.ts",
     "test:insight-hub": "node --test --import tsx src/modules/insight-hub/insight-hub.client.test.ts",
     "smoke:http": "node scripts/http-smoke.mjs",
     "smoke:release-center": "node scripts/release-center-smoke.mjs",

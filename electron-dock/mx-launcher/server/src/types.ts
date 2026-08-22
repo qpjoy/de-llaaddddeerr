@@ -794,6 +794,20 @@ export interface UserCenterUser {
   updatedAt: string;
 }
 
+/**
+ * Lightweight read-only identity used by ops views. Product access metadata
+ * is included for admission-management views, while credentials, profile
+ * data, roles, and tokens remain deliberately excluded.
+ */
+export interface UserCenterUserIdentity {
+  userId: string;
+  account: string;
+  displayName: string;
+  status: UserCenterUser['status'];
+  appAccess: UserCenterAppAccess;
+  updatedAt: string;
+}
+
 export interface UserCenterUserCredential {
   credentialId: string;
   userId: string;
@@ -2465,6 +2479,19 @@ export interface LauncherNetworkLease {
   updatedBy: string;
   updatedAt: string;
 }
+
+/**
+ * Ops-only lease inventory view. User Center identity fields are joined at
+ * read time and are never persisted into a lease or returned to Launcher
+ * enrollment/renewal clients.
+ */
+export type OpsLauncherNetworkLease = Omit<
+  LauncherNetworkLease,
+  'capabilityDigest' | 'capabilityVersion' | 'capabilityExpiresAt'
+> & {
+  userDisplayName: string | null;
+  userAccount: string | null;
+};
 
 export type LauncherNetworkHandoverStatus =
   | 'preparing'

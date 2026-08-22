@@ -45,11 +45,13 @@ import type {
   AuditEvent,
   LauncherNetworkHandover,
   LauncherNetworkLease,
+  OpsLauncherNetworkLease,
   LauncherProductUserAccessResult,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotPlan,
   SiteSlotSshProfile,
-  UserCenterUser
+  UserCenterUser,
+  UserCenterUserIdentity
 } from '../../types.js';
 
 const execFileAsync = promisify(execFile);
@@ -356,8 +358,16 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
   @Get('leases')
   async listLeases(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
     assertInternalOpsToken(opsToken);
+    const [leases, users] = await Promise.all([
+      this.store.listLauncherNetworkLeases(),
+      this.store.listUserCenterUserIdentities()
+    ]);
+    const usersById = new Map(users.map((user) => [user.userId, user]));
     return {
-      leases: (await this.store.listLauncherNetworkLeases()).map((lease) => opsLauncherLease(lease))
+      leases: leases.map((lease) => opsLauncherLease(
+        lease,
+        lease.userId ? usersById.get(lease.userId) ?? null : null
+      ))
     };
   }
 
@@ -369,7 +379,10 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     assertInternalOpsToken(opsToken);
     const lease = await this.store.getLauncherNetworkLease(leaseId);
     if (!lease) throw new NotFoundException('Launcher network lease not found');
-    return { lease: opsLauncherLease(lease) };
+    const user = lease.userId
+      ? (await this.store.listUserCenterUserIdentities()).find((candidate) => candidate.userId === lease.userId) ?? null
+      : null;
+    return { lease: opsLauncherLease(lease, user) };
   }
 
   @Get('leases/:leaseId/activity')
@@ -528,7 +541,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     const product = await this.store.getLauncherProductNetwork(productId);
     if (!product) throw new NotFoundException('Launcher product network not found');
     const [users, leases] = await Promise.all([
-      this.store.listUserCenterUsers(),
+      this.store.listUserCenterUserIdentities(),
       this.store.listLauncherNetworkLeases(productId)
     ]);
     const entries = users
@@ -560,7 +573,7 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       throw new NotFoundException('Launcher product network not found');
     }
     const [users, leases] = await Promise.all([
-      this.store.listUserCenterUsers(),
+      this.store.listUserCenterUserIdentities(),
       this.store.listLauncherNetworkLeases(productId)
     ]);
     const user = users.find((candidate) => candidate.userId === userId);
@@ -1203,15 +1216,20 @@ function publicLauncherLease(
 }
 
 function opsLauncherLease(
-  lease: LauncherNetworkLease
-): Omit<LauncherNetworkLease, 'capabilityDigest' | 'capabilityVersion' | 'capabilityExpiresAt'> {
+  lease: LauncherNetworkLease,
+  user: UserCenterUserIdentity | null
+): OpsLauncherNetworkLease {
   const {
     capabilityDigest: _capabilityDigest,
     capabilityVersion: _capabilityVersion,
     capabilityExpiresAt: _capabilityExpiresAt,
     ...safeLease
   } = lease;
-  return safeLease;
+  return {
+    ...safeLease,
+    userDisplayName: user?.displayName ?? null,
+    userAccount: user?.account ?? null
+  };
 }
 
 function launcherLeaseActivityView(event: AuditEvent) {
@@ -1268,7 +1286,7 @@ function launcherLeaseActivityRecordedStatus(event: AuditEvent): 'passed' | 'blo
 }
 
 function productUserAccessEntry(
-  user: UserCenterUser,
+  user: UserCenterUserIdentity,
   productId: string,
   leases: LauncherNetworkLease[]
 ) {

@@ -152,6 +152,7 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserCenterUserIdentity,
   UserCenterUserDeleteInput,
   UserCenterUserDeleteResult,
   UserCenterUserDeletionTombstone,
@@ -304,7 +305,8 @@ import {
   launcherNetworkProductIsStandaloneDefault,
   launcherNetworkSdkTestModeAllowed,
   normalizeLauncherNetworkProductId,
-  updateLauncherProductUserAccess
+  updateLauncherProductUserAccess,
+  userCenterUserIdentity
 } from './domain.js';
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
 import { applyCoreDnsConfigMapToKubernetes, applyGatewayConfigMapToKubernetes } from './kubernetes.js';
@@ -1036,6 +1038,12 @@ export class PostgresStore implements PlatformStore {
   async listUserCenterUsers(): Promise<UserCenterUser[]> {
     const users = await this.listRecords<UserCenterUser>('iam-user');
     return (await Promise.all(users.map((user) => this.withUserCredentialSummary(user))))
+      .sort((a, b) => a.userId.localeCompare(b.userId));
+  }
+
+  async listUserCenterUserIdentities(): Promise<UserCenterUserIdentity[]> {
+    return (await this.listRecords<UserCenterUser>('iam-user'))
+      .map((user) => userCenterUserIdentity(user))
       .sort((a, b) => a.userId.localeCompare(b.userId));
   }
 

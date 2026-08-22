@@ -139,6 +139,7 @@ test('Feishu token exchange provisions an isolated user and returns only an inte
     (user) => user.profile.externalIds.feishuSubject === 'tenant_allowed:ou_external_user'
   );
   assert.equal(linked.length, 1);
+  assert.equal(linked[0]?.displayName, 'Same Person');
   assert.notEqual(linked[0]?.userId, 'usr_existing_local');
   assert.equal(linked[0]?.email, null);
   assert.deepEqual(

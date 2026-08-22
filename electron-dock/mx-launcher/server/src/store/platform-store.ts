@@ -132,6 +132,7 @@ import type {
   UserCenterUserDeleteInput,
   UserCenterUserDeleteResult,
   UserCenterUser,
+  UserCenterUserIdentity,
   UserPasswordUpdateInput,
   UserPasswordUpdateResult,
   UserPasswordVerificationInput,
@@ -250,6 +251,7 @@ export interface PlatformStore {
   bootstrapUserCenter(): MaybePromise<UserCenterBootstrapResult>;
   listUserCenterRoles(): MaybePromise<UserCenterRole[]>;
   listUserCenterUsers(): MaybePromise<UserCenterUser[]>;
+  listUserCenterUserIdentities(): MaybePromise<UserCenterUserIdentity[]>;
   createUserCenterUser(input: CreateUserInput): MaybePromise<UserCenterUser>;
   importUserCenterUsers(input: ImportUserCenterUsersInput): MaybePromise<ImportUserCenterUsersResult>;
   updateUserCenterPassword(input: UserPasswordUpdateInput): MaybePromise<UserPasswordUpdateResult>;

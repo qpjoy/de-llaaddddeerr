@@ -138,6 +138,7 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserCenterUserIdentity,
   UserCenterAppAccess,
   UserCenterUserCredential,
   UserCenterUserCredentialSummary,
@@ -401,6 +402,23 @@ export function emptyUserAppAccess(): UserCenterAppAccess {
   };
 }
 
+export function userCenterUserIdentity(user: UserCenterUser): UserCenterUserIdentity {
+  const appAccess = user.appAccess ?? emptyUserAppAccess();
+  return {
+    userId: user.userId,
+    account: user.account,
+    displayName: user.displayName,
+    status: user.status,
+    appAccess: {
+      homeAppId: appAccess.homeAppId ?? null,
+      registeredByAppId: appAccess.registeredByAppId ?? null,
+      allowedAppIds: [...(appAccess.allowedAppIds ?? [])],
+      deniedAppIds: [...(appAccess.deniedAppIds ?? [])]
+    },
+    updatedAt: user.updatedAt
+  };
+}
+
 export class LauncherProductUserAccessDeniedError extends Error {
   readonly code = 'launcher_product_user_access_denied';
 
@@ -411,7 +429,7 @@ export class LauncherProductUserAccessDeniedError extends Error {
 }
 
 export function launcherProductUserAccessBlocked(
-  user: UserCenterUser | null | undefined,
+  user: Pick<UserCenterUser, 'appAccess'> | null | undefined,
   productId: string
 ): boolean {
   if (!user) return false;
@@ -422,7 +440,7 @@ export function launcherProductUserAccessBlocked(
 }
 
 export function assertLauncherProductUserAccess(
-  user: UserCenterUser | null | undefined,
+  user: Pick<UserCenterUser, 'userId' | 'appAccess'> | null | undefined,
   productId: string
 ): void {
   if (user && launcherProductUserAccessBlocked(user, productId)) {

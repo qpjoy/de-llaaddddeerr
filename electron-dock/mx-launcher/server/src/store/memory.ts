@@ -136,7 +136,8 @@ import {
   launcherNetworkProductIsStandaloneDefault,
   launcherNetworkSdkTestModeAllowed,
   normalizeLauncherNetworkProductId,
-  updateLauncherProductUserAccess
+  updateLauncherProductUserAccess,
+  userCenterUserIdentity
 } from './domain.js';
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
 import { applyCoreDnsConfigMapToKubernetes, applyGatewayConfigMapToKubernetes } from './kubernetes.js';
@@ -289,6 +290,7 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserCenterUserIdentity,
   UserCenterUserDeleteInput,
   UserCenterUserDeleteResult,
   UserCenterUserDeletionTombstone,
@@ -936,6 +938,12 @@ export class MemoryStore implements PlatformStore {
   listUserCenterUsers(): UserCenterUser[] {
     return [...this.users.values()]
       .map((user) => this.withUserCredentialSummary(user))
+      .sort((a, b) => a.userId.localeCompare(b.userId));
+  }
+
+  listUserCenterUserIdentities(): UserCenterUserIdentity[] {
+    return [...this.users.values()]
+      .map((user) => userCenterUserIdentity(user))
       .sort((a, b) => a.userId.localeCompare(b.userId));
   }
 

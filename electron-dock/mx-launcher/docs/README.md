@@ -8,8 +8,9 @@
 2. [21-network-mode-switch-events-and-performance.md](./21-network-mode-switch-events-and-performance.md)：
    当前访客/员工切换、事件和性能不回归基线。
 3. [28-mx-h2i-connection-operations-and-anonymous-governance.md](./28-mx-h2i-connection-operations-and-anonymous-governance.md)：
-   当前 MX-H2I 专属 Dashboard、连接抽屉、产品级用户 ban/unban、匿名准入隔离，以及
-   实时连接、3D 拓扑和未来 peer-safe 下线边界。
+   当前 Launcher Network 多产品 Dashboard、MX-H2I/Luopan 归属与过滤、连接抽屉、
+   Feishu 用户显示、产品级 ban/unban、匿名准入隔离，以及实时连接、3D 拓扑和
+   未来 peer-safe 下线边界。
 
 相关专题：
 

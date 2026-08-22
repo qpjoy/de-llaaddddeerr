@@ -4,8 +4,9 @@
 MX Launcher 后续主线。短期不建设 AI 训练平台，优先借鉴 K8s 和成熟运维系统能力，
 把 MX Launcher 做成稳定、可观测、可审计、可回滚的 Internal 控制面。
 
-MX-H2I 当前专属 Dashboard、Connections 抽屉、产品级用户 ban/unban、blocked inventory、
-匿名 ProductNetwork 隔离、静态 lease 与实时 WireGuard 状态的区分，以及未来安全下线状态机见
+Launcher Network 当前多产品 Dashboard、MX-H2I/Luopan 过滤与拓扑归属、Connections 抽屉、
+Feishu 用户显示、产品级用户 ban/unban、blocked inventory、匿名 ProductNetwork 隔离、
+静态 lease 与实时 WireGuard 状态的区分，以及未来安全下线状态机见
 [28-mx-h2i-connection-operations-and-anonymous-governance.md](./28-mx-h2i-connection-operations-and-anonymous-governance.md)。
 
 ## 目标

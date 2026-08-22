@@ -15,6 +15,7 @@ const INTERNAL_PEER_STATUS_AUTO_REFRESH_MS = 30000;
 const MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE = 48;
 const MX_H2I_LEASE_PAGE_SIZE = 100;
 const LAUNCHER_NETWORK_LEASE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+const LAUNCHER_NETWORK_ALL_PRODUCTS = 'all';
 
 function isLocalStaticAdminBaseUrl(value) {
   try {
@@ -71,6 +72,8 @@ const api = window.mxLauncher || {
 
 const defaultRelayEnrollmentDeviceId = `desktop-admin-${Date.now().toString(36)}`;
 let internalPeerAutoRefreshTimer = null;
+const launcherProductUserAccessRequests = new Map();
+const initialLauncherNetworkServerIdentity = launcherNetworkServerIdentity(defaultServerBaseUrl());
 
 const state = {
   activeView: 'app-center',
@@ -299,11 +302,18 @@ const state = {
   launcherProductsError: null,
   launcherLeases: [],
   launcherLeasesError: null,
+  launcherNetworkProductFilter: LAUNCHER_NETWORK_ALL_PRODUCTS,
+  launcherNetworkServerBase: initialLauncherNetworkServerIdentity.base,
+  launcherNetworkServerOrigin: initialLauncherNetworkServerIdentity.origin,
+  launcherNetworkRequestGeneration: 0,
+  launcherProductUserAccessByProduct: {},
+  launcherProductUserAccessErrors: {},
   mxH2iProductUserAccess: null,
   mxH2iProductUserAccessError: null,
   mxH2iLeaseFilter: {
     query: '',
     identity: 'all',
+    app: 'all',
     page: 1
   },
   mxH2iLeaseDrawer: null,
@@ -326,6 +336,7 @@ const state = {
   anonymousPolicyFeedback: null,
   mxH2iAnonymousQuickConfirmation: null,
   mxH2iTopology: null,
+  mxH2iTopologyQueryTimer: null,
   awxRuntimePolicies: [],
   awxRuntimePolicyBusy: false,
   awxRuntimePolicyFeedback: null,
@@ -711,10 +722,12 @@ if (appNavToggle) {
 
 serverInput.addEventListener('input', () => {
   clearOpsTokenIfServerBaseChanged();
+  synchronizeLauncherNetworkServerScope(serverInput.value);
 });
 
 serverInput.addEventListener('change', () => {
   clearOpsTokenIfServerBaseChanged();
+  synchronizeLauncherNetworkServerScope(serverInput.value);
   void persistConfig();
 });
 
@@ -1089,6 +1102,7 @@ async function refreshProducts() {
 }
 
 async function refreshAppCenterNetwork() {
+  const requestScope = captureLauncherNetworkRequestScope();
   const [appPayload, productPayload, leasePayload, productUserAccessPayload, dnsRoutesPayload, templatesPayload, serviceVipSmokePayload] = await Promise.all([
     loadAppCenterApps(),
     loadLauncherProductNetworks(),
@@ -1098,6 +1112,7 @@ async function refreshAppCenterNetwork() {
     loadAppOnboardingTemplates(),
     loadLauncherServiceVipSmokes()
   ]);
+  if (!isLauncherNetworkRequestScopeCurrent(requestScope)) return;
   state.appCenterApps = asArray(appPayload.apps);
   state.appCenterAppsError = appPayload.error || null;
   state.appOnboardingTemplates = asArray(templatesPayload.templates);
@@ -1108,8 +1123,13 @@ async function refreshAppCenterNetwork() {
   state.launcherProductsError = productPayload.error || null;
   state.launcherLeases = asArray(leasePayload.leases);
   state.launcherLeasesError = leasePayload.error || null;
-  state.mxH2iProductUserAccess = productUserAccessPayload.productUserAccess || null;
-  state.mxH2iProductUserAccessError = productUserAccessPayload.error || null;
+  applyLauncherProductUserAccessLists({
+    [MX_H2I_PRODUCT_ID]: productUserAccessPayload
+  });
+  const selectedProductId = launcherNetworkSelectedProductId();
+  if (selectedProductId !== LAUNCHER_NETWORK_ALL_PRODUCTS && selectedProductId !== MX_H2I_PRODUCT_ID) {
+    await ensureLauncherProductUserAccess(selectedProductId, { force: true, render: false });
+  }
   state.dnsCenter.routes = asArray(dnsRoutesPayload.routes);
   state.dnsCenter.routesError = dnsRoutesPayload.error || null;
   renderLauncherFoundationOverview();
@@ -1141,6 +1161,7 @@ async function launchHdiProduct() {
 
 async function refreshAdmin() {
   await persistConfig();
+  const launcherNetworkRequestScope = captureLauncherNetworkRequestScope();
   renderAdminLoading();
   try {
     const [
@@ -1176,6 +1197,7 @@ async function refreshAdmin() {
       loadGatewayRuntimeConfig(),
       loadSdkGatewayManifest()
     ]);
+    if (!isLauncherNetworkRequestScopeCurrent(launcherNetworkRequestScope)) return;
     state.dashboard = dashboard;
     state.sshProfiles = asArray(profilePayload.profiles);
     state.userCenter.users = asArray(userCenterPayload.users);
@@ -1198,8 +1220,13 @@ async function refreshAdmin() {
     state.launcherProductsError = launcherProductsPayload.error || null;
     state.launcherLeases = asArray(launcherLeasesPayload.leases);
     state.launcherLeasesError = launcherLeasesPayload.error || null;
-    state.mxH2iProductUserAccess = mxH2iProductUserAccessPayload.productUserAccess || null;
-    state.mxH2iProductUserAccessError = mxH2iProductUserAccessPayload.error || null;
+    applyLauncherProductUserAccessLists({
+      [MX_H2I_PRODUCT_ID]: mxH2iProductUserAccessPayload
+    });
+    const selectedProductId = launcherNetworkSelectedProductId();
+    if (selectedProductId !== LAUNCHER_NETWORK_ALL_PRODUCTS && selectedProductId !== MX_H2I_PRODUCT_ID) {
+      await ensureLauncherProductUserAccess(selectedProductId, { force: true, render: false });
+    }
     state.domesticRuntime.configs = asArray(domesticRuntimePayload.configs);
     state.domesticRuntime.error = domesticRuntimePayload.error || null;
     applySecretCenterPayload(secretCenterPayload);
@@ -1237,6 +1264,7 @@ async function refreshAdmin() {
     }
     setConnection('connected', 'Connected', `${dashboard.overview.siteId} / ${dashboard.overview.storeDriver}`);
   } catch (error) {
+    if (!isLauncherNetworkRequestScopeCurrent(launcherNetworkRequestScope)) return;
     if (state.setupRun.active) {
       clearSetupRun(`Admin API unavailable: ${error.message}`, 'failed');
     }
@@ -1250,6 +1278,8 @@ async function refreshAdmin() {
     state.launcherLeasesError = error.message;
     state.mxH2iProductUserAccess = null;
     state.mxH2iProductUserAccessError = error.message;
+    state.launcherProductUserAccessByProduct = {};
+    state.launcherProductUserAccessErrors = {};
     state.domesticRuntime.configs = [];
     state.domesticRuntime.error = error.message;
     state.secretCenter.providers = [];
@@ -1296,11 +1326,70 @@ async function loadLauncherNetworkLeases() {
 }
 
 async function loadMxH2iProductUserAccessList() {
+  return loadLauncherProductUserAccessList(MX_H2I_PRODUCT_ID);
+}
+
+async function loadLauncherProductUserAccessList(productId) {
   try {
-    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(MX_H2I_PRODUCT_ID)}/user-access`);
+    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(productId)}/user-access`);
     return { productUserAccess: payload.productUserAccess || null, error: null };
   } catch (error) {
     return { productUserAccess: null, error: error.message };
+  }
+}
+
+function applyLauncherProductUserAccessLists(payloads) {
+  const byProduct = { ...(state.launcherProductUserAccessByProduct || {}) };
+  const errors = { ...(state.launcherProductUserAccessErrors || {}) };
+  for (const [rawProductId, payload] of Object.entries(payloads || {})) {
+    const productId = String(rawProductId || '').trim().toLowerCase();
+    if (!productId || productId === LAUNCHER_NETWORK_ALL_PRODUCTS) continue;
+    if (payload?.error) {
+      errors[productId] = payload.error;
+    } else {
+      byProduct[productId] = payload?.productUserAccess || null;
+      delete errors[productId];
+    }
+  }
+  state.launcherProductUserAccessByProduct = byProduct;
+  state.launcherProductUserAccessErrors = errors;
+  state.mxH2iProductUserAccess = byProduct[MX_H2I_PRODUCT_ID] || null;
+  state.mxH2iProductUserAccessError = errors[MX_H2I_PRODUCT_ID] || null;
+}
+
+async function ensureLauncherProductUserAccess(productId, options = {}) {
+  const normalizedProductId = String(productId || '').trim().toLowerCase();
+  if (!normalizedProductId
+    || normalizedProductId === LAUNCHER_NETWORK_ALL_PRODUCTS
+    || !launcherNetworkStandaloneProducts().some((product) => product.productId === normalizedProductId)) return null;
+  const force = options.force === true;
+  const cached = Object.prototype.hasOwnProperty.call(state.launcherProductUserAccessByProduct || {}, normalizedProductId);
+  const cachedError = Object.prototype.hasOwnProperty.call(state.launcherProductUserAccessErrors || {}, normalizedProductId);
+  if (!force && (cached || cachedError)) return launcherNetworkProductUserAccess(normalizedProductId);
+  const requestScope = captureLauncherNetworkRequestScope();
+  const requestKey = launcherProductUserAccessRequestKey(normalizedProductId, requestScope);
+  if (launcherProductUserAccessRequests.has(requestKey)) {
+    return launcherProductUserAccessRequests.get(requestKey);
+  }
+  const request = (async () => {
+    const payload = await loadLauncherProductUserAccessList(normalizedProductId);
+    if (!isLauncherNetworkRequestScopeCurrent(requestScope)) return null;
+    applyLauncherProductUserAccessLists({ [normalizedProductId]: payload });
+    return payload.productUserAccess || null;
+  })();
+  launcherProductUserAccessRequests.set(requestKey, request);
+  try {
+    return await request;
+  } finally {
+    if (launcherProductUserAccessRequests.get(requestKey) === request) {
+      launcherProductUserAccessRequests.delete(requestKey);
+    }
+    const dashboardStillSelected = isLauncherNetworkRequestScopeCurrent(requestScope)
+      && launcherNetworkSelectedProductId() === normalizedProductId
+      && state.activeView === 'app-center'
+      && state.activeAppNode === MX_H2I_PRODUCT_ID
+      && state.mxH2iSurface === 'dashboard';
+    if (options.render !== false && dashboardStillSelected) renderSelectedAppDetail();
   }
 }
 
@@ -4301,6 +4390,63 @@ function normalizedInternalServerEndpoint(value = serverInput.value) {
   }
 }
 
+function launcherNetworkServerIdentity(value) {
+  const base = normalizeServerBaseValue(value) || defaultServerBaseUrl();
+  try {
+    return { base, origin: new URL(base).origin };
+  } catch {
+    return { base, origin: '' };
+  }
+}
+
+function captureLauncherNetworkRequestScope() {
+  return {
+    base: state.launcherNetworkServerBase,
+    origin: state.launcherNetworkServerOrigin,
+    generation: state.launcherNetworkRequestGeneration
+  };
+}
+
+function isLauncherNetworkRequestScopeCurrent(requestScope) {
+  return Boolean(requestScope)
+    && requestScope.base === state.launcherNetworkServerBase
+    && requestScope.origin === state.launcherNetworkServerOrigin
+    && requestScope.generation === state.launcherNetworkRequestGeneration;
+}
+
+function launcherProductUserAccessRequestKey(productId, requestScope = captureLauncherNetworkRequestScope()) {
+  return `${requestScope.generation}:${requestScope.origin}:${requestScope.base}:${productId}`;
+}
+
+function synchronizeLauncherNetworkServerScope(value) {
+  const next = launcherNetworkServerIdentity(value);
+  if (next.base === state.launcherNetworkServerBase && next.origin === state.launcherNetworkServerOrigin) return false;
+  const hadLauncherNetworkView = asArray(state.launcherProducts).length > 0
+    || asArray(state.launcherLeases).length > 0
+    || Boolean(state.mxH2iLeaseDrawer);
+  state.launcherNetworkServerBase = next.base;
+  state.launcherNetworkServerOrigin = next.origin;
+  state.launcherNetworkRequestGeneration += 1;
+  state.launcherProducts = [];
+  state.launcherProductsError = null;
+  state.launcherLeases = [];
+  state.launcherLeasesError = null;
+  state.launcherProductUserAccessByProduct = {};
+  state.launcherProductUserAccessErrors = {};
+  state.mxH2iProductUserAccess = null;
+  state.mxH2iProductUserAccessError = null;
+  launcherProductUserAccessRequests.clear();
+  state.anonymousPolicyBusyProductId = null;
+  state.anonymousPolicyFeedback = null;
+  state.mxH2iAnonymousQuickConfirmation = null;
+  if (state.mxH2iLeaseDrawer) closeMxH2iLeaseDrawer({ restoreFocus: false });
+  if (hadLauncherNetworkView
+    && state.activeView === 'app-center'
+    && state.activeAppNode === MX_H2I_PRODUCT_ID
+    && state.mxH2iSurface === 'dashboard') renderSelectedAppDetail();
+  return true;
+}
+
 function clearOpsToken() {
   if (opsTokenInput) opsTokenInput.value = '';
   opsTokenBinding = null;
@@ -4381,8 +4527,9 @@ function setServerBaseInputValue(value) {
   const next = normalizeServerBaseValue(value || defaultServerBaseUrl());
   if (serverInput.value !== next) {
     serverInput.value = next;
-    clearOpsTokenIfServerBaseChanged();
   }
+  synchronizeLauncherNetworkServerScope(next);
+  clearOpsTokenIfServerBaseChanged();
 }
 
 function normalizedServerBase() {
@@ -10045,6 +10192,54 @@ function launcherProductById(productId) {
   return asArray(state.launcherProducts).find((product) => product?.productId === normalized) || null;
 }
 
+function launcherNetworkStandaloneProducts() {
+  const byId = new Map();
+  for (const product of asArray(state.launcherProducts)) {
+    const productId = String(product?.productId || '').trim().toLowerCase();
+    if (!productId || productId === LAUNCHER_FOUNDATION_PRODUCT_ID || product?.mode !== 'standalone') continue;
+    byId.set(productId, { ...product, productId });
+  }
+  return [...byId.values()].sort((left, right) => (
+    left.productId === MX_H2I_PRODUCT_ID ? -1 : right.productId === MX_H2I_PRODUCT_ID ? 1 : 0
+  ) || launcherProductDisplayName(left.productId, left).localeCompare(launcherProductDisplayName(right.productId, right)));
+}
+
+function launcherNetworkSelectedProductId() {
+  const requested = String(state.launcherNetworkProductFilter || LAUNCHER_NETWORK_ALL_PRODUCTS).trim().toLowerCase();
+  if (requested === LAUNCHER_NETWORK_ALL_PRODUCTS) return LAUNCHER_NETWORK_ALL_PRODUCTS;
+  return launcherNetworkStandaloneProducts().some((product) => product.productId === requested)
+    ? requested
+    : LAUNCHER_NETWORK_ALL_PRODUCTS;
+}
+
+function launcherNetworkSelectedProduct() {
+  const productId = launcherNetworkSelectedProductId();
+  return productId === LAUNCHER_NETWORK_ALL_PRODUCTS ? null : launcherProductById(productId);
+}
+
+function launcherNetworkActiveLeases(productId = launcherNetworkSelectedProductId()) {
+  const standaloneIds = new Set(launcherNetworkStandaloneProducts().map((product) => product.productId));
+  return asArray(state.launcherLeases)
+    .filter((lease) => standaloneIds.has(String(lease?.productId || '').trim().toLowerCase()))
+    .filter((lease) => productId === LAUNCHER_NETWORK_ALL_PRODUCTS
+      || String(lease?.productId || '').trim().toLowerCase() === productId)
+    .filter((lease) => launcherLeaseIsActiveClientRecord(lease))
+    .slice()
+    .sort((left, right) => String(right.updatedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.createdAt || '')));
+}
+
+function launcherNetworkProductUserAccess(productId) {
+  return state.launcherProductUserAccessByProduct?.[productId] || null;
+}
+
+function launcherNetworkProductUserAccessError(productId) {
+  return state.launcherProductUserAccessErrors?.[productId] || null;
+}
+
+function launcherNetworkProductUserAccessLoading(productId) {
+  return launcherProductUserAccessRequests.has(launcherProductUserAccessRequestKey(productId));
+}
+
 function fallbackLauncherProduct(productId) {
   if (productId === MX_H2I_PRODUCT_ID || productId === LAUNCHER_FOUNDATION_PRODUCT_ID) {
     return {
@@ -10359,12 +10554,12 @@ function renderAppCenterShell() {
   const isMxH2iDashboard = app?.appId === MX_H2I_PRODUCT_ID && state.mxH2iSurface === 'dashboard';
   if (appCenterHeading) {
     appCenterHeading.textContent = isMxH2iDashboard
-      ? 'MX-H2I Dashboard'
+      ? 'Launcher Network'
       : app.displayName || launcherProductDisplayName(app.appId, null);
   }
   if (appCenterSubtitle) {
     appCenterSubtitle.textContent = isMxH2iDashboard
-      ? '连接清单、三维拓扑、用户访问与应用级匿名准入。'
+      ? '按 standalone ProductNetwork 查看 lease、VIP、三维拓扑与产品级准入。'
       : mode === 'standalone'
       ? 'VPN product / launcher standalone channel.'
       : `${launcherProductDisplayName(app.appId, null)} embeds launcher and uses ${launcherProductDisplayName(channelId, launcherProductNetwork(channelId))}.`;
@@ -11600,7 +11795,21 @@ function mxH2iLeaseIdentityLabel(lease) {
 
 function mxH2iLeaseSubject(lease) {
   if (mxH2iLeaseIdentityGroup(lease) === 'anonymous') return 'anonymous';
-  return String(lease?.userId || lease?.subject || lease?.account || 'employee');
+  if (lease?.leaseProfile === 'feishu') return String(lease?.userDisplayName || '姓名不可用');
+  return String(lease?.userDisplayName || lease?.userAccount || lease?.userId || 'employee');
+}
+
+function mxH2iLeaseAccount(lease) {
+  if (mxH2iLeaseIdentityGroup(lease) === 'anonymous') return '';
+  return String(lease?.userAccount || lease?.userId || '').trim();
+}
+
+function mxH2iLeaseAuditIdentity(lease) {
+  if (mxH2iLeaseIdentityGroup(lease) === 'anonymous') return '';
+  return [...new Set([
+    String(lease?.userAccount || '').trim(),
+    String(lease?.userId || '').trim()
+  ].filter(Boolean))].join(' · ');
 }
 
 function mxH2iLeaseSourceIp(lease) {
@@ -11634,20 +11843,25 @@ function mxH2iLeaseSearchText(lease) {
   return [
     mxH2iLeaseIdentityLabel(lease),
     mxH2iLeaseSubject(lease),
+    mxH2iLeaseAccount(lease),
+    lease?.userId,
     mxH2iLeaseSourceIp(lease),
     lease?.leaseIp,
     mxH2iLeaseDevice(lease),
     mxH2iLeasePlatform(lease),
     lease?.leaseId,
-    lease?.appId
+    lease?.appId,
+    lease?.productId
   ].map((value) => String(value || '').toLowerCase()).join(' ');
 }
 
 function mxH2iLeasePage(leases, filter = {}) {
   const query = String(filter.query || '').trim().toLowerCase();
-  const identity = ['employee', 'anonymous'].includes(filter.identity) ? filter.identity : 'all';
+  const identity = ['employee', 'feishu', 'anonymous'].includes(filter.identity) ? filter.identity : 'all';
+  const app = String(filter.app || 'all').trim().toLowerCase() || 'all';
   const filtered = asArray(leases).filter((lease) => (
-    (identity === 'all' || mxH2iLeaseIdentityGroup(lease) === identity)
+    (identity === 'all' || mxH2iTopologyLeaseGroup(lease) === identity)
+    && (app === 'all' || String(lease?.appId || '').trim().toLowerCase() === app)
     && (!query || mxH2iLeaseSearchText(lease).includes(query))
   ));
   const totalPages = Math.max(1, Math.ceil(filtered.length / MX_H2I_LEASE_PAGE_SIZE));
@@ -11673,12 +11887,12 @@ function renderMxH2iLeaseTableRow(lease) {
   const expiresAt = mxH2iLeaseExpiryAt(lease);
   const leaseKey = String(lease?.leaseId || lease?.leaseIp || lease?.installId || '').trim();
   return `
-    <tr data-mx-h2i-lease-row data-mx-h2i-lease-open="${escapeHtml(leaseKey)}" data-identity="${escapeHtml(identity)}" data-search="${escapeHtml(mxH2iLeaseSearchText(lease))}" tabindex="0" aria-label="Open ${escapeHtml(mxH2iLeaseSubject(lease))} connection details">
-      <td><strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong><small>${escapeHtml(mxH2iLeaseIdentityLabel(lease))}</small></td>
+    <tr data-mx-h2i-lease-row data-mx-h2i-lease-open="${escapeHtml(leaseKey)}" data-product-id="${escapeHtml(lease.productId || '')}" data-identity="${escapeHtml(identity)}" data-search="${escapeHtml(mxH2iLeaseSearchText(lease))}" tabindex="0" aria-label="Open ${escapeHtml(mxH2iLeaseSubject(lease))} connection details">
+      <td><strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong><small>${escapeHtml([mxH2iLeaseIdentityLabel(lease), mxH2iLeaseAuditIdentity(lease)].filter(Boolean).join(' · '))}</small></td>
       <td><strong>${escapeHtml(sourceIp)}</strong><small>${sourceIp === 'not recorded' ? 'legacy lease' : 'enrollment / renewal HTTP source'}</small></td>
       <td><strong>${escapeHtml(lease.leaseIp || '-')}</strong><small>${escapeHtml(lease.leaseId || '-')}</small></td>
       <td><strong>${escapeHtml(mxH2iLeaseDevice(lease))}</strong><small>${escapeHtml(lease.installId || lease.deviceId || '-')}</small></td>
-      <td><strong>${escapeHtml(mxH2iLeasePlatform(lease))}</strong><small>${escapeHtml(lease.appId || MX_H2I_PRODUCT_ID)}</small></td>
+      <td><strong>${escapeHtml(mxH2iLeasePlatform(lease))}</strong><small>${escapeHtml(`${lease.productId || '-'}${lease.appId ? ` · requester ${lease.appId}` : ''}`)}</small></td>
       <td><strong>${escapeHtml(observedAt ? formatTime(observedAt) : 'not observed')}</strong><small>${escapeHtml(recordUpdatedAt ? `record updated ${formatTime(recordUpdatedAt)}` : 'no runtime observation')}</small></td>
       <td><strong>${escapeHtml(expiresAt ? formatTime(expiresAt) : '-')}</strong><small>${escapeHtml(lease.status || 'active')}</small></td>
     </tr>
@@ -11700,8 +11914,28 @@ function mxH2iTopologyGroupLabel(group) {
   return 'Employee · Password';
 }
 
+function mxH2iTopologyProductId(lease) {
+  return String(lease?.productId || '').trim().toLowerCase();
+}
+
+function mxH2iTopologyGroupNodeId(productId, group) {
+  return `group:${productId}:${group}`;
+}
+
+function mxH2iTopologyClientNodeId(lease) {
+  return `client:${mxH2iTopologyProductId(lease)}:${mxH2iLeaseDrawerKey(lease)}`;
+}
+
+function mxH2iTopologyGroupNode(leases, nodeId) {
+  const match = String(nodeId || '').match(/^group:([^:]+):(employee|feishu|anonymous)$/);
+  if (!match) return null;
+  const [, productId, group] = match;
+  if (!asArray(leases).some((lease) => mxH2iTopologyProductId(lease) === productId && mxH2iTopologyLeaseGroup(lease) === group)) return null;
+  return { productId, group };
+}
+
 function mxH2iTopologyMachineKey(lease) {
-  return String(
+  const machineId = String(
     lease?.deviceId
     || lease?.installId
     || lease?.publicKey
@@ -11709,6 +11943,8 @@ function mxH2iTopologyMachineKey(lease) {
     || lease?.leaseIp
     || ''
   ).trim();
+  if (!machineId) return '';
+  return `${mxH2iTopologyProductId(lease) || 'unknown-product'}:${machineId}`;
 }
 
 function mxH2iTopologyInventorySummary(leases) {
@@ -11789,15 +12025,16 @@ function renderMxH2iTopologySelectedLease(lease) {
       <div>
         <span>${escapeHtml(mxH2iTopologyGroupLabel(mxH2iTopologyLeaseGroup(lease)))}</span>
         <strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong>
-        <small>${escapeHtml(lease.leaseId || 'lease ID not recorded')}</small>
+        <small>${escapeHtml([mxH2iLeaseAuditIdentity(lease), lease.productId, lease.leaseId || 'lease ID not recorded'].filter(Boolean).join(' · '))}</small>
       </div>
-      <button class="primary-button" type="button" data-mx-h2i-topology-open-selected="${escapeHtml(mxH2iLeaseDrawerKey(lease))}">Open connection drawer</button>
+      <button class="primary-button" type="button" data-mx-h2i-topology-open-selected="${escapeHtml(mxH2iTopologyClientNodeId(lease))}">Open connection drawer</button>
     </div>
     <dl class="mx-h2i-topology-selection-grid">
       <div><dt>Assigned IP</dt><dd>${escapeHtml(lease.leaseIp || 'not recorded')}</dd></div>
       <div><dt>Source IP</dt><dd>${escapeHtml(mxH2iLeaseSourceIp(lease))}</dd><small>enrollment / renewal HTTP source</small></div>
       <div><dt>Device</dt><dd>${escapeHtml(mxH2iLeaseDevice(lease))}</dd></div>
       <div><dt>Platform</dt><dd>${escapeHtml(mxH2iLeasePlatform(lease))}</dd></div>
+      <div><dt>ProductNetwork / VIP</dt><dd>${escapeHtml(launcherProductDisplayName(lease.productId, launcherProductById(lease.productId)))}</dd><small>${escapeHtml(launcherProductById(lease.productId)?.serviceVip || 'VIP not recorded')}</small></div>
       <div><dt>Record updated</dt><dd>${escapeHtml(recordUpdatedAt ? formatTime(recordUpdatedAt) : 'not recorded')}</dd></div>
       <div><dt>Expires</dt><dd>${escapeHtml(expiresAt ? formatTime(expiresAt) : 'not recorded')}</dd></div>
       <div><dt>Online / handshake</dt><dd>${escapeHtml(observedAt ? `runtime observation ${formatTime(observedAt)}` : 'not observed')}</dd><small>no online claim from a static lease</small></div>
@@ -11859,25 +12096,26 @@ function renderMxH2iTopologySelectedNode(nodeId, leases, product) {
   const normalized = String(nodeId || '').trim();
   const viewport = mxH2iTopologyWindow(leases);
   const selectedLease = viewport.rows.find((lease) => (
-    `client:${mxH2iLeaseDrawerKey(lease)}` === normalized
+    mxH2iTopologyClientNodeId(lease) === normalized
   )) || null;
   if (selectedLease) return renderMxH2iTopologySelectedLease(selectedLease);
-  if (normalized.startsWith('group:')) {
-    const group = normalized.slice('group:'.length);
-    if (!['employee', 'feishu', 'anonymous'].includes(group)) return renderMxH2iTopologySelectedLease(null);
-    const groupViewport = mxH2iTopologyWindow(leases, {
+  const groupNode = mxH2iTopologyGroupNode(leases, normalized);
+  if (groupNode) {
+    const groupProduct = launcherProductById(groupNode.productId);
+    const groupProductName = launcherProductDisplayName(groupNode.productId, groupProduct);
+    const groupViewport = mxH2iTopologyWindow(asArray(leases).filter((lease) => mxH2iTopologyProductId(lease) === groupNode.productId), {
       ...state.mxH2iTopologyView,
-      identity: group,
+      identity: groupNode.group,
       page: 1
     });
     return `
       <div class="mx-h2i-topology-selection-head">
         <div>
           <span>Identity aggregate</span>
-          <strong>${escapeHtml(mxH2iTopologyGroupLabel(group))}</strong>
+          <strong>${escapeHtml(groupProductName)} · ${escapeHtml(mxH2iTopologyGroupLabel(groupNode.group))}</strong>
           <small>${escapeHtml(String(groupViewport.filteredCount))} matched static lease records · ${escapeHtml(String(groupViewport.matched.machineCount))} device identities (best effort)</small>
         </div>
-        <button class="primary-button" type="button" data-mx-h2i-topology-apply-group="${escapeHtml(group)}">Filter to this group</button>
+        <button class="primary-button" type="button" data-mx-h2i-topology-apply-group="${escapeHtml(normalized)}">Filter to this product and group</button>
       </div>
       <div class="mx-h2i-static-data-notice" role="note">
         <strong>Aggregate, not a live network node</strong>
@@ -11885,12 +12123,33 @@ function renderMxH2iTopologySelectedNode(nodeId, leases, product) {
       </div>
     `;
   }
+  if (normalized.startsWith('product:')) {
+    const productId = normalized.slice('product:'.length);
+    const selectedProduct = launcherProductById(productId);
+    if (!selectedProduct || selectedProduct.mode !== 'standalone') return renderMxH2iTopologySelectedLease(null);
+    const productLeases = asArray(leases).filter((lease) => mxH2iTopologyProductId(lease) === productId);
+    return `
+      <div class="mx-h2i-topology-selection-head">
+        <div>
+          <span>Standalone ProductNetwork</span>
+          <strong>${escapeHtml(launcherProductDisplayName(productId, selectedProduct))}</strong>
+          <small>${escapeHtml(productId)} · VIP ${escapeHtml(selectedProduct.serviceVip || 'not recorded')} · ${escapeHtml(String(productLeases.length))} lease records</small>
+        </div>
+        <button class="primary-button" type="button" data-mx-h2i-topology-select-product="${escapeHtml(productId)}">Filter to this ProductNetwork</button>
+      </div>
+      <div class="mx-h2i-static-data-notice" role="note">
+        <strong>Product VIP ≠ client lease IP</strong>
+        <span>The VIP is the product-level service address. Each client instance keeps its own assigned lease IP.</span>
+      </div>
+    `;
+  }
   if (normalized === 'domestic' || normalized === 'internal') {
     const domestic = normalized === 'domestic';
     const label = domestic ? 'Domestic' : 'Internal';
+    const selectedProduct = product || launcherNetworkSelectedProduct();
     const address = domestic
-      ? product?.domesticGatewayIp || MX_DOMESTIC_RELAY_IP
-      : product?.internalControlIp || MX_INTERNAL_DNS_IP;
+      ? selectedProduct?.domesticGatewayIp || MX_DOMESTIC_RELAY_IP
+      : selectedProduct?.internalControlIp || MX_INTERNAL_DNS_IP;
     return `
       <div class="mx-h2i-topology-selection-head">
         <div>
@@ -11898,7 +12157,7 @@ function renderMxH2iTopologySelectedNode(nodeId, leases, product) {
           <strong>${label}</strong>
           <small>${escapeHtml(address)} · ${domestic ? 'relay path' : 'control / service plane'}</small>
         </div>
-        <button class="primary-button" type="button" data-mx-h2i-topology-${domestic ? 'open-domestic' : 'open-product'}>${domestic ? 'Open Domestic setup' : 'Open product settings'}</button>
+        ${domestic ? '<button class="primary-button" type="button" data-mx-h2i-topology-open-domestic>Open Domestic setup</button>' : (selectedProduct ? '<button class="primary-button" type="button" data-mx-h2i-topology-open-product>Open product settings</button>' : '')}
       </div>
       <div class="mx-h2i-static-data-notice" role="note">
         <strong>Runtime state not collected</strong>
@@ -11911,6 +12170,7 @@ function renderMxH2iTopologySelectedNode(nodeId, leases, product) {
 
 function renderMxH2iTopologyFallback(leases, product) {
   const viewport = mxH2iTopologyWindow(leases);
+  const products = product ? [product] : launcherNetworkStandaloneProducts();
   return `
     <div class="mx-h2i-topology-fallback" data-mx-h2i-topology-fallback>
       <div class="mx-h2i-topology-selection" data-mx-h2i-topology-selection aria-live="polite">
@@ -11920,12 +12180,12 @@ function renderMxH2iTopologyFallback(leases, product) {
         <strong>Accessible lease window</strong>
         <span>${viewport.rangeStart}-${viewport.rangeEnd} of ${viewport.filteredCount} matched · ${viewport.totalCount} total active lease records</span>
       </div>
-      <div class="mx-h2i-topology-paths" aria-label="MX-H2I topology static lease window">
+      <div class="mx-h2i-topology-paths" aria-label="Launcher Network topology static lease window">
         ${viewport.rows.map((lease) => {
           const leaseKey = mxH2iLeaseDrawerKey(lease);
           const selected = leaseKey === state.mxH2iTopologyView.selectedLeaseKey;
           return `
-            <button type="button" data-mx-h2i-topology-node="${escapeHtml(`client:${leaseKey}`)}" data-mx-h2i-topology-lease="${escapeHtml(leaseKey)}" aria-pressed="${selected ? 'true' : 'false'}">
+            <button type="button" data-mx-h2i-topology-node="${escapeHtml(mxH2iTopologyClientNodeId(lease))}" data-mx-h2i-topology-lease="${escapeHtml(leaseKey)}" aria-pressed="${selected ? 'true' : 'false'}">
               <span><strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong><small>${escapeHtml(mxH2iTopologyGroupLabel(mxH2iTopologyLeaseGroup(lease)))}</small></span>
               <span><strong>${escapeHtml(lease.leaseIp || 'not recorded')}</strong><small>assigned IP</small></span>
               <span><strong>${escapeHtml(mxH2iLeaseDevice(lease))}</strong><small>${escapeHtml(mxH2iLeasePlatform(lease))}</small></span>
@@ -11939,8 +12199,11 @@ function renderMxH2iTopologyFallback(leases, product) {
         <button class="secondary-button" type="button" data-mx-h2i-topology-page="next" ${viewport.page >= viewport.totalPages ? 'disabled' : ''}>Next ${MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE}</button>
       </div>
       <div class="mx-h2i-topology-route-summary">
-        <button type="button" data-mx-h2i-topology-node="domestic" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'domestic' ? 'true' : 'false'}"><strong>Domestic</strong><small>${escapeHtml(product?.domesticGatewayIp || MX_DOMESTIC_RELAY_IP)} · relay path, runtime state not collected here</small></button>
-        <button type="button" data-mx-h2i-topology-node="internal" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'internal' ? 'true' : 'false'}"><strong>Internal</strong><small>${escapeHtml(product?.internalControlIp || MX_INTERNAL_DNS_IP)} · control/service plane, runtime state not collected here</small></button>
+        ${products.map((item) => `
+          <button type="button" data-mx-h2i-topology-node="${escapeHtml(`product:${item.productId}`)}" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === `product:${item.productId}` ? 'true' : 'false'}"><strong>${escapeHtml(launcherProductDisplayName(item.productId, item))}</strong><small>${escapeHtml(item.serviceVip || 'VIP not recorded')} · product-level service VIP</small></button>
+        `).join('')}
+        <button type="button" data-mx-h2i-topology-node="domestic" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'domestic' ? 'true' : 'false'}"><strong>Domestic</strong><small>${escapeHtml(product?.domesticGatewayIp || MX_DOMESTIC_RELAY_IP)} · shared relay fabric, product CIDRs remain isolated</small></button>
+        <button type="button" data-mx-h2i-topology-node="internal" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'internal' ? 'true' : 'false'}"><strong>Internal</strong><small>${escapeHtml(product?.internalControlIp || MX_INTERNAL_DNS_IP)} · shared control/service plane</small></button>
       </div>
     </div>
   `;
@@ -11954,7 +12217,7 @@ function renderMxH2iTopologyExplorer(leases, product, options = {}) {
         <div class="mx-h2i-operations-head">
           <div>
             <span class="site-kind">3D Topology</span>
-            <h4 id="mx-h2i-topology-title">Client lease → Domestic → Internal</h4>
+            <h4 id="mx-h2i-topology-title">Client lease → ProductNetwork / VIP → Domestic → Internal</h4>
             <p>Lease inventory is unavailable, so no topology is inferred or rendered.</p>
           </div>
           <span class="health-chip" data-health="unknown" data-mx-h2i-topology-status>DATA UNAVAILABLE</span>
@@ -11966,14 +12229,17 @@ function renderMxH2iTopologyExplorer(leases, product, options = {}) {
     `;
   }
   const viewport = mxH2iTopologyWindow(leases);
+  const topologyProducts = product ? [product] : asArray(options.products);
   state.mxH2iTopologyView.page = viewport.page;
   const selectedNodeId = String(state.mxH2iTopologyView.selectedNodeId || '');
   const selectedClientVisible = viewport.rows.some((lease) => (
-    `client:${mxH2iLeaseDrawerKey(lease)}` === selectedNodeId
+    mxH2iTopologyClientNodeId(lease) === selectedNodeId
   ));
   const selectedGroupVisible = selectedNodeId.startsWith('group:')
-    && viewport.matched.groups[selectedNodeId.slice('group:'.length)] > 0;
-  if (selectedNodeId && !selectedClientVisible && !selectedGroupVisible && !['domestic', 'internal'].includes(selectedNodeId)) {
+    && Boolean(mxH2iTopologyGroupNode(leases, selectedNodeId));
+  const selectedProductVisible = selectedNodeId.startsWith('product:')
+    && topologyProducts.some((item) => `product:${item.productId}` === selectedNodeId);
+  if (selectedNodeId && !selectedClientVisible && !selectedGroupVisible && !selectedProductVisible && !['domestic', 'internal'].includes(selectedNodeId)) {
     state.mxH2iTopologyView.selectedNodeId = null;
     state.mxH2iTopologyView.selectedLeaseKey = null;
   }
@@ -11983,19 +12249,19 @@ function renderMxH2iTopologyExplorer(leases, product, options = {}) {
       <div class="mx-h2i-operations-head">
         <div>
           <span class="site-kind">Interactive static-lease topology</span>
-          <h4 id="mx-h2i-topology-title">Client lease records → identity groups → Domestic → Internal</h4>
+          <h4 id="mx-h2i-topology-title">Client leases → product-scoped identities → ProductNetwork / VIP → Domestic → Internal</h4>
           <p>Each 3D client node is one static lease record, not one physical machine. The scene renders one ${MX_H2I_TOPOLOGY_NODE_WINDOW_SIZE}-lease window at a time. Search, filter, and page cover all active lease records.</p>
         </div>
         <span class="health-chip" data-health="ready" data-mx-h2i-topology-status>INITIALIZING</span>
       </div>
-      <div class="mx-h2i-topology-metrics" aria-label="MX-H2I topology inventory summary">
+      <div class="mx-h2i-topology-metrics" aria-label="Launcher Network topology inventory summary">
         <span><strong>${escapeHtml(String(summary.machineCount))}</strong><small>device identities (best effort) · ${escapeHtml(String(summary.leaseCount))} active lease records</small></span>
-        <button type="button" data-group="employee" data-mx-h2i-topology-node="group:employee" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'group:employee' ? 'true' : 'false'}"><strong>${escapeHtml(String(summary.groups.employee))}</strong><small>employee · password</small></button>
-        <button type="button" data-group="feishu" data-mx-h2i-topology-node="group:feishu" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'group:feishu' ? 'true' : 'false'}"><strong>${escapeHtml(String(summary.groups.feishu))}</strong><small>employee · Feishu</small></button>
-        <button type="button" data-group="anonymous" data-mx-h2i-topology-node="group:anonymous" aria-pressed="${state.mxH2iTopologyView.selectedNodeId === 'group:anonymous' ? 'true' : 'false'}"><strong>${escapeHtml(String(summary.groups.anonymous))}</strong><small>anonymous</small></button>
+        <button type="button" data-group="employee" data-mx-h2i-topology-filter-group="employee"><strong>${escapeHtml(String(summary.groups.employee))}</strong><small>employee · password</small></button>
+        <button type="button" data-group="feishu" data-mx-h2i-topology-filter-group="feishu"><strong>${escapeHtml(String(summary.groups.feishu))}</strong><small>employee · Feishu</small></button>
+        <button type="button" data-group="anonymous" data-mx-h2i-topology-filter-group="anonymous"><strong>${escapeHtml(String(summary.groups.anonymous))}</strong><small>anonymous</small></button>
       </div>
       <div class="mx-h2i-topology-toolbar" role="group" aria-label="Topology controls">
-        <input type="search" value="${escapeHtml(state.mxH2iTopologyView.query)}" data-mx-h2i-topology-query placeholder="Search user, assigned/source IP, device, platform…" aria-label="Search all MX-H2I topology leases" />
+        <input type="search" value="${escapeHtml(state.mxH2iTopologyView.query)}" data-mx-h2i-topology-query placeholder="Search user, product, assigned/source IP, device, platform…" aria-label="Search Launcher Network topology leases" />
         <select data-mx-h2i-topology-identity aria-label="Filter topology by identity group">
           <option value="all" ${state.mxH2iTopologyView.identity === 'all' ? 'selected' : ''}>All identity groups</option>
           <option value="employee" ${state.mxH2iTopologyView.identity === 'employee' ? 'selected' : ''}>Employee · Password</option>
@@ -12011,10 +12277,10 @@ function renderMxH2iTopologyExplorer(leases, product, options = {}) {
       </div>
       <div class="mx-h2i-topology-layout">
         <div class="mx-h2i-topology-stage">
-          <canvas data-mx-h2i-topology-canvas tabindex="0" aria-label="Interactive MX-H2I static lease topology. Drag to rotate, Shift-drag or right-drag to pan, wheel to zoom, and use arrow or plus/minus keys."></canvas>
+          <canvas data-mx-h2i-topology-canvas tabindex="0" aria-label="Interactive Launcher Network static lease topology. Drag to rotate, Shift-drag or right-drag to pan, wheel to zoom, and use arrow or plus/minus keys."></canvas>
           <div class="mx-h2i-topology-tooltip" data-mx-h2i-topology-tooltip hidden></div>
           <div class="mx-h2i-topology-overlay" aria-hidden="true">
-            <span>LEASES</span><span>IDENTITIES / DOMESTIC</span><span>INTERNAL</span>
+            <span>LEASES</span><span>PRODUCT IDENTITIES</span><span>PRODUCT VIP / DOMESTIC</span><span>INTERNAL</span>
           </div>
           <p class="mx-h2i-topology-help">Static control-plane leases only · drag rotate · Shift/right drag pan · wheel zoom · click node select</p>
         </div>
@@ -12077,37 +12343,69 @@ function renderStandaloneAnonymousPolicy(product, options = {}) {
   `;
 }
 
-function mxH2iBlockedUserAccessRows() {
-  return asArray(state.mxH2iProductUserAccess?.blockedUsers)
+function mxH2iBlockedUserAccessRows(productId = launcherNetworkSelectedProductId()) {
+  if (!productId || productId === LAUNCHER_NETWORK_ALL_PRODUCTS) return [];
+  return asArray(launcherNetworkProductUserAccess(productId)?.blockedUsers)
     .filter((item) => item?.blocked === true && item?.userId)
     .slice()
     .sort((left, right) => String(left.displayName || left.account || left.userId)
       .localeCompare(String(right.displayName || right.account || right.userId)));
 }
 
-function renderMxH2iBlockedUsersPanel() {
-  const blockedUsers = mxH2iBlockedUserAccessRows();
-  const inventoryAvailable = !state.mxH2iProductUserAccessError && Boolean(state.mxH2iProductUserAccess);
+function renderMxH2iBlockedUsersPanel(productId) {
+  if (!productId || productId === LAUNCHER_NETWORK_ALL_PRODUCTS) return '';
+  const product = launcherProductById(productId);
+  const displayName = launcherProductDisplayName(productId, product);
+  const blockedUsers = mxH2iBlockedUserAccessRows(productId);
+  const accessError = launcherNetworkProductUserAccessError(productId);
+  const accessLoading = launcherNetworkProductUserAccessLoading(productId);
+  const inventoryAvailable = !accessError && Boolean(launcherNetworkProductUserAccess(productId));
   return `
     <section id="mx-h2i-banned-users" class="mx-h2i-operations-panel mx-h2i-banned-users" aria-labelledby="mx-h2i-banned-users-title">
       <div class="mx-h2i-operations-head">
         <div>
           <span class="site-kind">Product-scoped access</span>
-          <h4 id="mx-h2i-banned-users-title">Banned from MX-H2I</h4>
-          <p>These users are blocked only from MX-H2I. They remain visible here after their active MX-H2I leases are released, so an operator can inspect and unban them without database access.</p>
+          <h4 id="mx-h2i-banned-users-title">Banned from ${escapeHtml(displayName)}</h4>
+          <p>These users are blocked only from ProductNetwork <code>${escapeHtml(productId)}</code>. They remain visible after their active product leases are released, so an operator can inspect and unban them without database access.</p>
         </div>
-        <span class="mx-h2i-filter-count">${inventoryAvailable ? `${escapeHtml(String(blockedUsers.length))} banned` : 'inventory unavailable'}</span>
+        <span class="mx-h2i-filter-count">${accessLoading ? 'loading inventory' : inventoryAvailable ? `${escapeHtml(String(blockedUsers.length))} banned` : 'inventory unavailable'}</span>
       </div>
-      ${state.mxH2iProductUserAccessError ? `<div class="feedback error">Banned-user inventory unavailable: ${escapeHtml(state.mxH2iProductUserAccessError)}</div>` : ''}
+      ${accessError ? `<div class="feedback error">Banned-user inventory unavailable: ${escapeHtml(accessError)}</div>` : ''}
       <div class="mx-h2i-banned-user-list">
         ${blockedUsers.map((access) => `
-          <button class="mx-h2i-banned-user-row" type="button" data-mx-h2i-blocked-user-open="${escapeHtml(access.userId)}">
+          <button class="mx-h2i-banned-user-row" type="button" data-mx-h2i-blocked-user-open="${escapeHtml(access.userId)}" data-product-id="${escapeHtml(productId)}">
             <span><strong>${escapeHtml(access.displayName || access.account || access.userId)}</strong><small>${escapeHtml(access.account || access.userId)}</small></span>
             <span><strong>${escapeHtml(access.lastLease?.leaseIp || 'no active lease')}</strong><small>${escapeHtml(access.lastLease?.deviceLabel || access.lastLease?.deviceId || 'last device not recorded')}</small></span>
-            <span><strong>MX-H2I banned</strong><small>Luopan unaffected · open to unban</small></span>
+            <span><strong>${escapeHtml(displayName)} banned</strong><small>Other ProductNetworks unaffected · open to unban</small></span>
           </button>
-        `).join('') || `<div class="empty-state">${inventoryAvailable ? 'No user is currently banned from MX-H2I.' : 'Banned-user inventory has not loaded.'}</div>`}
+        `).join('') || `<div class="empty-state">${accessLoading ? `Loading ${escapeHtml(displayName)} banned-user inventory…` : inventoryAvailable ? `No user is currently banned from ${escapeHtml(displayName)}.` : 'Banned-user inventory has not loaded.'}</div>`}
       </div>
+    </section>
+  `;
+}
+
+function renderLauncherNetworkProductScope(products, leases, selectedProductId) {
+  const vipCounts = new Map();
+  for (const product of asArray(products)) {
+    const vip = String(product?.serviceVip || '').trim();
+    if (vip) vipCounts.set(vip, (vipCounts.get(vip) || 0) + 1);
+  }
+  return `
+    <section class="launcher-network-product-scope" aria-label="Standalone ProductNetwork filter">
+      ${asArray(products).map((product) => {
+        const productId = product.productId;
+        const count = asArray(leases).filter((lease) => mxH2iTopologyProductId(lease) === productId).length;
+        const selected = selectedProductId === productId;
+        const vip = String(product.serviceVip || '').trim();
+        const vipConflict = Boolean(vip && vipCounts.get(vip) > 1);
+        return `
+          <button type="button" data-launcher-network-product-select="${escapeHtml(productId)}" aria-pressed="${selected ? 'true' : 'false'}">
+            <span><strong>${escapeHtml(launcherProductDisplayName(productId, product))}</strong><small>${escapeHtml(productId)}</small></span>
+            <span><strong>${escapeHtml(product.serviceVip || 'VIP not recorded')}</strong><small>${vipConflict ? 'VIP conflict · verify registry' : 'ProductNetwork VIP'}</small></span>
+            <span><strong>${escapeHtml(String(count))}</strong><small>active lease records in current inventory</small></span>
+          </button>
+        `;
+      }).join('') || '<div class="empty-state">No standalone ProductNetwork is registered.</div>'}
     </section>
   `;
 }
@@ -12115,37 +12413,48 @@ function renderMxH2iBlockedUsersPanel() {
 function renderMxH2iOperationsScreen(product, leases, options = {}) {
   const leaseDataAvailable = options.leaseDataAvailable !== false;
   const activeLeases = asArray(leases);
-  const employeeLeases = activeLeases.filter((lease) => mxH2iLeaseIdentityGroup(lease) === 'employee');
+  const products = asArray(options.products);
+  const productId = options.productId || product?.productId || LAUNCHER_NETWORK_ALL_PRODUCTS;
+  const allProducts = productId === LAUNCHER_NETWORK_ALL_PRODUCTS;
+  const displayName = allProducts ? 'All standalone products' : launcherProductDisplayName(productId, product);
+  const employeeLeases = activeLeases.filter((lease) => mxH2iTopologyLeaseGroup(lease) === 'employee');
+  const feishuLeases = activeLeases.filter((lease) => mxH2iTopologyLeaseGroup(lease) === 'feishu');
   const anonymousLeases = activeLeases.filter((lease) => mxH2iLeaseIdentityGroup(lease) === 'anonymous');
   const sourceIpCount = activeLeases.filter((lease) => mxH2iLeaseSourceIp(lease) !== 'not recorded').length;
-  const blockedUserCount = mxH2iBlockedUserAccessRows().length;
-  const blockedUserDataAvailable = !state.mxH2iProductUserAccessError && Boolean(state.mxH2iProductUserAccess);
+  const blockedUserCount = allProducts ? null : mxH2iBlockedUserAccessRows(productId).length;
+  const blockedUserLoading = !allProducts && launcherNetworkProductUserAccessLoading(productId);
+  const blockedUserDataAvailable = !allProducts
+    && !launcherNetworkProductUserAccessError(productId)
+    && Boolean(launcherNetworkProductUserAccess(productId));
   const leasePage = mxH2iLeasePage(activeLeases, state.mxH2iLeaseFilter);
+  const requesterApps = [...new Set(activeLeases.map((lease) => String(lease?.appId || '').trim()).filter(Boolean))].sort();
   return `
-    <nav class="mx-h2i-local-nav" aria-label="MX-H2I operations sections">
+    <nav class="mx-h2i-local-nav" aria-label="Launcher Network sections">
       <a href="#mx-h2i-lease-overview">Overview</a>
       <a href="#mx-h2i-topology">Topology</a>
       <a href="#mx-h2i-connections">Connections</a>
-      <a href="#mx-h2i-banned-users">Banned users</a>
-      <a href="#mx-h2i-policy">Anonymous policy</a>
+      ${allProducts ? '' : '<a href="#mx-h2i-banned-users">Banned users</a><a href="#mx-h2i-policy">Anonymous policy</a>'}
     </nav>
+
+    ${renderLauncherNetworkProductScope(products, launcherNetworkActiveLeases(LAUNCHER_NETWORK_ALL_PRODUCTS), productId)}
 
     <section id="mx-h2i-lease-overview" class="mx-h2i-operations-panel" aria-labelledby="mx-h2i-lease-overview-title">
       <div class="mx-h2i-operations-head">
         <div>
-          <span class="site-kind">MX-H2I Operations</span>
-          <h4 id="mx-h2i-lease-overview-title">Lease control surface</h4>
+          <span class="site-kind">${escapeHtml(displayName)} · Launcher Network</span>
+          <h4 id="mx-h2i-lease-overview-title">ProductNetwork lease control surface</h4>
           <p>Active lease records are control-plane allocations. They are not proof of a live WireGuard session or a currently online client.</p>
         </div>
         <span class="health-chip" data-health="${leaseDataAvailable ? 'ready' : 'unknown'}">${leaseDataAvailable ? 'STATIC DATA' : 'DATA UNAVAILABLE'}</span>
       </div>
-      ${leaseDataAvailable ? '' : `<div class="feedback error">Lease inventory unavailable: ${escapeHtml(state.launcherLeasesError || 'MX-H2I ProductNetwork data has not loaded.')}</div>`}
+      ${leaseDataAvailable ? '' : `<div class="feedback error">Lease inventory unavailable: ${escapeHtml(state.launcherLeasesError || 'Launcher ProductNetwork data has not loaded.')}</div>`}
       <div class="mx-h2i-lease-metrics">
         <span><strong>${leaseDataAvailable ? escapeHtml(String(activeLeases.length)) : '—'}</strong><small>active lease records</small></span>
-        <span><strong>${leaseDataAvailable ? escapeHtml(String(employeeLeases.length)) : '—'}</strong><small>employees</small></span>
+        <span><strong>${leaseDataAvailable ? escapeHtml(String(employeeLeases.length)) : '—'}</strong><small>password employees</small></span>
+        <span><strong>${leaseDataAvailable ? escapeHtml(String(feishuLeases.length)) : '—'}</strong><small>Feishu employees</small></span>
         <span><strong>${leaseDataAvailable ? escapeHtml(String(anonymousLeases.length)) : '—'}</strong><small>anonymous</small></span>
         <span><strong>${leaseDataAvailable ? escapeHtml(String(sourceIpCount)) : '—'}</strong><small>source IP recorded</small></span>
-        <span><strong>${blockedUserDataAvailable ? escapeHtml(String(blockedUserCount)) : '—'}</strong><small>${blockedUserDataAvailable ? 'MX-H2I banned users' : 'ban inventory unavailable'}</small></span>
+        <span><strong>${allProducts ? escapeHtml(String(products.length)) : blockedUserDataAvailable ? escapeHtml(String(blockedUserCount)) : '—'}</strong><small>${allProducts ? 'standalone ProductNetworks' : blockedUserLoading ? 'loading ban inventory' : blockedUserDataAvailable ? `${escapeHtml(displayName)} banned users` : 'ban inventory unavailable'}</small></span>
       </div>
       <div class="mx-h2i-static-data-notice" role="note">
         <strong>Static lease ≠ real-time online</strong>
@@ -12156,23 +12465,28 @@ function renderMxH2iOperationsScreen(product, leases, options = {}) {
       </div>
     </section>
 
-    ${renderMxH2iTopologyExplorer(activeLeases, product, { leaseDataAvailable })}
+    ${renderMxH2iTopologyExplorer(activeLeases, product, { leaseDataAvailable, products, productId })}
 
     <section id="mx-h2i-connections" class="mx-h2i-operations-panel" aria-labelledby="mx-h2i-connections-title">
       <div class="mx-h2i-operations-head">
         <div>
           <span class="site-kind">Lease inventory</span>
           <h4 id="mx-h2i-connections-title">Detailed client lease records</h4>
-          <p>Filter static active leases by identity, user, IP, device, platform, lease ID, or app ID.</p>
+          <p>Filter static active leases by identity, user, ProductNetwork, requester app, IP, device, platform, or lease ID.</p>
         </div>
         <span class="mx-h2i-filter-count" data-mx-h2i-filter-count>${leaseDataAvailable ? escapeHtml(mxH2iLeasePageSummary(leasePage)) : 'Lease inventory unavailable'}</span>
       </div>
       <div class="mx-h2i-lease-filters">
-        <input type="search" data-mx-h2i-lease-query value="${escapeHtml(state.mxH2iLeaseFilter.query)}" placeholder="Search user, source IP, assigned IP, device…" aria-label="Search MX-H2I leases" />
-        <select data-mx-h2i-lease-identity aria-label="Filter MX-H2I leases by identity">
+        <input type="search" data-mx-h2i-lease-query value="${escapeHtml(state.mxH2iLeaseFilter.query)}" placeholder="Search user, product, source/assigned IP, device…" aria-label="Search Launcher Network leases" />
+        <select data-mx-h2i-lease-identity aria-label="Filter Launcher Network leases by identity">
           <option value="all" ${state.mxH2iLeaseFilter.identity === 'all' ? 'selected' : ''}>All identities</option>
-          <option value="employee" ${state.mxH2iLeaseFilter.identity === 'employee' ? 'selected' : ''}>Employees</option>
+          <option value="employee" ${state.mxH2iLeaseFilter.identity === 'employee' ? 'selected' : ''}>Employee · Password</option>
+          <option value="feishu" ${state.mxH2iLeaseFilter.identity === 'feishu' ? 'selected' : ''}>Employee · Feishu</option>
           <option value="anonymous" ${state.mxH2iLeaseFilter.identity === 'anonymous' ? 'selected' : ''}>Anonymous</option>
+        </select>
+        <select data-mx-h2i-lease-app aria-label="Filter Launcher Network leases by requesting app">
+          <option value="all" ${state.mxH2iLeaseFilter.app === 'all' ? 'selected' : ''}>All requester apps</option>
+          ${requesterApps.map((appId) => `<option value="${escapeHtml(appId)}" ${state.mxH2iLeaseFilter.app === appId ? 'selected' : ''}>${escapeHtml(appId)}</option>`).join('')}
         </select>
       </div>
       <div class="mx-h2i-lease-table-wrap">
@@ -12182,37 +12496,50 @@ function renderMxH2iOperationsScreen(product, leases, options = {}) {
             ${leasePage.rows.map((lease) => renderMxH2iLeaseTableRow(lease)).join('')}
           </tbody>
         </table>
-        <div class="empty-state" data-mx-h2i-filter-empty ${leasePage.filteredCount ? 'hidden' : ''}>${leaseDataAvailable ? 'No active MX-H2I lease record matches this filter.' : 'Lease inventory could not be loaded. Refresh data before acting on a connection.'}</div>
+        <div class="empty-state" data-mx-h2i-filter-empty ${leasePage.filteredCount ? 'hidden' : ''}>${leaseDataAvailable ? 'No active ProductNetwork lease record matches this filter.' : 'Lease inventory could not be loaded. Refresh data before acting on a connection.'}</div>
       </div>
-      <div class="mx-h2i-lease-pagination" aria-label="MX-H2I lease table pagination">
+      <div class="mx-h2i-lease-pagination" aria-label="Launcher Network lease table pagination">
         <button class="secondary-button" type="button" data-mx-h2i-lease-page="previous" ${leasePage.page <= 1 ? 'disabled' : ''}>Previous 100</button>
         <span data-mx-h2i-page-label>Page ${escapeHtml(String(leasePage.page))} of ${escapeHtml(String(leasePage.totalPages))}</span>
         <button class="secondary-button" type="button" data-mx-h2i-lease-page="next" ${leasePage.page >= leasePage.totalPages ? 'disabled' : ''}>Next 100</button>
       </div>
     </section>
 
-    ${renderMxH2iBlockedUsersPanel()}
+    ${allProducts ? `
+      <section class="mx-h2i-operations-panel launcher-network-all-safety" role="note">
+        <strong>All products is read-only for governance</strong>
+        <span>Select one ProductNetwork before changing anonymous admission or user access. This prevents an MX-H2I action from affecting Luopan, or vice versa.</span>
+      </section>
+    ` : renderMxH2iBlockedUsersPanel(productId)}
 
-    ${renderStandaloneAnonymousPolicy(product, {
+    ${allProducts ? '' : renderStandaloneAnonymousPolicy(product, {
       sectionId: 'mx-h2i-policy',
-      description: 'This saves only MX-H2I ProductNetwork policy. Luopan and other standalone apps keep their own values.',
+      description: `This saves only ${displayName} ProductNetwork policy (${productId}). Every other standalone ProductNetwork keeps its own value.`,
       unavailable: options.productDataAvailable === false,
-      unavailableMessage: state.launcherProductsError || 'The registered MX-H2I ProductNetwork is unavailable.'
+      unavailableMessage: state.launcherProductsError || `The registered ${displayName} ProductNetwork is unavailable.`
     })}
   `;
 }
 
 function renderMxH2iDashboard(product, leases) {
-  const registeredProduct = launcherProductById(MX_H2I_PRODUCT_ID);
-  const productDataAvailable = !state.launcherProductsError && Boolean(registeredProduct);
+  const products = launcherNetworkStandaloneProducts();
+  const productId = launcherNetworkSelectedProductId();
+  const allProducts = productId === LAUNCHER_NETWORK_ALL_PRODUCTS;
+  const registeredProduct = allProducts ? null : launcherProductById(productId);
+  const displayName = allProducts ? 'All standalone products' : launcherProductDisplayName(productId, registeredProduct);
+  const productDataAvailable = !state.launcherProductsError && (allProducts ? products.length > 0 : Boolean(registeredProduct));
   const leaseDataAvailable = productDataAvailable && !state.launcherLeasesError;
   const policy = productDataAvailable ? anonymousEnrollmentPolicyForProduct(registeredProduct) : null;
-  const policyBusy = state.anonymousPolicyBusyProductId === MX_H2I_PRODUCT_ID;
-  const quickTarget = policy ? (policy === 'disabled' ? 'enabled' : 'disabled') : null;
-  const policyFeedback = state.anonymousPolicyFeedback?.productId === MX_H2I_PRODUCT_ID
+  const policyBusy = !allProducts && state.anonymousPolicyBusyProductId === productId;
+  const quickTarget = !allProducts && policy ? (policy === 'disabled' ? 'enabled' : 'disabled') : null;
+  const quickConfirmation = state.mxH2iAnonymousQuickConfirmation;
+  const confirmationMatches = quickConfirmation?.productId === productId && quickConfirmation?.targetPolicy === quickTarget;
+  const policyFeedback = !allProducts && state.anonymousPolicyFeedback?.productId === productId
     ? state.anonymousPolicyFeedback
     : null;
-  const policyLabel = !policy
+  const policyLabel = allProducts
+    ? `${products.length} standalone ProductNetworks`
+    : !policy
     ? 'Anonymous policy unavailable'
     : policy === 'enabled'
     ? 'Anonymous enroll enabled'
@@ -12220,40 +12547,70 @@ function renderMxH2iDashboard(product, leases) {
       ? 'Anonymous enroll draining'
       : 'Anonymous enroll disabled';
   return `
-    <section class="mx-h2i-dashboard" aria-labelledby="mx-h2i-dashboard-title">
+    <section class="mx-h2i-dashboard" aria-labelledby="mx-h2i-dashboard-title" data-launcher-network-product="${escapeHtml(productId)}">
       <header class="mx-h2i-dashboard-hero">
         <div class="mx-h2i-dashboard-title">
-          <span class="site-kind">MX-H2I Control Room</span>
+          <span class="site-kind">Launcher Network Control Room</span>
           <h3 id="mx-h2i-dashboard-title">Connections &amp; Network Operations</h3>
-          <p>以 MX-H2I ProductNetwork 为边界查看连接分配、客户端拓扑和匿名准入；Luopan 使用自己的独立策略。</p>
+          <p>以 standalone ProductNetwork 为边界查看 lease、VIP、客户端拓扑和产品级准入。MX-H2I 与 Luopan 的策略和 lease 严格隔离。</p>
+          <label class="launcher-network-product-filter">
+            <span>ProductNetwork</span>
+            <select data-launcher-network-product-filter aria-label="Filter Launcher Network by standalone ProductNetwork">
+              <option value="${LAUNCHER_NETWORK_ALL_PRODUCTS}" ${allProducts ? 'selected' : ''}>All standalone products</option>
+              ${products.map((item) => `<option value="${escapeHtml(item.productId)}" ${item.productId === productId ? 'selected' : ''}>${escapeHtml(launcherProductDisplayName(item.productId, item))} · ${escapeHtml(item.productId)} · VIP ${escapeHtml(item.serviceVip || 'not recorded')}</option>`).join('')}
+            </select>
+          </label>
         </div>
-        <div class="mx-h2i-dashboard-status" aria-label="MX-H2I dashboard status">
+        <div class="mx-h2i-dashboard-status" aria-label="Launcher Network dashboard status">
           <span><strong>${leaseDataAvailable ? escapeHtml(String(asArray(leases).length)) : '—'}</strong><small>${leaseDataAvailable ? 'active lease records' : 'lease data unavailable'}</small></span>
-          <span data-policy="${escapeHtml(policy || 'unavailable')}"><strong>${escapeHtml(policyLabel)}</strong><small>mx-h2i only</small></span>
+          <span data-policy="${escapeHtml(policy || (allProducts ? 'multiple' : 'unavailable'))}"><strong>${escapeHtml(policyLabel)}</strong><small>${allProducts ? 'select one product to manage policy' : `${productId} only`}</small></span>
         </div>
         <div class="action-row mx-h2i-dashboard-actions">
           <button class="primary-button" type="button" data-mx-h2i-jump="connections">Open connections</button>
-          <button class="secondary-button" type="button" data-mx-h2i-jump="policy">Anonymous policy</button>
-          <button class="${quickTarget === 'disabled' ? 'secondary-button danger-button' : 'secondary-button'}" type="button" ${quickTarget ? `data-mx-h2i-anonymous-quick-request="${escapeHtml(quickTarget)}"` : ''} ${policyBusy || !productDataAvailable ? 'disabled' : ''}>${!quickTarget ? 'Anonymous policy unavailable' : quickTarget === 'disabled' ? 'Disable MX-H2I anonymous login' : 'Enable MX-H2I anonymous login'}</button>
-          <button class="secondary-button" type="button" data-mx-h2i-open-product>Product settings</button>
+          ${allProducts ? '' : `
+            <button class="secondary-button" type="button" data-mx-h2i-jump="policy">Anonymous policy</button>
+            <button class="${quickTarget === 'disabled' ? 'secondary-button danger-button' : 'secondary-button'}" type="button" ${quickTarget ? `data-mx-h2i-anonymous-quick-request="${escapeHtml(quickTarget)}" data-product-id="${escapeHtml(productId)}"` : ''} ${policyBusy || !productDataAvailable ? 'disabled' : ''}>${!quickTarget ? 'Anonymous policy unavailable' : quickTarget === 'disabled' ? `Disable ${escapeHtml(displayName)} anonymous login` : `Enable ${escapeHtml(displayName)} anonymous login`}</button>
+            <button class="secondary-button" type="button" data-mx-h2i-open-product data-product-id="${escapeHtml(productId)}">Product settings</button>
+          `}
           <button class="secondary-button" type="button" data-mx-h2i-refresh-dashboard>Refresh data</button>
         </div>
-        ${quickTarget && state.mxH2iAnonymousQuickConfirmation === quickTarget ? `
+        ${quickTarget && confirmationMatches ? `
           <div class="mx-h2i-quick-policy-confirmation" role="alert">
             <div>
-              <strong>Confirm ${escapeHtml(quickTarget)} for MX-H2I anonymous login?</strong>
-              <span>This writes only ProductNetwork <code>mx-h2i</code>; Luopan remains unchanged. Existing leases and WireGuard peers are not removed by this switch.</span>
+              <strong>Confirm ${escapeHtml(quickTarget)} for ${escapeHtml(displayName)} anonymous login?</strong>
+              <span>This writes only ProductNetwork <code>${escapeHtml(productId)}</code>; every other product remains unchanged. Existing leases and WireGuard peers are not removed by this switch.</span>
             </div>
-            <button class="${quickTarget === 'disabled' ? 'secondary-button danger-button' : 'primary-button'}" type="button" data-mx-h2i-anonymous-quick-confirm="${escapeHtml(quickTarget)}" ${policyBusy ? 'disabled' : ''}>${policyBusy ? 'Saving…' : `Confirm ${escapeHtml(quickTarget)}`}</button>
+            <button class="${quickTarget === 'disabled' ? 'secondary-button danger-button' : 'primary-button'}" type="button" data-mx-h2i-anonymous-quick-confirm="${escapeHtml(quickTarget)}" data-product-id="${escapeHtml(productId)}" ${policyBusy ? 'disabled' : ''}>${policyBusy ? 'Saving…' : `Confirm ${escapeHtml(quickTarget)}`}</button>
             <button class="secondary-button" type="button" data-mx-h2i-anonymous-quick-cancel ${policyBusy ? 'disabled' : ''}>Cancel</button>
           </div>
         ` : ''}
-        ${productDataAvailable && leaseDataAvailable ? '' : `<div class="feedback error mx-h2i-dashboard-feedback">${escapeHtml(state.launcherProductsError || state.launcherLeasesError || 'The registered MX-H2I ProductNetwork has not loaded. Refresh before changing connection or anonymous policy state.')}</div>`}
+        ${productDataAvailable && leaseDataAvailable ? '' : `<div class="feedback error mx-h2i-dashboard-feedback">${escapeHtml(state.launcherProductsError || state.launcherLeasesError || 'Registered standalone ProductNetwork data has not loaded. Refresh before interpreting connections or changing policy state.')}</div>`}
         ${policyFeedback ? `<div class="feedback ${escapeHtml(policyFeedback.kind || 'info')} mx-h2i-dashboard-feedback">${escapeHtml(policyFeedback.message || '')}</div>` : ''}
       </header>
-      ${renderMxH2iOperationsScreen(product, leases, { productDataAvailable, leaseDataAvailable })}
+      ${renderMxH2iOperationsScreen(registeredProduct, leases, { products, productId, productDataAvailable, leaseDataAvailable })}
     </section>
   `;
+}
+
+function selectLauncherNetworkProduct(productId) {
+  const normalized = String(productId || '').trim().toLowerCase();
+  const allowed = normalized === LAUNCHER_NETWORK_ALL_PRODUCTS
+    || launcherNetworkStandaloneProducts().some((product) => product.productId === normalized);
+  state.launcherNetworkProductFilter = allowed ? normalized : LAUNCHER_NETWORK_ALL_PRODUCTS;
+  state.mxH2iLeaseFilter.page = 1;
+  state.mxH2iLeaseFilter.app = 'all';
+  state.mxH2iTopologyView.page = 1;
+  state.mxH2iTopologyView.selectedLeaseKey = null;
+  state.mxH2iTopologyView.selectedNodeId = null;
+  state.mxH2iTopologyActivity.requestSequence += 1;
+  state.mxH2iTopologyActivity.leaseId = null;
+  state.mxH2iTopologyActivity.activity = [];
+  state.mxH2iAnonymousQuickConfirmation = null;
+  closeMxH2iLeaseDrawer({ restoreFocus: false });
+  disposeMxH2iTopology();
+  if (state.launcherNetworkProductFilter !== LAUNCHER_NETWORK_ALL_PRODUCTS) {
+    void ensureLauncherProductUserAccess(state.launcherNetworkProductFilter);
+  }
 }
 
 function bindMxH2iDashboardControls(root, leases, product) {
@@ -12262,6 +12619,9 @@ function bindMxH2iDashboardControls(root, leases, product) {
   const productButton = root.querySelector('[data-mx-h2i-open-product]');
   if (productButton) {
     productButton.addEventListener('click', () => {
+      const productId = productButton.dataset.productId;
+      const app = orderedAppCenterApps().find((item) => productNetworkIdForApp(item) === productId && launcherModeForApp(item) === 'standalone');
+      if (app) state.activeAppNode = app.appId;
       state.mxH2iSurface = 'product';
       closeMxH2iLeaseDrawer({ restoreFocus: false });
       renderAppCenterShell();
@@ -12269,8 +12629,22 @@ function bindMxH2iDashboardControls(root, leases, product) {
   }
   const refresh = root.querySelector('[data-mx-h2i-refresh-dashboard]');
   if (refresh) refresh.addEventListener('click', () => void refreshProducts());
+  const select = root.querySelector('[data-launcher-network-product-filter]');
+  if (select) select.addEventListener('change', () => {
+    selectLauncherNetworkProduct(select.value);
+    renderAppCenterShell();
+  });
+  for (const button of root.querySelectorAll('[data-launcher-network-product-select]')) {
+    button.addEventListener('click', () => {
+      selectLauncherNetworkProduct(button.dataset.launcherNetworkProductSelect);
+      renderAppCenterShell();
+    });
+  }
   root.querySelector('[data-mx-h2i-anonymous-quick-request]')?.addEventListener('click', (event) => {
-    state.mxH2iAnonymousQuickConfirmation = event.currentTarget.dataset.mxH2iAnonymousQuickRequest;
+    state.mxH2iAnonymousQuickConfirmation = {
+      productId: event.currentTarget.dataset.productId,
+      targetPolicy: event.currentTarget.dataset.mxH2iAnonymousQuickRequest
+    };
     renderSelectedAppDetail();
   });
   root.querySelector('[data-mx-h2i-anonymous-quick-cancel]')?.addEventListener('click', () => {
@@ -12278,7 +12652,10 @@ function bindMxH2iDashboardControls(root, leases, product) {
     renderSelectedAppDetail();
   });
   root.querySelector('[data-mx-h2i-anonymous-quick-confirm]')?.addEventListener('click', (event) => {
-    void saveMxH2iAnonymousQuickPolicy(event.currentTarget.dataset.mxH2iAnonymousQuickConfirm);
+    void saveMxH2iAnonymousQuickPolicy(
+      event.currentTarget.dataset.productId,
+      event.currentTarget.dataset.mxH2iAnonymousQuickConfirm
+    );
   });
   for (const jump of root.querySelectorAll('[data-mx-h2i-jump]')) {
     jump.addEventListener('click', () => {
@@ -12292,8 +12669,14 @@ function bindMxH2iDashboardControls(root, leases, product) {
 function refreshMxH2iTopologyExplorer(root, leases, product, focus = null) {
   const current = root?.querySelector?.('#mx-h2i-topology');
   if (!current) return;
+  const products = product ? [product] : launcherNetworkStandaloneProducts();
+  const productId = product?.productId || LAUNCHER_NETWORK_ALL_PRODUCTS;
   disposeMxH2iTopology();
-  current.outerHTML = renderMxH2iTopologyExplorer(leases, product, { leaseDataAvailable: true });
+  current.outerHTML = renderMxH2iTopologyExplorer(leases, product, {
+    leaseDataAvailable: true,
+    products,
+    productId
+  });
   bindMxH2iTopologyControls(root, leases, product);
   if (!focus?.selector) return;
   requestAnimationFrame(() => {
@@ -12308,24 +12691,36 @@ function refreshMxH2iTopologyExplorer(root, leases, product, focus = null) {
 function mxH2iTopologyLeaseForNode(leases, nodeId) {
   const viewport = mxH2iTopologyWindow(leases);
   const normalized = String(nodeId || '').trim();
-  return viewport.rows.find((lease) => `client:${mxH2iLeaseDrawerKey(lease)}` === normalized) || null;
+  return viewport.rows.find((lease) => mxH2iTopologyClientNodeId(lease) === normalized) || null;
 }
 
 function activateMxH2iTopologyNode(root, leases, product, nodeId, returnFocus = null) {
   const normalized = String(nodeId || '').trim();
   const lease = mxH2iTopologyLeaseForNode(leases, normalized);
   if (lease) {
-    openMxH2iLeaseDrawer(mxH2iLeaseDrawerKey(lease), returnFocus);
+    openMxH2iLeaseDrawer(mxH2iLeaseDrawerKey(lease), lease.productId, returnFocus);
     return;
   }
-  if (normalized.startsWith('group:')) {
-    const group = normalized.slice('group:'.length);
-    if (!['employee', 'feishu', 'anonymous'].includes(group)) return;
-    state.mxH2iTopologyView.identity = group;
+  const groupNode = mxH2iTopologyGroupNode(leases, normalized);
+  if (groupNode) {
+    state.mxH2iTopologyView.identity = groupNode.group;
     state.mxH2iTopologyView.page = 1;
     state.mxH2iTopologyView.selectedNodeId = normalized;
     state.mxH2iTopologyView.selectedLeaseKey = null;
+    if (launcherNetworkSelectedProductId() !== groupNode.productId) {
+      selectLauncherNetworkProduct(groupNode.productId);
+      state.mxH2iTopologyView.identity = groupNode.group;
+      renderAppCenterShell();
+      return;
+    }
     refreshMxH2iTopologyExplorer(root, leases, product, { selector: '[data-mx-h2i-topology-identity]' });
+    return;
+  }
+  if (normalized.startsWith('product:')) {
+    const productId = normalized.slice('product:'.length);
+    if (!launcherNetworkStandaloneProducts().some((item) => item.productId === productId)) return;
+    selectLauncherNetworkProduct(productId);
+    renderAppCenterShell();
     return;
   }
   if (normalized === 'domestic') {
@@ -12338,6 +12733,9 @@ function activateMxH2iTopologyNode(root, leases, product, nodeId, returnFocus = 
     return;
   }
   if (normalized === 'internal') {
+    if (!product) return;
+    const app = orderedAppCenterApps().find((item) => productNetworkIdForApp(item) === product.productId && launcherModeForApp(item) === 'standalone');
+    if (app) state.activeAppNode = app.appId;
     state.mxH2iSurface = 'product';
     closeMxH2iLeaseDrawer({ restoreFocus: false });
     renderAppCenterShell();
@@ -12352,12 +12750,15 @@ function bindMxH2iTopologySelectionActions(root, leases, product) {
       root,
       leases,
       product,
-      `client:${event.currentTarget.dataset.mxH2iTopologyOpenSelected}`,
+      event.currentTarget.dataset.mxH2iTopologyOpenSelected,
       event.currentTarget
     );
   });
   section.querySelector('[data-mx-h2i-topology-apply-group]')?.addEventListener('click', (event) => {
-    activateMxH2iTopologyNode(root, leases, product, `group:${event.currentTarget.dataset.mxH2iTopologyApplyGroup}`, event.currentTarget);
+    activateMxH2iTopologyNode(root, leases, product, event.currentTarget.dataset.mxH2iTopologyApplyGroup, event.currentTarget);
+  });
+  section.querySelector('[data-mx-h2i-topology-select-product]')?.addEventListener('click', (event) => {
+    activateMxH2iTopologyNode(root, leases, product, `product:${event.currentTarget.dataset.mxH2iTopologySelectProduct}`, event.currentTarget);
   });
   section.querySelector('[data-mx-h2i-topology-open-domestic]')?.addEventListener('click', (event) => {
     activateMxH2iTopologyNode(root, leases, product, 'domestic', event.currentTarget);
@@ -12372,9 +12773,12 @@ function renderMxH2iTopologySelection(root, leases, product, nodeId) {
   if (!section) return;
   const normalized = String(nodeId || '').trim();
   const selectedLease = mxH2iTopologyLeaseForNode(leases, normalized);
-  const group = normalized.startsWith('group:') ? normalized.slice('group:'.length) : null;
+  const groupNode = mxH2iTopologyGroupNode(leases, normalized);
+  const productNode = normalized.startsWith('product:')
+    && launcherNetworkStandaloneProducts().some((item) => `product:${item.productId}` === normalized);
   const valid = Boolean(selectedLease)
-    || ['employee', 'feishu', 'anonymous'].includes(group)
+    || Boolean(groupNode)
+    || productNode
     || ['domestic', 'internal'].includes(normalized);
   state.mxH2iTopologyView.selectedNodeId = valid ? normalized : null;
   state.mxH2iTopologyView.selectedLeaseKey = selectedLease ? mxH2iLeaseDrawerKey(selectedLease) : null;
@@ -12454,19 +12858,25 @@ function mxH2iTopologyPageFocusSelector(direction, viewport) {
 function bindMxH2iTopologyControls(root, leases, product) {
   const section = root?.querySelector?.('#mx-h2i-topology');
   if (!section) return;
+  const productScope = product?.productId || LAUNCHER_NETWORK_ALL_PRODUCTS;
   const query = section.querySelector('[data-mx-h2i-topology-query]');
   if (query) {
-    let queryTimer = null;
     query.addEventListener('input', () => {
       state.mxH2iTopologyView.query = query.value || '';
       state.mxH2iTopologyView.page = 1;
-      if (queryTimer !== null) clearTimeout(queryTimer);
-      queryTimer = setTimeout(() => {
+      if (state.mxH2iTopologyQueryTimer !== null) clearTimeout(state.mxH2iTopologyQueryTimer);
+      const cursor = query.selectionStart;
+      const queryTimer = setTimeout(() => {
+        if (state.mxH2iTopologyQueryTimer === queryTimer) state.mxH2iTopologyQueryTimer = null;
+        if (!section.isConnected
+          || root?.querySelector?.('#mx-h2i-topology') !== section
+          || launcherNetworkSelectedProductId() !== productScope) return;
         refreshMxH2iTopologyExplorer(root, leases, product, {
           selector: '[data-mx-h2i-topology-query]',
-          cursor: query.selectionStart
+          cursor
         });
       }, 160);
+      state.mxH2iTopologyQueryTimer = queryTimer;
     });
   }
   section.querySelector('[data-mx-h2i-topology-identity]')?.addEventListener('change', (event) => {
@@ -12476,6 +12886,15 @@ function bindMxH2iTopologyControls(root, leases, product) {
     state.mxH2iTopologyView.page = 1;
     refreshMxH2iTopologyExplorer(root, leases, product, { selector: '[data-mx-h2i-topology-identity]' });
   });
+  for (const groupButton of section.querySelectorAll('[data-mx-h2i-topology-filter-group]')) {
+    groupButton.addEventListener('click', () => {
+      state.mxH2iTopologyView.identity = ['employee', 'feishu', 'anonymous'].includes(groupButton.dataset.mxH2iTopologyFilterGroup)
+        ? groupButton.dataset.mxH2iTopologyFilterGroup
+        : 'all';
+      state.mxH2iTopologyView.page = 1;
+      refreshMxH2iTopologyExplorer(root, leases, product, { selector: '[data-mx-h2i-topology-identity]' });
+    });
+  }
   for (const pageButton of section.querySelectorAll('[data-mx-h2i-topology-page]')) {
     pageButton.addEventListener('click', () => {
       const direction = pageButton.dataset.mxH2iTopologyPage === 'next' ? 'next' : 'previous';
@@ -12514,6 +12933,7 @@ function bindMxH2iTopologyControls(root, leases, product) {
       && state.mxH2iSurface === 'dashboard') {
       initMxH2iTopology(section, leases, {
         product,
+        products: product ? [product] : launcherNetworkStandaloneProducts(),
         onSelect: (nodeId) => renderMxH2iTopologySelection(root, leases, product, nodeId),
         onActivate: (nodeId, returnFocus) => activateMxH2iTopologyNode(root, leases, product, nodeId, returnFocus)
       });
@@ -12523,56 +12943,71 @@ function bindMxH2iTopologyControls(root, leases, product) {
   if (selectedLease) void loadMxH2iTopologyActivity(section, selectedLease);
 }
 
-async function saveMxH2iAnonymousQuickPolicy(targetPolicy) {
+async function saveMxH2iAnonymousQuickPolicy(productId, targetPolicy) {
   if (state.anonymousPolicyBusyProductId) return;
+  const normalizedProductId = String(productId || '').trim().toLowerCase();
+  const confirmation = state.mxH2iAnonymousQuickConfirmation;
+  if (normalizedProductId === LAUNCHER_NETWORK_ALL_PRODUCTS
+    || launcherNetworkSelectedProductId() !== normalizedProductId
+    || confirmation?.productId !== normalizedProductId
+    || confirmation?.targetPolicy !== targetPolicy) {
+    state.mxH2iAnonymousQuickConfirmation = null;
+    return;
+  }
   const anonymousEnrollmentPolicy = targetPolicy === 'enabled' ? 'enabled' : 'disabled';
-  const current = launcherProductById(MX_H2I_PRODUCT_ID);
+  const current = launcherProductById(normalizedProductId);
+  const displayName = launcherProductDisplayName(normalizedProductId, current);
   if (!current || state.launcherProductsError) {
     state.mxH2iAnonymousQuickConfirmation = null;
     state.anonymousPolicyFeedback = {
-      productId: MX_H2I_PRODUCT_ID,
+      productId: normalizedProductId,
       kind: 'error',
-      message: 'MX-H2I ProductNetwork policy is unavailable. Refresh data before changing anonymous admission.'
+      message: `${displayName} ProductNetwork policy is unavailable. Refresh data before changing anonymous admission.`
     };
     renderSelectedAppDetail();
     return;
   }
   const anonymousUiVisibility = anonymousUiVisibilityForProduct(current);
-  state.anonymousPolicyBusyProductId = MX_H2I_PRODUCT_ID;
+  const requestScope = captureLauncherNetworkRequestScope();
+  state.anonymousPolicyBusyProductId = normalizedProductId;
   state.anonymousPolicyFeedback = {
-    productId: MX_H2I_PRODUCT_ID,
+    productId: normalizedProductId,
     kind: 'info',
-    message: `Saving MX-H2I anonymous admission as ${anonymousEnrollmentPolicy}; Luopan is unchanged.`
+    message: `Saving ${displayName} anonymous admission as ${anonymousEnrollmentPolicy}; other ProductNetworks are unchanged.`
   };
   renderSelectedAppDetail();
   try {
-    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(MX_H2I_PRODUCT_ID)}`, {
+    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(normalizedProductId)}`, {
       method: 'POST',
       body: {
         anonymousEnrollmentPolicy,
         anonymousUiVisibility,
         requestedBy: 'desktop-admin',
-        requestId: `desktop-mx-h2i-anonymous-quick-${Date.now()}`
+        requestId: `desktop-launcher-network-anonymous-quick-${Date.now()}`
       }
     });
+    if (!isLauncherNetworkRequestScopeCurrent(requestScope)) return;
     upsertLocalLauncherProduct({
       ...current,
       ...(payload?.product || {}),
-      productId: MX_H2I_PRODUCT_ID,
+      productId: normalizedProductId,
       anonymousEnrollmentPolicy: payload?.product?.anonymousEnrollmentPolicy || anonymousEnrollmentPolicy,
       anonymousUiVisibility: payload?.product?.anonymousUiVisibility || anonymousUiVisibility
     });
-    state.mxH2iAnonymousQuickConfirmation = null;
     state.anonymousPolicyFeedback = {
-      productId: MX_H2I_PRODUCT_ID,
+      productId: normalizedProductId,
       kind: 'success',
-      message: `MX-H2I anonymous admission is ${anonymousEnrollmentPolicy}. Luopan, employee login, existing leases, and WireGuard peers were not changed.`
+      message: `${displayName} anonymous admission is ${anonymousEnrollmentPolicy}. Other products, employee login, existing leases, and WireGuard peers were not changed.`
     };
+    if (launcherNetworkSelectedProductId() === normalizedProductId) state.mxH2iAnonymousQuickConfirmation = null;
   } catch (error) {
-    state.anonymousPolicyFeedback = { productId: MX_H2I_PRODUCT_ID, kind: 'error', message: error.message };
+    if (!isLauncherNetworkRequestScopeCurrent(requestScope)) return;
+    state.anonymousPolicyFeedback = { productId: normalizedProductId, kind: 'error', message: error.message };
   } finally {
-    state.anonymousPolicyBusyProductId = null;
-    renderSelectedAppDetail();
+    if (isLauncherNetworkRequestScopeCurrent(requestScope)) {
+      if (state.anonymousPolicyBusyProductId === normalizedProductId) state.anonymousPolicyBusyProductId = null;
+      if (launcherNetworkSelectedProductId() === normalizedProductId) renderSelectedAppDetail();
+    }
   }
 }
 
@@ -12615,8 +13050,10 @@ function renderSelectedAppDetail() {
     ? safeHttpEntrypoint(app.entrypoints?.admin)
     : null;
   if (app.appId === MX_H2I_PRODUCT_ID && state.mxH2iSurface === 'dashboard') {
-    appSelectedDetail.innerHTML = renderMxH2iDashboard(product, leases);
-    bindMxH2iDashboardControls(appSelectedDetail, leases, product);
+    const selectedProduct = launcherNetworkSelectedProduct();
+    const dashboardLeases = launcherNetworkActiveLeases();
+    appSelectedDetail.innerHTML = renderMxH2iDashboard(selectedProduct, dashboardLeases);
+    bindMxH2iDashboardControls(appSelectedDetail, dashboardLeases, selectedProduct);
     renderMxH2iLeaseDrawer();
     return;
   }
@@ -12863,7 +13300,15 @@ function bindMxH2iOperationsControls(root, leases) {
   const identity = root.querySelector('[data-mx-h2i-lease-identity]');
   if (identity) {
     identity.addEventListener('change', () => {
-      state.mxH2iLeaseFilter.identity = ['employee', 'anonymous'].includes(identity.value) ? identity.value : 'all';
+      state.mxH2iLeaseFilter.identity = ['employee', 'feishu', 'anonymous'].includes(identity.value) ? identity.value : 'all';
+      state.mxH2iLeaseFilter.page = 1;
+      applyMxH2iLeaseFilters(root, leases);
+    });
+  }
+  const requesterApp = root.querySelector('[data-mx-h2i-lease-app]');
+  if (requesterApp) {
+    requesterApp.addEventListener('change', () => {
+      state.mxH2iLeaseFilter.app = requesterApp.value || 'all';
       state.mxH2iLeaseFilter.page = 1;
       applyMxH2iLeaseFilters(root, leases);
     });
@@ -12877,12 +13322,12 @@ function bindMxH2iOperationsControls(root, leases) {
   const openLease = (event) => {
     const blockedUser = event.target?.closest?.('[data-mx-h2i-blocked-user-open]');
     if (blockedUser && root.contains(blockedUser)) {
-      openMxH2iBlockedUserDrawer(blockedUser.dataset.mxH2iBlockedUserOpen, blockedUser);
+      openMxH2iBlockedUserDrawer(blockedUser.dataset.mxH2iBlockedUserOpen, blockedUser.dataset.productId, blockedUser);
       return;
     }
     const row = event.target?.closest?.('[data-mx-h2i-lease-open]');
     if (!row || !root.contains(row)) return;
-    openMxH2iLeaseDrawer(row.dataset.mxH2iLeaseOpen, row);
+    openMxH2iLeaseDrawer(row.dataset.mxH2iLeaseOpen, row.dataset.productId, row);
   };
   root.addEventListener('click', openLease);
   root.addEventListener('keydown', (event) => {
@@ -12903,7 +13348,9 @@ function mxH2iLeaseDrawerKey(lease) {
 
 function mxH2iLeaseForDrawer(key = state.mxH2iLeaseDrawer?.leaseKey) {
   const normalized = String(key || '').trim();
-  const recordedLease = launcherLeasesForProduct(MX_H2I_PRODUCT_ID)
+  const productId = String(state.mxH2iLeaseDrawer?.productId || '').trim().toLowerCase();
+  if (!productId || productId === LAUNCHER_NETWORK_ALL_PRODUCTS) return null;
+  const recordedLease = launcherLeasesForProduct(productId)
     .find((lease) => mxH2iLeaseDrawerKey(lease) === normalized) || null;
   if (recordedLease) return recordedLease;
   const access = state.mxH2iLeaseDrawer?.productUserAccess;
@@ -12911,7 +13358,7 @@ function mxH2iLeaseForDrawer(key = state.mxH2iLeaseDrawer?.leaseKey) {
   return {
     ...(access.lastLease || {}),
     leaseId: access.lastLease?.leaseId || '',
-    productId: MX_H2I_PRODUCT_ID,
+    productId,
     userId: access.userId,
     subject: access.displayName || access.account || access.userId,
     identityKind: 'user',
@@ -12919,16 +13366,19 @@ function mxH2iLeaseForDrawer(key = state.mxH2iLeaseDrawer?.leaseKey) {
   };
 }
 
-function mxH2iBlockedUserAccessById(userId) {
-  return mxH2iBlockedUserAccessRows().find((access) => access.userId === userId) || null;
+function mxH2iBlockedUserAccessById(userId, productId) {
+  return mxH2iBlockedUserAccessRows(productId).find((access) => access.userId === userId) || null;
 }
 
-function openMxH2iLeaseDrawer(leaseKey, returnFocus = null) {
-  const lease = mxH2iLeaseForDrawer(leaseKey);
+function openMxH2iLeaseDrawer(leaseKey, productId, returnFocus = null) {
+  const normalizedProductId = String(productId || '').trim().toLowerCase();
+  const lease = launcherLeasesForProduct(normalizedProductId)
+    .find((item) => mxH2iLeaseDrawerKey(item) === String(leaseKey || '').trim()) || null;
   if (!lease || !mxH2iLeaseDrawer || !mxH2iLeaseBackdrop) return;
   mxH2iLeaseDrawerReturnFocus = returnFocus instanceof HTMLElement ? returnFocus : document.activeElement;
   state.mxH2iLeaseDrawer = {
     leaseKey: mxH2iLeaseDrawerKey(lease),
+    productId: normalizedProductId,
     userId: String(lease.userId || '').trim() || null,
     productUserAccess: null,
     accessLoading: false,
@@ -12939,18 +13389,23 @@ function openMxH2iLeaseDrawer(leaseKey, returnFocus = null) {
     feedback: null
   };
   renderMxH2iLeaseDrawer();
-  if (state.mxH2iLeaseDrawer.userId && mxH2iLeaseIdentityGroup(lease) === 'employee') {
-    void loadMxH2iProductUserAccess(state.mxH2iLeaseDrawer.userId);
+  if (launcherNetworkSelectedProductId() === normalizedProductId
+    && state.mxH2iLeaseDrawer.userId
+    && mxH2iLeaseIdentityGroup(lease) === 'employee') {
+    void loadMxH2iProductUserAccess(state.mxH2iLeaseDrawer.userId, normalizedProductId);
   }
   mxH2iLeaseDrawer.querySelector('[data-mx-h2i-lease-drawer-close]')?.focus();
 }
 
-function openMxH2iBlockedUserDrawer(userId, returnFocus = null) {
-  const access = mxH2iBlockedUserAccessById(String(userId || '').trim());
+function openMxH2iBlockedUserDrawer(userId, productId, returnFocus = null) {
+  const normalizedProductId = String(productId || '').trim().toLowerCase();
+  if (launcherNetworkSelectedProductId() !== normalizedProductId) return;
+  const access = mxH2iBlockedUserAccessById(String(userId || '').trim(), normalizedProductId);
   if (!access || !mxH2iLeaseDrawer || !mxH2iLeaseBackdrop) return;
   mxH2iLeaseDrawerReturnFocus = returnFocus instanceof HTMLElement ? returnFocus : document.activeElement;
   state.mxH2iLeaseDrawer = {
     leaseKey: mxH2iLeaseDrawerKey(access.lastLease) || `blocked-user:${access.userId}`,
+    productId: normalizedProductId,
     userId: access.userId,
     productUserAccess: access,
     accessLoading: false,
@@ -12961,7 +13416,7 @@ function openMxH2iBlockedUserDrawer(userId, returnFocus = null) {
     feedback: null
   };
   renderMxH2iLeaseDrawer();
-  void loadMxH2iProductUserAccess(access.userId);
+  void loadMxH2iProductUserAccess(access.userId, normalizedProductId);
   mxH2iLeaseDrawer.querySelector('[data-mx-h2i-lease-drawer-close]')?.focus();
 }
 
@@ -13014,24 +13469,38 @@ function mxH2iProductUserAccessFromPayload(payload) {
   return payload?.productUserAccess || payload?.access || null;
 }
 
-async function loadMxH2iProductUserAccess(userId) {
+async function loadMxH2iProductUserAccess(userId, productId) {
   const drawer = state.mxH2iLeaseDrawer;
-  if (!drawer || drawer.accessLoading || drawer.userId !== userId) return;
+  if (!drawer
+    || drawer.accessLoading
+    || drawer.userId !== userId
+    || drawer.productId !== productId
+    || launcherNetworkSelectedProductId() !== productId) return;
+  const requestScope = captureLauncherNetworkRequestScope();
   drawer.accessLoading = true;
   drawer.accessError = null;
   renderMxH2iLeaseDrawer();
   try {
-    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(MX_H2I_PRODUCT_ID)}/users/${encodeURIComponent(userId)}/access`);
-    if (!state.mxH2iLeaseDrawer || state.mxH2iLeaseDrawer.userId !== userId) return;
+    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(productId)}/users/${encodeURIComponent(userId)}/access`);
+    if (!isLauncherNetworkRequestScopeCurrent(requestScope)
+      || !state.mxH2iLeaseDrawer
+      || state.mxH2iLeaseDrawer.userId !== userId
+      || state.mxH2iLeaseDrawer.productId !== productId
+      || launcherNetworkSelectedProductId() !== productId) return;
     state.mxH2iLeaseDrawer.productUserAccess = {
       ...(state.mxH2iLeaseDrawer.productUserAccess || {}),
       ...(mxH2iProductUserAccessFromPayload(payload) || {})
     };
   } catch (error) {
-    if (!state.mxH2iLeaseDrawer || state.mxH2iLeaseDrawer.userId !== userId) return;
+    if (!isLauncherNetworkRequestScopeCurrent(requestScope)
+      || !state.mxH2iLeaseDrawer
+      || state.mxH2iLeaseDrawer.userId !== userId
+      || state.mxH2iLeaseDrawer.productId !== productId) return;
     state.mxH2iLeaseDrawer.accessError = error.message;
   } finally {
-    if (state.mxH2iLeaseDrawer?.userId === userId) {
+    if (isLauncherNetworkRequestScopeCurrent(requestScope)
+      && state.mxH2iLeaseDrawer?.userId === userId
+      && state.mxH2iLeaseDrawer?.productId === productId) {
       state.mxH2iLeaseDrawer.accessLoading = false;
       renderMxH2iLeaseDrawer();
     }
@@ -13042,44 +13511,59 @@ async function saveMxH2iProductUserAccess(blocked) {
   const drawer = state.mxH2iLeaseDrawer;
   if (!drawer?.userId || drawer.actionBusy) return;
   const userId = drawer.userId;
+  const productId = drawer.productId;
+  if (!productId
+    || productId === LAUNCHER_NETWORK_ALL_PRODUCTS
+    || launcherNetworkSelectedProductId() !== productId) return;
+  const requestScope = captureLauncherNetworkRequestScope();
+  const displayName = launcherProductDisplayName(productId, launcherProductById(productId));
   drawer.actionBusy = true;
   drawer.feedback = {
     kind: 'info',
-    message: blocked ? 'Banning this user from MX-H2I…' : 'Removing the MX-H2I user ban…'
+    message: blocked ? `Banning this user from ${displayName}…` : `Removing the ${displayName} user ban…`
   };
   renderMxH2iLeaseDrawer();
   try {
-    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(MX_H2I_PRODUCT_ID)}/users/${encodeURIComponent(userId)}/access`, {
+    const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(productId)}/users/${encodeURIComponent(userId)}/access`, {
       method: 'POST',
       body: {
         blocked,
         reason: String(drawer.reason || '').trim() || null,
         requestedBy: 'desktop-admin',
-        requestId: `desktop-mx-h2i-user-access-${Date.now()}`
+        requestId: `desktop-launcher-network-user-access-${Date.now()}`
       }
     });
+    if (!isLauncherNetworkRequestScopeCurrent(requestScope)) return;
     const access = {
       ...(drawer.productUserAccess || {}),
       ...(mxH2iProductUserAccessFromPayload(payload) || {})
     };
-    const activeDrawer = state.mxH2iLeaseDrawer?.userId === userId ? state.mxH2iLeaseDrawer : null;
+    const activeDrawer = state.mxH2iLeaseDrawer?.userId === userId
+      && state.mxH2iLeaseDrawer?.productId === productId
+      && launcherNetworkSelectedProductId() === productId
+      ? state.mxH2iLeaseDrawer
+      : null;
     if (activeDrawer) {
       activeDrawer.productUserAccess = access;
       activeDrawer.confirmation = null;
       activeDrawer.feedback = {
         kind: 'success',
         message: blocked
-          ? `Banned from MX-H2I. ${access?.controlPlane?.releasedLeaseCount || 0} control-plane lease(s) released; WireGuard peer removal is not claimed.`
-          : 'MX-H2I user ban removed. No lease or WireGuard peer was recreated.'
+          ? `Banned from ${displayName}. ${access?.controlPlane?.releasedLeaseCount || 0} control-plane lease(s) released; WireGuard peer removal is not claimed.`
+          : `${displayName} user ban removed. No lease or WireGuard peer was recreated.`
       };
     }
     await refreshAppCenterNetwork();
   } catch (error) {
-    if (state.mxH2iLeaseDrawer?.userId === userId) {
+    if (isLauncherNetworkRequestScopeCurrent(requestScope)
+      && state.mxH2iLeaseDrawer?.userId === userId
+      && state.mxH2iLeaseDrawer?.productId === productId) {
       state.mxH2iLeaseDrawer.feedback = { kind: 'error', message: error.message };
     }
   } finally {
-    if (state.mxH2iLeaseDrawer?.userId === userId) {
+    if (isLauncherNetworkRequestScopeCurrent(requestScope)
+      && state.mxH2iLeaseDrawer?.userId === userId
+      && state.mxH2iLeaseDrawer?.productId === productId) {
       state.mxH2iLeaseDrawer.actionBusy = false;
       renderMxH2iLeaseDrawer();
     }
@@ -13104,9 +13588,22 @@ function renderMxH2iLeaseDrawer() {
     : null;
   const identity = mxH2iLeaseIdentityGroup(lease);
   const employee = identity === 'employee' && Boolean(drawer.userId);
+  const productId = drawer.productId;
+  const product = launcherProductById(productId);
+  const productDisplayName = launcherProductDisplayName(productId, product);
+  const productSelected = launcherNetworkSelectedProductId() === productId;
   const access = drawer.productUserAccess;
   const blocked = access?.blocked === true;
-  const displaySubject = access?.displayName || access?.account || mxH2iLeaseSubject(lease);
+  const displaySubject = access?.displayName
+    || (mxH2iTopologyLeaseGroup(lease) === 'feishu'
+      ? lease.userDisplayName || '姓名不可用'
+      : access?.account || lease.userAccount || mxH2iLeaseSubject(lease));
+  const displayAccount = [...new Set([
+    String(access?.account || '').trim(),
+    String(lease.userAccount || '').trim(),
+    String(lease.userId || '').trim(),
+    String(drawer.userId || '').trim()
+  ].filter(Boolean))].join(' · ');
   const nextAction = blocked ? 'unban' : 'ban';
   const runtimePeerRemoval = access?.runtimePeerRemoval || null;
   const hasLeaseRecord = Boolean(lease.leaseId || lease.leaseIp || lease.installId || access?.lastLease);
@@ -13119,7 +13616,7 @@ function renderMxH2iLeaseDrawer() {
     <div class="app-editor-form mx-h2i-lease-drawer-layout">
       <header class="app-drawer-header">
         <div>
-          <span class="site-kind">${hasLeaseRecord ? 'MX-H2I Connection' : 'MX-H2I User Access'}</span>
+          <span class="site-kind">${hasLeaseRecord ? `${escapeHtml(productDisplayName)} Connection` : `${escapeHtml(productDisplayName)} User Access`}</span>
           <h2 id="mx-h2i-lease-drawer-title">${escapeHtml(displaySubject)}</h2>
           <p>${hasLeaseRecord
             ? `${escapeHtml(lease.leaseIp || '-')} · static control-plane lease · ${escapeHtml(mxH2iLeaseIdentityLabel(lease))}`
@@ -13134,19 +13631,21 @@ function renderMxH2iLeaseDrawer() {
             <span>This drawer does not call a lease “online” without runtime WireGuard telemetry. Enrollment source IP is not the observed NAT endpoint.</span>
           ` : `
             <strong>No lease allocated</strong>
-            <span>This user-access record remains visible so the product-scoped MX-H2I ban can be safely reviewed or removed. No connection or released lease is inferred.</span>
+            <span>This user-access record remains visible so the product-scoped ${escapeHtml(productDisplayName)} ban can be safely reviewed or removed. No connection or released lease is inferred.</span>
           `}
         </div>
         <div class="mx-h2i-lease-drawer-summary">
-          <article><span>Identity</span><strong>${escapeHtml(mxH2iLeaseIdentityLabel(lease))}</strong><small>${escapeHtml(drawer.userId || 'no user identity')}</small></article>
+          <article><span>Identity</span><strong>${escapeHtml(mxH2iLeaseIdentityLabel(lease))}</strong><small>${escapeHtml(displayAccount || 'no user identity')}</small></article>
           <article><span>Assigned IP</span><strong>${hasLeaseRecord ? escapeHtml(lease.leaseIp || '-') : 'no lease allocated'}</strong><small>${hasLeaseRecord ? escapeHtml(lease.status || 'active') : 'user access only'}</small></article>
           <article><span>Source IP</span><strong>${hasLeaseRecord ? escapeHtml(mxH2iLeaseSourceIp(lease)) : 'not recorded'}</strong><small>${hasLeaseRecord ? 'enrollment / renewal HTTP' : 'no enrollment lease'}</small></article>
-          <article><span>Application</span><strong>${escapeHtml(lease.appId || MX_H2I_PRODUCT_ID)}</strong><small>ProductNetwork ${escapeHtml(MX_H2I_PRODUCT_ID)}</small></article>
+          <article><span>ProductNetwork</span><strong>${escapeHtml(productDisplayName)}</strong><small>${escapeHtml(productId)} · VIP ${escapeHtml(product?.serviceVip || 'not recorded')}</small></article>
         </div>
         <section class="app-drawer-section">
           <div class="app-section-title"><span>01</span><strong>${hasLeaseRecord ? 'Connection identity' : 'User access identity'}</strong></div>
           <dl class="mx-h2i-lease-detail-grid">
             <div><dt>User / subject</dt><dd>${escapeHtml(displaySubject)}</dd></div>
+            <div><dt>User account</dt><dd>${escapeHtml(access?.account || lease.userAccount || '-')}</dd></div>
+            <div><dt>User ID</dt><dd>${escapeHtml(lease.userId || drawer.userId || '-')}</dd></div>
             <div><dt>Lease ID</dt><dd>${escapeHtml(lease.leaseId || '-')}</dd></div>
             <div><dt>Install ID</dt><dd>${escapeHtml(lease.installId || '-')}</dd></div>
             <div><dt>Device ID</dt><dd>${escapeHtml(lease.deviceId || '-')}</dd></div>
@@ -13164,11 +13663,17 @@ function renderMxH2iLeaseDrawer() {
           </dl>
         </section>
         <section class="app-drawer-section mx-h2i-control-section">
-          <div class="app-section-title"><span>03</span><strong>MX-H2I user access</strong></div>
-          ${employee ? `
+          <div class="app-section-title"><span>03</span><strong>${escapeHtml(productDisplayName)} user access</strong></div>
+          ${!productSelected ? `
+            <div class="mx-h2i-product-access-state">
+              <span class="health-chip" data-health="ready">read only</span>
+              <p>All-products mode never mutates anonymous policy or user access. Select <strong>${escapeHtml(productDisplayName)}</strong> first; other ProductNetworks remain unchanged.</p>
+            </div>
+            <button class="primary-button" type="button" data-mx-h2i-drawer-select-product="${escapeHtml(productId)}" data-mx-h2i-drawer-focus="select-product">Manage ${escapeHtml(productDisplayName)}</button>
+          ` : employee ? `
             <div class="mx-h2i-product-access-state">
               <span class="health-chip" data-health="${blocked ? 'blocked' : 'passed'}">${drawer.accessLoading ? 'checking' : blocked ? 'banned' : 'allowed'}</span>
-              <p>Only <strong>mx-h2i</strong> is changed. Luopan and other ProductNetworks are not affected. A ban releases matching control-plane leases, but does not claim the WireGuard peer has been removed.</p>
+              <p>Only <strong>${escapeHtml(productId)}</strong> is changed. Other ProductNetworks are not affected. A ban releases matching control-plane leases, but does not claim the WireGuard peer has been removed.</p>
             </div>
             ${drawer.accessError ? `<div class="feedback error">${escapeHtml(drawer.accessError)}</div>` : ''}
             ${drawer.feedback ? `<div class="feedback ${escapeHtml(drawer.feedback.kind || 'info')}">${escapeHtml(drawer.feedback.message || '')}</div>` : ''}
@@ -13180,8 +13685,8 @@ function renderMxH2iLeaseDrawer() {
             ` : ''}
             ${drawer.confirmation === nextAction ? `
               <div class="mx-h2i-access-confirmation" role="alert">
-                <strong>${blocked ? 'Confirm unban from MX-H2I?' : 'Confirm ban from MX-H2I?'}</strong>
-                <span>${blocked ? 'This restores admission only; it does not recreate a lease or peer.' : 'This blocks MX-H2I admission and releases matching active control-plane leases. Runtime peer removal remains separate.'}</span>
+                <strong>${blocked ? `Confirm unban from ${escapeHtml(productDisplayName)}?` : `Confirm ban from ${escapeHtml(productDisplayName)}?`}</strong>
+                <span>${blocked ? 'This restores admission only; it does not recreate a lease or peer.' : `This blocks ${escapeHtml(productDisplayName)} admission and releases matching active control-plane leases. Runtime peer removal remains separate.`}</span>
                 <label><span>Reason (optional)</span><input data-mx-h2i-access-reason data-mx-h2i-drawer-focus="access-reason" value="${escapeHtml(drawer.reason || '')}" placeholder="Operator reason" /></label>
                 <div class="action-row">
                   <button class="${blocked ? 'primary-button' : 'secondary-button danger-button'}" type="button" data-mx-h2i-access-confirm="${escapeHtml(nextAction)}" data-mx-h2i-drawer-focus="access-confirm" ${drawer.actionBusy ? 'disabled' : ''}>${drawer.actionBusy ? 'Working…' : blocked ? 'Confirm unban' : 'Confirm ban'}</button>
@@ -13189,14 +13694,14 @@ function renderMxH2iLeaseDrawer() {
                 </div>
               </div>
             ` : `
-              <button class="${blocked ? 'secondary-button' : 'secondary-button danger-button'}" type="button" data-mx-h2i-access-request="${escapeHtml(nextAction)}" data-mx-h2i-drawer-focus="access-request" ${drawer.accessLoading || drawer.actionBusy || !access ? 'disabled' : ''}>${blocked ? 'Unban from MX-H2I' : 'Ban from MX-H2I'}</button>
+              <button class="${blocked ? 'secondary-button' : 'secondary-button danger-button'}" type="button" data-mx-h2i-access-request="${escapeHtml(nextAction)}" data-mx-h2i-drawer-focus="access-request" ${drawer.accessLoading || drawer.actionBusy || !access ? 'disabled' : ''}>${blocked ? `Unban from ${escapeHtml(productDisplayName)}` : `Ban from ${escapeHtml(productDisplayName)}`}</button>
             `}
           ` : `
             <div class="mx-h2i-product-access-state">
               <span class="health-chip" data-health="ready">anonymous</span>
-              <p>This record has no user identity. Reliable single-client ban is not available until peer-safe revoke exists. Manage new anonymous admission with the MX-H2I application policy.</p>
+              <p>This record has no user identity. Reliable single-client ban is not available until peer-safe revoke exists. Manage new anonymous admission with the ${escapeHtml(productDisplayName)} ProductNetwork policy.</p>
             </div>
-            <button class="secondary-button" type="button" data-mx-h2i-drawer-open-policy data-mx-h2i-drawer-focus="anonymous-policy">Open MX-H2I anonymous policy</button>
+            <button class="secondary-button" type="button" data-mx-h2i-drawer-open-policy data-mx-h2i-drawer-focus="anonymous-policy">Open ${escapeHtml(productDisplayName)} anonymous policy</button>
           `}
         </section>
         <section class="app-drawer-section">
@@ -13221,6 +13726,13 @@ function renderMxH2iLeaseDrawer() {
   mxH2iLeaseDrawer.querySelector('[data-mx-h2i-drawer-open-policy]')?.addEventListener('click', () => {
     closeMxH2iLeaseDrawer();
     requestAnimationFrame(() => document.getElementById('mx-h2i-policy')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  });
+  mxH2iLeaseDrawer.querySelector('[data-mx-h2i-drawer-select-product]')?.addEventListener('click', (event) => {
+    const leaseKey = drawer.leaseKey;
+    const nextProductId = event.currentTarget.dataset.mxH2iDrawerSelectProduct;
+    selectLauncherNetworkProduct(nextProductId);
+    renderAppCenterShell();
+    requestAnimationFrame(() => openMxH2iLeaseDrawer(leaseKey, nextProductId));
   });
   mxH2iLeaseDrawer.querySelector('[data-mx-h2i-access-request]')?.addEventListener('click', (event) => {
     if (!state.mxH2iLeaseDrawer) return;
@@ -13271,6 +13783,7 @@ async function saveStandaloneAnonymousPolicy(root, productId) {
   const anonymousUiVisibility = ['primary', 'advanced', 'hidden'].includes(visibilityValue)
     ? visibilityValue
     : anonymousUiVisibilityForProduct(current);
+  const requestScope = captureLauncherNetworkRequestScope();
   state.anonymousPolicyBusyProductId = normalizedProductId;
   state.anonymousPolicyFeedback = {
     productId: normalizedProductId,
@@ -13288,6 +13801,7 @@ async function saveStandaloneAnonymousPolicy(root, productId) {
         requestId: `desktop-anonymous-policy-${Date.now()}`
       }
     });
+    if (!isLauncherNetworkRequestScopeCurrent(requestScope)) return;
     upsertLocalLauncherProduct({
       ...current,
       ...(payload?.product || {}),
@@ -13295,17 +13809,22 @@ async function saveStandaloneAnonymousPolicy(root, productId) {
       anonymousEnrollmentPolicy: payload?.product?.anonymousEnrollmentPolicy || anonymousEnrollmentPolicy,
       anonymousUiVisibility: payload?.product?.anonymousUiVisibility || anonymousUiVisibility
     });
-    if (normalizedProductId === MX_H2I_PRODUCT_ID) state.mxH2iAnonymousQuickConfirmation = null;
+    if (state.mxH2iAnonymousQuickConfirmation?.productId === normalizedProductId) {
+      state.mxH2iAnonymousQuickConfirmation = null;
+    }
     state.anonymousPolicyFeedback = {
       productId: normalizedProductId,
       kind: 'success',
       message: `${launcherProductDisplayName(normalizedProductId, payload?.product)} saved: ${anonymousEnrollmentPolicy} / ${anonymousUiVisibility}. Existing leases and peers were not changed.`
     };
   } catch (error) {
+    if (!isLauncherNetworkRequestScopeCurrent(requestScope)) return;
     state.anonymousPolicyFeedback = { productId: normalizedProductId, kind: 'error', message: error.message };
   } finally {
-    state.anonymousPolicyBusyProductId = null;
-    renderSelectedAppDetail();
+    if (isLauncherNetworkRequestScopeCurrent(requestScope)) {
+      state.anonymousPolicyBusyProductId = null;
+      renderSelectedAppDetail();
+    }
   }
 }
 
@@ -18620,51 +19139,74 @@ function formatJson(value) {
   return JSON.stringify(value, null, 2);
 }
 
-function mxH2iTopologyGraph(leases) {
+function mxH2iTopologyGraph(leases, products = []) {
   const viewport = mxH2iTopologyWindow(leases);
-  const groupPositions = {
-    employee: [-1.35, 2.15, 0],
-    feishu: [-1.35, 0, 0],
-    anonymous: [-1.35, -2.15, 0]
-  };
+  const productById = new Map(asArray(products)
+    .filter((product) => product?.productId)
+    .map((product) => [String(product.productId).trim().toLowerCase(), product]));
+  const productIds = [...new Set([
+    ...productById.keys(),
+    ...asArray(leases).map(mxH2iTopologyProductId).filter(Boolean)
+  ])].sort();
   const nodes = [];
-  for (const group of ['employee', 'feishu', 'anonymous']) {
-    const count = viewport.matched.groups[group];
-    if (!count) continue;
+  const laneGap = Math.max(2.4, Math.min(4, 8 / Math.max(productIds.length, 1)));
+  const laneY = (productIndex) => ((productIds.length - 1) / 2 - productIndex) * laneGap;
+  const groupOffset = { employee: 0.78, feishu: 0, anonymous: -0.78 };
+  for (const [productIndex, productId] of productIds.entries()) {
+    const productLeases = asArray(leases).filter((lease) => mxH2iTopologyProductId(lease) === productId);
+    const productViewport = mxH2iTopologyWindow(productLeases, { ...state.mxH2iTopologyView, page: 1 });
+    const product = productById.get(productId) || { productId, displayName: productId, serviceVip: '' };
     nodes.push({
-      id: `group:${group}`,
-      kind: `${group}-group`,
-      group,
-      label: String(count),
-      name: mxH2iTopologyGroupLabel(group),
-      position: groupPositions[group],
-      aggregateCount: count,
-      machineCount: viewport.matched.groupMachines[group]
+      id: `product:${productId}`,
+      kind: 'product',
+      productId,
+      label: product.serviceVip ? String(product.serviceVip).split('.').pop() || 'VIP' : 'VIP',
+      name: product.displayName || productId,
+      serviceVip: product.serviceVip || '',
+      position: [1.15, laneY(productIndex), 0]
     });
-  }
-  for (const group of ['employee', 'feishu', 'anonymous']) {
-    const clients = viewport.rows.filter((lease) => mxH2iTopologyLeaseGroup(lease) === group);
-    const columns = Math.min(8, Math.max(1, Math.ceil(Math.sqrt(clients.length * 1.6))));
-    const rows = Math.ceil(clients.length / columns);
-    clients.forEach((lease, index) => {
-      const column = index % columns;
-      const row = Math.floor(index / columns);
-      const leaseKey = mxH2iLeaseDrawerKey(lease);
+    for (const group of ['employee', 'feishu', 'anonymous']) {
+      const count = productViewport.matched.groups[group];
+      if (!count) continue;
       nodes.push({
-        id: `client:${leaseKey || `${group}-${index}`}`,
-        kind: group,
+        id: mxH2iTopologyGroupNodeId(productId, group),
+        kind: `${group}-group`,
         group,
-        label: String(lease.leaseIp || 'C').split('.').pop() || 'C',
-        name: mxH2iLeaseDevice(lease),
-        position: [
-          -5.8 + column * 0.48,
-          groupPositions[group][1] + (row - (rows - 1) / 2) * 0.42,
-          (column % 2 ? -0.28 : 0.28)
-        ],
-        leaseKey,
-        lease
+        productId,
+        label: String(count),
+        name: `${product.displayName || productId} · ${mxH2iTopologyGroupLabel(group)}`,
+        position: [-1.35, laneY(productIndex) + groupOffset[group], 0],
+        aggregateCount: count,
+        machineCount: productViewport.matched.groupMachines[group]
       });
-    });
+    }
+    for (const group of ['employee', 'feishu', 'anonymous']) {
+      const clients = viewport.rows.filter((lease) => (
+        mxH2iTopologyProductId(lease) === productId && mxH2iTopologyLeaseGroup(lease) === group
+      ));
+      const columns = Math.min(8, Math.max(1, Math.ceil(Math.sqrt(clients.length * 1.6))));
+      const rows = Math.ceil(clients.length / columns);
+      clients.forEach((lease, index) => {
+        const column = index % columns;
+        const row = Math.floor(index / columns);
+        const leaseKey = mxH2iLeaseDrawerKey(lease);
+        nodes.push({
+          id: mxH2iTopologyClientNodeId(lease),
+          kind: group,
+          group,
+          productId,
+          label: String(lease.leaseIp || 'C').split('.').pop() || 'C',
+          name: mxH2iLeaseDevice(lease),
+          position: [
+            -5.8 + column * 0.48,
+            laneY(productIndex) + groupOffset[group] + (row - (rows - 1) / 2) * 0.36,
+            (column % 2 ? -0.28 : 0.28)
+          ],
+          leaseKey,
+          lease
+        });
+      });
+    }
   }
   nodes.push(
     { id: 'domestic', kind: 'domestic', label: 'D', name: 'Domestic', position: [2.15, 0.45, 0] },
@@ -18675,12 +19217,15 @@ function mxH2iTopologyGraph(leases) {
     links: [
       ...nodes.filter((node) => node.lease).map((node) => ({
         from: node.id,
-        to: `group:${node.group}`,
+        to: mxH2iTopologyGroupNodeId(node.productId, node.group),
         kind: node.group
       })),
-      ...['employee', 'feishu', 'anonymous']
-        .filter((group) => viewport.matched.groups[group] > 0)
-        .map((group) => ({ from: `group:${group}`, to: 'domestic', kind: group })),
+      ...nodes.filter((node) => Number.isFinite(node.aggregateCount)).map((node) => ({
+        from: node.id,
+        to: `product:${node.productId}`,
+        kind: node.group
+      })),
+      ...productIds.map((productId) => ({ from: `product:${productId}`, to: 'domestic', kind: 'product' })),
       { from: 'domestic', to: 'internal', kind: 'internal' }
     ],
     viewport
@@ -18691,6 +19236,7 @@ function mxH2iTopologyColor(kind, theme = topologyTheme()) {
   if (kind === 'employee' || kind === 'employee-group') return theme.info;
   if (kind === 'feishu' || kind === 'feishu-group') return theme.warning;
   if (kind === 'anonymous' || kind === 'anonymous-group') return theme.archetype;
+  if (kind === 'product') return theme.primary;
   if (kind === 'domestic') return theme.success;
   return theme.primary;
 }
@@ -18723,7 +19269,7 @@ function initMxH2iTopology(root, leases, options = {}) {
     key.position.set(2, 4, 5);
     scene.add(key);
 
-    const graph = mxH2iTopologyGraph(leases);
+    const graph = mxH2iTopologyGraph(leases, options.products || (options.product ? [options.product] : []));
     const nodes = new Map();
     const labels = [];
     const raycastTargets = [];
@@ -18909,8 +19455,18 @@ function setMxH2iTopologyLabels(instance = state.mxH2iTopology, visible = true) 
 function applyMxH2iTopologyHighlight(instance = state.mxH2iTopology) {
   if (!instance || instance.disposed) return;
   const selected = instance.nodes.get(instance.selectedNodeId) || null;
-  const selectedGroupId = selected?.userData?.spec?.group ? `group:${selected.userData.spec.group}` : null;
-  const pathNodes = new Set(selected ? [selected.userData.id, selectedGroupId, 'domestic', 'internal'] : []);
+  const pathNodes = new Set(selected ? [selected.userData.id] : []);
+  const pathLinks = new Set();
+  if (selected) {
+    let cursor = selected.userData.id;
+    while (cursor && cursor !== 'internal') {
+      const next = instance.graph.links.find((link) => link.from === cursor);
+      if (!next) break;
+      pathLinks.add(`${next.from}->${next.to}`);
+      pathNodes.add(next.to);
+      cursor = next.to;
+    }
+  }
   for (const node of instance.nodes.values()) {
     const selectedNode = node.userData.id === instance.selectedNodeId;
     const hoveredNode = node.userData.id === instance.hoverNodeId;
@@ -18920,10 +19476,7 @@ function applyMxH2iTopologyHighlight(instance = state.mxH2iTopology) {
     node.userData.halo.material.opacity = selectedNode ? 0.34 : hoveredNode ? 0.24 : onPath ? 0.18 : selected ? 0.055 : 0.11;
   }
   for (const link of instance.links) {
-    const onSelectedPath = !selected
-      || link.spec.from === instance.selectedNodeId
-      || (link.spec.from === selectedGroupId && link.spec.to === 'domestic')
-      || (link.spec.from === 'domestic' && link.spec.to === 'internal');
+    const onSelectedPath = !selected || pathLinks.has(`${link.spec.from}->${link.spec.to}`);
     link.line.material.opacity = selected ? (onSelectedPath ? 0.94 : 0.08) : 0.4;
   }
   renderMxH2iTopologyFrame(instance, 0);
@@ -18963,7 +19516,7 @@ function updateMxH2iTopologyTooltip(instance, node, event = null) {
   if (lease) {
     tooltip.innerHTML = `
       <strong>${escapeHtml(mxH2iLeaseSubject(lease))}</strong>
-      <span>${escapeHtml(mxH2iTopologyGroupLabel(mxH2iTopologyLeaseGroup(lease)))}</span>
+      <span>${escapeHtml([mxH2iTopologyGroupLabel(mxH2iTopologyLeaseGroup(lease)), mxH2iLeaseAuditIdentity(lease), lease.productId].filter(Boolean).join(' · '))}</span>
       <small>${escapeHtml(lease.leaseIp || 'assigned IP not recorded')} · source ${escapeHtml(mxH2iLeaseSourceIp(lease))}</small>
       <small>${escapeHtml(mxH2iLeaseDevice(lease))} · ${escapeHtml(mxH2iLeasePlatform(lease))}</small>
       <small>Online/location/logs: not observed or not collected</small>
@@ -18974,6 +19527,13 @@ function updateMxH2iTopologyTooltip(instance, node, event = null) {
       <span>Identity aggregate · ${escapeHtml(String(spec.aggregateCount))} matched lease records</span>
       <small>${escapeHtml(String(spec.machineCount || 0))} matched device identities (best effort)</small>
       <small>Online/location/logs: not collected for this aggregate</small>
+    `;
+  } else if (spec.kind === 'product') {
+    tooltip.innerHTML = `
+      <strong>${escapeHtml(spec.name)}</strong>
+      <span>Standalone ProductNetwork · ${escapeHtml(spec.productId)}</span>
+      <small>Product-level VIP ${escapeHtml(spec.serviceVip || 'not recorded')} · not a client lease IP</small>
+      <small>Select to isolate this product; other products remain unchanged</small>
     `;
   } else {
     const domestic = spec.id === 'domestic';
@@ -19187,6 +19747,10 @@ function disposeMxH2iTopologyInstance(instance) {
 }
 
 function disposeMxH2iTopology() {
+  if (state.mxH2iTopologyQueryTimer !== null) {
+    clearTimeout(state.mxH2iTopologyQueryTimer);
+    state.mxH2iTopologyQueryTimer = null;
+  }
   const instance = state.mxH2iTopology;
   if (!instance) return;
   disposeMxH2iTopologyInstance(instance);
