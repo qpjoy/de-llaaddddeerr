@@ -2676,6 +2676,21 @@ select {
   pointer-events: none;
 }
 
+.mx-h2i-topology-traffic-legend {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  max-width: calc(100% - 20px);
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--mx-primary) 32%, var(--line));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--mx-bg-panel) 90%, transparent);
+  color: var(--mx-text-soft);
+  font-size: 9px;
+  line-height: 1.35;
+  pointer-events: none;
+}
+
 .mx-h2i-topology-tooltip {
   position: absolute;
   z-index: 3;
@@ -2863,7 +2878,9 @@ select {
   font-size: 10px;
 }
 
-.mx-h2i-topology-runtime {
+.mx-h2i-topology-runtime,
+.mx-h2i-topology-traffic,
+.mx-h2i-traffic-policy {
   display: grid;
   gap: 8px;
   padding-top: 10px;
@@ -2875,6 +2892,51 @@ select {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
+}
+
+.mx-h2i-traffic-history-list {
+  display: grid;
+  gap: 5px;
+}
+
+.mx-h2i-traffic-history-list article {
+  display: grid;
+  grid-template-columns: minmax(92px, 0.38fr) minmax(150px, 0.62fr);
+  gap: 3px 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--mx-bg-elevated);
+}
+
+.mx-h2i-traffic-history-list article[data-attribution="shared-peer"] {
+  border-color: color-mix(in srgb, var(--mx-warning) 34%, var(--line));
+}
+
+.mx-h2i-traffic-history-list time,
+.mx-h2i-traffic-history-list strong,
+.mx-h2i-traffic-history-list small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mx-h2i-traffic-history-list time,
+.mx-h2i-traffic-history-list small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.mx-h2i-traffic-history-list strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.mx-h2i-traffic-history-list small {
+  grid-column: 2;
 }
 
 .mx-h2i-topology-activity {
@@ -7690,6 +7752,14 @@ select {
 
   .mx-h2i-topology-node-actions article {
     grid-template-columns: 1fr;
+  }
+
+  .mx-h2i-traffic-history-list article {
+    grid-template-columns: 1fr;
+  }
+
+  .mx-h2i-traffic-history-list small {
+    grid-column: auto;
   }
 
   .mx-h2i-topology-toolbar input {

@@ -657,7 +657,7 @@ virtualized table；导出同样受 RBAC、脱敏和审计约束。
 lease `productId`，再关联 ProductNetwork；不从 VIP 或 IP 前缀反向猜产品。任何一个来源
 缺失都应成为可解释状态，不能默认为 offline 或 healthy。
 
-### 8.2 实时采集
+### 8.2 运行态采集与低频历史
 
 当前已提供 ops-only 的手动单节点观测：
 
@@ -671,18 +671,38 @@ counter 可计算区间平均 RX/TX，但必须标为 Domestic 手动区间估�
 `observedAt` 以远端 `wg` counter 读取完成时刻为准，不使用 SSH 请求开始时刻，
 避免两次查询延迟不同时扭曲差分速率。
 
-这条手动路径用于当前节点排障，不替代后续批量采集。规模化实时展示仍应由服务端或受控
-site-agent 每 5–15 秒批量采集一次：
+这条手动路径用于当前节点排障，不替代批量历史采集。当前低频采集器默认每 5 分钟按
+Domestic site/interface 执行一次脱敏的批量 `wg show mx-domestic dump`：远端在输出离开
+Domestic 前剥离 interface private key、peer preshared key 和 endpoint，只保留关联所需的
+public key、AllowedIPs、latest handshake 与累计 RX/TX；Internal 只在内存中用原始 public
+key 关联 active lease，持久层和 API 不保存或返回原始 dump/key。每条 lease 保留最多 288
+个样本（默认约 24 小时），采集 claim 按 environment/site/plane 做跨副本限频和 fencing，
+进程重启或 RollingUpdate 不应把一次周期放大成逐副本重复 SSH。
 
-- `wg show mx-domestic dump` 或等价的 peers/endpoints；
-- allowed IPs；
-- latest handshakes；
-- transfer RX/TX；
-- interface/config generation；
-- 可选 Internal direct 对应 interface。
+读取历史使用 ops-only：
 
-不允许 Admin 浏览器为每行 lease 发起一次 SSH/runner job。采集失败只让 snapshot stale，
-不得影响 enrollment、token introspection、连接 readiness 或本机网络。
+`GET /internal/v1/launcher-network/leases/{leaseId}/traffic-history?limit=12`
+
+Admin 选择节点时只读取已有历史，不自动轮询、不为每条 lease 启动 SSH。相邻两个同
+series、非 stale、累计 counter 未回退的样本才派生区间平均值；counter reset、peer/key
+变化、时钟异常、缺样本或超出 freshness SLA 时速率为 unknown。Domestic relay RX 表示
+客户端上行，TX 表示向客户端下载，它不是应用层或端到端吞吐量。
+
+WireGuard counter 属于 peer/public key，而不是 AllowedIP/lease。handover 或复用 key 使一个
+peer 对应多条 active lease 时，样本必须标记 `shared-peer` 和引用数，只能显示为 peer 聚合
+速率，不能复制成各 lease 的独占流量或加入产品总量。后续 Internal direct collector 必须
+使用独立 plane/series，Domestic 与 Internal 的速率不能相加。
+
+采集器只读 `wg show`，不执行 `wg set`、restart、route、tc、nftables 或 iptables。采集失败
+只让 snapshot stale/unknown，不得影响 enrollment、token introspection、连接 readiness、
+现有隧道或本机网络。浏览器也不允许选择 host/interface/script 或绕过采样间隔。
+
+当前 generic-record 实现只面向现有小规模部署：每个 lease 的有界 JSON history 在采样时
+整条更新，单 site 超过安全上限时 collector 必须整体 fail closed，而不是截断一部分节点并
+伪造“其余节点新鲜”。扩容前应迁移为专用 append-only time-series 表和 latest 表，批量
+insert、按时间分区/TTL，并把 1–5 分钟原始点下采样后再长期保留；采集 duration、写入量和
+WAL/DB 延迟必须进入容量门槛。不得让 history transaction、prune 或 collector 连接争用影响
+登录/enrollment 数据库路径。
 
 ### 8.3 派生状态
 
@@ -756,6 +776,11 @@ ProductNetwork 作为独立产品分支连入共享 fabric。切换到单产品�
 - red：missing/orphan/revoke failed；
 - gray dashed：stale/unknown/not applicable。
 
+选中 client 时，可在该 client→identity group 的边上显示最近一次有效历史区间的
+`↓ Domestic TX / ↑ Domestic RX`、实际样本间隔和 freshness。只有 selected path 显示速率
+badge，避免 48 条窗口同时创建大量纹理；只有一个样本时显示 `rate pending`，stale/reset/
+shared attribution 时分别退灰或明确标为 peer aggregate，绝不用粒子速度模拟真实网速。
+
 ### 9.3 交互与可访问性
 
 - hover 只显示脱敏摘要；click 选中节点，double-click/Enter 执行该节点的安全主操作；
@@ -768,8 +793,9 @@ ProductNetwork 作为独立产品分支连入共享 fabric。切换到单产品�
   动画或颜色伪造在线状态；
 - 选中 client 节点的右侧 Inspector 提供静态信息、exact lease audit、手动 Domestic WG
   观测和进入产品级 Ban/Unban 抽屉；匿名节点不伪造单用户 ban；
-- 尚无双平面 peer-safe reconcile 或 tc/nft enforcement 时，Disconnect、持续 Live speed、
-  Traffic limit 与 Port policy 必须保持 disabled，并说明缺少的 backend；
+- 历史快照可显示低频区间平均速率，但不称为持续 Live speed；尚无双平面 peer-safe
+  reconcile 或 tc/nft enforcement 时，Disconnect、Traffic limit 与 Port policy 必须保持
+  disabled，并说明缺少的 backend；
 - 大规模客户端先窗口化/cluster，禁止一万台设备各建高面数 sphere；
 - 提供 2D/table fallback、键盘操作和 reduced-motion；WebGL 失败只降级视图；
 - 选中 lease 的 activity 只展示服务端 provenance 的字段白名单审计事件，exact match
@@ -920,7 +946,7 @@ key 多引用。删除前必须构建引用图：
 
 ## 12. 未来流量、端口与客户端控制
 
-本期只预留模型，不执行规则。未来策略应绑定稳定身份：
+本期只预留模型和只读 UI，不执行规则。未来策略应绑定稳定身份：
 
 - productId；
 - leaseId/generation；
@@ -953,6 +979,28 @@ Internal desired policy
 每项都需要 preview、作用域、优先级、过期时间、回滚、冲突检测和 evidence。流控失败不能
 修改登录身份或自动删除 peer。
 
+建议稳定控制记录至少包含：
+
+- `policyId/productId/leaseId/leaseGeneration/assignedIp`；
+- `desired`：up/down rate、端口/CIDR ACL、有效期和操作者；
+- `effective`：每个 plane 的 revision、appliedAt、readBack、drift 和 error；
+- `mode=audit-only|enforce`，默认 `audit-only`；
+- 幂等 requestId、期望 revision、canary/rollback 状态。
+
+执行面边界：
+
+1. `tc` 负责速率整形：WireGuard egress 按目的 `/32`；ingress 如需严格上行控制，应使用
+   ingress police 或 IFB 按来源 `/32`，不能按 NAT endpoint、公钥或用户名匹配；
+2. nftables 负责端口/CIDR ACL 或 packet mark，并使用 MX Launcher 专属 table/chain/set；
+   更新通过单一原子 transaction 应用，不 flush 系统/其他产品规则；
+3. 只有缺少 nftables 时才考虑 iptables fallback，且只维护专属 chain，不能清空 FORWARD、
+   DOCKER-USER 或宿主已有规则；
+4. Domestic relay 与 Internal direct 分别 apply/read-back，避免同一流量被双重限速；
+5. 发现未知 root qdisc、handle/table 冲突或 read-back 不一致时必须 block/no-op；不得通过
+   restart WireGuard、重启接口或修改登录/token 来“修复”流控；
+6. apply 失败默认 fail-open 并告警，先以单个测试 `/32` canary，验证 rollback/reconcile 后
+   才扩大范围。
+
 ## 13. RBAC、隐私与审计
 
 建议权限拆分：
@@ -963,6 +1011,7 @@ Internal desired policy
 - `mx-h2i.revoke.preview`：生成 dry-run；
 - `mx-h2i.revoke.execute`：未来执行 batch；
 - `mx-h2i.diagnostics.run`：运行受控诊断；
+- `mx-h2i.traffic-history.read`：读取脱敏、低频 WG 历史；
 - `mx-h2i.traffic-policy.write`：未来流控。
 
 敏感规则：
@@ -987,6 +1036,9 @@ Internal desired policy
 - sourceIp/endpoint mismatch 计数，只作风险信号；
 - policy changes and revision conflicts；
 - collector freshness/failure；
+- snapshot claim contention、duration、peer/sample count、history prune；
+- interval RX/TX by plane/attribution（shared peer 不进入 product total）；
+- traffic policy desired/effective drift、apply/rollback result；
 - revoke saga duration/retry/failure；
 - employee/Feishu login success and guest→staff handover success。
 
@@ -1020,6 +1072,8 @@ Internal desired policy
 - 3D client topology；
 - stale/failure isolation；
 - orphan/released-present 报告。
+- 五分钟级 Domestic 批量快照、有界历史与选中连线速率 badge；
+- shared-peer attribution、counter reset 与 stale 防误报；
 
 ### Phase C：drain 与 dry-run
 
@@ -1161,10 +1215,13 @@ Launcher Network 归属、显示名与基础设施还必须覆盖：
     account/userId 作为可审计次级标识。
 17. All topology 只画一套 shared Domestic/Internal 基础设施，每个 standalone
     分支独立显示 channel、lease CIDR 和 VIP；配置值不伪装成 runtime reachability。
-18. 选中 active lease 可手动读取严格脱敏的 Domestic WG peer/handshake/累计 RX/TX；两次
-    合法样本只显示区间平均值，不声称 online、实时或端到端网速。
-19. 无 peer-safe 双平面 reconcile 与 tc/nft enforcement 时，Disconnect、持续 Live speed、
-    Traffic/Port policy 不可执行，也不得伪造成功。
+18. 选中 active lease 可手动读取严格脱敏的 Domestic WG peer/handshake/累计 RX/TX；低频
+    批量 collector 每个 site/interface 每周期只执行一次脱敏 dump，并保留有界历史。
+19. 选中 lease 连线只在两个合法历史样本间显示 Domestic 区间平均值、实际间隔和 freshness；
+    counter reset/stale/shared peer 均有明确降级，不声称 online、实时或端到端网速。
+20. 无 peer-safe 双平面 reconcile 与 tc/nft enforcement 时，Disconnect、Traffic/Port
+    policy 不可执行，也不得伪造成功；预留模型必须保持 desired/effective、per-plane evidence
+    和 fail-open rollback 边界。
 
 ## 18. 相关文档
 

@@ -25,6 +25,7 @@
     "test:launcher-lease-activity": "node --test --import tsx src/modules/launcher-network/lease-activity.test.ts",
     "test:launcher-lease-identity": "node --test --import tsx src/modules/launcher-network/lease-user-identity.test.ts",
     "test:launcher-runtime-observation": "node --test --import tsx src/modules/launcher-network/runtime-observation.test.ts",
+    "test:launcher-runtime-traffic": "node --test --import tsx src/modules/launcher-network/runtime-traffic-snapshot.test.ts",
     "test:insight-hub": "node --test --import tsx src/modules/insight-hub/insight-hub.client.test.ts",
     "smoke:http": "node scripts/http-smoke.mjs",
     "smoke:release-center": "node scripts/release-center-smoke.mjs",

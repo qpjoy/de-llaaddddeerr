@@ -13,6 +13,13 @@ import {
   type AuthenticationRateLimitState
 } from '../lib/auth-rate-limit.js';
 import {
+  appendLauncherNetworkTrafficHistory,
+  claimLauncherNetworkRuntimeCollection as claimRuntimeCollection,
+  completeLauncherNetworkRuntimeCollection as completeRuntimeCollection,
+  launcherNetworkRuntimeCollectionId,
+  launcherNetworkTrafficHistoryId
+} from '../lib/launcher-network-traffic.js';
+import {
   builtinAppCenterApps,
   builtinConfigSecretReferences,
   appReleasePublisherServiceAccountId,
@@ -212,6 +219,12 @@ import type {
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
   LauncherNetworkLeaseReleaseInput,
+  LauncherNetworkRuntimeCollectionClaimInput,
+  LauncherNetworkRuntimeCollectionClaimResult,
+  LauncherNetworkRuntimeCollectionCompleteInput,
+  LauncherNetworkRuntimeCollectionCompleteResult,
+  LauncherNetworkRuntimeCollectionState,
+  LauncherNetworkTrafficHistory,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LauncherNetworkMihomoSite,
@@ -375,6 +388,8 @@ export class MemoryStore implements PlatformStore {
   private readonly launcherProductUserAccess = new Map<string, LauncherProductUserAccess>();
   private readonly launcherNetworkLeases = new Map<string, LauncherNetworkLease>();
   private readonly launcherNetworkHandovers = new Map<string, LauncherNetworkHandover>();
+  private readonly launcherNetworkRuntimeCollections = new Map<string, LauncherNetworkRuntimeCollectionState>();
+  private readonly launcherNetworkTrafficHistories = new Map<string, LauncherNetworkTrafficHistory>();
   private launcherNetworkLeaseGeneration = 0;
   private readonly runtimeFeaturePolicies = new Map<string, RuntimeFeaturePolicy>();
   private readonly awxProviderConfigs = new Map<string, AwxProviderConfig>();
@@ -2530,6 +2545,66 @@ export class MemoryStore implements PlatformStore {
 
   getLauncherNetworkLease(leaseId: string): LauncherNetworkLease | null {
     return this.launcherNetworkLeases.get(leaseId.trim()) ?? null;
+  }
+
+  claimLauncherNetworkRuntimeCollection(
+    input: LauncherNetworkRuntimeCollectionClaimInput
+  ): LauncherNetworkRuntimeCollectionClaimResult {
+    const collectionId = launcherNetworkRuntimeCollectionId(input.siteId);
+    const result = claimRuntimeCollection(
+      this.config.environment,
+      this.launcherNetworkRuntimeCollections.get(collectionId) ?? null,
+      input
+    );
+    if (result.claimed) this.launcherNetworkRuntimeCollections.set(collectionId, result.state);
+    return result;
+  }
+
+  completeLauncherNetworkRuntimeCollection(
+    input: LauncherNetworkRuntimeCollectionCompleteInput
+  ): LauncherNetworkRuntimeCollectionCompleteResult {
+    const collectionId = launcherNetworkRuntimeCollectionId(input.siteId);
+    const previousState = this.launcherNetworkRuntimeCollections.get(collectionId);
+    if (!previousState) throw new Error('Launcher runtime collection claim not found');
+    const state = completeRuntimeCollection(previousState, input);
+    const histories = input.samples.map((sample) => {
+      const historyId = launcherNetworkTrafficHistoryId(sample.leaseId);
+      const history = appendLauncherNetworkTrafficHistory(
+        this.config.environment,
+        input.siteId,
+        this.launcherNetworkTrafficHistories.get(historyId) ?? null,
+        input,
+        sample
+      );
+      this.launcherNetworkTrafficHistories.set(historyId, history);
+      return history;
+    });
+    this.launcherNetworkRuntimeCollections.set(collectionId, state);
+    return { state, histories };
+  }
+
+  getLauncherNetworkRuntimeCollection(siteId: string): LauncherNetworkRuntimeCollectionState | null {
+    return this.launcherNetworkRuntimeCollections.get(
+      launcherNetworkRuntimeCollectionId(siteId)
+    ) ?? null;
+  }
+
+  getLauncherNetworkTrafficHistory(leaseId: string): LauncherNetworkTrafficHistory | null {
+    return this.launcherNetworkTrafficHistories.get(
+      launcherNetworkTrafficHistoryId(leaseId)
+    ) ?? null;
+  }
+
+  pruneLauncherNetworkTrafficHistories(cutoff: string, limit = 200): number {
+    const cutoffMs = Date.parse(cutoff);
+    if (!Number.isFinite(cutoffMs)) throw new Error('Launcher runtime history cutoff is invalid');
+    const ids = [...this.launcherNetworkTrafficHistories.entries()]
+      .filter(([, history]) => Date.parse(history.updatedAt) < cutoffMs)
+      .sort(([, left], [, right]) => left.updatedAt.localeCompare(right.updatedAt))
+      .slice(0, Math.max(1, Math.min(1_000, Math.floor(limit))))
+      .map(([id]) => id);
+    ids.forEach((id) => this.launcherNetworkTrafficHistories.delete(id));
+    return ids.length;
   }
 
   listLauncherNetworkHandovers(): LauncherNetworkHandover[] {

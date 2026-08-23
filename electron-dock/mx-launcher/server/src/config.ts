@@ -120,6 +120,14 @@ export function loadConfig(): RuntimeConfig {
     ),
     launcherNetworkHandoverTtlMs: intFromEnv('MX_LAUNCHER_NETWORK_HANDOVER_TTL_MS', 5 * 60 * 1000),
     launcherNetworkHandoverReconcileMs: intFromEnv('MX_LAUNCHER_NETWORK_HANDOVER_RECONCILE_MS', 30 * 1000),
+    launcherNetworkRuntimeSnapshotIntervalMs: intFromEnv(
+      'MX_LAUNCHER_NETWORK_RUNTIME_SNAPSHOT_INTERVAL_MS',
+      5 * 60 * 1000
+    ),
+    launcherNetworkRuntimeSnapshotRetentionSamples: intFromEnv(
+      'MX_LAUNCHER_NETWORK_RUNTIME_SNAPSHOT_RETENTION_SAMPLES',
+      288
+    ),
     feishuAppId: process.env.MX_FEISHU_APP_ID?.trim() || null,
     feishuAppSecret: process.env.MX_FEISHU_APP_SECRET?.trim() || null,
     feishuAllowedTenantKeys: stringListFromEnv('MX_FEISHU_ALLOWED_TENANT_KEYS'),

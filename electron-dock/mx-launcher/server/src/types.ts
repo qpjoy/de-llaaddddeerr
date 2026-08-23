@@ -30,6 +30,9 @@ export interface RuntimeConfig {
   launcherNetworkLegacyUnauthenticatedUserLeasesEnabled: boolean;
   launcherNetworkHandoverTtlMs: number;
   launcherNetworkHandoverReconcileMs: number;
+  /** Set to 0 to disable automatic Domestic WireGuard traffic snapshots. */
+  launcherNetworkRuntimeSnapshotIntervalMs: number;
+  launcherNetworkRuntimeSnapshotRetentionSamples: number;
   feishuAppId: string | null;
   feishuAppSecret: string | null;
   feishuAllowedTenantKeys: string[];
@@ -2500,6 +2503,120 @@ export interface LauncherNetworkLease {
   createdAt: string;
   updatedBy: string;
   updatedAt: string;
+}
+
+export type LauncherNetworkTrafficSampleStatus = 'observed' | 'unavailable' | 'failed';
+export type LauncherNetworkTrafficAttribution = 'exact' | 'shared-peer';
+
+/**
+ * A sanitized point-in-time Domestic relay observation. `rxBytes` and
+ * `txBytes` are WireGuard peer counters from the relay's perspective. They are
+ * not end-to-end connectivity or application throughput evidence.
+ */
+export interface LauncherNetworkTrafficSample {
+  snapshotId: string;
+  observedAt: string;
+  status: LauncherNetworkTrafficSampleStatus;
+  peerConfigured: 'yes' | 'no' | 'unknown';
+  latestHandshakeEpoch: number | null;
+  rxBytes: number | null;
+  txBytes: number | null;
+  relayRxBytesPerSecond: number | null;
+  relayTxBytesPerSecond: number | null;
+  rateWindowSeconds: number | null;
+  attribution: LauncherNetworkTrafficAttribution;
+  sharedLeaseCount: number;
+  /** Truncated digest used only to prevent rate deltas across peer handovers. */
+  seriesId: string | null;
+}
+
+export interface LauncherNetworkTrafficHistory {
+  historyId: string;
+  environment: string;
+  leaseId: string;
+  productId: string;
+  siteId: string;
+  source: 'domestic-relay-snapshot';
+  plane: 'domestic';
+  intervalSeconds: number;
+  retentionSamples: number;
+  samples: LauncherNetworkTrafficSample[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LauncherNetworkRuntimeCollectionState {
+  collectionId: string;
+  environment: string;
+  siteId: string;
+  source: 'domestic-relay-snapshot';
+  plane: 'domestic';
+  status: 'idle' | 'collecting';
+  activeClaimId: string | null;
+  collectionLeaseUntil: string | null;
+  lastAttemptAt: string | null;
+  lastCompletedAt: string | null;
+  nextAllowedAt: string | null;
+  latestSnapshotId: string | null;
+  latestResult: 'observed' | 'unavailable' | 'failed' | null;
+  activeLeaseCount: number;
+  peerCount: number;
+  unmatchedPeerCount: number;
+  sharedPeerLeaseCount: number;
+  collectedLeaseCount: number;
+  collectionDurationMs: number;
+  latestFailureCode: 'capacity-blocked' | 'profile-unavailable' | 'ssh-or-parse-failed' | null;
+  updatedAt: string;
+}
+
+export interface LauncherNetworkRuntimeCollectionClaimInput {
+  siteId: string;
+  claimId: string;
+  requestedAt: string;
+  minIntervalMs: number;
+  claimTtlMs: number;
+}
+
+export interface LauncherNetworkRuntimeCollectionClaimResult {
+  claimed: boolean;
+  outcome: 'claimed' | 'throttled' | 'in-flight';
+  state: LauncherNetworkRuntimeCollectionState;
+}
+
+export interface LauncherNetworkTrafficLeaseSampleInput {
+  leaseId: string;
+  productId: string;
+  status: LauncherNetworkTrafficSampleStatus;
+  peerConfigured: 'yes' | 'no' | 'unknown';
+  latestHandshakeEpoch: number | null;
+  rxBytes: number | null;
+  txBytes: number | null;
+  attribution: LauncherNetworkTrafficAttribution;
+  sharedLeaseCount: number;
+  seriesId: string | null;
+}
+
+export interface LauncherNetworkRuntimeCollectionCompleteInput {
+  siteId: string;
+  claimId: string;
+  snapshotId: string;
+  sampledAt: string;
+  result: 'observed' | 'unavailable' | 'failed';
+  intervalMs: number;
+  retentionSamples: number;
+  activeLeaseCount: number;
+  peerCount: number;
+  unmatchedPeerCount: number;
+  sharedPeerLeaseCount: number;
+  collectedLeaseCount: number;
+  collectionDurationMs: number;
+  failureCode: 'capacity-blocked' | 'profile-unavailable' | 'ssh-or-parse-failed' | null;
+  samples: LauncherNetworkTrafficLeaseSampleInput[];
+}
+
+export interface LauncherNetworkRuntimeCollectionCompleteResult {
+  state: LauncherNetworkRuntimeCollectionState;
+  histories: LauncherNetworkTrafficHistory[];
 }
 
 /**

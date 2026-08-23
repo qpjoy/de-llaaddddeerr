@@ -340,6 +340,8 @@ assert.match(topologySelectionSource, /Online \/ handshake/);
 assert.match(topologySelectionSource, /Location \/ logs/);
 assert.match(topologySelectionSource, /not collected/);
 assert.match(topologySelectionSource, /renderMxH2iTopologyNodeActions\(lease\)/);
+assert.match(topologySelectionSource, /renderMxH2iTopologyTrafficHistory\(lease\)/);
+assert.match(topologySelectionSource, /renderMxH2iTrafficPolicyReservation\(lease\)/);
 assert.match(topologySelectionSource, /renderMxH2iTopologyRuntimeObservation\(lease\)/);
 assert.match(topologySelectionSource, /renderMxH2iTopologyActivity\(lease\)/);
 
@@ -348,8 +350,8 @@ assert.match(topologyNodeActionsSource, /Open Ban \/ Unban controls/);
 assert.match(topologyNodeActionsSource, /Anonymous leases do not have a user identity that can be individually banned/);
 assert.match(topologyNodeActionsSource, /Disconnect tunnel/);
 assert.match(topologyNodeActionsSource, /peer-safe WG removal and admission reconciliation/);
-assert.match(topologyNodeActionsSource, /Live speed/);
-assert.match(topologyNodeActionsSource, /single WG counter is not a speed measurement/);
+assert.match(topologyNodeActionsSource, /Scheduled traffic snapshots/);
+assert.match(topologyNodeActionsSource, /historical averages, not live or end-to-end speed/);
 assert.match(topologyNodeActionsSource, /Traffic limit/);
 assert.match(topologyNodeActionsSource, /disabled/);
 assert.doesNotMatch(topologyNodeActionsSource, /fetchJson|saveMxH2iProductUserAccess/);
@@ -367,6 +369,25 @@ assert.match(topologyRuntimeRenderSource, /Domestic average TX/);
 assert.match(topologyRuntimeRenderSource, /counter resets are rejected/);
 assert.match(topologyRuntimeRenderSource, /Refresh WG status/);
 assert.doesNotMatch(topologyRuntimeRenderSource, /\.stdout|\.stderr|\.result|\.publicKey|\.endpoint/);
+
+const topologyTrafficRenderSource = functionSource(rendererSource, 'renderMxH2iTopologyTrafficHistory');
+assert.match(topologyTrafficRenderSource, /Historical traffic snapshots/);
+assert.match(topologyTrafficRenderSource, /Domestic relay TX · interval average/);
+assert.match(topologyTrafficRenderSource, /Domestic relay RX · interval average/);
+assert.match(topologyTrafficRenderSource, /not an online claim/);
+assert.match(topologyTrafficRenderSource, /mxH2iTrafficAttributionLabel/);
+assert.match(topologyTrafficRenderSource, /never counted as this node’s exclusive traffic/);
+assert.match(topologyTrafficRenderSource, /Refresh history/);
+assert.doesNotMatch(topologyTrafficRenderSource, /setInterval|setTimeout|\.stdout|\.stderr|\.publicKey|\.endpoint/);
+assert.match(functionSource(rendererSource, 'mxH2iTrafficAttributionLabel'), /shared WG peer aggregate/);
+
+const trafficPolicySource = functionSource(rendererSource, 'renderMxH2iTrafficPolicyReservation');
+assert.match(trafficPolicySource, /Desired/);
+assert.match(trafficPolicySource, /Effective/);
+assert.match(trafficPolicySource, /tc · nftables \/ iptables/);
+assert.match(trafficPolicySource, /ProductNetwork \+ lease \/32 \+ generation/);
+assert.match(trafficPolicySource, /disabled/);
+assert.doesNotMatch(trafficPolicySource, /fetchJson|save|POST|PATCH|DELETE/);
 
 const topologySelectedNodeSource = functionSource(rendererSource, 'renderMxH2iTopologySelectedNode');
 assert.match(topologySelectedNodeSource, /Identity aggregate/);
@@ -713,6 +734,7 @@ const synchronizeServerScope = Function(
   'renderSelectedAppDetail',
   'MX_H2I_PRODUCT_ID',
   `${functionSource(rendererSource, 'resetMxH2iTopologyRuntimeObservation')}
+${functionSource(rendererSource, 'resetMxH2iTopologyTrafficHistory')}
 ${functionSource(rendererSource, 'synchronizeLauncherNetworkServerScope')}
 return synchronizeLauncherNetworkServerScope;`
 )(
@@ -1072,6 +1094,7 @@ assert.match(opsProtectionSource, /products\\\/\[\^\/\]\+\\\/user-access/);
 assert.match(opsProtectionSource, /products\\\/\[\^\/\]\+\\\/users\\\/\[\^\/\]\+\\\/access/);
 assert.match(opsProtectionSource, /leases\\\/\[\^\/\]\+\\\/activity/);
 assert.match(opsProtectionSource, /runtime-observation/);
+assert.match(opsProtectionSource, /traffic-history/);
 
 const topologyActivityLoadSource = functionSource(rendererSource, 'loadMxH2iTopologyActivity');
 assert.match(topologyActivityLoadSource, /launcher-network\/leases\/\$\{encodeURIComponent\(leaseId\)\}\/activity/);
@@ -1211,6 +1234,160 @@ assert.equal(topologyRuntimeAverage([
   { observedAtMs: 3000, status: 'unavailable', stale: true, rxBytes: null, txBytes: null }
 ]), null, 'missing counters cannot produce a rate');
 
+const topologyTrafficHistoryPayload = Function(
+  'mxH2iTopologyProductId',
+  `${functionSource(rendererSource, 'mxH2iTrafficHistoryFromPayload')}
+return mxH2iTrafficHistoryFromPayload;`
+)(
+  (lease) => String(lease?.productId || '').trim().toLowerCase()
+);
+const safeTrafficHistory = topologyTrafficHistoryPayload({
+  trafficHistory: {
+    leaseId: 'lease-selected',
+    productId: 'luopan',
+    siteId: 'domestic-main',
+    source: 'domestic-relay-snapshot',
+    plane: 'domestic',
+    intervalSeconds: 300,
+    retentionSamples: 288,
+    stale: false,
+    samples: [
+      {
+        snapshotId: 'snapshot-1', observedAt: '2026-08-22T10:00:00.000Z', status: 'observed', peerConfigured: 'yes',
+        latestHandshakeEpoch: null, rxBytes: 1024, txBytes: 2048, relayRxBytesPerSecond: null, relayTxBytesPerSecond: null,
+        rateWindowSeconds: null, attribution: 'exact', sharedLeaseCount: 1, seriesId: 'must be discarded', stdout: 'discard me'
+      },
+      {
+        snapshotId: 'snapshot-2', observedAt: '2026-08-22T10:05:00.000Z', status: 'observed', peerConfigured: 'yes',
+        latestHandshakeEpoch: null, rxBytes: 4096, txBytes: 8192, relayRxBytesPerSecond: 10.24, relayTxBytesPerSecond: 20.48,
+        rateWindowSeconds: 300, attribution: 'shared-peer', sharedLeaseCount: 2, seriesId: 'must be discarded', publicKey: 'discard me'
+      },
+      {
+        snapshotId: 'snapshot-3', observedAt: '2026-08-22T10:10:00.000Z', status: 'failed', peerConfigured: 'unknown',
+        latestHandshakeEpoch: null, rxBytes: null, txBytes: null, relayRxBytesPerSecond: null, relayTxBytesPerSecond: null,
+        rateWindowSeconds: null, attribution: 'exact', sharedLeaseCount: 1, seriesId: null, stderr: 'discard me'
+      }
+    ]
+  }
+}, { leaseId: 'lease-selected', productId: 'luopan' });
+assert.equal(safeTrafficHistory.samples.length, 3);
+assert.equal(safeTrafficHistory.samples[1].attribution, 'shared-peer');
+assert.equal(safeTrafficHistory.samples[1].sharedLeaseCount, 2);
+assert.equal('seriesId' in safeTrafficHistory.samples[0], false, 'internal peer-series fingerprints are not consumed by the UI');
+assert.equal('stdout' in safeTrafficHistory.samples[0], false, 'raw output is discarded from stored traffic samples');
+assert.equal('publicKey' in safeTrafficHistory.samples[1], false, 'WireGuard public keys are never consumed by the UI');
+assert.equal('stderr' in safeTrafficHistory.samples[2], false, 'raw errors are discarded from stored traffic samples');
+assert.doesNotMatch(functionSource(rendererSource, 'mxH2iTrafficHistoryFromPayload'), /seriesId/, 'the UI contract excludes internal peer-series fingerprints');
+assert.throws(
+  () => topologyTrafficHistoryPayload({
+    trafficHistory: {
+      leaseId: 'lease-other', productId: 'luopan', siteId: 'domestic-main', source: 'domestic-relay-snapshot', plane: 'domestic',
+      intervalSeconds: 300, retentionSamples: 288, stale: false, samples: []
+    }
+  }, { leaseId: 'lease-selected', productId: 'luopan' }),
+  /did not match the selected lease/
+);
+assert.throws(
+  () => topologyTrafficHistoryPayload({
+    trafficHistory: {
+      leaseId: 'lease-selected', productId: 'luopan', siteId: 'domestic-main', source: 'domestic-relay-snapshot', plane: 'domestic',
+      intervalSeconds: 300, retentionSamples: 288, stale: false,
+      samples: [{
+        snapshotId: 'snapshot-1', observedAt: '2026-08-22T10:00:00.000Z', status: 'observed', peerConfigured: 'yes',
+        latestHandshakeEpoch: null, rxBytes: 1, txBytes: 2, relayRxBytesPerSecond: null, relayTxBytesPerSecond: null,
+        rateWindowSeconds: null, attribution: 'shared-peer', sharedLeaseCount: 1
+      }]
+    }
+  }, { leaseId: 'lease-selected', productId: 'luopan' }),
+  /invalid or out-of-order sample/,
+  'shared attribution fails closed unless at least two leases share the peer'
+);
+assert.throws(
+  () => topologyTrafficHistoryPayload({
+    trafficHistory: {
+      leaseId: 'lease-selected', productId: 'luopan', siteId: 'domestic-main', source: 'domestic-relay-snapshot', plane: 'domestic',
+      intervalSeconds: 300, retentionSamples: 288, stale: false,
+      samples: [{
+        snapshotId: 'snapshot-1', observedAt: '2026-08-22T10:00:00.000Z', status: 'observed', peerConfigured: 'yes',
+        latestHandshakeEpoch: null, rxBytes: 1, txBytes: 2, relayRxBytesPerSecond: 1, relayTxBytesPerSecond: 2,
+        rateWindowSeconds: null, attribution: 'exact', sharedLeaseCount: 1
+      }]
+    }
+  }, { leaseId: 'lease-selected', productId: 'luopan' }),
+  /invalid or out-of-order sample/,
+  'a derived rate without its actual rate window is rejected'
+);
+
+const trafficDescriptorSource = functionSource(rendererSource, 'mxH2iTopologyTrafficEvidenceDescriptor');
+assert.match(trafficDescriptorSource, /1 sample \/ rate pending/);
+assert.match(trafficDescriptorSource, /Snapshot stale · rate hidden/);
+assert.match(trafficDescriptorSource, /Snapshot failed · rate unavailable/);
+assert.match(trafficDescriptorSource, /↓ TX/);
+assert.match(trafficDescriptorSource, /↑ RX/);
+assert.match(trafficDescriptorSource, /shared WG peer aggregate/);
+assert.match(trafficDescriptorSource, /history\.stale === false/);
+const trafficDescriptorState = {
+  mxH2iTopologyTrafficHistory: {
+    leaseId: 'lease-selected',
+    productId: 'luopan',
+    loading: false,
+    error: null,
+    history: null
+  }
+};
+const topologyTrafficDescriptor = Function(
+  'state',
+  'mxH2iTopologyProductId',
+  'asArray',
+  'mxH2iByteRate',
+  'mxH2iTrafficWindowLabel',
+  'mxH2iDomesticHandshake',
+  'formatTime',
+  `${functionSource(rendererSource, 'mxH2iTrafficHistoryLatestSample')}
+${functionSource(rendererSource, 'mxH2iTrafficHistoryForLease')}
+${trafficDescriptorSource}
+return mxH2iTopologyTrafficEvidenceDescriptor;`
+)(
+  trafficDescriptorState,
+  (lease) => String(lease?.productId || '').trim().toLowerCase(),
+  (value) => Array.isArray(value) ? value : [],
+  (value) => `${value} B/s`,
+  (value) => `${value}s window`,
+  () => 'not observed',
+  (value) => value
+);
+const descriptorLease = { leaseId: 'lease-selected', productId: 'luopan' };
+trafficDescriptorState.mxH2iTopologyTrafficHistory.history = {
+  stale: false,
+  intervalSeconds: 300,
+  samples: [{
+    observedAt: 'sample-1', status: 'observed', peerConfigured: 'yes', attribution: 'exact', sharedLeaseCount: 1,
+    latestHandshakeEpoch: null, relayRxBytesPerSecond: null, relayTxBytesPerSecond: null, rateWindowSeconds: null
+  }]
+};
+assert.equal(topologyTrafficDescriptor(descriptorLease).primary, '1 sample / rate pending');
+trafficDescriptorState.mxH2iTopologyTrafficHistory.history = {
+  stale: true,
+  intervalSeconds: 300,
+  samples: [{
+    observedAt: 'sample-2', status: 'observed', peerConfigured: 'yes', attribution: 'exact', sharedLeaseCount: 1,
+    latestHandshakeEpoch: null, relayRxBytesPerSecond: 999, relayTxBytesPerSecond: 888, rateWindowSeconds: 300
+  }]
+};
+assert.equal(topologyTrafficDescriptor(descriptorLease).primary, 'Snapshot stale · rate hidden', 'stale latest evidence never paints a current rate');
+trafficDescriptorState.mxH2iTopologyTrafficHistory.history = {
+  stale: false,
+  intervalSeconds: 300,
+  samples: [{
+    observedAt: 'sample-3', status: 'observed', peerConfigured: 'yes', attribution: 'shared-peer', sharedLeaseCount: 3,
+    latestHandshakeEpoch: null, relayRxBytesPerSecond: 12, relayTxBytesPerSecond: 34, rateWindowSeconds: 301
+  }]
+};
+const sharedTrafficDescriptor = topologyTrafficDescriptor(descriptorLease);
+assert.match(sharedTrafficDescriptor.primary, /↓ TX 34 B\/s · ↑ RX 12 B\/s · 301s window/);
+assert.equal(sharedTrafficDescriptor.detail, 'shared WG peer aggregate · 3 leases');
+assert.equal(sharedTrafficDescriptor.shared, true);
+
 const topologyRuntimeLoadSource = functionSource(rendererSource, 'loadMxH2iTopologyRuntimeObservation');
 assert.match(topologyRuntimeLoadSource, /runtime-observation/);
 assert.match(topologyRuntimeLoadSource, /method: 'POST'/);
@@ -1223,6 +1400,29 @@ assert.match(topologyRuntimeLoadSource, /section\.isConnected/);
 assert.match(topologyRuntimeLoadSource, /mxH2iRuntimeObservationFromPayload\(payload, lease\)/);
 assert.match(topologyRuntimeLoadSource, /\.slice\(-2\)/);
 assert.doesNotMatch(topologyRuntimeLoadSource, /setInterval|setTimeout|domestic-relay\/diagnostics/);
+
+const topologyTrafficLoadSource = functionSource(rendererSource, 'loadMxH2iTopologyTrafficHistory');
+assert.match(topologyTrafficLoadSource, /launcher-network\/leases\/\$\{encodeURIComponent\(leaseId\)\}\/traffic-history\?limit=12/);
+assert.match(topologyTrafficLoadSource, /captureLauncherNetworkRequestScope\(\)/);
+assert.match(topologyTrafficLoadSource, /isLauncherNetworkRequestScopeCurrent\(requestScope\)/);
+assert.match(topologyTrafficLoadSource, /mxH2iTopologyTrafficHistory\.leaseId === leaseId/);
+assert.match(topologyTrafficLoadSource, /mxH2iTopologyTrafficHistory\.productId === productId/);
+assert.match(topologyTrafficLoadSource, /mxH2iTopologyView\.selectedLeaseKey === leaseKey/);
+assert.match(topologyTrafficLoadSource, /section\.isConnected/);
+assert.match(topologyTrafficLoadSource, /mxH2iTrafficHistoryFromPayload\(payload, lease\)/);
+assert.doesNotMatch(topologyTrafficLoadSource, /setInterval|setTimeout|runtime-snapshots\/domestic|runtime-observation|method:\s*'POST'/);
+assert.match(topologyTrafficLoadSource, /mxH2iTopologyTrafficHistory\.loading[\s\S]*return;/, 'an in-flight selected-lease history request is deduplicated');
+const renderTopologySelectionSource = functionSource(rendererSource, 'renderMxH2iTopologySelection');
+assert.equal(
+  (renderTopologySelectionSource.match(/loadMxH2iTopologyTrafficHistory\(/g) || []).length,
+  1,
+  'one node selection starts at most one history load'
+);
+assert.equal(
+  (topologyBindingSource.match(/loadMxH2iTopologyTrafficHistory\(/g) || []).length,
+  1,
+  'restoring a selected node starts one history load after a topology render'
+);
 
 const topologyPageFocusSelector = Function(
   `${functionSource(rendererSource, 'mxH2iTopologyPageFocusSelector')}
@@ -1264,6 +1464,7 @@ assert.match(initTopologySource, /new THREE\.Raycaster\(\)/);
 assert.match(initTopologySource, /raycastTargets/);
 assert.match(initTopologySource, /installMxH2iTopologyInteractions\(instance\)/);
 assert.match(initTopologySource, /setMxH2iTopologyNodeSelection\(instance, state\.mxH2iTopologyView\.selectedNodeId\)/);
+assert.match(initTopologySource, /updateMxH2iTopologyTrafficEvidence/);
 assert.match(initTopologySource, /raycastTargets\.push\(sphere\)/);
 assert.doesNotMatch(initTopologySource, /if \(isClient\) raycastTargets\.push/);
 assert.match(initTopologySource, /STATIC LEASE GRAPH/);
@@ -1311,6 +1512,19 @@ assert.match(topologyHighlightSource, /cursor !== 'internal'/);
 assert.match(topologyHighlightSource, /onSelectedPath/);
 assert.doesNotMatch(rendererSource, /function mxH2iTopologyCanAnimate|function syncMxH2iTopologyAnimation/);
 
+const topologyTrafficBadgeSource = functionSource(rendererSource, 'createMxH2iTopologyTrafficEvidenceBadge');
+assert.match(topologyTrafficBadgeSource, /new THREE\.CanvasTexture/);
+assert.match(topologyTrafficBadgeSource, /depthWrite: false/);
+assert.match(topologyTrafficBadgeSource, /depthTest: false/);
+assert.match(topologyTrafficBadgeSource, /String\(descriptor\.primary\)\.slice/);
+const topologyTrafficEvidenceSource = functionSource(rendererSource, 'updateMxH2iTopologyTrafficEvidence');
+assert.match(topologyTrafficEvidenceSource, /item\.spec\.from === clientNodeId && item\.spec\.to === groupNodeId/);
+assert.match(topologyTrafficEvidenceSource, /disposeMxH2iTopologyTrafficEvidence\(instance\)/);
+assert.doesNotMatch(topologyTrafficEvidenceSource, /line\.material|particles|setInterval|requestAnimationFrame/);
+const topologyTrafficDisposeSource = functionSource(rendererSource, 'disposeMxH2iTopologyTrafficEvidence');
+assert.match(topologyTrafficDisposeSource, /material\?\.map\?\.dispose/);
+assert.match(topologyTrafficDisposeSource, /material\?\.dispose/);
+
 const topologyActivateSource = functionSource(rendererSource, 'activateMxH2iTopologyNode');
 assert.match(topologyActivateSource, /openMxH2iLeaseDrawer/);
 assert.match(topologyActivateSource, /mxH2iTopologyGroupNode/);
@@ -1333,6 +1547,8 @@ assert.match(disposeSource, /forceContextLoss/);
 assert.match(stylesSource, /\.mx-h2i-operations-panel\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-topology-fallback\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-topology-metrics\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-topology-traffic-legend\s*\{/);
+assert.match(stylesSource, /\.mx-h2i-traffic-history-list\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-topology-toolbar\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-topology-tooltip\s*\{/);
 assert.match(stylesSource, /\.mx-h2i-topology-selection-grid\s*\{/);

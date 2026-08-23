@@ -340,6 +340,14 @@ const state = {
     samples: [],
     requestSequence: 0
   },
+  mxH2iTopologyTrafficHistory: {
+    leaseId: null,
+    productId: null,
+    loading: false,
+    error: null,
+    history: null,
+    requestSequence: 0
+  },
   anonymousPolicyBusyProductId: null,
   anonymousPolicyFeedback: null,
   mxH2iAnonymousQuickConfirmation: null,
@@ -4355,6 +4363,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || /^\/internal\/v1\/admin\/site-slots\/pipelines\/[^/]+$/.test(path)
       || /^\/internal\/v1\/launcher-network\/leases(?:\/[^/]+)?$/.test(path)
       || /^\/internal\/v1\/launcher-network\/leases\/[^/]+\/activity$/.test(path)
+      || /^\/internal\/v1\/launcher-network\/leases\/[^/]+\/traffic-history$/.test(path)
       || /^\/internal\/v1\/launcher-network\/products\/[^/]+\/user-access$/.test(path)
       || /^\/internal\/v1\/launcher-network\/products\/[^/]+\/users\/[^/]+\/access$/.test(path);
   }
@@ -4437,6 +4446,17 @@ function resetMxH2iTopologyRuntimeObservation() {
   };
 }
 
+function resetMxH2iTopologyTrafficHistory() {
+  state.mxH2iTopologyTrafficHistory = {
+    leaseId: null,
+    productId: null,
+    loading: false,
+    error: null,
+    history: null,
+    requestSequence: Number(state.mxH2iTopologyTrafficHistory?.requestSequence || 0) + 1
+  };
+}
+
 function synchronizeLauncherNetworkServerScope(value) {
   const next = launcherNetworkServerIdentity(value);
   if (next.base === state.launcherNetworkServerBase && next.origin === state.launcherNetworkServerOrigin) return false;
@@ -4455,6 +4475,7 @@ function synchronizeLauncherNetworkServerScope(value) {
   state.mxH2iProductUserAccess = null;
   state.mxH2iProductUserAccessError = null;
   resetMxH2iTopologyRuntimeObservation();
+  resetMxH2iTopologyTrafficHistory();
   launcherProductUserAccessRequests.clear();
   state.anonymousPolicyBusyProductId = null;
   state.anonymousPolicyFeedback = null;
@@ -12102,6 +12123,144 @@ function mxH2iRuntimeAverage(samples) {
   };
 }
 
+function mxH2iTrafficHistoryFromPayload(payload, lease) {
+  const leaseId = String(lease?.leaseId || '').trim();
+  const productId = mxH2iTopologyProductId(lease);
+  const history = payload?.trafficHistory;
+  if (!history || typeof history !== 'object') {
+    throw new Error('Traffic history response was missing its evidence envelope.');
+  }
+  if (!leaseId || String(history.leaseId || '').trim() !== leaseId) {
+    throw new Error('Traffic history response did not match the selected lease.');
+  }
+  if (String(history.productId || '').trim().toLowerCase() !== productId) {
+    throw new Error('Traffic history response did not match the selected ProductNetwork.');
+  }
+  if (history.source !== 'domestic-relay-snapshot' || history.plane !== 'domestic') {
+    throw new Error('Traffic history response did not identify the Domestic scheduled source.');
+  }
+  const siteId = String(history.siteId || '').trim();
+  const intervalSeconds = history.intervalSeconds;
+  const retentionSamples = history.retentionSamples;
+  const rawSamples = history.samples;
+  if (!siteId
+    || siteId.length > 120
+    || !Number.isSafeInteger(intervalSeconds)
+    || intervalSeconds < 60
+    || intervalSeconds > 86400
+    || !Number.isSafeInteger(retentionSamples)
+    || retentionSamples < 1
+    || retentionSamples > 288
+    || typeof history.stale !== 'boolean'
+    || !Array.isArray(rawSamples)
+    || rawSamples.length > 12) {
+    throw new Error('Traffic history response contained invalid schedule metadata.');
+  }
+  let previousObservedAtMs = -1;
+  const samples = rawSamples.map((sample) => {
+    const snapshotId = String(sample?.snapshotId || '').trim();
+    const observedAt = String(sample?.observedAt || '');
+    const observedAtMs = Date.parse(observedAt);
+    const status = String(sample?.status || '');
+    const peerConfigured = String(sample?.peerConfigured || '');
+    const attribution = String(sample?.attribution || '');
+    const sharedLeaseCount = sample?.sharedLeaseCount;
+    const latestHandshakeEpoch = sample?.latestHandshakeEpoch;
+    const rxBytes = sample?.rxBytes;
+    const txBytes = sample?.txBytes;
+    const relayRxBytesPerSecond = sample?.relayRxBytesPerSecond;
+    const relayTxBytesPerSecond = sample?.relayTxBytesPerSecond;
+    const rateWindowSeconds = sample?.rateWindowSeconds;
+    const counters = [rxBytes, txBytes];
+    const rates = [relayRxBytesPerSecond, relayTxBytesPerSecond];
+    if (!snapshotId
+      || snapshotId.length > 160
+      || !Number.isFinite(observedAtMs)
+      || observedAtMs <= previousObservedAtMs
+      || !['observed', 'unavailable', 'failed'].includes(status)
+      || !['yes', 'no', 'unknown'].includes(peerConfigured)
+      || !['exact', 'shared-peer'].includes(attribution)
+      || !Number.isSafeInteger(sharedLeaseCount)
+      || sharedLeaseCount < 1
+      || (attribution === 'exact' && sharedLeaseCount !== 1)
+      || (attribution === 'shared-peer' && sharedLeaseCount < 2)
+      || (latestHandshakeEpoch !== null
+        && (!Number.isSafeInteger(latestHandshakeEpoch)
+          || latestHandshakeEpoch < 0
+          || !Number.isFinite(new Date(latestHandshakeEpoch * 1000).getTime())
+          || (latestHandshakeEpoch * 1000) > observedAtMs + (5 * 60 * 1000)))
+      || counters.some((value) => value !== null && (!Number.isSafeInteger(value) || value < 0))
+      || rates.some((value) => value !== null && (!Number.isFinite(value) || value < 0))
+      || ((rxBytes === null) !== (txBytes === null))
+      || ((relayRxBytesPerSecond === null) !== (relayTxBytesPerSecond === null))
+      || ((relayRxBytesPerSecond === null) !== (rateWindowSeconds === null))
+      || (rateWindowSeconds !== null && (!Number.isFinite(rateWindowSeconds) || rateWindowSeconds <= 0))
+      || (relayRxBytesPerSecond !== null && (status !== 'observed' || peerConfigured !== 'yes' || rxBytes === null))) {
+      throw new Error('Traffic history response contained an invalid or out-of-order sample.');
+    }
+    previousObservedAtMs = observedAtMs;
+    return {
+      snapshotId,
+      observedAt,
+      observedAtMs,
+      status,
+      peerConfigured,
+      attribution,
+      sharedLeaseCount,
+      latestHandshakeEpoch,
+      rxBytes,
+      txBytes,
+      relayRxBytesPerSecond,
+      relayTxBytesPerSecond,
+      rateWindowSeconds
+    };
+  });
+  return {
+    leaseId,
+    productId,
+    siteId,
+    source: 'domestic-relay-snapshot',
+    plane: 'domestic',
+    intervalSeconds,
+    retentionSamples,
+    stale: history.stale,
+    samples
+  };
+}
+
+function mxH2iTrafficHistoryLatestSample(history) {
+  return asArray(history?.samples).at(-1) || null;
+}
+
+function mxH2iTrafficHistoryForLease(lease) {
+  const leaseId = String(lease?.leaseId || '').trim();
+  const productId = mxH2iTopologyProductId(lease);
+  const trafficState = state.mxH2iTopologyTrafficHistory;
+  if (!leaseId
+    || trafficState?.leaseId !== leaseId
+    || trafficState?.productId !== productId) return null;
+  return trafficState;
+}
+
+function mxH2iTrafficAttributionLabel(sample) {
+  if (!sample) return 'attribution unavailable';
+  return sample.attribution === 'shared-peer'
+    ? `shared WG peer aggregate · ${sample.sharedLeaseCount} leases`
+    : 'exact lease peer';
+}
+
+function mxH2iTrafficWindowLabel(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return 'window unavailable';
+  if (seconds < 60) return `${seconds >= 10 ? seconds.toFixed(0) : seconds.toFixed(1)}s window`;
+  if (seconds < 3600) {
+    const minutes = seconds / 60;
+    return `${minutes >= 10 ? minutes.toFixed(0) : minutes.toFixed(1)}m window`;
+  }
+  const hours = seconds / 3600;
+  return `${hours >= 10 ? hours.toFixed(0) : hours.toFixed(1)}h window`;
+}
+
 function mxH2iByteCount(value) {
   if (value === null || value === undefined) return 'not observed';
   const bytes = Number(value);
@@ -12161,14 +12320,98 @@ function renderMxH2iTopologyNodeActions(lease) {
         <div><strong>Disconnect tunnel</strong><span>Unavailable until peer-safe WG removal and admission reconciliation are implemented.</span></div>
         <button class="secondary-button" type="button" disabled title="Requires peer-safe WG removal and admission reconciliation">Unavailable</button>
       </article>
-      <article data-available="false">
-        <div><strong>Live speed</strong><span>Unavailable without repeated, timestamped runtime samples. A single WG counter is not a speed measurement.</span></div>
-        <button class="secondary-button" type="button" disabled title="Requires a timestamped runtime telemetry sampler">Needs telemetry</button>
+      <article data-available="read-only">
+        <div><strong>Scheduled traffic snapshots</strong><span>Stored Domestic counter intervals load once when this node is selected. They are historical averages, not live or end-to-end speed.</span></div>
+        <span class="health-chip" data-health="ready">READ-ONLY</span>
       </article>
       <article data-available="false">
         <div><strong>Traffic limit</strong><span>Unavailable until a product- and peer-scoped enforcement backend exists.</span></div>
         <button class="secondary-button" type="button" disabled title="Traffic policy enforcement backend is not available">Needs backend</button>
       </article>
+    </section>
+  `;
+}
+
+function renderMxH2iTopologyTrafficHistory(lease) {
+  const leaseId = String(lease?.leaseId || '').trim();
+  const trafficState = mxH2iTrafficHistoryForLease(lease);
+  const history = trafficState?.history || null;
+  const samples = asArray(history?.samples);
+  const latest = mxH2iTrafficHistoryLatestSample(history);
+  const rateAvailable = history?.stale === false
+    && latest?.status === 'observed'
+    && latest?.peerConfigured === 'yes'
+    && Number.isFinite(latest?.relayRxBytesPerSecond)
+    && Number.isFinite(latest?.relayTxBytesPerSecond);
+  const intervalLabel = history?.intervalSeconds
+    ? `${Math.round(history.intervalSeconds / 60)} min schedule`
+    : 'scheduled interval not loaded';
+  let content = '<div class="empty-state">Select this node to load its stored Domestic traffic snapshots.</div>';
+  if (!leaseId) {
+    content = '<div class="empty-state">Traffic history is unavailable because the lease ID was not recorded.</div>';
+  } else if (trafficState?.loading) {
+    content = '<div class="empty-state">Loading stored Domestic traffic snapshots…</div>';
+  } else if (trafficState?.error) {
+    content = `<div class="feedback error">Traffic snapshot history unavailable: ${escapeHtml(trafficState.error)}</div>`;
+  } else if (history && !samples.length) {
+    content = '<div class="empty-state">No scheduled snapshot has been stored for this lease yet.</div>';
+  } else if (history && latest) {
+    const attribution = mxH2iTrafficAttributionLabel(latest);
+    content = `
+      <dl class="mx-h2i-topology-selection-grid">
+        <div><dt>Client download</dt><dd>${escapeHtml(rateAvailable ? mxH2iByteRate(latest.relayTxBytesPerSecond) : 'not calculated')}</dd><small>Domestic relay TX · interval average</small></div>
+        <div><dt>Client upload</dt><dd>${escapeHtml(rateAvailable ? mxH2iByteRate(latest.relayRxBytesPerSecond) : 'not calculated')}</dd><small>Domestic relay RX · interval average</small></div>
+        <div><dt>Latest handshake</dt><dd>${escapeHtml(mxH2iDomesticHandshake(latest.latestHandshakeEpoch))}</dd><small>WG handshake timestamp, not an online claim</small></div>
+        <div><dt>Sample freshness</dt><dd>${escapeHtml(history.stale ? 'stale' : 'current for schedule')}</dd><small>${escapeHtml(formatTime(latest.observedAt))} · ${escapeHtml(intervalLabel)}</small></div>
+        <div><dt>Rate attribution</dt><dd>${escapeHtml(attribution)}</dd><small>${latest.attribution === 'shared-peer' ? 'peer aggregate; never counted as this node’s exclusive traffic' : 'mapped to this lease peer series'}</small></div>
+        <div><dt>Stored history</dt><dd>${escapeHtml(String(samples.length))} samples</dd><small>${escapeHtml(history.siteId)} · maximum ${escapeHtml(String(history.retentionSamples))} retained</small></div>
+      </dl>
+      <div class="mx-h2i-traffic-history-list" aria-label="Recent scheduled traffic intervals">
+        ${samples.slice(-6).reverse().map((sample) => {
+          const hasRate = sample.status === 'observed'
+            && sample.peerConfigured === 'yes'
+            && Number.isFinite(sample.relayRxBytesPerSecond)
+            && Number.isFinite(sample.relayTxBytesPerSecond);
+          return `
+            <article data-attribution="${escapeHtml(sample.attribution)}">
+              <time>${escapeHtml(formatTime(sample.observedAt))}</time>
+              <strong>${escapeHtml(hasRate ? `↓ ${mxH2iByteRate(sample.relayTxBytesPerSecond)} · ↑ ${mxH2iByteRate(sample.relayRxBytesPerSecond)}` : 'interval rate unavailable')}</strong>
+              <small>${escapeHtml(`${mxH2iTrafficAttributionLabel(sample)} · ${mxH2iTrafficWindowLabel(sample.rateWindowSeconds)}`)}</small>
+            </article>
+          `;
+        }).join('')}
+      </div>
+    `;
+  }
+  return `
+    <section class="mx-h2i-topology-traffic" data-mx-h2i-topology-traffic-history aria-live="polite">
+      <div class="mx-h2i-topology-runtime-head">
+        <div><strong>Historical traffic snapshots</strong><span>Low-frequency, stored Domestic WG evidence. ↓ uses relay TX (client download); ↑ uses relay RX (client upload). It does not prove online state or Internal/end-to-end throughput.</span></div>
+        <button class="secondary-button" type="button" data-mx-h2i-topology-refresh-traffic="${escapeHtml(mxH2iTopologyClientNodeId(lease))}" ${!leaseId || trafficState?.loading ? 'disabled' : ''}>${trafficState?.loading ? 'Loading…' : 'Refresh history'}</button>
+      </div>
+      ${content}
+    </section>
+  `;
+}
+
+function renderMxH2iTrafficPolicyReservation(lease) {
+  const scope = [mxH2iTopologyProductId(lease), lease?.leaseIp || 'lease IP unavailable'].filter(Boolean).join(' · ');
+  return `
+    <section class="mx-h2i-traffic-policy" aria-label="Reserved traffic enforcement controls">
+      <div class="mx-h2i-topology-runtime-head">
+        <div><strong>Traffic policy reservation</strong><span>Read-only contract placeholder. No tc, nftables, iptables, route, port, or WireGuard setting is changed here.</span></div>
+        <span class="health-chip" data-health="unknown">NOT ENFORCED</span>
+      </div>
+      <dl class="mx-h2i-topology-selection-grid">
+        <div><dt>Desired</dt><dd>unlimited</dd><small>no persisted per-lease policy yet</small></div>
+        <div><dt>Effective</dt><dd>not observed</dd><small>requires enforcement read-back</small></div>
+        <div><dt>Future scope key</dt><dd>${escapeHtml(scope)}</dd><small>ProductNetwork + lease /32 + generation</small></div>
+        <div><dt>Planned adapters</dt><dd>tc · nftables / iptables</dd><small>bandwidth, route, port and ACL enforcement</small></div>
+      </dl>
+      <div class="action-row">
+        <button class="secondary-button" type="button" disabled title="Requires desired/effective policy reconciliation and read-back">Set bandwidth</button>
+        <button class="secondary-button" type="button" disabled title="Requires desired/effective policy reconciliation and read-back">Route / port policy</button>
+      </div>
     </section>
   `;
 }
@@ -12247,6 +12490,8 @@ function renderMxH2iTopologySelectedLease(lease) {
       <div><dt>Location / logs</dt><dd>not collected</dd><small>no client position or log telemetry</small></div>
     </dl>
     ${renderMxH2iTopologyNodeActions(lease)}
+    ${renderMxH2iTopologyTrafficHistory(lease)}
+    ${renderMxH2iTrafficPolicyReservation(lease)}
     ${renderMxH2iTopologyRuntimeObservation(lease)}
     ${renderMxH2iTopologyActivity(lease)}
   `;
@@ -12487,6 +12732,7 @@ function renderMxH2iTopologyExplorer(leases, product, options = {}) {
         <div class="mx-h2i-topology-stage">
           <canvas data-mx-h2i-topology-canvas tabindex="0" aria-label="Interactive Launcher Network static lease topology. Drag to rotate, Shift-drag or right-drag to pan, wheel to zoom, and use arrow or plus/minus keys."></canvas>
           <div class="mx-h2i-topology-tooltip" data-mx-h2i-topology-tooltip hidden></div>
+          <div class="mx-h2i-topology-traffic-legend">Selected path snapshot · ↓ Domestic TX / client download · ↑ Domestic RX / client upload</div>
           <div class="mx-h2i-topology-overlay" aria-hidden="true">
             <span>LEASES</span><span>PRODUCT IDENTITIES</span><span>PRODUCT VIP / DOMESTIC</span><span>INTERNAL</span>
           </div>
@@ -12814,6 +13060,7 @@ function selectLauncherNetworkProduct(productId) {
   state.mxH2iTopologyActivity.leaseId = null;
   state.mxH2iTopologyActivity.activity = [];
   resetMxH2iTopologyRuntimeObservation();
+  resetMxH2iTopologyTrafficHistory();
   state.mxH2iAnonymousQuickConfirmation = null;
   closeMxH2iLeaseDrawer({ restoreFocus: false });
   disposeMxH2iTopology();
@@ -12970,6 +13217,13 @@ function bindMxH2iTopologySelectionActions(root, leases, product) {
     );
     if (lease) void loadMxH2iTopologyRuntimeObservation(root, section, leases, product, lease);
   });
+  section.querySelector('[data-mx-h2i-topology-refresh-traffic]')?.addEventListener('click', (event) => {
+    const lease = mxH2iTopologyLeaseForNode(
+      leases,
+      event.currentTarget.dataset.mxH2iTopologyRefreshTraffic
+    );
+    if (lease) void loadMxH2iTopologyTrafficHistory(root, section, leases, product, lease);
+  });
   section.querySelector('[data-mx-h2i-topology-apply-group]')?.addEventListener('click', (event) => {
     activateMxH2iTopologyNode(root, leases, product, event.currentTarget.dataset.mxH2iTopologyApplyGroup, event.currentTarget);
   });
@@ -12999,6 +13253,7 @@ function renderMxH2iTopologySelection(root, leases, product, nodeId) {
   const nextLeaseKey = selectedLease ? mxH2iLeaseDrawerKey(selectedLease) : null;
   if (state.mxH2iTopologyView.selectedLeaseKey !== nextLeaseKey) {
     resetMxH2iTopologyRuntimeObservation();
+    resetMxH2iTopologyTrafficHistory();
   }
   state.mxH2iTopologyView.selectedNodeId = valid ? normalized : null;
   state.mxH2iTopologyView.selectedLeaseKey = nextLeaseKey;
@@ -13015,7 +13270,77 @@ function renderMxH2iTopologySelection(root, leases, product, nodeId) {
   }
   bindMxH2iTopologySelectionActions(root, leases, product);
   setMxH2iTopologyNodeSelection(state.mxH2iTopology, state.mxH2iTopologyView.selectedNodeId);
-  if (selectedLease) void loadMxH2iTopologyActivity(section, selectedLease);
+  updateMxH2iTopologyTrafficEvidence(state.mxH2iTopology, selectedLease);
+  if (selectedLease) {
+    void loadMxH2iTopologyActivity(section, selectedLease);
+    void loadMxH2iTopologyTrafficHistory(root, section, leases, product, selectedLease);
+  }
+}
+
+async function loadMxH2iTopologyTrafficHistory(root, section, leases, product, lease) {
+  const leaseId = String(lease?.leaseId || '').trim();
+  const productId = mxH2iTopologyProductId(lease);
+  const leaseKey = mxH2iLeaseDrawerKey(lease);
+  if (!leaseId || !productId || !section?.isConnected) return;
+  if (state.mxH2iTopologyTrafficHistory.loading
+    && state.mxH2iTopologyTrafficHistory.leaseId === leaseId
+    && state.mxH2iTopologyTrafficHistory.productId === productId) return;
+  const requestScope = captureLauncherNetworkRequestScope();
+  const requestSequence = Number(state.mxH2iTopologyTrafficHistory.requestSequence || 0) + 1;
+  state.mxH2iTopologyTrafficHistory = {
+    leaseId,
+    productId,
+    loading: true,
+    error: null,
+    history: null,
+    requestSequence
+  };
+  const requestIsCurrent = () => (
+    section.isConnected
+    && isLauncherNetworkRequestScopeCurrent(requestScope)
+    && state.mxH2iTopologyTrafficHistory.requestSequence === requestSequence
+    && state.mxH2iTopologyTrafficHistory.leaseId === leaseId
+    && state.mxH2iTopologyTrafficHistory.productId === productId
+    && state.mxH2iTopologyView.selectedLeaseKey === leaseKey
+  );
+  const renderTraffic = () => {
+    if (!requestIsCurrent()) return;
+    const selection = section.querySelector('[data-mx-h2i-topology-selection]');
+    if (selection) {
+      selection.innerHTML = renderMxH2iTopologySelectedNode(
+        state.mxH2iTopologyView.selectedNodeId,
+        leases,
+        product
+      );
+      bindMxH2iTopologySelectionActions(root, leases, product);
+    }
+    updateMxH2iTopologyTrafficEvidence(state.mxH2iTopology, lease);
+  };
+  renderTraffic();
+  try {
+    const payload = await fetchJson(`/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/traffic-history?limit=12`);
+    if (!requestIsCurrent()) return;
+    state.mxH2iTopologyTrafficHistory = {
+      leaseId,
+      productId,
+      loading: false,
+      error: null,
+      history: mxH2iTrafficHistoryFromPayload(payload, lease),
+      requestSequence
+    };
+    renderTraffic();
+  } catch (error) {
+    if (!requestIsCurrent()) return;
+    state.mxH2iTopologyTrafficHistory = {
+      leaseId,
+      productId,
+      loading: false,
+      error: error.message,
+      history: null,
+      requestSequence
+    };
+    renderTraffic();
+  }
 }
 
 async function loadMxH2iTopologyRuntimeObservation(root, section, leases, product, lease) {
@@ -13231,7 +13556,10 @@ function bindMxH2iTopologyControls(root, leases, product) {
     }
   });
   const selectedLease = mxH2iTopologyLeaseForNode(leases, state.mxH2iTopologyView.selectedNodeId);
-  if (selectedLease) void loadMxH2iTopologyActivity(section, selectedLease);
+  if (selectedLease) {
+    void loadMxH2iTopologyActivity(section, selectedLease);
+    void loadMxH2iTopologyTrafficHistory(root, section, leases, product, selectedLease);
+  }
 }
 
 async function saveMxH2iAnonymousQuickPolicy(productId, targetPolicy) {
@@ -19632,6 +19960,7 @@ function initMxH2iTopology(root, leases, options = {}) {
       onActivate: typeof options.onActivate === 'function' ? options.onActivate : null,
       selectedNodeId: null,
       hoverNodeId: null,
+      trafficEvidenceBadge: null,
       controls: {
         target: new THREE.Vector3(0, 0, 0),
         radius: 13.8,
@@ -19675,6 +20004,10 @@ function initMxH2iTopology(root, leases, options = {}) {
     installMxH2iTopologyInteractions(instance);
     setMxH2iTopologyLabels(instance, state.mxH2iTopologyView.labelsVisible);
     setMxH2iTopologyNodeSelection(instance, state.mxH2iTopologyView.selectedNodeId);
+    updateMxH2iTopologyTrafficEvidence(
+      instance,
+      mxH2iTopologyLeaseForNode(leases, state.mxH2iTopologyView.selectedNodeId)
+    );
     renderMxH2iTopologyFrame(instance, 0);
     if (status) {
       status.textContent = instance.reducedMotion ? 'STATIC · REDUCED MOTION' : 'STATIC LEASE GRAPH';
@@ -19741,6 +20074,105 @@ function fitMxH2iTopologyCamera(instance = state.mxH2iTopology) {
 function setMxH2iTopologyLabels(instance = state.mxH2iTopology, visible = true) {
   if (!instance || instance.disposed) return;
   for (const label of instance.labels || []) label.visible = visible;
+  renderMxH2iTopologyFrame(instance, 0);
+}
+
+function mxH2iTopologyTrafficEvidenceDescriptor(lease) {
+  const trafficState = mxH2iTrafficHistoryForLease(lease);
+  if (!trafficState) return { tone: 'muted', primary: 'Stored traffic snapshot not loaded', secondary: 'Select node to load once', detail: 'Domestic history · no polling', shared: false };
+  if (trafficState.loading) return { tone: 'muted', primary: 'Loading stored traffic snapshots…', secondary: 'One history request', detail: 'Domestic history · no polling', shared: false };
+  if (trafficState.error) return { tone: 'muted', primary: 'Traffic snapshot unavailable', secondary: 'History request failed', detail: 'No rate inferred', shared: false };
+  const history = trafficState.history;
+  const samples = asArray(history?.samples);
+  const latest = mxH2iTrafficHistoryLatestSample(history);
+  if (!history || !latest) return { tone: 'muted', primary: 'No stored traffic snapshot', secondary: 'Rate pending', detail: 'Domestic scheduled sampler', shared: false };
+  const shared = latest.attribution === 'shared-peer';
+  const rateAvailable = history.stale === false
+    && latest.status === 'observed'
+    && latest.peerConfigured === 'yes'
+    && Number.isFinite(latest.relayRxBytesPerSecond)
+    && Number.isFinite(latest.relayTxBytesPerSecond);
+  let primary = 'Interval rate unavailable';
+  if (history.stale) primary = 'Snapshot stale · rate hidden';
+  else if (latest.status === 'failed') primary = 'Snapshot failed · rate unavailable';
+  else if (samples.length === 1 && !rateAvailable) primary = '1 sample / rate pending';
+  else if (rateAvailable) primary = `↓ TX ${mxH2iByteRate(latest.relayTxBytesPerSecond)} · ↑ RX ${mxH2iByteRate(latest.relayRxBytesPerSecond)} · ${mxH2iTrafficWindowLabel(latest.rateWindowSeconds)}`;
+  return {
+    tone: rateAvailable ? 'fresh' : 'muted',
+    primary,
+    secondary: `WG handshake ${mxH2iDomesticHandshake(latest.latestHandshakeEpoch)} · sampled ${formatTime(latest.observedAt)}`,
+    detail: shared ? `shared WG peer aggregate · ${latest.sharedLeaseCount} leases` : 'exact lease peer · Domestic interval estimate',
+    shared
+  };
+}
+
+function createMxH2iTopologyTrafficEvidenceBadge(descriptor, theme = topologyTheme()) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 768;
+  canvas.height = 168;
+  const context = canvas.getContext('2d');
+  const fresh = descriptor.tone === 'fresh';
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = fresh ? 'rgba(15, 45, 42, 0.96)' : 'rgba(31, 34, 43, 0.96)';
+  context.fillRect(3, 3, canvas.width - 6, canvas.height - 6);
+  context.strokeStyle = fresh ? theme.primary : theme.textSoft;
+  context.lineWidth = 4;
+  context.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
+  context.textAlign = 'left';
+  context.textBaseline = 'middle';
+  context.fillStyle = fresh ? theme.primary : theme.text;
+  context.font = '700 29px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+  context.fillText(String(descriptor.primary).slice(0, 64), 24, 42, 720);
+  context.fillStyle = theme.text;
+  context.font = '600 21px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+  context.fillText(String(descriptor.secondary).slice(0, 88), 24, 92, 720);
+  context.fillStyle = theme.textSoft;
+  context.font = '500 19px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+  context.fillText(String(descriptor.detail).slice(0, 88), 24, 132, 720);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false
+  }));
+  sprite.scale.set(4.8, 1.05, 1);
+  sprite.renderOrder = 20;
+  return sprite;
+}
+
+function disposeMxH2iTopologyTrafficEvidence(instance) {
+  const badge = instance?.trafficEvidenceBadge;
+  if (!badge) return;
+  badge.parent?.remove?.(badge);
+  badge.material?.map?.dispose?.();
+  badge.material?.dispose?.();
+  instance.trafficEvidenceBadge = null;
+}
+
+function updateMxH2iTopologyTrafficEvidence(instance = state.mxH2iTopology, lease = null) {
+  if (!instance || instance.disposed) return;
+  disposeMxH2iTopologyTrafficEvidence(instance);
+  if (!lease || mxH2iTopologyClientNodeId(lease) !== instance.selectedNodeId) {
+    renderMxH2iTopologyFrame(instance, 0);
+    return;
+  }
+  const descriptor = mxH2iTopologyTrafficEvidenceDescriptor(lease);
+  const clientNodeId = mxH2iTopologyClientNodeId(lease);
+  const groupNodeId = mxH2iTopologyGroupNodeId(mxH2iTopologyProductId(lease), mxH2iTopologyLeaseGroup(lease));
+  const link = instance.links.find((item) => item.spec.from === clientNodeId && item.spec.to === groupNodeId);
+  if (!link) {
+    renderMxH2iTopologyFrame(instance, 0);
+    return;
+  }
+  const badge = createMxH2iTopologyTrafficEvidenceBadge(descriptor);
+  const position = link.curve.getPoint(0.52);
+  badge.position.copy(position);
+  badge.position.y += 0.48;
+  badge.position.z += 0.64;
+  instance.root.add(badge);
+  instance.trafficEvidenceBadge = badge;
   renderMxH2iTopologyFrame(instance, 0);
 }
 

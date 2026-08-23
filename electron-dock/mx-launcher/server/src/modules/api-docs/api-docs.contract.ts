@@ -488,6 +488,81 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         }
       })
     },
+    '/internal/v1/launcher-network/leases/{leaseId}/traffic-history': {
+      get: operation({
+        tag: 'Launcher Network',
+        summary: '读取 lease 的低频 Domestic WireGuard 流量快照历史',
+        description: '要求 x-mx-ops-token。默认每 5 分钟按 Domestic site 执行一次批量快照，而不是逐节点轮询；默认每个 lease 有界保留 288 点（约 24 小时）。'
+          + 'samples 按 observedAt 升序返回；limit 默认 12，范围 1..288。relayRxBytesPerSecond 是 relay 从客户端接收的平均字节率（客户端上行），relayTxBytesPerSecond 是 relay 发往客户端的平均字节率（客户端下载）；rateWindowSeconds 是两次实际成功采样间隔，不能用计划 intervalSeconds 冒充。'
+          + 'attribution=shared-peer 表示多个 active lease 共用同一 WireGuard peer，速率只是该 peer 聚合值，严禁作为单 lease 独占值或产品总量相加。stale 在读取时根据最新样本年龄和该 site 后续失败/容量阻断动态计算。'
+          + '这是 Domestic 单平面 WireGuard counter 历史，不是 online、端到端连通性、Internal direct 状态或应用层吞吐。响应不返回 series digest、publicKey、PSK、endpoint、raw stdout/stderr、内部 claim 或存储字段；released lease 的历史仍可由 ops 查询，直到安全留存清理。',
+        operationId: 'getLauncherNetworkLeaseTrafficHistory',
+        auth: 'ops-token',
+        pathParams: ['leaseId'],
+        parameters: [{
+          name: 'limit',
+          in: 'query',
+          required: false,
+          schema: { type: 'integer', minimum: 1, maximum: 288, default: 12 }
+        }],
+        response: {
+          trafficHistory: {
+            leaseId: 'lnlease_example',
+            productId: 'mx-h2i',
+            siteId: 'domestic-main',
+            source: 'domestic-relay-snapshot',
+            plane: 'domestic',
+            intervalSeconds: 300,
+            retentionSamples: 288,
+            stale: false,
+            samples: [{
+              snapshotId: 'lnruntime_example',
+              observedAt: '2026-08-23T00:05:00.000Z',
+              status: 'observed',
+              peerConfigured: 'yes',
+              latestHandshakeEpoch: 1787443200,
+              rxBytes: 123456,
+              txBytes: 654321,
+              relayRxBytesPerSecond: 256.5,
+              relayTxBytesPerSecond: 512.25,
+              rateWindowSeconds: 301.2,
+              attribution: 'exact',
+              sharedLeaseCount: 1
+            }]
+          }
+        }
+      })
+    },
+    '/internal/v1/launcher-network/runtime-snapshots/domestic': {
+      post: operation({
+        tag: 'Launcher Network',
+        summary: '按 site 手动触发一次受限频保护的 Domestic 批量流量快照',
+        description: '要求 x-mx-ops-token 和 siteId。手动触发与自动采集共用 site 级分布式 claim、90 秒 fencing lease 和最短采集间隔；未到间隔返回 throttled，已有采集返回 in-flight，不能 force 绕过。'
+          + '远端只执行一次 wg show mx-domestic dump，并在 Domestic 主机上先剥离 interface private key、peer PSK 和 endpoint，只输出映射所需字段；任何 malformed/重复/超限 peer 行都会使整批失败关闭。'
+          + '每 site 超过 512 个 active lease 时 capacity-blocked 且不写 partial history。接口不执行 wg set、tc、iptables/nftables，不改变登录、enroll、lease 或 WireGuard 配置。',
+        operationId: 'collectLauncherNetworkDomesticRuntimeSnapshot',
+        auth: 'ops-token',
+        request: {
+          siteId: 'domestic-main'
+        },
+        required: ['siteId'],
+        response: {
+          collection: {
+            siteId: 'domestic-main',
+            source: 'domestic-relay-snapshot',
+            plane: 'domestic',
+            outcome: 'observed',
+            requestedAt: '2026-08-23T00:05:00.000Z',
+            sampledAt: '2026-08-23T00:05:01.000Z',
+            nextAllowedAt: '2026-08-23T00:10:00.000Z',
+            activeLeaseCount: 60,
+            peerCount: 62,
+            unmatchedPeerCount: 2,
+            sharedPeerLeaseCount: 0
+          }
+        }
+      })
+    },
     '/internal/v1/sdk/gateway/manifest': {
       get: operation({
         tag: 'Discovery',

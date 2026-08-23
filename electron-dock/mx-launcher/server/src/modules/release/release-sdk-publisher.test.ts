@@ -1001,6 +1001,8 @@ function testRuntimeConfig(): RuntimeConfig {
     launcherNetworkLegacyUnauthenticatedUserLeasesEnabled: false,
     launcherNetworkHandoverTtlMs: 300_000,
     launcherNetworkHandoverReconcileMs: 30_000,
+    launcherNetworkRuntimeSnapshotIntervalMs: 300_000,
+    launcherNetworkRuntimeSnapshotRetentionSamples: 288,
     feishuAppId: null,
     feishuAppSecret: null,
     feishuAllowedTenantKeys: [],

@@ -148,6 +148,39 @@ test('manual lease runtime observation is ops-only, Domestic-only, and strictly 
   assert.doesNotMatch(response, /"(?:stdout|stderr|result|summary|publicKey|endpoint)"/);
 });
 
+test('low-frequency traffic history is ops-only, peer-attributed, bounded, and redacted', () => {
+  const history = paths['/internal/v1/launcher-network/leases/{leaseId}/traffic-history']?.get;
+  assert.match(history?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
+  assert.match(history?.description ?? '', /默认每 5 分钟/);
+  assert.match(history?.description ?? '', /有界保留 288 点/);
+  assert.match(history?.description ?? '', /rateWindowSeconds 是两次实际成功采样间隔/);
+  assert.match(history?.description ?? '', /shared-peer/);
+  assert.match(history?.description ?? '', /不是 online、端到端连通性、Internal direct 状态或应用层吞吐/);
+  const historyResponse = JSON.stringify(history?.responses['200']);
+  assert.match(historyResponse, /"source":"domestic-relay-snapshot"/);
+  assert.match(historyResponse, /"plane":"domestic"/);
+  assert.match(historyResponse, /"rateWindowSeconds":301\.2/);
+  assert.match(historyResponse, /"attribution":"exact"/);
+  assert.match(historyResponse, /"sharedLeaseCount":1/);
+  assert.doesNotMatch(
+    historyResponse,
+    /"(?:seriesId|historyId|environment|createdAt|publicKey|presharedKey|endpoint|stdout|stderr|activeClaimId)"/
+  );
+
+  const collect = paths['/internal/v1/launcher-network/runtime-snapshots/domestic']?.post;
+  assert.match(collect?.['x-mx-auth'] ?? '', /x-mx-ops-token/);
+  assert.match(collect?.description ?? '', /分布式 claim/);
+  assert.match(collect?.description ?? '', /不能 force 绕过/);
+  assert.match(collect?.description ?? '', /只执行一次 wg show mx-domestic dump/);
+  assert.match(collect?.description ?? '', /超过 512 个 active lease/);
+  assert.match(collect?.description ?? '', /不执行 wg set、tc、iptables\/nftables/);
+  const collectResponse = JSON.stringify(collect?.responses['200']);
+  assert.doesNotMatch(
+    collectResponse,
+    /"(?:seriesId|publicKey|presharedKey|endpoint|stdout|stderr|activeClaimId|collectionDurationMs|latestFailureCode)"/
+  );
+});
+
 test('the system subscription contract exposes both operator URLs without provisioning a local 7890 instance', () => {
   const catalog = JSON.stringify(paths['/internal/v1/user-center/system-subscriptions']?.get?.responses['200']);
   assert.match(catalog, /"mixedPort":7788/);

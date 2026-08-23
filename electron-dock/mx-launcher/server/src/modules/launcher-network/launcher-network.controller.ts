@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { isIP } from 'node:net';
 import { promisify } from 'node:util';
 import {
   BadRequestException,
@@ -13,6 +15,7 @@ import {
   NotFoundException,
   Param,
   Post,
+  Query,
   UnauthorizedException
 } from '@nestjs/common';
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
@@ -45,6 +48,10 @@ import type {
   AuditEvent,
   LauncherNetworkHandover,
   LauncherNetworkLease,
+  LauncherNetworkRuntimeCollectionCompleteInput,
+  LauncherNetworkRuntimeCollectionState,
+  LauncherNetworkTrafficLeaseSampleInput,
+  LauncherNetworkTrafficSample,
   OpsLauncherNetworkLease,
   LauncherProductUserAccess,
   LauncherProductUserAccessResult,
@@ -58,11 +65,20 @@ import type {
 const execFileAsync = promisify(execFile);
 const LAUNCHER_PEER_LEASE_CAPABILITY_HEADER = 'x-mx-peer-lease-capability';
 const NEW_LAUNCHER_LEASE_CAPABILITY_HEADER = 'x-mx-new-lease-capability';
+const DEFAULT_RUNTIME_SNAPSHOT_INTERVAL_MS = 5 * 60 * 1000;
+const RUNTIME_SNAPSHOT_CLAIM_TTL_MS = 90 * 1000;
+const MAX_RUNTIME_SNAPSHOT_LEASES = 512;
+const MAX_RUNTIME_SNAPSHOT_PEERS = 4_096;
+const MAX_RUNTIME_SNAPSHOT_OUTPUT_BYTES = 1024 * 1024;
 
 @Controller('internal/v1/launcher-network')
 export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy {
   private handoverReconcileTimer: ReturnType<typeof setInterval> | null = null;
   private handoverReconcileInFlight: Promise<void> | null = null;
+  private runtimeSnapshotTimer: ReturnType<typeof setInterval> | null = null;
+  private runtimeSnapshotStartupTimer: ReturnType<typeof setTimeout> | null = null;
+  private runtimeSnapshotSweepInFlight: Promise<void> | null = null;
+  private readonly runtimeSnapshotInFlightBySite = new Map<string, Promise<DomesticRuntimeSnapshotResult>>();
 
   constructor(
     @Inject(PLATFORM_STORE) private readonly store: PlatformStore,
@@ -76,11 +92,29 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     }, intervalMs);
     this.handoverReconcileTimer.unref?.();
     void this.reconcileExpiredHandovers();
+    const runtimeIntervalMs = effectiveRuntimeSnapshotIntervalMs(
+      this.config.launcherNetworkRuntimeSnapshotIntervalMs
+    );
+    if (this.config.siteRole === 'internal' && runtimeIntervalMs > 0) {
+      this.runtimeSnapshotTimer = setInterval(() => {
+        void this.collectDueDomesticRuntimeSnapshots().catch(() => {});
+      }, runtimeIntervalMs);
+      this.runtimeSnapshotTimer.unref?.();
+      const startupJitterMs = 5_000 + Math.floor(Math.random() * 10_000);
+      this.runtimeSnapshotStartupTimer = setTimeout(() => {
+        void this.collectDueDomesticRuntimeSnapshots().catch(() => {});
+      }, startupJitterMs);
+      this.runtimeSnapshotStartupTimer.unref?.();
+    }
   }
 
   onModuleDestroy(): void {
     if (this.handoverReconcileTimer) clearInterval(this.handoverReconcileTimer);
     this.handoverReconcileTimer = null;
+    if (this.runtimeSnapshotTimer) clearInterval(this.runtimeSnapshotTimer);
+    if (this.runtimeSnapshotStartupTimer) clearTimeout(this.runtimeSnapshotStartupTimer);
+    this.runtimeSnapshotTimer = null;
+    this.runtimeSnapshotStartupTimer = null;
   }
 
   @Post('snapshots')
@@ -420,6 +454,69 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     return {
       runtimeObservation: launcherNetworkDomesticRuntimeObservation(lease, diagnostics)
     };
+  }
+
+  @Get('leases/:leaseId/traffic-history')
+  async getLeaseTrafficHistory(
+    @Param('leaseId') leaseId: string,
+    @Query('limit') rawLimit: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
+    const lease = await this.store.getLauncherNetworkLease(leaseId);
+    if (!lease) throw new NotFoundException('Launcher network lease not found');
+    const limit = runtimeTrafficHistoryLimit(rawLimit);
+    const intervalMs = effectiveRuntimeSnapshotIntervalMs(
+      this.config.launcherNetworkRuntimeSnapshotIntervalMs
+    ) || DEFAULT_RUNTIME_SNAPSHOT_INTERVAL_MS;
+    const retentionSamples = effectiveRuntimeSnapshotRetentionSamples(
+      this.config.launcherNetworkRuntimeSnapshotRetentionSamples
+    );
+    const siteId = lease.domesticSiteId || lease.siteId;
+    const [history, collection] = await Promise.all([
+      this.store.getLauncherNetworkTrafficHistory(lease.leaseId),
+      this.store.getLauncherNetworkRuntimeCollection(siteId)
+    ]);
+    const samples = (history?.samples ?? []).slice(-limit).map(publicRuntimeTrafficSample);
+    const latest = samples.at(-1) ?? null;
+    const latestAgeMs = latest ? Date.now() - Date.parse(latest.observedAt) : Number.POSITIVE_INFINITY;
+    const newerFailedCollection = Boolean(
+      collection?.lastCompletedAt
+      && (!latest || Date.parse(collection.lastCompletedAt) > Date.parse(latest.observedAt))
+      && collection.latestResult !== 'observed'
+    );
+    return {
+      trafficHistory: {
+        leaseId: lease.leaseId,
+        productId: lease.productId,
+        siteId,
+        source: 'domestic-relay-snapshot' as const,
+        plane: 'domestic' as const,
+        intervalSeconds: Math.floor(intervalMs / 1000),
+        retentionSamples,
+        stale: latest?.status !== 'observed'
+          || !Number.isFinite(latestAgeMs)
+          || latestAgeMs < -(5 * 60 * 1000)
+          || latestAgeMs > intervalMs * 2
+          || newerFailedCollection,
+        samples
+      }
+    };
+  }
+
+  @Post('runtime-snapshots/domestic')
+  async collectDomesticRuntimeSnapshot(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
+    const body = asRecord(rawBody);
+    const siteId = nullableString(body.siteId);
+    if (!siteId || siteId.length > 120) {
+      throw new BadRequestException('Domestic runtime snapshot requires siteId');
+    }
+    const result = await this.collectDomesticRuntimeSnapshotForSite(siteId);
+    return { collection: publicDomesticRuntimeSnapshotResult(result) };
   }
 
   @Post('leases/:leaseId/release')
@@ -1035,6 +1132,169 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
     return this.handoverReconcileInFlight;
   }
 
+  private async collectDueDomesticRuntimeSnapshots(): Promise<void> {
+    if (this.runtimeSnapshotSweepInFlight) return this.runtimeSnapshotSweepInFlight;
+    this.runtimeSnapshotSweepInFlight = (async () => {
+      const leases = (await this.store.listLauncherNetworkLeases())
+        .filter((lease) => launcherNetworkLeaseIsActive(lease));
+      const siteIds = [...new Set(leases.map((lease) => lease.domesticSiteId || lease.siteId))]
+        .filter(Boolean)
+        .sort();
+      for (const siteId of siteIds) {
+        try {
+          await this.collectDomesticRuntimeSnapshotForSite(siteId);
+        } catch {
+          // A telemetry failure on one Domestic site must not block other sites.
+        }
+      }
+      await this.pruneExpiredRuntimeTrafficHistories();
+    })().finally(() => {
+      this.runtimeSnapshotSweepInFlight = null;
+    });
+    return this.runtimeSnapshotSweepInFlight;
+  }
+
+  private collectDomesticRuntimeSnapshotForSite(
+    siteId: string
+  ): Promise<DomesticRuntimeSnapshotResult> {
+    const existing = this.runtimeSnapshotInFlightBySite.get(siteId);
+    if (existing) return existing;
+    const collection = this.runDomesticRuntimeSnapshotForSite(siteId)
+      .finally(() => {
+        this.runtimeSnapshotInFlightBySite.delete(siteId);
+      });
+    this.runtimeSnapshotInFlightBySite.set(siteId, collection);
+    return collection;
+  }
+
+  private async runDomesticRuntimeSnapshotForSite(
+    siteId: string
+  ): Promise<DomesticRuntimeSnapshotResult> {
+    const requestedAt = new Date().toISOString();
+    const startedAtMs = Date.now();
+    const intervalMs = effectiveRuntimeSnapshotIntervalMs(
+      this.config.launcherNetworkRuntimeSnapshotIntervalMs
+    ) || DEFAULT_RUNTIME_SNAPSHOT_INTERVAL_MS;
+    const retentionSamples = effectiveRuntimeSnapshotRetentionSamples(
+      this.config.launcherNetworkRuntimeSnapshotRetentionSamples
+    );
+    const claimId = `lnruntime_${randomUUID()}`;
+    const claim = await this.store.claimLauncherNetworkRuntimeCollection({
+      siteId,
+      claimId,
+      requestedAt,
+      minIntervalMs: intervalMs,
+      claimTtlMs: RUNTIME_SNAPSHOT_CLAIM_TTL_MS
+    });
+    if (!claim.claimed) {
+      return runtimeSnapshotResultFromState(claim.outcome, claim.state, requestedAt);
+    }
+
+    const leases = (await this.store.listLauncherNetworkLeases())
+      .filter((lease) => (
+        launcherNetworkLeaseIsActive(lease)
+        && (lease.domesticSiteId || lease.siteId) === siteId
+      ));
+    const snapshotId = claimId;
+    if (launcherRuntimeSnapshotCapacityBlocked(leases.length)) {
+      const sampledAt = new Date().toISOString();
+      const complete = await this.store.completeLauncherNetworkRuntimeCollection({
+        siteId,
+        claimId,
+        snapshotId,
+        sampledAt,
+        result: 'unavailable',
+        intervalMs,
+        retentionSamples,
+        activeLeaseCount: leases.length,
+        peerCount: 0,
+        unmatchedPeerCount: 0,
+        sharedPeerLeaseCount: 0,
+        collectedLeaseCount: 0,
+        collectionDurationMs: Math.max(0, Date.now() - startedAtMs),
+        failureCode: 'capacity-blocked',
+        samples: []
+      });
+      return runtimeSnapshotResultFromState('unavailable', complete.state, requestedAt);
+    }
+
+    const keyLeaseCounts = launcherRuntimeKeyLeaseCounts(leases);
+    const sharedPeerLeaseCount = leases.filter((lease) => (
+      lease.publicKey && (keyLeaseCounts.get(lease.publicKey) ?? 0) > 1
+    )).length;
+    const plan = await latestDomesticPlan(this.store, siteId);
+    const profile = await domesticSshProfile(this.store, plan, siteId);
+    let sampledAt = new Date().toISOString();
+    let result: LauncherNetworkRuntimeCollectionCompleteInput['result'] = 'unavailable';
+    let peerCount = 0;
+    let unmatchedPeerCount = 0;
+    let samples = unavailableTrafficSamples(leases, keyLeaseCounts, 'unavailable');
+    let failureCode: LauncherNetworkRuntimeCollectionCompleteInput['failureCode'] = 'profile-unavailable';
+    if (domesticRuntimeSnapshotReady(plan, profile)) {
+      try {
+        const ssh = sshArgv(profile as SiteSlotSshProfile, domesticRuntimeSnapshotScript());
+        const execution = await execFileAsync('ssh', ssh, {
+          timeout: Math.min(
+            (effectiveSshConnectTimeoutSeconds(profile?.connectTimeoutSeconds) + 45) * 1000,
+            RUNTIME_SNAPSHOT_CLAIM_TTL_MS - 15_000
+          ),
+          maxBuffer: MAX_RUNTIME_SNAPSHOT_OUTPUT_BYTES
+        });
+        sampledAt = new Date().toISOString();
+        const dump = parseLauncherNetworkDomesticDump(execution.stdout, siteId, sampledAt);
+        peerCount = dump.peers.size;
+        const activeKeys = new Set(leases.flatMap((lease) => lease.publicKey ? [lease.publicKey] : []));
+        unmatchedPeerCount = [...dump.peers.keys()].filter((key) => !activeKeys.has(key)).length;
+        samples = launcherNetworkTrafficSamplesFromDump(leases, keyLeaseCounts, dump, sampledAt);
+        result = 'observed';
+        failureCode = null;
+      } catch {
+        sampledAt = new Date().toISOString();
+        result = 'failed';
+        samples = unavailableTrafficSamples(leases, keyLeaseCounts, 'failed');
+        failureCode = 'ssh-or-parse-failed';
+      }
+    }
+    const complete = await this.store.completeLauncherNetworkRuntimeCollection({
+      siteId,
+      claimId,
+      snapshotId,
+      sampledAt,
+      result,
+      intervalMs,
+      retentionSamples,
+      activeLeaseCount: leases.length,
+      peerCount,
+      unmatchedPeerCount,
+      sharedPeerLeaseCount,
+      collectedLeaseCount: samples.filter((sample) => sample.status === 'observed').length,
+      collectionDurationMs: Math.max(0, Date.now() - startedAtMs),
+      failureCode,
+      samples
+    });
+    return runtimeSnapshotResultFromState(result, complete.state, requestedAt);
+  }
+
+  private async pruneExpiredRuntimeTrafficHistories(): Promise<void> {
+    const intervalMs = effectiveRuntimeSnapshotIntervalMs(
+      this.config.launcherNetworkRuntimeSnapshotIntervalMs
+    ) || DEFAULT_RUNTIME_SNAPSHOT_INTERVAL_MS;
+    const retentionSamples = effectiveRuntimeSnapshotRetentionSamples(
+      this.config.launcherNetworkRuntimeSnapshotRetentionSamples
+    );
+    const minimumRetentionMs = 24 * 60 * 60 * 1000;
+    const retentionMs = Math.max(
+      minimumRetentionMs,
+      intervalMs * retentionSamples + intervalMs * 2
+    );
+    const cutoff = new Date(Date.now() - retentionMs).toISOString();
+    try {
+      await this.store.pruneLauncherNetworkTrafficHistories(cutoff, 200);
+    } catch {
+      // Telemetry retention must never fail login, enrollment, or WG control paths.
+    }
+  }
+
   private async runExpiredHandoverReconciliation(
     now: Date,
     syncOverride?: (
@@ -1158,6 +1418,297 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       );
     }
   }
+}
+
+interface DomesticRuntimeSnapshotPeer {
+  allowedIps: string[];
+  latestHandshake: string;
+  rxBytes: string;
+  txBytes: string;
+  seriesId: string;
+}
+
+export interface DomesticRuntimeSnapshotDump {
+  peers: Map<string, DomesticRuntimeSnapshotPeer>;
+}
+
+interface DomesticRuntimeSnapshotResult {
+  siteId: string;
+  source: 'domestic-relay-snapshot';
+  plane: 'domestic';
+  outcome: 'observed' | 'unavailable' | 'failed' | 'throttled' | 'in-flight';
+  requestedAt: string;
+  sampledAt: string | null;
+  nextAllowedAt: string | null;
+  activeLeaseCount: number;
+  peerCount: number;
+  unmatchedPeerCount: number;
+  sharedPeerLeaseCount: number;
+}
+
+function effectiveRuntimeSnapshotIntervalMs(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_RUNTIME_SNAPSHOT_INTERVAL_MS;
+  }
+  if (value <= 0) return 0;
+  return Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Math.floor(value)));
+}
+
+export function launcherRuntimeSnapshotCapacityBlocked(activeLeaseCount: number): boolean {
+  return !Number.isSafeInteger(activeLeaseCount)
+    || activeLeaseCount < 0
+    || activeLeaseCount > MAX_RUNTIME_SNAPSHOT_LEASES;
+}
+
+function effectiveRuntimeSnapshotRetentionSamples(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 288;
+  return Math.max(2, Math.min(288, Math.floor(value)));
+}
+
+function runtimeTrafficHistoryLimit(value: string | undefined): number {
+  if (value === undefined || value === '') return 12;
+  if (!/^\d+$/.test(value)) throw new BadRequestException('Traffic history limit must be an integer');
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 288) {
+    throw new BadRequestException('Traffic history limit must be between 1 and 288');
+  }
+  return parsed;
+}
+
+function publicRuntimeTrafficSample(sample: LauncherNetworkTrafficSample) {
+  return {
+    snapshotId: sample.snapshotId,
+    observedAt: sample.observedAt,
+    status: sample.status,
+    peerConfigured: sample.peerConfigured,
+    latestHandshakeEpoch: sample.latestHandshakeEpoch,
+    rxBytes: sample.rxBytes,
+    txBytes: sample.txBytes,
+    relayRxBytesPerSecond: sample.relayRxBytesPerSecond,
+    relayTxBytesPerSecond: sample.relayTxBytesPerSecond,
+    rateWindowSeconds: sample.rateWindowSeconds,
+    attribution: sample.attribution,
+    sharedLeaseCount: sample.sharedLeaseCount
+  };
+}
+
+function runtimeSnapshotResultFromState(
+  outcome: DomesticRuntimeSnapshotResult['outcome'] | 'claimed',
+  state: LauncherNetworkRuntimeCollectionState,
+  requestedAt: string
+): DomesticRuntimeSnapshotResult {
+  return {
+    siteId: state.siteId,
+    source: 'domestic-relay-snapshot',
+    plane: 'domestic',
+    outcome: outcome === 'claimed' ? 'unavailable' : outcome,
+    requestedAt,
+    sampledAt: state.lastCompletedAt,
+    nextAllowedAt: state.nextAllowedAt,
+    activeLeaseCount: state.activeLeaseCount,
+    peerCount: state.peerCount,
+    unmatchedPeerCount: state.unmatchedPeerCount,
+    sharedPeerLeaseCount: state.sharedPeerLeaseCount
+  };
+}
+
+function publicDomesticRuntimeSnapshotResult(result: DomesticRuntimeSnapshotResult) {
+  return { ...result };
+}
+
+function domesticRuntimeSnapshotReady(
+  plan: SiteSlotPlan | null,
+  profile: SiteSlotSshProfile | null
+): boolean {
+  return Boolean(
+    plan
+    && plan.status !== 'blocked'
+    && profile
+    && profile.status === 'active'
+    && profile.host
+    && profile.identityFile
+    && existsSync(profile.identityFile)
+    && profile.knownHostsFile
+    && existsSync(profile.knownHostsFile)
+  );
+}
+
+export function domesticRuntimeSnapshotScript(): string {
+  return [
+    'set -eu',
+    'test -r /proc/sys/kernel/random/boot_id',
+    'test -r /sys/class/net/mx-domestic/ifindex',
+    'if ! command -v wg >/dev/null 2>&1; then exit 41; fi',
+    'boot_id="$(cat /proc/sys/kernel/random/boot_id)"',
+    'ifindex="$(cat /sys/class/net/mx-domestic/ifindex)"',
+    'printf "meta\\t%s\\t%s\\n" "$boot_id" "$ifindex"',
+    'dump="$(wg show mx-domestic dump)"',
+    // dump column 1 on peer rows is the peer public key. Columns 2 and 3
+    // (preshared key and endpoint) are deliberately discarded on Domestic.
+    'printf "%s\\n" "$dump" | awk \'NR > 1 { printf "peer\\t%s\\t%s\\t%s\\t%s\\t%s\\n", $1, $4, $5, $6, $7 }\''
+  ].join('; ');
+}
+
+export function parseLauncherNetworkDomesticDump(
+  output: string,
+  siteId: string,
+  sampledAt: string
+): DomesticRuntimeSnapshotDump {
+  if (Buffer.byteLength(output, 'utf8') > MAX_RUNTIME_SNAPSHOT_OUTPUT_BYTES) {
+    throw new Error('Domestic WireGuard dump exceeds the snapshot output limit');
+  }
+  const lines = output.split(/\r?\n/).filter((line) => line.length > 0);
+  if (lines.length < 1 || lines.length > MAX_RUNTIME_SNAPSHOT_PEERS + 1) {
+    throw new Error('Domestic WireGuard dump line count is invalid');
+  }
+  const meta = lines[0]?.split('\t');
+  if (
+    meta?.length !== 3
+    || meta[0] !== 'meta'
+    || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(meta[1] ?? '')
+    || !/^[1-9]\d{0,9}$/.test(meta[2] ?? '')
+  ) throw new Error('Domestic WireGuard dump metadata is invalid');
+  if (!Number.isFinite(Date.parse(sampledAt))) {
+    throw new Error('Domestic WireGuard dump timestamp is invalid');
+  }
+  const peers = new Map<string, DomesticRuntimeSnapshotPeer>();
+  for (const line of lines.slice(1)) {
+    if (line.length > 2_048) throw new Error('Domestic WireGuard peer row is too large');
+    const fields = line.split('\t');
+    if (fields.length !== 6 || fields[0] !== 'peer') {
+      throw new Error('Domestic WireGuard peer row is malformed');
+    }
+    const [, publicKey, rawAllowedIps, latestHandshake, rxBytes, txBytes] = fields;
+    if (!validWireGuardPublicKey(publicKey ?? '') || peers.has(publicKey as string)) {
+      throw new Error('Domestic WireGuard peer key is invalid or duplicated');
+    }
+    const allowedIps = (rawAllowedIps ?? '').split(',').filter(Boolean);
+    const handshake = wireGuardHandshakeEpoch(latestHandshake, sampledAt);
+    const transfer = wireGuardTransferCounters(`${rxBytes}/${txBytes}`);
+    if (
+      allowedIps.length < 1
+      || allowedIps.length > 64
+      || allowedIps.some((cidr) => !validWireGuardAllowedIp(cidr))
+      || !handshake.valid
+      || transfer === null
+    ) throw new Error('Domestic WireGuard peer metrics are invalid');
+    const seriesId = createHash('sha256')
+      .update(`${siteId}\0domestic\0mx-domestic\0${meta[1]}\0${meta[2]}\0${publicKey}`)
+      .digest('hex')
+      .slice(0, 24);
+    peers.set(publicKey as string, {
+      allowedIps,
+      latestHandshake: latestHandshake as string,
+      rxBytes: rxBytes as string,
+      txBytes: txBytes as string,
+      seriesId
+    });
+  }
+  return { peers };
+}
+
+function launcherRuntimeKeyLeaseCounts(leases: LauncherNetworkLease[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const lease of leases) {
+    if (!lease.publicKey || !validWireGuardPublicKey(lease.publicKey)) continue;
+    counts.set(lease.publicKey, (counts.get(lease.publicKey) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function launcherNetworkTrafficSamplesFromDump(
+  leases: LauncherNetworkLease[],
+  keyLeaseCounts: Map<string, number>,
+  dump: DomesticRuntimeSnapshotDump,
+  sampledAt: string
+): LauncherNetworkTrafficLeaseSampleInput[] {
+  return leases.map((lease) => {
+    const publicKey = lease.publicKey;
+    const sharedLeaseCount = publicKey ? keyLeaseCounts.get(publicKey) ?? 1 : 1;
+    const attribution = sharedLeaseCount > 1 ? 'shared-peer' as const : 'exact' as const;
+    if (!publicKey || !validWireGuardPublicKey(publicKey)) {
+      return unavailableTrafficSample(lease, attribution, sharedLeaseCount, 'unavailable');
+    }
+    const peer = dump.peers.get(publicKey);
+    if (!peer || !peer.allowedIps.includes(`${lease.leaseIp}/32`)) {
+      return {
+        leaseId: lease.leaseId,
+        productId: lease.productId,
+        status: 'observed',
+        peerConfigured: 'no',
+        latestHandshakeEpoch: null,
+        rxBytes: null,
+        txBytes: null,
+        attribution,
+        sharedLeaseCount,
+        seriesId: null
+      };
+    }
+    const handshake = wireGuardHandshakeEpoch(peer.latestHandshake, sampledAt);
+    const transfer = wireGuardTransferCounters(`${peer.rxBytes}/${peer.txBytes}`);
+    if (!handshake.valid || !transfer) {
+      return unavailableTrafficSample(lease, attribution, sharedLeaseCount, 'unavailable', 'yes');
+    }
+    return {
+      leaseId: lease.leaseId,
+      productId: lease.productId,
+      status: 'observed',
+      peerConfigured: 'yes',
+      latestHandshakeEpoch: handshake.value,
+      rxBytes: transfer.rxBytes,
+      txBytes: transfer.txBytes,
+      attribution,
+      sharedLeaseCount,
+      seriesId: peer.seriesId
+    };
+  });
+}
+
+function unavailableTrafficSamples(
+  leases: LauncherNetworkLease[],
+  keyLeaseCounts: Map<string, number>,
+  status: 'unavailable' | 'failed'
+): LauncherNetworkTrafficLeaseSampleInput[] {
+  return leases.map((lease) => {
+    const sharedLeaseCount = lease.publicKey ? keyLeaseCounts.get(lease.publicKey) ?? 1 : 1;
+    return unavailableTrafficSample(
+      lease,
+      sharedLeaseCount > 1 ? 'shared-peer' : 'exact',
+      sharedLeaseCount,
+      status
+    );
+  });
+}
+
+function unavailableTrafficSample(
+  lease: LauncherNetworkLease,
+  attribution: 'exact' | 'shared-peer',
+  sharedLeaseCount: number,
+  status: 'unavailable' | 'failed',
+  peerConfigured: 'yes' | 'no' | 'unknown' = 'unknown'
+): LauncherNetworkTrafficLeaseSampleInput {
+  return {
+    leaseId: lease.leaseId,
+    productId: lease.productId,
+    status,
+    peerConfigured,
+    latestHandshakeEpoch: null,
+    rxBytes: null,
+    txBytes: null,
+    attribution,
+    sharedLeaseCount,
+    seriesId: null
+  };
+}
+
+function validWireGuardAllowedIp(value: string): boolean {
+  const [address, rawPrefix, extra] = value.split('/');
+  if (!address || !rawPrefix || extra !== undefined || !/^\d{1,3}$/.test(rawPrefix)) return false;
+  const prefix = Number(rawPrefix);
+  const family = isIP(address);
+  return family === 4
+    ? prefix >= 0 && prefix <= 32
+    : family === 6 && prefix >= 0 && prefix <= 128;
 }
 
 function launcherNetworkHandoverTerminal(

@@ -16,6 +16,13 @@ import {
   buildLauncherNetworkHandover,
   launcherNetworkHandoverIsTerminal
 } from '../lib/launcher-network-handover.js';
+import {
+  appendLauncherNetworkTrafficHistory,
+  claimLauncherNetworkRuntimeCollection as claimRuntimeCollection,
+  completeLauncherNetworkRuntimeCollection as completeRuntimeCollection,
+  launcherNetworkRuntimeCollectionId,
+  launcherNetworkTrafficHistoryId
+} from '../lib/launcher-network-traffic.js';
 import type {
   AnonymousEnrollment,
   AnonymousEnrollmentRequest,
@@ -73,6 +80,12 @@ import type {
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
   LauncherNetworkLeaseReleaseInput,
+  LauncherNetworkRuntimeCollectionClaimInput,
+  LauncherNetworkRuntimeCollectionClaimResult,
+  LauncherNetworkRuntimeCollectionCompleteInput,
+  LauncherNetworkRuntimeCollectionCompleteResult,
+  LauncherNetworkRuntimeCollectionState,
+  LauncherNetworkTrafficHistory,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LauncherNetworkMihomoSite,
@@ -408,6 +421,8 @@ type RecordKind =
   | 'launcher-product-user-access-backfill'
   | 'launcher-network-lease'
   | 'launcher-network-handover'
+  | 'launcher-network-runtime-collection'
+  | 'launcher-network-traffic-history'
   | 'runtime-feature-policy'
   | 'awx-provider-config'
   | 'secret-provider-config'
@@ -3196,6 +3211,135 @@ export class PostgresStore implements PlatformStore {
 
   async getLauncherNetworkLease(leaseId: string): Promise<LauncherNetworkLease | null> {
     return this.getRecord<LauncherNetworkLease>('launcher-network-lease', leaseId.trim());
+  }
+
+  async claimLauncherNetworkRuntimeCollection(
+    input: LauncherNetworkRuntimeCollectionClaimInput
+  ): Promise<LauncherNetworkRuntimeCollectionClaimResult> {
+    return this.dataSource.transaction(async (manager) => {
+      await this.lockLauncherNetworkRuntimeCollection(manager, input.siteId);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const collectionId = launcherNetworkRuntimeCollectionId(input.siteId);
+      const row = await records.findOne({
+        where: {
+          kind: 'launcher-network-runtime-collection',
+          id: collectionId,
+          environment: this.config.environment
+        }
+      });
+      const result = claimRuntimeCollection(
+        this.config.environment,
+        row?.data as unknown as LauncherNetworkRuntimeCollectionState | null,
+        input
+      );
+      if (result.claimed) {
+        await this.saveRecordTo(
+          records,
+          'launcher-network-runtime-collection',
+          collectionId,
+          result.state,
+          input.siteId
+        );
+      }
+      return result;
+    });
+  }
+
+  async completeLauncherNetworkRuntimeCollection(
+    input: LauncherNetworkRuntimeCollectionCompleteInput
+  ): Promise<LauncherNetworkRuntimeCollectionCompleteResult> {
+    return this.dataSource.transaction(async (manager) => {
+      await this.lockLauncherNetworkRuntimeCollection(manager, input.siteId);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const collectionId = launcherNetworkRuntimeCollectionId(input.siteId);
+      const stateRow = await records.findOne({
+        where: {
+          kind: 'launcher-network-runtime-collection',
+          id: collectionId,
+          environment: this.config.environment
+        }
+      });
+      if (!stateRow) throw new Error('Launcher runtime collection claim not found');
+      const state = completeRuntimeCollection(
+        stateRow.data as unknown as LauncherNetworkRuntimeCollectionState,
+        input
+      );
+      const histories: LauncherNetworkTrafficHistory[] = [];
+      for (const sample of input.samples) {
+        const historyId = launcherNetworkTrafficHistoryId(sample.leaseId);
+        const historyRow = await records.findOne({
+          where: {
+            kind: 'launcher-network-traffic-history',
+            id: historyId,
+            environment: this.config.environment
+          }
+        });
+        const history = appendLauncherNetworkTrafficHistory(
+          this.config.environment,
+          input.siteId,
+          historyRow?.data as unknown as LauncherNetworkTrafficHistory | null,
+          input,
+          sample
+        );
+        await this.saveRecordTo(
+          records,
+          'launcher-network-traffic-history',
+          historyId,
+          history,
+          input.siteId
+        );
+        histories.push(history);
+      }
+      await this.saveRecordTo(
+        records,
+        'launcher-network-runtime-collection',
+        collectionId,
+        state,
+        input.siteId
+      );
+      return { state, histories };
+    });
+  }
+
+  async getLauncherNetworkTrafficHistory(
+    leaseId: string
+  ): Promise<LauncherNetworkTrafficHistory | null> {
+    return this.getRecord<LauncherNetworkTrafficHistory>(
+      'launcher-network-traffic-history',
+      launcherNetworkTrafficHistoryId(leaseId)
+    );
+  }
+
+  async getLauncherNetworkRuntimeCollection(
+    siteId: string
+  ): Promise<LauncherNetworkRuntimeCollectionState | null> {
+    return this.getRecord<LauncherNetworkRuntimeCollectionState>(
+      'launcher-network-runtime-collection',
+      launcherNetworkRuntimeCollectionId(siteId)
+    );
+  }
+
+  async pruneLauncherNetworkTrafficHistories(cutoff: string, limit = 200): Promise<number> {
+    const cutoffMs = Date.parse(cutoff);
+    if (!Number.isFinite(cutoffMs)) throw new Error('Launcher runtime history cutoff is invalid');
+    const boundedLimit = Math.max(1, Math.min(1_000, Math.floor(limit)));
+    const result = await this.dataSource.query(
+      `DELETE FROM mx_platform_records
+       WHERE kind = 'launcher-network-traffic-history'
+         AND environment = $1
+         AND updated_at < $2::timestamptz
+         AND id IN (
+           SELECT id
+           FROM mx_platform_records
+           WHERE kind = 'launcher-network-traffic-history'
+             AND environment = $1
+             AND updated_at < $2::timestamptz
+           ORDER BY updated_at ASC
+           LIMIT $3
+         )`,
+      [this.config.environment, new Date(cutoffMs).toISOString(), boundedLimit]
+    ) as [unknown[], number];
+    return typeof result?.[1] === 'number' ? result[1] : 0;
   }
 
   async listLauncherNetworkHandovers(): Promise<LauncherNetworkHandover[]> {
@@ -6203,6 +6347,19 @@ export class PostgresStore implements PlatformStore {
     await manager.query(
       'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
       [`mx-launcher:${this.config.environment}:handover`, transitionId]
+    );
+  }
+
+  private async lockLauncherNetworkRuntimeCollection(
+    manager: EntityManager,
+    siteId: string
+  ): Promise<void> {
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [
+        `mx-launcher:${this.config.environment}:launcher-network-runtime`,
+        launcherNetworkRuntimeCollectionId(siteId)
+      ]
     );
   }
 

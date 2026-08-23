@@ -51,6 +51,11 @@ import type {
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
   LauncherNetworkLeaseReleaseInput,
+  LauncherNetworkRuntimeCollectionClaimInput,
+  LauncherNetworkRuntimeCollectionClaimResult,
+  LauncherNetworkRuntimeCollectionCompleteInput,
+  LauncherNetworkRuntimeCollectionCompleteResult,
+  LauncherNetworkRuntimeCollectionState,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LauncherNetworkMihomoSite,
@@ -63,6 +68,7 @@ import type {
   LauncherProductUserAccess,
   LauncherProductUserAccessInput,
   LauncherProductUserAccessResult,
+  LauncherNetworkTrafficHistory,
   LogEntryInput,
   MihomoSubscriptionRender,
   PermissionGrant,
@@ -356,6 +362,15 @@ export interface PlatformStore {
   getLauncherNetworkLease(leaseId: string): MaybePromise<LauncherNetworkLease | null>;
   enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): MaybePromise<LauncherNetworkLease>;
   releaseLauncherNetworkLease(leaseId: string, input?: LauncherNetworkLeaseReleaseInput): MaybePromise<LauncherNetworkLease>;
+  claimLauncherNetworkRuntimeCollection(
+    input: LauncherNetworkRuntimeCollectionClaimInput
+  ): MaybePromise<LauncherNetworkRuntimeCollectionClaimResult>;
+  completeLauncherNetworkRuntimeCollection(
+    input: LauncherNetworkRuntimeCollectionCompleteInput
+  ): MaybePromise<LauncherNetworkRuntimeCollectionCompleteResult>;
+  getLauncherNetworkRuntimeCollection(siteId: string): MaybePromise<LauncherNetworkRuntimeCollectionState | null>;
+  getLauncherNetworkTrafficHistory(leaseId: string): MaybePromise<LauncherNetworkTrafficHistory | null>;
+  pruneLauncherNetworkTrafficHistories(cutoff: string, limit?: number): MaybePromise<number>;
   listLauncherNetworkHandovers(): MaybePromise<LauncherNetworkHandover[]>;
   getLauncherNetworkHandover(transitionId: string): MaybePromise<LauncherNetworkHandover | null>;
   createLauncherNetworkHandover(input: LauncherNetworkHandoverInput): MaybePromise<LauncherNetworkHandover>;
