@@ -49,6 +49,39 @@ const telegramHistoryParameters = [
   },
 ]
 
+const publicOpinionProvinceParameters = [
+  {
+    name: 'province', in: 'path', required: true,
+    description: 'Province as an ISO 3166-2:CN code, short Chinese name or official Chinese name. Examples: CN-JS, 江苏, 江苏省. Chinese names must be URL-encoded.',
+    schema: { type: 'string', minLength: 1, maxLength: 32 },
+  },
+  {
+    name: 'sort', in: 'query', required: false,
+    description: 'hot orders by heat score, effective sort time and canonical id; rows without a heat score are excluded. latest orders by effective sort time, collection time and canonical id. Effective sort time is publishedAt when present, otherwise collectedAt; this fallback is not exposed as publishedAt.',
+    schema: { type: 'string', enum: ['hot', 'latest'], default: 'hot' },
+  },
+  {
+    name: 'from', in: 'query', required: false,
+    description: 'Inclusive RFC3339 published/event-time lower bound. It must not be later than to.',
+    schema: { type: 'string', format: 'date-time' },
+  },
+  {
+    name: 'to', in: 'query', required: false,
+    description: 'Inclusive RFC3339 published/event-time upper bound. It must not be earlier than from.',
+    schema: { type: 'string', format: 'date-time' },
+  },
+  {
+    name: 'pageSize', in: 'query', required: false,
+    description: 'Defaults to 20; maximum 100, and the public_opinion platform policy may impose a lower limit.',
+    schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+  },
+  {
+    name: 'cursor', in: 'query', required: false,
+    description: 'HMAC-signed opaque nextCursor bound to province, sort, time bounds and page size. Return it unchanged; changing any bound requires starting from the first page.',
+    schema: { type: 'string', minLength: 1, maxLength: 8192 },
+  },
+]
+
 const resultTypeProperty = {
   type: 'string',
   enum: ['fresh', 'stable'],
@@ -147,6 +180,24 @@ const canonicalSearchResponse = {
   },
 }
 
+const publicOpinionPageResponse = {
+  description: 'A customer-safe page of canonical public-opinion items for one normalized province.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/PublicOpinionPageEnvelope' },
+    },
+  },
+}
+
+const publicOpinionItemResponse = {
+  description: 'One customer-safe canonical public-opinion item.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/PublicOpinionItemEnvelope' },
+    },
+  },
+}
+
 export const PUBLIC_OPENAPI_DOCUMENT = {
   openapi: '3.1.0',
   info: {
@@ -167,6 +218,10 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       name: 'Telegram',
       description: 'Hub-stored Telegram history, search and entities. Every consumer granted telegram reads the same complete canonical corpus; tenant-specific row subsets are not implemented.',
     },
+    {
+      name: 'Public Opinion',
+      description: 'Hub-stored province public-opinion feeds and customer-safe item details. Requires the public_opinion platform grant.',
+    },
     { name: 'Evidence', description: 'Request outcome and usage evidence for the current consumer.' },
   ],
   security: [{ bearerKey: [] }, { apiKeyHeader: [] }],
@@ -176,7 +231,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Discovery'],
         operationId: 'listPublicCapabilities',
         summary: 'List capabilities granted to the authenticated consumer',
-        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for the three Night-All compatibility operations: it is compiled into the deployed Hub contract rather than discovered from Night-All at request time. A platform must appear in both supportedPlatforms and readyPlatforms before dispatch. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for Night-All compatibility; compatibility calls then fail closed.',
+        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. For public_opinion, ready requires both an active fixed ingest source and both valid Hub serving indexes; it is not another grant or a freshness guarantee, and a paused source may still have indexed rows. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for the three Night-All compatibility operations: it is compiled into the deployed Hub contract rather than discovered from Night-All at request time. A platform must appear in both supportedPlatforms and readyPlatforms before dispatch. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for Night-All compatibility; compatibility calls then fail closed.',
         responses: {
           200: {
             description: 'Granted public capabilities.',
@@ -190,6 +245,13 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         platform: 'telegram',
                         ready: true,
                         capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search'],
+                        source: 'hub',
+                        servingMode: 'stored',
+                      },
+                      {
+                        platform: 'public_opinion',
+                        ready: true,
+                        capabilities: ['province_feed', 'item_detail', 'stored_search'],
                         source: 'hub',
                         servingMode: 'stored',
                       },
@@ -229,7 +291,17 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Search'],
         operationId: 'searchData',
         summary: 'Search one explicitly selected platform',
-        description: 'One request targets one granted platform. For platform=telegram, Hub searches canonical stored messages. Each page uses its own idempotency key; replay the same body with the same key.',
+        description: 'One request targets one granted platform. For platform=telegram, Hub searches canonical stored messages. public_opinion is Hub-local and is deliberately rejected by this Night-All-oriented compatibility route; use the province feed, /data/stored/search or /data/canonical/search. Each page uses its own idempotency key; replay the same body with the same key.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields', 'unsupported_match_mode', 'idempotency_key_required', 'invalid_idempotency_key', 'platform_operation_unsupported'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          409: ['request_in_progress', 'idempotency_conflict', 'request_outcome_unknown'],
+          410: ['search_cursor_expired'],
+          429: ['quota_exceeded'],
+          502: ['night_all_rejected', 'upstream_outcome_unknown'],
+          503: ['stored_search_unavailable', 'search_cursor_unavailable'],
+        },
         parameters: [idempotencyParameter],
         requestBody: {
           required: true,
@@ -343,6 +415,87 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
         },
         responses: { 200: canonicalSearchResponse, ...publicErrors },
+      },
+    },
+    '/data/public-opinion/provinces/{province}/items': {
+      get: {
+        tags: ['Public Opinion'],
+        operationId: 'listProvincePublicOpinionItems',
+        summary: 'List hot or latest public-opinion items for one province',
+        description: 'Requires the public_opinion platform grant and valid Hub serving indexes. The province path is normalized to a stable ISO 3166-2:CN code. This safe GET reads the Hub canonical PostgreSQL projection and is independently metered on every call and retry. hot excludes records without heatScore and sorts by heatScore, effective sort time and id; latest sorts by effective sort time, collectedAt and id. Effective sort time is publishedAt when present, otherwise collectedAt; this fallback is not exposed as publishedAt. from/to filter publishedAt only, so a bounded request excludes records whose publishedAt is null. Both orders use a signed keyset cursor. Only the documented customer-safe item allowlist is returned; raw rows, strategy/run ids, source coordinates, extensions, model reasoning and lineage remain private.',
+        'x-mx-error-codes': {
+          400: ['invalid_province', 'invalid_request', 'invalid_sort', 'page_size_exceeded', 'invalid_cursor', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable', 'serving_indexes_unavailable'],
+        },
+        parameters: publicOpinionProvinceParameters,
+        responses: {
+          200: {
+            ...publicOpinionPageResponse,
+            content: {
+              'application/json': {
+                ...publicOpinionPageResponse.content['application/json'],
+                example: {
+                  data: {
+                    contractVersion: 'mx-insight-hub.public-opinion.v1',
+                    province: { code: 'CN-JS', name: '江苏' },
+                    sort: 'hot',
+                    items: [{
+                      id: '11111111-1111-4111-8111-111111111111',
+                      title: '江苏舆情样例',
+                      summary: '公开摘要',
+                      url: 'https://example.com/items/11111111',
+                      publishedAt: '2026-08-23T03:00:00.000Z',
+                      collectedAt: '2026-08-23T03:01:00.000Z',
+                      province: { code: 'CN-JS', name: '江苏' },
+                      heatScore: 88.5,
+                      origin: { name: '江苏新闻广播', type: 'social', platform: 'douyin' },
+                    }],
+                    pageInfo: { returnedCount: 1, hasMore: false, nextCursor: null },
+                  },
+                  requestId: '00000000-0000-4000-8000-000000000005',
+                },
+              },
+            },
+          },
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          429: errorResponse,
+          503: errorResponse,
+        },
+      },
+    },
+    '/data/public-opinion/items/{id}': {
+      get: {
+        tags: ['Public Opinion'],
+        operationId: 'getPublicOpinionItem',
+        summary: 'Get one customer-safe public-opinion item',
+        description: 'Requires the public_opinion platform grant. id is the Hub canonical UUID returned by the province feed or canonical search. The lookup is fixed to platform public_opinion, dataset public-opinion.province.v1 and object type opinion_item; deleted or out-of-scope records are returned as item_not_found. This safe GET is independently metered on every call and retry.',
+        'x-mx-error-codes': {
+          400: ['invalid_request'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          404: ['item_not_found'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: [{
+          name: 'id', in: 'path', required: true,
+          description: 'Canonical UUID from a public-opinion list or canonical-search result.',
+          schema: { type: 'string', format: 'uuid' },
+        }],
+        responses: {
+          200: publicOpinionItemResponse,
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          404: errorResponse,
+          429: errorResponse,
+          503: errorResponse,
+        },
       },
     },
     '/tools/tokenize': {
@@ -771,7 +924,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         required: ['id', 'datasetId', 'platform', 'objectType', 'source'],
         properties: {
           id: { type: 'string', format: 'uuid' }, datasetId: { type: 'string' }, platform: { type: 'string' },
-          objectType: { type: 'string' }, contentType: { type: ['string', 'null'] }, externalId: { type: 'string' },
+          objectType: { type: 'string' }, contentType: { type: ['string', 'null'] }, externalId: { type: 'string', description: 'Public stable item identity. For public_opinion this repeats the Hub canonical id; the upstream source-row id remains private.' },
           url: { type: ['string', 'null'] }, title: { type: ['string', 'null'] }, text: { type: ['string', 'null'] },
           author: { type: 'object', additionalProperties: false, properties: {
             id: { type: ['string', 'null'] }, name: { type: ['string', 'null'] }, username: { type: ['string', 'null'] },
@@ -881,6 +1034,94 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             },
           },
           requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      PublicOpinionProvince: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['code', 'name'],
+        properties: {
+          code: {
+            type: 'string',
+            pattern: '^CN-[A-Z]{2}$',
+            description: 'Normalized ISO 3166-2:CN province-level code.',
+          },
+          name: { type: 'string', minLength: 1, description: 'Normalized short Chinese display name.' },
+        },
+      },
+      PublicOpinionOrigin: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'type', 'platform'],
+        properties: {
+          name: { type: ['string', 'null'], description: 'Reviewed public-facing source name, when available.' },
+          type: { type: ['string', 'null'], description: 'Reviewed source/content type, when available.' },
+          platform: { type: ['string', 'null'], description: 'Reviewed originating content platform, distinct from the public_opinion authorization platform.' },
+        },
+      },
+      PublicOpinionItem: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'title', 'summary', 'url', 'publishedAt', 'collectedAt', 'province', 'heatScore', 'origin'],
+        properties: {
+          id: { type: 'string', format: 'uuid', description: 'Hub canonical record id.' },
+          title: { type: ['string', 'null'] },
+          summary: { type: ['string', 'null'] },
+          url: { type: ['string', 'null'] },
+          publishedAt: { type: ['string', 'null'], format: 'date-time' },
+          collectedAt: { type: ['string', 'null'], format: 'date-time' },
+          province: {
+            description: 'Normalized province. Null is retained for a legacy/unclassified detail record; province feeds themselves contain only the requested normalized province.',
+            oneOf: [
+              { $ref: '#/components/schemas/PublicOpinionProvince' },
+              { type: 'null' },
+            ],
+          },
+          heatScore: { type: ['number', 'null'], description: 'Typed source heat score. It is used only by the province hot ordering and is not a cross-source relevance score.' },
+          origin: { $ref: '#/components/schemas/PublicOpinionOrigin' },
+        },
+      },
+      PublicOpinionPageInfo: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['returnedCount', 'hasMore', 'nextCursor'],
+        properties: {
+          returnedCount: { type: 'integer', minimum: 0, maximum: 100 },
+          hasMore: { type: 'boolean' },
+          nextCursor: {
+            type: ['string', 'null'],
+            maxLength: 8192,
+            description: 'Signed opaque keyset cursor. Return it unchanged with the same province, sort, bounds and pageSize.',
+          },
+        },
+      },
+      PublicOpinionPageEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['contractVersion', 'province', 'sort', 'items', 'pageInfo'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.public-opinion.v1' },
+              province: { $ref: '#/components/schemas/PublicOpinionProvince' },
+              sort: { type: 'string', enum: ['hot', 'latest'] },
+              items: { type: 'array', maxItems: 100, items: { $ref: '#/components/schemas/PublicOpinionItem' } },
+              pageInfo: { $ref: '#/components/schemas/PublicOpinionPageInfo' },
+            },
+          },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      PublicOpinionItemEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: { $ref: '#/components/schemas/PublicOpinionItem' },
+          requestId: { type: 'string', minLength: 1 },
         },
       },
       TelegramRecord: {
@@ -1146,13 +1387,13 @@ export const PUBLIC_DOCS_HTML = `<!doctype html>
     <div class="brand"><div class="mark">MX</div><div><strong>MX Insight Hub</strong><span>Open API</span></div></div>
     <nav aria-label="文档目录">
       <a href="#start">开始调用</a><a href="#rules">认证与调用规则</a><a href="#search">通用搜索</a>
-      <a href="#night-all">Night-All 兼容层</a><a href="#tools">通用工具</a><a href="#telegram">Telegram</a><a href="#discovery">能力与证据</a><a href="#errors">错误与重试</a>
+      <a href="#public-opinion">省级舆情</a><a href="#night-all">Night-All 兼容层</a><a href="#tools">通用工具</a><a href="#telegram">Telegram</a><a href="#discovery">能力与证据</a><a href="#errors">错误与重试</a>
       <a href="/docs/openapi.json">OpenAPI JSON ↗</a>
     </nav>
   </aside>
   <main>
     <header id="start"><div class="eyebrow">Consumer contract · API v1</div><h1>统一数据访问，<br>由授权边界控制。</h1>
-      <p class="lead">通过一个调用者 API Key 访问已授权平台与通用能力。Telegram 数据由 Hub 的规范化数据层提供，通用搜索和分词工具保持稳定响应结构。</p></header>
+      <p class="lead">通过一个调用者 API Key 访问已授权平台与通用能力。Telegram 与省级舆情数据由 Hub 的规范化数据层提供，通用搜索和分词工具保持稳定响应结构。</p></header>
     <div class="cards"><div class="card"><strong>Base path</strong><code>/api/v1</code></div><div class="card"><strong>Authentication</strong>Bearer API Key 或 <code>x-api-key</code></div><div class="card"><strong>Machine contract</strong><a href="/docs/openapi.json">OpenAPI 3.1 JSON</a></div></div>
 
     <h2 id="rules">认证与调用规则</h2>
@@ -1169,7 +1410,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
       <tr><td>结果新鲜度</td><td>可选 <code>type</code>：<code>fresh</code>（默认）表示始终检索当前数据，重放窗口为 120 秒，足以吸收一次重试而不会把 Key 变成缓存；<code>stable</code> 表示同一个 Key 永久返回首次的结果，用于报表、分页序列和审计等需要快照可复现的场景。<code>type</code> 参与请求指纹，同一个 Key 不能在两种语义之间切换。</td></tr>
       <tr><td>POST 分词</td><td>同样必须携带 <code>Idempotency-Key</code>；相同请求重放不会再次分词或重复计量。</td></tr>
       <tr><td>下一页</td><td>使用响应中的 <code>pageInfo.nextCursor</code>，不要解析或修改；因为 body 已变化，新页面必须使用新的幂等 Key。</td></tr>
-      <tr><td>GET 历史/实体</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>
+      <tr><td>GET 历史/实体/舆情</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>
       <tr><td>页大小</td><td>同时受接口上限与该调用者平台策略约束；超限返回 <code>page_size_exceeded</code>。</td></tr>
     </tbody></table>
 
@@ -1214,6 +1455,30 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: canonical-$(uuidgen)" \
   -d '{"query":"AI Agent","searchProfile":"canonical.balanced.v1","pageSize":20}' | jq</code></pre>
+
+    <h2 id="public-opinion">全国省级舆情</h2>
+    <div class="notice">需要调用者显式获得 <code>public_opinion</code> 平台授权。能力发现中的该平台项来自 Hub stored 数据面，不属于 Night-All compatibility，也不改变既有 <code>POST /api/v1/data/search</code> 契约。</div>
+    <p>先读取 <code>GET /api/v1/data/capabilities</code>。固定数据源处于 active，且两个 Hub 省级舆情服务索引都有效时，能力项的 <code>ready</code> 才为 <code>true</code>：</p>
+    <pre><code>{
+  "platform": "public_opinion",
+  "ready": true,
+  "source": "hub",
+  "servingMode": "stored",
+  "capabilities": ["province_feed", "item_detail", "stored_search"]
+}</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/public-opinion/provinces/{province}/items</code></div><p>按省份返回热门或最新条目。<code>province</code> 接受 ISO 3166-2:CN 代码、中文简称或正式名称，例如 <code>CN-JS</code>、<code>江苏</code>、<code>江苏省</code>；中文路径值需要 URL 编码。</p></div>
+    <table><thead><tr><th>参数</th><th>规则</th></tr></thead><tbody>
+      <tr><td><code>sort</code></td><td><code>hot</code>（默认）按 heatScore、内部有效排序时间、ID 降序，且排除无热度分数的记录；<code>latest</code> 按有效排序时间、采集时间、ID 降序。有效排序时间优先 publishedAt，缺失时回退 collectedAt，但不会把回退值冒充 publishedAt 返回。</td></tr>
+      <tr><td><code>from / to</code></td><td>可选 RFC3339 publishedAt 闭区间；<code>from</code> 不得晚于 <code>to</code>，带边界的请求会排除 publishedAt 为空的记录。</td></tr>
+      <tr><td><code>pageSize</code></td><td>默认 20，接口上限 100，并受调用者 <code>public_opinion</code> 平台策略的更低上限约束。</td></tr>
+      <tr><td><code>cursor</code></td><td>返回上一页的 <code>nextCursor</code> 原值。游标与省份、排序、时间范围及页大小绑定；任一条件改变都必须从第一页开始。</td></tr>
+    </tbody></table>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/public-opinion/provinces/CN-JS/items?sort=hot&amp;pageSize=20" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/public-opinion/items/{id}</code></div><p>用列表或 canonical search 返回的 Hub canonical UUID 读取详情。查询固定限定在 <code>public_opinion</code>、<code>public-opinion.province.v1</code>、<code>opinion_item</code>；不存在、已删除或不在该语料范围内的记录统一返回 <code>404 item_not_found</code>。</p></div>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/public-opinion/items/11111111-1111-4111-8111-111111111111" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
+    <p>列表与详情只返回 <code>id</code>、标题、摘要、公开链接、发布时间、采集时间、规范省份、heatScore，以及经映射的公开来源名称/类型/平台。策略与运行 ID、源表坐标、原始行、extensions、模型理由和内部 lineage 不会进入公开响应。原始 heatScore 仅用于同一省级语料的热门排序，不表示跨来源的全局相关度。</p>
 
     <h2 id="night-all">Night-All 兼容层</h2>
     <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面三条 compatibility route；请使用本页 Telegram 专用 Hub API。</div>
@@ -1298,7 +1563,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
     <div class="notice">如果搜索响应包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底。Canonical 接口还会以 <code>search.appliedProfile=postgres.substring.v1</code> 和 <code>search_profile_degraded</code> 明示策略变化；Telegram/Stored 兼容响应只保留投影告警。若 Elasticsearch 仍在线但 HanLP 查询降级，三个接口都会返回 <code>search_profile_degraded</code>。已有 Elasticsearch 游标会签名并复用首屏分词状态，不会中途切换模式或重新分词。</div>
 
     <h2 id="discovery">能力、请求状态与用量</h2>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它不代表 Night-All compatibility。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 与 <code>public_opinion</code> 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它们不代表 Night-All compatibility。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/requests/{requestId}</code></div><p>查询当前调用者拥有的持久请求记录。requestId 来自搜索响应头 <code>x-mx-insight-request-id</code>。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/usage?from=...&amp;to=...</code></div><p>读取当前调用者的请求、提交、释放、未知状态与计费单元汇总。</p></div>
 

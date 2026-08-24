@@ -270,6 +270,28 @@ export const adminApi = {
   resumeTelegramMonitorPipeline: (token) => request(
     token, `${ADMIN_ROOT}/pipelines/telegram-monitor/resume`, { method: 'POST' },
   ),
+  provinceOpinionPipeline: (token) => request(token, `${ADMIN_ROOT}/pipelines/province-opinion`),
+  updateProvinceOpinionPipeline: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/province-opinion`, { method: 'PUT', body },
+  ),
+  updateProvinceOpinionPipelineStatus: (token, status, writerContractAttestation = null) => request(
+    token, `${ADMIN_ROOT}/pipelines/province-opinion/status`, {
+      method: 'POST',
+      body: { status, ...(writerContractAttestation ? { writerContractAttestation } : {}) },
+    },
+  ),
+  runProvinceOpinionPipeline: (token, body = {}) => request(
+    token, `${ADMIN_ROOT}/pipelines/province-opinion/sync`, { method: 'POST', body },
+  ),
+  provinceOpinionPipelineProgress: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/province-opinion/progress`,
+  ),
+  resumeProvinceOpinionPipeline: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/province-opinion/resume`, { method: 'POST' },
+  ),
+  resetProvinceOpinionPipelineCheckpoint: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/province-opinion/checkpoint/reset`, { method: 'POST', body },
+  ),
 
   // Backfill (P3), agent (P5) and retrieval (embedding pipeline).
   backfill: (token) => request(token, `${ADMIN_ROOT}/backfill`),

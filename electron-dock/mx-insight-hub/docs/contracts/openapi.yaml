@@ -1010,7 +1010,12 @@ paths:
         means Hub dispatch eligibility; it does not prove current Night-All
         handler, endpoint, provider, credential, or upstream health.
         legacySearch is null when the consumer has no granted platform eligible
-        for Night-All compatibility; compatibility calls then fail closed.
+        for Night-All compatibility; compatibility calls then fail closed. The
+        Hub-owned public_opinion entry advertises province_feed, item_detail and
+        stored_search. Its ready flag requires both an active fixed ingestion
+        source and both valid Hub serving indexes; it is not an additional grant
+        or a guarantee of freshness, and an inactive source may still have
+        previously indexed records available.
       responses:
         "200":
           description: Capabilities granted to this consumer.
@@ -1070,6 +1075,11 @@ paths:
                     - platform: telegram
                       ready: true
                       capabilities: [monitor_chats, monitor_messages, stored_search, entity_search]
+                      source: hub
+                      servingMode: stored
+                    - platform: public_opinion
+                      ready: false
+                      capabilities: [province_feed, item_detail, stored_search]
                       source: hub
                       servingMode: stored
                     - platform: xiaohongshu
@@ -1148,11 +1158,13 @@ paths:
         canonical local data with the same fixed item source and response meta
         labels documented by /data/telegram/search; PostgreSQL degradation is
         represented only by warnings. Other enabled platforms use the governed
-        private Night-All adapter. Telegram pagination follows the signed,
+        private Night-All adapter, except public_opinion: that Hub-local stored
+        platform is rejected here and must use the province feed,
+        /data/stored/search or /data/canonical/search. Telegram pagination follows the signed,
         query-bound cursor, PIT/keyset and sticky-mode rules documented by
         /data/telegram/search.
       x-mx-error-codes:
-        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields, unsupported_match_mode, idempotency_key_required, invalid_idempotency_key]
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields, unsupported_match_mode, idempotency_key_required, invalid_idempotency_key, platform_operation_unsupported]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
@@ -1409,6 +1421,137 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "410": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/public-opinion/provinces/{province}/items:
+    get:
+      operationId: listProvincePublicOpinionItems
+      summary: List hot or latest public-opinion items for one province.
+      description: >-
+        Requires the API key's consumer to have the explicit public_opinion
+        platform grant. The province path is normalized to a stable ISO
+        3166-2:CN code. This safe GET reads the Hub canonical PostgreSQL
+        projection and is independently metered on every call and retry. Both
+        valid Hub serving indexes are required. hot excludes records without
+        heatScore and sorts by heatScore, effective sort time and id; latest
+        sorts by effective sort time, collectedAt and id. Effective sort time is
+        publishedAt when present, otherwise collectedAt; this fallback is not
+        exposed as publishedAt. from/to still filter publishedAt only, so bounded
+        requests exclude rows whose publishedAt is null. Both orders use a
+        signed keyset cursor. Only the documented customer-safe item allowlist
+        is returned; raw rows, strategy/run ids, source coordinates, extensions,
+        model reasoning and lineage remain private.
+      x-mx-allowed-query-fields: [sort, from, to, pageSize, cursor]
+      x-mx-error-codes:
+        "400": [invalid_province, invalid_request, invalid_sort, page_size_exceeded, invalid_cursor, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable, serving_indexes_unavailable]
+      parameters:
+        - name: province
+          in: path
+          required: true
+          description: >-
+            Province as an ISO 3166-2:CN code, short Chinese name or official
+            Chinese name. Examples: CN-JS, 江苏, 江苏省. Chinese names must be
+            URL-encoded.
+          schema: { type: string, minLength: 1, maxLength: 32 }
+        - name: sort
+          in: query
+          required: false
+          description: >-
+            hot orders by heat score, effective sort time and canonical id;
+            rows without a heat score are excluded. latest orders by effective
+            sort time, collection time and canonical id. Effective sort time is
+            publishedAt when present, otherwise collectedAt.
+          schema: { type: string, enum: [hot, latest], default: hot }
+        - name: from
+          in: query
+          required: false
+          description: Inclusive RFC3339 published/event-time lower bound. It must not be later than to.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: false
+          description: Inclusive RFC3339 published/event-time upper bound. It must not be earlier than from.
+          schema: { type: string, format: date-time }
+        - name: pageSize
+          in: query
+          required: false
+          description: Defaults to 20; maximum 100, and the public_opinion platform policy may impose a lower limit.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            HMAC-signed opaque nextCursor bound to province, sort, time bounds
+            and page size. Return it unchanged; changing any bound requires
+            starting from the first page.
+          schema: { type: string, minLength: 1, maxLength: 8192 }
+      responses:
+        "200":
+          description: A customer-safe page of canonical public-opinion items for one normalized province.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicOpinionPageEnvelope" }
+              example:
+                data:
+                  contractVersion: mx-insight-hub.public-opinion.v1
+                  province: { code: CN-JS, name: 江苏 }
+                  sort: hot
+                  items:
+                    - id: 11111111-1111-4111-8111-111111111111
+                      title: 江苏舆情样例
+                      summary: 公开摘要
+                      url: https://example.com/items/11111111
+                      publishedAt: "2026-08-23T03:00:00.000Z"
+                      collectedAt: "2026-08-23T03:01:00.000Z"
+                      province: { code: CN-JS, name: 江苏 }
+                      heatScore: 88.5
+                      origin: { name: 江苏新闻广播, type: social, platform: douyin }
+                  pageInfo: { returnedCount: 1, hasMore: false, nextCursor: null }
+                requestId: 00000000-0000-4000-8000-000000000005
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/public-opinion/items/{id}:
+    get:
+      operationId: getPublicOpinionItem
+      summary: Get one customer-safe public-opinion item.
+      description: >-
+        Requires the API key's consumer to have the explicit public_opinion
+        platform grant. id is the Hub canonical UUID returned by the province
+        feed or canonical search. The lookup is fixed to platform
+        public_opinion, dataset public-opinion.province.v1 and object type
+        opinion_item; deleted or out-of-scope records are returned as
+        item_not_found. This safe GET is independently metered on every call and
+        retry.
+      x-mx-error-codes:
+        "400": [invalid_request]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "404": [item_not_found]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Canonical UUID from a public-opinion list or canonical-search result.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: One customer-safe canonical public-opinion item.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicOpinionItemEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /data/telegram/chats:
@@ -2876,7 +3019,9 @@ components:
         platform: { type: string }
         objectType: { type: string }
         contentType: { type: [string, "null"] }
-        externalId: { type: string }
+        externalId:
+          type: string
+          description: For public_opinion this repeats the Hub canonical id; the upstream source-row id remains private.
         url: { type: [string, "null"] }
         title: { type: [string, "null"] }
         text: { type: [string, "null"] }
@@ -3174,6 +3319,91 @@ components:
         capturedAt: { type: string, format: date-time }
         reservedAt: { type: string, format: date-time }
         completedAt: { type: [string, "null"], format: date-time }
+    PublicOpinionProvince:
+      type: object
+      additionalProperties: false
+      required: [code, name]
+      properties:
+        code:
+          type: string
+          pattern: "^CN-[A-Z]{2}$"
+          description: Normalized ISO 3166-2:CN province-level code.
+        name:
+          type: string
+          minLength: 1
+          description: Normalized short Chinese display name.
+    PublicOpinionOrigin:
+      type: object
+      additionalProperties: false
+      required: [name, type, platform]
+      properties:
+        name: { type: [string, "null"], description: Reviewed public-facing source name, when available. }
+        type: { type: [string, "null"], description: Reviewed source/content type, when available. }
+        platform: { type: [string, "null"], description: Reviewed originating content platform, distinct from the public_opinion authorization platform. }
+    PublicOpinionItem:
+      type: object
+      additionalProperties: false
+      required: [id, title, summary, url, publishedAt, collectedAt, province, heatScore, origin]
+      description: >-
+        Strict customer-safe projection. Raw rows, target/negative keywords,
+        strategy and run ids, source coordinates, heat metrics, extensions, LLM
+        labels/reasoning and lineage are not part of this schema.
+      properties:
+        id: { type: string, format: uuid, description: Hub canonical record id. }
+        title: { type: [string, "null"] }
+        summary: { type: [string, "null"] }
+        url: { type: [string, "null"] }
+        publishedAt: { type: [string, "null"], format: date-time }
+        collectedAt: { type: [string, "null"], format: date-time }
+        province:
+          description: >-
+            Normalized province. Null is retained for a legacy or unclassified
+            detail record; province feeds contain only the requested normalized
+            province.
+          oneOf:
+            - { $ref: "#/components/schemas/PublicOpinionProvince" }
+            - { type: "null" }
+        heatScore:
+          type: [number, "null"]
+          description: Typed source heat score. Used by province hot ordering; it is not a cross-source relevance score.
+        origin: { $ref: "#/components/schemas/PublicOpinionOrigin" }
+    PublicOpinionPageInfo:
+      type: object
+      additionalProperties: false
+      required: [returnedCount, hasMore, nextCursor]
+      properties:
+        returnedCount: { type: integer, minimum: 0, maximum: 100 }
+        hasMore: { type: boolean }
+        nextCursor:
+          type: [string, "null"]
+          maxLength: 8192
+          description: Signed opaque keyset cursor. Return it unchanged with the same province, sort, bounds and pageSize.
+    PublicOpinionPageEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, province, sort, items, pageInfo]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.public-opinion.v1 }
+            province: { $ref: "#/components/schemas/PublicOpinionProvince" }
+            sort: { type: string, enum: [hot, latest] }
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: "#/components/schemas/PublicOpinionItem" }
+            pageInfo: { $ref: "#/components/schemas/PublicOpinionPageInfo" }
+        requestId: { type: string, minLength: 1 }
+    PublicOpinionItemEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/PublicOpinionItem" }
+        requestId: { type: string, minLength: 1 }
     TelegramRecord:
       type: object
       additionalProperties: false

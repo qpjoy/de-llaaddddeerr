@@ -17,6 +17,13 @@ import {
   storedSearchResponse,
 } from './data/stored-search.mjs'
 import {
+  PUBLIC_OPINION_PLATFORM,
+  normalizePublicOpinionItemId,
+  normalizePublicOpinionQuery,
+  publicOpinionItem,
+  publicOpinionPage,
+} from './data/public-opinion.mjs'
+import {
   canUseNightAllCompatibilityFallback,
   compatibilityUpstreamEvidence,
   nightAllCompatibilityBusinessOutcome,
@@ -401,7 +408,8 @@ export class HubService {
   async capabilities(context) {
     const grants = await this.store.listGrants(context.consumer.id)
     const canonicalGrants = [...new Set(grants.map((grant) => canonicalPlatform(grant)))]
-    const nightAllGrants = canonicalGrants.filter((platform) => platform !== 'telegram')
+    const localStoredPlatforms = new Set(['telegram', PUBLIC_OPINION_PLATFORM])
+    const nightAllGrants = canonicalGrants.filter((platform) => !localStoredPlatforms.has(platform))
     const payload = nightAllGrants.length > 0
       ? await this.adapter.capabilities(nightAllGrants)
       : { data: { platforms: [], legacySearch: null } }
@@ -414,6 +422,26 @@ export class HubService {
           source: 'hub',
           servingMode: 'stored',
           capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search'],
+        })
+      }
+    }
+    if (canonicalGrants.includes(PUBLIC_OPINION_PLATFORM) && typeof this.store.listPublicOpinionRecords === 'function') {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === PUBLIC_OPINION_PLATFORM)) {
+        const [source, servingIndexes] = await Promise.all([
+          typeof this.store.getExternalSource === 'function'
+            ? this.store.getExternalSource('province-opinion-results')
+            : null,
+          typeof this.store.getPublicOpinionServingIndexStatus === 'function'
+            ? this.store.getPublicOpinionServingIndexStatus()
+            : null,
+        ])
+        platforms.push({
+          platform: PUBLIC_OPINION_PLATFORM,
+          ready: source?.status === 'active' && servingIndexes?.ready === true,
+          source: 'hub',
+          servingMode: 'stored',
+          capabilities: ['province_feed', 'item_detail', 'stored_search'],
         })
       }
     }
@@ -581,10 +609,10 @@ export class HubService {
     if (typeof this.store.listCanonicalRecords !== 'function') {
       throw new AppError(503, 'stored_data_unavailable', 'Stored Telegram data requires the PostgreSQL store')
     }
-    const policy = await this.#telegramPolicy(context)
+    const policy = await this.#storedPlatformPolicy(context, 'telegram', 'Telegram')
     const resource = telegramMonitorResource(resourceName)
     const query = normalizeTelegramMonitorQuery(queryInput, policy.maxPageSize)
-    return this.#meterStoredTelegramRead(context, policy, {
+    return this.#meterStoredRead(context, 'telegram', policy, {
       path: `/api/v1/data/telegram/${resourceName}`,
       fingerprintBody: query,
       operation: async () => {
@@ -602,9 +630,9 @@ export class HubService {
     if (!this.searchQueries?.searchAuthors || !this.searchQueries?.searchTelegramChats) {
       throw new AppError(503, 'stored_search_unavailable', 'Telegram entity search requires the PostgreSQL search layer')
     }
-    const policy = await this.#telegramPolicy(context)
+    const policy = await this.#storedPlatformPolicy(context, 'telegram', 'Telegram')
     const query = normalizeTelegramEntityQuery(queryInput, policy.maxPageSize)
-    return this.#meterStoredTelegramRead(context, policy, {
+    return this.#meterStoredRead(context, 'telegram', policy, {
       path: '/api/v1/data/telegram/entities/search',
       fingerprintBody: query,
       operation: async () => {
@@ -646,6 +674,59 @@ export class HubService {
             ? 'elasticsearch'
             : 'postgres',
         }
+      },
+    })
+  }
+
+  async publicOpinionProvince(context, provinceInput, queryInput) {
+    if (typeof this.store.listPublicOpinionRecords !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Province opinion data requires the PostgreSQL store')
+    }
+    const policy = await this.#storedPlatformPolicy(context, PUBLIC_OPINION_PLATFORM, 'Public opinion')
+    const query = normalizePublicOpinionQuery(
+      provinceInput,
+      queryInput,
+      policy.maxPageSize,
+      this.apiKeyPepper,
+    )
+    await this.#assertPublicOpinionServingIndexes()
+    return this.#meterStoredRead(context, PUBLIC_OPINION_PLATFORM, policy, {
+      path: `/api/v1/data/public-opinion/provinces/${query.province.code}/items`,
+      fingerprintBody: {
+        provinceCode: query.province.code,
+        sort: query.sort,
+        from: query.from,
+        to: query.to,
+        pageSize: query.pageSize,
+        cursor: query.cursorToken,
+      },
+      operation: async () => {
+        const rows = await this.store.listPublicOpinionRecords({
+          provinceCode: query.province.code,
+          sort: query.sort,
+          pageSize: query.pageSize,
+          cursor: query.cursor,
+          from: query.from,
+          to: query.to,
+        })
+        return publicOpinionPage(rows, query, this.apiKeyPepper)
+      },
+    })
+  }
+
+  async publicOpinionItem(context, idInput) {
+    if (typeof this.store.getPublicOpinionRecord !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Province opinion data requires the PostgreSQL store')
+    }
+    const policy = await this.#storedPlatformPolicy(context, PUBLIC_OPINION_PLATFORM, 'Public opinion')
+    const id = normalizePublicOpinionItemId(idInput)
+    return this.#meterStoredRead(context, PUBLIC_OPINION_PLATFORM, policy, {
+      path: `/api/v1/data/public-opinion/items/${id}`,
+      fingerprintBody: { id },
+      operation: async () => {
+        const row = await this.store.getPublicOpinionRecord(id)
+        if (!row) throw new AppError(404, 'item_not_found', 'Province opinion item not found')
+        return publicOpinionItem(row)
       },
     })
   }
@@ -900,28 +981,46 @@ export class HubService {
     }
   }
 
-  async #telegramPolicy(context) {
+  async #storedPlatformPolicy(context, platform, label) {
     const grants = await this.store.listGrants(context.consumer.id)
-    assert(grants.includes('telegram'), 403, 'platform_not_granted', 'Telegram is not granted')
+    assert(grants.includes(platform), 403, 'platform_not_granted', `${label} is not granted`)
     return {
       ...this.defaultPolicy,
-      ...((await this.store.getPolicy(context.consumer.id, 'telegram')) || {}),
+      ...((await this.store.getPolicy(context.consumer.id, platform)) || {}),
     }
   }
 
-  async #meterStoredTelegramRead(context, policy, { path, fingerprintBody, operation }) {
+  async #assertPublicOpinionServingIndexes() {
+    if (typeof this.store.getPublicOpinionServingIndexStatus !== 'function') {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Province opinion serving indexes are not available',
+      )
+    }
+    const servingIndexes = await this.store.getPublicOpinionServingIndexStatus()
+    if (!servingIndexes.ready) {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Province opinion serving indexes are not ready',
+      )
+    }
+  }
+
+  async #meterStoredRead(context, platform, policy, { path, fingerprintBody, operation }) {
     const requestId = randomUUID()
     const startedAt = performance.now()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
     await this.store.reapStaleReservations()
     const reservation = await this.store.reserve({
       requestId,
-      idempotencyKey: `telegram-read:${requestId}`,
+      idempotencyKey: `${platform}-read:${requestId}`,
       fingerprint: requestFingerprint({ method: 'GET', path, body: fingerprintBody }),
       tenantId: context.tenant.id,
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
-      platform: 'telegram',
+      platform,
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -1345,6 +1444,12 @@ export class HubService {
     assert(query.length <= 500, 400, 'invalid_request', 'query must not exceed 500 characters')
     const grants = await this.store.listGrants(context.consumer.id)
     assert(grants.includes(platform), 403, 'platform_not_granted', 'Platform is not granted')
+    assert(
+      platform !== PUBLIC_OPINION_PLATFORM,
+      400,
+      'platform_operation_unsupported',
+      'public_opinion is Hub-stored; use the province feed or canonical stored search',
+    )
 
     const policy = {
       ...this.defaultPolicy,

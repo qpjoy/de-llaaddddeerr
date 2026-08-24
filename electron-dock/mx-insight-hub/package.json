@@ -12,6 +12,7 @@
     "projector": "node server/workers/projector.mjs",
     "ingest": "node server/workers/ingest.mjs",
     "migrate": "node server/migrate.mjs",
+    "ops:province-opinion-indexes": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f scripts/province-opinion-serving-indexes.sql",
     "test": "node --test tests/server/*.test.mjs tests/sites-worker.test.mjs && bash tests/manage-script.test.sh",
     "test:server": "node --test tests/server/*.test.mjs",
     "smoke": "node scripts/smoke.mjs",

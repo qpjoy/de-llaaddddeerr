@@ -17,6 +17,7 @@ const CANONICAL_ALLOWED_FIELDS = new Set([...STORED_ALLOWED_FIELDS, 'searchProfi
 const CANONICAL_SORTS = new Set(['newest', 'oldest', 'relevance'])
 const CURSOR_VERSION = 2
 const SORT_VERSION = 'score-eventTime-id-sharddoc-or-eventTime-id-v2'
+const OPAQUE_EXTERNAL_ID_PLATFORMS = new Set(['public_opinion'])
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const PUBLIC_METRICS = ['likes', 'comments', 'shares', 'views', 'bookmarks', 'members']
 const SEARCH_ANALYSIS_STATE_VERSION = 1
@@ -330,7 +331,9 @@ export function publicStoredSearchItem(row) {
     platform: row.platform,
     objectType: row.objectType,
     contentType: row.contentType ?? null,
-    externalId: row.externalId,
+    // Preserve the generic item shape without exposing the upstream table row
+    // identifier for corpora whose source coordinates are private evidence.
+    externalId: OPAQUE_EXTERNAL_ID_PLATFORMS.has(row.platform) ? row.id : row.externalId,
     url: row.url ?? null,
     title: row.title ?? null,
     text: row.body ?? null,

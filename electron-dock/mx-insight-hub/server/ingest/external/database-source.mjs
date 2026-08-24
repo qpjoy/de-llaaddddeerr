@@ -3,6 +3,12 @@ import pg from 'pg'
 import { AppError } from '../../core/errors.mjs'
 import { applyMapping, validateFieldMap, CHUNKER_VERSION } from './mapping.mjs'
 import { isTelegramSourceFunctionDefinition } from '../telegram/source-preparer.mjs'
+import {
+  PROVINCE_OPINION_SOURCE_KEY,
+  provinceOpinionColumnIssues,
+  provinceOpinionCursorIsFinite,
+  provinceOpinionSourceContractIssues,
+} from '../province/source-contract.mjs'
 
 // Incremental pull from a foreign PostgreSQL database.
 //
@@ -824,7 +830,9 @@ export class DatabaseSourcePuller {
         [schema, table],
       ),
       pool.query(
-        `SELECT con.conname AS name, con.contype AS type, pg_get_constraintdef(con.oid) AS definition
+        `SELECT con.conname AS name, con.contype AS type, con.convalidated AS validated,
+                pg_get_expr(con.conbin, con.conrelid) AS expression,
+                pg_get_constraintdef(con.oid) AS definition
            FROM pg_constraint con
            JOIN pg_class c ON c.oid = con.conrelid
            JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -851,7 +859,13 @@ export class DatabaseSourcePuller {
         valid: row.valid !== false,
         ready: row.ready !== false,
       })),
-      constraints: constraintResult.rows.map((row) => ({ name: row.name, type: row.type, definition: row.definition })),
+      constraints: constraintResult.rows.map((row) => ({
+        name: row.name,
+        type: row.type,
+        validated: row.validated !== false,
+        expression: row.expression,
+        definition: row.definition,
+      })),
       triggers: triggerResult.rows.map((row) => ({
         name: row.name, event: row.event, timing: row.timing, statement: row.statement,
       })),
@@ -1369,6 +1383,13 @@ export class DatabaseSourcePuller {
     const cursorId = `external:${sourceKey}`
     const saved = await this.queue.getCursor(cursorId)
     const position = saved?.position ?? {}
+    if (
+      sourceKey === PROVINCE_OPINION_SOURCE_KEY
+      && position.cursor != null
+      && !provinceOpinionCursorIsFinite(position.cursor)
+    ) {
+      throw new AppError(409, 'source_contract_mismatch', 'Province opinion checkpoint contains a non-finite watermark')
+    }
     const contractHash = sourceContractHash(source, mapping)
     this.#assertCheckpoint(position, {
       contractHash,
@@ -1477,6 +1498,19 @@ export class DatabaseSourcePuller {
     try {
       await this.#assertManagedSourceContract(pool, connection)
       const columns = await this.#columns(pool, connection)
+      if (sourceKey === PROVINCE_OPINION_SOURCE_KEY) {
+        const contractIssues = [
+          ...provinceOpinionSourceContractIssues(source),
+          ...provinceOpinionColumnIssues(columns),
+        ]
+        if (contractIssues.length > 0) {
+          throw new AppError(
+            409,
+            'source_contract_mismatch',
+            'Province opinion source contract changed; pause and re-probe before resuming',
+          )
+        }
+      }
       const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
       const cursorAliasName = internalCursorAlias(columns)
       const cursorAlias = quotedIdentifier(cursorAliasName, 'internal cursor alias')
@@ -1489,6 +1523,16 @@ export class DatabaseSourcePuller {
         [position.cursor ?? null, position.lastId ?? null, limit],
       )
       const exactCursors = takeExactCursors(rows, cursorAliasName, cursorName)
+      if (
+        sourceKey === PROVINCE_OPINION_SOURCE_KEY
+        && exactCursors.some((cursor) => !provinceOpinionCursorIsFinite(cursor))
+      ) {
+        throw new AppError(
+          409,
+          'source_contract_mismatch',
+          'Province opinion source returned a non-finite updated_at watermark',
+        )
+      }
       await assertOwned()
       if (rows.length === 0) {
         if (run) {

@@ -73,10 +73,13 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
   const telegramPipeline = useRemoteData(loadTelegramPipeline, onUnauthorized)
   const loadTelegramSqlitePipeline = useCallback(() => adminApi.telegramSqlitePipeline(token), [token])
   const telegramSqlitePipeline = useRemoteData(loadTelegramSqlitePipeline, onUnauthorized)
+  const loadProvinceOpinionPipeline = useCallback(() => adminApi.provinceOpinionPipeline(token), [token])
+  const provinceOpinionPipeline = useRemoteData(loadProvinceOpinionPipeline, onUnauthorized)
   const [selected, setSelected] = useState(null)
   const [creating, setCreating] = useState(false)
   const [telegramOpen, setTelegramOpen] = useState(false)
   const [telegramSqliteOpen, setTelegramSqliteOpen] = useState(false)
+  const [provinceOpinionOpen, setProvinceOpinionOpen] = useState(false)
 
   if (state.loading && !state.data) return <LoadingState label="正在加载外部数据源" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
@@ -134,11 +137,19 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         onRetry={telegramSqlitePipeline.refresh}
       />
 
+      <ProvinceOpinionPipelineCard
+        pipeline={provinceOpinionPipeline.data}
+        loading={provinceOpinionPipeline.loading}
+        error={provinceOpinionPipeline.error}
+        onOpen={() => setProvinceOpinionOpen(true)}
+        onRetry={provinceOpinionPipeline.refresh}
+      />
+
       {genericSources.length === 0 ? (
         <EmptyState
           icon={Database}
           title="还没有注册通用数据源"
-          description="Telegram monitor 与 SQLite API 已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
+          description="Telegram monitor、SQLite API 与全国省份舆情已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
         />
       ) : (
         <Panel title="通用数据源" subtitle="每个源有独立的 dataset，不会与固定业务清洗任务混合">
@@ -218,6 +229,22 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
           }}
         />
       ) : null}
+      {provinceOpinionOpen && provinceOpinionPipeline.data ? (
+        <ProvinceOpinionPipelineModal
+          token={token}
+          pipeline={provinceOpinionPipeline.data}
+          loading={provinceOpinionPipeline.loading}
+          onUnauthorized={onUnauthorized}
+          notify={notify}
+          onClose={() => setProvinceOpinionOpen(false)}
+          onRefresh={provinceOpinionPipeline.refresh}
+          onPipelineChanged={(updated) => {
+            if (updated?.task) provinceOpinionPipeline.setData(updated)
+            provinceOpinionPipeline.refresh()
+            state.refresh()
+          }}
+        />
+      ) : null}
       {selected ? (
         <SourceDetailModal
           token={token}
@@ -237,6 +264,7 @@ const PIPELINE_MANAGED_SOURCE_KEYS = new Set([
   'telegram-monitor-messages',
   'telegram-sqlite-api-chats',
   'telegram-sqlite-api-messages',
+  'province-opinion-results',
 ])
 
 const TELEGRAM_TASK_META = {
@@ -514,6 +542,342 @@ function TelegramSqlitePipelineCard({ pipeline, loading, error, onOpen, onRetry 
         </>
       )}
     </section>
+  )
+}
+
+function provinceOpinionRunning(pipeline) {
+  return ['running', 'draining'].includes(String(
+    pipeline?.task?.cursor?.status || pipeline?.task?.latestRun?.status || '',
+  ).toLowerCase())
+}
+
+function provinceOpinionStatus(pipeline) {
+  if (telegramTaskStuck(pipeline?.task)) return { status: 'error', label: '任务需恢复' }
+  if (provinceOpinionRunning(pipeline)) return { status: 'warning', label: '正在运行' }
+  if (pipeline?.status === 'active' && pipeline?.configurationIssues?.length > 0) {
+    return { status: 'error', label: '门禁异常' }
+  }
+  if (pipeline?.status === 'active') return { status: 'active', label: '已启用' }
+  return { status: 'disabled', label: pipeline?.configured ? '已暂停' : '待配置' }
+}
+
+function ProvinceOpinionPipelineCard({ pipeline, loading, error, onOpen, onRetry }) {
+  const status = provinceOpinionStatus(pipeline)
+  const task = pipeline?.task
+  const latestRunAt = task?.latestRun?.finishedAt || task?.latestRun?.startedAt || task?.latestRun?.createdAt
+
+  return (
+    <section className="qp-panel mih-telegram-card" aria-labelledby="province-opinion-pipeline-title">
+      <div className="mih-telegram-card__identity">
+        <span className="mih-telegram-card__icon"><Database size={22} weight="duotone" aria-hidden="true" /></span>
+        <div>
+          <p className="qp-kicker">BUSINESS PIPELINE / PUBLIC OPINION</p>
+          <h2 id="province-opinion-pipeline-title">全国省份舆情清洗任务</h2>
+          <p>固定读取 monitor_strategy_results；首次全量、后续按可靠更新水位增量，按省提供热门、最新与详情接口。</p>
+        </div>
+      </div>
+      {error && !pipeline ? (
+        <div className="mih-telegram-card__error"><ErrorState error={error} onRetry={onRetry} /></div>
+      ) : (
+        <>
+          <dl className="mih-telegram-card__facts">
+            <div><dt>运行状态</dt><dd><StatusBadge status={status.status} label={status.label} /></dd></div>
+            <div><dt>源库</dt><dd><code>{pipeline?.configured ? `${pipeline.connection?.host}:${pipeline.connection?.port || 5432}` : '尚未配置'}</code></dd></div>
+            <div><dt>固定表</dt><dd><code>public.monitor_strategy_results</code></dd></div>
+            <div><dt>输入任务</dt><dd>1 个固定结果表</dd></div>
+            <div><dt>同步周期</dt><dd>{formatNumber(pipeline?.syncIntervalSeconds || 300)} 秒</dd></div>
+            <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
+          </dl>
+          <div className="mih-telegram-card__actions">
+            {pipeline?.status !== 'active' ? <span className="mih-telegram-card__alert"><Warning size={15} />默认暂停；源表水位合同完成前不会导入</span> : null}
+            <button className="qp-button qp-button--ghost" type="button" disabled={loading || !pipeline} onClick={onOpen}>
+              {loading ? '正在刷新…' : '打开任务控制'}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+function ProvinceOpinionPipelineModal({
+  token, pipeline, loading, onUnauthorized, notify, onClose, onRefresh, onPipelineChanged,
+}) {
+  const configured = Boolean(pipeline.configured)
+  const running = provinceOpinionRunning(pipeline)
+  const status = provinceOpinionStatus(pipeline)
+  const task = pipeline.task || {}
+  const connection = pipeline.connection || {}
+  const servingIndexes = pipeline.servingIndexes || {}
+  const [form, setForm] = useState(() => ({
+    host: connection.host || '',
+    port: String(connection.port || 5432),
+    database: connection.database || '',
+    username: connection.username || '',
+    password: connection.password || '',
+    sslMode: connection.sslMode || 'require',
+    syncIntervalSeconds: String(pipeline.syncIntervalSeconds || 300),
+  }))
+  const [busyAction, setBusyAction] = useState(null)
+  const [writerContractConfirmed, setWriterContractConfirmed] = useState(false)
+  const [resetConfirmation, setResetConfirmation] = useState('')
+  const loadProgress = useCallback(
+    () => configured
+      ? adminApi.provinceOpinionPipelineProgress(token)
+      : Promise.resolve(null),
+    [configured, token],
+  )
+  const progress = useRemoteData(loadProgress, onUnauthorized)
+  const progressIssues = sqlitePipelineIssueMessages(
+    progress.data?.blocker,
+    progress.data?.issues,
+    pipeline.configurationIssues,
+  )
+  const stuck = telegramTaskStuck(task)
+
+  useEffect(() => {
+    if (!running || loading) return undefined
+    const timer = window.setTimeout(onRefresh, 2_000)
+    return () => window.clearTimeout(timer)
+  }, [loading, onRefresh, running])
+
+  const mutate = async (action, request, successMessage) => {
+    setBusyAction(action)
+    try {
+      const updated = await request()
+      if (updated?.task && updated?.status) onPipelineChanged(updated)
+      else onRefresh()
+      progress.refresh()
+      notify?.(successMessage, 'success')
+      return updated
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      notify?.(error.message, 'error')
+      return null
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  const save = (event) => {
+    event.preventDefault()
+    mutate(
+      'save',
+      () => adminApi.updateProvinceOpinionPipeline(token, {
+        connection: {
+          host: form.host.trim(),
+          port: Number(form.port),
+          database: form.database.trim(),
+          username: form.username.trim(),
+          password: form.password,
+          sslMode: form.sslMode,
+        },
+        syncIntervalSeconds: Number(form.syncIntervalSeconds),
+      }),
+      '全国省份舆情源库连接已验证并保存；任务仍保持暂停',
+    )
+  }
+
+  const changeStatus = (nextStatus) => mutate(
+    `status-${nextStatus}`,
+    () => adminApi.updateProvinceOpinionPipelineStatus(
+      token,
+      nextStatus,
+      nextStatus === 'active' ? {
+        confirmed: writerContractConfirmed,
+        contractVersion: pipeline.writerContract?.version,
+        contractDigest: pipeline.writerContract?.digest,
+      } : null,
+    ),
+    nextStatus === 'active' ? '全国省份舆情清洗任务已启用' : '已安全暂停全国省份舆情清洗任务',
+  )
+
+  const runSync = () => mutate(
+    'sync',
+    () => adminApi.runProvinceOpinionPipeline(token, { batchSize: 1000 }),
+    '全国省份舆情同步已提交',
+  )
+
+  const resumeFailed = () => mutate(
+    'resume',
+    () => adminApi.resumeProvinceOpinionPipeline(token),
+    '任务已从原 checkpoint 恢复；没有重置或重放已完成数据',
+  )
+
+  const resetCheckpoint = (event) => {
+    event.preventDefault()
+    if (resetConfirmation !== 'province-opinion') return
+    mutate(
+      'reset',
+      async () => {
+        const updated = await adminApi.resetProvinceOpinionPipelineCheckpoint(token, {
+          confirmPipelineKey: resetConfirmation,
+        })
+        setResetConfirmation('')
+        return updated
+      },
+      '一次性全量对齐已准备；下次同步会从源表起点重新扫描',
+    )
+  }
+
+  return (
+    <Modal
+      title={pipeline.displayName || '全国省份舆情'}
+      description={pipeline.status === 'active'
+        ? '固定 PostgreSQL 业务管线 · 已启用，持续受源表合同与 Hub 服务索引门禁约束'
+        : configured
+          ? '固定 PostgreSQL 业务管线 · 已配置但保持暂停，不会自动调度导入'
+          : '固定 PostgreSQL 业务管线 · 当前只完成能力，不连接、不启用、不导入现有数据'}
+      size="xlarge"
+      onClose={onClose}
+      footer={<button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭</button>}
+    >
+      <div className="mih-telegram-toolbar">
+        <div>
+          <StatusBadge status={status.status} label={status.label} />
+          <code>{pipeline.pipelineKey || 'province-opinion'}</code>
+          <span className="mih-telegram-toolbar__warning"><Warning size={15} />源表合同未验证前保持暂停</span>
+        </div>
+        <div className="mih-page-actions">
+          {pipeline.status === 'active' ? (
+            <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)} onClick={() => changeStatus('paused')}>
+              <Pause size={16} />{busyAction === 'status-paused' ? '安全暂停中…' : '安全暂停'}
+            </button>
+          ) : (
+            <button className="qp-button qp-button--ghost" type="button"
+              disabled={Boolean(busyAction) || !configured || running || progress.loading || !progress.data || progressIssues.length > 0 || !writerContractConfirmed}
+              title={!configured ? '先验证并保存源库连接' : progress.loading || !progress.data ? '先核对源表门禁' : progressIssues.length > 0 ? '源表或 Hub 服务索引门禁未满足' : !writerContractConfirmed ? '请先确认源端 writer 合同' : ''}
+              onClick={() => changeStatus('active')}>
+              <Play size={16} />{busyAction === 'status-active' ? '正在启用…' : '启用任务'}
+            </button>
+          )}
+          {stuck ? (
+            <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)} onClick={resumeFailed}>
+              <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '恢复卡住的任务'}
+            </button>
+          ) : null}
+          <button className="qp-button" type="button" disabled={Boolean(busyAction) || pipeline.status !== 'active'} onClick={runSync}>
+            <ArrowClockwise size={16} />{busyAction === 'sync' ? '正在提交…' : '立即同步'}
+          </button>
+        </div>
+      </div>
+
+      <p className="mih-inline-warning">
+        <Warning size={16} aria-hidden="true" />
+        附件样例的两条记录 province 都为空；给出的表结构也没有 updated_at。created_at 只代表插入时间，无法发现后续补写的省份、来源、热度或 LLM 结果，所以服务端会明确阻止启用，不会临时用 created_at 冒充更新水位。
+      </p>
+
+      <Panel title="只读源库与调度" subtitle="只填写连接坐标；表名、Dataset、对象类型和游标字段由业务版本固定">
+        <form className="mih-form mih-form--grid mih-telegram-config" onSubmit={save}>
+          <Field label="主机"><input className="qp-input" required value={form.host} placeholder="127.0.0.1" onChange={(event) => setForm({ ...form, host: event.target.value })} /></Field>
+          <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={form.port} onChange={(event) => setForm({ ...form, port: event.target.value })} /></Field>
+          <Field label="数据库"><input className="qp-input" required value={form.database} placeholder="night_all" onChange={(event) => setForm({ ...form, database: event.target.value })} /></Field>
+          <Field label="用户名"><input className="qp-input" required autoComplete="off" value={form.username} placeholder="mx_data" onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
+          <Field label="密码" hint="明文保存，仅 Admin Token 管理面可读取"><input className="qp-input" type="password" required autoComplete="off" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
+          <Field label="SSL 模式">
+            <select className="qp-input" value={form.sslMode} onChange={(event) => setForm({ ...form, sslMode: event.target.value })}>
+              <option value="disable">disable（受控内网）</option><option value="require">require</option>
+              <option value="verify-ca">verify-ca</option><option value="verify-full">verify-full</option>
+            </select>
+          </Field>
+          <Field label="同步间隔（秒）" hint="60–86400；首次空 checkpoint 会完整扫描">
+            <input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds}
+              onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} />
+          </Field>
+          <div className="mih-page-actions mih-form__wide">
+            <button className="qp-button qp-button--ghost" type="submit" disabled={Boolean(busyAction) || pipeline.status !== 'paused' || running}>
+              {busyAction === 'save' ? '正在验证并保存…' : '验证并保存连接'}
+            </button>
+          </div>
+        </form>
+      </Panel>
+
+      <Panel title="固定输入、增量与服务索引门禁" subtitle="连接测试只证明可达；启用还必须通过源表合同和 Hub 在线服务索引探测"
+        actions={<button className="qp-button qp-button--ghost" type="button" disabled={!configured || progress.loading} onClick={progress.refresh}><ArrowClockwise size={16} />核对源表</button>}>
+        <div className="mih-telegram-capabilities">
+          <div><strong>固定表</strong><p><code>public.monitor_strategy_results</code><br /><code>public-opinion.province.v1 · opinion_item</code></p></div>
+          <div><strong>可靠水位</strong><p><code>updated_at + id</code>；上游需增加非空 updated_at，并保证 province/source/heat/LLM 的每次更新都会推进。</p></div>
+          <div><strong>源端游标索引</strong><p><code>(updated_at, id)</code>；禁止不可观察的硬删除，并保证迟提交不会落到已越过的 checkpoint 后方。</p></div>
+          <div><strong>Hub 在线服务索引</strong><p>{servingIndexes.ready ? '已就绪' : `待安装：${(servingIndexes.missing || []).join('、') || '状态不可用'}`}<br /><code>scripts/province-opinion-serving-indexes.sql</code></p></div>
+        </div>
+        {progress.loading && !progress.data ? <LoadingState label="正在核对省份舆情源表" /> : null}
+        {progress.error ? <ErrorState error={progress.error} onRetry={progress.refresh} /> : null}
+        {progressIssues.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">{progressIssues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}</ul> : null}
+        {progress.data && progressIssues.length === 0 ? (
+          <p className="mih-preview-provenance">源表门禁通过 · 总行数 {formatNumber(progress.data.totalRows)} · 已完成 {formatNumber(progress.data.completedRows)} · 剩余 {formatNumber(progress.data.remainingRows)}</p>
+        ) : null}
+      </Panel>
+
+      <Panel title="源端 Writer 增量合同" subtitle="Schema 无法证明提交顺序；每次启用都必须显式确认并留下审计记录">
+        <ul className="mih-source-issues mih-source-issues--warning">
+          <li>{pipeline.writerContract?.summary?.watermark}</li>
+          <li>{pipeline.writerContract?.summary?.deletion}</li>
+          <li>{pipeline.writerContract?.summary?.ordering}</li>
+        </ul>
+        <label className="mih-agent-consent">
+          <input type="checkbox" checked={writerContractConfirmed} disabled={Boolean(busyAction) || running}
+            onChange={(event) => setWriterContractConfirmed(event.target.checked)} />
+          <span>
+            <strong>我已验证源端实现满足上述合同</strong>
+            <small>合同 {pipeline.writerContract?.version || 'province-opinion.writer.v1'} · 摘要 {pipeline.writerContract?.digest?.slice(0, 12) || '待加载'}…</small>
+          </span>
+        </label>
+        {pipeline.writerContract?.latestAttestation ? (
+          <p className="mih-preview-provenance">最近确认：{pipeline.writerContract.latestAttestation.attestedBy || 'admin-token'} · {formatDate(pipeline.writerContract.latestAttestation.attestedAt)}</p>
+        ) : <p className="mih-preview-provenance">尚无 writer 合同确认记录。</p>}
+      </Panel>
+
+      <Panel title="省份接口与全局归类" subtitle="热门/最新读取 Hub PostgreSQL 当前态；全局文本检索继续使用统一 canonical search">
+        <div className="mih-telegram-capabilities">
+          <div><strong>省份热门 / 最新</strong><p><code>GET /api/v1/data/public-opinion/provinces/CN-JS/items?sort=hot|latest</code></p></div>
+          <div><strong>点击详情</strong><p><code>GET /api/v1/data/public-opinion/items/:id</code>；只返回标题、摘要、链接、省份、热度和审核过的来源字段。</p></div>
+          <div><strong>全局搜索</strong><p><code>POST /api/v1/data/canonical/search</code>，以 platform / datasetId / objectType 归类；不改 Night-All 兼容接口。</p></div>
+        </div>
+      </Panel>
+
+      <Panel title="清洗、隐私与未来归档" subtitle="确定性入库不调用 Agent；分类推断保留为独立衍生层可能性">
+        <div className="mih-telegram-capabilities">
+          <div><strong>可公开字段</strong><p>province 规范为 ISO 代码，heat_score 为数值列；来源平台保持内容来源，不覆盖 Hub 授权平台。</p></div>
+          <div><strong>仅 Admin 证据</strong><p>strategy/run/hash、关键词、heat_metrics、llm_reason、raw、source 表引用只留在原始对象与修订，不进入公开响应。</p></div>
+          <div><strong>未来 Agent 归档</strong><p>使用独立、追加式 classification assertion，锚定 record + source revision；不写回 raw、canonical identity 或 checkpoint。</p></div>
+        </div>
+      </Panel>
+
+      <div className="mih-telegram-task-grid">
+        <article className="mih-telegram-task">
+          <header><div><span className="mih-telegram-task__role">省份舆情结果</span><code>{task.sourceKey || 'province-opinion-results'}</code></div><StatusBadge status={task.cursor?.status || pipeline.status} /></header>
+          <dl className="mih-telegram-task__definition">
+            <div><dt>Dataset / 对象</dt><dd><code>{task.source?.datasetId || 'public-opinion.province.v1'}</code><small>public_opinion · opinion_item</small></dd></div>
+            <div><dt>固定映射</dt><dd>{task.activeMapping?.version ? `v${task.activeMapping.version}` : task.builtInMappingAvailable ? 'v1 · 待启用审批' : '缺失'}</dd></div>
+            <div><dt>Checkpoint</dt><dd><code>{compactCheckpoint(task.cursor?.position)}</code></dd></div>
+            <div><dt>下次调度</dt><dd>{formatDate(task.nextDueAt)}</dd></div>
+          </dl>
+        </article>
+      </div>
+
+      <PipelineRunHistory token={token} tasks={[task]} onUnauthorized={onUnauthorized} labelOf={() => '省份舆情结果'} />
+
+      {pipeline.status === 'paused' && !running ? (
+        <section className="mih-source-danger" aria-labelledby="province-opinion-checkpoint-reset-title">
+          <div className="mih-source-danger__copy">
+            <Warning size={24} weight="duotone" aria-hidden="true" />
+            <div>
+              <h3 id="province-opinion-checkpoint-reset-title">一次性全量对齐</h3>
+              <p>重置后下一次同步会从源表起点重扫；Canonical 幂等去重，但源库、PG 和投影负载会增加。普通新增、暂停恢复与 ES 重建不需要本操作。</p>
+            </div>
+          </div>
+          <form className="mih-source-danger__form" onSubmit={resetCheckpoint}>
+            <Field label="输入业务标识以确认" hint={<code>province-opinion</code>}>
+              <input className="qp-input" value={resetConfirmation} autoComplete="off" spellCheck="false"
+                onChange={(event) => setResetConfirmation(event.target.value)} />
+            </Field>
+            <button className="qp-button qp-button--danger" type="submit" disabled={Boolean(busyAction) || resetConfirmation !== 'province-opinion'}>
+              {busyAction === 'reset' ? '正在准备全量对齐…' : '准备一次性全量对齐'}
+            </button>
+          </form>
+        </section>
+      ) : null}
+    </Modal>
   )
 }
 
@@ -2508,14 +2872,13 @@ function DatabaseSourceControl({
 }
 
 /**
- * Merge the run history of a fixed pipeline's two tasks into one timeline.
+ * Merge the run history of a fixed pipeline's tasks into one timeline.
  *
  * The generic source modal has shown this table all along; the two fixed
  * pipelines only ever rendered `latestRun`, so the per-sync time and row counts
- * an operator remembers were simply not on this screen. Both tasks are read
- * from the same per-source endpoint and interleaved, because they are scheduled
- * as a pair -- reading them apart hides exactly the case worth seeing, where
- * one task stopped and the other kept going.
+ * an operator remembers were simply not on this screen. Every task is read
+ * from the same per-source endpoint and interleaved. That keeps paired tasks
+ * comparable while also supporting a fixed pipeline with one input.
  */
 function PipelineRunHistory({ token, tasks, onUnauthorized, labelOf }) {
   const sourceKeys = tasks.map((task) => telegramTaskSourceKey(task)).filter(Boolean)
@@ -2543,7 +2906,7 @@ function PipelineRunHistory({ token, tasks, onUnauthorized, labelOf }) {
   const items = asList(runs.data)
 
   return (
-    <Panel title="任务与清洗记录" subtitle="两个子任务合并的运行时间线：每次运行的读取、入库、变更、删除、拒绝与失败原因"
+    <Panel title="任务与清洗记录" subtitle="固定任务合并的运行时间线：每次运行的读取、入库、变更、删除、拒绝与失败原因"
       actions={<button className="qp-button qp-button--ghost" type="button" disabled={runs.loading} onClick={runs.refresh}>
         <ArrowClockwise size={16} />刷新记录
       </button>}>

@@ -1,4 +1,5 @@
 import { sha256, canonicalJson } from '../normalizers.mjs'
+import { normalizeChinaProvince } from '../../data/china-provinces.mjs'
 
 // Declarative mapping from an arbitrary external record to a canonical one.
 //
@@ -30,11 +31,13 @@ const TIME_TARGETS = new Set(['eventTime', 'collectedAt', 'editedAt', 'deletedAt
 const NUMBER_TARGETS = new Set(['latitude', 'longitude'])
 const METRIC_TARGETS = new Set([
   'metrics.likes', 'metrics.comments', 'metrics.shares', 'metrics.views', 'metrics.bookmarks',
-  'metrics.members',
+  'metrics.members', 'metrics.heatScore',
 ])
 const ATTRIBUTE_TARGETS = new Set([
   'attributes.username', 'attributes.chatType',
   'attributes.chatUsername', 'attributes.mediaType',
+  'attributes.province', 'attributes.sourcePlatform', 'attributes.sourceType',
+  'attributes.llmLabel',
 ])
 const BOOLEAN_TARGETS = new Set(['attributes.isOutgoing'])
 const JSON_TARGETS = new Set(['media', 'entities', 'links'])
@@ -81,6 +84,8 @@ export function validateFieldMap(fieldMap) {
     }
     if (target === DROP_TARGET && rule?.type != null) {
       errors.push('_drop does not accept a type; it only marks source columns as intentionally omitted')
+    } else if (rule?.type === 'province_code' && target !== 'admin1Code') {
+      errors.push('type=province_code is supported only for admin1Code')
     } else if (rule?.type === 'composite') {
       if (target !== 'externalId' || sources.length < 2) {
         errors.push('type=composite is supported only for externalId with at least two source columns')
@@ -231,7 +236,8 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record', s
     const value = pick(raw, rule)
     if (value === null) continue
 
-    if (TIME_TARGETS.has(target)) mapped[target] = asTimestamp(value)
+    if (rule?.type === 'province_code') mapped[target] = normalizeChinaProvince(String(value))?.code ?? null
+    else if (TIME_TARGETS.has(target)) mapped[target] = asTimestamp(value)
     else if (NUMBER_TARGETS.has(target) || METRIC_TARGETS.has(target)) mapped[target] = asNumber(value)
     else if (BOOLEAN_TARGETS.has(target)) mapped[target] = asBoolean(value)
     else if (JSON_TARGETS.has(target)) mapped[target] = value
@@ -307,6 +313,7 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record', s
     },
     extensions,
     metrics,
+    ...(Object.hasOwn(metrics, 'heatScore') ? { heatScore: metrics.heatScore } : {}),
     rawItem: raw,
   }
 

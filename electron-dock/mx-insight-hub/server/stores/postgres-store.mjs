@@ -19,6 +19,71 @@ const connectorCallOutcomes = new Set(['complete', 'partial', 'failed', 'unknown
 const connectorSourceModes = new Set(['live', 'stale'])
 const connectorFailureKinds = new Set(['network', 'timeout', 'http', 'contract', 'business', 'internal', 'unknown'])
 const transientHttpStatuses = new Set([502, 503, 504])
+const PUBLIC_OPINION_SERVING_INDEX_CONTRACTS = Object.freeze([
+  {
+    name: 'canonical_province_opinion_hot_idx',
+    keys: [
+      'admin1_code',
+      'heat_score DESC NULLS LAST',
+      'coalesce(event_time, collected_at) DESC NULLS LAST',
+      'id DESC',
+    ],
+    predicate: [
+      "dataset_id = 'public-opinion.province.v1'",
+      "platform = 'public_opinion'",
+      "object_type = 'opinion_item'",
+      'deleted_at IS NULL',
+      'admin1_code IS NOT NULL',
+      'heat_score IS NOT NULL',
+      'collected_at IS NOT NULL',
+    ],
+  },
+  {
+    name: 'canonical_province_opinion_latest_idx',
+    keys: [
+      'admin1_code',
+      'coalesce(event_time, collected_at) DESC NULLS LAST',
+      'collected_at DESC NULLS LAST',
+      'id DESC',
+    ],
+    predicate: [
+      "dataset_id = 'public-opinion.province.v1'",
+      "platform = 'public_opinion'",
+      "object_type = 'opinion_item'",
+      'deleted_at IS NULL',
+      'admin1_code IS NOT NULL',
+      'collected_at IS NOT NULL',
+    ],
+  },
+])
+
+function normalizeIndexFragment(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/::(?:text|character varying)/g, '')
+    .replace(/[()"\s]/g, '')
+}
+
+function normalizedPredicateTerms(value) {
+  return normalizeIndexFragment(value).split('and').filter(Boolean).sort()
+}
+
+function publicOpinionIndexMatches(row, contract) {
+  if (
+    row?.indisready !== true
+    || row?.indisvalid !== true
+    || row?.indislive !== true
+    || row?.access_method !== 'btree'
+    || Number(row?.key_count) !== contract.keys.length
+  ) return false
+  const actualKeys = [row.key_1, row.key_2, row.key_3, row.key_4].map(normalizeIndexFragment)
+  const expectedKeys = contract.keys.map(normalizeIndexFragment)
+  if (!actualKeys.every((key, index) => key === expectedKeys[index])) return false
+  const actualPredicate = normalizedPredicateTerms(row.predicate)
+  const expectedPredicate = contract.predicate.map(normalizeIndexFragment).sort()
+  return actualPredicate.length === expectedPredicate.length
+    && actualPredicate.every((term, index) => term === expectedPredicate[index])
+}
 
 function compatibilityTimestamp(value = new Date()) {
   const date = value instanceof Date ? value : new Date(value)
@@ -1297,9 +1362,9 @@ export class PostgresStore {
               payload_sha256, content_type, url, title, body,
               author_external_id, author_name, event_time, collected_at,
               latitude, longitude, country_code, admin1_code, admin2_code,
-              stable_fields, extensions, deleted_at)
+              stable_fields, extensions, deleted_at, heat_score)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                   $16, $17, $18, $19, $20, $21, $22, $23)
+                   $16, $17, $18, $19, $20, $21, $22, $23, $24)
            ON CONFLICT (dataset_id, platform, object_type, external_id) DO UPDATE SET
              payload_sha256 = EXCLUDED.payload_sha256,
              content_type = EXCLUDED.content_type,
@@ -1318,6 +1383,7 @@ export class PostgresStore {
              stable_fields = EXCLUDED.stable_fields,
              extensions = EXCLUDED.extensions,
              deleted_at = EXCLUDED.deleted_at,
+             heat_score = EXCLUDED.heat_score,
              last_seen_at = now(),
              current_revision = core.canonical_records.current_revision
                + (core.canonical_records.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256)::int,
@@ -1330,7 +1396,7 @@ export class PostgresStore {
             record.title, record.body, record.authorExternalId, record.authorName,
             record.eventTime, record.collectedAt, record.latitude, record.longitude,
             record.countryCode, record.admin1Code, record.admin2Code,
-            record.stableFields, record.extensions, record.deletedAt,
+            record.stableFields, record.extensions, record.deletedAt, record.heatScore,
           ],
         )
         const { id, current_revision: revision, projection_revision: projection } = upserted.rows[0]
@@ -1489,6 +1555,118 @@ export class PostgresStore {
       ],
     )
     return rows
+  }
+
+  /**
+   * Customer-safe province feed over the current canonical PostgreSQL state.
+   *
+   * The SELECT is intentionally explicit and separate from Admin Data Center:
+   * raw payloads, extensions, strategy ids, model reasoning and lineage never
+   * cross this store boundary.
+   */
+  async getPublicOpinionServingIndexStatus() {
+    const required = PUBLIC_OPINION_SERVING_INDEX_CONTRACTS.map((contract) => contract.name)
+    const { rows } = await this.pool.query(
+      `SELECT index_rel.relname AS name,
+              index_meta.indisready,
+              index_meta.indisvalid,
+              index_meta.indislive,
+              access_method.amname AS access_method,
+              index_meta.indnkeyatts AS key_count,
+              pg_get_indexdef(index_rel.oid, 1, true) AS key_1,
+              pg_get_indexdef(index_rel.oid, 2, true) AS key_2,
+              pg_get_indexdef(index_rel.oid, 3, true) AS key_3,
+              pg_get_indexdef(index_rel.oid, 4, true) AS key_4,
+              pg_get_expr(index_meta.indpred, index_meta.indrelid, true) AS predicate
+         FROM pg_class index_rel
+         JOIN pg_namespace index_ns ON index_ns.oid = index_rel.relnamespace
+         JOIN pg_index index_meta ON index_meta.indexrelid = index_rel.oid
+         JOIN pg_am access_method ON access_method.oid = index_rel.relam
+         JOIN pg_class table_rel ON table_rel.oid = index_meta.indrelid
+         JOIN pg_namespace table_ns ON table_ns.oid = table_rel.relnamespace
+        WHERE index_ns.nspname = 'core'
+          AND table_ns.nspname = 'core'
+          AND table_rel.relname = 'canonical_records'
+          AND index_rel.relname = ANY($1::text[])`,
+      [required],
+    )
+    const byName = new Map(rows.map((row) => [row.name, row]))
+    const indexes = PUBLIC_OPINION_SERVING_INDEX_CONTRACTS.map((contract) => ({
+      name: contract.name,
+      ready: publicOpinionIndexMatches(byName.get(contract.name), contract),
+    }))
+    return {
+      ready: indexes.every((index) => index.ready),
+      required,
+      indexes,
+      missing: indexes.filter((index) => !index.ready).map((index) => index.name),
+    }
+  }
+
+  async listPublicOpinionRecords({
+    provinceCode,
+    sort,
+    pageSize,
+    cursor = null,
+    from = null,
+    to = null,
+  }) {
+    const select = `SELECT id, title, body, url, content_type, author_name,
+                           event_time, collected_at, admin1_code, heat_score,
+                           stable_fields,
+                           coalesce(event_time, collected_at) AS sort_time`
+    const scope = `FROM core.canonical_records
+                    WHERE dataset_id = 'public-opinion.province.v1'
+                      AND platform = 'public_opinion'
+                      AND object_type = 'opinion_item'
+                      AND deleted_at IS NULL
+                      AND admin1_code = $1
+                      AND collected_at IS NOT NULL
+                      AND ($2::timestamptz IS NULL OR event_time >= $2::timestamptz)
+                      AND ($3::timestamptz IS NULL OR event_time <= $3::timestamptz)`
+    if (sort === 'hot') {
+      const { rows } = await this.pool.query(
+        `${select}
+           ${scope}
+              AND heat_score IS NOT NULL
+              AND ($4::numeric IS NULL OR (heat_score, coalesce(event_time, collected_at), id) < ($4::numeric, $5::timestamptz, $6::uuid))
+            ORDER BY heat_score DESC, coalesce(event_time, collected_at) DESC, id DESC
+            LIMIT $7`,
+        [
+          provinceCode, from, to,
+          cursor?.heatScore ?? null, cursor?.sortTime ?? null, cursor?.id ?? null,
+          pageSize + 1,
+        ],
+      )
+      return rows
+    }
+    const { rows } = await this.pool.query(
+      `${select}
+         ${scope}
+            AND ($4::uuid IS NULL OR (coalesce(event_time, collected_at), collected_at, id) < ($5::timestamptz, $6::timestamptz, $4::uuid))
+          ORDER BY coalesce(event_time, collected_at) DESC, collected_at DESC, id DESC
+          LIMIT $7`,
+      [
+        provinceCode, from, to, cursor?.id ?? null,
+        cursor?.sortTime ?? null, cursor?.collectedAt ?? null, pageSize + 1,
+      ],
+    )
+    return rows
+  }
+
+  async getPublicOpinionRecord(id) {
+    const { rows } = await this.pool.query(
+      `SELECT id, title, body, url, content_type, author_name,
+              event_time, collected_at, admin1_code, heat_score, stable_fields
+         FROM core.canonical_records
+        WHERE id = $1
+          AND dataset_id = 'public-opinion.province.v1'
+          AND platform = 'public_opinion'
+          AND object_type = 'opinion_item'
+          AND deleted_at IS NULL`,
+      [id],
+    )
+    return rows[0] ?? null
   }
 
   async dataCenter({ datasetId = null, platform = null, objectType = null, pageSize = 50 } = {}) {

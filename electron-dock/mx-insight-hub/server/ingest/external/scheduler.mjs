@@ -7,6 +7,14 @@ import {
   TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION,
 } from '../telegram/monitor-pipeline.mjs'
 import { TELEGRAM_SQLITE_INPUTS } from '../telegram/sqlite-pipeline.mjs'
+import {
+  PROVINCE_OPINION_PIPELINE_KEY,
+  PROVINCE_OPINION_SOURCE_KEY,
+  PROVINCE_OPINION_WRITER_CONTRACT_DIGEST,
+  PROVINCE_OPINION_WRITER_CONTRACT_VERSION,
+  isProvinceOpinionSourceKey,
+  provinceOpinionSourceContractIssues,
+} from '../province/monitor-pipeline.mjs'
 import { sqliteApiDailyWindowAt } from './sqlite-api-source.mjs'
 
 const TELEGRAM_SCHEDULE_ERRORS = Object.freeze({
@@ -39,6 +47,21 @@ const TELEGRAM_SQLITE_SCHEDULE_ERRORS = Object.freeze({
   },
 })
 
+const PROVINCE_OPINION_SCHEDULE_ERRORS = Object.freeze({
+  unavailable: {
+    code: 'province_opinion_schedule_unavailable',
+    message: 'Province opinion scheduling requires the PostgreSQL queue',
+  },
+  failed: {
+    code: 'province_opinion_schedule_failed',
+    message: 'No province opinion task was scheduled',
+  },
+  outcomeUnknown: {
+    code: 'province_opinion_schedule_outcome_unknown',
+    message: 'The province opinion scheduling outcome is unknown',
+  },
+})
+
 function isDue(source, cursor, now) {
   if (cursor && cursor.status !== 'idle') return false
   const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
@@ -65,12 +88,17 @@ function telegramSQLiteScheduleTrigger(cursors, now) {
 }
 
 /** Schedule one incremental scan for every active foreign database source. */
-export async function scheduleActiveDatabaseSources({ store, queue, batchSize = 1_000, now = new Date() }) {
+export async function scheduleActiveDatabaseSources({
+  store,
+  queue,
+  batchSize = 1_000,
+  now = new Date(),
+}) {
   const sources = await store.listExternalSources()
   let enqueued = 0
   for (const source of sources) {
     if (source.sourceKind !== 'database' || source.status !== 'active') continue
-    if (isTelegramMonitorSourceKey(source.sourceKey)) continue
+    if (isTelegramMonitorSourceKey(source.sourceKey) || isProvinceOpinionSourceKey(source.sourceKey)) continue
     const cursor = await queue.getCursor(`external:${source.sourceKey}`)
     // A running continuation owns this source. Failed cursors require an
     // operator to fix/probe and explicitly resume; automatic retries would
@@ -101,6 +129,28 @@ export async function scheduleActiveDatabaseSources({ store, queue, batchSize = 
           queue,
           telegramSources.map((source) => scheduledJob(source.sourceKey, batchSize)),
           TELEGRAM_SCHEDULE_ERRORS,
+        )
+        enqueued += jobIds.filter((jobId) => jobId != null).length
+      }
+    }
+  }
+
+  const provinceOpinionSource = sources.find((source) => source.sourceKey === PROVINCE_OPINION_SOURCE_KEY)
+  if (
+    provinceOpinionSource?.sourceKind === 'database'
+    && provinceOpinionSource.status === 'active'
+    && provinceOpinionSourceContractIssues(provinceOpinionSource).length === 0
+  ) {
+    const attestation = await store.getLatestPipelineWriterContractAttestation?.(PROVINCE_OPINION_PIPELINE_KEY)
+    const attested = attestation?.contractVersion === PROVINCE_OPINION_WRITER_CONTRACT_VERSION
+      && attestation?.contractDigest === PROVINCE_OPINION_WRITER_CONTRACT_DIGEST
+    if (attested) {
+      const cursor = await queue.getCursor(`external:${PROVINCE_OPINION_SOURCE_KEY}`)
+      if (isDue(provinceOpinionSource, cursor, now)) {
+        const jobIds = await enqueueJobsAtomically(
+          queue,
+          [scheduledJob(PROVINCE_OPINION_SOURCE_KEY, batchSize)],
+          PROVINCE_OPINION_SCHEDULE_ERRORS,
         )
         enqueued += jobIds.filter((jobId) => jobId != null).length
       }
@@ -149,7 +199,14 @@ function waitForNextScan(intervalMs, signal) {
 }
 
 /** Keep active sources incremental after their initial full scan reaches idle. */
-export async function runExternalPullScheduler({ store, queue, batchSize, intervalMs, signal, logger = console }) {
+export async function runExternalPullScheduler({
+  store,
+  queue,
+  batchSize,
+  intervalMs,
+  signal,
+  logger = console,
+}) {
   while (!signal?.aborted) {
     try {
       const result = await scheduleActiveDatabaseSources({ store, queue, batchSize })

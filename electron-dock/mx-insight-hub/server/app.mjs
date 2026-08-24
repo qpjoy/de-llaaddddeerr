@@ -25,6 +25,10 @@ import {
   TelegramSQLitePipeline,
 } from './ingest/telegram/sqlite-pipeline.mjs'
 import {
+  isProvinceOpinionSourceKey,
+  ProvinceOpinionPipeline,
+} from './ingest/province/monitor-pipeline.mjs'
+import {
   adminTokenPrincipal,
   filterByTenantCapability,
   requireCapability,
@@ -196,12 +200,20 @@ function dataCenterPageInfo({ page, pageSize, total, hasMore, nextCursor, maxDir
 }
 
 function assertGenericSourceMutable(sourceKey) {
-  if (!isTelegramMonitorSourceKey(sourceKey) && !isTelegramSQLiteSourceKey(sourceKey)) return
-  const pipeline = isTelegramSQLiteSourceKey(sourceKey) ? 'telegram-sqlite' : 'telegram-monitor'
+  if (
+    !isTelegramMonitorSourceKey(sourceKey)
+    && !isTelegramSQLiteSourceKey(sourceKey)
+    && !isProvinceOpinionSourceKey(sourceKey)
+  ) return
+  const pipeline = isTelegramSQLiteSourceKey(sourceKey)
+    ? 'telegram-sqlite'
+    : isProvinceOpinionSourceKey(sourceKey)
+      ? 'province-opinion'
+      : 'telegram-monitor'
   throw new AppError(
     409,
     'pipeline_managed_source',
-    `Telegram sources are managed through /internal/v1/admin/pipelines/${pipeline}`,
+    `This fixed source is managed through /internal/v1/admin/pipelines/${pipeline}`,
   )
 }
 
@@ -327,6 +339,11 @@ export function createApp({
     store,
     queue,
     sqliteApiPuller,
+  })
+  const provinceOpinionPipeline = new ProvinceOpinionPipeline({
+    store,
+    queue,
+    databasePuller,
   })
 
   /**
@@ -1379,6 +1396,75 @@ export function createApp({
         return
       }
 
+      if (pathname === '/internal/v1/admin/pipelines/province-opinion') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        if (request.method === 'GET') {
+          sendJson(response, 200, { data: await provinceOpinionPipeline.get(), requestId })
+          return
+        }
+        if (request.method === 'PUT') {
+          const body = await readJson(request)
+          sendJson(response, 200, { data: await provinceOpinionPipeline.configure(body), requestId })
+          return
+        }
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/province-opinion/status') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter(
+          (field) => !['status', 'writerContractAttestation'].includes(field),
+        )
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported status fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await provinceOpinionPipeline.setStatus(body?.status, {
+            approvedBy: principal.memberId || 'admin-token',
+            writerContractAttestation: body?.writerContractAttestation ?? null,
+          }),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/province-opinion/sync') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        sendJson(response, 202, { data: await provinceOpinionPipeline.sync(body), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/pipelines/province-opinion/progress') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, { data: await provinceOpinionPipeline.progress(), requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/province-opinion/resume') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, { data: await provinceOpinionPipeline.resumeFailedTask(), requestId })
+        return
+      }
+      if (
+        request.method === 'POST'
+        && pathname === '/internal/v1/admin/pipelines/province-opinion/checkpoint/reset'
+      ) {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'confirmPipelineKey')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported checkpoint reset fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await provinceOpinionPipeline.resetCheckpoint(body?.confirmPipelineKey),
+          requestId,
+        })
+        return
+      }
+
       if (pathname === '/internal/v1/admin/pipelines/telegram-sqlite') {
         requireSourceAdmin(principal)
         requireSQLiteApiPuller()
@@ -2243,6 +2329,28 @@ export function createApp({
         const context = await requirePublic(request)
         sendJson(response, 200, {
           data: await service.telegramEntities(context, Object.fromEntries(searchParams.entries())),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/data/public-opinion/provinces/:province/items')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.publicOpinionProvince(
+            context,
+            params.province,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/data/public-opinion/items/:id')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.publicOpinionItem(context, params.id),
           requestId,
         })
         return

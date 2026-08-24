@@ -200,6 +200,47 @@ function assertNightAllPublicContract(document) {
   }
 }
 
+function assertPublicOpinionContract(document) {
+  const feed = document.paths['/data/public-opinion/provinces/{province}/items']?.get
+  const detail = document.paths['/data/public-opinion/items/{id}']?.get
+  assert.ok(feed)
+  assert.ok(detail)
+  assert.deepEqual(feed.parameters.map((parameter) => parameter.name), [
+    'province', 'sort', 'from', 'to', 'pageSize', 'cursor',
+  ])
+  assert.equal(
+    feed.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/PublicOpinionPageEnvelope',
+  )
+  assert.equal(
+    detail.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/PublicOpinionItemEnvelope',
+  )
+  assert.ok(feed['x-mx-error-codes'][400].includes('invalid_province'))
+  assert.ok(feed['x-mx-error-codes'][403].includes('platform_not_granted'))
+  assert.ok(feed['x-mx-error-codes'][503].includes('serving_indexes_unavailable'))
+  assert.match(feed.description, /effective sort time/i)
+  assert.match(feed.description, /publishedAt is null/i)
+  assert.ok(detail['x-mx-error-codes'][404].includes('item_not_found'))
+
+  const item = document.components.schemas.PublicOpinionItem
+  assert.equal(item.additionalProperties, false)
+  assert.deepEqual(item.required, [
+    'id', 'title', 'summary', 'url', 'publishedAt', 'collectedAt',
+    'province', 'heatScore', 'origin',
+  ])
+  assert.deepEqual(Object.keys(item.properties), item.required)
+  assert.equal(document.components.schemas.PublicOpinionOrigin.additionalProperties, false)
+  assert.equal(document.components.schemas.PublicOpinionPageEnvelope.additionalProperties, false)
+  assert.doesNotMatch(
+    JSON.stringify({
+      item: Object.keys(item.properties),
+      origin: Object.keys(document.components.schemas.PublicOpinionOrigin.properties),
+    }),
+    /raw_payload|strategy_id|run_id|llm_reason|extensions|source_item_id|lineage/i,
+  )
+}
+
 async function withServer(listenerMode, run) {
   const app = createApp({
     service: {},
@@ -254,6 +295,11 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/canonical\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/messages/)
+    assert.match(html, /\/api\/v1\/data\/public-opinion\/provinces\/\{province\}\/items/)
+    assert.match(html, /\/api\/v1\/data\/public-opinion\/items\/\{id\}/)
+    assert.match(html, /public_opinion/)
+    assert.match(html, /两个 Hub 省级舆情服务索引都有效/)
+    assert.match(html, /有效排序时间优先 publishedAt/)
     assert.match(html, /\/api\/v1\/data\/capabilities/)
     assert.match(html, /\/api\/v1\/tools\/tokenize/)
     assert.match(html, /nlp\.tokenize/)
@@ -283,6 +329,8 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.deepEqual(paths.sort(), [
       '/data/canonical/search',
       '/data/capabilities',
+      '/data/public-opinion/items/{id}',
+      '/data/public-opinion/provinces/{province}/items',
       '/data/search',
       '/data/stored/search',
       '/data/telegram/chats',
@@ -312,6 +360,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(document.components.schemas.TokenizeRequest.additionalProperties, false)
     assert.equal(document.components.schemas.StoredSearchRequest.additionalProperties, false)
     assert.equal(document.components.schemas.CanonicalSearchRequest.additionalProperties, false)
+    assertPublicOpinionContract(document)
     assertNightAllPublicContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
@@ -370,6 +419,7 @@ test('static OpenAPI YAML parses and mirrors the dynamic Night-All compatibility
   const document = JSON.parse(parsed.stdout)
   assert.equal(document.openapi, '3.1.0')
   assertNightAllPublicContract(document)
+  assertPublicOpinionContract(document)
 })
 
 test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy', async () => {

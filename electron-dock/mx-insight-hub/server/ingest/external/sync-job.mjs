@@ -32,6 +32,9 @@ export async function runExternalPullJob({
   timer?.unref?.()
   let result
   try {
+    if ((payload.chunk ?? 0) === 0 && typeof puller.assertReadyForPull === 'function') {
+      await puller.assertReadyForPull(sourceKey)
+    }
     result = await puller.pullBatch(sourceKey, {
       batchSize: payload.batchSize ?? 1_000,
       importRunId: payload.importRunId ?? null,

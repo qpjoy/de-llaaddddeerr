@@ -1,6 +1,11 @@
 import { AppError } from '../../core/errors.mjs'
 import { DatabaseSourcePuller } from './database-source.mjs'
 import { SQLiteApiSourcePuller } from './sqlite-api-source.mjs'
+import {
+  PROVINCE_OPINION_SOURCE_KEY,
+  provinceOpinionProbeIssues,
+  provinceOpinionSourceContractIssues,
+} from '../province/source-contract.mjs'
 
 /** Route the existing external-source contract to its engine-specific puller. */
 export class ExternalSourcePuller {
@@ -44,6 +49,25 @@ export class ExternalSourcePuller {
 
   async assertCheckpointCompatible(sourceKey, options) {
     return (await this.#forSource(sourceKey)).assertCheckpointCompatible(sourceKey, options)
+  }
+
+  async assertReadyForPull(sourceKey) {
+    const source = await this.store.getExternalSource(sourceKey)
+    if (!source) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
+    if (sourceKey !== PROVINCE_OPINION_SOURCE_KEY) return { ready: true }
+    const issues = provinceOpinionSourceContractIssues(source)
+    if (issues.length === 0) {
+      const description = await this.databasePuller.describe(sourceKey)
+      issues.push(...provinceOpinionProbeIssues(description))
+    }
+    if (issues.length > 0) {
+      throw new AppError(
+        409,
+        'source_contract_mismatch',
+        'Province opinion source contract changed; pause and re-probe before resuming',
+      )
+    }
+    return { ready: true }
   }
 
   async resetCheckpoint(sourceKey) {

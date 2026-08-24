@@ -15,13 +15,28 @@ example:
 ```json
 {
   "data": {
-    "platforms": [],
+    "platforms": [{
+      "platform": "public_opinion",
+      "ready": false,
+      "capabilities": ["province_feed", "item_detail", "stored_search"],
+      "source": "hub",
+      "servingMode": "stored"
+    }],
     "capabilities": [{ "capability": "nlp.tokenize", "ready": true }]
   }
 }
 ```
 
 Provider names and internal endpoint IDs are omitted.
+
+`platforms` contains only explicitly granted data platforms. For the Hub-owned
+`public_opinion` platform, `province_feed`, `item_detail`, and `stored_search`
+name the supported serving surfaces. Its `ready` flag requires both an `active`
+fixed ingestion source and both valid Hub province-serving indexes; it is not a
+second authorization decision or a freshness guarantee. An initially
+unconfigured or paused source therefore reports `ready=false`, while previously
+indexed records may still be available through the read APIs. The platform is
+local to Hub and is never added to the Night-All legacy dispatch matrix.
 
 ## Tokenize text
 
@@ -95,6 +110,10 @@ cost, failure and continuation. This does not prevent the separate
 `/data/canonical/search` route from searching already-stored Hub data across
 granted platforms in one canonical index; that route performs no provider
 fan-out.
+
+`public_opinion` is a Hub-local stored platform and is deliberately unsupported
+on this live-compatible route (`400 platform_operation_unsupported`). Use the
+province feed, `/data/stored/search`, or `/data/canonical/search` instead.
 
 `query` must be non-blank and at most 500 characters after trimming. `cursor`, when present, must be a non-blank opaque string of at most 8,192 characters. Clients must return the cursor from the previous response unchanged rather than constructing or decoding it.
 
@@ -275,6 +294,10 @@ The response uses `contractVersion=mx-insight-hub.stored-search.v1` and reports
 `source=hub` both for the response and each returned item. Connector lineage,
 raw payloads, extensions and provider coordinates are not returned.
 
+The common response shape retains `externalId`. For `public_opinion`, this
+field deliberately repeats the Hub canonical `id`; it never exposes the
+upstream `monitor_strategy_results.id` or another source-row coordinate.
+
 Authorization is currently **platform-grant only**. `datasetId` narrows results;
 it is not a separate authorization grant. A consumer granted a platform can
 search the complete Hub canonical corpus for that platform. Dataset-level or
@@ -356,6 +379,95 @@ and longest window across the consumer's complete current platform-grant set,
 even when this request narrows `platform`. This keeps one stable policy on one
 shared bucket instead of re-evaluating the same history against different
 limits.
+
+## Province public-opinion data
+
+The province feed and item-detail routes serve the Hub-owned canonical scope
+`platform=public_opinion`, `datasetId=public-opinion.province.v1`, and
+`objectType=opinion_item`. They never query the source database directly and
+require the API key's consumer to have the explicit `public_opinion` platform
+grant.
+
+```http
+GET /api/v1/data/public-opinion/provinces/CN-JS/items?sort=hot&pageSize=20
+GET /api/v1/data/public-opinion/items/11111111-1111-4111-8111-111111111111
+Authorization: Bearer <mx key>
+```
+
+The province path accepts an ISO 3166-2:CN code, a short Chinese name, or the
+official Chinese name, for example `CN-JS`, `江苏`, or `江苏省`. Chinese path
+values must be URL-encoded. Unknown names are rejected; unclassified records are
+not silently assigned to a province.
+
+The province feed accepts only these query parameters:
+
+| Parameter | Contract |
+| --- | --- |
+| `sort` | `hot` (default) or `latest`. `hot` excludes null heat scores and orders by `(heatScore, effectiveSortTime, id)` descending. `latest` orders by `(effectiveSortTime, collectedAt, id)` descending. `effectiveSortTime` is `publishedAt` when present, otherwise `collectedAt`; the fallback is never returned as `publishedAt`. |
+| `from` | Optional inclusive RFC3339 `publishedAt` lower bound. A bounded request excludes records whose `publishedAt` is null. |
+| `to` | Optional inclusive RFC3339 `publishedAt` upper bound; it must not precede `from`. |
+| `pageSize` | Positive integer, default 20. The effective maximum is the lower of 100 and the consumer's `public_opinion.maxPageSize` policy. |
+| `cursor` | Optional HMAC-signed opaque cursor, at most 8,192 characters. Return `pageInfo.nextCursor` unchanged. |
+
+The cursor is bound to the normalized province code, sort order, time bounds,
+and page size. Changing any of those values requires restarting without a
+cursor. Pagination is keyset-based over the current canonical projection; it is
+not a frozen multi-page snapshot. Each safe `GET`, including a retry or next
+page, is independently charged to the consumer's `public_opinion` request and
+usage policy. These routes do not take an `Idempotency-Key`.
+
+The list response uses `contractVersion=mx-insight-hub.public-opinion.v1`:
+
+```json
+{
+  "data": {
+    "contractVersion": "mx-insight-hub.public-opinion.v1",
+    "province": { "code": "CN-JS", "name": "江苏" },
+    "sort": "hot",
+    "items": [{
+      "id": "11111111-1111-4111-8111-111111111111",
+      "title": "江苏舆情样例",
+      "summary": "公开摘要",
+      "url": "https://example.com/items/11111111",
+      "publishedAt": "2026-08-23T03:00:00.000Z",
+      "collectedAt": "2026-08-23T03:01:00.000Z",
+      "province": { "code": "CN-JS", "name": "江苏" },
+      "heatScore": 88.5,
+      "origin": {
+        "name": "江苏新闻广播",
+        "type": "social",
+        "platform": "douyin"
+      }
+    }],
+    "pageInfo": { "returnedCount": 1, "hasMore": false, "nextCursor": null }
+  },
+  "requestId": "00000000-0000-4000-8000-000000000005"
+}
+```
+
+Every item is a strict public allowlist containing exactly `id`, `title`,
+`summary`, `url`, `publishedAt`, `collectedAt`, `province`, `heatScore`, and
+`origin={name,type,platform}`. Nullable values remain explicit. `origin.platform`
+is a reviewed originating content platform and is distinct from the
+`public_opinion` authorization platform. `heatScore` drives only the province
+hot order; it is not a relevance score comparable across arbitrary sources.
+Raw payloads, target/negative keywords, strategy/run identifiers, source table
+coordinates, heat metrics, extensions, LLM label/confidence/reasoning, and
+lineage are not public fields.
+
+The item-detail route accepts only a Hub canonical UUID returned by the feed or
+canonical search. Its lookup remains fixed to the public-opinion dataset and
+object type; a deleted, missing, or out-of-scope record returns
+`404 item_not_found`. A legacy unclassified detail may have `province=null`, but
+the province feed itself returns only the requested normalized province.
+
+For global search across different stored sources, use
+`POST /api/v1/data/canonical/search`. Specify `platform=public_opinion`,
+`datasetId=public-opinion.province.v1`, and `objectType=opinion_item` to narrow
+the result, or omit `platform` to search every platform granted to the consumer.
+Those filters only narrow the authorization scope. This addition does not add a
+`public_opinion` branch to `POST /api/v1/data/search`; that live/upstream-
+compatible route fails closed with `platform_operation_unsupported`.
 
 ## Telegram stored data
 

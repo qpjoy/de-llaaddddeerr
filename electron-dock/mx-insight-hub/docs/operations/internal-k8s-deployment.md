@@ -113,6 +113,27 @@ scaled to zero even though API/Admin Pods can later discover the recovered
 Service. After a successful Admin reindex, verify or restore the projector
 replica so subsequent outbox events continue to project.
 
+### Optional province-opinion serving indexes
+
+Routine deploy intentionally does not build the two province-feed indexes:
+they scan the shared canonical table and must not extend the transactional
+migration lock. The fixed `province-opinion` source therefore remains safely
+blocked after migration 033. Only after a separate onboarding approval, run the
+online operation from an approved workstation that has `psql` and the Hub
+database URL (not the Night-All source URL):
+
+```bash
+cd electron-dock/mx-insight-hub
+DATABASE_URL='<Hub PostgreSQL URL>' npm run ops:province-opinion-indexes
+```
+
+Do not wrap the command in a transaction. It uses `CREATE INDEX CONCURRENTLY`,
+repairs a stale same-name definition, prints both indexes' ready/valid state,
+and is idempotent. Reopen the Admin pipeline panel afterward; activation stays
+disabled unless the runtime catalog check recognizes both exact definitions.
+Running this operation does not configure a source, grant `public_opinion`,
+reset a checkpoint or start an import.
+
 ### Retired Hub-local PostgreSQL
 
 Older releases may have left `statefulset/mx-insight-hub-postgres` and its PVC.

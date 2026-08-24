@@ -849,6 +849,7 @@ export function platformLabel(platform) {
     facebook: 'Facebook',
     wechat_mp: '微信公众号',
     telegram: 'Telegram',
+    public_opinion: '全国省份舆情',
   }
   return labels[platform] || platform
 }
