@@ -36,6 +36,63 @@ function row(overrides = {}) {
   }
 }
 
+function servingIndexRows(overrides = {}) {
+  const predicatePrefix = "dataset_id = 'public-opinion.province.v1'::text AND platform = 'public_opinion'::text AND object_type = 'opinion_item'::text AND deleted_at IS NULL AND admin1_code IS NOT NULL"
+  return [
+    {
+      name: 'canonical_province_opinion_hot_idx',
+      indisready: true,
+      indisvalid: true,
+      indislive: true,
+      access_method: 'btree',
+      key_count: 4,
+      key_1: 'admin1_code',
+      key_2: 'heat_score',
+      key_3: 'COALESCE(event_time, collected_at)',
+      key_4: 'id',
+      key_1_options: 0,
+      key_2_options: 1,
+      key_3_options: 1,
+      key_4_options: 3,
+      predicate: `${predicatePrefix} AND heat_score IS NOT NULL AND collected_at IS NOT NULL`,
+      ...overrides.hot,
+    },
+    {
+      name: 'canonical_province_opinion_latest_idx',
+      indisready: true,
+      indisvalid: true,
+      indislive: true,
+      access_method: 'btree',
+      key_count: 4,
+      key_1: 'admin1_code',
+      key_2: 'COALESCE(event_time, collected_at)',
+      key_3: 'collected_at',
+      key_4: 'id',
+      key_1_options: 0,
+      key_2_options: 1,
+      key_3_options: 1,
+      key_4_options: 3,
+      predicate: `${predicatePrefix} AND collected_at IS NOT NULL`,
+      ...overrides.latest,
+    },
+  ]
+}
+
+async function servingIndexStatus(overrides = {}) {
+  const store = new PostgresStore({
+    async query(sql, values) {
+      assert.match(sql, /table_rel\.relname = 'canonical_records'/)
+      assert.match(sql, /index_meta\.indoption\[0\]::integer AS key_1_options/)
+      assert.deepEqual(values, [[
+        'canonical_province_opinion_hot_idx',
+        'canonical_province_opinion_latest_idx',
+      ]])
+      return { rows: servingIndexRows(overrides) }
+    },
+  })
+  return store.getPublicOpinionServingIndexStatus()
+}
+
 async function withServer(app, run) {
   const server = createServer(app)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -205,49 +262,24 @@ test('PostgreSQL province reads have fixed corpus scope, total-order cursors and
   }
 })
 
-test('PostgreSQL serving readiness requires both exact canonical indexes to be ready and valid', async () => {
-  const store = new PostgresStore({
-    async query(sql, values) {
-      assert.match(sql, /table_rel\.relname = 'canonical_records'/)
-      assert.deepEqual(values, [[
-        'canonical_province_opinion_hot_idx',
-        'canonical_province_opinion_latest_idx',
-      ]])
-      return {
-        rows: [
-          {
-            name: 'canonical_province_opinion_hot_idx',
-            indisready: true,
-            indisvalid: true,
-            indislive: true,
-            access_method: 'btree',
-            key_count: 4,
-            key_1: 'admin1_code',
-            key_2: 'heat_score DESC NULLS LAST',
-            key_3: 'COALESCE(event_time, collected_at) DESC NULLS LAST',
-            key_4: 'id DESC',
-            predicate: "dataset_id = 'public-opinion.province.v1'::text AND platform = 'public_opinion'::text AND object_type = 'opinion_item'::text AND deleted_at IS NULL AND admin1_code IS NOT NULL AND heat_score IS NOT NULL AND collected_at IS NOT NULL",
-          },
-          {
-            name: 'canonical_province_opinion_latest_idx',
-            indisready: true,
-            indisvalid: true,
-            indislive: true,
-            access_method: 'btree',
-            key_count: 4,
-            key_1: 'admin1_code',
-            key_2: 'event_time DESC NULLS LAST',
-            key_3: 'collected_at DESC NULLS LAST',
-            key_4: 'id DESC',
-            predicate: "dataset_id = 'public-opinion.province.v1'::text AND platform = 'public_opinion'::text AND object_type = 'opinion_item'::text AND deleted_at IS NULL AND admin1_code IS NOT NULL AND collected_at IS NOT NULL",
-          },
-        ],
-      }
-    },
+test('PostgreSQL serving readiness accepts exact expressions, sort options and predicates', async () => {
+  const status = await servingIndexStatus()
+  assert.equal(status.ready, true)
+  assert.deepEqual(status.missing, [])
+})
+
+test('PostgreSQL serving readiness rejects expression and sort-option drift', async () => {
+  const status = await servingIndexStatus({
+    latest: { key_2: 'event_time' },
   })
-  const status = await store.getPublicOpinionServingIndexStatus()
   assert.equal(status.ready, false)
   assert.deepEqual(status.missing, ['canonical_province_opinion_latest_idx'])
+
+  const wrongNullOrder = await servingIndexStatus({
+    hot: { key_2_options: 3 },
+  })
+  assert.equal(wrongNullOrder.ready, false)
+  assert.deepEqual(wrongNullOrder.missing, ['canonical_province_opinion_hot_idx'])
 })
 
 test('public province routes enforce grants, paginate safely and keep public_opinion local to Hub', async () => {

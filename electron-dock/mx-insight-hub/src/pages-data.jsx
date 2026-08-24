@@ -642,6 +642,10 @@ function ProvinceOpinionPipelineModal({
     pipeline.configurationIssues,
   )
   const stuck = telegramTaskStuck(task)
+  const refreshGates = () => {
+    progress.refresh()
+    onRefresh()
+  }
 
   useEffect(() => {
     if (!running || loading) return undefined
@@ -801,7 +805,7 @@ function ProvinceOpinionPipelineModal({
       </Panel>
 
       <Panel title="固定输入、增量与服务索引门禁" subtitle="连接测试只证明可达；启用还必须通过源表合同和 Hub 在线服务索引探测"
-        actions={<button className="qp-button qp-button--ghost" type="button" disabled={!configured || progress.loading} onClick={progress.refresh}><ArrowClockwise size={16} />核对源表</button>}>
+        actions={<button className="qp-button qp-button--ghost" type="button" disabled={!configured || progress.loading || loading} onClick={refreshGates}><ArrowClockwise size={16} />核对源表</button>}>
         <div className="mih-telegram-capabilities">
           <div><strong>固定表</strong><p><code>public.monitor_strategy_results</code><br /><code>public-opinion.province.v1 · opinion_item</code></p></div>
           <div><strong>可靠水位</strong><p><code>updated_at + id</code>；上游需增加非空 updated_at，并保证 province/source/heat/LLM 的每次更新都会推进。</p></div>

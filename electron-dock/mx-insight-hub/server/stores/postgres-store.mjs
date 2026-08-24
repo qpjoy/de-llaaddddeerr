@@ -19,14 +19,17 @@ const connectorCallOutcomes = new Set(['complete', 'partial', 'failed', 'unknown
 const connectorSourceModes = new Set(['live', 'stale'])
 const connectorFailureKinds = new Set(['network', 'timeout', 'http', 'contract', 'business', 'internal', 'unknown'])
 const transientHttpStatuses = new Set([502, 503, 504])
+// pg_get_indexdef(indexOid, columnNo, pretty) returns only the key expression.
+// PostgreSQL stores DESC (bit 0) and NULLS FIRST (bit 1) separately in
+// pg_index.indoption, so both pieces are required for an exact index contract.
 const PUBLIC_OPINION_SERVING_INDEX_CONTRACTS = Object.freeze([
   {
     name: 'canonical_province_opinion_hot_idx',
     keys: [
-      'admin1_code',
-      'heat_score DESC NULLS LAST',
-      'coalesce(event_time, collected_at) DESC NULLS LAST',
-      'id DESC',
+      { expression: 'admin1_code', options: 0 },
+      { expression: 'heat_score', options: 1 },
+      { expression: 'coalesce(event_time, collected_at)', options: 1 },
+      { expression: 'id', options: 3 },
     ],
     predicate: [
       "dataset_id = 'public-opinion.province.v1'",
@@ -41,10 +44,10 @@ const PUBLIC_OPINION_SERVING_INDEX_CONTRACTS = Object.freeze([
   {
     name: 'canonical_province_opinion_latest_idx',
     keys: [
-      'admin1_code',
-      'coalesce(event_time, collected_at) DESC NULLS LAST',
-      'collected_at DESC NULLS LAST',
-      'id DESC',
+      { expression: 'admin1_code', options: 0 },
+      { expression: 'coalesce(event_time, collected_at)', options: 1 },
+      { expression: 'collected_at', options: 1 },
+      { expression: 'id', options: 3 },
     ],
     predicate: [
       "dataset_id = 'public-opinion.province.v1'",
@@ -77,8 +80,15 @@ function publicOpinionIndexMatches(row, contract) {
     || Number(row?.key_count) !== contract.keys.length
   ) return false
   const actualKeys = [row.key_1, row.key_2, row.key_3, row.key_4].map(normalizeIndexFragment)
-  const expectedKeys = contract.keys.map(normalizeIndexFragment)
+  const expectedKeys = contract.keys.map((key) => normalizeIndexFragment(key.expression))
   if (!actualKeys.every((key, index) => key === expectedKeys[index])) return false
+  const actualOptions = [
+    row.key_1_options,
+    row.key_2_options,
+    row.key_3_options,
+    row.key_4_options,
+  ].map(Number)
+  if (!actualOptions.every((options, index) => options === contract.keys[index].options)) return false
   const actualPredicate = normalizedPredicateTerms(row.predicate)
   const expectedPredicate = contract.predicate.map(normalizeIndexFragment).sort()
   return actualPredicate.length === expectedPredicate.length
@@ -1650,6 +1660,10 @@ export class PostgresStore {
               pg_get_indexdef(index_rel.oid, 2, true) AS key_2,
               pg_get_indexdef(index_rel.oid, 3, true) AS key_3,
               pg_get_indexdef(index_rel.oid, 4, true) AS key_4,
+              index_meta.indoption[0]::integer AS key_1_options,
+              index_meta.indoption[1]::integer AS key_2_options,
+              index_meta.indoption[2]::integer AS key_3_options,
+              index_meta.indoption[3]::integer AS key_4_options,
               pg_get_expr(index_meta.indpred, index_meta.indrelid, true) AS predicate
          FROM pg_class index_rel
          JOIN pg_namespace index_ns ON index_ns.oid = index_rel.relnamespace

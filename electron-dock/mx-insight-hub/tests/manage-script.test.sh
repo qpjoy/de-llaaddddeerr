@@ -648,6 +648,33 @@ assert_eq \
 cmp -s "$ROOT_DIR/scripts/province-opinion-serving-indexes.sql" "$province_index_stdin" \
   || { printf 'not ok - deploy did not stream the exact province serving-index SQL\n' >&2; exit 1; }
 
+# The column form of pg_get_indexdef omits sort options. Guard the regression by
+# requiring expression-only comparisons plus the exact pg_index bit pattern for
+# every key, with both preflight checks and the final assertion sharing one view.
+province_index_sql="$(cat "$ROOT_DIR/scripts/province-opinion-serving-indexes.sql")"
+for key_number in 1 2 3 4; do
+  grep -Fq "pg_get_indexdef(c.oid, ${key_number}, true)), '[()[:space:]\"]', '', 'g') = e.key_${key_number}" \
+    <<<"$province_index_sql"
+done
+for option_number in 0 1 2 3; do
+  expected_number=$((option_number + 1))
+  grep -Fq "i.indoption[${option_number}] = e.option_${expected_number}" \
+    <<<"$province_index_sql"
+done
+assert_eq \
+  '2' \
+  "$(grep -Fc '0, 1, 1, 3,' <<<"$province_index_sql")" \
+  'both province indexes require ASC, DESC NULLS LAST, DESC NULLS LAST, DESC defaults'
+assert_eq \
+  '3' \
+  "$(grep -c 'FROM province_opinion_serving_index_contract' <<<"$province_index_sql")" \
+  'province index preflight and final gate reuse one complete contract'
+grep -Fq 'SELECT count(*) = 2 AND bool_and(contract_ready)' <<<"$province_index_sql"
+if grep -Eq 'heat_scoredescnullslast|collected_atdescnullslast|iddesc' <<<"$province_index_sql"; then
+  printf 'not ok - province index contract expects sort syntax from column-only pg_get_indexdef\n' >&2
+  exit 1
+fi
+
 province_index_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-province-index-error.XXXXXX")"
 if bash -c '
   set -euo pipefail
