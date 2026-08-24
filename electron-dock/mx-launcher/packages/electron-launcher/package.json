@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-launcher",
-  "version": "2.3.15",
+  "version": "2.3.16",
   "description": "Product-facing Electron Launcher client for MX Launcher release, update, rollout, AppCenter, and network integration.",
   "type": "module",
   "main": "dist/index.js",
@@ -76,6 +76,8 @@
     "smoke:network-diagnostics": "pnpm build && node scripts/network-diagnostics-smoke.mjs",
     "smoke:standalone-ownership": "pnpm build && node scripts/standalone-ownership-concurrency-smoke.mjs",
     "smoke:system-domain-proxy-windows": "pnpm build && node scripts/system-domain-proxy-windows-smoke.mjs",
+    "test:system-domain-proxy-darwin": "pnpm build && node scripts/system-domain-proxy-darwin.test.mjs",
+    "test:wireguard-darwin-safety": "pnpm build && node --test scripts/wireguard-darwin-safety.test.mjs",
     "smoke:wireguard-windows-nrpt": "pnpm build && node scripts/wireguard-windows-nrpt-smoke.mjs",
     "test:release-updater": "pnpm build && node --test scripts/release-updater.test.mjs",
     "test:asar-bootstrap": "pnpm build && node --test scripts/asar-bootstrap.test.mjs",

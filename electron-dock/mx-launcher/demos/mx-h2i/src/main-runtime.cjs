@@ -31,8 +31,13 @@ const {
 } = require('./windows-network-readiness.cjs');
 const {
   darwinSplitDnsStatusReady,
+  darwinSystemResolutionExpectedTargets,
+  darwinSystemResolutionResultReady,
   invalidatePersistedDarwinSplitDnsProof,
-  resolverRootsCoverDomains
+  macBackgroundSystemDomainProxyRepairEnabled,
+  firstResolverCoveredHost,
+  resolverRootsCoverDomains,
+  systemDomainProxyDomains
 } = require('./split-dns-policy.cjs');
 const {
   reconcileRuntimeUpdateWithInstalledVersion
@@ -117,6 +122,7 @@ const DARWIN_ENDPOINT_ROUTE_REPAIR_COOLDOWN_MS = 20_000;
 const NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS = 2500;
 const WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD = 3;
 const WINDOWS_BROWSER_PROOF_SESSION_ID = randomUUID();
+const DARWIN_SYSTEM_DNS_PROOF_SESSION_ID = randomUUID();
 const DEFAULT_CONFIG = {
   productId: defaultLauncherProductId(),
   productDisplayName: defaultLauncherProductDisplayName(),
@@ -195,6 +201,9 @@ let wireGuardConnectInFlight = false;
 const wireGuardConnectOperations = new Set();
 let wireGuardDisconnectInFlight = false;
 let networkMutationEpoch = 0;
+let activeForegroundNetworkOperation = null;
+let pausedForegroundNetworkOperation = null;
+let networkRecoveryPaused = false;
 let windowBoundsSaveTimer = null;
 let windowBoundsTrackingSuppressed = false;
 let activeWindowDrag = null;
@@ -215,6 +224,7 @@ let h2oManagedHydrateInFlight = null;
 let lastSystemDomainProxySignature = null;
 let lastSystemDomainProxyPolicySignature = null;
 let lastSystemDomainProxyAuthorizationCanceledSignature = null;
+let lastSystemDomainProxyPrivilegedFailureSignature = null;
 let lastWindowsSystemProxyTakeoverSignature = null;
 let pendingWindowsSystemProxyTakeoverSignature = null;
 let lastWindowsSystemProxyContinuationRefreshAt = 0;
@@ -603,13 +613,14 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:connect-guest', async () => {
-    const connectOperation = beginWireGuardConnectOperation();
-    const lifecycleEpoch = networkMutationEpoch;
     const transitionStartedAt = Date.now();
     const transitionId = makeRequestId('visit-connect');
+    const foregroundOperation = beginForegroundNetworkOperation('guest-connect', transitionId);
+    const connectOperation = beginWireGuardConnectOperation();
+    const lifecycleEpoch = foregroundOperation.epoch;
     let retainedConnectionWasProbed = false;
     try {
-      assertNetworkTransitionCurrent(lifecycleEpoch);
+      assertForegroundNetworkOperationCurrent(foregroundOperation, 'preflight');
     if (runtime.connection?.mode === 'employee' && runtime.connection?.state === 'connecting') {
       runtime.feedback = {
         tone: 'info',
@@ -685,6 +696,7 @@ function registerIpc() {
       return visibleRuntime();
     }
     const guestEndpointRouteRepair = await repairDarwinEndpointRouteBeforeBootstrap('guest-pre-bootstrap');
+    assertForegroundNetworkOperationCurrent(foregroundOperation, 'endpoint-probed');
     if (guestEndpointRouteRepair?.stale === true && guestEndpointRouteRepair?.repaired !== true) {
       await saveAndBroadcast();
       return visibleRuntime();
@@ -694,6 +706,7 @@ function registerIpc() {
       retainedRecovery = await recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap', {
         allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery()
       });
+      assertForegroundNetworkOperationCurrent(foregroundOperation, 'retained-tunnel-probed');
     }
     if (retainedRecovery?.authorizationCanceled === true) {
       runtime.feedback = {
@@ -719,6 +732,7 @@ function registerIpc() {
         { allowRecoverableState: true }
       );
       if (recoveredGuestProbe.superseded) return visibleRuntime();
+      assertForegroundNetworkOperationCurrent(foregroundOperation, 'retained-connection-probed');
     }
     const recoveredGuestDecision = retainedGuestRecoveryDecision({
       ready: recoveredGuestProbe?.ready === true,
@@ -774,11 +788,11 @@ function registerIpc() {
       await saveAndBroadcast();
       return visibleRuntime();
     }
-    assertNetworkTransitionCurrent(lifecycleEpoch);
+    assertForegroundNetworkOperationCurrent(foregroundOperation, 'connecting');
     setConnecting('guest');
     await publishNetworkModeEvent('visit:connect', 'connecting', { transitionId });
     await saveAndBroadcast();
-    assertNetworkTransitionCurrent(lifecycleEpoch);
+    assertForegroundNetworkOperationCurrent(foregroundOperation, 'bootstrap');
     scheduleNetworkEnvironmentDiagnostics('guest-pre-connect', {
       phase: 'bootstrap',
       persist: false,
@@ -789,7 +803,7 @@ function registerIpc() {
         identityKind: 'anonymous',
         requestTag: 'guest'
       });
-      assertNetworkTransitionCurrent(lifecycleEpoch);
+      assertForegroundNetworkOperationCurrent(foregroundOperation, 'session-ready');
       await applyNetworkSession(session, {
         mode: 'guest',
         subject: `anonymous:${session.lease.installId}`,
@@ -803,6 +817,7 @@ function registerIpc() {
         auth: null,
         feedback: '访客 lease 已由 Internal 下发，并保留 180 天未续租回收。',
         lifecycleEpoch,
+        foregroundOperation,
         transitionId,
         transitionStartedAt
       });
@@ -821,6 +836,7 @@ function registerIpc() {
       throw err;
     } finally {
       connectOperation.finish();
+      finishForegroundNetworkOperation(foregroundOperation);
     }
   });
   ipcMain.handle('mx-h2i:login-employee', async (_event, input) => {
@@ -858,11 +874,17 @@ function registerIpc() {
     await cancelFeishuLogin('user-canceled');
     return visibleRuntime();
   });
+  ipcMain.handle('mx-h2i:cancel-network-operation', (_event, input) => {
+    requestForegroundNetworkOperationCancel(input);
+    return visibleRuntime();
+  });
   ipcMain.handle('mx-h2i:disconnect', async () => {
     if (wireGuardDisconnectInFlight) return visibleRuntime();
     clearPendingFeishuLogin('network-disconnect');
     wireGuardDisconnectInFlight = true;
     networkMutationEpoch += 1;
+    networkRecoveryPaused = false;
+    pausedForegroundNetworkOperation = null;
     let disconnectedMode = runtime.connection?.mode === 'employee' ? 'employee' : 'guest';
     let disconnectedIp = nullableString(runtime.connection?.localIp);
     let retainedConnection = runtime.connection;
@@ -914,7 +936,77 @@ function registerIpc() {
           return visibleRuntime();
         }
       }
-      const systemDomainRestoreScript = systemDomainProxyManager?.darwinRestoreScript?.() || null;
+      const currentSystemDomainProxy = process.platform === 'darwin'
+        ? currentSystemDomainProxyStatus('disconnect-preflight')
+        : null;
+      const currentProxyOwnerIds = arrayValue(
+        currentSystemDomainProxy?.ownershipRegistry?.owners,
+        []
+      ).map((owner) => nullableString(owner?.ownerId || owner)).filter(Boolean);
+      const previousManagedRelease = retainedConnection?.diagnostics
+        ?.disconnectManagedRelease?.systemDomainProxy;
+      const darwinProxyRetainedForOtherOwners = process.platform === 'darwin'
+        && (
+          previousManagedRelease?.actual?.sharedPacRetained === true
+          || (
+            currentSystemDomainProxy?.applied === true
+            && currentProxyOwnerIds.length > 0
+            && !currentProxyOwnerIds.includes(standaloneOwnershipOwnerId())
+          )
+        );
+      const systemDomainRestoreScript = process.platform === 'darwin'
+        && !darwinProxyRetainedForOtherOwners
+        ? systemDomainProxyManager?.darwinRestoreScript?.() || null
+        : null;
+      if (
+        process.platform === 'darwin'
+        && !systemDomainRestoreScript
+        && !darwinProxyRetainedForOtherOwners
+      ) {
+        // A shared/multi-owner local edge must be released by the manager and
+        // cannot be appended safely to the LaunchDaemon uninstall shell. Run
+        // only that one privileged path in this explicit action; stopping WG
+        // now and restoring PAC afterwards would open two authorization dialogs.
+        const managedRelease = await disableSystemDomainProxyForRuntime(
+          'disconnect-managed-release-before-wireguard-stop'
+        );
+        const managedReleaseCanceled = isSystemDomainProxyAuthorizationCanceled(managedRelease);
+        const managedReleaseReady = managedRelease
+          && !managedRelease.error
+          && managedRelease.skipReason !== 'external-apply-transaction-in-flight';
+        runtime.connection = managedReleaseReady
+          ? {
+              ...retainedConnection,
+              state: foregroundOperationConnectionHasLiveTunnel(retainedConnection)
+                ? 'tunnel-only'
+                : retainedConnection.state,
+              health: foregroundOperationConnectionHasLiveTunnel(retainedConnection)
+                ? { ...retainedConnection.health, splitDns: 'blocked' }
+                : retainedConnection.health,
+              diagnostics: {
+                ...(retainedConnection?.diagnostics || {}),
+                disconnectManagedRelease: {
+                  ok: true,
+                  systemDomainProxy: managedRelease,
+                  updatedAt: nowIso()
+                },
+                updatedAt: nowIso()
+              }
+            }
+          : retainedConnection;
+        runtime.auth = retainedAuth;
+        runtime.feedback = {
+          tone: 'warning',
+          message: managedReleaseCanceled
+            ? '已取消系统网络清理；WireGuard、员工身份和现有 PAC/DNS 保持不变，本次不会继续弹出第二个授权窗口。'
+            : managedReleaseReady
+              ? '已完成共享 PAC/DNS owner 清理；WireGuard 和员工身份仍保持。请再次点击“断开连接”，下一次只会执行 WireGuard/残留 resolver 的合并清理。'
+              : `断开尚未执行：PAC/DNS 需要先完成受管清理，WireGuard 和员工身份保持不变，本次不会继续请求第二次授权。${managedRelease?.error || managedRelease?.skipReason || 'system proxy manager unavailable'}`
+        };
+        touchRuntime('disconnect deferred after Darwin managed proxy release');
+        await saveAndBroadcast();
+        return visibleRuntime();
+      }
       const wireGuard = await stopWireGuardForRuntime({
         darwinExtraUninstallShell: systemDomainRestoreScript
       });
@@ -925,8 +1017,18 @@ function registerIpc() {
         && wireGuard?.ok === false
         && typeof wireGuard?.status?.active !== 'boolean'
         && !wireGuardStillActive;
+      const darwinCombinedRestoreStarted = process.platform === 'darwin'
+        && Boolean(systemDomainRestoreScript)
+        && wireGuard?.privilegedExecution === 'started';
+      const darwinCombinedRestoreFailed = darwinCombinedRestoreStarted
+        && wireGuard?.ok !== true;
 
-      if (authorizationCanceled || wireGuardStillActive || wireGuardStopUnknown) {
+      if (
+        authorizationCanceled
+        || wireGuardStillActive
+        || wireGuardStopUnknown
+        || darwinCombinedRestoreFailed
+      ) {
         let browserRollback = null;
         if (process.platform === 'win32' && windowsSystemDomainProxy) {
           browserRollback = await attachWindowsBrowserAccessProof(
@@ -937,12 +1039,39 @@ function registerIpc() {
         if (authorizationCanceled && lastSystemDomainProxyPolicySignature) {
           lastSystemDomainProxyAuthorizationCanceledSignature = lastSystemDomainProxyPolicySignature;
         }
-        runtime.connection = retainedConnection;
+        runtime.connection = darwinCombinedRestoreFailed && !wireGuardStillActive
+          ? {
+              ...retainedConnection,
+              state: 'lease-only',
+              wireGuard: summarizeWireGuardStatus(wireGuard?.status, retainedConnection),
+              health: {
+                ...normalizeHealth(retainedConnection?.health, leasedHealth()),
+                wireGuard: 'stale',
+                internalApi: 'idle',
+                splitDns: 'stale'
+              },
+              diagnostics: {
+                ...(retainedConnection?.diagnostics || {}),
+                disconnectCleanup: {
+                  ok: false,
+                  cleanupReady: false,
+                  localEdgeClosePending: true,
+                  stage: 'darwin-combined-restore',
+                  message: wireGuard?.message || wireGuard?.error || 'Combined WireGuard/PAC cleanup failed after privileged handoff.',
+                  wireGuard,
+                  updatedAt: nowIso()
+                },
+                updatedAt: nowIso()
+              }
+            }
+          : retainedConnection;
         runtime.auth = retainedAuth;
         const reason = authorizationCanceled
           ? 'authorization-canceled'
           : wireGuardStillActive
             ? 'wireguard-still-active'
+            : darwinCombinedRestoreFailed
+              ? 'darwin-combined-restore-failed'
             : 'wireguard-stop-unverified';
         const detail = wireGuard?.message || wireGuard?.error || '无法确认 WireGuard 已停止';
         runtime.feedback = {
@@ -953,6 +1082,8 @@ function registerIpc() {
               ? '已取消断开；WireGuard、PAC、split DNS 和员工/访客连接均保持原状态。'
             : wireGuardStillActive
               ? `断开未完成，检测到 WireGuard 仍在运行：${detail}`
+              : darwinCombinedRestoreFailed
+                ? `WireGuard 可能已停止，但合并的 PAC/split DNS 清理未完整提交：${detail}。已保留员工身份、本机 2053 和可重试状态，本次不会继续弹出第二个授权窗口。`
               : `断开未完成，无法确认 WireGuard 已停止：${detail}`
         };
         queueDiagnosticLog('warning', `wireguard.disconnect-${reason}`, detail, {
@@ -1069,12 +1200,83 @@ function registerIpc() {
         }
       }
 
-      const standaloneOwnership = await releaseStandaloneOwnershipForRuntime('disconnect');
+      const darwinCombinedRestoreCompleted = process.platform === 'darwin'
+        && Boolean(systemDomainRestoreScript)
+        && wireGuard?.ok === true
+        && wireGuard?.privilegedExecution === 'started';
       const systemDomainProxy = process.platform === 'win32'
         ? windowsSystemDomainProxy
-        : systemDomainRestoreScript && wireGuard?.launchDaemon
+        : darwinProxyRetainedForOtherOwners
+          ? currentSystemDomainProxyStatus('disconnect-shared-proxy-retained', {
+              skipped: true,
+              skipReason: 'darwin-shared-proxy-retained-for-other-owners'
+            })
+        : darwinCombinedRestoreCompleted
           ? await completeExternalSystemDomainProxyRestore('disconnect-combined')
           : await disableSystemDomainProxyForRuntime('disconnect');
+      const darwinSystemProxyCleanupCanceled = process.platform === 'darwin'
+        && isSystemDomainProxyAuthorizationCanceled(systemDomainProxy);
+      const darwinSystemProxyCleanupReady = process.platform !== 'darwin'
+        || darwinProxyRetainedForOtherOwners
+        || Boolean(
+          systemDomainProxy
+          && systemDomainProxy.applied !== true
+          && !systemDomainProxy.error
+          && !darwinSystemProxyCleanupCanceled
+        );
+      if (!darwinSystemProxyCleanupReady) {
+        const detail = systemDomainProxy?.error
+          || systemDomainProxy?.skipReason
+          || '无法确认 macOS PAC/split DNS 已恢复。';
+        runtime.connection = {
+          ...retainedConnection,
+          state: 'lease-only',
+          wireGuard: summarizeWireGuardStatus(wireGuard?.status, retainedConnection),
+          health: {
+            ...normalizeHealth(retainedConnection?.health, leasedHealth()),
+            wireGuard: 'stale',
+            internalApi: 'idle',
+            splitDns: 'stale'
+          },
+          diagnostics: {
+            ...(retainedConnection?.diagnostics || {}),
+            disconnectCleanup: {
+              ok: false,
+              cleanupReady: false,
+              localEdgeClosePending: true,
+              ownershipReleasePending: true,
+              stage: 'darwin-system-proxy-restore',
+              message: detail,
+              wireGuard,
+              systemDomainProxy,
+              updatedAt: nowIso()
+            },
+            updatedAt: nowIso()
+          }
+        };
+        runtime.auth = retainedAuth;
+        runtime.feedback = {
+          tone: 'warning',
+          message: darwinSystemProxyCleanupCanceled
+            ? '已取消系统网络清理；WireGuard 已停止，但员工身份、本机 2053、PAC/DNS state 和 ownership 均保留，本次不会再次弹窗。'
+            : `WireGuard 已停止，但 macOS PAC/split DNS 清理未确认：${detail}。已保留员工身份、本机 2053 和 ownership，请再次明确清理。`
+        };
+        queueDiagnosticLog('warning', 'system-domain-proxy.disconnect-restore-unverified', detail, {
+          mode: disconnectedMode,
+          leaseIp: disconnectedIp,
+          wireGuard,
+          systemDomainProxy
+        });
+        touchRuntime('disconnect requires Darwin system proxy cleanup retry');
+        await publishNetworkModeEvent(
+          disconnectedMode === 'employee' ? 'staff:disconnect' : 'visit:disconnect',
+          'failed',
+          { leaseIp: disconnectedIp, reason: 'darwin-system-proxy-restore-unverified' }
+        );
+        await saveAndBroadcast();
+        return visibleRuntime();
+      }
+      const standaloneOwnership = await releaseStandaloneOwnershipForRuntime('disconnect');
       if (process.platform === 'win32' && standaloneOwnership?.error) {
         runtime.connection = {
           ...retainedConnection,
@@ -1166,6 +1368,8 @@ function registerIpc() {
     }
     clearPendingFeishuLogin('local-identity-reset');
     networkMutationEpoch += 1;
+    networkRecoveryPaused = false;
+    pausedForegroundNetworkOperation = null;
     const previousMode = runtime.connection?.mode === 'employee' ? 'employee' : 'guest';
     const previousIp = nullableString(runtime.connection?.localIp);
     try {
@@ -1878,9 +2082,20 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:repair-system-network', async () => {
-    await repairSystemNetworkForRuntime('manual-repair');
-    await saveAndBroadcast();
-    return visibleRuntime();
+    const operation = beginForegroundNetworkOperation(
+      'manual-repair',
+      makeRequestId('manual-network-repair')
+    );
+    try {
+      await repairSystemNetworkForRuntime('manual-repair', { foregroundOperation: operation });
+      await saveAndBroadcast();
+      return visibleRuntime();
+    } catch (err) {
+      if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
+      throw err;
+    } finally {
+      finishForegroundNetworkOperation(operation);
+    }
   });
   ipcMain.handle('mx-h2i:open-admin', async () => {
     const baseUrl = runtime.connection?.state === 'connected'
@@ -2008,21 +2223,27 @@ function registerIpc() {
 }
 
 async function promoteEmployeeConnection(options = {}) {
-  const connectOperation = beginWireGuardConnectOperation();
-  const lifecycleEpoch = networkMutationEpoch;
   const transitionStartedAt = Date.now();
   const transitionId = makeRequestId(options.provider === 'feishu' ? 'feishu-staff-connect' : 'staff-connect');
   const provider = options.provider === 'feishu' ? 'feishu' : 'password';
+  const foregroundOperation = beginForegroundNetworkOperation(
+    provider === 'feishu' ? 'feishu-connect' : 'employee-connect',
+    transitionId
+  );
+  const connectOperation = beginWireGuardConnectOperation();
+  const lifecycleEpoch = foregroundOperation.epoch;
   const providerLabel = provider === 'feishu' ? '飞书' : '员工账号';
   const accountHint = nullableString(options.account);
   try {
-    assertNetworkTransitionCurrent(lifecycleEpoch);
+    assertForegroundNetworkOperationCurrent(foregroundOperation, 'preflight');
     await drainWireGuardRecoveryOperation();
-    assertNetworkTransitionCurrent(lifecycleEpoch);
+    assertForegroundNetworkOperationCurrent(foregroundOperation, 'credential-check');
     await ensureCredentialStorageRecoveryReady();
+    assertForegroundNetworkOperationCurrent(foregroundOperation, 'endpoint-probe');
     const employeeEndpointRouteRepair = await repairDarwinEndpointRouteBeforeBootstrap(
       provider === 'feishu' ? 'feishu-pre-bootstrap' : 'employee-pre-bootstrap'
     );
+    assertForegroundNetworkOperationCurrent(foregroundOperation, 'endpoint-probed');
     if (employeeEndpointRouteRepair?.stale === true && employeeEndpointRouteRepair?.repaired !== true) {
       await saveAndBroadcast();
       return visibleRuntime();
@@ -2034,6 +2255,7 @@ async function promoteEmployeeConnection(options = {}) {
         provider === 'feishu' ? 'feishu-connect-guest-fallback-guard' : 'staff-connect-guest-fallback-guard'
       );
       if (guestProbe.superseded) return visibleRuntime();
+      assertForegroundNetworkOperationCurrent(foregroundOperation, 'retained-connection-probed');
       connectedFallbackWasProbed = true;
     }
     let retainedRecovery = null;
@@ -2042,6 +2264,7 @@ async function promoteEmployeeConnection(options = {}) {
         provider === 'feishu' ? 'feishu-pre-bootstrap' : 'employee-pre-bootstrap',
         { allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery() }
       );
+      assertForegroundNetworkOperationCurrent(foregroundOperation, 'retained-tunnel-probed');
     }
     if (retainedRecovery?.authorizationCanceled === true) {
       runtime.feedback = {
@@ -2063,7 +2286,14 @@ async function promoteEmployeeConnection(options = {}) {
     const guestFallback = networkFallback?.mode === 'guest' ? networkFallback : null;
     const identityFallback = networkFallback ? runtime.identity : null;
     const authFallback = networkFallback ? runtime.auth : null;
-    assertNetworkTransitionCurrent(lifecycleEpoch);
+    if (networkFallback) {
+      foregroundOperation.snapshot = {
+        connection: networkFallback,
+        identity: identityFallback,
+        auth: authFallback
+      };
+    }
+    assertForegroundNetworkOperationCurrent(foregroundOperation, 'connecting');
     setConnecting('employee', {
       replacingGuest: Boolean(guestFallback),
       provider
@@ -2073,7 +2303,7 @@ async function promoteEmployeeConnection(options = {}) {
       transitionId
     });
     await saveAndBroadcast({ fallbackConnection: networkFallback });
-    assertNetworkTransitionCurrent(lifecycleEpoch);
+    assertForegroundNetworkOperationCurrent(foregroundOperation, 'bootstrap');
     scheduleNetworkEnvironmentDiagnostics(`${provider}-pre-connect`, {
       phase: 'bootstrap',
       persist: false,
@@ -2086,7 +2316,7 @@ async function promoteEmployeeConnection(options = {}) {
       const bootstrap = resolvedBootstrap || await resolveBootstrapEndpoint(runtime.config, {
         requireSecureTransport: provider === 'feishu'
       });
-      assertNetworkTransitionCurrent(lifecycleEpoch);
+      assertForegroundNetworkOperationCurrent(foregroundOperation, 'bootstrap-resolved');
       if (provider === 'feishu') {
         assertSecureFeishuTransport(bootstrap, '员工网络切换');
       }
@@ -2096,12 +2326,12 @@ async function promoteEmployeeConnection(options = {}) {
       );
       const baseUrl = bootstrap.baseUrl;
       await applyResolvedBootstrapEndpoint(bootstrap);
-      assertNetworkTransitionCurrent(lifecycleEpoch);
+      assertForegroundNetworkOperationCurrent(foregroundOperation, 'authenticating');
       const auth = authenticated || await options.authenticate?.(baseUrl, bootstrap);
       if (!auth?.user?.userId || !auth?.accessToken) {
         throw new Error(`${providerLabel}登录没有返回可用的 Internal user token。`);
       }
-      assertNetworkTransitionCurrent(lifecycleEpoch);
+      assertForegroundNetworkOperationCurrent(foregroundOperation, 'authenticated');
       authenticated = auth;
       resolvedBootstrap = bootstrap;
       const account = nullableString(auth.user.email)
@@ -2126,7 +2356,7 @@ async function promoteEmployeeConnection(options = {}) {
       }, {
         preservePreviousOnRetryFailure: Boolean(networkFallback)
       });
-      assertNetworkTransitionCurrent(lifecycleEpoch);
+      assertForegroundNetworkOperationCurrent(foregroundOperation, 'session-ready');
       dataPlaneApplyStarted = true;
       await applyNetworkSession(session, {
         mode: 'employee',
@@ -2151,6 +2381,7 @@ async function promoteEmployeeConnection(options = {}) {
         fallbackIdentity: identityFallback,
         fallbackAuth: authFallback,
         lifecycleEpoch,
+        foregroundOperation,
         transitionId,
         transitionStartedAt
       });
@@ -2196,6 +2427,7 @@ async function promoteEmployeeConnection(options = {}) {
     throw err;
   } finally {
     connectOperation.finish();
+    finishForegroundNetworkOperation(foregroundOperation);
   }
 }
 
@@ -3272,12 +3504,13 @@ function onUnlockScreen() {
 }
 
 function scheduleWireGuardRecovery(reason, delays = [2500, 12_000, 25_000], options = {}) {
-  if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) return;
+  if (networkRecoveryPaused || anonymousRecoveryBlockedByPolicy(runtime?.connection)) return;
   const allowPrivileged = options.allowPrivileged === true;
   for (const delay of delays) {
     const timer = setTimeout(() => {
       const index = wireGuardRecoveryTimers.indexOf(timer);
       if (index >= 0) wireGuardRecoveryTimers.splice(index, 1);
+      if (networkRecoveryPaused) return;
       void recoverWireGuardForRuntime(reason, { allowPrivileged })
         .then((result) => maybeRefreshSystemDomainProxyAfterWireGuardRecovery(reason, result))
         .catch(() => undefined);
@@ -3335,7 +3568,7 @@ function scheduleNetworkChangeRecovery(reason) {
 }
 
 async function handleNetworkChange(reason) {
-  if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) return;
+  if (networkRecoveryPaused || anonymousRecoveryBlockedByPolicy(runtime?.connection)) return;
   const recoveryReason = `network-change-${reason || 'detected'}`;
   const endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(recoveryReason, { force: true });
   await recordDarwinEndpointRouteRepairDiagnostics(endpointRouteRepair, recoveryReason);
@@ -3350,32 +3583,37 @@ async function handleNetworkChange(reason) {
 
 async function refreshSystemDomainProxyAfterNetworkChange(reason) {
   if (!systemDomainProxyManager || !systemDomainProxyRuntimeEligible()) return null;
-  if (typeof systemDomainProxyManager.statusVerified === 'function') {
-    const verified = await systemDomainProxyManager.statusVerified().catch(() => null);
-    const withBrowserProof = await attachWindowsBrowserAccessProof(verified, reason);
-    if (withBrowserProof?.applied === true && systemDomainProxyConnectionReady(withBrowserProof)) {
-      await recordSystemDomainProxyDiagnostics({
-        ...withBrowserProof,
-        reason,
-        verified: true,
-        skipped: true,
-        skipReason: 'network-change-verified'
-      }, `system domain proxy verified: ${reason}`);
-      return withBrowserProof;
-    }
-  }
+  const expectedConnection = runtime?.connection || null;
+  const expectedEpoch = networkMutationEpoch;
   const status = await ensureSystemDomainProxyForRuntime('route-refresh');
+  if (!systemDomainProxyRefreshContextCurrent(expectedConnection, expectedEpoch)) {
+    return staleSystemDomainProxyRefreshStatus(status, reason);
+  }
   await recordSystemDomainProxyDiagnostics({
     ...(status && typeof status === 'object' ? status : {}),
     reason,
-    verified: false,
     repairReason: 'network-change'
   }, `system domain proxy checked after network change: ${reason}`);
   return status;
 }
 
+function systemDomainProxyRefreshContextCurrent(expectedConnection, expectedEpoch) {
+  return expectedEpoch === networkMutationEpoch
+    && sameConnectionTransitionIdentity(runtime?.connection, expectedConnection);
+}
+
+function staleSystemDomainProxyRefreshStatus(status, reason) {
+  return {
+    ...(status && typeof status === 'object' ? status : {}),
+    reason,
+    skipped: true,
+    stale: true,
+    skipReason: 'connection-changed-during-system-dns-proof'
+  };
+}
+
 async function maybeRefreshSystemDomainProxyAfterWireGuardRecovery(reason, result) {
-  if (appShutdownRequested || wireGuardDisconnectInFlight) return null;
+  if (appShutdownRequested || wireGuardDisconnectInFlight || networkRecoveryPaused) return null;
   if (!result?.ready || !systemDomainProxyRuntimeEligible()) return null;
   if (!shouldRefreshSystemDomainProxyAfterWireGuardRecovery(reason)) return null;
   return refreshSystemDomainProxyForRuntime('route-refresh');
@@ -3505,6 +3743,7 @@ async function initializeSystemDomainProxy() {
       pacPort: localEdgePort(),
       log: systemDomainProxyLogger()
     });
+    await reconcilePendingExternalSystemDomainProxyApplyAfterStartup();
   } catch (err) {
     console.warn('[mx-h2i] system domain proxy unavailable:', errorMessage(err));
     queueDiagnosticError('system-domain-proxy.initialize-failed', err);
@@ -3529,6 +3768,37 @@ async function initializeSystemDomainProxy() {
     // strict quit cleanup.
     console.warn('[mx-h2i] system domain proxy startup restore failed:', errorMessage(err));
     queueDiagnosticError('system-domain-proxy.startup-restore-failed', err);
+  }
+}
+
+async function reconcilePendingExternalSystemDomainProxyApplyAfterStartup() {
+  if (process.platform !== 'darwin' || !systemDomainProxyManager) return null;
+  const status = typeof systemDomainProxyManager.status === 'function'
+    ? systemDomainProxyManager.status()
+    : null;
+  const transactionToken = nullableString(status?.transactionToken);
+  if (
+    status?.pending !== true
+    || !transactionToken
+    || typeof systemDomainProxyManager.completeExternalApply !== 'function'
+  ) {
+    return status;
+  }
+  try {
+    return await systemDomainProxyManager.completeExternalApply(
+      transactionToken,
+      'app-startup-pending-reconcile'
+    );
+  } catch (err) {
+    // This is readback-only. Keep the durable pending transaction intact so a
+    // later explicit repair can reconcile it without inventing a restore.
+    queueDiagnosticError('system-domain-proxy.startup-pending-reconcile-failed', err, {
+      transactionPending: true
+    });
+    return {
+      ...status,
+      error: errorMessage(err)
+    };
   }
 }
 
@@ -3557,7 +3827,7 @@ async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
       && status?.skipped === true
       && status?.skipReason === 'background-refresh-no-privileged-apply'
     ) {
-      return attachWindowsBrowserAccessProof(
+      return attachSystemDomainProxyConnectionProof(
         await ensureSystemDomainProxyForRuntimeOnce(reason),
         reason
       );
@@ -3567,7 +3837,7 @@ async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
       : status;
   }
   const pending = ensureSystemDomainProxyForRuntimeOnce(reason)
-    .then((status) => attachWindowsBrowserAccessProof(status, reason));
+    .then((status) => attachSystemDomainProxyConnectionProof(status, reason));
   systemDomainProxyEnsureInFlight = pending;
   try {
     return await pending;
@@ -3598,15 +3868,30 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
   }
   try {
     const backgroundRefresh = isBackgroundSystemDomainProxyReason(reason);
+    const backgroundConnection = backgroundRefresh ? runtime?.connection || null : null;
+    const backgroundEpoch = networkMutationEpoch;
+    if (backgroundRefresh && networkRecoveryPaused) {
+      return currentSystemDomainProxyStatus(reason, {
+        skipped: true,
+        skipReason: 'foreground-network-recovery-paused'
+      });
+    }
     const reverseProxyRoutes = await systemPacReverseProxyRoutes({
       allowWarnings: !backgroundRefresh,
       timeoutMs: backgroundRefresh ? SYSTEM_DOMAIN_PROXY_ROUTE_REFRESH_TIMEOUT_MS : 5000
     });
-    const domains = uniqueStrings([
-      ...splitDnsDomains(runtime?.config),
-      ...reverseProxyRoutes.map((route) => route.host).filter(Boolean)
-    ]);
+    const domains = systemDomainProxyDomains(
+      splitDnsDomains(runtime?.config),
+      networkDiagnosticHost(),
+      reverseProxyRoutes.map((route) => route.host).filter(Boolean)
+    );
     if (domains.length === 0) {
+      if (process.platform === 'darwin' && backgroundRefresh) {
+        return currentSystemDomainProxyStatus(reason, {
+          skipped: true,
+          skipReason: 'background-no-domains'
+        });
+      }
       return disableSystemDomainProxyForRuntime(`${reason}-no-domains`);
     }
     const policy = {
@@ -3623,7 +3908,12 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
       ownershipClaim: systemDomainProxyOwnershipClaim(domains, reverseProxyRoutes)
     };
     const policySignature = systemDomainProxyPolicySignature(policy);
-    const skipped = await maybeSkipSystemDomainProxyApply(reason, policySignature);
+    if (!backgroundRefresh && shouldApplySystemDomainProxyForReason(reason)) {
+      // A new foreground action is an explicit user retry. Background ticks
+      // remain latched after a privileged failure and cannot reopen osascript.
+      lastSystemDomainProxyPrivilegedFailureSignature = null;
+    }
+    const skipped = await maybeSkipSystemDomainProxyApply(reason, policySignature, policy);
     if (skipped) return skipped;
     if (!shouldApplySystemDomainProxyForReason(reason)) {
       return currentSystemDomainProxyStatus(reason, {
@@ -3633,8 +3923,30 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
         reverseProxyRoutes
       });
     }
+    if (
+      backgroundRefresh
+      && (
+        networkRecoveryPaused
+        || !systemDomainProxyRefreshContextCurrent(backgroundConnection, backgroundEpoch)
+      )
+    ) {
+      return currentSystemDomainProxyStatus(reason, {
+        skipped: true,
+        stale: true,
+        skipReason: networkRecoveryPaused
+          ? 'foreground-network-recovery-paused'
+          : 'connection-changed-before-background-privileged-apply',
+        domains,
+        reverseProxyRoutes
+      });
+    }
     try {
-      let status = await systemDomainProxyManager.apply(policy);
+      let status = await systemDomainProxyManager.apply(policy, {
+        // A user-requested repair must bypass the metadata-only fast path so
+        // macOS gets one guarded resolver rewrite and cache flush. Background
+        // refresh remains read-only by default and never sets this flag.
+        forceDarwinRefresh: process.platform === 'darwin' && reason === 'manual-repair'
+      });
       if (
         process.platform === 'darwin'
         && status?.applied === true
@@ -3654,6 +3966,9 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
         lastSystemDomainProxyAuthorizationCanceledSignature = policySignature;
       } else if (status?.applied && !status?.error && !status?.resolverError) {
         lastSystemDomainProxyAuthorizationCanceledSignature = null;
+        lastSystemDomainProxyPrivilegedFailureSignature = null;
+      } else {
+        lastSystemDomainProxyPrivilegedFailureSignature = policySignature;
       }
       return status;
     } catch (err) {
@@ -3661,6 +3976,8 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
       pendingWindowsSystemProxyTakeoverSignature = null;
       if (isSystemDomainProxyAuthorizationCanceled(err)) {
         lastSystemDomainProxyAuthorizationCanceledSignature = policySignature;
+      } else {
+        lastSystemDomainProxyPrivilegedFailureSignature = policySignature;
       }
       return {
         supported: true,
@@ -3681,6 +3998,117 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
       error: errorMessage(err)
     };
   }
+}
+
+async function attachSystemDomainProxyConnectionProof(status, reason = 'manual') {
+  const withWindowsProof = await attachWindowsBrowserAccessProof(status, reason);
+  return attachDarwinSystemDnsProof(withWindowsProof, reason);
+}
+
+async function attachDarwinSystemDnsProof(status, reason = 'manual') {
+  if (process.platform !== 'darwin') return status;
+  const base = status && typeof status === 'object'
+    ? status
+    : {
+        supported: Boolean(systemDomainProxyManager),
+        applied: false,
+        platform: process.platform,
+        reason
+      };
+  const domains = splitDnsDomains(runtime?.config);
+  if (domains.length === 0) {
+    return {
+      ...base,
+      systemResolution: {
+        host: null,
+        state: 'not-configured',
+        severity: 'ok',
+        ok: true,
+        ready: true,
+        skipped: true,
+        skipReason: 'split-dns-not-configured',
+        proof: 'system-dns-lookup',
+        proofSessionId: DARWIN_SYSTEM_DNS_PROOF_SESSION_ID,
+        updatedAt: nowIso()
+      }
+    };
+  }
+  const host = darwinSplitDnsDiagnosticHost(domains, base.reverseProxyRoutes);
+  const expectedTargets = darwinSystemResolutionExpectedTargets(
+    host,
+    base.reverseProxyRoutes,
+    systemPacDnsFallbackTarget()
+  );
+  const metadataReady = base.applied === true
+    && base.verified === true
+    && base.resolverApplied === true
+    && base.systemResolverMode === 'dynamic';
+  if (!host || !metadataReady) {
+    return {
+      ...base,
+      systemResolution: {
+        host,
+        state: host ? 'resolver-metadata-not-ready' : 'proof-host-missing',
+        severity: 'error',
+        ok: false,
+        ready: false,
+        skipped: true,
+        skipReason: host ? 'resolver-metadata-not-ready' : 'split-dns-diagnostic-host-missing',
+        message: host
+          ? 'macOS PAC / dynamic resolver 元数据尚未 ready，未接受系统 DNS 证明。'
+          : '当前 split-DNS namespace 内没有可用于系统解析证明的主机。',
+        proof: 'system-dns-lookup',
+        proofSessionId: DARWIN_SYSTEM_DNS_PROOF_SESSION_ID,
+        updatedAt: nowIso()
+      }
+    };
+  }
+  let result = null;
+  try {
+    const mod = await importInstalledPackage('@qpjoy/electron-launcher/network-diagnostics');
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      result = await mod.diagnoseLauncherHostResolution({
+        host,
+        phase: 'connected',
+        expectedInternalTargets: expectedTargets,
+        internalCidrs: internalDiagnosticCidrs(),
+        v1HdoCidrs: configuredCidrList(process.env.MX_H2I_V1_HDO_CIDRS),
+        proxyFakeIpCidrs: configuredCidrList(process.env.MX_H2I_PROXY_FAKE_IP_CIDRS),
+        lookup: (lookupHost) => withTimeout(
+          dnsPromises.lookup(lookupHost, { all: true, family: 4 }),
+          1200,
+          `macOS split DNS proof timeout for ${lookupHost}`,
+          'MX_DARWIN_SPLIT_DNS_PROOF_TIMEOUT'
+        )
+      });
+      if (darwinSystemResolutionResultReady(result) || attempt === 3) break;
+      await delay(250);
+    }
+  } catch (err) {
+    result = {
+      host,
+      state: 'unresolved',
+      severity: 'error',
+      ok: false,
+      error: errorMessage(err),
+      message: `macOS split DNS 端到端解析失败：${errorMessage(err)}`,
+      updatedAt: nowIso()
+    };
+  }
+  return {
+    ...base,
+    systemResolution: {
+      ...result,
+      ready: darwinSystemResolutionResultReady(result),
+      proof: 'system-dns-lookup',
+      proofSessionId: DARWIN_SYSTEM_DNS_PROOF_SESSION_ID,
+      updatedAt: nowIso()
+    }
+  };
+}
+
+function darwinSplitDnsDiagnosticHost(domains, reverseProxyRoutes = null) {
+  return coveredSplitDnsDiagnosticHost(domains, reverseProxyRoutes);
 }
 
 async function attachWindowsBrowserAccessProof(status, reason = 'manual') {
@@ -3917,7 +4345,10 @@ function systemDomainProxyRuntimeEligible() {
 }
 
 async function prepareSystemDomainProxyForWireGuardInstall(reason = 'pre-connect') {
-  if (!systemDomainProxyManager?.darwinPrepareApply || process.platform !== 'darwin') return null;
+  const prepareExternalApply = systemDomainProxyManager?.prepareExternalApply
+    || systemDomainProxyManager?.darwinPrepareApply;
+  if (typeof prepareExternalApply !== 'function' || process.platform !== 'darwin') return null;
+  let policySignature = null;
   try {
     const cachedRoutes = Array.isArray(lastSystemPacReverseProxyRoutes) ? lastSystemPacReverseProxyRoutes : [];
     const reverseProxyRoutes = cachedRoutes.length > 0
@@ -3926,10 +4357,11 @@ async function prepareSystemDomainProxyForWireGuardInstall(reason = 'pre-connect
           allowWarnings: false,
           timeoutMs: 1500
         });
-    const domains = uniqueStrings([
-      ...splitDnsDomains(runtime?.config),
-      ...reverseProxyRoutes.map((route) => route.host).filter(Boolean)
-    ]);
+    const domains = systemDomainProxyDomains(
+      splitDnsDomains(runtime?.config),
+      preConnectSystemDomainProxyDiagnosticHost(),
+      reverseProxyRoutes.map((route) => route.host).filter(Boolean)
+    );
     if (domains.length === 0) return null;
     const policy = {
       enabled: true,
@@ -3944,14 +4376,19 @@ async function prepareSystemDomainProxyForWireGuardInstall(reason = 'pre-connect
       fallbackProxy: systemPacFallbackProxy(),
       ownershipClaim: systemDomainProxyOwnershipClaim(domains, reverseProxyRoutes)
     };
-    const status = await systemDomainProxyManager.darwinPrepareApply(policy);
+    policySignature = systemDomainProxyPolicySignature(policy);
+    const status = await prepareExternalApply.call(systemDomainProxyManager, policy);
     const shell = nullableString(status?.darwinApplyShell);
-    if (!shell) return { status, shell: null };
-    lastSystemDomainProxyPolicySignature = systemDomainProxyPolicySignature(policy);
+    const transactionToken = nullableString(status?.transactionToken);
+    if (!shell) return { status, shell: null, policySignature, transactionToken };
+    lastSystemDomainProxyPolicySignature = policySignature;
     lastSystemDomainProxyAuthorizationCanceledSignature = null;
+    lastSystemDomainProxyPrivilegedFailureSignature = null;
     return {
       status,
-      shell
+      shell,
+      policySignature,
+      transactionToken
     };
   } catch (err) {
     return {
@@ -3962,9 +4399,49 @@ async function prepareSystemDomainProxyForWireGuardInstall(reason = 'pre-connect
         reason,
         error: errorMessage(err)
       },
-      shell: null
+      shell: null,
+      policySignature,
+      transactionToken: null
     };
   }
+}
+
+function latchPreparedSystemDomainProxyFailure(prepared, result = null) {
+  const policySignature = nullableString(prepared?.policySignature)
+    || lastSystemDomainProxyPolicySignature;
+  if (!policySignature) return false;
+  lastSystemDomainProxyPrivilegedFailureSignature = policySignature;
+  if (result?.authorizationCanceled === true || isUserAuthorizationCanceledError(result)) {
+    lastSystemDomainProxyAuthorizationCanceledSignature = policySignature;
+  }
+  return true;
+}
+
+function markPreparedSystemDomainProxyPrivilegedHandoff(prepared) {
+  const transactionToken = nullableString(prepared?.transactionToken);
+  if (!transactionToken) return null;
+  if (typeof systemDomainProxyManager?.markExternalApplyHandoff !== 'function') {
+    const err = new Error('System proxy manager cannot durably mark the privileged handoff.');
+    err.code = 'MX_SYSTEM_PROXY_HANDOFF_UNAVAILABLE';
+    throw err;
+  }
+  const status = systemDomainProxyManager.markExternalApplyHandoff(transactionToken);
+  if (
+    status?.error
+    || status?.skipped === true
+    || status?.pending !== true
+    || status?.externalApplyPhase !== 'privileged-handoff'
+    || nullableString(status?.transactionToken) !== transactionToken
+  ) {
+    const err = new Error(
+      status?.error
+      || `System proxy privileged handoff was not committed (${status?.externalApplyPhase || status?.skipReason || 'unknown'}).`
+    );
+    err.code = 'MX_SYSTEM_PROXY_HANDOFF_FAILED';
+    err.status = status;
+    throw err;
+  }
+  return status;
 }
 
 function shouldSuppressWireGuardDnsForSystemDomainProxy(prepared = null) {
@@ -3992,6 +4469,7 @@ async function disableSystemDomainProxyForRuntime(reason = 'manual', options = {
   lastSystemDomainProxySignature = null;
   lastSystemDomainProxyPolicySignature = null;
   lastSystemDomainProxyAuthorizationCanceledSignature = null;
+  lastSystemDomainProxyPrivilegedFailureSignature = null;
   lastWindowsSystemProxyTakeoverSignature = null;
   pendingWindowsSystemProxyTakeoverSignature = null;
   lastWindowsSystemProxyContinuationRefreshAt = 0;
@@ -4081,6 +4559,243 @@ function beginWireGuardConnectOperation() {
   };
 }
 
+function beginForegroundNetworkOperation(kind, operationId = null) {
+  if (activeForegroundNetworkOperation) {
+    const err = new Error('Another foreground network operation is already running.');
+    err.code = 'MX_FOREGROUND_NETWORK_OPERATION_BUSY';
+    throw err;
+  }
+  networkMutationEpoch += 1;
+  networkRecoveryPaused = false;
+  pausedForegroundNetworkOperation = null;
+  cancelScheduledWireGuardRecovery();
+  const retainedConnection = retainableConnectionSnapshot(runtime?.connection);
+  const operation = {
+    id: nullableString(operationId) || makeRequestId('network-operation'),
+    kind: nullableString(kind) || 'network-operation',
+    status: 'running',
+    stage: 'starting',
+    cancelRequested: false,
+    promptActive: false,
+    privilegedStarted: false,
+    epoch: networkMutationEpoch,
+    startedAt: nowIso(),
+    snapshot: {
+      connection: retainedConnection,
+      identity: retainedConnection ? runtime?.identity : null,
+      auth: retainedConnection ? runtime?.auth : null
+    },
+    preparedSystemDomainProxy: null
+  };
+  activeForegroundNetworkOperation = operation;
+  broadcastState();
+  return operation;
+}
+
+function updateForegroundNetworkOperation(operation, stage, patch = {}) {
+  if (!operation || activeForegroundNetworkOperation !== operation) return false;
+  operation.stage = nullableString(stage) || operation.stage;
+  Object.assign(operation, patch);
+  broadcastState();
+  return true;
+}
+
+function assertForegroundNetworkOperationCurrent(operation, stage = null) {
+  if (stage) updateForegroundNetworkOperation(operation, stage);
+  assertNetworkTransitionCurrent(operation?.epoch);
+  if (
+    !operation
+    || activeForegroundNetworkOperation !== operation
+    || operation.cancelRequested === true
+  ) {
+    throw supersededNetworkTransitionError();
+  }
+}
+
+function foregroundOperationConnectionHasLiveTunnel(connection) {
+  return connection?.wireGuard?.active === true
+    || connection?.health?.wireGuard === 'ready';
+}
+
+function restoreForegroundNetworkOperationSnapshot(operation) {
+  const snapshot = operation?.snapshot || {};
+  if (snapshot.connection) {
+    runtime.connection = snapshot.connection;
+    if (Object.prototype.hasOwnProperty.call(snapshot, 'identity')) {
+      runtime.identity = snapshot.identity;
+    }
+    if (Object.prototype.hasOwnProperty.call(snapshot, 'auth')) {
+      runtime.auth = snapshot.auth;
+    }
+    return;
+  }
+  const current = runtime?.connection;
+  if (foregroundOperationConnectionHasLiveTunnel(current)) {
+    runtime.connection = {
+      ...current,
+      state: 'tunnel-only',
+      health: {
+        ...current.health,
+        splitDns: 'blocked'
+      }
+    };
+    return;
+  }
+  if (current?.state === 'connecting' && !current?.leaseId) {
+    runtime.connection = {
+      ...idleConnection(),
+      mode: current.mode === 'employee' ? 'employee' : 'guest'
+    };
+  }
+}
+
+async function restoreForegroundStandaloneOwnershipSnapshot(operation, reason) {
+  const snapshotConnection = operation?.snapshot?.connection || null;
+  const snapshotRoutePlan = normalizeRoutePlan(snapshotConnection?.routePlan);
+  if (snapshotRoutePlan && foregroundOperationConnectionHasLiveTunnel(snapshotConnection)) {
+    return upsertStandaloneOwnershipForRoutePlan(
+      snapshotRoutePlan,
+      snapshotConnection,
+      reason,
+      'active'
+    );
+  }
+  return releaseStandaloneOwnershipForRuntime(reason);
+}
+
+function markForegroundNetworkOperationPaused(operation, message) {
+  if (!operation) return;
+  operation.status = 'paused';
+  operation.stage = 'paused';
+  operation.promptActive = false;
+  operation.message = nullableString(message)
+    || '已停止本次连接/恢复的后续步骤；现有身份和已运行的隧道保持不变。';
+  pausedForegroundNetworkOperation = operation;
+  networkRecoveryPaused = true;
+}
+
+function requestForegroundNetworkOperationCancel(input = null) {
+  const requestedId = nullableString(
+    typeof input === 'string' ? input : input?.operationId || input?.id
+  );
+  let operation = activeForegroundNetworkOperation;
+  if (!operation) {
+    if (requestedId) {
+      return { canceled: false, reason: 'operation-id-mismatch' };
+    }
+    const connection = runtime?.connection;
+    const recoveryCancelable = shouldRecoverWireGuardConnection(connection)
+      || ['connecting', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable']
+        .includes(connection?.state);
+    if (!recoveryCancelable) {
+      return { canceled: false, reason: 'no-active-operation' };
+    }
+    networkMutationEpoch += 1;
+    operation = {
+      id: makeRequestId('background-network-recovery'),
+      kind: 'background-recovery',
+      status: 'paused',
+      stage: 'paused',
+      cancelRequested: true,
+      promptActive: false,
+      privilegedStarted: false,
+      epoch: networkMutationEpoch,
+      startedAt: nowIso(),
+      snapshot: {
+        connection: retainableConnectionSnapshot(connection),
+        identity: runtime?.identity,
+        auth: runtime?.auth
+      },
+      message: '已暂停自动恢复；员工身份、WireGuard 和 Internal 当前状态保持不变。'
+    };
+    networkRecoveryPaused = true;
+    cancelScheduledWireGuardRecovery();
+    pausedForegroundNetworkOperation = operation;
+    runtime.feedback = { tone: 'warning', message: operation.message };
+    touchRuntime('background network recovery paused by user');
+    broadcastState();
+    void saveRuntime(runtime).catch((err) => {
+      queueDiagnosticError('network.recovery-pause-save-failed', err, {
+        operationId: operation.id
+      });
+    });
+    return { canceled: true, operationId: operation.id };
+  }
+  if (operation.status !== 'running') {
+    return { canceled: false, reason: 'operation-not-running' };
+  }
+  if (requestedId && requestedId !== operation.id) {
+    return { canceled: false, reason: 'operation-id-mismatch' };
+  }
+  operation.cancelRequested = true;
+  operation.status = 'cancel-requested';
+  operation.stage = operation.promptActive ? 'cancel-requested-during-prompt' : 'cancel-requested';
+  operation.message = operation.promptActive
+    ? '已停止后续恢复；请取消或完成当前 macOS 授权窗口，MX-H2I 不会继续下一次提权。'
+    : '已停止本次连接/恢复的后续步骤。';
+  networkRecoveryPaused = true;
+  networkMutationEpoch += 1;
+  cancelScheduledWireGuardRecovery();
+  if (operation.privilegedStarted !== true) {
+    restoreForegroundNetworkOperationSnapshot(operation);
+  }
+  runtime.feedback = {
+    tone: 'warning',
+    message: operation.message
+  };
+  touchRuntime(`foreground network operation cancel requested: ${operation.kind}`);
+  broadcastState();
+  void saveRuntime(runtime).catch((err) => {
+    queueDiagnosticError('network.operation-cancel-save-failed', err, {
+      operationId: operation.id,
+      kind: operation.kind
+    });
+  });
+  return { canceled: true, operationId: operation.id };
+}
+
+function finishForegroundNetworkOperation(operation) {
+  if (!operation || activeForegroundNetworkOperation !== operation) return;
+  if (operation.cancelRequested === true || operation.status === 'cancel-requested') {
+    markForegroundNetworkOperationPaused(operation);
+  }
+  activeForegroundNetworkOperation = null;
+  broadcastState();
+}
+
+function visibleForegroundNetworkOperation() {
+  const operation = activeForegroundNetworkOperation || pausedForegroundNetworkOperation;
+  if (!operation) {
+    const connection = runtime?.connection;
+    const automaticRecoveryVisible = Boolean(wireGuardRecoveryInFlight)
+      || ['connecting', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable']
+        .includes(connection?.state);
+    if (!automaticRecoveryVisible) return null;
+    return {
+      id: null,
+      kind: 'background-recovery',
+      status: 'running',
+      stage: 'automatic-recovery',
+      cancelable: true,
+      promptActive: false,
+      paused: false,
+      startedAt: null,
+      message: '正在原位校验保留网络；可暂停后续自动恢复。'
+    };
+  }
+  return {
+    id: operation.id,
+    kind: operation.kind,
+    status: operation.status,
+    stage: operation.stage,
+    cancelable: operation.status === 'running',
+    promptActive: operation.promptActive === true,
+    paused: operation.status === 'paused' || networkRecoveryPaused,
+    startedAt: operation.startedAt,
+    message: nullableString(operation.message)
+  };
+}
+
 function supersededNetworkTransitionError() {
   const err = new Error('The network transition was superseded by disconnect or shutdown.');
   err.code = 'MX_NETWORK_TRANSITION_SUPERSEDED';
@@ -4101,10 +4816,13 @@ function assertNetworkTransitionCurrent(epoch) {
   }
 }
 
-async function completeExternalSystemDomainProxyApply(reason = 'external') {
+async function completeExternalSystemDomainProxyApply(reason = 'external', prepared = null) {
   if (!systemDomainProxyManager?.completeExternalApply) return null;
   try {
-    let status = await systemDomainProxyManager.completeExternalApply(reason);
+    const transactionToken = nullableString(prepared?.transactionToken);
+    let status = transactionToken
+      ? await systemDomainProxyManager.completeExternalApply(transactionToken, reason)
+      : await systemDomainProxyManager.completeExternalApply(reason);
     if (
       status?.applied === true
       && typeof systemDomainProxyManager.statusVerified === 'function'
@@ -4116,8 +4834,10 @@ async function completeExternalSystemDomainProxyApply(reason = 'external') {
         externalApply: true
       };
     }
+    status = await attachSystemDomainProxyConnectionProof(status, reason);
     if (status?.applied && !status?.error && !status?.resolverError) {
       lastSystemDomainProxyAuthorizationCanceledSignature = null;
+      lastSystemDomainProxyPrivilegedFailureSignature = null;
     }
     return status;
   } catch (err) {
@@ -4131,11 +4851,61 @@ async function completeExternalSystemDomainProxyApply(reason = 'external') {
   }
 }
 
+async function abortPreparedSystemDomainProxyApply(
+  prepared,
+  reason,
+  execution = 'not-started'
+) {
+  const transactionToken = nullableString(prepared?.transactionToken);
+  const skipReason = nullableString(prepared?.status?.skipReason);
+  if (skipReason === 'external-apply-durable-state-pending' && transactionToken) {
+    // A prior shell may already have committed and only the durable finalize
+    // failed. Treat it as unknown/started and reconcile from live readback;
+    // rolling back the local preflight snapshot would be unsafe.
+    return completeExternalSystemDomainProxyApply(
+      `${reason}-durable-pending-reconcile`,
+      prepared
+    );
+  }
+  if (skipReason === 'external-apply-transaction-in-flight') {
+    // Another in-memory transaction still owns this token. This caller did not
+    // prepare it and must neither abort nor complete it.
+    return currentSystemDomainProxyStatus(reason, {
+      skipped: true,
+      skipReason,
+      pending: true
+    });
+  }
+  if (!transactionToken && !prepared?.shell) return null;
+  if (transactionToken && typeof systemDomainProxyManager?.abortExternalApply === 'function') {
+    try {
+      return await systemDomainProxyManager.abortExternalApply(transactionToken, {
+        reason,
+        execution
+      });
+    } catch (err) {
+      latchPreparedSystemDomainProxyFailure(prepared, err);
+      return {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        error: errorMessage(err)
+      };
+    }
+  }
+  // Compatibility with an older manager: it cannot restore a prepared local
+  // edge transaction without risking a second authorization. Finalize via
+  // readback so the durable state is not left permanently pending.
+  return completeExternalSystemDomainProxyApply(`${reason}-compat-finalize`, prepared);
+}
+
 async function completeExternalSystemDomainProxyRestore(reason = 'external') {
   if (!systemDomainProxyManager?.completeExternalRestore) return null;
   lastSystemDomainProxySignature = null;
   lastSystemDomainProxyPolicySignature = null;
   lastSystemDomainProxyAuthorizationCanceledSignature = null;
+  lastSystemDomainProxyPrivilegedFailureSignature = null;
   lastWindowsSystemProxyTakeoverSignature = null;
   pendingWindowsSystemProxyTakeoverSignature = null;
   lastWindowsSystemProxyContinuationRefreshAt = 0;
@@ -4177,6 +4947,12 @@ function stopSystemDomainProxyRefreshWatcher() {
 
 async function refreshSystemDomainProxyForRuntime(reason = 'manual') {
   if (appShutdownRequested) return shutdownSystemDomainProxyStatus(reason);
+  if (networkRecoveryPaused && isBackgroundSystemDomainProxyReason(reason)) {
+    return currentSystemDomainProxyStatus(reason, {
+      skipped: true,
+      skipReason: 'foreground-network-recovery-paused'
+    });
+  }
   if (wireGuardDisconnectInFlight) {
     return {
       supported: true,
@@ -4200,9 +4976,14 @@ async function refreshSystemDomainProxyForRuntime(reason = 'manual') {
     await recordSystemDomainProxyDiagnostics(status, `system domain proxy restored while inactive: ${reason}`);
     return status;
   }
+  const expectedConnection = runtime?.connection || null;
+  const expectedEpoch = networkMutationEpoch;
   systemDomainProxyRefreshInFlight = true;
   try {
     const status = await ensureSystemDomainProxyForRuntime(reason);
+    if (!systemDomainProxyRefreshContextCurrent(expectedConnection, expectedEpoch)) {
+      return staleSystemDomainProxyRefreshStatus(status, reason);
+    }
     await recordSystemDomainProxyDiagnostics(status, `system domain proxy refreshed: ${reason}`);
     return status;
   } finally {
@@ -4246,6 +5027,22 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
       resolverApplied: status.resolverApplied,
       platform: status.platform
     });
+  } else if (
+    process.platform === 'darwin'
+    && status?.systemResolution
+    && status.systemResolution.ready !== true
+  ) {
+    queueDiagnosticLog(
+      'warning',
+      'system-domain-proxy.system-dns-not-ready',
+      status.systemResolution.message || 'macOS system DNS proof is not ready.',
+      {
+        reason: status.reason,
+        host: status.systemResolution.host,
+        state: status.systemResolution.state,
+        addresses: status.systemResolution.addresses
+      }
+    );
   }
   const promoteWindows = process.platform === 'win32'
     && previousState === 'tunnel-only'
@@ -4316,7 +5113,7 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
     runtime.feedback = {
       tone: 'warning',
       message: process.platform === 'darwin'
-        ? `macOS split DNS 实时验证失败，连接降级为 tunnel-only：${status?.resolverError || status?.error || 'dynamic resolver/local DNS relay 未通过'}`
+        ? `macOS split DNS 实时验证失败，连接降级为 tunnel-only：${status?.systemResolution?.message || status?.resolverError || status?.error || 'dynamic resolver/local DNS relay 未通过'}`
         : `Windows 浏览器 Internal 路径已失效，连接降级为 tunnel-only：${status?.browserAccess?.error || status?.error || 'PAC/local edge 未通过'}`
     };
   } else if (browserFallbackChanged && nextState === 'connected') {
@@ -4472,7 +5269,7 @@ async function systemDomainProxyStatusForDiagnostics(phase) {
     return status;
   }
   const verified = await systemDomainProxyManager.statusVerified().catch(() => status);
-  return attachWindowsBrowserAccessProof(verified, 'diagnostics');
+  return attachSystemDomainProxyConnectionProof(verified, 'diagnostics');
 }
 
 async function collectWindowsNrptDiagnostics() {
@@ -4586,7 +5383,14 @@ function windowsNrptResolutionHint(windowsNrpt) {
   return '';
 }
 
-async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
+async function repairSystemNetworkForRuntime(reason = 'manual-repair', options = {}) {
+  const foregroundOperation = options.foregroundOperation || null;
+  const checkpoint = (stage) => {
+    if (foregroundOperation) {
+      assertForegroundNetworkOperationCurrent(foregroundOperation, stage);
+    }
+  };
+  checkpoint('diagnostics-before');
   if (anonymousRecoveryBlockedByPolicy(runtime?.connection)) {
     applyAnonymousLoginDisabledState(`system network repair blocked: ${reason}`);
     return {
@@ -4596,20 +5400,151 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
     };
   }
   const before = await collectNetworkEnvironmentDiagnostics(`${reason}-before`);
-  // User-triggered repair: allow one macOS admin prompt to delete stale
-  // endpoint routes (route delete needs root). Background recovery paths keep
-  // allowPrivileged off so no surprise auth dialogs appear.
-  const endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(reason, { force: true, allowPrivileged: true });
+  checkpoint('endpoint-probe');
+  // Probe endpoint routes without privilege first. On macOS the endpoint,
+  // WireGuard routes, PAC, and resolver mutations are appended to one
+  // foreground shell below so a confirmed repair never chains auth dialogs.
+  let endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(reason, {
+    force: true,
+    allowPrivileged: false
+  });
+  checkpoint('endpoint-probed');
   const pendingCleanup = pendingWindowsCleanupDiagnostic(runtime?.connection);
   if (pendingCleanup) {
-    return repairPendingWindowsCleanupForRuntime(
-      reason,
-      before,
-      endpointRouteRepair,
-      pendingCleanup
+    updateForegroundNetworkOperation(foregroundOperation, 'windows-cleanup', {
+      privilegedStarted: true,
+      promptActive: true
+    });
+    try {
+      return await repairPendingWindowsCleanupForRuntime(
+        reason,
+        before,
+        endpointRouteRepair,
+        pendingCleanup
+      );
+    } finally {
+      updateForegroundNetworkOperation(foregroundOperation, 'windows-cleanup-complete', {
+        promptActive: false
+      });
+    }
+  }
+  const darwinRetainedRepair = process.platform === 'darwin'
+    && shouldRecoverWireGuardConnection(runtime?.connection);
+  const shouldCombineDarwinRepair = darwinRetainedRepair
+    && (
+      typeof systemDomainProxyManager?.prepareExternalApply === 'function'
+      || typeof systemDomainProxyManager?.darwinPrepareApply === 'function'
+    );
+  const combinedSystemDomainProxy = shouldCombineDarwinRepair
+    ? await prepareSystemDomainProxyForWireGuardInstall(reason)
+    : null;
+  updateForegroundNetworkOperation(foregroundOperation, 'system-domain-proxy-prepared', {
+    preparedSystemDomainProxy: combinedSystemDomainProxy
+  });
+  try {
+    checkpoint('before-privileged-repair');
+  } catch (err) {
+    await abortPreparedSystemDomainProxyApply(
+      combinedSystemDomainProxy,
+      `${reason}-canceled-before-privileged-repair`,
+      'not-started'
+    );
+    throw err;
+  }
+  const skipCombinedRepair = shouldCombineDarwinRepair && !combinedSystemDomainProxy?.shell;
+  if (skipCombinedRepair && combinedSystemDomainProxy?.transactionToken) {
+    await abortPreparedSystemDomainProxyApply(
+      combinedSystemDomainProxy,
+      `${reason}-combined-shell-unavailable`,
+      'not-started'
     );
   }
-  const wireGuardSystemRepair = await repairWireGuardSystemStateForRuntime(reason);
+  let darwinPrivilegedCommandStarted = false;
+  const beforeDarwinPrivilegedCommand = () => {
+    checkpoint('before-darwin-privileged-command');
+    markPreparedSystemDomainProxyPrivilegedHandoff(combinedSystemDomainProxy);
+    darwinPrivilegedCommandStarted = true;
+    updateForegroundNetworkOperation(foregroundOperation, 'system-authorization', {
+      privilegedStarted: true,
+      promptActive: true
+    });
+  };
+  let wireGuardSystemRepair;
+  let systemDomainProxy = null;
+  try {
+    wireGuardSystemRepair = skipCombinedRepair
+    ? {
+        ok: false,
+        skipped: true,
+        reason: 'darwin-combined-shell-unavailable',
+        message: 'PAC / DNS repair could not be prepared; skipped a separate WireGuard authorization transaction.'
+      }
+    : await repairWireGuardSystemStateForRuntime(reason, {
+        darwinExtraInstallShell: combinedSystemDomainProxy?.shell || null,
+        beforeDarwinPrivilegedCommand
+      });
+  } catch (err) {
+    if (process.platform === 'darwin' && combinedSystemDomainProxy?.shell) {
+      if (darwinPrivilegedCommandStarted) {
+        // Once the combined shell has been handed to osascript, execution may
+        // have partially committed. Only read back/finalize; never restore here.
+        systemDomainProxy = await completeExternalSystemDomainProxyApply(
+          `${reason}-combined-error`,
+          combinedSystemDomainProxy
+        );
+        latchPreparedSystemDomainProxyFailure(combinedSystemDomainProxy, err);
+      } else {
+        systemDomainProxy = await abortPreparedSystemDomainProxyApply(
+          combinedSystemDomainProxy,
+          `${reason}-combined-not-started`,
+          'not-started'
+        );
+      }
+    }
+    if (foregroundOperation?.cancelRequested === true) {
+      markForegroundNetworkOperationPaused(
+        foregroundOperation,
+        '已停止后续网络修复；已完成的系统变更已实时收口，不会再次请求授权。'
+      );
+      await saveAndBroadcast();
+      throw supersededNetworkTransitionError();
+    }
+    throw err;
+  } finally {
+    updateForegroundNetworkOperation(foregroundOperation, 'system-authorization-complete', {
+      promptActive: false
+    });
+  }
+  const combinedAuthorizationCanceled = wireGuardSystemRepair?.authorizationCanceled === true
+    || isUserAuthorizationCanceledError(wireGuardSystemRepair);
+  const combinedPrivilegedExecution = nullableString(wireGuardSystemRepair?.privilegedExecution);
+  if (process.platform === 'darwin' && combinedSystemDomainProxy?.shell) {
+    systemDomainProxy = combinedAuthorizationCanceled
+      ? await abortPreparedSystemDomainProxyApply(
+          combinedSystemDomainProxy,
+          `${reason}-authorization-canceled`,
+          'authorization-canceled'
+        )
+      : combinedPrivilegedExecution === 'not-started' || !darwinPrivilegedCommandStarted
+        ? await abortPreparedSystemDomainProxyApply(
+            combinedSystemDomainProxy,
+            `${reason}-combined-not-started`,
+            'not-started'
+          )
+      : await completeExternalSystemDomainProxyApply(
+          `${reason}-combined`,
+          combinedSystemDomainProxy
+        );
+    if (combinedAuthorizationCanceled && foregroundOperation?.cancelRequested === true) {
+      restoreForegroundNetworkOperationSnapshot(foregroundOperation);
+    }
+  }
+  if (process.platform === 'darwin' && combinedSystemDomainProxy?.shell) {
+    endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(`${reason}-after-combined`, {
+      force: true,
+      allowPrivileged: false
+    });
+  }
   let wireGuardProbe = null;
   if (shouldRecoverWireGuardConnection(runtime?.connection)) {
     wireGuardProbe = await probeWireGuardForConnection({
@@ -4628,10 +5563,27 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
       }
     };
   }
-  let systemDomainProxy = null;
-  if (systemDomainProxyRuntimeEligible()) {
+  checkpoint('system-repair-probed');
+  if (process.platform === 'darwin' && combinedSystemDomainProxy?.shell) {
+    // The tokenized prepared transaction was finalized above before honoring
+    // cancellation, so no pending state or later authorization can escape.
+  } else if (darwinRetainedRepair && shouldCombineDarwinRepair) {
+    systemDomainProxy = currentSystemDomainProxyStatus(reason, {
+      skipped: true,
+      skipReason: 'darwin-combined-shell-unavailable'
+    });
+  } else if (darwinRetainedRepair && !shouldCombineDarwinRepair) {
+    // Compatibility with an older manager: WG may already have requested the
+    // only foreground authorization allowed in this user action.
+    systemDomainProxy = currentSystemDomainProxyStatus(reason, {
+      skipped: true,
+      skipReason: 'darwin-system-proxy-repair-deferred-after-wireguard'
+    });
+  } else if (systemDomainProxyRuntimeEligible()) {
+    checkpoint('before-system-domain-proxy-ensure');
     systemDomainProxy = await ensureSystemDomainProxyForRuntime(reason);
   } else if (systemDomainProxyManager?.restoreStale) {
+    checkpoint('before-system-domain-proxy-restore-stale');
     try {
       systemDomainProxy = await systemDomainProxyManager.restoreStale(reason);
     } catch (err) {
@@ -4644,8 +5596,32 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
       };
     }
   } else {
+    checkpoint('before-system-domain-proxy-disable');
     systemDomainProxy = await disableSystemDomainProxyForRuntime(reason);
   }
+  if (process.platform === 'darwin' && combinedSystemDomainProxy?.shell) {
+    const combinedPolicySignature = combinedSystemDomainProxy.policySignature
+      || lastSystemDomainProxyPolicySignature;
+    const combinedCanceled = wireGuardSystemRepair?.authorizationCanceled === true
+      || isUserAuthorizationCanceledError(wireGuardSystemRepair)
+      || isUserAuthorizationCanceledError(systemDomainProxy);
+    const combinedReady = wireGuardSystemRepair?.ok === true
+      && systemDomainProxyConnectionReady(systemDomainProxy);
+    if (!combinedReady && combinedPolicySignature) {
+      lastSystemDomainProxyPrivilegedFailureSignature = combinedPolicySignature;
+      if (combinedCanceled) {
+        lastSystemDomainProxyAuthorizationCanceledSignature = combinedPolicySignature;
+      }
+    }
+  }
+  if (process.platform === 'darwin' && systemDomainProxy) {
+    lastSystemDomainProxySignature = null;
+    await recordSystemDomainProxyDiagnostics(
+      systemDomainProxy,
+      `system domain proxy explicitly repaired: ${reason}`
+    );
+  }
+  checkpoint('system-domain-proxy-recorded');
   let windowsSystemDnsDegraded = false;
   const windowsBrowserReady = process.platform === 'win32'
     && windowsBrowserAccessReady(systemDomainProxy);
@@ -4687,8 +5663,9 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
   lastNetworkEnvironmentSignature = null;
   lastNetworkSignature = null;
   const after = await collectNetworkEnvironmentDiagnostics(`${reason}-after`, {
-    phase: connected ? 'connected' : 'disconnected'
+    phase: networkDiagnosticPhase()
   });
+  checkpoint('diagnostics-after');
   runtime.connection = {
     ...(runtime.connection || idleConnection()),
     diagnostics: {
@@ -4713,12 +5690,15 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
     tone: systemDomainProxy?.error
       || wireGuardSystemRepair?.ok === false
       || (endpointRouteRepair?.stale === true && endpointRouteRepair?.repaired !== true)
+      || (process.platform === 'darwin' && !systemDomainProxyConnectionReady(systemDomainProxy))
       ? 'warning'
       : after?.resolution?.severity === 'error'
         ? 'warning'
         : 'success',
     message: connected
       ? `已重新确认 MX-H2I WireGuard 路由和 PAC/DNS：${after?.resolution?.message || 'network ready'}${windowsSystemDnsDegraded && windowsBrowserReady ? ' 浏览器路径 ready，非 PAC 程序的系统 DNS 仍为 degraded。' : ''}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
+      : wireGuardProbe?.ready === true
+        ? `WireGuard 与 Internal API 已保留，但 PAC/split DNS 系统路径仍未 ready：${systemDomainProxy?.systemResolution?.message || systemDomainProxy?.resolverError || systemDomainProxy?.error || after?.resolution?.message || 'system DNS proof failed'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
       : `已执行系统网络修复，但 WireGuard 尚未恢复 ready：${after?.resolution?.message || wireGuardProbe?.message || 'stale state cleared'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
   };
   touchRuntime(`system network repaired: ${reason}`);
@@ -4958,17 +5938,17 @@ async function repairPendingWindowsCleanupForRuntime(
   };
 }
 
-async function repairWireGuardSystemStateForRuntime(reason) {
+async function repairWireGuardSystemStateForRuntime(reason, options = {}) {
   if (!shouldRecoverWireGuardConnection(runtime?.connection)) {
     if (process.platform !== 'win32') {
       return { ok: true, skipped: true, reason: 'connection-not-retained' };
     }
     try {
       const mod = await importInstalledPackage('@qpjoy/electron-launcher/wireguard');
-      const options = wireGuardRuntimeOptions();
-      const status = mod.getLauncherWireGuardPeerStatus(options);
+      const runtimeOptions = wireGuardRuntimeOptions(options);
+      const status = mod.getLauncherWireGuardPeerStatus(runtimeOptions);
       const windowsNrpt = typeof mod.getLauncherWireGuardNrptStatus === 'function'
-        ? await mod.getLauncherWireGuardNrptStatus(options).catch(() => null)
+        ? await mod.getLauncherWireGuardNrptStatus(runtimeOptions).catch(() => null)
         : null;
       if (windowsWireGuardCleanupConfirmed(
         { status },
@@ -4998,13 +5978,14 @@ async function repairWireGuardSystemStateForRuntime(reason) {
   }
   try {
     const mod = await importInstalledPackage('@qpjoy/electron-launcher/wireguard');
-    const options = wireGuardRuntimeOptions();
-    const status = mod.getLauncherWireGuardPeerStatus(options);
+    const runtimeOptions = wireGuardRuntimeOptions(options);
+    const status = mod.getLauncherWireGuardPeerStatus(runtimeOptions);
     if (status?.active === true) {
-      return await mod.repairLauncherWireGuardPeerRoutes(options);
+      return await mod.repairLauncherWireGuardPeerRoutes(runtimeOptions);
     }
-    return await mod.recoverLauncherWireGuardPeer({ ...options, reason });
+    return await mod.recoverLauncherWireGuardPeer({ ...runtimeOptions, reason });
   } catch (err) {
+    if (isSupersededNetworkTransitionError(err)) throw err;
     queueDiagnosticError('wireguard.system-route-repair-failed', err, { reason });
     return {
       ok: false,
@@ -5514,18 +6495,39 @@ function networkDiagnosticPhase() {
 
 function networkDiagnosticHost() {
   const routeHost = preferredReverseProxyDiagnosticHost();
-  const connectedInternalFallback = ['connected', 'tunnel-only'].includes(runtime?.connection?.state)
-    ? LEGACY_DEFAULT_BOOTSTRAP_HOST
-    : null;
+  if (['connected', 'tunnel-only'].includes(runtime?.connection?.state)) {
+    const splitHost = coveredSplitDnsDiagnosticHost(splitDnsDomains(runtime?.config));
+    if (splitHost) return splitHost;
+  }
   return firstHostname([
     process.env.MX_H2I_DNS_DIAGNOSTIC_HOST,
     routeHost,
-    connectedInternalFallback,
     process.env.MX_H2I_BOOTSTRAP_DOMAIN,
     process.env.MX_H2I_BOOTSTRAP_HOST,
     runtime?.config?.bootstrapApiBaseUrl,
     DEFAULT_CONFIG.bootstrapApiBaseUrl,
     runtime?.config?.internalApiBaseUrl
+  ]);
+}
+
+function preConnectSystemDomainProxyDiagnosticHost() {
+  return coveredSplitDnsDiagnosticHost(splitDnsDomains(runtime?.config)) || firstHostname([
+    process.env.MX_H2I_DNS_DIAGNOSTIC_HOST,
+    preferredReverseProxyDiagnosticHost(),
+    LEGACY_DEFAULT_BOOTSTRAP_HOST
+  ]);
+}
+
+function coveredSplitDnsDiagnosticHost(domains, reverseProxyRoutes = null) {
+  const routeHosts = arrayValue(Array.isArray(reverseProxyRoutes)
+    ? reverseProxyRoutes.map((route) => nullableString(route?.host))
+    : [], []);
+  return firstResolverCoveredHost(domains, [
+    hostnameFromMaybeUrl(process.env.MX_H2I_DNS_DIAGNOSTIC_HOST),
+    hostnameFromMaybeUrl(preferredReverseProxyDiagnosticHost()),
+    ...routeHosts.map(hostnameFromMaybeUrl),
+    LEGACY_DEFAULT_BOOTSTRAP_HOST,
+    ...arrayValue(domains, [])
   ]);
 }
 
@@ -5896,6 +6898,20 @@ function compactSystemDomainProxyStatus(status) {
           error: nullableString(status.browserAccess.error)
         }
       : null,
+    systemResolution: status.systemResolution && typeof status.systemResolution === 'object'
+      ? {
+          ready: status.systemResolution.ready === true,
+          host: nullableString(status.systemResolution.host),
+          state: nullableString(status.systemResolution.state),
+          severity: nullableString(status.systemResolution.severity),
+          addresses: arrayValue(status.systemResolution.addresses, [])
+            .map((row) => ({
+              address: nullableString(row?.address),
+              classification: nullableString(row?.classification)
+            })),
+          error: nullableString(status.systemResolution.error)
+        }
+      : null,
     systemResolverMode: nullableString(status.systemResolverMode),
     resolverApplied: status.resolverApplied === true,
     resolverError: nullableString(status.resolverError),
@@ -6151,6 +7167,8 @@ function networkEnvironmentSignature(diagnostics) {
           pacUrl: diagnostics.systemDomainProxy.pacUrl || null,
           browserReady: diagnostics.systemDomainProxy.browserReady === true,
           browserProxyStatusCode: diagnostics.systemDomainProxy.browserAccess?.proxyStatusCode || null,
+          systemResolutionReady: diagnostics.systemDomainProxy.systemResolution?.ready === true,
+          systemResolutionState: diagnostics.systemDomainProxy.systemResolution?.state || null,
           systemResolverMode: diagnostics.systemDomainProxy.systemResolverMode || null,
           resolverApplied: diagnostics.systemDomainProxy.resolverApplied === true,
           resolverDomains: arrayValue(diagnostics.systemDomainProxy.resolverDomains, []).sort()
@@ -6174,6 +7192,13 @@ function systemDomainProxyStatusSignature(status) {
     browserHost: nullableString(status.browserAccess?.host),
     browserProxyStatusCode: status.browserAccess?.proxyStatusCode || null,
     browserError: nullableString(status.browserAccess?.error),
+    systemResolutionReady: status.systemResolution?.ready === true,
+    systemResolutionHost: nullableString(status.systemResolution?.host),
+    systemResolutionState: nullableString(status.systemResolution?.state),
+    systemResolutionAddresses: arrayValue(status.systemResolution?.addresses, [])
+      .map((row) => `${nullableString(row?.address) || ''}:${nullableString(row?.classification) || ''}`)
+      .sort(),
+    systemResolutionError: nullableString(status.systemResolution?.error),
     dnsFallbackTarget: nullableString(status.dnsFallbackTarget),
     systemResolverMode: nullableString(status.systemResolverMode),
     resolverPort: status.resolverPort || null,
@@ -6223,15 +7248,57 @@ function systemDomainProxyPolicySignature(policy) {
   });
 }
 
-async function maybeSkipSystemDomainProxyApply(reason, policySignature) {
+async function maybeSkipSystemDomainProxyApply(reason, policySignature, policy = null) {
   if (!isBackgroundSystemDomainProxyReason(reason) || !policySignature) return null;
   const policyUnchanged = policySignature === lastSystemDomainProxyPolicySignature;
   const status = typeof systemDomainProxyManager?.status === 'function'
     ? systemDomainProxyManager.status()
     : null;
-  const verified = shouldVerifySystemDomainProxyBeforeBackgroundSkip(reason)
+  let verified = shouldVerifySystemDomainProxyBeforeBackgroundSkip(reason)
     ? await systemDomainProxyManager?.statusVerified?.().catch(() => null)
     : null;
+  if (
+    !policyUnchanged
+    && process.platform === 'darwin'
+    && policy
+    && typeof systemDomainProxyManager?.resumeDarwinLocalEdge === 'function'
+  ) {
+    verified = await systemDomainProxyManager
+      .resumeDarwinLocalEdge(policy, reason)
+      .catch(() => verified);
+  }
+  if (policySignature === lastSystemDomainProxyPrivilegedFailureSignature) {
+    if (systemDomainProxyStatusLooksApplied(verified)) {
+      lastSystemDomainProxyPrivilegedFailureSignature = null;
+    } else {
+      return {
+        ...(verified && typeof verified === 'object'
+          ? verified
+          : status && typeof status === 'object'
+            ? status
+            : {}),
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        skipped: true,
+        skipReason: 'privileged-repair-failed-awaiting-user-retry'
+      };
+    }
+  }
+  if (
+    !policyUnchanged
+    && process.platform === 'darwin'
+    && verified?.localEdgeResumed === true
+  ) {
+    lastSystemDomainProxyPolicySignature = policySignature;
+    return {
+      ...verified,
+      reason,
+      skipped: true,
+      skipReason: 'background-live-state-verified'
+    };
+  }
   if (!policyUnchanged && process.platform !== 'win32') return null;
   if (!policyUnchanged && (!status || typeof status !== 'object' || status.applied !== true)) return null;
   if (
@@ -6388,7 +7455,9 @@ function shouldApplySystemDomainProxyForReason(reason) {
 }
 
 function allowMacBackgroundSystemDomainProxyRepair() {
-  return !['0', 'false', 'no', 'off'].includes(String(process.env.MX_H2I_MAC_BACKGROUND_PROXY_REPAIR || '').trim().toLowerCase());
+  return macBackgroundSystemDomainProxyRepairEnabled(
+    process.env.MX_H2I_MAC_BACKGROUND_PROXY_REPAIR
+  );
 }
 
 function currentSystemDomainProxyStatus(reason, extra = {}) {
@@ -6429,8 +7498,9 @@ function isSystemDomainProxyAuthorizationCanceled(status) {
 }
 
 function isUserAuthorizationCanceledError(value) {
+  if (value?.authorizationCanceled === true) return true;
   const text = authorizationErrorText(value);
-  return /authorization canceled|administrator authorization canceled|user canceled|user cancelled|用户已取消|取消授权|已取消|\(-128\)|osascript.*canceled|osascript.*cancelled/i.test(text);
+  return /\(\s*-128\s*\)|macOS administrator authorization canceled|用户(?:已)?取消(?:了)?管理员授权|已取消 WireGuard 管理员授权/i.test(text);
 }
 
 function authorizationErrorText(value) {
@@ -6943,6 +8013,7 @@ async function settleAnonymousLoginDisabledAfterStartup() {
 
 function wireGuardRecoveryIdentity(connection = runtime?.connection) {
   return {
+    mutationEpoch: networkMutationEpoch,
     mode: connection?.mode === 'employee' ? 'employee' : 'guest',
     subject: nullableString(connection?.subject),
     leaseId: nullableString(connection?.leaseId),
@@ -6964,6 +8035,7 @@ function wireGuardRecoveryIdentityIsCurrent(identity) {
   if (!identity || typeof identity !== 'object') return false;
   const current = wireGuardRecoveryIdentity(runtime?.connection);
   return [
+    'mutationEpoch',
     'mode',
     'subject',
     'leaseId',
@@ -12449,9 +13521,30 @@ async function probeConnectedModeBeforeTransition(mode, reason, options = {}) {
   if (!sameConnectionTransitionIdentity(current, connection)) {
     return { ready: false, superseded: true, result };
   }
-  const systemDomainProxy = result.ready
-    ? await ensureSystemDomainProxyForRuntime('manual-connect-guard')
-    : null;
+  let systemDomainProxy = null;
+  if (result.ready) {
+    try {
+      const verified = typeof systemDomainProxyManager?.statusVerified === 'function'
+        ? await systemDomainProxyManager.statusVerified()
+        : currentSystemDomainProxyStatus('manual-connect-guard');
+      systemDomainProxy = await attachSystemDomainProxyConnectionProof({
+        ...(verified && typeof verified === 'object' ? verified : {}),
+        reason: 'manual-connect-guard',
+        skipped: true,
+        skipReason: 'foreground-connect-guard-read-only'
+      }, 'manual-connect-guard');
+    } catch (err) {
+      systemDomainProxy = {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason: 'manual-connect-guard',
+        skipped: true,
+        skipReason: 'foreground-connect-guard-read-only',
+        error: errorMessage(err)
+      };
+    }
+  }
   const ready = result.ready && systemDomainProxyConnectionReady(systemDomainProxy);
   runtime.connection = {
     ...current,
@@ -12759,6 +13852,10 @@ function normalizeDiagnostics(input) {
     disconnectCleanup: row.disconnectCleanup && typeof row.disconnectCleanup === 'object'
       ? row.disconnectCleanup
       : null,
+    disconnectManagedRelease: row.disconnectManagedRelease
+      && typeof row.disconnectManagedRelease === 'object'
+      ? row.disconnectManagedRelease
+      : null,
     shutdownCleanup: row.shutdownCleanup && typeof row.shutdownCleanup === 'object'
       ? row.shutdownCleanup
       : null,
@@ -12949,7 +14046,9 @@ async function repairDarwinEndpointRouteBeforeBootstrap(reason) {
   try {
     const result = await repairDarwinStaleEndpointRoutesForRuntime(reason, {
       force: true,
-      allowPrivileged: true
+      // Login/connect preflight is diagnostic-only. Endpoint bypass, WG,
+      // PAC and DNS are applied later in one combined foreground transaction.
+      allowPrivileged: false
     });
     await recordDarwinEndpointRouteRepairDiagnostics(result, reason);
     return result;
@@ -13223,7 +14322,15 @@ async function ensureLauncherProduct(launcher, productId, productDisplayName) {
 }
 
 async function applyNetworkSession(session, options) {
-  assertNetworkTransitionCurrent(options.lifecycleEpoch);
+  const foregroundOperation = options.foregroundOperation || null;
+  const checkpoint = (stage) => {
+    if (foregroundOperation) {
+      assertForegroundNetworkOperationCurrent(foregroundOperation, stage);
+    } else {
+      assertNetworkTransitionCurrent(options.lifecycleEpoch);
+    }
+  };
+  checkpoint('applying-session');
   const transitionStartedAt = Number.isFinite(options.transitionStartedAt) ? options.transitionStartedAt : Date.now();
   const applyStartedAt = Date.now();
   const lease = session.lease || {};
@@ -13316,9 +14423,12 @@ async function applyNetworkSession(session, options) {
     };
     touchRuntime(options.mode === 'employee' ? 'employee lease ready' : 'guest lease ready');
     await saveAndBroadcast();
-    assertNetworkTransitionCurrent(options.lifecycleEpoch);
+    checkpoint('preparing-data-plane');
 
     const preflightStartedAt = Date.now();
+    const darwinExternalApplyPrepareSupported = process.platform !== 'darwin'
+      || typeof systemDomainProxyManager?.prepareExternalApply === 'function'
+      || typeof systemDomainProxyManager?.darwinPrepareApply === 'function';
     const preflightResults = await Promise.allSettled([
       syncDomesticPeerForLease(lease, { bootstrapResolveMode, bootstrapBaseUrl, ...handoverOptions }),
       syncInternalDirectPeerForLease(lease, routePlan, { bootstrapResolveMode, bootstrapBaseUrl, ...handoverOptions }),
@@ -13333,8 +14443,67 @@ async function applyNetworkSession(session, options) {
     const combinedSystemDomainProxy = preflightResults[2].status === 'fulfilled'
       ? preflightResults[2].value
       : null;
+    updateForegroundNetworkOperation(foregroundOperation, 'system-domain-proxy-prepared', {
+      preparedSystemDomainProxy: combinedSystemDomainProxy
+    });
+    const abortPrePrivilegeTransition = async (abortReason) => {
+      await abortPreparedSystemDomainProxyApply(
+        combinedSystemDomainProxy,
+        abortReason,
+        'not-started'
+      );
+      if (fallbackLease) {
+        const rollback = await syncPeerHandover(
+          fallbackLease,
+          lease,
+          'abort',
+          normalizeRoutePlan(options.fallbackConnection?.routePlan),
+          { bootstrapResolveMode, bootstrapBaseUrl, transitionId: options.transitionId }
+        ).catch(() => null);
+        runtime.networkHandover = rollback?.ok === true
+          ? null
+          : runtime.networkHandover
+            ? { ...runtime.networkHandover, phase: 'abort-pending', updatedAt: nowIso() }
+            : null;
+      }
+      if (foregroundOperation?.cancelRequested === true) {
+        restoreForegroundNetworkOperationSnapshot(foregroundOperation);
+        markForegroundNetworkOperationPaused(
+          foregroundOperation,
+          '已停止本次连接；PAC 准备状态和远端切换已回滚，原有身份与隧道保持不变。'
+        );
+      }
+    };
+    try {
+      checkpoint('preflight-settled');
+    } catch (err) {
+      await abortPrePrivilegeTransition('pre-connect-canceled-after-preflight');
+      throw err;
+    }
+    if (process.platform === 'darwin' && combinedSystemDomainProxy && !combinedSystemDomainProxy.shell) {
+      await abortPrePrivilegeTransition('pre-connect-combined-shell-unavailable');
+      const unavailableError = new Error(
+        combinedSystemDomainProxy.status?.error
+        || 'PAC / DNS transaction could not be combined with WireGuard; stopped before requesting authorization.'
+      );
+      if (foregroundOperation) {
+        restoreForegroundNetworkOperationSnapshot(foregroundOperation);
+        markForegroundNetworkOperationPaused(
+          foregroundOperation,
+          `系统授权尚未启动；已收口 PAC pending/peer handover 并保留登录、租约和原有隧道。${unavailableError.message}`
+        );
+        await saveAndBroadcast();
+        throw supersededNetworkTransitionError();
+      }
+      throw unavailableError;
+    }
     const preflightFailure = preflightResults.find((result) => result.status === 'rejected');
     if (!fallbackLease && preflightFailure) {
+      await abortPreparedSystemDomainProxyApply(
+        combinedSystemDomainProxy,
+        'pre-connect-preflight-failed',
+        'not-started'
+      );
       throw preflightFailure.reason;
     }
     if (
@@ -13344,6 +14513,11 @@ async function applyNetworkSession(session, options) {
         || !peerHandoverSyncsReady(domesticPeerSync, internalDirectPeerSync, routePlan)
       )
     ) {
+      await abortPreparedSystemDomainProxyApply(
+        combinedSystemDomainProxy,
+        'pre-connect-handover-preflight-failed',
+        'not-started'
+      );
       const rollback = await syncPeerHandover(
         fallbackLease,
         lease,
@@ -13385,7 +14559,12 @@ async function applyNetworkSession(session, options) {
         updatedAt: nowIso()
       };
     }
-    assertNetworkTransitionCurrent(options.lifecycleEpoch);
+    try {
+      checkpoint('before-system-authorization');
+    } catch (err) {
+      await abortPrePrivilegeTransition('pre-connect-canceled-before-system-authorization');
+      throw err;
+    }
     const preflightFinishedAt = Date.now();
     runtime.feedback = {
       tone: 'info',
@@ -13393,9 +14572,26 @@ async function applyNetworkSession(session, options) {
     };
     touchRuntime(options.mode === 'employee' ? 'employee data-plane switching' : 'guest data-plane switching');
     await saveAndBroadcast();
+    try {
+      checkpoint('before-system-authorization-command');
+    } catch (err) {
+      await abortPrePrivilegeTransition('pre-connect-canceled-before-system-authorization-command');
+      throw err;
+    }
 
     const wireGuardStartedAt = Date.now();
     let wireGuardResult;
+    let externallyCompletedSystemDomainProxy = null;
+    let darwinPrivilegedCommandStarted = false;
+    const beforeDarwinPrivilegedCommand = () => {
+      checkpoint('before-darwin-privileged-command');
+      markPreparedSystemDomainProxyPrivilegedHandoff(combinedSystemDomainProxy);
+      darwinPrivilegedCommandStarted = true;
+      updateForegroundNetworkOperation(foregroundOperation, 'system-authorization', {
+        privilegedStarted: true,
+        promptActive: true
+      });
+    };
     try {
       wireGuardResult = await startWireGuardForSession({
         routePlan,
@@ -13405,9 +14601,33 @@ async function applyNetworkSession(session, options) {
         domesticPeerSync,
         domesticRelayDiagnostics: null,
         darwinExtraInstallShell: combinedSystemDomainProxy?.shell || null,
-        suppressWireGuardDns: shouldSuppressWireGuardDnsForSystemDomainProxy(combinedSystemDomainProxy)
+        suppressWireGuardDns: shouldSuppressWireGuardDnsForSystemDomainProxy(combinedSystemDomainProxy),
+        beforeDarwinPrivilegedCommand
       });
     } catch (err) {
+      if (combinedSystemDomainProxy?.shell) {
+        if (darwinPrivilegedCommandStarted) {
+          // The combined shell was handed to osascript. It may have partially
+          // committed before the error, so only finalize via readback.
+          externallyCompletedSystemDomainProxy = await completeExternalSystemDomainProxyApply(
+            'post-connect-combined-error',
+            combinedSystemDomainProxy
+          );
+          latchPreparedSystemDomainProxyFailure(combinedSystemDomainProxy, err);
+        } else {
+          externallyCompletedSystemDomainProxy = await abortPreparedSystemDomainProxyApply(
+            combinedSystemDomainProxy,
+            'post-connect-combined-not-started',
+            'not-started'
+          );
+        }
+      }
+      if (process.platform === 'darwin' && !darwinPrivilegedCommandStarted) {
+        await restoreForegroundStandaloneOwnershipSnapshot(
+          foregroundOperation,
+          'connect-canceled-before-privileged-command'
+        );
+      }
       if (fallbackLease) {
         const rollback = await syncPeerHandover(
           fallbackLease,
@@ -13422,11 +14642,49 @@ async function applyNetworkSession(session, options) {
             ? { ...runtime.networkHandover, phase: 'abort-pending', updatedAt: nowIso() }
             : null;
       }
+      if (foregroundOperation?.cancelRequested === true) {
+        restoreForegroundNetworkOperationSnapshot(foregroundOperation);
+        markForegroundNetworkOperationPaused(
+          foregroundOperation,
+          '已停止后续连接步骤；系统事务已按实时状态收口，原有身份和隧道状态已保留。'
+        );
+        await saveAndBroadcast();
+        throw supersededNetworkTransitionError();
+      }
+      if (
+        process.platform === 'darwin'
+        && !darwinPrivilegedCommandStarted
+        && foregroundOperation
+        && !isSupersededNetworkTransitionError(err)
+      ) {
+        restoreForegroundNetworkOperationSnapshot(foregroundOperation);
+        markForegroundNetworkOperationPaused(
+          foregroundOperation,
+          `系统授权尚未启动，已保留登录、租约和原有隧道；请显式重试。${errorMessage(err)}`
+        );
+        await saveAndBroadcast();
+        throw supersededNetworkTransitionError();
+      }
       throw err;
+    } finally {
+      updateForegroundNetworkOperation(foregroundOperation, 'system-authorization-complete', {
+        promptActive: false
+      });
     }
-    assertNetworkTransitionCurrent(options.lifecycleEpoch);
     const wireGuardFinishedAt = Date.now();
     if (wireGuardResult.authorizationCanceled === true) {
+      if (combinedSystemDomainProxy?.shell) {
+        externallyCompletedSystemDomainProxy = await abortPreparedSystemDomainProxyApply(
+          combinedSystemDomainProxy,
+          'post-connect-authorization-canceled',
+          'authorization-canceled'
+        );
+        latchPreparedSystemDomainProxyFailure(combinedSystemDomainProxy, wireGuardResult);
+      }
+      const authorizationCanceledOwnership = await restoreForegroundStandaloneOwnershipSnapshot(
+        foregroundOperation,
+        'connect-authorization-canceled-ownership-restore'
+      );
       const handoverRollback = fallbackLease
         ? await syncPeerHandover(
             fallbackLease,
@@ -13452,13 +14710,63 @@ async function applyNetworkSession(session, options) {
             internalBaseUrl: options.fallbackConnection.internalBaseUrl
           })
         : null;
-      applyWireGuardAuthorizationCanceled(options, wireGuardResult, handoverRollback, fallbackProbe);
+      const retainedForegroundConnection = foregroundOperation?.snapshot?.connection || null;
+      if (foregroundOperation?.cancelRequested === true || retainedForegroundConnection) {
+        restoreForegroundNetworkOperationSnapshot(foregroundOperation);
+        runtime.connection = {
+          ...runtime.connection,
+          diagnostics: {
+            ...(runtime.connection?.diagnostics || {}),
+            authorizationCanceled: {
+              ok: false,
+              message: wireGuardResult.message || '用户取消了系统管理员授权。',
+              updatedAt: nowIso()
+            },
+            standaloneOwnershipRegistry: authorizationCanceledOwnership,
+            updatedAt: nowIso()
+          }
+        };
+        markForegroundNetworkOperationPaused(
+          foregroundOperation,
+          foregroundOperation?.cancelRequested === true
+            ? '已停止本次连接；系统授权未执行，原有身份和隧道保持不变。'
+            : '已取消系统管理员授权；已有员工身份、租约和隧道状态保持不变，自动恢复已暂停。'
+        );
+      } else {
+        applyWireGuardAuthorizationCanceled(options, wireGuardResult, handoverRollback, fallbackProbe);
+      }
       await publishNetworkModeEvent(
         options.mode === 'employee' ? 'staff:connect' : 'visit:connect',
         'failed',
         { reason: 'authorization-canceled', transitionId: options.transitionId }
       );
       return;
+    }
+    if (combinedSystemDomainProxy?.shell) {
+      externallyCompletedSystemDomainProxy = wireGuardResult.privilegedExecution === 'not-started'
+        || !darwinPrivilegedCommandStarted
+        ? await abortPreparedSystemDomainProxyApply(
+            combinedSystemDomainProxy,
+            'post-connect-combined-not-started',
+            'not-started'
+          )
+        : await completeExternalSystemDomainProxyApply(
+            'post-connect-combined',
+            combinedSystemDomainProxy
+          );
+    }
+    if (process.platform === 'darwin' && !darwinPrivilegedCommandStarted) {
+      const standaloneOwnership = await restoreForegroundStandaloneOwnershipSnapshot(
+        foregroundOperation,
+        'connect-not-started-ownership-restore'
+      );
+      wireGuardResult = {
+        ...wireGuardResult,
+        diagnostics: {
+          ...(wireGuardResult.diagnostics || {}),
+          standaloneOwnershipRegistry: standaloneOwnership
+        }
+      };
     }
     runtime.connection = {
       ...runtime.connection,
@@ -13468,8 +14776,40 @@ async function applyNetworkSession(session, options) {
       health: wireGuardResult.health,
       wireGuard: wireGuardResult.wireGuard,
       domesticPeerSync,
-      diagnostics: wireGuardResult.diagnostics
+      diagnostics: {
+        ...(wireGuardResult.diagnostics || {}),
+        ...(externallyCompletedSystemDomainProxy
+          ? { systemDomainProxy: externallyCompletedSystemDomainProxy }
+          : {})
+      }
     };
+    if (foregroundOperation?.cancelRequested === true) {
+      const ownershipReady = wireGuardResult.diagnostics?.standaloneOwnershipRegistry?.ok === true;
+      const browserReady = systemDomainProxyConnectionReady(externallyCompletedSystemDomainProxy);
+      const dataPlaneReady = postConnectDataPlaneReady({
+        platform: process.platform,
+        wireGuardReady: wireGuardResult.ready,
+        connection: runtime.connection
+      });
+      runtime.connection = {
+        ...runtime.connection,
+        state: dataPlaneReady && browserReady && ownershipReady
+          ? 'connected'
+          : dataPlaneReady
+            ? 'tunnel-only'
+            : runtime.connection.state,
+        health: dataPlaneReady && !browserReady
+          ? { ...runtime.connection.health, splitDns: 'blocked' }
+          : runtime.connection.health
+      };
+      markForegroundNetworkOperationPaused(
+        foregroundOperation,
+        '已停止后续连接步骤；已完成的系统变更已按实时状态收口，不会再次请求授权。'
+      );
+      await saveAndBroadcast();
+      throw supersededNetworkTransitionError();
+    }
+    checkpoint('wireguard-applied');
     const postConnectReady = postConnectDataPlaneReady({
       platform: process.platform,
       wireGuardReady: wireGuardResult.ready,
@@ -13506,17 +14846,67 @@ async function applyNetworkSession(session, options) {
         diagnostics: wireGuardResult.diagnostics
       });
     }
-    const systemDomainProxy = postConnectReady
-      ? (combinedSystemDomainProxy?.shell
-          ? await completeExternalSystemDomainProxyApply('post-connect-combined')
-          : await ensureSystemDomainProxyForRuntime('post-connect'))
-      : deferredSystemDomainProxyRestoreStatus('wireguard-not-ready', combinedSystemDomainProxy);
-    assertNetworkTransitionCurrent(options.lifecycleEpoch);
+    const deferLegacyDarwinSystemDomainProxy = process.platform === 'darwin'
+      && !darwinExternalApplyPrepareSupported
+      && darwinPrivilegedCommandStarted;
+    const systemDomainProxy = combinedSystemDomainProxy?.shell
+      ? externallyCompletedSystemDomainProxy
+      : deferLegacyDarwinSystemDomainProxy
+        ? currentSystemDomainProxyStatus('post-connect', {
+            skipped: true,
+            skipReason: 'darwin-external-prepare-unavailable-deferred',
+            systemResolution: {
+              ready: false,
+              message: '当前 system proxy manager 不支持合并授权；PAC / split DNS 已延后，请从高级选项显式修复网络。'
+            }
+          })
+      : postConnectReady
+        ? await ensureSystemDomainProxyForRuntime('post-connect')
+        : deferredSystemDomainProxyRestoreStatus('wireguard-not-ready', combinedSystemDomainProxy);
+    checkpoint('system-domain-proxy-verified');
     const standaloneOwnership = wireGuardResult.diagnostics?.standaloneOwnershipRegistry || null;
-    assertNetworkTransitionCurrent(options.lifecycleEpoch);
     const browserReady = systemDomainProxyConnectionReady(systemDomainProxy);
     const ownershipReady = standaloneOwnership?.ok === true;
     const connectionReady = postConnectReady && browserReady && ownershipReady;
+    const checkpointCommittedTransition = async (stage) => {
+      try {
+        checkpoint(stage);
+      } catch (err) {
+        if (foregroundOperation?.cancelRequested === true) {
+          runtime.connection = {
+            ...runtime.connection,
+            state: connectionReady
+              ? 'connected'
+              : postConnectReady
+                ? 'tunnel-only'
+                : runtime.connection.state,
+            health: connectionReady
+              ? { ...runtime.connection.health, splitDns: 'ready' }
+              : postConnectReady && !browserReady
+                ? { ...runtime.connection.health, splitDns: 'blocked' }
+                : runtime.connection.health,
+            diagnostics: {
+              ...(runtime.connection.diagnostics || {}),
+              ...(handoverCommit ? { handoverCommit } : {}),
+              ...(systemDomainProxy ? { systemDomainProxy } : {}),
+              ...(standaloneOwnership ? { standaloneOwnership } : {}),
+              updatedAt: nowIso()
+            }
+          };
+          markForegroundNetworkOperationPaused(
+            foregroundOperation,
+            '已停止后续连接收尾；WireGuard、Internal 与 PAC/DNS 的实测状态已保留，不会回滚系统网络或继续清理租约。'
+          );
+          await saveAndBroadcast();
+        }
+        throw err;
+      }
+    };
+    await checkpointCommittedTransition('connection-proof-ready');
+    if (combinedSystemDomainProxy?.shell && !connectionReady) {
+      latchPreparedSystemDomainProxyFailure(combinedSystemDomainProxy, wireGuardResult);
+    }
+    await checkpointCommittedTransition('before-superseded-lease-retirement');
     const supersededLeaseRetirements = connectionReady
       && (!handoverCommit || handoverCommit.ok)
       ? await retireSupersededLocalLeases(lease, {
@@ -13525,6 +14915,7 @@ async function applyNetworkSession(session, options) {
           transitionId: options.transitionId
         })
       : [];
+    await checkpointCommittedTransition('after-superseded-lease-retirement');
     const browserFallback = process.platform === 'win32'
       ? windowsBrowserFallbackState({
           connection: runtime.connection,
@@ -13598,6 +14989,8 @@ async function applyNetworkSession(session, options) {
     const pacFeedback = systemDomainProxy?.applied
       ? process.platform === 'darwin' && systemDomainProxyConnectionReady(systemDomainProxy)
         ? ` macOS PAC、dynamic split DNS 与本机 DNS relay 已实时验证；${publicTrafficFeedback}${resolverFeedback}`
+        : process.platform === 'darwin'
+        ? ` macOS PAC 与 dynamic resolver 元数据已写入，但系统解析证明未通过：${systemDomainProxy?.systemResolution?.message || 'unknown'}。${publicTrafficFeedback}${resolverFeedback}`
         : browserProofSkipped
         ? ` 系统 PAC 已写入；当前没有 split-DNS 域名诊断主机，已跳过浏览器 CONNECT 证明。${publicTrafficFeedback}${resolverFeedback}`
         : systemDomainProxy?.browserAccess?.ready
@@ -13612,7 +15005,7 @@ async function applyNetworkSession(session, options) {
       ? ' Windows 系统 DNS 仍受第三方 TUN/DoH 或上游 DNS 影响；浏览器已由 PAC/local edge 兜底，非 PAC 程序保持 degraded。'
       : '';
     const domainPathError = process.platform === 'darwin'
-      ? systemDomainProxy?.resolverError || systemDomainProxy?.error || 'dynamic resolver/local DNS relay 未通过'
+      ? systemDomainProxy?.systemResolution?.message || systemDomainProxy?.resolverError || systemDomainProxy?.error || 'dynamic resolver/local DNS relay 未通过'
       : systemDomainProxy?.browserAccess?.error || systemDomainProxy?.error || 'PAC/local edge 未通过';
     runtime.feedback = {
       tone: connectionReady ? 'success' : 'warning',
@@ -13629,12 +15022,14 @@ async function applyNetworkSession(session, options) {
       : postConnectReady
         ? 'wireguard ready; browser path blocked'
         : 'wireguard lease only');
+    await checkpointCommittedTransition('before-connection-events');
     if (connectionReady) {
       if (options.replacedMode === 'guest') {
         await publishNetworkModeEvent('visit:disconnect', 'disconnected', {
           reason: 'staff-preempted-visit',
           transitionId: options.transitionId
         });
+        await checkpointCommittedTransition('after-visit-disconnect-event');
       }
       await publishNetworkModeEvent(
         options.mode === 'employee' ? 'staff:connect' : 'visit:connect',
@@ -13645,6 +15040,7 @@ async function applyNetworkSession(session, options) {
           transitionId: options.transitionId
         }
       );
+      await checkpointCommittedTransition('after-connected-event');
       scheduleDomesticRelayDiagnostics(lease, {
         bootstrapResolveMode,
         bootstrapBaseUrl
@@ -13661,6 +15057,7 @@ async function applyNetworkSession(session, options) {
           transitionId: options.transitionId
         }
       );
+      await checkpointCommittedTransition('after-failed-event');
     }
     if (!connectionReady) {
       scheduleWireGuardRecovery('post-connect-probe', [1500, 4000, 9000]);
@@ -13912,8 +15309,27 @@ async function startWireGuardForSession(input) {
       internalBaseUrl,
       pathPreference,
       darwinExtraInstallShell: input.darwinExtraInstallShell,
-      suppressWireGuardDns: input.suppressWireGuardDns
+      suppressWireGuardDns: input.suppressWireGuardDns,
+      beforeDarwinPrivilegedCommand: input.beforeDarwinPrivilegedCommand
     });
+    if (attempt.result?.authorizationCanceled === true) {
+      const canceled = wireGuardAuthorizationCanceledFailure(
+        attempt.result.message || '用户取消了系统授权。'
+      );
+      return {
+        ...canceled,
+        privilegedExecution: launcherWireGuardPrivilegedExecution(attempt.result),
+        routePlan,
+        routeCidrs: routePlan.routeCidrs,
+        wireGuard: summarizeWireGuardResult(attempt.result),
+        diagnostics: {
+          ...canceled.diagnostics,
+          standaloneOwnershipRegistry: connectingOwnership,
+          updatedAt: nowIso()
+        },
+        path: attempt.result.peer?.path || routePathFromPreference(attempt.pathPreference)
+      };
+    }
     const {
       result,
       route,
@@ -13950,6 +15366,7 @@ async function startWireGuardForSession(input) {
     return {
       state: ready ? 'connected' : (tunnelReady ? 'tunnel-only' : 'lease-only'),
       ready,
+      privilegedExecution: launcherWireGuardPrivilegedExecution(result),
       routePlan,
       routeCidrs: routePlan.routeCidrs,
       health: launcherNetworkHealth({
@@ -13993,11 +15410,23 @@ async function startWireGuardForSession(input) {
           )
     };
   } catch (err) {
+    if (isSupersededNetworkTransitionError(err)) throw err;
     if (isUserAuthorizationCanceledError(err)) {
       return wireGuardAuthorizationCanceledFailure(errorMessage(err));
     }
     return wireGuardFailure(errorMessage(err));
   }
+}
+
+function launcherWireGuardPrivilegedExecution(result) {
+  for (const value of [
+    result?.privilegedExecution,
+    result?.launchDaemon?.privilegedExecution,
+    result?.tunnel?.privilegedExecution
+  ]) {
+    if (['not-started', 'started', 'authorization-canceled'].includes(value)) return value;
+  }
+  return null;
 }
 
 function launcherConnectResultProvesTunnelAbsent(mod, result, windowsNrpt) {
@@ -14021,7 +15450,8 @@ function isRegisteredStandaloneRouteCidr(value) {
 async function connectAndProbeWireGuardPath(mod, input) {
   const result = await mod.connectLauncherWireGuardPeer({
     ...wireGuardRuntimeOptions({
-      darwinExtraInstallShell: input.darwinExtraInstallShell
+      darwinExtraInstallShell: input.darwinExtraInstallShell,
+      beforeDarwinPrivilegedCommand: input.beforeDarwinPrivilegedCommand
     }),
     routePlan: input.routePlan,
     privateKey: input.privateKey,
@@ -14030,6 +15460,19 @@ async function connectAndProbeWireGuardPath(mod, input) {
     pathPreference: input.pathPreference,
     action: 'restart'
   });
+  if (result?.authorizationCanceled === true) {
+    return {
+      pathPreference: input.pathPreference,
+      result,
+      route: null,
+      endpointRoute: null,
+      internalApi: null,
+      windowsNrpt: null,
+      windowsDnsResolution: null,
+      splitDnsReady: false,
+      ready: false
+    };
+  }
   const status = result.status || {};
   const targetIp = internalTargetIp(input.routePlan, input.internalBaseUrl);
   const endpointRoute = mod.probeLauncherWireGuardEndpoint({
@@ -14745,6 +16188,9 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
     return { ok: true, skipped: true, reason: 'connection-not-desired' };
   }
   const manual = options.foreground === true || String(reason || '').startsWith('manual');
+  if (networkRecoveryPaused && options.foreground !== true && !manual) {
+    return { ok: true, skipped: true, reason: 'foreground-network-recovery-paused' };
+  }
   const currentRecoveryGate = () => wireGuardRecoveryGate({
     connectOperationCount: wireGuardConnectOperations.size,
     disconnectInFlight: wireGuardDisconnectInFlight,
@@ -14777,7 +16223,7 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
     }
   }
   const allowPrivileged = options.allowPrivileged !== false;
-  wireGuardRecoveryInFlight = (async () => {
+  const pendingRecovery = (async () => {
     const connection = runtime.connection || {};
     const recoveryIdentity = wireGuardRecoveryIdentity(connection);
     const routePlan = normalizeRoutePlan(connection.routePlan);
@@ -15043,11 +16489,19 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
         await saveAndBroadcast();
       }
       return { ok: false, reason, message: errorMessage(err) };
-    } finally {
-      wireGuardRecoveryInFlight = null;
     }
   })();
-  return wireGuardRecoveryInFlight;
+  wireGuardRecoveryInFlight = pendingRecovery;
+  const settlePendingRecovery = () => {
+    if (wireGuardRecoveryInFlight !== pendingRecovery) return;
+    wireGuardRecoveryInFlight = null;
+    // The last persisted/broadcast probe happens while the Promise is still
+    // in flight. Publish the settled advisory state as well, otherwise the
+    // renderer can keep showing a background operation that no longer exists.
+    broadcastState();
+  };
+  void pendingRecovery.then(settlePendingRecovery, settlePendingRecovery);
+  return pendingRecovery;
 }
 
 function shouldRecoverWireGuardConnection(connection) {
@@ -15168,6 +16622,21 @@ async function reconcileCredentialStorageFailureAfterStartup() {
     const darwinRestoreScript = process.platform === 'darwin'
       ? systemDomainProxyManager?.darwinRestoreScript?.() || null
       : null;
+    if (process.platform === 'darwin' && !darwinRestoreScript) {
+      // Credential fail-close runs at startup. A managed/shared PAC release
+      // cannot be combined with LaunchDaemon uninstall, so perform at most one
+      // privileged manager action and persist cleanup-required. Never retry a
+      // canceled/failed authorization inside this automatic turn.
+      systemDomainProxy = await disableSystemDomainProxyForRuntime(
+        'credential-storage-fail-closed-managed-release'
+      );
+      const detail = systemDomainProxy?.error
+        || systemDomainProxy?.skipReason
+        || 'PAC/DNS managed release completed; WireGuard cleanup is deferred to an explicit action.';
+      throw new Error(
+        `Credential fail-closed deferred WireGuard cleanup to avoid a second macOS authorization dialog. ${detail}`
+      );
+    }
     wireGuard = await stopWireGuardForRuntime({
       darwinExtraUninstallShell: darwinRestoreScript
     });
@@ -15193,7 +16662,7 @@ async function reconcileCredentialStorageFailureAfterStartup() {
       ? await completeExternalSystemDomainProxyRestore('credential-storage-fail-closed')
       : await disableSystemDomainProxyForRuntimeStrict(
           'credential-storage-fail-closed',
-          2
+          process.platform === 'darwin' ? 1 : 2
         );
     if (systemDomainProxy?.error || systemDomainProxy?.applied === true) {
       throw new Error(
@@ -15630,6 +17099,13 @@ function wireGuardRuntimeOptions(options = {}) {
     profileName: WIREGUARD_PROFILE_NAME,
     allowSystemFallback: false,
     darwinLaunchDaemon: true,
+    // MX-H2I combines endpoint/WG/PAC/DNS in the LaunchDaemon transaction.
+    // A failed/canceled osascript must not fall back to a second app-managed
+    // administrator dialog in the same foreground action.
+    fallbackToAppManaged: false,
+    ...(typeof options.beforeDarwinPrivilegedCommand === 'function'
+      ? { beforeDarwinPrivilegedCommand: options.beforeDarwinPrivilegedCommand }
+      : {}),
     darwinServiceIdentity,
     nrptCleanupDnsDomains: splitDnsDomains(runtime?.config),
     nrptCleanupDnsServer: retainedRoutePlan?.dnsServer || null
@@ -16175,10 +17651,9 @@ function shouldPreferRetainedOverlayBootstrap(connection) {
 function shouldAllowPrivilegedPreBootstrapRecovery() {
   const override = nullableString(process.env.MX_H2I_PREBOOTSTRAP_PRIVILEGED_RECOVERY);
   if (override) return !['0', 'false', 'no', 'off'].includes(override.toLowerCase());
-  // This path runs only after an explicit Connect/Login action. Background
-  // network and wake watchers continue to probe without privilege, while a
-  // foreground macOS repair may legitimately surface the system password UI.
-  return process.platform === 'win32' || process.platform === 'darwin';
+  // Darwin defers endpoint/WG/PAC/DNS mutation to the final combined shell so
+  // one Connect/Login action cannot chain administrator dialogs.
+  return process.platform === 'win32';
 }
 
 function bootstrapResolveAttempts(candidate, config) {
@@ -17180,6 +18655,7 @@ function visibleRuntime(source = runtime) {
     connection: visibleConnection(source.connection),
     auth: visibleAuth(source.auth),
     authFlow: visibleFeishuAuthFlow(),
+    networkOperation: visibleForegroundNetworkOperation(),
     diagnosticLog: diagnosticLogStatus()
   };
 }

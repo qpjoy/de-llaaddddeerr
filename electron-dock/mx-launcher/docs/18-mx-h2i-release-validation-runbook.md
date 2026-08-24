@@ -165,8 +165,10 @@ hidden `RunAs` pattern.
 On macOS, the required gate is that the local edge and SystemConfiguration supplemental resolver
 must both be live before suppressed interface DNS can count as ready. The current suppression
 boolean alone is not proof that this gate passed; release evidence must verify both components
-until the implementation explicitly consumes the prepared result. That resolver is scoped to
-declared Internal/app domains, and unmatched names retain the original system resolver.
+and a real `getaddrinfo`/`dscacheutil` lookup of the exact H2I host. A parent-zone relay answer is
+insufficient: V1 `100.*`, Clash `198.18/15`, public, or mixed Internal/fake-IP answers must keep the
+runtime `tunnel-only`. That resolver is scoped to declared Internal/app domains, and unmatched names
+retain the original system resolver.
 
 ### Windows Clash/DNS Regression Gate
 
@@ -330,6 +332,28 @@ Checklist:
 - app opens on a clean machine;
 - guest connect succeeds with one permission flow;
 - employee login succeeds without repeated permission prompts;
+- macOS packaged regression: with `mx-h2i` ProductNetwork anonymous enrollment set to `disabled`,
+  retain an employee/Feishu tunnel across restart and a network-service removal; startup performs
+  read-only PAC/resolver/system-DNS proof with zero prompt, valid employee auth/lease/WG remain
+  unchanged, and the UI shows repair/disconnect rather than login. One explicit repair may prompt
+  once; deleted service names cannot fail the transaction; exact `h2i.mxinfo-inc.cn` resolves only
+  to its current MX-H2I target (`10.88.88.88`, not Luopan `10.88.100.3` or any other `10.*`) before
+  `connected`. Repeat with Clash TUN/fake-IP and `dns-hijack: any:53` enabled, including a public
+  out-of-namespace diagnostic-host override: the exact child must still use `127.0.0.1:2053`, while
+  unmatched public traffic remains on Clash; turning Clash off must not change MX-H2I readiness.
+  An id-less retained-recovery hint may expose Pause but must not disable explicit Repair or
+  Disconnect. Rename an owned service and disconnect without reapplying: the exact MX PAC must be
+  disabled; then let Clash/HDO take over a service and confirm disconnect does not overwrite it.
+  A verify run in which every selected service disappears must remain not-ready. Record product id,
+  policy revision/syncedAt, server URL, prompt
+  count, current network services, PAC URL, dynamic resolver domains, and system lookup result;
+- while connect/recovery is busy, click the independent stop action before the
+  next privileged stage. The IPC must return immediately, the current macOS
+  dialog (if already visible) is canceled in the system dialog, no later dialog
+  opens, and startup/route-refresh stay read-only until a new explicit Connect
+  or Repair. Employee auth/identity, lease, active WireGuard, and Internal proof
+  remain unchanged; a prepared-but-uncommitted PAC/DNS transaction leaves no
+  pending state or new local-edge policy;
 - AppCenter entry opens;
 - Windows: Clash TUN/system-proxy live switching and strict teardown pass the W1-W6 gate above,
   including a public app/browser-resource smoke;

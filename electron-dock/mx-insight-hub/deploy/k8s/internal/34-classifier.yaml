@@ -1,0 +1,83 @@
+# Hub-owned Agent classification worker.
+#
+# It has no Service or ingress and does not share the Launcher, DNS, WireGuard
+# or user-session path. A model/provider outage only grows the durable analysis
+# backlog; source ingest, strict HanLP projection and API readiness stay
+# independent. The database pipeline enforces global single-flight and pacing
+# even if this Deployment is accidentally scaled above one replica.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-insight-hub-classifier
+  namespace: mx-insight-hub
+  labels:
+    app.kubernetes.io/name: mx-insight-hub-classifier
+    app.kubernetes.io/part-of: mx-insight-hub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-insight-hub-classifier
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-insight-hub-classifier
+        app.kubernetes.io/part-of: mx-insight-hub
+        mx-insight-hub.io/plane: worker
+    spec:
+      serviceAccountName: mx-insight-hub
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: classifier
+          image: mx-insight-hub:shadow
+          imagePullPolicy: Never
+          command: ["node", "server/workers/classifier.mjs"]
+          envFrom:
+            - configMapRef:
+                name: mx-insight-hub-config
+            - secretRef:
+                name: mx-insight-hub-model-keys
+                optional: true
+          env:
+            # Public mode only relaxes the otherwise-required Admin HTTP token;
+            # this worker does not create an HTTP listener.
+            - name: MX_INSIGHT_LISTENER_MODE
+              value: public
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: DATABASE_URL
+            - name: MX_INSIGHT_API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_API_KEY_PEPPER
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

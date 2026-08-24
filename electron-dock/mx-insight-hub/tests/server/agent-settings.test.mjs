@@ -406,6 +406,126 @@ test('AgentRuntime uses environment providers when the database setting selects 
   runtime.close()
 })
 
+test('AgentRuntime can probe a legacy uppercase environment provider id', async () => {
+  const settingsStore = {
+    async loadSetting(kind) { return row(kind, { revision: 3 }) },
+    async loadCredentialsInternal() { throw new Error('environment settings must not read credentials') },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({
+      agent: {
+        chatProviders: JSON.stringify([{
+          id: 'OpenAI',
+          baseUrl: 'https://models.example.com/v1',
+          model: 'env-model',
+          authMode: 'none',
+        }]),
+        embeddingProviders: null,
+      },
+    }),
+    settingsStore,
+    logger: quiet,
+    refreshIntervalMs: 0,
+    probeCooldownMs: 0,
+    fetchImpl: async () => new Response(JSON.stringify({
+      choices: [{ message: { content: 'OK' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  }).start()
+
+  const result = await runtime.testProvider({ kind: 'chat', providerId: 'OpenAI' })
+  assert.equal(result.ok, true)
+  assert.equal(result.providerId, 'OpenAI')
+  runtime.close()
+})
+
+test('AgentRuntime probes a disabled saved DB provider in an isolated router without enabling it', async () => {
+  const sentinel = 'disabled-provider-secret-must-not-echo'
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database',
+    revision: 4,
+    providers: [provider({ enabled: false })],
+  }))
+  harness.state.credentials.get('chat').set('primary', sentinel)
+  let request = null
+  const runtime = await new AgentRuntime({
+    config: config(),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    logger: quiet,
+    refreshIntervalMs: 0,
+    probeCooldownMs: 0,
+    fetchImpl: async (url, options) => {
+      request = { url, authorization: options.headers.authorization, body: JSON.parse(options.body) }
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    },
+  }).start()
+
+  assert.deepEqual(runtime.status().chat, [], 'disabled provider must stay out of the production chain')
+  const result = await runtime.testProvider({ kind: 'chat', providerId: 'primary' })
+
+  assert.equal(request.url, 'https://models.example.com/v1/chat/completions')
+  assert.equal(request.authorization, `Bearer ${sentinel}`)
+  assert.equal(request.body.model, 'chat-model')
+  assert.equal(result.ok, true)
+  assert.equal(result.providerId, 'primary')
+  assert.doesNotMatch(JSON.stringify(result), /disabled-provider-secret-must-not-echo|authorization|payload/i)
+  assert.deepEqual(runtime.status().chat, [], 'a successful probe must not mutate the production chain')
+  runtime.close()
+})
+
+test('AgentRuntime applies per-provider single-flight and cooldown protection to probes', async () => {
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 2, providers: [provider({ enabled: false, authMode: 'none' })],
+  }))
+  let now = 1_000
+  let releaseFirst
+  let announceFirst
+  const firstStarted = new Promise((resolve) => { announceFirst = resolve })
+  let calls = 0
+  const runtime = await new AgentRuntime({
+    config: config(),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    logger: quiet,
+    refreshIntervalMs: 0,
+    probeCooldownMs: 5_000,
+    nowFn: () => now,
+    fetchImpl: async () => {
+      calls += 1
+      if (calls === 1) {
+        announceFirst()
+        await new Promise((resolve) => { releaseFirst = resolve })
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    },
+  }).start()
+
+  const first = runtime.testProvider({ kind: 'chat', providerId: 'primary' })
+  await firstStarted
+  await assert.rejects(
+    () => runtime.testProvider({ kind: 'chat', providerId: 'primary' }),
+    (error) => error?.status === 429 && error?.code === 'agent_provider_probe_in_progress',
+  )
+  releaseFirst()
+  await first
+  await assert.rejects(
+    () => runtime.testProvider({ kind: 'chat', providerId: 'primary' }),
+    (error) => error?.status === 429
+      && error?.code === 'agent_provider_probe_rate_limited'
+      && error?.details?.retryAfterMs === 5_000,
+  )
+  now += 5_000
+  assert.equal((await runtime.testProvider({ kind: 'chat', providerId: 'primary' })).ok, true)
+  assert.equal(calls, 2)
+  runtime.close()
+})
+
 test('post-commit refresh failure disables the changed kind and reports deferred application', async () => {
   let failReads = false
   let chatState = row('chat', {
@@ -768,6 +888,17 @@ test('admin provider PUT returns only the safe setting shape', async () => {
         providers: [{ ...provider(), keyConfigured: true }],
       }
     },
+    async testProvider(input) {
+      assert.deepEqual(input, { kind: 'chat', providerId: 'primary' })
+      return {
+        ok: true,
+        kind: 'chat',
+        providerId: 'primary',
+        model: 'model-a',
+        latencyMs: 23,
+        testedAt: '2026-08-24T10:00:00.000Z',
+      }
+    },
   }
   const app = createApp({
     service: {},
@@ -799,6 +930,18 @@ test('admin provider PUT returns only the safe setting shape', async () => {
     const payload = await response.json()
     assert.equal(payload.data.providers[0].keyConfigured, true)
     assert.doesNotMatch(JSON.stringify(payload), /request-only-secret|apiKey|apiKeyEnv/)
+
+    const probe = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat/primary/test`,
+      {
+        method: 'POST',
+        headers: { 'x-mx-insight-admin-token': 'admin-token-for-agent-settings' },
+      },
+    )
+    assert.equal(probe.status, 200)
+    const probePayload = await probe.json()
+    assert.equal(probePayload.data.latencyMs, 23)
+    assert.doesNotMatch(JSON.stringify(probePayload), /request-only-secret|apiKey|apiKeyEnv|payload/)
 
     const deferred = await fetch(
       `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat`,

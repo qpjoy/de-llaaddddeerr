@@ -427,12 +427,14 @@ const recoveryRuntime = {
 const recoveryIdentityApi = Function(
   'runtime',
   'nullableString',
+  'networkMutationEpoch',
   `${functionSource(mainSource, 'wireGuardRecoveryIdentity')}
 ${functionSource(mainSource, 'wireGuardRecoveryIdentityIsCurrent')}
 return { wireGuardRecoveryIdentity, wireGuardRecoveryIdentityIsCurrent };`
 )(
   recoveryRuntime,
-  (value) => typeof value === 'string' && value.trim() ? value.trim() : null
+  (value) => typeof value === 'string' && value.trim() ? value.trim() : null,
+  7
 );
 const capturedRecoveryIdentity = recoveryIdentityApi.wireGuardRecoveryIdentity(recoveryRuntime.connection);
 assert.equal(recoveryIdentityApi.wireGuardRecoveryIdentityIsCurrent(capturedRecoveryIdentity), true);
@@ -488,10 +490,12 @@ const recoverWithAsyncIdentityGuard = Function(
   'wireGuardRecoveryIdentityIsCurrent',
   'normalizeRoutePlan',
   'importInstalledPackage',
+  'broadcastState',
   `let wireGuardRecoveryInFlight = null;
 let lastWireGuardRecoveryFailureAt = 0;
 const wireGuardConnectOperations = new Set();
 let wireGuardDisconnectInFlight = false;
+let networkRecoveryPaused = false;
 ${functionSource(mainSource, 'recoverWireGuardForRuntime')}
 return recoverWireGuardForRuntime;`
 )(
@@ -502,7 +506,8 @@ return recoverWireGuardForRuntime;`
   recoveryIdentityApi.wireGuardRecoveryIdentity,
   recoveryIdentityApi.wireGuardRecoveryIdentityIsCurrent,
   (routePlan) => routePlan || { leaseIp: '10.89.100.12' },
-  async () => recoveryImportReady
+  async () => recoveryImportReady,
+  () => undefined
 );
 recoveryRuntime.connection = {
   ...recoveryRuntime.connection,
@@ -535,6 +540,11 @@ assert.deepEqual(
   { ok: true, skipped: true, reason: 'connection-transition-superseded' }
 );
 assert.equal(staleRecoveryMutationCalls, 0, 'a stale async guest recovery must not mutate the employee tunnel');
+assert.match(
+  functionSource(mainSource, 'recoverWireGuardForRuntime'),
+  /wireGuardRecoveryInFlight = pendingRecovery[\s\S]*settlePendingRecovery[\s\S]*broadcastState\(\)[\s\S]*pendingRecovery\.then\(settlePendingRecovery, settlePendingRecovery\)/,
+  'a completed background probe must clear its in-flight marker and publish the settled UI state'
+);
 assert.equal(recoveryRuntime.connection.mode, 'employee');
 
 const staleEmployeeRuntime = {
@@ -614,8 +624,13 @@ assert.match(guestUiSource, /data-action="resetLocalNetworkIdentity"[\s\S]*disco
 
 assert.match(
   functionSource(rendererSource, 'renderConnectionRecoverySteps'),
-  /!show \|\| anonymousRecoveryBlockedByPolicy\(\)/,
-  'disabled non-ready anonymous state must never render in-place recovery progress'
+  /!show \|\| networkOperationPaused\(\) \|\| anonymousRecoveryBlockedByPolicy\(\)/,
+  'paused or disabled non-ready anonymous state must never render misleading in-place recovery progress'
+);
+assert.match(
+  functionSource(rendererSource, 'renderConnectionRecoverySteps'),
+  /currentNetworkOperation\(\) \? ''[\s\S]*data-action="cancelNetworkOperation"[\s\S]*暂停自动恢复[\s\S]*系统权限框/,
+  'retained automatic recovery without a foreground id must still expose a safe pause action'
 );
 assert.match(
   functionSource(rendererSource, 'renderWireGuardDiagnostics'),
@@ -636,6 +651,11 @@ assert.match(
 );
 
 const runActionSource = functionSource(rendererSource, 'runAction');
+assert.match(
+  runActionSource,
+  /networkOperationBlocksMutation\(\) && isNetworkMutatingAction\(action\)/,
+  'a cancel-requested operation must block reconnect, repair, disconnect, and identity cleanup races'
+);
 assert.match(
   runActionSource,
   /\['connectGuest', 'disconnect', 'resetLocalNetworkIdentity'\]\.includes\(action\)[\s\S]*!isGuestConnectionActive\(\)[\s\S]*modeDraft = 'employee'/,

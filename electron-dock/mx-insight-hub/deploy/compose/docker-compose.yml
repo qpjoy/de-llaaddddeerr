@@ -40,7 +40,12 @@ services:
       MX_INSIGHT_TG_MONITOR_DATABASE_URL: ${MX_INSIGHT_TG_MONITOR_DATABASE_URL:-}
       MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS: ${MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS:-60000}
       MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE: ${MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE:-1000}
+      MX_COMMON_SEGMENTER: ${MX_COMMON_SEGMENTER:-}
+      MX_COMMON_HANLP_URL: ${MX_COMMON_HANLP_URL:-}
       MX_INSIGHT_SERVER_FILE_ROOTS: ${MX_INSIGHT_SERVER_FILE_ROOTS:-{"shared-dir":"/shared_dir"}}
+      MX_INSIGHT_AGENT_PROVIDERS: ${MX_INSIGHT_AGENT_PROVIDERS:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -77,12 +82,31 @@ services:
       MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS: ${MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS:-60000}
       MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE: ${MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE:-1000}
       MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS: ${MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS:-1000}
+      MX_INSIGHT_PROVINCE_PAGE_DELAY_MS: ${MX_INSIGHT_PROVINCE_PAGE_DELAY_MS:-2000}
+      MX_COMMON_SEGMENTER: ${MX_COMMON_SEGMENTER:-}
+      MX_COMMON_HANLP_URL: ${MX_COMMON_HANLP_URL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       app:
         condition: service_healthy
     command: ["node", "server/workers/ingest.mjs"]
+    restart: unless-stopped
+
+  classifier:
+    image: ${MX_INSIGHT_IMAGE:-mx-insight-hub:local}
+    environment:
+      MX_INSIGHT_LISTENER_MODE: public
+      MX_INSIGHT_STORE: postgres
+      DATABASE_URL: postgres://mx_insight:${MX_INSIGHT_POSTGRES_PASSWORD:-local-postgres-change-me}@postgres:5432/mx_insight_hub
+      MX_INSIGHT_API_KEY_PEPPER: ${MX_INSIGHT_API_KEY_PEPPER:-local-pepper-change-me-at-least-32-bytes}
+      MX_INSIGHT_AGENT_PROVIDERS: ${MX_INSIGHT_AGENT_PROVIDERS:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    depends_on:
+      app:
+        condition: service_healthy
+    command: ["node", "server/workers/classifier.mjs"]
     restart: unless-stopped
 
 volumes:

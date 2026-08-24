@@ -1,6 +1,11 @@
 import { AppError } from '../core/errors.mjs'
 import { validateFieldMap, inferFieldMap } from '../ingest/external/mapping.mjs'
-import { EmbeddingRouter, ProviderRouter, parseProviderConfig } from './providers.mjs'
+import {
+  EmbeddingRouter,
+  ProviderRouter,
+  parseProviderConfig,
+  validateChatResponse,
+} from './providers.mjs'
 
 export {
   ProviderRouter,
@@ -8,6 +13,7 @@ export {
   NoProviderAvailableError,
   parseProviderConfig,
   shouldFailover,
+  validateChatResponse,
 } from './providers.mjs'
 
 // The Hub's central agent.
@@ -116,7 +122,7 @@ export class HubAgent {
       messages,
       temperature,
       max_tokens: maxTokens,
-    }), { signal })
+    }), { signal, validatePayload: validateChatResponse })
   }
 
   /**
@@ -304,6 +310,39 @@ If none fit, use {"category": "unknown", "confidence": 0}.`,
     return this.embeddings.embed(texts, { signal })
   }
 
+  /** Run a minimal, data-free request against exactly one provider. */
+  async testProvider({ kind, providerId, signal } = {}) {
+    if (!['chat', 'embedding'].includes(kind)) {
+      throw new AppError(400, 'invalid_provider_kind', 'kind must be chat or embedding')
+    }
+    if (typeof providerId !== 'string' || !providerId) {
+      throw new AppError(400, 'invalid_provider_id', 'providerId is required')
+    }
+    let result
+    if (kind === 'chat') {
+      result = await this.chat.callProvider(providerId, '/chat/completions', (provider) => ({
+        model: provider.model,
+        messages: [{ role: 'user', content: 'Reply with OK.' }],
+        temperature: 0,
+        max_tokens: 8,
+      }), { signal, validatePayload: validateChatResponse })
+    } else {
+      result = await this.embeddings.embedProvider(
+        providerId,
+        ['MX Insight Hub provider connectivity test'],
+        { signal },
+      )
+    }
+    return {
+      ok: true,
+      kind,
+      providerId: result.provider,
+      model: result.model,
+      latencyMs: result.latencyMs,
+      testedAt: new Date().toISOString(),
+    }
+  }
+
   status() {
     return {
       chat: this.chat?.available ? this.chat.status() : [],
@@ -331,13 +370,15 @@ export function createAgentFromProviders({
   embeddingProviders,
   expectedEmbeddingDimensions = null,
   logger = console,
+  fetchImpl = globalThis.fetch,
 }) {
   return new HubAgent({
-    chat: new ProviderRouter({ providers: chatProviders, logger }),
+    chat: new ProviderRouter({ providers: chatProviders, logger, fetchImpl }),
     embeddings: new EmbeddingRouter({
       providers: embeddingProviders,
       expectedDimensions: expectedEmbeddingDimensions,
       logger,
+      fetchImpl,
     }),
     logger,
   })

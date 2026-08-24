@@ -931,6 +931,12 @@ night-all.mxinfo-inc.cn -> 10.88.88.88
 ```
 
 因此 V2-only 域名可以放进 V1 DNS 后台做测试和过渡；同名迁移域名不能无条件覆盖。
+这一边界也适用于 H 端 macOS resolver：V2 policy 可以声明 parent suffix，但共存期不得删除、
+覆盖带 HDO marker 的 V1 `/etc/resolver/mxinfo-inc.cn`。Launcher 同时安装当前 V2 route/诊断用的
+精确 child（例如 `h2i.mxinfo-inc.cn`）到 SystemConfiguration supplemental resolver，利用最长
+suffix 优先级让 V2 child 命中 `127.0.0.1:2053`；V1 parent 文件继续服务其它 V1 域名。只有 V1
+明确退役后，才允许通过带备份的显式迁移接管 parent，不能由普通连接、后台刷新或 orphan cleanup
+静默完成。
 如果 `night-all.mxinfo-inc.cn` 在 V1 仍用于线上 HDO，它在 V1 DNS 里应继续返回
 `100.89.0.12`。V2 要使用同名域名时，要么等切换窗口整体改 A 记录，要么让 Domestic
 DNS front 根据来源网段或 listener/view 转发到 V2 Internal CoreDNS，返回 `10.88.88.88`。
@@ -1025,6 +1031,11 @@ bootstrap 配置会迁移到新域名，不会泛化改写其它 `mxinfo-inc.cn`
 - `connected / H2I ready`：命中的 V2 split 内网域名必须优先解析到 `10.88.88.88`，再走
   MX-H2I WG route。这个阶段不应因为 Internal DNS 暂时失败而静默落回 `116.*` 或
   `198.18.*`。
+  若开发环境把诊断主机配置成 split namespace 之外的公网 bootstrap，connected proof 必须
+  忽略它并选择被当前 root 覆盖的精确 child（当前为 `h2i.mxinfo-inc.cn`）。macOS 将该 child
+  指向 `127.0.0.1:2053`，利用最长 suffix 压过仍在线的 V1 parent resolver，并绕开 Clash
+  TUN 的 `any:53` 劫持；未命中 split 的公网流量仍可继续走 Clash。`198.18/15` 只说明
+  优先级尚未生效，不能晋升 `connected`。
 - `disconnect / repair`：Windows 先进入 PAC 恢复阶段，同时保持 `2053` 存活。如果
   `AutoConfigURL` 仍由 MX 持有，则恢复最近一次成功协商时捕获的 external value 并 readback；
   如果外部 owner 已接管，则保留其值，不覆盖，只做 notification/readback。随后停止 WG、
@@ -1038,7 +1049,7 @@ Clash/mihomo 兼容原则不是按模式写两套逻辑，而是统一优先级 
 | --- | --- |
 | Clash system proxy | Windows 默认仍安装 MX-H2I PAC；live loopback 静态 proxy 被复用为 fallback，可读取的 loopback PAC 被包装，Internal exact/suffix 始终先走 `PROXY 127.0.0.1:2053` |
 | Clash TUN/fake-ip | `198.18.0.0/15` 只作为代理 fake-ip 证据，不算系统 DNS ready；WG endpoint 必须先写物理网关 `/32` bypass，Internal route proof 必须命中 MX-H2I WG interface；若 resolver 仍被劫持，PAC/local-edge 浏览器 proof 可进入 browser-ready，但非 PAC 程序保持 degraded |
-| Clash TUN ↔ system proxy 在线切换 | 5 秒巡检常态只读验证；新 owner signature 可触发一次有界协商并按结果写回，同一 signature 后续 tick 不周期抢回；状态变化、重连或手动 repair 可再次协商 |
+| Clash TUN ↔ system proxy 在线切换 | 定时巡检常态只读验证；新 owner signature 只在前台显式动作中触发一次有界协商并按结果写回，同一 signature 后续 tick 不周期抢回；状态变化、重连或手动 repair 可再次协商 |
 | Clash PAC/WPAD 不可安全包装 | 可读的 live loopback PAC 被包装；短启动宽限期后仍无 listener 的 stale loopback PAC 被跳过且不恢复，再尝试 live static proxy 或 `DIRECT`；live-invalid/非 loopback PAC、dead static listener 仍 fail closed。AutoDetect/WPAD 仅在没有可表达的 live static/PAC owner 时 fail closed；均不误报 browser-ready |
 | Clash 关闭 | MX-H2I 断开后应恢复到系统 DNS/公网解析；如果仍返回 `198.18.*`，优先查系统 DNS cache、Clash 残留 TUN/DNS 或 stale MX-H2I resolver |
 | V2 connected | 对 `10.88.88.88`、`10.88.0.1`、Domestic relay endpoint、DNS server 写更具体 route/priority，压过 TUN 默认路由 |
@@ -1148,12 +1159,21 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
 - macOS Wi-Fi/网络切换时，MX-H2I 会监控默认路由和 network service 签名变化；变化后先做
   无权限 WireGuard probe，再验证系统 PAC 与 dynamic split DNS。连接已成立时，后台
   `route-refresh` 会用真实系统状态验证 PAC 和 dynamic resolver；若睡眠唤醒、Clash/mihomo
-  系统代理或 TUN 模式切换覆盖了 MX-H2I 设置，默认自动重新写入 PAC/split DNS；macOS 可能
-  弹出管理员授权框，这是写 `networksetup` 与 SystemConfiguration dynamic DNS 的系统要求。
-  网络变化签名包含各 network service 的 Auto Proxy URL/state，因此 Clash 系统代理切换会被
-  近实时识别，而不只依赖 30 秒兜底刷新。测试环境可用
-  `MX_H2I_MAC_BACKGROUND_PROXY_REPAIR=0` 改成只诊断不修复。启动时仍不自动恢复 stale macOS
-  PAC/split DNS，避免用户尚未选择连接前弹权限框。
+  系统代理或 TUN 模式切换覆盖了 MX-H2I 设置，默认只把连接降级为 `tunnel-only` 并保留
+  WireGuard/Internal，不在后台弹管理员授权框。用户明确点击连接、员工登录或“修复网络”时，
+  才允许一次前台授权事务重新写入 PAC/split DNS；确认授权后若事务仍失败，会按同一 policy
+  latch，后台 watcher 不得再次弹框，只有下一次用户显式操作才重试。只有明确接受交互授权框和
+  重复修复风险的受控测试/运维环境，才可
+  显式设置 `MX_H2I_MAC_BACKGROUND_PROXY_REPAIR=1`；生产安装包不应预置。网络变化签名包含当前可用 network
+  service 的 Auto Proxy URL/state；持久化的 previous state 只用于断开回滚，已经删除的测试/VPN
+  service 不参与 apply/readback，也不能让整个权限事务失败。启动时只读复核与当前 policy 完全匹配的
+  live PAC/resolver；若系统仍指向 MX-H2I，只恢复进程内 `127.0.0.1:2053` listener，再用真实系统解析证明
+  后恢复 `connected`，不写 SystemConfiguration、不弹权限框、也不加入其它进程的 shared edge。不匹配或
+  fake-IP 仍保持 `tunnel-only`，不自动写 stale macOS PAC/split DNS。系统解析 ready 必须命中当前 host
+  对应的明确 ProductNetwork target；`h2i.mxinfo-inc.cn` 当前只接受 `10.88.88.88`，不能用任意 `10.*`
+  （包括 Luopan `10.88.100.3` 或客户端 lease）代替。断开恢复对 PAC URL 做 exact compare-and-swap：重命名
+  后仍继承 MX PAC 的 service 会被安全关闭，已由 Clash/HDO 接管的 service 不回写旧快照。员工
+  auth/lease/WireGuard 始终保留，UI 显示修复/断开而非再次登录。
 - macOS Domestic/bootstrap endpoint 的 `/32` bypass route 不能只比较 gateway/interface。
   两个 Wi-Fi 都使用 `en0 + 192.168.0.1`、但 DHCP source 从 `192.168.0.104` 变化到另一地址时，
   旧 host route 的 `IFA` 会继续绑定已经不存在的 source，Node/Electron 报
@@ -1164,16 +1184,24 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
   物理路径，再从该接口读取当前 IPv4 source。root WireGuard LaunchDaemon 每 5 秒用同一判据
   比较 gateway、interface、source/IFA；任一变化都会删除并重建 endpoint bypass。App 网络
   诊断也使用同一物理 default，避免把正常的 `endpoint -> en0` 误判成偏离 TUN default。
-  用户主动点击访客连接、员工登录或“修复网络”时若发现旧 route，只请求一次管理员授权，
-  在同一批命令中执行 best-effort delete，再 `add/change -host endpoint physical-gateway`；
+  访客连接/员工登录的 pre-bootstrap 阶段只读诊断旧 route，不单独提权；若旧 route 已阻断
+  bootstrap，则停止本次连接并提示用户执行“修复网络”。最终连接或显式修复只请求一次管理员授权，
+  在同一批 WG/PAC/DNS 命令中执行 best-effort delete，再 `add/change -host endpoint physical-gateway`；
   `not in table` 只表示 clone route 不能按普通 host entry 删除，不再被当成修复成功或最终失败。
   后台 watcher 只诊断，不执行一次必然报 `must be root` 的无权限删除。
-- macOS 权限申请应收敛为 Launcher network transaction。当前 V2 可能出现两次授权：
-  第一次安装/刷新 WireGuard LaunchDaemon 和 route，第二次写系统 PAC 与 dynamic split
-  DNS。短期应把 UI 文案合并为一次“即将修改 WireGuard、DNS、PAC”的连接动作，并尽量只在
-  首次连接或配置变更时触发；长期应由 Launcher native helper/broker 一次性执行
-  WG/route/DNS/PAC apply、记录 previous state，并在 disconnect/repair 中统一回滚。这样
-  MX-H2I、Luopan 等 standalone 都不各自弹权限，也不会互相覆盖系统网络。
+- macOS 权限申请收敛为 Launcher network transaction。用户显式连接或“修复网络”时，当前
+  V2 把 endpoint bypass、WireGuard LaunchDaemon/route、PAC 与 dynamic split DNS 命令合并到
+  同一个前台 `osascript` 授权事务；需要提权时允许弹一次，但确认后不得再启动第二个独立授权
+  事务。准备阶段不能生成安全的 combined shell 时，本次动作跳过单独的 WireGuard 提权，转入
+  PAC/DNS 显式修复或失败反馈，避免串行弹框。长期仍应由 Launcher native helper/broker 统一
+  执行 WG/route/DNS/PAC apply、记录 previous state，并在 disconnect/repair 中统一回滚，使
+  MX-H2I、Luopan 等 standalone 共用 machine-global owner 协调而不互相覆盖系统网络。
+- 连接或恢复进行中必须提供独立于普通 action busy lock 的“停止本次连接/恢复”。该动作只递增
+  当前 network operation generation、取消后续阶段并暂停自动恢复，不得当作 disconnect：员工
+  auth/identity、lease、已运行的 WireGuard 和 Internal 证据都保留。已经打开的 macOS 管理员窗口
+  仍由用户在系统窗口点“取消”；Launcher 不强杀可能已经执行一半的 root shell，而是在进程返回后
+  只读 reconcile 实际状态、完成或安全撤销尚未提交的 PAC/DNS prepare transaction，并禁止进入
+  下一次提权。下一次用户显式连接或“修复网络”才解除 pause，后台 watcher 不得自行解除。
 - macOS 用户态 WireGuard 会把当前 routePlan 的 AllowedIPs 展开为数量受控的 `/20`
   priority routes，并给 Domestic gateway、Internal control、DNS 等关键 IP 写 `/32`
   priority routes，用来压过 Clash/Mihomo 等 198.18 TUN 的同前缀路由。多个 standalone

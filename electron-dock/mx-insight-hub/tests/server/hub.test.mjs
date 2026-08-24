@@ -209,6 +209,25 @@ test('non-Kubernetes runtime keeps Elasticsearch disabled when no URL is configu
   assert.equal(config.common.elasticsearch.enabled, false)
 })
 
+test('Hub bounds bulk HanLP defaults while explicit common settings still win', () => {
+  const base = {
+    MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER,
+  }
+  const defaults = loadConfig(base)
+  assert.equal(defaults.common.segmenter.concurrency, 2)
+  assert.equal(defaults.common.segmenter.batchSize, 16)
+
+  const explicit = loadConfig({
+    ...base,
+    MX_COMMON_SEGMENTER_CONCURRENCY: '3',
+    MX_COMMON_SEGMENTER_BATCH_SIZE: '24',
+  })
+  assert.equal(explicit.common.segmenter.concurrency, 3)
+  assert.equal(explicit.common.segmenter.batchSize, 24)
+})
+
 test('Telegram SQLite page pacing has a bounded deployment default', () => {
   const base = {
     MX_INSIGHT_LISTENER_MODE: 'public',
@@ -222,6 +241,23 @@ test('Telegram SQLite page pacing has a bounded deployment default', () => {
   }).externalPull.telegramSqlitePageDelayMs, 0)
   assert.throws(
     () => loadConfig({ ...base, MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS: '60001' }),
+    /must be an integer between 0 and 60000/,
+  )
+})
+
+test('province source page pacing has a bounded deployment default', () => {
+  const base = {
+    MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER,
+  }
+  assert.equal(loadConfig(base).externalPull.provincePageDelayMs, 2_000)
+  assert.equal(loadConfig({
+    ...base,
+    MX_INSIGHT_PROVINCE_PAGE_DELAY_MS: '0',
+  }).externalPull.provincePageDelayMs, 0)
+  assert.throws(
+    () => loadConfig({ ...base, MX_INSIGHT_PROVINCE_PAGE_DELAY_MS: '60001' }),
     /must be an integer between 0 and 60000/,
   )
 })

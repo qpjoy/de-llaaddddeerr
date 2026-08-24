@@ -203,6 +203,12 @@ Windows 会监控非 loopback 网卡地址、掩码和 MAC 组成的网络签名
 该前台恢复只绕过当前这一个 connect operation 自身和后台失败 cooldown；并发 connect
 仍被阻止。是否保留隧道以修复后的 live service probe 为准，不能继续使用点击前缓存的
 `wireGuard.active`。
+连接/恢复 busy 时，“停止本次连接/恢复”走独立 IPC，不受普通 action 锁阻挡。它会让当前
+operation generation 失效、清除后续 recovery timer，并把自动恢复保持为 paused；不会清员工
+token/identity、不会卸载 WireGuard、不会 restore PAC，也不会释放 lease。已启动的管理员进程
+不能被应用强杀；若系统授权框已经出现，用户在系统窗口取消，子进程 settle 后 Launcher 只做
+read-only reconcile，并记录 `networkOperation.cancelRequested/paused` 与本次 privileged stage。
+下一次用户显式连接或修复才解除 paused。
 若 live probe 仍确认 WireGuard service active，“重新连接”只允许原位修复
 route/NRPT/PAC；修复未通过时保留现有隧道，不能继续进入 destructive restart。确需
 restart 时先 Stop 并释放所有 `ServiceController` 句柄，再直接调用
@@ -261,7 +267,7 @@ ready；当前 suppression 布尔判定本身不是 prepared 证据，验收必�
 electron-dock/mx-launcher/demos/mx-h2i/scripts/repair-macos-dns.sh
 ```
 
-安装包中的位置是 `MX-H2I.app/Contents/Resources/repair/repair-macos-dns.sh`。脚本会先直接检查 `127.0.0.1:2053`：A 查询必须得到 IPv4，AAAA 查询不得错误得到 A；通过后才重建 `State:/Network/Service/com.qpjoy.electron-launcher.domain-proxy/DNS`、刷新 `dscacheutil` / `mDNSResponder` 缓存并复检。
+安装包中的位置是 `MX-H2I.app/Contents/Resources/repair/repair-macos-dns.sh`。脚本会先直接检查 `127.0.0.1:2053`：A 查询必须得到 IPv4，AAAA 查询不得错误得到 A；随后把被 parent suffix 覆盖的精确测试主机（默认 `h2i.mxinfo-inc.cn`）一并写入 `State:/Network/Service/com.qpjoy.electron-launcher.domain-proxy/DNS`，刷新 `dscacheutil` / `mDNSResponder` 缓存，再用 `dscacheutil` 的真实系统解析路径确认所有 IPv4 都命中 `MX_H2I_DNS_EXPECTED_TARGETS`（默认仅 `10.88.88.88`）。任意其它 `10.*`（包括 Luopan VIP 或客户端 lease）、V1 `100.*`、Clash `198.18.*` 都不算修复完成；routePlan 正式迁移后才应显式更新 expected target。
 
 默认不会改动 V1 HDO 留下的 `/etc/resolver/*`。确认 HDO 已断开且 MX-H2I 应接管相同域名时，可显式运行：
 

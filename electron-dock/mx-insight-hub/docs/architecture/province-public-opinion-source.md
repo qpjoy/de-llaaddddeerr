@@ -1,6 +1,7 @@
 # Nationwide province public-opinion source
 
-Status: repository contract only; intentionally not connected or deployed.
+Status: repository contract plus paused ingest/classification implementation;
+intentionally not connected or deployed.
 
 This document defines the bounded Hub contract for the Night-All
 `public.monitor_strategy_results` table. The immediate product goal is to serve
@@ -8,8 +9,10 @@ province-specific hot/latest opinion items and item detail without weakening
 the existing external-source, lineage or public-authorization boundaries.
 
 It is not an instruction to connect a database, deploy the current branch,
-activate a source, grant a consumer or ingest the supplied sample. Those remain
-separate operator decisions after the source contract has been proven.
+activate either pipeline, grant a consumer or ingest the supplied sample. Those
+remain separate operator decisions after the source contract has been proven.
+The corresponding step-by-step procedure is
+[Nationwide province public-opinion operations](../operations/province-public-opinion-ingestion.md).
 
 ## 1. Ownership and fixed identity
 
@@ -58,10 +61,28 @@ DNS or user connectivity.
 
 ## 3. `updated_at + id` is a correctness gate
 
-The supplied table contract has an immutable primary-key `id`, but it does not
-currently provide a reliable change watermark. `created_at` only describes the
-initial insert and cannot reveal a later correction to `province`, source
-metadata, heat or LLM output. It must never be used as an incremental cursor.
+The historical table contract has an immutable primary-key `id`, but did not
+provide a reliable change watermark. `created_at` only describes the initial
+insert and cannot reveal a later correction to `province`, source metadata,
+heat or LLM output. It must never be used as an incremental cursor.
+
+The Night-All repository now contains
+`migrations/040_monitor_strategy_results_hub_watermark.sql` as the intended
+upstream implementation. It backfills a finite `updated_at`, makes it non-null,
+validates the finite-value constraint, creates `(updated_at, id)`, rejects ID
+changes, and installs a `BEFORE INSERT OR UPDATE` trigger. The trigger holds a
+transaction-scoped advisory lock through commit and atomically advances a
+single-row watermark state to at least its previous value plus one microsecond.
+That avoids stale `max(updated_at)` reads: a stale REPEATABLE READ/SERIALIZABLE
+writer must serialization-fail and retry rather than publish an old watermark.
+Night-All's migration baseline also forces 040 to run rather than inferring it
+from a partial legacy schema.
+
+This is repository evidence, not deployment evidence. Before Hub activation,
+040 must be executed on the target Night-All PostgreSQL, checked against real
+rows and the normal writer path, and then attested using the contract digest
+returned by the current Hub probe. Static/domain tests passed in the Night-All
+repository, but no real PostgreSQL execution has yet been evidenced.
 
 Activation requires all of the following upstream guarantees:
 
@@ -81,6 +102,12 @@ Activation requires all of the following upstream guarantees:
    watermarked tombstone/change record. Otherwise an ordered change journal or
    CDC position is required.
 
+Migration 040 deliberately does not install a blanket DELETE blocker because
+that would also alter the existing parent-table cascade and cleanup behavior.
+The deletion guarantee therefore remains an explicit deployment attestation:
+operators must audit cleanup jobs, table privileges and cascade paths, and keep
+the pipeline paused if they cannot prove this condition.
+
 A column name and index alone are insufficient: the source owner must attest to
 the writer behavior. The Hub's read-only probe verifies the visible schema,
 nullability, types and index, but it cannot prove application commit semantics.
@@ -88,8 +115,10 @@ If those semantics cannot be guaranteed, the correct adapter is a future
 append-only change journal or CDC connector—not a timestamp guess.
 
 Routine Hub ingest must not create the upstream column, trigger or index. The
-source remains paused until Night-All has deliberately implemented and tested
-the contract and an operator has reviewed the evidence.
+source remains paused until the target Night-All database has deliberately run
+040, an operator has reviewed real-database and writer-path evidence, and the
+current Hub contract digest has been attested. The presence of a migration file
+or a baseline entry cannot satisfy those gates.
 
 The two Hub-local hot/latest serving indexes are deliberately outside migration
 033. Building regular indexes inside the transactional migration would retain
@@ -117,17 +146,23 @@ attestation all pass, ingestion has exactly two modes.
 ### 4.1 First run: complete current alignment
 
 An empty, explicitly reviewed checkpoint starts a keyset scan of all current
-rows in `(updated_at, id)` order. Each committed batch preserves:
+rows in `(updated_at, id)` order. The batch transaction preserves:
 
-- the exact upstream row as a source object;
+- the exact upstream row as the current source object plus an immutable raw
+  source revision;
 - the reviewed mapping/import-run identity;
 - the canonical record and immutable revision when content changed;
 - projection-outbox work;
-- the acknowledged `(updated_at, id)` checkpoint.
+- source-revision-anchored analysis work; and
+- committed batch evidence including its exact cursor end.
 
-Those writes and the checkpoint acknowledgement form one Hub transaction. A
-failure leaves the last committed checkpoint intact. Retry resumes the same
-run/batch evidence; it does not create a second logical initial import.
+Checkpoint acknowledgement is a second durable phase after the batch commit;
+the final batch atomically finalizes the import run and cursor. A crash after
+the batch commit but before acknowledgement is recovered by reading the stored
+batch evidence and advancing to its saved cursor end without trusting a page
+that may since have drifted upstream. A failure before commit leaves the last
+acknowledged checkpoint intact. Retry resumes the same run/batch evidence; it
+does not create a second logical initial import.
 
 This is a current-table alignment, not proof that previously hard-deleted rows
 never existed. Deletion history requires the source contract described above.
@@ -139,8 +174,11 @@ strictly greater than the durable `(updated_at, id)` checkpoint. There is no
 periodic historical full scan and no overlap window used to hide an unsafe
 watermark.
 
-An unchanged replay is absorbed by canonical identity and revision hashes. A
-rejected row or ambiguous commit must not advance the checkpoint. Resetting the
+An unchanged replay is absorbed by canonical identity and revision hashes. For
+this fixed source the raw identity excludes only the transport `updated_at`;
+that value remains in current raw/lineage, but a watermark-only upsert does not
+create a new evidence revision or paid analysis task. A rejected row or
+ambiguous commit must not advance the checkpoint. Resetting the
 checkpoint requires the source to be paused and drained plus an explicit
 operator confirmation; reset is a controlled full replay, not a normal retry.
 
@@ -152,7 +190,10 @@ connection is not evidence that incremental synchronization is safe:
 | Source | `paused`, `active` |
 | Import run | `running`, `succeeded`, `failed`, `skipped` |
 | Cursor | `idle`, `running`, `failed` |
+| Raw source revision | current pointer plus append-only semantic-payload-change revisions |
 | Projection outbox | `pending`, `delivered`, `dead` |
+| Analysis task | `pending`, `running`, `succeeded`, `dead`, `superseded` |
+| Classification assertion | `proposed`, `accepted`, `rejected`, `superseded` |
 
 ## 5. Field and provenance classification
 
@@ -238,20 +279,40 @@ cursor-bound and applied identically in PostgreSQL and Elasticsearch. It must
 not expose raw `extensions`, accept arbitrary search DSL, infer access from a
 source tag, or turn an unreviewed Agent label into a public filter.
 
-## 7. Future classification/archive extension point
+## 7. Derived classification/archive plane
 
 “Archive” here means a versioned derived classification attached to preserved
 source/revision evidence. It does not mean moving, deleting or rewriting the
 raw source object, and it is not a cold-storage or retention feature.
 
-The current phase deliberately adds **no classification-assertion migration,
-Agent writer, classification job, scheduler, route or projector**. It only
-reserves the following future append-only assertion contract in the design:
+Migration 034 implements the persistence half of this contract:
+
+- `ingest.source_object_revisions` keeps each semantic raw payload-change
+  revision independently from canonical revisions, including A→B→A reversions;
+  the fixed source's transport-only `updated_at` is retained but excluded from
+  that digest so writer watermark churn does not re-run the Agent;
+- pre-034 rows carry hash version 0 because their old digest represented
+  canonical content. The first new pull compares old/new semantic JSONB before
+  adopting hash version 1, so an unchanged legacy row is not fabricated as a
+  second raw revision or paid task;
+- `control.agent_analysis_pipelines` registers the default-paused
+  `province-geography-v1` pipeline and its immutable analysis/taxonomy/rule/
+  prompt versions;
+- `agent_center.analysis_tasks` anchors work to raw source revision, canonical
+  revision and input hash, with a single global in-flight claim, lease,
+  generation fence, bounded retry and stale-input supersession;
+- `agent_center.classification_assertions` keeps append-only source/rule/Agent/
+  manual evidence.
+
+The schema is:
 
 ```text
 assertion_id
+task_id
 record_id
-source_revision
+source_object_revision_id
+canonical_revision
+input_sha256
 field_key                 # initially province or source classification
 proposed_value
 method                    # source, rule, agent or manual
@@ -263,21 +324,41 @@ status                    # proposed, accepted, rejected or superseded
 created_at / decided_at / decided_by
 ```
 
-An assertion is anchored to the source revision it classified. A new source
-revision never inherits a stale assertion invisibly. Corrections append a new
-assertion and supersede the old one; they do not update history in place.
+The dedicated classifier worker entrypoint runs deterministic rules first and
+calls a bounded Chat Agent only for ambiguous geography. Event province,
+publisher province and geographic scope are separate fields. Agent evidence
+must quote the bounded input and its province/prefecture/adcode semantics must
+match the returned code; a quote that merely exists cannot validate a different
+province. Agent output always remains a proposal. The pipeline is
+installed paused; adding records creates a durable backlog but never invokes a
+model in the ingest transaction.
+
+An assertion is anchored to the source revision it classified. A new raw or
+canonical revision supersedes stale pending/running work instead of inheriting
+a conclusion invisibly. A correction appends a new source revision and new
+assertion rather than rewriting raw history. The schema can represent a prior
+assertion as `superseded`, but the current writer does not automatically decide
+or update previously completed assertions.
 
 Preferred ownership remains upstream: when Night-All later identifies a
 province or source, it writes the factual field and advances `updated_at`, and
-the Hub ingests a new revision. If a future Hub Agent assists, it may create a
-reviewable proposal only. It cannot write the upstream row, approve its own
-proposal, alter canonical identity/deduplication, advance/reset an ingest
-checkpoint, activate a source or grant a consumer.
+the Hub ingests a new revision. A Hub Agent may create a reviewable proposal
+only. It cannot write the upstream row, approve its own proposal, alter
+canonical identity/deduplication, advance/reset an ingest checkpoint, activate
+a source or grant a consumer.
 
-Only accepted assertions may later feed a separate governed classification
-projection. Until that projection has a migration, writer, review workflow and
-rebuild tests, canonical `admin1_code` remains `NULL`. `unknown` is a valid
-outcome and is never a prompt to guess.
+The repository currently has pipeline status/update/materialize/retry-dead and
+read-only assertion APIs, plus a dedicated package script, Compose service and
+K8s classifier Deployment with no Service or ingress. The pipeline is still
+installed paused, and repository wiring is not evidence that any environment
+has rolled it out. There is no accept/reject decision writer and no governed
+classification projection. Therefore only the built-in explicit source
+`province` mapping affects canonical `admin1_code`; rule/Agent proposals do not
+affect province feeds or public search. `unknown` is a valid outcome and is
+never a prompt to guess.
+
+The full activation, rate, recovery, review and HanLP boundaries are in the
+[operations runbook](../operations/province-public-opinion-ingestion.md).
 
 ## 8. Explicit non-actions for this phase
 
@@ -290,14 +371,17 @@ Completing the repository work does not authorize any of the following:
 - alter `monitor_strategy_results` or install upstream DDL;
 - activate the source, schedule a pull, reset a checkpoint or import data;
 - create a `public_opinion` consumer grant;
-- add an Agent classification table, writer, queue, model call or background
-  task;
+- activate the analysis pipeline, start/deploy its classifier, configure a
+  provider, retry dead analysis tasks or treat a proposal as approved;
 - change MX-H2I login/networking or restart Launcher components.
 
-The operator may consider onboarding only after the upstream watermark/writer
-contract is implemented, the source owner supplies evidence, the public field
-allowlist is reviewed, the online Hub indexes are separately installed and a
-deployment is separately approved.
+The operator may consider onboarding only after Night-All 040 is executed and
+verified in the target database, the source owner supplies writer-path evidence,
+the current Hub contract digest is attested, the public field allowlist is
+reviewed, the online Hub indexes are separately installed and a deployment is
+separately approved. Classification additionally requires a
+successful classifier rollout, provider/cost approval, raw-revision acceptance
+tests and a review decision path; none is implied by applying migration 034.
 
 ## Related decisions
 
@@ -308,3 +392,5 @@ deployment is separately approved.
 - [Unified canonical search](../adr/0009-unified-canonical-search.md)
 - [Shared data plane and search](shared-data-plane-and-search.md)
 - [BI and Data Agent evolution](bi-and-data-agent-evolution.md)
+- [Nationwide province public-opinion operations](../operations/province-public-opinion-ingestion.md)
+- [Agent provider settings](../operations/agent-provider-settings.md)

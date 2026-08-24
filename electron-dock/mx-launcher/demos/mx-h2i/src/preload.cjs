@@ -8,6 +8,10 @@ const api = {
   loginEmployee: (input) => ipcRenderer.invoke('mx-h2i:login-employee', input),
   startFeishuLogin: () => ipcRenderer.invoke('mx-h2i:start-feishu-login'),
   cancelFeishuLogin: () => ipcRenderer.invoke('mx-h2i:cancel-feishu-login'),
+  cancelNetworkOperation: (operationId = null) => ipcRenderer.invoke(
+    'mx-h2i:cancel-network-operation',
+    { id: typeof operationId === 'string' && operationId.trim() ? operationId.trim() : null }
+  ),
   disconnect: () => ipcRenderer.invoke('mx-h2i:disconnect'),
   resetLocalNetworkIdentity: () => ipcRenderer.invoke('mx-h2i:reset-local-network-identity'),
   installAppCenter: () => ipcRenderer.invoke('mx-h2i:install-appcenter'),

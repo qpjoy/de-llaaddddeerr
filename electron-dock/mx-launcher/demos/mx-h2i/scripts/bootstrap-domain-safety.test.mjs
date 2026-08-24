@@ -326,8 +326,13 @@ assert.match(
 );
 assert.match(
   functionSource(mainSource, 'networkDiagnosticHost'),
-  /connectedInternalFallback[\s\S]*LEGACY_DEFAULT_BOOTSTRAP_HOST[\s\S]*routeHost,[\s\S]*connectedInternalFallback,[\s\S]*runtime\?\.config\?\.bootstrapApiBaseUrl/,
-  'connected diagnostics must test an Internal split-DNS name instead of requiring the public bootstrap name to resolve into the overlay'
+  /\['connected', 'tunnel-only'\][\s\S]*coveredSplitDnsDiagnosticHost\(splitDnsDomains\(runtime\?\.config\)\)[\s\S]*if \(splitHost\) return splitHost/,
+  'connected diagnostics must use a host covered by the active split-DNS roots instead of requiring the public bootstrap name to resolve into the overlay'
+);
+assert.match(
+  functionSource(mainSource, 'coveredSplitDnsDiagnosticHost'),
+  /firstResolverCoveredHost\(domains,[\s\S]*LEGACY_DEFAULT_BOOTSTRAP_HOST[\s\S]*arrayValue\(domains, \[\]\)/,
+  'the split-DNS proof must retain an exact MX-H2I child candidate so it can outrank a same-parent V1 resolver while Clash TUN is active'
 );
 
 console.log('bootstrap domain safety tests passed');

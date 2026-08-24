@@ -29,11 +29,27 @@ const DEFAULT_TIMEOUT_MS = 60_000
 const CIRCUIT_THRESHOLD = 3
 const CIRCUIT_COOLDOWN_MS = 60_000
 
-export class NoProviderAvailableError extends Error {
-  constructor(attempts) {
-    super(`No model provider could serve the request (${attempts.map((a) => `${a.provider}: ${a.error}`).join('; ')})`)
+export class NoProviderAvailableError extends AppError {
+  constructor(attempts, { invalidResponse = false } = {}) {
+    super(
+      invalidResponse ? 502 : 503,
+      invalidResponse ? 'agent_invalid_response' : 'agent_providers_unavailable',
+      `No model provider could serve the request (${attempts.map((a) => `${a.provider}: ${a.error}`).join('; ')})`,
+    )
     this.name = 'NoProviderAvailableError'
     this.attempts = attempts
+  }
+}
+
+/** Validate the subset of the OpenAI chat shape consumed by HubAgent. */
+export function validateChatResponse(payload) {
+  const content = payload?.choices?.[0]?.message?.content
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    throw new AppError(
+      502,
+      'agent_invalid_response',
+      'Provider response did not contain chat message content',
+    )
   }
 }
 
@@ -195,15 +211,41 @@ export class ProviderRouter {
    * provider-specific) is substituted per attempt rather than baked in by the
    * caller.
    */
-  async call(path, buildBody, { signal } = {}) {
-    if (!this.available) {
+  async call(path, buildBody, { signal, validatePayload } = {}) {
+    return this.#callProviders(this.providers, path, buildBody, { signal, validatePayload })
+  }
+
+  /** Probe exactly one saved provider without silently succeeding on fallback. */
+  async callProvider(providerId, path, buildBody, { signal, validatePayload } = {}) {
+    const provider = this.providers.find((candidate) => candidate.id === providerId)
+    if (!provider) {
+      throw new AppError(404, 'agent_provider_not_found', 'The provider was not found in this runtime')
+    }
+    // An explicit operator probe is the recovery path for an open circuit, so
+    // it must actually contact the selected provider. It still records the
+    // result and closes/reopens that provider's circuit normally.
+    return this.#callProviders([provider], path, buildBody, {
+      signal,
+      validatePayload,
+      ignoreCircuit: true,
+    })
+  }
+
+  async #callProviders(
+    providers,
+    path,
+    buildBody,
+    { signal, validatePayload, ignoreCircuit = false } = {},
+  ) {
+    if (providers.length === 0) {
       throw new AppError(503, 'agent_not_configured', 'No model provider is configured')
     }
     const attempts = []
+    let sawInvalidResponse = false
 
-    for (const provider of this.providers) {
+    for (const provider of providers) {
       const breaker = this.#breakers.get(provider.id)
-      if (breaker.open) {
+      if (!ignoreCircuit && breaker.open) {
         attempts.push({ provider: provider.id, error: 'circuit open', skipped: true })
         continue
       }
@@ -219,8 +261,14 @@ export class ProviderRouter {
       }
 
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), provider.timeoutMs)
-      signal?.addEventListener('abort', () => controller.abort(), { once: true })
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, provider.timeoutMs)
+      const abortFromCaller = () => controller.abort()
+      if (signal?.aborted) controller.abort()
+      else signal?.addEventListener('abort', abortFromCaller, { once: true })
       const startedAt = performance.now()
 
       try {
@@ -260,7 +308,26 @@ export class ProviderRouter {
         } catch {
           // JSON parser errors may include a fragment of the upstream body.
           // Replace them before the generic failure trail/logging boundary.
-          throw new Error('provider returned invalid JSON')
+          sawInvalidResponse = true
+          breaker.recordFailure()
+          attempts.push({ provider: provider.id, error: 'provider returned invalid JSON' })
+          this.logger?.warn?.(`[agent] ${provider.id} returned invalid JSON; trying next provider`)
+          continue
+        }
+        try {
+          await validatePayload?.(payload, provider)
+        } catch (error) {
+          // A 2xx only proves that an HTTP server answered. Treat a payload that
+          // cannot satisfy the caller's protocol as this provider's failure so
+          // a healthy fallback gets a chance, and do not close its circuit.
+          sawInvalidResponse = true
+          breaker.recordFailure()
+          const reason = error instanceof AppError
+            ? error.message
+            : 'provider returned an invalid response'
+          attempts.push({ provider: provider.id, error: reason })
+          this.logger?.warn?.(`[agent] ${provider.id} returned an invalid response; trying next provider`)
+          continue
         }
         breaker.recordSuccess()
         return {
@@ -275,16 +342,20 @@ export class ProviderRouter {
         }
       } catch (error) {
         if (error instanceof AppError) throw error
+        // A caller cancellation is not a provider failure and must not start a
+        // paid fallback request after the work that needed it has gone away.
+        if (signal?.aborted && !timedOut) throw error
         breaker.recordFailure()
         const reason = error.name === 'AbortError' ? `timed out after ${provider.timeoutMs}ms` : error.message
         attempts.push({ provider: provider.id, error: reason })
         this.logger?.warn?.(`[agent] ${provider.id} failed (${reason}); trying next provider`)
       } finally {
         clearTimeout(timer)
+        signal?.removeEventListener?.('abort', abortFromCaller)
       }
     }
 
-    throw new NoProviderAvailableError(attempts)
+    throw new NoProviderAvailableError(attempts, { invalidResponse: sawInvalidResponse })
   }
 
   status() {
@@ -348,22 +419,63 @@ export class EmbeddingRouter extends ProviderRouter {
     const result = await this.call('/embeddings', (provider) => ({
       model: provider.model,
       input: inputs,
-    }), options)
-    const vectors = (result.payload?.data ?? [])
-      .sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
-      .map((entry) => entry.embedding)
-    if (vectors.length !== inputs.length) {
-      throw new AppError(502, 'agent_invalid_response', 'Embedding count does not match the input count')
-    }
-    // Verify at the boundary too: configuration can be right while a provider
-    // silently serves a different model revision.
-    if (this.dimensions && vectors[0]?.length !== this.dimensions) {
+    }), {
+      ...options,
+      validatePayload: (payload, provider) => this.#validatePayload(payload, provider, inputs),
+    })
+    return this.#withVectors(result, inputs)
+  }
+
+  async embedProvider(providerId, inputs, options = {}) {
+    const result = await this.callProvider(providerId, '/embeddings', (provider) => ({
+      model: provider.model,
+      input: inputs,
+    }), {
+      ...options,
+      validatePayload: (payload, provider) => this.#validatePayload(payload, provider, inputs),
+    })
+    return this.#withVectors(result, inputs)
+  }
+
+  #validatePayload(payload, provider, inputs) {
+    if (payload?.model != null && payload.model !== provider.model) {
       throw new AppError(
         502,
-        'agent_dimension_mismatch',
-        `${result.provider} returned ${vectors[0]?.length} dimensions, expected ${this.dimensions}`,
+        'agent_model_mismatch',
+        'Embedding response model does not match the configured model',
       )
     }
+    if (!Array.isArray(payload?.data) || payload.data.length !== inputs.length) {
+      throw new AppError(502, 'agent_invalid_response', 'Embedding count does not match the input count')
+    }
+
+    const seenIndexes = new Set()
+    for (const entry of payload.data) {
+      if (!Number.isInteger(entry?.index)
+        || entry.index < 0
+        || entry.index >= inputs.length
+        || seenIndexes.has(entry.index)) {
+        throw new AppError(502, 'agent_invalid_response', 'Embedding indexes do not match the inputs')
+      }
+      seenIndexes.add(entry.index)
+      if (!Array.isArray(entry.embedding)
+        || entry.embedding.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
+        throw new AppError(502, 'agent_invalid_response', 'Embedding response contained an invalid vector')
+      }
+      if (this.dimensions && entry.embedding.length !== this.dimensions) {
+        throw new AppError(
+          502,
+          'agent_dimension_mismatch',
+          `${provider.id} returned ${entry.embedding.length} dimensions, expected ${this.dimensions}`,
+        )
+      }
+    }
+  }
+
+  #withVectors(result, inputs) {
+    const vectors = [...(result.payload?.data ?? [])]
+      .sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
+      .map((entry) => entry.embedding)
     return { ...result, vectors }
   }
 }

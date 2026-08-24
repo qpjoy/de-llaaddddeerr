@@ -24,6 +24,7 @@ cd ../mx-insight-hub
 
 # 一键部署：自动 build → migrate → 起 Admin/Public → 幂等建并打印 bootstrap API key
 MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 bash scripts/manage.sh ops internal-production deploy
+MX_INSIGHT_BUILD_NETWORK=host \
 bash scripts/manage.sh ops internal-production deploy
 
 # 部署完即可用，无需 port-forward / 手动连 admin：

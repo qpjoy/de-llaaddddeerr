@@ -105,9 +105,10 @@ paths:
       summary: Read the redacted Chat and Embedding provider status.
       description: >-
         The break-glass Admin Token and an allowlisted Launcher platform-admin
-        session may read provider metadata, circuit state and keyConfigured.
-        Responses never contain apiKey, apiKeyEnv, Secret names or environment
-        variable names, and there is no credential-reveal operation.
+        session may read provider metadata, circuit state, keyConfigured and
+        durable analysis-pipeline backlog/evidence. Responses never contain
+        apiKey, apiKeyEnv, Secret names or environment variable names, and
+        there is no credential-reveal operation.
       security:
         - adminToken: []
         - launcherSession: []
@@ -163,6 +164,145 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/providers/{kind}/{providerId}/test:
+    servers:
+      - url: /internal/v1/admin
+    post:
+      operationId: testAgentProvider
+      summary: Test exactly one configured provider without failover.
+      description: >-
+        Only the break-glass Hub Admin Token may test providers. The server
+        sends a fixed value-free connectivity probe to the selected provider;
+        it does not fall back to another provider and never returns request
+        payloads, vectors or credentials.
+      security:
+        - adminToken: []
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema: { type: string, enum: [chat, embedding] }
+        - name: providerId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" }
+      responses:
+        "200":
+          description: The selected provider returned a valid minimal response.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProviderTestEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/pipelines/{pipelineKey}:
+    servers:
+      - url: /internal/v1/admin
+    put:
+      operationId: updateAgentAnalysisPipeline
+      summary: Pause, activate or rate-limit one Agent analysis pipeline.
+      description: >-
+        Only the break-glass Hub Admin Token may mutate the independent derived
+        analysis plane. expectedRevision prevents lost updates. Pipeline state
+        never gates source ingestion, strict HanLP indexing or Hub readiness.
+      security:
+        - adminToken: []
+      parameters:
+        - { $ref: "#/components/parameters/AgentPipelineKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentPipelineUpdateRequest" }
+      responses:
+        "200":
+          description: Updated pipeline status and durable backlog counters.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentAnalysisPipelineEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/pipelines/{pipelineKey}/materialize:
+    servers:
+      - url: /internal/v1/admin
+    post:
+      operationId: materializeAgentAnalysisPipeline
+      summary: Idempotently materialize missing tasks for current source revisions.
+      security:
+        - adminToken: []
+      parameters:
+        - { $ref: "#/components/parameters/AgentPipelineKey" }
+      responses:
+        "202":
+          description: Current committed records were scanned and missing tasks were added.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentPipelineMaterializeEnvelope" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/pipelines/{pipelineKey}/retry-dead:
+    servers:
+      - url: /internal/v1/admin
+    post:
+      operationId: retryDeadAgentAnalysisTasks
+      summary: Requeue exhausted tasks without rerunning source ingestion.
+      security:
+        - adminToken: []
+      parameters:
+        - { $ref: "#/components/parameters/AgentPipelineKey" }
+      responses:
+        "202":
+          description: Dead tasks were reset to pending and retained their evidence identity.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentPipelineRetryEnvelope" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/pipelines/{pipelineKey}/assertions:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: listAgentClassificationAssertions
+      summary: Read recent append-only classification evidence.
+      description: >-
+        The break-glass Admin Token and an allowlisted Launcher platform-admin
+        session may inspect proposals. Agent-created assertions remain proposed
+        and are not written into canonical records or public serving indexes.
+      security:
+        - adminToken: []
+        - launcherSession: []
+      parameters:
+        - { $ref: "#/components/parameters/AgentPipelineKey" }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: Recent assertions in reverse creation order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentAssertionListEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /pipelines/telegram-monitor:
     servers:
@@ -1808,6 +1948,12 @@ components:
       in: path
       required: true
       schema: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9][a-z0-9._-]*$" }
+    AgentPipelineKey:
+      name: pipelineKey
+      in: path
+      required: true
+      description: Current governed Agent analysis pipeline identifier.
+      schema: { type: string, const: province-geography-v1 }
     SourceFilename:
       name: filename
       in: query
@@ -1862,7 +2008,10 @@ components:
         Redacted provider metadata. apiKey, apiKeyEnv, Secret names and
         environment-variable names are intentionally not members of this schema.
       properties:
-        id: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" }
+        id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          description: Environment providers may retain legacy uppercase IDs; database-managed IDs are lowercase.
         baseUrl: { type: string, format: uri }
         model: { type: string, minLength: 1, maxLength: 200 }
         timeoutMs: { type: integer, minimum: 1000, maximum: 300000 }
@@ -1918,7 +2067,7 @@ components:
     AgentOverview:
       type: object
       additionalProperties: false
-      required: [available]
+      required: [available, pipelines]
       properties:
         available: { type: boolean }
         chat:
@@ -1937,6 +2086,10 @@ components:
           properties:
             chat: { $ref: "#/components/schemas/AgentProviderSetting" }
             embedding: { $ref: "#/components/schemas/AgentProviderSetting" }
+        pipelines:
+          type: array
+          description: Durable derived-analysis status; independent from Agent runtime availability.
+          items: { $ref: "#/components/schemas/AgentAnalysisPipeline" }
     AgentOverviewEnvelope:
       type: object
       additionalProperties: false
@@ -1957,6 +2110,195 @@ components:
       required: [data, requestId]
       properties:
         data: { $ref: "#/components/schemas/AgentProviderSettingDeferred" }
+        requestId: { type: string }
+    AgentProviderTest:
+      type: object
+      additionalProperties: false
+      required: [ok, kind, providerId, model, latencyMs, testedAt]
+      properties:
+        ok: { type: boolean, const: true }
+        kind: { type: string, enum: [chat, embedding] }
+        providerId: { type: string, minLength: 1 }
+        model: { type: string, minLength: 1 }
+        latencyMs: { type: number, minimum: 0 }
+        testedAt: { type: string, format: date-time }
+    AgentProviderTestEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentProviderTest" }
+        requestId: { type: string }
+    AgentAnalysisTaskCounts:
+      type: object
+      additionalProperties: false
+      required: [pending, running, succeeded, dead, superseded, total, oldestPendingAt, lastCompletedAt]
+      properties:
+        pending: { type: integer, minimum: 0 }
+        running: { type: integer, minimum: 0 }
+        succeeded: { type: integer, minimum: 0 }
+        dead: { type: integer, minimum: 0 }
+        superseded: { type: integer, minimum: 0 }
+        total: { type: integer, minimum: 0 }
+        oldestPendingAt: { type: [string, "null"], format: date-time }
+        lastCompletedAt: { type: [string, "null"], format: date-time }
+    AgentAssertionCounts:
+      type: object
+      additionalProperties: false
+      required: [proposed, accepted, rejected, superseded, total]
+      properties:
+        proposed: { type: integer, minimum: 0 }
+        accepted: { type: integer, minimum: 0 }
+        rejected: { type: integer, minimum: 0 }
+        superseded: { type: integer, minimum: 0 }
+        total: { type: integer, minimum: 0 }
+    AgentClassificationAssertion:
+      type: object
+      additionalProperties: false
+      required:
+        - assertionId
+        - taskId
+        - pipelineKey
+        - recordId
+        - sourceObjectRevisionId
+        - canonicalRevision
+        - fieldKey
+        - proposedValue
+        - method
+        - confidence
+        - evidenceRefs
+        - taxonomyVersion
+        - ruleVersion
+        - providerId
+        - model
+        - promptVersion
+        - status
+        - createdAt
+      properties:
+        assertionId: { type: string, format: uuid }
+        taskId: { type: integer, minimum: 1 }
+        pipelineKey: { type: string }
+        recordId: { type: string, format: uuid }
+        sourceObjectRevisionId: { type: integer, minimum: 1 }
+        canonicalRevision: { type: integer, minimum: 1 }
+        fieldKey:
+          type: string
+          enum:
+            - geography.event_admin1_code
+            - geography.publisher_admin1_code
+            - geography.geo_scope
+            - classification.source_class
+            - classification.event_type
+        proposedValue: {}
+        method: { type: string, enum: [source, rule, agent, manual] }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        evidenceRefs:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        taxonomyVersion: { type: string }
+        ruleVersion: { type: [string, "null"] }
+        providerId: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        promptVersion: { type: [string, "null"] }
+        status: { type: string, enum: [proposed, accepted, rejected, superseded] }
+        createdAt: { type: string, format: date-time }
+    AgentAnalysisPipeline:
+      type: object
+      additionalProperties: false
+      required:
+        - pipelineKey
+        - displayName
+        - taskType
+        - status
+        - revision
+        - analysisVersion
+        - taxonomyVersion
+        - ruleVersion
+        - promptVersion
+        - itemsPerMinute
+        - maxInFlight
+        - nextDispatchAt
+        - updatedBy
+        - updatedAt
+        - tasks
+        - assertions
+      properties:
+        pipelineKey: { type: string, const: province-geography-v1 }
+        displayName: { type: string }
+        taskType: { type: string, const: record.classification }
+        status: { type: string, enum: [paused, active] }
+        revision: { type: integer, minimum: 0 }
+        analysisVersion: { type: string }
+        taxonomyVersion: { type: string }
+        ruleVersion: { type: string }
+        promptVersion: { type: string }
+        itemsPerMinute: { type: integer, minimum: 1, maximum: 60 }
+        maxInFlight: { type: integer, minimum: 1, maximum: 1 }
+        nextDispatchAt: { type: [string, "null"], format: date-time }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+        tasks: { $ref: "#/components/schemas/AgentAnalysisTaskCounts" }
+        assertions: { $ref: "#/components/schemas/AgentAssertionCounts" }
+        recentAssertions:
+          type: array
+          maxItems: 8
+          items: { $ref: "#/components/schemas/AgentClassificationAssertion" }
+    AgentPipelineUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision]
+      minProperties: 2
+      properties:
+        expectedRevision: { type: integer, minimum: 0 }
+        status: { type: string, enum: [paused, active] }
+        itemsPerMinute: { type: integer, minimum: 1, maximum: 60 }
+    AgentAnalysisPipelineEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentAnalysisPipeline" }
+        requestId: { type: string }
+    AgentPipelineMaterializeResult:
+      type: object
+      additionalProperties: false
+      required: [pipelineKey, enqueued, pipeline]
+      properties:
+        pipelineKey: { type: string, const: province-geography-v1 }
+        enqueued: { type: integer, minimum: 0 }
+        pipeline: { $ref: "#/components/schemas/AgentAnalysisPipeline" }
+    AgentPipelineMaterializeEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentPipelineMaterializeResult" }
+        requestId: { type: string }
+    AgentPipelineRetryResult:
+      type: object
+      additionalProperties: false
+      required: [pipelineKey, retried, pipeline]
+      properties:
+        pipelineKey: { type: string, const: province-geography-v1 }
+        retried: { type: integer, minimum: 0 }
+        pipeline: { $ref: "#/components/schemas/AgentAnalysisPipeline" }
+    AgentPipelineRetryEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentPipelineRetryResult" }
+        requestId: { type: string }
+    AgentAssertionListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/AgentClassificationAssertion" }
         requestId: { type: string }
     AgentProviderUpdateInput:
       type: object

@@ -18,6 +18,10 @@ export function sha256(value) {
 // Stable stringify: sorted keys, so an identical payload always hashes the same.
 export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  // node-postgres returns timestamp/timestamptz columns as Date instances.
+  // Treat them exactly like JSON.stringify does; otherwise Object.keys(Date)
+  // is empty and every timestamp hashes as `{}`, silently collapsing revisions.
+  if (value instanceof Date) return JSON.stringify(value.toJSON())
   if (value && typeof value === 'object') {
     return `{${Object.keys(value)
       .sort()

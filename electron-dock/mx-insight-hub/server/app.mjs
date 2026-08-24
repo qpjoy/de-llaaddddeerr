@@ -321,9 +321,11 @@ export function createApp({
   sqliteApiPuller = null,
   telegramSourcePreparer = null,
   agent = null,
+  agentPipelines = null,
   search = null,
   searchReindex = null,
   embedding = null,
+  segmenterConfig = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
   staticRoot,
@@ -344,6 +346,8 @@ export function createApp({
     store,
     queue,
     databasePuller,
+    agentPipelineStore: agentPipelines,
+    segmenterConfig,
   })
 
   /**
@@ -2069,15 +2073,36 @@ export function createApp({
       // ---- agent (P5) -----------------------------------------------------
       if (request.method === 'GET' && pathname === '/internal/v1/admin/agent') {
         requirePlatformAdmin(principal)
+        const pipelines = agentPipelines ? await agentPipelines.listPipelines() : []
+        const pipelineData = agentPipelines
+          ? await Promise.all(pipelines.map(async (pipeline) => ({
+              ...pipeline,
+              recentAssertions: await agentPipelines.listAssertions(pipeline.pipelineKey, 8),
+            })))
+          : []
         sendJson(response, 200, {
           data: {
             available: Boolean(agent?.available),
             // The circuit state per provider is the operationally useful part:
             // it shows when the chain is quietly running on a fallback.
             ...(agent?.status() ?? {}),
+            pipelines: pipelineData,
           },
           requestId,
         })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent/providers/:kind/:providerId/test')
+      if (params && request.method === 'POST') {
+        requireAgentAdmin(principal)
+        if (typeof agent?.testProvider !== 'function') {
+          throw new AppError(503, 'agent_settings_unavailable', 'Agent provider testing is unavailable')
+        }
+        const data = await agent.testProvider({
+          kind: params.kind,
+          providerId: params.providerId,
+        })
+        sendJson(response, 200, { data, requestId })
         return
       }
       params = routeMatch(pathname, '/internal/v1/admin/agent/providers/:kind')
@@ -2095,6 +2120,54 @@ export function createApp({
           data,
           requestId,
         })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/agent/pipelines/:pipelineKey')
+      if (params && request.method === 'PUT') {
+        requireAgentAdmin(principal)
+        if (!agentPipelines) {
+          throw new AppError(503, 'agent_pipeline_unavailable', 'Agent pipelines require PostgreSQL')
+        }
+        const data = await agentPipelines.updatePipeline(
+          params.pipelineKey,
+          await readJson(request, 16 * 1024),
+          { updatedBy: 'admin-token' },
+        )
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent/pipelines/:pipelineKey/materialize')
+      if (params && request.method === 'POST') {
+        requireAgentAdmin(principal)
+        if (!agentPipelines) {
+          throw new AppError(503, 'agent_pipeline_unavailable', 'Agent pipelines require PostgreSQL')
+        }
+        const data = await agentPipelines.materializeCurrent(params.pipelineKey)
+        sendJson(response, 202, { data, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent/pipelines/:pipelineKey/retry-dead')
+      if (params && request.method === 'POST') {
+        requireAgentAdmin(principal)
+        if (!agentPipelines) {
+          throw new AppError(503, 'agent_pipeline_unavailable', 'Agent pipelines require PostgreSQL')
+        }
+        const data = await agentPipelines.retryDead(params.pipelineKey)
+        sendJson(response, 202, { data, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent/pipelines/:pipelineKey/assertions')
+      if (params && request.method === 'GET') {
+        requirePlatformAdmin(principal)
+        if (!agentPipelines) {
+          throw new AppError(503, 'agent_pipeline_unavailable', 'Agent pipelines require PostgreSQL')
+        }
+        const data = await agentPipelines.listAssertions(
+          params.pipelineKey,
+          searchParams.get('limit') || 20,
+        )
+        sendJson(response, 200, { data, requestId })
         return
       }
 

@@ -84,8 +84,11 @@ export {
 export {
   createElectronLauncherSystemDomainProxy,
   renderElectronLauncherPacScript,
+  type ElectronLauncherExternalApplyAbortExecution,
+  type ElectronLauncherExternalApplyAbortOptions,
   type ElectronLauncherPacProxy,
   type ElectronLauncherPacMatchMode,
+  type ElectronLauncherSystemDomainProxyApplyOptions,
   type ElectronLauncherSystemDomainProxyManager,
   type ElectronLauncherSystemDomainProxyOptions,
   type ElectronLauncherSystemDomainProxyPolicy,

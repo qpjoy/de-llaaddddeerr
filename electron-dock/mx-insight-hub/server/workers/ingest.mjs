@@ -13,6 +13,10 @@ import { ExternalSourcePuller } from '../ingest/external/source-puller.mjs'
 import { SQLiteApiSourcePuller } from '../ingest/external/sqlite-api-source.mjs'
 import { runExternalPullScheduler } from '../ingest/external/scheduler.mjs'
 import { EXTERNAL_PULL_QUEUE, runExternalPullJob } from '../ingest/external/sync-job.mjs'
+import {
+  assertProvinceOpinionHanlpConfigured,
+  isProvinceOpinionSourceKey,
+} from '../ingest/province/monitor-pipeline.mjs'
 import { TELEGRAM_SQLITE_SOURCE_KEYS } from '../ingest/telegram/sqlite-pipeline.mjs'
 import { createPostgresStore } from '../stores/postgres-store.mjs'
 
@@ -139,6 +143,9 @@ async function main() {
   }
 
   async function handleExternalPull(payload, job) {
+    if (isProvinceOpinionSourceKey(payload?.sourceKey)) {
+      assertProvinceOpinionHanlpConfigured(config.common.segmenter)
+    }
     return runExternalPullJob({
       puller: externalSourcePuller,
       queue,
@@ -146,9 +153,11 @@ async function main() {
       job,
       signal: controller.signal,
       logger,
-      continuationDelayMs: TELEGRAM_SQLITE_SOURCE_KEYS.has(payload?.sourceKey)
-        ? config.externalPull.telegramSqlitePageDelayMs
-        : 0,
+      continuationDelayMs: isProvinceOpinionSourceKey(payload?.sourceKey)
+        ? config.externalPull.provincePageDelayMs
+        : TELEGRAM_SQLITE_SOURCE_KEYS.has(payload?.sourceKey)
+          ? config.externalPull.telegramSqlitePageDelayMs
+          : 0,
     })
   }
 
@@ -166,6 +175,7 @@ async function main() {
       queue,
       batchSize: config.externalPull.batchSize,
       intervalMs: config.externalPull.intervalMs,
+      segmenterConfig: config.common.segmenter,
       signal: controller.signal,
       logger,
     }),

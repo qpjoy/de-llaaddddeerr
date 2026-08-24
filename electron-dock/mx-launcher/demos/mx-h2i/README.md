@@ -130,6 +130,12 @@ prefer Host Resolve/env mode and leave `MX_H2I_BOOTSTRAP_DNS_SERVERS` empty
 unless that host also serves DNS on port 53. The connected WireGuard phase
 still relies on the launcher route plan and split DNS.
 
+`MX_H2I_DNS_DIAGNOSTIC_HOST` is only a candidate. Once an employee or guest
+tunnel is retained, an out-of-namespace public host is ignored for split-DNS
+readiness and MX-H2I selects a covered exact Internal child instead. On macOS
+this lets the `127.0.0.1:2053` supplemental resolver outrank a V1 parent and
+Clash TUN `any:53` hijack without changing unmatched public traffic.
+
 Passwords, MX bearer tokens, and lease capabilities are accepted only over a
 normally validated HTTPS endpoint, loopback HTTP, or the exact Internal HTTP
 origin of an already live and re-probed WireGuard overlay. The legacy public
@@ -195,11 +201,34 @@ both A and AAAA queries to the local relay instead of merely checking that the
 resolver entry exists. Synthetic IPv4 ownership answers are returned only for A
 or ANY; AAAA receives NOERROR/NODATA and never a mismatched A answer. If
 sleep/wake, a physical network change, or a Clash/mihomo mode switch removes the
-MX-H2I entries, MX-H2I automatically reapplies the connected PAC/split DNS
-state. macOS may show an administrator authorization prompt for that repair
-because `networksetup` and dynamic DNS are system settings. Set
-`MX_H2I_MAC_BACKGROUND_PROXY_REPAIR=0` only for controlled test builds that
-should detect the overwrite without repairing it.
+MX-H2I entries, the background refresh keeps WireGuard/Internal intact and
+downgrades the UI to `tunnel-only`; it does not open an administrator prompt.
+Reconnect, employee login, or the explicit network repair action reapplies PAC
+and split DNS with one foreground authorization transaction. A confirmed but
+failed transaction is latched until another explicit user retry, so the periodic
+watcher cannot reopen the same dialog. A controlled test/operations environment that explicitly accepts
+interactive authorization and repeated-repair risk can opt into the old behavior
+with `MX_H2I_MAC_BACKGROUND_PROXY_REPAIR=1`; production packages should not
+preconfigure it. PAC apply/readback
+uses the current macOS network-service inventory; deleted test or VPN services
+remain only in the restore snapshot and cannot poison a new privileged apply.
+On restart, MX-H2I may restart only its process-local PAC/DNS listener after the
+persisted policy and live PAC/resolver match exactly; it never rewrites macOS
+network state or joins another process's local edge from that path. A renamed
+service carrying the exact owned PAC is disabled during disconnect, while a
+service taken over by Clash/HDO is left unchanged. No background path applies
+system state. An authenticated employee retained in
+`tunnel-only` sees repair/disconnect controls instead of a second login form.
+
+While a foreground connect or repair is running, the launcher exposes a
+`Stop this connection/recovery` action independently of the normal busy-action
+lock. Stopping pauses later recovery stages and background retries while
+preserving the current employee identity, lease, WireGuard process, and Internal
+reachability; it is not a disconnect. If a macOS administrator dialog is already
+open, the user still cancels that dialog in macOS. The launcher lets the current
+privileged process settle, performs read-only reconciliation, and does not enter
+another privileged stage. A new explicit Connect or Repair action clears the
+pause and starts a fresh bounded transaction.
 
 For a Mac that stayed powered on while moving between networks, run the
 standalone repair script while the updated MX-H2I app is running:
@@ -210,8 +239,11 @@ electron-dock/mx-launcher/demos/mx-h2i/scripts/repair-macos-dns.sh
 
 Packaged builds include the same script at
 `MX-H2I.app/Contents/Resources/repair/repair-macos-dns.sh`. It validates the
-local `127.0.0.1:2053` relay, reapplies the dynamic resolver, flushes the macOS
-DNS caches, and verifies A/AAAA behavior. It only reports V1 HDO resolver files
+local `127.0.0.1:2053` relay, adds the covered exact H2I host beside its parent
+suffix, reapplies the dynamic resolver, flushes the macOS DNS caches, and then
+requires both the local relay and the real macOS resolver to return only the
+explicit MX-H2I target (`MX_H2I_DNS_EXPECTED_TARGETS`, default `10.88.88.88`),
+not merely any V2 `10.*` address. It only reports V1 HDO resolver files
 by default. After HDO is disconnected, use
 `--remove-legacy-hdo-resolvers` to move confirmed legacy files into a recoverable
 `/var/tmp/mx-h2i-dns-repair-*` backup. `--check-only` never changes system

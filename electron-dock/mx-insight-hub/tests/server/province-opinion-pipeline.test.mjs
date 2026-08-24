@@ -19,6 +19,10 @@ const SOURCE_ID = '11111111-1111-4111-8111-111111111111'
 const FIRST_ID = '11111111-1111-4111-8111-111111111111'
 const SECOND_ID = '22222222-2222-4222-8222-222222222222'
 const ADMIN_TOKEN = 'province-opinion-admin-token'
+const HANLP_CONFIG = Object.freeze({
+  backend: 'hanlp',
+  hanlpUrl: 'http://mx-common-hanlp.mx-common.svc.cluster.local:8000',
+})
 
 async function withServer(app, run) {
   const server = createServer(app)
@@ -39,7 +43,7 @@ async function call(baseUrl, path, { method = 'GET', headers = {}, body } = {}) 
   return { response, payload: await response.json() }
 }
 
-function fixture() {
+function fixture({ segmenterConfig = HANLP_CONFIG } = {}) {
   const source = {
     id: SOURCE_ID,
     sourceKey: PROVINCE_OPINION_INPUT.sourceKey,
@@ -147,7 +151,7 @@ function fixture() {
     databasePuller,
     calls,
     savedCursors,
-    pipeline: new ProvinceOpinionPipeline({ store, queue, databasePuller }),
+    pipeline: new ProvinceOpinionPipeline({ store, queue, databasePuller, segmenterConfig }),
     setCursor(value) { cursor = structuredClone(value) },
     setDescription(value) { description = structuredClone(value) },
     setServingIndexesReady(value) { servingIndexesReady = value },
@@ -303,6 +307,25 @@ test('activation fails closed without updated_at/index and requires exact writer
   assert.equal(setup.getAttestation().contractDigest, PROVINCE_OPINION_WRITER_CONTRACT_DIGEST)
 })
 
+test('province activation and scheduling fail closed without explicit HanLP configuration', async () => {
+  const setup = fixture({ segmenterConfig: { backend: 'jieba', hanlpUrl: null } })
+  setup.setDescription(validDescription())
+  await setup.pipeline.configure({
+    connection: {
+      host: 'night-all.internal', database: 'night_all', username: 'mx_data', password: 'private',
+    },
+  })
+
+  const status = await setup.pipeline.get()
+  assert.equal(status.indexing.requiredBackend, 'hanlp')
+  assert.equal(status.indexing.readyToSchedule, false)
+  assert.ok(status.configurationIssues.some((issue) => issue.includes('MX_COMMON_SEGMENTER=hanlp')))
+  await assert.rejects(
+    () => setup.pipeline.setStatus('active', { writerContractAttestation: ATTESTATION }),
+    (error) => error?.code === 'province_hanlp_required',
+  )
+})
+
 test('activation and Admin state fail closed until both Hub serving indexes are valid', async () => {
   const setup = fixture()
   await setup.pipeline.configure({
@@ -402,6 +425,46 @@ test('province mapping promotes stable province code and numeric heat while keep
   assert.equal(unknown.stableFields.attributes.province, '待分析')
 })
 
+test('province raw identity ignores only the transport watermark', () => {
+  const fieldMap = {
+    externalId: { from: 'id' },
+    title: { from: 'title' },
+    eventTime: { from: 'published_at', type: 'timestamp' },
+    _drop: { from: ['updated_at'] },
+  }
+  const options = {
+    platform: 'public_opinion',
+    objectType: 'opinion_item',
+    source: { origin: 'database', sourceKey: 'province-opinion-results' },
+  }
+  const first = applyMapping({
+    id: 'item-1', title: '同一正文',
+    published_at: new Date('2026-08-24T09:00:00.000Z'),
+    updated_at: new Date('2026-08-24T10:00:00.000Z'),
+  }, fieldMap, options).record
+  const replay = applyMapping({
+    id: 'item-1', title: '同一正文',
+    published_at: new Date('2026-08-24T09:00:00.000Z'),
+    updated_at: new Date('2026-08-24T10:05:00.000Z'),
+  }, fieldMap, options).record
+  const changed = applyMapping({
+    id: 'item-1', title: '正文已修改',
+    published_at: new Date('2026-08-24T09:00:00.000Z'),
+    updated_at: new Date('2026-08-24T10:05:00.000Z'),
+  }, fieldMap, options).record
+  const rescheduled = applyMapping({
+    id: 'item-1', title: '同一正文',
+    published_at: new Date('2026-08-24T09:30:00.000Z'),
+    updated_at: new Date('2026-08-24T10:05:00.000Z'),
+  }, fieldMap, options).record
+
+  assert.notEqual(first.rawItem.updated_at, replay.rawItem.updated_at)
+  assert.equal(first.rawPayloadSha256, replay.rawPayloadSha256)
+  assert.notEqual(first.rawPayloadSha256, changed.rawPayloadSha256)
+  assert.notEqual(first.rawPayloadSha256, rescheduled.rawPayloadSha256)
+  assert.notEqual(first.payloadSha256, rescheduled.payloadSha256)
+})
+
 test('fixed province source is scheduled once only after current writer attestation', async () => {
   const setup = fixture()
   setup.setDescription(validDescription())
@@ -431,6 +494,7 @@ test('fixed province source is scheduled once only after current writer attestat
     store: setup.store,
     queue,
     databasePuller: setup.databasePuller,
+    segmenterConfig: HANLP_CONFIG,
     now: new Date(),
   })
   assert.equal(result.active, 1)
@@ -438,6 +502,7 @@ test('fixed province source is scheduled once only after current writer attestat
   assert.equal(jobs.length, 1)
   assert.equal(jobs[0].payload.sourceKey, PROVINCE_OPINION_INPUT.sourceKey)
   assert.equal(jobs[0].payload.trigger, 'schedule')
+  assert.equal(jobs[0].payload.batchSize, 200)
   assert.equal(PROVINCE_OPINION_PIPELINE_KEY, 'province-opinion')
 
   setup.source.datasetId = 'wrong-dataset'
@@ -445,6 +510,7 @@ test('fixed province source is scheduled once only after current writer attestat
     store: setup.store,
     queue,
     databasePuller: setup.databasePuller,
+    segmenterConfig: HANLP_CONFIG,
     now: new Date(),
   })
   assert.equal(drifted.enqueued, 0)
@@ -505,6 +571,7 @@ test('province pipeline routes are Admin-only and the fixed source rejects gener
     store: setup.store,
     queue: setup.queue,
     databasePuller: setup.databasePuller,
+    segmenterConfig: HANLP_CONFIG,
     adapter: { dependencies: async () => ({ status: 'up' }) },
     adminToken: ADMIN_TOKEN,
     logger: { error() {} },

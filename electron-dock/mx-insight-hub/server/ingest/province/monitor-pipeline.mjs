@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../../core/errors.mjs'
+import { PROVINCE_GEOGRAPHY_PIPELINE_KEY } from '../../agent/pipeline-store.mjs'
 import { enqueueJobsAtomically } from '../external/atomic-enqueue.mjs'
 import { validateDatabaseConnection } from '../external/database-source.mjs'
 import { EXTERNAL_PULL_QUEUE } from '../external/sync-job.mjs'
@@ -19,6 +20,8 @@ export {
 export const PROVINCE_OPINION_PIPELINE_KEY = 'province-opinion'
 export const PROVINCE_OPINION_MAPPING_VERSION = 1
 export const PROVINCE_OPINION_WRITER_CONTRACT_VERSION = 'province-opinion.writer.v1'
+export const PROVINCE_OPINION_SAFE_BATCH_SIZE = 200
+export const PROVINCE_OPINION_MAX_BATCH_SIZE = 500
 export const PROVINCE_OPINION_SERVING_INDEXES = Object.freeze([
   'canonical_province_opinion_hot_idx',
   'canonical_province_opinion_latest_idx',
@@ -69,6 +72,35 @@ const ENQUEUE_ERRORS = Object.freeze({
 
 export function isProvinceOpinionSourceKey(sourceKey) {
   return sourceKey === PROVINCE_OPINION_SOURCE_KEY
+}
+
+export function provinceOpinionHanlpIssues(segmenterConfig) {
+  const backend = typeof segmenterConfig?.backend === 'string'
+    ? segmenterConfig.backend.trim().toLowerCase()
+    : ''
+  const hanlpUrl = typeof segmenterConfig?.hanlpUrl === 'string'
+    ? segmenterConfig.hanlpUrl.trim()
+    : ''
+  const issues = []
+  if (backend !== 'hanlp') {
+    issues.push('Province opinion indexing requires MX_COMMON_SEGMENTER=hanlp')
+  }
+  if (!hanlpUrl) {
+    issues.push('Province opinion indexing requires a configured MX_COMMON_HANLP_URL')
+  }
+  return issues
+}
+
+export function assertProvinceOpinionHanlpConfigured(segmenterConfig) {
+  const issues = provinceOpinionHanlpIssues(segmenterConfig)
+  if (issues.length > 0) {
+    throw new AppError(
+      409,
+      'province_hanlp_required',
+      'Configure strict HanLP indexing before activating or scheduling the province opinion pipeline',
+      { issues },
+    )
+  }
 }
 
 function writerContract() {
@@ -125,9 +157,13 @@ function syncInterval(value) {
 }
 
 function batchSize(value) {
-  const size = value ?? 1_000
-  if (!Number.isInteger(size) || size < 1 || size > 5_000) {
-    throw new AppError(400, 'invalid_batch_size', 'batchSize must be an integer between 1 and 5000')
+  const size = value ?? PROVINCE_OPINION_SAFE_BATCH_SIZE
+  if (!Number.isInteger(size) || size < 1 || size > PROVINCE_OPINION_MAX_BATCH_SIZE) {
+    throw new AppError(
+      400,
+      'invalid_batch_size',
+      `batchSize must be an integer between 1 and ${PROVINCE_OPINION_MAX_BATCH_SIZE}`,
+    )
   }
   return size
 }
@@ -153,10 +189,12 @@ function nextDueAt(source, cursor) {
 }
 
 export class ProvinceOpinionPipeline {
-  constructor({ store, queue, databasePuller }) {
+  constructor({ store, queue, databasePuller, agentPipelineStore = null, segmenterConfig = null }) {
     this.store = store
     this.queue = queue
     this.databasePuller = databasePuller
+    this.agentPipelineStore = agentPipelineStore
+    this.segmenterConfig = segmenterConfig
   }
 
   async #source() {
@@ -207,16 +245,21 @@ export class ProvinceOpinionPipeline {
 
   async get() {
     const source = await this.#source()
-    const [activeMapping, mappings, cursor, runs, latestAttestation, servingIndexes] = await Promise.all([
+    const [
+      activeMapping, mappings, cursor, runs, latestAttestation, servingIndexes,
+      classification,
+    ] = await Promise.all([
       this.store.getActiveMapping(source.id),
       this.store.listSourceMappings(source.id),
       this.#cursor(),
       this.store.listImportRuns(source.id, 1),
       this.store.getLatestPipelineWriterContractAttestation?.(PROVINCE_OPINION_PIPELINE_KEY) ?? null,
       this.#servingIndexes(),
+      this.agentPipelineStore?.getPipeline?.(PROVINCE_GEOGRAPHY_PIPELINE_KEY) ?? null,
     ])
     const connection = sharedConnection(source.connection)
     const sourceContractIssues = provinceOpinionSourceContractIssues(source)
+    const hanlpIssues = provinceOpinionHanlpIssues(this.segmenterConfig)
     const fixedContractValid = sourceContractIssues.length === 0
     return {
       pipelineKey: PROVINCE_OPINION_PIPELINE_KEY,
@@ -233,12 +276,20 @@ export class ProvinceOpinionPipeline {
       },
       configurationIssues: [
         ...sourceContractIssues,
+        ...hanlpIssues,
         ...(servingIndexes.ready
           ? []
           : [`Hub serving indexes are not ready: ${servingIndexes.missing.join(', ')}`]),
       ],
       servingIndexes,
+      indexing: {
+        requiredBackend: 'hanlp',
+        configuredBackend: this.segmenterConfig?.backend || null,
+        hanlpUrlConfigured: Boolean(this.segmenterConfig?.hanlpUrl),
+        readyToSchedule: hanlpIssues.length === 0,
+      },
       writerContract: { ...writerContract(), latestAttestation },
+      classification,
       task: {
         ...PROVINCE_OPINION_INPUT,
         source,
@@ -318,6 +369,7 @@ export class ProvinceOpinionPipeline {
       return this.get()
     }
     return this.#withLock(async () => {
+      assertProvinceOpinionHanlpConfigured(this.segmenterConfig)
       const source = await this.#source()
       const sourceContractIssues = provinceOpinionSourceContractIssues(source)
       if (sourceContractIssues.length > 0) {
@@ -389,6 +441,7 @@ export class ProvinceOpinionPipeline {
       throw new AppError(400, 'unsupported_fields', `Unsupported sync fields: ${unsupported.join(', ')}`)
     }
     const size = batchSize(body.batchSize)
+    assertProvinceOpinionHanlpConfigured(this.segmenterConfig)
     const source = await this.#source()
     const sourceContractIssues = provinceOpinionSourceContractIssues(source)
     if (sourceContractIssues.length > 0) {

@@ -144,5 +144,13 @@ test('observation hash is stable for a replayed batch and distinct for a later c
 
 test('canonical json sorts keys deterministically', () => {
   assert.equal(canonicalJson({ b: 1, a: [2, { d: 4, c: 3 }] }), '{"a":[2,{"c":3,"d":4}],"b":1}')
+  assert.equal(
+    canonicalJson({ publishedAt: new Date('2026-08-24T10:00:00.000Z') }),
+    '{"publishedAt":"2026-08-24T10:00:00.000Z"}',
+  )
+  assert.notEqual(
+    canonicalJson({ publishedAt: new Date('2026-08-24T10:00:00.000Z') }),
+    canonicalJson({ publishedAt: new Date('2026-08-24T10:05:00.000Z') }),
+  )
   assert.equal(sha256('x').length, 64)
 })

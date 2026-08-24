@@ -3,6 +3,8 @@ import { createAgentFromProviders, parseProviderConfig } from './index.mjs'
 import { normalizeDatabaseProviders, publicSetting } from './settings-store.mjs'
 
 const DEFAULT_REFRESH_INTERVAL_MS = 5_000
+const DEFAULT_PROBE_COOLDOWN_MS = 5_000
+const DEFAULT_MAX_CONCURRENT_PROBES = 2
 
 function parseEnvironmentEmbeddingProviders(raw, expected = {}) {
   const providers = parseProviderConfig(raw, { kind: 'embedding' })
@@ -89,12 +91,43 @@ function databaseSetting(kind, stored, credentials, expectedEmbeddingDimensions)
   }
 }
 
+function databaseProbeProvider(kind, stored, credentials, providerId, expectedEmbeddingDimensions) {
+  const normalized = normalizeDatabaseProviders(stored.providers, {
+    kind,
+    expectedEmbeddingDimensions,
+  })
+  const selected = normalized.find(({ provider }) => provider.id === providerId)?.provider
+  if (!selected) {
+    throw new AppError(404, 'agent_provider_not_found', 'The saved provider was not found')
+  }
+  if (kind === 'embedding') {
+    if (!stored.lockedEmbeddingModel || !stored.lockedEmbeddingDimensions) {
+      throw new AppError(409, 'embedding_space_unlocked', 'Embedding provider metadata is missing its persisted vector-space lock')
+    }
+    if (
+      selected.model !== stored.lockedEmbeddingModel
+      || selected.dimensions !== stored.lockedEmbeddingDimensions
+    ) {
+      throw new AppError(409, 'reindex_required', 'Changing the embedding model or dimensions requires a controlled re-embedding')
+    }
+  }
+  const provider = {
+    ...selected,
+    ...(selected.authMode === 'bearer'
+      ? { apiKey: credentials.get(selected.id) || null }
+      : {}),
+  }
+  return parseProviderConfig([provider], { kind, allowInlineApiKey: true })[0]
+}
+
 export class AgentRuntime {
   #agent
   #timer = null
   #refreshing = null
   #settings = new Map()
   #needsApply = new Set()
+  #probeStates = new Map()
+  #activeProbes = 0
 
   constructor({
     config,
@@ -104,6 +137,10 @@ export class AgentRuntime {
     refreshIntervalMs = DEFAULT_REFRESH_INTERVAL_MS,
     setIntervalFn = setInterval,
     clearIntervalFn = clearInterval,
+    fetchImpl = globalThis.fetch,
+    probeCooldownMs = DEFAULT_PROBE_COOLDOWN_MS,
+    maxConcurrentProbes = DEFAULT_MAX_CONCURRENT_PROBES,
+    nowFn = Date.now,
   }) {
     this.config = config
     this.settingsStore = settingsStore
@@ -112,6 +149,10 @@ export class AgentRuntime {
     this.refreshIntervalMs = refreshIntervalMs
     this.setIntervalFn = setIntervalFn
     this.clearIntervalFn = clearIntervalFn
+    this.fetchImpl = fetchImpl
+    this.probeCooldownMs = probeCooldownMs
+    this.maxConcurrentProbes = maxConcurrentProbes
+    this.nowFn = nowFn
 
     // Environment configuration is the last-known-good bootstrap. A database
     // outage during startup must not turn an optional Agent into an API outage.
@@ -226,6 +267,7 @@ export class AgentRuntime {
       embeddingProviders: embedding.providers,
       expectedEmbeddingDimensions: this.config.embedding?.dimensions ?? null,
       logger: this.logger,
+      fetchImpl: this.fetchImpl,
     })
     // Swap only after every provider and the complete agent constructed. Calls
     // already in flight retain the previous immutable object.
@@ -243,6 +285,7 @@ export class AgentRuntime {
       embeddingProviders: kind === 'embedding' ? [] : (this.#agent?.embeddings?.providers || []),
       expectedEmbeddingDimensions: this.config.embedding?.dimensions ?? null,
       logger: this.logger,
+      fetchImpl: this.fetchImpl,
     })
     this.#agent = agent
     this.#settings = new Map(this.#settings)
@@ -355,6 +398,86 @@ export class AgentRuntime {
 
   embed(...args) {
     return this.#agent.embed(...args)
+  }
+
+  async testProvider({ kind, providerId, signal } = {}) {
+    if (!['chat', 'embedding'].includes(kind)) {
+      throw new AppError(400, 'invalid_provider_kind', 'kind must be chat or embedding')
+    }
+    // Database-managed IDs are lowercase, while legacy environment chains may
+    // contain uppercase IDs. Both are safe path identifiers and must remain
+    // testable without rewriting a working environment configuration.
+    if (typeof providerId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(providerId)) {
+      throw new AppError(400, 'invalid_provider_id', 'providerId is required')
+    }
+    if (!this.#settings.get(kind)?.providers?.some((provider) => provider.id === providerId)) {
+      throw new AppError(404, 'agent_provider_not_found', 'The saved provider was not found')
+    }
+
+    const key = `${kind}:${providerId}`
+    const now = this.nowFn()
+    const state = this.#probeStates.get(key)
+    if (state?.inFlight) {
+      throw new AppError(429, 'agent_provider_probe_in_progress', 'A probe for this provider is already running')
+    }
+    const retryAfterMs = state ? this.probeCooldownMs - (now - state.startedAt) : 0
+    if (retryAfterMs > 0) {
+      throw new AppError(
+        429,
+        'agent_provider_probe_rate_limited',
+        'Provider probes are temporarily rate limited',
+        { retryAfterMs },
+      )
+    }
+    if (this.#activeProbes >= this.maxConcurrentProbes) {
+      throw new AppError(429, 'agent_provider_probe_capacity', 'Too many provider probes are running')
+    }
+
+    this.#probeStates.set(key, { inFlight: true, startedAt: now })
+    this.#activeProbes += 1
+    try {
+      if (!this.settingsStore || !this.managedKinds.has(kind)) {
+        return await this.#agent.testProvider({ kind, providerId, signal })
+      }
+      let runtime
+      if (typeof this.settingsStore.loadRuntimeSetting === 'function') {
+        runtime = await this.settingsStore.loadRuntimeSetting(kind)
+      } else {
+        const setting = await this.settingsStore.loadSetting(kind)
+        runtime = {
+          setting,
+          credentials: setting.source === 'database'
+            ? await this.settingsStore.loadCredentialsInternal(kind)
+            : new Map(),
+        }
+      }
+      if (runtime.setting.source !== 'database') {
+        return await this.#agent.testProvider({ kind, providerId, signal })
+      }
+
+      // Build an isolated one-provider router from one secret-bearing database
+      // snapshot. A disabled candidate can be checked before it ever joins the
+      // production chain, and neither the key nor the response payload escapes.
+      const provider = databaseProbeProvider(
+        kind,
+        runtime.setting,
+        runtime.credentials,
+        providerId,
+        this.config.embedding?.dimensions ?? null,
+      )
+      const probeAgent = createAgentFromProviders({
+        chatProviders: kind === 'chat' ? [provider] : [],
+        embeddingProviders: kind === 'embedding' ? [provider] : [],
+        expectedEmbeddingDimensions: this.config.embedding?.dimensions ?? null,
+        logger: this.logger,
+        fetchImpl: this.fetchImpl,
+      })
+      return await probeAgent.testProvider({ kind, providerId, signal })
+    } finally {
+      this.#activeProbes -= 1
+      const current = this.#probeStates.get(key)
+      if (current) current.inFlight = false
+    }
   }
 
   status() {

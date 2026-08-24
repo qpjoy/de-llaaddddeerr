@@ -218,6 +218,17 @@ function asBoolean(value) {
   return null
 }
 
+function semanticRawPayload(raw, source) {
+  if (source?.sourceKey !== 'province-opinion-results') return raw
+  // `updated_at` is the Night-All transport watermark. The writer contract
+  // intentionally advances it on every upsert, including an otherwise
+  // identical row. Keep the value in rawItem for lineage/cursor evidence, but
+  // exclude it from the semantic raw digest so a watermark-only replay does
+  // not create another source revision and another Agent task.
+  const { updated_at: _transportWatermark, ...semantic } = raw
+  return semantic
+}
+
 /**
  * Apply a mapping to one raw record.
  *
@@ -315,6 +326,10 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record', s
     metrics,
     ...(Object.hasOwn(metrics, 'heatScore') ? { heatScore: metrics.heatScore } : {}),
     rawItem: raw,
+    // Raw identity is separate from canonical identity. Fields intentionally
+    // kept out of canonical/search (for example model evidence) can still
+    // change and must create a reproducible source revision for Agent work.
+    rawPayloadSha256: sha256(canonicalJson(semanticRawPayload(raw, source))),
   }
 
   // Collection time is observation metadata, not content. Metrics remain in
@@ -326,7 +341,13 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record', s
 }
 
 function contentOnly(record) {
-  const { collectedAt: _collectedAt, metrics: _metrics, rawItem: _rawItem, ...rest } = record
+  const {
+    collectedAt: _collectedAt,
+    metrics: _metrics,
+    rawItem: _rawItem,
+    rawPayloadSha256: _rawPayloadSha256,
+    ...rest
+  } = record
   return rest
 }
 

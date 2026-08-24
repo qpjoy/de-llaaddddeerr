@@ -302,6 +302,26 @@ export const adminApi = {
     `${ADMIN_ROOT}/agent/providers/${encodeURIComponent(kind)}`,
     { method: 'PUT', body },
   ),
+  testAgentProvider: (token, kind, providerId) => request(
+    token,
+    `${ADMIN_ROOT}/agent/providers/${encodeURIComponent(kind)}/${encodeURIComponent(providerId)}/test`,
+    { method: 'POST' },
+  ),
+  updateAgentPipeline: (token, pipelineKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent/pipelines/${encodeURIComponent(pipelineKey)}`,
+    { method: 'PUT', body },
+  ),
+  materializeAgentPipeline: (token, pipelineKey) => request(
+    token,
+    `${ADMIN_ROOT}/agent/pipelines/${encodeURIComponent(pipelineKey)}/materialize`,
+    { method: 'POST' },
+  ),
+  retryDeadAgentPipeline: (token, pipelineKey) => request(
+    token,
+    `${ADMIN_ROOT}/agent/pipelines/${encodeURIComponent(pipelineKey)}/retry-dead`,
+    { method: 'POST' },
+  ),
   retrieval: (token) => request(token, `${ADMIN_ROOT}/retrieval`),
   semanticSearch: (token, body) => request(token, `${ADMIN_ROOT}/retrieval/search`, { method: 'POST', body }),
   runtime: (token) => Promise.all([

@@ -9,10 +9,12 @@ import {
 import { TELEGRAM_SQLITE_INPUTS } from '../telegram/sqlite-pipeline.mjs'
 import {
   PROVINCE_OPINION_PIPELINE_KEY,
+  PROVINCE_OPINION_SAFE_BATCH_SIZE,
   PROVINCE_OPINION_SOURCE_KEY,
   PROVINCE_OPINION_WRITER_CONTRACT_DIGEST,
   PROVINCE_OPINION_WRITER_CONTRACT_VERSION,
   isProvinceOpinionSourceKey,
+  provinceOpinionHanlpIssues,
   provinceOpinionSourceContractIssues,
 } from '../province/monitor-pipeline.mjs'
 import { sqliteApiDailyWindowAt } from './sqlite-api-source.mjs'
@@ -93,6 +95,7 @@ export async function scheduleActiveDatabaseSources({
   queue,
   batchSize = 1_000,
   now = new Date(),
+  segmenterConfig = null,
 }) {
   const sources = await store.listExternalSources()
   let enqueued = 0
@@ -140,6 +143,7 @@ export async function scheduleActiveDatabaseSources({
     provinceOpinionSource?.sourceKind === 'database'
     && provinceOpinionSource.status === 'active'
     && provinceOpinionSourceContractIssues(provinceOpinionSource).length === 0
+    && provinceOpinionHanlpIssues(segmenterConfig).length === 0
   ) {
     const attestation = await store.getLatestPipelineWriterContractAttestation?.(PROVINCE_OPINION_PIPELINE_KEY)
     const attested = attestation?.contractVersion === PROVINCE_OPINION_WRITER_CONTRACT_VERSION
@@ -149,7 +153,10 @@ export async function scheduleActiveDatabaseSources({
       if (isDue(provinceOpinionSource, cursor, now)) {
         const jobIds = await enqueueJobsAtomically(
           queue,
-          [scheduledJob(PROVINCE_OPINION_SOURCE_KEY, batchSize)],
+          [scheduledJob(
+            PROVINCE_OPINION_SOURCE_KEY,
+            Math.min(batchSize, PROVINCE_OPINION_SAFE_BATCH_SIZE),
+          )],
           PROVINCE_OPINION_SCHEDULE_ERRORS,
         )
         enqueued += jobIds.filter((jobId) => jobId != null).length
@@ -204,12 +211,13 @@ export async function runExternalPullScheduler({
   queue,
   batchSize,
   intervalMs,
+  segmenterConfig,
   signal,
   logger = console,
 }) {
   while (!signal?.aborted) {
     try {
-      const result = await scheduleActiveDatabaseSources({ store, queue, batchSize })
+      const result = await scheduleActiveDatabaseSources({ store, queue, batchSize, segmenterConfig })
       if (result.enqueued > 0) logger.log?.(`[external] scheduled ${result.enqueued}/${result.active} active database source(s)`)
     } catch (error) {
       const candidate = typeof error?.code === 'string' ? error.code : error?.name

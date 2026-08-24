@@ -8,6 +8,7 @@ set -eu
 DOMAINS=${MX_H2I_DNS_DOMAINS:-"mxinfo-inc.cn internal.mx corp.mx h2i.mx"}
 LOCAL_EDGE_PORT=${MX_H2I_LOCAL_EDGE_PORT:-2053}
 TEST_HOST=${MX_H2I_DNS_TEST_HOST:-h2i.mxinfo-inc.cn}
+EXPECTED_TARGETS=${MX_H2I_DNS_EXPECTED_TARGETS:-10.88.88.88}
 DYNAMIC_DNS_KEY='State:/Network/Service/com.qpjoy.electron-launcher.domain-proxy/DNS'
 CHECK_ONLY=0
 REMOVE_LEGACY=0
@@ -21,6 +22,7 @@ usage() {
     '  MX_H2I_DNS_DOMAINS       Space-separated split-DNS suffixes.' \
     '  MX_H2I_LOCAL_EDGE_PORT   MX-H2I local DNS relay port (default: 2053).' \
     '  MX_H2I_DNS_TEST_HOST     Host used for direct relay verification.' \
+    '  MX_H2I_DNS_EXPECTED_TARGETS  Space-separated exact IPv4 targets (default: 10.88.88.88).' \
     '' \
     '--remove-legacy-hdo-resolvers moves only resolver files carrying an HDO' \
     'marker or the legacy 100.88.0.1 DNS address into a /var/tmp backup.'
@@ -75,6 +77,31 @@ for domain in $DOMAINS; do
     ''|*[!A-Za-z0-9.-]*) fail "invalid split-DNS domain: $domain" ;;
   esac
 done
+case "$TEST_HOST" in
+  ''|*[!A-Za-z0-9.-]*) fail "invalid split-DNS test host: $TEST_HOST" ;;
+esac
+for target in $EXPECTED_TARGETS; do
+  printf '%s\n' "$target" | /usr/bin/awk -F. '
+    NF != 4 { exit 1 }
+    { for (i = 1; i <= 4; i += 1) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1 }
+  ' || fail "invalid expected MX-H2I IPv4 target: $target"
+done
+[ -n "$EXPECTED_TARGETS" ] || fail 'at least one expected MX-H2I IPv4 target is required.'
+
+# Keep a covered exact V2 service host in the supplemental resolver list. On
+# macOS the longer suffix wins over a still-active V1 HDO parent resolver,
+# without deleting or rewriting the V1 /etc/resolver file.
+test_host_covered=0
+test_host_present=0
+for domain in $DOMAINS; do
+  [ "$TEST_HOST" = "$domain" ] && test_host_present=1
+  case "$TEST_HOST" in
+    "$domain"|*."$domain") test_host_covered=1 ;;
+  esac
+done
+if [ "$test_host_covered" -eq 1 ] && [ "$test_host_present" -ne 1 ]; then
+  DOMAINS="$DOMAINS $TEST_HOST"
+fi
 
 command -v dig >/dev/null 2>&1 || fail 'dig is required but was not found.'
 command -v scutil >/dev/null 2>&1 || fail 'scutil is required but was not found.'
@@ -86,14 +113,28 @@ if [ "$CHECK_ONLY" -ne 1 ] && [ "$(id -u)" -ne 0 ]; then
       "MX_H2I_DNS_DOMAINS=$DOMAINS" \
       "MX_H2I_LOCAL_EDGE_PORT=$LOCAL_EDGE_PORT" \
       "MX_H2I_DNS_TEST_HOST=$TEST_HOST" \
+      "MX_H2I_DNS_EXPECTED_TARGETS=$EXPECTED_TARGETS" \
       "$0" --remove-legacy-hdo-resolvers
   fi
   exec /usr/bin/sudo -- /usr/bin/env \
     "MX_H2I_DNS_DOMAINS=$DOMAINS" \
     "MX_H2I_LOCAL_EDGE_PORT=$LOCAL_EDGE_PORT" \
     "MX_H2I_DNS_TEST_HOST=$TEST_HOST" \
+    "MX_H2I_DNS_EXPECTED_TARGETS=$EXPECTED_TARGETS" \
     "$0"
 fi
+
+addresses_match_expected_targets() {
+  addresses=$1
+  [ -n "$addresses" ] || return 1
+  for address in $addresses; do
+    matched=0
+    for expected in $EXPECTED_TARGETS; do
+      [ "$address" = "$expected" ] && matched=1
+    done
+    [ "$matched" -eq 1 ] || return 1
+  done
+}
 
 find_legacy_resolvers() {
   found=0
@@ -123,6 +164,10 @@ check_local_relay() {
     || fail "the MX-H2I relay at 127.0.0.1:$LOCAL_EDGE_PORT did not return NOERROR for the A query. Start or reconnect MX-H2I first."
   printf '%s\n' "$relay_a" | /usr/bin/grep -Eq '[[:space:]]IN[[:space:]]+A[[:space:]]' \
     || fail "the MX-H2I relay at 127.0.0.1:$LOCAL_EDGE_PORT did not return an A record for $TEST_HOST. Start or reconnect MX-H2I first."
+  relay_ipv4=$(printf '%s\n' "$relay_a" \
+    | /usr/bin/awk '$0 ~ /[[:space:]]IN[[:space:]]+A[[:space:]]/ { print $NF }')
+  addresses_match_expected_targets "$relay_ipv4" \
+    || fail "the MX-H2I relay returned an unexpected product target for $TEST_HOST: $(printf '%s' "$relay_ipv4" | /usr/bin/tr '\n' ' ')"
 
   printf '%s\n' "$relay_aaaa" | /usr/bin/grep -Eq 'status:[[:space:]]+NOERROR' \
     || fail "the local relay did not return NOERROR/NODATA for the AAAA query to $TEST_HOST."
@@ -131,6 +176,25 @@ check_local_relay() {
   fi
 
   log "local relay protocol check passed for $TEST_HOST (A and AAAA)."
+}
+
+check_system_resolver() {
+  attempt=1
+  system_ipv4=''
+  while [ "$attempt" -le 3 ]; do
+    system_lookup=$(/usr/bin/dscacheutil -q host -a name "$TEST_HOST" 2>/dev/null || true)
+    system_ipv4=$(printf '%s\n' "$system_lookup" \
+      | /usr/bin/awk '$1 == "ip_address:" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $2 }')
+    if addresses_match_expected_targets "$system_ipv4"; then
+      log "macOS system resolver check passed for $TEST_HOST: $(printf '%s' "$system_ipv4" | /usr/bin/tr '\n' ' ')"
+      return
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -le 3 ] && /bin/sleep 1
+  done
+  [ -n "$system_ipv4" ] \
+    || fail "the macOS system resolver did not return an IPv4 address for $TEST_HOST."
+  fail "the macOS system resolver returned an unexpected MX-H2I target for $TEST_HOST: $(printf '%s' "$system_ipv4" | /usr/bin/tr '\n' ' ')"
 }
 
 legacy_resolvers=$(find_legacy_resolvers || true)
@@ -145,6 +209,7 @@ fi
 check_local_relay
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
+  check_system_resolver
   log 'check-only mode completed; no system state was changed.'
   exit 0
 fi
@@ -187,6 +252,7 @@ TEMP_FILE=$(/usr/bin/mktemp -t mx-h2i-dns.XXXXXX)
 log "reapplied dynamic split DNS to 127.0.0.1:$LOCAL_EDGE_PORT and flushed macOS DNS caches."
 
 check_local_relay
+check_system_resolver
 
 dynamic_state=$(printf 'show %s\nquit\n' "$DYNAMIC_DNS_KEY" | /usr/sbin/scutil 2>/dev/null || true)
 if ! printf '%s\n' "$dynamic_state" | /usr/bin/grep -Eq "ServerPort[[:space:]]*:[[:space:]]*$LOCAL_EDGE_PORT"; then

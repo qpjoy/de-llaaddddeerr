@@ -553,7 +553,7 @@ hanlp_absent="$(bash -c '
   discover_hanlp_url
   printf "%s" "$MX_COMMON_HANLP_URL"
 ' _ "$ROOT_DIR")"
-assert_eq '' "$hanlp_absent" 'first deploy without HanLP keeps local jieba'
+assert_eq '' "$hanlp_absent" 'first general deploy without HanLP leaves the province pipeline gated'
 
 # A transiently empty Endpoint must not turn a deployed HanLP-backed Hub into a
 # jieba deployment. Discovery runs before ConfigMap creation and every workload
@@ -1094,8 +1094,12 @@ printf 'ok - optional Telegram reader is Secret-wired without output exposure\n'
 grep -q 'MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS.*60000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_PROVINCE_PAGE_DELAY_MS.*2000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q '^  ingest:' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'server/workers/ingest.mjs' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q '^  classifier:' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'server/workers/classifier.mjs' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'server/workers/classifier.mjs' "$ROOT_DIR/deploy/k8s/internal/34-classifier.yaml"
 grep -q 'MX_INSIGHT_SERVER_FILE_GROUP_ID:-10' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'supplementalGroups: \[10\]' "$ROOT_DIR/deploy/k8s/internal/31-admin-api.yaml"
 if rg -q 'supplementalGroups|server-files|/shared_dir' \
@@ -1110,6 +1114,7 @@ printf 'ok - local Compose wires the periodic external-pull worker\n'
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_PROVINCE_PAGE_DELAY_MS=' "$ROOT_DIR/scripts/manage.sh"
 printf 'ok - internal runtime ConfigMap wires external-pull scheduling controls\n'
 
 if rg -q 'MX_INSIGHT_PROVIDER_MASTER_KEY' \

@@ -42,6 +42,9 @@ const H2O_RULE_PACKS = [
 
 let state = null;
 let busyAction = '';
+let busyActionRunId = 0;
+let actionRunSequence = 0;
+let cancelNetworkOperationInFlight = false;
 let screen = 'launcher';
 let modeDraft = 'employee';
 let windowDrag = null;
@@ -493,6 +496,12 @@ root.addEventListener('click', (event) => {
     void runAction('installRelease', button.dataset.releaseId || '');
     return;
   }
+  if (action === 'cancelNetworkOperation') {
+    appShellMenuOpen = false;
+    phoneMenuOpen = false;
+    void runAction(action, { id: button.dataset.operationId || null });
+    return;
+  }
   if (action === 'connectGuest') {
     modeDraft = 'guest';
   }
@@ -703,8 +712,46 @@ function finishWindowDrag(event) {
 }
 
 async function runAction(action, payload) {
+  if (action === 'cancelNetworkOperation') {
+    if (cancelNetworkOperationInFlight) return;
+    const operationId = typeof payload?.id === 'string' && payload.id.trim()
+      ? payload.id.trim()
+      : currentNetworkOperation()?.id || null;
+    const cancelRunId = ++actionRunSequence;
+    cancelNetworkOperationInFlight = true;
+    // Logical cancel must be able to run while Connect/Login/Repair is still
+    // awaiting IPC. Invalidate that older renderer turn so its eventual
+    // response/finally cannot overwrite the paused state or clear a retry.
+    busyAction = '';
+    busyActionRunId = cancelRunId;
+    render();
+    try {
+      const next = await api.cancelNetworkOperation?.(operationId);
+      if (
+        busyActionRunId === cancelRunId
+        && next
+        && typeof next === 'object'
+        && 'connection' in next
+      ) {
+        state = next;
+      }
+    } catch {
+      if (busyActionRunId === cancelRunId) {
+        const next = await api.getState().catch(() => null);
+        if (next && typeof next === 'object' && 'connection' in next) state = next;
+      }
+    } finally {
+      cancelNetworkOperationInFlight = false;
+      if (busyActionRunId === cancelRunId) busyActionRunId = 0;
+      render();
+    }
+    return;
+  }
+  if (networkOperationBlocksMutation() && isNetworkMutatingAction(action)) return;
   if (busyAction) return;
+  const runId = ++actionRunSequence;
   busyAction = action;
+  busyActionRunId = runId;
   render();
   try {
     const handlers = {
@@ -740,6 +787,7 @@ async function runAction(action, payload) {
     };
     if (handlers[action]) {
       const next = await handlers[action]();
+      if (busyActionRunId !== runId) return;
       if (next && typeof next === 'object' && 'connection' in next) {
         state = next;
         if (action === 'login-employee') syncEmployeeLoginDraftFromState();
@@ -754,16 +802,20 @@ async function runAction(action, payload) {
       }
     }
   } catch {
+    if (busyActionRunId !== runId) return;
     const next = await api.getState().catch(() => null);
     if (next && typeof next === 'object' && 'connection' in next) {
       state = next;
     }
   } finally {
-    busyAction = '';
-    if (['connectGuest', 'disconnect', 'resetLocalNetworkIdentity'].includes(action) && !isGuestConnectionActive()) {
-      modeDraft = 'employee';
+    if (busyActionRunId === runId) {
+      busyAction = '';
+      busyActionRunId = 0;
+      if (['connectGuest', 'disconnect', 'resetLocalNetworkIdentity'].includes(action) && !isGuestConnectionActive()) {
+        modeDraft = 'employee';
+      }
+      render();
     }
-    render();
   }
 }
 
@@ -842,7 +894,20 @@ function syncEmployeeLoginDraftFromState() {
 
 function isEmployeeLoginVisible() {
   const connected = state.connection?.state === 'connected';
-  return modeDraft === 'employee' && (!connected || state.connection?.mode !== 'employee');
+  return modeDraft === 'employee'
+    && !isRetainedEmployeeSession()
+    && (!connected || state.connection?.mode !== 'employee');
+}
+
+function isRetainedEmployeeSession() {
+  const connection = state?.connection || {};
+  const expiresAt = Date.parse(state?.auth?.expiresAt || '');
+  const authCurrent = Boolean(state?.auth)
+    && (!Number.isFinite(expiresAt) || expiresAt > Date.now());
+  return state?.identity?.kind === 'user'
+    && authCurrent
+    && connection.mode === 'employee'
+    && ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable'].includes(connection.state);
 }
 
 function isGuestConnectionActive() {
@@ -935,8 +1000,127 @@ function guestConnectionPrompt() {
   return `当前已连接访客模式${ip}。员工认证成功后会自动切换到员工网络；身份认证阶段失败、拒绝或取消时保留访客连接。`;
 }
 
+function currentNetworkOperation() {
+  const operation = state?.networkOperation;
+  if (!operation || typeof operation !== 'object') return null;
+  const id = typeof operation.id === 'string' ? operation.id.trim() : '';
+  const kind = String(operation.kind || '').toLowerCase();
+  const status = String(operation.status || '');
+  const idlessBackgroundRecovery = !id && kind === 'background-recovery';
+  if ((!id && !idlessBackgroundRecovery) || !['running', 'cancel-requested', 'paused'].includes(status)) return null;
+  return { ...operation, id: id || null, kind, status };
+}
+
+function networkOperationPaused() {
+  return currentNetworkOperation()?.status === 'paused'
+    && !rendererPendingNetworkOperation();
+}
+
+function networkOperationInProgress() {
+  const operation = currentNetworkOperation();
+  if (!operation?.id && operation?.kind === 'background-recovery') return false;
+  return ['running', 'cancel-requested'].includes(String(operation?.status || ''));
+}
+
+function networkOperationBlocksMutation() {
+  return cancelNetworkOperationInFlight
+    || networkOperationInProgress()
+    || Boolean(rendererPendingNetworkOperation());
+}
+
+function isNetworkMutatingAction(action) {
+  return [
+    'connectGuest',
+    'login-employee',
+    'login-feishu',
+    'repairSystemNetwork',
+    'refreshDiagnostics',
+    'disconnect',
+    'resetLocalNetworkIdentity'
+  ].includes(action);
+}
+
+function networkOperationKind(operation = currentNetworkOperation()) {
+  return String(operation?.kind || '').toLowerCase();
+}
+
+function networkOperationIsRepair(operation = currentNetworkOperation()) {
+  return /repair|recover/.test(networkOperationKind(operation));
+}
+
+function networkOperationIsGuestConnect(operation = currentNetworkOperation()) {
+  return /guest|visit|anonymous/.test(networkOperationKind(operation));
+}
+
+function rendererPendingNetworkOperation() {
+  const kind = busyAction === 'repairSystemNetwork'
+    ? 'manual-repair'
+    : busyAction === 'connectGuest'
+      ? 'guest-connect'
+      : busyAction === 'login-employee'
+        ? 'employee-connect'
+        : null;
+  if (!kind) return null;
+  return {
+    id: '',
+    kind,
+    status: 'running',
+    stage: 'renderer-awaiting-main',
+    cancelable: true,
+    promptActive: false,
+    message: null
+  };
+}
+
+function renderNetworkOperationControl() {
+  const visibleOperation = currentNetworkOperation();
+  if (
+    !visibleOperation?.id
+    && visibleOperation?.kind === 'background-recovery'
+    && ['disconnect', 'resetLocalNetworkIdentity'].includes(busyAction)
+  ) return '';
+  const pendingRendererOperation = rendererPendingNetworkOperation();
+  const operation = visibleOperation?.status === 'paused' && pendingRendererOperation
+    ? pendingRendererOperation
+    : visibleOperation || pendingRendererOperation;
+  if (!operation) return '';
+  if (operation.status === 'paused') {
+    const retry = networkOperationIsRepair(operation)
+      ? '<button class="secondary-button" type="button" data-action="repairSystemNetwork">重新修复网络</button>'
+      : networkOperationIsGuestConnect(operation)
+        ? '<button class="secondary-button" type="button" data-action="connectGuest">重新连接</button>'
+        : '<button class="secondary-button" type="button" data-action="select-mode" data-mode="employee">返回员工登录</button>';
+    return `
+      <section class="connection-recovery-panel" role="status" aria-live="polite" data-network-operation-status="paused">
+        <strong>已停止后续恢复</strong>
+        <span>${escapeHtml(operation.message || '本次连接或恢复已暂停。')} 现有健康 WireGuard 与登录状态会保留；不会把“取消”当成断开连接，也不会自动继续或再次弹出权限框。</span>
+        <div class="connect-actions">${retry}</div>
+      </section>
+    `;
+  }
+  const cancelRequested = operation.status === 'cancel-requested' || cancelNetworkOperationInFlight;
+  const label = cancelRequested
+    ? '正在停止后续步骤'
+    : networkOperationIsRepair(operation)
+      ? '停止后续恢复'
+      : '取消本次连接';
+  return `
+    <section class="connection-recovery-panel" role="status" aria-live="polite" data-network-operation-status="${escapeAttr(operation.status)}">
+      <strong>${escapeHtml(operation.message || (networkOperationIsRepair(operation) ? '正在修复系统网络' : '正在建立网络连接'))}</strong>
+      <span>如果 macOS 系统权限框已经打开，请同时在系统权限框中点“取消”；此按钮会停止后续步骤，不会执行断开或清理当前健康连接。</span>
+      <div class="connect-actions">
+        <button class="secondary-button" type="button" data-action="cancelNetworkOperation" data-operation-id="${escapeAttr(operation.id || '')}" ${cancelRequested || operation.cancelable === false ? 'disabled' : ''}>${escapeHtml(label)}</button>
+      </div>
+    </section>
+  `;
+}
+
 function isConnectionPending() {
-  return state?.connection?.state === 'connecting'
+  if (networkOperationPaused()) return false;
+  const operation = currentNetworkOperation();
+  const idlessBackgroundRecovery = !operation?.id && operation?.kind === 'background-recovery';
+  return networkOperationInProgress()
+    || (state?.connection?.state === 'connecting' && !idlessBackgroundRecovery)
     || busyAction === 'connectGuest'
     || busyAction === 'login-employee'
     || feishuAuthStage() === 'connecting';
@@ -977,6 +1161,7 @@ function feishuAuthStage() {
 }
 
 function feishuAuthPending() {
+  if (networkOperationPaused() && feishuAuthStage() === 'connecting') return false;
   return Boolean(feishuAuthFlow())
     || busyAction === 'login-feishu'
     || busyAction === 'cancel-feishu-login';
@@ -1106,12 +1291,16 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
   if (screen === 'advanced') return renderAdvancedPhone();
   const mode = modeDraft;
   const activeLease = connected || leaseOnly || tunnelOnly || degraded;
+  const retainedEmployee = isRetainedEmployeeSession();
   const showEmployeeLogin = isEmployeeLoginVisible();
   const disconnecting = busyAction === 'disconnect';
+  const recoveryPaused = networkOperationPaused();
   const pendingMode = busyAction === 'login-employee' ? 'employee' : state.connection?.mode;
   const anonymousRecoveryBlocked = anonymousRecoveryBlockedByPolicy();
   const modeTitle = disconnecting
     ? `${state.connection?.mode === 'employee' ? '员工' : '访客'}模式 正在断开`
+    : recoveryPaused
+      ? `${state.connection?.mode === 'employee' ? '员工' : '访客'}模式 恢复已暂停`
     : connecting
     ? `${pendingMode === 'employee' ? '员工' : '访客'}模式 连接中`
     : anonymousRecoveryBlocked
@@ -1143,11 +1332,36 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
         <p>${escapeHtml(connectionCaption())}</p>
       </section>
       ${renderFeedback()}
+      ${renderNetworkOperationControl()}
       ${renderConnectionRecoverySteps(activeLease && !connected)}
 
-      ${showEmployeeLogin ? renderEmployeeLogin(connecting) : renderGuestConnect(connected, connecting, activeLease && !connected)}
+      ${retainedEmployee
+        ? renderEmployeeRecovery()
+        : showEmployeeLogin
+          ? renderEmployeeLogin(connecting)
+          : renderGuestConnect(connected, connecting, activeLease && !connected)}
       ${renderConnectionStrip()}
       ${renderPhoneFooterInfo(connected)}
+    </section>
+  `;
+}
+
+function renderEmployeeRecovery() {
+  const repairing = busyAction === 'repairSystemNetwork';
+  const disconnecting = busyAction === 'disconnect';
+  const operationPending = networkOperationBlocksMutation();
+  const provider = state?.auth?.provider === 'feishu' ? '飞书' : '员工账号';
+  return `
+    <section class="connect-panel employee-recovery-panel" role="status" aria-live="polite">
+      <button class="connect-dial is-recovering" type="button" disabled aria-busy="${repairing ? 'true' : 'false'}">
+        <span>${repairing ? '修复中' : '会话已保留'}</span>
+      </button>
+      <p class="anonymous-access-note">${escapeHtml(`${provider}身份和员工隧道仍有效，无需重新登录；当前仅修复 PAC / split DNS 系统路径。`)}</p>
+      <div class="connect-actions">
+        <button class="text-button" type="button" data-action="repairSystemNetwork" ${repairing || disconnecting || operationPending ? 'disabled' : ''}>${repairing ? '正在修复网络' : '修复网络'}</button>
+        <button class="text-button" type="button" data-action="disconnect" ${repairing || disconnecting || operationPending ? 'disabled' : ''}>${disconnecting ? '正在断开' : '断开连接'}</button>
+        <button class="text-button" type="button" data-action="show-advanced">高级选项</button>
+      </div>
     </section>
   `;
 }
@@ -1192,7 +1406,7 @@ function renderGuestConnect(connected, connecting, retainedConnection = false) {
 }
 
 function renderConnectionRecoverySteps(show) {
-  if (!show || anonymousRecoveryBlockedByPolicy()) return '';
+  if (!show || networkOperationPaused() || anonymousRecoveryBlockedByPolicy()) return '';
   const connection = state.connection || {};
   const health = connection.health || {};
   const diagnostics = connection.diagnostics || {};
@@ -1238,6 +1452,12 @@ function renderConnectionRecoverySteps(show) {
           </div>
         `).join('')}
       </div>
+      ${currentNetworkOperation() ? '' : `
+        <div class="connect-actions">
+          <button class="secondary-button" type="button" data-action="cancelNetworkOperation">暂停自动恢复</button>
+        </div>
+        <span>如果 macOS 系统权限框已经打开，请同时在系统权限框中点“取消”；暂停不会断开或清理当前健康连接。</span>
+      `}
     </section>
   `;
 }
@@ -1246,7 +1466,7 @@ function renderEmployeeLogin(connecting) {
   const guestActive = isGuestConnectionActive();
   const loginPending = busyAction === 'login-employee';
   const feishuFlow = feishuAuthFlow();
-  const feishuStage = feishuAuthStage();
+  const feishuStage = networkOperationPaused() ? '' : feishuAuthStage();
   const feishuPending = feishuAuthPending();
   const feishuCancelable = Boolean(feishuFlow) && feishuStage !== 'connecting';
   const replacingGuest = guestActive || (
@@ -1384,6 +1604,7 @@ function renderAdvancedPhone() {
         <p>Launcher Foundation / endpoint / release</p>
       </section>
       ${renderFeedback()}
+      ${renderNetworkOperationControl()}
       <section class="advanced-list">
         ${renderAdvancedRow('指纹、人脸与密码', 'identity / device binding', '◎')}
         ${renderAdvancedRow('安全', 'permission broker / helper policy', '◆')}
@@ -1406,8 +1627,11 @@ function renderAnonymousAccessPanel() {
   const guestActive = isGuestConnectionActive();
   const connected = guestActive && connection.state === 'connected';
   const disconnectable = connected || isGuestTunnelActive(connection);
-  const connecting = busyAction === 'connectGuest'
-    || (guestActive && connection.state === 'connecting');
+  const connecting = !networkOperationPaused() && (
+    networkOperationBlocksMutation()
+    || busyAction === 'connectGuest'
+    || (guestActive && connection.state === 'connecting')
+  );
   const retainedGuest = guestActive
     && ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection.state);
   const disconnecting = busyAction === 'disconnect';
@@ -1819,8 +2043,8 @@ function renderWireGuardDiagnostics() {
         </div>
         <div class="toolbar-actions">
           ${anonymousRecoveryBlockedByPolicy() ? '' : `
-            <button class="secondary-button" type="button" data-action="repairSystemNetwork" ${busyAction === 'repairSystemNetwork' ? 'disabled' : ''}>修复网络</button>
-            <button class="secondary-button" type="button" data-action="refreshDiagnostics" ${busyAction === 'refreshDiagnostics' ? 'disabled' : ''}>重新诊断</button>
+            <button class="secondary-button" type="button" data-action="repairSystemNetwork" ${busyAction === 'repairSystemNetwork' || networkOperationBlocksMutation() ? 'disabled' : ''}>修复网络</button>
+            <button class="secondary-button" type="button" data-action="refreshDiagnostics" ${busyAction === 'refreshDiagnostics' || networkOperationBlocksMutation() ? 'disabled' : ''}>重新诊断</button>
           `}
         </div>
       </div>
@@ -3904,6 +4128,7 @@ function connectionCaption() {
   const connection = state.connection || {};
   if (busyAction === 'disconnect') return '正在等待一次系统授权，以原子停止 WireGuard 并恢复 PAC / split DNS';
   if (anonymousRecoveryBlockedByPolicy()) return ANONYMOUS_LOGIN_DISABLED_MESSAGE;
+  if (networkOperationPaused()) return `${connection.localIp || '当前网络'} / 已停止后续恢复，现有健康连接保持中`;
   if (feishuAuthFlow() && feishuAuthStage() !== 'connecting') {
     return connection.mode === 'guest' && connection.localIp
       ? `${connection.localIp} / 等待飞书授权，访客连接保持中`
@@ -4236,6 +4461,7 @@ function createMockApi() {
       ]
     },
     authFlow: null,
+    networkOperation: null,
     feedback: null,
     activity: [],
     updatedAt: new Date().toISOString()
@@ -4346,6 +4572,22 @@ function createMockApi() {
         message: mockState.connection.mode === 'guest' && mockState.connection.localIp
           ? `已取消飞书登录。当前访客连接（${mockState.connection.localIp}）保持不变。`
           : '已取消飞书登录。'
+      }
+    }),
+    cancelNetworkOperation: async (operationId = null) => commit({
+      networkOperation: {
+        id: operationId || mockState.networkOperation?.id || `mock-network-operation-${Date.now()}`,
+        kind: mockState.networkOperation?.kind || 'background-recovery',
+        status: 'paused',
+        stage: 'paused',
+        cancelable: false,
+        promptActive: false,
+        startedAt: mockState.networkOperation?.startedAt || new Date().toISOString(),
+        message: '已停止后续恢复。'
+      },
+      feedback: {
+        tone: 'warning',
+        message: '已停止后续恢复；现有健康连接保持不变。'
       }
     }),
     disconnect: async () => commit({

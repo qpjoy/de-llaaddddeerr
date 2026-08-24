@@ -506,9 +506,14 @@ discover_hanlp_url() {
   if [ "${MX_COMMON_HANLP_URL+x}" = x ]; then
     if [ -n "$MX_COMMON_HANLP_URL" ]; then
       say "HanLP tokenizer: ${MX_COMMON_HANLP_URL} (explicitly configured)"
+      if [ -z "${MX_COMMON_SEGMENTER:-}" ]; then
+        MX_COMMON_SEGMENTER="hanlp"
+      fi
     else
       say "HanLP tokenizer auto-discovery explicitly disabled; using local jieba"
     fi
+    export MX_COMMON_SEGMENTER
+    export MX_COMMON_HANLP_URL
     return 0
   fi
 
@@ -545,7 +550,12 @@ discover_hanlp_url() {
     # decision; auto-discovery must never silently downgrade an existing Hub.
     MX_COMMON_HANLP_URL=""
     say "WARNING: no ready HanLP Endpoint and no retained HanLP URL; configuring local jieba." >&2
+    say "         The nationwide province pipeline will remain activation-blocked until HanLP is configured." >&2
   fi
+  if [ -n "${MX_COMMON_HANLP_URL:-}" ] && [ -z "${MX_COMMON_SEGMENTER:-}" ]; then
+    MX_COMMON_SEGMENTER="hanlp"
+  fi
+  export MX_COMMON_SEGMENTER
   export MX_COMMON_HANLP_URL
 }
 
@@ -716,6 +726,14 @@ create_runtime_config() {
     '; then
     die "MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS must be an integer from 0 to 60000"
   fi
+  local province_page_delay_ms="${MX_INSIGHT_PROVINCE_PAGE_DELAY_MS:-2000}"
+  if ! MX_INSIGHT_PROVINCE_PAGE_DELAY_MS_VALUE="$province_page_delay_ms" \
+    node -e '
+      const value = Number(process.env.MX_INSIGHT_PROVINCE_PAGE_DELAY_MS_VALUE)
+      if (!Number.isInteger(value) || value < 0 || value > 60_000) process.exit(1)
+    '; then
+    die "MX_INSIGHT_PROVINCE_PAGE_DELAY_MS must be an integer from 0 to 60000"
+  fi
   if [ "${MX_INSIGHT_SEARCH_READY:-0}" != "1" ] && [ -z "${MX_COMMON_ELASTICSEARCH_URL:-}" ]; then
     say "shared search is not ready; deploying with MX_COMMON_ELASTICSEARCH_URL unset (search degraded)"
     elasticsearch_url=""
@@ -730,6 +748,7 @@ create_runtime_config() {
     --from-literal=MX_COMMON_ELASTICSEARCH_URL="$elasticsearch_url" \
     --from-literal=MX_COMMON_REDIS_URL="$redis_url" \
     --from-literal=MX_COMMON_HANLP_URL="${MX_COMMON_HANLP_URL:-}" \
+    --from-literal=MX_COMMON_SEGMENTER="${MX_COMMON_SEGMENTER:-}" \
     --from-literal=MX_COMMON_QUEUE_DRIVER="${MX_COMMON_QUEUE_DRIVER:-postgres}" \
     --from-literal=MX_INSIGHT_SERVER_FILE_ROOTS="$server_file_roots" \
     --from-literal=MX_INSIGHT_EMBEDDING_MODEL="${MX_INSIGHT_EMBEDDING_MODEL:-}" \
@@ -741,6 +760,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS="${MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS:-60000}" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE="${MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE:-1000}" \
     --from-literal=MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS="$telegram_sqlite_page_delay_ms" \
+    --from-literal=MX_INSIGHT_PROVINCE_PAGE_DELAY_MS="$province_page_delay_ms" \
     --from-literal=MX_INSIGHT_AGENT_PROVIDERS="${MX_INSIGHT_AGENT_PROVIDERS:-}" \
     --from-literal=MX_INSIGHT_EMBEDDING_PROVIDERS="${MX_INSIGHT_EMBEDDING_PROVIDERS:-}" \
     --dry-run=client -o yaml | kubectl apply -f -
@@ -870,8 +890,7 @@ ensure_shared_data_plane() {
   say "reconciling shared data plane (mx-common)"
   # Hub's namespace must carry the client label before its pods can reach the
   # shared stores; mx-common applies it from this list.
-  if MX_COMMON_HANLP_ENABLED=0 \
-     MX_COMMON_CLIENT_NAMESPACES="mx-insight-hub ${MX_COMMON_EXTRA_CLIENT_NAMESPACES:-}" \
+  if MX_COMMON_CLIENT_NAMESPACES="mx-insight-hub ${MX_COMMON_EXTRA_CLIENT_NAMESPACES:-}" \
      bash "$manage" ensure; then
     MX_INSIGHT_SEARCH_READY=1
     say "shared data plane is healthy"
@@ -1094,6 +1113,7 @@ apply_k8s() {
   render_file "${K8S_DIR}/31-admin-api.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/32-projector.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/33-ingest.yaml" | kubectl apply -f -
+  render_file "${K8S_DIR}/34-classifier.yaml" | kubectl apply -f -
   kubectl apply -f "${K8S_DIR}/40-network-policy.yaml"
   kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-public deployment/mx-insight-hub-admin
   if ! kubectl -n "$namespace" rollout status \
@@ -1128,6 +1148,15 @@ apply_k8s() {
     deployment/mx-insight-hub-ingest --timeout=180s; then
     kubectl -n "$namespace" logs deployment/mx-insight-hub-ingest --tail=60 >&2 || true
     die "ingest worker did not become ready"
+  fi
+  # Classification is a post-commit derived plane. Its failure must never roll
+  # back an API/login deployment or stop source ingestion; the durable backlog
+  # remains visible in the Agent center and drains after recovery.
+  kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-classifier
+  if ! kubectl -n "$namespace" rollout status \
+    deployment/mx-insight-hub-classifier --timeout=180s; then
+    kubectl -n "$namespace" logs deployment/mx-insight-hub-classifier --tail=60 >&2 || true
+    say "WARNING: Agent classifier did not become ready; classification backlog is retained." >&2
   fi
   verify_hanlp_from_hub || true
   refresh_launcher_workload
@@ -1533,7 +1562,7 @@ ops_action() {
   fi
   case "$action" in
     plan)
-      for file in 00-namespace.yaml 05-serviceaccount.yaml 20-migration-job.yaml 30-public-api.yaml 31-admin-api.yaml 32-projector.yaml 33-ingest.yaml 40-network-policy.yaml; do
+      for file in 00-namespace.yaml 05-serviceaccount.yaml 20-migration-job.yaml 30-public-api.yaml 31-admin-api.yaml 32-projector.yaml 33-ingest.yaml 34-classifier.yaml 40-network-policy.yaml; do
         render_file "${K8S_DIR}/${file}"
       done
       ;;

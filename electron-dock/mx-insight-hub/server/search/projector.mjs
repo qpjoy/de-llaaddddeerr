@@ -18,6 +18,9 @@ import { isRetryableSegmenterIntegrityError } from './reindex-integrity.mjs'
 
 const WORKER_ID = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`
 const MAX_ATTEMPTS = 5
+const DEFAULT_BATCH_SIZE = 50
+const DEFAULT_LEASE_SECONDS = 300
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000
 
 export class SearchProjector {
   constructor({
@@ -25,8 +28,11 @@ export class SearchProjector {
     client,
     segmenter,
     indexSet,
-    batchSize = 200,
-    leaseSeconds = 120,
+    batchSize = DEFAULT_BATCH_SIZE,
+    leaseSeconds = DEFAULT_LEASE_SECONDS,
+    heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
     logger = console,
   }) {
     this.pool = pool
@@ -35,6 +41,9 @@ export class SearchProjector {
     this.indexSet = indexSet
     this.batchSize = batchSize
     this.leaseSeconds = leaseSeconds
+    this.heartbeatIntervalMs = heartbeatIntervalMs
+    this.setTimeoutFn = setTimeoutFn
+    this.clearTimeoutFn = clearTimeoutFn
     this.logger = logger
     this.workerId = WORKER_ID
   }
@@ -96,6 +105,68 @@ export class SearchProjector {
     return new Map(rows.map((row) => [row.id, row]))
   }
 
+  /** Keep a long HanLP/Elasticsearch batch owned while it is still making progress. */
+  #monitorClaimLease(eventIds) {
+    const clearTimeoutFn = this.clearTimeoutFn
+    let stopped = false
+    let timer = null
+    let inFlight = null
+    let failure = null
+
+    const recordFailure = (error) => {
+      if (failure) return failure
+      failure = error instanceof Error ? error : new Error(String(error))
+      if (!failure.code) failure.code = 'projection_lease_heartbeat_failed'
+      this.logger?.warn?.(`[projector] claim lease heartbeat failed: ${failure.message}`)
+      return failure
+    }
+    const assertHealthy = () => {
+      if (failure) throw failure
+    }
+    const pulse = async () => {
+      assertHealthy()
+      try {
+        const { rowCount } = await this.pool.query(
+          `UPDATE outbox.projection_events
+              SET leased_until = now() + make_interval(secs => $2)
+            WHERE id = ANY($1::bigint[])
+              AND status = 'claimed'
+              AND locked_by = $3`,
+          [eventIds, this.leaseSeconds, this.workerId],
+        )
+        if (rowCount !== eventIds.length) {
+          const error = new Error(
+            `claim lease lost while renewing ${eventIds.length} event(s); renewed ${rowCount}`,
+          )
+          error.code = 'projection_lease_lost'
+          throw error
+        }
+      } catch (error) {
+        throw recordFailure(error)
+      }
+    }
+    const schedule = () => {
+      if (stopped || failure) return
+      timer = this.setTimeoutFn(async () => {
+        inFlight = pulse()
+        await inFlight.catch(() => {})
+        inFlight = null
+        schedule()
+      }, this.heartbeatIntervalMs)
+      timer?.unref?.()
+    }
+    schedule()
+
+    return {
+      async stop({ requireHealthy = false } = {}) {
+        stopped = true
+        if (timer) clearTimeoutFn(timer)
+        await inFlight?.catch(() => {})
+        if (requireHealthy) assertHealthy()
+      },
+    }
+  }
+
   async #markDelivered(eventIds) {
     if (eventIds.length === 0) return 0
     const { rowCount } = await this.pool.query(
@@ -134,14 +205,23 @@ export class SearchProjector {
    * Project one batch. Returns counts; never throws for permanent per-document problems.
    *
    * Throws for retryable shared-dependency outages, which the caller turns into
-   * a backoff rather than a per-event failure. Marking 200 events failed because
-   * Elasticsearch or the required tokenizer was briefly down would burn their
-   * retry budget for no reason.
+   * a backoff rather than a per-event failure. Marking a whole batch failed
+   * because Elasticsearch or the required tokenizer was briefly down would burn
+   * their retry budget for no reason.
    */
   async projectBatch() {
     const events = await this.#claim()
     if (events.length === 0) return { claimed: 0, delivered: 0, failed: 0 }
+    const leaseHeartbeat = this.#monitorClaimLease(events.map((event) => event.id))
 
+    try {
+      return await this.#projectClaimedBatch(events, leaseHeartbeat)
+    } finally {
+      await leaseHeartbeat.stop()
+    }
+  }
+
+  async #projectClaimedBatch(events, leaseHeartbeat) {
     const runId = await this.#startRun(events.length)
     const records = await this.#loadRecords([...new Set(events.map((event) => event.aggregate_id))])
 
@@ -261,12 +341,17 @@ export class SearchProjector {
         // Give the whole batch back untouched; purge/index are idempotent, and a
         // transport/topology/provenance failure does not belong in any
         // individual event's budget.
+        await leaseHeartbeat.stop()
         await this.#releaseClaim(events.map((event) => event.id))
         await this.#finishRun(runId, { delivered: 0, failed: 0, error: error.message })
         throw error
       }
     }
 
+    // Stop renewing before terminal transitions. Their ownership predicates are
+    // the final fence, and a concurrent heartbeat must not mistake a delivered
+    // row for a lost claim.
+    await leaseHeartbeat.stop({ requireHealthy: true })
     const deliveredCount = await this.#markDelivered(delivered)
     const failedCount = await this.#markFailed(failures)
     // Only tokenizer-dependent upserts wait for a shared HanLP outage. Deletes
@@ -360,16 +445,33 @@ export class SearchProjector {
  * is expected to catch up promptly once the cluster returns, and a long backoff
  * would leave the index stale well after the outage ended.
  */
-export async function runProjectorLoop(projector, { idleDelayMs = 2_000, signal, logger = console }) {
+export async function runProjectorLoop(projector, {
+  idleDelayMs = 2_000,
+  reclaimIntervalMs = idleDelayMs,
+  nowFn = Date.now,
+  signal,
+  logger = console,
+}) {
   let backoffMs = idleDelayMs
-  await projector.reclaimExpired().catch(() => {})
+  let nextReclaimAt = nowFn()
+  // A continuously non-empty backlog never enters the idle branch, so keep a
+  // wall-clock sweep cadence between successful batches as well.
+  const reclaimExpired = async ({ force = false } = {}) => {
+    const now = nowFn()
+    if (!force && now < nextReclaimAt) return
+    nextReclaimAt = now + reclaimIntervalMs
+    await projector.reclaimExpired().catch(() => {})
+  }
+
+  await reclaimExpired({ force: true })
 
   while (!signal?.aborted) {
+    await reclaimExpired()
     try {
       const result = await projector.projectBatch()
       backoffMs = idleDelayMs
       if (result.claimed === 0) {
-        await projector.reclaimExpired().catch(() => {})
+        await reclaimExpired({ force: true })
         await delay(idleDelayMs, signal)
       } else {
         logger?.log?.(

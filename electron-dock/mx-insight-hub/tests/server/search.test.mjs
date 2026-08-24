@@ -20,7 +20,7 @@ import {
   resolveSearchProfile,
   searchCapabilities,
 } from '../../server/search/profiles.mjs'
-import { SearchProjector } from '../../server/search/projector.mjs'
+import { runProjectorLoop, SearchProjector } from '../../server/search/projector.mjs'
 import {
   currentStateCutoverLockName,
   purgeStaleCurrentStateCopies,
@@ -2142,6 +2142,121 @@ function fakePool(handlers) {
   })
   return pool
 }
+
+test('projector defaults to a bounded live batch and five-minute claim lease', async () => {
+  const pool = fakePool([
+    ["SET status = 'claimed'", (values) => {
+      assert.equal(values[0], 50)
+      assert.equal(values[1], 300)
+      return { rows: [] }
+    }],
+  ])
+  const projector = new SearchProjector({
+    pool,
+    client: {},
+    segmenter,
+    indexSet: contentIndex(),
+    logger: { log() {}, warn() {}, error() {} },
+  })
+
+  assert.deepEqual(
+    await projector.projectBatch(),
+    { claimed: 0, delivered: 0, failed: 0 },
+  )
+})
+
+test('projector loop reclaims an expired startup lease while pending backlog stays non-empty', async () => {
+  const controller = new AbortController()
+  const leaseExpiresAt = 75
+  const reclaimTimes = []
+  let now = 0
+  let batches = 0
+  let expiredLeaseReclaimed = false
+  const projector = {
+    async reclaimExpired() {
+      reclaimTimes.push(now)
+      if (now >= leaseExpiresAt) expiredLeaseReclaimed = true
+      return expiredLeaseReclaimed ? 1 : 0
+    },
+    async projectBatch() {
+      batches += 1
+      now += 40
+      if (batches === 4) controller.abort()
+      return { claimed: 1, delivered: 1, failed: 0 }
+    },
+  }
+
+  await runProjectorLoop(projector, {
+    idleDelayMs: 2_000,
+    reclaimIntervalMs: 50,
+    nowFn: () => now,
+    signal: controller.signal,
+    logger: { log() {}, warn() {}, error() {} },
+  })
+
+  assert.equal(batches, 4)
+  assert.equal(expiredLeaseReclaimed, true)
+  assert.deepEqual(reclaimTimes, [0, 80])
+})
+
+test('projector heartbeats a long-running live claim with the same owner and lease', async () => {
+  const aggregateId = 'deadbeef-0000-4000-8000-000000000000'
+  let releaseRecords
+  let recordsRequested = false
+  const recordsGate = new Promise((resolve) => { releaseRecords = resolve })
+  const renewals = []
+  const timers = []
+  const pool = fakePool([
+    ["SET status = 'claimed'", () => ({
+      rows: [{ id: 6, aggregate_id: aggregateId, event_type: 'delete', projection_revision: 2, attempts: 1 }],
+    })],
+    ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
+    ['FROM core.canonical_records WHERE id = ANY', async () => {
+      recordsRequested = true
+      await recordsGate
+      return { rows: [] }
+    }],
+    ['SET leased_until = now() + make_interval', (values) => {
+      renewals.push(values)
+      return { rows: [], rowCount: 1 }
+    }],
+    ["SET status = 'delivered'", () => ({ rows: [], rowCount: 1 })],
+  ])
+  const projector = new SearchProjector({
+    pool,
+    segmenter,
+    indexSet: contentIndex(),
+    logger: { log() {}, warn() {}, error() {} },
+    client: {
+      async bulk() {
+        return { items: [{ delete: { _id: aggregateId, status: 404 } }] }
+      },
+    },
+    heartbeatIntervalMs: 1_000,
+    setTimeoutFn(callback, milliseconds) {
+      const handle = { callback, milliseconds, cleared: false, unref() {} }
+      timers.push(handle)
+      return handle
+    },
+    clearTimeoutFn(handle) {
+      handle.cleared = true
+    },
+  })
+
+  const running = projector.projectBatch()
+  while (!recordsRequested || timers.length === 0) await Promise.resolve()
+  assert.equal(timers[0].milliseconds, 1_000)
+  await timers[0].callback()
+  assert.deepEqual(renewals, [[[6], 300, projector.workerId]])
+
+  const heartbeat = pool.queries.find(({ sql }) => sql.includes('SET leased_until = now() + make_interval'))
+  assert.match(heartbeat.sql, /status = 'claimed'/)
+  assert.match(heartbeat.sql, /locked_by = \$3/)
+
+  releaseRecords()
+  assert.deepEqual(await running, { claimed: 1, delivered: 1, failed: 0 })
+  assert.equal(timers.at(-1).cleared, true)
+})
 
 test('projector treats a version conflict as delivered, not failed', async () => {
   const row = canonicalRow()

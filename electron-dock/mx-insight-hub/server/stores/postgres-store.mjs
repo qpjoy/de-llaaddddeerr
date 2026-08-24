@@ -1339,20 +1339,65 @@ export class PostgresStore {
       const sourceRunId = apiSearchLineage ? ingestRunId : importRunId
       for (const record of records) {
         if (record.deletedAt != null) deleted += 1
-        await client.query(
+        const rawPayloadSha256 = record.rawPayloadSha256 || record.payloadSha256
+        const sourceObjectResult = await client.query(
           `INSERT INTO ingest.source_objects
              (id, connector_id, stream_id, object_type, source_key,
-              payload_sha256, raw_payload, source_updated_at, ${sourceRunColumn})
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+              payload_sha256, raw_payload_hash_version, raw_payload,
+              source_updated_at, ${sourceRunColumn})
+           VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $8, $9)
            ON CONFLICT (connector_id, stream_id, object_type, source_key) DO UPDATE SET
              payload_sha256 = EXCLUDED.payload_sha256,
+             raw_payload_hash_version = 1,
              raw_payload = EXCLUDED.raw_payload,
              source_updated_at = EXCLUDED.source_updated_at,
              ${sourceRunColumn} = EXCLUDED.${sourceRunColumn},
-             last_seen_at = now()`,
+             current_revision = ingest.source_objects.current_revision
+               + CASE
+                   WHEN ingest.source_objects.raw_payload_hash_version = 0 THEN
+                     ((CASE
+                         WHEN ingest.source_objects.connector_id = 'external:province-opinion-results'
+                           THEN ingest.source_objects.raw_payload - 'updated_at'
+                         ELSE ingest.source_objects.raw_payload
+                       END) IS DISTINCT FROM
+                      (CASE
+                         WHEN EXCLUDED.connector_id = 'external:province-opinion-results'
+                           THEN EXCLUDED.raw_payload - 'updated_at'
+                         ELSE EXCLUDED.raw_payload
+                       END))::int
+                   ELSE (ingest.source_objects.payload_sha256
+                     IS DISTINCT FROM EXCLUDED.payload_sha256)::int
+                 END,
+             last_seen_at = now()
+           RETURNING id, current_revision, raw_payload_hash_version`,
           [
             randomUUID(), connectorId, stream, record.objectType, record.externalId,
-            record.payloadSha256, record.rawItem, record.collectedAt, sourceRunId,
+            rawPayloadSha256, record.rawItem, record.collectedAt, sourceRunId,
+          ],
+        )
+
+        // Preserve every distinct raw payload independently from canonical
+        // revisions. Province/source/model evidence may change without changing
+        // public text, and delayed Agent work must still read the exact source
+        // revision that justified it.
+        const sourceObject = sourceObjectResult.rows[0]
+        const sourceRevisionResult = await client.query(
+          `WITH inserted AS (
+             INSERT INTO ingest.source_object_revisions
+               (source_object_id, revision, payload_sha256, payload_hash_version, raw_payload,
+                source_updated_at, ${sourceRunColumn})
+             VALUES ($1, $2, $3, 1, $4, $5, $6)
+             ON CONFLICT (source_object_id, revision) DO NOTHING
+             RETURNING id
+           )
+           SELECT id FROM inserted
+           UNION ALL
+           SELECT id FROM ingest.source_object_revisions
+            WHERE source_object_id = $1 AND revision = $2
+           LIMIT 1`,
+          [
+            sourceObject.id, Number(sourceObject.current_revision), rawPayloadSha256,
+            record.rawItem, record.collectedAt, sourceRunId,
           ],
         )
 
@@ -1409,6 +1454,34 @@ export class PostgresStore {
           [id, revision, record.payloadSha256, record.rawItem, record.parserVersion, sourceRunId],
         )
         if (revisionInsert.rowCount > 0) changed += 1
+
+        if (datasetId === 'public-opinion.province.v1') {
+          const sourceRevisionId = sourceRevisionResult.rows[0]?.id
+          if (!sourceRevisionId) {
+            throw new Error('current source object revision was not materialized')
+          }
+          // Domain work is created in the same transaction as its immutable raw
+          // evidence. The canonical revision is part of task identity, so a
+          // mapping/normalizer change over unchanged raw evidence is analyzed
+          // again instead of being swallowed by the old task's unique key.
+          // Model availability never blocks this commit; a dedicated classifier
+          // claims the task later under its own lease/rate policy.
+          await client.query(
+            `INSERT INTO agent_center.analysis_tasks
+               (pipeline_key, record_id, source_object_revision_id,
+                canonical_revision, input_sha256, analysis_version,
+                taxonomy_version, rule_version, prompt_version)
+             SELECT pipeline_key, $1, $2, $3, $4, analysis_version,
+                    taxonomy_version, rule_version, prompt_version
+               FROM control.agent_analysis_pipelines
+              WHERE pipeline_key = 'province-geography-v1'
+             ON CONFLICT
+               (pipeline_key, record_id, source_object_revision_id,
+                canonical_revision, analysis_version)
+             DO NOTHING`,
+            [id, sourceRevisionId, Number(revision), rawPayloadSha256],
+          )
+        }
 
         if (apiSearchLineage) {
           const sourceEventId = `${apiSearchLineage.connectorCallId}:${record.objectType}:${record.externalId}`

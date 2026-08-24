@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-08-23.
+Last reviewed: 2026-08-24.
 
 This directory is the source of truth for MX Insight Hub. Night-All-specific implementation details remain in the Night-All repository; this project records only the stable dependency contract and ownership boundary.
 
@@ -20,7 +20,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | Data ingest and serving plane | Admin-token-only PostgreSQL/file source management, browser upload, allowlisted server-file paths, content observations, reusable immutable format rules, canonical records/revisions/tombstones, projection outbox, durable queues/cursors, interpretation-aware file idempotency, PostgreSQL external pull and import-run evidence are implemented. PostgreSQL credentials live directly in `catalog.external_sources.connection`; catalog backups are therefore sensitive. `/shared_dir` directory watcher/landing agent, immutable object/cloud storage adapters, prompt CRUD, a generic CDC connector and non-PostgreSQL database connectors are not. |
 | Telegram monitor sources | `telegram.monitor.chats.v1` and `telegram.monitor.messages.v1`, a fixed two-input business task, explicit idempotent source-contract preparation, source progress/import evidence, strict history, Night-All-v1-compatible stored search and fuzzy entity search are implemented. Preparation installs the database-enforced watermark/trigger/index contract with one-request DDL credentials while ordinary ingest stays read-only; activation remains fail-closed until probe and writer attestation pass. These canonical datasets have no `tenant_id`; all consumers with the `telegram` grant read the same corpus. |
 | Telegram SQLite read API | `telegram.sqlite.chats.v1` and `telegram.sqlite.messages.v1` are a separate fixed, Admin-managed GET-only pipeline. It preserves raw JSON and deletion-marked rows in PostgreSQL, uses deterministic identities and Hub transaction idempotency, and performs an initial/manual full alignment followed by append-oriented overlap polling plus a bounded previous-day window at 02:00 Asia/Shanghai. It never schedules an automatic historical full scan and is not merged into the PostgreSQL public Telegram datasets. |
-| Nationwide province public opinion | Repository contract only: a fixed PostgreSQL source and province hot/latest/detail serving boundary are defined, but the source remains deliberately paused, physically unconfigured and ungranted. Activation is blocked until Night-All proves a finite non-null timestamp `updated_at` writer contract plus `(updated_at, id)` ordering/index, and until both exact Hub serving indexes are installed by the separate online operation. No deployment, upstream connection, data import or Agent classification writer is part of this phase. |
+| Nationwide province public opinion | Repository implementation, default paused: the fixed PostgreSQL source, province hot/latest/detail boundary, append-only raw source revisions and a source-revision-anchored rule/Agent analysis pipeline are defined. Night-All now contains migration `040_monitor_strategy_results_hub_watermark.sql`, but activation still fails closed until 040 has been executed and verified on the target Night-All PostgreSQL, the current Hub writer-contract digest has then been attested, and both exact Hub serving indexes exist. A dedicated classifier entrypoint, package script, Compose service and K8s Deployment are included, but the analysis pipeline remains paused; assertion review is read-only and no assertion is projected into canonical/public serving. No environment rollout, upstream connection, data import, provider setup or consumer grant is implied. |
 | Search/retrieval | Canonical projection outbox, projector, unified cross-platform stored search, strict Chinese relevance, PostgreSQL degradation paths, Admin semantic search and a guarded Admin-plane reindex operation are implemented. The repository includes versioned allowlisted profiles and the content-v4 mapping; each deployed environment remains gated on its strict blue/green index validation. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
 | Private/public DNS routes | Deliberately not auto-created. They require route/TLS review and a deployed public Service. |
 | Billing, BI and Data Agent | Designed as later phases; the MVP has mutable request/usage evidence, not an append-only billing ledger or invoice engine. |
@@ -83,11 +83,12 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 18. [Telegram monitor PostgreSQL ingestion](operations/telegram-monitor-ingestion.md)
 19. [Telegram SQLite read-API ingestion](operations/telegram-sqlite-api-ingestion.md)
 20. [Nationwide province public-opinion source](architecture/province-public-opinion-source.md)
-21. [Backup and restore](operations/backup-restore.md)
-22. [Observability and SLO](operations/observability-slo.md)
-23. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
-24. [Agent provider settings](operations/agent-provider-settings.md)
-25. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
+21. [Nationwide province public-opinion operations](operations/province-public-opinion-ingestion.md)
+22. [Backup and restore](operations/backup-restore.md)
+23. [Observability and SLO](operations/observability-slo.md)
+24. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
+25. [Agent provider settings](operations/agent-provider-settings.md)
+26. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
 
 ## Decisions
 

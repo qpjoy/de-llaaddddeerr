@@ -478,6 +478,8 @@ test('PostgresStore writes compatibility run, canonical revision, observation an
   const queries = []
   const runId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
   const recordId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+  const sourceObjectId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const sourceRevisionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
   const requestId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
   const connectorCallId = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
   const record = {
@@ -510,7 +512,12 @@ test('PostgresStore writes compatibility run, canonical revision, observation an
       queries.push({ sql, values })
       if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
       if (/INSERT INTO ingest\.ingest_runs/.test(sql)) return { rows: [{ id: runId }], rowCount: 1 }
-      if (/INSERT INTO ingest\.source_objects/.test(sql)) return { rows: [], rowCount: 1 }
+      if (/INSERT INTO ingest\.source_objects/.test(sql)) {
+        return { rows: [{ id: sourceObjectId, current_revision: 1 }], rowCount: 1 }
+      }
+      if (/INSERT INTO ingest\.source_object_revisions/.test(sql)) {
+        return { rows: [{ id: sourceRevisionId }], rowCount: 1 }
+      }
       if (/INSERT INTO core\.canonical_records/.test(sql)) {
         return { rows: [{ id: recordId, current_revision: 1, projection_revision: 1 }], rowCount: 1 }
       }

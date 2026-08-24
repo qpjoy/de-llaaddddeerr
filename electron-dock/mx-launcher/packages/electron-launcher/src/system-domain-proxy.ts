@@ -31,6 +31,16 @@ import {
   releaseElectronLauncherProcessLease,
   type ElectronLauncherProcessLease
 } from './process-lease.js';
+import {
+  currentDarwinCleanupOnlyServices,
+  currentDarwinExternalApplyPhase,
+  currentDarwinResolverDomains,
+  darwinExternalApplyAbortAllowed,
+  darwinPacVerificationRowsReady,
+  intersectDarwinManagedServiceNames,
+  mergeDarwinPreviousState,
+  type DarwinExternalApplyPhase
+} from './darwin-system-domain-proxy-state.js';
 import { windowsPowerShellCommand } from './windows-command.js';
 
 const STATE_VERSION = 1;
@@ -80,6 +90,10 @@ export interface ElectronLauncherSystemDomainProxyOptions {
   log?: Pick<Console, 'warn'> | null;
 }
 
+export interface ElectronLauncherSystemDomainProxyApplyOptions {
+  forceDarwinRefresh?: boolean;
+}
+
 export interface ElectronLauncherSystemDomainProxyStatus {
   supported: boolean;
   applied: boolean;
@@ -114,7 +128,20 @@ export interface ElectronLauncherSystemDomainProxyStatus {
   pending?: boolean;
   externalApply?: boolean;
   darwinApplyShell?: string | null;
+  transactionToken?: string | null;
+  externalApplyPhase?: DarwinExternalApplyPhase | null;
   error?: string;
+  skipReason?: string;
+  localEdgeResumed?: boolean;
+}
+
+export type ElectronLauncherExternalApplyAbortExecution =
+  | 'not-started'
+  | 'authorization-canceled';
+
+export interface ElectronLauncherExternalApplyAbortOptions {
+  execution: ElectronLauncherExternalApplyAbortExecution;
+  reason?: string;
 }
 
 export interface ElectronLauncherBrowserAccessStatus {
@@ -149,18 +176,38 @@ export interface ElectronLauncherSystemDomainProxyRoute {
 }
 
 export interface ElectronLauncherSystemDomainProxyManager {
-  apply(policy: ElectronLauncherSystemDomainProxyPolicy): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  apply(
+    policy: ElectronLauncherSystemDomainProxyPolicy,
+    options?: ElectronLauncherSystemDomainProxyApplyOptions
+  ): Promise<ElectronLauncherSystemDomainProxyStatus>;
   disable(
     reason?: string,
     options?: { keepLocalEdgeAlive?: boolean }
   ): Promise<ElectronLauncherSystemDomainProxyStatus>;
   restoreStale(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  prepareExternalApply?(
+    policy: ElectronLauncherSystemDomainProxyPolicy
+  ): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  abortExternalApply?(
+    transactionToken: string,
+    options: ElectronLauncherExternalApplyAbortOptions
+  ): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  markExternalApplyHandoff?(
+    transactionToken: string
+  ): ElectronLauncherSystemDomainProxyStatus;
   darwinPrepareApply?(policy: ElectronLauncherSystemDomainProxyPolicy): Promise<ElectronLauncherSystemDomainProxyStatus>;
-  completeExternalApply?(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  completeExternalApply?(
+    transactionToken: string,
+    reason?: string
+  ): Promise<ElectronLauncherSystemDomainProxyStatus>;
   darwinRestoreScript?(): string | null;
   completeExternalRestore?(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
   status(): ElectronLauncherSystemDomainProxyStatus;
   statusVerified(): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  resumeDarwinLocalEdge?(
+    policy: ElectronLauncherSystemDomainProxyPolicy,
+    reason?: string
+  ): Promise<ElectronLauncherSystemDomainProxyStatus>;
   refreshWindowsContinuation?(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
   probeBrowserAccess(input: {
     host: string;
@@ -217,6 +264,8 @@ interface StoredState {
   ownershipRegistry?: ElectronLauncherNetworkOwnershipRegistry | null;
   previous: unknown;
   pending?: boolean;
+  externalTransactionToken?: string;
+  externalTransactionPhase?: DarwinExternalApplyPhase;
   continuationNotifyPending?: boolean;
   updatedAt: string;
 }
@@ -268,6 +317,21 @@ interface PreparedSystemDomainProxyApply {
   changed: boolean;
 }
 
+interface LocalEdgeSnapshot {
+  server: Server | null;
+  dnsServer: DgramSocket | null;
+  port: number | null;
+  key: string | null;
+  config: LocalPacServerConfig | null;
+}
+
+interface DarwinExternalApplyTransaction {
+  token: string;
+  phase: DarwinExternalApplyPhase;
+  beforeState: StoredState | null;
+  localEdgeBefore: LocalEdgeSnapshot;
+}
+
 interface WindowsCurrentUserProxyLease {
   version: 1;
   pid: number;
@@ -288,6 +352,7 @@ export function createElectronLauncherSystemDomainProxy(
   let localPacPort: number | null = null;
   let localPacKey: string | null = null;
   let localPacConfig: LocalPacServerConfig | null = null;
+  let darwinExternalApplyTransaction: DarwinExternalApplyTransaction | null = null;
   const localPacSockets = new Set<Socket>();
 
   function acquireWindowsOwnershipGate(): void {
@@ -337,7 +402,10 @@ export function createElectronLauncherSystemDomainProxy(
     await closed;
   }
 
-  async function ensureLocalPacServer(pac: Omit<ResolvedPacSource, 'pacUrl' | 'usesLocalPac' | 'sharedLocalPac'>): Promise<{
+  async function ensureLocalPacServer(
+    pac: Omit<ResolvedPacSource, 'pacUrl' | 'usesLocalPac' | 'sharedLocalPac'>,
+    serverOptions: { allowShared?: boolean } = {}
+  ): Promise<{
     pacUrl: string;
     port: number;
     config?: LocalPacServerConfig | null;
@@ -417,6 +485,9 @@ export function createElectronLauncherSystemDomainProxy(
         // The server may have failed before entering the listening state.
       }
       if (preferredPort > 0 && isAddressInUseError(err)) {
+        if (serverOptions.allowShared === false) {
+          throw new Error(`macOS local edge 127.0.0.1:${preferredPort} is already in use; read-only resume will not register with another process.`);
+        }
         if (process.platform === 'win32') {
           throw new Error(
             `Windows local edge 127.0.0.1:${preferredPort} is already owned by another process; `
@@ -657,7 +728,11 @@ export function createElectronLauncherSystemDomainProxy(
     }
   }
 
-  async function resolvePacSource(policy: ElectronLauncherSystemDomainProxyPolicy, previous: unknown): Promise<ResolvedPacSource | null> {
+  async function resolvePacSource(
+    policy: ElectronLauncherSystemDomainProxyPolicy,
+    previous: unknown,
+    serverOptions: { allowShared?: boolean; startLocalEdge?: boolean } = {}
+  ): Promise<ResolvedPacSource | null> {
     if (policy?.enabled !== true) return null;
     const domains = normalizeDomains(policy.domains);
     const pacUrl = stringValue(policy.pacUrl);
@@ -716,7 +791,23 @@ export function createElectronLauncherSystemDomainProxy(
       ownershipClaim,
       ownershipClaims: normalizeOwnershipClaims(ownershipClaim ? [ownershipClaim] : [])
     };
-    const localServer = await ensureLocalPacServer(localPac);
+    if (serverOptions.startLocalEdge === false) {
+      if (!pacPort) return null;
+      const effectiveConfig = localConfigFromPac(localPac);
+      return {
+        ...localPac,
+        pacUrl: `http://127.0.0.1:${pacPort}${PAC_PATH}`,
+        pacPort,
+        domains: effectiveConfig.domains,
+        dnsServers: effectiveConfig.dnsServers,
+        dnsFallbackTarget: effectiveConfig.dnsFallbackTarget,
+        reverseProxyRoutes: effectiveConfig.reverseProxyRoutes,
+        ownershipClaims: effectiveConfig.ownershipClaims,
+        sharedLocalPac: false,
+        usesLocalPac: true
+      };
+    }
+    const localServer = await ensureLocalPacServer(localPac, serverOptions);
     const effectiveConfig = localServer.config || localConfigFromPac(localPac);
     return {
       ...localPac,
@@ -732,10 +823,18 @@ export function createElectronLauncherSystemDomainProxy(
     };
   }
 
-  async function prepareApplyState(policy: ElectronLauncherSystemDomainProxyPolicy): Promise<PreparedSystemDomainProxyApply | null> {
+  async function prepareApplyState(
+    policy: ElectronLauncherSystemDomainProxyPolicy,
+    prepareOptions: {
+      allowSharedLocalEdge?: boolean;
+      externalTransactionToken?: string | null;
+    } = {}
+  ): Promise<PreparedSystemDomainProxyApply | null> {
     const existing = readState(statePath);
     const platformStates = await platformStatesForApply(existing);
-    const pac = await resolvePacSource(policy, platformStates.previous);
+    const pac = await resolvePacSource(policy, platformStates.previous, {
+      allowShared: prepareOptions.allowSharedLocalEdge !== false
+    });
     if (!pac) return null;
     const previous = pac.staleWindowsPacIgnored === true
       ? windowsStateWithoutAutoConfigUrl(platformStates.previous)
@@ -775,6 +874,12 @@ export function createElectronLauncherSystemDomainProxy(
     writeState(statePath, {
       ...next,
       pending: true,
+      ...(prepareOptions.externalTransactionToken
+        ? {
+            externalTransactionToken: prepareOptions.externalTransactionToken,
+            externalTransactionPhase: 'prepared' as const
+          }
+        : {}),
       updatedAt: new Date().toISOString()
     });
     return {
@@ -854,9 +959,480 @@ export function createElectronLauncherSystemDomainProxy(
     return next;
   }
 
+  async function currentVerifiedStatus(): Promise<ElectronLauncherSystemDomainProxyStatus> {
+    if (!isSupportedPlatform()) return unsupportedStatus();
+    const state = readState(statePath);
+    if (!state?.applied || state.platform !== process.platform) {
+      return {
+        supported: true,
+        applied: false,
+        verified: true,
+        platform: process.platform
+      };
+    }
+    try {
+      const pacVerification = await verifyPlatformPac(state.pacUrl, state.previous);
+      const resolverVerification = await verifySystemResolvers(state);
+      const localDnsVerification = await verifyLocalDnsRelay(state);
+      return publicState(state, {
+        applied: pacVerification.applied && resolverVerification.applied && localDnsVerification.applied,
+        verified: true,
+        actual: {
+          pac: pacVerification,
+          resolver: resolverVerification,
+          localDns: localDnsVerification
+        },
+        resolverApplied: resolverVerification.applied && localDnsVerification.applied,
+        resolverError: resolverVerification.error || localDnsVerification.error || null
+      });
+    } catch (err) {
+      return publicState(state, {
+        applied: false,
+        verified: false,
+        error: errorMessage(err)
+      });
+    }
+  }
+
+  async function rollbackDarwinLocalEdgeResume(
+    before: LocalEdgeSnapshot,
+    _pac: ResolvedPacSource | null
+  ): Promise<void> {
+    if (!before.server && localPacServer) {
+      await closeLocalPacServer();
+      return;
+    }
+    localPacServer = before.server;
+    localDnsServer = before.dnsServer;
+    localPacPort = before.port;
+    localPacKey = before.key;
+    localPacConfig = before.config;
+  }
+
+  function captureLocalEdgeSnapshot(): LocalEdgeSnapshot {
+    return {
+      server: localPacServer,
+      dnsServer: localDnsServer,
+      port: localPacPort,
+      key: localPacKey,
+      config: localPacConfig
+    };
+  }
+
+  async function restoreExternalApplyLocalEdge(before: LocalEdgeSnapshot): Promise<void> {
+    if (before.server) {
+      if (localPacServer !== before.server || localDnsServer !== before.dnsServer) {
+        throw new Error('External apply local edge changed concurrently; refusing an unsafe rollback.');
+      }
+      localPacPort = before.port;
+      localPacKey = before.key;
+      localPacConfig = before.config;
+      return;
+    }
+    if (localPacServer || localDnsServer) await closeLocalPacServer();
+    localPacPort = before.port;
+    localPacKey = before.key;
+    localPacConfig = before.config;
+  }
+
+  function externalApplyConflictStatus(reason: string): ElectronLauncherSystemDomainProxyStatus {
+    const current = readState(statePath);
+    const transactionToken = darwinExternalApplyTransaction?.token
+      || current?.externalTransactionToken
+      || null;
+    const externalApplyPhase = currentDarwinExternalApplyPhase(
+      darwinExternalApplyTransaction?.phase || current?.externalTransactionPhase
+    );
+    const extra = {
+      applied: false,
+      reason,
+      skipped: true,
+      skipReason: 'external-apply-transaction-in-flight',
+      transactionToken,
+      externalApplyPhase,
+      error: 'A macOS external system proxy transaction is already in flight.'
+    };
+    return current?.applied && current.platform === process.platform
+      ? publicState(current, extra)
+      : {
+          supported: true,
+          platform: process.platform,
+          ...extra
+        };
+  }
+
+  function externalApplyTransactionPending(): boolean {
+    if (darwinExternalApplyTransaction) return true;
+    const current = readState(statePath);
+    return current?.pending === true && Boolean(current.externalTransactionToken);
+  }
+
+  function externalApplyTransactionPhase(
+    transaction: DarwinExternalApplyTransaction | null,
+    current: StoredState | null
+  ): DarwinExternalApplyPhase {
+    const phases = [
+      currentDarwinExternalApplyPhase(transaction?.phase),
+      currentDarwinExternalApplyPhase(current?.externalTransactionPhase)
+    ];
+    if (phases.includes('readback-started')) return 'readback-started';
+    if (phases.includes('privileged-handoff')) return 'privileged-handoff';
+    return 'prepared';
+  }
+
+  function externalApplyTokenMismatchStatus(
+    reason: string,
+    transactionToken: string
+  ): ElectronLauncherSystemDomainProxyStatus {
+    const current = readState(statePath);
+    const extra = {
+      applied: false,
+      reason,
+      skipped: true,
+      skipReason: 'external-apply-transaction-token-mismatch',
+      transactionToken: current?.externalTransactionToken || null,
+      externalApplyPhase: currentDarwinExternalApplyPhase(current?.externalTransactionPhase),
+      error: `External apply transaction token is stale or unknown: ${transactionToken}`
+    };
+    return current?.applied && current.platform === process.platform
+      ? publicState(current, extra)
+      : {
+          supported: true,
+          platform: process.platform,
+          ...extra
+        };
+  }
+
+  async function prepareExternalApplyTransaction(
+    policy: ElectronLauncherSystemDomainProxyPolicy
+  ): Promise<ElectronLauncherSystemDomainProxyStatus> {
+    const reason = 'external-prepare';
+    if (!isSupportedPlatform()) return unsupportedStatus({ reason });
+    if (process.platform !== 'darwin') {
+      return unsupportedStatus({ reason, platform: process.platform });
+    }
+    if (darwinExternalApplyTransaction) return externalApplyConflictStatus(reason);
+
+    const beforeState = readState(statePath);
+    if (beforeState?.pending === true || beforeState?.externalTransactionToken) {
+      return publicState(beforeState, {
+        applied: false,
+        reason,
+        skipped: true,
+        skipReason: 'external-apply-durable-state-pending',
+        transactionToken: beforeState.externalTransactionToken || null,
+        error: 'A pending system proxy state must be completed or repaired before preparing another external apply.'
+      });
+    }
+    if (beforeState?.sharedLocalPac === true) {
+      return publicState(beforeState, {
+        applied: false,
+        reason,
+        skipped: true,
+        skipReason: 'external-apply-shared-edge-rollback-unsafe',
+        transactionToken: null,
+        error: 'Refusing to prepare an external apply over a shared local edge because an abort cannot safely restore another owner.'
+      });
+    }
+
+    const token = randomUUID();
+    const localEdgeBefore = captureLocalEdgeSnapshot();
+    darwinExternalApplyTransaction = {
+      token,
+      phase: 'prepared',
+      beforeState,
+      localEdgeBefore
+    };
+
+    let prepared: PreparedSystemDomainProxyApply | null;
+    try {
+      prepared = await prepareApplyState(policy, {
+        allowSharedLocalEdge: false,
+        externalTransactionToken: token
+      });
+    } catch (err) {
+      const current = readState(statePath);
+      if (current?.externalTransactionToken === token) {
+        return publicState(current, {
+          applied: false,
+          reason,
+          pending: true,
+          externalApply: false,
+          darwinApplyShell: null,
+          transactionToken: token,
+          error: errorMessage(err)
+        });
+      }
+      try {
+        await restoreExternalApplyLocalEdge(localEdgeBefore);
+      } catch (rollbackErr) {
+        return {
+          supported: true,
+          applied: false,
+          platform: process.platform,
+          reason,
+          transactionToken: token,
+          error: `External apply prepare failed (${errorMessage(err)}); local edge rollback also failed (${errorMessage(rollbackErr)}).`
+        };
+      }
+      darwinExternalApplyTransaction = null;
+      return {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        transactionToken: null,
+        error: errorMessage(err)
+      };
+    }
+
+    if (!prepared) {
+      await restoreExternalApplyLocalEdge(localEdgeBefore);
+      darwinExternalApplyTransaction = null;
+      return {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        skipped: true,
+        skipReason: 'external-apply-policy-disabled',
+        transactionToken: null
+      };
+    }
+
+    let shell: string | null = null;
+    let shellError: string | null = null;
+    try {
+      shell = await darwinPlatformAndSystemApplyShell(
+        prepared.pac.pacUrl,
+        prepared.previous,
+        prepared.existing,
+        prepared.resolverPlan
+      );
+    } catch (err) {
+      shellError = errorMessage(err);
+    }
+    return publicState(prepared.next, {
+      applied: false,
+      changed: prepared.changed,
+      pending: true,
+      externalApply: Boolean(shell),
+      darwinApplyShell: shell,
+      transactionToken: token,
+      externalApplyPhase: 'prepared',
+      ...(shell
+        ? {}
+        : {
+            skipped: true,
+            skipReason: 'darwin-apply-shell-unavailable',
+            error: shellError || 'macOS external apply shell is unavailable.'
+          })
+    });
+  }
+
+  async function abortExternalApplyTransaction(
+    transactionToken: string,
+    abortOptions: ElectronLauncherExternalApplyAbortOptions
+  ): Promise<ElectronLauncherSystemDomainProxyStatus> {
+    const reason = abortOptions?.reason || 'external-abort';
+    if (!['not-started', 'authorization-canceled'].includes(abortOptions?.execution)) {
+      return {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        skipped: true,
+        skipReason: 'external-apply-abort-execution-unknown',
+        transactionToken: stringValue(transactionToken),
+        error: 'External apply abort requires proof that the privileged shell was not executed.'
+      };
+    }
+    const token = stringValue(transactionToken);
+    const transaction = darwinExternalApplyTransaction;
+    const current = readState(statePath);
+    if (
+      !token
+      || !transaction
+      || transaction.token !== token
+      || current?.pending !== true
+      || current.externalTransactionToken !== token
+    ) {
+      return externalApplyTokenMismatchStatus(reason, token || '<empty>');
+    }
+    const phase = externalApplyTransactionPhase(transaction, current);
+    if (!darwinExternalApplyAbortAllowed(phase, abortOptions.execution)) {
+      return publicState(current, {
+        applied: false,
+        reason,
+        skipped: true,
+        skipReason: 'external-apply-abort-after-handoff',
+        transactionToken: token,
+        externalApplyPhase: phase,
+        error: 'Refusing to abort this execution phase; complete live readback instead.'
+      });
+    }
+    if (current.sharedLocalPac === true || transaction.beforeState?.sharedLocalPac === true) {
+      return publicState(current, {
+        applied: false,
+        reason,
+        skipped: true,
+        skipReason: 'external-apply-shared-edge-rollback-unsafe',
+        transactionToken: token,
+        error: 'Refusing to abort a shared local edge transaction; no external owner was released or deleted.'
+      });
+    }
+
+    try {
+      await restoreExternalApplyLocalEdge(transaction.localEdgeBefore);
+      if (transaction.beforeState) writeState(statePath, transaction.beforeState);
+      else rmSync(statePath, { force: true });
+    } catch (err) {
+      return publicState(current, {
+        applied: false,
+        reason,
+        skipped: true,
+        skipReason: 'external-apply-abort-failed',
+        transactionToken: token,
+        error: errorMessage(err)
+      });
+    }
+    darwinExternalApplyTransaction = null;
+    if (transaction.beforeState) {
+      return publicState(transaction.beforeState, {
+        reason,
+        restored: true,
+        skipped: true,
+        skipReason: 'external-apply-aborted-before-system-write',
+        transactionToken: null
+      });
+    }
+    return {
+      supported: true,
+      applied: false,
+      platform: process.platform,
+      reason,
+      restored: true,
+      skipped: true,
+      skipReason: 'external-apply-aborted-before-system-write',
+      transactionToken: null
+    };
+  }
+
+  function markExternalApplyHandoffTransaction(
+    transactionToken: string
+  ): ElectronLauncherSystemDomainProxyStatus {
+    const reason = 'external-handoff';
+    const token = stringValue(transactionToken);
+    const transaction = darwinExternalApplyTransaction;
+    const current = readState(statePath);
+    if (
+      !token
+      || !transaction
+      || transaction.token !== token
+      || current?.pending !== true
+      || current.externalTransactionToken !== token
+    ) {
+      return externalApplyTokenMismatchStatus(reason, token || '<empty>');
+    }
+    const phase = externalApplyTransactionPhase(transaction, current);
+    if (phase === 'readback-started') {
+      return publicState(current, {
+        applied: false,
+        reason,
+        pending: true,
+        externalApply: true,
+        transactionToken: token,
+        externalApplyPhase: phase
+      });
+    }
+    const next: StoredState = {
+      ...current,
+      externalTransactionPhase: 'privileged-handoff',
+      updatedAt: new Date().toISOString()
+    };
+    writeState(statePath, next);
+    transaction.phase = 'privileged-handoff';
+    return publicState(next, {
+      applied: false,
+      reason,
+      pending: true,
+      externalApply: true,
+      transactionToken: token,
+      externalApplyPhase: 'privileged-handoff'
+    });
+  }
+
+  async function completeExternalApplyTransaction(
+    transactionToken: string,
+    reason = 'external'
+  ): Promise<ElectronLauncherSystemDomainProxyStatus> {
+    const token = stringValue(transactionToken);
+    const existing = readState(statePath);
+    if (
+      !token
+      || !existing?.applied
+      || existing.platform !== process.platform
+      || existing.pending !== true
+      || existing.externalTransactionToken !== token
+    ) {
+      return externalApplyTokenMismatchStatus(reason, token || '<empty>');
+    }
+    if (darwinExternalApplyTransaction?.token === token) {
+      darwinExternalApplyTransaction.phase = 'readback-started';
+    }
+    const readbackState: StoredState = {
+      ...existing,
+      externalTransactionPhase: 'readback-started',
+      updatedAt: new Date().toISOString()
+    };
+    writeState(statePath, readbackState);
+    const resolver = await verifySystemResolvers(readbackState).catch((err) => ({
+      applied: false,
+      platform: process.platform,
+      mode: storedSystemResolverMode(readbackState),
+      domains: [],
+      error: errorMessage(err)
+    }));
+    const actual = await verifyPlatformPac(readbackState.pacUrl, readbackState.previous).catch((err) => ({
+      applied: false,
+      platform: process.platform,
+      error: errorMessage(err)
+    }));
+    const next: StoredState = {
+      ...readbackState,
+      systemResolver: resolver.mode !== 'off',
+      systemResolverMode: resolver.mode,
+      resolverDomains: normalizeDomains(readbackState.resolverDomains),
+      resolverPort: normalizePort(readbackState.resolverPort),
+      resolverApplied: resolver.applied,
+      resolverError: resolver.error || null,
+      pending: false,
+      updatedAt: new Date().toISOString()
+    };
+    delete next.pending;
+    delete next.externalTransactionToken;
+    delete next.externalTransactionPhase;
+    writeState(statePath, next);
+    if (darwinExternalApplyTransaction?.token === token) {
+      darwinExternalApplyTransaction = null;
+    }
+    return publicState(next, {
+      applied: actual.applied === true && resolver.applied === true,
+      reason,
+      verified: true,
+      externalApply: true,
+      transactionToken: null,
+      actual: {
+        pac: actual,
+        resolver
+      }
+    });
+  }
+
   return {
-    async apply(policy) {
+    async apply(policy, applyOptions = {}) {
       if (!isSupportedPlatform()) return unsupportedStatus();
+      if (externalApplyTransactionPending()) return externalApplyConflictStatus('apply');
       const gateWasHeld = Boolean(windowsOwnershipGateLease);
       const localServerBeforePrepare = localPacServer;
       const localPortBeforePrepare = localPacPort;
@@ -895,7 +1471,8 @@ export function createElectronLauncherSystemDomainProxy(
           previous,
           existing,
           log,
-          windowsApplySnapshot
+          windowsApplySnapshot,
+          applyOptions
         );
         next.systemResolver = resolver.mode !== 'off';
         next.systemResolverMode = resolver.mode;
@@ -936,87 +1513,17 @@ export function createElectronLauncherSystemDomainProxy(
       }
     },
 
-    async darwinPrepareApply(policy) {
-      if (!isSupportedPlatform()) return unsupportedStatus();
-      if (process.platform !== 'darwin') return unsupportedStatus({ platform: process.platform });
-      const prepared = await prepareApplyState(policy);
-      if (!prepared) {
-        await closeLocalPacServer();
-        return this.disable('domain-proxy-disabled');
-      }
-      const shell = await darwinPlatformAndSystemApplyShell(
-        prepared.pac.pacUrl,
-        prepared.previous,
-        prepared.existing,
-        prepared.resolverPlan
-      );
-      if (!shell) {
-        return publicState(prepared.next, {
-          changed: prepared.changed,
-          pending: true,
-          externalApply: false,
-          darwinApplyShell: null,
-          skipped: true,
-          reason: 'darwin-apply-shell-unavailable'
-        });
-      }
-      return publicState(prepared.next, {
-        changed: prepared.changed,
-        pending: true,
-        externalApply: true,
-        darwinApplyShell: shell
-      });
-    },
-
-    async completeExternalApply(reason = 'external') {
-      const existing = readState(statePath);
-      if (!existing?.applied || existing.platform !== process.platform) {
-        return {
-          supported: true,
-          applied: false,
-          platform: process.platform,
-          reason,
-          skipped: true
-        };
-      }
-      const resolver = await verifySystemResolvers(existing).catch((err) => ({
-        applied: false,
-        platform: process.platform,
-        mode: storedSystemResolverMode(existing),
-        domains: [],
-        error: errorMessage(err)
-      }));
-      const actual = await verifyPlatformPac(existing.pacUrl, existing.previous).catch((err) => ({
-        applied: false,
-        platform: process.platform,
-        error: errorMessage(err)
-      }));
-      const next: StoredState = {
-        ...existing,
-        systemResolver: resolver.mode !== 'off',
-        systemResolverMode: resolver.mode,
-        resolverDomains: normalizeDomains(existing.resolverDomains),
-        resolverPort: normalizePort(existing.resolverPort),
-        resolverApplied: resolver.applied,
-        resolverError: resolver.error || null,
-        pending: false,
-        updatedAt: new Date().toISOString()
-      };
-      delete next.pending;
-      writeState(statePath, next);
-      return publicState(next, {
-        reason,
-        verified: true,
-        externalApply: true,
-        actual: {
-          pac: actual,
-          resolver
-        }
-      });
-    },
+    prepareExternalApply: prepareExternalApplyTransaction,
+    abortExternalApply: abortExternalApplyTransaction,
+    markExternalApplyHandoff: markExternalApplyHandoffTransaction,
+    // Compatibility alias for existing Darwin callers. New callers must keep
+    // the returned transactionToken and pass it to abort/complete.
+    darwinPrepareApply: prepareExternalApplyTransaction,
+    completeExternalApply: completeExternalApplyTransaction,
 
     async disable(reason = 'manual', disableOptions = {}) {
       if (!isSupportedPlatform()) return unsupportedStatus({ reason });
+      if (externalApplyTransactionPending()) return externalApplyConflictStatus(reason);
       const existing = readState(statePath);
       if (!existing?.applied || existing.platform !== process.platform) {
         await closeLocalPacServer();
@@ -1127,6 +1634,7 @@ export function createElectronLauncherSystemDomainProxy(
 
     async restoreStale(reason = 'startup') {
       if (!isSupportedPlatform()) return unsupportedStatus({ reason });
+      if (externalApplyTransactionPending()) return externalApplyConflictStatus(reason);
       acquireWindowsOwnershipGate();
       const existing = readState(statePath);
       if (existing?.applied === true && existing.platform === process.platform) {
@@ -1209,6 +1717,7 @@ export function createElectronLauncherSystemDomainProxy(
 
     darwinRestoreScript() {
       if (process.platform !== 'darwin') return null;
+      if (externalApplyTransactionPending()) return null;
       const existing = readState(statePath);
       if (existing?.applied === true && existing.platform === process.platform) {
         if (requiresManagedRelease(existing, localPacConfig)) return null;
@@ -1218,6 +1727,7 @@ export function createElectronLauncherSystemDomainProxy(
     },
 
     async completeExternalRestore(reason = 'external') {
+      if (externalApplyTransactionPending()) return externalApplyConflictStatus(reason);
       const existing = readState(statePath);
       if (existing?.applied === true && existing.platform === process.platform) {
         await releaseSharedOwnerForState(existing).catch((err) => {
@@ -1250,35 +1760,131 @@ export function createElectronLauncherSystemDomainProxy(
     },
 
     async statusVerified() {
-      if (!isSupportedPlatform()) return unsupportedStatus();
-      const state = readState(statePath);
-      if (!state?.applied || state.platform !== process.platform) {
-        return {
-          supported: true,
-          applied: false,
-          verified: true,
-          platform: process.platform
-        };
+      return currentVerifiedStatus();
+    },
+
+    async resumeDarwinLocalEdge(policy, reason = 'app-startup') {
+      if (process.platform !== 'darwin') {
+        return unsupportedStatus({ reason, platform: process.platform });
       }
+      const existing = readState(statePath);
+      if (
+        !existing?.applied
+        || existing.platform !== process.platform
+        || existing.pending === true
+        || existing.sharedLocalPac === true
+        || !isLocalPacUrl(existing.pacUrl)
+      ) {
+        return existing?.applied
+          ? publicState(existing, {
+              applied: false,
+              verified: false,
+              reason,
+              skipped: true,
+              skipReason: existing.pending === true
+                ? 'darwin-local-edge-state-pending'
+                : existing.sharedLocalPac === true
+                  ? 'darwin-shared-local-edge-not-resumable'
+                : 'darwin-local-edge-state-not-resumable',
+              localEdgeResumed: false
+            })
+          : {
+              supported: true,
+              applied: false,
+              verified: false,
+              platform: process.platform,
+              reason,
+              skipped: true,
+              skipReason: 'darwin-local-edge-state-missing',
+              localEdgeResumed: false
+            };
+      }
+
+      const before = {
+        server: localPacServer,
+        dnsServer: localDnsServer,
+        port: localPacPort,
+        key: localPacKey,
+        config: localPacConfig
+      };
+      let pac: ResolvedPacSource | null = null;
       try {
-        const pacVerification = await verifyPlatformPac(state.pacUrl, state.previous);
-        const resolverVerification = await verifySystemResolvers(state);
-        const localDnsVerification = await verifyLocalDnsRelay(state);
-        return publicState(state, {
-          applied: pacVerification.applied && resolverVerification.applied && localDnsVerification.applied,
-          verified: true,
-          actual: {
-            pac: pacVerification,
-            resolver: resolverVerification,
-            localDns: localDnsVerification
-          },
-          resolverApplied: resolverVerification.applied && localDnsVerification.applied,
-          resolverError: resolverVerification.error || localDnsVerification.error || null
+        const [pacVerification, resolverVerification] = await Promise.all([
+          verifyPlatformPac(existing.pacUrl, existing.previous),
+          verifySystemResolvers(existing)
+        ]);
+        if (pacVerification.applied !== true || resolverVerification.applied !== true) {
+          return publicState(existing, {
+            applied: false,
+            verified: true,
+            reason,
+            skipped: true,
+            skipReason: 'darwin-live-system-state-mismatch',
+            localEdgeResumed: false,
+            actual: {
+              pac: pacVerification,
+              resolver: resolverVerification
+            }
+          });
+        }
+        const candidate = await resolvePacSource(policy, existing.previous, {
+          allowShared: false,
+          startLocalEdge: false
         });
+        if (!candidate || !darwinLocalEdgeMatchesStoredState(candidate, existing)) {
+          return publicState(existing, {
+            applied: false,
+            verified: false,
+            reason,
+            skipped: true,
+            skipReason: 'darwin-local-edge-policy-mismatch',
+            localEdgeResumed: false
+          });
+        }
+        pac = await resolvePacSource(policy, existing.previous, { allowShared: false });
+        if (!pac || !darwinLocalEdgeMatchesStoredState(pac, existing)) {
+          await rollbackDarwinLocalEdgeResume(before, pac);
+          return publicState(existing, {
+            applied: false,
+            verified: false,
+            reason,
+            skipped: true,
+            skipReason: 'darwin-local-edge-policy-mismatch',
+            localEdgeResumed: false
+          });
+        }
+        const verified = await currentVerifiedStatus();
+        if (verified.applied !== true || verified.verified !== true || verified.resolverApplied !== true) {
+          await rollbackDarwinLocalEdgeResume(before, pac);
+          return {
+            ...verified,
+            reason,
+            skipped: true,
+            skipReason: 'darwin-live-system-state-mismatch',
+            localEdgeResumed: false
+          };
+        }
+        return {
+          ...verified,
+          reason,
+          changed: false,
+          skipped: true,
+          skipReason: 'darwin-local-edge-resumed',
+          localEdgeResumed: true
+        };
       } catch (err) {
-        return publicState(state, {
+        try {
+          await rollbackDarwinLocalEdgeResume(before, pac);
+        } catch (rollbackErr) {
+          log.warn('[electron-launcher] failed to roll back macOS local edge resume', rollbackErr);
+        }
+        return publicState(existing, {
           applied: false,
           verified: false,
+          reason,
+          skipped: true,
+          skipReason: 'darwin-local-edge-resume-failed',
+          localEdgeResumed: false,
           error: errorMessage(err)
         });
       }
@@ -1547,6 +2153,25 @@ async function platformStatesForApply(existing: StoredState | null): Promise<{
   previous: unknown;
   windowsApplySnapshot: Record<string, RegistryValue> | null;
 }> {
+  if (process.platform === 'darwin') {
+    if (!existing?.applied || existing.platform !== process.platform) {
+      return {
+        previous: await capturePlatformState(),
+        windowsApplySnapshot: null
+      };
+    }
+    let current: unknown = null;
+    try {
+      current = await capturePlatformState();
+    } catch {
+      // A transient networksetup read failure must not discard the original
+      // restore snapshot. Live apply/verification filters stale services.
+    }
+    return {
+      previous: mergeDarwinPreviousState(existing.previous, current, existing.pacUrl),
+      windowsApplySnapshot: null
+    };
+  }
   if (process.platform !== 'win32') {
     return {
       previous: !existing?.applied || existing.platform !== process.platform
@@ -1604,11 +2229,19 @@ async function applyPlatformPacAndSystemResolvers(
   previous: unknown,
   existing: StoredState | null,
   log: Pick<Console, 'warn'>,
-  windowsApplySnapshot: Record<string, RegistryValue> | null
+  windowsApplySnapshot: Record<string, RegistryValue> | null,
+  applyOptions: ElectronLauncherSystemDomainProxyApplyOptions = {}
 ): Promise<SystemResolverApplyResult> {
   const plan = systemResolverPlan(pac);
   if (process.platform === 'darwin' && plan.mode === 'dynamic' && plan.port && plan.domains.length > 0) {
-    return applyDarwinPacAndDynamicResolvers(pac.pacUrl, previous, existing, { ...plan, port: plan.port }, log);
+    return applyDarwinPacAndDynamicResolvers(
+      pac.pacUrl,
+      previous,
+      existing,
+      { ...plan, port: plan.port },
+      log,
+      applyOptions.forceDarwinRefresh === true
+    );
   }
   await applyPlatformPac(pac.pacUrl, previous, windowsApplySnapshot);
   return applySystemResolversWithPlan(pac, existing, plan, log);
@@ -1616,7 +2249,7 @@ async function applyPlatformPacAndSystemResolvers(
 
 async function restorePlatformState(previous: unknown, pacUrl: string): Promise<void> {
   if (process.platform === 'darwin') {
-    await restoreDarwinState(previous);
+    await restoreDarwinState(previous, pacUrl);
     return;
   }
   if (process.platform === 'win32') {
@@ -1765,9 +2398,14 @@ async function verifyLocalDnsRelay(state: StoredState): Promise<{
   if (process.platform !== 'darwin' || mode === 'off' || !port) {
     return { applied: true, skipped: true };
   }
-  const route = normalizeReverseProxyRoutes(state.reverseProxyRoutes)
-    .find((item) => item.enabled !== false && isIP(item.dnsTarget || '') === 4);
-  const host = route?.host || normalizeDomains(state.resolverDomains)[0] || normalizeDomains(state.domains)[0];
+  const routes = normalizeReverseProxyRoutes(state.reverseProxyRoutes)
+    .filter((item) => item.enabled !== false && isIP(item.dnsTarget || '') === 4);
+  const route = routes.find((item) => /(^|\.)h2i\./i.test(item.host)) || routes[0];
+  const resolverDomains = normalizeDomains(state.resolverDomains);
+  const exactH2iDomain = resolverDomains
+    .filter((domain) => /(^|\.)h2i\./i.test(domain))
+    .sort((left, right) => right.length - left.length)[0];
+  const host = route?.host || exactH2iDomain || resolverDomains[0] || normalizeDomains(state.domains)[0];
   if (!host) return { applied: true, skipped: true };
   const server = `127.0.0.1:${port}`;
   try {
@@ -1844,15 +2482,10 @@ function systemResolverPlan(pac: ResolvedPacSource): { mode: ElectronLauncherSys
 }
 
 function darwinResolverDomains(domains: unknown): string[] {
-  const roots: string[] = [];
-  const candidates = normalizeDomains(domains)
-    .filter(isDarwinResolverDomain)
-    .sort((left, right) => left.length - right.length || left.localeCompare(right));
-  for (const domain of candidates) {
-    if (roots.some((root) => domain === root || domain.endsWith(`.${root}`))) continue;
-    roots.push(domain);
-  }
-  return roots;
+  // Keep exact child zones as well as parent roots. A more-specific V2 zone
+  // must be able to outrank a still-active V1 HDO /etc/resolver parent without
+  // deleting or rewriting that foreign resolver.
+  return currentDarwinResolverDomains(normalizeDomains(domains));
 }
 
 async function applyDarwinDynamicResolvers(domains: string[], port: number): Promise<void> {
@@ -1882,9 +2515,10 @@ async function applyDarwinPacAndDynamicResolvers(
   previous: unknown,
   existing: StoredState | null,
   plan: { mode: ElectronLauncherSystemResolverMode; domains: string[]; port: number },
-  log: Pick<Console, 'warn'>
+  log: Pick<Console, 'warn'>,
+  forceRefresh = false
 ): Promise<SystemResolverApplyResult> {
-  if (existing?.applied && existing.pacUrl === pacUrl && systemResolverPlanMatches(existing, plan)) {
+  if (!forceRefresh && existing?.applied && existing.pacUrl === pacUrl && systemResolverPlanMatches(existing, plan)) {
     const pacVerification = await verifyDarwinPac(pacUrl, previous).catch(() => null);
     const resolverVerification = await verifyDarwinDynamicResolvers(plan.domains, plan.port).catch(() => null);
     if (pacVerification?.applied === true && resolverVerification?.applied === true) {
@@ -1910,13 +2544,19 @@ async function applyDarwinPacAndDynamicResolvers(
   }
   try {
     await runDarwinPrivilegedShell(shell);
-    const verification = await verifyDarwinDynamicResolvers(plan.domains, plan.port);
+    const [pacVerification, resolverVerification] = await Promise.all([
+      verifyDarwinPac(pacUrl, previous),
+      verifyDarwinDynamicResolvers(plan.domains, plan.port)
+    ]);
+    const applied = pacVerification.applied && resolverVerification.applied;
     return {
       mode: plan.mode,
       domains: plan.domains,
       port: plan.port,
-      applied: verification.applied,
-      error: verification.error || null
+      applied,
+      error: applied
+        ? null
+        : resolverVerification.error || 'macOS PAC was not applied to every current network service'
     };
   } catch (err) {
     const message = darwinAuthorizationErrorMessage(err);
@@ -1940,17 +2580,18 @@ async function darwinPlatformAndSystemApplyShell(
   if (process.platform !== 'darwin' || plan.mode !== 'dynamic' || !plan.port) return null;
   const resolverScript = darwinDynamicResolverScript(plan.domains, plan.port);
   if (!resolverScript) return null;
-  let services = darwinServiceNames(previous);
-  if (services.length === 0) services = await listDarwinNetworkServices();
+  const services = await liveDarwinNetworkServices(previous);
   if (services.length === 0) throw new Error('macOS network services not found');
   return [
     'set -e',
     ...darwinStaleResolverFileRemovalCommands(existing, plan),
     ...services.flatMap((name) => [
-      ['/usr/sbin/networksetup', '-setautoproxyurl', name, pacUrl].map(shellQuote).join(' '),
-      ['/usr/sbin/networksetup', '-setautoproxystate', name, 'on'].map(shellQuote).join(' ')
+      darwinGuardedNetworksetupMutation(name, ['-setautoproxyurl', name, pacUrl]),
+      darwinGuardedNetworksetupMutation(name, ['-setautoproxystate', name, 'on'])
     ]),
-    `/usr/bin/printf %s ${shellQuote(resolverScript)} | /usr/sbin/scutil`
+    `/usr/bin/printf %s ${shellQuote(resolverScript)} | /usr/sbin/scutil`,
+    '/usr/bin/dscacheutil -flushcache >/dev/null 2>&1 || true',
+    '/usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true'
   ].join('\n');
 }
 
@@ -1959,17 +2600,19 @@ async function restoreDarwinPlatformAndSystemState(state: StoredState, log: Pick
     await runDarwinPrivilegedShell(darwinPlatformAndSystemRestoreShell(state));
   } catch (err) {
     log.warn('[electron-launcher] failed to restore macOS PAC and split DNS in one transaction', err);
-    await restoreDarwinState(state.previous).catch((restoreErr) => {
-      log.warn('[electron-launcher] failed to restore macOS PAC after combined restore failure', restoreErr);
-    });
-    await restoreSystemResolvers(state, log);
+    // Keep durable ownership state and the local edge intact for an explicit
+    // retry. A failed/canceled combined restore must never launch a second or
+    // third administrator prompt in the same user action.
+    throw err;
   }
 }
 
 function darwinPlatformAndSystemRestoreShell(state: StoredState): string {
   return [
     'set -e',
-    ...darwinAutoProxyRestoreCommands(state.previous),
+    ...darwinAutoProxyRestoreCommands(state.previous, state.pacUrl),
+    ...darwinOwnedPacCleanupCommands(state.previous),
+    darwinLiveOwnedPacCleanupCommand(state.pacUrl),
     darwinDynamicResolverRemovalCommand(),
     ...darwinOwnedResolverFileRemovalCommands(normalizeDomains(state.resolverDomains))
   ].join('\n');
@@ -1983,18 +2626,76 @@ function darwinOrphanSystemResolverRestoreShell(): string {
   ].join('\n');
 }
 
-function darwinAutoProxyRestoreCommands(previous: unknown): string[] {
+function darwinAutoProxyRestoreCommands(previous: unknown, ownedPacUrl: string): string[] {
+  if (!ownedPacUrl) return [];
   return previousServices(previous)
     .filter((service) => service.name)
     .flatMap((service) => {
       const name = String(service.name);
-      const commands: string[] = [];
+      const mutations: string[] = [];
       if (service.url) {
-        commands.push(['/usr/sbin/networksetup', '-setautoproxyurl', name, String(service.url)].map(shellQuote).join(' ') + ' || true');
+        mutations.push(darwinGuardedNetworksetupMutation(
+          name,
+          ['-setautoproxyurl', name, String(service.url)]
+        ));
       }
-      commands.push(['/usr/sbin/networksetup', '-setautoproxystate', name, service.enabled === true ? 'on' : 'off'].map(shellQuote).join(' ') + ' || true');
-      return commands;
+      mutations.push(darwinGuardedNetworksetupMutation(
+        name,
+        ['-setautoproxystate', name, service.enabled === true ? 'on' : 'off']
+      ));
+      const read = ['/usr/sbin/networksetup', '-getautoproxyurl', name].map(shellQuote).join(' ');
+      return [
+        `if ! current_proxy=$(${read} 2>/dev/null); then`,
+        ...darwinNetworkServiceReadFailureGuard(name).split('\n').map((line) => `  ${line}`),
+        `elif /usr/bin/printf '%s\\n' "$current_proxy" | /usr/bin/grep -Fqx ${shellQuote(`URL: ${ownedPacUrl}`)} &&`,
+        `  /usr/bin/printf '%s\\n' "$current_proxy" | /usr/bin/grep -Fqx 'Enabled: Yes'; then`,
+        ...mutations.flatMap((command) => command.split('\n').map((line) => `  ${line}`)),
+        'fi'
+      ];
     });
+}
+
+function darwinOwnedPacCleanupCommands(previous: unknown): string[] {
+  return currentDarwinCleanupOnlyServices(previous).map(({ name, pacUrl }) => {
+    const read = ['/usr/sbin/networksetup', '-getautoproxyurl', name]
+      .map(shellQuote)
+      .join(' ');
+    const disable = ['/usr/sbin/networksetup', '-setautoproxystate', name, 'off']
+      .map(shellQuote)
+      .join(' ');
+    return `if ${read} 2>/dev/null | /usr/bin/grep -Fqx ${shellQuote(`URL: ${pacUrl}`)}; then ${disable} || true; fi`;
+  });
+}
+
+function darwinLiveOwnedPacCleanupCommand(pacUrl: string): string {
+  if (!pacUrl) return ':';
+  return [
+    'network_services=$(/usr/sbin/networksetup -listallnetworkservices) || exit 1',
+    '/usr/bin/printf \'%s\\n\' "$network_services" | while IFS= read -r service; do',
+    '  case "$service" in ""|"An asterisk"*) continue ;; esac',
+    '  service=${service#\\*}',
+    `  if /usr/sbin/networksetup -getautoproxyurl "$service" 2>/dev/null | /usr/bin/grep -Fqx ${shellQuote(`URL: ${pacUrl}`)}; then`,
+    '    /usr/sbin/networksetup -setautoproxystate "$service" off || true',
+    '  fi',
+    'done',
+    'network_services=$(/usr/sbin/networksetup -listallnetworkservices) || exit 1',
+    'if /usr/bin/printf \'%s\\n\' "$network_services" | while IFS= read -r service; do',
+    '  case "$service" in ""|"An asterisk"*) continue ;; esac',
+    '  service=${service#\\*}',
+    '  if ! current_proxy=$(/usr/sbin/networksetup -getautoproxyurl "$service" 2>/dev/null); then',
+    '    if ! refreshed_services=$(/usr/sbin/networksetup -listallnetworkservices 2>/dev/null); then',
+    '      /usr/bin/printf \'inventory-read-failed:%s\\n\' "$service"',
+    '    elif /usr/bin/printf \'%s\\n\' "$refreshed_services" | /usr/bin/sed \'s/^\\*//\' | /usr/bin/grep -Fqx "$service"; then',
+    '      /usr/bin/printf \'service-read-failed:%s\\n\' "$service"',
+    '    fi',
+    '    continue',
+    '  fi',
+    `  if /usr/bin/printf '%s\\n' "$current_proxy" | /usr/bin/grep -Fqx ${shellQuote(`URL: ${pacUrl}`)} &&`,
+    `    /usr/bin/printf '%s\\n' "$current_proxy" | /usr/bin/grep -Fqx 'Enabled: Yes'; then`,
+    `    /usr/bin/printf '%s\\n' "$service"`,
+    '  fi',
+    'done | /usr/bin/grep -q .; then exit 1; fi'
+  ].join('\n');
 }
 
 function darwinDynamicResolverRemovalCommand(): string {
@@ -2262,8 +2963,7 @@ async function captureDarwinState(): Promise<{ services: unknown[] }> {
 }
 
 async function applyDarwinPac(pacUrl: string, previous: unknown): Promise<void> {
-  let services = darwinServiceNames(previous);
-  if (services.length === 0) services = await listDarwinNetworkServices();
+  const services = await liveDarwinNetworkServices(previous);
   if (services.length === 0) throw new Error('macOS network services not found');
   const commands = [];
   for (const name of services) {
@@ -2274,8 +2974,17 @@ async function applyDarwinPac(pacUrl: string, previous: unknown): Promise<void> 
 }
 
 async function verifyDarwinPac(pacUrl: string, previous: unknown): Promise<{ applied: boolean; platform: NodeJS.Platform; pacUrl: string; services: unknown[] }> {
-  let services = darwinServiceNames(previous);
-  if (services.length === 0) services = await listDarwinNetworkServices();
+  const baseline = darwinManagedServiceBaseline(previous);
+  let listed: string[] | null = null;
+  let inventoryError: string | null = null;
+  try {
+    listed = await listDarwinNetworkServices();
+  } catch (err) {
+    inventoryError = errorMessage(err);
+  }
+  const services = listed
+    ? intersectDarwinManagedServiceNames(baseline, listed)
+    : await liveDarwinNetworkServices(previous);
   const rows = [];
   for (const name of services) {
     try {
@@ -2288,36 +2997,47 @@ async function verifyDarwinPac(pacUrl: string, previous: unknown): Promise<{ app
         applied: parsed.enabled === true && parsed.url === pacUrl
       });
     } catch (err) {
-      rows.push({
-        name,
-        applied: false,
-        error: errorMessage(err)
-      });
+      const stillExists = await darwinNetworkServiceExists(name);
+      rows.push(stillExists === false
+        ? { name, applied: true, ignored: true, error: errorMessage(err) }
+        : { name, applied: false, error: errorMessage(err) });
     }
   }
+  if (listed) {
+    const managed = new Set(baseline);
+    for (const name of listed) {
+      if (!managed.has(name)) {
+        rows.push({
+          name,
+          applied: false,
+          unmanaged: true,
+          error: 'current macOS network service has no pre-MX restore snapshot'
+        });
+      }
+    }
+  } else {
+    rows.push({
+      name: null,
+      applied: false,
+      inventoryUnavailable: true,
+      error: inventoryError || 'macOS network service inventory unavailable'
+    });
+  }
   return {
-    applied: rows.length > 0 && rows.every((row) => row.applied === true),
+    applied: darwinPacVerificationRowsReady(rows),
     platform: process.platform,
     pacUrl,
     services: rows
   };
 }
 
-async function restoreDarwinState(previous: unknown): Promise<void> {
-  const services = previousServices(previous);
-  const commands = [];
-  for (const service of services) {
-    if (!service.name) continue;
-    if (service.url) {
-      commands.push(['-setautoproxyurl', service.name, service.url]);
-    }
-    commands.push([
-      '-setautoproxystate',
-      service.name,
-      service.enabled === true ? 'on' : 'off'
-    ]);
-  }
-  await runDarwinNetworksetupSetBatch(commands);
+async function restoreDarwinState(previous: unknown, ownedPacUrl: string): Promise<void> {
+  await runDarwinPrivilegedShell([
+    'set -e',
+    ...darwinAutoProxyRestoreCommands(previous, ownedPacUrl),
+    ...darwinOwnedPacCleanupCommands(previous),
+    darwinLiveOwnedPacCleanupCommand(ownedPacUrl)
+  ].join('\n'));
 }
 
 async function listDarwinNetworkServices(): Promise<string[]> {
@@ -2326,6 +3046,44 @@ async function listDarwinNetworkServices(): Promise<string[]> {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('An asterisk') && !line.startsWith('*'));
+}
+
+async function liveDarwinNetworkServices(previous: unknown): Promise<string[]> {
+  const baseline = darwinManagedServiceBaseline(previous);
+  if (baseline.length === 0) return [];
+  try {
+    const listed = await listDarwinNetworkServices();
+    return intersectDarwinManagedServiceNames(baseline, listed);
+  } catch {
+    // Fall back to the durable restore inventory, but only keep services that
+    // networksetup can still read. Deleted test/VPN services must not poison
+    // the privileged PAC + resolver transaction or its readiness readback.
+  }
+  const live = [];
+  for (const name of baseline) {
+    try {
+      await execFileText('/usr/sbin/networksetup', ['-getautoproxyurl', name]);
+      live.push(name);
+    } catch {
+      // The service was removed after the original restore snapshot.
+    }
+  }
+  return live;
+}
+
+function darwinManagedServiceBaseline(previous: unknown): string[] {
+  return uniqueList([
+    ...darwinServiceNames(previous),
+    ...currentDarwinCleanupOnlyServices(previous).map((service) => service.name)
+  ]);
+}
+
+async function darwinNetworkServiceExists(name: string): Promise<boolean | null> {
+  try {
+    return (await listDarwinNetworkServices()).includes(name);
+  } catch {
+    return null;
+  }
 }
 
 function parseDarwinAutoProxy(stdout: string): { url: string | null; enabled: boolean } {
@@ -2367,13 +3125,47 @@ async function runDarwinNetworksetupSetBatch(commands: string[][]): Promise<void
   } catch {
     const command = [
       'set -e',
-      ...commands.map((args) => ['/usr/sbin/networksetup', ...args].map(shellQuote).join(' '))
+      ...commands.map((args) => {
+        const service = args[1];
+        const mutation = ['/usr/sbin/networksetup', ...args].map(shellQuote).join(' ');
+        if (!service) return mutation;
+        return darwinGuardedNetworksetupMutation(service, args);
+      })
     ].join('\n');
     await execFileText('/usr/bin/osascript', [
       '-e',
       `do shell script ${JSON.stringify(command)} with administrator privileges`
     ]);
   }
+}
+
+function darwinGuardedNetworksetupMutation(service: string, args: string[]): string {
+  const probe = ['/usr/sbin/networksetup', '-getautoproxyurl', service]
+    .map(shellQuote)
+    .join(' ');
+  const mutation = ['/usr/sbin/networksetup', ...args]
+    .map(shellQuote)
+    .join(' ');
+  return [
+    `if ${probe} >/dev/null 2>&1; then`,
+    `  if ! ${mutation}; then`,
+    `    if ${probe} >/dev/null 2>&1; then`,
+    '      exit 1',
+    '    else',
+    ...darwinNetworkServiceReadFailureGuard(service).split('\n').map((line) => `      ${line}`),
+    '    fi',
+    '  fi',
+    'else',
+    ...darwinNetworkServiceReadFailureGuard(service).split('\n').map((line) => `  ${line}`),
+    'fi'
+  ].join('\n');
+}
+
+function darwinNetworkServiceReadFailureGuard(service: string): string {
+  return [
+    'refreshed_services=$(/usr/sbin/networksetup -listallnetworkservices) || exit 1',
+    `if /usr/bin/printf '%s\\n' "$refreshed_services" | /usr/bin/sed 's/^\\*//' | /usr/bin/grep -Fqx ${shellQuote(service)}; then exit 1; fi`
+  ].join('\n');
 }
 
 async function captureWindowsState(): Promise<Record<string, RegistryValue>> {
@@ -3488,10 +4280,14 @@ function prefixToIpv4Mask(prefix: number): string {
 
 function requiresManagedRelease(state: StoredState, config: LocalPacServerConfig | null): boolean {
   const ownerId = stateOwnershipOwnerId(state);
-  if (!ownerId) return false;
-  if (state.sharedLocalPac === true) return true;
   const claims = normalizeOwnershipClaims(config?.ownershipClaims);
-  return claims.some((claim) => normalizeOwnerId(claim.ownerId) !== ownerId);
+  const registeredOwnerIds = arrayValue(state.ownershipRegistry?.owners, [])
+    .map((owner) => normalizeOwnerId((owner as { ownerId?: unknown }).ownerId))
+    .filter((candidate): candidate is string => Boolean(candidate));
+  if (!ownerId) return claims.length > 0 || registeredOwnerIds.length > 0;
+  if (state.sharedLocalPac === true) return true;
+  return claims.some((claim) => normalizeOwnerId(claim.ownerId) !== ownerId)
+    || registeredOwnerIds.some((candidate) => candidate !== ownerId);
 }
 
 function stateOwnershipOwnerId(state: StoredState): string | null {
@@ -4173,6 +4969,80 @@ function systemDomainProxyStateChanged(existing: StoredState | null, next: Store
     || JSON.stringify(normalizeDomains(existing.resolverDomains)) !== JSON.stringify(normalizeDomains(next.resolverDomains));
 }
 
+function isLocalPacUrl(value: unknown): boolean {
+  const text = stringValue(value);
+  if (!text) return false;
+  try {
+    const url = new URL(text);
+    return url.protocol === 'http:'
+      && isLoopbackProxyHost(url.hostname)
+      && url.pathname === PAC_PATH
+      && Boolean(normalizePort(Number(url.port)));
+  } catch {
+    return false;
+  }
+}
+
+function darwinLocalEdgeMatchesStoredState(pac: ResolvedPacSource, state: StoredState): boolean {
+  if (!pac.usesLocalPac || !state.applied || state.platform !== 'darwin') return false;
+  return pac.pacUrl === state.pacUrl
+    && pac.pacPort === normalizePort(state.pacPort)
+    && (pac.proxy?.address || null) === (state.proxy || null)
+    && pac.matchMode === state.matchMode
+    && (pac.fallbackProxy?.directive || null) === (state.fallbackProxy || null)
+    && (pac.fallbackPacUrl || null) === (state.fallbackPacUrl || null)
+    && pac.dnsFallbackTarget === normalizeDnsTarget(state.dnsFallbackTarget)
+    && normalizedStringSetEqual(pac.domains, state.domains)
+    && normalizedStringSetEqual(pac.dnsServers, state.dnsServers, normalizeDnsServers)
+    && canonicalReverseProxyRoutes(pac.reverseProxyRoutes) === canonicalReverseProxyRoutes(state.reverseProxyRoutes)
+    && canonicalOwnershipClaim(pac.ownershipClaim) === canonicalOwnershipClaim(state.ownershipClaim)
+    && systemResolverPlanMatches(state, systemResolverPlan(pac));
+}
+
+function normalizedStringSetEqual(
+  left: unknown,
+  right: unknown,
+  normalize: (value: unknown) => string[] = normalizeDomains
+): boolean {
+  const a = [...normalize(left)].sort();
+  const b = [...normalize(right)].sort();
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function canonicalReverseProxyRoutes(value: unknown): string {
+  return JSON.stringify(normalizeReverseProxyRoutes(value)
+    .map((route) => ({
+      routeId: route.routeId || null,
+      host: route.host,
+      dnsTarget: route.dnsTarget || null,
+      targetUrl: route.targetUrl || null,
+      tlsMode: route.tlsMode || null,
+      authRequired: route.authRequired === true,
+      enabled: route.enabled !== false
+    }))
+    .sort((left, right) => left.host.localeCompare(right.host)));
+}
+
+function canonicalOwnershipClaim(value: unknown): string {
+  const claim = normalizeOwnershipClaim(value);
+  if (!claim) return 'null';
+  return JSON.stringify({
+    ownerId: claim.ownerId,
+    productId: claim.productId || null,
+    instanceId: claim.instanceId || null,
+    displayName: claim.displayName || null,
+    state: claim.state || null,
+    priority: claim.priority ?? null,
+    leaseIp: claim.leaseIp || null,
+    gatewayIp: claim.gatewayIp || null,
+    dnsHosts: [...(claim.dnsHosts || [])].sort(),
+    dnsZones: [...(claim.dnsZones || [])].sort(),
+    routeCidrs: [...(claim.routeCidrs || [])].sort(),
+    reverseProxyRoutes: canonicalReverseProxyRoutes(claim.reverseProxyRoutes),
+    metadata: claim.metadata || null
+  });
+}
+
 function publicState(state: StoredState, extra: Partial<ElectronLauncherSystemDomainProxyStatus> = {}): ElectronLauncherSystemDomainProxyStatus {
   return {
     supported: true,
@@ -4199,6 +5069,8 @@ function publicState(state: StoredState, extra: Partial<ElectronLauncherSystemDo
       ? buildElectronLauncherNetworkOwnershipRegistry([state.ownershipClaim])
       : null),
     pending: state.pending === true || state.continuationNotifyPending === true,
+    transactionToken: state.externalTransactionToken || null,
+    externalApplyPhase: currentDarwinExternalApplyPhase(state.externalTransactionPhase),
     updatedAt: state.updatedAt || null,
     ...extra
   };

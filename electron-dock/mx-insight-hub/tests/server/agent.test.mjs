@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { getEventListeners } from 'node:events'
 import test from 'node:test'
 import {
   EmbeddingRouter,
@@ -112,6 +113,78 @@ test('a down primary falls over to the next provider', async () => {
   assert.match(result.attempts[0].error, /503/)
 })
 
+test('an exact provider probe never succeeds through a fallback provider', async () => {
+  const seen = []
+  const router = new ProviderRouter({
+    providers: providers('primary', 'secondary'),
+    logger: quiet,
+    fetchImpl: async (url) => {
+      seen.push(new URL(url).hostname)
+      if (url.includes('primary')) return jsonResponse({ error: 'unavailable' }, 503)
+      return jsonResponse(chatReply('fallback must not be used'))
+    },
+  })
+
+  await assert.rejects(
+    () => router.callProvider('primary', '/chat/completions', (provider) => ({ model: provider.model })),
+    (error) => {
+      assert.ok(error instanceof NoProviderAvailableError)
+      assert.deepEqual(error.attempts, [{ provider: 'primary', error: 'HTTP 503' }])
+      return true
+    },
+  )
+  assert.deepEqual(seen, ['primary.invalid'])
+})
+
+test('a 2xx chat payload without message content fails over before closing the circuit', async () => {
+  const seen = []
+  const chat = new ProviderRouter({
+    providers: providers('primary', 'secondary'),
+    logger: quiet,
+    fetchImpl: async (url) => {
+      seen.push(new URL(url).hostname)
+      return url.includes('primary')
+        ? jsonResponse({ choices: [{}] })
+        : jsonResponse(chatReply('valid fallback'))
+    },
+  })
+  const agent = new HubAgent({
+    chat,
+    embeddings: new EmbeddingRouter({ providers: [], logger: quiet }),
+    logger: quiet,
+  })
+
+  const result = await agent.complete([{ role: 'user', content: 'hello' }])
+
+  assert.equal(result.provider, 'secondary')
+  assert.deepEqual(seen, ['primary.invalid', 'secondary.invalid'])
+  assert.match(result.attempts[0].error, /chat message content/)
+  assert.equal(chat.status()[0].circuit, 'degraded')
+  assert.equal(chat.status()[1].circuit, 'closed')
+})
+
+test('an exact chat probe maps a semantic 2xx failure to a stable 502', async () => {
+  const agent = new HubAgent({
+    chat: new ProviderRouter({
+      providers: providers('broken'),
+      logger: quiet,
+      fetchImpl: async () => jsonResponse({ choices: [{}] }),
+    }),
+    embeddings: new EmbeddingRouter({ providers: [], logger: quiet }),
+    logger: quiet,
+  })
+
+  await assert.rejects(
+    () => agent.testProvider({ kind: 'chat', providerId: 'broken' }),
+    (error) => {
+      assert.ok(error instanceof NoProviderAvailableError)
+      assert.equal(error.status, 502)
+      assert.equal(error.code, 'agent_invalid_response')
+      return true
+    },
+  )
+})
+
 test('a malformed request is not retried across every provider', async () => {
   let calls = 0
   const router = new ProviderRouter({
@@ -148,6 +221,23 @@ test('a timeout counts as a provider failure and fails over', async () => {
   assert.match(result.attempts[0].error, /timed out/)
 })
 
+test('completed provider calls detach the shared worker abort listener', async () => {
+  const router = new ProviderRouter({
+    providers: providers('primary'),
+    logger: quiet,
+    fetchImpl: async () => jsonResponse(chatReply('ok')),
+  })
+  const controller = new AbortController()
+
+  for (let index = 0; index < 20; index += 1) {
+    await router.call('/chat/completions', (provider) => ({ model: provider.model }), {
+      signal: controller.signal,
+    })
+  }
+
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
+})
+
 test('every provider failing raises NoProviderAvailableError with the trail', async () => {
   const router = new ProviderRouter({
     providers: providers('a', 'b'),
@@ -156,7 +246,10 @@ test('every provider failing raises NoProviderAvailableError with the trail', as
   })
   await assert.rejects(
     () => router.call('/chat/completions', (p) => ({ model: p.model })),
-    (error) => error instanceof NoProviderAvailableError && error.attempts.length === 2,
+    (error) => error instanceof NoProviderAvailableError
+      && error.status === 503
+      && error.code === 'agent_providers_unavailable'
+      && error.attempts.length === 2,
   )
 })
 
@@ -312,6 +405,67 @@ test('a provider that returns the wrong dimension count is rejected at the bound
   await assert.rejects(() => router.embed(['hello']), /returned 2 dimensions, expected 4/)
 })
 
+test('an invalid embedding 2xx payload fails over before circuit success is recorded', async () => {
+  const seen = []
+  const shared = {
+    model: 'shared-space', dimensions: 2, apiKeyEnv: null, timeoutMs: 1_000,
+  }
+  const router = new EmbeddingRouter({
+    providers: [
+      { ...shared, id: 'primary', baseUrl: 'https://primary.invalid/v1' },
+      { ...shared, id: 'secondary', baseUrl: 'https://secondary.invalid/v1' },
+    ],
+    logger: quiet,
+    fetchImpl: async (url) => {
+      seen.push(new URL(url).hostname)
+      return url.includes('primary')
+        ? jsonResponse({ data: [{ index: 0, embedding: [1] }] })
+        : jsonResponse({ data: [{ index: 0, embedding: [1, 2] }] })
+    },
+  })
+
+  const result = await router.embed(['hello'])
+
+  assert.equal(result.provider, 'secondary')
+  assert.deepEqual(result.vectors, [[1, 2]])
+  assert.deepEqual(seen, ['primary.invalid', 'secondary.invalid'])
+  assert.equal(router.status()[0].circuit, 'degraded')
+  assert.equal(router.status()[1].circuit, 'closed')
+})
+
+test('embedding validates every finite vector and any returned model identity', async () => {
+  const providerConfig = {
+    id: 'only', baseUrl: 'https://only.invalid/v1', model: 'space-a',
+    dimensions: 2, apiKeyEnv: null, timeoutMs: 1_000,
+  }
+  for (const payload of [
+    {
+      model: 'space-a',
+      data: [
+        { index: 0, embedding: [1, 2] },
+        { index: 1, embedding: [3, Number.NaN] },
+      ],
+    },
+    {
+      model: 'space-b',
+      data: [
+        { index: 0, embedding: [1, 2] },
+        { index: 1, embedding: [3, 4] },
+      ],
+    },
+  ]) {
+    const router = new EmbeddingRouter({
+      providers: [providerConfig],
+      logger: quiet,
+      fetchImpl: async () => jsonResponse(payload),
+    })
+    await assert.rejects(
+      () => router.embed(['first', 'second']),
+      (error) => error.status === 502 && error.code === 'agent_invalid_response',
+    )
+  }
+})
+
 test('embeddings are returned in input order regardless of response order', async () => {
   const router = new EmbeddingRouter({
     providers: [{ id: 'a', baseUrl: 'https://a/v1', model: 'm1', dimensions: 2, apiKeyEnv: null, timeoutMs: 1000 }],
@@ -338,6 +492,75 @@ function agentWith(fetchImpl) {
     logger: quiet,
   })
 }
+
+test('HubAgent tests one chat provider with a bounded data-free request', async () => {
+  let request = null
+  const agent = new HubAgent({
+    chat: new ProviderRouter({
+      providers: providers('chat-probe'),
+      logger: quiet,
+      fetchImpl: async (url, options) => {
+        request = { url, body: JSON.parse(options.body) }
+        return jsonResponse(chatReply('OK'))
+      },
+    }),
+    embeddings: new EmbeddingRouter({ providers: [], logger: quiet }),
+    logger: quiet,
+  })
+
+  const result = await agent.testProvider({ kind: 'chat', providerId: 'chat-probe' })
+
+  assert.equal(request.url, 'https://chat-probe.invalid/v1/chat/completions')
+  assert.deepEqual(request.body, {
+    model: 'chat-probe-model',
+    messages: [{ role: 'user', content: 'Reply with OK.' }],
+    temperature: 0,
+    max_tokens: 8,
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.kind, 'chat')
+  assert.equal(result.providerId, 'chat-probe')
+  assert.equal(result.model, 'chat-probe-model')
+  assert.equal(Number.isInteger(result.latencyMs), true)
+  assert.equal(Number.isNaN(Date.parse(result.testedAt)), false)
+  assert.equal('payload' in result, false)
+})
+
+test('HubAgent tests one embedding provider and validates its returned vector', async () => {
+  let request = null
+  const agent = new HubAgent({
+    chat: new ProviderRouter({ providers: [], logger: quiet }),
+    embeddings: new EmbeddingRouter({
+      providers: [{
+        id: 'embedding-probe',
+        baseUrl: 'https://embedding-probe.invalid/v1',
+        model: 'embedding-probe-model',
+        dimensions: 2,
+        apiKeyEnv: null,
+        timeoutMs: 1_000,
+      }],
+      logger: quiet,
+      fetchImpl: async (url, options) => {
+        request = { url, body: JSON.parse(options.body) }
+        return jsonResponse({ data: [{ index: 0, embedding: [0.25, 0.75] }] })
+      },
+    }),
+    logger: quiet,
+  })
+
+  const result = await agent.testProvider({ kind: 'embedding', providerId: 'embedding-probe' })
+
+  assert.equal(request.url, 'https://embedding-probe.invalid/v1/embeddings')
+  assert.deepEqual(request.body, {
+    model: 'embedding-probe-model',
+    input: ['MX Insight Hub provider connectivity test'],
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.kind, 'embedding')
+  assert.equal(result.providerId, 'embedding-probe')
+  assert.equal(result.model, 'embedding-probe-model')
+  assert.equal('vectors' in result, false)
+})
 
 test('mapping suggestion falls back to the deterministic matcher when no model is configured', async () => {
   const agent = new HubAgent({

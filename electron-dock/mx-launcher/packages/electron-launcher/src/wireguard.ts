@@ -16,6 +16,7 @@ import {
   selectDarwinPhysicalDefaultRoute,
   setWireGuardTunnelState,
   uninstallDarwinWireGuardLaunchDaemon,
+  type WireGuardConnectionRuntimeStatus,
   type WireGuardServiceIdentity,
   type WireGuardWindowsNrptStatus
 } from '@qpjoy/electron-core-wireguard';
@@ -38,6 +39,7 @@ export interface ElectronLauncherWireGuardRuntimeOptions {
   nrptProbeTimeoutMs?: number;
   nrptCleanupDnsDomains?: string[] | null;
   nrptCleanupDnsServer?: string | null;
+  beforeDarwinPrivilegedCommand?: () => void;
 }
 
 export interface ElectronLauncherWindowsNrptDesiredState {
@@ -285,12 +287,25 @@ function wireGuardDnsServerHost(value: string | null | undefined): string | null
   return clean;
 }
 
-export function resolveLauncherWireGuardRuntime(input: ElectronLauncherWireGuardRuntimeOptions) {
-  return resolveWireGuardConnectionRuntime({
+export function resolveLauncherWireGuardRuntime(
+  input: ElectronLauncherWireGuardRuntimeOptions
+): WireGuardConnectionRuntimeStatus {
+  const runtime = resolveWireGuardConnectionRuntime({
     installDir: input.installDir ?? join(input.userDataDir, 'bin'),
     bundledDir: input.bundledDir ?? defaultBundledWireGuardDir(),
     allowSystemFallback: input.allowSystemFallback ?? false
   });
+  if (input.darwinLaunchDaemon !== true || runtime.platform !== 'darwin') return runtime;
+  const userspaceAvailable = runtime.wg.available === true
+    && runtime.wireGuardGo?.available === true;
+  return {
+    ...runtime,
+    available: userspaceAvailable,
+    method: userspaceAvailable ? 'darwin-userspace' : 'missing',
+    error: userspaceAvailable
+      ? null
+      : runtime.wireGuardGo?.error || runtime.wg.error || 'Darwin LaunchDaemon requires wg and wireguard-go.'
+  };
 }
 
 export function probeDarwinPhysicalDefaultRoute(): ElectronLauncherDarwinPhysicalDefaultRoute {
@@ -354,7 +369,8 @@ export async function connectLauncherWireGuardPeer(
     const launchDaemon = await installDarwinWireGuardLaunchDaemon({
       runtime,
       configPath: peer.configPath,
-      serviceIdentity: launcherDarwinServiceIdentity(input)
+      serviceIdentity: launcherDarwinServiceIdentity(input),
+      beforeDarwinPrivilegedCommand: input.beforeDarwinPrivilegedCommand
     });
     const status = await waitForLauncherWireGuardStatus(runtime, peer.configPath);
     const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes.length : 0;
@@ -364,6 +380,7 @@ export async function connectLauncherWireGuardPeer(
       return {
         ok,
         authorizationCanceled,
+        privilegedExecution: launchDaemon.privilegedExecution,
         action,
         peer,
         runtime,
@@ -379,6 +396,29 @@ export async function connectLauncherWireGuardPeer(
         message: ok ? launchDaemon.message : launcherWireGuardNotReadyMessage(launchDaemon, status)
       };
     }
+  }
+  if (
+    runtime.platform === 'darwin'
+    && input.darwinLaunchDaemon === true
+    && input.fallbackToAppManaged === false
+  ) {
+    const status = safeWireGuardStatus(runtime, peer.configPath);
+    const message = runtime.error || 'Darwin LaunchDaemon userspace runtime is unavailable.';
+    return {
+      ok: false,
+      authorizationCanceled: false,
+      privilegedExecution: 'not-started' as const,
+      action,
+      peer,
+      runtime,
+      status,
+      tunnel: {
+        ok: false,
+        configPath: peer.configPath,
+        message
+      },
+      message
+    };
   }
   const tunnel = await setWireGuardTunnelState({
     runtime,
@@ -453,6 +493,7 @@ export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuard
       return {
         ok: launchDaemon.ok === true,
         authorizationCanceled,
+        privilegedExecution: launchDaemon.privilegedExecution,
         skipped: false,
         configPath,
         runtime,
@@ -468,6 +509,51 @@ export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuard
         message: launchDaemon.message
       };
     }
+    if (input.fallbackToAppManaged === false) {
+      const status = safeWireGuardStatus(runtime, configPath);
+      const cleanupReady = status?.ok === true && status.active === false;
+      return {
+        ok: cleanupReady,
+        authorizationCanceled: false,
+        privilegedExecution: 'not-started' as const,
+        skipped: true,
+        reason: cleanupReady
+          ? 'darwin-wireguard-already-inactive'
+          : 'darwin-launchdaemon-not-visible',
+        configPath,
+        runtime,
+        status,
+        launchDaemon: launchDaemonStatus,
+        cleanupReady,
+        message: cleanupReady
+          ? 'WireGuard LaunchDaemon is not visible and the live tunnel is already inactive.'
+          : 'WireGuard LaunchDaemon is not visible; app-managed fallback is disabled, so no second administrator dialog was started.'
+      };
+    }
+  }
+  if (
+    runtime.platform === 'darwin'
+    && input.darwinLaunchDaemon === true
+    && input.fallbackToAppManaged === false
+  ) {
+    const status = safeWireGuardStatus(runtime, configPath);
+    const cleanupReady = status?.ok === true && status.active === false;
+    return {
+      ok: cleanupReady,
+      authorizationCanceled: false,
+      privilegedExecution: 'not-started' as const,
+      skipped: true,
+      reason: cleanupReady
+        ? 'darwin-wireguard-already-inactive'
+        : 'darwin-userspace-runtime-unavailable',
+      configPath,
+      runtime,
+      status,
+      cleanupReady,
+      message: cleanupReady
+        ? 'The live Darwin WireGuard tunnel is already inactive.'
+        : runtime.error || 'Darwin LaunchDaemon userspace runtime is unavailable; app-managed fallback was not started.'
+    };
   }
   const tunnel = await setWireGuardTunnelState({
     runtime,
@@ -516,11 +602,17 @@ export async function repairLauncherWireGuardPeerRoutes(input: ElectronLauncherW
       ok: true,
       skipped: true,
       reason: 'missing-wireguard-config',
+      privilegedExecution: 'not-started' as const,
       configPath
     };
   }
   const runtime = resolveLauncherWireGuardRuntime(input);
-  const repaired = await repairWireGuardTunnelRoutes({ runtime, configPath });
+  const repaired = await repairWireGuardTunnelRoutes({
+    runtime,
+    configPath,
+    darwinExtraRepairShell: input.darwinServiceIdentity?.darwinExtraInstallShell || null,
+    beforeDarwinPrivilegedCommand: input.beforeDarwinPrivilegedCommand
+  });
   const status = safeWireGuardStatus(runtime, configPath);
   const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes : [];
   const windowsNrpt = await launcherWindowsNrptStatus(runtime, configPath, input.nrptProbeTimeoutMs);
@@ -596,7 +688,8 @@ export async function recoverLauncherWireGuardPeer(
     const launchDaemon = await installDarwinWireGuardLaunchDaemon({
       runtime,
       configPath,
-      serviceIdentity: launcherDarwinServiceIdentity(input)
+      serviceIdentity: launcherDarwinServiceIdentity(input),
+      beforeDarwinPrivilegedCommand: input.beforeDarwinPrivilegedCommand
     });
     const nextStatus = await waitForLauncherWireGuardStatus(runtime, configPath);
     const nextMissingRouteCount = Array.isArray(nextStatus?.missingRoutes) ? nextStatus.missingRoutes.length : 0;
@@ -606,6 +699,7 @@ export async function recoverLauncherWireGuardPeer(
       return {
         ok,
         authorizationCanceled,
+        privilegedExecution: launchDaemon.privilegedExecution,
         action: 'launchdaemon-recover',
         recoveryReason: input.reason ?? null,
         configPath,
@@ -622,6 +716,24 @@ export async function recoverLauncherWireGuardPeer(
         message: ok ? launchDaemon.message : launcherWireGuardNotReadyMessage(launchDaemon, nextStatus)
       };
     }
+  }
+  if (
+    runtime.platform === 'darwin'
+    && input.darwinLaunchDaemon === true
+    && input.fallbackToAppManaged === false
+  ) {
+    return {
+      ok: false,
+      authorizationCanceled: false,
+      privilegedExecution: 'not-started' as const,
+      action: 'launchdaemon-recover',
+      recoveryReason: input.reason ?? null,
+      configPath,
+      runtime,
+      status,
+      windowsNrpt,
+      message: runtime.error || 'Darwin LaunchDaemon userspace runtime is unavailable.'
+    };
   }
   const tunnel = await setWireGuardTunnelState({
     runtime,
@@ -945,8 +1057,11 @@ function launcherDarwinServiceIdentity(input: ElectronLauncherWireGuardRuntimeOp
 }
 
 function isDarwinAuthorizationCancelled(result: unknown): boolean {
-  const message = stringValue(objectRecord(result).message) || stringValue(objectRecord(result).error) || '';
-  return /user canceled|user cancelled|用户已取消|已取消.*管理员授权|-128/i.test(message);
+  const record = objectRecord(result);
+  if (record.authorizationCanceled === true) return true;
+  if (record.authorizationCanceled === false) return false;
+  const message = stringValue(record.message) || stringValue(record.error) || '';
+  return /\(-128\)/.test(message);
 }
 
 function launcherWireGuardNotReadyMessage(tunnel: unknown, status: unknown): string {

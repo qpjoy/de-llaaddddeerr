@@ -65,6 +65,18 @@ export function loadConfig(environment = process.env) {
   const common = loadCommonConfig(PRODUCT_ID, commonEnvironment)
   common.postgres.url = databaseUrl
   common.queue.redisUrl = common.redis.url
+  // mx-common serves products with very different tokenizer capacity. The Hub
+  // runs strict, corpus-sized HanLP projections, so its absent-env defaults must
+  // stay below the small in-cluster service's admission ceiling. Explicit common
+  // settings remain authoritative for deployments that have measured more room.
+  if (environment.MX_COMMON_SEGMENTER_CONCURRENCY == null
+    || environment.MX_COMMON_SEGMENTER_CONCURRENCY === '') {
+    common.segmenter.concurrency = 2
+  }
+  if (environment.MX_COMMON_SEGMENTER_BATCH_SIZE == null
+    || environment.MX_COMMON_SEGMENTER_BATCH_SIZE === '') {
+    common.segmenter.batchSize = 16
+  }
   common.embedding = {
     // Dimensions are what couple an index mapping to a model, so they are
     // configured explicitly rather than inferred from a model name that may
@@ -159,6 +171,12 @@ export function loadConfig(environment = process.env) {
         environment.MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS,
         1_000,
         'MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS',
+        60_000,
+      ),
+      provincePageDelayMs: boundedNonNegativeInteger(
+        environment.MX_INSIGHT_PROVINCE_PAGE_DELAY_MS,
+        2_000,
+        'MX_INSIGHT_PROVINCE_PAGE_DELAY_MS',
         60_000,
       ),
     },

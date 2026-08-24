@@ -15,6 +15,14 @@ const rendererSource = readFileSync(
   fileURLToPath(new URL('../src/renderer.js', import.meta.url)),
   'utf8'
 );
+const launcherWireGuardSource = readFileSync(
+  fileURLToPath(new URL('../../../packages/electron-launcher/src/wireguard.ts', import.meta.url)),
+  'utf8'
+);
+const coreWireGuardSource = readFileSync(
+  fileURLToPath(new URL('../../../../../electron-plugin/packages/electron-core-wireguard/src/index.ts', import.meta.url)),
+  'utf8'
+);
 
 function functionSource(source, name) {
   const candidates = [`async function ${name}(`, `function ${name}(`];
@@ -522,6 +530,7 @@ const visibleRuntime = Function(
   'visibleConnection',
   'visibleAuth',
   'visibleFeishuAuthFlow',
+  'visibleForegroundNetworkOperation',
   'diagnosticLogStatus',
   `${functionSource(mainSource, 'visibleRuntime')}; return visibleRuntime;`
 )(
@@ -529,6 +538,7 @@ const visibleRuntime = Function(
   (value) => value,
   (value) => value,
   (value) => value,
+  () => null,
   () => null,
   () => null
 );
@@ -1032,6 +1042,388 @@ assert.match(
 );
 
 assert.match(
+  functionSource(mainSource, 'completeExternalSystemDomainProxyApply'),
+  /attachSystemDomainProxyConnectionProof\(status, reason\)/,
+  'the combined macOS WireGuard/PAC transaction must collect live system DNS proof before deciding connected'
+);
+assert.match(
+  functionSource(mainSource, 'prepareSystemDomainProxyForWireGuardInstall'),
+  /systemDomainProxyDomains\([\s\S]*preConnectSystemDomainProxyDiagnosticHost\(\)/,
+  'the combined first-connect transaction must include the exact H2I child even while state is lease-only'
+);
+assert.match(
+  functionSource(mainSource, 'prepareSystemDomainProxyForWireGuardInstall'),
+  /prepareExternalApply[\s\S]*transactionToken/,
+  'the foreground macOS apply must carry the manager transaction token through the combined shell'
+);
+assert.match(
+  functionSource(mainSource, 'completeExternalSystemDomainProxyApply'),
+  /completeExternalApply\(transactionToken, reason\)/,
+  'a started external transaction must finalize the exact prepared token'
+);
+assert.match(
+  functionSource(mainSource, 'reconcilePendingExternalSystemDomainProxyApplyAfterStartup'),
+  /status\?\.pending !== true[\s\S]*transactionToken[\s\S]*completeExternalApply\([\s\S]*transactionToken,[\s\S]*app-startup-pending-reconcile/,
+  'cold start must reconcile a crashed external transaction by tokenized readback before local-edge resume'
+);
+assert.match(
+  functionSource(mainSource, 'abortPreparedSystemDomainProxyApply'),
+  /abortExternalApply\(transactionToken,[\s\S]*execution/,
+  'a not-started or explicitly canceled external transaction must abort without a system restore'
+);
+assert.doesNotMatch(
+  functionSource(mainSource, 'attachDarwinSystemDnsProof'),
+  /runtime\.auth\s*=|stopWireGuard|disconnectConnection/,
+  'a failed macOS DNS proof may only gate connected versus tunnel-only; it must not clear auth or stop WireGuard'
+);
+for (const refreshFunction of [
+  'refreshSystemDomainProxyAfterNetworkChange',
+  'refreshSystemDomainProxyForRuntime'
+]) {
+  assert.match(
+    functionSource(mainSource, refreshFunction),
+    /expectedConnection[\s\S]*expectedEpoch[\s\S]*systemDomainProxyRefreshContextCurrent[\s\S]*recordSystemDomainProxyDiagnostics/,
+    `${refreshFunction} must discard a system DNS proof completed for a superseded connection`
+  );
+}
+assert.match(
+  functionSource(mainSource, 'maybeSkipSystemDomainProxyApply'),
+  /statusVerified[\s\S]*resumeDarwinLocalEdge[\s\S]*localEdgeResumed[\s\S]*background-live-state-verified/,
+  'startup recovery must restart only the local edge, then reuse strictly matching live macOS state without applying or prompting'
+);
+assert.match(
+  functionSource(mainSource, 'applyNetworkSession'),
+  /latchPreparedSystemDomainProxyFailure\(combinedSystemDomainProxy, err\)[\s\S]*latchPreparedSystemDomainProxyFailure\(combinedSystemDomainProxy, wireGuardResult\)[\s\S]*!connectionReady/,
+  'Connect/Login combined cancellation or failed proof must latch the policy before any background retry'
+);
+assert.match(
+  functionSource(mainSource, 'attachDarwinSystemDnsProof'),
+  /darwinSystemResolutionExpectedTargets[\s\S]*expectedInternalTargets: expectedTargets/,
+  'the connected gate must bind the selected H2I hostname to its exact ProductNetwork target'
+);
+assert.match(
+  functionSource(mainSource, 'ensureSystemDomainProxyForRuntimeOnce'),
+  /forceDarwinRefresh:[\s\S]*reason === 'manual-repair'/,
+  'a user-requested repair must bypass the metadata fast path exactly once without enabling background mutations'
+);
+assert.match(
+  functionSource(mainSource, 'ensureSystemDomainProxyForRuntimeOnce'),
+  /backgroundConnection[\s\S]*backgroundEpoch[\s\S]*maybeSkipSystemDomainProxyApply[\s\S]*networkRecoveryPaused[\s\S]*systemDomainProxyRefreshContextCurrent\(backgroundConnection, backgroundEpoch\)[\s\S]*systemDomainProxyManager\.apply/,
+  'pause or connection changes during background preflight must be re-checked immediately before privileged apply'
+);
+assert.match(
+  functionSource(mainSource, 'repairDarwinEndpointRouteBeforeBootstrap'),
+  /allowPrivileged: false/,
+  'Connect/Login pre-bootstrap must not open a separate endpoint-route authorization dialog'
+);
+const connectGuardSource = functionSource(mainSource, 'probeConnectedModeBeforeTransition');
+assert.match(connectGuardSource, /statusVerified\(\)[\s\S]*attachSystemDomainProxyConnectionProof/);
+assert.doesNotMatch(
+  connectGuardSource,
+  /ensureSystemDomainProxyForRuntime/,
+  'the foreground connect guard must be read-only so one Connect/Login action cannot prompt before the final combined shell'
+);
+assert.doesNotMatch(
+  functionSource(mainSource, 'shouldAllowPrivilegedPreBootstrapRecovery'),
+  /process\.platform === 'darwin'/,
+  'Darwin retained recovery must defer privilege to the final combined transaction by default'
+);
+assert.match(
+  functionSource(mainSource, 'ensureSystemDomainProxyForRuntimeOnce'),
+  /domains\.length === 0[\s\S]*process\.platform === 'darwin' && backgroundRefresh[\s\S]*background-no-domains[\s\S]*disableSystemDomainProxyForRuntime/,
+  'a Darwin background tick with no domains must remain read-only instead of opening a restore prompt'
+);
+assert.match(
+  functionSource(mainSource, 'maybeSkipSystemDomainProxyApply'),
+  /lastSystemDomainProxyPrivilegedFailureSignature[\s\S]*privileged-repair-failed-awaiting-user-retry/,
+  'a confirmed-but-failed privileged transaction must not reopen the macOS authorization dialog on every background tick'
+);
+assert.match(
+  functionSource(mainSource, 'repairSystemNetworkForRuntime'),
+  /process\.platform === 'darwin'[\s\S]*recordSystemDomainProxyDiagnostics\([\s\S]*const connected/,
+  'an explicit macOS repair must immediately promote a proven employee tunnel instead of waiting for the next background tick'
+);
+const repairSource = functionSource(mainSource, 'repairSystemNetworkForRuntime');
+assert.match(
+  repairSource,
+  /allowPrivileged: false[\s\S]*shouldRecoverWireGuardConnection[\s\S]*prepareSystemDomainProxyForWireGuardInstall[\s\S]*darwin-combined-shell-unavailable[\s\S]*darwinExtraInstallShell: combinedSystemDomainProxy\?\.shell[\s\S]*completeExternalSystemDomainProxyApply/,
+  'one explicit macOS repair must combine endpoint/WireGuard/PAC/DNS changes into one foreground authorization transaction'
+);
+assert.match(
+  repairSource,
+  /darwin-system-proxy-repair-deferred-after-wireguard[\s\S]*lastSystemDomainProxyPrivilegedFailureSignature[\s\S]*lastSystemDomainProxyAuthorizationCanceledSignature/,
+  'a degraded or canceled combined transaction must be latched and an older manager must defer a second prompt'
+);
+assert.doesNotMatch(
+  repairSource,
+  /repairDarwinStaleEndpointRoutesForRuntime\([^)]*allowPrivileged: true/,
+  'manual repair must not open a separate endpoint-route authorization dialog'
+);
+assert.match(
+  launcherWireGuardSource,
+  /repairWireGuardTunnelRoutes\(\{[\s\S]*darwinExtraRepairShell: input\.darwinServiceIdentity\?\.darwinExtraInstallShell/,
+  'the Launcher WireGuard repair must forward the combined PAC/DNS shell'
+);
+assert.match(
+  coreWireGuardSource,
+  /darwinExtraRepairShell\?:[\s\S]*darwinEndpointBypassCommands[\s\S]*input\.darwinExtraRepairShell[\s\S]*const authorizationCanceled = isWireGuardAuthorizationCancelled[\s\S]*authorizationCanceled/,
+  'the single WireGuard authorization shell must include endpoint/PAC/DNS repair and classify cancellation'
+);
+assert.match(
+  functionSource(mainSource, 'wireGuardRuntimeOptions'),
+  /darwinLaunchDaemon: true[\s\S]*fallbackToAppManaged: false/,
+  'a failed/canceled combined LaunchDaemon transaction must not fall back to a second app-managed authorization dialog'
+);
+const authorizationCanceledClassifierSource = functionSource(
+  mainSource,
+  'isUserAuthorizationCanceledError'
+);
+assert.match(
+  authorizationCanceledClassifierSource,
+  /value\?\.authorizationCanceled === true/,
+  'structured authorization cancellation must take precedence over message heuristics'
+);
+assert.match(
+  authorizationCanceledClassifierSource,
+  /-128[\s\S]*管理员授权/,
+  'text fallback must be limited to the AppleScript cancellation code or an explicit administrator-authorization message'
+);
+assert.doesNotMatch(
+  authorizationCanceledClassifierSource,
+  /user canceled\|user cancelled\|用户已取消\|取消授权\|已取消\|osascript\.\*cancel/i,
+  'generic canceled text must not roll back a combined transaction that may already have partially committed'
+);
+assert.match(
+  repairSource,
+  /before-system-domain-proxy-ensure[\s\S]*ensureSystemDomainProxyForRuntime[\s\S]*before-system-domain-proxy-restore-stale[\s\S]*restoreStale[\s\S]*before-system-domain-proxy-disable[\s\S]*disableSystemDomainProxyForRuntime/,
+  'manual repair must re-check cancellation immediately before every remaining potentially privileged PAC/restore branch'
+);
+assert.match(
+  repairSource,
+  /recordSystemDomainProxyDiagnostics[\s\S]*system-domain-proxy-recorded[\s\S]*collectNetworkEnvironmentDiagnostics[\s\S]*diagnostics-after[\s\S]*runtime\.feedback/,
+  'read-only repair diagnostics may finish after cancel but must checkpoint before overwriting paused feedback'
+);
+assert.match(
+  functionSource(mainSource, 'connectAndProbeWireGuardPath'),
+  /result\?\.authorizationCanceled === true[\s\S]*route: null[\s\S]*ready: false/,
+  'authorization cancellation must stop before route/Internal probes and other post-install side effects'
+);
+assert.match(
+  functionSource(mainSource, 'startWireGuardForSession'),
+  /attempt\.result\?\.authorizationCanceled === true[\s\S]*wireGuardAuthorizationCanceledFailure/,
+  'the raw launcher authorization-canceled result must reach the foreground state machine'
+);
+
+assert.match(
+  mainSource,
+  /ipcMain\.handle\('mx-h2i:cancel-network-operation',[\s\S]*requestForegroundNetworkOperationCancel/,
+  'main IPC must expose a dedicated foreground network cancel path'
+);
+assert.match(
+  functionSource(mainSource, 'beginForegroundNetworkOperation'),
+  /networkMutationEpoch \+= 1[\s\S]*snapshot:[\s\S]*connection:[\s\S]*identity:[\s\S]*auth:[\s\S]*broadcastState\(\)/,
+  'every explicit foreground flow must invalidate stale recovery and expose a retained snapshot before waiting'
+);
+const cancelNetworkSource = functionSource(mainSource, 'requestForegroundNetworkOperationCancel');
+assert.match(
+  cancelNetworkSource,
+  /operation-id-mismatch[\s\S]*networkRecoveryPaused = true[\s\S]*networkMutationEpoch \+= 1[\s\S]*cancelScheduledWireGuardRecovery\(\)[\s\S]*broadcastState\(\)[\s\S]*void saveRuntime/,
+  'cancel must CAS the optional operation id, stop later recovery, broadcast immediately, and persist asynchronously'
+);
+assert.doesNotMatch(
+  cancelNetworkSource,
+  /stopWireGuardForRuntime|disableSystemDomainProxyForRuntime|runtime\.auth\s*=\s*null/,
+  'cancel must not disconnect a healthy tunnel, restore system settings, or clear employee auth'
+);
+assert.match(
+  functionSource(mainSource, 'visibleForegroundNetworkOperation'),
+  /kind:[\s\S]*status:[\s\S]*stage:[\s\S]*cancelable:[\s\S]*promptActive:[\s\S]*paused:/,
+  'renderer state must distinguish running, cancel-requested, and paused recovery'
+);
+assert.match(
+  functionSource(mainSource, 'scheduleWireGuardRecovery'),
+  /networkRecoveryPaused[\s\S]*setTimeout[\s\S]*networkRecoveryPaused/,
+  'a pause must gate both scheduling and already-scheduled background recovery callbacks'
+);
+assert.match(
+  functionSource(mainSource, 'wireGuardRecoveryIdentity'),
+  /mutationEpoch: networkMutationEpoch/,
+  'cancel epoch changes must supersede an in-flight background recovery result'
+);
+const applySessionSource = functionSource(mainSource, 'applyNetworkSession');
+assert.match(
+  applySessionSource,
+  /preflight-settled[\s\S]*abortPrePrivilegeTransition[\s\S]*before-system-authorization-command[\s\S]*privilegedStarted: true/,
+  'cancel during connect preflight must abort prepared PAC and handover state before any privileged command starts'
+);
+assert.match(
+  applySessionSource,
+  /authorizationCanceled[\s\S]*abortPreparedSystemDomainProxyApply[\s\S]*completeExternalSystemDomainProxyApply[\s\S]*cancelRequested/,
+  'authorization cancel must abort a not-run token, while a started/unknown shell must finalize before honoring app cancel'
+);
+assert.match(
+  functionSource(mainSource, 'repairSystemNetworkForRuntime'),
+  /before-privileged-repair[\s\S]*privilegedStarted: true[\s\S]*completeExternalSystemDomainProxyApply[\s\S]*system-repair-probed/,
+  'manual repair must checkpoint before privilege and finalize/read back before stopping a canceled flow'
+);
+assert.match(
+  applySessionSource,
+  /const beforeDarwinPrivilegedCommand = \(\) => \{[\s\S]*checkpoint\('before-darwin-privileged-command'\)[\s\S]*markPreparedSystemDomainProxyPrivilegedHandoff[\s\S]*darwinPrivilegedCommandStarted = true[\s\S]*startWireGuardForSession\(\{[\s\S]*beforeDarwinPrivilegedCommand/,
+  'the final cancel checkpoint must run inside the launcher hook immediately before the real Darwin privileged command'
+);
+assert.match(
+  functionSource(mainSource, 'markPreparedSystemDomainProxyPrivilegedHandoff'),
+  /markExternalApplyHandoff\(transactionToken\)[\s\S]*externalApplyPhase !== 'privileged-handoff'[\s\S]*throw err/,
+  'the token handoff must be durably and synchronously marked before osascript; any mismatch must fail closed'
+);
+assert.match(
+  functionSource(mainSource, 'repairSystemNetworkForRuntime'),
+  /beforeDarwinPrivilegedCommand[\s\S]*markPreparedSystemDomainProxyPrivilegedHandoff\(combinedSystemDomainProxy\)[\s\S]*darwinPrivilegedCommandStarted = true/,
+  'manual repair must use the same durable token handoff before its combined authorization command'
+);
+assert.match(
+  applySessionSource,
+  /!darwinPrivilegedCommandStarted[\s\S]*abortPreparedSystemDomainProxyApply[\s\S]*restoreForegroundStandaloneOwnershipSnapshot/,
+  'a hook cancellation before osascript must abort prepared PAC and restore/release the connecting ownership claim'
+);
+assert.match(
+  applySessionSource,
+  /wireGuardResult\.authorizationCanceled === true[\s\S]*restoreForegroundStandaloneOwnershipSnapshot[\s\S]*retainedForegroundConnection[\s\S]*restoreForegroundNetworkOperationSnapshot/,
+  'AppleScript -128 must restore ownership and a retained employee/guest snapshot instead of clearing auth'
+);
+assert.match(
+  applySessionSource,
+  /darwin-external-prepare-unavailable-deferred[\s\S]*ensureSystemDomainProxyForRuntime\('post-connect'\)/,
+  'an old Darwin system-proxy manager must defer PAC/DNS after the WireGuard prompt instead of opening a second dialog'
+);
+assert.match(
+  applySessionSource,
+  /combinedSystemDomainProxy && !combinedSystemDomainProxy\.shell[\s\S]*abortPrePrivilegeTransition\('pre-connect-combined-shell-unavailable'\)[\s\S]*restoreForegroundNetworkOperationSnapshot[\s\S]*markForegroundNetworkOperationPaused/,
+  'a durable pending or uncombinable PAC state must reconcile/abort handover and preserve login before any authorization command'
+);
+assert.match(
+  applySessionSource,
+  /connection-proof-ready[\s\S]*before-superseded-lease-retirement[\s\S]*retireSupersededLocalLeases[\s\S]*after-superseded-lease-retirement[\s\S]*before-connection-events/,
+  'cancel after system commit must stop lease retirement and later event scheduling at explicit checkpoints'
+);
+assert.match(
+  applySessionSource,
+  /checkpointCommittedTransition[\s\S]*state: connectionReady[\s\S]*markForegroundNetworkOperationPaused[\s\S]*saveAndBroadcast/,
+  'a post-commit cancel must preserve the proven live connection instead of rolling system state back'
+);
+const abortPreparedSource = functionSource(mainSource, 'abortPreparedSystemDomainProxyApply');
+assert.match(
+  abortPreparedSource,
+  /external-apply-durable-state-pending[\s\S]*completeExternalSystemDomainProxyApply/,
+  'a durable pending token may represent an already-committed shell and must reconcile by readback'
+);
+assert.match(
+  abortPreparedSource,
+  /external-apply-transaction-in-flight[\s\S]*currentSystemDomainProxyStatus/,
+  'a token owned by another in-memory transaction must never be aborted by this foreground flow'
+);
+
+const restoreSnapshotBox = {
+  current: {
+    connection: { state: 'lease-only', mode: 'employee', leaseId: 'new-staff-lease' },
+    identity: { kind: 'user', account: 'new@example.com' },
+    auth: { accessToken: 'new-staff-token' }
+  }
+};
+const restoreSnapshotHarness = Function(
+  'box',
+  `let runtime = box.current;
+function foregroundOperationConnectionHasLiveTunnel() { return false; }
+function idleConnection() { return { state: 'idle', mode: 'guest' }; }
+${functionSource(mainSource, 'restoreForegroundNetworkOperationSnapshot')}
+return (operation) => { restoreForegroundNetworkOperationSnapshot(operation); box.current = runtime; };`
+)(restoreSnapshotBox);
+restoreSnapshotHarness({
+  snapshot: {
+    connection: { state: 'connected', mode: 'guest', leaseId: 'guest-lease' },
+    identity: { kind: 'anonymous', account: null },
+    auth: null
+  }
+});
+assert.equal(restoreSnapshotBox.current.connection.mode, 'guest');
+assert.equal(restoreSnapshotBox.current.identity.kind, 'anonymous');
+assert.equal(
+  restoreSnapshotBox.current.auth,
+  null,
+  'guest-to-employee cancellation must restore an explicit null guest auth instead of retaining the new employee token'
+);
+
+const disconnectHandlerStart = mainSource.indexOf("ipcMain.handle('mx-h2i:disconnect'");
+const disconnectHandlerEnd = mainSource.indexOf("ipcMain.handle('mx-h2i:reset-local-network-identity'", disconnectHandlerStart);
+assert.ok(disconnectHandlerStart >= 0 && disconnectHandlerEnd > disconnectHandlerStart);
+const disconnectHandlerSource = mainSource.slice(disconnectHandlerStart, disconnectHandlerEnd);
+const managedReleaseStart = disconnectHandlerSource.indexOf("!systemDomainRestoreScript");
+const managedReleaseEnd = disconnectHandlerSource.indexOf('const wireGuard = await stopWireGuardForRuntime', managedReleaseStart);
+const managedReleaseSource = disconnectHandlerSource.slice(managedReleaseStart, managedReleaseEnd);
+assert.equal((managedReleaseSource.match(/disableSystemDomainProxyForRuntime\(/g) || []).length, 1);
+assert.doesNotMatch(
+  managedReleaseSource,
+  /stopWireGuardForRuntime/,
+  'a Darwin shared-owner disconnect turn must choose managed PAC release and return before opening a WireGuard authorization dialog'
+);
+assert.match(
+  disconnectHandlerSource,
+  /darwinProxyRetainedForOtherOwners[\s\S]*darwin-shared-proxy-retained-for-other-owners/,
+  'the second disconnect phase must leave another Launcher owner\'s PAC/local edge intact'
+);
+assert.match(
+  disconnectHandlerSource,
+  /darwinCombinedRestoreStarted[\s\S]*wireGuard\?\.privilegedExecution === 'started'[\s\S]*darwinCombinedRestoreFailed[\s\S]*本次不会继续弹出第二个授权窗口/,
+  'a started but failed combined uninstall/restore must retain auth and local edge without starting a second privileged cleanup'
+);
+assert.match(
+  disconnectHandlerSource,
+  /darwinCombinedRestoreCompleted[\s\S]*wireGuard\?\.ok === true[\s\S]*wireGuard\?\.privilegedExecution === 'started'[\s\S]*completeExternalSystemDomainProxyRestore/,
+  'disconnect may finalize an external PAC restore only after a successful privileged command'
+);
+assert.doesNotMatch(
+  disconnectHandlerSource,
+  /systemDomainRestoreScript && wireGuard\?\.launchDaemon[\s\S]*completeExternalSystemDomainProxyRestore/,
+  'a read-only LaunchDaemon status object must not be mistaken for execution of the combined restore shell'
+);
+assert.ok(
+  disconnectHandlerSource.indexOf('const systemDomainProxy =')
+    < disconnectHandlerSource.indexOf("releaseStandaloneOwnershipForRuntime('disconnect')"),
+  'Darwin PAC/restore proof must settle before standalone ownership is released'
+);
+assert.match(
+  disconnectHandlerSource,
+  /darwinSystemProxyCleanupReady[\s\S]*runtime\.auth = retainedAuth[\s\S]*return visibleRuntime\(\)[\s\S]*releaseStandaloneOwnershipForRuntime\('disconnect'\)/,
+  'a canceled or failed Darwin proxy restore must preserve auth, state, local edge, and ownership'
+);
+assert.match(
+  functionSource(mainSource, 'normalizeDiagnostics'),
+  /disconnectManagedRelease:/,
+  'the two-phase shared-owner cleanup marker must survive restart before the WireGuard-only second phase'
+);
+const credentialFailureSource = functionSource(mainSource, 'reconcileCredentialStorageFailureAfterStartup');
+assert.match(
+  credentialFailureSource,
+  /process\.platform === 'darwin' && !darwinRestoreScript[\s\S]*disableSystemDomainProxyForRuntime\([\s\S]*throw new Error[\s\S]*stopWireGuardForRuntime/,
+  'credential fail-close must persist a deferred cleanup after one managed Darwin action and never continue to a second prompt'
+);
+assert.match(
+  credentialFailureSource,
+  /process\.platform === 'darwin' \? 1 : 2/,
+  'any non-combined Darwin credential cleanup retry budget must be exactly one'
+);
+assert.match(
+  functionSource(launcherWireGuardSource, 'resolveLauncherWireGuardRuntime'),
+  /darwinLaunchDaemon !== true[\s\S]*userspaceAvailable[\s\S]*method: userspaceAvailable \? 'darwin-userspace' : 'missing'/,
+  'MX-H2I LaunchDaemon mode must ignore a stale wg-quick/Bash4 runtime and force userspace or fail closed'
+);
+assert.match(
+  functionSource(launcherWireGuardSource, 'connectLauncherWireGuardPeer'),
+  /darwinLaunchDaemon === true[\s\S]*fallbackToAppManaged === false[\s\S]*privilegedExecution: 'not-started'[\s\S]*setWireGuardTunnelState/,
+  'missing Darwin userspace tools must return before the app-managed osascript fallback'
+);
+
+assert.match(
   functionSource(mainSource, 'normalizeDiagnostics'),
   /localPersistence:[\s\S]*label:[\s\S]*message:[\s\S]*updatedAt:/,
   'local persistence diagnostics must survive a later successful save and restart'
@@ -1047,12 +1439,227 @@ assert.equal(secureEqual('', ''), true);
 
 assert.match(preloadSource, /startFeishuLogin: \(\) => ipcRenderer\.invoke\('mx-h2i:start-feishu-login'\)/);
 assert.match(preloadSource, /cancelFeishuLogin: \(\) => ipcRenderer\.invoke\('mx-h2i:cancel-feishu-login'\)/);
+assert.match(
+  preloadSource,
+  /cancelNetworkOperation: \(operationId = null\) => ipcRenderer\.invoke\([\s\S]*'mx-h2i:cancel-network-operation',[\s\S]*\{ id:/,
+  'the preload bridge must pass an optional exact operation id to the cancel IPC'
+);
 assert.match(rendererSource, /'login-feishu': \(\) => api\.startFeishuLogin\?\.\(\)/);
 assert.match(rendererSource, /'cancel-feishu-login': \(\) => api\.cancelFeishuLogin\?\.\(\)/);
+const runActionSource = functionSource(rendererSource, 'runAction');
 assert.match(
-  functionSource(rendererSource, 'runAction'),
+  runActionSource,
   /catch\s*\{[\s\S]*api\.getState\(\)\.catch\(\(\) => null\)[\s\S]*state = next/,
   'a rejected IPC action must refresh the broadcast in-memory diagnosis instead of becoming unhandled'
+);
+assert.match(
+  runActionSource,
+  /action === 'cancelNetworkOperation'[\s\S]*busyAction = ''[\s\S]*busyActionRunId = cancelRunId[\s\S]*api\.cancelNetworkOperation\?\.\(operationId\)/,
+  'network cancel must bypass the busy action while invalidating its stale renderer turn'
+);
+assert.doesNotMatch(
+  runActionSource,
+  /if \(!operationId\) return/,
+  'automatic retained recovery must remain pausable even when there is no foreground operation id'
+);
+assert.match(
+  runActionSource,
+  /if \(busyActionRunId !== runId\) return;[\s\S]*finally[\s\S]*if \(busyActionRunId === runId\)/,
+  'an older connect promise must neither commit stale state nor clear a newer retry'
+);
+assert.match(
+  runActionSource,
+  /networkOperationBlocksMutation\(\) && isNetworkMutatingAction\(action\)/,
+  'cancel-requested must block a second network mutation until the main operation pauses'
+);
+assert.match(
+  functionSource(rendererSource, 'networkOperationInProgress'),
+  /!operation\?\.id[\s\S]*operation\?\.kind === 'background-recovery'[\s\S]*return false/,
+  'id-less automatic recovery is advisory and must not block repair or disconnect'
+);
+assert.match(
+  functionSource(rendererSource, 'networkOperationBlocksMutation'),
+  /cancelNetworkOperationInFlight[\s\S]*networkOperationInProgress\(\)[\s\S]*rendererPendingNetworkOperation\(\)/,
+  'the cancel IPC handoff and renderer-to-main startup gap must stay mutually exclusive'
+);
+
+const networkOperationUiSource = functionSource(rendererSource, 'renderNetworkOperationControl');
+assert.match(
+  networkOperationUiSource,
+  /visibleOperation\?\.status === 'paused' && pendingRendererOperation[\s\S]*visibleOperation \|\| pendingRendererOperation/,
+  'the cancel control must render immediately while IPC has not broadcast its operation id yet'
+);
+assert.match(networkOperationUiSource, /data-action="cancelNetworkOperation"/);
+assert.match(networkOperationUiSource, /取消本次连接|停止后续恢复/);
+assert.match(networkOperationUiSource, /系统权限框[\s\S]*系统权限框中点“取消”/);
+assert.match(networkOperationUiSource, /重新修复网络[\s\S]*重新连接[\s\S]*返回员工登录/);
+assert.match(networkOperationUiSource, /data-network-operation-status="paused"[\s\S]*已停止后续恢复/);
+assert.doesNotMatch(
+  networkOperationUiSource,
+  /data-action="disconnect"/,
+  'logical cancel and paused retry UI must never be implemented as disconnect'
+);
+const backgroundRecoveryUi = Function(
+  'state',
+  `let busyAction = '';
+let cancelNetworkOperationInFlight = false;
+function escapeHtml(value) { return String(value); }
+function escapeAttr(value) { return String(value); }
+${functionSource(rendererSource, 'currentNetworkOperation')}
+${functionSource(rendererSource, 'networkOperationPaused')}
+${functionSource(rendererSource, 'networkOperationKind')}
+${functionSource(rendererSource, 'networkOperationIsRepair')}
+${functionSource(rendererSource, 'networkOperationIsGuestConnect')}
+${functionSource(rendererSource, 'rendererPendingNetworkOperation')}
+${networkOperationUiSource}
+return renderNetworkOperationControl();`
+)({
+  connection: { state: 'connecting', mode: 'employee' },
+  networkOperation: {
+    id: null,
+    kind: 'background-recovery',
+    status: 'running',
+    cancelable: true,
+    message: '正在原位校验保留网络'
+  }
+});
+assert.match(backgroundRecoveryUi, /停止后续恢复/);
+assert.match(backgroundRecoveryUi, /data-action="cancelNetworkOperation"/);
+assert.match(backgroundRecoveryUi, /data-operation-id=""/);
+
+const operationGate = Function(
+  'state',
+  'busyAction',
+  'cancelNetworkOperationInFlight',
+  `${functionSource(rendererSource, 'currentNetworkOperation')}
+${functionSource(rendererSource, 'networkOperationInProgress')}
+${functionSource(rendererSource, 'rendererPendingNetworkOperation')}
+${functionSource(rendererSource, 'networkOperationBlocksMutation')}
+${functionSource(rendererSource, 'networkOperationPaused')}
+${functionSource(rendererSource, 'isConnectionPending')}
+function feishuAuthStage() { return ''; }
+return {
+  blocks: networkOperationBlocksMutation(),
+  pending: isConnectionPending()
+};`
+);
+assert.deepEqual(operationGate({
+  connection: { state: 'tunnel-only' },
+  networkOperation: { id: null, kind: 'background-recovery', status: 'running' }
+}, '', false), { blocks: false, pending: false });
+assert.deepEqual(operationGate({
+  connection: { state: 'connecting' },
+  networkOperation: { id: null, kind: 'background-recovery', status: 'running' }
+}, '', false), { blocks: false, pending: false });
+assert.deepEqual(operationGate({
+  connection: { state: 'connecting' },
+  networkOperation: { id: 'foreground-1', kind: 'employee-connect', status: 'running' }
+}, '', false), { blocks: true, pending: true });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+const firstConnect = deferred();
+const retryConnect = deferred();
+let connectCalls = 0;
+let disconnectCalls = 0;
+const pausedState = {
+  connection: { state: 'idle', mode: 'guest' },
+  networkOperation: {
+    id: 'op-connect-1',
+    kind: 'guest-connect',
+    status: 'paused',
+    stage: 'paused',
+    cancelable: false
+  }
+};
+const runActionHarness = Function(
+  'api',
+  `${functionSource(rendererSource, 'currentNetworkOperation')}
+${functionSource(rendererSource, 'networkOperationInProgress')}
+${functionSource(rendererSource, 'rendererPendingNetworkOperation')}
+${functionSource(rendererSource, 'networkOperationBlocksMutation')}
+${functionSource(rendererSource, 'isNetworkMutatingAction')}
+let state = { connection: { state: 'idle', mode: 'guest' }, networkOperation: null, apps: {} };
+let busyAction = '';
+let busyActionRunId = 0;
+let actionRunSequence = 0;
+let cancelNetworkOperationInFlight = false;
+let modeDraft = 'guest';
+let selectedAppId = '';
+let appCenterRoute = '';
+let appInspectorCollapsed = false;
+function render() {}
+function syncEmployeeLoginDraftFromState() {}
+function isGuestConnectionActive() { return state.connection?.mode === 'guest' && state.connection?.state !== 'idle'; }
+async function setScreen() {}
+${runActionSource}
+return {
+  runAction,
+  setState(next) { state = next; },
+  getState() { return state; },
+  getBusyAction() { return busyAction; }
+};`
+)({
+  connectGuest: () => (++connectCalls === 1 ? firstConnect.promise : retryConnect.promise),
+  disconnect: async () => {
+    disconnectCalls += 1;
+    return { connection: { state: 'idle', mode: 'guest' }, networkOperation: null, apps: {} };
+  },
+  cancelNetworkOperation: async () => pausedState,
+  getState: async () => pausedState
+});
+
+const staleConnectTurn = runActionHarness.runAction('connectGuest');
+runActionHarness.setState({
+  connection: { state: 'connecting', mode: 'guest' },
+  networkOperation: {
+    id: 'op-connect-1',
+    kind: 'guest-connect',
+    status: 'running',
+    stage: 'bootstrap',
+    cancelable: true
+  },
+  apps: {}
+});
+await runActionHarness.runAction('cancelNetworkOperation', { id: 'op-connect-1' });
+assert.equal(runActionHarness.getState().networkOperation.status, 'paused');
+const retryTurn = runActionHarness.runAction('connectGuest');
+assert.equal(runActionHarness.getBusyAction(), 'connectGuest');
+firstConnect.resolve({ connection: { state: 'connected', mode: 'guest', localIp: '10.89.100.9' }, networkOperation: null, apps: {} });
+await staleConnectTurn;
+assert.equal(
+  runActionHarness.getBusyAction(),
+  'connectGuest',
+  'the canceled promise finally must not clear a newer retry busy state'
+);
+assert.equal(
+  runActionHarness.getState().networkOperation.status,
+  'paused',
+  'the canceled promise response must not overwrite the paused/newer state'
+);
+retryConnect.resolve({ connection: { state: 'connected', mode: 'guest', localIp: '10.89.100.10' }, networkOperation: null, apps: {} });
+await retryTurn;
+assert.equal(runActionHarness.getBusyAction(), '');
+assert.equal(runActionHarness.getState().connection.localIp, '10.89.100.10');
+runActionHarness.setState({
+  connection: { state: 'tunnel-only', mode: 'employee', localIp: '10.89.50.2' },
+  networkOperation: {
+    id: null,
+    kind: 'background-recovery',
+    status: 'running',
+    cancelable: true
+  },
+  apps: {}
+});
+await runActionHarness.runAction('disconnect');
+assert.equal(
+  disconnectCalls,
+  1,
+  'an id-less retained-recovery hint must not block an explicit disconnect'
 );
 
 const employeeUiSource = functionSource(rendererSource, 'renderEmployeeLogin');
@@ -1067,6 +1674,50 @@ assert.match(employeeUiSource, /data-action="disconnect"/);
 assert.match(employeeUiSource, /仅断开访客模式/);
 assert.match(employeeUiSource, /当前访客 IP/);
 assert.match(employeeUiSource, /data-action="show-advanced"/);
+
+const retainedEmployeeSession = Function(
+  'state',
+  `${functionSource(rendererSource, 'isRetainedEmployeeSession')}; return isRetainedEmployeeSession();`
+);
+const validEmployeeAuth = {
+  provider: 'feishu',
+  expiresAt: new Date(Date.now() + 60_000).toISOString()
+};
+assert.equal(retainedEmployeeSession({
+  auth: validEmployeeAuth,
+  identity: { kind: 'user' },
+  connection: { state: 'tunnel-only', mode: 'employee' }
+}), true, 'an authenticated retained employee tunnel must remain an employee session');
+assert.equal(retainedEmployeeSession({
+  auth: { ...validEmployeeAuth, expiresAt: new Date(Date.now() - 60_000).toISOString() },
+  identity: { kind: 'user' },
+  connection: { state: 'tunnel-only', mode: 'employee' }
+}), false, 'an expired employee token must return to the login flow');
+assert.equal(retainedEmployeeSession({
+  auth: validEmployeeAuth,
+  identity: { kind: 'user' },
+  connection: { state: 'tunnel-only', mode: 'guest' }
+}), false, 'a guest tunnel must never be presented as a retained employee session');
+
+const retainedEmployeeUiSource = functionSource(rendererSource, 'renderEmployeeRecovery');
+assert.match(retainedEmployeeUiSource, /data-action="repairSystemNetwork"/);
+assert.match(retainedEmployeeUiSource, /data-action="disconnect"/);
+assert.match(retainedEmployeeUiSource, /无需重新登录/);
+assert.doesNotMatch(
+  retainedEmployeeUiSource,
+  /login-employee|login-feishu|connectGuest/,
+  'a retained employee tunnel must offer repair/disconnect without restarting authentication'
+);
+assert.match(
+  functionSource(rendererSource, 'renderPhone'),
+  /renderNetworkOperationControl\(\)[\s\S]*retainedEmployee[\s\S]*renderEmployeeRecovery\(\)[\s\S]*renderEmployeeLogin/,
+  'the phone must route an authenticated employee tunnel-only state to recovery before login'
+);
+assert.match(
+  functionSource(rendererSource, 'renderAdvancedPhone'),
+  /renderNetworkOperationControl\(\)/,
+  'advanced repair must retain the same cancel and paused controls, including id-less background recovery'
+);
 
 const anonymousUiSource = functionSource(rendererSource, 'renderAnonymousAccessPanel');
 assert.match(anonymousUiSource, /const action = disconnectable \? 'disconnect' : 'connectGuest'/);

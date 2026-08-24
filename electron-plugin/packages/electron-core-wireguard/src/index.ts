@@ -53,6 +53,8 @@ export type WireGuardToolName = 'wg' | 'wg-quick' | 'wireguard-go' | 'wireguard'
 
 export type WireGuardTunnelAction = 'up' | 'down' | 'restart';
 
+export type WireGuardPrivilegedExecution = 'not-started' | 'started' | 'authorization-canceled';
+
 export interface WireGuardRuntimeStatus {
   target: string;
   available: boolean;
@@ -141,6 +143,8 @@ export interface WireGuardTunnelResult {
 
 export interface WireGuardRouteRepairResult {
   ok: boolean;
+  authorizationCanceled?: boolean;
+  privilegedExecution?: WireGuardPrivilegedExecution;
   mode: string;
   configPath: string;
   interfaceName: string | null;
@@ -173,6 +177,8 @@ export interface WireGuardLaunchDaemonStatus {
 }
 
 export interface WireGuardLaunchDaemonResult extends WireGuardLaunchDaemonStatus {
+  authorizationCanceled?: boolean;
+  privilegedExecution?: WireGuardPrivilegedExecution;
   command: string;
   routeLogPath?: string | null;
   routeLogTail?: string | null;
@@ -895,6 +901,8 @@ export async function setWireGuardTunnelState(input: {
 export async function repairWireGuardTunnelRoutes(input: {
   runtime: WireGuardConnectionRuntimeStatus;
   configPath: string;
+  darwinExtraRepairShell?: string | null;
+  beforeDarwinPrivilegedCommand?: () => void;
 }): Promise<WireGuardRouteRepairResult> {
   const profile = parseWireGuardProfile(input.configPath);
   const realInterfaceName = resolveWireGuardRealInterface(input.runtime, profile.interfaceName, profile.addresses);
@@ -906,6 +914,7 @@ export async function repairWireGuardTunnelRoutes(input: {
     command: '',
     routeLogPath: wireGuardRouteLogPath(input.configPath, profile.interfaceName),
     routeLogTail: readTextTail(wireGuardRouteLogPath(input.configPath, profile.interfaceName)),
+    privilegedExecution: 'not-started' as const,
     runtime: input.runtime
   };
   if (!input.runtime.available) {
@@ -948,6 +957,7 @@ export async function repairWireGuardTunnelRoutes(input: {
       return {
         ...baseResult,
         ok: true,
+        privilegedExecution: 'started',
         command: command.displayCommand,
         routeLogTail: readTextTail(baseResult.routeLogPath),
         stdout: result.stdout,
@@ -957,9 +967,12 @@ export async function repairWireGuardTunnelRoutes(input: {
           : '已修复 HDO split DNS 优先级。'
       };
     } catch (err) {
+      const authorizationCanceled = isWireGuardAuthorizationCancelled(command, err);
       return {
         ...baseResult,
         ok: false,
+        authorizationCanceled,
+        privilegedExecution: authorizationCanceled ? 'authorization-canceled' : 'started',
         command: command.displayCommand,
         routeLogTail: readTextTail(baseResult.routeLogPath),
         message: wireGuardCommandErrorMessage(command, err)
@@ -1003,37 +1016,43 @@ export async function repairWireGuardTunnelRoutes(input: {
     `ifconfig ${shellQuote(realInterfaceName)} >/dev/null`,
     ...darwinEndpointBypassCommands(profile.endpointHosts, '"$ROUTE_LOG"'),
     ...routeDownCommands,
-    ...routeUpCommands
+    ...routeUpCommands,
+    ...(input.darwinExtraRepairShell ? [input.darwinExtraRepairShell] : [])
   ].join('\n');
   const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
-  const displayCommand = `osascript -e ${shellQuote(script)}`;
+  const repairCommand: WireGuardTunnelCommand = {
+    action: 'up',
+    platform: input.runtime.platform,
+    configPath: input.configPath,
+    command: 'osascript',
+    args: ['-e', script],
+    displayCommand: `osascript -e ${shellQuote(script)}`,
+    needsAdmin: true,
+    runtime: input.runtime
+  };
+  input.beforeDarwinPrivilegedCommand?.();
   try {
     const result = await execFileAsync('osascript', ['-e', script]);
     return {
       ...baseResult,
       ok: true,
-      command: displayCommand,
+      privilegedExecution: 'started',
+      command: repairCommand.displayCommand,
       routeLogTail: readTextTail(baseResult.routeLogPath),
       stdout: result.stdout,
       stderr: result.stderr,
       message: `已把 HDO 路由重新绑定到 ${realInterfaceName}。`
     };
   } catch (err) {
+    const authorizationCanceled = isWireGuardAuthorizationCancelled(repairCommand, err);
     return {
       ...baseResult,
       ok: false,
-      command: displayCommand,
+      authorizationCanceled,
+      privilegedExecution: authorizationCanceled ? 'authorization-canceled' : 'started',
+      command: repairCommand.displayCommand,
       routeLogTail: readTextTail(baseResult.routeLogPath),
-      message: wireGuardCommandErrorMessage({
-        action: 'up',
-        platform: input.runtime.platform,
-        configPath: input.configPath,
-        command: 'osascript',
-        args: ['-e', script],
-        displayCommand,
-        needsAdmin: true,
-        runtime: input.runtime
-      }, err)
+      message: wireGuardCommandErrorMessage(repairCommand, err)
     };
   }
 }
@@ -1084,12 +1103,14 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
   runtime: WireGuardConnectionRuntimeStatus;
   configPath: string;
   serviceIdentity?: WireGuardServiceIdentity;
+  beforeDarwinPrivilegedCommand?: () => void;
 }): Promise<WireGuardLaunchDaemonResult> {
   const base = getDarwinWireGuardLaunchDaemonStatus(input);
   if (!base.supported) {
     return {
       ...base,
       ok: false,
+      privilegedExecution: 'not-started',
       command: '',
       message: '当前平台不支持 WireGuard LaunchDaemon。'
     };
@@ -1098,40 +1119,28 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
     return {
       ...base,
       ok: false,
+      privilegedExecution: 'not-started',
       command: '',
       message: input.runtime.error ?? 'WireGuard runtime unavailable'
     };
   }
+  let assets: DarwinLaunchDaemonAssets;
+  let script: string;
+  let displayCommand: string;
   try {
-    const assets = darwinLaunchDaemonAssets(input.runtime, input.configPath, {
+    assets = darwinLaunchDaemonAssets(input.runtime, input.configPath, {
       writeSetConfig: true,
       serviceIdentity: input.serviceIdentity
     });
     const shellCommand = darwinLaunchDaemonInstallShell(assets, input.serviceIdentity?.darwinExtraInstallShell);
-    const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
-    const displayCommand = `osascript -e ${shellQuote(script)}`;
-    const result = await execFileAsync('osascript', ['-e', script]);
-    const { status, tunnelStatus } = await waitForDarwinLaunchDaemonReady(input);
-    const tunnelActive = tunnelStatus?.active === true && (tunnelStatus.missingRoutes?.length ?? 0) === 0;
-    return {
-      ...status,
-      ok: tunnelActive || status.running || status.loaded,
-      command: displayCommand,
-      routeLogPath: assets.routeLogPath,
-      routeLogTail: readTextTail(assets.routeLogPath),
-      stdout: result.stdout,
-      stderr: result.stderr,
-      message: tunnelActive || status.running
-        ? `已安装并启动 ${assets.displayName} 系统守护。`
-        : (status.loaded
-            ? `已安装 ${assets.displayName} 系统守护，正在等待 tunnel 就绪。`
-            : `已安装 ${assets.displayName} 系统守护，但 launchd 尚未报告运行状态。`)
-    };
+    script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
+    displayCommand = `osascript -e ${shellQuote(script)}`;
   } catch (err) {
     const status = getDarwinWireGuardLaunchDaemonStatus(input);
     return {
       ...status,
       ok: false,
+      privilegedExecution: 'not-started',
       command: 'osascript -e <install-wireguard-launchdaemon>',
       routeLogPath: wireGuardRouteLogPathFromConfig(input.configPath),
       routeLogTail: readTextTail(wireGuardRouteLogPathFromConfig(input.configPath)),
@@ -1145,6 +1154,51 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
         needsAdmin: true,
         runtime: input.runtime
       }, err)
+    };
+  }
+
+  input.beforeDarwinPrivilegedCommand?.();
+  try {
+    const result = await execFileAsync('osascript', ['-e', script]);
+    const { status, tunnelStatus } = await waitForDarwinLaunchDaemonReady(input);
+    const tunnelActive = tunnelStatus?.active === true && (tunnelStatus.missingRoutes?.length ?? 0) === 0;
+    return {
+      ...status,
+      ok: tunnelActive || status.running || status.loaded,
+      privilegedExecution: 'started',
+      command: displayCommand,
+      routeLogPath: assets.routeLogPath,
+      routeLogTail: readTextTail(assets.routeLogPath),
+      stdout: result.stdout,
+      stderr: result.stderr,
+      message: tunnelActive || status.running
+        ? `已安装并启动 ${assets.displayName} 系统守护。`
+        : (status.loaded
+            ? `已安装 ${assets.displayName} 系统守护，正在等待 tunnel 就绪。`
+            : `已安装 ${assets.displayName} 系统守护，但 launchd 尚未报告运行状态。`)
+    };
+  } catch (err) {
+    const status = getDarwinWireGuardLaunchDaemonStatus(input);
+    const command: WireGuardTunnelCommand = {
+      action: 'up',
+      platform: input.runtime.platform,
+      configPath: input.configPath,
+      command: 'osascript',
+      args: ['-e', script],
+      displayCommand,
+      needsAdmin: true,
+      runtime: input.runtime
+    };
+    const authorizationCanceled = isWireGuardAuthorizationCancelled(command, err);
+    return {
+      ...status,
+      ok: false,
+      authorizationCanceled,
+      privilegedExecution: authorizationCanceled ? 'authorization-canceled' : 'started',
+      command: displayCommand,
+      routeLogPath: assets.routeLogPath,
+      routeLogTail: readTextTail(assets.routeLogPath),
+      message: wireGuardCommandErrorMessage(command, err)
     };
   }
 }
@@ -1186,23 +1240,40 @@ export async function uninstallDarwinWireGuardLaunchDaemon(input: {
     return {
       ...base,
       ok: false,
+      privilegedExecution: 'not-started',
       command: '',
       message: '当前平台不支持 WireGuard LaunchDaemon。'
     };
   }
+  let assets: DarwinLaunchDaemonAssets | null = null;
+  let command: WireGuardTunnelCommand | null = null;
+  let privilegedExecution: WireGuardPrivilegedExecution = 'not-started';
   try {
-    const assets = darwinLaunchDaemonAssets(input.runtime, input.configPath, {
+    assets = darwinLaunchDaemonAssets(input.runtime, input.configPath, {
       writeSetConfig: false,
       serviceIdentity: input.serviceIdentity
     });
     const shellCommand = darwinLaunchDaemonUninstallShell(assets, input.serviceIdentity?.darwinExtraUninstallShell);
     const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
     const displayCommand = `osascript -e ${shellQuote(script)}`;
+    command = {
+      action: 'down',
+      platform: input.runtime.platform,
+      configPath: input.configPath,
+      command: 'osascript',
+      args: ['-e', script],
+      displayCommand,
+      needsAdmin: true,
+      runtime: input.runtime
+    };
+    privilegedExecution = 'started';
     const result = await execFileAsync('osascript', ['-e', script]);
     const status = getDarwinWireGuardLaunchDaemonStatus(input);
     return {
       ...status,
       ok: !status.loaded && !status.installed,
+      authorizationCanceled: false,
+      privilegedExecution,
       command: displayCommand,
       routeLogPath: assets.routeLogPath,
       routeLogTail: readTextTail(assets.routeLogPath),
@@ -1212,13 +1283,18 @@ export async function uninstallDarwinWireGuardLaunchDaemon(input: {
     };
   } catch (err) {
     const status = getDarwinWireGuardLaunchDaemonStatus(input);
+    const authorizationCanceled = privilegedExecution === 'started'
+      && command !== null
+      && isWireGuardAuthorizationCancelled(command, err);
     return {
       ...status,
       ok: false,
-      command: 'osascript -e <uninstall-wireguard-launchdaemon>',
-      routeLogPath: wireGuardRouteLogPathFromConfig(input.configPath),
-      routeLogTail: readTextTail(wireGuardRouteLogPathFromConfig(input.configPath)),
-      message: wireGuardCommandErrorMessage({
+      authorizationCanceled,
+      privilegedExecution: authorizationCanceled ? 'authorization-canceled' : privilegedExecution,
+      command: command?.displayCommand || 'osascript -e <uninstall-wireguard-launchdaemon>',
+      routeLogPath: assets?.routeLogPath || wireGuardRouteLogPathFromConfig(input.configPath),
+      routeLogTail: readTextTail(assets?.routeLogPath || wireGuardRouteLogPathFromConfig(input.configPath)),
+      message: wireGuardCommandErrorMessage(command || {
         action: 'down',
         platform: input.runtime.platform,
         configPath: input.configPath,
@@ -4931,10 +5007,7 @@ function commandOutputMessage(err: unknown): string | null {
 }
 
 function isAppleScriptAuthorizationCancelled(message: string): boolean {
-  return message.includes('(-128)')
-    || message.includes('用户已取消')
-    || /user canceled/i.test(message)
-    || /cancelled/i.test(message);
+  return message.includes('(-128)');
 }
 
 function isPathLike(value: string): boolean {

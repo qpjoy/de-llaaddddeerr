@@ -8,4 +8,5 @@ resources:
   - 31-admin-api.yaml
   - 32-projector.yaml
   - 33-ingest.yaml
+  - 34-classifier.yaml
   - 40-network-policy.yaml

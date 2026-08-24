@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-core-wireguard",
-  "version": "2.3.15",
+  "version": "2.3.16",
   "private": false,
   "description": "WireGuard mesh profile contracts and config rendering helpers for QPJoy HDO.",
   "license": "UNLICENSED",
@@ -24,6 +24,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "smoke:darwin-route": "pnpm build && node scripts/darwin-default-route-smoke.cjs",
+    "test:darwin-privileged-handoff": "pnpm build && node --test scripts/darwin-privileged-handoff.test.cjs",
     "smoke:windows-nrpt": "pnpm build && node scripts/windows-nrpt-status-smoke.cjs && node scripts/windows-endpoint-bypass-smoke.cjs",
     "smoke:windows-endpoint-bypass": "pnpm build && node scripts/windows-endpoint-bypass-smoke.cjs",
     "prepack": "pnpm build",

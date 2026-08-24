@@ -586,6 +586,14 @@ function ProvinceOpinionPipelineCard({ pipeline, loading, error, onOpen, onRetry
             <div><dt>固定表</dt><dd><code>public.monitor_strategy_results</code></dd></div>
             <div><dt>输入任务</dt><dd>1 个固定结果表</dd></div>
             <div><dt>同步周期</dt><dd>{formatNumber(pipeline?.syncIntervalSeconds || 300)} 秒</dd></div>
+            <div><dt>Agent 归类</dt><dd><StatusBadge
+              status={pipeline?.classification?.status === 'active' ? 'active' : 'disabled'}
+              label={pipeline?.classification?.status === 'active'
+                ? `运行中 · 待处理 ${formatNumber(pipeline.classification.tasks?.pending || 0)}`
+                : '独立暂停'} /></dd></div>
+            <div><dt>HanLP 索引</dt><dd><StatusBadge
+              status={pipeline?.indexing?.readyToSchedule ? 'active' : 'suspended'}
+              label={pipeline?.indexing?.readyToSchedule ? '严格后端已配置' : '阻止启用'} /></dd></div>
             <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
           </dl>
           <div className="mih-telegram-card__actions">
@@ -694,7 +702,7 @@ function ProvinceOpinionPipelineModal({
 
   const runSync = () => mutate(
     'sync',
-    () => adminApi.runProvinceOpinionPipeline(token, { batchSize: 1000 }),
+    () => adminApi.runProvinceOpinionPipeline(token, { batchSize: 200 }),
     '全国省份舆情同步已提交',
   )
 
@@ -799,6 +807,9 @@ function ProvinceOpinionPipelineModal({
           <div><strong>可靠水位</strong><p><code>updated_at + id</code>；上游需增加非空 updated_at，并保证 province/source/heat/LLM 的每次更新都会推进。</p></div>
           <div><strong>源端游标索引</strong><p><code>(updated_at, id)</code>；禁止不可观察的硬删除，并保证迟提交不会落到已越过的 checkpoint 后方。</p></div>
           <div><strong>Hub 在线服务索引</strong><p>{servingIndexes.ready ? '已就绪' : `待安装：${(servingIndexes.missing || []).join('、') || '状态不可用'}`}<br /><code>scripts/province-opinion-serving-indexes.sql</code></p></div>
+          <div><strong>HanLP 分词门禁</strong><p>{pipeline.indexing?.readyToSchedule
+            ? `已配置 ${pipeline.indexing.configuredBackend}；服务瞬时故障时严格等待并退避`
+            : '未配置严格 HanLP 后端/URL；固定源不能启用或调度'}<br /><code>MX_COMMON_SEGMENTER=hanlp</code></p></div>
         </div>
         {progress.loading && !progress.data ? <LoadingState label="正在核对省份舆情源表" /> : null}
         {progress.error ? <ErrorState error={progress.error} onRetry={progress.refresh} /> : null}
@@ -835,11 +846,16 @@ function ProvinceOpinionPipelineModal({
         </div>
       </Panel>
 
-      <Panel title="清洗、隐私与未来归档" subtitle="确定性入库不调用 Agent；分类推断保留为独立衍生层可能性">
+      <Panel title="清洗、Agent 归档与严格索引" subtitle="三段独立恢复：固定源提交、Agent 派生分析、HanLP 分词投影">
         <div className="mih-telegram-capabilities">
           <div><strong>可公开字段</strong><p>province 规范为 ISO 代码，heat_score 为数值列；来源平台保持内容来源，不覆盖 Hub 授权平台。</p></div>
-          <div><strong>仅 Admin 证据</strong><p>strategy/run/hash、关键词、heat_metrics、llm_reason、raw、source 表引用只留在原始对象与修订，不进入公开响应。</p></div>
-          <div><strong>未来 Agent 归档</strong><p>使用独立、追加式 classification assertion，锚定 record + source revision；不写回 raw、canonical identity 或 checkpoint。</p></div>
+          <div><strong>追加式原始修订</strong><p>strategy/run/hash、关键词、llm_reason 与 raw 按 source revision 保留；仅抽取去重后的语义字段和证据窗口进入模型。</p></div>
+          <div><strong>多维 Agent 归档</strong><p>事件省份、发布者省份、地理范围、事件类型与来源类型分别形成 assertion；Agent 只能提案，不改 raw、canonical 或 checkpoint。</p></div>
+          <div><strong>当前 Agent 状态</strong><p>{pipeline.classification
+            ? `${pipeline.classification.status === 'active' ? '已启用' : '已暂停'} · 待处理 ${formatNumber(pipeline.classification.tasks?.pending || 0)} · 失败隔离 ${formatNumber(pipeline.classification.tasks?.dead || 0)} · 待审核 ${formatNumber(pipeline.classification.assertions?.proposed || 0)}`
+            : 'Agent 派生面尚不可用；固定源同步与索引不受影响。'}</p></div>
+          <div><strong>严格 HanLP 索引</strong><p>每条 canonical 投影必须经过 HanLP；服务过载或不可达时保留待投影并退避，不写入本地 fallback 分词结果。</p></div>
+          <div><strong>三级背压</strong><p>源库每页 200 条并留 2 秒续页间隔；Agent 默认 12 条/分钟且单并发；HanLP live batch 与 bulk 并发均受 Hub 专用上限保护。</p></div>
         </div>
       </Panel>
 
@@ -2979,6 +2995,9 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.agent(token), [token])
   const state = useRemoteData(load, onUnauthorized)
   const [editingKind, setEditingKind] = useState(null)
+  const [testingProvider, setTestingProvider] = useState(null)
+  const [providerTests, setProviderTests] = useState({})
+  const [pipelineBusy, setPipelineBusy] = useState(null)
 
   if (state.loading && !state.data) return <LoadingState label="正在读取模型链路" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
@@ -2988,6 +3007,7 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
   const embeddingSetting = agentProviderSetting(agent, 'embedding')
   const chatProviders = mergeProviderStatus(chatSetting.providers, agent.chat)
   const embeddingProviders = mergeProviderStatus(embeddingSetting.providers, agent.embeddings)
+  const pipelines = Array.isArray(agent.pipelines) ? agent.pipelines : []
   const canEdit = session?.kind === 'admin-token'
 
   const saveSetting = async (kind, body) => {
@@ -2997,6 +3017,7 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
         ...agent,
         settings: { ...agent.settings, [kind]: updated },
       })
+      setProviderTests({})
       notify?.(
         updated.runtimeApplied === false
           ? `${kind === 'chat' ? '对话' : 'Embedding'} Provider 配置已保存，运行时正在重试应用`
@@ -3008,6 +3029,37 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
     } catch (error) {
       if (error?.status === 401) onUnauthorized?.(error)
       throw error
+    }
+  }
+
+  const testProvider = async (kind, providerId, key) => {
+    setTestingProvider(key)
+    try {
+      const result = await adminApi.testAgentProvider(token, kind, providerId)
+      setProviderTests((current) => ({ ...current, [key]: result }))
+      notify?.(`${providerId} 连接成功（${result.latencyMs} ms）`, 'success')
+      state.refresh()
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      setProviderTests((current) => ({ ...current, [key]: { ok: false, message: error.message } }))
+      notify?.(`${providerId} 连接测试失败：${error.message}`, 'warning')
+    } finally {
+      setTestingProvider(null)
+    }
+  }
+
+  const runPipelineAction = async (key, action, operation, message) => {
+    setPipelineBusy(`${key}:${action}`)
+    try {
+      await operation()
+      notify?.(message, 'success')
+      await state.refresh()
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      notify?.(error.message, 'warning')
+      return null
+    } finally {
+      setPipelineBusy(null)
     }
   }
 
@@ -3034,6 +3086,9 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
         providers={chatProviders}
         canEdit={canEdit}
         onEdit={() => setEditingKind('chat')}
+        onTest={testProvider}
+        testingProvider={testingProvider}
+        providerTests={providerTests}
       />
       <AgentProviderPanel
         kind="embedding"
@@ -3043,13 +3098,26 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
         providers={embeddingProviders}
         canEdit={canEdit}
         onEdit={() => setEditingKind('embedding')}
+        onTest={testProvider}
+        testingProvider={testingProvider}
+        providerTests={providerTests}
       />
-      <Panel title="当前接线边界" subtitle="模型已配置不等于所有数据源都在执行智能清洗">
+      {pipelines.map((pipeline) => (
+        <AgentPipelinePanel
+          key={pipeline.pipelineKey}
+          pipeline={pipeline}
+          canEdit={canEdit}
+          busy={pipelineBusy}
+          onAction={runPipelineAction}
+          token={token}
+        />
+      ))}
+      <Panel title="处理边界" subtitle="固定省份源已接入独立 Agent 派生面；同步、分类与严格 HanLP 索引各自可恢复">
         <div className="mih-agent-scope-grid">
-          <div><strong>文件映射建议</strong><p>已接线，但只在管理员预览时显式勾选；仅发送列名，建议仍需人工批准。</p></div>
-          <div><strong>数据库 / Telegram 清洗</strong><p>使用确定性、版本化 mapping。逐行分类能力尚未接入，不会静默把源数据发送给模型。</p></div>
-          <div><strong>向量检索</strong><p>{embeddingProviders.length > 0 ? 'Embedding worker 已配置，可生成独立 chunk 索引。' : '未配置 Embedding provider；PG/全文检索不受影响。'}</p></div>
-          <div><strong>建议的下一步</strong><p>只把 schema drift 或拒绝行副本送入隔离队列，并记录模型、prompt、数据范围、费用和人工结论。</p></div>
+          <div><strong>文件映射建议</strong><p>管理员显式选择后，只发送列名、类型族与无值结构统计；建议仍需人工批准。</p></div>
+          <div><strong>全国省份舆情</strong><p>先规则提取，只有歧义项调用模型；事件省份、发布者省份与地理范围分别归档，Agent 只能提案。</p></div>
+          <div><strong>严格 HanLP 索引</strong><p>canonical 写入后由 projector 严格调用 HanLP；服务异常时保持待投影并退避，不写降级分词索引。</p></div>
+          <div><strong>向量检索</strong><p>{embeddingProviders.length > 0 ? 'Embedding worker 已配置；正文 chunk 会发送给所选 Embedding Provider。' : '未配置 Embedding provider；PG/全文检索不受影响。'}</p></div>
         </div>
       </Panel>
       {editingKind ? (
@@ -3089,7 +3157,10 @@ function mergeProviderStatus(configured, runtime) {
   })
 }
 
-function AgentProviderPanel({ kind, title, subtitle, setting, providers, canEdit, onEdit }) {
+function AgentProviderPanel({
+  kind, title, subtitle, setting, providers, canEdit, onEdit,
+  onTest, testingProvider, providerTests,
+}) {
   const sourceLabel = setting.source === 'database' ? '数据库' : '环境变量'
   return (
     <Panel
@@ -3106,18 +3177,154 @@ function AgentProviderPanel({ kind, title, subtitle, setting, providers, canEdit
         <span>Revision <code>{setting.revision ?? '—'}</code></span>
         {!canEdit ? <span>权限 <strong>只读</strong></span> : null}
       </div>
-      <ProviderTable providers={providers} kind={kind} />
+      <ProviderTable
+        providers={providers}
+        kind={kind}
+        revision={setting.revision}
+        canTest={canEdit}
+        onTest={onTest}
+        testingProvider={testingProvider}
+        providerTests={providerTests}
+      />
     </Panel>
   )
 }
 
-function ProviderTable({ providers, kind }) {
+function formatAssertionValue(value) {
+  if (value === null) return 'NULL'
+  if (typeof value === 'string') return value
+  try { return JSON.stringify(value) } catch { return '—' }
+}
+
+function AgentPipelinePanel({ pipeline, canEdit, busy, onAction, token }) {
+  const [rate, setRate] = useState(String(pipeline.itemsPerMinute || 12))
+  useEffect(() => setRate(String(pipeline.itemsPerMinute || 12)), [pipeline.itemsPerMinute])
+
+  const key = pipeline.pipelineKey
+  const tasks = pipeline.tasks || {}
+  const assertions = pipeline.assertions || {}
+  const recent = Array.isArray(pipeline.recentAssertions) ? pipeline.recentAssertions : []
+  const pipelineBusy = typeof busy === 'string' && busy.startsWith(`${key}:`)
+
+  const updateStatus = (status) => onAction(
+    key,
+    `status-${status}`,
+    () => adminApi.updateAgentPipeline(token, key, {
+      expectedRevision: pipeline.revision,
+      status,
+    }),
+    status === 'active' ? 'Agent 分析管线已启用' : 'Agent 分析管线已暂停；现有任务和证据均已保留',
+  )
+
+  const saveRate = (event) => {
+    event.preventDefault()
+    const itemsPerMinute = Number(rate)
+    if (!Number.isInteger(itemsPerMinute) || itemsPerMinute < 1 || itemsPerMinute > 60) return
+    onAction(
+      key,
+      'rate',
+      () => adminApi.updateAgentPipeline(token, key, {
+        expectedRevision: pipeline.revision,
+        itemsPerMinute,
+      }),
+      `Agent 分析速率已更新为每分钟 ${itemsPerMinute} 条`,
+    )
+  }
+
+  return (
+    <Panel
+      title={pipeline.displayName || key}
+      subtitle="规则先行、模型只处理歧义；事件省份、发布者省份和地理范围分别保存，模型结果仅作为待审核提案"
+      actions={<>
+        <StatusBadge
+          status={pipeline.status === 'active' ? 'active' : 'disabled'}
+          label={pipeline.status === 'active' ? '分析中' : '已暂停'}
+        />
+        {canEdit ? pipeline.status === 'active' ? (
+          <button className="qp-button qp-button--ghost" type="button" disabled={pipelineBusy} onClick={() => updateStatus('paused')}>
+            <Pause size={16} aria-hidden="true" />暂停
+          </button>
+        ) : (
+          <button className="qp-button qp-button--primary" type="button" disabled={pipelineBusy} onClick={() => updateStatus('active')}>
+            <Play size={16} aria-hidden="true" />启用
+          </button>
+        ) : null}
+      </>}
+    >
+      <div className="mih-agent-chain-meta">
+        <span>Pipeline <code>{key}</code></span>
+        <span>Revision <code>{pipeline.revision}</code></span>
+        <span>分析版本 <code>{pipeline.analysisVersion}</code></span>
+        <span>规则 / Taxonomy <code>{pipeline.ruleVersion}</code><code>{pipeline.taxonomyVersion}</code></span>
+        <span>全局并发 <strong>{pipeline.maxInFlight || 1}</strong></span>
+      </div>
+      <div className="mih-metric-grid mih-agent-pipeline-metrics">
+        <MetricCard icon={ArrowClockwise} label="待处理" value={formatNumber(tasks.pending || 0)} hint={tasks.oldestPendingAt ? `最早 ${formatDate(tasks.oldestPendingAt)}` : '当前无积压'} tone={tasks.pending ? 'warning' : 'success'} />
+        <MetricCard icon={Play} label="处理中" value={formatNumber(tasks.running || 0)} hint="数据库租约与 owner fence" tone={tasks.running ? 'info' : 'primary'} />
+        <MetricCard icon={Database} label="已完成" value={formatNumber(tasks.succeeded || 0)} hint={`总任务 ${formatNumber(tasks.total || 0)}`} tone="success" />
+        <MetricCard icon={Brain} label="待审核提案" value={formatNumber(assertions.proposed || 0)} hint={`已接受 ${formatNumber(assertions.accepted || 0)}`} tone={assertions.proposed ? 'warning' : 'primary'} />
+        <MetricCard icon={Warning} label="失败隔离" value={formatNumber(tasks.dead || 0)} hint={`已淘汰旧版本 ${formatNumber(tasks.superseded || 0)}`} tone={tasks.dead ? 'danger' : 'primary'} />
+      </div>
+      {canEdit ? (
+        <form className="mih-agent-pipeline-controls" onSubmit={saveRate}>
+          <label>
+            <span>全局处理速率（条/分钟）</span>
+            <input className="qp-input" type="number" min="1" max="60" step="1" value={rate}
+              onChange={(event) => setRate(event.target.value)} disabled={pipelineBusy} />
+          </label>
+          <button className="qp-button qp-button--outline" type="submit" disabled={pipelineBusy || Number(rate) === pipeline.itemsPerMinute}>保存限速</button>
+          <button className="qp-button qp-button--ghost" type="button" disabled={pipelineBusy}
+            onClick={() => onAction(key, 'materialize', () => adminApi.materializeAgentPipeline(token, key), '已核对当前记录并补齐缺失分析任务')}>
+            <ArrowClockwise size={16} aria-hidden="true" />补齐当前积压
+          </button>
+          {tasks.dead > 0 ? (
+            <button className="qp-button qp-button--ghost" type="button" disabled={pipelineBusy}
+              onClick={() => onAction(key, 'retry-dead', () => adminApi.retryDeadAgentPipeline(token, key), '失败隔离任务已重新排队')}>
+              <ArrowClockwise size={16} aria-hidden="true" />重试失败任务
+            </button>
+          ) : null}
+          <small>默认每分钟 12 条、全局单并发；暂停不影响固定源同步、严格 HanLP 索引或 Hub 可用性。</small>
+        </form>
+      ) : null}
+      <DataTable label={`${pipeline.displayName || key} 最近分类证据`}>
+        <thead><tr><th>字段</th><th>建议值</th><th>方法</th><th>置信度</th><th>状态</th><th>时间</th></tr></thead>
+        <tbody>
+          {recent.map((item) => <tr key={item.assertionId}>
+            <td><code>{item.fieldKey}</code></td>
+            <td><code>{formatAssertionValue(item.proposedValue)}</code></td>
+            <td>{item.method}{item.providerId ? <small>{item.providerId} · {item.model}</small> : null}</td>
+            <td>{Math.round(Number(item.confidence || 0) * 100)}%</td>
+            <td><StatusBadge status={item.status === 'accepted' ? 'active' : item.status === 'proposed' ? 'pending' : item.status} label={item.status} /></td>
+            <td>{formatDate(item.createdAt)}</td>
+          </tr>)}
+          {recent.length === 0 ? <tr><td colSpan="6" className="mih-agent-provider-empty">尚无分析证据；管线默认暂停，启用前可先测试对话 Provider。</td></tr> : null}
+        </tbody>
+      </DataTable>
+    </Panel>
+  )
+}
+
+function providerTestKey(kind, provider, revision) {
+  return JSON.stringify([
+    kind,
+    provider.id,
+    revision,
+    provider.baseUrl,
+    provider.model,
+    provider.dimensions ?? null,
+  ])
+}
+
+function ProviderTable({ providers, kind, revision, canTest, onTest, testingProvider, providerTests }) {
   return (
     <DataTable label={`${kind === 'chat' ? '对话' : 'Embedding'} Provider 链`}>
-      <thead><tr><th>优先级</th><th>Provider</th><th>模型</th><th>Endpoint</th><th>状态</th><th>凭据</th><th>熔断</th></tr></thead>
+      <thead><tr><th>优先级</th><th>Provider</th><th>模型</th><th>Endpoint</th><th>状态</th><th>凭据</th><th>熔断</th>{canTest ? <th>连接测试</th> : null}</tr></thead>
       <tbody>
-        {providers.map((provider, index) => (
-          <tr key={provider.id}>
+        {providers.map((provider, index) => {
+          const testKey = providerTestKey(kind, provider, revision)
+          const test = providerTests?.[testKey]
+          const testDisabled = provider.authMode !== 'none' && !provider.keyConfigured
+          return <tr key={provider.id}>
             <td><strong>{index === 0 ? '首选' : `降级 ${index}`}</strong><small>priority {provider.priority}</small></td>
             <td><code>{provider.id}</code></td>
             <td><code>{provider.model}</code>{kind === 'embedding' ? <small>{provider.dimensions || '—'} dimensions</small> : null}</td>
@@ -3133,9 +3340,21 @@ function ProviderTable({ providers, kind }) {
                 status={provider.circuit === 'closed' ? 'active' : provider.circuit === 'open' ? 'suspended' : 'pending'}
                 label={{ closed: '正常', degraded: '有失败', open: '已熔断' }[provider.circuit] || provider.circuit} />
             ) : '—'}</td>
+            {canTest ? <td>
+              <button
+                className="qp-button qp-button--outline"
+                type="button"
+                disabled={testDisabled || Boolean(testingProvider)}
+                onClick={() => onTest(kind, provider.id, testKey)}
+              >
+                <Plugs size={15} aria-hidden="true" />
+                {testingProvider === testKey ? '测试中' : '测试'}
+              </button>
+              {test ? <small>{test.ok ? `${test.latencyMs} ms · 成功` : '最近失败'}</small> : null}
+            </td> : null}
           </tr>
-        ))}
-        {providers.length === 0 ? <tr><td colSpan="7" className="mih-agent-provider-empty">尚未配置 Provider</td></tr> : null}
+        })}
+        {providers.length === 0 ? <tr><td colSpan={canTest ? 8 : 7} className="mih-agent-provider-empty">尚未配置 Provider</td></tr> : null}
       </tbody>
     </DataTable>
   )
