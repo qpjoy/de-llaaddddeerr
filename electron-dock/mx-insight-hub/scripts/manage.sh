@@ -1059,6 +1059,22 @@ warn_local_postgres_present() {
   say "        bash scripts/manage.sh ops internal-production decommission-local-postgres" >&2
 }
 
+# Reconcile the two Hub-local PostgreSQL indexes that gate activation of the
+# fixed province-opinion source. The SQL is deliberately streamed from the
+# operator checkout into the shared PostgreSQL Pod: the runtime image neither
+# ships psql nor needs permission to perform DDL. The script is idempotent and
+# uses CREATE/DROP INDEX CONCURRENTLY, so it must remain outside the migration
+# transaction and before workload rollout reports the deploy as successful.
+ensure_province_opinion_serving_indexes() {
+  local sql_file="${ROOT_DIR}/scripts/province-opinion-serving-indexes.sql"
+  [ -r "$sql_file" ] || die "province-opinion serving-index SQL is missing: ${sql_file}"
+  say "reconciling province-opinion serving indexes"
+  if ! kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+    psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 <"$sql_file"; then
+    die "province-opinion serving indexes could not be reconciled"
+  fi
+}
+
 # Explicit, irreversible removal of the retired local PostgreSQL.
 #
 # Separate command, never part of deploy, and it names what it will destroy
@@ -1108,6 +1124,8 @@ apply_k8s() {
     k8s_migration_diagnostics
     die "migration did not complete"
   fi
+
+  ensure_province_opinion_serving_indexes
 
   render_file "${K8S_DIR}/30-public-api.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/31-admin-api.yaml" | kubectl apply -f -

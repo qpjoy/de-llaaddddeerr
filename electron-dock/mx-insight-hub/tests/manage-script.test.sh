@@ -616,6 +616,52 @@ fi
 grep -q -- '--from-literal=MX_COMMON_HANLP_URL=' <<<"$runtime_config_body"
 printf 'ok - regular deploy discovers HanLP before publishing runtime config\n'
 
+# Fixed-source serving indexes are an idempotent deploy prerequisite, not a
+# separate operator memory step. They must run only after schema migrations and
+# before any API workload is applied/restarted.
+migration_complete_line="$(grep -n -- '--for=condition=complete job/mx-insight-hub-migrate' <<<"$apply_k8s_body" | cut -d: -f1)"
+province_indexes_line="$(grep -n '^  ensure_province_opinion_serving_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
+first_api_apply_line="$(grep -n '30-public-api.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
+if ! [ "$migration_complete_line" -lt "$province_indexes_line" ] \
+  || ! [ "$province_indexes_line" -lt "$first_api_apply_line" ]; then
+  printf 'not ok - province serving indexes are not reconciled after migrations and before API rollout\n' >&2
+  exit 1
+fi
+
+province_index_stdin="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-province-index-stdin.XXXXXX")"
+province_index_argv="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-province-index-argv.XXXXXX")"
+PROVINCE_INDEX_STDIN="$province_index_stdin" \
+PROVINCE_INDEX_ARGV="$province_index_argv" \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    printf "%s\n" "$*" >"$PROVINCE_INDEX_ARGV"
+    cat >"$PROVINCE_INDEX_STDIN"
+  }
+  ensure_province_opinion_serving_indexes
+' _ "$ROOT_DIR"
+assert_eq \
+  '-n mx-common exec -i statefulset/mx-common-postgres -- psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1' \
+  "$(cat "$province_index_argv")" \
+  'deploy streams province indexes to the shared Hub database'
+cmp -s "$ROOT_DIR/scripts/province-opinion-serving-indexes.sql" "$province_index_stdin" \
+  || { printf 'not ok - deploy did not stream the exact province serving-index SQL\n' >&2; exit 1; }
+
+province_index_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-province-index-error.XXXXXX")"
+if bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() { cat >/dev/null; return 1; }
+  ensure_province_opinion_serving_indexes
+' _ "$ROOT_DIR" >"$province_index_error" 2>&1; then
+  printf 'not ok - deploy continued after province serving-index reconciliation failed\n' >&2
+  exit 1
+fi
+grep -q 'province-opinion serving indexes could not be reconciled' "$province_index_error"
+rm -f -- "$province_index_stdin" "$province_index_argv" "$province_index_error"
+printf 'ok - province serving-index reconciliation is exact and fail-closed\n'
+
 run_hanlp_hub_smoke() (
   export MX_COMMON_HANLP_URL=http://hanlp.test
   export MX_INSIGHT_SEARCH_READY=1

@@ -185,7 +185,10 @@ Compose/manual 环境必须显式设置 `MX_COMMON_SEGMENTER=hanlp`、可达的
 `MX_COMMON_HANLP_URL`，并单独运行 projector；当前 Compose 文件不包含 HanLP/ES 服务，
 不能当成完整索引环境。
 
-两个省份服务索引需另行在线安装：
+`ops internal-production deploy|apply` 会在 migration Job 成功后、API/worker rollout 前，
+自动把下列 SQL 流式送入共享 Hub PostgreSQL。已有精确索引时会快速跳过；创建、重建或
+最终有效性校验失败时部署会 fail closed，不再依赖 operator 记住额外命令。手工/Compose
+环境或故障修复仍可单独执行：
 
 ```bash
 cd electron-dock/mx-insight-hub

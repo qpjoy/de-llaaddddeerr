@@ -104,3 +104,21 @@ SELECT c.relname AS index_name, i.indisready, i.indisvalid
      'canonical_province_opinion_latest_idx'
    )
  ORDER BY c.relname;
+
+SELECT count(*) = 2 AND bool_and(i.indisready AND i.indisvalid AND i.indislive)
+         AS province_opinion_serving_indexes_ready
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_index i ON i.indexrelid = c.oid
+ WHERE n.nspname = 'core'
+   AND c.relname IN (
+     'canonical_province_opinion_hot_idx',
+     'canonical_province_opinion_latest_idx'
+   ) \gset
+
+\if :province_opinion_serving_indexes_ready
+  \echo 'province-opinion serving indexes are ready'
+\else
+  \warn 'province-opinion serving indexes did not become ready'
+  \quit 1
+\endif
