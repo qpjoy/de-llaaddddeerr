@@ -1075,6 +1075,22 @@ ensure_province_opinion_serving_indexes() {
   fi
 }
 
+# Reconcile the Hub-local indexes used by canonical Telegram context. This is
+# kept separate from transactional migrations because production datasets are
+# already populated and CREATE/DROP INDEX CONCURRENTLY cannot run in a
+# transaction. The SQL validates the full catalog contract, repairs an invalid
+# or drifted same-name index, and fails the deploy before any API rollout if the
+# two serving indexes are not ready.
+ensure_canonical_context_serving_indexes() {
+  local sql_file="${ROOT_DIR}/scripts/canonical-context-serving-indexes.sql"
+  [ -r "$sql_file" ] || die "canonical context serving-index SQL is missing: ${sql_file}"
+  say "reconciling canonical context serving indexes"
+  if ! kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+    psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 <"$sql_file"; then
+    die "canonical context serving indexes could not be reconciled"
+  fi
+}
+
 # Explicit, irreversible removal of the retired local PostgreSQL.
 #
 # Separate command, never part of deploy, and it names what it will destroy
@@ -1126,6 +1142,7 @@ apply_k8s() {
   fi
 
   ensure_province_opinion_serving_indexes
+  ensure_canonical_context_serving_indexes
 
   render_file "${K8S_DIR}/30-public-api.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/31-admin-api.yaml" | kubectl apply -f -

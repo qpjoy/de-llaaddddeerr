@@ -120,6 +120,47 @@ function resolveSchema(document, schema) {
   return document.components.schemas[schema.$ref.split('/').at(-1)]
 }
 
+function assertCanonicalContextContract(document) {
+  const route = document.paths['/data/canonical/items/{id}/context']?.get
+  assert.ok(route)
+  assert.equal(route.operationId, 'getCanonicalMessageContext')
+  assert.deepEqual(route['x-mx-error-codes']['409'], ['context_not_supported'])
+  assert.deepEqual(route['x-mx-error-codes']['503'], [
+    'stored_data_unavailable',
+    'serving_indexes_unavailable',
+  ])
+  assert.deepEqual(
+    Object.keys(route.responses).map(Number).sort((left, right) => left - right),
+    [200, 400, 401, 403, 404, 409, 429, 503],
+  )
+  const before = route.parameters.find((parameter) => parameter.name === 'before')
+  const after = route.parameters.find((parameter) => parameter.name === 'after')
+  for (const parameter of [before, after]) {
+    assert.equal(parameter.schema.default, 10)
+    assert.equal(parameter.schema.minimum, 0)
+    assert.equal(parameter.schema.maximum, 50)
+  }
+  assert.equal(
+    route.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/CanonicalContextEnvelope',
+  )
+
+  const data = document.components.schemas.CanonicalContextEnvelope.properties.data
+  assert.equal(data.additionalProperties, false)
+  assert.equal(data.properties.contractVersion.const, 'mx-insight-hub.canonical-context.v1')
+  assert.equal(data.properties.items.maxItems, 101)
+  assert.equal(data.properties.anchorIndex.maximum, 50)
+  assert.deepEqual(data.properties.ordering.properties.fields.const, ['eventTime', 'canonicalId'])
+  assert.ok(data.required.includes('storedWindow'))
+  assert.ok(data.required.includes('upstreamCompleteness'))
+
+  const completeness = document.components.schemas.CanonicalContextCompleteness
+  assert.deepEqual(completeness.properties.status.enum, ['unknown', 'bounded', 'attested_complete'])
+  const capability = document.components.schemas.CanonicalContextCapability
+  assert.equal(capability.properties.defaultBefore.const, 10)
+  assert.equal(capability.properties.maxAfter.const, 50)
+}
+
 function assertNightAllPublicContract(document) {
   const compatibility = document.paths['/night-all/search/{operation}'].post
   const compatibilityContent = compatibility.requestBody.content['application/json']
@@ -293,6 +334,10 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /compatibility_store_unavailable/)
     assert.match(html, /\/api\/v1\/data\/stored\/search/)
     assert.match(html, /\/api\/v1\/data\/canonical\/search/)
+    assert.match(html, /\/api\/v1\/data\/canonical\/items\/\{id\}\/context/)
+    assert.match(html, /storedWindow\.hasMoreStoredBefore\/After/)
+    assert.match(html, /upstreamCompleteness/)
+    assert.match(html, /context_not_supported/)
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/messages/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/provinces\/\{province\}\/items/)
@@ -327,6 +372,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(response.status, 200)
     assert.equal(document.openapi, '3.1.0')
     assert.deepEqual(paths.sort(), [
+      '/data/canonical/items/{id}/context',
       '/data/canonical/search',
       '/data/capabilities',
       '/data/public-opinion/items/{id}',
@@ -362,6 +408,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(document.components.schemas.CanonicalSearchRequest.additionalProperties, false)
     assertPublicOpinionContract(document)
     assertNightAllPublicContract(document)
+    assertCanonicalContextContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
       document.components.schemas.CanonicalSearchRequest.properties.searchProfile.default,
@@ -420,6 +467,7 @@ test('static OpenAPI YAML parses and mirrors the dynamic Night-All compatibility
   assert.equal(document.openapi, '3.1.0')
   assertNightAllPublicContract(document)
   assertPublicOpinionContract(document)
+  assertCanonicalContextContract(document)
 })
 
 test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy', async () => {
@@ -433,6 +481,9 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   assert.match(guide, /不证明 handler、endpoint、provider、credential/)
   assert.doesNotMatch(guide, /默认 provider 已启用且配置了凭据/)
   assert.doesNotMatch(guide, /存在可执行 handler 或 endpoint candidate/)
+  assert.match(guide, /\/api\/v1\/data\/canonical\/items\/\{id\}\/context/)
+  assert.match(guide, /storedWindow\.hasMoreStoredBefore\/After/)
+  assert.match(guide, /upstreamCompleteness/)
 })
 
 test('admin-only listener does not expose public documentation', async () => {

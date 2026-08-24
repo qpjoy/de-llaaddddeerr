@@ -17,6 +17,11 @@ import {
   storedSearchResponse,
 } from './data/stored-search.mjs'
 import {
+  canonicalContextCapability,
+  canonicalContextResponse,
+  normalizeCanonicalContextQuery,
+} from './data/canonical-context.mjs'
+import {
   PUBLIC_OPINION_PLATFORM,
   normalizePublicOpinionItemId,
   normalizePublicOpinionQuery,
@@ -416,12 +421,33 @@ export class HubService {
     if (canonicalGrants.includes('telegram') && typeof this.store.listCanonicalRecords === 'function') {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === 'telegram')) {
+        let context = null
+        if (
+          typeof this.store.getCanonicalContext === 'function'
+          && typeof this.store.getCanonicalContextServingIndexStatus === 'function'
+        ) {
+          try {
+            context = canonicalContextCapability(await this.store.getCanonicalContextServingIndexStatus())
+          } catch {
+            // Capability discovery must not take existing Telegram reads down
+            // because the optional context index diagnostic is unavailable.
+            context = canonicalContextCapability(null)
+            this.logger?.warn?.('[canonical-context] serving index status is unavailable')
+          }
+        }
         platforms.push({
           platform: 'telegram',
           ready: true,
           source: 'hub',
           servingMode: 'stored',
-          capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search'],
+          capabilities: [
+            'monitor_chats',
+            'monitor_messages',
+            'stored_search',
+            'entity_search',
+            ...(context ? ['message_context'] : []),
+          ],
+          ...(context ? { context } : {}),
         })
       }
     }
@@ -727,6 +753,47 @@ export class HubService {
         const row = await this.store.getPublicOpinionRecord(id)
         if (!row) throw new AppError(404, 'item_not_found', 'Province opinion item not found')
         return publicOpinionItem(row)
+      },
+    })
+  }
+
+  async canonicalContext(context, idInput, queryInput) {
+    if (
+      typeof this.store.getCanonicalContext !== 'function'
+      || typeof this.store.getCanonicalContextServingIndexStatus !== 'function'
+    ) {
+      throw new AppError(503, 'stored_data_unavailable', 'Canonical context requires the PostgreSQL store')
+    }
+    const id = requiredUuid(idInput, 'id')
+    const query = normalizeCanonicalContextQuery(queryInput)
+    const policy = await this.#storedPlatformPolicy(context, 'telegram', 'Telegram')
+    let servingIndexes
+    try {
+      servingIndexes = await this.store.getCanonicalContextServingIndexStatus()
+    } catch {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Canonical context serving index status is unavailable',
+      )
+    }
+    if (!servingIndexes.ready) {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Canonical context serving indexes are not ready',
+      )
+    }
+    return this.#meterStoredRead(context, 'telegram', policy, {
+      path: `/api/v1/data/canonical/items/${id}/context`,
+      fingerprintBody: { id, before: query.before, after: query.after },
+      operation: async () => {
+        const result = await this.store.getCanonicalContext({ id, ...query })
+        if (!result) throw new AppError(404, 'item_not_found', 'Canonical item not found')
+        if (!result.contextSupported) {
+          throw new AppError(409, 'context_not_supported', 'Canonical item does not support message context')
+        }
+        return canonicalContextResponse({ query, result })
       },
     })
   }
@@ -1045,7 +1112,13 @@ export class HubService {
         // Stored pages may contain customer-visible text. Usage evidence needs
         // counts and latency, not a second retained copy of that content.
         responseBody: null,
-        unitsActual: Math.max(1, payload.pageInfo?.returnedCount ?? payload.items?.length ?? 0),
+        unitsActual: Math.max(
+          1,
+          payload.pageInfo?.returnedCount
+            ?? payload.storedWindow?.returnedCount
+            ?? payload.items?.length
+            ?? 0,
+        ),
         upstreamLatencyMs: Math.round(performance.now() - startedAt),
       })
       return payload

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { CANONICAL_CONTEXT_DATASETS } from '../data/canonical-context.mjs'
 import {
   CONNECTOR_ID,
   DATASET_ID,
@@ -22,6 +23,115 @@ const transientHttpStatuses = new Set([502, 503, 504])
 // pg_get_indexdef(indexOid, columnNo, pretty) returns only the key expression.
 // PostgreSQL stores DESC (bit 0) and NULLS FIRST (bit 1) separately in
 // pg_index.indoption, so both pieces are required for an exact index contract.
+function canonicalContextDatasetEntries(datasets) {
+  if (!datasets || typeof datasets !== 'object' || Array.isArray(datasets)) {
+    throw new Error('Canonical context dataset registry must be an object')
+  }
+  const entries = Object.entries(datasets)
+  if (entries.length === 0) throw new Error('Canonical context dataset registry must not be empty')
+  const indexNames = new Set()
+  for (const [datasetId, dataset] of entries) {
+    if (!/^[a-z0-9][a-z0-9._-]*$/.test(datasetId)) {
+      throw new Error(`Canonical context dataset id is unsafe: ${datasetId}`)
+    }
+    if (dataset?.objectType !== 'message') {
+      throw new Error(`Canonical context dataset must contain messages: ${datasetId}`)
+    }
+    if (!/^[a-z][a-z0-9_]*$/.test(dataset.servingIndexName ?? '')) {
+      throw new Error(`Canonical context serving index name is unsafe: ${datasetId}`)
+    }
+    if (indexNames.has(dataset.servingIndexName)) {
+      throw new Error(`Canonical context serving index name is duplicated: ${dataset.servingIndexName}`)
+    }
+    indexNames.add(dataset.servingIndexName)
+  }
+  return entries
+}
+
+function canonicalContextQueryBranch(datasetId, position, side) {
+  const before = side === 'before'
+  const comparison = before ? '<' : '>'
+  const direction = before ? 'DESC' : 'ASC'
+  const limit = before ? '$2' : '$3'
+  return {
+    name: `context_${position}_${side}`,
+    sql: `context_${position}_${side} AS (
+         SELECT '${side}'::text AS side,
+                row_number() OVER (ORDER BY r.event_time ${direction}, r.id ${direction}) AS side_position,
+                r.id, r.dataset_id, r.platform, r.object_type, r.content_type,
+                r.external_id, r.url, r.title, r.body, r.author_external_id, r.author_name,
+                r.event_time, r.collected_at, r.stable_fields,
+                r.stable_fields #>> '{relations,chatId}' AS context_id
+           FROM anchor a
+           CROSS JOIN LATERAL (
+             SELECT id, dataset_id, platform, object_type, content_type,
+                    external_id, url, title, body, author_external_id, author_name,
+                    event_time, collected_at, stable_fields
+               FROM core.canonical_records r
+              WHERE a.dataset_id = '${datasetId}'
+                AND a.object_type = 'message'
+                AND a.event_time IS NOT NULL
+                AND a.context_id IS NOT NULL
+                AND r.dataset_id = '${datasetId}'
+                AND r.platform = 'telegram'
+                AND r.object_type = 'message'
+                AND r.deleted_at IS NULL
+                AND r.event_time IS NOT NULL
+                AND r.stable_fields #>> '{relations,chatId}' IS NOT NULL
+                AND r.stable_fields #>> '{relations,chatId}' = a.context_id
+                AND (r.event_time, r.id) ${comparison} (a.event_time, a.id)
+              ORDER BY r.event_time ${direction}, r.id ${direction}
+              LIMIT ${limit}
+           ) r
+       )`,
+  }
+}
+
+export function buildCanonicalContextStoragePlan(datasets = CANONICAL_CONTEXT_DATASETS) {
+  const entries = canonicalContextDatasetEntries(datasets)
+  const indexContracts = entries.map(([datasetId, dataset]) => Object.freeze({
+    datasetId,
+    name: dataset.servingIndexName,
+    keys: Object.freeze([
+      Object.freeze({ expression: "stable_fields #>> '{relations,chatId}'", options: 0 }),
+      Object.freeze({ expression: 'event_time', options: 3 }),
+      Object.freeze({ expression: 'id', options: 3 }),
+    ]),
+    predicate: Object.freeze([
+      `dataset_id = '${datasetId}'`,
+      "platform = 'telegram'",
+      "object_type = 'message'",
+      'deleted_at IS NULL',
+    ]),
+  }))
+  const branches = entries.flatMap(([datasetId], position) => [
+    canonicalContextQueryBranch(datasetId, position, 'before'),
+    canonicalContextQueryBranch(datasetId, position, 'after'),
+  ])
+  const querySql = `WITH anchor AS MATERIALIZED (
+         SELECT 'current'::text AS side,
+                0::bigint AS side_position,
+                id, dataset_id, platform, object_type, content_type,
+                external_id, url, title, body, author_external_id, author_name,
+                event_time, collected_at, stable_fields,
+                stable_fields #>> '{relations,chatId}' AS context_id
+           FROM core.canonical_records
+          WHERE id = $1::uuid
+            AND platform = 'telegram'
+            AND deleted_at IS NULL
+       ), ${branches.map((branch) => branch.sql).join(', ')}
+       SELECT * FROM anchor
+       ${branches.map((branch) => `UNION ALL SELECT * FROM ${branch.name}`).join('\n       ')}
+       ORDER BY side, side_position`
+  return Object.freeze({
+    indexContracts: Object.freeze(indexContracts),
+    querySql,
+  })
+}
+
+const CANONICAL_CONTEXT_STORAGE_PLAN = buildCanonicalContextStoragePlan()
+const CANONICAL_CONTEXT_SERVING_INDEX_CONTRACTS = CANONICAL_CONTEXT_STORAGE_PLAN.indexContracts
+const CANONICAL_CONTEXT_QUERY_SQL = CANONICAL_CONTEXT_STORAGE_PLAN.querySql
 const PUBLIC_OPINION_SERVING_INDEX_CONTRACTS = Object.freeze([
   {
     name: 'canonical_province_opinion_hot_idx',
@@ -60,10 +170,30 @@ const PUBLIC_OPINION_SERVING_INDEX_CONTRACTS = Object.freeze([
   },
 ])
 
+function lowerSqlOutsideLiterals(value) {
+  const input = String(value ?? '')
+  let output = ''
+  let inLiteral = false
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index]
+    if (character === "'") {
+      output += character
+      if (inLiteral && input[index + 1] === "'") {
+        output += input[index + 1]
+        index += 1
+      } else {
+        inLiteral = !inLiteral
+      }
+    } else {
+      output += inLiteral ? character : character.toLowerCase()
+    }
+  }
+  return output
+}
+
 function normalizeIndexFragment(value) {
-  return String(value ?? '')
-    .toLowerCase()
-    .replace(/::(?:text|character varying)/g, '')
+  return lowerSqlOutsideLiterals(value)
+    .replace(/::(?:text(?:\[\])?|character varying)/g, '')
     .replace(/[()"\s]/g, '')
 }
 
@@ -71,7 +201,7 @@ function normalizedPredicateTerms(value) {
   return normalizeIndexFragment(value).split('and').filter(Boolean).sort()
 }
 
-function publicOpinionIndexMatches(row, contract) {
+function servingIndexMatches(row, contract) {
   if (
     row?.indisready !== true
     || row?.indisvalid !== true
@@ -79,7 +209,9 @@ function publicOpinionIndexMatches(row, contract) {
     || row?.access_method !== 'btree'
     || Number(row?.key_count) !== contract.keys.length
   ) return false
-  const actualKeys = [row.key_1, row.key_2, row.key_3, row.key_4].map(normalizeIndexFragment)
+  const actualKeys = [row.key_1, row.key_2, row.key_3, row.key_4]
+    .slice(0, contract.keys.length)
+    .map(normalizeIndexFragment)
   const expectedKeys = contract.keys.map((key) => normalizeIndexFragment(key.expression))
   if (!actualKeys.every((key, index) => key === expectedKeys[index])) return false
   const actualOptions = [
@@ -87,7 +219,7 @@ function publicOpinionIndexMatches(row, contract) {
     row.key_2_options,
     row.key_3_options,
     row.key_4_options,
-  ].map(Number)
+  ].slice(0, contract.keys.length).map(Number)
   if (!actualOptions.every((options, index) => options === contract.keys[index].options)) return false
   const actualPredicate = normalizedPredicateTerms(row.predicate)
   const expectedPredicate = contract.predicate.map(normalizeIndexFragment).sort()
@@ -1640,6 +1772,88 @@ export class PostgresStore {
     return rows
   }
 
+  async getCanonicalContextServingIndexStatus() {
+    const required = CANONICAL_CONTEXT_SERVING_INDEX_CONTRACTS.map((contract) => contract.name)
+    const { rows } = await this.pool.query(
+      `SELECT index_rel.relname AS name,
+              index_meta.indisready,
+              index_meta.indisvalid,
+              index_meta.indislive,
+              access_method.amname AS access_method,
+              index_meta.indnkeyatts AS key_count,
+              pg_get_indexdef(index_rel.oid, 1, true) AS key_1,
+              pg_get_indexdef(index_rel.oid, 2, true) AS key_2,
+              pg_get_indexdef(index_rel.oid, 3, true) AS key_3,
+              index_meta.indoption[0]::integer AS key_1_options,
+              index_meta.indoption[1]::integer AS key_2_options,
+              index_meta.indoption[2]::integer AS key_3_options,
+              pg_get_expr(index_meta.indpred, index_meta.indrelid, true) AS predicate
+         FROM pg_class index_rel
+         JOIN pg_namespace index_ns ON index_ns.oid = index_rel.relnamespace
+         JOIN pg_index index_meta ON index_meta.indexrelid = index_rel.oid
+         JOIN pg_am access_method ON access_method.oid = index_rel.relam
+         JOIN pg_class table_rel ON table_rel.oid = index_meta.indrelid
+         JOIN pg_namespace table_ns ON table_ns.oid = table_rel.relnamespace
+        WHERE index_ns.nspname = 'core'
+          AND table_ns.nspname = 'core'
+          AND table_rel.relname = 'canonical_records'
+          AND index_rel.relname = ANY($1::text[])`,
+      [required],
+    )
+    const byName = new Map(rows.map((row) => [row.name, row]))
+    const indexes = CANONICAL_CONTEXT_SERVING_INDEX_CONTRACTS.map((contract) => ({
+      name: contract.name,
+      ready: servingIndexMatches(byName.get(contract.name), contract),
+    }))
+    return {
+      ready: indexes.every((index) => index.ready),
+      required,
+      indexes,
+      missing: indexes.filter((index) => !index.ready).map((index) => index.name),
+    }
+  }
+
+  /**
+   * Resolve one canonical anchor and its nearest stored neighbors in a single
+   * PostgreSQL snapshot. Each dataset branch names its partial-index predicate
+   * literally so PostgreSQL can use the matching chat/time serving index.
+  */
+  async getCanonicalContext({ id, before, after }) {
+    const { rows } = await this.pool.query(
+      CANONICAL_CONTEXT_QUERY_SQL,
+      [id, before + 1, after + 1],
+    )
+    const current = rows.find((row) => row.side === 'current') ?? null
+    if (!current) return null
+    const dataset = CANONICAL_CONTEXT_DATASETS[current.dataset_id]
+    const contextSupported = Boolean(
+      dataset
+      && current.object_type === dataset.objectType
+      && current.event_time
+      && current.context_id,
+    )
+    if (!contextSupported) {
+      return {
+        current,
+        before: [],
+        after: [],
+        hasMoreStoredBefore: false,
+        hasMoreStoredAfter: false,
+        contextSupported: false,
+      }
+    }
+    const beforeRows = rows.filter((row) => row.side === 'before')
+    const afterRows = rows.filter((row) => row.side === 'after')
+    return {
+      current,
+      before: beforeRows.slice(0, before).reverse(),
+      after: afterRows.slice(0, after),
+      hasMoreStoredBefore: beforeRows.length > before,
+      hasMoreStoredAfter: afterRows.length > after,
+      contextSupported: true,
+    }
+  }
+
   /**
    * Customer-safe province feed over the current canonical PostgreSQL state.
    *
@@ -1680,7 +1894,7 @@ export class PostgresStore {
     const byName = new Map(rows.map((row) => [row.name, row]))
     const indexes = PUBLIC_OPINION_SERVING_INDEX_CONTRACTS.map((contract) => ({
       name: contract.name,
-      ready: publicOpinionIndexMatches(byName.get(contract.name), contract),
+      ready: servingIndexMatches(byName.get(contract.name), contract),
     }))
     return {
       ready: indexes.every((index) => index.ready),

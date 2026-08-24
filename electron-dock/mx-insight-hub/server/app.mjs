@@ -2454,6 +2454,19 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/api/v1/data/canonical/items/:id/context')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.canonicalContext(
+            context,
+            params.id,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
       if (request.method === 'POST' && pathname === '/api/v1/data/canonical/search') {
         const context = await requirePublic(request)
         const result = await service.canonicalSearch(context, {

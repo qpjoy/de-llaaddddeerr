@@ -137,7 +137,9 @@ dispatch。这里的 `readyPlatforms` 是兼容字段，表示当前 Hub 固定�
 它不证明 Night-All 当前 handler、endpoint、provider、credential 或上游健康。
 `data.platforms[]` 中出现 `telegram` 只代表 Hub stored/monitor 数据面可用，
 其平台项使用 `source=hub`、`servingMode=stored`；这不代表 Telegram 支持 Night-All
-legacy search。Key 缺失、无效或已撤销时返回 `401`。
+legacy search。若该项包含 `message_context`，应继续检查 `context.ready` 和
+`context.datasets`；前者是独立的索引服务门禁，后者是明确支持上下文的 dataset
+清单。Key 缺失、无效或已撤销时返回 `401`。
 
 ## 4. 搜索 API
 
@@ -396,7 +398,7 @@ curl -sS -i -X POST \
 ## 7. Telegram 已存数据 API
 
 本节全部路由都需要明确的 `telegram` 平台授权。当前所有获得该授权的 consumer
-读取同一份完整 canonical Telegram 语料，尚未实现 tenant-specific row subset。
+读取同一份 Hub 已存 canonical Telegram 语料，尚未实现 tenant-specific row subset。
 
 ### `GET /api/v1/data/telegram/chats`
 
@@ -430,6 +432,30 @@ curl -sS -i --get \
 
 成功返回 `200`，包含 normalized record、lineage 和 `pageInfo`。下一页可将返回的
 cursor 作为新的 `--data-urlencode "cursor=$CURSOR"` 参数。
+
+### `GET /api/v1/data/canonical/items/{id}/context`
+
+`id` 是 `/api/v1/data/canonical/search` 返回的 Telegram message canonical UUID。
+可选 `before`、`after` 分别为 `0..50`，默认都是 10。接口只在命中项所在的同一
+dataset、同一 normalized chat 中按 `(eventTime, canonicalId)` 总序读取邻近消息，
+返回一个升序 `items` 列表；`items[anchorIndex].id` 等于 `anchorId`。不会把 Monitor
+和 SQLite 两个 dataset 混进同一窗口。
+
+```bash
+ANCHOR_ID="${ANCHOR_ID:?set ANCHOR_ID to a Telegram canonical search item id}"
+curl -sS -i --get \
+  -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode 'before=10' \
+  --data-urlencode 'after=10' \
+  "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context"
+```
+
+`storedWindow.hasMoreStoredBefore/After` 只说明 Hub PostgreSQL 当前是否还有邻近行，
+不能解释为 Telegram 上游的第一/最后消息。`upstreamCompleteness` 是独立的来源证据：
+Monitor 当前为 `unknown`，SQLite 当前为 `bounded`。GET 不使用幂等 key，每次调用和
+重试独立计量。未知 dataset 返回 `409 context_not_supported`；所需索引未就绪返回
+`503 serving_indexes_unavailable`。响应复用 canonical public allowlist，不包含 raw、
+`extensions`、连接信息或内部 lineage。
 
 ### `POST /api/v1/data/telegram/search`
 

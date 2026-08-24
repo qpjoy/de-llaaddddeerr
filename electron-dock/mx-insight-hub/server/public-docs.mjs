@@ -21,6 +21,10 @@ const publicErrors = Object.fromEntries(
   [400, 401, 403, 404, 409, 410, 429, 502, 503].map((status) => [status, errorResponse]),
 )
 
+const canonicalContextErrors = Object.fromEntries(
+  [400, 401, 403, 404, 409, 429, 503].map((status) => [status, errorResponse]),
+)
+
 const telegramHistoryParameters = [
   {
     name: 'chatId', in: 'query', required: false,
@@ -180,6 +184,15 @@ const canonicalSearchResponse = {
   },
 }
 
+const canonicalContextResponse = {
+  description: 'Nearest stored messages around one canonical Telegram message.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/CanonicalContextEnvelope' },
+    },
+  },
+}
+
 const publicOpinionPageResponse = {
   description: 'A customer-safe page of canonical public-opinion items for one normalized province.',
   content: {
@@ -231,7 +244,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Discovery'],
         operationId: 'listPublicCapabilities',
         summary: 'List capabilities granted to the authenticated consumer',
-        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. For public_opinion, ready requires both an active fixed ingest source and both valid Hub serving indexes; it is not another grant or a freshness guarantee, and a paused source may still have indexed rows. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for the three Night-All compatibility operations: it is compiled into the deployed Hub contract rather than discovered from Night-All at request time. A platform must appear in both supportedPlatforms and readyPlatforms before dispatch. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for Night-All compatibility; compatibility calls then fail closed.',
+        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. Telegram message context is advertised per dataset under platform.context; context.ready is an index-serving gate and is independent from the broader Telegram platform ready flag. For public_opinion, ready requires both an active fixed ingest source and both valid Hub serving indexes; it is not another grant or a freshness guarantee, and a paused source may still have indexed rows. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for the three Night-All compatibility operations: it is compiled into the deployed Hub contract rather than discovered from Night-All at request time. A platform must appear in both supportedPlatforms and readyPlatforms before dispatch. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for Night-All compatibility; compatibility calls then fail closed.',
         responses: {
           200: {
             description: 'Granted public capabilities.',
@@ -244,9 +257,33 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                       {
                         platform: 'telegram',
                         ready: true,
-                        capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search'],
+                        capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search', 'message_context'],
                         source: 'hub',
                         servingMode: 'stored',
+                        context: {
+                          contractVersion: 'mx-insight-hub.canonical-context.v1',
+                          ready: true,
+                          defaultBefore: 10,
+                          defaultAfter: 10,
+                          maxBefore: 50,
+                          maxAfter: 50,
+                          datasets: [
+                            {
+                              datasetId: 'telegram.monitor.messages.v1',
+                              objectType: 'message',
+                              streamType: 'chat',
+                              ordering: ['eventTime', 'canonicalId'],
+                              upstreamCompleteness: { status: 'unknown', basis: null, through: null },
+                            },
+                            {
+                              datasetId: 'telegram.sqlite.messages.v1',
+                              objectType: 'message',
+                              streamType: 'chat',
+                              ordering: ['eventTime', 'canonicalId'],
+                              upstreamCompleteness: { status: 'bounded', basis: 'append_only_overlap', through: null },
+                            },
+                          ],
+                        },
                       },
                       {
                         platform: 'public_opinion',
@@ -415,6 +452,41 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
         },
         responses: { 200: canonicalSearchResponse, ...publicErrors },
+      },
+    },
+    '/data/canonical/items/{id}/context': {
+      get: {
+        tags: ['Search', 'Telegram'],
+        operationId: 'getCanonicalMessageContext',
+        summary: 'Read the nearest stored messages around one canonical search hit',
+        description: 'Requires the telegram platform grant. The anchor id is the Hub canonical UUID returned by canonical search. Context never crosses dataset, platform, object type or normalized chat id. Rows are ordered by the declared total order (eventTime, canonicalId), not by inferred Telegram sequence. before and after default to 10 and are independently capped at 50. storedWindow describes only active records currently stored in Hub; upstreamCompleteness is a separate declared source-capture statement, may be upgraded only from persisted evidence, and must not be inferred from storedWindow, source activity or cursor state. Only datasets explicitly advertised by the Telegram context capability are supported. Raw rows, extensions, source credentials and lineage remain private. This safe GET is metered on every call and retry.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          404: ['item_not_found'],
+          409: ['context_not_supported'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable', 'serving_indexes_unavailable'],
+        },
+        parameters: [
+          {
+            name: 'id', in: 'path', required: true,
+            description: 'Hub canonical message UUID returned by a search result.',
+            schema: { type: 'string', format: 'uuid' },
+          },
+          {
+            name: 'before', in: 'query', required: false,
+            description: 'Number of nearest stored messages before the anchor.',
+            schema: { type: 'integer', minimum: 0, maximum: 50, default: 10 },
+          },
+          {
+            name: 'after', in: 'query', required: false,
+            description: 'Number of nearest stored messages after the anchor.',
+            schema: { type: 'integer', minimum: 0, maximum: 50, default: 10 },
+          },
+        ],
+        responses: { 200: canonicalContextResponse, ...canonicalContextErrors },
       },
     },
     '/data/public-opinion/provinces/{province}/items': {
@@ -1036,6 +1108,114 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           requestId: { type: 'string', format: 'uuid' },
         },
       },
+      CanonicalContextCompleteness: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['status', 'basis', 'through'],
+        description: 'Declared upstream-capture statement for this dataset. attested_complete requires persisted scope/time evidence. It is independent from the number of neighboring active rows currently stored in Hub.',
+        properties: {
+          status: { type: 'string', enum: ['unknown', 'bounded', 'attested_complete'] },
+          basis: { type: ['string', 'null'] },
+          through: { type: ['string', 'null'], format: 'date-time' },
+        },
+      },
+      CanonicalContextCapabilityDataset: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['datasetId', 'objectType', 'streamType', 'ordering', 'upstreamCompleteness'],
+        properties: {
+          datasetId: { type: 'string' },
+          objectType: { type: 'string', const: 'message' },
+          streamType: { type: 'string', const: 'chat' },
+          ordering: { type: 'array', const: ['eventTime', 'canonicalId'] },
+          upstreamCompleteness: { $ref: '#/components/schemas/CanonicalContextCompleteness' },
+        },
+      },
+      CanonicalContextCapability: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['contractVersion', 'ready', 'defaultBefore', 'defaultAfter', 'maxBefore', 'maxAfter', 'datasets'],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.canonical-context.v1' },
+          ready: { type: 'boolean', description: 'True only while every serving index required by the advertised dataset set is valid and ready.' },
+          defaultBefore: { type: 'integer', const: 10 },
+          defaultAfter: { type: 'integer', const: 10 },
+          maxBefore: { type: 'integer', const: 50 },
+          maxAfter: { type: 'integer', const: 50 },
+          datasets: {
+            type: 'array', minItems: 1,
+            items: { $ref: '#/components/schemas/CanonicalContextCapabilityDataset' },
+          },
+        },
+      },
+      CanonicalContextEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['contractVersion', 'source', 'anchorId', 'anchorIndex', 'stream', 'items', 'storedWindow', 'ordering', 'upstreamCompleteness', 'warnings'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.canonical-context.v1' },
+              source: { type: 'string', const: 'hub' },
+              anchorId: { type: 'string', format: 'uuid' },
+              anchorIndex: { type: 'integer', minimum: 0, maximum: 50 },
+              stream: {
+                type: 'object', additionalProperties: false,
+                required: ['platform', 'datasetId', 'objectType', 'type', 'id'],
+                properties: {
+                  platform: { type: 'string', const: 'telegram' },
+                  datasetId: { type: 'string' },
+                  objectType: { type: 'string', const: 'message' },
+                  type: { type: 'string', const: 'chat' },
+                  id: { type: 'string', minLength: 1, maxLength: 256 },
+                },
+              },
+              items: {
+                type: 'array', minItems: 1, maxItems: 101,
+                description: 'One ascending list. items[anchorIndex].id always equals anchorId.',
+                items: { $ref: '#/components/schemas/StoredSearchItem' },
+              },
+              storedWindow: {
+                type: 'object', additionalProperties: false,
+                required: ['beforeRequested', 'afterRequested', 'beforeReturned', 'afterReturned', 'returnedCount', 'hasMoreStoredBefore', 'hasMoreStoredAfter'],
+                properties: {
+                  beforeRequested: { type: 'integer', minimum: 0, maximum: 50 },
+                  afterRequested: { type: 'integer', minimum: 0, maximum: 50 },
+                  beforeReturned: { type: 'integer', minimum: 0, maximum: 50 },
+                  afterReturned: { type: 'integer', minimum: 0, maximum: 50 },
+                  returnedCount: { type: 'integer', minimum: 1, maximum: 101 },
+                  hasMoreStoredBefore: { type: 'boolean' },
+                  hasMoreStoredAfter: { type: 'boolean' },
+                },
+              },
+              ordering: {
+                type: 'object', additionalProperties: false,
+                required: ['fields', 'direction', 'quality'],
+                properties: {
+                  fields: { type: 'array', const: ['eventTime', 'canonicalId'] },
+                  direction: { type: 'string', const: 'ascending' },
+                  quality: { type: 'string', const: 'deterministic' },
+                },
+              },
+              upstreamCompleteness: { $ref: '#/components/schemas/CanonicalContextCompleteness' },
+              warnings: {
+                type: 'array', maxItems: 1,
+                items: {
+                  type: 'object', additionalProperties: false, required: ['code', 'message'],
+                  properties: {
+                    code: { type: 'string', enum: ['upstream_completeness_unknown', 'upstream_completeness_bounded'] },
+                    message: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
       PublicOpinionProvince: {
         type: 'object',
         additionalProperties: false,
@@ -1208,6 +1388,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                     capabilities: { type: 'array', items: { type: 'string' } },
                     source: { type: 'string', enum: ['hub'], description: 'Present for Hub-owned platform entries.' },
                     servingMode: { type: 'string', enum: ['stored'], description: 'Present for Hub-owned stored-data entries.' },
+                    context: { $ref: '#/components/schemas/CanonicalContextCapability' },
                   },
                 },
               },
@@ -1410,7 +1591,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
       <tr><td>结果新鲜度</td><td>可选 <code>type</code>：<code>fresh</code>（默认）表示始终检索当前数据，重放窗口为 120 秒，足以吸收一次重试而不会把 Key 变成缓存；<code>stable</code> 表示同一个 Key 永久返回首次的结果，用于报表、分页序列和审计等需要快照可复现的场景。<code>type</code> 参与请求指纹，同一个 Key 不能在两种语义之间切换。</td></tr>
       <tr><td>POST 分词</td><td>同样必须携带 <code>Idempotency-Key</code>；相同请求重放不会再次分词或重复计量。</td></tr>
       <tr><td>下一页</td><td>使用响应中的 <code>pageInfo.nextCursor</code>，不要解析或修改；因为 body 已变化，新页面必须使用新的幂等 Key。</td></tr>
-      <tr><td>GET 历史/实体/舆情</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>
+      <tr><td>GET 历史/上下文/实体/舆情</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>
       <tr><td>页大小</td><td>同时受接口上限与该调用者平台策略约束；超限返回 <code>page_size_exceeded</code>。</td></tr>
     </tbody></table>
 
@@ -1455,6 +1636,11 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: canonical-$(uuidgen)" \
   -d '{"query":"AI Agent","searchProfile":"canonical.balanced.v1","pageSize":20}' | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/canonical/items/{id}/context?before=10&amp;after=10</code></div><p>对 Telegram 消息搜索结果的 canonical UUID 读取同一 dataset、同一 chat 的邻近已存消息。默认前后各 10 条，单侧上限 50；返回一个升序 <code>items</code> 列表，<code>anchorIndex</code> 指向命中项。</p></div>
+    <div class="notice"><code>storedWindow.hasMoreStoredBefore/After</code> 只描述 Hub PostgreSQL 当前是否还有记录；<code>upstreamCompleteness</code> 单独描述有持久证据支持的上游采集完整性。两者不能互相推导。</div>
+    <pre><code>ANCHOR_ID="&lt;canonical-search-item-id&gt;"
+curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;after=10" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
 
     <h2 id="public-opinion">全国省级舆情</h2>
     <div class="notice">需要调用者显式获得 <code>public_opinion</code> 平台授权。能力发现中的该平台项来自 Hub stored 数据面，不属于 Night-All compatibility，也不改变既有 <code>POST /api/v1/data/search</code> 契约。</div>
@@ -1541,6 +1727,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
       <tr><td>Monitor 会话目录</td><td><code>GET /data/telegram/chats</code></td><td><code>telegram.monitor.chats.v1</code></td></tr>
       <tr><td>Monitor 高级检索</td><td><code>POST /data/telegram/search</code></td><td>固定的 <code>telegram.monitor.*</code></td></tr>
       <tr><td>Monitor + SQLite 统一检索</td><td><code>POST /data/canonical/search</code></td><td>授权范围内全部 Telegram canonical dataset</td></tr>
+      <tr><td>命中消息的前后文</td><td><code>GET /data/canonical/items/{id}/context</code></td><td>命中项所在 dataset + chat；默认前后各 10 条</td></tr>
       <tr><td>指定单个来源数据集</td><td><code>POST /data/stored/search</code></td><td>由 <code>datasetId</code> 精确收窄</td></tr>
     </tbody></table>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/messages</code></div><p>Monitor 消息历史；支持 <code>chatId</code>、<code>from</code>、<code>to</code>、<code>pageSize</code>、<code>cursor</code>。该兼容接口不会隐式混入 SQLite。</p></div>
@@ -1559,11 +1746,15 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: telegram-all-sources-$(uuidgen)" \\
   -d '{"platform":"telegram","objectType":"message","query":"AI Agent","searchProfile":"canonical.balanced.v1","pageSize":20}' | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/canonical/items/{id}/context</code></div><p>用上一步搜索项的 <code>id</code> 读取邻近消息。排序总序为 <code>(eventTime, canonicalId)</code>；不会跨 Monitor/SQLite dataset，也不会跨 chat。未知的新数据源默认返回 <code>context_not_supported</code>，只有能力发现中 <code>context.datasets</code> 明确列出的 dataset 才支持。</p></div>
+    <div class="notice">当前 Monitor 的 <code>upstreamCompleteness.status</code> 为 <code>unknown</code>；SQLite 导入为 <code>bounded</code>。这不会阻止读取 Hub 已提交的上下文，但调用方不得把列表头尾解释成 Telegram 上游历史的绝对头尾。</div>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/context?before=10&amp;after=10" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/entities/search?query=example&amp;pageSize=20</code></div><p>模糊匹配作者名称/用户名和会话标题/用户名。</p></div>
     <div class="notice">如果搜索响应包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底。Canonical 接口还会以 <code>search.appliedProfile=postgres.substring.v1</code> 和 <code>search_profile_degraded</code> 明示策略变化；Telegram/Stored 兼容响应只保留投影告警。若 Elasticsearch 仍在线但 HanLP 查询降级，三个接口都会返回 <code>search_profile_degraded</code>。已有 Elasticsearch 游标会签名并复用首屏分词状态，不会中途切换模式或重新分词。</div>
 
     <h2 id="discovery">能力、请求状态与用量</h2>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 与 <code>public_opinion</code> 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它们不代表 Night-All compatibility。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 与 <code>public_opinion</code> 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它们不代表 Night-All compatibility。Telegram 的 <code>context.datasets</code> 是上下文支持清单，<code>context.ready</code> 是独立的服务索引门禁。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/requests/{requestId}</code></div><p>查询当前调用者拥有的持久请求记录。requestId 来自搜索响应头 <code>x-mx-insight-request-id</code>。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/usage?from=...&amp;to=...</code></div><p>读取当前调用者的请求、提交、释放、未知状态与计费单元汇总。</p></div>
 
@@ -1571,7 +1762,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
     <table><thead><tr><th>HTTP</th><th>含义</th><th>建议</th></tr></thead><tbody>
       <tr><td>400</td><td>字段、游标、页大小或幂等 Key 不合法</td><td>修正请求，不原样盲重试</td></tr>
       <tr><td>401 / 403</td><td>Key 无效，或平台未授权</td><td>检查 Key 与 capabilities</td></tr>
-      <tr><td>409</td><td>幂等冲突、处理中或结果未知</td><td>保持原 body 与原幂等 Key；查询 request status</td></tr>
+      <tr><td>409</td><td>幂等冲突/处理中/结果未知，或该 dataset 不支持上下文</td><td>搜索请求保持原 body 与原幂等 Key；上下文请求先检查 capabilities</td></tr>
       <tr><td>410</td><td>搜索游标过期</td><td>从无 cursor 的第一页重新开始，并使用新幂等 Key</td></tr>
       <tr><td>429</td><td>请求或并发配额耗尽</td><td>等待策略窗口恢复</td></tr>
       <tr><td>503</td><td>当前数据或搜索运行时不可用</td><td>安全 GET 可稍后重试；POST 复用原幂等 Key</td></tr>

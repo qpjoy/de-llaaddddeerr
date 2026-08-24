@@ -621,10 +621,12 @@ printf 'ok - regular deploy discovers HanLP before publishing runtime config\n'
 # before any API workload is applied/restarted.
 migration_complete_line="$(grep -n -- '--for=condition=complete job/mx-insight-hub-migrate' <<<"$apply_k8s_body" | cut -d: -f1)"
 province_indexes_line="$(grep -n '^  ensure_province_opinion_serving_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
+context_indexes_line="$(grep -n '^  ensure_canonical_context_serving_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 first_api_apply_line="$(grep -n '30-public-api.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
 if ! [ "$migration_complete_line" -lt "$province_indexes_line" ] \
-  || ! [ "$province_indexes_line" -lt "$first_api_apply_line" ]; then
-  printf 'not ok - province serving indexes are not reconciled after migrations and before API rollout\n' >&2
+  || ! [ "$province_indexes_line" -lt "$context_indexes_line" ] \
+  || ! [ "$context_indexes_line" -lt "$first_api_apply_line" ]; then
+  printf 'not ok - serving indexes are not reconciled after migrations and before API rollout\n' >&2
   exit 1
 fi
 
@@ -688,6 +690,79 @@ fi
 grep -q 'province-opinion serving indexes could not be reconciled' "$province_index_error"
 rm -f -- "$province_index_stdin" "$province_index_argv" "$province_index_error"
 printf 'ok - province serving-index reconciliation is exact and fail-closed\n'
+
+context_index_stdin="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-context-index-stdin.XXXXXX")"
+context_index_argv="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-context-index-argv.XXXXXX")"
+CONTEXT_INDEX_STDIN="$context_index_stdin" \
+CONTEXT_INDEX_ARGV="$context_index_argv" \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() {
+    printf "%s\n" "$*" >>"$CONTEXT_INDEX_ARGV"
+    cat >"$CONTEXT_INDEX_STDIN"
+  }
+  ensure_canonical_context_serving_indexes
+' _ "$ROOT_DIR"
+assert_eq \
+  '-n mx-common exec -i statefulset/mx-common-postgres -- psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1' \
+  "$(cat "$context_index_argv")" \
+  'deploy streams canonical context indexes to the shared Hub database'
+assert_eq '1' "$(wc -l <"$context_index_argv" | tr -d ' ')" \
+  'canonical context reconciliation performs exactly one kubectl call'
+if grep -Eq 'mx-launcher|mx-internal-shadow' "$context_index_argv"; then
+  printf 'not ok - canonical context reconciliation touched Launcher resources\n' >&2
+  exit 1
+fi
+cmp -s "$ROOT_DIR/scripts/canonical-context-serving-indexes.sql" "$context_index_stdin" \
+  || { printf 'not ok - deploy did not stream the exact canonical context serving-index SQL\n' >&2; exit 1; }
+
+context_index_sql="$(cat "$ROOT_DIR/scripts/canonical-context-serving-indexes.sql")"
+for key_number in 1 2 3; do
+  grep -Fq "pg_get_indexdef(c.oid, ${key_number}, true), '[()[:space:]\"]', '', 'g') = e.key_${key_number}" \
+    <<<"$context_index_sql"
+done
+for option_number in 0 1 2; do
+  expected_number=$((option_number + 1))
+  grep -Fq "i.indoption[${option_number}] = e.option_${expected_number}" \
+    <<<"$context_index_sql"
+done
+assert_eq \
+  '2' \
+  "$(grep -Fc '0, 3, 3,' <<<"$context_index_sql")" \
+  'both canonical context indexes require ASC, DESC defaults, DESC defaults'
+assert_eq \
+  '3' \
+  "$(grep -c 'FROM canonical_context_serving_index_contract' <<<"$context_index_sql")" \
+  'context index preflight and final gate reuse one complete contract'
+grep -Fq 'DROP INDEX CONCURRENTLY IF EXISTS core.canonical_monitor_tg_messages_chat_time_idx' \
+  <<<"$context_index_sql"
+grep -Fq 'DROP INDEX CONCURRENTLY IF EXISTS core.canonical_sqlite_tg_messages_chat_time_idx' \
+  <<<"$context_index_sql"
+grep -Fq "stable_fields#>>''{relations,chatId}''::text[]" <<<"$context_index_sql"
+if grep -Fq 'lower(pg_get_indexdef' <<<"$context_index_sql"; then
+  printf 'not ok - canonical context contract lowercases a case-sensitive JSON path\n' >&2
+  exit 1
+fi
+grep -Fq 'SELECT count(*) = 2 AND bool_and(contract_ready)' <<<"$context_index_sql"
+if grep -Eq 'CREATE INDEX CONCURRENTLY IF NOT EXISTS' <<<"$context_index_sql"; then
+  printf 'not ok - canonical context reconciliation can skip an invalid same-name index\n' >&2
+  exit 1
+fi
+
+context_index_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-context-index-error.XXXXXX")"
+if bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  kubectl() { cat >/dev/null; return 1; }
+  ensure_canonical_context_serving_indexes
+' _ "$ROOT_DIR" >"$context_index_error" 2>&1; then
+  printf 'not ok - deploy continued after canonical context serving-index reconciliation failed\n' >&2
+  exit 1
+fi
+grep -q 'canonical context serving indexes could not be reconciled' "$context_index_error"
+rm -f -- "$context_index_stdin" "$context_index_argv" "$context_index_error"
+printf 'ok - canonical context serving-index reconciliation is exact and fail-closed\n'
 
 run_hanlp_hub_smoke() (
   export MX_COMMON_HANLP_URL=http://hanlp.test

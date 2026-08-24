@@ -612,44 +612,104 @@ retry is a new request and may consume another quota slot.
 Mapped source tombstones remain in canonical/revision evidence but are excluded
 from history, content search and entity search.
 
-### Telegram chronological context (planned versioned projection)
+### Telegram canonical message context
 
-Some upstream records contain `prev_message`, `current_message` and
-`next_message`. These mean “observed chronological neighbor” only. They are not a
-reply chain, thread/topic or media-album relation. Current compatibility ingest
-indexes the top-level record and retains embedded neighbors as raw lineage; the
-current v1 history/search projections above do **not** expose a `contextWindow` and
-do not index the embedded objects as duplicate messages.
+Canonical search remains a compact ranked result set. It does not expand every
+hit into 21 messages. A client that needs the chat window calls the separate safe
+GET route with the canonical UUID from the search item:
 
-The target projector will upsert conversation nodes by the internal identity
-`(platform, conversationKey, messageId)` and create explicit directed
-`chronological_next` edges `prev -> current -> next`. A context-only node is a
-stub, later promotable by a full observation. An edge is accepted only when both
-stable message IDs resolve to the same conversation; reply/thread fields remain
-independent. Missing prev/next means “not observed”, not first/last message, and
-the Hub never guesses a neighbor from numeric message-ID adjacency.
+```http
+GET /api/v1/data/canonical/items/{id}/context?before=10&after=10
+Authorization: Bearer <api-key>
+```
 
-A future public contract may project verified edges as a generalized window:
+`before` and `after` default to 10, accept `0..50` independently and do not use
+the consumer's search page-size limit. The caller needs the `telegram` platform
+grant. Every call/retry is independently metered; there is no idempotency key.
+The Hub fails closed with `503 serving_indexes_unavailable` until both advertised
+Telegram message-dataset serving indexes are valid. An unknown or future dataset
+is not silently treated as an empty chat: it returns `409 context_not_supported`
+until that dataset is explicitly added to the context capability registry.
+
+The response is one ascending safe-item list. `items[anchorIndex].id` equals
+`anchorId`. Neighbors are restricted to the anchor's exact `platform`,
+`datasetId`, `objectType=message` and normalized chat ID, and use the declared
+total order `(eventTime, canonicalId)`. This is a deterministic stored-message
+order, not an assertion about reply chains, topics, media albums, numeric
+Telegram ID adjacency or upstream collector sequence.
 
 ```json
 {
-  "contextWindow": {
-    "before": [],
-    "current": { "id": "opaque-message-id" },
-    "after": [],
-    "completeness": { "before": "unknown", "after": "unknown" }
-  }
+  "data": {
+    "contractVersion": "mx-insight-hub.canonical-context.v1",
+    "source": "hub",
+    "anchorId": "33333333-3333-4333-8333-333333333333",
+    "anchorIndex": 0,
+    "stream": {
+      "platform": "telegram",
+      "datasetId": "telegram.monitor.messages.v1",
+      "objectType": "message",
+      "type": "chat",
+      "id": "-1001234567890"
+    },
+    "items": [{
+      "id": "33333333-3333-4333-8333-333333333333",
+      "datasetId": "telegram.monitor.messages.v1",
+      "platform": "telegram",
+      "objectType": "message",
+      "text": "example message",
+      "source": "hub"
+    }],
+    "storedWindow": {
+      "beforeRequested": 10,
+      "afterRequested": 10,
+      "beforeReturned": 0,
+      "afterReturned": 0,
+      "returnedCount": 1,
+      "hasMoreStoredBefore": false,
+      "hasMoreStoredAfter": false
+    },
+    "ordering": {
+      "fields": ["eventTime", "canonicalId"],
+      "direction": "ascending",
+      "quality": "deterministic"
+    },
+    "upstreamCompleteness": {
+      "status": "unknown",
+      "basis": null,
+      "through": null
+    },
+    "warnings": [{
+      "code": "upstream_completeness_unknown",
+      "message": "No public upstream-capture completeness attestation is available for this dataset."
+    }]
+  },
+  "requestId": "transport-correlation-id"
 }
 ```
 
-That field requires a new version; this example is a design direction, not a v1
-response promise. Importers remove at most one leading UTF-8 BOM (`U+FEFF`) before
-parsing while retaining the original bytes/hash as lineage. `groupName="私人群组"`
-is display text and cannot identify a conversation: multiple private groups share
-it. Prefer a normalized Telegram chat ID, then a validated public handle. A
-private `t.me/c/<chat-id>` or `rawGroupName` is source-scoped internal key material
-and must be exposed, if ever authorized, only as an opaque Hub conversation ID.
-Unstable/conflicting keys keep neighbor data as raw evidence and create no edge.
+`storedWindow.hasMoreStoredBefore/After` means only that the current Hub
+PostgreSQL projection contains another row beyond the returned window. It never
+proves an upstream first/last message. `upstreamCompleteness` is deliberately
+separate and changes only from persisted source-capture evidence. Current
+`telegram.monitor.messages.v1` is `unknown`; current
+`telegram.sqlite.messages.v1` is `bounded` with basis
+`append_only_overlap`. Source active/idle state, a successful checkpoint, a
+failed continuation cursor, or `hasMoreStored*=false` cannot upgrade either
+status.
+
+`GET /api/v1/data/capabilities` advertises `message_context` and a dataset-level
+`context` object with readiness, limits, ordering and completeness. A future
+source becomes compatible by adding an explicit dataset registry entry, a stable
+conversation key, a declared total order, a matching bounded serving index and
+contract tests. Platform name alone is insufficient. Context items reuse the
+strict canonical public allowlist; raw rows, `extensions`, source coordinates,
+credentials and internal lineage are never returned. The original canonical
+search item retains its ranked-match/score semantics. The public allowlist does
+not forward raw Elasticsearch highlight fragments; a UI may highlight the
+original hit from the query text and use `anchorIndex` to mark that same message
+inside the context list. Neighbor items remain an unhighlighted chronological
+reading view.
 
 ### Night-All-v1-compatible stored search
 

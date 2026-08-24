@@ -1151,6 +1151,9 @@ paths:
         handler, endpoint, provider, credential, or upstream health.
         legacySearch is null when the consumer has no granted platform eligible
         for Night-All compatibility; compatibility calls then fail closed. The
+        Telegram entry advertises message context per dataset under context;
+        context.ready is an index-serving gate independent from the broader
+        Telegram platform ready flag. The
         Hub-owned public_opinion entry advertises province_feed, item_detail and
         stored_search. Its ready flag requires both an active fixed ingestion
         source and both valid Hub serving indexes; it is not an additional grant
@@ -1188,6 +1191,7 @@ paths:
                               type: string
                               enum: [stored]
                               description: Present for Hub-owned stored-data entries.
+                            context: { $ref: "#/components/schemas/CanonicalContextCapability" }
                       legacySearch:
                         description: >-
                           Hub-pinned, grant-filtered dispatch matrix, or null when
@@ -1214,9 +1218,27 @@ paths:
                   platforms:
                     - platform: telegram
                       ready: true
-                      capabilities: [monitor_chats, monitor_messages, stored_search, entity_search]
+                      capabilities: [monitor_chats, monitor_messages, stored_search, entity_search, message_context]
                       source: hub
                       servingMode: stored
+                      context:
+                        contractVersion: mx-insight-hub.canonical-context.v1
+                        ready: true
+                        defaultBefore: 10
+                        defaultAfter: 10
+                        maxBefore: 50
+                        maxAfter: 50
+                        datasets:
+                          - datasetId: telegram.monitor.messages.v1
+                            objectType: message
+                            streamType: chat
+                            ordering: [eventTime, canonicalId]
+                            upstreamCompleteness: { status: unknown, basis: null, through: null }
+                          - datasetId: telegram.sqlite.messages.v1
+                            objectType: message
+                            streamType: chat
+                            ordering: [eventTime, canonicalId]
+                            upstreamCompleteness: { status: bounded, basis: append_only_overlap, through: null }
                     - platform: public_opinion
                       ready: false
                       capabilities: [province_feed, item_detail, stored_search]
@@ -1561,6 +1583,62 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "410": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/canonical/items/{id}/context:
+    get:
+      operationId: getCanonicalMessageContext
+      summary: Read the nearest stored messages around one canonical search hit.
+      description: >-
+        Requires the telegram platform grant. The anchor id is the Hub canonical
+        UUID returned by canonical search. Context never crosses dataset,
+        platform, object type or normalized chat id. Rows use the declared
+        (eventTime, canonicalId) total order rather than an inferred Telegram
+        sequence. before and after default to 10 and are independently capped at
+        50. storedWindow describes only active records currently stored in Hub;
+        upstreamCompleteness is a separate declared source-capture statement,
+        may be upgraded only from persisted evidence, and cannot be inferred
+        from storedWindow, source activity or cursor state. Only datasets
+        advertised by the Telegram context capability are
+        supported. Raw rows, extensions, credentials and lineage remain private.
+        This safe GET is independently metered on every call and retry.
+      x-mx-allowed-query-fields: [before, after]
+      x-mx-error-codes:
+        "400": [invalid_request, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "404": [item_not_found]
+        "409": [context_not_supported]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable, serving_indexes_unavailable]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Hub canonical message UUID returned by a search result.
+          schema: { type: string, format: uuid }
+        - name: before
+          in: query
+          required: false
+          description: Number of nearest stored messages before the anchor.
+          schema: { type: integer, minimum: 0, maximum: 50, default: 10 }
+        - name: after
+          in: query
+          required: false
+          description: Number of nearest stored messages after the anchor.
+          schema: { type: integer, minimum: 0, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Nearest stored messages around the canonical anchor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanonicalContextEnvelope"
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /data/public-opinion/provinces/{province}/items:
@@ -3443,6 +3521,111 @@ components:
               type: array
               items: { $ref: "#/components/schemas/NightAllDataSearchWarning" }
             durationMs: { type: integer, minimum: 0 }
+        requestId: { type: string, format: uuid }
+    CanonicalContextCompleteness:
+      type: object
+      additionalProperties: false
+      required: [status, basis, through]
+      description: >-
+        Declared upstream-capture statement for this dataset. attested_complete
+        requires persisted scope/time evidence. It is independent from the
+        number of neighboring active rows currently stored in Hub.
+      properties:
+        status: { type: string, enum: [unknown, bounded, attested_complete] }
+        basis: { type: [string, "null"] }
+        through: { type: [string, "null"], format: date-time }
+    CanonicalContextCapabilityDataset:
+      type: object
+      additionalProperties: false
+      required: [datasetId, objectType, streamType, ordering, upstreamCompleteness]
+      properties:
+        datasetId: { type: string }
+        objectType: { type: string, const: message }
+        streamType: { type: string, const: chat }
+        ordering:
+          type: array
+          const: [eventTime, canonicalId]
+        upstreamCompleteness: { $ref: "#/components/schemas/CanonicalContextCompleteness" }
+    CanonicalContextCapability:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, ready, defaultBefore, defaultAfter, maxBefore, maxAfter, datasets]
+      properties:
+        contractVersion: { type: string, const: mx-insight-hub.canonical-context.v1 }
+        ready:
+          type: boolean
+          description: True only while every serving index required by the advertised dataset set is valid and ready.
+        defaultBefore: { type: integer, const: 10 }
+        defaultAfter: { type: integer, const: 10 }
+        maxBefore: { type: integer, const: 50 }
+        maxAfter: { type: integer, const: 50 }
+        datasets:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/CanonicalContextCapabilityDataset" }
+    CanonicalContextEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, source, anchorId, anchorIndex, stream, items, storedWindow, ordering, upstreamCompleteness, warnings]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.canonical-context.v1 }
+            source: { type: string, const: hub }
+            anchorId: { type: string, format: uuid }
+            anchorIndex: { type: integer, minimum: 0, maximum: 50 }
+            stream:
+              type: object
+              additionalProperties: false
+              required: [platform, datasetId, objectType, type, id]
+              properties:
+                platform: { type: string, const: telegram }
+                datasetId: { type: string }
+                objectType: { type: string, const: message }
+                type: { type: string, const: chat }
+                id: { type: string, minLength: 1, maxLength: 256 }
+            items:
+              type: array
+              minItems: 1
+              maxItems: 101
+              description: One ascending list; items[anchorIndex].id always equals anchorId.
+              items: { $ref: "#/components/schemas/StoredSearchItem" }
+            storedWindow:
+              type: object
+              additionalProperties: false
+              required: [beforeRequested, afterRequested, beforeReturned, afterReturned, returnedCount, hasMoreStoredBefore, hasMoreStoredAfter]
+              properties:
+                beforeRequested: { type: integer, minimum: 0, maximum: 50 }
+                afterRequested: { type: integer, minimum: 0, maximum: 50 }
+                beforeReturned: { type: integer, minimum: 0, maximum: 50 }
+                afterReturned: { type: integer, minimum: 0, maximum: 50 }
+                returnedCount: { type: integer, minimum: 1, maximum: 101 }
+                hasMoreStoredBefore: { type: boolean }
+                hasMoreStoredAfter: { type: boolean }
+            ordering:
+              type: object
+              additionalProperties: false
+              required: [fields, direction, quality]
+              properties:
+                fields:
+                  type: array
+                  const: [eventTime, canonicalId]
+                direction: { type: string, const: ascending }
+                quality: { type: string, const: deterministic }
+            upstreamCompleteness: { $ref: "#/components/schemas/CanonicalContextCompleteness" }
+            warnings:
+              type: array
+              maxItems: 1
+              items:
+                type: object
+                additionalProperties: false
+                required: [code, message]
+                properties:
+                  code: { type: string, enum: [upstream_completeness_unknown, upstream_completeness_bounded] }
+                  message: { type: string }
         requestId: { type: string, format: uuid }
     TokenizeRequest:
       type: object
