@@ -6,6 +6,7 @@ import { AppError } from './core/errors.mjs'
 import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson } from './core/http.mjs'
 import { PUBLIC_DOCS_HTML, PUBLIC_OPENAPI_DOCUMENT } from './public-docs.mjs'
 import { publicStoredSearchItem } from './data/stored-search.mjs'
+import { normalizeChinaProvince } from './data/china-provinces.mjs'
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import {
   BUILTIN_FILE_FORMAT_RULES,
@@ -127,11 +128,12 @@ function requiredSourceKey(body) {
 }
 
 function dataCenterCursorBinding({
-  query, datasetId, platform, objectType, pageSize, searchProfile = null, sort = null,
+  query, datasetId, platform, objectType, relatedProvince = null, provinceRelation = null,
+  pageSize, searchProfile = null, sort = null,
 }) {
   return createHash('sha256')
     .update(JSON.stringify({
-      query, datasetId, platform, objectType, pageSize,
+      query, datasetId, platform, objectType, relatedProvince, provinceRelation, pageSize,
       ...(searchProfile ? { searchProfile } : {}),
       // The sort is part of what a cursor means. Without it, flipping the order
       // and paging on would resume from a position computed under the old one.
@@ -1045,7 +1047,12 @@ export function createApp({
           throw new AppError(400, 'invalid_request', 'q must not exceed 500 characters')
         }
         const requestedOffset = requestedPage == null ? null : (requestedPage - 1) * pageSize
-        if (query && requestedOffset != null && requestedOffset + pageSize > DATA_CENTER_SEARCH_RESULT_WINDOW) {
+        if (
+          query
+          && !searchParams.get('relatedProvince')?.trim()
+          && requestedOffset != null
+          && requestedOffset + pageSize > DATA_CENTER_SEARCH_RESULT_WINDOW
+        ) {
           throw new AppError(
             400,
             'search_page_out_of_range',
@@ -1057,11 +1064,44 @@ export function createApp({
           platform: optionalFilter('platform'),
           objectType: optionalFilter('objectType'),
         }
+        const rawRelatedProvince = optionalFilter('relatedProvince')
+        const relatedProvince = rawRelatedProvince
+          ? normalizeChinaProvince(rawRelatedProvince)
+          : null
+        if (rawRelatedProvince && !relatedProvince) {
+          throw new AppError(
+            400,
+            'invalid_related_province',
+            'relatedProvince must be a supported ISO 3166-2:CN code or province name',
+          )
+        }
+        const requestedProvinceRelation = optionalFilter('provinceRelation')
+        const provinceRelation = requestedProvinceRelation || 'any'
+        const provinceRelations = new Set([
+          'any', 'event', 'publisher', 'display', 'report', 'recall', 'related', 'canonical',
+        ])
+        if (!provinceRelations.has(provinceRelation)) {
+          throw new AppError(
+            400,
+            'invalid_province_relation',
+            'provinceRelation must be any, event, publisher, display, report, recall, related or canonical',
+          )
+        }
+        if (requestedProvinceRelation && !relatedProvince) {
+          throw new AppError(400, 'invalid_request', 'provinceRelation requires relatedProvince')
+        }
         // Default to newest-first. A relevance-ranked list under a 时间 column
         // reads as unsorted; ranking is still available, but by choice.
         const sort = optionalFilter('sort') || 'newest'
         if (!['relevance', 'newest', 'oldest'].includes(sort)) {
           throw new AppError(400, 'invalid_sort', "sort must be relevance, newest or oldest")
+        }
+        if (relatedProvince && sort === 'relevance') {
+          throw new AppError(
+            400,
+            'invalid_sort',
+            'relatedProvince uses PostgreSQL canonical truth and supports newest or oldest sorting',
+          )
         }
         const requestedSearchProfile = optionalFilter('searchProfile')
         if (!query && requestedSearchProfile) {
@@ -1070,18 +1110,27 @@ export function createApp({
         const profile = query
           ? resolveSearchProfile(requestedSearchProfile, { audience: 'admin' })
           : null
+        if (relatedProvince && requestedSearchProfile) {
+          throw new AppError(
+            400,
+            'invalid_request',
+            'searchProfile is not used with relatedProvince; the combined filter uses PostgreSQL substring search',
+          )
+        }
         const binding = dataCenterCursorBinding({
           query,
           ...filters,
+          relatedProvince: relatedProvince?.code ?? null,
+          provinceRelation: relatedProvince ? provinceRelation : null,
           pageSize,
           sort,
-          searchProfile: profile?.id ?? null,
+          searchProfile: relatedProvince ? null : profile?.id ?? null,
         })
         const encodedCursor = optionalFilter('cursor')
         if (requestedPage != null && encodedCursor) {
           throw new AppError(400, 'invalid_request', 'page and cursor cannot be used together')
         }
-        if (query) {
+        if (query && !relatedProvince) {
           if (!search?.queries?.searchContent) {
             throw new AppError(503, 'stored_search_unavailable', 'Data Center search requires the canonical search layer')
           }
@@ -1173,6 +1222,13 @@ export function createApp({
         const page = requestedPage ?? cursorState.page
         const result = await store.dataCenterRecords({
           ...filters,
+          ...(relatedProvince ? {
+            query,
+            relatedAdmin1Code: relatedProvince.code,
+            relatedProvinceNames: [relatedProvince.name, relatedProvince.officialName],
+            provinceRelation,
+          } : {}),
+          sort,
           pageSize,
           cursor: cursorState.cursor,
           page: requestedPage,
@@ -1181,7 +1237,17 @@ export function createApp({
         sendJson(response, 200, {
           data: {
             items: result.items,
-            mode: 'postgres',
+            mode: relatedProvince ? 'postgres-related' : 'postgres',
+            ...(relatedProvince ? {
+              provinceFilter: {
+                province: { code: relatedProvince.code, name: relatedProvince.name },
+                relation: provinceRelation,
+                relationStatusScope: 'accepted-or-proposed',
+                includesRecallHints: ['any', 'recall'].includes(provinceRelation),
+                qualityGateApplied: false,
+                keywordMode: query ? 'postgres-substring' : null,
+              },
+            } : {}),
             pageInfo: dataCenterPageInfo({
               page,
               pageSize,

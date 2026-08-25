@@ -1,9 +1,15 @@
 import { AppError } from '../core/errors.mjs'
 import { CHINA_PROVINCES, normalizeChinaProvince } from '../data/china-provinces.mjs'
+import {
+  INFORMATION_ATTRIBUTION_RULE_VERSION,
+  evaluateInformationAttributionRules,
+} from './information-attribution-rules.mjs'
 
 export const PROVINCE_ANALYSIS_FIELDS = Object.freeze({
   eventAdmin1: 'geography.event_admin1_code',
+  relatedAdmin1Codes: 'geography.related_admin1_codes',
   publisherAdmin1: 'geography.publisher_admin1_code',
+  reportAttribution: 'geography.report_attribution',
   geoScope: 'geography.geo_scope',
   locationLabel: 'geography.location_label',
   locationType: 'geography.location_type',
@@ -193,6 +199,44 @@ function publisherProvince(sourceName) {
         code: province.code,
         evidence: { path: 'source_name', quote: evidenceWindow(value, index, term, 60) },
       }
+    }
+  }
+  return null
+}
+
+function trustedReportAttribution(raw) {
+  const nested = parseObject(raw?.raw) || {}
+  const deep = parseObject(nested.raw) || {}
+  const candidates = [
+    ['reportProvince', raw?.reportProvince],
+    ['report_attribution', raw?.report_attribution],
+    ['reportAttribution', raw?.reportAttribution],
+    ['raw.reportProvince', nested.reportProvince],
+    ['raw.report_attribution', nested.report_attribution],
+    ['raw.reportAttribution', nested.reportAttribution],
+    ['raw.raw.reportProvince', deep.reportProvince],
+    ['raw.raw.report_attribution', deep.report_attribution],
+    ['raw.raw.reportAttribution', deep.reportAttribution],
+  ]
+  for (const [path, value] of candidates) {
+    const attribution = parseObject(value)
+    if (!attribution || attribution.basis !== 'publisher_registry') continue
+    const registryRef = text(attribution.registryRef ?? attribution.registry_ref, 240)
+    const sourceRef = text(attribution.sourceRef ?? attribution.source_ref, 240)
+    if (!registryRef && !sourceRef) continue
+    const province = normalizeChinaProvince(
+      attribution.admin1Code ?? attribution.admin1_code ?? attribution.province,
+    )
+    if (!province) continue
+    return {
+      admin1Code: province.code,
+      basis: 'publisher_registry',
+      ...(registryRef ? { registryRef } : {}),
+      ...(sourceRef ? { sourceRef } : {}),
+      evidence: {
+        path,
+        quote: `${province.code}:publisher_registry:${registryRef || sourceRef}`,
+      },
     }
   }
   return null
@@ -537,11 +581,39 @@ export function buildProvinceAnalysisContext(input) {
     }] : []),
   ]
   const publisher = publisherProvince(sourceName)
+  const reportAttribution = trustedReportAttribution(raw)
+  const attributionRule = evaluateInformationAttributionRules(eventFields)
   const scopeCodes = new Set(eventCodes)
   if (explicit?.code) scopeCodes.add(explicit.code)
   if (structured?.code) scopeCodes.add(structured.code)
   const scope = foreignLocation
-    ? { value: 'overseas', confidence: 0.95, quote: foreignLocation.label }
+    ? {
+      value: 'overseas',
+      confidence: 0.95,
+      quote: foreignLocation.label,
+      path: foreignLocation.evidence.path,
+    }
+    : explicit?.code
+    ? {
+      value: 'province',
+      confidence: 1,
+      quote: explicit.evidence.quote,
+      path: explicit.evidence.path,
+    }
+    : structured?.code
+    ? {
+      value: 'province',
+      confidence: 0.95,
+      quote: structured.evidence.quote,
+      path: structured.evidence.path,
+    }
+    : attributionRule
+    ? {
+      value: 'unknown',
+      confidence: 1,
+      quote: attributionRule.evidence.quote,
+      path: attributionRule.evidence.path,
+    }
     : scopeFromEvidence(scopeCodes, eventFields)
   const sourceType = text(raw.source_type ?? input?.content_type, 80)
   const platform = text(raw.platform ?? input?.platform, 80)
@@ -566,7 +638,7 @@ export function buildProvinceAnalysisContext(input) {
       0.95,
       [structured.evidence],
     ))
-  } else if (eventCodes.size === 1) {
+  } else if (!attributionRule && eventCodes.size === 1) {
     const code = [...eventCodes][0]
     const evidence = hits.find((hit) => hit.code === code)
     assertions.push(assertion(
@@ -577,13 +649,62 @@ export function buildProvinceAnalysisContext(input) {
       evidence ? [{ path: evidence.path, quote: evidence.window }] : [],
     ))
   }
-  if (publisher) {
+  if (attributionRule) {
+    assertions.push(assertion(
+      PROVINCE_ANALYSIS_FIELDS.relatedAdmin1Codes,
+      attributionRule.relatedAdmin1Codes,
+      'rule',
+      attributionRule.confidence,
+      [attributionRule.evidence],
+      {
+        ruleVersion: attributionRule.ruleVersion,
+        ruleKey: attributionRule.ruleKey,
+      },
+    ))
+  }
+  if (reportAttribution) {
+    assertions.push(assertion(
+      PROVINCE_ANALYSIS_FIELDS.reportAttribution,
+      {
+        admin1Code: reportAttribution.admin1Code,
+        basis: reportAttribution.basis,
+        ...(reportAttribution.registryRef
+          ? { registryRef: reportAttribution.registryRef }
+          : {}),
+        ...(reportAttribution.sourceRef
+          ? { sourceRef: reportAttribution.sourceRef }
+          : {}),
+      },
+      'source',
+      1,
+      [reportAttribution.evidence],
+    ))
+    assertions.push(assertion(
+      PROVINCE_ANALYSIS_FIELDS.publisherAdmin1,
+      reportAttribution.admin1Code,
+      'source',
+      1,
+      [reportAttribution.evidence],
+    ))
+  } else if (publisher) {
     assertions.push(assertion(
       PROVINCE_ANALYSIS_FIELDS.publisherAdmin1,
       publisher.code,
       'rule',
       0.9,
       [publisher.evidence],
+      { ruleVersion: INFORMATION_ATTRIBUTION_RULE_VERSION, ruleKey: 'publisher_name' },
+    ))
+    assertions.push(assertion(
+      PROVINCE_ANALYSIS_FIELDS.reportAttribution,
+      {
+        admin1Code: publisher.code,
+        basis: 'publisher_name',
+      },
+      'rule',
+      0.9,
+      [publisher.evidence],
+      { ruleVersion: INFORMATION_ATTRIBUTION_RULE_VERSION, ruleKey: 'publisher_name' },
     ))
   }
   assertions.push(assertion(
@@ -591,7 +712,11 @@ export function buildProvinceAnalysisContext(input) {
     scope.value,
     'rule',
     scope.confidence,
-    scope.quote ? [{ path: 'event_text', quote: scope.quote }] : [],
+    scope.quote ? [{ path: scope.path || 'event_text', quote: scope.quote }] : [],
+    attributionRule ? {
+      ruleVersion: attributionRule.ruleVersion,
+      ruleKey: attributionRule.ruleKey,
+    } : {},
   ))
   if (foreignLocation) {
     assertions.push(assertion(
@@ -666,6 +791,13 @@ export function buildProvinceAnalysisContext(input) {
       path: hit.path,
       evidence: hit.window,
     })),
+    ...(attributionRule ? {
+      relatedGeography: {
+        ruleKey: attributionRule.ruleKey,
+        admin1Codes: attributionRule.relatedAdmin1Codes,
+        evidence: attributionRule.evidence.quote,
+      },
+    } : {}),
   }
   const scopeAlreadyExplainsNoSingleProvince = [
     'maritime', 'national', 'overseas', 'multi_province',
@@ -683,6 +815,7 @@ export function buildProvinceAnalysisContext(input) {
     sourceName: text(sourceName, 240),
     sourceClass,
     eventType,
+    acceptedReportAttribution: reportAttribution,
     qualityRaw: {
       ...raw,
       title: raw.title ?? input?.title,
@@ -696,7 +829,7 @@ export function buildProvinceAnalysisContext(input) {
     // province even when the bounded local province vocabulary has no hit.
     needsAgent: !explicit
       && !structured?.code
-      && eventCodes.size !== 1
+      && (eventCodes.size !== 1 || Boolean(attributionRule))
       && !scopeAlreadyExplainsNoSingleProvince,
   }
 }
@@ -758,25 +891,30 @@ function agentAssertions(parsed, context, result, versions) {
     { providerId: result.provider, model: result.model, promptVersion: versions.promptVersion },
   ))
 
-  const publisherCode = parsed.publisherAdmin1Code == null ? null : String(parsed.publisherAdmin1Code)
-  const publisherQuote = text(parsed.publisherEvidenceText, 200)
-  if (publisherCode !== null && !PROVINCE_BY_CODE.has(publisherCode)) {
-    throw new AppError(502, 'agent_invalid_response', 'Model returned an unsupported publisher province code')
+  // A trusted source report attribution is an accepted fact. The Agent may
+  // still analyze the event location, but it must not create a later publisher
+  // proposal that masks that source fact in current-state materialization.
+  if (!context.acceptedReportAttribution) {
+    const publisherCode = parsed.publisherAdmin1Code == null ? null : String(parsed.publisherAdmin1Code)
+    const publisherQuote = text(parsed.publisherEvidenceText, 200)
+    if (publisherCode !== null && !PROVINCE_BY_CODE.has(publisherCode)) {
+      throw new AppError(502, 'agent_invalid_response', 'Model returned an unsupported publisher province code')
+    }
+    if (publisherCode !== null && !containsEvidence(context.sourceName, publisherQuote)) {
+      throw new AppError(502, 'agent_unverified_evidence', 'Model publisher evidence was not present in source name')
+    }
+    if (publisherCode !== null && !publisherEvidenceCodes(publisherQuote).has(publisherCode)) {
+      throw new AppError(502, 'agent_unverified_evidence', 'Model publisher province code did not match its evidence')
+    }
+    assertions.push(assertion(
+      PROVINCE_ANALYSIS_FIELDS.publisherAdmin1,
+      publisherCode,
+      'agent',
+      confidence(parsed.publisherConfidence),
+      publisherQuote ? [{ path: 'source_name', quote: publisherQuote }] : [],
+      { providerId: result.provider, model: result.model, promptVersion: versions.promptVersion },
+    ))
   }
-  if (publisherCode !== null && !containsEvidence(context.sourceName, publisherQuote)) {
-    throw new AppError(502, 'agent_unverified_evidence', 'Model publisher evidence was not present in source name')
-  }
-  if (publisherCode !== null && !publisherEvidenceCodes(publisherQuote).has(publisherCode)) {
-    throw new AppError(502, 'agent_unverified_evidence', 'Model publisher province code did not match its evidence')
-  }
-  assertions.push(assertion(
-    PROVINCE_ANALYSIS_FIELDS.publisherAdmin1,
-    publisherCode,
-    'agent',
-    confidence(parsed.publisherConfidence),
-    publisherQuote ? [{ path: 'source_name', quote: publisherQuote }] : [],
-    { providerId: result.provider, model: result.model, promptVersion: versions.promptVersion },
-  ))
 
   const locationLabel = text(parsed.locationLabel, 160)
   const locationType = text(parsed.locationType, 24).toLowerCase()

@@ -631,6 +631,9 @@ export function DataCenterPage({ token, onUnauthorized }) {
   const [objectType, setObjectType] = useState('')
   const [queryDraft, setQueryDraft] = useState('')
   const [query, setQuery] = useState('')
+  const [relatedProvinceDraft, setRelatedProvinceDraft] = useState('')
+  const [relatedProvince, setRelatedProvince] = useState('')
+  const [provinceRelation, setProvinceRelation] = useState('any')
   const [searchProfile, setSearchProfile] = useState('')
   const [page, setPage] = useState(1)
   const [cursor, setCursor] = useState(null)
@@ -664,13 +667,15 @@ export function DataCenterPage({ token, onUnauthorized }) {
     ? requestedProfileMetadata.id
     : fallbackSearchProfile
   const selectedSearchProfile = searchProfiles.find((profile) => profile.id === effectiveSearchProfile) || null
-  const requestedSearchProfile = query ? effectiveSearchProfile : ''
+  const requestedSearchProfile = query && !relatedProvince ? effectiveSearchProfile : ''
   const loadRecords = useCallback(async () => {
     const filters = {
       q: query || undefined,
       datasetId: datasetId || undefined,
       platform: platform || undefined,
       objectType: objectType || undefined,
+      relatedProvince: relatedProvince || undefined,
+      provinceRelation: relatedProvince ? provinceRelation : undefined,
       searchProfile: requestedSearchProfile || undefined,
       sort,
       pageSize,
@@ -682,7 +687,7 @@ export function DataCenterPage({ token, onUnauthorized }) {
     } catch (error) {
       // A rolling deployment can briefly pair the new console with the legacy
       // catalog endpoint. Keep first-page browsing usable until the API catches up.
-      if (error?.status !== 404 || cursor) throw error
+      if (error?.status !== 404 || cursor || relatedProvince) throw error
       const legacy = await adminApi.dataCenter(token, filters)
       const normalizedQuery = query.toLocaleLowerCase()
       const records = asArray(legacy?.records).filter((record) => !normalizedQuery || [
@@ -694,7 +699,10 @@ export function DataCenterPage({ token, onUnauthorized }) {
         pageInfo: { pageSize: legacy?.pageSize || pageSize, hasMore: false, nextCursor: null },
       }
     }
-  }, [cursor, datasetId, objectType, page, platform, query, requestedSearchProfile, searchRevision, token])
+  }, [
+    cursor, datasetId, objectType, page, platform, provinceRelation, query, relatedProvince,
+    requestedSearchProfile, searchRevision, sort, token,
+  ])
   const recordsState = useRemoteData(loadRecords, onUnauthorized)
   const refreshAfterReindex = useCallback(() => {
     state.refresh()
@@ -753,6 +761,7 @@ export function DataCenterPage({ token, onUnauthorized }) {
   const search = (event) => {
     event.preventDefault()
     setQuery(queryDraft.trim())
+    setRelatedProvince(relatedProvinceDraft.trim())
     resetPagination()
     setSearchRevision((revision) => revision + 1)
   }
@@ -822,10 +831,17 @@ export function DataCenterPage({ token, onUnauthorized }) {
                 onChange={(event) => setQueryDraft(event.target.value)} />
             </span>
           </label>
+          <label className="qp-field">
+            <span className="qp-field__label">相关省份</span>
+            <input className="qp-input" value={relatedProvinceDraft} placeholder="CN-JS / 江苏"
+              onChange={(event) => setRelatedProvinceDraft(event.target.value)} />
+          </label>
           <button className="qp-button" type="submit" disabled={recordsState.loading}>搜索</button>
-          {query ? <button className="qp-button qp-button--ghost" type="button" onClick={() => {
+          {query || relatedProvince ? <button className="qp-button qp-button--ghost" type="button" onClick={() => {
             setQueryDraft('')
             setQuery('')
+            setRelatedProvinceDraft('')
+            setRelatedProvince('')
             resetPagination()
           }}>清除搜索</button> : null}
         </form>
@@ -842,10 +858,28 @@ export function DataCenterPage({ token, onUnauthorized }) {
             { value: '', label: '全部类型' },
             ...objectTypes.map((value) => ({ value, label: value })),
           ]} />
+          <DropdownField label="省份关系" value={provinceRelation} onChange={changeFilter(setProvinceRelation)}
+            disabled={!relatedProvince && !relatedProvinceDraft} options={[
+              { value: 'any', label: '任一关系 / 线索' },
+              { value: 'event', label: '事件地' },
+              { value: 'publisher', label: '发布者所在地' },
+              { value: 'display', label: '当前展示归属' },
+              { value: 'report', label: '报告归属' },
+              { value: 'recall', label: '上游召回 hint' },
+              { value: 'related', label: '主题 / 提及区域' },
+              { value: 'canonical', label: '源映射 admin1' },
+            ]} />
           <DropdownField label="搜索策略" value={effectiveSearchProfile} onChange={changeSearchProfile}
-            disabled={!searchProfiles.length} options={searchProfileOptions} />
+            disabled={!searchProfiles.length || Boolean(relatedProvince)} options={searchProfileOptions} />
         </div>
-        {selectedSearchProfile?.summary ? (
+        <p className="mih-search-profile-summary">
+          全局浏览会把所有 Dataset 按时间混排，高吞吐数据集可能占满前页；关键词只匹配文本，
+          不等于地域筛选。填写“相关省份”后改走 PostgreSQL canonical truth，不应用公开质量门禁；
+          “任一关系 / 线索”包含事件地、发布者所在地、展示归属、报告归属、召回 hint、
+          主题 / 提及区域和源映射字段；其中 proposal、hint 只是审计线索。“主题 / 提及”不等于事件地。
+          普通正文仅提到省名不会自动成为地域关系，需要同时填写关键词或等待归属分析产生 typed 结果。
+        </p>
+        {!relatedProvince && selectedSearchProfile?.summary ? (
           <p className="mih-search-profile-summary" role="status" aria-live="polite">
             <span className="qp-tag qp-tag--primary">
               {selectedSearchProfile.id === defaultSearchProfile || selectedSearchProfile.default ? 'API 默认' : '本次选择'}
@@ -857,7 +891,7 @@ export function DataCenterPage({ token, onUnauthorized }) {
         {[...new Set([
           selectedSearchProfile?.warning,
           searchExecution?.warning,
-          query && !searchExecution?.warning
+          query && !relatedProvince && !searchExecution?.warning
             && /postgres/iu.test(searchExecution?.mode || recordsState.data?.mode || '')
             ? 'Elasticsearch 当前不可用，本次搜索已回退 PostgreSQL substring/trigram；所选 Elasticsearch profile 未完整应用。'
             : null,
@@ -867,9 +901,11 @@ export function DataCenterPage({ token, onUnauthorized }) {
             <span>{warning}</span>
           </div>
         ))}
-        <SearchLab capabilities={searchCapabilities} selectedProfile={selectedSearchProfile}
-          execution={searchExecution} recordsMode={recordsState.data?.mode} query={query}
-          safeSample={safeSearchSample} />
+        {!relatedProvince ? (
+          <SearchLab capabilities={searchCapabilities} selectedProfile={selectedSearchProfile}
+            execution={searchExecution} recordsMode={recordsState.data?.mode} query={query}
+            safeSample={safeSearchSample} />
+        ) : null}
       </Panel>
 
       {datasets.length ? (
@@ -906,7 +942,7 @@ export function DataCenterPage({ token, onUnauthorized }) {
               <th>记录</th><th>Dataset</th><th>平台 / 类型</th><th>版本</th>
               <th>
                 <button className="mih-sort-toggle" type="button"
-                  onClick={() => { setSort(nextSort(sort, query)); setPage(1); setCursor(null) }}
+                  onClick={() => { setSort(nextSort(sort, query && !relatedProvince)); setPage(1); setCursor(null) }}
                   title={sortHint(sort)}
                   aria-label={`时间排序：${sortLabel(sort)}，点击切换`}>
                   时间<span aria-hidden="true">{sortGlyph(sort)}</span>
@@ -943,6 +979,9 @@ export function DataCenterPage({ token, onUnauthorized }) {
                             ? ''
                             : ` / ${formatNumber(record.publication.qualificationThreshold)}`}`}
                       </small>
+                    ) : null}
+                    {asArray(record.relatedProvinceMatches).length ? (
+                      <small>相关依据：{record.relatedProvinceMatches.join(' · ')}</small>
                     ) : null}
                   </td>
                   <td><button className="qp-button qp-button--ghost" type="button" onClick={() => setSelectedRecord(record)}>查看完整记录</button></td>

@@ -1101,6 +1101,14 @@ paths:
         Elasticsearch ranking/highlight with the existing PostgreSQL fallback;
         direct page jumps are limited to the first 10,000 ranked hits and report
         maxDirectPage, while cursor traversal remains available for deeper reads.
+        relatedProvince is an Admin evidence filter over PostgreSQL canonical truth,
+        not a public quality/qualification gate. provinceRelation selects event,
+        publisher, display, typed report attribution, upstream recall hint,
+        subject/mentioned-area assertion, canonical admin1, or their union. Admin
+        audit includes current accepted or proposed assertions and recall hints;
+        related never means accepted event geography. A combined q + relatedProvince request deliberately
+        uses PostgreSQL title/body/external-ID substring matching so an Elasticsearch
+        projection that lacks relation metadata cannot silently drop matches.
         page and cursor are mutually exclusive. The Admin response is intentionally
         not redacted and may include the current revision payload, extensions and
         lineage. Host paths and saved connection credentials are never included.
@@ -1119,6 +1127,24 @@ paths:
         - name: objectType
           in: query
           schema: { type: string, minLength: 1 }
+        - name: relatedProvince
+          in: query
+          description: ISO 3166-2:CN code or supported Chinese province name.
+          schema: { type: string, minLength: 1 }
+        - name: provinceRelation
+          in: query
+          description: Requires relatedProvince; defaults to the union of all explicit relations.
+          schema:
+            type: string
+            enum: [any, event, publisher, display, report, recall, related, canonical]
+            default: any
+        - name: sort
+          in: query
+          description: Defaults to newest. relatedProvince does not support relevance.
+          schema:
+            type: string
+            enum: [newest, oldest, relevance]
+            default: newest
         - name: pageSize
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 50 }

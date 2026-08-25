@@ -362,6 +362,22 @@ province. Agent output always remains a proposal. The pipeline is
 installed paused; adding records creates a durable backlog but never invokes a
 model in the ingest transaction.
 
+Mentions and physical event locations are also separate. A phrase such as
+`部署台湾一线` creates a versioned, proposed
+`geography.related_admin1_codes=[{admin1Code:"CN-TW",relation:"mentioned_area"}]`
+assertion with source-text evidence; it does not deterministically create an
+event province. A source name such as `人民网福建` may independently create
+proposed publisher/report attribution `CN-FJ` with `basis=publisher_name`.
+Neither proposal changes formal serving. Only a typed source
+`report_attribution` with `basis=publisher_registry` plus a non-empty,
+auditable `registryRef` or `sourceRef` is accepted as trusted report
+attribution; merely putting the basis string in content is insufficient. A
+later Agent result is not allowed to replace accepted report attribution.
+Every deterministic attribution assertion records its rule version; changing a
+pattern, confidence or relationship requires a new version. Because the
+pipeline is paused by default, these assertions appear only after the pipeline
+is explicitly enabled or its backlog is run.
+
 An assertion is anchored to the source revision it classified. A new raw or
 canonical revision supersedes stale pending/running work instead of inheriting
 a conclusion invisibly. A correction appends a new source revision and new

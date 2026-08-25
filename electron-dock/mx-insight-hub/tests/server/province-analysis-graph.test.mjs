@@ -62,6 +62,92 @@ test('Taiwan Strait and Hainan Prefecture text do not become false event provinc
   assert.equal(prefecture.needsAgent, true)
 })
 
+test('cross-strait frontline text remains related geography while publisher attribution stays separate', () => {
+  const context = buildProvinceAnalysisContext({
+    raw_payload: {
+      title: '解放军特种兵部署台湾一线，实弹演练现场公开',
+      summary: '解放军特种兵部署台湾一线，实弹演练现场公开',
+      source_name: '抖音 @人民网福建',
+      source_type: 'social',
+      platform: 'douyin',
+    },
+  })
+
+  assert.equal(assertionFor(context.assertions, PROVINCE_ANALYSIS_FIELDS.eventAdmin1), undefined)
+  assert.deepEqual(
+    assertionFor(context.assertions, PROVINCE_ANALYSIS_FIELDS.relatedAdmin1Codes),
+    {
+      fieldKey: PROVINCE_ANALYSIS_FIELDS.relatedAdmin1Codes,
+      value: [{ admin1Code: 'CN-TW', relation: 'mentioned_area' }],
+      method: 'rule',
+      confidence: 0.7,
+      evidenceRefs: [{
+        path: 'title',
+        quote: '解放军特种兵部署台湾一线，实弹演练现场公开',
+      }],
+      status: 'proposed',
+      ruleVersion: 'information-attribution.2026-08.1',
+      ruleKey: 'cross_strait_frontline',
+    },
+  )
+  assert.deepEqual(
+    assertionFor(context.assertions, PROVINCE_ANALYSIS_FIELDS.publisherAdmin1),
+    {
+      fieldKey: PROVINCE_ANALYSIS_FIELDS.publisherAdmin1,
+      value: 'CN-FJ',
+      method: 'rule',
+      confidence: 0.9,
+      evidenceRefs: [{ path: 'source_name', quote: '抖音 @人民网福建' }],
+      status: 'proposed',
+      ruleVersion: 'information-attribution.2026-08.1',
+      ruleKey: 'publisher_name',
+    },
+  )
+  assert.deepEqual(
+    assertionFor(context.assertions, PROVINCE_ANALYSIS_FIELDS.reportAttribution)?.value,
+    { admin1Code: 'CN-FJ', basis: 'publisher_name' },
+  )
+  assert.equal(
+    assertionFor(context.assertions, PROVINCE_ANALYSIS_FIELDS.reportAttribution)?.status,
+    'proposed',
+  )
+  assert.equal(assertionFor(context.assertions, PROVINCE_ANALYSIS_FIELDS.geoScope)?.value, 'unknown')
+  assert.equal(assertionFor(context.assertions, PROVINCE_ANALYSIS_FIELDS.locationLabel), undefined)
+  assert.equal(context.needsAgent, true)
+})
+
+test('source, structured and foreign event geography outrank a related-area phrase', () => {
+  const explicit = buildProvinceAnalysisContext({
+    raw_payload: {
+      province: '江苏省',
+      title: '江苏单位发布台湾一线相关演训信息',
+    },
+  })
+  const structured = buildProvinceAnalysisContext({
+    raw_payload: {
+      city: '南京市',
+      title: '南京发布台湾一线相关演训信息',
+    },
+  })
+  const foreign = buildProvinceAnalysisContext({
+    raw_payload: {
+      title: '菲律宾回应台湾一线相关演训信息',
+      eventLocation: {
+        label: '菲律宾',
+        type: 'country',
+        countryCode: 'PH',
+      },
+    },
+  })
+
+  assert.equal(assertionFor(explicit.assertions, PROVINCE_ANALYSIS_FIELDS.eventAdmin1)?.value, 'CN-JS')
+  assert.equal(assertionFor(explicit.assertions, PROVINCE_ANALYSIS_FIELDS.geoScope)?.value, 'province')
+  assert.equal(assertionFor(structured.assertions, PROVINCE_ANALYSIS_FIELDS.eventAdmin1)?.value, 'CN-JS')
+  assert.equal(assertionFor(structured.assertions, PROVINCE_ANALYSIS_FIELDS.geoScope)?.value, 'province')
+  assert.equal(assertionFor(foreign.assertions, PROVINCE_ANALYSIS_FIELDS.eventAdmin1), undefined)
+  assert.equal(assertionFor(foreign.assertions, PROVINCE_ANALYSIS_FIELDS.geoScope)?.value, 'overseas')
+})
+
 test('a Jiangsu media name is publisher province evidence only', () => {
   const context = buildProvinceAnalysisContext({
     raw_payload: {
@@ -133,6 +219,87 @@ test('an explicit source province is accepted without calling the Agent', async 
       evidenceRefs: [{ path: 'raw.province', quote: '江苏省' }],
       status: 'accepted',
     },
+  )
+})
+
+test('trusted report attribution is accepted and cannot be replaced by an Agent publisher proposal', async () => {
+  const result = await runProvinceAnalysisGraph({
+    claim: claim({
+      raw_payload: {
+        title: '行业运行情况更新',
+        source_name: '观察平台',
+        report_attribution: {
+          admin1Code: 'CN-JS',
+          basis: 'publisher_registry',
+          registryRef: 'media-registry:people-js',
+        },
+      },
+    }),
+    agent: {
+      available: true,
+      async complete() {
+        return {
+          provider: 'test-provider',
+          model: 'test-model',
+          payload: { choices: [{ message: { content: JSON.stringify({
+            eventAdmin1Code: null,
+            eventConfidence: 0,
+            eventEvidenceText: '',
+            publisherAdmin1Code: 'CN-FJ',
+            publisherConfidence: 0.9,
+            publisherEvidenceText: '福建',
+            geoScope: 'unknown',
+            scopeConfidence: 1,
+            scopeEvidenceText: '',
+          }) } }] },
+        }
+      },
+    },
+  })
+
+  const publisherAssertions = result.assertions.filter((item) => (
+    item.fieldKey === PROVINCE_ANALYSIS_FIELDS.publisherAdmin1
+  ))
+  assert.deepEqual(publisherAssertions, [{
+    fieldKey: PROVINCE_ANALYSIS_FIELDS.publisherAdmin1,
+    value: 'CN-JS',
+    method: 'source',
+    confidence: 1,
+    evidenceRefs: [{
+      path: 'report_attribution',
+      quote: 'CN-JS:publisher_registry:media-registry:people-js',
+    }],
+    status: 'accepted',
+  }])
+  assert.deepEqual(
+    assertionFor(result.assertions, PROVINCE_ANALYSIS_FIELDS.reportAttribution)?.value,
+    {
+      admin1Code: 'CN-JS',
+      basis: 'publisher_registry',
+      registryRef: 'media-registry:people-js',
+    },
+  )
+})
+
+test('publisher_registry text without an auditable reference is not accepted', () => {
+  const context = buildProvinceAnalysisContext({
+    raw_payload: {
+      title: '行业运行情况更新',
+      source_name: '观察平台',
+      report_attribution: {
+        admin1Code: 'CN-JS',
+        basis: 'publisher_registry',
+      },
+    },
+  })
+
+  assert.equal(
+    assertionFor(context.assertions, PROVINCE_ANALYSIS_FIELDS.reportAttribution),
+    undefined,
+  )
+  assert.equal(
+    assertionFor(context.assertions, PROVINCE_ANALYSIS_FIELDS.publisherAdmin1),
+    undefined,
   )
 })
 

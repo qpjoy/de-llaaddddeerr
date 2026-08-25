@@ -229,7 +229,7 @@ test('Data Center record browser pages PostgreSQL and searches the ES projection
     assert.equal(typeof firstBody.pageInfo.nextCursor, 'string')
     assert.deepEqual(browseCalls[0], {
       datasetId: 'external.canyie.v1', platform: null, objectType: null,
-      pageSize: 25, cursor: null, page: null,
+      sort: 'newest', pageSize: 25, cursor: null, page: null,
     })
 
     const second = await fetch(
@@ -252,8 +252,61 @@ test('Data Center record browser pages PostgreSQL and searches the ES projection
     })
     assert.deepEqual(browseCalls[2], {
       datasetId: 'external.canyie.v1', platform: null, objectType: null,
-      pageSize: 25, cursor: null, page: 3,
+      sort: 'newest', pageSize: 25, cursor: null, page: 3,
     })
+
+    const related = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?datasetId=public-opinion.province.v1&q=%E9%83%A8%E7%BD%B2&relatedProvince=%E5%8F%B0%E6%B9%BE&provinceRelation=any&sort=newest&pageSize=10`,
+      { headers },
+    )
+    assert.equal(related.status, 200)
+    const relatedBody = (await related.json()).data
+    assert.equal(relatedBody.mode, 'postgres-related')
+    assert.deepEqual(relatedBody.provinceFilter, {
+      province: { code: 'CN-TW', name: '台湾' },
+      relation: 'any',
+      relationStatusScope: 'accepted-or-proposed',
+      includesRecallHints: true,
+      qualityGateApplied: false,
+      keywordMode: 'postgres-substring',
+    })
+    assert.deepEqual(browseCalls[3], {
+      datasetId: 'public-opinion.province.v1', platform: null, objectType: null,
+      query: '部署', relatedAdmin1Code: 'CN-TW', relatedProvinceNames: ['台湾', '台湾省'],
+      provinceRelation: 'any', sort: 'newest',
+      pageSize: 10, cursor: null, page: null,
+    })
+    assert.equal(searchCalls.length, 0)
+
+    const mentioned = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?relatedProvince=CN-TW&provinceRelation=related`,
+      { headers },
+    )
+    assert.equal(mentioned.status, 200)
+    assert.equal((await mentioned.json()).data.provinceFilter.relation, 'related')
+    assert.equal(browseCalls[4].provinceRelation, 'related')
+
+    const oldest = await fetch(
+      `${baseUrl}/internal/v1/admin/data-center/records?sort=oldest&pageSize=10`,
+      { headers },
+    )
+    assert.equal(oldest.status, 200)
+    assert.equal(browseCalls[5].sort, 'oldest')
+
+    for (const [queryString, code] of [
+      ['relatedProvince=火星', 'invalid_related_province'],
+      ['provinceRelation=event', 'invalid_request'],
+      ['relatedProvince=CN-JS&provinceRelation=nearby', 'invalid_province_relation'],
+      ['relatedProvince=CN-JS&sort=relevance', 'invalid_sort'],
+      ['relatedProvince=CN-JS&q=江苏&searchProfile=canonical.phrase.v1', 'invalid_request'],
+    ]) {
+      const invalid = await fetch(
+        `${baseUrl}/internal/v1/admin/data-center/records?${queryString}`,
+        { headers },
+      )
+      assert.equal(invalid.status, 400)
+      assert.equal((await invalid.json()).error.code, code)
+    }
 
     const searched = await fetch(
       `${baseUrl}/internal/v1/admin/data-center/records?q=%E5%91%BD%E4%B8%AD&platform=twitter&pageSize=10`,
@@ -523,6 +576,63 @@ test('PostgresStore keyset-pages full canonical records for the Admin browser', 
   assert.match(calls[1].sql, /ORDER BY coalesce\(r\.event_time, r\.collected_at, r\.last_seen_at, r\.first_seen_at\) DESC, r\.id DESC/)
 })
 
+test('PostgresStore filters Admin records by explicit province relations without a quality gate', async () => {
+  const calls = []
+  const store = new PostgresStore({
+    async query(sql, values) {
+      calls.push({ sql: sql.replace(/\s+/g, ' ').trim(), values })
+      if (sql.includes('count(*)::bigint AS total')) return { rows: [{ total: '1' }] }
+      return {
+        rows: [{
+          id: '11111111-1111-4111-8111-111111111111',
+          dataset_id: 'public-opinion.province.v1', platform: 'public_opinion',
+          object_type: 'opinion_item', external_id: 'opinion-1', title: '江苏相关记录',
+          current_revision: 1, sort_time: '2026-08-25T12:00:00.000Z',
+          related_admin1_matches: ['event', 'recall', 'related'],
+        }],
+      }
+    },
+  })
+
+  const result = await store.dataCenterRecords({
+    datasetId: 'public-opinion.province.v1',
+    query: '相关',
+    relatedAdmin1Code: 'CN-JS',
+    relatedProvinceNames: ['江苏', '江苏省'],
+    provinceRelation: 'any',
+    sort: 'newest',
+    pageSize: 20,
+  })
+
+  assert.equal(result.total, 1)
+  assert.deepEqual(result.items[0].relatedProvinceMatches, ['event', 'recall', 'related'])
+  assert.deepEqual(calls[0].values, [
+    'public-opinion.province.v1', '相关', 'CN-JS', ['江苏', '江苏省'],
+  ])
+  assert.deepEqual(calls[1].values, [
+    'public-opinion.province.v1', '相关', 'CN-JS', ['江苏', '江苏省'], 21,
+  ])
+  for (const { sql } of calls) {
+    assert.match(sql, /LEFT JOIN core\.record_revisions revision_filter/)
+    assert.match(sql, /LEFT JOIN core\.public_opinion_current_state publication_filter/)
+    assert.match(sql, /publication_filter\.event_admin1_code = \$3::text/)
+    assert.match(sql, /politicalTerrorProvinceSuggestion/)
+    assert.match(sql, /raw,raw,reportAttribution/)
+    assert.match(sql, /report_attribution ->> 'basis' = 'publisher_registry'/)
+    assert.match(sql, /geography\.related_admin1_codes/)
+    assert.match(sql, /related_assertion\.task_id = publication_filter\.materialized_from_task_id/)
+    assert.match(sql, /related_assertion\.canonical_revision = r\.current_revision/)
+    assert.match(sql, /related_assertion\.source_object_revision_id = publication_filter\.source_object_revision_id/)
+    assert.match(sql, /related_assertion\.status IN \('accepted', 'proposed'\)/)
+    assert.match(sql, /related_task\.status = 'succeeded'/)
+    assert.doesNotMatch(sql, /related_assertion\.status IN \([^)]*(?:rejected|superseded)/)
+    assert.doesNotMatch(sql, /publication_filter\.(?:quality_score|qualification_threshold)/)
+  }
+  assert.match(calls[1].sql, /r\.external_id ILIKE '%' \|\| \$2 \|\| '%'/)
+  assert.match(calls[1].sql, /AS related_admin1_matches/)
+  assert.match(calls[1].sql, /ORDER BY page\.sort_time DESC, page\.id DESC/)
+})
+
 test('Data Center full records expose only revision-fenced bounded publication state', async () => {
   const recordId = '11111111-1111-4111-8111-111111111111'
   const publication = {
@@ -640,4 +750,15 @@ test('PostgresStore supports direct 1-based Admin page offsets with an exact tot
   assert.equal(result.nextCursor, null)
   assert.deepEqual(calls[1].values, ['external.canyie.v1', 'twitter', 'post', 2, 2])
   assert.match(calls[1].sql, /LIMIT \$4 OFFSET \$5/)
+
+  await store.dataCenterRecords({
+    datasetId: 'external.canyie.v1', sort: 'oldest', pageSize: 1,
+    cursor: {
+      sortTime: '2025-01-01T00:00:00.000Z',
+      id: '00000000-0000-4000-8000-000000000001',
+    },
+  })
+  assert.match(calls[3].sql, /\) > \(\$2::timestamptz, \$3::uuid\)/)
+  assert.match(calls[3].sql, /ORDER BY coalesce\(r\.event_time, r\.collected_at, r\.last_seen_at, r\.first_seen_at\) ASC, r\.id ASC/)
+  assert.match(calls[3].sql, /ORDER BY page\.sort_time ASC, page\.id ASC/)
 })

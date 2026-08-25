@@ -588,7 +588,7 @@ select {
 
 .mih-data-center-search {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) auto auto;
+  grid-template-columns: minmax(260px, 1fr) minmax(180px, 0.45fr) auto auto;
   align-items: end;
   gap: 10px;
 }
@@ -615,7 +615,7 @@ select {
 
 .mih-filter-bar {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
 }
 

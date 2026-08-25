@@ -2610,6 +2610,11 @@ export class PostgresStore {
     datasetId = null,
     platform = null,
     objectType = null,
+    query = null,
+    relatedAdmin1Code = null,
+    relatedProvinceNames = [],
+    provinceRelation = 'any',
+    sort = 'newest',
     pageSize = 50,
     cursor = null,
     page = null,
@@ -2625,13 +2630,63 @@ export class PostgresStore {
       filterValues.push(value)
       filterClauses.push(`${column} = $${filterValues.length}`)
     }
+    if (query) {
+      filterValues.push(query)
+      filterClauses.push(`(
+        r.title ILIKE '%' || $${filterValues.length} || '%'
+        OR r.body ILIKE '%' || $${filterValues.length} || '%'
+        OR r.external_id ILIKE '%' || $${filterValues.length} || '%'
+      )`)
+    }
+    let provinceFilterJoins = ''
+    let relatedMatchesSelect = ''
+    if (relatedAdmin1Code) {
+      filterValues.push(relatedAdmin1Code)
+      const codeParameter = filterValues.length
+      filterValues.push(relatedProvinceNames)
+      const namesParameter = filterValues.length
+      const filterRelations = dataCenterProvinceRelationExpressions({
+        recordAlias: 'r',
+        publicationAlias: 'publication_filter',
+        revisionAlias: 'revision_filter',
+        codeParameter,
+        namesParameter,
+      })
+      filterClauses.push(filterRelations[provinceRelation])
+      provinceFilterJoins = `LEFT JOIN core.record_revisions revision_filter
+          ON revision_filter.record_id = r.id
+         AND revision_filter.revision = r.current_revision
+        LEFT JOIN core.public_opinion_current_state publication_filter
+          ON publication_filter.record_id = r.id
+         AND publication_filter.canonical_revision = r.current_revision`
+      const resultRelations = dataCenterProvinceRelationExpressions({
+        recordAlias: 'r',
+        publicationAlias: 'publication',
+        revisionAlias: 'revision',
+        codeParameter,
+        namesParameter,
+      })
+      relatedMatchesSelect = `,
+              ARRAY_REMOVE(ARRAY[
+                CASE WHEN ${resultRelations.event} THEN 'event' END,
+                CASE WHEN ${resultRelations.publisher} THEN 'publisher' END,
+                CASE WHEN ${resultRelations.display} THEN 'display' END,
+                CASE WHEN ${resultRelations.report} THEN 'report' END,
+                CASE WHEN ${resultRelations.recall} THEN 'recall' END,
+                CASE WHEN ${resultRelations.related} THEN 'related' END,
+                CASE WHEN ${resultRelations.canonical} THEN 'canonical' END
+              ], NULL) AS related_admin1_matches`
+    }
+    const oldestFirst = sort === 'oldest'
+    const direction = oldestFirst ? 'ASC' : 'DESC'
+    const cursorOperator = oldestFirst ? '>' : '<'
     const values = [...filterValues]
     const clauses = [...filterClauses]
     if (cursor) {
       values.push(cursor.sortTime, cursor.id)
       clauses.push(
         `(coalesce(r.event_time, r.collected_at, r.last_seen_at, r.first_seen_at), r.id)`
-        + ` < ($${values.length - 1}::timestamptz, $${values.length}::uuid)`,
+        + ` ${cursorOperator} ($${values.length - 1}::timestamptz, $${values.length}::uuid)`,
       )
     }
     values.push(pageSize + 1)
@@ -2647,6 +2702,7 @@ export class PostgresStore {
       this.pool.query(
         `SELECT count(*)::bigint AS total
            FROM core.canonical_records r
+           ${provinceFilterJoins}
            ${filterWhere}`,
         filterValues,
       ),
@@ -2655,8 +2711,9 @@ export class PostgresStore {
          SELECT r.id,
                 coalesce(r.event_time, r.collected_at, r.last_seen_at, r.first_seen_at) AS sort_time
            FROM core.canonical_records r
+           ${provinceFilterJoins}
            ${where}
-          ORDER BY coalesce(r.event_time, r.collected_at, r.last_seen_at, r.first_seen_at) DESC, r.id DESC
+          ORDER BY coalesce(r.event_time, r.collected_at, r.last_seen_at, r.first_seen_at) ${direction}, r.id ${direction}
           LIMIT $${limitParameter}
           ${offset}
        )
@@ -2693,6 +2750,7 @@ export class PostgresStore {
               publication.country_name AS publication_country_name,
               publication.assessed_at AS publication_assessed_at,
               page.sort_time
+              ${relatedMatchesSelect}
          FROM page
          JOIN core.canonical_records r ON r.id = page.id
          LEFT JOIN core.record_revisions revision
@@ -2713,7 +2771,7 @@ export class PostgresStore {
            ON observation_run.id = observation.ingest_run_id
          LEFT JOIN serving.connector_calls connector_call
            ON connector_call.id = observation_run.connector_call_id
-        ORDER BY page.sort_time DESC, page.id DESC`,
+        ORDER BY page.sort_time ${direction}, page.id ${direction}`,
         values,
       ),
     ])
@@ -4016,6 +4074,134 @@ export class PostgresStore {
   }
 }
 
+function dataCenterProvinceRelationExpressions({
+  recordAlias,
+  publicationAlias,
+  revisionAlias,
+  codeParameter,
+  namesParameter,
+}) {
+  const code = `$${codeParameter}::text`
+  const names = `$${namesParameter}::text[]`
+  const trustedReportRaw = `EXISTS (
+    SELECT 1
+      FROM jsonb_array_elements(jsonb_build_array(
+        ${revisionAlias}.normalized_payload -> 'reportProvince',
+        ${revisionAlias}.normalized_payload -> 'report_attribution',
+        ${revisionAlias}.normalized_payload -> 'reportAttribution',
+        ${revisionAlias}.normalized_payload #> '{raw,reportProvince}',
+        ${revisionAlias}.normalized_payload #> '{raw,report_attribution}',
+        ${revisionAlias}.normalized_payload #> '{raw,reportAttribution}',
+        ${revisionAlias}.normalized_payload #> '{raw,raw,reportProvince}',
+        ${revisionAlias}.normalized_payload #> '{raw,raw,report_attribution}',
+        ${revisionAlias}.normalized_payload #> '{raw,raw,reportAttribution}'
+      )) report_attribution
+     WHERE jsonb_typeof(report_attribution) = 'object'
+       AND report_attribution ->> 'basis' = 'publisher_registry'
+       AND coalesce(
+         nullif(btrim(report_attribution ->> 'registryRef'), ''),
+         nullif(btrim(report_attribution ->> 'registry_ref'), ''),
+         nullif(btrim(report_attribution ->> 'sourceRef'), ''),
+         nullif(btrim(report_attribution ->> 'source_ref'), '')
+       ) IS NOT NULL
+       AND (
+         upper(coalesce(
+           report_attribution ->> 'admin1Code',
+           report_attribution ->> 'admin1_code',
+           report_attribution ->> 'province'
+         )) = upper(${code})
+         OR coalesce(
+           report_attribution ->> 'admin1Code',
+           report_attribution ->> 'admin1_code',
+           report_attribution ->> 'province'
+         ) = ANY(${names})
+       )
+  )`
+  const recallCode = `coalesce(
+    ${revisionAlias}.normalized_payload #>> '{heat_metrics,provinceSuggestionCode}',
+    ${revisionAlias}.normalized_payload #>> '{heat_metrics,recallAdmin1Code}',
+    ${revisionAlias}.normalized_payload #>> '{raw,politicalTerrorProvinceSuggestionCode}',
+    ${revisionAlias}.normalized_payload #>> '{raw,politicalTerrorRecallAdmin1Code}'
+  )`
+  const recallName = `coalesce(
+    ${revisionAlias}.normalized_payload #>> '{heat_metrics,provinceSuggestion}',
+    ${revisionAlias}.normalized_payload #>> '{raw,politicalTerrorProvinceSuggestion}'
+  )`
+  const recallQuery = `coalesce(
+    ${revisionAlias}.normalized_payload #>> '{heat_metrics,provinceRecallQuery}',
+    ${revisionAlias}.normalized_payload #>> '{raw,politicalTerrorProvinceRecallQuery}',
+    ''
+  )`
+  const recallFlag = `lower(coalesce(
+    ${revisionAlias}.normalized_payload #>> '{heat_metrics,provinceRecall}',
+    ${revisionAlias}.normalized_payload #>> '{raw,politicalTerrorProvinceRecall}',
+    'false'
+  )) = 'true'`
+  const currentAssertion = (fieldKey, valuePredicate) => `EXISTS (
+    SELECT 1
+      FROM agent_center.classification_assertions related_assertion
+      JOIN agent_center.analysis_tasks related_task
+        ON related_task.id = related_assertion.task_id
+     WHERE related_assertion.task_id = ${publicationAlias}.materialized_from_task_id
+       AND related_assertion.pipeline_key = 'province-geography-v1'
+       AND related_assertion.record_id = ${recordAlias}.id
+       AND related_assertion.canonical_revision = ${recordAlias}.current_revision
+       AND related_assertion.source_object_revision_id = ${publicationAlias}.source_object_revision_id
+       AND related_assertion.field_key = '${fieldKey}'
+       AND related_assertion.status IN ('accepted', 'proposed')
+       AND related_task.status = 'succeeded'
+       AND related_task.record_id = ${recordAlias}.id
+       AND related_task.canonical_revision = ${recordAlias}.current_revision
+       AND related_task.source_object_revision_id = ${publicationAlias}.source_object_revision_id
+       AND ${valuePredicate}
+  )`
+  const reportAssertion = currentAssertion(
+    'geography.report_attribution',
+    `jsonb_typeof(related_assertion.proposed_value) = 'object'
+       AND related_assertion.proposed_value ->> 'admin1Code' = ${code}`,
+  )
+  const relatedAssertion = currentAssertion(
+    'geography.related_admin1_codes',
+    `jsonb_typeof(related_assertion.proposed_value) = 'array'
+       AND EXISTS (
+         SELECT 1
+           FROM jsonb_array_elements(related_assertion.proposed_value) related_area
+          WHERE related_area ->> 'admin1Code' = ${code}
+       )`,
+  )
+  const relations = {
+    event: `${publicationAlias}.event_admin1_code = ${code}`,
+    publisher: `${publicationAlias}.publisher_admin1_code = ${code}`,
+    display: `${publicationAlias}.display_admin1_code = ${code}`,
+    report: `(
+      ${trustedReportRaw}
+      OR ${reportAssertion}
+    )`,
+    recall: `(${recallFlag} AND (
+        upper(${recallCode}) = upper(${code})
+        OR ${recallName} = ANY(${names})
+        OR EXISTS (
+          SELECT 1
+            FROM unnest(${names}) AS related_province_name
+           WHERE ${recallQuery} ILIKE '%' || related_province_name || '%'
+        )
+      )
+    )`,
+    related: relatedAssertion,
+    canonical: `${recordAlias}.admin1_code = ${code}`,
+  }
+  relations.any = `(${[
+    relations.event,
+    relations.publisher,
+    relations.display,
+    relations.report,
+    relations.recall,
+    relations.related,
+    relations.canonical,
+  ].join(' OR ')})`
+  return relations
+}
+
 function dataCenterDataset(row) {
   return {
     datasetId: row.dataset_id,
@@ -4104,6 +4290,9 @@ function dataCenterRecordDetail(row) {
     projectionRevision: Number(row.projection_revision || 0),
     firstSeenAt: iso(row.first_seen_at),
     lastSeenAt: iso(row.last_seen_at),
+    ...(Array.isArray(row.related_admin1_matches) ? {
+      relatedProvinceMatches: row.related_admin1_matches,
+    } : {}),
     ...(publication ? { publication } : {}),
     highlight: null,
   }

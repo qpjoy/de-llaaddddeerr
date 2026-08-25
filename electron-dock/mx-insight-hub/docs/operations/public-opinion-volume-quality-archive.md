@@ -469,6 +469,65 @@ jq -e '
 `geographyVerified=true` 的 `verifiedJiangsu` 才是已接受的江苏事件地理事实。
 审计完成后删除 `$AUDIT_DIR`，不要把原始分页文件附到普通工单或公开日志。
 
+### 4.3 Data Center 按省相关关系查询
+
+Data Center 是 Admin evidence surface，不应用公共 feed 的 formal/qualified、质量分或
+`geographyVerified` 门禁。按江苏所有已记录关系、从新到旧查询：
+
+```bash
+curl -fsS -G \
+  -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
+  --data-urlencode 'datasetId=public-opinion.province.v1' \
+  --data-urlencode 'relatedProvince=CN-JS' \
+  --data-urlencode 'provinceRelation=any' \
+  --data-urlencode 'sort=newest' \
+  --data-urlencode 'pageSize=100' \
+  "$HUB_ADMIN_BASE/internal/v1/admin/data-center/records" |
+jq '.data | {mode, provinceFilter, pageInfo, items}'
+```
+
+`relatedProvince` 也接受 `江苏`、`江苏省`。`provinceRelation` 可显式选择：
+
+- `event`：已物化的事件省份；
+- `publisher`：发布者所在地；
+- `display`：当前展示归属；
+- `report`：typed `reportProvince/report_attribution` raw 或当前任务 assertion，不回退为 publisher；
+- `recall`：Night-All 的省份召回 hint/query；
+- `related`：当前分析任务的主题/提及区域 assertion，例如“台湾一线”可提及 `CN-TW`；
+  它不是 event location，也不能证明大陆侧发生地为福建；
+- `canonical`：canonical record 的源映射 `admin1Code`；
+- `any`：以上关系/线索的并集，响应记录的 `relatedProvinceMatches` 给出实际命中依据。
+
+`provinceFilter.relationStatusScope=accepted-or-proposed` 表示 Admin audit 会纳入当前任务的
+accepted/proposed assertion；`includesRecallHints=true` 表示还纳入上游 hint。`related` assertion
+必须属于 publication 当前物化的 succeeded task，并同时匹配当前 canonical/source-object revision；
+stale、rejected、superseded assertion 不会命中。该安全 `EXISTS` 会增加 Admin 诊断查询开销，
+大数据集应同时传 `datasetId=public-opinion.province.v1`，不要把它用作高频公开 serving API。
+
+`any` 不把普通正文中的省名自动升级为地域关系。要找“正文提到江苏但尚未分析/归属”的
+记录，使用关键词查询；它是文本召回，不是地理事实：
+
+```bash
+curl -fsS -G \
+  -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
+  --data-urlencode 'datasetId=public-opinion.province.v1' \
+  --data-urlencode 'q=江苏' \
+  --data-urlencode 'sort=newest' \
+  --data-urlencode 'pageSize=100' \
+  "$HUB_ADMIN_BASE/internal/v1/admin/data-center/records" |
+jq '.data | {mode, searchExecution, pageInfo, items}'
+```
+
+同时传 `q` 和 `relatedProvince` 表示两者取交集。该组合固定走 PostgreSQL 的
+title/body/external-ID substring 与 canonical relation 查询，避免 Elasticsearch 投影尚未携带
+report/recall 等关系时静默漏数；因此不可传 `searchProfile` 或 `sort=relevance`。
+
+不选 Dataset 的空关键词浏览会把所有 Dataset 按时间混排，高吞吐 Dataset 可能占满前几页；
+这不是质量过滤。全局关键词搜索同样不应用舆情质量门禁，若目标行不在当前页，先查看
+`pageInfo.total/totalPages`；若 `mode=postgres` 或 Search Lab 显示 target schema pending，则当前
+使用的是降级 substring 路径，应先按 Dataset 缩小诊断范围并检查搜索重建/水位，而不要通过
+降低舆情质量阈值来修复 Admin 搜索。
+
 ## 5. Night-All 供给漏斗
 
 Hub 汇总只能说明“进入 Hub 以后发生了什么”。判断源少还是质量门槛，必须同时读取
