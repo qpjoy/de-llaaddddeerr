@@ -17,6 +17,7 @@ import { dirname, join, resolve } from 'node:path';
 
 import { runHdoCli } from './hdo';
 import { runH2iCli } from './h2i';
+import { runOpenCli } from './open';
 
 const args = process.argv.slice(2);
 const packageRoot = resolve(__dirname, '..');
@@ -109,6 +110,9 @@ Usage:
   qp-tunnel-cli hdo enroll --server-url https://domestic.example.com --username user
   qp-tunnel-cli h2i enroll --bootstrap-url https://h2i.example.com --username user
   qp-tunnel-cli h2i enroll --bootstrap-url https://h2i.example.com --anonymous
+  qp-tunnel-cli open install --subnet 100.127.0.0/24
+  qp-tunnel-cli open create internal-01 --ip 100.127.0.10
+  qp-tunnel-cli open enroll --file internal-01.ovpn
   qp-tunnel-cli <mihomo-client command> [options]
   qp-tunnel-cli -- <command> [args...]
   qp-tunnel-cli <command-path> [args...]
@@ -139,6 +143,8 @@ Common commands:
   qp-tunnel-cli listen off
   qp-tunnel-cli hdo status
   qp-tunnel-cli h2i status
+  qp-tunnel-cli open status
+  qp-tunnel-cli open help
   qp-tunnel-cli uninstall --purge
   qp-tunnel-cli ./electron-server/scripts/manage.sh redeploy
 
@@ -174,6 +180,15 @@ Install the script as a normal server command:
 
 Enroll this machine into an HDO mesh:
   HDO_PASSWORD=... qp-tunnel-cli hdo enroll --server-url https://domestic.example.com --username user
+
+Reverse access over OpenVPN, so an Oversea host can reach back into a machine
+that only has outbound connectivity. The Oversea side installs a server; the
+inside machine enrolls as a spoke with route-nopull, so it receives one stable
+address and nothing else about its networking changes:
+  sudo qp-tunnel-cli open install --host 203.0.113.10
+  sudo qp-tunnel-cli open create internal-01
+  sudo qp-tunnel-cli open enroll --file internal-01.ovpn
+Run 'qp-tunnel-cli open help' for the full command set.
 `);
 }
 
@@ -776,6 +791,11 @@ async function main(): Promise<void> {
   if (command === 'h2i' || command === 'h2i-enroll') {
     const h2iArgs = command === 'h2i' ? args.slice(1) : ['enroll', ...args.slice(1)];
     await runH2iCli(h2iArgs, { isRoot, sudoSelf });
+    return;
+  }
+
+  if (command === 'open' || command === 'ovpn' || command === 'openvpn') {
+    await runOpenCli(args.slice(1), { isRoot, sudoSelf });
     return;
   }
 
