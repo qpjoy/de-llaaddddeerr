@@ -166,4 +166,16 @@ bash scripts/manage.sh reindex-search
 ```bash
 # Hub API 参考
 # TikHub/TGStat
+## 舆情处理省份归类情况
+curl -fsS \
+  -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
+  "$HUB_ADMIN_BASE/internal/v1/admin/pipelines/province-opinion/quality-summary" |
+jq '.data | {
+  canonical,
+  publication,
+  geography,
+  completeness,
+  analysis,
+  archive
+}'
 ```

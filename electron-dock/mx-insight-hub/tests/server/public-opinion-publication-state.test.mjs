@@ -156,7 +156,7 @@ test('proposed geography never enters formal province serving', () => {
   ]
 
   const formal = publicationStateFromResult({ assertions, sourceStage: 'formal' })
-  assert.equal(formal.eventAdmin1Code, 'CN-JS')
+  assert.equal(formal.eventAdmin1Code, null)
   assert.equal(formal.publisherAdmin1Code, 'CN-BJ')
   assert.equal(formal.displayAdmin1Code, null)
   assert.equal(formal.geographyVerified, false)
@@ -175,6 +175,26 @@ test('proposed geography never enters formal province serving', () => {
   })
   assert.equal(emptyAccepted.displayAdmin1Code, null)
   assert.equal(emptyAccepted.geographyVerified, false)
+})
+
+test('accepted source province cannot be hidden or replaced by proposed geography', () => {
+  const assertions = [
+    { fieldKey: 'geography.event_admin1_code', value: 'CN-JS', status: 'accepted' },
+    { fieldKey: 'geography.event_admin1_code', value: 'CN-ZJ', status: 'proposed' },
+    { fieldKey: 'geography.publisher_admin1_code', value: 'CN-BJ', status: 'proposed' },
+    { fieldKey: 'geography.geo_scope', value: 'overseas', status: 'proposed' },
+    { fieldKey: 'geography.location_label', value: '海外', status: 'proposed' },
+  ]
+
+  const formal = publicationStateFromResult({ assertions, sourceStage: 'formal' })
+  assert.equal(formal.eventAdmin1Code, 'CN-JS')
+  assert.equal(formal.geoScope, 'overseas')
+  assert.equal(formal.displayAdmin1Code, 'CN-JS')
+  assert.equal(formal.geographyVerified, true)
+
+  const candidate = publicationStateFromResult({ assertions, sourceStage: 'candidate' })
+  assert.equal(candidate.eventAdmin1Code, 'CN-ZJ')
+  assert.equal(candidate.displayAdmin1Code, null)
 })
 
 test('quality scoring is deterministic and cannot qualify an unlocated keyword-only fragment', () => {

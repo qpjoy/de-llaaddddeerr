@@ -99,21 +99,26 @@ export function publicationStateFromResult({
     qualificationThreshold: threshold,
     qualityFlags,
     rejectionCodes,
-    eventAdmin1Code: typeof eventAdmin1Code === 'string' ? eventAdmin1Code : null,
+    eventAdmin1Code: formal
+      ? acceptedEventAdmin1Code
+      : typeof eventAdmin1Code === 'string'
+        ? eventAdmin1Code
+        : null,
     publisherAdmin1Code: typeof publisherAdmin1Code === 'string' ? publisherAdmin1Code : null,
-    // Formal serving only trusts accepted event geography. Candidate reads are
-    // the explicit exploration surface where proposed event or publisher
-    // geography may still be displayed. The scope fence prevents an overseas
-    // event filed from Beijing from re-entering a Beijing province feed.
-    displayAdmin1Code: singleProvinceDisplayAllowed
-      ? formal
-        ? acceptedEventAdmin1Code
-        : typeof eventAdmin1Code === 'string'
+    // Formal serving only trusts accepted event geography and cannot be hidden
+    // by a proposed scope. Candidate reads are the explicit exploration surface
+    // where proposed event or publisher geography may still be displayed; their
+    // scope fence prevents an overseas event filed from Beijing from re-entering
+    // a Beijing province feed.
+    displayAdmin1Code: formal
+      ? acceptedEventAdmin1Code
+      : singleProvinceDisplayAllowed
+        ? typeof eventAdmin1Code === 'string'
           ? eventAdmin1Code
           : typeof publisherAdmin1Code === 'string'
             ? publisherAdmin1Code
             : null
-      : null,
+        : null,
     geographyVerified,
     geoScope,
     locationLabel: typeof locationLabel === 'string' ? locationLabel.slice(0, 160) : null,

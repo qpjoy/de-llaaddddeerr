@@ -76,12 +76,12 @@ const publicOpinionProvinceParameters = [
   },
   {
     name: 'includeCandidates', in: 'query', required: false,
-    description: 'Defaults to false and preserves the formal-only contract. qualified adds Hub-qualified candidates; true is accepted as an alias. all includes every candidate meeting minQualityScore and requires both from and to.',
+    description: 'Defaults to false and preserves the formal-only contract. qualified adds only candidates already in status=qualified; minQualityScore is an additional request floor, not a reclassification control. true is accepted as an alias. all includes every candidate passing the optional score filter and requires both from and to; omit minQualityScore to retain unscored candidates.',
     schema: { type: 'string', enum: ['false', 'true', 'qualified', 'all'], default: 'false' },
   },
   {
     name: 'minQualityScore', in: 'query', required: false,
-    description: 'Candidate quality threshold from 0 to 100. It is valid only with includeCandidates=qualified or all and defaults to 80 for qualified.',
+    description: 'Additional candidate score floor from 0 to 100. It is valid only with includeCandidates=qualified or all and defaults to 80 for qualified. Setting 0 does not change publication status or lower a record qualification threshold; with all, an explicit 0 still excludes null/unscored values.',
     schema: { type: 'integer', minimum: 0, maximum: 100 },
   },
   {
@@ -128,11 +128,11 @@ const publicOpinionSearchRequestProperties = {
   includeCandidates: {
     type: 'string',
     enum: ['qualified', 'all'],
-    description: 'Valid only with explicit platform=public_opinion. qualified includes candidates with status=qualified and defaults minQualityScore to 80. all is a bounded audit mode and requires from, to and at least one of province, countryCode or location.',
+    description: 'Valid only with explicit platform=public_opinion. qualified includes only candidates already in status=qualified and defaults the additional minQualityScore floor to 80; 0 does not reclassify pending/rejected/failed rows. all is a bounded audit mode and requires from, to and at least one of province, countryCode or location; omit minQualityScore to retain unscored candidates.',
   },
   minQualityScore: {
     type: 'integer', minimum: 0, maximum: 100,
-    description: 'Candidate threshold. Valid only with includeCandidates=qualified or all; qualified defaults to 80.',
+    description: 'Additional candidate score floor. Valid only with includeCandidates=qualified or all; qualified defaults to 80. It does not change publication status or lower a record qualification threshold.',
   },
   province: {
     type: 'string', minLength: 1, maxLength: 64,
@@ -581,7 +581,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Public Opinion'],
         operationId: 'listProvincePublicOpinionItems',
         summary: 'List hot or latest public-opinion items for one province',
-        description: 'Requires the public_opinion platform grant and valid Hub serving indexes. The province path is normalized to a stable ISO 3166-2:CN code. By default includeCandidates=false preserves the existing formal-only response. includeCandidates=qualified adds candidates at or above minQualityScore (default 80); includeCandidates=all is an explicit bounded audit view and requires both from and to. This safe GET reads the Hub canonical PostgreSQL projection and is independently metered on every call and retry. hot excludes records without heatScore and sorts by heatScore, effective sort time and id; latest sorts by effective sort time, collectedAt and id. Effective sort time is publishedAt when present, otherwise collectedAt; this fallback is not exposed as publishedAt. For formal rows, from/to retain the existing publishedAt semantics and exclude an undated row. For candidate rows only, an absent publishedAt uses collectedAt for the bounded window so an explicitly requested audit candidate remains reachable. Both orders use a signed keyset cursor bound to candidate visibility controls. Only the documented customer-safe item allowlist is returned; raw rows, upstream provider identities, strategy/run ids, source coordinates, extensions, model reasoning and lineage remain private.',
+        description: 'Requires the public_opinion platform grant and valid Hub serving indexes. The province path is normalized to a stable ISO 3166-2:CN code. By default includeCandidates=false preserves the existing formal-only response. includeCandidates=qualified adds only candidates already in status=qualified and at or above the effective quality floor; minQualityScore (default 80) is an additional request floor, so setting 0 does not reclassify pending/rejected/failed rows or lower the record qualification threshold. includeCandidates=all is an explicit bounded audit view and requires both from and to; omit minQualityScore to retain unscored candidates. The province path always excludes candidates without that display province. This safe GET reads the Hub canonical PostgreSQL projection and is independently metered on every call and retry. hot excludes records without heatScore and sorts by heatScore, effective sort time and id; latest sorts by effective sort time, collectedAt and id. Effective sort time is publishedAt when present, otherwise collectedAt; this fallback is not exposed as publishedAt. For formal rows, from/to retain the existing publishedAt semantics and exclude an undated row. For candidate rows only, an absent publishedAt uses collectedAt for the bounded window so an explicitly requested audit candidate remains reachable. Both orders use a signed keyset cursor bound to candidate visibility controls. Only the documented customer-safe item allowlist is returned; raw rows, upstream provider identities, strategy/run ids, source coordinates, extensions, model reasoning and lineage remain private.',
         'x-mx-error-codes': {
           400: ['invalid_province', 'invalid_request', 'invalid_sort', 'page_size_exceeded', 'invalid_cursor', 'unsupported_fields', 'candidate_scope_required'],
           401: ['api_key_required', 'invalid_api_key'],
@@ -632,7 +632,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Public Opinion'],
         operationId: 'getPublicOpinionProvinceCoverage',
         summary: 'Compare public-opinion availability across every province',
-        description: 'Requires the public_opinion platform grant, valid Hub serving indexes and an explicit from/to window. The default remains formal-only. includeCandidates=qualified adds Hub-qualified candidates at or above minQualityScore (default 80); includeCandidates=all includes all candidates, optionally narrowed by an explicit minQualityScore. Formal rows use publishedAt for the window; undated candidates use collectedAt. targetPerProvince defaults to 10 and affects only shortfall/meetsTarget calculations. featuredProvinceCodes contains at most eight provinces ranked by available count and average quality; provinces always contains the full stable province taxonomy. Counts and scores are Hub-owned publication metadata. Upstream raw rows, provider names, endpoint ids, credentials, strategy/run ids, source coordinates, extensions, reasoning and lineage remain private.',
+        description: 'Requires the public_opinion platform grant, valid Hub serving indexes and an explicit from/to window. The default remains formal-only. includeCandidates=qualified adds only candidates already in status=qualified and at or above the effective quality floor; minQualityScore (default 80) is an additional request floor and setting 0 does not reclassify rows. includeCandidates=all includes all candidates, optionally narrowed by an explicit minQualityScore; omit it to retain unscored candidates. Coverage groups only records with a display province, so it cannot inventory unclassified candidates. Formal rows use publishedAt for the window; undated candidates use collectedAt. targetPerProvince defaults to 10 and affects only shortfall/meetsTarget calculations. featuredProvinceCodes contains at most eight provinces ranked by available count and average quality; provinces always contains the full stable province taxonomy. Counts and scores are Hub-owned publication metadata. Upstream raw rows, provider names, endpoint ids, credentials, strategy/run ids, source coordinates, extensions, reasoning and lineage remain private.',
         'x-mx-error-codes': {
           400: ['invalid_request', 'unsupported_fields'],
           401: ['api_key_required', 'invalid_api_key'],
@@ -656,7 +656,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Public Opinion'],
         operationId: 'getPublicOpinionItem',
         summary: 'Get one customer-safe public-opinion item',
-        description: 'Requires the public_opinion platform grant. id is the Hub canonical UUID returned by the province feed or canonical search. By default includeCandidates=false looks only in the formal corpus and preserves the existing response. includeCandidates=qualified or all may resolve a candidate meeting minQualityScore; because the id is exact, this detail route does not require a time window. The lookup remains fixed to Hub-owned public-opinion corpora; deleted, below-threshold or out-of-scope records are returned as item_not_found. This safe GET is independently metered on every call and retry. Only the documented allowlist is returned; upstream raw and operational coordinates remain private.',
+        description: 'Requires the public_opinion platform grant. id is the Hub canonical UUID returned by the province feed or canonical search. By default includeCandidates=false looks only in the formal corpus and preserves the existing response. includeCandidates=qualified may resolve only a candidate already in status=qualified and above the effective quality floor; minQualityScore is an additional request floor, not a reclassification control. includeCandidates=all may resolve any candidate passing its optional score filter; omit minQualityScore to retain unscored candidates. Because the id is exact, this detail route does not require a time window. The lookup remains fixed to Hub-owned public-opinion corpora; deleted, below-threshold or out-of-scope records are returned as item_not_found. This safe GET is independently metered on every call and retry. Only the documented allowlist is returned; upstream raw and operational coordinates remain private.',
         'x-mx-error-codes': {
           400: ['invalid_request', 'unsupported_fields'],
           401: ['api_key_required', 'invalid_api_key'],
@@ -1881,7 +1881,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -d '{"platform":"xiaohongshu","query":"AI Agent","datasetId":"night-all.search.v1","objectType":"post","pageSize":20}' | jq</code></pre>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/canonical/search</code></div><p>来源无关的统一检索：在一份 canonical 全局索引中直接排序，不逐个调用来源后拼接。省略 <code>platform</code> 时搜索当前调用者已授权的全部平台；<code>datasetId</code> 与 <code>objectType</code> 只用于收窄。可用 <code>searchProfile</code> 选择版本化搜索策略；不接受任意 analyzer、tokenizer、filter 或 ES DSL。</p></div>
     <div class="notice">统一接口只读取 Hub 已存数据，不触发第三方采集。响应的 <code>scope.platforms</code> 是本次实际授权范围；游标与该范围及首屏分词状态绑定，后续页不会再次调用 HanLP。授权或 profile 发生变化后应从第一页重新搜索。独立的 canonical-search 用量桶固定采用调用者当前全部平台授权中最严格的限额。</div>
-    <div class="notice"><strong>public_opinion 可见性：</strong>stored/canonical 搜索默认只返回 <code>sourceStage=formal</code> 且 <code>status=formal</code> 的舆情记录；混合平台搜索只门禁 <code>public_opinion</code> 分支，其他平台不受影响。候选查询必须显式指定 <code>platform=public_opinion</code>。<code>includeCandidates=qualified</code> 默认质量阈值为 80；<code>includeCandidates=all</code> 必须同时提供 <code>from</code>、<code>to</code>，并至少提供 <code>province</code>、<code>countryCode</code> 或 <code>location</code> 之一。候选时间窗按 <code>eventTime</code>，缺失时回退 <code>collectedAt</code>；formal 仍只按 <code>eventTime</code>。显式候选响应只增加有界 <code>quality</code>/<code>location</code>，且不返回候选 author、contentType、provider、raw、flags 或内部理由。</div>
+    <div class="notice"><strong>public_opinion 可见性：</strong>stored/canonical 搜索默认只返回 <code>sourceStage=formal</code> 且 <code>status=formal</code> 的舆情记录；混合平台搜索只门禁 <code>public_opinion</code> 分支，其他平台不受影响。候选查询必须显式指定 <code>platform=public_opinion</code>。<code>includeCandidates=qualified</code> 只加入已经是 <code>status=qualified</code> 的候选；<code>minQualityScore</code> 是额外请求下限，传 0 不会把 pending/rejected/failed 重新分类。<code>includeCandidates=all</code> 必须同时提供 <code>from</code>、<code>to</code>，并至少提供 <code>province</code>、<code>countryCode</code> 或 <code>location</code> 之一；要保留 unscored candidate 应省略 <code>minQualityScore</code>。候选时间窗按 <code>eventTime</code>，缺失时回退 <code>collectedAt</code>；formal 仍只按 <code>eventTime</code>。显式候选响应只增加有界 <code>quality</code>/<code>location</code>，且不返回候选 author、contentType、provider、raw、flags 或内部理由。</div>
     <table><thead><tr><th>searchProfile</th><th>查询策略</th></tr></thead><tbody>
       <tr><td><code>canonical.balanced.v1</code>（默认）</td><td>HanLP 健康时使用“原文 phrase 或全部 HanLP/presegmented 词命中（AND）”；若分词降级到 Jieba/bigram，则明确应用 phrase-only，绝不拿 fallback 词误查 HanLP 字段。</td></tr>
       <tr><td><code>canonical.phrase.v1</code></td><td>只匹配保持语序的原文 phrase，精度优先。</td></tr>
@@ -1919,8 +1919,8 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     <table><thead><tr><th>参数</th><th>规则</th></tr></thead><tbody>
       <tr><td><code>sort</code></td><td><code>hot</code>（默认）按 heatScore、内部有效排序时间、ID 降序，且排除无热度分数的记录；<code>latest</code> 按有效排序时间、采集时间、ID 降序。有效排序时间优先 publishedAt，缺失时回退 collectedAt，但不会把回退值冒充 publishedAt 返回。</td></tr>
       <tr><td><code>from / to</code></td><td>可选 RFC3339 闭区间；formal 记录继续按 publishedAt 过滤并排除无日期记录。只有显式候选模式下，候选缺少 publishedAt 时才用 collectedAt 参与窗口过滤，返回时仍保持 publishedAt 为空。</td></tr>
-      <tr><td><code>includeCandidates</code></td><td>默认 <code>false</code>，保持原 formal-only 契约。<code>qualified</code>（或 <code>true</code>）加入达到质量阈值的候选；<code>all</code> 是显式审计视图，必须同时提供 <code>from</code> 与 <code>to</code>。</td></tr>
-      <tr><td><code>minQualityScore</code></td><td>仅可与候选模式一起使用，范围 0–100；<code>qualified</code> 默认 80。</td></tr>
+      <tr><td><code>includeCandidates</code></td><td>默认 <code>false</code>，保持原 formal-only 契约。<code>qualified</code>（或 <code>true</code>）只加入已经 qualified 且达到有效质量下限的候选；<code>all</code> 是显式审计视图，必须同时提供 <code>from</code> 与 <code>to</code>。</td></tr>
+      <tr><td><code>minQualityScore</code></td><td>仅可与候选模式一起使用，范围 0–100；它是额外请求下限，不改变 publication status 或记录 qualification threshold。<code>qualified</code> 默认 80；<code>all</code> 要保留 unscored 时应省略该字段。</td></tr>
       <tr><td><code>pageSize</code></td><td>默认 20，接口上限 100，并受调用者 <code>public_opinion</code> 平台策略的更低上限约束。</td></tr>
       <tr><td><code>cursor</code></td><td>返回上一页的 <code>nextCursor</code> 原值。游标与省份、排序、时间范围及页大小绑定；任一条件改变都必须从第一页开始。</td></tr>
     </tbody></table>

@@ -408,8 +408,8 @@ The province feed accepts only these query parameters:
 | `sort` | `hot` (default) or `latest`. `hot` excludes null heat scores and orders by `(heatScore, effectiveSortTime, id)` descending. `latest` orders by `(effectiveSortTime, collectedAt, id)` descending. `effectiveSortTime` is `publishedAt` when present, otherwise `collectedAt`; the fallback is never returned as `publishedAt`. |
 | `from` | Optional inclusive RFC3339 `publishedAt` lower bound. A bounded request excludes records whose `publishedAt` is null. |
 | `to` | Optional inclusive RFC3339 `publishedAt` upper bound; it must not precede `from`. |
-| `includeCandidates` | Omitted/`false` preserves the historical formal-only response. `qualified` includes candidates whose Hub-owned current state meets `minQualityScore` (default 80). `all` includes pending/rejected/failed candidates too and requires both `from` and `to`. Boolean `true` is a compatibility alias for `qualified`. |
-| `minQualityScore` | Integer 0–100, valid only with candidate mode. It defaults to 80 for `qualified`; `all` has no implicit score floor. |
+| `includeCandidates` | Omitted/`false` preserves the historical formal-only response. `qualified` includes only candidates already in `status=qualified` and above the effective quality floor. `all` includes pending/rejected/failed candidates too and requires both `from` and `to`. Boolean `true` is a compatibility alias for `qualified`. |
+| `minQualityScore` | Integer 0–100, valid only with candidate mode. It is an additional request floor, not a reclassification control or an override of the record qualification threshold. It defaults to 80 for `qualified`; `all` has no implicit score floor, and the field must be omitted to retain null/unscored candidates. |
 | `pageSize` | Positive integer, default 20. The effective maximum is the lower of 100 and the consumer's `public_opinion.maxPageSize` policy. |
 | `cursor` | Optional HMAC-signed opaque cursor, at most 8,192 characters. Return `pageInfo.nextCursor` unchanged. |
 

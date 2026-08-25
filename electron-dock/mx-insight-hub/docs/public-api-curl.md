@@ -223,10 +223,11 @@ cursor 过期时返回 `410`；应移除 cursor、换新 key 并从第一页重�
 `sourceStage=formal` 且 `status=formal` 的记录；混合平台搜索中的其他平台完全不受
 影响。候选与精确地理/时间过滤必须显式指定 `platform=public_opinion`：
 
-- `includeCandidates=qualified` 加入 `status=qualified` 的候选，
-  `minQualityScore` 默认 80；
+- `includeCandidates=qualified` 只加入已经是 `status=qualified` 的候选；
+  `minQualityScore` 默认 80，且只是额外请求下限，传 0 不会重新分类 pending/rejected；
 - `includeCandidates=all` 必须同时提供 RFC3339 `from`、`to`，并至少提供
-  `province`、ISO alpha-2 `countryCode` 或精确 `location` 之一；
+  `province`、ISO alpha-2 `countryCode` 或精确 `location` 之一；要包含 unscored candidate
+  必须省略 `minQualityScore`；
 - formal 时间窗只使用 `eventTime`；候选缺少 `eventTime` 时可回退 `collectedAt`；
 - 显式候选结果只增加有界的 `quality` 与 `location`，不返回候选 author、
   contentType、source/provider、raw、flags 或内部理由。

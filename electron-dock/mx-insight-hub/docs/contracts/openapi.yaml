@@ -1669,9 +1669,13 @@ paths:
         Requires the API key's consumer to have the explicit public_opinion
         platform grant. The province path is normalized to a stable ISO
         3166-2:CN code. By default includeCandidates=false preserves the
-        formal-only contract. qualified adds Hub-qualified candidates at or
-        above minQualityScore (default 80); includeCandidates=all requires both
-        from and to. This
+        formal-only contract. qualified adds only candidates already in
+        status=qualified and above the effective quality floor;
+        minQualityScore (default 80) is an additional request floor, so 0 does
+        not reclassify pending/rejected/failed rows. includeCandidates=all
+        requires both from and to; omit minQualityScore to retain unscored
+        candidates. The province path excludes candidates without that display
+        province. This
         safe GET reads the Hub canonical PostgreSQL
         projection and is independently metered on every call and retry. Both
         valid Hub serving indexes are required. hot excludes records without
@@ -1722,12 +1726,12 @@ paths:
         - name: includeCandidates
           in: query
           required: false
-          description: Defaults to false. qualified (or true) adds qualified candidates; all requires from and to.
+          description: Defaults to false. qualified (or true) adds only candidates already in status=qualified; all requires from and to and must omit minQualityScore to retain unscored candidates.
           schema: { type: string, enum: ["false", "true", qualified, all], default: "false" }
         - name: minQualityScore
           in: query
           required: false
-          description: Candidate quality threshold from 0 to 100; qualified defaults to 80.
+          description: Additional candidate score floor from 0 to 100; qualified defaults to 80. It does not change publication status or lower a record qualification threshold; with all, explicit 0 excludes null/unscored values.
           schema: { type: integer, minimum: 0, maximum: 100 }
         - name: pageSize
           in: query
@@ -1777,9 +1781,14 @@ paths:
       description: >-
         Requires the public_opinion grant, valid Hub serving indexes and an
         explicit from/to window. The default is formal-only. qualified adds
-        candidates at or above minQualityScore (default 80); all includes all
-        candidates, optionally narrowed by minQualityScore. Formal rows use
-        publishedAt for the window; undated candidates use collectedAt. targetPerProvince
+        only candidates already in status=qualified and above the effective
+        quality floor. minQualityScore (default 80) is an additional request
+        floor, so 0 does not reclassify pending/rejected/failed rows or lower a
+        record qualification threshold. all includes all candidates optionally
+        narrowed by minQualityScore; omit it to retain unscored candidates.
+        Coverage groups only records with a display province and therefore does
+        not inventory unclassified candidates. Formal rows use publishedAt for
+        the window; undated candidates use collectedAt. targetPerProvince
         defaults to 10. featuredProvinceCodes contains at most eight ranked
         provinces; provinces contains the full stable province taxonomy. Only
         Hub-owned safe publication counts and scores are returned; upstream raw
@@ -1805,12 +1814,12 @@ paths:
         - name: includeCandidates
           in: query
           required: false
-          description: Defaults to false. qualified (or true) adds qualified candidates; all includes all candidates.
+          description: Defaults to false. qualified (or true) adds only candidates already in status=qualified and above the effective quality floor; all includes pending/rejected/failed candidates too and must omit minQualityScore to retain unscored candidates.
           schema: { type: string, enum: ["false", "true", qualified, all], default: "false" }
         - name: minQualityScore
           in: query
           required: false
-          description: Candidate quality threshold from 0 to 100; qualified defaults to 80.
+          description: Additional candidate score floor from 0 to 100; qualified defaults to 80. It does not change publication status or lower a record qualification threshold; with all, explicit 0 excludes null/unscored values.
           schema: { type: integer, minimum: 0, maximum: 100 }
         - name: targetPerProvince
           in: query
@@ -1838,10 +1847,14 @@ paths:
         feed or canonical search. The lookup is fixed to platform
         public_opinion, dataset public-opinion.province.v1 and object type
         opinion_item. By default includeCandidates=false looks only in the
-        formal corpus. qualified or all may resolve a candidate meeting
-        minQualityScore; the exact id lookup does not require a time window. Deleted,
-        below-threshold or out-of-scope records return item_not_found. This safe
-        GET is independently metered on every call and retry.
+        formal corpus. qualified may resolve only a candidate already in
+        status=qualified and above the effective quality floor; minQualityScore
+        is an additional request floor, not a reclassification control. all may
+        resolve any candidate passing its optional score filter; omit
+        minQualityScore to retain unscored candidates. The exact id lookup does
+        not require a time window. Deleted, below-threshold or out-of-scope
+        records return item_not_found. This safe GET is independently metered
+        on every call and retry.
       x-mx-error-codes:
         "400": [invalid_request, unsupported_fields]
         "401": [api_key_required, invalid_api_key]
@@ -1858,12 +1871,12 @@ paths:
         - name: includeCandidates
           in: query
           required: false
-          description: Defaults to false. qualified (or true) and all opt into candidate detail lookup.
+          description: Defaults to false. qualified (or true) resolves only candidates already in status=qualified and above the effective quality floor; all opts into any candidate passing the optional score filter and must omit minQualityScore to retain unscored candidates.
           schema: { type: string, enum: ["false", "true", qualified, all], default: "false" }
         - name: minQualityScore
           in: query
           required: false
-          description: Candidate quality threshold from 0 to 100; qualified defaults to 80.
+          description: Additional candidate score floor from 0 to 100; qualified defaults to 80. It does not change publication status or lower a record qualification threshold; with all, explicit 0 excludes null/unscored values.
           schema: { type: integer, minimum: 0, maximum: 100 }
       responses:
         "200":
@@ -3488,8 +3501,8 @@ components:
         includeCandidates:
           type: string
           enum: [qualified, all]
-          description: Valid only with explicit platform=public_opinion. qualified defaults minQualityScore to 80; all requires from, to and at least one of province, countryCode or location.
-        minQualityScore: { type: integer, minimum: 0, maximum: 100, description: Valid only with includeCandidates=qualified or all; qualified defaults to 80. }
+          description: Valid only with explicit platform=public_opinion. qualified includes only status=qualified candidates and defaults the additional minQualityScore floor to 80; 0 does not reclassify rows. all requires from, to and at least one of province, countryCode or location; omit minQualityScore to retain unscored candidates.
+        minQualityScore: { type: integer, minimum: 0, maximum: 100, description: Additional request floor valid only with includeCandidates=qualified or all; it does not change publication status or lower a record qualification threshold. }
         province: { type: string, minLength: 1, maxLength: 64, description: Exact ISO 3166-2:CN code or supported Chinese province name; valid only with explicit platform=public_opinion. }
         countryCode: { type: string, pattern: "^[A-Za-z]{2}$", description: Exact ISO 3166-1 alpha-2 country; valid only with explicit platform=public_opinion. }
         location: { type: string, minLength: 1, maxLength: 160, description: Exact normalized location label; valid only with explicit platform=public_opinion. }
@@ -3514,8 +3527,8 @@ components:
         includeCandidates:
           type: string
           enum: [qualified, all]
-          description: Valid only with explicit platform=public_opinion. qualified defaults minQualityScore to 80; all requires from, to and at least one of province, countryCode or location.
-        minQualityScore: { type: integer, minimum: 0, maximum: 100, description: Valid only with includeCandidates=qualified or all; qualified defaults to 80. }
+          description: Valid only with explicit platform=public_opinion. qualified includes only status=qualified candidates and defaults the additional minQualityScore floor to 80; 0 does not reclassify rows. all requires from, to and at least one of province, countryCode or location; omit minQualityScore to retain unscored candidates.
+        minQualityScore: { type: integer, minimum: 0, maximum: 100, description: Additional request floor valid only with includeCandidates=qualified or all; it does not change publication status or lower a record qualification threshold. }
         province: { type: string, minLength: 1, maxLength: 64, description: Exact ISO 3166-2:CN code or supported Chinese province name; valid only with explicit platform=public_opinion. }
         countryCode: { type: string, pattern: "^[A-Za-z]{2}$", description: Exact ISO 3166-1 alpha-2 country; valid only with explicit platform=public_opinion. }
         location: { type: string, minLength: 1, maxLength: 160, description: Exact normalized location label; valid only with explicit platform=public_opinion. }

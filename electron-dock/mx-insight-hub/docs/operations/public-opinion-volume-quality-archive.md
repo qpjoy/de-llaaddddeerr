@@ -186,6 +186,29 @@ curl -fsS --get \
 `latest`。formal 的有界查询只按真实 `publishedAt`；显式候选缺失发布时间时才可按
 Hub `collectedAt` 落入窗口，响应不会把该值伪装成 `publishedAt`。
 
+需要核对江苏路径下“当前窗口内所有已入 Hub 候选”时，使用 `all` 并完全省略
+`minQualityScore`；显式传 `0` 仍会排除 `qualityScore=null` 的 unscored candidate：
+
+```bash
+curl -fsS --get \
+  -H "Authorization: Bearer $HUB_API_KEY" \
+  --data-urlencode 'sort=latest' \
+  --data-urlencode "from=$FROM" \
+  --data-urlencode "to=$TO" \
+  --data-urlencode 'includeCandidates=all' \
+  --data-urlencode 'pageSize=50' \
+  "$HUB_URL/api/v1/data/public-opinion/provinces/CN-JS/items" \
+| jq -e '.data | {
+    province, sort, pageInfo,
+    items: [.items[] | {
+      id, title, publishedAt, collectedAt, province, quality, location
+    }]
+  }'
+```
+
+这个公开路径仍要求 `displayAdmin1Code=CN-JS`；它不会返回无省份、其他省份或仅带“江苏召回
+提示”的 candidate。审计这些记录应使用第 4 节 Admin 视图。
+
 ## 3. `includeCandidates` 的语义和边界
 
 `includeCandidates` 是 Hub 读取当前 publication state 的可见性开关，不是 Night-All
@@ -195,8 +218,15 @@ Hub `collectedAt` 落入窗口，响应不会把该值伪装成 `publishedAt`。
 | --- | --- | --- |
 | 省略或 `false` | `sourceStage=formal` 且 `status=formal` | 历史兼容默认 |
 | `true` | `qualified` 的兼容别名 | 不建议新客户端继续使用布尔别名 |
-| `qualified` | formal + `status=qualified` 且达到 `minQualityScore` 的 candidate | `minQualityScore` 默认 80 |
+| `qualified` | formal + 已经是 `status=qualified`、且达到有效质量下限的 candidate | `minQualityScore` 默认 80；它只是额外的请求下限，不会降低记录自身 qualification threshold |
 | `all` | formal + pending/qualified/rejected/failed candidate | 省份 feed/coverage 必须给 `from`、`to`；stored/canonical search 还必须给精确地理条件 |
+
+`qualified&minQualityScore=0` 仍然不是“所有 candidate”。省份 feed、详情和 coverage 的
+有效下限是 `max(publication.qualificationThreshold, minQualityScore)`，并且仍要求
+`status=qualified`；传 0 不会把 pending/rejected/failed 重新分类为 qualified。省份 feed
+还固定要求 `displayAdmin1Code` 等于路径省份，所以没有 display province 的 candidate
+不会出现在江苏列表。若 `includeCandidates=all` 显式携带 `minQualityScore=0`，SQL 的 NULL
+语义仍会排除尚未评分的 candidate；需要包括 unscored 时必须完全省略 `minQualityScore`。
 
 只有显式候选读取才返回有界的
 `quality={stage,status,score,threshold,geographyVerified}` 和可选
@@ -215,6 +245,25 @@ evidence、flags 和凭据不会因此公开。
 
 硬拒绝的广告/成人/博彩/聚合页/无 URL 等记录不会进入 candidate envelope，
 `includeCandidates=all` 也不能返回它们。
+
+### 3.1 Hub candidate 质量评分
+
+Hub 当前质量分是可解释的确定性加分，而不是一个不可见的模型总分：
+
+| 证据 | 分值 |
+| --- | ---: |
+| 正文命中受控涉政/涉恐相关词 | 40 |
+| 未命中规则词但 Night-All 上游分类为正类 | 置信度 `>=0.8` 时 35，否则 25 |
+| 标题非空 | 10 |
+| 事件文本至少 40 个字符 | 15 |
+| 已验证 event province，或高置信的非 `unknown` geo scope | 25 |
+| source class 可识别 | 5 |
+| source URL 存在 | 5 |
+
+总分封顶 100，candidate 的默认 qualification threshold 为 80。缺相关性、正文过短、事件
+地理未验证、来源未知时会同时产生对应 rejection code；`qualityFlags` 记录实际获得的证据。
+江苏媒体的受信 `reportProvince` 只解决报告归属，不应冒充 event geography 获得 25 分；若
+以后引入 report-attribution 质量，应使用独立的 verified/status 字段。
 
 ## 4. Admin 质量汇总
 
@@ -277,6 +326,148 @@ curl -fsS \
   `analysis.errors` 只给安全错误码分布，不返回 provider 私密信息。
 - `archive.priorSourceRevisions` 和 `priorCanonicalRevisions` 是当前对象之外保留的历史版本
   行数，不是冷存储对象数，也不是备份成功证明。
+
+### 4.1 核对“qualified 最新只到某日”
+
+先比较 Hub 的最新 canonical/publication 活动与全部 candidate 状态，不要仅凭江苏公开列表
+判断源端没有新数据：
+
+```bash
+curl -fsS \
+  -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
+  "$HUB_ADMIN_BASE/internal/v1/admin/pipelines/province-opinion/quality-summary" \
+| jq -e '.data | {
+    checkedAt,
+    latestRecordAt: .time.latestRecordAt,
+    latestPublicationAt: .time.latestPublicationAt,
+    stages: .publication.stages,
+    statuses: .publication.statuses,
+    candidates: .publication.candidates,
+    withoutProvince: .geography.withoutProvince
+  }'
+```
+
+`latestRecordAt/latestPublicationAt` 晚于公开列表最后一条，只能说明 Hub 仍有新活动；新记录
+可能是 pending/rejected、unscored、无省份、其他省份或海外，不能据此称为江苏 qualified。
+
+需要逐条查看最新的所有 candidate（包括无省份、pending/rejected/failed）时使用 Admin
+Data Center，而不是放宽公共省份 feed。以下脚本按 100 条分页读取完整当前
+`public-opinion.province.v1`；响应包含 Admin-only raw/lineage，输出文件必须按敏感运维数据
+保护：
+
+```bash
+AUDIT_DIR="$(mktemp -d)"
+page=1
+while :; do
+  page_file="$AUDIT_DIR/page-$page.json"
+  curl -fsS --get \
+    -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
+    --data-urlencode 'datasetId=public-opinion.province.v1' \
+    --data-urlencode 'platform=public_opinion' \
+    --data-urlencode 'objectType=opinion_item' \
+    --data-urlencode 'sort=newest' \
+    --data-urlencode 'pageSize=100' \
+    --data-urlencode "page=$page" \
+    "$HUB_ADMIN_BASE/internal/v1/admin/data-center/records" \
+    -o "$page_file"
+  jq -e '.data.items | type == "array"' "$page_file" >/dev/null
+  total_pages="$(jq -r '.data.pageInfo.totalPages // 1' "$page_file")"
+  [ "$page" -ge "$total_pages" ] && break
+  page=$((page + 1))
+done
+
+jq -s '[.[].data.items[]]' "$AUDIT_DIR"/page-*.json > "$AUDIT_DIR/records.json"
+jq -e '
+  [.[] | select(.publication.sourceStage == "candidate")] as $c
+  | {
+      candidateCount: ($c | length),
+      statuses: (reduce $c[] as $r ({};
+        .[$r.publication.status] = ((.[$r.publication.status] // 0) + 1))),
+      withoutDisplayProvince: ([$c[]
+        | select(.publication.displayAdmin1Code == null)] | length),
+      latest: {
+        eventTime: ([$c[] | .eventTime // empty] | max // null),
+        collectedAt: ([$c[] | .collectedAt // empty] | max // null),
+        assessedAt: ([$c[] | .publication.assessedAt // empty] | max // null)
+      },
+      recent20: ($c
+        | sort_by(.collectedAt // .eventTime // "") | reverse | .[:20]
+        | map({
+            id, title, eventTime, collectedAt,
+            publication: {
+              sourceStage: .publication.sourceStage,
+              status: .publication.status,
+              qualityScore: .publication.qualityScore,
+              qualificationThreshold: .publication.qualificationThreshold,
+              eventAdmin1Code: .publication.eventAdmin1Code,
+              publisherAdmin1Code: .publication.publisherAdmin1Code,
+              displayAdmin1Code: .publication.displayAdmin1Code,
+              geographyVerified: .publication.geographyVerified,
+              locationLabel: .publication.locationLabel,
+              countryCode: .publication.countryCode,
+              assessedAt: .publication.assessedAt
+            }
+          }))
+    }' "$AUDIT_DIR/records.json"
+```
+
+### 4.2 江苏 recall hint 统计
+
+Night-All 的 province recall query/hint 是召回路径，不是事件发生地证据。Data Center 的
+Admin raw payload 保留结构化 `provinceRecall`、`provinceSuggestion` 和 query，因而不需要
+把 hint 加入公共 province feed。接着使用上节生成的 `records.json`：
+
+```bash
+jq -e '
+  def heat: (.rawPayload.heat_metrics // {});
+  def source_raw: (.rawPayload.raw // {});
+  def is_recall:
+    ((heat.provinceRecall == true)
+      or (source_raw.politicalTerrorProvinceRecall == true));
+  def hinted_province:
+    ((heat.provinceSuggestion
+      // source_raw.politicalTerrorProvinceSuggestion
+      // "") | sub("省$"; ""));
+  def recall_query:
+    (heat.provinceRecallQuery
+      // source_raw.politicalTerrorProvinceRecallQuery
+      // "");
+  [.[] | select(is_recall and
+    ((hinted_province == "江苏") or (recall_query | contains("江苏"))))] as $hinted
+  | [$hinted[] | select(.publication.sourceStage == "candidate")] as $c
+  | {
+      definition: "upstream recall path/hint; not accepted event geography",
+      hintedRows: ($hinted | length),
+      candidateRows: ($c | length),
+      candidateStatuses: (reduce $c[] as $r ({};
+        .[$r.publication.status] = ((.[$r.publication.status] // 0) + 1))),
+      withoutDisplayProvince: ([$c[]
+        | select(.publication.displayAdmin1Code == null)] | length),
+      eventJiangsu: ([$c[]
+        | select(.publication.eventAdmin1Code == "CN-JS")] | length),
+      publisherJiangsu: ([$c[]
+        | select(.publication.publisherAdmin1Code == "CN-JS")] | length),
+      publisherJiangsuEventElsewhere: ([$c[] | select(
+        .publication.publisherAdmin1Code == "CN-JS"
+        and .publication.eventAdmin1Code != null
+        and .publication.eventAdmin1Code != "CN-JS")] | length),
+      displayedAsJiangsu: ([$c[]
+        | select(.publication.displayAdmin1Code == "CN-JS")] | length),
+      verifiedJiangsu: ([$c[] | select(
+        .publication.displayAdmin1Code == "CN-JS"
+        and .publication.geographyVerified == true)] | length),
+      conflictingDisplayProvince: ([$c[] | select(
+        .publication.displayAdmin1Code != null
+        and .publication.displayAdmin1Code != "CN-JS")] | length),
+      latestCollectedAt: ([$c[] | .collectedAt // empty] | max // null)
+    }' "$AUDIT_DIR/records.json"
+```
+
+`hintedRows` 不能计入江苏 coverage。`publisherJiangsu` 只表示当前 publisher assertion/推断
+为江苏，不等于受信媒体注册表确认的 `reportProvince`；`eventJiangsu` 表示事件地字段为江苏，
+两者是不同事实。只有 `displayedAsJiangsu` 能说明当前展示分类为江苏，且只有同时满足
+`geographyVerified=true` 的 `verifiedJiangsu` 才是已接受的江苏事件地理事实。
+审计完成后删除 `$AUDIT_DIR`，不要把原始分页文件附到普通工单或公开日志。
 
 ## 5. Night-All 供给漏斗
 
@@ -354,6 +545,14 @@ curl -fsS --get \
 损失还没有完整的独立计数。因此 `collected - normalizedCandidates` 大于三类 drop 之和时，
 应记录为“归因缺口”，不能武断地全部归为质量差。
 
+2026-08-25 的生产只读快照显示：`itemsPerProvince=5`；省级 recall 34/34 失败，
+`target=170`、`collected=0`、`shortfall=170`，其中江苏为 `status=failed`、`itemCount=0`，
+`error.code=WEB_SEARCH_SKILL_TIMEOUT`；candidate envelope 为 `465 produced / 0 persisted`，
+writer disabled；同一 run 的 formal
+持久化总数为 18，其中江苏为 0。这里的 **18 是该 run 的全国 formal 持久化总数**，不是
+每省数量，也不是省级 recall 成功或收集数量。该快照只说明当时的召回/写入状态，不是永久
+SLA；应始终用上面的只读命令复核当前 run。
+
 审计样本（生成于 2026-08-09）为 `416 collected → 235 normalized/reviewed → 8 semantic
 passed → 7 final`，已明确的 low-quality drop 只有 3。这个样本说明当时主损失是狭窄主题
 语义门槛，而不是源端只采到 7 条；它不是永久 SLA，必须用上述命令检查当前 run。
@@ -378,11 +577,76 @@ Night-All 当前 `political_terror_daily_brief` 的目标是政治/涉恐日报�
 政治/涉恐数据集原有门槛。单纯降低 `minQualityScore` 只能放宽 Hub candidate 展示，既不会
 增加 Night-All collection，也不会补齐已经被源端硬拒绝的记录。
 
-## 7. 海外位置字段和当前局限
+## 7. 报告归属、事件位置和海外字段
 
-不要把 `province` 写成“海外”“其他”或国家名。`province` 只接受中国 34 个省级区域的
-ISO 3166-2:CN code；无法由 accepted event evidence 证明时保持 `null`。当前候选位置契约
-已经提供：
+新增业务规则是：江苏媒体/机构发布的报告可以归属江苏，即使报告描述的事件发生在其他
+省份或国家；事件地点必须保留为独立事实，不能被报告归属覆盖。必须拆成以下三层契约：
+
+1. **report province / publisher attribution**：只有受信媒体注册表或受控来源主数据确认发布
+   机构在江苏，才可将报告归属江苏。建议源契约先新增 typed `reportProvince` 字段，或新增
+   `report_attribution` JSONB（至少含 `admin1Code`、`basis=publisher_registry` 和可审计的
+   registry/source reference）；不能把现有普通 `province` 或搜索关键词重新解释成它。
+2. **event location**：`eventAdmin1Code` 及 country/region/city 只描述事件发生地。Agent 可以
+   分析 event location，但不得创建、覆盖或“修正”受信的 `reportProvince`；两者冲突时同时
+   保留。
+3. **recall provenance**：Night-All query/province recall hint 只记录内容如何被检索到，可以
+   用于召回质量审计，但不是 publisher/report/event 地理事实，不能进入前两层。
+
+`displayAdmin1Code` 是省份导航采用的最终归属桶。若产品选择报告归属口径，它可以来自已
+验证的 `reportProvince`，但不代表事件发生在该省；`geographyVerified` 仍只表示 accepted
+event geography，不能因为发布机构属于江苏而置真。
+
+例如，江苏媒体报道北京事件时，目标内部状态可表达为：
+
+```json
+{
+  "reportProvince": {
+    "admin1Code": "CN-JS",
+    "basis": "publisher_registry"
+  },
+  "eventAdmin1Code": "CN-BJ",
+  "displayAdmin1Code": "CN-JS",
+  "geographyVerified": true
+}
+```
+
+当前 source/canonical schema 的普通 `province`/`admin1_code` 主要按 event province 使用；
+把它直接重解释为 report province 会污染历史语义。现有 `publisherAdmin1Code` 可用于观察
+媒体名称推断或 Agent proposal，但它没有证明“受信媒体注册确认”，不能替代新的 source
+contract 字段。Admin Data Center 的 bounded `publication` 块能并列查看 event、publisher
+和 display code，适合迁移前审计，却不能证明 report attribution 已验证。
+
+当前 materializer 也 **尚未自动支持这个产品口径**：candidate 只有在 event province 缺失且
+geo scope 不是 `multi_province/national/maritime/overseas` 时才回退 publisher，formal 的
+display province 仍只接受 accepted event province；若 event 在外省，candidate 也优先 event
+而不是江苏 publisher。因此当前不能保证“事件在外地的江苏媒体报告”进入江苏公开列表。
+本轮不修改 publication materializer 或公开 SQL，避免无版本地改变现有省份语义。
+
+公开契约若采用这个规则，不能只静默扩大 `province` 的含义。建议做版本化、可回滚的加法：
+
+1. 先给 Night-All/固定源写入契约增加 `reportProvince` 或 `report_attribution` JSONB，并在
+   Hub mapping/revision 中原样留存 provenance；历史普通 `province` 不做批量重解释；
+2. 再给 publication 增加明确的 `displayBasis=event|publisher_registry`，仅让已验证的
+   report attribution 参与 publisher 归属；媒体名称规则或 Agent proposal 不能冒充 registry；
+3. 给公开 item 增加 `provinceBasis`（或等价 attribution block），明确 `province` 是导航
+   归属而不总是事件地；另加独立 `eventLocation` 承载 event province/country/region/city，
+   现有 candidate `location` 在兼容期保留，不能直接重命名；
+4. coverage 保留 `verifiedCount` 为 accepted event 数，并另加 `publisherAttributedCount`，
+   禁止把媒体归属混入 verified coverage；materializer 最后才按版本化规则选择
+   `displayAdmin1Code`，同时补充冲突样本测试（江苏媒体、外省事件、海外事件、
+   national/multi-province 以及无事件地点）。
+
+现有 quality-summary 足够回答 candidate 总量、状态、是否有 display province 和 verified
+event 数，但不能单独拆出 publisher-attributed 数；当前逐条 Data Center 已足够做上节的
+只读审计。若该口径成为长期仪表盘指标，再给 Admin quality-summary 增加分基准聚合，不应
+通过 recall hint 估算。
+
+### 7.1 海外位置字段和当前局限
+
+不要把 `eventAdmin1Code`、`reportProvince` 或公开 `province` 写成“海外”“其他”或国家名；
+这些字段只接受中国 34 个省级区域的 ISO 3166-2:CN code。没有 event evidence 时
+`eventAdmin1Code` 保持 `null`；未来即使存在受信 `reportProvince`，海外 event location 也仍
+独立保存。当前候选位置契约已经提供：
 
 ```json
 {
@@ -404,7 +668,8 @@ ISO 3166-2:CN code；无法由 accepted event evidence 证明时保持 `null`。
 - `location.label/type`：有证据的 country/region/city 展示值；
 - `geographyVerified`：accepted event geography，不能由媒体所在地或模型 proposal 直接
   置真；
-- `publisherAdmin1` 与 event location 分开保存，江苏媒体不自动等于事件发生在江苏。
+- `publisherAdmin1` 与 event location 分开保存；只有受信 publisher registry 确认后，江苏
+  媒体才可使报告归属江苏，但不能据此把事件地点写成江苏或把 `geographyVerified` 置真。
 
 当前分析不能保证“较全面识别全球具体位置”：确定性行政区词典以中国为中心，海外主要
 依赖源结构化字段、明确国家/地点文字和有界 Chat Agent；Agent 不使用外部 geocoder/tools，
