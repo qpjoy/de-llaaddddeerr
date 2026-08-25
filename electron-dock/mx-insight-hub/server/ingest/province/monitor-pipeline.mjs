@@ -19,7 +19,7 @@ export {
 
 export const PROVINCE_OPINION_PIPELINE_KEY = 'province-opinion'
 export const PROVINCE_OPINION_MAPPING_VERSION = 1
-export const PROVINCE_OPINION_WRITER_CONTRACT_VERSION = 'province-opinion.writer.v1'
+export const PROVINCE_OPINION_WRITER_CONTRACT_VERSION = 'province-opinion.writer.v2'
 export const PROVINCE_OPINION_SAFE_BATCH_SIZE = 200
 export const PROVINCE_OPINION_MAX_BATCH_SIZE = 500
 export const PROVINCE_OPINION_SERVING_INDEXES = Object.freeze([
@@ -37,6 +37,7 @@ export const PROVINCE_OPINION_INPUT = Object.freeze({
 
 export const PROVINCE_OPINION_WRITER_CONTRACT_SUMMARY = Object.freeze({
   watermark: 'Every insert and every relevant update advances a finite, non-null timestamp updated_at, including province, source, heat and LLM classification changes.',
+  publicationStage: 'Every row exposes source_stage=formal|candidate; candidate writes explicitly set candidate before AI review, and only a reviewed formal result may promote candidate to formal.',
   deletion: 'Hard deletes are not used; removals must remain observable through a source change record before Hub ingestion can support them.',
   ordering: 'A later commit cannot expose updated_at at or behind a checkpoint already consumed by the Hub; use an ordered change journal or CDC when this cannot be guaranteed.',
   input: Object.freeze({
@@ -505,6 +506,21 @@ export class ProvinceOpinionPipeline {
       ...progress,
       blocker: issues.length > 0 ? progress.blocker || 'source_contract_unsafe' : null,
       issues,
+    }
+  }
+
+  async qualitySummary() {
+    if (typeof this.store.getPublicOpinionQualitySummary !== 'function') {
+      throw new AppError(
+        503,
+        'quality_summary_unavailable',
+        'Province opinion quality summary is unavailable',
+      )
+    }
+    return {
+      pipelineKey: PROVINCE_OPINION_PIPELINE_KEY,
+      checkedAt: new Date().toISOString(),
+      ...await this.store.getPublicOpinionQualitySummary(),
     }
   }
 

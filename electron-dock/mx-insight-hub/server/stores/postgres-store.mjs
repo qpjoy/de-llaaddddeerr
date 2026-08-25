@@ -38,7 +38,12 @@ export function publicOpinionSourceStage(datasetId, rawItem) {
     ?? raw.sourceStage
     ?? hubCandidate.source_stage
     ?? hubCandidate.sourceStage
-  return value === 'candidate' ? 'candidate' : 'formal'
+  if (value === 'formal' || value === 'candidate') return value
+  throw new AppError(
+    400,
+    'invalid_public_opinion_source_stage',
+    'public-opinion source_stage must be explicitly formal or candidate',
+  )
 }
 
 function boundedText(value, maximum) {
@@ -73,6 +78,87 @@ export function publicOpinionLocation(rawItem) {
     type: locationType,
     countryName: boundedText(location.country ?? location.countryName, 120),
     countryCode: code && /^[A-Za-z]{2}$/.test(code) ? code.toUpperCase() : null,
+  }
+}
+
+function countMap(value, requiredKeys = []) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  return Object.fromEntries([
+    ...requiredKeys.map((key) => [key, Number(source[key] || 0)]),
+    ...Object.entries(source)
+      .filter(([key]) => !requiredKeys.includes(key))
+      .map(([key, count]) => [key, Number(count || 0)]),
+  ])
+}
+
+export function publicOpinionQualitySummaryRow(row = {}) {
+  const canonicalTotal = Number(row.canonical_total || 0)
+  const active = Number(row.active_count || 0)
+  const sourceObjects = Number(row.source_object_count || 0)
+  const sourceRevisions = Number(row.source_revision_count || 0)
+  const canonicalRevisions = Number(row.canonical_revision_count || 0)
+  return {
+    contractVersion: 'mx-insight-hub.public-opinion.quality-summary.v1',
+    canonical: {
+      total: canonicalTotal,
+      active,
+      deleted: Number(row.deleted_count || 0),
+      withPublicationState: Number(row.publication_state_count || 0),
+      missingPublicationState: Number(row.missing_publication_state_count || 0),
+    },
+    publication: {
+      stages: countMap(row.stage_counts, ['formal', 'candidate']),
+      statuses: countMap(row.status_counts, ['formal', 'pending', 'qualified', 'rejected', 'failed']),
+      assessed: Number(row.assessed_count || 0),
+      unassessed: Number(row.unassessed_count || 0),
+      candidates: {
+        total: Number(row.candidate_count || 0),
+        scored: Number(row.candidate_scored_count || 0),
+        unscored: Number(row.candidate_unscored_count || 0),
+        qualifiedAtThreshold: Number(row.candidate_qualified_count || 0),
+        averageQualityScore: row.average_candidate_quality_score == null
+          ? null
+          : Number(row.average_candidate_quality_score),
+        scoreBuckets: countMap(row.candidate_score_buckets, [
+          'unscored', '0-59', '60-79', '80-100',
+        ]),
+        qualityFlags: countMap(row.candidate_quality_flags),
+        rejectionCodes: countMap(row.candidate_rejection_codes),
+      },
+    },
+    geography: {
+      withProvince: Number(row.with_province_count || 0),
+      withoutProvince: Number(row.without_province_count || 0),
+      verified: Number(row.verified_count || 0),
+      withLocation: Number(row.with_location_count || 0),
+      scopes: countMap(row.scope_counts, [
+        'province', 'multi_province', 'national', 'maritime', 'overseas', 'unknown',
+      ]),
+      countries: countMap(row.country_counts),
+      provinces: countMap(row.province_counts),
+    },
+    completeness: {
+      missingTitle: Number(row.missing_title_count || 0),
+      missingUrl: Number(row.missing_url_count || 0),
+      missingEventTime: Number(row.missing_event_time_count || 0),
+    },
+    analysis: {
+      tasks: countMap(row.task_counts, ['pending', 'running', 'succeeded', 'dead', 'superseded']),
+      errors: countMap(row.task_error_counts),
+      assertions: countMap(row.assertion_counts, ['proposed', 'accepted', 'rejected', 'superseded']),
+    },
+    archive: {
+      sourceObjects,
+      sourceRevisionRows: sourceRevisions,
+      priorSourceRevisions: Math.max(0, sourceRevisions - sourceObjects),
+      canonicalRevisionRows: canonicalRevisions,
+      priorCanonicalRevisions: Math.max(0, canonicalRevisions - canonicalTotal),
+    },
+    time: {
+      oldestRecordAt: iso(row.oldest_record_at),
+      latestRecordAt: iso(row.latest_record_at),
+      latestPublicationAt: iso(row.latest_publication_at),
+    },
   }
 }
 // pg_get_indexdef(indexOid, columnNo, pretty) returns only the key expression.
@@ -2034,6 +2120,198 @@ export class PostgresStore {
     }
   }
 
+  /**
+   * Admin-only inventory for separating source volume, publication quality,
+   * geography coverage and retained history. It intentionally aggregates the
+   * current Hub projection instead of returning restricted raw evidence.
+   */
+  async getPublicOpinionQualitySummary() {
+    const { rows } = await this.pool.query(
+      `WITH current_records AS MATERIALIZED (
+         SELECT record.id,
+                record.deleted_at,
+                record.title,
+                record.url,
+                record.event_time,
+                record.first_seen_at,
+                record.last_seen_at,
+                publication.record_id AS publication_record_id,
+                publication.source_stage,
+                publication.status AS publication_status,
+                publication.quality_score,
+                publication.qualification_threshold,
+                publication.quality_flags,
+                publication.rejection_codes,
+                publication.display_admin1_code,
+                publication.geography_verified,
+                publication.geo_scope,
+                publication.country_code,
+                publication.location_label,
+                publication.updated_at AS publication_updated_at
+           FROM core.canonical_records record
+           LEFT JOIN core.public_opinion_current_state publication
+             ON publication.record_id = record.id
+            AND publication.canonical_revision = record.current_revision
+          WHERE record.dataset_id = 'public-opinion.province.v1'
+            AND record.platform = 'public_opinion'
+            AND record.object_type = 'opinion_item'
+       ), stage_counts AS (
+         SELECT source_stage AS key, count(*)::integer AS value
+           FROM current_records
+          WHERE deleted_at IS NULL AND publication_record_id IS NOT NULL
+          GROUP BY source_stage
+       ), status_counts AS (
+         SELECT publication_status AS key, count(*)::integer AS value
+           FROM current_records
+          WHERE deleted_at IS NULL AND publication_record_id IS NOT NULL
+          GROUP BY publication_status
+       ), scope_counts AS (
+         SELECT coalesce(geo_scope, 'unknown') AS key, count(*)::integer AS value
+           FROM current_records
+          WHERE deleted_at IS NULL
+          GROUP BY coalesce(geo_scope, 'unknown')
+       ), country_counts AS (
+         SELECT coalesce(country_code, 'unclassified') AS key, count(*)::integer AS value
+           FROM current_records
+          WHERE deleted_at IS NULL
+          GROUP BY coalesce(country_code, 'unclassified')
+       ), province_counts AS (
+         SELECT display_admin1_code AS key, count(*)::integer AS value
+           FROM current_records
+          WHERE deleted_at IS NULL AND display_admin1_code IS NOT NULL
+          GROUP BY display_admin1_code
+       ), candidate_score_buckets AS (
+         SELECT CASE
+                  WHEN quality_score IS NULL THEN 'unscored'
+                  WHEN quality_score < 60 THEN '0-59'
+                  WHEN quality_score < 80 THEN '60-79'
+                  ELSE '80-100'
+                END AS key,
+                count(*)::integer AS value
+          FROM current_records
+          WHERE deleted_at IS NULL AND source_stage = 'candidate'
+          GROUP BY 1
+       ), candidate_quality_flags AS (
+         SELECT flag AS key, count(*)::integer AS value
+           FROM current_records
+          CROSS JOIN LATERAL jsonb_array_elements_text(quality_flags) AS flags(flag)
+          WHERE deleted_at IS NULL AND source_stage = 'candidate'
+          GROUP BY 1
+       ), candidate_rejection_codes AS (
+         SELECT code AS key, count(*)::integer AS value
+           FROM current_records
+          CROSS JOIN LATERAL jsonb_array_elements_text(rejection_codes) AS codes(code)
+          WHERE deleted_at IS NULL AND source_stage = 'candidate'
+          GROUP BY 1
+       ), task_counts AS (
+         SELECT status AS key, count(*)::integer AS value
+           FROM agent_center.analysis_tasks
+          WHERE pipeline_key = 'province-geography-v1'
+          GROUP BY status
+       ), task_error_counts AS (
+         SELECT last_error_code AS key, count(*)::integer AS value
+           FROM agent_center.analysis_tasks
+          WHERE pipeline_key = 'province-geography-v1'
+            AND last_error_code IS NOT NULL
+          GROUP BY last_error_code
+       ), assertion_counts AS (
+         SELECT status AS key, count(*)::integer AS value
+           FROM agent_center.classification_assertions
+          WHERE pipeline_key = 'province-geography-v1'
+          GROUP BY status
+       )
+       SELECT count(*)::bigint AS canonical_total,
+              count(*) FILTER (WHERE deleted_at IS NULL)::bigint AS active_count,
+              count(*) FILTER (WHERE deleted_at IS NOT NULL)::bigint AS deleted_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND publication_record_id IS NOT NULL
+              )::bigint AS publication_state_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND publication_record_id IS NULL
+              )::bigint AS missing_publication_state_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND quality_score IS NOT NULL
+              )::bigint AS assessed_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND quality_score IS NULL
+              )::bigint AS unassessed_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND source_stage = 'candidate'
+              )::bigint AS candidate_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND source_stage = 'candidate'
+                  AND quality_score IS NOT NULL
+              )::bigint AS candidate_scored_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND source_stage = 'candidate'
+                  AND quality_score IS NULL
+              )::bigint AS candidate_unscored_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND source_stage = 'candidate'
+                  AND publication_status = 'qualified'
+                  AND quality_score >= qualification_threshold
+              )::bigint AS candidate_qualified_count,
+              round((avg(quality_score) FILTER (
+                WHERE deleted_at IS NULL AND source_stage = 'candidate'
+                  AND quality_score IS NOT NULL
+              ))::numeric, 2) AS average_candidate_quality_score,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND display_admin1_code IS NOT NULL
+              )::bigint AS with_province_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND display_admin1_code IS NULL
+              )::bigint AS without_province_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND geography_verified = true
+              )::bigint AS verified_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL
+                  AND (location_label IS NOT NULL OR country_code IS NOT NULL)
+              )::bigint AS with_location_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND nullif(btrim(title), '') IS NULL
+              )::bigint AS missing_title_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND nullif(btrim(url), '') IS NULL
+              )::bigint AS missing_url_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND event_time IS NULL
+              )::bigint AS missing_event_time_count,
+              min(first_seen_at) FILTER (WHERE deleted_at IS NULL) AS oldest_record_at,
+              max(last_seen_at) FILTER (WHERE deleted_at IS NULL) AS latest_record_at,
+              max(publication_updated_at) FILTER (WHERE deleted_at IS NULL) AS latest_publication_at,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM stage_counts), '{}'::jsonb) AS stage_counts,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM status_counts), '{}'::jsonb) AS status_counts,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM scope_counts), '{}'::jsonb) AS scope_counts,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM country_counts), '{}'::jsonb) AS country_counts,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM province_counts), '{}'::jsonb) AS province_counts,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM candidate_score_buckets), '{}'::jsonb) AS candidate_score_buckets,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM candidate_quality_flags), '{}'::jsonb) AS candidate_quality_flags,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM candidate_rejection_codes), '{}'::jsonb) AS candidate_rejection_codes,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM task_counts), '{}'::jsonb) AS task_counts,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM task_error_counts), '{}'::jsonb) AS task_error_counts,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM assertion_counts), '{}'::jsonb) AS assertion_counts,
+              (SELECT count(*)::bigint
+                 FROM ingest.source_objects source_object
+                WHERE source_object.connector_id = 'external:province-opinion-results'
+                  AND source_object.object_type = 'opinion_item') AS source_object_count,
+              (SELECT count(*)::bigint
+                 FROM ingest.source_object_revisions source_revision
+                 JOIN ingest.source_objects source_object
+                   ON source_object.id = source_revision.source_object_id
+                WHERE source_object.connector_id = 'external:province-opinion-results'
+                  AND source_object.object_type = 'opinion_item') AS source_revision_count,
+              (SELECT count(*)::bigint
+                 FROM core.record_revisions revision
+                 JOIN core.canonical_records record ON record.id = revision.record_id
+                WHERE record.dataset_id = 'public-opinion.province.v1'
+                  AND record.platform = 'public_opinion'
+                  AND record.object_type = 'opinion_item') AS canonical_revision_count
+         FROM current_records`,
+    )
+    return publicOpinionQualitySummaryRow(rows[0])
+  }
+
   async listPublicOpinionRecords({
     provinceCode,
     sort,
@@ -2399,11 +2677,30 @@ export class PostgresStore {
               observation_run.request_id AS observation_request_id,
               observation_run.connector_call_id,
               connector_call.operation AS connector_operation,
+              publication.record_id AS publication_record_id,
+              publication.source_stage AS publication_source_stage,
+              publication.status AS publication_status,
+              publication.quality_score AS publication_quality_score,
+              publication.qualification_threshold AS publication_qualification_threshold,
+              publication.event_admin1_code AS publication_event_admin1_code,
+              publication.publisher_admin1_code AS publication_publisher_admin1_code,
+              publication.display_admin1_code AS publication_display_admin1_code,
+              publication.geography_verified AS publication_geography_verified,
+              publication.geo_scope AS publication_geo_scope,
+              publication.country_code AS publication_country_code,
+              publication.location_label AS publication_location_label,
+              publication.location_type AS publication_location_type,
+              publication.country_name AS publication_country_name,
+              publication.assessed_at AS publication_assessed_at,
               page.sort_time
          FROM page
          JOIN core.canonical_records r ON r.id = page.id
          LEFT JOIN core.record_revisions revision
            ON revision.record_id = r.id AND revision.revision = r.current_revision
+         LEFT JOIN core.public_opinion_current_state publication
+           ON publication.record_id = r.id
+          AND publication.canonical_revision = r.current_revision
+          AND r.dataset_id = 'public-opinion.province.v1'
          LEFT JOIN LATERAL (
            SELECT o.id, o.ingest_run_id, o.connector_id, o.source_event_id,
                   o.query_fingerprint, o.observed_at
@@ -2454,10 +2751,29 @@ export class PostgresStore {
               observation.query_fingerprint AS observation_query_fingerprint,
               observation_run.request_id AS observation_request_id,
               observation_run.connector_call_id,
-              connector_call.operation AS connector_operation
+              connector_call.operation AS connector_operation,
+              publication.record_id AS publication_record_id,
+              publication.source_stage AS publication_source_stage,
+              publication.status AS publication_status,
+              publication.quality_score AS publication_quality_score,
+              publication.qualification_threshold AS publication_qualification_threshold,
+              publication.event_admin1_code AS publication_event_admin1_code,
+              publication.publisher_admin1_code AS publication_publisher_admin1_code,
+              publication.display_admin1_code AS publication_display_admin1_code,
+              publication.geography_verified AS publication_geography_verified,
+              publication.geo_scope AS publication_geo_scope,
+              publication.country_code AS publication_country_code,
+              publication.location_label AS publication_location_label,
+              publication.location_type AS publication_location_type,
+              publication.country_name AS publication_country_name,
+              publication.assessed_at AS publication_assessed_at
          FROM core.canonical_records r
          LEFT JOIN core.record_revisions revision
            ON revision.record_id = r.id AND revision.revision = r.current_revision
+         LEFT JOIN core.public_opinion_current_state publication
+           ON publication.record_id = r.id
+          AND publication.canonical_revision = r.current_revision
+          AND r.dataset_id = 'public-opinion.province.v1'
          LEFT JOIN LATERAL (
            SELECT o.id, o.ingest_run_id, o.connector_id, o.source_event_id,
                   o.query_fingerprint, o.observed_at
@@ -3730,7 +4046,28 @@ function dataCenterRecord(row) {
   }
 }
 
+function dataCenterPublication(row) {
+  if (row.publication_record_id == null) return null
+  return {
+    sourceStage: row.publication_source_stage,
+    status: row.publication_status,
+    qualityScore: row.publication_quality_score == null ? null : Number(row.publication_quality_score),
+    qualificationThreshold: Number(row.publication_qualification_threshold),
+    eventAdmin1Code: row.publication_event_admin1_code,
+    publisherAdmin1Code: row.publication_publisher_admin1_code,
+    displayAdmin1Code: row.publication_display_admin1_code,
+    geographyVerified: row.publication_geography_verified === true,
+    geoScope: row.publication_geo_scope,
+    countryCode: row.publication_country_code,
+    locationLabel: row.publication_location_label,
+    locationType: row.publication_location_type,
+    countryName: row.publication_country_name,
+    assessedAt: iso(row.publication_assessed_at),
+  }
+}
+
 function dataCenterRecordDetail(row) {
+  const publication = dataCenterPublication(row)
   return {
     ...dataCenterRecord(row),
     identityHash: row.identity_hash,
@@ -3767,6 +4104,7 @@ function dataCenterRecordDetail(row) {
     projectionRevision: Number(row.projection_revision || 0),
     firstSeenAt: iso(row.first_seen_at),
     lastSeenAt: iso(row.last_seen_at),
+    ...(publication ? { publication } : {}),
     highlight: null,
   }
 }

@@ -64,7 +64,7 @@ province hot/latest/detail ─────────────────�
 
 ## 3. Night-All 激活前置
 
-### 3.1 `updated_at + id` writer contract
+### 3.1 `updated_at + id + source_stage` writer contract
 
 `created_at` 只能证明首次插入，不能发现后来补写的省份、来源、热度或 LLM 结果，禁止
 作为增量游标。Night-All 仓库现在提供
@@ -93,23 +93,26 @@ disposition。它不在 Night-All 建候选产品表、评分接口或覆盖率 
 
 1. `updated_at` 为 `timestamp` 或 `timestamptz`、`NOT NULL`，并有已经 validate 的精确
    `CHECK (isfinite(updated_at))`；`date`、`infinity` 和 `-infinity` 都不接受。
-2. 每次 insert 和每次相关 update 都推进 `updated_at`。相关字段至少包括 `province`、
+2. `source_stage` 为 `NOT NULL`，并有已经 validate、且只允许 `formal`/`candidate` 的
+   CHECK；Hub 固定源 probe 缺列、可空、未 validate 或允许第三种值时一律拒绝激活。
+3. 每次 insert 和每次相关 update 都推进 `updated_at`。相关字段至少包括 `province`、
    source 元数据、`published_at`、标题/摘要/链接、`heat_score`、LLM 标签/理由/置信度，
    以及将来支持的删除标记。
-3. `id` 不变且唯一；索引的前导列严格为 `(updated_at, id)`。相同时间戳下由 `id`
+4. `id` 不变且唯一；索引的前导列严格为 `(updated_at, id)`。相同时间戳下由 `id`
    提供稳定全序。
-4. 提交顺序不会让后提交的修改出现在 Hub 已确认 checkpoint 的同一位置或其之前。
+5. 提交顺序不会让后提交的修改出现在 Hub 已确认 checkpoint 的同一位置或其之前。
    如果应用写入无法保证这一点，应改用有序 change journal/CDC，而不是增加 overlap
    窗口猜测。
-5. 禁止不可观察的 hard delete。删除必须先成为有水位的 tombstone/change record；
+6. 禁止不可观察的 hard delete。删除必须先成为有水位的 tombstone/change record；
    否则当前固定表 adapter 无法证明删除完整性。
 
 042 不会擅自安装全表 hard-delete blocker，因为这会同时改变现有外键级联和清理流程。
-因此第 5 项仍是部署前 writer attestation：必须核对 Night-All 清理任务、结果表删除权限
+因此第 6 项仍是部署前 writer attestation：必须核对 Night-All 清理任务、结果表删除权限
 及父表级联路径；无法证明“不会删除”时保持 pipeline paused，改造 tombstone/journal 后再启用。
 
-Hub 的 schema probe 能验证列、类型、nullability、有限值约束和索引，但不能证明应用
-writer/commit 行为。Night-All owner 必须提交写路径测试证据，Hub operator 再确认
+Hub 的 schema probe 能验证列、类型、nullability、有限值约束、`source_stage` 两值约束和
+索引，但不能证明应用 writer/commit 行为。Night-All owner 必须提交写路径测试证据，
+Hub operator 再确认
 当前 API 返回的 `writerContract.version` 和 `writerContract.digest`；不要复制旧环境的
 digest 或口头确认。
 
@@ -124,12 +127,15 @@ select column_name, data_type, is_nullable, column_default
   from information_schema.columns
  where table_schema = 'public'
    and table_name = 'monitor_strategy_results'
-   and column_name = 'updated_at';
+   and column_name in ('updated_at', 'source_stage');
 
 select conname, convalidated, pg_get_constraintdef(oid) as definition
   from pg_constraint
  where conrelid = 'public.monitor_strategy_results'::regclass
-   and conname = 'monitor_strategy_results_updated_at_finite';
+   and conname in (
+     'monitor_strategy_results_updated_at_finite',
+     'monitor_strategy_results_source_stage_check'
+   );
 
 select indexname, indexdef
   from pg_indexes
@@ -182,6 +188,10 @@ probe；只有本次 GET 的 configuration issues 为空，才能提交本次返
 4. 重新 probe、提交当前 writer attestation，完成首次导入和 content-v5 全量重建。只有
    Hub 默认隐藏 candidate、显式查询及 PostgreSQL/Elasticsearch 结果一致后，才启用
    Night-All candidate writer；质量 pipeline 仍需单独的模型/成本审批后启用。
+
+新 ingest 不再把缺失、空值或未知 `source_stage` 猜成 `formal`：这些行会以
+`invalid_public_opinion_source_stage` 明确失败并回滚本批。migration 035 对已经进入 Hub 的
+历史记录仍按 `formal` 回填；该兼容 backfill 不应用于之后的新 ingest。
 
 Hub migration 只会建立 Hub 自有 metadata、raw revision、publication state 和暂停的分类
 backlog，不会打开 Night-All 网络连接或调用模型。反向发布（先写 candidate、后部署 Hub
@@ -282,7 +292,7 @@ curl -sS -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
   "status": "active",
   "writerContractAttestation": {
     "confirmed": true,
-    "contractVersion": "province-opinion.writer.v1",
+    "contractVersion": "province-opinion.writer.v2",
     "contractDigest": "<本次 GET 返回的 digest>"
   }
 }
@@ -467,9 +477,15 @@ event text，publisher evidence 必须存在于 source name，而且省/城市/a
 `formal` 或达到阈值的 `qualified` 会进入对应公共可见模式，原始 reason/provider/evidence
 始终只在内部证据层。
 
+formal 的 `display_admin1` 只能来自非空且 `status=accepted` 的 event geography；
+`proposed` event/publisher assertion 可以保留在内部证据和 candidate 显式探索结果中，
+但不能进入 formal 省份 feed。publication 的 `geography_verified` 同样只由 accepted event
+geography 决定，不能直接信任 `quality.geography_verified` proposal。
+
 人工纠正仍应回写 Night-All 明确 source 字段并推进 `updated_at`，从而形成新的 raw
-revision；当前没有 Hub-local manual decision 产品。publisher/dateline 只能成为
-`display_admin1` 兜底，不能计作 verified event province；`overseas`、`maritime`、
+revision；当前没有 Hub-local manual decision 产品。candidate 显式探索中的
+publisher/dateline 只能成为 `display_admin1` 兜底，不能计作 verified event province；
+`overseas`、`maritime`、
 `national`、`multi_province` 禁止回退 publisher。境外事件保留 country/location/geo scope，
 不会塞入中国省份列。
 

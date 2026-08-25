@@ -466,7 +466,12 @@ bounded `quality={stage,status,score,threshold,geographyVerified}` and optional
 are all `null`: a transport engine, provider ID, private endpoint or credential
 name is never a public source identity. Quality score is Hub-owned publication
 quality, not the Night-All heat score and not province confidence. `formal`
-records keep the historical response and serving semantics.
+records keep the historical response and serving semantics. A formal record's
+display province can only come from a non-empty, accepted event-geography
+assertion; proposed event or publisher geography cannot enter the formal province
+feed. Explicit candidate reads may display proposed event/publisher geography for
+exploration, but `geographyVerified=true` still requires accepted event geography
+and never trusts the `quality.geography_verified` proposal by itself.
 
 For formal rows, `from/to` continue to filter real `publishedAt`; an undated
 formal row remains excluded from a bounded request. Candidate rows instead use

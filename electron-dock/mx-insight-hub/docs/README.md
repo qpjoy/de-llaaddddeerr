@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-08-24.
+Last reviewed: 2026-08-26.
 
 This directory is the source of truth for MX Insight Hub. Night-All-specific implementation details remain in the Night-All repository; this project records only the stable dependency contract and ownership boundary.
 
@@ -88,11 +88,12 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 19. [Telegram SQLite read-API ingestion](operations/telegram-sqlite-api-ingestion.md)
 20. [Nationwide province public-opinion source](architecture/province-public-opinion-source.md)
 21. [Nationwide province public-opinion operations](operations/province-public-opinion-ingestion.md)
-22. [Backup and restore](operations/backup-restore.md)
-23. [Observability and SLO](operations/observability-slo.md)
-24. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
-25. [Agent provider settings](operations/agent-provider-settings.md)
-26. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
+22. [Public-opinion volume, quality and archive troubleshooting](operations/public-opinion-volume-quality-archive.md)
+23. [Backup and restore](operations/backup-restore.md)
+24. [Observability and SLO](operations/observability-slo.md)
+25. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
+26. [Agent provider settings](operations/agent-provider-settings.md)
+27. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
 
 ## Decisions
 

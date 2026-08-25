@@ -14,7 +14,6 @@ const PUBLICATION_FIELDS = Object.freeze({
   qualityScore: 'quality.score',
   qualityFlags: 'quality.flags',
   rejectionCodes: 'quality.rejection_codes',
-  geographyVerified: 'quality.geography_verified',
 })
 
 const UPDATE_FIELDS = new Set(['expectedRevision', 'status', 'itemsPerMinute'])
@@ -26,9 +25,12 @@ function safeErrorCode(error) {
   return 'agent_analysis_failed'
 }
 
-function assertionValue(assertions, fieldKey) {
+function assertionValue(assertions, fieldKey, status = null) {
   for (let index = (assertions || []).length - 1; index >= 0; index -= 1) {
-    if (assertions[index]?.fieldKey === fieldKey) return assertions[index].value
+    if (assertions[index]?.fieldKey === fieldKey
+      && (status === null || assertions[index].status === status)) {
+      return assertions[index].value
+    }
   }
   return null
 }
@@ -56,12 +58,21 @@ export function publicationStateFromResult({
     ? Math.max(0, Math.min(100, Math.round(Number(qualificationThreshold))))
     : 80
   const eventAdmin1Code = assertionValue(assertions, PUBLICATION_FIELDS.eventAdmin1)
+  const acceptedEventAdmin1Value = assertionValue(
+    assertions,
+    PUBLICATION_FIELDS.eventAdmin1,
+    'accepted',
+  )
+  const acceptedEventAdmin1Code = typeof acceptedEventAdmin1Value === 'string'
+    && acceptedEventAdmin1Value.trim()
+    ? acceptedEventAdmin1Value
+    : null
   const publisherAdmin1Code = assertionValue(assertions, PUBLICATION_FIELDS.publisherAdmin1)
   const geoScope = assertionValue(assertions, PUBLICATION_FIELDS.geoScope) || 'unknown'
   const singleProvinceDisplayAllowed = ![
     'multi_province', 'national', 'maritime', 'overseas',
   ].includes(geoScope)
-  const geographyVerified = assertionValue(assertions, PUBLICATION_FIELDS.geographyVerified) === true
+  const geographyVerified = acceptedEventAdmin1Code !== null
   const locationLabel = assertionValue(assertions, PUBLICATION_FIELDS.locationLabel)
   const locationType = assertionValue(assertions, PUBLICATION_FIELDS.locationType)
   const countryName = assertionValue(assertions, PUBLICATION_FIELDS.countryName)
@@ -90,16 +101,18 @@ export function publicationStateFromResult({
     rejectionCodes,
     eventAdmin1Code: typeof eventAdmin1Code === 'string' ? eventAdmin1Code : null,
     publisherAdmin1Code: typeof publisherAdmin1Code === 'string' ? publisherAdmin1Code : null,
-    // A publisher/dateline province is only a display fallback when the event
-    // has not already been classified outside a single Chinese province. This
-    // prevents an overseas event filed from Beijing from re-entering a Beijing
-    // province feed.
+    // Formal serving only trusts accepted event geography. Candidate reads are
+    // the explicit exploration surface where proposed event or publisher
+    // geography may still be displayed. The scope fence prevents an overseas
+    // event filed from Beijing from re-entering a Beijing province feed.
     displayAdmin1Code: singleProvinceDisplayAllowed
-      ? typeof eventAdmin1Code === 'string'
-        ? eventAdmin1Code
-        : typeof publisherAdmin1Code === 'string'
-          ? publisherAdmin1Code
-          : null
+      ? formal
+        ? acceptedEventAdmin1Code
+        : typeof eventAdmin1Code === 'string'
+          ? eventAdmin1Code
+          : typeof publisherAdmin1Code === 'string'
+            ? publisherAdmin1Code
+            : null
       : null,
     geographyVerified,
     geoScope,

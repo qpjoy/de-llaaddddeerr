@@ -24,6 +24,7 @@ const REQUIRED_SOURCE_COLUMNS = Object.freeze([
   'province',
   'heat_score',
   'updated_at',
+  'source_stage',
 ])
 const TIMESTAMP_TYPES = new Set(['timestamp', 'timestamptz'])
 const NUMERIC_TYPES = new Set(['int2', 'int4', 'int8', 'float4', 'float8', 'numeric', 'decimal'])
@@ -66,6 +67,8 @@ export function provinceOpinionColumnIssues(columns = []) {
   if (updatedAt?.nullable === true) issues.push('cursor column updated_at must be non-null')
   const id = byName.get('id')
   if (id?.nullable === true) issues.push('id column id must be non-null')
+  const sourceStage = byName.get('source_stage')
+  if (sourceStage && sourceStage.nullable !== false) issues.push('source_stage column must be non-null')
   if (updatedAt && !TIMESTAMP_TYPES.has(updatedAt.databaseType)) {
     issues.push('cursor column updated_at must be timestamp or timestamptz; date cannot observe multiple same-day revisions')
   }
@@ -80,6 +83,23 @@ export function provinceOpinionColumnIssues(columns = []) {
   return issues
 }
 
+function normalizedSourceStageCheck(expression) {
+  return String(expression || '')
+    .toLowerCase()
+    .replace(/["\s()]/g, '')
+    .replace(/::text/g, '')
+}
+
+function isExactSourceStageCheck(constraint) {
+  if (constraint.type !== 'c' || constraint.validated !== true) return false
+  // PostgreSQL rewrites IN (...) to = ANY (ARRAY[...]) in pg_get_expr output.
+  const expression = normalizedSourceStageCheck(constraint.expression)
+  return expression === "source_stage=anyarray['formal','candidate']"
+    || expression === "source_stage=anyarray['candidate','formal']"
+    || expression === "source_stagein'formal','candidate'"
+    || expression === "source_stagein'candidate','formal'"
+}
+
 export function provinceOpinionProbeIssues(description) {
   const issues = [
     ...(description?.issues || []),
@@ -92,6 +112,10 @@ export function provinceOpinionProbeIssues(description) {
   ))
   if (!finiteWatermark) {
     issues.push('updated_at requires a CHECK (isfinite(updated_at)) constraint')
+  }
+  const exactSourceStage = (description?.constraints || []).some(isExactSourceStageCheck)
+  if (!exactSourceStage) {
+    issues.push("source_stage requires a validated CHECK allowing only 'formal' and 'candidate'")
   }
   return [...new Set(issues)]
 }

@@ -92,6 +92,11 @@ function fixture({ segmenterConfig = HANLP_CONFIG } = {}) {
         'canonical_province_opinion_latest_idx',
       ],
     }),
+    getPublicOpinionQualitySummary: async () => ({
+      contractVersion: 'mx-insight-hub.public-opinion.quality-summary.v1',
+      canonical: { total: 5_189, active: 5_189, deleted: 0 },
+      publication: { stages: { formal: 5_189, candidate: 0 } },
+    }),
     updateExternalSourcesBatch: async (updates) => {
       Object.assign(source, updates[0])
       if (updates[0].connection) source.connection = structuredClone(updates[0].connection)
@@ -178,17 +183,26 @@ function validDescription(overrides = {}) {
     ['province', 'text'],
     ['heat_score', 'numeric'],
     ['updated_at', 'timestamptz'],
+    ['source_stage', 'text'],
   ].map(([name, databaseType]) => ({ name, databaseType, nullable: false }))
   return {
     issues: [],
     warnings: [],
     columns,
-    constraints: [{
-      type: 'c',
-      validated: true,
-      expression: 'isfinite(updated_at)',
-      definition: 'CHECK (isfinite(updated_at))',
-    }],
+    constraints: [
+      {
+        type: 'c',
+        validated: true,
+        expression: 'isfinite(updated_at)',
+        definition: 'CHECK (isfinite(updated_at))',
+      },
+      {
+        type: 'c',
+        validated: true,
+        expression: "(source_stage = ANY (ARRAY['formal'::text, 'candidate'::text]))",
+        definition: "CHECK ((source_stage = ANY (ARRAY['formal'::text, 'candidate'::text])))",
+      },
+    ],
     ...overrides,
   }
 }
@@ -225,6 +239,8 @@ test('province pipeline starts paused/unconfigured and keeps table, cursor and i
   const initial = await setup.pipeline.get()
   assert.equal(initial.status, 'paused')
   assert.equal(initial.configured, false)
+  assert.equal(initial.writerContract.version, 'province-opinion.writer.v2')
+  assert.match(initial.writerContract.summary.publicationStage, /source_stage=formal\|candidate/)
   assert.deepEqual(initial.fixedInput, {
     schema: 'public',
     table: 'monitor_strategy_results',
@@ -291,6 +307,59 @@ test('activation fails closed without updated_at/index and requires exact writer
     () => setup.pipeline.setStatus('active', { writerContractAttestation: ATTESTATION }),
     (error) => error.code === 'source_probe_failed'
       && error.details.issues.includes('updated_at requires a CHECK (isfinite(updated_at)) constraint'),
+  )
+
+  setup.setDescription(validDescription({
+    columns: validDescription().columns.filter((column) => column.name !== 'source_stage'),
+  }))
+  await assert.rejects(
+    () => setup.pipeline.setStatus('active', { writerContractAttestation: ATTESTATION }),
+    (error) => error.code === 'source_probe_failed'
+      && error.details.issues.includes('required province opinion column source_stage is missing'),
+  )
+
+  setup.setDescription(validDescription({
+    columns: validDescription().columns.map((column) => (
+      column.name === 'source_stage' ? { ...column, nullable: true } : column
+    )),
+  }))
+  await assert.rejects(
+    () => setup.pipeline.setStatus('active', { writerContractAttestation: ATTESTATION }),
+    (error) => error.code === 'source_probe_failed'
+      && error.details.issues.includes('source_stage column must be non-null'),
+  )
+
+  setup.setDescription(validDescription({
+    constraints: [
+      validDescription().constraints[0],
+      {
+        type: 'c',
+        validated: true,
+        expression: "(source_stage = ANY (ARRAY['formal'::text, 'candidate'::text, 'unknown'::text]))",
+      },
+    ],
+  }))
+  await assert.rejects(
+    () => setup.pipeline.setStatus('active', { writerContractAttestation: ATTESTATION }),
+    (error) => error.code === 'source_probe_failed'
+      && error.details.issues.includes(
+        "source_stage requires a validated CHECK allowing only 'formal' and 'candidate'",
+      ),
+  )
+
+  setup.setDescription(validDescription({
+    constraints: validDescription().constraints.map((constraint) => (
+      constraint.expression.includes('source_stage')
+        ? { ...constraint, validated: false }
+        : constraint
+    )),
+  }))
+  await assert.rejects(
+    () => setup.pipeline.setStatus('active', { writerContractAttestation: ATTESTATION }),
+    (error) => error.code === 'source_probe_failed'
+      && error.details.issues.includes(
+        "source_stage requires a validated CHECK allowing only 'formal' and 'candidate'",
+      ),
   )
 
   setup.setDescription(validDescription())
@@ -608,11 +677,32 @@ test('province pipeline routes are Admin-only and the fixed source rejects gener
     assert.equal(denied.response.status, 403)
     assert.equal(denied.payload.error.code, 'admin_token_required')
 
+    const deniedQuality = await call(
+      baseUrl,
+      '/internal/v1/admin/pipelines/province-opinion/quality-summary',
+      { headers: { 'x-api-key': 'mih_live_not_admin' } },
+    )
+    assert.equal(deniedQuality.response.status, 403)
+    assert.equal(deniedQuality.payload.error.code, 'admin_token_required')
+
     const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
     const aggregate = await call(baseUrl, '/internal/v1/admin/pipelines/province-opinion', { headers })
     assert.equal(aggregate.response.status, 200)
     assert.equal(aggregate.payload.data.status, 'paused')
     assert.equal(aggregate.payload.data.configured, false)
+
+    const quality = await call(
+      baseUrl,
+      '/internal/v1/admin/pipelines/province-opinion/quality-summary',
+      { headers },
+    )
+    assert.equal(quality.response.status, 200)
+    assert.equal(quality.payload.data.pipelineKey, PROVINCE_OPINION_PIPELINE_KEY)
+    assert.equal(quality.payload.data.canonical.total, 5_189)
+    assert.equal(
+      quality.payload.data.contractVersion,
+      'mx-insight-hub.public-opinion.quality-summary.v1',
+    )
 
     const genericMutation = await call(
       baseUrl,

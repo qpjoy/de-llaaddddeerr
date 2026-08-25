@@ -930,7 +930,21 @@ export function DataCenterPage({ token, onUnauthorized }) {
                   <td>{record.platform}<small>{record.objectType}{record.contentType ? ` · ${record.contentType}` : ''}</small></td>
                   <td>r{formatNumber(record.currentRevision || 1)}</td>
                   <td>{formatDate(record.eventTime || record.collectedAt)}</td>
-                  <td><StatusBadge status={record.deletedAt ? 'disabled' : 'active'} label={record.deletedAt ? '已删除' : '当前'} /></td>
+                  <td>
+                    <StatusBadge status={record.deletedAt ? 'disabled' : 'active'} label={record.deletedAt ? '已删除' : '当前'} />
+                    {record.publication ? (
+                      <small>
+                        {record.publication.displayAdmin1Code || record.publication.locationLabel
+                          || record.publication.countryName || record.publication.countryCode || '地域未定'}
+                        {' · '}
+                        {record.publication.qualityScore == null
+                          ? record.publication.status
+                          : `质量 ${formatNumber(record.publication.qualityScore)}${record.publication.qualificationThreshold == null
+                            ? ''
+                            : ` / ${formatNumber(record.publication.qualificationThreshold)}`}`}
+                      </small>
+                    ) : null}
+                  </td>
                   <td><button className="qp-button qp-button--ghost" type="button" onClick={() => setSelectedRecord(record)}>查看完整记录</button></td>
                 </tr>
               })}

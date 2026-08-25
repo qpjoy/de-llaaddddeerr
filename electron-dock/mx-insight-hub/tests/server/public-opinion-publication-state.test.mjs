@@ -38,11 +38,20 @@ test('migration 035 owns revision-fenced candidate publication state and backfil
 
 test('ingest recognizes only public-opinion stages and bounds display location fields', () => {
   assert.equal(publicOpinionSourceStage('other.v1', { source_stage: 'candidate' }), null)
-  assert.equal(publicOpinionSourceStage('public-opinion.province.v1', {}), 'formal')
+  assert.equal(
+    publicOpinionSourceStage('public-opinion.province.v1', { source_stage: 'formal' }),
+    'formal',
+  )
   assert.equal(
     publicOpinionSourceStage('public-opinion.province.v1', { source_stage: 'candidate' }),
     'candidate',
   )
+  for (const rawItem of [{}, { source_stage: '' }, { source_stage: 'unknown' }]) {
+    assert.throws(
+      () => publicOpinionSourceStage('public-opinion.province.v1', rawItem),
+      (error) => error.status === 400 && error.code === 'invalid_public_opinion_source_stage',
+    )
+  }
   assert.deepEqual(publicOpinionLocation({
     raw: {
       politicalTerrorEventLocation: {
@@ -76,15 +85,18 @@ test('external ingest initializes publication state before enqueueing analysis a
 
 test('publication decision keeps formal rows formal and qualifies candidates at the configured threshold', () => {
   const assertions = [
-    { fieldKey: 'geography.event_admin1_code', value: 'CN-JS' },
-    { fieldKey: 'geography.publisher_admin1_code', value: 'CN-BJ' },
-    { fieldKey: 'geography.geo_scope', value: 'province' },
-    { fieldKey: 'quality.score', value: 80 },
-    { fieldKey: 'quality.flags', value: ['substantive_text'] },
-    { fieldKey: 'quality.rejection_codes', value: [] },
-    { fieldKey: 'quality.geography_verified', value: true },
+    { fieldKey: 'geography.event_admin1_code', value: 'CN-JS', status: 'accepted' },
+    { fieldKey: 'geography.publisher_admin1_code', value: 'CN-BJ', status: 'proposed' },
+    { fieldKey: 'geography.geo_scope', value: 'province', status: 'proposed' },
+    { fieldKey: 'quality.score', value: 80, status: 'proposed' },
+    { fieldKey: 'quality.flags', value: ['substantive_text'], status: 'proposed' },
+    { fieldKey: 'quality.rejection_codes', value: [], status: 'proposed' },
+    { fieldKey: 'quality.geography_verified', value: true, status: 'proposed' },
   ]
-  assert.equal(publicationStateFromResult({ assertions, sourceStage: 'formal' }).status, 'formal')
+  const formal = publicationStateFromResult({ assertions, sourceStage: 'formal' })
+  assert.equal(formal.status, 'formal')
+  assert.equal(formal.displayAdmin1Code, 'CN-JS')
+  assert.equal(formal.geographyVerified, true)
   const candidate = publicationStateFromResult({
     assertions: [
       ...assertions,
@@ -105,18 +117,19 @@ test('publication decision keeps formal rows formal and qualifies candidates at 
   assert.equal(candidate.countryCode, 'CN')
   const publisherFallback = publicationStateFromResult({
     assertions: [
-      { fieldKey: 'geography.publisher_admin1_code', value: 'CN-BJ' },
-      { fieldKey: 'geography.geo_scope', value: 'unknown' },
-      { fieldKey: 'quality.score', value: 90 },
+      { fieldKey: 'geography.publisher_admin1_code', value: 'CN-BJ', status: 'proposed' },
+      { fieldKey: 'geography.geo_scope', value: 'unknown', status: 'proposed' },
+      { fieldKey: 'quality.score', value: 90, status: 'proposed' },
     ],
     sourceStage: 'candidate',
   })
   assert.equal(publisherFallback.displayAdmin1Code, 'CN-BJ')
+  assert.equal(publisherFallback.geographyVerified, false)
   const overseas = publicationStateFromResult({
     assertions: [
-      { fieldKey: 'geography.publisher_admin1_code', value: 'CN-BJ' },
-      { fieldKey: 'geography.geo_scope', value: 'overseas' },
-      { fieldKey: 'quality.score', value: 90 },
+      { fieldKey: 'geography.publisher_admin1_code', value: 'CN-BJ', status: 'proposed' },
+      { fieldKey: 'geography.geo_scope', value: 'overseas', status: 'proposed' },
+      { fieldKey: 'quality.score', value: 90, status: 'proposed' },
     ],
     sourceStage: 'candidate',
   })
@@ -131,6 +144,37 @@ test('publication decision keeps formal rows formal and qualifies candidates at 
   assert.equal(publicationStateFromResult({
     assertions: [], sourceStage: 'candidate',
   }).status, 'failed')
+})
+
+test('proposed geography never enters formal province serving', () => {
+  const assertions = [
+    { fieldKey: 'geography.event_admin1_code', value: 'CN-JS', status: 'proposed' },
+    { fieldKey: 'geography.publisher_admin1_code', value: 'CN-BJ', status: 'proposed' },
+    { fieldKey: 'geography.geo_scope', value: 'province', status: 'proposed' },
+    { fieldKey: 'quality.score', value: 95, status: 'proposed' },
+    { fieldKey: 'quality.geography_verified', value: true, status: 'proposed' },
+  ]
+
+  const formal = publicationStateFromResult({ assertions, sourceStage: 'formal' })
+  assert.equal(formal.eventAdmin1Code, 'CN-JS')
+  assert.equal(formal.publisherAdmin1Code, 'CN-BJ')
+  assert.equal(formal.displayAdmin1Code, null)
+  assert.equal(formal.geographyVerified, false)
+
+  const candidate = publicationStateFromResult({ assertions, sourceStage: 'candidate' })
+  assert.equal(candidate.displayAdmin1Code, 'CN-JS')
+  assert.equal(candidate.geographyVerified, false)
+
+  const emptyAccepted = publicationStateFromResult({
+    assertions: [
+      { fieldKey: 'geography.event_admin1_code', value: '', status: 'accepted' },
+      { fieldKey: 'geography.geo_scope', value: 'province', status: 'proposed' },
+      { fieldKey: 'quality.geography_verified', value: true, status: 'proposed' },
+    ],
+    sourceStage: 'formal',
+  })
+  assert.equal(emptyAccepted.displayAdmin1Code, null)
+  assert.equal(emptyAccepted.geographyVerified, false)
 })
 
 test('quality scoring is deterministic and cannot qualify an unlocated keyword-only fragment', () => {

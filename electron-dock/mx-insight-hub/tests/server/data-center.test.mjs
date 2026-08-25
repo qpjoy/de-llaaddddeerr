@@ -504,6 +504,7 @@ test('PostgresStore keyset-pages full canonical records for the Admin browser', 
   assert.equal(result.items.length, 1)
   assert.equal(result.items[0].body, '正文一')
   assert.equal(result.items[0].externalId, '1962355370623652093')
+  assert.equal(Object.hasOwn(result.items[0], 'publication'), false)
   assert.equal(result.total, 3)
   assert.equal(result.hasMore, true)
   assert.deepEqual(result.nextCursor, {
@@ -516,7 +517,100 @@ test('PostgresStore keyset-pages full canonical records for the Admin browser', 
   ])
   assert.match(calls[1].sql, /^WITH page AS MATERIALIZED/)
   assert.match(calls[1].sql, /JOIN core\.canonical_records r ON r\.id = page\.id/)
+  assert.match(calls[1].sql, /LEFT JOIN core\.public_opinion_current_state publication/)
+  assert.match(calls[1].sql, /publication\.canonical_revision = r\.current_revision/)
+  assert.match(calls[1].sql, /r\.dataset_id = 'public-opinion\.province\.v1'/)
   assert.match(calls[1].sql, /ORDER BY coalesce\(r\.event_time, r\.collected_at, r\.last_seen_at, r\.first_seen_at\) DESC, r\.id DESC/)
+})
+
+test('Data Center full records expose only revision-fenced bounded publication state', async () => {
+  const recordId = '11111111-1111-4111-8111-111111111111'
+  const publication = {
+    sourceStage: 'candidate',
+    status: 'qualified',
+    qualityScore: 91,
+    qualificationThreshold: 80,
+    eventAdmin1Code: 'CN-JS',
+    publisherAdmin1Code: 'CN-BJ',
+    displayAdmin1Code: 'CN-JS',
+    geographyVerified: true,
+    geoScope: 'province',
+    countryCode: 'CN',
+    locationLabel: '南京市',
+    locationType: 'city',
+    countryName: '中国',
+    assessedAt: '2026-08-25T14:22:00.000Z',
+  }
+  const row = {
+    id: recordId,
+    dataset_id: 'public-opinion.province.v1',
+    platform: 'public_opinion',
+    object_type: 'opinion_item',
+    external_id: 'opinion-1',
+    current_revision: 3,
+    projection_revision: 4,
+    sort_time: '2026-08-25T14:00:00.000Z',
+    publication_record_id: recordId,
+    publication_source_stage: 'candidate',
+    publication_status: 'qualified',
+    publication_quality_score: '91',
+    publication_qualification_threshold: '80',
+    publication_event_admin1_code: 'CN-JS',
+    publication_publisher_admin1_code: 'CN-BJ',
+    publication_display_admin1_code: 'CN-JS',
+    publication_geography_verified: true,
+    publication_geo_scope: 'province',
+    publication_country_code: 'CN',
+    publication_location_label: '南京市',
+    publication_location_type: 'city',
+    publication_country_name: '中国',
+    publication_assessed_at: '2026-08-25T14:22:00.000Z',
+    publication_quality_flags: ['must-not-escape'],
+    publication_analysis_version: 'must-not-escape',
+  }
+  const calls = []
+  const store = new PostgresStore({
+    async query(sql, values) {
+      calls.push({ sql: sql.replace(/\s+/g, ' ').trim(), values })
+      if (sql.includes('count(*)::bigint AS total')) return { rows: [{ total: '1' }] }
+      return { rows: [row] }
+    },
+  })
+
+  const page = await store.dataCenterRecords({ pageSize: 50 })
+  assert.deepEqual(page.items[0].publication, publication)
+  const [byId] = await store.dataCenterRecordsByIds([recordId])
+  assert.deepEqual(byId.publication, publication)
+  assert.equal(JSON.stringify(page.items[0].publication).includes('must-not-escape'), false)
+
+  const detailQueries = calls.filter((call) => !call.sql.includes('count(*)::bigint AS total'))
+  assert.equal(detailQueries.length, 2)
+  for (const { sql } of detailQueries) {
+    assert.match(sql, /LEFT JOIN core\.public_opinion_current_state publication/)
+    assert.match(sql, /publication\.record_id = r\.id/)
+    assert.match(sql, /publication\.canonical_revision = r\.current_revision/)
+    assert.match(sql, /r\.dataset_id = 'public-opinion\.province\.v1'/)
+    assert.doesNotMatch(
+      sql,
+      /publication\.(?:quality_flags|rejection_codes|analysis_version|taxonomy_version|rule_version|prompt_version|materialized_from_task_id|source_object_revision_id)/,
+    )
+  }
+
+  const genericStore = new PostgresStore({
+    async query() {
+      return { rows: [{
+        id: recordId,
+        dataset_id: 'external.generic.v1',
+        platform: 'external',
+        object_type: 'record',
+        external_id: 'generic-1',
+        current_revision: 1,
+        publication_record_id: null,
+      }] }
+    },
+  })
+  const [generic] = await genericStore.dataCenterRecordsByIds([recordId])
+  assert.equal(Object.hasOwn(generic, 'publication'), false)
 })
 
 test('PostgresStore supports direct 1-based Admin page offsets with an exact total', async () => {

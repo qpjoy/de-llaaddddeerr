@@ -834,7 +834,7 @@ function ProvinceOpinionPipelineModal({
             onChange={(event) => setWriterContractConfirmed(event.target.checked)} />
           <span>
             <strong>我已验证源端实现满足上述合同</strong>
-            <small>合同 {pipeline.writerContract?.version || 'province-opinion.writer.v1'} · 摘要 {pipeline.writerContract?.digest?.slice(0, 12) || '待加载'}…</small>
+            <small>合同 {pipeline.writerContract?.version || 'province-opinion.writer.v2'} · 摘要 {pipeline.writerContract?.digest?.slice(0, 12) || '待加载'}…</small>
           </span>
         </label>
         {pipeline.writerContract?.latestAttestation ? (

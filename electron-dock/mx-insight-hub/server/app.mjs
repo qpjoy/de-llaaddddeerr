@@ -1445,6 +1445,11 @@ export function createApp({
         sendJson(response, 200, { data: await provinceOpinionPipeline.progress(), requestId })
         return
       }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/pipelines/province-opinion/quality-summary') {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, { data: await provinceOpinionPipeline.qualitySummary(), requestId })
+        return
+      }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/province-opinion/resume') {
         requireSourceAdmin(principal)
         requireDatabasePuller()
