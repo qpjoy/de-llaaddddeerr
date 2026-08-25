@@ -457,7 +457,10 @@ Agent 返回值必须是支持的 CN admin1 code/geo scope；非空 event eviden
 event text，publisher evidence 必须存在于 source name，而且省/城市/adcode 的语义必须
 与返回 code 一致。例如“南京”可支持 `CN-JS`，不能支持 `CN-BJ`；“台湾海峡”和“海南州”
 也不会被字符串前缀误当成台湾/海南事件省份。非法 JSON、无效 code 或无法回指/语义
-不一致的证据都会使 task 失败并重试，而不是静默落库。
+不一致的模型证据会被整批丢弃；task 仍以确定性规则和质量 assertion 完成，并在
+`result_summary.agentValidation` 记录安全错误码、provider/model/usage，不保存模型原文。
+Provider 未配置、网络、超时、取消和上游响应协议失败仍按 task 失败与重试处理，不能被
+这种内容级降级掩盖。
 
 ### 7.3 assertion 状态和当前审核闭环
 
@@ -554,6 +557,8 @@ provider chain 不解析 `Retry-After`，429 会立即转向下一个 provider�
   revision 自己有独立 task。
 - 无 Chat provider：明确规则可完成；需要 Agent 的歧义 task 失败并按预算重试，最终
   `dead`，不会猜 province。
+- Chat provider 已成功返回、但 JSON/枚举/证据校验失败：拒绝全部模型 assertion，保留
+  rules-only/quality 结果并完成 task；同一确定性无效响应不会再重复调用 5 次。
 - 修复 provider/input 后，`POST .../retry-dead` 会把该 pipeline **全部** dead task 的
   attempts 清零并重新排队。操作前先检查错误分布；当前没有单 task retry API。
 - deleted record 会以 skipped summary 完成且不生成 assertion。

@@ -27,6 +27,10 @@ export const PROVINCE_ANALYSIS_FIELDS = Object.freeze({
 const GEO_SCOPES = new Set([
   'province', 'multi_province', 'national', 'maritime', 'overseas', 'unknown',
 ])
+const AGENT_OUTPUT_VALIDATION_CODES = new Set([
+  'agent_invalid_response',
+  'agent_unverified_evidence',
+])
 const MEDIA_SUFFIX = /^(?:省|市|自治区|特别行政区)?(?:新闻|日报|晚报|广播|电视|电台|卫视|融媒体|传媒|报业|新闻网)/u
 const LOWER_ADMIN_OR_FEATURE_SUFFIX = /^(?:省|市|州|地区|盟|县|区|旗|新区|海峡)/u
 const MARITIME_TERMS = ['南海', '东海', '黄海', '渤海', '台海', '台湾海峡', '黄岩岛', '钓鱼岛', '海域', '海警']
@@ -414,6 +418,11 @@ function safeJsonObject(value) {
 function confidence(value) {
   const number = Number(value)
   return Number.isFinite(number) ? Math.max(0, Math.min(number, 1)) : 0
+}
+
+function tokenCount(value) {
+  const number = Number(value)
+  return Number.isSafeInteger(number) && number >= 0 ? number : 0
 }
 
 function containsEvidence(haystack, quote) {
@@ -1016,6 +1025,7 @@ export async function runProvinceAnalysisGraph({ claim, agent, signal } = {}) {
   let providerId = null
   let model = null
   let usage = null
+  let agentValidation = null
 
   if (context.needsAgent) {
     if (!agent?.available) {
@@ -1025,14 +1035,27 @@ export async function runProvinceAnalysisGraph({ claim, agent, signal } = {}) {
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: JSON.stringify(context.compact) },
     ], { temperature: 0, maxTokens: 256, signal })
-    const parsed = safeJsonObject(result.payload?.choices?.[0]?.message?.content)
-    assertions = [
-      ...assertions,
-      ...agentAssertions(parsed, context, result, { promptVersion: claim.promptVersion }),
-    ]
     providerId = result.provider
     model = result.model
     usage = result.payload?.usage || null
+    try {
+      const parsed = safeJsonObject(result.payload?.choices?.[0]?.message?.content)
+      assertions = [
+        ...assertions,
+        ...agentAssertions(parsed, context, result, { promptVersion: claim.promptVersion }),
+      ]
+      agentValidation = { accepted: true, errorCode: null }
+    } catch (error) {
+      // The provider completed successfully, so its identity and usage remain
+      // auditable, but an unparseable or unverified proposal must never turn
+      // into assertions. Only this local output-validation boundary degrades;
+      // provider, transport, cancellation and configuration failures still
+      // reject the task so operational faults cannot look like valid analysis.
+      if (!(error instanceof AppError) || !AGENT_OUTPUT_VALIDATION_CODES.has(error.code)) {
+        throw error
+      }
+      agentValidation = { accepted: false, errorCode: error.code }
+    }
   }
   assertions = [...assertions, ...qualityAssertions(context, assertions)]
 
@@ -1043,11 +1066,12 @@ export async function runProvinceAnalysisGraph({ claim, agent, signal } = {}) {
     summary: {
       assertionCount: assertions.length,
       usedAgent: context.needsAgent,
+      agentValidation,
       promptCharacters: context.needsAgent ? JSON.stringify(context.compact).length : 0,
       usage: usage ? {
-        promptTokens: Number(usage.prompt_tokens || 0),
-        completionTokens: Number(usage.completion_tokens || 0),
-        totalTokens: Number(usage.total_tokens || 0),
+        promptTokens: tokenCount(usage.prompt_tokens),
+        completionTokens: tokenCount(usage.completion_tokens),
+        totalTokens: tokenCount(usage.total_tokens),
       } : null,
     },
   }

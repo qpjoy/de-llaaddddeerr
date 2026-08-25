@@ -564,7 +564,7 @@ export class AgentPipelineStore {
            LEFT JOIN core.public_opinion_current_state publication
              ON publication.record_id = task.record_id
           WHERE task.id = $1
-          FOR UPDATE`,
+          FOR UPDATE OF task, source_revision, source_object, record`,
         [claim.taskId],
       )
       const task = current.rows[0]
@@ -746,7 +746,7 @@ export class AgentPipelineStore {
              LEFT JOIN core.public_opinion_current_state publication
                ON publication.record_id = task.record_id
             WHERE task.id = $1
-            FOR UPDATE`,
+            FOR UPDATE OF task, source_revision, source_object, record`,
           [claim.taskId],
         )
         const task = current.rows[0]

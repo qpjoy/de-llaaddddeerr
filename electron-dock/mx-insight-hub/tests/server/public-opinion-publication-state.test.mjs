@@ -36,6 +36,27 @@ test('migration 035 owns revision-fenced candidate publication state and backfil
   assert.doesNotMatch(migration, /ON DELETE CASCADE/)
 })
 
+test('Agent task locks exclude the nullable publication side of the outer join', async () => {
+  const source = await readFile(
+    new URL('../../server/agent/pipeline-store.mjs', import.meta.url),
+    'utf8',
+  )
+  const completeClaim = source.slice(
+    source.indexOf('async completeClaim('),
+    source.indexOf('async failClaim('),
+  )
+  const exhaustedFailure = source.slice(source.indexOf('async failClaim('))
+
+  for (const query of [completeClaim, exhaustedFailure]) {
+    assert.match(query, /LEFT JOIN core\.public_opinion_current_state publication/)
+    assert.match(
+      query,
+      /FOR UPDATE OF task, source_revision, source_object, record/,
+    )
+    assert.doesNotMatch(query, /FOR UPDATE OF[^`\n]*publication/)
+  }
+})
+
 test('ingest recognizes only public-opinion stages and bounds display location fields', () => {
   assert.equal(publicOpinionSourceStage('other.v1', { source_stage: 'candidate' }), null)
   assert.equal(

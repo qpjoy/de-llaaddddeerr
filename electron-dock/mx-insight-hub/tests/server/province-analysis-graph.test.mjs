@@ -208,6 +208,7 @@ test('an explicit source province is accepted without calling the Agent', async 
 
   assert.equal(calls, 0)
   assert.equal(result.summary.usedAgent, false)
+  assert.equal(result.summary.agentValidation, null)
   assert.equal(result.providerId, null)
   assert.deepEqual(
     assertionFor(result.assertions, PROVINCE_ANALYSIS_FIELDS.eventAdmin1),
@@ -362,6 +363,7 @@ test('ambiguous analysis sends only compact selected fields, never the whole raw
   assert.equal(userContent.includes('ignored_blob'), false)
   assert.equal(userContent.includes('raw_payload'), false)
   assert.equal(result.summary.usedAgent, true)
+  assert.deepEqual(result.summary.agentValidation, { accepted: true, errorCode: null })
   assert.equal(result.summary.promptCharacters, userContent.length)
   assert.equal(
     result.assertions.filter((assertion) => assertion.method === 'agent')
@@ -420,71 +422,168 @@ test('conflicting structured location signals require Agent analysis instead of 
   ])
 })
 
-test('Agent publisher code must respect a more specific prefecture name', async () => {
-  await assert.rejects(
-    runProvinceAnalysisGraph({
-      claim: claim({
-        raw_payload: {
-          title: '当地发布最新处置通报',
-          source_name: '海南州融媒体中心',
-        },
-      }),
-      agent: {
-        available: true,
-        async complete() {
-          return {
-            provider: 'primary',
-            model: 'model-a',
-            payload: { choices: [{ message: { content: JSON.stringify({
-              eventAdmin1Code: null,
-              eventConfidence: 0,
-              eventEvidenceText: '',
-              publisherAdmin1Code: 'CN-HI',
-              publisherConfidence: 0.9,
-              publisherEvidenceText: '海南州融媒体中心',
-              geoScope: 'unknown',
-              scopeConfidence: 1,
-              scopeEvidenceText: '',
-            }) } }] },
-          }
-        },
+test('an unverified Agent publisher code degrades to deterministic assertions', async () => {
+  const result = await runProvinceAnalysisGraph({
+    claim: claim({
+      raw_payload: {
+        title: '当地发布最新处置通报',
+        source_name: '海南州融媒体中心',
       },
     }),
-    (error) => error?.code === 'agent_unverified_evidence',
+    agent: {
+      available: true,
+      async complete() {
+        return {
+          provider: 'primary',
+          model: 'model-a',
+          payload: { choices: [{ message: { content: JSON.stringify({
+            eventAdmin1Code: null,
+            eventConfidence: 0,
+            eventEvidenceText: '',
+            publisherAdmin1Code: 'CN-HI',
+            publisherConfidence: 0.9,
+            publisherEvidenceText: '海南州融媒体中心',
+            geoScope: 'unknown',
+            scopeConfidence: 1,
+            scopeEvidenceText: '',
+          }) } }], usage: {
+            prompt_tokens: 101,
+            completion_tokens: 23,
+            total_tokens: 124,
+          } },
+        }
+      },
+    },
+  })
+
+  assert.equal(result.providerId, 'primary')
+  assert.equal(result.model, 'model-a')
+  assert.deepEqual(result.summary.agentValidation, {
+    accepted: false,
+    errorCode: 'agent_unverified_evidence',
+  })
+  assert.deepEqual(result.summary.usage, {
+    promptTokens: 101,
+    completionTokens: 23,
+    totalTokens: 124,
+  })
+  assert.equal(result.assertions.some((item) => item.method === 'agent'), false)
+  assert.equal(
+    assertionFor(result.assertions, PROVINCE_ANALYSIS_FIELDS.publisherAdmin1)?.value,
+    'CN-QH',
+  )
+  assert.ok(assertionFor(result.assertions, PROVINCE_ANALYSIS_FIELDS.qualityScore))
+})
+
+test('an Agent province that contradicts cited evidence is discarded safely', async () => {
+  const result = await runProvinceAnalysisGraph({
+    claim: claim({
+      raw_payload: {
+        title: '当地发布最新处置通报',
+        city: '玄武区',
+      },
+    }),
+    agent: {
+      available: true,
+      async complete() {
+        return {
+          provider: 'deepseek-compatible',
+          model: 'chat-model',
+          payload: { choices: [{ message: { content: JSON.stringify({
+            eventAdmin1Code: 'CN-BJ',
+            eventConfidence: 0.9,
+            eventEvidenceText: '玄武区',
+            publisherAdmin1Code: null,
+            publisherConfidence: 0,
+            publisherEvidenceText: '',
+            geoScope: 'province',
+            scopeConfidence: 0.9,
+            scopeEvidenceText: '玄武区',
+          }) } }], usage: {
+            prompt_tokens: 'invalid-private-value',
+            completion_tokens: -1,
+            total_tokens: Number.POSITIVE_INFINITY,
+          } },
+        }
+      },
+    },
+  })
+
+  assert.deepEqual(result.summary.agentValidation, {
+    accepted: false,
+    errorCode: 'agent_unverified_evidence',
+  })
+  assert.deepEqual(result.summary.usage, {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+  })
+  assert.equal(result.assertions.some((item) => item.method === 'agent'), false)
+  assert.ok(assertionFor(result.assertions, PROVINCE_ANALYSIS_FIELDS.qualityScore))
+})
+
+test('malformed model content degrades without exposing the content in summary', async () => {
+  const modelContent = 'private malformed model text without JSON'
+  const result = await runProvinceAnalysisGraph({
+    claim: claim({
+      raw_payload: {
+        title: '行业运行情况更新',
+        source_name: '江苏新闻',
+      },
+    }),
+    agent: {
+      available: true,
+      async complete() {
+        return {
+          provider: 'primary',
+          model: 'model-a',
+          payload: {
+            choices: [{ message: { content: modelContent } }],
+            usage: { prompt_tokens: 80, completion_tokens: 8, total_tokens: 88 },
+          },
+        }
+      },
+    },
+  })
+
+  assert.deepEqual(result.summary.agentValidation, {
+    accepted: false,
+    errorCode: 'agent_invalid_response',
+  })
+  assert.equal(JSON.stringify(result.summary).includes(modelContent), false)
+  assert.equal(result.assertions.some((item) => item.method === 'agent'), false)
+  assert.equal(
+    assertionFor(result.assertions, PROVINCE_ANALYSIS_FIELDS.publisherAdmin1)?.value,
+    'CN-JS',
   )
 })
 
-test('Agent province code must match the meaning of its cited structured evidence', async () => {
+test('Agent completion failures are not swallowed by local output degradation', async () => {
+  const providerFailure = Object.assign(new Error('provider response contract failed'), {
+    code: 'agent_invalid_response',
+  })
+
   await assert.rejects(
     runProvinceAnalysisGraph({
-      claim: claim({
-        raw_payload: {
-          title: '当地发布最新处置通报',
-          city: '玄武区',
-        },
-      }),
+      claim: claim({ raw_payload: { title: '行业运行情况更新' } }),
       agent: {
         available: true,
         async complete() {
-          return {
-            provider: 'deepseek-compatible',
-            model: 'chat-model',
-            payload: { choices: [{ message: { content: JSON.stringify({
-              eventAdmin1Code: 'CN-BJ',
-              eventConfidence: 0.9,
-              eventEvidenceText: '玄武区',
-              publisherAdmin1Code: null,
-              publisherConfidence: 0,
-              publisherEvidenceText: '',
-              geoScope: 'province',
-              scopeConfidence: 0.9,
-              scopeEvidenceText: '玄武区',
-            }) } }] },
-          }
+          throw providerFailure
         },
       },
     }),
-    (error) => error?.code === 'agent_unverified_evidence',
+    (error) => error === providerFailure,
+  )
+})
+
+test('ambiguous analysis still fails when no Agent provider is configured', async () => {
+  await assert.rejects(
+    runProvinceAnalysisGraph({
+      claim: claim({ raw_payload: { title: '行业运行情况更新' } }),
+      agent: { available: false },
+    }),
+    (error) => error?.code === 'agent_not_configured',
   )
 })
 
@@ -533,4 +632,5 @@ test('Agent may propose a province from a verified free-text prefecture quote', 
   assert.equal(event.value, 'CN-JS')
   assert.equal(event.status, 'proposed')
   assert.equal(result.summary.usedAgent, true)
+  assert.deepEqual(result.summary.agentValidation, { accepted: true, errorCode: null })
 })
