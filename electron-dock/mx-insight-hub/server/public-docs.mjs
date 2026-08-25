@@ -75,6 +75,16 @@ const publicOpinionProvinceParameters = [
     schema: { type: 'string', format: 'date-time' },
   },
   {
+    name: 'includeCandidates', in: 'query', required: false,
+    description: 'Defaults to false and preserves the formal-only contract. qualified adds Hub-qualified candidates; true is accepted as an alias. all includes every candidate meeting minQualityScore and requires both from and to.',
+    schema: { type: 'string', enum: ['false', 'true', 'qualified', 'all'], default: 'false' },
+  },
+  {
+    name: 'minQualityScore', in: 'query', required: false,
+    description: 'Candidate quality threshold from 0 to 100. It is valid only with includeCandidates=qualified or all and defaults to 80 for qualified.',
+    schema: { type: 'integer', minimum: 0, maximum: 100 },
+  },
+  {
     name: 'pageSize', in: 'query', required: false,
     description: 'Defaults to 20; maximum 100, and the public_opinion platform policy may impose a lower limit.',
     schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
@@ -86,11 +96,79 @@ const publicOpinionProvinceParameters = [
   },
 ]
 
+const publicOpinionCandidateParameters = publicOpinionProvinceParameters.slice(4, 6)
+
+const publicOpinionCoverageParameters = [
+  {
+    name: 'from', in: 'query', required: true,
+    description: 'Inclusive RFC3339 published/event-time lower bound.',
+    schema: { type: 'string', format: 'date-time' },
+  },
+  {
+    name: 'to', in: 'query', required: true,
+    description: 'Inclusive RFC3339 published/event-time upper bound. It must not be earlier than from.',
+    schema: { type: 'string', format: 'date-time' },
+  },
+  ...publicOpinionCandidateParameters,
+  {
+    name: 'targetPerProvince', in: 'query', required: false,
+    description: 'Coverage target used to calculate shortfall and meetsTarget. Defaults to 10.',
+    schema: { type: 'integer', minimum: 1, maximum: 100, default: 10 },
+  },
+]
+
 const resultTypeProperty = {
   type: 'string',
   enum: ['fresh', 'stable'],
   default: 'fresh',
   description: "Result freshness. 'fresh' always searches current data and replays a committed response only within 120 seconds, which covers a retry without turning the key into a cache. 'stable' replays the first response for that key indefinitely, for snapshots that must stay reproducible. Part of the request fingerprint.",
+}
+
+const publicOpinionSearchRequestProperties = {
+  includeCandidates: {
+    type: 'string',
+    enum: ['qualified', 'all'],
+    description: 'Valid only with explicit platform=public_opinion. qualified includes candidates with status=qualified and defaults minQualityScore to 80. all is a bounded audit mode and requires from, to and at least one of province, countryCode or location.',
+  },
+  minQualityScore: {
+    type: 'integer', minimum: 0, maximum: 100,
+    description: 'Candidate threshold. Valid only with includeCandidates=qualified or all; qualified defaults to 80.',
+  },
+  province: {
+    type: 'string', minLength: 1, maxLength: 64,
+    description: 'Exact China province filter as an ISO 3166-2:CN code or supported Chinese province name. Valid only with explicit platform=public_opinion.',
+  },
+  countryCode: {
+    type: 'string', pattern: '^[A-Za-z]{2}$',
+    description: 'Exact ISO 3166-1 alpha-2 country filter. Valid only with explicit platform=public_opinion.',
+  },
+  location: {
+    type: 'string', minLength: 1, maxLength: 160,
+    description: 'Exact normalized location-label filter. Valid only with explicit platform=public_opinion.',
+  },
+  from: {
+    type: 'string', format: 'date-time',
+    description: 'Inclusive lower bound. Formal rows use eventTime; explicitly requested candidates use eventTime or collectedAt when eventTime is absent.',
+  },
+  to: {
+    type: 'string', format: 'date-time',
+    description: 'Inclusive upper bound. It must not be earlier than from.',
+  },
+}
+
+const publicOpinionSearchFilterProperties = {
+  includeCandidates: {
+    oneOf: [
+      { type: 'boolean', const: false },
+      { type: 'string', enum: ['qualified', 'all'] },
+    ],
+  },
+  minQualityScore: { type: ['integer', 'null'], minimum: 0, maximum: 100 },
+  province: { type: ['string', 'null'] },
+  countryCode: { type: ['string', 'null'] },
+  location: { type: ['string', 'null'] },
+  from: { type: ['string', 'null'], format: 'date-time' },
+  to: { type: ['string', 'null'], format: 'date-time' },
 }
 
 const idempotencyParameter = {
@@ -211,6 +289,15 @@ const publicOpinionItemResponse = {
   },
 }
 
+const publicOpinionCoverageResponse = {
+  description: 'Customer-safe province coverage for one explicit time window.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/PublicOpinionCoverageEnvelope' },
+    },
+  },
+}
+
 export const PUBLIC_OPENAPI_DOCUMENT = {
   openapi: '3.1.0',
   info: {
@@ -288,7 +375,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                       {
                         platform: 'public_opinion',
                         ready: true,
-                        capabilities: ['province_feed', 'item_detail', 'stored_search'],
+                        capabilities: ['province_feed', 'province_coverage', 'item_detail', 'stored_search'],
                         source: 'hub',
                         servingMode: 'stored',
                       },
@@ -406,7 +493,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Search'],
         operationId: 'searchStoredData',
         summary: 'Search Hub canonical data without calling an upstream provider',
-        description: 'Requires the explicit platform grant. datasetId and objectType are exact filters, not separate authorization grants: every consumer granted a platform can search the complete Hub canonical corpus for that platform. Elasticsearch is preferred and transport failure falls back to PostgreSQL. Physical databases, indices and query DSL are not accepted.',
+        description: 'Requires the explicit platform grant. datasetId and objectType are exact filters, not separate authorization grants: every consumer granted a platform can search the complete Hub canonical corpus for that platform. For platform=public_opinion the default is formal-only. Candidate and exact geography/time controls are accepted only with explicit platform=public_opinion; includeCandidates=all requires from, to and at least one of province, countryCode or location. Other platforms are unaffected. Explicit candidate responses expose only bounded Hub quality/location metadata and omit candidate author/contentType and upstream source identity. Elasticsearch is preferred and transport failure falls back to PostgreSQL. Physical databases, indices and query DSL are not accepted. The publication-visibility contract is part of the idempotency fingerprint; after upgrading to this contract, use a new Idempotency-Key instead of reusing a pre-upgrade key.',
         parameters: [idempotencyParameter],
         requestBody: {
           required: true,
@@ -431,7 +518,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Search'],
         operationId: 'searchCanonicalData',
         summary: 'Search all authorized Hub canonical datasets in one ranked result set',
-        description: 'Searches the shared Hub canonical current-state projection once; it does not fan out to source APIs. Omitting platform searches all platforms currently granted to the consumer. platform, datasetId and objectType only narrow that authorized scope. searchProfile selects a versioned, server-owned query policy; callers cannot supply analyzers or Elasticsearch DSL. Balanced search uses HanLP/pre-segmented AND only while query segmentation is healthy; degraded Jieba/bigram terms switch the applied profile to raw phrase. The signed cursor is bound to the sorted platform-grant scope, query, filters, page size, resolved search profile and first-page analysis state so later pages do not re-segment. The independent canonical-search usage bucket always uses the strictest limits across the consumer\'s complete current grant set. Elasticsearch is preferred and PostgreSQL is the explicit degradation path.',
+        description: 'Searches the shared Hub canonical current-state projection once; it does not fan out to source APIs. Omitting platform searches all platforms currently granted to the consumer. In a mixed-platform result, only the public_opinion branch is formal-only by default; every other platform is unchanged. Candidate and exact geography/time controls require explicit platform=public_opinion; includeCandidates=all requires from, to and at least one of province, countryCode or location. Explicit candidate responses expose only bounded Hub quality/location metadata and omit candidate author/contentType and upstream source identity. platform, datasetId and objectType only narrow the authorized scope. searchProfile selects a versioned, server-owned query policy; callers cannot supply analyzers or Elasticsearch DSL. Balanced search uses HanLP/pre-segmented AND only while query segmentation is healthy; degraded Jieba/bigram terms switch the applied profile to raw phrase. The signed cursor is bound to the sorted platform-grant scope, query, filters, page size, resolved search profile and first-page analysis state so later pages do not re-segment. The independent canonical-search usage bucket always uses the strictest limits across the consumer\'s complete current grant set. Elasticsearch is preferred and PostgreSQL is the explicit degradation path. The publication-visibility contract is part of the idempotency fingerprint whenever the authorized scope can include public_opinion; after upgrading to this contract, use a new Idempotency-Key instead of reusing a pre-upgrade key.',
         parameters: [idempotencyParameter],
         requestBody: {
           required: true,
@@ -494,9 +581,9 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Public Opinion'],
         operationId: 'listProvincePublicOpinionItems',
         summary: 'List hot or latest public-opinion items for one province',
-        description: 'Requires the public_opinion platform grant and valid Hub serving indexes. The province path is normalized to a stable ISO 3166-2:CN code. This safe GET reads the Hub canonical PostgreSQL projection and is independently metered on every call and retry. hot excludes records without heatScore and sorts by heatScore, effective sort time and id; latest sorts by effective sort time, collectedAt and id. Effective sort time is publishedAt when present, otherwise collectedAt; this fallback is not exposed as publishedAt. from/to filter publishedAt only, so a bounded request excludes records whose publishedAt is null. Both orders use a signed keyset cursor. Only the documented customer-safe item allowlist is returned; raw rows, strategy/run ids, source coordinates, extensions, model reasoning and lineage remain private.',
+        description: 'Requires the public_opinion platform grant and valid Hub serving indexes. The province path is normalized to a stable ISO 3166-2:CN code. By default includeCandidates=false preserves the existing formal-only response. includeCandidates=qualified adds candidates at or above minQualityScore (default 80); includeCandidates=all is an explicit bounded audit view and requires both from and to. This safe GET reads the Hub canonical PostgreSQL projection and is independently metered on every call and retry. hot excludes records without heatScore and sorts by heatScore, effective sort time and id; latest sorts by effective sort time, collectedAt and id. Effective sort time is publishedAt when present, otherwise collectedAt; this fallback is not exposed as publishedAt. For formal rows, from/to retain the existing publishedAt semantics and exclude an undated row. For candidate rows only, an absent publishedAt uses collectedAt for the bounded window so an explicitly requested audit candidate remains reachable. Both orders use a signed keyset cursor bound to candidate visibility controls. Only the documented customer-safe item allowlist is returned; raw rows, upstream provider identities, strategy/run ids, source coordinates, extensions, model reasoning and lineage remain private.',
         'x-mx-error-codes': {
-          400: ['invalid_province', 'invalid_request', 'invalid_sort', 'page_size_exceeded', 'invalid_cursor', 'unsupported_fields'],
+          400: ['invalid_province', 'invalid_request', 'invalid_sort', 'page_size_exceeded', 'invalid_cursor', 'unsupported_fields', 'candidate_scope_required'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
           429: ['quota_exceeded'],
@@ -540,25 +627,52 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         },
       },
     },
+    '/data/public-opinion/province-coverage': {
+      get: {
+        tags: ['Public Opinion'],
+        operationId: 'getPublicOpinionProvinceCoverage',
+        summary: 'Compare public-opinion availability across every province',
+        description: 'Requires the public_opinion platform grant, valid Hub serving indexes and an explicit from/to window. The default remains formal-only. includeCandidates=qualified adds Hub-qualified candidates at or above minQualityScore (default 80); includeCandidates=all includes all candidates, optionally narrowed by an explicit minQualityScore. Formal rows use publishedAt for the window; undated candidates use collectedAt. targetPerProvince defaults to 10 and affects only shortfall/meetsTarget calculations. featuredProvinceCodes contains at most eight provinces ranked by available count and average quality; provinces always contains the full stable province taxonomy. Counts and scores are Hub-owned publication metadata. Upstream raw rows, provider names, endpoint ids, credentials, strategy/run ids, source coordinates, extensions, reasoning and lineage remain private.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable', 'serving_indexes_unavailable'],
+        },
+        parameters: publicOpinionCoverageParameters,
+        responses: {
+          200: publicOpinionCoverageResponse,
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          429: errorResponse,
+          503: errorResponse,
+        },
+      },
+    },
     '/data/public-opinion/items/{id}': {
       get: {
         tags: ['Public Opinion'],
         operationId: 'getPublicOpinionItem',
         summary: 'Get one customer-safe public-opinion item',
-        description: 'Requires the public_opinion platform grant. id is the Hub canonical UUID returned by the province feed or canonical search. The lookup is fixed to platform public_opinion, dataset public-opinion.province.v1 and object type opinion_item; deleted or out-of-scope records are returned as item_not_found. This safe GET is independently metered on every call and retry.',
+        description: 'Requires the public_opinion platform grant. id is the Hub canonical UUID returned by the province feed or canonical search. By default includeCandidates=false looks only in the formal corpus and preserves the existing response. includeCandidates=qualified or all may resolve a candidate meeting minQualityScore; because the id is exact, this detail route does not require a time window. The lookup remains fixed to Hub-owned public-opinion corpora; deleted, below-threshold or out-of-scope records are returned as item_not_found. This safe GET is independently metered on every call and retry. Only the documented allowlist is returned; upstream raw and operational coordinates remain private.',
         'x-mx-error-codes': {
-          400: ['invalid_request'],
+          400: ['invalid_request', 'unsupported_fields'],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted'],
           404: ['item_not_found'],
           429: ['quota_exceeded'],
           503: ['stored_data_unavailable'],
         },
-        parameters: [{
-          name: 'id', in: 'path', required: true,
-          description: 'Canonical UUID from a public-opinion list or canonical-search result.',
-          schema: { type: 'string', format: 'uuid' },
-        }],
+        parameters: [
+          {
+            name: 'id', in: 'path', required: true,
+            description: 'Canonical UUID from a public-opinion list or canonical-search result.',
+            schema: { type: 'string', format: 'uuid' },
+          },
+          ...publicOpinionCandidateParameters,
+        ],
         responses: {
           200: publicOpinionItemResponse,
           400: errorResponse,
@@ -868,6 +982,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           query: { type: 'string', minLength: 1, maxLength: 500 },
           datasetId: { type: 'string', minLength: 1, maxLength: 200, description: 'Optional exact logical dataset filter; not a physical database or authorization grant.' },
           objectType: { type: 'string', minLength: 1, maxLength: 100, description: 'Optional exact canonical object-type filter.' },
+          ...publicOpinionSearchRequestProperties,
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed opaque nextCursor bound to the normalized query and filters.' },
           type: resultTypeProperty,
@@ -882,6 +997,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           platform: { type: 'string', minLength: 1, maxLength: 64, description: 'Optional exact platform filter. It must already be granted; omit it to search every currently granted platform.' },
           datasetId: { type: 'string', minLength: 1, maxLength: 200, description: 'Optional exact logical dataset filter; never a physical source selector or authorization grant.' },
           objectType: { type: 'string', minLength: 1, maxLength: 100, description: 'Optional exact canonical object-type filter.' },
+          ...publicOpinionSearchRequestProperties,
           searchProfile: {
             type: 'string',
             enum: PUBLIC_SEARCH_PROFILE_IDS,
@@ -1005,6 +1121,39 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           eventTime: { type: ['string', 'null'], format: 'date-time' },
           collectedAt: { type: ['string', 'null'], format: 'date-time' },
           score: { type: ['number', 'null'] }, source: { type: 'string', const: 'hub' },
+          quality: { $ref: '#/components/schemas/PublicOpinionSearchQuality' },
+          location: { $ref: '#/components/schemas/PublicOpinionSearchLocation' },
+        },
+      },
+      PublicOpinionSearchQuality: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['stage', 'status', 'score', 'geographyVerified'],
+        description: 'Bounded Hub publication metadata returned only for explicit public_opinion candidate searches.',
+        properties: {
+          stage: { type: ['string', 'null'], enum: ['formal', 'candidate', null] },
+          status: {
+            type: ['string', 'null'],
+            enum: ['formal', 'pending', 'qualified', 'rejected', 'failed', null],
+          },
+          score: { type: ['number', 'null'], minimum: 0, maximum: 100 },
+          geographyVerified: { type: 'boolean' },
+        },
+      },
+      PublicOpinionSearchLocation: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['provinceCode', 'label', 'type', 'country', 'countryCode'],
+        description: 'Bounded Hub-normalized location returned only for explicit public_opinion candidate searches.',
+        properties: {
+          provinceCode: { type: ['string', 'null'] },
+          label: { type: ['string', 'null'] },
+          type: {
+            type: ['string', 'null'],
+            enum: ['province', 'country', 'region', 'city', 'maritime', 'unknown', null],
+          },
+          country: { type: ['string', 'null'] },
+          countryCode: { type: ['string', 'null'], pattern: '^[A-Z]{2}$' },
         },
       },
       StoredSearchPageInfo: {
@@ -1048,6 +1197,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
               source: { type: 'string', const: 'hub' }, query: { type: 'string' },
               filters: { type: 'object', additionalProperties: false, required: ['platform', 'datasetId', 'objectType'], properties: {
                 platform: { type: 'string' }, datasetId: { type: ['string', 'null'] }, objectType: { type: ['string', 'null'] },
+                ...publicOpinionSearchFilterProperties,
               } },
               items: { type: 'array', items: { $ref: '#/components/schemas/StoredSearchItem' } },
               pageInfo: { $ref: '#/components/schemas/StoredSearchPageInfo' },
@@ -1084,6 +1234,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   platform: { type: ['string', 'null'] },
                   datasetId: { type: ['string', 'null'] },
                   objectType: { type: ['string', 'null'] },
+                  ...publicOpinionSearchFilterProperties,
                 },
               },
               search: {
@@ -1239,6 +1390,38 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           platform: { type: ['string', 'null'], description: 'Reviewed originating content platform, distinct from the public_opinion authorization platform.' },
         },
       },
+      PublicOpinionQuality: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['stage', 'status', 'score', 'threshold', 'geographyVerified'],
+        description: 'Hub-owned publication metadata returned only when candidate visibility is explicitly enabled.',
+        properties: {
+          stage: { type: 'string', enum: ['formal', 'candidate'] },
+          status: { type: 'string', enum: ['formal', 'pending', 'qualified', 'rejected', 'failed'] },
+          score: { type: ['number', 'null'], minimum: 0, maximum: 100 },
+          threshold: { type: ['number', 'null'], minimum: 0, maximum: 100 },
+          geographyVerified: { type: 'boolean' },
+        },
+      },
+      PublicOpinionLocation: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['label', 'type', 'country', 'countryCode', 'geoScope'],
+        description: 'Hub-normalized event location returned only with explicit candidate visibility when location evidence is available.',
+        properties: {
+          label: { type: ['string', 'null'] },
+          type: {
+            type: ['string', 'null'],
+            enum: ['province', 'country', 'region', 'city', 'maritime', 'unknown', null],
+          },
+          country: { type: ['string', 'null'] },
+          countryCode: { type: ['string', 'null'] },
+          geoScope: {
+            type: ['string', 'null'],
+            enum: ['province', 'multi_province', 'national', 'maritime', 'overseas', 'unknown', null],
+          },
+        },
+      },
       PublicOpinionItem: {
         type: 'object',
         additionalProperties: false,
@@ -1259,6 +1442,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
           heatScore: { type: ['number', 'null'], description: 'Typed source heat score. It is used only by the province hot ordering and is not a cross-source relevance score.' },
           origin: { $ref: '#/components/schemas/PublicOpinionOrigin' },
+          quality: { $ref: '#/components/schemas/PublicOpinionQuality' },
+          location: { $ref: '#/components/schemas/PublicOpinionLocation' },
         },
       },
       PublicOpinionPageInfo: {
@@ -1301,6 +1486,77 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         required: ['data', 'requestId'],
         properties: {
           data: { $ref: '#/components/schemas/PublicOpinionItem' },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      PublicOpinionCoverageProvince: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'province', 'formalCount', 'qualifiedCandidateCount', 'candidateCount',
+          'qualifiedCandidateRate', 'verifiedCount', 'verifiedRate',
+          'availableCount', 'shortfall', 'meetsTarget', 'averageQualityScore',
+        ],
+        properties: {
+          province: { $ref: '#/components/schemas/PublicOpinionProvince' },
+          formalCount: { type: 'integer', minimum: 0 },
+          qualifiedCandidateCount: { type: 'integer', minimum: 0 },
+          candidateCount: { type: 'integer', minimum: 0 },
+          qualifiedCandidateRate: { type: ['number', 'null'], minimum: 0, maximum: 1 },
+          verifiedCount: { type: 'integer', minimum: 0 },
+          verifiedRate: { type: ['number', 'null'], minimum: 0, maximum: 1 },
+          availableCount: { type: 'integer', minimum: 0 },
+          shortfall: { type: 'integer', minimum: 0 },
+          meetsTarget: { type: 'boolean' },
+          averageQualityScore: { type: ['number', 'null'], minimum: 0, maximum: 100 },
+        },
+      },
+      PublicOpinionCoverageTotals: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['provinceCount', 'availableCount', 'provincesMeetingTarget', 'totalShortfall'],
+        properties: {
+          provinceCount: { type: 'integer', minimum: 0, maximum: 34 },
+          availableCount: { type: 'integer', minimum: 0 },
+          provincesMeetingTarget: { type: 'integer', minimum: 0, maximum: 34 },
+          totalShortfall: { type: 'integer', minimum: 0 },
+        },
+      },
+      PublicOpinionCoverageEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object',
+            additionalProperties: false,
+            required: [
+              'contractVersion', 'from', 'to', 'includeCandidates', 'minQualityScore',
+              'targetPerProvince', 'featuredProvinceCodes', 'totals', 'provinces',
+            ],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.public-opinion.coverage.v1' },
+              from: { type: 'string', format: 'date-time' },
+              to: { type: 'string', format: 'date-time' },
+              includeCandidates: {
+                oneOf: [
+                  { type: 'boolean', const: false },
+                  { type: 'string', enum: ['qualified', 'all'] },
+                ],
+              },
+              minQualityScore: { type: ['integer', 'null'], minimum: 0, maximum: 100 },
+              targetPerProvince: { type: 'integer', minimum: 1, maximum: 100 },
+              featuredProvinceCodes: {
+                type: 'array', maxItems: 8, uniqueItems: true,
+                items: { type: 'string', pattern: '^CN-[A-Z]{2}$' },
+              },
+              totals: { $ref: '#/components/schemas/PublicOpinionCoverageTotals' },
+              provinces: {
+                type: 'array', maxItems: 34,
+                items: { $ref: '#/components/schemas/PublicOpinionCoverageProvince' },
+              },
+            },
+          },
           requestId: { type: 'string', minLength: 1 },
         },
       },
@@ -1588,6 +1844,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
     <h3>幂等、游标与配额</h3>
     <table><thead><tr><th>规则</th><th>客户端行为</th></tr></thead><tbody>
       <tr><td>POST 搜索</td><td><code>Idempotency-Key</code> 在同一 consumer 内全局唯一。仅在重试完全相同的路径和规范化 body 时复用；新路径、新 body 或新页面必须使用新 Key。</td></tr>
+      <tr><td>舆情可见性契约升级</td><td>可命中 <code>public_opinion</code> 的 stored/canonical 搜索会把 formal/candidate 可见性契约写入幂等指纹。升级后不要复用升级前的 Key；请生成新 Key。旧 Key 会返回 <code>409 idempotency_conflict</code>，不会回放升级前可能未门禁的响应。</td></tr>
       <tr><td>结果新鲜度</td><td>可选 <code>type</code>：<code>fresh</code>（默认）表示始终检索当前数据，重放窗口为 120 秒，足以吸收一次重试而不会把 Key 变成缓存；<code>stable</code> 表示同一个 Key 永久返回首次的结果，用于报表、分页序列和审计等需要快照可复现的场景。<code>type</code> 参与请求指纹，同一个 Key 不能在两种语义之间切换。</td></tr>
       <tr><td>POST 分词</td><td>同样必须携带 <code>Idempotency-Key</code>；相同请求重放不会再次分词或重复计量。</td></tr>
       <tr><td>下一页</td><td>使用响应中的 <code>pageInfo.nextCursor</code>，不要解析或修改；因为 body 已变化，新页面必须使用新的幂等 Key。</td></tr>
@@ -1624,6 +1881,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -d '{"platform":"xiaohongshu","query":"AI Agent","datasetId":"night-all.search.v1","objectType":"post","pageSize":20}' | jq</code></pre>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/canonical/search</code></div><p>来源无关的统一检索：在一份 canonical 全局索引中直接排序，不逐个调用来源后拼接。省略 <code>platform</code> 时搜索当前调用者已授权的全部平台；<code>datasetId</code> 与 <code>objectType</code> 只用于收窄。可用 <code>searchProfile</code> 选择版本化搜索策略；不接受任意 analyzer、tokenizer、filter 或 ES DSL。</p></div>
     <div class="notice">统一接口只读取 Hub 已存数据，不触发第三方采集。响应的 <code>scope.platforms</code> 是本次实际授权范围；游标与该范围及首屏分词状态绑定，后续页不会再次调用 HanLP。授权或 profile 发生变化后应从第一页重新搜索。独立的 canonical-search 用量桶固定采用调用者当前全部平台授权中最严格的限额。</div>
+    <div class="notice"><strong>public_opinion 可见性：</strong>stored/canonical 搜索默认只返回 <code>sourceStage=formal</code> 且 <code>status=formal</code> 的舆情记录；混合平台搜索只门禁 <code>public_opinion</code> 分支，其他平台不受影响。候选查询必须显式指定 <code>platform=public_opinion</code>。<code>includeCandidates=qualified</code> 默认质量阈值为 80；<code>includeCandidates=all</code> 必须同时提供 <code>from</code>、<code>to</code>，并至少提供 <code>province</code>、<code>countryCode</code> 或 <code>location</code> 之一。候选时间窗按 <code>eventTime</code>，缺失时回退 <code>collectedAt</code>；formal 仍只按 <code>eventTime</code>。显式候选响应只增加有界 <code>quality</code>/<code>location</code>，且不返回候选 author、contentType、provider、raw、flags 或内部理由。</div>
     <table><thead><tr><th>searchProfile</th><th>查询策略</th></tr></thead><tbody>
       <tr><td><code>canonical.balanced.v1</code>（默认）</td><td>HanLP 健康时使用“原文 phrase 或全部 HanLP/presegmented 词命中（AND）”；若分词降级到 Jieba/bigram，则明确应用 phrase-only，绝不拿 fallback 词误查 HanLP 字段。</td></tr>
       <tr><td><code>canonical.phrase.v1</code></td><td>只匹配保持语序的原文 phrase，精度优先。</td></tr>
@@ -1636,6 +1894,11 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: canonical-$(uuidgen)" \
   -d '{"query":"AI Agent","searchProfile":"canonical.balanced.v1","pageSize":20}' | jq</code></pre>
+    <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/canonical/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: public-opinion-audit-$(uuidgen)" \
+  -d '{"platform":"public_opinion","query":"涉恐","includeCandidates":"all","countryCode":"SS","location":"南苏丹","from":"2026-08-24T00:00:00Z","to":"2026-08-25T23:59:59Z","pageSize":20}' | jq</code></pre>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/canonical/items/{id}/context?before=10&amp;after=10</code></div><p>对 Telegram 消息搜索结果的 canonical UUID 读取同一 dataset、同一 chat 的邻近已存消息。默认前后各 10 条，单侧上限 50；返回一个升序 <code>items</code> 列表，<code>anchorIndex</code> 指向命中项。</p></div>
     <div class="notice"><code>storedWindow.hasMoreStoredBefore/After</code> 只描述 Hub PostgreSQL 当前是否还有记录；<code>upstreamCompleteness</code> 单独描述有持久证据支持的上游采集完整性。两者不能互相推导。</div>
     <pre><code>ANCHOR_ID="&lt;canonical-search-item-id&gt;"
@@ -1650,21 +1913,28 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
   "ready": true,
   "source": "hub",
   "servingMode": "stored",
-  "capabilities": ["province_feed", "item_detail", "stored_search"]
+  "capabilities": ["province_feed", "province_coverage", "item_detail", "stored_search"]
 }</code></pre>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/public-opinion/provinces/{province}/items</code></div><p>按省份返回热门或最新条目。<code>province</code> 接受 ISO 3166-2:CN 代码、中文简称或正式名称，例如 <code>CN-JS</code>、<code>江苏</code>、<code>江苏省</code>；中文路径值需要 URL 编码。</p></div>
     <table><thead><tr><th>参数</th><th>规则</th></tr></thead><tbody>
       <tr><td><code>sort</code></td><td><code>hot</code>（默认）按 heatScore、内部有效排序时间、ID 降序，且排除无热度分数的记录；<code>latest</code> 按有效排序时间、采集时间、ID 降序。有效排序时间优先 publishedAt，缺失时回退 collectedAt，但不会把回退值冒充 publishedAt 返回。</td></tr>
-      <tr><td><code>from / to</code></td><td>可选 RFC3339 publishedAt 闭区间；<code>from</code> 不得晚于 <code>to</code>，带边界的请求会排除 publishedAt 为空的记录。</td></tr>
+      <tr><td><code>from / to</code></td><td>可选 RFC3339 闭区间；formal 记录继续按 publishedAt 过滤并排除无日期记录。只有显式候选模式下，候选缺少 publishedAt 时才用 collectedAt 参与窗口过滤，返回时仍保持 publishedAt 为空。</td></tr>
+      <tr><td><code>includeCandidates</code></td><td>默认 <code>false</code>，保持原 formal-only 契约。<code>qualified</code>（或 <code>true</code>）加入达到质量阈值的候选；<code>all</code> 是显式审计视图，必须同时提供 <code>from</code> 与 <code>to</code>。</td></tr>
+      <tr><td><code>minQualityScore</code></td><td>仅可与候选模式一起使用，范围 0–100；<code>qualified</code> 默认 80。</td></tr>
       <tr><td><code>pageSize</code></td><td>默认 20，接口上限 100，并受调用者 <code>public_opinion</code> 平台策略的更低上限约束。</td></tr>
       <tr><td><code>cursor</code></td><td>返回上一页的 <code>nextCursor</code> 原值。游标与省份、排序、时间范围及页大小绑定；任一条件改变都必须从第一页开始。</td></tr>
     </tbody></table>
     <pre><code>curl -sS "$HUB_URL/api/v1/data/public-opinion/provinces/CN-JS/items?sort=hot&amp;pageSize=20" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/public-opinion/items/{id}</code></div><p>用列表或 canonical search 返回的 Hub canonical UUID 读取详情。查询固定限定在 <code>public_opinion</code>、<code>public-opinion.province.v1</code>、<code>opinion_item</code>；不存在、已删除或不在该语料范围内的记录统一返回 <code>404 item_not_found</code>。</p></div>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/public-opinion/provinces/CN-JS/items?sort=latest&amp;includeCandidates=qualified&amp;minQualityScore=80&amp;from=2026-08-24T00%3A00%3A00Z&amp;to=2026-08-25T23%3A59%3A59Z" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/public-opinion/province-coverage</code></div><p>在明确的 <code>from/to</code> 时间窗内返回全部省级地区的 formal、qualified candidate、全部 candidate、地理已验证和可用数量，并按默认每省 10 条目标计算缺口。formal 按 publishedAt 统计，候选缺日期时按 collectedAt 统计。<code>featuredProvinceCodes</code> 只给出最多 8 个数据较充足的热门省份；<code>provinces</code> 始终返回完整地区列表，适合界面折叠展示其余省份。</p></div>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/public-opinion/province-coverage?from=2026-08-24T00%3A00%3A00Z&amp;to=2026-08-25T23%3A59%3A59Z&amp;includeCandidates=qualified&amp;minQualityScore=80&amp;targetPerProvince=10" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/public-opinion/items/{id}</code></div><p>用列表或 canonical search 返回的 Hub canonical UUID 读取详情。默认只查 formal；若 ID 来自显式候选列表，详情请求需携带相同的 <code>includeCandidates</code> 与 <code>minQualityScore</code>。精确 ID 查询不要求时间窗；不存在、低于阈值、已删除或不在公开语料范围内的记录统一返回 <code>404 item_not_found</code>。</p></div>
     <pre><code>curl -sS "$HUB_URL/api/v1/data/public-opinion/items/11111111-1111-4111-8111-111111111111" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
-    <p>列表与详情只返回 <code>id</code>、标题、摘要、公开链接、发布时间、采集时间、规范省份、heatScore，以及经映射的公开来源名称/类型/平台。策略与运行 ID、源表坐标、原始行、extensions、模型理由和内部 lineage 不会进入公开响应。原始 heatScore 仅用于同一省级语料的热门排序，不表示跨来源的全局相关度。</p>
+    <p>默认列表与详情继续只返回 <code>id</code>、标题、摘要、公开链接、发布时间、采集时间、规范省份、heatScore，以及经映射的公开来源名称/类型/平台。显式候选模式额外返回 Hub 自有的 <code>quality</code>，以及有证据时的规范 <code>location</code>；候选来源三元组保持为空，避免把搜索引擎或上游 Provider 身份当作发布方公开。上游原始行、凭据与内部操作坐标，策略与运行 ID、源表坐标、extensions、模型理由和内部 lineage 均不会进入公开响应。原始 heatScore 仅用于同一省级语料的热门排序，不表示跨来源的全局相关度。</p>
 
     <h2 id="night-all">Night-All 兼容层</h2>
     <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面三条 compatibility route；请使用本页 Telegram 专用 Hub API。</div>

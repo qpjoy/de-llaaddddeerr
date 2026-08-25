@@ -175,9 +175,9 @@ current index 可直接从 PG canonical current state 重建。
 索引命名建议：
 
 ```text
-mx-insight-hub-content-v4-current  current concrete index
+mx-insight-hub-content-v5-current  current concrete index
 mx-insight-hub-content             read alias
-mx-insight-hub-content-v4          compatible write alias
+mx-insight-hub-content-v5          compatible write alias
 
 mx-insight-hub-chunk-v1-current    semantic current concrete index
 mx-insight-hub-chunk               read alias
@@ -201,10 +201,13 @@ version 使用 `keyword`；正文使用 `text`；经纬度使用 `geo_point`；�
 大小，以及 entity type/user/url 都是有界的 typed fields。源 JSON 仍只以 PG raw
 副本为权威，不允许 ES dynamic mapping 猜字段。
 
-content v4 是仓库为下一次全文能力升级声明的 schema，而不是对已部署 v3 mapping
-的原位改义。任何仍由 v3 alias 服务的环境都必须完成严格重建后才算升级。v4
-预先建立一组有界、职责单一的词项视图，使大部分后续相关性调整只改变查询
-profile：
+content v4 建立了有界、职责单一的词项视图，使大部分相关性调整只改变查询
+profile；它仍是既有 named profiles 的最低兼容 schema。当前 content v5 不是对 v4
+mapping 的原位改义：它增加 revision-fenced 的 `publication` 对象，包含 stage、
+status、quality score、展示省份、地理核验、候选 effective time 及有界 location/
+country exact fields。任何仍由 v4 alias 服务的环境都必须完成严格全量重建和原子
+alias 切换后，ES 才能执行 public-opinion visibility；切换前首屏请求由 PG fallback
+继续服务，旧 v4 PIT 不会跨 schema 续页。
 
 | 逻辑视图 | index-time 表示 | 查询用途与边界 |
 | --- | --- | --- |

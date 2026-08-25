@@ -1,16 +1,22 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { normalizeChinaProvince } from './china-provinces.mjs'
 import {
   DEFAULT_SEARCH_PROFILE,
   POSTGRES_SEARCH_PROFILE,
   resolveSearchProfile,
 } from '../search/profiles.mjs'
 
+const PUBLIC_OPINION_PLATFORM = 'public_opinion'
+const PUBLIC_OPINION_SEARCH_FIELDS = [
+  'countryCode', 'from', 'includeCandidates', 'location', 'minQualityScore', 'province', 'to',
+]
 const STORED_ALLOWED_FIELDS = new Set([
   // `type` selects result freshness and is consumed by the service layer; it is
   // accepted here so a strict body check does not reject it, and deliberately
   // excluded from the normalized query, which describes only what to search.
   'cursor', 'datasetId', 'objectType', 'pageSize', 'platform', 'query', 'type',
+  ...PUBLIC_OPINION_SEARCH_FIELDS,
 ])
 const CANONICAL_ALLOWED_FIELDS = new Set([...STORED_ALLOWED_FIELDS, 'searchProfile', 'sort'])
 // `id` terminates every ordering, so all three are total and page deterministically.
@@ -20,11 +26,129 @@ const SORT_VERSION = 'score-eventTime-id-sharddoc-or-eventTime-id-v2'
 const OPAQUE_EXTERNAL_ID_PLATFORMS = new Set(['public_opinion'])
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const PUBLIC_METRICS = ['likes', 'comments', 'shares', 'views', 'bookmarks', 'members']
+const PUBLICATION_STAGES = new Set(['formal', 'candidate'])
+const PUBLICATION_STATUSES = new Set(['formal', 'pending', 'qualified', 'rejected', 'failed'])
+const PUBLICATION_LOCATION_TYPES = new Set(['province', 'country', 'region', 'city', 'maritime', 'unknown'])
 const SEARCH_ANALYSIS_STATE_VERSION = 1
 const SEARCH_ANALYSIS_BACKENDS = new Set(['hanlp', 'jieba', 'bigram'])
 const SEARCH_ANALYSIS_MAX_TOKENS = 512
 const SEARCH_ANALYSIS_MAX_TOKEN_LENGTH = 512
 const SEARCH_ANALYSIS_MAX_TOTAL_LENGTH = 2_048
+const ISO_DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/
+
+function timestampValue(value, field) {
+  if (value == null) return null
+  if (typeof value !== 'string' || !ISO_DATE_TIME_PATTERN.test(value)) {
+    throw new AppError(400, 'invalid_request', `${field} must be an ISO date-time`)
+  }
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    throw new AppError(400, 'invalid_request', `${field} must be an ISO date-time`)
+  }
+  return parsed.toISOString()
+}
+
+function qualityScoreValue(value, candidateMode) {
+  if (value == null) return candidateMode === 'qualified' ? 80 : null
+  if (!Number.isInteger(value) || value < 0 || value > 100) {
+    throw new AppError(400, 'invalid_request', 'minQualityScore must be an integer between 0 and 100')
+  }
+  if (candidateMode === 'formal') {
+    throw new AppError(
+      400,
+      'invalid_request',
+      'minQualityScore requires includeCandidates=qualified or all',
+    )
+  }
+  return value
+}
+
+function publicOpinionVisibility(input, platform) {
+  const explicit = PUBLIC_OPINION_SEARCH_FIELDS.some((field) => Object.hasOwn(input, field))
+  if (explicit && platform !== PUBLIC_OPINION_PLATFORM) {
+    throw new AppError(
+      400,
+      'invalid_request',
+      'Public-opinion search filters require explicit platform=public_opinion',
+    )
+  }
+
+  let candidateMode = 'formal'
+  if (input.includeCandidates != null) {
+    candidateMode = String(input.includeCandidates).trim().toLowerCase()
+    if (candidateMode !== 'qualified' && candidateMode !== 'all') {
+      throw new AppError(400, 'invalid_request', 'includeCandidates must be qualified or all')
+    }
+  }
+  const province = input.province == null ? null : normalizeChinaProvince(input.province)
+  if (input.province != null && !province) {
+    throw new AppError(
+      400,
+      'invalid_province',
+      'province must be a supported ISO 3166-2:CN code or province name',
+    )
+  }
+  let countryCode = null
+  if (input.countryCode != null) {
+    if (typeof input.countryCode !== 'string' || !/^[A-Za-z]{2}$/.test(input.countryCode.trim())) {
+      throw new AppError(400, 'invalid_request', 'countryCode must be an ISO alpha-2 country code')
+    }
+    countryCode = input.countryCode.trim().toUpperCase()
+  }
+  const location = input.location == null
+    ? null
+    : stringValue(input.location, 'location', 160)
+  const from = timestampValue(input.from, 'from')
+  const to = timestampValue(input.to, 'to')
+  if (from && to && from > to) {
+    throw new AppError(400, 'invalid_request', 'from must not be later than to')
+  }
+  const minQualityScore = qualityScoreValue(input.minQualityScore, candidateMode)
+  if (candidateMode === 'all' && (!from || !to || !(province || countryCode || location))) {
+    throw new AppError(
+      400,
+      'candidate_scope_required',
+      'includeCandidates=all requires from, to and at least one of province, countryCode or location',
+    )
+  }
+  return {
+    candidateMode,
+    minQualityScore,
+    provinceCode: province?.code ?? null,
+    countryCode,
+    location,
+    from,
+    to,
+    explicit,
+  }
+}
+
+function withPublicOpinionBinding(binding, visibility) {
+  if (!visibility?.explicit) return binding
+  return {
+    ...binding,
+    includeCandidates: visibility.candidateMode === 'formal' ? false : visibility.candidateMode,
+    minQualityScore: visibility.minQualityScore,
+    province: visibility.provinceCode,
+    countryCode: visibility.countryCode,
+    location: visibility.location,
+    from: visibility.from,
+    to: visibility.to,
+  }
+}
+
+function publicOpinionResponseFilters(visibility) {
+  if (!visibility?.explicit) return {}
+  return {
+    includeCandidates: visibility.candidateMode === 'formal' ? false : visibility.candidateMode,
+    minQualityScore: visibility.minQualityScore,
+    province: visibility.provinceCode,
+    countryCode: visibility.countryCode,
+    location: visibility.location,
+    from: visibility.from,
+    to: visibility.to,
+  }
+}
 
 function stringValue(value, field, maxLength, { required = false } = {}) {
   if (value == null) {
@@ -54,7 +178,7 @@ function pageSizeValue(value, maxPageSize) {
 
 function queryBinding(query) {
   return createHash('sha256')
-    .update(JSON.stringify({
+    .update(JSON.stringify(withPublicOpinionBinding({
       v: CURSOR_VERSION,
       sort: SORT_VERSION,
       query: query.query,
@@ -62,13 +186,13 @@ function queryBinding(query) {
       datasetId: query.datasetId,
       objectType: query.objectType,
       pageSize: query.pageSize,
-    }))
+    }, query.publicOpinionVisibility)))
     .digest('base64url')
 }
 
 function canonicalQueryBinding(query) {
   return createHash('sha256')
-    .update(JSON.stringify({
+    .update(JSON.stringify(withPublicOpinionBinding({
       v: CURSOR_VERSION,
       sort: SORT_VERSION,
       query: query.query,
@@ -82,7 +206,7 @@ function canonicalQueryBinding(query) {
       // let a caller flip the order and keep paging from a position computed
       // under the previous one, silently skipping and repeating rows.
       requestedSort: query.sort,
-    }))
+    }, query.publicOpinionVisibility)))
     .digest('base64url')
 }
 
@@ -139,7 +263,11 @@ function validSearchAfter(mode, value) {
 function validSearchAnalysisState(mode, value) {
   if (mode === 'postgres') return value === null
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  if (Object.keys(value).sort().join(',') !== 'appliedProfile,backendUsed,degraded,errorCode,tokens,v') {
+  const keys = Object.keys(value).sort().join(',')
+  if (
+    keys !== 'appliedProfile,backendUsed,degraded,errorCode,tokens,v' &&
+    keys !== 'appliedProfile,backendUsed,degraded,errorCode,indexSchema,tokens,v'
+  ) {
     return false
   }
   if (
@@ -150,6 +278,9 @@ function validSearchAnalysisState(mode, value) {
     typeof value.degraded !== 'boolean' ||
     !(value.backendUsed === null || SEARCH_ANALYSIS_BACKENDS.has(value.backendUsed)) ||
     !(value.errorCode === null || (typeof value.errorCode === 'string' && value.errorCode.length <= 64)) ||
+    !(value.indexSchema === undefined || (
+      typeof value.indexSchema === 'string' && /^content-v\d+$/.test(value.indexSchema)
+    )) ||
     !Array.isArray(value.tokens) ||
     value.tokens.length > SEARCH_ANALYSIS_MAX_TOKENS
   ) {
@@ -246,12 +377,14 @@ export function normalizeStoredSearchQuery(input, maxPageSize = 100, cursorSecre
     throw new AppError(400, 'unsupported_fields', `Unsupported stored search fields: ${unsupported.join(', ')}`)
   }
   const validPolicyMax = Number.isInteger(maxPageSize) && maxPageSize > 0 ? maxPageSize : 100
+  const platform = stringValue(input.platform, 'platform', 64, { required: true })
   const normalized = {
     query: stringValue(input.query, 'query', 500, { required: true }),
-    platform: stringValue(input.platform, 'platform', 64, { required: true }),
+    platform,
     datasetId: stringValue(input.datasetId, 'datasetId', 200),
     objectType: stringValue(input.objectType, 'objectType', 100),
     pageSize: pageSizeValue(input.pageSize, Math.min(100, validPolicyMax)),
+    publicOpinionVisibility: publicOpinionVisibility(input, platform),
   }
   const cursorBinding = queryBinding(normalized)
   const cursorToken = stringValue(input.cursor, 'cursor', 8_192)
@@ -300,6 +433,7 @@ export function normalizeCanonicalSearchQuery(input, {
       { audience: 'public' },
     ).id,
     sort: sortValue(input.sort),
+    publicOpinionVisibility: publicOpinionVisibility(input, platform),
   }
   const cursorBinding = canonicalQueryBinding(normalized)
   const cursorToken = stringValue(input.cursor, 'cursor', 8_192)
@@ -324,34 +458,73 @@ function publicMetrics(metrics) {
   }))
 }
 
-export function publicStoredSearchItem(row) {
+function publicCandidateMetadata(publication) {
+  const stage = PUBLICATION_STAGES.has(publication?.stage) ? publication.stage : null
+  const status = PUBLICATION_STATUSES.has(publication?.status) ? publication.status : null
+  const score = publication?.qualityScore == null ? null : Number(publication.qualityScore)
+  const text = (value) => {
+    if (typeof value !== 'string') return null
+    const normalized = value.trim()
+    return normalized && normalized.length <= 256 ? normalized : null
+  }
+  const countryCode = text(publication?.countryCode)?.toUpperCase() ?? null
   return {
+    quality: {
+      stage,
+      status,
+      score: score != null && Number.isFinite(score) && score >= 0 && score <= 100 ? score : null,
+      geographyVerified: publication?.geographyVerified === true,
+    },
+    location: {
+      provinceCode: text(publication?.displayAdmin1),
+      label: text(publication?.locationLabel),
+      type: PUBLICATION_LOCATION_TYPES.has(publication?.locationType)
+        ? publication.locationType
+        : null,
+      country: text(publication?.countryName),
+      countryCode: countryCode && /^[A-Z]{2}$/.test(countryCode) ? countryCode : null,
+    },
+  }
+}
+
+export function publicStoredSearchItem(row, { includeCandidateMetadata = false } = {}) {
+  const suppressCandidateIdentity = includeCandidateMetadata || row.publication?.stage === 'candidate'
+  const item = {
     id: row.id,
     datasetId: row.datasetId,
     platform: row.platform,
     objectType: row.objectType,
-    contentType: row.contentType ?? null,
+    ...(!suppressCandidateIdentity ? { contentType: row.contentType ?? null } : {}),
     // Preserve the generic item shape without exposing the upstream table row
     // identifier for corpora whose source coordinates are private evidence.
     externalId: OPAQUE_EXTERNAL_ID_PLATFORMS.has(row.platform) ? row.id : row.externalId,
     url: row.url ?? null,
     title: row.title ?? null,
     text: row.body ?? null,
-    author: {
-      id: row.authorExternalId ?? null,
-      name: row.authorName ?? null,
-      username: row.authorHandle ?? null,
-    },
+    ...(!suppressCandidateIdentity ? {
+      author: {
+        id: row.authorExternalId ?? null,
+        name: row.authorName ?? null,
+        username: row.authorHandle ?? null,
+      },
+    } : {}),
     metrics: publicMetrics(row.metrics),
     eventTime: isoDate(row.eventTime),
     collectedAt: isoDate(row.collectedAt),
     score: typeof row.score === 'number' && Number.isFinite(row.score) ? row.score : null,
     source: 'hub',
   }
+  return includeCandidateMetadata
+    ? { ...item, ...publicCandidateMetadata(row.publication) }
+    : item
 }
 
 export function storedSearchResponse({ query, result, durationMs, cursorSecret }) {
-  const items = (result.items || []).map(publicStoredSearchItem)
+  const includeCandidateMetadata = ['qualified', 'all']
+    .includes(query.publicOpinionVisibility?.candidateMode)
+  const items = (result.items || []).map((row) => (
+    publicStoredSearchItem(row, { includeCandidateMetadata })
+  ))
   const seen = query.cursor?.seen ?? 0
   const hasMore = Boolean(result.hasMore)
   const requestedProfile = result.searchExecution?.requestedProfile
@@ -381,6 +554,7 @@ export function storedSearchResponse({ query, result, durationMs, cursorSecret }
         platform: query.platform,
         datasetId: query.datasetId,
         objectType: query.objectType,
+        ...publicOpinionResponseFilters(query.publicOpinionVisibility),
       },
       items,
       pageInfo: {
@@ -405,7 +579,11 @@ export function storedSearchResponse({ query, result, durationMs, cursorSecret }
 }
 
 export function canonicalSearchResponse({ query, result, durationMs, cursorSecret }) {
-  const items = (result.items || []).map(publicStoredSearchItem)
+  const includeCandidateMetadata = ['qualified', 'all']
+    .includes(query.publicOpinionVisibility?.candidateMode)
+  const items = (result.items || []).map((row) => (
+    publicStoredSearchItem(row, { includeCandidateMetadata })
+  ))
   const seen = query.cursor?.seen ?? 0
   const hasMore = Boolean(result.hasMore)
   const totalCount = Number.isSafeInteger(result.total) && result.total >= 0 ? result.total : null
@@ -439,6 +617,7 @@ export function canonicalSearchResponse({ query, result, durationMs, cursorSecre
         platform: query.platform,
         datasetId: query.datasetId,
         objectType: query.objectType,
+        ...publicOpinionResponseFilters(query.publicOpinionVisibility),
       },
       search: {
         requestedProfile,

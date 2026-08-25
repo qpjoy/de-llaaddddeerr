@@ -16,7 +16,7 @@ flowchart LR
   OB --> PJ["mx-insight-hub-projector\n（独立 Deployment）"]
   PJ -->|"索引写入严格要求配置后端"| SEG["mx-common segmenter\n生产配置为 HanLP"]
   SEG --> PJ
-  PJ --> ES1["Elasticsearch current state\ncontent-v4-current"]
+  PJ --> ES1["Elasticsearch current state\ncontent-v5-current"]
   PG --> CH["record_chunks + durable chunk deletes"]
   CH --> EP["embedding/delete loop"]
   EP --> ES2["Elasticsearch current state\nchunk-v1-current"]
@@ -48,8 +48,8 @@ flowchart LR
 
 ```
 全文读别名     mx-insight-hub-content
-兼容写别名     mx-insight-hub-content-v4
-当前全文索引   mx-insight-hub-content-v4-current
+兼容写别名     mx-insight-hub-content-v5
+当前全文索引   mx-insight-hub-content-v5-current
 
 语义读别名     mx-insight-hub-chunk
 兼容写别名     mx-insight-hub-chunk-v1

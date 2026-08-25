@@ -115,7 +115,7 @@ function fakeDatabase({ dropLockSessionOnUpdate = null } = {}) {
 function healthySearch(pool) {
   return {
     pool,
-    indexSet: { schemaVersion: 4 },
+    indexSet: { schemaVersion: 5 },
     chunkIndexSet: null,
     client: { async clusterHealth() { return { status: 'yellow' } } },
     queries: {
@@ -163,7 +163,7 @@ test('Admin search reindex is durable single-flight work with progress and audit
   assert.ok(['queued', 'running'].includes(first.operation.status))
   assert.equal(first.preflight.projectorRequired, false)
   assert.equal(first.preflight.sourceIndexSchema, 'content-v3')
-  assert.equal(first.preflight.targetIndexSchema, 'content-v4')
+  assert.equal(first.preflight.targetIndexSchema, 'content-v5')
   await started
 
   const duplicate = await manager.start({ requestedBy: 'member-8', requestId: 'request-8' })
@@ -319,7 +319,7 @@ test('Admin reindex HTTP routes are admin-token-only and accept no execution par
     preflight: {
       ready: true, blockers: [], warnings: [], projectorRequired: false,
       projectorReadyReplicas: null, expectedBackend: 'hanlp',
-      sourceIndexSchema: 'content-v3', targetIndexSchema: 'content-v4',
+      sourceIndexSchema: 'content-v3', targetIndexSchema: 'content-v5',
     },
     operation: null,
   }
@@ -413,7 +413,7 @@ test('a reachable but degraded cluster warns instead of vetoing its own replacem
   assert.match(degraded.message, /unassigned_shards=6/)
   // The active schema is still read, so the operator can see what is replaced.
   assert.equal(preflight.sourceIndexSchema, 'content-v3')
-  assert.equal(preflight.targetIndexSchema, 'content-v4')
+  assert.equal(preflight.targetIndexSchema, 'content-v5')
 })
 
 test('an unreachable cluster is the only Elasticsearch condition that blocks', async () => {
@@ -450,13 +450,13 @@ test('losing the capability read degrades the schema display without blocking', 
 test('a target shard the cluster refuses to place blocks with the deciders that refused it', async () => {
   const { pool } = fakeDatabase()
   const search = healthySearch(pool)
-  search.indexSet = { schemaVersion: 4, currentIndex: 'mx-insight-hub-content-v4-current' }
+  search.indexSet = { schemaVersion: 5, currentIndex: 'mx-insight-hub-content-v5-current' }
   search.client.clusterHealth = async () => ({
     cluster_name: 'mx-common', status: 'red', number_of_nodes: 1, unassigned_shards: 1,
   })
   // The shape Elasticsearch actually returns when disk stops an allocation.
   search.client.allocationExplain = async ({ index, shard, primary }) => {
-    assert.equal(index, 'mx-insight-hub-content-v4-current')
+    assert.equal(index, 'mx-insight-hub-content-v5-current')
     assert.equal(shard, 0)
     assert.equal(primary, true)
     return {
@@ -485,7 +485,7 @@ test('a target shard the cluster refuses to place blocks with the deciders that 
   assert.equal(preflight.ready, false)
   const blocker = preflight.blockers.find((entry) => entry.code === 'search_index_unallocatable')
   assert.ok(blocker, 'the unallocatable target must block')
-  assert.match(blocker.message, /mx-insight-hub-content-v4-current shard 0/)
+  assert.match(blocker.message, /mx-insight-hub-content-v5-current shard 0/)
   // The two numbers that size the fix survive into the message.
   assert.match(blocker.message, /102\.3gb/)
   assert.match(blocker.message, /77\.5gb/)
@@ -583,12 +583,12 @@ test('preflight reads tokenizer provenance from the actual serving A/B generatio
   }
   const search = healthySearch(database.pool)
   search.indexSet = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     readAlias: 'mx-insight-hub-content',
-    writeAlias: 'mx-insight-hub-content-v4',
-    currentIndex: 'mx-insight-hub-content-v4-current',
+    writeAlias: 'mx-insight-hub-content-v5',
+    currentIndex: 'mx-insight-hub-content-v5-current',
   }
-  const serving = 'mx-insight-hub-content-v4-rebuild'
+  const serving = 'mx-insight-hub-content-v5-rebuild'
   search.client.getAlias = async (alias) => ({
     [serving]: { aliases: { [alias]: { is_write_index: true } } },
   })

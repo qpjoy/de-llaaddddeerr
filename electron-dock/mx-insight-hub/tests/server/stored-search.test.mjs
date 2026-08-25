@@ -154,7 +154,17 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
           pitId: null,
           searchAfter: ['2026-08-10T00:00:00.000Z', FIRST_ID],
         },
-        items: [canonicalItem(secondPage ? SECOND_ID : FIRST_ID)],
+        items: [{
+          ...canonicalItem(secondPage ? SECOND_ID : FIRST_ID),
+          ...(options.publicOpinionVisibility ? {
+            platform: 'public_opinion',
+            publication: {
+              stage: 'candidate', status: 'qualified', qualityScore: 91,
+              displayAdmin1: 'CN-JS', geographyVerified: true,
+              locationLabel: '江苏', locationType: 'province', countryName: '中国', countryCode: 'CN',
+            },
+          } : {}),
+        }],
       }
     },
   }
@@ -171,6 +181,14 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Stored search consumer' })
   const key = await service.createApiKey({ consumerId: consumer.id, name: 'Stored search key' })
   await service.putPlatformConfiguration('xiaohongshu', {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+    maxRequests: 10,
+    windowSeconds: 3_600,
+    maxPageSize: 2,
+  })
+  await service.putPlatformConfiguration('public_opinion', {
     tenantId: tenant.id,
     consumerId: consumer.id,
     enabled: true,
@@ -329,5 +347,33 @@ test('stored search is platform-granted, idempotent, opaque and never accepts ph
     assert.equal(generic.response.status, 200)
     assert.equal(upstreamCalls.length, 1)
     assert.equal(contentCalls.length, 2)
+
+    const candidate = await call(baseUrl, '/api/v1/data/stored/search', {
+      method: 'POST',
+      headers: { ...authorization, 'idempotency-key': 'stored-public-opinion-qualified' },
+      body: {
+        platform: 'public_opinion', query: '处置', includeCandidates: 'qualified',
+        minQualityScore: 85, province: '江苏', pageSize: 1,
+      },
+    })
+    assert.equal(candidate.response.status, 200)
+    assert.deepEqual(contentCalls.at(-1).options.publicOpinionVisibility, {
+      candidateMode: 'qualified', minQualityScore: 85, provinceCode: 'CN-JS',
+      countryCode: null, location: null, from: null, to: null, explicit: true,
+    })
+    assert.deepEqual(candidate.payload.data.filters, {
+      platform: 'public_opinion', datasetId: null, objectType: null,
+      includeCandidates: 'qualified', minQualityScore: 85, province: 'CN-JS',
+      countryCode: null, location: null, from: null, to: null,
+    })
+    assert.deepEqual(candidate.payload.data.items[0].quality, {
+      stage: 'candidate', status: 'qualified', score: 91, geographyVerified: true,
+    })
+    assert.deepEqual(candidate.payload.data.items[0].location, {
+      provinceCode: 'CN-JS', label: '江苏', type: 'province', country: '中国', countryCode: 'CN',
+    })
+    assert.equal(Object.hasOwn(candidate.payload.data.items[0], 'author'), false)
+    assert.equal(Object.hasOwn(candidate.payload.data.items[0], 'contentType'), false)
+    assert.equal(Object.hasOwn(candidate.payload.data.items[0], 'sourceName'), false)
   })
 })

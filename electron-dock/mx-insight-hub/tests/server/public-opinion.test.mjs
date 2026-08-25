@@ -3,7 +3,10 @@ import { createServer } from 'node:http'
 import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
 import {
+  normalizePublicOpinionCoverageQuery,
+  normalizePublicOpinionDetailQuery,
   normalizePublicOpinionQuery,
+  publicOpinionCoverage,
   publicOpinionItem,
   publicOpinionPage,
 } from '../../server/data/public-opinion.mjs'
@@ -161,6 +164,85 @@ test('province taxonomy normalizes Jiangsu and cursors are bound to province and
   })
 })
 
+test('candidate visibility is opt-in, quality bounded and all requires a list time window', () => {
+  const formal = normalizePublicOpinionQuery('江苏', {}, 100, PEPPER)
+  assert.equal(formal.candidateMode, 'formal')
+  assert.equal(formal.minQualityScore, null)
+  assert.equal('quality' in publicOpinionPage([row()], formal, PEPPER).items[0], false)
+
+  const qualified = normalizePublicOpinionQuery('江苏', {
+    includeCandidates: 'qualified', minQualityScore: '85',
+  }, 100, PEPPER)
+  assert.equal(qualified.candidateMode, 'qualified')
+  assert.equal(qualified.minQualityScore, 85)
+  const qualifiedItem = publicOpinionPage([row({
+    source_stage: 'candidate',
+    quality_status: 'qualified',
+    quality_score: 91,
+    qualification_threshold: 85,
+    geography_verified: true,
+  })], qualified, PEPPER).items[0]
+  assert.deepEqual(qualifiedItem.quality, {
+    stage: 'candidate', status: 'qualified', score: 91, threshold: 85, geographyVerified: true,
+  })
+
+  const trueAlias = normalizePublicOpinionQuery('江苏', { includeCandidates: 'true' }, 100, PEPPER)
+  assert.equal(trueAlias.candidateMode, 'qualified')
+  assert.equal(trueAlias.minQualityScore, 80)
+  assert.throws(
+    () => normalizePublicOpinionQuery('江苏', { minQualityScore: '80' }, 100, PEPPER),
+    (error) => error.code === 'invalid_request',
+  )
+  assert.throws(
+    () => normalizePublicOpinionQuery('江苏', { includeCandidates: 'all' }, 100, PEPPER),
+    (error) => error.code === 'candidate_scope_required',
+  )
+  const all = normalizePublicOpinionQuery('江苏', {
+    includeCandidates: 'all',
+    from: '2026-08-24T00:00:00Z',
+    to: '2026-08-25T23:59:59Z',
+  }, 100, PEPPER)
+  assert.equal(all.candidateMode, 'all')
+  assert.equal(all.minQualityScore, null)
+
+  assert.equal(normalizePublicOpinionDetailQuery({ includeCandidates: 'all' }).candidateMode, 'all')
+})
+
+test('province coverage requires a bounded window and returns full safe coverage', () => {
+  assert.throws(
+    () => normalizePublicOpinionCoverageQuery({}),
+    (error) => error.code === 'invalid_request',
+  )
+  const query = normalizePublicOpinionCoverageQuery({
+    from: '2026-08-24T00:00:00Z',
+    to: '2026-08-25T23:59:59Z',
+    includeCandidates: 'qualified',
+    minQualityScore: '80',
+    targetPerProvince: '10',
+  })
+  const coverage = publicOpinionCoverage([{
+    province_code: 'CN-JS',
+    formal_count: '4',
+    qualified_candidate_count: '7',
+    candidate_count: '12',
+    verified_count: '9',
+    average_quality_score: '88.5',
+    raw_payload: 'must-not-leak',
+    provider_id: 'must-not-leak',
+  }], query)
+  assert.equal(coverage.contractVersion, 'mx-insight-hub.public-opinion.coverage.v1')
+  assert.equal(coverage.includeCandidates, 'qualified')
+  assert.equal(coverage.provinces.length, 34)
+  assert.equal(coverage.featuredProvinceCodes.length, 8)
+  const jiangsu = coverage.provinces.find((item) => item.province.code === 'CN-JS')
+  assert.equal(jiangsu.availableCount, 11)
+  assert.equal(jiangsu.qualifiedCandidateRate, 0.583)
+  assert.equal(jiangsu.verifiedRate, 0.818)
+  assert.equal(jiangsu.shortfall, 0)
+  assert.equal(jiangsu.meetsTarget, true)
+  assert.equal(JSON.stringify(coverage).includes('must-not-leak'), false)
+})
+
 test('public province item is a strict allowlist', () => {
   const item = publicOpinionItem({
     ...row(),
@@ -196,6 +278,33 @@ test('public province item is a strict allowlist', () => {
     collected_at: new Date('2026-08-23T04:00:00.000Z'),
   }))
   assert.equal(unpublished.publishedAt, null)
+
+  const candidate = publicOpinionItem({
+    ...row(),
+    source_stage: 'candidate',
+    quality_status: 'qualified',
+    quality_score: '91',
+    qualification_threshold: '80',
+    geography_verified: true,
+    location_label: '南京',
+    location_type: 'city',
+    country_name: '中国',
+    country_code: 'CN',
+    geo_scope: 'province',
+    provider_id: 'must-not-leak',
+    endpoint_id: 'must-not-leak',
+    credential_id: 'must-not-leak',
+    business_id: 'must-not-leak',
+    availability_mode: 'must-not-leak',
+  }, { includeQuality: true })
+  assert.deepEqual(candidate.quality, {
+    stage: 'candidate', status: 'qualified', score: 91, threshold: 80, geographyVerified: true,
+  })
+  assert.deepEqual(candidate.location, {
+    label: '南京', type: 'city', country: '中国', countryCode: 'CN', geoScope: 'province',
+  })
+  assert.deepEqual(candidate.origin, { name: null, type: null, platform: null })
+  assert.equal(JSON.stringify(candidate).includes('must-not-leak'), false)
 })
 
 test('public opinion global search keeps the generic shape but masks upstream row identity', () => {
@@ -224,6 +333,8 @@ test('PostgreSQL province reads have fixed corpus scope, total-order cursors and
     provinceCode: 'CN-JS',
     sort: 'hot',
     pageSize: 20,
+    candidateMode: 'qualified',
+    minQualityScore: 85,
     cursor: {
       heatScore: '88.5',
       sortTime: '2026-08-23T03:00:00.000Z',
@@ -241,22 +352,41 @@ test('PostgreSQL province reads have fixed corpus scope, total-order cursors and
     },
   })
   await store.getPublicOpinionRecord(FIRST_ID)
+  await store.getPublicOpinionProvinceCoverage({
+    from: '2026-08-23T00:00:00.000Z',
+    to: '2026-08-24T00:00:00.000Z',
+    candidateMode: 'qualified',
+    minQualityScore: 80,
+  })
 
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 4)
   assert.match(calls[0].sql, /dataset_id = 'public-opinion\.province\.v1'/)
   assert.match(calls[0].sql, /platform = 'public_opinion'/)
   assert.match(calls[0].sql, /object_type = 'opinion_item'/)
-  assert.match(calls[0].sql, /admin1_code = \$1/)
-  assert.match(calls[0].sql, /\(heat_score, coalesce\(event_time, collected_at\), id\) < \(\$4::numeric, \$5::timestamptz, \$6::uuid\)/)
-  assert.match(calls[1].sql, /\(coalesce\(event_time, collected_at\), collected_at, id\) < \(\$5::timestamptz, \$6::timestamptz, \$4::uuid\)/)
+  assert.match(calls[0].sql, /publication\.display_admin1_code = \$1/)
+  assert.doesNotMatch(calls[0].sql, /coalesce\(publication\.display_admin1_code, record\.admin1_code\)/)
+  assert.match(calls[0].sql, /CASE WHEN publication\.source_stage = 'candidate'[\s\S]+coalesce\(record\.event_time, record\.collected_at\)[\s\S]+ELSE record\.event_time/)
+  assert.match(calls[0].sql, /publication\.canonical_revision = record\.current_revision/)
+  assert.match(calls[0].sql, /publication\.source_stage = 'formal'/)
+  assert.match(calls[0].sql, /publication\.source_stage = 'candidate'/)
+  assert.match(calls[0].sql, /\(record\.heat_score, coalesce\(record\.event_time, record\.collected_at\), record\.id\) < \(\$6::numeric, \$7::timestamptz, \$8::uuid\)/)
+  assert.match(calls[1].sql, /\(coalesce\(record\.event_time, record\.collected_at\), record\.collected_at, record\.id\) < \(\$7::timestamptz, \$8::timestamptz, \$6::uuid\)/)
   assert.match(calls[2].sql, /deleted_at IS NULL/)
   assert.deepEqual(calls[0].values, [
-    'CN-JS', null, null, '88.5', '2026-08-23T03:00:00.000Z', FIRST_ID, 21,
+    'CN-JS', null, null, 'qualified', 85,
+    '88.5', '2026-08-23T03:00:00.000Z', FIRST_ID, 21,
   ])
   assert.deepEqual(calls[1].values, [
-    'CN-JS', null, null, FIRST_ID,
+    'CN-JS', null, null, 'formal', null, FIRST_ID,
     '2026-08-23T03:00:00.000Z', '2026-08-23T03:01:00.000Z', 11,
   ])
+  assert.deepEqual(calls[2].values, [FIRST_ID, 'formal', null])
+  assert.deepEqual(calls[3].values, [
+    '2026-08-23T00:00:00.000Z', '2026-08-24T00:00:00.000Z', 'qualified', 80,
+  ])
+  assert.match(calls[3].sql, /AS qualified_candidate_count/)
+  assert.match(calls[3].sql, /AS verified_count/)
+  assert.match(calls[3].sql, /CASE WHEN publication\.source_stage = 'candidate'[\s\S]+coalesce\(record\.event_time, record\.collected_at\)[\s\S]+ELSE record\.event_time/)
   for (const { sql } of calls) {
     assert.doesNotMatch(sql, /raw_payload|extensions|strategy_id|run_id|llm_reason|source_item_id/i)
   }
@@ -287,11 +417,44 @@ test('public province routes enforce grants, paginate safely and keep public_opi
   const listCalls = []
   store.listPublicOpinionRecords = async (input) => {
     listCalls.push(input)
+    if (input.candidateMode !== 'formal') {
+      return [row({
+        source_stage: 'candidate',
+        quality_status: 'qualified',
+        quality_score: '91',
+        qualification_threshold: String(input.minQualityScore ?? 80),
+        geography_verified: true,
+        location_label: '南京',
+        location_type: 'city',
+        country_name: '中国',
+        country_code: 'CN',
+        geo_scope: 'province',
+      })]
+    }
     return input.cursor
       ? [row({ id: SECOND_ID, heat_score: '70', event_time: new Date('2026-08-22T03:00:00.000Z') })]
       : [row(), row({ id: SECOND_ID, heat_score: '70', event_time: new Date('2026-08-22T03:00:00.000Z') })]
   }
-  store.getPublicOpinionRecord = async (id) => id === FIRST_ID ? row() : null
+  const detailCalls = []
+  store.getPublicOpinionRecord = async (id, query) => {
+    detailCalls.push({ id, query })
+    if (id !== FIRST_ID) return null
+    if (query?.candidateMode !== 'formal') {
+      return row({
+        source_stage: 'candidate', quality_status: 'qualified', quality_score: '91',
+        qualification_threshold: String(query.minQualityScore ?? 80), geography_verified: true,
+      })
+    }
+    return row()
+  }
+  const coverageCalls = []
+  store.getPublicOpinionProvinceCoverage = async (input) => {
+    coverageCalls.push(input)
+    return [{
+      province_code: 'CN-JS', formal_count: 4, qualified_candidate_count: 7,
+      candidate_count: 12, verified_count: 9, average_quality_score: 88.5,
+    }]
+  }
   let servingReady = false
   store.getPublicOpinionServingIndexStatus = async () => ({
     ready: servingReady,
@@ -352,7 +515,7 @@ test('public province routes enforce grants, paginate safely and keep public_opi
     const capabilities = await call(baseUrl, '/api/v1/data/capabilities', headers)
     assert.equal(capabilities.response.status, 200)
     const platform = capabilities.payload.data.platforms.find((entry) => entry.platform === 'public_opinion')
-    assert.deepEqual(platform.capabilities, ['province_feed', 'item_detail', 'stored_search'])
+    assert.deepEqual(platform.capabilities, ['province_feed', 'province_coverage', 'item_detail', 'stored_search'])
     assert.equal(platform.ready, false)
     assert.deepEqual(upstreamCapabilityCalls, [])
 
@@ -389,8 +552,11 @@ test('public province routes enforce grants, paginate safely and keep public_opi
     assert.equal(first.response.status, 200)
     assert.equal(first.payload.data.items.length, 1)
     assert.ok(first.payload.data.pageInfo.nextCursor)
+    assert.equal('quality' in first.payload.data.items[0], false)
+    assert.equal('location' in first.payload.data.items[0], false)
     assert.equal(listCalls[0].provinceCode, 'CN-JS')
     assert.equal(listCalls[0].sort, 'hot')
+    assert.equal(listCalls[0].candidateMode, 'formal')
 
     const next = await call(
       baseUrl,
@@ -401,9 +567,61 @@ test('public province routes enforce grants, paginate safely and keep public_opi
     assert.equal(next.payload.data.items[0].id, SECOND_ID)
     assert.equal(listCalls[1].cursor.id, FIRST_ID)
 
+    const qualified = await call(
+      baseUrl,
+      '/api/v1/data/public-opinion/provinces/CN-JS/items?includeCandidates=qualified&minQualityScore=85',
+      headers,
+    )
+    assert.equal(qualified.response.status, 200)
+    assert.equal(listCalls[2].candidateMode, 'qualified')
+    assert.equal(listCalls[2].minQualityScore, 85)
+    assert.equal(qualified.payload.data.items[0].quality.status, 'qualified')
+    assert.equal(qualified.payload.data.items[0].location.label, '南京')
+    assert.equal(JSON.stringify(qualified.payload).includes('source_stage'), false)
+
+    const unboundedAll = await call(
+      baseUrl,
+      '/api/v1/data/public-opinion/provinces/CN-JS/items?includeCandidates=all',
+      headers,
+    )
+    assert.equal(unboundedAll.response.status, 400)
+    assert.equal(unboundedAll.payload.error.code, 'candidate_scope_required')
+    assert.equal(listCalls.length, 3)
+
+    const boundedAll = await call(
+      baseUrl,
+      '/api/v1/data/public-opinion/provinces/CN-JS/items?includeCandidates=all&from=2026-08-24T00%3A00%3A00Z&to=2026-08-25T23%3A59%3A59Z',
+      headers,
+    )
+    assert.equal(boundedAll.response.status, 200)
+    assert.equal(listCalls[3].candidateMode, 'all')
+    assert.equal(listCalls[3].from, '2026-08-24T00:00:00.000Z')
+
+    const coverage = await call(
+      baseUrl,
+      '/api/v1/data/public-opinion/province-coverage?from=2026-08-24T00%3A00%3A00Z&to=2026-08-25T23%3A59%3A59Z&includeCandidates=qualified&minQualityScore=80&targetPerProvince=10',
+      headers,
+    )
+    assert.equal(coverage.response.status, 200)
+    assert.equal(coverageCalls.length, 1)
+    assert.equal(coverageCalls[0].candidateMode, 'qualified')
+    assert.equal(coverage.payload.data.provinces.length, 34)
+    assert.equal(coverage.payload.data.provinces[0].province.code, 'CN-BJ')
+    assert.equal(JSON.stringify(coverage.payload).includes('provider_id'), false)
+
     const detail = await call(baseUrl, `/api/v1/data/public-opinion/items/${FIRST_ID}`, headers)
     assert.equal(detail.response.status, 200)
     assert.equal(detail.payload.data.province.code, 'CN-JS')
+    assert.equal('quality' in detail.payload.data, false)
+    assert.equal(detailCalls[0].query.candidateMode, 'formal')
+    const candidateDetail = await call(
+      baseUrl,
+      `/api/v1/data/public-opinion/items/${FIRST_ID}?includeCandidates=qualified&minQualityScore=85`,
+      headers,
+    )
+    assert.equal(candidateDetail.response.status, 200)
+    assert.equal(candidateDetail.payload.data.quality.score, 91)
+    assert.equal(detailCalls[1].query.candidateMode, 'qualified')
     const missing = await call(baseUrl, `/api/v1/data/public-opinion/items/${SECOND_ID}`, headers)
     assert.equal(missing.response.status, 404)
     assert.equal(missing.payload.error.code, 'item_not_found')

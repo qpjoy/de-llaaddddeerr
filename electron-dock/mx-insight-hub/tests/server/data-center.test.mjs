@@ -65,7 +65,7 @@ test('Data Center route is admin-token-only, validates filters, and stays off th
       pageSize: 25,
       searchCapabilities: undefined,
     })
-    assert.equal(responseData.searchCapabilities.indexSchema, 'content-v4')
+    assert.equal(responseData.searchCapabilities.indexSchema, 'content-v5')
     assert.equal(responseData.searchCapabilities.activeIndexSchema, null)
     assert.equal(responseData.searchCapabilities.ready, false)
     assert.equal(responseData.searchCapabilities.defaultProfile, DEFAULT_SEARCH_PROFILE)

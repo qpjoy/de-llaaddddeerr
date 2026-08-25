@@ -390,6 +390,8 @@ grant.
 
 ```http
 GET /api/v1/data/public-opinion/provinces/CN-JS/items?sort=hot&pageSize=20
+GET /api/v1/data/public-opinion/provinces/CN-JS/items?includeCandidates=qualified&minQualityScore=80&from=2026-08-24T00:00:00Z&to=2026-08-24T23:59:59Z
+GET /api/v1/data/public-opinion/province-coverage?from=2026-08-24T00:00:00Z&to=2026-08-24T23:59:59Z&includeCandidates=qualified&targetPerProvince=10
 GET /api/v1/data/public-opinion/items/11111111-1111-4111-8111-111111111111
 Authorization: Bearer <mx key>
 ```
@@ -406,12 +408,15 @@ The province feed accepts only these query parameters:
 | `sort` | `hot` (default) or `latest`. `hot` excludes null heat scores and orders by `(heatScore, effectiveSortTime, id)` descending. `latest` orders by `(effectiveSortTime, collectedAt, id)` descending. `effectiveSortTime` is `publishedAt` when present, otherwise `collectedAt`; the fallback is never returned as `publishedAt`. |
 | `from` | Optional inclusive RFC3339 `publishedAt` lower bound. A bounded request excludes records whose `publishedAt` is null. |
 | `to` | Optional inclusive RFC3339 `publishedAt` upper bound; it must not precede `from`. |
+| `includeCandidates` | Omitted/`false` preserves the historical formal-only response. `qualified` includes candidates whose Hub-owned current state meets `minQualityScore` (default 80). `all` includes pending/rejected/failed candidates too and requires both `from` and `to`. Boolean `true` is a compatibility alias for `qualified`. |
+| `minQualityScore` | Integer 0–100, valid only with candidate mode. It defaults to 80 for `qualified`; `all` has no implicit score floor. |
 | `pageSize` | Positive integer, default 20. The effective maximum is the lower of 100 and the consumer's `public_opinion.maxPageSize` policy. |
 | `cursor` | Optional HMAC-signed opaque cursor, at most 8,192 characters. Return `pageInfo.nextCursor` unchanged. |
 
 The cursor is bound to the normalized province code, sort order, time bounds,
-and page size. Changing any of those values requires restarting without a
-cursor. Pagination is keyset-based over the current canonical projection; it is
+page size and, when explicitly enabled, candidate visibility and quality floor.
+Changing any of those values requires restarting without a cursor. The legacy
+formal-only binding stays byte-compatible. Pagination is keyset-based over the current canonical projection; it is
 not a frozen multi-page snapshot. Each safe `GET`, including a retry or next
 page, is independently charged to the consumer's `public_opinion` request and
 usage policy. These routes do not take an `Idempotency-Key`.
@@ -455,11 +460,44 @@ Raw payloads, target/negative keywords, strategy/run identifiers, source table
 coordinates, heat metrics, extensions, LLM label/confidence/reasoning, and
 lineage are not public fields.
 
+When and only when candidate visibility is requested, items additionally expose
+bounded `quality={stage,status,score,threshold,geographyVerified}` and optional
+`location={label,type,country,countryCode,geoScope}`. Candidate `origin` members
+are all `null`: a transport engine, provider ID, private endpoint or credential
+name is never a public source identity. Quality score is Hub-owned publication
+quality, not the Night-All heat score and not province confidence. `formal`
+records keep the historical response and serving semantics.
+
+For formal rows, `from/to` continue to filter real `publishedAt`; an undated
+formal row remains excluded from a bounded request. Candidate rows instead use
+`publishedAt` when present and otherwise their Hub `collectedAt` as a serving
+window so an explicitly requested undated candidate remains reachable. The
+fallback is not rewritten into `publishedAt`.
+
 The item-detail route accepts only a Hub canonical UUID returned by the feed or
 canonical search. Its lookup remains fixed to the public-opinion dataset and
-object type; a deleted, missing, or out-of-scope record returns
+object type. It is formal-only by default; the same `includeCandidates` and
+`minQualityScore` controls can explicitly authorize a candidate detail without
+a time-window requirement. A deleted, missing, hidden or out-of-scope record returns
 `404 item_not_found`. A legacy unclassified detail may have `province=null`, but
 the province feed itself returns only the requested normalized province.
+
+### Province coverage
+
+`GET /api/v1/data/public-opinion/province-coverage` requires RFC3339 `from` and
+`to`, accepts the same candidate controls, and accepts `targetPerProvince=1..100`
+(default 10). It always returns all 34 supported province-level regions in stable
+catalog order with `formalCount`, `qualifiedCandidateCount`, `candidateCount`,
+qualification/verified rates, `availableCount`, `shortfall`, `meetsTarget` and
+average quality. `featuredProvinceCodes` ranks at most eight regions for the UI;
+the client can pin those cards and collapse the rest without issuing 34 separate
+queries. The target is an observability goal, never a promise or a reason to
+fabricate records. A province with five verified items returns `shortfall=5`.
+
+`geographyVerified` and the verified count require accepted event geography.
+Publisher/dateline fallbacks may provide a display location for candidate
+exploration but do not satisfy verified province coverage. Overseas events keep
+country/location/geo scope and do not enter a China province bucket.
 
 For global search across different stored sources, use
 `POST /api/v1/data/canonical/search`. Specify `platform=public_opinion`,
@@ -468,6 +506,18 @@ the result, or omit `platform` to search every platform granted to the consumer.
 Those filters only narrow the authorization scope. This addition does not add a
 `public_opinion` branch to `POST /api/v1/data/search`; that live/upstream-
 compatible route fails closed with `platform_operation_unsupported`.
+
+Both stored and canonical search remain formal-only when the new fields are
+omitted. Candidate search requires explicit `platform=public_opinion` and accepts
+`includeCandidates=qualified|all`, `minQualityScore`, `province`, `countryCode`,
+`location`, `from`, and `to`. `all` additionally requires both time bounds and at
+least one exact geography selector (`province`, `countryCode`, or `location`).
+These controls are signed into the query/cursor and idempotency contract. A
+default public-opinion request also carries the new formal-visibility contract
+marker so a stable pre-upgrade cached body cannot bypass the publication gate;
+clients must use a new `Idempotency-Key` after this rollout. Searches spanning
+other granted platforms apply the publication predicate only to
+`public_opinion`; unrelated platforms are not filtered by quality state.
 
 ## Telegram stored data
 

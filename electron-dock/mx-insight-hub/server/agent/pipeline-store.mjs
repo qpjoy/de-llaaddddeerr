@@ -3,6 +3,20 @@ import { AppError } from '../core/errors.mjs'
 
 export const PROVINCE_GEOGRAPHY_PIPELINE_KEY = 'province-geography-v1'
 
+const PUBLICATION_FIELDS = Object.freeze({
+  eventAdmin1: 'geography.event_admin1_code',
+  publisherAdmin1: 'geography.publisher_admin1_code',
+  geoScope: 'geography.geo_scope',
+  locationLabel: 'geography.location_label',
+  locationType: 'geography.location_type',
+  countryName: 'geography.country_name',
+  countryCode: 'geography.country_code',
+  qualityScore: 'quality.score',
+  qualityFlags: 'quality.flags',
+  rejectionCodes: 'quality.rejection_codes',
+  geographyVerified: 'quality.geography_verified',
+})
+
 const UPDATE_FIELDS = new Set(['expectedRevision', 'status', 'itemsPerMinute'])
 
 function safeErrorCode(error) {
@@ -10,6 +24,92 @@ function safeErrorCode(error) {
     if (typeof value === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(value)) return value
   }
   return 'agent_analysis_failed'
+}
+
+function assertionValue(assertions, fieldKey) {
+  for (let index = (assertions || []).length - 1; index >= 0; index -= 1) {
+    if (assertions[index]?.fieldKey === fieldKey) return assertions[index].value
+  }
+  return null
+}
+
+function boundedStringArray(value) {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value
+    .filter((item) => typeof item === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(item))
+    .slice(0, 40))]
+}
+
+export function publicationStateFromResult({
+  assertions,
+  sourceStage,
+  qualificationThreshold = 80,
+  summary = {},
+} = {}) {
+  const formal = sourceStage !== 'candidate'
+  const scoreValue = assertionValue(assertions, PUBLICATION_FIELDS.qualityScore)
+  const numericScore = Number(scoreValue)
+  const qualityScore = scoreValue != null && Number.isFinite(numericScore)
+    ? Math.max(0, Math.min(100, Math.round(numericScore)))
+    : null
+  const threshold = Number.isFinite(Number(qualificationThreshold))
+    ? Math.max(0, Math.min(100, Math.round(Number(qualificationThreshold))))
+    : 80
+  const eventAdmin1Code = assertionValue(assertions, PUBLICATION_FIELDS.eventAdmin1)
+  const publisherAdmin1Code = assertionValue(assertions, PUBLICATION_FIELDS.publisherAdmin1)
+  const geoScope = assertionValue(assertions, PUBLICATION_FIELDS.geoScope) || 'unknown'
+  const singleProvinceDisplayAllowed = ![
+    'multi_province', 'national', 'maritime', 'overseas',
+  ].includes(geoScope)
+  const geographyVerified = assertionValue(assertions, PUBLICATION_FIELDS.geographyVerified) === true
+  const locationLabel = assertionValue(assertions, PUBLICATION_FIELDS.locationLabel)
+  const locationType = assertionValue(assertions, PUBLICATION_FIELDS.locationType)
+  const countryName = assertionValue(assertions, PUBLICATION_FIELDS.countryName)
+  const countryCode = assertionValue(assertions, PUBLICATION_FIELDS.countryCode)
+  const qualityFlags = boundedStringArray(assertionValue(assertions, PUBLICATION_FIELDS.qualityFlags))
+  const rejectionCodes = boundedStringArray(assertionValue(assertions, PUBLICATION_FIELDS.rejectionCodes))
+  const skippedCode = typeof summary?.skipped === 'string'
+    && /^[a-z0-9_.-]{1,80}$/i.test(summary.skipped)
+    ? summary.skipped
+    : null
+  if (skippedCode && !rejectionCodes.includes(skippedCode)) {
+    rejectionCodes.push(skippedCode)
+  }
+  const status = formal
+    ? 'formal'
+    : qualityScore == null
+      ? 'failed'
+      : qualityScore >= threshold
+        ? 'qualified'
+        : 'rejected'
+  return {
+    status,
+    qualityScore,
+    qualificationThreshold: threshold,
+    qualityFlags,
+    rejectionCodes,
+    eventAdmin1Code: typeof eventAdmin1Code === 'string' ? eventAdmin1Code : null,
+    publisherAdmin1Code: typeof publisherAdmin1Code === 'string' ? publisherAdmin1Code : null,
+    // A publisher/dateline province is only a display fallback when the event
+    // has not already been classified outside a single Chinese province. This
+    // prevents an overseas event filed from Beijing from re-entering a Beijing
+    // province feed.
+    displayAdmin1Code: singleProvinceDisplayAllowed
+      ? typeof eventAdmin1Code === 'string'
+        ? eventAdmin1Code
+        : typeof publisherAdmin1Code === 'string'
+          ? publisherAdmin1Code
+          : null
+      : null,
+    geographyVerified,
+    geoScope,
+    locationLabel: typeof locationLabel === 'string' ? locationLabel.slice(0, 160) : null,
+    locationType: ['country', 'region', 'city'].includes(locationType) ? locationType : null,
+    countryName: typeof countryName === 'string' ? countryName.slice(0, 160) : null,
+    countryCode: typeof countryCode === 'string' && /^[A-Z]{2}$/u.test(countryCode)
+      ? countryCode
+      : null,
+  }
 }
 
 function pipelineRow(row) {
@@ -434,13 +534,17 @@ export class AgentPipelineStore {
       const current = await client.query(
         `SELECT task.*, source_revision.revision AS source_revision_number,
                 source_object.current_revision AS current_source_revision,
-                record.current_revision AS current_canonical_revision
+                record.current_revision AS current_canonical_revision,
+                record.dataset_id, record.platform, record.object_type,
+                publication.source_stage, publication.qualification_threshold
            FROM agent_center.analysis_tasks task
            JOIN ingest.source_object_revisions source_revision
              ON source_revision.id = task.source_object_revision_id
            JOIN ingest.source_objects source_object
              ON source_object.id = source_revision.source_object_id
            JOIN core.canonical_records record ON record.id = task.record_id
+           LEFT JOIN core.public_opinion_current_state publication
+             ON publication.record_id = task.record_id
           WHERE task.id = $1
           FOR UPDATE`,
         [claim.taskId],
@@ -510,6 +614,85 @@ export class AgentPipelineStore {
           result.summary || {},
         ],
       )
+      if (completed.rowCount === 1 && task.source_stage) {
+        const publication = publicationStateFromResult({
+          assertions: result.assertions || [],
+          sourceStage: task.source_stage,
+          qualificationThreshold: Number(task.qualification_threshold || 80),
+          summary: result.summary || {},
+        })
+        const materialized = await client.query(
+          `UPDATE core.public_opinion_current_state
+              SET status = $4,
+                  quality_score = $5,
+                  qualification_threshold = $6,
+                  quality_flags = $7,
+                  rejection_codes = $8,
+                  event_admin1_code = $9,
+                  publisher_admin1_code = $10,
+                  display_admin1_code = $11,
+                  geography_verified = $12,
+                  geo_scope = $13,
+                  location_label = coalesce($14, location_label),
+                  location_type = coalesce($15, location_type),
+                  country_name = coalesce($16, country_name),
+                  country_code = coalesce($17, country_code),
+                  analysis_version = $18,
+                  taxonomy_version = $19,
+                  rule_version = $20,
+                  prompt_version = $21,
+                  materialized_from_task_id = $22,
+                  assessed_at = now(),
+                  updated_at = now()
+            WHERE record_id = $1
+              AND canonical_revision = $2
+              AND source_object_revision_id = $3
+            RETURNING record_id`,
+          [
+            claim.recordId, claim.canonicalRevision, claim.sourceObjectRevisionId,
+            publication.status, publication.qualityScore,
+            publication.qualificationThreshold,
+            JSON.stringify(publication.qualityFlags),
+            JSON.stringify(publication.rejectionCodes),
+            publication.eventAdmin1Code, publication.publisherAdmin1Code,
+            publication.displayAdmin1Code, publication.geographyVerified,
+            publication.geoScope, publication.locationLabel,
+            publication.locationType, publication.countryName,
+            publication.countryCode, claim.analysisVersion,
+            claim.taxonomyVersion, claim.ruleVersion, claim.promptVersion,
+            claim.taskId,
+          ],
+        )
+        if (materialized.rowCount !== 1) {
+          throw new Error('public opinion publication state revision fence rejected materialization')
+        }
+        const projected = await client.query(
+          `UPDATE core.canonical_records
+              SET projection_revision = projection_revision + 1
+            WHERE id = $1 AND current_revision = $2
+            RETURNING projection_revision`,
+          [claim.recordId, claim.canonicalRevision],
+        )
+        if (projected.rowCount !== 1) {
+          throw new Error('canonical revision changed during publication materialization')
+        }
+        await client.query(
+          `INSERT INTO outbox.projection_events
+             (aggregate_type, aggregate_id, event_type, projection_revision, payload)
+           VALUES ('canonical_record', $1, 'upsert', $2, $3)
+           ON CONFLICT (aggregate_id, projection_revision) DO NOTHING`,
+          [
+            claim.recordId,
+            projected.rows[0].projection_revision,
+            {
+              datasetId: task.dataset_id,
+              platform: task.platform,
+              objectType: task.object_type,
+              publicationStateChanged: true,
+            },
+          ],
+        )
+      }
       await client.query('COMMIT')
       return { completed: completed.rowCount === 1 }
     } catch (error) {
@@ -523,6 +706,106 @@ export class AgentPipelineStore {
   async failClaim(claim, error) {
     const exhausted = claim.attempts >= claim.maxAttempts
     const backoffSeconds = Math.min(2 ** claim.attempts * 5, 3_600)
+    if (exhausted) {
+      const errorCode = safeErrorCode(error)
+      const client = await this.pool.connect()
+      try {
+        await client.query('BEGIN')
+        const current = await client.query(
+          `SELECT task.status, task.locked_by, task.claim_generation,
+                  task.canonical_revision, task.source_object_revision_id,
+                  publication.source_stage,
+                  record.current_revision, record.dataset_id,
+                  record.platform, record.object_type,
+                  source_revision.revision AS source_revision_number,
+                  source_object.current_revision AS current_source_revision
+             FROM agent_center.analysis_tasks task
+             JOIN core.canonical_records record ON record.id = task.record_id
+             JOIN ingest.source_object_revisions source_revision
+               ON source_revision.id = task.source_object_revision_id
+             JOIN ingest.source_objects source_object
+               ON source_object.id = source_revision.source_object_id
+             LEFT JOIN core.public_opinion_current_state publication
+               ON publication.record_id = task.record_id
+            WHERE task.id = $1
+            FOR UPDATE`,
+          [claim.taskId],
+        )
+        const task = current.rows[0]
+        const ownsClaim = task?.status === 'running'
+          && task.locked_by === claim.workerId
+          && Number(task.claim_generation) === claim.generation
+        if (!ownsClaim) {
+          await client.query('COMMIT')
+          return { failed: false, dead: true, errorCode }
+        }
+        const failed = await client.query(
+          `UPDATE agent_center.analysis_tasks
+              SET status = 'dead', last_error_code = $4,
+                  locked_by = NULL, leased_until = NULL,
+                  finished_at = now(), updated_at = now()
+            WHERE id = $1 AND status = 'running'
+              AND locked_by = $2 AND claim_generation = $3`,
+          [claim.taskId, claim.workerId, claim.generation, errorCode],
+        )
+        const currentInput = Number(task.source_revision_number) === Number(task.current_source_revision)
+          && Number(task.canonical_revision) === Number(task.current_revision)
+        if (failed.rowCount === 1 && task.source_stage === 'candidate' && currentInput) {
+          const state = await client.query(
+            `UPDATE core.public_opinion_current_state
+                SET status = 'failed',
+                    rejection_codes = CASE
+                      WHEN rejection_codes ? $4 THEN rejection_codes
+                      ELSE rejection_codes || jsonb_build_array($4::text)
+                    END,
+                    materialized_from_task_id = $5,
+                    assessed_at = now(), updated_at = now()
+              WHERE record_id = $1
+                AND canonical_revision = $2
+                AND source_object_revision_id = $3
+              RETURNING record_id`,
+            [
+              claim.recordId, claim.canonicalRevision,
+              claim.sourceObjectRevisionId, errorCode, claim.taskId,
+            ],
+          )
+          if (state.rowCount === 1) {
+            const projected = await client.query(
+              `UPDATE core.canonical_records
+                  SET projection_revision = projection_revision + 1
+                WHERE id = $1 AND current_revision = $2
+                RETURNING projection_revision`,
+              [claim.recordId, claim.canonicalRevision],
+            )
+            if (projected.rowCount === 1) {
+              await client.query(
+                `INSERT INTO outbox.projection_events
+                   (aggregate_type, aggregate_id, event_type, projection_revision, payload)
+                 VALUES ('canonical_record', $1, 'upsert', $2, $3)
+                 ON CONFLICT (aggregate_id, projection_revision) DO NOTHING`,
+                [
+                  claim.recordId,
+                  projected.rows[0].projection_revision,
+                  {
+                    datasetId: task.dataset_id,
+                    platform: task.platform,
+                    objectType: task.object_type,
+                    publicationStateChanged: true,
+                  },
+                ],
+              )
+            }
+          }
+        }
+        await client.query('COMMIT')
+        return { failed: failed.rowCount === 1, dead: true, errorCode }
+      } catch (transactionError) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw transactionError
+      } finally {
+        client.release()
+      }
+    }
     const { rowCount } = await this.pool.query(
       `UPDATE agent_center.analysis_tasks
           SET status = $4,
@@ -538,10 +821,10 @@ export class AgentPipelineStore {
           AND locked_by = $2 AND claim_generation = $3`,
       [
         claim.taskId, claim.workerId, claim.generation,
-        exhausted ? 'dead' : 'pending', backoffSeconds, safeErrorCode(error),
+        'pending', backoffSeconds, safeErrorCode(error),
       ],
     )
-    return { failed: rowCount === 1, dead: exhausted, errorCode: safeErrorCode(error) }
+    return { failed: rowCount === 1, dead: false, errorCode: safeErrorCode(error) }
   }
 }
 

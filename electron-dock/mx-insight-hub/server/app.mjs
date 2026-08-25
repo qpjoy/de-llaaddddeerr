@@ -2419,11 +2419,26 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/public-opinion/province-coverage') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.publicOpinionCoverage(
+            context,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
       params = routeMatch(pathname, '/api/v1/data/public-opinion/items/:id')
       if (request.method === 'GET' && params) {
         const context = await requirePublic(request)
         sendJson(response, 200, {
-          data: await service.publicOpinionItem(context, params.id),
+          data: await service.publicOpinionItem(
+            context,
+            params.id,
+            Object.fromEntries(searchParams.entries()),
+          ),
           requestId,
         })
         return

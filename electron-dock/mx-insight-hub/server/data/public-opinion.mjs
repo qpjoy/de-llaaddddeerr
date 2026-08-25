@@ -1,13 +1,31 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
-import { normalizeChinaProvince } from './china-provinces.mjs'
+import { CHINA_PROVINCES, normalizeChinaProvince } from './china-provinces.mjs'
 
 export const PUBLIC_OPINION_PLATFORM = 'public_opinion'
 export const PUBLIC_OPINION_DATASET_ID = 'public-opinion.province.v1'
 export const PUBLIC_OPINION_OBJECT_TYPE = 'opinion_item'
 
-const ALLOWED_QUERY_FIELDS = new Set(['cursor', 'from', 'pageSize', 'sort', 'to'])
+const ALLOWED_QUERY_FIELDS = new Set([
+  'cursor',
+  'from',
+  'includeCandidates',
+  'minQualityScore',
+  'pageSize',
+  'sort',
+  'to',
+])
+const ALLOWED_DETAIL_QUERY_FIELDS = new Set(['includeCandidates', 'minQualityScore'])
+const ALLOWED_COVERAGE_QUERY_FIELDS = new Set([
+  'from',
+  'includeCandidates',
+  'minQualityScore',
+  'targetPerProvince',
+  'to',
+])
 const SORTS = new Set(['hot', 'latest'])
+const CANDIDATE_MODES = new Set(['qualified', 'all'])
+const DEFAULT_QUALITY_SCORE = 80
 const CURSOR_VERSION = 2
 const MAX_CURSOR_LENGTH = 8_192
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -37,8 +55,56 @@ function pageSizeValue(value, maxPageSize) {
   return pageSize
 }
 
+function boundedInteger(value, field, fallback, min, max) {
+  if (value == null) return fallback
+  if (!/^\d+$/.test(String(value))) {
+    throw new AppError(400, 'invalid_request', `${field} must be an integer between ${min} and ${max}`)
+  }
+  const number = Number(value)
+  if (number < min || number > max) {
+    throw new AppError(400, 'invalid_request', `${field} must be between ${min} and ${max}`)
+  }
+  return number
+}
+
+function candidateModeValue(value) {
+  if (value == null || value === false || value === 'false' || value === '') return 'formal'
+  if (value === true || value === 'true') return 'qualified'
+  const normalized = String(value).trim().toLowerCase()
+  if (CANDIDATE_MODES.has(normalized)) return normalized
+  throw new AppError(400, 'invalid_request', 'includeCandidates must be false, qualified or all')
+}
+
+function candidateSelection(input) {
+  const candidateMode = candidateModeValue(input.includeCandidates)
+  const explicitMinQualityScore = input.minQualityScore != null
+  if (candidateMode === 'formal' && explicitMinQualityScore) {
+    throw new AppError(400, 'invalid_request', 'minQualityScore requires includeCandidates=qualified or all')
+  }
+  return {
+    candidateMode,
+    minQualityScore: boundedInteger(
+      input.minQualityScore,
+      'minQualityScore',
+      candidateMode === 'qualified' ? DEFAULT_QUALITY_SCORE : null,
+      0,
+      100,
+    ),
+  }
+}
+
+function assertAllCandidateWindow(candidateMode, from, to) {
+  if (candidateMode === 'all' && (!from || !to)) {
+    throw new AppError(
+      400,
+      'candidate_scope_required',
+      'includeCandidates=all requires both from and to',
+    )
+  }
+}
+
 function bindingFor(query) {
-  return createHash('sha256').update(JSON.stringify({
+  const binding = {
     v: CURSOR_VERSION,
     platform: PUBLIC_OPINION_PLATFORM,
     datasetId: PUBLIC_OPINION_DATASET_ID,
@@ -48,7 +114,14 @@ function bindingFor(query) {
     from: query.from,
     to: query.to,
     pageSize: query.pageSize,
-  })).digest('base64url')
+  }
+  // Preserve the exact v2 binding for legacy/default formal-only cursors.
+  // Candidate modes are additive and bind their visibility controls.
+  if (query.candidateMode !== 'formal') {
+    binding.includeCandidates = query.candidateMode
+    binding.minQualityScore = query.minQualityScore
+  }
+  return createHash('sha256').update(JSON.stringify(binding)).digest('base64url')
 }
 
 function signature(payload, secret) {
@@ -135,6 +208,8 @@ export function normalizePublicOpinionQuery(provinceInput, input = {}, maxPageSi
   const from = timestampValue(input.from, 'from')
   const to = timestampValue(input.to, 'to')
   if (from && to && from > to) throw new AppError(400, 'invalid_request', 'from must not be later than to')
+  const candidateSelectionValue = candidateSelection(input)
+  assertAllCandidateWindow(candidateSelectionValue.candidateMode, from, to)
   const validPolicyMax = Number.isInteger(maxPageSize) && maxPageSize > 0 ? maxPageSize : 100
   const normalized = {
     province,
@@ -142,6 +217,7 @@ export function normalizePublicOpinionQuery(provinceInput, input = {}, maxPageSi
     from,
     to,
     pageSize: pageSizeValue(input.pageSize, validPolicyMax),
+    ...candidateSelectionValue,
   }
   const cursorBinding = bindingFor(normalized)
   if (input.cursor != null && typeof input.cursor !== 'string') {
@@ -162,6 +238,39 @@ export function normalizePublicOpinionQuery(provinceInput, input = {}, maxPageSi
   }
 }
 
+export function normalizePublicOpinionDetailQuery(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new AppError(400, 'invalid_request', 'query parameters must be an object')
+  }
+  const unsupported = Object.keys(input).filter((field) => !ALLOWED_DETAIL_QUERY_FIELDS.has(field))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_fields', `Unsupported public-opinion item fields: ${unsupported.join(', ')}`)
+  }
+  return candidateSelection(input)
+}
+
+export function normalizePublicOpinionCoverageQuery(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new AppError(400, 'invalid_request', 'query parameters must be an object')
+  }
+  const unsupported = Object.keys(input).filter((field) => !ALLOWED_COVERAGE_QUERY_FIELDS.has(field))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_fields', `Unsupported province coverage fields: ${unsupported.join(', ')}`)
+  }
+  const from = timestampValue(input.from, 'from')
+  const to = timestampValue(input.to, 'to')
+  if (!from || !to) {
+    throw new AppError(400, 'invalid_request', 'province coverage requires both from and to')
+  }
+  if (from > to) throw new AppError(400, 'invalid_request', 'from must not be later than to')
+  return {
+    from,
+    to,
+    targetPerProvince: boundedInteger(input.targetPerProvince, 'targetPerProvince', 10, 1, 100),
+    ...candidateSelection(input),
+  }
+}
+
 function iso(value) {
   return value == null ? null : new Date(value).toISOString()
 }
@@ -172,10 +281,11 @@ function numberValue(value) {
   return Number.isFinite(number) ? number : null
 }
 
-export function publicOpinionItem(row) {
+export function publicOpinionItem(row, { includeQuality = false } = {}) {
   const province = normalizeChinaProvince(row.admin1_code)
   const attributes = row.stable_fields?.attributes || {}
-  return {
+  const candidate = row.source_stage === 'candidate'
+  const item = {
     id: row.id,
     title: row.title ?? null,
     summary: row.body ?? null,
@@ -185,11 +295,39 @@ export function publicOpinionItem(row) {
     province: province ? { code: province.code, name: province.name } : null,
     heatScore: numberValue(row.heat_score),
     origin: {
-      name: row.author_name ?? null,
-      type: typeof attributes.sourceType === 'string' ? attributes.sourceType : row.content_type ?? null,
-      platform: typeof attributes.sourcePlatform === 'string' ? attributes.sourcePlatform : null,
+      // Candidate source names may be transport engines or upstream provider
+      // identifiers. Keep the established formal response unchanged, but do
+      // not expose that identity on opt-in candidate reads.
+      name: candidate ? null : row.author_name ?? null,
+      type: candidate
+        ? null
+        : typeof attributes.sourceType === 'string' ? attributes.sourceType : row.content_type ?? null,
+      platform: candidate
+        ? null
+        : typeof attributes.sourcePlatform === 'string' ? attributes.sourcePlatform : null,
     },
   }
+  if (includeQuality) {
+    item.quality = {
+      stage: candidate ? 'candidate' : 'formal',
+      status: typeof row.quality_status === 'string'
+        ? row.quality_status
+        : candidate ? 'pending' : 'formal',
+      score: numberValue(row.quality_score),
+      threshold: numberValue(row.qualification_threshold),
+      geographyVerified: row.geography_verified === true,
+    }
+    if (row.location_label || row.country_name || row.country_code || row.geo_scope) {
+      item.location = {
+        label: row.location_label ?? null,
+        type: row.location_type ?? null,
+        country: row.country_name ?? null,
+        countryCode: row.country_code ?? null,
+        geoScope: row.geo_scope ?? null,
+      }
+    }
+  }
+  return item
 }
 
 export function publicOpinionPage(rows, query, cursorSecret) {
@@ -213,7 +351,9 @@ export function publicOpinionPage(rows, query, cursorSecret) {
     contractVersion: 'mx-insight-hub.public-opinion.v1',
     province: { code: query.province.code, name: query.province.name },
     sort: query.sort,
-    items: pageRows.map(publicOpinionItem),
+    items: pageRows.map((row) => publicOpinionItem(row, {
+      includeQuality: query.candidateMode !== 'formal',
+    })),
     pageInfo: {
       returnedCount: pageRows.length,
       hasMore,
@@ -221,6 +361,61 @@ export function publicOpinionPage(rows, query, cursorSecret) {
         ? encodePublicOpinionCursor(nextPosition, query.cursorBinding, cursorSecret)
         : null,
     },
+  }
+}
+
+export function publicOpinionCoverage(rows, query) {
+  const byProvince = new Map((rows || []).map((row) => [row.province_code, row]))
+  const provinces = CHINA_PROVINCES.map((province) => {
+    const row = byProvince.get(province.code) || {}
+    const formalCount = Number(row.formal_count || 0)
+    const qualifiedCandidateCount = Number(row.qualified_candidate_count || 0)
+    const candidateCount = Number(row.candidate_count || 0)
+    const verifiedCount = Number(row.verified_count || 0)
+    const availableCount = query.candidateMode === 'formal'
+      ? formalCount
+      : formalCount + (query.candidateMode === 'qualified' ? qualifiedCandidateCount : candidateCount)
+    const qualifiedCandidateRate = candidateCount > 0
+      ? Math.round((qualifiedCandidateCount / candidateCount) * 1_000) / 1_000
+      : null
+    const verifiedRate = availableCount > 0
+      ? Math.round((verifiedCount / availableCount) * 1_000) / 1_000
+      : null
+    return {
+      province: { code: province.code, name: province.name },
+      formalCount,
+      qualifiedCandidateCount,
+      candidateCount,
+      qualifiedCandidateRate,
+      verifiedCount,
+      verifiedRate,
+      availableCount,
+      shortfall: Math.max(0, query.targetPerProvince - availableCount),
+      meetsTarget: availableCount >= query.targetPerProvince,
+      averageQualityScore: numberValue(row.average_quality_score),
+    }
+  })
+  const ranked = provinces.slice().sort((left, right) => (
+    right.availableCount - left.availableCount
+    || (right.verifiedRate ?? -1) - (left.verifiedRate ?? -1)
+    || (right.averageQualityScore ?? -1) - (left.averageQualityScore ?? -1)
+    || left.province.code.localeCompare(right.province.code)
+  ))
+  return {
+    contractVersion: 'mx-insight-hub.public-opinion.coverage.v1',
+    from: query.from,
+    to: query.to,
+    includeCandidates: query.candidateMode === 'formal' ? false : query.candidateMode,
+    minQualityScore: query.minQualityScore,
+    targetPerProvince: query.targetPerProvince,
+    featuredProvinceCodes: ranked.slice(0, 8).map((item) => item.province.code),
+    totals: {
+      provinceCount: provinces.length,
+      availableCount: provinces.reduce((total, item) => total + item.availableCount, 0),
+      provincesMeetingTarget: provinces.filter((item) => item.meetsTarget).length,
+      totalShortfall: provinces.reduce((total, item) => total + item.shortfall, 0),
+    },
+    provinces,
   }
 }
 

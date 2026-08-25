@@ -591,7 +591,7 @@ test('explicit relaxed relevance remains available while strict relevance is the
 
 test('search profile registry exposes a bounded public allowlist and keeps diagnostics admin-only', () => {
   const publicCapabilities = searchCapabilities()
-  assert.equal(publicCapabilities.indexSchema, 'content-v4')
+  assert.equal(publicCapabilities.indexSchema, 'content-v5')
   assert.equal(publicCapabilities.defaultProfile, DEFAULT_SEARCH_PROFILE)
   assert.deepEqual(publicCapabilities.profiles.map((entry) => entry.id), [
     'canonical.balanced.v1',
@@ -635,7 +635,7 @@ test('named content profiles compile to fixed fields and operators', async () =>
   const searches = []
   const client = {
     async getAlias(alias) {
-      return { [`${alias}-v4-current`]: { aliases: { [alias]: {} } } }
+      return { [`${alias}-v5-current`]: { aliases: { [alias]: {} } } }
     },
     async request(method, path, body) {
       if (path.includes('/_pit?')) return { id: `pit-${searches.length}` }
@@ -686,14 +686,14 @@ test('named content profiles compile to fixed fields and operators', async () =>
   )
 })
 
-test('v4-only profiles fail closed until the read alias serves content-v4', async () => {
+test('v4 profile features remain available during the content-v5 publication rollout', async () => {
   let backing = 'mx-insight-hub-content-v3-current'
   const client = {
     async getAlias(alias) {
       return { [backing]: { aliases: { [alias]: {} } } }
     },
     async request(method, path) {
-      if (path.includes('/_pit?')) return { id: 'pit-v4-ready' }
+      if (path.includes('/_pit?')) return { id: 'pit-profile-ready' }
       if (path === '/_search') return { hits: { total: { value: 0, relation: 'eq' }, hits: [] } }
       if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
       throw new Error(`unexpected ${method} ${path}`)
@@ -720,12 +720,18 @@ test('v4-only profiles fail closed until the read alias serves content-v4', asyn
   )
 
   backing = 'mx-insight-hub-content-v4-current'
-  const after = await queries.searchCapabilities({ audience: 'admin' })
-  assert.equal(after.activeIndexSchema, 'content-v4')
-  assert.equal(after.ready, true)
-  assert.equal(after.profiles.find((entry) => entry.id === 'canonical.zh-recall.v1').ready, true)
+  const duringRollout = await queries.searchCapabilities({ audience: 'admin' })
+  assert.equal(duringRollout.activeIndexSchema, 'content-v4')
+  assert.equal(duringRollout.ready, false, 'publication visibility still requires content-v5')
+  assert.equal(duringRollout.profiles.find((entry) => entry.id === 'canonical.zh-recall.v1').ready, true)
   const result = await queries.searchContent('人工智能', { searchProfile: 'canonical.title-prefix.v1' })
   assert.equal(result.searchExecution.appliedProfile, 'canonical.title-prefix.v1')
+
+  backing = 'mx-insight-hub-content-v5-current'
+  const after = await queries.searchCapabilities({ audience: 'admin' })
+  assert.equal(after.activeIndexSchema, 'content-v5')
+  assert.equal(after.ready, true)
+  assert.equal(after.profiles.find((entry) => entry.id === 'canonical.zh-recall.v1').ready, true)
 })
 
 test('degraded query analysis is bounded and falls back to phrase without using incompatible tokens', async () => {
@@ -800,7 +806,7 @@ test('every segmentation-dependent profile fails soft to the fixed phrase plan w
     pool: { query: async () => ({ rows: [] }) },
     client: {
       async getAlias(alias) {
-        return { [`${alias}-v4-current`]: { aliases: { [alias]: {} } } }
+        return { [`${alias}-v5-current`]: { aliases: { [alias]: {} } } }
       },
       async request(method, path, body) {
         if (path.includes('/_pit?')) return { id: `pit-degraded-${searches.length}` }
@@ -1214,8 +1220,8 @@ test('an expired PIT is reported as an expired cursor instead of restarting on P
 test('content index derives read alias, write alias and bootstrap index', () => {
   const definition = contentIndex()
   assert.equal(definition.readAlias, 'mx-insight-hub-content')
-  assert.equal(definition.writeAlias, 'mx-insight-hub-content-v4')
-  assert.equal(definition.currentIndex, 'mx-insight-hub-content-v4-current')
+  assert.equal(definition.writeAlias, 'mx-insight-hub-content-v5')
+  assert.equal(definition.currentIndex, 'mx-insight-hub-content-v5-current')
   assert.equal(definition.bootstrapIndex, definition.currentIndex)
   assert.equal(definition.settings['index.lifecycle.name'], undefined)
   assert.equal(definition.settings['index.lifecycle.rollover_alias'], undefined)
@@ -1378,17 +1384,33 @@ function currentSnapshotPool(matchSql, rows, {
   }
 }
 
-test('content current index atomically replaces v1-v3 read memberships with v4 PostgreSQL truth', async () => {
+test('content current index atomically replaces v1-v4 read memberships with v5 PostgreSQL truth', async () => {
   const indexSet = contentIndex()
   const oldV1 = 'mx-insight-hub-content-v1-000001'
   const oldV2 = 'mx-insight-hub-content-v2-000001'
   const oldV3 = 'mx-insight-hub-content-v3-current'
+  const oldV4 = 'mx-insight-hub-content-v4-current'
   const harness = currentIndexHarness(indexSet, {
     [oldV1]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v1': { is_write_index: true } },
     [oldV2]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v2': { is_write_index: true } },
     [oldV3]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v3': { is_write_index: true } },
+    [oldV4]: { [indexSet.readAlias]: {}, 'mx-insight-hub-content-v4': { is_write_index: true } },
   })
-  const live = canonicalRow()
+  const live = canonicalRow({
+    dataset_id: 'public-opinion.province.v1',
+    platform: 'public_opinion',
+    object_type: 'opinion_item',
+    event_time: null,
+    publication_source_stage: 'candidate',
+    publication_status: 'qualified',
+    publication_quality_score: 91,
+    publication_display_admin1_code: 'CN-JS',
+    publication_geography_verified: true,
+    publication_location_label: '江苏',
+    publication_location_type: 'province',
+    publication_country_name: '中国',
+    publication_country_code: 'CN',
+  })
   const deleted = canonicalRow({
     id: '22222222-2222-4222-8222-222222222222',
     projection_revision: 4,
@@ -1411,7 +1433,7 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
   })
 
   assert.equal(result.rebuilt, true)
-  assert.equal(result.currentIndex, 'mx-insight-hub-content-v4-current')
+  assert.equal(result.currentIndex, 'mx-insight-hub-content-v5-current')
   assert.equal(harness.calls.templates.length, 1)
   assert.equal(harness.calls.templates[0].body.template.aliases, undefined, 'partial rebuild is never exposed by a template alias')
   assert.equal(harness.calls.templates[0].body.template.settings['index.lifecycle.name'], undefined)
@@ -1423,6 +1445,8 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
     entry.sql.includes('FROM core.canonical_records') && !entry.sql.includes('count(*)')
   ))
   assert.equal(canonicalScans[0].values[2], null, 'the build pass scans everything')
+  assert.match(canonicalScans[0].sql, /publication\.canonical_revision = record\.current_revision/)
+  assert.match(canonicalScans.at(-1).sql, /publication\.updated_at >= \$3/)
   assert.equal(
     canonicalScans.at(-1).values[2].toISOString(),
     snapshot.buildStartedAt.toISOString(),
@@ -1430,10 +1454,22 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
   )
   assert.deepEqual(
     harness.calls.readAliasesDuringBulk[0],
-    [oldV1, oldV2, oldV3],
-    'v1-v3 remain readable until the first complete v4 snapshot has succeeded',
+    [oldV1, oldV2, oldV3, oldV4],
+    'v1-v4 remain readable until the first complete v5 snapshot has succeeded',
   )
   assert.deepEqual(harness.calls.readAliasesDuringBulk[1], [indexSet.currentIndex])
+  assert.deepEqual(harness.calls.bulks[1][1].publication, {
+    stage: 'candidate',
+    status: 'qualified',
+    qualityScore: 91,
+    displayAdmin1: 'CN-JS',
+    geographyVerified: true,
+    effectiveTime: live.collected_at,
+    locationLabel: '江苏',
+    locationType: 'province',
+    countryName: '中国',
+    countryCode: 'CN',
+  })
   assert.equal(harness.calls.bulks[0][0].index.version_type, 'external_gte')
   assert.equal(harness.calls.bulks[0][2].delete.version_type, 'external_gte')
 
@@ -1442,6 +1478,7 @@ test('content current index atomically replaces v1-v3 read memberships with v4 P
   assert.ok(actions.some(({ remove }) => remove?.index === oldV1 && remove.alias === indexSet.readAlias))
   assert.ok(actions.some(({ remove }) => remove?.index === oldV2 && remove.alias === indexSet.readAlias))
   assert.ok(actions.some(({ remove }) => remove?.index === oldV3 && remove.alias === indexSet.readAlias))
+  assert.ok(actions.some(({ remove }) => remove?.index === oldV4 && remove.alias === indexSet.readAlias))
   assert.ok(actions.some(({ add }) => add?.index === indexSet.currentIndex && add.alias === 'mx-insight-hub-content-v1'))
   assert.ok(actions.some(({ add }) => add?.index === indexSet.currentIndex && add.alias === 'mx-insight-hub-content-v3'))
   assert.deepEqual(Object.keys(harness.aliasResponse(indexSet.readAlias)), [indexSet.currentIndex])
@@ -1703,10 +1740,10 @@ test('current-state cleanup supports a caller-selected revision field', async ()
 test('current-state cleanup retries an alias cutover snapshot and never purges the new generation', async () => {
   const indexSet = {
     readAlias: 'content',
-    writeAlias: 'content-v4',
-    currentIndex: 'content-v4-current',
+    writeAlias: 'content-v5',
+    currentIndex: 'content-v5-current',
   }
-  const alternate = 'content-v4-rebuild'
+  const alternate = 'content-v5-rebuild'
   let writeReads = 0
   let purgeCalls = 0
   const client = {
@@ -1742,8 +1779,8 @@ test('live current-state writes refuse to mix a different tokenizer backend', as
   let purgeCalls = 0
   const indexSet = {
     readAlias: 'content',
-    writeAlias: 'content-v4',
-    currentIndex: 'content-v4-current',
+    writeAlias: 'content-v5',
+    currentIndex: 'content-v5-current',
   }
   const client = {
     async getAlias(alias) {
@@ -1781,7 +1818,7 @@ test('live current-state writes refuse to mix a different tokenizer backend', as
 })
 
 test('live writes and A/B cutover hold opposite modes of the same advisory fence', async () => {
-  const indexSet = { readAlias: 'content', writeAlias: 'content-v4' }
+  const indexSet = { readAlias: 'content', writeAlias: 'content-v5' }
   const events = []
   const values = []
   const statements = []
@@ -1842,7 +1879,7 @@ test('a failed advisory unlock destroys the pooled live-writer connection', asyn
   await assert.rejects(
     () => withCurrentStateWriteFence({
       pool: { connect: async () => connection },
-      indexSet: { readAlias: 'content', writeAlias: 'content-v4' },
+      indexSet: { readAlias: 'content', writeAlias: 'content-v5' },
     }, async () => {}),
     unlockError,
   )
@@ -2211,7 +2248,7 @@ test('projector heartbeats a long-running live claim with the same owner and lea
       rows: [{ id: 6, aggregate_id: aggregateId, event_type: 'delete', projection_revision: 2, attempts: 1 }],
     })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
-    ['FROM core.canonical_records WHERE id = ANY', async () => {
+    ['FROM core.canonical_records record', async () => {
       recordsRequested = true
       await recordsGate
       return { rows: [] }
@@ -2259,13 +2296,22 @@ test('projector heartbeats a long-running live claim with the same owner and lea
 })
 
 test('projector treats a version conflict as delivered, not failed', async () => {
-  const row = canonicalRow()
+  const row = canonicalRow({
+    dataset_id: 'public-opinion.province.v1',
+    platform: 'public_opinion',
+    object_type: 'opinion_item',
+    publication_source_stage: 'formal',
+    publication_status: 'formal',
+    publication_quality_score: null,
+    publication_display_admin1_code: 'CN-JS',
+    publication_geography_verified: true,
+  })
   const updates = []
   const pool = fakePool([
     ["SET status = 'claimed'", () => ({
       rows: [{ id: 7, aggregate_id: row.id, event_type: 'upsert', projection_revision: 3, attempts: 1 }],
     })],
-    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [row] })],
+    ['FROM core.canonical_records record', () => ({ rows: [row] })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
     ["SET status = 'delivered'", (values) => {
       updates.push(['delivered', values[0]])
@@ -2298,6 +2344,16 @@ test('projector treats a version conflict as delivered, not failed', async () =>
   const [action] = bulkBody
   assert.equal(action.index.version_type, 'external')
   assert.equal(action.index.version, 3, 'external version guards against out-of-order delivery')
+  assert.deepEqual(bulkBody[1].publication, {
+    stage: 'formal',
+    status: 'formal',
+    qualityScore: null,
+    displayAdmin1: 'CN-JS',
+    geographyVerified: true,
+    effectiveTime: row.event_time,
+  })
+  const load = pool.queries.find(({ sql }) => sql.includes('FROM core.canonical_records record'))
+  assert.match(load.sql, /publication\.canonical_revision = record\.current_revision/)
   const deliveredUpdate = pool.queries.find(({ sql }) => sql.includes("SET status = 'delivered'"))
   assert.match(deliveredUpdate.sql, /status = 'claimed'/)
   assert.match(deliveredUpdate.sql, /locked_by = \$2/)
@@ -2315,6 +2371,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     'mx-insight-hub-content-v2-000001',
     'mx-insight-hub-content-v3-current',
     'mx-insight-hub-content-v4-current',
+    'mx-insight-hub-content-v5-current',
   ]
   let cleanupRequest = null
   let bulkBody = null
@@ -2322,7 +2379,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     ["SET status = 'claimed'", () => ({
       rows: [{ id: 8, aggregate_id: row.id, event_type: 'upsert', projection_revision: 3, attempts: 1 }],
     })],
-    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [row] })],
+    ['FROM core.canonical_records record', () => ({ rows: [row] })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
     ["SET status = 'delivered'", (values) => {
       delivered.push(values[0])
@@ -2336,9 +2393,9 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     logger: { log() {}, warn() {}, error() {} },
     client: {
       async getAlias(alias) {
-        if (alias === 'mx-insight-hub-content-v4') {
+        if (alias === 'mx-insight-hub-content-v5') {
           return {
-            [backingIndices[3]]: {
+            [backingIndices.at(-1)]: {
               aliases: { [alias]: { is_write_index: true } },
             },
           }
@@ -2367,7 +2424,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
   assert.equal(result.failed, 0)
   assert.deepEqual(delivered, [[8]])
   assert.equal(cleanupRequest.method, 'POST')
-  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current\/_delete_by_query/)
+  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current,mx-insight-hub-content-v4-current\/_delete_by_query/)
   assert.deepEqual(
     cleanupRequest.body.query.bool.should[0].bool.filter,
     [
@@ -2384,7 +2441,7 @@ test('projector turns a stale upsert into a versioned delete for a current tombs
     ],
   )
   assert.equal(bulkBody.length, 1)
-  assert.equal(bulkBody[0].delete._index, 'mx-insight-hub-content-v4')
+  assert.equal(bulkBody[0].delete._index, 'mx-insight-hub-content-v5')
   assert.equal(bulkBody[0].delete.version, 4, 'the tombstone uses current PostgreSQL state')
   assert.equal(bulkBody[0].delete.version_type, 'external_gte')
 })
@@ -2396,6 +2453,7 @@ test('projector turns a stale delete into the current restored document', async 
     'mx-insight-hub-content-v2-000001',
     'mx-insight-hub-content-v3-current',
     'mx-insight-hub-content-v4-current',
+    'mx-insight-hub-content-v5-current',
   ]
   let cleanupRequest = null
   let bulkBody = null
@@ -2403,7 +2461,7 @@ test('projector turns a stale delete into the current restored document', async 
     ["SET status = 'claimed'", () => ({
       rows: [{ id: 9, aggregate_id: row.id, event_type: 'delete', projection_revision: 4, attempts: 1 }],
     })],
-    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [row] })],
+    ['FROM core.canonical_records record', () => ({ rows: [row] })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
     ["SET status = 'delivered'", () => ({ rows: [], rowCount: 1 })],
   ])
@@ -2414,9 +2472,9 @@ test('projector turns a stale delete into the current restored document', async 
     logger: { log() {}, warn() {}, error() {} },
     client: {
       async getAlias(alias) {
-        if (alias === 'mx-insight-hub-content-v4') {
+        if (alias === 'mx-insight-hub-content-v5') {
           return {
-            [backingIndices[3]]: {
+            [backingIndices.at(-1)]: {
               aliases: { [alias]: { is_write_index: true } },
             },
           }
@@ -2437,9 +2495,9 @@ test('projector turns a stale delete into the current restored document', async 
   const result = await projector.projectBatch()
   assert.equal(result.delivered, 1)
   assert.equal(result.failed, 0)
-  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current\/_delete_by_query/)
+  assert.match(cleanupRequest.path, /mx-insight-hub-content-v1-000001,mx-insight-hub-content-v2-000001,mx-insight-hub-content-v3-current,mx-insight-hub-content-v4-current\/_delete_by_query/)
   assert.equal(bulkBody.length, 2)
-  assert.equal(bulkBody[0].index._index, 'mx-insight-hub-content-v4')
+  assert.equal(bulkBody[0].index._index, 'mx-insight-hub-content-v5')
   assert.equal(bulkBody[0].index.version, 5)
   assert.equal(bulkBody[0].index.version_type, 'external')
   assert.equal(bulkBody[1].id, row.id)
@@ -2456,7 +2514,7 @@ test('projector emits one operation and delivers every event for one aggregate',
         { id: 11, aggregate_id: row.id, event_type: 'upsert', projection_revision: 5, attempts: 1 },
       ],
     })],
-    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [row] })],
+    ['FROM core.canonical_records record', () => ({ rows: [row] })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
     ["SET status = 'delivered'", (values) => {
       delivered.push(values[0])
@@ -2492,7 +2550,7 @@ test('projector emits a versioned delete when the canonical record no longer exi
     ["SET status = 'claimed'", () => ({
       rows: [{ id: 12, aggregate_id: aggregateId, event_type: 'upsert', projection_revision: 6, attempts: 1 }],
     })],
-    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [] })],
+    ['FROM core.canonical_records record', () => ({ rows: [] })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
     ["SET status = 'delivered'", (values) => {
       delivered.push(values[0])
@@ -2526,7 +2584,7 @@ test('projector failure transition is fenced by the current lease owner', async 
     ["SET status = 'claimed'", () => ({
       rows: [{ id: 13, aggregate_id: row.id, event_type: 'upsert', projection_revision: 3, attempts: 1 }],
     })],
-    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [row] })],
+    ['FROM core.canonical_records record', () => ({ rows: [row] })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
     ['SET status = $2', () => ({ rowCount: 1 })],
   ])
@@ -2560,7 +2618,7 @@ test('a worker that lost its lease cannot report another owner event as delivere
     ["SET status = 'claimed'", () => ({
       rows: [{ id: 14, aggregate_id: row.id, event_type: 'upsert', projection_revision: 3, attempts: 1 }],
     })],
-    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [row] })],
+    ['FROM core.canonical_records record', () => ({ rows: [row] })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
     ["SET status = 'delivered'", () => ({ rowCount: 0 })],
   ])
@@ -2589,7 +2647,7 @@ test('projector returns the whole batch when the cluster is unreachable', async 
     ["SET status = 'claimed'", () => ({
       rows: [{ id: 11, aggregate_id: canonicalRow().id, event_type: 'upsert', projection_revision: 1, attempts: 1 }],
     })],
-    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [canonicalRow()] })],
+    ['FROM core.canonical_records record', () => ({ rows: [canonicalRow()] })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
     ["SET status = 'pending', leased_until = NULL, locked_by = NULL,\n              attempts = GREATEST", (values) => {
       released.push(values)
@@ -2640,7 +2698,7 @@ test('projector releases only transient-tokenizer upserts while still delivering
             { id: 17, aggregate_id: deferred.id, event_type: 'upsert', projection_revision: 3, attempts: 1 },
           ],
     })],
-    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [row, deferred] })],
+    ['FROM core.canonical_records record', () => ({ rows: [row, deferred] })],
     ['FROM control.search_rebuild_progress', () => ({ rows: [{ segmenter_backend: 'hanlp' }] })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
     ["SET status = 'pending', leased_until = NULL, locked_by = NULL,\n              attempts = GREATEST", (values) => {
@@ -2719,7 +2777,7 @@ test('projector budgets a permanent tokenizer poison per aggregate and continues
       { id: 21, aggregate_id: poison.id, event_type: 'upsert', projection_revision: 3, attempts: 5 },
       { id: 22, aggregate_id: healthy.id, event_type: 'upsert', projection_revision: 3, attempts: 1 },
     ] })],
-    ['FROM core.canonical_records WHERE id = ANY', () => ({ rows: [poison, healthy] })],
+    ['FROM core.canonical_records record', () => ({ rows: [poison, healthy] })],
     ['FROM control.search_rebuild_progress', () => ({ rows: [{ segmenter_backend: 'hanlp' }] })],
     ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
     ['SET status = $2', (values) => {
@@ -2768,7 +2826,7 @@ test('an interrupted rebuild resumes from its cursor instead of discarding the p
   const harness = currentIndexHarness(indexSet, {
     'mx-insight-hub-content-v3-current': { [indexSet.readAlias]: {} },
   })
-  // The partial v4 index survived the interruption; it serves no alias.
+  // The partial v5 index survived the interruption; it serves no alias.
   harness.client.indexExists = async (index) => index === indexSet.currentIndex
   const remaining = canonicalRow({ id: '44444444-4444-4444-8444-444444444444' })
   const snapshot = currentSnapshotPool('FROM core.canonical_records', [remaining], {
@@ -2980,7 +3038,7 @@ test('a strict tokenizer failure names the status behind the category', async ()
 
 test('an ordinary restart replays the delta, not the corpus', async () => {
   const indexSet = contentIndex()
-  // v4 already serves every alias: the active startup path.
+  // v5 already serves every alias: the active startup path.
   const harness = currentIndexHarness(indexSet, {
     [indexSet.currentIndex]: {
       [indexSet.readAlias]: {},

@@ -1154,8 +1154,9 @@ paths:
         Telegram entry advertises message context per dataset under context;
         context.ready is an index-serving gate independent from the broader
         Telegram platform ready flag. The
-        Hub-owned public_opinion entry advertises province_feed, item_detail and
-        stored_search. Its ready flag requires both an active fixed ingestion
+        Hub-owned public_opinion entry advertises province_feed,
+        province_coverage, item_detail and stored_search. Its ready flag requires
+        both an active fixed ingestion
         source and both valid Hub serving indexes; it is not an additional grant
         or a guarantee of freshness, and an inactive source may still have
         previously indexed records available.
@@ -1241,7 +1242,7 @@ paths:
                             upstreamCompleteness: { status: bounded, basis: append_only_overlap, through: null }
                     - platform: public_opinion
                       ready: false
-                      capabilities: [province_feed, item_detail, stored_search]
+                      capabilities: [province_feed, province_coverage, item_detail, stored_search]
                       source: hub
                       servingMode: stored
                     - platform: xiaohongshu
@@ -1480,9 +1481,18 @@ paths:
         database, index, SQL, Elasticsearch DSL/script or provider parameters.
         Response and item source are always hub; connector lineage, raw payloads
         and provider coordinates are excluded. The opaque cursor is HMAC-signed
-        and bound to the normalized query, filters and page size.
+        and bound to the normalized query, filters and page size. For
+        platform=public_opinion the default is formal-only. Candidate and exact
+        geography/time controls require explicit platform=public_opinion;
+        includeCandidates=all requires from, to and at least one of province,
+        countryCode or location. Other platforms are unaffected. Explicit
+        candidate results expose only bounded Hub quality/location metadata and
+        omit candidate author/contentType and upstream source identity. The
+        publication-visibility contract is part of the idempotency fingerprint;
+        after upgrading to this contract, use a new Idempotency-Key instead of
+        reusing a pre-upgrade key.
       x-mx-error-codes:
-        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields, idempotency_key_required, invalid_idempotency_key]
+        "400": [invalid_request, invalid_cursor, invalid_province, candidate_scope_required, page_size_exceeded, unsupported_fields, idempotency_key_required, invalid_idempotency_key]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
@@ -1539,9 +1549,19 @@ paths:
         filters and Elasticsearch DSL are rejected. Its independent usage bucket always applies the
         strictest limits across the consumer's complete current platform-grant
         set. Public items use an allowlist and exclude raw payloads, extensions,
-        credentials and provider coordinates.
+        credentials and provider coordinates. In a mixed-platform result, only
+        the public_opinion branch is formal-only by default; every other
+        platform is unchanged. Candidate and exact geography/time controls
+        require explicit platform=public_opinion; includeCandidates=all requires
+        from, to and at least one of province, countryCode or location. Explicit
+        candidate results expose only bounded Hub quality/location metadata and
+        omit candidate author/contentType and upstream source identity. The
+        publication-visibility contract is part of the idempotency fingerprint
+        whenever the authorized scope can include public_opinion; after
+        upgrading to this contract, use a new Idempotency-Key instead of reusing
+        a pre-upgrade key.
       x-mx-error-codes:
-        "400": [invalid_request, invalid_cursor, invalid_platform, invalid_search_profile, page_size_exceeded, unsupported_fields, idempotency_key_required, invalid_idempotency_key]
+        "400": [invalid_request, invalid_cursor, invalid_platform, invalid_province, candidate_scope_required, invalid_search_profile, page_size_exceeded, unsupported_fields, idempotency_key_required, invalid_idempotency_key]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown]
@@ -1648,20 +1668,25 @@ paths:
       description: >-
         Requires the API key's consumer to have the explicit public_opinion
         platform grant. The province path is normalized to a stable ISO
-        3166-2:CN code. This safe GET reads the Hub canonical PostgreSQL
+        3166-2:CN code. By default includeCandidates=false preserves the
+        formal-only contract. qualified adds Hub-qualified candidates at or
+        above minQualityScore (default 80); includeCandidates=all requires both
+        from and to. This
+        safe GET reads the Hub canonical PostgreSQL
         projection and is independently metered on every call and retry. Both
         valid Hub serving indexes are required. hot excludes records without
         heatScore and sorts by heatScore, effective sort time and id; latest
         sorts by effective sort time, collectedAt and id. Effective sort time is
         publishedAt when present, otherwise collectedAt; this fallback is not
-        exposed as publishedAt. from/to still filter publishedAt only, so bounded
-        requests exclude rows whose publishedAt is null. Both orders use a
+        exposed as publishedAt. Formal rows retain publishedAt-only window
+        semantics. Candidate rows with no publishedAt use collectedAt only for
+        the explicit bounded candidate window. Both orders use a
         signed keyset cursor. Only the documented customer-safe item allowlist
         is returned; raw rows, strategy/run ids, source coordinates, extensions,
         model reasoning and lineage remain private.
-      x-mx-allowed-query-fields: [sort, from, to, pageSize, cursor]
+      x-mx-allowed-query-fields: [sort, from, to, includeCandidates, minQualityScore, pageSize, cursor]
       x-mx-error-codes:
-        "400": [invalid_province, invalid_request, invalid_sort, page_size_exceeded, invalid_cursor, unsupported_fields]
+        "400": [invalid_province, invalid_request, invalid_sort, page_size_exceeded, invalid_cursor, unsupported_fields, candidate_scope_required]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "429": [quota_exceeded]
@@ -1687,13 +1712,23 @@ paths:
         - name: from
           in: query
           required: false
-          description: Inclusive RFC3339 published/event-time lower bound. It must not be later than to.
+          description: Inclusive RFC3339 lower bound. Formal rows use publishedAt; undated candidate rows use collectedAt.
           schema: { type: string, format: date-time }
         - name: to
           in: query
           required: false
-          description: Inclusive RFC3339 published/event-time upper bound. It must not be earlier than from.
+          description: Inclusive RFC3339 upper bound. Formal rows use publishedAt; undated candidate rows use collectedAt.
           schema: { type: string, format: date-time }
+        - name: includeCandidates
+          in: query
+          required: false
+          description: Defaults to false. qualified (or true) adds qualified candidates; all requires from and to.
+          schema: { type: string, enum: ["false", "true", qualified, all], default: "false" }
+        - name: minQualityScore
+          in: query
+          required: false
+          description: Candidate quality threshold from 0 to 100; qualified defaults to 80.
+          schema: { type: integer, minimum: 0, maximum: 100 }
         - name: pageSize
           in: query
           required: false
@@ -1735,6 +1770,64 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /data/public-opinion/province-coverage:
+    get:
+      operationId: getPublicOpinionProvinceCoverage
+      summary: Compare public-opinion availability across every province.
+      description: >-
+        Requires the public_opinion grant, valid Hub serving indexes and an
+        explicit from/to window. The default is formal-only. qualified adds
+        candidates at or above minQualityScore (default 80); all includes all
+        candidates, optionally narrowed by minQualityScore. Formal rows use
+        publishedAt for the window; undated candidates use collectedAt. targetPerProvince
+        defaults to 10. featuredProvinceCodes contains at most eight ranked
+        provinces; provinces contains the full stable province taxonomy. Only
+        Hub-owned safe publication counts and scores are returned; upstream raw
+        and operational coordinates remain private.
+      x-mx-allowed-query-fields: [from, to, includeCandidates, minQualityScore, targetPerProvince]
+      x-mx-error-codes:
+        "400": [invalid_request, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable, serving_indexes_unavailable]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inclusive RFC3339 published/event-time lower bound.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          description: Inclusive RFC3339 published/event-time upper bound. It must not be earlier than from.
+          schema: { type: string, format: date-time }
+        - name: includeCandidates
+          in: query
+          required: false
+          description: Defaults to false. qualified (or true) adds qualified candidates; all includes all candidates.
+          schema: { type: string, enum: ["false", "true", qualified, all], default: "false" }
+        - name: minQualityScore
+          in: query
+          required: false
+          description: Candidate quality threshold from 0 to 100; qualified defaults to 80.
+          schema: { type: integer, minimum: 0, maximum: 100 }
+        - name: targetPerProvince
+          in: query
+          required: false
+          description: Coverage target used for shortfall and meetsTarget calculations.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+      responses:
+        "200":
+          description: Customer-safe province coverage for one explicit time window.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicOpinionCoverageEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /data/public-opinion/items/{id}:
     get:
       operationId: getPublicOpinionItem
@@ -1744,11 +1837,13 @@ paths:
         platform grant. id is the Hub canonical UUID returned by the province
         feed or canonical search. The lookup is fixed to platform
         public_opinion, dataset public-opinion.province.v1 and object type
-        opinion_item; deleted or out-of-scope records are returned as
-        item_not_found. This safe GET is independently metered on every call and
-        retry.
+        opinion_item. By default includeCandidates=false looks only in the
+        formal corpus. qualified or all may resolve a candidate meeting
+        minQualityScore; the exact id lookup does not require a time window. Deleted,
+        below-threshold or out-of-scope records return item_not_found. This safe
+        GET is independently metered on every call and retry.
       x-mx-error-codes:
-        "400": [invalid_request]
+        "400": [invalid_request, unsupported_fields]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
         "404": [item_not_found]
@@ -1760,6 +1855,16 @@ paths:
           required: true
           description: Canonical UUID from a public-opinion list or canonical-search result.
           schema: { type: string, format: uuid }
+        - name: includeCandidates
+          in: query
+          required: false
+          description: Defaults to false. qualified (or true) and all opt into candidate detail lookup.
+          schema: { type: string, enum: ["false", "true", qualified, all], default: "false" }
+        - name: minQualityScore
+          in: query
+          required: false
+          description: Candidate quality threshold from 0 to 100; qualified defaults to 80.
+          schema: { type: integer, minimum: 0, maximum: 100 }
       responses:
         "200":
           description: One customer-safe canonical public-opinion item.
@@ -3380,8 +3485,23 @@ components:
         query: { type: string, minLength: 1, maxLength: 500 }
         datasetId: { type: string, minLength: 1, maxLength: 200, description: Optional exact logical filter; not a physical database or authorization grant. }
         objectType: { type: string, minLength: 1, maxLength: 100, description: Optional exact canonical object-type filter. }
+        includeCandidates:
+          type: string
+          enum: [qualified, all]
+          description: Valid only with explicit platform=public_opinion. qualified defaults minQualityScore to 80; all requires from, to and at least one of province, countryCode or location.
+        minQualityScore: { type: integer, minimum: 0, maximum: 100, description: Valid only with includeCandidates=qualified or all; qualified defaults to 80. }
+        province: { type: string, minLength: 1, maxLength: 64, description: Exact ISO 3166-2:CN code or supported Chinese province name; valid only with explicit platform=public_opinion. }
+        countryCode: { type: string, pattern: "^[A-Za-z]{2}$", description: Exact ISO 3166-1 alpha-2 country; valid only with explicit platform=public_opinion. }
+        location: { type: string, minLength: 1, maxLength: 160, description: Exact normalized location label; valid only with explicit platform=public_opinion. }
+        from: { type: string, format: date-time, description: Inclusive lower bound. Formal uses eventTime; an explicit candidate falls back to collectedAt when eventTime is absent. }
+        to: { type: string, format: date-time, description: Inclusive upper bound; it must not be earlier than from. }
         pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
-        cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to query, platform, datasetId, objectType and page size. }
+        cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to the normalized query and filters; explicit public_opinion candidate controls join the binding. }
+        type:
+          type: string
+          enum: [fresh, stable]
+          default: fresh
+          description: fresh searches current data and replays a committed retry for at most 120 seconds; stable replays the first response for this key indefinitely. Part of the idempotency fingerprint.
     CanonicalSearchRequest:
       type: object
       additionalProperties: false
@@ -3391,13 +3511,33 @@ components:
         platform: { type: string, minLength: 1, maxLength: 64, description: Optional exact platform filter; it must be granted. Omit it to search every currently granted platform. }
         datasetId: { type: string, minLength: 1, maxLength: 200, description: Optional exact logical dataset filter; never a physical source selector or authorization grant. }
         objectType: { type: string, minLength: 1, maxLength: 100, description: Optional exact canonical object-type filter. }
+        includeCandidates:
+          type: string
+          enum: [qualified, all]
+          description: Valid only with explicit platform=public_opinion. qualified defaults minQualityScore to 80; all requires from, to and at least one of province, countryCode or location.
+        minQualityScore: { type: integer, minimum: 0, maximum: 100, description: Valid only with includeCandidates=qualified or all; qualified defaults to 80. }
+        province: { type: string, minLength: 1, maxLength: 64, description: Exact ISO 3166-2:CN code or supported Chinese province name; valid only with explicit platform=public_opinion. }
+        countryCode: { type: string, pattern: "^[A-Za-z]{2}$", description: Exact ISO 3166-1 alpha-2 country; valid only with explicit platform=public_opinion. }
+        location: { type: string, minLength: 1, maxLength: 160, description: Exact normalized location label; valid only with explicit platform=public_opinion. }
+        from: { type: string, format: date-time, description: Inclusive lower bound. Formal uses eventTime; an explicit candidate falls back to collectedAt when eventTime is absent. }
+        to: { type: string, format: date-time, description: Inclusive upper bound; it must not be earlier than from. }
         searchProfile:
           type: string
           enum: [canonical.balanced.v1, canonical.phrase.v1, canonical.terms-all.v1, canonical.zh-recall.v1, canonical.title-prefix.v1]
           default: canonical.balanced.v1
           description: Versioned server-owned search policy. The balanced default uses raw phrase OR all healthy HanLP/pre-segmented terms; degraded Jieba/bigram query terms cause an explicit phrase-only applied profile. Callers cannot supply arbitrary analysis settings or ES DSL.
         pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
-        cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to query, filters, page size, resolved search profile, sorted authorized platform scope and bounded first-page analysis state. }
+        cursor: { type: string, minLength: 1, maxLength: 8192, description: HMAC-signed opaque cursor bound to query, filters, page size, resolved search profile, sort, sorted authorized platform scope and bounded first-page analysis state; explicit public_opinion candidate controls join the binding. }
+        sort:
+          type: string
+          enum: [newest, oldest, relevance]
+          default: newest
+          description: Deterministic result order; every ordering ends on canonical id and is part of the cursor binding.
+        type:
+          type: string
+          enum: [fresh, stable]
+          default: fresh
+          description: fresh searches current data and replays a committed retry for at most 120 seconds; stable replays the first response for this key indefinitely. Part of the idempotency fingerprint.
     StoredSearchEnvelope:
       type: object
       additionalProperties: false
@@ -3419,6 +3559,16 @@ components:
                 platform: { type: string }
                 datasetId: { type: [string, "null"] }
                 objectType: { type: [string, "null"] }
+                includeCandidates:
+                  oneOf:
+                    - { type: boolean, const: false }
+                    - { type: string, enum: [qualified, all] }
+                minQualityScore: { type: [integer, "null"], minimum: 0, maximum: 100 }
+                province: { type: [string, "null"] }
+                countryCode: { type: [string, "null"] }
+                location: { type: [string, "null"] }
+                from: { type: [string, "null"], format: date-time }
+                to: { type: [string, "null"], format: date-time }
             items:
               type: array
               items: { $ref: "#/components/schemas/StoredSearchItem" }
@@ -3460,6 +3610,29 @@ components:
         collectedAt: { type: [string, "null"], format: date-time }
         score: { type: [number, "null"] }
         source: { type: string, const: hub }
+        quality: { $ref: "#/components/schemas/PublicOpinionSearchQuality" }
+        location: { $ref: "#/components/schemas/PublicOpinionSearchLocation" }
+    PublicOpinionSearchQuality:
+      type: object
+      additionalProperties: false
+      required: [stage, status, score, geographyVerified]
+      description: Bounded Hub publication metadata returned only for explicit public_opinion candidate searches.
+      properties:
+        stage: { type: [string, "null"], enum: [formal, candidate, null] }
+        status: { type: [string, "null"], enum: [formal, pending, qualified, rejected, failed, null] }
+        score: { type: [number, "null"], minimum: 0, maximum: 100 }
+        geographyVerified: { type: boolean }
+    PublicOpinionSearchLocation:
+      type: object
+      additionalProperties: false
+      required: [provinceCode, label, type, country, countryCode]
+      description: Bounded Hub-normalized location returned only for explicit public_opinion candidate searches.
+      properties:
+        provinceCode: { type: [string, "null"] }
+        label: { type: [string, "null"] }
+        type: { type: [string, "null"], enum: [province, country, region, city, maritime, unknown, null] }
+        country: { type: [string, "null"] }
+        countryCode: { type: [string, "null"], pattern: "^[A-Z]{2}$" }
     CanonicalSearchPageInfo:
       type: object
       additionalProperties: false
@@ -3504,6 +3677,16 @@ components:
                 platform: { type: [string, "null"] }
                 datasetId: { type: [string, "null"] }
                 objectType: { type: [string, "null"] }
+                includeCandidates:
+                  oneOf:
+                    - { type: boolean, const: false }
+                    - { type: string, enum: [qualified, all] }
+                minQualityScore: { type: [integer, "null"], minimum: 0, maximum: 100 }
+                province: { type: [string, "null"] }
+                countryCode: { type: [string, "null"] }
+                location: { type: [string, "null"] }
+                from: { type: [string, "null"], format: date-time }
+                to: { type: [string, "null"], format: date-time }
             search:
               type: object
               additionalProperties: false
@@ -3865,6 +4048,28 @@ components:
         name: { type: [string, "null"], description: Reviewed public-facing source name, when available. }
         type: { type: [string, "null"], description: Reviewed source/content type, when available. }
         platform: { type: [string, "null"], description: Reviewed originating content platform, distinct from the public_opinion authorization platform. }
+    PublicOpinionQuality:
+      type: object
+      additionalProperties: false
+      required: [stage, status, score, threshold, geographyVerified]
+      description: Hub-owned publication metadata returned only when candidate visibility is explicitly enabled.
+      properties:
+        stage: { type: string, enum: [formal, candidate] }
+        status: { type: string, enum: [formal, pending, qualified, rejected, failed] }
+        score: { type: [number, "null"], minimum: 0, maximum: 100 }
+        threshold: { type: [number, "null"], minimum: 0, maximum: 100 }
+        geographyVerified: { type: boolean }
+    PublicOpinionLocation:
+      type: object
+      additionalProperties: false
+      required: [label, type, country, countryCode, geoScope]
+      description: Hub-normalized event location returned only with explicit candidate visibility when evidence is available.
+      properties:
+        label: { type: [string, "null"] }
+        type: { type: [string, "null"], enum: [province, country, region, city, maritime, unknown, null] }
+        country: { type: [string, "null"] }
+        countryCode: { type: [string, "null"] }
+        geoScope: { type: [string, "null"], enum: [province, multi_province, national, maritime, overseas, unknown, null] }
     PublicOpinionItem:
       type: object
       additionalProperties: false
@@ -3892,6 +4097,8 @@ components:
           type: [number, "null"]
           description: Typed source heat score. Used by province hot ordering; it is not a cross-source relevance score.
         origin: { $ref: "#/components/schemas/PublicOpinionOrigin" }
+        quality: { $ref: "#/components/schemas/PublicOpinionQuality" }
+        location: { $ref: "#/components/schemas/PublicOpinionLocation" }
     PublicOpinionPageInfo:
       type: object
       additionalProperties: false
@@ -3928,6 +4135,61 @@ components:
       required: [data, requestId]
       properties:
         data: { $ref: "#/components/schemas/PublicOpinionItem" }
+        requestId: { type: string, minLength: 1 }
+    PublicOpinionCoverageProvince:
+      type: object
+      additionalProperties: false
+      required: [province, formalCount, qualifiedCandidateCount, candidateCount, qualifiedCandidateRate, verifiedCount, verifiedRate, availableCount, shortfall, meetsTarget, averageQualityScore]
+      properties:
+        province: { $ref: "#/components/schemas/PublicOpinionProvince" }
+        formalCount: { type: integer, minimum: 0 }
+        qualifiedCandidateCount: { type: integer, minimum: 0 }
+        candidateCount: { type: integer, minimum: 0 }
+        qualifiedCandidateRate: { type: [number, "null"], minimum: 0, maximum: 1 }
+        verifiedCount: { type: integer, minimum: 0 }
+        verifiedRate: { type: [number, "null"], minimum: 0, maximum: 1 }
+        availableCount: { type: integer, minimum: 0 }
+        shortfall: { type: integer, minimum: 0 }
+        meetsTarget: { type: boolean }
+        averageQualityScore: { type: [number, "null"], minimum: 0, maximum: 100 }
+    PublicOpinionCoverageTotals:
+      type: object
+      additionalProperties: false
+      required: [provinceCount, availableCount, provincesMeetingTarget, totalShortfall]
+      properties:
+        provinceCount: { type: integer, minimum: 0, maximum: 34 }
+        availableCount: { type: integer, minimum: 0 }
+        provincesMeetingTarget: { type: integer, minimum: 0, maximum: 34 }
+        totalShortfall: { type: integer, minimum: 0 }
+    PublicOpinionCoverageEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, from, to, includeCandidates, minQualityScore, targetPerProvince, featuredProvinceCodes, totals, provinces]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.public-opinion.coverage.v1 }
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+            includeCandidates:
+              oneOf:
+                - { type: boolean, const: false }
+                - { type: string, enum: [qualified, all] }
+            minQualityScore: { type: [integer, "null"], minimum: 0, maximum: 100 }
+            targetPerProvince: { type: integer, minimum: 1, maximum: 100 }
+            featuredProvinceCodes:
+              type: array
+              maxItems: 8
+              uniqueItems: true
+              items: { type: string, pattern: "^CN-[A-Z]{2}$" }
+            totals: { $ref: "#/components/schemas/PublicOpinionCoverageTotals" }
+            provinces:
+              type: array
+              maxItems: 34
+              items: { $ref: "#/components/schemas/PublicOpinionCoverageProvince" }
         requestId: { type: string, minLength: 1 }
     TelegramRecord:
       type: object

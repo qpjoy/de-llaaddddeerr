@@ -242,13 +242,33 @@ function assertNightAllPublicContract(document) {
 }
 
 function assertPublicOpinionContract(document) {
+  const capabilitiesExample = document.paths['/data/capabilities']
+    ?.get.responses[200].content['application/json'].example
+  const publicOpinionCapability = capabilitiesExample?.data.platforms
+    ?.find((entry) => entry.platform === 'public_opinion')
   const feed = document.paths['/data/public-opinion/provinces/{province}/items']?.get
+  const coverage = document.paths['/data/public-opinion/province-coverage']?.get
   const detail = document.paths['/data/public-opinion/items/{id}']?.get
   assert.ok(feed)
+  assert.ok(coverage)
   assert.ok(detail)
-  assert.deepEqual(feed.parameters.map((parameter) => parameter.name), [
-    'province', 'sort', 'from', 'to', 'pageSize', 'cursor',
+  assert.deepEqual(publicOpinionCapability?.capabilities, [
+    'province_feed', 'province_coverage', 'item_detail', 'stored_search',
   ])
+  assert.deepEqual(feed.parameters.map((parameter) => parameter.name), [
+    'province', 'sort', 'from', 'to', 'includeCandidates', 'minQualityScore', 'pageSize', 'cursor',
+  ])
+  assert.deepEqual(detail.parameters.map((parameter) => parameter.name), [
+    'id', 'includeCandidates', 'minQualityScore',
+  ])
+  assert.deepEqual(coverage.parameters.map((parameter) => parameter.name), [
+    'from', 'to', 'includeCandidates', 'minQualityScore', 'targetPerProvince',
+  ])
+  assert.equal(coverage.parameters[0].required, true)
+  assert.equal(coverage.parameters[1].required, true)
+  assert.deepEqual(feed.parameters[4].schema.enum, ['false', 'true', 'qualified', 'all'])
+  assert.equal(feed.parameters[5].schema.minimum, 0)
+  assert.equal(feed.parameters[5].schema.maximum, 100)
   assert.equal(
     feed.responses[200].content['application/json'].schema.$ref,
     '#/components/schemas/PublicOpinionPageEnvelope',
@@ -257,12 +277,20 @@ function assertPublicOpinionContract(document) {
     detail.responses[200].content['application/json'].schema.$ref,
     '#/components/schemas/PublicOpinionItemEnvelope',
   )
+  assert.equal(
+    coverage.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/PublicOpinionCoverageEnvelope',
+  )
   assert.ok(feed['x-mx-error-codes'][400].includes('invalid_province'))
   assert.ok(feed['x-mx-error-codes'][403].includes('platform_not_granted'))
   assert.ok(feed['x-mx-error-codes'][503].includes('serving_indexes_unavailable'))
   assert.match(feed.description, /effective sort time/i)
-  assert.match(feed.description, /publishedAt is null/i)
+  assert.match(feed.description, /candidate rows.*collectedAt/i)
+  assert.match(feed.description, /includeCandidates=false/i)
+  assert.match(feed.description, /includeCandidates=all.*requires both from and to/i)
   assert.ok(detail['x-mx-error-codes'][404].includes('item_not_found'))
+  assert.match(detail.description, /does not require a time window/i)
+  assert.match(coverage.description, /full stable province taxonomy/i)
 
   const item = document.components.schemas.PublicOpinionItem
   assert.equal(item.additionalProperties, false)
@@ -270,15 +298,86 @@ function assertPublicOpinionContract(document) {
     'id', 'title', 'summary', 'url', 'publishedAt', 'collectedAt',
     'province', 'heatScore', 'origin',
   ])
-  assert.deepEqual(Object.keys(item.properties), item.required)
+  assert.deepEqual(Object.keys(item.properties), [...item.required, 'quality', 'location'])
   assert.equal(document.components.schemas.PublicOpinionOrigin.additionalProperties, false)
+  assert.equal(document.components.schemas.PublicOpinionQuality.additionalProperties, false)
+  assert.equal(document.components.schemas.PublicOpinionLocation.additionalProperties, false)
   assert.equal(document.components.schemas.PublicOpinionPageEnvelope.additionalProperties, false)
+  assert.equal(document.components.schemas.PublicOpinionCoverageEnvelope.additionalProperties, false)
+  assert.equal(document.components.schemas.PublicOpinionCoverageProvince.additionalProperties, false)
+  assert.equal(document.components.schemas.PublicOpinionCoverageTotals.additionalProperties, false)
+  assert.deepEqual(
+    document.components.schemas.PublicOpinionCoverageEnvelope
+      .properties.data.properties.includeCandidates.oneOf[0],
+    { type: 'boolean', const: false },
+  )
   assert.doesNotMatch(
     JSON.stringify({
       item: Object.keys(item.properties),
       origin: Object.keys(document.components.schemas.PublicOpinionOrigin.properties),
+      quality: Object.keys(document.components.schemas.PublicOpinionQuality.properties),
+      location: Object.keys(document.components.schemas.PublicOpinionLocation.properties),
+      coverage: Object.keys(document.components.schemas.PublicOpinionCoverageProvince.properties),
     }),
-    /raw_payload|strategy_id|run_id|llm_reason|extensions|source_item_id|lineage/i,
+    /raw_payload|strategy_id|run_id|llm_reason|extensions|source_item_id|lineage|business_?id|credential|endpoint_?id|provider_?id|availability/i,
+  )
+}
+
+function assertPublicOpinionSearchContract(document) {
+  const requestFields = [
+    'includeCandidates', 'minQualityScore', 'province', 'countryCode', 'location', 'from', 'to',
+  ]
+  for (const schemaName of ['StoredSearchRequest', 'CanonicalSearchRequest']) {
+    const properties = document.components.schemas[schemaName].properties
+    for (const field of requestFields) assert.ok(properties[field], `${schemaName}.${field}`)
+    assert.deepEqual(properties.includeCandidates.enum, ['qualified', 'all'])
+    assert.equal(properties.minQualityScore.minimum, 0)
+    assert.equal(properties.minQualityScore.maximum, 100)
+    assert.equal(properties.countryCode.pattern, '^[A-Za-z]{2}$')
+    assert.equal(properties.location.maxLength, 160)
+    assert.equal(properties.from.format, 'date-time')
+    assert.equal(properties.to.format, 'date-time')
+    assert.deepEqual(properties.type.enum, ['fresh', 'stable'])
+  }
+  assert.deepEqual(
+    document.components.schemas.CanonicalSearchRequest.properties.sort.enum,
+    ['newest', 'oldest', 'relevance'],
+  )
+
+  const stored = document.paths['/data/stored/search'].post
+  const canonical = document.paths['/data/canonical/search'].post
+  for (const operation of [stored, canonical]) {
+    assert.match(operation.description, /formal-only/i)
+    assert.match(operation.description, /includeCandidates=all.*from.*to.*province.*countryCode.*location/i)
+    assert.match(operation.description, /new Idempotency-Key/i)
+    assert.match(operation.description, /candidate author\/contentType/i)
+  }
+  assert.match(canonical.description, /every other platform is unchanged/i)
+
+  for (const envelopeName of ['StoredSearchEnvelope', 'CanonicalSearchEnvelope']) {
+    const filters = document.components.schemas[envelopeName]
+      .properties.data.properties.filters.properties
+    for (const field of requestFields) assert.ok(filters[field], `${envelopeName}.filters.${field}`)
+    assert.deepEqual(filters.includeCandidates.oneOf[0], { type: 'boolean', const: false })
+    assert.deepEqual(filters.includeCandidates.oneOf[1].enum, ['qualified', 'all'])
+  }
+
+  const item = document.components.schemas.StoredSearchItem
+  assert.equal(item.properties.quality.$ref, '#/components/schemas/PublicOpinionSearchQuality')
+  assert.equal(item.properties.location.$ref, '#/components/schemas/PublicOpinionSearchLocation')
+  const quality = document.components.schemas.PublicOpinionSearchQuality
+  const location = document.components.schemas.PublicOpinionSearchLocation
+  assert.equal(quality.additionalProperties, false)
+  assert.equal(location.additionalProperties, false)
+  assert.deepEqual(Object.keys(quality.properties), [
+    'stage', 'status', 'score', 'geographyVerified',
+  ])
+  assert.deepEqual(Object.keys(location.properties), [
+    'provinceCode', 'label', 'type', 'country', 'countryCode',
+  ])
+  assert.doesNotMatch(
+    JSON.stringify({ quality: quality.properties, location: location.properties }),
+    /flags|reason|provider|raw|sourceName|author|contentType/i,
   )
 }
 
@@ -341,7 +440,14 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/messages/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/provinces\/\{province\}\/items/)
+    assert.match(html, /\/api\/v1\/data\/public-opinion\/province-coverage/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/items\/\{id\}/)
+    assert.match(html, /includeCandidates/)
+    assert.match(html, /minQualityScore/)
+    assert.match(html, /countryCode/)
+    assert.match(html, /候选 author、contentType/)
+    assert.match(html, /旧 Key 会返回.*idempotency_conflict/)
+    assert.match(html, /featuredProvinceCodes/)
     assert.match(html, /public_opinion/)
     assert.match(html, /两个 Hub 省级舆情服务索引都有效/)
     assert.match(html, /有效排序时间优先 publishedAt/)
@@ -376,6 +482,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/canonical/search',
       '/data/capabilities',
       '/data/public-opinion/items/{id}',
+      '/data/public-opinion/province-coverage',
       '/data/public-opinion/provinces/{province}/items',
       '/data/search',
       '/data/stored/search',
@@ -407,6 +514,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(document.components.schemas.StoredSearchRequest.additionalProperties, false)
     assert.equal(document.components.schemas.CanonicalSearchRequest.additionalProperties, false)
     assertPublicOpinionContract(document)
+    assertPublicOpinionSearchContract(document)
     assertNightAllPublicContract(document)
     assertCanonicalContextContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
@@ -467,6 +575,7 @@ test('static OpenAPI YAML parses and mirrors the dynamic Night-All compatibility
   assert.equal(document.openapi, '3.1.0')
   assertNightAllPublicContract(document)
   assertPublicOpinionContract(document)
+  assertPublicOpinionSearchContract(document)
   assertCanonicalContextContract(document)
 })
 
@@ -484,6 +593,9 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   assert.match(guide, /\/api\/v1\/data\/canonical\/items\/\{id\}\/context/)
   assert.match(guide, /storedWindow\.hasMoreStoredBefore\/After/)
   assert.match(guide, /upstreamCompleteness/)
+  assert.match(guide, /public_opinion.*formal/is)
+  assert.match(guide, /includeCandidates=all.*province.*countryCode.*location/is)
+  assert.match(guide, /升级前.*409 idempotency_conflict/s)
 })
 
 test('admin-only listener does not expose public documentation', async () => {

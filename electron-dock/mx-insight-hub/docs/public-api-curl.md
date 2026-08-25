@@ -217,6 +217,36 @@ curl -sS -i -X POST \
 元数据和 `searchMode`。当前 consumer 至少需要一个平台授权。Elasticsearch PIT
 cursor 过期时返回 `410`；应移除 cursor、换新 key 并从第一页重新开始。
 
+### stored/canonical 中的 `public_opinion` 可见性
+
+只要 stored/canonical 搜索范围可能包含 `public_opinion`，该平台分支默认只返回
+`sourceStage=formal` 且 `status=formal` 的记录；混合平台搜索中的其他平台完全不受
+影响。候选与精确地理/时间过滤必须显式指定 `platform=public_opinion`：
+
+- `includeCandidates=qualified` 加入 `status=qualified` 的候选，
+  `minQualityScore` 默认 80；
+- `includeCandidates=all` 必须同时提供 RFC3339 `from`、`to`，并至少提供
+  `province`、ISO alpha-2 `countryCode` 或精确 `location` 之一；
+- formal 时间窗只使用 `eventTime`；候选缺少 `eventTime` 时可回退 `collectedAt`；
+- 显式候选结果只增加有界的 `quality` 与 `location`，不返回候选 author、
+  contentType、source/provider、raw、flags 或内部理由。
+
+```bash
+IDEMPOTENCY_KEY="$(new_idempotency_key)"
+curl -sS -i -X POST \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  -d '{"platform":"public_opinion","query":"涉恐","includeCandidates":"all","countryCode":"SS","location":"南苏丹","from":"2026-08-24T00:00:00Z","to":"2026-08-25T23:59:59Z","pageSize":20}' \
+  "$HUB_URL/api/v1/data/canonical/search"
+```
+
+publication visibility 是幂等指纹的一部分。升级到该契约后，首次请求必须使用新的
+`Idempotency-Key`；复用升级前的 key 会返回 `409 idempotency_conflict`，不会回放
+升级前可能未门禁的响应。默认请求的 cursor binding 保持兼容，但升级前创建的
+Elasticsearch PIT 若不是 content-v5 会返回 `503 search_cursor_unavailable`，应移除
+cursor、换新 key 并从第一页重新搜索。
+
 ## 5. Night-All 兼容层
 
 公开的 legacy Night-All 路由仅有：

@@ -20,6 +20,61 @@ const connectorCallOutcomes = new Set(['complete', 'partial', 'failed', 'unknown
 const connectorSourceModes = new Set(['live', 'stale'])
 const connectorFailureKinds = new Set(['network', 'timeout', 'http', 'contract', 'business', 'internal', 'unknown'])
 const transientHttpStatuses = new Set([502, 503, 504])
+const publicOpinionDatasets = new Set([
+  'public-opinion.province.v1',
+])
+
+export function publicOpinionSourceStage(datasetId, rawItem) {
+  if (!publicOpinionDatasets.has(datasetId)) return null
+  const raw = rawItem && typeof rawItem === 'object' && !Array.isArray(rawItem)
+    ? rawItem
+    : {}
+  const hubCandidate = raw.hub_candidate && typeof raw.hub_candidate === 'object'
+    ? raw.hub_candidate
+    : raw.hubCandidate && typeof raw.hubCandidate === 'object'
+      ? raw.hubCandidate
+      : {}
+  const value = raw.source_stage
+    ?? raw.sourceStage
+    ?? hubCandidate.source_stage
+    ?? hubCandidate.sourceStage
+  return value === 'candidate' ? 'candidate' : 'formal'
+}
+
+function boundedText(value, maximum) {
+  return typeof value === 'string' && value.trim()
+    ? value.trim().slice(0, maximum)
+    : null
+}
+
+export function publicOpinionLocation(rawItem) {
+  const raw = rawItem && typeof rawItem === 'object' && !Array.isArray(rawItem)
+    ? rawItem
+    : {}
+  const nested = raw.raw && typeof raw.raw === 'object' && !Array.isArray(raw.raw)
+    ? raw.raw
+    : {}
+  const hubCandidate = raw.hub_candidate && typeof raw.hub_candidate === 'object'
+    ? raw.hub_candidate
+    : raw.hubCandidate && typeof raw.hubCandidate === 'object'
+      ? raw.hubCandidate
+      : {}
+  const location = [
+    raw.eventLocation,
+    raw.politicalTerrorEventLocation,
+    nested.politicalTerrorEventLocation,
+    hubCandidate.eventLocation,
+  ].find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {}
+  const allowedTypes = new Set(['province', 'country', 'region', 'city', 'maritime'])
+  const locationType = allowedTypes.has(location.type) ? location.type : 'unknown'
+  const code = boundedText(location.countryCode ?? raw.country_code ?? raw.countryCode, 2)
+  return {
+    label: boundedText(location.label, 160),
+    type: locationType,
+    countryName: boundedText(location.country ?? location.countryName, 120),
+    countryCode: code && /^[A-Za-z]{2}$/.test(code) ? code.toUpperCase() : null,
+  }
+}
 // pg_get_indexdef(indexOid, columnNo, pretty) returns only the key expression.
 // PostgreSQL stores DESC (bit 0) and NULLS FIRST (bit 1) separately in
 // pg_index.indoption, so both pieces are required for an exact index contract.
@@ -1543,6 +1598,8 @@ export class PostgresStore {
           ],
         )
 
+        const sourceStage = publicOpinionSourceStage(datasetId, record.rawItem)
+        const refreshUndatedCandidateProjection = sourceStage === 'candidate'
         const upserted = await client.query(
           `INSERT INTO core.canonical_records
              (id, dataset_id, platform, object_type, external_id, schema_version,
@@ -1575,7 +1632,15 @@ export class PostgresStore {
              current_revision = core.canonical_records.current_revision
                + (core.canonical_records.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256)::int,
              projection_revision = core.canonical_records.projection_revision
-               + (core.canonical_records.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256)::int
+               + (
+                   core.canonical_records.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256
+                   OR (
+                     $25::boolean
+                     AND core.canonical_records.event_time IS NULL
+                     AND EXCLUDED.event_time IS NULL
+                     AND core.canonical_records.collected_at IS DISTINCT FROM EXCLUDED.collected_at
+                   )
+                 )::int
            RETURNING id, current_revision, projection_revision`,
           [
             randomUUID(), datasetId, platform, record.objectType, record.externalId,
@@ -1584,9 +1649,11 @@ export class PostgresStore {
             record.eventTime, record.collectedAt, record.latitude, record.longitude,
             record.countryCode, record.admin1Code, record.admin2Code,
             record.stableFields, record.extensions, record.deletedAt, record.heatScore,
+            refreshUndatedCandidateProjection,
           ],
         )
-        const { id, current_revision: revision, projection_revision: projection } = upserted.rows[0]
+        const { id, current_revision: revision } = upserted.rows[0]
+        let projection = upserted.rows[0].projection_revision
 
         const revisionInsert = await client.query(
           `INSERT INTO core.record_revisions
@@ -1597,11 +1664,74 @@ export class PostgresStore {
         )
         if (revisionInsert.rowCount > 0) changed += 1
 
-        if (datasetId === 'public-opinion.province.v1') {
-          const sourceRevisionId = sourceRevisionResult.rows[0]?.id
+        const sourceRevisionId = sourceRevisionResult.rows[0]?.id
+        if (sourceStage) {
           if (!sourceRevisionId) {
             throw new Error('current source object revision was not materialized')
           }
+          const formal = sourceStage === 'formal'
+          const location = publicOpinionLocation(record.rawItem)
+          const stateResult = await client.query(
+            `INSERT INTO core.public_opinion_current_state
+               (record_id, canonical_revision, source_object_revision_id,
+                source_stage, status, event_admin1_code, display_admin1_code,
+                geography_verified, geo_scope, country_code,
+                location_label, location_type, country_name)
+             VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9, $10, $11, $12)
+             ON CONFLICT (record_id) DO UPDATE SET
+               canonical_revision = EXCLUDED.canonical_revision,
+               source_object_revision_id = EXCLUDED.source_object_revision_id,
+               source_stage = EXCLUDED.source_stage,
+               status = EXCLUDED.status,
+               quality_score = NULL,
+               quality_flags = '[]'::jsonb,
+               rejection_codes = '[]'::jsonb,
+               event_admin1_code = EXCLUDED.event_admin1_code,
+               publisher_admin1_code = NULL,
+               display_admin1_code = EXCLUDED.display_admin1_code,
+               geography_verified = EXCLUDED.geography_verified,
+               geo_scope = EXCLUDED.geo_scope,
+               country_code = EXCLUDED.country_code,
+               location_label = EXCLUDED.location_label,
+               location_type = EXCLUDED.location_type,
+               country_name = EXCLUDED.country_name,
+               analysis_version = NULL,
+               taxonomy_version = NULL,
+               rule_version = NULL,
+               prompt_version = NULL,
+               materialized_from_task_id = NULL,
+               assessed_at = NULL,
+               updated_at = now()
+             WHERE core.public_opinion_current_state.canonical_revision
+                     IS DISTINCT FROM EXCLUDED.canonical_revision
+                OR core.public_opinion_current_state.source_object_revision_id
+                     IS DISTINCT FROM EXCLUDED.source_object_revision_id
+                OR core.public_opinion_current_state.source_stage
+                     IS DISTINCT FROM EXCLUDED.source_stage
+             RETURNING record_id`,
+            [
+              id, Number(revision), sourceRevisionId, sourceStage,
+              formal ? 'formal' : 'pending',
+              record.admin1Code,
+              record.admin1Code != null,
+              record.admin1Code != null ? 'province' : 'unknown',
+              location.countryCode ?? record.countryCode,
+              location.label,
+              location.type,
+              location.countryName,
+            ],
+          )
+          if (stateResult.rowCount > 0) {
+            const bumped = await client.query(
+              `UPDATE core.canonical_records
+                  SET projection_revision = projection_revision + 1
+                WHERE id = $1
+                RETURNING projection_revision`,
+              [id],
+            )
+            projection = bumped.rows[0].projection_revision
+          }
+
           // Domain work is created in the same transaction as its immutable raw
           // evidence. The canonical revision is part of task identity, so a
           // mapping/normalizer change over unchanged raw evidence is analyzed
@@ -1911,30 +2041,75 @@ export class PostgresStore {
     cursor = null,
     from = null,
     to = null,
+    candidateMode = 'formal',
+    minQualityScore = null,
   }) {
-    const select = `SELECT id, title, body, url, content_type, author_name,
-                           event_time, collected_at, admin1_code, heat_score,
-                           stable_fields,
-                           coalesce(event_time, collected_at) AS sort_time`
-    const scope = `FROM core.canonical_records
-                    WHERE dataset_id = 'public-opinion.province.v1'
-                      AND platform = 'public_opinion'
-                      AND object_type = 'opinion_item'
-                      AND deleted_at IS NULL
-                      AND admin1_code = $1
-                      AND collected_at IS NOT NULL
-                      AND ($2::timestamptz IS NULL OR event_time >= $2::timestamptz)
-                      AND ($3::timestamptz IS NULL OR event_time <= $3::timestamptz)`
+    const select = `SELECT record.id, record.title, record.body, record.url,
+                           record.content_type, record.author_name,
+                           record.event_time, record.collected_at,
+                           publication.display_admin1_code AS admin1_code,
+                           record.heat_score, record.stable_fields,
+                           publication.source_stage,
+                           publication.status AS quality_status,
+                           publication.quality_score,
+                           publication.qualification_threshold,
+                           publication.geography_verified,
+                           publication.geo_scope,
+                           publication.country_code,
+                           publication.location_label,
+                           publication.location_type,
+                           publication.country_name,
+                           coalesce(record.event_time, record.collected_at) AS sort_time`
+    const scope = `FROM core.canonical_records record
+                    JOIN core.public_opinion_current_state publication
+                      ON publication.record_id = record.id
+                     AND publication.canonical_revision = record.current_revision
+                    WHERE record.dataset_id = 'public-opinion.province.v1'
+                      AND record.platform = 'public_opinion'
+                      AND record.object_type = 'opinion_item'
+                      AND record.deleted_at IS NULL
+                      AND publication.display_admin1_code = $1
+                      AND record.collected_at IS NOT NULL
+                      AND ($2::timestamptz IS NULL OR (
+                        CASE WHEN publication.source_stage = 'candidate'
+                          THEN coalesce(record.event_time, record.collected_at)
+                          ELSE record.event_time
+                        END
+                      ) >= $2::timestamptz)
+                      AND ($3::timestamptz IS NULL OR (
+                        CASE WHEN publication.source_stage = 'candidate'
+                          THEN coalesce(record.event_time, record.collected_at)
+                          ELSE record.event_time
+                        END
+                      ) <= $3::timestamptz)
+                      AND (
+                        (publication.source_stage = 'formal' AND publication.status = 'formal')
+                        OR (
+                          $4::text = 'qualified'
+                          AND publication.source_stage = 'candidate'
+                          AND publication.status = 'qualified'
+                          AND publication.quality_score >= greatest(
+                            publication.qualification_threshold,
+                            coalesce($5::smallint, 80)
+                          )
+                        )
+                        OR (
+                          $4::text = 'all'
+                          AND publication.source_stage = 'candidate'
+                          AND ($5::smallint IS NULL OR publication.quality_score >= $5::smallint)
+                        )
+                      )`
     if (sort === 'hot') {
       const { rows } = await this.pool.query(
         `${select}
            ${scope}
-              AND heat_score IS NOT NULL
-              AND ($4::numeric IS NULL OR (heat_score, coalesce(event_time, collected_at), id) < ($4::numeric, $5::timestamptz, $6::uuid))
-            ORDER BY heat_score DESC, coalesce(event_time, collected_at) DESC, id DESC
-            LIMIT $7`,
+              AND record.heat_score IS NOT NULL
+              AND ($6::numeric IS NULL OR (record.heat_score, coalesce(record.event_time, record.collected_at), record.id) < ($6::numeric, $7::timestamptz, $8::uuid))
+            ORDER BY record.heat_score DESC, coalesce(record.event_time, record.collected_at) DESC, record.id DESC
+            LIMIT $9`,
         [
           provinceCode, from, to,
+          candidateMode, minQualityScore,
           cursor?.heatScore ?? null, cursor?.sortTime ?? null, cursor?.id ?? null,
           pageSize + 1,
         ],
@@ -1944,30 +2119,143 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       `${select}
          ${scope}
-            AND ($4::uuid IS NULL OR (coalesce(event_time, collected_at), collected_at, id) < ($5::timestamptz, $6::timestamptz, $4::uuid))
-          ORDER BY coalesce(event_time, collected_at) DESC, collected_at DESC, id DESC
-          LIMIT $7`,
+            AND ($6::uuid IS NULL OR (coalesce(record.event_time, record.collected_at), record.collected_at, record.id) < ($7::timestamptz, $8::timestamptz, $6::uuid))
+          ORDER BY coalesce(record.event_time, record.collected_at) DESC, record.collected_at DESC, record.id DESC
+          LIMIT $9`,
       [
-        provinceCode, from, to, cursor?.id ?? null,
+        provinceCode, from, to, candidateMode, minQualityScore, cursor?.id ?? null,
         cursor?.sortTime ?? null, cursor?.collectedAt ?? null, pageSize + 1,
       ],
     )
     return rows
   }
 
-  async getPublicOpinionRecord(id) {
+  async getPublicOpinionRecord(id, { candidateMode = 'formal', minQualityScore = null } = {}) {
     const { rows } = await this.pool.query(
-      `SELECT id, title, body, url, content_type, author_name,
-              event_time, collected_at, admin1_code, heat_score, stable_fields
-         FROM core.canonical_records
-        WHERE id = $1
-          AND dataset_id = 'public-opinion.province.v1'
-          AND platform = 'public_opinion'
-          AND object_type = 'opinion_item'
-          AND deleted_at IS NULL`,
-      [id],
+      `SELECT record.id, record.title, record.body, record.url,
+              record.content_type, record.author_name,
+              record.event_time, record.collected_at,
+              publication.display_admin1_code AS admin1_code,
+              record.heat_score, record.stable_fields,
+              publication.source_stage,
+              publication.status AS quality_status,
+              publication.quality_score,
+              publication.qualification_threshold,
+              publication.geography_verified,
+              publication.geo_scope,
+              publication.country_code,
+              publication.location_label,
+              publication.location_type,
+              publication.country_name
+         FROM core.canonical_records record
+         JOIN core.public_opinion_current_state publication
+           ON publication.record_id = record.id
+          AND publication.canonical_revision = record.current_revision
+        WHERE record.id = $1
+          AND record.dataset_id = 'public-opinion.province.v1'
+          AND record.platform = 'public_opinion'
+          AND record.object_type = 'opinion_item'
+          AND record.deleted_at IS NULL
+          AND (
+            (publication.source_stage = 'formal' AND publication.status = 'formal')
+            OR (
+              $2::text = 'qualified'
+              AND publication.source_stage = 'candidate'
+              AND publication.status = 'qualified'
+              AND publication.quality_score >= greatest(
+                publication.qualification_threshold,
+                coalesce($3::smallint, 80)
+              )
+            )
+            OR (
+              $2::text = 'all'
+              AND publication.source_stage = 'candidate'
+              AND ($3::smallint IS NULL OR publication.quality_score >= $3::smallint)
+            )
+          )`,
+      [id, candidateMode, minQualityScore],
     )
     return rows[0] ?? null
+  }
+
+  async getPublicOpinionProvinceCoverage({
+    from,
+    to,
+    candidateMode = 'formal',
+    minQualityScore = null,
+  }) {
+    const { rows } = await this.pool.query(
+      `SELECT publication.display_admin1_code AS province_code,
+              count(*) FILTER (
+                WHERE publication.source_stage = 'formal'
+                  AND publication.status = 'formal'
+              )::integer AS formal_count,
+              count(*) FILTER (
+                WHERE publication.source_stage = 'candidate'
+                  AND (
+                    $3::text <> 'all'
+                    OR $4::smallint IS NULL
+                    OR publication.quality_score >= $4::smallint
+                  )
+              )::integer AS candidate_count,
+              count(*) FILTER (
+                WHERE publication.source_stage = 'candidate'
+                  AND publication.status = 'qualified'
+                  AND publication.quality_score >= greatest(
+                    publication.qualification_threshold,
+                    coalesce($4::smallint, 80)
+                  )
+              )::integer AS qualified_candidate_count,
+              count(*) FILTER (
+                WHERE publication.geography_verified = true
+                  AND (
+                    (publication.source_stage = 'formal' AND publication.status = 'formal')
+                    OR (
+                      $3::text = 'qualified'
+                      AND publication.source_stage = 'candidate'
+                      AND publication.status = 'qualified'
+                      AND publication.quality_score >= greatest(
+                        publication.qualification_threshold,
+                        coalesce($4::smallint, 80)
+                      )
+                    )
+                    OR (
+                      $3::text = 'all'
+                      AND publication.source_stage = 'candidate'
+                      AND ($4::smallint IS NULL OR publication.quality_score >= $4::smallint)
+                    )
+                  )
+              )::integer AS verified_count,
+              avg(publication.quality_score) FILTER (
+                WHERE publication.source_stage = 'candidate'
+                  AND publication.quality_score IS NOT NULL
+              ) AS average_quality_score
+         FROM core.canonical_records record
+         JOIN core.public_opinion_current_state publication
+           ON publication.record_id = record.id
+          AND publication.canonical_revision = record.current_revision
+        WHERE record.dataset_id = 'public-opinion.province.v1'
+          AND record.platform = 'public_opinion'
+          AND record.object_type = 'opinion_item'
+          AND record.deleted_at IS NULL
+          AND (
+            CASE WHEN publication.source_stage = 'candidate'
+              THEN coalesce(record.event_time, record.collected_at)
+              ELSE record.event_time
+            END
+          ) >= $1::timestamptz
+          AND (
+            CASE WHEN publication.source_stage = 'candidate'
+              THEN coalesce(record.event_time, record.collected_at)
+              ELSE record.event_time
+            END
+          ) <= $2::timestamptz
+          AND publication.display_admin1_code IS NOT NULL
+        GROUP BY publication.display_admin1_code
+        ORDER BY province_code`,
+      [from, to, candidateMode, minQualityScore],
+    )
+    return rows
   }
 
   async dataCenter({ datasetId = null, platform = null, objectType = null, pageSize = 50 } = {}) {

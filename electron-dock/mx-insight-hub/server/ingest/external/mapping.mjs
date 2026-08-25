@@ -220,12 +220,40 @@ function asBoolean(value) {
 
 function semanticRawPayload(raw, source) {
   if (source?.sourceKey !== 'province-opinion-results') return raw
-  // `updated_at` is the Night-All transport watermark. The writer contract
-  // intentionally advances it on every upsert, including an otherwise
-  // identical row. Keep the value in rawItem for lineage/cursor evidence, but
-  // exclude it from the semantic raw digest so a watermark-only replay does
-  // not create another source revision and another Agent task.
-  const { updated_at: _transportWatermark, ...semantic } = raw
+  // Night-All advances transport/run coordinates on each observation even when
+  // the evidence is unchanged. Keep those values in rawItem for lineage, but
+  // exclude them from the semantic digest so a daily replay does not reset a
+  // qualified candidate to pending or create another Agent task. Stage,
+  // disposition, content, evidence and scores remain semantic.
+  const {
+    updated_at: _transportWatermark,
+    run_id: _runCoordinate,
+    ...semantic
+  } = raw
+  if (semantic.heat_metrics && typeof semantic.heat_metrics === 'object') {
+    const {
+      provinceRecallRetrievedAt: _retrievedAt,
+      sourceEnvelope,
+      ...heatMetrics
+    } = semantic.heat_metrics
+    if (sourceEnvelope && typeof sourceEnvelope === 'object') {
+      const { agentRunId: _agentRunId, ...stableEnvelope } = sourceEnvelope
+      heatMetrics.sourceEnvelope = stableEnvelope
+    }
+    semantic.heat_metrics = heatMetrics
+  }
+  if (semantic.raw && typeof semantic.raw === 'object') {
+    const {
+      politicalTerrorProvinceRecallRetrievedAt: _retrievedAt,
+      politicalTerrorSourceEnvelope,
+      ...rawEvidence
+    } = semantic.raw
+    if (politicalTerrorSourceEnvelope && typeof politicalTerrorSourceEnvelope === 'object') {
+      const { agentRunId: _agentRunId, ...stableEnvelope } = politicalTerrorSourceEnvelope
+      rawEvidence.politicalTerrorSourceEnvelope = stableEnvelope
+    }
+    semantic.raw = rawEvidence
+  }
   return semantic
 }
 

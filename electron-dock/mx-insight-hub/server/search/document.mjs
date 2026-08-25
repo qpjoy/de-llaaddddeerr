@@ -9,6 +9,7 @@ import { DATASET_ID } from '../ingest/normalizers.mjs'
 const LINEAGE_KEY = /(provider|credential|upstream|endpoint|business.?id|availability|billing|token|secret|password|auth)/i
 const COLLECTOR_OPERATION_KEYS = new Set([
   'account_alias', 'account_phone', 'first_seen_account_id',
+  'source_disposition', 'source_stage', 'sourcedisposition', 'sourcestage',
 ])
 
 function customerSafeExtensionKey(key) {
@@ -37,6 +38,32 @@ function safeExtensions(extensions) {
     result[key] = safeValue && typeof safeValue === 'object' ? JSON.stringify(safeValue) : safeValue
   }
   return result
+}
+
+function publicationOf(row) {
+  const stage = asText(row.publication_source_stage)
+  if (!stage) return null
+  const locationLabel = asText(row.publication_location_label)
+  const locationType = asText(row.publication_location_type)
+  const countryName = asText(row.publication_country_name)
+  const countryCode = asText(row.publication_country_code)
+  return {
+    stage,
+    status: asText(row.publication_status),
+    qualityScore: finiteNonNegative(row.publication_quality_score),
+    displayAdmin1: asText(row.publication_display_admin1_code),
+    geographyVerified: row.publication_geography_verified === true,
+    // Candidate sources may not have a defensible event timestamp. Their
+    // bounded search window uses collection time as a fallback; formal records
+    // retain the historical event-time semantics.
+    effectiveTime: stage === 'candidate'
+      ? (row.event_time ?? row.collected_at ?? null)
+      : (row.event_time ?? null),
+    ...(locationLabel ? { locationLabel } : {}),
+    ...(locationType ? { locationType } : {}),
+    ...(countryName ? { countryName } : {}),
+    ...(countryCode ? { countryCode } : {}),
+  }
 }
 
 function metricsOf(stableFields) {
@@ -165,6 +192,7 @@ export async function buildContentDocument(row, { segmenter }) {
   const media = mediaOf(stableFields)
   const entities = entitiesOf(stableFields)
   const location = locationOf(row)
+  const publication = publicationOf(row)
 
   return {
     id: row.id,
@@ -221,6 +249,7 @@ export async function buildContentDocument(row, { segmenter }) {
     countryCode: row.country_code,
     admin1Code: row.admin1_code,
     admin2Code: row.admin2_code,
+    ...(publication ? { publication } : {}),
 
     eventTime: row.event_time,
     editedAt: stableFields.editedAt ?? null,

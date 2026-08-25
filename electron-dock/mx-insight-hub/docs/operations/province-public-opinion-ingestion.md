@@ -16,12 +16,13 @@ provider 配置见 [Agent provider settings](agent-provider-settings.md)，全�
 
 | 层 | 仓库当前状态 | 不能据此声称的状态 |
 | --- | --- | --- |
-| 固定源 | migration 033 注册固定 dataset、表、mapping 和 `updated_at + id` 游标；默认 `paused` 且无物理连接。Night-All 仓库已新增 040 水位 migration，并通过静态/领域测试 | 040 已在目标 PostgreSQL 执行并经实库/writer-path 验证、连接已验证或已导入 5,158 条 |
+| 固定源 | migration 033 注册固定 dataset、表、mapping 和 `updated_at + id` 游标；默认 `paused` 且无物理连接。Night-All 042 提供水位合同，043 在原表增加默认 formal 的 `source_stage` | 042/043 已在目标 PostgreSQL 执行并经实库/writer-path 验证、候选 writer 已安全启用、连接已验证或已导入任何业务行 |
 | Hub 服务索引 | 提供独立的 `CREATE INDEX CONCURRENTLY` 操作并在激活时校验两个精确索引 | 任一环境已经实际安装 |
 | raw revision | migration 034 增加 append-only `ingest.source_object_revisions`；新 ingest 按 semantic raw SHA-256 独立于 canonical hash 产出 payload-change source revision，传输水位 `updated_at` 单独保留但不触发重分析 | migration 之前不存在的 raw 历史已被恢复 |
 | 分类任务 | migration 034 注册默认暂停的 `province-geography-v1`，ingest 与当前记录 materializer 都能幂等创建任务 | pipeline 已启用、模型已配置或任务已跑完 |
 | 分类 worker | `npm run classifier`、Compose service 和独立 K8s Deployment 已接线；单飞、租约、心跳、重试和 stale-input fence 已实现 | 任一环境已成功 rollout、拥有可用 Chat provider，或暂停的 pipeline 已启用 |
-| 审核 | assertion schema、计数和只读列表已实现；source/rule/agent/manual 状态模型已保留 | 已有 accept/reject 写 API、完整审核 UI，或 accepted assertion 已投影到 canonical/公共 API |
+| 发布态 | Hub migration 035 增加 revision-fenced current state；formal 保持公开，candidate 从 pending 经质量/地理分析变为 qualified/rejected/failed，并触发 content-v5 重投影 | pipeline 已启用、候选已评估或任一环境已完成 content-v5 重建 |
+| 审核证据 | assertion schema、计数和只读列表已实现；source/rule/agent/manual 状态模型已保留，原始 evidence/provider 仅限内部 | 已有人工 accept/reject 产品流程或模型 proposal 已成为 canonical 事实 |
 | HanLP | 省份固定源激活/调度要求显式 `MX_COMMON_SEGMENTER=hanlp` 和 HanLP URL；常驻 content/chunk writer 与全量重建都使用严格、带 provenance 的分词包装；查询仍 fail-soft | 某环境的 HanLP、ES 或 content alias 已经健康并完成重建 |
 
 迁移和 API 可以先发布，但固定源与分类 pipeline 都应继续保持 `paused`，直到本手册的
@@ -37,6 +38,7 @@ external-pull queue ──► Hub PostgreSQL transaction
                         ├─ current source object
                         ├─ append-only raw source revision
                         ├─ canonical current record + canonical revision
+                        ├─ current publication state (formal/pending/...)
                         ├─ content projection outbox
                         └─ province analysis task
                                  │ independent, paused by default
@@ -44,7 +46,7 @@ external-pull queue ──► Hub PostgreSQL transaction
                          rule extraction ──► bounded Chat Agent if ambiguous
                                  │
                                  ▼
-                         append-only assertions ──► operator review/upstream correction
+                         append-only assertions ──► revision-fenced publication state
 
 content projection outbox ──► strict HanLP ──► Elasticsearch current-state index
 province hot/latest/detail ──────────────────► PostgreSQL serving indexes
@@ -55,8 +57,8 @@ province hot/latest/detail ─────────────────�
 - 模型永远不在源读取、canonical commit 或 checkpoint 路径内调用；provider 故障只会
   增加分类 backlog。
 - Elasticsearch/HanLP 故障不回滚 PostgreSQL ingest，也不要求重置源 checkpoint。
-- 分类 assertion 不写 Night-All，不改 canonical identity、`admin1_code`、游标、授权或
-  搜索索引。
+- 分类 assertion 不写 Night-All，不改 canonical identity、`admin1_code`、游标或授权；
+  它只更新 Hub 自有 publication state，并通过 outbox 刷新有界 content-v5 投影。
 - 省份热门、最新与详情读取 PostgreSQL；严格 HanLP 影响全文/切片检索的新鲜度，不是
   这些省份接口的可用性前置。
 
@@ -66,7 +68,7 @@ province hot/latest/detail ─────────────────�
 
 `created_at` 只能证明首次插入，不能发现后来补写的省份、来源、热度或 LLM 结果，禁止
 作为增量游标。Night-All 仓库现在提供
-`migrations/040_monitor_strategy_results_hub_watermark.sql`。该 migration：
+`migrations/042_monitor_strategy_results_hub_watermark.sql`。该 migration：
 
 - 将旧行 `updated_at` 回填为有限的 `created_at`，没有可用 `created_at` 时使用数据库
   当前时间；随后设置 `DEFAULT clock_timestamp()`、`NOT NULL` 和经过 validate 的
@@ -80,8 +82,13 @@ province hot/latest/detail ─────────────────�
 - 在 Night-All migration baseline 中标成必须执行，不能从“表里碰巧已有 updated_at”
   推断已经完成。
 
-040 存在和静态/领域测试通过只证明仓库意图。当前没有 Docker/真实 PostgreSQL 执行
-证据，更不能证明任一目标环境已经部署。Night-All owner 必须先在目标数据库执行 040，
+`migrations/043_monitor_strategy_result_source_stage.sql` 只扩展原
+`monitor_strategy_results`：历史行默认 `formal`，候选行为 `candidate`，并带可选
+disposition。它不在 Night-All 建候选产品表、评分接口或覆盖率 API。候选写入还受
+`NIGHTALL_PUBLIC_OPINION_CANDIDATE_WRITER_ENABLED` 显式闸门控制。
+
+042/043 存在和静态/领域测试通过只证明仓库意图。当前没有 Docker/真实 PostgreSQL 执行
+证据，更不能证明任一目标环境已经部署。Night-All owner 必须先在目标数据库执行 042/043，
 再用实库和生产等价写路径证明：
 
 1. `updated_at` 为 `timestamp` 或 `timestamptz`、`NOT NULL`，并有已经 validate 的精确
@@ -97,7 +104,7 @@ province hot/latest/detail ─────────────────�
 5. 禁止不可观察的 hard delete。删除必须先成为有水位的 tombstone/change record；
    否则当前固定表 adapter 无法证明删除完整性。
 
-040 不会擅自安装全表 hard-delete blocker，因为这会同时改变现有外键级联和清理流程。
+042 不会擅自安装全表 hard-delete blocker，因为这会同时改变现有外键级联和清理流程。
 因此第 5 项仍是部署前 writer attestation：必须核对 Night-All 清理任务、结果表删除权限
 及父表级联路径；无法证明“不会删除”时保持 pipeline paused，改造 tombstone/journal 后再启用。
 
@@ -110,7 +117,7 @@ digest 或口头确认。
 LLM 字段、两个相同 `updated_at` 的不同 ID、软删除，以及并发事务反序提交。每个相关
 修改都必须在严格 `>` 旧 checkpoint 的查询中可见。
 
-目标环境至少要保存以下 040 实库证据；不要在生产业务行上直接演练 destructive update：
+目标环境至少要保存以下 042 实库证据；不要在生产业务行上直接演练 destructive update：
 
 ```sql
 select column_name, data_type, is_nullable, column_default
@@ -146,7 +153,7 @@ select count(*) filter (where updated_at is null) as null_watermarks,
 还要在生产等价测试库用正常 writer 证明：insert/update 自动推进水位；尝试改 `id` 被
 拒绝；两个并发事务按相反计划顺序提交后，较晚提交者的 `(updated_at,id)` 仍严格位于
 已提交者之后；`REPEATABLE READ` 写入只能得到更大水位或明确 serialization-fail。
-记录 migration runner 输出、目标 database identity、040 checksum、上述
+记录 migration runner 输出、目标 database identity、042/043 checksum、上述
 查询结果和并发测试，不要只截 migration 文件。最后再让 Hub 以 read-only 连接重新
 probe；只有本次 GET 的 configuration issues 为空，才能提交本次返回的 digest。
 
@@ -163,8 +170,24 @@ probe；只有本次 GET 的 configuration issues 为空，才能提交本次返
 
 ### 3.3 Hub 本地前置
 
-应用当前 migration 只会建立暂停的 metadata、raw revision 和分类 backlog，不会打开
-网络连接或调用模型。
+发布顺序是安全边界，而不是可互换的操作清单：
+
+1. 先在 Hub 应用 migration 035，部署 formal-only 的 list/detail/search gate、publication
+   state 和 content-v5 代码；保持固定源与分类 pipeline 为 `paused`。
+2. 先用历史 formal 数据验证默认 API、索引回退和 MX-H2I 登录/联网 smoke。此时不应有
+   Night-All candidate writer。
+3. 再在 Night-All 数据库先应用并验证 042/043；两者是 additive，旧代码仍把历史/新增行
+   当作原 formal 结果。保持 candidate writer gate 为 false，随后滚动升级所有 Night-All
+   API/worker，使每个 reader 都具备 formal-only 条件并等待旧实例完全退出。
+4. 重新 probe、提交当前 writer attestation，完成首次导入和 content-v5 全量重建。只有
+   Hub 默认隐藏 candidate、显式查询及 PostgreSQL/Elasticsearch 结果一致后，才启用
+   Night-All candidate writer；质量 pipeline 仍需单独的模型/成本审批后启用。
+
+Hub migration 只会建立 Hub 自有 metadata、raw revision、publication state 和暂停的分类
+backlog，不会打开 Night-All 网络连接或调用模型。反向发布（先写 candidate、后部署 Hub
+gate）会把低质量候选暴露给旧 reader；禁止这样做。回滚时先关闭 Night-All writer gate、
+暂停 Hub source/classifier/projector，再回退 Hub workload。已有 candidate 行不能在旧
+Night-All reader 仍运行时仅靠回退代码处理。
 
 省份源启用前必须先部署并验证 HanLP。owned K8s 环境中先执行 mx-common 的显式模型
 部署流程，再部署 Hub；普通 `mx-common ensure` 不会下载/安装 HanLP 模型：
@@ -249,9 +272,9 @@ curl -sS -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
 重新读取 pipeline，确认 fixed locator、built-in mapping、两个服务索引和 schema probe
 都没有 drift。
 
-### 4.3 审核 040 实库证据并提交当前 writer attestation
+### 4.3 审核 042/043 实库证据并提交当前 writer attestation
 
-本步骤必须发生在目标 Night-All 已执行 040、实库/writer-path 证据通过，并且 Hub 用
+本步骤必须发生在目标 Night-All 已执行 042/043、实库/writer-path 证据通过，并且 Hub 用
 只读连接重新 probe 之后。激活请求必须原样使用本次 GET 返回的 version/digest：
 
 ```json
@@ -268,7 +291,7 @@ curl -sS -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
 发送到 `POST /internal/v1/admin/pipelines/province-opinion/status`。服务会在激活前重新
 检查固定源身份、连接、服务索引、built-in mapping、schema/约束/索引、checkpoint
 兼容性和 attestation。任一项失败都应修复根因，禁止临时用 `created_at`、去掉有限值
-约束或手工伪造 digest。040 的文件存在、Night-All baseline 条目或另一环境的成功记录
+约束或手工伪造 digest。042/043 的文件存在、Night-All baseline 条目或另一环境的成功记录
 都不能代替目标环境证据。
 
 ### 4.4 启动一次完整 current-table alignment
@@ -329,7 +352,9 @@ acknowledge，不重新相信已经漂移的上游 page。commit outcome unknown
 
 - `core.canonical_records.current_revision` 只在 canonical content hash 变化时增长。
 - `ingest.source_objects.current_revision` 由 semantic raw payload 的独立 SHA-256 驱动；
-  固定源仅从 digest 中排除传输水位 `updated_at`，原值仍保存在 current raw/lineage 中。
+  固定源从 digest 中排除传输/运行坐标（`updated_at`、run ID、召回采集时间等），原值仍
+  保存在 current raw/lineage 中。标题、摘要、来源证据、source stage、地理线索或审核
+  输入变化仍会产生新 revision。
 - `ingest.source_object_revisions` 保存每次 semantic raw payload 变化、其 source `updated_at` 和
   import lineage；A→B→A 会保留三个有序 revision，而完全相同的 replay 不增长。
 - 只改 `llm_reason`、keywords、嵌套 raw 或其他 `_drop` 字段时，可以保持同一 canonical
@@ -345,14 +370,16 @@ acknowledge，不重新相信已经漂移的上游 page。commit outcome unknown
 migration 之前只有 source object 当前态，没有 append-only raw 历史。migration 034
 只能把当时可见的 current raw seed 为 revision 1，并把旧 canonical digest 标成 hash
 version 0；它不会虚构已经被覆盖的历史。第一次新版本 pull 不会直接比较两种不同算法的
-hash，而会在 PostgreSQL 中比较旧/新 semantic JSONB（省份源排除 `updated_at`）：相同则
+hash，而会在 PostgreSQL 中比较旧/新 semantic JSONB（省份源排除上述运行坐标）：相同则
 原地采用 hash version 1 且不增加 revision/task，真正变化才形成 revision 2。后续全部按
 独立 semantic raw SHA-256 判断。
 
 source revision 是“semantic payload 变化的证据历史”，不是每次 poll 的 observation
-日志；仅 `updated_at` 变化时 `source_objects.raw_payload/source_updated_at` 会反映最新
+日志；仅运行坐标变化时 `source_objects.raw_payload/source_updated_at` 会反映最新
 传输位置，但 immutable revision 仍保留第一次形成该 semantic revision 时的水位快照，
-不会新增 revision/分类任务，避免 Night-All 每次 upsert 推进水位时重复计费。激活前
+不会新增 revision/分类任务，避免 Night-All 每次 upsert 推进水位时重复计费。无发布时间
+candidate 的 `collected_at` 变化仍会只推进 projection revision/outbox，使 PostgreSQL 与
+Elasticsearch 的候选时间窗一致，但不会重置质量状态或重复调用模型。激活前
 必须在隔离环境验证 legacy hash adoption、A、仅水位变化、A→B 和
 A→B→A 三组序列，并确认 current source revision 始终能 join 到 immutable payload、
 raw-only 变化会产 task、相同 replay 不重复计费。任一序列失败都应保持源暂停，这不是
@@ -433,15 +460,18 @@ event text，publisher evidence 必须存在于 source name，而且省/城市/a
 
 当前 Admin API 可读取 pipeline 计数、最近 assertions，并通过
 `GET /internal/v1/admin/agent/pipelines/province-geography-v1/assertions?limit=100`
-查看最多 100 条，但**没有 accept/reject 决策写 API**，也没有把 accepted assertion
-投影到 canonical/public API 的 writer。不要用临时 SQL 冒充产品审核流程。
+查看最多 100 条。Hub 没有人工 accept/reject 写 API，不能用临时 SQL 冒充产品审核；
+但 migration 035 已提供自动、revision-fenced 的 publication materializer：formal 保持
+`formal`，candidate 依据同一 source/canonical revision 的地理与质量 assertion 变为
+`qualified`、`rejected` 或 `failed`，并递增 projection revision、写 outbox。只有
+`formal` 或达到阈值的 `qualified` 会进入对应公共可见模式，原始 reason/provider/evidence
+始终只在内部证据层。
 
-当前可闭环的审核动作是：operator 复核 proposal → Night-All owner 将确认的事实写回
-显式 `province`/相关 source 字段并推进 `updated_at` → Hub 增量产生新 raw/canonical
-revision → built-in source mapping 服务该事实。未写回的 proposal 继续留在 Admin evidence
-中，不进入省份 feed 或公共搜索 filter。未来只有在独立 decision API、审计、governed
-current-value projection 和 rebuild 测试都落地后，才可让 Hub-local accepted assertion
-参与 serving。
+人工纠正仍应回写 Night-All 明确 source 字段并推进 `updated_at`，从而形成新的 raw
+revision；当前没有 Hub-local manual decision 产品。publisher/dateline 只能成为
+`display_admin1` 兜底，不能计作 verified event province；`overseas`、`maritime`、
+`national`、`multi_province` 禁止回退 publisher。境外事件保留 country/location/geo scope，
+不会塞入中国省份列。
 
 ## 8. 分类限流、provider fallback 与重试
 
@@ -551,7 +581,7 @@ HanLP 索引的公共字段。
 
 | 现象 | 数据保证 | 操作 |
 | --- | --- | --- |
-| 连接/probe/writer contract drift | cursor 不越过不安全行；任务停止 | 暂停源；确认目标 Night-All 040 已执行且 trigger/constraint/index 未 drift，修复连接或 writer 后重新 probe 和 attest；不要改用 `created_at` |
+| 连接/probe/writer contract drift | cursor 不越过不安全行；任务停止 | 暂停源；确认目标 Night-All 042/043 已执行且 trigger/constraint/index 未 drift，修复连接或 writer 后重新 probe 和 attest；不要改用 `created_at` |
 | 一批有 rejected row | 整批失败，checkpoint 留在批前 | 修复源数据/固定合同；调用 province `/resume` 清除 failed 状态，位置不变 |
 | transient external-pull 失败 | mxq 默认最多 5 次，lease 120 秒，30 秒 heartbeat；约 10/20/40/80 秒退避 | 观察自动重试；耗尽后 cursor 保持 failed，再用 `/resume` |
 | cursor `running` 但 worker 已消失 | 小于阈值时防止误并发；静默达到 `max(10 × cadence, 15 min)` 视为 abandoned | 确认没有实际 worker/锁后调用 `/resume`；原 checkpoint 不清空 |
@@ -582,7 +612,7 @@ Night-All 已 hard-delete 的历史，也不能修复不推进 `updated_at` 的 
 
 ### 11.2 首次上线验收清单
 
-- [ ] 目标 Night-All PostgreSQL 已执行 040；保存 database identity、migration/checksum、
+- [ ] 目标 Night-All PostgreSQL 已执行 042/043；保存 database identity、migration/checksum、
   finite/non-null、trigger、索引和真实 writer 证据，没有把仓库文件存在当成部署证明。
 - [ ] Night-All owner 通过 insert/update、`id` 不可变、并发 commit、soft-delete 和
   `(updated_at,id)` 增量可见性测试。

@@ -3,12 +3,14 @@ import { ElasticsearchError, ElasticsearchUnavailableError } from '@qpjoy/mx-com
 import { AppError } from '../core/errors.mjs'
 import {
   buildContentSearchPlan,
+  CONTENT_INDEX_SCHEMA,
   DEFAULT_SEARCH_PROFILE,
   knownMatchBranches,
   postgresSearchProfile,
   publicSearchProfile,
   resolveSearchProfile,
   searchCapabilities as profileSearchCapabilities,
+  searchIndexSchemaSatisfies,
   searchProfileNeedsSegmentation,
   searchProfileRequiredIndexSchema,
 } from './profiles.mjs'
@@ -33,6 +35,7 @@ const SEARCH_ANALYSIS_STATE_CHARACTER_LIMIT = 2_048
 const SEARCH_ANALYSIS_STATE_VERSION = 1
 const SEARCH_BACKENDS = new Set(['hanlp', 'jieba', 'bigram'])
 const SEGMENTATION_DEGRADED_PROFILE = 'canonical.phrase.v1'
+const PUBLIC_OPINION_PLATFORM = 'public_opinion'
 export const SEARCH_SORTS = Object.freeze(['relevance', 'newest', 'oldest'])
 
 /**
@@ -60,6 +63,105 @@ function normalizeOffset(offset) {
     throw new AppError(400, 'invalid_search_offset', 'Search offset must be a non-negative integer')
   }
   return offset
+}
+
+function publicOpinionStageFilter(visibility) {
+  const timeRange = (field) => ((visibility.from || visibility.to) ? [{
+    range: {
+      [field]: {
+        ...(visibility.from ? { gte: visibility.from } : {}),
+        ...(visibility.to ? { lte: visibility.to } : {}),
+      },
+    },
+  }] : [])
+  const should = [{
+    bool: {
+      filter: [
+        { term: { 'publication.stage': 'formal' } },
+        { term: { 'publication.status': 'formal' } },
+        ...timeRange('eventTime'),
+      ],
+    },
+  }]
+  if (visibility.candidateMode === 'qualified') {
+    should.push({
+      bool: {
+        filter: [
+          { term: { 'publication.stage': 'candidate' } },
+          { term: { 'publication.status': 'qualified' } },
+          { range: { 'publication.qualityScore': { gte: visibility.minQualityScore } } },
+          ...timeRange('publication.effectiveTime'),
+        ],
+      },
+    })
+  } else if (visibility.candidateMode === 'all') {
+    should.push({
+      bool: {
+        filter: [
+          { term: { 'publication.stage': 'candidate' } },
+          ...(visibility.minQualityScore == null ? [] : [{
+            range: { 'publication.qualityScore': { gte: visibility.minQualityScore } },
+          }]),
+          ...timeRange('publication.effectiveTime'),
+        ],
+      },
+    })
+  }
+  return { bool: { should, minimum_should_match: 1 } }
+}
+
+function publicOpinionVisibilityFilter(visibility) {
+  if (!visibility) return null
+  const publicOpinionFilters = [
+    { term: { platform: PUBLIC_OPINION_PLATFORM } },
+    publicOpinionStageFilter(visibility),
+    ...(visibility.provinceCode ? [{ term: { 'publication.displayAdmin1': visibility.provinceCode } }] : []),
+    ...(visibility.countryCode ? [{ term: { 'publication.countryCode': visibility.countryCode } }] : []),
+    ...(visibility.location ? [{ term: { 'publication.locationLabel': visibility.location } }] : []),
+  ]
+  return {
+    bool: {
+      should: [
+        { bool: { must_not: [{ term: { platform: PUBLIC_OPINION_PLATFORM } }] } },
+        { bool: { filter: publicOpinionFilters } },
+      ],
+      minimum_should_match: 1,
+    },
+  }
+}
+
+function postgresPublicationPredicate(visibility, parameter) {
+  if (!visibility) return 'TRUE'
+  const formalTime = `(($${parameter}::jsonb ->> 'from') IS NULL
+                       OR event_time >= (($${parameter}::jsonb ->> 'from')::timestamptz))
+                  AND (($${parameter}::jsonb ->> 'to') IS NULL
+                       OR event_time <= (($${parameter}::jsonb ->> 'to')::timestamptz))`
+  const candidateTime = `(($${parameter}::jsonb ->> 'from') IS NULL
+                          OR coalesce(event_time, collected_at) >= (($${parameter}::jsonb ->> 'from')::timestamptz))
+                     AND (($${parameter}::jsonb ->> 'to') IS NULL
+                          OR coalesce(event_time, collected_at) <= (($${parameter}::jsonb ->> 'to')::timestamptz))`
+  let candidate = 'FALSE'
+  if (visibility.candidateMode === 'qualified') {
+    candidate = `(publication.source_stage = 'candidate'
+                  AND publication.status = 'qualified'
+                  AND publication.quality_score >= (($${parameter}::jsonb ->> 'minQualityScore')::integer)
+                  AND ${candidateTime})`
+  } else if (visibility.candidateMode === 'all') {
+    candidate = `(publication.source_stage = 'candidate'
+                  AND (($${parameter}::jsonb ->> 'minQualityScore') IS NULL
+                       OR publication.quality_score >= (($${parameter}::jsonb ->> 'minQualityScore')::integer))
+                  AND ${candidateTime})`
+  }
+  return `(platform <> '${PUBLIC_OPINION_PLATFORM}' OR (
+            ((publication.source_stage = 'formal' AND publication.status = 'formal'
+              AND ${formalTime}) OR ${candidate})
+            AND (($${parameter}::jsonb ->> 'provinceCode') IS NULL
+                 OR publication.display_admin1_code = ($${parameter}::jsonb ->> 'provinceCode'))
+            AND (($${parameter}::jsonb ->> 'countryCode') IS NULL
+                 OR publication.country_code = ($${parameter}::jsonb ->> 'countryCode'))
+            AND (($${parameter}::jsonb ->> 'location') IS NULL
+                 OR publication.location_label = ($${parameter}::jsonb ->> 'location'))
+          ))`
 }
 
 function wildcardSubstring(term) {
@@ -158,7 +260,7 @@ function analysisTokens(value, { cursor = false } = {}) {
   return tokens
 }
 
-function analysisState({ appliedProfile, tokens, queryAnalysis }) {
+function analysisState({ appliedProfile, tokens, queryAnalysis, indexSchema = null }) {
   return {
     v: SEARCH_ANALYSIS_STATE_VERSION,
     appliedProfile: appliedProfile.id,
@@ -166,6 +268,7 @@ function analysisState({ appliedProfile, tokens, queryAnalysis }) {
     backendUsed: queryAnalysis.backendUsed,
     degraded: queryAnalysis.degraded,
     errorCode: queryAnalysis.errorCode,
+    ...(indexSchema ? { indexSchema } : {}),
   }
 }
 
@@ -363,7 +466,7 @@ export class SearchQueries {
     const requiredIndexSchema = searchProfileRequiredIndexSchema(profile)
     if (!requiredIndexSchema) return
     const activeIndexSchema = await this.#activeContentIndexSchema()
-    if (activeIndexSchema !== requiredIndexSchema) {
+    if (!searchIndexSchemaSatisfies(activeIndexSchema, requiredIndexSchema)) {
       throw new AppError(
         503,
         'search_profile_unavailable',
@@ -371,6 +474,11 @@ export class SearchQueries {
         { searchProfile: profile.id, requiredIndexSchema, activeIndexSchema },
       )
     }
+  }
+
+  async #publicOpinionVisibilityIndexReady() {
+    const activeIndexSchema = await this.#activeContentIndexSchema()
+    return activeIndexSchema === CONTENT_INDEX_SCHEMA
   }
 
   /**
@@ -608,6 +716,7 @@ export class SearchQueries {
     strictRelevance = undefined,
     trackTotalHits = false,
     sort = 'relevance',
+    publicOpinionVisibility = null,
   } = {}) {
     const limit = clampSize(size)
     const normalizedOffset = normalizeOffset(offset)
@@ -630,11 +739,36 @@ export class SearchQueries {
         fromTime, toTime, limit, cursor, offset: normalizedOffset,
         includeTotal: trackTotalHits || normalizedOffset != null,
         requestedProfile,
+        publicOpinionVisibility,
       })
     }
     let pitId = cursor?.pitId ?? null
     try {
-      if (!pitId) await this.#assertProfileIndexReady(requestedProfile)
+      if (publicOpinionVisibility && (
+        !await this.#publicOpinionVisibilityIndexReady() ||
+        (cursor?.mode === 'elasticsearch' && cursor.analysisState?.indexSchema !== CONTENT_INDEX_SCHEMA)
+      )) {
+        if (cursor?.mode === 'elasticsearch') {
+          throw new AppError(
+            503,
+            'search_cursor_unavailable',
+            'The search projection changed; retry the same cursor after the content index is ready',
+          )
+        }
+        this.logger?.warn?.(
+          `[search] ${CONTENT_INDEX_SCHEMA} is not active; using PostgreSQL public-opinion visibility`,
+        )
+        return this.#searchContentPostgres(query, {
+          platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
+          fromTime, toTime, limit, cursor: null, offset: normalizedOffset,
+          includeTotal: trackTotalHits || normalizedOffset != null,
+          requestedProfile,
+          publicOpinionVisibility,
+        })
+      }
+      if (!pitId) {
+        await this.#assertProfileIndexReady(requestedProfile)
+      }
       const restoredAnalysis = restoreAnalysisState(cursor?.analysisState, requestedProfile)
       let segmentMetadata = null
       let tokens = []
@@ -667,7 +801,12 @@ export class SearchQueries {
       const executionWarning = segmentationDegraded
         ? degradedSegmentationWarning(queryAnalysis)
         : undefined
-      const cursorAnalysisState = analysisState({ appliedProfile, tokens, queryAnalysis })
+      const cursorAnalysisState = analysisState({
+        appliedProfile,
+        tokens,
+        queryAnalysis,
+        indexSchema: publicOpinionVisibility ? CONTENT_INDEX_SCHEMA : null,
+      })
       const segmented = toPresegmentedText(tokens)
       const plan = buildContentSearchPlan({ profile: appliedProfile, query, segmented })
       if (!pitId) {
@@ -678,6 +817,7 @@ export class SearchQueries {
         pitId = opened?.id
         if (!pitId) throw new Error('Elasticsearch did not return a point-in-time id')
       }
+      const publicationFilter = publicOpinionVisibilityFilter(publicOpinionVisibility)
       const filter = [
         ...(platform ? [{ term: { platform } }] : []),
         ...(Array.isArray(platforms) && platforms.length > 0 ? [{ terms: { platform: platforms } }] : []),
@@ -694,6 +834,7 @@ export class SearchQueries {
             },
           },
         }] : []),
+        ...(publicationFilter ? [publicationFilter] : []),
       ]
       const response = await this.client.request('POST', '/_search', {
         size: normalizedOffset == null ? limit + 1 : limit,
@@ -774,6 +915,7 @@ export class SearchQueries {
           fromTime, toTime, limit, cursor: null, offset: normalizedOffset,
           includeTotal: trackTotalHits || normalizedOffset != null,
           requestedProfile,
+          publicOpinionVisibility,
         })
       }
       throw error
@@ -876,14 +1018,37 @@ export class SearchQueries {
     offset,
     includeTotal,
     requestedProfile,
+    publicOpinionVisibility,
   }) {
+    const publicationJoin = publicOpinionVisibility
+      ? `LEFT JOIN core.public_opinion_current_state publication
+           ON publication.record_id = core.canonical_records.id
+          AND publication.canonical_revision = core.canonical_records.current_revision`
+      : ''
+    const publicationSelect = publicOpinionVisibility
+      ? `, publication.source_stage AS publication_source_stage,
+           publication.status AS publication_status,
+           publication.quality_score AS publication_quality_score,
+           publication.display_admin1_code AS publication_display_admin1_code,
+           publication.geography_verified AS publication_geography_verified,
+           publication.location_label AS publication_location_label,
+           publication.location_type AS publication_location_type,
+           publication.country_name AS publication_country_name,
+           publication.country_code AS publication_country_code`
+      : ''
+    const visibilityParameter = offset == null ? 14 : 15
+    const publicationPredicate = publicOpinionVisibility
+      ? `AND ${postgresPublicationPredicate(publicOpinionVisibility, visibilityParameter)}`
+      : ''
     const { rows } = await this.pool.query(
       `WITH matching AS (
          SELECT id, dataset_id, platform, object_type, external_id, url, title, body,
                 author_external_id, author_name,
                 event_time, collected_at, stable_fields
+                ${publicationSelect}
                 ${includeTotal ? ', count(*) OVER () AS total_count' : ''}
            FROM core.canonical_records
+           ${publicationJoin}
           WHERE deleted_at IS NULL
             AND (
               title ILIKE '%' || $1 || '%'
@@ -899,6 +1064,7 @@ export class SearchQueries {
             AND ($8::timestamptz IS NULL OR event_time >= $8::timestamptz)
             AND ($9::timestamptz IS NULL OR event_time <= $9::timestamptz)
             AND ($12::text[] IS NULL OR platform = ANY($12::text[]))
+            ${publicationPredicate}
        )
        SELECT *
          FROM matching
@@ -927,6 +1093,7 @@ export class SearchQueries {
         Array.isArray(platforms) && platforms.length > 0 ? platforms : null,
         offset == null ? limit + 1 : limit,
         ...(offset != null ? [offset] : []),
+        ...(publicOpinionVisibility ? [JSON.stringify(publicOpinionVisibility)] : []),
       ],
     )
     let exactTotal = null
@@ -936,6 +1103,7 @@ export class SearchQueries {
         : await this.#countContentPostgres(query, {
             platform, platforms, datasetId, datasetIds, objectType,
             authorExternalId, chatId, fromTime, toTime,
+            publicOpinionVisibility,
           })
     }
     const pageRows = rows.slice(0, limit)
@@ -980,6 +1148,21 @@ export class SearchQueries {
         eventTime: row.event_time,
         collectedAt: row.collected_at,
         metrics: row.stable_fields?.metrics ?? {},
+        ...(publicOpinionVisibility ? {
+          publication: {
+            stage: row.publication_source_stage ?? null,
+            status: row.publication_status ?? null,
+            qualityScore: row.publication_quality_score == null
+              ? null
+              : Number(row.publication_quality_score),
+            displayAdmin1: row.publication_display_admin1_code ?? null,
+            geographyVerified: row.publication_geography_verified === true,
+            locationLabel: row.publication_location_label ?? null,
+            locationType: row.publication_location_type ?? null,
+            countryName: row.publication_country_name ?? null,
+            countryCode: row.publication_country_code ?? null,
+          },
+        } : {}),
         score: null,
         highlight: null,
         matchEvidence: ['postgres_substring'],
@@ -997,10 +1180,20 @@ export class SearchQueries {
     chatId,
     fromTime,
     toTime,
+    publicOpinionVisibility,
   }) {
+    const publicationJoin = publicOpinionVisibility
+      ? `LEFT JOIN core.public_opinion_current_state publication
+           ON publication.record_id = core.canonical_records.id
+          AND publication.canonical_revision = core.canonical_records.current_revision`
+      : ''
+    const publicationPredicate = publicOpinionVisibility
+      ? `AND ${postgresPublicationPredicate(publicOpinionVisibility, 11)}`
+      : ''
     const { rows } = await this.pool.query(
       `SELECT count(*)::bigint AS total_count
          FROM core.canonical_records
+         ${publicationJoin}
         WHERE deleted_at IS NULL
           AND (
             title ILIKE '%' || $1 || '%'
@@ -1015,11 +1208,13 @@ export class SearchQueries {
           AND ($7::text IS NULL OR (stable_fields #>> '{relations,chatId}') = $7)
           AND ($8::timestamptz IS NULL OR event_time >= $8::timestamptz)
           AND ($9::timestamptz IS NULL OR event_time <= $9::timestamptz)
-          AND ($10::text[] IS NULL OR platform = ANY($10::text[]))`,
+          AND ($10::text[] IS NULL OR platform = ANY($10::text[]))
+          ${publicationPredicate}`,
       [
         query, platform, datasetId, datasetIds, objectType, authorExternalId,
         chatId, fromTime, toTime,
         Array.isArray(platforms) && platforms.length > 0 ? platforms : null,
+        ...(publicOpinionVisibility ? [JSON.stringify(publicOpinionVisibility)] : []),
       ],
     )
     return Number(rows[0]?.total_count ?? 0)

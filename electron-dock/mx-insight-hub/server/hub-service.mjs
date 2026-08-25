@@ -23,8 +23,11 @@ import {
 } from './data/canonical-context.mjs'
 import {
   PUBLIC_OPINION_PLATFORM,
+  normalizePublicOpinionCoverageQuery,
+  normalizePublicOpinionDetailQuery,
   normalizePublicOpinionItemId,
   normalizePublicOpinionQuery,
+  publicOpinionCoverage,
   publicOpinionItem,
   publicOpinionPage,
 } from './data/public-opinion.mjs'
@@ -77,6 +80,7 @@ const PUBLIC_SEARCH_FIELDS = new Set(['platform', 'query', 'pageSize', 'cursor',
  */
 const RESULT_TYPES = new Set(['fresh', 'stable'])
 const FRESH_REPLAY_WINDOW_MS = 120_000
+const PUBLIC_OPINION_VISIBILITY_CONTRACT = 'public-opinion.publication-visibility.v1'
 
 function resolveResultType(body) {
   const value = body?.type ?? 'fresh'
@@ -467,7 +471,7 @@ export class HubService {
           ready: source?.status === 'active' && servingIndexes?.ready === true,
           source: 'hub',
           servingMode: 'stored',
-          capabilities: ['province_feed', 'item_detail', 'stored_search'],
+          capabilities: ['province_feed', 'province_coverage', 'item_detail', 'stored_search'],
         })
       }
     }
@@ -725,6 +729,9 @@ export class HubService {
         to: query.to,
         pageSize: query.pageSize,
         cursor: query.cursorToken,
+        ...(query.candidateMode === 'formal'
+          ? {}
+          : { includeCandidates: query.candidateMode, minQualityScore: query.minQualityScore }),
       },
       operation: async () => {
         const rows = await this.store.listPublicOpinionRecords({
@@ -734,25 +741,56 @@ export class HubService {
           cursor: query.cursor,
           from: query.from,
           to: query.to,
+          candidateMode: query.candidateMode,
+          minQualityScore: query.minQualityScore,
         })
         return publicOpinionPage(rows, query, this.apiKeyPepper)
       },
     })
   }
 
-  async publicOpinionItem(context, idInput) {
+  async publicOpinionCoverage(context, queryInput) {
+    if (typeof this.store.getPublicOpinionProvinceCoverage !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Province opinion coverage requires the PostgreSQL store')
+    }
+    const policy = await this.#storedPlatformPolicy(context, PUBLIC_OPINION_PLATFORM, 'Public opinion')
+    const query = normalizePublicOpinionCoverageQuery(queryInput)
+    await this.#assertPublicOpinionServingIndexes()
+    return this.#meterStoredRead(context, PUBLIC_OPINION_PLATFORM, policy, {
+      path: '/api/v1/data/public-opinion/province-coverage',
+      fingerprintBody: {
+        from: query.from,
+        to: query.to,
+        includeCandidates: query.candidateMode === 'formal' ? false : query.candidateMode,
+        minQualityScore: query.minQualityScore,
+        targetPerProvince: query.targetPerProvince,
+      },
+      operation: async () => {
+        const rows = await this.store.getPublicOpinionProvinceCoverage(query)
+        return publicOpinionCoverage(rows, query)
+      },
+    })
+  }
+
+  async publicOpinionItem(context, idInput, queryInput = {}) {
     if (typeof this.store.getPublicOpinionRecord !== 'function') {
       throw new AppError(503, 'stored_data_unavailable', 'Province opinion data requires the PostgreSQL store')
     }
     const policy = await this.#storedPlatformPolicy(context, PUBLIC_OPINION_PLATFORM, 'Public opinion')
     const id = normalizePublicOpinionItemId(idInput)
+    const query = normalizePublicOpinionDetailQuery(queryInput)
     return this.#meterStoredRead(context, PUBLIC_OPINION_PLATFORM, policy, {
       path: `/api/v1/data/public-opinion/items/${id}`,
-      fingerprintBody: { id },
+      fingerprintBody: {
+        id,
+        ...(query.candidateMode === 'formal'
+          ? {}
+          : { includeCandidates: query.candidateMode, minQualityScore: query.minQualityScore }),
+      },
       operation: async () => {
-        const row = await this.store.getPublicOpinionRecord(id)
+        const row = await this.store.getPublicOpinionRecord(id, query)
         if (!row) throw new AppError(404, 'item_not_found', 'Province opinion item not found')
-        return publicOpinionItem(row)
+        return publicOpinionItem(row, { includeQuality: query.candidateMode !== 'formal' })
       },
     })
   }
@@ -834,6 +872,23 @@ export class HubService {
       pageSize: query.pageSize,
       cursor: query.cursorToken,
       type: resultType,
+      ...(query.platform === PUBLIC_OPINION_PLATFORM ? {
+        publicOpinionVisibility: {
+          contractVersion: PUBLIC_OPINION_VISIBILITY_CONTRACT,
+          mode: query.publicOpinionVisibility.candidateMode,
+        },
+      } : {}),
+      ...(query.publicOpinionVisibility.explicit ? {
+        includeCandidates: query.publicOpinionVisibility.candidateMode === 'formal'
+          ? false
+          : query.publicOpinionVisibility.candidateMode,
+        minQualityScore: query.publicOpinionVisibility.minQualityScore,
+        province: query.publicOpinionVisibility.provinceCode,
+        countryCode: query.publicOpinionVisibility.countryCode,
+        location: query.publicOpinionVisibility.location,
+        from: query.publicOpinionVisibility.from,
+        to: query.publicOpinionVisibility.to,
+      } : {}),
     }
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
@@ -887,6 +942,9 @@ export class HubService {
         objectType: query.objectType,
         size: query.pageSize,
         cursor: query.cursor,
+        ...(query.platform === PUBLIC_OPINION_PLATFORM
+          ? { publicOpinionVisibility: query.publicOpinionVisibility }
+          : {}),
       })
       const responseBody = storedSearchResponse({
         query,
@@ -966,6 +1024,23 @@ export class HubService {
       cursor: query.cursorToken,
       sort: query.sort,
       type: resultType,
+      ...(query.platforms.includes(PUBLIC_OPINION_PLATFORM) ? {
+        publicOpinionVisibility: {
+          contractVersion: PUBLIC_OPINION_VISIBILITY_CONTRACT,
+          mode: query.publicOpinionVisibility.candidateMode,
+        },
+      } : {}),
+      ...(query.publicOpinionVisibility.explicit ? {
+        includeCandidates: query.publicOpinionVisibility.candidateMode === 'formal'
+          ? false
+          : query.publicOpinionVisibility.candidateMode,
+        minQualityScore: query.publicOpinionVisibility.minQualityScore,
+        province: query.publicOpinionVisibility.provinceCode,
+        countryCode: query.publicOpinionVisibility.countryCode,
+        location: query.publicOpinionVisibility.location,
+        from: query.publicOpinionVisibility.from,
+        to: query.publicOpinionVisibility.to,
+      } : {}),
     }
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
@@ -1023,6 +1098,9 @@ export class HubService {
         cursor: query.cursor,
         searchProfile: query.searchProfile,
         trackTotalHits: true,
+        ...(query.platforms.includes(PUBLIC_OPINION_PLATFORM)
+          ? { publicOpinionVisibility: query.publicOpinionVisibility }
+          : {}),
       })
       const responseBody = canonicalSearchResponse({
         query,

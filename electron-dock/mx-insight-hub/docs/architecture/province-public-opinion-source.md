@@ -1,7 +1,7 @@
 # Nationwide province public-opinion source
 
-Status: repository contract plus paused ingest/classification implementation;
-intentionally not connected or deployed.
+Status: repository contract plus paused ingest/classification/publication-state
+implementation; intentionally not connected or deployed.
 
 This document defines the bounded Hub contract for the Night-All
 `public.monitor_strategy_results` table. The immediate product goal is to serve
@@ -32,9 +32,13 @@ with Telegram or another Night-All corpus:
 content platform. A Weibo, website or other upstream origin remains provenance
 on the item and must not replace the Hub authorization platform.
 
-Night-All owns the source table and its writer behavior. MX Insight Hub owns
-source registration, reviewed mapping, raw/canonical/revision lineage, public
-field filtering and serving APIs. Neither side may infer that ownership of one
+Night-All owns collection, normalization, source deduplication and the source
+table writer. It uses the existing `monitor_strategy_results` table for both
+historical/formal rows and normalized source candidates, distinguished by
+`source_stage=formal|candidate`; it does not own candidate scoring or a public
+candidate API. MX Insight Hub owns source registration, raw/canonical/revision
+lineage, revision-fenced publication state, quality scoring, search indexing,
+coverage and all external APIs. Neither side may infer that ownership of one
 layer permits it to mutate the other.
 
 ## 2. Safe installation state
@@ -67,7 +71,7 @@ insert and cannot reveal a later correction to `province`, source metadata,
 heat or LLM output. It must never be used as an incremental cursor.
 
 The Night-All repository now contains
-`migrations/040_monitor_strategy_results_hub_watermark.sql` as the intended
+`migrations/042_monitor_strategy_results_hub_watermark.sql` as the intended
 upstream implementation. It backfills a finite `updated_at`, makes it non-null,
 validates the finite-value constraint, creates `(updated_at, id)`, rejects ID
 changes, and installs a `BEFORE INSERT OR UPDATE` trigger. The trigger holds a
@@ -75,11 +79,18 @@ transaction-scoped advisory lock through commit and atomically advances a
 single-row watermark state to at least its previous value plus one microsecond.
 That avoids stale `max(updated_at)` reads: a stale REPEATABLE READ/SERIALIZABLE
 writer must serialization-fail and retry rather than publish an old watermark.
-Night-All's migration baseline also forces 040 to run rather than inferring it
+Night-All's migration baseline also forces 042 to run rather than inferring it
 from a partial legacy schema.
 
+Night-All migration `043_monitor_strategy_result_source_stage.sql` is additive:
+it adds `source_stage` with `DEFAULT 'formal'`, optional
+`source_disposition`, and a stage/cursor index. Existing rows and old Hub
+writers therefore remain formal. Candidate writing is separately feature
+gated and must stay disabled until the Hub publication gate has been deployed
+and every Night-All reader instance understands `source_stage`.
+
 This is repository evidence, not deployment evidence. Before Hub activation,
-040 must be executed on the target Night-All PostgreSQL, checked against real
+042 and 043 must be executed on the target Night-All PostgreSQL, checked against real
 rows and the normal writer path, and then attested using the contract digest
 returned by the current Hub probe. Static/domain tests passed in the Night-All
 repository, but no real PostgreSQL execution has yet been evidenced.
@@ -102,7 +113,7 @@ Activation requires all of the following upstream guarantees:
    watermarked tombstone/change record. Otherwise an ordered change journal or
    CDC position is required.
 
-Migration 040 deliberately does not install a blanket DELETE blocker because
+Migration 042 deliberately does not install a blanket DELETE blocker because
 that would also alter the existing parent-table cascade and cleanup behavior.
 The deletion guarantee therefore remains an explicit deployment attestation:
 operators must audit cleanup jobs, table privileges and cascade paths, and keep
@@ -116,7 +127,7 @@ append-only change journal or CDC connector—not a timestamp guess.
 
 Routine Hub ingest must not create the upstream column, trigger or index. The
 source remains paused until the target Night-All database has deliberately run
-040, an operator has reviewed real-database and writer-path evidence, and the
+042, an operator has reviewed real-database and writer-path evidence, and the
 current Hub contract digest has been attested. The presence of a migration file
 or a baseline entry cannot satisfy those gates.
 
@@ -175,9 +186,12 @@ periodic historical full scan and no overlap window used to hide an unsafe
 watermark.
 
 An unchanged replay is absorbed by canonical identity and revision hashes. For
-this fixed source the raw identity excludes only the transport `updated_at`;
-that value remains in current raw/lineage, but a watermark-only upsert does not
-create a new evidence revision or paid analysis task. A rejected row or
+this fixed source the raw identity excludes transport/run coordinates such as
+`updated_at`, `run_id`, the candidate envelope's Agent run ID and province
+recall retrieval timestamps. Those values remain in current raw/lineage, but a
+coordinate-only upsert does not create a new evidence revision or paid analysis
+task. Candidate stage, disposition, content, evidence and scores remain
+semantic. A rejected row or
 ambiguous commit must not advance the checkpoint. Resetting the
 checkpoint requires the source to be paused and drained plus an explicit
 operator confirmation; reset is a controlled full replay, not a normal retry.
@@ -194,6 +208,7 @@ connection is not evidence that incremental synchronization is safe:
 | Projection outbox | `pending`, `delivered`, `dead` |
 | Analysis task | `pending`, `running`, `succeeded`, `dead`, `superseded` |
 | Classification assertion | `proposed`, `accepted`, `rejected`, `superseded` |
+| Publication state | `formal`, `pending`, `qualified`, `rejected`, `failed` |
 
 ## 5. Field and provenance classification
 
@@ -212,7 +227,12 @@ from province-specific feeds until a later source revision or an accepted
 future classification assertion supplies a province.
 
 The nationwide province dictionary defines accepted identifiers; it does not
-promise that every province currently has data.
+promise that every province currently has data. Event province, publisher or
+dateline province and display province remain separate. A trusted China News
+Beijing dateline may provide a low-confidence display fallback only when no
+better event location exists; it is not counted as verified event geography.
+Foreign events keep `province=NULL` and use bounded country/location/geo-scope
+fields instead of being forced into a Chinese province.
 
 ### Heat
 
@@ -221,9 +241,11 @@ with a non-null score, orders it descending and uses an internal effective sort
 time plus record identity as stable tie-breakers. The latest feed orders by that
 effective time, collection time and identity and does not require a heat score.
 Effective sort time is the factual `publishedAt` when present, otherwise
-`collectedAt`; the fallback is never returned as `publishedAt`. `from`/`to`
-continue to filter factual `publishedAt`, so bounded requests exclude records
-whose publication time is unknown.
+`collectedAt`; the fallback is never returned as `publishedAt`. Formal-only
+`from`/`to` requests retain the historical factual `publishedAt` semantics.
+Only an explicitly requested candidate view uses `collectedAt` when a candidate
+has no publication time, so an undated audit item remains reachable inside a
+bounded window.
 
 Heat is meaningful only under the source's declared scoring contract. A global
 search must not compare heat values from unrelated sources as if they shared a
@@ -252,9 +274,10 @@ Different query intents use different contracts:
 
 | Intent | Contract | Boundary |
 | --- | --- | --- |
-| Province hot/latest feed | `GET /api/v1/data/public-opinion/provinces/:province/items?sort=hot\|latest` | Requires an explicit supported province and the `public_opinion` grant. Returns only records with accepted explicit province data. |
-| Click-through detail | `GET /api/v1/data/public-opinion/items/:id` | Same grant; returns the allowlisted title, summary, URL, time, province, heat and origin fields. |
-| Text retrieval in this corpus | `POST /api/v1/data/stored/search` with explicit `platform=public_opinion` | Uses the common search shape, but remains one authorized platform per request. It is not a province-hot ranking API. |
+| Province hot/latest feed | `GET /api/v1/data/public-opinion/provinces/:province/items?sort=hot\|latest` | Requires an explicit supported province and the `public_opinion` grant. Defaults to formal-only; `includeCandidates=qualified|all` is explicit and cursor-bound. |
+| Province coverage | `GET /api/v1/data/public-opinion/province-coverage` | Requires `from` and `to`; returns all 34 province-level regions, up to eight featured codes, quality/verified counts and a target shortfall. The default target of 10 is a coverage goal, never fabricated data. |
+| Click-through detail | `GET /api/v1/data/public-opinion/items/:id` | Same grant; defaults formal-only. Candidate detail requires an explicit candidate mode and returns only bounded Hub-owned quality/location metadata. |
+| Text retrieval in this corpus | `POST /api/v1/data/stored/search` with explicit `platform=public_opinion` | Defaults formal-only. Explicit candidate filters support province/country/location and bounded time; upstream providers remain private. |
 | Admin audit | Data Center/import evidence | Admin Token only; may show raw, revision and lineage that public APIs cannot expose. |
 | Cross-source global search | Existing `POST /api/v1/data/canonical/search` | Searches one shared canonical projection constrained by the caller's platform grants. Results are classified by existing platform/dataset/objectType fields; it does not compare source-specific heat scores. |
 
@@ -272,12 +295,13 @@ must additionally keep these dimensions separate:
 - factual geography such as `admin1_code`;
 - derived content taxonomy plus its version and evidence.
 
-The first phase does not add `provinceCode` or heat to the canonical-search
-request/response shape. Clients use the returned canonical `id` with the
-dedicated item-detail route. A later geography filter must be allowlisted,
-cursor-bound and applied identically in PostgreSQL and Elasticsearch. It must
-not expose raw `extensions`, accept arbitrary search DSL, infer access from a
-source tag, or turn an unreviewed Agent label into a public filter.
+Candidate-aware stored/canonical search adds only allowlisted
+`includeCandidates`, `minQualityScore`, `province`, `countryCode`, `location`,
+`from` and `to` controls. PostgreSQL and Elasticsearch use the same publication
+predicate and typed projection. Cross-platform search applies that predicate
+only to `public_opinion` records. Candidate `all` requires a bounded time range
+plus an exact geography selector. No mode exposes raw `extensions`, arbitrary
+search DSL, upstream provider identity or unreviewed model reasoning.
 
 ## 7. Derived classification/archive plane
 
@@ -285,7 +309,8 @@ source tag, or turn an unreviewed Agent label into a public filter.
 source/revision evidence. It does not mean moving, deleting or rewriting the
 raw source object, and it is not a cold-storage or retention feature.
 
-Migration 034 implements the persistence half of this contract:
+Migrations 034 and 035 implement the evidence and current-publication halves of
+this contract:
 
 - `ingest.source_object_revisions` keeps each semantic raw payload-change
   revision independently from canonical revisions, including A→B→A reversions;
@@ -303,6 +328,10 @@ Migration 034 implements the persistence half of this contract:
   generation fence, bounded retry and stale-input supersession;
 - `agent_center.classification_assertions` keeps append-only source/rule/Agent/
   manual evidence.
+- `core.public_opinion_current_state` keeps one revision-fenced serving decision
+  per canonical record. Historical rows initialize as formal; candidates start
+  pending, then become qualified, rejected or failed. The default qualification
+  threshold is 80 and is independent from province-verification confidence.
 
 The schema is:
 
@@ -351,11 +380,10 @@ The repository currently has pipeline status/update/materialize/retry-dead and
 read-only assertion APIs, plus a dedicated package script, Compose service and
 K8s classifier Deployment with no Service or ingress. The pipeline is still
 installed paused, and repository wiring is not evidence that any environment
-has rolled it out. There is no accept/reject decision writer and no governed
-classification projection. Therefore only the built-in explicit source
-`province` mapping affects canonical `admin1_code`; rule/Agent proposals do not
-affect province feeds or public search. `unknown` is a valid outcome and is
-never a prompt to guess.
+has rolled it out. Completion materializes only a bounded, revision-fenced
+publication decision and queues a fresh search projection; raw assertions and
+provider evidence remain private and no model mutates canonical truth or the
+Night-All row. `unknown` is a valid outcome and is never a prompt to guess.
 
 The full activation, rate, recovery, review and HanLP boundaries are in the
 [operations runbook](../operations/province-public-opinion-ingestion.md).
@@ -375,13 +403,18 @@ Completing the repository work does not authorize any of the following:
   provider, retry dead analysis tasks or treat a proposal as approved;
 - change MX-H2I login/networking or restart Launcher components.
 
-The operator may consider onboarding only after Night-All 040 is executed and
+The operator may consider onboarding only after Hub migration 035 and the
+formal-only list/detail/search gates are deployed, content-v5 is rebuilt, then
+Night-All 042/043 are executed and
 verified in the target database, the source owner supplies writer-path evidence,
 the current Hub contract digest is attested, the public field allowlist is
 reviewed, the online Hub indexes are separately installed and a deployment is
 separately approved. Classification additionally requires a
 successful classifier rollout, provider/cost approval, raw-revision acceptance
-tests and a review decision path; none is implied by applying migration 034.
+tests and explicit pipeline activation; none is implied by applying migrations
+034/035. Candidate writing must be enabled only after all Night-All readers have
+been upgraded; a rolling old/new reader mix or a direct code rollback can expose
+candidate rows as legacy formal results.
 
 ## Related decisions
 

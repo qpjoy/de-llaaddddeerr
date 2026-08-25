@@ -2,7 +2,20 @@ import { AppError } from '../core/errors.mjs'
 
 export const DEFAULT_SEARCH_PROFILE = 'canonical.balanced.v1'
 export const POSTGRES_SEARCH_PROFILE = 'postgres.substring.v1'
-export const CONTENT_INDEX_SCHEMA = 'content-v4'
+export const CONTENT_INDEX_SCHEMA = 'content-v5'
+const CONTENT_PROFILE_MIN_INDEX_SCHEMA = 'content-v4'
+
+function indexSchemaVersion(value) {
+  const match = /^content-v(\d+)$/.exec(String(value || ''))
+  return match ? Number(match[1]) : null
+}
+
+export function searchIndexSchemaSatisfies(activeIndexSchema, requiredIndexSchema) {
+  if (!requiredIndexSchema) return true
+  const activeVersion = indexSchemaVersion(activeIndexSchema)
+  const requiredVersion = indexSchemaVersion(requiredIndexSchema)
+  return activeVersion != null && requiredVersion != null && activeVersion >= requiredVersion
+}
 
 const INDEX_REPRESENTATIONS = Object.freeze([
   Object.freeze({
@@ -122,7 +135,7 @@ const PROFILES = Object.freeze([
     ],
     public: true,
     needsSegmentation: true,
-    requiredIndexSchema: CONTENT_INDEX_SCHEMA,
+    requiredIndexSchema: CONTENT_PROFILE_MIN_INDEX_SCHEMA,
     kind: 'zh-recall',
   }),
   profile({
@@ -134,7 +147,7 @@ const PROFILES = Object.freeze([
     public: true,
     warning: 'Prefix terms are indexed through 12 characters; longer terms may not match.',
     maxPrefixChars: 12,
-    requiredIndexSchema: CONTENT_INDEX_SCHEMA,
+    requiredIndexSchema: CONTENT_PROFILE_MIN_INDEX_SCHEMA,
     kind: 'title-prefix',
   }),
   profile({
@@ -145,7 +158,7 @@ const PROFILES = Object.freeze([
     queryPlan: [plan('cjk_phrase', 'CJK bigram phrase', 'Requires ordered CJK bigrams.')],
     public: false,
     warning: 'Comparison profile: single-character CJK queries may produce no bigram terms.',
-    requiredIndexSchema: CONTENT_INDEX_SCHEMA,
+    requiredIndexSchema: CONTENT_PROFILE_MIN_INDEX_SCHEMA,
     kind: 'cjk-bigram',
   }),
   profile({
@@ -221,7 +234,7 @@ export function searchCapabilities({ audience = 'public', activeIndexSchema = un
     return includeReadiness
       ? {
           ...metadata,
-          ready: !entry.requiredIndexSchema || entry.requiredIndexSchema === activeIndexSchema,
+          ready: searchIndexSchemaSatisfies(activeIndexSchema, entry.requiredIndexSchema),
         }
       : metadata
   })

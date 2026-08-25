@@ -425,7 +425,7 @@ test('province mapping promotes stable province code and numeric heat while keep
   assert.equal(unknown.stableFields.attributes.province, '待分析')
 })
 
-test('province raw identity ignores only the transport watermark', () => {
+test('province raw identity ignores transport/run coordinates but keeps semantic stage changes', () => {
   const fieldMap = {
     externalId: { from: 'id' },
     title: { from: 'title' },
@@ -439,11 +439,29 @@ test('province raw identity ignores only the transport watermark', () => {
   }
   const first = applyMapping({
     id: 'item-1', title: '同一正文',
+    run_id: 'run-1',
+    heat_metrics: {
+      provinceRecallRetrievedAt: '2026-08-24T10:00:00.000Z',
+      sourceEnvelope: { stage: 'candidate', disposition: 'normalized', agentRunId: 'agent-1' },
+    },
+    raw: {
+      politicalTerrorProvinceRecallRetrievedAt: '2026-08-24T10:00:00.000Z',
+      politicalTerrorSourceEnvelope: { stage: 'candidate', disposition: 'normalized', agentRunId: 'agent-1' },
+    },
     published_at: new Date('2026-08-24T09:00:00.000Z'),
     updated_at: new Date('2026-08-24T10:00:00.000Z'),
   }, fieldMap, options).record
   const replay = applyMapping({
     id: 'item-1', title: '同一正文',
+    run_id: 'run-2',
+    heat_metrics: {
+      provinceRecallRetrievedAt: '2026-08-24T10:05:00.000Z',
+      sourceEnvelope: { stage: 'candidate', disposition: 'normalized', agentRunId: 'agent-2' },
+    },
+    raw: {
+      politicalTerrorProvinceRecallRetrievedAt: '2026-08-24T10:05:00.000Z',
+      politicalTerrorSourceEnvelope: { stage: 'candidate', disposition: 'normalized', agentRunId: 'agent-2' },
+    },
     published_at: new Date('2026-08-24T09:00:00.000Z'),
     updated_at: new Date('2026-08-24T10:05:00.000Z'),
   }, fieldMap, options).record
@@ -457,11 +475,18 @@ test('province raw identity ignores only the transport watermark', () => {
     published_at: new Date('2026-08-24T09:30:00.000Z'),
     updated_at: new Date('2026-08-24T10:05:00.000Z'),
   }, fieldMap, options).record
+  const candidate = applyMapping({
+    id: 'item-1', title: '同一正文', source_stage: 'candidate',
+    published_at: new Date('2026-08-24T09:00:00.000Z'),
+    updated_at: new Date('2026-08-24T10:05:00.000Z'),
+  }, fieldMap, options).record
 
   assert.notEqual(first.rawItem.updated_at, replay.rawItem.updated_at)
   assert.equal(first.rawPayloadSha256, replay.rawPayloadSha256)
   assert.notEqual(first.rawPayloadSha256, changed.rawPayloadSha256)
   assert.notEqual(first.rawPayloadSha256, rescheduled.rawPayloadSha256)
+  assert.notEqual(first.rawPayloadSha256, candidate.rawPayloadSha256)
+  assert.equal(candidate.rawItem.source_stage, 'candidate')
   assert.notEqual(first.payloadSha256, rescheduled.payloadSha256)
 })
 

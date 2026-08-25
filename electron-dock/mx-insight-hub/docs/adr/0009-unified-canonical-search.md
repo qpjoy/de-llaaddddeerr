@@ -68,6 +68,16 @@ search projection:
 10. Diagnostics expose stable query-token provenance, named match branches and
     highlights. CJK-only and historical loose-OR profiles are Admin Search Lab
     controls; they cannot be promoted to the public allowlist or logical default.
+11. Content v5 adds a revision-fenced typed publication projection for
+    `public_opinion`. Public stored/canonical search defaults to formal-only;
+    explicitly scoped candidate reads may filter bounded quality, province,
+    country, exact location and time fields. Other platforms and Admin queries
+    are unchanged. During a v4-to-v5 rebuild, first-page public-opinion reads use
+    the equivalent PostgreSQL predicate; an Elasticsearch PIT without v5
+    provenance cannot cross the schema boundary. Every request whose scope can
+    include `public_opinion` also binds a publication-contract marker into its
+    idempotency fingerprint, so a pre-gate stable response cannot replay after
+    rollout; callers must use a new idempotency key after the upgrade.
 
 The existing source-shaped and compatibility endpoints remain unchanged. In
 particular, the unified stored search is not a replacement for a live Night-All

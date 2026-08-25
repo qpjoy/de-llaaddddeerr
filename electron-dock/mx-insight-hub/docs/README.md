@@ -20,19 +20,23 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | Data ingest and serving plane | Admin-token-only PostgreSQL/file source management, browser upload, allowlisted server-file paths, content observations, reusable immutable format rules, canonical records/revisions/tombstones, projection outbox, durable queues/cursors, interpretation-aware file idempotency, PostgreSQL external pull and import-run evidence are implemented. PostgreSQL credentials live directly in `catalog.external_sources.connection`; catalog backups are therefore sensitive. `/shared_dir` directory watcher/landing agent, immutable object/cloud storage adapters, prompt CRUD, a generic CDC connector and non-PostgreSQL database connectors are not. |
 | Telegram monitor sources | `telegram.monitor.chats.v1` and `telegram.monitor.messages.v1`, a fixed two-input business task, explicit idempotent source-contract preparation, source progress/import evidence, strict history, Night-All-v1-compatible stored search and fuzzy entity search are implemented. Preparation installs the database-enforced watermark/trigger/index contract with one-request DDL credentials while ordinary ingest stays read-only; activation remains fail-closed until probe and writer attestation pass. These canonical datasets have no `tenant_id`; all consumers with the `telegram` grant read the same corpus. |
 | Telegram SQLite read API | `telegram.sqlite.chats.v1` and `telegram.sqlite.messages.v1` are a separate fixed, Admin-managed GET-only pipeline. It preserves raw JSON and deletion-marked rows in PostgreSQL, uses deterministic identities and Hub transaction idempotency, and performs an initial/manual full alignment followed by append-oriented overlap polling plus a bounded previous-day window at 02:00 Asia/Shanghai. It never schedules an automatic historical full scan and is not merged into the PostgreSQL public Telegram datasets. |
-| Nationwide province public opinion | Repository implementation, default paused: the fixed PostgreSQL source, province hot/latest/detail boundary, append-only raw source revisions and a source-revision-anchored rule/Agent analysis pipeline are defined. Night-All now contains migration `040_monitor_strategy_results_hub_watermark.sql`, but activation still fails closed until 040 has been executed and verified on the target Night-All PostgreSQL, the current Hub writer-contract digest has then been attested, and both exact Hub serving indexes exist. A dedicated classifier entrypoint, package script, Compose service and K8s Deployment are included, but the analysis pipeline remains paused; assertion review is read-only and no assertion is projected into canonical/public serving. No environment rollout, upstream connection, data import, provider setup or consumer grant is implied. |
-| Search/retrieval | Canonical projection outbox, projector, unified cross-platform stored search, strict Chinese relevance, PostgreSQL degradation paths, Admin semantic search and a guarded Admin-plane reindex operation are implemented. The repository includes versioned allowlisted profiles and the content-v4 mapping; each deployed environment remains gated on its strict blue/green index validation. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
+| Nationwide province public opinion | Repository implementation, default paused: the fixed PostgreSQL source, province hot/latest/detail/coverage boundary, append-only raw source revisions and a source-revision-anchored rule/Agent analysis pipeline are defined. Night-All migration `042_monitor_strategy_results_hub_watermark.sql` provides the ordered writer contract; additive migration `043_monitor_strategy_result_source_stage.sql` lets the existing result table carry `formal` and gated `candidate` source rows without creating a second product table. Hub migration 035 owns revision-fenced publication, quality and geography state and content-v5 projects only bounded typed fields; raw assertions and provider evidence remain private. Rollout must install and verify Hub 035 plus formal-only serving gates first, then apply Night-All 042/043 to its database and upgrade every Night-All reader while the writer gate stays off; only after old readers have drained may operators enable the candidate writer and, separately, the paused Hub analysis pipeline. No environment rollout, upstream connection, data import, provider setup or consumer grant is implied. |
+| Search/retrieval | Canonical projection outbox, projector, unified cross-platform stored search, strict Chinese relevance, PostgreSQL degradation paths, Admin semantic search and a guarded Admin-plane reindex operation are implemented. The repository includes versioned allowlisted profiles and the content-v5 mapping; each deployed environment remains gated on its strict blue/green index validation. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
 | Private/public DNS routes | Deliberately not auto-created. They require route/TLS review and a deployed public Service. |
 | Billing, BI and Data Agent | Designed as later phases; the MVP has mutable request/usage evidence, not an append-only billing ledger or invoice engine. |
 | Backup/PITR and ELK/SLO | Target runbooks are documented but automation/exporters are not implemented yet; these remain production release gates. |
 
 ## Search evolution boundary
 
-- The repository declares content v4; an environment whose read alias still
-  points to content v3 stays on v3 until a strict PG-to-ES rebuild has populated
-  and validated v4. The v4 capability set is deliberately bounded: raw
-  standard, HanLP coarse pre-segmented, title/body CJK bigram and title-only
-  edge-prefix fields.
+- The repository declares content v5. An environment whose read alias still
+  points to content v4 continues serving the existing search profiles while
+  public-opinion visibility requests fall back to PostgreSQL; only a strict
+  PG-to-ES rebuild and alias cutover activates the v5 publication gate. v4's
+  bounded raw/HanLP/CJK/prefix views remain the profile minimum; v5 adds the
+  revision-fenced typed publication, quality, geography and effective-time
+  fields used by public candidate-aware search. This rollout intentionally
+  changes the public-opinion idempotency fingerprint; callers must use a new
+  `Idempotency-Key` after upgrade instead of replaying a pre-gate stable result.
 - Search behavior is expressed as immutable allowlisted profiles. The strict
   baseline is `canonical.balanced.v1`; `canonical.phrase.v1`,
   `canonical.terms-all.v1`, `canonical.zh-recall.v1` and
@@ -57,7 +61,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
   installing IK or HanLP inside Elasticsearch.
 - The authoritative lifecycle and guardrails are documented in
   [Data-platform storage and serving](architecture/data-platform-storage-and-serving.md#43-版本化搜索-profiles),
-  [Search and observability stack](operations/search-and-observability-stack.md#42-content-v4-与搜索-profile-变更手册),
+  [Search and observability stack](operations/search-and-observability-stack.md#42-content-v5-与搜索-profile-变更手册),
   and [ADR-0009](adr/0009-unified-canonical-search.md#search-profiles-and-analysis-lifecycle).
 
 ## Read in this order

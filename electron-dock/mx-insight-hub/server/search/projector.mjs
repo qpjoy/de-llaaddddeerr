@@ -99,7 +99,21 @@ export class SearchProjector {
   async #loadRecords(aggregateIds) {
     if (aggregateIds.length === 0) return new Map()
     const { rows } = await this.pool.query(
-      `SELECT * FROM core.canonical_records WHERE id = ANY($1::uuid[])`,
+      `SELECT record.*,
+              publication.source_stage AS publication_source_stage,
+              publication.status AS publication_status,
+              publication.quality_score AS publication_quality_score,
+              publication.display_admin1_code AS publication_display_admin1_code,
+              publication.geography_verified AS publication_geography_verified,
+              publication.location_label AS publication_location_label,
+              publication.location_type AS publication_location_type,
+              publication.country_name AS publication_country_name,
+              publication.country_code AS publication_country_code
+         FROM core.canonical_records record
+         LEFT JOIN core.public_opinion_current_state publication
+           ON publication.record_id = record.id
+          AND publication.canonical_revision = record.current_revision
+        WHERE record.id = ANY($1::uuid[])`,
       [aggregateIds],
     )
     return new Map(rows.map((row) => [row.id, row]))

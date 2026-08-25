@@ -5,7 +5,7 @@ export const PRODUCT_ID = 'mx-insight-hub'
 // Bump for incompatible mappings and whenever a new searchable multi-field
 // must be populated for existing documents. Elasticsearch can add a mapping in
 // place, but it cannot retroactively analyze old `_source` into that field.
-export const CONTENT_SCHEMA_VERSION = 4
+export const CONTENT_SCHEMA_VERSION = 5
 export const CHUNK_SCHEMA_VERSION = 1
 
 // Human names arrive as raw source text. Keep that raw value in `_source` and
@@ -156,6 +156,22 @@ export function contentIndex({ numberOfReplicas = 0 } = {}) {
       countryCode: { type: 'keyword' },
       admin1Code: { type: 'keyword' },
       admin2Code: { type: 'keyword' },
+      publication: {
+        type: 'object',
+        dynamic: 'strict',
+        properties: {
+          stage: { type: 'keyword' },
+          status: { type: 'keyword' },
+          qualityScore: { type: 'short' },
+          displayAdmin1: { type: 'keyword' },
+          geographyVerified: { type: 'boolean' },
+          effectiveTime: { type: 'date' },
+          locationLabel: { type: 'keyword', ignore_above: 256 },
+          locationType: { type: 'keyword' },
+          countryName: { type: 'keyword', ignore_above: 256 },
+          countryCode: { type: 'keyword' },
+        },
+      },
 
       eventTime: { type: 'date' },
       editedAt: { type: 'date' },

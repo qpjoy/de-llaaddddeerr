@@ -170,13 +170,22 @@ PG 中已有的 outbox dead 或 `projection_failed_at` quarantine 清零。该�
 projector、ingest、Launcher、MX-H2I 登录或联网链路。执行前仍应在低峰期确认 ES
 磁盘和 PG 读取余量。
 
-### 4.2 content v4 与搜索 profile 变更手册
+### 4.2 content v5 与搜索 profile 变更手册
 
-仓库最新 mapping 声明 content v4；任何仍由 content v3 alias 服务的环境都必须
-完成本节的 schema-versioned 迁移后才算升级。v3 已有 raw `standard` 与 HanLP
+仓库最新 mapping 声明 content v5。v4 仍是既有 named profile 的最低版本：v3 已有 raw `standard` 与 HanLP
 coarse 预分词字段，姓名/username 另有 prefix、CJK bigram 和 identifier
 substring；v4 新增 `title.cjk`、`body.cjk` 和 `title.prefix`。它的目标是让
-相关性实验优先成为查询变更，而不是每次都改 mapping。
+相关性实验优先成为查询变更，而不是每次都改 mapping。v5 在此基础上增加
+revision-fenced typed `publication` 状态、质量、地理位置与候选 effective time，
+用于公共 public-opinion visibility 与精确候选过滤；Admin 未传 visibility 时仍按
+原查询执行。
+
+v5 同时给所有会命中 `public_opinion` 的 stored/canonical search 幂等指纹加入
+publication visibility contract marker，包括默认 formal 模式。这是安全边界：旧
+`type=stable` 响应可能在 gate 前包含候选，不能跨部署原样 replay。升级后调用方
+必须换用新的 `Idempotency-Key`；复用旧 key 将按既有规则返回 `409
+idempotency_conflict`。签名 cursor 的默认 query binding 保持兼容，但旧 v4 PIT
+因缺少 `content-v5` provenance 会返回 `503 search_cursor_unavailable`。
 
 服务端 profile registry 只接受以下不可变、带版本的 allowlist：
 
@@ -224,14 +233,15 @@ IK `max_word` index / `smart` search 的职责分离在 MX 中对应为“索引
 | 新增 CJK、edge-ngram、delimiter、html-strip、stem 等 multi-field | 是 | mapping 即使可原位新增，历史文档也不会自动有 postings；按新 schema 重建 |
 | 只更新 field 的默认 `search_analyzer` | 文档无需重建 | 仍优先新增 profile；避免 close/reopen 或 alias 下 analyzer 不一致 |
 
-content v4 发布时，先让代码声明新的 `mx-insight-hub-content-v4-current`，再执行
+content v5 发布时，先让代码声明新的 `mx-insight-hub-content-v5-current`，再执行
 本节 4.1 的严格命令。strict reconciler 使用部署所要求的同一 tokenizer 对 PG
 current truth 做第一遍扫描；只有完整成功后才把 content 的 read/兼容 write aliases
-从 v3 原子切到 v4，然后做 content catch-up。若启用了 chunk 投影，content 完成后
-chunk 再独立构建和切换；两者不共同原子。不要在 v3 原位修改 analyzer，
+从 v4 原子切到 v5，然后做 content catch-up；catch-up 同时按 canonical
+`last_seen_at` 与 publication `updated_at` 捕获切换窗口内的变化。若启用了 chunk 投影，content 完成后
+chunk 再独立构建和切换；两者不共同原子。不要在 v4 原位修改 mapping，
 也不要把只覆盖新写入的 multi-field 当作迁移完成。mapping conflict、HanLP busy/
 timeout、意外 jieba/bigram fallback 或 degraded provenance 都必须让命令非零退出；
-旧 v3 索引保留到 count/hash、代表性查询、磁盘和延迟验收完成，供 alias 回滚。
+旧 v4 索引保留到 count/hash、代表性查询、磁盘和延迟验收完成，供 alias 回滚。
 
 附件中的 analyzer 只能作为实验素材，不能直接复制到正文：
 
