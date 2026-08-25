@@ -24,6 +24,112 @@ MetaCubeX/mihomo GitHub release. This keeps `npm i -g @qpjoy/tunnel-cli` small
 while avoiding GitHub during bootstrap when the npm registry or a registry mirror
 is reachable first.
 
+## OpenVPN Reverse Access (`open`)
+
+`qp-tunnel-cli open` connects an Oversea server to a machine that only has
+outbound connectivity, so the Oversea side can reach back into it. The Oversea
+host runs the server; the inside machine enrolls as a spoke.
+
+The design rationale, the subnet decision and the guarantees are in
+[docs/01-openvpn-reverse-access.md](docs/01-openvpn-reverse-access.md).
+
+On the Oversea server:
+
+```bash
+sudo qp-tunnel-cli open preflight --server --subnet 100.127.0.0/24
+sudo qp-tunnel-cli open install --host 203.0.113.10 --port-range 20000-20100
+sudo qp-tunnel-cli open create internal-01 --ip 100.127.0.10
+```
+
+Copy the resulting `.ovpn` to the inside machine and enroll there:
+
+```bash
+sudo qp-tunnel-cli open preflight --file internal-01.ovpn
+sudo qp-tunnel-cli open enroll --file internal-01.ovpn
+sudo qp-tunnel-cli open doctor
+```
+
+Enrollment is deliberately containing. The generated client configuration uses
+`route-nopull` plus explicit pull-filters and `script-security 0`, and the
+server pushes nothing at all, so joining the link cannot install routes, move
+the default gateway or touch the resolver. The only kernel change is the
+connected route for the tunnel interface. `open doctor` proves it by diffing
+the live default route, `/etc/resolv.conf` and the nat table against a snapshot
+taken before enrollment.
+
+`open preflight` enumerates the kernel routing table, Docker networks, the CNI
+and any WireGuard overlay, and refuses a tunnel subnet that overlaps any of
+them. The default `100.127.0.0/24` is RFC 6598 space, which Docker's address
+pools never reach; note that `172.66`-`172.88` are **public** addresses, not
+private ones, and that an AWS default VPC occupies `172.31.0.0/16`.
+
+Each instance owns its own interface, unit, iptables chain and state directory,
+so one inside machine can hold links to several Oversea servers at once:
+
+```bash
+sudo qp-tunnel-cli open enroll --instance jp01 --file jp01.ovpn
+sudo qp-tunnel-cli open enroll --instance us01 --file us01.ovpn
+```
+
+The distribution `openvpn-server@.service` and `openvpn-client@.service`
+templates are never created, modified or enabled; an unrelated OpenVPN
+installation on the same host is left alone. `open` uses
+`qp-openvpn-client@`, `qp-openvpn-server@` and `qp-openvpn-firewall@` instead,
+and refuses to overwrite a same-named unit it did not write.
+
+On the Oversea host the runtime is selected automatically: when the
+qp-tunnel-cli managed `mx-oversea-hysteria2` stack is present, OpenVPN is
+deployed as a sibling container on `network_mode: host`; otherwise it is
+installed on the host directly. Host networking is required rather than
+preferred - on a bridge network the tun device stays inside the container
+namespace, where neither the host nor a sibling container can reach the spoke
+addresses.
+
+Routing internet traffic through the Oversea server is a separate, reversible
+opt-in that enrollment never performs:
+
+```bash
+sudo qp-tunnel-cli open egress on --mode cn-direct
+sudo qp-tunnel-cli open egress off
+```
+
+`cn-direct` reads this host's local networks from the live routing table at the
+moment it is enabled, so LAN, Docker bridges, the CNI and existing overlays stay
+direct, and applies a China IP-prefix split. That split is an approximation:
+OpenVPN has no equivalent of Clash domain rules.
+
+`open create` issues two profiles at once, because the two client generations
+disagree about which options exist:
+
+- `<name>.ovpn` for OpenVPN 2.4.7+, Tunnelblick, the Windows community GUI and
+  `open enroll`
+- `<name>.connect.ovpn` for OpenVPN Connect and the mobile apps, which run the
+  OpenVPN 3 core
+
+Both are self-contained: generic `dev tun`, inlined certificates, and the fixed
+address still comes from the server's client-config-dir. Containment lives in
+the file rather than in the tooling, and the server pushes nothing at all, so a
+direct import is equally unable to install routes or DNS.
+
+OpenVPN 3 rejects a whole profile rather than ignoring options it does not
+know. Measured against a real Connect log, the option it names is `topology`,
+which OpenVPN 3 has never had because it implements subnet topology internally;
+`pull-filter` and `script-security` are unsupported for the same kind of
+reason. The Connect variant therefore keeps `route-nopull` and `data-ciphers`
+- both confirmed to parse - and drops the rest. That costs the `pull-filter`
+layer, which only guards against a mis-set server; the primary guarantee, a
+server that pushes nothing, is unaffected.
+
+Importing directly does give up the checks around the connection: the subnet
+collision preflight, the pinned host route, the before/after snapshot behind
+`open doctor`, and the deterministic interface name. Note also that GUI clients
+apply their own settings on top of the profile - Tunnelblick's per-config "Set
+nameserver" changes DNS regardless of what the profile says. Prefer
+`open enroll` on a production host; a direct import is fine for a phone or a
+throwaway check. See the design note for the full matrix.
+
+Spoke commands run on Linux and macOS; the server and `egress` are Linux-only.
+
 ## MX H2I V2 Enrollment on Ubuntu
 
 `qp-tunnel-cli h2i` is the native V2 path. It uses the same
