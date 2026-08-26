@@ -121,9 +121,9 @@ curl -sS "$HUB_URL/docs/openapi.json"
 过滤的 dispatch 矩阵，其固定版本为
 `night-all.legacy-search-capabilities.v1`。矩阵由当前 Hub 发布版本固定，不会在请求时从
 Night-All `/api/v1/search/capabilities` 实时发现。选择 `HUB_PLATFORM`、调用
-`nlp.tokenize` 或执行 Night-All compatibility 请求前，都应先读取此接口。当前 consumer
-没有可用于 Night-All compatibility 的平台 grant 时，`legacySearch` 为 `null`，兼容
-路由会 fail closed。
+`nlp.tokenize`、全国/省级 all-ingested 舆情 feed 或执行 Night-All compatibility 请求前，
+都应先读取此接口。当前 consumer 没有可用于 Night-All compatibility 的平台 grant 时，
+`legacySearch` 为 `null`，兼容路由会 fail closed。
 
 ```bash
 curl -sS -i \
@@ -140,6 +140,19 @@ dispatch。这里的 `readyPlatforms` 是兼容字段，表示当前 Hub 固定�
 legacy search。若该项包含 `message_context`，应继续检查 `context.ready` 和
 `context.datasets`；前者是独立的索引服务门禁，后者是明确支持上下文的 dataset
 清单。Key 缺失、无效或已撤销时返回 `401`。
+
+P1 地区目录需要 `data.platforms[]` 中存在 `platform=public_opinion`，且其
+`capabilities` 包含 `region_catalog`。全国/省级 all-ingested feed 还要求同一平台项
+包含 `region_feed`，并在独立的 `data.capabilities[]` 中出现：
+
+```json
+{ "capability": "public_opinion.all_ingested.read", "ready": true }
+```
+
+`public_opinion` platform grant 与 `public_opinion.all_ingested.read` 是两个独立门禁，
+缺少任意一个都不能读取该 feed；后者不默认授予，也不会自行授予数据平台访问权。
+后者的 `ready=true` 还表示 region feed 专用的全局 latest 索引和
+revision-fenced display-province 索引均已通过精确合同校验。
 
 ## 4. 搜索 API
 
@@ -248,7 +261,118 @@ publication visibility 是幂等指纹的一部分。升级到该契约后，首
 Elasticsearch PIT 若不是 content-v5 会返回 `503 search_cursor_unavailable`，应移除
 cursor、换新 key 并从第一页重新搜索。
 
-## 5. Night-All 兼容层
+## 5. 全国与省级 all-ingested 舆情 API
+
+这两个 P1 接口只读取 Hub 的 `canonical_current_safe` 当前投影，不直连上游源库。
+正式产品不要把 Hub API Key 存进浏览器或 Electron renderer；应由 AppCenter/BFF 使用
+consumer key 调用，再向前端返回业务所需字段。
+
+### `GET /api/v1/data/public-opinion/regions`
+
+P1 地区目录仅支持组合 `parentCode=CN&level=province`；两项省略时分别默认 `CN` 和
+`province`，其他值会被拒绝。接口稳定返回全部 34 个省级地区及代码，不因当前是否有
+数据而删减。城市目录属于 P2，P1 不接受 city level。
+
+```bash
+curl -sS -G \
+  -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode 'parentCode=CN' \
+  --data-urlencode 'level=province' \
+  "$HUB_URL/api/v1/data/public-opinion/regions" |
+jq '.error // .data.regions'
+```
+
+调用方应原样保存并传回每个 `regions[].code`，不要自行构造或猜测地区代码。
+
+### `GET /api/v1/data/public-opinion/regions/{regionCode}/items`
+
+P1 feed 只接受以下固定语义：
+
+- `regionCode=CN` 表示全国，或使用目录返回的 34 个省级代码之一；不接受中文别名和市级代码；
+- `visibility` 必填且只能为 `all_ingested`；
+- `sort` 可省略并默认 `latest`，不接受其他值，因此无 heatScore 的记录不会因排序模式而消失；
+- `from` 与 `to` 都必填，使用 RFC3339 闭区间；
+- `pageSize` 可选，默认 20，上限取 100 与 consumer 平台策略中的较小值；
+- `cursor` 可选，必须原样使用上一页的 `pageInfo.nextCursor`。
+
+全国示例：
+
+```bash
+curl -sS -G \
+  -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode 'visibility=all_ingested' \
+  --data-urlencode 'sort=latest' \
+  --data-urlencode 'from=2026-08-24T00:00:00+08:00' \
+  --data-urlencode 'to=2026-08-26T23:59:59+08:00' \
+  --data-urlencode 'pageSize=50' \
+  "$HUB_URL/api/v1/data/public-opinion/regions/CN/items" |
+jq '.error // .data'
+```
+
+选择江苏后的请求只替换 path 中的地区代码，其他参数保持不变：
+
+```bash
+curl -sS -G \
+  -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode 'visibility=all_ingested' \
+  --data-urlencode 'sort=latest' \
+  --data-urlencode 'from=2026-08-24T00:00:00+08:00' \
+  --data-urlencode 'to=2026-08-26T23:59:59+08:00' \
+  --data-urlencode 'pageSize=50' \
+  "$HUB_URL/api/v1/data/public-opinion/regions/CN-JS/items" |
+jq '.error // .data'
+```
+
+响应中的 `region` 是目录同结构对象（全国为
+`{code:"CN",name:"中国",officialName:"中华人民共和国",level:"country",parentCode:null}`），
+并回显 `visibility={mode:"all_ingested",qualityFiltered:false,
+corpusDefinition:"canonical_current_safe"}`、`sort="latest"`、`timeBasis="effective"`、
+归一化后的 `from`/`to`，以及 `items` 和 `pageInfo`。这里没有 `scope` 字段。
+
+翻页时必须保留相同的 region、visibility、sort、时间窗和 pageSize：
+
+```bash
+FIRST_PAGE="$(
+  curl -sS -G \
+    -H "Authorization: Bearer $HUB_KEY" \
+    --data-urlencode 'visibility=all_ingested' \
+    --data-urlencode 'sort=latest' \
+    --data-urlencode 'from=2026-08-24T00:00:00+08:00' \
+    --data-urlencode 'to=2026-08-26T23:59:59+08:00' \
+    --data-urlencode 'pageSize=50' \
+    "$HUB_URL/api/v1/data/public-opinion/regions/CN/items"
+)"
+NEXT_CURSOR="$(printf '%s' "$FIRST_PAGE" | jq -r '.data.pageInfo.nextCursor // empty')"
+
+if [ -n "$NEXT_CURSOR" ]; then
+  curl -sS -G \
+    -H "Authorization: Bearer $HUB_KEY" \
+    --data-urlencode 'visibility=all_ingested' \
+    --data-urlencode 'sort=latest' \
+    --data-urlencode 'from=2026-08-24T00:00:00+08:00' \
+    --data-urlencode 'to=2026-08-26T23:59:59+08:00' \
+    --data-urlencode 'pageSize=50' \
+    --data-urlencode "cursor=$NEXT_CURSOR" \
+    "$HUB_URL/api/v1/data/public-opinion/regions/CN/items" |
+  jq '.error // .data'
+fi
+```
+
+`all_ingested` 表示不按质量分数、qualification status 或地理验证状态过滤；它会包含
+未评分、pending、rejected 和 failed candidate。全国 `CN` 还包含当前未分配省份的安全
+记录，这些 item 保持 `province=null`。该接口没有 `minQualityScore` 参数；不要把旧接口中
+的 `minQualityScore=0` 当作“全部”，因为旧查询中显式 0 仍会排除 null/unscored candidate。
+
+这里的“全部”严格限定为 `canonical_current_safe`：当前未删除、已 canonical 化且具有
+revision-fenced current publication state 的公开安全投影。不包含上游 raw/raw payload、
+历史 source/canonical revision、删除或 tombstone、映射/导入失败、没有 current
+publication state 的记录，也不返回 provider/endpoint、凭据、策略/运行 ID、extensions、
+质量 flags/拒绝理由、模型 reasoning 或内部 lineage。
+
+旧的 `/provinces/{province}/items`、`/province-coverage`、`/items/{id}` 和搜索接口均保持
+原有路径、默认值、授权和 cursor 语义；P1 不提供城市 feed。
+
+## 6. Night-All 兼容层
 
 公开的 legacy Night-All 路由仅有：
 
@@ -402,7 +526,7 @@ curl -sS -i -X POST \
 成功与错误行为遵循共享 compatibility 规则。不要向 `user-info` 发送 channel
 selector；operation 不支持的字段会被拒绝。
 
-## 6. 分词
+## 7. 分词
 
 ### `POST /api/v1/tools/tokenize`
 
@@ -426,7 +550,7 @@ curl -sS -i -X POST \
 过大可能返回 `413`；分词运行时不可用返回 `503`。精确重放不会再次分词或重复
 计量。
 
-## 7. Telegram 已存数据 API
+## 8. Telegram 已存数据 API
 
 本节全部路由都需要明确的 `telegram` 平台授权。当前所有获得该授权的 consumer
 读取同一份 Hub 已存 canonical Telegram 语料，尚未实现 tenant-specific row subset。
@@ -527,7 +651,7 @@ curl -sS -i --get \
 `searchMode=elasticsearch|postgres`。缺少 query 返回 `400`；搜索不可用返回
 `503`。
 
-## 8. 请求与用量证据
+## 9. 请求与用量证据
 
 ### `GET /api/v1/requests/{requestId}`
 

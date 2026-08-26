@@ -1059,8 +1059,9 @@ warn_local_postgres_present() {
   say "        bash scripts/manage.sh ops internal-production decommission-local-postgres" >&2
 }
 
-# Reconcile the two Hub-local PostgreSQL indexes that gate activation of the
-# fixed province-opinion source. The SQL is deliberately streamed from the
+# Reconcile the Hub-local PostgreSQL indexes for the curated province feed and
+# the all-ingested region feed. The legacy pair gates source activation; the
+# region pair independently gates the broader public endpoint. The SQL is deliberately streamed from the
 # operator checkout into the shared PostgreSQL Pod: the runtime image neither
 # ships psql nor needs permission to perform DDL. The script is idempotent and
 # uses CREATE/DROP INDEX CONCURRENTLY, so it must remain outside the migration

@@ -113,14 +113,14 @@ scaled to zero even though API/Admin Pods can later discover the recovered
 Service. After a successful Admin reindex, verify or restore the projector
 replica so subsequent outbox events continue to project.
 
-### Optional province-opinion serving indexes
+### Province-opinion serving indexes
 
-Routine deploy intentionally does not build the two province-feed indexes:
-they scan the shared canonical table and must not extend the transactional
-migration lock. The fixed `province-opinion` source therefore remains safely
-blocked after migration 033. Only after a separate onboarding approval, run the
-online operation from an approved workstation that has `psql` and the Hub
-database URL (not the Night-All source URL):
+Routine deploy reconciles the two curated province-feed indexes and the two
+all-ingested region-feed indexes after the transactional migration Job and
+before API rollout. They are kept out of migrations because they scan populated
+Hub tables and use `CREATE INDEX CONCURRENTLY`. For an independently managed
+environment, run the same idempotent online operation with the Hub database URL
+(not the Night-All source URL):
 
 ```bash
 cd electron-dock/mx-insight-hub

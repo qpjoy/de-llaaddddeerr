@@ -22,14 +22,19 @@ import {
   normalizeCanonicalContextQuery,
 } from './data/canonical-context.mjs'
 import {
+  PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
   PUBLIC_OPINION_PLATFORM,
   normalizePublicOpinionCoverageQuery,
   normalizePublicOpinionDetailQuery,
   normalizePublicOpinionItemId,
   normalizePublicOpinionQuery,
+  normalizePublicOpinionRegionQuery,
+  normalizePublicOpinionRegionsQuery,
   publicOpinionCoverage,
   publicOpinionItem,
   publicOpinionPage,
+  publicOpinionRegionPage,
+  publicOpinionRegions,
 } from './data/public-opinion.mjs'
 import {
   canUseNightAllCompatibilityFallback,
@@ -97,8 +102,11 @@ function replayWindowFor(resultType) {
   return resultType === 'stable' ? null : FRESH_REPLAY_WINDOW_MS
 }
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
-const PUBLIC_CAPABILITIES = new Set(['nlp.tokenize'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
+const PUBLIC_CAPABILITIES = new Set([
+  TOKENIZE_CAPABILITY,
+  PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
+])
 const CANONICAL_SEARCH_USAGE_SCOPE = 'data.canonical-search'
 const TOKENIZE_MAX_TEXT_LENGTH = 4_096
 const TOKENIZE_MAX_TOKENS = 8_192
@@ -332,6 +340,7 @@ export class HubService {
   async getPlatformConfiguration({ tenantId, consumerId }) {
     const normalizedTenantId = optionalUuid(tenantId, 'tenantId')
     const normalizedConsumerId = optionalUuid(consumerId, 'consumerId')
+    const allIngestedReady = await this.#publicOpinionRegionServingReady()
     return {
       grants: normalizedConsumerId ? await this.store.listGrants(normalizedConsumerId) : [],
       policies: normalizedConsumerId ? await this.store.listPolicies(normalizedConsumerId) : [],
@@ -341,10 +350,16 @@ export class HubService {
       capabilityPolicies: normalizedConsumerId && typeof this.store.listCapabilityPolicies === 'function'
         ? await this.store.listCapabilityPolicies(normalizedConsumerId)
         : [],
-      availableCapabilities: [{
-        capability: TOKENIZE_CAPABILITY,
-        ready: typeof this.segmenter?.segmentWithMeta === 'function',
-      }],
+      availableCapabilities: [
+        {
+          capability: TOKENIZE_CAPABILITY,
+          ready: typeof this.segmenter?.segmentWithMeta === 'function',
+        },
+        {
+          capability: PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
+          ready: allIngestedReady,
+        },
+      ],
     }
   }
 
@@ -471,13 +486,23 @@ export class HubService {
           ready: source?.status === 'active' && servingIndexes?.ready === true,
           source: 'hub',
           servingMode: 'stored',
-          capabilities: ['province_feed', 'province_coverage', 'item_detail', 'stored_search'],
+          capabilities: [
+            'province_feed',
+            'province_coverage',
+            'region_catalog',
+            'region_feed',
+            'item_detail',
+            'stored_search',
+          ],
         })
       }
     }
     const capabilityGrants = typeof this.store.listCapabilityGrants === 'function'
       ? await this.store.listCapabilityGrants(context.consumer.id)
       : []
+    const allIngestedReady = capabilityGrants.includes(PUBLIC_OPINION_ALL_INGESTED_CAPABILITY)
+      ? await this.#publicOpinionRegionServingReady()
+      : false
     return {
       ...payload,
       data: {
@@ -487,7 +512,10 @@ export class HubService {
           .map((capability) => ({
             capability,
             ready: capability === TOKENIZE_CAPABILITY
-              && typeof this.segmenter?.segmentWithMeta === 'function',
+              ? typeof this.segmenter?.segmentWithMeta === 'function'
+              : capability === PUBLIC_OPINION_ALL_INGESTED_CAPABILITY
+                ? allIngestedReady
+                : false,
           })),
       },
     }
@@ -745,6 +773,78 @@ export class HubService {
           minQualityScore: query.minQualityScore,
         })
         return publicOpinionPage(rows, query, this.apiKeyPepper)
+      },
+    })
+  }
+
+  async publicOpinionRegions(context, queryInput) {
+    const policy = await this.#storedPlatformPolicy(context, PUBLIC_OPINION_PLATFORM, 'Public opinion')
+    const query = normalizePublicOpinionRegionsQuery(queryInput)
+    return this.#meterStoredRead(context, PUBLIC_OPINION_PLATFORM, policy, {
+      path: '/api/v1/data/public-opinion/regions',
+      fingerprintBody: query,
+      operation: async () => publicOpinionRegions(query),
+    })
+  }
+
+  async publicOpinionRegion(context, regionInput, queryInput) {
+    if (typeof this.store.listPublicOpinionRegionRecords !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Public opinion region data requires the PostgreSQL store')
+    }
+    const platformPolicy = await this.#storedPlatformPolicy(context, PUBLIC_OPINION_PLATFORM, 'Public opinion')
+    const query = normalizePublicOpinionRegionQuery(
+      regionInput,
+      queryInput,
+      platformPolicy.maxPageSize,
+      this.apiKeyPepper,
+    )
+    const grants = typeof this.store.listCapabilityGrants === 'function'
+      ? await this.store.listCapabilityGrants(context.consumer.id)
+      : []
+    assert(
+      grants.includes(PUBLIC_OPINION_ALL_INGESTED_CAPABILITY),
+      403,
+      'capability_not_granted',
+      'all_ingested public opinion is not granted',
+    )
+    const capabilityPolicy = {
+      ...this.defaultPolicy,
+      ...((typeof this.store.getCapabilityPolicy === 'function'
+        ? await this.store.getCapabilityPolicy(
+            context.consumer.id,
+            PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
+          )
+        : null) || {}),
+    }
+    const policy = {
+      ...platformPolicy,
+      maxRequests: capabilityPolicy.maxRequests,
+      windowSeconds: capabilityPolicy.windowSeconds,
+    }
+    await this.#assertPublicOpinionRegionServingIndexes()
+    return this.#meterStoredRead(context, PUBLIC_OPINION_PLATFORM, policy, {
+      capability: PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
+      path: `/api/v1/data/public-opinion/regions/${query.region.code}/items`,
+      fingerprintBody: {
+        regionCode: query.region.code,
+        visibility: query.visibility,
+        sort: query.sort,
+        from: query.from,
+        to: query.to,
+        pageSize: query.pageSize,
+        cursor: query.cursorToken,
+      },
+      operation: async () => {
+        const rows = await this.store.listPublicOpinionRegionRecords({
+          regionCode: query.region.code,
+          visibility: query.visibility,
+          sort: query.sort,
+          from: query.from,
+          to: query.to,
+          pageSize: query.pageSize,
+          cursor: query.cursor,
+        })
+        return publicOpinionRegionPage(rows, query, this.apiKeyPepper)
       },
     })
   }
@@ -1153,19 +1253,65 @@ export class HubService {
     }
   }
 
-  async #meterStoredRead(context, platform, policy, { path, fingerprintBody, operation }) {
+  async #publicOpinionRegionServingReady() {
+    if (
+      typeof this.store.listPublicOpinionRegionRecords !== 'function'
+      || typeof this.store.getPublicOpinionRegionServingIndexStatus !== 'function'
+    ) return false
+    try {
+      const servingIndexes = await this.store.getPublicOpinionRegionServingIndexStatus()
+      return servingIndexes?.ready === true
+    } catch {
+      this.logger?.warn?.('[public-opinion] region serving index status is unavailable')
+      return false
+    }
+  }
+
+  async #assertPublicOpinionRegionServingIndexes() {
+    if (typeof this.store.getPublicOpinionRegionServingIndexStatus !== 'function') {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Public opinion region serving indexes are not available',
+      )
+    }
+    let servingIndexes
+    try {
+      servingIndexes = await this.store.getPublicOpinionRegionServingIndexStatus()
+    } catch {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Public opinion region serving index status is unavailable',
+      )
+    }
+    if (!servingIndexes.ready) {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Public opinion region serving indexes are not ready',
+      )
+    }
+  }
+
+  async #meterStoredRead(context, platform, policy, {
+    path,
+    fingerprintBody,
+    operation,
+    capability = null,
+  }) {
     const requestId = randomUUID()
     const startedAt = performance.now()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
     await this.store.reapStaleReservations()
     const reservation = await this.store.reserve({
       requestId,
-      idempotencyKey: `${platform}-read:${requestId}`,
+      idempotencyKey: `${capability || platform}-read:${requestId}`,
       fingerprint: requestFingerprint({ method: 'GET', path, body: fingerprintBody }),
       tenantId: context.tenant.id,
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
-      platform,
+      ...(capability ? { capability } : { platform }),
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
@@ -1195,6 +1341,7 @@ export class HubService {
           payload.pageInfo?.returnedCount
             ?? payload.storedWindow?.returnedCount
             ?? payload.items?.length
+            ?? payload.regions?.length
             ?? 0,
         ),
         upstreamLatencyMs: Math.round(performance.now() - startedAt),

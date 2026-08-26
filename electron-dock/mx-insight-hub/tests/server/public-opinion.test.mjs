@@ -515,7 +515,14 @@ test('public province routes enforce grants, paginate safely and keep public_opi
     const capabilities = await call(baseUrl, '/api/v1/data/capabilities', headers)
     assert.equal(capabilities.response.status, 200)
     const platform = capabilities.payload.data.platforms.find((entry) => entry.platform === 'public_opinion')
-    assert.deepEqual(platform.capabilities, ['province_feed', 'province_coverage', 'item_detail', 'stored_search'])
+    assert.deepEqual(platform.capabilities, [
+      'province_feed',
+      'province_coverage',
+      'region_catalog',
+      'region_feed',
+      'item_detail',
+      'stored_search',
+    ])
     assert.equal(platform.ready, false)
     assert.deepEqual(upstreamCapabilityCalls, [])
 

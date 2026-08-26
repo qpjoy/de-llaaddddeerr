@@ -78,6 +78,12 @@ const CAPABILITY_CATALOG = {
     endpoint: 'POST /api/v1/tools/tokenize',
     usageHint: 'curl 粘贴即运行并静默读取 Key；旧 API Key 不会被读取或回显',
   },
+  'public_opinion.all_ingested.read': {
+    label: '全量安全舆情读取',
+    description: '在有界时间窗内枚举 canonical current safe 记录，包含未分类和未评分项，不暴露 raw、模型推理或历史 revision',
+    endpoint: 'GET /api/v1/data/public-opinion/regions/{regionCode}/items',
+    usageHint: '还必须同时授予 public_opinion 平台；默认不向新调用者开放',
+  },
 }
 
 const PUBLIC_DOCS_HREF = (() => {

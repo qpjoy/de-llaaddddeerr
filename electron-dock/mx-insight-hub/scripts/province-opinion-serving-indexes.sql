@@ -1,6 +1,7 @@
 \set ON_ERROR_STOP on
 
--- Online Hub-local serving indexes for the fixed province-opinion pipeline.
+-- Online Hub-local serving indexes for the fixed province-opinion pipeline
+-- and the additive all-ingested region feed.
 -- Run this file with psql against the Hub database as a standalone operation;
 -- do not wrap it in BEGIN/COMMIT.  CREATE/DROP INDEX CONCURRENTLY cannot run in
 -- a transaction block.  The source stays paused and no upstream data is read.
@@ -146,5 +147,139 @@ SELECT count(*) = 2 AND bool_and(contract_ready)
   \echo 'province-opinion serving indexes are ready'
 \else
   \warn 'province-opinion serving indexes did not become ready'
+  \quit 1
+\endif
+
+-- The all-ingested region feed has a different access path from the curated
+-- province feed.  CN must retain rows whose admin1 is NULL, while province
+-- selection uses the revision-fenced display code from current publication
+-- state rather than the canonical source code.  Keep these contracts separate
+-- so readiness cannot claim the region feed is indexed when only the legacy
+-- province hot/latest indexes exist.
+CREATE TEMP VIEW public_opinion_region_serving_index_contract AS
+WITH expected (
+  index_name,
+  table_name,
+  key_1,
+  key_2,
+  key_3,
+  option_1,
+  option_2,
+  option_3,
+  predicate
+) AS (
+  VALUES
+    (
+      'canonical_public_opinion_region_latest_idx',
+      'canonical_records',
+      'coalesceevent_time,collected_at',
+      'collected_at',
+      'id',
+      1, 1, 3,
+      'dataset_id=''public-opinion.province.v1''andplatform=''public_opinion''andobject_type=''opinion_item''anddeleted_atisnullandcollected_atisnotnull'
+    ),
+    (
+      'public_opinion_current_state_region_idx',
+      'public_opinion_current_state',
+      'display_admin1_code',
+      'record_id',
+      'canonical_revision',
+      0, 0, 0,
+      'display_admin1_codeisnotnull'
+    )
+)
+SELECT e.index_name,
+       coalesce(
+         i.indisvalid
+         AND i.indisready
+         AND i.indislive
+         AND am.amname = 'btree'
+         AND tn.nspname = 'core'
+         AND t.relname = e.table_name
+         AND i.indnkeyatts = 3
+         AND regexp_replace(lower(pg_get_indexdef(c.oid, 1, true)), '[()[:space:]"]', '', 'g') = e.key_1
+         AND regexp_replace(lower(pg_get_indexdef(c.oid, 2, true)), '[()[:space:]"]', '', 'g') = e.key_2
+         AND regexp_replace(lower(pg_get_indexdef(c.oid, 3, true)), '[()[:space:]"]', '', 'g') = e.key_3
+         AND i.indoption[0] = e.option_1
+         AND i.indoption[1] = e.option_2
+         AND i.indoption[2] = e.option_3
+         AND regexp_replace(
+           regexp_replace(lower(pg_get_expr(i.indpred, i.indrelid, true)), '::text', '', 'g'),
+           '[()[:space:]"]', '', 'g'
+         ) = e.predicate,
+         false
+       ) AS contract_ready
+  FROM expected e
+  LEFT JOIN pg_namespace n
+    ON n.nspname = 'core'
+  LEFT JOIN pg_class c
+    ON c.relnamespace = n.oid
+   AND c.relname = e.index_name
+  LEFT JOIN pg_index i
+    ON i.indexrelid = c.oid
+  LEFT JOIN pg_class t
+    ON t.oid = i.indrelid
+  LEFT JOIN pg_namespace tn
+    ON tn.oid = t.relnamespace
+  LEFT JOIN pg_am am
+    ON am.oid = c.relam;
+
+SELECT contract_ready AS global_region_index_ready
+  FROM public_opinion_region_serving_index_contract
+ WHERE index_name = 'canonical_public_opinion_region_latest_idx' \gset
+
+\if :global_region_index_ready
+  \echo 'canonical_public_opinion_region_latest_idx is already valid'
+\else
+  DROP INDEX CONCURRENTLY IF EXISTS core.canonical_public_opinion_region_latest_idx;
+  CREATE INDEX CONCURRENTLY canonical_public_opinion_region_latest_idx
+    ON core.canonical_records (
+      (coalesce(event_time, collected_at)) DESC NULLS LAST,
+      collected_at DESC NULLS LAST,
+      id DESC
+    )
+    WHERE dataset_id = 'public-opinion.province.v1'
+      AND platform = 'public_opinion'
+      AND object_type = 'opinion_item'
+      AND deleted_at IS NULL
+      AND collected_at IS NOT NULL;
+\endif
+
+SELECT contract_ready AS display_region_index_ready
+  FROM public_opinion_region_serving_index_contract
+ WHERE index_name = 'public_opinion_current_state_region_idx' \gset
+
+\if :display_region_index_ready
+  \echo 'public_opinion_current_state_region_idx is already valid'
+\else
+  DROP INDEX CONCURRENTLY IF EXISTS core.public_opinion_current_state_region_idx;
+  CREATE INDEX CONCURRENTLY public_opinion_current_state_region_idx
+    ON core.public_opinion_current_state (
+      display_admin1_code,
+      record_id,
+      canonical_revision
+    )
+    WHERE display_admin1_code IS NOT NULL;
+\endif
+
+SELECT c.relname AS index_name, i.indisready, i.indisvalid
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_index i ON i.indexrelid = c.oid
+ WHERE n.nspname = 'core'
+   AND c.relname IN (
+     'canonical_public_opinion_region_latest_idx',
+     'public_opinion_current_state_region_idx'
+   )
+ ORDER BY c.relname;
+
+SELECT count(*) = 2 AND bool_and(contract_ready)
+         AS public_opinion_region_serving_indexes_ready
+  FROM public_opinion_region_serving_index_contract \gset
+
+\if :public_opinion_region_serving_indexes_ready
+  \echo 'public-opinion region serving indexes are ready'
+\else
+  \warn 'public-opinion region serving indexes did not become ready'
   \quit 1
 \endif

@@ -672,6 +672,9 @@ assert_eq \
   "$(grep -c 'FROM province_opinion_serving_index_contract' <<<"$province_index_sql")" \
   'province index preflight and final gate reuse one complete contract'
 grep -Fq 'SELECT count(*) = 2 AND bool_and(contract_ready)' <<<"$province_index_sql"
+grep -Fq 'CREATE INDEX CONCURRENTLY canonical_public_opinion_region_latest_idx' <<<"$province_index_sql"
+grep -Fq 'CREATE INDEX CONCURRENTLY public_opinion_current_state_region_idx' <<<"$province_index_sql"
+grep -Fq 'FROM public_opinion_region_serving_index_contract' <<<"$province_index_sql"
 if grep -Eq 'heat_scoredescnullslast|collected_atdescnullslast|iddesc' <<<"$province_index_sql"; then
   printf 'not ok - province index contract expects sort syntax from column-only pg_get_indexdef\n' >&2
   exit 1

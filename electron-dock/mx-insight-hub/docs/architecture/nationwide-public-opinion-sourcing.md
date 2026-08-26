@@ -47,10 +47,31 @@ Last reviewed: 2026-08-26.
 
 ## 地区切换消费面
 
-用户界面先请求 `GET /api/v1/data/public-opinion/province-coverage`获取 34 个地区、可用数和缺口，
-选中地区后请求 `GET /api/v1/data/public-opinion/provinces/:province/items?sort=latest`。浏览器/
-Electron renderer 不保存 Hub API key；正式产品通过 AppCenter/BFF 以 consumer key 访问。该读链路不修改
-MX-H2I 的登录、lease、WireGuard、route、DNS/PAC 或用户联网状态机。
+P1 地区切换先调用
+`GET /api/v1/data/public-opinion/regions?parentCode=CN&level=province`。该接口只支持全国父级
+和省级 level（省略时分别默认 `CN` 与 `province`），稳定返回全部 34 个省级地区及代码，
+不因当前数据量而删减。选择“全国”时以 `regionCode=CN` 调用
+`GET /api/v1/data/public-opinion/regions/CN/items`；选择省份时只把 path 替换为目录返回的准确
+代码，例如 `CN-JS`。P1 不接受中文别名或城市代码，城市目录与 city feed 留到 P2，不能用
+省名/关键词猜测城市归属。
+
+region feed 固定使用 `visibility=all_ingested`、`sort=latest` 和必填 RFC3339 `from`/`to`
+闭区间；`sort` 可省略并默认 `latest`，其他值不支持。它同时要求 `public_opinion` platform
+grant 与独立、非默认的 `public_opinion.all_ingested.read` capability。响应回显目录同结构的
+`region`、描述对象 `visibility={mode:all_ingested,qualityFiltered:false,
+corpusDefinition:canonical_current_safe}`、`sort`、`timeBasis=effective`、归一化的
+`from`/`to`，以及 `items`、`pageInfo`；游标必须在地区和其他参数不变时原样续传。
+
+这里的“忽略质量”是 `canonical_current_safe`，不是 raw dump：当前未分类省份、未评分、
+pending/rejected/failed candidate 仍可进入全国 `CN` 结果，且 `province=null` 保持不变；
+省级结果只匹配该省。上游 raw/raw payload、source/canonical 历史 revision、删除/tombstone、
+映射/导入失败和没有 revision-fenced current publication state 的记录均不可见，内部 provider、
+凭据、策略/运行 ID、质量 flags/拒绝理由、模型 reasoning 与 lineage 也不公开。
+
+现有 `province-coverage`、`/provinces/:province/items`、item detail 与搜索接口保持原路径、
+默认值、授权和 cursor 语义，可继续用于“可用数/缺口”和 formal/candidate 受控视图。浏览器/
+Electron renderer 不保存 Hub API key；正式产品通过 AppCenter/BFF 以 consumer key 访问。
+该读链路不修改 MX-H2I 的登录、lease、WireGuard、route、DNS/PAC 或用户联网状态机。
 
 ## 内容权利边界
 

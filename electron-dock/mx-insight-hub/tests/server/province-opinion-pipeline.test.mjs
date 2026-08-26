@@ -279,6 +279,8 @@ test('migration installs only a paused, unconfigured and ungranted source contra
   )
   assert.match(servingSql, /CREATE INDEX CONCURRENTLY canonical_province_opinion_hot_idx/)
   assert.match(servingSql, /CREATE INDEX CONCURRENTLY canonical_province_opinion_latest_idx/)
+  assert.match(servingSql, /CREATE INDEX CONCURRENTLY canonical_public_opinion_region_latest_idx/)
+  assert.match(servingSql, /CREATE INDEX CONCURRENTLY public_opinion_current_state_region_idx/)
   assert.doesNotMatch(servingSql, /^\s*(?:BEGIN|COMMIT)\s*;/im)
 })
 

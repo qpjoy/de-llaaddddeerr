@@ -2477,6 +2477,30 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/public-opinion/regions') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.publicOpinionRegions(
+            context,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/data/public-opinion/regions/:region/items')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.publicOpinionRegion(
+            context,
+            params.region,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
       params = routeMatch(pathname, '/api/v1/data/public-opinion/provinces/:province/items')
       if (request.method === 'GET' && params) {
         const context = await requirePublic(request)

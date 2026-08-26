@@ -310,6 +310,34 @@ const PUBLIC_OPINION_SERVING_INDEX_CONTRACTS = Object.freeze([
     ],
   },
 ])
+const PUBLIC_OPINION_REGION_SERVING_INDEX_CONTRACTS = Object.freeze([
+  {
+    name: 'canonical_public_opinion_region_latest_idx',
+    table: 'canonical_records',
+    keys: [
+      { expression: 'coalesce(event_time, collected_at)', options: 1 },
+      { expression: 'collected_at', options: 1 },
+      { expression: 'id', options: 3 },
+    ],
+    predicate: [
+      "dataset_id = 'public-opinion.province.v1'",
+      "platform = 'public_opinion'",
+      "object_type = 'opinion_item'",
+      'deleted_at IS NULL',
+      'collected_at IS NOT NULL',
+    ],
+  },
+  {
+    name: 'public_opinion_current_state_region_idx',
+    table: 'public_opinion_current_state',
+    keys: [
+      { expression: 'display_admin1_code', options: 0 },
+      { expression: 'record_id', options: 0 },
+      { expression: 'canonical_revision', options: 0 },
+    ],
+    predicate: ['display_admin1_code IS NOT NULL'],
+  },
+])
 
 function lowerSqlOutsideLiterals(value) {
   const input = String(value ?? '')
@@ -2120,6 +2148,53 @@ export class PostgresStore {
     }
   }
 
+  async getPublicOpinionRegionServingIndexStatus() {
+    const required = PUBLIC_OPINION_REGION_SERVING_INDEX_CONTRACTS.map((contract) => contract.name)
+    const { rows } = await this.pool.query(
+      `SELECT index_rel.relname AS name,
+              table_rel.relname AS table_name,
+              index_meta.indisready,
+              index_meta.indisvalid,
+              index_meta.indislive,
+              access_method.amname AS access_method,
+              index_meta.indnkeyatts AS key_count,
+              pg_get_indexdef(index_rel.oid, 1, true) AS key_1,
+              pg_get_indexdef(index_rel.oid, 2, true) AS key_2,
+              pg_get_indexdef(index_rel.oid, 3, true) AS key_3,
+              pg_get_indexdef(index_rel.oid, 4, true) AS key_4,
+              index_meta.indoption[0]::integer AS key_1_options,
+              index_meta.indoption[1]::integer AS key_2_options,
+              index_meta.indoption[2]::integer AS key_3_options,
+              index_meta.indoption[3]::integer AS key_4_options,
+              pg_get_expr(index_meta.indpred, index_meta.indrelid, true) AS predicate
+         FROM pg_class index_rel
+         JOIN pg_namespace index_ns ON index_ns.oid = index_rel.relnamespace
+         JOIN pg_index index_meta ON index_meta.indexrelid = index_rel.oid
+         JOIN pg_am access_method ON access_method.oid = index_rel.relam
+         JOIN pg_class table_rel ON table_rel.oid = index_meta.indrelid
+         JOIN pg_namespace table_ns ON table_ns.oid = table_rel.relnamespace
+        WHERE index_ns.nspname = 'core'
+          AND table_ns.nspname = 'core'
+          AND table_rel.relname IN ('canonical_records', 'public_opinion_current_state')
+          AND index_rel.relname = ANY($1::text[])`,
+      [required],
+    )
+    const byName = new Map(rows.map((row) => [row.name, row]))
+    const indexes = PUBLIC_OPINION_REGION_SERVING_INDEX_CONTRACTS.map((contract) => {
+      const row = byName.get(contract.name)
+      return {
+        name: contract.name,
+        ready: row?.table_name === contract.table && servingIndexMatches(row, contract),
+      }
+    })
+    return {
+      ready: indexes.every((index) => index.ready),
+      required,
+      indexes,
+      missing: indexes.filter((index) => !index.ready).map((index) => index.name),
+    }
+  }
+
   /**
    * Admin-only inventory for separating source volume, publication quality,
    * geography coverage and retained history. It intentionally aggregates the
@@ -2404,6 +2479,87 @@ export class PostgresStore {
         provinceCode, from, to, candidateMode, minQualityScore, cursor?.id ?? null,
         cursor?.sortTime ?? null, cursor?.collectedAt ?? null, pageSize + 1,
       ],
+    )
+    return rows
+  }
+
+  /**
+   * Broad but customer-safe public-opinion enumeration.
+   *
+   * This deliberately ignores publication status, quality score and geography
+   * verification.  It still requires a current revision-fenced publication
+   * state and never selects raw payloads, extensions, lineage or model traces.
+   */
+  async listPublicOpinionRegionRecords({
+    regionCode,
+    visibility,
+    sort,
+    from,
+    to,
+    pageSize,
+    cursor = null,
+  }) {
+    if (visibility !== 'all_ingested') {
+      throw new AppError(400, 'invalid_visibility', 'Region records currently require visibility=all_ingested')
+    }
+    if (sort !== 'latest') {
+      throw new AppError(400, 'invalid_sort', 'all_ingested region records currently support latest only')
+    }
+    if (regionCode !== 'CN' && !/^CN-[A-Z]{2}$/.test(regionCode || '')) {
+      throw new AppError(400, 'invalid_region', 'regionCode must be CN or an ISO 3166-2:CN province code')
+    }
+
+    const values = [from, to]
+    const predicates = [
+      "record.dataset_id = 'public-opinion.province.v1'",
+      "record.platform = 'public_opinion'",
+      "record.object_type = 'opinion_item'",
+      'record.deleted_at IS NULL',
+      'record.collected_at IS NOT NULL',
+      'coalesce(record.event_time, record.collected_at) >= $1::timestamptz',
+      'coalesce(record.event_time, record.collected_at) <= $2::timestamptz',
+    ]
+    if (regionCode !== 'CN') {
+      values.push(regionCode)
+      predicates.push(`publication.display_admin1_code = $${values.length}`)
+    }
+    if (cursor) {
+      values.push(cursor.sortTime, cursor.collectedAt, cursor.id)
+      const first = values.length - 2
+      predicates.push(
+        `(coalesce(record.event_time, record.collected_at), record.collected_at, record.id) < (`
+        + `$${first}::timestamptz, $${first + 1}::timestamptz, $${first + 2}::uuid)`,
+      )
+    }
+    values.push(pageSize + 1)
+    const limitParameter = values.length
+    const { rows } = await this.pool.query(
+      `SELECT record.id, record.title, record.body, record.url,
+              record.content_type, record.author_name,
+              record.event_time, record.collected_at,
+              publication.display_admin1_code AS admin1_code,
+              record.heat_score, record.stable_fields,
+              publication.source_stage,
+              publication.status AS quality_status,
+              publication.quality_score,
+              publication.qualification_threshold,
+              publication.geography_verified,
+              publication.geo_scope,
+              publication.country_code,
+              publication.location_label,
+              publication.location_type,
+              publication.country_name,
+              coalesce(record.event_time, record.collected_at) AS sort_time
+         FROM core.canonical_records record
+         JOIN core.public_opinion_current_state publication
+           ON publication.record_id = record.id
+          AND publication.canonical_revision = record.current_revision
+        WHERE ${predicates.join('\n          AND ')}
+        ORDER BY coalesce(record.event_time, record.collected_at) DESC NULLS LAST,
+                 record.collected_at DESC NULLS LAST,
+                 record.id DESC
+        LIMIT $${limitParameter}`,
+      values,
     )
     return rows
   }

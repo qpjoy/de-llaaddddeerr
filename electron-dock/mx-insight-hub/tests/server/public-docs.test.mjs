@@ -247,14 +247,34 @@ function assertPublicOpinionContract(document) {
   const publicOpinionCapability = capabilitiesExample?.data.platforms
     ?.find((entry) => entry.platform === 'public_opinion')
   const feed = document.paths['/data/public-opinion/provinces/{province}/items']?.get
+  const regions = document.paths['/data/public-opinion/regions']?.get
+  const regionFeed = document.paths['/data/public-opinion/regions/{regionCode}/items']?.get
   const coverage = document.paths['/data/public-opinion/province-coverage']?.get
   const detail = document.paths['/data/public-opinion/items/{id}']?.get
   assert.ok(feed)
+  assert.ok(regions)
+  assert.ok(regionFeed)
   assert.ok(coverage)
   assert.ok(detail)
   assert.deepEqual(publicOpinionCapability?.capabilities, [
-    'province_feed', 'province_coverage', 'item_detail', 'stored_search',
+    'province_feed', 'province_coverage', 'region_catalog', 'region_feed',
+    'item_detail', 'stored_search',
   ])
+  assert.deepEqual(regions.parameters.map((parameter) => parameter.name), [
+    'parentCode', 'level',
+  ])
+  assert.deepEqual(regionFeed.parameters.map((parameter) => parameter.name), [
+    'regionCode', 'visibility', 'sort', 'from', 'to', 'pageSize', 'cursor',
+  ])
+  assert.equal(regions.parameters[0].schema.const, 'CN')
+  assert.equal(regions.parameters[1].schema.const, 'province')
+  assert.equal(regionFeed.parameters[1].required, true)
+  assert.equal(regionFeed.parameters[1].schema.const, 'all_ingested')
+  assert.equal(regionFeed.parameters[2].schema.const, 'latest')
+  assert.equal(regionFeed.parameters[3].required, true)
+  assert.equal(regionFeed.parameters[4].required, true)
+  assert.equal(regionFeed.parameters[5].schema.maximum, 100)
+  assert.equal(regionFeed.parameters[6].schema.maxLength, 8192)
   assert.deepEqual(feed.parameters.map((parameter) => parameter.name), [
     'province', 'sort', 'from', 'to', 'includeCandidates', 'minQualityScore', 'pageSize', 'cursor',
   ])
@@ -281,6 +301,14 @@ function assertPublicOpinionContract(document) {
     coverage.responses[200].content['application/json'].schema.$ref,
     '#/components/schemas/PublicOpinionCoverageEnvelope',
   )
+  assert.equal(
+    regions.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/PublicOpinionRegionsEnvelope',
+  )
+  assert.equal(
+    regionFeed.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/PublicOpinionRegionFeedEnvelope',
+  )
   assert.ok(feed['x-mx-error-codes'][400].includes('invalid_province'))
   assert.ok(feed['x-mx-error-codes'][403].includes('platform_not_granted'))
   assert.ok(feed['x-mx-error-codes'][503].includes('serving_indexes_unavailable'))
@@ -291,6 +319,29 @@ function assertPublicOpinionContract(document) {
   assert.ok(detail['x-mx-error-codes'][404].includes('item_not_found'))
   assert.match(detail.description, /does not require a time window/i)
   assert.match(coverage.description, /full stable province taxonomy/i)
+  assert.ok(regionFeed['x-mx-error-codes'][403].includes('platform_not_granted'))
+  assert.ok(regionFeed['x-mx-error-codes'][403].includes('capability_not_granted'))
+  assert.match(regionFeed.description, /public_opinion\.all_ingested\.read/)
+  assert.match(regionFeed.description, /canonical_current_safe/)
+  assert.match(regionFeed.description, /includes formal and candidate items regardless of score, status or geography verification/i)
+  assert.match(regionFeed.description, /Every returned item includes its safe quality summary/i)
+  assert.match(regions.description, /all 34 stable province-level regions/i)
+  assert.match(regions.description, /City taxonomy and city selectors are not exposed/i)
+
+  const capabilities = resolveSchema(
+    document,
+    document.paths['/data/capabilities'].get.responses[200]
+      .content['application/json'].schema,
+  ).properties.data.properties.capabilities.items.properties.capability
+  assert.deepEqual(capabilities.enum, [
+    'nlp.tokenize', 'public_opinion.all_ingested.read',
+  ])
+  assert.deepEqual(
+    capabilitiesExample.data.capabilities.find(
+      (entry) => entry.capability === 'public_opinion.all_ingested.read',
+    ),
+    { capability: 'public_opinion.all_ingested.read', ready: true },
+  )
 
   const item = document.components.schemas.PublicOpinionItem
   assert.equal(item.additionalProperties, false)
@@ -306,6 +357,29 @@ function assertPublicOpinionContract(document) {
   assert.equal(document.components.schemas.PublicOpinionCoverageEnvelope.additionalProperties, false)
   assert.equal(document.components.schemas.PublicOpinionCoverageProvince.additionalProperties, false)
   assert.equal(document.components.schemas.PublicOpinionCoverageTotals.additionalProperties, false)
+  assert.equal(document.components.schemas.PublicOpinionRegionsEnvelope.additionalProperties, false)
+  assert.equal(document.components.schemas.PublicOpinionRegionFeedEnvelope.additionalProperties, false)
+  assert.equal(document.components.schemas.PublicOpinionRegionFeedItem.additionalProperties, false)
+  assert.equal(document.components.schemas.PublicOpinionRegionVisibility.additionalProperties, false)
+  assert.equal(
+    document.components.schemas.PublicOpinionRegionsEnvelope
+      .properties.data.properties.contractVersion.const,
+    'mx-insight-hub.public-opinion.regions.v1',
+  )
+  assert.equal(
+    document.components.schemas.PublicOpinionRegionsEnvelope
+      .properties.data.properties.regions.minItems,
+    34,
+  )
+  const regionFeedData = document.components.schemas.PublicOpinionRegionFeedEnvelope.properties.data
+  assert.equal(regionFeedData.properties.contractVersion.const, 'mx-insight-hub.public-opinion.region-feed.v1')
+  assert.equal(regionFeedData.properties.sort.const, 'latest')
+  assert.equal(regionFeedData.properties.timeBasis.const, 'effective')
+  const visibility = document.components.schemas.PublicOpinionRegionVisibility
+  assert.equal(visibility.properties.mode.const, 'all_ingested')
+  assert.equal(visibility.properties.qualityFiltered.const, false)
+  assert.equal(visibility.properties.corpusDefinition.const, 'canonical_current_safe')
+  assert.ok(document.components.schemas.PublicOpinionRegionFeedItem.required.includes('quality'))
   assert.deepEqual(
     document.components.schemas.PublicOpinionCoverageEnvelope
       .properties.data.properties.includeCandidates.oneOf[0],
@@ -318,6 +392,7 @@ function assertPublicOpinionContract(document) {
       quality: Object.keys(document.components.schemas.PublicOpinionQuality.properties),
       location: Object.keys(document.components.schemas.PublicOpinionLocation.properties),
       coverage: Object.keys(document.components.schemas.PublicOpinionCoverageProvince.properties),
+      regionFeedItem: Object.keys(document.components.schemas.PublicOpinionRegionFeedItem.properties),
     }),
     /raw_payload|strategy_id|run_id|llm_reason|extensions|source_item_id|lineage|business_?id|credential|endpoint_?id|provider_?id|availability/i,
   )
@@ -440,6 +515,8 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/messages/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/provinces\/\{province\}\/items/)
+    assert.match(html, /\/api\/v1\/data\/public-opinion\/regions\?parentCode=CN&amp;level=province/)
+    assert.match(html, /\/api\/v1\/data\/public-opinion\/regions\/\{regionCode\}\/items/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/province-coverage/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/items\/\{id\}/)
     assert.match(html, /includeCandidates/)
@@ -449,7 +526,12 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /旧 Key 会返回.*idempotency_conflict/)
     assert.match(html, /featuredProvinceCodes/)
     assert.match(html, /public_opinion/)
-    assert.match(html, /两个 Hub 省级舆情服务索引都有效/)
+    assert.match(html, /public_opinion\.all_ingested\.read/)
+    assert.match(html, /canonical_current_safe/)
+    assert.match(html, /province=null/)
+    assert.match(html, /P1 不发布市级代码/)
+    assert.match(html, /两个 curated province-feed 索引都有效/)
+    assert.match(html, /region feed 专用的全局 latest 索引/)
     assert.match(html, /有效排序时间优先 publishedAt/)
     assert.match(html, /\/api\/v1\/data\/capabilities/)
     assert.match(html, /\/api\/v1\/tools\/tokenize/)
@@ -484,6 +566,8 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/public-opinion/items/{id}',
       '/data/public-opinion/province-coverage',
       '/data/public-opinion/provinces/{province}/items',
+      '/data/public-opinion/regions',
+      '/data/public-opinion/regions/{regionCode}/items',
       '/data/search',
       '/data/stored/search',
       '/data/telegram/chats',

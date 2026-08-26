@@ -18,11 +18,21 @@ example:
     "platforms": [{
       "platform": "public_opinion",
       "ready": false,
-      "capabilities": ["province_feed", "item_detail", "stored_search"],
+      "capabilities": [
+        "province_feed",
+        "province_coverage",
+        "region_catalog",
+        "region_feed",
+        "item_detail",
+        "stored_search"
+      ],
       "source": "hub",
       "servingMode": "stored"
     }],
-    "capabilities": [{ "capability": "nlp.tokenize", "ready": true }]
+    "capabilities": [
+      { "capability": "nlp.tokenize", "ready": true },
+      { "capability": "public_opinion.all_ingested.read", "ready": true }
+    ]
   }
 }
 ```
@@ -30,13 +40,19 @@ example:
 Provider names and internal endpoint IDs are omitted.
 
 `platforms` contains only explicitly granted data platforms. For the Hub-owned
-`public_opinion` platform, `province_feed`, `item_detail`, and `stored_search`
-name the supported serving surfaces. Its `ready` flag requires both an `active`
-fixed ingestion source and both valid Hub province-serving indexes; it is not a
-second authorization decision or a freshness guarantee. An initially
-unconfigured or paused source therefore reports `ready=false`, while previously
-indexed records may still be available through the read APIs. The platform is
+`public_opinion` platform, `province_feed`, `province_coverage`,
+`region_catalog`, `region_feed`, `item_detail`, and `stored_search` name the
+supported serving surfaces. Its `ready` flag is not a second authorization
+decision or a freshness guarantee. An initially unconfigured or paused source
+may report `ready=false`, while previously indexed records can still be
+available through read APIs whose own serving gates are ready. The platform is
 local to Hub and is never added to the Night-All legacy dispatch matrix.
+
+`public_opinion.all_ingested.read` is a separate, non-default step-up
+capability. It never grants the `public_opinion` platform by itself. The P1
+region feed requires both the platform grant and this capability; a consumer
+with only one of them cannot read the all-ingested view. Capability discovery
+returns the entry only to a consumer that has explicitly received the grant.
 
 ## Tokenize text
 
@@ -380,7 +396,7 @@ even when this request narrows `platform`. This keeps one stable policy on one
 shared bucket instead of re-evaluating the same history against different
 limits.
 
-## Province public-opinion data
+## Public-opinion data
 
 The province feed and item-detail routes serve the Hub-owned canonical scope
 `platform=public_opinion`, `datasetId=public-opinion.province.v1`, and
@@ -395,6 +411,162 @@ GET /api/v1/data/public-opinion/province-coverage?from=2026-08-24T00:00:00Z&to=2
 GET /api/v1/data/public-opinion/items/11111111-1111-4111-8111-111111111111
 Authorization: Bearer <mx key>
 ```
+
+The P1 region APIs are additive. They do not change the paths, defaults,
+responses, authorization rules or cursor binding of any existing province,
+coverage, detail, stored-search or canonical-search API.
+
+### P1 province region catalog
+
+```http
+GET /api/v1/data/public-opinion/regions?parentCode=CN&level=province
+Authorization: Bearer <mx key>
+```
+
+The region catalog requires the `public_opinion` platform grant. P1 accepts
+only `parentCode=CN` and `level=province`; omitted fields default to those exact
+values, while other values or additional fields are rejected. It returns the
+stable 34-entry province-level taxonomy in catalog order, including every
+region even when the current corpus has no matching item. The returned region
+`code` is the value to pass to the P1 region feed. P1 does not expose a city
+catalog, infer city codes, or accept a city as a region selector; city support
+is a separate P2 contract.
+
+```json
+{
+  "data": {
+    "contractVersion": "mx-insight-hub.public-opinion.regions.v1",
+    "parentCode": "CN",
+    "level": "province",
+    "regions": [
+      {
+        "code": "CN-BJ",
+        "name": "北京",
+        "officialName": "北京市",
+        "level": "province",
+        "parentCode": "CN"
+      },
+      {
+        "code": "CN-JS",
+        "name": "江苏",
+        "officialName": "江苏省",
+        "level": "province",
+        "parentCode": "CN"
+      }
+    ]
+  },
+  "requestId": "00000000-0000-4000-8000-000000000006"
+}
+```
+
+### P1 nationwide and province all-ingested feed
+
+```http
+GET /api/v1/data/public-opinion/regions/CN/items?visibility=all_ingested&sort=latest&from=2026-08-24T00:00:00Z&to=2026-08-26T23:59:59Z&pageSize=50
+GET /api/v1/data/public-opinion/regions/CN-JS/items?visibility=all_ingested&sort=latest&from=2026-08-24T00:00:00Z&to=2026-08-26T23:59:59Z&pageSize=50
+Authorization: Bearer <mx key>
+```
+
+The region feed requires both the `public_opinion` platform grant and the
+separate `public_opinion.all_ingested.read` capability. P1 accepts `CN` for the
+nationwide scope or one of the 34 exact ISO 3166-2:CN codes returned by the
+catalog. It does not accept Chinese aliases or city codes.
+
+Capability discovery reports this step-up capability as `ready=true` only when
+the dedicated global-latest and revision-fenced display-province serving index
+contracts are both valid. Missing or drifted region indexes fail the feed closed
+with `503 serving_indexes_unavailable`; the legacy province feed keeps its own
+existing hot/latest index gate.
+
+P1 is deliberately one narrow enumeration contract:
+
+| Parameter | P1 contract |
+| --- | --- |
+| `visibility` | Required and must be exactly `all_ingested`. No quality score, qualification status or geography-verification predicate is applied. |
+| `sort` | Optional, defaults to `latest`, and no other value is accepted. P1 does not expose `hot`, so a null heat score cannot remove an otherwise visible record. |
+| `from` | Required inclusive RFC3339 effective-sort-time lower bound. |
+| `to` | Required inclusive RFC3339 effective-sort-time upper bound; it must not precede `from`. |
+| `pageSize` | Optional positive integer, default 20. The effective maximum is the lower of 100 and the consumer's `public_opinion.maxPageSize` policy. |
+| `cursor` | Optional signed opaque keyset cursor, at most 8,192 characters. Return `pageInfo.nextCursor` unchanged with every other parameter unchanged. |
+
+Effective sort time is `publishedAt` when available and otherwise
+`collectedAt`; the fallback is used for filtering and ordering but is never
+rewritten into `publishedAt`. The total order is effective sort time,
+`collectedAt`, then canonical `id`, all descending. The cursor is bound to the
+normalized region code, fixed visibility and sort, time bounds and page size.
+Pagination reads the current projection and is not a frozen multi-page
+snapshot. Each request and retry is independently metered and does not take an
+`Idempotency-Key`.
+
+`all_ingested` has the bounded public meaning `canonical_current_safe`. It
+includes current formal and candidate records in the fixed public-opinion
+canonical scope even when a candidate is unscored, pending, rejected or failed.
+The nationwide `CN` scope also includes records whose current safe projection
+has no assigned province; those items keep `province=null`. A province scope
+returns only records assigned to that exact province.
+
+`canonical_current_safe` excludes upstream raw rows, raw payloads, source and
+canonical revision history, deleted/tombstoned records, mapping/import failures,
+and records without a revision-fenced current publication-state row. It also
+continues to omit provider/endpoint identities, credentials, strategy/run IDs,
+extensions, quality flags and rejection reasons, model reasoning and internal
+lineage. Ignoring publication quality is not permission to bypass the public
+field allowlist or expose raw evidence.
+
+```json
+{
+  "data": {
+    "contractVersion": "mx-insight-hub.public-opinion.region-feed.v1",
+    "region": {
+      "code": "CN",
+      "name": "中国",
+      "officialName": "中华人民共和国",
+      "level": "country",
+      "parentCode": null
+    },
+    "visibility": {
+      "mode": "all_ingested",
+      "qualityFiltered": false,
+      "corpusDefinition": "canonical_current_safe"
+    },
+    "sort": "latest",
+    "timeBasis": "effective",
+    "from": "2026-08-23T16:00:00.000Z",
+    "to": "2026-08-26T15:59:59.000Z",
+    "items": [{
+      "id": "11111111-1111-4111-8111-111111111111",
+      "title": "全国舆情样例",
+      "summary": "公开摘要",
+      "url": "https://example.com/items/11111111",
+      "publishedAt": null,
+      "collectedAt": "2026-08-25T03:01:00.000Z",
+      "province": null,
+      "heatScore": null,
+      "origin": { "name": null, "type": null, "platform": null },
+      "quality": {
+        "stage": "candidate",
+        "status": "rejected",
+        "score": null,
+        "threshold": 80,
+        "geographyVerified": false
+      }
+    }],
+    "pageInfo": {
+      "returnedCount": 1,
+      "hasMore": false,
+      "nextCursor": null
+    }
+  },
+  "requestId": "00000000-0000-4000-8000-000000000007"
+}
+```
+
+Candidate origin members remain null. Quality and bounded location metadata may
+be returned to describe the record, but neither participates in P1 selection.
+There is no `minQualityScore` parameter on this endpoint. Item detail remains on
+the existing route and retains its existing candidate visibility contract.
+
+### Existing province feed
 
 The province path accepts an ISO 3166-2:CN code, a short Chinese name, or the
 official Chinese name, for example `CN-JS`, `江苏`, or `江苏省`. Chinese path

@@ -1237,7 +1237,7 @@ paths:
                           additionalProperties: false
                           required: [capability, ready]
                           properties:
-                            capability: { type: string, enum: [nlp.tokenize] }
+                            capability: { type: string, enum: [nlp.tokenize, public_opinion.all_ingested.read] }
                             ready: { type: boolean }
                   requestId: { type: string }
               example:
@@ -1268,7 +1268,7 @@ paths:
                             upstreamCompleteness: { status: bounded, basis: append_only_overlap, through: null }
                     - platform: public_opinion
                       ready: false
-                      capabilities: [province_feed, province_coverage, item_detail, stored_search]
+                      capabilities: [province_feed, province_coverage, region_catalog, region_feed, item_detail, stored_search]
                       source: hub
                       servingMode: stored
                     - platform: xiaohongshu
@@ -1289,6 +1289,7 @@ paths:
                         readyPlatforms: [twitter, xiaohongshu]
                   capabilities:
                     - { capability: nlp.tokenize, ready: true }
+                    - { capability: public_opinion.all_ingested.read, ready: true }
                 requestId: 00000000-0000-4000-8000-000000000001
   /tools/tokenize:
     post:
@@ -1685,6 +1686,121 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/public-opinion/regions:
+    get:
+      operationId: listPublicOpinionRegions
+      summary: List the stable nationwide province-level region catalog.
+      description: >-
+        Requires the public_opinion platform grant. P1 supports parentCode=CN
+        and level=province only and returns all 34 stable province-level regions
+        even when the current corpus has no matching item. The returned exact
+        code is accepted by the P1 region feed. City taxonomy and city selectors
+        are not exposed. The response contains no corpus counts, raw data or
+        source coordinates.
+      x-mx-allowed-query-fields: [parentCode, level]
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_parent_region, unsupported_region_level, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - name: parentCode
+          in: query
+          required: false
+          description: P1 supports the nationwide parent only. Defaults to CN.
+          schema: { type: string, const: CN, default: CN }
+        - name: level
+          in: query
+          required: false
+          description: P1 exposes the stable province-level catalog only. City codes are not exposed.
+          schema: { type: string, const: province, default: province }
+      responses:
+        "200":
+          description: The stable P1 province-level public-opinion region catalog.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicOpinionRegionsEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/public-opinion/regions/{regionCode}/items:
+    get:
+      operationId: listPublicOpinionRegionItems
+      summary: List nationwide or province current canonical items without quality filtering.
+      description: >-
+        Requires both the public_opinion platform grant and the separate,
+        non-default public_opinion.all_ingested.read capability. P1 accepts CN
+        or one exact province code from the region catalog; Chinese aliases and
+        city codes are rejected. visibility must be all_ingested, sort supports
+        latest only, and from/to are required. Effective time is publishedAt
+        when present and otherwise collectedAt; the fallback is used for
+        filtering and ordering without rewriting publishedAt. The nationwide
+        CN scope includes current safe items without an assigned province,
+        while a province scope matches only that province.
+        canonical_current_safe means the current, non-deleted, revision-fenced
+        public projection: it includes formal and candidate items regardless of
+        score, status or geography verification but excludes raw rows, revision
+        history, provider/endpoint identities, credentials, strategy/run ids,
+        quality flags and rejection reasons, model reasoning and internal
+        lineage. Every returned item includes its safe quality summary. Each
+        call and retry is independently metered; no Idempotency-Key is accepted.
+      x-mx-allowed-query-fields: [visibility, sort, from, to, pageSize, cursor]
+      x-mx-error-codes:
+        "400": [invalid_region, invalid_visibility, invalid_sort, invalid_request, page_size_exceeded, invalid_cursor, unsupported_fields, all_ingested_scope_required]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted, capability_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable, serving_indexes_unavailable]
+      parameters:
+        - name: regionCode
+          in: path
+          required: true
+          description: CN or one exact ISO 3166-2:CN province code returned by the region catalog. Chinese aliases and city codes are not accepted.
+          schema: { type: string, pattern: "^CN(?:-[A-Z]{2})?$" }
+        - name: visibility
+          in: query
+          required: true
+          description: P1 requires all_ingested. No quality score, qualification status or geography-verification predicate is applied.
+          schema: { type: string, const: all_ingested }
+        - name: sort
+          in: query
+          required: false
+          description: P1 supports latest only and defaults to latest. Null heat scores do not remove records.
+          schema: { type: string, const: latest, default: latest }
+        - name: from
+          in: query
+          required: true
+          description: Inclusive RFC3339 effective-time lower bound. Effective time is publishedAt when present, otherwise collectedAt.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          description: Inclusive RFC3339 effective-time upper bound. It must not be earlier than from.
+          schema: { type: string, format: date-time }
+        - name: pageSize
+          in: query
+          required: false
+          description: Defaults to 20; maximum 100, and the public_opinion platform policy may impose a lower limit.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          required: false
+          description: HMAC-signed opaque nextCursor bound to region, visibility, sort, time bounds and page size. Return it unchanged.
+          schema: { type: string, minLength: 1, maxLength: 8192 }
+      responses:
+        "200":
+          description: A customer-safe page of current canonical public-opinion items without quality filtering.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicOpinionRegionFeedEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /data/public-opinion/provinces/{province}/items:
@@ -4079,6 +4195,53 @@ components:
           type: string
           minLength: 1
           description: Normalized short Chinese display name.
+    PublicOpinionRegionCatalogEntry:
+      type: object
+      additionalProperties: false
+      required: [code, name, officialName, level, parentCode]
+      properties:
+        code: { type: string, pattern: "^CN-[A-Z]{2}$" }
+        name: { type: string, minLength: 1 }
+        officialName: { type: string, minLength: 1 }
+        level: { type: string, const: province }
+        parentCode: { type: string, const: CN }
+    PublicOpinionRegionScope:
+      type: object
+      additionalProperties: false
+      required: [code, name, officialName, level, parentCode]
+      properties:
+        code: { type: string, pattern: "^CN(?:-[A-Z]{2})?$" }
+        name: { type: string, minLength: 1 }
+        officialName: { type: string, minLength: 1 }
+        level: { type: string, enum: [country, province] }
+        parentCode: { type: [string, "null"], enum: [CN, null] }
+    PublicOpinionRegionVisibility:
+      type: object
+      additionalProperties: false
+      required: [mode, qualityFiltered, corpusDefinition]
+      properties:
+        mode: { type: string, const: all_ingested }
+        qualityFiltered: { type: boolean, const: false }
+        corpusDefinition: { type: string, const: canonical_current_safe }
+    PublicOpinionRegionsEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, parentCode, level, regions]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.public-opinion.regions.v1 }
+            parentCode: { type: string, const: CN }
+            level: { type: string, const: province }
+            regions:
+              type: array
+              minItems: 34
+              maxItems: 34
+              items: { $ref: "#/components/schemas/PublicOpinionRegionCatalogEntry" }
+        requestId: { type: string, minLength: 1 }
     PublicOpinionOrigin:
       type: object
       additionalProperties: false
@@ -4091,7 +4254,7 @@ components:
       type: object
       additionalProperties: false
       required: [stage, status, score, threshold, geographyVerified]
-      description: Hub-owned publication metadata returned only when candidate visibility is explicitly enabled.
+      description: Hub-owned publication metadata. Legacy province/detail responses include it only with candidate visibility; the all-ingested region feed requires it on every formal or candidate item.
       properties:
         stage: { type: string, enum: [formal, candidate] }
         status: { type: string, enum: [formal, pending, qualified, rejected, failed] }
@@ -4138,6 +4301,30 @@ components:
         origin: { $ref: "#/components/schemas/PublicOpinionOrigin" }
         quality: { $ref: "#/components/schemas/PublicOpinionQuality" }
         location: { $ref: "#/components/schemas/PublicOpinionLocation" }
+    PublicOpinionRegionFeedItem:
+      type: object
+      additionalProperties: false
+      required: [id, title, summary, url, publishedAt, collectedAt, province, heatScore, origin, quality]
+      description: >-
+        Strict customer-safe current projection with a required quality summary.
+        Raw rows, revision history, internal source coordinates and model
+        reasoning are not part of this schema.
+      properties:
+        id: { type: string, format: uuid, description: Hub canonical record id. }
+        title: { type: [string, "null"] }
+        summary: { type: [string, "null"] }
+        url: { type: [string, "null"] }
+        publishedAt: { type: [string, "null"], format: date-time }
+        collectedAt: { type: [string, "null"], format: date-time }
+        province:
+          description: Assigned normalized province, or null for a nationwide unclassified item.
+          oneOf:
+            - { $ref: "#/components/schemas/PublicOpinionProvince" }
+            - { type: "null" }
+        heatScore: { type: [number, "null"] }
+        origin: { $ref: "#/components/schemas/PublicOpinionOrigin" }
+        quality: { $ref: "#/components/schemas/PublicOpinionQuality" }
+        location: { $ref: "#/components/schemas/PublicOpinionLocation" }
     PublicOpinionPageInfo:
       type: object
       additionalProperties: false
@@ -4166,6 +4353,29 @@ components:
               type: array
               maxItems: 100
               items: { $ref: "#/components/schemas/PublicOpinionItem" }
+            pageInfo: { $ref: "#/components/schemas/PublicOpinionPageInfo" }
+        requestId: { type: string, minLength: 1 }
+    PublicOpinionRegionFeedEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, region, visibility, sort, timeBasis, from, to, items, pageInfo]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.public-opinion.region-feed.v1 }
+            region: { $ref: "#/components/schemas/PublicOpinionRegionScope" }
+            visibility: { $ref: "#/components/schemas/PublicOpinionRegionVisibility" }
+            sort: { type: string, const: latest }
+            timeBasis: { type: string, const: effective }
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: "#/components/schemas/PublicOpinionRegionFeedItem" }
             pageInfo: { $ref: "#/components/schemas/PublicOpinionPageInfo" }
         requestId: { type: string, minLength: 1 }
     PublicOpinionItemEnvelope:

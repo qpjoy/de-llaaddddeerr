@@ -17,7 +17,7 @@ provider 配置见 [Agent provider settings](agent-provider-settings.md)，全�
 | 层 | 仓库当前状态 | 不能据此声称的状态 |
 | --- | --- | --- |
 | 固定源 | migration 033 注册固定 dataset、表、mapping 和 `updated_at + id` 游标；默认 `paused` 且无物理连接。Night-All 042 提供水位合同，043 在原表增加默认 formal 的 `source_stage` | 042/043 已在目标 PostgreSQL 执行并经实库/writer-path 验证、候选 writer 已安全启用、连接已验证或已导入任何业务行 |
-| Hub 服务索引 | 提供独立的 `CREATE INDEX CONCURRENTLY` 操作并在激活时校验两个精确索引 | 任一环境已经实际安装 |
+| Hub 服务索引 | 提供独立的 `CREATE INDEX CONCURRENTLY` 操作；源激活校验 2 个 curated-feed 索引，`all_ingested` region feed 独立校验 2 个全局/发布地区索引 | 任一环境已经实际安装 |
 | raw revision | migration 034 增加 append-only `ingest.source_object_revisions`；新 ingest 按 semantic raw SHA-256 独立于 canonical hash 产出 payload-change source revision，传输水位 `updated_at` 单独保留但不触发重分析 | migration 之前不存在的 raw 历史已被恢复 |
 | 分类任务 | migration 034 注册默认暂停的 `province-geography-v1`，ingest 与当前记录 materializer 都能幂等创建任务 | pipeline 已启用、模型已配置或任务已跑完 |
 | 分类 worker | `npm run classifier`、Compose service 和独立 K8s Deployment 已接线；单飞、租约、心跳、重试和 stale-input fence 已实现 | 任一环境已成功 rollout、拥有可用 Chat provider，或暂停的 pipeline 已启用 |
@@ -279,7 +279,7 @@ curl -sS -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
 ```
 
 保存时会实际测试连接并确认 session 为 read-only，但仍不会激活或读取业务行。随后
-重新读取 pipeline，确认 fixed locator、built-in mapping、两个服务索引和 schema probe
+重新读取 pipeline，确认 fixed locator、built-in mapping、用于源激活的两个 curated-feed 索引和 schema probe
 都没有 drift。
 
 ### 4.3 审核 042/043 实库证据并提交当前 writer attestation

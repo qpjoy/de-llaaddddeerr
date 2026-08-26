@@ -5,6 +5,7 @@ import { CHINA_PROVINCES, normalizeChinaProvince } from './china-provinces.mjs'
 export const PUBLIC_OPINION_PLATFORM = 'public_opinion'
 export const PUBLIC_OPINION_DATASET_ID = 'public-opinion.province.v1'
 export const PUBLIC_OPINION_OBJECT_TYPE = 'opinion_item'
+export const PUBLIC_OPINION_ALL_INGESTED_CAPABILITY = 'public_opinion.all_ingested.read'
 
 const ALLOWED_QUERY_FIELDS = new Set([
   'cursor',
@@ -22,6 +23,15 @@ const ALLOWED_COVERAGE_QUERY_FIELDS = new Set([
   'minQualityScore',
   'targetPerProvince',
   'to',
+])
+const ALLOWED_REGION_CATALOG_QUERY_FIELDS = new Set(['level', 'parentCode'])
+const ALLOWED_REGION_FEED_QUERY_FIELDS = new Set([
+  'cursor',
+  'from',
+  'pageSize',
+  'sort',
+  'to',
+  'visibility',
 ])
 const SORTS = new Set(['hot', 'latest'])
 const CANDIDATE_MODES = new Set(['qualified', 'all'])
@@ -122,6 +132,22 @@ function bindingFor(query) {
     binding.minQualityScore = query.minQualityScore
   }
   return createHash('sha256').update(JSON.stringify(binding)).digest('base64url')
+}
+
+function regionBindingFor(query) {
+  return createHash('sha256').update(JSON.stringify({
+    v: 1,
+    contract: 'mx-insight-hub.public-opinion.region-feed.v1',
+    platform: PUBLIC_OPINION_PLATFORM,
+    datasetId: PUBLIC_OPINION_DATASET_ID,
+    objectType: PUBLIC_OPINION_OBJECT_TYPE,
+    regionCode: query.region.code,
+    visibility: query.visibility,
+    sort: query.sort,
+    from: query.from,
+    to: query.to,
+    pageSize: query.pageSize,
+  })).digest('base64url')
 }
 
 function signature(payload, secret) {
@@ -271,6 +297,122 @@ export function normalizePublicOpinionCoverageQuery(input = {}) {
   }
 }
 
+export function normalizePublicOpinionRegionsQuery(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new AppError(400, 'invalid_request', 'query parameters must be an object')
+  }
+  const unsupported = Object.keys(input).filter((field) => !ALLOWED_REGION_CATALOG_QUERY_FIELDS.has(field))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_fields', `Unsupported public-opinion region fields: ${unsupported.join(', ')}`)
+  }
+  const parentCode = input.parentCode == null ? 'CN' : String(input.parentCode).trim().toUpperCase()
+  const level = input.level == null ? 'province' : String(input.level).trim().toLowerCase()
+  if (parentCode !== 'CN') {
+    throw new AppError(400, 'invalid_parent_region', 'P1 region catalog only supports parentCode=CN')
+  }
+  if (level !== 'province') {
+    throw new AppError(400, 'unsupported_region_level', 'P1 region catalog only supports level=province')
+  }
+  return { parentCode, level }
+}
+
+function normalizePublicOpinionRegion(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new AppError(400, 'invalid_region', 'region must be CN or a supported ISO 3166-2:CN province code')
+  }
+  const code = value.trim().toUpperCase()
+  if (code === 'CN') {
+    return {
+      code: 'CN',
+      name: '中国',
+      officialName: '中华人民共和国',
+      level: 'country',
+      parentCode: null,
+    }
+  }
+  const province = normalizeChinaProvince(code)
+  if (!province || province.code !== code) {
+    throw new AppError(400, 'invalid_region', 'region must be CN or a supported ISO 3166-2:CN province code')
+  }
+  return { ...province, level: 'province', parentCode: 'CN' }
+}
+
+export function normalizePublicOpinionRegionQuery(
+  regionInput,
+  input = {},
+  maxPageSize = 100,
+  cursorSecret,
+) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new AppError(400, 'invalid_request', 'query parameters must be an object')
+  }
+  const unsupported = Object.keys(input).filter((field) => !ALLOWED_REGION_FEED_QUERY_FIELDS.has(field))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_fields', `Unsupported public-opinion region feed fields: ${unsupported.join(', ')}`)
+  }
+  const visibility = input.visibility == null ? null : String(input.visibility).trim().toLowerCase()
+  if (visibility !== 'all_ingested') {
+    throw new AppError(
+      400,
+      'invalid_visibility',
+      'P1 region feed requires visibility=all_ingested; use the existing province feed for curated visibility',
+    )
+  }
+  const sort = input.sort == null ? 'latest' : String(input.sort).trim().toLowerCase()
+  if (sort !== 'latest') {
+    throw new AppError(400, 'invalid_sort', 'all_ingested region feed currently supports sort=latest only')
+  }
+  const from = timestampValue(input.from, 'from')
+  const to = timestampValue(input.to, 'to')
+  if (!from || !to) {
+    throw new AppError(400, 'all_ingested_scope_required', 'visibility=all_ingested requires both from and to')
+  }
+  if (from > to) throw new AppError(400, 'invalid_request', 'from must not be later than to')
+  const validPolicyMax = Number.isInteger(maxPageSize) && maxPageSize > 0 ? maxPageSize : 100
+  const normalized = {
+    region: normalizePublicOpinionRegion(regionInput),
+    visibility,
+    sort,
+    from,
+    to,
+    pageSize: pageSizeValue(input.pageSize, validPolicyMax),
+  }
+  const cursorBinding = regionBindingFor(normalized)
+  if (input.cursor != null && typeof input.cursor !== 'string') {
+    throw new AppError(400, 'invalid_request', 'cursor must be a string')
+  }
+  if (input.cursor?.length > MAX_CURSOR_LENGTH) {
+    throw new AppError(400, 'invalid_cursor', `cursor must not exceed ${MAX_CURSOR_LENGTH} characters`)
+  }
+  const cursorToken = input.cursor == null ? null : input.cursor.trim()
+  if (input.cursor != null && !cursorToken) {
+    throw new AppError(400, 'invalid_request', 'cursor must be a non-blank string')
+  }
+  return {
+    ...normalized,
+    cursorBinding,
+    cursorToken,
+    cursor: decodePublicOpinionCursor(cursorToken, {
+      sort,
+      binding: cursorBinding,
+      secret: cursorSecret,
+    }),
+  }
+}
+
+export function publicOpinionRegions(query) {
+  return {
+    contractVersion: 'mx-insight-hub.public-opinion.regions.v1',
+    parentCode: query.parentCode,
+    level: query.level,
+    regions: CHINA_PROVINCES.map((province) => ({
+      ...province,
+      level: 'province',
+      parentCode: 'CN',
+    })),
+  }
+}
+
 function iso(value) {
   return value == null ? null : new Date(value).toISOString()
 }
@@ -354,6 +496,39 @@ export function publicOpinionPage(rows, query, cursorSecret) {
     items: pageRows.map((row) => publicOpinionItem(row, {
       includeQuality: query.candidateMode !== 'formal',
     })),
+    pageInfo: {
+      returnedCount: pageRows.length,
+      hasMore,
+      nextCursor: hasMore && nextPosition
+        ? encodePublicOpinionCursor(nextPosition, query.cursorBinding, cursorSecret)
+        : null,
+    },
+  }
+}
+
+export function publicOpinionRegionPage(rows, query, cursorSecret) {
+  const hasMore = rows.length > query.pageSize
+  const pageRows = hasMore ? rows.slice(0, query.pageSize) : rows
+  const last = pageRows.at(-1)
+  const nextPosition = !last ? null : {
+    heatScore: null,
+    sortTime: iso(last.sort_time ?? last.event_time ?? last.collected_at),
+    collectedAt: iso(last.collected_at),
+    id: last.id,
+  }
+  return {
+    contractVersion: 'mx-insight-hub.public-opinion.region-feed.v1',
+    region: query.region,
+    visibility: {
+      mode: 'all_ingested',
+      qualityFiltered: false,
+      corpusDefinition: 'canonical_current_safe',
+    },
+    sort: query.sort,
+    timeBasis: 'effective',
+    from: query.from,
+    to: query.to,
+    items: pageRows.map((row) => publicOpinionItem(row, { includeQuality: true })),
     pageInfo: {
       returnedCount: pageRows.length,
       hasMore,

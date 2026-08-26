@@ -131,8 +131,9 @@ source remains paused until the target Night-All database has deliberately run
 current Hub contract digest has been attested. The presence of a migration file
 or a baseline entry cannot satisfy those gates.
 
-The two Hub-local hot/latest serving indexes are deliberately outside migration
-033. Building regular indexes inside the transactional migration would retain
+The two curated-feed hot/latest indexes and the two additive region-feed
+indexes are deliberately outside migration 033. Building regular indexes
+inside the transactional migration would retain
 the preceding `ALTER TABLE` lock while PostgreSQL scans the shared canonical
 table. After a separately approved Hub migration, and before this one pipeline
 is activated, install them online as a standalone non-transactional operation:
@@ -144,8 +145,10 @@ DATABASE_URL='<Hub PostgreSQL URL>' npm run ops:province-opinion-indexes
 
 The SQL uses `CREATE INDEX CONCURRENTLY`, validates the exact table, btree keys,
 predicate and ready/valid/live state, and is safe to rerun. Do not wrap it in
-`BEGIN`/`COMMIT`. Pipeline activation and the province list API both fail closed
-until both exact indexes are ready; item detail remains an indexed canonical-ID
+`BEGIN`/`COMMIT`. Pipeline activation and the curated province list API fail
+closed on the original pair; the all-ingested region feed independently fails
+closed until its global-latest and display-province indexes are ready. Item
+detail remains an indexed canonical-ID
 lookup. This command is an operator runbook entry, not authorization to execute
 it in the current phase.
 
@@ -224,7 +227,9 @@ province remains SQL `NULL`.
 `NULL` means “not classified from accepted evidence”. It must not be rewritten
 as `全国`, `其他`, `unknown`, Jiangsu or a best guess. Such a record is excluded
 from province-specific feeds until a later source revision or an accepted
-future classification assertion supplies a province.
+future classification assertion supplies a province. If it otherwise belongs
+to `canonical_current_safe`, it remains eligible for the P1 nationwide `CN`
+all-ingested feed and is returned with `province=null`.
 
 The nationwide province dictionary defines accepted identifiers; it does not
 promise that every province currently has data. Event province, publisher or
@@ -274,6 +279,8 @@ Different query intents use different contracts:
 
 | Intent | Contract | Boundary |
 | --- | --- | --- |
+| Province region catalog | `GET /api/v1/data/public-opinion/regions?parentCode=CN&level=province` | Requires the `public_opinion` grant. P1 supports only the nationwide parent and province level (with those exact defaults), returns all 34 stable regions independent of corpus counts and exposes no city taxonomy. |
+| Nationwide/province all-ingested feed | `GET /api/v1/data/public-opinion/regions/:regionCode/items?visibility=all_ingested&sort=latest&from=...&to=...` | Accepts `CN` or one exact catalog province code. Requires both the `public_opinion` grant and non-default `public_opinion.all_ingested.read` capability. It is bounded by required effective-time `from`/`to`, latest-only and cursor-paged. |
 | Province hot/latest feed | `GET /api/v1/data/public-opinion/provinces/:province/items?sort=hot\|latest` | Requires an explicit supported province and the `public_opinion` grant. Defaults to formal-only; `includeCandidates=qualified|all` is explicit and cursor-bound. |
 | Province coverage | `GET /api/v1/data/public-opinion/province-coverage` | Requires `from` and `to`; returns all 34 province-level regions, up to eight featured codes, quality/verified counts and a target shortfall. The default target of 10 is a coverage goal, never fabricated data. |
 | Click-through detail | `GET /api/v1/data/public-opinion/items/:id` | Same grant; defaults formal-only. Candidate detail requires an explicit candidate mode and returns only bounded Hub-owned quality/location metadata. |
@@ -284,6 +291,31 @@ Different query intents use different contracts:
 The dedicated province endpoint is the initial product API because its ranking
 and missing-province behavior are well-defined. The common stored-search API is
 for text retrieval, not for silently merging heterogeneous heat scores.
+
+The additive P1 region feed defines `all_ingested` as
+`canonical_current_safe`, not as unrestricted source access. It includes the
+current safe formal and candidate projection without filtering on quality
+score, publication qualification status or geography verification, so
+unclassified, unscored, pending, rejected and failed current rows remain
+enumerable. `CN` includes eligible rows with `province=null`; a province code
+matches only that exact province. The response reports the catalog-shaped
+`region`, descriptive `visibility={mode: all_ingested, qualityFiltered: false,
+corpusDefinition: canonical_current_safe}`, `sort=latest`,
+`timeBasis=effective`, normalized `from`/`to`, `items` and `pageInfo`.
+
+This view still excludes upstream raw rows and raw payloads, source/canonical
+revision history, deleted/tombstoned records, mapping/import failures and any
+record without a revision-fenced current publication state. Provider/endpoint
+identities, credentials, strategy/run IDs, extensions, quality flags and
+rejection reasons, model reasoning and internal lineage remain private. The
+step-up capability therefore changes the quality-selection predicate, not the
+public field allowlist or trust boundary.
+
+These region APIs do not change the path, defaults, response, authorization or
+cursor semantics of the existing province, coverage, item-detail,
+stored-search or canonical-search APIs. City catalog and city-scoped serving
+remain P2 and require reviewed city evidence; P1 must not infer them from a
+keyword or province assignment.
 
 The existing canonical global-search contract keeps the authorization platform,
 dataset and object type separate. A future geography/classification extension
