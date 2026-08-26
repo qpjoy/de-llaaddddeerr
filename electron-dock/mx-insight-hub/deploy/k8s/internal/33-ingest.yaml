@@ -53,7 +53,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: projector
+        - name: ingest
           image: mx-insight-hub:shadow
           imagePullPolicy: Never
           command: ["node", "server/workers/ingest.mjs"]

@@ -412,6 +412,12 @@ raw-only 变化会产 task、相同 replay 不重复计费。任一序列失败�
 6. source 在运行中被暂停时，当前已提交 batch 仍会安全 acknowledge，随后 run 结束，
    不再交接下一批。
 
+管理面的 `task.scheduling` 会将调度状态明确分为 `scheduled` / `due` /
+`overdue` / `blocked` / `failed` / `running` / `paused`。`nextDueAt` 只是由最后游标时间和
+source cadence 计算的到期时间，不是已入队证明。当它超过宽限仍未推进时，
+页面会显示“自动调度逾期”；优先检查 `mx-insight-hub-ingest` 的实际 Pod/镜像和
+`external-pull` 去重任务，再核对 HanLP、fixed contract 与 writer attestation 门禁。
+
 因此 Night-All 对已消费行的后补必须推进 `updated_at`。如果它把新值写在 checkpoint
 之前，Hub 没有安全规则可以自动发现；普通运维不得用每日全量扫描补偿 writer 缺陷。
 
@@ -463,6 +469,12 @@ Provider 未配置、网络、超时、取消和上游响应协议失败仍按 t
 这种内容级降级掩盖。
 
 ### 7.3 assertion 状态和当前审核闭环
+
+Agent 中心的数字是字段级 assertion 计数，不是新闻条数。一个已完成 task 会为
+event province、publisher province、geo scope、source class、quality score/flags 等产生
+多条 assertion。因此“已完成 5,189 / accepted 5,311 / proposed 44,970”这类组合
+不能除法得到地理归类成功率；`accepted` 主要是 source 事实，`proposed` 是未进入
+formal 省份流的派生证据，不是需要逐条清空的人工待办。
 
 - `method=source` 的明确事实可以记为 `accepted`；built-in mapping 同时已经把显式
   province 写入 canonical `admin1_code`。

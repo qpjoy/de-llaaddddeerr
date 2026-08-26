@@ -87,13 +87,14 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 18. [Telegram monitor PostgreSQL ingestion](operations/telegram-monitor-ingestion.md)
 19. [Telegram SQLite read-API ingestion](operations/telegram-sqlite-api-ingestion.md)
 20. [Nationwide province public-opinion source](architecture/province-public-opinion-source.md)
-21. [Nationwide province public-opinion operations](operations/province-public-opinion-ingestion.md)
-22. [Public-opinion volume, quality and archive troubleshooting](operations/public-opinion-volume-quality-archive.md)
-23. [Backup and restore](operations/backup-restore.md)
-24. [Observability and SLO](operations/observability-slo.md)
-25. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
-26. [Agent provider settings](operations/agent-provider-settings.md)
-27. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
+21. [Nationwide public-opinion sourcing and geography evidence](architecture/nationwide-public-opinion-sourcing.md)
+22. [Nationwide province public-opinion operations](operations/province-public-opinion-ingestion.md)
+23. [Public-opinion volume, quality and archive troubleshooting](operations/public-opinion-volume-quality-archive.md)
+24. [Backup and restore](operations/backup-restore.md)
+25. [Observability and SLO](operations/observability-slo.md)
+26. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
+27. [Agent provider settings](operations/agent-provider-settings.md)
+28. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
 
 ## Decisions
 

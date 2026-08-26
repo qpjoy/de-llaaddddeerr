@@ -13,6 +13,7 @@ import {
   PROVINCE_OPINION_WRITER_CONTRACT_DIGEST,
   PROVINCE_OPINION_WRITER_CONTRACT_VERSION,
   ProvinceOpinionPipeline,
+  provinceOpinionSchedulingStatus,
 } from '../../server/ingest/province/monitor-pipeline.mjs'
 
 const SOURCE_ID = '11111111-1111-4111-8111-111111111111'
@@ -168,6 +169,45 @@ const ATTESTATION = Object.freeze({
   confirmed: true,
   contractVersion: PROVINCE_OPINION_WRITER_CONTRACT_VERSION,
   contractDigest: PROVINCE_OPINION_WRITER_CONTRACT_DIGEST,
+})
+
+test('province scheduling reports gates and a materially overdue idle cursor', () => {
+  const source = {
+    status: 'active',
+    syncIntervalSeconds: 300,
+  }
+  const writerAttestation = {
+    contractVersion: PROVINCE_OPINION_WRITER_CONTRACT_VERSION,
+    contractDigest: PROVINCE_OPINION_WRITER_CONTRACT_DIGEST,
+  }
+  const blocked = provinceOpinionSchedulingStatus({
+    source,
+    cursor: null,
+    writerAttestation: null,
+    now: new Date('2026-08-26T04:00:00.000Z'),
+  })
+  assert.equal(blocked.status, 'blocked')
+  assert.match(blocked.message, /writer/)
+
+  const scheduled = provinceOpinionSchedulingStatus({
+    source,
+    cursor: { status: 'idle', updatedAt: '2026-08-26T03:58:00.000Z' },
+    writerAttestation,
+    now: new Date('2026-08-26T04:00:00.000Z'),
+  })
+  assert.equal(scheduled.status, 'scheduled')
+  assert.equal(scheduled.dueAt, '2026-08-26T04:03:00.000Z')
+
+  const overdue = provinceOpinionSchedulingStatus({
+    source,
+    cursor: { status: 'idle', updatedAt: '2026-08-26T03:00:00.000Z' },
+    writerAttestation,
+    now: new Date('2026-08-26T04:00:00.000Z'),
+  })
+  assert.equal(overdue.status, 'overdue')
+  assert.equal(overdue.dueAt, '2026-08-26T03:05:00.000Z')
+  assert.equal(overdue.overdueBySeconds, 3_300)
+  assert.match(overdue.message, /mx-insight-hub-ingest/)
 })
 
 function validDescription(overrides = {}) {

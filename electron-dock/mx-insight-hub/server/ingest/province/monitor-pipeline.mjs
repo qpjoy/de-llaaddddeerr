@@ -189,6 +189,56 @@ function nextDueAt(source, cursor) {
   return new Date(new Date(updatedAt).getTime() + source.syncIntervalSeconds * 1_000).toISOString()
 }
 
+export function provinceOpinionSchedulingStatus({
+  source,
+  cursor,
+  sourceContractIssues = [],
+  hanlpIssues = [],
+  writerAttestation = null,
+  now = new Date(),
+} = {}) {
+  const dueAt = nextDueAt(source, cursor)
+  const base = { dueAt, overdueBySeconds: 0 }
+  if (source?.status !== 'active') {
+    return { ...base, status: 'paused', message: '数据源已暂停，不会自动调度。' }
+  }
+  if (sourceContractIssues.length > 0) {
+    return { ...base, status: 'blocked', message: '固定源合同漂移，自动调度已阻断。' }
+  }
+  if (hanlpIssues.length > 0) {
+    return { ...base, status: 'blocked', message: 'HanLP 严格索引门禁未满足，自动调度已阻断。' }
+  }
+  if (!isCurrentWriterContractAttestation(writerAttestation)) {
+    return { ...base, status: 'blocked', message: '当前 writer 合同尚未确认，自动调度已阻断。' }
+  }
+  if (cursor?.status === 'failed') {
+    return { ...base, status: 'failed', message: '游标处于 failed，需要修复后显式恢复，不会自动重试。' }
+  }
+  if (cursor?.status && cursor.status !== 'idle') {
+    return { ...base, status: 'running', message: '当前批次或续页仍在运行。' }
+  }
+  if (!cursor) {
+    return { ...base, status: 'due', message: '首次全量对齐已到期，等待 ingest worker 入队。' }
+  }
+  if (!dueAt) {
+    return { ...base, status: 'blocked', message: '游标缺少可用更新时间，无法计算下一次调度。' }
+  }
+  const overdueBySeconds = Math.max(0, Math.floor((now.getTime() - new Date(dueAt).getTime()) / 1_000))
+  const graceSeconds = Math.max(120, Number(source?.syncIntervalSeconds || 300))
+  if (overdueBySeconds > graceSeconds) {
+    return {
+      dueAt,
+      overdueBySeconds,
+      status: 'overdue',
+      message: '已超过调度宽限；检查 mx-insight-hub-ingest 运行/镜像、队列去重任务和 scheduler 日志。',
+    }
+  }
+  if (overdueBySeconds > 0) {
+    return { dueAt, overdueBySeconds, status: 'due', message: '已到期，等待 scheduler 扫描入队。' }
+  }
+  return { ...base, status: 'scheduled', message: '周期增量调度正常。' }
+}
+
 export class ProvinceOpinionPipeline {
   constructor({ store, queue, databasePuller, agentPipelineStore = null, segmenterConfig = null }) {
     this.store = store
@@ -262,6 +312,13 @@ export class ProvinceOpinionPipeline {
     const sourceContractIssues = provinceOpinionSourceContractIssues(source)
     const hanlpIssues = provinceOpinionHanlpIssues(this.segmenterConfig)
     const fixedContractValid = sourceContractIssues.length === 0
+    const scheduling = provinceOpinionSchedulingStatus({
+      source,
+      cursor,
+      sourceContractIssues,
+      hanlpIssues,
+      writerAttestation: latestAttestation,
+    })
     return {
       pipelineKey: PROVINCE_OPINION_PIPELINE_KEY,
       displayName: '全国省份舆情',
@@ -301,7 +358,8 @@ export class ProvinceOpinionPipeline {
         )),
         cursor,
         latestRun: runs[0] ?? null,
-        nextDueAt: nextDueAt(source, cursor),
+        nextDueAt: scheduling.dueAt,
+        scheduling,
       },
     }
   }

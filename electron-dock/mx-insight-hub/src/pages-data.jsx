@@ -554,6 +554,9 @@ function provinceOpinionRunning(pipeline) {
 function provinceOpinionStatus(pipeline) {
   if (telegramTaskStuck(pipeline?.task)) return { status: 'error', label: '任务需恢复' }
   if (provinceOpinionRunning(pipeline)) return { status: 'warning', label: '正在运行' }
+  if (pipeline?.task?.scheduling?.status === 'failed') return { status: 'error', label: '任务需恢复' }
+  if (pipeline?.task?.scheduling?.status === 'blocked') return { status: 'error', label: '自动调度被阻断' }
+  if (pipeline?.task?.scheduling?.status === 'overdue') return { status: 'error', label: '自动调度逾期' }
   if (pipeline?.status === 'active' && pipeline?.configurationIssues?.length > 0) {
     return { status: 'error', label: '门禁异常' }
   }
@@ -595,6 +598,7 @@ function ProvinceOpinionPipelineCard({ pipeline, loading, error, onOpen, onRetry
               status={pipeline?.indexing?.readyToSchedule ? 'active' : 'suspended'}
               label={pipeline?.indexing?.readyToSchedule ? '严格后端已配置' : '阻止启用'} /></dd></div>
             <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
+            <div><dt>自动调度</dt><dd>{task?.scheduling?.message || '等待状态证据'}</dd></div>
           </dl>
           <div className="mih-telegram-card__actions">
             {pipeline?.status !== 'active' ? <span className="mih-telegram-card__alert"><Warning size={15} />默认暂停；源表水位合同完成前不会导入</span> : null}
@@ -856,7 +860,7 @@ function ProvinceOpinionPipelineModal({
           <div><strong>追加式原始修订</strong><p>strategy/run/hash、关键词、llm_reason 与 raw 按 source revision 保留；仅抽取去重后的语义字段和证据窗口进入模型。</p></div>
           <div><strong>多维 Agent 归档</strong><p>事件省份、发布者省份、地理范围、事件类型与来源类型分别形成 assertion；Agent 只能提案，不改 raw、canonical 或 checkpoint。</p></div>
           <div><strong>当前 Agent 状态</strong><p>{pipeline.classification
-            ? `${pipeline.classification.status === 'active' ? '已启用' : '已暂停'} · 待处理 ${formatNumber(pipeline.classification.tasks?.pending || 0)} · 失败隔离 ${formatNumber(pipeline.classification.tasks?.dead || 0)} · 待审核 ${formatNumber(pipeline.classification.assertions?.proposed || 0)}`
+            ? `${pipeline.classification.status === 'active' ? '已启用' : '已暂停'} · 待处理 ${formatNumber(pipeline.classification.tasks?.pending || 0)} · 失败隔离 ${formatNumber(pipeline.classification.tasks?.dead || 0)} · 未采纳派生断言 ${formatNumber(pipeline.classification.assertions?.proposed || 0)}`
             : 'Agent 派生面尚不可用；固定源同步与索引不受影响。'}</p></div>
           <div><strong>严格 HanLP 索引</strong><p>每条 canonical 投影必须经过 HanLP；服务过载或不可达时保留待投影并退避，不写入本地 fallback 分词结果。</p></div>
           <div><strong>三级背压</strong><p>源库每页 200 条并留 2 秒续页间隔；Agent 默认 12 条/分钟且单并发；HanLP live batch 与 bulk 并发均受 Hub 专用上限保护。</p></div>
@@ -870,7 +874,7 @@ function ProvinceOpinionPipelineModal({
             <div><dt>Dataset / 对象</dt><dd><code>{task.source?.datasetId || 'public-opinion.province.v1'}</code><small>public_opinion · opinion_item</small></dd></div>
             <div><dt>固定映射</dt><dd>{task.activeMapping?.version ? `v${task.activeMapping.version}` : task.builtInMappingAvailable ? 'v1 · 待启用审批' : '缺失'}</dd></div>
             <div><dt>Checkpoint</dt><dd><code>{compactCheckpoint(task.cursor?.position)}</code></dd></div>
-            <div><dt>下次调度</dt><dd>{formatDate(task.nextDueAt)}</dd></div>
+            <div><dt>下次调度</dt><dd>{formatDate(task.nextDueAt)}<small>{task.scheduling?.message}</small></dd></div>
           </dl>
         </article>
       </div>
@@ -3238,7 +3242,7 @@ function AgentPipelinePanel({ pipeline, canEdit, busy, onAction, token }) {
   return (
     <Panel
       title={pipeline.displayName || key}
-      subtitle="规则先行、模型只处理歧义；事件省份、发布者省份和地理范围分别保存，模型结果仅作为待审核提案"
+      subtitle="规则先行、模型只处理歧义；事件省份、发布者省份和地理范围分别保存；派生断言不是人工待办"
       actions={<>
         <StatusBadge
           status={pipeline.status === 'active' ? 'active' : 'disabled'}
@@ -3266,9 +3270,10 @@ function AgentPipelinePanel({ pipeline, canEdit, busy, onAction, token }) {
         <MetricCard icon={ArrowClockwise} label="待处理" value={formatNumber(tasks.pending || 0)} hint={tasks.oldestPendingAt ? `最早 ${formatDate(tasks.oldestPendingAt)}` : '当前无积压'} tone={tasks.pending ? 'warning' : 'success'} />
         <MetricCard icon={Play} label="处理中" value={formatNumber(tasks.running || 0)} hint="数据库租约与 owner fence" tone={tasks.running ? 'info' : 'primary'} />
         <MetricCard icon={Database} label="已完成" value={formatNumber(tasks.succeeded || 0)} hint={`总任务 ${formatNumber(tasks.total || 0)}`} tone="success" />
-        <MetricCard icon={Brain} label="待审核提案" value={formatNumber(assertions.proposed || 0)} hint={`已接受 ${formatNumber(assertions.accepted || 0)}`} tone={assertions.proposed ? 'warning' : 'primary'} />
+        <MetricCard icon={Brain} label="未采纳派生断言" value={formatNumber(assertions.proposed || 0)} hint={`source 事实断言 ${formatNumber(assertions.accepted || 0)}`} tone="primary" />
         <MetricCard icon={Warning} label="失败隔离" value={formatNumber(tasks.dead || 0)} hint={`已淘汰旧版本 ${formatNumber(tasks.superseded || 0)}`} tone={tasks.dead ? 'danger' : 'primary'} />
       </div>
+      <p className="mih-preview-provenance">断言按字段计数，一条新闻会产生多条；<code>proposed</code> 是未写入 formal 省份流的规则/Agent 证据，当前没有逐条人工审批入口，不需要清空该数字。</p>
       {canEdit ? (
         <form className="mih-agent-pipeline-controls" onSubmit={saveRate}>
           <label>
@@ -3298,7 +3303,7 @@ function AgentPipelinePanel({ pipeline, canEdit, busy, onAction, token }) {
             <td><code>{formatAssertionValue(item.proposedValue)}</code></td>
             <td>{item.method}{item.providerId ? <small>{item.providerId} · {item.model}</small> : null}</td>
             <td>{Math.round(Number(item.confidence || 0) * 100)}%</td>
-            <td><StatusBadge status={item.status === 'accepted' ? 'active' : item.status === 'proposed' ? 'pending' : item.status} label={item.status} /></td>
+            <td><StatusBadge status={item.status === 'accepted' ? 'active' : item.status === 'proposed' ? 'pending' : item.status} label={item.status === 'accepted' ? 'source fact' : item.status === 'proposed' ? '派生证据' : item.status} /></td>
             <td>{formatDate(item.createdAt)}</td>
           </tr>)}
           {recent.length === 0 ? <tr><td colSpan="6" className="mih-agent-provider-empty">尚无分析证据；管线默认暂停，启用前可先测试对话 Provider。</td></tr> : null}
