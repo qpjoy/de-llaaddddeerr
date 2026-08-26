@@ -621,6 +621,13 @@ function ProvinceOpinionPipelineModal({
   const task = pipeline.task || {}
   const connection = pipeline.connection || {}
   const servingIndexes = pipeline.servingIndexes || {}
+  const writerContract = pipeline.writerContract || {}
+  const latestWriterAttestation = writerContract.latestAttestation || null
+  const writerContractCurrent = Boolean(
+    latestWriterAttestation
+    && latestWriterAttestation.contractVersion === writerContract.version
+    && latestWriterAttestation.contractDigest === writerContract.digest,
+  )
   const [form, setForm] = useState(() => ({
     host: connection.host || '',
     port: String(connection.port || 5432),
@@ -708,6 +715,16 @@ function ProvinceOpinionPipelineModal({
     nextStatus === 'active' ? '全国省份舆情清洗任务已启用' : '已安全暂停全国省份舆情清洗任务',
   )
 
+  const confirmWriterContract = () => mutate(
+    'attest',
+    () => adminApi.updateProvinceOpinionPipelineStatus(token, 'active', {
+      confirmed: writerContractConfirmed,
+      contractVersion: writerContract.version,
+      contractDigest: writerContract.digest,
+    }),
+    '当前 writer 合同已确认；自动调度与立即同步已恢复',
+  )
+
   const runSync = () => mutate(
     'sync',
     () => adminApi.runProvinceOpinionPipeline(token, { batchSize: 200 }),
@@ -772,7 +789,10 @@ function ProvinceOpinionPipelineModal({
               <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '恢复卡住的任务'}
             </button>
           ) : null}
-          <button className="qp-button" type="button" disabled={Boolean(busyAction) || pipeline.status !== 'active'} onClick={runSync}>
+          <button className="qp-button" type="button"
+            disabled={Boolean(busyAction) || pipeline.status !== 'active' || !writerContractCurrent}
+            title={!writerContractCurrent ? '先确认当前 writer 合同' : ''}
+            onClick={runSync}>
             <ArrowClockwise size={16} />{busyAction === 'sync' ? '正在提交…' : '立即同步'}
           </button>
         </div>
@@ -833,16 +853,36 @@ function ProvinceOpinionPipelineModal({
           <li>{pipeline.writerContract?.summary?.deletion}</li>
           <li>{pipeline.writerContract?.summary?.ordering}</li>
         </ul>
-        <label className="mih-agent-consent">
-          <input type="checkbox" checked={writerContractConfirmed} disabled={Boolean(busyAction) || running}
-            onChange={(event) => setWriterContractConfirmed(event.target.checked)} />
-          <span>
-            <strong>我已验证源端实现满足上述合同</strong>
-            <small>合同 {pipeline.writerContract?.version || 'province-opinion.writer.v2'} · 摘要 {pipeline.writerContract?.digest?.slice(0, 12) || '待加载'}…</small>
-          </span>
-        </label>
-        {pipeline.writerContract?.latestAttestation ? (
-          <p className="mih-preview-provenance">最近确认：{pipeline.writerContract.latestAttestation.attestedBy || 'admin-token'} · {formatDate(pipeline.writerContract.latestAttestation.attestedAt)}</p>
+        {pipeline.status !== 'active' || !writerContractCurrent ? (
+          <label className="mih-agent-consent">
+            <input type="checkbox" checked={writerContractConfirmed} disabled={Boolean(busyAction) || running}
+              onChange={(event) => setWriterContractConfirmed(event.target.checked)} />
+            <span>
+              <strong>我已验证源端实现满足上述合同</strong>
+              <small>
+                合同 {writerContract.version || 'province-opinion.writer.v2'} · 摘要 {writerContract.digest?.slice(0, 12) || '待加载'}…
+                {pipeline.status === 'active' ? ' · 勾选后点击“确认当前合同”写入审计记录' : ' · 勾选后点击“启用任务”写入审计记录'}
+              </small>
+            </span>
+          </label>
+        ) : (
+          <p className="mih-preview-provenance">当前 writer 合同已确认，自动调度与立即同步可用。</p>
+        )}
+        {pipeline.status === 'active' && !writerContractCurrent ? (
+          <div className="mih-page-actions">
+            <button className="qp-button qp-button--ghost" type="button"
+              disabled={Boolean(busyAction) || !configured || running || progress.loading || !progress.data || progressIssues.length > 0 || !writerContractConfirmed}
+              title={!configured ? '先验证并保存源库连接' : progress.loading || !progress.data ? '先核对源表门禁' : progressIssues.length > 0 ? '源表或 Hub 服务索引门禁未满足' : !writerContractConfirmed ? '先勾选确认源端实现满足当前合同' : ''}
+              onClick={confirmWriterContract}>
+              <ShieldCheck size={16} />{busyAction === 'attest' ? '正在确认…' : '确认当前合同'}
+            </button>
+          </div>
+        ) : null}
+        {latestWriterAttestation ? (
+          <p className="mih-preview-provenance">
+            最近确认：{latestWriterAttestation.attestedBy || 'admin-token'} · {formatDate(latestWriterAttestation.attestedAt)}
+            {writerContractCurrent ? ' · 当前合同' : ' · 与当前版本或摘要不匹配'}
+          </p>
         ) : <p className="mih-preview-provenance">尚无 writer 合同确认记录。</p>}
       </Panel>
 

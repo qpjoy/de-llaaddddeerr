@@ -161,6 +161,7 @@ function fixture({ segmenterConfig = HANLP_CONFIG } = {}) {
     setCursor(value) { cursor = structuredClone(value) },
     setDescription(value) { description = structuredClone(value) },
     setServingIndexesReady(value) { servingIndexesReady = value },
+    setAttestation(value) { attestation = structuredClone(value) },
     getAttestation() { return structuredClone(attestation) },
   }
 }
@@ -414,6 +415,44 @@ test('activation fails closed without updated_at/index and requires exact writer
   assert.equal(active.status, 'active')
   assert.equal(active.task.activeMapping.version, 1)
   assert.equal(setup.getAttestation().contractDigest, PROVINCE_OPINION_WRITER_CONTRACT_DIGEST)
+})
+
+test('an active province pipeline can re-confirm the current writer contract without pausing', async () => {
+  const setup = fixture()
+  await setup.pipeline.configure({
+    connection: {
+      host: 'night-all.internal', database: 'night_all', username: 'mx_data',
+      password: 'private', sslMode: 'require',
+    },
+  })
+  setup.setDescription(validDescription())
+  await setup.pipeline.setStatus('active', {
+    approvedBy: 'operator-1',
+    writerContractAttestation: ATTESTATION,
+  })
+  setup.setAttestation({
+    contractVersion: 'province-opinion.writer.v1',
+    contractDigest: '0'.repeat(64),
+    attestedBy: 'operator-old',
+    attestedAt: '2026-08-24T14:16:00.000Z',
+  })
+
+  const stale = await setup.pipeline.get()
+  assert.equal(stale.status, 'active')
+  assert.equal(stale.task.scheduling.status, 'blocked')
+  assert.match(stale.task.scheduling.message, /writer/)
+
+  const refreshed = await setup.pipeline.setStatus('active', {
+    approvedBy: 'operator-2',
+    writerContractAttestation: ATTESTATION,
+  })
+  assert.equal(refreshed.status, 'active')
+  assert.equal(refreshed.writerContract.latestAttestation.attestedBy, 'operator-2')
+  assert.equal(
+    refreshed.writerContract.latestAttestation.contractDigest,
+    PROVINCE_OPINION_WRITER_CONTRACT_DIGEST,
+  )
+  assert.notEqual(refreshed.task.scheduling.status, 'blocked')
 })
 
 test('province activation and scheduling fail closed without explicit HanLP configuration', async () => {
