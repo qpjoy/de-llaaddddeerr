@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { SOURCE_CATALOG_SEED } from '../data/source-catalog-seed.mjs'
 
 function nowIso() {
   return new Date().toISOString()
@@ -85,6 +86,30 @@ export class MemoryStore {
     // small in-memory catalog makes the local UI and focused HTTP tests honest
     // enough to exercise registration without pretending imports are durable.
     this.externalSources = new Map()
+    // The governance catalog is useful in local development without a data
+    // plane. Unlike canonical records it is ordinary administrative metadata,
+    // so the memory implementation can exercise the complete CRUD contract.
+    this.sourceCatalogEntries = new Map(
+      SOURCE_CATALOG_SEED.map((entry) => [entry.id, clone(entry)]),
+    )
+    this.sourceCatalogEvents = new Map(SOURCE_CATALOG_SEED.map((entry) => [entry.id, [{
+      id: entry.id,
+      entryId: entry.id,
+      eventType: 'seed_import',
+      actor: 'memory-seed',
+      fromRevision: null,
+      toRevision: entry.revision,
+      changes: {
+        after: {
+          id: entry.id,
+          sourceKey: entry.sourceKey,
+          legacySequence: entry.legacySequence,
+          revision: entry.revision,
+          importedFrom: entry.importedFrom,
+        },
+      },
+      createdAt: entry.createdAt,
+    }]]))
   }
 
   async close() {}
@@ -816,6 +841,105 @@ export class MemoryStore {
     return clone([...this.externalSources.values()].sort((left, right) => (
       right.createdAt.localeCompare(left.createdAt)
     )))
+  }
+
+  // ---- governed source catalog ------------------------------------------
+
+  async listSourceCatalogEntries({ includeArchived = false } = {}) {
+    return clone([...this.sourceCatalogEntries.values()]
+      .filter((entry) => includeArchived || !entry.archivedAt)
+      .sort((left, right) => (
+        Number(left.legacySequence || Number.MAX_SAFE_INTEGER)
+          - Number(right.legacySequence || Number.MAX_SAFE_INTEGER)
+          || left.canonicalName.localeCompare(right.canonicalName, 'zh-CN')
+      )))
+  }
+
+  async getSourceCatalogEntry(id) {
+    return clone(this.sourceCatalogEntries.get(id) || null)
+  }
+
+  async createSourceCatalogEntry(input, { actor = 'admin-token' } = {}) {
+    if ([...this.sourceCatalogEntries.values()].some((entry) => entry.sourceKey === input.sourceKey)) {
+      throw new AppError(409, 'source_catalog_key_exists', `Source catalog key already exists: ${input.sourceKey}`)
+    }
+    if (input.legacySequence != null && [...this.sourceCatalogEntries.values()]
+      .some((entry) => entry.legacySequence === input.legacySequence)) {
+      throw new AppError(409, 'source_catalog_sequence_exists', `Legacy sequence already exists: ${input.legacySequence}`)
+    }
+    const createdAt = nowIso()
+    const entry = {
+      id: randomUUID(),
+      ...clone(input),
+      revision: 1,
+      archivedAt: null,
+      createdAt,
+      updatedAt: createdAt,
+    }
+    this.sourceCatalogEntries.set(entry.id, entry)
+    this.#appendSourceCatalogEvent(entry.id, {
+      eventType: 'create', actor, fromRevision: null, toRevision: 1,
+      changes: { after: clone(entry) },
+    })
+    return clone(entry)
+  }
+
+  async updateSourceCatalogEntry(id, patch, {
+    expectedRevision,
+    actor = 'admin-token',
+    eventType = 'update',
+  } = {}) {
+    const entry = this.sourceCatalogEntries.get(id)
+    if (!entry) throw new AppError(404, 'source_catalog_entry_not_found', 'Source catalog entry was not found')
+    if (entry.revision !== expectedRevision) {
+      throw new AppError(409, 'source_catalog_revision_conflict', 'Source catalog entry changed; reload before saving', {
+        expectedRevision,
+        currentRevision: entry.revision,
+      })
+    }
+    if (patch.parentSourceId === id) {
+      throw new AppError(400, 'invalid_source_catalog_parent', 'A source catalog entry cannot be its own parent')
+    }
+    const before = clone(entry)
+    Object.assign(entry, clone(patch), {
+      revision: entry.revision + 1,
+      updatedAt: nowIso(),
+    })
+    this.#appendSourceCatalogEvent(id, {
+      eventType,
+      actor,
+      fromRevision: before.revision,
+      toRevision: entry.revision,
+      changes: { before, after: clone(entry) },
+    })
+    return clone(entry)
+  }
+
+  async archiveSourceCatalogEntry(id, options = {}) {
+    return this.updateSourceCatalogEntry(id, { archivedAt: nowIso() }, {
+      ...options,
+      eventType: 'archive',
+    })
+  }
+
+  async restoreSourceCatalogEntry(id, options = {}) {
+    return this.updateSourceCatalogEntry(id, { archivedAt: null }, {
+      ...options,
+      eventType: 'restore',
+    })
+  }
+
+  async listSourceCatalogEvents(entryId, limit = 50) {
+    return clone((this.sourceCatalogEvents.get(entryId) || [])
+      .slice()
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, limit))
+  }
+
+  #appendSourceCatalogEvent(entryId, event) {
+    const events = this.sourceCatalogEvents.get(entryId) || []
+    events.push({ id: randomUUID(), entryId, createdAt: nowIso(), ...clone(event) })
+    this.sourceCatalogEvents.set(entryId, events)
   }
 
   async listFileFormatRules() {

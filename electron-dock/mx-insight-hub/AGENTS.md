@@ -11,6 +11,10 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 ## MX Insight Hub product context
 
 - Treat `/Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/electron-dock/mx-launcher/demos/ui-design-neon-void` and `mx-launcher/ui-design` as the visual source of truth.
+- For the governed source catalog, the real Hub `DashboardPage` command-center layout is the large-screen visual baseline. The existing external-source pipeline page is an execution-semantic reference only, not the dashboard reference.
+- Keep `/source-catalog` as the governed business directory and `/sources` as the existing connection, mapping, import, and cleaning execution surface (shown as “数据清洗计划”). Do not merge their status models or storage.
+- Source-catalog metadata is authoritative in PostgreSQL. Elasticsearch may later receive a rebuildable outbox projection, but application requests must never dual-write PG and ES.
+- Source-catalog status has four independent delivered axes: coverage (`unknown/not_covered/partial/covered`), delivery (`exploring/planned/doing/blocked/complete/paused/retired`), field review, and runtime health. A `complete` delivery may still have unknown or degraded runtime health.
 - Use the supplied Sub2API dashboard screenshot only as the information-architecture reference for accounts, API keys, plans, quotas, usage, channels, and operational metrics. Do not copy its branding.
 - The primary workflow is: create a consumer, issue a one-time API key, grant explicit platform capabilities and limits, call Night-All through the Hub, and inspect usage/latency/error evidence.
 - Night-All remains an internal data source. Never expose its provider credentials, provider names, endpoint IDs, `businessId`, or `availabilityMode` to public clients.

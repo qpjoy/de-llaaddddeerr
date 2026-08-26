@@ -3173,6 +3173,176 @@ export class PostgresStore {
     return rows.map(externalSource)
   }
 
+  // ---- governed source catalog (migration 036) --------------------------
+
+  async listSourceCatalogEntries({ includeArchived = false } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT *
+         FROM catalog.source_catalog_entries
+        WHERE $1::boolean OR archived_at IS NULL
+        ORDER BY legacy_sequence NULLS LAST, canonical_name, id`,
+      [includeArchived === true],
+    )
+    return rows.map(sourceCatalogEntry)
+  }
+
+  async getSourceCatalogEntry(id) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM catalog.source_catalog_entries WHERE id = $1`,
+      [id],
+    )
+    return sourceCatalogEntry(rows[0])
+  }
+
+  async createSourceCatalogEntry(input, { actor = 'admin-token' } = {}) {
+    try {
+      return await withPgTransaction(this.pool, async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO catalog.source_catalog_entries
+             (id, source_key, legacy_sequence, canonical_name, aliases, source_kind,
+              parent_source_id, major_category, scenarios, regions, entry_modules,
+              monitorable_content, extractable_clues, tracking_fields, suggested_access,
+              compliance_boundary, priority, coverage_status, delivery_status, review_status,
+              runtime_status, owner, connector_hints, notes, tags, evidence_refs,
+              custom_fields, imported_from)
+           VALUES
+             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+              $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
+              $27, $28)
+           RETURNING *`,
+          [
+            randomUUID(), input.sourceKey, input.legacySequence, input.canonicalName,
+            input.aliases, input.sourceKind, input.parentSourceId, input.majorCategory,
+            input.scenarios, input.regions, input.entryModules, input.monitorableContent,
+            input.extractableClues, input.trackingFields, input.suggestedAccess,
+            input.complianceBoundary, input.priority, input.coverageStatus,
+            input.deliveryStatus, input.reviewStatus, input.runtimeStatus, input.owner,
+            input.connectorHints, input.notes, input.tags, JSON.stringify(input.evidenceRefs),
+            input.customFields, input.importedFrom,
+          ],
+        )
+        const entry = sourceCatalogEntry(rows[0])
+        await client.query(
+          `INSERT INTO catalog.source_catalog_events
+             (id, entry_id, event_type, actor, from_revision, to_revision, changes)
+           VALUES ($1, $2, 'create', $3, NULL, 1, $4)`,
+          [randomUUID(), entry.id, actor, { after: entry }],
+        )
+        return entry
+      })
+    } catch (error) {
+      if (error?.code === '23505') {
+        throw new AppError(409, 'source_catalog_entry_exists', 'Source catalog key or legacy sequence already exists')
+      }
+      throw error
+    }
+  }
+
+  async updateSourceCatalogEntry(id, patch, {
+    expectedRevision,
+    actor = 'admin-token',
+    eventType = 'update',
+  } = {}) {
+    return withPgTransaction(this.pool, async (client) => {
+      const currentResult = await client.query(
+        `SELECT * FROM catalog.source_catalog_entries WHERE id = $1 FOR UPDATE`,
+        [id],
+      )
+      const before = sourceCatalogEntry(currentResult.rows[0])
+      if (!before) throw new AppError(404, 'source_catalog_entry_not_found', 'Source catalog entry was not found')
+      if (before.revision !== expectedRevision) {
+        throw new AppError(409, 'source_catalog_revision_conflict', 'Source catalog entry changed; reload before saving', {
+          expectedRevision,
+          currentRevision: before.revision,
+        })
+      }
+      if (patch.parentSourceId === id) {
+        throw new AppError(400, 'invalid_source_catalog_parent', 'A source catalog entry cannot be its own parent')
+      }
+      const merged = { ...before, ...patch }
+      const { rows } = await client.query(
+        `UPDATE catalog.source_catalog_entries
+            SET canonical_name = $3,
+                aliases = $4,
+                source_kind = $5,
+                parent_source_id = $6,
+                major_category = $7,
+                scenarios = $8,
+                regions = $9,
+                entry_modules = $10,
+                monitorable_content = $11,
+                extractable_clues = $12,
+                tracking_fields = $13,
+                suggested_access = $14,
+                compliance_boundary = $15,
+                priority = $16,
+                coverage_status = $17,
+                delivery_status = $18,
+                review_status = $19,
+                runtime_status = $20,
+                owner = $21,
+                connector_hints = $22,
+                notes = $23,
+                tags = $24,
+                evidence_refs = $25,
+                custom_fields = $26,
+                archived_at = $27,
+                revision = revision + 1,
+                updated_at = now()
+          WHERE id = $1 AND revision = $2
+          RETURNING *`,
+        [
+          id, expectedRevision, merged.canonicalName, merged.aliases, merged.sourceKind,
+          merged.parentSourceId, merged.majorCategory, merged.scenarios, merged.regions,
+          merged.entryModules, merged.monitorableContent, merged.extractableClues,
+          merged.trackingFields, merged.suggestedAccess, merged.complianceBoundary,
+          merged.priority, merged.coverageStatus, merged.deliveryStatus,
+          merged.reviewStatus, merged.runtimeStatus, merged.owner, merged.connectorHints,
+          merged.notes, merged.tags, JSON.stringify(merged.evidenceRefs), merged.customFields,
+          merged.archivedAt,
+        ],
+      )
+      const entry = sourceCatalogEntry(rows[0])
+      await client.query(
+        `INSERT INTO catalog.source_catalog_events
+           (id, entry_id, event_type, actor, from_revision, to_revision, changes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          randomUUID(), id, eventType, actor, before.revision, entry.revision,
+          { before, after: entry },
+        ],
+      )
+      return entry
+    })
+  }
+
+  async archiveSourceCatalogEntry(id, options = {}) {
+    return this.updateSourceCatalogEntry(id, { archivedAt: new Date().toISOString() }, {
+      ...options,
+      eventType: 'archive',
+    })
+  }
+
+  async restoreSourceCatalogEntry(id, options = {}) {
+    return this.updateSourceCatalogEntry(id, { archivedAt: null }, {
+      ...options,
+      eventType: 'restore',
+    })
+  }
+
+  async listSourceCatalogEvents(entryId, limit = 50) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200))
+    const { rows } = await this.pool.query(
+      `SELECT *
+         FROM catalog.source_catalog_events
+        WHERE entry_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2`,
+      [entryId, safeLimit],
+    )
+    return rows.map(sourceCatalogEvent)
+  }
+
   /**
    * Serialize pull/reset operations for one source across all Hub workers.
    *
@@ -4468,6 +4638,56 @@ function externalSource(row) {
     syncIntervalSeconds: row.sync_interval_seconds == null ? null : Number(row.sync_interval_seconds),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
+  }
+}
+
+function sourceCatalogEntry(row) {
+  return row && {
+    id: row.id,
+    sourceKey: row.source_key,
+    legacySequence: row.legacy_sequence == null ? null : Number(row.legacy_sequence),
+    canonicalName: row.canonical_name,
+    aliases: row.aliases || [],
+    sourceKind: row.source_kind,
+    parentSourceId: row.parent_source_id,
+    majorCategory: row.major_category,
+    scenarios: row.scenarios || [],
+    regions: row.regions || [],
+    entryModules: row.entry_modules || [],
+    monitorableContent: row.monitorable_content || [],
+    extractableClues: row.extractable_clues || [],
+    trackingFields: row.tracking_fields || [],
+    suggestedAccess: row.suggested_access || [],
+    complianceBoundary: row.compliance_boundary,
+    priority: row.priority,
+    coverageStatus: row.coverage_status,
+    deliveryStatus: row.delivery_status,
+    reviewStatus: row.review_status,
+    runtimeStatus: row.runtime_status,
+    owner: row.owner,
+    connectorHints: row.connector_hints || [],
+    notes: row.notes,
+    tags: row.tags || [],
+    evidenceRefs: row.evidence_refs || [],
+    customFields: row.custom_fields || {},
+    revision: Number(row.revision || 1),
+    archivedAt: iso(row.archived_at),
+    importedFrom: row.imported_from,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  }
+}
+
+function sourceCatalogEvent(row) {
+  return row && {
+    id: row.id,
+    entryId: row.entry_id,
+    eventType: row.event_type,
+    actor: row.actor,
+    fromRevision: row.from_revision == null ? null : Number(row.from_revision),
+    toRevision: Number(row.to_revision),
+    changes: row.changes || {},
+    createdAt: iso(row.created_at),
   }
 }
 

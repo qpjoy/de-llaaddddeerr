@@ -7,6 +7,13 @@ import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson }
 import { PUBLIC_DOCS_HTML, PUBLIC_OPENAPI_DOCUMENT } from './public-docs.mjs'
 import { publicStoredSearchItem } from './data/stored-search.mjs'
 import { normalizeChinaProvince } from './data/china-provinces.mjs'
+import {
+  normalizeSourceCatalogCreate,
+  normalizeSourceCatalogPatch,
+  sourceCatalogId,
+  sourceCatalogRevision,
+  sourceCatalogSnapshot,
+} from './data/source-catalog.mjs'
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import {
   BUILTIN_FILE_FORMAT_RULES,
@@ -1605,6 +1612,98 @@ export function createApp({
           data: await telegramSQLitePipeline.resetCheckpoints(body?.confirmPipelineKey),
           requestId,
         })
+        return
+      }
+
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/source-catalog') {
+        requireSourceAdmin(principal)
+        const includeArchived = url.searchParams.get('includeArchived') === 'true'
+        const items = await store.listSourceCatalogEntries({ includeArchived })
+        sendJson(response, 200, { data: sourceCatalogSnapshot(items), requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/source-catalog') {
+        requireSourceAdmin(principal)
+        const body = await readJson(request)
+        const input = normalizeSourceCatalogCreate({
+          ...body,
+          sourceKey: body?.sourceKey || `catalog-${randomUUID()}`,
+        })
+        const data = await store.createSourceCatalogEntry(input, {
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 201, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/:id/events')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        const entryId = sourceCatalogId(params.id)
+        const entry = await store.getSourceCatalogEntry(entryId)
+        if (!entry) throw new AppError(404, 'source_catalog_entry_not_found', 'Source catalog entry was not found')
+        const requestedLimit = Number(url.searchParams.get('limit') || 50)
+        const limit = Number.isInteger(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 200)) : 50
+        sendJson(response, 200, {
+          data: await store.listSourceCatalogEvents(entryId, limit),
+          requestId,
+        })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/:id/archive')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        const entryId = sourceCatalogId(params.id)
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'revision')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported archive fields: ${unsupported.join(', ')}`)
+        }
+        const data = await store.archiveSourceCatalogEntry(entryId, {
+          expectedRevision: sourceCatalogRevision(body?.revision),
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/:id/restore')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        const entryId = sourceCatalogId(params.id)
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'revision')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported restore fields: ${unsupported.join(', ')}`)
+        }
+        const data = await store.restoreSourceCatalogEntry(entryId, {
+          expectedRevision: sourceCatalogRevision(body?.revision),
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/:id')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        const data = await store.getSourceCatalogEntry(sourceCatalogId(params.id))
+        if (!data) throw new AppError(404, 'source_catalog_entry_not_found', 'Source catalog entry was not found')
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        const entryId = sourceCatalogId(params.id)
+        const body = await readJson(request)
+        const revision = sourceCatalogRevision(body?.revision)
+        const patch = normalizeSourceCatalogPatch(body)
+        const data = await store.updateSourceCatalogEntry(entryId, patch, {
+          expectedRevision: revision,
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 200, { data, requestId })
         return
       }
 

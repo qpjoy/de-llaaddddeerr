@@ -1,42 +1,49 @@
-# Dashboard Design QA
+# Source Catalog Design QA
 
-## Evidence
+## Comparison target and evidence
 
-- Reference: `/Users/qpjoy/.codex/generated_images/019fe599-b0a4-7293-90f2-2856191b7efc/exec-87ad9040-8952-475f-a72d-afb2fa1cf9e9.png`
-- Implementation: `/private/tmp/mx-insight-hub-dashboard-final.png`
-- Full-view comparison: `/private/tmp/mx-insight-hub-dashboard-compare-final.png`
-- Desktop viewport: `1487x1058`, device scale factor `1`.
-- Verified state: protected Admin Token session, 24-hour range, auto-refresh enabled, comparison view, and one real local request in the result-unknown state.
-- Focused responsive evidence: `/private/tmp/mx-insight-hub-dashboard-tablet.png` and `/private/tmp/mx-insight-hub-dashboard-mobile-pass2.png`.
+- Source visual truth: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-fab86061-b5be-4fa4-9a63-f363b8b9b193.png`
+- Source pixels: `2710x1312`; normalized to `1415x685` at the same `2.066:1` desktop aspect ratio.
+- Browser-rendered implementation: `/private/tmp/mx-source-catalog-overview-final.jpg`
+- Implementation pixels and CSS viewport: `1415x685`, device scale factor `1`.
+- Same-input full-view comparison: `/private/tmp/mx-source-catalog-dashboard-comparison-final.png`
+- Focused multidimensional table: `/private/tmp/mx-source-catalog-table.jpg`
+- Focused editor after the sticky-action fix: `/private/tmp/mx-source-catalog-editor-v2.jpg`
+- Responsive evidence: `/private/tmp/mx-source-catalog-responsive-760.jpg`, CSS viewport `760x800` (browser capture area `760x780`).
+- State: local Admin Token session; `/source-catalog?section=overview` with the deterministic 215-row seed. The source and implementation intentionally show different business metrics: the source is the real Hub gateway dashboard and defines visual grammar, while the implementation is the governed source-catalog dashboard requested for this feature.
+
+## Findings
+
+No actionable P0, P1, or P2 findings remain.
+
+The final side-by-side input confirms the same Hub command-center hierarchy: dark grid canvas, compact page heading, three-panel overview, bordered KPI rail, two-column lower analysis, restrained radii, cyan active state, blue operational charts, and semantic success/warning/danger accents. The additional in-page menu is intentional because the source-catalog brief explicitly requires dashboard, multidimensional table, taxonomy, and plan management under one left-navigation entry.
 
 ## Required fidelity surfaces
 
-- Typography: keeps the existing MX Insight Hub type scale and Neon Void hierarchy; command-center headings are compact and operational rather than promotional.
-- Spacing and geometry: follows the reference's dense overview, KPI rail, two-column analysis and matrix hierarchy while retaining the product's 4/6/8px radius system and responsive sidebar behavior.
-- Colors: uses the existing `--qp-*` tokens. Cyan is reserved for active state, focus and primary data; success, warning and danger keep their semantic colors.
-- Image and asset quality: reuses the real product logo, Phosphor icons and Chart.js visualizations. No placeholder, handcrafted SVG, emoji or CSS-drawn icon assets were introduced.
-- Copy: all dashboard labels describe values the existing APIs can prove. Empty and unavailable values render explicitly instead of being replaced by demo figures.
+- Fonts and typography: the implementation reuses the Hub/Neon Void font stack and existing `--qp-font-*` scale. Heading weights, muted explanatory copy, tab labels, KPI numerals, chart labels, table text and monospaced identifiers remain consistent with the source. Long taxonomy and source names truncate or wrap inside bounded controls instead of colliding.
+- Spacing and layout rhythm: desktop uses the source's three-panel overview, continuous KPI rail and lower analysis/risk split. The menu adds one deliberate 44px interaction layer; overview density was tightened so meaningful lower-dashboard content remains above the fold. Panel padding, 12–14px section gaps, one-pixel dividers and existing Hub radii/elevation match the source grammar.
+- Colors and visual tokens: panels, grid background, borders, copy and state colors all come from existing `--qp-*` tokens. Cyan is reserved for the selected route, selected subpage, focus and primary coverage; blue, green, amber, purple and red retain operational semantics with adequate dark-theme contrast.
+- Image and asset quality: the real MX Insight Hub logo is reused. All functional icons use the installed Phosphor family and all charts use Chart.js; there are no emoji, placeholder images, handcrafted SVGs, inline SVG illustrations, CSS-art replacements or stretched assets.
+- Copy and content: all visible counts are derived from the 215-row catalog. `29/186`, `doing/exploring/complete`, unassigned owners and review gaps are kept on separate evidence axes. The Telegram completion note is backed by real runbook and pipeline references; no sample alert or fake runtime-health claim is shown.
+- Icons and states: selected, hover, focus, disabled, archived, success, warning and destructive-confirmation states use the existing interaction language. Canvas charts expose text alternatives, native inputs retain labels, and keyboard focus is visible.
+- Responsiveness and accessibility: at `760px` the document width remains exactly `760px`, the overview becomes one column, the menu remains usable, and KPI tiles become four columns before the narrower two-column breakpoint. Reduced-motion disables catalog transitions. The editor traps focus through the shared Modal component and keeps Save/Archive actions visible while its body scrolls.
 
-## Intentional data-contract adaptations
+## Focused interaction evidence
 
-- The reference's realtime traffic series is represented by current-period platform aggregates and current-versus-previous comparisons because the product does not expose a trustworthy time-series endpoint.
-- The reference's P95/P99 and freshness values are replaced with average upstream latency and result certainty because percentile and freshness data are not present in the current contract.
-- Risk events are derived from actual usage and platform state, with evidence links into existing management routes; no sample incident feed is fabricated.
+- Search reduced the 215-row catalog to the two Telegram records.
+- The built-in bottom/covered/uncovered/in-progress/P0/unassigned/archive views report real counts.
+- Next-page navigation is enabled for page 1 of 8 after the pagination fix.
+- A local test record was created using Enter-to-add scenario, region and tag controls, then archived, restored and verified through create/archive/restore audit events. The memory server was restarted afterward, returning the deliverable preview to the clean 215-row seed.
+- Telegram exposes eight evidence references and a baseline import event.
+- Desktop overview, table, editor and `760px` responsive layout were rendered in the in-app browser.
+- Browser console review returned no errors or warnings.
 
-## Iteration history
+## Comparison history
 
-- Pass 1 — `/private/tmp/mx-insight-hub-dashboard-pass1.png`: P1, readiness incorrectly clamped to 100 despite a failed/unknown request. The score formula was corrected and the explanation made visible.
-- Pass 2 — `/private/tmp/mx-insight-hub-dashboard-pass2.png`: P2, a single platform produced oversized bars and the top comparison duplicated lower content. The top panel became a platform aggregate view, bar thickness was capped, and desktop density was tightened.
-- Mobile pass 1 — `/private/tmp/mx-insight-hub-dashboard-mobile.png`: P2, the health matrix caused `853px` document width at a `640px` viewport and the page heading was centered. Dashboard overflow containment and mobile heading alignment were corrected; final document width is `640px`.
-- Truthfulness/accessibility review: processing requests were removed from result certainty, added to the risk queue, and denied unproven latency credit. The local reference score is explicitly marked non-SLO, its latency threshold is unified at 1.5 seconds, chart labels now include both periods' values, and the compact risk level remains available to assistive technology.
-- Final — `/private/tmp/mx-insight-hub-dashboard-final.png`: no actionable P0, P1 or P2 visual defects remain.
-
-## Interaction and accessibility review
-
-- Range selection updates the URL and reloads both current and comparison periods.
-- Auto-refresh can be paused and resumed; its pressed state is exposed to assistive technology.
-- Result comparison/structure tabs, risk evidence links and existing navigation routes work.
-- Desktop (`1487x1058`), tablet (`900x1000`) and compact (`640x900`) layouts were checked without page-level horizontal overflow.
-- Canvas charts have accessible labels, reduced-motion behavior is respected, and browser console review returned no errors or warnings.
+1. Pass 1 found a P2 layout mismatch: the catalog-specific `1500px` breakpoint moved governance health below the overview at a normalized desktop viewport, unlike the real Hub dashboard. The breakpoint was aligned to `1320px`; the post-fix three-column evidence is `/private/tmp/mx-source-catalog-overview-v2.jpg`.
+2. Pass 2 found P2 density drift: source-catalog overview cards were taller than the visual baseline. The panel minimum height changed from `222px` to `200px` and the category chart from `148px` to `126px`. The post-fix evidence is `/private/tmp/mx-source-catalog-overview-final.jpg`.
+3. Table interaction review found a P1 functional defect: `Pagination` had eight known pages but Next was disabled because `hasMore` was omitted. The catalog now passes `hasMore={currentPage < totalPages}`; the final table evidence shows 30 rows and an enabled Next control.
+4. Editor review found a P2 usability defect: the modal footer fell below a `685px` viewport. The source-catalog xlarge modal now uses a fixed header/footer grid and a scrollable body; `/private/tmp/mx-source-catalog-editor-v2.jpg` shows Save, Cancel and Archive visible without page scrolling.
+5. Final comparison found no remaining actionable P0/P1/P2 mismatch. The different charts and copy are required domain content, not visual drift.
 
 final result: passed

@@ -169,6 +169,32 @@ export const adminApi = {
       },
     },
   ),
+  sourceCatalog: (token, { includeArchived = false } = {}) => request(
+    token,
+    `${ADMIN_ROOT}/source-catalog`,
+    { query: { includeArchived: includeArchived || undefined } },
+  ),
+  createSourceCatalogEntry: (token, body) => request(
+    token, `${ADMIN_ROOT}/source-catalog`, { method: 'POST', body },
+  ),
+  updateSourceCatalogEntry: (token, id, body) => request(
+    token, `${ADMIN_ROOT}/source-catalog/${encodeURIComponent(id)}`, { method: 'PUT', body },
+  ),
+  archiveSourceCatalogEntry: (token, id, revision) => request(
+    token,
+    `${ADMIN_ROOT}/source-catalog/${encodeURIComponent(id)}/archive`,
+    { method: 'POST', body: { revision } },
+  ),
+  restoreSourceCatalogEntry: (token, id, revision) => request(
+    token,
+    `${ADMIN_ROOT}/source-catalog/${encodeURIComponent(id)}/restore`,
+    { method: 'POST', body: { revision } },
+  ),
+  sourceCatalogEvents: (token, id, limit = 50) => request(
+    token,
+    `${ADMIN_ROOT}/source-catalog/${encodeURIComponent(id)}/events`,
+    { query: { limit } },
+  ),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },

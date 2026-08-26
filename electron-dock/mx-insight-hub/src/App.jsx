@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Brain,
+  Books,
   Database,
   DownloadSimple,
   MagnifyingGlass,
@@ -32,6 +33,7 @@ import {
 } from './pages.jsx'
 import { AgentPage, BackfillPage, RetrievalPage, SourcesPage } from './pages-data.jsx'
 import { DataCenterPage } from './pages-catalog.jsx'
+import { SourceCatalogPage } from './pages-source-catalog.jsx'
 
 const SESSION_KEY = 'mx-insight-hub.admin-token'
 
@@ -45,7 +47,8 @@ const ROUTES = [
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
   { path: '/platforms', label: '开放能力', description: '数据平台与通用 API', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
-  { path: '/sources', label: '外部数据源', description: '表格、文本与异构库', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/sources', label: '数据清洗计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
   { path: '/agent', label: '中心 Agent', description: '模型链路与降级', icon: Brain, group: '数据平面', component: AgentPage, capability: 'membership.write', platformAdmin: true },
@@ -423,7 +426,7 @@ export function App() {
             </button>
           </div>
         </header>
-        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
+        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
           <Page {...pageProps} />
         </main>
       </div>
