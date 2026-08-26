@@ -172,6 +172,13 @@ const ATTESTATION = Object.freeze({
   contractDigest: PROVINCE_OPINION_WRITER_CONTRACT_DIGEST,
 })
 
+test('province task-control modal imports its writer-confirmation icon', async () => {
+  const page = await readFile(new URL('../../src/pages-data.jsx', import.meta.url), 'utf8')
+  const phosphorImport = page.match(/import\s*\{([\s\S]*?)\}\s*from '@phosphor-icons\/react'/)?.[1] || ''
+  assert.match(phosphorImport, /\bShieldCheck\b/)
+  assert.match(page, /<ShieldCheck size=\{16\} \/>/)
+})
+
 test('province scheduling reports gates and a materially overdue idle cursor', () => {
   const source = {
     status: 'active',

@@ -11,6 +11,7 @@ import {
   Play,
   Plugs,
   Plus,
+  ShieldCheck,
   Table,
   Trash,
   Warning,
