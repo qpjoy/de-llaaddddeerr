@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import {
   Archive,
   ArrowRight,
   ArrowSquareOut,
   Books,
+  CaretDown,
   ChartDonut,
   Check,
   CheckCircle,
@@ -41,6 +42,7 @@ import {
 import { adminApi } from './api.js'
 import {
   EmptyState,
+  DropdownField,
   ErrorState,
   Field,
   LoadingState,
@@ -140,14 +142,8 @@ function Panel({ title, subtitle, action, className = '', children }) {
 }
 
 function SelectField({ label, value, onChange, options, emptyLabel, disabled = false }) {
-  return (
-    <Field label={label}>
-      <select className="qp-select" value={value ?? ''} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
-        {emptyLabel ? <option value="">{emptyLabel}</option> : null}
-        {options.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
-      </select>
-    </Field>
-  )
+  const normalizedOptions = emptyLabel ? [{ value: '', label: emptyLabel }, ...options] : options
+  return <DropdownField label={label} value={value ?? ''} disabled={disabled} options={normalizedOptions} onChange={onChange} />
 }
 
 function CatalogBadge({ dimension, value }) {
@@ -406,46 +402,316 @@ function SourceCatalogOverview({ snapshot, onOpenCatalog }) {
   )
 }
 
-function TagInput({ label, values, onChange, suggestions = [], hint, placeholder = '输入后按回车新增' }) {
-  const [draft, setDraft] = useState('')
-  const listId = useMemo(() => `mih-tag-suggestions-${Math.random().toString(16).slice(2)}`, [])
-  const add = () => {
-    const next = draft.normalize('NFKC').trim()
-    if (!next || values.includes(next)) {
-      setDraft('')
-      return
+function normalizeDraft(value) {
+  return String(value || '').normalize('NFKC').trim()
+}
+
+function uniqueSuggestions(values) {
+  return [...new Set((values || []).map(normalizeDraft).filter(Boolean))]
+}
+
+function useUpwardMenu(open, rootRef, optionCount) {
+  const [openUpward, setOpenUpward] = useState(false)
+  useLayoutEffect(() => {
+    if (!open || !rootRef.current) return
+    const rootRect = rootRef.current.getBoundingClientRect()
+    const boundaryRect = rootRef.current.closest('.mih-modal__body')?.getBoundingClientRect()
+      ?? rootRef.current.closest('.mih-modal')?.getBoundingClientRect()
+    const boundaryTop = Math.max(0, boundaryRect?.top ?? 0)
+    const boundaryBottom = Math.min(window.innerHeight, boundaryRect?.bottom ?? window.innerHeight)
+    const menuHeight = Math.min(280, optionCount * 35 + 12)
+    const spaceBelow = boundaryBottom - rootRect.bottom - 8
+    const spaceAbove = rootRect.top - boundaryTop - 8
+    setOpenUpward(spaceBelow < menuHeight && spaceAbove > spaceBelow)
+  }, [open, optionCount, rootRef])
+  return openUpward
+}
+
+function CreateableCombobox({ label, value, onChange, suggestions = [], placeholder = '输入或选择' }) {
+  const labelId = useId()
+  const inputId = useId()
+  const listboxId = useId()
+  const rootRef = useRef(null)
+  const inputRef = useRef(null)
+  const [open, setOpen] = useState(false)
+  const [filtering, setFiltering] = useState(false)
+  const [highlightedIndex, setHighlightedIndex] = useState(0)
+  const normalized = normalizeDraft(value)
+  const options = useMemo(() => {
+    const query = filtering ? normalized.toLocaleLowerCase() : ''
+    const available = uniqueSuggestions(suggestions)
+      .filter((item) => !query || item.toLocaleLowerCase().includes(query))
+      .slice(0, 12)
+      .map((item) => ({ value: item, label: item, create: false }))
+    if (normalized && !available.some((item) => item.value === normalized)
+      && !uniqueSuggestions(suggestions).includes(normalized)) {
+      available.unshift({ value: normalized, label: `使用新分类 “${normalized}”`, create: true })
     }
-    onChange([...values, next])
-    setDraft('')
+    return available
+  }, [filtering, normalized, suggestions])
+  const openUpward = useUpwardMenu(open, rootRef, options.length)
+
+  useEffect(() => {
+    if (!open) return undefined
+    const closeOnOutsidePointer = (event) => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer)
+  }, [open])
+
+  useEffect(() => setHighlightedIndex(0), [normalized, open])
+
+  const choose = (option) => {
+    if (!option) return
+    onChange(option.value)
+    setFiltering(false)
+    setOpen(false)
+    inputRef.current?.focus()
   }
+
+  const move = (delta) => {
+    if (!options.length) return
+    setHighlightedIndex((current) => (current + delta + options.length) % options.length)
+  }
+
   return (
-    <Field label={label} hint={hint}>
-      <div className="mih-tag-editor">
-        {values.map((value) => (
-          <span className="mih-tag-editor__tag" key={value}>
-            {value}
-            <button type="button" aria-label={`移除 ${value}`} onClick={() => onChange(values.filter((item) => item !== value))}>
-              <X size={12} aria-hidden="true" />
-            </button>
-          </span>
-        ))}
-        <input
-          value={draft}
-          list={listId}
-          placeholder={values.length ? '继续添加' : placeholder}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={add}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ',') {
-              event.preventDefault()
-              add()
-            }
-            if (event.key === 'Backspace' && !draft && values.length) onChange(values.slice(0, -1))
-          }}
-        />
-        <datalist id={listId}>{suggestions.filter((value) => !values.includes(value)).map((value) => <option value={value} key={value} />)}</datalist>
+    <div className="qp-field mih-createable-combobox" ref={rootRef} onBlur={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false)
+    }}>
+      <label className="qp-field__label" id={labelId} htmlFor={inputId}>{label}</label>
+      <div className="mih-combobox-anchor">
+        <div className={`mih-createable-combobox__control${open ? ' is-open' : ''}`}>
+          <input
+            ref={inputRef}
+            id={inputId}
+            value={value}
+            required
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={open}
+            aria-controls={listboxId}
+            aria-activedescendant={open && options.length ? `${listboxId}-option-${highlightedIndex}` : undefined}
+            placeholder={placeholder}
+            onFocus={() => { setFiltering(false); setOpen(true) }}
+            onChange={(event) => { onChange(event.target.value); setFiltering(true); setOpen(true) }}
+            onKeyDown={(event) => {
+              if (event.nativeEvent?.isComposing || event.isComposing || event.keyCode === 229) return
+              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault()
+                if (!open) setOpen(true)
+                else move(event.key === 'ArrowDown' ? 1 : -1)
+              } else if (event.key === 'Enter' && open && options.length) {
+                event.preventDefault()
+                choose(options[highlightedIndex])
+              } else if (event.key === 'Escape') {
+                event.preventDefault()
+                setOpen(false)
+              }
+            }}
+          />
+          <button
+            type="button"
+            aria-label={`${open ? '收起' : '展开'}${label}选项`}
+            aria-expanded={open}
+            aria-controls={listboxId}
+            onClick={() => {
+              if (open) {
+                setOpen(false)
+                return
+              }
+              setFiltering(false)
+              setOpen(true)
+              inputRef.current?.focus()
+            }}
+          >
+            <CaretDown size={14} aria-hidden="true" />
+          </button>
+        </div>
+        {open && options.length ? (
+          <div className={`mih-combobox-menu${openUpward ? ' is-upward' : ''}`} id={listboxId} role="listbox" aria-labelledby={labelId}>
+            {options.map((option, index) => (
+              <button
+                className={`mih-combobox-option${index === highlightedIndex ? ' is-highlighted' : ''}${option.value === normalized && !option.create ? ' is-selected' : ''}`}
+                id={`${listboxId}-option-${index}`}
+                key={`${option.create ? 'create' : 'option'}-${option.value}`}
+                type="button"
+                role="option"
+                aria-selected={option.value === normalized && !option.create}
+                tabIndex={-1}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setHighlightedIndex(index)}
+                onClick={() => choose(option)}
+              >
+                {option.create ? <Plus size={13} aria-hidden="true" /> : <Check className="mih-combobox-option__check" size={13} weight="bold" aria-hidden="true" />}
+                <span>{option.label}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
-    </Field>
+    </div>
+  )
+}
+
+function TagInput({ label, values, onChange, suggestions = [], hint, placeholder = '输入后按回车新增', draft = '', onDraftChange }) {
+  const labelId = useId()
+  const inputId = useId()
+  const listboxId = useId()
+  const rootRef = useRef(null)
+  const inputRef = useRef(null)
+  const [open, setOpen] = useState(false)
+  const [highlightedIndex, setHighlightedIndex] = useState(0)
+  const normalizedDraft = normalizeDraft(draft)
+  const options = useMemo(() => {
+    const available = uniqueSuggestions(suggestions)
+      .filter((item) => !normalizedDraft || item.toLocaleLowerCase().includes(normalizedDraft.toLocaleLowerCase()))
+      .slice(0, 12)
+      .map((item) => ({ value: item, label: item, create: false }))
+    if (normalizedDraft && !available.some((item) => item.value === normalizedDraft)
+      && !values.includes(normalizedDraft)) {
+      available.unshift({ value: normalizedDraft, label: `新增 “${normalizedDraft}”`, create: true })
+    }
+    return available
+  }, [normalizedDraft, suggestions, values])
+  const openUpward = useUpwardMenu(open, rootRef, options.length)
+
+  useEffect(() => {
+    if (!open) return undefined
+    const closeOnOutsidePointer = (event) => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer)
+  }, [open])
+
+  useEffect(() => setHighlightedIndex(0), [normalizedDraft, open])
+
+  const commit = (candidate = draft) => {
+    const next = normalizeDraft(candidate)
+    if (next && !values.includes(next)) onChange([...values, next])
+    if (next) onDraftChange?.('')
+  }
+
+  const choose = (option) => {
+    if (!option) return
+    if (values.includes(option.value)) onChange(values.filter((item) => item !== option.value))
+    else onChange([...values, option.value])
+    onDraftChange?.('')
+    setOpen(true)
+    inputRef.current?.focus()
+  }
+
+  const move = (delta) => {
+    if (!options.length) return
+    setHighlightedIndex((current) => (current + delta + options.length) % options.length)
+  }
+
+  return (
+    <div className="qp-field mih-tag-combobox" ref={rootRef} onBlur={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) {
+        commit()
+        setOpen(false)
+      }
+    }}>
+      <label className="qp-field__label" id={labelId} htmlFor={inputId}>{label}</label>
+      <div className="mih-combobox-anchor">
+        <div className={`mih-tag-editor${open ? ' is-open' : ''}`}>
+          {values.map((value) => (
+            <span className="mih-tag-editor__tag" key={value}>
+              {value}
+              <button type="button" aria-label={`移除 ${value}`} onClick={() => onChange(values.filter((item) => item !== value))}>
+                <X size={12} aria-hidden="true" />
+              </button>
+            </span>
+          ))}
+          <input
+            ref={inputRef}
+            id={inputId}
+            value={draft}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={open}
+            aria-controls={listboxId}
+            aria-activedescendant={open && options.length ? `${listboxId}-option-${highlightedIndex}` : undefined}
+            placeholder={values.length ? '继续添加' : placeholder}
+            onFocus={() => setOpen(true)}
+            onChange={(event) => { onDraftChange?.(event.target.value); setOpen(true) }}
+            onKeyDown={(event) => {
+              if (event.nativeEvent?.isComposing || event.isComposing || event.keyCode === 229) return
+              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault()
+                if (!open) setOpen(true)
+                else move(event.key === 'ArrowDown' ? 1 : -1)
+              } else if (event.key === 'Enter') {
+                event.preventDefault()
+                if (open && options.length) choose(options[highlightedIndex])
+                else commit()
+              } else if (event.key === ',') {
+                event.preventDefault()
+                commit()
+              } else if (event.key === 'Escape') {
+                event.preventDefault()
+                setOpen(false)
+              } else if (event.key === 'Backspace' && !draft && values.length) {
+                onChange(values.slice(0, -1))
+              }
+            }}
+          />
+          <button
+            className="mih-tag-editor__toggle"
+            type="button"
+            aria-label={`${open ? '收起' : '展开'}${label}选项`}
+            aria-expanded={open}
+            aria-controls={listboxId}
+            onClick={() => {
+              if (open) {
+                setOpen(false)
+                return
+              }
+              setOpen(true)
+              inputRef.current?.focus()
+            }}
+          >
+            <CaretDown size={14} aria-hidden="true" />
+          </button>
+        </div>
+        {open && options.length ? (
+          <div className={`mih-combobox-menu${openUpward ? ' is-upward' : ''}`} id={listboxId} role="listbox" aria-labelledby={labelId} aria-multiselectable="true">
+            {options.map((option, index) => {
+              const selected = values.includes(option.value)
+              return (
+                <button
+                  className={`mih-combobox-option${index === highlightedIndex ? ' is-highlighted' : ''}${selected ? ' is-selected' : ''}`}
+                  id={`${listboxId}-option-${index}`}
+                  key={`${option.create ? 'create' : 'option'}-${option.value}`}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  tabIndex={-1}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => setHighlightedIndex(index)}
+                  onClick={() => choose(option)}
+                >
+                  {option.create ? <Plus size={13} aria-hidden="true" /> : <Check className="mih-combobox-option__check" size={13} weight="bold" aria-hidden="true" />}
+                  <span>{option.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        ) : null}
+      </div>
+      {hint ? <span className="qp-field__hint">{hint}</span> : null}
+    </div>
+  )
+}
+
+function ToolbarDropdown({ icon: Icon, label, value, onChange, options }) {
+  return (
+    <div className="mih-source-toolbar-dropdown">
+      <Icon size={16} aria-hidden="true" />
+      <DropdownField className="mih-source-toolbar-dropdown__field" label={label} value={value} options={options} onChange={onChange} />
+    </div>
   )
 }
 
@@ -662,11 +928,9 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
           <button className={`qp-button qp-button--ghost qp-button--sm${filterOpen ? ' is-active' : ''}`} type="button" onClick={() => setFilterOpen((value) => !value)}>
             <Funnel size={16} aria-hidden="true" />筛选{activeFilterCount ? ` · ${activeFilterCount}` : ''}
           </button>
-          <label className="mih-source-toolbar-select"><Columns size={16} aria-hidden="true" /><span>分组</span><select value={groupBy} onChange={(event) => setGroupBy(event.target.value)}><option value="none">不分组</option><option value="majorCategory">按大类</option><option value="deliveryStatus">按阶段</option><option value="region">按区域</option></select></label>
-          <label className="mih-source-toolbar-select"><SortAscending size={16} aria-hidden="true" /><span>排序</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="sequence">序号</option><option value="name">名称</option><option value="priority">优先级</option><option value="coverage">覆盖状态</option><option value="updated">最近更新</option></select></label>
-          <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => setDensity((value) => value === 'comfortable' ? 'compact' : value === 'compact' ? 'spacious' : 'comfortable')}>
-            <Rows size={16} aria-hidden="true" />行高 · {density === 'compact' ? '紧凑' : density === 'spacious' ? '宽松' : '适中'}
-          </button>
+          <ToolbarDropdown icon={Columns} label="分组" value={groupBy} onChange={setGroupBy} options={[{ value: 'none', label: '不分组' }, { value: 'majorCategory', label: '按大类' }, { value: 'deliveryStatus', label: '按阶段' }, { value: 'region', label: '按区域' }]} />
+          <ToolbarDropdown icon={SortAscending} label="排序" value={sortBy} onChange={setSortBy} options={[{ value: 'sequence', label: '序号' }, { value: 'name', label: '名称' }, { value: 'priority', label: '优先级' }, { value: 'coverage', label: '覆盖状态' }, { value: 'updated', label: '最近更新' }]} />
+          <ToolbarDropdown icon={Rows} label="行高" value={density} onChange={setDensity} options={[{ value: 'compact', label: '紧凑' }, { value: 'comfortable', label: '适中' }, { value: 'spacious', label: '宽松' }]} />
           <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => setSaveViewOpen(true)}><FloppyDisk size={16} aria-hidden="true" />保存视图</button>
           <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => downloadCatalogCsv(visible)}><FileCsv size={16} aria-hidden="true" />导出 {visible.length}</button>
           <button className="qp-button qp-button--primary qp-button--sm" type="button" onClick={() => setCreating(true)}><Plus size={16} aria-hidden="true" />新增数据源</button>
@@ -688,8 +952,8 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
           <div className="mih-source-bulk-bar" role="region" aria-label="批量操作">
             <strong>已选 {selected.length} 条</strong>
             <span />
-            <label>覆盖状态<select disabled={bulkSaving} defaultValue="" onChange={(event) => { if (event.target.value) bulkUpdate('coverageStatus', event.target.value); event.target.value = '' }}><option value="">批量设置</option>{COVERAGE_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
-            <label>实施阶段<select disabled={bulkSaving} defaultValue="" onChange={(event) => { if (event.target.value) bulkUpdate('deliveryStatus', event.target.value); event.target.value = '' }}><option value="">批量设置</option>{DELIVERY_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
+            <DropdownField className="mih-source-bulk-dropdown" label="覆盖状态" value="" disabled={bulkSaving} placeholder="批量设置" options={COVERAGE_OPTIONS} onChange={(value) => bulkUpdate('coverageStatus', value)} />
+            <DropdownField className="mih-source-bulk-dropdown" label="实施阶段" value="" disabled={bulkSaving} placeholder="批量设置" options={DELIVERY_OPTIONS} onChange={(value) => bulkUpdate('deliveryStatus', value)} />
             <button type="button" className="qp-button qp-button--ghost qp-button--sm" onClick={() => setSelectedIds(new Set())}>取消选择</button>
           </div>
         ) : null}
@@ -772,6 +1036,7 @@ function emptyForm(entry) {
 function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify, onClose, onChanged }) {
   const [tab, setTab] = useState('profile')
   const [form, setForm] = useState(() => emptyForm(entry))
+  const [tagDrafts, setTagDrafts] = useState({})
   const [events, setEvents] = useState(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
@@ -788,16 +1053,25 @@ function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify
   }, [entry, events, onUnauthorized, tab, token])
 
   const update = (field, value) => setForm((current) => ({ ...current, [field]: value }))
+  const tagDraftProps = (field) => ({
+    draft: tagDrafts[field] || '',
+    onDraftChange: (value) => setTagDrafts((current) => ({ ...current, [field]: value })),
+  })
   const save = async (event) => {
     event.preventDefault()
     setSaving(true)
     setError(null)
     try {
+      const committedForm = Object.entries(tagDrafts).reduce((current, [field, draft]) => {
+        const next = normalizeDraft(draft)
+        if (!next || !Array.isArray(current[field]) || current[field].includes(next)) return current
+        return { ...current, [field]: [...current[field], next] }
+      }, { ...form })
       const payload = {
-        ...form,
-        owner: form.owner.trim() || null,
-        complianceBoundary: form.complianceBoundary.trim() || null,
-        notes: form.notes.trim() || null,
+        ...committedForm,
+        owner: committedForm.owner.trim() || null,
+        complianceBoundary: committedForm.complianceBoundary.trim() || null,
+        notes: committedForm.notes.trim() || null,
       }
       if (entry) await adminApi.updateSourceCatalogEntry(token, entry.id, { ...payload, revision: entry.revision })
       else await adminApi.createSourceCatalogEntry(token, payload)
@@ -846,6 +1120,7 @@ function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify
       title={entry ? `编辑 · ${entry.canonicalName}` : '新增数据源'}
       description={entry ? `稳定标识 ${entry.sourceKey} · revision ${entry.revision}` : '先登记业务目录，再建立获取与清洗计划；目录中不保存连接密码。'}
       onClose={onClose}
+      closeOnBackdrop={false}
       footer={(
         <>
           <span>
@@ -865,24 +1140,24 @@ function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify
             <div className="mih-source-editor-grid">
               <Field label="数据源 / 平台名称"><input className="qp-input" required autoFocus value={form.canonicalName} onChange={(event) => update('canonicalName', event.target.value)} /></Field>
               <SelectField label="来源类型" value={form.sourceKind} options={SOURCE_KIND_OPTIONS} onChange={(value) => update('sourceKind', value)} />
-              <Field label="一级分类"><input className="qp-input" required list="mih-source-categories" value={form.majorCategory} onChange={(event) => update('majorCategory', event.target.value)} /><datalist id="mih-source-categories">{facets.majorCategories.map((value) => <option value={value} key={value} />)}</datalist></Field>
+              <CreateableCombobox label="一级分类" value={form.majorCategory} suggestions={facets.majorCategories} onChange={(value) => update('majorCategory', value)} />
               <SelectField label="优先级" value={form.priority} options={PRIORITY_OPTIONS} onChange={(value) => update('priority', value)} />
             </div>
-            <TagInput label="别名" values={form.aliases} onChange={(value) => update('aliases', value)} />
-            <TagInput label="细分场景" values={form.scenarios} onChange={(value) => update('scenarios', value)} suggestions={facets.scenarios} hint="可输入后回车新增；支持一个平台属于多个 use case。" />
-            <TagInput label="区域" values={form.regions} onChange={(value) => update('regions', value)} suggestions={facets.regions} hint="区域为多选，避免把全球/中国大陆长期塞成一个枚举。" />
-            <TagInput label="自由标签" values={form.tags} onChange={(value) => update('tags', value)} suggestions={facets.tags} />
+            <TagInput label="别名" values={form.aliases} onChange={(value) => update('aliases', value)} {...tagDraftProps('aliases')} />
+            <TagInput label="细分场景" values={form.scenarios} onChange={(value) => update('scenarios', value)} suggestions={facets.scenarios} hint="可输入后回车新增；支持一个平台属于多个 use case。" {...tagDraftProps('scenarios')} />
+            <TagInput label="区域" values={form.regions} onChange={(value) => update('regions', value)} suggestions={facets.regions} hint="区域为多选，避免把全球/中国大陆长期塞成一个枚举。" {...tagDraftProps('regions')} />
+            <TagInput label="自由标签" values={form.tags} onChange={(value) => update('tags', value)} suggestions={facets.tags} {...tagDraftProps('tags')} />
           </section>
         ) : null}
 
         {tab === 'capabilities' ? (
           <section className="mih-source-editor-section">
             <p className="mih-source-editor-callout"><WarningCircle size={17} aria-hidden="true" /><span>“可监测内容”等初始值来自分类模板，不等于该平台已经实测覆盖；完成验证后再把核验状态改为“已核验”。</span></p>
-            <TagInput label="代表入口 / 模块" values={form.entryModules} onChange={(value) => update('entryModules', value)} />
-            <TagInput label="可监测内容" values={form.monitorableContent} onChange={(value) => update('monitorableContent', value)} />
-            <TagInput label="可提取线索" values={form.extractableClues} onChange={(value) => update('extractableClues', value)} />
-            <TagInput label="主体追踪字段" values={form.trackingFields} onChange={(value) => update('trackingFields', value)} />
-            <TagInput label="建议接入方式" values={form.suggestedAccess} onChange={(value) => update('suggestedAccess', value)} />
+            <TagInput label="代表入口 / 模块" values={form.entryModules} onChange={(value) => update('entryModules', value)} {...tagDraftProps('entryModules')} />
+            <TagInput label="可监测内容" values={form.monitorableContent} onChange={(value) => update('monitorableContent', value)} {...tagDraftProps('monitorableContent')} />
+            <TagInput label="可提取线索" values={form.extractableClues} onChange={(value) => update('extractableClues', value)} {...tagDraftProps('extractableClues')} />
+            <TagInput label="主体追踪字段" values={form.trackingFields} onChange={(value) => update('trackingFields', value)} {...tagDraftProps('trackingFields')} />
+            <TagInput label="建议接入方式" values={form.suggestedAccess} onChange={(value) => update('suggestedAccess', value)} {...tagDraftProps('suggestedAccess')} />
           </section>
         ) : null}
 
@@ -902,7 +1177,7 @@ function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify
 
         {tab === 'evidence' ? (
           <section className="mih-source-editor-section">
-            <TagInput label="接入线索 / Connector" values={form.connectorHints} onChange={(value) => update('connectorHints', value)} suggestions={facets.connectorHints} hint="仅保存 provider 或方式线索，不保存 URL 凭证、密码或 token。" />
+            <TagInput label="接入线索 / Connector" values={form.connectorHints} onChange={(value) => update('connectorHints', value)} suggestions={facets.connectorHints} hint="仅保存 provider 或方式线索，不保存 URL 凭证、密码或 token。" {...tagDraftProps('connectorHints')} />
             <div className="mih-source-evidence-list">
               <h3>关联证据</h3>
               {form.evidenceRefs.length ? form.evidenceRefs.map((reference) => (

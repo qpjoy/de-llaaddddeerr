@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import {
   ArrowClockwise,
   CaretDown,
+  Check,
   CheckCircle,
   CircleNotch,
   Copy,
@@ -253,7 +254,7 @@ export function Field({ label, hint, children, className = '' }) {
   )
 }
 
-export function DropdownField({ label, value, onChange, options, disabled = false, className = '' }) {
+export function DropdownField({ label, value, onChange, options, disabled = false, className = '', placeholder = '请选择' }) {
   const labelId = useId()
   const triggerId = useId()
   const listboxId = useId()
@@ -262,6 +263,7 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
   const optionRefs = useRef([])
   const typeaheadRef = useRef({ value: '', timer: null })
   const [open, setOpen] = useState(false)
+  const [openUpward, setOpenUpward] = useState(false)
   const selectedIndex = options.findIndex((option) => option.value === value)
   const firstEnabledIndex = useMemo(
     () => options.findIndex((option) => !option.disabled),
@@ -365,6 +367,19 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
     return () => document.removeEventListener('pointerdown', closeOnOutsidePointer)
   }, [open])
 
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return
+    const triggerRect = triggerRef.current.getBoundingClientRect()
+    const boundaryRect = rootRef.current?.closest('.mih-modal__body')?.getBoundingClientRect()
+      ?? rootRef.current?.closest('.mih-modal')?.getBoundingClientRect()
+    const boundaryTop = Math.max(0, boundaryRect?.top ?? 0)
+    const boundaryBottom = Math.min(window.innerHeight, boundaryRect?.bottom ?? window.innerHeight)
+    const menuHeight = Math.min(280, options.length * 33 + 12)
+    const spaceBelow = boundaryBottom - triggerRect.bottom - 8
+    const spaceAbove = triggerRect.top - boundaryTop - 8
+    setOpenUpward(spaceBelow < menuHeight && spaceAbove > spaceBelow)
+  }, [open, options.length])
+
   useEffect(() => {
     if (open) optionRefs.current[highlightedIndex]?.scrollIntoView({ block: 'nearest' })
   }, [highlightedIndex, open])
@@ -400,10 +415,10 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
           onClick={() => (open ? closeMenu() : openMenu())}
           onKeyDown={onTriggerKeyDown}
         >
-          <span className="qp-dropdown__value">{selected?.label ?? (value ? `未知筛选：${value}` : '请选择')}</span>
+          <span className={`qp-dropdown__value${selected ? '' : ' is-placeholder'}`}>{selected?.label ?? (value ? `未知筛选：${value}` : placeholder)}</span>
           <CaretDown className="qp-dropdown__chevron" size={14} aria-hidden="true" />
         </button>
-        <div className="qp-dropdown__menu mih-dropdown__menu" id={listboxId} role="listbox" aria-labelledby={labelId}>
+        <div className={`qp-dropdown__menu mih-dropdown__menu${openUpward ? ' is-upward' : ''}`} id={listboxId} role="listbox" aria-labelledby={labelId}>
           {options.map((option, index) => option.group ? (
             <div className="mih-dropdown__group" key={option.value} role="presentation">{option.label}</div>
           ) : (
@@ -421,7 +436,8 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
               onMouseEnter={() => { if (!option.disabled) setHighlightedIndex(index) }}
               onClick={() => selectOption(index)}
             >
-              {option.label}
+              <Check className="mih-dropdown__check" size={13} weight="bold" aria-hidden="true" />
+              <span>{option.label}</span>
             </button>
           ))}
         </div>
@@ -430,7 +446,7 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
   )
 }
 
-export function Modal({ title, description, children, footer, onClose, size = 'medium' }) {
+export function Modal({ title, description, children, footer, onClose, size = 'medium', closeOnBackdrop = true }) {
   const titleId = useId()
   const dialogRef = useRef(null)
   const onCloseRef = useRef(onClose)
@@ -450,6 +466,7 @@ export function Modal({ title, description, children, footer, onClose, size = 'm
     ].join(',')
     const focusableElements = () => [...(dialog?.querySelectorAll(focusableSelector) || [])]
     const onKeyDown = (event) => {
+      if (event.defaultPrevented) return
       if (event.key === 'Escape') {
         event.preventDefault()
         onCloseRef.current()
@@ -486,7 +503,9 @@ export function Modal({ title, description, children, footer, onClose, size = 'm
   }, [])
 
   return (
-    <div className="mih-modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className="mih-modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (closeOnBackdrop && event.target === event.currentTarget) onClose()
+    }}>
       <section ref={dialogRef} className={`mih-modal mih-modal--${size}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <header className="mih-modal__header">
           <div>

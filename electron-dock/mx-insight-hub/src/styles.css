@@ -414,6 +414,45 @@ select {
 .mih-dropdown__menu {
   max-height: min(280px, 46vh);
   overflow-y: auto;
+  scrollbar-color: color-mix(in srgb, var(--qp-primary) 34%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.mih-dropdown__menu.is-upward {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.mih-dropdown {
+  z-index: 1;
+}
+
+.mih-dropdown.is-open {
+  z-index: 60;
+}
+
+.mih-dropdown .qp-dropdown__trigger:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--qp-primary) 16%, transparent);
+  outline-offset: 2px;
+}
+
+.mih-dropdown .qp-dropdown__value.is-placeholder {
+  color: var(--qp-text-4);
+}
+
+.mih-dropdown .qp-dropdown__option::before {
+  content: none;
+}
+
+.mih-dropdown__check {
+  flex: 0 0 auto;
+  color: var(--qp-primary);
+  opacity: 0;
+}
+
+.mih-dropdown .qp-dropdown__option.is-selected .mih-dropdown__check,
+.mih-dropdown .qp-dropdown__option[aria-selected="true"] .mih-dropdown__check {
+  opacity: 1;
 }
 
 .mih-dropdown__group {
@@ -4211,7 +4250,7 @@ select {
   color: #bdd1ff;
 }
 
-.mih-source-toolbar-select {
+.mih-source-toolbar-dropdown {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -4224,16 +4263,45 @@ select {
   font-size: var(--qp-font-caption-1);
 }
 
-.mih-source-toolbar-select select,
-.mih-source-bulk-bar select {
+.mih-source-toolbar-dropdown:has(.qp-dropdown.is-open) {
+  border-color: color-mix(in srgb, var(--qp-primary) 54%, var(--qp-line));
+  background: color-mix(in srgb, var(--qp-primary) 6%, transparent);
+}
+
+.mih-source-toolbar-dropdown__field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.mih-source-toolbar-dropdown__field > .qp-field__label {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.mih-source-toolbar-dropdown__field .qp-dropdown {
+  min-width: 78px;
+}
+
+.mih-source-toolbar-dropdown__field .qp-dropdown__trigger {
   min-height: 26px;
   border: 0;
-  outline: 0;
-  background: var(--qp-bg-3);
+  padding: 0 3px 0 2px;
+  background: transparent;
   color: var(--qp-text-2);
-  font: inherit;
   font-size: var(--qp-font-caption-1);
-  cursor: pointer;
+}
+
+.mih-source-toolbar-dropdown__field .qp-dropdown__trigger:hover,
+.mih-source-toolbar-dropdown__field .qp-dropdown.is-open .qp-dropdown__trigger {
+  background: transparent;
+}
+
+.mih-source-toolbar-dropdown__field .qp-dropdown__menu {
+  width: max-content;
+  min-width: max(100%, 150px);
 }
 
 .mih-source-filter-panel {
@@ -4267,12 +4335,30 @@ select {
   font-weight: 600;
 }
 
-.mih-source-bulk-bar label {
-  display: inline-flex;
+.mih-source-bulk-dropdown {
+  display: grid;
+  grid-template-columns: auto minmax(108px, 1fr);
   align-items: center;
   gap: 6px;
+  min-width: 190px;
+}
+
+.mih-source-bulk-dropdown > .qp-field__label {
   color: var(--qp-text-3);
   font-size: var(--qp-font-caption-1);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.mih-source-bulk-dropdown .qp-dropdown__trigger {
+  min-height: 30px;
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-source-bulk-dropdown .qp-dropdown__menu {
+  right: 0;
+  left: auto;
+  min-width: 150px;
 }
 
 .mih-source-grid {
@@ -4629,6 +4715,162 @@ select {
   color: var(--qp-text-2);
 }
 
+.mih-createable-combobox,
+.mih-tag-combobox {
+  position: relative;
+}
+
+.mih-combobox-anchor {
+  position: relative;
+  min-width: 0;
+}
+
+.mih-createable-combobox__control {
+  display: flex;
+  align-items: center;
+  min-height: var(--qp-size-control-md);
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-sm);
+  background: var(--qp-bg-input);
+  transition: border-color var(--qp-transition-fast), background var(--qp-transition-fast), box-shadow var(--qp-transition-fast);
+}
+
+.mih-createable-combobox__control:hover,
+.mih-createable-combobox__control.is-open,
+.mih-createable-combobox__control:focus-within,
+.mih-tag-editor.is-open {
+  border-color: color-mix(in srgb, var(--qp-primary) 65%, var(--qp-line));
+  background: var(--qp-bg-hover);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--qp-primary) 10%, transparent);
+}
+
+.mih-createable-combobox__control input {
+  min-width: 0;
+  min-height: calc(var(--qp-size-control-md) - 2px);
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--qp-text-1);
+  font: inherit;
+  font-size: var(--qp-font-body-2);
+}
+
+.mih-createable-combobox__control input::placeholder {
+  color: var(--qp-text-4);
+}
+
+.mih-createable-combobox__control > button,
+.mih-tag-editor__toggle {
+  display: grid;
+  width: 34px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: var(--qp-radius-xs);
+  padding: 0;
+  background: transparent;
+  color: var(--qp-text-3);
+  cursor: pointer;
+}
+
+.mih-createable-combobox__control > button:hover,
+.mih-createable-combobox__control > button:focus-visible,
+.mih-tag-editor__toggle:hover,
+.mih-tag-editor__toggle:focus-visible {
+  background: var(--qp-light-4);
+  color: var(--qp-text-1);
+}
+
+.mih-createable-combobox__control > button:focus-visible,
+.mih-tag-editor__toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--qp-primary) 32%, transparent);
+  outline-offset: -2px;
+}
+
+.mih-createable-combobox__control.is-open > button svg,
+.mih-tag-editor.is-open > .mih-tag-editor__toggle svg {
+  transform: rotate(180deg);
+}
+
+.mih-createable-combobox__control > button svg,
+.mih-tag-editor__toggle svg {
+  transition: transform var(--qp-transition-fast);
+}
+
+.mih-combobox-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  z-index: 80;
+  display: grid;
+  gap: 3px;
+  max-height: min(280px, 42vh);
+  overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 38%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  padding: 6px;
+  background: var(--qp-bg-4);
+  box-shadow: var(--qp-shadow-drop-2);
+  scrollbar-color: color-mix(in srgb, var(--qp-primary) 34%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.mih-combobox-menu.is-upward {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.mih-combobox-option {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 32px;
+  border: 0;
+  border-radius: var(--qp-radius-xs);
+  padding: 0 9px;
+  background: transparent;
+  color: var(--qp-text-2);
+  font: inherit;
+  font-size: var(--qp-font-body-2);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mih-combobox-option > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mih-combobox-option:hover,
+.mih-combobox-option.is-highlighted {
+  background: var(--qp-light-3);
+  color: var(--qp-text-1);
+}
+
+.mih-combobox-option.is-selected,
+.mih-combobox-option[aria-selected="true"] {
+  background: color-mix(in srgb, var(--qp-primary) 14%, var(--qp-bg-4));
+  color: var(--qp-primary);
+}
+
+.mih-combobox-option__check {
+  color: var(--qp-primary);
+  opacity: 0;
+}
+
+.mih-combobox-option.is-selected .mih-combobox-option__check,
+.mih-combobox-option[aria-selected="true"] .mih-combobox-option__check {
+  opacity: 1;
+}
+
 .mih-tag-editor {
   display: flex;
   align-items: center;
@@ -4691,6 +4933,10 @@ select {
   color: var(--qp-text-1);
   font: inherit;
   font-size: var(--qp-font-body-2);
+}
+
+.mih-tag-editor > .mih-tag-editor__toggle {
+  margin-left: auto;
 }
 
 .mih-tag-editor > input::placeholder {
@@ -5144,7 +5390,7 @@ select {
     display: none;
   }
 
-  .mih-source-bulk-bar label {
+  .mih-source-bulk-dropdown {
     justify-content: space-between;
   }
 
@@ -5210,21 +5456,19 @@ select {
     grid-template-columns: 1fr;
   }
 
-  .mih-source-bulk-bar label {
+  .mih-source-bulk-dropdown {
     width: 100%;
-  }
-
-  .mih-source-bulk-bar select {
-    margin-left: auto;
+    grid-template-columns: minmax(92px, auto) minmax(0, 1fr);
   }
 
   .mih-source-table-toolbar > .qp-button,
-  .mih-source-toolbar-select {
+  .mih-source-toolbar-dropdown {
     flex: 1 1 calc(50% - 4px);
     justify-content: center;
   }
 
-  .mih-source-toolbar-select select {
+  .mih-source-toolbar-dropdown__field,
+  .mih-source-toolbar-dropdown__field .qp-dropdown {
     min-width: 0;
   }
 
