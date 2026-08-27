@@ -62,21 +62,60 @@ const ADMIN_TELEGRAM_CHAT_KIND_SQL = `(CASE
        IN ('broadcast', 'channel', 'public_channel') THEN 'channel'
   WHEN lower(btrim(coalesce(chat.stable_fields #>> '{attributes,chatType}', chat.content_type, '')))
        IN ('group', 'megagroup', 'public_group', 'supergroup') THEN 'group'
-  ELSE NULL
+  ELSE 'unknown'
 END)`
 
-const ADMIN_PUBLIC_TELEGRAM_CHAT_SQL = `chat.dataset_id = 'telegram.monitor.chats.v1'
-  AND chat.platform = 'telegram'
-  AND chat.object_type = 'chat'
-  AND chat.deleted_at IS NULL
-  AND ${ADMIN_TELEGRAM_CHAT_KIND_SQL} IS NOT NULL
-  AND (
-    nullif(btrim(chat.stable_fields #>> '{attributes,username}'), '') IS NOT NULL
-    OR (
-      chat.url ~* '^https://(www[.])?t[.]me/[A-Za-z0-9_]+/?([?][^#]*)?(#.*)?$'
-      AND chat.url !~* '^https://(www[.])?t[.]me/joinchat/?([?#].*)?$'
-    )
-  )`
+const ADMIN_TELEGRAM_DATASETS = Object.freeze({
+  monitor: Object.freeze({
+    chats: 'telegram.monitor.chats.v1',
+    messages: 'telegram.monitor.messages.v1',
+  }),
+  sqlite: Object.freeze({
+    chats: 'telegram.sqlite.chats.v1',
+    messages: 'telegram.sqlite.messages.v1',
+  }),
+})
+
+function adminTelegramDatasets(sourceScope = 'all', role) {
+  if (sourceScope === 'monitor' || sourceScope === 'sqlite') {
+    return [ADMIN_TELEGRAM_DATASETS[sourceScope][role]]
+  }
+  return [ADMIN_TELEGRAM_DATASETS.monitor[role], ADMIN_TELEGRAM_DATASETS.sqlite[role]]
+}
+
+function adminTelegramChatSelector(chatId, sourceScope = 'all') {
+  const qualified = /^(monitor|sqlite):([0-9a-f-]{36})$/i.exec(chatId)
+  return {
+    value: qualified?.[2] ?? chatId,
+    datasets: adminTelegramDatasets(qualified?.[1]?.toLowerCase() ?? sourceScope, 'chats'),
+  }
+}
+
+const ADMIN_PUBLIC_OPINION_BROWSE_SELECT = `SELECT record.id, record.title, record.body,
+       record.url, record.content_type, record.author_name, record.event_time,
+       record.collected_at, record.heat_score,
+       publication.record_id AS publication_record_id,
+       (publication.record_id IS NOT NULL) AS has_publication_state,
+       publication.source_stage,
+       publication.status AS quality_status,
+       publication.quality_score,
+       publication.qualification_threshold,
+       publication.quality_flags,
+       publication.rejection_codes,
+       publication.display_admin1_code AS admin1_code,
+       publication.geography_verified,
+       publication.geo_scope,
+       publication.country_code,
+       publication.country_name,
+       publication.location_label,
+       publication.location_type,
+       record.stable_fields #>> '{attributes,sourceType}' AS source_type,
+       record.stable_fields #>> '{attributes,sourcePlatform}' AS source_platform,
+       coalesce(record.event_time, record.collected_at, to_timestamp(0)) AS sort_time
+  FROM core.canonical_records record
+  LEFT JOIN core.public_opinion_current_state publication
+    ON publication.record_id = record.id
+   AND publication.canonical_revision = record.current_revision`
 
 export function publicOpinionSourceStage(datasetId, rawItem) {
   if (!publicOpinionDatasets.has(datasetId)) return null
@@ -2071,84 +2110,98 @@ export class PostgresStore {
   }
 
   /**
-   * Admin-only Telegram product facade. The public-chat predicate is part of
-   * every SQL statement and therefore runs before keyset pagination/limits.
-   * This is intentionally separate from the consumer Telegram corpus, whose
-   * established contract includes all governed monitor rows.
+   * Admin-only Telegram product facade. It intentionally exposes governed
+   * canonical business rows from both ingestors without applying a public-chat
+   * gate; the response projection remains an allowlist.
    */
-  async listAdminTelegramChats({ kind, query = null, pageSize, cursor = null }) {
+  async listAdminTelegramChats({
+    kind = 'all',
+    sourceScope = 'all',
+    query = null,
+    pageSize,
+    cursor = null,
+  }) {
+    const datasets = adminTelegramDatasets(sourceScope, 'chats')
     const { rows } = await this.pool.query(
       `SELECT chat.id, chat.dataset_id, chat.external_id, chat.object_type,
               chat.content_type, chat.url, chat.title, chat.body,
               chat.author_external_id, chat.author_name, chat.event_time,
               chat.collected_at, chat.stable_fields, chat.current_revision,
-              coalesce(chat.event_time, chat.collected_at) AS sort_time
+              coalesce(chat.event_time, chat.collected_at, chat.first_seen_at) AS sort_time
          FROM core.canonical_records chat
-        WHERE ${ADMIN_PUBLIC_TELEGRAM_CHAT_SQL}
-          AND ${ADMIN_TELEGRAM_CHAT_KIND_SQL} = $1
-          AND coalesce(chat.event_time, chat.collected_at) IS NOT NULL
+        WHERE chat.dataset_id = ANY($1::text[])
+          AND chat.platform = 'telegram'
+          AND chat.object_type = 'chat'
+          AND chat.deleted_at IS NULL
+          AND ($2::text = 'all' OR ${ADMIN_TELEGRAM_CHAT_KIND_SQL} = $2)
           AND (
-            $2::text IS NULL
-            OR chat.title ILIKE '%' || $2 || '%'
-            OR chat.stable_fields #>> '{attributes,username}' ILIKE '%' || $2 || '%'
+            $3::text IS NULL
+            OR chat.title ILIKE '%' || $3 || '%'
+            OR chat.stable_fields #>> '{attributes,username}' ILIKE '%' || $3 || '%'
           )
           AND (
-            $3::timestamptz IS NULL
-            OR (coalesce(chat.event_time, chat.collected_at), chat.id) < ($3::timestamptz, $4::uuid)
+            $4::timestamptz IS NULL
+            OR (coalesce(chat.event_time, chat.collected_at, chat.first_seen_at), chat.id) < ($4::timestamptz, $5::uuid)
           )
-        ORDER BY coalesce(chat.event_time, chat.collected_at) DESC, chat.id DESC
-        LIMIT $5`,
-      [kind, query, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
+        ORDER BY coalesce(chat.event_time, chat.collected_at, chat.first_seen_at) DESC, chat.id DESC
+        LIMIT $6`,
+      [datasets, kind, query, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
     )
     return rows
   }
 
-  async getAdminPublicTelegramChat(chatId) {
+  async getAdminTelegramChat(chatId, sourceScope = 'all') {
+    const selector = adminTelegramChatSelector(chatId, sourceScope)
     const { rows } = await this.pool.query(
       `SELECT chat.id, chat.dataset_id, chat.external_id, chat.object_type,
               chat.content_type, chat.url, chat.title, chat.body,
               chat.author_external_id, chat.author_name, chat.event_time,
               chat.collected_at, chat.stable_fields, chat.current_revision,
-              coalesce(chat.event_time, chat.collected_at) AS sort_time
+              coalesce(chat.event_time, chat.collected_at, chat.first_seen_at) AS sort_time
          FROM core.canonical_records chat
-        WHERE ${ADMIN_PUBLIC_TELEGRAM_CHAT_SQL}
+        WHERE chat.dataset_id = ANY($2::text[])
+          AND chat.platform = 'telegram'
+          AND chat.object_type = 'chat'
+          AND chat.deleted_at IS NULL
           AND (
             chat.id::text = $1
             OR chat.external_id = $1
             OR ltrim(chat.stable_fields #>> '{attributes,username}', '@') = ltrim($1, '@')
           )
-        ORDER BY chat.id DESC
+        ORDER BY (chat.dataset_id = 'telegram.monitor.chats.v1') DESC, chat.id DESC
         LIMIT 1`,
-      [chatId],
+      [selector.value, selector.datasets],
     )
     return rows[0] ?? null
   }
 
-  async listAdminTelegramMessages({ chatExternalId, pageSize, cursor = null }) {
+  async listAdminTelegramMessages({
+    chatExternalId,
+    sourceScope = 'all',
+    pageSize,
+    cursor = null,
+  }) {
+    const datasets = adminTelegramDatasets(sourceScope, 'messages')
     const { rows } = await this.pool.query(
       `SELECT message.id, message.dataset_id, message.external_id,
               message.object_type, message.content_type, message.url,
               message.title, message.body, message.author_external_id,
               message.author_name, message.event_time, message.collected_at,
               message.stable_fields, message.current_revision,
-              message.event_time AS sort_time
+              coalesce(message.event_time, message.collected_at, message.first_seen_at) AS sort_time
          FROM core.canonical_records message
-         JOIN core.canonical_records chat
-           ON chat.external_id = $1
-          AND ${ADMIN_PUBLIC_TELEGRAM_CHAT_SQL}
-        WHERE message.dataset_id = 'telegram.monitor.messages.v1'
+        WHERE message.dataset_id = ANY($1::text[])
           AND message.platform = 'telegram'
           AND message.object_type = 'message'
           AND message.deleted_at IS NULL
-          AND message.event_time IS NOT NULL
-          AND message.stable_fields #>> '{relations,chatId}' = $1
+          AND message.stable_fields #>> '{relations,chatId}' = $2
           AND (
-            $2::timestamptz IS NULL
-            OR (message.event_time, message.id) < ($2::timestamptz, $3::uuid)
+            $3::timestamptz IS NULL
+            OR (coalesce(message.event_time, message.collected_at, message.first_seen_at), message.id) < ($3::timestamptz, $4::uuid)
           )
-        ORDER BY message.event_time DESC, message.id DESC
-        LIMIT $4`,
-      [chatExternalId, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
+        ORDER BY coalesce(message.event_time, message.collected_at, message.first_seen_at) DESC, message.id DESC
+        LIMIT $5`,
+      [datasets, chatExternalId, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
     )
     return rows
   }
@@ -2156,60 +2209,56 @@ export class PostgresStore {
   async searchAdminTelegramMessages({
     query,
     chatExternalId = null,
+    sourceScope = 'all',
     pageSize,
     cursor = null,
   }) {
+    const datasets = adminTelegramDatasets(sourceScope, 'messages')
     const { rows } = await this.pool.query(
       `SELECT message.id, message.dataset_id, message.external_id,
               message.object_type, message.content_type, message.url,
               message.title, message.body, message.author_external_id,
               message.author_name, message.event_time, message.collected_at,
               message.stable_fields, message.current_revision,
-              message.event_time AS sort_time,
+              coalesce(message.event_time, message.collected_at, message.first_seen_at) AS sort_time,
               CASE
-                WHEN lower(coalesce(message.body, '')) = lower($1) THEN 1.0
+                WHEN lower(coalesce(message.body, '')) = lower($2) THEN 1.0
                 ELSE 0.5
               END::double precision AS score
          FROM core.canonical_records message
-         JOIN core.canonical_records chat
-           ON chat.external_id = message.stable_fields #>> '{relations,chatId}'
-          AND ${ADMIN_PUBLIC_TELEGRAM_CHAT_SQL}
-        WHERE message.dataset_id = 'telegram.monitor.messages.v1'
+        WHERE message.dataset_id = ANY($1::text[])
           AND message.platform = 'telegram'
           AND message.object_type = 'message'
           AND message.deleted_at IS NULL
-          AND message.event_time IS NOT NULL
-          AND ($2::text IS NULL OR message.stable_fields #>> '{relations,chatId}' = $2)
+          AND ($3::text IS NULL OR message.stable_fields #>> '{relations,chatId}' = $3)
           AND (
-            message.body ILIKE '%' || $1 || '%'
-            OR message.title ILIKE '%' || $1 || '%'
-            OR message.author_name ILIKE '%' || $1 || '%'
+            message.body ILIKE '%' || $2 || '%'
+            OR message.title ILIKE '%' || $2 || '%'
+            OR message.author_name ILIKE '%' || $2 || '%'
           )
           AND (
-            $3::timestamptz IS NULL
-            OR (message.event_time, message.id) < ($3::timestamptz, $4::uuid)
+            $4::timestamptz IS NULL
+            OR (coalesce(message.event_time, message.collected_at, message.first_seen_at), message.id) < ($4::timestamptz, $5::uuid)
           )
-        ORDER BY message.event_time DESC, message.id DESC
-        LIMIT $5`,
-      [query, chatExternalId, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
+        ORDER BY coalesce(message.event_time, message.collected_at, message.first_seen_at) DESC, message.id DESC
+        LIMIT $6`,
+      [datasets, query, chatExternalId, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
     )
     return rows
   }
 
-  async getAdminPublicTelegramMessage(id) {
+  async getAdminTelegramMessage(id, sourceScope = 'all') {
+    const datasets = adminTelegramDatasets(sourceScope, 'messages')
     const { rows } = await this.pool.query(
       `SELECT message.id
          FROM core.canonical_records message
-         JOIN core.canonical_records chat
-           ON chat.external_id = message.stable_fields #>> '{relations,chatId}'
-          AND ${ADMIN_PUBLIC_TELEGRAM_CHAT_SQL}
         WHERE message.id = $1::uuid
-          AND message.dataset_id = 'telegram.monitor.messages.v1'
+          AND message.dataset_id = ANY($2::text[])
           AND message.platform = 'telegram'
           AND message.object_type = 'message'
           AND message.deleted_at IS NULL
         LIMIT 1`,
-      [id],
+      [id, datasets],
     )
     return rows[0] ?? null
   }
@@ -2888,6 +2937,206 @@ export class PostgresStore {
       [from, to, candidateMode, minQualityScore],
     )
     return rows
+  }
+
+  async getAdminPublicOpinionFunnel({ from, to }) {
+    const { rows } = await this.pool.query(
+      `WITH current_records AS MATERIALIZED (
+         SELECT record.id, record.deleted_at, record.event_time, record.heat_score,
+                publication.record_id AS publication_record_id,
+                publication.source_stage,
+                publication.status AS publication_status,
+                publication.display_admin1_code,
+                publication.geo_scope
+           FROM core.canonical_records record
+           LEFT JOIN core.public_opinion_current_state publication
+             ON publication.record_id = record.id
+            AND publication.canonical_revision = record.current_revision
+          WHERE record.dataset_id = 'public-opinion.province.v1'
+            AND record.platform = 'public_opinion'
+            AND record.object_type = 'opinion_item'
+       ), stage_counts AS (
+         SELECT coalesce(source_stage, 'unknown') AS key, count(*)::integer AS value
+           FROM current_records
+          WHERE deleted_at IS NULL AND publication_record_id IS NOT NULL
+          GROUP BY coalesce(source_stage, 'unknown')
+       ), status_counts AS (
+         SELECT coalesce(publication_status, 'unknown') AS key, count(*)::integer AS value
+           FROM current_records
+          WHERE deleted_at IS NULL AND publication_record_id IS NOT NULL
+          GROUP BY coalesce(publication_status, 'unknown')
+       ), scope_counts AS (
+         SELECT coalesce(geo_scope, 'unknown') AS key, count(*)::integer AS value
+           FROM current_records
+          WHERE deleted_at IS NULL
+          GROUP BY coalesce(geo_scope, 'unknown')
+       )
+       SELECT count(*)::bigint AS canonical_total,
+              count(*) FILTER (WHERE deleted_at IS NULL)::bigint AS active_count,
+              count(*) FILTER (WHERE deleted_at IS NOT NULL)::bigint AS deleted_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND publication_record_id IS NOT NULL
+              )::bigint AS with_publication_state_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND publication_record_id IS NULL
+              )::bigint AS missing_publication_state_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND event_time IS NOT NULL
+              )::bigint AS with_event_time_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND event_time IS NULL
+              )::bigint AS missing_event_time_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND event_time >= $1::timestamptz
+                  AND event_time <= $2::timestamptz
+              )::bigint AS within_window_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND event_time IS NOT NULL
+                  AND (event_time < $1::timestamptz OR event_time > $2::timestamptz)
+              )::bigint AS outside_window_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND display_admin1_code IS NOT NULL
+              )::bigint AS with_province_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND display_admin1_code IS NULL
+              )::bigint AS without_province_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND heat_score IS NOT NULL
+              )::bigint AS with_heat_score_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND heat_score IS NULL
+              )::bigint AS missing_heat_score_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND publication_record_id IS NOT NULL
+                  AND source_stage IS DISTINCT FROM 'formal'
+              )::bigint AS not_formal_stage_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL AND publication_record_id IS NOT NULL
+                  AND publication_status IS DISTINCT FROM 'formal'
+              )::bigint AS not_formal_status_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL
+                  AND source_stage = 'formal' AND publication_status = 'formal'
+                  AND event_time >= $1::timestamptz AND event_time <= $2::timestamptz
+                  AND display_admin1_code IS NOT NULL
+              )::bigint AS coverage_visible_count,
+              count(*) FILTER (
+                WHERE deleted_at IS NULL
+                  AND source_stage = 'formal' AND publication_status = 'formal'
+                  AND event_time >= $1::timestamptz AND event_time <= $2::timestamptz
+                  AND display_admin1_code IS NOT NULL AND heat_score IS NOT NULL
+              )::bigint AS hot_visible_count,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM stage_counts), '{}'::jsonb) AS stage_counts,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM status_counts), '{}'::jsonb) AS status_counts,
+              coalesce((SELECT jsonb_object_agg(key, value) FROM scope_counts), '{}'::jsonb) AS scope_counts
+         FROM current_records`,
+      [from, to],
+    )
+    return rows[0] ?? {}
+  }
+
+  async listAdminPublicOpinionBrowseRecords({
+    from,
+    to,
+    pageSize,
+    cursor = null,
+    query = null,
+    reason = 'all',
+    stage = 'all',
+    status = 'all',
+    province = 'all',
+    scope = 'all',
+    time = 'all',
+    heat = 'all',
+  }) {
+    const values = [from, to]
+    const predicates = [
+      "record.dataset_id = 'public-opinion.province.v1'",
+      "record.platform = 'public_opinion'",
+      "record.object_type = 'opinion_item'",
+      'record.deleted_at IS NULL',
+    ]
+    const parameter = (value) => {
+      values.push(value)
+      return `$${values.length}`
+    }
+
+    if (query) {
+      const placeholder = parameter(`%${query}%`)
+      predicates.push(`(
+        record.title ILIKE ${placeholder}
+        OR record.body ILIKE ${placeholder}
+        OR record.author_name ILIKE ${placeholder}
+        OR publication.display_admin1_code ILIKE ${placeholder}
+        OR publication.location_label ILIKE ${placeholder}
+        OR publication.country_name ILIKE ${placeholder}
+        OR record.stable_fields #>> '{attributes,sourceType}' ILIKE ${placeholder}
+        OR record.stable_fields #>> '{attributes,sourcePlatform}' ILIKE ${placeholder}
+      )`)
+    }
+    if (stage === 'missing') predicates.push('publication.source_stage IS NULL')
+    else if (stage !== 'all') predicates.push(`publication.source_stage = ${parameter(stage)}`)
+    if (status === 'missing') predicates.push('publication.status IS NULL')
+    else if (status !== 'all') predicates.push(`publication.status = ${parameter(status)}`)
+    if (province === 'missing') predicates.push('publication.display_admin1_code IS NULL')
+    else if (province !== 'all') predicates.push(`publication.display_admin1_code = ${parameter(province)}`)
+    if (scope === 'missing') predicates.push('publication.geo_scope IS NULL')
+    else if (scope !== 'all') {
+      predicates.push(`publication.geo_scope = ${parameter(scope === 'nationwide' ? 'national' : scope)}`)
+    }
+    if (time === 'missing') predicates.push('record.event_time IS NULL')
+    else if (time === 'within') predicates.push('record.event_time >= $1::timestamptz AND record.event_time <= $2::timestamptz')
+    else if (time === 'outside') predicates.push('record.event_time IS NOT NULL AND (record.event_time < $1::timestamptz OR record.event_time > $2::timestamptz)')
+    if (heat === 'missing') predicates.push('record.heat_score IS NULL')
+    else if (heat === 'present') predicates.push('record.heat_score IS NOT NULL')
+
+    const coverage = `publication.record_id IS NOT NULL
+      AND publication.source_stage = 'formal'
+      AND publication.status = 'formal'
+      AND record.event_time >= $1::timestamptz
+      AND record.event_time <= $2::timestamptz
+      AND publication.display_admin1_code IS NOT NULL`
+    const reasons = {
+      coverage_visible: `(${coverage})`,
+      hot_visible: `(${coverage} AND record.heat_score IS NOT NULL)`,
+      missing_publication_state: 'publication.record_id IS NULL',
+      not_formal_stage: "publication.record_id IS NOT NULL AND publication.source_stage IS DISTINCT FROM 'formal'",
+      not_formal_status: "publication.record_id IS NOT NULL AND publication.status IS DISTINCT FROM 'formal'",
+      missing_event_time: 'record.event_time IS NULL',
+      outside_window: 'record.event_time IS NOT NULL AND (record.event_time < $1::timestamptz OR record.event_time > $2::timestamptz)',
+      missing_province: 'publication.display_admin1_code IS NULL',
+      missing_heat: 'record.heat_score IS NULL',
+    }
+    if (reason !== 'all') predicates.push(`(${reasons[reason]})`)
+
+    if (cursor) {
+      const sortTime = parameter(cursor.sortTime)
+      const id = parameter(cursor.id)
+      predicates.push(`(coalesce(record.event_time, record.collected_at, to_timestamp(0)), record.id) < (${sortTime}::timestamptz, ${id}::uuid)`)
+    }
+    const limit = parameter(pageSize + 1)
+    const { rows } = await this.pool.query(
+      `${ADMIN_PUBLIC_OPINION_BROWSE_SELECT}
+        WHERE ${predicates.join('\n          AND ')}
+        ORDER BY coalesce(record.event_time, record.collected_at, to_timestamp(0)) DESC,
+                 record.id DESC
+        LIMIT ${limit}`,
+      values,
+    )
+    return rows
+  }
+
+  async getAdminPublicOpinionBrowseRecord(id) {
+    const { rows } = await this.pool.query(
+      `${ADMIN_PUBLIC_OPINION_BROWSE_SELECT}
+        WHERE record.id = $1::uuid
+          AND record.dataset_id = 'public-opinion.province.v1'
+          AND record.platform = 'public_opinion'
+          AND record.object_type = 'opinion_item'
+          AND record.deleted_at IS NULL`,
+      [id],
+    )
+    return rows[0] ?? null
   }
 
   // Admin data-product views are curated/formal-only by design. These focused

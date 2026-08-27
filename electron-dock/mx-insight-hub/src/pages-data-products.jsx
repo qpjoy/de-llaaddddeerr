@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -34,6 +34,7 @@ import {
 const NUMBER_FORMATTER = new Intl.NumberFormat('zh-CN')
 
 function formatNumber(value, fallback = '—') {
+  if (value == null || value === '') return fallback
   const number = Number(value)
   return Number.isFinite(number) ? NUMBER_FORMATTER.format(number) : fallback
 }
@@ -47,9 +48,9 @@ function formatDateTime(value, fallback = '时间未知') {
   }).format(date)
 }
 
-function windowFor(range) {
+function windowFor(range, now = Date.now()) {
   const hours = range === '24h' ? 24 : range === '7d' ? 24 * 7 : 24 * 30
-  const to = new Date()
+  const to = new Date(now)
   const from = new Date(to.getTime() - hours * 60 * 60 * 1000)
   return { from: from.toISOString(), to: to.toISOString() }
 }
@@ -91,6 +92,42 @@ function telegramText(item) {
   return item?.text ?? item?.body ?? item?.summary ?? ''
 }
 
+function telegramMessageKey(item) {
+  const dataset = item?.sourceDataset || item?.sourceScope || 'telegram'
+  return `${dataset}:${item?.canonicalId || item?.id || `${item?.externalId || 'message'}:${item?.eventTime || item?.publishedAt || ''}`}`
+}
+
+function telegramChatSelector(item) {
+  return item?.chatKey || item?.canonicalId || item?.externalId || item?.username || null
+}
+
+function telegramSourceLabel(value) {
+  return value === 'monitor' ? 'Monitor' : value === 'sqlite' ? 'SQLite' : '合并'
+}
+
+function telegramKindLabel(value) {
+  return value === 'channel' ? '频道' : value === 'group' ? '群组' : value === 'unknown' ? '未知类型' : '全部类型'
+}
+
+function visibilityEvidenceText(value) {
+  if (!value) return '无可见性证据'
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return value.filter(Boolean).join(' · ') || '无可见性证据'
+  if (typeof value === 'object') {
+    return [
+      value.hasUsername ? '有用户名' : '无用户名',
+      `链接类型 ${value.urlKind || 'unknown'}`,
+      value.publicHandleUrl ? `handle ${value.publicHandleUrl}` : null,
+    ].filter(Boolean).join(' · ')
+  }
+  return String(value)
+}
+
+function telegramSelectedDatasets(sourceScope, selected) {
+  const datasets = sourceScope?.datasets || []
+  return selected === 'all' ? datasets : datasets.filter((dataset) => dataset.includes(`.${selected}.`))
+}
+
 function TelegramMessage({ item, anchor = false }) {
   const author = item?.author?.name || item?.author?.username || item?.author?.id || '未知发送者'
   const text = telegramText(item)
@@ -100,10 +137,11 @@ function TelegramMessage({ item, anchor = false }) {
         <span className="mih-tg-avatar" aria-hidden="true">{String(author).slice(0, 1).toUpperCase()}</span>
         <strong>{author}</strong>
         <time>{formatDateTime(item?.eventTime ?? item?.publishedAt)}</time>
+        <span className="qp-tag">{item?.sourceDataset || telegramSourceLabel(item?.sourceScope)}</span>
         {anchor ? <span className="qp-tag">检索锚点</span> : null}
       </header>
       <div className="mih-tg-bubble">
-        {text ? <p>{text}</p> : <p className="is-muted">[{item?.contentType || '媒体 / 服务消息'}，无公开文本]</p>}
+        {text ? <p>{text}</p> : <p className="is-muted">[{item?.contentType || '媒体 / 服务消息'}，无原始可显示文本]</p>}
         {item?.relations?.replyToMessageId ? <small>回复消息 {item.relations.replyToMessageId}</small> : null}
         {item?.metrics?.views != null ? <small>{formatNumber(item.metrics.views)} 次查看</small> : null}
       </div>
@@ -112,16 +150,19 @@ function TelegramMessage({ item, anchor = false }) {
 }
 
 function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
-  const isChannel = kind === 'channel'
-  const title = isChannel ? 'Telegram 公开频道' : 'Telegram 公开群组'
-  const KindIcon = isChannel ? Broadcast : Users
+  const [sourceScope, setSourceScope] = useState('all')
+  const [kindFilter, setKindFilter] = useState(kind || 'all')
+  const title = `Telegram ${telegramKindLabel(kindFilter)}`
+  const KindIcon = kindFilter === 'channel' ? Broadcast : kindFilter === 'group' ? Users : TelegramLogo
   const [directoryDraft, setDirectoryDraft] = useState('')
   const [directoryQuery, setDirectoryQuery] = useState('')
   const [directoryCursors, setDirectoryCursors] = useState([null])
   const [directoryPage, setDirectoryPage] = useState(0)
   const [selectedChatId, setSelectedChatId] = useState(null)
-  const [messageCursors, setMessageCursors] = useState([null])
-  const [messagePage, setMessagePage] = useState(0)
+  const [messageItems, setMessageItems] = useState([])
+  const [messagePageInfo, setMessagePageInfo] = useState(null)
+  const [messageLoadingMore, setMessageLoadingMore] = useState(false)
+  const [messageLoadMoreError, setMessageLoadMoreError] = useState(null)
   const [searchDraft, setSearchDraft] = useState('')
   const [searchData, setSearchData] = useState(null)
   const [searchError, setSearchError] = useState(null)
@@ -132,49 +173,171 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
   const [contextLoading, setContextLoading] = useState(false)
   const [beforeCount, setBeforeCount] = useState(10)
   const [afterCount, setAfterCount] = useState(10)
+  const transcriptRef = useRef(null)
+  const loadEarlierRef = useRef(null)
+  const messageLoadingMoreRef = useRef(false)
+  const messageGenerationRef = useRef(0)
+  const interactionGenerationRef = useRef(0)
+  const activeChatIdRef = useRef(selectedChatId)
+  const pendingScrollRestoreRef = useRef(null)
+  const initialScrollPendingRef = useRef(false)
+  activeChatIdRef.current = selectedChatId
 
   const loadDirectory = useCallback(() => adminApi.dataProductTelegramChats(token, {
-    kind,
+    sourceScope,
+    kind: kindFilter,
     query: directoryQuery || undefined,
     pageSize: 30,
     cursor: directoryCursors[directoryPage] || undefined,
-  }), [directoryCursors, directoryPage, directoryQuery, kind, token])
+  }), [directoryCursors, directoryPage, directoryQuery, kindFilter, sourceScope, token])
   const directory = useRemoteData(loadDirectory, onUnauthorized)
+  const directoryData = (directory.data?.sourceScope?.selected && directory.data.sourceScope.selected !== sourceScope)
+    || (directory.data?.kind && directory.data.kind !== kindFilter)
+    ? null
+    : directory.data
+  const directoryItems = useMemo(() => (directoryData?.items || []).filter(
+    (item) => kindFilter === 'all' || (item.kind || 'unknown') === kindFilter,
+  ), [directoryData, kindFilter])
 
   useEffect(() => {
-    const items = directory.data?.items || []
+    setDirectoryCursors([null])
+    setDirectoryPage(0)
+    setSelectedChatId(null)
+  }, [kindFilter, sourceScope])
+
+  useEffect(() => {
+    const items = directoryItems
     if (!items.length) {
       setSelectedChatId(null)
       return
     }
-    if (!selectedChatId || !items.some((item) => item.externalId === selectedChatId)) {
-      setSelectedChatId(items[0].externalId)
+    if (!selectedChatId || !items.some((item) => telegramChatSelector(item) === selectedChatId)) {
+      setSelectedChatId(telegramChatSelector(items[0]))
     }
-  }, [directory.data, selectedChatId])
+  }, [directoryItems, selectedChatId])
 
   const selectedChat = useMemo(
-    () => (directory.data?.items || []).find((item) => item.externalId === selectedChatId) || null,
-    [directory.data, selectedChatId],
+    () => directoryItems.find((item) => telegramChatSelector(item) === selectedChatId) || null,
+    [directoryItems, selectedChatId],
   )
 
   const loadMessages = useCallback(() => selectedChatId
-    ? adminApi.dataProductTelegramMessages(token, selectedChatId, {
+      ? adminApi.dataProductTelegramMessages(token, selectedChatId, {
+        sourceScope,
         pageSize: 30,
-        cursor: messageCursors[messagePage] || undefined,
       })
     : Promise.resolve({ items: [], pageInfo: { returnedCount: 0, hasMore: false, nextCursor: null } }),
-  [messageCursors, messagePage, selectedChatId, token])
+  [selectedChatId, sourceScope, token])
   const messages = useRemoteData(loadMessages, onUnauthorized)
 
   useEffect(() => {
-    setMessageCursors([null])
-    setMessagePage(0)
+    messageGenerationRef.current += 1
+    interactionGenerationRef.current += 1
+    messageLoadingMoreRef.current = false
+    pendingScrollRestoreRef.current = null
+    setMessageItems([])
+    setMessagePageInfo(null)
+    setMessageLoadingMore(false)
+    setMessageLoadMoreError(null)
+    setSearching(false)
     setSearchData(null)
     setSearchError(null)
+    setContextLoading(false)
     setContextAnchor(null)
     setContextData(null)
     setContextError(null)
-  }, [selectedChatId])
+  }, [selectedChatId, sourceScope])
+
+  useEffect(() => {
+    if (!messages.data) return
+    setMessageItems(messages.data.items || [])
+    setMessagePageInfo(messages.data.pageInfo || { returnedCount: 0, hasMore: false, nextCursor: null })
+    setMessageLoadMoreError(null)
+    initialScrollPendingRef.current = true
+  }, [messages.data])
+
+  useLayoutEffect(() => {
+    const viewport = transcriptRef.current
+    if (!viewport) return
+    if (initialScrollPendingRef.current) {
+      initialScrollPendingRef.current = false
+      viewport.scrollTop = viewport.scrollHeight
+      return
+    }
+    const previous = pendingScrollRestoreRef.current
+    if (!previous) return
+    pendingScrollRestoreRef.current = null
+    viewport.scrollTop = previous.scrollTop + (viewport.scrollHeight - previous.scrollHeight)
+  }, [messageItems])
+
+  const loadEarlierMessages = useCallback(async () => {
+    const nextCursor = messagePageInfo?.nextCursor
+    if (
+      !selectedChatId
+      || !nextCursor
+      || messageLoadingMoreRef.current
+      || searching
+      || searchData
+      || contextData
+    ) return
+
+    const generation = messageGenerationRef.current
+    const viewport = transcriptRef.current
+    pendingScrollRestoreRef.current = viewport
+      ? { scrollHeight: viewport.scrollHeight, scrollTop: viewport.scrollTop }
+      : null
+    messageLoadingMoreRef.current = true
+    setMessageLoadingMore(true)
+    setMessageLoadMoreError(null)
+    try {
+      const page = await adminApi.dataProductTelegramMessages(token, selectedChatId, {
+        sourceScope,
+        pageSize: 30,
+        cursor: nextCursor,
+      })
+      if (generation !== messageGenerationRef.current) return
+      const seen = new Set(messageItems.map(telegramMessageKey))
+      const additions = (page.items || []).filter((item) => {
+        const key = telegramMessageKey(item)
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      if (additions.length) setMessageItems((current) => [...current, ...additions])
+      setMessagePageInfo(page.pageInfo || { returnedCount: 0, hasMore: false, nextCursor: null })
+      if (!additions.length) pendingScrollRestoreRef.current = null
+    } catch (error) {
+      if (generation !== messageGenerationRef.current) return
+      pendingScrollRestoreRef.current = null
+      if (error?.status === 401) onUnauthorized?.(error)
+      setMessageLoadMoreError(error)
+    } finally {
+      if (generation === messageGenerationRef.current) {
+        messageLoadingMoreRef.current = false
+        setMessageLoadingMore(false)
+      }
+    }
+  }, [contextData, messageItems, messagePageInfo?.nextCursor, onUnauthorized, searchData, searching, selectedChatId, sourceScope, token])
+
+  useEffect(() => {
+    const target = loadEarlierRef.current
+    const viewport = transcriptRef.current
+    if (
+      !target
+      || !viewport
+      || !messagePageInfo?.hasMore
+      || messageLoadMoreError
+      || searching
+      || searchData
+      || contextData
+      || typeof IntersectionObserver === 'undefined'
+    ) return undefined
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadEarlierMessages()
+    }, { root: viewport, rootMargin: '160px 0px 0px', threshold: 0.01 })
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [contextData, loadEarlierMessages, messageLoadMoreError, messagePageInfo?.hasMore, searchData, searching])
 
   const submitDirectory = (event) => {
     event.preventDefault()
@@ -187,109 +350,172 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
     event.preventDefault()
     const query = searchDraft.trim()
     if (!query || !selectedChatId) return
+    const chatId = selectedChatId
+    const generation = interactionGenerationRef.current + 1
+    interactionGenerationRef.current = generation
+    messageGenerationRef.current += 1
+    messageLoadingMoreRef.current = false
+    pendingScrollRestoreRef.current = null
+    setMessageLoadingMore(false)
+    setMessageLoadMoreError(null)
     setSearching(true)
+    setSearchData(null)
     setSearchError(null)
+    setContextLoading(false)
+    setContextAnchor(null)
     setContextData(null)
+    setContextError(null)
     try {
-      setSearchData(await adminApi.searchDataProductTelegram(token, {
+      const data = await adminApi.searchDataProductTelegram(token, {
         query,
-        chatId: selectedChatId,
+        chatId,
+        sourceScope,
         pageSize: 20,
-      }))
+      })
+      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== chatId) return
+      setSearchData(data)
     } catch (error) {
+      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== chatId) return
       if (error?.status === 401) onUnauthorized?.(error)
       setSearchError(error)
       setSearchData(null)
     } finally {
-      setSearching(false)
+      if (generation === interactionGenerationRef.current && activeChatIdRef.current === chatId) {
+        setSearching(false)
+      }
     }
   }
 
   const openContext = async (item) => {
     const canonicalId = item?.canonicalId || item?.id
-    if (!canonicalId) return
+    if (!canonicalId || !selectedChatId) return
+    const chatId = selectedChatId
+    const generation = interactionGenerationRef.current + 1
+    interactionGenerationRef.current = generation
+    messageGenerationRef.current += 1
+    messageLoadingMoreRef.current = false
+    pendingScrollRestoreRef.current = null
+    setMessageLoadingMore(false)
     setContextAnchor(canonicalId)
     setContextLoading(true)
+    setContextData(null)
     setContextError(null)
     try {
-      setContextData(await adminApi.dataProductTelegramContext(token, canonicalId, {
+      const data = await adminApi.dataProductTelegramContext(token, canonicalId, {
+        sourceScope,
         before: beforeCount,
         after: afterCount,
-      }))
+      })
+      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== chatId) return
+      setContextData(data)
     } catch (error) {
+      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== chatId) return
       if (error?.status === 401) onUnauthorized?.(error)
       setContextError(error)
       setContextData(null)
     } finally {
-      setContextLoading(false)
+      if (generation === interactionGenerationRef.current && activeChatIdRef.current === chatId) {
+        setContextLoading(false)
+      }
     }
   }
 
   const transcript = contextData?.items
     ? contextData.items
-    : [...(messages.data?.items || [])].reverse()
-  const demoMode = Boolean(directory.data?.demoMode || messages.data?.demoMode)
+    : [...messageItems].reverse()
+  const demoMode = Boolean(directoryData?.demoMode || messages.data?.demoMode)
   const warningList = [
     ...(searchData?.warnings || []),
     ...(contextData?.warnings || []),
   ]
+  const selectedDatasets = telegramSelectedDatasets(directoryData?.sourceScope, sourceScope)
 
   return (
     <div className="mih-product-page mih-product-page--telegram">
       <PageHeading
         eyebrow="DATA PRODUCTS / TELEGRAM"
         title={title}
-        description="从 Hub 已归档的公开会话中检索频道与群组，按消息窗口还原上下文；不把当前存储窗口冒充 Telegram 完整历史。"
-        loading={directory.loading || messages.loading}
-        onRefresh={() => { directory.refresh(); messages.refresh() }}
+        description="内部完整观察 Hub 已归档的 Telegram 会话；可切换 Monitor、SQLite 或合并口径，先载入最近 30 条并向上滚动读取历史。"
+        loading={directory.loading || messages.loading || messageLoadingMore}
+        onRefresh={() => {
+          directory.refresh()
+          messageGenerationRef.current += 1
+          interactionGenerationRef.current += 1
+          messageLoadingMoreRef.current = false
+          pendingScrollRestoreRef.current = null
+          setMessageLoadingMore(false)
+          setMessageLoadMoreError(null)
+          setSearching(false)
+          setSearchData(null)
+          setSearchError(null)
+          setContextLoading(false)
+          setContextAnchor(null)
+          setContextData(null)
+          setContextError(null)
+          messages.refresh()
+        }}
       >
         <StatusBadge status={directory.error ? 'down' : demoMode ? 'degraded' : 'ready'}
           label={directory.error ? '目录接口异常' : demoMode ? '本地演示' : '只读展示'} />
       </PageHeading>
 
-      <PageModeNotice demoMode={demoMode}>仅展示服务端已验证为公开的 {isChannel ? '频道' : '群组'}，私有或无法判定的对象不会进入目录。</PageModeNotice>
+      <PageModeNotice demoMode={demoMode}>内部展示不按公开性隐藏数据；类型与可见性证据只作为诊断字段展示，合并口径保留不同数据集中的原始记录。</PageModeNotice>
+
+      <section className="mih-tg-scopebar qp-panel" aria-label="Telegram 数据观察口径">
+        <div><span>来源口径</span><div className="mih-command-segmented">
+          {[['all', '合并'], ['monitor', 'Monitor'], ['sqlite', 'SQLite']].map(([value, label]) => (
+            <button type="button" key={value} aria-pressed={sourceScope === value} onClick={() => setSourceScope(value)}>{label}</button>
+          ))}
+        </div></div>
+        <div><span>会话类型</span><div className="mih-command-segmented">
+          {[['all', '全部'], ['channel', '频道'], ['group', '群组'], ['unknown', '未知']].map(([value, label]) => (
+            <button type="button" key={value} aria-pressed={kindFilter === value} onClick={() => setKindFilter(value)}>{label}</button>
+          ))}
+        </div></div>
+        <small>切换口径会重新载入目录、聊天记录和检索范围。</small>
+      </section>
 
       <section className="mih-product-kpis" aria-label="Telegram 当前窗口概览">
-        <article><KindIcon size={20} weight="duotone" /><span>当前目录</span><strong>{formatNumber(directory.data?.pageInfo?.returnedCount, '0')}</strong><small>本页已验证公开对象</small></article>
+        <article><KindIcon size={20} weight="duotone" /><span>当前目录</span><strong>{formatNumber(directoryData?.pageInfo?.returnedCount, '0')}</strong><small>{telegramKindLabel(kindFilter)} · 不做可见性过滤</small></article>
         <article><Users size={20} weight="duotone" /><span>会话成员</span><strong>{formatNumber(selectedChat?.memberCount)}</strong><small>{selectedChat?.title || '尚未选择会话'}</small></article>
-        <article><ChatCircleText size={20} weight="duotone" /><span>消息窗口</span><strong>{formatNumber(transcript.length, '0')}</strong><small>按事件时间展示</small></article>
-        <article><Database size={20} weight="duotone" /><span>数据范围</span><strong>Monitor</strong><small>当前展示口径</small></article>
+        <article><ChatCircleText size={20} weight="duotone" /><span>消息窗口</span><strong>{formatNumber(transcript.length, '0')}</strong><small>业务时间优先，缺失时回退采集 / 入库时间</small></article>
+        <article><Database size={20} weight="duotone" /><span>数据范围</span><strong>{telegramSourceLabel(sourceScope)}</strong><small>{selectedDatasets.join(' + ') || '等待接口返回当前数据集'}</small></article>
       </section>
 
       <section className="mih-tg-workbench">
         <aside className="qp-panel mih-tg-directory" aria-label={`${title}目录`}>
           <header>
-            <div><TelegramLogo size={20} weight="fill" /><strong>公开会话</strong></div>
+            <div><TelegramLogo size={20} weight="fill" /><strong>内部会话目录</strong></div>
             <span>{directoryPage + 1}</span>
           </header>
           <form className="mih-product-search" onSubmit={submitDirectory}>
             <MagnifyingGlass size={17} aria-hidden="true" />
             <input value={directoryDraft} onChange={(event) => setDirectoryDraft(event.target.value)}
-              placeholder={`搜索${isChannel ? '频道' : '群组'}名称或用户名`} aria-label={`搜索${title}`} />
+              placeholder="搜索会话名称、用户名或标识" aria-label={`搜索${title}`} />
             <button type="submit">查找</button>
           </form>
           <div className="mih-tg-directory__list qp-scrollbar">
-            {directory.loading && !directory.data ? <LoadingState label="正在加载公开会话" /> : null}
+            {directory.loading && !directory.data ? <LoadingState label="正在加载内部会话目录" /> : null}
             {directory.error ? <ErrorState error={directory.error} onRetry={directory.refresh} /> : null}
-            {!directory.loading && !directory.error && !(directory.data?.items || []).length ? (
-              <EmptyState icon={TelegramLogo} title="暂无已验证公开会话"
-                description="这不等于 Telegram 上不存在对象；可能尚未接入、类型无法判定或没有公开入口证据。" />
+            {!directory.loading && !directory.error && !directoryItems.length ? (
+              <EmptyState icon={TelegramLogo} title="当前口径没有已归档会话"
+                description="可切换合并来源或全部类型；空结果表示对应数据集尚未收录，不代表被公开性规则隐藏。" />
             ) : null}
-            {(directory.data?.items || []).map((chat) => (
-              <button className={`mih-tg-chat${selectedChatId === chat.externalId ? ' is-active' : ''}`}
-                type="button" key={chat.canonicalId || chat.externalId}
-                onClick={() => setSelectedChatId(chat.externalId)}>
+            {directoryItems.map((chat) => (
+              <button className={`mih-tg-chat${selectedChatId === telegramChatSelector(chat) ? ' is-active' : ''}`}
+                type="button" key={chat.chatKey || `${chat.sourceDataset || 'telegram'}:${chat.canonicalId || chat.externalId}`}
+                onClick={() => setSelectedChatId(telegramChatSelector(chat))}>
                 <span className="mih-tg-avatar"><KindIcon size={16} weight="fill" aria-hidden="true" /></span>
-                <span><strong>{chat.title || chat.username || chat.externalId}</strong><small>{chat.username ? `@${chat.username.replace(/^@/, '')}` : '无公开用户名'}</small></span>
+                <span><strong>{chat.title || chat.username || chat.externalId}</strong><small>{chat.sourceDataset || chat.sourceScope || 'unknown'} · {telegramKindLabel(chat.kind || 'unknown')} · {chat.username ? `@${chat.username.replace(/^@/, '')}` : '无用户名'}</small></span>
                 <em>{chat.memberCount == null ? '—' : formatNumber(chat.memberCount)}</em>
               </button>
             ))}
           </div>
           <CursorControls page={directoryPage + 1} noun="页" loading={directory.loading}
-            hasMore={Boolean(directory.data?.pageInfo?.hasMore)}
+            hasMore={Boolean(directoryData?.pageInfo?.hasMore)}
             onPrevious={() => setDirectoryPage((value) => Math.max(0, value - 1))}
             onNext={() => {
-              const next = directory.data?.pageInfo?.nextCursor
+              const next = directoryData?.pageInfo?.nextCursor
               if (!next) return
               setDirectoryCursors((current) => [...current.slice(0, directoryPage + 1), next])
               setDirectoryPage((value) => value + 1)
@@ -300,11 +526,11 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
           <header className="mih-tg-conversation__header">
             <div className="mih-tg-avatar mih-tg-avatar--large"><KindIcon size={21} weight="fill" aria-hidden="true" /></div>
             <div>
-              <strong>{selectedChat?.title || '选择一个公开会话'}</strong>
-              <span>{selectedChat?.username ? `@${selectedChat.username.replace(/^@/, '')}` : selectedChat?.externalId || '从左侧目录开始'}</span>
+              <strong>{selectedChat?.title || '选择一个会话'}</strong>
+              <span>{selectedChat ? `${selectedChat.sourceDataset || selectedChat.sourceScope || 'unknown'} · ${telegramKindLabel(selectedChat.kind || 'unknown')} · ${visibilityEvidenceText(selectedChat.visibilityEvidence)}` : '从左侧目录开始'}</span>
             </div>
             {selectedChat?.url ? <a className="qp-button qp-button--ghost qp-icon-button" href={selectedChat.url}
-              target="_blank" rel="noreferrer" aria-label="打开公开 Telegram 入口"><ArrowSquareOut size={17} /></a> : null}
+              target="_blank" rel="noreferrer" aria-label="打开 Telegram 业务入口"><ArrowSquareOut size={17} /></a> : null}
           </header>
           <form className="mih-tg-search" onSubmit={submitSearch}>
             <MagnifyingGlass size={17} aria-hidden="true" />
@@ -313,7 +539,16 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
             <button className="qp-button qp-button--outline qp-button--sm" type="submit"
               disabled={!selectedChatId || !searchDraft.trim() || searching}>{searching ? '检索中' : '检索'}</button>
             {searchData || searchError ? <button className="qp-button qp-button--ghost qp-button--sm" type="button"
-              onClick={() => { setSearchData(null); setSearchError(null); setContextData(null); setContextAnchor(null) }}>返回消息</button> : null}
+              onClick={() => {
+                interactionGenerationRef.current += 1
+                setSearching(false)
+                setSearchData(null)
+                setSearchError(null)
+                setContextLoading(false)
+                setContextData(null)
+                setContextAnchor(null)
+                setContextError(null)
+              }}>返回消息</button> : null}
           </form>
           {searchError ? <div className="mih-tg-inline-state"><ErrorState error={searchError} /></div> : null}
           {searchData ? (
@@ -328,35 +563,57 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
               )) : <EmptyState icon={MagnifyingGlass} title="没有命中已归档消息" description="可调整关键词；空结果不是接口故障。" />}
             </section>
           ) : null}
-          <div className="mih-tg-transcript qp-scrollbar" aria-label="会话消息窗口">
-            {messages.loading && !messages.data && !contextData ? <LoadingState label="正在加载消息窗口" /> : null}
+          <div ref={transcriptRef} className="mih-tg-transcript qp-scrollbar" aria-label="会话消息窗口"
+            aria-busy={messages.loading || messageLoadingMore || contextLoading}>
+            {!contextData && !searchData && selectedChatId && !messages.loading && messageItems.length ? (
+              <div ref={loadEarlierRef} className={`mih-tg-history-loader${messageLoadMoreError ? ' is-error' : ''}`}
+                role={messageLoadMoreError ? 'alert' : 'status'} aria-live="polite">
+                {messageLoadMoreError ? (
+                  <>
+                    <Warning size={16} weight="fill" aria-hidden="true" />
+                    <span>更早消息加载失败：{messageLoadMoreError.message || '接口请求失败'}</span>
+                    <button className="qp-button qp-button--ghost qp-button--sm" type="button"
+                      onClick={loadEarlierMessages}>重试</button>
+                  </>
+                ) : messageLoadingMore ? (
+                  <><span className="mih-tg-history-loader__pulse" aria-hidden="true" />正在加载更早消息…</>
+                ) : messagePageInfo?.hasMore ? (
+                  <button className="qp-button qp-button--ghost qp-button--sm" type="button"
+                    onClick={loadEarlierMessages}>加载更多早期消息</button>
+                ) : (
+                  <span>已到当前 Hub 存储边界</span>
+                )}
+              </div>
+            ) : null}
+            {messages.loading && !messageItems.length && !contextData ? <LoadingState label="正在加载消息窗口" /> : null}
             {messages.error && !contextData ? <ErrorState error={messages.error} onRetry={messages.refresh} /> : null}
             {contextLoading ? <LoadingState label="正在还原锚点上下文" /> : null}
             {contextError ? <ErrorState error={contextError} /> : null}
             {!messages.loading && !messages.error && selectedChatId && !transcript.length ? (
-              <EmptyState icon={ChatCircleText} title="该公开会话暂无已归档消息"
+              <EmptyState icon={ChatCircleText} title="该会话暂无已归档消息"
                 description="会话存在不代表消息已经同步；请在右侧检查数据范围与管线状态。" />
             ) : null}
             {transcript.map((item, index) => (
-              <TelegramMessage item={item} key={item.canonicalId || item.id || `${item.externalId}-${index}`}
+              <TelegramMessage item={item} key={telegramMessageKey(item) || index}
                 anchor={Boolean(contextData && index === contextData.anchorIndex)} />
             ))}
           </div>
           {!contextData ? (
-            <CursorControls page={messagePage + 1} noun="窗口" loading={messages.loading}
-              hasMore={Boolean(messages.data?.pageInfo?.hasMore)}
-              onPrevious={() => setMessagePage((value) => Math.max(0, value - 1))}
-              onNext={() => {
-                const next = messages.data?.pageInfo?.nextCursor
-                if (!next) return
-                setMessageCursors((current) => [...current.slice(0, messagePage + 1), next])
-                setMessagePage((value) => value + 1)
-              }} />
+            <div className="mih-tg-context-footer mih-tg-history-footer" role="status" aria-live="polite">
+              <span>已加载 {formatNumber(messageItems.length, '0')} 条存储消息</span>
+              <span>{messagePageInfo?.hasMore ? '向上滚动可继续加载' : messageItems.length ? '已到存储边界' : '等待消息数据'}</span>
+            </div>
           ) : (
             <div className="mih-tg-context-footer">
               <span>当前为检索锚点上下文</span>
               <button className="qp-button qp-button--ghost qp-button--sm" type="button"
-                onClick={() => { setContextData(null); setContextAnchor(null) }}>关闭上下文</button>
+                onClick={() => {
+                  interactionGenerationRef.current += 1
+                  setContextLoading(false)
+                  setContextData(null)
+                  setContextAnchor(null)
+                  setContextError(null)
+                }}>关闭上下文</button>
             </div>
           )}
         </main>
@@ -364,9 +621,9 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
         <aside className="qp-panel mih-product-diagnostics" aria-label="Telegram 数据诊断">
           <header><Pulse size={18} weight="duotone" /><strong>数据诊断</strong></header>
           <section>
-            <span>公开性判定</span>
-            <strong>服务端过滤</strong>
-            <small>类型 + 公开用户名 / 非邀请链接</small>
+            <span>可见性证据</span>
+            <strong>展示但不参与过滤</strong>
+            <small>{visibilityEvidenceText(selectedChat?.visibilityEvidence)}</small>
           </section>
           <section>
             <span>上下文窗口</span>
@@ -376,14 +633,14 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
               <label>后<input type="number" min="0" max="50" value={afterCount}
                 onChange={(event) => setAfterCount(Math.max(0, Math.min(50, Number(event.target.value) || 0)))} /></label>
             </div>
-            <small>每侧最多 50 条，点击检索命中后生效</small>
+            <small>每侧最多 50 条；缺业务时间的消息仍展示，但不能构造时间锚点上下文</small>
           </section>
           <section>
             <span>存储完整性</span>
-            <strong>{contextData?.upstreamCompleteness?.status || 'unknown'}</strong>
+            <strong>{contextData?.upstreamCompleteness?.status || (messagePageInfo ? (messagePageInfo.hasMore ? 'more-available' : 'stored-boundary') : 'unknown')}</strong>
             <small>{contextData
               ? `前侧更多 ${contextData.storedWindow?.hasMoreStoredBefore ? '是' : '否'} · 后侧更多 ${contextData.storedWindow?.hasMoreStoredAfter ? '是' : '否'}`
-              : '尚未打开锚点上下文'}</small>
+              : `普通会话已加载 ${formatNumber(messageItems.length, '0')} 条${messagePageInfo?.hasMore ? '，仍有更早消息' : ''}`}</small>
           </section>
           <section>
             <span>检索后端</span>
@@ -393,12 +650,12 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
           {warningList.map((warning) => <div className="mih-product-warning" key={warning.code || warning.message}>
             <Warning size={16} weight="fill" /><span><strong>{warning.code || 'warning'}</strong><small>{warning.message}</small></span>
           </div>)}
-          {[directory.error, messages.error, searchError, contextError].filter(Boolean).map((error, index) => {
+          {[directory.error, messages.error, messageLoadMoreError, searchError, contextError].filter(Boolean).map((error, index) => {
             const readable = readableError(error)
             return <div className="mih-product-warning is-danger" key={`${readable.title}-${index}`}><Warning size={16} weight="fill" /><span><strong>{readable.title}</strong><small>{readable.detail}</small></span></div>
           })}
           <footer>
-            <Database size={15} /><span>{directory.data?.sourceScope?.datasets?.join(' · ') || 'telegram.monitor.*'}</span>
+            <Database size={15} /><span>{selectedDatasets.join(' · ') || `telegram.${sourceScope}.*`}</span>
           </footer>
         </aside>
       </section>
@@ -457,6 +714,168 @@ function OpinionListItem({ item, index, active, onSelect }) {
   )
 }
 
+const OPINION_REASON_LABELS = {
+  all: '全部 active current 数据',
+  coverage_visible: '正式覆盖口径',
+  hot_visible: '热点口径',
+  missing_publication_state: '缺 publication state',
+  not_formal_stage: '非 formal 阶段',
+  not_formal_status: '非 formal 状态',
+  missing_event_time: '缺事件时间',
+  outside_window: '时间窗外',
+  missing_province: '未归属省份 / 待总结',
+  missing_heat: '缺热度分',
+}
+
+function OpinionRecordExplorer({ token, timeWindow, initialView, onClose, onUnauthorized }) {
+  const [filters, setFilters] = useState(initialView.filters || { reason: initialView.reason || 'all' })
+  const [searchDraft, setSearchDraft] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [cursors, setCursors] = useState([null])
+  const [page, setPage] = useState(0)
+  const [selectedId, setSelectedId] = useState(null)
+  const recordsRequestKey = JSON.stringify({
+    ...timeWindow,
+    cursor: cursors[page] || null,
+    query: searchQuery || null,
+    reason: filters.reason || 'all',
+    stage: filters.stage || null,
+    status: filters.status || null,
+    province: filters.province || null,
+    scope: filters.scope || null,
+    time: filters.time || null,
+    heat: filters.heat || null,
+  })
+  const loadRecords = useCallback(async () => ({
+    ...await adminApi.dataProductPublicOpinionRecords(token, {
+      ...timeWindow,
+      pageSize: 40,
+      cursor: cursors[page] || undefined,
+      query: searchQuery || undefined,
+      reason: filters.reason || 'all',
+      stage: filters.stage || undefined,
+      status: filters.status || undefined,
+      province: filters.province || undefined,
+      scope: filters.scope || undefined,
+      time: filters.time || undefined,
+      heat: filters.heat || undefined,
+    }),
+    __requestKey: recordsRequestKey,
+  }), [cursors, filters, page, recordsRequestKey, searchQuery, timeWindow, token])
+  const records = useRemoteData(loadRecords, onUnauthorized)
+  const recordsData = records.data?.__requestKey === recordsRequestKey ? records.data : null
+
+  useEffect(() => {
+    setCursors([null])
+    setPage(0)
+    setSelectedId(null)
+  }, [filters, searchQuery, timeWindow.from, timeWindow.to])
+
+  useEffect(() => {
+    const items = recordsData?.items || []
+    if (!items.length) {
+      setSelectedId(null)
+      return
+    }
+    if (!selectedId || !items.some((item) => item.id === selectedId)) setSelectedId(items[0].id)
+  }, [recordsData, selectedId])
+
+  const detail = useRemoteData(useCallback(
+    () => selectedId ? adminApi.dataProductPublicOpinionRecord(token, selectedId, timeWindow) : Promise.resolve(null),
+    [selectedId, timeWindow, token],
+  ), onUnauthorized)
+  const detailMatchesWindow = detail.data?.window?.from === timeWindow.from
+    && detail.data?.window?.to === timeWindow.to
+  const selectedListItem = (recordsData?.items || []).find((item) => item.id === selectedId)
+  const selected = selectedListItem
+    ? (detail.data?.id === selectedId && detailMatchesWindow ? detail.data : selectedListItem)
+    : null
+  const setReason = (reason) => setFilters({ reason })
+  const activeReason = filters.reason || 'all'
+
+  return (
+    <Modal title={`未展示数据观察 · ${initialView.label || OPINION_REASON_LABELS[activeReason]}`}
+      description="直接查询当前 Hub 数据库；历史快照不参与本窗口计数。筛选结果保留诊断原因，供后续 Agent 归属与归纳。"
+      onClose={onClose} size="xlarge"
+      footer={<CursorControls page={page + 1} noun="页" loading={records.loading}
+        hasMore={Boolean(recordsData?.pageInfo?.hasMore)}
+        onPrevious={() => setPage((value) => Math.max(0, value - 1))}
+        onNext={() => {
+          const next = recordsData?.pageInfo?.nextCursor
+          if (!next) return
+          setCursors((current) => [...current.slice(0, page + 1), next])
+          setPage((value) => value + 1)
+        }} />}>
+      <div className="mih-opinion-record-explorer">
+        <div className="mih-opinion-record-filters" aria-label="未展示数据快速筛选">
+          {['all', 'missing_province', 'missing_publication_state', 'not_formal_stage', 'not_formal_status', 'missing_event_time', 'outside_window', 'missing_heat'].map((reason) => (
+            <button type="button" key={reason} aria-pressed={activeReason === reason} onClick={() => setReason(reason)}>
+              {OPINION_REASON_LABELS[reason]}
+            </button>
+          ))}
+        </div>
+        <form className="mih-product-search mih-opinion-record-search" onSubmit={(event) => {
+          event.preventDefault()
+          setSearchQuery(searchDraft.trim())
+        }}>
+          <MagnifyingGlass size={17} aria-hidden="true" />
+          <input autoFocus value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)}
+            placeholder="搜索标题、摘要、作者、来源或地区" aria-label="搜索未展示舆情数据" />
+          <button type="submit">搜索</button>
+          {searchQuery ? <button type="button" onClick={() => { setSearchDraft(''); setSearchQuery('') }}>清除</button> : null}
+        </form>
+        <div className="mih-opinion-record-browser">
+          <aside className="mih-opinion-record-list qp-scrollbar">
+            <header><strong>{OPINION_REASON_LABELS[activeReason] || activeReason}</strong><span>{formatNumber(recordsData?.pageInfo?.returnedCount, '0')} 条当前页</span></header>
+            {records.loading && !recordsData ? <LoadingState label="正在查询当前数据" /> : null}
+            {records.error ? <ErrorState error={records.error} onRetry={records.refresh} /> : null}
+            {!records.loading && !records.error && !(recordsData?.items || []).length ? (
+              <EmptyState icon={CheckCircle} title="该诊断条件当前没有记录" description="这是当前数据库返回的零结果，可切换筛选或时间范围。" />
+            ) : null}
+            {(recordsData?.items || []).map((item) => (
+              <button type="button" key={item.id} className={selectedId === item.id ? 'is-active' : ''}
+                onClick={() => setSelectedId(item.id)}>
+                <strong>{item.title || '无标题记录'}</strong>
+                <small>{item.source?.platform || item.source?.type || '来源未知'} · {item.provinceCode || item.geography?.locationLabel || '未归属'} · {formatDateTime(item.eventTime)}</small>
+                <span>{(item.diagnostics?.reasons || []).map((reason) => OPINION_REASON_LABELS[reason] || reason).join(' · ') || '符合当前展示条件'}</span>
+              </button>
+            ))}
+          </aside>
+          <section className="mih-opinion-record-detail qp-scrollbar">
+            {detail.loading && selectedId ? <LoadingState label="正在加载完整诊断" /> : null}
+            {detail.error ? <ErrorState error={detail.error} onRetry={detail.refresh} /> : null}
+            {!selectedId && !detail.loading ? <EmptyState icon={NewspaperClipping} title="选择记录查看诊断" description="左侧可查看所有状态、未归属以及缺字段的数据。" /> : null}
+            {selected ? <>
+              <header><div><span className="qp-tag">{selected.sourceStage || 'stage unknown'}</span><span className="qp-tag">{selected.publicationStatus || 'status unknown'}</span></div><time>{formatDateTime(selected.eventTime)}</time></header>
+              <h2>{selected.title || '无标题记录'}</h2>
+              <p>{selected.summary || '当前记录没有摘要；仍保留用于内部诊断与后续 Agent 处理。'}</p>
+              <dl>
+                <div><dt>来源</dt><dd>{selected.source?.platform || selected.source?.type || '未知'}</dd></div>
+                <div><dt>作者</dt><dd>{selected.authorName || '未知'}</dd></div>
+                <div><dt>内容类型</dt><dd>{selected.contentType || '未知'}</dd></div>
+                <div><dt>地域</dt><dd>{selected.provinceCode || selected.geography?.locationLabel || '未归属'}</dd></div>
+                <div><dt>地域范围</dt><dd>{selected.geography?.scope || 'unknown'}</dd></div>
+                <div><dt>热度</dt><dd>{formatNumber(selected.heatScore)}</dd></div>
+                <div><dt>质量分</dt><dd>{formatNumber(selected.qualityScore)}</dd></div>
+                <div><dt>采集时间</dt><dd>{formatDateTime(selected.collectedAt)}</dd></div>
+              </dl>
+              <div className="mih-opinion-record-reasons">
+                <strong>未展示 / 待处理原因</strong>
+                {(selected.diagnostics?.reasons || []).length ? selected.diagnostics.reasons.map((reason) => (
+                  <span className="qp-tag" key={reason}>{OPINION_REASON_LABELS[reason] || reason}</span>
+                )) : <span className="qp-tag qp-tag--success">当前无排除原因</span>}
+                {(selected.qualityFlags || []).map((flag) => <span className="qp-tag" key={`quality:${flag}`}>质量：{flag}</span>)}
+                {(selected.rejectionCodes || []).map((code) => <span className="qp-tag" key={`rejection:${code}`}>拒绝：{code}</span>)}
+              </div>
+              {selected.url ? <a className="qp-button qp-button--outline" href={selected.url} target="_blank" rel="noreferrer">打开业务来源<ArrowSquareOut size={16} /></a> : null}
+            </> : null}
+          </section>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
   const range = ['24h', '7d', '30d'].includes(query.get('range')) ? query.get('range') : '30d'
   const provinceCode = query.get('province') || 'CN-JS'
@@ -466,24 +885,32 @@ export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
   const [feedCursors, setFeedCursors] = useState([null])
   const [feedPage, setFeedPage] = useState(0)
   const [selectedId, setSelectedId] = useState(null)
-  const timeWindow = useMemo(() => windowFor(range), [range])
+  const [recordExplorer, setRecordExplorer] = useState(null)
+  const [windowRevision, setWindowRevision] = useState(0)
+  const timeWindow = useMemo(() => windowFor(range), [range, windowRevision])
 
   const regions = useRemoteData(useCallback(
     () => adminApi.dataProductPublicOpinionRegions(token), [token],
   ), onUnauthorized)
-  const coverage = useRemoteData(useCallback(
-    () => adminApi.dataProductPublicOpinionCoverage(token, { ...timeWindow, targetPerProvince: 10 }),
-    [timeWindow, token],
-  ), onUnauthorized)
-  const feed = useRemoteData(useCallback(
-    () => adminApi.dataProductPublicOpinionProvince(token, provinceCode, {
+  const coverageRequestKey = `${timeWindow.from}:${timeWindow.to}`
+  const coverage = useRemoteData(useCallback(async () => ({
+    ...await adminApi.dataProductPublicOpinionCoverage(token, { ...timeWindow, targetPerProvince: 10 }),
+    __requestKey: coverageRequestKey,
+  }), [coverageRequestKey, timeWindow, token]), onUnauthorized)
+  const feedRequestKey = JSON.stringify({
+    ...timeWindow, provinceCode, sort, cursor: feedCursors[feedPage] || null,
+  })
+  const feed = useRemoteData(useCallback(async () => ({
+    ...await adminApi.dataProductPublicOpinionProvince(token, provinceCode, {
       sort,
       ...timeWindow,
       pageSize: 30,
       cursor: feedCursors[feedPage] || undefined,
     }),
-    [feedCursors, feedPage, provinceCode, sort, timeWindow, token],
-  ), onUnauthorized)
+    __requestKey: feedRequestKey,
+  }), [feedCursors, feedPage, feedRequestKey, provinceCode, sort, timeWindow, token]), onUnauthorized)
+  const coverageData = coverage.data?.__requestKey === coverageRequestKey ? coverage.data : null
+  const feedData = feed.data?.__requestKey === feedRequestKey ? feed.data : null
   const pipeline = useRemoteData(useCallback(
     () => adminApi.provinceOpinionPipeline(token), [token],
   ), onUnauthorized)
@@ -493,21 +920,26 @@ export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
   const quality = useRemoteData(useCallback(
     () => adminApi.provinceOpinionQualitySummary(token), [token],
   ), onUnauthorized)
+  const funnelRequestKey = `${timeWindow.from}:${timeWindow.to}`
+  const funnel = useRemoteData(useCallback(async () => ({
+    ...await adminApi.dataProductPublicOpinionFunnel(token, timeWindow),
+    __requestKey: funnelRequestKey,
+  }), [funnelRequestKey, timeWindow, token]), onUnauthorized)
 
   useEffect(() => {
     setFeedCursors([null])
     setFeedPage(0)
     setSelectedId(null)
-  }, [provinceCode, range, sort])
+  }, [provinceCode, range, sort, timeWindow.from, timeWindow.to])
 
   useEffect(() => {
-    const items = feed.data?.items || []
+    const items = feedData?.items || []
     if (!items.length) {
       setSelectedId(null)
       return
     }
     if (!selectedId || !items.some((item) => item.id === selectedId)) setSelectedId(items[0].id)
-  }, [feed.data, selectedId])
+  }, [feedData, selectedId])
 
   const detail = useRemoteData(useCallback(
     () => selectedId ? adminApi.dataProductPublicOpinionItem(token, selectedId) : Promise.resolve(null),
@@ -515,11 +947,11 @@ export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
   ), onUnauthorized)
   const regionList = regions.data?.regions || []
   const selectedRegion = regionList.find((region) => region.code === provinceCode)
-    || feed.data?.province
+    || feedData?.province
     || { code: provinceCode, name: provinceCode }
-  const coverageItems = coverage.data?.provinces || coverage.data?.items || []
+  const coverageItems = coverageData?.provinces || coverageData?.items || []
   const selectedCoverage = coverageItems.find((item) => (item.province?.code || item.code) === provinceCode)
-  const demoMode = Boolean(regions.data?.demoMode || coverage.data?.demoMode || feed.data?.demoMode)
+  const demoMode = Boolean(regions.data?.demoMode || coverageData?.demoMode || feedData?.demoMode)
   const pipelineIssues = [
     ...(pipeline.data?.configurationIssues || []),
     ...(progress.data?.issues || []),
@@ -530,18 +962,78 @@ export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
     ?? quality.data?.candidate ?? quality.data?.candidateCount
   const qualityPending = quality.data?.publication?.statuses?.pending
     ?? quality.data?.pending ?? quality.data?.pendingCount
-  const available = selectedCoverage?.availableCount ?? selectedCoverage?.available ?? selectedCoverage?.formalCount ?? feed.data?.pageInfo?.returnedCount ?? 0
+  const available = selectedCoverage?.availableCount ?? selectedCoverage?.available ?? selectedCoverage?.formalCount ?? feedData?.pageInfo?.returnedCount ?? 0
   const shortfall = selectedCoverage?.shortfall ?? Math.max(0, 10 - Number(available || 0))
-  const detailItem = detail.data
+  const detailItem = (feedData?.items || []).some((item) => item.id === selectedId)
+    && detail.data?.id === selectedId ? detail.data : null
+  const funnelData = funnel.data?.__requestKey === funnelRequestKey ? funnel.data : null
+  const funnelStages = [
+    {
+      key: 'current', label: 'Current Active', count: funnelData?.canonical?.active,
+      excluded: funnelData?.canonical?.deleted, action: { label: '全部 active current 数据', filters: { reason: 'all' } },
+    },
+    {
+      key: 'coverage', label: '正式覆盖口径', count: funnelData?.visibility?.coverageVisible,
+      excluded: Math.max(0, Number(funnelData?.canonical?.active || 0) - Number(funnelData?.visibility?.coverageVisible || 0)),
+      action: { label: OPINION_REASON_LABELS.coverage_visible, filters: { reason: 'coverage_visible' } },
+    },
+    {
+      key: 'hot', label: '热点可用口径', count: funnelData?.visibility?.hotVisible,
+      excluded: Math.max(0, Number(funnelData?.visibility?.coverageVisible || 0) - Number(funnelData?.visibility?.hotVisible || 0)),
+      action: { label: OPINION_REASON_LABELS.hot_visible, filters: { reason: 'hot_visible' } },
+    },
+  ]
+  const funnelDimensions = [
+    {
+      key: 'publication', label: '有 Publication', count: funnelData?.publication?.withState,
+      issues: [['missing_publication_state', funnelData?.reasons?.missingPublicationState]],
+    },
+    {
+      key: 'time', label: '在时间窗内', count: funnelData?.time?.withinWindow,
+      issues: [
+        ['missing_event_time', funnelData?.reasons?.missingEventTime],
+        ['outside_window', funnelData?.reasons?.outsideWindow],
+      ],
+    },
+    {
+      key: 'province', label: '已归属省份', count: funnelData?.geography?.withProvince,
+      issues: [['missing_province', funnelData?.reasons?.missingProvince]],
+    },
+    {
+      key: 'stage', label: 'Formal 阶段', count: funnelData?.publication?.stages?.formal,
+      issues: [['not_formal_stage', funnelData?.reasons?.notFormalStage]],
+    },
+    {
+      key: 'status', label: 'Formal 状态', count: funnelData?.publication?.statuses?.formal,
+      issues: [['not_formal_status', funnelData?.reasons?.notFormalStatus]],
+    },
+    {
+      key: 'heat', label: '已有热度分', count: funnelData?.heat?.withScore,
+      issues: [['missing_heat', funnelData?.reasons?.missingHeat]],
+    },
+  ]
+  const funnelReasons = [
+    ['missingPublicationState', 'missing_publication_state'],
+    ['notFormalStage', 'not_formal_stage'],
+    ['notFormalStatus', 'not_formal_status'],
+    ['missingEventTime', 'missing_event_time'],
+    ['outsideWindow', 'outside_window'],
+    ['missingProvince', 'missing_province'],
+    ['missingHeat', 'missing_heat'],
+  ]
 
   const refreshAll = () => {
-    regions.refresh(); coverage.refresh(); feed.refresh(); detail.refresh(); pipeline.refresh(); progress.refresh(); quality.refresh()
+    setFeedCursors([null])
+    setFeedPage(0)
+    setSelectedId(null)
+    setWindowRevision((value) => value + 1)
+    regions.refresh(); detail.refresh(); pipeline.refresh(); progress.refresh(); quality.refresh()
   }
 
   return (
     <div className="mih-product-page mih-product-page--opinion">
       <PageHeading eyebrow="DATA PRODUCTS / PUBLIC OPINION" title="全国舆情"
-        description={`当前展示${selectedRegion.name}公开舆情，可切换省份、时间窗与排序，并把“无数据”和“接口异常”分开呈现。`}
+        description={`当前展示${selectedRegion.name}业务舆情，可切换省份、时间窗与排序，并把“无数据”和“接口异常”分开呈现。`}
         loading={feed.loading || coverage.loading} onRefresh={refreshAll}>
         <div className="mih-command-segmented" aria-label="舆情时间范围">
           {[['24h', '近24小时'], ['7d', '近7天'], ['30d', '近30天']].map(([value, label]) => (
@@ -553,7 +1045,54 @@ export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
         </button>
       </PageHeading>
 
-      <PageModeNotice demoMode={demoMode}>地区目录、覆盖缺口、新闻列表与详情分别读取；列表为空不会被包装成系统健康。</PageModeNotice>
+      <PageModeNotice demoMode={demoMode}>这是内部完整观察：当前列表口径之外的数据不会隐藏，可从实时漏斗查看未归属、候选、缺时间和缺热度记录；历史快照只作参考，不参与当前计数。</PageModeNotice>
+
+      <section className="mih-opinion-funnel qp-panel" aria-label="实时舆情数据漏斗">
+        <header>
+          <div><Pulse size={18} weight="duotone" /><span><strong>实时数据漏斗 / 质量剖面</strong><small>{funnelData?.window ? `${formatDateTime(funnelData.window.from)} — ${formatDateTime(funnelData.window.to)} · 主链为真实包含关系，下方质量维度并行统计` : '正在读取当前数据库'}</small></span></div>
+          <button className="qp-button qp-button--outline qp-button--sm" type="button"
+            onClick={() => setRecordExplorer({ label: OPINION_REASON_LABELS.missing_province, filters: { reason: 'missing_province' } })}>
+            <MapPin size={15} />未归属 / 待总结
+          </button>
+        </header>
+        {funnel.loading && !funnelData ? <LoadingState label="正在计算当前数据漏斗" /> : null}
+        {funnel.error ? <ErrorState error={funnel.error} onRetry={funnel.refresh} /> : null}
+        {funnelData ? <>
+          <div className="mih-opinion-funnel__stages">
+            {funnelStages.map((stage) => (
+              <button type="button" key={stage.key} onClick={() => setRecordExplorer(stage.action)}
+                aria-label={`查看${stage.label} ${formatNumber(stage.count, '0')} 条记录`}>
+                <span>{stage.key.toUpperCase()}</span>
+                <strong>{formatNumber(stage.count, '0')}</strong>
+                <em>{stage.label}</em>
+                <small>{stage.key === 'current'
+                  ? `查看 active ${formatNumber(stage.count, '0')} 条 · deleted ${formatNumber(stage.excluded, '0')}`
+                  : `查看本口径 ${formatNumber(stage.count, '0')} 条 · 总排除 ${formatNumber(stage.excluded, '0')}`}</small>
+              </button>
+            ))}
+          </div>
+          <div className="mih-opinion-funnel__dimensions" aria-label="并行质量维度">
+            {funnelDimensions.map((dimension) => (
+              <article key={dimension.key}>
+                <span>{dimension.label}</span><strong>{formatNumber(dimension.count, '0')}</strong>
+                <div>{dimension.issues.map(([reason, count]) => (
+                  <button type="button" key={reason} onClick={() => setRecordExplorer({ label: OPINION_REASON_LABELS[reason], filters: { reason } })}>
+                    {OPINION_REASON_LABELS[reason]} {formatNumber(count, '0')}
+                  </button>
+                ))}</div>
+              </article>
+            ))}
+          </div>
+          <div className="mih-opinion-funnel__reasons" aria-label="排除原因快捷查看">
+            <span>并行诊断 · 排除原因可重叠</span>
+            {funnelReasons.map(([field, reason]) => (
+              <button type="button" key={reason} onClick={() => setRecordExplorer({ label: OPINION_REASON_LABELS[reason], filters: { reason } })}>
+                {OPINION_REASON_LABELS[reason]} <strong>{formatNumber(funnelData.reasons?.[field], '0')}</strong>
+              </button>
+            ))}
+          </div>
+        </> : null}
+      </section>
 
       <section className="mih-product-kpis" aria-label="全国舆情当前状态">
         <article><MapTrifold size={20} weight="duotone" /><span>省级地区</span><strong>{formatNumber(regionList.length, '34')}</strong><small>固定行政区目录</small></article>
@@ -565,7 +1104,7 @@ export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
       <section className="mih-opinion-toolbar qp-panel">
         <div>
           <GlobeHemisphereWest size={18} weight="duotone" />
-          <span><strong>{selectedRegion.name}舆情榜</strong><small>{formatNumber(feed.data?.pageInfo?.returnedCount, '0')} 条当前结果</small></span>
+          <span><strong>{selectedRegion.name}舆情榜</strong><small>{formatNumber(feedData?.pageInfo?.returnedCount, '0')} 条当前结果</small></span>
         </div>
         <div className="mih-command-segmented" aria-label="舆情排序">
           <button type="button" aria-pressed={sort === 'hot'} onClick={() => setQuery({ sort: 'hot' })}>热点</button>
@@ -580,22 +1119,22 @@ export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
         <aside className="qp-panel mih-opinion-list">
           <header><Fire size={18} weight="fill" /><strong>{selectedRegion.name}{sort === 'hot' ? '舆情榜' : '最新舆情'}</strong><span>{range === '24h' ? '24H' : range.toUpperCase()}</span></header>
           <div className="mih-opinion-list__body qp-scrollbar">
-            {feed.loading && !feed.data ? <LoadingState label="正在加载省级舆情" /> : null}
+            {feed.loading && !feedData ? <LoadingState label="正在加载省级舆情" /> : null}
             {feed.error ? <ErrorState error={feed.error} onRetry={feed.refresh} /> : null}
-            {!feed.loading && !feed.error && !(feed.data?.items || []).length ? (
+            {!feed.loading && !feed.error && !(feedData?.items || []).length ? (
               <EmptyState icon={NewspaperClipping} title={`${selectedRegion.name}当前没有可展示舆情`}
                 description="这是接口成功后的零数据状态；可切换时间范围、最新排序，或查看右侧覆盖与管线问题。" />
             ) : null}
-            {(feed.data?.items || []).map((item, index) => (
+            {(feedData?.items || []).map((item, index) => (
               <OpinionListItem key={item.id} item={item} index={feedPage * 30 + index}
                 active={selectedId === item.id} onSelect={() => setSelectedId(item.id)} />
             ))}
           </div>
           <CursorControls page={feedPage + 1} noun="页" loading={feed.loading}
-            hasMore={Boolean(feed.data?.pageInfo?.hasMore)}
+            hasMore={Boolean(feedData?.pageInfo?.hasMore)}
             onPrevious={() => setFeedPage((value) => Math.max(0, value - 1))}
             onNext={() => {
-              const next = feed.data?.pageInfo?.nextCursor
+              const next = feedData?.pageInfo?.nextCursor
               if (!next) return
               setFeedCursors((current) => [...current.slice(0, feedPage + 1), next])
               setFeedPage((value) => value + 1)
@@ -615,7 +1154,7 @@ export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
               </header>
               <article>
                 <h2>{detailItem.title || '无标题舆情记录'}</h2>
-                <p>{detailItem.summary || '当前记录没有可公开展示的正文摘要。'}</p>
+                <p>{detailItem.summary || '当前记录没有已归档的正文摘要。'}</p>
                 <div className="mih-opinion-meta"><MapPin size={16} /><span>{detailItem.province?.name || '未归属省份'}</span><span>{detailItem.origin?.name || detailItem.origin?.platform || '来源待确认'}</span><time>{formatDateTime(detailItem.publishedAt)}</time></div>
               </article>
               <dl className="mih-opinion-facts">
@@ -624,7 +1163,7 @@ export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
                 <div><dt>热度指数</dt><dd>{formatNumber(detailItem.heatScore)}</dd></div>
               </dl>
               {detailItem.url && !detailItem.demoMode ? <a className="qp-button qp-button--primary mih-opinion-source-link" href={detailItem.url}
-                target="_blank" rel="noreferrer">打开公开来源<ArrowSquareOut size={16} /></a> : null}
+                target="_blank" rel="noreferrer">打开业务来源<ArrowSquareOut size={16} /></a> : null}
               {detailItem.demoMode ? <span className="mih-opinion-demo-source">演示数据不提供外部跳转</span> : null}
             </>
           ) : null}
@@ -653,13 +1192,16 @@ export function PublicOpinionPage({ token, query, setQuery, onUnauthorized }) {
         </div>
       </section>
 
-      {provincePickerOpen ? <ProvincePicker regions={regionList} coverage={coverage.data}
+      {provincePickerOpen ? <ProvincePicker regions={regionList} coverage={coverageData}
         selectedCode={provinceCode} search={provinceSearch} setSearch={setProvinceSearch}
         onClose={() => setProvincePickerOpen(false)} onSelect={(code) => {
           setQuery({ province: code })
           setProvincePickerOpen(false)
           setProvinceSearch('')
         }} /> : null}
+      {recordExplorer ? <OpinionRecordExplorer key={`${recordExplorer.label}:${range}`} token={token}
+        timeWindow={timeWindow} initialView={recordExplorer} onUnauthorized={onUnauthorized}
+        onClose={() => setRecordExplorer(null)} /> : null}
     </div>
   )
 }

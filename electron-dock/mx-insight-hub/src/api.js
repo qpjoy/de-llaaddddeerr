@@ -286,6 +286,17 @@ export const adminApi = {
   dataProductPublicOpinionItem: (token, id) => request(
     token, `${ADMIN_ROOT}/data-products/public-opinion/items/${encodeURIComponent(id)}`,
   ),
+  dataProductPublicOpinionFunnel: (token, query = {}) => request(
+    token, `${ADMIN_ROOT}/data-products/public-opinion/funnel`, { query },
+  ),
+  dataProductPublicOpinionRecords: (token, query = {}) => request(
+    token, `${ADMIN_ROOT}/data-products/public-opinion/records`, { query },
+  ),
+  dataProductPublicOpinionRecord: (token, id, query = {}) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/public-opinion/records/${encodeURIComponent(id)}`,
+    { query },
+  ),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },

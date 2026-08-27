@@ -1061,6 +1061,47 @@ export function createApp({
         })
         return
       }
+      if (
+        request.method === 'GET'
+        && pathname === '/internal/v1/admin/data-products/public-opinion/funnel'
+      ) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductPublicOpinionFunnel(
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'GET'
+        && pathname === '/internal/v1/admin/data-products/public-opinion/records'
+      ) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductPublicOpinionBrowse(
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(
+        pathname,
+        '/internal/v1/admin/data-products/public-opinion/records/:id',
+      )
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductPublicOpinionBrowseItem(
+            params.id,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
       params = routeMatch(
         pathname,
         '/internal/v1/admin/data-products/public-opinion/provinces/:province/items',
