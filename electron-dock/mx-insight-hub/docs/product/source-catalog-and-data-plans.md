@@ -43,12 +43,14 @@ Phase 1 已提供独立 `/source-catalog` 管理面、215 条确定性 seed、PG
 多维表格已经支持搜索、组合筛选、分组、排序、行高、浏览器私有视图、批量状态、CSV 导出、
 tag 回车新增、详情编辑、软归档/恢复和变更历史。
 
-目录管理现已补齐三个运营闭环：
+目录管理现已补齐四个运营闭环：
 
 - “新增数据源”创建平台目录项；点击平台名称进入详情，可查看按规范名称与 alias 匹配的 dataset、
   canonical 记录、物理 source 和索引分块状态；平台归档后这些数据仍保留并可继续核查；
 - “分类与字段”独立管理大类、细分场景和区域词条，支持新增、说明、revision、审计、归档与恢复；
   被活动或已归档目录引用的词条禁止重命名/归档，不执行级联删除；
+- 负责人是 Hub 内独立治理对象，支持新增、编辑、分配、审计、归档与恢复；目录项通过稳定
+  `owner_id` 引用负责人，登录账号引用只作为可空占位，不查询或依赖 Launcher；
 - 表格中的覆盖与实施徽标可直接进入人工治理区，也支持勾选后批量设置。二者是对外汇报口径；
   runtime 是自动观测，数据或索引检测不会静默覆盖人工结论。
 
@@ -142,7 +144,7 @@ relation 模型，不能把 ES 文档反向写成目录权威事实。
 id, stable_key, display_name, aliases[]
 summary, primary_taxonomy_id, priority
 coverage_status, delivery_status, review_status, runtime_status
-owner_member_id, steward_member_ids[]
+owner_id, steward_ids[]
 compliance_summary, notes
 record_version, created_by, created_at, updated_by, updated_at
 ```
@@ -181,7 +183,7 @@ entry_module, monitorable_content[], extractable_clues[]
 tracking_fields[], recommended_access_modes[]
 compliance_boundary, priority
 coverage_status, delivery_status, review_status, runtime_status
-freshness_slo, owner_member_id
+freshness_slo, owner_id
 record_version
 ```
 
@@ -214,8 +216,13 @@ TikHub、JustOne、Rapid、Apify、真机和自建可以作为 `provider_label` 
 
 ### 4.5 负责人和协作
 
-负责人必须关联 Hub member/Launcher federated principal，而不是自由文本。为兼容尚未建档的
-团队或外部责任方，可以先保存 `unresolved_owner_label`，但它不能被统计为已分配负责人。
+Phase 1 的负责人首先是 Hub PostgreSQL 内的独立治理对象，而不是自由文本，也不要求已经存在
+Hub member 或 Launcher federated principal。负责人具备稳定 `owner_id`、显示名称、说明、
+revision、引用计数、审计与软归档；仍被活动或已归档目录引用时禁止归档，必须先完成改派。
+
+`linked_account_id` 仅作为可空、无外键的后续绑定占位。本阶段不读取 Launcher 用户、不修改登录
+合同，也不因为账号服务不可用而影响目录。后续绑定必须通过单独的有审计流程建立；负责人改名或
+账号绑定变化不能改写历史目录事件。
 
 最小角色关系：
 

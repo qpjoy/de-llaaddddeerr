@@ -41,6 +41,28 @@ function initialSourceCatalogTerms(entries) {
   return [...terms.values()]
 }
 
+function initialSourceCatalogOwners(entries) {
+  const owners = new Map()
+  for (const entry of entries) {
+    const normalizedName = sourceCatalogTermNormalizedName(entry.owner)
+    if (!normalizedName || owners.has(normalizedName)) continue
+    const id = randomUUID()
+    owners.set(normalizedName, {
+      id,
+      ownerKey: `owner-${id}`,
+      displayName: String(entry.owner).normalize('NFKC').trim(),
+      normalizedName,
+      description: null,
+      linkedAccountId: null,
+      revision: 1,
+      archivedAt: null,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    })
+  }
+  return owners
+}
+
 function sourceCatalogEntryNormalizedNames(entry) {
   return [...new Set([entry.canonicalName, ...(entry.aliases || [])]
     .map(sourceCatalogTermNormalizedName)
@@ -155,9 +177,22 @@ export class MemoryStore {
     // The governance catalog is useful in local development without a data
     // plane. Unlike canonical records it is ordinary administrative metadata,
     // so the memory implementation can exercise the complete CRUD contract.
-    this.sourceCatalogEntries = new Map(
-      SOURCE_CATALOG_SEED.map((entry) => [entry.id, clone(entry)]),
-    )
+    const ownersByName = initialSourceCatalogOwners(SOURCE_CATALOG_SEED)
+    this.sourceCatalogOwners = new Map([...ownersByName.values()].map((owner) => [owner.id, owner]))
+    this.sourceCatalogOwnerEvents = new Map([...ownersByName.values()].map((owner) => [owner.id, [{
+      id: randomUUID(),
+      ownerId: owner.id,
+      eventType: 'seed_import',
+      actor: 'memory-seed',
+      fromRevision: null,
+      toRevision: 1,
+      changes: { after: clone(owner) },
+      createdAt: owner.createdAt,
+    }]]))
+    this.sourceCatalogEntries = new Map(SOURCE_CATALOG_SEED.map((entry) => {
+      const ownerId = ownersByName.get(sourceCatalogTermNormalizedName(entry.owner))?.id || null
+      return [entry.id, { ...clone(entry), ownerId }]
+    }))
     this.sourceCatalogEvents = new Map(SOURCE_CATALOG_SEED.map((entry) => [entry.id, [{
       id: entry.id,
       entryId: entry.id,
@@ -952,10 +987,14 @@ export class MemoryStore {
     }
     this.#assertSourceCatalogNamesAvailable(input)
     this.#assertSourceCatalogTaxonomyAvailable(input)
+    const managedInput = { ...clone(input) }
+    if (managedInput.ownerId) {
+      managedInput.owner = this.#requireAssignableSourceCatalogOwner(managedInput.ownerId).displayName
+    }
     const createdAt = nowIso()
     const entry = {
       id: randomUUID(),
-      ...clone(input),
+      ...managedInput,
       revision: 1,
       archivedAt: null,
       createdAt,
@@ -987,6 +1026,32 @@ export class MemoryStore {
     }
     const before = clone(entry)
     const merged = { ...entry, ...clone(patch) }
+    if (Object.prototype.hasOwnProperty.call(patch, 'ownerId')) {
+      if (patch.ownerId) {
+        merged.owner = this.#requireAssignableSourceCatalogOwner(patch.ownerId).displayName
+      } else if (patch.owner) {
+        merged.owner = patch.owner
+      } else {
+        merged.owner = null
+      }
+    } else if (Object.prototype.hasOwnProperty.call(patch, 'owner')) {
+      const managedOwner = before.ownerId
+        ? this.#requireAssignableSourceCatalogOwner(before.ownerId)
+        : null
+      if (
+        !patch.owner
+        || !managedOwner
+        || sourceCatalogTermNormalizedName(patch.owner)
+          !== sourceCatalogTermNormalizedName(managedOwner.displayName)
+      ) {
+        merged.ownerId = null
+      } else {
+        merged.ownerId = managedOwner.id
+        merged.owner = managedOwner.displayName
+      }
+    } else if (merged.ownerId) {
+      merged.owner = this.#requireAssignableSourceCatalogOwner(merged.ownerId).displayName
+    }
     if (
       patch.canonicalName
       && sourceCatalogTermNormalizedName(patch.canonicalName)
@@ -1040,6 +1105,19 @@ export class MemoryStore {
     this.sourceCatalogEvents.set(entryId, events)
   }
 
+  #requireAssignableSourceCatalogOwner(ownerId) {
+    const owner = this.sourceCatalogOwners.get(ownerId)
+    if (!owner) {
+      throw new AppError(404, 'source_catalog_owner_not_found', 'Source catalog owner was not found')
+    }
+    if (owner.archivedAt) {
+      throw new AppError(409, 'source_catalog_owner_archived', 'Archived source catalog owners cannot be assigned', {
+        ownerId,
+      })
+    }
+    return owner
+  }
+
   #assertSourceCatalogNamesAvailable(candidate, { excludeEntryId = null } = {}) {
     const requested = new Set(sourceCatalogEntryNormalizedNames(candidate))
     for (const entry of this.sourceCatalogEntries.values()) {
@@ -1068,6 +1146,128 @@ export class MemoryStore {
   #sourceCatalogTermUsage(term) {
     return [...this.sourceCatalogEntries.values()]
       .filter((entry) => sourceCatalogEntryUsesTerm(entry, term)).length
+  }
+
+  #sourceCatalogOwnerUsage(ownerId) {
+    return [...this.sourceCatalogEntries.values()]
+      .filter((entry) => entry.ownerId === ownerId).length
+  }
+
+  #sourceCatalogOwnerView(owner) {
+    return owner ? { ...clone(owner), usageCount: this.#sourceCatalogOwnerUsage(owner.id) } : null
+  }
+
+  async listSourceCatalogOwners({ includeArchived = false } = {}) {
+    return [...this.sourceCatalogOwners.values()]
+      .filter((owner) => includeArchived || !owner.archivedAt)
+      .sort((left, right) => left.displayName.localeCompare(right.displayName, 'zh-CN'))
+      .map((owner) => this.#sourceCatalogOwnerView(owner))
+  }
+
+  async getSourceCatalogOwner(id) {
+    return this.#sourceCatalogOwnerView(this.sourceCatalogOwners.get(id))
+  }
+
+  async createSourceCatalogOwner(input, { actor = 'admin-token' } = {}) {
+    if ([...this.sourceCatalogOwners.values()].some((owner) => (
+      owner.ownerKey === input.ownerKey || owner.normalizedName === input.normalizedName
+    ))) {
+      throw new AppError(409, 'source_catalog_owner_exists', 'A source catalog owner with this key or name already exists')
+    }
+    if (input.linkedAccountId && [...this.sourceCatalogOwners.values()]
+      .some((owner) => owner.linkedAccountId === input.linkedAccountId)) {
+      throw new AppError(409, 'source_catalog_owner_account_conflict', 'This login account is already linked to another source catalog owner')
+    }
+    const createdAt = nowIso()
+    const owner = {
+      id: randomUUID(),
+      ...clone(input),
+      revision: 1,
+      archivedAt: null,
+      createdAt,
+      updatedAt: createdAt,
+    }
+    this.sourceCatalogOwners.set(owner.id, owner)
+    this.#appendSourceCatalogOwnerEvent(owner.id, {
+      eventType: 'create', actor, fromRevision: null, toRevision: 1,
+      changes: { after: clone(owner) },
+    })
+    return this.#sourceCatalogOwnerView(owner)
+  }
+
+  async updateSourceCatalogOwner(id, patch, {
+    expectedRevision,
+    actor = 'admin-token',
+    eventType = 'update',
+  } = {}) {
+    const owner = this.sourceCatalogOwners.get(id)
+    if (!owner) throw new AppError(404, 'source_catalog_owner_not_found', 'Source catalog owner was not found')
+    if (owner.revision !== expectedRevision) {
+      throw new AppError(409, 'source_catalog_owner_revision_conflict', 'Source catalog owner changed; reload before saving', {
+        expectedRevision,
+        currentRevision: owner.revision,
+      })
+    }
+    if (patch.normalizedName && [...this.sourceCatalogOwners.values()].some((candidate) => (
+      candidate.id !== id && candidate.normalizedName === patch.normalizedName
+    ))) {
+      throw new AppError(409, 'source_catalog_owner_exists', 'A source catalog owner with this name already exists')
+    }
+    if (patch.linkedAccountId && [...this.sourceCatalogOwners.values()].some((candidate) => (
+      candidate.id !== id && candidate.linkedAccountId === patch.linkedAccountId
+    ))) {
+      throw new AppError(409, 'source_catalog_owner_account_conflict', 'This login account is already linked to another source catalog owner')
+    }
+    if (patch.archivedAt && this.#sourceCatalogOwnerUsage(id) > 0) {
+      throw new AppError(409, 'source_catalog_owner_in_use', 'Referenced source catalog owners cannot be archived', {
+        usageCount: this.#sourceCatalogOwnerUsage(id),
+      })
+    }
+    const before = clone(owner)
+    Object.assign(owner, clone(patch), {
+      revision: owner.revision + 1,
+      updatedAt: nowIso(),
+    })
+    if (patch.displayName) {
+      for (const entry of this.sourceCatalogEntries.values()) {
+        if (entry.ownerId === id) entry.owner = owner.displayName
+      }
+    }
+    this.#appendSourceCatalogOwnerEvent(id, {
+      eventType,
+      actor,
+      fromRevision: before.revision,
+      toRevision: owner.revision,
+      changes: { before, after: clone(owner) },
+    })
+    return this.#sourceCatalogOwnerView(owner)
+  }
+
+  async archiveSourceCatalogOwner(id, options = {}) {
+    return this.updateSourceCatalogOwner(id, { archivedAt: nowIso() }, {
+      ...options,
+      eventType: 'archive',
+    })
+  }
+
+  async restoreSourceCatalogOwner(id, options = {}) {
+    return this.updateSourceCatalogOwner(id, { archivedAt: null }, {
+      ...options,
+      eventType: 'restore',
+    })
+  }
+
+  async listSourceCatalogOwnerEvents(ownerId, limit = 50) {
+    return clone((this.sourceCatalogOwnerEvents.get(ownerId) || [])
+      .slice()
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, limit))
+  }
+
+  #appendSourceCatalogOwnerEvent(ownerId, event) {
+    const events = this.sourceCatalogOwnerEvents.get(ownerId) || []
+    events.push({ id: randomUUID(), ownerId, createdAt: nowIso(), ...clone(event) })
+    this.sourceCatalogOwnerEvents.set(ownerId, events)
   }
 
   #sourceCatalogTermView(term) {

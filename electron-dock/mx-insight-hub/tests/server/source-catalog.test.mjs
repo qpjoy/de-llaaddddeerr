@@ -460,6 +460,202 @@ test('source catalog taxonomy supports managed terms, facet discovery, guarded a
   })
 })
 
+test('source catalog owners support managed assignment, compatibility text, audit, and guarded archive', async () => {
+  await withServer(async (baseUrl) => {
+    const initial = await call(baseUrl, '/internal/v1/admin/source-catalog/owners')
+    assert.equal(initial.response.status, 200)
+    assert.deepEqual(initial.payload.data.summary, {
+      total: 0,
+      archived: 0,
+      assigned: 0,
+      unassigned: 0,
+    })
+
+    const created = await call(baseUrl, '/internal/v1/admin/source-catalog/owners', {
+      method: 'POST',
+      body: { displayName: '数据负责人 A', description: '独立治理对象' },
+    })
+    assert.equal(created.response.status, 201)
+    assert.match(created.payload.data.ownerKey, /^owner-/u)
+    assert.equal(created.payload.data.linkedAccountId, null)
+    assert.equal(created.payload.data.usageCount, 0)
+    const ownerId = created.payload.data.id
+
+    const duplicate = await call(baseUrl, '/internal/v1/admin/source-catalog/owners', {
+      method: 'POST',
+      body: { displayName: '  数据负责人 A  ' },
+    })
+    assert.equal(duplicate.response.status, 409)
+    assert.equal(duplicate.payload.error.code, 'source_catalog_owner_exists')
+
+    const mixedLegacyPayload = await call(baseUrl, '/internal/v1/admin/source-catalog', {
+      method: 'POST',
+      body: {
+        canonicalName: '负责人兼容负载测试平台',
+        majorCategory: '负责人治理测试分类',
+        scenarios: ['负责人治理测试场景'],
+        regions: ['负责人治理测试区域'],
+        ownerId: null,
+        owner: '旧自由文本负责人',
+      },
+    })
+    assert.equal(mixedLegacyPayload.response.status, 201)
+    assert.equal(mixedLegacyPayload.payload.data.ownerId, null)
+    assert.equal(mixedLegacyPayload.payload.data.owner, '旧自由文本负责人')
+    const updatedMixedLegacyPayload = await call(
+      baseUrl,
+      `/internal/v1/admin/source-catalog/${mixedLegacyPayload.payload.data.id}`,
+      {
+        method: 'PUT',
+        body: {
+          revision: mixedLegacyPayload.payload.data.revision,
+          ownerId: null,
+          owner: '更新后的自由文本负责人',
+        },
+      },
+    )
+    assert.equal(updatedMixedLegacyPayload.response.status, 200)
+    assert.equal(updatedMixedLegacyPayload.payload.data.ownerId, null)
+    assert.equal(updatedMixedLegacyPayload.payload.data.owner, '更新后的自由文本负责人')
+
+    const assignedEntry = await call(baseUrl, '/internal/v1/admin/source-catalog', {
+      method: 'POST',
+      body: {
+        canonicalName: '负责人治理测试平台',
+        majorCategory: '负责人治理测试分类',
+        scenarios: ['负责人治理测试场景'],
+        regions: ['负责人治理测试区域'],
+        ownerId,
+        owner: '不应成为权威的自由文本',
+      },
+    })
+    assert.equal(assignedEntry.response.status, 201)
+    assert.equal(assignedEntry.payload.data.ownerId, ownerId)
+    assert.equal(assignedEntry.payload.data.owner, '数据负责人 A')
+
+    const inUse = await call(baseUrl, `/internal/v1/admin/source-catalog/owners/${ownerId}`)
+    assert.equal(inUse.response.status, 200)
+    assert.equal(inUse.payload.data.usageCount, 1)
+
+    const legacyFullForm = await call(
+      baseUrl,
+      `/internal/v1/admin/source-catalog/${assignedEntry.payload.data.id}`,
+      {
+        method: 'PUT',
+        body: {
+          revision: assignedEntry.payload.data.revision,
+          owner: '数据负责人 A',
+          notes: '旧编辑器仍回传 owner 文本',
+        },
+      },
+    )
+    assert.equal(legacyFullForm.response.status, 200)
+    assert.equal(legacyFullForm.payload.data.ownerId, ownerId)
+
+    const renamed = await call(baseUrl, `/internal/v1/admin/source-catalog/owners/${ownerId}`, {
+      method: 'PUT',
+      body: { revision: created.payload.data.revision, displayName: '数据负责人 B' },
+    })
+    assert.equal(renamed.response.status, 200)
+    assert.equal(renamed.payload.data.usageCount, 1)
+    const stale = await call(baseUrl, `/internal/v1/admin/source-catalog/owners/${ownerId}`, {
+      method: 'PUT',
+      body: { revision: created.payload.data.revision, description: '过期修改' },
+    })
+    assert.equal(stale.response.status, 409)
+    assert.equal(stale.payload.error.code, 'source_catalog_owner_revision_conflict')
+    const projectedEntry = await call(
+      baseUrl,
+      `/internal/v1/admin/source-catalog/${assignedEntry.payload.data.id}`,
+    )
+    assert.equal(projectedEntry.payload.data.ownerId, ownerId)
+    assert.equal(projectedEntry.payload.data.owner, '数据负责人 B')
+
+    const archivedEntry = await call(
+      baseUrl,
+      `/internal/v1/admin/source-catalog/${assignedEntry.payload.data.id}/archive`,
+      {
+        method: 'POST',
+        body: { revision: projectedEntry.payload.data.revision },
+      },
+    )
+    assert.equal(archivedEntry.response.status, 200)
+    const blockedArchive = await call(
+      baseUrl,
+      `/internal/v1/admin/source-catalog/owners/${ownerId}/archive`,
+      {
+        method: 'POST',
+        body: { revision: renamed.payload.data.revision },
+      },
+    )
+    assert.equal(blockedArchive.response.status, 409)
+    assert.equal(blockedArchive.payload.error.code, 'source_catalog_owner_in_use')
+    assert.equal(blockedArchive.payload.error.details.usageCount, 1)
+
+    const cleared = await call(
+      baseUrl,
+      `/internal/v1/admin/source-catalog/${assignedEntry.payload.data.id}`,
+      {
+        method: 'PUT',
+        body: { revision: archivedEntry.payload.data.revision, ownerId: null },
+      },
+    )
+    assert.equal(cleared.response.status, 200)
+    assert.equal(cleared.payload.data.ownerId, null)
+    assert.equal(cleared.payload.data.owner, null)
+
+    const archivedOwner = await call(
+      baseUrl,
+      `/internal/v1/admin/source-catalog/owners/${ownerId}/archive`,
+      {
+        method: 'POST',
+        body: { revision: renamed.payload.data.revision },
+      },
+    )
+    assert.equal(archivedOwner.response.status, 200)
+    assert.ok(archivedOwner.payload.data.archivedAt)
+
+    const assignArchived = await call(baseUrl, '/internal/v1/admin/source-catalog', {
+      method: 'POST',
+      body: {
+        canonicalName: '归档负责人分配测试平台',
+        majorCategory: '负责人治理测试分类',
+        scenarios: ['负责人治理测试场景'],
+        regions: ['负责人治理测试区域'],
+        ownerId,
+      },
+    })
+    assert.equal(assignArchived.response.status, 409)
+    assert.equal(assignArchived.payload.error.code, 'source_catalog_owner_archived')
+
+    const activeOnly = await call(baseUrl, '/internal/v1/admin/source-catalog/owners')
+    assert.equal(activeOnly.payload.data.items.length, 0)
+    const withArchived = await call(
+      baseUrl,
+      '/internal/v1/admin/source-catalog/owners?includeArchived=true',
+    )
+    assert.equal(withArchived.payload.data.items.length, 1)
+
+    const restored = await call(
+      baseUrl,
+      `/internal/v1/admin/source-catalog/owners/${ownerId}/restore`,
+      {
+        method: 'POST',
+        body: { revision: archivedOwner.payload.data.revision },
+      },
+    )
+    assert.equal(restored.response.status, 200)
+    assert.equal(restored.payload.data.archivedAt, null)
+
+    const events = await call(baseUrl, `/internal/v1/admin/source-catalog/owners/${ownerId}/events`)
+    assert.equal(events.response.status, 200)
+    assert.deepEqual(
+      new Set(events.payload.data.map((event) => event.eventType)),
+      new Set(['create', 'update', 'archive', 'restore']),
+    )
+  })
+})
+
 test('source catalog related data matches canonical names and aliases without exposing source connections', async () => {
   await withServer(async (baseUrl, store) => {
     const created = await call(baseUrl, '/internal/v1/admin/source-catalog', {
@@ -646,8 +842,36 @@ test('source catalog remains Hub Admin Token-only for anonymous, Launcher user, 
   await withServer(async (baseUrl, store) => {
     const [entry] = await store.listSourceCatalogEntries()
     const [term] = await store.listSourceCatalogTerms()
+    const ownerResponse = await call(baseUrl, '/internal/v1/admin/source-catalog/owners', {
+      method: 'POST',
+      body: { displayName: '权限测试负责人' },
+    })
+    const owner = ownerResponse.payload.data
     const protectedOperations = [
       { method: 'GET', path: '/internal/v1/admin/source-catalog' },
+      { method: 'GET', path: '/internal/v1/admin/source-catalog/owners' },
+      {
+        method: 'POST',
+        path: '/internal/v1/admin/source-catalog/owners',
+        body: { displayName: '未授权负责人' },
+      },
+      { method: 'GET', path: `/internal/v1/admin/source-catalog/owners/${owner.id}` },
+      {
+        method: 'PUT',
+        path: `/internal/v1/admin/source-catalog/owners/${owner.id}`,
+        body: { revision: owner.revision, description: '未授权修改' },
+      },
+      { method: 'GET', path: `/internal/v1/admin/source-catalog/owners/${owner.id}/events` },
+      {
+        method: 'POST',
+        path: `/internal/v1/admin/source-catalog/owners/${owner.id}/archive`,
+        body: { revision: owner.revision },
+      },
+      {
+        method: 'POST',
+        path: `/internal/v1/admin/source-catalog/owners/${owner.id}/restore`,
+        body: { revision: owner.revision },
+      },
       { method: 'GET', path: '/internal/v1/admin/source-catalog/taxonomy' },
       {
         method: 'POST',

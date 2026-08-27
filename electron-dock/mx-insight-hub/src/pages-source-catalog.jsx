@@ -42,7 +42,6 @@ import {
 import { adminApi } from './api.js'
 import {
   EmptyState,
-  DropdownField,
   ErrorState,
   Field,
   LoadingState,
@@ -104,6 +103,8 @@ const TAXONOMY_KINDS = [
   { value: 'scenario', label: '细分场景', singular: '场景', description: '一个平台可关联多个 use case。' },
   { value: 'region', label: '区域', singular: '区域', description: '多选覆盖范围，不与数据驻留或合规区域混用。' },
 ]
+const OWNER_KIND = { value: 'owner', label: '负责人', singular: '负责人', description: '独立维护的人员或团队；后续可选择关联登录账号，目前不依赖账号系统。' }
+const GOVERNANCE_KINDS = [...TAXONOMY_KINDS, OWNER_KIND]
 
 const BUILTIN_VIEWS = [
   { id: 'all', label: '底表', icon: Rows, predicate: (item) => !item.archivedAt },
@@ -114,6 +115,7 @@ const BUILTIN_VIEWS = [
   { id: 'unassigned', label: '无负责人', icon: UserCircle, predicate: (item) => !item.archivedAt && !item.owner },
   { id: 'archived', label: '已归档', icon: Archive, predicate: (item) => Boolean(item.archivedAt) },
 ]
+const REFERENCE_VIEW = { id: 'references', label: '治理引用', icon: TreeStructure, predicate: () => true }
 
 const SECTION_OPTIONS = [
   { id: 'overview', label: '数据源总览', icon: ChartDonut },
@@ -149,7 +151,180 @@ function Panel({ title, subtitle, action, className = '', children }) {
 
 function SelectField({ label, value, onChange, options, emptyLabel, disabled = false }) {
   const normalizedOptions = emptyLabel ? [{ value: '', label: emptyLabel }, ...options] : options
-  return <DropdownField label={label} value={value ?? ''} disabled={disabled} options={normalizedOptions} onChange={onChange} />
+  return <SearchableSelect label={label} value={value ?? ''} disabled={disabled} options={normalizedOptions} onChange={onChange} />
+}
+
+function SearchableSelect({ label, value, onChange, options = [], placeholder = '请选择', disabled = false, className = '', leadingIcon: LeadingIcon = null }) {
+  const labelId = useId()
+  const triggerId = useId()
+  const searchId = useId()
+  const listboxId = useId()
+  const rootRef = useRef(null)
+  const anchorRef = useRef(null)
+  const searchRef = useRef(null)
+  const optionRefs = useRef([])
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const [highlightedIndex, setHighlightedIndex] = useState(0)
+  const normalizedQuery = normalizeDraft(query).toLocaleLowerCase('zh-CN')
+  const selected = options.find((option) => option.value === value)
+  const visibleOptions = useMemo(() => options.filter((option) => {
+    if (!normalizedQuery) return true
+    return normalizeDraft([option.label, option.value, option.description]
+      .filter(Boolean)
+      .join('\n'))
+      .toLocaleLowerCase('zh-CN')
+      .includes(normalizedQuery)
+  }), [normalizedQuery, options])
+  const firstEnabledIndex = Math.max(0, visibleOptions.findIndex((option) => !option.disabled))
+  const openUpward = useUpwardMenu(open, anchorRef, visibleOptions.length, 48)
+
+  useEffect(() => {
+    if (!open) return undefined
+    const closeOnOutsidePointer = (event) => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    setQuery('')
+    const selectedIndex = options.findIndex((option) => option.value === value && !option.disabled)
+    setHighlightedIndex(selectedIndex >= 0 ? selectedIndex : firstEnabledIndex)
+    window.requestAnimationFrame(() => searchRef.current?.focus())
+  }, [open])
+
+  useEffect(() => {
+    if (open) setHighlightedIndex(firstEnabledIndex)
+  }, [firstEnabledIndex, normalizedQuery])
+
+  useEffect(() => {
+    if (open) optionRefs.current[highlightedIndex]?.scrollIntoView({ block: 'nearest' })
+  }, [highlightedIndex, open])
+
+  const close = () => {
+    setOpen(false)
+    setQuery('')
+  }
+  const choose = (option) => {
+    if (!option || option.disabled) return
+    onChange(option.value)
+    close()
+    window.requestAnimationFrame(() => document.getElementById(triggerId)?.focus())
+  }
+  const move = (delta) => {
+    if (!visibleOptions.length) return
+    setHighlightedIndex((current) => {
+      let next = current
+      for (let offset = 0; offset < visibleOptions.length; offset += 1) {
+        next = (next + delta + visibleOptions.length) % visibleOptions.length
+        if (!visibleOptions[next]?.disabled) return next
+      }
+      return current
+    })
+  }
+  const onMenuKeyDown = (event) => {
+    if (event.nativeEvent?.isComposing || event.isComposing || event.keyCode === 229) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      move(event.key === 'ArrowDown' ? 1 : -1)
+    } else if (event.key === 'Enter' && visibleOptions.length) {
+      event.preventDefault()
+      choose(visibleOptions[highlightedIndex] || visibleOptions[firstEnabledIndex])
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      close()
+      document.getElementById(triggerId)?.focus()
+    }
+  }
+
+  return (
+    <div
+      ref={rootRef}
+      className={`qp-field mih-search-select ${className}`.trim()}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) close()
+      }}
+    >
+      <span className={`qp-field__label mih-search-select__label${LeadingIcon ? ' mih-sr-only' : ''}`} id={labelId}>{label}</span>
+      <div className="mih-search-select__anchor" ref={anchorRef}>
+        <button
+          className={`mih-search-select__trigger${open ? ' is-open' : ''}`}
+          id={triggerId}
+          type="button"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-controls={listboxId}
+          aria-labelledby={`${labelId} ${triggerId}`}
+          disabled={disabled}
+          onClick={() => setOpen((current) => !current)}
+          onKeyDown={(event) => {
+            if (event.nativeEvent?.isComposing || event.isComposing || event.keyCode === 229) return
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault()
+              if (!open) setOpen(true)
+              else move(event.key === 'ArrowDown' ? 1 : -1)
+            } else if (event.key === 'Escape' && open) {
+              event.preventDefault()
+              close()
+            }
+          }}
+        >
+          {LeadingIcon ? <LeadingIcon size={16} aria-hidden="true" /> : null}
+          {LeadingIcon ? <span className="mih-search-select__inline-label">{label}</span> : null}
+          <span className={`mih-search-select__value${selected ? '' : ' is-placeholder'}`}>{selected?.label ?? (value || placeholder)}</span>
+          <CaretDown className="mih-search-select__chevron" size={14} aria-hidden="true" />
+        </button>
+        {open ? (
+          <div className={`mih-search-select__menu${openUpward ? ' is-upward' : ''}`}>
+            <label className="mih-search-select__search" htmlFor={searchId}>
+              <MagnifyingGlass size={14} aria-hidden="true" />
+              <input
+                ref={searchRef}
+                id={searchId}
+                role="combobox"
+                value={query}
+                placeholder={`搜索${label}`}
+                aria-label={`搜索${label}选项`}
+                aria-autocomplete="list"
+                aria-expanded="true"
+                aria-haspopup="listbox"
+                aria-controls={listboxId}
+                aria-activedescendant={visibleOptions.length ? `${listboxId}-option-${highlightedIndex}` : undefined}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={onMenuKeyDown}
+              />
+              {query ? <button type="button" aria-label={`清空${label}搜索`} onClick={() => setQuery('')}><X size={12} aria-hidden="true" /></button> : null}
+            </label>
+            <div className="mih-search-select__options" id={listboxId} role="listbox" aria-labelledby={labelId}>
+              {visibleOptions.map((option, index) => (
+                <button
+                  ref={(node) => { optionRefs.current[index] = node }}
+                  className={`mih-combobox-option${index === highlightedIndex ? ' is-highlighted' : ''}${option.value === value ? ' is-selected' : ''}`}
+                  id={`${listboxId}-option-${index}`}
+                  key={`${option.value}-${option.label}`}
+                  type="button"
+                  role="option"
+                  aria-selected={option.value === value}
+                  disabled={option.disabled}
+                  tabIndex={-1}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => { if (!option.disabled) setHighlightedIndex(index) }}
+                  onClick={() => choose(option)}
+                >
+                  <Check className="mih-combobox-option__check" size={13} weight="bold" aria-hidden="true" />
+                  <span>{option.label}</span>
+                </button>
+              ))}
+              {!visibleOptions.length ? <p className="mih-search-select__empty">没有匹配项</p> : null}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
 }
 
 function CatalogBadge({ dimension, value, onClick = null, ariaLabel = null }) {
@@ -422,7 +597,7 @@ function uniqueSuggestions(values) {
   return [...new Set((values || []).map(normalizeDraft).filter(Boolean))]
 }
 
-function useUpwardMenu(open, rootRef, optionCount) {
+function useUpwardMenu(open, rootRef, optionCount, extraHeight = 0) {
   const [openUpward, setOpenUpward] = useState(false)
   useLayoutEffect(() => {
     if (!open || !rootRef.current) return
@@ -431,11 +606,11 @@ function useUpwardMenu(open, rootRef, optionCount) {
       ?? rootRef.current.closest('.mih-modal')?.getBoundingClientRect()
     const boundaryTop = Math.max(0, boundaryRect?.top ?? 0)
     const boundaryBottom = Math.min(window.innerHeight, boundaryRect?.bottom ?? window.innerHeight)
-    const menuHeight = Math.min(280, optionCount * 35 + 12)
+    const menuHeight = Math.min(328, optionCount * 35 + 12 + extraHeight)
     const spaceBelow = boundaryBottom - rootRect.bottom - 8
     const spaceAbove = rootRect.top - boundaryTop - 8
     setOpenUpward(spaceBelow < menuHeight && spaceAbove > spaceBelow)
-  }, [open, optionCount, rootRef])
+  }, [extraHeight, open, optionCount, rootRef])
   return openUpward
 }
 
@@ -719,12 +894,7 @@ function TagInput({ label, values, onChange, suggestions = [], hint, placeholder
 }
 
 function ToolbarDropdown({ icon: Icon, label, value, onChange, options }) {
-  return (
-    <div className="mih-source-toolbar-dropdown">
-      <Icon size={16} aria-hidden="true" />
-      <DropdownField className="mih-source-toolbar-dropdown__field" label={label} value={value} options={options} onChange={onChange} />
-    </div>
-  )
+  return <SearchableSelect className="mih-source-toolbar-dropdown" leadingIcon={Icon} label={label} value={value} options={options} onChange={onChange} />
 }
 
 function textSearch(item, query) {
@@ -751,7 +921,11 @@ function matchesFilters(item, filters) {
     && (!filters.priority || item.priority === filters.priority)
     && (!filters.coverage || item.coverageStatus === filters.coverage)
     && (!filters.delivery || item.deliveryStatus === filters.delivery)
-    && (!filters.owner || (filters.owner === '__unassigned' ? !item.owner : item.owner === filters.owner))
+    && (!filters.owner || (filters.owner === '__unassigned'
+      ? !item.ownerId && !item.owner
+      : filters.owner.startsWith('legacy:')
+        ? item.owner === filters.owner.slice('legacy:'.length)
+        : item.ownerId === filters.owner || item.owner === filters.owner))
 }
 
 function compareCatalog(left, right, sortBy) {
@@ -788,6 +962,8 @@ function downloadCatalogCsv(items) {
 }
 
 function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh, requestedView, onRequestedViewHandled, requestedTermKind = '', requestedTermValue = '' }) {
+  const ownerLoad = useCallback(() => adminApi.sourceCatalogOwners(token, { includeArchived: true }), [token])
+  const ownerState = useRemoteData(ownerLoad, onUnauthorized)
   const [viewId, setViewId] = useState(requestedView || 'all')
   const [query, setQuery] = useState('')
   const [filters, setFilters] = useState({ ...EMPTY_FILTERS })
@@ -809,6 +985,16 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
       return []
     }
   })
+  const managedOwners = Array.isArray(ownerState.data?.items) ? ownerState.data.items : []
+  const managedOwnerNames = new Set(managedOwners.map((owner) => owner.displayName))
+  const ownerFilterOptions = [
+    ...managedOwners
+      .filter((owner) => !owner.archivedAt || filters.owner === owner.id)
+      .map((owner) => ({ value: owner.id, label: owner.archivedAt ? `${owner.displayName}（已归档）` : owner.displayName })),
+    ...(snapshot.facets.owners || [])
+      .filter((ownerName) => !managedOwnerNames.has(ownerName) || filters.owner === ownerName || filters.owner === `legacy:${ownerName}`)
+      .map((ownerName) => ({ value: filters.owner === ownerName ? ownerName : `legacy:${ownerName}`, label: `${ownerName}（旧记录）` })),
+  ]
   const pageSize = density === 'compact' ? 40 : density === 'spacious' ? 20 : 30
 
   useEffect(() => {
@@ -825,13 +1011,15 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
         ? 'scenario'
         : requestedTermKind === 'region'
           ? 'region'
+          : requestedTermKind === 'owner'
+            ? 'owner'
           : null
     if (!field) return
-    setViewId('all')
+    setViewId(requestedView || REFERENCE_VIEW.id)
     setFilters({ ...EMPTY_FILTERS, [field]: requestedTermValue })
     setPage(1)
     setSelectedIds(new Set())
-  }, [requestedTermKind, requestedTermValue])
+  }, [requestedTermKind, requestedTermValue, requestedView])
 
   const selectView = (id) => {
     const custom = savedViews.find((view) => view.id === id)
@@ -850,7 +1038,9 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
     setSelectedIds(new Set())
   }
 
-  const baseView = BUILTIN_VIEWS.find((view) => view.id === viewId) || BUILTIN_VIEWS[0]
+  const baseView = viewId === REFERENCE_VIEW.id
+    ? REFERENCE_VIEW
+    : BUILTIN_VIEWS.find((view) => view.id === viewId) || BUILTIN_VIEWS[0]
   const visible = useMemo(() => snapshot.items
     .filter(baseView.predicate)
     .filter((item) => textSearch(item, query.trim()))
@@ -937,6 +1127,11 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
               </button>
             )
           })}
+          {viewId === REFERENCE_VIEW.id ? (
+            <button type="button" aria-pressed="true" onClick={() => selectView('all')}>
+              <TreeStructure size={15} aria-hidden="true" /><span>{REFERENCE_VIEW.label}</span><small>{visible.length}</small><X size={12} aria-label="退出治理引用视图" />
+            </button>
+          ) : null}
           {savedViews.map((view) => (
             <button type="button" key={view.id} onClick={() => selectView(view.id)}>
               <FloppyDisk size={15} aria-hidden="true" /><span>{view.name}</span>
@@ -975,7 +1170,7 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
             <SelectField label="优先级" value={filters.priority} emptyLabel="全部优先级" options={PRIORITY_OPTIONS} onChange={(value) => setFilters({ ...filters, priority: value })} />
             <SelectField label="覆盖状态" value={filters.coverage} emptyLabel="全部状态" options={COVERAGE_OPTIONS} onChange={(value) => setFilters({ ...filters, coverage: value })} />
             <SelectField label="实施阶段" value={filters.delivery} emptyLabel="全部阶段" options={DELIVERY_OPTIONS} onChange={(value) => setFilters({ ...filters, delivery: value })} />
-            <SelectField label="负责人" value={filters.owner} emptyLabel="全部负责人" options={[{ value: '__unassigned', label: '未分配' }, ...snapshot.facets.owners.map((value) => ({ value, label: value }))]} onChange={(value) => setFilters({ ...filters, owner: value })} />
+            <SelectField label="负责人" value={filters.owner} emptyLabel="全部负责人" options={[{ value: '__unassigned', label: '未分配' }, ...ownerFilterOptions]} onChange={(value) => setFilters({ ...filters, owner: value })} />
             <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={!activeFilterCount} onClick={() => setFilters({ ...EMPTY_FILTERS })}><X size={14} aria-hidden="true" />清空筛选</button>
           </div>
         ) : null}
@@ -984,8 +1179,8 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
           <div className="mih-source-bulk-bar" role="region" aria-label="批量操作">
             <strong>已选 {selected.length} 条</strong>
             <span />
-            <DropdownField className="mih-source-bulk-dropdown" label="覆盖状态" value="" disabled={bulkSaving} placeholder="批量设置" options={COVERAGE_OPTIONS} onChange={(value) => bulkUpdate('coverageStatus', value)} />
-            <DropdownField className="mih-source-bulk-dropdown" label="实施阶段" value="" disabled={bulkSaving} placeholder="批量设置" options={DELIVERY_OPTIONS} onChange={(value) => bulkUpdate('deliveryStatus', value)} />
+            <SearchableSelect className="mih-source-bulk-dropdown" label="覆盖状态" value="" disabled={bulkSaving} placeholder="批量设置" options={COVERAGE_OPTIONS} onChange={(value) => bulkUpdate('coverageStatus', value)} />
+            <SearchableSelect className="mih-source-bulk-dropdown" label="实施阶段" value="" disabled={bulkSaving} placeholder="批量设置" options={DELIVERY_OPTIONS} onChange={(value) => bulkUpdate('deliveryStatus', value)} />
             <button type="button" className="qp-button qp-button--ghost qp-button--sm" onClick={() => setSelectedIds(new Set())}>取消选择</button>
           </div>
         ) : null}
@@ -1026,8 +1221,8 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
         <Pagination page={currentPage} pageSize={pageSize} total={visible.length} totalPages={totalPages} hasMore={currentPage < totalPages} onPageChange={setPage} label="数据源目录分页" />
       </section>
 
-      {creating ? <CatalogEntryModal token={token} facets={snapshot.facets} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setCreating(false)} onChanged={() => { setCreating(false); onRefresh() }} /> : null}
-      {editing ? <CatalogEntryModal token={token} entry={editing.entry} initialTab={editing.initialTab} facets={snapshot.facets} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setEditing(null)} onChanged={() => { setEditing(null); onRefresh() }} /> : null}
+      {creating ? <CatalogEntryModal token={token} facets={snapshot.facets} owners={managedOwners} onOwnersChanged={ownerState.refresh} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setCreating(false)} onChanged={() => { setCreating(false); onRefresh() }} /> : null}
+      {editing ? <CatalogEntryModal token={token} entry={editing.entry} initialTab={editing.initialTab} facets={snapshot.facets} owners={managedOwners} onOwnersChanged={ownerState.refresh} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setEditing(null)} onChanged={() => { setEditing(null); onRefresh() }} /> : null}
       {saveViewOpen ? (
         <Modal title="保存当前视图" description="保存筛选、分组、排序和行高；当前版本仅保存在此浏览器。" onClose={() => setSaveViewOpen(false)} footer={<><button className="qp-button qp-button--ghost" type="button" onClick={() => setSaveViewOpen(false)}>取消</button><button className="qp-button qp-button--primary" type="submit" form="save-source-view" disabled={!viewName.trim()}><FloppyDisk size={16} aria-hidden="true" />保存</button></>}>
           <form id="save-source-view" className="mih-form" onSubmit={saveCurrentView}><Field label="视图名称"><input className="qp-input" value={viewName} autoFocus onChange={(event) => setViewName(event.target.value)} placeholder="例如：P0 海外数据源" /></Field></form>
@@ -1056,6 +1251,7 @@ function emptyForm(entry) {
     deliveryStatus: entry?.deliveryStatus || 'exploring',
     reviewStatus: entry?.reviewStatus || 'needs_review',
     runtimeStatus: entry?.runtimeStatus || 'not_configured',
+    ownerId: entry?.ownerId || '',
     owner: entry?.owner || '',
     connectorHints: entry?.connectorHints || [],
     notes: entry?.notes || '',
@@ -1162,7 +1358,7 @@ function RelatedDataTab({ entry, state, onRetry }) {
   )
 }
 
-function CatalogEntryModal({ token, entry = null, initialTab = 'profile', facets, onUnauthorized, notify, onClose, onChanged }) {
+function CatalogEntryModal({ token, entry = null, initialTab = 'profile', facets, owners = [], onOwnersChanged, onUnauthorized, notify, onClose, onChanged }) {
   const [tab, setTab] = useState(initialTab)
   const [form, setForm] = useState(() => emptyForm(entry))
   const [tagDrafts, setTagDrafts] = useState({})
@@ -1171,6 +1367,21 @@ function CatalogEntryModal({ token, entry = null, initialTab = 'profile', facets
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
   const [confirmArchive, setConfirmArchive] = useState(false)
+  const [localOwners, setLocalOwners] = useState([])
+  const [ownerCreating, setOwnerCreating] = useState(false)
+  const [ownerName, setOwnerName] = useState('')
+  const [ownerSaving, setOwnerSaving] = useState(false)
+  const [ownerError, setOwnerError] = useState(null)
+  const availableOwners = useMemo(() => {
+    const byId = new Map([...owners, ...localOwners].map((owner) => [owner.id, owner]))
+    return [...byId.values()]
+  }, [localOwners, owners])
+
+  useEffect(() => {
+    if (form.ownerId || !form.owner) return
+    const matchedOwner = availableOwners.find((owner) => owner.displayName === form.owner)
+    if (matchedOwner) setForm((current) => ({ ...current, ownerId: matchedOwner.id }))
+  }, [availableOwners, form.owner, form.ownerId])
 
   useEffect(() => {
     if (!entry || tab !== 'history' || events) return
@@ -1202,6 +1413,28 @@ function CatalogEntryModal({ token, entry = null, initialTab = 'profile', facets
     draft: tagDrafts[field] || '',
     onDraftChange: (value) => setTagDrafts((current) => ({ ...current, [field]: value })),
   })
+  const createOwner = async () => {
+    const displayName = normalizeDraft(ownerName)
+    if (!displayName || ownerSaving) return
+    setOwnerSaving(true)
+    setOwnerError(null)
+    try {
+      const response = await adminApi.createSourceCatalogOwner(token, { displayName, description: null })
+      const created = response?.item || response
+      if (!created?.id) throw new Error('负责人创建成功，但响应缺少负责人标识')
+      setLocalOwners((current) => [...current, created])
+      setForm((current) => ({ ...current, ownerId: created.id, owner: created.displayName }))
+      setOwnerCreating(false)
+      setOwnerName('')
+      onOwnersChanged?.()
+      notify?.(`负责人“${created.displayName}”已创建并选中`, 'success')
+    } catch (requestError) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setOwnerError(requestError)
+    } finally {
+      setOwnerSaving(false)
+    }
+  }
   const save = async (event) => {
     event.preventDefault()
     setSaving(true)
@@ -1212,9 +1445,10 @@ function CatalogEntryModal({ token, entry = null, initialTab = 'profile', facets
         if (!next || !Array.isArray(current[field]) || current[field].includes(next)) return current
         return { ...current, [field]: [...current[field], next] }
       }, { ...form })
+      const { owner: ownerText, ownerId, ...catalogFields } = committedForm
       const payload = {
-        ...committedForm,
-        owner: committedForm.owner.trim() || null,
+        ...catalogFields,
+        ...(ownerId ? { ownerId } : ownerText.trim() ? { owner: ownerText.trim() } : { ownerId: null }),
         complianceBoundary: committedForm.complianceBoundary.trim() || null,
         notes: committedForm.notes.trim() || null,
       }
@@ -1319,7 +1553,41 @@ function CatalogEntryModal({ token, entry = null, initialTab = 'profile', facets
               <SelectField label="实施阶段（人工 / 对外）" value={form.deliveryStatus} options={DELIVERY_OPTIONS} onChange={(value) => update('deliveryStatus', value)} />
               <SelectField label="字段核验" value={form.reviewStatus} options={REVIEW_OPTIONS} onChange={(value) => update('reviewStatus', value)} />
               <Field label="运行健康（自动观测）" hint="由已关联 source、pipeline 与索引投影汇总；此处只读。"><div className="mih-source-runtime-readonly"><CatalogBadge dimension="runtime" value={form.runtimeStatus} /><small>system observed</small></div></Field>
-              <Field label="负责人" hint="负责人是人员或团队，不是 tikhub / justone 等接入供应商。"><input className="qp-input" value={form.owner} onChange={(event) => update('owner', event.target.value)} placeholder="尚未分配" /></Field>
+              <div className="mih-owner-assignment">
+                <SelectField
+                  label="负责人"
+                  value={form.ownerId}
+                  emptyLabel="尚未分配"
+                  options={availableOwners
+                    .filter((owner) => !owner.archivedAt || owner.id === form.ownerId)
+                    .map((owner) => ({ value: owner.id, label: owner.archivedAt ? `${owner.displayName}（已归档）` : owner.displayName, description: owner.description }))}
+                  onChange={(ownerId) => {
+                    const owner = availableOwners.find((candidate) => candidate.id === ownerId)
+                    setForm((current) => ({ ...current, ownerId, owner: owner?.displayName || '' }))
+                  }}
+                />
+                <button className="mih-owner-assignment__create" type="button" onClick={() => { setOwnerCreating((current) => !current); setOwnerError(null) }}><Plus size={13} aria-hidden="true" />新增负责人</button>
+                <span className="qp-field__hint">负责人是人员或团队，不是 tikhub / justone 等接入供应商。</span>
+                {ownerCreating ? (
+                  <div className="mih-owner-quick-create">
+                    <input
+                      className="qp-input"
+                      autoFocus
+                      value={ownerName}
+                      placeholder="负责人或团队名称"
+                      onChange={(event) => setOwnerName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.nativeEvent?.isComposing || event.isComposing || event.keyCode === 229) return
+                        if (event.key === 'Enter') { event.preventDefault(); createOwner() }
+                        if (event.key === 'Escape') { event.preventDefault(); setOwnerCreating(false); setOwnerName('') }
+                      }}
+                    />
+                    <button className="qp-button qp-button--primary qp-button--sm" type="button" disabled={ownerSaving || !ownerName.trim()} onClick={createOwner}>{ownerSaving ? '创建中' : '创建并选中'}</button>
+                    <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => { setOwnerCreating(false); setOwnerName(''); setOwnerError(null) }}>取消</button>
+                  </div>
+                ) : null}
+                {ownerError ? <small className="mih-owner-assignment__error">{ownerError.message || '负责人创建失败'}</small> : null}
+              </div>
             </div>
             <Field label="合规边界"><textarea className="qp-textarea" rows="5" value={form.complianceBoundary} onChange={(event) => update('complianceBoundary', event.target.value)} /></Field>
             <Field label="备注 / 待补充"><textarea className="qp-textarea" rows="4" value={form.notes} onChange={(event) => update('notes', event.target.value)} /></Field>
@@ -1459,63 +1727,146 @@ function TaxonomyTermModal({ token, term = null, kind, onUnauthorized, notify, o
   )
 }
 
+function OwnerModal({ token, owner = null, onUnauthorized, notify, onClose, onChanged }) {
+  const [form, setForm] = useState({
+    displayName: owner?.displayName || '',
+    description: owner?.description || '',
+  })
+  const [saving, setSaving] = useState(false)
+  const [confirmArchive, setConfirmArchive] = useState(false)
+  const [error, setError] = useState(null)
+  const visibleError = error?.code === 'source_catalog_owner_in_use'
+    ? { ...error, message: `无法归档“${owner?.displayName || '负责人'}”：仍有数据源由其负责。请先点击引用数量迁移这些平台。` }
+    : error
+
+  const save = async (event) => {
+    event.preventDefault()
+    const displayName = normalizeDraft(form.displayName)
+    if (!displayName) return
+    setSaving(true)
+    setError(null)
+    try {
+      const payload = { displayName, description: normalizeDraft(form.description) || null }
+      if (owner) await adminApi.updateSourceCatalogOwner(token, owner.id, { ...payload, revision: owner.revision })
+      else await adminApi.createSourceCatalogOwner(token, payload)
+      notify?.(`负责人已${owner ? '更新' : '创建'}`, 'success')
+      onChanged()
+    } catch (requestError) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setError(requestError)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const archive = async () => {
+    if (!owner) return
+    if (!confirmArchive) {
+      setConfirmArchive(true)
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      if (owner.archivedAt) await adminApi.restoreSourceCatalogOwner(token, owner.id, owner.revision)
+      else await adminApi.archiveSourceCatalogOwner(token, owner.id, owner.revision)
+      notify?.(owner.archivedAt ? '负责人已恢复' : '负责人已归档', 'success')
+      onChanged()
+    } catch (requestError) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setError(requestError)
+      setConfirmArchive(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Modal
+      title={owner ? `管理负责人 · ${owner.displayName}` : '新增负责人'}
+      description="负责人先作为独立治理对象维护；未来可显式关联登录账号，但不会把账号系统当作负责人表。"
+      onClose={onClose}
+      closeOnBackdrop={false}
+      footer={(
+        <>
+          <span>{owner ? <button className={`qp-button ${confirmArchive ? 'qp-button--danger' : 'qp-button--ghost'}`} type="button" disabled={saving} onClick={archive}>{owner.archivedAt ? <Check size={16} /> : <Archive size={16} />}{owner.archivedAt ? (confirmArchive ? '确认恢复' : '恢复负责人') : (confirmArchive ? '确认归档' : '归档负责人')}</button> : null}</span>
+          <span className="mih-page-actions"><button className="qp-button qp-button--ghost" type="button" onClick={onClose}>取消</button><button className="qp-button qp-button--primary" type="submit" form="source-owner-form" disabled={saving || !form.displayName.trim()}><FloppyDisk size={16} aria-hidden="true" />{saving ? '正在保存' : '保存'}</button></span>
+        </>
+      )}
+    >
+      {visibleError ? <ErrorState error={visibleError} /> : null}
+      <form id="source-owner-form" className="mih-form mih-source-taxonomy-form" onSubmit={save}>
+        <Field label="显示名称"><input className="qp-input" required autoFocus value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} placeholder="输入人员或团队名称" /></Field>
+        <Field label="说明" hint="可填写职责范围、团队或交接说明。"><textarea className="qp-textarea" rows="5" value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="例如：内容平台接入与监测能力负责人" /></Field>
+        <p className="mih-source-editor-callout"><UserCircle size={17} aria-hidden="true" /><span>当前负责人记录与登录账号相互独立。{owner ? `已有 ${formatNumber(owner.usageCount || 0)} 条数据源引用。` : '创建后即可在平台治理页搜索选择。'}</span></p>
+      </form>
+    </Modal>
+  )
+}
+
 function TaxonomyPage({ token, onUnauthorized, notify, onRefresh, onOpenCatalog }) {
   const load = useCallback(() => adminApi.sourceCatalogTaxonomy(token, { includeArchived: true }), [token])
   const state = useRemoteData(load, onUnauthorized)
+  const ownerLoad = useCallback(() => adminApi.sourceCatalogOwners(token, { includeArchived: true }), [token])
+  const ownerState = useRemoteData(ownerLoad, onUnauthorized)
   const [kind, setKind] = useState('major_category')
   const [query, setQuery] = useState('')
   const [showArchived, setShowArchived] = useState(false)
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState(null)
-  const kindConfig = TAXONOMY_KINDS.find((item) => item.value === kind) || TAXONOMY_KINDS[0]
+  const kindConfig = GOVERNANCE_KINDS.find((item) => item.value === kind) || TAXONOMY_KINDS[0]
   const terms = Array.isArray(state.data?.items) ? state.data.items : []
-  const visible = terms
-    .filter((term) => term.kind === kind)
-    .filter((term) => showArchived || !term.archivedAt)
-    .filter((term) => !query.trim() || [term.displayName, term.description].filter(Boolean).join('\n').toLocaleLowerCase('zh-CN').includes(query.trim().toLocaleLowerCase('zh-CN')))
+  const owners = Array.isArray(ownerState.data?.items) ? ownerState.data.items : []
+  const activeState = kind === 'owner' ? ownerState : state
+  const visible = (kind === 'owner' ? owners : terms.filter((term) => term.kind === kind))
+    .filter((item) => showArchived || !item.archivedAt)
+    .filter((item) => !query.trim() || normalizeDraft([item.displayName, item.description].filter(Boolean).join('\n')).toLocaleLowerCase('zh-CN').includes(normalizeDraft(query).toLocaleLowerCase('zh-CN')))
     .sort((left, right) => Number(left.sortOrder || 0) - Number(right.sortOrder || 0) || left.displayName.localeCompare(right.displayName, 'zh-CN'))
   const changed = () => {
     setCreating(false)
     setEditing(null)
-    state.refresh()
+    if (kind === 'owner') ownerState.refresh()
+    else state.refresh()
     onRefresh?.()
   }
 
   return (
     <section className="mih-source-taxonomy">
       <div className="qp-panel mih-source-taxonomy-manager">
-        <nav className="mih-source-taxonomy-kind-tabs" aria-label="分类词条类型">
-          {TAXONOMY_KINDS.map((item) => {
-            const count = terms.filter((term) => term.kind === item.value && !term.archivedAt).length
-            return <button type="button" aria-pressed={kind === item.value} key={item.value} onClick={() => { setKind(item.value); setQuery('') }}><span>{item.label}</span><small>{count}</small></button>
+        <nav className="mih-source-taxonomy-kind-tabs" aria-label="分类与负责人类型">
+          {GOVERNANCE_KINDS.map((item) => {
+            const count = item.value === 'owner'
+              ? owners.filter((owner) => !owner.archivedAt).length
+              : terms.filter((term) => term.kind === item.value && !term.archivedAt).length
+            return <button type="button" aria-pressed={kind === item.value} key={item.value} onClick={() => { setKind(item.value); setQuery(''); setCreating(false); setEditing(null) }}><span>{item.label}</span><small>{count}</small></button>
           })}
         </nav>
 
         <div className="mih-source-taxonomy-toolbar">
-          <div><strong>{kindConfig.label}词条</strong><p>{kindConfig.description}</p></div>
+          <div><strong>{kind === 'owner' ? '负责人管理' : `${kindConfig.label}词条`}</strong><p>{kindConfig.description}</p></div>
           <label className="mih-source-search"><MagnifyingGlass size={16} aria-hidden="true" /><input value={query} placeholder={`搜索${kindConfig.singular}名称或说明`} onChange={(event) => setQuery(event.target.value)} />{query ? <button type="button" aria-label="清空搜索" onClick={() => setQuery('')}><X size={13} /></button> : null}</label>
           <button className={`qp-button qp-button--ghost qp-button--sm${showArchived ? ' is-active' : ''}`} type="button" aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}><Archive size={15} aria-hidden="true" />{showArchived ? '隐藏已归档' : '显示已归档'}</button>
           <button className="qp-button qp-button--primary qp-button--sm" type="button" onClick={() => setCreating(true)}><Plus size={16} aria-hidden="true" />新增{kindConfig.singular}</button>
         </div>
 
-        {state.loading && !state.data ? <LoadingState label="正在加载分类词条" /> : null}
-        {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
-        {state.data ? (
+        {activeState.loading && !activeState.data ? <LoadingState label={`正在加载${kindConfig.label}`} /> : null}
+        {activeState.error ? <ErrorState error={activeState.error} onRetry={activeState.refresh} /> : null}
+        {activeState.data ? (
           <div className="qp-data-table mih-table-wrap mih-source-taxonomy-table">
-            <table className="mih-table" aria-label={`${kindConfig.label}词条管理`}>
+            <table className="mih-table" aria-label={`${kindConfig.label}管理`}>
               <thead><tr><th>名称</th><th>说明</th><th>引用</th><th>状态</th><th>最近更新</th><th aria-label="操作" /></tr></thead>
-              <tbody>{visible.map((term) => (
-                <tr className={term.archivedAt ? 'is-archived' : ''} key={term.id}>
-                  <td><button className="mih-source-taxonomy-name" type="button" onClick={() => setEditing(term)}><strong>{term.displayName}</strong><small>{term.termKey || term.id}</small></button></td>
-                  <td><p>{term.description || '尚未补充说明'}</p></td>
-                  <td><button className="mih-source-taxonomy-reference" type="button" onClick={() => onOpenCatalog(kind, term.displayName)}>{formatNumber(taxonomyReferenceCount(term))} 条数据源<ArrowRight size={12} aria-hidden="true" /></button></td>
-                  <td><span className={`mih-source-taxonomy-state${term.archivedAt ? ' is-archived' : ''}`}>{term.archivedAt ? '已归档' : '使用中'}</span></td>
-                  <td>{formatDate(term.updatedAt || term.createdAt)}</td>
-                  <td><button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`管理 ${term.displayName}`} onClick={() => setEditing(term)}><NotePencil size={16} aria-hidden="true" /></button></td>
+              <tbody>{visible.map((item) => (
+                <tr className={item.archivedAt ? 'is-archived' : ''} key={item.id}>
+                  <td><button className="mih-source-taxonomy-name" type="button" onClick={() => setEditing(item)}><strong>{item.displayName}</strong><small>{item.ownerKey || item.termKey || item.id}</small></button></td>
+                  <td><p>{item.description || '尚未补充说明'}</p></td>
+                  <td><button className="mih-source-taxonomy-reference" type="button" onClick={() => onOpenCatalog(kind, kind === 'owner' ? item.id : item.displayName)}>{formatNumber(kind === 'owner' ? item.usageCount || 0 : taxonomyReferenceCount(item))} 条数据源<ArrowRight size={12} aria-hidden="true" /></button></td>
+                  <td><span className={`mih-source-taxonomy-state${item.archivedAt ? ' is-archived' : ''}`}>{item.archivedAt ? '已归档' : '使用中'}</span></td>
+                  <td>{formatDate(item.updatedAt || item.createdAt)}</td>
+                  <td><button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`管理 ${item.displayName}`} onClick={() => setEditing(item)}><NotePencil size={16} aria-hidden="true" /></button></td>
                 </tr>
               ))}</tbody>
             </table>
-            {!visible.length ? <EmptyState icon={TreeStructure} title={`暂无${showArchived ? '符合条件的' : '可用'}${kindConfig.singular}词条`} description="可以新增词条；新词条会立即出现在数据源编辑建议中。" /> : null}
+            {!visible.length ? <EmptyState icon={kind === 'owner' ? UserCircle : TreeStructure} title={`暂无${showArchived ? '符合条件的' : '可用'}${kindConfig.singular}`} description={`可以新增${kindConfig.singular}；创建后会立即出现在数据源编辑选择中。`} /> : null}
           </div>
         ) : null}
       </div>
@@ -1529,17 +1880,27 @@ function TaxonomyPage({ token, onUnauthorized, notify, onRefresh, onOpenCatalog 
             <div><dt>runtime_status</dt><dd>{RUNTIME_OPTIONS.map((item) => item.label).join(' / ')}</dd><small>source / pipeline / index 自动观测</small></div>
           </dl>
         </Panel>
-        <Panel title="安全变更规则" subtitle="词条是稳定治理对象，不是随手改写的字符串">
-          <div className="mih-source-governance-notes">
-            <article><Tag size={18} aria-hidden="true" /><div><strong>新建后立即可选</strong><p>大类、场景与区域统一进入编辑建议，避免同义词继续分叉。</p></div></article>
-            <article><Archive size={18} aria-hidden="true" /><div><strong>引用中禁止归档</strong><p>先查看引用并完成迁移；归档不级联删除平台或历史数据。</p></div></article>
-            <article><ShieldCheck size={18} aria-hidden="true" /><div><strong>稳定标识与审计</strong><p>未引用词条可重命名；引用中先迁移，API 以 revision 防止并发覆盖。</p></div></article>
-          </div>
+        <Panel title="安全变更规则" subtitle={kind === 'owner' ? '负责人以稳定 ownerId 关联平台' : '词条是稳定治理对象，不是随手改写的字符串'}>
+          {kind === 'owner' ? (
+            <div className="mih-source-governance-notes">
+              <article><UserCircle size={18} aria-hidden="true" /><div><strong>独立负责人表</strong><p>当前不依赖登录账号；未来只通过显式字段关联账号。</p></div></article>
+              <article><NotePencil size={18} aria-hidden="true" /><div><strong>引用中可以改名</strong><p>平台保存 ownerId，改名会安全同步显示文本，不会让保存视图失效。</p></div></article>
+              <article><Archive size={18} aria-hidden="true" /><div><strong>引用中禁止归档</strong><p>点击引用数量查看活动与已归档平台，完成改派或清空后再归档负责人。</p></div></article>
+            </div>
+          ) : (
+            <div className="mih-source-governance-notes">
+              <article><Tag size={18} aria-hidden="true" /><div><strong>新建后立即可选</strong><p>大类、场景与区域统一进入编辑选择，避免自由文本继续分叉。</p></div></article>
+              <article><Archive size={18} aria-hidden="true" /><div><strong>引用中禁止归档</strong><p>先查看引用并完成迁移；归档不级联删除平台或历史数据。</p></div></article>
+              <article><ShieldCheck size={18} aria-hidden="true" /><div><strong>稳定标识与审计</strong><p>未引用词条可重命名；引用中先迁移，API 以 revision 防止并发覆盖。</p></div></article>
+            </div>
+          )}
         </Panel>
       </div>
 
-      {creating ? <TaxonomyTermModal token={token} kind={kind} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setCreating(false)} onChanged={changed} /> : null}
-      {editing ? <TaxonomyTermModal token={token} term={editing} kind={editing.kind} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setEditing(null)} onChanged={changed} /> : null}
+      {creating && kind === 'owner' ? <OwnerModal token={token} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setCreating(false)} onChanged={changed} /> : null}
+      {creating && kind !== 'owner' ? <TaxonomyTermModal token={token} kind={kind} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setCreating(false)} onChanged={changed} /> : null}
+      {editing && kind === 'owner' ? <OwnerModal token={token} owner={editing} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setEditing(null)} onChanged={changed} /> : null}
+      {editing && kind !== 'owner' ? <TaxonomyTermModal token={token} term={editing} kind={editing.kind} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setEditing(null)} onChanged={changed} /> : null}
     </section>
   )
 }
@@ -1608,7 +1969,7 @@ export function SourceCatalogPage({ token, query, setQuery, onUnauthorized, noti
   const heading = section === 'catalog'
     ? { eyebrow: 'CATALOG / MULTI-DIMENSIONAL / GOVERNANCE', title: '多维数据源目录', description: '同一底表上的保存视图、筛选、分组、批量状态、编辑、归档与导出。' }
     : section === 'taxonomy'
-      ? { eyebrow: 'TAXONOMY / FIELDS / OVERRIDES', title: '分类与字段治理', description: '把大类、场景、区域、能力模板与平台实测证据拆开治理。' }
+      ? { eyebrow: 'TAXONOMY / OWNERS / FIELDS', title: '分类与字段治理', description: '集中管理大类、场景、区域和负责人，并与平台实测证据拆开治理。' }
       : section === 'plans'
         ? { eyebrow: 'ACQUIRE / CLEAN / ARCHIVE / PUBLISH', title: '计划与实施证据', description: '目录说明“做什么”，计划说明“怎么做”，Agent 只是可审核的受控步骤。' }
         : { eyebrow: 'SOURCE CATALOG / COVERAGE / EVIDENCE', title: '数据源覆盖总览', description: '基于 215 条权威目录观察覆盖、优先级、实施阶段、负责人和字段核验。' }
@@ -1631,7 +1992,7 @@ export function SourceCatalogPage({ token, query, setQuery, onUnauthorized, noti
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       {section === 'overview' ? <SourceCatalogOverview snapshot={snapshot} onOpenCatalog={openCatalog} /> : null}
       {section === 'catalog' ? <SourceCatalogTable snapshot={snapshot} token={token} onUnauthorized={onUnauthorized} notify={notify} onRefresh={state.refresh} requestedView={catalogViewRequest} onRequestedViewHandled={() => setCatalogViewRequest('')} requestedTermKind={requestedTermKind} requestedTermValue={requestedTermValue} /> : null}
-      {section === 'taxonomy' ? <TaxonomyPage token={token} onUnauthorized={onUnauthorized} notify={notify} onRefresh={state.refresh} onOpenCatalog={(termKind, termValue) => openCatalog('all', termKind, termValue)} /> : null}
+      {section === 'taxonomy' ? <TaxonomyPage token={token} onUnauthorized={onUnauthorized} notify={notify} onRefresh={state.refresh} onOpenCatalog={(termKind, termValue) => openCatalog(REFERENCE_VIEW.id, termKind, termValue)} /> : null}
       {section === 'plans' ? <PlansPage snapshot={snapshot} /> : null}
 
       <footer className="mih-command-footer" aria-label="数据源目录状态">

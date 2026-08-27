@@ -111,6 +111,14 @@ function parentId(value) {
   return value.toLowerCase()
 }
 
+function managedOwnerId(value) {
+  if (value == null || value === '') return null
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
+    throw new AppError(400, 'invalid_source_catalog_field', 'ownerId must be a UUID')
+  }
+  return value.toLowerCase()
+}
+
 function evidenceRefs(value) {
   if (value == null) return []
   if (!Array.isArray(value) || value.length > 32) {
@@ -192,6 +200,7 @@ function normalizeKnownFields(input, { partial }) {
     normalized.sourceKind = choice(source.sourceKind ?? 'platform', 'sourceKind', SOURCE_KINDS)
   }
   if (!partial || hasOwn(source, 'parentSourceId')) normalized.parentSourceId = parentId(source.parentSourceId)
+  if (!partial || hasOwn(source, 'ownerId')) normalized.ownerId = managedOwnerId(source.ownerId)
   if (!partial || hasOwn(source, 'priority')) {
     normalized.priority = choice(source.priority ?? 'P2', 'priority', SOURCE_PRIORITIES)
   }
@@ -223,6 +232,7 @@ export function normalizeSourceCatalogCreate(input) {
     ...Object.keys(ARRAY_FIELDS),
     'sourceKind',
     'parentSourceId',
+    'ownerId',
     'priority',
     'coverageStatus',
     'deliveryStatus',
@@ -261,6 +271,7 @@ export function normalizeSourceCatalogPatch(input) {
     ...Object.keys(ARRAY_FIELDS),
     'sourceKind',
     'parentSourceId',
+    'ownerId',
     'priority',
     'coverageStatus',
     'deliveryStatus',
@@ -349,6 +360,51 @@ export function normalizeSourceCatalogTermPatch(input) {
   return patch
 }
 
+export function normalizeSourceCatalogOwnerCreate(input) {
+  const source = asObject(input)
+  const allowed = new Set(['ownerKey', 'displayName', 'description', 'linkedAccountId'])
+  const unsupported = Object.keys(source).filter((field) => !allowed.has(field))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_fields', `Unsupported source catalog owner fields: ${unsupported.join(', ')}`)
+  }
+  const ownerKey = text(source.ownerKey, 'ownerKey', { required: true, maximum: 128 })
+  if (!SOURCE_KEY_PATTERN.test(ownerKey)) {
+    throw new AppError(400, 'invalid_source_catalog_owner_field', 'ownerKey must use lowercase letters, numbers, dots, underscores or hyphens')
+  }
+  const displayName = text(source.displayName, 'displayName', { required: true, maximum: 160 })
+  return {
+    ownerKey,
+    displayName,
+    normalizedName: sourceCatalogTermNormalizedName(displayName),
+    description: text(source.description, 'description', { maximum: 2_000 }),
+    linkedAccountId: text(source.linkedAccountId, 'linkedAccountId', { maximum: 160 }),
+  }
+}
+
+export function normalizeSourceCatalogOwnerPatch(input) {
+  const source = asObject(input)
+  const allowed = new Set(['displayName', 'description', 'linkedAccountId'])
+  const unsupported = Object.keys(source).filter((field) => field !== 'revision' && !allowed.has(field))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_fields', `Unsupported source catalog owner fields: ${unsupported.join(', ')}`)
+  }
+  const patch = {}
+  if (hasOwn(source, 'displayName')) {
+    patch.displayName = text(source.displayName, 'displayName', { required: true, maximum: 160 })
+    patch.normalizedName = sourceCatalogTermNormalizedName(patch.displayName)
+  }
+  if (hasOwn(source, 'description')) {
+    patch.description = text(source.description, 'description', { maximum: 2_000 })
+  }
+  if (hasOwn(source, 'linkedAccountId')) {
+    patch.linkedAccountId = text(source.linkedAccountId, 'linkedAccountId', { maximum: 160 })
+  }
+  if (Object.keys(patch).length === 0) {
+    throw new AppError(400, 'empty_source_catalog_owner_patch', 'At least one editable owner field is required')
+  }
+  return patch
+}
+
 export function sourceCatalogRevision(value) {
   if (!Number.isInteger(value) || value <= 0) {
     throw new AppError(400, 'invalid_source_catalog_revision', 'revision must be a positive integer')
@@ -364,6 +420,13 @@ export function sourceCatalogId(value) {
 }
 
 export const sourceCatalogTermId = sourceCatalogId
+
+export function sourceCatalogOwnerId(value) {
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
+    throw new AppError(400, 'invalid_source_catalog_owner_id', 'Source catalog owner id must be a UUID')
+  }
+  return value.toLowerCase()
+}
 
 export function sourceCatalogTermSnapshot(items) {
   const ordered = [...(items || [])].sort((left, right) => (
@@ -381,6 +444,22 @@ export function sourceCatalogTermSnapshot(items) {
         kind,
         active.filter((item) => item.kind === kind).length,
       ])),
+    },
+  }
+}
+
+export function sourceCatalogOwnerSnapshot(items) {
+  const ordered = [...(items || [])].sort((left, right) => (
+    left.displayName.localeCompare(right.displayName, 'zh-CN') || left.id.localeCompare(right.id)
+  ))
+  const active = ordered.filter((item) => !item.archivedAt)
+  return {
+    items: ordered,
+    summary: {
+      total: active.length,
+      archived: ordered.length - active.length,
+      assigned: active.filter((item) => Number(item.usageCount || 0) > 0).length,
+      unassigned: active.filter((item) => Number(item.usageCount || 0) === 0).length,
     },
   }
 }

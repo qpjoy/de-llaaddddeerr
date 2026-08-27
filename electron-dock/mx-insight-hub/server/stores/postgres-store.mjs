@@ -3231,28 +3231,32 @@ export class PostgresStore {
     try {
       return await withPgTransaction(this.pool, async (client) => {
         await this.#assertSourceCatalogTaxonomyAvailable(client, input)
+        const managedInput = { ...input }
+        if (managedInput.ownerId) {
+          managedInput.owner = (await this.#requireAssignableSourceCatalogOwner(client, managedInput.ownerId)).displayName
+        }
         const { rows } = await client.query(
           `INSERT INTO catalog.source_catalog_entries
              (id, source_key, legacy_sequence, canonical_name, aliases, source_kind,
               parent_source_id, major_category, scenarios, regions, entry_modules,
               monitorable_content, extractable_clues, tracking_fields, suggested_access,
               compliance_boundary, priority, coverage_status, delivery_status, review_status,
-              runtime_status, owner, connector_hints, notes, tags, evidence_refs,
+              runtime_status, owner, owner_id, connector_hints, notes, tags, evidence_refs,
               custom_fields, imported_from)
            VALUES
              ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
               $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
-              $27, $28)
+              $27, $28, $29)
            RETURNING *`,
           [
-            randomUUID(), input.sourceKey, input.legacySequence, input.canonicalName,
-            input.aliases, input.sourceKind, input.parentSourceId, input.majorCategory,
-            input.scenarios, input.regions, input.entryModules, input.monitorableContent,
-            input.extractableClues, input.trackingFields, input.suggestedAccess,
-            input.complianceBoundary, input.priority, input.coverageStatus,
-            input.deliveryStatus, input.reviewStatus, input.runtimeStatus, input.owner,
-            input.connectorHints, input.notes, input.tags, JSON.stringify(input.evidenceRefs),
-            input.customFields, input.importedFrom,
+            randomUUID(), managedInput.sourceKey, managedInput.legacySequence, managedInput.canonicalName,
+            managedInput.aliases, managedInput.sourceKind, managedInput.parentSourceId, managedInput.majorCategory,
+            managedInput.scenarios, managedInput.regions, managedInput.entryModules, managedInput.monitorableContent,
+            managedInput.extractableClues, managedInput.trackingFields, managedInput.suggestedAccess,
+            managedInput.complianceBoundary, managedInput.priority, managedInput.coverageStatus,
+            managedInput.deliveryStatus, managedInput.reviewStatus, managedInput.runtimeStatus, managedInput.owner,
+            managedInput.ownerId, managedInput.connectorHints, managedInput.notes, managedInput.tags,
+            JSON.stringify(managedInput.evidenceRefs), managedInput.customFields, managedInput.importedFrom,
           ],
         )
         const entry = sourceCatalogEntry(rows[0])
@@ -3299,6 +3303,32 @@ export class PostgresStore {
         throw new AppError(400, 'invalid_source_catalog_parent', 'A source catalog entry cannot be its own parent')
       }
       const merged = { ...before, ...patch }
+      if (Object.prototype.hasOwnProperty.call(patch, 'ownerId')) {
+        if (patch.ownerId) {
+          merged.owner = (await this.#requireAssignableSourceCatalogOwner(client, patch.ownerId)).displayName
+        } else if (patch.owner) {
+          merged.owner = patch.owner
+        } else {
+          merged.owner = null
+        }
+      } else if (Object.prototype.hasOwnProperty.call(patch, 'owner')) {
+        const managedOwner = before.ownerId
+          ? await this.#requireAssignableSourceCatalogOwner(client, before.ownerId)
+          : null
+        if (
+          !patch.owner
+          || !managedOwner
+          || sourceCatalogComparableName(patch.owner)
+            !== sourceCatalogComparableName(managedOwner.displayName)
+        ) {
+          merged.ownerId = null
+        } else {
+          merged.ownerId = managedOwner.id
+          merged.owner = managedOwner.displayName
+        }
+      } else if (merged.ownerId) {
+        merged.owner = (await this.#requireAssignableSourceCatalogOwner(client, merged.ownerId)).displayName
+      }
       if (
         patch.canonicalName
         && sourceCatalogComparableName(patch.canonicalName)
@@ -3331,12 +3361,13 @@ export class PostgresStore {
                 review_status = $19,
                 runtime_status = $20,
                 owner = $21,
-                connector_hints = $22,
-                notes = $23,
-                tags = $24,
-                evidence_refs = $25,
-                custom_fields = $26,
-                archived_at = $27,
+                owner_id = $22,
+                connector_hints = $23,
+                notes = $24,
+                tags = $25,
+                evidence_refs = $26,
+                custom_fields = $27,
+                archived_at = $28,
                 revision = revision + 1,
                 updated_at = now()
           WHERE id = $1 AND revision = $2
@@ -3347,9 +3378,9 @@ export class PostgresStore {
           merged.entryModules, merged.monitorableContent, merged.extractableClues,
           merged.trackingFields, merged.suggestedAccess, merged.complianceBoundary,
           merged.priority, merged.coverageStatus, merged.deliveryStatus,
-          merged.reviewStatus, merged.runtimeStatus, merged.owner, merged.connectorHints,
-          merged.notes, merged.tags, JSON.stringify(merged.evidenceRefs), merged.customFields,
-          merged.archivedAt,
+          merged.reviewStatus, merged.runtimeStatus, merged.owner, merged.ownerId,
+          merged.connectorHints, merged.notes, merged.tags, JSON.stringify(merged.evidenceRefs),
+          merged.customFields, merged.archivedAt,
         ],
       )
       const entry = sourceCatalogEntry(rows[0])
@@ -3398,6 +3429,187 @@ export class PostgresStore {
       [entryId, safeLimit],
     )
     return rows.map(sourceCatalogEvent)
+  }
+
+  async listSourceCatalogOwners({ includeArchived = false } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT owner.*, count(entry.id)::integer AS usage_count
+         FROM catalog.source_catalog_owners owner
+         LEFT JOIN catalog.source_catalog_entries entry ON entry.owner_id = owner.id
+        WHERE $1::boolean OR owner.archived_at IS NULL
+        GROUP BY owner.id
+        ORDER BY owner.display_name, owner.id`,
+      [includeArchived === true],
+    )
+    return rows.map(sourceCatalogOwner)
+  }
+
+  async getSourceCatalogOwner(id, client = this.pool) {
+    const { rows } = await client.query(
+      `SELECT owner.*, count(entry.id)::integer AS usage_count
+         FROM catalog.source_catalog_owners owner
+         LEFT JOIN catalog.source_catalog_entries entry ON entry.owner_id = owner.id
+        WHERE owner.id = $1
+        GROUP BY owner.id`,
+      [id],
+    )
+    return sourceCatalogOwner(rows[0])
+  }
+
+  async createSourceCatalogOwner(input, { actor = 'admin-token' } = {}) {
+    try {
+      return await withPgTransaction(this.pool, async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO catalog.source_catalog_owners
+             (id, owner_key, display_name, normalized_name, description, linked_account_id)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING *`,
+          [
+            randomUUID(), input.ownerKey, input.displayName, input.normalizedName,
+            input.description, input.linkedAccountId,
+          ],
+        )
+        const owner = sourceCatalogOwner({ ...rows[0], usage_count: 0 })
+        await client.query(
+          `INSERT INTO catalog.source_catalog_owner_events
+             (id, owner_id, event_type, actor, from_revision, to_revision, changes)
+           VALUES ($1, $2, 'create', $3, NULL, 1, $4)`,
+          [randomUUID(), owner.id, actor, { after: owner }],
+        )
+        return owner
+      })
+    } catch (error) {
+      if (error?.code === '23505') {
+        if (String(error.constraint || '').includes('linked_account')) {
+          throw new AppError(409, 'source_catalog_owner_account_conflict', 'This login account is already linked to another source catalog owner')
+        }
+        throw new AppError(409, 'source_catalog_owner_exists', 'A source catalog owner with this key or name already exists')
+      }
+      throw error
+    }
+  }
+
+  async updateSourceCatalogOwner(id, patch, {
+    expectedRevision,
+    actor = 'admin-token',
+    eventType = 'update',
+  } = {}) {
+    try {
+      return await withPgTransaction(this.pool, async (client) => {
+        const currentResult = await client.query(
+          `SELECT * FROM catalog.source_catalog_owners WHERE id = $1 FOR UPDATE`,
+          [id],
+        )
+        const current = sourceCatalogOwner(currentResult.rows[0])
+        if (!current) throw new AppError(404, 'source_catalog_owner_not_found', 'Source catalog owner was not found')
+        if (current.revision !== expectedRevision) {
+          throw new AppError(409, 'source_catalog_owner_revision_conflict', 'Source catalog owner changed; reload before saving', {
+            expectedRevision,
+            currentRevision: current.revision,
+          })
+        }
+        const usageCount = await this.#sourceCatalogOwnerUsage(client, id)
+        if (patch.archivedAt && usageCount > 0) {
+          throw new AppError(409, 'source_catalog_owner_in_use', 'Referenced source catalog owners cannot be archived', {
+            usageCount,
+          })
+        }
+        const merged = { ...current, ...patch }
+        const { rows } = await client.query(
+          `UPDATE catalog.source_catalog_owners
+              SET display_name = $3,
+                  normalized_name = $4,
+                  description = $5,
+                  linked_account_id = $6,
+                  archived_at = $7,
+                  revision = revision + 1,
+                  updated_at = now()
+            WHERE id = $1 AND revision = $2
+            RETURNING *`,
+          [
+            id, expectedRevision, merged.displayName, merged.normalizedName,
+            merged.description, merged.linkedAccountId, merged.archivedAt,
+          ],
+        )
+        const owner = sourceCatalogOwner({ ...rows[0], usage_count: usageCount })
+        if (patch.displayName) {
+          await client.query(
+            `UPDATE catalog.source_catalog_entries SET owner = $2 WHERE owner_id = $1`,
+            [id, owner.displayName],
+          )
+        }
+        await client.query(
+          `INSERT INTO catalog.source_catalog_owner_events
+             (id, owner_id, event_type, actor, from_revision, to_revision, changes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            randomUUID(), id, eventType, actor, current.revision, owner.revision,
+            { before: { ...current, usageCount }, after: owner },
+          ],
+        )
+        return owner
+      })
+    } catch (error) {
+      if (error?.code === '23505') {
+        if (String(error.constraint || '').includes('linked_account')) {
+          throw new AppError(409, 'source_catalog_owner_account_conflict', 'This login account is already linked to another source catalog owner')
+        }
+        throw new AppError(409, 'source_catalog_owner_exists', 'A source catalog owner with this name already exists')
+      }
+      throw error
+    }
+  }
+
+  async archiveSourceCatalogOwner(id, options = {}) {
+    return this.updateSourceCatalogOwner(id, { archivedAt: new Date().toISOString() }, {
+      ...options,
+      eventType: 'archive',
+    })
+  }
+
+  async restoreSourceCatalogOwner(id, options = {}) {
+    return this.updateSourceCatalogOwner(id, { archivedAt: null }, {
+      ...options,
+      eventType: 'restore',
+    })
+  }
+
+  async listSourceCatalogOwnerEvents(ownerId, limit = 50) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200))
+    const { rows } = await this.pool.query(
+      `SELECT *
+         FROM catalog.source_catalog_owner_events
+        WHERE owner_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2`,
+      [ownerId, safeLimit],
+    )
+    return rows.map(sourceCatalogOwnerEvent)
+  }
+
+  async #sourceCatalogOwnerUsage(client, ownerId) {
+    const { rows } = await client.query(
+      `SELECT count(*)::integer AS usage_count
+         FROM catalog.source_catalog_entries
+        WHERE owner_id = $1`,
+      [ownerId],
+    )
+    return Number(rows[0]?.usage_count || 0)
+  }
+
+  async #requireAssignableSourceCatalogOwner(client, ownerId) {
+    const { rows } = await client.query(
+      `SELECT * FROM catalog.source_catalog_owners WHERE id = $1 FOR KEY SHARE`,
+      [ownerId],
+    )
+    const owner = sourceCatalogOwner(rows[0])
+    if (!owner) throw new AppError(404, 'source_catalog_owner_not_found', 'Source catalog owner was not found')
+    if (owner.archivedAt) {
+      throw new AppError(409, 'source_catalog_owner_archived', 'Archived source catalog owners cannot be assigned', {
+        ownerId,
+      })
+    }
+    return owner
   }
 
   async #replaceSourceCatalogEntryNames(client, entry) {
@@ -5066,6 +5278,7 @@ function sourceCatalogEntry(row) {
     reviewStatus: row.review_status,
     runtimeStatus: row.runtime_status,
     owner: row.owner,
+    ownerId: row.owner_id,
     connectorHints: row.connector_hints || [],
     notes: row.notes,
     tags: row.tags || [],
@@ -5114,6 +5327,35 @@ function sourceCatalogTermEvent(row) {
   return row && {
     id: row.id,
     termId: row.term_id,
+    eventType: row.event_type,
+    actor: row.actor,
+    fromRevision: row.from_revision == null ? null : Number(row.from_revision),
+    toRevision: Number(row.to_revision),
+    changes: row.changes || {},
+    createdAt: iso(row.created_at),
+  }
+}
+
+function sourceCatalogOwner(row) {
+  return row && {
+    id: row.id,
+    ownerKey: row.owner_key,
+    displayName: row.display_name,
+    normalizedName: row.normalized_name,
+    description: row.description,
+    linkedAccountId: row.linked_account_id,
+    usageCount: Number(row.usage_count || 0),
+    revision: Number(row.revision || 1),
+    archivedAt: iso(row.archived_at),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  }
+}
+
+function sourceCatalogOwnerEvent(row) {
+  return row && {
+    id: row.id,
+    ownerId: row.owner_id,
     eventType: row.event_type,
     actor: row.actor,
     fromRevision: row.from_revision == null ? null : Number(row.from_revision),

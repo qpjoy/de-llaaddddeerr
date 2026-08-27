@@ -64,6 +64,10 @@ run、dataset、文档或 ES 投影。平台详情按规范名称与 alias 汇�
 不能重命名或归档，服务端返回 409 和引用数量，必须先显式迁移引用。词条变更绝不级联删除平台、
 canonical 数据或历史证据。
 
+负责人同样是 Hub-owned 的独立治理对象。目录通过 `owner_id` 建立稳定引用；已有自由文本只作为
+兼容展示投影迁移。Phase 1 不要求负责人关联登录账号，只预留可空的 `linked_account_id`，且不建立
+Launcher 外键或查询依赖。被任意活动或已归档目录引用的负责人必须先改派，才能软归档。
+
 ### 2. 覆盖在 capability 粒度记录
 
 平台目录项至少包含一个 versioned capability。`content.search`、`comments.list`、

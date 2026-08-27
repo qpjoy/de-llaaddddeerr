@@ -9,11 +9,15 @@ import { publicStoredSearchItem } from './data/stored-search.mjs'
 import { normalizeChinaProvince } from './data/china-provinces.mjs'
 import {
   normalizeSourceCatalogCreate,
+  normalizeSourceCatalogOwnerCreate,
+  normalizeSourceCatalogOwnerPatch,
   normalizeSourceCatalogPatch,
   normalizeSourceCatalogTermCreate,
   normalizeSourceCatalogTermPatch,
   SOURCE_CATALOG_TERM_KINDS,
   sourceCatalogId,
+  sourceCatalogOwnerId,
+  sourceCatalogOwnerSnapshot,
   sourceCatalogRevision,
   sourceCatalogSnapshot,
   sourceCatalogTermId,
@@ -1643,6 +1647,98 @@ export function createApp({
           actor: principal.memberId || principal.kind || 'admin-token',
         })
         sendJson(response, 201, { data, requestId })
+        return
+      }
+
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/source-catalog/owners') {
+        requireSourceAdmin(principal)
+        const includeArchived = url.searchParams.get('includeArchived') === 'true'
+        const owners = await store.listSourceCatalogOwners({ includeArchived })
+        sendJson(response, 200, { data: sourceCatalogOwnerSnapshot(owners), requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/source-catalog/owners') {
+        requireSourceAdmin(principal)
+        const body = await readJson(request)
+        const input = normalizeSourceCatalogOwnerCreate({
+          ...body,
+          ownerKey: body?.ownerKey || `owner-${randomUUID()}`,
+        })
+        const data = await store.createSourceCatalogOwner(input, {
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 201, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/owners/:id/events')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        const ownerId = sourceCatalogOwnerId(params.id)
+        const owner = await store.getSourceCatalogOwner(ownerId)
+        if (!owner) throw new AppError(404, 'source_catalog_owner_not_found', 'Source catalog owner was not found')
+        const requestedLimit = Number(url.searchParams.get('limit') || 50)
+        const limit = Number.isInteger(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 200)) : 50
+        sendJson(response, 200, {
+          data: await store.listSourceCatalogOwnerEvents(ownerId, limit),
+          requestId,
+        })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/owners/:id/archive')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        const ownerId = sourceCatalogOwnerId(params.id)
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'revision')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported owner archive fields: ${unsupported.join(', ')}`)
+        }
+        const data = await store.archiveSourceCatalogOwner(ownerId, {
+          expectedRevision: sourceCatalogRevision(body?.revision),
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/owners/:id/restore')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        const ownerId = sourceCatalogOwnerId(params.id)
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'revision')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported owner restore fields: ${unsupported.join(', ')}`)
+        }
+        const data = await store.restoreSourceCatalogOwner(ownerId, {
+          expectedRevision: sourceCatalogRevision(body?.revision),
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/owners/:id')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        const data = await store.getSourceCatalogOwner(sourceCatalogOwnerId(params.id))
+        if (!data) throw new AppError(404, 'source_catalog_owner_not_found', 'Source catalog owner was not found')
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        const ownerId = sourceCatalogOwnerId(params.id)
+        const body = await readJson(request)
+        const revision = sourceCatalogRevision(body?.revision)
+        const patch = normalizeSourceCatalogOwnerPatch(body)
+        const data = await store.updateSourceCatalogOwner(ownerId, patch, {
+          expectedRevision: revision,
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 200, { data, requestId })
         return
       }
 
