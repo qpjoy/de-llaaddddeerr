@@ -981,6 +981,116 @@ export function createApp({
         })
         return
       }
+      if (
+        request.method === 'GET'
+        && pathname === '/internal/v1/admin/data-products/telegram/chats'
+      ) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductTelegramChats(
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      let params = routeMatch(
+        pathname,
+        '/internal/v1/admin/data-products/telegram/chats/:chatId/messages',
+      )
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductTelegramMessages(
+            params.chatId,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'POST'
+        && pathname === '/internal/v1/admin/data-products/telegram/search'
+      ) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductTelegramSearch(await readJson(request)),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(
+        pathname,
+        '/internal/v1/admin/data-products/telegram/items/:id/context',
+      )
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductTelegramContext(
+            params.id,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'GET'
+        && pathname === '/internal/v1/admin/data-products/public-opinion/regions'
+      ) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductPublicOpinionRegions(
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'GET'
+        && pathname === '/internal/v1/admin/data-products/public-opinion/province-coverage'
+      ) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductPublicOpinionCoverage(
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(
+        pathname,
+        '/internal/v1/admin/data-products/public-opinion/provinces/:province/items',
+      )
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductPublicOpinionProvince(
+            params.province,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(
+        pathname,
+        '/internal/v1/admin/data-products/public-opinion/items/:id',
+      )
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminDataProductPublicOpinionItem(
+            params.id,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/search/reindex') {
         requireSourceAdmin(principal)
         if (!searchReindex) {
@@ -1297,7 +1407,7 @@ export function createApp({
         sendJson(response, 201, { data: await service.createTenant(await readJson(request)), requestId })
         return
       }
-      let params = routeMatch(pathname, '/internal/v1/admin/tenants/:id')
+      params = routeMatch(pathname, '/internal/v1/admin/tenants/:id')
       if (request.method === 'PUT' && params) {
         requireTenantCapability(principal, params.id, 'tenant.write')
         sendJson(response, 200, { data: await service.renameTenant(params.id, await readJson(request)), requestId })

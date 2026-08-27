@@ -2,9 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Brain,
   Books,
+  Broadcast,
+  CaretDown,
+  ChatsCircle,
   Database,
   DownloadSimple,
   MagnifyingGlass,
+  NewspaperClipping,
+  Package,
   Pulse,
   ChartLine,
   Coins,
@@ -33,9 +38,22 @@ import {
 } from './pages.jsx'
 import { AgentPage, BackfillPage, RetrievalPage, SourcesPage } from './pages-data.jsx'
 import { DataCenterPage } from './pages-catalog.jsx'
+import {
+  PublicOpinionPage,
+  TelegramChannelsPage,
+  TelegramGroupsPage,
+} from './pages-data-products.jsx'
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
 
 const SESSION_KEY = 'mx-insight-hub.admin-token'
+const DATA_PRODUCTS_NAV_KEY = 'data-products'
+const NAV_PARENTS = {
+  [DATA_PRODUCTS_NAV_KEY]: {
+    label: '数据产品',
+    description: '目录与业务数据展示',
+    icon: Package,
+  },
+}
 
 // `capability` gates the route against what the session actually grants. The
 // console renders itself from the server's answer rather than from a local role
@@ -47,7 +65,10 @@ const ROUTES = [
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
   { path: '/platforms', label: '开放能力', description: '数据平台与通用 API', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
-  { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/telegram/channels', label: 'Telegram 公开频道', description: '频道与已存消息', icon: Broadcast, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramChannelsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/telegram/groups', label: 'Telegram 公开群组', description: '群组与对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramGroupsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/sources', label: '数据清洗计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
@@ -246,29 +267,88 @@ function SessionGate({ checking, message, onAuthenticate }) {
 
 function Navigation({ activePath, onNavigate, routes = ROUTES }) {
   const groups = [...new Set(routes.map((route) => route.group))]
+  const activeParent = routes.find((route) => route.path === activePath)?.navParent || null
+  const [expandedParents, setExpandedParents] = useState(() => new Set(activeParent ? [activeParent] : []))
+
+  useEffect(() => {
+    if (!activeParent) return
+    setExpandedParents((current) => {
+      if (current.has(activeParent)) return current
+      const next = new Set(current)
+      next.add(activeParent)
+      return next
+    })
+  }, [activeParent])
+
+  const toggleParent = (key) => {
+    setExpandedParents((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const routeLink = (route, child = false) => {
+    const Icon = route.icon
+    const active = route.path === activePath
+    return (
+      <a
+        className={`mih-nav__item${child ? ' mih-nav__child' : ''}${active ? ' is-active' : ''}`}
+        href={`#${route.path}`}
+        aria-current={active ? 'page' : undefined}
+        onClick={onNavigate}
+        key={route.path}
+      >
+        <Icon size={child ? 16 : 18} weight={active ? 'duotone' : 'regular'} aria-hidden="true" />
+        <span><strong>{route.label}</strong><small>{route.description}</small></span>
+      </a>
+    )
+  }
+
   return (
     <nav className="mih-nav" aria-label="管理台导航">
-      {groups.map((group) => (
-        <section className="mih-nav__group" key={group}>
-          <h2>{group}</h2>
-          {routes.filter((route) => route.group === group).map((route) => {
-            const Icon = route.icon
-            const active = route.path === activePath
-            return (
-              <a
-                className={`mih-nav__item${active ? ' is-active' : ''}`}
-                href={`#${route.path}`}
-                aria-current={active ? 'page' : undefined}
-                onClick={onNavigate}
-                key={route.path}
-              >
-                <Icon size={18} weight={active ? 'duotone' : 'regular'} aria-hidden="true" />
-                <span><strong>{route.label}</strong><small>{route.description}</small></span>
-              </a>
-            )
-          })}
-        </section>
-      ))}
+      {groups.map((group) => {
+        const groupRoutes = routes.filter((route) => route.group === group)
+        const renderedParents = new Set()
+        return (
+          <section className="mih-nav__group" key={group}>
+            <h2>{group}</h2>
+            {groupRoutes.map((route) => {
+              if (!route.navParent) return routeLink(route)
+              if (renderedParents.has(route.navParent)) return null
+              renderedParents.add(route.navParent)
+              const parent = NAV_PARENTS[route.navParent]
+              const children = groupRoutes.filter((candidate) => candidate.navParent === route.navParent)
+              if (!parent || children.length === 0) return null
+              const ParentIcon = parent.icon
+              const expanded = expandedParents.has(route.navParent)
+              const parentActive = children.some((candidate) => candidate.path === activePath)
+              const childrenId = `mih-nav-children-${route.navParent}`
+              return (
+                <div className={`mih-nav__branch${parentActive ? ' is-active' : ''}`} key={route.navParent}>
+                  <button
+                    className="mih-nav__item mih-nav__parent"
+                    type="button"
+                    aria-expanded={expanded}
+                    aria-controls={childrenId}
+                    onClick={() => toggleParent(route.navParent)}
+                  >
+                    <ParentIcon size={18} weight={parentActive ? 'duotone' : 'regular'} aria-hidden="true" />
+                    <span><strong>{parent.label}</strong><small>{parent.description}</small></span>
+                    <CaretDown className="mih-nav__parent-caret" size={14} aria-hidden="true" />
+                  </button>
+                  {expanded ? (
+                    <div className="mih-nav__children" id={childrenId}>
+                      {children.map((child) => routeLink(child, true))}
+                    </div>
+                  ) : null}
+                </div>
+              )
+            })}
+          </section>
+        )
+      })}
     </nav>
   )
 }

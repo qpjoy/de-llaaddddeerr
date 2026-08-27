@@ -251,6 +251,41 @@ export const adminApi = {
     `${ADMIN_ROOT}/source-catalog/owners/${encodeURIComponent(id)}/events`,
     { query: { limit } },
   ),
+
+  // Read-only business presentations. These routes deliberately use the
+  // admin session rather than borrowing a consumer API key, so inspecting a
+  // showcase neither consumes customer quota nor exposes a reusable secret in
+  // the renderer.
+  dataProductTelegramChats: (token, query = {}) => request(
+    token, `${ADMIN_ROOT}/data-products/telegram/chats`, { query },
+  ),
+  dataProductTelegramMessages: (token, chatId, query = {}) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/telegram/chats/${encodeURIComponent(chatId)}/messages`,
+    { query },
+  ),
+  searchDataProductTelegram: (token, body) => request(
+    token, `${ADMIN_ROOT}/data-products/telegram/search`, { method: 'POST', body },
+  ),
+  dataProductTelegramContext: (token, id, query = {}) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/telegram/items/${encodeURIComponent(id)}/context`,
+    { query },
+  ),
+  dataProductPublicOpinionRegions: (token) => request(
+    token, `${ADMIN_ROOT}/data-products/public-opinion/regions`,
+  ),
+  dataProductPublicOpinionCoverage: (token, query = {}) => request(
+    token, `${ADMIN_ROOT}/data-products/public-opinion/province-coverage`, { query },
+  ),
+  dataProductPublicOpinionProvince: (token, province, query = {}) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/public-opinion/provinces/${encodeURIComponent(province)}/items`,
+    { query },
+  ),
+  dataProductPublicOpinionItem: (token, id) => request(
+    token, `${ADMIN_ROOT}/data-products/public-opinion/items/${encodeURIComponent(id)}`,
+  ),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },
@@ -367,6 +402,9 @@ export const adminApi = {
   ),
   provinceOpinionPipelineProgress: (token) => request(
     token, `${ADMIN_ROOT}/pipelines/province-opinion/progress`,
+  ),
+  provinceOpinionQualitySummary: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/province-opinion/quality-summary`,
   ),
   resumeProvinceOpinionPipeline: (token) => request(
     token, `${ADMIN_ROOT}/pipelines/province-opinion/resume`, { method: 'POST' },

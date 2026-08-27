@@ -37,6 +37,31 @@ import {
   publicOpinionRegions,
 } from './data/public-opinion.mjs'
 import {
+  adminPublicOpinionCoverageResponse,
+  adminPublicOpinionItemResponse,
+  adminPublicOpinionProvinceResponse,
+  adminPublicOpinionRegionsResponse,
+  adminTelegramChatsResponse,
+  adminTelegramContextResponse,
+  adminTelegramMessagesResponse,
+  adminTelegramSearchResponse,
+  demoAdminPublicOpinionCoverageRows,
+  demoAdminPublicOpinionItem,
+  demoAdminPublicOpinionRows,
+  demoAdminTelegramChats,
+  demoAdminTelegramContext,
+  demoAdminTelegramMessages,
+  demoAdminTelegramSearch,
+  normalizeAdminPublicOpinionCoverageQuery,
+  normalizeAdminPublicOpinionItemQuery,
+  normalizeAdminPublicOpinionProvinceQuery,
+  normalizeAdminPublicOpinionRegionsQuery,
+  normalizeAdminTelegramChatsQuery,
+  normalizeAdminTelegramContextQuery,
+  normalizeAdminTelegramHistoryQuery,
+  normalizeAdminTelegramSearchQuery,
+} from './data/admin-data-products.mjs'
+import {
   canUseNightAllCompatibilityFallback,
   compatibilityUpstreamEvidence,
   nightAllCompatibilityBusinessOutcome,
@@ -661,6 +686,136 @@ export class HubService {
       tenantId: context.tenant.id,
       consumerId: context.consumer.id,
     }))
+  }
+
+  async adminDataProductTelegramChats(queryInput) {
+    const query = normalizeAdminTelegramChatsQuery(queryInput)
+    if (typeof this.store.listAdminTelegramChats !== 'function') {
+      return adminTelegramChatsResponse(demoAdminTelegramChats(query), query, { demoMode: true })
+    }
+    const rows = await this.store.listAdminTelegramChats(query)
+    return adminTelegramChatsResponse(rows, query)
+  }
+
+  async adminDataProductTelegramMessages(chatIdInput, queryInput) {
+    const query = normalizeAdminTelegramHistoryQuery(chatIdInput, queryInput)
+    if (
+      typeof this.store.getAdminPublicTelegramChat !== 'function'
+      || typeof this.store.listAdminTelegramMessages !== 'function'
+    ) {
+      const demo = demoAdminTelegramMessages(query)
+      if (!demo.chat) throw new AppError(404, 'chat_not_found', 'Public Telegram chat not found')
+      return adminTelegramMessagesResponse(demo.chat, demo.rows, query, { demoMode: true })
+    }
+    const chat = await this.store.getAdminPublicTelegramChat(query.chatId)
+    if (!chat) throw new AppError(404, 'chat_not_found', 'Public Telegram chat not found')
+    const rows = await this.store.listAdminTelegramMessages({
+      ...query,
+      chatExternalId: String(chat.external_id),
+    })
+    return adminTelegramMessagesResponse(chat, rows, query)
+  }
+
+  async adminDataProductTelegramSearch(body) {
+    const query = normalizeAdminTelegramSearchQuery(body)
+    if (
+      typeof this.store.getAdminPublicTelegramChat !== 'function'
+      || typeof this.store.searchAdminTelegramMessages !== 'function'
+    ) {
+      const demo = demoAdminTelegramSearch(query)
+      if (query.chatId && !demo.chat) {
+        throw new AppError(404, 'chat_not_found', 'Public Telegram chat not found')
+      }
+      return adminTelegramSearchResponse(demo.rows, query, { demoMode: true })
+    }
+    const chat = query.chatId
+      ? await this.store.getAdminPublicTelegramChat(query.chatId)
+      : null
+    if (query.chatId && !chat) {
+      throw new AppError(404, 'chat_not_found', 'Public Telegram chat not found')
+    }
+    const rows = await this.store.searchAdminTelegramMessages({
+      ...query,
+      chatExternalId: chat ? String(chat.external_id) : null,
+    })
+    return adminTelegramSearchResponse(rows, query)
+  }
+
+  async adminDataProductTelegramContext(idInput, queryInput) {
+    const query = normalizeAdminTelegramContextQuery(idInput, queryInput)
+    if (
+      typeof this.store.getAdminPublicTelegramMessage !== 'function'
+      || typeof this.store.getCanonicalContext !== 'function'
+    ) {
+      const result = demoAdminTelegramContext(query)
+      if (!result) throw new AppError(404, 'item_not_found', 'Public Telegram item not found')
+      return adminTelegramContextResponse(query, result, { demoMode: true })
+    }
+    const anchor = await this.store.getAdminPublicTelegramMessage(query.id)
+    if (!anchor) throw new AppError(404, 'item_not_found', 'Public Telegram item not found')
+    const result = await this.store.getCanonicalContext(query)
+    if (!result) throw new AppError(404, 'item_not_found', 'Public Telegram item not found')
+    if (!result.contextSupported) {
+      throw new AppError(409, 'context_not_supported', 'Canonical item does not support message context')
+    }
+    return adminTelegramContextResponse(query, result)
+  }
+
+  async adminDataProductPublicOpinionRegions(queryInput) {
+    const query = normalizeAdminPublicOpinionRegionsQuery(queryInput)
+    return adminPublicOpinionRegionsResponse(query, {
+      demoMode: typeof this.store.listAdminPublicOpinionRecords !== 'function',
+    })
+  }
+
+  async adminDataProductPublicOpinionCoverage(queryInput) {
+    const query = normalizeAdminPublicOpinionCoverageQuery(queryInput)
+    if (typeof this.store.getAdminPublicOpinionProvinceCoverage !== 'function') {
+      return adminPublicOpinionCoverageResponse(
+        demoAdminPublicOpinionCoverageRows(query),
+        query,
+        { demoMode: true },
+      )
+    }
+    const rows = await this.store.getAdminPublicOpinionProvinceCoverage(query)
+    return adminPublicOpinionCoverageResponse(rows, query)
+  }
+
+  async adminDataProductPublicOpinionProvince(provinceInput, queryInput) {
+    const query = normalizeAdminPublicOpinionProvinceQuery(
+      provinceInput,
+      queryInput,
+      this.apiKeyPepper,
+    )
+    if (typeof this.store.listAdminPublicOpinionRecords !== 'function') {
+      return adminPublicOpinionProvinceResponse(
+        demoAdminPublicOpinionRows(query),
+        query,
+        this.apiKeyPepper,
+        { demoMode: true },
+      )
+    }
+    const rows = await this.store.listAdminPublicOpinionRecords({
+      provinceCode: query.province.code,
+      sort: query.sort,
+      pageSize: query.pageSize,
+      cursor: query.cursor,
+      from: query.from,
+      to: query.to,
+    })
+    return adminPublicOpinionProvinceResponse(rows, query, this.apiKeyPepper)
+  }
+
+  async adminDataProductPublicOpinionItem(idInput, queryInput) {
+    const id = normalizeAdminPublicOpinionItemQuery(idInput, queryInput)
+    if (typeof this.store.getAdminPublicOpinionRecord !== 'function') {
+      const row = demoAdminPublicOpinionItem(id)
+      if (!row) throw new AppError(404, 'item_not_found', 'Public-opinion item not found')
+      return adminPublicOpinionItemResponse(row, { demoMode: true })
+    }
+    const row = await this.store.getAdminPublicOpinionRecord(id)
+    if (!row) throw new AppError(404, 'item_not_found', 'Public-opinion item not found')
+    return adminPublicOpinionItemResponse(row)
   }
 
   async telegramMonitor(context, resourceName, queryInput) {

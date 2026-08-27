@@ -83,3 +83,55 @@ No actionable P0, P1 or P2 findings remain. The source captures demonstrate the 
 5. Final focused comparison found no remaining actionable P0/P1/P2 mismatch. The intentionally dark implementation is the requested correction to the defective native rendering shown in the sources.
 
 final result: passed
+
+---
+
+# Data products design QA
+
+## Scope
+
+- Product entry: `数据产品`
+- Routes: data source catalog, Telegram public channels, Telegram public groups, nationwide public opinion
+- Browser viewport: 1280 × 720, in-app Browser
+- Visual language: existing MX Insight Hub / Neon Void tokens
+
+## Reference comparison
+
+- Province selector reference: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-14ea85c5-ad74-4156-8057-f89792a5d548.jpg`
+- Public-opinion list/detail reference: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-40227940-85e2-454a-a400-e028b37d8fda.png`
+- Side-by-side province selector comparison: `artifacts/design-qa/picker-comparison.jpg`
+- Side-by-side public-opinion comparison: `artifacts/design-qa/opinion-comparison.png`
+
+The implementation preserves the reference workflows rather than its light palette: a searchable province grid, selected-region state, ranked news list, active item, detail panel, time range, hot/latest sorting and source facts. It adds coverage counts and explicit data-health diagnostics while staying inside the Hub design system.
+
+## Interaction verification
+
+- Data-product parent navigation expands and collapses; active child auto-expands the branch.
+- Sidebar navigation scrolls independently at short viewport heights and no longer overlaps the protected-session card.
+- Telegram channel and group directories are server-filtered and searchable.
+- Selecting a chat loads its archived message window.
+- Message search returns canonical anchors; clicking a hit opens the requested before/after context and shows stored/upstream completeness.
+- Province picker lists all 34 regions, supports text search and exposes per-region availability.
+- Jiangsu renders list and detail data; Beijing renders an explicit successful zero-data state.
+- Coverage, pipeline, scheduling and quality failures remain distinct from an empty feed.
+- Demo content is visibly labelled and does not offer a broken external-source link.
+- No browser console errors were observed; only Vite development logs were present.
+
+## Accessibility and responsive checks
+
+- Main navigation, dialogs, search fields, regions, pagination and segmented controls expose semantic roles and accessible names.
+- Selected/pressed/expanded states are announced through ARIA.
+- Keyboard-safe native controls are retained for numeric before/after limits.
+- The desktop workbench collapses through existing responsive breakpoints; the nested sidebar remains scrollable instead of covering session controls.
+
+## Captured states
+
+- `artifacts/design-qa/telegram-channels-viewport.jpg`
+- `artifacts/design-qa/telegram-context.jpg`
+- `artifacts/design-qa/opinion-region-picker.jpg`
+- `artifacts/design-qa/opinion-detail.jpg`
+- `artifacts/design-qa/opinion-empty.jpg`
+
+## Final result
+
+passed

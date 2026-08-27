@@ -57,6 +57,27 @@ const publicOpinionDatasets = new Set([
   'public-opinion.province.v1',
 ])
 
+const ADMIN_TELEGRAM_CHAT_KIND_SQL = `(CASE
+  WHEN lower(btrim(coalesce(chat.stable_fields #>> '{attributes,chatType}', chat.content_type, '')))
+       IN ('broadcast', 'channel', 'public_channel') THEN 'channel'
+  WHEN lower(btrim(coalesce(chat.stable_fields #>> '{attributes,chatType}', chat.content_type, '')))
+       IN ('group', 'megagroup', 'public_group', 'supergroup') THEN 'group'
+  ELSE NULL
+END)`
+
+const ADMIN_PUBLIC_TELEGRAM_CHAT_SQL = `chat.dataset_id = 'telegram.monitor.chats.v1'
+  AND chat.platform = 'telegram'
+  AND chat.object_type = 'chat'
+  AND chat.deleted_at IS NULL
+  AND ${ADMIN_TELEGRAM_CHAT_KIND_SQL} IS NOT NULL
+  AND (
+    nullif(btrim(chat.stable_fields #>> '{attributes,username}'), '') IS NOT NULL
+    OR (
+      chat.url ~* '^https://(www[.])?t[.]me/[A-Za-z0-9_]+/?([?][^#]*)?(#.*)?$'
+      AND chat.url !~* '^https://(www[.])?t[.]me/joinchat/?([?#].*)?$'
+    )
+  )`
+
 export function publicOpinionSourceStage(datasetId, rawItem) {
   if (!publicOpinionDatasets.has(datasetId)) return null
   const raw = rawItem && typeof rawItem === 'object' && !Array.isArray(rawItem)
@@ -2049,6 +2070,150 @@ export class PostgresStore {
     return rows
   }
 
+  /**
+   * Admin-only Telegram product facade. The public-chat predicate is part of
+   * every SQL statement and therefore runs before keyset pagination/limits.
+   * This is intentionally separate from the consumer Telegram corpus, whose
+   * established contract includes all governed monitor rows.
+   */
+  async listAdminTelegramChats({ kind, query = null, pageSize, cursor = null }) {
+    const { rows } = await this.pool.query(
+      `SELECT chat.id, chat.dataset_id, chat.external_id, chat.object_type,
+              chat.content_type, chat.url, chat.title, chat.body,
+              chat.author_external_id, chat.author_name, chat.event_time,
+              chat.collected_at, chat.stable_fields, chat.current_revision,
+              coalesce(chat.event_time, chat.collected_at) AS sort_time
+         FROM core.canonical_records chat
+        WHERE ${ADMIN_PUBLIC_TELEGRAM_CHAT_SQL}
+          AND ${ADMIN_TELEGRAM_CHAT_KIND_SQL} = $1
+          AND coalesce(chat.event_time, chat.collected_at) IS NOT NULL
+          AND (
+            $2::text IS NULL
+            OR chat.title ILIKE '%' || $2 || '%'
+            OR chat.stable_fields #>> '{attributes,username}' ILIKE '%' || $2 || '%'
+          )
+          AND (
+            $3::timestamptz IS NULL
+            OR (coalesce(chat.event_time, chat.collected_at), chat.id) < ($3::timestamptz, $4::uuid)
+          )
+        ORDER BY coalesce(chat.event_time, chat.collected_at) DESC, chat.id DESC
+        LIMIT $5`,
+      [kind, query, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
+    )
+    return rows
+  }
+
+  async getAdminPublicTelegramChat(chatId) {
+    const { rows } = await this.pool.query(
+      `SELECT chat.id, chat.dataset_id, chat.external_id, chat.object_type,
+              chat.content_type, chat.url, chat.title, chat.body,
+              chat.author_external_id, chat.author_name, chat.event_time,
+              chat.collected_at, chat.stable_fields, chat.current_revision,
+              coalesce(chat.event_time, chat.collected_at) AS sort_time
+         FROM core.canonical_records chat
+        WHERE ${ADMIN_PUBLIC_TELEGRAM_CHAT_SQL}
+          AND (
+            chat.id::text = $1
+            OR chat.external_id = $1
+            OR ltrim(chat.stable_fields #>> '{attributes,username}', '@') = ltrim($1, '@')
+          )
+        ORDER BY chat.id DESC
+        LIMIT 1`,
+      [chatId],
+    )
+    return rows[0] ?? null
+  }
+
+  async listAdminTelegramMessages({ chatExternalId, pageSize, cursor = null }) {
+    const { rows } = await this.pool.query(
+      `SELECT message.id, message.dataset_id, message.external_id,
+              message.object_type, message.content_type, message.url,
+              message.title, message.body, message.author_external_id,
+              message.author_name, message.event_time, message.collected_at,
+              message.stable_fields, message.current_revision,
+              message.event_time AS sort_time
+         FROM core.canonical_records message
+         JOIN core.canonical_records chat
+           ON chat.external_id = $1
+          AND ${ADMIN_PUBLIC_TELEGRAM_CHAT_SQL}
+        WHERE message.dataset_id = 'telegram.monitor.messages.v1'
+          AND message.platform = 'telegram'
+          AND message.object_type = 'message'
+          AND message.deleted_at IS NULL
+          AND message.event_time IS NOT NULL
+          AND message.stable_fields #>> '{relations,chatId}' = $1
+          AND (
+            $2::timestamptz IS NULL
+            OR (message.event_time, message.id) < ($2::timestamptz, $3::uuid)
+          )
+        ORDER BY message.event_time DESC, message.id DESC
+        LIMIT $4`,
+      [chatExternalId, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
+    )
+    return rows
+  }
+
+  async searchAdminTelegramMessages({
+    query,
+    chatExternalId = null,
+    pageSize,
+    cursor = null,
+  }) {
+    const { rows } = await this.pool.query(
+      `SELECT message.id, message.dataset_id, message.external_id,
+              message.object_type, message.content_type, message.url,
+              message.title, message.body, message.author_external_id,
+              message.author_name, message.event_time, message.collected_at,
+              message.stable_fields, message.current_revision,
+              message.event_time AS sort_time,
+              CASE
+                WHEN lower(coalesce(message.body, '')) = lower($1) THEN 1.0
+                ELSE 0.5
+              END::double precision AS score
+         FROM core.canonical_records message
+         JOIN core.canonical_records chat
+           ON chat.external_id = message.stable_fields #>> '{relations,chatId}'
+          AND ${ADMIN_PUBLIC_TELEGRAM_CHAT_SQL}
+        WHERE message.dataset_id = 'telegram.monitor.messages.v1'
+          AND message.platform = 'telegram'
+          AND message.object_type = 'message'
+          AND message.deleted_at IS NULL
+          AND message.event_time IS NOT NULL
+          AND ($2::text IS NULL OR message.stable_fields #>> '{relations,chatId}' = $2)
+          AND (
+            message.body ILIKE '%' || $1 || '%'
+            OR message.title ILIKE '%' || $1 || '%'
+            OR message.author_name ILIKE '%' || $1 || '%'
+          )
+          AND (
+            $3::timestamptz IS NULL
+            OR (message.event_time, message.id) < ($3::timestamptz, $4::uuid)
+          )
+        ORDER BY message.event_time DESC, message.id DESC
+        LIMIT $5`,
+      [query, chatExternalId, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
+    )
+    return rows
+  }
+
+  async getAdminPublicTelegramMessage(id) {
+    const { rows } = await this.pool.query(
+      `SELECT message.id
+         FROM core.canonical_records message
+         JOIN core.canonical_records chat
+           ON chat.external_id = message.stable_fields #>> '{relations,chatId}'
+          AND ${ADMIN_PUBLIC_TELEGRAM_CHAT_SQL}
+        WHERE message.id = $1::uuid
+          AND message.dataset_id = 'telegram.monitor.messages.v1'
+          AND message.platform = 'telegram'
+          AND message.object_type = 'message'
+          AND message.deleted_at IS NULL
+        LIMIT 1`,
+      [id],
+    )
+    return rows[0] ?? null
+  }
+
   async getCanonicalContextServingIndexStatus() {
     const required = CANONICAL_CONTEXT_SERVING_INDEX_CONTRACTS.map((contract) => contract.name)
     const { rows } = await this.pool.query(
@@ -2723,6 +2888,32 @@ export class PostgresStore {
       [from, to, candidateMode, minQualityScore],
     )
     return rows
+  }
+
+  // Admin data-product views are curated/formal-only by design. These focused
+  // entry points let HubService distinguish a real PostgreSQL runtime from the
+  // MemoryStore demo without adding any new public MemoryStore API.
+  listAdminPublicOpinionRecords(input) {
+    return this.listPublicOpinionRecords({
+      ...input,
+      candidateMode: 'formal',
+      minQualityScore: null,
+    })
+  }
+
+  getAdminPublicOpinionProvinceCoverage(input) {
+    return this.getPublicOpinionProvinceCoverage({
+      ...input,
+      candidateMode: 'formal',
+      minQualityScore: null,
+    })
+  }
+
+  getAdminPublicOpinionRecord(id) {
+    return this.getPublicOpinionRecord(id, {
+      candidateMode: 'formal',
+      minQualityScore: null,
+    })
   }
 
   async dataCenter({ datasetId = null, platform = null, objectType = null, pageSize = 50 } = {}) {
