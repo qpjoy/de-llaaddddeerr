@@ -126,6 +126,7 @@ async function withFixture(run, { maxRequests = 100, maxPageSize = 2 } = {}) {
       owner,
       first,
       second,
+      archived,
       adapterCalls,
     })
   } finally {
@@ -137,22 +138,34 @@ test('public source catalog requires API Key and an explicit source_catalog gran
   await withFixture(async ({ baseUrl, key, noGrantKey, adapterCalls }) => {
     const anonymous = await call(baseUrl, '/api/v1/data/source-catalog')
     assert.equal(anonymous.response.status, 401)
+    assert.equal(anonymous.payload.error.code, 'api_key_required')
 
     const adminToken = await call(baseUrl, '/api/v1/data/source-catalog', {
       headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
     })
     assert.equal(adminToken.response.status, 401)
+    assert.equal(adminToken.payload.error.code, 'api_key_required')
 
     const launcherStyleBearer = await call(baseUrl, '/api/v1/data/source-catalog', {
       headers: { authorization: 'Bearer launcher-session-token-not-an-api-key' },
     })
     assert.equal(launcherStyleBearer.response.status, 401)
+    assert.equal(launcherStyleBearer.payload.error.code, 'invalid_api_key')
 
     const forbidden = await call(baseUrl, '/api/v1/data/source-catalog', {
       headers: { authorization: `Bearer ${noGrantKey.secret}` },
     })
     assert.equal(forbidden.response.status, 403)
     assert.equal(forbidden.payload.error.code, 'platform_not_granted')
+
+    const ungrantedCapabilities = await call(baseUrl, '/api/v1/data/capabilities', {
+      headers: { authorization: `Bearer ${noGrantKey.secret}` },
+    })
+    assert.equal(ungrantedCapabilities.response.status, 200)
+    assert.equal(
+      ungrantedCapabilities.payload.data.platforms.some(({ platform }) => platform === 'source_catalog'),
+      false,
+    )
 
     const capabilities = await call(baseUrl, '/api/v1/data/capabilities', {
       headers: { authorization: `Bearer ${key.secret}` },
@@ -165,7 +178,7 @@ test('public source catalog requires API Key and an explicit source_catalog gran
         ready: true,
         source: 'hub',
         servingMode: 'stored',
-        capabilities: ['catalog_entries', 'catalog_metadata', 'filtered_browse'],
+        capabilities: ['catalog_entries', 'catalog_metadata', 'catalog_detail', 'filtered_browse'],
       },
     )
     assert.deepEqual(adapterCalls, [])
@@ -229,6 +242,19 @@ test('public source catalog exposes a safe, filterable keyset-paged business pro
     assert.deepEqual(secondPage.payload.data.items.map((item) => item.id), [second.id])
     assert.equal(secondPage.payload.data.pageInfo.hasMore, false)
 
+    const cursor = params.get('cursor')
+    params.set('cursor', `${cursor[0] === 'A' ? 'B' : 'A'}${cursor.slice(1)}`)
+    const tampered = await call(baseUrl, `/api/v1/data/source-catalog?${params}`, { headers })
+    assert.equal(tampered.response.status, 400)
+    assert.equal(tampered.payload.error.code, 'invalid_cursor')
+
+    params.set('cursor', cursor)
+    params.set('pageSize', '2')
+    const resized = await call(baseUrl, `/api/v1/data/source-catalog?${params}`, { headers })
+    assert.equal(resized.response.status, 400)
+    assert.equal(resized.payload.error.code, 'invalid_cursor')
+
+    params.set('pageSize', '1')
     params.set('coverageStatus', 'not_covered')
     const rebound = await call(baseUrl, `/api/v1/data/source-catalog?${params}`, { headers })
     assert.equal(rebound.response.status, 400)
@@ -243,6 +269,14 @@ test('public source catalog exposes a safe, filterable keyset-paged business pro
     assert.equal(searched.payload.data.items.length, 2)
     assert.equal(searched.payload.data.items.some((item) => item.canonicalName === '已归档公共平台'), false)
 
+    const sourceKind = await call(baseUrl, '/api/v1/data/source-catalog?sourceKind=platform&pageSize=2', { headers })
+    assert.equal(sourceKind.response.status, 200)
+    assert.equal(sourceKind.payload.data.items.length, 2)
+
+    const invalidSourceKind = await call(baseUrl, '/api/v1/data/source-catalog?sourceKind=private&pageSize=2', { headers })
+    assert.equal(invalidSourceKind.response.status, 400)
+    assert.equal(invalidSourceKind.payload.error.code, 'invalid_request')
+
     const archived = await call(baseUrl, '/api/v1/data/source-catalog?includeArchived=true', { headers })
     assert.equal(archived.response.status, 400)
     assert.equal(archived.payload.error.code, 'unsupported_fields')
@@ -250,6 +284,59 @@ test('public source catalog exposes a safe, filterable keyset-paged business pro
     const tooLarge = await call(baseUrl, '/api/v1/data/source-catalog?pageSize=3', { headers })
     assert.equal(tooLarge.response.status, 400)
     assert.equal(tooLarge.payload.error.code, 'page_size_exceeded')
+  })
+})
+
+test('public source catalog exposes a stable, safe detail resource by id', async () => {
+  await withFixture(async ({ baseUrl, key, noGrantKey, first, archived }) => {
+    const headers = { authorization: `Bearer ${key.secret}` }
+    const pageQuery = new URLSearchParams({ query: '公共平台 A', pageSize: '2' })
+    const page = await call(baseUrl, `/api/v1/data/source-catalog?${pageQuery}`, { headers })
+    const listed = page.payload.data.items.find((item) => item.id === first.id)
+
+    const detail = await call(baseUrl, `/api/v1/data/source-catalog/${first.id}`, { headers })
+    assert.equal(detail.response.status, 200)
+    assert.equal(detail.payload.data.contractVersion, 'source-catalog.public.v1')
+    assert.deepEqual(detail.payload.data.item, listed)
+    assert.equal(typeof detail.payload.requestId, 'string')
+
+    const anonymous = await call(baseUrl, `/api/v1/data/source-catalog/${first.id}`)
+    assert.equal(anonymous.response.status, 401)
+    assert.equal(anonymous.payload.error.code, 'api_key_required')
+
+    const forbidden = await call(baseUrl, `/api/v1/data/source-catalog/${first.id}`, {
+      headers: { authorization: `Bearer ${noGrantKey.secret}` },
+    })
+    assert.equal(forbidden.response.status, 403)
+    assert.equal(forbidden.payload.error.code, 'platform_not_granted')
+
+    const invalidId = await call(baseUrl, '/api/v1/data/source-catalog/not-a-uuid', { headers })
+    assert.equal(invalidId.response.status, 400)
+    assert.equal(invalidId.payload.error.code, 'invalid_source_catalog_id')
+
+    for (const id of [
+      '00000000-0000-4000-8000-000000000099',
+      archived.id,
+    ]) {
+      const missing = await call(baseUrl, `/api/v1/data/source-catalog/${id}`, { headers })
+      assert.equal(missing.response.status, 404)
+      assert.equal(missing.payload.error.code, 'source_catalog_entry_not_found')
+    }
+
+    const unsupported = await call(
+      baseUrl,
+      `/api/v1/data/source-catalog/${first.id}?includeArchived=true`,
+      { headers },
+    )
+    assert.equal(unsupported.response.status, 400)
+    assert.equal(unsupported.payload.error.code, 'unsupported_fields')
+
+    const noPublicWrite = await call(baseUrl, `/api/v1/data/source-catalog/${first.id}`, {
+      method: 'PUT',
+      headers,
+      body: { canonicalName: '不能写入' },
+    })
+    assert.equal(noPublicWrite.response.status, 404)
   })
 })
 
@@ -268,6 +355,14 @@ test('public source catalog metadata reconstructs fields, statuses, facets and s
     assert.equal(result.payload.data.summary.total, 217)
     assert.equal(Object.hasOwn(result.payload.data.summary, 'archived'), false)
     assert.equal(Object.hasOwn(result.payload.data, 'items'), false)
+    assert.deepEqual(Object.keys(result.payload.data.summary).sort(), [
+      'blocked', 'categories', 'complete', 'coverage', 'coverageRate', 'covered',
+      'delivery', 'exploring', 'inProgress', 'partial', 'priorities', 'review',
+      'total', 'unassigned', 'uncovered', 'unknownCoverage',
+    ].sort())
+    assert.deepEqual(Object.keys(result.payload.data.facets).sort(), [
+      'connectorHints', 'majorCategories', 'owners', 'regions', 'scenarios', 'tags',
+    ].sort())
 
     const page = await call(baseUrl, '/api/v1/data/source-catalog?pageSize=1', {
       headers: { 'x-api-key': key.secret },
@@ -330,6 +425,10 @@ test('public source catalog redacts credentials accidentally pasted into governe
     ])
     assert.equal(JSON.stringify(page.payload).includes('must-not-leak-secret'), false)
 
+    const detail = await call(baseUrl, `/api/v1/data/source-catalog/${first.id}`, { headers })
+    assert.equal(detail.response.status, 200)
+    assert.deepEqual(detail.payload.data.item, item)
+
     const secretSearch = await call(
       baseUrl,
       '/api/v1/data/source-catalog?query=must-not-leak-secret&pageSize=2',
@@ -350,12 +449,14 @@ test('public source catalog redacts credentials accidentally pasted into governe
 })
 
 test('public source catalog GETs share the consumer platform quota', async () => {
-  await withFixture(async ({ baseUrl, key }) => {
+  await withFixture(async ({ baseUrl, key, first: firstEntry }) => {
     const headers = { authorization: `Bearer ${key.secret}` }
-    const first = await call(baseUrl, '/api/v1/data/source-catalog?pageSize=1', { headers })
-    assert.equal(first.response.status, 200)
-    const limited = await call(baseUrl, '/api/v1/data/source-catalog/metadata', { headers })
+    const page = await call(baseUrl, '/api/v1/data/source-catalog?pageSize=1', { headers })
+    assert.equal(page.response.status, 200)
+    const metadata = await call(baseUrl, '/api/v1/data/source-catalog/metadata', { headers })
+    assert.equal(metadata.response.status, 200)
+    const limited = await call(baseUrl, `/api/v1/data/source-catalog/${firstEntry.id}`, { headers })
     assert.equal(limited.response.status, 429)
     assert.equal(limited.payload.error.code, 'quota_exceeded')
-  }, { maxRequests: 1, maxPageSize: 2 })
+  }, { maxRequests: 2, maxPageSize: 2 })
 })

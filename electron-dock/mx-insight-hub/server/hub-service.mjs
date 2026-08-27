@@ -24,8 +24,11 @@ import {
   normalizeCanonicalContextQuery,
 } from './data/canonical-context.mjs'
 import {
+  normalizePublicSourceCatalogDetailQuery,
+  normalizePublicSourceCatalogId,
   normalizePublicSourceCatalogMetadataQuery,
   normalizePublicSourceCatalogQuery,
+  publicSourceCatalogDetail,
   publicSourceCatalogMetadata,
   publicSourceCatalogPage,
   SOURCE_CATALOG_PLATFORM,
@@ -584,7 +587,7 @@ export class HubService {
           ready: true,
           source: 'hub',
           servingMode: 'stored',
-          capabilities: ['catalog_entries', 'catalog_metadata', 'filtered_browse'],
+          capabilities: ['catalog_entries', 'catalog_metadata', 'catalog_detail', 'filtered_browse'],
         })
       }
     }
@@ -1086,6 +1089,26 @@ export class HubService {
           this.store.listSourceCatalogOwners({ includeArchived: false }),
         ])
         return publicSourceCatalogMetadata(entries, taxonomyTerms, owners)
+      },
+    })
+  }
+
+  async sourceCatalogDetail(context, idInput, queryInput = {}) {
+    if (typeof this.store.getSourceCatalogEntry !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Source catalog detail requires the current Hub store')
+    }
+    const policy = await this.#storedPlatformPolicy(context, SOURCE_CATALOG_PLATFORM, 'Source catalog')
+    const id = normalizePublicSourceCatalogId(idInput)
+    const query = normalizePublicSourceCatalogDetailQuery(queryInput)
+    return this.#meterStoredRead(context, SOURCE_CATALOG_PLATFORM, policy, {
+      path: `/api/v1/data/source-catalog/${id}`,
+      fingerprintBody: { id, ...query },
+      operation: async () => {
+        const entry = await this.store.getSourceCatalogEntry(id)
+        if (!entry || entry.archivedAt) {
+          throw new AppError(404, 'source_catalog_entry_not_found', 'Source catalog entry was not found')
+        }
+        return publicSourceCatalogDetail(entry)
       },
     })
   }

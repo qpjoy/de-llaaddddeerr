@@ -258,6 +258,28 @@ export function normalizePublicSourceCatalogMetadataQuery(input = {}) {
   return {}
 }
 
+export function normalizePublicSourceCatalogDetailQuery(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new AppError(400, 'invalid_request', 'Source catalog detail query must be an object')
+  }
+  const unsupported = Object.keys(input)
+  if (unsupported.length > 0) {
+    throw new AppError(
+      400,
+      'unsupported_fields',
+      `Unsupported source catalog detail fields: ${unsupported.join(', ')}`,
+    )
+  }
+  return {}
+}
+
+export function normalizePublicSourceCatalogId(value) {
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
+    throw new AppError(400, 'invalid_source_catalog_id', 'Source catalog id must be a UUID')
+  }
+  return value.toLowerCase()
+}
+
 function comparable(value) {
   return sourceCatalogTermNormalizedName(value)
 }
@@ -333,6 +355,13 @@ export function publicSourceCatalogItem(entry) {
     tags: publicTextArray(entry.tags, 'tags', redacted),
     notes: publicText(entry.notes, 'notes', redacted),
     redactedFields: [...redacted].sort(),
+  }
+}
+
+export function publicSourceCatalogDetail(entry) {
+  return {
+    contractVersion: PUBLIC_SOURCE_CATALOG_CONTRACT,
+    item: publicSourceCatalogItem(entry),
   }
 }
 

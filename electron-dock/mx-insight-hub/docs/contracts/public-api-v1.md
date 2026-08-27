@@ -61,18 +61,19 @@ The same rule applies to `public_opinion.diagnostics.read`: it is an explicit,
 non-default step-up capability and never grants the `public_opinion` platform
 by itself. Funnel and unshown-record diagnostics require both grants. The
 `source_catalog` platform is Hub-owned and advertises `catalog_entries`,
-`catalog_metadata`, and `filtered_browse` when its stored serving surface is
-ready.
+`catalog_metadata`, `catalog_detail`, and `filtered_browse` when its stored
+serving surface is ready.
 
 ## Source catalog
 
 ```http
 GET /api/v1/data/source-catalog?coverageStatus=covered&deliveryStatus=doing&pageSize=50
 GET /api/v1/data/source-catalog/metadata
+GET /api/v1/data/source-catalog/{id}
 Authorization: Bearer <mx key>
 ```
 
-Both routes require the explicit `source_catalog` platform grant. They accept
+All three routes require the explicit `source_catalog` platform grant. They accept
 an issued API Key, not an Admin Token or Launcher session. Every safe GET and
 retry is independently metered against the platform policy and does not use an
 `Idempotency-Key`.
@@ -112,6 +113,23 @@ facets. Together with the list it is sufficient to reconstruct filters,
 coverage/delivery reports, owner selectors and status dashboards without
 exposing management APIs. This route accepts no query fields; any supplied key
 returns `400 unsupported_fields`.
+
+The metadata response is strict rather than an open-ended JSON bag. `summary`
+always contains active totals, coverage/delivery/review/priority counts,
+coverage rate, unassigned-owner count, and category summaries. `facets` always
+contains `majorCategories`, `scenarios`, `regions`, `owners`,
+`connectorHints`, and `tags`. Both schemas reject additional properties;
+adding a field requires an explicit contract-version review.
+
+`GET /data/source-catalog/{id}` accepts an exact UUID returned by the list and
+returns `data.contractVersion`, the same safe `data.item` projection, and the
+top-level `requestId`. It is active-only, accepts no query fields, does not
+expose any extra management fields, and shares the same platform quota. An
+invalid UUID returns `400 invalid_source_catalog_id`; any query key returns
+`400 unsupported_fields`; an unknown or archived UUID returns
+`404 source_catalog_entry_not_found`. Authentication, grant, quota, and storage
+failures use `api_key_required` / `invalid_api_key`, `platform_not_granted`,
+`quota_exceeded`, and `stored_data_unavailable`, respectively.
 
 ## Tokenize text
 

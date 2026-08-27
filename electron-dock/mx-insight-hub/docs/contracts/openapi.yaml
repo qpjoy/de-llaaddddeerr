@@ -1273,7 +1273,7 @@ paths:
                       servingMode: stored
                     - platform: source_catalog
                       ready: true
-                      capabilities: [catalog_entries, catalog_metadata, filtered_browse]
+                      capabilities: [catalog_entries, catalog_metadata, catalog_detail, filtered_browse]
                       source: hub
                       servingMode: stored
                     - platform: xiaohongshu
@@ -1770,6 +1770,42 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/source-catalog/{id}:
+    get:
+      operationId: getSourceCatalogEntry
+      summary: Read one active governed source-catalog entry.
+      description: >-
+        Requires the source_catalog platform grant. Returns the same
+        customer-safe SourceCatalogEntry projection used by the list, selected
+        by an exact UUID obtained from that list. Archived or unknown entries
+        are not exposed. This route accepts no query fields and every call or
+        retry is separately metered.
+      x-mx-allowed-query-fields: []
+      x-mx-error-codes:
+        "400": [invalid_source_catalog_id, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "404": [source_catalog_entry_not_found]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Exact active source-catalog UUID returned by the list route.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: One active customer-safe source-catalog entry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceCatalogDetailEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /data/source-catalog/metadata:
@@ -4562,6 +4598,98 @@ components:
             filters: { $ref: "#/components/schemas/SourceCatalogFilters" }
             pageInfo: { $ref: "#/components/schemas/SourceCatalogPageInfo" }
         requestId: { type: string, minLength: 1 }
+    SourceCatalogDetailEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, item]
+          properties:
+            contractVersion: { type: string, const: source-catalog.public.v1 }
+            item: { $ref: "#/components/schemas/SourceCatalogEntry" }
+        requestId: { type: string, minLength: 1 }
+    SourceCatalogCoverageCounts:
+      type: object
+      additionalProperties: false
+      properties:
+        unknown: { type: integer, minimum: 0 }
+        not_covered: { type: integer, minimum: 0 }
+        partial: { type: integer, minimum: 0 }
+        covered: { type: integer, minimum: 0 }
+    SourceCatalogDeliveryCounts:
+      type: object
+      additionalProperties: false
+      properties:
+        exploring: { type: integer, minimum: 0 }
+        planned: { type: integer, minimum: 0 }
+        doing: { type: integer, minimum: 0 }
+        blocked: { type: integer, minimum: 0 }
+        complete: { type: integer, minimum: 0 }
+        paused: { type: integer, minimum: 0 }
+        retired: { type: integer, minimum: 0 }
+    SourceCatalogPriorityCounts:
+      type: object
+      additionalProperties: false
+      properties:
+        P0: { type: integer, minimum: 0 }
+        P1: { type: integer, minimum: 0 }
+        P2: { type: integer, minimum: 0 }
+        P3: { type: integer, minimum: 0 }
+    SourceCatalogReviewCounts:
+      type: object
+      additionalProperties: false
+      properties:
+        needs_review: { type: integer, minimum: 0 }
+        verified: { type: integer, minimum: 0 }
+        rejected: { type: integer, minimum: 0 }
+    SourceCatalogCategorySummary:
+      type: object
+      additionalProperties: false
+      required: [category, total, covered, partial, complete, doing]
+      properties:
+        category: { type: string, minLength: 1 }
+        total: { type: integer, minimum: 0 }
+        covered: { type: integer, minimum: 0 }
+        partial: { type: integer, minimum: 0 }
+        complete: { type: integer, minimum: 0 }
+        doing: { type: integer, minimum: 0 }
+    SourceCatalogSummary:
+      type: object
+      additionalProperties: false
+      required: [total, covered, uncovered, partial, unknownCoverage, coverageRate, complete, inProgress, exploring, blocked, unassigned, coverage, delivery, priorities, review, categories]
+      properties:
+        total: { type: integer, minimum: 0 }
+        covered: { type: integer, minimum: 0 }
+        uncovered: { type: integer, minimum: 0 }
+        partial: { type: integer, minimum: 0 }
+        unknownCoverage: { type: integer, minimum: 0 }
+        coverageRate: { type: number, minimum: 0, maximum: 100 }
+        complete: { type: integer, minimum: 0 }
+        inProgress: { type: integer, minimum: 0 }
+        exploring: { type: integer, minimum: 0 }
+        blocked: { type: integer, minimum: 0 }
+        unassigned: { type: integer, minimum: 0 }
+        coverage: { $ref: "#/components/schemas/SourceCatalogCoverageCounts" }
+        delivery: { $ref: "#/components/schemas/SourceCatalogDeliveryCounts" }
+        priorities: { $ref: "#/components/schemas/SourceCatalogPriorityCounts" }
+        review: { $ref: "#/components/schemas/SourceCatalogReviewCounts" }
+        categories:
+          type: array
+          items: { $ref: "#/components/schemas/SourceCatalogCategorySummary" }
+    SourceCatalogFacets:
+      type: object
+      additionalProperties: false
+      required: [majorCategories, scenarios, regions, owners, connectorHints, tags]
+      properties:
+        majorCategories: { type: array, uniqueItems: true, items: { type: string } }
+        scenarios: { type: array, uniqueItems: true, items: { type: string } }
+        regions: { type: array, uniqueItems: true, items: { type: string } }
+        owners: { type: array, uniqueItems: true, items: { type: string } }
+        connectorHints: { type: array, uniqueItems: true, items: { type: string } }
+        tags: { type: array, uniqueItems: true, items: { type: string } }
     SourceCatalogMetadataEnvelope:
       type: object
       additionalProperties: false
@@ -4597,8 +4725,8 @@ components:
                 runtimeStatuses: { type: array, items: { type: string, enum: [not_configured, unknown, healthy, degraded, failed] } }
                 priorities: { type: array, items: { type: string, enum: [P0, P1, P2, P3] } }
                 taxonomyKinds: { type: array, items: { type: string, enum: [major_category, scenario, region, tag] } }
-            summary: { type: object, additionalProperties: true }
-            facets: { type: object, additionalProperties: true }
+            summary: { $ref: "#/components/schemas/SourceCatalogSummary" }
+            facets: { $ref: "#/components/schemas/SourceCatalogFacets" }
             taxonomy:
               type: array
               items:

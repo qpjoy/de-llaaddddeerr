@@ -173,6 +173,7 @@ function assertDataProductPublicContract(document, telegramOperationIds = {
 }) {
   for (const path of [
     '/data/source-catalog',
+    '/data/source-catalog/{id}',
     '/data/source-catalog/metadata',
     '/data/public-opinion/funnel',
     '/data/public-opinion/records',
@@ -187,6 +188,11 @@ function assertDataProductPublicContract(document, telegramOperationIds = {
     'pageSize', 'cursor',
   ].sort())
   assert.equal(catalog.parameters.find(({ name }) => name === 'pageSize').schema.default, 50)
+  assert.deepEqual(catalog['x-mx-allowed-query-fields'], [
+    'query', 'sourceKind', 'majorCategory', 'scenario', 'region', 'coverageStatus',
+    'deliveryStatus', 'reviewStatus', 'runtimeStatus', 'priority', 'ownerId', 'tag',
+    'pageSize', 'cursor',
+  ])
   assert.equal(
     catalog.responses[200].content['application/json'].schema.$ref,
     '#/components/schemas/SourceCatalogPageEnvelope',
@@ -205,6 +211,61 @@ function assertDataProductPublicContract(document, telegramOperationIds = {
   assert.deepEqual(catalogMetadata['x-mx-allowed-query-fields'], [])
   assert.deepEqual(catalogMetadata['x-mx-error-codes'][400], ['unsupported_fields'])
   assert.ok(catalogMetadata.responses[400])
+
+  const catalogDetail = document.paths['/data/source-catalog/{id}'].get
+  assert.equal(catalogDetail.operationId, 'getSourceCatalogEntry')
+  assert.deepEqual(catalogDetail.parameters.map(({ name }) => name), ['id'])
+  assert.equal(catalogDetail.parameters[0].required, true)
+  assert.equal(catalogDetail.parameters[0].schema.format, 'uuid')
+  assert.deepEqual(catalogDetail['x-mx-allowed-query-fields'], [])
+  assert.deepEqual(catalogDetail['x-mx-error-codes'][400], [
+    'invalid_source_catalog_id', 'unsupported_fields',
+  ])
+  assert.deepEqual(catalogDetail['x-mx-error-codes'][404], ['source_catalog_entry_not_found'])
+  assert.equal(
+    catalogDetail.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/SourceCatalogDetailEnvelope',
+  )
+  assert.equal(
+    document.components.schemas.SourceCatalogDetailEnvelope.properties.data
+      .properties.contractVersion.const,
+    'source-catalog.public.v1',
+  )
+  assert.equal(
+    document.components.schemas.SourceCatalogDetailEnvelope.properties.data
+      .properties.item.$ref,
+    '#/components/schemas/SourceCatalogEntry',
+  )
+
+  const catalogSummary = document.components.schemas.SourceCatalogSummary
+  const catalogFacets = document.components.schemas.SourceCatalogFacets
+  assert.equal(catalogSummary.additionalProperties, false)
+  assert.equal(catalogFacets.additionalProperties, false)
+  assert.deepEqual(catalogSummary.required.sort(), [
+    'blocked', 'categories', 'complete', 'coverage', 'coverageRate', 'covered',
+    'delivery', 'exploring', 'inProgress', 'partial', 'priorities', 'review',
+    'total', 'unassigned', 'uncovered', 'unknownCoverage',
+  ].sort())
+  assert.deepEqual(catalogFacets.required.sort(), [
+    'connectorHints', 'majorCategories', 'owners', 'regions', 'scenarios', 'tags',
+  ].sort())
+  assert.equal(
+    document.components.schemas.SourceCatalogMetadataEnvelope.properties.data
+      .properties.summary.$ref,
+    '#/components/schemas/SourceCatalogSummary',
+  )
+  assert.equal(
+    document.components.schemas.SourceCatalogMetadataEnvelope.properties.data
+      .properties.facets.$ref,
+    '#/components/schemas/SourceCatalogFacets',
+  )
+
+  const sourceCatalogCapability = document.paths['/data/capabilities']
+    .get.responses[200].content['application/json'].example.data.platforms
+    .find(({ platform }) => platform === 'source_catalog')
+  assert.deepEqual(sourceCatalogCapability.capabilities, [
+    'catalog_entries', 'catalog_metadata', 'catalog_detail', 'filtered_browse',
+  ])
 
   const diagnostics = document.paths['/data/public-opinion/records'].get
   assert.equal(diagnostics.operationId, 'listPublicOpinionDiagnosticRecords')
@@ -658,6 +719,19 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/usage/)
     assert.match(html, /Idempotency-Key/)
     assert.match(html, /nextCursor/)
+    const sourceCatalogHtml = pages.find((page) => page.path === '/docs/source-catalog').html
+    assert.match(sourceCatalogHtml, /export HUB_URL=/)
+    assert.match(sourceCatalogHtml, /MX_INSIGHT_API_KEY/)
+    assert.match(sourceCatalogHtml, /管理台的“开放能力”/)
+    assert.match(sourceCatalogHtml, /已有 API Key 不需要重新签发/)
+    assert.match(sourceCatalogHtml, /\/api\/v1\/data\/capabilities/)
+    assert.match(sourceCatalogHtml, /\/api\/v1\/data\/source-catalog\/metadata/)
+    assert.match(sourceCatalogHtml, /SOURCE_ID/)
+    assert.match(sourceCatalogHtml, /nextCursor/)
+    for (const code of [
+      'invalid_source_catalog_id', 'source_catalog_entry_not_found',
+      'platform_not_granted', 'quota_exceeded', 'stored_data_unavailable',
+    ]) assert.match(sourceCatalogHtml, new RegExp(code))
     assert.equal((html.match(/<script>/g) || []).length, 1)
     assert.match(response.headers.get('content-security-policy'), /script-src 'sha256-/)
     assert.doesNotMatch(html, /https?:\/\/(?:cdn|unpkg|jsdelivr)\./i)
@@ -740,6 +814,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/search',
       '/data/source-catalog',
       '/data/source-catalog/metadata',
+      '/data/source-catalog/{id}',
       '/data/stored/search',
       '/data/telegram/chats',
       '/data/telegram/entities/search',
@@ -857,6 +932,11 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   assert.match(guide, /public_opinion.*formal/is)
   assert.match(guide, /includeCandidates=all.*province.*countryCode.*location/is)
   assert.match(guide, /升级前.*409 idempotency_conflict/s)
+  assert.match(guide, /source_catalog/)
+  assert.match(guide, /\/api\/v1\/data\/source-catalog\/metadata/)
+  assert.match(guide, /\/api\/v1\/data\/source-catalog\/\$\{SOURCE_ID\}/)
+  assert.match(guide, /nextCursor/)
+  assert.match(guide, /source_catalog_entry_not_found/)
 })
 
 test('admin-only listener does not expose public documentation', async () => {

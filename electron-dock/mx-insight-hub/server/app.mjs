@@ -2991,6 +2991,19 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/api/v1/data/source-catalog/:id')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.sourceCatalogDetail(
+            context,
+            params.id,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
       if (request.method === 'GET' && pathname === '/api/v1/data/public-opinion/regions') {
         const context = await requirePublic(request)
         sendJson(response, 200, {

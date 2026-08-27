@@ -29,6 +29,13 @@ test('tokenize curl is paste-ready without putting an API key in history or argv
   assert.match(pages, /复制 curl/)
   assert.match(pages, /滑动窗口内请求上限/)
   assert.match(pages, /同一调用者的所有 API Key 共享请求上限/)
+  assert.match(pages, /'source_catalog'/)
+
+  const components = await readFile(
+    fileURLToPath(new URL('../../src/components.jsx', import.meta.url)),
+    'utf8',
+  )
+  assert.match(components, /source_catalog:\s*'数据源目录'/)
 })
 
 test('a whole-block paste works in bash and zsh without exposing its key', async () => {

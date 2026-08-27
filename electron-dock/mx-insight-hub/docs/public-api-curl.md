@@ -172,12 +172,67 @@ revision-fenced display-province 索引均已通过精确合同校验。
 `public_opinion.diagnostics.read` 是另一个非默认 step-up capability，与
 `public_opinion` platform grant 同时存在时才能查看漏斗和未展示记录。
 `source_catalog` 平台项使用 Hub stored 数据面，能力包括
-`catalog_entries`、`catalog_metadata` 和 `filtered_browse`。
+`catalog_entries`、`catalog_metadata`、`catalog_detail` 和 `filtered_browse`。
 
 ## 3.1 数据源目录 API
 
-本节需要显式 `source_catalog` platform grant，只接受 API Key。两个 GET
-都独立计量且不使用幂等 key。
+本节需要显式 `source_catalog` platform grant，只接受 API Key。负责 consumer 的
+Hub operator 必须先完成授权；调用者不能通过 Public API 自行授权。三个 GET 都独立
+计量且不使用幂等 key。operator 在 Hub 管理台“开放能力”中依次选择租户、调用者和
+“数据源目录”，配置配额后启用；授权按 consumer 动态生效，已有 API Key 无需重新签发。
+为了让本节可以单独复制执行，请静默读取 API Key，避免把凭据写入 shell history：
+
+```bash
+read -rsp 'MX Insight API Key: ' MX_INSIGHT_API_KEY
+export MX_INSIGHT_API_KEY
+printf '\n'
+```
+
+### 授权预检
+
+先确认当前 Key 对应的 consumer 确实获得目录授权。结果必须有
+`platform=source_catalog`、`ready=true`，并包含 `catalog_entries`、
+`catalog_metadata`、`catalog_detail` 和 `filtered_browse`：
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  "$HUB_URL/api/v1/data/capabilities" \
+  | jq '.data.platforms[] | select(.platform == "source_catalog")'
+```
+
+没有该平台项时，请让 operator 为当前 consumer 授权；不要尝试用管理凭据替代
+Public API Key。
+
+### `GET /api/v1/data/source-catalog/metadata`
+
+建议在构造筛选条件前先调用 metadata。它返回公开字段/枚举、active taxonomy、
+负责人公开投影、summary 和 facets，供外部系统还原目录筛选器和看板。列表和
+metadata 都不包含 `evidenceRefs/customFields/importedFrom/events/related-data`、
+登录绑定、连接或凭据。该接口不接受 query 参数；传入任何 query key 都返回
+`400 unsupported_fields`。
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  "$HUB_URL/api/v1/data/source-catalog/metadata" \
+  | jq '{contractVersion: .data.contractVersion,
+         fields: .data.fields,
+         enums: .data.enums,
+         summary: .data.summary,
+         facets: .data.facets,
+         taxonomy: .data.taxonomy,
+         owners: .data.owners,
+         requestId}'
+```
+
+- `summary` 的固定字段是 `total`、`covered`、`uncovered`、`partial`、`unknownCoverage`、
+  `coverageRate`、`complete`、`inProgress`、`exploring`、`blocked`、`unassigned`、
+  `coverage`、`delivery`、`priorities`、`review`、`categories`。
+- `facets` 的固定字段是 `majorCategories`、`scenarios`、`regions`、`owners`、
+  `connectorHints`、`tags`。
+
+调用方应使用 metadata 返回的精确 taxonomy、owner ID 和 enum 值生成 filters。
 
 ### `GET /api/v1/data/source-catalog`
 
@@ -191,30 +246,64 @@ password 等高置信凭据内容，Hub 会在搜索和 facet 计算前按字段
 `redactedFields` 中列出字段名。taxonomy/负责人只有发生脱敏时才返回该字段。
 
 ```bash
-curl -sS -i --get \
-  -H "Authorization: Bearer $HUB_KEY" \
+FIRST_PAGE=$(curl -sS --get \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   --data-urlencode 'coverageStatus=covered' \
   --data-urlencode 'deliveryStatus=doing' \
   --data-urlencode 'pageSize=50' \
-  "$HUB_URL/api/v1/data/source-catalog"
+  "$HUB_URL/api/v1/data/source-catalog")
+
+printf '%s\n' "$FIRST_PAGE" \
+  | jq '{contractVersion: .data.contractVersion,
+         items: .data.items,
+         filters: .data.filters,
+         pageInfo: .data.pageInfo,
+         requestId}'
 ```
 
 cursor 是绑定完整 filters 和 pageSize 的 HMAC 签名 keyset，稳定顺序为
 `(legacySequence NULLS LAST, canonicalName, id)`。条件改变后应移除 cursor
 从首页开始；复用旧 cursor 返回 `400 invalid_cursor`。
 
-### `GET /api/v1/data/source-catalog/metadata`
-
-返回公开字段/枚举、active taxonomy、负责人公开投影、summary 和 facets，
-供外部系统还原目录筛选器和看板。列表和 metadata 都不包含
-`evidenceRefs/customFields/importedFrom/events/related-data`、登录绑定、连接或凭据。
-该接口不接受 query 参数；传入任何 query key 都返回 `400 unsupported_fields`。
+仅当 `pageInfo.hasMore=true` 时，原样携带 `nextCursor`，并保持所有 filters 和
+`pageSize` 不变：
 
 ```bash
-curl -sS -i \
-  -H "Authorization: Bearer $HUB_KEY" \
-  "$HUB_URL/api/v1/data/source-catalog/metadata"
+NEXT_CURSOR=$(printf '%s\n' "$FIRST_PAGE" | jq -r '.data.pageInfo.nextCursor // empty')
+
+curl -sS --get \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'coverageStatus=covered' \
+  --data-urlencode 'deliveryStatus=doing' \
+  --data-urlencode 'pageSize=50' \
+  --data-urlencode "cursor=$NEXT_CURSOR" \
+  "$HUB_URL/api/v1/data/source-catalog" | jq
 ```
+
+### `GET /api/v1/data/source-catalog/{id}`
+
+从列表条目取得 active UUID，再读取同一份 customer-safe `SourceCatalogEntry` 投影。
+详情路由不接受 query 参数；不要从名称、sequence 或其他业务字段自行拼接 ID。
+
+```bash
+SOURCE_ID=$(printf '%s\n' "$FIRST_PAGE" | jq -r '.data.items[0].id')
+
+curl -sS \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  "$HUB_URL/api/v1/data/source-catalog/${SOURCE_ID}" \
+  | jq '{contractVersion: .data.contractVersion, item: .data.item, requestId}'
+```
+
+### 稳定错误码
+
+| HTTP | `error.code` | 处理方式 |
+| --- | --- | --- |
+| 400 | `invalid_request`, `invalid_cursor`, `invalid_source_catalog_id`, `page_size_exceeded`, `unsupported_fields` | 修正字段、UUID 或分页状态；不要原样重试。 |
+| 401 | `api_key_required`, `invalid_api_key` | 提供或轮换当前 consumer 的 API Key。 |
+| 403 | `platform_not_granted` | 让 operator 为该 consumer 授予 `source_catalog`。 |
+| 404 | `source_catalog_entry_not_found` | 重新从列表获取 active UUID。 |
+| 429 | `quota_exceeded` | 等待 platform policy 的计量窗口恢复。 |
+| 503 | `stored_data_unavailable` | 安全 GET 可稍后重试；保留 `requestId` 供排查。 |
 
 ## 4. 搜索 API
 

@@ -953,6 +953,7 @@ export function platformLabel(platform) {
     wechat_mp: '微信公众号',
     telegram: 'Telegram',
     public_opinion: '全国省份舆情',
+    source_catalog: '数据源目录',
   }
   return labels[platform] || platform
 }

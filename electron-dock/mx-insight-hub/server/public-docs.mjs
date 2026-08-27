@@ -598,7 +598,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                       {
                         platform: 'source_catalog',
                         ready: true,
-                        capabilities: ['catalog_entries', 'catalog_metadata', 'filtered_browse'],
+                        capabilities: ['catalog_entries', 'catalog_metadata', 'catalog_detail', 'filtered_browse'],
                         source: 'hub',
                         servingMode: 'stored',
                       },
@@ -816,6 +816,11 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           429: ['quota_exceeded'],
           503: ['stored_data_unavailable'],
         },
+        'x-mx-allowed-query-fields': [
+          'query', 'sourceKind', 'majorCategory', 'scenario', 'region',
+          'coverageStatus', 'deliveryStatus', 'reviewStatus', 'runtimeStatus', 'priority',
+          'ownerId', 'tag', 'pageSize', 'cursor',
+        ],
         parameters: sourceCatalogQueryParameters,
         responses: {
           200: {
@@ -825,6 +830,42 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: errorResponse,
           401: errorResponse,
           403: errorResponse,
+          429: errorResponse,
+          503: errorResponse,
+        },
+      },
+    },
+    '/data/source-catalog/{id}': {
+      get: {
+        tags: ['Source Catalog'],
+        operationId: 'getSourceCatalogEntry',
+        summary: 'Read one active governed source-catalog entry',
+        description: 'Requires the source_catalog platform grant. Returns the same customer-safe SourceCatalogEntry projection used by the list, selected by an exact UUID obtained from that list. Archived or unknown entries are not exposed. This route accepts no query fields and every call or retry is separately metered.',
+        'x-mx-allowed-query-fields': [],
+        'x-mx-error-codes': {
+          400: ['invalid_source_catalog_id', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          404: ['source_catalog_entry_not_found'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: [
+          {
+            name: 'id', in: 'path', required: true,
+            description: 'Exact active source-catalog UUID returned by the list route.',
+            schema: { type: 'string', format: 'uuid' },
+          },
+        ],
+        responses: {
+          200: {
+            description: 'One active customer-safe source-catalog entry.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/SourceCatalogDetailEnvelope' } } },
+          },
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          404: errorResponse,
           429: errorResponse,
           503: errorResponse,
         },
@@ -1906,6 +1947,100 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           requestId: { type: 'string', minLength: 1 },
         },
       },
+      SourceCatalogDetailEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object', additionalProperties: false,
+            required: ['contractVersion', 'item'],
+            properties: {
+              contractVersion: { type: 'string', const: 'source-catalog.public.v1' },
+              item: { $ref: '#/components/schemas/SourceCatalogEntry' },
+            },
+          },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      SourceCatalogCoverageCounts: {
+        type: 'object', additionalProperties: false,
+        properties: Object.fromEntries(
+          ['unknown', 'not_covered', 'partial', 'covered']
+            .map((status) => [status, { type: 'integer', minimum: 0 }]),
+        ),
+      },
+      SourceCatalogDeliveryCounts: {
+        type: 'object', additionalProperties: false,
+        properties: Object.fromEntries(
+          ['exploring', 'planned', 'doing', 'blocked', 'complete', 'paused', 'retired']
+            .map((status) => [status, { type: 'integer', minimum: 0 }]),
+        ),
+      },
+      SourceCatalogPriorityCounts: {
+        type: 'object', additionalProperties: false,
+        properties: Object.fromEntries(
+          ['P0', 'P1', 'P2', 'P3'].map((priority) => [priority, { type: 'integer', minimum: 0 }]),
+        ),
+      },
+      SourceCatalogReviewCounts: {
+        type: 'object', additionalProperties: false,
+        properties: Object.fromEntries(
+          ['needs_review', 'verified', 'rejected']
+            .map((status) => [status, { type: 'integer', minimum: 0 }]),
+        ),
+      },
+      SourceCatalogCategorySummary: {
+        type: 'object', additionalProperties: false,
+        required: ['category', 'total', 'covered', 'partial', 'complete', 'doing'],
+        properties: {
+          category: { type: 'string', minLength: 1 },
+          total: { type: 'integer', minimum: 0 },
+          covered: { type: 'integer', minimum: 0 },
+          partial: { type: 'integer', minimum: 0 },
+          complete: { type: 'integer', minimum: 0 },
+          doing: { type: 'integer', minimum: 0 },
+        },
+      },
+      SourceCatalogSummary: {
+        type: 'object', additionalProperties: false,
+        required: [
+          'total', 'covered', 'uncovered', 'partial', 'unknownCoverage', 'coverageRate',
+          'complete', 'inProgress', 'exploring', 'blocked', 'unassigned',
+          'coverage', 'delivery', 'priorities', 'review', 'categories',
+        ],
+        properties: {
+          total: { type: 'integer', minimum: 0 },
+          covered: { type: 'integer', minimum: 0 },
+          uncovered: { type: 'integer', minimum: 0 },
+          partial: { type: 'integer', minimum: 0 },
+          unknownCoverage: { type: 'integer', minimum: 0 },
+          coverageRate: { type: 'number', minimum: 0, maximum: 100 },
+          complete: { type: 'integer', minimum: 0 },
+          inProgress: { type: 'integer', minimum: 0 },
+          exploring: { type: 'integer', minimum: 0 },
+          blocked: { type: 'integer', minimum: 0 },
+          unassigned: { type: 'integer', minimum: 0 },
+          coverage: { $ref: '#/components/schemas/SourceCatalogCoverageCounts' },
+          delivery: { $ref: '#/components/schemas/SourceCatalogDeliveryCounts' },
+          priorities: { $ref: '#/components/schemas/SourceCatalogPriorityCounts' },
+          review: { $ref: '#/components/schemas/SourceCatalogReviewCounts' },
+          categories: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/SourceCatalogCategorySummary' },
+          },
+        },
+      },
+      SourceCatalogFacets: {
+        type: 'object', additionalProperties: false,
+        required: ['majorCategories', 'scenarios', 'regions', 'owners', 'connectorHints', 'tags'],
+        properties: Object.fromEntries(
+          ['majorCategories', 'scenarios', 'regions', 'owners', 'connectorHints', 'tags']
+            .map((field) => [field, {
+              type: 'array', uniqueItems: true, items: { type: 'string' },
+            }]),
+        ),
+      },
       SourceCatalogMetadataEnvelope: {
         type: 'object',
         additionalProperties: false,
@@ -1940,8 +2075,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   taxonomyKinds: { type: 'array', items: { type: 'string', enum: ['major_category', 'scenario', 'region', 'tag'] } },
                 },
               },
-              summary: { type: 'object', additionalProperties: true },
-              facets: { type: 'object', additionalProperties: true },
+              summary: { $ref: '#/components/schemas/SourceCatalogSummary' },
+              facets: { $ref: '#/components/schemas/SourceCatalogFacets' },
               taxonomy: {
                 type: 'array', items: {
                   type: 'object', additionalProperties: false,
@@ -2765,7 +2900,9 @@ const PUBLIC_DOCS_TEMPLATE = `<!doctype html>
     <h3>认证及显式授权</h3>
     <p>每个请求必须携带已签发的调用者 API Key。建议使用 Bearer；不要把 Key 放进 URL、日志或前端代码。Key 只能调用后台为其调用者显式启用的平台或通用 capability；先调用 capabilities 确认授权与 Hub dispatch eligibility。</p>
     <pre><code>export HUB_URL="https://hub.example.com"
-export MX_INSIGHT_API_KEY="&lt;issued-api-key&gt;"
+read -rsp 'MX Insight API Key: ' MX_INSIGHT_API_KEY
+export MX_INSIGHT_API_KEY
+printf '\\n'
 
 curl -sS "$HUB_URL/api/v1/data/capabilities" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
@@ -2783,15 +2920,78 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
 
     <section class="doc-page" data-doc-page="source-catalog">
     <h2 id="source-catalog">数据源目录</h2>
-    <div class="notice">数据源目录是 Hub 对外的已治理业务视图。调用者必须使用 API Key 并显式获得 <code>source_catalog</code> platform grant；不使用 admin token，也不开放管理面的增删改。每次 GET 都按该平台策略计量，不需要 <code>Idempotency-Key</code>。</div>
-    <p>公开投影保留还原目录和对外汇报所需的经治理字段，包括平台、大类、细分场景、区域、覆盖状态、实施阶段、字段审核、运行状态、优先级、负责人、标签、备注与接入线索。不返回 <code>evidenceRefs</code>、<code>customFields</code>、<code>importedFrom</code>、事件历史、关联数据、登录账号绑定、连接信息或凭据。</p>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog</code></div><p>分页返回 active 目录条目。支持 <code>query</code>、<code>sourceKind</code>、<code>majorCategory</code>、<code>scenario</code>、<code>region</code>、<code>coverageStatus</code>、<code>deliveryStatus</code>、<code>reviewStatus</code>、<code>runtimeStatus</code>、<code>priority</code>、<code>ownerId</code> 和 <code>tag</code> 组合过滤。普通业务备注会保留；误粘的 DSN、带凭据 URL、私网连接、API key、token 或敏感口令会在搜索/facet 前按字段移除，<code>redactedFields</code> 说明受影响字段。响应契约是 <code>source-catalog.public.v1</code>，分页信息同时包含 <code>totalCount</code> 和不透明 <code>nextCursor</code>。游标是 HMAC 签名的 keyset，与全部过滤条件及 <code>pageSize</code> 绑定；修改条件后必须从首页开始，否则返回 <code>400 invalid_cursor</code>。</p></div>
-    <pre><code>curl -sS -G "$HUB_URL/api/v1/data/source-catalog" \
+    <div class="notice">这是只读、active-only 的已治理业务视图。负责该调用者的 Hub operator 必须先授予 <code>source_catalog</code> platform grant；调用者不能通过 Public API 自行授权。三个 GET 都只接受已签发的调用者 API Key，按同一 platform policy 独立计量，不使用 <code>Idempotency-Key</code>。</div>
+    <p>授权入口是 Hub 管理台的“开放能力”：依次选择租户、调用者和“数据源目录”，配置配额后启用。授权按 consumer 动态生效，已有 API Key 不需要重新签发。</p>
+    <h3>1. 准备 API Key 并确认授权</h3>
+    <pre><code>export HUB_URL="https://hub.minsight-ai.com"
+read -rsp 'MX Insight API Key: ' MX_INSIGHT_API_KEY
+export MX_INSIGHT_API_KEY
+printf '\\n'
+
+curl -sS "$HUB_URL/api/v1/data/capabilities" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  | jq '.data.platforms[] | select(.platform == "source_catalog")'</code></pre>
+    <p>预检结果必须包含 <code>ready=true</code>，以及 <code>catalog_entries</code>、<code>catalog_metadata</code>、<code>catalog_detail</code>、<code>filtered_browse</code>。没有该平台项时，请让 operator 为当前 consumer 授权；不要改用管理凭据调用 Public API。</p>
+
+    <h3>2. 先读取 metadata</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog/metadata</code></div><p>返回 <code>source-catalog.public.v1</code> 的公开字段定义与枚举、active taxonomy、负责人公开投影、严格的 summary 与 facets。该路由不接受任何 query 参数；传入任意 query key 都返回 <code>400 unsupported_fields</code>。</p></div>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/source-catalog/metadata" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  | jq '{contractVersion: .data.contractVersion,
+         fields: .data.fields,
+         enums: .data.enums,
+         summary: .data.summary,
+         facets: .data.facets,
+         taxonomy: .data.taxonomy,
+         owners: .data.owners,
+         requestId}'</code></pre>
+    <p><code>summary</code> 固定包含 total、coverage/delivery/review/priority 计数、coverageRate、负责人缺失数和分类汇总；<code>facets</code> 固定包含 majorCategories、scenarios、regions、owners、connectorHints、tags。客户端应使用 metadata 返回的精确值构造目录过滤条件。</p>
+
+    <h3>3. 查询第一页</h3>
+    <p>公开投影保留还原目录和对外汇报所需的治理字段；不返回证据、custom fields、导入来源、事件历史、关联数据、登录绑定、连接坐标或凭据。误粘的 DSN、带凭据 URL、私网连接、API key、token 或敏感口令会在搜索/facet 前按字段移除，<code>redactedFields</code> 列出受影响字段。</p>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog</code></div><p>支持 <code>query</code>、<code>sourceKind</code>、<code>majorCategory</code>、<code>scenario</code>、<code>region</code>、<code>coverageStatus</code>、<code>deliveryStatus</code>、<code>reviewStatus</code>、<code>runtimeStatus</code>、<code>priority</code>、<code>ownerId</code>、<code>tag</code>、<code>pageSize</code> 和 <code>cursor</code>。<code>pageSize</code> 默认 50、硬上限 100，并可能被 consumer policy 进一步降低。</p></div>
+    <pre><code>FIRST_PAGE=$(curl -sS -G "$HUB_URL/api/v1/data/source-catalog" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   --data-urlencode 'coverageStatus=covered' \
   --data-urlencode 'deliveryStatus=doing' \
-  --data-urlencode 'pageSize=50' | jq</code></pre>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog/metadata</code></div><p>返回公开字段定义与枚举、当前 active taxonomy、负责人公开投影、全局 summary 与 facets，供外部系统还原 Hub 的筛选器、统计和状态看板。</p></div>
+  --data-urlencode 'pageSize=50')
+
+printf '%s\n' "$FIRST_PAGE" \
+  | jq '{contractVersion: .data.contractVersion,
+         items: .data.items,
+         filters: .data.filters,
+         pageInfo: .data.pageInfo,
+         requestId}'</code></pre>
+    <p>成功响应固定为顶层 <code>data + requestId</code>；<code>data</code> 固定包含 <code>contractVersion</code>、<code>items</code>、规范化后的 <code>filters</code> 和 <code>pageInfo.returnedCount/totalCount/hasMore/nextCursor</code>。</p>
+
+    <h3>4. 使用不透明 cursor 读取下一页</h3>
+    <pre><code>NEXT_CURSOR=$(printf '%s\n' "$FIRST_PAGE" | jq -r '.data.pageInfo.nextCursor // empty')
+
+curl -sS -G "$HUB_URL/api/v1/data/source-catalog" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'coverageStatus=covered' \
+  --data-urlencode 'deliveryStatus=doing' \
+  --data-urlencode 'pageSize=50' \
+  --data-urlencode "cursor=$NEXT_CURSOR" | jq</code></pre>
+    <p>只有 <code>hasMore=true</code> 时才请求下一页。<code>nextCursor</code> 是 HMAC 签名的 keyset，绑定全部规范化 filters 与 <code>pageSize</code>；必须原样返回。更改任一条件后应移除 cursor，从第一页重新开始，否则返回 <code>400 invalid_cursor</code>。</p>
+
+    <h3>5. 按列表返回的 UUID 读取详情</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog/{id}</code></div><p>返回与列表完全相同的安全 <code>SourceCatalogEntry</code> 投影。只接受列表返回的 active UUID，不接受 query 参数。</p></div>
+    <pre><code>SOURCE_ID=$(printf '%s\n' "$FIRST_PAGE" | jq -r '.data.items[0].id')
+
+curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  | jq '{contractVersion: .data.contractVersion, item: .data.item, requestId}'</code></pre>
+
+    <h3>数据源目录错误码</h3>
+    <table><thead><tr><th>HTTP</th><th>error.code</th><th>调用方处理</th></tr></thead><tbody>
+      <tr><td>400</td><td><code>invalid_request</code>、<code>invalid_cursor</code>、<code>invalid_source_catalog_id</code>、<code>page_size_exceeded</code>、<code>unsupported_fields</code></td><td>修正字段、UUID 或分页状态；不要原样重试。</td></tr>
+      <tr><td>401</td><td><code>api_key_required</code>、<code>invalid_api_key</code></td><td>提供或轮换当前 consumer 的 API Key。</td></tr>
+      <tr><td>403</td><td><code>platform_not_granted</code></td><td>让 operator 为该 consumer 授予 <code>source_catalog</code>。</td></tr>
+      <tr><td>404</td><td><code>source_catalog_entry_not_found</code></td><td>重新从列表获取 active UUID。</td></tr>
+      <tr><td>429</td><td><code>quota_exceeded</code></td><td>等待 platform policy 的计量窗口恢复。</td></tr>
+      <tr><td>503</td><td><code>stored_data_unavailable</code></td><td>安全 GET 可稍后重试；保留错误响应的 <code>requestId</code> 供排查。</td></tr>
+    </tbody></table>
     </section>
 
     <section class="doc-page" data-doc-page="search">

@@ -69,6 +69,7 @@ const PLATFORM_CATALOG = [
   'wechat_mp',
   'telegram',
   'public_opinion',
+  'source_catalog',
 ]
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 }

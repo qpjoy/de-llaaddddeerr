@@ -41,7 +41,7 @@ Open API 文档的业务导航尽量跟随 Admin 信息架构，但只保留可�
 | --- | --- | --- |
 | 开始调用 | `/docs` | Base URL、API Key、首个请求 |
 | 认证与调用规则 | `/docs/auth` | grant、quota、cursor、idempotency |
-| 数据源目录 | `/docs/source-catalog` | 目录列表与 metadata/facets |
+| 数据源目录 | `/docs/source-catalog` | 目录列表、详情与 metadata/facets |
 | Telegram 会话 | `/docs/telegram` | 会话、消息、检索、canonical context |
 | 全国舆情 | `/docs/public-opinion` | 地区、coverage、feed、详情、检索 |
 | 通用搜索 | `/docs/search` | live、stored、canonical search |
@@ -132,9 +132,14 @@ Telegram 也遵循同一原则：省略新增参数时，既有 chats/messages/s
 数据源目录使用 `source_catalog` platform grant。它公开已发布的活动目录事实，不开放 Admin CRUD、
 归档、审计、关联数据原始记录或 saved-view 管理。
 
+能力发现中的该平台项固定使用 Hub stored 数据面，并声明 `catalog_entries`、`catalog_metadata`、
+`catalog_detail` 和 `filtered_browse`。Public 调用者不能自行授予这些能力；operator 完成 consumer
+授权后，调用者通过 `GET /api/v1/data/capabilities` 验证授权与服务就绪状态。
+
 ```http
 GET /api/v1/data/source-catalog
 GET /api/v1/data/source-catalog/metadata
+GET /api/v1/data/source-catalog/{id}
 ```
 
 列表支持 `query`、`sourceKind`、`majorCategory`、`scenario`、`region`、`coverageStatus`、
@@ -150,6 +155,15 @@ runtime 四条状态轴、负责人引用、connector hints、tags 和经治理�
 - 字段定义与枚举 choices；
 - 活动 taxonomy 与负责人公共投影；
 - 同一口径的 summary 与 facets，供筛选器和汇报卡片直接使用。
+
+`summary` 与 `facets` 是稳定合同，不是任意 JSON。summary 固定包含 active 总量、coverage/delivery/
+review/priority 计数、coverage rate、未分配负责人数量和分类汇总；facets 固定包含
+`majorCategories/scenarios/regions/owners/connectorHints/tags`。两者的 OpenAPI schema 都使用
+`additionalProperties=false`，新增字段必须走合同版本评审。
+
+详情只接受列表返回的 active UUID，返回同一个 customer-safe `SourceCatalogEntry` 投影，不额外暴露
+管理字段。详情不接受 query 参数；非法 UUID 返回 `invalid_source_catalog_id`，未知或归档 UUID 返回
+`source_catalog_entry_not_found`。列表、metadata 和详情共享 `source_catalog` platform quota，分别计量。
 
 Public 不返回 archived entries/terms/owners、`evidenceRefs`、`customFields`、`importedFrom`、内部
 revision/timestamps/events、linked login account、related canonical records、physical source
