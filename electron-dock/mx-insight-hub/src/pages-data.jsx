@@ -32,6 +32,23 @@ import {
   useRemoteData,
 } from './components.jsx'
 
+const SSL_MODE_OPTIONS = [
+  { value: 'disable', label: 'disable（同机或受控内网）' },
+  { value: 'require', label: 'require' },
+  { value: 'verify-ca', label: 'verify-ca' },
+  { value: 'verify-full', label: 'verify-full' },
+]
+
+const AGENT_CONFIG_SOURCE_OPTIONS = [
+  { value: 'database', label: '数据库（可在线更新）' },
+  { value: 'environment', label: '环境变量（由部署管理）' },
+]
+
+const PROVIDER_AUTH_OPTIONS = [
+  { value: 'bearer', label: 'Bearer Token' },
+  { value: 'none', label: '无需认证' },
+]
+
 // Pages for the data plane: external sources (P4), the model agent (P5) and the
 // retrieval pipeline. Each one surfaces the degradation state rather than only
 // the happy path — a system quietly running on a fallback is the thing an
@@ -811,12 +828,9 @@ function ProvinceOpinionPipelineModal({
           <Field label="数据库"><input className="qp-input" required value={form.database} placeholder="night_all" onChange={(event) => setForm({ ...form, database: event.target.value })} /></Field>
           <Field label="用户名"><input className="qp-input" required autoComplete="off" value={form.username} placeholder="mx_data" onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
           <Field label="密码" hint="明文保存，仅 Admin Token 管理面可读取"><input className="qp-input" type="password" required autoComplete="off" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
-          <Field label="SSL 模式">
-            <select className="qp-input" value={form.sslMode} onChange={(event) => setForm({ ...form, sslMode: event.target.value })}>
-              <option value="disable">disable（受控内网）</option><option value="require">require</option>
-              <option value="verify-ca">verify-ca</option><option value="verify-full">verify-full</option>
-            </select>
-          </Field>
+          <DropdownField label="SSL 模式" value={form.sslMode}
+            onChange={(sslMode) => setForm({ ...form, sslMode })}
+            options={[{ ...SSL_MODE_OPTIONS[0], label: 'disable（受控内网）' }, ...SSL_MODE_OPTIONS.slice(1)]} />
           <Field label="同步间隔（秒）" hint="60–86400；首次空 checkpoint 会完整扫描">
             <input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds}
               onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} />
@@ -1414,12 +1428,8 @@ function TelegramPipelineModal({
           <Field label="数据库"><input className="qp-input" required value={form.database} placeholder="night_all" onChange={(event) => setForm({ ...form, database: event.target.value })} /></Field>
           <Field label="用户名"><input className="qp-input" required autoComplete="off" value={form.username} placeholder="mx_data" onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
           <Field label="密码" hint="明文保存，仅 Admin Token 接口返回"><input className="qp-input" type="text" required autoComplete="off" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
-          <Field label="SSL 模式">
-            <select className="qp-input" value={form.sslMode} onChange={(event) => setForm({ ...form, sslMode: event.target.value })}>
-              <option value="disable">disable（同机或受控内网）</option><option value="require">require</option>
-              <option value="verify-ca">verify-ca</option><option value="verify-full">verify-full</option>
-            </select>
-          </Field>
+          <DropdownField label="SSL 模式" value={form.sslMode}
+            onChange={(sslMode) => setForm({ ...form, sslMode })} options={SSL_MODE_OPTIONS} />
           <Field label="同步间隔（秒）" hint="60–86400；暂停后不再发起新批次"><input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds} onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} /></Field>
           <div className="mih-page-actions mih-form__wide">
             <button className="qp-button qp-button--ghost" type="submit" disabled={Boolean(busyAction) || pipeline.status !== 'paused' || running}
@@ -2043,15 +2053,8 @@ function CreateSourceModal({ token, onUnauthorized, notify, onClose, onCreated }
               <input className="qp-input" type="text" value={form.password} required autoComplete="off"
                 onChange={(event) => setForm({ ...form, password: event.target.value })} />
             </Field>
-            <Field label="SSL 模式">
-              <select className="qp-input" value={form.sslMode}
-                onChange={(event) => setForm({ ...form, sslMode: event.target.value })}>
-                <option value="disable">disable（同机或受控内网）</option>
-                <option value="require">require</option>
-                <option value="verify-ca">verify-ca</option>
-                <option value="verify-full">verify-full</option>
-              </select>
-            </Field>
+            <DropdownField label="SSL 模式" value={form.sslMode}
+              onChange={(sslMode) => setForm({ ...form, sslMode })} options={SSL_MODE_OPTIONS} />
             <Field label="Schema">
               <input className="qp-input" value={form.schema} required
                 onChange={(event) => setForm({ ...form, schema: event.target.value })} />
@@ -2842,14 +2845,8 @@ function DatabaseSourceControl({
             <Field label="密码" hint="明文保存并仅向 Admin Token 管理接口返回">
               <input className="qp-input" type="text" required autoComplete="off" value={draft.password} onChange={(event) => setDraft({ ...draft, password: event.target.value })} />
             </Field>
-            <Field label="SSL 模式">
-              <select className="qp-input" value={draft.sslMode} onChange={(event) => setDraft({ ...draft, sslMode: event.target.value })}>
-                <option value="disable">disable（同机或受控内网）</option>
-                <option value="require">require</option>
-                <option value="verify-ca">verify-ca</option>
-                <option value="verify-full">verify-full</option>
-              </select>
-            </Field>
+            <DropdownField label="SSL 模式" value={draft.sslMode}
+              onChange={(sslMode) => setDraft({ ...draft, sslMode })} options={SSL_MODE_OPTIONS} />
             <Field label="Schema"><input className="qp-input" required value={draft.schema} onChange={(event) => setDraft({ ...draft, schema: event.target.value })} /></Field>
             <Field label="表名"><input className="qp-input" required value={draft.table} onChange={(event) => setDraft({ ...draft, table: event.target.value })} /></Field>
             <Field label="变更水位列"><input className="qp-input" value={draft.cursorColumn} onChange={(event) => setDraft({ ...draft, cursorColumn: event.target.value })} /></Field>
@@ -3581,16 +3578,15 @@ function ProviderSettingsModal({ kind, setting, onClose, onSave }) {
       </>}
     >
       <form id={`agent-provider-${kind}`} className="mih-agent-provider-form" onSubmit={submit}>
-        <Field
+        <DropdownField
           label="目标配置来源"
           className="mih-agent-source-choice"
           hint="数据库配置可在线更新；环境变量由部署注入。"
-        >
-          <select className="qp-input" value={targetSource} onChange={(event) => changeTargetSource(event.target.value)} disabled={saving}>
-            <option value="database">数据库（可在线更新）</option>
-            <option value="environment">环境变量（由部署管理）</option>
-          </select>
-        </Field>
+          value={targetSource}
+          onChange={changeTargetSource}
+          options={AGENT_CONFIG_SOURCE_OPTIONS}
+          disabled={saving}
+        />
         {targetSource === 'environment' ? (
           <div className="mih-inline-warning">
             <Warning size={17} aria-hidden="true" />
@@ -3641,7 +3637,8 @@ function ProviderSettingsModal({ kind, setting, onClose, onSave }) {
                 <Field label="超时（ms）"><input className="qp-input" type="number" min="1000" max="300000" step="1" required value={provider.timeoutMs} onChange={(event) => patchProvider(index, { timeoutMs: event.target.value })} /></Field>
                 <Field label="优先级" hint="保存时按数值从小到大排序"><input className="qp-input" type="number" min="0" max="10000" step="1" required value={provider.priority} onChange={(event) => patchProvider(index, { priority: event.target.value })} /></Field>
                 {isEmbedding ? <Field label="Dimensions" hint="改变后必须 reindex"><input className="qp-input" type="number" min="1" step="1" required value={provider.dimensions} onChange={(event) => patchProvider(index, { dimensions: event.target.value })} /></Field> : null}
-                <Field label="认证方式"><select className="qp-input" value={provider.authMode} onChange={(event) => patchProvider(index, { authMode: event.target.value })}><option value="bearer">Bearer Token</option><option value="none">无需认证</option></select></Field>
+                <DropdownField label="认证方式" value={provider.authMode}
+                  onChange={(authMode) => patchProvider(index, { authMode })} options={PROVIDER_AUTH_OPTIONS} />
                 <Field
                   label="API Key"
                   className="mih-agent-provider-editor__wide"

@@ -7,8 +7,10 @@ import {
   normalizeTelegramEntityQuery,
   normalizeTelegramSearchQuery,
   publicTelegramMonitorPage,
+  publicTelegramMonitorRecord,
   telegramDataSearchResponse,
   telegramMonitorResource,
+  telegramStoredDatasetIds,
 } from './data/telegram-monitor.mjs'
 import {
   canonicalSearchResponse,
@@ -22,7 +24,15 @@ import {
   normalizeCanonicalContextQuery,
 } from './data/canonical-context.mjs'
 import {
+  normalizePublicSourceCatalogMetadataQuery,
+  normalizePublicSourceCatalogQuery,
+  publicSourceCatalogMetadata,
+  publicSourceCatalogPage,
+  SOURCE_CATALOG_PLATFORM,
+} from './data/public-source-catalog.mjs'
+import {
   PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
+  PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
   PUBLIC_OPINION_PLATFORM,
   normalizePublicOpinionCoverageQuery,
   normalizePublicOpinionDetailQuery,
@@ -36,6 +46,10 @@ import {
   publicOpinionRegionPage,
   publicOpinionRegions,
 } from './data/public-opinion.mjs'
+import {
+  normalizePublicOpinionDiagnosticsBrowseQuery,
+  publicOpinionDiagnosticsBrowseResponse,
+} from './data/public-opinion-diagnostics.mjs'
 import {
   adminPublicOpinionCoverageResponse,
   adminPublicOpinionBrowseItemResponse,
@@ -121,6 +135,12 @@ const RESULT_TYPES = new Set(['fresh', 'stable'])
 const FRESH_REPLAY_WINDOW_MS = 120_000
 const PUBLIC_OPINION_VISIBILITY_CONTRACT = 'public-opinion.publication-visibility.v1'
 
+function publicDataProductContract(response, contractVersion) {
+  const payload = { ...response, contractVersion }
+  delete payload.demoMode
+  return payload
+}
+
 function resolveResultType(body) {
   const value = body?.type ?? 'fresh'
   assert(
@@ -140,6 +160,7 @@ const TOKENIZE_CAPABILITY = 'nlp.tokenize'
 const PUBLIC_CAPABILITIES = new Set([
   TOKENIZE_CAPABILITY,
   PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
+  PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
 ])
 const CANONICAL_SEARCH_USAGE_SCOPE = 'data.canonical-search'
 const TOKENIZE_MAX_TEXT_LENGTH = 4_096
@@ -393,6 +414,12 @@ export class HubService {
           capability: PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
           ready: allIngestedReady,
         },
+        {
+          capability: PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
+          ready: typeof this.store.getAdminPublicOpinionFunnel === 'function'
+            && typeof this.store.listAdminPublicOpinionBrowseRecords === 'function'
+            && typeof this.store.getAdminPublicOpinionBrowseRecord === 'function',
+        },
       ],
     }
   }
@@ -466,7 +493,7 @@ export class HubService {
   async capabilities(context) {
     const grants = await this.store.listGrants(context.consumer.id)
     const canonicalGrants = [...new Set(grants.map((grant) => canonicalPlatform(grant)))]
-    const localStoredPlatforms = new Set(['telegram', PUBLIC_OPINION_PLATFORM])
+    const localStoredPlatforms = new Set(['telegram', PUBLIC_OPINION_PLATFORM, SOURCE_CATALOG_PLATFORM])
     const nightAllGrants = canonicalGrants.filter((platform) => !localStoredPlatforms.has(platform))
     const payload = nightAllGrants.length > 0
       ? await this.adapter.capabilities(nightAllGrants)
@@ -496,6 +523,20 @@ export class HubService {
           capabilities: [
             'monitor_chats',
             'monitor_messages',
+            ...(typeof this.store.listAdminTelegramChats === 'function'
+              ? ['sqlite_chats']
+              : []),
+            ...(typeof this.store.listAdminTelegramMessages === 'function'
+              ? ['sqlite_messages']
+              : []),
+            ...(typeof this.store.listAdminTelegramChats === 'function'
+              && typeof this.store.getAdminTelegramChat === 'function'
+              && typeof this.store.listAdminTelegramMessages === 'function'
+              ? ['multi_source_conversations']
+              : []),
+            ...(typeof this.store.listAdminTelegramChats === 'function'
+              ? ['conversation_filter']
+              : []),
             'stored_search',
             'entity_search',
             ...(context ? ['message_context'] : []),
@@ -527,7 +568,23 @@ export class HubService {
             'region_feed',
             'item_detail',
             'stored_search',
+            'diagnostics',
           ],
+        })
+      }
+    }
+    if (
+      canonicalGrants.includes(SOURCE_CATALOG_PLATFORM)
+      && typeof this.store.listSourceCatalogEntries === 'function'
+    ) {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === SOURCE_CATALOG_PLATFORM)) {
+        platforms.push({
+          platform: SOURCE_CATALOG_PLATFORM,
+          ready: true,
+          source: 'hub',
+          servingMode: 'stored',
+          capabilities: ['catalog_entries', 'catalog_metadata', 'filtered_browse'],
         })
       }
     }
@@ -537,6 +594,9 @@ export class HubService {
     const allIngestedReady = capabilityGrants.includes(PUBLIC_OPINION_ALL_INGESTED_CAPABILITY)
       ? await this.#publicOpinionRegionServingReady()
       : false
+    const diagnosticsReady = typeof this.store.getAdminPublicOpinionFunnel === 'function'
+      && typeof this.store.listAdminPublicOpinionBrowseRecords === 'function'
+      && typeof this.store.getAdminPublicOpinionBrowseRecord === 'function'
     return {
       ...payload,
       data: {
@@ -549,7 +609,9 @@ export class HubService {
               ? typeof this.segmenter?.segmentWithMeta === 'function'
               : capability === PUBLIC_OPINION_ALL_INGESTED_CAPABILITY
                 ? allIngestedReady
-                : false,
+                : capability === PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY
+                  ? diagnosticsReady
+                  : false,
           })),
       },
     }
@@ -875,17 +937,155 @@ export class HubService {
     }
     const policy = await this.#storedPlatformPolicy(context, 'telegram', 'Telegram')
     const resource = telegramMonitorResource(resourceName)
-    const query = normalizeTelegramMonitorQuery(queryInput, policy.maxPageSize)
+    const query = normalizeTelegramMonitorQuery(
+      queryInput,
+      policy.maxPageSize,
+      resourceName,
+      this.apiKeyPepper,
+    )
     return this.#meterStoredRead(context, 'telegram', policy, {
       path: `/api/v1/data/telegram/${resourceName}`,
       fingerprintBody: query,
       operation: async () => {
-      const rows = await this.store.listCanonicalRecords({
-        ...resource,
-        platform: 'telegram',
-        ...query,
-      })
-        return publicTelegramMonitorPage(rows, query.pageSize)
+        let rows
+        let chat = null
+        let effectiveSourceScope = query.sourceScope
+        if (resourceName === 'chats') {
+          if (query.cursorBinding) {
+            if (typeof this.store.listAdminTelegramChats !== 'function') {
+              throw new AppError(
+                503,
+                'stored_data_unavailable',
+                'Multi-source Telegram directory requires the PostgreSQL product store',
+              )
+            }
+            rows = await this.store.listAdminTelegramChats({
+              kind: query.kind,
+              sourceScope: query.sourceScope,
+              query: query.query,
+              pageSize: query.pageSize,
+              cursor: query.cursor,
+            })
+          } else {
+            rows = await this.store.listCanonicalRecords({
+              ...resource,
+              platform: 'telegram',
+              ...query,
+            })
+          }
+        } else {
+          let selectedSourceScope = query.sourceScope
+          let chatId = query.chatId
+          const qualifiedChat = /^(monitor|sqlite):/i.exec(chatId || '')
+          if (qualifiedChat) {
+            if (query.sourceScope !== 'all' && query.sourceScope !== qualifiedChat[1].toLowerCase()) {
+              throw new AppError(400, 'source_scope_mismatch', 'chatKey source does not match sourceScope')
+            }
+            if (typeof this.store.getAdminTelegramChat !== 'function') {
+              throw new AppError(503, 'stored_data_unavailable', 'Qualified Telegram chat lookup requires the PostgreSQL store')
+            }
+            chat = await this.store.getAdminTelegramChat(chatId, query.sourceScope)
+            if (!chat) throw new AppError(404, 'chat_not_found', 'Telegram chat not found')
+            selectedSourceScope = qualifiedChat[1].toLowerCase()
+            effectiveSourceScope = selectedSourceScope
+            chatId = String(chat.external_id)
+          }
+          if (query.cursorBinding) {
+            if (typeof this.store.listAdminTelegramMessages !== 'function') {
+              throw new AppError(
+                503,
+                'stored_data_unavailable',
+                'Multi-source Telegram history requires the PostgreSQL product store',
+              )
+            }
+            rows = await this.store.listAdminTelegramMessages({
+              chatExternalId: chatId,
+              sourceScope: selectedSourceScope,
+              pageSize: query.pageSize,
+              cursor: query.cursor,
+              from: query.from,
+              to: query.to,
+            })
+          } else {
+            const datasets = telegramStoredDatasetIds(selectedSourceScope, resourceName)
+            const pages = await Promise.all(datasets.map((datasetId) => this.store.listCanonicalRecords({
+              ...resource,
+              datasetId,
+              platform: 'telegram',
+              ...query,
+              chatId,
+            })))
+            rows = [...new Map(
+              pages.flat()
+                .sort((left, right) => {
+                  const time = new Date(right.sort_time).getTime() - new Date(left.sort_time).getTime()
+                  return time || String(right.id).localeCompare(String(left.id))
+                })
+                .map((row) => [row.id, row]),
+            ).values()]
+          }
+        }
+        const page = publicTelegramMonitorPage(rows, query.pageSize, {
+          cursorBinding: query.cursorBinding,
+          cursorSecret: this.apiKeyPepper,
+        })
+        return {
+          contractVersion: `mx-insight-hub.data-products.telegram-${resourceName}.v1`,
+          sourceScope: {
+            selected: effectiveSourceScope,
+            datasets: telegramStoredDatasetIds(effectiveSourceScope, resourceName),
+          },
+          ...(resourceName === 'chats'
+            ? { filters: { kind: query.kind, query: query.query } }
+            : { filters: { chatId: query.chatId, from: query.from, to: query.to } }),
+          ...(chat ? { chat: publicTelegramMonitorRecord(chat) } : {}),
+          ...page,
+        }
+      },
+    })
+  }
+
+  async sourceCatalog(context, queryInput) {
+    if (typeof this.store.listSourceCatalogEntries !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Source catalog requires the current Hub store')
+    }
+    const policy = await this.#storedPlatformPolicy(context, SOURCE_CATALOG_PLATFORM, 'Source catalog')
+    const query = normalizePublicSourceCatalogQuery(queryInput, policy.maxPageSize, this.apiKeyPepper)
+    return this.#meterStoredRead(context, SOURCE_CATALOG_PLATFORM, policy, {
+      path: '/api/v1/data/source-catalog',
+      fingerprintBody: {
+        ...query.filters,
+        pageSize: query.pageSize,
+        cursor: query.cursorToken,
+      },
+      operation: async () => publicSourceCatalogPage(
+        await this.store.listSourceCatalogEntries({ includeArchived: false }),
+        query,
+        this.apiKeyPepper,
+      ),
+    })
+  }
+
+  async sourceCatalogMetadata(context, queryInput = {}) {
+    const query = normalizePublicSourceCatalogMetadataQuery(queryInput)
+    if (
+      typeof this.store.listSourceCatalogEntries !== 'function'
+      || typeof this.store.listSourceCatalogTerms !== 'function'
+      || typeof this.store.listSourceCatalogOwners !== 'function'
+    ) {
+      throw new AppError(503, 'stored_data_unavailable', 'Source catalog metadata requires the current Hub store')
+    }
+    const policy = await this.#storedPlatformPolicy(context, SOURCE_CATALOG_PLATFORM, 'Source catalog')
+    return this.#meterStoredRead(context, SOURCE_CATALOG_PLATFORM, policy, {
+      path: '/api/v1/data/source-catalog/metadata',
+      fingerprintBody: query,
+      operation: async () => {
+        const [entries, taxonomyTerms, owners] = await Promise.all([
+          this.store.listSourceCatalogEntries({ includeArchived: false }),
+          this.store.listSourceCatalogTerms({ includeArchived: false }),
+          this.store.listSourceCatalogOwners({ includeArchived: false }),
+        ])
+        return publicSourceCatalogMetadata(entries, taxonomyTerms, owners)
       },
     })
   }
@@ -1097,6 +1297,69 @@ export class HubService {
         const row = await this.store.getPublicOpinionRecord(id, query)
         if (!row) throw new AppError(404, 'item_not_found', 'Province opinion item not found')
         return publicOpinionItem(row, { includeQuality: query.candidateMode !== 'formal' })
+      },
+    })
+  }
+
+  async publicOpinionDiagnosticsFunnel(context, queryInput) {
+    const { policy } = await this.#publicOpinionDiagnosticsPolicy(context)
+    if (typeof this.store.getAdminPublicOpinionFunnel !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Public-opinion diagnostics require the PostgreSQL store')
+    }
+    const query = normalizeAdminPublicOpinionFunnelQuery(queryInput)
+    return this.#meterStoredRead(context, PUBLIC_OPINION_PLATFORM, policy, {
+      capability: PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
+      path: '/api/v1/data/public-opinion/funnel',
+      fingerprintBody: query,
+      operation: async () => publicDataProductContract(
+        adminPublicOpinionFunnelResponse(
+          await this.store.getAdminPublicOpinionFunnel(query),
+          query,
+        ),
+        'mx-insight-hub.data-products.public-opinion-funnel.v1',
+      ),
+    })
+  }
+
+  async publicOpinionDiagnosticsRecords(context, queryInput) {
+    const { policy, maxPageSize } = await this.#publicOpinionDiagnosticsPolicy(context)
+    if (typeof this.store.listAdminPublicOpinionBrowseRecords !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Public-opinion diagnostics require the PostgreSQL store')
+    }
+    const query = normalizePublicOpinionDiagnosticsBrowseQuery(
+      queryInput,
+      maxPageSize,
+      this.apiKeyPepper,
+    )
+    return this.#meterStoredRead(context, PUBLIC_OPINION_PLATFORM, policy, {
+      capability: PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
+      path: '/api/v1/data/public-opinion/records',
+      fingerprintBody: query,
+      operation: async () => publicOpinionDiagnosticsBrowseResponse(
+        await this.store.listAdminPublicOpinionBrowseRecords(query),
+        query,
+        this.apiKeyPepper,
+      ),
+    })
+  }
+
+  async publicOpinionDiagnosticsRecord(context, idInput, queryInput) {
+    const { policy } = await this.#publicOpinionDiagnosticsPolicy(context)
+    if (typeof this.store.getAdminPublicOpinionBrowseRecord !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Public-opinion diagnostics require the PostgreSQL store')
+    }
+    const query = normalizeAdminPublicOpinionBrowseItemQuery(idInput, queryInput)
+    return this.#meterStoredRead(context, PUBLIC_OPINION_PLATFORM, policy, {
+      capability: PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
+      path: `/api/v1/data/public-opinion/records/${query.id}`,
+      fingerprintBody: query,
+      operation: async () => {
+        const row = await this.store.getAdminPublicOpinionBrowseRecord(query.id)
+        if (!row) throw new AppError(404, 'item_not_found', 'Public-opinion record not found')
+        return publicDataProductContract(
+          adminPublicOpinionBrowseItemResponse(row, query),
+          'mx-insight-hub.data-products.public-opinion-record.v1',
+        )
       },
     })
   }
@@ -1438,6 +1701,40 @@ export class HubService {
     return {
       ...this.defaultPolicy,
       ...((await this.store.getPolicy(context.consumer.id, platform)) || {}),
+    }
+  }
+
+  async #publicOpinionDiagnosticsPolicy(context) {
+    const platformPolicy = await this.#storedPlatformPolicy(
+      context,
+      PUBLIC_OPINION_PLATFORM,
+      'Public opinion',
+    )
+    const grants = typeof this.store.listCapabilityGrants === 'function'
+      ? await this.store.listCapabilityGrants(context.consumer.id)
+      : []
+    assert(
+      grants.includes(PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY),
+      403,
+      'capability_not_granted',
+      'Public-opinion diagnostics are not granted',
+    )
+    const capabilityPolicy = {
+      ...this.defaultPolicy,
+      ...((typeof this.store.getCapabilityPolicy === 'function'
+        ? await this.store.getCapabilityPolicy(
+            context.consumer.id,
+            PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
+          )
+        : null) || {}),
+    }
+    return {
+      maxPageSize: platformPolicy.maxPageSize,
+      policy: {
+        ...platformPolicy,
+        maxRequests: capabilityPolicy.maxRequests,
+        windowSeconds: capabilityPolicy.windowSeconds,
+      },
     }
   }
 
@@ -1987,10 +2284,18 @@ export class HubService {
       ...(cursor ? { cursor } : {}),
     }
     const resultType = resolveResultType(body)
+    let fingerprintQuery = telegramQuery ?? upstreamBody
+    if (telegramQuery && (!dedicatedTelegramSearch || body.sourceScope == null)) {
+      // Preserve the pre-sourceScope idempotency fingerprint for callers that
+      // did not opt into the additive multi-source contract. This lets an
+      // in-flight retry across a Hub upgrade replay its existing request.
+      fingerprintQuery = { ...telegramQuery }
+      delete fingerprintQuery.sourceScope
+    }
     const fingerprint = requestFingerprint({
       method: 'POST',
       path,
-      body: { ...(telegramQuery ?? upstreamBody), type: resultType },
+      body: { ...fingerprintQuery, type: resultType },
     })
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
@@ -2121,11 +2426,12 @@ export class HubService {
     if (!this.searchQueries?.searchContent) {
       throw new AppError(503, 'stored_search_unavailable', 'Stored Telegram search requires the PostgreSQL search layer')
     }
-    const datasets = {
-      messages: ['telegram.monitor.messages.v1'],
-      chats: ['telegram.monitor.chats.v1'],
-      all: ['telegram.monitor.messages.v1', 'telegram.monitor.chats.v1'],
-    }[query.scope]
+    const datasets = query.scope === 'all'
+      ? [
+          ...telegramStoredDatasetIds(query.sourceScope, 'messages'),
+          ...telegramStoredDatasetIds(query.sourceScope, 'chats'),
+        ]
+      : telegramStoredDatasetIds(query.sourceScope, query.scope)
     const result = await this.searchQueries.searchContent(query.query, {
       platform: 'telegram',
       datasetIds: datasets,

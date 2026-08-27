@@ -1237,7 +1237,7 @@ paths:
                           additionalProperties: false
                           required: [capability, ready]
                           properties:
-                            capability: { type: string, enum: [nlp.tokenize, public_opinion.all_ingested.read] }
+                            capability: { type: string, enum: [nlp.tokenize, public_opinion.all_ingested.read, public_opinion.diagnostics.read] }
                             ready: { type: boolean }
                   requestId: { type: string }
               example:
@@ -1245,7 +1245,7 @@ paths:
                   platforms:
                     - platform: telegram
                       ready: true
-                      capabilities: [monitor_chats, monitor_messages, stored_search, entity_search, message_context]
+                      capabilities: [monitor_chats, monitor_messages, sqlite_chats, sqlite_messages, multi_source_conversations, conversation_filter, stored_search, entity_search, message_context]
                       source: hub
                       servingMode: stored
                       context:
@@ -1268,7 +1268,12 @@ paths:
                             upstreamCompleteness: { status: bounded, basis: append_only_overlap, through: null }
                     - platform: public_opinion
                       ready: false
-                      capabilities: [province_feed, province_coverage, region_catalog, region_feed, item_detail, stored_search]
+                      capabilities: [province_feed, province_coverage, region_catalog, region_feed, item_detail, stored_search, diagnostics]
+                      source: hub
+                      servingMode: stored
+                    - platform: source_catalog
+                      ready: true
+                      capabilities: [catalog_entries, catalog_metadata, filtered_browse]
                       source: hub
                       servingMode: stored
                     - platform: xiaohongshu
@@ -1290,6 +1295,7 @@ paths:
                   capabilities:
                     - { capability: nlp.tokenize, ready: true }
                     - { capability: public_opinion.all_ingested.read, ready: true }
+                    - { capability: public_opinion.diagnostics.read, ready: true }
                 requestId: 00000000-0000-4000-8000-000000000001
   /tools/tokenize:
     post:
@@ -1688,6 +1694,113 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /data/source-catalog:
+    get:
+      operationId: listSourceCatalogEntries
+      summary: List active governed source-catalog entries.
+      description: >-
+        Requires the source_catalog platform grant. Returns the customer-safe
+        business projection needed to reconstruct the Hub catalog table and
+        status filters. Archived entries, evidence, custom fields, import
+        provenance, events, related-data coordinates, login bindings,
+        connections and credentials are excluded. Ordinary governed notes
+        remain visible, but high-confidence
+        credentials, credentialed URLs, DSNs, private-network connection
+        coordinates, API keys and tokens accidentally pasted into free text
+        are removed and named in redactedFields. Search and facets use only the
+        redacted projection. Results use stable
+        (legacySequence NULLS LAST, canonicalName, id) ordering. The HMAC-signed
+        keyset cursor is bound to every normalized filter and pageSize; changing
+        any one requires restarting from page one. Every call and retry is
+        separately metered.
+      x-mx-allowed-query-fields: [query, sourceKind, majorCategory, scenario, region, coverageStatus, deliveryStatus, reviewStatus, runtimeStatus, priority, ownerId, tag, pageSize, cursor]
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - { name: query, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 240 } }
+        - name: sourceKind
+          in: query
+          required: false
+          schema: { type: string, enum: [platform, platform_module, source_class, registry, provider, dataset, other] }
+        - { name: majorCategory, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 160 } }
+        - { name: scenario, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 160 } }
+        - { name: region, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 160 } }
+        - name: coverageStatus
+          in: query
+          required: false
+          schema: { type: string, enum: [unknown, not_covered, partial, covered] }
+        - name: deliveryStatus
+          in: query
+          required: false
+          schema: { type: string, enum: [exploring, planned, doing, blocked, complete, paused, retired] }
+        - name: reviewStatus
+          in: query
+          required: false
+          schema: { type: string, enum: [needs_review, verified, rejected] }
+        - name: runtimeStatus
+          in: query
+          required: false
+          schema: { type: string, enum: [not_configured, unknown, healthy, degraded, failed] }
+        - name: priority
+          in: query
+          required: false
+          schema: { type: string, enum: [P0, P1, P2, P3] }
+        - { name: ownerId, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: tag, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 160 } }
+        - name: pageSize
+          in: query
+          required: false
+          description: Defaults to 50; the source_catalog policy may impose a lower maximum.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          required: false
+          description: HMAC-signed keyset cursor bound to every filter and pageSize; return unchanged.
+          schema: { type: string, minLength: 1, maxLength: 4096 }
+      responses:
+        "200":
+          description: One filtered page from the active source catalog.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceCatalogPageEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/source-catalog/metadata:
+    get:
+      operationId: getSourceCatalogMetadata
+      summary: Read source-catalog fields, enums, taxonomy, owners and facets.
+      description: >-
+        Requires the source_catalog platform grant. Returns active taxonomy and
+        owner projections plus the field model, summary and facets needed to
+        reconstruct Hub filters and reporting. Owners are independent from
+        login accounts. This route accepts no query fields; any supplied query
+        key returns 400 unsupported_fields. Every call and retry is separately
+        metered.
+      x-mx-allowed-query-fields: []
+      x-mx-error-codes:
+        "400": [unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      responses:
+        "200":
+          description: Active source-catalog metadata and reporting facets.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceCatalogMetadataEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /data/public-opinion/regions:
     get:
       operationId: listPublicOpinionRegions
@@ -1979,6 +2092,150 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /data/public-opinion/funnel:
+    get:
+      operationId: getPublicOpinionDiagnosticsFunnel
+      summary: Explain the public-opinion visibility funnel.
+      description: >-
+        Requires the public_opinion platform grant and the independent
+        public_opinion.diagnostics.read capability. Returns governed aggregate
+        counts for canonical state, publication stage/status, event time,
+        geography, heat and product visibility. Raw rows, connections,
+        extensions and model reasoning remain private. The capability has its
+        own quota; every call and retry is metered.
+      x-mx-allowed-query-fields: [from, to]
+      x-mx-error-codes:
+        "400": [invalid_request, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted, capability_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: Supply from and to together; otherwise the latest 30-day window is used.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: false
+          description: Supply from and to together.
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Customer-safe public-opinion funnel diagnostics.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicOpinionDiagnosticsFunnelEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/public-opinion/records:
+    get:
+      operationId: listPublicOpinionDiagnosticRecords
+      summary: Browse displayed and non-displayed public-opinion records.
+      description: >-
+        Requires public_opinion plus public_opinion.diagnostics.read. Filters
+        mirror the Hub funnel explorer. The HMAC-signed keyset cursor binds the
+        complete normalized filter set and pageSize. When paging a request that
+        omitted from/to, reuse the response window explicitly so the dynamic
+        default window cannot drift.
+      x-mx-allowed-query-fields: [cursor, from, heat, pageSize, province, query, reason, scope, stage, status, time, to]
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted, capability_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - { name: from, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: false, schema: { type: string, format: date-time } }
+        - name: reason
+          in: query
+          required: false
+          schema: { type: string, enum: [all, coverage_visible, hot_visible, missing_publication_state, not_formal_stage, not_formal_status, missing_event_time, outside_window, missing_province, missing_heat], default: all }
+        - name: stage
+          in: query
+          required: false
+          schema: { type: string, enum: [all, formal, candidate, missing], default: all }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [all, formal, pending, qualified, rejected, failed, missing], default: all }
+        - name: province
+          in: query
+          required: false
+          description: all, missing or one ISO 3166-2:CN province code.
+          schema: { type: string, default: all }
+        - name: scope
+          in: query
+          required: false
+          schema: { type: string, enum: [all, missing, national, nationwide, province, multi_province, city, maritime, overseas, unknown], default: all }
+        - name: time
+          in: query
+          required: false
+          schema: { type: string, enum: [all, within, outside, missing], default: all }
+        - name: heat
+          in: query
+          required: false
+          schema: { type: string, enum: [all, present, missing], default: all }
+        - { name: query, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 500 } }
+        - name: pageSize
+          in: query
+          required: false
+          description: Defaults to 50; the public_opinion platform policy may impose a lower maximum.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          required: false
+          description: HMAC-signed keyset cursor bound to the full normalized filter set and pageSize.
+          schema: { type: string, minLength: 1, maxLength: 2048 }
+      responses:
+        "200":
+          description: A customer-safe page of public-opinion diagnostic records.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicOpinionDiagnosticsRecordsEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/public-opinion/records/{id}:
+    get:
+      operationId: getPublicOpinionDiagnosticRecord
+      summary: Read one customer-safe public-opinion diagnostic record.
+      description: >-
+        Requires public_opinion plus public_opinion.diagnostics.read. Returns
+        the governed projection and deterministic display/non-display reasons;
+        raw payloads, extensions, source connections and model reasoning are
+        excluded.
+      x-mx-allowed-query-fields: [from, to]
+      x-mx-error-codes:
+        "400": [invalid_request, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted, capability_not_granted]
+        "404": [item_not_found]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: from, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: false, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: One customer-safe public-opinion diagnostic record.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicOpinionDiagnosticsRecordEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /data/public-opinion/items/{id}:
     get:
       operationId: getPublicOpinionItem
@@ -2035,17 +2292,19 @@ paths:
   /data/telegram/chats:
     get:
       operationId: listTelegramMonitorChats
-      summary: List normalized Telegram monitor chats from Hub storage.
+      summary: List normalized Telegram conversations from Hub storage.
       description: >-
         Requires the API key's consumer to have the explicit `telegram` grant.
-        Only the documented query fields are accepted; source tables, raw rows,
-        provider details and arbitrary sorting are not public inputs. The read
-        serves the same complete canonical dataset to every consumer granted
-        telegram; tenant-specific row scoping is not implemented. It
-        consumes one request from telegram.maxRequests and commits
-        max(1, returnedCount) usage units without retaining the response body in
-        usage evidence. A retry is a separately metered request.
-      x-mx-allowed-query-fields: [chatId, from, to, pageSize, cursor]
+        Omitting all additive fields preserves the existing Monitor-only path,
+        response and legacy cursor. sourceScope=all merges Monitor and SQLite
+        imports; kind and query power the conversation picker. The legacy
+        chatId/from/to filters remain accepted. Extended modes
+        use an HMAC-signed keyset cursor bound to resource, sourceScope, kind,
+        query, chatId, from, to and pageSize. New-mode ordering uses immutable effectiveSortTime,
+        falling back from business event time to collectedAt and firstSeenAt;
+        nullable response times are not rewritten. Every chat returns chatKey for exact source-aware
+        history lookup. The safe read is metered on every call and retry.
+      x-mx-allowed-query-fields: [sourceScope, kind, query, chatId, from, to, pageSize, cursor]
       x-mx-error-codes:
         "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
         "401": [api_key_required, invalid_api_key]
@@ -2053,6 +2312,9 @@ paths:
         "429": [quota_exceeded]
         "503": [stored_data_unavailable]
       parameters:
+        - $ref: "#/components/parameters/TelegramSourceScope"
+        - $ref: "#/components/parameters/TelegramKind"
+        - $ref: "#/components/parameters/TelegramQuery"
         - $ref: "#/components/parameters/TelegramChatId"
         - $ref: "#/components/parameters/TelegramFrom"
         - $ref: "#/components/parameters/TelegramTo"
@@ -2074,23 +2336,29 @@ paths:
   /data/telegram/messages:
     get:
       operationId: listTelegramMonitorMessages
-      summary: List normalized Telegram monitor messages from Hub storage.
+      summary: Restore normalized Telegram conversation messages from Hub storage.
       description: >-
         Requires the API key's consumer to have the explicit `telegram` grant.
-        Results use descending event-time/internal-ID keyset pagination. Return
-        `nextCursor` unchanged; it is opaque. Free-text `q`, OFFSET, SQL, raw
-        export, caller-selected datasets and tenant-specific row subsets are not
-        supported. The read consumes
-        one request from telegram.maxRequests and commits max(1, returnedCount)
-        usage units; a retry is separately metered.
-      x-mx-allowed-query-fields: [chatId, from, to, pageSize, cursor]
+        Omitting sourceScope and using a plain external chatId preserves the
+        Monitor-only legacy contract and cursor. Explicit sourceScope or a
+        qualified monitor:&lt;canonical UUID&gt;/sqlite:&lt;canonical UUID&gt; chatKey
+        opts into source-aware history and an HMAC-signed cursor bound to
+        resource, sourceScope, chatId, time bounds and pageSize. sourceScope=all
+        with a plain external chatId merges both stored sources. New-mode
+        ordering uses immutable effectiveSortTime with business-time,
+        collectedAt and firstSeenAt fallback, while response timestamps retain
+        their true nullable values. Items include
+        canonicalId and sourceScope. Every call and retry is metered.
+      x-mx-allowed-query-fields: [sourceScope, chatId, from, to, pageSize, cursor]
       x-mx-error-codes:
-        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields, source_scope_mismatch]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted]
+        "404": [chat_not_found]
         "429": [quota_exceeded]
         "503": [stored_data_unavailable]
       parameters:
+        - $ref: "#/components/parameters/TelegramSourceScope"
         - $ref: "#/components/parameters/TelegramChatId"
         - $ref: "#/components/parameters/TelegramFrom"
         - $ref: "#/components/parameters/TelegramTo"
@@ -2105,6 +2373,8 @@ paths:
           $ref: "#/components/responses/Error"
         "403":
           $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
         "429":
           $ref: "#/components/responses/Error"
         "503":
@@ -2115,7 +2385,10 @@ paths:
       summary: Search canonical Telegram chats/messages without an upstream provider call.
       description: >-
         Returns the Night-All data-search v1 envelope from Hub-owned canonical
-        storage. Elasticsearch is the ranked projection; PostgreSQL substring
+        storage. sourceScope defaults to monitor for backward compatibility;
+        explicit all searches Monitor and SQLite imports together. Omitting
+        chatId searches globally, while chatId/chatKey restricts one
+        conversation. Elasticsearch is the ranked projection; PostgreSQL substring
         search is the documented degraded path and is reported only through a
         search_projection_degraded warning, never through meta.searchMode.
         Every item has source.provider null and source.endpointId
@@ -2303,9 +2576,30 @@ components:
       in: query
       required: false
       description: >-
-        Exact normalized chat identifier. It matches the chat external ID on
-        the chats resource and the normalized chat relation on messages.
+        Exact normalized chat identifier, or the source-qualified chatKey
+        returned by the chats route.
       schema: { type: string, minLength: 1, maxLength: 256 }
+    TelegramSourceScope:
+      name: sourceScope
+      in: query
+      required: false
+      description: >-
+        Stored corpus to read. Defaults to monitor for backward compatibility;
+        all merges Monitor and SQLite imports. Explicit use opts into the
+        additive source-aware contract.
+      schema: { type: string, enum: [all, monitor, sqlite], default: monitor }
+    TelegramKind:
+      name: kind
+      in: query
+      required: false
+      description: Normalized conversation kind filter.
+      schema: { type: string, enum: [all, channel, group, unknown], default: all }
+    TelegramQuery:
+      name: query
+      in: query
+      required: false
+      description: Case-insensitive conversation title or username substring.
+      schema: { type: string, minLength: 1, maxLength: 200 }
     TelegramFrom:
       name: from
       in: query
@@ -2335,8 +2629,11 @@ components:
       name: cursor
       in: query
       required: false
-      description: Opaque nextCursor from the previous page; return unchanged.
-      schema: { type: string, minLength: 1, maxLength: 1024 }
+      description: >-
+        Opaque nextCursor from the previous page; return unchanged with the same
+        filters and pageSize. Legacy Monitor cursors are at most 1024
+        characters; extended source/filter cursors are at most 2048.
+      schema: { type: string, minLength: 1, maxLength: 2048 }
   schemas:
     AgentProviderSafe:
       type: object
@@ -4006,6 +4303,7 @@ components:
         authorId: { type: string, minLength: 1, maxLength: 256 }
         from: { type: string, format: date-time }
         to: { type: string, format: date-time }
+        sourceScope: { type: string, enum: [all, monitor, sqlite], default: monitor }
         matchMode: { type: string, const: full_text, default: full_text }
         pageSize: { type: integer, minimum: 1, maximum: 100, default: 50 }
         cursor:
@@ -4056,6 +4354,7 @@ components:
       type: object
       additionalProperties: false
       required:
+        - canonicalId
         - id
         - externalId
         - platform
@@ -4070,6 +4369,14 @@ components:
         - media
         - source
       properties:
+        canonicalId:
+          type: [string, "null"]
+          format: uuid
+          description: Present for Hub canonical Telegram search hits.
+        sourceScope:
+          type: [string, "null"]
+          enum: [monitor, sqlite, null]
+          description: Stored Telegram source for a canonical hit.
         id: { type: string, minLength: 1 }
         externalId: { type: [string, "null"] }
         platform: { type: string, minLength: 1 }
@@ -4182,6 +4489,145 @@ components:
         capturedAt: { type: string, format: date-time }
         reservedAt: { type: string, format: date-time }
         completedAt: { type: [string, "null"], format: date-time }
+    SourceCatalogEntry:
+      type: object
+      additionalProperties: false
+      required: [id, sourceKey, legacySequence, canonicalName, aliases, sourceKind, parentSourceId, majorCategory, scenarios, regions, entryModules, monitorableContent, extractableClues, trackingFields, suggestedAccess, complianceBoundary, priority, coverageStatus, deliveryStatus, reviewStatus, runtimeStatus, ownerId, owner, connectorHints, tags, notes, redactedFields]
+      properties:
+        id: { type: string, format: uuid }
+        sourceKey: { type: string, minLength: 1, maxLength: 128 }
+        legacySequence: { type: [integer, "null"], minimum: 1 }
+        canonicalName: { type: string, minLength: 1, maxLength: 160 }
+        aliases: { type: array, items: { type: string } }
+        sourceKind: { type: string, enum: [platform, platform_module, source_class, registry, provider, dataset, other] }
+        parentSourceId: { type: [string, "null"], format: uuid }
+        majorCategory: { type: string }
+        scenarios: { type: array, items: { type: string } }
+        regions: { type: array, items: { type: string } }
+        entryModules: { type: array, items: { type: string } }
+        monitorableContent: { type: array, items: { type: string } }
+        extractableClues: { type: array, items: { type: string } }
+        trackingFields: { type: array, items: { type: string } }
+        suggestedAccess: { type: array, items: { type: string } }
+        complianceBoundary: { type: [string, "null"] }
+        priority: { type: string, enum: [P0, P1, P2, P3] }
+        coverageStatus: { type: string, enum: [unknown, not_covered, partial, covered] }
+        deliveryStatus: { type: string, enum: [exploring, planned, doing, blocked, complete, paused, retired] }
+        reviewStatus: { type: string, enum: [needs_review, verified, rejected] }
+        runtimeStatus: { type: string, enum: [not_configured, unknown, healthy, degraded, failed] }
+        ownerId: { type: [string, "null"], format: uuid }
+        owner: { type: [string, "null"] }
+        connectorHints: { type: array, items: { type: string } }
+        tags: { type: array, items: { type: string } }
+        notes: { type: [string, "null"] }
+        redactedFields: { type: array, uniqueItems: true, items: { type: string } }
+    SourceCatalogFilters:
+      type: object
+      additionalProperties: false
+      required: [query, sourceKind, majorCategory, scenario, region, coverageStatus, deliveryStatus, reviewStatus, runtimeStatus, priority, ownerId, tag]
+      properties:
+        query: { type: [string, "null"], minLength: 1, maxLength: 240 }
+        sourceKind: { type: [string, "null"], enum: [platform, platform_module, source_class, registry, provider, dataset, other, null] }
+        majorCategory: { type: [string, "null"], minLength: 1, maxLength: 160 }
+        scenario: { type: [string, "null"], minLength: 1, maxLength: 160 }
+        region: { type: [string, "null"], minLength: 1, maxLength: 160 }
+        coverageStatus: { type: [string, "null"], enum: [unknown, not_covered, partial, covered, null] }
+        deliveryStatus: { type: [string, "null"], enum: [exploring, planned, doing, blocked, complete, paused, retired, null] }
+        reviewStatus: { type: [string, "null"], enum: [needs_review, verified, rejected, null] }
+        runtimeStatus: { type: [string, "null"], enum: [not_configured, unknown, healthy, degraded, failed, null] }
+        priority: { type: [string, "null"], enum: [P0, P1, P2, P3, null] }
+        ownerId: { type: [string, "null"], format: uuid }
+        tag: { type: [string, "null"], minLength: 1, maxLength: 160 }
+    SourceCatalogPageInfo:
+      type: object
+      additionalProperties: false
+      required: [returnedCount, totalCount, hasMore, nextCursor]
+      properties:
+        returnedCount: { type: integer, minimum: 0, maximum: 100 }
+        totalCount: { type: integer, minimum: 0 }
+        hasMore: { type: boolean }
+        nextCursor: { type: [string, "null"], maxLength: 4096 }
+    SourceCatalogPageEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, items, filters, pageInfo]
+          properties:
+            contractVersion: { type: string, const: source-catalog.public.v1 }
+            items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/SourceCatalogEntry" } }
+            filters: { $ref: "#/components/schemas/SourceCatalogFilters" }
+            pageInfo: { $ref: "#/components/schemas/SourceCatalogPageInfo" }
+        requestId: { type: string, minLength: 1 }
+    SourceCatalogMetadataEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, fields, enums, summary, facets, taxonomy, owners]
+          properties:
+            contractVersion: { type: string, const: source-catalog.public.v1 }
+            fields:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [key, label, type]
+                properties:
+                  key: { type: string }
+                  label: { type: string }
+                  type: { type: string }
+                  enum: { type: string }
+                  taxonomyKind: { type: string, enum: [major_category, scenario, region, tag] }
+            enums:
+              type: object
+              additionalProperties: false
+              required: [sourceKinds, coverageStatuses, deliveryStatuses, reviewStatuses, runtimeStatuses, priorities, taxonomyKinds]
+              properties:
+                sourceKinds: { type: array, items: { type: string, enum: [platform, platform_module, source_class, registry, provider, dataset, other] } }
+                coverageStatuses: { type: array, items: { type: string, enum: [unknown, not_covered, partial, covered] } }
+                deliveryStatuses: { type: array, items: { type: string, enum: [exploring, planned, doing, blocked, complete, paused, retired] } }
+                reviewStatuses: { type: array, items: { type: string, enum: [needs_review, verified, rejected] } }
+                runtimeStatuses: { type: array, items: { type: string, enum: [not_configured, unknown, healthy, degraded, failed] } }
+                priorities: { type: array, items: { type: string, enum: [P0, P1, P2, P3] } }
+                taxonomyKinds: { type: array, items: { type: string, enum: [major_category, scenario, region, tag] } }
+            summary: { type: object, additionalProperties: true }
+            facets: { type: object, additionalProperties: true }
+            taxonomy:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [id, termKey, kind, displayName, description, color, sortOrder, usageCount]
+                properties:
+                  id: { type: string, format: uuid }
+                  termKey: { type: string }
+                  kind: { type: string, enum: [major_category, scenario, region, tag] }
+                  displayName: { type: string }
+                  description: { type: [string, "null"] }
+                  color: { type: [string, "null"] }
+                  sortOrder: { type: integer }
+                  usageCount: { type: integer, minimum: 0 }
+                  redactedFields: { type: array, uniqueItems: true, items: { type: string } }
+            owners:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [id, displayName, description, usageCount]
+                properties:
+                  id: { type: string, format: uuid }
+                  displayName: { type: string }
+                  description: { type: [string, "null"] }
+                  usageCount: { type: integer, minimum: 0 }
+                  redactedFields: { type: array, uniqueItems: true, items: { type: string } }
+        requestId: { type: string, minLength: 1 }
     PublicOpinionProvince:
       type: object
       additionalProperties: false
@@ -4440,10 +4886,171 @@ components:
               maxItems: 34
               items: { $ref: "#/components/schemas/PublicOpinionCoverageProvince" }
         requestId: { type: string, minLength: 1 }
+    PublicOpinionDiagnosticsSourceScope:
+      type: object
+      additionalProperties: false
+      required: [mode, datasets]
+      properties:
+        mode: { type: string, const: canonical }
+        datasets: { type: array, const: [public-opinion.province.v1] }
+    PublicOpinionDiagnosticsWindow:
+      type: object
+      additionalProperties: false
+      required: [from, to]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+    PublicOpinionDiagnosticsCounts:
+      type: object
+      additionalProperties: { type: integer, minimum: 0 }
+    PublicOpinionDiagnosticsFunnelEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, sourceScope, window, canonical, publication, time, geography, heat, visibility, reasons]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.data-products.public-opinion-funnel.v1 }
+            sourceScope: { $ref: "#/components/schemas/PublicOpinionDiagnosticsSourceScope" }
+            window: { $ref: "#/components/schemas/PublicOpinionDiagnosticsWindow" }
+            canonical: { $ref: "#/components/schemas/PublicOpinionDiagnosticsCounts" }
+            publication:
+              type: object
+              additionalProperties: false
+              required: [withState, missingState, stages, statuses]
+              properties:
+                withState: { type: integer, minimum: 0 }
+                missingState: { type: integer, minimum: 0 }
+                stages: { $ref: "#/components/schemas/PublicOpinionDiagnosticsCounts" }
+                statuses: { $ref: "#/components/schemas/PublicOpinionDiagnosticsCounts" }
+            time: { $ref: "#/components/schemas/PublicOpinionDiagnosticsCounts" }
+            geography:
+              type: object
+              additionalProperties: false
+              required: [withProvince, withoutProvince, scopes]
+              properties:
+                withProvince: { type: integer, minimum: 0 }
+                withoutProvince: { type: integer, minimum: 0 }
+                scopes: { $ref: "#/components/schemas/PublicOpinionDiagnosticsCounts" }
+            heat: { $ref: "#/components/schemas/PublicOpinionDiagnosticsCounts" }
+            visibility: { $ref: "#/components/schemas/PublicOpinionDiagnosticsCounts" }
+            reasons: { $ref: "#/components/schemas/PublicOpinionDiagnosticsCounts" }
+        requestId: { type: string, minLength: 1 }
+    PublicOpinionDiagnosticRecordFields:
+      type: object
+      required: [id, title, summary, url, contentType, authorName, eventTime, collectedAt, heatScore, sourceStage, publicationStatus, qualityScore, qualificationThreshold, provinceCode, geography, source, qualityFlags, rejectionCodes, diagnostics]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: [string, "null"] }
+        summary: { type: [string, "null"] }
+        url: { type: [string, "null"], format: uri }
+        contentType: { type: [string, "null"] }
+        authorName: { type: [string, "null"] }
+        eventTime: { type: [string, "null"], format: date-time }
+        collectedAt: { type: [string, "null"], format: date-time }
+        heatScore: { type: [number, "null"] }
+        sourceStage: { type: [string, "null"] }
+        publicationStatus: { type: [string, "null"] }
+        qualityScore: { type: [number, "null"] }
+        qualificationThreshold: { type: [number, "null"] }
+        provinceCode: { type: [string, "null"] }
+        geography:
+          type: object
+          additionalProperties: false
+          required: [verified, scope, countryCode, countryName, locationLabel, locationType]
+          properties:
+            verified: { type: boolean }
+            scope: { type: [string, "null"] }
+            countryCode: { type: [string, "null"] }
+            countryName: { type: [string, "null"] }
+            locationLabel: { type: [string, "null"] }
+            locationType: { type: [string, "null"] }
+        source:
+          type: object
+          additionalProperties: false
+          required: [type, platform]
+          properties:
+            type: { type: [string, "null"] }
+            platform: { type: [string, "null"] }
+        qualityFlags: { type: array, maxItems: 100, items: { type: string } }
+        rejectionCodes: { type: array, maxItems: 100, items: { type: string } }
+        diagnostics:
+          type: object
+          additionalProperties: false
+          required: [hasPublicationState, coverageVisible, hotVisible, reasons]
+          properties:
+            hasPublicationState: { type: boolean }
+            coverageVisible: { type: boolean }
+            hotVisible: { type: boolean }
+            reasons:
+              type: array
+              items: { type: string, enum: [missing_publication_state, not_formal_stage, not_formal_status, missing_event_time, outside_window, missing_province, missing_heat] }
+    PublicOpinionDiagnosticRecord:
+      allOf:
+        - { $ref: "#/components/schemas/PublicOpinionDiagnosticRecordFields" }
+      unevaluatedProperties: false
+    PublicOpinionDiagnosticRecordDetail:
+      allOf:
+        - { $ref: "#/components/schemas/PublicOpinionDiagnosticRecordFields" }
+        - type: object
+          required: [contractVersion, sourceScope, window]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.data-products.public-opinion-record.v1 }
+            sourceScope: { $ref: "#/components/schemas/PublicOpinionDiagnosticsSourceScope" }
+            window: { $ref: "#/components/schemas/PublicOpinionDiagnosticsWindow" }
+      unevaluatedProperties: false
+    PublicOpinionDiagnosticsPageInfo:
+      type: object
+      additionalProperties: false
+      required: [returnedCount, hasMore, nextCursor]
+      properties:
+        returnedCount: { type: integer, minimum: 0, maximum: 100 }
+        hasMore: { type: boolean }
+        nextCursor: { type: [string, "null"], maxLength: 2048 }
+    PublicOpinionDiagnosticsRecordsEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, sourceScope, window, filters, items, pageInfo]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.data-products.public-opinion-records.v1 }
+            sourceScope: { $ref: "#/components/schemas/PublicOpinionDiagnosticsSourceScope" }
+            window: { $ref: "#/components/schemas/PublicOpinionDiagnosticsWindow" }
+            filters:
+              type: object
+              additionalProperties: false
+              required: [query, reason, stage, status, province, scope, time, heat]
+              properties:
+                query: { type: [string, "null"] }
+                reason: { type: string, enum: [all, coverage_visible, hot_visible, missing_publication_state, not_formal_stage, not_formal_status, missing_event_time, outside_window, missing_province, missing_heat] }
+                stage: { type: string, enum: [all, formal, candidate, missing] }
+                status: { type: string, enum: [all, formal, pending, qualified, rejected, failed, missing] }
+                province: { type: string }
+                scope: { type: string, enum: [all, missing, national, nationwide, province, multi_province, city, maritime, overseas, unknown] }
+                time: { type: string, enum: [all, within, outside, missing] }
+                heat: { type: string, enum: [all, present, missing] }
+            items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/PublicOpinionDiagnosticRecord" } }
+            pageInfo: { $ref: "#/components/schemas/PublicOpinionDiagnosticsPageInfo" }
+        requestId: { type: string, minLength: 1 }
+    PublicOpinionDiagnosticsRecordEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/PublicOpinionDiagnosticRecordDetail" }
+        requestId: { type: string, minLength: 1 }
     TelegramRecord:
       type: object
       additionalProperties: false
       required:
+        - canonicalId
         - id
         - externalId
         - platform
@@ -4463,8 +5070,10 @@ components:
         - entities
         - links
         - lineage
+        - sourceScope
         - dataVersion
       properties:
+        canonicalId: { type: [string, "null"], format: uuid }
         id:
           type: string
           description: Stable external identity within the fixed Hub dataset.
@@ -4551,8 +5160,13 @@ components:
           additionalProperties: false
           required: [datasetId, origin]
           properties:
-            datasetId: { type: string, enum: [telegram.monitor.chats.v1, telegram.monitor.messages.v1] }
+            datasetId: { type: string, enum: [telegram.monitor.chats.v1, telegram.monitor.messages.v1, telegram.sqlite.chats.v1, telegram.sqlite.messages.v1] }
             origin: { type: string, enum: [hub-direct, hub-import] }
+        sourceScope: { type: [string, "null"], enum: [monitor, sqlite, null] }
+        chatKey:
+          type: string
+          description: Present for chat records; use as chatId to select the exact stored source.
+        kind: { type: string, enum: [channel, group, unknown], description: Present for chat records. }
         dataVersion: { type: string }
     TelegramPageInfo:
       type: object
@@ -4572,8 +5186,30 @@ components:
         data:
           type: object
           additionalProperties: false
-          required: [items, pageInfo]
+          required: [contractVersion, sourceScope, filters, items, pageInfo]
           properties:
+            contractVersion: { type: string, enum: [mx-insight-hub.data-products.telegram-chats.v1, mx-insight-hub.data-products.telegram-messages.v1] }
+            sourceScope:
+              type: object
+              additionalProperties: false
+              required: [selected, datasets]
+              properties:
+                selected: { type: string, enum: [all, monitor, sqlite] }
+                datasets:
+                  type: array
+                  minItems: 1
+                  maxItems: 2
+                  items: { type: string, enum: [telegram.monitor.chats.v1, telegram.monitor.messages.v1, telegram.sqlite.chats.v1, telegram.sqlite.messages.v1] }
+            filters:
+              type: object
+              additionalProperties: false
+              properties:
+                kind: { type: string, enum: [all, channel, group, unknown] }
+                query: { type: [string, "null"] }
+                chatId: { type: [string, "null"] }
+                from: { type: [string, "null"], format: date-time }
+                to: { type: [string, "null"], format: date-time }
+            chat: { $ref: "#/components/schemas/TelegramRecord" }
             items:
               type: array
               maxItems: 100

@@ -17,15 +17,17 @@ import {
   Key,
   List,
   LockKey,
+  Moon,
   ShieldCheck,
   SidebarSimple,
   SignOut,
   Users,
   Stack,
+  Sun,
   X,
 } from '@phosphor-icons/react'
 import { adminApi, signInWithLauncher } from './api.js'
-import { ErrorState, Field, ToastStack } from './components.jsx'
+import { ErrorState, Field, THEME_CHANGE_EVENT, ToastStack } from './components.jsx'
 import {
   ApiKeysPage,
   ConsumersPage,
@@ -44,6 +46,7 @@ import {
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
 
 const SESSION_KEY = 'mx-insight-hub.admin-token'
+const THEME_KEY = 'mx-insight-hub.theme'
 const DATA_PRODUCTS_NAV_KEY = 'data-products'
 const NAV_PARENTS = {
   [DATA_PRODUCTS_NAV_KEY]: {
@@ -113,6 +116,18 @@ function writeSessionToken(token) {
   }
 }
 
+function readThemePreference() {
+  try {
+    return localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light'
+  } catch {
+    return 'light'
+  }
+}
+
+function themeClassName(theme) {
+  return theme === 'dark' ? 'qp-theme-neon-void' : 'qp-theme-neon-void-light'
+}
+
 function readLocation({ canonicalize = false } = {}) {
   const raw = window.location.hash.replace(/^#/, '') || '/dashboard?range=24h'
   const separator = raw.indexOf('?')
@@ -135,7 +150,19 @@ function readLocation({ canonicalize = false } = {}) {
   return { path, query }
 }
 
-function SessionGate({ checking, message, onAuthenticate }) {
+function ThemeToggle({ theme, onToggle, className = '' }) {
+  const light = theme === 'light'
+  const Icon = light ? Moon : Sun
+  const label = light ? '切换到深色模式' : '切换到浅色模式'
+  return (
+    <button className={`qp-button qp-button--ghost qp-icon-button ${className}`.trim()} type="button"
+      aria-label={label} title={label} onClick={onToggle}>
+      <Icon size={17} aria-hidden="true" />
+    </button>
+  )
+}
+
+function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }) {
   const [candidate, setCandidate] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -183,7 +210,8 @@ function SessionGate({ checking, message, onAuthenticate }) {
   }
 
   return (
-    <div className="qp-app qp-theme-neon-void qp-density--medium mih-auth">
+    <div className={`qp-app ${themeClassName(theme)} qp-density--medium mih-auth`}>
+      <ThemeToggle theme={theme} onToggle={onToggleTheme} className="mih-auth-theme-toggle" />
       <section className="qp-panel qp-panel--elevated mih-auth-card" aria-labelledby="mih-auth-title">
         <div className="mih-auth-brand">
           <img src="assets/mx-insight-logo-mark.png" alt="" />
@@ -369,6 +397,7 @@ function Navigation({ activePath, onNavigate, routes = ROUTES }) {
 
 export function App() {
   const initialToken = useMemo(readSessionToken, [])
+  const [theme, setTheme] = useState(readThemePreference)
   const [token, setToken] = useState(initialToken)
   const [authState, setAuthState] = useState(initialToken ? 'checking' : 'signed-out')
   const [authMessage, setAuthMessage] = useState('')
@@ -376,6 +405,22 @@ export function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [toasts, setToasts] = useState([])
   const [session, setSession] = useState(null)
+
+  useEffect(() => {
+    const root = document.documentElement
+    root.classList.remove('qp-theme-neon-void', 'qp-theme-neon-void-light')
+    root.classList.add(themeClassName(theme))
+    try {
+      localStorage.setItem(THEME_KEY, theme)
+    } catch {
+      // Theme still applies for this page when persistent storage is unavailable.
+    }
+    window.dispatchEvent(new Event(THEME_CHANGE_EVENT))
+  }, [theme])
+
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => current === 'light' ? 'dark' : 'light')
+  }, [])
 
   useEffect(() => {
     if (!window.location.hash) {
@@ -460,7 +505,8 @@ export function App() {
   }, [location.path, location.query])
 
   if (authState !== 'signed-in') {
-    return <SessionGate checking={authState === 'checking'} message={authMessage} onAuthenticate={authenticate} />
+    return <SessionGate checking={authState === 'checking'} message={authMessage} onAuthenticate={authenticate}
+      theme={theme} onToggleTheme={toggleTheme} />
   }
 
   const routes = visibleRoutes(session)
@@ -479,7 +525,7 @@ export function App() {
   }
 
   return (
-    <div className={`qp-app qp-theme-neon-void qp-density--medium qp-shell mih-shell${menuOpen ? ' is-nav-open' : ''}`}>
+    <div className={`qp-app ${themeClassName(theme)} qp-density--medium qp-shell mih-shell${menuOpen ? ' is-nav-open' : ''}`}>
       <a className="mih-skip-link" href="#mih-main-content">跳到主要内容</a>
       <button className="mih-nav-backdrop" type="button" aria-label="关闭导航" onClick={() => setMenuOpen(false)} />
       <aside className="qp-sidebar qp-scrollbar mih-sidebar" aria-label="MX Insight Hub">
@@ -516,6 +562,7 @@ export function App() {
             <strong>{route.label}</strong>
           </div>
           <div className="mih-topbar-actions">
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
             <span className="qp-tag qp-tag--success mih-session-tag"><ShieldCheck size={14} weight="fill" aria-hidden="true" />受保护的管理会话</span>
             <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="退出管理会话" onClick={() => signOut()}>
               <SignOut size={17} aria-hidden="true" />

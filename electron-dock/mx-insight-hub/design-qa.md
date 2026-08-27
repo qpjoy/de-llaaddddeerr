@@ -135,3 +135,53 @@ The implementation preserves the reference workflows rather than its light palet
 ## Final result
 
 passed
+
+---
+
+# Hub-wide searchable dropdown and light theme QA — 2026-08-27
+
+## Comparison target and evidence
+
+- Native-popup defect reference: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-e25cadea-188c-4b67-bed0-d4b30687e599.png`, `2786x1350` pixels.
+- Target dropdown reference: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-649693bb-bbba-466d-8136-fee07672dd54.png`, `2790x1342` pixels.
+- Repaired caller filter: `/private/tmp/mx-hub-dark-consumer-tenant.jpg`, `1526x985` pixels.
+- Desktop dark target state: `/private/tmp/mx-hub-dark-source-group.jpg`, `1526x985` pixels.
+- Responsive light target state: `/private/tmp/mx-hub-final-light-source-group.jpg`, `760x800` pixels.
+- Light login state: `/private/tmp/mx-hub-light-login.jpg`, `760x800` pixels.
+- Modal-boundary state: `/private/tmp/mx-hub-owner-dropdown-boundary.jpg`, `760x800` pixels.
+- Same-input desktop comparison: `/private/tmp/mx-dropdown-full-comparison.jpg`. The reference was normalized to `2048x985`, cropped to the implementation's `1526x985` capture width, then placed beside the implementation without changing density.
+- Same-state focused comparison: `/private/tmp/mx-dropdown-final-focus-comparison.jpg`. Both sides show the open `分组 / 不分组` state; native-density crops were normalized to the same `440x410` inspection frame.
+- State: local Admin Token session with no production credentials or external writes. The source-catalog table, caller tenant filter, Agent modal, login gate and design-system demo were exercised in dark and light themes.
+
+## Findings
+
+No actionable P0, P1 or P2 findings remain. The final focused comparison preserves the target anatomy: compact trigger, attached dark popover, bordered search field, cyan selected row, explicit check, four searchable options, restrained radius and tokenized elevation. The caller page no longer delegates its expanded menu to macOS/Chromium, so the white system popup in the defect reference cannot recur in Hub source code.
+
+## Required fidelity surfaces
+
+- Fonts and typography: triggers, search text, options and group labels use the existing Neon Void font stack and `--qp-font-*` scale. Chinese labels retain the target hierarchy and remain legible at the `760px` responsive breakpoint.
+- Spacing and layout: trigger and menu edges share an anchor, search padding and option-row rhythm match the target, menus are viewport bounded, and the responsive toolbar wraps without overlap. The source editor's owner menu remained inside the modal body; because space was available it correctly stayed downward rather than forcing an upward state.
+- Colors and tokens: dark values remain the original Neon Void defaults. Light is opt-in through `.qp-theme-neon-void-light`, using cool white/blue-gray surfaces and deep teal `#087f75` instead of low-contrast neon cyan. White-surface contrast is `15.31:1` for primary text, `4.88:1` for teal primary, `7.46:1` for success, `6.99:1` for danger and `7.19:1` for info.
+- Image and asset quality: the real Hub logo is unchanged. Caret, check, search, theme and session affordances use the installed Phosphor family in Hub; no placeholder image, emoji, CSS illustration or new handcrafted SVG asset was introduced.
+- Copy and content: all existing option values, Chinese labels, query parameters and submitted payload values are preserved. Search adds only contextual placeholders and the explicit `没有匹配项` state.
+- Icons and states: closed, open, hover/highlight, selected, disabled, clear-search, no-result, long-list, modal and theme-toggle states were inspected. The shared design demo documents searchable and disabled variants while retaining the legacy native select only as an explicitly documented fallback.
+- Accessibility: the trigger exposes combobox/listbox semantics; the separate filter input is a named `searchbox` outside the listbox; options expose `aria-selected` and disabled state. ArrowUp/Down, Home/End, Enter, Escape, Tab, IME guards, focus return and outside-pointer close remain in the shared component.
+- Viewport resilience: the desktop comparison retains the target command-center density. At `760x800` the sidebar collapses behind the existing navigation control, the light toolbar wraps, the dropdown remains wholly visible and the page has no control collision.
+
+## Interaction and regression evidence
+
+1. Source scan now finds zero `<select>` or `<option>` elements under `mx-insight-hub/src`; all 19 wrapper-expanded Hub selection sites resolve through the shared searchable dropdown.
+2. Search plus ArrowDown/Enter selected `按阶段` and closed the menu with focus restored. Escape closed only the menu. A 12-option classification list filtered to the two `海外` matches, and a non-matching query rendered `没有匹配项` with zero options.
+3. Light/dark preference survived reload and sign-out. The local Admin Token login completed again after the theme and dropdown changes, returning to the protected session without changing authentication requests, token storage or server forwarding.
+4. The design demo switched dark/light, searched tenants and selected `LCY` by keyboard. Its disabled specimen remained non-interactive.
+5. Browser console review returned no errors or warnings for Hub or the design demo.
+6. Build/regression gates passed: Hub production build, Sites tests `4/4`, design-system build/typecheck, demo syntax check, Luopan check/build, and the full MX-H2I safety check including anonymous entry, Feishu OAuth, bootstrap domain, split-DNS and Windows reconnect assertions.
+
+## Comparison history
+
+1. Audit found 11 literal native selects, 19 effective page controls, a duplicated page-local searchable implementation, and no light theme. The page-local implementation was consolidated into the shared Hub component and every native Hub site was migrated.
+2. First browser pass confirmed dark/light rendering and login persistence, then exposed two implementation risks: filtered grouped options could repeat their heading, and the popup search input duplicated the trigger's combobox role. Group emission is now once per group and the filter is a named searchbox.
+3. Compatibility review found that replacing the legacy pseudo-check would remove selected marks from older `qp-dropdown` markup. The original fallback check contract was restored while explicit icon children suppress it, keeping existing dark consumers pixel-stable.
+4. Final side-by-side and focused comparisons found no remaining actionable mismatch. Dark retains the reference look; light reads as the same product rather than an inverted or washed-out skin.
+
+final result: passed

@@ -297,8 +297,8 @@ Hub 的详细数据架构位于 sibling `../../mx-insight-hub/docs/`，重点参
 - Neon Void 已在 `demos/ui-design-neon-void` 和 `mx-launcher/ui-design`
   沉淀 `qp-dropdown` 的 trigger/menu/option 规范。Hub 数据中心应使用该
   自定义 listbox，不依赖 macOS/Chromium 无法稳定换肤的原生
-  `<select>` 展开层。这是 Hub 页面内组件选择，不改 Launcher 共享样式
-  包、身份会话或 MX-H2I 网络状态机。
+  `<select>` 展开层。该阶段只在 Hub 页面内复用既有样式；后续共享扩展
+  见第 13 节，身份会话和 MX-H2I 网络状态机始终不在此组件范围内。
 - 数据中心的“已删除记录”是 Hub PostgreSQL current truth 中
   `deleted_at IS NOT NULL` 的当前逻辑记录数，不是 Hub 物理删除次数，
   也不是 Elasticsearch delete 请求或 import-run 累计。当时的源库
@@ -323,3 +323,18 @@ Hub 的详细数据架构位于 sibling `../../mx-insight-hub/docs/`，重点参
   Admin 授权和 ES 10,000 条直达窗口仍由 Hub 自己负责。这是纯增量
   CSS/类名合同，不改 Launcher 登录会话、Internal 配置中心或 MX-H2I
   联网状态机。
+
+## 13. 2026-08-27 Hub 下拉框与 light theme
+
+- Hub 所有 popup value selector 统一使用共享 React `DropdownField`，菜单
+  anatomy 由 Neon Void 的 additive `qp-dropdown--searchable`、search、options、
+  group、empty 和 check 类名约束。原生 `qp-select` 只保留为设计包 fallback，
+  不再用于 Hub 产品控件；地区选择 dialog 和左侧导航 accordion 不属于下拉值
+  选择器，不强行收窄成 popup。
+- `qp-theme-neon-void-light` 是 opt-in 冷白蓝灰主题，使用适合白底可读性的深 teal，
+  不改 `:root` 与 `qp-theme-neon-void` 的 dark 默认值。Hub 新浏览器默认 light，
+  用户可持久切换回 dark；Chart.js 在主题变化时重新读取 tokens。
+- 这次只改 Hub UI、Neon Void CSS/token 合同与 demo specimen，不改 Hub sign-in
+  请求、Launcher token/session、Internal 配置、ProductNetwork、WireGuard、route、
+  PAC、DNS、NRPT、resolver 或 MX-H2I ownership 状态机。共享包的 dark 合同保持
+  兼容，Luopan 仅需构建/视觉回归。

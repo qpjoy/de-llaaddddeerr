@@ -161,6 +161,107 @@ function assertCanonicalContextContract(document) {
   assert.equal(capability.properties.maxAfter.const, 50)
 }
 
+function resolveParameter(document, parameter) {
+  if (!parameter?.$ref) return parameter
+  return document.components.parameters[parameter.$ref.split('/').at(-1)]
+}
+
+function assertDataProductPublicContract(document, telegramOperationIds = {
+  chats: 'listTelegramChats',
+  messages: 'listTelegramMessages',
+  search: 'searchTelegram',
+}) {
+  for (const path of [
+    '/data/source-catalog',
+    '/data/source-catalog/metadata',
+    '/data/public-opinion/funnel',
+    '/data/public-opinion/records',
+    '/data/public-opinion/records/{id}',
+  ]) assert.ok(document.paths[path]?.get, path)
+
+  const catalog = document.paths['/data/source-catalog'].get
+  assert.equal(catalog.operationId, 'listSourceCatalogEntries')
+  assert.deepEqual(catalog.parameters.map(({ name }) => name).sort(), [
+    'query', 'sourceKind', 'majorCategory', 'scenario', 'region', 'ownerId', 'tag',
+    'coverageStatus', 'deliveryStatus', 'reviewStatus', 'runtimeStatus', 'priority',
+    'pageSize', 'cursor',
+  ].sort())
+  assert.equal(catalog.parameters.find(({ name }) => name === 'pageSize').schema.default, 50)
+  assert.equal(
+    catalog.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/SourceCatalogPageEnvelope',
+  )
+  const catalogEntry = document.components.schemas.SourceCatalogEntry
+  assert.ok(catalogEntry.required.includes('redactedFields'))
+  assert.equal(catalogEntry.properties.redactedFields.items.type, 'string')
+  assert.equal(
+    document.components.schemas.SourceCatalogPageEnvelope.properties.data
+      .properties.contractVersion.const,
+    'source-catalog.public.v1',
+  )
+  assert.ok(document.components.schemas.SourceCatalogPageInfo.required.includes('totalCount'))
+
+  const catalogMetadata = document.paths['/data/source-catalog/metadata'].get
+  assert.deepEqual(catalogMetadata['x-mx-allowed-query-fields'], [])
+  assert.deepEqual(catalogMetadata['x-mx-error-codes'][400], ['unsupported_fields'])
+  assert.ok(catalogMetadata.responses[400])
+
+  const diagnostics = document.paths['/data/public-opinion/records'].get
+  assert.equal(diagnostics.operationId, 'listPublicOpinionDiagnosticRecords')
+  assert.equal(diagnostics.parameters.find(({ name }) => name === 'pageSize').schema.default, 50)
+  assert.equal(diagnostics.parameters.find(({ name }) => name === 'cursor').schema.maxLength, 2048)
+  const diagnosticDetailEnvelope = document.components.schemas.PublicOpinionDiagnosticsRecordEnvelope
+  assert.equal(
+    diagnosticDetailEnvelope.properties.data.$ref,
+    '#/components/schemas/PublicOpinionDiagnosticRecordDetail',
+  )
+  const diagnosticRecord = document.components.schemas.PublicOpinionDiagnosticRecord
+  const diagnosticDetail = document.components.schemas.PublicOpinionDiagnosticRecordDetail
+  assert.equal(diagnosticRecord.unevaluatedProperties, false)
+  assert.equal(diagnosticDetail.unevaluatedProperties, false)
+  assert.equal(
+    diagnosticDetail.allOf[0].$ref,
+    '#/components/schemas/PublicOpinionDiagnosticRecordFields',
+  )
+  assert.deepEqual(diagnosticDetail.allOf[1].required, ['contractVersion', 'sourceScope', 'window'])
+  const capabilitiesEnvelope = resolveSchema(
+    document,
+    document.paths['/data/capabilities'].get.responses[200]
+      .content['application/json'].schema,
+  )
+  assert.deepEqual(
+    capabilitiesEnvelope.properties.data.properties.capabilities
+      .items.properties.capability.enum,
+    ['nlp.tokenize', 'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read'],
+  )
+
+  const chats = document.paths['/data/telegram/chats'].get
+  const messages = document.paths['/data/telegram/messages'].get
+  assert.equal(chats.operationId, telegramOperationIds.chats)
+  assert.equal(messages.operationId, telegramOperationIds.messages)
+  const chatParameters = chats.parameters.map((parameter) => resolveParameter(document, parameter))
+  const messageParameters = messages.parameters.map((parameter) => resolveParameter(document, parameter))
+  assert.deepEqual(chatParameters.map(({ name }) => name), [
+    'sourceScope', 'kind', 'query', 'chatId', 'from', 'to', 'pageSize', 'cursor',
+  ])
+  assert.deepEqual(messageParameters.map(({ name }) => name), ['sourceScope', 'chatId', 'from', 'to', 'pageSize', 'cursor'])
+  assert.equal(chatParameters.find(({ name }) => name === 'sourceScope').schema.default, 'monitor')
+  assert.deepEqual(chatParameters.find(({ name }) => name === 'kind').schema.enum, ['all', 'channel', 'group', 'unknown'])
+  assert.equal(messageParameters.find(({ name }) => name === 'cursor').schema.maxLength, 2048)
+  assert.ok(messages['x-mx-error-codes'][400].includes('source_scope_mismatch'))
+  assert.deepEqual(messages['x-mx-error-codes'][404], ['chat_not_found'])
+  assert.ok(messages.responses[404])
+  assert.equal(document.paths['/data/telegram/search'].post.operationId, telegramOperationIds.search)
+  assert.equal(document.components.schemas.TelegramSearchRequest.properties.sourceScope.default, 'monitor')
+  for (const field of ['canonicalId', 'sourceScope', 'chatKey', 'kind']) {
+    assert.ok(document.components.schemas.TelegramRecord.properties[field], field)
+  }
+  assert.ok(document.components.schemas.TelegramRecord.required.includes('canonicalId'))
+  for (const field of ['contractVersion', 'sourceScope', 'filters', 'items', 'pageInfo']) {
+    assert.ok(document.components.schemas.TelegramPageEnvelope.properties.data.required.includes(field), field)
+  }
+}
+
 function assertNightAllPublicContract(document) {
   const compatibility = document.paths['/night-all/search/{operation}'].post
   const compatibilityContent = compatibility.requestBody.content['application/json']
@@ -258,7 +359,7 @@ function assertPublicOpinionContract(document) {
   assert.ok(detail)
   assert.deepEqual(publicOpinionCapability?.capabilities, [
     'province_feed', 'province_coverage', 'region_catalog', 'region_feed',
-    'item_detail', 'stored_search',
+    'item_detail', 'stored_search', 'diagnostics',
   ])
   assert.deepEqual(regions.parameters.map((parameter) => parameter.name), [
     'parentCode', 'level',
@@ -335,6 +436,7 @@ function assertPublicOpinionContract(document) {
   ).properties.data.properties.capabilities.items.properties.capability
   assert.deepEqual(capabilities.enum, [
     'nlp.tokenize', 'public_opinion.all_ingested.read',
+    'public_opinion.diagnostics.read',
   ])
   assert.deepEqual(
     capabilitiesExample.data.capabilities.find(
@@ -475,15 +577,23 @@ async function withServer(listenerMode, run) {
 
 test('public listener serves self-contained public API documentation', async () => {
   await withServer('public', async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/docs`)
-    const html = await response.text()
+    const pagePaths = [
+      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/search', '/docs/telegram',
+      '/docs/public-opinion', '/docs/night-all', '/docs/tools', '/docs/evidence', '/docs/errors',
+    ]
+    const pages = await Promise.all(pagePaths.map(async (path) => {
+      const response = await fetch(`${baseUrl}${path}`)
+      return { path, response, html: await response.text() }
+    }))
+    const response = pages[0].response
+    const html = pages.map((page) => page.html).join('\n')
 
-    assert.equal(response.status, 200)
+    assert.ok(pages.every((page) => page.response.status === 200))
     assert.match(response.headers.get('content-type'), /^text\/html/)
     assert.match(response.headers.get('content-security-policy'), /default-src 'none'/)
     assert.match(html, /MX Insight Hub/)
     assert.match(html, /\/api\/v1\/data\/search/)
-    assert.match(html, /href="#night-all"/)
+    assert.match(html, /href="\/docs\/night-all"/)
     assert.match(html, /<h2 id="night-all">Night-All 兼容层<\/h2>/)
     assert.match(html, /\/api\/v1\/night-all\/search\/raw/)
     assert.match(html, /\/api\/v1\/night-all\/search\/crawl/)
@@ -514,6 +624,10 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /context_not_supported/)
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/messages/)
+    assert.match(html, /\/api\/v1\/data\/source-catalog/)
+    assert.match(html, /\/api\/v1\/data\/source-catalog\/metadata/)
+    assert.match(html, /source-catalog\.public\.v1/)
+    assert.match(html, /source_catalog/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/provinces\/\{province\}\/items/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/regions\?parentCode=CN&amp;level=province/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/regions\/\{regionCode\}\/items/)
@@ -544,10 +658,62 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/usage/)
     assert.match(html, /Idempotency-Key/)
     assert.match(html, /nextCursor/)
-    assert.doesNotMatch(html, /<script\b/i)
+    assert.equal((html.match(/<script>/g) || []).length, 1)
+    assert.match(response.headers.get('content-security-policy'), /script-src 'sha256-/)
     assert.doesNotMatch(html, /https?:\/\/(?:cdn|unpkg|jsdelivr)\./i)
     assert.doesNotMatch(html, FORBIDDEN_PUBLIC_DOC_DETAILS)
     assert.doesNotMatch(html, /mih_(?:live|test)_[A-Za-z0-9_-]+/i)
+  })
+})
+
+test('public documentation navigation uses stable page routes and keeps legacy anchors predictable', async () => {
+  await withServer('public', async (baseUrl) => {
+    const pages = [
+      ['/docs/auth', 'rules', '认证与调用规则'],
+      ['/docs/source-catalog', 'source-catalog', '数据源目录'],
+      ['/docs/search', 'search', '通用搜索'],
+      ['/docs/telegram', 'telegram', 'Telegram 会话'],
+      ['/docs/public-opinion', 'public-opinion', '全国省级舆情'],
+      ['/docs/night-all', 'night-all', 'Night-All 兼容层'],
+      ['/docs/tools', 'tools', '通用工具'],
+      ['/docs/evidence', 'discovery', '能力、请求状态与用量'],
+      ['/docs/errors', 'errors', '错误与重试'],
+    ]
+
+    for (const [path, key, heading] of pages) {
+      const response = await fetch(`${baseUrl}${path}`)
+      const html = await response.text()
+      assert.equal(response.status, 200, path)
+      assert.match(html, new RegExp(`href="${path}" class="active" aria-current="page"`), path)
+      assert.match(html, new RegExp(`data-doc-page="${key}"`), path)
+      assert.match(html, new RegExp(heading), path)
+      assert.equal((html.match(/class="doc-page"/g) || []).length, 1, path)
+      assert.doesNotMatch(html, /href="#[^"]+"/, path)
+    }
+
+    const trailingSlash = await fetch(`${baseUrl}/docs/telegram/`)
+    assert.equal(trailingSlash.status, 200)
+    assert.match(await trailingSlash.text(), /data-doc-page="telegram"/)
+
+    const legacyEntry = await fetch(`${baseUrl}/docs`)
+    const legacyHtml = await legacyEntry.text()
+    assert.equal(legacyEntry.status, 200)
+    assert.equal((legacyHtml.match(/class="doc-page"/g) || []).length, 1)
+    assert.match(legacyHtml, /location\.hash\.slice\(1\)/)
+    assert.match(legacyHtml, /'public-opinion':'\/docs\/public-opinion'/)
+    assert.match(legacyHtml, /telegram:'\/docs\/telegram'/)
+
+    for (const [alias, canonical] of [
+      ['/docs/authentication', '/docs/auth'],
+      ['/docs/operations', '/docs/evidence'],
+    ]) {
+      const redirect = await fetch(`${baseUrl}${alias}`, { redirect: 'manual' })
+      assert.equal(redirect.status, 308)
+      assert.equal(redirect.headers.get('location'), canonical)
+    }
+
+    const unknown = await fetch(`${baseUrl}/docs/unknown-page`)
+    assert.equal(unknown.status, 404)
   })
 })
 
@@ -563,12 +729,17 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/canonical/items/{id}/context',
       '/data/canonical/search',
       '/data/capabilities',
+      '/data/public-opinion/funnel',
       '/data/public-opinion/items/{id}',
       '/data/public-opinion/province-coverage',
       '/data/public-opinion/provinces/{province}/items',
+      '/data/public-opinion/records',
+      '/data/public-opinion/records/{id}',
       '/data/public-opinion/regions',
       '/data/public-opinion/regions/{regionCode}/items',
       '/data/search',
+      '/data/source-catalog',
+      '/data/source-catalog/metadata',
       '/data/stored/search',
       '/data/telegram/chats',
       '/data/telegram/entities/search',
@@ -601,6 +772,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assertPublicOpinionSearchContract(document)
     assertNightAllPublicContract(document)
     assertCanonicalContextContract(document)
+    assertDataProductPublicContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
       document.components.schemas.CanonicalSearchRequest.properties.searchProfile.default,
@@ -661,6 +833,11 @@ test('static OpenAPI YAML parses and mirrors the dynamic Night-All compatibility
   assertPublicOpinionContract(document)
   assertPublicOpinionSearchContract(document)
   assertCanonicalContextContract(document)
+  assertDataProductPublicContract(document, {
+    chats: 'listTelegramMonitorChats',
+    messages: 'listTelegramMonitorMessages',
+    search: 'searchStoredTelegram',
+  })
 })
 
 test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy', async () => {
@@ -684,7 +861,7 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
 
 test('admin-only listener does not expose public documentation', async () => {
   await withServer('admin', async (baseUrl) => {
-    for (const path of ['/docs', '/docs/openapi.json']) {
+    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
       const response = await fetch(`${baseUrl}${path}`)
       const payload = await response.json()
       assert.equal(response.status, 404)

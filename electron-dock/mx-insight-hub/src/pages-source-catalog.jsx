@@ -41,6 +41,7 @@ import {
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import {
+  DropdownField,
   EmptyState,
   ErrorState,
   Field,
@@ -53,6 +54,7 @@ import {
   formatDate,
   formatNumber,
   useRemoteData,
+  useThemeRevision,
 } from './components.jsx'
 
 const COVERAGE_OPTIONS = [
@@ -151,180 +153,7 @@ function Panel({ title, subtitle, action, className = '', children }) {
 
 function SelectField({ label, value, onChange, options, emptyLabel, disabled = false }) {
   const normalizedOptions = emptyLabel ? [{ value: '', label: emptyLabel }, ...options] : options
-  return <SearchableSelect label={label} value={value ?? ''} disabled={disabled} options={normalizedOptions} onChange={onChange} />
-}
-
-function SearchableSelect({ label, value, onChange, options = [], placeholder = '请选择', disabled = false, className = '', leadingIcon: LeadingIcon = null }) {
-  const labelId = useId()
-  const triggerId = useId()
-  const searchId = useId()
-  const listboxId = useId()
-  const rootRef = useRef(null)
-  const anchorRef = useRef(null)
-  const searchRef = useRef(null)
-  const optionRefs = useRef([])
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const [highlightedIndex, setHighlightedIndex] = useState(0)
-  const normalizedQuery = normalizeDraft(query).toLocaleLowerCase('zh-CN')
-  const selected = options.find((option) => option.value === value)
-  const visibleOptions = useMemo(() => options.filter((option) => {
-    if (!normalizedQuery) return true
-    return normalizeDraft([option.label, option.value, option.description]
-      .filter(Boolean)
-      .join('\n'))
-      .toLocaleLowerCase('zh-CN')
-      .includes(normalizedQuery)
-  }), [normalizedQuery, options])
-  const firstEnabledIndex = Math.max(0, visibleOptions.findIndex((option) => !option.disabled))
-  const openUpward = useUpwardMenu(open, anchorRef, visibleOptions.length, 48)
-
-  useEffect(() => {
-    if (!open) return undefined
-    const closeOnOutsidePointer = (event) => {
-      if (!rootRef.current?.contains(event.target)) setOpen(false)
-    }
-    document.addEventListener('pointerdown', closeOnOutsidePointer)
-    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer)
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    setQuery('')
-    const selectedIndex = options.findIndex((option) => option.value === value && !option.disabled)
-    setHighlightedIndex(selectedIndex >= 0 ? selectedIndex : firstEnabledIndex)
-    window.requestAnimationFrame(() => searchRef.current?.focus())
-  }, [open])
-
-  useEffect(() => {
-    if (open) setHighlightedIndex(firstEnabledIndex)
-  }, [firstEnabledIndex, normalizedQuery])
-
-  useEffect(() => {
-    if (open) optionRefs.current[highlightedIndex]?.scrollIntoView({ block: 'nearest' })
-  }, [highlightedIndex, open])
-
-  const close = () => {
-    setOpen(false)
-    setQuery('')
-  }
-  const choose = (option) => {
-    if (!option || option.disabled) return
-    onChange(option.value)
-    close()
-    window.requestAnimationFrame(() => document.getElementById(triggerId)?.focus())
-  }
-  const move = (delta) => {
-    if (!visibleOptions.length) return
-    setHighlightedIndex((current) => {
-      let next = current
-      for (let offset = 0; offset < visibleOptions.length; offset += 1) {
-        next = (next + delta + visibleOptions.length) % visibleOptions.length
-        if (!visibleOptions[next]?.disabled) return next
-      }
-      return current
-    })
-  }
-  const onMenuKeyDown = (event) => {
-    if (event.nativeEvent?.isComposing || event.isComposing || event.keyCode === 229) return
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault()
-      move(event.key === 'ArrowDown' ? 1 : -1)
-    } else if (event.key === 'Enter' && visibleOptions.length) {
-      event.preventDefault()
-      choose(visibleOptions[highlightedIndex] || visibleOptions[firstEnabledIndex])
-    } else if (event.key === 'Escape') {
-      event.preventDefault()
-      close()
-      document.getElementById(triggerId)?.focus()
-    }
-  }
-
-  return (
-    <div
-      ref={rootRef}
-      className={`qp-field mih-search-select ${className}`.trim()}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) close()
-      }}
-    >
-      <span className={`qp-field__label mih-search-select__label${LeadingIcon ? ' mih-sr-only' : ''}`} id={labelId}>{label}</span>
-      <div className="mih-search-select__anchor" ref={anchorRef}>
-        <button
-          className={`mih-search-select__trigger${open ? ' is-open' : ''}`}
-          id={triggerId}
-          type="button"
-          aria-haspopup="listbox"
-          aria-expanded={open}
-          aria-controls={listboxId}
-          aria-labelledby={`${labelId} ${triggerId}`}
-          disabled={disabled}
-          onClick={() => setOpen((current) => !current)}
-          onKeyDown={(event) => {
-            if (event.nativeEvent?.isComposing || event.isComposing || event.keyCode === 229) return
-            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-              event.preventDefault()
-              if (!open) setOpen(true)
-              else move(event.key === 'ArrowDown' ? 1 : -1)
-            } else if (event.key === 'Escape' && open) {
-              event.preventDefault()
-              close()
-            }
-          }}
-        >
-          {LeadingIcon ? <LeadingIcon size={16} aria-hidden="true" /> : null}
-          {LeadingIcon ? <span className="mih-search-select__inline-label">{label}</span> : null}
-          <span className={`mih-search-select__value${selected ? '' : ' is-placeholder'}`}>{selected?.label ?? (value || placeholder)}</span>
-          <CaretDown className="mih-search-select__chevron" size={14} aria-hidden="true" />
-        </button>
-        {open ? (
-          <div className={`mih-search-select__menu${openUpward ? ' is-upward' : ''}`}>
-            <label className="mih-search-select__search" htmlFor={searchId}>
-              <MagnifyingGlass size={14} aria-hidden="true" />
-              <input
-                ref={searchRef}
-                id={searchId}
-                role="combobox"
-                value={query}
-                placeholder={`搜索${label}`}
-                aria-label={`搜索${label}选项`}
-                aria-autocomplete="list"
-                aria-expanded="true"
-                aria-haspopup="listbox"
-                aria-controls={listboxId}
-                aria-activedescendant={visibleOptions.length ? `${listboxId}-option-${highlightedIndex}` : undefined}
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={onMenuKeyDown}
-              />
-              {query ? <button type="button" aria-label={`清空${label}搜索`} onClick={() => setQuery('')}><X size={12} aria-hidden="true" /></button> : null}
-            </label>
-            <div className="mih-search-select__options" id={listboxId} role="listbox" aria-labelledby={labelId}>
-              {visibleOptions.map((option, index) => (
-                <button
-                  ref={(node) => { optionRefs.current[index] = node }}
-                  className={`mih-combobox-option${index === highlightedIndex ? ' is-highlighted' : ''}${option.value === value ? ' is-selected' : ''}`}
-                  id={`${listboxId}-option-${index}`}
-                  key={`${option.value}-${option.label}`}
-                  type="button"
-                  role="option"
-                  aria-selected={option.value === value}
-                  disabled={option.disabled}
-                  tabIndex={-1}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onMouseEnter={() => { if (!option.disabled) setHighlightedIndex(index) }}
-                  onClick={() => choose(option)}
-                >
-                  <Check className="mih-combobox-option__check" size={13} weight="bold" aria-hidden="true" />
-                  <span>{option.label}</span>
-                </button>
-              ))}
-              {!visibleOptions.length ? <p className="mih-search-select__empty">没有匹配项</p> : null}
-            </div>
-          </div>
-        ) : null}
-      </div>
-    </div>
-  )
+  return <DropdownField label={label} value={value ?? ''} disabled={disabled} options={normalizedOptions} onChange={onChange} />
 }
 
 function CatalogBadge({ dimension, value, onClick = null, ariaLabel = null }) {
@@ -368,7 +197,7 @@ function CatalogKpi({ icon: Icon, label, value, hint, tone = 'primary' }) {
 }
 
 function chartTheme() {
-  const styles = getComputedStyle(document.documentElement)
+  const styles = getComputedStyle(document.querySelector('.qp-app') || document.documentElement)
   const token = (name, fallback) => styles.getPropertyValue(name).trim() || fallback
   return {
     primary: token('--qp-primary', '#2bf6d2'),
@@ -386,12 +215,13 @@ function chartTheme() {
 
 function useCatalogChart(buildConfig, signature) {
   const canvasRef = useRef(null)
+  const themeRevision = useThemeRevision()
   useEffect(() => {
     if (!canvasRef.current) return undefined
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     const chart = new Chart(canvasRef.current, buildConfig(chartTheme(), reducedMotion))
     return () => chart.destroy()
-  }, [buildConfig, signature])
+  }, [buildConfig, signature, themeRevision])
   return canvasRef
 }
 
@@ -894,7 +724,7 @@ function TagInput({ label, values, onChange, suggestions = [], hint, placeholder
 }
 
 function ToolbarDropdown({ icon: Icon, label, value, onChange, options }) {
-  return <SearchableSelect className="mih-source-toolbar-dropdown" leadingIcon={Icon} label={label} value={value} options={options} onChange={onChange} />
+  return <DropdownField className="mih-source-toolbar-dropdown" leadingIcon={Icon} label={label} value={value} options={options} onChange={onChange} />
 }
 
 function textSearch(item, query) {
@@ -1179,8 +1009,8 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
           <div className="mih-source-bulk-bar" role="region" aria-label="批量操作">
             <strong>已选 {selected.length} 条</strong>
             <span />
-            <SearchableSelect className="mih-source-bulk-dropdown" label="覆盖状态" value="" disabled={bulkSaving} placeholder="批量设置" options={COVERAGE_OPTIONS} onChange={(value) => bulkUpdate('coverageStatus', value)} />
-            <SearchableSelect className="mih-source-bulk-dropdown" label="实施阶段" value="" disabled={bulkSaving} placeholder="批量设置" options={DELIVERY_OPTIONS} onChange={(value) => bulkUpdate('deliveryStatus', value)} />
+            <DropdownField className="mih-source-bulk-dropdown" label="覆盖状态" value="" disabled={bulkSaving} placeholder="批量设置" options={COVERAGE_OPTIONS} onChange={(value) => bulkUpdate('coverageStatus', value)} />
+            <DropdownField className="mih-source-bulk-dropdown" label="实施阶段" value="" disabled={bulkSaving} placeholder="批量设置" options={DELIVERY_OPTIONS} onChange={(value) => bulkUpdate('deliveryStatus', value)} />
             <button type="button" className="qp-button qp-button--ghost qp-button--sm" onClick={() => setSelectedIds(new Set())}>取消选择</button>
           </div>
         ) : null}

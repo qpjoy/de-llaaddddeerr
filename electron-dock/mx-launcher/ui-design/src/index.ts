@@ -1,5 +1,7 @@
 export {
   neonVoidCssVariables,
+  neonVoidLightCssVariables,
+  neonVoidLightTheme,
   neonVoidTokens,
   neonVoidTheme,
   type NeonVoidTokens,
@@ -16,6 +18,7 @@ export const cssEntryPoints = {
 
 export const classNames = {
   app: 'qp-app qp-theme-neon-void',
+  appLight: 'qp-app qp-theme-neon-void-light',
   densitySmall: 'qp-density--small',
   densityMedium: 'qp-density--medium',
   densityLarge: 'qp-density--large',

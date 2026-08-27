@@ -24,14 +24,16 @@ example:
         "region_catalog",
         "region_feed",
         "item_detail",
-        "stored_search"
+        "stored_search",
+        "diagnostics"
       ],
       "source": "hub",
       "servingMode": "stored"
     }],
     "capabilities": [
       { "capability": "nlp.tokenize", "ready": true },
-      { "capability": "public_opinion.all_ingested.read", "ready": true }
+      { "capability": "public_opinion.all_ingested.read", "ready": true },
+      { "capability": "public_opinion.diagnostics.read", "ready": true }
     ]
   }
 }
@@ -41,7 +43,8 @@ Provider names and internal endpoint IDs are omitted.
 
 `platforms` contains only explicitly granted data platforms. For the Hub-owned
 `public_opinion` platform, `province_feed`, `province_coverage`,
-`region_catalog`, `region_feed`, `item_detail`, and `stored_search` name the
+`region_catalog`, `region_feed`, `item_detail`, `stored_search`, and
+`diagnostics` name the
 supported serving surfaces. Its `ready` flag is not a second authorization
 decision or a freshness guarantee. An initially unconfigured or paused source
 may report `ready=false`, while previously indexed records can still be
@@ -53,6 +56,62 @@ capability. It never grants the `public_opinion` platform by itself. The P1
 region feed requires both the platform grant and this capability; a consumer
 with only one of them cannot read the all-ingested view. Capability discovery
 returns the entry only to a consumer that has explicitly received the grant.
+
+The same rule applies to `public_opinion.diagnostics.read`: it is an explicit,
+non-default step-up capability and never grants the `public_opinion` platform
+by itself. Funnel and unshown-record diagnostics require both grants. The
+`source_catalog` platform is Hub-owned and advertises `catalog_entries`,
+`catalog_metadata`, and `filtered_browse` when its stored serving surface is
+ready.
+
+## Source catalog
+
+```http
+GET /api/v1/data/source-catalog?coverageStatus=covered&deliveryStatus=doing&pageSize=50
+GET /api/v1/data/source-catalog/metadata
+Authorization: Bearer <mx key>
+```
+
+Both routes require the explicit `source_catalog` platform grant. They accept
+an issued API Key, not an Admin Token or Launcher session. Every safe GET and
+retry is independently metered against the platform policy and does not use an
+`Idempotency-Key`.
+
+The list returns only active catalog entries under
+`contractVersion=source-catalog.public.v1`. It exposes the governed fields
+needed to reconstruct the Hub directory and external status reporting:
+platform/name and aliases, source kind, major category, scenarios, regions,
+representative modules, observable content, extractable clues, tracking fields,
+suggested access, compliance boundary, priority, coverage, delivery, field
+review, runtime status, owner, tags, notes and access leads. It does not expose
+`evidenceRefs`, `customFields`, `importedFrom`, event/revision history,
+related-data coordinates, account linkage, connections or credentials.
+Ordinary governed business notes remain public. Before filtering, searching or
+building facets, the Hub removes high-confidence DSNs, credentialed URLs,
+private-network connection coordinates, API keys, tokens, passwords and other
+credential material accidentally pasted into free-text fields. Every entry
+always includes `redactedFields`; taxonomy and owner projections include it
+when one of their fields was removed.
+
+The complete filter allowlist is `query`, `sourceKind`, `majorCategory`,
+`scenario`, `region`, `coverageStatus`, `deliveryStatus`, `reviewStatus`,
+`runtimeStatus`, `priority`, `ownerId`, `tag`, `pageSize`, and `cursor`.
+`pageSize` defaults to 50, is capped at 100, and may be reduced by the
+consumer's `source_catalog` policy. `pageInfo` contains `returnedCount`,
+`totalCount`, `hasMore`, and `nextCursor`.
+
+Pagination uses an HMAC-signed keyset ordered by
+`(legacySequence NULLS LAST, canonicalName, id)`. The cursor is bound to the
+complete normalized filter set and page size. Clients return it unchanged;
+changing any bound and reusing the cursor returns `400 invalid_cursor`, so the
+client must restart without a cursor.
+
+`GET /data/source-catalog/metadata` returns the public field definitions and
+enums, current active taxonomy, public owner projections, global summary and
+facets. Together with the list it is sufficient to reconstruct filters,
+coverage/delivery reports, owner selectors and status dashboards without
+exposing management APIs. This route accepts no query fields; any supplied key
+returns `400 unsupported_fields`.
 
 ## Tokenize text
 
@@ -676,6 +735,44 @@ Publisher/dateline fallbacks may provide a display location for candidate
 exploration but do not satisfy verified province coverage. Overseas events keep
 country/location/geo scope and do not enter a China province bucket.
 
+### Funnel and unshown-record diagnostics
+
+```http
+GET /api/v1/data/public-opinion/funnel?from=2026-08-24T00:00:00Z&to=2026-08-25T23:59:59Z
+GET /api/v1/data/public-opinion/records?reason=missing_province&from=2026-08-24T00:00:00Z&to=2026-08-25T23:59:59Z&pageSize=50
+GET /api/v1/data/public-opinion/records/{id}?from=2026-08-24T00:00:00Z&to=2026-08-25T23:59:59Z
+Authorization: Bearer <mx key>
+```
+
+These diagnostic resources require both the `public_opinion` platform grant
+and the independent `public_opinion.diagnostics.read` capability. The step-up
+capability has its own request window; record pagination is also bounded by the
+platform's `maxPageSize`. Every GET/retry is independently metered and does not
+use an idempotency key. A missing platform grant returns
+`403 platform_not_granted`; a missing step-up grant returns
+`403 capability_not_granted`.
+
+The funnel reports the explainable inclusion stages from active-current records
+through publication state, formal stage/status, event time, selected time
+window, province assignment, and heat score. Its contract version is
+`mx-insight-hub.data-products.public-opinion-funnel.v1`.
+
+The records route accepts only `cursor`, `from`, `heat`, `pageSize`, `province`,
+`query`, `reason`, `scope`, `stage`, `status`, `time`, and `to`. Reasons include
+`missing_province`, `missing_publication_state`, `not_formal_stage`,
+`not_formal_status`, `missing_event_time`, `outside_window`, and `missing_heat`,
+plus the published visibility views in the machine contract. The list uses a
+signed opaque keyset cursor bound to the full normalized filter set. The list
+and detail contract versions are respectively
+`mx-insight-hub.data-products.public-opinion-records.v1` and
+`mx-insight-hub.data-products.public-opinion-record.v1`.
+
+Responses reuse the bounded public diagnostic projection. They never return
+raw payloads, `extensions`, source connections/credentials, mutable internal
+coordinates, model reasoning, or Admin operations. These APIs expose why a row
+is absent from a product view; they do not publish the Admin Token funnel or
+grant access to catalog/update controls.
+
 For global search across different stored sources, use
 `POST /api/v1/data/canonical/search`. Specify `platform=public_opinion`,
 `datasetId=public-opinion.province.v1`, and `objectType=opinion_item` to narrow
@@ -701,8 +798,8 @@ other granted platforms apply the publication predicate only to
 ### History
 
 ```http
-GET /api/v1/data/telegram/chats?pageSize=50&from=2026-08-01T00:00:00Z
-GET /api/v1/data/telegram/messages?chatId=-1001234567890&pageSize=50&cursor=<opaque>
+GET /api/v1/data/telegram/chats?sourceScope=all&kind=channel&query=news&pageSize=50
+GET /api/v1/data/telegram/messages?sourceScope=all&chatId=<chatKey>&pageSize=50&cursor=<opaque>
 ```
 
 These two read-only resources are served from Hub-owned canonical datasets, not
@@ -712,11 +809,23 @@ from the physical Night-All tables on each request:
 | --- | --- | --- |
 | `chats` | `telegram.monitor.chats.v1` | `chat` |
 | `messages` | `telegram.monitor.messages.v1` | `message` |
+| `chats` with `sourceScope=sqlite|all` | `telegram.sqlite.chats.v1` | `chat` |
+| `messages` with `sourceScope=sqlite|all` | `telegram.sqlite.messages.v1` | `message` |
 
-They intentionally remain monitor-specific compatibility APIs. SQLite imports
-are separate canonical datasets (`telegram.sqlite.chats.v1` and
-`telegram.sqlite.messages.v1`) and are not silently mixed into the history or
-Telegram-specific search contracts.
+For backward compatibility, omitting `sourceScope` keeps the historical
+monitor-only view. Callers explicitly select `all` to reconstruct the Hub Admin
+Monitor + SQLite conversation surface, or `sqlite` to inspect only imported
+records. SQLite data is never mixed into an omitted/default scope.
+
+The routes are additive and are not renamed: existing Monitor callers keep the
+same `/data/telegram/chats`, `/data/telegram/messages` and
+`/data/telegram/search` paths. Omitting `sourceScope` (and, for chats,
+`kind/query`) preserves the legacy Monitor response and unsigned v1 history
+cursor. Explicit `sourceScope`, chat filters or a qualified
+`monitor:<canonical UUID>` / `sqlite:<canonical UUID>` chatKey opts into an
+HMAC-signed v2 history cursor bound to the resource, selected source, filters
+and page size. `sourceScope=all` with a plain external chat ID is the explicit
+two-source merge.
 
 Use the unified endpoint when the caller wants Telegram data regardless of
 ingestion source. Omitting `datasetId` is what combines monitor and SQLite
@@ -744,7 +853,9 @@ tenant ID, source-table name, provider, connector, database field, endpoint ID
 or raw-payload switch is never accepted from the caller. `GET
 /api/v1/data/capabilities` advertises `monitor_chats` and
 `monitor_messages` under `telegram` when that consumer is granted the platform
-and the stored-data runtime is available.
+and the stored-data runtime is available. Additive discovery names are
+`sqlite_chats`, `sqlite_messages`, `multi_source_conversations` and
+`conversation_filter`.
 
 The two canonical datasets currently have no `tenant_id` or per-tenant row
 scope. Consequently, every consumer with the `telegram` grant reads the same
@@ -753,20 +864,28 @@ ownership, the grant decision, policy, request quota and usage evidence, not a
 different row subset. Tenant-specific Telegram delivery is not implemented and
 would require a separately versioned dataset or explicit row-scope contract.
 
-The complete query allowlist is:
+The query allowlist is resource-specific:
 
 | Field | Contract |
 | --- | --- |
-| `chatId` | Optional non-blank string, at most 256 characters. On `messages` it filters the normalized chat relation; on `chats` it matches the chat external ID. |
-| `from` | Optional complete RFC3339/ISO date-time with `T`, seconds and `Z` or a numeric offset; `eventTime` is inclusive. Date-only and space-separated forms are rejected. |
-| `to` | Same complete date-time form; `eventTime` is inclusive and may not precede `from`. |
+| `sourceScope` | Optional `monitor|sqlite|all`, default `monitor`. Supported by chats, messages and Telegram search. |
+| `kind` | Chats only: `all|channel|group|unknown`, default `all`. |
+| `query` | Chats only: bounded search across the safe title/username/identifier projection. |
+| `chatId` | Messages only: optional non-blank stable chat key/normalized identifier, at most 256 characters. |
+| `from` | Messages only: optional complete RFC3339/ISO date-time with `T`, seconds and `Z` or a numeric offset; `eventTime` is inclusive. Date-only and space-separated forms are rejected. |
+| `to` | Messages only: same complete date-time form; `eventTime` is inclusive and may not precede `from`. |
 | `pageSize` | Positive integer. Default is 50 or the consumer's lower policy limit; the effective maximum is the consumer's `telegram.maxPageSize`, never above the server default of 100. |
-| `cursor` | Optional opaque string, at most 1,024 characters. Return `pageInfo.nextCursor` unchanged. |
+| `cursor` | Return `pageInfo.nextCursor` unchanged. Legacy Monitor-only cursors are at most 1,024 characters; additive signed source/filter cursors are at most 2,048. |
 
 Unknown query fields are rejected with `unsupported_fields`. In particular,
 there is no free-text `q`, arbitrary sort, SQL, offset, raw export or caller
-selected dataset. Results use descending `(eventTime, internal canonical ID)`
-keyset pagination, so clients must not decode or construct cursors.
+selected dataset. When all additive filters are omitted, the legacy Monitor
+ordering and cursor semantics remain unchanged. Explicit `sourceScope`, `kind`
+or `query` enables the source-aware keyset contract, ordered by immutable
+`effectiveSortTime` then the internal canonical ID. `effectiveSortTime` falls
+back from business event time to `collectedAt` and then `firstSeenAt`; it does
+not rewrite nullable `eventTime` or `collectedAt` response fields. Clients must
+not decode or construct either cursor version.
 
 The following uses synthetic values to illustrate the contract; it is not a
 production row.
@@ -777,6 +896,8 @@ production row.
     "items": [
       {
         "id": "-1001234567890:42",
+        "canonicalId": "11111111-1111-4111-8111-111111111111",
+        "sourceScope": "monitor",
         "externalId": "-1001234567890:42",
         "platform": "telegram",
         "objectType": "message",
@@ -960,6 +1081,7 @@ Content-Type: application/json
 
 {
   "query": "agent",
+  "sourceScope": "all",
   "scope": "messages",
   "chatId": "-1001234567890",
   "authorId": "12345",
@@ -971,9 +1093,12 @@ Content-Type: application/json
 }
 ```
 
-`query` is required and limited to 500 characters. `scope` is
+`query` is required and limited to 500 characters. `sourceScope` is
+`monitor` (default), `sqlite`, or `all`; the default preserves the existing
+monitor-only contract. `scope` is
 `messages` (default), `chats` or `all`. `chatId` and `authorId` are exact
-normalized identities. Time bounds are inclusive complete RFC3339 values.
+normalized identities; omitting `chatId` searches globally in the selected
+source scope, while setting it searches one conversation. Time bounds are inclusive complete RFC3339 values.
 Only `full_text` is implemented; callers cannot send ES DSL, SQL, arbitrary
 fields, provider parameters or a physical dataset/source name.
 
@@ -981,7 +1106,8 @@ The response uses `contractVersion: night-all.data-search.v1`, including the
 familiar `platform`, `query`, `items`, `pageInfo`, `status`, `warnings` and
 `meta` fields. Item fields remain
 `id/externalId/platform/contentType/url/title/text/publishedAt/collectedAt/
-author/metrics/media/source`. Every item reports
+author/metrics/media/source` and additionally report the Hub `canonicalId` and
+selected `sourceScope`. Every item reports
 `source={provider:null, endpointId:"hub-canonical-search"}`. Response metadata
 reports `sourceProvider="mx-insight-hub"` and
 `endpointId="hub-canonical-search"`. These are fixed serving-plane labels; they
@@ -989,8 +1115,8 @@ never identify the registered PostgreSQL provider. Night-All-v1 metric keys are
 non-negative numbers or `null`; invalid/negative source sentinels are normalized
 to `null` instead of leaking a response that fails the compatibility schema.
 
-Search pagination uses a version-3, HMAC-signed opaque cursor, limited to 8,192
-characters. The signature binds the cursor to the normalized query, scope,
+Search pagination uses an HMAC-signed opaque cursor, limited to 8,192
+characters. The signature binds the cursor to the normalized query, source scope, result scope,
 filters, match mode, page size and bounded first-page analysis state. Later
 pages reuse the same applied profile, tokens and backend instead of calling the
 segmenter again. Do not decode or construct it, and do not change those inputs

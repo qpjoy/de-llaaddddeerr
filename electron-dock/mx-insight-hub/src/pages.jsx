@@ -27,6 +27,7 @@ import {
 import { adminApi } from './api.js'
 import { copyText, TOKENIZE_CURL_TEMPLATE } from './open-capabilities.js'
 import {
+  DropdownField,
   EmptyState,
   ErrorState,
   Field,
@@ -111,26 +112,16 @@ function sortedPlatforms(byPlatform = {}) {
 }
 
 function FilterSelect({ label, value, onChange, options, emptyLabel = '全部', disabled = false }) {
-  return (
-    <Field label={label} className="mih-filter-field">
-      <select className="qp-select" value={value || ''} onChange={(event) => onChange(event.target.value)} disabled={disabled}>
-        <option value="">{emptyLabel}</option>
-        {options.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
-      </select>
-    </Field>
-  )
+  return <DropdownField className="mih-filter-field" label={label} value={value || ''} onChange={onChange}
+    options={[{ value: '', label: emptyLabel }, ...options]} disabled={disabled} />
 }
 
 function RangeFilter({ value, onChange }) {
-  return (
-    <Field label="时间范围" className="mih-filter-field">
-      <select className="qp-select" value={value} onChange={(event) => onChange(event.target.value)}>
-        <option value="24h">近 24 小时</option>
-        <option value="7d">近 7 天</option>
-        <option value="30d">近 30 天</option>
-      </select>
-    </Field>
-  )
+  return <DropdownField className="mih-filter-field" label="时间范围" value={value} onChange={onChange} options={[
+    { value: '24h', label: '近 24 小时' },
+    { value: '7d', label: '近 7 天' },
+    { value: '30d', label: '近 30 天' },
+  ]} />
 }
 
 function Panel({ title, subtitle, action, children, className = '' }) {
@@ -754,11 +745,10 @@ export function ConsumersPage({ token, session, query, setQuery, onUnauthorized,
         >
           <form id="create-consumer" className="mih-form" onSubmit={create}>
             {consumerTenants.length ? (
-              <Field label="所属租户">
-                <select className="qp-select" value={form.tenantId} onChange={(event) => setForm({ ...form, tenantId: event.target.value })} required autoFocus>
-                  {consumerTenants.map((tenant) => <option value={tenant.id} key={tenant.id}>{tenant.name}</option>)}
-                </select>
-              </Field>
+              <DropdownField label="所属租户" value={form.tenantId}
+                onChange={(tenantId) => setForm({ ...form, tenantId })}
+                options={consumerTenants.map((tenant) => ({ value: tenant.id, label: tenant.name }))}
+                required autoFocus />
             ) : (
               <Field label="首个租户名称" hint="当前没有租户，提交时会先创建租户。">
                 <input className="qp-input" value={form.tenantName} onChange={(event) => setForm({ ...form, tenantName: event.target.value })} required autoFocus />
@@ -943,20 +933,16 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
           )}
         >
           <form id="create-api-key" className="mih-form" onSubmit={create}>
-            <Field label="调用者">
-              <select className="qp-select" value={form.consumerId} onChange={(event) => setForm({ ...form, consumerId: event.target.value })} required autoFocus>
-                {writableConsumers.map((consumer) => <option value={consumer.id} key={consumer.id}>{consumer.name}</option>)}
-              </select>
-            </Field>
+            <DropdownField label="调用者" value={form.consumerId}
+              onChange={(consumerId) => setForm({ ...form, consumerId })}
+              options={writableConsumers.map((consumer) => ({ value: consumer.id, label: consumer.name }))}
+              required autoFocus />
             <Field label="密钥名称">
               <input className="qp-input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：数据分析生产环境" required />
             </Field>
-            <Field label="环境">
-              <select className="qp-select" value={form.environment} onChange={(event) => setForm({ ...form, environment: event.target.value })}>
-                <option value="live">Live</option>
-                <option value="test">Test</option>
-              </select>
-            </Field>
+            <DropdownField label="环境" value={form.environment}
+              onChange={(environment) => setForm({ ...form, environment })}
+              options={[{ value: 'live', label: 'Live' }, { value: 'test', label: 'Test' }]} />
             <Field label="有效期（天）" hint="默认 180 天；可设置 1–730 天，到期后立即拒绝认证。">
               <input
                 className="qp-input"

@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MX Insight Hub</title>
+    <script>
+      try {
+        document.documentElement.classList.add(
+          localStorage.getItem('mx-insight-hub.theme') === 'dark'
+            ? 'qp-theme-neon-void'
+            : 'qp-theme-neon-void-light',
+        )
+      } catch {
+        document.documentElement.classList.add('qp-theme-neon-void-light')
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

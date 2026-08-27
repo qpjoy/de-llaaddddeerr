@@ -4,6 +4,8 @@ import {
   searchCapabilities,
 } from './search/profiles.mjs'
 
+export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
+
 const PUBLIC_SEARCH_PROFILE_IDS = Object.freeze(
   searchCapabilities({ audience: 'public' }).profiles.map((profile) => profile.id),
 )
@@ -25,10 +27,16 @@ const canonicalContextErrors = Object.fromEntries(
   [400, 401, 403, 404, 409, 429, 503].map((status) => [status, errorResponse]),
 )
 
-const telegramHistoryParameters = [
+const telegramSourceScopeParameter = {
+  name: 'sourceScope', in: 'query', required: false,
+  description: 'Stored corpus to read. Defaults to monitor for backward compatibility; all merges Monitor and SQLite imports.',
+  schema: { type: 'string', enum: ['all', 'monitor', 'sqlite'], default: 'monitor' },
+}
+
+const telegramHistoryFilterParameters = [
   {
     name: 'chatId', in: 'query', required: false,
-    description: 'Exact normalized Telegram chat identifier.',
+    description: 'Exact normalized chat identifier, or the stable chatKey returned by the chats route.',
     schema: { type: 'string', minLength: 1, maxLength: 256 },
   },
   {
@@ -41,15 +49,145 @@ const telegramHistoryParameters = [
     description: 'Inclusive RFC3339 event-time upper bound.',
     schema: { type: 'string', format: 'date-time' },
   },
+]
+
+const telegramPageParameters = [
   {
     name: 'pageSize', in: 'query', required: false,
     description: 'Defaults to 50; the API-key policy may impose a lower maximum.',
-    schema: { type: 'integer', minimum: 1, maximum: 100 },
+    schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
   },
   {
     name: 'cursor', in: 'query', required: false,
-    description: 'Opaque nextCursor returned by the previous page. Return it unchanged.',
-    schema: { type: 'string', minLength: 1, maxLength: 1024 },
+    description: 'Opaque nextCursor returned by the previous page. Return it unchanged with the same filters and pageSize. Legacy monitor-only cursors are at most 1024 characters; extended source/filter cursors are at most 2048.',
+    schema: { type: 'string', minLength: 1, maxLength: 2048 },
+  },
+]
+
+const telegramChatParameters = [
+  telegramSourceScopeParameter,
+  {
+    name: 'kind', in: 'query', required: false,
+    description: 'Filter the conversation catalog by normalized Telegram kind.',
+    schema: { type: 'string', enum: ['all', 'channel', 'group', 'unknown'], default: 'all' },
+  },
+  {
+    name: 'query', in: 'query', required: false,
+    description: 'Case-insensitive title or username substring.',
+    schema: { type: 'string', minLength: 1, maxLength: 200 },
+  },
+  ...telegramHistoryFilterParameters,
+  ...telegramPageParameters,
+]
+
+const telegramMessageParameters = [
+  telegramSourceScopeParameter,
+  ...telegramHistoryFilterParameters,
+  ...telegramPageParameters,
+]
+
+const sourceCatalogQueryParameters = [
+  ['query', 'Free-text search across the public catalog projection.'],
+  ['majorCategory', 'Exact active major-category display name.'],
+  ['scenario', 'Exact active scenario display name.'],
+  ['region', 'Exact active region display name.'],
+  ['ownerId', 'Exact active owner UUID.'],
+  ['tag', 'Exact active tag display name.'],
+].map(([name, description]) => ({
+  name, in: 'query', required: false, description,
+  schema: name === 'ownerId'
+    ? { type: 'string', format: 'uuid' }
+    : { type: 'string', minLength: 1, maxLength: name === 'query' ? 240 : 160 },
+}))
+sourceCatalogQueryParameters.splice(1, 0,
+  {
+    name: 'sourceKind', in: 'query', required: false,
+    schema: { type: 'string', enum: ['platform', 'platform_module', 'source_class', 'registry', 'provider', 'dataset', 'other'] },
+  },
+)
+for (const [name, values] of [
+  ['coverageStatus', ['unknown', 'not_covered', 'partial', 'covered']],
+  ['deliveryStatus', ['exploring', 'planned', 'doing', 'blocked', 'complete', 'paused', 'retired']],
+  ['reviewStatus', ['needs_review', 'verified', 'rejected']],
+  ['runtimeStatus', ['not_configured', 'unknown', 'healthy', 'degraded', 'failed']],
+  ['priority', ['P0', 'P1', 'P2', 'P3']],
+]) {
+  sourceCatalogQueryParameters.push({
+    name, in: 'query', required: false,
+    schema: { type: 'string', enum: values },
+  })
+}
+sourceCatalogQueryParameters.push(
+  {
+    name: 'pageSize', in: 'query', required: false,
+    description: 'Defaults to 50; maximum 100, and the source_catalog policy may impose a lower limit.',
+    schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+  },
+  {
+    name: 'cursor', in: 'query', required: false,
+    description: 'HMAC-signed keyset cursor bound to every filter and pageSize. Return unchanged; changing a filter requires restarting from page one.',
+    schema: { type: 'string', minLength: 1, maxLength: 4096 },
+  },
+)
+
+const publicOpinionDiagnosticsWindowParameters = [
+  {
+    name: 'from', in: 'query', required: false,
+    description: 'Inclusive RFC3339 lower bound. Supply from and to together; otherwise the latest 30-day window is used.',
+    schema: { type: 'string', format: 'date-time' },
+  },
+  {
+    name: 'to', in: 'query', required: false,
+    description: 'Inclusive RFC3339 upper bound. Supply from and to together.',
+    schema: { type: 'string', format: 'date-time' },
+  },
+]
+
+const publicOpinionDiagnosticsRecordParameters = [
+  ...publicOpinionDiagnosticsWindowParameters,
+  {
+    name: 'reason', in: 'query', required: false,
+    schema: { type: 'string', enum: ['all', 'coverage_visible', 'hot_visible', 'missing_publication_state', 'not_formal_stage', 'not_formal_status', 'missing_event_time', 'outside_window', 'missing_province', 'missing_heat'], default: 'all' },
+  },
+  {
+    name: 'stage', in: 'query', required: false,
+    schema: { type: 'string', enum: ['all', 'formal', 'candidate', 'missing'], default: 'all' },
+  },
+  {
+    name: 'status', in: 'query', required: false,
+    schema: { type: 'string', enum: ['all', 'formal', 'pending', 'qualified', 'rejected', 'failed', 'missing'], default: 'all' },
+  },
+  {
+    name: 'province', in: 'query', required: false,
+    description: 'all, missing, or one ISO 3166-2:CN province code.',
+    schema: { type: 'string', default: 'all' },
+  },
+  {
+    name: 'scope', in: 'query', required: false,
+    schema: { type: 'string', enum: ['all', 'missing', 'national', 'nationwide', 'province', 'multi_province', 'city', 'maritime', 'overseas', 'unknown'], default: 'all' },
+  },
+  {
+    name: 'time', in: 'query', required: false,
+    schema: { type: 'string', enum: ['all', 'within', 'outside', 'missing'], default: 'all' },
+  },
+  {
+    name: 'heat', in: 'query', required: false,
+    schema: { type: 'string', enum: ['all', 'present', 'missing'], default: 'all' },
+  },
+  {
+    name: 'query', in: 'query', required: false,
+    description: 'Search the customer-safe title, summary, author and location projection.',
+    schema: { type: 'string', minLength: 1, maxLength: 500 },
+  },
+  {
+    name: 'pageSize', in: 'query', required: false,
+    description: 'Defaults to 50; the public_opinion platform maxPageSize may impose a lower limit.',
+    schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+  },
+  {
+    name: 'cursor', in: 'query', required: false,
+    description: 'HMAC-signed keyset cursor bound to the complete normalized filter set and pageSize.',
+    schema: { type: 'string', minLength: 1, maxLength: 2048 },
   },
 ]
 
@@ -380,6 +518,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   servers: [{ url: '/api/v1', description: 'Same-origin public API' }],
   tags: [
     { name: 'Discovery', description: 'Discover the caller\'s granted platform capabilities.' },
+    { name: 'Source Catalog', description: 'Reconstruct the active governed source catalog, filters, taxonomy, owners and status summary.' },
     { name: 'Search', description: 'Idempotent content search.' },
     { name: 'Compatibility', description: 'Temporary Night-All legacy routes with durable Hub evidence and exact last-good fallback.' },
     { name: 'Tools', description: 'Granted platform-independent processing capabilities.' },
@@ -413,7 +552,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                       {
                         platform: 'telegram',
                         ready: true,
-                        capabilities: ['monitor_chats', 'monitor_messages', 'stored_search', 'entity_search', 'message_context'],
+                        capabilities: ['monitor_chats', 'monitor_messages', 'sqlite_chats', 'sqlite_messages', 'multi_source_conversations', 'conversation_filter', 'stored_search', 'entity_search', 'message_context'],
                         source: 'hub',
                         servingMode: 'stored',
                         context: {
@@ -451,7 +590,15 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                           'region_feed',
                           'item_detail',
                           'stored_search',
+                          'diagnostics',
                         ],
+                        source: 'hub',
+                        servingMode: 'stored',
+                      },
+                      {
+                        platform: 'source_catalog',
+                        ready: true,
+                        capabilities: ['catalog_entries', 'catalog_metadata', 'filtered_browse'],
                         source: 'hub',
                         servingMode: 'stored',
                       },
@@ -478,6 +625,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                     capabilities: [
                       { capability: 'nlp.tokenize', ready: true },
                       { capability: 'public_opinion.all_ingested.read', ready: true },
+                      { capability: 'public_opinion.diagnostics.read', ready: true },
                     ],
                   },
                   requestId: '00000000-0000-4000-8000-000000000001',
@@ -655,6 +803,60 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         responses: { 200: canonicalContextResponse, ...canonicalContextErrors },
       },
     },
+    '/data/source-catalog': {
+      get: {
+        tags: ['Source Catalog'],
+        operationId: 'listSourceCatalogEntries',
+        summary: 'List active governed source-catalog entries',
+        description: 'Requires the source_catalog platform grant. Returns the complete customer-safe business projection needed to rebuild the Hub catalog table and its status filters. Ordinary governed notes remain available, but high-confidence credentials, credentialed URLs, DSNs, private-network connection coordinates, API keys and tokens accidentally pasted into any free-text field are removed; redactedFields reports the affected field names. Search and facets operate only on this redacted projection. Archived entries and evidence, custom fields, import provenance, events, related-data coordinates, login bindings, connection details and credentials are not returned. Results use the stable (legacySequence NULLS LAST, canonicalName, id) order. The HMAC-signed keyset cursor is bound to every normalized filter and pageSize; changing any one of them requires restarting from the first page. This safe GET is metered on every call and retry.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: sourceCatalogQueryParameters,
+        responses: {
+          200: {
+            description: 'One filtered page from the active source catalog.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/SourceCatalogPageEnvelope' } } },
+          },
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          429: errorResponse,
+          503: errorResponse,
+        },
+      },
+    },
+    '/data/source-catalog/metadata': {
+      get: {
+        tags: ['Source Catalog'],
+        operationId: 'getSourceCatalogMetadata',
+        summary: 'Read source-catalog fields, enums, taxonomy, owners and facets',
+        description: 'Requires the source_catalog platform grant. Returns only active taxonomy terms and owners, plus the field model, enumerations, summary and facets needed to reconstruct Hub filters and reporting. The owner projection is independent from login accounts. This route accepts no query fields; any supplied query key returns 400 unsupported_fields. This safe GET is metered on every call and retry.',
+        'x-mx-allowed-query-fields': [],
+        'x-mx-error-codes': {
+          400: ['unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        responses: {
+          200: {
+            description: 'Active source-catalog metadata and reporting facets.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/SourceCatalogMetadataEnvelope' } } },
+          },
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          429: errorResponse,
+          503: errorResponse,
+        },
+      },
+    },
     '/data/public-opinion/regions': {
       get: {
         tags: ['Public Opinion'],
@@ -778,6 +980,95 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         },
       },
     },
+    '/data/public-opinion/funnel': {
+      get: {
+        tags: ['Public Opinion'],
+        operationId: 'getPublicOpinionDiagnosticsFunnel',
+        summary: 'Explain the public-opinion visibility funnel',
+        description: 'Requires both the public_opinion platform grant and the independent public_opinion.diagnostics.read capability. Returns counts for canonical state, publication stage/status, event time, geography, heat and current product visibility in one bounded window. It exposes governed aggregate diagnostics only; raw rows, source connections, extensions and model reasoning remain private. This safe GET uses the capability quota and is metered on every call and retry.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted', 'capability_not_granted'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: publicOpinionDiagnosticsWindowParameters,
+        responses: {
+          200: {
+            description: 'Customer-safe public-opinion funnel diagnostics.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/PublicOpinionDiagnosticsFunnelEnvelope' } } },
+          },
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          429: errorResponse,
+          503: errorResponse,
+        },
+      },
+    },
+    '/data/public-opinion/records': {
+      get: {
+        tags: ['Public Opinion'],
+        operationId: 'listPublicOpinionDiagnosticRecords',
+        summary: 'Browse displayed and non-displayed public-opinion records',
+        description: 'Requires the public_opinion grant and public_opinion.diagnostics.read. Filters mirror the Hub funnel explorer, including missing ownership, publication, event-time and heat reasons. The response is a bounded customer-safe allowlist. Pagination uses an HMAC-signed keyset cursor bound to the entire normalized filter set and pageSize.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted', 'capability_not_granted'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: publicOpinionDiagnosticsRecordParameters,
+        responses: {
+          200: {
+            description: 'A customer-safe page of public-opinion diagnostic records.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/PublicOpinionDiagnosticsRecordsEnvelope' } } },
+          },
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          429: errorResponse,
+          503: errorResponse,
+        },
+      },
+    },
+    '/data/public-opinion/records/{id}': {
+      get: {
+        tags: ['Public Opinion'],
+        operationId: 'getPublicOpinionDiagnosticRecord',
+        summary: 'Read one customer-safe public-opinion diagnostic record',
+        description: 'Requires the public_opinion grant and public_opinion.diagnostics.read. Returns the governed projection and all deterministic reasons why the record is or is not displayed in the requested window. Raw payloads, extensions, source connections and model reasoning are excluded.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted', 'capability_not_granted'],
+          404: ['item_not_found'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: [
+          {
+            name: 'id', in: 'path', required: true,
+            schema: { type: 'string', format: 'uuid' },
+          },
+          ...publicOpinionDiagnosticsWindowParameters,
+        ],
+        responses: {
+          200: {
+            description: 'One customer-safe public-opinion diagnostic record.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/PublicOpinionDiagnosticsRecordEnvelope' } } },
+          },
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          404: errorResponse,
+          429: errorResponse,
+          503: errorResponse,
+        },
+      },
+    },
     '/data/public-opinion/items/{id}': {
       get: {
         tags: ['Public Opinion'],
@@ -855,8 +1146,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Telegram'],
         operationId: 'listTelegramChats',
         summary: 'List normalized Telegram chats from Hub storage',
-        description: 'Requires the telegram grant. Every granted consumer reads the same complete Hub canonical corpus; tenant-specific row subsets are not implemented. Results use descending event-time keyset pagination. This safe GET is separately metered on every call and retry.',
-        parameters: telegramHistoryParameters,
+        description: 'Requires the telegram grant. Legacy chatId/from/to filters remain accepted. Omitting sourceScope/kind/query preserves the historical Monitor behavior. Explicit sourceScope, kind or query opts into the additive conversation contract; all merges Monitor and SQLite imports. New-mode keysets use immutable effectiveSortTime, falling back from business event time to collectedAt and then firstSeenAt, while response eventTime/collectedAt remain their true nullable values. Each chat carries a stable chatKey for subsequent history reads. This safe GET is separately metered on every call and retry.',
+        parameters: telegramChatParameters,
         responses: {
           200: {
             description: 'A page of normalized Telegram chats.',
@@ -871,8 +1162,16 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Telegram'],
         operationId: 'listTelegramMessages',
         summary: 'List normalized Telegram messages from Hub storage',
-        description: 'Requires the telegram grant. Every granted consumer reads the same complete Hub canonical corpus; tenant-specific row subsets are not implemented. Filter by exact chatId and/or inclusive event-time bounds. Return nextCursor unchanged; offset pagination is not supported.',
-        parameters: telegramHistoryParameters,
+        description: 'Requires the telegram grant. Omitting sourceScope with a plain external chatId preserves the Monitor legacy path. Explicit sourceScope or a qualified chatKey opts into source-aware history; all with a plain external ID merges Monitor and SQLite messages. New-mode keysets use immutable effectiveSortTime, falling back from business event time to collectedAt and then firstSeenAt, without rewriting nullable response times. Every item includes canonicalId and sourceScope. Return nextCursor unchanged; offset pagination is not supported.',
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields', 'source_scope_mismatch'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          404: ['chat_not_found'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: telegramMessageParameters,
         responses: {
           200: {
             description: 'A page of normalized Telegram messages.',
@@ -882,6 +1181,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                 example: {
                   data: {
                     items: [{
+                      canonicalId: '11111111-1111-4111-8111-111111111111',
                       id: '-1001234567890:42',
                       externalId: '-1001234567890:42',
                       platform: 'telegram',
@@ -901,6 +1201,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                       collectedAt: '2026-08-09T08:01:00.000Z',
                       editedAt: null,
                       lineage: { datasetId: 'telegram.monitor.messages.v1', origin: 'hub-direct' },
+                      sourceScope: 'monitor',
                       dataVersion: '2',
                     }],
                     pageInfo: { returnedCount: 1, hasMore: false, nextCursor: null },
@@ -919,7 +1220,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Telegram'],
         operationId: 'searchTelegram',
         summary: 'Advanced search across canonical Telegram messages and chats',
-        description: 'Requires the telegram grant. Ranked full-text search uses the governed search projection and a documented PostgreSQL fallback. The version-3 opaque cursor is bound to the query, filters and bounded first-page analysis state, so later pages do not call the segmenter again. HanLP degradation applies raw phrase and reports search_profile_degraded.',
+        description: 'Requires the telegram grant. sourceScope defaults to monitor for compatibility; set all to search both Monitor and SQLite-import conversations. Omitting chatId searches the selected corpus globally, while a chatId/chatKey limits the query to one conversation. Ranked full-text search uses the governed search projection and a documented PostgreSQL fallback. The version-3 opaque cursor is bound to the query, sourceScope, filters and bounded first-page analysis state, so later pages do not call the segmenter again.',
         parameters: [idempotencyParameter],
         requestBody: {
           required: true,
@@ -931,6 +1232,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                 scope: 'messages',
                 chatId: '-1001234567890',
                 from: '2026-08-01T00:00:00Z',
+                sourceScope: 'all',
                 matchMode: 'full_text',
                 pageSize: 20,
               },
@@ -1164,6 +1466,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           authorId: { type: 'string', minLength: 1, maxLength: 256 },
           from: { type: 'string', format: 'date-time' },
           to: { type: 'string', format: 'date-time' },
+          sourceScope: { type: 'string', enum: ['all', 'monitor', 'sqlite'], default: 'monitor' },
           matchMode: { type: 'string', enum: ['full_text'], default: 'full_text' },
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed version-3 cursor bound to query, filters and bounded first-page analysis state; return unchanged.' },
@@ -1182,6 +1485,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         type: 'object',
         required: ['id', 'externalId', 'platform', 'text'],
         properties: {
+          canonicalId: { type: ['string', 'null'], format: 'uuid', description: 'Present for Hub canonical Telegram search hits.' },
+          sourceScope: { type: ['string', 'null'], enum: ['monitor', 'sqlite', null], description: 'Stored Telegram source for a canonical hit.' },
           id: { type: 'string' }, externalId: { type: 'string' }, platform: { type: 'string' },
           contentType: { type: ['string', 'null'] }, url: { type: ['string', 'null'] },
           title: { type: ['string', 'null'] }, text: { type: ['string', 'null'] },
@@ -1195,18 +1500,43 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       },
       SearchEnvelope: {
         type: 'object',
+        additionalProperties: false,
         required: ['data', 'requestId'],
         properties: {
           data: {
             type: 'object',
+            additionalProperties: false,
             required: ['contractVersion', 'platform', 'query', 'items', 'pageInfo', 'status', 'warnings', 'meta'],
             properties: {
-              contractVersion: { type: 'string', example: 'night-all.data-search.v1' },
+              contractVersion: { type: 'string', const: 'night-all.data-search.v1' },
               platform: { type: 'string' }, query: { type: 'string' },
               items: { type: 'array', items: { $ref: '#/components/schemas/SearchItem' } },
-              pageInfo: { $ref: '#/components/schemas/PageInfo' },
-              status: { type: 'string' }, warnings: { type: 'array', items: { type: 'string' } },
-              meta: { type: 'object', additionalProperties: true },
+              pageInfo: {
+                type: 'object', additionalProperties: false,
+                required: ['pageIndex', 'pageSize', 'returnedCount', 'hasMore', 'nextCursor', 'cursorType'],
+                properties: {
+                  pageIndex: { type: 'integer', minimum: 1 }, pageSize: { type: 'integer', minimum: 0, maximum: 100 },
+                  returnedCount: { type: 'integer', minimum: 0, maximum: 100 }, hasMore: { type: 'boolean' },
+                  nextCursor: { type: ['string', 'null'], maxLength: 8192 },
+                  cursorType: { type: 'string', enum: ['opaque', 'none'] },
+                },
+              },
+              status: { type: 'string', enum: ['ok', 'partial', 'failed'] },
+              warnings: {
+                type: 'array', items: {
+                  type: 'object', additionalProperties: false, required: ['code', 'message'],
+                  properties: { code: { type: 'string' }, message: { type: 'string' } },
+                },
+              },
+              meta: {
+                type: 'object', additionalProperties: false,
+                required: ['capability', 'capabilityStatus', 'paginationMode', 'sourceProvider', 'endpointId', 'providerCalls', 'durationMs'],
+                properties: {
+                  capability: { type: 'string' }, capabilityStatus: { type: 'string' }, paginationMode: { type: 'string' },
+                  sourceProvider: { type: ['string', 'null'] }, endpointId: { type: ['string', 'null'] },
+                  providerCalls: { type: 'integer', minimum: 0 }, durationMs: { type: 'integer', minimum: 0 },
+                },
+              },
             },
           },
           requestId: { type: 'string' },
@@ -1492,6 +1822,154 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             },
           },
           requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      SourceCatalogEntry: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'id', 'sourceKey', 'legacySequence', 'canonicalName', 'aliases', 'sourceKind',
+          'parentSourceId', 'majorCategory', 'scenarios', 'regions', 'entryModules',
+          'monitorableContent', 'extractableClues', 'trackingFields', 'suggestedAccess',
+          'complianceBoundary', 'priority', 'coverageStatus', 'deliveryStatus',
+          'reviewStatus', 'runtimeStatus', 'ownerId', 'owner', 'connectorHints', 'tags', 'notes',
+          'redactedFields',
+        ],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          sourceKey: { type: 'string', minLength: 1, maxLength: 128 },
+          legacySequence: { type: ['integer', 'null'], minimum: 1 },
+          canonicalName: { type: 'string', minLength: 1, maxLength: 160 },
+          aliases: { type: 'array', items: { type: 'string' } },
+          sourceKind: { type: 'string', enum: ['platform', 'platform_module', 'source_class', 'registry', 'provider', 'dataset', 'other'] },
+          parentSourceId: { type: ['string', 'null'], format: 'uuid' },
+          majorCategory: { type: 'string' },
+          scenarios: { type: 'array', items: { type: 'string' } },
+          regions: { type: 'array', items: { type: 'string' } },
+          entryModules: { type: 'array', items: { type: 'string' } },
+          monitorableContent: { type: 'array', items: { type: 'string' } },
+          extractableClues: { type: 'array', items: { type: 'string' } },
+          trackingFields: { type: 'array', items: { type: 'string' } },
+          suggestedAccess: { type: 'array', items: { type: 'string' } },
+          complianceBoundary: { type: ['string', 'null'] },
+          priority: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3'] },
+          coverageStatus: { type: 'string', enum: ['unknown', 'not_covered', 'partial', 'covered'] },
+          deliveryStatus: { type: 'string', enum: ['exploring', 'planned', 'doing', 'blocked', 'complete', 'paused', 'retired'] },
+          reviewStatus: { type: 'string', enum: ['needs_review', 'verified', 'rejected'] },
+          runtimeStatus: { type: 'string', enum: ['not_configured', 'unknown', 'healthy', 'degraded', 'failed'] },
+          ownerId: { type: ['string', 'null'], format: 'uuid' },
+          owner: { type: ['string', 'null'] },
+          connectorHints: { type: 'array', items: { type: 'string' } },
+          tags: { type: 'array', items: { type: 'string' } },
+          notes: { type: ['string', 'null'] },
+          redactedFields: { type: 'array', uniqueItems: true, items: { type: 'string' } },
+        },
+      },
+      SourceCatalogFilters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['query', 'sourceKind', 'majorCategory', 'scenario', 'region', 'coverageStatus', 'deliveryStatus', 'reviewStatus', 'runtimeStatus', 'priority', 'ownerId', 'tag'],
+        properties: Object.fromEntries(sourceCatalogQueryParameters
+          .filter(({ name }) => !['pageSize', 'cursor'].includes(name))
+          .map(({ name, schema }) => [name, {
+            ...schema,
+            type: schema.type === 'string' ? ['string', 'null'] : schema.type,
+            ...(schema.enum ? { enum: [...schema.enum, null] } : {}),
+          }])),
+      },
+      SourceCatalogPageInfo: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['returnedCount', 'totalCount', 'hasMore', 'nextCursor'],
+        properties: {
+          returnedCount: { type: 'integer', minimum: 0, maximum: 100 },
+          totalCount: { type: 'integer', minimum: 0 },
+          hasMore: { type: 'boolean' },
+          nextCursor: { type: ['string', 'null'], maxLength: 4096 },
+        },
+      },
+      SourceCatalogPageEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object', additionalProperties: false,
+            required: ['contractVersion', 'items', 'filters', 'pageInfo'],
+            properties: {
+              contractVersion: { type: 'string', const: 'source-catalog.public.v1' },
+              items: { type: 'array', maxItems: 100, items: { $ref: '#/components/schemas/SourceCatalogEntry' } },
+              filters: { $ref: '#/components/schemas/SourceCatalogFilters' },
+              pageInfo: { $ref: '#/components/schemas/SourceCatalogPageInfo' },
+            },
+          },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      SourceCatalogMetadataEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object', additionalProperties: false,
+            required: ['contractVersion', 'fields', 'enums', 'summary', 'facets', 'taxonomy', 'owners'],
+            properties: {
+              contractVersion: { type: 'string', const: 'source-catalog.public.v1' },
+              fields: {
+                type: 'array',
+                items: {
+                  type: 'object', additionalProperties: false,
+                  required: ['key', 'label', 'type'],
+                  properties: {
+                    key: { type: 'string' }, label: { type: 'string' }, type: { type: 'string' },
+                    enum: { type: 'string' }, taxonomyKind: { type: 'string', enum: ['major_category', 'scenario', 'region', 'tag'] },
+                  },
+                },
+              },
+              enums: {
+                type: 'object', additionalProperties: false,
+                required: ['sourceKinds', 'coverageStatuses', 'deliveryStatuses', 'reviewStatuses', 'runtimeStatuses', 'priorities', 'taxonomyKinds'],
+                properties: {
+                  sourceKinds: { type: 'array', items: { type: 'string', enum: ['platform', 'platform_module', 'source_class', 'registry', 'provider', 'dataset', 'other'] } },
+                  coverageStatuses: { type: 'array', items: { type: 'string', enum: ['unknown', 'not_covered', 'partial', 'covered'] } },
+                  deliveryStatuses: { type: 'array', items: { type: 'string', enum: ['exploring', 'planned', 'doing', 'blocked', 'complete', 'paused', 'retired'] } },
+                  reviewStatuses: { type: 'array', items: { type: 'string', enum: ['needs_review', 'verified', 'rejected'] } },
+                  runtimeStatuses: { type: 'array', items: { type: 'string', enum: ['not_configured', 'unknown', 'healthy', 'degraded', 'failed'] } },
+                  priorities: { type: 'array', items: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3'] } },
+                  taxonomyKinds: { type: 'array', items: { type: 'string', enum: ['major_category', 'scenario', 'region', 'tag'] } },
+                },
+              },
+              summary: { type: 'object', additionalProperties: true },
+              facets: { type: 'object', additionalProperties: true },
+              taxonomy: {
+                type: 'array', items: {
+                  type: 'object', additionalProperties: false,
+                  required: ['id', 'termKey', 'kind', 'displayName', 'description', 'color', 'sortOrder', 'usageCount'],
+                  properties: {
+                    id: { type: 'string', format: 'uuid' }, termKey: { type: 'string' },
+                    kind: { type: 'string', enum: ['major_category', 'scenario', 'region', 'tag'] },
+                    displayName: { type: 'string' }, description: { type: ['string', 'null'] },
+                    color: { type: ['string', 'null'] }, sortOrder: { type: 'integer' },
+                    usageCount: { type: 'integer', minimum: 0 },
+                    redactedFields: { type: 'array', uniqueItems: true, items: { type: 'string' } },
+                  },
+                },
+              },
+              owners: {
+                type: 'array', items: {
+                  type: 'object', additionalProperties: false,
+                  required: ['id', 'displayName', 'description', 'usageCount'],
+                  properties: {
+                    id: { type: 'string', format: 'uuid' }, displayName: { type: 'string' },
+                    description: { type: ['string', 'null'] }, usageCount: { type: 'integer', minimum: 0 },
+                    redactedFields: { type: 'array', uniqueItems: true, items: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+          requestId: { type: 'string', minLength: 1 },
         },
       },
       PublicOpinionProvince: {
@@ -1800,10 +2278,171 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           requestId: { type: 'string', minLength: 1 },
         },
       },
+      PublicOpinionDiagnosticsSourceScope: {
+        type: 'object', additionalProperties: false,
+        required: ['mode', 'datasets'],
+        properties: {
+          mode: { type: 'string', const: 'canonical' },
+          datasets: { type: 'array', const: ['public-opinion.province.v1'] },
+        },
+      },
+      PublicOpinionDiagnosticsWindow: {
+        type: 'object', additionalProperties: false,
+        required: ['from', 'to'],
+        properties: {
+          from: { type: 'string', format: 'date-time' },
+          to: { type: 'string', format: 'date-time' },
+        },
+      },
+      PublicOpinionDiagnosticsCounts: {
+        type: 'object',
+        additionalProperties: { type: 'integer', minimum: 0 },
+      },
+      PublicOpinionDiagnosticsFunnelEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object', additionalProperties: false,
+            required: ['contractVersion', 'sourceScope', 'window', 'canonical', 'publication', 'time', 'geography', 'heat', 'visibility', 'reasons'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.public-opinion-funnel.v1' },
+              sourceScope: { $ref: '#/components/schemas/PublicOpinionDiagnosticsSourceScope' },
+              window: { $ref: '#/components/schemas/PublicOpinionDiagnosticsWindow' },
+              canonical: { $ref: '#/components/schemas/PublicOpinionDiagnosticsCounts' },
+              publication: {
+                type: 'object', additionalProperties: false,
+                required: ['withState', 'missingState', 'stages', 'statuses'],
+                properties: {
+                  withState: { type: 'integer', minimum: 0 },
+                  missingState: { type: 'integer', minimum: 0 },
+                  stages: { $ref: '#/components/schemas/PublicOpinionDiagnosticsCounts' },
+                  statuses: { $ref: '#/components/schemas/PublicOpinionDiagnosticsCounts' },
+                },
+              },
+              time: { $ref: '#/components/schemas/PublicOpinionDiagnosticsCounts' },
+              geography: {
+                type: 'object', additionalProperties: false,
+                required: ['withProvince', 'withoutProvince', 'scopes'],
+                properties: {
+                  withProvince: { type: 'integer', minimum: 0 },
+                  withoutProvince: { type: 'integer', minimum: 0 },
+                  scopes: { $ref: '#/components/schemas/PublicOpinionDiagnosticsCounts' },
+                },
+              },
+              heat: { $ref: '#/components/schemas/PublicOpinionDiagnosticsCounts' },
+              visibility: { $ref: '#/components/schemas/PublicOpinionDiagnosticsCounts' },
+              reasons: { $ref: '#/components/schemas/PublicOpinionDiagnosticsCounts' },
+            },
+          },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      PublicOpinionDiagnosticRecordFields: {
+        type: 'object',
+        required: ['id', 'title', 'summary', 'url', 'contentType', 'authorName', 'eventTime', 'collectedAt', 'heatScore', 'sourceStage', 'publicationStatus', 'qualityScore', 'qualificationThreshold', 'provinceCode', 'geography', 'source', 'qualityFlags', 'rejectionCodes', 'diagnostics'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          title: { type: ['string', 'null'] },
+          summary: { type: ['string', 'null'] },
+          url: { type: ['string', 'null'], format: 'uri' },
+          contentType: { type: ['string', 'null'] },
+          authorName: { type: ['string', 'null'] },
+          eventTime: { type: ['string', 'null'], format: 'date-time' },
+          collectedAt: { type: ['string', 'null'], format: 'date-time' },
+          heatScore: { type: ['number', 'null'] },
+          sourceStage: { type: ['string', 'null'] },
+          publicationStatus: { type: ['string', 'null'] },
+          qualityScore: { type: ['number', 'null'] },
+          qualificationThreshold: { type: ['number', 'null'] },
+          provinceCode: { type: ['string', 'null'] },
+          geography: {
+            type: 'object', additionalProperties: false,
+            required: ['verified', 'scope', 'countryCode', 'countryName', 'locationLabel', 'locationType'],
+            properties: {
+              verified: { type: 'boolean' }, scope: { type: ['string', 'null'] },
+              countryCode: { type: ['string', 'null'] }, countryName: { type: ['string', 'null'] },
+              locationLabel: { type: ['string', 'null'] }, locationType: { type: ['string', 'null'] },
+            },
+          },
+          source: {
+            type: 'object', additionalProperties: false,
+            required: ['type', 'platform'],
+            properties: { type: { type: ['string', 'null'] }, platform: { type: ['string', 'null'] } },
+          },
+          qualityFlags: { type: 'array', maxItems: 100, items: { type: 'string' } },
+          rejectionCodes: { type: 'array', maxItems: 100, items: { type: 'string' } },
+          diagnostics: {
+            type: 'object', additionalProperties: false,
+            required: ['hasPublicationState', 'coverageVisible', 'hotVisible', 'reasons'],
+            properties: {
+              hasPublicationState: { type: 'boolean' }, coverageVisible: { type: 'boolean' }, hotVisible: { type: 'boolean' },
+              reasons: { type: 'array', items: { type: 'string', enum: ['missing_publication_state', 'not_formal_stage', 'not_formal_status', 'missing_event_time', 'outside_window', 'missing_province', 'missing_heat'] } },
+            },
+          },
+        },
+      },
+      PublicOpinionDiagnosticRecord: {
+        allOf: [{ $ref: '#/components/schemas/PublicOpinionDiagnosticRecordFields' }],
+        unevaluatedProperties: false,
+      },
+      PublicOpinionDiagnosticRecordDetail: {
+        allOf: [
+          { $ref: '#/components/schemas/PublicOpinionDiagnosticRecordFields' },
+          {
+            type: 'object',
+            required: ['contractVersion', 'sourceScope', 'window'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.public-opinion-record.v1' },
+              sourceScope: { $ref: '#/components/schemas/PublicOpinionDiagnosticsSourceScope' },
+              window: { $ref: '#/components/schemas/PublicOpinionDiagnosticsWindow' },
+            },
+          },
+        ],
+        unevaluatedProperties: false,
+      },
+      PublicOpinionDiagnosticsPageInfo: {
+        type: 'object', additionalProperties: false,
+        required: ['returnedCount', 'hasMore', 'nextCursor'],
+        properties: {
+          returnedCount: { type: 'integer', minimum: 0, maximum: 100 },
+          hasMore: { type: 'boolean' },
+          nextCursor: { type: ['string', 'null'], maxLength: 2048 },
+        },
+      },
+      PublicOpinionDiagnosticsRecordsEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object', additionalProperties: false,
+            required: ['contractVersion', 'sourceScope', 'window', 'filters', 'items', 'pageInfo'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.public-opinion-records.v1' },
+              sourceScope: { $ref: '#/components/schemas/PublicOpinionDiagnosticsSourceScope' },
+              window: { $ref: '#/components/schemas/PublicOpinionDiagnosticsWindow' },
+              filters: { type: 'object', additionalProperties: false, required: ['query', 'reason', 'stage', 'status', 'province', 'scope', 'time', 'heat'], properties: Object.fromEntries(publicOpinionDiagnosticsRecordParameters.filter(({ name }) => !['from', 'to', 'pageSize', 'cursor'].includes(name)).map(({ name, schema }) => [name, { ...schema, ...(name === 'query' ? { type: ['string', 'null'] } : {}) }])) },
+              items: { type: 'array', maxItems: 100, items: { $ref: '#/components/schemas/PublicOpinionDiagnosticRecord' } },
+              pageInfo: { $ref: '#/components/schemas/PublicOpinionDiagnosticsPageInfo' },
+            },
+          },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      PublicOpinionDiagnosticsRecordEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: { $ref: '#/components/schemas/PublicOpinionDiagnosticRecordDetail' },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
       TelegramRecord: {
         type: 'object',
-        required: ['id', 'externalId', 'platform', 'objectType', 'lineage', 'dataVersion'],
+        additionalProperties: false,
+        required: ['canonicalId', 'id', 'externalId', 'platform', 'objectType', 'contentType', 'title', 'text', 'url', 'author', 'relations', 'attributes', 'metrics', 'media', 'entities', 'links', 'eventTime', 'collectedAt', 'editedAt', 'lineage', 'sourceScope', 'dataVersion'],
         properties: {
+          canonicalId: { type: ['string', 'null'], format: 'uuid' },
           id: { type: 'string' }, externalId: { type: 'string' }, platform: { type: 'string', const: 'telegram' },
           objectType: { type: 'string', enum: ['chat', 'message'] }, contentType: { type: ['string', 'null'] },
           title: { type: ['string', 'null'] }, text: { type: ['string', 'null'] }, url: { type: ['string', 'null'] },
@@ -1813,18 +2452,42 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           entities: { type: 'array', items: { type: 'object', additionalProperties: true } },
           links: { type: 'array', items: {} }, eventTime: { type: ['string', 'null'], format: 'date-time' },
           collectedAt: { type: ['string', 'null'], format: 'date-time' }, editedAt: { type: ['string', 'null'], format: 'date-time' },
-          lineage: { type: 'object', required: ['datasetId', 'origin'], properties: { datasetId: { type: 'string' }, origin: { type: 'string' } } },
+          lineage: { type: 'object', additionalProperties: false, required: ['datasetId', 'origin'], properties: { datasetId: { type: 'string', enum: ['telegram.monitor.chats.v1', 'telegram.monitor.messages.v1', 'telegram.sqlite.chats.v1', 'telegram.sqlite.messages.v1'] }, origin: { type: 'string', enum: ['hub-direct', 'hub-import'] } } },
+          sourceScope: { type: ['string', 'null'], enum: ['monitor', 'sqlite', null] },
+          chatKey: { type: 'string', description: 'Present for chat records; use as chatId to select the exact stored source.' },
+          kind: { type: 'string', enum: ['channel', 'group', 'unknown'], description: 'Present for chat records.' },
           dataVersion: { type: 'string' },
         },
       },
       TelegramPageEnvelope: {
         type: 'object',
+        additionalProperties: false,
         required: ['data', 'requestId'],
         properties: {
           data: {
             type: 'object',
-            required: ['items', 'pageInfo'],
+            additionalProperties: false,
+            required: ['contractVersion', 'sourceScope', 'filters', 'items', 'pageInfo'],
             properties: {
+              contractVersion: { type: 'string', enum: ['mx-insight-hub.data-products.telegram-chats.v1', 'mx-insight-hub.data-products.telegram-messages.v1'] },
+              sourceScope: {
+                type: 'object', additionalProperties: false,
+                required: ['selected', 'datasets'],
+                properties: {
+                  selected: { type: 'string', enum: ['all', 'monitor', 'sqlite'] },
+                  datasets: { type: 'array', minItems: 1, maxItems: 2, items: { type: 'string', enum: ['telegram.monitor.chats.v1', 'telegram.monitor.messages.v1', 'telegram.sqlite.chats.v1', 'telegram.sqlite.messages.v1'] } },
+                },
+              },
+              filters: {
+                type: 'object', additionalProperties: false,
+                properties: {
+                  kind: { type: 'string', enum: ['all', 'channel', 'group', 'unknown'] },
+                  query: { type: ['string', 'null'] }, chatId: { type: ['string', 'null'] },
+                  from: { type: ['string', 'null'], format: 'date-time' },
+                  to: { type: ['string', 'null'], format: 'date-time' },
+                },
+              },
+              chat: { $ref: '#/components/schemas/TelegramRecord' },
               items: { type: 'array', items: { $ref: '#/components/schemas/TelegramRecord' } },
               pageInfo: { $ref: '#/components/schemas/PageInfo' },
             },
@@ -1904,7 +2567,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   properties: {
                     capability: {
                       type: 'string',
-                      enum: ['nlp.tokenize', 'public_opinion.all_ingested.read'],
+                      enum: ['nlp.tokenize', 'public_opinion.all_ingested.read', 'public_opinion.diagnostics.read'],
                     },
                     ready: { type: 'boolean' },
                   },
@@ -2012,17 +2675,34 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   },
 }
 
-export const PUBLIC_DOCS_HTML = `<!doctype html>
+export const PUBLIC_DOCS_ROUTES = Object.freeze([
+  { key: 'start', path: '/docs', label: '开始调用' },
+  { key: 'rules', path: '/docs/auth', label: '认证与调用规则' },
+  { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录' },
+  { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话' },
+  { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情' },
+  { key: 'search', path: '/docs/search', label: '通用搜索' },
+  { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层' },
+  { key: 'tools', path: '/docs/tools', label: '通用工具' },
+  { key: 'discovery', path: '/docs/evidence', label: '能力与证据' },
+  { key: 'errors', path: '/docs/errors', label: '错误与重试' },
+])
+
+const PUBLIC_DOCS_ROUTE_ALIASES = Object.freeze({
+  '/docs/authentication': '/docs/auth',
+  '/docs/operations': '/docs/evidence',
+})
+
+const PUBLIC_DOCS_TEMPLATE = `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="MX Insight Hub Open API 文档">
-  <title>MX Insight Hub · Open API</title>
+  <title>__PUBLIC_DOCS_TITLE__ · MX Insight Hub Open API</title>
   <style>
     :root { color-scheme: dark; --bg:#070b12; --panel:#101824; --line:#26364b; --text:#e9f2fb; --muted:#91a4b8; --cyan:#2de4d0; --blue:#5597ff; --amber:#f3c85a; }
     * { box-sizing:border-box; }
-    html { scroll-behavior:smooth; }
     body { margin:0; background:radial-gradient(circle at 75% 0,#102338 0,transparent 34rem),var(--bg); color:var(--text); font:15px/1.7 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
     a { color:var(--cyan); text-decoration:none; }
     a:hover { text-decoration:underline; }
@@ -2034,7 +2714,9 @@ export const PUBLIC_DOCS_HTML = `<!doctype html>
     .brand span,.eyebrow,.muted { color:var(--muted); }
     nav a { display:block; padding:7px 10px; border-left:2px solid transparent; color:var(--muted); }
     nav a:hover { border-color:var(--cyan); color:var(--text); text-decoration:none; background:#11202d; }
+    nav a.active { border-color:var(--cyan); color:var(--cyan); background:#112b31; }
     main { width:min(1120px,100%); padding:54px clamp(24px,5vw,72px) 90px; }
+    .doc-page > :first-child { margin-top:0; }
     .eyebrow { text-transform:uppercase; letter-spacing:.18em; color:var(--cyan); font-size:12px; font-weight:700; }
     h1 { margin:.2em 0; font-size:clamp(34px,5vw,58px); line-height:1.08; }
     h2 { margin:62px 0 18px; font-size:27px; }
@@ -2066,16 +2748,19 @@ export const PUBLIC_DOCS_HTML = `<!doctype html>
   <aside>
     <div class="brand"><div class="mark">MX</div><div><strong>MX Insight Hub</strong><span>Open API</span></div></div>
     <nav aria-label="文档目录">
-      <a href="#start">开始调用</a><a href="#rules">认证与调用规则</a><a href="#search">通用搜索</a>
-      <a href="#public-opinion">省级舆情</a><a href="#night-all">Night-All 兼容层</a><a href="#tools">通用工具</a><a href="#telegram">Telegram</a><a href="#discovery">能力与证据</a><a href="#errors">错误与重试</a>
+      __PUBLIC_DOCS_NAV__
       <a href="/docs/openapi.json">OpenAPI JSON ↗</a>
     </nav>
   </aside>
   <main>
+    <section class="doc-page" data-doc-page="start">
     <header id="start"><div class="eyebrow">Consumer contract · API v1</div><h1>统一数据访问，<br>由授权边界控制。</h1>
       <p class="lead">通过一个调用者 API Key 访问已授权平台与通用能力。Telegram 与省级舆情数据由 Hub 的规范化数据层提供，通用搜索和分词工具保持稳定响应结构。</p></header>
     <div class="cards"><div class="card"><strong>Base path</strong><code>/api/v1</code></div><div class="card"><strong>Authentication</strong>Bearer API Key 或 <code>x-api-key</code></div><div class="card"><strong>Machine contract</strong><a href="/docs/openapi.json">OpenAPI 3.1 JSON</a></div></div>
+    <script>${PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT}</script>
+    </section>
 
+    <section class="doc-page" data-doc-page="rules">
     <h2 id="rules">认证与调用规则</h2>
     <h3>认证及显式授权</h3>
     <p>每个请求必须携带已签发的调用者 API Key。建议使用 Bearer；不要把 Key 放进 URL、日志或前端代码。Key 只能调用后台为其调用者显式启用的平台或通用 capability；先调用 capabilities 确认授权与 Hub dispatch eligibility。</p>
@@ -2094,7 +2779,22 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
       <tr><td>GET 历史/上下文/实体/舆情</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>
       <tr><td>页大小</td><td>同时受接口上限与该调用者平台策略约束；超限返回 <code>page_size_exceeded</code>。</td></tr>
     </tbody></table>
+    </section>
 
+    <section class="doc-page" data-doc-page="source-catalog">
+    <h2 id="source-catalog">数据源目录</h2>
+    <div class="notice">数据源目录是 Hub 对外的已治理业务视图。调用者必须使用 API Key 并显式获得 <code>source_catalog</code> platform grant；不使用 admin token，也不开放管理面的增删改。每次 GET 都按该平台策略计量，不需要 <code>Idempotency-Key</code>。</div>
+    <p>公开投影保留还原目录和对外汇报所需的经治理字段，包括平台、大类、细分场景、区域、覆盖状态、实施阶段、字段审核、运行状态、优先级、负责人、标签、备注与接入线索。不返回 <code>evidenceRefs</code>、<code>customFields</code>、<code>importedFrom</code>、事件历史、关联数据、登录账号绑定、连接信息或凭据。</p>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog</code></div><p>分页返回 active 目录条目。支持 <code>query</code>、<code>sourceKind</code>、<code>majorCategory</code>、<code>scenario</code>、<code>region</code>、<code>coverageStatus</code>、<code>deliveryStatus</code>、<code>reviewStatus</code>、<code>runtimeStatus</code>、<code>priority</code>、<code>ownerId</code> 和 <code>tag</code> 组合过滤。普通业务备注会保留；误粘的 DSN、带凭据 URL、私网连接、API key、token 或敏感口令会在搜索/facet 前按字段移除，<code>redactedFields</code> 说明受影响字段。响应契约是 <code>source-catalog.public.v1</code>，分页信息同时包含 <code>totalCount</code> 和不透明 <code>nextCursor</code>。游标是 HMAC 签名的 keyset，与全部过滤条件及 <code>pageSize</code> 绑定；修改条件后必须从首页开始，否则返回 <code>400 invalid_cursor</code>。</p></div>
+    <pre><code>curl -sS -G "$HUB_URL/api/v1/data/source-catalog" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'coverageStatus=covered' \
+  --data-urlencode 'deliveryStatus=doing' \
+  --data-urlencode 'pageSize=50' | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog/metadata</code></div><p>返回公开字段定义与枚举、当前 active taxonomy、负责人公开投影、全局 summary 与 facets，供外部系统还原 Hub 的筛选器、统计和状态看板。</p></div>
+    </section>
+
+    <section class="doc-page" data-doc-page="search">
     <h2 id="search">通用搜索</h2>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/search</code></div><p>在一个请求中选择一个已授权平台。<code>platform=telegram</code> 使用 Hub 已清洗数据。</p></div>
     <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/search" \\
@@ -2147,7 +2847,9 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
     <pre><code>ANCHOR_ID="&lt;canonical-search-item-id&gt;"
 curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;after=10" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
+    </section>
 
+    <section class="doc-page" data-doc-page="public-opinion">
     <h2 id="public-opinion">全国省级舆情</h2>
     <div class="notice">需要调用者显式获得 <code>public_opinion</code> 平台授权。能力发现中的该平台项来自 Hub stored 数据面，不属于 Night-All compatibility，也不改变既有 <code>POST /api/v1/data/search</code> 契约。</div>
     <p>先读取 <code>GET /api/v1/data/capabilities</code>。固定数据源处于 active，且两个 curated province-feed 索引都有效时，平台项的 <code>ready</code> 才为 <code>true</code>：</p>
@@ -2194,6 +2896,20 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
     <p>默认列表与详情继续只返回 <code>id</code>、标题、摘要、公开链接、发布时间、采集时间、规范省份、heatScore，以及经映射的公开来源名称/类型/平台。显式候选模式额外返回 Hub 自有的 <code>quality</code>，以及有证据时的规范 <code>location</code>；候选来源三元组保持为空，避免把搜索引擎或上游 Provider 身份当作发布方公开。上游原始行、凭据与内部操作坐标，策略与运行 ID、源表坐标、extensions、模型理由和内部 lineage 均不会进入公开响应。原始 heatScore 仅用于同一省级语料的热门排序，不表示跨来源的全局相关度。</p>
 
+    <h3>漏斗与未展示记录诊断</h3>
+    <div class="notice">诊断面仍需要 <code>public_opinion</code> platform grant，并额外要求 step-up capability <code>public_opinion.diagnostics.read</code>。它使用 API Key 的独立 capability 策略与计量配额，不接受 admin token。Admin 的操作、原始投影、extensions、connection 信息和模型 reasoning 不对外。</div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/public-opinion/funnel?from=...&amp;to=...</code></div><p>在给定时间窗返回从 active current 数据到发布状态、formal 阶段/状态、事件时间、时间窗、省份归属与热度分的可解释漏斗，契约版本为 <code>mx-insight-hub.data-products.public-opinion-funnel.v1</code>。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/public-opinion/records</code></div><p>分页查看漏斗各阶段和未展示记录。支持 <code>from</code>、<code>to</code>、<code>reason</code>、<code>scope</code>、<code>stage</code>、<code>status</code>、<code>province</code>、<code>time</code>、<code>heat</code>、<code>query</code>、<code>pageSize</code> 和不透明 <code>cursor</code>。<code>reason</code> 可用于查看 <code>missing_province</code>、<code>missing_publication_state</code>、<code>not_formal_stage</code>、<code>not_formal_status</code>、<code>missing_event_time</code>、<code>outside_window</code> 或 <code>missing_heat</code> 等原因。</p></div>
+    <pre><code>curl -sS -G "$HUB_URL/api/v1/data/public-opinion/records" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'reason=missing_province' \
+  --data-urlencode 'from=2026-08-24T00:00:00Z' \
+  --data-urlencode 'to=2026-08-25T23:59:59Z' \
+  --data-urlencode 'pageSize=50' | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/public-opinion/records/{id}?from=...&amp;to=...</code></div><p>读取一条诊断记录的安全详情与未展示原因。列表、详情与漏斗分别使用 <code>...public-opinion-records.v1</code>、<code>...public-opinion-record.v1</code> 和上述 funnel 契约。</p></div>
+    </section>
+
+    <section class="doc-page" data-doc-page="night-all">
     <h2 id="night-all">Night-All 兼容层</h2>
     <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面三条 compatibility route；请使用本页 Telegram 专用 Hub API。</div>
     <p>每次调用前读取 <code>GET /api/v1/data/capabilities</code>。<code>data.legacySearch</code> 是由当前 Hub 发布版本固定（<code>Hub-pinned</code>）、再按 consumer grants 过滤的 operation dispatch 矩阵，contractVersion 固定为 <code>night-all.legacy-search-capabilities.v1</code>。它不会在请求时从 Night-All 的 capability 接口实时发现。只有平台同时出现在相应 operation 的 <code>supportedPlatforms</code> 和 <code>readyPlatforms</code> 中，Hub 才会 dispatch；这里的 <code>readyPlatforms</code> 仅表示 Hub 在固定契约下允许 dispatch，不证明 Night-All 当前 handler、endpoint、provider、credential 或上游健康。没有可用于 Night-All compatibility 的 platform grant 时该字段为 <code>null</code>，三条兼容路由全部 fail closed。</p>
@@ -2229,7 +2945,9 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
       <tr><td><code>503 compatibility_store_unavailable</code></td><td>fallback 所需的 Hub compatibility store 暂不可用。</td></tr>
       <tr><td><code>400/404/409/422/429 night_all_rejected</code></td><td>Night-All 明确拒绝；Hub 保留这些可安全转发的 HTTP 状态。其他明确拒绝映射为 502。</td></tr>
     </tbody></table>
+    </section>
 
+    <section class="doc-page" data-doc-page="tools">
     <h2 id="tools">通用工具</h2>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/tools/tokenize</code></div><p>新建或从未配置的调用者默认获得 <code>nlp.tokenize</code>，管理员可显式停用；调用仍必须携带已签发的 API Key。默认按 consumer + capability 的 3600 秒滚动窗口限制 1000 次，同一调用者的所有 Key 共享上限。它不授予数据平台权限，响应会报告实际分词后端及降级状态。</p></div>
     <pre><code>curl -sS -X POST "$HUB_URL/api/v1/tools/tokenize" \
@@ -2247,27 +2965,32 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
   },
   "requestId": "00000000-0000-4000-8000-000000000004"
 }</code></pre>
+    </section>
 
-    <h2 id="telegram">Telegram 数据</h2>
+    <section class="doc-page" data-doc-page="telegram">
+    <h2 id="telegram">Telegram 会话</h2>
     <div class="notice">授权 <code>telegram</code> 后，调用者读取的是同一份 Hub 全量规范化语料；当前没有按租户划分不同的 Telegram 行级数据子集。租户隔离作用于 API Key 所有权、平台授权、策略、配额和用量证据。</div>
+    <div class="notice">现有路径没有改名：省略扩展字段时，<code>chats</code>、<code>messages</code> 和 Telegram 专用 <code>search</code> 仍严格使用 Monitor-only 旧合同与旧 cursor binding。显式传 <code>sourceScope=all|sqlite|monitor</code> 才启用来源感知的扩展合同；要还原 Hub Admin 的 Monitor + SQLite 合并视图请传 <code>all</code>。Night-All 的 <code>raw/crawl/user-info</code> 转接路径、默认和响应保持不变。</div>
+    <div class="notice">扩展会话模式使用不可变的 <code>effectiveSortTime</code> 排序键：优先业务事件时间，其次采集时间，最后首次入库时间；响应中的 <code>eventTime</code>/<code>collectedAt</code> 仍保留真实可空值。省略扩展参数的 Monitor 旧模式排序与 cursor 语义保持不变。</div>
     <table><thead><tr><th>调用目标</th><th>接口</th><th>实际数据范围</th></tr></thead><tbody>
       <tr><td>Monitor 消息历史</td><td><code>GET /data/telegram/messages</code></td><td><code>telegram.monitor.messages.v1</code></td></tr>
       <tr><td>Monitor 会话目录</td><td><code>GET /data/telegram/chats</code></td><td><code>telegram.monitor.chats.v1</code></td></tr>
       <tr><td>Monitor 高级检索</td><td><code>POST /data/telegram/search</code></td><td>固定的 <code>telegram.monitor.*</code></td></tr>
       <tr><td>Monitor + SQLite 统一检索</td><td><code>POST /data/canonical/search</code></td><td>授权范围内全部 Telegram canonical dataset</td></tr>
+      <tr><td>Monitor + SQLite 会话/消息还原</td><td><code>GET /data/telegram/chats|messages?sourceScope=all</code></td><td>相容响应中增加来源与 canonical 定位</td></tr>
       <tr><td>命中消息的前后文</td><td><code>GET /data/canonical/items/{id}/context</code></td><td>命中项所在 dataset + chat；默认前后各 10 条</td></tr>
       <tr><td>指定单个来源数据集</td><td><code>POST /data/stored/search</code></td><td>由 <code>datasetId</code> 精确收窄</td></tr>
     </tbody></table>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/messages</code></div><p>Monitor 消息历史；支持 <code>chatId</code>、<code>from</code>、<code>to</code>、<code>pageSize</code>、<code>cursor</code>。该兼容接口不会隐式混入 SQLite。</p></div>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/chats</code></div><p>会话目录，使用相同的时间和游标规则。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/messages</code></div><p>消息历史；支持 <code>sourceScope=all|monitor|sqlite</code>、<code>chatId</code>、<code>from</code>、<code>to</code>、<code>pageSize</code>、<code>cursor</code>。普通 external chatId 且省略 sourceScope 时保留 Monitor v1 cursor；显式来源或 <code>monitor:&lt;UUID&gt;</code>/<code>sqlite:&lt;UUID&gt;</code> chatKey 使用与来源、会话、时间窗和 pageSize 绑定的 HMAC v2 cursor。每条消息返回 <code>canonicalId</code> 和 <code>sourceScope</code>。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/chats</code></div><p>会话目录；支持 <code>sourceScope</code>、<code>query</code>、<code>kind=all|channel|group|unknown</code>、<code>pageSize</code> 和 <code>cursor</code>。省略 sourceScope/kind/query 保留旧 Monitor v1 cursor；显式任一扩展过滤使用 HMAC v2 cursor。响应的 <code>chatKey</code> 是稳定的来源感知会话选择键。</p></div>
     <pre><code>curl -sS "$HUB_URL/api/v1/data/telegram/messages?chatId=-1001234567890&amp;pageSize=20" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
-    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/telegram/search</code></div><p>高级全文检索；<code>scope</code> 可选 <code>messages</code>、<code>chats</code>、<code>all</code>，并可按 chat、author 和时间过滤。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/telegram/search</code></div><p>高级全文检索；<code>sourceScope</code> 可选 <code>all</code>、<code>monitor</code>、<code>sqlite</code>，省略时保留旧 Monitor-only v3 cursor binding，显式传值才将来源加入扩展 binding。<code>scope</code> 可选 <code>messages</code>、<code>chats</code>、<code>all</code>；省略 <code>chatId</code> 为全局搜索，传入时只搜当前会话。</p></div>
     <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/telegram/search" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: telegram-$(uuidgen)" \\
-  -d '{"query":"AI Agent","scope":"all","from":"2026-08-01T00:00:00Z","pageSize":20}' | jq</code></pre>
+  -d '{"query":"AI Agent","sourceScope":"all","scope":"all","from":"2026-08-01T00:00:00Z","pageSize":20}' | jq</code></pre>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/canonical/search</code></div><p>同时检索 Telegram monitor 与 SQLite 导入数据。省略 <code>datasetId</code> 是合并的关键；如果只要消息，可用 <code>objectType=message</code> 收窄。</p></div>
     <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/canonical/search" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
@@ -2280,12 +3003,16 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/entities/search?query=example&amp;pageSize=20</code></div><p>模糊匹配作者名称/用户名和会话标题/用户名。</p></div>
     <div class="notice">如果搜索响应包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底。Canonical 接口还会以 <code>search.appliedProfile=postgres.substring.v1</code> 和 <code>search_profile_degraded</code> 明示策略变化；Telegram/Stored 兼容响应只保留投影告警。若 Elasticsearch 仍在线但 HanLP 查询降级，三个接口都会返回 <code>search_profile_degraded</code>。已有 Elasticsearch 游标会签名并复用首屏分词状态，不会中途切换模式或重新分词。</div>
+    </section>
 
+    <section class="doc-page" data-doc-page="discovery">
     <h2 id="discovery">能力、请求状态与用量</h2>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 与 <code>public_opinion</code> 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它们不代表 Night-All compatibility。Telegram 的 <code>context.datasets</code> 是上下文支持清单，<code>context.ready</code> 是独立的服务索引门禁。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/requests/{requestId}</code></div><p>查询当前调用者拥有的持久请求记录。requestId 来自搜索响应头 <code>x-mx-insight-request-id</code>。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/usage?from=...&amp;to=...</code></div><p>读取当前调用者的请求、提交、释放、未知状态与计费单元汇总。</p></div>
+    </section>
 
+    <section class="doc-page" data-doc-page="errors">
     <h2 id="errors">错误与重试</h2>
     <table><thead><tr><th>HTTP</th><th>含义</th><th>建议</th></tr></thead><tbody>
       <tr><td>400</td><td>字段、游标、页大小或幂等 Key 不合法</td><td>修正请求，不原样盲重试</td></tr>
@@ -2296,8 +3023,42 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
       <tr><td>503</td><td>当前数据或搜索运行时不可用</td><td>安全 GET 可稍后重试；POST 复用原幂等 Key</td></tr>
     </tbody></table>
     <p>所有错误都返回稳定的 <code>error.code</code> 和用于排查的 <code>requestId</code>。</p>
+    </section>
     <footer>MX Insight Hub Open API v1 · <a href="/docs/openapi.json">下载 OpenAPI JSON</a></footer>
   </main>
 </div>
 </body>
 </html>`
+
+function normalizedDocsPath(pathname) {
+  if (typeof pathname !== 'string') return null
+  const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname
+  return normalized || '/'
+}
+
+function docsNavigation(activeKey) {
+  return PUBLIC_DOCS_ROUTES.map((route) => {
+    const active = route.key === activeKey
+    return `<a href="${route.path}"${active ? ' class="active" aria-current="page"' : ''}>${route.label}</a>`
+  }).join('')
+}
+
+export function publicDocsHtmlForPath(pathname) {
+  const normalized = normalizedDocsPath(pathname)
+  const route = PUBLIC_DOCS_ROUTES.find((candidate) => candidate.path === normalized)
+  if (!route) return null
+
+  return PUBLIC_DOCS_TEMPLATE
+    .replace('__PUBLIC_DOCS_TITLE__', route.label)
+    .replace('__PUBLIC_DOCS_NAV__', docsNavigation(route.key))
+    .replace(/\n\s*<section class="doc-page" data-doc-page="([^"]+)">[\s\S]*?<\/section>/g, (section, key) => (
+      key === route.key ? section : ''
+    ))
+}
+
+export function publicDocsRedirectForPath(pathname) {
+  const normalized = normalizedDocsPath(pathname)
+  return PUBLIC_DOCS_ROUTE_ALIASES[normalized] || null
+}
+
+export const PUBLIC_DOCS_HTML = publicDocsHtmlForPath('/docs')

@@ -159,8 +159,13 @@ Launcher 继续认证人员，Hub 用 federated principal + Hub-local role 授�
 saved view、export、日志和普通 Launcher session 只得到稳定引用、健康和
 `credentialConfigured`，不得得到 password、DSN、token、cookie 或 header。
 
-公共 API key 不能访问目录管理面。若后续需要 tenant-specific row scope，必须新增显式模型和
-migration，不从 Launcher organization 或 Hub membership 自动推导。
+公共 API key 不能访问目录管理面。经 `source_catalog` platform grant 授权的 consumer 可以读取
+独立的 active-only 安全投影，用于还原目录、覆盖与实施阶段及多维筛选；该投影不包含归档、审计、
+saved view、related data、custom fields、evidence 原文、登录账号绑定、connection 或 credential，
+也不提供任何写操作。详细边界见
+[对外 API 产品面与文档准则](../architecture/public-api-product-surfaces.md)。若后续需要
+tenant-specific row scope，必须新增显式模型和 migration，不从 Launcher organization 或 Hub
+membership 自动推导。
 
 ### 10. 导航和视觉采用 Hub 大屏语法
 

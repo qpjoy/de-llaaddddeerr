@@ -33,9 +33,9 @@ body {
   place-items: center;
   border-radius: var(--qp-radius-md);
   background: var(--qp-primary);
-  color: #071311;
+  color: var(--qp-on-primary);
   font-weight: 800;
-  box-shadow: 0 0 22px rgba(43, 246, 210, 0.22);
+  box-shadow: var(--qp-primary-shadow);
 }
 
 .demo-density-card {
@@ -49,6 +49,10 @@ body {
 .demo-density-card .qp-segmented__item {
   flex: 1 1 0;
   min-width: 0;
+}
+
+.demo-density-card__label {
+  margin-top: var(--qp-space-3);
 }
 
 .demo-nav-link {
@@ -190,7 +194,7 @@ body {
   place-items: center;
   border-radius: var(--qp-radius-sm);
   background: var(--qp-primary);
-  color: #071311;
+  color: var(--qp-on-primary);
   font-size: 11px;
   font-weight: 800;
 }

@@ -1,6 +1,6 @@
 # @qpjoy/ui-design-neon-void
 
-Neon Void is the reusable QPJoy dark tool UI style extracted from the MX Launcher design base. It packages the screenshot style as npm-ready tokens plus CSS components: deep blue-black workspaces, cyan primary actions, quiet panel surfaces, purple design frames, and precise status colors.
+Neon Void is the reusable QPJoy tool UI style extracted from the MX Launcher design base. It packages the original deep blue-black/cyan dark mode plus an opt-in cool light companion as npm-ready tokens and CSS components.
 
 ## Design Language
 
@@ -44,6 +44,17 @@ The screenshots look compact because of capture scale, so the library does not l
 
 Individual controls also support explicit sizes such as `qp-button--sm`, `qp-button--md`, `qp-button--lg`, `qp-input--sm`, `qp-input--md`, and `qp-input--lg`.
 
+## Themes
+
+Dark remains the default contract. Apply the light class explicitly when a product needs the cool white/blue-gray palette; both modes keep the same spacing, type scale and component anatomy.
+
+```html
+<main class="qp-app qp-theme-neon-void">...</main>
+<main class="qp-app qp-theme-neon-void-light">...</main>
+```
+
+The light primary is a deeper teal so text, focus and selected states remain legible on white surfaces. Use `neonVoidLightTheme` or `neonVoidLightCssVariables` when consuming tokens from TypeScript.
+
 ## Exports
 
 - `@qpjoy/ui-design-neon-void/styles.css`: tokens plus component classes.
@@ -55,7 +66,7 @@ Individual controls also support explicit sizes such as `qp-button--sm`, `qp-but
 
 - Layout: `qp-app`, `qp-shell`, `qp-sidebar`, `qp-main`, `qp-panel`, `qp-card`, `qp-section-title`.
 - Actions: `qp-button`, `qp-icon-button`, `qp-button--primary`, `qp-button--outline`, `qp-button--ghost`, `qp-button--transparent`.
-- Form: `qp-field`, `qp-input`, `qp-select`, `qp-dropdown`, `qp-textarea`, `qp-input-group`.
+- Form: `qp-field`, `qp-input`, `qp-select`, `qp-dropdown`, `qp-textarea`, `qp-input-group`. Use `qp-select` only as a native fallback; products that require a consistently themed popup should use `qp-dropdown--searchable` with `qp-dropdown__search`, `qp-dropdown__options`, `qp-dropdown__group`, `qp-dropdown__empty`, and `qp-dropdown__check`.
 - Choice: `qp-choice--radio`, `qp-choice--checkbox`, `qp-switch`, `qp-slider`, `qp-segmented`.
 - Feedback: `qp-tag`, `qp-status`, `qp-toast`, `qp-dialog`, `qp-actionbar`.
 - Data navigation: `qp-pagination`, `qp-pagination__summary`, `qp-pagination__pages`, `qp-pagination__page`, `qp-pagination__jump`.

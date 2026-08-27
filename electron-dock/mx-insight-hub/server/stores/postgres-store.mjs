@@ -2180,28 +2180,47 @@ export class PostgresStore {
     sourceScope = 'all',
     pageSize,
     cursor = null,
+    from = null,
+    to = null,
   }) {
     const datasets = adminTelegramDatasets(sourceScope, 'messages')
+    const values = [
+      datasets,
+      chatExternalId,
+      cursor?.sortTime ?? null,
+      cursor?.id ?? null,
+    ]
+    const sortExpression = 'coalesce(message.event_time, message.collected_at, message.first_seen_at)'
+    const predicates = [
+      'message.dataset_id = ANY($1::text[])',
+      "message.platform = 'telegram'",
+      "message.object_type = 'message'",
+      'message.deleted_at IS NULL',
+      "($2::text IS NULL OR message.stable_fields #>> '{relations,chatId}' = $2)",
+      `(
+        $3::timestamptz IS NULL
+        OR (${sortExpression}, message.id) < ($3::timestamptz, $4::uuid)
+      )`,
+    ]
+    const parameter = (value) => {
+      values.push(value)
+      return `$${values.length}`
+    }
+    if (from) predicates.push(`${sortExpression} >= ${parameter(from)}::timestamptz`)
+    if (to) predicates.push(`${sortExpression} <= ${parameter(to)}::timestamptz`)
+    const limit = parameter(pageSize + 1)
     const { rows } = await this.pool.query(
       `SELECT message.id, message.dataset_id, message.external_id,
               message.object_type, message.content_type, message.url,
               message.title, message.body, message.author_external_id,
               message.author_name, message.event_time, message.collected_at,
               message.stable_fields, message.current_revision,
-              coalesce(message.event_time, message.collected_at, message.first_seen_at) AS sort_time
+              ${sortExpression} AS sort_time
          FROM core.canonical_records message
-        WHERE message.dataset_id = ANY($1::text[])
-          AND message.platform = 'telegram'
-          AND message.object_type = 'message'
-          AND message.deleted_at IS NULL
-          AND message.stable_fields #>> '{relations,chatId}' = $2
-          AND (
-            $3::timestamptz IS NULL
-            OR (coalesce(message.event_time, message.collected_at, message.first_seen_at), message.id) < ($3::timestamptz, $4::uuid)
-          )
-        ORDER BY coalesce(message.event_time, message.collected_at, message.first_seen_at) DESC, message.id DESC
-        LIMIT $5`,
-      [datasets, chatExternalId, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
+        WHERE ${predicates.join('\n          AND ')}
+        ORDER BY ${sortExpression} DESC, message.id DESC
+        LIMIT ${limit}`,
+      values,
     )
     return rows
   }

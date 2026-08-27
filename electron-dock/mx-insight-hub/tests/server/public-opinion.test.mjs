@@ -522,6 +522,7 @@ test('public province routes enforce grants, paginate safely and keep public_opi
       'region_feed',
       'item_detail',
       'stored_search',
+      'diagnostics',
     ])
     assert.equal(platform.ready, false)
     assert.deepEqual(upstreamCapabilityCalls, [])

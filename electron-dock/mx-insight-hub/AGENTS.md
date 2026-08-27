@@ -11,6 +11,8 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 ## MX Insight Hub product context
 
 - Treat `/Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/electron-dock/mx-launcher/demos/ui-design-neon-void` and `mx-launcher/ui-design` as the visual source of truth.
+- Hub defaults new browser profiles to the cool light Neon Void theme and keeps the existing dark theme as a persisted user-selectable mode. Theme changes are presentation-only and must not change authentication, routing, or API behavior.
+- Use the shared searchable `DropdownField` for every popup value selector in the Hub. Do not use native `<select>` for Hub product controls because its expanded menu cannot be themed consistently; region-picker dialogs and navigation accordions remain their own interaction patterns.
 - For the governed source catalog, the real Hub `DashboardPage` command-center layout is the large-screen visual baseline. The existing external-source pipeline page is an execution-semantic reference only, not the dashboard reference.
 - Keep `/source-catalog` as the governed business directory and `/sources` as the existing connection, mapping, import, and cleaning execution surface (shown as “数据清洗计划”). Do not merge their status models or storage.
 - Source-catalog metadata is authoritative in PostgreSQL. Elasticsearch may later receive a rebuildable outbox projection, but application requests must never dual-write PG and ES.

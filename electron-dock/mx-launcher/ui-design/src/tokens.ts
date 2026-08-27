@@ -6,7 +6,7 @@ export const neonVoidTokens = {
   meta: {
     name: 'Neon Void',
     packageName: '@qpjoy/ui-design-neon-void',
-    description: 'Dark tool UI with cyan primary actions, quiet blue-gray panels, compact controls, and precise state feedback.'
+    description: 'Dark-first tool UI with a cool light companion, teal primary actions, compact controls, and precise state feedback.'
   },
   color: {
     background: {
@@ -50,6 +50,36 @@ export const neonVoidTokens = {
       x: '#FF4F68',
       y: '#22E184',
       z: '#5E8EEC'
+    },
+    lightTheme: {
+      background: {
+        bg1: '#F8FAFC',
+        bg2: '#F1F5F9',
+        bg3Panel: '#FFFFFF',
+        bg4ActionbarDialog: '#F7FAFC',
+        input: '#F4F7FA',
+        hover: '#E8EEF4',
+        active: '#DCE6EE'
+      },
+      text: {
+        t1: '#182637',
+        t2: 'rgba(24, 38, 55, 0.76)',
+        t3: 'rgba(24, 38, 55, 0.6)',
+        t4: 'rgba(24, 38, 55, 0.43)',
+        t5: 'rgba(24, 38, 55, 0.18)'
+      },
+      accent: {
+        main: '#087F75',
+        mainHover: '#066D65',
+        mainPressed: '#05574F',
+        archetype: '#7047AA',
+        danger: '#B63245',
+        warning: '#8A5B00',
+        success: '#1B6B45',
+        info: '#2D609E'
+      },
+      line: 'rgba(35, 67, 91, 0.16)',
+      sidebar: '#F8FAFC'
     }
   },
   typography: {
@@ -134,9 +164,40 @@ export const neonVoidCssVariables = {
   '--qp-font-family': neonVoidTokens.typography.family
 } as const;
 
+export const neonVoidLightCssVariables = {
+  '--qp-bg-1': neonVoidTokens.color.lightTheme.background.bg1,
+  '--qp-bg-2': neonVoidTokens.color.lightTheme.background.bg2,
+  '--qp-bg-3': neonVoidTokens.color.lightTheme.background.bg3Panel,
+  '--qp-bg-4': neonVoidTokens.color.lightTheme.background.bg4ActionbarDialog,
+  '--qp-bg-input': neonVoidTokens.color.lightTheme.background.input,
+  '--qp-bg-hover': neonVoidTokens.color.lightTheme.background.hover,
+  '--qp-bg-active': neonVoidTokens.color.lightTheme.background.active,
+  '--qp-line': neonVoidTokens.color.lightTheme.line,
+  '--qp-primary': neonVoidTokens.color.lightTheme.accent.main,
+  '--qp-primary-hover': neonVoidTokens.color.lightTheme.accent.mainHover,
+  '--qp-primary-pressed': neonVoidTokens.color.lightTheme.accent.mainPressed,
+  '--qp-danger': neonVoidTokens.color.lightTheme.accent.danger,
+  '--qp-warning': neonVoidTokens.color.lightTheme.accent.warning,
+  '--qp-success': neonVoidTokens.color.lightTheme.accent.success,
+  '--qp-info': neonVoidTokens.color.lightTheme.accent.info,
+  '--qp-archetype': neonVoidTokens.color.lightTheme.accent.archetype,
+  '--qp-text-1': neonVoidTokens.color.lightTheme.text.t1,
+  '--qp-text-2': neonVoidTokens.color.lightTheme.text.t2,
+  '--qp-text-3': neonVoidTokens.color.lightTheme.text.t3,
+  '--qp-text-4': neonVoidTokens.color.lightTheme.text.t4,
+  '--qp-font-family': neonVoidTokens.typography.family
+} as const;
+
 export const neonVoidTheme = {
   name: neonVoidTokens.meta.name,
   styleName: 'neon-void',
   tokens: neonVoidTokens,
   cssVariables: neonVoidCssVariables
+} as const;
+
+export const neonVoidLightTheme = {
+  name: 'Neon Void Light',
+  styleName: 'neon-void-light',
+  tokens: neonVoidTokens,
+  cssVariables: neonVoidLightCssVariables
 } as const;

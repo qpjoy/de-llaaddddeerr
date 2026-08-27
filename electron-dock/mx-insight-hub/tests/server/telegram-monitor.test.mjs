@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
+import { requestFingerprint } from '../../server/core/crypto.mjs'
 import { AppError } from '../../server/core/errors.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { DatabaseSourcePuller } from '../../server/ingest/external/database-source.mjs'
@@ -70,16 +72,22 @@ test('Telegram query parameters reject explicit empty values', () => {
     chatId: null,
     from: null,
     to: null,
+    kind: 'all',
+    query: null,
+    sourceScope: 'monitor',
     pageSize: 50,
     cursor: null,
   })
 })
 
 test('public Telegram records enforce field types and withhold unverified link objects', () => {
+  const legacyUrl = 'https://legacy:credential@example.test/message?token=legacy-value'
   const record = publicTelegramMonitorRecord({
+    id: '11111111-1111-4111-8111-111111111111',
     external_id: '-1007:42',
     dataset_id: 'telegram.monitor.messages.v1',
     object_type: 'message',
+    url: legacyUrl,
     event_time: new Date('2026-08-10T00:00:00.000Z'),
     collected_at: new Date('2026-08-10T00:01:00.000Z'),
     stable_fields: {
@@ -99,7 +107,18 @@ test('public Telegram records enforce field types and withhold unverified link o
   assert.deepEqual(record.media, { media_kind: 'image', size_bytes: 100 })
   assert.deepEqual(record.entities, [{ type: 'url', offset: 0, length: 5, url: 'https://example.test' }])
   assert.deepEqual(record.links, [])
+  assert.equal(record.url, legacyUrl)
   assert.equal(JSON.stringify(record).includes('must-not-leak'), false)
+
+  const sqliteRecord = publicTelegramMonitorRecord({
+    id: '22222222-2222-4222-8222-222222222222',
+    external_id: '-1007:43',
+    dataset_id: 'telegram.sqlite.messages.v1',
+    object_type: 'message',
+    url: 'https://user:password@example.test/message?api_key=must-not-leak',
+    stable_fields: {},
+  })
+  assert.equal(sqliteRecord.url, null)
 })
 
 test('Night-All v1 Telegram search maps negative metric sentinels to null', () => {
@@ -222,12 +241,161 @@ test('Telegram search cursors exceed 10k safely and are bound to the normalized 
     { ...input, query: 'different', cursor },
     { ...input, chatId: '-1008', cursor },
     { ...input, pageSize: 25, cursor },
+    { ...input, sourceScope: 'sqlite', cursor },
   ]) {
     assert.throws(
       () => normalizeTelegramSearchQuery(changed, 100, PEPPER),
       (error) => error?.code === 'invalid_cursor',
     )
   }
+})
+
+test('Telegram default Monitor search accepts the pre-sourceScope v3 cursor binding', () => {
+  const input = { query: 'keyword', scope: 'messages', pageSize: 1 }
+  const legacyBinding = createHash('sha256').update(JSON.stringify({
+    v: 3,
+    sort: 'es-score-eventTime-id-sharddoc-pg-eventTime-id-v2',
+    query: 'keyword',
+    scope: 'messages',
+    matchMode: 'full_text',
+    chatId: null,
+    authorId: null,
+    from: null,
+    to: null,
+    pageSize: 1,
+  })).digest('base64url')
+  const legacyCursor = encodeTelegramSearchCursor({
+    mode: 'postgres',
+    searchAfter: ['2026-08-05T00:00:00.000Z', '11111111-1111-4111-8111-111111111111'],
+    seen: 1,
+  }, legacyBinding, PEPPER)
+
+  const resumed = normalizeTelegramSearchQuery({ ...input, cursor: legacyCursor }, 100, PEPPER)
+  assert.equal(resumed.sourceScope, 'monitor')
+  assert.equal(resumed.cursorBinding, legacyBinding)
+  assert.equal(resumed.cursor.seen, 1)
+
+  assert.throws(
+    () => normalizeTelegramSearchQuery(
+      { ...input, sourceScope: 'monitor', cursor: legacyCursor },
+      100,
+      PEPPER,
+    ),
+    (error) => error?.code === 'invalid_cursor',
+  )
+})
+
+test('Telegram search replays pre-sourceScope idempotency fingerprints on dedicated and generic routes', async () => {
+  const store = new MemoryStore()
+  const service = new HubService({
+    store,
+    adapter: { capabilities: async () => ({ data: { platforms: [] } }) },
+    apiKeyPepper: PEPPER,
+    searchQueries: {
+      searchContent: async () => assert.fail('a pre-upgrade committed request must replay without searching'),
+    },
+  })
+  const tenant = await service.createTenant({ name: 'Fingerprint compatibility tenant' })
+  const consumer = await service.createConsumer({
+    tenantId: tenant.id,
+    name: 'Fingerprint compatibility consumer',
+  })
+  const apiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Fingerprint compatibility key',
+  })
+  await service.putPlatformConfiguration('telegram', {
+    tenantId: tenant.id,
+    consumerId: consumer.id,
+    enabled: true,
+    maxRequests: 20,
+    windowSeconds: 3_600,
+    maxPageSize: 20,
+  })
+  const context = { tenant, consumer, apiKey }
+  const legacyCursorBinding = createHash('sha256').update(JSON.stringify({
+    v: 3,
+    sort: 'es-score-eventTime-id-sharddoc-pg-eventTime-id-v2',
+    query: 'legacy',
+    scope: 'messages',
+    matchMode: 'full_text',
+    chatId: null,
+    authorId: null,
+    from: null,
+    to: null,
+    pageSize: 1,
+  })).digest('base64url')
+  const preSourceScopeQuery = {
+    query: 'legacy',
+    scope: 'messages',
+    matchMode: 'full_text',
+    chatId: null,
+    authorId: null,
+    from: null,
+    to: null,
+    pageSize: 1,
+    cursorBinding: legacyCursorBinding,
+    cursor: null,
+  }
+
+  const cases = [
+    {
+      requestId: '11111111-1111-4111-8111-111111111111',
+      idempotencyKey: 'telegram-pre-scope-dedicated',
+      path: '/api/v1/data/telegram/search',
+      body: { query: 'legacy', scope: 'messages', pageSize: 1 },
+      marker: 'dedicated-replay',
+    },
+    {
+      requestId: '22222222-2222-4222-8222-222222222222',
+      idempotencyKey: 'telegram-pre-scope-generic',
+      path: '/api/v1/data/search',
+      body: { platform: 'telegram', query: 'legacy', pageSize: 1 },
+      marker: 'generic-replay',
+    },
+  ]
+
+  for (const fixture of cases) {
+    const fingerprint = requestFingerprint({
+      method: 'POST',
+      path: fixture.path,
+      body: { ...preSourceScopeQuery, type: 'fresh' },
+    })
+    const reservation = await store.reserve({
+      requestId: fixture.requestId,
+      idempotencyKey: fixture.idempotencyKey,
+      fingerprint,
+      tenantId: tenant.id,
+      consumerId: consumer.id,
+      apiKeyId: apiKey.id,
+      platform: 'telegram',
+      unitsReserved: 1,
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+      windowStart: new Date(Date.now() - 3_600_000),
+      maxRequests: 20,
+    })
+    assert.equal(reservation.kind, 'reserved')
+    await store.commitRequest(fixture.requestId, {
+      responseStatus: 200,
+      responseBody: { data: { marker: fixture.marker } },
+      unitsActual: 1,
+      upstreamLatencyMs: 1,
+    })
+
+    const replay = await service.search(context, fixture)
+    assert.equal(replay.replay, true)
+    assert.equal(replay.requestId, fixture.requestId)
+    assert.equal(replay.body.data.marker, fixture.marker)
+  }
+
+  await assert.rejects(
+    () => service.search(context, {
+      path: cases[0].path,
+      idempotencyKey: cases[0].idempotencyKey,
+      body: { ...cases[0].body, sourceScope: 'monitor' },
+    }),
+    (error) => error?.code === 'idempotency_conflict',
+  )
 })
 
 async function withServer(app, callback) {
@@ -1716,13 +1884,33 @@ function canonicalRows() {
   ]
 }
 
+function canonicalChatRows() {
+  return [
+    {
+      id: '44444444-4444-4444-8444-444444444444', dataset_id: 'telegram.monitor.chats.v1',
+      external_id: '-1007', object_type: 'chat', content_type: 'group', title: 'Legacy monitor chat',
+      event_time: new Date('2026-08-02T00:00:00Z'), collected_at: new Date('2026-08-02T01:00:00Z'),
+      stable_fields: { attributes: { chatType: 'group' } }, current_revision: 1,
+      sort_time: new Date('2026-08-02T00:00:00Z'),
+    },
+    {
+      id: '55555555-5555-4555-8555-555555555555', dataset_id: 'telegram.monitor.chats.v1',
+      external_id: '-1008', object_type: 'chat', content_type: 'channel', title: 'Older monitor channel',
+      event_time: new Date('2026-08-01T00:00:00Z'), collected_at: new Date('2026-08-01T01:00:00Z'),
+      stable_fields: { attributes: { chatType: 'channel' } }, current_revision: 1,
+      sort_time: new Date('2026-08-01T00:00:00Z'),
+    },
+  ]
+}
+
 test('public Telegram history is consumer-granted, page-bounded, keyset-paged and allowlisted', async () => {
   const store = new MemoryStore()
   const seen = []
   store.listCanonicalRecords = async (query) => {
     seen.push(query)
-    return canonicalRows()
+    return query.objectType === 'chat' ? canonicalChatRows() : canonicalRows()
   }
+  store.listAdminTelegramChats = async () => assert.fail('default chats must keep legacy canonical paging')
   const adapter = {
     dependencies: async () => ({ status: 'up' }),
     capabilities: async () => ({ data: { platforms: [] } }),
@@ -1761,6 +1949,29 @@ test('public Telegram history is consumer-granted, page-bounded, keyset-paged an
     const immediatelyAllowed = await call(baseUrl, '/api/v1/data/telegram/messages?pageSize=1', { headers: allowed })
     assert.equal(immediatelyAllowed.response.status, 200)
     assert.equal(immediatelyAllowed.payload.data.items.length, 1)
+    assert.equal(immediatelyAllowed.payload.data.sourceScope.selected, 'monitor')
+    assert.equal(seen.at(-1).datasetId, 'telegram.monitor.messages.v1')
+
+    const legacyChats = await call(baseUrl, '/api/v1/data/telegram/chats?pageSize=1', { headers: allowed })
+    assert.equal(legacyChats.response.status, 200)
+    assert.equal(legacyChats.payload.data.items[0].title, 'Legacy monitor chat')
+    assert.equal(seen.at(-1).datasetId, 'telegram.monitor.chats.v1')
+    assert.deepEqual(
+      Object.keys(JSON.parse(Buffer.from(legacyChats.payload.data.pageInfo.nextCursor, 'base64url').toString('utf8'))).sort(),
+      ['id', 't', 'v'],
+    )
+
+    const legacyFilteredChats = await call(
+      baseUrl,
+      '/api/v1/data/telegram/chats?chatId=-1007&from=2026-08-01T00%3A00%3A00Z&to=2026-08-03T00%3A00%3A00Z&pageSize=1',
+      { headers: allowed },
+    )
+    assert.equal(legacyFilteredChats.response.status, 200)
+    assert.equal(seen.at(-1).datasetId, 'telegram.monitor.chats.v1')
+    assert.equal(seen.at(-1).chatId, '-1007')
+    assert.equal(seen.at(-1).from, '2026-08-01T00:00:00.000Z')
+    assert.equal(seen.at(-1).to, '2026-08-03T00:00:00.000Z')
+    assert.equal(seen.at(-1).cursorBinding, undefined)
 
     const stillForbidden = await call(baseUrl, '/api/v1/data/telegram/messages?pageSize=1', { headers: denied })
     assert.equal(stillForbidden.response.status, 403)
@@ -1779,6 +1990,10 @@ test('public Telegram history is consumer-granted, page-bounded, keyset-paged an
     assert.equal(first.payload.data.items.length, 2)
     assert.equal(first.payload.data.pageInfo.hasMore, true)
     assert.ok(first.payload.data.pageInfo.nextCursor)
+    assert.deepEqual(
+      Object.keys(JSON.parse(Buffer.from(first.payload.data.pageInfo.nextCursor, 'base64url').toString('utf8'))).sort(),
+      ['id', 't', 'v'],
+    )
     assert.deepEqual(first.payload.data.items[0].relations, { chatId: '-1007', messageId: '43' })
     const serialized = JSON.stringify(first.payload)
     assert.equal(serialized.includes('must-not-leak'), false)
@@ -1792,6 +2007,206 @@ test('public Telegram history is consumer-granted, page-bounded, keyset-paged an
     assert.equal(second.response.status, 200)
     assert.equal(seen.at(-1).cursor.id, canonicalRows()[1].id)
     assert.equal(seen.at(-1).cursor.sortTime, '2026-08-01T00:00:00.000Z')
+  })
+})
+
+test('public Telegram conversation facade exposes explicit mixed-source discovery and qualified history', async () => {
+  const store = new MemoryStore()
+  const chatId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const otherChatId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+  const messageId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const olderMessageId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+  const chat = {
+    id: chatId,
+    dataset_id: 'telegram.sqlite.chats.v1',
+    external_id: '-1007001',
+    object_type: 'chat',
+    content_type: 'group',
+    title: '内部测试群',
+    event_time: new Date('2026-08-20T00:00:00Z'),
+    collected_at: new Date('2026-08-20T00:01:00Z'),
+    stable_fields: { attributes: { chatType: 'group', username: 'internal_group' } },
+    current_revision: 1,
+    sort_time: new Date('2026-08-20T00:00:00Z'),
+  }
+  const otherChat = {
+    ...chat,
+    id: otherChatId,
+    external_id: '-1007002',
+    title: '另一个内部测试群',
+    sort_time: new Date('2026-08-19T00:00:00Z'),
+  }
+  const message = {
+    id: messageId,
+    dataset_id: 'telegram.sqlite.messages.v1',
+    external_id: '-1007001:9',
+    object_type: 'message',
+    content_type: 'text',
+    body: 'SQLite 历史消息',
+    event_time: null,
+    collected_at: null,
+    first_seen_at: new Date('2026-08-20T00:03:00Z'),
+    stable_fields: { relations: { chatId: '-1007001', messageId: '9' } },
+    current_revision: 1,
+    sort_time: new Date('2026-08-20T00:03:00Z'),
+  }
+  const olderMessage = {
+    ...message,
+    id: olderMessageId,
+    external_id: '-1007001:8',
+    body: '较早的 SQLite 历史消息',
+    first_seen_at: new Date('2026-08-19T00:03:00Z'),
+    sort_time: new Date('2026-08-19T00:03:00Z'),
+  }
+  const chatQueries = []
+  const historyQueries = []
+  store.listAdminTelegramChats = async (query) => {
+    chatQueries.push(query)
+    return [chat, otherChat]
+  }
+  store.getAdminTelegramChat = async (selector, sourceScope) => {
+    assert.equal(selector, `sqlite:${chatId}`)
+    assert.equal(sourceScope, 'sqlite')
+    return chat
+  }
+  store.listCanonicalRecords = async (query) => {
+    assert.fail(`explicit/qualified history must not use legacy canonical paging: ${query.datasetId}`)
+  }
+  store.listAdminTelegramMessages = async (query) => {
+    historyQueries.push(query)
+    return query.cursor ? [olderMessage] : [message, olderMessage]
+  }
+  const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
+  const tenant = await service.createTenant({ name: 'Conversation tenant' })
+  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Conversation consumer' })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Conversation key' })
+  await service.putPlatformConfiguration('telegram', {
+    tenantId: tenant.id, consumerId: consumer.id, enabled: true,
+    maxRequests: 10, windowSeconds: 3600, maxPageSize: 20,
+  })
+  const app = createApp({ service, store, adapter: {}, adminToken: ADMIN_TOKEN })
+
+  await withServer(app, async (baseUrl) => {
+    const unauthorized = await call(baseUrl, '/api/v1/data/telegram/chats?sourceScope=all', {
+      headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
+    })
+    assert.equal(unauthorized.response.status, 401)
+
+    const headers = { authorization: `Bearer ${key.secret}` }
+    const incompatibleDirectoryFilters = await call(
+      baseUrl,
+      '/api/v1/data/telegram/chats?sourceScope=all&chatId=-1007001',
+      { headers },
+    )
+    assert.equal(incompatibleDirectoryFilters.response.status, 400)
+    assert.equal(incompatibleDirectoryFilters.payload.error.code, 'unsupported_fields')
+    assert.equal(chatQueries.length, 0)
+
+    const directory = await call(
+      baseUrl,
+      '/api/v1/data/telegram/chats?sourceScope=all&kind=group&query=%E6%B5%8B%E8%AF%95&pageSize=1',
+      { headers },
+    )
+    assert.equal(directory.response.status, 200)
+    assert.equal(directory.payload.data.contractVersion, 'mx-insight-hub.data-products.telegram-chats.v1')
+    assert.deepEqual(directory.payload.data.sourceScope, {
+      selected: 'all',
+      datasets: ['telegram.monitor.chats.v1', 'telegram.sqlite.chats.v1'],
+    })
+    assert.equal(directory.payload.data.items[0].canonicalId, chatId)
+    assert.equal(directory.payload.data.items[0].chatKey, `sqlite:${chatId}`)
+    assert.equal(directory.payload.data.items[0].kind, 'group')
+    assert.equal(directory.payload.data.pageInfo.hasMore, true)
+    assert.ok(directory.payload.data.pageInfo.nextCursor)
+    assert.deepEqual(chatQueries[0], {
+      kind: 'group', sourceScope: 'all', query: '测试', pageSize: 1, cursor: null,
+    })
+
+    const changedDirectory = await call(
+      baseUrl,
+      '/api/v1/data/telegram/chats?sourceScope=all&kind=channel&query=%E6%B5%8B%E8%AF%95&pageSize=1'
+        + `&cursor=${encodeURIComponent(directory.payload.data.pageInfo.nextCursor)}`,
+      { headers },
+    )
+    assert.equal(changedDirectory.response.status, 400)
+    assert.equal(changedDirectory.payload.error.code, 'invalid_cursor')
+
+    const history = await call(
+      baseUrl,
+      `/api/v1/data/telegram/messages?chatId=${encodeURIComponent(`sqlite:${chatId}`)}&pageSize=1`,
+      { headers },
+    )
+    assert.equal(history.response.status, 200)
+    assert.equal(history.payload.data.sourceScope.selected, 'sqlite')
+    assert.equal(history.payload.data.chat.chatKey, `sqlite:${chatId}`)
+    assert.equal(history.payload.data.items[0].canonicalId, messageId)
+    assert.equal(history.payload.data.items[0].eventTime, null)
+    assert.equal(history.payload.data.items[0].collectedAt, null)
+    assert.ok(history.payload.data.pageInfo.nextCursor)
+    assert.deepEqual(historyQueries[0], {
+      chatExternalId: '-1007001',
+      sourceScope: 'sqlite',
+      pageSize: 1,
+      cursor: null,
+      from: null,
+      to: null,
+    })
+
+    const nextHistory = await call(
+      baseUrl,
+      `/api/v1/data/telegram/messages?chatId=${encodeURIComponent(`sqlite:${chatId}`)}&pageSize=1`
+        + `&cursor=${encodeURIComponent(history.payload.data.pageInfo.nextCursor)}`,
+      { headers },
+    )
+    assert.equal(nextHistory.response.status, 200)
+    assert.equal(nextHistory.payload.data.items[0].canonicalId, olderMessageId)
+    assert.deepEqual(historyQueries[1].cursor, {
+      sortTime: '2026-08-20T00:03:00.000Z',
+      id: messageId,
+    })
+
+    const changedHistory = await call(
+      baseUrl,
+      `/api/v1/data/telegram/messages?sourceScope=all&chatId=${encodeURIComponent(`sqlite:${chatId}`)}&pageSize=1`
+        + `&cursor=${encodeURIComponent(history.payload.data.pageInfo.nextCursor)}`,
+      { headers },
+    )
+    assert.equal(changedHistory.response.status, 400)
+    assert.equal(changedHistory.payload.error.code, 'invalid_cursor')
+
+    const historyCursor = history.payload.data.pageInfo.nextCursor
+    const tamperedHistoryCursor = `${historyCursor.slice(0, -1)}${historyCursor.endsWith('A') ? 'B' : 'A'}`
+    const tamperedHistory = await call(
+      baseUrl,
+      `/api/v1/data/telegram/messages?chatId=${encodeURIComponent(`sqlite:${chatId}`)}&pageSize=1`
+        + `&cursor=${encodeURIComponent(tamperedHistoryCursor)}`,
+      { headers },
+    )
+    assert.equal(tamperedHistory.response.status, 400)
+    assert.equal(tamperedHistory.payload.error.code, 'invalid_cursor')
+
+    const mergedHistory = await call(
+      baseUrl,
+      '/api/v1/data/telegram/messages?sourceScope=all&chatId=-1007001&pageSize=1',
+      { headers },
+    )
+    assert.equal(mergedHistory.response.status, 200)
+    assert.equal(mergedHistory.payload.data.sourceScope.selected, 'all')
+    assert.equal(mergedHistory.payload.data.items[0].eventTime, null)
+    assert.equal(historyQueries[2].sourceScope, 'all')
+    assert.equal(historyQueries[2].chatExternalId, '-1007001')
+
+    const capabilities = await call(baseUrl, '/api/v1/data/capabilities', { headers })
+    assert.deepEqual(capabilities.payload.data.platforms[0].capabilities, [
+      'monitor_chats',
+      'monitor_messages',
+      'sqlite_chats',
+      'sqlite_messages',
+      'multi_source_conversations',
+      'conversation_filter',
+      'stored_search',
+      'entity_search',
+    ])
   })
 })
 
@@ -1818,11 +2233,16 @@ test('local Telegram search keeps Night-All v1 compatibility, idempotency and st
             },
         items: [{
           id: '11111111-1111-4111-8111-111111111111',
+          datasetId: options.datasetIds?.includes('telegram.sqlite.messages.v1')
+            ? 'telegram.sqlite.messages.v1'
+            : 'telegram.monitor.messages.v1',
           externalId: '-1007:42',
           platform: 'telegram',
           objectType: 'message',
           contentType: 'text',
-          url: 'https://t.me/example/42',
+          url: options.datasetIds?.includes('telegram.sqlite.messages.v1')
+            ? 'https://example.test/message?access_token=must-not-leak'
+            : 'https://t.me/example/42',
           title: null,
           body: 'keyword result',
           authorExternalId: 'user-1',
@@ -1891,6 +2311,8 @@ test('local Telegram search keeps Night-All v1 compatibility, idempotency and st
     assert.deepEqual(first.payload.data.items[0].source, {
       provider: null, endpointId: 'hub-canonical-search',
     })
+    assert.equal(first.payload.data.items[0].canonicalId, '11111111-1111-4111-8111-111111111111')
+    assert.equal(first.payload.data.items[0].sourceScope, 'monitor')
     assert.deepEqual(first.payload.data.items[0].metrics, {
       likes: null, comments: null, shares: null, views: 12, bookmarks: null,
     })
@@ -1977,6 +2399,19 @@ test('local Telegram search keeps Night-All v1 compatibility, idempotency and st
     assert.equal(entities.payload.data.items.length, 2)
     assert.equal(entities.payload.data.items[0].entityType, 'chat')
     assert.equal(JSON.stringify(entities.payload).includes('must-not-leak'), false)
+
+    const mixedSearch = await call(baseUrl, '/api/v1/data/telegram/search', {
+      method: 'POST',
+      headers: { ...authorization, 'idempotency-key': 'telegram-search-mixed-0001' },
+      body: { query: 'keyword', scope: 'messages', sourceScope: 'all', pageSize: 1 },
+    })
+    assert.equal(mixedSearch.response.status, 200)
+    assert.deepEqual(contentCalls.at(-1).options.datasetIds, [
+      'telegram.monitor.messages.v1',
+      'telegram.sqlite.messages.v1',
+    ])
+    assert.equal(mixedSearch.payload.data.items[0].sourceScope, 'sqlite')
+    assert.equal(mixedSearch.payload.data.items[0].url, null)
   })
 })
 

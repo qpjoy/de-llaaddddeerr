@@ -62,7 +62,12 @@
         </nav>
 
         <section class="qp-panel qp-panel--design-frame demo-density-card">
-          <h2 class="qp-heading-2">Density</h2>
+          <h2 class="qp-heading-2">Theme</h2>
+          <div class="qp-segmented" role="group" aria-label="Theme">
+            <button class="qp-segmented__item is-active" type="button" data-theme="dark" aria-pressed="true">Dark</button>
+            <button class="qp-segmented__item" type="button" data-theme="light" aria-pressed="false">Light</button>
+          </div>
+          <h2 class="qp-heading-2 demo-density-card__label">Density</h2>
           <div class="qp-segmented" role="group" aria-label="Density">
             <button class="qp-segmented__item" type="button" data-density="small">Small</button>
             <button class="qp-segmented__item is-active" type="button" data-density="medium">Medium</button>
@@ -464,34 +469,38 @@
           <h2 class="qp-section-title">Dropdowns & Selection</h2>
           <div class="demo-dropdown-page">
             <section class="qp-panel demo-control-panel">
-              <h3 class="qp-heading-2">Custom Dropdown</h3>
+              <h3 class="qp-heading-2">Searchable Dropdown</h3>
               <div class="demo-form-grid">
                 <div class="qp-field">
-                  <span class="qp-field__label">Status</span>
-                  <div class="qp-dropdown" data-dropdown>
+                  <span class="qp-field__label">Tenant</span>
+                  <div class="qp-dropdown qp-dropdown--searchable" data-dropdown data-searchable>
                     <button class="qp-dropdown__trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
-                      <span class="qp-dropdown__value" data-dropdown-value>Published</span>
+                      <span class="qp-dropdown__value" data-dropdown-value>All tenants</span>
                       <span class="qp-dropdown__chevron">⌄</span>
                     </button>
-                    <div class="qp-dropdown__menu" role="listbox" aria-label="Status">
-                      <button class="qp-dropdown__option is-selected" type="button" role="option" aria-selected="true" data-value="Published">Published</button>
-                      <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="Local">Local</button>
-                      <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="Workshop">Workshop</button>
+                    <div class="qp-dropdown__menu qp-dropdown__menu--searchable" aria-label="Tenant menu">
+                      <label class="qp-dropdown__search">
+                        <input type="search" placeholder="Search tenants" aria-label="Search tenant options" aria-controls="demo-tenant-options" />
+                      </label>
+                      <div class="qp-dropdown__options" id="demo-tenant-options" role="listbox" aria-label="Tenant">
+                        <button class="qp-dropdown__option is-selected" type="button" role="option" aria-selected="true" data-value="All tenants">All tenants</button>
+                        <div class="qp-dropdown__group" role="presentation">Workspace tenants</div>
+                        <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="LCY">LCY</button>
+                        <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="ystest">ystest</button>
+                        <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="bootstrap">bootstrap</button>
+                        <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="舟山租户">舟山租户</button>
+                        <p class="qp-dropdown__empty" hidden>No matching options</p>
+                      </div>
                     </div>
                   </div>
                 </div>
                 <div class="qp-field">
-                  <span class="qp-field__label">Material UV</span>
-                  <div class="qp-dropdown" data-dropdown>
-                    <button class="qp-dropdown__trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
-                      <span class="qp-dropdown__value" data-dropdown-value>ModelUV</span>
+                  <span class="qp-field__label">Disabled</span>
+                  <div class="qp-dropdown">
+                    <button class="qp-dropdown__trigger" type="button" aria-haspopup="listbox" aria-expanded="false" disabled>
+                      <span class="qp-dropdown__value">Inherited from policy</span>
                       <span class="qp-dropdown__chevron">⌄</span>
                     </button>
-                    <div class="qp-dropdown__menu" role="listbox" aria-label="Material UV">
-                      <button class="qp-dropdown__option is-selected" type="button" role="option" aria-selected="true" data-value="ModelUV">ModelUV</button>
-                      <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="WorldUV">WorldUV</button>
-                      <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="ScreenUV">ScreenUV</button>
-                    </div>
                   </div>
                 </div>
               </div>

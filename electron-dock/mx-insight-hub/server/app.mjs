@@ -4,7 +4,12 @@ import { extname, join, normalize } from 'node:path'
 import { secureEqual } from './core/crypto.mjs'
 import { AppError } from './core/errors.mjs'
 import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson } from './core/http.mjs'
-import { PUBLIC_DOCS_HTML, PUBLIC_OPENAPI_DOCUMENT } from './public-docs.mjs'
+import {
+  PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT,
+  PUBLIC_OPENAPI_DOCUMENT,
+  publicDocsHtmlForPath,
+  publicDocsRedirectForPath,
+} from './public-docs.mjs'
 import { publicStoredSearchItem } from './data/stored-search.mjs'
 import { normalizeChinaProvince } from './data/china-provinces.mjs'
 import {
@@ -23,6 +28,7 @@ import {
   sourceCatalogTermId,
   sourceCatalogTermSnapshot,
 } from './data/source-catalog.mjs'
+
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import {
   BUILTIN_FILE_FORMAT_RULES,
@@ -58,6 +64,10 @@ import {
   resolveSearchProfile,
   searchCapabilities,
 } from './search/profiles.mjs'
+
+const PUBLIC_DOCS_SCRIPT_HASH = createHash('sha256')
+  .update(PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT)
+  .digest('base64')
 
 function queryFilters(searchParams) {
   return {
@@ -875,17 +885,32 @@ export function createApp({
         return
       }
 
-      if (request.method === 'GET' && (pathname === '/docs' || pathname === '/docs/')) {
+      const publicDocsRedirect = request.method === 'GET' ? publicDocsRedirectForPath(pathname) : null
+      if (publicDocsRedirect !== null) {
         if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
-        response.writeHead(200, {
-          'content-type': 'text/html; charset=utf-8',
-          'content-length': Buffer.byteLength(PUBLIC_DOCS_HTML),
+        response.writeHead(308, {
+          location: publicDocsRedirect,
           'cache-control': 'public, max-age=300',
-          'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+          'content-length': '0',
           'referrer-policy': 'no-referrer',
           'x-content-type-options': 'nosniff',
         })
-        response.end(PUBLIC_DOCS_HTML)
+        response.end()
+        return
+      }
+
+      const publicDocsHtml = request.method === 'GET' ? publicDocsHtmlForPath(pathname) : null
+      if (publicDocsHtml !== null) {
+        if (listenerMode === 'admin') throw new AppError(404, 'not_found', 'Route not found')
+        response.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'content-length': Buffer.byteLength(publicDocsHtml),
+          'cache-control': 'public, max-age=300',
+          'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${PUBLIC_DOCS_SCRIPT_HASH}'; base-uri 'none'; frame-ancestors 'none'`,
+          'referrer-policy': 'no-referrer',
+          'x-content-type-options': 'nosniff',
+        })
+        response.end(publicDocsHtml)
         return
       }
       if (request.method === 'GET' && pathname === '/docs/openapi.json') {
@@ -2947,6 +2972,25 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/source-catalog/metadata') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.sourceCatalogMetadata(
+            context,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/source-catalog') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.sourceCatalog(context, Object.fromEntries(searchParams.entries())),
+          requestId,
+        })
+        return
+      }
       if (request.method === 'GET' && pathname === '/api/v1/data/public-opinion/regions') {
         const context = await requirePublic(request)
         sendJson(response, 200, {
@@ -2989,6 +3033,41 @@ export function createApp({
         sendJson(response, 200, {
           data: await service.publicOpinionCoverage(
             context,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/public-opinion/funnel') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.publicOpinionDiagnosticsFunnel(
+            context,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/public-opinion/records') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.publicOpinionDiagnosticsRecords(
+            context,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/data/public-opinion/records/:id')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.publicOpinionDiagnosticsRecord(
+            context,
+            params.id,
             Object.fromEntries(searchParams.entries()),
           ),
           requestId,

@@ -98,7 +98,22 @@ curl -sS -i "$HUB_URL/health/dependencies"
 
 ### `GET /docs`（`/docs/` 是别名）
 
-返回自包含的 HTML 公开指南，可缓存五分钟。
+返回自包含的 HTML 公开指南开始页，可缓存五分钟。左侧每个标签都有独立路由，可直达、刷新和复制链接：
+
+| 文档页 | 路径 |
+| --- | --- |
+| 认证与调用规则 | `/docs/auth` |
+| 数据源目录 | `/docs/source-catalog` |
+| Telegram 会话 | `/docs/telegram` |
+| 全国舆情 | `/docs/public-opinion` |
+| 通用搜索 | `/docs/search` |
+| Night-All 兼容层 | `/docs/night-all` |
+| 通用工具 | `/docs/tools` |
+| 能力与证据 | `/docs/evidence` |
+| 错误与重试 | `/docs/errors` |
+
+`/docs/authentication` 和 `/docs/operations` 保留为旧路径的 308 规范化跳转。旧的
+`/docs#telegram` 等锚点会由开始页跳到对应的新路由，新页面不再下发整份长文档。
 
 ```bash
 curl -sS "$HUB_URL/docs"
@@ -153,6 +168,53 @@ P1 地区目录需要 `data.platforms[]` 中存在 `platform=public_opinion`，�
 缺少任意一个都不能读取该 feed；后者不默认授予，也不会自行授予数据平台访问权。
 后者的 `ready=true` 还表示 region feed 专用的全局 latest 索引和
 revision-fenced display-province 索引均已通过精确合同校验。
+
+`public_opinion.diagnostics.read` 是另一个非默认 step-up capability，与
+`public_opinion` platform grant 同时存在时才能查看漏斗和未展示记录。
+`source_catalog` 平台项使用 Hub stored 数据面，能力包括
+`catalog_entries`、`catalog_metadata` 和 `filtered_browse`。
+
+## 3.1 数据源目录 API
+
+本节需要显式 `source_catalog` platform grant，只接受 API Key。两个 GET
+都独立计量且不使用幂等 key。
+
+### `GET /api/v1/data/source-catalog`
+
+支持 `query`、`sourceKind`、`majorCategory`、`scenario`、`region`、
+`coverageStatus`、`deliveryStatus`、`reviewStatus`、`runtimeStatus`、`priority`、
+`ownerId`、`tag`、`pageSize`和`cursor`。`pageSize` 默认 50，上限 100，且可被
+platform policy 进一步降低。返回 active-only 的 `source-catalog.public.v1`
+公开投影及 `returnedCount/totalCount/hasMore/nextCursor`。
+普通业务备注仍会返回；若误粘了 DSN、带凭据 URL、私网连接、API key、token、
+password 等高置信凭据内容，Hub 会在搜索和 facet 计算前按字段移除，并在条目的
+`redactedFields` 中列出字段名。taxonomy/负责人只有发生脱敏时才返回该字段。
+
+```bash
+curl -sS -i --get \
+  -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode 'coverageStatus=covered' \
+  --data-urlencode 'deliveryStatus=doing' \
+  --data-urlencode 'pageSize=50' \
+  "$HUB_URL/api/v1/data/source-catalog"
+```
+
+cursor 是绑定完整 filters 和 pageSize 的 HMAC 签名 keyset，稳定顺序为
+`(legacySequence NULLS LAST, canonicalName, id)`。条件改变后应移除 cursor
+从首页开始；复用旧 cursor 返回 `400 invalid_cursor`。
+
+### `GET /api/v1/data/source-catalog/metadata`
+
+返回公开字段/枚举、active taxonomy、负责人公开投影、summary 和 facets，
+供外部系统还原目录筛选器和看板。列表和 metadata 都不包含
+`evidenceRefs/customFields/importedFrom/events/related-data`、登录绑定、连接或凭据。
+该接口不接受 query 参数；传入任何 query key 都返回 `400 unsupported_fields`。
+
+```bash
+curl -sS -i \
+  -H "Authorization: Bearer $HUB_KEY" \
+  "$HUB_URL/api/v1/data/source-catalog/metadata"
+```
 
 ## 4. 搜索 API
 
@@ -372,6 +434,36 @@ publication state 的记录，也不返回 provider/endpoint、凭据、策略/�
 旧的 `/provinces/{province}/items`、`/province-coverage`、`/items/{id}` 和搜索接口均保持
 原有路径、默认值、授权和 cursor 语义；P1 不提供城市 feed。
 
+### 漏斗与未展示记录诊断
+
+这三个诊断 GET 除 `public_opinion` platform grant 外，还需要独立的
+`public_opinion.diagnostics.read` capability。前者缺失返回
+`403 platform_not_granted`，后者缺失返回 `403 capability_not_granted`。
+它们仅接受 API Key，每次调用/重试独立计量，不使用幂等 key。
+
+```bash
+curl -sS -i --get \
+  -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode 'from=2026-08-24T00:00:00Z' \
+  --data-urlencode 'to=2026-08-25T23:59:59Z' \
+  "$HUB_URL/api/v1/data/public-opinion/funnel"
+
+curl -sS -i --get \
+  -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode 'reason=missing_province' \
+  --data-urlencode 'from=2026-08-24T00:00:00Z' \
+  --data-urlencode 'to=2026-08-25T23:59:59Z' \
+  --data-urlencode 'pageSize=50' \
+  "$HUB_URL/api/v1/data/public-opinion/records"
+```
+
+`records` 支持 `cursor/from/heat/pageSize/province/query/reason/scope/stage/status/time/to`。
+可用 `reason=missing_province|missing_publication_state|not_formal_stage|not_formal_status|
+missing_event_time|outside_window|missing_heat` 定位漏斗原因，再用返回的 ID
+调用 `GET /api/v1/data/public-opinion/records/{id}?from=...&to=...` 查看安全诊断详情。
+列表 cursor 是绑定完整筛选的签名 keyset；条件变化后必须从首页开始。
+公开投影不返回 raw、extensions、connection/凭据、Admin 操作或模型 reasoning。
+
 ## 6. Night-All 兼容层
 
 公开的 legacy Night-All 路由仅有：
@@ -554,17 +646,24 @@ curl -sS -i -X POST \
 
 本节全部路由都需要明确的 `telegram` 平台授权。当前所有获得该授权的 consumer
 读取同一份 Hub 已存 canonical Telegram 语料，尚未实现 tenant-specific row subset。
+现有三个路径没有改名；省略扩展字段仍是原有 Monitor-only 合同。Night-All 的
+`raw/crawl/user-info` 转接路径、默认和响应也保持不变。
 
 ### `GET /api/v1/data/telegram/chats`
 
-可选 query 参数：精确 `chatId`、inclusive RFC3339 `from`/`to`、`pageSize`
-（`1..100`，policy 可能降低，默认 50）和 opaque `cursor`（最多 1024 字符）。结果
-使用 event-time 降序 keyset pagination。每次 GET 和重试都会独立计量，不使用
-幂等 key。
+可选 query 参数：`sourceScope=all|monitor|sqlite`（默认 `monitor`）、
+`kind=all|channel|group|unknown`（默认 `all`）、`query`、`pageSize`（`1..100`，
+policy 可能降低，默认 50）和 opaque `cursor`。返回的 `chatKey` 是合并
+Monitor/SQLite 后的稳定会话选择键。每次 GET 和重试都会独立计量，不使用幂等 key。
+省略 `sourceScope/kind/query` 时沿用 Monitor unsigned v1 cursor；显式任一扩展字段
+时使用绑定 sourceScope、kind、query、pageSize 的 HMAC v2 cursor（最长 2048）。
 
 ```bash
 curl -sS -i --get \
   -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode 'sourceScope=all' \
+  --data-urlencode 'kind=channel' \
+  --data-urlencode 'query=news' \
   --data-urlencode 'pageSize=20' \
   "$HUB_URL/api/v1/data/telegram/chats"
 ```
@@ -572,14 +671,26 @@ curl -sS -i --get \
 成功返回 `200`。必须原样传回 `nextCursor`。时间顺序/cursor 无效或含未知 query
 字段时返回 `400`；缺少授权返回 `403`；已存数据不可用返回 `503`。
 
+显式传 `sourceScope`、`kind` 或 `query` 时，扩展模式按不可变的
+`effectiveSortTime` 分页：优先业务事件时间，其次采集时间，最后首次入库时间；响应中
+可空的 `eventTime`/`collectedAt` 不会被回填改写。省略这些扩展参数时仍使用既有
+Monitor 排序与 cursor 语义。
+
 ### `GET /api/v1/data/telegram/messages`
 
-使用与 `chats` 相同的可选参数和限制；`chatId` 精确过滤一个 normalized chat，时间
-上下界均为 inclusive。不支持 offset pagination。
+可选 `sourceScope=all|monitor|sqlite`（默认 `monitor`）、`chatId`、inclusive RFC3339
+`from`/`to`、`pageSize` 和 `cursor`。`chatId` 可使用 chats 返回的稳定会话键精确
+过滤。不支持 offset pagination。每条消息额外返回 `canonicalId` 和
+`sourceScope`，用于上下文读取和来源诊断。
+省略 `sourceScope` 且使用普通 external chatId 时仍是 Monitor v1；显式
+`sourceScope` 或使用 `monitor:<canonical UUID>` / `sqlite:<canonical UUID>` chatKey
+启用绑定来源、chat、时间窗和 pageSize 的 HMAC v2 cursor。只有
+`sourceScope=all` + 普通 external chatId 会合并两套来源。
 
 ```bash
 curl -sS -i --get \
   -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode 'sourceScope=all' \
   --data-urlencode 'pageSize=20' \
   --data-urlencode 'from=2026-08-01T00:00:00Z' \
   "$HUB_URL/api/v1/data/telegram/messages"
@@ -614,10 +725,13 @@ Monitor 当前为 `unknown`，SQLite 当前为 `bounded`。GET 不使用幂等 k
 
 ### `POST /api/v1/data/telegram/search`
 
-必填字段为 `query`。可选字段包括 `scope=messages|chats|all`（默认 `messages`）、
+必填字段为 `query`。可选字段包括 `sourceScope=all|monitor|sqlite`（默认
+`monitor`，显式 `all` 合并 Monitor + SQLite）、`scope=messages|chats|all`（默认 `messages`）、
 `chatId`、`authorId`、inclusive RFC3339 `from`/`to`、`matchMode=full_text`、
 `pageSize`（`1..100`，默认 50 且受 policy 限制）和最多 8192 字符的 opaque cursor。
 该路由已固定为 Telegram，不接受 `platform` 字段。
+省略 `sourceScope` 保留旧 Monitor-only v3 cursor binding；显式传
+`monitor|sqlite|all` 才把来源加入扩展 binding。
 
 ```bash
 IDEMPOTENCY_KEY="$(new_idempotency_key)"
@@ -625,7 +739,7 @@ curl -sS -i -X POST \
   -H "Authorization: Bearer $HUB_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
-  -d '{"query":"AI Agent","scope":"messages","from":"2026-08-01T00:00:00Z","matchMode":"full_text","pageSize":20}' \
+  -d '{"query":"AI Agent","sourceScope":"all","scope":"messages","from":"2026-08-01T00:00:00Z","matchMode":"full_text","pageSize":20}' \
   "$HUB_URL/api/v1/data/telegram/search"
 ```
 

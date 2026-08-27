@@ -107,6 +107,7 @@ test('generic capability grants stay separate from platform grants and policies'
     assert.deepEqual(configuration.payload.data.availableCapabilities, [
       { capability: 'nlp.tokenize', ready: true },
       { capability: 'public_opinion.all_ingested.read', ready: false },
+      { capability: 'public_opinion.diagnostics.read', ready: false },
     ])
 
     const unsupported = await call('/internal/v1/admin/capabilities/all', {

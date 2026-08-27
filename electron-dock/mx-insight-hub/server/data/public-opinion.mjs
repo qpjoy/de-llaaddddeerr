@@ -6,6 +6,7 @@ export const PUBLIC_OPINION_PLATFORM = 'public_opinion'
 export const PUBLIC_OPINION_DATASET_ID = 'public-opinion.province.v1'
 export const PUBLIC_OPINION_OBJECT_TYPE = 'opinion_item'
 export const PUBLIC_OPINION_ALL_INGESTED_CAPABILITY = 'public_opinion.all_ingested.read'
+export const PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY = 'public_opinion.diagnostics.read'
 
 const ALLOWED_QUERY_FIELDS = new Set([
   'cursor',

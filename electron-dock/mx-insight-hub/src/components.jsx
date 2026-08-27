@@ -8,10 +8,23 @@ import {
   CircleNotch,
   Copy,
   Info,
+  MagnifyingGlass,
   WarningCircle,
   X,
   XCircle,
 } from '@phosphor-icons/react'
+
+export const THEME_CHANGE_EVENT = 'mx-insight-hub:theme-change'
+
+export function useThemeRevision() {
+  const [revision, setRevision] = useState(0)
+  useEffect(() => {
+    const update = () => setRevision((value) => value + 1)
+    window.addEventListener(THEME_CHANGE_EVENT, update)
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, update)
+  }, [])
+  return revision
+}
 
 export function useRemoteData(load, onUnauthorized) {
   const [state, setState] = useState({ data: null, error: null, loading: true })
@@ -254,46 +267,84 @@ export function Field({ label, hint, children, className = '' }) {
   )
 }
 
-export function DropdownField({ label, value, onChange, options, disabled = false, className = '', placeholder = '请选择' }) {
+export function DropdownField({
+  label,
+  value,
+  onChange,
+  options = [],
+  disabled = false,
+  required = false,
+  autoFocus = false,
+  className = '',
+  placeholder = '请选择',
+  hint = '',
+  leadingIcon: LeadingIcon = null,
+}) {
   const labelId = useId()
   const triggerId = useId()
+  const searchId = useId()
   const listboxId = useId()
   const rootRef = useRef(null)
+  const anchorRef = useRef(null)
   const triggerRef = useRef(null)
+  const searchRef = useRef(null)
   const optionRefs = useRef([])
-  const typeaheadRef = useRef({ value: '', timer: null })
   const [open, setOpen] = useState(false)
   const [openUpward, setOpenUpward] = useState(false)
-  const selectedIndex = options.findIndex((option) => option.value === value)
-  const firstEnabledIndex = useMemo(
-    () => options.findIndex((option) => !option.disabled),
-    [options],
-  )
-  const initialIndex = selectedIndex >= 0 ? selectedIndex : firstEnabledIndex
-  const [highlightedIndex, setHighlightedIndex] = useState(initialIndex)
-  const selected = selectedIndex >= 0 ? options[selectedIndex] : null
+  const [query, setQuery] = useState('')
+  const normalizedQuery = query.trim().toLocaleLowerCase('zh-CN')
+  const selected = options.find((option) => !option.group && option.value === value) || null
+  const visibleOptions = useMemo(() => {
+    if (!normalizedQuery) return options
+    const matches = new Set(options.filter((option) => (
+      !option.group
+      && [option.label, option.value, option.description]
+        .filter(Boolean)
+        .join('\n')
+        .toLocaleLowerCase('zh-CN')
+        .includes(normalizedQuery)
+    )))
+    const visible = []
+    let pendingGroup = null
+    let groupIncluded = false
+    for (const option of options) {
+      if (option.group) {
+        pendingGroup = option
+        groupIncluded = false
+      } else if (matches.has(option)) {
+        if (pendingGroup && !groupIncluded) {
+          visible.push(pendingGroup)
+          groupIncluded = true
+        }
+        visible.push(option)
+      }
+    }
+    return visible
+  }, [normalizedQuery, options])
+  const selectedIndex = visibleOptions.findIndex((option) => !option.group && option.value === value)
+  const firstEnabledIndex = visibleOptions.findIndex((option) => !option.disabled && !option.group)
+  const [highlightedIndex, setHighlightedIndex] = useState(Math.max(0, selectedIndex, firstEnabledIndex))
 
   const openMenu = () => {
     if (disabled) return
-    setHighlightedIndex(selectedIndex >= 0 ? selectedIndex : firstEnabledIndex)
+    setQuery('')
     setOpen(true)
   }
 
   const closeMenu = ({ restoreFocus = false } = {}) => {
     setOpen(false)
+    setQuery('')
     if (restoreFocus) triggerRef.current?.focus()
   }
 
-  const selectOption = (index) => {
-    const option = options[index]
-    if (!option || option.disabled) return
+  const selectOption = (option) => {
+    if (!option || option.disabled || option.group) return
     onChange(option.value)
-    setHighlightedIndex(index)
     closeMenu({ restoreFocus: true })
   }
 
   const moveHighlight = (delta) => {
-    const enabled = options.flatMap((option, index) => (option.disabled ? [] : [index]))
+    const enabled = visibleOptions.flatMap((option, index) => (option.disabled || option.group ? [] : [index]))
     if (!enabled.length) return
     const position = enabled.indexOf(highlightedIndex)
     const nextPosition = position < 0
@@ -303,32 +354,12 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
   }
 
   const moveToEdge = (edge) => {
-    const enabled = options.flatMap((option, index) => (option.disabled ? [] : [index]))
+    const enabled = visibleOptions.flatMap((option, index) => (option.disabled || option.group ? [] : [index]))
     if (enabled.length) setHighlightedIndex(edge === 'start' ? enabled[0] : enabled.at(-1))
   }
 
-  const moveByCharacter = (character) => {
-    if (!character || character.length !== 1 || /\s/u.test(character)) return false
-    clearTimeout(typeaheadRef.current.timer)
-    const query = `${typeaheadRef.current.value}${character}`.toLocaleLowerCase()
-    const start = highlightedIndex >= 0 ? highlightedIndex + 1 : 0
-    const ordered = [...options.keys()].map((_, offset) => (start + offset) % options.length)
-    const match = ordered.find((index) => (
-      !options[index].disabled && String(options[index].label).toLocaleLowerCase().startsWith(query)
-    ))
-    typeaheadRef.current.value = query
-    typeaheadRef.current.timer = window.setTimeout(() => {
-      typeaheadRef.current.value = ''
-      typeaheadRef.current.timer = null
-    }, 500)
-    if (match !== undefined) {
-      setHighlightedIndex(match)
-      if (!open) setOpen(true)
-    }
-    return true
-  }
-
   const onTriggerKeyDown = (event) => {
+    if (event.nativeEvent?.isComposing || event.isComposing || event.keyCode === 229) return
     if (event.key === 'Escape' && open) {
       event.preventDefault()
       closeMenu()
@@ -351,11 +382,34 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
     }
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
-      if (open) selectOption(highlightedIndex)
+      if (open) selectOption(visibleOptions[highlightedIndex] || visibleOptions[firstEnabledIndex])
       else openMenu()
       return
     }
-    if (moveByCharacter(event.key)) event.preventDefault()
+    if (!open && event.key.length === 1 && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault()
+      setQuery(event.key)
+      setOpen(true)
+    }
+  }
+
+  const onSearchKeyDown = (event) => {
+    if (event.nativeEvent?.isComposing || event.isComposing || event.keyCode === 229) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      moveHighlight(event.key === 'ArrowDown' ? 1 : -1)
+    } else if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault()
+      moveToEdge(event.key === 'Home' ? 'start' : 'end')
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      selectOption(visibleOptions[highlightedIndex] || visibleOptions[firstEnabledIndex])
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      closeMenu({ restoreFocus: true })
+    } else if (event.key === 'Tab') {
+      closeMenu()
+    }
   }
 
   useEffect(() => {
@@ -368,42 +422,43 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
   }, [open])
 
   useLayoutEffect(() => {
-    if (!open || !triggerRef.current) return
-    const triggerRect = triggerRef.current.getBoundingClientRect()
+    if (!open || !anchorRef.current) return
+    const triggerRect = anchorRef.current.getBoundingClientRect()
     const boundaryRect = rootRef.current?.closest('.mih-modal__body')?.getBoundingClientRect()
       ?? rootRef.current?.closest('.mih-modal')?.getBoundingClientRect()
     const boundaryTop = Math.max(0, boundaryRect?.top ?? 0)
     const boundaryBottom = Math.min(window.innerHeight, boundaryRect?.bottom ?? window.innerHeight)
-    const menuHeight = Math.min(280, options.length * 33 + 12)
+    const menuHeight = Math.min(292, visibleOptions.length * 33 + 58)
     const spaceBelow = boundaryBottom - triggerRect.bottom - 8
     const spaceAbove = triggerRect.top - boundaryTop - 8
     setOpenUpward(spaceBelow < menuHeight && spaceAbove > spaceBelow)
-  }, [open, options.length])
+  }, [open, visibleOptions.length])
+
+  useEffect(() => {
+    if (!open) return
+    const nextSelectedIndex = visibleOptions.findIndex((option) => !option.group && option.value === value && !option.disabled)
+    setHighlightedIndex(nextSelectedIndex >= 0 ? nextSelectedIndex : Math.max(0, firstEnabledIndex))
+    window.requestAnimationFrame(() => searchRef.current?.focus())
+  }, [normalizedQuery, open])
 
   useEffect(() => {
     if (open) optionRefs.current[highlightedIndex]?.scrollIntoView({ block: 'nearest' })
   }, [highlightedIndex, open])
 
-  useEffect(() => () => clearTimeout(typeaheadRef.current.timer), [])
-
-  useEffect(() => {
-    if (!open) setHighlightedIndex(selectedIndex >= 0 ? selectedIndex : firstEnabledIndex)
-  }, [firstEnabledIndex, open, selectedIndex])
-
   return (
     <div
       ref={rootRef}
-      className={`qp-field ${className}`.trim()}
+      className={`qp-field mih-search-select ${className}`.trim()}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) closeMenu()
       }}
     >
-      <span className="qp-field__label" id={labelId}>{label}</span>
-      <div className={`qp-dropdown mih-dropdown${open ? ' is-open' : ''}`}>
+      <span className={`qp-field__label mih-search-select__label${LeadingIcon ? ' mih-sr-only' : ''}`} id={labelId}>{label}</span>
+      <div ref={anchorRef} className={`qp-dropdown qp-dropdown--searchable mih-search-select__anchor${open ? ' is-open' : ''}`}>
         <button
           ref={triggerRef}
           id={triggerId}
-          className="qp-dropdown__trigger"
+          className={`qp-dropdown__trigger mih-search-select__trigger${open ? ' is-open' : ''}`}
           type="button"
           role="combobox"
           aria-haspopup="listbox"
@@ -411,37 +466,65 @@ export function DropdownField({ label, value, onChange, options, disabled = fals
           aria-controls={listboxId}
           aria-labelledby={`${labelId} ${triggerId}`}
           aria-activedescendant={open && highlightedIndex >= 0 ? `${listboxId}-option-${highlightedIndex}` : undefined}
+          aria-required={required || undefined}
           disabled={disabled}
+          autoFocus={autoFocus}
           onClick={() => (open ? closeMenu() : openMenu())}
           onKeyDown={onTriggerKeyDown}
         >
-          <span className={`qp-dropdown__value${selected ? '' : ' is-placeholder'}`}>{selected?.label ?? (value ? `未知筛选：${value}` : placeholder)}</span>
-          <CaretDown className="qp-dropdown__chevron" size={14} aria-hidden="true" />
+          {LeadingIcon ? <LeadingIcon size={16} aria-hidden="true" /> : null}
+          {LeadingIcon ? <span className="mih-search-select__inline-label">{label}</span> : null}
+          <span className={`qp-dropdown__value mih-search-select__value${selected ? '' : ' is-placeholder'}`}>{selected?.label ?? (value ? `未知筛选：${value}` : placeholder)}</span>
+          <CaretDown className="qp-dropdown__chevron mih-search-select__chevron" size={14} aria-hidden="true" />
         </button>
-        <div className={`qp-dropdown__menu mih-dropdown__menu${openUpward ? ' is-upward' : ''}`} id={listboxId} role="listbox" aria-labelledby={labelId}>
-          {options.map((option, index) => option.group ? (
-            <div className="mih-dropdown__group" key={option.value} role="presentation">{option.label}</div>
-          ) : (
-            <button
-              ref={(node) => { optionRefs.current[index] = node }}
-              className={`qp-dropdown__option${index === selectedIndex ? ' is-selected' : ''}${index === highlightedIndex ? ' is-highlighted' : ''}`}
-              id={`${listboxId}-option-${index}`}
-              key={option.value}
-              type="button"
-              role="option"
-              aria-selected={index === selectedIndex}
-              aria-disabled={option.disabled || undefined}
-              disabled={option.disabled}
-              tabIndex={-1}
-              onMouseEnter={() => { if (!option.disabled) setHighlightedIndex(index) }}
-              onClick={() => selectOption(index)}
-            >
-              <Check className="mih-dropdown__check" size={13} weight="bold" aria-hidden="true" />
-              <span>{option.label}</span>
-            </button>
-          ))}
-        </div>
+        {open ? (
+          <div className={`qp-dropdown__menu qp-dropdown__menu--searchable mih-search-select__menu${openUpward ? ' is-upward' : ''}`}>
+            <label className="qp-dropdown__search mih-search-select__search" htmlFor={searchId}>
+              <MagnifyingGlass size={14} aria-hidden="true" />
+              <input
+                ref={searchRef}
+                id={searchId}
+                type="search"
+                role="searchbox"
+                value={query}
+                placeholder={`搜索${label}`}
+                aria-label={`搜索${label}选项`}
+                aria-controls={listboxId}
+                aria-activedescendant={visibleOptions.length ? `${listboxId}-option-${highlightedIndex}` : undefined}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={onSearchKeyDown}
+              />
+              {query ? <button type="button" aria-label={`清空${label}搜索`} onClick={() => setQuery('')}><X size={12} aria-hidden="true" /></button> : null}
+            </label>
+            <div className="qp-dropdown__options mih-search-select__options" id={listboxId} role="listbox" aria-labelledby={labelId}>
+              {visibleOptions.map((option, index) => option.group ? (
+                <div className="qp-dropdown__group" key={option.value} role="presentation">{option.label}</div>
+              ) : (
+                <button
+                  ref={(node) => { optionRefs.current[index] = node }}
+                  className={`qp-dropdown__option mih-combobox-option${option.value === value ? ' is-selected' : ''}${index === highlightedIndex ? ' is-highlighted' : ''}`}
+                  id={`${listboxId}-option-${index}`}
+                  key={`${option.value}-${option.label}`}
+                  type="button"
+                  role="option"
+                  aria-selected={option.value === value}
+                  aria-disabled={option.disabled || undefined}
+                  disabled={option.disabled}
+                  tabIndex={-1}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => { if (!option.disabled) setHighlightedIndex(index) }}
+                  onClick={() => selectOption(option)}
+                >
+                  <Check className="qp-dropdown__check mih-combobox-option__check" size={13} weight="bold" aria-hidden="true" />
+                  <span>{option.label}</span>
+                </button>
+              ))}
+              {!visibleOptions.some((option) => !option.group) ? <p className="qp-dropdown__empty mih-search-select__empty">没有匹配项</p> : null}
+            </div>
+          </div>
+        ) : null}
       </div>
+      {hint ? <span className="qp-field__hint">{hint}</span> : null}
     </div>
   )
 }
@@ -574,7 +657,7 @@ export function ToastStack({ toasts, onDismiss }) {
 }
 
 function chartTheme() {
-  const styles = getComputedStyle(document.documentElement)
+  const styles = getComputedStyle(document.querySelector('.qp-app') || document.documentElement)
   const token = (name, fallback) => styles.getPropertyValue(name).trim() || fallback
   return {
     primary: token('--qp-primary', '#2bf6d2'),
@@ -592,12 +675,13 @@ function chartTheme() {
 
 function useChart(buildConfig, signature) {
   const canvasRef = useRef(null)
+  const themeRevision = useThemeRevision()
   useEffect(() => {
     if (!canvasRef.current) return undefined
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     const chart = new Chart(canvasRef.current, buildConfig(chartTheme(), reducedMotion))
     return () => chart.destroy()
-  }, [buildConfig, signature])
+  }, [buildConfig, signature, themeRevision])
   return canvasRef
 }
 

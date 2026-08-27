@@ -9,7 +9,9 @@ export const TELEGRAM_MONITOR_RESOURCES = Object.freeze({
   messages: Object.freeze({ datasetId: 'telegram.monitor.messages.v1', objectType: 'message' }),
 })
 
-const ALLOWED_QUERY_FIELDS = new Set(['chatId', 'cursor', 'from', 'pageSize', 'to'])
+const ALLOWED_QUERY_FIELDS = new Set([
+  'chatId', 'cursor', 'from', 'kind', 'pageSize', 'query', 'sourceScope', 'to',
+])
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const ISO_DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/
 const PUBLIC_METRICS = Object.freeze({
@@ -29,8 +31,76 @@ const PUBLIC_ENTITY = Object.freeze({
   type: 'string', offset: 'number', length: 'number', url: 'string', user_id: 'number',
 })
 const SEARCH_SCOPES = new Set(['messages', 'chats', 'all'])
-const SEARCH_FIELDS = new Set(['authorId', 'chatId', 'cursor', 'from', 'matchMode', 'pageSize', 'query', 'scope', 'to'])
+const SEARCH_FIELDS = new Set([
+  'authorId', 'chatId', 'cursor', 'from', 'matchMode', 'pageSize', 'query',
+  'scope', 'sourceScope', 'to',
+])
 const ENTITY_SEARCH_FIELDS = new Set(['query', 'pageSize'])
+const SOURCE_SCOPES = new Set(['all', 'monitor', 'sqlite'])
+const CHAT_KINDS = new Set(['all', 'channel', 'group', 'unknown'])
+const CHANNEL_TYPES = new Set(['broadcast', 'channel', 'public_channel'])
+const GROUP_TYPES = new Set(['group', 'megagroup', 'public_group', 'supergroup'])
+
+export const TELEGRAM_STORED_DATASETS = Object.freeze({
+  monitor: Object.freeze({
+    chats: 'telegram.monitor.chats.v1',
+    messages: 'telegram.monitor.messages.v1',
+  }),
+  sqlite: Object.freeze({
+    chats: 'telegram.sqlite.chats.v1',
+    messages: 'telegram.sqlite.messages.v1',
+  }),
+})
+
+function enumValue(value, field, allowed, fallback) {
+  if (value == null) return fallback
+  const normalized = stringValue(value, field, 32)?.toLowerCase()
+  if (!allowed.has(normalized)) {
+    throw new AppError(400, 'invalid_request', `${field} is not supported`)
+  }
+  return normalized
+}
+
+export function telegramStoredDatasetIds(sourceScope, resource) {
+  if (sourceScope === 'monitor' || sourceScope === 'sqlite') {
+    return [TELEGRAM_STORED_DATASETS[sourceScope][resource]]
+  }
+  return [
+    TELEGRAM_STORED_DATASETS.monitor[resource],
+    TELEGRAM_STORED_DATASETS.sqlite[resource],
+  ]
+}
+
+export function telegramSourceScopeForDataset(datasetId) {
+  if (datasetId === TELEGRAM_STORED_DATASETS.monitor.chats
+      || datasetId === TELEGRAM_STORED_DATASETS.monitor.messages) return 'monitor'
+  if (datasetId === TELEGRAM_STORED_DATASETS.sqlite.chats
+      || datasetId === TELEGRAM_STORED_DATASETS.sqlite.messages) return 'sqlite'
+  return null
+}
+
+function publicTelegramChatKind(row) {
+  const value = row?.stable_fields?.attributes?.chatType ?? row?.content_type
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (CHANNEL_TYPES.has(normalized)) return 'channel'
+  if (GROUP_TYPES.has(normalized)) return 'group'
+  return 'unknown'
+}
+
+function publicTelegramUrl(value, sourceScope) {
+  if (sourceScope !== 'sqlite') return value ?? null
+  if (typeof value !== 'string' || !value.trim() || value.length > 2_048) return null
+  try {
+    const parsed = new URL(value.trim())
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return null
+    if ([...parsed.searchParams.keys()].some(
+      (key) => /(?:auth|credential|key|password|secret|signature|token)/i.test(key),
+    )) return null
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
 
 function stringValue(value, field, maxLength) {
   if (value == null) return null
@@ -104,6 +174,75 @@ export function decodeTelegramCursor(value) {
   }
 }
 
+const PRODUCT_CURSOR_VERSION = 2
+const PRODUCT_CURSOR_MAX_LENGTH = 2_048
+
+function telegramProductCursorBinding(query, resourceName) {
+  return createHash('sha256').update(JSON.stringify({
+    v: PRODUCT_CURSOR_VERSION,
+    contract: `mx-insight-hub.data-products.telegram-${resourceName}.v1`,
+    resource: resourceName,
+    sourceScope: query.sourceScope,
+    ...(resourceName === 'chats'
+      ? { kind: query.kind, query: query.query }
+      : { chatId: query.chatId, from: query.from, to: query.to }),
+    pageSize: query.pageSize,
+  })).digest('base64url')
+}
+
+function productCursorSignature(payload, secret) {
+  if (typeof secret !== 'string' || !secret) {
+    throw new AppError(500, 'cursor_configuration_error', 'Telegram product cursor signing is not configured')
+  }
+  return createHmac('sha256', secret).update(JSON.stringify(payload)).digest('base64url')
+}
+
+function encodeTelegramProductCursor({ sortTime, id }, binding, secret) {
+  const payload = {
+    v: PRODUCT_CURSOR_VERSION,
+    q: binding,
+    t: new Date(sortTime).toISOString(),
+    id,
+  }
+  if (!UUID_PATTERN.test(id || '')) {
+    throw new AppError(500, 'cursor_configuration_error', 'Telegram product cursor row is invalid')
+  }
+  return Buffer.from(
+    JSON.stringify({ ...payload, s: productCursorSignature(payload, secret) }),
+    'utf8',
+  ).toString('base64url')
+}
+
+function decodeTelegramProductCursor(value, binding, secret) {
+  if (!value) return null
+  try {
+    if (
+      typeof value !== 'string'
+      || value.length > PRODUCT_CURSOR_MAX_LENGTH
+      || !/^[A-Za-z0-9_-]+$/.test(value)
+      || Buffer.from(value, 'base64url').toString('base64url') !== value
+    ) throw new Error('bad cursor')
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    const payload = { v: parsed?.v, q: parsed?.q, t: parsed?.t, id: parsed?.id }
+    const validKeys = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      && Object.keys(parsed).sort().join(',') === 'id,q,s,t,v'
+    const validSortTime = typeof parsed?.t === 'string'
+      && new Date(parsed.t).toISOString() === parsed.t
+    if (
+      !validKeys
+      || parsed.v !== PRODUCT_CURSOR_VERSION
+      || parsed.q !== binding
+      || !validSortTime
+      || !UUID_PATTERN.test(parsed.id || '')
+      || typeof parsed.s !== 'string'
+      || !signaturesMatch(parsed.s, productCursorSignature(payload, secret))
+    ) throw new Error('bad cursor')
+    return { sortTime: parsed.t, id: parsed.id }
+  } catch {
+    throw new AppError(400, 'invalid_cursor', 'cursor is invalid for this Telegram product query')
+  }
+}
+
 const SEARCH_CURSOR_VERSION = 3
 const SEARCH_SORT_VERSION = 'es-score-eventTime-id-sharddoc-pg-eventTime-id-v2'
 const SEARCH_ANALYSIS_STATE_VERSION = 1
@@ -112,7 +251,7 @@ const SEARCH_ANALYSIS_MAX_TOKENS = 512
 const SEARCH_ANALYSIS_MAX_TOKEN_LENGTH = 512
 const SEARCH_ANALYSIS_MAX_TOTAL_LENGTH = 2_048
 
-function telegramSearchBinding(query) {
+function telegramSearchBinding(query, { includeSourceScope = false } = {}) {
   return createHash('sha256')
     .update(JSON.stringify({
       v: SEARCH_CURSOR_VERSION,
@@ -125,6 +264,7 @@ function telegramSearchBinding(query) {
       from: query.from,
       to: query.to,
       pageSize: query.pageSize,
+      ...(includeSourceScope ? { sourceScope: query.sourceScope } : {}),
     }))
     .digest('base64url')
 }
@@ -284,8 +424,14 @@ export function normalizeTelegramSearchQuery(input, maxPageSize = 100, cursorSec
     from,
     to,
     pageSize: pageSizeValue(input.pageSize, Math.min(100, validPolicyMax)),
+    sourceScope: enumValue(input.sourceScope, 'sourceScope', SOURCE_SCOPES, 'monitor'),
   }
-  const cursorBinding = telegramSearchBinding(normalized)
+  // A missing sourceScope is the original Monitor-only v1 contract. Keep its
+  // v3 cursor binding byte-for-byte compatible; the additive multi-source
+  // contract is entered only when callers opt in with sourceScope.
+  const cursorBinding = telegramSearchBinding(normalized, {
+    includeSourceScope: input.sourceScope != null,
+  })
   return {
     ...normalized,
     cursorBinding,
@@ -312,7 +458,12 @@ export function normalizeTelegramEntityQuery(input, maxPageSize = 100) {
 }
 
 /** Validate the complete public query allowlist before it reaches SQL. */
-export function normalizeTelegramMonitorQuery(input, maxPageSize = 100) {
+export function normalizeTelegramMonitorQuery(
+  input,
+  maxPageSize = 100,
+  resourceName = null,
+  cursorSecret,
+) {
   const unsupported = Object.keys(input || {}).filter((key) => !ALLOWED_QUERY_FIELDS.has(key))
   if (unsupported.length > 0) {
     throw new AppError(400, 'unsupported_fields', `Unsupported query fields: ${unsupported.join(', ')}`)
@@ -322,12 +473,55 @@ export function normalizeTelegramMonitorQuery(input, maxPageSize = 100) {
   if (from && to && from > to) throw new AppError(400, 'invalid_request', 'from must not be later than to')
   const validPolicyMax = Number.isInteger(maxPageSize) && maxPageSize > 0 ? maxPageSize : 100
   const effectiveMax = Math.min(100, validPolicyMax)
-  return {
-    chatId: stringValue(input?.chatId, 'chatId', 256),
+  const extendedChatQuery = resourceName === 'chats' && (
+    input?.sourceScope != null || input?.kind != null || input?.query != null
+  )
+  if (extendedChatQuery) {
+    const unsupported = ['chatId', 'from', 'to'].filter((field) => input?.[field] != null)
+    if (unsupported.length > 0) {
+      throw new AppError(400, 'unsupported_fields', `Unsupported Telegram chat fields: ${unsupported.join(', ')}`)
+    }
+  }
+  if (resourceName === 'messages') {
+    const unsupported = ['kind', 'query'].filter((field) => input?.[field] != null)
+    if (unsupported.length > 0) {
+      throw new AppError(400, 'unsupported_fields', `Unsupported Telegram message fields: ${unsupported.join(', ')}`)
+    }
+  }
+  const chatId = stringValue(input?.chatId, 'chatId', 256)
+  const qualifiedChatScope = resourceName === 'messages'
+    ? /^(monitor|sqlite):/i.exec(chatId || '')?.[1]?.toLowerCase() ?? null
+    : null
+  const requestedSourceScope = enumValue(
+    input?.sourceScope,
+    'sourceScope',
+    SOURCE_SCOPES,
+    qualifiedChatScope ?? 'monitor',
+  )
+  const normalized = {
+    chatId,
     from,
     to,
+    kind: enumValue(input?.kind, 'kind', CHAT_KINDS, 'all'),
+    query: stringValue(input?.query, 'query', 200),
+    sourceScope: requestedSourceScope,
     pageSize: pageSizeValue(input?.pageSize, effectiveMax),
-    cursor: decodeTelegramCursor(stringValue(input?.cursor, 'cursor', 1024)),
+  }
+  const extendedCursor = input?.sourceScope != null
+    || extendedChatQuery
+    || qualifiedChatScope !== null
+  const cursorToken = stringValue(
+    input?.cursor,
+    'cursor',
+    extendedCursor ? PRODUCT_CURSOR_MAX_LENGTH : 1_024,
+  )
+  if (!extendedCursor) return { ...normalized, cursor: decodeTelegramCursor(cursorToken) }
+  const binding = telegramProductCursorBinding(normalized, resourceName)
+  return {
+    ...normalized,
+    cursorBinding: binding,
+    cursorToken,
+    cursor: decodeTelegramProductCursor(cursorToken, binding, cursorSecret),
   }
 }
 
@@ -364,7 +558,9 @@ function safeEntities(source) {
  */
 export function publicTelegramMonitorRecord(row) {
   const stable = row.stable_fields || {}
+  const sourceScope = telegramSourceScopeForDataset(row.dataset_id)
   return {
+    canonicalId: row.id ?? null,
     id: row.external_id,
     externalId: row.external_id,
     platform: 'telegram',
@@ -372,7 +568,7 @@ export function publicTelegramMonitorRecord(row) {
     contentType: row.content_type ?? null,
     title: row.title ?? null,
     text: row.body ?? null,
-    url: row.url ?? null,
+    url: publicTelegramUrl(row.url, sourceScope),
     author: {
       id: row.author_external_id ?? null,
       name: row.author_name ?? null,
@@ -396,11 +592,19 @@ export function publicTelegramMonitorRecord(row) {
       datasetId: row.dataset_id,
       origin: stable.source?.origin === 'database' ? 'hub-direct' : 'hub-import',
     },
+    sourceScope,
+    ...(row.object_type === 'chat' && row.id && sourceScope
+      ? { chatKey: `${sourceScope}:${row.id}`, kind: publicTelegramChatKind(row) }
+      : {}),
     dataVersion: String(row.current_revision ?? 1),
   }
 }
 
-export function publicTelegramMonitorPage(rows, pageSize) {
+export function publicTelegramMonitorPage(
+  rows,
+  pageSize,
+  { cursorBinding = null, cursorSecret = null } = {},
+) {
   const hasMore = rows.length > pageSize
   const pageRows = hasMore ? rows.slice(0, pageSize) : rows
   const last = pageRows.at(-1)
@@ -410,7 +614,13 @@ export function publicTelegramMonitorPage(rows, pageSize) {
       returnedCount: pageRows.length,
       hasMore,
       nextCursor: hasMore && last
-        ? encodeTelegramCursor({ sortTime: last.sort_time, id: last.id })
+        ? cursorBinding
+          ? encodeTelegramProductCursor(
+              { sortTime: last.sort_time, id: last.id },
+              cursorBinding,
+              cursorSecret,
+            )
+          : encodeTelegramCursor({ sortTime: last.sort_time, id: last.id })
         : null,
     },
   }
@@ -427,33 +637,38 @@ export function telegramDataSearchResponse({
   durationMs,
 }) {
   const rows = result.items || []
-  const items = rows.map((row) => ({
-    id: row.id,
-    externalId: row.externalId,
-    platform: 'telegram',
-    contentType: row.contentType ?? row.objectType ?? 'message',
-    url: row.url ?? null,
-    title: row.title ?? null,
-    text: row.body ?? null,
-    publishedAt: row.eventTime ? new Date(row.eventTime).toISOString() : null,
-    collectedAt: row.collectedAt ? new Date(row.collectedAt).toISOString() : null,
-    author: {
-      id: row.authorExternalId ?? null,
-      name: row.authorName ?? null,
-      avatarUrl: row.authorAvatarUrl ?? null,
-    },
-    metrics: Object.fromEntries(
-      ['likes', 'comments', 'shares', 'views', 'bookmarks'].map((key) => {
-        const value = row.metrics?.[key]
-        return [key, typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null]
-      }),
-    ),
-    media: { coverUrl: null, images: [], videos: [] },
-    // Night-All v1 deliberately restricts this field to its three upstream
-    // provider enums. Hub is the serving plane, not another upstream provider,
-    // so null is the only strictly compatible and non-misleading value.
-    source: { provider: null, endpointId: 'hub-canonical-search' },
-  }))
+  const items = rows.map((row) => {
+    const sourceScope = telegramSourceScopeForDataset(row.datasetId)
+    return {
+      id: row.id,
+      canonicalId: row.id,
+      externalId: row.externalId,
+      sourceScope,
+      platform: 'telegram',
+      contentType: row.contentType ?? row.objectType ?? 'message',
+      url: publicTelegramUrl(row.url, sourceScope),
+      title: row.title ?? null,
+      text: row.body ?? null,
+      publishedAt: row.eventTime ? new Date(row.eventTime).toISOString() : null,
+      collectedAt: row.collectedAt ? new Date(row.collectedAt).toISOString() : null,
+      author: {
+        id: row.authorExternalId ?? null,
+        name: row.authorName ?? null,
+        avatarUrl: row.authorAvatarUrl ?? null,
+      },
+      metrics: Object.fromEntries(
+        ['likes', 'comments', 'shares', 'views', 'bookmarks'].map((key) => {
+          const value = row.metrics?.[key]
+          return [key, typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null]
+        }),
+      ),
+      media: { coverUrl: null, images: [], videos: [] },
+      // Night-All v1 deliberately restricts this field to its three upstream
+      // provider enums. Hub is the serving plane, not another upstream provider,
+      // so null is the only strictly compatible and non-misleading value.
+      source: { provider: null, endpointId: 'hub-canonical-search' },
+    }
+  })
   const seen = cursor?.seen ?? 0
   const hasMore = Boolean(result.hasMore)
   const nextCursor = hasMore
