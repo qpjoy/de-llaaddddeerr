@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Brain,
   Books,
-  Broadcast,
   CaretDown,
   ChatsCircle,
   Database,
@@ -40,8 +39,7 @@ import { AgentPage, BackfillPage, RetrievalPage, SourcesPage } from './pages-dat
 import { DataCenterPage } from './pages-catalog.jsx'
 import {
   PublicOpinionPage,
-  TelegramChannelsPage,
-  TelegramGroupsPage,
+  TelegramPage,
 } from './pages-data-products.jsx'
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
 
@@ -66,8 +64,7 @@ const ROUTES = [
   { path: '/platforms', label: '开放能力', description: '数据平台与通用 API', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
-  { path: '/data-products/telegram/channels', label: 'Telegram 频道', description: 'Monitor / SQLite 内部会话', icon: Broadcast, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramChannelsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
-  { path: '/data-products/telegram/groups', label: 'Telegram 群组', description: '群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramGroupsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/sources', label: '数据清洗计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
@@ -78,6 +75,10 @@ const ROUTES = [
 ]
 
 const ROUTE_MAP = new Map(ROUTES.map((route) => [route.path, route]))
+const LEGACY_ROUTE_REDIRECTS = new Map([
+  ['/data-products/telegram/channels', { path: '/data-products/telegram', kind: 'channel' }],
+  ['/data-products/telegram/groups', { path: '/data-products/telegram', kind: 'group' }],
+])
 
 function visibleRoutes(session) {
   // An older server may omit capabilities, but platform-wide pages still stay
@@ -112,13 +113,26 @@ function writeSessionToken(token) {
   }
 }
 
-function readLocation() {
+function readLocation({ canonicalize = false } = {}) {
   const raw = window.location.hash.replace(/^#/, '') || '/dashboard?range=24h'
   const separator = raw.indexOf('?')
-  const candidatePath = separator === -1 ? raw : raw.slice(0, separator)
+  let candidatePath = separator === -1 ? raw : raw.slice(0, separator)
+  const query = new URLSearchParams(separator === -1 ? '' : raw.slice(separator + 1))
+  const legacyRedirect = LEGACY_ROUTE_REDIRECTS.get(candidatePath)
+  if (legacyRedirect) {
+    candidatePath = legacyRedirect.path
+    query.set('kind', legacyRedirect.kind)
+    if (canonicalize) {
+      const search = query.toString()
+      window.history.replaceState(
+        null,
+        '',
+        `${window.location.pathname}${window.location.search}#${candidatePath}${search ? `?${search}` : ''}`,
+      )
+    }
+  }
   const path = ROUTE_MAP.has(candidatePath) ? candidatePath : '/dashboard'
-  const search = separator === -1 ? '' : raw.slice(separator + 1)
-  return { path, query: new URLSearchParams(search) }
+  return { path, query }
 }
 
 function SessionGate({ checking, message, onAuthenticate }) {
@@ -366,9 +380,11 @@ export function App() {
   useEffect(() => {
     if (!window.location.hash) {
       window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/dashboard?range=24h`)
+    } else {
+      setLocation(readLocation({ canonicalize: true }))
     }
     const update = () => {
-      setLocation(readLocation())
+      setLocation(readLocation({ canonicalize: true }))
       setMenuOpen(false)
     }
     window.addEventListener('hashchange', update)

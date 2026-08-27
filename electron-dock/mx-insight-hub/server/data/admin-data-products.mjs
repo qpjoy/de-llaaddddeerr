@@ -26,7 +26,7 @@ const CHANNEL_TYPES = new Set(['broadcast', 'channel', 'public_channel'])
 const GROUP_TYPES = new Set(['group', 'megagroup', 'public_group', 'supergroup'])
 const CHAT_QUERY_FIELDS = new Set(['cursor', 'kind', 'pageSize', 'query', 'sourceScope'])
 const HISTORY_QUERY_FIELDS = new Set(['cursor', 'pageSize', 'sourceScope'])
-const SEARCH_FIELDS = new Set(['chatId', 'cursor', 'pageSize', 'query', 'sourceScope'])
+const SEARCH_FIELDS = new Set(['chatId', 'cursor', 'kind', 'pageSize', 'query', 'sourceScope'])
 const CONTEXT_FIELDS = new Set(['after', 'before', 'sourceScope'])
 const ADMIN_PROVINCE_FIELDS = new Set(['cursor', 'from', 'pageSize', 'sort', 'to'])
 const ADMIN_COVERAGE_FIELDS = new Set(['from', 'targetPerProvince', 'to'])
@@ -347,11 +347,16 @@ export function normalizeAdminTelegramHistoryQuery(chatIdInput, input = {}) {
 export function normalizeAdminTelegramSearchQuery(input = {}) {
   unsupportedFields(input, SEARCH_FIELDS, 'Telegram search')
   const chatId = optionalString(input.chatId, 'chatId')
+  const kind = input.kind == null ? 'all' : requiredString(input.kind, 'kind', 16).toLowerCase()
+  if (!CHAT_KINDS.has(kind)) {
+    throw new AppError(400, 'invalid_request', 'kind must be all, channel, group, or unknown')
+  }
   const selectedScope = telegramSourceScopeValue(input.sourceScope)
   if (chatId) ensureTelegramSelectorScope(chatId, selectedScope)
   return {
     query: requiredString(input.query, 'query', 500),
     chatId,
+    kind,
     sourceScope: selectedScope,
     pageSize: pageSizeValue(input.pageSize),
     cursor: decodeTelegramCursor(optionalString(input.cursor, 'cursor', 1_024)),
@@ -402,6 +407,7 @@ export function adminTelegramSearchResponse(rows, query, { demoMode = false } = 
     sourceScope: sourceScope(ADMIN_TELEGRAM_SOURCE_SCOPE, query.sourceScope),
     query: query.query,
     chatId: query.chatId,
+    kind: query.kind,
     items: page.pageRows.map((row) => ({
       ...adminTelegramMessage(row),
       score: typeof row.score === 'number' && Number.isFinite(row.score) ? row.score : null,
@@ -739,6 +745,14 @@ const DEMO_TELEGRAM_CHATS = Object.freeze([
     sort_time: demoDate(8), current_revision: 1,
   },
   {
+    id: '10000000-0000-4000-8000-000000000006',
+    dataset_id: 'telegram.monitor.chats.v1', external_id: '-1003001', object_type: 'chat',
+    content_type: 'channel', title: 'Monitor 同号频道', url: null,
+    event_time: demoDate(6), collected_at: demoDate(0, -9),
+    stable_fields: { attributes: { chatType: 'channel' } },
+    sort_time: demoDate(6), current_revision: 1,
+  },
+  {
     id: '10000000-0000-4000-8000-000000000101',
     dataset_id: 'telegram.sqlite.chats.v1', external_id: '-1001001', object_type: 'chat',
     content_type: 'channel', title: '全球科技观察（SQLite）', url: 'https://t.me/mx_global_tech',
@@ -790,7 +804,7 @@ const DEMO_TELEGRAM_MESSAGES = Object.freeze([
   demoMessage('20000000-0000-4000-8000-000000000007', '-1002998', 7, '该消息属于邀请群组，供内部业务展示。', 1, {
     stable_fields: { relations: { chatId: '-1002998', messageId: '7' }, password: 'must-not-leak' },
   }),
-  demoMessage('20000000-0000-4000-8000-000000000101', '-1001001', 101, 'SQLite 采集的频道历史消息。', 4, {
+  demoMessage('20000000-0000-4000-8000-000000000101', '-1001001', 101, 'SQLite 采集的频道历史消息，包含开房归档索引。', 4, {
     dataset_id: 'telegram.sqlite.messages.v1',
   }),
   demoMessage('20000000-0000-4000-8000-000000000102', '-1003001', 102, '无法判定类型的 SQLite 会话消息。', 1, {
@@ -855,6 +869,15 @@ export function demoAdminTelegramSearch(query) {
   const rows = DEMO_TELEGRAM_MESSAGES
     .filter((row) => demoMatchesSourceScope(row, query.sourceScope))
     .filter((row) => !chat || row.stable_fields?.relations?.chatId === String(chat.external_id))
+    .filter((row) => {
+      if (chat || query.kind === 'all') return true
+      const rowScope = adminTelegramSourceScopeForDataset(row.dataset_id)
+      const rowChat = DEMO_TELEGRAM_CHATS.find((candidate) => (
+        adminTelegramSourceScopeForDataset(candidate.dataset_id) === rowScope
+        && String(candidate.external_id) === row.stable_fields?.relations?.chatId
+      ))
+      return rowChat != null && adminTelegramChatKind(rowChat) === query.kind
+    })
     .filter((row) => [row.title, row.body, row.author_name]
       .some((value) => value?.toLocaleLowerCase('zh-CN').includes(needle)))
     .filter((row) => tupleBefore(row, query.cursor))

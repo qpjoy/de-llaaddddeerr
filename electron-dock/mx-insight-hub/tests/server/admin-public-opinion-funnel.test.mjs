@@ -143,6 +143,32 @@ test('PostgreSQL funnel is unbounded and browse uses stable parameterized keyset
   assert.doesNotMatch(browse.sql, /raw_payload|normalized_payload|model_reasoning|credentials|connection_string/i)
 })
 
+test('PostgreSQL browse types its default window even when the selected reason does not use it', async () => {
+  const calls = []
+  const store = new PostgresStore({
+    async query(sql, values) {
+      calls.push({ sql, values })
+      return { rows: [] }
+    },
+  })
+
+  await store.listAdminPublicOpinionBrowseRecords({
+    from: FROM,
+    to: TO,
+    pageSize: 25,
+    reason: 'missing_province',
+  })
+
+  const browse = calls[0]
+  assert.match(browse.sql, /\$1::timestamptz <= \$2::timestamptz/)
+  assert.match(browse.sql, /publication\.display_admin1_code IS NULL/)
+  assert.deepEqual(browse.values, [FROM, TO, 26])
+  const referencedParameters = new Set(
+    [...browse.sql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])),
+  )
+  assert.deepEqual([...referencedParameters].sort((left, right) => left - right), [1, 2, 3])
+})
+
 test('Admin opinion browse validates filters and requires paired window boundaries', () => {
   assert.throws(
     () => normalizeAdminPublicOpinionBrowseQuery({ from: FROM }, NOW),

@@ -9,6 +9,7 @@ import {
   adminTelegramMessagesResponse,
   normalizeAdminTelegramContextQuery,
   normalizeAdminTelegramHistoryQuery,
+  normalizeAdminTelegramSearchQuery,
 } from '../../server/data/admin-data-products.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
@@ -284,6 +285,65 @@ test('Telegram history, search and context keep canonical ids without hiding int
   assert.ok(search.payload.data.items.every((item) => ['monitor', 'sqlite'].includes(item.sourceScope)))
   assert.doesNotMatch(JSON.stringify(search.payload), /must-not-leak|credential|password/i)
 
+  const globalSqliteSearch = await request('/internal/v1/admin/data-products/telegram/search', {
+    token: ADMIN_TOKEN,
+    method: 'POST',
+    body: { query: '开房', kind: 'channel', sourceScope: 'sqlite' },
+  })
+  assert.equal(globalSqliteSearch.response.status, 200)
+  assert.equal(globalSqliteSearch.payload.data.kind, 'channel')
+  assert.equal(globalSqliteSearch.payload.data.items.length, 1)
+  assert.equal(globalSqliteSearch.payload.data.items[0].sourceDataset, 'telegram.sqlite.messages.v1')
+  assert.equal(globalSqliteSearch.payload.data.items[0].relations.chatId, '-1001001')
+  assert.match(globalSqliteSearch.payload.data.items[0].text, /开房/)
+
+  const wrongKind = await request('/internal/v1/admin/data-products/telegram/search', {
+    token: ADMIN_TOKEN,
+    method: 'POST',
+    body: { query: '开房', kind: 'group', sourceScope: 'sqlite' },
+  })
+  assert.equal(wrongKind.response.status, 200)
+  assert.deepEqual(wrongKind.payload.data.items, [])
+
+  const conflictingChannel = await request('/internal/v1/admin/data-products/telegram/search', {
+    token: ADMIN_TOKEN,
+    method: 'POST',
+    body: { query: '无法判定', kind: 'channel', sourceScope: 'all' },
+  })
+  assert.equal(conflictingChannel.response.status, 200)
+  assert.deepEqual(conflictingChannel.payload.data.items, [])
+
+  const pairedUnknown = await request('/internal/v1/admin/data-products/telegram/search', {
+    token: ADMIN_TOKEN,
+    method: 'POST',
+    body: { query: '无法判定', kind: 'unknown', sourceScope: 'all' },
+  })
+  assert.equal(pairedUnknown.response.status, 200)
+  assert.equal(pairedUnknown.payload.data.items.length, 1)
+  assert.equal(pairedUnknown.payload.data.items[0].sourceDataset, 'telegram.sqlite.messages.v1')
+
+  const currentChatSearch = await request('/internal/v1/admin/data-products/telegram/search', {
+    token: ADMIN_TOKEN,
+    method: 'POST',
+    body: {
+      query: '开房', sourceScope: 'sqlite',
+      chatId: 'sqlite:10000000-0000-4000-8000-000000000101',
+    },
+  })
+  assert.equal(currentChatSearch.response.status, 200)
+  assert.equal(currentChatSearch.payload.data.items.length, 1)
+
+  const wrongChatSearch = await request('/internal/v1/admin/data-products/telegram/search', {
+    token: ADMIN_TOKEN,
+    method: 'POST',
+    body: {
+      query: '开房', sourceScope: 'sqlite',
+      chatId: 'sqlite:10000000-0000-4000-8000-000000000102',
+    },
+  })
+  assert.equal(wrongChatSearch.response.status, 200)
+  assert.deepEqual(wrongChatSearch.payload.data.items, [])
+
   const privateHistory = await request(
     '/internal/v1/admin/data-products/telegram/chats/-1002998/messages',
     { token: ADMIN_TOKEN },
@@ -409,6 +469,14 @@ test('Telegram history pagination is independent from the bounded search context
   assert.equal(history.pageSize, 50)
   assert.equal(history.cursor, null)
   assert.equal(history.sourceScope, 'all')
+
+  const search = normalizeAdminTelegramSearchQuery({ query: '开房', kind: 'channel' })
+  assert.equal(search.kind, 'channel')
+  assert.equal(search.chatId, null)
+  assert.throws(
+    () => normalizeAdminTelegramSearchQuery({ query: '开房', kind: 'private' }),
+    (error) => error?.code === 'invalid_request',
+  )
 
   const context = normalizeAdminTelegramContextQuery(
     '20000000-0000-4000-8000-000000000001',
@@ -692,7 +760,7 @@ test('PostgreSQL Telegram plans merge both datasets without a public-chat gate',
       id: '40000000-0000-4000-8000-000000000002',
     },
   })
-  await store.searchAdminTelegramMessages({ query: 'keyword', pageSize: 10 })
+  await store.searchAdminTelegramMessages({ query: 'keyword', kind: 'group', pageSize: 10 })
 
   const chatSql = calls[0].sql
   assert.match(chatSql, /chat\.dataset_id = ANY\(\$1::text\[\]\)/)
@@ -729,13 +797,23 @@ test('PostgreSQL Telegram plans merge both datasets without a public-chat gate',
   assert.match(searchSql, /message\.dataset_id = ANY\(\$1::text\[\]\)/)
   assert.doesNotMatch(searchSql, /message\.event_time IS NOT NULL/)
   assert.match(searchSql, /coalesce\(message\.event_time, message\.collected_at, message\.first_seen_at\) AS sort_time/)
-  assert.match(searchSql, /\(coalesce\(message\.event_time, message\.collected_at, message\.first_seen_at\), message\.id\) < \(\$4::timestamptz, \$5::uuid\)/)
+  assert.match(searchSql, /EXISTS \(\s*SELECT 1\s*FROM core\.canonical_records chat/)
+  assert.match(searchSql, /chat\.external_id = message\.stable_fields #>> '\{relations,chatId\}'/)
+  assert.match(searchSql, /message\.dataset_id = 'telegram\.monitor\.messages\.v1'\s+AND chat\.dataset_id = 'telegram\.monitor\.chats\.v1'/)
+  assert.match(searchSql, /message\.dataset_id = 'telegram\.sqlite\.messages\.v1'\s+AND chat\.dataset_id = 'telegram\.sqlite\.chats\.v1'/)
+  assert.match(searchSql, /\(coalesce\(message\.event_time, message\.collected_at, message\.first_seen_at\), message\.id\) < \(\$5::timestamptz, \$6::uuid\)/)
   assert.match(searchSql, /ORDER BY coalesce\(message\.event_time, message\.collected_at, message\.first_seen_at\) DESC, message\.id DESC/)
   assert.doesNotMatch(searchSql, /last_seen_at/)
   assert.doesNotMatch(searchSql, /coalesce\(message\.event_time, message\.collected_at\) IS NOT NULL/)
-  assert.deepEqual(calls[2].values, [[
-    'telegram.monitor.messages.v1', 'telegram.sqlite.messages.v1',
-  ], 'keyword', null, null, null, 11])
+  assert.deepEqual(calls[2].values, [
+    ['telegram.monitor.messages.v1', 'telegram.sqlite.messages.v1'],
+    'keyword',
+    null,
+    'group',
+    null,
+    null,
+    11,
+  ])
 
   await store.listAdminPublicOpinionRecords({
     provinceCode: 'CN-JS', sort: 'latest', pageSize: 10,

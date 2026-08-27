@@ -149,9 +149,12 @@ function TelegramMessage({ item, anchor = false }) {
   )
 }
 
-function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
+const TELEGRAM_KINDS = new Set(['all', 'channel', 'group', 'unknown'])
+
+function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnauthorized }) {
   const [sourceScope, setSourceScope] = useState('all')
-  const [kindFilter, setKindFilter] = useState(kind || 'all')
+  const requestedKind = TELEGRAM_KINDS.has(query?.get('kind')) ? query.get('kind') : kind
+  const [kindFilter, setKindFilter] = useState(requestedKind)
   const title = `Telegram ${telegramKindLabel(kindFilter)}`
   const KindIcon = kindFilter === 'channel' ? Broadcast : kindFilter === 'group' ? Users : TelegramLogo
   const [directoryDraft, setDirectoryDraft] = useState('')
@@ -164,6 +167,7 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
   const [messageLoadingMore, setMessageLoadingMore] = useState(false)
   const [messageLoadMoreError, setMessageLoadMoreError] = useState(null)
   const [searchDraft, setSearchDraft] = useState('')
+  const [searchTarget, setSearchTarget] = useState('all')
   const [searchData, setSearchData] = useState(null)
   const [searchError, setSearchError] = useState(null)
   const [searching, setSearching] = useState(false)
@@ -182,6 +186,10 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
   const pendingScrollRestoreRef = useRef(null)
   const initialScrollPendingRef = useRef(false)
   activeChatIdRef.current = selectedChatId
+
+  useEffect(() => {
+    setKindFilter(requestedKind)
+  }, [requestedKind])
 
   const loadDirectory = useCallback(() => adminApi.dataProductTelegramChats(token, {
     sourceScope,
@@ -349,8 +357,9 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
   const submitSearch = async (event) => {
     event.preventDefault()
     const query = searchDraft.trim()
-    if (!query || !selectedChatId) return
-    const chatId = selectedChatId
+    const activeChatId = activeChatIdRef.current
+    const chatId = searchTarget === 'chat' ? activeChatId : null
+    if (!query || (searchTarget === 'chat' && !chatId)) return
     const generation = interactionGenerationRef.current + 1
     interactionGenerationRef.current = generation
     messageGenerationRef.current += 1
@@ -368,19 +377,20 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
     try {
       const data = await adminApi.searchDataProductTelegram(token, {
         query,
-        chatId,
+        ...(chatId ? { chatId } : {}),
         sourceScope,
+        ...(searchTarget === 'all' ? { kind: kindFilter } : {}),
         pageSize: 20,
       })
-      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== chatId) return
+      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== activeChatId) return
       setSearchData(data)
     } catch (error) {
-      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== chatId) return
+      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== activeChatId) return
       if (error?.status === 401) onUnauthorized?.(error)
       setSearchError(error)
       setSearchData(null)
     } finally {
-      if (generation === interactionGenerationRef.current && activeChatIdRef.current === chatId) {
+      if (generation === interactionGenerationRef.current && activeChatIdRef.current === activeChatId) {
         setSearching(false)
       }
     }
@@ -388,8 +398,8 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
 
   const openContext = async (item) => {
     const canonicalId = item?.canonicalId || item?.id
-    if (!canonicalId || !selectedChatId) return
-    const chatId = selectedChatId
+    if (!canonicalId) return
+    const activeChatId = activeChatIdRef.current
     const generation = interactionGenerationRef.current + 1
     interactionGenerationRef.current = generation
     messageGenerationRef.current += 1
@@ -406,15 +416,15 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
         before: beforeCount,
         after: afterCount,
       })
-      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== chatId) return
+      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== activeChatId) return
       setContextData(data)
     } catch (error) {
-      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== chatId) return
+      if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== activeChatId) return
       if (error?.status === 401) onUnauthorized?.(error)
       setContextError(error)
       setContextData(null)
     } finally {
-      if (generation === interactionGenerationRef.current && activeChatIdRef.current === chatId) {
+      if (generation === interactionGenerationRef.current && activeChatIdRef.current === activeChatId) {
         setContextLoading(false)
       }
     }
@@ -428,6 +438,15 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
     ...(searchData?.warnings || []),
     ...(contextData?.warnings || []),
   ]
+  const globalSearchActive = searchTarget === 'all' && Boolean(searching || searchData || searchError || contextData)
+  const conversationTitle = globalSearchActive
+    ? (contextData ? `上下文 · 会话 ${contextData.stream?.id || '待识别'}` : '全部 Telegram 会话检索')
+    : (selectedChat?.title || '选择一个会话')
+  const conversationDescription = globalSearchActive
+    ? `${telegramSourceLabel(sourceScope)} · ${telegramKindLabel(kindFilter)} · 结果可能来自左侧当前会话之外`
+    : (selectedChat
+      ? `${selectedChat.sourceDataset || selectedChat.sourceScope || 'unknown'} · ${telegramKindLabel(selectedChat.kind || 'unknown')} · ${visibilityEvidenceText(selectedChat.visibilityEvidence)}`
+      : '从左侧目录开始')
   const selectedDatasets = telegramSelectedDatasets(directoryData?.sourceScope, sourceScope)
 
   return (
@@ -469,10 +488,31 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
         </div></div>
         <div><span>会话类型</span><div className="mih-command-segmented">
           {[['all', '全部'], ['channel', '频道'], ['group', '群组'], ['unknown', '未知']].map(([value, label]) => (
-            <button type="button" key={value} aria-pressed={kindFilter === value} onClick={() => setKindFilter(value)}>{label}</button>
+            <button type="button" key={value} aria-pressed={kindFilter === value} onClick={() => {
+              setKindFilter(value)
+              setQuery?.({ kind: value === 'all' ? null : value })
+            }}>{label}</button>
           ))}
         </div></div>
-        <small>切换口径会重新载入目录、聊天记录和检索范围。</small>
+        <div><span>检索范围</span><div className="mih-command-segmented">
+          {[['all', '全部会话'], ['chat', '当前会话']].map(([value, label]) => (
+            <button type="button" key={value} aria-pressed={searchTarget === value}
+              disabled={value === 'chat' && !selectedChatId}
+              onClick={() => {
+                if (value === searchTarget) return
+                interactionGenerationRef.current += 1
+                setSearching(false)
+                setSearchData(null)
+                setSearchError(null)
+                setContextLoading(false)
+                setContextData(null)
+                setContextAnchor(null)
+                setContextError(null)
+                setSearchTarget(value)
+              }}>{label}</button>
+          ))}
+        </div></div>
+        <small>全部会话检索会覆盖当前来源与类型；当前会话用于精确核对单个聊天。</small>
       </section>
 
       <section className="mih-product-kpis" aria-label="Telegram 当前窗口概览">
@@ -526,18 +566,20 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
           <header className="mih-tg-conversation__header">
             <div className="mih-tg-avatar mih-tg-avatar--large"><KindIcon size={21} weight="fill" aria-hidden="true" /></div>
             <div>
-              <strong>{selectedChat?.title || '选择一个会话'}</strong>
-              <span>{selectedChat ? `${selectedChat.sourceDataset || selectedChat.sourceScope || 'unknown'} · ${telegramKindLabel(selectedChat.kind || 'unknown')} · ${visibilityEvidenceText(selectedChat.visibilityEvidence)}` : '从左侧目录开始'}</span>
+              <strong>{conversationTitle}</strong>
+              <span>{conversationDescription}</span>
             </div>
-            {selectedChat?.url ? <a className="qp-button qp-button--ghost qp-icon-button" href={selectedChat.url}
+            {!globalSearchActive && selectedChat?.url ? <a className="qp-button qp-button--ghost qp-icon-button" href={selectedChat.url}
               target="_blank" rel="noreferrer" aria-label="打开 Telegram 业务入口"><ArrowSquareOut size={17} /></a> : null}
           </header>
           <form className="mih-tg-search" onSubmit={submitSearch}>
             <MagnifyingGlass size={17} aria-hidden="true" />
             <input value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)}
-              placeholder="在当前会话的已归档消息中搜索" disabled={!selectedChatId} aria-label="搜索当前会话消息" />
+              placeholder={searchTarget === 'chat' ? '在当前会话的已归档消息中搜索' : '在当前来源与类型的全部消息中搜索'}
+              disabled={searchTarget === 'chat' && !selectedChatId}
+              aria-label={searchTarget === 'chat' ? '搜索当前会话消息' : '搜索全部 Telegram 消息'} />
             <button className="qp-button qp-button--outline qp-button--sm" type="submit"
-              disabled={!selectedChatId || !searchDraft.trim() || searching}>{searching ? '检索中' : '检索'}</button>
+              disabled={(searchTarget === 'chat' && !selectedChatId) || !searchDraft.trim() || searching}>{searching ? '检索中' : '检索'}</button>
             {searchData || searchError ? <button className="qp-button qp-button--ghost qp-button--sm" type="button"
               onClick={() => {
                 interactionGenerationRef.current += 1
@@ -553,14 +595,15 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
           {searchError ? <div className="mih-tg-inline-state"><ErrorState error={searchError} /></div> : null}
           {searchData ? (
             <section className="mih-tg-search-results">
-              <header><strong>检索结果</strong><span>{searchData.pageInfo?.returnedCount || 0} 条 · {searchData.searchMode || 'unknown'}</span></header>
+              <header><strong>{searchTarget === 'chat' ? '当前会话检索结果' : `${telegramKindLabel(kindFilter)}全局检索结果`}</strong><span>{searchData.pageInfo?.returnedCount || 0} 条 · {searchData.searchMode || 'unknown'}</span></header>
               {(searchData.items || []).length ? searchData.items.map((item) => (
                 <button type="button" key={item.canonicalId || item.id} onClick={() => openContext(item)}>
                   <span><strong>{item.author?.name || '未知发送者'}</strong><time>{formatDateTime(item.eventTime)}</time></span>
                   <p>{telegramText(item) || `[${item.contentType || '非文本消息'}]`}</p>
-                  <small>查看前 {beforeCount} / 后 {afterCount} 条已存上下文</small>
+                  <small>{item.sourceDataset || item.sourceScope || 'telegram'} · 会话 {item.relations?.chatId || '未知'} · 查看前 {beforeCount} / 后 {afterCount} 条已存上下文</small>
                 </button>
-              )) : <EmptyState icon={MagnifyingGlass} title="没有命中已归档消息" description="可调整关键词；空结果不是接口故障。" />}
+              )) : <EmptyState icon={MagnifyingGlass} title="没有命中已归档消息"
+                description={searchTarget === 'chat' ? '当前会话没有命中；可切换为全部会话继续检索。' : '可调整关键词、来源或会话类型；空结果不是接口故障。'} />}
             </section>
           ) : null}
           <div ref={transcriptRef} className="mih-tg-transcript qp-scrollbar" aria-label="会话消息窗口"
@@ -663,12 +706,8 @@ function TelegramDirectoryPage({ kind, token, onUnauthorized }) {
   )
 }
 
-export function TelegramChannelsPage(props) {
-  return <TelegramDirectoryPage {...props} kind="channel" />
-}
-
-export function TelegramGroupsPage(props) {
-  return <TelegramDirectoryPage {...props} kind="group" />
+export function TelegramPage(props) {
+  return <TelegramDirectoryPage {...props} />
 }
 
 function ProvincePicker({ regions, coverage, selectedCode, search, setSearch, onSelect, onClose }) {

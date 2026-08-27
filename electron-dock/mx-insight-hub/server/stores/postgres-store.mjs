@@ -2209,11 +2209,12 @@ export class PostgresStore {
   async searchAdminTelegramMessages({
     query,
     chatExternalId = null,
+    kind = 'all',
     sourceScope = 'all',
     pageSize,
     cursor = null,
   }) {
-    const datasets = adminTelegramDatasets(sourceScope, 'messages')
+    const messageDatasets = adminTelegramDatasets(sourceScope, 'messages')
     const { rows } = await this.pool.query(
       `SELECT message.id, message.dataset_id, message.external_id,
               message.object_type, message.content_type, message.url,
@@ -2232,17 +2233,40 @@ export class PostgresStore {
           AND message.deleted_at IS NULL
           AND ($3::text IS NULL OR message.stable_fields #>> '{relations,chatId}' = $3)
           AND (
+            $3::text IS NOT NULL
+            OR $4::text = 'all'
+            OR EXISTS (
+              SELECT 1
+                FROM core.canonical_records chat
+               WHERE chat.platform = 'telegram'
+                 AND chat.object_type = 'chat'
+                 AND chat.deleted_at IS NULL
+                 AND chat.external_id = message.stable_fields #>> '{relations,chatId}'
+                 AND (
+                   (message.dataset_id = 'telegram.monitor.messages.v1'
+                    AND chat.dataset_id = 'telegram.monitor.chats.v1')
+                   OR
+                   (message.dataset_id = 'telegram.sqlite.messages.v1'
+                    AND chat.dataset_id = 'telegram.sqlite.chats.v1')
+                 )
+                 AND ${ADMIN_TELEGRAM_CHAT_KIND_SQL} = $4
+            )
+          )
+          AND (
             message.body ILIKE '%' || $2 || '%'
             OR message.title ILIKE '%' || $2 || '%'
             OR message.author_name ILIKE '%' || $2 || '%'
           )
           AND (
-            $4::timestamptz IS NULL
-            OR (coalesce(message.event_time, message.collected_at, message.first_seen_at), message.id) < ($4::timestamptz, $5::uuid)
+            $5::timestamptz IS NULL
+            OR (coalesce(message.event_time, message.collected_at, message.first_seen_at), message.id) < ($5::timestamptz, $6::uuid)
           )
         ORDER BY coalesce(message.event_time, message.collected_at, message.first_seen_at) DESC, message.id DESC
-        LIMIT $6`,
-      [datasets, query, chatExternalId, cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1],
+        LIMIT $7`,
+      [
+        messageDatasets, query, chatExternalId, kind,
+        cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1,
+      ],
     )
     return rows
   }
@@ -3051,6 +3075,7 @@ export class PostgresStore {
   }) {
     const values = [from, to]
     const predicates = [
+      '$1::timestamptz <= $2::timestamptz',
       "record.dataset_id = 'public-opinion.province.v1'",
       "record.platform = 'public_opinion'",
       "record.object_type = 'opinion_item'",
