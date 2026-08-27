@@ -14,6 +14,12 @@ import { randomUUID } from 'node:crypto'
 
 const WORKER_ID = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`
 
+function assertPayloadMatch(payloadMatch) {
+  if (payloadMatch === null || typeof payloadMatch !== 'object' || Array.isArray(payloadMatch)) {
+    throw new TypeError('payloadMatch must be a plain object')
+  }
+}
+
 export class PostgresQueue {
   constructor({ pool, namespace, visibilityTimeoutMs = 120_000, maxAttempts = 5, logger = console }) {
     this.pool = pool
@@ -159,6 +165,22 @@ export class PostgresQueue {
       [queue ? this.#queueName(queue) : null],
     )
     return rows
+  }
+
+  /** Return whether this namespaced queue has a pending/running matching job. */
+  async hasOutstandingJob(queue, payloadMatch) {
+    assertPayloadMatch(payloadMatch)
+    const { rows } = await this.pool.query(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM mxq.jobs
+          WHERE queue = $1
+            AND status IN ('pending', 'running')
+            AND payload @> $2::jsonb
+       ) AS outstanding`,
+      [this.#queueName(queue), payloadMatch],
+    )
+    return rows[0]?.outstanding === true
   }
 
   // ---- durable cursors -------------------------------------------------

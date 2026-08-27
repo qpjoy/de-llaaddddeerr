@@ -12,6 +12,17 @@ export const TELEGRAM_SQLITE_MAPPING_VERSION = 2
 const ABANDONED_RUN_CYCLES = 10
 const ABANDONED_RUN_FLOOR_MS = 15 * 60 * 1_000
 
+// These failures preserve an open importRunId specifically because retrying
+// from the same durable page is safe. Contract/mapping/rejection failures are
+// intentionally absent: they still require an operator to correct the source.
+const AUTO_RECOVERABLE_CURSOR_ERRORS = new Set([
+  'continuation_enqueue_failed',
+  'sqlite_api_invalid_json',
+  'sqlite_api_unavailable',
+  'sqlite_api_response_read_failed',
+  'sqlite_api_request_failed',
+])
+
 export const TELEGRAM_SQLITE_INPUTS = Object.freeze([
   Object.freeze({
     role: 'chats',
@@ -220,10 +231,11 @@ function safeSource(source) {
 }
 
 export class TelegramSQLitePipeline {
-  constructor({ store, queue, sqliteApiPuller }) {
+  constructor({ store, queue, sqliteApiPuller, now = () => new Date() }) {
     this.store = store
     this.queue = queue
     this.sqliteApiPuller = sqliteApiPuller
+    this.now = now
   }
 
   async #source(input) {
@@ -248,7 +260,13 @@ export class TelegramSQLitePipeline {
   #cursorSilenceMs(cursor) {
     const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
     if (!updatedAt) return null
-    return Date.now() - new Date(updatedAt).getTime()
+    const updatedAtMs = new Date(updatedAt).getTime()
+    if (!Number.isFinite(updatedAtMs)) return null
+    return this.now().getTime() - updatedAtMs
+  }
+
+  #cursorError(cursor) {
+    return cursor?.last_error ?? cursor?.lastError ?? cursor?.error ?? null
   }
 
   /**
@@ -264,13 +282,33 @@ export class TelegramSQLitePipeline {
     return silence >= Math.max(cadence * ABANDONED_RUN_CYCLES, ABANDONED_RUN_FLOOR_MS)
   }
 
+  #cursorAutoRecoverable(source, cursor) {
+    if (!this.#cursorAbandoned(source, cursor)) return false
+    if (!cursor?.position?.importRunId) return false
+    if (cursor?.status === 'running') return true
+    return cursor?.status === 'failed'
+      && AUTO_RECOVERABLE_CURSOR_ERRORS.has(this.#cursorError(cursor))
+  }
+
+  async #outstandingSourceJobs(sources) {
+    if (typeof this.queue?.hasOutstandingJob !== 'function') return null
+    const checks = await Promise.all(sources.map(async (source) => ({
+      sourceKey: source.sourceKey,
+      outstanding: await this.queue.hasOutstandingJob(
+        EXTERNAL_PULL_QUEUE,
+        { sourceKey: source.sourceKey },
+      ),
+    })))
+    return checks.filter((entry) => entry.outstanding)
+  }
+
   async #withLocks(operation) {
     if (typeof this.sqliteApiPuller?.withSourceLocks !== 'function') {
       throw new AppError(503, 'source_lock_unavailable', 'Telegram SQLite changes require source locking')
     }
     return this.sqliteApiPuller.withSourceLocks(
       TELEGRAM_SQLITE_INPUTS.map((input) => input.sourceKey),
-      operation,
+      (assertOwned = async () => {}, sessions = []) => operation(assertOwned, sessions),
     )
   }
 
@@ -563,7 +601,7 @@ export class TelegramSQLitePipeline {
   }
 
   /**
-   * Clear a failed cursor so scheduling can resume, without replaying anything.
+   * Clear a failed cursor so scheduling can resume without replaying committed data.
    *
    * A transient upstream outage leaves the cursor `failed`, and the scheduler
    * treats anything other than `idle` as not due -- deliberately, so a
@@ -575,10 +613,12 @@ export class TelegramSQLitePipeline {
    * The only previous way out was a full checkpoint reset: paying for a
    * complete re-read to recover from a network blip. This resumes from the
    * durable position instead and touches nothing else -- the checkpoint, the
-   * mapping and the source status are all left exactly as they were.
+   * mapping and the source status are all left exactly as they were. A batch
+   * already committed is acknowledged from evidence; only the current
+   * uncommitted source page can be fetched again.
    */
   async resumeFailedTasks() {
-    return this.#withLocks(async () => {
+    return this.#withLocks(async (assertOwned) => {
       const sources = await this.#sources()
       const cursors = await Promise.all(sources.map((source) => this.#cursor(source.sourceKey)))
       // A `running` cursor that is still being written is someone else's work.
@@ -600,6 +640,16 @@ export class TelegramSQLitePipeline {
           { sourceKeys: draining.map(({ source }) => source.sourceKey) },
         )
       }
+      const outstandingJobs = await this.#outstandingSourceJobs(sources)
+      if (outstandingJobs?.length > 0) {
+        throw new AppError(
+          409,
+          'source_recovery_pending',
+          'Wait for queued or running Telegram SQLite jobs before recovering cursors',
+          { sourceKeys: outstandingJobs.map(({ sourceKey }) => sourceKey) },
+        )
+      }
+      await assertOwned()
       const resumed = []
       for (const [index, source] of sources.entries()) {
         const cursor = cursors[index]
@@ -610,6 +660,7 @@ export class TelegramSQLitePipeline {
         }
         // Same position, cleared status: the next scheduled run continues from
         // the last durable checkpoint rather than re-reading the source.
+        await assertOwned()
         await this.queue.saveCursor(
           `external:${source.sourceKey}`,
           cursor.position ?? {},
@@ -621,7 +672,7 @@ export class TelegramSQLitePipeline {
           resumed: true,
           from: abandoned ? 'abandoned_run' : 'failed',
           silentForMs: abandoned ? this.#cursorSilenceMs(cursor) : null,
-          clearedError: cursor.error ?? null,
+          clearedError: this.#cursorError(cursor),
         })
       }
       return {
@@ -630,6 +681,141 @@ export class TelegramSQLitePipeline {
         tasks: resumed,
       }
     })
+  }
+
+  /**
+   * Recover only a provably abandoned, resumable SQLite task.
+   *
+   * This is deliberately narrower than the operator-facing recovery above:
+   * the cursor must still reference its open import run, the error must be a
+   * transient transport/continuation failure (or a stale `running` cursor),
+   * and the durable queue must confirm that no job can still own either half
+   * of the paired pipeline. The source advisory locks close the final race with
+   * a worker that is already acquiring ownership.
+   */
+  async recoverStalledTasks() {
+    if (typeof this.queue?.hasOutstandingJob !== 'function') {
+      return {
+        pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY,
+        recovered: 0,
+        skipped: 'outstanding_job_check_unavailable',
+        tasks: [],
+      }
+    }
+
+    const initialSources = await this.#sources()
+    if (initialSources.some((source) => source.status !== 'active')) {
+      return {
+        pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY,
+        recovered: 0,
+        skipped: 'pipeline_inactive',
+        tasks: [],
+      }
+    }
+    const initialCursors = await Promise.all(
+      initialSources.map((source) => this.#cursor(source.sourceKey)),
+    )
+    if (!initialSources.some((source, index) => (
+      this.#cursorAutoRecoverable(source, initialCursors[index])
+    ))) {
+      return {
+        pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY,
+        recovered: 0,
+        skipped: 'no_recoverable_task',
+        tasks: [],
+      }
+    }
+
+    try {
+      return await this.#withLocks(async (assertOwned) => {
+        // Re-read under both source locks: the first check is only an efficient
+        // fast path and must never authorize a state transition by itself.
+        const sources = await this.#sources()
+        if (sources.some((source) => source.status !== 'active')) {
+          return {
+            pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY,
+            recovered: 0,
+            skipped: 'pipeline_inactive',
+            tasks: [],
+          }
+        }
+        const cursors = await Promise.all(sources.map((source) => this.#cursor(source.sourceKey)))
+        const candidates = sources
+          .map((source, index) => ({ source, cursor: cursors[index] }))
+          .filter(({ source, cursor }) => this.#cursorAutoRecoverable(source, cursor))
+        const blocked = sources
+          .map((source, index) => ({ source, cursor: cursors[index] }))
+          .filter(({ source, cursor }) => (
+            cursor?.status != null
+            && cursor.status !== 'idle'
+            && !this.#cursorAutoRecoverable(source, cursor)
+          ))
+        if (blocked.length > 0) {
+          return {
+            pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY,
+            recovered: 0,
+            skipped: 'paired_task_blocked',
+            sourceKeys: blocked.map(({ source }) => source.sourceKey),
+            tasks: [],
+          }
+        }
+        if (candidates.length === 0) {
+          return {
+            pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY,
+            recovered: 0,
+            skipped: 'state_changed',
+            tasks: [],
+          }
+        }
+
+        const outstandingJobs = await this.#outstandingSourceJobs(sources)
+        if (outstandingJobs == null || outstandingJobs.length > 0) {
+          return {
+            pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY,
+            recovered: 0,
+            skipped: outstandingJobs == null
+              ? 'outstanding_job_check_unavailable'
+              : 'outstanding_jobs',
+            sourceKeys: outstandingJobs?.map(({ sourceKey }) => sourceKey) ?? [],
+            tasks: [],
+          }
+        }
+        await assertOwned()
+
+        const recovered = []
+        for (const { source, cursor } of candidates) {
+          await assertOwned()
+          await this.queue.saveCursor(
+            `external:${source.sourceKey}`,
+            cursor.position,
+            { status: 'idle', processedDelta: 0, error: null },
+          )
+          recovered.push({
+            sourceKey: source.sourceKey,
+            importRunId: cursor.position.importRunId,
+            from: cursor.status === 'running' ? 'abandoned_run' : 'transient_failure',
+            clearedError: this.#cursorError(cursor),
+            silentForMs: this.#cursorSilenceMs(cursor),
+          })
+        }
+        return {
+          pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY,
+          recovered: recovered.length,
+          skipped: null,
+          tasks: recovered,
+        }
+      })
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'source_busy') {
+        return {
+          pipelineKey: TELEGRAM_SQLITE_PIPELINE_KEY,
+          recovered: 0,
+          skipped: 'source_lock_busy',
+          tasks: [],
+        }
+      }
+      throw error
+    }
   }
 
   async sync(body = {}) {

@@ -4,7 +4,7 @@ import { loadCommonConfig, productDatabaseName, ConfigError } from '../src/confi
 import { defineIndexSet, defaultIlmPolicy } from '../src/elasticsearch/index-manager.mjs'
 import { nameField, vectorField } from '../src/elasticsearch/analysis.mjs'
 import { dailySnapshotPolicy, s3Repository, snapshotHealth } from '../src/elasticsearch/snapshots.mjs'
-import { createQueue } from '../src/queue/index.mjs'
+import { BullmqQueue, createQueue, PostgresQueue } from '../src/queue/index.mjs'
 import { batchingSegmenter, HanlpSegmenter } from '../src/segmenter/index.mjs'
 import {
   describeClusterHealth,
@@ -56,6 +56,70 @@ test('bullmq driver refuses a transactional enqueue instead of silently dropping
     () => queue.enqueue('demo', {}, { client: {} }),
     /Transactional enqueue is not available/,
   )
+})
+
+test('postgres outstanding-job lookup is namespaced and uses JSONB containment', async () => {
+  const queries = []
+  const pool = {
+    async query(sql, params) {
+      queries.push({ sql, params })
+      return { rows: [{ outstanding: true }] }
+    },
+  }
+  const queue = new PostgresQueue({ pool, namespace: 'test' })
+  const payloadMatch = { sourceKey: 'telegram', options: { fullSync: false } }
+
+  assert.equal(await queue.hasOutstandingJob('external-pull', payloadMatch), true)
+  assert.equal(queries.length, 1)
+  assert.match(queries[0].sql, /status IN \('pending', 'running'\)/)
+  assert.match(queries[0].sql, /payload @> \$2::jsonb/)
+  assert.deepEqual(queries[0].params, ['test:external-pull', payloadMatch])
+})
+
+test('bullmq outstanding-job lookup covers every non-terminal stored state', async () => {
+  const calls = []
+  class QueueStub {
+    async getJobs(...args) {
+      calls.push(args)
+      return [
+        { data: { sourceKey: 'other' } },
+        { data: { sourceKey: 'telegram', options: { fullSync: false, batchSize: 50 } } },
+      ]
+    }
+
+    async close() {}
+  }
+
+  const queue = new BullmqQueue({
+    pool: {},
+    namespace: 'test',
+    redisUrl: 'redis://localhost:6379',
+  })
+  queue.bullmq = { Queue: QueueStub }
+
+  assert.equal(
+    await queue.hasOutstandingJob('external-pull', {
+      sourceKey: 'telegram',
+      options: { fullSync: false },
+    }),
+    true,
+  )
+  assert.deepEqual(calls[0], [
+    ['waiting', 'active', 'delayed', 'prioritized'],
+    0,
+    -1,
+    true,
+  ])
+  assert.equal(await queue.hasOutstandingJob('external-pull', { sourceKey: 'missing' }), false)
+  await queue.close()
+})
+
+test('outstanding-job lookup requires an object payload match', async () => {
+  const postgres = new PostgresQueue({ pool: {}, namespace: 'test' })
+  const bullmq = new BullmqQueue({ pool: {}, namespace: 'test', redisUrl: 'redis://localhost:6379' })
+
+  await assert.rejects(() => postgres.hasOutstandingJob('demo', null), /payloadMatch must be a plain object/)
+  await assert.rejects(() => bullmq.hasOutstandingJob('demo', []), /payloadMatch must be a plain object/)
 })
 
 test('index set names encode the schema version in the write alias only', () => {

@@ -1,6 +1,6 @@
 # Telegram SQLite read-API ingestion
 
-Last reviewed: 2026-08-15.
+Last reviewed: 2026-08-28.
 
 This runbook covers the fixed `telegram-sqlite` pipeline that reads the
 Telegram collector's SQLite fallback through its GET-only HTTP API. It is a
@@ -83,6 +83,12 @@ The fixed operating policy is:
 - every page is idempotently upserted and checkpointed after its Hub
   transaction commits, so retries do not duplicate canonical records.
 
+The previous-day sweep records `daily_window` as its import-run trigger.
+Migration `039_import_run_daily_window_trigger.sql` drops and recreates the
+`import_runs_trigger_check` constraint on `ingest.import_runs` so both upgraded
+and newly installed databases accept that runtime value alongside `manual`,
+`schedule`, and `file`.
+
 The upstream `end_at` predicate is inclusive. The daily sweep intentionally
 uses the next midnight as its fixed upper bound, so a record exactly on that
 boundary can be read again by adjacent windows; canonical identity absorbs the
@@ -155,6 +161,66 @@ window, not all historical rows. The chat directory is currently about 124
 rows and is refreshed in one bounded page. The first due run after 02:00
 Asia/Shanghai uses the previous-day window once; the cursor records that local
 date so later 300-second checks do not repeat it.
+
+## Stalled cursor recovery
+
+The scheduler only considers an `idle` cursor due, and the two SQLite child
+sources are scheduled as a pair. Before stalled-task recovery existed, a worker
+that disappeared while one cursor remained `running` made that child permanently
+not due; the paired `every(isDue)` check then prevented both children from being
+scheduled. This is why an orphaned `running` cursor dated 08/25 could block every
+later scheduled run even though no worker or queued job still owned it.
+
+Each scheduler pass now calls `TelegramSQLitePipeline.recoverStalledTasks()`
+before its normal due check. Automatic recovery is deliberately fail-closed and
+is allowed only when all of the following are true:
+
+- both fixed child sources are active;
+- the candidate cursor has been silent for at least ten of its configured sync
+  intervals, with a 15-minute floor (50 minutes at the default 300-second
+  interval);
+- `position.importRunId` is still present, so recovery continues the same open
+  import run;
+- the cursor is either stale `running`, or `failed` with one of the transient
+  allowlisted errors: `continuation_enqueue_failed`,
+  `sqlite_api_invalid_json`, `sqlite_api_unavailable`,
+  `sqlite_api_response_read_failed`, or `sqlite_api_request_failed`;
+- the durable queue confirms that neither child has an outstanding
+  `external-pull` job (pending or running); and
+- both source advisory locks are acquired and the cursor/queue state still
+  satisfies the checks after it is re-read under those locks.
+
+If the outstanding-job query is unavailable, either source lock is busy, the
+pipeline is inactive, or state changes during the check, recovery is skipped.
+Mapping, checkpoint-contract, import-contract, and row-rejection failures remain
+operator-gated; examples include `checkpoint_contract_mismatch`,
+`import_batch_failed`, and `row_rejections_detected`. If the paired cursor is
+still fresh `running` or has one of those deterministic failures, neither child
+is auto-recovered or scheduled around it.
+
+A recovered cursor is changed to `idle` at the exact same durable position with
+the same `importRunId`; recovery does not reset a checkpoint, fork or close the
+run, change mappings, or reprocess already committed batches. The scheduler then
+atomically enqueues the chats and messages tasks immediately. On retry, committed
+batch evidence is checked before reading the source and its stored `cursor_end`
+is authoritative. At most, the current page whose Hub transaction never
+committed is requested again.
+
+For a deterministic failure, or whenever automatic recovery does not apply,
+first correct and probe the root cause and confirm that no queued/running worker
+owns either child. Then perform these actions in order:
+
+1. POST `/internal/v1/admin/pipelines/telegram-sqlite/resume` (the Admin UI action
+   is **恢复卡住的任务**).
+2. After resume succeeds, POST
+   `/internal/v1/admin/pipelines/telegram-sqlite/sync` (the Admin UI action is
+   **立即同步**).
+
+Resume preserves each durable cursor position and open import run. It returns
+`409 source_recovery_pending` rather than racing an outstanding continuation;
+wait for that job to finish or establish that it no longer exists, then retry
+resume. Do not use **一次性全量对齐** or any checkpoint reset for ordinary stalled
+task recovery.
 
 ## Mapping and indexes
 

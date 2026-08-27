@@ -96,6 +96,18 @@ function routeFixture() {
   const queue = {
     pool: { connect: async () => queueClient },
     getCursor: async (cursorId) => cursors.get(cursorId) ?? null,
+    hasOutstandingJob: async () => false,
+    saveCursor: async (cursorId, position, options) => {
+      const saved = {
+        ...cursors.get(cursorId),
+        position: structuredClone(position),
+        status: options.status,
+        last_error: options.error,
+      }
+      cursors.set(cursorId, saved)
+      calls.push(['saveCursor', cursorId, structuredClone(position), structuredClone(options)])
+      return saved
+    },
     enqueue: async (queueName, payload, options) => {
       assert.equal(options.client, queueClient)
       calls.push(['enqueue', queueName, structuredClone(payload)])
@@ -125,7 +137,7 @@ function routeFixture() {
     adminToken: ADMIN_TOKEN,
     logger: { error() {} },
   })
-  return { app, calls, sources, genericMutations: () => genericMutations }
+  return { app, calls, sources, cursors, genericMutations: () => genericMutations }
 }
 
 test('Telegram SQLite pipeline and source reads are Admin-Token-only and redact the upstream token', async () => {
@@ -240,4 +252,61 @@ test('Telegram SQLite status and sync routes remain Admin-only and invoke the fi
       },
     })))
   assert.equal(fixture.calls.filter(([kind]) => kind === 'updateBatch').length, 1)
+})
+
+test('Telegram SQLite diagnostics and checkpoint-preserving recovery remain Admin-only', async () => {
+  const fixture = routeFixture()
+  const cursorId = 'external:telegram-sqlite-api-messages'
+  const checkpoint = { importRunId: 'run-resume', cycle: { mode: 'incremental', page: 14 } }
+  fixture.cursors.set(cursorId, {
+    id: cursorId,
+    status: 'failed',
+    position: checkpoint,
+    last_error: 'sqlite_api_unavailable',
+    updatedAt: '2026-08-25T00:05:00.000Z',
+  })
+
+  await withServer(fixture.app, async (baseUrl) => {
+    const deniedProgress = await call(
+      baseUrl,
+      '/internal/v1/admin/pipelines/telegram-sqlite/progress',
+      { headers: { 'x-api-key': 'mih_live_not_admin' } },
+    )
+    assert.equal(deniedProgress.response.status, 403)
+    assert.equal(deniedProgress.payload.error.code, 'admin_token_required')
+
+    const deniedResume = await call(
+      baseUrl,
+      '/internal/v1/admin/pipelines/telegram-sqlite/resume',
+      {
+        method: 'POST', body: {},
+        headers: { 'x-api-key': 'mih_live_not_admin' },
+      },
+    )
+    assert.equal(deniedResume.response.status, 403)
+    assert.equal(deniedResume.payload.error.code, 'admin_token_required')
+
+    const headers = { 'x-mx-insight-admin-token': ADMIN_TOKEN }
+    const progress = await call(
+      baseUrl,
+      '/internal/v1/admin/pipelines/telegram-sqlite/progress',
+      { headers },
+    )
+    assert.equal(progress.response.status, 200)
+    assert.equal(progress.payload.data.tasks.length, 2)
+
+    const resumed = await call(
+      baseUrl,
+      '/internal/v1/admin/pipelines/telegram-sqlite/resume',
+      { method: 'POST', body: {}, headers },
+    )
+    assert.equal(resumed.response.status, 200)
+    assert.equal(
+      resumed.payload.data.tasks.find((task) => task.sourceKey.endsWith('messages')).resumed,
+      true,
+    )
+  })
+
+  assert.deepEqual(fixture.cursors.get(cursorId).position, checkpoint)
+  assert.equal(fixture.cursors.get(cursorId).status, 'idle')
 })

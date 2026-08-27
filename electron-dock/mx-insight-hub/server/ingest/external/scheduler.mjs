@@ -96,6 +96,8 @@ export async function scheduleActiveDatabaseSources({
   batchSize = 1_000,
   now = new Date(),
   segmenterConfig = null,
+  telegramSQLitePipeline = null,
+  logger = console,
 }) {
   const sources = await store.listExternalSources()
   let enqueued = 0
@@ -168,10 +170,21 @@ export async function scheduleActiveDatabaseSources({
     sources.find((source) => source.sourceKey === input.sourceKey)
   ))
   if (sqliteSources.every((source) => source?.sourceKind === 'sqlite_api' && source.status === 'active')) {
+    const recovery = typeof telegramSQLitePipeline?.recoverStalledTasks === 'function'
+      ? await telegramSQLitePipeline.recoverStalledTasks()
+      : null
+    if (recovery?.recovered > 0) {
+      logger.log?.(
+        `[external] recovered ${recovery.recovered} stale Telegram SQLite task(s) from durable checkpoints`,
+      )
+    }
     const cursors = await Promise.all(sqliteSources.map(
       (source) => queue.getCursor(`external:${source.sourceKey}`),
     ))
-    if (sqliteSources.every((source, index) => isDue(source, cursors[index], now))) {
+    if (
+      recovery?.recovered > 0
+      || sqliteSources.every((source, index) => isDue(source, cursors[index], now))
+    ) {
       const sqliteBatchSize = Math.min(batchSize, 500)
       const trigger = telegramSQLiteScheduleTrigger(cursors, now)
       const jobIds = await enqueueJobsAtomically(
@@ -212,12 +225,20 @@ export async function runExternalPullScheduler({
   batchSize,
   intervalMs,
   segmenterConfig,
+  telegramSQLitePipeline,
   signal,
   logger = console,
 }) {
   while (!signal?.aborted) {
     try {
-      const result = await scheduleActiveDatabaseSources({ store, queue, batchSize, segmenterConfig })
+      const result = await scheduleActiveDatabaseSources({
+        store,
+        queue,
+        batchSize,
+        segmenterConfig,
+        telegramSQLitePipeline,
+        logger,
+      })
       if (result.enqueued > 0) logger.log?.(`[external] scheduled ${result.enqueued}/${result.active} active database source(s)`)
     } catch (error) {
       const candidate = typeof error?.code === 'string' ? error.code : error?.name

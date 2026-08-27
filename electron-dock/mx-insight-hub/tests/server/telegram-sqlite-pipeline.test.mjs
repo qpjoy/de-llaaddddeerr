@@ -141,6 +141,19 @@ function pipelineFixture() {
   const queue = {
     pool: { connect: async () => queueClient },
     getCursor: async (cursorId) => cursors.get(cursorId) ?? null,
+    hasOutstandingJob: async () => false,
+    saveCursor: async (cursorId, position, options) => {
+      const current = cursors.get(cursorId) ?? { id: cursorId, processed_count: 0 }
+      const saved = {
+        ...current,
+        position: structuredClone(position),
+        status: options.status,
+        last_error: options.error,
+        updatedAt: new Date().toISOString(),
+      }
+      cursors.set(cursorId, saved)
+      return saved
+    },
     enqueue: async (queueName, payload, options) => {
       assert.equal(options.client, queueClient)
       const { client: _client, ...safeOptions } = options
@@ -434,6 +447,16 @@ test('Telegram SQLite v2 migration promotes search fields and installs scoped qu
   }
 })
 
+test('Telegram SQLite daily-window trigger migration replaces the original check safely', async () => {
+  const sql = await readFile(new URL('../../migrations/039_import_run_daily_window_trigger.sql', import.meta.url), 'utf8')
+  const drop = sql.indexOf('DROP CONSTRAINT IF EXISTS import_runs_trigger_check;')
+  const add = sql.indexOf('ADD CONSTRAINT import_runs_trigger_check')
+
+  assert.ok(drop >= 0)
+  assert.ok(add > drop)
+  assert.match(sql, /CHECK \(trigger IN \('manual', 'schedule', 'file', 'daily_window'\)\);/u)
+})
+
 
 test('one task failing its diagnostics never blanks the other task', async () => {
   const fixture = pipelineFixture()
@@ -561,6 +584,166 @@ test('a run still within the threshold is left alone', async () => {
     (error) => {
       assert.equal(error.code, 'source_draining')
       // Naming the task saves an operator from guessing which half is busy.
+      assert.deepEqual(error.details.sourceKeys, ['telegram-sqlite-api-messages'])
+      return true
+    },
+  )
+})
+
+test('scheduler recovery resumes a stale running cursor from the same import run', async () => {
+  const fixture = pipelineFixture()
+  for (const source of fixture.sources.values()) source.status = 'active'
+  const now = new Date('2026-08-28T12:00:00.000Z')
+  const checkpoint = {
+    importRunId: 'run-messages-0825',
+    cycle: { mode: 'incremental', page: 14, processedRows: 6_500 },
+    lastMessageAt: '2026-08-25T00:05:00.000Z',
+  }
+  fixture.cursors.set('external:telegram-sqlite-api-messages', {
+    id: 'external:telegram-sqlite-api-messages',
+    status: 'running',
+    position: checkpoint,
+    updated_at: '2026-08-25T00:05:00.000Z',
+  })
+  const saved = []
+  fixture.queue.saveCursor = async (id, position, options) => {
+    saved.push({ id, position: structuredClone(position), options: structuredClone(options) })
+    fixture.cursors.set(id, {
+      ...fixture.cursors.get(id), position: structuredClone(position), status: options.status,
+    })
+  }
+
+  const result = await new TelegramSQLitePipeline({ ...fixture, now: () => now })
+    .recoverStalledTasks()
+
+  assert.equal(result.recovered, 1)
+  assert.equal(result.skipped, null)
+  assert.deepEqual(result.tasks, [{
+    sourceKey: 'telegram-sqlite-api-messages',
+    importRunId: 'run-messages-0825',
+    from: 'abandoned_run',
+    clearedError: null,
+    silentForMs: now.getTime() - new Date('2026-08-25T00:05:00.000Z').getTime(),
+  }])
+  assert.deepEqual(saved, [{
+    id: 'external:telegram-sqlite-api-messages',
+    position: checkpoint,
+    options: { status: 'idle', processedDelta: 0, error: null },
+  }])
+})
+
+test('scheduler recovery allows only stale transient failures with an open import run', async () => {
+  const now = new Date('2026-08-28T12:00:00.000Z')
+  const recoverable = pipelineFixture()
+  for (const source of recoverable.sources.values()) source.status = 'active'
+  recoverable.cursors.set('external:telegram-sqlite-api-messages', {
+    id: 'external:telegram-sqlite-api-messages',
+    status: 'failed',
+    position: { importRunId: 'run-transient', cycle: { page: 8 } },
+    last_error: 'sqlite_api_unavailable',
+    updated_at: '2026-08-25T00:05:00.000Z',
+  })
+  const recovered = await new TelegramSQLitePipeline({ ...recoverable, now: () => now })
+    .recoverStalledTasks()
+  assert.equal(recovered.recovered, 1)
+  assert.equal(recovered.tasks[0].from, 'transient_failure')
+  assert.equal(recovered.tasks[0].clearedError, 'sqlite_api_unavailable')
+  assert.equal(
+    recoverable.cursors.get('external:telegram-sqlite-api-messages').position.importRunId,
+    'run-transient',
+  )
+
+  for (const errorCode of ['row_rejections_detected', 'import_batch_failed', 'checkpoint_contract_mismatch']) {
+    const blocked = pipelineFixture()
+    for (const source of blocked.sources.values()) source.status = 'active'
+    blocked.cursors.set('external:telegram-sqlite-api-messages', {
+      id: 'external:telegram-sqlite-api-messages',
+      status: 'failed',
+      position: { importRunId: `run-${errorCode}`, cycle: { page: 8 } },
+      last_error: errorCode,
+      updated_at: '2026-08-25T00:05:00.000Z',
+    })
+    const result = await new TelegramSQLitePipeline({ ...blocked, now: () => now })
+      .recoverStalledTasks()
+    assert.equal(result.recovered, 0, errorCode)
+    assert.equal(result.skipped, 'no_recoverable_task', errorCode)
+    assert.equal(
+      blocked.cursors.get('external:telegram-sqlite-api-messages').status,
+      'failed',
+      errorCode,
+    )
+  }
+})
+
+test('scheduler recovery never clears a cursor while either paired job is outstanding', async () => {
+  const fixture = pipelineFixture()
+  for (const source of fixture.sources.values()) source.status = 'active'
+  fixture.cursors.set('external:telegram-sqlite-api-messages', {
+    id: 'external:telegram-sqlite-api-messages',
+    status: 'running',
+    position: { importRunId: 'run-owned', cycle: { page: 9 } },
+    updated_at: '2026-08-25T00:05:00.000Z',
+  })
+  fixture.queue.hasOutstandingJob = async (_queue, match) => match.sourceKey.endsWith('chats')
+  let saved = false
+  fixture.queue.saveCursor = async () => { saved = true }
+
+  const result = await new TelegramSQLitePipeline({
+    ...fixture,
+    now: () => new Date('2026-08-28T12:00:00.000Z'),
+  }).recoverStalledTasks()
+
+  assert.equal(result.recovered, 0)
+  assert.equal(result.skipped, 'outstanding_jobs')
+  assert.deepEqual(result.sourceKeys, ['telegram-sqlite-api-chats'])
+  assert.equal(saved, false)
+})
+
+test('scheduler recovery never bypasses a deterministic failure in the paired task', async () => {
+  const fixture = pipelineFixture()
+  for (const source of fixture.sources.values()) source.status = 'active'
+  fixture.cursors.set('external:telegram-sqlite-api-chats', {
+    id: 'external:telegram-sqlite-api-chats',
+    status: 'failed',
+    position: { importRunId: 'run-contract', cycle: { page: 2 } },
+    last_error: 'checkpoint_contract_mismatch',
+    updated_at: '2026-08-25T00:04:00.000Z',
+  })
+  fixture.cursors.set('external:telegram-sqlite-api-messages', {
+    id: 'external:telegram-sqlite-api-messages',
+    status: 'failed',
+    position: { importRunId: 'run-network', cycle: { page: 14 } },
+    last_error: 'sqlite_api_unavailable',
+    updated_at: '2026-08-25T00:05:00.000Z',
+  })
+  let saved = false
+  fixture.queue.saveCursor = async () => { saved = true }
+
+  const result = await new TelegramSQLitePipeline({
+    ...fixture,
+    now: () => new Date('2026-08-28T12:00:00.000Z'),
+  }).recoverStalledTasks()
+
+  assert.equal(result.recovered, 0)
+  assert.equal(result.skipped, 'paired_task_blocked')
+  assert.deepEqual(result.sourceKeys, ['telegram-sqlite-api-chats'])
+  assert.equal(saved, false)
+})
+
+test('operator recovery also refuses to race an outstanding continuation job', async () => {
+  const fixture = pipelineFixture()
+  fixture.cursors.set('external:telegram-sqlite-api-messages', {
+    id: 'external:telegram-sqlite-api-messages',
+    status: 'failed',
+    position: { importRunId: 'run-owned', cycle: { page: 9 } },
+    last_error: 'continuation_enqueue_failed',
+  })
+  fixture.queue.hasOutstandingJob = async (_queue, match) => match.sourceKey.endsWith('messages')
+
+  await assert.rejects(
+    () => new TelegramSQLitePipeline(fixture).resumeFailedTasks(),
+    (error) => {
+      assert.equal(error.code, 'source_recovery_pending')
       assert.deepEqual(error.details.sourceKeys, ['telegram-sqlite-api-messages'])
       return true
     },

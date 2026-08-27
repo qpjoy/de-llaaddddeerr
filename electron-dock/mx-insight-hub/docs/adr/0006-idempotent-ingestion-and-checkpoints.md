@@ -26,6 +26,25 @@
   batch，并直接采用其 `cursor_end`；若较低层重放同时提供了不同 fingerprint，
   `pageDrifted` 是来源页发生漂移的事故证据，已提交 batch 仍是权威，不能把
   新页面盲写成同一 batch。
+- durable cursor 状态与 queue job 所有权是两个独立事实，不能仅因 cursor 长期
+  `running` 就覆盖它，也不能因 queue 中暂时查不到 job 就丢弃 checkpoint。
+  Telegram SQLite scheduler 只自动恢复超过
+  `max(syncIntervalSeconds * 10, 15 分钟)`、仍保留 `importRunId` 的 cursor：
+  stale `running` 可恢复；`failed` 还必须属于明确的 transient 白名单。恢复前在
+  两个 source advisory lock 内重新读取状态，并确认两个子来源都没有 outstanding
+  `external-pull` job；无法执行检查、锁争用或状态变化时一律 fail closed。
+  mapping、checkpoint/ingest contract 和 row rejection 等确定性失败仍由运维人员
+  修正后人工恢复。
+- 恢复只把同一 cursor position 改回 `idle`，不 reset checkpoint、不新建
+  import run，也不重放已经提交的 batch；同一 run/batch 的持久化证据会直接提供
+  `cursor_end`，最多重新请求当前尚未提交的源页。scheduler 随后立即原子入队
+  chats/messages 两个任务。人工恢复必须按 `resume` 后 `sync` 的顺序执行，且
+  `resume` 在任一子来源仍有 outstanding job 时以
+  `409 source_recovery_pending` 拒绝。
+- Telegram SQLite 的上海前一日窗口把 import-run trigger 记录为
+  `daily_window`；migration 039 以 `DROP CONSTRAINT IF EXISTS` 后重新 `ADD` 的
+  upgrade-safe 方式扩展 `ingest.import_runs` 上的
+  `import_runs_trigger_check`，使运行时值与数据库约束一致。
 - source 使用 PostgreSQL session advisory try-lock。pull/reset、连接测试、
   连接/映射切换等拓扑操作不会
   交叉；争用立即返回 `409 source_busy`，不在长查询后面无界等待。暂停只阻止

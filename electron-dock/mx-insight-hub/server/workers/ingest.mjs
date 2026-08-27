@@ -17,7 +17,10 @@ import {
   assertProvinceOpinionHanlpConfigured,
   isProvinceOpinionSourceKey,
 } from '../ingest/province/monitor-pipeline.mjs'
-import { TELEGRAM_SQLITE_SOURCE_KEYS } from '../ingest/telegram/sqlite-pipeline.mjs'
+import {
+  TELEGRAM_SQLITE_SOURCE_KEYS,
+  TelegramSQLitePipeline,
+} from '../ingest/telegram/sqlite-pipeline.mjs'
 import { createPostgresStore } from '../stores/postgres-store.mjs'
 
 // Ingest worker: drains queued search results and runs Night-All backfills.
@@ -50,6 +53,7 @@ async function main() {
   const backfill = new NightAllBackfill({ store, adapter, queue, logger })
   const databasePuller = new DatabaseSourcePuller({ store, queue, logger })
   const sqliteApiPuller = new SQLiteApiSourcePuller({ store, queue, logger })
+  const telegramSQLitePipeline = new TelegramSQLitePipeline({ store, queue, sqliteApiPuller })
   const externalSourcePuller = new ExternalSourcePuller({
     store,
     queue,
@@ -176,6 +180,7 @@ async function main() {
       batchSize: config.externalPull.batchSize,
       intervalMs: config.externalPull.intervalMs,
       segmenterConfig: config.common.segmenter,
+      telegramSQLitePipeline,
       signal: controller.signal,
       logger,
     }),

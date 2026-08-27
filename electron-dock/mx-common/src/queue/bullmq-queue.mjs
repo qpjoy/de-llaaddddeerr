@@ -10,6 +10,36 @@
 // Cursors stay in PostgreSQL regardless of driver: they are durable state, and
 // Redis is configured for eviction in most deployments.
 
+const OUTSTANDING_JOB_STATES = ['waiting', 'active', 'delayed', 'prioritized']
+
+function assertPayloadMatch(payloadMatch) {
+  if (payloadMatch === null || typeof payloadMatch !== 'object' || Array.isArray(payloadMatch)) {
+    throw new TypeError('payloadMatch must be a plain object')
+  }
+}
+
+// Mirror PostgreSQL JSONB containment for the JSON payload shapes used by jobs.
+function jsonContains(value, expected) {
+  if (Array.isArray(expected)) {
+    return (
+      Array.isArray(value) &&
+      expected.every((expectedItem) => value.some((item) => jsonContains(item, expectedItem)))
+    )
+  }
+  if (expected !== null && typeof expected === 'object') {
+    return (
+      value !== null &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.entries(expected).every(
+        ([key, expectedValue]) =>
+          Object.prototype.hasOwnProperty.call(value, key) && jsonContains(value[key], expectedValue),
+      )
+    )
+  }
+  return value === expected
+}
+
 export class BullmqQueue {
   #queues = new Map()
 
@@ -84,6 +114,14 @@ export class BullmqQueue {
       status,
       count,
     }))
+  }
+
+  /** Return whether this namespaced queue has a non-terminal matching job. */
+  async hasOutstandingJob(name, payloadMatch) {
+    assertPayloadMatch(payloadMatch)
+    const queue = await this.#queue(name)
+    const jobs = await queue.getJobs(OUTSTANDING_JOB_STATES, 0, -1, true)
+    return jobs.some((job) => jsonContains(job?.data, payloadMatch))
   }
 
   // BullMQ reclaims stalled jobs itself through its stalled-check interval, so

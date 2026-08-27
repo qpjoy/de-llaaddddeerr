@@ -2458,6 +2458,75 @@ test('periodic SQLite API scheduling atomically enqueues the due pair with a cap
   ])
 })
 
+test('periodic SQLite scheduling immediately enqueues both tasks after safe recovery', async () => {
+  const sources = [
+    {
+      sourceKey: 'telegram-sqlite-api-chats', sourceKind: 'sqlite_api', status: 'active',
+      syncIntervalSeconds: 300,
+    },
+    {
+      sourceKey: 'telegram-sqlite-api-messages', sourceKind: 'sqlite_api', status: 'active',
+      syncIntervalSeconds: 300,
+    },
+  ]
+  const cursors = new Map(sources.map((source) => [source.sourceKey, {
+    status: source.sourceKey.endsWith('messages') ? 'failed' : 'idle',
+    updatedAt: '2026-08-28T07:59:59.000Z',
+    position: source.sourceKey.endsWith('messages')
+      ? { importRunId: 'run-resume', cycle: { page: 14 } }
+      : {},
+  }]))
+  const enqueues = []
+  const statements = []
+  const logs = []
+  const client = {
+    query: async (sql) => { statements.push(sql); return { rows: [] } },
+    release() {},
+  }
+  const queue = {
+    pool: { connect: async () => client },
+    getCursor: async (id) => cursors.get(id.replace(/^external:/u, '')),
+    enqueue: async (name, payload, options) => {
+      assert.equal(options.client, client)
+      enqueues.push([name, structuredClone(payload)])
+      return enqueues.length
+    },
+  }
+  let recoveryCalls = 0
+  const telegramSQLitePipeline = {
+    recoverStalledTasks: async () => {
+      recoveryCalls += 1
+      cursors.set('telegram-sqlite-api-messages', {
+        ...cursors.get('telegram-sqlite-api-messages'),
+        status: 'idle',
+        updatedAt: '2026-08-28T08:00:00.000Z',
+      })
+      return { recovered: 1 }
+    },
+  }
+
+  const result = await scheduleActiveDatabaseSources({
+    store: {
+      listExternalSources: async () => sources,
+      getLatestPipelineWriterContractAttestation: async () => null,
+    },
+    queue,
+    telegramSQLitePipeline,
+    logger: { log: (line) => logs.push(line) },
+    now: new Date('2026-08-28T08:00:00.000Z'),
+    batchSize: 1_000,
+  })
+
+  assert.deepEqual(result, { active: 2, enqueued: 2 })
+  assert.equal(recoveryCalls, 1)
+  assert.deepEqual(statements, ['BEGIN', 'COMMIT'])
+  assert.deepEqual(enqueues.map(([, payload]) => payload.sourceKey), [
+    'telegram-sqlite-api-chats',
+    'telegram-sqlite-api-messages',
+  ])
+  assert.match(logs[0], /recovered 1 stale Telegram SQLite task/u)
+})
+
 test('SQLite daily-window scheduling uses Shanghai 02:00 and catches up checkpoint drift as a pair', async () => {
   const sources = [
     {

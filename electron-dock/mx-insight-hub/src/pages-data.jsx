@@ -236,6 +236,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
           token={token}
           pipeline={telegramSqlitePipeline.data}
           loading={telegramSqlitePipeline.loading}
+          error={telegramSqlitePipeline.error}
           onUnauthorized={onUnauthorized}
           notify={notify}
           onClose={() => setTelegramSqliteOpen(false)}
@@ -307,7 +308,7 @@ function telegramTaskMeta(task) {
 }
 
 function telegramTaskCursorStatus(task) {
-  return task?.cursor?.status || task?.latestRun?.status || task?.source?.status || 'idle'
+  return task?.cursor?.status || 'idle'
 }
 
 // Ten sync cycles, floored at 15 minutes -- the same bar the server applies.
@@ -326,7 +327,7 @@ function telegramTaskSilenceMs(task) {
  *
  * `failed` is the obvious case. A `running` cursor whose worker died is the
  * quiet one: it also makes isDue false, it also freezes the paired task, and
- * nothing ever moves it back on its own.
+ * it needs either the scheduler's guarded self-recovery or an operator action.
  */
 function telegramTaskStuck(task) {
   const status = telegramTaskCursorStatus(task)
@@ -340,7 +341,13 @@ function telegramTaskStuck(task) {
 
 function telegramStuckDescription(task) {
   const status = telegramTaskCursorStatus(task)
-  if (status === 'failed') return '游标停在 failed'
+  if (status === 'failed') {
+    const candidate = task?.cursor?.last_error || task?.cursor?.lastError || task?.cursor?.error
+    const code = typeof candidate === 'string' && /^[A-Za-z0-9_.-]{1,80}$/u.test(candidate)
+      ? candidate
+      : null
+    return code ? `游标停在 failed · ${code}` : '游标停在 failed'
+  }
   const silence = telegramTaskSilenceMs(task)
   const minutes = silence == null ? null : Math.round(silence / 60_000)
   return minutes == null
@@ -354,8 +361,8 @@ function telegramTaskSourceKey(task) {
 }
 
 function telegramPipelineIsRunning(pipeline) {
-  return pipeline?.status === 'draining' || (pipeline?.tasks || []).some((task) => (
-    ['running', 'draining'].includes(String(task?.cursor?.status || task?.latestRun?.status || '').toLowerCase())
+  return pipeline?.draining === true || pipeline?.status === 'draining' || (pipeline?.tasks || []).some((task) => (
+    ['running', 'draining'].includes(String(task?.cursor?.status || '').toLowerCase())
   ))
 }
 
@@ -961,7 +968,7 @@ function ProvinceOpinionPipelineModal({
 }
 
 function TelegramSqlitePipelineModal({
-  token, pipeline, loading, onUnauthorized, notify, onClose, onRefresh, onPipelineChanged,
+  token, pipeline, loading, error, onUnauthorized, notify, onClose, onRefresh, onPipelineChanged,
 }) {
   const configured = telegramSqlitePipelineConfigured(pipeline)
   const running = telegramPipelineIsRunning(pipeline)
@@ -977,16 +984,33 @@ function TelegramSqlitePipelineModal({
   )
   const progress = useRemoteData(loadProgress, onUnauthorized)
   const [busyAction, setBusyAction] = useState(null)
+  const [followupRefreshes, setFollowupRefreshes] = useState(0)
+  const [historyRevision, setHistoryRevision] = useState(0)
   const [resetConfirmation, setResetConfirmation] = useState('')
   const warnings = sqlitePipelineIssueMessages(pipeline.warnings, pipeline.strategy?.warnings)
   const progressTasks = Array.isArray(progress.data) ? progress.data : progress.data?.tasks || []
   const connectionEditable = !running && !['active', 'draining'].includes(pipeline.status)
 
   useEffect(() => {
-    if (!running || loading) return undefined
-    const timer = window.setTimeout(onRefresh, 2_000)
+    if ((!running && followupRefreshes === 0) || loading) return undefined
+    const timer = window.setTimeout(() => {
+      onRefresh()
+      setHistoryRevision((value) => value + 1)
+      if (followupRefreshes > 0) setFollowupRefreshes((value) => Math.max(0, value - 1))
+    }, 2_000)
     return () => window.clearTimeout(timer)
-  }, [loading, onRefresh, running])
+  }, [followupRefreshes, loading, onRefresh, running])
+
+  const wasRunning = useRef(running)
+  useEffect(() => {
+    if (running) {
+      wasRunning.current = true
+      return
+    }
+    if (!wasRunning.current) return
+    wasRunning.current = false
+    setHistoryRevision((value) => value + 1)
+  }, [running])
 
   const mutate = async (action, request, successMessage) => {
     setBusyAction(action)
@@ -995,6 +1019,13 @@ function TelegramSqlitePipelineModal({
       if (updated?.tasks && updated?.status) onPipelineChanged(updated)
       else onRefresh()
       progress.refresh()
+      if (action === 'sync' || action === 'resume') {
+        // The 202 sync response can win the race with the worker's first cursor
+        // write. Keep observing long enough to see it start; once running is
+        // visible, the regular running poll owns refresh through completion.
+        setFollowupRefreshes(6)
+        setHistoryRevision((value) => value + 1)
+      }
       notify?.(successMessage, 'success')
       return updated
     } catch (error) {
@@ -1096,7 +1127,7 @@ function TelegramSqlitePipelineModal({
           )}
           {failedTasks.length > 0 ? (
             <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)}
-              title="清除失败或已静默的运行状态，从上次 checkpoint 继续；不会重放数据" onClick={resumeFailed}>
+              title="清除失败或已静默的运行状态，从上次 checkpoint 继续；不会重放已提交批次" onClick={resumeFailed}>
               <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '恢复卡住的任务'}
             </button>
           ) : null}
@@ -1106,12 +1137,14 @@ function TelegramSqlitePipelineModal({
         </div>
       </div>
 
+      {error ? <ErrorState error={error} onRetry={onRefresh} /> : null}
+
       {failedTasks.length > 0 ? (
         <p className="mih-inline-warning">
           <Warning size={16} aria-hidden="true" />
           {failedTasks.map((task) => `${telegramSqliteTaskMeta(task).label}（${telegramStuckDescription(task)}）`).join('、')}。
-          两个任务同批调度，所以一个卡住会连带另一个一起停止排程，直到人工恢复。
-          「恢复卡住的任务」只清除卡住状态并从各自 checkpoint 继续，不重放数据，也不重置 Checkpoint。
+          两个任务同批调度，所以一个卡住会连带另一个停止排程。调度器只会在确认原运行已超时、保留可续跑 importRunId 且队列没有活跃任务时自动恢复暂态故障；其他故障仍需人工处理。
+          「恢复卡住的任务」只清除卡住状态并从各自 checkpoint 继续，不重放已提交批次，也不重置 Checkpoint；最多重取当前未提交页。
           判定标准是静默超过 10 个同步周期（默认 50 分钟）；仍在推进的批次不会被打断。
         </p>
       ) : null}
@@ -1165,6 +1198,7 @@ function TelegramSqlitePipelineModal({
       </Panel>
 
       <PipelineRunHistory token={token} tasks={tasks} onUnauthorized={onUnauthorized}
+        refreshRevision={historyRevision}
         labelOf={(sourceKey) => (sourceKey?.endsWith('chats') ? '会话目录' : '消息事实')} />
 
       <Panel title="处理链路与索引能力" subtitle="远端只读响应先作为原始证据保留；删除标记留在 canonical/revision，公共 ES 按 current-state tombstone 收敛">
@@ -1206,7 +1240,7 @@ function TelegramSqliteTaskCard({ task, progress, configured }) {
   const sourceKey = telegramTaskSourceKey(task) || meta.sourceKey
   const diagnostic = progress.find((entry) => entry.role === task.role || entry.sourceKey === sourceKey)
   const latest = task.latestRun
-  const cursorStatus = task.cursor?.status || latest?.status || task.source?.status || 'idle'
+  const cursorStatus = telegramTaskCursorStatus(task)
   const mappingVersion = task.activeMapping?.version ?? task.activeMapping ?? '—'
   const endpoint = task.endpoint || task.source?.connection?.endpoint || meta.endpoint
   const dataset = task.dataset || task.source?.datasetId || meta.dataset
@@ -2942,30 +2976,50 @@ function DatabaseSourceControl({
  * from the same per-source endpoint and interleaved. That keeps paired tasks
  * comparable while also supporting a fixed pipeline with one input.
  */
-function PipelineRunHistory({ token, tasks, onUnauthorized, labelOf }) {
+function PipelineRunHistory({ token, tasks, onUnauthorized, labelOf, refreshRevision = 0 }) {
   const sourceKeys = tasks.map((task) => telegramTaskSourceKey(task)).filter(Boolean)
   const signature = sourceKeys.join(',')
   const load = useCallback(
     async () => {
-      if (!signature) return []
+      if (!signature) return { items: [], failures: [] }
       const keys = signature.split(',')
-      const perTask = await Promise.all(keys.map(async (key) => {
-        // One task's history must not be lost to the other's failure.
-        try {
-          const runs = await adminApi.importRuns(token, key)
-          return asList(runs).map((run) => ({ ...run, sourceKey: key }))
-        } catch {
-          return []
-        }
+      const perTask = await Promise.allSettled(keys.map(async (key) => {
+        const runs = await adminApi.importRuns(token, key)
+        return asList(runs).map((run) => ({ ...run, sourceKey: key }))
       }))
-      return perTask.flat().sort((left, right) => (
-        String(right.startedAt || right.createdAt || '').localeCompare(String(left.startedAt || left.createdAt || ''))
-      ))
+      const unauthorized = perTask.find((result) => result.status === 'rejected' && result.reason?.status === 401)
+      if (unauthorized) throw unauthorized.reason
+      return {
+        items: perTask.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+          .sort((left, right) => (
+            String(right.startedAt || right.createdAt || '').localeCompare(String(left.startedAt || left.createdAt || ''))
+          )),
+        failures: perTask.flatMap((result, index) => result.status === 'rejected' ? [{
+          sourceKey: keys[index],
+          code: result.reason?.code || 'request_failed',
+          message: result.reason?.message || '任务记录读取失败',
+        }] : []),
+      }
     },
-    [signature, token],
+    [refreshRevision, signature, token],
   )
   const runs = useRemoteData(load, onUnauthorized)
-  const items = asList(runs.data)
+  const items = asList(runs.data?.items)
+  const failures = asList(runs.data?.failures)
+
+  const displayStatus = (run) => {
+    if (run.status !== 'running') {
+      return {
+        status: run.status === 'succeeded' ? 'active' : run.status === 'failed' ? 'down' : run.status,
+        label: run.status,
+      }
+    }
+    const task = tasks.find((candidate) => telegramTaskSourceKey(candidate) === run.sourceKey)
+    if (task?.latestRun?.id === run.id && telegramTaskStuck(task)) {
+      return { status: 'down', label: '等待恢复' }
+    }
+    return { status: 'running', label: 'running' }
+  }
 
   return (
     <Panel title="任务与清洗记录" subtitle="固定任务合并的运行时间线：每次运行的读取、入库、变更、删除、拒绝与失败原因"
@@ -2974,22 +3028,30 @@ function PipelineRunHistory({ token, tasks, onUnauthorized, labelOf }) {
       </button>}>
       {runs.loading && !runs.data ? <LoadingState label="正在加载任务记录" /> : null}
       {runs.error ? <ErrorState error={runs.error} onRetry={runs.refresh} /> : null}
-      {items.length === 0 && !runs.loading && !runs.error
+      {failures.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">
+        {failures.map((failure) => <li key={failure.sourceKey}>
+          <code>{failure.sourceKey}</code>：{failure.message}（{failure.code}）
+        </li>)}
+      </ul> : null}
+      {items.length === 0 && failures.length === 0 && !runs.loading && !runs.error
         ? <EmptyState icon={Database} title="还没有任务记录" description="同步执行后，这里会出现每次运行的可审计证据。" />
         : null}
       {items.length > 0 ? <DataTable label="固定管线运行历史">
         <thead><tr><th>开始时间</th><th>任务</th><th>状态</th><th>读取</th><th>入库</th><th>变更</th><th>删除</th><th>拒绝</th><th>错误</th></tr></thead>
-        <tbody>{items.map((run) => <tr key={run.id}>
-          <td>{formatDate(run.startedAt || run.createdAt)}<small>{formatDate(run.finishedAt) !== '—' ? `结束 ${formatDate(run.finishedAt)}` : '运行中'}</small></td>
-          <td>{labelOf(run.sourceKey)}<small><code>{run.sourceKey}</code></small></td>
-          <td><StatusBadge status={run.status === 'succeeded' ? 'active' : run.status === 'failed' ? 'down' : run.status} label={run.status} /></td>
-          <td>{formatNumber(run.rowCount || 0)}</td>
-          <td>{formatNumber(run.ingestedCount || 0)}</td>
-          <td>{formatNumber(run.changedCount || 0)}</td>
-          <td>{formatNumber(run.deletedCount || 0)}</td>
-          <td>{formatNumber(run.rejectedCount || 0)}</td>
-          <td><code>{run.lastError || run.error || '—'}</code></td>
-        </tr>)}</tbody>
+        <tbody>{items.map((run) => {
+          const status = displayStatus(run)
+          return <tr key={run.id}>
+            <td>{formatDate(run.startedAt || run.createdAt)}<small>{formatDate(run.finishedAt) !== '—' ? `结束 ${formatDate(run.finishedAt)}` : status.label === '等待恢复' ? '等待恢复' : '运行中'}</small></td>
+            <td>{labelOf(run.sourceKey)}<small><code>{run.sourceKey}</code></small></td>
+            <td><StatusBadge status={status.status} label={status.label} /></td>
+            <td>{formatNumber(run.rowCount || 0)}</td>
+            <td>{formatNumber(run.ingestedCount || 0)}</td>
+            <td>{formatNumber(run.changedCount || 0)}</td>
+            <td>{formatNumber(run.deletedCount || 0)}</td>
+            <td>{formatNumber(run.rejectedCount || 0)}</td>
+            <td><code>{run.lastError || run.error || '—'}</code></td>
+          </tr>
+        })}</tbody>
       </DataTable> : null}
     </Panel>
   )
