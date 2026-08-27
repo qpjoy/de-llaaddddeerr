@@ -99,6 +99,11 @@ const SOURCE_KIND_OPTIONS = [
 
 const PRIORITY_OPTIONS = ['P0', 'P1', 'P2', 'P3'].map((value) => ({ value, label: value }))
 const optionLabel = (options, value) => options.find((option) => option.value === value)?.label || value || '—'
+const TAXONOMY_KINDS = [
+  { value: 'major_category', label: '大类', singular: '大类', description: '每个平台的主业务归属，用于稳定汇报。' },
+  { value: 'scenario', label: '细分场景', singular: '场景', description: '一个平台可关联多个 use case。' },
+  { value: 'region', label: '区域', singular: '区域', description: '多选覆盖范围，不与数据驻留或合规区域混用。' },
+]
 
 const BUILTIN_VIEWS = [
   { id: 'all', label: '底表', icon: Rows, predicate: (item) => !item.archivedAt },
@@ -119,6 +124,7 @@ const SECTION_OPTIONS = [
 
 const EMPTY_FILTERS = Object.freeze({
   category: '',
+  scenario: '',
   region: '',
   priority: '',
   coverage: '',
@@ -146,7 +152,7 @@ function SelectField({ label, value, onChange, options, emptyLabel, disabled = f
   return <DropdownField label={label} value={value ?? ''} disabled={disabled} options={normalizedOptions} onChange={onChange} />
 }
 
-function CatalogBadge({ dimension, value }) {
+function CatalogBadge({ dimension, value, onClick = null, ariaLabel = null }) {
   const labels = dimension === 'coverage'
     ? COVERAGE_OPTIONS
     : dimension === 'delivery'
@@ -161,12 +167,18 @@ function CatalogBadge({ dimension, value }) {
       : dimension === 'delivery'
         ? Pulse
         : CirclesThree
-  return (
-    <span className={`mih-catalog-status mih-catalog-status--${value || 'unknown'}`}>
+  const content = (
+    <>
       <Icon size={13} weight="fill" aria-hidden="true" />
       {optionLabel(labels, value)}
-    </span>
+    </>
   )
+  const className = `mih-catalog-status mih-catalog-status--${value || 'unknown'}${onClick ? ' mih-catalog-status--interactive' : ''}`
+  return onClick ? (
+    <button className={className} type="button" aria-label={ariaLabel || `编辑${dimension === 'coverage' ? '覆盖状态' : '实施阶段'}`} onClick={onClick}>
+      {content}
+    </button>
+  ) : <span className={className}>{content}</span>
 }
 
 function CatalogKpi({ icon: Icon, label, value, hint, tone = 'primary' }) {
@@ -734,6 +746,7 @@ function textSearch(item, query) {
 
 function matchesFilters(item, filters) {
   return (!filters.category || item.majorCategory === filters.category)
+    && (!filters.scenario || item.scenarios?.includes(filters.scenario))
     && (!filters.region || item.regions?.includes(filters.region))
     && (!filters.priority || item.priority === filters.priority)
     && (!filters.coverage || item.coverageStatus === filters.coverage)
@@ -774,7 +787,7 @@ function downloadCatalogCsv(items) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
-function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh, requestedView, onRequestedViewHandled }) {
+function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh, requestedView, onRequestedViewHandled, requestedTermKind = '', requestedTermValue = '' }) {
   const [viewId, setViewId] = useState(requestedView || 'all')
   const [query, setQuery] = useState('')
   const [filters, setFilters] = useState({ ...EMPTY_FILTERS })
@@ -803,6 +816,22 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
     setViewId(requestedView)
     onRequestedViewHandled?.()
   }, [onRequestedViewHandled, requestedView])
+
+  useEffect(() => {
+    if (!requestedTermValue) return
+    const field = requestedTermKind === 'major_category'
+      ? 'category'
+      : requestedTermKind === 'scenario'
+        ? 'scenario'
+        : requestedTermKind === 'region'
+          ? 'region'
+          : null
+    if (!field) return
+    setViewId('all')
+    setFilters({ ...EMPTY_FILTERS, [field]: requestedTermValue })
+    setPage(1)
+    setSelectedIds(new Set())
+  }, [requestedTermKind, requestedTermValue])
 
   const selectView = (id) => {
     const custom = savedViews.find((view) => view.id === id)
@@ -842,6 +871,8 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
   const allPageSelected = pageItems.length > 0 && pageItems.every((item) => selectedIds.has(item.id))
   const selected = snapshot.items.filter((item) => selectedIds.has(item.id))
   const activeFilterCount = Object.values(filters).filter(Boolean).length
+
+  const openEditor = (entry, initialTab = 'profile') => setEditing({ entry, initialTab })
 
   useEffect(() => setPage(1), [density, filters, query, sortBy, viewId])
 
@@ -939,6 +970,7 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
         {filterOpen ? (
           <div className="mih-source-filter-panel">
             <SelectField label="一级分类" value={filters.category} emptyLabel="全部分类" options={snapshot.facets.majorCategories.map((value) => ({ value, label: value }))} onChange={(value) => setFilters({ ...filters, category: value })} />
+            <SelectField label="细分场景" value={filters.scenario} emptyLabel="全部场景" options={snapshot.facets.scenarios.map((value) => ({ value, label: value }))} onChange={(value) => setFilters({ ...filters, scenario: value })} />
             <SelectField label="区域" value={filters.region} emptyLabel="全部区域" options={snapshot.facets.regions.map((value) => ({ value, label: value }))} onChange={(value) => setFilters({ ...filters, region: value })} />
             <SelectField label="优先级" value={filters.priority} emptyLabel="全部优先级" options={PRIORITY_OPTIONS} onChange={(value) => setFilters({ ...filters, priority: value })} />
             <SelectField label="覆盖状态" value={filters.coverage} emptyLabel="全部状态" options={COVERAGE_OPTIONS} onChange={(value) => setFilters({ ...filters, coverage: value })} />
@@ -973,16 +1005,16 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
                   <tr className={item.archivedAt ? 'is-archived' : ''} key={item.id}>
                     <td className="mih-source-check"><input type="checkbox" aria-label={`选择 ${item.canonicalName}`} checked={selectedIds.has(item.id)} onChange={() => setSelectedIds((current) => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next })} /></td>
                     <td>{item.legacySequence || '—'}</td>
-                    <td><button className="mih-source-name" type="button" onClick={() => setEditing(item)}><strong>{item.canonicalName}</strong><small>{optionLabel(SOURCE_KIND_OPTIONS, item.sourceKind)} · rev {item.revision}</small></button></td>
+                    <td><button className="mih-source-name" type="button" onClick={() => openEditor(item, 'related')}><strong>{item.canonicalName}</strong><small>{optionLabel(SOURCE_KIND_OPTIONS, item.sourceKind)} · rev {item.revision}</small></button></td>
                     <td><span className="mih-source-cell-tag">{item.majorCategory}</span></td>
                     <td><div className="mih-source-cell-tags">{item.scenarios?.slice(0, 2).map((value) => <span key={value}>{value}</span>)}{item.scenarios?.length > 2 ? <small>+{item.scenarios.length - 2}</small> : null}</div></td>
                     <td><div className="mih-source-cell-tags">{item.regions?.map((value) => <span key={value}>{value}</span>)}</div></td>
-                    <td><CatalogBadge dimension="coverage" value={item.coverageStatus} /></td>
-                    <td><CatalogBadge dimension="delivery" value={item.deliveryStatus} /></td>
+                    <td><CatalogBadge dimension="coverage" value={item.coverageStatus} ariaLabel={`编辑 ${item.canonicalName} 的覆盖状态`} onClick={() => openEditor(item, 'governance')} /></td>
+                    <td><CatalogBadge dimension="delivery" value={item.deliveryStatus} ariaLabel={`编辑 ${item.canonicalName} 的实施阶段`} onClick={() => openEditor(item, 'governance')} /></td>
                     <td><span className={`mih-source-priority mih-source-priority--${item.priority.toLowerCase()}`}>{item.priority}</span></td>
-                    <td>{item.owner ? <span className="mih-source-owner"><UserCircle size={15} aria-hidden="true" />{item.owner}</span> : <button className="mih-source-unassigned" type="button" onClick={() => setEditing(item)}>待分配</button>}</td>
+                    <td>{item.owner ? <span className="mih-source-owner"><UserCircle size={15} aria-hidden="true" />{item.owner}</span> : <button className="mih-source-unassigned" type="button" onClick={() => openEditor(item, 'governance')}>待分配</button>}</td>
                     <td><div className="mih-source-cell-tags">{item.connectorHints?.slice(0, 2).map((value) => <span key={value}>{value}</span>)}{!item.connectorHints?.length ? <small>—</small> : null}</div></td>
-                    <td><button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`编辑 ${item.canonicalName}`} onClick={() => setEditing(item)}><NotePencil size={16} aria-hidden="true" /></button></td>
+                    <td><button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`编辑 ${item.canonicalName}`} onClick={() => openEditor(item)}><NotePencil size={16} aria-hidden="true" /></button></td>
                   </tr>
                 )),
               ])}
@@ -995,7 +1027,7 @@ function SourceCatalogTable({ snapshot, token, onUnauthorized, notify, onRefresh
       </section>
 
       {creating ? <CatalogEntryModal token={token} facets={snapshot.facets} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setCreating(false)} onChanged={() => { setCreating(false); onRefresh() }} /> : null}
-      {editing ? <CatalogEntryModal token={token} entry={editing} facets={snapshot.facets} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setEditing(null)} onChanged={() => { setEditing(null); onRefresh() }} /> : null}
+      {editing ? <CatalogEntryModal token={token} entry={editing.entry} initialTab={editing.initialTab} facets={snapshot.facets} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setEditing(null)} onChanged={() => { setEditing(null); onRefresh() }} /> : null}
       {saveViewOpen ? (
         <Modal title="保存当前视图" description="保存筛选、分组、排序和行高；当前版本仅保存在此浏览器。" onClose={() => setSaveViewOpen(false)} footer={<><button className="qp-button qp-button--ghost" type="button" onClick={() => setSaveViewOpen(false)}>取消</button><button className="qp-button qp-button--primary" type="submit" form="save-source-view" disabled={!viewName.trim()}><FloppyDisk size={16} aria-hidden="true" />保存</button></>}>
           <form id="save-source-view" className="mih-form" onSubmit={saveCurrentView}><Field label="视图名称"><input className="qp-input" value={viewName} autoFocus onChange={(event) => setViewName(event.target.value)} placeholder="例如：P0 海外数据源" /></Field></form>
@@ -1033,11 +1065,109 @@ function emptyForm(entry) {
   }
 }
 
-function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify, onClose, onChanged }) {
-  const [tab, setTab] = useState('profile')
+function relatedNumber(value, fallback = 0) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+function RelatedDataTab({ entry, state, onRetry }) {
+  if (state.loading && !state.data) return <LoadingState label="正在汇总平台关联数据" />
+  if (state.error && !state.data) return <ErrorState error={state.error} onRetry={onRetry} />
+
+  const data = state.data || {}
+  const datasets = Array.isArray(data.datasets) ? data.datasets : []
+  const externalSources = Array.isArray(data.externalSources) ? data.externalSources : []
+  const recentRecords = Array.isArray(data.recentRecords) ? data.recentRecords : []
+  const projection = data.searchProjection || {}
+  const stats = data.stats || {}
+  const matchKeys = (Array.isArray(data.matchKeys) && data.matchKeys.length
+    ? data.matchKeys
+    : [entry.canonicalName, ...(entry.aliases || [])])
+    .map((value) => typeof value === 'string' ? value : value?.key || value?.value || value?.label)
+    .filter(Boolean)
+  const datasetCount = relatedNumber(stats.datasetCount, datasets.length)
+  const objectCount = relatedNumber(stats.objectTypeCount, new Set(datasets.flatMap((item) => item.objectTypes || (item.objectType ? [item.objectType] : []))).size)
+  const recordCount = relatedNumber(stats.activeRecordCount ?? stats.canonicalRecordCount, datasets.reduce((sum, item) => sum + relatedNumber(item.activeRecordCount ?? item.recordCount), 0))
+  const indexedCount = relatedNumber(projection.projectedChunkCount ?? stats.projectedChunkCount)
+
+  return (
+    <section className="mih-source-editor-section mih-source-related">
+      <p className="mih-source-editor-callout mih-source-related__archive-note">
+        <Archive size={17} aria-hidden="true" />
+        <span><strong>归档不会删除数据。</strong> 平台改名或归档只改变目录展示；canonical 记录、数据集、外部接入与可重建的索引投影都会保留。</span>
+      </p>
+
+      {state.error ? <ErrorState error={state.error} onRetry={onRetry} /> : null}
+
+      <div className="mih-source-related__match">
+        <div>
+          <strong>平台匹配口径</strong>
+          <small>使用 canonicalName 与 aliases 归一匹配数据中的 platform；不会用可变显示名作为数据主键。</small>
+        </div>
+        <div className="mih-source-cell-tags" aria-label="平台匹配名称">
+          {matchKeys.map((value) => <span key={value}>{value}</span>)}
+        </div>
+      </div>
+
+      <div className="mih-source-related__metrics">
+        <article><Database size={18} weight="duotone" aria-hidden="true" /><span>数据集</span><strong>{formatNumber(datasetCount)}</strong><small>匹配的平台数据集</small></article>
+        <article><Stack size={18} weight="duotone" aria-hidden="true" /><span>对象类型</span><strong>{formatNumber(objectCount)}</strong><small>canonical object type</small></article>
+        <article><Rows size={18} weight="duotone" aria-hidden="true" /><span>有效记录</span><strong>{formatNumber(recordCount)}</strong><small>{stats.deletedRecordCount ? `${formatNumber(stats.deletedRecordCount)} 条删除版本保留` : 'PostgreSQL current truth'}</small></article>
+        <article><MagnifyingGlass size={18} weight="duotone" aria-hidden="true" /><span>索引分块</span><strong>{formatNumber(indexedCount)}</strong><small>{projection.state || '未建立投影'}</small></article>
+      </div>
+
+      <div className="mih-source-related__grid">
+        <div className="mih-source-related__panel">
+          <header><div><strong>数据集与对象</strong><small>点击平台时汇总全部匹配数据，不把 ES 当成业务真相。</small></div><span>{datasets.length}</span></header>
+          {datasets.length ? (
+            <div className="qp-data-table mih-table-wrap">
+              <table className="mih-table" aria-label={`${entry.canonicalName} 关联数据集`}>
+                <thead><tr><th>Dataset</th><th>平台 / 对象</th><th>有效记录</th><th>分块 / 已投影</th><th>最近更新</th></tr></thead>
+                <tbody>{datasets.map((dataset, index) => (
+                  <tr key={dataset.datasetId || dataset.id || index}>
+                    <td><code>{dataset.datasetId || dataset.id || '—'}</code></td>
+                    <td><strong>{dataset.platforms?.join(' / ') || dataset.platform || entry.canonicalName}</strong><small>{dataset.objectTypes?.join(' / ') || dataset.objectType || 'record'}</small></td>
+                    <td>{formatNumber(relatedNumber(dataset.activeRecordCount ?? dataset.recordCount ?? dataset.records))}<small>{dataset.deletedRecordCount ? `${formatNumber(dataset.deletedRecordCount)} 条已删除版本` : ''}</small></td>
+                    <td>{formatNumber(relatedNumber(dataset.chunkCount))}<small>{formatNumber(relatedNumber(dataset.projectedChunkCount))} 已投影</small></td>
+                    <td>{formatDate(dataset.lastCollectedAt || dataset.lastEventAt || dataset.updatedAt || dataset.latestRecordAt)}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : <EmptyState icon={Database} title="尚无关联数据集" description="目录已经登记，但还没有匹配到 canonical dataset 或对象记录。" />}
+        </div>
+
+        <div className="mih-source-related__panel">
+          <header><div><strong>外部接入</strong><small>物理 source 按规范名称或别名匹配，不随目录归档级联删除。</small></div><span>{externalSources.length}</span></header>
+          {externalSources.length ? <div className="mih-source-related__sources">{externalSources.map((source, index) => (
+            <article key={source.sourceKey || source.id || index}>
+              <span><FlowArrow size={17} weight="duotone" aria-hidden="true" /></span>
+              <div><strong>{source.displayName || source.sourceKey || '未命名接入'}</strong><small>{source.datasetId || '未绑定 dataset'} · {source.sourceKind || 'source'}</small></div>
+              <em>{source.status || 'unknown'}</em>
+            </article>
+          ))}</div> : <EmptyState icon={FlowArrow} title="尚无外部接入" description="可在“数据清洗计划”中注册 source，并将其 platform 统一为本平台的规范名称或别名。" />}
+        </div>
+      </div>
+
+      <div className="mih-source-related__panel mih-source-related__records">
+        <header><div><strong>最近数据</strong><small>仅展示有权限读取的 canonical 摘要。</small></div><span>{recentRecords.length}</span></header>
+        {recentRecords.length ? <div>{recentRecords.map((record, index) => (
+          <article key={record.id || (record.datasetId && record.externalId ? `${record.datasetId}-${record.externalId}` : `record-${index}`)}>
+            <div><strong>{record.title || record.externalId || '未命名记录'}</strong><p>{record.body || record.summary || '暂无正文摘要'}</p></div>
+            <small>{record.datasetId || 'dataset'} · {record.objectType || 'record'} · {formatDate(record.eventTime || record.updatedAt || record.collectedAt)}</small>
+          </article>
+        ))}</div> : <EmptyState icon={Rows} title="尚无可展示记录" description="接入完成后，这里会显示与平台匹配的最近数据。" />}
+      </div>
+    </section>
+  )
+}
+
+function CatalogEntryModal({ token, entry = null, initialTab = 'profile', facets, onUnauthorized, notify, onClose, onChanged }) {
+  const [tab, setTab] = useState(initialTab)
   const [form, setForm] = useState(() => emptyForm(entry))
   const [tagDrafts, setTagDrafts] = useState({})
   const [events, setEvents] = useState(null)
+  const [relatedState, setRelatedState] = useState({ data: null, error: null, loading: false, loaded: false })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
   const [confirmArchive, setConfirmArchive] = useState(false)
@@ -1051,6 +1181,21 @@ function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify
         setError(requestError)
       })
   }, [entry, events, onUnauthorized, tab, token])
+
+  const loadRelatedData = useCallback(() => {
+    if (!entry) return
+    setRelatedState((current) => ({ ...current, error: null, loading: true, loaded: true }))
+    adminApi.sourceCatalogRelatedData(token, entry.id)
+      .then((data) => setRelatedState({ data, error: null, loading: false, loaded: true }))
+      .catch((requestError) => {
+        if (requestError?.status === 401) onUnauthorized?.(requestError)
+        setRelatedState((current) => ({ ...current, error: requestError, loading: false, loaded: true }))
+      })
+  }, [entry, onUnauthorized, token])
+
+  useEffect(() => {
+    if (entry && tab === 'related' && !relatedState.loaded && !relatedState.loading) loadRelatedData()
+  }, [entry, loadRelatedData, relatedState.loaded, relatedState.loading, tab])
 
   const update = (field, value) => setForm((current) => ({ ...current, [field]: value }))
   const tagDraftProps = (field) => ({
@@ -1111,13 +1256,14 @@ function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify
     { id: 'capabilities', label: '能力与字段', icon: ListChecks },
     { id: 'governance', label: '状态与合规', icon: ShieldCheck },
     { id: 'evidence', label: '接入与证据', icon: Path },
+    ...(entry ? [{ id: 'related', label: '关联数据', icon: Database }] : []),
     ...(entry ? [{ id: 'history', label: '变更记录', icon: ClockCounterClockwise }] : []),
   ]
 
   return (
     <Modal
       size="xlarge"
-      title={entry ? `编辑 · ${entry.canonicalName}` : '新增数据源'}
+      title={entry ? `平台详情 · ${entry.canonicalName}` : '新增数据源'}
       description={entry ? `稳定标识 ${entry.sourceKey} · revision ${entry.revision}` : '先登记业务目录，再建立获取与清洗计划；目录中不保存连接密码。'}
       onClose={onClose}
       closeOnBackdrop={false}
@@ -1125,8 +1271,9 @@ function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify
         <>
           <span>
             {entry ? <button className={`qp-button ${confirmArchive ? 'qp-button--danger' : 'qp-button--ghost'}`} type="button" disabled={saving} onClick={archive}>{entry.archivedAt ? <Check size={16} /> : <Archive size={16} />}{entry.archivedAt ? (confirmArchive ? '确认恢复' : '恢复') : (confirmArchive ? '确认归档' : '归档')}</button> : null}
+            {entry && confirmArchive && !entry.archivedAt ? <small className="mih-source-archive-impact">仅从活动目录隐藏；关联数据、接入和索引都保留。</small> : null}
           </span>
-          <span className="mih-page-actions"><button className="qp-button qp-button--ghost" type="button" onClick={onClose}>取消</button><button className="qp-button qp-button--primary" type="submit" form="source-catalog-entry-form" disabled={saving || tab === 'history'}><FloppyDisk size={16} aria-hidden="true" />{saving ? '正在保存' : '保存'}</button></span>
+          <span className="mih-page-actions"><button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭</button><button className="qp-button qp-button--primary" type="submit" form="source-catalog-entry-form" disabled={saving || ['history', 'related'].includes(tab)}><FloppyDisk size={16} aria-hidden="true" />{saving ? '正在保存' : '保存修改'}</button></span>
         </>
       )}
     >
@@ -1163,11 +1310,15 @@ function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify
 
         {tab === 'governance' ? (
           <section className="mih-source-editor-section">
+            <p className="mih-source-editor-callout">
+              <ShieldCheck size={17} aria-hidden="true" />
+              <span><strong>覆盖状态与实施阶段是人工维护的对外汇报口径。</strong> 自动检测只提供运行健康和证据建议，不会静默覆盖人工结论；每次保存都会进入变更记录。</span>
+            </p>
             <div className="mih-source-editor-grid">
-              <SelectField label="覆盖状态" value={form.coverageStatus} options={COVERAGE_OPTIONS} onChange={(value) => update('coverageStatus', value)} />
-              <SelectField label="实施阶段" value={form.deliveryStatus} options={DELIVERY_OPTIONS} onChange={(value) => update('deliveryStatus', value)} />
+              <SelectField label="覆盖状态（人工 / 对外）" value={form.coverageStatus} options={COVERAGE_OPTIONS} onChange={(value) => update('coverageStatus', value)} />
+              <SelectField label="实施阶段（人工 / 对外）" value={form.deliveryStatus} options={DELIVERY_OPTIONS} onChange={(value) => update('deliveryStatus', value)} />
               <SelectField label="字段核验" value={form.reviewStatus} options={REVIEW_OPTIONS} onChange={(value) => update('reviewStatus', value)} />
-              <SelectField label="运行健康" value={form.runtimeStatus} options={RUNTIME_OPTIONS} onChange={(value) => update('runtimeStatus', value)} />
+              <Field label="运行健康（自动观测）" hint="由已关联 source、pipeline 与索引投影汇总；此处只读。"><div className="mih-source-runtime-readonly"><CatalogBadge dimension="runtime" value={form.runtimeStatus} /><small>system observed</small></div></Field>
               <Field label="负责人" hint="负责人是人员或团队，不是 tikhub / justone 等接入供应商。"><input className="qp-input" value={form.owner} onChange={(event) => update('owner', event.target.value)} placeholder="尚未分配" /></Field>
             </div>
             <Field label="合规边界"><textarea className="qp-textarea" rows="5" value={form.complianceBoundary} onChange={(event) => update('complianceBoundary', event.target.value)} /></Field>
@@ -1191,6 +1342,16 @@ function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify
           </section>
         ) : null}
 
+        {tab === 'related' && entry ? (
+          <RelatedDataTab
+            entry={entry}
+            state={relatedState}
+            onRetry={() => {
+              setRelatedState({ data: null, error: null, loading: false, loaded: false })
+            }}
+          />
+        ) : null}
+
         {tab === 'history' ? (
           <section className="mih-source-editor-section">
             {events ? (
@@ -1211,36 +1372,174 @@ function CatalogEntryModal({ token, entry = null, facets, onUnauthorized, notify
   )
 }
 
-function TaxonomyPage({ snapshot, onEdit }) {
-  const categoryItems = snapshot.summary.categories || []
+function taxonomyReferenceCount(term) {
+  return relatedNumber(term?.referenceCount ?? term?.usageCount ?? term?.entryCount ?? term?.references?.length)
+}
+
+function TaxonomyTermModal({ token, term = null, kind, onUnauthorized, notify, onClose, onChanged }) {
+  const kindConfig = TAXONOMY_KINDS.find((item) => item.value === (term?.kind || kind)) || TAXONOMY_KINDS[0]
+  const [form, setForm] = useState({
+    displayName: term?.displayName || '',
+    description: term?.description || '',
+  })
+  const [saving, setSaving] = useState(false)
+  const [confirmArchive, setConfirmArchive] = useState(false)
+  const [error, setError] = useState(null)
+
+  const visibleError = error?.code === 'source_catalog_term_in_use'
+    ? { ...error, message: `无法修改“${term?.displayName || kindConfig.singular}”：仍有数据源引用该词条。请先查看引用并迁移到其他词条后，再重命名或归档。` }
+    : error
+
+  const save = async (event) => {
+    event.preventDefault()
+    const displayName = form.displayName.normalize('NFKC').trim()
+    if (!displayName) return
+    setSaving(true)
+    setError(null)
+    try {
+      const payload = {
+        displayName,
+        description: form.description.trim() || null,
+      }
+      if (term) await adminApi.updateSourceCatalogTaxonomyTerm(token, term.id, { ...payload, revision: term.revision })
+      else await adminApi.createSourceCatalogTaxonomyTerm(token, { ...payload, kind: kindConfig.value })
+      notify?.(`${kindConfig.singular}词条已${term ? '更新' : '创建'}`, 'success')
+      onChanged()
+    } catch (requestError) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setError(requestError)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const archive = async () => {
+    if (!term) return
+    if (!confirmArchive) {
+      setConfirmArchive(true)
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      if (term.archivedAt) await adminApi.restoreSourceCatalogTaxonomyTerm(token, term.id, term.revision)
+      else await adminApi.archiveSourceCatalogTaxonomyTerm(token, term.id, term.revision)
+      notify?.(term.archivedAt ? '词条已恢复，可继续在数据源中选择' : '词条已归档', 'success')
+      onChanged()
+    } catch (requestError) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setError(requestError)
+      setConfirmArchive(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Modal
+      title={term ? `管理${kindConfig.singular} · ${term.displayName}` : `新增${kindConfig.singular}`}
+      description="统一词条会立即进入数据源编辑下拉；未引用词条可安全重命名或归档，且不会删除任何平台或数据。"
+      onClose={onClose}
+      closeOnBackdrop={false}
+      footer={(
+        <>
+          <span>{term ? <button className={`qp-button ${confirmArchive ? 'qp-button--danger' : 'qp-button--ghost'}`} type="button" disabled={saving} onClick={archive}>{term.archivedAt ? <Check size={16} /> : <Archive size={16} />}{term.archivedAt ? (confirmArchive ? '确认恢复' : '恢复词条') : (confirmArchive ? '确认归档' : '归档词条')}</button> : null}</span>
+          <span className="mih-page-actions"><button className="qp-button qp-button--ghost" type="button" onClick={onClose}>取消</button><button className="qp-button qp-button--primary" type="submit" form="source-taxonomy-term-form" disabled={saving || !form.displayName.trim()}><FloppyDisk size={16} aria-hidden="true" />{saving ? '正在保存' : '保存'}</button></span>
+        </>
+      )}
+    >
+      {visibleError ? <ErrorState error={visibleError} /> : null}
+      <form id="source-taxonomy-term-form" className="mih-form mih-source-taxonomy-form" onSubmit={save}>
+        <Field label="词条类型"><div className="mih-source-taxonomy-kind-readonly"><TreeStructure size={16} weight="duotone" aria-hidden="true" /><strong>{kindConfig.label}</strong><small>{kindConfig.description}</small></div></Field>
+        <Field label="显示名称"><input className="qp-input" required autoFocus value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} placeholder={`输入${kindConfig.singular}名称`} /></Field>
+        <Field label="说明" hint="说明用于治理和选择提示，不会写入平台数据。"><textarea className="qp-textarea" rows="5" value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="适用范围、命名口径或使用注意事项" /></Field>
+        {term ? <p className="mih-source-editor-callout"><ShieldCheck size={17} aria-hidden="true" /><span>当前有 {formatNumber(taxonomyReferenceCount(term))} 条数据源引用。引用中词条不能重命名或归档；系统会要求先完成迁移，不会级联修改或删除数据。</span></p> : null}
+      </form>
+    </Modal>
+  )
+}
+
+function TaxonomyPage({ token, onUnauthorized, notify, onRefresh, onOpenCatalog }) {
+  const load = useCallback(() => adminApi.sourceCatalogTaxonomy(token, { includeArchived: true }), [token])
+  const state = useRemoteData(load, onUnauthorized)
+  const [kind, setKind] = useState('major_category')
+  const [query, setQuery] = useState('')
+  const [showArchived, setShowArchived] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [editing, setEditing] = useState(null)
+  const kindConfig = TAXONOMY_KINDS.find((item) => item.value === kind) || TAXONOMY_KINDS[0]
+  const terms = Array.isArray(state.data?.items) ? state.data.items : []
+  const visible = terms
+    .filter((term) => term.kind === kind)
+    .filter((term) => showArchived || !term.archivedAt)
+    .filter((term) => !query.trim() || [term.displayName, term.description].filter(Boolean).join('\n').toLocaleLowerCase('zh-CN').includes(query.trim().toLocaleLowerCase('zh-CN')))
+    .sort((left, right) => Number(left.sortOrder || 0) - Number(right.sortOrder || 0) || left.displayName.localeCompare(right.displayName, 'zh-CN'))
+  const changed = () => {
+    setCreating(false)
+    setEditing(null)
+    state.refresh()
+    onRefresh?.()
+  }
+
   return (
     <section className="mih-source-taxonomy">
-      <div className="mih-source-taxonomy-grid">
-        {categoryItems.map((category) => (
-          <button className="qp-panel mih-source-taxonomy-card" type="button" key={category.category} onClick={() => onEdit(category.category)}>
-            <span><TreeStructure size={18} weight="duotone" aria-hidden="true" /></span>
-            <div><strong>{category.category}</strong><small>{category.total} 条目录 · {category.covered} 条已覆盖</small></div>
-            <em>{category.total ? `${((category.covered / category.total) * 100).toFixed(1)}%` : '0%'}</em>
-          </button>
-        ))}
+      <div className="qp-panel mih-source-taxonomy-manager">
+        <nav className="mih-source-taxonomy-kind-tabs" aria-label="分类词条类型">
+          {TAXONOMY_KINDS.map((item) => {
+            const count = terms.filter((term) => term.kind === item.value && !term.archivedAt).length
+            return <button type="button" aria-pressed={kind === item.value} key={item.value} onClick={() => { setKind(item.value); setQuery('') }}><span>{item.label}</span><small>{count}</small></button>
+          })}
+        </nav>
+
+        <div className="mih-source-taxonomy-toolbar">
+          <div><strong>{kindConfig.label}词条</strong><p>{kindConfig.description}</p></div>
+          <label className="mih-source-search"><MagnifyingGlass size={16} aria-hidden="true" /><input value={query} placeholder={`搜索${kindConfig.singular}名称或说明`} onChange={(event) => setQuery(event.target.value)} />{query ? <button type="button" aria-label="清空搜索" onClick={() => setQuery('')}><X size={13} /></button> : null}</label>
+          <button className={`qp-button qp-button--ghost qp-button--sm${showArchived ? ' is-active' : ''}`} type="button" aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}><Archive size={15} aria-hidden="true" />{showArchived ? '隐藏已归档' : '显示已归档'}</button>
+          <button className="qp-button qp-button--primary qp-button--sm" type="button" onClick={() => setCreating(true)}><Plus size={16} aria-hidden="true" />新增{kindConfig.singular}</button>
+        </div>
+
+        {state.loading && !state.data ? <LoadingState label="正在加载分类词条" /> : null}
+        {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
+        {state.data ? (
+          <div className="qp-data-table mih-table-wrap mih-source-taxonomy-table">
+            <table className="mih-table" aria-label={`${kindConfig.label}词条管理`}>
+              <thead><tr><th>名称</th><th>说明</th><th>引用</th><th>状态</th><th>最近更新</th><th aria-label="操作" /></tr></thead>
+              <tbody>{visible.map((term) => (
+                <tr className={term.archivedAt ? 'is-archived' : ''} key={term.id}>
+                  <td><button className="mih-source-taxonomy-name" type="button" onClick={() => setEditing(term)}><strong>{term.displayName}</strong><small>{term.termKey || term.id}</small></button></td>
+                  <td><p>{term.description || '尚未补充说明'}</p></td>
+                  <td><button className="mih-source-taxonomy-reference" type="button" onClick={() => onOpenCatalog(kind, term.displayName)}>{formatNumber(taxonomyReferenceCount(term))} 条数据源<ArrowRight size={12} aria-hidden="true" /></button></td>
+                  <td><span className={`mih-source-taxonomy-state${term.archivedAt ? ' is-archived' : ''}`}>{term.archivedAt ? '已归档' : '使用中'}</span></td>
+                  <td>{formatDate(term.updatedAt || term.createdAt)}</td>
+                  <td><button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`管理 ${term.displayName}`} onClick={() => setEditing(term)}><NotePencil size={16} aria-hidden="true" /></button></td>
+                </tr>
+              ))}</tbody>
+            </table>
+            {!visible.length ? <EmptyState icon={TreeStructure} title={`暂无${showArchived ? '符合条件的' : '可用'}${kindConfig.singular}词条`} description="可以新增词条；新词条会立即出现在数据源编辑建议中。" /> : null}
+          </div>
+        ) : null}
       </div>
+
       <div className="mih-source-taxonomy-panels">
-        <Panel title="字段字典" subtitle="关键治理字段保持强类型，自由标签用于补充而非替代">
+        <Panel title="字段字典" subtitle="人工汇报口径与自动运行观测保持独立">
           <dl className="mih-source-dictionary">
-            <div><dt>coverage_status</dt><dd>{COVERAGE_OPTIONS.map((item) => item.label).join(' / ')}</dd><small>回答“能力是否覆盖”</small></div>
-            <div><dt>delivery_status</dt><dd>{DELIVERY_OPTIONS.map((item) => item.label).join(' / ')}</dd><small>回答“项目推进到哪里”</small></div>
-            <div><dt>review_status</dt><dd>{REVIEW_OPTIONS.map((item) => item.label).join(' / ')}</dd><small>回答“模板字段是否被核验”</small></div>
-            <div><dt>runtime_status</dt><dd>{RUNTIME_OPTIONS.map((item) => item.label).join(' / ')}</dd><small>回答“当前链路是否健康”</small></div>
+            <div><dt>coverage_status</dt><dd>{COVERAGE_OPTIONS.map((item) => item.label).join(' / ')}</dd><small>人工维护的对外能力覆盖口径</small></div>
+            <div><dt>delivery_status</dt><dd>{DELIVERY_OPTIONS.map((item) => item.label).join(' / ')}</dd><small>人工维护的对外实施阶段</small></div>
+            <div><dt>review_status</dt><dd>{REVIEW_OPTIONS.map((item) => item.label).join(' / ')}</dd><small>模板字段是否已被人工核验</small></div>
+            <div><dt>runtime_status</dt><dd>{RUNTIME_OPTIONS.map((item) => item.label).join(' / ')}</dd><small>source / pipeline / index 自动观测</small></div>
           </dl>
         </Panel>
-        <Panel title="分类治理提醒" subtitle="当前细分场景混合了业务能力、渠道形态和获取条件">
+        <Panel title="安全变更规则" subtitle="词条是稳定治理对象，不是随手改写的字符串">
           <div className="mih-source-governance-notes">
-            <article><Tag size={18} aria-hidden="true" /><div><strong>{snapshot.facets.scenarios.length} 个场景标签</strong><p>允许多选与回车新增；后续拆为 use case、channel type 与 access scope。</p></div></article>
-            <article><Globe size={18} aria-hidden="true" /><div><strong>{snapshot.facets.regions.length} 个区域值</strong><p>区域使用多选关系，跨境属性单独治理，不依赖斜杠拼接字符串。</p></div></article>
-            <article><ShieldCheck size={18} aria-hidden="true" /><div><strong>分类模板与平台验证分层</strong><p>模板提供默认能力；source override 与 evidence 才能证明平台实际覆盖。</p></div></article>
+            <article><Tag size={18} aria-hidden="true" /><div><strong>新建后立即可选</strong><p>大类、场景与区域统一进入编辑建议，避免同义词继续分叉。</p></div></article>
+            <article><Archive size={18} aria-hidden="true" /><div><strong>引用中禁止归档</strong><p>先查看引用并完成迁移；归档不级联删除平台或历史数据。</p></div></article>
+            <article><ShieldCheck size={18} aria-hidden="true" /><div><strong>稳定标识与审计</strong><p>未引用词条可重命名；引用中先迁移，API 以 revision 防止并发覆盖。</p></div></article>
           </div>
         </Panel>
       </div>
+
+      {creating ? <TaxonomyTermModal token={token} kind={kind} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setCreating(false)} onChanged={changed} /> : null}
+      {editing ? <TaxonomyTermModal token={token} term={editing} kind={editing.kind} onUnauthorized={onUnauthorized} notify={notify} onClose={() => setEditing(null)} onChanged={changed} /> : null}
     </section>
   )
 }
@@ -1296,6 +1595,8 @@ export function SourceCatalogPage({ token, query, setQuery, onUnauthorized, noti
   const state = useRemoteData(load, onUnauthorized)
   const section = query.get('section') || 'overview'
   const requestedView = query.get('catalogView') || ''
+  const requestedTermKind = query.get('termKind') || ''
+  const requestedTermValue = query.get('termValue') || ''
   const [catalogViewRequest, setCatalogViewRequest] = useState(requestedView)
 
   useEffect(() => setCatalogViewRequest(requestedView), [requestedView])
@@ -1312,9 +1613,9 @@ export function SourceCatalogPage({ token, query, setQuery, onUnauthorized, noti
         ? { eyebrow: 'ACQUIRE / CLEAN / ARCHIVE / PUBLISH', title: '计划与实施证据', description: '目录说明“做什么”，计划说明“怎么做”，Agent 只是可审核的受控步骤。' }
         : { eyebrow: 'SOURCE CATALOG / COVERAGE / EVIDENCE', title: '数据源覆盖总览', description: '基于 215 条权威目录观察覆盖、优先级、实施阶段、负责人和字段核验。' }
 
-  const openCatalog = (view = 'all') => {
+  const openCatalog = (view = 'all', termKind = null, termValue = null) => {
     setCatalogViewRequest(view)
-    setQuery({ section: 'catalog', catalogView: view })
+    setQuery({ section: 'catalog', catalogView: view, termKind, termValue })
   }
 
   return (
@@ -1324,13 +1625,13 @@ export function SourceCatalogPage({ token, query, setQuery, onUnauthorized, noti
       </PageHeading>
 
       <nav className="mih-source-section-tabs" aria-label="数据源系统菜单">
-        {SECTION_OPTIONS.map((item) => { const Icon = item.icon; return <button type="button" aria-pressed={section === item.id} key={item.id} onClick={() => setQuery({ section: item.id, catalogView: item.id === 'catalog' ? (requestedView || 'all') : null })}><Icon size={16} weight={section === item.id ? 'duotone' : 'regular'} aria-hidden="true" /><span>{item.label}</span></button> })}
+        {SECTION_OPTIONS.map((item) => { const Icon = item.icon; return <button type="button" aria-pressed={section === item.id} key={item.id} onClick={() => setQuery({ section: item.id, catalogView: item.id === 'catalog' ? (requestedView || 'all') : null, termKind: null, termValue: null })}><Icon size={16} weight={section === item.id ? 'duotone' : 'regular'} aria-hidden="true" /><span>{item.label}</span></button> })}
       </nav>
 
       {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       {section === 'overview' ? <SourceCatalogOverview snapshot={snapshot} onOpenCatalog={openCatalog} /> : null}
-      {section === 'catalog' ? <SourceCatalogTable snapshot={snapshot} token={token} onUnauthorized={onUnauthorized} notify={notify} onRefresh={state.refresh} requestedView={catalogViewRequest} onRequestedViewHandled={() => setCatalogViewRequest('')} /> : null}
-      {section === 'taxonomy' ? <TaxonomyPage snapshot={snapshot} onEdit={() => openCatalog('all')} /> : null}
+      {section === 'catalog' ? <SourceCatalogTable snapshot={snapshot} token={token} onUnauthorized={onUnauthorized} notify={notify} onRefresh={state.refresh} requestedView={catalogViewRequest} onRequestedViewHandled={() => setCatalogViewRequest('')} requestedTermKind={requestedTermKind} requestedTermValue={requestedTermValue} /> : null}
+      {section === 'taxonomy' ? <TaxonomyPage token={token} onUnauthorized={onUnauthorized} notify={notify} onRefresh={state.refresh} onOpenCatalog={(termKind, termValue) => openCatalog('all', termKind, termValue)} /> : null}
       {section === 'plans' ? <PlansPage snapshot={snapshot} /> : null}
 
       <footer className="mih-command-footer" aria-label="数据源目录状态">

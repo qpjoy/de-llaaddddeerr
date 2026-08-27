@@ -42,7 +42,8 @@ coverage assertion、evidence、saved view 和 data plan。
 
 “数据源”在目录语境中表示业务平台/能力，例如抖音评论、Telegram messages 或淘宝商品；
 `catalog.external_sources` 继续表示一张物理外部表、一个文件 family 或一个可拉取输入。
-两者通过稳定引用关联，不合并成一张表。
+两者的目标模型通过稳定引用关联，不合并成一张表。Phase 1 先以目录规范名称与唯一归属的 alias
+归一匹配，平台改名自动保留旧名；显式 source/dataset binding 在后续 relation migration 中补齐。
 
 现有五份文本只用于可审计的基线导入：
 
@@ -52,6 +53,16 @@ coverage assertion、evidence、saved view 和 data plan。
 - `03.txt` 按序号合并详情字段；
 - 名称、列语义或重复冲突生成 warning/alias proposal，必须审核；
 - 原始 input hash、parser/mapping version 和人工修正永久可追溯。
+
+目录项的删除语义是**软归档/恢复**，管理 API 不提供物理 `DELETE`。归档只把平台移出活动目录、
+默认汇总和选择列表，不删除 `core.canonical_records`、`catalog.external_sources`、mapping、import
+run、dataset、文档或 ES 投影。平台详情按规范名称与 alias 汇总既有 canonical 数据、物理 source
+和索引分块；平台改名必须保留旧名称为 alias，避免显示名变化切断既有数据的查询入口。
+
+大类、细分场景、区域和 tag 是有稳定 key、revision、审计和归档状态的独立治理词条，不再只从
+现有目录行临时 `distinct`。新词条可以在目录编辑器中选择；仍被任意活动或已归档目录引用的词条
+不能重命名或归档，服务端返回 409 和引用数量，必须先显式迁移引用。词条变更绝不级联删除平台、
+canonical 数据或历史证据。
 
 ### 2. 覆盖在 capability 粒度记录
 
@@ -87,6 +98,10 @@ UI 都不得把这些轴折叠为一个通用 `status`。
 
 override 不删除派生 readiness/health，也不自动发布 dataset。UI 同时显示人工结论与运行事实。
 到期 override 进入复核，不静默续期。
+
+Phase 1 的平台级 `coverage_status` 与 `delivery_status` 是可直接人工维护、带 revision/audit 的
+对外汇报口径；`runtime_status` 是系统观测事实。自动发现 source、canonical 数据或索引分块只能
+补充运行证据和建议，不能静默覆盖人工覆盖结论或把“已有数据”自动宣称为 `covered/complete`。
 
 ### 5. acquisition、cleaning、archive 和 publication 是不同 plan type
 

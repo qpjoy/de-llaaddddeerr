@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { SOURCE_CATALOG_SEED } from '../data/source-catalog-seed.mjs'
+import { sourceCatalogTermNormalizedName } from '../data/source-catalog.mjs'
 
 function nowIso() {
   return new Date().toISOString()
@@ -8,6 +9,71 @@ function nowIso() {
 
 function clone(value) {
   return value == null ? value : structuredClone(value)
+}
+
+function initialSourceCatalogTerms(entries) {
+  const terms = new Map()
+  const add = (kind, displayName) => {
+    const normalizedName = sourceCatalogTermNormalizedName(displayName)
+    if (!normalizedName || terms.has(`${kind}\u0000${normalizedName}`)) return
+    const id = randomUUID()
+    terms.set(`${kind}\u0000${normalizedName}`, {
+      id,
+      termKey: `term-${id}`,
+      kind,
+      displayName: String(displayName).normalize('NFKC').trim(),
+      normalizedName,
+      description: null,
+      color: null,
+      sortOrder: 0,
+      revision: 1,
+      archivedAt: null,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    })
+  }
+  for (const entry of entries) {
+    add('major_category', entry.majorCategory)
+    entry.scenarios?.forEach((value) => add('scenario', value))
+    entry.regions?.forEach((value) => add('region', value))
+    entry.tags?.forEach((value) => add('tag', value))
+  }
+  return [...terms.values()]
+}
+
+function sourceCatalogEntryNormalizedNames(entry) {
+  return [...new Set([entry.canonicalName, ...(entry.aliases || [])]
+    .map(sourceCatalogTermNormalizedName)
+    .filter(Boolean))]
+}
+
+function sourceCatalogEntryTaxonomyValues(entry, kind) {
+  if (kind === 'major_category') return [entry.majorCategory]
+  if (kind === 'scenario') return entry.scenarios || []
+  if (kind === 'region') return entry.regions || []
+  return entry.tags || []
+}
+
+function sourceCatalogEntryUsesTerm(entry, term) {
+  const normalizedTerm = sourceCatalogTermNormalizedName(term.displayName)
+  return sourceCatalogEntryTaxonomyValues(entry, term.kind)
+    .some((value) => sourceCatalogTermNormalizedName(value) === normalizedTerm)
+}
+
+function safeSourceCatalogRecord(record) {
+  return {
+    id: record.id,
+    datasetId: record.datasetId,
+    platform: record.platform,
+    objectType: record.objectType,
+    contentType: record.contentType ?? null,
+    externalId: record.externalId,
+    title: record.title ?? null,
+    currentRevision: Number(record.currentRevision || 1),
+    eventTime: record.eventTime ?? null,
+    collectedAt: record.collectedAt ?? null,
+    deletedAt: record.deletedAt ?? null,
+  }
 }
 
 function active(record) {
@@ -110,6 +176,23 @@ export class MemoryStore {
       },
       createdAt: entry.createdAt,
     }]]))
+    const taxonomyTerms = initialSourceCatalogTerms(SOURCE_CATALOG_SEED)
+    this.sourceCatalogTerms = new Map(taxonomyTerms.map((term) => [term.id, term]))
+    this.sourceCatalogTermEvents = new Map(taxonomyTerms.map((term) => [term.id, [{
+      id: randomUUID(),
+      termId: term.id,
+      eventType: 'seed_import',
+      actor: 'memory-seed',
+      fromRevision: null,
+      toRevision: 1,
+      changes: { after: clone(term) },
+      createdAt: term.createdAt,
+    }]]))
+    // Canonical data stays PostgreSQL-authoritative. These maps are empty in
+    // local mode, but keep the related-data contract testable without faking a
+    // second API shape.
+    this.canonicalRecords = new Map()
+    this.recordChunks = new Map()
   }
 
   async close() {}
@@ -867,6 +950,8 @@ export class MemoryStore {
       .some((entry) => entry.legacySequence === input.legacySequence)) {
       throw new AppError(409, 'source_catalog_sequence_exists', `Legacy sequence already exists: ${input.legacySequence}`)
     }
+    this.#assertSourceCatalogNamesAvailable(input)
+    this.#assertSourceCatalogTaxonomyAvailable(input)
     const createdAt = nowIso()
     const entry = {
       id: randomUUID(),
@@ -901,7 +986,20 @@ export class MemoryStore {
       throw new AppError(400, 'invalid_source_catalog_parent', 'A source catalog entry cannot be its own parent')
     }
     const before = clone(entry)
-    Object.assign(entry, clone(patch), {
+    const merged = { ...entry, ...clone(patch) }
+    if (
+      patch.canonicalName
+      && sourceCatalogTermNormalizedName(patch.canonicalName)
+        !== sourceCatalogTermNormalizedName(before.canonicalName)
+    ) {
+      merged.aliases = [...new Set([...(merged.aliases || []), before.canonicalName])]
+      if (merged.aliases.length > 32) {
+        throw new AppError(400, 'invalid_source_catalog_field', 'aliases has too many values')
+      }
+    }
+    this.#assertSourceCatalogNamesAvailable(merged, { excludeEntryId: id })
+    this.#assertSourceCatalogTaxonomyAvailable(merged)
+    Object.assign(entry, merged, {
       revision: entry.revision + 1,
       updatedAt: nowIso(),
     })
@@ -940,6 +1038,276 @@ export class MemoryStore {
     const events = this.sourceCatalogEvents.get(entryId) || []
     events.push({ id: randomUUID(), entryId, createdAt: nowIso(), ...clone(event) })
     this.sourceCatalogEvents.set(entryId, events)
+  }
+
+  #assertSourceCatalogNamesAvailable(candidate, { excludeEntryId = null } = {}) {
+    const requested = new Set(sourceCatalogEntryNormalizedNames(candidate))
+    for (const entry of this.sourceCatalogEntries.values()) {
+      if (entry.id === excludeEntryId) continue
+      const conflict = sourceCatalogEntryNormalizedNames(entry).find((name) => requested.has(name))
+      if (!conflict) continue
+      throw new AppError(409, 'source_catalog_name_conflict', 'Source catalog canonical names and aliases must be unique', {
+        normalizedName: conflict,
+        conflictingEntryId: entry.id,
+        conflictingEntryName: entry.canonicalName,
+      })
+    }
+  }
+
+  #assertSourceCatalogTaxonomyAvailable(candidate) {
+    for (const term of this.sourceCatalogTerms.values()) {
+      if (!term.archivedAt || !sourceCatalogEntryUsesTerm(candidate, term)) continue
+      throw new AppError(409, 'source_catalog_term_archived', 'Source catalog entries cannot reference an archived taxonomy term', {
+        termId: term.id,
+        kind: term.kind,
+        displayName: term.displayName,
+      })
+    }
+  }
+
+  #sourceCatalogTermUsage(term) {
+    return [...this.sourceCatalogEntries.values()]
+      .filter((entry) => sourceCatalogEntryUsesTerm(entry, term)).length
+  }
+
+  #sourceCatalogTermView(term) {
+    return term ? { ...clone(term), usageCount: this.#sourceCatalogTermUsage(term) } : null
+  }
+
+  async listSourceCatalogTerms({ includeArchived = false, kind = null } = {}) {
+    return [...this.sourceCatalogTerms.values()]
+      .filter((term) => (includeArchived || !term.archivedAt) && (!kind || term.kind === kind))
+      .sort((left, right) => (
+        left.kind.localeCompare(right.kind)
+          || left.sortOrder - right.sortOrder
+          || left.displayName.localeCompare(right.displayName, 'zh-CN')
+      ))
+      .map((term) => this.#sourceCatalogTermView(term))
+  }
+
+  async getSourceCatalogTerm(id) {
+    return this.#sourceCatalogTermView(this.sourceCatalogTerms.get(id))
+  }
+
+  async createSourceCatalogTerm(input, { actor = 'admin-token' } = {}) {
+    if ([...this.sourceCatalogTerms.values()].some((term) => (
+      term.kind === input.kind && term.normalizedName === input.normalizedName
+    ))) {
+      throw new AppError(409, 'source_catalog_term_exists', 'A taxonomy term with this name already exists')
+    }
+    const createdAt = nowIso()
+    const term = {
+      id: randomUUID(),
+      ...clone(input),
+      revision: 1,
+      archivedAt: null,
+      createdAt,
+      updatedAt: createdAt,
+    }
+    this.sourceCatalogTerms.set(term.id, term)
+    this.#appendSourceCatalogTermEvent(term.id, {
+      eventType: 'create', actor, fromRevision: null, toRevision: 1,
+      changes: { after: clone(term) },
+    })
+    return this.#sourceCatalogTermView(term)
+  }
+
+  async updateSourceCatalogTerm(id, patch, {
+    expectedRevision,
+    actor = 'admin-token',
+    eventType = 'update',
+  } = {}) {
+    const term = this.sourceCatalogTerms.get(id)
+    if (!term) throw new AppError(404, 'source_catalog_term_not_found', 'Source catalog taxonomy term was not found')
+    if (term.revision !== expectedRevision) {
+      throw new AppError(409, 'source_catalog_term_revision_conflict', 'Taxonomy term changed; reload before saving', {
+        expectedRevision,
+        currentRevision: term.revision,
+      })
+    }
+    if (patch.normalizedName && patch.normalizedName !== term.normalizedName) {
+      const usageCount = this.#sourceCatalogTermUsage(term)
+      if (usageCount > 0) {
+        throw new AppError(409, 'source_catalog_term_in_use', 'Referenced taxonomy terms cannot be renamed', {
+          usageCount,
+        })
+      }
+      if ([...this.sourceCatalogTerms.values()].some((candidate) => (
+        candidate.id !== id
+          && candidate.kind === term.kind
+          && candidate.normalizedName === patch.normalizedName
+      ))) {
+        throw new AppError(409, 'source_catalog_term_exists', 'A taxonomy term with this name already exists')
+      }
+    }
+    const before = clone(term)
+    Object.assign(term, clone(patch), {
+      revision: term.revision + 1,
+      updatedAt: nowIso(),
+    })
+    this.#appendSourceCatalogTermEvent(id, {
+      eventType,
+      actor,
+      fromRevision: before.revision,
+      toRevision: term.revision,
+      changes: { before, after: clone(term) },
+    })
+    return this.#sourceCatalogTermView(term)
+  }
+
+  async archiveSourceCatalogTerm(id, options = {}) {
+    const term = this.sourceCatalogTerms.get(id)
+    if (!term) throw new AppError(404, 'source_catalog_term_not_found', 'Source catalog taxonomy term was not found')
+    const usageCount = this.#sourceCatalogTermUsage(term)
+    if (usageCount > 0) {
+      throw new AppError(409, 'source_catalog_term_in_use', 'Referenced taxonomy terms cannot be archived', {
+        usageCount,
+      })
+    }
+    return this.updateSourceCatalogTerm(id, { archivedAt: nowIso() }, {
+      ...options,
+      eventType: 'archive',
+    })
+  }
+
+  async restoreSourceCatalogTerm(id, options = {}) {
+    return this.updateSourceCatalogTerm(id, { archivedAt: null }, {
+      ...options,
+      eventType: 'restore',
+    })
+  }
+
+  async listSourceCatalogTermEvents(termId, limit = 50) {
+    return clone((this.sourceCatalogTermEvents.get(termId) || [])
+      .slice()
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, limit))
+  }
+
+  #appendSourceCatalogTermEvent(termId, event) {
+    const events = this.sourceCatalogTermEvents.get(termId) || []
+    events.push({ id: randomUUID(), termId, createdAt: nowIso(), ...clone(event) })
+    this.sourceCatalogTermEvents.set(termId, events)
+  }
+
+  async sourceCatalogRelatedData(entry, { pageSize = 20 } = {}) {
+    const matchKeys = [...new Set([entry.canonicalName, ...(entry.aliases || [])]
+      .map(sourceCatalogTermNormalizedName)
+      .filter(Boolean))]
+    const matches = (value) => matchKeys.includes(sourceCatalogTermNormalizedName(value))
+    const records = [...this.canonicalRecords.values()]
+      .filter((record) => matches(record.platform))
+      .sort((left, right) => String(
+        right.eventTime || right.collectedAt || right.lastSeenAt || right.firstSeenAt || '',
+      ).localeCompare(String(
+        left.eventTime || left.collectedAt || left.lastSeenAt || left.firstSeenAt || '',
+      )))
+    const recordIds = new Set(records.filter((record) => !record.deletedAt).map((record) => record.id))
+    const chunks = [...this.recordChunks.values()].filter((chunk) => recordIds.has(chunk.recordId))
+    const externalSources = [...this.externalSources.values()]
+      .filter((source) => matches(source.platform))
+      .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
+      .map((source) => ({
+        id: source.id,
+        sourceKey: source.sourceKey,
+        displayName: source.displayName,
+        sourceKind: source.sourceKind,
+        datasetId: source.datasetId,
+        platform: source.platform,
+        objectType: source.objectType,
+        status: source.status,
+        syncIntervalSeconds: source.syncIntervalSeconds,
+        createdAt: source.createdAt,
+        updatedAt: source.updatedAt,
+      }))
+    const datasets = new Map()
+    for (const record of records) {
+      const current = datasets.get(record.datasetId) || {
+        datasetId: record.datasetId,
+        platforms: new Set(),
+        objectTypes: new Set(),
+        contentTypes: new Set(),
+        activeRecordCount: 0,
+        deletedRecordCount: 0,
+        revisionCount: 0,
+        lastCollectedAt: null,
+        lastEventAt: null,
+        chunkCount: 0,
+        projectedChunkCount: 0,
+      }
+      current.platforms.add(record.platform)
+      current.objectTypes.add(record.objectType)
+      if (record.contentType) current.contentTypes.add(record.contentType)
+      if (record.deletedAt) current.deletedRecordCount += 1
+      else current.activeRecordCount += 1
+      current.revisionCount += Number(record.currentRevision || 1)
+      if (record.collectedAt && (!current.lastCollectedAt || record.collectedAt > current.lastCollectedAt)) {
+        current.lastCollectedAt = record.collectedAt
+      }
+      if (record.eventTime && (!current.lastEventAt || record.eventTime > current.lastEventAt)) {
+        current.lastEventAt = record.eventTime
+      }
+      datasets.set(record.datasetId, current)
+    }
+    for (const chunk of chunks) {
+      const record = this.canonicalRecords.get(chunk.recordId)
+      const dataset = record && datasets.get(record.datasetId)
+      if (!dataset) continue
+      dataset.chunkCount += 1
+      if (chunk.projectedAt) dataset.projectedChunkCount += 1
+    }
+    const datasetRows = [...datasets.values()].map((dataset) => ({
+      ...dataset,
+      platforms: [...dataset.platforms].sort(),
+      objectTypes: [...dataset.objectTypes].sort(),
+      contentTypes: [...dataset.contentTypes].sort(),
+    })).sort((left, right) => left.datasetId.localeCompare(right.datasetId))
+    const activeRecordCount = records.filter((record) => !record.deletedAt).length
+    const embeddedChunkCount = chunks.filter((chunk) => chunk.embeddedAt).length
+    const projectedChunkCount = chunks.filter((chunk) => chunk.projectedAt).length
+    const recordsWithChunks = new Set(chunks.map((chunk) => chunk.recordId)).size
+    const projectionState = activeRecordCount === 0
+      ? 'empty'
+      : projectedChunkCount === 0
+        ? 'not_indexed'
+        : projectedChunkCount < chunks.length
+          ? 'partial'
+          : 'ready'
+    return {
+      entry: {
+        id: entry.id,
+        sourceKey: entry.sourceKey,
+        canonicalName: entry.canonicalName,
+        aliases: entry.aliases || [],
+        archivedAt: entry.archivedAt,
+        revision: entry.revision,
+      },
+      matchKeys: [entry.canonicalName, ...(entry.aliases || [])],
+      stats: {
+        datasetCount: datasetRows.length,
+        externalSourceCount: externalSources.length,
+        recordCount: records.length,
+        activeRecordCount,
+        deletedRecordCount: records.length - activeRecordCount,
+        revisionCount: records.reduce((total, record) => total + Number(record.currentRevision || 1), 0),
+        chunkCount: chunks.length,
+        embeddedChunkCount,
+        projectedChunkCount,
+      },
+      datasets: datasetRows,
+      externalSources: clone(externalSources),
+      recentRecords: records.slice(0, pageSize).map(safeSourceCatalogRecord),
+      searchProjection: {
+        state: projectionState,
+        recordCount: activeRecordCount,
+        recordsWithChunks,
+        chunkCount: chunks.length,
+        embeddedChunkCount,
+        projectedChunkCount,
+      },
+      pageSize,
+      hasMore: records.length > pageSize,
+    }
   }
 
   async listFileFormatRules() {

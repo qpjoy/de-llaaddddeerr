@@ -195,6 +195,36 @@ export const adminApi = {
     `${ADMIN_ROOT}/source-catalog/${encodeURIComponent(id)}/events`,
     { query: { limit } },
   ),
+  sourceCatalogRelatedData: (token, id, { pageSize = 20 } = {}) => request(
+    token,
+    `${ADMIN_ROOT}/source-catalog/${encodeURIComponent(id)}/related-data`,
+    { query: { pageSize } },
+  ),
+  sourceCatalogTaxonomy: (token, { includeArchived = false, kind } = {}) => request(
+    token,
+    `${ADMIN_ROOT}/source-catalog/taxonomy`,
+    { query: { includeArchived: includeArchived || undefined, kind } },
+  ),
+  createSourceCatalogTaxonomyTerm: (token, body) => request(
+    token,
+    `${ADMIN_ROOT}/source-catalog/taxonomy`,
+    { method: 'POST', body },
+  ),
+  updateSourceCatalogTaxonomyTerm: (token, id, body) => request(
+    token,
+    `${ADMIN_ROOT}/source-catalog/taxonomy/${encodeURIComponent(id)}`,
+    { method: 'PUT', body },
+  ),
+  archiveSourceCatalogTaxonomyTerm: (token, id, revision) => request(
+    token,
+    `${ADMIN_ROOT}/source-catalog/taxonomy/${encodeURIComponent(id)}/archive`,
+    { method: 'POST', body: { revision } },
+  ),
+  restoreSourceCatalogTaxonomyTerm: (token, id, revision) => request(
+    token,
+    `${ADMIN_ROOT}/source-catalog/taxonomy/${encodeURIComponent(id)}/restore`,
+    { method: 'POST', body: { revision } },
+  ),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },

@@ -16,6 +16,39 @@ function iso(value) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
 }
 
+function sourceCatalogComparableName(value) {
+  return String(value || '').normalize('NFKC').trim().toLocaleLowerCase('zh-CN')
+}
+
+function sourceCatalogOwnedNames(entry) {
+  const names = new Map()
+  const add = (displayName, nameKind) => {
+    const normalizedName = sourceCatalogComparableName(displayName)
+    if (!normalizedName || names.has(normalizedName)) return
+    names.set(normalizedName, {
+      normalizedName,
+      displayName: String(displayName).normalize('NFKC').trim(),
+      nameKind,
+    })
+  }
+  add(entry.canonicalName, 'canonical')
+  entry.aliases?.forEach((alias) => add(alias, 'alias'))
+  return [...names.values()]
+}
+
+function sourceCatalogEntryTaxonomyValues(entry, kind) {
+  if (kind === 'major_category') return [entry.majorCategory]
+  if (kind === 'scenario') return entry.scenarios || []
+  if (kind === 'region') return entry.regions || []
+  return entry.tags || []
+}
+
+function sourceCatalogEntryUsesTerm(entry, term) {
+  const normalizedTerm = sourceCatalogComparableName(term.displayName)
+  return sourceCatalogEntryTaxonomyValues(entry, term.kind)
+    .some((value) => sourceCatalogComparableName(value) === normalizedTerm)
+}
+
 const connectorCallOutcomes = new Set(['complete', 'partial', 'failed', 'unknown'])
 const connectorSourceModes = new Set(['live', 'stale'])
 const connectorFailureKinds = new Set(['network', 'timeout', 'http', 'contract', 'business', 'internal', 'unknown'])
@@ -3197,6 +3230,7 @@ export class PostgresStore {
   async createSourceCatalogEntry(input, { actor = 'admin-token' } = {}) {
     try {
       return await withPgTransaction(this.pool, async (client) => {
+        await this.#assertSourceCatalogTaxonomyAvailable(client, input)
         const { rows } = await client.query(
           `INSERT INTO catalog.source_catalog_entries
              (id, source_key, legacy_sequence, canonical_name, aliases, source_kind,
@@ -3222,6 +3256,7 @@ export class PostgresStore {
           ],
         )
         const entry = sourceCatalogEntry(rows[0])
+        await this.#replaceSourceCatalogEntryNames(client, entry)
         await client.query(
           `INSERT INTO catalog.source_catalog_events
              (id, entry_id, event_type, actor, from_revision, to_revision, changes)
@@ -3232,6 +3267,9 @@ export class PostgresStore {
       })
     } catch (error) {
       if (error?.code === '23505') {
+        if (String(error.constraint || '').includes('source_catalog_entry_names')) {
+          throw new AppError(409, 'source_catalog_name_conflict', 'Source catalog canonical names and aliases must be unique')
+        }
         throw new AppError(409, 'source_catalog_entry_exists', 'Source catalog key or legacy sequence already exists')
       }
       throw error
@@ -3243,7 +3281,8 @@ export class PostgresStore {
     actor = 'admin-token',
     eventType = 'update',
   } = {}) {
-    return withPgTransaction(this.pool, async (client) => {
+    try {
+      return await withPgTransaction(this.pool, async (client) => {
       const currentResult = await client.query(
         `SELECT * FROM catalog.source_catalog_entries WHERE id = $1 FOR UPDATE`,
         [id],
@@ -3260,6 +3299,17 @@ export class PostgresStore {
         throw new AppError(400, 'invalid_source_catalog_parent', 'A source catalog entry cannot be its own parent')
       }
       const merged = { ...before, ...patch }
+      if (
+        patch.canonicalName
+        && sourceCatalogComparableName(patch.canonicalName)
+          !== sourceCatalogComparableName(before.canonicalName)
+      ) {
+        merged.aliases = [...new Set([...(merged.aliases || []), before.canonicalName])]
+        if (merged.aliases.length > 32) {
+          throw new AppError(400, 'invalid_source_catalog_field', 'aliases has too many values')
+        }
+      }
+      await this.#assertSourceCatalogTaxonomyAvailable(client, merged)
       const { rows } = await client.query(
         `UPDATE catalog.source_catalog_entries
             SET canonical_name = $3,
@@ -3303,6 +3353,7 @@ export class PostgresStore {
         ],
       )
       const entry = sourceCatalogEntry(rows[0])
+      await this.#replaceSourceCatalogEntryNames(client, entry)
       await client.query(
         `INSERT INTO catalog.source_catalog_events
            (id, entry_id, event_type, actor, from_revision, to_revision, changes)
@@ -3313,7 +3364,13 @@ export class PostgresStore {
         ],
       )
       return entry
-    })
+      })
+    } catch (error) {
+      if (error?.code === '23505' && String(error.constraint || '').includes('source_catalog_entry_names')) {
+        throw new AppError(409, 'source_catalog_name_conflict', 'Source catalog canonical names and aliases must be unique')
+      }
+      throw error
+    }
   }
 
   async archiveSourceCatalogEntry(id, options = {}) {
@@ -3341,6 +3398,350 @@ export class PostgresStore {
       [entryId, safeLimit],
     )
     return rows.map(sourceCatalogEvent)
+  }
+
+  async #replaceSourceCatalogEntryNames(client, entry) {
+    const names = sourceCatalogOwnedNames(entry)
+    await client.query(
+      `DELETE FROM catalog.source_catalog_entry_names WHERE entry_id = $1`,
+      [entry.id],
+    )
+    await client.query(
+      `INSERT INTO catalog.source_catalog_entry_names
+         (entry_id, normalized_name, display_name, name_kind)
+       SELECT $1, name.normalized_name, name.display_name, name.name_kind
+         FROM unnest($2::text[], $3::text[], $4::text[])
+           AS name(normalized_name, display_name, name_kind)`,
+      [
+        entry.id,
+        names.map((name) => name.normalizedName),
+        names.map((name) => name.displayName),
+        names.map((name) => name.nameKind),
+      ],
+    )
+  }
+
+  async listSourceCatalogTerms({ includeArchived = false, kind = null } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT term.*
+         FROM catalog.source_catalog_terms term
+        WHERE ($1::boolean OR term.archived_at IS NULL)
+          AND ($2::text IS NULL OR term.kind = $2)
+        ORDER BY term.kind, term.sort_order, term.display_name, term.id`,
+      [includeArchived === true, kind],
+    )
+    const entries = await this.#sourceCatalogTaxonomyEntries(this.pool)
+    return rows.map((row) => {
+      const term = sourceCatalogTerm(row)
+      return {
+        ...term,
+        usageCount: entries.filter((entry) => sourceCatalogEntryUsesTerm(entry, term)).length,
+      }
+    })
+  }
+
+  async getSourceCatalogTerm(id, client = this.pool) {
+    const { rows } = await client.query(
+      `SELECT term.*
+         FROM catalog.source_catalog_terms term
+        WHERE term.id = $1`,
+      [id],
+    )
+    const term = sourceCatalogTerm(rows[0])
+    if (!term) return null
+    return {
+      ...term,
+      usageCount: await this.#sourceCatalogTermUsage(client, term),
+    }
+  }
+
+  async createSourceCatalogTerm(input, { actor = 'admin-token' } = {}) {
+    try {
+      return await withPgTransaction(this.pool, async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO catalog.source_catalog_terms
+             (id, term_key, kind, display_name, normalized_name, description, color, sort_order)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           RETURNING *`,
+          [
+            randomUUID(), input.termKey, input.kind, input.displayName,
+            input.normalizedName, input.description, input.color, input.sortOrder,
+          ],
+        )
+        const term = sourceCatalogTerm({ ...rows[0], usage_count: 0 })
+        await client.query(
+          `INSERT INTO catalog.source_catalog_term_events
+             (id, term_id, event_type, actor, from_revision, to_revision, changes)
+           VALUES ($1, $2, 'create', $3, NULL, 1, $4)`,
+          [randomUUID(), term.id, actor, { after: term }],
+        )
+        return term
+      })
+    } catch (error) {
+      if (error?.code === '23505') {
+        throw new AppError(409, 'source_catalog_term_exists', 'A taxonomy term with this name already exists')
+      }
+      throw error
+    }
+  }
+
+  async updateSourceCatalogTerm(id, patch, {
+    expectedRevision,
+    actor = 'admin-token',
+    eventType = 'update',
+  } = {}) {
+    try {
+      return await withPgTransaction(this.pool, async (client) => {
+        const currentResult = await client.query(
+          `SELECT * FROM catalog.source_catalog_terms WHERE id = $1 FOR UPDATE`,
+          [id],
+        )
+        const current = sourceCatalogTerm(currentResult.rows[0])
+        if (!current) {
+          throw new AppError(404, 'source_catalog_term_not_found', 'Source catalog taxonomy term was not found')
+        }
+        if (current.revision !== expectedRevision) {
+          throw new AppError(409, 'source_catalog_term_revision_conflict', 'Taxonomy term changed; reload before saving', {
+            expectedRevision,
+            currentRevision: current.revision,
+          })
+        }
+        const usageCount = await this.#sourceCatalogTermUsage(client, current)
+        if (patch.normalizedName && patch.normalizedName !== current.normalizedName && usageCount > 0) {
+          throw new AppError(409, 'source_catalog_term_in_use', 'Referenced taxonomy terms cannot be renamed', {
+            usageCount,
+          })
+        }
+        if (patch.archivedAt && usageCount > 0) {
+          throw new AppError(409, 'source_catalog_term_in_use', 'Referenced taxonomy terms cannot be archived', {
+            usageCount,
+          })
+        }
+        const merged = { ...current, ...patch }
+        const { rows } = await client.query(
+          `UPDATE catalog.source_catalog_terms
+              SET display_name = $3,
+                  normalized_name = $4,
+                  description = $5,
+                  color = $6,
+                  sort_order = $7,
+                  archived_at = $8,
+                  revision = revision + 1,
+                  updated_at = now()
+            WHERE id = $1 AND revision = $2
+            RETURNING *`,
+          [
+            id, expectedRevision, merged.displayName, merged.normalizedName,
+            merged.description, merged.color, merged.sortOrder, merged.archivedAt,
+          ],
+        )
+        const term = sourceCatalogTerm({ ...rows[0], usage_count: usageCount })
+        await client.query(
+          `INSERT INTO catalog.source_catalog_term_events
+             (id, term_id, event_type, actor, from_revision, to_revision, changes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            randomUUID(), id, eventType, actor, current.revision, term.revision,
+            { before: { ...current, usageCount }, after: term },
+          ],
+        )
+        return term
+      })
+    } catch (error) {
+      if (error?.code === '23505') {
+        throw new AppError(409, 'source_catalog_term_exists', 'A taxonomy term with this name already exists')
+      }
+      throw error
+    }
+  }
+
+  async archiveSourceCatalogTerm(id, options = {}) {
+    return this.updateSourceCatalogTerm(id, { archivedAt: new Date().toISOString() }, {
+      ...options,
+      eventType: 'archive',
+    })
+  }
+
+  async restoreSourceCatalogTerm(id, options = {}) {
+    return this.updateSourceCatalogTerm(id, { archivedAt: null }, {
+      ...options,
+      eventType: 'restore',
+    })
+  }
+
+  async listSourceCatalogTermEvents(termId, limit = 50) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200))
+    const { rows } = await this.pool.query(
+      `SELECT *
+         FROM catalog.source_catalog_term_events
+        WHERE term_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2`,
+      [termId, safeLimit],
+    )
+    return rows.map(sourceCatalogTermEvent)
+  }
+
+  async #sourceCatalogTermUsage(client, term) {
+    const entries = await this.#sourceCatalogTaxonomyEntries(client)
+    return entries.filter((entry) => sourceCatalogEntryUsesTerm(entry, term)).length
+  }
+
+  async #sourceCatalogTaxonomyEntries(client) {
+    const { rows } = await client.query(
+      `SELECT major_category, scenarios, regions, tags
+         FROM catalog.source_catalog_entries`,
+    )
+    return rows.map((row) => ({
+      majorCategory: row.major_category,
+      scenarios: row.scenarios || [],
+      regions: row.regions || [],
+      tags: row.tags || [],
+    }))
+  }
+
+  async #assertSourceCatalogTaxonomyAvailable(client, candidate) {
+    const { rows } = await client.query(
+      `SELECT *
+         FROM catalog.source_catalog_terms
+        ORDER BY id
+          FOR KEY SHARE`,
+    )
+    for (const row of rows) {
+      const term = sourceCatalogTerm(row)
+      if (!term.archivedAt || !sourceCatalogEntryUsesTerm(candidate, term)) continue
+      throw new AppError(409, 'source_catalog_term_archived', 'Source catalog entries cannot reference an archived taxonomy term', {
+        termId: term.id,
+        kind: term.kind,
+        displayName: term.displayName,
+      })
+    }
+  }
+
+  async sourceCatalogRelatedData(entry, { pageSize = 20 } = {}) {
+    const matchKeys = [...new Set([entry.canonicalName, ...(entry.aliases || [])]
+      .map((value) => String(value).normalize('NFKC').trim().toLocaleLowerCase('zh-CN'))
+      .filter(Boolean))]
+    const [datasetResult, recordResult, sourceResult, chunkResult] = await Promise.all([
+      this.pool.query(
+        `WITH matched_records AS (
+           SELECT *
+             FROM core.canonical_records
+            WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
+         ), record_stats AS (
+           SELECT record.dataset_id,
+                  array_agg(DISTINCT record.platform ORDER BY record.platform) AS platforms,
+                  array_agg(DISTINCT record.object_type ORDER BY record.object_type) AS object_types,
+                  coalesce(
+                    array_agg(DISTINCT record.content_type ORDER BY record.content_type)
+                      FILTER (WHERE record.content_type IS NOT NULL),
+                    ARRAY[]::text[]
+                  ) AS content_types,
+                  count(*) FILTER (WHERE record.deleted_at IS NULL) AS active_record_count,
+                  count(*) FILTER (WHERE record.deleted_at IS NOT NULL) AS deleted_record_count,
+                  coalesce(sum(record.current_revision), 0) AS revision_count,
+                  max(record.collected_at) AS last_collected_at,
+                  max(record.event_time) AS last_event_at
+             FROM matched_records record
+            GROUP BY record.dataset_id
+         ), chunk_stats AS (
+           SELECT record.dataset_id,
+                  count(chunk.id) AS chunk_count,
+                  count(chunk.id) FILTER (WHERE chunk.projected_at IS NOT NULL) AS projected_chunk_count
+             FROM matched_records record
+             JOIN core.record_chunks chunk ON chunk.record_id = record.id
+            WHERE record.deleted_at IS NULL
+            GROUP BY record.dataset_id
+         )
+         SELECT record_stats.*,
+                coalesce(chunk_stats.chunk_count, 0) AS chunk_count,
+                coalesce(chunk_stats.projected_chunk_count, 0) AS projected_chunk_count
+           FROM record_stats
+           LEFT JOIN chunk_stats USING (dataset_id)
+          ORDER BY record_stats.dataset_id`,
+        [matchKeys],
+      ),
+      this.pool.query(
+        `SELECT id, dataset_id, platform, object_type, content_type, external_id,
+                title, current_revision, event_time, collected_at, deleted_at
+           FROM core.canonical_records
+          WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
+          ORDER BY coalesce(event_time, collected_at, last_seen_at, first_seen_at) DESC, id DESC
+          LIMIT $2`,
+        [matchKeys, pageSize + 1],
+      ),
+      this.pool.query(
+        `SELECT *
+           FROM catalog.external_sources
+          WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
+          ORDER BY updated_at DESC, source_key`,
+        [matchKeys],
+      ),
+      this.pool.query(
+        `SELECT count(*)::integer AS chunk_count,
+                count(*) FILTER (WHERE chunk.embedded_at IS NOT NULL)::integer AS embedded_chunk_count,
+                count(*) FILTER (WHERE chunk.projected_at IS NOT NULL)::integer AS projected_chunk_count,
+                count(DISTINCT chunk.record_id)::integer AS records_with_chunks
+           FROM core.record_chunks chunk
+           JOIN core.canonical_records record ON record.id = chunk.record_id
+          WHERE record.deleted_at IS NULL
+            AND lower(btrim(normalize(record.platform, NFKC))) = ANY($1::text[])`,
+        [matchKeys],
+      ),
+    ])
+    const datasets = datasetResult.rows.map(sourceCatalogRelatedDataset)
+    const allRecentRecords = recordResult.rows.map(dataCenterRecord)
+    const recentRecords = allRecentRecords.slice(0, pageSize)
+    const externalSources = sourceResult.rows.map(sourceCatalogRelatedExternalSource)
+    const chunkStats = chunkResult.rows[0] || {}
+    const activeRecordCount = datasets.reduce((total, row) => total + row.activeRecordCount, 0)
+    const deletedRecordCount = datasets.reduce((total, row) => total + row.deletedRecordCount, 0)
+    const recordCount = activeRecordCount + deletedRecordCount
+    const chunkCount = Number(chunkStats.chunk_count || 0)
+    const embeddedChunkCount = Number(chunkStats.embedded_chunk_count || 0)
+    const projectedChunkCount = Number(chunkStats.projected_chunk_count || 0)
+    const projectionState = activeRecordCount === 0
+      ? 'empty'
+      : projectedChunkCount === 0
+        ? 'not_indexed'
+        : projectedChunkCount < chunkCount
+          ? 'partial'
+          : 'ready'
+    return {
+      entry: {
+        id: entry.id,
+        sourceKey: entry.sourceKey,
+        canonicalName: entry.canonicalName,
+        aliases: entry.aliases || [],
+        archivedAt: entry.archivedAt,
+        revision: entry.revision,
+      },
+      matchKeys: [entry.canonicalName, ...(entry.aliases || [])],
+      stats: {
+        datasetCount: datasets.length,
+        externalSourceCount: externalSources.length,
+        recordCount,
+        activeRecordCount,
+        deletedRecordCount,
+        revisionCount: datasets.reduce((total, row) => total + row.revisionCount, 0),
+        chunkCount,
+        embeddedChunkCount,
+        projectedChunkCount,
+      },
+      datasets,
+      externalSources,
+      recentRecords,
+      searchProjection: {
+        state: projectionState,
+        recordCount: activeRecordCount,
+        recordsWithChunks: Number(chunkStats.records_with_chunks || 0),
+        chunkCount,
+        embeddedChunkCount,
+        projectedChunkCount,
+      },
+      pageSize,
+      hasMore: allRecentRecords.length > pageSize,
+    }
   }
 
   /**
@@ -4688,6 +5089,69 @@ function sourceCatalogEvent(row) {
     toRevision: Number(row.to_revision),
     changes: row.changes || {},
     createdAt: iso(row.created_at),
+  }
+}
+
+function sourceCatalogTerm(row) {
+  return row && {
+    id: row.id,
+    termKey: row.term_key,
+    kind: row.kind,
+    displayName: row.display_name,
+    normalizedName: row.normalized_name,
+    description: row.description,
+    color: row.color,
+    sortOrder: Number(row.sort_order || 0),
+    usageCount: Number(row.usage_count || 0),
+    revision: Number(row.revision || 1),
+    archivedAt: iso(row.archived_at),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  }
+}
+
+function sourceCatalogTermEvent(row) {
+  return row && {
+    id: row.id,
+    termId: row.term_id,
+    eventType: row.event_type,
+    actor: row.actor,
+    fromRevision: row.from_revision == null ? null : Number(row.from_revision),
+    toRevision: Number(row.to_revision),
+    changes: row.changes || {},
+    createdAt: iso(row.created_at),
+  }
+}
+
+function sourceCatalogRelatedDataset(row) {
+  return {
+    datasetId: row.dataset_id,
+    platforms: row.platforms || [],
+    objectTypes: row.object_types || [],
+    contentTypes: row.content_types || [],
+    activeRecordCount: Number(row.active_record_count || 0),
+    deletedRecordCount: Number(row.deleted_record_count || 0),
+    revisionCount: Number(row.revision_count || 0),
+    lastCollectedAt: iso(row.last_collected_at),
+    lastEventAt: iso(row.last_event_at),
+    chunkCount: Number(row.chunk_count || 0),
+    projectedChunkCount: Number(row.projected_chunk_count || 0),
+  }
+}
+
+function sourceCatalogRelatedExternalSource(row) {
+  return row && {
+    id: row.id,
+    sourceKey: row.source_key,
+    displayName: row.display_name,
+    sourceKind: row.source_kind,
+    datasetId: row.dataset_id,
+    platform: row.platform,
+    objectType: row.object_type,
+    status: row.status,
+    syncIntervalSeconds: row.sync_interval_seconds == null ? null : Number(row.sync_interval_seconds),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
   }
 }
 

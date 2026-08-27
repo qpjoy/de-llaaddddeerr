@@ -10,9 +10,14 @@ import { normalizeChinaProvince } from './data/china-provinces.mjs'
 import {
   normalizeSourceCatalogCreate,
   normalizeSourceCatalogPatch,
+  normalizeSourceCatalogTermCreate,
+  normalizeSourceCatalogTermPatch,
+  SOURCE_CATALOG_TERM_KINDS,
   sourceCatalogId,
   sourceCatalogRevision,
   sourceCatalogSnapshot,
+  sourceCatalogTermId,
+  sourceCatalogTermSnapshot,
 } from './data/source-catalog.mjs'
 import { validateFieldMap } from './ingest/external/mapping.mjs'
 import {
@@ -1618,8 +1623,13 @@ export function createApp({
       if (request.method === 'GET' && pathname === '/internal/v1/admin/source-catalog') {
         requireSourceAdmin(principal)
         const includeArchived = url.searchParams.get('includeArchived') === 'true'
-        const items = await store.listSourceCatalogEntries({ includeArchived })
-        sendJson(response, 200, { data: sourceCatalogSnapshot(items), requestId })
+        const [items, taxonomyTerms] = await Promise.all([
+          store.listSourceCatalogEntries({ includeArchived }),
+          typeof store.listSourceCatalogTerms === 'function'
+            ? store.listSourceCatalogTerms({ includeArchived: false })
+            : [],
+        ])
+        sendJson(response, 200, { data: sourceCatalogSnapshot(items, taxonomyTerms), requestId })
         return
       }
       if (request.method === 'POST' && pathname === '/internal/v1/admin/source-catalog') {
@@ -1633,6 +1643,120 @@ export function createApp({
           actor: principal.memberId || principal.kind || 'admin-token',
         })
         sendJson(response, 201, { data, requestId })
+        return
+      }
+
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/source-catalog/taxonomy') {
+        requireSourceAdmin(principal)
+        const includeArchived = url.searchParams.get('includeArchived') === 'true'
+        const kind = url.searchParams.get('kind')?.trim() || null
+        if (kind && !SOURCE_CATALOG_TERM_KINDS.includes(kind)) {
+          throw new AppError(400, 'invalid_source_catalog_term_kind', `kind must be one of ${SOURCE_CATALOG_TERM_KINDS.join(', ')}`)
+        }
+        const terms = await store.listSourceCatalogTerms({ includeArchived, kind })
+        sendJson(response, 200, { data: sourceCatalogTermSnapshot(terms), requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/source-catalog/taxonomy') {
+        requireSourceAdmin(principal)
+        const body = await readJson(request)
+        const input = normalizeSourceCatalogTermCreate({
+          ...body,
+          termKey: body?.termKey || `term-${randomUUID()}`,
+        })
+        const data = await store.createSourceCatalogTerm(input, {
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 201, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/taxonomy/:id/events')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        const termId = sourceCatalogTermId(params.id)
+        const term = await store.getSourceCatalogTerm(termId)
+        if (!term) throw new AppError(404, 'source_catalog_term_not_found', 'Source catalog taxonomy term was not found')
+        const requestedLimit = Number(url.searchParams.get('limit') || 50)
+        const limit = Number.isInteger(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 200)) : 50
+        sendJson(response, 200, {
+          data: await store.listSourceCatalogTermEvents(termId, limit),
+          requestId,
+        })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/taxonomy/:id/archive')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        const termId = sourceCatalogTermId(params.id)
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'revision')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported taxonomy archive fields: ${unsupported.join(', ')}`)
+        }
+        const data = await store.archiveSourceCatalogTerm(termId, {
+          expectedRevision: sourceCatalogRevision(body?.revision),
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/taxonomy/:id/restore')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        const termId = sourceCatalogTermId(params.id)
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'revision')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported taxonomy restore fields: ${unsupported.join(', ')}`)
+        }
+        const data = await store.restoreSourceCatalogTerm(termId, {
+          expectedRevision: sourceCatalogRevision(body?.revision),
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/taxonomy/:id')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        const data = await store.getSourceCatalogTerm(sourceCatalogTermId(params.id))
+        if (!data) throw new AppError(404, 'source_catalog_term_not_found', 'Source catalog taxonomy term was not found')
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        const termId = sourceCatalogTermId(params.id)
+        const body = await readJson(request)
+        const revision = sourceCatalogRevision(body?.revision)
+        const patch = normalizeSourceCatalogTermPatch(body)
+        const data = await store.updateSourceCatalogTerm(termId, patch, {
+          expectedRevision: revision,
+          actor: principal.memberId || principal.kind || 'admin-token',
+        })
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/source-catalog/:id/related-data')
+      if (params && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        const entryId = sourceCatalogId(params.id)
+        const entry = await store.getSourceCatalogEntry(entryId)
+        if (!entry) throw new AppError(404, 'source_catalog_entry_not_found', 'Source catalog entry was not found')
+        const rawPageSize = url.searchParams.get('pageSize')
+        const pageSize = rawPageSize == null || rawPageSize === '' ? 20 : Number(rawPageSize)
+        if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+          throw new AppError(400, 'invalid_page_size', 'pageSize must be an integer between 1 and 100')
+        }
+        sendJson(response, 200, {
+          data: await store.sourceCatalogRelatedData(entry, { pageSize }),
+          requestId,
+        })
         return
       }
 

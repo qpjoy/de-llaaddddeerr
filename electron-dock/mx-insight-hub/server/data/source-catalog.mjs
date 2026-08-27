@@ -29,12 +29,22 @@ export const RUNTIME_STATUSES = Object.freeze([
   'failed',
 ])
 export const SOURCE_PRIORITIES = Object.freeze(['P0', 'P1', 'P2', 'P3'])
+export const SOURCE_CATALOG_TERM_KINDS = Object.freeze([
+  'major_category',
+  'scenario',
+  'region',
+  'tag',
+])
 
 const SOURCE_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/u
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const EVIDENCE_TYPES = new Set(['document', 'pipeline', 'dataset', 'external_source', 'plan', 'url'])
 const PRIVATE_CUSTOM_FIELD = /(?:password|passwd|secret|token|credential|authori[sz]ation|api.?key|access.?key|private.?key|cookie|session|dsn|connection.?string)/iu
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
+
+export function sourceCatalogTermNormalizedName(value) {
+  return String(value || '').normalize('NFKC').trim().toLocaleLowerCase('zh-CN')
+}
 
 function asObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -276,6 +286,69 @@ export function normalizeSourceCatalogPatch(input) {
   return patch
 }
 
+function termSortOrder(value) {
+  if (value == null || value === '') return 0
+  if (!Number.isInteger(value) || value < 0 || value > 100_000) {
+    throw new AppError(400, 'invalid_source_catalog_term_field', 'sortOrder must be an integer between 0 and 100000')
+  }
+  return value
+}
+
+function termColor(value) {
+  const normalized = text(value, 'color', { maximum: 7 })
+  if (normalized == null) return null
+  if (!/^#[0-9a-f]{6}$/iu.test(normalized)) {
+    throw new AppError(400, 'invalid_source_catalog_term_field', 'color must be a six-digit hexadecimal color')
+  }
+  return normalized.toLowerCase()
+}
+
+export function normalizeSourceCatalogTermCreate(input) {
+  const source = asObject(input)
+  const allowed = new Set(['termKey', 'kind', 'displayName', 'description', 'color', 'sortOrder'])
+  const unsupported = Object.keys(source).filter((field) => !allowed.has(field))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_fields', `Unsupported source catalog term fields: ${unsupported.join(', ')}`)
+  }
+  const termKey = text(source.termKey, 'termKey', { required: true, maximum: 128 })
+  if (!SOURCE_KEY_PATTERN.test(termKey)) {
+    throw new AppError(400, 'invalid_source_catalog_term_field', 'termKey must use lowercase letters, numbers, dots, underscores or hyphens')
+  }
+  const displayName = text(source.displayName, 'displayName', { required: true, maximum: 160 })
+  return {
+    termKey,
+    kind: choice(source.kind, 'kind', SOURCE_CATALOG_TERM_KINDS),
+    displayName,
+    normalizedName: sourceCatalogTermNormalizedName(displayName),
+    description: text(source.description, 'description', { maximum: 2_000 }),
+    color: termColor(source.color),
+    sortOrder: termSortOrder(source.sortOrder),
+  }
+}
+
+export function normalizeSourceCatalogTermPatch(input) {
+  const source = asObject(input)
+  const allowed = new Set(['displayName', 'description', 'color', 'sortOrder'])
+  const unsupported = Object.keys(source).filter((field) => field !== 'revision' && !allowed.has(field))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_fields', `Unsupported source catalog term fields: ${unsupported.join(', ')}`)
+  }
+  const patch = {}
+  if (hasOwn(source, 'displayName')) {
+    patch.displayName = text(source.displayName, 'displayName', { required: true, maximum: 160 })
+    patch.normalizedName = sourceCatalogTermNormalizedName(patch.displayName)
+  }
+  if (hasOwn(source, 'description')) {
+    patch.description = text(source.description, 'description', { maximum: 2_000 })
+  }
+  if (hasOwn(source, 'color')) patch.color = termColor(source.color)
+  if (hasOwn(source, 'sortOrder')) patch.sortOrder = termSortOrder(source.sortOrder)
+  if (Object.keys(patch).length === 0) {
+    throw new AppError(400, 'empty_source_catalog_term_patch', 'At least one editable taxonomy field is required')
+  }
+  return patch
+}
+
 export function sourceCatalogRevision(value) {
   if (!Number.isInteger(value) || value <= 0) {
     throw new AppError(400, 'invalid_source_catalog_revision', 'revision must be a positive integer')
@@ -288,6 +361,28 @@ export function sourceCatalogId(value) {
     throw new AppError(400, 'invalid_source_catalog_id', 'Source catalog id must be a UUID')
   }
   return value.toLowerCase()
+}
+
+export const sourceCatalogTermId = sourceCatalogId
+
+export function sourceCatalogTermSnapshot(items) {
+  const ordered = [...(items || [])].sort((left, right) => (
+    left.kind.localeCompare(right.kind)
+      || Number(left.sortOrder || 0) - Number(right.sortOrder || 0)
+      || left.displayName.localeCompare(right.displayName, 'zh-CN')
+  ))
+  const active = ordered.filter((item) => !item.archivedAt)
+  return {
+    items: ordered,
+    summary: {
+      total: active.length,
+      archived: ordered.length - active.length,
+      byKind: Object.fromEntries(SOURCE_CATALOG_TERM_KINDS.map((kind) => [
+        kind,
+        active.filter((item) => item.kind === kind).length,
+      ])),
+    },
+  }
 }
 
 function counts(values, field) {
@@ -306,7 +401,7 @@ function distinct(values, selector) {
   }))].sort((left, right) => left.localeCompare(right, 'zh-CN'))
 }
 
-export function sourceCatalogSnapshot(items) {
+export function sourceCatalogSnapshot(items, taxonomyTerms = []) {
   const ordered = [...(items || [])].sort((left, right) => (
     Number(left.legacySequence || Number.MAX_SAFE_INTEGER) - Number(right.legacySequence || Number.MAX_SAFE_INTEGER)
       || left.canonicalName.localeCompare(right.canonicalName, 'zh-CN')
@@ -334,6 +429,10 @@ export function sourceCatalogSnapshot(items) {
     if (item.deliveryStatus === 'doing') current.doing += 1
     categories.set(item.majorCategory, current)
   }
+  const activeTerms = taxonomyTerms.filter((term) => !term.archivedAt)
+  const termValues = (kind) => activeTerms
+    .filter((term) => term.kind === kind)
+    .map((term) => term.displayName)
   return {
     items: ordered,
     summary: {
@@ -356,12 +455,24 @@ export function sourceCatalogSnapshot(items) {
       categories: [...categories.values()].sort((left, right) => right.total - left.total),
     },
     facets: {
-      majorCategories: distinct(active, (item) => item.majorCategory),
-      scenarios: distinct(active, (item) => item.scenarios),
-      regions: distinct(active, (item) => item.regions),
+      majorCategories: distinct([
+        ...active,
+        ...termValues('major_category').map((displayName) => ({ majorCategory: displayName })),
+      ], (item) => item.majorCategory),
+      scenarios: distinct([
+        ...active,
+        ...termValues('scenario').map((displayName) => ({ scenarios: [displayName] })),
+      ], (item) => item.scenarios),
+      regions: distinct([
+        ...active,
+        ...termValues('region').map((displayName) => ({ regions: [displayName] })),
+      ], (item) => item.regions),
       owners: distinct(active, (item) => item.owner),
       connectorHints: distinct(active, (item) => item.connectorHints),
-      tags: distinct(active, (item) => item.tags),
+      tags: distinct([
+        ...active,
+        ...termValues('tag').map((displayName) => ({ tags: [displayName] })),
+      ], (item) => item.tags),
     },
   }
 }
