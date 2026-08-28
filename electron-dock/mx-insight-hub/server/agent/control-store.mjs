@@ -115,6 +115,28 @@ async function lockControlKey(client, namespace, key) {
   )
 }
 
+async function lockEnabledProxyEndpoints(client, sequences, code = 'invalid_agent_proxy') {
+  const proxyKeys = [...new Set(sequences.flatMap((sequence) => (
+    Array.isArray(sequence?.proxy_keys) ? sequence.proxy_keys : []
+  )))]
+  const endpoints = proxyKeys.length > 0
+    ? await client.query(
+        `SELECT proxy_key
+           FROM control.agent_proxy_endpoints
+          WHERE enabled = true
+            AND proxy_key = ANY($1::text[])
+          FOR SHARE`,
+        [proxyKeys],
+      )
+    : { rows: [] }
+  const enabledKeys = new Set(endpoints.rows.map((row) => row.proxy_key))
+  for (const sequence of sequences) {
+    if (!sequence.proxy_keys.some((proxyKey) => enabledKeys.has(proxyKey))) {
+      invalid(code, `Proxy Sequence ${sequence.sequence_key} has no enabled endpoint`)
+    }
+  }
+}
+
 export class AgentControlStore {
   constructor(pool) {
     this.pool = pool
@@ -135,7 +157,19 @@ export class AgentControlStore {
            (sequence_key, display_name, kind, provider_ids, source,
             provider_revision, updated_by)
          VALUES ($1, $2, $3, $4::text[], 'bootstrap', $5, 'environment-bootstrap')
-         ON CONFLICT (sequence_key) DO NOTHING`,
+         ON CONFLICT (sequence_key) DO UPDATE SET
+           display_name = EXCLUDED.display_name,
+           provider_ids = EXCLUDED.provider_ids,
+           provider_revision = EXCLUDED.provider_revision,
+           revision = control.agent_llm_sequences.revision + 1,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = now()
+         WHERE control.agent_llm_sequences.source = 'bootstrap'
+           AND (control.agent_llm_sequences.display_name,
+                control.agent_llm_sequences.provider_ids,
+                control.agent_llm_sequences.provider_revision)
+               IS DISTINCT FROM
+               (EXCLUDED.display_name, EXCLUDED.provider_ids, EXCLUDED.provider_revision)`,
         [sequenceKey, kind === 'chat' ? 'MX Default Chat' : 'MX Default Embedding', kind, ids, providerRevision],
       )
       await client.query(
@@ -278,25 +312,34 @@ export class AgentControlStore {
       field: 'proxySequenceKeys', minimum: 0, maximum: MAX_SEQUENCE_PROVIDERS,
     })
     if (keys.length === 0) return
+    const client = await this.pool.connect()
     try {
-      const result = await this.pool.query(
-        `SELECT sequence_key
+      await client.query('BEGIN')
+      const result = await client.query(
+        `SELECT sequence_key, proxy_keys
            FROM control.agent_proxy_sequences
           WHERE enabled = true
-            AND sequence_key = ANY($1::text[])`,
+            AND sequence_key = ANY($1::text[])
+          FOR SHARE`,
         [keys],
       )
-      const available = new Set(result.rows.map((row) => row.sequence_key))
+      const available = new Map(result.rows.map((row) => [row.sequence_key, row]))
       for (const key of keys) {
-        if (!available.has(key)) {
-          invalid('invalid_provider_settings', `Proxy Sequence ${key} is missing or disabled`)
+        const sequence = available.get(key)
+        if (!sequence || !Array.isArray(sequence.proxy_keys) || sequence.proxy_keys.length === 0) {
+          invalid('invalid_provider_settings', `Proxy Sequence ${key} is missing, disabled, or contains no endpoints`)
         }
       }
+      await lockEnabledProxyEndpoints(client, [...available.values()], 'invalid_provider_settings')
+      await client.query('COMMIT')
     } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
       if (relationMissing(error)) {
-        invalid('invalid_provider_settings', 'Proxy settings migration is not available')
+        throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require the Agent control migration')
       }
       throw error
+    } finally {
+      client.release()
     }
   }
 
@@ -484,6 +527,21 @@ export class AgentControlStore {
           currentRevision: revision,
         })
       }
+      if (!enabled) {
+        const references = await client.query(
+          `SELECT sequence_key
+             FROM control.agent_proxy_sequences
+            WHERE $1 = ANY(proxy_keys)
+            ORDER BY sequence_key
+            FOR SHARE`,
+          [proxyKey],
+        )
+        if (references.rows.length > 0) {
+          throw new AppError(409, 'agent_proxy_endpoint_in_use', 'Remove the endpoint from every Proxy Sequence before disabling it', {
+            sequenceKeys: references.rows.map((row) => row.sequence_key),
+          })
+        }
+      }
       const saved = await client.query(
         `INSERT INTO control.agent_proxy_endpoints
            (proxy_key, display_name, proxy_url, enabled, revision, updated_by, updated_at)
@@ -508,6 +566,58 @@ export class AgentControlStore {
     }
   }
 
+  async deleteProxyEndpoint(proxyKey, input) {
+    assertKey(proxyKey, 'proxyKey')
+    const expected = expectedRevision(input?.expectedRevision)
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await lockControlKey(client, 'proxy-endpoint', proxyKey)
+      const current = await client.query(
+        `SELECT proxy_key, display_name, proxy_url, enabled, revision, updated_by, updated_at
+           FROM control.agent_proxy_endpoints
+          WHERE proxy_key = $1
+          FOR UPDATE`,
+        [proxyKey],
+      )
+      if (!current.rows[0]) {
+        throw new AppError(404, 'agent_proxy_endpoint_not_found', 'Proxy endpoint was not found')
+      }
+      const revision = Number(current.rows[0].revision)
+      if (revision !== expected) {
+        throw new AppError(409, 'proxy_revision_conflict', 'Proxy endpoint changed; reload and retry', {
+          currentRevision: revision,
+        })
+      }
+      const references = await client.query(
+        `SELECT sequence_key
+           FROM control.agent_proxy_sequences
+          WHERE $1 = ANY(proxy_keys)
+          ORDER BY sequence_key
+          FOR SHARE`,
+        [proxyKey],
+      )
+      if (references.rows.length > 0) {
+        throw new AppError(409, 'agent_proxy_endpoint_in_use', 'Remove the endpoint from every Proxy Sequence before deleting it', {
+          sequenceKeys: references.rows.map((row) => row.sequence_key),
+        })
+      }
+      const deleted = await client.query(
+        `DELETE FROM control.agent_proxy_endpoints
+          WHERE proxy_key = $1
+        RETURNING proxy_key, display_name, proxy_url, enabled, revision, updated_by, updated_at`,
+        [proxyKey],
+      )
+      await client.query('COMMIT')
+      return proxyEndpointRow(deleted.rows[0])
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
   async saveProxySequence(sequenceKey, input, { updatedBy = 'admin-token' } = {}) {
     assertKey(sequenceKey, 'sequenceKey')
     const expected = expectedRevision(input?.expectedRevision)
@@ -520,12 +630,32 @@ export class AgentControlStore {
     if (typeof directFallback !== 'boolean' || typeof enabled !== 'boolean') {
       invalid('invalid_agent_proxy', 'directFallback and enabled must be boolean')
     }
-    if (proxyKeys.length === 0 && !directFallback) {
-      invalid('invalid_agent_proxy', 'Proxy Sequence requires an endpoint or direct fallback')
+    if (proxyKeys.length === 0) {
+      invalid('invalid_agent_proxy', 'Proxy Sequence requires at least one endpoint')
     }
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      let globalSetting = null
+      let providerSettings = null
+      if (!enabled) {
+        // Match setGlobalProxySequence/deleteProxySequence and Provider writes:
+        // bindings are locked before the Sequence row, so a concurrent bind can
+        // neither slip past this transition nor deadlock while holding the
+        // Sequence lock that it still needs to validate.
+        await lockControlKey(client, 'proxy-settings', 'global')
+        globalSetting = await client.query(
+          `SELECT global_sequence_key
+             FROM control.agent_proxy_settings
+            WHERE singleton = true
+            FOR SHARE`,
+        )
+        providerSettings = await client.query(
+          `SELECT kind, providers
+             FROM control.agent_provider_settings
+            FOR SHARE`,
+        )
+      }
       await lockControlKey(client, 'proxy-sequence', sequenceKey)
       const endpoints = await client.query(
         `SELECT proxy_key, enabled
@@ -539,7 +669,7 @@ export class AgentControlStore {
         if (!enabledKeys.has(key)) invalid('invalid_agent_proxy', `Proxy endpoint ${key} is missing or disabled`)
       }
       const current = await client.query(
-        'SELECT revision FROM control.agent_proxy_sequences WHERE sequence_key = $1 FOR UPDATE',
+        'SELECT revision, enabled FROM control.agent_proxy_sequences WHERE sequence_key = $1 FOR UPDATE',
         [sequenceKey],
       )
       const revision = Number(current.rows[0]?.revision ?? 0)
@@ -547,6 +677,24 @@ export class AgentControlStore {
         throw new AppError(409, 'proxy_sequence_revision_conflict', 'Proxy Sequence changed; reload and retry', {
           currentRevision: revision,
         })
+      }
+      if (current.rows[0]?.enabled === true && !enabled) {
+        if (globalSetting?.rows[0]?.global_sequence_key === sequenceKey) {
+          throw new AppError(409, 'agent_proxy_sequence_in_use', 'Select a different global Proxy Sequence before disabling this one', {
+            global: true,
+            providers: [],
+          })
+        }
+        const providers = (providerSettings?.rows || []).flatMap((row) => (
+          Array.isArray(row.providers) ? row.providers : []
+        ).filter((provider) => provider?.proxySequenceKey === sequenceKey)
+          .map((provider) => ({ kind: row.kind, providerId: provider.id })))
+        if (providers.length > 0) {
+          throw new AppError(409, 'agent_proxy_sequence_in_use', 'Remove the Proxy Sequence from every Provider before disabling it', {
+            global: false,
+            providers,
+          })
+        }
       }
       const saved = await client.query(
         `INSERT INTO control.agent_proxy_sequences
@@ -575,6 +723,77 @@ export class AgentControlStore {
     }
   }
 
+  async deleteProxySequence(sequenceKey, input) {
+    assertKey(sequenceKey, 'sequenceKey')
+    const expected = expectedRevision(input?.expectedRevision)
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      // Match setGlobalProxySequence's lock order so deleting a Sequence can
+      // never race the global binding into ON DELETE SET NULL.
+      await lockControlKey(client, 'proxy-settings', 'global')
+      const globalSetting = await client.query(
+        `SELECT global_sequence_key
+           FROM control.agent_proxy_settings
+          WHERE singleton = true
+          FOR SHARE`,
+      )
+      const providerSettings = await client.query(
+        `SELECT kind, providers
+           FROM control.agent_provider_settings
+          FOR SHARE`,
+      )
+      await lockControlKey(client, 'proxy-sequence', sequenceKey)
+      const current = await client.query(
+        `SELECT sequence_key, display_name, proxy_keys, direct_fallback,
+                enabled, revision, updated_by, updated_at
+           FROM control.agent_proxy_sequences
+          WHERE sequence_key = $1
+          FOR UPDATE`,
+        [sequenceKey],
+      )
+      if (!current.rows[0]) {
+        throw new AppError(404, 'agent_proxy_sequence_not_found', 'Proxy Sequence was not found')
+      }
+      const revision = Number(current.rows[0].revision)
+      if (revision !== expected) {
+        throw new AppError(409, 'proxy_sequence_revision_conflict', 'Proxy Sequence changed; reload and retry', {
+          currentRevision: revision,
+        })
+      }
+      if (globalSetting.rows[0]?.global_sequence_key === sequenceKey) {
+        throw new AppError(409, 'agent_proxy_sequence_in_use', 'Select a different global Proxy Sequence before deleting this one', {
+          global: true,
+          providers: [],
+        })
+      }
+      const providers = providerSettings.rows.flatMap((row) => (
+        Array.isArray(row.providers) ? row.providers : []
+      ).filter((provider) => provider?.proxySequenceKey === sequenceKey)
+        .map((provider) => ({ kind: row.kind, providerId: provider.id })))
+      if (providers.length > 0) {
+        throw new AppError(409, 'agent_proxy_sequence_in_use', 'Remove the Proxy Sequence from every Provider before deleting it', {
+          global: false,
+          providers,
+        })
+      }
+      const deleted = await client.query(
+        `DELETE FROM control.agent_proxy_sequences
+          WHERE sequence_key = $1
+        RETURNING sequence_key, display_name, proxy_keys, direct_fallback,
+                  enabled, revision, updated_by, updated_at`,
+        [sequenceKey],
+      )
+      await client.query('COMMIT')
+      return proxySequenceRow(deleted.rows[0])
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
   async setGlobalProxySequence(sequenceKey, { expectedRevision: expected, updatedBy = 'admin-token' } = {}) {
     if (sequenceKey != null) assertKey(sequenceKey, 'sequenceKey')
     expectedRevision(expected)
@@ -593,12 +812,14 @@ export class AgentControlStore {
       }
       if (sequenceKey != null) {
         const selected = await client.query(
-          'SELECT enabled FROM control.agent_proxy_sequences WHERE sequence_key = $1 FOR SHARE',
+          'SELECT sequence_key, enabled, proxy_keys FROM control.agent_proxy_sequences WHERE sequence_key = $1 FOR SHARE',
           [sequenceKey],
         )
-        if (!selected.rows[0] || selected.rows[0].enabled === false) {
-          invalid('invalid_agent_proxy', 'The selected Proxy Sequence is missing or disabled')
+        if (!selected.rows[0] || selected.rows[0].enabled === false
+          || !Array.isArray(selected.rows[0].proxy_keys) || selected.rows[0].proxy_keys.length === 0) {
+          invalid('invalid_agent_proxy', 'The selected Proxy Sequence is missing, disabled, or contains no endpoints')
         }
+        await lockEnabledProxyEndpoints(client, selected.rows)
       }
       const saved = await client.query(
         `INSERT INTO control.agent_proxy_settings

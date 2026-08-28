@@ -2783,7 +2783,7 @@ export function createApp({
           throw new AppError(503, 'agent_control_unavailable', 'LLM Sequence testing requires PostgreSQL')
         }
         const body = await readJson(request, 16 * 1024)
-        const data = await agent.testSequence(params.sequenceKey, { kind: body?.kind })
+        const data = await agent.testSequence(params.sequenceKey, body)
         sendJson(response, 200, { data, requestId })
         return
       }
@@ -2829,6 +2829,18 @@ export function createApp({
         sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
         return
       }
+      if (params && request.method === 'DELETE') {
+        requireAgentAdmin(principal)
+        if (typeof agent?.deleteProxyEndpoint !== 'function') {
+          throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require PostgreSQL')
+        }
+        const data = await agent.deleteProxyEndpoint(
+          params.proxyKey,
+          await readJson(request, 16 * 1024),
+        )
+        sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/agent/proxies/sequences/:sequenceKey')
       if (params && request.method === 'PUT') {
         requireAgentAdmin(principal)
@@ -2836,6 +2848,18 @@ export function createApp({
           params.sequenceKey,
           await readJson(request, 32 * 1024),
           { updatedBy: 'admin-token' },
+        )
+        sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
+        return
+      }
+      if (params && request.method === 'DELETE') {
+        requireAgentAdmin(principal)
+        if (typeof agent?.deleteProxySequence !== 'function') {
+          throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require PostgreSQL')
+        }
+        const data = await agent.deleteProxySequence(
+          params.sequenceKey,
+          await readJson(request, 16 * 1024),
         )
         sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
         return

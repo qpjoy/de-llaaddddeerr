@@ -39,11 +39,6 @@ const SSL_MODE_OPTIONS = [
   { value: 'verify-full', label: 'verify-full' },
 ]
 
-const AGENT_CONFIG_SOURCE_OPTIONS = [
-  { value: 'database', label: '数据库（可在线更新）' },
-  { value: 'environment', label: '环境变量（由部署管理）' },
-]
-
 const PROVIDER_AUTH_OPTIONS = [
   { value: 'bearer', label: 'Bearer Token' },
   { value: 'none', label: '无需认证' },
@@ -3107,7 +3102,6 @@ function formatBytes(value) {
 export function AgentPage({ token, session, onUnauthorized, notify, section = 'providers' }) {
   const load = useCallback(() => adminApi.agent(token), [token])
   const state = useRemoteData(load, onUnauthorized)
-  const [editingKind, setEditingKind] = useState(null)
   const [testingProvider, setTestingProvider] = useState(null)
   const [providerTests, setProviderTests] = useState({})
   const [pipelineBusy, setPipelineBusy] = useState(null)
@@ -3123,7 +3117,9 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
   const embeddingProviders = mergeProviderStatus(embeddingSetting.providers, agent.embeddings)
   const pipelines = Array.isArray(agent.pipelines) ? agent.pipelines : []
   const canEdit = session?.kind === 'admin-token'
+  const llmSequences = agent.control?.sequences || []
   const proxySequences = agent.control?.proxy?.sequences || []
+  const proxyEndpoints = agent.control?.proxy?.endpoints || []
 
   const saveSetting = async (kind, body) => {
     try {
@@ -3202,11 +3198,14 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
         setting={chatSetting}
         providers={chatProviders}
         canEdit={canEdit}
-        onEdit={() => setEditingKind('chat')}
+        onSave={(body) => saveSetting('chat', body)}
         onTest={testProvider}
         testingProvider={testingProvider}
         providerTests={providerTests}
         onReveal={(provider) => setRevealTarget({ kind: 'chat', provider })}
+        llmSequences={llmSequences}
+        proxySequences={proxySequences}
+        proxyEndpoints={proxyEndpoints}
       /> : null}
       {section === 'providers' ? <AgentProviderPanel
         kind="embedding"
@@ -3215,11 +3214,14 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
         setting={embeddingSetting}
         providers={embeddingProviders}
         canEdit={canEdit}
-        onEdit={() => setEditingKind('embedding')}
+        onSave={(body) => saveSetting('embedding', body)}
         onTest={testProvider}
         testingProvider={testingProvider}
         providerTests={providerTests}
         onReveal={(provider) => setRevealTarget({ kind: 'embedding', provider })}
+        llmSequences={llmSequences}
+        proxySequences={proxySequences}
+        proxyEndpoints={proxyEndpoints}
       /> : null}
       {section === 'runtime' ? pipelines.map((pipeline) => (
         <AgentPipelinePanel
@@ -3239,15 +3241,6 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
           <div><strong>向量检索</strong><p>{embeddingProviders.length > 0 ? 'Embedding worker 已配置；正文 chunk 会发送给所选 Embedding Provider。' : '未配置 Embedding provider；PG/全文检索不受影响。'}</p></div>
         </div>
       </Panel> : null}
-      {section === 'providers' && editingKind ? (
-        <ProviderSettingsModal
-          kind={editingKind}
-          setting={editingKind === 'chat' ? chatSetting : embeddingSetting}
-          onClose={() => setEditingKind(null)}
-          onSave={(body) => saveSetting(editingKind, body)}
-          proxySequences={proxySequences}
-        />
-      ) : null}
       {revealTarget ? (
         <ProviderSecretRevealModal
           token={token}
@@ -3286,35 +3279,238 @@ function mergeProviderStatus(configured, runtime) {
 }
 
 function AgentProviderPanel({
-  kind, title, subtitle, setting, providers, canEdit, onEdit,
-  onTest, testingProvider, providerTests, onReveal,
+  kind, title, subtitle, setting, providers, canEdit, onSave,
+  onTest, testingProvider, providerTests, onReveal, llmSequences = [], proxySequences = [], proxyEndpoints = [],
 }) {
   const sourceLabel = setting.source === 'database' ? '数据库' : '环境变量'
+  const [editor, setEditor] = useState(null)
+  const [pendingDelete, setPendingDelete] = useState(null)
+  const [migrationOpen, setMigrationOpen] = useState(false)
+  const [migrationRevision, setMigrationRevision] = useState(null)
+  const [migrationKeys, setMigrationKeys] = useState({})
+  const [confirmEnvironment, setConfirmEnvironment] = useState(false)
+  const [savingAction, setSavingAction] = useState(null)
+  const [error, setError] = useState(null)
+  const editorHeadingRef = useRef(null)
+
+  useEffect(() => {
+    if (editor) editorHeadingRef.current?.focus()
+  }, [editor?.mode, editor?.originalId])
+
+  const drafts = providers.map((provider, index) => providerDraft(provider, index, kind))
+
+  const persist = async (nextDrafts, source = 'database', revision = setting.revision ?? 0) => {
+    const normalized = source === 'database'
+      ? normalizeProviderDrafts(nextDrafts, { kind, setting, initialProviders: drafts })
+      : []
+    return onSave({
+      source,
+      expectedRevision: revision,
+      providers: normalized,
+    })
+  }
+
+  const startCreate = () => {
+    const draft = blankProvider(providers.length, kind)
+    if (kind === 'embedding' && providers[0]) {
+      draft.model = String(providers[0].model || '')
+      draft.dimensions = String(providers[0].dimensions || '')
+    }
+    setEditor({ mode: 'create', originalId: null, openingRevision: setting.revision ?? 0, draft })
+    setMigrationOpen(false)
+    setPendingDelete(null)
+    setConfirmEnvironment(false)
+    setError(null)
+  }
+
+  const startEdit = (provider, index) => {
+    setEditor({
+      mode: 'edit',
+      originalId: provider.id,
+      openingRevision: setting.revision ?? 0,
+      draft: providerDraft(provider, index, kind),
+    })
+    setMigrationOpen(false)
+    setPendingDelete(null)
+    setConfirmEnvironment(false)
+    setError(null)
+  }
+
+  const startMigration = () => {
+    setMigrationOpen(true)
+    setMigrationRevision(setting.revision ?? 0)
+    setEditor(null)
+    setPendingDelete(null)
+    setConfirmEnvironment(false)
+    setError(null)
+  }
+
+  const saveEditor = async (event) => {
+    event.preventDefault()
+    if (!editor) return
+    const nextDrafts = editor.mode === 'create'
+      ? [...drafts, editor.draft]
+      : drafts.map((provider) => provider.id === editor.originalId ? editor.draft : provider)
+    setSavingAction('editor')
+    setError(null)
+    try {
+      await persist(nextDrafts, 'database', editor.openingRevision)
+      setEditor(null)
+    } catch (saveError) {
+      setEditor((current) => current ? {
+        ...current,
+        draft: { ...current.draft, apiKey: '' },
+      } : current)
+      setError(saveError)
+    } finally {
+      setSavingAction(null)
+    }
+  }
+
+  const deleteProvider = async (providerId) => {
+    const references = llmSequences.filter((sequence) => (
+      sequence.kind === kind && Array.isArray(sequence.providerIds) && sequence.providerIds.includes(providerId)
+    ))
+    if (references.length > 0) {
+      setError(new Error(`请先从 Sequence ${references.map((sequence) => sequence.displayName || sequence.sequenceKey).join('、')} 中移除 ${providerId}。`))
+      setPendingDelete(null)
+      return
+    }
+    setSavingAction(`delete:${providerId}`)
+    setError(null)
+    try {
+      await persist(drafts.filter((provider) => provider.id !== providerId))
+      if (editor?.originalId === providerId) setEditor(null)
+      setPendingDelete(null)
+    } catch (saveError) {
+      setError(saveError)
+    } finally {
+      setSavingAction(null)
+    }
+  }
+
+  const migrateToDatabase = async (event) => {
+    event.preventDefault()
+    setSavingAction('migration')
+    setError(null)
+    try {
+      await persist(drafts.map((provider) => ({
+        ...provider,
+        apiKey: provider.authMode === 'none' ? '' : String(migrationKeys[provider.id] || ''),
+      })), 'database', migrationRevision ?? setting.revision ?? 0)
+      setMigrationKeys({})
+      setMigrationOpen(false)
+      setMigrationRevision(null)
+    } catch (saveError) {
+      setMigrationKeys({})
+      setError(saveError)
+    } finally {
+      setSavingAction(null)
+    }
+  }
+
+  const switchToEnvironment = async () => {
+    setSavingAction('environment')
+    setError(null)
+    try {
+      await persist([], 'environment')
+      setEditor(null)
+      setConfirmEnvironment(false)
+    } catch (saveError) {
+      setError(saveError)
+    } finally {
+      setSavingAction(null)
+    }
+  }
+
+  const databaseManaged = setting.source === 'database'
+  const busy = Boolean(savingAction)
+  const actions = canEdit ? (
+    databaseManaged ? <>
+      <button className="qp-button qp-button--ghost" type="button" disabled={busy}
+        onClick={() => { setConfirmEnvironment(true); setEditor(null); setMigrationOpen(false); setError(null) }}>
+        切回环境变量
+      </button>
+      <button className="qp-button qp-button--outline" type="button" disabled={busy || providers.length >= 32} onClick={startCreate}>
+        <Plus size={16} aria-hidden="true" />新建 Provider
+      </button>
+    </> : (
+      <button className="qp-button qp-button--outline" type="button" disabled={busy}
+        onClick={providers.length > 0 ? startMigration : startCreate}>
+        <Database size={16} aria-hidden="true" />{providers.length > 0 ? '迁移到数据库管理' : '新建 Provider'}
+      </button>
+    )
+  ) : null
+
   return (
     <Panel
       title={title}
       subtitle={subtitle}
-      actions={canEdit ? (
-        <button className="qp-button qp-button--outline" type="button" onClick={onEdit}>
-          <PencilSimple size={16} aria-hidden="true" />编辑配置
-        </button>
-      ) : null}
+      actions={actions}
     >
       <div className="mih-agent-chain-meta">
         <span>配置来源 <strong>{sourceLabel}</strong><code>{setting.source}</code></span>
         <span>Revision <code>{setting.revision ?? '—'}</code></span>
         {!canEdit ? <span>权限 <strong>只读</strong></span> : null}
       </div>
+      {!databaseManaged ? <p className="mih-agent-provider-source-note">
+        当前 Provider 由部署环境只读注入；连接测试仍可使用。迁移到数据库后才能逐条新建、编辑、删除和绑定 Proxy。
+      </p> : null}
+      {confirmEnvironment ? <div className="mih-agent-provider-confirm" role="alert">
+        <Warning size={18} aria-hidden="true" />
+        <div>
+          <strong>确认切回部署环境？</strong>
+          <p>切换会清除数据库保存的本类 Provider 密钥，之后由环境变量接管；数据库中的在线配置将不再提供服务。</p>
+        </div>
+        <button className="qp-button qp-button--ghost" type="button" disabled={busy} onClick={() => setConfirmEnvironment(false)}>取消</button>
+        <button className="qp-button qp-button--danger" type="button" disabled={busy} onClick={switchToEnvironment}>
+          {savingAction === 'environment' ? '正在切换' : '确认切回'}
+        </button>
+      </div> : null}
+      {error ? <div className="mih-agent-provider-error"><ErrorState error={error} /></div> : null}
       <ProviderTable
         providers={providers}
         kind={kind}
         revision={setting.revision}
         canTest={canEdit}
+        canManage={canEdit && databaseManaged}
         onTest={onTest}
         testingProvider={testingProvider}
         providerTests={providerTests}
         onReveal={onReveal}
+        onEdit={startEdit}
+        onDeleteRequest={(providerId) => { setPendingDelete(providerId); setEditor(null); setError(null) }}
+        onDeleteCancel={() => setPendingDelete(null)}
+        onDeleteConfirm={deleteProvider}
+        pendingDelete={pendingDelete}
+        savingAction={savingAction}
+        source={setting.source}
+        llmSequences={llmSequences}
       />
+      {migrationOpen ? <ProviderMigrationEditor
+        kind={kind}
+        providers={providers}
+        keys={migrationKeys}
+        busy={busy}
+        onChange={(providerId, apiKey) => setMigrationKeys((current) => ({ ...current, [providerId]: apiKey }))}
+        onCancel={() => { setMigrationOpen(false); setMigrationRevision(null); setMigrationKeys({}); setError(null) }}
+        onSubmit={migrateToDatabase}
+      /> : null}
+      {editor ? <ProviderEditor
+        kind={kind}
+        editor={editor}
+        proxySequences={proxySequences}
+        proxyEndpoints={proxyEndpoints}
+        setting={setting}
+        busy={savingAction === 'editor'}
+        headingRef={editorHeadingRef}
+        onChange={(patch) => setEditor((current) => ({
+          ...current,
+          draft: { ...current.draft, ...patch },
+        }))}
+        onCancel={() => { setEditor(null); setError(null) }}
+        onSubmit={saveEditor}
+      /> : null}
     </Panel>
   )
 }
@@ -3445,20 +3641,36 @@ function providerTestKey(kind, provider, revision) {
   ])
 }
 
-function ProviderTable({ providers, kind, revision, canTest, onTest, testingProvider, providerTests, onReveal }) {
+function ProviderTable({
+  providers, kind, revision, canTest, canManage, onTest, testingProvider, providerTests,
+  onReveal, onEdit, onDeleteRequest, onDeleteCancel, onDeleteConfirm,
+  pendingDelete, savingAction, source, llmSequences = [],
+}) {
+  const showActions = canTest || canManage
   return (
-    <DataTable label={`${kind === 'chat' ? '对话' : 'Embedding'} Provider 链`}>
-      <thead><tr><th>优先级</th><th>Provider</th><th>模型</th><th>Endpoint</th><th>状态</th><th>凭据</th><th>熔断</th>{canTest ? <th>连接测试</th> : null}</tr></thead>
+    <DataTable label={`${kind === 'chat' ? '对话' : 'Embedding'} Provider Catalog`}>
+      <thead><tr><th>优先级</th><th>Provider</th><th>模型</th><th>Endpoint</th><th>Proxy</th><th>状态</th><th>凭据</th><th>熔断</th>{showActions ? <th>操作</th> : null}</tr></thead>
       <tbody>
         {providers.map((provider, index) => {
           const testKey = providerTestKey(kind, provider, revision)
           const test = providerTests?.[testKey]
           const testDisabled = provider.authMode !== 'none' && !provider.keyConfigured
+          const deleting = pendingDelete === provider.id
+          const sequenceReferences = llmSequences.filter((sequence) => (
+            sequence.kind === kind && Array.isArray(sequence.providerIds) && sequence.providerIds.includes(provider.id)
+          ))
+          const deleteDisabled = sequenceReferences.length > 0 || (kind === 'embedding' && providers.length <= 1)
+          const deleteHint = sequenceReferences.length > 0
+            ? `先从 Sequence ${sequenceReferences.map((sequence) => sequence.displayName || sequence.sequenceKey).join('、')} 中移除`
+            : kind === 'embedding' && providers.length <= 1
+              ? 'Embedding Catalog 必须保留至少一个 Provider；可改为停用'
+              : ''
           return <tr key={provider.id}>
             <td><strong>{index === 0 ? '首选' : `降级 ${index}`}</strong><small>priority {provider.priority}</small></td>
             <td><strong>{provider.displayName || provider.id}</strong><small><code>{provider.id}</code></small></td>
             <td><code>{provider.model}</code><small>{provider.protocol || 'openai-compatible'}{kind === 'embedding' ? ` · ${provider.dimensions || '—'} dimensions` : ''}</small></td>
             <td><code>{provider.baseUrl || '—'}</code><small>{provider.timeoutMs ? `${provider.timeoutMs} ms` : 'timeout 未知'} · {provider.authMode || 'bearer'}</small></td>
+            <td><code>{provider.proxySequenceKey || '继承全局'}</code></td>
             <td><StatusBadge status={provider.enabled === false ? 'disabled' : 'active'} label={provider.enabled === false ? '停用' : '启用'} /></td>
             <td>{provider.authMode === 'none' ? (
               <StatusBadge status="active" label="无需密钥" />
@@ -3470,26 +3682,49 @@ function ProviderTable({ providers, kind, revision, canTest, onTest, testingProv
                 status={provider.circuit === 'closed' ? 'active' : provider.circuit === 'open' ? 'suspended' : 'pending'}
                 label={{ closed: '正常', degraded: '有失败', open: '已熔断' }[provider.circuit] || provider.circuit} />
             ) : '—'}</td>
-            {canTest ? <td>
-              <button
-                className="qp-button qp-button--outline"
-                type="button"
-                disabled={testDisabled || Boolean(testingProvider)}
-                onClick={() => onTest(kind, provider.id, testKey)}
-              >
-                <Plugs size={15} aria-hidden="true" />
-                {testingProvider === testKey ? '测试中' : '测试'}
-              </button>
-              {test ? <small>{test.ok ? `${test.latencyMs} ms · 成功` : '最近失败'}</small> : null}
-              {provider.authMode !== 'none' && provider.keyConfigured ? (
-                <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(testingProvider)} onClick={() => onReveal?.(provider)}>
-                  <Key size={15} aria-hidden="true" />查看 Key
+            {showActions ? <td><div className="mih-agent-provider-actions">
+              {canTest ? <>
+                <button
+                  className="qp-button qp-button--outline"
+                  type="button"
+                  disabled={testDisabled || Boolean(testingProvider) || Boolean(savingAction)}
+                  onClick={() => onTest(kind, provider.id, testKey)}
+                  aria-label={`测试 ${provider.displayName || provider.id} 连接`}
+                >
+                  <Plugs size={15} aria-hidden="true" />
+                  {testingProvider === testKey ? '测试中' : '测试'}
                 </button>
-              ) : null}
-            </td> : null}
+                {test ? <small role="status">{test.ok ? `${test.latencyMs} ms · 成功` : '最近失败'}</small> : null}
+                {source === 'database' && provider.authMode !== 'none' && provider.keyConfigured ? (
+                  <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(testingProvider) || Boolean(savingAction)} onClick={() => onReveal?.(provider)}>
+                    <Key size={15} aria-hidden="true" />查看 Key
+                  </button>
+                ) : null}
+              </> : null}
+              {canManage ? deleting ? <div className="mih-agent-provider-delete-confirm" role="group" aria-label={`确认删除 ${provider.displayName || provider.id}`}>
+                <button className="qp-button qp-button--danger" type="button"
+                  disabled={Boolean(savingAction)} onClick={() => onDeleteConfirm(provider.id)}>
+                  {savingAction === `delete:${provider.id}` ? '删除中' : '确认删除'}
+                </button>
+                <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(savingAction)} onClick={onDeleteCancel}>取消</button>
+              </div> : <>
+                {sequenceReferences.length > 0 ? <small className="mih-agent-provider-reference">
+                  被 {sequenceReferences.map((sequence) => sequence.displayName || sequence.sequenceKey).join('、')} 引用；请先移出 Sequence
+                </small> : null}
+                <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(savingAction)} onClick={() => onEdit(provider, index)}>
+                  <PencilSimple size={15} aria-hidden="true" />编辑
+                </button>
+                <button className="qp-button qp-button--ghost mih-agent-provider-delete" type="button"
+                  disabled={Boolean(savingAction) || deleteDisabled}
+                  title={deleteHint}
+                  onClick={() => onDeleteRequest(provider.id)}>
+                  <Trash size={15} aria-hidden="true" />删除
+                </button>
+              </> : null}
+            </div></td> : null}
           </tr>
         })}
-        {providers.length === 0 ? <tr><td colSpan={canTest ? 8 : 7} className="mih-agent-provider-empty">尚未配置 Provider</td></tr> : null}
+        {providers.length === 0 ? <tr><td colSpan={showActions ? 9 : 8} className="mih-agent-provider-empty">尚未配置 Provider</td></tr> : null}
       </tbody>
     </DataTable>
   )
@@ -3508,7 +3743,8 @@ function providerDraft(provider, index, kind) {
     enabled: provider.enabled !== false,
     priority: String(provider.priority ?? (index + 1) * 10),
     authMode: provider.authMode || 'bearer',
-    keyConfigured: provider.keyConfigured === true,
+    keyConfigured: provider.authMode !== 'none' && provider.keyConfigured === true,
+    originalId: String(provider.id || ''),
     originalBaseUrl: String(provider.baseUrl || ''),
     apiKey: '',
     clearKey: false,
@@ -3527,251 +3763,202 @@ function vectorSignatures(providers) {
     .sort()
 }
 
-function ProviderSettingsModal({ kind, setting, onClose, onSave, proxySequences = [] }) {
-  const initialProviders = useMemo(
-    () => setting.providers.map((provider, index) => providerDraft(provider, index, kind)),
-    [kind, setting],
-  )
-  const [providers, setProviders] = useState(initialProviders)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState(null)
-  const [targetSource, setTargetSource] = useState(setting.source === 'environment' ? 'database' : setting.source)
+function normalizeProviderDrafts(providers, { kind, setting, initialProviders }) {
+  if (providers.length > 32) throw new Error('每个 Catalog 最多可保存 32 个 Provider。')
+  const ids = providers.map((provider) => provider.id.trim())
+  if (ids.some((id) => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id))) {
+    throw new Error('Provider ID 必须以小写字母或数字开头，且只能包含小写字母、数字、点、下划线和连字符。')
+  }
+  if (new Set(ids).size !== ids.length) throw new Error('Provider ID 不能重复。')
+
+  if (kind === 'embedding' && initialProviders.length > 0) {
+    if (providers.length === 0) {
+      throw new Error('已有 Embedding Catalog 不能删除为空；如需暂停，请保留 Provider 并设为停用。')
+    }
+    if (JSON.stringify(vectorSignatures(initialProviders)) !== JSON.stringify(vectorSignatures(providers))) {
+      throw new Error('Embedding 模型或 dimensions 不能直接修改；请先完成受控 reindex 流程。')
+    }
+  }
+
+  const normalized = providers.map((provider) => {
+    const id = provider.id.trim()
+    const displayName = provider.displayName.trim() || id
+    const baseUrl = provider.baseUrl.trim()
+    const model = provider.model.trim()
+    const timeoutMs = Number(provider.timeoutMs)
+    const priority = Number(provider.priority)
+    const dimensions = Number(provider.dimensions)
+    const apiKey = provider.apiKey.trim()
+    if (!displayName || displayName.length > 120) throw new Error(`${id} 的显示名称不能为空且不能超过 120 个字符。`)
+    if (!baseUrl || !model) throw new Error(`${id} 必须填写 Base URL 和模型。`)
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 300_000) {
+      throw new Error(`${id} 的超时必须是 1000–300000 ms 的整数。`)
+    }
+    if (!Number.isInteger(priority) || priority < 0 || priority > 10_000) {
+      throw new Error(`${id} 的优先级必须是 0–10000 的整数。`)
+    }
+    if (kind === 'embedding' && (!Number.isInteger(dimensions) || dimensions < 1)) {
+      throw new Error(`${id} 的 Embedding 维度必须是正整数。`)
+    }
+    const sameCredentialIdentity = provider.keyConfigured && provider.originalId === id
+    if (setting.source === 'environment' && provider.enabled && provider.authMode === 'bearer' && !apiKey) {
+      throw new Error(`迁移 ${id} 时必须重新输入 API Key；浏览器不会读取环境变量密钥。`)
+    }
+    if (setting.source === 'database' && provider.enabled && provider.authMode === 'bearer'
+      && !sameCredentialIdentity && !apiKey && !provider.clearKey) {
+      throw new Error(`${id} 是新的凭据身份，启用前必须填写 API Key。`)
+    }
+    if (setting.source === 'database' && sameCredentialIdentity && provider.authMode === 'bearer'
+      && provider.baseUrl.trim() !== provider.originalBaseUrl && !apiKey && !provider.clearKey) {
+      throw new Error(`${id} 修改 Base URL 后必须重新输入 API Key，或明确清除旧密钥。`)
+    }
+    return {
+      id,
+      displayName,
+      baseUrl,
+      model,
+      protocol: kind === 'embedding' ? 'openai-compatible' : provider.protocol,
+      proxySequenceKey: provider.proxySequenceKey || null,
+      timeoutMs,
+      ...(kind === 'embedding' ? { dimensions } : {}),
+      enabled: provider.enabled,
+      priority,
+      authMode: provider.authMode,
+      ...(provider.authMode !== 'none' && provider.clearKey ? { clearApiKey: true } : {}),
+      ...(provider.authMode !== 'none' && !provider.clearKey && apiKey ? { apiKey } : {}),
+    }
+  })
+  normalized.sort((left, right) => left.priority - right.priority)
+  return normalized
+}
+
+function ProviderEditor({ kind, editor, proxySequences, proxyEndpoints, setting, busy, headingRef, onChange, onCancel, onSubmit }) {
+  const provider = editor.draft
   const isEmbedding = kind === 'embedding'
-  const initialVectorSignatures = isEmbedding ? vectorSignatures(initialProviders) : []
-  const nextVectorSignatures = isEmbedding ? vectorSignatures(providers) : []
-  const removedExistingEmbeddingChain = isEmbedding && initialProviders.length > 0 && providers.length === 0
-  const embeddingChanged = isEmbedding
-    && initialProviders.length > 0
-    && (removedExistingEmbeddingChain
-      || JSON.stringify(initialVectorSignatures) !== JSON.stringify(nextVectorSignatures))
-  const databaseTarget = targetSource === 'database'
-  const blockedEmbeddingChange = databaseTarget && embeddingChanged
-
-  const patchProvider = (index, patch) => {
-    setProviders((current) => current.map((provider, providerIndex) => (
-      providerIndex === index ? { ...provider, ...patch } : provider
-    )))
-    setError(null)
+  const headingId = `agent-provider-editor-${kind}`
+  const enabledProxyKeys = new Set(proxyEndpoints.filter((endpoint) => endpoint.enabled).map((endpoint) => endpoint.proxyKey))
+  const proxyOptions = [
+    { value: '', label: '继承全局 Proxy' },
+    ...proxySequences.map((sequence) => ({
+      value: sequence.sequenceKey,
+      label: sequence.displayName,
+      description: Array.isArray(sequence.proxyKeys) && sequence.proxyKeys.some((proxyKey) => enabledProxyKeys.has(proxyKey))
+        ? `${sequence.proxyKeys.filter((proxyKey) => enabledProxyKeys.has(proxyKey)).length} 个已启用 endpoint${sequence.directFallback ? ' + direct' : ''}`
+        : '没有已启用 endpoint，不能绑定',
+      disabled: sequence.enabled === false || !Array.isArray(sequence.proxyKeys)
+        || !sequence.proxyKeys.some((proxyKey) => enabledProxyKeys.has(proxyKey)),
+    })),
+  ]
+  if (provider.proxySequenceKey && !proxyOptions.some((option) => option.value === provider.proxySequenceKey)) {
+    proxyOptions.push({ value: provider.proxySequenceKey, label: `${provider.proxySequenceKey}（当前绑定）` })
   }
-
-  const addProvider = () => {
-    setProviders((current) => [...current, blankProvider(current.length, kind)])
-    setError(null)
-  }
-
-  const removeProvider = (index) => {
-    setProviders((current) => current.filter((_, providerIndex) => providerIndex !== index))
-    setError(null)
-  }
-
-  const changeTargetSource = (source) => {
-    setTargetSource(source)
-    if (source === 'environment') {
-      setProviders((current) => current.map((provider) => ({ ...provider, apiKey: '', clearKey: false })))
-    }
-    setError(null)
-  }
-
-  const submit = async (event) => {
-    event.preventDefault()
-    setError(null)
-    const normalized = []
-    if (databaseTarget) {
-      const ids = providers.map((provider) => provider.id.trim())
-      if (ids.some((id) => !id) || new Set(ids).size !== ids.length) {
-        setError(new Error('Provider ID 必须填写且不能重复。'))
-        return
-      }
-      if (setting.source === 'environment' && providers.some((provider) => (
-        provider.authMode === 'bearer' && !provider.apiKey.trim()
-      ))) {
-        setError(new Error('首次从环境变量迁移到数据库时，每个 Bearer Provider 都必须重新输入密钥。'))
-        return
-      }
-      const unsafeBaseUrlChange = providers.find((provider) => (
-        setting.source === 'database'
-        && provider.authMode === 'bearer'
-        && provider.keyConfigured
-        && provider.baseUrl.trim() !== provider.originalBaseUrl
-        && !provider.apiKey.trim()
-        && !provider.clearKey
-      ))
-      if (unsafeBaseUrlChange) {
-        setError(new Error(`${unsafeBaseUrlChange.id.trim() || 'Provider'} 修改 Base URL 后必须重新输入密钥，或明确清除旧密钥。`))
-        return
-      }
-      if (embeddingChanged) {
-        setError(new Error(removedExistingEmbeddingChain
-          ? '已有 Embedding 链不能删除为空；如需暂停，请保留原 Provider 条目并全部停用。'
-          : 'Embedding 模型或 dimensions 不能在此处直接修改；请先完成受控 reindex 流程。'))
-        return
-      }
-      for (const provider of providers) {
-        const timeoutMs = Number(provider.timeoutMs)
-        const priority = Number(provider.priority)
-        const dimensions = Number(provider.dimensions)
-        if (!provider.baseUrl.trim() || !provider.model.trim()) {
-          setError(new Error(`${provider.id.trim()} 必须填写 Base URL 和模型。`))
-          return
-        }
-        if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 300_000) {
-          setError(new Error(`${provider.id.trim()} 的超时必须是 1000–300000 ms 的整数。`))
-          return
-        }
-        if (!Number.isInteger(priority) || priority < 0 || priority > 10_000) {
-          setError(new Error(`${provider.id.trim()} 的优先级必须是 0–10000 的整数。`))
-          return
-        }
-        if (isEmbedding && (!Number.isInteger(dimensions) || dimensions < 1)) {
-          setError(new Error(`${provider.id.trim()} 的 Embedding 维度必须是正整数。`))
-          return
-        }
-        normalized.push({
-          id: provider.id.trim(),
-          displayName: provider.displayName.trim() || provider.id.trim(),
-          baseUrl: provider.baseUrl.trim(),
-          model: provider.model.trim(),
-          protocol: isEmbedding ? 'openai-compatible' : provider.protocol,
-          proxySequenceKey: provider.proxySequenceKey || null,
-          timeoutMs,
-          ...(isEmbedding ? { dimensions } : {}),
-          enabled: provider.enabled,
-          priority,
-          authMode: provider.authMode,
-          ...(provider.clearKey ? { clearApiKey: true } : {}),
-          ...(!provider.clearKey && provider.apiKey.trim() ? { apiKey: provider.apiKey.trim() } : {}),
-        })
-      }
-      normalized.sort((left, right) => left.priority - right.priority)
-    }
-
-    setSaving(true)
-    try {
-      await onSave({ source: targetSource, expectedRevision: setting.revision ?? null, providers: normalized })
-      setProviders((current) => current.map((provider) => ({ ...provider, apiKey: '', clearKey: false })))
-      onClose()
-    } catch (saveError) {
-      setProviders((current) => current.map((provider) => ({ ...provider, apiKey: '' })))
-      setError(saveError)
-    } finally {
-      setSaving(false)
-    }
-  }
-
   return (
-    <Modal
-      title={`编辑${kind === 'chat' ? '对话' : ' Embedding'} Provider`}
-      description={`当前来源：${setting.source} · Revision ${setting.revision ?? '—'}。保存使用 expectedRevision 防止覆盖并发修改。`}
-      size="xlarge"
-      onClose={onClose}
-      footer={<>
-        <button className="qp-button qp-button--ghost" type="button" onClick={onClose} disabled={saving}>取消</button>
-        <button className="qp-button qp-button--primary" type="submit" form={`agent-provider-${kind}`} disabled={saving || blockedEmbeddingChange}>
-          {saving ? '正在保存' : targetSource === 'environment' ? '切回环境变量' : '保存 Provider 链'}
-        </button>
-      </>}
-    >
-      <form id={`agent-provider-${kind}`} className="mih-agent-provider-form" onSubmit={submit}>
-        <DropdownField
-          label="目标配置来源"
-          className="mih-agent-source-choice"
-          hint="数据库配置可在线更新；环境变量由部署注入。"
-          value={targetSource}
-          onChange={changeTargetSource}
-          options={AGENT_CONFIG_SOURCE_OPTIONS}
-          disabled={saving}
-        />
-        {targetSource === 'environment' ? (
-          <div className="mih-inline-warning">
-            <Warning size={17} aria-hidden="true" />
-            切回后将读取部署环境中的 Provider 配置；本操作不会修改环境变量。环境配置有变化时仍需重新部署服务。
+    <section className="mih-agent-provider-editor mih-agent-provider-editor--inline" aria-labelledby={headingId}>
+      <header>
+        <div>
+          <h3 id={headingId} ref={headingRef} tabIndex="-1">
+            {editor.mode === 'create' ? `新建${isEmbedding ? ' Embedding' : ' Chat'} Provider` : `编辑 ${provider.displayName || provider.id}`}
+          </h3>
+          {provider.authMode === 'none' ? (
+            <StatusBadge status="active" label="无需密钥" />
+          ) : (
+            <StatusBadge status={provider.keyConfigured ? 'active' : 'suspended'} label={provider.keyConfigured ? '密钥已配置' : '需要密钥'} />
+          )}
+        </div>
+        <p>{setting.source === 'environment'
+          ? '保存后会将此 Catalog 切换为数据库管理。'
+          : '只编辑当前条目；保存时仍以 revision 保护整个 Catalog。'}</p>
+      </header>
+      <form id={`agent-provider-${kind}`} onSubmit={onSubmit}>
+        <div className="mih-agent-provider-editor__grid">
+          <Field label="Provider ID" hint={editor.mode === 'edit' ? '创建后不可修改；如需更名，请新建 Provider 并迁移 Sequence' : ''}>
+            <input className="qp-input" required maxLength="64" pattern="[a-z0-9][a-z0-9._-]{0,63}"
+              disabled={busy || editor.mode === 'edit'} value={provider.id} onChange={(event) => onChange({ id: event.target.value })} />
+          </Field>
+          <Field label="显示名称"><input className="qp-input" required maxLength="120" disabled={busy} value={provider.displayName} onChange={(event) => onChange({ displayName: event.target.value })} /></Field>
+          <Field label="模型"><input className="qp-input" required maxLength="200" disabled={busy} value={provider.model} onChange={(event) => onChange({ model: event.target.value })} /></Field>
+          {!isEmbedding ? <DropdownField label="调用协议" value={provider.protocol}
+            onChange={(protocol) => onChange({ protocol })} options={PROVIDER_PROTOCOL_OPTIONS} disabled={busy} /> : null}
+          <Field label="Base URL" className="mih-agent-provider-editor__wide" hint="修改后必须重新输入密钥或明确清除旧密钥">
+            <input className="qp-input" type="url" required disabled={busy} value={provider.baseUrl} placeholder="https://api.example.com/v1" onChange={(event) => onChange({ baseUrl: event.target.value })} />
+          </Field>
+          <Field label="超时（ms）"><input className="qp-input" type="number" min="1000" max="300000" step="1" required disabled={busy} value={provider.timeoutMs} onChange={(event) => onChange({ timeoutMs: event.target.value })} /></Field>
+          <Field label="优先级" hint="保存时按数值从小到大排序"><input className="qp-input" type="number" min="0" max="10000" step="1" required disabled={busy} value={provider.priority} onChange={(event) => onChange({ priority: event.target.value })} /></Field>
+          {isEmbedding ? <Field label="Dimensions" hint="改变向量空间前必须 reindex"><input className="qp-input" type="number" min="1" step="1" required disabled={busy} value={provider.dimensions} onChange={(event) => onChange({ dimensions: event.target.value })} /></Field> : null}
+          <DropdownField label="认证方式" value={provider.authMode}
+            onChange={(authMode) => onChange({ authMode, ...(authMode === 'none' ? { apiKey: '', clearKey: false } : {}) })}
+            options={PROVIDER_AUTH_OPTIONS} disabled={busy} />
+          <DropdownField label="Provider Proxy" hint="未指定时继承 Hub 全局 Proxy Sequence。" value={provider.proxySequenceKey}
+            onChange={(proxySequenceKey) => onChange({ proxySequenceKey })} options={proxyOptions} disabled={busy} />
+          <Field label="API Key" className="mih-agent-provider-editor__wide"
+            hint={setting.source === 'environment' && provider.authMode === 'bearer'
+              ? '迁移时必须重新输入；环境变量密钥不会进入浏览器'
+              : '始终不回显；留空保留当前密钥'}>
+            <input className="qp-input" type="password" autoComplete="new-password" maxLength="8192"
+              value={provider.apiKey} disabled={busy || provider.clearKey || provider.authMode === 'none'}
+              onChange={(event) => onChange({ apiKey: event.target.value })} />
+          </Field>
+        </div>
+        <footer>
+          <div className="mih-agent-provider-options">
+            <label><input type="checkbox" checked={provider.enabled} disabled={busy} onChange={(event) => onChange({ enabled: event.target.checked })} />启用 Provider</label>
+            {provider.authMode !== 'none' && provider.keyConfigured ? <label className="mih-agent-provider-clear">
+              <input type="checkbox" checked={provider.clearKey} disabled={busy}
+                onChange={(event) => onChange({ clearKey: event.target.checked, apiKey: '' })} />明确清除已保存密钥
+            </label> : null}
           </div>
-        ) : null}
-        {databaseTarget && setting.source === 'environment' ? (
-          <div className="mih-inline-warning">
-            <Key size={17} aria-hidden="true" />
-            当前仍在使用环境配置，说明自动导入未完成或已关闭。手动切换到数据库时，每个 Bearer Provider 都必须重新输入密钥；浏览器不会读取环境变量。
+          <div className="mih-page-actions">
+            <button className="qp-button qp-button--ghost" type="button" onClick={onCancel} disabled={busy}>取消</button>
+            <button className="qp-button qp-button--primary" type="submit" disabled={busy}>
+              {busy ? '正在保存' : editor.mode === 'create' ? '创建 Provider' : '保存修改'}
+            </button>
           </div>
-        ) : null}
-        {databaseTarget && isEmbedding ? (
-          <div className="mih-inline-warning">
-            <Warning size={17} aria-hidden="true" />
-            Embedding 模型与 dimensions 决定向量空间。修改前必须安排完整 reindex，不能直接复用已有向量。
-          </div>
-        ) : null}
-        {blockedEmbeddingChange ? (
-          <div className="mih-inline-warning">
-            <Warning size={17} aria-hidden="true" />
-            {removedExistingEmbeddingChain
-              ? '已有 Embedding 链不能删除为空。保存已禁用；如需暂停向量生成，请保留原 Provider 条目并全部设为停用。'
-              : '检测到既有 Embedding 模型或 dimensions 签名变化，保存已禁用。请通过受控 reindex 流程完成变更。'}
-          </div>
-        ) : null}
-        {error ? <ErrorState error={error} /> : null}
-        {databaseTarget ? <div className="mih-agent-provider-list">
-          {providers.map((provider, index) => (
-            <article className="mih-agent-provider-editor" key={index}>
-              <header>
-                <div>
-                  <span>{index === 0 ? '首选 Provider' : `降级 Provider ${index}`}</span>
-                  {provider.authMode === 'none' ? (
-                    <StatusBadge status="active" label="无需密钥" />
-                  ) : (
-                    <StatusBadge status={provider.keyConfigured ? 'active' : 'suspended'} label={provider.keyConfigured ? '密钥已配置' : '密钥缺失'} />
-                  )}
-                </div>
-                <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`删除 Provider ${index + 1}`} onClick={() => removeProvider(index)} disabled={saving}>
-                  <Trash size={17} aria-hidden="true" />
-                </button>
-              </header>
-              <div className="mih-agent-provider-editor__grid">
-                <Field label="Provider ID"><input className="qp-input" required maxLength="64" pattern="[a-z0-9][a-z0-9._-]{0,63}" value={provider.id} onChange={(event) => patchProvider(index, { id: event.target.value })} /></Field>
-                <Field label="显示名称"><input className="qp-input" required maxLength="120" value={provider.displayName} onChange={(event) => patchProvider(index, { displayName: event.target.value })} /></Field>
-                <Field label="模型"><input className="qp-input" required maxLength="200" value={provider.model} onChange={(event) => patchProvider(index, { model: event.target.value })} /></Field>
-                {!isEmbedding ? <DropdownField label="调用协议" value={provider.protocol}
-                  onChange={(protocol) => patchProvider(index, { protocol })} options={PROVIDER_PROTOCOL_OPTIONS} /> : null}
-                <Field label="Base URL" className="mih-agent-provider-editor__wide" hint="修改后必须重新输入密钥或明确清除旧密钥"><input className="qp-input" type="url" required value={provider.baseUrl} placeholder="https://api.example.com/v1" onChange={(event) => patchProvider(index, { baseUrl: event.target.value })} /></Field>
-                <Field label="超时（ms）"><input className="qp-input" type="number" min="1000" max="300000" step="1" required value={provider.timeoutMs} onChange={(event) => patchProvider(index, { timeoutMs: event.target.value })} /></Field>
-                <Field label="优先级" hint="保存时按数值从小到大排序"><input className="qp-input" type="number" min="0" max="10000" step="1" required value={provider.priority} onChange={(event) => patchProvider(index, { priority: event.target.value })} /></Field>
-                {isEmbedding ? <Field label="Dimensions" hint="改变后必须 reindex"><input className="qp-input" type="number" min="1" step="1" required value={provider.dimensions} onChange={(event) => patchProvider(index, { dimensions: event.target.value })} /></Field> : null}
-                <DropdownField label="认证方式" value={provider.authMode}
-                  onChange={(authMode) => patchProvider(index, { authMode })} options={PROVIDER_AUTH_OPTIONS} />
-                <DropdownField label="Provider Proxy" hint="未指定时继承 Hub 全局 Proxy Sequence。" value={provider.proxySequenceKey}
-                  onChange={(proxySequenceKey) => patchProvider(index, { proxySequenceKey })}
-                  options={[{ value: '', label: '继承全局 Proxy' }, ...proxySequences.map((sequence) => ({ value: sequence.sequenceKey, label: sequence.displayName }))]} />
-                <Field
-                  label="API Key"
-                  className="mih-agent-provider-editor__wide"
-                  hint={setting.source === 'environment' && provider.authMode === 'bearer'
-                    ? '必须重新输入；环境变量密钥不会自动迁移'
-                    : '始终不回显；留空保留现有密钥'}
-                >
-                  <input
-                    className="qp-input"
-                    type="password"
-                    autoComplete="new-password"
-                    maxLength="8192"
-                    value={provider.apiKey}
-                    disabled={provider.clearKey || provider.authMode === 'none'}
-                    onChange={(event) => patchProvider(index, { apiKey: event.target.value })}
-                  />
-                </Field>
-              </div>
-              <footer>
-                <label><input type="checkbox" checked={provider.enabled} onChange={(event) => patchProvider(index, { enabled: event.target.checked })} />启用 Provider</label>
-                <label className="mih-agent-provider-clear"><input type="checkbox" checked={provider.clearKey} onChange={(event) => patchProvider(index, { clearKey: event.target.checked, apiKey: '' })} />明确清除已保存密钥</label>
-              </footer>
-            </article>
-          ))}
-          {providers.length === 0 ? <p className="mih-agent-provider-empty">此链为空；保存后对应能力将保持确定性降级。</p> : null}
-        </div> : null}
-        {databaseTarget ? (
-          <button className="qp-button qp-button--outline" type="button" onClick={addProvider} disabled={saving}>
-            <Plus size={16} aria-hidden="true" />添加 Provider
-          </button>
-        ) : null}
+        </footer>
       </form>
-    </Modal>
+    </section>
+  )
+}
+
+function ProviderMigrationEditor({ kind, providers, keys, busy, onChange, onCancel, onSubmit }) {
+  const headingId = `agent-provider-migration-${kind}`
+  return (
+    <section className="mih-agent-provider-migration" aria-labelledby={headingId}>
+      <header>
+        <div>
+          <h3 id={headingId}>迁移到数据库管理</h3>
+          <p>Provider 元数据来自当前环境；这里只收集启用的 Bearer Provider 密钥，然后一次性切换，避免半迁移状态。</p>
+        </div>
+      </header>
+      <form onSubmit={onSubmit}>
+        <DataTable label={`${kind === 'chat' ? '对话' : 'Embedding'} Provider 迁移密钥`}>
+          <thead><tr><th>Provider</th><th>Endpoint / 模型</th><th>迁移凭据</th></tr></thead>
+          <tbody>{providers.map((provider) => {
+            const needsKey = provider.enabled !== false && provider.authMode !== 'none'
+            return <tr key={provider.id}>
+              <td><strong>{provider.displayName || provider.id}</strong><small><code>{provider.id}</code></small></td>
+              <td><code>{provider.baseUrl}</code><small>{provider.model}</small></td>
+              <td>{provider.authMode === 'none' ? <StatusBadge status="active" label="无需密钥" /> : (
+                <label className="mih-agent-provider-migration__key">
+                  <span>{needsKey ? 'API Key（必填）' : 'API Key（启用前填写）'}</span>
+                  <input className="qp-input" type="password" autoComplete="new-password" maxLength="8192"
+                    required={needsKey} disabled={busy} value={keys[provider.id] || ''}
+                    onChange={(event) => onChange(provider.id, event.target.value)} />
+                </label>
+              )}</td>
+            </tr>
+          })}</tbody>
+        </DataTable>
+        <div className="mih-agent-provider-migration__actions">
+          <p><Key size={16} aria-hidden="true" />保存后密钥不会再次在列表或普通接口中返回。</p>
+          <div className="mih-page-actions">
+            <button className="qp-button qp-button--ghost" type="button" onClick={onCancel} disabled={busy}>取消</button>
+            <button className="qp-button qp-button--primary" type="submit" disabled={busy}>
+              {busy ? '正在迁移' : '迁移并切换到数据库'}
+            </button>
+          </div>
+        </div>
+      </form>
+    </section>
   )
 }
 

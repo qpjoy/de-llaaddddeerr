@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
+import { AgentControlStore } from '../../server/agent/control-store.mjs'
 import { AgentRuntime } from '../../server/agent/runtime.mjs'
 import {
   AgentSettingsStore,
@@ -48,6 +49,9 @@ function databaseHarness() {
       ['chat', new Map()],
       ['embedding', new Map()],
     ]),
+    proxySequences: new Map(),
+    proxyEndpoints: new Map(),
+    proxyMigrationMissing: false,
     queries: [],
   }
 
@@ -74,6 +78,33 @@ function databaseHarness() {
     }
     if (text.startsWith('SELECT provider_id')) {
       return { rows: [...state.credentials.get(params[0]).keys()].map((provider_id) => ({ provider_id })) }
+    }
+    if (text.includes('FROM control.agent_proxy_sequences')) {
+      if (state.proxyMigrationMissing) {
+        const error = new Error('relation does not exist')
+        error.code = '42P01'
+        throw error
+      }
+      const requested = new Set(params[0] || [])
+      return {
+        rows: [...state.proxySequences.values()]
+          .filter((sequence) => requested.has(sequence.sequence_key))
+          .map((sequence) => structuredClone(sequence)),
+      }
+    }
+    if (text.includes('FROM control.agent_proxy_endpoints')) {
+      if (state.proxyMigrationMissing) {
+        const error = new Error('relation does not exist')
+        error.code = '42P01'
+        throw error
+      }
+      const requested = new Set(params[0] || [])
+      return {
+        rows: [...state.proxyEndpoints.values()]
+          .filter((endpoint) => requested.has(endpoint.proxy_key))
+          .filter((endpoint) => !text.includes('enabled = true') || endpoint.enabled)
+          .map((endpoint) => structuredClone(endpoint)),
+      }
     }
     if (text.startsWith('INSERT INTO control.agent_provider_settings') && (
       params.length === 1 || text.includes("VALUES ('embedding')")
@@ -144,6 +175,79 @@ function config(overrides = {}) {
   }
 }
 
+function proxyControlHarness({
+  endpointReferences = [],
+  globalSequenceKey = null,
+  providerSettings = [],
+} = {}) {
+  const state = {
+    endpoint: {
+      proxy_key: 'host-7890', display_name: 'Host 7890',
+      proxy_url: 'http://127.0.0.1:7890', enabled: true, revision: 2,
+      updated_by: 'admin-token', updated_at: '2026-08-28T00:00:00.000Z',
+    },
+    sequence: {
+      sequence_key: 'agent-egress', display_name: 'Agent egress',
+      proxy_keys: ['host-7890'], direct_fallback: false, enabled: true, revision: 3,
+      updated_by: 'admin-token', updated_at: '2026-08-28T00:00:00.000Z',
+    },
+    endpointReferences,
+    globalSequenceKey,
+    providerSettings,
+    deletedEndpoint: false,
+    deletedSequence: false,
+    queries: [],
+  }
+  const query = async (sql, params = []) => {
+    const text = sql.replace(/\s+/g, ' ').trim()
+    state.queries.push({ text, params })
+    if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK'
+      || text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+    if (text.includes('FROM control.agent_proxy_endpoints') && text.includes('FOR UPDATE')) {
+      return { rows: state.endpoint && !state.deletedEndpoint ? [structuredClone(state.endpoint)] : [] }
+    }
+    if (text.includes('FROM control.agent_proxy_endpoints') && text.includes('FOR SHARE')) {
+      return { rows: state.endpoint && !state.deletedEndpoint ? [structuredClone(state.endpoint)] : [] }
+    }
+    if (text.includes('FROM control.agent_proxy_sequences') && text.includes('$1 = ANY(proxy_keys)')) {
+      return { rows: state.endpointReferences.map((sequence_key) => ({ sequence_key })) }
+    }
+    if (text.startsWith('DELETE FROM control.agent_proxy_endpoints')) {
+      state.deletedEndpoint = true
+      return { rows: [structuredClone(state.endpoint)] }
+    }
+    if (text.includes('FROM control.agent_proxy_settings') && text.includes('FOR SHARE')) {
+      return { rows: [{ global_sequence_key: state.globalSequenceKey }] }
+    }
+    if (text.includes('FROM control.agent_proxy_sequences') && text.includes('FOR UPDATE')) {
+      return { rows: state.sequence && !state.deletedSequence ? [structuredClone(state.sequence)] : [] }
+    }
+    if (text.includes('FROM control.agent_provider_settings') && text.includes('FOR SHARE')) {
+      return { rows: structuredClone(state.providerSettings) }
+    }
+    if (text.startsWith('INSERT INTO control.agent_proxy_sequences')) {
+      state.sequence = {
+        ...state.sequence,
+        sequence_key: params[0],
+        display_name: params[1],
+        proxy_keys: params[2],
+        direct_fallback: params[3],
+        enabled: params[4],
+        revision: Number(state.sequence?.revision || 0) + 1,
+        updated_by: params[5],
+      }
+      return { rows: [structuredClone(state.sequence)] }
+    }
+    if (text.startsWith('DELETE FROM control.agent_proxy_sequences')) {
+      state.deletedSequence = true
+      return { rows: [structuredClone(state.sequence)] }
+    }
+    throw new Error(`Unhandled proxy control SQL in test harness: ${text}`)
+  }
+  const client = { query, release() {} }
+  return { state, store: new AgentControlStore({ async connect() { return client } }) }
+}
+
 test('migration 041 adds only isolated Agent control-plane state and no business writes', async () => {
   const sql = await readFile(new URL('../../migrations/041_agent_llm_control_plane.sql', import.meta.url), 'utf8')
   assert.match(sql, /CREATE TABLE IF NOT EXISTS control\.agent_llm_sequences/)
@@ -153,6 +257,321 @@ test('migration 041 adds only isolated Agent control-plane state and no business
   assert.doesNotMatch(sql, /INSERT INTO control\.agent_provider_settings/i)
   assert.doesNotMatch(sql, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:core|ingest)\./i)
   assert.doesNotMatch(sql, /ON DELETE CASCADE/i)
+})
+
+test('Proxy endpoint deletion enforces revision CAS and refuses Sequence references', async () => {
+  const referenced = proxyControlHarness({ endpointReferences: ['agent-egress', 'backup-egress'] })
+  await assert.rejects(
+    () => referenced.store.deleteProxyEndpoint('host-7890', { expectedRevision: 2 }),
+    (error) => error?.status === 409
+      && error?.code === 'agent_proxy_endpoint_in_use'
+      && error?.details?.sequenceKeys.join(',') === 'agent-egress,backup-egress',
+  )
+  assert.equal(referenced.state.deletedEndpoint, false)
+
+  const stale = proxyControlHarness()
+  await assert.rejects(
+    () => stale.store.deleteProxyEndpoint('host-7890', { expectedRevision: 1 }),
+    (error) => error?.status === 409
+      && error?.code === 'proxy_revision_conflict'
+      && error?.details?.currentRevision === 2,
+  )
+  assert.equal(stale.state.deletedEndpoint, false)
+
+  const available = proxyControlHarness()
+  const deleted = await available.store.deleteProxyEndpoint('host-7890', { expectedRevision: 2 })
+  assert.equal(deleted.proxyKey, 'host-7890')
+  assert.equal(deleted.revision, 2)
+  assert.equal(available.state.deletedEndpoint, true)
+  await assert.rejects(
+    () => available.store.deleteProxyEndpoint('host-7890', { expectedRevision: 2 }),
+    (error) => error?.status === 404 && error?.code === 'agent_proxy_endpoint_not_found',
+  )
+})
+
+test('Proxy endpoint cannot be disabled while any Sequence still references it', async () => {
+  const referenced = proxyControlHarness({ endpointReferences: ['agent-egress', 'backup-egress'] })
+  await assert.rejects(
+    () => referenced.store.saveProxyEndpoint('host-7890', {
+      expectedRevision: 2,
+      displayName: 'Host 7890',
+      proxyUrl: 'http://127.0.0.1:7890',
+      enabled: false,
+    }),
+    (error) => error?.status === 409
+      && error?.code === 'agent_proxy_endpoint_in_use'
+      && error?.details?.sequenceKeys.join(',') === 'agent-egress,backup-egress',
+  )
+  assert.equal(referenced.state.endpoint.enabled, true)
+})
+
+test('Proxy Sequence deletion refuses global and Provider bindings before deleting', async () => {
+  const global = proxyControlHarness({ globalSequenceKey: 'agent-egress' })
+  await assert.rejects(
+    () => global.store.deleteProxySequence('agent-egress', { expectedRevision: 3 }),
+    (error) => error?.status === 409
+      && error?.code === 'agent_proxy_sequence_in_use'
+      && error?.details?.global === true,
+  )
+  assert.equal(global.state.deletedSequence, false)
+
+  const providerBound = proxyControlHarness({
+    providerSettings: [{
+      kind: 'chat',
+      providers: [{ id: 'primary', proxySequenceKey: 'agent-egress' }],
+    }],
+  })
+  await assert.rejects(
+    () => providerBound.store.deleteProxySequence('agent-egress', { expectedRevision: 3 }),
+    (error) => error?.status === 409
+      && error?.code === 'agent_proxy_sequence_in_use'
+      && error?.details?.providers?.[0]?.providerId === 'primary',
+  )
+  assert.equal(providerBound.state.deletedSequence, false)
+
+  const available = proxyControlHarness()
+  const deleted = await available.store.deleteProxySequence('agent-egress', { expectedRevision: 3 })
+  assert.equal(deleted.sequenceKey, 'agent-egress')
+  assert.equal(deleted.revision, 3)
+  assert.equal(available.state.deletedSequence, true)
+  await assert.rejects(
+    () => available.store.deleteProxySequence('agent-egress', { expectedRevision: 3 }),
+    (error) => error?.status === 404 && error?.code === 'agent_proxy_sequence_not_found',
+  )
+})
+
+test('Proxy Sequence cannot transition from enabled to disabled while bound', async () => {
+  const disable = {
+    expectedRevision: 3,
+    displayName: 'Agent egress',
+    proxyKeys: ['host-7890'],
+    directFallback: false,
+    enabled: false,
+  }
+  const global = proxyControlHarness({ globalSequenceKey: 'agent-egress' })
+  await assert.rejects(
+    () => global.store.saveProxySequence('agent-egress', disable),
+    (error) => error?.status === 409
+      && error?.code === 'agent_proxy_sequence_in_use'
+      && error?.details?.global === true,
+  )
+  assert.equal(global.state.sequence.enabled, true)
+
+  const providerBound = proxyControlHarness({
+    providerSettings: [{
+      kind: 'chat',
+      providers: [{ id: 'primary', proxySequenceKey: 'agent-egress' }],
+    }],
+  })
+  await assert.rejects(
+    () => providerBound.store.saveProxySequence('agent-egress', disable),
+    (error) => error?.status === 409
+      && error?.code === 'agent_proxy_sequence_in_use'
+      && error?.details?.providers?.[0]?.providerId === 'primary',
+  )
+  assert.equal(providerBound.state.sequence.enabled, true)
+
+  const available = proxyControlHarness()
+  const saved = await available.store.saveProxySequence('agent-egress', disable)
+  assert.equal(saved.enabled, false)
+  assert.equal(saved.revision, 4)
+  const globalAdvisory = available.state.queries.findIndex(({ params }) => (
+    params[0] === 'mx-insight-agent:proxy-settings:global'
+  ))
+  const globalLock = available.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_proxy_settings') && text.includes('FOR SHARE')
+  ))
+  const providerLock = available.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_provider_settings') && text.includes('FOR SHARE')
+  ))
+  const sequenceAdvisory = available.state.queries.findIndex(({ params }) => (
+    params[0] === 'mx-insight-agent:proxy-sequence:agent-egress'
+  ))
+  const sequenceLock = available.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_proxy_sequences') && text.includes('FOR UPDATE')
+  ))
+  assert.ok(globalAdvisory >= 0 && globalAdvisory < globalLock)
+  assert.ok(globalLock < providerLock)
+  assert.ok(providerLock < sequenceAdvisory)
+  assert.ok(sequenceAdvisory < sequenceLock)
+})
+
+test('bootstrap refreshes only generated Sequences when the Provider catalog changes', async () => {
+  const queries = []
+  const client = {
+    async query(sql) {
+      queries.push(sql.replace(/\s+/g, ' ').trim())
+      return { rows: [] }
+    },
+    release() {},
+  }
+  const store = new AgentControlStore({ async connect() { return client } })
+  await store.ensureBootstrapSequence({
+    kind: 'chat', providerIds: ['primary', 'fallback'], providerRevision: 4,
+  })
+  const upsert = queries.find((query) => query.startsWith('INSERT INTO control.agent_llm_sequences'))
+  assert.match(upsert, /ON CONFLICT \(sequence_key\) DO UPDATE SET/)
+  assert.match(upsert, /provider_ids = EXCLUDED\.provider_ids/)
+  assert.match(upsert, /provider_revision = EXCLUDED\.provider_revision/)
+  assert.match(upsert, /revision = control\.agent_llm_sequences\.revision \+ 1/)
+  assert.match(upsert, /WHERE control\.agent_llm_sequences\.source = 'bootstrap'/)
+  assert.match(upsert, /IS DISTINCT FROM/)
+})
+
+test('Provider writes lock and validate Proxy Sequences in their persistence transaction', async () => {
+  const harness = databaseHarness()
+  harness.state.proxySequences.set('agent-egress', {
+    sequence_key: 'agent-egress', enabled: true, proxy_keys: ['host-7890'],
+  })
+  harness.state.proxyEndpoints.set('host-7890', {
+    proxy_key: 'host-7890', enabled: true,
+  })
+  const store = new AgentSettingsStore(harness.pool)
+  await store.updateSetting('chat', {
+    expectedRevision: 0,
+    source: 'database',
+    providers: [provider({ authMode: 'none', proxySequenceKey: 'agent-egress' })],
+  })
+  const providerLock = harness.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_provider_settings') && text.includes('FOR UPDATE')
+  ))
+  const proxyLock = harness.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_proxy_sequences') && text.includes('FOR SHARE')
+  ))
+  const endpointLock = harness.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_proxy_endpoints') && text.includes('FOR SHARE')
+  ))
+  const providerWrite = harness.state.queries.findIndex(({ text, params }) => (
+    text.startsWith('INSERT INTO control.agent_provider_settings') && params.length > 1
+  ))
+  assert.ok(providerLock >= 0 && providerLock < proxyLock)
+  assert.ok(proxyLock < endpointLock)
+  assert.ok(endpointLock < providerWrite)
+
+  const disabledEndpoint = databaseHarness()
+  disabledEndpoint.state.proxySequences.set('agent-egress', {
+    sequence_key: 'agent-egress', enabled: true, proxy_keys: ['host-7890'],
+  })
+  disabledEndpoint.state.proxyEndpoints.set('host-7890', {
+    proxy_key: 'host-7890', enabled: false,
+  })
+  await assert.rejects(
+    () => new AgentSettingsStore(disabledEndpoint.pool).updateSetting('chat', {
+      expectedRevision: 0,
+      source: 'database',
+      providers: [provider({ authMode: 'none', proxySequenceKey: 'agent-egress' })],
+    }),
+    (error) => error?.status === 400
+      && error?.code === 'invalid_provider_settings'
+      && /no enabled endpoint/.test(error?.message),
+  )
+  assert.equal(disabledEndpoint.state.settings.get('chat').revision, 0)
+
+  const missingMigration = databaseHarness()
+  missingMigration.state.proxyMigrationMissing = true
+  await assert.rejects(
+    () => new AgentSettingsStore(missingMigration.pool).updateSetting('chat', {
+      expectedRevision: 0,
+      source: 'database',
+      providers: [provider({ authMode: 'none', proxySequenceKey: 'agent-egress' })],
+    }),
+    (error) => error?.status === 503 && error?.code === 'agent_control_unavailable',
+  )
+  assert.equal(missingMigration.state.settings.get('chat').revision, 0)
+})
+
+test('Proxy Sequence pre-validation locks and requires an enabled endpoint', async () => {
+  const available = databaseHarness()
+  available.state.proxySequences.set('agent-egress', {
+    sequence_key: 'agent-egress', enabled: true, proxy_keys: ['host-7890'],
+  })
+  available.state.proxyEndpoints.set('host-7890', {
+    proxy_key: 'host-7890', enabled: true,
+  })
+  await new AgentControlStore(available.pool).validateProxySequenceKeys(['agent-egress'])
+  const sequenceLock = available.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_proxy_sequences') && text.includes('FOR SHARE')
+  ))
+  const endpointLock = available.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_proxy_endpoints') && text.includes('FOR SHARE')
+  ))
+  assert.ok(sequenceLock >= 0 && sequenceLock < endpointLock)
+
+  const disabled = databaseHarness()
+  disabled.state.proxySequences.set('agent-egress', {
+    sequence_key: 'agent-egress', enabled: true, proxy_keys: ['host-7890'],
+  })
+  disabled.state.proxyEndpoints.set('host-7890', {
+    proxy_key: 'host-7890', enabled: false,
+  })
+  await assert.rejects(
+    () => new AgentControlStore(disabled.pool).validateProxySequenceKeys(['agent-egress']),
+    (error) => error?.status === 400
+      && error?.code === 'invalid_provider_settings'
+      && /no enabled endpoint/.test(error?.message),
+  )
+})
+
+test('new Proxy Sequences and global bindings require a real endpoint', async () => {
+  const pool = { async connect() { throw new Error('validation should happen before connecting') } }
+  const store = new AgentControlStore(pool)
+  await assert.rejects(
+    () => store.saveProxySequence('direct-only', {
+      expectedRevision: 0,
+      displayName: 'Direct only',
+      proxyKeys: [],
+      directFallback: true,
+      enabled: true,
+    }),
+    (error) => error?.status === 400 && error?.code === 'invalid_agent_proxy',
+  )
+
+  const globalClient = {
+    async query(sql) {
+      const text = sql.replace(/\s+/g, ' ').trim()
+      if (text === 'BEGIN' || text === 'ROLLBACK'
+        || text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text.includes('FROM control.agent_proxy_settings') && text.includes('FOR UPDATE')) {
+        return { rows: [{ revision: 0 }] }
+      }
+      if (text.includes('FROM control.agent_proxy_sequences') && text.includes('FOR SHARE')) {
+        return { rows: [{ enabled: true, proxy_keys: [] }] }
+      }
+      throw new Error(`Unhandled global Proxy test SQL: ${text}`)
+    },
+    release() {},
+  }
+  await assert.rejects(
+    () => new AgentControlStore({ async connect() { return globalClient } })
+      .setGlobalProxySequence('direct-only', { expectedRevision: 0 }),
+    (error) => error?.status === 400 && error?.code === 'invalid_agent_proxy',
+  )
+
+  const disabledEndpointClient = {
+    async query(sql) {
+      const text = sql.replace(/\s+/g, ' ').trim()
+      if (text === 'BEGIN' || text === 'ROLLBACK'
+        || text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text.includes('FROM control.agent_proxy_settings') && text.includes('FOR UPDATE')) {
+        return { rows: [{ revision: 0 }] }
+      }
+      if (text.includes('FROM control.agent_proxy_sequences') && text.includes('FOR SHARE')) {
+        return { rows: [{ sequence_key: 'disabled-route', enabled: true, proxy_keys: ['host-7890'] }] }
+      }
+      if (text.includes('FROM control.agent_proxy_endpoints') && text.includes('FOR SHARE')) {
+        return { rows: [] }
+      }
+      throw new Error(`Unhandled disabled endpoint binding SQL: ${text}`)
+    },
+    release() {},
+  }
+  await assert.rejects(
+    () => new AgentControlStore({ async connect() { return disabledEndpointClient } })
+      .setGlobalProxySequence('disabled-route', { expectedRevision: 0 }),
+    (error) => error?.status === 400
+      && error?.code === 'invalid_agent_proxy'
+      && /no enabled endpoint/.test(error?.message),
+  )
 })
 
 test('database provider validation rejects credential exfiltration URLs and unknown fields', async () => {
@@ -488,6 +907,126 @@ test('AgentRuntime routes the global Sequence and keeps legacy catalog fallback 
   assert.equal(fallback.provider, 'catalog-first')
   assert.equal(fallback.sequenceKey, null)
   assert.deepEqual(seen, ['sequence-only.invalid', 'catalog-first.invalid'])
+  runtime.close()
+})
+
+test('an explicitly bound Proxy Sequence with no enabled endpoint fails closed', async () => {
+  let fetchCalls = 0
+  const settingsStore = {
+    async loadSetting(kind) {
+      return kind === 'chat'
+        ? row('chat', {
+            source: 'database', revision: 1,
+            providers: [provider({ authMode: 'none' })],
+          })
+        : row('embedding')
+    },
+    async loadCredentialsInternal() { return new Map() },
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot() {
+      return {
+        sequences: [], defaultBinding: null,
+        proxyEndpoints: [{
+          proxyKey: 'host-7890', displayName: 'Host 7890',
+          proxyUrl: 'http://127.0.0.1:7890', enabled: false, revision: 2,
+        }],
+        proxySequences: [{
+          sequenceKey: 'agent-egress', displayName: 'Agent egress',
+          proxyKeys: ['host-7890'], directFallback: true, enabled: true, revision: 3,
+        }],
+        globalProxySequenceKey: 'agent-egress',
+        proxyRevision: 1,
+      }
+    },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore,
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    fetchImpl: async () => {
+      fetchCalls += 1
+      throw new Error('direct transport must not be attempted')
+    },
+  }).start()
+
+  await assert.rejects(
+    () => runtime.complete([{ role: 'user', content: 'hello' }]),
+    (error) => error?.status === 503
+      && error?.code === 'agent_providers_unavailable'
+      && error?.attempts?.[0]?.error === 'transport failure',
+  )
+  assert.equal(fetchCalls, 0)
+  runtime.close()
+})
+
+test('Sequence say-hi refreshes current state and enforces Sequence revision CAS', async () => {
+  let failReads = false
+  let fetchCalls = 0
+  const snapshot = {
+    sequences: [{
+      sequenceKey: 'say-hi', displayName: 'Say hi', kind: 'chat',
+      providerIds: ['primary'], enabled: true, source: 'database',
+      providerRevision: 1, revision: 2,
+    }],
+    defaultBinding: null,
+    proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0,
+  }
+  const settingsStore = {
+    async loadSetting(kind) {
+      if (failReads) throw new Error('database unavailable')
+      return kind === 'chat'
+        ? row('chat', {
+            source: 'database', revision: 1,
+            providers: [provider({ authMode: 'none' })],
+          })
+        : row('embedding')
+    },
+    async loadCredentialsInternal() { return new Map() },
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot() {
+      if (failReads) throw new Error('database unavailable')
+      return snapshot
+    },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore,
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    fetchImpl: async () => {
+      fetchCalls += 1
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'Hi from the current Sequence.' } }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  }).start()
+
+  await assert.rejects(
+    () => runtime.testSequence('say-hi', { kind: 'chat', expectedRevision: 1 }),
+    (error) => error?.status === 409
+      && error?.code === 'sequence_revision_conflict'
+      && error?.details?.currentRevision === 2,
+  )
+  assert.equal(fetchCalls, 0)
+  const passed = await runtime.testSequence('say-hi', { kind: 'chat', expectedRevision: 2 })
+  assert.equal(passed.sample, 'Hi from the current Sequence.')
+  assert.equal(fetchCalls, 1)
+
+  failReads = true
+  await assert.rejects(
+    () => runtime.testSequence('say-hi', { kind: 'chat', expectedRevision: 2 }),
+    (error) => error?.status === 503 && error?.code === 'agent_settings_refresh_failed',
+  )
+  assert.equal(fetchCalls, 1, 'a failed refresh must not test the last-known-good router')
   runtime.close()
 })
 
@@ -875,6 +1414,141 @@ test('post-commit refresh failure disables a modified active LLM Sequence', asyn
   })
   assert.equal(result.runtimeApplied, false)
   assert.deepEqual(runtime.status().chat, [])
+  runtime.close()
+})
+
+test('post-delete refresh failure fails managed Agent capabilities closed', async (t) => {
+  for (const operation of ['endpoint', 'sequence']) {
+    await t.test(operation, async () => {
+      let failControlReads = false
+      const snapshot = {
+        sequences: [], defaultBinding: null,
+        proxyEndpoints: [{
+          proxyKey: 'host-7890', displayName: 'Host 7890',
+          proxyUrl: 'http://127.0.0.1:7890', enabled: true, revision: 1,
+        }],
+        proxySequences: [{
+          sequenceKey: 'agent-egress', displayName: 'Agent egress',
+          proxyKeys: ['host-7890'], directFallback: true, enabled: true, revision: 1,
+        }],
+        globalProxySequenceKey: null,
+        proxyRevision: 0,
+      }
+      const controlStore = {
+        async ensureBootstrapSequence() {},
+        async loadRuntimeSnapshot() {
+          if (failControlReads) throw new Error('control snapshot unavailable after delete')
+          return snapshot
+        },
+        async deleteProxyEndpoint(key, input) {
+          assert.equal(key, 'host-7890')
+          assert.deepEqual(input, { expectedRevision: 1 })
+          failControlReads = true
+          return snapshot.proxyEndpoints[0]
+        },
+        async deleteProxySequence(key, input) {
+          assert.equal(key, 'agent-egress')
+          assert.deepEqual(input, { expectedRevision: 1 })
+          failControlReads = true
+          return snapshot.proxySequences[0]
+        },
+      }
+      const settingsStore = {
+        async loadSetting(kind) {
+          return kind === 'chat'
+            ? row('chat', {
+                source: 'database', revision: 1,
+                providers: [provider({ authMode: 'none' })],
+              })
+            : row('embedding')
+        },
+        async loadCredentialsInternal() { return new Map() },
+      }
+      const runtime = await new AgentRuntime({
+        config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+        settingsStore,
+        controlStore,
+        managedKinds: ['chat'],
+        logger: quiet,
+        refreshIntervalMs: 0,
+      }).start()
+      assert.equal(runtime.status().chat.length, 1)
+
+      const result = operation === 'endpoint'
+        ? await runtime.deleteProxyEndpoint('host-7890', { expectedRevision: 1 })
+        : await runtime.deleteProxySequence('agent-egress', { expectedRevision: 1 })
+      assert.equal(result.runtimeApplied, false)
+      assert.deepEqual(runtime.status().chat, [])
+      runtime.close()
+    })
+  }
+})
+
+test('Proxy Sequence deletion and disabling refuse an environment Provider reference', async () => {
+  let deleteCalls = 0
+  let saveCalls = 0
+  const snapshot = {
+    sequences: [], defaultBinding: null,
+    proxyEndpoints: [{
+      proxyKey: 'host-7890', displayName: 'Host 7890',
+      proxyUrl: 'http://127.0.0.1:7890', enabled: true, revision: 1,
+    }],
+    proxySequences: [{
+      sequenceKey: 'agent-egress', displayName: 'Agent egress',
+      proxyKeys: ['host-7890'], directFallback: false, enabled: true, revision: 1,
+    }],
+    globalProxySequenceKey: null,
+    proxyRevision: 0,
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot() { return snapshot },
+    async deleteProxySequence() { deleteCalls += 1 },
+    async saveProxySequence() { saveCalls += 1 },
+  }
+  const settingsStore = {
+    async loadSetting(kind) { return row(kind) },
+    async loadCredentialsInternal() { return new Map() },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({
+      agent: {
+        chatProviders: JSON.stringify([provider({
+          authMode: 'none',
+          proxySequenceKey: 'agent-egress',
+        })]),
+        embeddingProviders: null,
+        autoMigrate: false,
+      },
+    }),
+    settingsStore,
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+  }).start()
+
+  await assert.rejects(
+    () => runtime.saveProxySequence('agent-egress', {
+      expectedRevision: 1,
+      displayName: 'Agent egress',
+      proxyKeys: ['host-7890'],
+      directFallback: false,
+      enabled: false,
+    }),
+    (error) => error?.status === 409
+      && error?.code === 'agent_proxy_sequence_in_use'
+      && error?.details?.providers?.[0]?.providerId === 'primary',
+  )
+  assert.equal(saveCalls, 0)
+
+  await assert.rejects(
+    () => runtime.deleteProxySequence('agent-egress', { expectedRevision: 1 }),
+    (error) => error?.status === 409
+      && error?.code === 'agent_proxy_sequence_in_use'
+      && error?.details?.providers?.[0]?.providerId === 'primary',
+  )
+  assert.equal(deleteCalls, 0)
   runtime.close()
 })
 
@@ -1298,6 +1972,86 @@ test('admin provider PUT returns only the safe setting shape', async () => {
     )
     assert.equal(deferred.status, 202)
     assert.equal((await deferred.json()).data.runtimeApplied, false)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('Proxy DELETE routes require the admin token and preserve deferred runtime status', async () => {
+  const calls = []
+  const agent = {
+    available: true,
+    status: () => ({ chat: [], embeddings: [], embeddingDimensions: null, settings: {} }),
+    async testSequence(sequenceKey, body) {
+      calls.push({ type: 'say-hi', sequenceKey, body })
+      return { ok: true, sequenceKey }
+    },
+    async deleteProxyEndpoint(proxyKey, body) {
+      calls.push({ type: 'endpoint', proxyKey, body })
+      return { proxyKey, revision: body.expectedRevision, runtimeApplied: true }
+    },
+    async deleteProxySequence(sequenceKey, body) {
+      calls.push({ type: 'sequence', sequenceKey, body })
+      return { sequenceKey, revision: body.expectedRevision, runtimeApplied: false }
+    },
+  }
+  const app = createApp({
+    service: {},
+    store: { async ping() { return true } },
+    adapter: { async dependencies() { return { status: 'up' } } },
+    agent,
+    adminToken: 'admin-token-for-proxy-delete',
+    logger: quiet,
+  })
+  const server = createServer(app)
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const root = `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/proxies`
+    const sayHi = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/sequences/say-hi/test`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-mx-insight-admin-token': 'admin-token-for-proxy-delete',
+        },
+        body: JSON.stringify({ kind: 'chat', expectedRevision: 7 }),
+      },
+    )
+    assert.equal(sayHi.status, 200)
+    const denied = await fetch(`${root}/endpoints/host-7890`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: 2 }),
+    })
+    assert.equal(denied.status, 401)
+    assert.equal(calls.length, 1)
+
+    const endpoint = await fetch(`${root}/endpoints/host-7890`, {
+      method: 'DELETE',
+      headers: {
+        'content-type': 'application/json',
+        'x-mx-insight-admin-token': 'admin-token-for-proxy-delete',
+      },
+      body: JSON.stringify({ expectedRevision: 2 }),
+    })
+    assert.equal(endpoint.status, 200)
+
+    const sequence = await fetch(`${root}/sequences/agent-egress`, {
+      method: 'DELETE',
+      headers: {
+        'content-type': 'application/json',
+        'x-mx-insight-admin-token': 'admin-token-for-proxy-delete',
+      },
+      body: JSON.stringify({ expectedRevision: 3 }),
+    })
+    assert.equal(sequence.status, 202)
+    assert.equal((await sequence.json()).data.runtimeApplied, false)
+    assert.deepEqual(calls, [
+      { type: 'say-hi', sequenceKey: 'say-hi', body: { kind: 'chat', expectedRevision: 7 } },
+      { type: 'endpoint', proxyKey: 'host-7890', body: { expectedRevision: 2 } },
+      { type: 'sequence', sequenceKey: 'agent-egress', body: { expectedRevision: 3 } },
+    ])
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }

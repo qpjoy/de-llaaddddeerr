@@ -516,7 +516,10 @@ export function DropdownField({
                   onClick={() => selectOption(option)}
                 >
                   <Check className="qp-dropdown__check mih-combobox-option__check" size={13} weight="bold" aria-hidden="true" />
-                  <span>{option.label}</span>
+                  <span className="mih-combobox-option__copy">
+                    <span>{option.label}</span>
+                    {option.description ? <small>{option.description}</small> : null}
+                  </span>
                 </button>
               ))}
               {!visibleOptions.some((option) => !option.group) ? <p className="qp-dropdown__empty mih-search-select__empty">没有匹配项</p> : null}

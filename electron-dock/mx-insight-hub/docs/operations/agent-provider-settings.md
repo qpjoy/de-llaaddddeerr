@@ -25,13 +25,16 @@ catalog 顺序工作，因此迁移失败不会影响登录、readiness 或已�
 1. **LLM Provider**：保存多个账号、模型和调用协议。Chat 支持 OpenAI-compatible
    （OpenAI、DeepSeek、Kimi 等兼容接口）及 Anthropic Messages；Embedding 只允许
    OpenAI-compatible。Anthropic 的 temperature 上限为 1；Agent Market Trace 会同时
-   显示请求值与实际下发值。
+   显示请求值与实际下发值。Chat/Embedding 分别以页面内 Catalog 表格管理；新建和编辑
+   只展开当前 Provider 的内联表单，不再用整条 Catalog 的弹窗。
 2. **LLM Sequence**：把已保存 Provider 按顺序组成可复用服务。保存和设为全局默认前
    会逐个执行精确连接测试；至少包含一个 Provider。`say hi` 会走完整 Sequence，展示
-   实际响应的 Provider、模型和延迟。
+   实际响应的 Provider、模型和延迟。存在未保存修改时，按钮会先用 CAS 保存当前草稿，
+   再强制刷新并测试同一 revision，避免测试旧链；手动测试可作为已打开熔断器的恢复探测。
 3. **LLM Proxy**：维护无凭据的 HTTP/HTTPS Proxy endpoint 和有序 Proxy Sequence。
    Provider 指定的 Proxy Sequence 优先于 Hub 全局值；链中代理仅在 transport 失败时
-   尝试下一个，是否最后直连由显式开关决定。
+   尝试下一个，是否最后直连由显式开关决定。endpoint 和 Sequence 都支持页面内
+   新建、编辑、删除；全局绑定与逐 Provider 绑定独立显示。
 4. **Agent Market**：进阶搜索教学 demo。可选具体 LLM Sequence；不选择时使用全局默认。
 5. **原中心 Agent**：保留既有 pipeline、断言和处理边界，迁移期间不改变业务开关。
 
@@ -55,14 +58,19 @@ bash scripts/manage.sh deploy
 然后用 **Hub admin token** 登录管理台，打开「Agent 中心」：
 
 1. 在 LLM Provider 确认自动导入结果，或新建 Provider。Base URL 必须是 API 根地址；
-   Anthropic 使用 `https://api.anthropic.com/v1`，不要填写 `/messages`。
+   Anthropic 使用 `https://api.anthropic.com/v1`，不要填写 `/messages`。被 LLM Sequence
+   引用的 Provider 不能删除，必须先从对应 Sequence 移除。
 2. 逐个执行连接测试。测试只访问选中的 Provider；已停用但凭据完整的候选也可隔离测试。
-3. 在 LLM Sequence 拖动 Provider 手柄组成顺序，执行「验证并保存」或「保存并设为默认」。
-4. Agent Market 可显式选择一个 Chat Sequence 做 dry-run；其他旧消费者自动读取对应能力的
+3. 如需代理，先在 LLM Proxy 新建 endpoint，再把它加入至少一个 Proxy Sequence，随后在
+   独立绑定区设为 Hub 全局默认或 Provider 专属出口。仅创建 endpoint 并不会让模型请求使用它。
+4. 在 LLM Sequence 拖动 Provider 手柄组成顺序，执行「验证并保存」或「保存并设为默认」。
+   `say hi` 报 `transport failure` 时先看页面显示的当前配置路由；若已绑定的 Proxy Sequence
+   没有已启用 endpoint，请求会 fail closed，不会绕过代理直连。把 endpoint 加入链并启用后再测。
+5. Agent Market 可显式选择一个 Chat Sequence 做 dry-run；其他旧消费者自动读取对应能力的
    全局 binding。自动生成的 bootstrap Sequence 因 Provider revision 变化而过期时，
    旧消费者临时回到 catalog 顺序；管理员保存过的自定义默认和 Agent Market 的显式
    选择都会 fail closed，避免悄悄扩大或改写已验证顺序。
-5. Admin API 立即刷新；projector 和 classifier 最迟在下一个轮询周期采用同一数据库
+6. Admin API 立即刷新；projector 和 classifier 最迟在下一个轮询周期采用同一数据库
    revision，无需修改 `.env` 或重启。
 
 正常保存返回 `200`，表示当前 Admin API 已采用新 revision。若数据库提交已经成功、
@@ -132,6 +140,12 @@ Proxy URL 不保存账号密码，也不接受 query、fragment 或 path。当�
 Provider 专属 Proxy Sequence → Hub 全局 Proxy Sequence → 直连（仅当链允许）。代理切换
 只处理 DNS、连接、TLS、timeout 等 transport 失败；上游 HTTP 401/403/404/429/5xx
 仍按 LLM Sequence 的 Provider fallback 规则处理，避免同一 Provider 经多个代理重复计费。
+
+新建或重新绑定的 Proxy Sequence 至少需要一个已启用 endpoint；只需要直连时应清除
+全局/Provider 绑定，而不是保存空链。历史空链仍可在界面中查看、修复或删除，但不能再次
+设为全局或 Provider 绑定。删除使用 revision CAS，且 endpoint 被任一 Proxy Sequence 引用、
+或 Proxy Sequence 被全局/任一 Provider 引用时返回 `409`，不会级联修改现有出口策略。
+同样地，已被全局或 Provider 引用的 Proxy Sequence 不能直接停用；必须先解除绑定。
 
 内部 K8s 的 Admin API、classifier 和 projector 使用 `hostNetwork`，所以
 `http://127.0.0.1:7890` 指向节点上的代理。Compose 不共享宿主网络，应填写

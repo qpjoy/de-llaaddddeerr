@@ -297,7 +297,7 @@ export class ProviderRouter {
   }
 
   /** Call an ordered subset while sharing the catalog router's circuit state. */
-  async callSequence(providerIds, path, buildBody, { signal, validatePayload } = {}) {
+  async callSequence(providerIds, path, buildBody, { signal, validatePayload, ignoreCircuit = false } = {}) {
     if (!Array.isArray(providerIds) || providerIds.length === 0) {
       throw new AppError(503, 'agent_sequence_unavailable', 'The selected LLM Sequence has no providers')
     }
@@ -306,7 +306,7 @@ export class ProviderRouter {
     if (providers.some((provider) => !provider)) {
       throw new AppError(503, 'agent_sequence_unavailable', 'The selected LLM Sequence references an unavailable provider')
     }
-    return this.#callProviders(providers, path, buildBody, { signal, validatePayload })
+    return this.#callProviders(providers, path, buildBody, { signal, validatePayload, ignoreCircuit })
   }
 
   /** Probe exactly one saved provider without silently succeeding on fallback. */

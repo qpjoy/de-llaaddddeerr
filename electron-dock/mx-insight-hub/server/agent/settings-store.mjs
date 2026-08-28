@@ -459,6 +459,57 @@ export class AgentSettingsStore {
         })
       }
 
+      // Keep Provider → Proxy Sequence binding validation in the same
+      // transaction as the Provider write. deleteProxySequence takes the
+      // complementary Provider FOR SHARE lock before deleting the Sequence,
+      // so validation and persistence cannot be split by a concurrent DELETE.
+      const proxySequenceKeys = source === 'database'
+        ? [...new Set(normalized.map(({ provider }) => provider.proxySequenceKey).filter(Boolean))]
+        : []
+      if (proxySequenceKeys.length > 0) {
+        let proxySequences
+        let enabledProxyEndpoints
+        try {
+          proxySequences = await client.query(
+            `SELECT sequence_key, enabled, proxy_keys
+               FROM control.agent_proxy_sequences
+              WHERE sequence_key = ANY($1::text[])
+              FOR SHARE`,
+            [proxySequenceKeys],
+          )
+          const proxyKeys = [...new Set(proxySequences.rows.flatMap((sequence) => (
+            Array.isArray(sequence.proxy_keys) ? sequence.proxy_keys : []
+          )))]
+          enabledProxyEndpoints = proxyKeys.length > 0
+            ? await client.query(
+                `SELECT proxy_key
+                   FROM control.agent_proxy_endpoints
+                  WHERE enabled = true
+                    AND proxy_key = ANY($1::text[])
+                  FOR SHARE`,
+                [proxyKeys],
+              )
+            : { rows: [] }
+        } catch (error) {
+          if (error?.code === '42P01' || error?.code === '3F000') {
+            throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require the Agent control migration')
+          }
+          throw error
+        }
+        const available = new Map(proxySequences.rows.map((sequence) => [sequence.sequence_key, sequence]))
+        const enabledKeys = new Set(enabledProxyEndpoints.rows.map((endpoint) => endpoint.proxy_key))
+        for (const sequenceKey of proxySequenceKeys) {
+          const sequence = available.get(sequenceKey)
+          if (!sequence || sequence.enabled === false || !Array.isArray(sequence.proxy_keys)
+            || sequence.proxy_keys.length === 0) {
+            invalid(`Proxy Sequence ${sequenceKey} is missing, disabled, or contains no endpoints`)
+          }
+          if (!sequence.proxy_keys.some((proxyKey) => enabledKeys.has(proxyKey))) {
+            invalid(`Proxy Sequence ${sequenceKey} has no enabled endpoint`)
+          }
+        }
+      }
+
       const activeEmbedding = kind === 'embedding' && source === 'database'
         ? normalized.filter(({ provider }) => provider.enabled)
         : []

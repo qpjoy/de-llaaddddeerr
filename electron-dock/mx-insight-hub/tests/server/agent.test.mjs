@@ -468,6 +468,39 @@ test('a repeatedly failing provider is skipped instead of timing out every reque
   assert.equal(router.status()[0].circuit, 'open')
 })
 
+test('a manual Sequence probe can recover an open circuit without changing production routing', async () => {
+  let healthy = false
+  let calls = 0
+  const router = new ProviderRouter({
+    providers: providers('primary'),
+    logger: quiet,
+    fetchImpl: async () => {
+      calls += 1
+      return healthy ? jsonResponse(chatReply('recovered')) : jsonResponse({}, 503)
+    },
+  })
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await assert.rejects(() => router.callSequence(
+      ['primary'], '/chat/completions', (provider) => ({ model: provider.model }),
+    ))
+  }
+  healthy = true
+  await assert.rejects(
+    () => router.callSequence(['primary'], '/chat/completions', () => ({})),
+    (error) => error.attempts?.[0]?.error === 'circuit open',
+  )
+  assert.equal(calls, 3, 'normal traffic still skips the open circuit')
+
+  const recovered = await router.callSequence(
+    ['primary'], '/chat/completions', (provider) => ({ model: provider.model }),
+    { ignoreCircuit: true },
+  )
+  assert.equal(recovered.provider, 'primary')
+  assert.equal(calls, 4)
+  assert.equal(router.status()[0].circuit, 'closed')
+})
+
 // ---------------------------------------------------------------------------
 // Embeddings
 // ---------------------------------------------------------------------------

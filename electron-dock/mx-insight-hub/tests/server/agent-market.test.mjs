@@ -27,11 +27,11 @@ test('Agent Market binds native dragging only to explicit handles', async () => 
 
   const center = await readFile(new URL('../../src/pages-agent-center.tsx', import.meta.url), 'utf8')
   assert.doesNotMatch(center, /<article[^>]*(?:draggable|onDragStart)=/u)
-  assert.match(center, /className="mih-sequence-drag-handle" draggable=\{canEdit\}/u)
+  assert.match(center, /className="mih-sequence-drag-handle" draggable=\{canEdit && !busy\}/u)
   assert.equal(
-    [...center.matchAll(/className="mih-sequence-drag-handle" draggable=\{canEdit\}/gu)].length,
+    [...center.matchAll(/className="mih-sequence-drag-handle" draggable=\{canEdit && !busy\}/gu)].length,
     2,
-    'Provider and Proxy palettes each expose one explicit handle implementation',
+    'Provider and Proxy palettes each expose one explicit handle implementation that is disabled while busy',
   )
   assert.match(center, /application\/x-mx-insight-provider/u)
   assert.match(center, /application\/x-mx-insight-proxy/u)

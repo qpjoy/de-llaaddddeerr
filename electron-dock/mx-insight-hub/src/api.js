@@ -463,10 +463,10 @@ export const adminApi = {
     `${ADMIN_ROOT}/agent/sequences/${encodeURIComponent(sequenceKey)}`,
     { method: 'PUT', body },
   ),
-  testAgentSequence: (token, sequenceKey, kind) => request(
+  testAgentSequence: (token, sequenceKey, kind, expectedRevision) => request(
     token,
     `${ADMIN_ROOT}/agent/sequences/${encodeURIComponent(sequenceKey)}/test`,
-    { method: 'POST', body: { kind } },
+    { method: 'POST', body: { kind, expectedRevision } },
   ),
   setDefaultAgentSequence: (token, sequenceKey, body) => request(
     token,
@@ -478,10 +478,20 @@ export const adminApi = {
     `${ADMIN_ROOT}/agent/proxies/endpoints/${encodeURIComponent(proxyKey)}`,
     { method: 'PUT', body },
   ),
+  deleteAgentProxyEndpoint: (token, proxyKey, expectedRevision) => request(
+    token,
+    `${ADMIN_ROOT}/agent/proxies/endpoints/${encodeURIComponent(proxyKey)}`,
+    { method: 'DELETE', body: { expectedRevision } },
+  ),
   saveAgentProxySequence: (token, sequenceKey, body) => request(
     token,
     `${ADMIN_ROOT}/agent/proxies/sequences/${encodeURIComponent(sequenceKey)}`,
     { method: 'PUT', body },
+  ),
+  deleteAgentProxySequence: (token, sequenceKey, expectedRevision) => request(
+    token,
+    `${ADMIN_ROOT}/agent/proxies/sequences/${encodeURIComponent(sequenceKey)}`,
+    { method: 'DELETE', body: { expectedRevision } },
   ),
   setDefaultAgentProxySequence: (token, body) => request(
     token,

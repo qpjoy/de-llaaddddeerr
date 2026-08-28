@@ -122,6 +122,7 @@ export class HubAgent {
     signal,
     providerIds = null,
     sequenceKey = null,
+    ignoreCircuit = false,
   } = {}) {
     const call = providerIds
       ? this.chat.callSequence.bind(this.chat, providerIds)
@@ -131,7 +132,7 @@ export class HubAgent {
       messages,
       temperature,
       max_tokens: maxTokens,
-    }), { signal, validatePayload: validateChatResponse })
+    }), { signal, validatePayload: validateChatResponse, ignoreCircuit })
     return {
       ...result,
       sequenceKey,
@@ -320,13 +321,13 @@ If none fit, use {"category": "unknown", "confidence": 0}.`,
   }
 
   /** Embed a batch of texts. Throws when unavailable: there is no fallback for a vector. */
-  async embed(texts, { signal, providerIds = null, sequenceKey = null } = {}) {
+  async embed(texts, { signal, providerIds = null, sequenceKey = null, ignoreCircuit = false } = {}) {
     if (!this.embeddings?.available) {
       throw new AppError(503, 'embeddings_not_configured', 'No embedding provider is configured')
     }
     const result = providerIds
-      ? await this.embeddings.embedSequence(providerIds, texts, { signal })
-      : await this.embeddings.embed(texts, { signal })
+      ? await this.embeddings.embedSequence(providerIds, texts, { signal, ignoreCircuit })
+      : await this.embeddings.embed(texts, { signal, ignoreCircuit })
     return { ...result, sequenceKey }
   }
 

@@ -390,7 +390,11 @@ export class AgentRuntime {
           : provider
       }
       const proxyUrls = sequence.proxyKeys.flatMap((key) => endpoints.has(key) ? [endpoints.get(key)] : [])
-      if (proxyUrls.length === 0 && !sequence.directFallback) {
+      // A bound chain is an explicit egress policy. `directFallback` applies
+      // only after at least one enabled proxy route was actually attempted;
+      // an empty/fully-disabled chain must never turn into an accidental direct
+      // route merely because the historical row still carries that flag.
+      if (proxyUrls.length === 0) {
         return { ...provider, proxyUrls: [], directFallback: false }
       }
       return { ...provider, proxyUrls, directFallback: sequence.directFallback }
@@ -859,15 +863,37 @@ export class AgentRuntime {
     return tests
   }
 
-  async testSequence(sequenceKey, { kind, signal } = {}) {
+  async testSequence(sequenceKey, { kind, expectedRevision, signal } = {}) {
     if (!['chat', 'embedding'].includes(kind)) {
       throw new AppError(400, 'invalid_provider_kind', 'kind must be chat or embedding')
+    }
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new AppError(400, 'invalid_agent_sequence', 'expectedRevision must be a non-negative integer')
+    }
+    if (!await this.refresh({ force: true })) {
+      throw new AppError(503, 'agent_settings_refresh_failed', 'Current Agent settings could not be loaded; Sequence test was not run')
+    }
+    const currentSequence = this.#control.get(kind)?.sequences
+      ?.find((candidate) => candidate.sequenceKey === sequenceKey)
+    if (!currentSequence) {
+      throw new AppError(404, 'agent_sequence_not_found', 'The LLM Sequence was not found')
+    }
+    if (currentSequence.revision !== expectedRevision) {
+      throw new AppError(409, 'sequence_revision_conflict', 'LLM Sequence changed; reload and retry', {
+        currentRevision: currentSequence.revision,
+      })
     }
     const sequence = this.#resolveSequence(kind, sequenceKey, { explicit: true })
     if (kind === 'chat') {
       const result = await this.complete([
         { role: 'user', content: 'Say hi in one short sentence.' },
-      ], { temperature: 0, maxTokens: 32, signal, sequenceKey: sequence.sequenceKey })
+      ], {
+        temperature: 0,
+        maxTokens: 32,
+        signal,
+        sequenceKey: sequence.sequenceKey,
+        ignoreCircuit: true,
+      })
       return {
         ok: true,
         kind,
@@ -884,6 +910,7 @@ export class AgentRuntime {
       const result = await this.embed(['MX Insight Hub LLM Sequence connectivity test'], {
         signal,
         sequenceKey: sequence.sequenceKey,
+        ignoreCircuit: true,
       })
       return {
         ok: true,
@@ -907,12 +934,69 @@ export class AgentRuntime {
     return { ...saved, runtimeApplied }
   }
 
+  async deleteProxyEndpoint(proxyKey, input) {
+    if (!this.controlStore) throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require PostgreSQL')
+    const deleted = await this.controlStore.deleteProxyEndpoint(proxyKey, input)
+    const runtimeApplied = await this.refresh({ force: true })
+    if (!runtimeApplied) this.#disableManagedKinds()
+    return { ...deleted, runtimeApplied }
+  }
+
+  #environmentProxyReferences(sequenceKey) {
+    return [...this.#settings.entries()].flatMap(([kind, setting]) => (
+      setting?.source === 'environment'
+        ? (setting.providers || [])
+            .filter((provider) => provider.proxySequenceKey === sequenceKey)
+            .map((provider) => ({ kind, providerId: provider.id }))
+        : []
+    ))
+  }
+
   async saveProxySequence(sequenceKey, input, { updatedBy = 'admin-token' } = {}) {
     if (!this.controlStore) throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require PostgreSQL')
+    if (input?.enabled === false) {
+      if (!await this.refresh({ force: true })) {
+        throw new AppError(503, 'agent_settings_refresh_failed', 'Current Agent settings could not be loaded; Proxy Sequence was not disabled')
+      }
+      const current = [...this.#control.values()]
+        .flatMap((control) => control?.proxySequences || [])
+        .find((sequence) => sequence.sequenceKey === sequenceKey)
+      if (current?.enabled === true) {
+        const environmentReferences = this.#environmentProxyReferences(sequenceKey)
+        if (environmentReferences.length > 0) {
+          throw new AppError(
+            409,
+            'agent_proxy_sequence_in_use',
+            'Remove the Proxy Sequence from every environment Provider before disabling it',
+            { global: false, providers: environmentReferences },
+          )
+        }
+      }
+    }
     const saved = await this.controlStore.saveProxySequence(sequenceKey, input, { updatedBy })
     const runtimeApplied = await this.refresh({ force: true })
     if (!runtimeApplied) this.#disableManagedKinds()
     return { ...saved, runtimeApplied }
+  }
+
+  async deleteProxySequence(sequenceKey, input) {
+    if (!this.controlStore) throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require PostgreSQL')
+    if (!await this.refresh({ force: true })) {
+      throw new AppError(503, 'agent_settings_refresh_failed', 'Current Agent settings could not be loaded; Proxy Sequence was not deleted')
+    }
+    const environmentReferences = this.#environmentProxyReferences(sequenceKey)
+    if (environmentReferences.length > 0) {
+      throw new AppError(
+        409,
+        'agent_proxy_sequence_in_use',
+        'Remove the Proxy Sequence from every environment Provider before deleting it',
+        { global: false, providers: environmentReferences },
+      )
+    }
+    const deleted = await this.controlStore.deleteProxySequence(sequenceKey, input)
+    const runtimeApplied = await this.refresh({ force: true })
+    if (!runtimeApplied) this.#disableManagedKinds()
+    return { ...deleted, runtimeApplied }
   }
 
   async setGlobalProxySequence(sequenceKey, input, { updatedBy = 'admin-token' } = {}) {
