@@ -473,6 +473,11 @@ export const adminApi = {
     `${ADMIN_ROOT}/agent/sequences/${encodeURIComponent(sequenceKey)}/default`,
     { method: 'PUT', body },
   ),
+  clearDefaultAgentSequence: (token, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent/sequences/default`,
+    { method: 'PUT', body },
+  ),
   saveAgentProxyEndpoint: (token, proxyKey, body) => request(
     token,
     `${ADMIN_ROOT}/agent/proxies/endpoints/${encodeURIComponent(proxyKey)}`,

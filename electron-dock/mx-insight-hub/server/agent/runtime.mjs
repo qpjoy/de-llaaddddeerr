@@ -193,8 +193,8 @@ export class AgentRuntime {
       },
       credentials: { chat: new Map(), embedding: new Map() },
       control: {
-        chat: { sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0 },
-        embedding: { sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0 },
+        chat: { controlAvailable: false, sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0 },
+        embedding: { controlAvailable: false, sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0 },
       },
     })
   }
@@ -245,7 +245,7 @@ export class AgentRuntime {
               providerIds,
               providerRevision: setting?.revision ?? 0,
             }).catch((error) => {
-              this.logger?.warn?.(`[agent] default ${kind} Sequence bootstrap failed (${error.message}); using catalog order`)
+              this.logger?.warn?.(`[agent] compatibility ${kind} Sequence bootstrap failed (${error.message})`)
             })
           }
         }
@@ -345,6 +345,7 @@ export class AgentRuntime {
       loadKind('embedding'),
     ])
     const emptyControl = {
+      controlAvailable: false,
       sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
       globalProxySequenceKey: null, proxyRevision: 0,
     }
@@ -561,13 +562,34 @@ export class AgentRuntime {
   }
 
   get embeddings() {
-    return this.#agent?.embeddings
+    const embeddings = this.#agent?.embeddings
+    if (!embeddings?.available) return embeddings
+    try {
+      this.#resolveSequence('embedding')
+      return embeddings
+    } catch (error) {
+      if (error?.code !== 'agent_sequence_unavailable') throw error
+      // Keep exact Provider/Sequence probes available through the private
+      // runtime router, while ordinary embedding consumers see that no governed
+      // default service is currently usable.
+      return { available: false, dimensions: embeddings.dimensions }
+    }
   }
 
-  #resolveSequence(kind, requestedKey = null, { explicit = false } = {}) {
+  #resolveSequence(kind, requestedKey = null) {
     const control = this.#control.get(kind)
     const sequenceKey = requestedKey || control?.defaultBinding?.sequenceKey || null
-    if (!sequenceKey) return null
+    if (!sequenceKey) {
+      // Only an older runtime without the control migration may preserve the
+      // legacy ordered catalog. Once governance is available, the absence of an
+      // explicit default is itself a fail-closed routing decision.
+      if (control?.controlAvailable === false) return null
+      throw new AppError(
+        503,
+        'agent_sequence_unavailable',
+        'No default LLM Sequence is configured for this capability',
+      )
+    }
     const sequence = control?.sequences?.find((candidate) => candidate.sequenceKey === sequenceKey)
     const setting = this.#settings.get(kind)
     const enabledIds = new Set(
@@ -580,27 +602,17 @@ export class AgentRuntime {
       && sequence.providerIds.length > 0
       && sequence.providerIds.every((providerId) => enabledIds.has(providerId))
     if (!valid) {
-      const customDefault = !explicit
-        && Boolean(control?.defaultBinding)
-        && sequence?.source !== 'bootstrap'
-      if (explicit || customDefault) {
-        throw new AppError(
-          503,
-          'agent_sequence_unavailable',
-          'The selected LLM Sequence is missing, stale, disabled, or references an unavailable Provider',
-        )
-      }
-      // A generated bootstrap chain preserves the legacy catalog fallback
-      // during migration. Once an operator saves a custom Sequence it fails
-      // closed instead of silently widening or reordering that selection.
-      return null
+      throw new AppError(
+        503,
+        'agent_sequence_unavailable',
+        'The selected LLM Sequence is missing, stale, disabled, or references an unavailable Provider',
+      )
     }
     return sequence
   }
 
   complete(messages, options = {}) {
-    const explicit = typeof options.sequenceKey === 'string' && options.sequenceKey.length > 0
-    const sequence = this.#resolveSequence('chat', options.sequenceKey, { explicit })
+    const sequence = this.#resolveSequence('chat', options.sequenceKey)
     return this.#agent.complete(messages, {
       ...options,
       providerIds: sequence?.providerIds || null,
@@ -636,8 +648,7 @@ export class AgentRuntime {
   }
 
   embed(texts, options = {}) {
-    const explicit = typeof options.sequenceKey === 'string' && options.sequenceKey.length > 0
-    const sequence = this.#resolveSequence('embedding', options.sequenceKey, { explicit })
+    const sequence = this.#resolveSequence('embedding', options.sequenceKey)
     return this.#agent.embed(texts, {
       ...options,
       providerIds: sequence?.providerIds || null,
@@ -837,6 +848,22 @@ export class AgentRuntime {
     return { binding, sequence: verified, runtimeApplied }
   }
 
+  async clearDefaultSequence(kind, input, { updatedBy = 'admin-token' } = {}) {
+    if (!this.controlStore) {
+      throw new AppError(503, 'agent_control_unavailable', 'LLM Sequence settings require PostgreSQL')
+    }
+    if (!this.managedKinds.has(kind)) {
+      throw new AppError(503, 'agent_control_unavailable', `This runtime does not manage ${kind} providers`)
+    }
+    const binding = await this.controlStore.setDefaultSequence(kind, null, {
+      expectedRevision: input?.expectedRevision,
+      updatedBy,
+    })
+    const runtimeApplied = await this.refresh({ force: true })
+    if (!runtimeApplied) this.#disableKind(kind, this.#settings.get(kind))
+    return { binding, runtimeApplied }
+  }
+
   async #ensureProvidersVerified(kind, providerIds) {
     const settingsRevision = this.#settings.get(kind)?.revision ?? 0
     const proxyFingerprint = proxyControlFingerprint(this.#control.get(kind))
@@ -883,7 +910,7 @@ export class AgentRuntime {
         currentRevision: currentSequence.revision,
       })
     }
-    const sequence = this.#resolveSequence(kind, sequenceKey, { explicit: true })
+    const sequence = this.#resolveSequence(kind, sequenceKey)
     if (kind === 'chat') {
       const result = await this.complete([
         { role: 'user', content: 'Say hi in one short sentence.' },

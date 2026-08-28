@@ -5,8 +5,10 @@ HanLP、Hub Agent 和向量检索是三条独立链路。HanLP 安装成功只�
 
 Agent 中心是 Hub 内部模型能力的唯一管理入口。Agent Market、文件字段建议、固定省份
 分析、在线语义检索和 embedding projector 都继续调用同一个 `AgentRuntime` 兼容门面；
-业务代码不读取 Key，也不各自实现 fallback。未配置新控制面时，运行时仍按旧 Provider
-catalog 顺序工作，因此迁移失败不会影响登录、readiness 或已有确定性降级。
+业务代码不读取 Key，也不各自实现 fallback。Provider Catalog 只是账号目录，第一条记录
+不会成为系统默认；只有显式绑定的 LLM Sequence 才能承接未指定 Sequence 的模型调用。
+若控制面 migration 尚未可用，滚动部署窗口才临时保留旧 Catalog 顺序兼容；正常控制面
+可用但未设置默认时，通用模型调用 fail closed，拥有确定性降级的旧消费者继续降级。
 
 | 消费者 | 能力 | 当前边界 |
 | --- | --- | --- |
@@ -26,16 +28,20 @@ catalog 顺序工作，因此迁移失败不会影响登录、readiness 或已�
    （OpenAI、DeepSeek、Kimi 等兼容接口）及 Anthropic Messages；Embedding 只允许
    OpenAI-compatible。Anthropic 的 temperature 上限为 1；Agent Market Trace 会同时
    显示请求值与实际下发值。Chat/Embedding 分别以页面内 Catalog 表格管理；新建和编辑
-   只展开当前 Provider 的内联表单，不再用整条 Catalog 的弹窗。
-2. **LLM Sequence**：把已保存 Provider 按顺序组成可复用服务。保存和设为全局默认前
+   只展开当前 Provider 的内联表单，不再用整条 Catalog 的弹窗。Catalog 顺序只用于
+   目录管理；即使只有一个 Provider，也应通过仅含一项的 Sequence 提供服务。
+2. **LLM Sequence**：把已保存 Provider 按顺序组成可复用服务。保存和设为业务默认前
    会逐个执行精确连接测试；至少包含一个 Provider。`say hi` 会走完整 Sequence，展示
    实际响应的 Provider、模型和延迟。存在未保存修改时，按钮会先用 CAS 保存当前草稿，
    再强制刷新并测试同一 revision，避免测试旧链；手动测试可作为已打开熔断器的恢复探测。
+   创建或保存记录不会自动设置默认；Chat 与 Embedding 的业务默认都可显式设置或清除。
 3. **LLM Proxy**：维护无凭据的 HTTP/HTTPS Proxy endpoint 和有序 Proxy Sequence。
    Provider 指定的 Proxy Sequence 优先于 Hub 全局值；链中代理仅在 transport 失败时
-   尝试下一个，是否最后直连由显式开关决定。endpoint 和 Sequence 都支持页面内
-   新建、编辑、删除；全局绑定与逐 Provider 绑定独立显示。
-4. **Agent Market**：进阶搜索教学 demo。可选具体 LLM Sequence；不选择时使用全局默认。
+   尝试下一个，是否最后使用系统出网由显式开关决定。Proxy 整体可不配置：Hub 全局和
+   Provider 都未绑定时，Node 请求使用容器的系统出网。endpoint 和 Sequence 都支持
+   页面内新建、编辑、删除；全局绑定与逐 Provider 绑定独立显示。
+4. **Agent Market**：进阶搜索教学 demo。可选具体 LLM Sequence；不选择时只使用显式的
+   Chat 业务默认。若未设置可用默认，模型阶段确定性降级，不会偷选第一条记录。
 5. **原中心 Agent**：保留既有 pipeline、断言和处理边界，迁移期间不改变业务开关。
 
 ## 第一次启用
@@ -50,7 +56,10 @@ bash scripts/manage.sh deploy
 
 部署启动后，`MX_INSIGHT_AGENT_AUTO_MIGRATE=1` 会尝试把现有
 `MX_INSIGHT_AGENT_PROVIDERS` / `MX_INSIGHT_EMBEDDING_PROVIDERS` 及其引用的环境 Key
-原样导入 PostgreSQL，并生成 `mx-default-chat` / `mx-default-embedding` 与全局 binding。
+原样导入 PostgreSQL，并生成未绑定的 `mx-default-chat` / `mx-default-embedding` 兼容
+Sequence 候选；它们不会自动成为业务默认。migration 042 只会把旧版本以
+`environment-bootstrap` 创建的精确默认绑定改成带 revision 的空 tombstone；管理员曾
+显式设置的默认保持不变。
 导入是幂等竞争安全的：多个 API/worker 同时启动只有一个 revision 获胜。旧配置包含
 数据库策略不接受的 URL、ID 或缺失 Key 时会跳过导入并继续使用环境 catalog，不阻断
 进程启动。
@@ -61,15 +70,16 @@ bash scripts/manage.sh deploy
    Anthropic 使用 `https://api.anthropic.com/v1`，不要填写 `/messages`。被 LLM Sequence
    引用的 Provider 不能删除，必须先从对应 Sequence 移除。
 2. 逐个执行连接测试。测试只访问选中的 Provider；已停用但凭据完整的候选也可隔离测试。
-3. 如需代理，先在 LLM Proxy 新建 endpoint，再把它加入至少一个 Proxy Sequence，随后在
-   独立绑定区设为 Hub 全局默认或 Provider 专属出口。仅创建 endpoint 并不会让模型请求使用它。
-4. 在 LLM Sequence 拖动 Provider 手柄组成顺序，执行「验证并保存」或「保存并设为默认」。
+3. Proxy 是可选项。不需要应用级代理时保持 Hub 全局和 Provider 未绑定，此时请求走容器
+   的系统出网；如需代理，再新建 endpoint、加入 Proxy Sequence，并显式绑定为 Hub 全局
+   或 Provider 专属出口。仅创建第一条 endpoint/Sequence 不会改变任何请求路径。
+4. 在 LLM Sequence 拖动 Provider 手柄组成顺序，执行「验证并保存」或「保存并设为业务默认」。
+   只保存记录不会改变业务默认；默认可以随时显式清除。
    `say hi` 报 `transport failure` 时先看页面显示的当前配置路由；若已绑定的 Proxy Sequence
-   没有已启用 endpoint，请求会 fail closed，不会绕过代理直连。把 endpoint 加入链并启用后再测。
-5. Agent Market 可显式选择一个 Chat Sequence 做 dry-run；其他旧消费者自动读取对应能力的
-   全局 binding。自动生成的 bootstrap Sequence 因 Provider revision 变化而过期时，
-   旧消费者临时回到 catalog 顺序；管理员保存过的自定义默认和 Agent Market 的显式
-   选择都会 fail closed，避免悄悄扩大或改写已验证顺序。
+   没有已启用 endpoint，请求会 fail closed，不会绕过代理使用系统出网。把 endpoint 加入链并启用后再测。
+5. Agent Market 可显式选择一个 Chat Sequence 做 dry-run；保留空项时只读取 Chat 业务
+   默认。正常控制面没有默认、默认过期或显式选择过期时都不会回到 Catalog 顺序：
+   Agent Market 的模型阶段确定性降级，通用调用 fail closed，避免悄悄扩大或改写顺序。
 6. Admin API 立即刷新；projector 和 classifier 最迟在下一个轮询周期采用同一数据库
    revision，无需修改 `.env` 或重启。
 
@@ -98,7 +108,7 @@ URL 或任意环境变量名。
   dispatch 限制，不是 provider RPM/TPM、日 token 或费用预算。
 - 每条任务先跑本地规则，只有省份证据缺失或冲突时调用 Chat provider；模型只收到
   有界语义投影，不收到整行 raw。
-- enabled providers 按 priority 尝试。transport/timeout、无效 JSON、401/403/404、
+- enabled providers 按显式业务默认 Sequence 的顺序尝试。transport/timeout、无效 JSON、401/403/404、
   429 和 5xx 会 fallback；普通 4xx 不 fallback。
 - 每个 provider 默认 timeout 60 秒，可设 1–300 秒；连续 3 次失败后在当前进程熔断
   60 秒。API 与 classifier 各有 process-local circuit，管理页看到的 API circuit 不能
@@ -136,12 +146,14 @@ HTTP、userinfo、localhost 和 IP literal，但 DNS 名称仍可能解析到内
 
 ## Proxy 与 K8s
 
-Proxy URL 不保存账号密码，也不接受 query、fragment 或 path。当前优先级为：
-Provider 专属 Proxy Sequence → Hub 全局 Proxy Sequence → 直连（仅当链允许）。代理切换
+Proxy URL 不保存账号密码，也不接受 query、fragment 或 path。应用级代理优先级为：
+Provider 专属 Proxy Sequence → Hub 全局 Proxy Sequence。两者都未绑定时，请求不附加
+应用 Proxy dispatcher，使用 Node/容器的系统出网；若已绑定代理链，则只有该链明确打开
+`directFallback` 时，所有代理 transport 失败后才回到系统出网。代理切换
 只处理 DNS、连接、TLS、timeout 等 transport 失败；上游 HTTP 401/403/404/429/5xx
 仍按 LLM Sequence 的 Provider fallback 规则处理，避免同一 Provider 经多个代理重复计费。
 
-新建或重新绑定的 Proxy Sequence 至少需要一个已启用 endpoint；只需要直连时应清除
+新建或重新绑定的 Proxy Sequence 至少需要一个已启用 endpoint；只需要系统出网时应清除
 全局/Provider 绑定，而不是保存空链。历史空链仍可在界面中查看、修复或删除，但不能再次
 设为全局或 Provider 绑定。删除使用 revision CAS，且 endpoint 被任一 Proxy Sequence 引用、
 或 Proxy Sequence 被全局/任一 Provider 引用时返回 `409`，不会级联修改现有出口策略。
@@ -159,8 +171,10 @@ Kubernetes 对 `hostNetwork` Pod 与 `podSelector` / `namespaceSelector` 的匹�
 
 Proxy 配置只影响 LLM HTTP 出口，不修改 Docker daemon 的代理、Pod DNS、Launcher、
 WireGuard 或 MX-H2I 用户网络。Provider 引用了不存在/停用的专属 Proxy Sequence 时会
-禁止直连；已显式绑定但失效的全局 Proxy 也会禁止直连。只有从未配置全局 Proxy 时才
-保持历史直连行为。
+禁止系统出网 fallback；已显式绑定但失效的全局 Proxy 也会 fail closed。全局和 Provider
+都未绑定时才使用系统出网。尤其要注意，`/etc/systemd/system/docker.service.d/` 配置的是
+Docker daemon 拉取镜像的代理，不会自动注入 Node/K8s Pod；若系统出网需要 HTTP proxy，
+必须在容器运行环境单独配置，或显式使用这里的 Proxy endpoint/Sequence。
 
 ## Embedding 的不可热切换项
 
@@ -196,8 +210,9 @@ Sequence 因此会失效而不是继续使用 last-known-good 密钥。环境变
 - `GET /internal/v1/admin/agent` 的响应中没有 Key、`apiKeyEnv` 或 Secret 名称；
 - reveal 只有 Admin Token 会话并重新输入正确 Token 才返回明文，响应不可缓存；
 - 单 provider 测试失败时不会 fallback，成功响应不包含模型 payload/vector；
-- Sequence 保存会验证全部 Provider；过期的显式/自定义默认 Sequence fail closed，只有自动 bootstrap 默认可兼容回退 catalog；
-- Provider 专属 Proxy 缺失时不会绕过代理直连，Proxy transport fallback 顺序可观测；
+- Provider/Sequence/Proxy 记录都不会因为位于列表第一条而成为默认；默认只能显式设置，也可清除；
+- Sequence 保存会验证全部 Provider；正常控制面无默认或默认过期时不会兼容回退 Catalog；
+- Provider 专属 Proxy 缺失时不会绕过代理使用系统出网，Proxy transport fallback 顺序可观测；
 - Launcher platform-admin 可读但写设置返回 `403 admin_token_required`；
 - 旧 revision 写入返回 `409`，不会覆盖另一管理员的更新；
 - 非法 URL、未知字段和客户端提交的 `apiKeyEnv` 被拒绝；

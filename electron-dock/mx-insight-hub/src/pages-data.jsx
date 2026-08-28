@@ -3180,7 +3180,7 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
         eyebrow={section === 'providers' ? 'AGENT CENTER / LLM PROVIDERS' : 'AGENT CENTER / LEGACY RUNTIME'}
         title={section === 'providers' ? 'LLM Provider' : '原中心 Agent'}
         description={section === 'providers'
-          ? 'Provider 是可复用模型账号；真正提供服务的是经过测试的 LLM Sequence。旧的全局链仍作为兼容回退。'
+          ? 'Provider 是可复用模型账号目录，不设置 Provider 默认；实际服务顺序与系统默认仅由显式 LLM Sequence 决定。'
           : '保留原有分析管线、断言、限流与处理边界，便于后续逐项迁移和优化。'}
         loading={state.loading}
         onRefresh={state.refresh}
@@ -3194,7 +3194,7 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
       {section === 'providers' ? <AgentProviderPanel
         kind="chat"
         title="Chat Provider Catalog"
-        subtitle="优先级只定义 bootstrap/兼容顺序；正式服务顺序在 LLM Sequence 中编排"
+        subtitle="Catalog 顺序只用于目录管理；第一条记录不会成为系统默认"
         setting={chatSetting}
         providers={chatProviders}
         canEdit={canEdit}
@@ -3210,7 +3210,7 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
       {section === 'providers' ? <AgentProviderPanel
         kind="embedding"
         title="Embedding Provider Catalog"
-        subtitle={`当前运行维度 ${agent.embeddingDimensions ?? '未配置'}；同一 Sequence 内所有模型必须同模型、同维度`}
+        subtitle={`当前运行维度 ${agent.embeddingDimensions ?? '未配置'}；同一 Sequence 内所有模型必须同模型、同维度；第一条记录不代表默认`}
         setting={embeddingSetting}
         providers={embeddingProviders}
         canEdit={canEdit}
@@ -3453,6 +3453,9 @@ function AgentProviderPanel({
         <span>Revision <code>{setting.revision ?? '—'}</code></span>
         {!canEdit ? <span>权限 <strong>只读</strong></span> : null}
       </div>
+      <p className="mih-agent-provider-source-note">
+        Provider 记录不会自动成为系统默认。实际服务和默认绑定仅由显式 LLM Sequence 决定；只使用一个 Provider 时，请创建只包含该 Provider 的单项 Sequence。
+      </p>
       {!databaseManaged ? <p className="mih-agent-provider-source-note">
         当前 Provider 由部署环境只读注入；连接测试仍可使用。迁移到数据库后才能逐条新建、编辑、删除和绑定 Proxy。
       </p> : null}
@@ -3649,7 +3652,7 @@ function ProviderTable({
   const showActions = canTest || canManage
   return (
     <DataTable label={`${kind === 'chat' ? '对话' : 'Embedding'} Provider Catalog`}>
-      <thead><tr><th>优先级</th><th>Provider</th><th>模型</th><th>Endpoint</th><th>Proxy</th><th>状态</th><th>凭据</th><th>熔断</th>{showActions ? <th>操作</th> : null}</tr></thead>
+      <thead><tr><th>Catalog 顺序</th><th>Provider</th><th>模型</th><th>Endpoint</th><th>Proxy</th><th>状态</th><th>凭据</th><th>熔断</th>{showActions ? <th>操作</th> : null}</tr></thead>
       <tbody>
         {providers.map((provider, index) => {
           const testKey = providerTestKey(kind, provider, revision)
@@ -3666,11 +3669,11 @@ function ProviderTable({
               ? 'Embedding Catalog 必须保留至少一个 Provider；可改为停用'
               : ''
           return <tr key={provider.id}>
-            <td><strong>{index === 0 ? '首选' : `降级 ${index}`}</strong><small>priority {provider.priority}</small></td>
+            <td><strong>序号 {index + 1}</strong><small>排序值 {provider.priority}</small></td>
             <td><strong>{provider.displayName || provider.id}</strong><small><code>{provider.id}</code></small></td>
             <td><code>{provider.model}</code><small>{provider.protocol || 'openai-compatible'}{kind === 'embedding' ? ` · ${provider.dimensions || '—'} dimensions` : ''}</small></td>
             <td><code>{provider.baseUrl || '—'}</code><small>{provider.timeoutMs ? `${provider.timeoutMs} ms` : 'timeout 未知'} · {provider.authMode || 'bearer'}</small></td>
-            <td><code>{provider.proxySequenceKey || '继承全局'}</code></td>
+            <td><code>{provider.proxySequenceKey || '继承全局；未设置则系统出网'}</code></td>
             <td><StatusBadge status={provider.enabled === false ? 'disabled' : 'active'} label={provider.enabled === false ? '停用' : '启用'} /></td>
             <td>{provider.authMode === 'none' ? (
               <StatusBadge status="active" label="无需密钥" />
@@ -3838,12 +3841,12 @@ function ProviderEditor({ kind, editor, proxySequences, proxyEndpoints, setting,
   const headingId = `agent-provider-editor-${kind}`
   const enabledProxyKeys = new Set(proxyEndpoints.filter((endpoint) => endpoint.enabled).map((endpoint) => endpoint.proxyKey))
   const proxyOptions = [
-    { value: '', label: '继承全局 Proxy' },
+    { value: '', label: '不设专属 · 继承全局 Proxy', description: 'Hub 全局也未设置时使用系统出网。' },
     ...proxySequences.map((sequence) => ({
       value: sequence.sequenceKey,
       label: sequence.displayName,
       description: Array.isArray(sequence.proxyKeys) && sequence.proxyKeys.some((proxyKey) => enabledProxyKeys.has(proxyKey))
-        ? `${sequence.proxyKeys.filter((proxyKey) => enabledProxyKeys.has(proxyKey)).length} 个已启用 endpoint${sequence.directFallback ? ' + direct' : ''}`
+        ? `${sequence.proxyKeys.filter((proxyKey) => enabledProxyKeys.has(proxyKey)).length} 个已启用 endpoint${sequence.directFallback ? ' + 系统出网 fallback' : ''}`
         : '没有已启用 endpoint，不能绑定',
       disabled: sequence.enabled === false || !Array.isArray(sequence.proxyKeys)
         || !sequence.proxyKeys.some((proxyKey) => enabledProxyKeys.has(proxyKey)),
@@ -3883,12 +3886,12 @@ function ProviderEditor({ kind, editor, proxySequences, proxyEndpoints, setting,
             <input className="qp-input" type="url" required disabled={busy} value={provider.baseUrl} placeholder="https://api.example.com/v1" onChange={(event) => onChange({ baseUrl: event.target.value })} />
           </Field>
           <Field label="超时（ms）"><input className="qp-input" type="number" min="1000" max="300000" step="1" required disabled={busy} value={provider.timeoutMs} onChange={(event) => onChange({ timeoutMs: event.target.value })} /></Field>
-          <Field label="优先级" hint="保存时按数值从小到大排序"><input className="qp-input" type="number" min="0" max="10000" step="1" required disabled={busy} value={provider.priority} onChange={(event) => onChange({ priority: event.target.value })} /></Field>
+          <Field label="Catalog 排序值" hint="仅决定目录顺序；保存时按数值从小到大排序，不设置系统默认"><input className="qp-input" type="number" min="0" max="10000" step="1" required disabled={busy} value={provider.priority} onChange={(event) => onChange({ priority: event.target.value })} /></Field>
           {isEmbedding ? <Field label="Dimensions" hint="改变向量空间前必须 reindex"><input className="qp-input" type="number" min="1" step="1" required disabled={busy} value={provider.dimensions} onChange={(event) => onChange({ dimensions: event.target.value })} /></Field> : null}
           <DropdownField label="认证方式" value={provider.authMode}
             onChange={(authMode) => onChange({ authMode, ...(authMode === 'none' ? { apiKey: '', clearKey: false } : {}) })}
             options={PROVIDER_AUTH_OPTIONS} disabled={busy} />
-          <DropdownField label="Provider Proxy" hint="未指定时继承 Hub 全局 Proxy Sequence。" value={provider.proxySequenceKey}
+          <DropdownField label="Provider Proxy" hint="未指定时继承 Hub 全局 Proxy Sequence；全局也未设置时使用系统出网。" value={provider.proxySequenceKey}
             onChange={(proxySequenceKey) => onChange({ proxySequenceKey })} options={proxyOptions} disabled={busy} />
           <Field label="API Key" className="mih-agent-provider-editor__wide"
             hint={setting.source === 'environment' && provider.authMode === 'bearer'

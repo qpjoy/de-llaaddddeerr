@@ -461,7 +461,9 @@ rule version；任意结构漂移需要重新预览并人工批准。规则中�
 
 ### 10.1 可配置与切换模型
 
-所有 provider 都说 OpenAI 兼容的 REST（`/chat/completions`、`/embeddings`）——DeepSeek、Qwen、Moonshot、vLLM、Ollama、OpenAI 全都暴露这套。只支持一种线格式而不是每家一个 adapter，是"加一个 provider 是一行配置而不是一次改代码"的原因。
+Chat provider 支持 OpenAI-compatible REST（`/chat/completions`）与 Anthropic Messages；
+embedding 继续使用 OpenAI-compatible `embeddings`。DeepSeek、Qwen、Moonshot、vLLM、
+Ollama 等兼容服务不需要各自复制业务调用代码，协议适配保持在统一 Provider 层。
 
 ```bash
 MX_INSIGHT_AGENT_PROVIDERS='[
@@ -470,11 +472,14 @@ MX_INSIGHT_AGENT_PROVIDERS='[
 ]'
 ```
 
-**数组顺序就是降级顺序。** 环境变量仍是 bootstrap/回滚来源：API key 用环境
-变量名引用，provider 列表在 ConfigMap 中，key 在 Secret 中。首次部署 migration
-后，Hub admin token 还可以在「中心 Agent」把每条链切为 `database` 来源；地址、
-Key、超时、启停和顺序按 revision 热更新，API 进程立即加载，projector 在轮询周期
-内收敛，无需修改 env 或 rollout。
+环境变量仍是 Provider Catalog 的 bootstrap/回滚来源：API key 用环境变量名引用，
+provider 列表在 ConfigMap 中，key 在 Secret 中。Catalog 数组顺序只保留为 migration
+表尚不可用时的滚动部署兼容，不是正常运行时的业务默认。首次部署 migration 后，Hub
+admin token 可以把 Catalog 切为 `database` 来源，再把一个或多个 Provider 组成显式
+LLM Sequence。只有显式设置为 Chat/Embedding 业务默认的 Sequence 才承接未指定链的
+调用；记录第一条不会自动成为默认，默认也可以为空。地址、Key、超时、启停、Sequence
+顺序和绑定按 revision 热更新，API 进程立即加载，projector 在轮询周期内收敛，无需
+修改 env 或 rollout。
 
 数据库模式把 Provider 元数据和明文 Key 分到两张表。普通设置查询永远不选择 Key，
 GET/PUT 和 UI 只返回 `keyConfigured`；密钥输入留空表示保留，清除必须显式请求。
@@ -497,7 +502,7 @@ GET/PUT 和 UI 只返回 `keyConfigured`；密钥输入留空表示保留，清�
 
 400 是我们的请求有问题（body 畸形、上下文超长），挨个 provider 重试只会同样失败，多花一轮延迟和一次账单。
 
-**熔断是必需的，不是优化。** 连续失败 3 次后该 provider 被跳过 60 秒（半开时放一个探针）。没有它，一个挂掉的首选会让**每一个**请求都先付满它的超时——降级功能正常，系统依然不可用。
+**熔断是必需的，不是优化。** 连续失败 3 次后该 provider 被跳过 60 秒（半开时放一个探针）。没有它，Sequence 中一个挂掉的前置 Provider 会让**每一个**请求都先付满它的超时——降级功能正常，系统依然不可用。
 
 `GET /internal/v1/admin/agent` 报每个 provider 的熔断状态，因为「悄悄用第三选择的模型跑了一个月」否则完全不可见。
 

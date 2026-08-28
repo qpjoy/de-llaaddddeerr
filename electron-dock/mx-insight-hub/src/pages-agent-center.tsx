@@ -15,6 +15,7 @@ import {
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import {
+  ConfirmDialog,
   DropdownField,
   ErrorState,
   Field,
@@ -75,6 +76,10 @@ type ProxySequence = {
   enabled: boolean
   revision: number
 }
+
+type ProxyDeleteTarget =
+  | { kind: 'endpoint', item: ProxyEndpoint }
+  | { kind: 'sequence', item: ProxySequence }
 
 const PROVIDER_MIME = 'application/x-mx-insight-provider'
 const PROXY_MIME = 'application/x-mx-insight-proxy'
@@ -147,6 +152,7 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
   const [busy, setBusy] = useState('')
   const [error, setError] = useState<any>(null)
   const [sample, setSample] = useState<any>(null)
+  const [clearDefaultKind, setClearDefaultKind] = useState<'chat' | 'embedding' | null>(null)
   const canEdit = session?.kind === 'admin-token'
 
   const sequences = (state.data?.control?.sequences || []) as LlmSequence[]
@@ -173,7 +179,7 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
   const routeNotes = draft.providerIds.map((providerId) => {
     const provider = providerById.get(providerId)
     const sequenceKey = provider?.proxySequenceKey || proxyControl.globalSequenceKey || null
-    if (!sequenceKey) return `${provider?.displayName || providerId}：直连（未绑定 Proxy）`
+    if (!sequenceKey) return `${provider?.displayName || providerId}：系统出网（未设置应用 Proxy）`
     const proxySequence = proxySequences.find((sequence: ProxySequence) => sequence.sequenceKey === sequenceKey)
     if (!proxySequence?.enabled) return `${provider?.displayName || providerId}：${sequenceKey} 缺失或停用，禁止直连`
     const routes = proxySequence.proxyKeys.flatMap((key: string) => {
@@ -183,15 +189,9 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
     if (routes.length === 0) {
       return `${provider?.displayName || providerId}：${sequenceKey} 没有已启用 endpoint，禁止直连`
     }
-    if (proxySequence.directFallback) routes.push('direct')
+    if (proxySequence.directFallback) routes.push('系统出网')
     return `${provider?.displayName || providerId}：${sequenceKey} → ${routes.join(' → ')}`
   })
-
-  useEffect(() => {
-    if (selectedKey || creating) return
-    const initial = sequences.find((sequence) => sequence.kind === 'chat') || sequences[0]
-    if (initial) setSelectedKey(initial.sequenceKey)
-  }, [creating, selectedKey, sequences])
 
   useEffect(() => {
     if (creating) return
@@ -262,7 +262,7 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
       }
       notify?.(
         setDefault
-          ? `${saved.displayName} 已验证并设为全局默认 Sequence`
+          ? `${saved.displayName} 已验证并设为业务默认 Sequence`
           : `${saved.displayName} 已验证并保存`,
         'success',
       )
@@ -314,6 +314,31 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
     }
   }
 
+  const confirmClearDefault = async () => {
+    if (!clearDefaultKind) return
+    const binding = bindings.find((candidate: any) => candidate.kind === clearDefaultKind)
+    if (!binding?.sequenceKey) {
+      setClearDefaultKind(null)
+      return
+    }
+    setBusy('clear-default')
+    setError(null)
+    try {
+      await adminApi.clearDefaultAgentSequence(token, {
+        kind: clearDefaultKind,
+        expectedRevision: binding.revision || 0,
+      })
+      notify?.(`${clearDefaultKind === 'chat' ? 'Chat / Agent' : 'Embedding'} 业务默认已清除`, 'success')
+      setClearDefaultKind(null)
+      await state.refresh()
+    } catch (requestError: any) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setError(requestError)
+    } finally {
+      setBusy('')
+    }
+  }
+
   if (state.loading && !state.data) return <LoadingState label="正在读取 LLM Sequence" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
 
@@ -322,13 +347,30 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
       <PageHeading
         eyebrow="AGENT CENTER / LLM SEQUENCES"
         title="LLM Sequence"
-        description="Sequence 是 Agent 真正选择的服务：按顺序尝试已保存 Provider，至少一个；保存或设为默认前自动核对当前 revision 的连接测试。"
+        description="Sequence 是 Agent 真正选择的服务：按顺序尝试已保存 Provider。保存不会自动设为默认；只有显式设置的业务默认才承接未指定 Sequence 的调用。"
         loading={state.loading}
         onRefresh={state.refresh}
       ><></></PageHeading>
       {!canEdit ? <div className="mih-inline-warning"><Warning size={17} />Launcher 平台管理员可查看；编辑、测试和切换默认值仅限 Admin Token。</div> : null}
+      <section className="mih-agent-defaults" aria-label="LLM 业务默认">
+        {(['chat', 'embedding'] as const).map((kind) => {
+          const binding = bindings.find((candidate: any) => candidate.kind === kind)
+          const sequence = sequences.find((candidate) => candidate.sequenceKey === binding?.sequenceKey)
+          const label = kind === 'chat' ? 'Chat / Agent' : 'Embedding'
+          return <div key={kind}>
+            <span><strong>{label} 业务默认</strong><small>{binding?.sequenceKey
+              ? `${sequence?.displayName || binding.sequenceKey} · ${binding.sequenceKey}`
+              : '未设置；不会自动使用 Catalog 第一条或第一个 Sequence'}</small></span>
+            {binding?.sequenceKey ? <>
+              <StatusBadge status="active" label="已显式设置" />
+              {canEdit ? <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busy)}
+                onClick={() => { setError(null); setClearDefaultKind(kind) }}>清除默认</button> : null}
+            </> : <StatusBadge status="disabled" label="未设置" />}
+          </div>
+        })}
+      </section>
       <div className="mih-agent-center-grid">
-        <Panel title="Sequence 列表" subtitle="bootstrap 是部署时从旧全局链生成的兼容默认。"
+        <Panel title="Sequence 列表" subtitle="列表只是可选服务目录；兼容 Sequence 也不会自动成为业务默认。"
           actions={canEdit ? <button className="qp-button qp-button--outline" type="button" disabled={Boolean(busy)} onClick={startNew}><Plus size={16} />新建</button> : null}>
           <div className="mih-agent-center-list">
             {sequences.map((sequence) => {
@@ -343,11 +385,11 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
                   <StatusBadge status={sequence.enabled ? 'active' : 'disabled'} label={sequence.kind} />
                   {sequence.providerRevision !== Number(settings[sequence.kind]?.revision ?? 0)
                     ? <StatusBadge status="suspended" label="需重验" /> : null}
-                  {isDefault ? <StatusBadge status="active" label="默认" /> : null}
+                  {isDefault ? <StatusBadge status="active" label="业务默认" /> : null}
                 </span>
               </button>
             })}
-            {sequences.length === 0 ? <p className="mih-agent-center-empty">尚无 Sequence；旧 Provider catalog 顺序仍作为兼容链。</p> : null}
+            {sequences.length === 0 ? <p className="mih-agent-center-empty">尚无 Sequence。创建记录后仍需显式设置业务默认。</p> : null}
           </div>
         </Panel>
 
@@ -421,21 +463,29 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
               <div className="mih-agent-route-diagnostic">
                 <strong>当前配置推导路由</strong>
                 <p>{error?.code === 'agent_providers_unavailable'
-                  ? 'Sequence 已开始调用，但所有 Provider 均未成功；transport failure 表示网络或代理传输失败，不是 Prompt 错误。'
+                  ? 'Sequence 已开始调用，但所有 Provider 均未成功；transport failure 表示系统出网或已配置代理的传输失败，不是 Prompt 错误。'
                   : '当前草稿或已保存 Sequence 与 Provider revision 不一致，请先重新验证保存。'}</p>
                 <ul>{routeNotes.map((note, index) => <li key={draft.providerIds[index]}><code>{note}</code></li>)}</ul>
-                <a className="qp-button qp-button--outline" href="#/agent/proxies"><Globe size={16} />检查 Proxy 绑定</a>
+                <a className="qp-button qp-button--outline" href="#/agent/proxies"><Globe size={16} />查看可选 Proxy 配置</a>
               </div>
             ) : null}
           </> : null}
           {sample?.sequenceKey === draft.sequenceKey ? <div className="mih-agent-sequence-sample"><CheckCircle size={18} /><div><strong>say hi 返回示例</strong><p>{sample.result.sample || `${sample.result.dimensions} dimensions`}</p><small>{sample.result.providerId} · {sample.result.model} · {sample.result.latencyMs} ms</small></div></div> : null}
           <div className="mih-agent-center-actions">
             <button className="qp-button qp-button--primary" type="button" disabled={!canEdit || Boolean(busy)} onClick={() => save(false)}><FloppyDisk size={16} />{busy === 'save' ? '验证中' : '验证并保存'}</button>
-            <button className="qp-button qp-button--outline" type="button" disabled={!canEdit || Boolean(busy)} onClick={() => save(true)}><CheckCircle size={16} />{busy === 'default' ? '验证中' : '保存并设为默认'}</button>
+            <button className="qp-button qp-button--outline" type="button" disabled={!canEdit || Boolean(busy)} onClick={() => save(true)}><CheckCircle size={16} />{busy === 'default' ? '验证中' : '保存并设为业务默认'}</button>
             <button className="qp-button qp-button--ghost" type="button" disabled={!canEdit || Boolean(busy)} onClick={sayHi}><Play size={16} />{busy === 'test' ? '测试中' : draftChanged ? '保存并 say hi' : 'say hi'}</button>
           </div>
         </Panel>
       </div>
+      {clearDefaultKind ? <ConfirmDialog
+        title={`清除 ${clearDefaultKind === 'chat' ? 'Chat / Agent' : 'Embedding'} 业务默认`}
+        description="清除后，未显式选择 Sequence 的调用不会自动改用第一个 Provider 或 Sequence；相关 Agent 将按各自的无模型降级策略处理。"
+        confirmLabel="清除默认"
+        busy={busy === 'clear-default'}
+        onConfirm={confirmClearDefault}
+        onCancel={() => { if (!busy) setClearDefaultKind(null) }}
+      >{error ? <div className="mih-inline-warning"><Warning size={17} />{error.message}</div> : null}</ConfirmDialog> : null}
     </>
   )
 }
@@ -444,10 +494,11 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
   const load = useCallback(() => adminApi.agent(token), [token])
   const state = useRemoteData(load, onUnauthorized) as any
   const [endpointDraft, setEndpointDraft] = useState({ proxyKey: '', displayName: '', proxyUrl: '', enabled: true, revision: 0 })
-  const [sequenceDraft, setSequenceDraft] = useState({ sequenceKey: '', displayName: '', proxyKeys: [] as string[], directFallback: true, enabled: true, revision: 0 })
+  const [sequenceDraft, setSequenceDraft] = useState({ sequenceKey: '', displayName: '', proxyKeys: [] as string[], directFallback: false, enabled: true, revision: 0 })
   const [globalDraft, setGlobalDraft] = useState('')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState<any>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ProxyDeleteTarget | null>(null)
   const canEdit = session?.kind === 'admin-token'
   const proxy = state.data?.control?.proxy || { endpoints: [], sequences: [], globalSequenceKey: null, revision: 0 }
   const endpoints = proxy.endpoints as ProxyEndpoint[]
@@ -474,7 +525,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
   }
 
   const newProxySequence = () => {
-    setSequenceDraft({ sequenceKey: '', displayName: '', proxyKeys: [], directFallback: true, enabled: true, revision: 0 })
+    setSequenceDraft({ sequenceKey: '', displayName: '', proxyKeys: [], directFallback: false, enabled: true, revision: 0 })
     setError(null)
   }
 
@@ -511,7 +562,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
   const saveProxySequence = async (setGlobal: boolean) => {
     if (!keyValid(sequenceDraft.sequenceKey) || !sequenceDraft.displayName.trim()
       || sequenceDraft.proxyKeys.length === 0) {
-      setError(new Error('请填写合法 Sequence，并至少加入一个 Proxy endpoint；仅直连请清除全局/Provider 绑定。'))
+      setError(new Error('请填写合法 Sequence，并至少加入一个 Proxy endpoint；使用系统出网时无需创建或绑定 Proxy。'))
       return
     }
     if (!sequenceDraft.enabled && sequenceDraftReferenceLabels.length > 0) {
@@ -554,27 +605,17 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
     setSequenceDraft({ ...sequenceDraft, proxyKeys: [...sequenceDraft.proxyKeys, proxyKey] })
   }
 
-  const removeEndpoint = async (endpoint: ProxyEndpoint) => {
+  const removeEndpoint = (endpoint: ProxyEndpoint) => {
     const usedBy = sequences.filter((sequence) => sequence.proxyKeys.includes(endpoint.proxyKey))
     if (usedBy.length > 0) {
       setError(new Error(`请先从 Proxy Sequence 移除 ${endpoint.displayName}：${usedBy.map((item) => item.displayName).join('、')}`))
       return
     }
-    if (!window.confirm(`删除 Proxy endpoint “${endpoint.displayName}”？`)) return
-    setBusy(`delete-endpoint:${endpoint.proxyKey}`)
     setError(null)
-    try {
-      await adminApi.deleteAgentProxyEndpoint(token, endpoint.proxyKey, endpoint.revision)
-      if (endpointDraft.proxyKey === endpoint.proxyKey) newEndpoint()
-      notify?.('Proxy endpoint 已删除', 'success')
-      await state.refresh()
-    } catch (requestError: any) {
-      if (requestError?.status === 401) onUnauthorized?.(requestError)
-      setError(requestError)
-    } finally { setBusy('') }
+    setDeleteTarget({ kind: 'endpoint', item: endpoint })
   }
 
-  const removeProxySequence = async (sequence: ProxySequence) => {
+  const removeProxySequence = (sequence: ProxySequence) => {
     const providerRefs = providerRows.filter(({ provider }) => provider.proxySequenceKey === sequence.sequenceKey)
     if (proxy.globalSequenceKey === sequence.sequenceKey || providerRefs.length > 0) {
       const refs = [
@@ -584,13 +625,27 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
       setError(new Error(`请先解除 Proxy Sequence 绑定：${refs.join('、')}`))
       return
     }
-    if (!window.confirm(`删除 Proxy Sequence “${sequence.displayName}”？`)) return
-    setBusy(`delete-sequence:${sequence.sequenceKey}`)
+    setError(null)
+    setDeleteTarget({ kind: 'sequence', item: sequence })
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return
+    const target = deleteTarget
+    const targetKey = target.kind === 'endpoint' ? target.item.proxyKey : target.item.sequenceKey
+    setBusy(`delete-${target.kind}:${targetKey}`)
     setError(null)
     try {
-      await adminApi.deleteAgentProxySequence(token, sequence.sequenceKey, sequence.revision)
-      if (sequenceDraft.sequenceKey === sequence.sequenceKey) newProxySequence()
-      notify?.('Proxy Sequence 已删除', 'success')
+      if (target.kind === 'endpoint') {
+        await adminApi.deleteAgentProxyEndpoint(token, target.item.proxyKey, target.item.revision)
+        if (endpointDraft.proxyKey === target.item.proxyKey) newEndpoint()
+        notify?.('Proxy endpoint 已删除', 'success')
+      } else {
+        await adminApi.deleteAgentProxySequence(token, target.item.sequenceKey, target.item.revision)
+        if (sequenceDraft.sequenceKey === target.item.sequenceKey) newProxySequence()
+        notify?.('Proxy Sequence 已删除', 'success')
+      }
+      setDeleteTarget(null)
       await state.refresh()
     } catch (requestError: any) {
       if (requestError?.status === 401) onUnauthorized?.(requestError)
@@ -607,7 +662,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
         expectedRevision: proxy.revision || 0,
       })
       setGlobalDraft(sequenceKey)
-      notify?.(sequenceKey ? 'Hub 全局 Proxy 绑定已更新' : 'Hub 全局 Proxy 已清除，恢复历史直连', 'success')
+      notify?.(sequenceKey ? 'Hub 全局 Proxy 绑定已更新' : 'Hub 全局 Proxy 已清除，使用系统出网', 'success')
       await state.refresh()
     } catch (requestError: any) {
       if (requestError?.status === 401) onUnauthorized?.(requestError)
@@ -646,7 +701,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
   return (
     <>
       <PageHeading eyebrow="AGENT CENTER / PROXY SEQUENCES" title="LLM Proxy"
-        description="Provider 可覆盖 Hub 全局 Proxy Sequence；每条代理链按序尝试，最后是否直连由显式开关决定。"
+        description="Proxy 是可选出网覆盖：不设置时使用容器的系统出网；可显式设置 Hub 全局链，也可让 Provider 使用自己的链。"
         loading={state.loading} onRefresh={state.refresh}><></></PageHeading>
       <div className="mih-inline-warning"><Warning size={17} />K8s 内的 127.0.0.1 指当前 Pod 网络命名空间。生产已让使用 Agent 的 worker 与 Admin 统一 hostNetwork；Compose 请使用 host.docker.internal。</div>
       {proxy.globalSequenceKey && (!currentGlobalSequence || currentGlobalSequence.enabled === false) ? (
@@ -656,19 +711,19 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
       ) : null}
       {error ? <ErrorState error={error} onRetry={undefined} /> : null}
 
-      <Panel title="Proxy 绑定" subtitle="先把 endpoint 编入 Proxy Sequence，再绑定为 Hub 全局默认或某个 Provider 的专属出口。">
+      <Panel title="Proxy 绑定" subtitle="不绑定时使用系统出网；需要应用级代理时，先把 endpoint 编入 Sequence，再显式绑定到 Hub 全局或 Provider。">
         <div className="mih-proxy-bindings">
           <section>
-            <h3>Hub 全局默认</h3>
+            <h3>Hub 全局绑定（可选）</h3>
             <div className="mih-proxy-binding-control">
               <DropdownField label="全局 Proxy Sequence" value={globalDraft} disabled={!canEdit || Boolean(busy)}
                 onChange={setGlobalDraft} options={[
-                  { value: '', label: '不绑定 · 历史直连' },
+                  { value: '', label: '不绑定 · 使用系统出网', description: '不附加应用 Proxy dispatcher；由容器与宿主网络决定实际出口。' },
                   ...sequences.filter((sequence) => sequence.enabled).map((sequence) => ({
                     value: sequence.sequenceKey,
                     label: sequence.displayName,
                     description: enabledEndpointCount(sequence)
-                      ? `${enabledEndpointCount(sequence)} 个已启用 endpoint${sequence.directFallback ? ' + direct' : ''}`
+                      ? `${enabledEndpointCount(sequence)} 个已启用 endpoint${sequence.directFallback ? ' + 系统出网 fallback' : ''}`
                       : '没有已启用 endpoint，不能绑定',
                     disabled: enabledEndpointCount(sequence) === 0,
                   })),
@@ -687,7 +742,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
                     disabled={!canEdit || Boolean(busy) || state.data?.settings?.[kind]?.source !== 'database'}
                     onChange={(sequenceKey: string) => bindProvider(kind, provider.id, sequenceKey)}
                     options={[
-                      { value: '', label: '继承 Hub 全局' },
+                      { value: '', label: '不设专属 · 继承 Hub 全局', description: 'Hub 全局也未绑定时使用系统出网。' },
                       ...sequences.filter((sequence) => sequence.enabled).map((sequence) => ({
                         value: sequence.sequenceKey,
                         label: sequence.displayName,
@@ -747,7 +802,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
               const providerRefs = providerRows.filter(({ provider }) => provider.proxySequenceKey === sequence.sequenceKey)
               const isGlobal = proxy.globalSequenceKey === sequence.sequenceKey
               return <article key={sequence.sequenceKey} className={`mih-agent-crud-row${sequenceDraft.sequenceKey === sequence.sequenceKey ? ' is-selected' : ''}`}>
-                <span><strong>{sequence.displayName}</strong><code>{sequence.sequenceKey}</code><small>{enabledEndpointCount(sequence)} enabled / {sequence.proxyKeys.length} total{sequence.directFallback ? ' + direct' : ''}</small></span>
+                <span><strong>{sequence.displayName}</strong><code>{sequence.sequenceKey}</code><small>{enabledEndpointCount(sequence)} enabled / {sequence.proxyKeys.length} total{sequence.directFallback ? ' + system egress' : ''}</small></span>
                 <span>{isGlobal ? <StatusBadge status="active" label="全局" /> : null}<StatusBadge status={sequence.enabled ? 'active' : 'disabled'} label={sequence.enabled ? '启用' : '停用'} /><small>{providerRefs.length ? `${providerRefs.length} 个 Provider 绑定` : '无专属绑定'}</small></span>
                 <div>
                   <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`编辑 ${sequence.displayName}`} disabled={!canEdit || Boolean(busy)} onClick={() => { setSequenceDraft({ ...sequence }); setError(null) }}><PencilSimple size={16} /></button>
@@ -762,7 +817,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
             <div className="mih-agent-center-form-grid">
             <Field label="Sequence Key" hint=""><input className="qp-input" value={sequenceDraft.sequenceKey} disabled={!canEdit || Boolean(busy) || sequenceDraft.revision > 0} placeholder="agent-proxy-primary" onChange={(event) => setSequenceDraft({ ...sequenceDraft, sequenceKey: event.target.value })} /></Field>
             <Field label="显示名称" hint=""><input className="qp-input" value={sequenceDraft.displayName} disabled={!canEdit || Boolean(busy)} placeholder="Agent Proxy Sequence" onChange={(event) => setSequenceDraft({ ...sequenceDraft, displayName: event.target.value })} /></Field>
-            <label className="mih-agent-center-check"><input type="checkbox" checked={sequenceDraft.directFallback} disabled={!canEdit || Boolean(busy)} onChange={(event) => setSequenceDraft({ ...sequenceDraft, directFallback: event.target.checked })} />末尾允许直连 fallback</label>
+            <label className="mih-agent-center-check"><input type="checkbox" checked={sequenceDraft.directFallback} disabled={!canEdit || Boolean(busy)} onChange={(event) => setSequenceDraft({ ...sequenceDraft, directFallback: event.target.checked })} />代理均失败后允许系统出网</label>
             <label className="mih-agent-center-check"><input type="checkbox" checked={sequenceDraft.enabled}
               disabled={!canEdit || Boolean(busy) || (sequenceDraft.enabled && sequenceDraftReferenceLabels.length > 0)}
               onChange={(event) => setSequenceDraft({ ...sequenceDraft, enabled: event.target.checked })} />启用 Sequence</label>
@@ -785,17 +840,25 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
                   <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`下移 ${endpointById.get(proxyKey)?.displayName || proxyKey}`} disabled={!canEdit || Boolean(busy) || index === sequenceDraft.proxyKeys.length - 1} onClick={() => setSequenceDraft({ ...sequenceDraft, proxyKeys: move(sequenceDraft.proxyKeys, index, index + 1) })}><ArrowDown size={15} /></button>
                   <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`移除 ${endpointById.get(proxyKey)?.displayName || proxyKey}`} disabled={!canEdit || Boolean(busy)} onClick={() => setSequenceDraft({ ...sequenceDraft, proxyKeys: sequenceDraft.proxyKeys.filter((key) => key !== proxyKey) })}><Trash size={15} /></button></div>
               </article>)}
-              {sequenceDraft.proxyKeys.length === 0 ? <p>拖入至少一个代理。只需要直连时不要创建 Proxy Sequence，清除绑定即可。</p> : null}
+              {sequenceDraft.proxyKeys.length === 0 ? <p>拖入至少一个代理。使用系统出网时不要创建 Proxy Sequence，保持全局和 Provider 未绑定即可。</p> : null}
             </div>
             </div>
             <div className="mih-agent-center-actions">
               <button className="qp-button qp-button--primary" type="button" disabled={!canEdit || Boolean(busy)} onClick={() => saveProxySequence(false)}><FloppyDisk size={16} />{sequenceDraft.revision ? '保存修改' : '创建 Sequence'}</button>
-              <button className="qp-button qp-button--outline" type="button" disabled={!canEdit || Boolean(busy)} onClick={() => saveProxySequence(true)}><Globe size={16} />保存并设为全局</button>
+              <button className="qp-button qp-button--outline" type="button" disabled={!canEdit || Boolean(busy)} onClick={() => saveProxySequence(true)}><Globe size={16} />保存并绑定全局</button>
               {sequenceDraft.revision ? <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busy)} onClick={newProxySequence}>取消编辑</button> : null}
             </div>
           </div>
         </Panel>
       </div>
+      {deleteTarget ? <ConfirmDialog
+        title={deleteTarget.kind === 'endpoint' ? '删除 Proxy endpoint' : '删除 Proxy Sequence'}
+        description={`“${deleteTarget.item.displayName}” 删除后无法恢复；已被引用的记录仍会由服务端拒绝删除。`}
+        confirmLabel="删除"
+        busy={busy.startsWith('delete-')}
+        onConfirm={confirmDelete}
+        onCancel={() => { if (!busy) setDeleteTarget(null) }}
+      >{error ? <div className="mih-inline-warning"><Warning size={17} />{error.message}</div> : null}</ConfirmDialog> : null}
     </>
   )
 }

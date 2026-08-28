@@ -148,7 +148,6 @@ export class AgentControlStore {
       field: 'providerIds', minimum: 1, maximum: MAX_SEQUENCE_PROVIDERS,
     })
     const sequenceKey = `mx-default-${kind}`
-    const consumerKey = `hub.${kind}.default`
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
@@ -170,14 +169,13 @@ export class AgentControlStore {
                 control.agent_llm_sequences.provider_revision)
                IS DISTINCT FROM
                (EXCLUDED.display_name, EXCLUDED.provider_ids, EXCLUDED.provider_revision)`,
-        [sequenceKey, kind === 'chat' ? 'MX Default Chat' : 'MX Default Embedding', kind, ids, providerRevision],
-      )
-      await client.query(
-        `INSERT INTO control.agent_consumer_bindings
-           (consumer_key, kind, sequence_key, updated_by)
-         VALUES ($1, $2, $3, 'environment-bootstrap')
-         ON CONFLICT (consumer_key) DO NOTHING`,
-        [consumerKey, kind, sequenceKey],
+        [
+          sequenceKey,
+          kind === 'chat' ? 'MX Compatibility Chat' : 'MX Compatibility Embedding',
+          kind,
+          ids,
+          providerRevision,
+        ],
       )
       await client.query('COMMIT')
       return sequenceKey
@@ -228,6 +226,7 @@ export class AgentControlStore {
       )
       await client.query('COMMIT')
       return {
+        controlAvailable: true,
         sequences: sequences.rows.map(sequenceRow),
         defaultBinding: binding.rows[0] ? bindingRow(binding.rows[0]) : null,
         proxyEndpoints: proxyEndpoints.rows.map(proxyEndpointRow),
@@ -242,6 +241,7 @@ export class AgentControlStore {
       // legacy catalog order rather than taking down login/readiness.
       if (relationMissing(error)) {
         return {
+          controlAvailable: false,
           sequences: [], defaultBinding: null, proxyEndpoints: [],
           proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0,
         }
@@ -439,7 +439,7 @@ export class AgentControlStore {
 
   async setDefaultSequence(kind, sequenceKey, { expectedRevision: expected, updatedBy = 'admin-token' } = {}) {
     assertKind(kind)
-    assertKey(sequenceKey, 'sequenceKey')
+    if (sequenceKey != null) assertKey(sequenceKey, 'sequenceKey')
     expectedRevision(expected)
     const consumerKey = `hub.${kind}.default`
     const client = await this.pool.connect()
@@ -457,21 +457,23 @@ export class AgentControlStore {
           currentRevision: revision,
         })
       }
-      const sequence = await client.query(
-        `SELECT enabled, provider_revision FROM control.agent_llm_sequences
-          WHERE sequence_key = $1 AND kind = $2
-          FOR SHARE`,
-        [sequenceKey, kind],
-      )
-      if (!sequence.rows[0] || sequence.rows[0].enabled === false) {
-        invalid('invalid_agent_binding', 'The selected Sequence is missing or disabled')
-      }
-      const setting = await client.query(
-        'SELECT revision FROM control.agent_provider_settings WHERE kind = $1 FOR SHARE',
-        [kind],
-      )
-      if (Number(sequence.rows[0].provider_revision) !== Number(setting.rows[0]?.revision ?? 0)) {
-        throw new AppError(409, 'sequence_verification_stale', 'The selected Sequence must be tested against the current Provider catalog')
+      if (sequenceKey != null) {
+        const sequence = await client.query(
+          `SELECT enabled, provider_revision FROM control.agent_llm_sequences
+            WHERE sequence_key = $1 AND kind = $2
+            FOR SHARE`,
+          [sequenceKey, kind],
+        )
+        if (!sequence.rows[0] || sequence.rows[0].enabled === false) {
+          invalid('invalid_agent_binding', 'The selected Sequence is missing or disabled')
+        }
+        const setting = await client.query(
+          'SELECT revision FROM control.agent_provider_settings WHERE kind = $1 FOR SHARE',
+          [kind],
+        )
+        if (Number(sequence.rows[0].provider_revision) !== Number(setting.rows[0]?.revision ?? 0)) {
+          throw new AppError(409, 'sequence_verification_stale', 'The selected Sequence must be tested against the current Provider catalog')
+        }
       }
       const saved = await client.query(
         `INSERT INTO control.agent_consumer_bindings

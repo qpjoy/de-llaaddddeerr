@@ -65,10 +65,10 @@ The light primary is a deeper teal so text, focus and selected states remain leg
 ## Component Classes
 
 - Layout: `qp-app`, `qp-shell`, `qp-sidebar`, `qp-main`, `qp-panel`, `qp-card`, `qp-section-title`.
-- Actions: `qp-button`, `qp-icon-button`, `qp-button--primary`, `qp-button--outline`, `qp-button--ghost`, `qp-button--transparent`.
+- Actions: `qp-button`, `qp-icon-button`, `qp-button--primary`, `qp-button--outline`, `qp-button--ghost`, `qp-button--transparent`, `qp-button--danger`.
 - Form: `qp-field`, `qp-input`, `qp-select`, `qp-dropdown`, `qp-textarea`, `qp-input-group`. Use `qp-select` only as a native fallback; products that require a consistently themed popup should use `qp-dropdown--searchable` with `qp-dropdown__search`, `qp-dropdown__options`, `qp-dropdown__group`, `qp-dropdown__empty`, and `qp-dropdown__check`.
 - Choice: `qp-choice--radio`, `qp-choice--checkbox`, `qp-switch`, `qp-slider`, `qp-segmented`.
-- Feedback: `qp-tag`, `qp-status`, `qp-toast`, `qp-dialog`, `qp-actionbar`.
+- Feedback: `qp-tag`, `qp-status`, `qp-toast`, `qp-modal-backdrop`, `qp-modal`, `qp-dialog`, `qp-actionbar`.
 - Data navigation: `qp-pagination`, `qp-pagination__summary`, `qp-pagination__pages`, `qp-pagination__page`, `qp-pagination__jump`.
 - Query inspection: `qp-search-lab`, `qp-search-lab__readiness`, `qp-search-lab__grid`, `qp-search-lab__facts`, `qp-search-lab__analysis`, `qp-search-lab__samples`, `qp-code-block`.
 - App surfaces: `qp-menu`, `qp-list`, `qp-project-card`, `qp-market-layout`, `qp-market-card`, `qp-market-inspector`, `qp-chip-list`, `qp-user-card`, `qp-color-swatch`.
@@ -76,6 +76,62 @@ The light primary is a deeper teal so text, focus and selected states remain leg
 - Properties: `qp-properties-panel`, `qp-property-section`, `qp-property-row`, `qp-axis-grid`, `qp-axis-field`, `qp-swatch-input`.
 - Editor panels: `qp-panel-tabs`, `qp-panel-tab`, `qp-split-panel`, `qp-anchor-grid`, `qp-anchor-preset`.
 - Icons: `qp-icon`, `qp-icon-board`, `qp-icon-category`, `qp-icon-grid`, `qp-icon-cell`.
+
+## Modals and dialogs
+
+The package provides framework-agnostic presentation classes. The consuming application owns open state, focus trapping, focus restoration, Escape and backdrop handling, and async busy state.
+
+Use `qp-modal` for create/edit forms. Apply a size modifier and keep the heading, body, and actions in their named regions:
+
+```html
+<div class="qp-modal-backdrop" role="presentation">
+  <section
+    class="qp-modal qp-modal--medium"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="provider-title"
+    aria-describedby="provider-description"
+  >
+    <header class="qp-modal__header">
+      <div class="qp-modal__heading">
+        <h2 id="provider-title">Add provider</h2>
+        <p id="provider-description" class="qp-modal__description">Create a reusable LLM account.</p>
+      </div>
+    </header>
+    <div class="qp-modal__body">Form fields go here.</div>
+    <footer class="qp-modal__footer">
+      <button class="qp-button qp-button--ghost" type="button">Cancel</button>
+      <button class="qp-button qp-button--primary" type="button">Create provider</button>
+    </footer>
+  </section>
+</div>
+```
+
+Use the compact `qp-dialog` surface for a destructive confirmation. A host should expose it as an `alertdialog`, focus the least destructive action first, and prevent dismissal while the destructive request is busy:
+
+```html
+<div class="qp-modal-backdrop" role="presentation">
+  <section
+    class="qp-dialog qp-dialog--danger"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="delete-title"
+    aria-describedby="delete-description"
+  >
+    <div class="qp-dialog__icon" aria-hidden="true">!</div>
+    <div class="qp-dialog__body">
+      <strong id="delete-title">Delete provider?</strong>
+      <p id="delete-description" class="qp-body-2 qp-muted">This action cannot be undone.</p>
+      <div class="qp-dialog__actions">
+        <button class="qp-button qp-button--ghost" type="button" autofocus>Cancel</button>
+        <button class="qp-button qp-button--danger" type="button">Delete provider</button>
+      </div>
+    </div>
+  </section>
+</div>
+```
+
+For destructive dialogs, Escape and the backdrop may cancel only while idle. Disable every dismissal control and set `aria-busy="true"` while the request is in flight. After closing, restore focus to the invoking control or to a stable nearby fallback if that control was deleted.
 
 ## Demo
 

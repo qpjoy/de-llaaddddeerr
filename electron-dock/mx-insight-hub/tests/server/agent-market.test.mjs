@@ -37,6 +37,20 @@ test('Agent Market binds native dragging only to explicit handles', async () => 
   assert.match(center, /application\/x-mx-insight-proxy/u)
 })
 
+test('Agent Center keeps defaults explicit and uses the shared confirm dialog', async () => {
+  const center = await readFile(new URL('../../src/pages-agent-center.tsx', import.meta.url), 'utf8')
+  const market = await readFile(new URL('../../src/pages-agent-market.tsx', import.meta.url), 'utf8')
+
+  assert.doesNotMatch(center, /window\.confirm/u)
+  assert.match(center, /<ConfirmDialog/u)
+  assert.doesNotMatch(center, /const initial = sequences\.find/u)
+  assert.match(center, /不会自动使用 Catalog 第一条或第一个 Sequence/u)
+  assert.match(center, /directFallback: false/u)
+  assert.match(center, /不绑定 · 使用系统出网/u)
+  assert.doesNotMatch(market, /全局默认 LLM Sequence/u)
+  assert.match(market, /未设置可用的业务默认（模型阶段确定性降级）/u)
+})
+
 function requestBody(definition = freshAdvancedSearchDefinition()) {
   return {
     dryRun: true,

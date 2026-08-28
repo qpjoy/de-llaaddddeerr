@@ -259,6 +259,18 @@ test('migration 041 adds only isolated Agent control-plane state and no business
   assert.doesNotMatch(sql, /ON DELETE CASCADE/i)
 })
 
+test('migration 042 tombstones only implicit compatibility defaults and preserves CAS history', async () => {
+  const sql = await readFile(new URL('../../migrations/042_agent_explicit_llm_defaults.sql', import.meta.url), 'utf8')
+  assert.match(sql, /ALTER COLUMN sequence_key DROP NOT NULL/)
+  assert.match(sql, /SET sequence_key = NULL/)
+  assert.match(sql, /revision = revision \+ 1/)
+  assert.match(sql, /updated_by = 'environment-bootstrap'/)
+  assert.match(sql, /consumer_key = 'hub\.chat\.default'[\s\S]*sequence_key = 'mx-default-chat'/)
+  assert.match(sql, /consumer_key = 'hub\.embedding\.default'[\s\S]*sequence_key = 'mx-default-embedding'/)
+  assert.doesNotMatch(sql, /DELETE FROM control\.agent_consumer_bindings/i)
+  assert.doesNotMatch(sql, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:core|ingest)\./i)
+})
+
 test('Proxy endpoint deletion enforces revision CAS and refuses Sequence references', async () => {
   const referenced = proxyControlHarness({ endpointReferences: ['agent-egress', 'backup-egress'] })
   await assert.rejects(
@@ -396,11 +408,11 @@ test('Proxy Sequence cannot transition from enabled to disabled while bound', as
   assert.ok(sequenceAdvisory < sequenceLock)
 })
 
-test('bootstrap refreshes only generated Sequences when the Provider catalog changes', async () => {
+test('bootstrap refreshes only Compatibility Sequence candidates and never creates a default binding', async () => {
   const queries = []
   const client = {
-    async query(sql) {
-      queries.push(sql.replace(/\s+/g, ' ').trim())
+    async query(sql, params = []) {
+      queries.push({ text: sql.replace(/\s+/g, ' ').trim(), params })
       return { rows: [] }
     },
     release() {},
@@ -409,13 +421,82 @@ test('bootstrap refreshes only generated Sequences when the Provider catalog cha
   await store.ensureBootstrapSequence({
     kind: 'chat', providerIds: ['primary', 'fallback'], providerRevision: 4,
   })
-  const upsert = queries.find((query) => query.startsWith('INSERT INTO control.agent_llm_sequences'))
-  assert.match(upsert, /ON CONFLICT \(sequence_key\) DO UPDATE SET/)
-  assert.match(upsert, /provider_ids = EXCLUDED\.provider_ids/)
-  assert.match(upsert, /provider_revision = EXCLUDED\.provider_revision/)
-  assert.match(upsert, /revision = control\.agent_llm_sequences\.revision \+ 1/)
-  assert.match(upsert, /WHERE control\.agent_llm_sequences\.source = 'bootstrap'/)
-  assert.match(upsert, /IS DISTINCT FROM/)
+  const upsert = queries.find(({ text }) => text.startsWith('INSERT INTO control.agent_llm_sequences'))
+  assert.match(upsert.text, /ON CONFLICT \(sequence_key\) DO UPDATE SET/)
+  assert.match(upsert.text, /provider_ids = EXCLUDED\.provider_ids/)
+  assert.match(upsert.text, /provider_revision = EXCLUDED\.provider_revision/)
+  assert.match(upsert.text, /revision = control\.agent_llm_sequences\.revision \+ 1/)
+  assert.match(upsert.text, /WHERE control\.agent_llm_sequences\.source = 'bootstrap'/)
+  assert.match(upsert.text, /IS DISTINCT FROM/)
+  assert.equal(upsert.params[1], 'MX Compatibility Chat')
+  assert.equal(queries.some(({ text }) => text.includes('INSERT INTO control.agent_consumer_bindings')), false)
+})
+
+test('runtime control snapshots distinguish a governed empty state from a missing migration', async () => {
+  const normalClient = {
+    async query(sql) {
+      const text = sql.replace(/\s+/g, ' ').trim()
+      if (text.startsWith('BEGIN') || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [] }
+      if (text.includes('FROM control.agent_proxy_settings')) {
+        return { rows: [{ global_sequence_key: null, revision: 0, updated_by: null, updated_at: null }] }
+      }
+      return { rows: [] }
+    },
+    release() {},
+  }
+  const normal = await new AgentControlStore({ async connect() { return normalClient } })
+    .loadRuntimeSnapshot('chat')
+  assert.equal(normal.controlAvailable, true)
+  assert.equal(normal.defaultBinding, null)
+
+  const missingClient = {
+    async query(sql) {
+      const text = sql.replace(/\s+/g, ' ').trim()
+      if (text.startsWith('BEGIN') || text === 'ROLLBACK') return { rows: [] }
+      const error = new Error('relation does not exist')
+      error.code = '42P01'
+      throw error
+    },
+    release() {},
+  }
+  const missing = await new AgentControlStore({ async connect() { return missingClient } })
+    .loadRuntimeSnapshot('chat')
+  assert.equal(missing.controlAvailable, false)
+  assert.equal(missing.defaultBinding, null)
+})
+
+test('clearing an LLM default writes a nullable binding tombstone under revision CAS', async () => {
+  const queries = []
+  const client = {
+    async query(sql, params = []) {
+      const text = sql.replace(/\s+/g, ' ').trim()
+      queries.push({ text, params })
+      if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK'
+        || text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text.includes('SELECT revision FROM control.agent_consumer_bindings')) {
+        return { rows: [{ revision: 4 }] }
+      }
+      if (text.startsWith('INSERT INTO control.agent_consumer_bindings')) {
+        return { rows: [{
+          consumer_key: params[0], kind: params[1], sequence_key: params[2],
+          revision: 5, updated_by: params[3], updated_at: '2026-08-29T00:00:00.000Z',
+        }] }
+      }
+      throw new Error(`Unexpected default-clear SQL: ${text}`)
+    },
+    release() {},
+  }
+  const store = new AgentControlStore({ async connect() { return client } })
+  const cleared = await store.setDefaultSequence('chat', null, { expectedRevision: 4 })
+  assert.equal(cleared.sequenceKey, null)
+  assert.equal(cleared.revision, 5)
+  assert.equal(
+    queries.some(({ text }) => text.includes('FROM control.agent_llm_sequences')),
+    false,
+    'clearing must not validate an arbitrary Sequence',
+  )
+  const write = queries.find(({ text }) => text.startsWith('INSERT INTO control.agent_consumer_bindings'))
+  assert.deepEqual(write.params.slice(0, 3), ['hub.chat.default', 'chat', null])
 })
 
 test('Provider writes lock and validate Proxy Sequences in their persistence transaction', async () => {
@@ -830,7 +911,7 @@ test('AgentRuntime loads DB settings, refreshes atomically, and keeps last-known
   runtime.close()
 })
 
-test('AgentRuntime routes the global Sequence and keeps legacy catalog fallback for a stale default', async () => {
+test('AgentRuntime routes an explicit default and fails every stale binding closed regardless of source', async () => {
   const harness = databaseHarness()
   harness.state.settings.set('chat', row('chat', {
     source: 'database',
@@ -848,10 +929,12 @@ test('AgentRuntime routes the global Sequence and keeps legacy catalog fallback 
     async ensureBootstrapSequence() {},
     async loadRuntimeSnapshot(kind) {
       if (kind !== 'chat') return {
+        controlAvailable: true,
         sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
         globalProxySequenceKey: null, proxyRevision: 0,
       }
       return {
+        controlAvailable: true,
         sequences: [{
           sequenceKey: 'selected', displayName: 'Selected', kind: 'chat',
           providerIds: ['sequence-only'], enabled: true,
@@ -903,10 +986,230 @@ test('AgentRuntime routes the global Sequence and keeps legacy catalog fallback 
 
   controlState.source = 'bootstrap'
   await runtime.refresh({ force: true })
-  const fallback = await runtime.complete([{ role: 'user', content: 'hello' }])
-  assert.equal(fallback.provider, 'catalog-first')
-  assert.equal(fallback.sequenceKey, null)
-  assert.deepEqual(seen, ['sequence-only.invalid', 'catalog-first.invalid'])
+  await assert.rejects(
+    async () => runtime.complete([{ role: 'user', content: 'hello' }]),
+    (error) => error?.code === 'agent_sequence_unavailable',
+  )
+  assert.deepEqual(seen, ['sequence-only.invalid'])
+  runtime.close()
+})
+
+test('governed runtimes without a default never promote the first Provider from the catalog', async () => {
+  let fetchCalls = 0
+  const settingsStore = {
+    async loadSetting(kind) {
+      return kind === 'chat'
+        ? row('chat', {
+            source: 'database', revision: 1,
+            providers: [provider({
+              id: 'catalog-first', baseUrl: 'https://catalog-first.invalid/v1', authMode: 'none',
+            })],
+          })
+        : row('embedding')
+    },
+    async loadCredentialsInternal() { return new Map() },
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot() {
+      return {
+        controlAvailable: true,
+        sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
+        globalProxySequenceKey: null, proxyRevision: 0,
+      }
+    },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore,
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    fetchImpl: async () => {
+      fetchCalls += 1
+      throw new Error('the catalog must not be called without an explicit default')
+    },
+  }).start()
+
+  await assert.rejects(
+    async () => runtime.complete([{ role: 'user', content: 'hello' }]),
+    (error) => error?.status === 503 && error?.code === 'agent_sequence_unavailable',
+  )
+  const profile = await runtime.suggestFileProfile({ columns: ['id', 'title'] })
+  assert.equal(profile.origin, 'inferred')
+  assert.equal(await runtime.classifyRecord({ record: { id: '1' }, categories: ['news'] }), null)
+  assert.equal(fetchCalls, 0)
+  runtime.close()
+})
+
+test('AgentRuntime clears a default into a revisioned tombstone and applies it fail-closed', async () => {
+  let binding = {
+    consumerKey: 'hub.chat.default', kind: 'chat', sequenceKey: 'selected', revision: 3,
+  }
+  const settingsStore = {
+    async loadSetting(kind) {
+      return kind === 'chat'
+        ? row('chat', {
+            source: 'database', revision: 1,
+            providers: [provider({ authMode: 'none' })],
+          })
+        : row('embedding')
+    },
+    async loadCredentialsInternal() { return new Map() },
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot() {
+      return {
+        controlAvailable: true,
+        sequences: [{
+          sequenceKey: 'selected', displayName: 'Selected', kind: 'chat',
+          providerIds: ['primary'], enabled: true, source: 'database',
+          providerRevision: 1, revision: 2,
+        }],
+        defaultBinding: structuredClone(binding),
+        proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0,
+      }
+    },
+    async setDefaultSequence(kind, sequenceKey, input) {
+      assert.equal(kind, 'chat')
+      assert.equal(sequenceKey, null)
+      assert.equal(input.expectedRevision, 3)
+      binding = { ...binding, sequenceKey: null, revision: 4 }
+      return structuredClone(binding)
+    },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore,
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+  }).start()
+
+  const cleared = await runtime.clearDefaultSequence('chat', { expectedRevision: 3 })
+  assert.equal(cleared.binding.sequenceKey, null)
+  assert.equal(cleared.binding.revision, 4)
+  assert.equal(cleared.runtimeApplied, true)
+  await assert.rejects(
+    async () => runtime.complete([{ role: 'user', content: 'hello' }]),
+    (error) => error?.code === 'agent_sequence_unavailable',
+  )
+  runtime.close()
+})
+
+test('a missing control migration keeps the legacy ordered Provider catalog compatible', async () => {
+  const seen = []
+  const settingsStore = {
+    async loadSetting(kind) {
+      return kind === 'chat'
+        ? row('chat', {
+            source: 'database', revision: 1,
+            providers: [provider({
+              id: 'legacy-first', baseUrl: 'https://legacy-first.invalid/v1', authMode: 'none',
+            })],
+          })
+        : row('embedding')
+    },
+    async loadCredentialsInternal() { return new Map() },
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot() {
+      return {
+        controlAvailable: false,
+        sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
+        globalProxySequenceKey: null, proxyRevision: 0,
+      }
+    },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore,
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    fetchImpl: async (url) => {
+      seen.push(new URL(url).hostname)
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'legacy OK' } }] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    },
+  }).start()
+
+  const result = await runtime.complete([{ role: 'user', content: 'hello' }])
+  assert.equal(result.provider, 'legacy-first')
+  assert.equal(result.sequenceKey, null)
+  assert.deepEqual(seen, ['legacy-first.invalid'])
+  runtime.close()
+})
+
+test('embedding availability requires a governed default while explicit Sequence tests remain usable', async () => {
+  let fetchCalls = 0
+  const settingsStore = {
+    async loadSetting(kind) {
+      return kind === 'embedding'
+        ? row('embedding', {
+            source: 'database', revision: 1,
+            providers: [provider({
+              id: 'embedding-candidate', baseUrl: 'https://embedding-candidate.invalid/v1',
+              model: 'embedding-model', dimensions: 3, authMode: 'none',
+            })],
+            lockedEmbeddingModel: 'embedding-model',
+            lockedEmbeddingDimensions: 3,
+          })
+        : row('chat')
+    },
+    async loadCredentialsInternal() { return new Map() },
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot(kind) {
+      return {
+        controlAvailable: true,
+        sequences: kind === 'embedding' ? [{
+          sequenceKey: 'embedding-candidate-sequence', displayName: 'Embedding candidate',
+          kind: 'embedding', providerIds: ['embedding-candidate'], enabled: true,
+          source: 'database', providerRevision: 1, revision: 2,
+        }] : [],
+        defaultBinding: null,
+        proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0,
+      }
+    },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({
+      agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false },
+      embedding: { model: 'embedding-model', dimensions: 3 },
+    }),
+    settingsStore,
+    controlStore,
+    managedKinds: ['embedding'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    fetchImpl: async () => {
+      fetchCalls += 1
+      return new Response(JSON.stringify({ data: [{ index: 0, embedding: [0.1, 0.2, 0.3] }] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    },
+  }).start()
+
+  assert.equal(runtime.embeddings.available, false)
+  await assert.rejects(
+    async () => runtime.embed(['ordinary embedding']),
+    (error) => error?.status === 503 && error?.code === 'agent_sequence_unavailable',
+  )
+  assert.equal(fetchCalls, 0)
+  const probe = await runtime.testSequence('embedding-candidate-sequence', {
+    kind: 'embedding', expectedRevision: 2,
+  })
+  assert.equal(probe.providerId, 'embedding-candidate')
+  assert.equal(probe.dimensions, 3)
+  assert.equal(fetchCalls, 1)
   runtime.close()
 })
 
@@ -927,7 +1230,16 @@ test('an explicitly bound Proxy Sequence with no enabled endpoint fails closed',
     async ensureBootstrapSequence() {},
     async loadRuntimeSnapshot() {
       return {
-        sequences: [], defaultBinding: null,
+        controlAvailable: true,
+        sequences: [{
+          sequenceKey: 'chat-default', displayName: 'Chat default', kind: 'chat',
+          providerIds: ['primary'], enabled: true, source: 'database',
+          providerRevision: 1, revision: 1,
+        }],
+        defaultBinding: {
+          consumerKey: 'hub.chat.default', kind: 'chat',
+          sequenceKey: 'chat-default', revision: 1,
+        },
         proxyEndpoints: [{
           proxyKey: 'host-7890', displayName: 'Host 7890',
           proxyUrl: 'http://127.0.0.1:7890', enabled: false, revision: 2,
@@ -968,6 +1280,7 @@ test('Sequence say-hi refreshes current state and enforces Sequence revision CAS
   let failReads = false
   let fetchCalls = 0
   const snapshot = {
+    controlAvailable: true,
     sequences: [{
       sequenceKey: 'say-hi', displayName: 'Say hi', kind: 'chat',
       providerIds: ['primary'], enabled: true, source: 'database',
@@ -1030,12 +1343,13 @@ test('Sequence say-hi refreshes current state and enforces Sequence revision CAS
   runtime.close()
 })
 
-test('AgentRuntime imports a legacy environment provider and bootstraps its default Sequence once', async () => {
+test('AgentRuntime imports a legacy environment Provider and creates only a Compatibility Sequence candidate', async () => {
   const harness = databaseHarness()
   const bootstraps = []
   const controlStore = {
     async loadRuntimeSnapshot() {
       return {
+        controlAvailable: true,
         sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
         globalProxySequenceKey: null, proxyRevision: 0,
       }
@@ -1064,6 +1378,10 @@ test('AgentRuntime imports a legacy environment provider and bootstraps its defa
   assert.equal(runtime.status().settings.chat.source, 'database')
   assert.equal(runtime.status().chat[0].id, 'legacy-chat')
   assert.deepEqual(bootstraps, [{ kind: 'chat', providerIds: ['legacy-chat'], providerRevision: 1 }])
+  await assert.rejects(
+    async () => runtime.complete([{ role: 'user', content: 'hello' }]),
+    (error) => error?.code === 'agent_sequence_unavailable',
+  )
   runtime.close()
 })
 
@@ -1977,7 +2295,7 @@ test('admin provider PUT returns only the safe setting shape', async () => {
   }
 })
 
-test('Proxy DELETE routes require the admin token and preserve deferred runtime status', async () => {
+test('Agent default clear and Proxy DELETE routes require admin and preserve deferred runtime status', async () => {
   const calls = []
   const agent = {
     available: true,
@@ -1985,6 +2303,13 @@ test('Proxy DELETE routes require the admin token and preserve deferred runtime 
     async testSequence(sequenceKey, body) {
       calls.push({ type: 'say-hi', sequenceKey, body })
       return { ok: true, sequenceKey }
+    },
+    async clearDefaultSequence(kind, body) {
+      calls.push({ type: 'clear-default', kind, body })
+      return {
+        binding: { consumerKey: `hub.${kind}.default`, kind, sequenceKey: null, revision: body.expectedRevision + 1 },
+        runtimeApplied: false,
+      }
     },
     async deleteProxyEndpoint(proxyKey, body) {
       calls.push({ type: 'endpoint', proxyKey, body })
@@ -2019,13 +2344,26 @@ test('Proxy DELETE routes require the admin token and preserve deferred runtime 
       },
     )
     assert.equal(sayHi.status, 200)
+    const clearDefault = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/sequences/default`,
+      {
+        method: 'PUT',
+        headers: {
+          'content-type': 'application/json',
+          'x-mx-insight-admin-token': 'admin-token-for-proxy-delete',
+        },
+        body: JSON.stringify({ kind: 'chat', expectedRevision: 7 }),
+      },
+    )
+    assert.equal(clearDefault.status, 202)
+    assert.equal((await clearDefault.json()).data.binding.sequenceKey, null)
     const denied = await fetch(`${root}/endpoints/host-7890`, {
       method: 'DELETE',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ expectedRevision: 2 }),
     })
     assert.equal(denied.status, 401)
-    assert.equal(calls.length, 1)
+    assert.equal(calls.length, 2)
 
     const endpoint = await fetch(`${root}/endpoints/host-7890`, {
       method: 'DELETE',
@@ -2049,6 +2387,7 @@ test('Proxy DELETE routes require the admin token and preserve deferred runtime 
     assert.equal((await sequence.json()).data.runtimeApplied, false)
     assert.deepEqual(calls, [
       { type: 'say-hi', sequenceKey: 'say-hi', body: { kind: 'chat', expectedRevision: 7 } },
+      { type: 'clear-default', kind: 'chat', body: { kind: 'chat', expectedRevision: 7 } },
       { type: 'endpoint', proxyKey: 'host-7890', body: { expectedRevision: 2 } },
       { type: 'sequence', sequenceKey: 'agent-egress', body: { expectedRevision: 3 } },
     ])

@@ -2803,6 +2803,20 @@ export function createApp({
         sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
         return
       }
+      if (pathname === '/internal/v1/admin/agent/sequences/default' && request.method === 'PUT') {
+        requireAgentAdmin(principal)
+        if (typeof agent?.clearDefaultSequence !== 'function') {
+          throw new AppError(503, 'agent_control_unavailable', 'LLM Sequence settings require PostgreSQL')
+        }
+        const body = await readJson(request, 16 * 1024)
+        const data = await agent.clearDefaultSequence(
+          body?.kind,
+          body,
+          { updatedBy: 'admin-token' },
+        )
+        sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/agent/sequences/:sequenceKey')
       if (params && request.method === 'PUT') {
         requireAgentAdmin(principal)

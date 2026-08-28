@@ -521,7 +521,7 @@
           <h2 class="qp-section-title">Feedback</h2>
           <div class="demo-feedback-page">
             <section class="qp-panel">
-              <h3 class="qp-heading-2">Actionbar & Dialog</h3>
+              <h3 class="qp-heading-2">Actionbar & Confirm Dialog</h3>
               <div class="demo-action-grid">
                 <div class="qp-actionbar">
                   <button class="qp-actionbar__item" type="button">Open</button>
@@ -529,18 +529,47 @@
                   <button class="qp-actionbar__item" type="button">Duplicate</button>
                   <button class="qp-actionbar__item" type="button">Delete</button>
                 </div>
-                <div class="qp-dialog">
+                <div class="qp-dialog qp-dialog--danger">
                   <div class="qp-dialog__icon">!</div>
                   <div class="qp-dialog__body">
-                    <strong>Failed to import</strong>
-                    <p class="qp-body-2 qp-muted">Failed to import 32 files. PNG and JPEG are supported.</p>
+                    <strong>Delete provider?</strong>
+                    <p class="qp-body-2 qp-muted">MX OpenAI 02 will be permanently removed.</p>
                     <div class="qp-dialog__actions">
-                      <button class="qp-button qp-button--transparent" type="button">Cancel</button>
-                      <button class="qp-button qp-button--primary" type="button">OK</button>
+                      <button class="qp-button qp-button--ghost" type="button">Cancel</button>
+                      <button class="qp-button qp-button--danger" type="button">Delete provider</button>
                     </div>
                   </div>
                 </div>
               </div>
+            </section>
+            <section class="qp-panel">
+              <h3 class="qp-heading-2">Modal Anatomy · Add Provider</h3>
+              <p class="qp-body-2 qp-muted">Static visual specimen; the host application supplies focus and dismissal behavior.</p>
+              <section class="qp-modal qp-modal--medium" aria-label="Add provider modal visual specimen">
+                <header class="qp-modal__header">
+                  <div class="qp-modal__heading">
+                    <h2 class="qp-heading-2">Add provider</h2>
+                    <p class="qp-modal__description">Create a reusable LLM account for an LLM Sequence.</p>
+                  </div>
+                  <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="Close modal specimen">×</button>
+                </header>
+                <div class="qp-modal__body">
+                  <div class="demo-form-grid">
+                    <label class="qp-field">
+                      <span class="qp-field__label">Display name</span>
+                      <input class="qp-input" value="MX OpenAI 02" readonly />
+                    </label>
+                    <label class="qp-field">
+                      <span class="qp-field__label">Model</span>
+                      <input class="qp-input" value="gpt-5.5" readonly />
+                    </label>
+                  </div>
+                </div>
+                <footer class="qp-modal__footer">
+                  <button class="qp-button qp-button--ghost" type="button">Cancel</button>
+                  <button class="qp-button qp-button--primary" type="button">Create provider</button>
+                </footer>
+              </section>
             </section>
             <section class="qp-panel">
               <h3 class="qp-heading-2">Toasts</h3>

@@ -656,12 +656,36 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
   const [result, setResult] = useState<DryRunResult | null>(null)
   const [previousResult, setPreviousResult] = useState<DryRunResult | null>(null)
   const canEdit = session?.kind === 'admin-token'
+  const chatSequences = (agentControl.data?.control?.sequences || [])
+    .filter((sequence: any) => sequence.kind === 'chat' && sequence.enabled)
+  const chatDefaultBinding = (agentControl.data?.control?.bindings || [])
+    .find((binding: any) => binding.kind === 'chat' && binding.sequenceKey)
+  const chatDefaultSequence = chatSequences
+    .find((sequence: any) => sequence.sequenceKey === chatDefaultBinding?.sequenceKey)
+  const chatDefaultReady = Boolean(chatDefaultSequence)
+    && chatDefaultSequence.providerRevision === Number(agentControl.data?.settings?.chat?.revision ?? 0)
   const chatSequenceOptions = useMemo(() => [
-    { value: '', label: '全局默认 LLM Sequence' },
-    ...((agentControl.data?.control?.sequences || [])
-      .filter((sequence: any) => sequence.kind === 'chat' && sequence.enabled)
-      .map((sequence: any) => ({ value: sequence.sequenceKey, label: `${sequence.displayName} · ${sequence.sequenceKey}` }))),
-  ], [agentControl.data])
+    {
+      value: '',
+      label: chatDefaultReady
+        ? `使用业务默认：${chatDefaultSequence.displayName}`
+        : '未设置可用的业务默认（模型阶段确定性降级）',
+      description: chatDefaultReady
+        ? `显式绑定 ${chatDefaultSequence.sequenceKey}`
+        : '不会自动使用第一个 Provider 或 Sequence。',
+    },
+    ...chatSequences.map((sequence: any) => ({
+      value: sequence.sequenceKey,
+      label: `${sequence.displayName} · ${sequence.sequenceKey}`,
+      description: sequence.providerRevision === Number(agentControl.data?.settings?.chat?.revision ?? 0)
+        ? '已匹配当前 Provider revision'
+        : 'Provider 已变化；运行前需要重新验证',
+      disabled: sequence.providerRevision !== Number(agentControl.data?.settings?.chat?.revision ?? 0),
+    })),
+  ], [agentControl.data, chatDefaultReady, chatDefaultSequence, chatSequences])
+  const chatSequenceHint = chatDefaultReady
+    ? '保留此项会使用 Agent 中心显式设置的 Chat 业务默认；显式选择其他 Sequence 时 fail-closed。'
+    : '当前没有可用的 Chat 业务默认；保留此项时模型阶段确定性降级，也可显式选择已验证 Sequence。'
 
   useEffect(() => {
     if (!remote.data) return
@@ -819,7 +843,7 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
           <Panel title="运行实验" subtitle="运行使用当前未保存草稿的不可变快照。">
             <DropdownField
               label="LLM Sequence"
-              hint="默认项跟随 Agent 中心的全局 Chat Sequence；显式选择会 fail-closed，不会偷换为其他链。"
+              hint={chatSequenceHint}
               value={sequenceKey}
               onChange={setSequenceKey}
               options={chatSequenceOptions as never[]}

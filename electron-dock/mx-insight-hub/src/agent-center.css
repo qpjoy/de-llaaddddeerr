@@ -13,6 +13,36 @@
   min-width: 0;
 }
 
+.mih-agent-defaults {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 18px;
+}
+
+.mih-agent-defaults > div {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid var(--qp-line);
+  border-radius: 12px;
+  background: var(--qp-bg-2);
+}
+
+.mih-agent-defaults > div > span:first-child {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 3px;
+}
+
+.mih-agent-defaults small {
+  color: var(--qp-text-3);
+  overflow-wrap: anywhere;
+}
+
 .mih-agent-center-list {
   display: grid;
   gap: 8px;
@@ -355,6 +385,7 @@
 }
 
 @media (max-width: 680px) {
+  .mih-agent-defaults,
   .mih-agent-center-form-grid {
     grid-template-columns: 1fr;
   }

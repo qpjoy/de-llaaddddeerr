@@ -532,12 +532,30 @@ export function DropdownField({
   )
 }
 
-export function Modal({ title, description, children, footer, onClose, size = 'medium', closeOnBackdrop = true }) {
+export function Modal({
+  title,
+  description,
+  children,
+  footer,
+  onClose,
+  size = 'medium',
+  closeOnBackdrop = true,
+  closeOnEscape = true,
+  role = 'dialog',
+  busy = false,
+  showClose = true,
+  initialFocusRef,
+}) {
   const titleId = useId()
+  const descriptionId = useId()
   const dialogRef = useRef(null)
   const onCloseRef = useRef(onClose)
+  const busyRef = useRef(busy)
+  const closeOnEscapeRef = useRef(closeOnEscape)
   const returnFocusRef = useRef(null)
   onCloseRef.current = onClose
+  busyRef.current = busy
+  closeOnEscapeRef.current = closeOnEscape
 
   useEffect(() => {
     returnFocusRef.current = document.activeElement
@@ -555,7 +573,7 @@ export function Modal({ title, description, children, footer, onClose, size = 'm
       if (event.defaultPrevented) return
       if (event.key === 'Escape') {
         event.preventDefault()
-        onCloseRef.current()
+        if (!busyRef.current && closeOnEscapeRef.current) onCloseRef.current?.()
         return
       }
       if (event.key !== 'Tab' || !dialog) return
@@ -577,7 +595,7 @@ export function Modal({ title, description, children, footer, onClose, size = 'm
     }
     document.addEventListener('keydown', onKeyDown)
     const frame = window.requestAnimationFrame(() => {
-      const initial = dialog?.querySelector('[autofocus]') || focusableElements()[0] || dialog
+      const initial = initialFocusRef?.current || dialog?.querySelector('[autofocus]') || focusableElements()[0] || dialog
       initial?.focus()
     })
     return () => {
@@ -589,23 +607,74 @@ export function Modal({ title, description, children, footer, onClose, size = 'm
   }, [])
 
   return (
-    <div className="mih-modal-backdrop" role="presentation" onMouseDown={(event) => {
-      if (closeOnBackdrop && event.target === event.currentTarget) onClose()
+    <div className="qp-modal-backdrop mih-modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (!busy && closeOnBackdrop && event.target === event.currentTarget) onClose?.()
     }}>
-      <section ref={dialogRef} className={`mih-modal mih-modal--${size}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
-        <header className="mih-modal__header">
-          <div>
+      <section
+        ref={dialogRef}
+        className={`qp-modal qp-modal--${size} mih-modal mih-modal--${size}`}
+        role={role}
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={description ? descriptionId : undefined}
+        aria-busy={busy || undefined}
+        tabIndex={-1}
+      >
+        <header className="qp-modal__header mih-modal__header">
+          <div className="qp-modal__heading">
             <h2 id={titleId}>{title}</h2>
-            {description ? <p>{description}</p> : null}
+            {description ? <p id={descriptionId} className="qp-modal__description">{description}</p> : null}
           </div>
-          <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="关闭" onClick={onClose}>
-            <X size={18} aria-hidden="true" />
-          </button>
+          {showClose ? (
+            <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="关闭" onClick={onClose} disabled={busy}>
+              <X size={18} aria-hidden="true" />
+            </button>
+          ) : null}
         </header>
-        <div className="mih-modal__body">{children}</div>
-        {footer ? <footer className="mih-modal__footer">{footer}</footer> : null}
+        <div className="qp-modal__body mih-modal__body">{children}</div>
+        {footer ? <footer className="qp-modal__footer mih-modal__footer">{footer}</footer> : null}
       </section>
     </div>
+  )
+}
+
+export function ConfirmDialog({
+  title,
+  description,
+  children,
+  confirmLabel = '确认',
+  cancelLabel = '取消',
+  tone = 'danger',
+  busy = false,
+  onConfirm,
+  onCancel,
+}) {
+  const cancelRef = useRef(null)
+  const confirmClassName = tone === 'danger' ? 'qp-button--danger' : 'qp-button--primary'
+
+  return (
+    <Modal
+      title={title}
+      description={description}
+      size="small"
+      role="alertdialog"
+      busy={busy}
+      closeOnBackdrop={false}
+      initialFocusRef={cancelRef}
+      onClose={onCancel}
+      footer={(
+        <>
+          <button ref={cancelRef} className="qp-button qp-button--ghost" type="button" autoFocus disabled={busy} onClick={onCancel}>
+            {cancelLabel}
+          </button>
+          <button className={`qp-button ${confirmClassName}`} type="button" disabled={busy} onClick={onConfirm}>
+            {confirmLabel}
+          </button>
+        </>
+      )}
+    >
+      {children}
+    </Modal>
   )
 }
 
