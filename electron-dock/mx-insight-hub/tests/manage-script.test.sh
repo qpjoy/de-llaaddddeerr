@@ -1380,10 +1380,15 @@ assert_eq \
 
 assert_eq \
   "3" \
-  "$(printf '%s' "$dockerfile_source" | grep -Fc 'FROM node:22.21.1-bookworm-slim')" \
-  "all image stages pin a Node release with stable native TypeScript stripping"
+  "$(printf '%s' "$dockerfile_source" | grep -Fc 'FROM node:22-bookworm-slim')" \
+  "all image stages reuse the deploy-compatible Node 22 base tag"
 
 assert_eq \
   "1" \
-  "$(printf '%s' "$dockerfile_source" | grep -Fc 'RUN node -e')" \
+  "$(printf '%s' "$dockerfile_source" | grep -Fc 'requires Node >=22.18 for native TypeScript')" \
+  "the build rejects a cached Node image without default-enabled native TypeScript stripping"
+
+assert_eq \
+  "1" \
+  "$(printf '%s' "$dockerfile_source" | grep -Fc "import('./server/index.mjs')")" \
   "runtime image imports the full server entrypoint before deployment"

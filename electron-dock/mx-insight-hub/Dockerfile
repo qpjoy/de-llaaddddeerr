@@ -1,8 +1,13 @@
 # syntax=docker/dockerfile:1.7
-FROM node:22.21.1-bookworm-slim AS build
+# Keep the Node 22 line instead of an exact patch tag so existing deployment
+# caches remain eligible rather than forcing a new base-image pull. Native
+# TypeScript still has a hard minimum, enforced immediately below.
+FROM node:22-bookworm-slim AS build
 # Default to the China npm mirror so the build needs no oversea proxy.
 # Override with --build-arg NPM_REGISTRY=https://registry.npmjs.org if desired.
 ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+RUN node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 18)) throw new Error('mx-insight-hub requires Node >=22.18 for native TypeScript')"
 
 WORKDIR /workspace/mx-insight-hub
 COPY --from=ui_design package.json /workspace/mx-launcher/ui-design/package.json
@@ -21,7 +26,7 @@ COPY --from=mx_common migrations /workspace/mx-common/migrations
 COPY . ./
 RUN npm run build
 
-FROM node:22.21.1-bookworm-slim AS production-dependencies
+FROM node:22-bookworm-slim AS production-dependencies
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 
 # mx-common is a `file:` dependency, so npm links it rather than copying it, and
@@ -57,7 +62,7 @@ RUN npm ci --omit=dev --registry="$NPM_REGISTRY" \
       --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=300000 \
  && npm cache clean --force
 
-FROM node:22.21.1-bookworm-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     MX_INSIGHT_HOST=0.0.0.0 \
     MX_INSIGHT_PORT=18180
