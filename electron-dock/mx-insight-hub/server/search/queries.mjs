@@ -715,6 +715,7 @@ export class SearchQueries {
     searchProfile = null,
     strictRelevance = undefined,
     trackTotalHits = false,
+    oneShot = false,
     sort = 'relevance',
     publicOpinionVisibility = null,
   } = {}) {
@@ -730,17 +731,21 @@ export class SearchQueries {
     if (cursor && normalizedOffset != null) {
       throw new AppError(400, 'incompatible_search_pagination', 'Search cursor and offset cannot be used together')
     }
+    if (cursor && oneShot) {
+      throw new AppError(400, 'incompatible_search_pagination', 'One-shot search does not accept a cursor')
+    }
     if (!this.client && cursor?.mode === 'elasticsearch') {
       throw new AppError(503, 'search_cursor_unavailable', 'Elasticsearch is unavailable; retry the same cursor later')
     }
     if (!this.client || cursor?.mode === 'postgres') {
-      return this.#searchContentPostgres(query, {
+      const result = await this.#searchContentPostgres(query, {
         platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
         fromTime, toTime, limit, cursor, offset: normalizedOffset,
         includeTotal: trackTotalHits || normalizedOffset != null,
         requestedProfile,
         publicOpinionVisibility,
       })
+      return oneShot ? { ...result, nextCursor: null } : result
     }
     let pitId = cursor?.pitId ?? null
     try {
@@ -758,13 +763,14 @@ export class SearchQueries {
         this.logger?.warn?.(
           `[search] ${CONTENT_INDEX_SCHEMA} is not active; using PostgreSQL public-opinion visibility`,
         )
-        return this.#searchContentPostgres(query, {
+        const result = await this.#searchContentPostgres(query, {
           platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
           fromTime, toTime, limit, cursor: null, offset: normalizedOffset,
           includeTotal: trackTotalHits || normalizedOffset != null,
           requestedProfile,
           publicOpinionVisibility,
         })
+        return oneShot ? { ...result, nextCursor: null } : result
       }
       if (!pitId) {
         await this.#assertProfileIndexReady(requestedProfile)
@@ -872,13 +878,13 @@ export class SearchQueries {
       const currentPitId = response.pit_id ?? pitId
       // Offset pages do not hand the PIT back to the caller, so always close
       // their one-request snapshot instead of leaking it until the TTL.
-      if (normalizedOffset != null || !hasMore) await this.#closeSearchPit(currentPitId)
+      if (normalizedOffset != null || oneShot || !hasMore) await this.#closeSearchPit(currentPitId)
       return {
         mode: 'elasticsearch',
         total,
         totalRelation: response.hits?.total?.relation ?? 'eq',
         hasMore,
-        nextCursor: hasMore && normalizedOffset == null ? {
+        nextCursor: hasMore && normalizedOffset == null && !oneShot ? {
           mode: 'elasticsearch',
           pitId: currentPitId,
           searchAfter: pageHits.at(-1)?.sort,
@@ -910,13 +916,14 @@ export class SearchQueries {
       }
       if (error instanceof ElasticsearchUnavailableError) {
         this.logger?.warn?.('[search] Elasticsearch unavailable; falling back to PostgreSQL content search')
-        return this.#searchContentPostgres(query, {
+        const result = await this.#searchContentPostgres(query, {
           platform, platforms, datasetId, datasetIds, objectType, authorExternalId, chatId,
           fromTime, toTime, limit, cursor: null, offset: normalizedOffset,
           includeTotal: trackTotalHits || normalizedOffset != null,
           requestedProfile,
           publicOpinionVisibility,
         })
+        return oneShot ? { ...result, nextCursor: null } : result
       }
       throw error
     }

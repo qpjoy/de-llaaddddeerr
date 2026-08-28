@@ -12,6 +12,9 @@ import {
 } from './public-docs.mjs'
 import { publicStoredSearchItem } from './data/stored-search.mjs'
 import { normalizeChinaProvince } from './data/china-provinces.mjs'
+import { ADVANCED_SEARCH_AGENT_KEY } from '../agent-market/advanced-search/schemas.ts'
+import { runAdvancedSearchDryRun } from './agent-market/runner.ts'
+import { builtinAdvancedSearchSnapshot } from './agent-market/store.ts'
 import {
   normalizeSourceCatalogCreate,
   normalizeSourceCatalogOwnerCreate,
@@ -350,6 +353,7 @@ export function createApp({
   telegramSourcePreparer = null,
   agent = null,
   agentPipelines = null,
+  agentMarket = null,
   search = null,
   searchReindex = null,
   embedding = null,
@@ -523,6 +527,12 @@ export function createApp({
   function requireAgentAdmin(principal) {
     if (principal?.kind !== 'admin-token') {
       throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may change model providers')
+    }
+  }
+
+  function requireAgentMarketAdmin(principal) {
+    if (principal?.kind !== 'admin-token') {
+      throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may save or run Agent Market drafts')
     }
   }
 
@@ -2658,6 +2668,66 @@ export function createApp({
         })
         return
       }
+
+      // ---- Agent Market -------------------------------------------------
+      // This namespace is intentionally separate from production analysis
+      // tasks. A dry run calls only the read-side search object and the model
+      // router; it never reaches HubService reservations, queues or outbox.
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/agent-market') {
+        requirePlatformAdmin(principal)
+        const items = agentMarket
+          ? await agentMarket.listAgents()
+          : (() => {
+              const snapshot = builtinAdvancedSearchSnapshot()
+              return [{
+                ...snapshot,
+                activeStages: snapshot.definition.stages.filter((stage) => stage.state === 'active').length,
+                trashedStages: snapshot.definition.stages.filter((stage) => stage.state === 'trashed').length,
+              }]
+            })()
+        sendJson(response, 200, { data: items, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent-market/:agentKey/dry-run')
+      if (params && request.method === 'POST') {
+        requireAgentMarketAdmin(principal)
+        if (params.agentKey !== ADVANCED_SEARCH_AGENT_KEY) {
+          throw new AppError(404, 'agent_market_not_found', 'The Agent Market item was not found')
+        }
+        const data = await runAdvancedSearchDryRun({
+          body: await readJson(request, 256 * 1024),
+          search,
+          agent,
+        })
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent-market/:agentKey')
+      if (params && request.method === 'GET') {
+        requirePlatformAdmin(principal)
+        const data = agentMarket
+          ? await agentMarket.getAgent(params.agentKey)
+          : params.agentKey === ADVANCED_SEARCH_AGENT_KEY
+            ? builtinAdvancedSearchSnapshot()
+            : null
+        if (!data) throw new AppError(404, 'agent_market_not_found', 'The Agent Market item was not found')
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (params && request.method === 'PUT') {
+        requireAgentMarketAdmin(principal)
+        if (!agentMarket) {
+          throw new AppError(503, 'agent_market_store_unavailable', 'Saving Agent Market drafts requires PostgreSQL')
+        }
+        const data = await agentMarket.saveAgent(
+          params.agentKey,
+          await readJson(request, 256 * 1024),
+          { updatedBy: principal.memberId || principal.kind || 'admin-token' },
+        )
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
       params = routeMatch(pathname, '/internal/v1/admin/agent/providers/:kind/:providerId/test')
       if (params && request.method === 'POST') {
         requireAgentAdmin(principal)

@@ -536,6 +536,41 @@ test('offset content search asks Elasticsearch for an exact total and closes its
   )
 })
 
+test('one-shot content search closes its PIT without exact-count or cursor work', async () => {
+  const calls = []
+  const hits = [
+    searchHit('33333333-3333-4333-8333-333333333333', 9.5, '2026-08-03T00:00:00.000Z', 3),
+    searchHit('22222222-2222-4222-8222-222222222222', 8.5, '2026-08-02T00:00:00.000Z', 2),
+    searchHit('11111111-1111-4111-8111-111111111111', 7.5, '2026-08-01T00:00:00.000Z', 1),
+  ]
+  const client = {
+    async request(method, path, body) {
+      calls.push({ method, path, body })
+      if (path.includes('/_pit?')) return { id: 'pit-one-shot' }
+      if (path === '/_search') {
+        return { pit_id: 'pit-one-shot-renewed', hits: { total: { value: 10_000, relation: 'gte' }, hits } }
+      }
+      if (method === 'DELETE' && path === '/_pit') return { succeeded: true }
+      throw new Error(`unexpected ${method} ${path}`)
+    },
+  }
+
+  const result = await contentSearch({ client }).searchContent('人工智能', {
+    size: 2,
+    oneShot: true,
+  })
+  const search = calls.find((entry) => entry.path === '/_search')
+  assert.equal(search.body.size, 3, 'one-shot uses one extra hit rather than an exact count')
+  assert.equal(Object.hasOwn(search.body, 'track_total_hits'), false)
+  assert.equal(Object.hasOwn(search.body, 'from'), false)
+  assert.equal(result.hasMore, true)
+  assert.equal(result.nextCursor, null, 'a closed one-shot PIT is never returned as a cursor')
+  assert.deepEqual(
+    calls.find((entry) => entry.method === 'DELETE' && entry.path === '/_pit')?.body,
+    { id: 'pit-one-shot-renewed' },
+  )
+})
+
 test('offset search stays inside the Elasticsearch 10k result-window boundary', async () => {
   const calls = []
   const hits = Array.from({ length: 50 }, (_, index) => (

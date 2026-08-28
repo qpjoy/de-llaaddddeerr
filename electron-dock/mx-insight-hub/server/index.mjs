@@ -10,6 +10,7 @@ import { HubService } from './hub-service.mjs'
 import { createAgentRuntime } from './agent/runtime.mjs'
 import { AgentSettingsStore } from './agent/settings-store.mjs'
 import { AgentPipelineStore } from './agent/pipeline-store.mjs'
+import { AgentMarketStore } from './agent-market/store.ts'
 import { createSearch } from './search/index.mjs'
 import { AdminSearchReindex } from './search/admin-reindex.mjs'
 import { EmbeddingPipeline } from './embedding/pipeline.mjs'
@@ -63,6 +64,9 @@ export async function createRuntime(config = loadConfig()) {
   const agentPipelines = pool && config.listenerMode !== 'public'
     ? new AgentPipelineStore(pool)
     : null
+  const agentMarket = pool && config.listenerMode !== 'public'
+    ? new AgentMarketStore(pool)
+    : null
   const agent = await createAgentRuntime({
     config,
     settingsStore: agentSettings,
@@ -107,6 +111,7 @@ export async function createRuntime(config = loadConfig()) {
     telegramSourcePreparer,
     agent,
     agentPipelines,
+    agentMarket,
     search,
     searchReindex,
     embedding,
@@ -120,7 +125,7 @@ export async function createRuntime(config = loadConfig()) {
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
-    agentPipelines,
+    agentPipelines, agentMarket,
     search, searchReindex, embedding,
   }
 }

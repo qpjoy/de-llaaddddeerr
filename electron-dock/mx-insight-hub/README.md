@@ -12,6 +12,14 @@ object/cloud adapters, a generic CDC connector, freshness-aware live fallback,
 BI datasets and governed Text2SQL/Data Agent tools remain later delivery gates
 rather than implied capabilities.
 
+The Internal Admin console now also contains one versioned [Agent Market
+advanced-search dry-run](docs/architecture/agent-market-advanced-search.md)
+example. It exposes editable stage prompts/parameters, Zod contracts, return
+examples, trace/evaluation and a recoverable stage trash while reading the
+current PG/ES search plane without writing business data. It is a learning and
+shadow-experiment surface, not a replacement for public search or the
+production analysis pipeline.
+
 It is an independently deployed product module and a sibling of `mx-launcher`, not a Night-All fork and not an embedded Launcher database/service:
 
 - **Night-All** owns providers, collection, normalization, source evidence, and upstream credentials.

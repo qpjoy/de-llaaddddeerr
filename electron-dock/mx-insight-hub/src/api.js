@@ -428,6 +428,21 @@ export const adminApi = {
   backfill: (token) => request(token, `${ADMIN_ROOT}/backfill`),
   startBackfill: (token, body) => request(token, `${ADMIN_ROOT}/backfill`, { method: 'POST', body }),
   agent: (token) => request(token, `${ADMIN_ROOT}/agent`),
+  agentMarket: (token) => request(token, `${ADMIN_ROOT}/agent-market`),
+  agentMarketItem: (token, agentKey) => request(
+    token,
+    `${ADMIN_ROOT}/agent-market/${encodeURIComponent(agentKey)}`,
+  ),
+  saveAgentMarketItem: (token, agentKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-market/${encodeURIComponent(agentKey)}`,
+    { method: 'PUT', body },
+  ),
+  runAgentMarketDryRun: (token, agentKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-market/${encodeURIComponent(agentKey)}/dry-run`,
+    { method: 'POST', body },
+  ),
   updateAgentProviders: (token, kind, body) => request(
     token,
     `${ADMIN_ROOT}/agent/providers/${encodeURIComponent(kind)}`,

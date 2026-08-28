@@ -37,6 +37,7 @@ export function createSearch({ pool, config, logger = console }) {
     dimensions: config.embedding?.dimensions,
     numberOfReplicas: config.elasticsearch.numberOfReplicas,
   })
+  const queries = new SearchQueries({ pool, client, segmenter, indexSet, chunkIndexSet: chunks, logger })
 
   return {
     client,
@@ -48,7 +49,14 @@ export function createSearch({ pool, config, logger = console }) {
     // a time so an interactive search never queues behind a rebuild's fan-out.
     segmenterConcurrency: config.segmenter?.concurrency || 1,
     segmenterBatchSize: config.segmenter?.batchSize || 64,
-    queries: new SearchQueries({ pool, client, segmenter, indexSet, chunkIndexSet: chunks, logger }),
+    queries,
+    // Agent Market shadow runs compare the rebuildable ES projection with PG
+    // canonical truth. Keeping the PG-only reader explicit avoids private
+    // method access or a second query implementation; ordinary search keeps
+    // using `queries` and is unchanged.
+    postgresQueries: client
+      ? new SearchQueries({ pool, client: null, segmenter, indexSet, chunkIndexSet: chunks, logger })
+      : queries,
     projector: client
       ? new SearchProjector({ pool, client, segmenter, indexSet, logger })
       : null,

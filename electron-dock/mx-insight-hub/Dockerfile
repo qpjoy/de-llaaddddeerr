@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM node:22-bookworm-slim AS build
+FROM node:22.21.1-bookworm-slim AS build
 # Default to the China npm mirror so the build needs no oversea proxy.
 # Override with --build-arg NPM_REGISTRY=https://registry.npmjs.org if desired.
 ARG NPM_REGISTRY=https://registry.npmmirror.com
@@ -21,7 +21,7 @@ COPY --from=mx_common migrations /workspace/mx-common/migrations
 COPY . ./
 RUN npm run build
 
-FROM node:22-bookworm-slim AS production-dependencies
+FROM node:22.21.1-bookworm-slim AS production-dependencies
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 
 # mx-common is a `file:` dependency, so npm links it rather than copying it, and
@@ -57,7 +57,7 @@ RUN npm ci --omit=dev --registry="$NPM_REGISTRY" \
       --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=300000 \
  && npm cache clean --force
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:22.21.1-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     MX_INSIGHT_HOST=0.0.0.0 \
     MX_INSIGHT_PORT=18180
@@ -68,10 +68,15 @@ WORKDIR /app
 COPY --from=production-dependencies /mx-common /mx-common
 COPY --from=build /workspace/mx-insight-hub/package.json ./package.json
 COPY --from=production-dependencies /app/node_modules ./node_modules
+COPY --from=build /workspace/mx-insight-hub/agent-market ./agent-market
 COPY --from=build /workspace/mx-insight-hub/server ./server
 COPY --from=build /workspace/mx-insight-hub/migrations ./migrations
 COPY --from=build /workspace/mx-insight-hub/dist ./dist
 COPY --from=build /workspace/mx-insight-hub/public ./public
+# Agent Market intentionally uses Node's native TypeScript type stripping.
+# Import the full entrypoint while building the image so a missing source tree,
+# unsupported TypeScript construct or stale Node base fails before deployment.
+RUN node -e "import('./server/index.mjs')"
 # Use the numeric UID/GID of the base image's `node` user (1000:1000).
 # Kubernetes `runAsNonRoot` cannot verify a non-numeric username, so a numeric
 # USER here lets the image satisfy that check without relying on runAsUser.

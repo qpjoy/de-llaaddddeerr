@@ -1,6 +1,6 @@
 # MX Insight Hub design index
 
-Last reviewed: 2026-08-26.
+Last reviewed: 2026-08-28.
 
 This directory is the source of truth for MX Insight Hub. Night-All-specific implementation details remain in the Night-All repository; this project records only the stable dependency contract and ownership boundary.
 
@@ -22,6 +22,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 | Telegram SQLite read API | `telegram.sqlite.chats.v1` and `telegram.sqlite.messages.v1` are a separate fixed, Admin-managed GET-only pipeline. It preserves raw JSON and deletion-marked rows in PostgreSQL, uses deterministic identities and Hub transaction idempotency, and performs an initial/manual full alignment followed by append-oriented overlap polling plus a bounded previous-day window at 02:00 Asia/Shanghai. It never schedules an automatic historical full scan and is not merged into the PostgreSQL public Telegram datasets. |
 | Nationwide province public opinion | Repository implementation, default paused: the fixed PostgreSQL source, province hot/latest/detail/coverage boundary, append-only raw source revisions and a source-revision-anchored rule/Agent analysis pipeline are defined. Additive P1 contracts provide a stable 34-province catalog and a bounded nationwide-or-province region feed for `CN` or one exact catalog code. The feed is fixed to `visibility=all_ingested`, `sort=latest` and required `from`/`to`, and requires both the `public_opinion` platform grant and non-default `public_opinion.all_ingested.read` capability. Its `canonical_current_safe` corpus includes unclassified, unscored and rejected current records, while excluding raw rows, history, deleted records and records without a revision-fenced current publication state. Existing province/coverage/detail/search APIs are unchanged; city catalog/feed is P2. Night-All migration `042_monitor_strategy_results_hub_watermark.sql` provides the ordered writer contract; additive migration `043_monitor_strategy_result_source_stage.sql` lets the existing result table carry `formal` and gated `candidate` source rows without creating a second product table. Hub migration 035 owns revision-fenced publication, quality and geography state and content-v5 projects only bounded typed fields; raw assertions and provider evidence remain private. Rollout must install and verify Hub 035 plus formal-only serving gates first, then apply Night-All 042/043 to its database and upgrade every Night-All reader while the writer gate stays off; only after old readers have drained may operators enable the candidate writer and, separately, the paused Hub analysis pipeline. No environment rollout, upstream connection, data import, provider setup or consumer grant is implied. |
 | Search/retrieval | Canonical projection outbox, projector, unified cross-platform stored search, strict Chinese relevance, PostgreSQL degradation paths, Admin semantic search and a guarded Admin-plane reindex operation are implemented. The repository includes versioned allowlisted profiles and the content-v5 mapping; each deployed environment remains gated on its strict blue/green index validation. Elasticsearch remains rebuildable and is not required for canonical/history availability. |
+| Agent Market | Implemented as an Internal Admin-only learning/dry-run slice with one advanced-search example: editable per-stage prompts and model parameters, Zod/JSON Schema contracts and examples, explicit trace/evaluation, recoverable stage trash, read-only PG/ES/semantic retrieval, bounded corrective retry and grounded citations/refusal. Saving definitions is Admin-Token-only and revisioned; dry runs make zero business-data writes and do not alter public search, production analysis pipelines, Launcher login or MX-H2I networking. |
 | Private/public DNS routes | Deliberately not auto-created. They require route/TLS review and a deployed public Service. |
 | Billing, BI and Data Agent | Designed as later phases; the MVP has mutable request/usage evidence, not an append-only billing ledger or invoice engine. |
 | Backup/PITR and ELK/SLO | Target runbooks are documented but automation/exporters are not implemented yet; these remain production release gates. |
@@ -94,8 +95,9 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 25. [Backup and restore](operations/backup-restore.md)
 26. [Observability and SLO](operations/observability-slo.md)
 27. [BI and Data Agent evolution](architecture/bi-and-data-agent-evolution.md)
-28. [Agent provider settings](operations/agent-provider-settings.md)
-29. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
+28. [Agent Market advanced-search dry run](architecture/agent-market-advanced-search.md)
+29. [Agent provider settings](operations/agent-provider-settings.md)
+30. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
 
 ## Decisions
 

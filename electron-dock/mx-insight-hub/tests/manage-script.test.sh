@@ -1372,3 +1372,18 @@ for stage_marker in "/workspace/mx-common/src" "COPY --from=mx_common src ./src"
     "$([ "$source_line" -gt "$install_line" ] && echo after || echo before)" \
     "shared source (${stage_marker}) is copied after the first npm ci"
 done
+
+assert_eq \
+  "1" \
+  "$(printf '%s' "$dockerfile_source" | grep -Fc 'COPY --from=build /workspace/mx-insight-hub/agent-market ./agent-market')" \
+  "runtime image includes the code-owned Agent Market contracts imported at startup"
+
+assert_eq \
+  "3" \
+  "$(printf '%s' "$dockerfile_source" | grep -Fc 'FROM node:22.21.1-bookworm-slim')" \
+  "all image stages pin a Node release with stable native TypeScript stripping"
+
+assert_eq \
+  "1" \
+  "$(printf '%s' "$dockerfile_source" | grep -Fc 'RUN node -e')" \
+  "runtime image imports the full server entrypoint before deployment"

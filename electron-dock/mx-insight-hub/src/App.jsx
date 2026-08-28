@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Brain,
   Books,
@@ -23,11 +23,12 @@ import {
   SignOut,
   Users,
   Stack,
+  Storefront,
   Sun,
   X,
 } from '@phosphor-icons/react'
 import { adminApi, signInWithLauncher } from './api.js'
-import { ErrorState, Field, THEME_CHANGE_EVENT, ToastStack } from './components.jsx'
+import { ErrorState, Field, LoadingState, THEME_CHANGE_EVENT, ToastStack } from './components.jsx'
 import {
   ApiKeysPage,
   ConsumersPage,
@@ -44,6 +45,18 @@ import {
   TelegramPage,
 } from './pages-data-products.jsx'
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
+
+const LazyAgentMarketPage = lazy(() => import('./pages-agent-market.tsx').then((module) => ({
+  default: module.AgentMarketPage,
+})))
+
+function AgentMarketRoute(props) {
+  return (
+    <Suspense fallback={<LoadingState label="正在加载 Agent Market" />}>
+      <LazyAgentMarketPage {...props} />
+    </Suspense>
+  )
+}
 
 const SESSION_KEY = 'mx-insight-hub.admin-token'
 const THEME_KEY = 'mx-insight-hub.theme'
@@ -72,6 +85,7 @@ const ROUTES = [
   { path: '/sources', label: '数据清洗计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
+  { path: '/agent-market', label: 'Agent Market', description: '可编辑、可观测的 Agent 示例', icon: Storefront, group: '数据平面', component: AgentMarketRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/agent', label: '中心 Agent', description: '模型链路与降级', icon: Brain, group: '数据平面', component: AgentPage, capability: 'membership.write', platformAdmin: true },
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
   { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read' },

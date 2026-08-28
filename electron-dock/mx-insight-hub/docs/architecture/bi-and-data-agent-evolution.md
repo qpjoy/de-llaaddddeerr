@@ -2,6 +2,12 @@
 
 MX Insight Hub starts as a governed data API, then grows into an intelligent BI and Agent center without moving Night-All’s collection responsibilities.
 
+The current [Agent Market advanced-search dry run](agent-market-advanced-search.md)
+is an incremental learning surface for prompt, schema, tool and trace behavior.
+It deliberately does not claim delivery of the tenant-facing Query Service,
+Text2SQL, Agent identity, approval, export, replay ledger or production publish
+workflow described below.
+
 ## Phase 1: governed data access
 
 - stable capabilities and search contract;
