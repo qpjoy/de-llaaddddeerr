@@ -559,9 +559,10 @@ discover_hanlp_url() {
   export MX_COMMON_HANLP_URL
 }
 
-# Probe through the non-hostNetwork projector and the Service DNS, not through
-# HanLP localhost or a node-IP client. This verifies the namespace label, DNS
-# and mx-common NetworkPolicy contract that production tokenization uses.
+# Probe from the production projector through HanLP Service DNS. The current
+# single-node profile gives that worker hostNetwork so it can also reach a
+# node-local LLM proxy; this smoke therefore verifies DNS and the HanLP handler,
+# not namespaceSelector enforcement for ordinary pod-network traffic.
 verify_hanlp_from_hub() {
   [ -n "${MX_COMMON_HANLP_URL:-}" ] || return 0
   if [ "${MX_INSIGHT_SEARCH_READY:-0}" != "1" ]; then
@@ -763,6 +764,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_PROVINCE_PAGE_DELAY_MS="$province_page_delay_ms" \
     --from-literal=MX_INSIGHT_AGENT_PROVIDERS="${MX_INSIGHT_AGENT_PROVIDERS:-}" \
     --from-literal=MX_INSIGHT_EMBEDDING_PROVIDERS="${MX_INSIGHT_EMBEDDING_PROVIDERS:-}" \
+    --from-literal=MX_INSIGHT_AGENT_AUTO_MIGRATE="${MX_INSIGHT_AGENT_AUTO_MIGRATE:-1}" \
     --dry-run=client -o yaml | kubectl apply -f -
 
   kubectl -n "$namespace" create secret generic mx-insight-hub-secrets \

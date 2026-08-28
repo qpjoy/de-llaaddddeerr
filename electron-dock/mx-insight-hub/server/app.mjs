@@ -2662,6 +2662,9 @@ export function createApp({
             // The circuit state per provider is the operationally useful part:
             // it shows when the chain is quietly running on a fallback.
             ...(agent?.status() ?? {}),
+            control: typeof agent?.controlStatus === 'function'
+              ? await agent.controlStatus()
+              : { sequences: [], bindings: [], providerTests: [], proxy: { endpoints: [], sequences: [], globalSequenceKey: null, revision: 0 } },
             pipelines: pipelineData,
           },
           requestId,
@@ -2741,6 +2744,20 @@ export function createApp({
         sendJson(response, 200, { data, requestId })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/agent/providers/:kind/:providerId/reveal')
+      if (params && request.method === 'POST') {
+        requireAgentAdmin(principal)
+        if (typeof agent?.revealProviderCredential !== 'function') {
+          throw new AppError(503, 'agent_settings_unavailable', 'Provider credentials require PostgreSQL')
+        }
+        const body = await readJson(request, 16 * 1024)
+        if (!adminToken || typeof body?.adminToken !== 'string' || !secureEqual(body.adminToken, adminToken)) {
+          throw new AppError(403, 'admin_token_reauthentication_required', 'Re-enter the Hub admin token to reveal this key')
+        }
+        const data = await agent.revealProviderCredential(params.kind, params.providerId)
+        sendJson(response, 200, { data, requestId })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/agent/providers/:kind')
       if (params && request.method === 'PUT') {
         requireAgentAdmin(principal)
@@ -2756,6 +2773,82 @@ export function createApp({
           data,
           requestId,
         })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/agent/sequences/:sequenceKey/test')
+      if (params && request.method === 'POST') {
+        requireAgentAdmin(principal)
+        if (typeof agent?.testSequence !== 'function') {
+          throw new AppError(503, 'agent_control_unavailable', 'LLM Sequence testing requires PostgreSQL')
+        }
+        const body = await readJson(request, 16 * 1024)
+        const data = await agent.testSequence(params.sequenceKey, { kind: body?.kind })
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent/sequences/:sequenceKey/default')
+      if (params && request.method === 'PUT') {
+        requireAgentAdmin(principal)
+        if (typeof agent?.setDefaultSequence !== 'function') {
+          throw new AppError(503, 'agent_control_unavailable', 'LLM Sequence settings require PostgreSQL')
+        }
+        const body = await readJson(request, 16 * 1024)
+        const data = await agent.setDefaultSequence(
+          body?.kind,
+          params.sequenceKey,
+          body,
+          { updatedBy: 'admin-token' },
+        )
+        sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent/sequences/:sequenceKey')
+      if (params && request.method === 'PUT') {
+        requireAgentAdmin(principal)
+        if (typeof agent?.saveSequence !== 'function') {
+          throw new AppError(503, 'agent_control_unavailable', 'LLM Sequence settings require PostgreSQL')
+        }
+        const data = await agent.saveSequence(
+          params.sequenceKey,
+          await readJson(request, 64 * 1024),
+          { updatedBy: 'admin-token' },
+        )
+        sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/agent/proxies/endpoints/:proxyKey')
+      if (params && request.method === 'PUT') {
+        requireAgentAdmin(principal)
+        const data = await agent.saveProxyEndpoint(
+          params.proxyKey,
+          await readJson(request, 32 * 1024),
+          { updatedBy: 'admin-token' },
+        )
+        sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/agent/proxies/sequences/:sequenceKey')
+      if (params && request.method === 'PUT') {
+        requireAgentAdmin(principal)
+        const data = await agent.saveProxySequence(
+          params.sequenceKey,
+          await readJson(request, 32 * 1024),
+          { updatedBy: 'admin-token' },
+        )
+        sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
+        return
+      }
+      if (pathname === '/internal/v1/admin/agent/proxies/default' && request.method === 'PUT') {
+        requireAgentAdmin(principal)
+        const body = await readJson(request, 16 * 1024)
+        const data = await agent.setGlobalProxySequence(
+          body?.sequenceKey ?? null,
+          body,
+          { updatedBy: 'admin-token' },
+        )
+        sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })
         return
       }
 

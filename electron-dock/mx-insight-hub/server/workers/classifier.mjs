@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { createPool } from '@qpjoy/mx-common'
 import { createAgentRuntime } from '../agent/runtime.mjs'
 import { AgentSettingsStore } from '../agent/settings-store.mjs'
+import { AgentControlStore } from '../agent/control-store.mjs'
 import {
   AgentPipelineStore,
   PROVINCE_GEOGRAPHY_PIPELINE_KEY,
@@ -168,6 +169,7 @@ async function main() {
   const agent = await createAgentRuntime({
     config,
     settingsStore: new AgentSettingsStore(pool),
+    controlStore: new AgentControlStore(pool),
     managedKinds: ['chat'],
     logger: console,
   })

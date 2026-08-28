@@ -44,6 +44,7 @@ services:
       MX_COMMON_HANLP_URL: ${MX_COMMON_HANLP_URL:-}
       MX_INSIGHT_SERVER_FILE_ROOTS: ${MX_INSIGHT_SERVER_FILE_ROOTS:-{"shared-dir":"/shared_dir"}}
       MX_INSIGHT_AGENT_PROVIDERS: ${MX_INSIGHT_AGENT_PROVIDERS:-}
+      MX_INSIGHT_AGENT_AUTO_MIGRATE: ${MX_INSIGHT_AGENT_AUTO_MIGRATE:-1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     extra_hosts:
@@ -101,8 +102,11 @@ services:
       DATABASE_URL: postgres://mx_insight:${MX_INSIGHT_POSTGRES_PASSWORD:-local-postgres-change-me}@postgres:5432/mx_insight_hub
       MX_INSIGHT_API_KEY_PEPPER: ${MX_INSIGHT_API_KEY_PEPPER:-local-pepper-change-me-at-least-32-bytes}
       MX_INSIGHT_AGENT_PROVIDERS: ${MX_INSIGHT_AGENT_PROVIDERS:-}
+      MX_INSIGHT_AGENT_AUTO_MIGRATE: ${MX_INSIGHT_AGENT_AUTO_MIGRATE:-1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       app:
         condition: service_healthy

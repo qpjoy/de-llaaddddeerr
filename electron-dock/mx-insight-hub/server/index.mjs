@@ -9,6 +9,7 @@ import { loadConfig } from './config.mjs'
 import { HubService } from './hub-service.mjs'
 import { createAgentRuntime } from './agent/runtime.mjs'
 import { AgentSettingsStore } from './agent/settings-store.mjs'
+import { AgentControlStore } from './agent/control-store.mjs'
 import { AgentPipelineStore } from './agent/pipeline-store.mjs'
 import { AgentMarketStore } from './agent-market/store.ts'
 import { createSearch } from './search/index.mjs'
@@ -61,6 +62,9 @@ export async function createRuntime(config = loadConfig()) {
   const agentSettings = pool && config.listenerMode !== 'public'
     ? new AgentSettingsStore(pool)
     : null
+  const agentControl = pool && config.listenerMode !== 'public'
+    ? new AgentControlStore(pool)
+    : null
   const agentPipelines = pool && config.listenerMode !== 'public'
     ? new AgentPipelineStore(pool)
     : null
@@ -70,6 +74,7 @@ export async function createRuntime(config = loadConfig()) {
   const agent = await createAgentRuntime({
     config,
     settingsStore: agentSettings,
+    controlStore: agentControl,
     // The public listener exposes neither Agent routes nor model-backed work.
     // Keep its runtime empty even if provider metadata exists in the ConfigMap.
     managedKinds: config.listenerMode === 'public' ? [] : ['chat', 'embedding'],

@@ -27,6 +27,11 @@ spec:
         app.kubernetes.io/part-of: mx-insight-hub
         mx-insight-hub.io/plane: worker
     spec:
+      # Keep Chat Agent egress identical to the Admin probe path when a Proxy
+      # Sequence contains a host-local endpoint such as 127.0.0.1:7890.
+      # The classifier has no listener, Service or declared container port.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: mx-insight-hub
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 90

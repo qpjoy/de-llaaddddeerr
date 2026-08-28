@@ -1,10 +1,12 @@
 import { AppError } from '../core/errors.mjs'
+import { createHash } from 'node:crypto'
 import { createAgentFromProviders, parseProviderConfig } from './index.mjs'
 import { normalizeDatabaseProviders, publicSetting } from './settings-store.mjs'
 
 const DEFAULT_REFRESH_INTERVAL_MS = 5_000
 const DEFAULT_PROBE_COOLDOWN_MS = 5_000
 const DEFAULT_MAX_CONCURRENT_PROBES = 2
+const PROBE_EVIDENCE_MAX_AGE_MS = 15 * 60_000
 
 function parseEnvironmentEmbeddingProviders(raw, expected = {}) {
   const providers = parseProviderConfig(raw, { kind: 'embedding' })
@@ -20,6 +22,23 @@ function parseEnvironmentEmbeddingProviders(raw, expected = {}) {
     throw new AppError(500, 'invalid_configuration', 'Environment embedding provider dimensions must match MX_INSIGHT_EMBEDDING_DIMENSIONS')
   }
   return providers
+}
+
+function proxyControlFingerprint(control) {
+  const endpoints = (control?.proxyEndpoints || [])
+    .map(({ proxyKey, proxyUrl, enabled, revision }) => ({ proxyKey, proxyUrl, enabled, revision }))
+    .sort((left, right) => left.proxyKey.localeCompare(right.proxyKey))
+  const sequences = (control?.proxySequences || [])
+    .map(({ sequenceKey, proxyKeys, directFallback, enabled, revision }) => ({
+      sequenceKey, proxyKeys, directFallback, enabled, revision,
+    }))
+    .sort((left, right) => left.sequenceKey.localeCompare(right.sequenceKey))
+  return createHash('sha256').update(JSON.stringify({
+    endpoints,
+    sequences,
+    globalProxySequenceKey: control?.globalProxySequenceKey || null,
+    proxyRevision: control?.proxyRevision || 0,
+  })).digest('hex')
 }
 
 function environmentSetting(kind, raw, metadata, expectedEmbedding = {}) {
@@ -42,8 +61,11 @@ function environmentSetting(kind, raw, metadata, expectedEmbedding = {}) {
       revision: metadata?.revision ?? 0,
       providers: providers.map((provider, priority) => ({
         id: provider.id,
+        displayName: provider.displayName || provider.id,
         baseUrl: provider.baseUrl,
         model: provider.model,
+        protocol: provider.protocol || 'openai-compatible',
+        proxySequenceKey: provider.proxySequenceKey || null,
         timeoutMs: provider.timeoutMs,
         ...(kind === 'embedding' ? { dimensions: provider.dimensions } : {}),
         enabled: true,
@@ -128,10 +150,12 @@ export class AgentRuntime {
   #needsApply = new Set()
   #probeStates = new Map()
   #activeProbes = 0
+  #control = new Map()
 
   constructor({
     config,
     settingsStore = null,
+    controlStore = null,
     managedKinds = ['chat', 'embedding'],
     logger = console,
     refreshIntervalMs = DEFAULT_REFRESH_INTERVAL_MS,
@@ -144,6 +168,7 @@ export class AgentRuntime {
   }) {
     this.config = config
     this.settingsStore = settingsStore
+    this.controlStore = controlStore
     this.managedKinds = new Set(managedKinds)
     this.logger = logger
     this.refreshIntervalMs = refreshIntervalMs
@@ -167,6 +192,10 @@ export class AgentRuntime {
         revision: 0, providers: [],
       },
       credentials: { chat: new Map(), embedding: new Map() },
+      control: {
+        chat: { sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0 },
+        embedding: { sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0 },
+      },
     })
   }
 
@@ -193,7 +222,35 @@ export class AgentRuntime {
           this.logger?.warn?.(`[agent] environment embedding lock failed (${error.message}); embedding remains disabled`)
         }
       }
+      if (this.controlStore && this.config.agent?.autoMigrate !== false) {
+        for (const kind of this.managedKinds) {
+          await this.#migrateEnvironmentProviders(kind).catch((error) => {
+            // Import is additive. Unsupported legacy URLs/IDs or a transient
+            // race leave the environment chain authoritative and must never
+            // make the Admin listener or workers unavailable.
+            this.logger?.warn?.(`[agent] ${kind} environment migration skipped (${error.message})`)
+          })
+        }
+      }
       await this.refresh({ force: true })
+      if (this.controlStore) {
+        for (const kind of this.managedKinds) {
+          const setting = this.#settings.get(kind)
+          const providerIds = (setting?.providers || [])
+            .filter((provider) => provider.enabled !== false)
+            .map((provider) => provider.id)
+          if (providerIds.length > 0) {
+            await this.controlStore.ensureBootstrapSequence({
+              kind,
+              providerIds,
+              providerRevision: setting?.revision ?? 0,
+            }).catch((error) => {
+              this.logger?.warn?.(`[agent] default ${kind} Sequence bootstrap failed (${error.message}); using catalog order`)
+            })
+          }
+        }
+        await this.refresh({ force: true })
+      }
     }
     if (this.settingsStore && this.refreshIntervalMs > 0) {
       this.#timer = this.setIntervalFn(() => {
@@ -202,6 +259,59 @@ export class AgentRuntime {
       this.#timer?.unref?.()
     }
     return this
+  }
+
+  async #migrateEnvironmentProviders(kind) {
+    const current = await this.settingsStore.loadSetting(kind)
+    if (current.source !== 'environment') return false
+    const parsed = kind === 'embedding'
+      ? parseEnvironmentEmbeddingProviders(this.config.agent.embeddingProviders, this.config.embedding)
+      : parseProviderConfig(this.config.agent.chatProviders, { kind: 'chat' })
+    if (parsed.length === 0) return false
+    const providers = parsed.map((provider, priority) => {
+      const apiKey = provider.authMode === 'bearer'
+        ? provider.apiKey || (provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : null)
+        : null
+      if (provider.authMode === 'bearer' && !apiKey) {
+        throw new AppError(
+          503,
+          'agent_environment_key_missing',
+          `Provider ${provider.id} cannot be migrated because its referenced API key is missing`,
+        )
+      }
+      return {
+        id: provider.id,
+        displayName: provider.displayName || provider.id,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        protocol: provider.protocol || 'openai-compatible',
+        proxySequenceKey: provider.proxySequenceKey || null,
+        timeoutMs: provider.timeoutMs,
+        ...(kind === 'embedding' ? { dimensions: provider.dimensions } : {}),
+        enabled: true,
+        priority,
+        authMode: provider.authMode,
+        ...(apiKey ? { apiKey } : {}),
+      }
+    })
+    try {
+      await this.settingsStore.updateSetting(kind, {
+        expectedRevision: current.revision,
+        source: 'database',
+        providers,
+      }, {
+        updatedBy: 'environment-bootstrap',
+        expectedEmbeddingDimensions: this.config.embedding?.dimensions ?? null,
+        embeddingBaseline: kind === 'embedding' && parsed[0]
+          ? { model: parsed[0].model, dimensions: parsed[0].dimensions }
+          : null,
+      })
+      return true
+    } catch (error) {
+      // Another API/worker process may win the same idempotent bootstrap.
+      if (error?.code === 'settings_revision_conflict') return false
+      throw error
+    }
   }
 
   close() {
@@ -234,6 +344,18 @@ export class AgentRuntime {
       loadKind('chat'),
       loadKind('embedding'),
     ])
+    const emptyControl = {
+      sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
+      globalProxySequenceKey: null, proxyRevision: 0,
+    }
+    const [chatControl, embeddingControl] = await Promise.all([
+      this.controlStore && this.managedKinds.has('chat')
+        ? this.controlStore.loadRuntimeSnapshot('chat')
+        : emptyControl,
+      this.controlStore && this.managedKinds.has('embedding')
+        ? this.controlStore.loadRuntimeSnapshot('embedding')
+        : emptyControl,
+    ])
     return {
       chat: chatRuntime.setting,
       embedding: embeddingRuntime.setting,
@@ -241,7 +363,38 @@ export class AgentRuntime {
         chat: chatRuntime.credentials,
         embedding: embeddingRuntime.credentials,
       },
+      control: { chat: chatControl, embedding: embeddingControl },
     }
+  }
+
+  #withProxyRoutes(providers, control) {
+    const endpoints = new Map(
+      (control?.proxyEndpoints || [])
+        .filter((endpoint) => endpoint.enabled)
+        .map((endpoint) => [endpoint.proxyKey, endpoint.proxyUrl]),
+    )
+    const sequences = new Map(
+      (control?.proxySequences || [])
+        .filter((sequence) => sequence.enabled)
+        .map((sequence) => [sequence.sequenceKey, sequence]),
+    )
+    return providers.map((provider) => {
+      const sequenceKey = provider.proxySequenceKey || control?.globalProxySequenceKey || null
+      const sequence = sequenceKey ? sequences.get(sequenceKey) : null
+      if (!sequence) {
+        // A Provider-specific override is an explicit egress policy. Never
+        // bypass it with direct traffic when the referenced proxy chain is
+        // missing or disabled. A missing global default still means direct.
+        return provider.proxySequenceKey || control?.globalProxySequenceKey
+          ? { ...provider, proxyUrls: [], directFallback: false }
+          : provider
+      }
+      const proxyUrls = sequence.proxyKeys.flatMap((key) => endpoints.has(key) ? [endpoints.get(key)] : [])
+      if (proxyUrls.length === 0 && !sequence.directFallback) {
+        return { ...provider, proxyUrls: [], directFallback: false }
+      }
+      return { ...provider, proxyUrls, directFallback: sequence.directFallback }
+    })
   }
 
   #applySnapshot(snapshot) {
@@ -263,8 +416,8 @@ export class AgentRuntime {
         )
 
     const agent = createAgentFromProviders({
-      chatProviders: chat.providers,
-      embeddingProviders: embedding.providers,
+      chatProviders: this.#withProxyRoutes(chat.providers, snapshot.control?.chat),
+      embeddingProviders: this.#withProxyRoutes(embedding.providers, snapshot.control?.embedding),
       expectedEmbeddingDimensions: this.config.embedding?.dimensions ?? null,
       logger: this.logger,
       fetchImpl: this.fetchImpl,
@@ -275,6 +428,10 @@ export class AgentRuntime {
     this.#settings = new Map([
       ['chat', chat.setting],
       ['embedding', embedding.setting],
+    ])
+    this.#control = new Map([
+      ['chat', snapshot.control?.chat || { sequences: [], defaultBinding: null }],
+      ['embedding', snapshot.control?.embedding || { sequences: [], defaultBinding: null }],
     ])
     this.#needsApply.clear()
   }
@@ -291,6 +448,12 @@ export class AgentRuntime {
     this.#settings = new Map(this.#settings)
     this.#settings.set(kind, setting)
     this.#needsApply.add(kind)
+  }
+
+  #disableManagedKinds() {
+    for (const kind of this.managedKinds) {
+      this.#disableKind(kind, this.#settings.get(kind))
+    }
   }
 
   async refresh({ force = false } = {}) {
@@ -312,6 +475,8 @@ export class AgentRuntime {
           return !this.#needsApply.has(kind)
             && current?.source === next.source
             && current?.revision === next.revision
+            && JSON.stringify(this.#control.get(kind) || null)
+              === JSON.stringify(snapshot.control?.[kind] || null)
         })
         if (!force && unchanged) return true
         this.#applySnapshot(snapshot)
@@ -337,6 +502,17 @@ export class AgentRuntime {
     }
     if (!this.managedKinds.has(kind)) {
       throw new AppError(503, 'agent_settings_unavailable', `This runtime does not manage ${kind} providers`)
+    }
+    if (input?.source === 'database' && this.controlStore) {
+      const proxySequenceKeys = [...new Set((input.providers || [])
+        .map((provider) => provider?.proxySequenceKey)
+        .filter(Boolean))]
+      if (proxySequenceKeys.length > 0) {
+        if (typeof this.controlStore.validateProxySequenceKeys !== 'function') {
+          throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require the Agent control migration')
+        }
+        await this.controlStore.validateProxySequenceKeys(proxySequenceKeys)
+      }
     }
     let embeddingBaseline = null
     let environmentEmbeddingProviders = []
@@ -384,20 +560,97 @@ export class AgentRuntime {
     return this.#agent?.embeddings
   }
 
-  complete(...args) {
-    return this.#agent.complete(...args)
+  #resolveSequence(kind, requestedKey = null, { explicit = false } = {}) {
+    const control = this.#control.get(kind)
+    const sequenceKey = requestedKey || control?.defaultBinding?.sequenceKey || null
+    if (!sequenceKey) return null
+    const sequence = control?.sequences?.find((candidate) => candidate.sequenceKey === sequenceKey)
+    const setting = this.#settings.get(kind)
+    const enabledIds = new Set(
+      (setting?.providers || [])
+        .filter((provider) => provider.enabled !== false)
+        .map((provider) => provider.id),
+    )
+    const valid = sequence?.enabled
+      && sequence.providerRevision === (setting?.revision ?? 0)
+      && sequence.providerIds.length > 0
+      && sequence.providerIds.every((providerId) => enabledIds.has(providerId))
+    if (!valid) {
+      const customDefault = !explicit
+        && Boolean(control?.defaultBinding)
+        && sequence?.source !== 'bootstrap'
+      if (explicit || customDefault) {
+        throw new AppError(
+          503,
+          'agent_sequence_unavailable',
+          'The selected LLM Sequence is missing, stale, disabled, or references an unavailable Provider',
+        )
+      }
+      // A generated bootstrap chain preserves the legacy catalog fallback
+      // during migration. Once an operator saves a custom Sequence it fails
+      // closed instead of silently widening or reordering that selection.
+      return null
+    }
+    return sequence
   }
 
-  suggestFieldMap(...args) {
-    return this.#agent.suggestFieldMap(...args)
+  complete(messages, options = {}) {
+    const explicit = typeof options.sequenceKey === 'string' && options.sequenceKey.length > 0
+    const sequence = this.#resolveSequence('chat', options.sequenceKey, { explicit })
+    return this.#agent.complete(messages, {
+      ...options,
+      providerIds: sequence?.providerIds || null,
+      sequenceKey: sequence?.sequenceKey || null,
+    })
   }
 
-  classifyRecord(...args) {
-    return this.#agent.classifyRecord(...args)
+  suggestFieldMap(options = {}) {
+    const sequence = this.#legacySequenceOrDisabled('chat')
+    return this.#agent.suggestFieldMap({
+      ...options,
+      providerIds: sequence?.providerIds || null,
+      sequenceKey: sequence?.sequenceKey || null,
+    })
   }
 
-  embed(...args) {
-    return this.#agent.embed(...args)
+  suggestFileProfile(options = {}) {
+    const sequence = this.#legacySequenceOrDisabled('chat')
+    return this.#agent.suggestFileProfile({
+      ...options,
+      providerIds: sequence?.providerIds || null,
+      sequenceKey: sequence?.sequenceKey || null,
+    })
+  }
+
+  classifyRecord(options = {}) {
+    const sequence = this.#legacySequenceOrDisabled('chat')
+    return this.#agent.classifyRecord({
+      ...options,
+      providerIds: sequence?.providerIds || null,
+      sequenceKey: sequence?.sequenceKey || null,
+    })
+  }
+
+  embed(texts, options = {}) {
+    const explicit = typeof options.sequenceKey === 'string' && options.sequenceKey.length > 0
+    const sequence = this.#resolveSequence('embedding', options.sequenceKey, { explicit })
+    return this.#agent.embed(texts, {
+      ...options,
+      providerIds: sequence?.providerIds || null,
+      sequenceKey: sequence?.sequenceKey || null,
+    })
+  }
+
+  #legacySequenceOrDisabled(kind) {
+    try {
+      return this.#resolveSequence(kind)
+    } catch (error) {
+      if (error?.code !== 'agent_sequence_unavailable') throw error
+      // These legacy facade methods already own deterministic/null fallback.
+      // Route them through an intentionally empty chain so their existing
+      // catch boundary runs; generic complete/embed remain fail-closed.
+      return { sequenceKey: null, providerIds: [] }
+    }
   }
 
   async testProvider({ kind, providerId, signal } = {}) {
@@ -410,6 +663,7 @@ export class AgentRuntime {
     if (typeof providerId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(providerId)) {
       throw new AppError(400, 'invalid_provider_id', 'providerId is required')
     }
+    await this.refresh()
     if (!this.#settings.get(kind)?.providers?.some((provider) => provider.id === providerId)) {
       throw new AppError(404, 'agent_provider_not_found', 'The saved provider was not found')
     }
@@ -435,9 +689,14 @@ export class AgentRuntime {
 
     this.#probeStates.set(key, { inFlight: true, startedAt: now })
     this.#activeProbes += 1
+    let result = null
+    let failure = null
+    let evidenceSetting = this.#settings.get(kind)
+    let evidenceControl = this.#control.get(kind)
     try {
       if (!this.settingsStore || !this.managedKinds.has(kind)) {
-        return await this.#agent.testProvider({ kind, providerId, signal })
+        result = await this.#agent.testProvider({ kind, providerId, signal })
+        return result
       }
       let runtime
       if (typeof this.settingsStore.loadRuntimeSetting === 'function') {
@@ -452,8 +711,14 @@ export class AgentRuntime {
         }
       }
       if (runtime.setting.source !== 'database') {
-        return await this.#agent.testProvider({ kind, providerId, signal })
+        result = await this.#agent.testProvider({ kind, providerId, signal })
+        return result
       }
+
+      evidenceSetting = runtime.setting
+      evidenceControl = this.controlStore
+        ? await this.controlStore.loadRuntimeSnapshot(kind)
+        : evidenceControl
 
       // Build an isolated one-provider router from one secret-bearing database
       // snapshot. A disabled candidate can be checked before it ever joins the
@@ -465,19 +730,212 @@ export class AgentRuntime {
         providerId,
         this.config.embedding?.dimensions ?? null,
       )
+      const routedProvider = this.#withProxyRoutes(
+        [provider],
+        evidenceControl,
+      )[0]
       const probeAgent = createAgentFromProviders({
-        chatProviders: kind === 'chat' ? [provider] : [],
-        embeddingProviders: kind === 'embedding' ? [provider] : [],
+        chatProviders: kind === 'chat' ? [routedProvider] : [],
+        embeddingProviders: kind === 'embedding' ? [routedProvider] : [],
         expectedEmbeddingDimensions: this.config.embedding?.dimensions ?? null,
         logger: this.logger,
         fetchImpl: this.fetchImpl,
       })
-      return await probeAgent.testProvider({ kind, providerId, signal })
+      result = await probeAgent.testProvider({ kind, providerId, signal })
+      return result
+    } catch (error) {
+      failure = error
+      throw error
     } finally {
       this.#activeProbes -= 1
       const current = this.#probeStates.get(key)
       if (current) current.inFlight = false
+      if (this.controlStore) {
+        const provider = evidenceSetting?.providers?.find((candidate) => candidate.id === providerId)
+        if (provider) {
+          await this.controlStore.recordProbe({
+            kind,
+            providerId,
+            settingsRevision: evidenceSetting?.revision ?? 0,
+            proxyFingerprint: proxyControlFingerprint(evidenceControl),
+            model: provider.model,
+            protocol: provider.protocol || 'openai-compatible',
+            ok: Boolean(result?.ok),
+            latencyMs: result?.latencyMs ?? null,
+            errorCode: failure?.code || (failure ? 'agent_provider_probe_failed' : null),
+          }).catch((error) => {
+            this.logger?.warn?.(`[agent] provider probe evidence could not be stored (${error.message})`)
+          })
+        }
+      }
     }
+  }
+
+  async saveSequence(sequenceKey, input, { updatedBy = 'admin-token' } = {}) {
+    if (!this.controlStore) {
+      throw new AppError(503, 'agent_control_unavailable', 'LLM Sequence settings require PostgreSQL')
+    }
+    const kind = input?.kind
+    if (!this.managedKinds.has(kind)) {
+      throw new AppError(503, 'agent_control_unavailable', `This runtime does not manage ${kind} providers`)
+    }
+    if (!Array.isArray(input?.providerIds) || input.providerIds.length === 0) {
+      throw new AppError(400, 'invalid_agent_sequence', 'An LLM Sequence requires at least one Provider')
+    }
+    if (new Set(input.providerIds).size !== input.providerIds.length) {
+      throw new AppError(400, 'invalid_agent_sequence', 'An LLM Sequence must not repeat a Provider')
+    }
+    const changesActiveDefault = this.#control.get(kind)?.defaultBinding?.sequenceKey === sequenceKey
+    // Verification is deliberately exact-provider and sequential. It cannot
+    // silently pass because a different fallback answered, and it stays below
+    // the runtime's bounded probe concurrency.
+    const tests = await this.#ensureProvidersVerified(kind, input.providerIds)
+    const providerRevision = this.#settings.get(kind)?.revision ?? 0
+    const saved = await this.controlStore.saveSequence(sequenceKey, input, {
+      providerRevision,
+      verifiedBy: updatedBy,
+      updatedBy,
+    })
+    const runtimeApplied = await this.refresh({ force: true })
+    if (!runtimeApplied && changesActiveDefault) this.#disableKind(kind, this.#settings.get(kind))
+    return { ...saved, tests, runtimeApplied }
+  }
+
+  async setDefaultSequence(kind, sequenceKey, input, { updatedBy = 'admin-token' } = {}) {
+    if (!this.controlStore) {
+      throw new AppError(503, 'agent_control_unavailable', 'LLM Sequence settings require PostgreSQL')
+    }
+    // Require fresh evidence for the exact provider revision before binding.
+    // A just-saved Sequence reuses its probes, avoiding duplicate paid calls.
+    const snapshot = await this.controlStore.loadRuntimeSnapshot(kind)
+    const sequence = snapshot.sequences.find((candidate) => candidate.sequenceKey === sequenceKey)
+    if (!sequence) throw new AppError(404, 'agent_sequence_not_found', 'The LLM Sequence was not found')
+    await this.#ensureProvidersVerified(kind, sequence.providerIds)
+    // The re-test above records evidence but does not change providerRevision;
+    // save the same Sequence to advance its verification timestamp/revision.
+    const verified = await this.controlStore.saveSequence(sequenceKey, {
+      expectedRevision: sequence.revision,
+      displayName: sequence.displayName,
+      kind,
+      providerIds: sequence.providerIds,
+      enabled: sequence.enabled,
+    }, {
+      providerRevision: this.#settings.get(kind)?.revision ?? 0,
+      verifiedBy: updatedBy,
+      updatedBy,
+    })
+    const binding = await this.controlStore.setDefaultSequence(kind, sequenceKey, {
+      expectedRevision: input?.expectedRevision,
+      updatedBy,
+    })
+    const runtimeApplied = await this.refresh({ force: true })
+    if (!runtimeApplied) this.#disableKind(kind, this.#settings.get(kind))
+    return { binding, sequence: verified, runtimeApplied }
+  }
+
+  async #ensureProvidersVerified(kind, providerIds) {
+    const settingsRevision = this.#settings.get(kind)?.revision ?? 0
+    const proxyFingerprint = proxyControlFingerprint(this.#control.get(kind))
+    const control = await this.controlStore.listPublicControl()
+    const currentPasses = new Map(
+      control.providerTests
+        .filter((test) => {
+          const testedAt = Date.parse(test.testedAt || '')
+          return test.kind === kind
+            && test.settingsRevision === settingsRevision
+            && test.proxyFingerprint === proxyFingerprint
+            && test.ok
+            && Number.isFinite(testedAt)
+            && this.nowFn() - testedAt <= PROBE_EVIDENCE_MAX_AGE_MS
+        })
+        .map((test) => [test.providerId, test]),
+    )
+    const tests = []
+    for (const providerId of providerIds) {
+      const passed = currentPasses.get(providerId)
+      if (passed) tests.push(passed)
+      else tests.push(await this.testProvider({ kind, providerId }))
+    }
+    return tests
+  }
+
+  async testSequence(sequenceKey, { kind, signal } = {}) {
+    if (!['chat', 'embedding'].includes(kind)) {
+      throw new AppError(400, 'invalid_provider_kind', 'kind must be chat or embedding')
+    }
+    const sequence = this.#resolveSequence(kind, sequenceKey, { explicit: true })
+    if (kind === 'chat') {
+      const result = await this.complete([
+        { role: 'user', content: 'Say hi in one short sentence.' },
+      ], { temperature: 0, maxTokens: 32, signal, sequenceKey: sequence.sequenceKey })
+      return {
+        ok: true,
+        kind,
+        sequenceKey: sequence.sequenceKey,
+        providerId: result.provider,
+        model: result.model,
+        latencyMs: result.latencyMs,
+        sample: String(result.payload?.choices?.[0]?.message?.content || '').slice(0, 240),
+        attempts: result.attempts || [],
+        testedAt: new Date().toISOString(),
+      }
+    }
+    if (kind === 'embedding') {
+      const result = await this.embed(['MX Insight Hub LLM Sequence connectivity test'], {
+        signal,
+        sequenceKey: sequence.sequenceKey,
+      })
+      return {
+        ok: true,
+        kind,
+        sequenceKey: sequence.sequenceKey,
+        providerId: result.provider,
+        model: result.model,
+        latencyMs: result.latencyMs,
+        dimensions: result.vectors?.[0]?.length ?? null,
+        attempts: result.attempts || [],
+        testedAt: new Date().toISOString(),
+      }
+    }
+  }
+
+  async saveProxyEndpoint(proxyKey, input, { updatedBy = 'admin-token' } = {}) {
+    if (!this.controlStore) throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require PostgreSQL')
+    const saved = await this.controlStore.saveProxyEndpoint(proxyKey, input, { updatedBy })
+    const runtimeApplied = await this.refresh({ force: true })
+    if (!runtimeApplied) this.#disableManagedKinds()
+    return { ...saved, runtimeApplied }
+  }
+
+  async saveProxySequence(sequenceKey, input, { updatedBy = 'admin-token' } = {}) {
+    if (!this.controlStore) throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require PostgreSQL')
+    const saved = await this.controlStore.saveProxySequence(sequenceKey, input, { updatedBy })
+    const runtimeApplied = await this.refresh({ force: true })
+    if (!runtimeApplied) this.#disableManagedKinds()
+    return { ...saved, runtimeApplied }
+  }
+
+  async setGlobalProxySequence(sequenceKey, input, { updatedBy = 'admin-token' } = {}) {
+    if (!this.controlStore) throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require PostgreSQL')
+    const saved = await this.controlStore.setGlobalProxySequence(sequenceKey, { ...input, updatedBy })
+    const runtimeApplied = await this.refresh({ force: true })
+    if (!runtimeApplied) this.#disableManagedKinds()
+    return { ...saved, runtimeApplied }
+  }
+
+  async revealProviderCredential(kind, providerId) {
+    if (!this.settingsStore?.revealCredentialInternal) {
+      throw new AppError(503, 'agent_settings_unavailable', 'Provider credentials require PostgreSQL')
+    }
+    const apiKey = await this.settingsStore.revealCredentialInternal(kind, providerId)
+    if (!apiKey) throw new AppError(404, 'agent_provider_key_not_found', 'The Provider has no saved API key')
+    return { kind, providerId, apiKey }
+  }
+
+  async controlStatus() {
+    return this.controlStore
+      ? this.controlStore.listPublicControl()
+      : { sequences: [], bindings: [], providerTests: [], proxy: { endpoints: [], sequences: [], globalSequenceKey: null, revision: 0 } }
   }
 
   status() {
@@ -487,6 +945,8 @@ export class AgentRuntime {
         chat: this.#settings.get('chat'),
         embedding: this.#settings.get('embedding'),
       },
+      sequences: [...this.#control.values()].flatMap((control) => control?.sequences || []),
+      bindings: [...this.#control.values()].flatMap((control) => control?.defaultBinding ? [control.defaultBinding] : []),
     }
   }
 }

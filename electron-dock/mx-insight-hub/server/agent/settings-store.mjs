@@ -4,12 +4,14 @@ import { isIP } from 'node:net'
 const KINDS = new Set(['chat', 'embedding'])
 const SOURCES = new Set(['environment', 'database'])
 const AUTH_MODES = new Set(['bearer', 'none'])
-const ENDPOINT_PATHS = ['/chat/completions', '/embeddings', '/completions']
-const MAX_PROVIDERS = 8
+const PROVIDER_PROTOCOLS = new Set(['openai-compatible', 'anthropic-messages'])
+const ENDPOINT_PATHS = ['/chat/completions', '/embeddings', '/completions', '/messages']
+const MAX_PROVIDERS = 32
 const DEFAULT_TIMEOUT_MS = 60_000
 const INPUT_FIELDS = new Set([
   'id', 'baseUrl', 'model', 'timeoutMs', 'dimensions', 'enabled', 'priority',
-  'authMode', 'apiKey', 'clearApiKey',
+  'authMode', 'apiKey', 'clearApiKey', 'displayName', 'protocol',
+  'proxySequenceKey',
 ])
 const UPDATE_FIELDS = new Set(['expectedRevision', 'source', 'providers'])
 
@@ -81,6 +83,26 @@ function normalizeProvider(entry, index, kind) {
   }
   const authMode = entry.authMode ?? 'bearer'
   if (!AUTH_MODES.has(authMode)) invalid(`provider[${index}].authMode must be bearer or none`)
+  const displayName = entry.displayName == null ? entry.id : entry.displayName
+  if (typeof displayName !== 'string' || !displayName.trim() || displayName.trim().length > 120) {
+    invalid(`provider[${index}].displayName must be a non-empty string of at most 120 characters`)
+  }
+  const protocol = entry.protocol ?? 'openai-compatible'
+  if (!PROVIDER_PROTOCOLS.has(protocol)) {
+    invalid(`provider[${index}].protocol must be openai-compatible or anthropic-messages`)
+  }
+  if (kind === 'embedding' && protocol !== 'openai-compatible') {
+    invalid(`provider[${index}].protocol must be openai-compatible for embeddings`)
+  }
+  const proxySequenceKey = entry.proxySequenceKey == null || entry.proxySequenceKey === ''
+    ? null
+    : entry.proxySequenceKey
+  if (proxySequenceKey != null && (
+    typeof proxySequenceKey !== 'string'
+    || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(proxySequenceKey)
+  )) {
+    invalid(`provider[${index}].proxySequenceKey must be a lowercase sequence identifier`)
+  }
 
   let dimensions
   if (kind === 'embedding') {
@@ -110,8 +132,11 @@ function normalizeProvider(entry, index, kind) {
   return {
     provider: {
       id: entry.id,
+      displayName: displayName.trim(),
       baseUrl: normalizeBaseUrl(entry.baseUrl, index),
       model: entry.model.trim(),
+      protocol,
+      proxySequenceKey,
       timeoutMs,
       ...(kind === 'embedding' ? { dimensions } : {}),
       enabled,
@@ -177,8 +202,11 @@ export function publicSetting(setting, configuredIds = new Set()) {
     revision: setting.revision,
     providers: setting.providers.map((provider) => ({
       id: provider.id,
+      displayName: provider.displayName || provider.id,
       baseUrl: provider.baseUrl,
       model: provider.model,
+      protocol: provider.protocol || 'openai-compatible',
+      proxySequenceKey: provider.proxySequenceKey || null,
       timeoutMs: provider.timeoutMs,
       ...(setting.kind === 'embedding' ? { dimensions: provider.dimensions } : {}),
       enabled: provider.enabled !== false,
@@ -235,6 +263,21 @@ export class AgentSettingsStore {
       [kind],
     )
     return new Map(rows.map((row) => [row.provider_id, row.api_key]))
+  }
+
+  /** Explicit Admin-token re-auth path. Never include this in list/status APIs. */
+  async revealCredentialInternal(kind, providerId) {
+    assertProviderKind(kind)
+    if (typeof providerId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(providerId)) {
+      invalid('providerId must be a lowercase provider identifier')
+    }
+    const { rows } = await this.pool.query(
+      `SELECT api_key
+         FROM control.agent_provider_credentials
+        WHERE kind = $1 AND provider_id = $2`,
+      [kind, providerId],
+    )
+    return rows[0]?.api_key ?? null
   }
 
   /**

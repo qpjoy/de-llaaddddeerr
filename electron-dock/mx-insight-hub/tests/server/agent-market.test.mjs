@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
@@ -16,6 +17,25 @@ import {
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 
 const ADMIN_TOKEN = 'agent-market-admin-token'
+
+test('Agent Market binds native dragging only to explicit handles', async () => {
+  const source = await readFile(new URL('../../src/pages-agent-market.tsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /<article[^>]*(?:draggable|onDragStart)=/u)
+  assert.match(source, /className="mih-market-stage-drag-handle" draggable=\{canEdit\}/u)
+  assert.match(source, /className="mih-market-trash__drag-handle" draggable=\{canEdit\}/u)
+  assert.match(source, /application\/x-mx-insight-agent-market-stage/u)
+
+  const center = await readFile(new URL('../../src/pages-agent-center.tsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(center, /<article[^>]*(?:draggable|onDragStart)=/u)
+  assert.match(center, /className="mih-sequence-drag-handle" draggable=\{canEdit\}/u)
+  assert.equal(
+    [...center.matchAll(/className="mih-sequence-drag-handle" draggable=\{canEdit\}/gu)].length,
+    2,
+    'Provider and Proxy palettes each expose one explicit handle implementation',
+  )
+  assert.match(center, /application\/x-mx-insight-provider/u)
+  assert.match(center, /application\/x-mx-insight-proxy/u)
+})
 
 function requestBody(definition = freshAdvancedSearchDefinition()) {
   return {
@@ -326,7 +346,7 @@ test('invalid model date filters degrade through Zod instead of aborting the dry
   assert.equal(result.dryRun, true)
 })
 
-test('edited prompts and model controls reach both provider and trace unchanged', async () => {
+test('edited prompts, model controls, and selected Sequence reach provider and trace unchanged', async () => {
   const definition = freshAdvancedSearchDefinition()
   const triage = definition.stages.find((stage) => stage.type === 'triage')
   triage.prompt.system = 'CUSTOM SYSTEM {{query}}'
@@ -334,9 +354,11 @@ test('edited prompts and model controls reach both provider and trace unchanged'
   triage.model.temperature = 0.73
   triage.model.maxTokens = 777
   for (const stage of definition.stages.slice(1)) stage.state = 'trashed'
+  const body = requestBody(definition)
+  body.sequenceKey = 'market-chat-sequence'
   let providerCall = null
   const result = await runAdvancedSearchDryRun({
-    body: requestBody(definition),
+    body,
     search: null,
     agent: {
       available: true,
@@ -346,6 +368,7 @@ test('edited prompts and model controls reach both provider and trace unchanged'
         return {
           provider: 'test',
           model: 'test-chat',
+          sequenceKey: options.sequenceKey,
           payload: {
             choices: [{ message: { content: JSON.stringify({
               route: 'clarify',
@@ -369,10 +392,12 @@ test('edited prompts and model controls reach both provider and trace unchanged'
   assert.match(providerCall.messages[2].content, /CUSTOM USER/)
   assert.equal(providerCall.options.temperature, 0.73)
   assert.equal(providerCall.options.maxTokens, 777)
+  assert.equal(providerCall.options.sequenceKey, 'market-chat-sequence')
   const trace = result.traces.find((entry) => entry.type === 'triage')
   assert.deepEqual(trace.messages, providerCall.messages)
   assert.equal(trace.parameters.temperature, 0.73)
   assert.equal(trace.parameters.maxTokens, 777)
+  assert.equal(trace.model.sequenceKey, 'market-chat-sequence')
 })
 
 test('dry-run concurrency gate rejects excess work before another read starts', async () => {
@@ -601,6 +626,33 @@ test('Agent Market is Admin-listener-only and readable without creating database
     })
     assert.equal(launcherAdmin.status, 200)
 
+    const agentCenter = await fetch(baseUrl + '/internal/v1/admin/agent', {
+      headers: { authorization: 'Bearer launcher-platform-admin' },
+    })
+    assert.equal(agentCenter.status, 200, 'Launcher platform admins retain read-only Agent Center access')
+
+    const sequenceWrite = await fetch(baseUrl + '/internal/v1/admin/agent/sequences/read-only-check', {
+      method: 'PUT',
+      headers: {
+        authorization: 'Bearer launcher-platform-admin',
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    })
+    assert.equal(sequenceWrite.status, 403)
+    assert.equal((await sequenceWrite.json()).error.code, 'admin_token_required')
+
+    const reveal = await fetch(baseUrl + '/internal/v1/admin/agent/providers/chat/provider/reveal', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer launcher-platform-admin',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ adminToken: ADMIN_TOKEN }),
+    })
+    assert.equal(reveal.status, 403, 'Launcher sessions can never reveal Provider keys')
+    assert.equal((await reveal.json()).error.code, 'admin_token_required')
+
     for (const [method, suffix] of [
       ['PUT', `/${ADVANCED_SEARCH_AGENT_KEY}`],
       ['POST', `/${ADVANCED_SEARCH_AGENT_KEY}/dry-run`],
@@ -632,5 +684,10 @@ test('Agent Market is Admin-listener-only and readable without creating database
       headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
     })
     assert.equal(response.status, 404)
+
+    const agentCenter = await fetch(baseUrl + '/internal/v1/admin/agent', {
+      headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
+    })
+    assert.equal(agentCenter.status, 404)
   })
 })

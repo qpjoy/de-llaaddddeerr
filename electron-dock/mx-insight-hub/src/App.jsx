@@ -45,6 +45,7 @@ import {
   TelegramPage,
 } from './pages-data-products.jsx'
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
+import { AgentProxyPage, AgentSequencePage } from './pages-agent-center.tsx'
 
 const LazyAgentMarketPage = lazy(() => import('./pages-agent-market.tsx').then((module) => ({
   default: module.AgentMarketPage,
@@ -58,14 +59,28 @@ function AgentMarketRoute(props) {
   )
 }
 
+function AgentProvidersRoute(props) {
+  return <AgentPage {...props} section="providers" />
+}
+
+function AgentRuntimeRoute(props) {
+  return <AgentPage {...props} section="runtime" />
+}
+
 const SESSION_KEY = 'mx-insight-hub.admin-token'
 const THEME_KEY = 'mx-insight-hub.theme'
 const DATA_PRODUCTS_NAV_KEY = 'data-products'
+const AGENT_CENTER_NAV_KEY = 'agent-center'
 const NAV_PARENTS = {
   [DATA_PRODUCTS_NAV_KEY]: {
     label: '数据产品',
     description: '目录与业务数据展示',
     icon: Package,
+  },
+  [AGENT_CENTER_NAV_KEY]: {
+    label: 'Agent 中心',
+    description: 'Provider、Sequence 与 Agent',
+    icon: Brain,
   },
 }
 
@@ -85,8 +100,11 @@ const ROUTES = [
   { path: '/sources', label: '数据清洗计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
-  { path: '/agent-market', label: 'Agent Market', description: '可编辑、可观测的 Agent 示例', icon: Storefront, group: '数据平面', component: AgentMarketRoute, capability: 'membership.write', platformAdmin: true },
-  { path: '/agent', label: '中心 Agent', description: '模型链路与降级', icon: Brain, group: '数据平面', component: AgentPage, capability: 'membership.write', platformAdmin: true },
+  { path: '/agent/providers', label: 'LLM Provider', description: '模型账号、协议与密钥', icon: Key, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentProvidersRoute, capability: 'membership.write', platformAdmin: true },
+  { path: '/agent/sequences', label: 'LLM Sequence', description: '可复用的有序降级链', icon: List, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentSequencePage, capability: 'membership.write', platformAdmin: true },
+  { path: '/agent/proxies', label: 'LLM Proxy', description: '全局与 Provider 代理链', icon: Globe, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentProxyPage, capability: 'membership.write', platformAdmin: true },
+  { path: '/agent/market', label: 'Agent Market', description: '可编辑、可观测的 Agent 示例', icon: Storefront, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentMarketRoute, capability: 'membership.write', platformAdmin: true },
+  { path: '/agent/runtime', label: '原中心 Agent', description: '原有管线、断言与处理边界', icon: Pulse, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentRuntimeRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
   { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read' },
 ]
@@ -95,6 +113,8 @@ const ROUTE_MAP = new Map(ROUTES.map((route) => [route.path, route]))
 const LEGACY_ROUTE_REDIRECTS = new Map([
   ['/data-products/telegram/channels', { path: '/data-products/telegram', kind: 'channel' }],
   ['/data-products/telegram/groups', { path: '/data-products/telegram', kind: 'group' }],
+  ['/agent', { path: '/agent/providers' }],
+  ['/agent-market', { path: '/agent/market' }],
 ])
 
 function visibleRoutes(session) {
@@ -150,7 +170,7 @@ function readLocation({ canonicalize = false } = {}) {
   const legacyRedirect = LEGACY_ROUTE_REDIRECTS.get(candidatePath)
   if (legacyRedirect) {
     candidatePath = legacyRedirect.path
-    query.set('kind', legacyRedirect.kind)
+    if (legacyRedirect.kind) query.set('kind', legacyRedirect.kind)
     if (canonicalize) {
       const search = query.toString()
       window.history.replaceState(

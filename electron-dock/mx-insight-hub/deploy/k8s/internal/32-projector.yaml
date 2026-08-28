@@ -33,8 +33,11 @@ spec:
         app.kubernetes.io/part-of: mx-insight-hub
         mx-insight-hub.io/plane: worker
     spec:
-      # Cluster DNS only: unlike the API planes this workload never talks to
-      # host-local Night-All, so it has no reason to share the host network.
+      # Agent Provider proxy endpoints may be host-local (for example
+      # 127.0.0.1:7890). Share the node network so embedding and Admin probes
+      # see the same proxy path; this worker still exposes no Service or port.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: mx-insight-hub
       automountServiceAccountToken: false
       # Long enough to finish a bulk batch and mark it delivered, so a rollout

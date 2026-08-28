@@ -49,6 +49,11 @@ const PROVIDER_AUTH_OPTIONS = [
   { value: 'none', label: '无需认证' },
 ]
 
+const PROVIDER_PROTOCOL_OPTIONS = [
+  { value: 'openai-compatible', label: 'OpenAI-compatible' },
+  { value: 'anthropic-messages', label: 'Anthropic Messages' },
+]
+
 // Pages for the data plane: external sources (P4), the model agent (P5) and the
 // retrieval pipeline. Each one surfaces the degradation state rather than only
 // the happy path — a system quietly running on a fallback is the thing an
@@ -3099,13 +3104,14 @@ function formatBytes(value) {
 // Agent
 // ---------------------------------------------------------------------------
 
-export function AgentPage({ token, session, onUnauthorized, notify }) {
+export function AgentPage({ token, session, onUnauthorized, notify, section = 'providers' }) {
   const load = useCallback(() => adminApi.agent(token), [token])
   const state = useRemoteData(load, onUnauthorized)
   const [editingKind, setEditingKind] = useState(null)
   const [testingProvider, setTestingProvider] = useState(null)
   const [providerTests, setProviderTests] = useState({})
   const [pipelineBusy, setPipelineBusy] = useState(null)
+  const [revealTarget, setRevealTarget] = useState(null)
 
   if (state.loading && !state.data) return <LoadingState label="正在读取模型链路" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
@@ -3117,6 +3123,7 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
   const embeddingProviders = mergeProviderStatus(embeddingSetting.providers, agent.embeddings)
   const pipelines = Array.isArray(agent.pipelines) ? agent.pipelines : []
   const canEdit = session?.kind === 'admin-token'
+  const proxySequences = agent.control?.proxy?.sequences || []
 
   const saveSetting = async (kind, body) => {
     try {
@@ -3174,22 +3181,24 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
   return (
     <>
       <PageHeading
-        eyebrow="MODEL PROVIDERS / FAILOVER"
-        title="中心 Agent"
-        description="数组顺序即降级顺序。熔断打开表示该 provider 连续失败后被暂时跳过——没有它，一个挂掉的首选会让每个请求都先付满超时。"
+        eyebrow={section === 'providers' ? 'AGENT CENTER / LLM PROVIDERS' : 'AGENT CENTER / LEGACY RUNTIME'}
+        title={section === 'providers' ? 'LLM Provider' : '原中心 Agent'}
+        description={section === 'providers'
+          ? 'Provider 是可复用模型账号；真正提供服务的是经过测试的 LLM Sequence。旧的全局链仍作为兼容回退。'
+          : '保留原有分析管线、断言、限流与处理边界，便于后续逐项迁移和优化。'}
         loading={state.loading}
         onRefresh={state.refresh}
       />
-      {!agent.available ? (
+      {section === 'providers' && !agent.available ? (
         <EmptyState icon={Brain} title="未配置模型 provider"
           description={canEdit
             ? '可在下方配置 Provider。未配置时映射建议回退到规则推断，Hub 与现有联网功能不中断。'
             : '未配置时映射建议回退到规则推断，Hub 与现有联网功能不中断。'} />
       ) : null}
-      <AgentProviderPanel
+      {section === 'providers' ? <AgentProviderPanel
         kind="chat"
-        title="对话模型链路"
-        subtitle="按优先级降级；400/422 不降级，因为换个 provider 会一样失败"
+        title="Chat Provider Catalog"
+        subtitle="优先级只定义 bootstrap/兼容顺序；正式服务顺序在 LLM Sequence 中编排"
         setting={chatSetting}
         providers={chatProviders}
         canEdit={canEdit}
@@ -3197,11 +3206,12 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
         onTest={testProvider}
         testingProvider={testingProvider}
         providerTests={providerTests}
-      />
-      <AgentProviderPanel
+        onReveal={(provider) => setRevealTarget({ kind: 'chat', provider })}
+      /> : null}
+      {section === 'providers' ? <AgentProviderPanel
         kind="embedding"
-        title="Embedding 链路"
-        subtitle={`当前运行维度 ${agent.embeddingDimensions ?? '未配置'}；链路内所有模型必须同维度`}
+        title="Embedding Provider Catalog"
+        subtitle={`当前运行维度 ${agent.embeddingDimensions ?? '未配置'}；同一 Sequence 内所有模型必须同模型、同维度`}
         setting={embeddingSetting}
         providers={embeddingProviders}
         canEdit={canEdit}
@@ -3209,8 +3219,9 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
         onTest={testProvider}
         testingProvider={testingProvider}
         providerTests={providerTests}
-      />
-      {pipelines.map((pipeline) => (
+        onReveal={(provider) => setRevealTarget({ kind: 'embedding', provider })}
+      /> : null}
+      {section === 'runtime' ? pipelines.map((pipeline) => (
         <AgentPipelinePanel
           key={pipeline.pipelineKey}
           pipeline={pipeline}
@@ -3219,21 +3230,30 @@ export function AgentPage({ token, session, onUnauthorized, notify }) {
           onAction={runPipelineAction}
           token={token}
         />
-      ))}
-      <Panel title="处理边界" subtitle="固定省份源已接入独立 Agent 派生面；同步、分类与严格 HanLP 索引各自可恢复">
+      )) : null}
+      {section === 'runtime' ? <Panel title="处理边界" subtitle="固定省份源已接入独立 Agent 派生面；同步、分类与严格 HanLP 索引各自可恢复">
         <div className="mih-agent-scope-grid">
           <div><strong>文件映射建议</strong><p>管理员显式选择后，只发送列名、类型族与无值结构统计；建议仍需人工批准。</p></div>
           <div><strong>全国省份舆情</strong><p>先规则提取，只有歧义项调用模型；事件省份、发布者省份与地理范围分别归档，Agent 只能提案。</p></div>
           <div><strong>严格 HanLP 索引</strong><p>canonical 写入后由 projector 严格调用 HanLP；服务异常时保持待投影并退避，不写降级分词索引。</p></div>
           <div><strong>向量检索</strong><p>{embeddingProviders.length > 0 ? 'Embedding worker 已配置；正文 chunk 会发送给所选 Embedding Provider。' : '未配置 Embedding provider；PG/全文检索不受影响。'}</p></div>
         </div>
-      </Panel>
-      {editingKind ? (
+      </Panel> : null}
+      {section === 'providers' && editingKind ? (
         <ProviderSettingsModal
           kind={editingKind}
           setting={editingKind === 'chat' ? chatSetting : embeddingSetting}
           onClose={() => setEditingKind(null)}
           onSave={(body) => saveSetting(editingKind, body)}
+          proxySequences={proxySequences}
+        />
+      ) : null}
+      {revealTarget ? (
+        <ProviderSecretRevealModal
+          token={token}
+          target={revealTarget}
+          onClose={() => setRevealTarget(null)}
+          onUnauthorized={onUnauthorized}
         />
       ) : null}
     </>
@@ -3267,7 +3287,7 @@ function mergeProviderStatus(configured, runtime) {
 
 function AgentProviderPanel({
   kind, title, subtitle, setting, providers, canEdit, onEdit,
-  onTest, testingProvider, providerTests,
+  onTest, testingProvider, providerTests, onReveal,
 }) {
   const sourceLabel = setting.source === 'database' ? '数据库' : '环境变量'
   return (
@@ -3293,6 +3313,7 @@ function AgentProviderPanel({
         onTest={onTest}
         testingProvider={testingProvider}
         providerTests={providerTests}
+        onReveal={onReveal}
       />
     </Panel>
   )
@@ -3424,7 +3445,7 @@ function providerTestKey(kind, provider, revision) {
   ])
 }
 
-function ProviderTable({ providers, kind, revision, canTest, onTest, testingProvider, providerTests }) {
+function ProviderTable({ providers, kind, revision, canTest, onTest, testingProvider, providerTests, onReveal }) {
   return (
     <DataTable label={`${kind === 'chat' ? '对话' : 'Embedding'} Provider 链`}>
       <thead><tr><th>优先级</th><th>Provider</th><th>模型</th><th>Endpoint</th><th>状态</th><th>凭据</th><th>熔断</th>{canTest ? <th>连接测试</th> : null}</tr></thead>
@@ -3435,8 +3456,8 @@ function ProviderTable({ providers, kind, revision, canTest, onTest, testingProv
           const testDisabled = provider.authMode !== 'none' && !provider.keyConfigured
           return <tr key={provider.id}>
             <td><strong>{index === 0 ? '首选' : `降级 ${index}`}</strong><small>priority {provider.priority}</small></td>
-            <td><code>{provider.id}</code></td>
-            <td><code>{provider.model}</code>{kind === 'embedding' ? <small>{provider.dimensions || '—'} dimensions</small> : null}</td>
+            <td><strong>{provider.displayName || provider.id}</strong><small><code>{provider.id}</code></small></td>
+            <td><code>{provider.model}</code><small>{provider.protocol || 'openai-compatible'}{kind === 'embedding' ? ` · ${provider.dimensions || '—'} dimensions` : ''}</small></td>
             <td><code>{provider.baseUrl || '—'}</code><small>{provider.timeoutMs ? `${provider.timeoutMs} ms` : 'timeout 未知'} · {provider.authMode || 'bearer'}</small></td>
             <td><StatusBadge status={provider.enabled === false ? 'disabled' : 'active'} label={provider.enabled === false ? '停用' : '启用'} /></td>
             <td>{provider.authMode === 'none' ? (
@@ -3460,6 +3481,11 @@ function ProviderTable({ providers, kind, revision, canTest, onTest, testingProv
                 {testingProvider === testKey ? '测试中' : '测试'}
               </button>
               {test ? <small>{test.ok ? `${test.latencyMs} ms · 成功` : '最近失败'}</small> : null}
+              {provider.authMode !== 'none' && provider.keyConfigured ? (
+                <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(testingProvider)} onClick={() => onReveal?.(provider)}>
+                  <Key size={15} aria-hidden="true" />查看 Key
+                </button>
+              ) : null}
             </td> : null}
           </tr>
         })}
@@ -3472,8 +3498,11 @@ function ProviderTable({ providers, kind, revision, canTest, onTest, testingProv
 function providerDraft(provider, index, kind) {
   return {
     id: String(provider.id || ''),
+    displayName: String(provider.displayName || provider.id || ''),
     baseUrl: String(provider.baseUrl || ''),
     model: String(provider.model || ''),
+    protocol: provider.protocol || 'openai-compatible',
+    proxySequenceKey: provider.proxySequenceKey || '',
     timeoutMs: String(provider.timeoutMs || 60_000),
     dimensions: kind === 'embedding' ? String(provider.dimensions || '') : '',
     enabled: provider.enabled !== false,
@@ -3498,7 +3527,7 @@ function vectorSignatures(providers) {
     .sort()
 }
 
-function ProviderSettingsModal({ kind, setting, onClose, onSave }) {
+function ProviderSettingsModal({ kind, setting, onClose, onSave, proxySequences = [] }) {
   const initialProviders = useMemo(
     () => setting.providers.map((provider, index) => providerDraft(provider, index, kind)),
     [kind, setting],
@@ -3599,8 +3628,11 @@ function ProviderSettingsModal({ kind, setting, onClose, onSave }) {
         }
         normalized.push({
           id: provider.id.trim(),
+          displayName: provider.displayName.trim() || provider.id.trim(),
           baseUrl: provider.baseUrl.trim(),
           model: provider.model.trim(),
+          protocol: isEmbedding ? 'openai-compatible' : provider.protocol,
+          proxySequenceKey: provider.proxySequenceKey || null,
           timeoutMs,
           ...(isEmbedding ? { dimensions } : {}),
           enabled: provider.enabled,
@@ -3658,7 +3690,7 @@ function ProviderSettingsModal({ kind, setting, onClose, onSave }) {
         {databaseTarget && setting.source === 'environment' ? (
           <div className="mih-inline-warning">
             <Key size={17} aria-hidden="true" />
-            环境变量中的密钥不会自动复制到数据库。首次保存时，每个 Bearer Provider 都必须重新输入密钥。
+            当前仍在使用环境配置，说明自动导入未完成或已关闭。手动切换到数据库时，每个 Bearer Provider 都必须重新输入密钥；浏览器不会读取环境变量。
           </div>
         ) : null}
         {databaseTarget && isEmbedding ? (
@@ -3694,13 +3726,19 @@ function ProviderSettingsModal({ kind, setting, onClose, onSave }) {
               </header>
               <div className="mih-agent-provider-editor__grid">
                 <Field label="Provider ID"><input className="qp-input" required maxLength="64" pattern="[a-z0-9][a-z0-9._-]{0,63}" value={provider.id} onChange={(event) => patchProvider(index, { id: event.target.value })} /></Field>
+                <Field label="显示名称"><input className="qp-input" required maxLength="120" value={provider.displayName} onChange={(event) => patchProvider(index, { displayName: event.target.value })} /></Field>
                 <Field label="模型"><input className="qp-input" required maxLength="200" value={provider.model} onChange={(event) => patchProvider(index, { model: event.target.value })} /></Field>
+                {!isEmbedding ? <DropdownField label="调用协议" value={provider.protocol}
+                  onChange={(protocol) => patchProvider(index, { protocol })} options={PROVIDER_PROTOCOL_OPTIONS} /> : null}
                 <Field label="Base URL" className="mih-agent-provider-editor__wide" hint="修改后必须重新输入密钥或明确清除旧密钥"><input className="qp-input" type="url" required value={provider.baseUrl} placeholder="https://api.example.com/v1" onChange={(event) => patchProvider(index, { baseUrl: event.target.value })} /></Field>
                 <Field label="超时（ms）"><input className="qp-input" type="number" min="1000" max="300000" step="1" required value={provider.timeoutMs} onChange={(event) => patchProvider(index, { timeoutMs: event.target.value })} /></Field>
                 <Field label="优先级" hint="保存时按数值从小到大排序"><input className="qp-input" type="number" min="0" max="10000" step="1" required value={provider.priority} onChange={(event) => patchProvider(index, { priority: event.target.value })} /></Field>
                 {isEmbedding ? <Field label="Dimensions" hint="改变后必须 reindex"><input className="qp-input" type="number" min="1" step="1" required value={provider.dimensions} onChange={(event) => patchProvider(index, { dimensions: event.target.value })} /></Field> : null}
                 <DropdownField label="认证方式" value={provider.authMode}
                   onChange={(authMode) => patchProvider(index, { authMode })} options={PROVIDER_AUTH_OPTIONS} />
+                <DropdownField label="Provider Proxy" hint="未指定时继承 Hub 全局 Proxy Sequence。" value={provider.proxySequenceKey}
+                  onChange={(proxySequenceKey) => patchProvider(index, { proxySequenceKey })}
+                  options={[{ value: '', label: '继承全局 Proxy' }, ...proxySequences.map((sequence) => ({ value: sequence.sequenceKey, label: sequence.displayName }))]} />
                 <Field
                   label="API Key"
                   className="mih-agent-provider-editor__wide"
@@ -3733,6 +3771,59 @@ function ProviderSettingsModal({ kind, setting, onClose, onSave }) {
           </button>
         ) : null}
       </form>
+    </Modal>
+  )
+}
+
+function ProviderSecretRevealModal({ token, target, onClose, onUnauthorized }) {
+  const [adminToken, setAdminToken] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+
+  const reveal = async (event) => {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    setApiKey('')
+    try {
+      const result = await adminApi.revealAgentProviderKey(
+        token,
+        target.kind,
+        target.provider.id,
+        adminToken,
+      )
+      setApiKey(result.apiKey)
+      setAdminToken('')
+    } catch (requestError) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setError(requestError)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal title={`查看 ${target.provider.displayName || target.provider.id} Key`}
+      description="这是唯一会返回明文 Key 的内部接口；需要重新输入 Hub Admin Token，响应禁止缓存。"
+      onClose={onClose}
+      footer={<button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭并清除</button>}>
+      {!apiKey ? <form className="mih-agent-secret-reveal" onSubmit={reveal}>
+        <Field label="重新输入 Admin Token" hint="Launcher Token 不能查看模型密钥。">
+          <input className="qp-input" type="password" autoComplete="off" value={adminToken}
+            onChange={(event) => setAdminToken(event.target.value)} autoFocus required />
+        </Field>
+        {error ? <ErrorState error={error} /> : null}
+        <button className="qp-button qp-button--primary" type="submit" disabled={busy || !adminToken}>
+          <Key size={16} />{busy ? '正在验证' : '验证并显示'}
+        </button>
+      </form> : <div className="mih-agent-secret-reveal">
+        <Field label="API Key" hint="关闭窗口后即从组件状态中清除；请不要截图或粘贴到日志。">
+          <input className="qp-input mih-mono" type="text" readOnly value={apiKey} autoComplete="off" />
+        </Field>
+        <button className="qp-button qp-button--outline" type="button"
+          onClick={() => navigator.clipboard?.writeText(apiKey)}><Key size={16} />复制到剪贴板</button>
+      </div>}
     </Modal>
   )
 }

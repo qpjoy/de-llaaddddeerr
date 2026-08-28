@@ -362,13 +362,43 @@
   transition: border-color var(--qp-transition-fast), box-shadow var(--qp-transition-fast);
 }
 
-.mih-market-stage[draggable="true"] {
-  cursor: grab;
-}
-
 .mih-market-stage.is-selected {
   border-color: color-mix(in srgb, var(--qp-primary) 52%, var(--qp-line));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--qp-primary) 14%, transparent), var(--qp-shadow-drop-2);
+}
+
+.mih-market-stage-drag-handle {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 24px;
+  user-select: none;
+}
+
+.mih-market-stage-drag-handle::before {
+  position: absolute;
+  top: 9px;
+  right: 0;
+  left: 0;
+  height: 6px;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 18%, var(--qp-line));
+  border-radius: var(--qp-radius-pill);
+  background: color-mix(in srgb, var(--qp-primary) 5%, var(--qp-bg-3));
+  content: '';
+  transition: border-color var(--qp-transition-fast), background var(--qp-transition-fast);
+}
+
+.mih-market-stage-drag-handle[draggable="true"] {
+  cursor: grab;
+}
+
+.mih-market-stage-drag-handle[draggable="true"]:hover::before {
+  border-color: color-mix(in srgb, var(--qp-primary) 48%, var(--qp-line));
+  background: color-mix(in srgb, var(--qp-primary) 11%, var(--qp-bg-3));
+}
+
+.mih-market-stage-drag-handle[draggable="true"]:active {
+  cursor: grabbing;
 }
 
 .mih-market-stage__header {
@@ -731,6 +761,37 @@
   background: var(--qp-bg-2);
   color: var(--qp-text-2);
   font-size: 11px;
+}
+
+.mih-market-trash__drag-handle {
+  position: relative;
+  flex: 0 0 18px;
+  align-self: stretch;
+  min-height: 26px;
+  user-select: none;
+}
+
+.mih-market-trash__drag-handle::before {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 6px;
+  width: 4px;
+  border-radius: var(--qp-radius-pill);
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--qp-text-4) 0 2px,
+    transparent 2px 5px
+  );
+  content: '';
+}
+
+.mih-market-trash__drag-handle[draggable="true"] {
+  cursor: grab;
+}
+
+.mih-market-trash__label {
+  flex: 1 1 auto;
 }
 
 .mih-market-trash small {

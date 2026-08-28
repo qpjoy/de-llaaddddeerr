@@ -70,9 +70,11 @@ type StageTrace = {
     issues: Array<{ path: string, message: string }>
   }
   model: null | {
+    sequenceKey: string | null
     provider: string | null
     model: string | null
     temperature: number
+    effectiveTemperature: number | null
     maxTokens: number
     latencyMs: number | null
     inputTokens: number | null
@@ -146,6 +148,8 @@ const STAGE_TABS = [
   { id: 'result', label: 'Result' },
   { id: 'metrics', label: 'Metrics' },
 ] as const
+
+const STAGE_DRAG_MIME = 'application/x-mx-insight-agent-market-stage'
 
 type StageTab = typeof STAGE_TABS[number]['id']
 
@@ -474,6 +478,10 @@ function StageMetrics({ traces }: { traces: StageTrace[] }) {
             ? (trace.model.responseValidation.valid ? 'PASS' : 'FAIL')
             : '—'}</strong></span>
           <span>模型 <strong>{trace.model?.model || (trace.toolCalls.length ? '固定工具' : '—')}</strong></span>
+          {trace.model ? <span>Temperature <strong>{trace.model.temperature}{trace.model.effectiveTemperature != null
+            && trace.model.effectiveTemperature !== trace.model.temperature
+            ? ` → ${trace.model.effectiveTemperature}` : ''}</strong></span> : null}
+          {trace.model?.sequenceKey ? <span>Sequence <strong>{trace.model.sequenceKey}</strong></span> : null}
           <span>Tokens <strong>{metricNumber(trace.model?.inputTokens)} / {metricNumber(trace.model?.outputTokens)}</strong></span>
           <span>Tool calls <strong>{trace.toolCalls.length}</strong></span>
           {trace.model?.errorCode ? <span>降级码 <strong>{trace.model.errorCode}</strong></span> : null}
@@ -500,7 +508,6 @@ function StageCard({
   onTab,
   onMutate,
   onTrash,
-  onDragStart,
 }: {
   stage: AdvancedSearchStage
   selected: boolean
@@ -511,14 +518,12 @@ function StageCard({
   onTab: (tab: StageTab) => void
   onMutate: (mutate: (stage: AdvancedSearchStage) => void) => void
   onTrash: () => void
-  onDragStart: (event: DragEvent<HTMLElement>) => void
 }) {
   const meta = ADVANCED_SEARCH_STAGE_META[stage.type]
   const Icon = meta.kind === 'agent' ? Brain : Wrench
   const latest = traces.at(-1)
   return (
-    <article className={'mih-market-stage' + (selected ? ' is-selected' : '')}
-      draggable={canEdit} onDragStart={onDragStart}>
+    <article className={'mih-market-stage' + (selected ? ' is-selected' : '')}>
       <header className="mih-market-stage__header">
         <button type="button" className="mih-market-stage__select" onClick={onSelect}
           aria-expanded={selected}>
@@ -624,6 +629,13 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
     loading: boolean
     refresh: () => void
   }
+  const loadAgentControl = useCallback(() => adminApi.agent(token), [token])
+  const agentControl = useRemoteData(loadAgentControl, onUnauthorized) as {
+    data: any
+    error: any
+    loading: boolean
+    refresh: () => void
+  }
   const [snapshot, setSnapshot] = useState<Snapshot>({
     agentKey: ADVANCED_SEARCH_AGENT_KEY,
     revision: 0,
@@ -635,6 +647,7 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
   const [draft, setDraft] = useState<AdvancedSearchDefinition>(() => freshAdvancedSearchDefinition())
   const [query, setQuery] = useState<string>(ADVANCED_SEARCH_INPUT_EXAMPLE.query)
   const [filters, setFilters] = useState<FilterDraft>(EMPTY_FILTERS)
+  const [sequenceKey, setSequenceKey] = useState<string>('')
   const [selectedStage, setSelectedStage] = useState<AdvancedSearchStageType>('triage')
   const [tab, setTab] = useState<StageTab>('prompt')
   const [saving, setSaving] = useState(false)
@@ -643,6 +656,12 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
   const [result, setResult] = useState<DryRunResult | null>(null)
   const [previousResult, setPreviousResult] = useState<DryRunResult | null>(null)
   const canEdit = session?.kind === 'admin-token'
+  const chatSequenceOptions = useMemo(() => [
+    { value: '', label: '全局默认 LLM Sequence' },
+    ...((agentControl.data?.control?.sequences || [])
+      .filter((sequence: any) => sequence.kind === 'chat' && sequence.enabled)
+      .map((sequence: any) => ({ value: sequence.sequenceKey, label: `${sequence.displayName} · ${sequence.sequenceKey}` }))),
+  ], [agentControl.data])
 
   useEffect(() => {
     if (!remote.data) return
@@ -685,9 +704,13 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
     setSelectedStage(stageId as AdvancedSearchStageType)
   }
 
-  const dragId = (event: DragEvent): string => event.dataTransfer.getData('text/plain')
+  const dragId = (event: DragEvent): string | null => {
+    const id = event.dataTransfer.getData(STAGE_DRAG_MIME)
+    return draft.stages.some((stage) => stage.id === id) ? id : null
+  }
   const onDragStart = (stageId: string) => (event: DragEvent<HTMLElement>) => {
     event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData(STAGE_DRAG_MIME, stageId)
     event.dataTransfer.setData('text/plain', stageId)
   }
   const allowDrop = (event: DragEvent) => {
@@ -730,6 +753,7 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
       const runSnapshot = structuredClone(parsed.data)
       const next = await adminApi.runAgentMarketDryRun(token, ADVANCED_SEARCH_AGENT_KEY, {
         dryRun: true,
+        sequenceKey: sequenceKey || null,
         query: query.trim(),
         filters: {
           platform: nullable(filters.platform),
@@ -793,6 +817,14 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
       <div className="mih-market-layout">
         <aside className="mih-market-runner">
           <Panel title="运行实验" subtitle="运行使用当前未保存草稿的不可变快照。">
+            <DropdownField
+              label="LLM Sequence"
+              hint="默认项跟随 Agent 中心的全局 Chat Sequence；显式选择会 fail-closed，不会偷换为其他链。"
+              value={sequenceKey}
+              onChange={setSequenceKey}
+              options={chatSequenceOptions as never[]}
+              disabled={!canEdit || running || agentControl.loading}
+            />
             <Field label="user" hint="这是本次 dry-run 的用户消息。">
               <textarea className="qp-input mih-market-query" value={query} disabled={!canEdit || running}
                 onChange={(event) => setQuery(event.target.value)} />
@@ -875,7 +907,6 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
                 onTab={setTab}
                 onMutate={(mutate) => mutateStage(stage.id, mutate)}
                 onTrash={() => moveToTrash(stage.id)}
-                onDragStart={onDragStart(stage.id)}
               />
               {stage.type === 'triage' ? (
                 <div className="mih-market-branch-note" aria-label="意图分流条件边">
@@ -890,7 +921,10 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
                   <span>partial / insufficient → rewrite · 最多 {stage.options.maxRetries} 次</span>
                 </div>
               ) : null}
-              <div className="mih-market-flow-line" aria-hidden="true" />
+              <div className="mih-market-stage-drag-handle" draggable={canEdit}
+                aria-hidden="true"
+                title={canEdit ? '拖动阶段到回收站' : undefined}
+                onDragStart={canEdit ? onDragStart(stage.id) : undefined} />
             </div>
           ))}
           <LockedGate kind="exit" title="Trace + Eval Gate"
@@ -905,9 +939,14 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
             <header><Recycle size={22} weight="duotone" /><div><strong>阶段回收站</strong><p>拖入测试删除后的影响；配置、Prompt 与原位置仍保留。</p></div></header>
             <div>
               {trashedStages.map((stage) => (
-                <article key={stage.id} draggable={canEdit} onDragStart={onDragStart(stage.id)}>
-                  <span>{ADVANCED_SEARCH_STAGE_META[stage.type].label}</span>
+                <article key={stage.id}>
+                  <span className="mih-market-trash__drag-handle" draggable={canEdit}
+                    aria-hidden="true"
+                    title={canEdit ? '拖回阶段图' : undefined}
+                    onDragStart={canEdit ? onDragStart(stage.id) : undefined} />
+                  <span className="mih-market-trash__label">{ADVANCED_SEARCH_STAGE_META[stage.type].label}</span>
                   <button className="qp-button qp-button--ghost" type="button" disabled={!canEdit}
+                    aria-label={'恢复 ' + ADVANCED_SEARCH_STAGE_META[stage.type].label}
                     onClick={() => restore(stage.id)}>
                     <ArrowCounterClockwise size={15} />恢复
                   </button>

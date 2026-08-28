@@ -1,12 +1,14 @@
 import { AppError } from '../core/errors.mjs'
+import { ProxyAgent } from 'undici'
 
 // Model provider registry with ordered failover.
 //
-// Every provider speaks the OpenAI-compatible REST shape (`/chat/completions`,
-// `/embeddings`), which is what DeepSeek, Qwen, Moonshot, vLLM, Ollama and
-// OpenAI itself all expose. Supporting one wire format instead of an adapter
-// per vendor is why adding a provider is a config line rather than a code
-// change.
+// Chat providers may speak either the OpenAI-compatible REST shape
+// (`/chat/completions`) used by OpenAI, DeepSeek, Kimi, Qwen, vLLM and Ollama,
+// or Anthropic's Messages shape (`/messages`). The rest of the Hub consumes one
+// stable OpenAI-shaped envelope so adding a transport never leaks vendor
+// conditionals into Agent graphs. Embeddings remain OpenAI-compatible because
+// Anthropic does not expose an embedding endpoint.
 //
 // Configuration (MX_INSIGHT_AGENT_PROVIDERS, JSON array, priority order):
 //
@@ -28,6 +30,16 @@ const DEFAULT_TIMEOUT_MS = 60_000
 // unusable.
 const CIRCUIT_THRESHOLD = 3
 const CIRCUIT_COOLDOWN_MS = 60_000
+const proxyDispatchers = new Map()
+
+function proxyDispatcher(proxyUrl) {
+  let dispatcher = proxyDispatchers.get(proxyUrl)
+  if (!dispatcher) {
+    dispatcher = new ProxyAgent(proxyUrl)
+    proxyDispatchers.set(proxyUrl, dispatcher)
+  }
+  return dispatcher
+}
 
 export class NoProviderAvailableError extends AppError {
   constructor(attempts, { invalidResponse = false } = {}) {
@@ -98,7 +110,7 @@ export function parseProviderConfig(raw, { kind = 'chat', allowInlineApiKey = fa
     // on every call. Caught here because the alternative is discovering it
     // through a provider chain that silently fails over to nothing.
     const baseUrl = String(entry.baseUrl).replace(/\/+$/, '')
-    for (const endpoint of ['/chat/completions', '/embeddings', '/completions']) {
+    for (const endpoint of ['/chat/completions', '/embeddings', '/completions', '/messages']) {
       if (baseUrl.endsWith(endpoint)) {
         throw new AppError(
           500,
@@ -109,10 +121,29 @@ export function parseProviderConfig(raw, { kind = 'chat', allowInlineApiKey = fa
       }
     }
 
+    const protocol = entry.protocol ?? 'openai-compatible'
+    if (!['openai-compatible', 'anthropic-messages'].includes(protocol)) {
+      throw new AppError(
+        500,
+        'invalid_configuration',
+        `provider[${index}].protocol must be openai-compatible or anthropic-messages`,
+      )
+    }
+    if (kind === 'embedding' && protocol !== 'openai-compatible') {
+      throw new AppError(
+        500,
+        'invalid_configuration',
+        `provider[${index}].protocol must be openai-compatible for embeddings`,
+      )
+    }
+
     return {
       id: entry.id,
+      displayName: entry.displayName || entry.id,
       baseUrl,
       model: entry.model,
+      protocol,
+      proxySequenceKey: entry.proxySequenceKey || null,
       apiKeyEnv: entry.apiKeyEnv || null,
       // Database-backed settings resolve a credential before constructing the
       // router. Environment configuration keeps the original apiKeyEnv path.
@@ -176,6 +207,56 @@ class CircuitBreaker {
   }
 }
 
+function anthropicRequestBody(body) {
+  const system = []
+  const messages = []
+  for (const message of Array.isArray(body?.messages) ? body.messages : []) {
+    if (message?.role === 'system') {
+      if (typeof message.content === 'string' && message.content) system.push(message.content)
+      continue
+    }
+    if (!['user', 'assistant'].includes(message?.role)) continue
+    messages.push({ role: message.role, content: message.content })
+  }
+  return {
+    model: body.model,
+    max_tokens: body.max_tokens,
+    messages,
+    ...(system.length > 0 ? { system: system.join('\n\n') } : {}),
+    ...(body.temperature == null ? {} : { temperature: Math.min(1, body.temperature) }),
+  }
+}
+
+function normalizedAnthropicPayload(payload) {
+  const content = Array.isArray(payload?.content)
+    ? payload.content
+      .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text)
+      .join('')
+    : ''
+  return {
+    id: payload?.id,
+    model: payload?.model,
+    choices: [{ message: { role: 'assistant', content } }],
+    usage: {
+      prompt_tokens: payload?.usage?.input_tokens,
+      completion_tokens: payload?.usage?.output_tokens,
+      total_tokens: Number.isFinite(payload?.usage?.input_tokens)
+        && Number.isFinite(payload?.usage?.output_tokens)
+        ? payload.usage.input_tokens + payload.usage.output_tokens
+        : undefined,
+    },
+  }
+}
+
+function safeTransportFailure(error, { timedOut, timeoutMs }) {
+  if (timedOut || error?.name === 'AbortError') return `timed out after ${timeoutMs}ms`
+  // Fetch/Undici transport messages may contain proxy URLs, resolved IPs or
+  // TLS diagnostics. Attempts are returned to Admin traces, so expose only a
+  // stable class and keep raw details out of both the response and logger.
+  return 'transport failure'
+}
+
 export class ProviderRouter {
   #breakers = new Map()
 
@@ -213,6 +294,19 @@ export class ProviderRouter {
    */
   async call(path, buildBody, { signal, validatePayload } = {}) {
     return this.#callProviders(this.providers, path, buildBody, { signal, validatePayload })
+  }
+
+  /** Call an ordered subset while sharing the catalog router's circuit state. */
+  async callSequence(providerIds, path, buildBody, { signal, validatePayload } = {}) {
+    if (!Array.isArray(providerIds) || providerIds.length === 0) {
+      throw new AppError(503, 'agent_sequence_unavailable', 'The selected LLM Sequence has no providers')
+    }
+    const byId = new Map(this.providers.map((provider) => [provider.id, provider]))
+    const providers = providerIds.map((providerId) => byId.get(providerId))
+    if (providers.some((provider) => !provider)) {
+      throw new AppError(503, 'agent_sequence_unavailable', 'The selected LLM Sequence references an unavailable provider')
+    }
+    return this.#callProviders(providers, path, buildBody, { signal, validatePayload })
   }
 
   /** Probe exactly one saved provider without silently succeeding on fallback. */
@@ -272,16 +366,48 @@ export class ProviderRouter {
       const startedAt = performance.now()
 
       try {
-        const response = await this.fetchImpl(`${provider.baseUrl}${path}`, {
+        const anthropic = provider.protocol === 'anthropic-messages' && path === '/chat/completions'
+        const requestPath = anthropic ? '/messages' : path
+        const requestBody = buildBody(provider)
+        const init = {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            ...(authMode === 'bearer' && apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+            ...(authMode === 'bearer' && apiKey
+              ? anthropic
+                ? { 'x-api-key': apiKey }
+                : { authorization: `Bearer ${apiKey}` }
+              : {}),
+            ...(anthropic ? { 'anthropic-version': '2023-06-01' } : {}),
           },
-          body: JSON.stringify(buildBody(provider)),
+          body: JSON.stringify(anthropic ? anthropicRequestBody(requestBody) : requestBody),
           signal: controller.signal,
           redirect: 'error',
-        })
+        }
+        const proxyUrls = Array.isArray(provider.proxyUrls) ? provider.proxyUrls : []
+        const transportRoutes = [
+          ...proxyUrls.map((proxyUrl) => ({ proxyUrl })),
+          ...(provider.directFallback === false ? [] : [{ proxyUrl: null }]),
+        ]
+        let response = null
+        let lastTransportError = null
+        for (const route of transportRoutes) {
+          if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
+          try {
+            response = await this.fetchImpl(`${provider.baseUrl}${requestPath}`, {
+              ...init,
+              ...(route.proxyUrl ? { dispatcher: proxyDispatcher(route.proxyUrl) } : {}),
+            })
+            break
+          } catch (error) {
+            lastTransportError = error
+            if (controller.signal.aborted) throw error
+            this.logger?.warn?.(
+              `[agent] ${provider.id} transport ${route.proxyUrl ? 'proxy' : 'direct'} failed; trying next route`,
+            )
+          }
+        }
+        if (!response) throw lastTransportError || new Error('No provider transport route is available')
 
         if (!response.ok) {
           // Upstream bodies may contain reflected prompts, credentials or vendor
@@ -305,6 +431,7 @@ export class ProviderRouter {
         let payload
         try {
           payload = await response.json()
+          if (anthropic) payload = normalizedAnthropicPayload(payload)
         } catch {
           // JSON parser errors may include a fragment of the upstream body.
           // Replace them before the generic failure trail/logging boundary.
@@ -333,6 +460,7 @@ export class ProviderRouter {
         return {
           provider: provider.id,
           model: provider.model,
+          protocol: provider.protocol || 'openai-compatible',
           latencyMs: Math.round(performance.now() - startedAt),
           payload,
           // Which providers were skipped or failed on the way here. Callers
@@ -346,7 +474,10 @@ export class ProviderRouter {
         // paid fallback request after the work that needed it has gone away.
         if (signal?.aborted && !timedOut) throw error
         breaker.recordFailure()
-        const reason = error.name === 'AbortError' ? `timed out after ${provider.timeoutMs}ms` : error.message
+        const reason = safeTransportFailure(error, {
+          timedOut,
+          timeoutMs: provider.timeoutMs,
+        })
         attempts.push({ provider: provider.id, error: reason })
         this.logger?.warn?.(`[agent] ${provider.id} failed (${reason}); trying next provider`)
       } finally {
@@ -361,7 +492,9 @@ export class ProviderRouter {
   status() {
     return this.providers.map((provider) => ({
       id: provider.id,
+      displayName: provider.displayName || provider.id,
       model: provider.model,
+      protocol: provider.protocol || 'openai-compatible',
       dimensions: provider.dimensions,
       keyConfigured: this.#authMode(provider) !== 'bearer' || Boolean(this.#apiKey(provider)),
       circuit: this.#breakers.get(provider.id).state,
@@ -417,6 +550,17 @@ export class EmbeddingRouter extends ProviderRouter {
 
   async embed(inputs, options = {}) {
     const result = await this.call('/embeddings', (provider) => ({
+      model: provider.model,
+      input: inputs,
+    }), {
+      ...options,
+      validatePayload: (payload, provider) => this.#validatePayload(payload, provider, inputs),
+    })
+    return this.#withVectors(result, inputs)
+  }
+
+  async embedSequence(providerIds, inputs, options = {}) {
+    const result = await this.callSequence(providerIds, '/embeddings', (provider) => ({
       model: provider.model,
       input: inputs,
     }), {

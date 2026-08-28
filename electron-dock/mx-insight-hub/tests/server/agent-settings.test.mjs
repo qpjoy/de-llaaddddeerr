@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
@@ -66,6 +67,10 @@ function databaseHarness() {
       return {
         rows: [...state.credentials.get(params[0]).entries()].map(([provider_id, api_key]) => ({ provider_id, api_key })),
       }
+    }
+    if (text.startsWith('SELECT api_key')) {
+      const apiKey = state.credentials.get(params[0]).get(params[1])
+      return { rows: apiKey == null ? [] : [{ api_key: apiKey }], rowCount: apiKey == null ? 0 : 1 }
     }
     if (text.startsWith('SELECT provider_id')) {
       return { rows: [...state.credentials.get(params[0]).keys()].map((provider_id) => ({ provider_id })) }
@@ -139,6 +144,17 @@ function config(overrides = {}) {
   }
 }
 
+test('migration 041 adds only isolated Agent control-plane state and no business writes', async () => {
+  const sql = await readFile(new URL('../../migrations/041_agent_llm_control_plane.sql', import.meta.url), 'utf8')
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS control\.agent_llm_sequences/)
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS control\.agent_consumer_bindings/)
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS control\.agent_proxy_sequences/)
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS agent_center\.agent_provider_probe_results/)
+  assert.doesNotMatch(sql, /INSERT INTO control\.agent_provider_settings/i)
+  assert.doesNotMatch(sql, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:core|ingest)\./i)
+  assert.doesNotMatch(sql, /ON DELETE CASCADE/i)
+})
+
 test('database provider validation rejects credential exfiltration URLs and unknown fields', async () => {
   for (const baseUrl of [
     'http://models.example.com/v1',
@@ -148,6 +164,7 @@ test('database provider validation rejects credential exfiltration URLs and unkn
     'https://models.example.com/v1#fragment',
     'https://models.example.com/v1#',
     'https://models.example.com/v1/chat/completions',
+    'https://models.example.com/v1/messages',
     'https://localhost/v1',
     'https://localhost./v1',
     'https://api.localhost/v1',
@@ -172,6 +189,17 @@ test('database provider validation rejects credential exfiltration URLs and unkn
   assert.throws(
     () => normalizeDatabaseProviders([{ ...provider(), apiKey: 'x'.repeat(8_193) }], { kind: 'chat' }),
     /at most 8192/,
+  )
+  const [anthropic] = normalizeDatabaseProviders([{
+    ...provider(), protocol: 'anthropic-messages', proxySequenceKey: 'agent-egress',
+  }], { kind: 'chat' })
+  assert.equal(anthropic.provider.protocol, 'anthropic-messages')
+  assert.equal(anthropic.provider.proxySequenceKey, 'agent-egress')
+  assert.throws(
+    () => normalizeDatabaseProviders([{
+      ...provider(), protocol: 'anthropic-messages', dimensions: 4,
+    }], { kind: 'embedding' }),
+    /openai-compatible for embedding/,
   )
 })
 
@@ -208,6 +236,8 @@ test('settings store persists plaintext separately while every public shape stay
     1,
     'only the explicit runtime snapshot query selects api_key',
   )
+
+  assert.equal(await store.revealCredentialInternal('chat', 'primary'), sentinel)
 
   const preserved = await store.updateSetting('chat', {
     expectedRevision: 1,
@@ -381,6 +411,123 @@ test('AgentRuntime loads DB settings, refreshes atomically, and keeps last-known
   runtime.close()
 })
 
+test('AgentRuntime routes the global Sequence and keeps legacy catalog fallback for a stale default', async () => {
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database',
+    revision: 7,
+    providers: [
+      provider({ id: 'catalog-first', baseUrl: 'https://catalog-first.invalid/v1', authMode: 'none' }),
+      provider({ id: 'sequence-only', baseUrl: 'https://sequence-only.invalid/v1', authMode: 'none', priority: 1 }),
+    ],
+  }))
+  const controlState = {
+    providerRevision: 7,
+    source: 'database',
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot(kind) {
+      if (kind !== 'chat') return {
+        sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
+        globalProxySequenceKey: null, proxyRevision: 0,
+      }
+      return {
+        sequences: [{
+          sequenceKey: 'selected', displayName: 'Selected', kind: 'chat',
+          providerIds: ['sequence-only'], enabled: true,
+          providerRevision: controlState.providerRevision, revision: 1,
+          source: controlState.source,
+        }],
+        defaultBinding: { consumerKey: 'hub.chat.default', kind: 'chat', sequenceKey: 'selected', revision: 1 },
+        proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0,
+      }
+    },
+  }
+  const seen = []
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    fetchImpl: async (url) => {
+      seen.push(new URL(url).hostname)
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    },
+  }).start()
+
+  const selected = await runtime.complete([{ role: 'user', content: 'hello' }])
+  assert.equal(selected.provider, 'sequence-only')
+  assert.equal(selected.sequenceKey, 'selected')
+
+  controlState.providerRevision = 6
+  await runtime.refresh({ force: true })
+  await assert.rejects(
+    async () => runtime.complete([{ role: 'user', content: 'hello' }]),
+    (error) => error?.code === 'agent_sequence_unavailable',
+  )
+  const profile = await runtime.suggestFileProfile({ columns: ['id', 'title'] })
+  assert.equal(profile.origin, 'inferred', 'stale custom routing must preserve file preview fallback')
+  assert.equal(
+    await runtime.classifyRecord({ record: { id: '1' }, categories: ['news'] }),
+    null,
+    'stale custom routing must preserve the legacy classifier null fallback',
+  )
+  await assert.rejects(
+    async () => runtime.complete([{ role: 'user', content: 'hello' }], { sequenceKey: 'selected' }),
+    (error) => error?.code === 'agent_sequence_unavailable',
+  )
+
+  controlState.source = 'bootstrap'
+  await runtime.refresh({ force: true })
+  const fallback = await runtime.complete([{ role: 'user', content: 'hello' }])
+  assert.equal(fallback.provider, 'catalog-first')
+  assert.equal(fallback.sequenceKey, null)
+  assert.deepEqual(seen, ['sequence-only.invalid', 'catalog-first.invalid'])
+  runtime.close()
+})
+
+test('AgentRuntime imports a legacy environment provider and bootstraps its default Sequence once', async () => {
+  const harness = databaseHarness()
+  const bootstraps = []
+  const controlStore = {
+    async loadRuntimeSnapshot() {
+      return {
+        sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
+        globalProxySequenceKey: null, proxyRevision: 0,
+      }
+    },
+    async ensureBootstrapSequence(input) { bootstraps.push(input) },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({
+      agent: {
+        chatProviders: JSON.stringify([{
+          id: 'legacy-chat', displayName: 'Legacy Chat',
+          baseUrl: 'https://legacy-chat.invalid/v1', model: 'legacy-model', authMode: 'none',
+        }]),
+        embeddingProviders: null,
+        autoMigrate: true,
+      },
+    }),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+  }).start()
+
+  assert.equal(harness.state.settings.get('chat').source, 'database')
+  assert.equal(runtime.status().settings.chat.source, 'database')
+  assert.equal(runtime.status().chat[0].id, 'legacy-chat')
+  assert.deepEqual(bootstraps, [{ kind: 'chat', providerIds: ['legacy-chat'], providerRevision: 1 }])
+  runtime.close()
+})
+
 test('AgentRuntime uses environment providers when the database setting selects environment', async () => {
   const settingsStore = {
     async loadSetting(kind) { return row(kind, { revision: 3 }) },
@@ -476,6 +623,108 @@ test('AgentRuntime probes a disabled saved DB provider in an isolated router wit
   runtime.close()
 })
 
+test('an exact DB Provider probe uses the same global Proxy Sequence as production calls', async () => {
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 2,
+    providers: [provider({ authMode: 'none' })],
+  }))
+  const probes = []
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async recordProbe(input) { probes.push(input) },
+    async loadRuntimeSnapshot(kind) {
+      return {
+        sequences: [], defaultBinding: null,
+        proxyEndpoints: [{ proxyKey: 'host', proxyUrl: 'http://127.0.0.1:7890', enabled: true }],
+        proxySequences: [{
+          sequenceKey: 'global-egress', proxyKeys: ['host'],
+          directFallback: false, enabled: true,
+        }],
+        globalProxySequenceKey: kind === 'chat' ? 'global-egress' : null,
+        proxyRevision: 1,
+      }
+    },
+  }
+  let usedProxy = false
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    probeCooldownMs: 0,
+    fetchImpl: async (_url, options) => {
+      usedProxy = Boolean(options.dispatcher)
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    },
+  }).start()
+
+  const result = await runtime.testProvider({ kind: 'chat', providerId: 'primary' })
+  assert.equal(result.ok, true)
+  assert.equal(usedProxy, true)
+  assert.equal(probes.length, 1)
+  assert.equal(probes[0].ok, true)
+  assert.match(probes[0].proxyFingerprint, /^[0-9a-f]{64}$/)
+  assert.equal(probes[0].settingsRevision, 2)
+  runtime.close()
+})
+
+test('a long Provider probe records the exact settings snapshot it actually tested', async () => {
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 2,
+    providers: [provider({ authMode: 'none' })],
+  }))
+  const evidence = []
+  const emptyControl = {
+    sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
+    globalProxySequenceKey: null, proxyRevision: 0,
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot() { return emptyControl },
+    async recordProbe(input) { evidence.push(input) },
+  }
+  let announceStarted
+  let releaseProbe
+  const started = new Promise((resolve) => { announceStarted = resolve })
+  const hold = new Promise((resolve) => { releaseProbe = resolve })
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    probeCooldownMs: 0,
+    fetchImpl: async () => {
+      announceStarted()
+      await hold
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    },
+  }).start()
+
+  const probe = runtime.testProvider({ kind: 'chat', providerId: 'primary' })
+  await started
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 3,
+    providers: [provider({ authMode: 'none', model: 'new-model' })],
+  }))
+  await runtime.refresh({ force: true })
+  releaseProbe()
+  assert.equal((await probe).ok, true)
+  assert.equal(runtime.status().settings.chat.revision, 3)
+  assert.equal(evidence[0].settingsRevision, 2)
+  assert.equal(evidence[0].model, 'chat-model')
+  runtime.close()
+})
+
 test('AgentRuntime applies per-provider single-flight and cooldown protection to probes', async () => {
   const harness = databaseHarness()
   harness.state.settings.set('chat', row('chat', {
@@ -567,6 +816,65 @@ test('post-commit refresh failure disables the changed kind and reports deferred
   failReads = false
   assert.equal(await runtime.refresh(), true)
   assert.equal(runtime.status().chat[0].id, 'replacement')
+  runtime.close()
+})
+
+test('post-commit refresh failure disables a modified active LLM Sequence', async () => {
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 1,
+    providers: [provider({ authMode: 'none' })],
+  }))
+  let failControlReads = false
+  const snapshot = {
+    sequences: [{
+      sequenceKey: 'active-sequence', displayName: 'Active', kind: 'chat',
+      providerIds: ['primary'], enabled: true, source: 'database',
+      providerRevision: 1, revision: 1,
+    }],
+    defaultBinding: {
+      consumerKey: 'hub.chat.default', kind: 'chat',
+      sequenceKey: 'active-sequence', revision: 1,
+    },
+    proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0,
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot() {
+      if (failControlReads) throw new Error('control snapshot unavailable after commit')
+      return snapshot
+    },
+    async listPublicControl() {
+      return { sequences: snapshot.sequences, bindings: [snapshot.defaultBinding], providerTests: [], proxy: {} }
+    },
+    async recordProbe() {},
+    async saveSequence(_key, input) {
+      failControlReads = true
+      return { ...snapshot.sequences[0], ...input, revision: 2 }
+    },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    probeCooldownMs: 0,
+    fetchImpl: async () => new Response(JSON.stringify({
+      choices: [{ message: { content: 'OK' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  }).start()
+
+  const result = await runtime.saveSequence('active-sequence', {
+    expectedRevision: 1,
+    displayName: 'Active changed',
+    kind: 'chat',
+    providerIds: ['primary'],
+    enabled: true,
+  })
+  assert.equal(result.runtimeApplied, false)
+  assert.deepEqual(runtime.status().chat, [])
   runtime.close()
 })
 
@@ -899,6 +1207,11 @@ test('admin provider PUT returns only the safe setting shape', async () => {
         testedAt: '2026-08-24T10:00:00.000Z',
       }
     },
+    async revealProviderCredential(kind, providerId) {
+      assert.equal(kind, 'chat')
+      assert.equal(providerId, 'primary')
+      return { kind, providerId, apiKey: sentinel }
+    },
   }
   const app = createApp({
     service: {},
@@ -942,6 +1255,35 @@ test('admin provider PUT returns only the safe setting shape', async () => {
     const probePayload = await probe.json()
     assert.equal(probePayload.data.latencyMs, 23)
     assert.doesNotMatch(JSON.stringify(probePayload), /request-only-secret|apiKey|apiKeyEnv|payload/)
+
+    const deniedReveal = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat/primary/reveal`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-mx-insight-admin-token': 'admin-token-for-agent-settings',
+        },
+        body: JSON.stringify({ adminToken: 'wrong-token' }),
+      },
+    )
+    assert.equal(deniedReveal.status, 403)
+    assert.doesNotMatch(await deniedReveal.text(), /request-only-secret/)
+
+    const reveal = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat/primary/reveal`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-mx-insight-admin-token': 'admin-token-for-agent-settings',
+        },
+        body: JSON.stringify({ adminToken: 'admin-token-for-agent-settings' }),
+      },
+    )
+    assert.equal(reveal.status, 200)
+    assert.match(reveal.headers.get('cache-control') || '', /no-store/)
+    assert.equal((await reveal.json()).data.apiKey, sentinel)
 
     const deferred = await fetch(
       `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat`,

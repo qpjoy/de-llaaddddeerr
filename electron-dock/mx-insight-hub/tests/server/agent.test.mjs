@@ -77,6 +77,124 @@ test('provider order is the failover order', () => {
   assert.equal(parsed[0].baseUrl, 'https://a/v1', 'trailing slash is normalised away')
 })
 
+test('an LLM Sequence selects and orders a provider subset without changing catalog order', async () => {
+  const seen = []
+  const router = new ProviderRouter({
+    providers: providers('catalog-first', 'sequence-first', 'sequence-second'),
+    logger: quiet,
+    fetchImpl: async (url) => {
+      const id = new URL(url).hostname.split('.')[0]
+      seen.push(id)
+      return id === 'sequence-first'
+        ? jsonResponse({ error: 'overloaded' }, 503)
+        : jsonResponse(chatReply('ok'))
+    },
+  })
+
+  const result = await router.callSequence(
+    ['sequence-first', 'sequence-second'],
+    '/chat/completions',
+    (entry) => ({ model: entry.model }),
+  )
+
+  assert.equal(result.provider, 'sequence-second')
+  assert.deepEqual(seen, ['sequence-first', 'sequence-second'])
+  assert.equal(router.providers[0].id, 'catalog-first')
+})
+
+test('Anthropic Messages providers are adapted to the stable Hub chat envelope', async () => {
+  let observed
+  const router = new ProviderRouter({
+    providers: [{
+      ...providers('claude')[0],
+      protocol: 'anthropic-messages',
+      authMode: 'bearer',
+      apiKey: 'anthropic-secret-sentinel',
+    }],
+    logger: quiet,
+    fetchImpl: async (url, options) => {
+      observed = { url, options, body: JSON.parse(options.body) }
+      return jsonResponse({
+        id: 'msg_1',
+        model: 'claude-model',
+        content: [{ type: 'text', text: 'hello from Claude' }],
+        usage: { input_tokens: 7, output_tokens: 4 },
+      })
+    },
+  })
+  const agent = new HubAgent({
+    chat: router,
+    embeddings: new EmbeddingRouter({ providers: [], logger: quiet }),
+    logger: quiet,
+  })
+
+  const result = await agent.complete([
+    { role: 'system', content: 'System contract' },
+    { role: 'user', content: 'Say hi' },
+  ], { temperature: 1.7, maxTokens: 55 })
+
+  assert.equal(observed.url, 'https://claude.invalid/v1/messages')
+  assert.equal(observed.options.headers['x-api-key'], 'anthropic-secret-sentinel')
+  assert.equal(observed.options.headers.authorization, undefined)
+  assert.equal(observed.options.headers['anthropic-version'], '2023-06-01')
+  assert.deepEqual(observed.body, {
+    model: 'claude-model',
+    max_tokens: 55,
+    messages: [{ role: 'user', content: 'Say hi' }],
+    system: 'System contract',
+    temperature: 1,
+  })
+  assert.equal(result.payload.choices[0].message.content, 'hello from Claude')
+  assert.equal(result.requestedTemperature, 1.7)
+  assert.equal(result.effectiveTemperature, 1)
+  assert.deepEqual(result.payload.usage, {
+    prompt_tokens: 7,
+    completion_tokens: 4,
+    total_tokens: 11,
+  })
+})
+
+test('a Provider Proxy Sequence falls back to direct only after proxy transport failure', async () => {
+  const routes = []
+  const router = new ProviderRouter({
+    providers: [{
+      ...providers('proxied')[0],
+      proxyUrls: ['http://127.0.0.1:7890'],
+      directFallback: true,
+    }],
+    logger: quiet,
+    fetchImpl: async (_url, options) => {
+      routes.push(options.dispatcher ? 'proxy' : 'direct')
+      if (options.dispatcher) throw new Error('proxy unavailable')
+      return jsonResponse(chatReply('direct fallback'))
+    },
+  })
+
+  const result = await router.call('/chat/completions', (entry) => ({ model: entry.model }))
+
+  assert.equal(result.provider, 'proxied')
+  assert.deepEqual(routes, ['proxy', 'direct'])
+})
+
+test('transport diagnostics never leak proxy or network details into attempts', async () => {
+  const router = new ProviderRouter({
+    providers: providers('private-route'),
+    logger: quiet,
+    fetchImpl: async () => {
+      throw new Error('connect db-password=AUDIT_SENTINEL via 10.0.0.7')
+    },
+  })
+
+  await assert.rejects(
+    () => router.call('/chat/completions', (entry) => ({ model: entry.model })),
+    (error) => {
+      assert.equal(error.attempts[0].error, 'transport failure')
+      assert.doesNotMatch(error.message, /AUDIT_SENTINEL|10\.0\.0\.7/)
+      return true
+    },
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Failover policy
 // ---------------------------------------------------------------------------
@@ -694,6 +812,12 @@ test('a baseUrl that already contains an endpoint path is rejected', () => {
   assert.throws(
     () => parseProviderConfig(JSON.stringify([
       { id: 'x', baseUrl: 'https://llm.example.com/v1/embeddings', model: 'e' },
+    ])),
+    /baseUrl must be the API root/,
+  )
+  assert.throws(
+    () => parseProviderConfig(JSON.stringify([
+      { id: 'claude', baseUrl: 'https://api.anthropic.com/v1/messages', model: 'claude-sonnet-4-0' },
     ])),
     /baseUrl must be the API root/,
   )

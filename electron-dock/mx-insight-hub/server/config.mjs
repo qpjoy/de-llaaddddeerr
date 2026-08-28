@@ -97,6 +97,9 @@ export function loadConfig(environment = process.env) {
   const agent = {
     chatProviders: environment.MX_INSIGHT_AGENT_PROVIDERS?.trim() || null,
     embeddingProviders: environment.MX_INSIGHT_EMBEDDING_PROVIDERS?.trim() || null,
+    // One-time, idempotent import into the database-backed Provider catalog.
+    // Set to 0 only for an emergency rollback that must keep env authoritative.
+    autoMigrate: environment.MX_INSIGHT_AGENT_AUTO_MIGRATE !== '0',
   }
 
   // Federated identity through MX Launcher's User Center. Absent configuration

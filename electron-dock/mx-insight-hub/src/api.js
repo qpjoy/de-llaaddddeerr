@@ -453,6 +453,41 @@ export const adminApi = {
     `${ADMIN_ROOT}/agent/providers/${encodeURIComponent(kind)}/${encodeURIComponent(providerId)}/test`,
     { method: 'POST' },
   ),
+  revealAgentProviderKey: (token, kind, providerId, adminToken) => request(
+    token,
+    `${ADMIN_ROOT}/agent/providers/${encodeURIComponent(kind)}/${encodeURIComponent(providerId)}/reveal`,
+    { method: 'POST', body: { adminToken } },
+  ),
+  saveAgentSequence: (token, sequenceKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent/sequences/${encodeURIComponent(sequenceKey)}`,
+    { method: 'PUT', body },
+  ),
+  testAgentSequence: (token, sequenceKey, kind) => request(
+    token,
+    `${ADMIN_ROOT}/agent/sequences/${encodeURIComponent(sequenceKey)}/test`,
+    { method: 'POST', body: { kind } },
+  ),
+  setDefaultAgentSequence: (token, sequenceKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent/sequences/${encodeURIComponent(sequenceKey)}/default`,
+    { method: 'PUT', body },
+  ),
+  saveAgentProxyEndpoint: (token, proxyKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent/proxies/endpoints/${encodeURIComponent(proxyKey)}`,
+    { method: 'PUT', body },
+  ),
+  saveAgentProxySequence: (token, sequenceKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent/proxies/sequences/${encodeURIComponent(sequenceKey)}`,
+    { method: 'PUT', body },
+  ),
+  setDefaultAgentProxySequence: (token, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent/proxies/default`,
+    { method: 'PUT', body },
+  ),
   updateAgentPipeline: (token, pipelineKey, body) => request(
     token,
     `${ADMIN_ROOT}/agent/pipelines/${encodeURIComponent(pipelineKey)}`,

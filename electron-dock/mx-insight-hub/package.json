@@ -29,6 +29,7 @@
   "dependencies": {
     "@qpjoy/mx-common": "file:../mx-common",
     "pg": "8.22.0",
+    "undici": "7.29.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

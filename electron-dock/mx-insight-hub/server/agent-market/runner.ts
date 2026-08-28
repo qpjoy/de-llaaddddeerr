@@ -65,7 +65,7 @@ type AgentRuntime = {
   embeddings?: { available?: boolean }
   complete?: (
     messages: Array<{ role: string, content: string }>,
-    options: { temperature: number, maxTokens: number, signal: AbortSignal },
+    options: { temperature: number, maxTokens: number, signal: AbortSignal, sequenceKey?: string | null },
   ) => Promise<Record<string, any>>
   embed?: (texts: string[], options?: { signal?: AbortSignal }) => Promise<unknown>
 }
@@ -76,9 +76,11 @@ type CandidateList = {
 }
 
 type ModelTrace = {
+  sequenceKey: string | null
   provider: string | null
   model: string | null
   temperature: number
+  effectiveTemperature: number | null
   maxTokens: number
   latencyMs: number | null
   inputTokens: number | null
@@ -285,9 +287,11 @@ async function runStructuredModel<T>(
       note: '未配置可用模型；使用确定性 fallback，Prompt 改动不会触发模型。',
       messages,
       model: {
+        sequenceKey: context.request.sequenceKey,
         provider: null,
         model: null,
         temperature: stage.model.temperature,
+        effectiveTemperature: null,
         maxTokens: stage.model.maxTokens,
         latencyMs: null,
         inputTokens: null,
@@ -300,9 +304,11 @@ async function runStructuredModel<T>(
     }
   }
 
-  let observed: Pick<ModelTrace, 'provider' | 'model' | 'latencyMs' | 'inputTokens' | 'outputTokens' | 'attempts'> = {
+  let observed: Pick<ModelTrace, 'sequenceKey' | 'provider' | 'model' | 'effectiveTemperature' | 'latencyMs' | 'inputTokens' | 'outputTokens' | 'attempts'> = {
+    sequenceKey: context.request.sequenceKey,
     provider: null,
     model: null,
+    effectiveTemperature: null,
     latencyMs: null,
     inputTokens: null,
     outputTokens: null,
@@ -314,10 +320,13 @@ async function runStructuredModel<T>(
       temperature: stage.model.temperature,
       maxTokens: stage.model.maxTokens,
       signal: context.signal,
+      sequenceKey: context.request.sequenceKey,
     })
     observed = {
+      sequenceKey: typeof result.sequenceKey === 'string' ? result.sequenceKey : context.request.sequenceKey,
       provider: typeof result.provider === 'string' ? result.provider : null,
       model: typeof result.model === 'string' ? result.model : null,
+      effectiveTemperature: usageNumber(result.effectiveTemperature),
       latencyMs: usageNumber(result.latencyMs),
       inputTokens: usageNumber(result.payload?.usage?.prompt_tokens),
       outputTokens: usageNumber(result.payload?.usage?.completion_tokens),

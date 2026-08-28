@@ -17,6 +17,7 @@
   "include": [
     "agent-market/**/*.ts",
     "server/agent-market/**/*.ts",
-    "src/pages-agent-market.tsx"
+    "src/pages-agent-market.tsx",
+    "src/pages-agent-center.tsx"
   ]
 }

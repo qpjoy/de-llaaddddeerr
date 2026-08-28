@@ -14,6 +14,7 @@ import {
 } from '../search/reindex-lock.mjs'
 import { createAgentRuntime } from '../agent/runtime.mjs'
 import { AgentSettingsStore } from '../agent/settings-store.mjs'
+import { AgentControlStore } from '../agent/control-store.mjs'
 import { EmbeddingPipeline, runEmbeddingLoop } from '../embedding/pipeline.mjs'
 
 // Projector worker entrypoint.
@@ -110,6 +111,7 @@ async function main() {
   const agent = await createAgentRuntime({
     config,
     settingsStore: new AgentSettingsStore(pool),
+    controlStore: new AgentControlStore(pool),
     managedKinds: ['embedding'],
     logger,
   })
