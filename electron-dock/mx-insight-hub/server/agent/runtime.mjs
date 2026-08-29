@@ -961,7 +961,9 @@ export class AgentRuntime {
         { role: 'user', content: 'Say hi in one short sentence.' },
       ], {
         temperature: 0,
-        maxTokens: 32,
+        // Keep the operator sample viable for reasoning-capable providers;
+        // smaller limits can end in reasoning_content before any final text.
+        maxTokens: 1_024,
         signal,
         sequenceKey: sequence.sequenceKey,
         ignoreCircuit: true,

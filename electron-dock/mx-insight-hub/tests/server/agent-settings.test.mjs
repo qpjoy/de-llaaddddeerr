@@ -54,6 +54,7 @@ function databaseHarness() {
     ]),
     proxySequences: new Map(),
     proxyEndpoints: new Map(),
+    llmSequences: new Map(),
     proxyMigrationMissing: false,
     queries: [],
   }
@@ -107,6 +108,17 @@ function databaseHarness() {
           .filter((endpoint) => requested.has(endpoint.proxy_key))
           .filter((endpoint) => !text.includes('enabled = true') || endpoint.enabled)
           .map((endpoint) => structuredClone(endpoint)),
+      }
+    }
+    if (text.includes('FROM control.agent_llm_sequences')) {
+      const kind = params[0]
+      const removed = new Set(params[1] || [])
+      return {
+        rows: [...state.llmSequences.values()]
+          .filter((sequence) => sequence.kind === kind)
+          .filter((sequence) => sequence.provider_ids.some((providerId) => removed.has(providerId)))
+          .sort((left, right) => left.sequence_key.localeCompare(right.sequence_key))
+          .map((sequence) => structuredClone(sequence)),
       }
     }
     if (text.startsWith('INSERT INTO control.agent_provider_settings') && (
@@ -767,6 +779,52 @@ test('Provider writes lock and validate Proxy Sequences in their persistence tra
     (error) => error?.status === 503 && error?.code === 'agent_control_unavailable',
   )
   assert.equal(missingMigration.state.settings.get('chat').revision, 0)
+})
+
+test('Provider catalog replacement cannot delete an ID referenced by an LLM Sequence', async () => {
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database',
+    revision: 1,
+    providers: [
+      provider({ id: 'primary', authMode: 'none', priority: 0 }),
+      provider({ id: 'fallback', authMode: 'none', priority: 1 }),
+    ],
+  }))
+  harness.state.llmSequences.set('production-chat', {
+    sequence_key: 'production-chat',
+    kind: 'chat',
+    provider_ids: ['primary'],
+  })
+  const store = new AgentSettingsStore(harness.pool)
+
+  await assert.rejects(
+    () => store.updateSetting('chat', {
+      expectedRevision: 1,
+      source: 'database',
+      providers: [provider({ id: 'fallback', authMode: 'none' })],
+    }),
+    (error) => error?.status === 409
+      && error?.code === 'agent_provider_in_use'
+      && error?.details?.providerIds?.includes('primary')
+      && error?.details?.sequenceKeys?.includes('production-chat'),
+  )
+  assert.equal(harness.state.settings.get('chat').revision, 1)
+
+  const providerLock = harness.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_provider_settings') && text.includes('FOR UPDATE')
+  ))
+  const sequenceLock = harness.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_llm_sequences') && text.includes('FOR SHARE')
+  ))
+  assert.ok(providerLock >= 0 && providerLock < sequenceLock)
+
+  const saved = await store.updateSetting('chat', {
+    expectedRevision: 1,
+    source: 'database',
+    providers: [provider({ id: 'primary', authMode: 'none' })],
+  })
+  assert.deepEqual(saved.providers.map((entry) => entry.id), ['primary'])
 })
 
 test('Proxy Sequence pre-validation locks and requires an enabled endpoint', async () => {
@@ -1487,6 +1545,7 @@ test('an explicitly bound Proxy Sequence with no enabled endpoint fails closed',
 test('Sequence say-hi refreshes current state and enforces Sequence revision CAS', async () => {
   let failReads = false
   let fetchCalls = 0
+  let requestBody = null
   const snapshot = {
     controlAvailable: true,
     sequences: [{
@@ -1523,10 +1582,16 @@ test('Sequence say-hi refreshes current state and enforces Sequence revision CAS
     managedKinds: ['chat'],
     logger: quiet,
     refreshIntervalMs: 0,
-    fetchImpl: async () => {
+    fetchImpl: async (_url, options) => {
       fetchCalls += 1
+      requestBody = JSON.parse(options.body)
       return new Response(JSON.stringify({
-        choices: [{ message: { content: 'Hi from the current Sequence.' } }],
+        choices: requestBody.max_tokens < 1_024
+          ? [{
+              finish_reason: 'length',
+              message: { content: null, reasoning_content: 'Still reasoning' },
+            }]
+          : [{ message: { content: 'Hi from the current Sequence.' } }],
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     },
   }).start()
@@ -1540,6 +1605,7 @@ test('Sequence say-hi refreshes current state and enforces Sequence revision CAS
   assert.equal(fetchCalls, 0)
   const passed = await runtime.testSequence('say-hi', { kind: 'chat', expectedRevision: 2 })
   assert.equal(passed.sample, 'Hi from the current Sequence.')
+  assert.equal(requestBody.max_tokens, 1_024)
   assert.equal(fetchCalls, 1)
 
   failReads = true

@@ -510,6 +510,49 @@ export class AgentSettingsStore {
         }
       }
 
+      // Provider IDs are embedded in LLM Sequence rows rather than backed by
+      // a foreign key because the catalog itself is a versioned JSON value.
+      // Keep the same Provider -> Proxy -> LLM lock order used by Sequence
+      // writes, then reject a catalog replacement that would strand a saved
+      // Sequence. The UI performs the same check for a better explanation,
+      // but this transaction is the authority for direct API calls and races.
+      if (source === 'database') {
+        const retainedProviderIds = new Set(normalized.map(({ provider }) => provider.id))
+        const removedProviderIds = current.providers
+          .map((provider) => provider.id)
+          .filter((providerId) => !retainedProviderIds.has(providerId))
+        if (removedProviderIds.length > 0) {
+          let references = { rows: [] }
+          try {
+            references = await client.query(
+              `SELECT sequence_key, provider_ids
+                 FROM control.agent_llm_sequences
+                WHERE kind = $1
+                  AND provider_ids && $2::text[]
+                ORDER BY sequence_key
+                FOR SHARE`,
+              [kind, removedProviderIds],
+            )
+          } catch (error) {
+            // Older rolling-deployment peers may update Provider settings
+            // before migration 041 exists; without that relation there cannot
+            // yet be an LLM Sequence reference to protect.
+            if (error?.code !== '42P01' && error?.code !== '3F000') throw error
+          }
+          if (references.rows.length > 0) {
+            throw new AppError(
+              409,
+              'agent_provider_in_use',
+              'Remove the Provider from every LLM Sequence before deleting it',
+              {
+                providerIds: removedProviderIds,
+                sequenceKeys: references.rows.map((row) => row.sequence_key),
+              },
+            )
+          }
+        }
+      }
+
       const activeEmbedding = kind === 'embedding' && source === 'database'
         ? normalized.filter(({ provider }) => provider.enabled)
         : []

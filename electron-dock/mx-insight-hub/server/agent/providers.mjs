@@ -57,10 +57,17 @@ export class NoProviderAvailableError extends AppError {
 export function validateChatResponse(payload) {
   const content = payload?.choices?.[0]?.message?.content
   if (typeof content !== 'string' || content.trim().length === 0) {
+    const choice = payload?.choices?.[0]
+    const reasoningContent = choice?.message?.reasoning_content
+    const exhaustedWhileReasoning = choice?.finish_reason === 'length'
+      && typeof reasoningContent === 'string'
+      && reasoningContent.trim().length > 0
     throw new AppError(
       502,
       'agent_invalid_response',
-      'Provider response did not contain chat message content',
+      exhaustedWhileReasoning
+        ? 'Provider exhausted the output token budget while reasoning before producing final chat message content'
+        : 'Provider response did not contain chat message content',
     )
   }
 }

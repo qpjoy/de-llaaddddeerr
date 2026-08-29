@@ -116,6 +116,9 @@ URL 或任意环境变量名。
 - provider test 使用固定、无业务数据的小请求并且只测指定 provider。它可能仍产生
   provider 侧调用/计费，也不能证明 classifier Pod 拥有相同的 Secret 和网络出口；
   同一 provider 单飞、测试后冷却 5 秒，单进程最多同时探测 2 个 provider。
+- Chat provider 和 Sequence 的测试使用与普通 Hub completion 一致的 1024 token 输出上限，
+  避免 DeepSeek V4 等默认先生成 `reasoning_content` 的模型在最终 `content` 前被 8/32 token
+  截断而误报失败。测试仍要求非空最终 `content`；仅有思维链不会被当作成功，也不会写入错误或日志。
 - 测试证据绑定精确的 Provider settings revision 与该 Provider 有效出网路由的 SHA-256
   指纹，最多复用 15 分钟；未绑定的 Proxy 目录项不会使直连证据失效，而专属或全局
   绑定变化会强制重新测试。长测试期间发生热刷新不会把旧 Key/旧出口的成功记到新 revision。
@@ -218,6 +221,7 @@ Sequence 因此会失效而不是继续使用 last-known-good 密钥。环境变
 - Provider 专属 Proxy 缺失时不会绕过代理使用系统出网，Proxy transport fallback 顺序可观测；
 - Launcher platform-admin 可读但写设置返回 `403 admin_token_required`；
 - 旧 revision 写入返回 `409`，不会覆盖另一管理员的更新；
+- 直接绕过界面更新 Catalog 也不能删除被 LLM Sequence 引用的 Provider，服务端返回 `409 agent_provider_in_use`；
 - 非法 URL、未知字段和客户端提交的 `apiKeyEnv` 被拒绝；
 - 数据库或新配置暂时不可用时，进程保留 last-known-good，Hub readiness、canonical ingest 和 MX-H2I 登录不受影响；
 - analysis pipeline 保持暂停时，部署/保存 provider 不会创建模型任务；classifier 停止时固定源同步和严格 HanLP 投影仍独立运行。

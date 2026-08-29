@@ -345,7 +345,11 @@ If none fit, use {"category": "unknown", "confidence": 0}.`,
         model: provider.model,
         messages: [{ role: 'user', content: 'Reply with OK.' }],
         temperature: 0,
-        max_tokens: 8,
+        // Reasoning-capable OpenAI-compatible models can spend the beginning
+        // of their output budget in `reasoning_content`. Match the ordinary
+        // Hub completion budget so a connectivity probe is not a false
+        // negative before the model reaches its final `content`.
+        max_tokens: 1_024,
       }), { signal, validatePayload: validateChatResponse })
     } else {
       result = await this.embeddings.embedProvider(

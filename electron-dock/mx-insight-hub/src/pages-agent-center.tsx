@@ -402,8 +402,14 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
             <Field label="显示名称" hint=""><input className="qp-input" value={draft.displayName} disabled={!canEdit || Boolean(busy)}
               placeholder="My LLM Sequence" onChange={(event) => setDraft({ ...draft, displayName: event.target.value })} /></Field>
             <DropdownField label="能力" value={draft.kind}
+              hint={draft.kind === 'chat'
+                ? '读取 system/user 提示词并生成文字或结构化结果，用于 Agent 阶段。'
+                : '把文本编码为固定维度向量，用于向量索引和语义检索；不会生成回答。'}
               onChange={(kind: string) => setDraft({ ...draft, kind: kind as 'chat' | 'embedding', providerIds: [], revision: 0, sequenceKey: draft.revision ? '' : draft.sequenceKey })}
-              options={[{ value: 'chat', label: 'Chat / Agent' }, { value: 'embedding', label: 'Embedding' }] as never[]}
+              options={[
+                { value: 'chat', label: 'Chat / Agent', description: '提示词 → 文字、JSON 或工具决策' },
+                { value: 'embedding', label: 'Embedding', description: '文本 → 固定维度向量，用于相似检索' },
+              ] as never[]}
               disabled={!canEdit || Boolean(busy) || draft.revision > 0} />
             <label className="mih-agent-center-check"><input type="checkbox" checked={draft.enabled} disabled={!canEdit || Boolean(busy)}
               onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />启用 Sequence</label>

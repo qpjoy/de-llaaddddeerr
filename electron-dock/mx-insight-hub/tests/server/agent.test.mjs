@@ -666,7 +666,7 @@ test('HubAgent tests one chat provider with a bounded data-free request', async 
     model: 'chat-probe-model',
     messages: [{ role: 'user', content: 'Reply with OK.' }],
     temperature: 0,
-    max_tokens: 8,
+    max_tokens: 1_024,
   })
   assert.equal(result.ok, true)
   assert.equal(result.kind, 'chat')
@@ -675,6 +675,65 @@ test('HubAgent tests one chat provider with a bounded data-free request', async 
   assert.equal(Number.isInteger(result.latencyMs), true)
   assert.equal(Number.isNaN(Date.parse(result.testedAt)), false)
   assert.equal('payload' in result, false)
+})
+
+test('chat provider probes leave enough budget for a reasoning model to produce final content', async () => {
+  let requestBody = null
+  const agent = new HubAgent({
+    chat: new ProviderRouter({
+      providers: providers('reasoning-probe'),
+      logger: quiet,
+      fetchImpl: async (_url, options) => {
+        requestBody = JSON.parse(options.body)
+        return requestBody.max_tokens < 1_024
+          ? jsonResponse({
+              choices: [{
+                finish_reason: 'length',
+                message: { content: null, reasoning_content: 'Still reasoning' },
+              }],
+            })
+          : jsonResponse(chatReply('OK'))
+      },
+    }),
+    embeddings: new EmbeddingRouter({ providers: [], logger: quiet }),
+    logger: quiet,
+  })
+
+  const result = await agent.testProvider({ kind: 'chat', providerId: 'reasoning-probe' })
+
+  assert.equal(requestBody.max_tokens, 1_024)
+  assert.equal(result.ok, true)
+})
+
+test('a reasoning-only response reports output-budget exhaustion without exposing reasoning', async () => {
+  const agent = new HubAgent({
+    chat: new ProviderRouter({
+      providers: providers('reasoning-only'),
+      logger: quiet,
+      fetchImpl: async () => jsonResponse({
+        choices: [{
+          finish_reason: 'length',
+          message: {
+            content: null,
+            reasoning_content: 'private-reasoning-sentinel',
+          },
+        }],
+      }),
+    }),
+    embeddings: new EmbeddingRouter({ providers: [], logger: quiet }),
+    logger: quiet,
+  })
+
+  await assert.rejects(
+    () => agent.testProvider({ kind: 'chat', providerId: 'reasoning-only' }),
+    (error) => {
+      assert.equal(error.status, 502)
+      assert.equal(error.code, 'agent_invalid_response')
+      assert.match(error.message, /output token budget while reasoning/)
+      assert.doesNotMatch(error.message, /private-reasoning-sentinel/)
+      return true
+    },
+  )
 })
 
 test('HubAgent tests one embedding provider and validates its returned vector', async () => {
