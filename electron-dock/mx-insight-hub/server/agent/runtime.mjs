@@ -1,6 +1,12 @@
 import { AppError } from '../core/errors.mjs'
 import { createAgentFromProviders, parseProviderConfig } from './index.mjs'
-import { providerProxyRouteFingerprint } from './control-store.mjs'
+import {
+  aggregateProviderProxyRouteFingerprint,
+  egressRouteOverride,
+  projectSequenceRouteProof,
+  providerProxyRouteFingerprint,
+  resolveProviderProxyRoute,
+} from './control-store.mjs'
 import { normalizeDatabaseProviders, publicSetting } from './settings-store.mjs'
 
 const DEFAULT_REFRESH_INTERVAL_MS = 5_000
@@ -176,8 +182,18 @@ export class AgentRuntime {
       },
       credentials: { chat: new Map(), embedding: new Map() },
       control: {
-        chat: { controlAvailable: false, sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0 },
-        embedding: { controlAvailable: false, sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0 },
+        chat: {
+          controlAvailable: false, sequences: [], defaultBinding: null,
+          proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null,
+          globalEgressMode: 'inherit', proxyRevision: 0,
+          deploymentEgress: this.config.deploymentEgress,
+        },
+        embedding: {
+          controlAvailable: false, sequences: [], defaultBinding: null,
+          proxyEndpoints: [], proxySequences: [], globalProxySequenceKey: null,
+          globalEgressMode: 'inherit', proxyRevision: 0,
+          deploymentEgress: this.config.deploymentEgress,
+        },
       },
     })
   }
@@ -330,7 +346,8 @@ export class AgentRuntime {
     const emptyControl = {
       controlAvailable: false,
       sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
-      globalProxySequenceKey: null, proxyRevision: 0,
+      globalProxySequenceKey: null, globalEgressMode: 'inherit', proxyRevision: 0,
+      deploymentEgress: this.config.deploymentEgress,
     }
     const [chatControl, embeddingControl] = await Promise.all([
       this.controlStore && this.managedKinds.has('chat')
@@ -351,38 +368,27 @@ export class AgentRuntime {
     }
   }
 
-  #withProxyRoutes(providers, control) {
-    const endpoints = new Map(
-      (control?.proxyEndpoints || [])
-        .filter((endpoint) => endpoint.enabled)
-        .map((endpoint) => [endpoint.proxyKey, endpoint.proxyUrl]),
-    )
-    const sequences = new Map(
-      (control?.proxySequences || [])
-        .filter((sequence) => sequence.enabled)
-        .map((sequence) => [sequence.sequenceKey, sequence]),
-    )
+  #withProxyRoutes(providers, control, routeOverride = undefined, { strictProxy = false } = {}) {
     return providers.map((provider) => {
-      const sequenceKey = provider.proxySequenceKey || control?.globalProxySequenceKey || null
-      const sequence = sequenceKey ? sequences.get(sequenceKey) : null
-      if (!sequence) {
-        // A Provider-specific override is an explicit egress policy. Never
-        // bypass it with direct traffic when the referenced proxy chain is
-        // missing or disabled. A missing global default still means direct.
-        return provider.proxySequenceKey || control?.globalProxySequenceKey
-          ? { ...provider, proxyUrls: [], directFallback: false }
-          : provider
+      const route = resolveProviderProxyRoute(provider, control, routeOverride)
+      return {
+        ...provider,
+        proxyUrls: [...route.proxyUrls],
+        directFallback: strictProxy && routeOverride != null
+          ? false
+          : route.directFallback,
       }
-      const proxyUrls = sequence.proxyKeys.flatMap((key) => endpoints.has(key) ? [endpoints.get(key)] : [])
-      // A bound chain is an explicit egress policy. `directFallback` applies
-      // only after at least one enabled proxy route was actually attempted;
-      // an empty/fully-disabled chain must never turn into an accidental direct
-      // route merely because the historical row still carries that flag.
-      if (proxyUrls.length === 0) {
-        return { ...provider, proxyUrls: [], directFallback: false }
-      }
-      return { ...provider, proxyUrls, directFallback: sequence.directFallback }
     })
+  }
+
+  #transportOverride(kind, routeOverride, { strictProxy = false } = {}) {
+    const route = resolveProviderProxyRoute(null, this.#control.get(kind), routeOverride)
+    return {
+      proxyUrls: [...route.proxyUrls],
+      directFallback: strictProxy && routeOverride != null
+        ? false
+        : route.directFallback,
+    }
   }
 
   #applySnapshot(snapshot) {
@@ -584,11 +590,20 @@ export class AgentRuntime {
       && sequence.providerRevision === (setting?.revision ?? 0)
       && sequence.providerIds.length > 0
       && sequence.providerIds.every((providerId) => enabledIds.has(providerId))
-    if (!valid) {
+    const currentRouteFingerprint = sequence
+      ? this.#providerVerificationState(
+          kind,
+          sequence.providerIds,
+          egressRouteOverride(sequence.egressMode, sequence.proxySequenceKey),
+        ).aggregateProxyFingerprint
+      : null
+    const routeValid = !sequence?.verifiedProxyFingerprint
+      || sequence.verifiedProxyFingerprint === currentRouteFingerprint
+    if (!valid || !routeValid) {
       throw new AppError(
         503,
         'agent_sequence_unavailable',
-        'The selected LLM Sequence is missing, stale, disabled, or references an unavailable Provider',
+        'The selected LLM Sequence is missing, stale, disabled, or references an unavailable Provider or Proxy route',
       )
     }
     return sequence
@@ -596,46 +611,78 @@ export class AgentRuntime {
 
   complete(messages, options = {}) {
     const sequence = this.#resolveSequence('chat', options.sequenceKey)
+    const routeOverride = sequence
+      ? egressRouteOverride(sequence.egressMode, sequence.proxySequenceKey)
+      : undefined
+    const transportOverride = routeOverride === undefined
+      ? undefined
+      : this.#transportOverride('chat', routeOverride)
     return this.#agent.complete(messages, {
       ...options,
       providerIds: sequence?.providerIds || null,
       sequenceKey: sequence?.sequenceKey || null,
+      transportOverride,
     })
   }
 
   suggestFieldMap(options = {}) {
     const sequence = this.#legacySequenceOrDisabled('chat')
+    const routeOverride = sequence
+      ? egressRouteOverride(sequence.egressMode, sequence.proxySequenceKey)
+      : undefined
     return this.#agent.suggestFieldMap({
       ...options,
       providerIds: sequence?.providerIds || null,
       sequenceKey: sequence?.sequenceKey || null,
+      transportOverride: routeOverride === undefined
+        ? undefined
+        : this.#transportOverride('chat', routeOverride),
     })
   }
 
   suggestFileProfile(options = {}) {
     const sequence = this.#legacySequenceOrDisabled('chat')
+    const routeOverride = sequence
+      ? egressRouteOverride(sequence.egressMode, sequence.proxySequenceKey)
+      : undefined
     return this.#agent.suggestFileProfile({
       ...options,
       providerIds: sequence?.providerIds || null,
       sequenceKey: sequence?.sequenceKey || null,
+      transportOverride: routeOverride === undefined
+        ? undefined
+        : this.#transportOverride('chat', routeOverride),
     })
   }
 
   classifyRecord(options = {}) {
     const sequence = this.#legacySequenceOrDisabled('chat')
+    const routeOverride = sequence
+      ? egressRouteOverride(sequence.egressMode, sequence.proxySequenceKey)
+      : undefined
     return this.#agent.classifyRecord({
       ...options,
       providerIds: sequence?.providerIds || null,
       sequenceKey: sequence?.sequenceKey || null,
+      transportOverride: routeOverride === undefined
+        ? undefined
+        : this.#transportOverride('chat', routeOverride),
     })
   }
 
   embed(texts, options = {}) {
     const sequence = this.#resolveSequence('embedding', options.sequenceKey)
+    const routeOverride = sequence
+      ? egressRouteOverride(sequence.egressMode, sequence.proxySequenceKey)
+      : undefined
+    const transportOverride = routeOverride === undefined
+      ? undefined
+      : this.#transportOverride('embedding', routeOverride)
     return this.#agent.embed(texts, {
       ...options,
       providerIds: sequence?.providerIds || null,
       sequenceKey: sequence?.sequenceKey || null,
+      transportOverride,
     })
   }
 
@@ -651,7 +698,15 @@ export class AgentRuntime {
     }
   }
 
-  async testProvider({ kind, providerId, signal } = {}) {
+  async testProvider({
+    kind,
+    providerId,
+    signal,
+    routeOverride = undefined,
+    routeMode = null,
+    strictProxy = false,
+    persistEvidence = true,
+  } = {}) {
     if (!['chat', 'embedding'].includes(kind)) {
       throw new AppError(400, 'invalid_provider_kind', 'kind must be chat or embedding')
     }
@@ -661,12 +716,23 @@ export class AgentRuntime {
     if (typeof providerId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(providerId)) {
       throw new AppError(400, 'invalid_provider_id', 'providerId is required')
     }
+    if (routeOverride !== undefined && routeOverride !== null && (
+      typeof routeOverride !== 'string'
+      || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(routeOverride)
+    )) {
+      throw new AppError(400, 'invalid_agent_proxy_route', 'Proxy Sequence key is invalid')
+    }
     await this.refresh()
     if (!this.#settings.get(kind)?.providers?.some((provider) => provider.id === providerId)) {
       throw new AppError(404, 'agent_provider_not_found', 'The saved provider was not found')
     }
 
-    const key = `${kind}:${providerId}`
+    const routeKey = routeOverride === undefined
+      ? 'effective'
+      : routeOverride === null
+        ? 'system-egress'
+        : `proxy:${routeOverride}`
+    const key = `${kind}:${providerId}:${routeKey}`
     const now = this.nowFn()
     const state = this.#probeStates.get(key)
     if (state?.inFlight) {
@@ -691,10 +757,31 @@ export class AgentRuntime {
     let failure = null
     let evidenceSetting = this.#settings.get(kind)
     let evidenceControl = this.#control.get(kind)
+    const withRoute = (value) => routeMode === 'inherit'
+      ? { ...value, route: { mode: 'inherit' } }
+      : routeOverride === undefined
+        ? value
+      : {
+          ...value,
+          route: routeOverride === null
+            ? { mode: 'system-egress' }
+            : { mode: 'proxy-sequence', sequenceKey: routeOverride },
+        }
     try {
       if (!this.settingsStore || !this.managedKinds.has(kind)) {
-        result = await this.#agent.testProvider({ kind, providerId, signal })
-        return result
+        if (typeof routeOverride === 'string' && !this.controlStore) {
+          throw new AppError(503, 'agent_control_unavailable', 'Proxy route testing requires PostgreSQL')
+        }
+        const transportOverride = routeOverride === undefined
+          ? undefined
+          : this.#transportOverride(kind, routeOverride, { strictProxy })
+        result = await this.#agent.testProvider({
+          kind,
+          providerId,
+          signal,
+          transportOverride,
+        })
+        return withRoute(result)
       }
       let runtime
       if (typeof this.settingsStore.loadRuntimeSetting === 'function') {
@@ -709,8 +796,19 @@ export class AgentRuntime {
         }
       }
       if (runtime.setting.source !== 'database') {
-        result = await this.#agent.testProvider({ kind, providerId, signal })
-        return result
+        const transportOverride = routeOverride === undefined
+          ? undefined
+          : this.#transportOverride(kind, routeOverride, { strictProxy })
+        if (typeof routeOverride === 'string' && transportOverride.proxyUrls.length === 0) {
+          throw new AppError(400, 'invalid_agent_proxy_route', 'The selected Proxy Sequence has no usable endpoint')
+        }
+        result = await this.#agent.testProvider({
+          kind,
+          providerId,
+          signal,
+          transportOverride,
+        })
+        return withRoute(result)
       }
 
       evidenceSetting = runtime.setting
@@ -728,19 +826,30 @@ export class AgentRuntime {
         providerId,
         this.config.embedding?.dimensions ?? null,
       )
-      const routedProvider = this.#withProxyRoutes(
-        [provider],
-        evidenceControl,
-      )[0]
+      const route = resolveProviderProxyRoute(provider, evidenceControl, routeOverride)
+      if (typeof routeOverride === 'string' && route.proxyUrls.length === 0) {
+        throw new AppError(400, 'invalid_agent_proxy_route', 'The selected Proxy Sequence has no usable endpoint')
+      }
+      const transportOverride = {
+        proxyUrls: [...route.proxyUrls],
+        directFallback: strictProxy && routeOverride != null
+          ? false
+          : route.directFallback,
+      }
       const probeAgent = createAgentFromProviders({
-        chatProviders: kind === 'chat' ? [routedProvider] : [],
-        embeddingProviders: kind === 'embedding' ? [routedProvider] : [],
+        chatProviders: kind === 'chat' ? [provider] : [],
+        embeddingProviders: kind === 'embedding' ? [provider] : [],
         expectedEmbeddingDimensions: this.config.embedding?.dimensions ?? null,
         logger: this.logger,
         fetchImpl: this.fetchImpl,
       })
-      result = await probeAgent.testProvider({ kind, providerId, signal })
-      return result
+      result = await probeAgent.testProvider({
+        kind,
+        providerId,
+        signal,
+        transportOverride,
+      })
+      return withRoute(result)
     } catch (error) {
       failure = error
       throw error
@@ -748,14 +857,14 @@ export class AgentRuntime {
       this.#activeProbes -= 1
       const current = this.#probeStates.get(key)
       if (current) current.inFlight = false
-      if (this.controlStore) {
+      if (this.controlStore && persistEvidence) {
         const provider = evidenceSetting?.providers?.find((candidate) => candidate.id === providerId)
         if (provider) {
           await this.controlStore.recordProbe({
             kind,
             providerId,
             settingsRevision: evidenceSetting?.revision ?? 0,
-            proxyFingerprint: providerProxyRouteFingerprint(provider, evidenceControl),
+            proxyFingerprint: providerProxyRouteFingerprint(provider, evidenceControl, routeOverride),
             model: provider.model,
             protocol: provider.protocol || 'openai-compatible',
             ok: Boolean(result?.ok),
@@ -785,12 +894,20 @@ export class AgentRuntime {
     }
     await this.#requireFreshVerificationState('LLM Sequence was not saved')
     const changesActiveDefault = this.#control.get(kind)?.defaultBinding?.sequenceKey === sequenceKey
+    const proxySequenceKey = typeof input?.proxySequenceKey === 'string'
+      ? input.proxySequenceKey
+      : null
+    const routeOverride = egressRouteOverride(input?.egressMode, proxySequenceKey)
     // Verification is deliberately exact-provider and sequential. It cannot
     // silently pass because a different fallback answered, and it stays below
     // the runtime's bounded probe concurrency.
-    const { tests, verification } = await this.#ensureProvidersVerified(kind, input.providerIds)
+    const { tests, verification } = await this.#ensureProvidersVerified(
+      kind,
+      input.providerIds,
+      routeOverride,
+    )
     await this.#requireFreshVerificationState('LLM Sequence was not saved')
-    this.#assertVerificationState(kind, input.providerIds, verification)
+    this.#assertVerificationState(kind, input.providerIds, verification, routeOverride)
     const providerRevision = verification.settingsRevision
     const saved = await this.controlStore.saveSequence(sequenceKey, input, {
       providerRevision,
@@ -813,9 +930,14 @@ export class AgentRuntime {
     const sequence = this.#control.get(kind)?.sequences
       ?.find((candidate) => candidate.sequenceKey === sequenceKey)
     if (!sequence) throw new AppError(404, 'agent_sequence_not_found', 'The LLM Sequence was not found')
-    const { verification } = await this.#ensureProvidersVerified(kind, sequence.providerIds)
+    const routeOverride = egressRouteOverride(sequence.egressMode, sequence.proxySequenceKey)
+    const { verification } = await this.#ensureProvidersVerified(
+      kind,
+      sequence.providerIds,
+      routeOverride,
+    )
     await this.#requireFreshVerificationState('The business default was not changed')
-    this.#assertVerificationState(kind, sequence.providerIds, verification)
+    this.#assertVerificationState(kind, sequence.providerIds, verification, routeOverride)
     // The re-test above records evidence but does not change providerRevision;
     // save the same Sequence to advance its verification timestamp/revision.
     const verified = await this.controlStore.saveSequence(sequenceKey, {
@@ -824,6 +946,8 @@ export class AgentRuntime {
       kind,
       providerIds: sequence.providerIds,
       enabled: sequence.enabled,
+      egressMode: sequence.egressMode,
+      proxySequenceKey: sequence.proxySequenceKey,
     }, {
       providerRevision: verification.settingsRevision,
       verification,
@@ -867,21 +991,33 @@ export class AgentRuntime {
     }
   }
 
-  #providerVerificationState(kind, providerIds) {
+  #providerVerificationState(kind, providerIds, routeOverride = undefined) {
     const settingsRevision = this.#settings.get(kind)?.revision ?? 0
     const providers = new Map(
       (this.#settings.get(kind)?.providers || []).map((provider) => [provider.id, provider]),
     )
     const proxyFingerprints = new Map(providerIds.map((providerId) => [
       providerId,
-      providerProxyRouteFingerprint(providers.get(providerId), this.#control.get(kind)),
+      providerProxyRouteFingerprint(
+        providers.get(providerId),
+        this.#control.get(kind),
+        routeOverride,
+      ),
     ]))
-    return { settingsRevision, proxyFingerprints }
+    return {
+      settingsRevision,
+      proxyFingerprints,
+      aggregateProxyFingerprint: aggregateProviderProxyRouteFingerprint(
+        providerIds,
+        proxyFingerprints,
+      ),
+    }
   }
 
-  #assertVerificationState(kind, providerIds, expected) {
-    const current = this.#providerVerificationState(kind, providerIds)
+  #assertVerificationState(kind, providerIds, expected, routeOverride = undefined) {
+    const current = this.#providerVerificationState(kind, providerIds, routeOverride)
     const unchanged = current.settingsRevision === expected.settingsRevision
+      && current.aggregateProxyFingerprint === expected.aggregateProxyFingerprint
       && providerIds.every((providerId) => (
         current.proxyFingerprints.get(providerId) === expected.proxyFingerprints.get(providerId)
       ))
@@ -894,8 +1030,8 @@ export class AgentRuntime {
     }
   }
 
-  async #ensureProvidersVerified(kind, providerIds) {
-    const verification = this.#providerVerificationState(kind, providerIds)
+  async #ensureProvidersVerified(kind, providerIds, routeOverride = undefined) {
+    const verification = this.#providerVerificationState(kind, providerIds, routeOverride)
     const matchingPasses = (providerTests) => new Map(
       providerTests
         .filter((test) => {
@@ -915,7 +1051,11 @@ export class AgentRuntime {
     for (const providerId of providerIds) {
       const passed = currentPasses.get(providerId)
       if (passed) tests.push(passed)
-      else tests.push(await this.testProvider({ kind, providerId }))
+      else tests.push(await this.testProvider({
+        kind,
+        providerId,
+        routeOverride,
+      }))
     }
     // Do not trust only the live call result: route A -> B -> A can otherwise
     // make the final in-memory fingerprint look unchanged even though a probe
@@ -1073,9 +1213,12 @@ export class AgentRuntime {
     return { ...deleted, runtimeApplied }
   }
 
-  async setGlobalProxySequence(sequenceKey, input, { updatedBy = 'admin-token' } = {}) {
+  async setGlobalProxySequence(selection, input = {}, { updatedBy = 'admin-token' } = {}) {
     if (!this.controlStore) throw new AppError(503, 'agent_control_unavailable', 'Proxy settings require PostgreSQL')
-    const saved = await this.controlStore.setGlobalProxySequence(sequenceKey, { ...input, updatedBy })
+    const policy = selection && typeof selection === 'object' && !Array.isArray(selection)
+      ? { ...selection, updatedBy }
+      : { ...input, sequenceKey: selection, updatedBy }
+    const saved = await this.controlStore.setGlobalProxySequence(policy)
     const runtimeApplied = await this.refresh({ force: true })
     if (!runtimeApplied) this.#disableManagedKinds()
     return { ...saved, runtimeApplied }
@@ -1091,9 +1234,22 @@ export class AgentRuntime {
   }
 
   async controlStatus() {
-    return this.controlStore
-      ? this.controlStore.listPublicControl()
-      : { sequences: [], bindings: [], providerTests: [], proxy: { endpoints: [], sequences: [], globalSequenceKey: null, revision: 0 } }
+    if (!this.controlStore) {
+      return { sequences: [], bindings: [], providerTests: [], proxy: { endpoints: [], sequences: [], globalSequenceKey: null, revision: 0 } }
+    }
+    const status = await this.controlStore.listPublicControl()
+    return {
+      ...status,
+      // listPublicControl intentionally reads no environment configuration.
+      // Re-project only the proof booleans from this runtime's last applied,
+      // already-public Provider metadata and its internal routing snapshot.
+      // The helper returns neither the effective route nor its current digest.
+      sequences: (status.sequences || []).map((sequence) => projectSequenceRouteProof(
+        sequence,
+        this.#settings.get(sequence.kind),
+        this.#control.get(sequence.kind),
+      )),
+    }
   }
 
   status() {

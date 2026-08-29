@@ -156,6 +156,61 @@ function requiredSourceKey(body) {
   return sourceKey
 }
 
+function providerTestRouteOptions(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new AppError(400, 'invalid_agent_proxy_route', 'request body must be an object')
+  }
+  const unsupported = Object.keys(body).filter((field) => field !== 'route')
+  if (unsupported.length > 0) {
+    throw new AppError(
+      400,
+      'invalid_agent_proxy_route',
+      `request contains unsupported field ${unsupported[0]}`,
+    )
+  }
+  if (!Object.prototype.hasOwnProperty.call(body, 'route')) return {}
+
+  const route = body.route
+  if (!route || typeof route !== 'object' || Array.isArray(route)) {
+    throw new AppError(400, 'invalid_agent_proxy_route', 'route must be an object')
+  }
+  if (route.mode === 'inherit') {
+    if (Object.keys(route).some((field) => field !== 'mode')) {
+      throw new AppError(400, 'invalid_agent_proxy_route', 'inherit route contains unsupported fields')
+    }
+    return { routeOverride: undefined, routeMode: 'inherit', persistEvidence: false }
+  }
+  if (route.mode === 'system-egress') {
+    if (Object.keys(route).some((field) => field !== 'mode')) {
+      throw new AppError(400, 'invalid_agent_proxy_route', 'system-egress route contains unsupported fields')
+    }
+    return { routeOverride: null, strictProxy: true, persistEvidence: false }
+  }
+  if (route.mode === 'proxy-sequence') {
+    const unsupportedRoute = Object.keys(route)
+      .filter((field) => !['mode', 'sequenceKey'].includes(field))
+    if (unsupportedRoute.length > 0) {
+      throw new AppError(400, 'invalid_agent_proxy_route', 'proxy-sequence route contains unsupported fields')
+    }
+    if (
+      typeof route.sequenceKey !== 'string'
+      || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(route.sequenceKey)
+    ) {
+      throw new AppError(400, 'invalid_agent_proxy_route', 'Proxy Sequence key is invalid')
+    }
+    return {
+      routeOverride: route.sequenceKey,
+      strictProxy: true,
+      persistEvidence: false,
+    }
+  }
+  throw new AppError(
+    400,
+    'invalid_agent_proxy_route',
+    'route mode must be inherit, system-egress, or proxy-sequence',
+  )
+}
+
 function dataCenterCursorBinding({
   query, datasetId, platform, objectType, relatedProvince = null, provinceRelation = null,
   pageSize, searchProfile = null, sort = null,
@@ -2737,9 +2792,11 @@ export function createApp({
         if (typeof agent?.testProvider !== 'function') {
           throw new AppError(503, 'agent_settings_unavailable', 'Agent provider testing is unavailable')
         }
+        const routeOptions = providerTestRouteOptions(await readJson(request, 16 * 1024))
         const data = await agent.testProvider({
           kind: params.kind,
           providerId: params.providerId,
+          ...routeOptions,
         })
         sendJson(response, 200, { data, requestId })
         return
@@ -2882,8 +2939,8 @@ export function createApp({
         requireAgentAdmin(principal)
         const body = await readJson(request, 16 * 1024)
         const data = await agent.setGlobalProxySequence(
-          body?.sequenceKey ?? null,
           body,
+          {},
           { updatedBy: 'admin-token' },
         )
         sendJson(response, data.runtimeApplied === false ? 202 : 200, { data, requestId })

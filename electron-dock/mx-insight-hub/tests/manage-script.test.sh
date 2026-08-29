@@ -1085,6 +1085,131 @@ if bash -c '
 fi
 printf 'ok - runtime config requires provisioning to have run first\n'
 
+# The deployment captures Docker's effective proxy state without sourcing or
+# mutating systemd drop-ins. URLs remain inside the runtime Secret; only the
+# namespaced Agent env receives the resulting JSON snapshot.
+daemon_proxy_snapshot="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  DEPLOY_K8S_NODE_NAME="internal-node-1"
+  docker() {
+    case "$*" in
+      "info --format {{json .}}")
+        printf "%s" '\''{"HTTPProxy":"http://proxy-user:proxy-pass@127.0.0.1:7890","HttpsProxy":"http://127.0.0.1:7788","NoProxy":"localhost,.svc"}'\''
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  systemctl() {
+    case "$*" in
+      "show docker.service --property=DropInPaths --value --no-pager")
+        printf "%s" "/etc/systemd/system/docker.service.d/proxy.conf /run/systemd/system/docker.service.d/runtime.conf"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  docker_daemon_proxy_snapshot
+' _ "$ROOT_DIR")"
+MX_INSIGHT_TEST_DAEMON_PROXY_SNAPSHOT="$daemon_proxy_snapshot" node -e '
+  const snapshot = JSON.parse(process.env.MX_INSIGHT_TEST_DAEMON_PROXY_SNAPSHOT)
+  if (snapshot.version !== 1 || snapshot.configured !== true) process.exit(1)
+  if (snapshot.sourceKind !== "docker-daemon-effective") process.exit(1)
+  if (snapshot.runtimeKind !== "kubernetes-host-network") process.exit(1)
+  if (snapshot.httpProxy !== "http://proxy-user:proxy-pass@127.0.0.1:7890") process.exit(1)
+  if (snapshot.httpsProxy !== "http://127.0.0.1:7788") process.exit(1)
+  if (snapshot.noProxy !== "localhost,.svc") process.exit(1)
+  if (snapshot.nodeName !== "internal-node-1") process.exit(1)
+  if (snapshot.sourceLocations.join("|") !== "/etc/systemd/system/docker.service.d/proxy.conf|/run/systemd/system/docker.service.d/runtime.conf") process.exit(1)
+  if (!Number.isFinite(Date.parse(snapshot.observedAt))) process.exit(1)
+'
+printf 'ok - effective Docker daemon proxy is captured with provenance\n'
+
+empty_daemon_proxy_snapshot="$(bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  docker() { return 1; }
+  systemctl() { return 1; }
+  docker_daemon_proxy_snapshot
+' _ "$ROOT_DIR")"
+MX_INSIGHT_TEST_DAEMON_PROXY_SNAPSHOT="$empty_daemon_proxy_snapshot" node -e '
+  const snapshot = JSON.parse(process.env.MX_INSIGHT_TEST_DAEMON_PROXY_SNAPSHOT)
+  if (snapshot.configured !== false) process.exit(1)
+  if (snapshot.httpProxy !== null || snapshot.httpsProxy !== null || snapshot.noProxy !== null) process.exit(1)
+  if (snapshot.nodeName !== null || snapshot.sourceLocations.length !== 0) process.exit(1)
+'
+printf 'ok - unavailable or unconfigured Docker daemon produces an explicit empty snapshot\n'
+
+daemon_proxy_secret_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-daemon-proxy-secret.XXXXXX")"
+daemon_proxy_configmap_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-daemon-proxy-configmap.XXXXXX")"
+rm -f -- "$daemon_proxy_secret_marker" "$daemon_proxy_configmap_marker"
+DAEMON_PROXY_SECRET_MARKER="$daemon_proxy_secret_marker" \
+DAEMON_PROXY_CONFIGMAP_MARKER="$daemon_proxy_configmap_marker" \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  DEPLOY_K8S_NODE_NAME="internal-node-1"
+  export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+  export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+  export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+  export NIGHT_ALL_BASE_URL="http://night-all.internal"
+  export MX_INSIGHT_SEARCH_READY=1
+  docker() {
+    printf "%s" '\''{"HttpProxy":"http://127.0.0.1:7890","HttpsProxy":"http://127.0.0.1:7890","NoProxy":"localhost,.cluster.local"}'\''
+  }
+  systemctl() { printf "%s" "/etc/systemd/system/docker.service.d/proxy.conf"; }
+  kubectl() {
+    local target="" argument
+    case " $* " in
+      *" create configmap mx-insight-hub-config "*) target="$DAEMON_PROXY_CONFIGMAP_MARKER" ;;
+      *" create secret generic mx-insight-hub-secrets "*) target="$DAEMON_PROXY_SECRET_MARKER" ;;
+    esac
+    if [ -n "$target" ]; then
+      for argument in "$@"; do
+        case "$argument" in
+          --from-literal=MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT=*)
+            printf "%s" "${argument#--from-literal=MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT=}" >"$target"
+            ;;
+        esac
+      done
+    fi
+    case " $* " in
+      *" --dry-run=client -o yaml "*) printf "apiVersion: v1\\nkind: List\\nitems: []\\n" ;;
+      *) while IFS= read -r _line; do :; done ;;
+    esac
+  }
+  create_runtime_config
+' _ "$ROOT_DIR"
+if [ ! -s "$daemon_proxy_secret_marker" ]; then
+  printf 'not ok - Docker daemon proxy snapshot was not stored in the runtime Secret\n' >&2
+  exit 1
+fi
+if [ -e "$daemon_proxy_configmap_marker" ]; then
+  printf 'not ok - Docker daemon proxy snapshot leaked into the runtime ConfigMap\n' >&2
+  exit 1
+fi
+MX_INSIGHT_TEST_DAEMON_PROXY_SNAPSHOT="$(cat "$daemon_proxy_secret_marker")" node -e '
+  const snapshot = JSON.parse(process.env.MX_INSIGHT_TEST_DAEMON_PROXY_SNAPSHOT)
+  if (!snapshot.configured || snapshot.nodeName !== "internal-node-1") process.exit(1)
+'
+rm -f -- "$daemon_proxy_secret_marker"
+
+for agent_manifest in 31-admin-api.yaml 32-projector.yaml 34-classifier.yaml; do
+  grep -q 'name: MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT' "$ROOT_DIR/deploy/k8s/internal/$agent_manifest"
+  grep -q 'key: MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT' "$ROOT_DIR/deploy/k8s/internal/$agent_manifest"
+done
+if rg -q 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT' \
+  "$ROOT_DIR/deploy/k8s/internal/30-public-api.yaml" \
+  "$ROOT_DIR/deploy/k8s/internal/33-ingest.yaml"; then
+  printf 'not ok - Docker daemon proxy snapshot escaped the Agent workloads\n' >&2
+  exit 1
+fi
+runtime_config_function="$(sed -n '/^create_runtime_config() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
+if grep -Eq -- '--from-literal=(HTTP_PROXY|HTTPS_PROXY|NO_PROXY)=' <<<"$runtime_config_function"; then
+  printf 'not ok - Docker daemon proxy was injected as a process-wide proxy variable\n' >&2
+  exit 1
+fi
+printf 'ok - Docker daemon proxy snapshot is Secret-wired only to Agent workloads\n'
+
 # The production loader sources this example as Bash. Quote JSON as one value;
 # otherwise Bash strips its inner quotes before the runtime validator sees it.
 example_server_roots="$(

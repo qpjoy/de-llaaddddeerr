@@ -158,10 +158,13 @@
 }
 
 .mih-sequence-drag-handle {
+  appearance: none;
   display: grid;
   place-items: center;
   flex: 0 0 28px;
+  width: 28px;
   min-height: 36px;
+  border: 1px solid transparent;
   border-radius: 8px;
   color: var(--qp-text-3);
   background: color-mix(in srgb, var(--qp-primary) 7%, transparent);
@@ -173,6 +176,45 @@
 }
 
 .mih-sequence-drag-handle[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.mih-sequence-drag-handle[draggable="true"]:hover,
+.mih-sequence-drag-handle[draggable="true"]:focus-visible {
+  border-color: var(--qp-primary);
+  color: var(--qp-primary);
+}
+
+.mih-proxy-endpoint-drag-handle,
+.mih-proxy-step-drag-handle {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  flex: 0 0 30px;
+  width: 30px;
+  min-height: 36px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--qp-text-3);
+  background: color-mix(in srgb, var(--qp-primary) 8%, transparent);
+  user-select: none;
+}
+
+.mih-proxy-endpoint-drag-handle[draggable="true"],
+.mih-proxy-step-drag-handle[draggable="true"] {
+  cursor: grab;
+}
+
+.mih-proxy-endpoint-drag-handle[draggable="true"]:hover,
+.mih-proxy-step-drag-handle[draggable="true"]:hover,
+.mih-proxy-endpoint-drag-handle[draggable="true"]:focus-visible,
+.mih-proxy-step-drag-handle[draggable="true"]:focus-visible {
+  border-color: var(--qp-primary);
+  color: var(--qp-primary);
+}
+
+.mih-proxy-endpoint-drag-handle[draggable="true"]:active,
+.mih-proxy-step-drag-handle[draggable="true"]:active {
   cursor: grabbing;
 }
 
@@ -266,6 +308,167 @@
   overflow-wrap: anywhere;
 }
 
+.mih-agent-egress-evidence {
+  margin-bottom: 18px;
+}
+
+.mih-agent-egress-summary {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.72fr) minmax(0, 1.28fr);
+  gap: 14px;
+}
+
+.mih-agent-egress-effective {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 45%, var(--qp-line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--qp-primary) 6%, var(--qp-bg-2));
+}
+
+.mih-agent-egress-effective > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.mih-agent-egress-effective code {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.mih-agent-egress-effective small,
+.mih-agent-egress-facts small,
+.mih-agent-egress-precedence small,
+.mih-proxy-compat-summary small {
+  color: var(--qp-text-3);
+}
+
+.mih-agent-egress-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.mih-agent-egress-facts > div {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--qp-line);
+  border-radius: 10px;
+  background: var(--qp-bg-2);
+}
+
+.mih-agent-egress-facts__wide {
+  grid-column: 1 / -1;
+}
+
+.mih-agent-egress-facts dt {
+  margin-bottom: 4px;
+  color: var(--qp-text-3);
+  font-size: 0.76rem;
+  letter-spacing: 0.05em;
+}
+
+.mih-agent-egress-facts dd {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.mih-agent-egress-facts code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.mih-agent-egress-precedence {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--qp-line);
+}
+
+.mih-agent-egress-precedence h3,
+.mih-agent-egress-policy-editor h3 {
+  margin: 0 0 9px;
+  font-size: 0.88rem;
+}
+
+.mih-agent-egress-precedence ol {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mih-agent-egress-precedence li {
+  display: flex;
+  min-width: 0;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--qp-line);
+  border-radius: 10px;
+  background: var(--qp-bg-2);
+}
+
+.mih-agent-egress-precedence li > span {
+  display: grid;
+  place-items: center;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  color: var(--qp-primary);
+  background: color-mix(in srgb, var(--qp-primary) 12%, transparent);
+}
+
+.mih-agent-egress-precedence li > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mih-agent-egress-policy-editor {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--qp-line);
+}
+
+.mih-agent-egress-policy-editor header p {
+  margin: -5px 0 12px;
+  color: var(--qp-text-3);
+}
+
+.mih-agent-egress-policy-editor__controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mih-proxy-compat-summary {
+  min-height: 92px;
+  padding: 12px;
+  border: 1px solid var(--qp-line);
+  border-radius: 11px;
+  background: var(--qp-bg-2);
+}
+
+.mih-proxy-compat-summary p {
+  margin: 8px 0 4px;
+}
+
 .mih-proxy-bindings {
   display: grid;
   grid-template-columns: minmax(260px, 0.72fr) minmax(340px, 1.28fr);
@@ -316,6 +519,30 @@
   color: var(--qp-text-3);
 }
 
+.mih-proxy-route-test {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--qp-line);
+}
+
+.mih-proxy-route-test header h3 {
+  margin: 0 0 4px;
+  font-size: 0.92rem;
+}
+
+.mih-proxy-route-test header p {
+  margin: 0;
+  color: var(--qp-text-3);
+}
+
+.mih-proxy-route-test__controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  gap: 10px;
+  align-items: end;
+  margin: 14px 0 10px;
+}
+
 .mih-agent-crud-list {
   display: grid;
   gap: 8px;
@@ -364,6 +591,21 @@
   overflow-wrap: anywhere;
 }
 
+.mih-proxy-endpoint-row > .mih-proxy-endpoint-identity {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+}
+
+.mih-proxy-endpoint-identity > span {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .mih-agent-center-editor {
   border-top: 1px solid var(--qp-line);
   padding-top: 16px;
@@ -374,10 +616,79 @@
   overflow: auto;
 }
 
+.mih-proxy-builder--order {
+  grid-template-columns: 1fr;
+}
+
+.mih-proxy-order-dropzone {
+  min-height: 180px;
+}
+
+.mih-sequence-dropzone > .mih-proxy-builder-help {
+  margin: 0;
+  padding: 2px 3px 8px;
+  text-align: left;
+}
+
+.mih-proxy-sequence-entry {
+  display: grid;
+  gap: 3px;
+}
+
+.mih-proxy-insert-slot {
+  min-height: 8px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed transparent;
+  border-radius: 8px;
+  color: transparent;
+  font-size: 0.72rem;
+  transition: min-height 120ms ease, border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.mih-proxy-order-dropzone.is-dragging .mih-proxy-insert-slot {
+  min-height: 24px;
+  border-color: color-mix(in srgb, var(--qp-primary) 35%, var(--qp-line));
+  color: var(--qp-text-3);
+}
+
+.mih-proxy-order-dropzone.is-dragging .mih-proxy-insert-slot:hover {
+  border-color: var(--qp-primary);
+  color: var(--qp-primary);
+  background: color-mix(in srgb, var(--qp-primary) 8%, transparent);
+}
+
+.mih-proxy-insert-slot--end.is-empty {
+  min-height: 90px;
+  border-color: color-mix(in srgb, var(--qp-primary) 55%, var(--qp-line));
+  color: var(--qp-text-3);
+  background: color-mix(in srgb, var(--qp-primary) 3%, transparent);
+}
+
+.mih-proxy-remove-dropzone {
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed var(--qp-line);
+  border-radius: 11px;
+  color: var(--qp-text-3);
+  background: var(--qp-bg-2);
+}
+
+.mih-proxy-remove-dropzone.is-active {
+  border-color: color-mix(in srgb, var(--qp-danger) 60%, var(--qp-line));
+  color: var(--qp-danger);
+  background: color-mix(in srgb, var(--qp-danger) 7%, transparent);
+}
+
 @media (max-width: 1120px) {
   .mih-agent-center-grid,
   .mih-agent-center-grid--proxy,
+  .mih-agent-egress-summary,
   .mih-proxy-bindings,
+  .mih-proxy-route-test__controls,
   .mih-sequence-builder,
   .mih-proxy-builder {
     grid-template-columns: 1fr;
@@ -386,8 +697,15 @@
 
 @media (max-width: 680px) {
   .mih-agent-defaults,
-  .mih-agent-center-form-grid {
+  .mih-agent-center-form-grid,
+  .mih-agent-egress-facts,
+  .mih-agent-egress-precedence ol,
+  .mih-agent-egress-policy-editor__controls {
     grid-template-columns: 1fr;
+  }
+
+  .mih-agent-egress-facts__wide {
+    grid-column: auto;
   }
 
   .mih-proxy-binding-control,

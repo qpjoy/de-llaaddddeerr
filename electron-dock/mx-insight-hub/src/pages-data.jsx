@@ -3673,7 +3673,7 @@ function ProviderTable({
             <td><strong>{provider.displayName || provider.id}</strong><small><code>{provider.id}</code></small></td>
             <td><code>{provider.model}</code><small>{provider.protocol || 'openai-compatible'}{kind === 'embedding' ? ` · ${provider.dimensions || '—'} dimensions` : ''}</small></td>
             <td><code>{provider.baseUrl || '—'}</code><small>{provider.timeoutMs ? `${provider.timeoutMs} ms` : 'timeout 未知'} · {provider.authMode || 'bearer'}</small></td>
-            <td><code>{provider.proxySequenceKey || '继承全局；未设置则系统出网'}</code></td>
+            <td><code>{provider.proxySequenceKey || '继承 Hub 应用出网策略'}</code></td>
             <td><StatusBadge status={provider.enabled === false ? 'disabled' : 'active'} label={provider.enabled === false ? '停用' : '启用'} /></td>
             <td>{provider.authMode === 'none' ? (
               <StatusBadge status="active" label="无需密钥" />
@@ -3841,12 +3841,12 @@ function ProviderEditor({ kind, editor, proxySequences, proxyEndpoints, setting,
   const headingId = `agent-provider-editor-${kind}`
   const enabledProxyKeys = new Set(proxyEndpoints.filter((endpoint) => endpoint.enabled).map((endpoint) => endpoint.proxyKey))
   const proxyOptions = [
-    { value: '', label: '不设专属 · 继承全局 Proxy', description: 'Hub 全局也未设置时使用系统出网。' },
+    { value: '', label: '不设专属 · 继承 Hub 应用策略', description: '默认继续继承部署时观测到的 Docker daemon 代理；也可由 Hub 策略显式改为 Pod/Node 系统出网。' },
     ...proxySequences.map((sequence) => ({
       value: sequence.sequenceKey,
       label: sequence.displayName,
       description: Array.isArray(sequence.proxyKeys) && sequence.proxyKeys.some((proxyKey) => enabledProxyKeys.has(proxyKey))
-        ? `${sequence.proxyKeys.filter((proxyKey) => enabledProxyKeys.has(proxyKey)).length} 个已启用 endpoint${sequence.directFallback ? ' + 系统出网 fallback' : ''}`
+        ? `${sequence.proxyKeys.filter((proxyKey) => enabledProxyKeys.has(proxyKey)).length} 个已启用 endpoint${sequence.directFallback ? ' + Pod/Node 系统出网 fallback' : ''}`
         : '没有已启用 endpoint，不能绑定',
       disabled: sequence.enabled === false || !Array.isArray(sequence.proxyKeys)
         || !sequence.proxyKeys.some((proxyKey) => enabledProxyKeys.has(proxyKey)),
@@ -3891,7 +3891,7 @@ function ProviderEditor({ kind, editor, proxySequences, proxyEndpoints, setting,
           <DropdownField label="认证方式" value={provider.authMode}
             onChange={(authMode) => onChange({ authMode, ...(authMode === 'none' ? { apiKey: '', clearKey: false } : {}) })}
             options={PROVIDER_AUTH_OPTIONS} disabled={busy} />
-          <DropdownField label="Provider Proxy" hint="未指定时继承 Hub 全局 Proxy Sequence；全局也未设置时使用系统出网。" value={provider.proxySequenceKey}
+          <DropdownField label="Provider Proxy" hint="兼容绑定；未指定时继承 Hub 应用出网策略。该策略默认继承部署时观测到的 Docker daemon 代理，也可显式选择 Pod/Node 系统出网。" value={provider.proxySequenceKey}
             onChange={(proxySequenceKey) => onChange({ proxySequenceKey })} options={proxyOptions} disabled={busy} />
           <Field label="API Key" className="mih-agent-provider-editor__wide"
             hint={setting.source === 'environment' && provider.authMode === 'bearer'

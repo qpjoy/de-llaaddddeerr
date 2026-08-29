@@ -123,6 +123,7 @@ export class HubAgent {
     providerIds = null,
     sequenceKey = null,
     ignoreCircuit = false,
+    transportOverride,
   } = {}) {
     const call = providerIds
       ? this.chat.callSequence.bind(this.chat, providerIds)
@@ -132,7 +133,12 @@ export class HubAgent {
       messages,
       temperature,
       max_tokens: maxTokens,
-    }), { signal, validatePayload: validateChatResponse, ignoreCircuit })
+    }), {
+      signal,
+      validatePayload: validateChatResponse,
+      ignoreCircuit,
+      transportOverride,
+    })
     return {
       ...result,
       sequenceKey,
@@ -156,7 +162,14 @@ export class HubAgent {
    * ingestion until a human approves it (migration 008); letting a model decide
    * how data is stored would make the data model unreproducible.
    */
-  async suggestFieldMap({ columns, sampleRows = [], signal, providerIds = null, sequenceKey = null } = {}) {
+  async suggestFieldMap({
+    columns,
+    sampleRows = [],
+    signal,
+    providerIds = null,
+    sequenceKey = null,
+    transportOverride,
+  } = {}) {
     const deterministic = inferFieldMap(columns)
     if (!this.available) {
       return { fieldMap: deterministic, origin: 'inferred', model: null, confidence: null }
@@ -174,7 +187,7 @@ export class HubAgent {
             'Correct and complete it.',
           ].filter(Boolean).join('\n'),
         },
-      ], { signal, providerIds, sequenceKey })
+      ], { signal, providerIds, sequenceKey, transportOverride })
 
       const raw = extractJson(result.payload?.choices?.[0]?.message?.content)
       const fieldMap = this.#sanitizeFieldMap(raw, columns)
@@ -207,7 +220,14 @@ export class HubAgent {
    * `sampling` is produced by the external importer and contains only column
    * names, type families and aggregate signal counts.
    */
-  async suggestFileProfile({ columns, sampling = null, signal, providerIds = null, sequenceKey = null } = {}) {
+  async suggestFileProfile({
+    columns,
+    sampling = null,
+    signal,
+    providerIds = null,
+    sequenceKey = null,
+    transportOverride,
+  } = {}) {
     const deterministic = inferFieldMap(columns)
     const safeSampling = valueFreeFileSampling(sampling)
     if (!this.available) {
@@ -232,7 +252,7 @@ export class HubAgent {
             'Correct and complete the profile.',
           ].filter(Boolean).join('\n'),
         },
-      ], { signal, providerIds, sequenceKey })
+      ], { signal, providerIds, sequenceKey, transportOverride })
       const raw = extractJson(result.payload?.choices?.[0]?.message?.content)
       const fieldMap = this.#sanitizeFieldMap(raw?.fieldMap, columns)
       validateFieldMap(fieldMap)
@@ -292,7 +312,14 @@ export class HubAgent {
    * record rather than dropping it — an unclassified row in `extensions` is
    * recoverable, a discarded one is not.
    */
-  async classifyRecord({ record, categories, signal, providerIds = null, sequenceKey = null } = {}) {
+  async classifyRecord({
+    record,
+    categories,
+    signal,
+    providerIds = null,
+    sequenceKey = null,
+    transportOverride,
+  } = {}) {
     if (!this.available) return null
     try {
       const result = await this.complete([
@@ -303,7 +330,7 @@ Reply with only {"category": "<one of the listed values>", "confidence": <0..1>}
 If none fit, use {"category": "unknown", "confidence": 0}.`,
         },
         { role: 'user', content: JSON.stringify(record).slice(0, 4_000) },
-      ], { signal, providerIds, sequenceKey })
+      ], { signal, providerIds, sequenceKey, transportOverride })
       const parsed = extractJson(result.payload?.choices?.[0]?.message?.content)
       // A category outside the allowed set is a hallucination, not a new class.
       if (!categories.includes(parsed.category) && parsed.category !== 'unknown') {
@@ -321,18 +348,28 @@ If none fit, use {"category": "unknown", "confidence": 0}.`,
   }
 
   /** Embed a batch of texts. Throws when unavailable: there is no fallback for a vector. */
-  async embed(texts, { signal, providerIds = null, sequenceKey = null, ignoreCircuit = false } = {}) {
+  async embed(texts, {
+    signal,
+    providerIds = null,
+    sequenceKey = null,
+    ignoreCircuit = false,
+    transportOverride,
+  } = {}) {
     if (!this.embeddings?.available) {
       throw new AppError(503, 'embeddings_not_configured', 'No embedding provider is configured')
     }
     const result = providerIds
-      ? await this.embeddings.embedSequence(providerIds, texts, { signal, ignoreCircuit })
-      : await this.embeddings.embed(texts, { signal, ignoreCircuit })
+      ? await this.embeddings.embedSequence(providerIds, texts, {
+          signal,
+          ignoreCircuit,
+          transportOverride,
+        })
+      : await this.embeddings.embed(texts, { signal, ignoreCircuit, transportOverride })
     return { ...result, sequenceKey }
   }
 
   /** Run a minimal, data-free request against exactly one provider. */
-  async testProvider({ kind, providerId, signal } = {}) {
+  async testProvider({ kind, providerId, signal, transportOverride } = {}) {
     if (!['chat', 'embedding'].includes(kind)) {
       throw new AppError(400, 'invalid_provider_kind', 'kind must be chat or embedding')
     }
@@ -350,12 +387,12 @@ If none fit, use {"category": "unknown", "confidence": 0}.`,
         // Hub completion budget so a connectivity probe is not a false
         // negative before the model reaches its final `content`.
         max_tokens: 1_024,
-      }), { signal, validatePayload: validateChatResponse })
+      }), { signal, validatePayload: validateChatResponse, transportOverride })
     } else {
       result = await this.embeddings.embedProvider(
         providerId,
         ['MX Insight Hub provider connectivity test'],
-        { signal },
+        { signal, transportOverride },
       )
     }
     return {

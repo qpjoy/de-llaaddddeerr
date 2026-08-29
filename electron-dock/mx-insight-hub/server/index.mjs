@@ -63,7 +63,7 @@ export async function createRuntime(config = loadConfig()) {
     ? new AgentSettingsStore(pool)
     : null
   const agentControl = pool && config.listenerMode !== 'public'
-    ? new AgentControlStore(pool)
+    ? new AgentControlStore(pool, { deploymentEgress: config.deploymentEgress })
     : null
   const agentPipelines = pool && config.listenerMode !== 'public'
     ? new AgentPipelineStore(pool)

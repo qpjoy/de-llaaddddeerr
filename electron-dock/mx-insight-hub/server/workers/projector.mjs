@@ -111,7 +111,7 @@ async function main() {
   const agent = await createAgentRuntime({
     config,
     settingsStore: new AgentSettingsStore(pool),
-    controlStore: new AgentControlStore(pool),
+    controlStore: new AgentControlStore(pool, { deploymentEgress: config.deploymentEgress }),
     managedKinds: ['embedding'],
     logger,
   })

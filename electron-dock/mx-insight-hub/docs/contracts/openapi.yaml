@@ -102,19 +102,24 @@ paths:
       - url: /internal/v1/admin
     get:
       operationId: getAgentStatus
-      summary: Read the redacted Chat and Embedding provider status.
+      summary: List redacted Agent runtime, LLM Sequence and Proxy control status.
       description: >-
         The break-glass Admin Token and an allowlisted Launcher platform-admin
         session may read provider metadata, circuit state, keyConfigured and
-        durable analysis-pipeline backlog/evidence. Responses never contain
-        apiKey, apiKeyEnv, Secret names or environment variable names, and
-        there is no credential-reveal operation.
+        durable analysis-pipeline backlog/evidence. control is the list surface
+        for LLM Sequences, explicit business-default bindings, Provider probe
+        evidence, Proxy endpoints, Proxy Sequences, the three-state Hub egress
+        policy, and the read-only Docker daemon deployment baseline; there are
+        no separate list routes for those resources. Proxy URL userinfo is
+        removed server-side and credentials are represented only by booleans.
+        This overview never contains apiKey, apiKeyEnv, Secret names or
+        environment variable names.
       security:
         - adminToken: []
         - launcherSession: []
       responses:
         "200":
-          description: Redacted runtime and persisted-setting status.
+          description: Redacted runtime, persisted-setting and Agent control status.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AgentOverviewEnvelope" }
@@ -163,6 +168,7 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "413": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
@@ -176,7 +182,13 @@ paths:
         Only the break-glass Hub Admin Token may test providers. The server
         sends a fixed value-free connectivity probe to the selected provider;
         it does not fall back to another provider and never returns request
-        payloads, vectors or credentials.
+        payloads, vectors or credentials. Omitting route tests and records the
+        Provider's effective compatibility route. Supplying inherit performs a
+        one-shot test of that same inherited route without replacing reusable
+        verification evidence. Supplying system-egress or a named Proxy
+        Sequence performs a one-shot strict route test; it does not change any
+        binding or reusable verification evidence, and a named Proxy Sequence
+        cannot fall back to system egress during that test.
       security:
         - adminToken: []
       parameters:
@@ -188,6 +200,11 @@ paths:
           in: path
           required: true
           schema: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProviderTestRequest" }
       responses:
         "200":
           description: The selected provider returned a valid minimal response.
@@ -199,8 +216,336 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/sequences/{sequenceKey}:
+    servers:
+      - url: /internal/v1/admin
+    put:
+      operationId: saveAgentLlmSequence
+      summary: Create or replace one ordered LLM Sequence.
+      description: >-
+        Only the break-glass Hub Admin Token may write. The Sequence contains at
+        least one saved Provider and selects one of three egress modes: inherit,
+        system-egress, or proxy-sequence. proxy-sequence requires exactly one
+        proxySequenceKey; the other modes require it to be null or omitted.
+        inherit continues through the Provider compatibility binding, Hub
+        policy, Docker daemon deployment baseline, and finally system egress.
+        The server verifies every Provider on the exact effective route before
+        committing. Saving does not make the Sequence a business default.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/AgentSequenceKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentLlmSequenceSaveRequest" }
+      responses:
+        "200":
+          description: Sequence committed and applied to this runtime.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentLlmSequenceMutationEnvelope" }
+        "202":
+          description: Sequence committed, but this runtime could not reload it immediately.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentLlmSequenceMutationEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/sequences/{sequenceKey}/test:
+    servers:
+      - url: /internal/v1/admin
+    post:
+      operationId: testAgentLlmSequence
+      summary: Test one saved LLM Sequence at an expected revision.
+      description: >-
+        Runs a fixed value-free Chat or Embedding request through the saved
+        Provider order and its effective Proxy route. The revision fence prevents
+        testing a different Sequence definition than the operator selected.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/AgentSequenceKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentLlmSequenceTestRequest" }
+      responses:
+        "200":
+          description: A Provider in the selected Sequence returned a valid response.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentLlmSequenceTestEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/sequences/{sequenceKey}/default:
+    servers:
+      - url: /internal/v1/admin
+    put:
+      operationId: setDefaultAgentLlmSequence
+      summary: Verify and set one LLM Sequence as its capability's business default.
+      description: >-
+        Re-verifies the saved Sequence against the current Provider catalog and
+        exact effective route, advances its verification revision, then updates
+        the Chat or Embedding default with compare-and-swap semantics.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/AgentSequenceKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentLlmDefaultUpdateRequest" }
+      responses:
+        "200":
+          description: Default binding committed and applied to this runtime.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentLlmDefaultSetEnvelope" }
+        "202":
+          description: Default binding committed, but this runtime could not reload it immediately.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentLlmDefaultSetEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/sequences/default:
+    servers:
+      - url: /internal/v1/admin
+    put:
+      operationId: clearDefaultAgentLlmSequence
+      summary: Clear the Chat or Embedding business-default LLM Sequence.
+      description: >-
+        Writes a revisioned null binding. No Provider or first Sequence is chosen
+        implicitly after the default is cleared.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentLlmDefaultUpdateRequest" }
+      responses:
+        "200":
+          description: Null default binding committed and applied to this runtime.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentLlmDefaultClearEnvelope" }
+        "202":
+          description: Null default binding committed, but this runtime could not reload it immediately.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentLlmDefaultClearEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/proxies/endpoints/{proxyKey}:
+    servers:
+      - url: /internal/v1/admin
+    put:
+      operationId: saveAgentProxyEndpoint
+      summary: Create or replace one application Proxy endpoint.
+      description: >-
+        Stores an HTTP or HTTPS Proxy URL without credentials, query, fragment or
+        path. Creating the first endpoint does not bind it. An endpoint referenced
+        by a Proxy Sequence cannot be disabled until it is removed from that chain.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/AgentProxyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProxyEndpointSaveRequest" }
+      responses:
+        "200":
+          description: Endpoint committed and applied to this runtime.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProxyEndpointMutationEnvelope" }
+        "202":
+          description: Endpoint committed, but this runtime could not reload it immediately.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProxyEndpointMutationEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteAgentProxyEndpoint
+      summary: Delete one unreferenced Proxy endpoint at an expected revision.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/AgentProxyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentRevisionRequest" }
+      responses:
+        "200":
+          description: Endpoint deleted and runtime refresh completed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProxyEndpointMutationEnvelope" }
+        "202":
+          description: Endpoint deleted, but this runtime could not reload immediately.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProxyEndpointMutationEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/proxies/sequences/{sequenceKey}:
+    servers:
+      - url: /internal/v1/admin
+    put:
+      operationId: saveAgentProxySequence
+      summary: Create or replace one ordered Proxy Sequence.
+      description: >-
+        The chain contains one to sixteen distinct enabled endpoint keys. Its
+        directFallback flag controls system egress after transport routes fail.
+        Creating the first Proxy Sequence does not bind it globally or to an LLM
+        Sequence or Provider.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/AgentSequenceKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProxySequenceSaveRequest" }
+      responses:
+        "200":
+          description: Proxy Sequence committed and applied to this runtime.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProxySequenceMutationEnvelope" }
+        "202":
+          description: Proxy Sequence committed, but this runtime could not reload it immediately.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProxySequenceMutationEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteAgentProxySequence
+      summary: Delete one unbound Proxy Sequence at an expected revision.
+      description: >-
+        The server refuses deletion while the chain is selected by an LLM
+        Sequence or by the legacy Hub-global/Provider compatibility bindings.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/AgentSequenceKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentRevisionRequest" }
+      responses:
+        "200":
+          description: Proxy Sequence deleted and runtime refresh completed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProxySequenceMutationEnvelope" }
+        "202":
+          description: Proxy Sequence deleted, but this runtime could not reload immediately.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProxySequenceMutationEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /agent/proxies/default:
+    servers:
+      - url: /internal/v1/admin
+    put:
+      operationId: setGlobalAgentProxySequence
+      summary: Set the three-state Hub application egress policy.
+      description: >-
+        Sets inherit, system-egress, or proxy-sequence after compare-and-swap
+        validation. proxy-sequence requires one enabled Sequence with at least
+        one enabled endpoint; the other modes require a null or omitted
+        sequenceKey. inherit follows the deployment-owned Docker daemon proxy
+        snapshot and falls through to Pod/Node system egress when no applicable
+        proxy exists; system-egress explicitly bypasses application and daemon
+        proxies. The management UI requires operator confirmation before
+        enabling this editor. This operation changes only the Hub policy stored
+        in PostgreSQL: it never edits the Docker daemon, its systemd drop-ins,
+        or the read-only deployment baseline. The first Proxy Sequence is never
+        selected automatically.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProxyGlobalUpdateRequest" }
+      responses:
+        "200":
+          description: Global compatibility binding committed and applied.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProxyGlobalMutationEnvelope" }
+        "202":
+          description: Binding committed, but this runtime could not reload it immediately.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProxyGlobalMutationEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /agent/pipelines/{pipelineKey}:
     servers:
@@ -2590,6 +2935,26 @@ components:
       in: header
       name: x-api-key
   parameters:
+    AgentSequenceKey:
+      name: sequenceKey
+      in: path
+      required: true
+      description: LLM Sequence or Proxy Sequence identifier, depending on the route.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+    AgentProxyKey:
+      name: proxyKey
+      in: path
+      required: true
+      description: Application Proxy endpoint identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
     SourceKey:
       name: sourceKey
       in: path
@@ -2674,7 +3039,7 @@ components:
     AgentProviderSafe:
       type: object
       additionalProperties: false
-      required: [id, baseUrl, model, timeoutMs, enabled, priority, authMode, keyConfigured]
+      required: [id, displayName, baseUrl, model, protocol, proxySequenceKey, timeoutMs, enabled, priority, authMode, keyConfigured]
       description: >-
         Redacted provider metadata. apiKey, apiKeyEnv, Secret names and
         environment-variable names are intentionally not members of this schema.
@@ -2683,8 +3048,15 @@ components:
           type: string
           pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
           description: Environment providers may retain legacy uppercase IDs; database-managed IDs are lowercase.
+        displayName: { type: string, minLength: 1, maxLength: 120 }
         baseUrl: { type: string, format: uri }
         model: { type: string, minLength: 1, maxLength: 200 }
+        protocol: { type: string, enum: [openai-compatible, anthropic-messages] }
+        proxySequenceKey:
+          type: [string, "null"]
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+          description: Legacy Provider-specific Proxy Sequence compatibility binding.
         timeoutMs: { type: integer, minimum: 1000, maximum: 300000 }
         dimensions: { type: integer, minimum: 1 }
         enabled: { type: boolean }
@@ -2696,10 +3068,12 @@ components:
     AgentRuntimeProviderStatus:
       type: object
       additionalProperties: false
-      required: [id, model, keyConfigured, circuit]
+      required: [id, displayName, model, protocol, keyConfigured, circuit]
       properties:
         id: { type: string }
+        displayName: { type: string }
         model: { type: string }
+        protocol: { type: string, enum: [openai-compatible, anthropic-messages] }
         dimensions: { type: integer, minimum: 1 }
         keyConfigured: { type: boolean }
         circuit: { type: string, enum: [closed, degraded, open] }
@@ -2738,7 +3112,7 @@ components:
     AgentOverview:
       type: object
       additionalProperties: false
-      required: [available, pipelines]
+      required: [available, control, pipelines]
       properties:
         available: { type: boolean }
         chat:
@@ -2757,6 +3131,16 @@ components:
           properties:
             chat: { $ref: "#/components/schemas/AgentProviderSetting" }
             embedding: { $ref: "#/components/schemas/AgentProviderSetting" }
+        sequences:
+          type: array
+          description: Compatibility top-level view of the saved LLM Sequences.
+          items: { $ref: "#/components/schemas/AgentLlmSequence" }
+        bindings:
+          type: array
+          description: Compatibility top-level view of explicit business-default bindings.
+          items: { $ref: "#/components/schemas/AgentLlmBinding" }
+        control:
+          $ref: "#/components/schemas/AgentControlStatus"
         pipelines:
           type: array
           description: Durable derived-analysis status; independent from Agent runtime availability.
@@ -2793,12 +3177,642 @@ components:
         model: { type: string, minLength: 1 }
         latencyMs: { type: number, minimum: 0 }
         testedAt: { type: string, format: date-time }
+        route: { $ref: "#/components/schemas/AgentProviderTestRoute" }
+    AgentProviderTestRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        route: { $ref: "#/components/schemas/AgentProviderTestRoute" }
+    AgentProviderTestRoute:
+      description: >-
+        Optional one-shot route selector. inherit exercises the normal
+        Provider/Hub/deployment precedence without recording reusable evidence;
+        system-egress bypasses all proxies; proxy-sequence requires sequenceKey
+        and disables that Sequence's direct fallback for this strict probe.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode: { type: string, const: inherit }
+        - type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode: { type: string, const: system-egress }
+        - type: object
+          additionalProperties: false
+          required: [mode, sequenceKey]
+          properties:
+            mode: { type: string, const: proxy-sequence }
+            sequenceKey:
+              type: string
+              minLength: 1
+              maxLength: 64
+              pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
     AgentProviderTestEnvelope:
       type: object
       additionalProperties: false
       required: [data, requestId]
       properties:
         data: { $ref: "#/components/schemas/AgentProviderTest" }
+        requestId: { type: string }
+    AgentRevisionRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision]
+      properties:
+        expectedRevision: { type: integer, minimum: 0 }
+    AgentLlmSequenceSaveRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        egressMode and proxySequenceKey form one selection. proxy-sequence
+        requires a non-null key; inherit and system-egress require the key to be
+        null or omitted. For backward compatibility, omitting egressMode infers
+        proxy-sequence when a key is supplied and inherit otherwise.
+      required: [expectedRevision, displayName, kind, providerIds]
+      properties:
+        expectedRevision: { type: integer, minimum: 0 }
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        kind: { type: string, enum: [chat, embedding] }
+        providerIds:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        egressMode:
+          type: string
+          enum: [inherit, system-egress, proxy-sequence]
+          description: >-
+            inherit continues through Provider compatibility, Hub policy,
+            deployment baseline, and system egress; system-egress bypasses all
+            proxies; proxy-sequence selects proxySequenceKey.
+        proxySequenceKey:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+          description: >-
+            Required only when egressMode is proxy-sequence. Must be null or
+            omitted for inherit and system-egress.
+        enabled: { type: boolean, default: true }
+    AgentLlmSequenceTestRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, expectedRevision]
+      properties:
+        kind: { type: string, enum: [chat, embedding] }
+        expectedRevision: { type: integer, minimum: 0 }
+    AgentLlmDefaultUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, expectedRevision]
+      properties:
+        kind: { type: string, enum: [chat, embedding] }
+        expectedRevision:
+          type: integer
+          minimum: 0
+          description: Expected revision of the capability's business-default binding.
+    AgentLlmSequence:
+      type: object
+      additionalProperties: false
+      required:
+        - sequenceKey
+        - displayName
+        - kind
+        - providerIds
+        - enabled
+        - source
+        - egressMode
+        - proxySequenceKey
+        - providerRevision
+        - verifiedProxyFingerprint
+        - revision
+        - verifiedAt
+        - verifiedBy
+        - updatedBy
+        - updatedAt
+      properties:
+        sequenceKey:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        kind: { type: string, enum: [chat, embedding] }
+        providerIds:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 64 }
+        enabled: { type: boolean }
+        source: { type: string, enum: [bootstrap, database] }
+        egressMode:
+          type: string
+          enum: [inherit, system-egress, proxy-sequence]
+          description: >-
+            Persisted Sequence-level egress selection. proxy-sequence requires
+            proxySequenceKey; the other modes require the key to be null.
+        proxySequenceKey:
+          type: [string, "null"]
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+          description: Non-null exactly when egressMode is proxy-sequence.
+        providerRevision: { type: integer, minimum: 0 }
+        verifiedProxyFingerprint:
+          type: [string, "null"]
+          pattern: "^[0-9a-f]{64}$"
+          description: Exact aggregate Provider-route proof; null marks a pre-proof compatibility record.
+        routeProofStatus:
+          type: string
+          enum: [valid, missing-proof, provider-revision-changed, provider-unavailable, route-changed]
+          description: Safe server-side comparison between the saved proof and the currently effective Provider and egress route.
+        routeProofValid:
+          type: boolean
+          description: True only when the saved Provider-route proof still matches the current effective route.
+        needsRevalidation:
+          type: boolean
+          description: True when the Sequence must be tested and saved again before business use.
+        revision: { type: integer, minimum: 1 }
+        verifiedAt: { type: [string, "null"], format: date-time }
+        verifiedBy: { type: [string, "null"] }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+    AgentLlmBinding:
+      type: object
+      additionalProperties: false
+      required: [consumerKey, kind, sequenceKey, revision, updatedBy, updatedAt]
+      properties:
+        consumerKey: { type: string, enum: [hub.chat.default, hub.embedding.default] }
+        kind: { type: string, enum: [chat, embedding] }
+        sequenceKey:
+          type: [string, "null"]
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        revision: { type: integer, minimum: 1 }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+    AgentProviderProbeEvidence:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - providerId
+        - settingsRevision
+        - proxyFingerprint
+        - model
+        - protocol
+        - ok
+        - latencyMs
+        - errorCode
+        - testedBy
+        - testedAt
+      properties:
+        kind: { type: string, enum: [chat, embedding] }
+        providerId: { type: string, minLength: 1, maxLength: 64 }
+        settingsRevision: { type: integer, minimum: 0 }
+        proxyFingerprint: { type: string, pattern: "^[0-9a-f]{64}$" }
+        model: { type: string, minLength: 1 }
+        protocol: { type: string, enum: [openai-compatible, anthropic-messages] }
+        ok: { type: boolean }
+        latencyMs: { type: [integer, "null"], minimum: 0 }
+        errorCode: { type: [string, "null"] }
+        testedBy: { type: [string, "null"] }
+        testedAt: { type: [string, "null"], format: date-time }
+    AgentProviderAttempt:
+      type: object
+      additionalProperties: false
+      required: [provider, error]
+      properties:
+        provider: { type: string }
+        error: { type: string }
+        skipped: { type: boolean }
+    AgentLlmSequenceTest:
+      type: object
+      additionalProperties: false
+      required: [ok, kind, sequenceKey, providerId, model, latencyMs, attempts, testedAt]
+      properties:
+        ok: { type: boolean, const: true }
+        kind: { type: string, enum: [chat, embedding] }
+        sequenceKey: { type: string, minLength: 1, maxLength: 64 }
+        providerId: { type: string, minLength: 1, maxLength: 64 }
+        model: { type: string, minLength: 1 }
+        latencyMs: { type: number, minimum: 0 }
+        sample:
+          type: string
+          maxLength: 240
+          description: Present for a Chat Sequence test.
+        dimensions:
+          type: [integer, "null"]
+          minimum: 1
+          description: Present for an Embedding Sequence test.
+        attempts:
+          type: array
+          items: { $ref: "#/components/schemas/AgentProviderAttempt" }
+        testedAt: { type: string, format: date-time }
+    AgentProxyEndpoint:
+      type: object
+      additionalProperties: false
+      required: [proxyKey, displayName, proxyUrl, enabled, revision, updatedBy, updatedAt]
+      properties:
+        proxyKey:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        proxyUrl: { type: string, format: uri, pattern: "^https?://" }
+        enabled: { type: boolean }
+        revision: { type: integer, minimum: 1 }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+    AgentProxySequence:
+      type: object
+      additionalProperties: false
+      required: [sequenceKey, displayName, proxyKeys, directFallback, enabled, revision, updatedBy, updatedAt]
+      properties:
+        sequenceKey:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        proxyKeys:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        directFallback: { type: boolean }
+        enabled: { type: boolean }
+        revision: { type: integer, minimum: 1 }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+    AgentProxyControl:
+      type: object
+      additionalProperties: false
+      description: >-
+        Redacted egress-control projection. Resolution priority is request
+        override, LLM Sequence, legacy Provider compatibility binding, Hub
+        policy, Docker daemon deployment baseline, then Pod/Node system egress.
+        baseline is deployment-owned and read-only; confirmed edits through the
+        default-policy route change only policy and never mutate Docker.
+      required: [endpoints, sequences, globalSequenceKey, revision, policy, baseline, effective, precedence]
+      properties:
+        endpoints:
+          type: array
+          items: { $ref: "#/components/schemas/AgentProxyEndpoint" }
+        sequences:
+          type: array
+          items: { $ref: "#/components/schemas/AgentProxySequence" }
+        globalSequenceKey:
+          type: [string, "null"]
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+          description: Backward-compatible alias of policy.sequenceKey.
+        revision: { type: integer, minimum: 0 }
+        policy: { $ref: "#/components/schemas/AgentProxyPolicy" }
+        baseline: { $ref: "#/components/schemas/AgentDeploymentProxyBaseline" }
+        effective: { $ref: "#/components/schemas/AgentEffectiveEgress" }
+        precedence:
+          type: array
+          minItems: 6
+          maxItems: 6
+          description: Ordered from the highest-priority override to final system egress.
+          items: { $ref: "#/components/schemas/AgentEgressPrecedenceEntry" }
+    AgentProxyPolicy:
+      type: object
+      additionalProperties: false
+      required: [egressMode, sequenceKey, globalSequenceKey, revision, updatedBy, updatedAt]
+      description: >-
+        Hub-owned application policy. proxy-sequence requires both Sequence-key
+        aliases to contain the same key; inherit and system-egress require both
+        to be null. Editing this policy never changes the Docker daemon baseline.
+      properties:
+        egressMode: { type: string, enum: [inherit, system-egress, proxy-sequence] }
+        sequenceKey:
+          type: [string, "null"]
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        globalSequenceKey:
+          type: [string, "null"]
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+          description: Backward-compatible alias of sequenceKey.
+        revision: { type: integer, minimum: 0 }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+    AgentDeploymentProxyBaseline:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - configured
+        - sourceKind
+        - runtimeKind
+        - httpProxy
+        - httpsProxy
+        - noProxy
+        - sourceLocations
+        - nodeName
+        - observedAt
+        - httpProxyCredentials
+        - httpsProxyCredentials
+      description: >-
+        Read-only deployment snapshot of the effective Docker daemon proxy.
+        HTTP(S) URLs are server-redacted by removing URL userinfo; credential
+        presence is exposed only by booleans. This snapshot is discovered during
+        deployment and cannot be edited through the Hub API.
+      properties:
+        version: { type: integer, const: 1 }
+        configured: { type: boolean }
+        sourceKind: { type: [string, "null"], enum: [docker-daemon-effective, null] }
+        runtimeKind:
+          type: [string, "null"]
+          enum: [kubernetes-host-network, docker-compose-bridge, host-process, null]
+        httpProxy:
+          type: [string, "null"]
+          format: uri
+          pattern: "^https?://"
+          description: Server-redacted effective HTTP proxy origin; URL userinfo is absent.
+        httpsProxy:
+          type: [string, "null"]
+          format: uri
+          pattern: "^https?://"
+          description: Server-redacted effective HTTPS proxy origin; URL userinfo is absent.
+        noProxy:
+          type: [string, "null"]
+          maxLength: 8192
+          description: Effective daemon no-proxy list captured at observedAt.
+        sourceLocations:
+          type: array
+          maxItems: 32
+          description: Read-only Docker service drop-in locations reported during discovery.
+          items: { type: string, minLength: 1, maxLength: 512 }
+        nodeName: { type: [string, "null"], maxLength: 253 }
+        observedAt: { type: [string, "null"], format: date-time }
+        httpProxyCredentials:
+          type: boolean
+          description: True when the unredacted HTTP proxy URL contains URL userinfo.
+        httpsProxyCredentials:
+          type: boolean
+          description: True when the unredacted HTTPS proxy URL contains URL userinfo.
+    AgentEffectiveEgress:
+      type: object
+      additionalProperties: false
+      required: [egressMode, source, sequenceKey, httpProxy, httpsProxy, noProxy]
+      description: Effective Hub fallback after applying policy to the deployment baseline.
+      properties:
+        egressMode: { type: string, enum: [proxy-sequence, docker-daemon, system-egress] }
+        source: { type: string, enum: [hub-policy, docker-daemon, system] }
+        sequenceKey:
+          type: [string, "null"]
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        httpProxy:
+          type: [string, "null"]
+          format: uri
+          pattern: "^https?://"
+          description: Server-redacted effective HTTP proxy; URL userinfo is absent.
+        httpsProxy:
+          type: [string, "null"]
+          format: uri
+          pattern: "^https?://"
+          description: Server-redacted effective HTTPS proxy; URL userinfo is absent.
+        noProxy: { type: [string, "null"], maxLength: 8192 }
+    AgentEgressPrecedenceEntry:
+      type: object
+      additionalProperties: false
+      required: [rank, layer, label]
+      properties:
+        rank: { type: integer, minimum: 1, maximum: 6 }
+        layer:
+          type: string
+          enum: [request-override, llm-sequence, provider-compat, hub-policy, docker-daemon, system]
+        label: { type: string, minLength: 1 }
+    AgentControlStatus:
+      type: object
+      additionalProperties: false
+      required: [sequences, bindings, providerTests, proxy]
+      properties:
+        sequences:
+          type: array
+          items: { $ref: "#/components/schemas/AgentLlmSequence" }
+        bindings:
+          type: array
+          items: { $ref: "#/components/schemas/AgentLlmBinding" }
+        providerTests:
+          type: array
+          items: { $ref: "#/components/schemas/AgentProviderProbeEvidence" }
+        proxy: { $ref: "#/components/schemas/AgentProxyControl" }
+    AgentLlmSequenceMutation:
+      type: object
+      additionalProperties: false
+      required: [sequenceKey, displayName, kind, providerIds, enabled, source, egressMode, proxySequenceKey, providerRevision, verifiedProxyFingerprint, revision, verifiedAt, verifiedBy, updatedBy, updatedAt, tests, runtimeApplied]
+      properties:
+        sequenceKey: { type: string, minLength: 1, maxLength: 64 }
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        kind: { type: string, enum: [chat, embedding] }
+        providerIds:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items: { type: string }
+        enabled: { type: boolean }
+        source: { type: string, enum: [bootstrap, database] }
+        egressMode:
+          type: string
+          enum: [inherit, system-egress, proxy-sequence]
+          description: >-
+            proxy-sequence requires proxySequenceKey; inherit and system-egress
+            require the key to be null.
+        proxySequenceKey:
+          type: [string, "null"]
+          maxLength: 64
+          description: Non-null exactly when egressMode is proxy-sequence.
+        providerRevision: { type: integer, minimum: 0 }
+        verifiedProxyFingerprint: { type: string, pattern: "^[0-9a-f]{64}$" }
+        revision: { type: integer, minimum: 1 }
+        verifiedAt: { type: string, format: date-time }
+        verifiedBy: { type: [string, "null"] }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+        tests:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/AgentProviderProbeEvidence" }
+        runtimeApplied: { type: boolean }
+    AgentLlmSequenceMutationEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentLlmSequenceMutation" }
+        requestId: { type: string }
+    AgentLlmSequenceTestEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentLlmSequenceTest" }
+        requestId: { type: string }
+    AgentLlmDefaultSetResult:
+      type: object
+      additionalProperties: false
+      required: [binding, sequence, runtimeApplied]
+      properties:
+        binding: { $ref: "#/components/schemas/AgentLlmBinding" }
+        sequence: { $ref: "#/components/schemas/AgentLlmSequence" }
+        runtimeApplied: { type: boolean }
+    AgentLlmDefaultClearResult:
+      type: object
+      additionalProperties: false
+      required: [binding, runtimeApplied]
+      properties:
+        binding: { $ref: "#/components/schemas/AgentLlmBinding" }
+        runtimeApplied: { type: boolean }
+    AgentLlmDefaultSetEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentLlmDefaultSetResult" }
+        requestId: { type: string }
+    AgentLlmDefaultClearEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentLlmDefaultClearResult" }
+        requestId: { type: string }
+    AgentProxyEndpointSaveRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, displayName, proxyUrl]
+      properties:
+        expectedRevision: { type: integer, minimum: 0 }
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        proxyUrl: { type: string, format: uri, pattern: "^https?://" }
+        enabled: { type: boolean, default: true }
+    AgentProxySequenceSaveRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, displayName, proxyKeys]
+      properties:
+        expectedRevision: { type: integer, minimum: 0 }
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        proxyKeys:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        directFallback: { type: boolean, default: true }
+        enabled: { type: boolean, default: true }
+    AgentProxyGlobalUpdateRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        Three-state Hub policy update. proxy-sequence requires sequenceKey;
+        inherit and system-egress require sequenceKey to be null or omitted.
+        For backward compatibility, omitting egressMode infers proxy-sequence
+        when sequenceKey is supplied and inherit otherwise. This request never
+        edits the deployment-owned Docker daemon baseline.
+      required: [expectedRevision]
+      properties:
+        egressMode: { type: string, enum: [inherit, system-egress, proxy-sequence] }
+        sequenceKey:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 64
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+          description: Required only for proxy-sequence; otherwise null or omitted.
+        expectedRevision: { type: integer, minimum: 0 }
+    AgentProxyEndpointMutation:
+      type: object
+      additionalProperties: false
+      required: [proxyKey, displayName, proxyUrl, enabled, revision, updatedBy, updatedAt, runtimeApplied]
+      properties:
+        proxyKey: { type: string, minLength: 1, maxLength: 64 }
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        proxyUrl: { type: string, format: uri, pattern: "^https?://" }
+        enabled: { type: boolean }
+        revision: { type: integer, minimum: 1 }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+        runtimeApplied: { type: boolean }
+    AgentProxySequenceMutation:
+      type: object
+      additionalProperties: false
+      required: [sequenceKey, displayName, proxyKeys, directFallback, enabled, revision, updatedBy, updatedAt, runtimeApplied]
+      properties:
+        sequenceKey: { type: string, minLength: 1, maxLength: 64 }
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        proxyKeys:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 64 }
+        directFallback: { type: boolean }
+        enabled: { type: boolean }
+        revision: { type: integer, minimum: 1 }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+        runtimeApplied: { type: boolean }
+    AgentProxyGlobalMutation:
+      type: object
+      additionalProperties: false
+      required: [egressMode, sequenceKey, globalSequenceKey, revision, updatedBy, updatedAt, runtimeApplied]
+      description: Committed Hub application policy; the Docker daemon baseline is unchanged.
+      properties:
+        egressMode: { type: string, enum: [inherit, system-egress, proxy-sequence] }
+        sequenceKey:
+          type: [string, "null"]
+          maxLength: 64
+          description: Non-null exactly when egressMode is proxy-sequence.
+        globalSequenceKey:
+          type: [string, "null"]
+          maxLength: 64
+          description: Backward-compatible alias of sequenceKey.
+        revision: { type: integer, minimum: 1 }
+        updatedBy: { type: [string, "null"] }
+        updatedAt: { type: [string, "null"], format: date-time }
+        runtimeApplied: { type: boolean }
+    AgentProxyEndpointMutationEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentProxyEndpointMutation" }
+        requestId: { type: string }
+    AgentProxySequenceMutationEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentProxySequenceMutation" }
+        requestId: { type: string }
+    AgentProxyGlobalMutationEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/AgentProxyGlobalMutation" }
         requestId: { type: string }
     AgentAnalysisTaskCounts:
       type: object

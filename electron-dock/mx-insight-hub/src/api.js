@@ -448,10 +448,10 @@ export const adminApi = {
     `${ADMIN_ROOT}/agent/providers/${encodeURIComponent(kind)}`,
     { method: 'PUT', body },
   ),
-  testAgentProvider: (token, kind, providerId) => request(
+  testAgentProvider: (token, kind, providerId, body) => request(
     token,
     `${ADMIN_ROOT}/agent/providers/${encodeURIComponent(kind)}/${encodeURIComponent(providerId)}/test`,
-    { method: 'POST' },
+    { method: 'POST', body },
   ),
   revealAgentProviderKey: (token, kind, providerId, adminToken) => request(
     token,
@@ -499,6 +499,11 @@ export const adminApi = {
     { method: 'DELETE', body: { expectedRevision } },
   ),
   setDefaultAgentProxySequence: (token, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent/proxies/default`,
+    { method: 'PUT', body },
+  ),
+  saveAgentEgressPolicy: (token, body) => request(
     token,
     `${ADMIN_ROOT}/agent/proxies/default`,
     { method: 'PUT', body },

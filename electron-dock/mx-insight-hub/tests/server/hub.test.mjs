@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { after, before, test } from 'node:test'
 import { NightAllAdapter } from '../../server/adapters/night-all.mjs'
 import { createApp } from '../../server/app.mjs'
-import { loadConfig } from '../../server/config.mjs'
+import { loadConfig, parseDeploymentEgressSnapshot } from '../../server/config.mjs'
 import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all-data-search.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
@@ -207,6 +207,54 @@ test('non-Kubernetes runtime keeps Elasticsearch disabled when no URL is configu
   })
   assert.equal(config.common.elasticsearch.url, null)
   assert.equal(config.common.elasticsearch.enabled, false)
+})
+
+test('deployment Docker proxy snapshot is strict, immutable config evidence', () => {
+  assert.deepEqual(parseDeploymentEgressSnapshot(null), {
+    version: 1,
+    configured: false,
+    sourceKind: null,
+    runtimeKind: null,
+    httpProxy: null,
+    httpsProxy: null,
+    noProxy: null,
+    sourceLocations: [],
+    nodeName: null,
+    observedAt: null,
+  })
+  const snapshot = {
+    version: 1,
+    configured: true,
+    sourceKind: 'docker-daemon-effective',
+    runtimeKind: 'kubernetes-host-network',
+    httpProxy: 'http://daemon-user:daemon-password@127.0.0.1:7890',
+    httpsProxy: 'http://127.0.0.1:7788',
+    noProxy: 'localhost,.svc,10.0.0.0/8',
+    sourceLocations: ['/etc/systemd/system/docker.service.d/http-proxy.conf'],
+    nodeName: 'worker-a',
+    observedAt: '2026-08-29T08:00:00+08:00',
+  }
+  const parsed = parseDeploymentEgressSnapshot(JSON.stringify(snapshot))
+  assert.equal(parsed.httpProxy, snapshot.httpProxy)
+  assert.equal(parsed.httpsProxy, snapshot.httpsProxy)
+  assert.notEqual(parsed.sourceLocations, snapshot.sourceLocations)
+
+  const rejects = [
+    { ...snapshot, version: 2 },
+    { ...snapshot, sourceKind: 'operator-input' },
+    { ...snapshot, runtimeKind: 'unknown-runtime' },
+    { ...snapshot, configured: false },
+    { ...snapshot, httpProxy: 'socks5://127.0.0.1:7890' },
+    { ...snapshot, httpProxy: 'http://127.0.0.1:7890/path' },
+    { ...snapshot, observedAt: 'yesterday' },
+    { ...snapshot, unexpected: true },
+  ]
+  for (const invalid of rejects) {
+    assert.throws(
+      () => parseDeploymentEgressSnapshot(JSON.stringify(invalid)),
+      (error) => error?.status === 500 && error?.code === 'invalid_configuration',
+    )
+  }
 })
 
 test('Hub bounds bulk HanLP defaults while explicit common settings still win', () => {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { getEventListeners } from 'node:events'
 import test from 'node:test'
+import { ProxyAgent } from 'undici'
 import {
   EmbeddingRouter,
   HubAgent,
@@ -8,6 +9,7 @@ import {
   ProviderRouter,
   parseProviderConfig,
   shouldFailover,
+  validateChatResponse,
 } from '../../server/agent/index.mjs'
 
 const quiet = { warn() {}, log() {}, error() {} }
@@ -174,6 +176,275 @@ test('a Provider Proxy Sequence falls back to direct only after proxy transport 
 
   assert.equal(result.provider, 'proxied')
   assert.deepEqual(routes, ['proxy', 'direct'])
+})
+
+test('a transport override does not mutate the Provider catalog and shares its circuit', async () => {
+  const catalogProvider = providers('shared-circuit')[0]
+  let calls = 0
+  let effectiveProvider = null
+  const router = new ProviderRouter({
+    providers: [catalogProvider],
+    logger: quiet,
+    fetchImpl: async () => {
+      calls += 1
+      return jsonResponse({ error: 'unavailable' }, 503)
+    },
+  })
+  const transportOverride = {
+    proxyUrls: ['http://127.0.0.1:17890'],
+    directFallback: false,
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await assert.rejects(() => router.call('/chat/completions', (provider) => {
+      effectiveProvider = provider
+      return { model: provider.model }
+    }, { transportOverride }))
+  }
+
+  assert.notEqual(effectiveProvider, catalogProvider, 'the request receives an effective clone')
+  assert.deepEqual(effectiveProvider.proxyUrls, transportOverride.proxyUrls)
+  assert.equal(effectiveProvider.directFallback, false)
+  assert.equal(router.providers[0], catalogProvider, 'the catalog retains its original object')
+  assert.equal(Object.hasOwn(catalogProvider, 'proxyUrls'), false)
+  assert.equal(Object.hasOwn(catalogProvider, 'directFallback'), false)
+  assert.equal(router.status()[0].circuit, 'open')
+
+  await assert.rejects(
+    () => router.call('/chat/completions', (provider) => ({ model: provider.model })),
+    (error) => error.attempts?.[0]?.error === 'circuit open',
+  )
+  assert.equal(calls, 3, 'the non-override call shares and respects the opened circuit')
+})
+
+test('a transport exception advances from the first override proxy to the second', async () => {
+  const dispatchers = []
+  const agent = new HubAgent({
+    chat: new ProviderRouter({
+      providers: providers('override-sequence'),
+      logger: quiet,
+      fetchImpl: async (_url, options) => {
+        dispatchers.push(options.dispatcher)
+        if (dispatchers.length === 1) throw new Error('first proxy unavailable')
+        return jsonResponse(chatReply('second proxy'))
+      },
+    }),
+    embeddings: new EmbeddingRouter({ providers: [], logger: quiet }),
+    logger: quiet,
+  })
+
+  const result = await agent.complete([{ role: 'user', content: 'hello' }], {
+    providerIds: ['override-sequence'],
+    transportOverride: {
+      proxyUrls: ['http://127.0.0.1:17891', 'http://127.0.0.1:17892'],
+      directFallback: false,
+    },
+  })
+
+  assert.equal(result.payload.choices[0].message.content, 'second proxy')
+  assert.equal(dispatchers.length, 2)
+  assert.ok(dispatchers.every(Boolean))
+  assert.notEqual(dispatchers[0], dispatchers[1])
+})
+
+test('the ProxyAgent cache evicts idle LRU entries without closing an active response', async () => {
+  const originalClose = ProxyAgent.prototype.close
+  const closed = new Set()
+  ProxyAgent.prototype.close = function closeForTest() {
+    closed.add(this)
+    return Promise.resolve()
+  }
+
+  let activeBodyController
+  let activeDispatcher
+  let markActiveStarted
+  const activeStarted = new Promise((resolve) => { markActiveStarted = resolve })
+  const activeProvider = { ...providers('active-proxy-cache')[0], timeoutMs: 30_000 }
+  const activeRouter = new ProviderRouter({
+    providers: [activeProvider],
+    logger: quiet,
+    fetchImpl: async (_url, options) => {
+      activeDispatcher = options.dispatcher
+      markActiveStarted()
+      return new Response(new ReadableStream({
+        start(controller) { activeBodyController = controller },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+  const activeCall = activeRouter.callProvider(
+    activeProvider.id,
+    '/chat/completions',
+    (provider) => ({ model: provider.model }),
+    {
+      validatePayload: validateChatResponse,
+      transportOverride: {
+        proxyUrls: ['http://127.0.0.1:17910'],
+        directFallback: false,
+      },
+    },
+  )
+
+  try {
+    await activeStarted
+    const churnRouter = new ProviderRouter({
+      providers: providers('proxy-cache-churn'),
+      logger: quiet,
+      fetchImpl: async () => jsonResponse(chatReply('OK')),
+    })
+    for (let index = 0; index < 40; index += 1) {
+      await churnRouter.callProvider(
+        'proxy-cache-churn',
+        '/chat/completions',
+        (provider) => ({ model: provider.model }),
+        {
+          validatePayload: validateChatResponse,
+          transportOverride: {
+            proxyUrls: [`http://127.0.0.1:${18000 + index}`],
+            directFallback: false,
+          },
+        },
+      )
+    }
+    assert.ok(closed.size > 0, 'idle historical dispatchers are reclaimed above the bound')
+    assert.equal(closed.has(activeDispatcher), false, 'an unread active response keeps its lease')
+
+    activeBodyController.enqueue(new TextEncoder().encode(JSON.stringify(chatReply('active OK'))))
+    activeBodyController.close()
+    await activeCall
+
+    for (let index = 0; index < 40; index += 1) {
+      await churnRouter.callProvider(
+        'proxy-cache-churn',
+        '/chat/completions',
+        (provider) => ({ model: provider.model }),
+        {
+          validatePayload: validateChatResponse,
+          transportOverride: {
+            proxyUrls: [`http://127.0.0.1:${18100 + index}`],
+            directFallback: false,
+          },
+        },
+      )
+    }
+    assert.equal(closed.has(activeDispatcher), true, 'the released LRU dispatcher becomes reclaimable')
+  } finally {
+    ProxyAgent.prototype.close = originalClose
+    if (activeBodyController) {
+      try { activeBodyController.close() } catch {}
+    }
+    await activeCall.catch(() => {})
+  }
+})
+
+test('an HTTP 5xx is a Provider outcome and is not replayed through another proxy', async () => {
+  let calls = 0
+  let cancelled = false
+  const agent = new HubAgent({
+    chat: new ProviderRouter({
+      providers: providers('override-probe'),
+      logger: quiet,
+      fetchImpl: async () => {
+        calls += 1
+        return new Response(new ReadableStream({
+          cancel() { cancelled = true },
+        }), { status: 502 })
+      },
+    }),
+    embeddings: new EmbeddingRouter({ providers: [], logger: quiet }),
+    logger: quiet,
+  })
+
+  await assert.rejects(() => agent.testProvider({
+    kind: 'chat',
+    providerId: 'override-probe',
+    transportOverride: {
+      proxyUrls: ['http://127.0.0.1:17893', 'http://127.0.0.1:17894'],
+      directFallback: false,
+    },
+  }), (error) => error instanceof NoProviderAvailableError
+    && error.attempts?.[0]?.error === 'HTTP 502')
+
+  assert.equal(calls, 1)
+  assert.equal(cancelled, true)
+})
+
+test('provider HTTP outcomes other than 5xx do not retry through another proxy', async () => {
+  for (const status of [429, 401, 403, 404]) {
+    let calls = 0
+    const router = new ProviderRouter({
+      providers: providers(`status-${status}`),
+      logger: quiet,
+      fetchImpl: async () => {
+        calls += 1
+        return jsonResponse({ error: 'provider outcome' }, status)
+      },
+    })
+
+    await assert.rejects(() => router.callProvider(
+      `status-${status}`,
+      '/chat/completions',
+      (provider) => ({ model: provider.model }),
+      {
+        transportOverride: {
+          proxyUrls: ['http://127.0.0.1:17895', 'http://127.0.0.1:17896'],
+          directFallback: false,
+        },
+      },
+    ))
+    assert.equal(calls, 1, `HTTP ${status} is not retried through another proxy`)
+  }
+})
+
+test('a 5xx from the final transport route still fails over to the next Provider', async () => {
+  const seen = []
+  const router = new ProviderRouter({
+    providers: providers('route-primary', 'route-secondary'),
+    logger: quiet,
+    fetchImpl: async (url) => {
+      const id = new URL(url).hostname.split('.')[0]
+      seen.push(id)
+      return id === 'route-primary'
+        ? jsonResponse({ error: 'unavailable' }, 503)
+        : jsonResponse(chatReply('fallback Provider'))
+    },
+  })
+
+  const result = await router.call('/chat/completions', (provider) => ({ model: provider.model }), {
+    transportOverride: {
+      proxyUrls: ['http://127.0.0.1:17897'],
+      directFallback: false,
+    },
+  })
+
+  assert.equal(result.provider, 'route-secondary')
+  assert.deepEqual(seen, ['route-primary', 'route-secondary'])
+  assert.deepEqual(result.attempts, [{ provider: 'route-primary', error: 'HTTP 503' }])
+})
+
+test('caller abort does not continue to another override transport route', async () => {
+  const controller = new AbortController()
+  let calls = 0
+  const router = new ProviderRouter({
+    providers: providers('abort-route'),
+    logger: quiet,
+    fetchImpl: async () => {
+      calls += 1
+      controller.abort(new Error('caller stopped'))
+      throw controller.signal.reason
+    },
+  })
+
+  await assert.rejects(
+    () => router.call('/chat/completions', (provider) => ({ model: provider.model }), {
+      signal: controller.signal,
+      transportOverride: {
+        proxyUrls: ['http://127.0.0.1:17898', 'http://127.0.0.1:17899'],
+        directFallback: false,
+      },
+    }),
+    /caller stopped/,
+  )
+  assert.equal(calls, 1)
 })
 
 test('transport diagnostics never leak proxy or network details into attempts', async () => {
@@ -630,6 +901,41 @@ test('embeddings are returned in input order regardless of response order', asyn
   })
   const { vectors } = await router.embed(['first', 'second'])
   assert.deepEqual(vectors, [[1, 2], [3, 4]])
+})
+
+test('HubAgent forwards a transport override through an embedding Sequence', async () => {
+  let dispatcher = null
+  const embeddingProvider = {
+    id: 'embedding-override',
+    baseUrl: 'https://embedding-override.invalid/v1',
+    model: 'shared-space',
+    dimensions: 2,
+    apiKeyEnv: null,
+    timeoutMs: 1_000,
+  }
+  const agent = new HubAgent({
+    chat: new ProviderRouter({ providers: [], logger: quiet }),
+    embeddings: new EmbeddingRouter({
+      providers: [embeddingProvider],
+      logger: quiet,
+      fetchImpl: async (_url, options) => {
+        dispatcher = options.dispatcher
+        return jsonResponse({ data: [{ index: 0, embedding: [1, 2] }] })
+      },
+    }),
+    logger: quiet,
+  })
+
+  const result = await agent.embed(['hello'], {
+    providerIds: ['embedding-override'],
+    transportOverride: {
+      proxyUrls: ['http://127.0.0.1:17900'],
+      directFallback: false,
+    },
+  })
+
+  assert.ok(dispatcher)
+  assert.deepEqual(result.vectors, [[1, 2]])
 })
 
 // ---------------------------------------------------------------------------

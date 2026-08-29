@@ -7,6 +7,131 @@ export const PRODUCT_ID = 'mx-insight-hub'
 const KUBERNETES_ELASTICSEARCH_URL =
   'http://mx-common-elasticsearch.mx-common.svc.cluster.local:9200'
 
+const DEPLOYMENT_EGRESS_FIELDS = new Set([
+  'version',
+  'configured',
+  'sourceKind',
+  'runtimeKind',
+  'httpProxy',
+  'httpsProxy',
+  'noProxy',
+  'sourceLocations',
+  'nodeName',
+  'observedAt',
+])
+const DEPLOYMENT_EGRESS_RUNTIME_KINDS = new Set([
+  'kubernetes-host-network',
+  'docker-compose-bridge',
+  'host-process',
+])
+const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
+
+function normalizedDeploymentProxy(value, field) {
+  if (value == null) return null
+  if (typeof value !== 'string' || value.length > 2048) {
+    throw new AppError(500, 'invalid_configuration', `${field} must be a valid HTTP(S) proxy URL or null`)
+  }
+  let parsed
+  try { parsed = new URL(value) } catch {
+    throw new AppError(500, 'invalid_configuration', `${field} must be a valid HTTP(S) proxy URL or null`)
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)
+    || parsed.search || parsed.hash
+    || (parsed.pathname !== '' && parsed.pathname !== '/')) {
+    throw new AppError(500, 'invalid_configuration', `${field} must be an HTTP(S) proxy origin without path, query or fragment`)
+  }
+  return parsed.toString().replace(/\/$/, '')
+}
+
+export function parseDeploymentEgressSnapshot(raw) {
+  if (raw == null || String(raw).trim() === '') {
+    return {
+      version: 1,
+      configured: false,
+      sourceKind: null,
+      runtimeKind: null,
+      httpProxy: null,
+      httpsProxy: null,
+      noProxy: null,
+      sourceLocations: [],
+      nodeName: null,
+      observedAt: null,
+    }
+  }
+  let snapshot
+  try { snapshot = JSON.parse(raw) } catch {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT must be valid JSON')
+  }
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT must be a JSON object')
+  }
+  for (const field of Object.keys(snapshot)) {
+    if (!DEPLOYMENT_EGRESS_FIELDS.has(field)) {
+      throw new AppError(500, 'invalid_configuration', `MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT contains unsupported field ${field}`)
+    }
+  }
+  for (const field of DEPLOYMENT_EGRESS_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(snapshot, field)) {
+      throw new AppError(500, 'invalid_configuration', `MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT is missing ${field}`)
+    }
+  }
+  if (snapshot.version !== 1) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.version must be 1')
+  }
+  if (typeof snapshot.configured !== 'boolean') {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.configured must be boolean')
+  }
+  if (snapshot.sourceKind !== 'docker-daemon-effective') {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.sourceKind must be docker-daemon-effective')
+  }
+  if (!DEPLOYMENT_EGRESS_RUNTIME_KINDS.has(snapshot.runtimeKind)) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.runtimeKind is unsupported')
+  }
+  const httpProxy = normalizedDeploymentProxy(snapshot.httpProxy, 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.httpProxy')
+  const httpsProxy = normalizedDeploymentProxy(snapshot.httpsProxy, 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.httpsProxy')
+  if (snapshot.configured !== Boolean(httpProxy || httpsProxy)) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.configured must match the effective proxy URLs')
+  }
+  if (snapshot.noProxy != null && (
+    typeof snapshot.noProxy !== 'string'
+    || snapshot.noProxy.length > 8192
+    || /[\0\r\n]/.test(snapshot.noProxy)
+  )) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.noProxy must be a bounded single-line string or null')
+  }
+  if (!Array.isArray(snapshot.sourceLocations) || snapshot.sourceLocations.length > 32
+    || snapshot.sourceLocations.some((value) => (
+      typeof value !== 'string' || !value || value.length > 512 || /[\0\r\n]/.test(value)
+    ))) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.sourceLocations must contain bounded strings')
+  }
+  if (snapshot.nodeName != null && (
+    typeof snapshot.nodeName !== 'string'
+    || !snapshot.nodeName
+    || snapshot.nodeName.length > 253
+    || /[\0\r\n]/.test(snapshot.nodeName)
+  )) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.nodeName must be a bounded string or null')
+  }
+  if (typeof snapshot.observedAt !== 'string'
+    || !RFC3339_PATTERN.test(snapshot.observedAt)
+    || !Number.isFinite(Date.parse(snapshot.observedAt))) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT.observedAt must be RFC3339')
+  }
+  return {
+    version: 1,
+    configured: snapshot.configured,
+    sourceKind: snapshot.sourceKind,
+    runtimeKind: snapshot.runtimeKind,
+    httpProxy,
+    httpsProxy,
+    noProxy: snapshot.noProxy == null ? null : snapshot.noProxy.trim(),
+    sourceLocations: [...snapshot.sourceLocations],
+    nodeName: snapshot.nodeName,
+    observedAt: snapshot.observedAt,
+  }
+}
+
 function positiveInteger(value, fallback, name) {
   if (value == null || value === '') return fallback
   const parsed = Number(value)
@@ -101,6 +226,9 @@ export function loadConfig(environment = process.env) {
     // Set to 0 only for an emergency rollback that must keep env authoritative.
     autoMigrate: environment.MX_INSIGHT_AGENT_AUTO_MIGRATE !== '0',
   }
+  const deploymentEgress = parseDeploymentEgressSnapshot(
+    environment.MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT,
+  )
 
   // Federated identity through MX Launcher's User Center. Absent configuration
   // simply disables the federated path; the admin token keeps working, which is
@@ -124,6 +252,7 @@ export function loadConfig(environment = process.env) {
     common,
     launcher,
     agent,
+    deploymentEgress,
     embedding: common.embedding,
     host: environment.MX_INSIGHT_HOST || '0.0.0.0',
     port: positiveInteger(environment.MX_INSIGHT_PORT, 18_180, 'MX_INSIGHT_PORT'),

@@ -4,8 +4,10 @@ import { createServer } from 'node:http'
 import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
 import {
+  aggregateProviderProxyRouteFingerprint,
   AgentControlStore,
   providerProxyRouteFingerprint,
+  resolveProviderProxyRoute,
 } from '../../server/agent/control-store.mjs'
 import { AgentRuntime } from '../../server/agent/runtime.mjs'
 import {
@@ -193,6 +195,7 @@ function config(overrides = {}) {
 function proxyControlHarness({
   endpointReferences = [],
   globalSequenceKey = null,
+  llmSequenceReferences = [],
   providerSettings = [],
 } = {}) {
   const state = {
@@ -208,6 +211,7 @@ function proxyControlHarness({
     },
     endpointReferences,
     globalSequenceKey,
+    llmSequenceReferences,
     providerSettings,
     deletedEndpoint: false,
     deletedSequence: false,
@@ -239,6 +243,14 @@ function proxyControlHarness({
     }
     if (text.includes('FROM control.agent_provider_settings') && text.includes('FOR SHARE')) {
       return { rows: structuredClone(state.providerSettings) }
+    }
+    if (text.includes('FROM control.agent_llm_sequences') && text.includes('FOR SHARE')) {
+      return {
+        rows: state.llmSequenceReferences.map((reference) => ({
+          sequence_key: typeof reference === 'string' ? reference : reference.sequenceKey,
+          kind: typeof reference === 'string' ? 'chat' : reference.kind,
+        })),
+      }
     }
     if (text.startsWith('INSERT INTO control.agent_proxy_sequences')) {
       state.sequence = {
@@ -280,7 +292,8 @@ function sequenceVerificationHarness() {
     llmSequence: {
       sequence_key: 'candidate', display_name: 'Candidate', kind: 'chat',
       provider_ids: ['primary'], enabled: true, source: 'database',
-      provider_revision: 2, revision: 1,
+      egress_mode: 'inherit', proxy_sequence_key: null, provider_revision: 2,
+      verified_proxy_fingerprint: null, revision: 1,
     },
     bindingRevision: 0,
     sequenceWrites: 0,
@@ -329,7 +342,9 @@ function sequenceVerificationHarness() {
       state.llmSequence = {
         ...state.llmSequence,
         sequence_key: params[0], display_name: params[1], kind: params[2],
-        provider_ids: params[3], enabled: params[4], provider_revision: params[5],
+        provider_ids: params[3], enabled: params[4], egress_mode: params[5],
+        proxy_sequence_key: params[6], provider_revision: params[7],
+        verified_proxy_fingerprint: params[8],
         revision: Number(state.llmSequence?.revision || 0) + 1,
       }
       return { rows: [structuredClone(state.llmSequence)] }
@@ -349,19 +364,27 @@ function sequenceVerificationHarness() {
   return { state, store: new AgentControlStore({ async connect() { return client } }) }
 }
 
-function verificationFor(state, control = {}) {
-  const providerRow = state.providerSetting.providers[0]
+function verificationFor(state, control = {}, routeOverride = undefined) {
+  const providerIds = state.llmSequence?.provider_ids
+    || state.providerSetting.providers.map((entry) => entry.id)
+  const providerRows = new Map(state.providerSetting.providers.map((entry) => [entry.id, entry]))
+  const proxyControl = {
+    globalProxySequenceKey: state.globalSequenceKey,
+    proxySequences: [],
+    proxyEndpoints: [],
+    ...control,
+  }
+  const proxyFingerprints = new Map(providerIds.map((providerId) => [
+    providerId,
+    providerProxyRouteFingerprint(providerRows.get(providerId), proxyControl, routeOverride),
+  ]))
   return {
     settingsRevision: state.providerSetting.revision,
-    proxyFingerprints: new Map([[
-      providerRow.id,
-      providerProxyRouteFingerprint(providerRow, {
-        globalProxySequenceKey: state.globalSequenceKey,
-        proxySequences: [],
-        proxyEndpoints: [],
-        ...control,
-      }),
-    ]]),
+    proxyFingerprints,
+    aggregateProxyFingerprint: aggregateProviderProxyRouteFingerprint(
+      providerIds,
+      proxyFingerprints,
+    ),
   }
 }
 
@@ -386,6 +409,183 @@ test('migration 042 tombstones only implicit compatibility defaults and preserve
   assert.match(sql, /consumer_key = 'hub\.embedding\.default'[\s\S]*sequence_key = 'mx-default-embedding'/)
   assert.doesNotMatch(sql, /DELETE FROM control\.agent_consumer_bindings/i)
   assert.doesNotMatch(sql, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:core|ingest)\./i)
+})
+
+test('migration 043 adds nullable LLM Sequence Proxy proof without rebinding existing rows', async () => {
+  const sql = await readFile(new URL('../../migrations/043_agent_llm_sequence_proxy.sql', import.meta.url), 'utf8')
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS proxy_sequence_key text/)
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS verified_proxy_fingerprint char\(64\)/)
+  assert.match(sql, /FOREIGN KEY \(proxy_sequence_key\)[\s\S]*ON DELETE RESTRICT/)
+  assert.match(sql, /verified_proxy_fingerprint IS NULL/)
+  assert.doesNotMatch(sql, /proxy_sequence_key\s+text\s+NOT NULL/i)
+  assert.doesNotMatch(sql, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+control\.agent_llm_sequences/i)
+  assert.doesNotMatch(sql, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:core|ingest)\./i)
+})
+
+test('migration 044 adds explicit three-state egress without persisting deployment secrets', async () => {
+  const sql = await readFile(new URL('../../migrations/044_agent_deployment_egress.sql', import.meta.url), 'utf8')
+  assert.match(sql, /agent_llm_sequences[\s\S]*ADD COLUMN IF NOT EXISTS egress_mode text/)
+  assert.match(sql, /agent_proxy_settings[\s\S]*ADD COLUMN IF NOT EXISTS egress_mode text/)
+  assert.match(sql, /'inherit'[\s\S]*'system-egress'[\s\S]*'proxy-sequence'/)
+  assert.match(sql, /proxy_sequence_key IS NOT NULL/)
+  assert.match(sql, /global_sequence_key IS NOT NULL/)
+  assert.doesNotMatch(sql, /http_proxy|https_proxy|no_proxy/i)
+  assert.doesNotMatch(sql, /(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:core|ingest)\./i)
+})
+
+test('Provider Proxy route resolution supports explicit override and fails closed without routes', () => {
+  const providerRow = provider({ proxySequenceKey: 'provider-egress' })
+  const control = {
+    globalProxySequenceKey: 'global-egress',
+    proxySequences: [
+      {
+        sequenceKey: 'provider-egress', proxyKeys: ['provider-proxy'],
+        directFallback: false, enabled: true,
+      },
+      {
+        sequenceKey: 'sequence-egress', proxyKeys: ['sequence-proxy', 'disabled-proxy'],
+        directFallback: true, enabled: true,
+      },
+      {
+        sequenceKey: 'empty-egress', proxyKeys: ['disabled-proxy'],
+        directFallback: true, enabled: true,
+      },
+    ],
+    proxyEndpoints: [
+      { proxyKey: 'provider-proxy', proxyUrl: 'http://127.0.0.1:7001', enabled: true },
+      { proxyKey: 'sequence-proxy', proxyUrl: 'http://127.0.0.1:7002', enabled: true },
+      { proxyKey: 'disabled-proxy', proxyUrl: 'http://127.0.0.1:7003', enabled: false },
+    ],
+  }
+
+  const inherited = resolveProviderProxyRoute(providerRow, control)
+  assert.equal(inherited.source, 'provider')
+  assert.deepEqual(inherited.proxyUrls, ['http://127.0.0.1:7001'])
+  assert.equal(inherited.directFallback, false)
+
+  const overridden = resolveProviderProxyRoute(providerRow, control, 'sequence-egress')
+  assert.equal(overridden.source, 'override')
+  assert.deepEqual(overridden.proxyUrls, ['http://127.0.0.1:7002'])
+  assert.equal(overridden.directFallback, true)
+
+  const system = resolveProviderProxyRoute(providerRow, control, null)
+  assert.equal(system.source, 'system')
+  assert.deepEqual(system.proxyUrls, [])
+  assert.equal(system.directFallback, true)
+
+  const empty = resolveProviderProxyRoute(providerRow, control, 'empty-egress')
+  assert.deepEqual(empty.proxyUrls, [])
+  assert.equal(empty.directFallback, false)
+})
+
+test('inherited Docker egress follows Go NO_PROXY semantics and functional fingerprints', () => {
+  const baseline = {
+    version: 1,
+    configured: true,
+    sourceKind: 'docker-daemon-effective',
+    runtimeKind: 'kubernetes-host-network',
+    httpProxy: 'http://proxy.internal:7890',
+    httpsProxy: 'http://secure-proxy.internal:7788',
+    noProxy: '.internal.example,example.com:8443,10.0.0.0/8,2001:db8::/32',
+    sourceLocations: ['/etc/systemd/system/docker.service.d/http-proxy.conf'],
+    nodeName: 'worker-a',
+    observedAt: '2026-08-29T00:00:00Z',
+  }
+  const control = {
+    globalEgressMode: 'inherit', globalProxySequenceKey: null,
+    proxySequences: [], proxyEndpoints: [], deploymentEgress: baseline,
+  }
+  const route = (baseUrl, override = undefined, current = control) => (
+    resolveProviderProxyRoute(provider({ baseUrl, proxySequenceKey: null }), current, override)
+  )
+
+  assert.deepEqual(route('https://models.example.net/v1').proxyUrls, [baseline.httpsProxy])
+  assert.deepEqual(route('http://models.example.net/v1').proxyUrls, [baseline.httpProxy])
+  assert.deepEqual(route('https://api.internal.example/v1').proxyUrls, [])
+  assert.deepEqual(
+    route('https://internal.example/v1').proxyUrls,
+    [baseline.httpsProxy],
+    'a leading dot matches subdomains only',
+  )
+  assert.deepEqual(route('https://example.com:8443/v1').proxyUrls, [])
+  assert.deepEqual(route('https://example.com/v1').proxyUrls, [baseline.httpsProxy])
+  assert.deepEqual(route('http://10.20.30.40/v1').proxyUrls, [])
+  assert.deepEqual(route('https://[2001:db8::42]/v1').proxyUrls, [])
+  assert.deepEqual(route('https://localhost/v1').proxyUrls, [])
+  assert.deepEqual(route('https://127.0.0.2/v1').proxyUrls, [])
+
+  const original = route('https://models.example.net/v1')
+  const metadataOnly = route('https://models.example.net/v1', undefined, {
+    ...control,
+    deploymentEgress: {
+      ...baseline,
+      observedAt: '2026-08-29T01:00:00Z',
+      sourceLocations: ['/different/source/path'],
+      nodeName: 'worker-b',
+      noProxy: '.does-not-match.example',
+    },
+  })
+  assert.equal(metadataOnly.fingerprint, original.fingerprint)
+  const changedProxy = route('https://models.example.net/v1', undefined, {
+    ...control,
+    deploymentEgress: { ...baseline, httpsProxy: 'http://other-proxy.internal:7788' },
+  })
+  assert.notEqual(changedProxy.fingerprint, original.fingerprint)
+  assert.equal(
+    route('https://models.example.net/v1', null).fingerprint,
+    route('https://models.example.net/v1', null, {
+      ...control,
+      deploymentEgress: { ...baseline, httpsProxy: 'http://other-proxy.internal:7788' },
+    }).fingerprint,
+    'an explicit system route is independent from deployment evidence',
+  )
+})
+
+test('Provider compatibility binding precedes Hub policy and Hub system stops daemon inheritance', () => {
+  const control = {
+    globalEgressMode: 'system-egress',
+    globalProxySequenceKey: null,
+    deploymentEgress: {
+      configured: true,
+      httpProxy: 'http://daemon-proxy.internal:7890',
+      httpsProxy: 'http://daemon-proxy.internal:7890',
+      noProxy: null,
+    },
+    proxySequences: [{
+      sequenceKey: 'provider-route', proxyKeys: ['provider-endpoint'],
+      directFallback: false, enabled: true,
+    }],
+    proxyEndpoints: [{
+      proxyKey: 'provider-endpoint', proxyUrl: 'http://provider-proxy.internal:7788', enabled: true,
+    }],
+  }
+  const providerRoute = resolveProviderProxyRoute(
+    provider({ proxySequenceKey: 'provider-route' }),
+    control,
+  )
+  assert.equal(providerRoute.source, 'provider')
+  assert.deepEqual(providerRoute.proxyUrls, ['http://provider-proxy.internal:7788'])
+
+  const systemRoute = resolveProviderProxyRoute(provider({ proxySequenceKey: null }), control)
+  assert.equal(systemRoute.source, 'global-system')
+  assert.deepEqual(systemRoute.proxyUrls, [])
+})
+
+test('aggregate Provider Proxy proof preserves Provider request order', () => {
+  const fingerprints = new Map([
+    ['first', '1'.repeat(64)],
+    ['second', '2'.repeat(64)],
+  ])
+  const ordered = aggregateProviderProxyRouteFingerprint(['first', 'second'], fingerprints)
+  assert.match(ordered, /^[0-9a-f]{64}$/)
+  assert.equal(
+    ordered,
+    aggregateProviderProxyRouteFingerprint(['first', 'second'], Object.fromEntries(fingerprints)),
+  )
+  assert.notEqual(
+    ordered,
+    aggregateProviderProxyRouteFingerprint(['second', 'first'], fingerprints),
+  )
 })
 
 test('Proxy endpoint deletion enforces revision CAS and refuses Sequence references', async () => {
@@ -458,6 +658,17 @@ test('Proxy Sequence deletion refuses global and Provider bindings before deleti
   )
   assert.equal(providerBound.state.deletedSequence, false)
 
+  const llmBound = proxyControlHarness({
+    llmSequenceReferences: [{ kind: 'chat', sequenceKey: 'production-chat' }],
+  })
+  await assert.rejects(
+    () => llmBound.store.deleteProxySequence('agent-egress', { expectedRevision: 3 }),
+    (error) => error?.status === 409
+      && error?.code === 'agent_proxy_sequence_in_use'
+      && error?.details?.sequences?.[0]?.sequenceKey === 'production-chat',
+  )
+  assert.equal(llmBound.state.deletedSequence, false)
+
   const available = proxyControlHarness()
   const deleted = await available.store.deleteProxySequence('agent-egress', { expectedRevision: 3 })
   assert.equal(deleted.sequenceKey, 'agent-egress')
@@ -500,6 +711,15 @@ test('Proxy Sequence cannot transition from enabled to disabled while bound', as
   )
   assert.equal(providerBound.state.sequence.enabled, true)
 
+  const llmBound = proxyControlHarness({ llmSequenceReferences: ['production-chat'] })
+  await assert.rejects(
+    () => llmBound.store.saveProxySequence('agent-egress', disable),
+    (error) => error?.status === 409
+      && error?.code === 'agent_proxy_sequence_in_use'
+      && error?.details?.sequences?.[0]?.sequenceKey === 'production-chat',
+  )
+  assert.equal(llmBound.state.sequence.enabled, true)
+
   const available = proxyControlHarness()
   const saved = await available.store.saveProxySequence('agent-egress', disable)
   assert.equal(saved.enabled, false)
@@ -519,10 +739,14 @@ test('Proxy Sequence cannot transition from enabled to disabled while bound', as
   const sequenceLock = available.state.queries.findIndex(({ text }) => (
     text.includes('FROM control.agent_proxy_sequences') && text.includes('FOR UPDATE')
   ))
+  const llmLock = available.state.queries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_llm_sequences') && text.includes('FOR SHARE')
+  ))
   assert.ok(globalAdvisory >= 0 && globalAdvisory < globalLock)
   assert.ok(globalLock < providerLock)
   assert.ok(providerLock < sequenceAdvisory)
   assert.ok(sequenceAdvisory < sequenceLock)
+  assert.ok(sequenceLock < llmLock)
 })
 
 test('bootstrap refreshes only Compatibility Sequence candidates and never creates a default binding', async () => {
@@ -541,7 +765,9 @@ test('bootstrap refreshes only Compatibility Sequence candidates and never creat
   const upsert = queries.find(({ text }) => text.startsWith('INSERT INTO control.agent_llm_sequences'))
   assert.match(upsert.text, /ON CONFLICT \(sequence_key\) DO UPDATE SET/)
   assert.match(upsert.text, /provider_ids = EXCLUDED\.provider_ids/)
+  assert.match(upsert.text, /proxy_sequence_key = EXCLUDED\.proxy_sequence_key/)
   assert.match(upsert.text, /provider_revision = EXCLUDED\.provider_revision/)
+  assert.match(upsert.text, /verified_proxy_fingerprint = EXCLUDED\.verified_proxy_fingerprint/)
   assert.match(upsert.text, /revision = control\.agent_llm_sequences\.revision \+ 1/)
   assert.match(upsert.text, /WHERE control\.agent_llm_sequences\.source = 'bootstrap'/)
   assert.match(upsert.text, /IS DISTINCT FROM/)
@@ -580,6 +806,314 @@ test('runtime control snapshots distinguish a governed empty state from a missin
     .loadRuntimeSnapshot('chat')
   assert.equal(missing.controlAvailable, false)
   assert.equal(missing.defaultBinding, null)
+
+  const preProxyColumnClient = {
+    async query(sql) {
+      const text = sql.replace(/\s+/g, ' ').trim()
+      if (text.startsWith('BEGIN') || text === 'ROLLBACK') return { rows: [] }
+      const error = new Error('column "proxy_sequence_key" does not exist')
+      error.code = '42703'
+      error.column = 'proxy_sequence_key'
+      throw error
+    },
+    release() {},
+  }
+  const preProxyColumn = await new AgentControlStore({
+    async connect() { return preProxyColumnClient },
+  }).loadRuntimeSnapshot('chat')
+  assert.equal(preProxyColumn.controlAvailable, false)
+  assert.equal(preProxyColumn.defaultBinding, null)
+
+  let legacyAttempts = 0
+  const preEgressColumnClient = {
+    async query(sql) {
+      const text = sql.replace(/\s+/g, ' ').trim()
+      if (text.startsWith('BEGIN')) {
+        legacyAttempts += 1
+        return { rows: [] }
+      }
+      if (text === 'ROLLBACK' || text === 'COMMIT') return { rows: [] }
+      if (text.includes('egress_mode')) {
+        const error = new Error('column "egress_mode" does not exist')
+        error.code = '42703'
+        error.column = 'egress_mode'
+        throw error
+      }
+      if (text.includes('FROM control.agent_proxy_settings')) {
+        return { rows: [{ global_sequence_key: null, revision: 0 }] }
+      }
+      return { rows: [] }
+    },
+    release() {},
+  }
+  const preEgressColumn = await new AgentControlStore({
+    async connect() { return preEgressColumnClient },
+  }).loadRuntimeSnapshot('chat')
+  assert.equal(preEgressColumn.controlAvailable, true)
+  assert.equal(preEgressColumn.globalEgressMode, 'inherit')
+  assert.equal(legacyAttempts, 2, 'missing migration 044 retries the old schema in a new transaction')
+})
+
+test('public proxy control redacts deployment userinfo and explains effective precedence', async () => {
+  const deploymentEgress = {
+    version: 1,
+    configured: true,
+    sourceKind: 'docker-daemon-effective',
+    runtimeKind: 'kubernetes-host-network',
+    httpProxy: 'http://daemon-user:daemon-password@127.0.0.1:7890',
+    httpsProxy: 'http://secure-user:secure-password@127.0.0.1:7788',
+    noProxy: 'localhost,.svc',
+    sourceLocations: ['/etc/systemd/system/docker.service.d/http-proxy.conf'],
+    nodeName: 'worker-a',
+    observedAt: '2026-08-29T00:00:00Z',
+  }
+  const query = async (sql) => {
+    const text = sql.replace(/\s+/g, ' ').trim()
+    if (text.startsWith('BEGIN') || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [] }
+    if (text.includes('FROM control.agent_proxy_settings')) {
+      return { rows: [{ egress_mode: 'inherit', global_sequence_key: null, revision: 3 }] }
+    }
+    return { rows: [] }
+  }
+  const client = { query, release() {} }
+  const pool = { query, async connect() { return client } }
+  const control = await new AgentControlStore(pool, { deploymentEgress }).listPublicControl()
+  assert.equal(control.proxy.policy.egressMode, 'inherit')
+  assert.equal(control.proxy.effective.egressMode, 'docker-daemon')
+  assert.equal(control.proxy.effective.source, 'docker-daemon')
+  assert.equal(control.proxy.baseline.httpProxy, 'http://127.0.0.1:7890')
+  assert.equal(control.proxy.baseline.httpsProxy, 'http://127.0.0.1:7788')
+  assert.equal(control.proxy.baseline.httpProxyCredentials, true)
+  assert.equal(control.proxy.baseline.httpsProxyCredentials, true)
+  assert.deepEqual(
+    control.proxy.precedence.map((entry) => entry.layer),
+    ['request-override', 'llm-sequence', 'provider-compat', 'hub-policy', 'docker-daemon', 'system'],
+  )
+  assert.doesNotMatch(JSON.stringify(control), /daemon-user|daemon-password|secure-user|secure-password/)
+})
+
+test('public LLM Sequences project current route proof validity without exposing route secrets', async () => {
+  const deploymentEgress = {
+    version: 1,
+    configured: true,
+    sourceKind: 'docker-daemon-effective',
+    runtimeKind: 'kubernetes-host-network',
+    httpProxy: null,
+    httpsProxy: 'http://proof-user:proof-password@127.0.0.1:7788',
+    noProxy: null,
+    sourceLocations: ['/etc/systemd/system/docker.service.d/http-proxy.conf'],
+    nodeName: 'worker-proof',
+    observedAt: '2026-08-29T00:00:00Z',
+  }
+  const currentProvider = provider({ authMode: 'none', proxySequenceKey: null })
+  const proofControl = {
+    globalProxySequenceKey: null,
+    globalEgressMode: 'inherit',
+    proxySequences: [],
+    proxyEndpoints: [],
+    deploymentEgress,
+  }
+  const currentFingerprint = providerProxyRouteFingerprint(currentProvider, proofControl)
+  const validAggregate = aggregateProviderProxyRouteFingerprint(
+    ['primary'],
+    new Map([['primary', currentFingerprint]]),
+  )
+  const sequence = (sequenceKey, overrides = {}) => ({
+    sequence_key: sequenceKey,
+    display_name: sequenceKey,
+    kind: 'chat',
+    provider_ids: ['primary'],
+    enabled: true,
+    source: 'database',
+    egress_mode: 'inherit',
+    proxy_sequence_key: null,
+    provider_revision: 7,
+    verified_proxy_fingerprint: validAggregate,
+    revision: 1,
+    verified_at: '2026-08-29T00:00:00Z',
+    verified_by: 'admin-token',
+    updated_by: 'admin-token',
+    updated_at: '2026-08-29T00:00:00Z',
+    ...overrides,
+  })
+  const chatSequences = [
+    sequence('valid'),
+    sequence('missing-proof', { verified_proxy_fingerprint: null }),
+    sequence('provider-revision-changed', { provider_revision: 6 }),
+    sequence('provider-unavailable', {
+      provider_ids: ['removed'],
+      verified_proxy_fingerprint: 'a'.repeat(64),
+    }),
+    sequence('route-changed', { verified_proxy_fingerprint: 'b'.repeat(64) }),
+  ]
+  const query = async (sql, params = []) => {
+    const text = sql.replace(/\s+/g, ' ').trim()
+    if (text.startsWith('BEGIN') || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [] }
+    if (text.includes('FROM control.agent_llm_sequences')) {
+      return { rows: params[0] === 'chat' ? structuredClone(chatSequences) : [] }
+    }
+    if (text.includes('FROM control.agent_provider_settings')) {
+      return {
+        rows: params[0] === 'chat'
+          ? [{ revision: 7, providers: [structuredClone(currentProvider)] }]
+          : [{ revision: 0, providers: [] }],
+      }
+    }
+    if (text.includes('FROM control.agent_proxy_settings')) {
+      return { rows: [{ egress_mode: 'inherit', global_sequence_key: null, revision: 0 }] }
+    }
+    return { rows: [] }
+  }
+  const pool = {
+    async connect() { return { query, release() {} } },
+    async query() { return { rows: [] } },
+  }
+  const control = await new AgentControlStore(pool, { deploymentEgress }).listPublicControl()
+  const byKey = new Map(control.sequences.map((entry) => [entry.sequenceKey, entry]))
+
+  assert.deepEqual(
+    ['routeProofStatus', 'routeProofValid', 'needsRevalidation']
+      .map((field) => byKey.get('valid')[field]),
+    ['valid', true, false],
+  )
+  for (const status of [
+    'missing-proof',
+    'provider-revision-changed',
+    'provider-unavailable',
+    'route-changed',
+  ]) {
+    assert.equal(byKey.get(status).routeProofStatus, status)
+    assert.equal(byKey.get(status).routeProofValid, false)
+    assert.equal(byKey.get(status).needsRevalidation, true)
+  }
+  for (const projected of byKey.values()) {
+    assert.equal(Object.hasOwn(projected, 'currentProxyFingerprint'), false)
+    assert.equal(Object.hasOwn(projected, 'routeFingerprint'), false)
+  }
+  assert.doesNotMatch(JSON.stringify(control.sequences), /proof-user|proof-password|127\.0\.0\.1:7788/)
+})
+
+test('runtime public proof reprojects environment Providers from the applied snapshot', async () => {
+  const deploymentEgress = {
+    version: 1,
+    configured: true,
+    sourceKind: 'docker-daemon-effective',
+    runtimeKind: 'kubernetes-host-network',
+    httpProxy: null,
+    httpsProxy: 'http://runtime-user:runtime-secret@127.0.0.1:7788',
+    noProxy: null,
+    sourceLocations: ['/private/runtime/proxy.conf'],
+    nodeName: 'runtime-worker',
+    observedAt: '2026-08-29T01:00:00Z',
+  }
+  const environmentProvider = provider({
+    id: 'env-chat',
+    baseUrl: 'https://environment-model.example.com/v1',
+    model: 'environment-model',
+    authMode: 'none',
+    proxySequenceKey: null,
+  })
+  const internalControl = {
+    controlAvailable: true,
+    sequences: [],
+    defaultBinding: null,
+    proxyEndpoints: [],
+    proxySequences: [],
+    globalProxySequenceKey: null,
+    globalEgressMode: 'inherit',
+    proxyRevision: 0,
+    deploymentEgress,
+  }
+  const providerFingerprint = providerProxyRouteFingerprint(environmentProvider, internalControl)
+  const verifiedProxyFingerprint = aggregateProviderProxyRouteFingerprint(
+    ['env-chat'],
+    new Map([['env-chat', providerFingerprint]]),
+  )
+  const savedSequence = {
+    sequenceKey: 'environment-sequence',
+    displayName: 'Environment Sequence',
+    kind: 'chat',
+    providerIds: ['env-chat'],
+    enabled: true,
+    source: 'bootstrap',
+    egressMode: 'inherit',
+    proxySequenceKey: null,
+    providerRevision: 3,
+    verifiedProxyFingerprint,
+    revision: 2,
+    verifiedAt: '2026-08-29T01:00:00Z',
+    verifiedBy: 'admin-token',
+    updatedBy: 'admin-token',
+    updatedAt: '2026-08-29T01:00:00Z',
+  }
+  internalControl.sequences = [savedSequence]
+
+  const settingsStore = {
+    async loadSetting(kind) {
+      assert.equal(kind, 'chat')
+      return row('chat', { source: 'environment', revision: 3, providers: [] })
+    },
+    async loadCredentialsInternal() {
+      throw new Error('environment settings must not read credentials')
+    },
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot(kind) {
+      return kind === 'chat'
+        ? structuredClone(internalControl)
+        : {
+            controlAvailable: true,
+            sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
+            globalProxySequenceKey: null, globalEgressMode: 'inherit', proxyRevision: 0,
+            deploymentEgress,
+          }
+    },
+    async listPublicControl() {
+      return {
+        sequences: [{
+          ...savedSequence,
+          routeProofStatus: 'provider-unavailable',
+          routeProofValid: false,
+          needsRevalidation: true,
+        }],
+        bindings: [],
+        providerTests: [],
+        proxy: { endpoints: [], sequences: [], globalSequenceKey: null, revision: 0 },
+      }
+    },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({
+      agent: {
+        chatProviders: JSON.stringify([environmentProvider]),
+        embeddingProviders: null,
+        autoMigrate: false,
+      },
+      deploymentEgress,
+    }),
+    settingsStore,
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+  }).start()
+
+  try {
+    const control = await runtime.controlStatus()
+    const projected = control.sequences[0]
+    assert.equal(projected.routeProofStatus, 'valid')
+    assert.equal(projected.routeProofValid, true)
+    assert.equal(projected.needsRevalidation, false)
+    assert.equal(Object.hasOwn(projected, 'currentProxyFingerprint'), false)
+    assert.equal(Object.hasOwn(projected, 'routeFingerprint'), false)
+    assert.doesNotMatch(
+      JSON.stringify(control),
+      /runtime-user|runtime-secret|127\.0\.0\.1:7788|environment-model\.example\.com/,
+    )
+  } finally {
+    runtime.close()
+  }
 })
 
 test('clearing an LLM default writes a nullable binding tombstone under revision CAS', async () => {
@@ -667,6 +1201,8 @@ test('Sequence save and default binding atomically reject a route changed after 
     verification: proxyProof,
   })
   assert.equal(saved.revision, 2)
+  assert.equal(saved.proxySequenceKey, null)
+  assert.equal(saved.verifiedProxyFingerprint, proxyProof.aggregateProxyFingerprint)
 
   harness.state.llmSequence = {
     ...harness.state.llmSequence,
@@ -717,6 +1253,112 @@ test('Sequence save and default binding atomically reject a route changed after 
   assert.ok(firstProviderLock < firstProxySequenceLock)
   assert.ok(firstProxySequenceLock < firstEndpointLock)
   assert.ok(firstEndpointLock < firstSequenceWrite)
+})
+
+test('LLM Sequence Proxy override is persisted with its exact aggregate proof', async () => {
+  const harness = sequenceVerificationHarness()
+  harness.state.providerSetting.providers[0].proxySequenceKey = 'provider-egress'
+  harness.state.globalSequenceKey = 'global-egress'
+  const control = {
+    proxySequences: [{
+      sequenceKey: 'agent-egress', proxyKeys: ['host-7890'],
+      directFallback: false, enabled: true,
+    }],
+    proxyEndpoints: [{
+      proxyKey: 'host-7890', proxyUrl: 'http://127.0.0.1:7890', enabled: true,
+    }],
+  }
+  const proof = verificationFor(harness.state, control, 'agent-egress')
+  await assert.rejects(
+    () => harness.store.saveSequence('candidate', {
+      expectedRevision: 1,
+      displayName: 'Candidate',
+      kind: 'chat',
+      providerIds: ['primary'],
+      enabled: true,
+      proxySequenceKey: 'agent-egress',
+    }, {
+      providerRevision: 2,
+      verification: { ...proof, aggregateProxyFingerprint: '0'.repeat(64) },
+    }),
+    (error) => error?.status === 409 && error?.code === 'agent_provider_verification_stale',
+  )
+  assert.equal(harness.state.sequenceWrites, 0)
+
+  const saved = await harness.store.saveSequence('candidate', {
+    expectedRevision: 1,
+    displayName: 'Candidate',
+    kind: 'chat',
+    providerIds: ['primary'],
+    enabled: true,
+    proxySequenceKey: 'agent-egress',
+  }, {
+    providerRevision: 2,
+    verification: proof,
+  })
+  assert.equal(saved.proxySequenceKey, 'agent-egress')
+  assert.equal(saved.verifiedProxyFingerprint, proof.aggregateProxyFingerprint)
+  const write = harness.state.queries.findLast(({ text }) => (
+    text.startsWith('INSERT INTO control.agent_llm_sequences')
+  ))
+  assert.equal(write.params[5], 'proxy-sequence')
+  assert.equal(write.params[6], 'agent-egress')
+  assert.equal(write.params[8], proof.aggregateProxyFingerprint)
+  const selectedRoutes = harness.state.queries
+    .filter(({ text }) => text.includes('FROM control.agent_proxy_sequences'))
+    .map(({ params }) => params[0])
+  assert.ok(selectedRoutes.every((keys) => keys.length === 1 && keys[0] === 'agent-egress'))
+})
+
+test('nullable LLM Sequence Proxy binding retains the inherited compatibility route', async () => {
+  const harness = sequenceVerificationHarness()
+  harness.state.globalSequenceKey = 'agent-egress'
+  const proof = verificationFor(harness.state, {
+    proxySequences: [{
+      sequenceKey: 'agent-egress', proxyKeys: ['host-7890'],
+      directFallback: false, enabled: true,
+    }],
+    proxyEndpoints: [{
+      proxyKey: 'host-7890', proxyUrl: 'http://127.0.0.1:7890', enabled: true,
+    }],
+  })
+  const saved = await harness.store.saveSequence('candidate', {
+    expectedRevision: 1,
+    displayName: 'Candidate',
+    kind: 'chat',
+    providerIds: ['primary'],
+    enabled: true,
+    proxySequenceKey: null,
+  }, {
+    providerRevision: 2,
+    verification: proof,
+  })
+  assert.equal(saved.proxySequenceKey, null)
+  assert.equal(saved.verifiedProxyFingerprint, proof.aggregateProxyFingerprint)
+})
+
+test('LLM Sequence system-egress is explicit and ignores inherited Hub Proxy policy', async () => {
+  const harness = sequenceVerificationHarness()
+  harness.state.globalSequenceKey = 'agent-egress'
+  const proof = verificationFor(harness.state, {}, null)
+  const saved = await harness.store.saveSequence('candidate', {
+    expectedRevision: 1,
+    displayName: 'System route',
+    kind: 'chat',
+    providerIds: ['primary'],
+    enabled: true,
+    egressMode: 'system-egress',
+    proxySequenceKey: null,
+  }, {
+    providerRevision: 2,
+    verification: proof,
+  })
+  assert.equal(saved.egressMode, 'system-egress')
+  assert.equal(saved.proxySequenceKey, null)
+  const proxyReads = harness.state.queries.filter(({ text }) => (
+    text.includes('FROM control.agent_proxy_sequences')
+  ))
+  assert.equal(proxyReads.length, 0, 'explicit system egress must not resolve the inherited Hub Sequence')
 })
 
 test('Provider writes lock and validate Proxy Sequences in their persistence transaction', async () => {
@@ -919,6 +1561,51 @@ test('new Proxy Sequences and global bindings require a real endpoint', async ()
       && error?.code === 'invalid_agent_proxy'
       && /no enabled endpoint/.test(error?.message),
   )
+})
+
+test('global egress policy persists explicit system and keeps legacy null as inherit', async () => {
+  const makeStore = () => {
+    const writes = []
+    const client = {
+      async query(sql, params = []) {
+        const text = sql.replace(/\s+/g, ' ').trim()
+        if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK'
+          || text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+        if (text.startsWith('SELECT revision FROM control.agent_proxy_settings')) {
+          return { rows: [{ revision: 4 }] }
+        }
+        if (text.startsWith('INSERT INTO control.agent_proxy_settings')) {
+          writes.push(params)
+          return { rows: [{
+            egress_mode: params[0], global_sequence_key: params[1], revision: 5,
+            updated_by: params[2], updated_at: '2026-08-29T00:00:00Z',
+          }] }
+        }
+        throw new Error(`Unexpected global policy SQL: ${text}`)
+      },
+      release() {},
+    }
+    return {
+      store: new AgentControlStore({ async connect() { return client } }),
+      writes,
+    }
+  }
+
+  const explicit = makeStore()
+  const system = await explicit.store.setGlobalProxySequence({
+    expectedRevision: 4,
+    egressMode: 'system-egress',
+    sequenceKey: null,
+  })
+  assert.equal(system.egressMode, 'system-egress')
+  assert.equal(system.sequenceKey, null)
+  assert.deepEqual(explicit.writes[0].slice(0, 2), ['system-egress', null])
+
+  const legacy = makeStore()
+  const inherited = await legacy.store.setGlobalProxySequence(null, { expectedRevision: 4 })
+  assert.equal(inherited.egressMode, 'inherit')
+  assert.equal(inherited.globalSequenceKey, null)
+  assert.deepEqual(legacy.writes[0].slice(0, 2), ['inherit', null])
 })
 
 test('database provider validation rejects credential exfiltration URLs and unknown fields', async () => {
@@ -1804,6 +2491,144 @@ test('an exact DB Provider probe uses the same global Proxy Sequence as producti
   runtime.close()
 })
 
+test('LLM Sequence owns its Proxy route and one-shot Provider route tests do not persist bindings or evidence', async () => {
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 2,
+    providers: [provider({ authMode: 'none' })],
+  }))
+  const now = Date.parse('2026-08-29T08:00:00.000Z')
+  const providerTests = []
+  const savedMetadata = []
+  const snapshot = {
+    controlAvailable: true,
+    sequences: [],
+    defaultBinding: null,
+    proxyEndpoints: [{
+      proxyKey: 'host-7788', displayName: 'Host 7788',
+      proxyUrl: 'http://127.0.0.1:7788', enabled: true, revision: 1,
+    }],
+    proxySequences: [{
+      sequenceKey: 'routed-egress', displayName: 'Routed egress',
+      proxyKeys: ['host-7788'], directFallback: false, enabled: true, revision: 1,
+    }],
+    globalProxySequenceKey: null,
+    proxyRevision: 0,
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot() { return structuredClone(snapshot) },
+    async listPublicControl() {
+      return {
+        sequences: structuredClone(snapshot.sequences),
+        bindings: [],
+        providerTests: structuredClone(providerTests),
+        proxy: {},
+      }
+    },
+    async recordProbe(input) {
+      providerTests.push({ ...structuredClone(input), testedAt: new Date(now).toISOString() })
+    },
+    async saveSequence(sequenceKey, input, metadata) {
+      assert.equal(input.proxySequenceKey, 'routed-egress')
+      assert.match(metadata.verification.aggregateProxyFingerprint, /^[0-9a-f]{64}$/)
+      assert.equal(
+        metadata.verification.proxyFingerprints.get('primary'),
+        providerTests.at(-1).proxyFingerprint,
+      )
+      savedMetadata.push(metadata)
+      const saved = {
+        sequenceKey,
+        displayName: input.displayName,
+        kind: input.kind,
+        providerIds: [...input.providerIds],
+        proxySequenceKey: input.proxySequenceKey,
+        enabled: input.enabled,
+        source: 'database',
+        providerRevision: metadata.providerRevision,
+        verifiedProxyFingerprint: metadata.verification.aggregateProxyFingerprint,
+        revision: 1,
+      }
+      snapshot.sequences = [structuredClone(saved)]
+      return structuredClone(saved)
+    },
+  }
+  const dispatchers = []
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    probeCooldownMs: 0,
+    nowFn: () => now,
+    fetchImpl: async (_url, options) => {
+      dispatchers.push(Boolean(options.dispatcher))
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    },
+  }).start()
+
+  const inheritTest = await runtime.testProvider({
+    kind: 'chat', providerId: 'primary', routeMode: 'inherit',
+    persistEvidence: false,
+  })
+  assert.deepEqual(inheritTest.route, { mode: 'inherit' })
+  assert.deepEqual(dispatchers, [false])
+  assert.equal(providerTests.length, 0, 'one-shot inherited tests must not create reusable evidence')
+
+  const systemTest = await runtime.testProvider({
+    kind: 'chat', providerId: 'primary', routeOverride: null,
+    strictProxy: true, persistEvidence: false,
+  })
+  assert.deepEqual(systemTest.route, { mode: 'system-egress' })
+  assert.deepEqual(dispatchers, [false, false])
+  assert.equal(providerTests.length, 0, 'one-shot system tests must not create reusable evidence')
+
+  const proxyTest = await runtime.testProvider({
+    kind: 'chat', providerId: 'primary', routeOverride: 'routed-egress',
+    strictProxy: true, persistEvidence: false,
+  })
+  assert.deepEqual(proxyTest.route, {
+    mode: 'proxy-sequence', sequenceKey: 'routed-egress',
+  })
+  assert.deepEqual(dispatchers, [false, false, true])
+  assert.equal(providerTests.length, 0, 'one-shot Proxy tests must not create reusable evidence')
+
+  const saved = await runtime.saveSequence('business-chat', {
+    expectedRevision: 0,
+    displayName: 'Business chat',
+    kind: 'chat',
+    providerIds: ['primary'],
+    proxySequenceKey: 'routed-egress',
+    enabled: true,
+  })
+  assert.equal(saved.proxySequenceKey, 'routed-egress')
+  assert.match(saved.verifiedProxyFingerprint, /^[0-9a-f]{64}$/)
+  assert.equal(savedMetadata.length, 1)
+  assert.equal(providerTests.length, 1, 'saving must create exact reusable route evidence')
+  assert.deepEqual(dispatchers, [false, false, true, true])
+
+  await runtime.complete([{ role: 'user', content: 'hello' }], {
+    sequenceKey: 'business-chat',
+  })
+  assert.deepEqual(dispatchers, [false, false, true, true, true])
+
+  snapshot.proxyEndpoints[0].proxyUrl = 'http://127.0.0.1:7890'
+  snapshot.proxyEndpoints[0].revision = 2
+  await runtime.refresh({ force: true })
+  assert.throws(
+    () => runtime.complete([{ role: 'user', content: 'hello again' }], {
+      sequenceKey: 'business-chat',
+    }),
+    (error) => error?.status === 503 && error?.code === 'agent_sequence_unavailable',
+  )
+  assert.equal(dispatchers.length, 5, 'a stale route proof must fail before any model request')
+  runtime.close()
+})
+
 test('Provider probe evidence follows only its effective Proxy route', async () => {
   const harness = databaseHarness()
   harness.state.settings.set('chat', row('chat', {
@@ -2614,6 +3439,7 @@ test('runtime rejects database-to-environment embedding switch across vector spa
 
 test('admin provider PUT returns only the safe setting shape', async () => {
   const sentinel = 'request-only-secret'
+  const probeInputs = []
   const agent = {
     available: true,
     status: () => ({ chat: [], embeddings: [], embeddingDimensions: null, settings: {} }),
@@ -2632,7 +3458,7 @@ test('admin provider PUT returns only the safe setting shape', async () => {
       }
     },
     async testProvider(input) {
-      assert.deepEqual(input, { kind: 'chat', providerId: 'primary' })
+      probeInputs.push(structuredClone(input))
       return {
         ok: true,
         kind: 'chat',
@@ -2640,6 +3466,15 @@ test('admin provider PUT returns only the safe setting shape', async () => {
         model: 'model-a',
         latencyMs: 23,
         testedAt: '2026-08-24T10:00:00.000Z',
+        ...(input.routeMode === 'inherit'
+          ? { route: { mode: 'inherit' } }
+          : Object.prototype.hasOwnProperty.call(input, 'routeOverride')
+          ? {
+              route: input.routeOverride === null
+                ? { mode: 'system-egress' }
+                : { mode: 'proxy-sequence', sequenceKey: input.routeOverride },
+            }
+          : {}),
       }
     },
     async revealProviderCredential(kind, providerId) {
@@ -2689,7 +3524,92 @@ test('admin provider PUT returns only the safe setting shape', async () => {
     assert.equal(probe.status, 200)
     const probePayload = await probe.json()
     assert.equal(probePayload.data.latencyMs, 23)
+    assert.deepEqual(probeInputs[0], { kind: 'chat', providerId: 'primary' })
     assert.doesNotMatch(JSON.stringify(probePayload), /request-only-secret|apiKey|apiKeyEnv|payload/)
+
+    const inheritProbe = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat/primary/test`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-mx-insight-admin-token': 'admin-token-for-agent-settings',
+        },
+        body: JSON.stringify({ route: { mode: 'inherit' } }),
+      },
+    )
+    assert.equal(inheritProbe.status, 200)
+    assert.deepEqual(probeInputs[1], {
+      kind: 'chat',
+      providerId: 'primary',
+      routeOverride: undefined,
+      routeMode: 'inherit',
+      persistEvidence: false,
+    })
+    assert.deepEqual((await inheritProbe.json()).data.route, { mode: 'inherit' })
+
+    const systemProbe = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat/primary/test`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-mx-insight-admin-token': 'admin-token-for-agent-settings',
+        },
+        body: JSON.stringify({ route: { mode: 'system-egress' } }),
+      },
+    )
+    assert.equal(systemProbe.status, 200)
+    assert.deepEqual(probeInputs[2], {
+      kind: 'chat',
+      providerId: 'primary',
+      routeOverride: null,
+      strictProxy: true,
+      persistEvidence: false,
+    })
+    assert.deepEqual((await systemProbe.json()).data.route, { mode: 'system-egress' })
+
+    const proxyProbe = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat/primary/test`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-mx-insight-admin-token': 'admin-token-for-agent-settings',
+        },
+        body: JSON.stringify({
+          route: { mode: 'proxy-sequence', sequenceKey: 'host-egress' },
+        }),
+      },
+    )
+    assert.equal(proxyProbe.status, 200)
+    assert.deepEqual(probeInputs[3], {
+      kind: 'chat',
+      providerId: 'primary',
+      routeOverride: 'host-egress',
+      strictProxy: true,
+      persistEvidence: false,
+    })
+    assert.deepEqual((await proxyProbe.json()).data.route, {
+      mode: 'proxy-sequence',
+      sequenceKey: 'host-egress',
+    })
+
+    const invalidProbe = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat/primary/test`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-mx-insight-admin-token': 'admin-token-for-agent-settings',
+        },
+        body: JSON.stringify({
+          route: { mode: 'proxy-sequence', sequenceKey: 'https://proxy.invalid' },
+        }),
+      },
+    )
+    assert.equal(invalidProbe.status, 400)
+    assert.equal(probeInputs.length, 4, 'invalid explicit routes must not reach the Agent runtime')
 
     const deniedReveal = await fetch(
       `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat/primary/reveal`,

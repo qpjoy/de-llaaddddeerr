@@ -30,15 +30,52 @@ const DEFAULT_TIMEOUT_MS = 60_000
 // unusable.
 const CIRCUIT_THRESHOLD = 3
 const CIRCUIT_COOLDOWN_MS = 60_000
+const MAX_CACHED_PROXY_DISPATCHERS = 32
 const proxyDispatchers = new Map()
 
-function proxyDispatcher(proxyUrl) {
-  let dispatcher = proxyDispatchers.get(proxyUrl)
-  if (!dispatcher) {
-    dispatcher = new ProxyAgent(proxyUrl)
-    proxyDispatchers.set(proxyUrl, dispatcher)
+function closeProxyDispatcher(dispatcher) {
+  try {
+    Promise.resolve(dispatcher.close()).catch(() => {})
+  } catch {
+    // Eviction is best-effort. A close failure must not fail an unrelated model
+    // request or put an already-removed dispatcher back into the cache.
   }
-  return dispatcher
+}
+
+function evictIdleProxyDispatchers() {
+  while (proxyDispatchers.size > MAX_CACHED_PROXY_DISPATCHERS) {
+    const oldestIdle = [...proxyDispatchers]
+      .find(([, entry]) => entry.active === 0)
+    if (!oldestIdle) return
+    const [proxyUrl, entry] = oldestIdle
+    proxyDispatchers.delete(proxyUrl)
+    closeProxyDispatcher(entry.dispatcher)
+  }
+}
+
+function acquireProxyDispatcher(proxyUrl) {
+  let entry = proxyDispatchers.get(proxyUrl)
+  if (!entry) {
+    entry = { dispatcher: new ProxyAgent(proxyUrl), active: 0 }
+  } else {
+    // Map insertion order is the LRU order. Active entries remain protected by
+    // their lease even if they become the oldest item while a body is streaming.
+    proxyDispatchers.delete(proxyUrl)
+  }
+  entry.active += 1
+  proxyDispatchers.set(proxyUrl, entry)
+  evictIdleProxyDispatchers()
+
+  let released = false
+  return {
+    dispatcher: entry.dispatcher,
+    release() {
+      if (released) return
+      released = true
+      entry.active -= 1
+      evictIdleProxyDispatchers()
+    },
+  }
 }
 
 export class NoProviderAvailableError extends AppError {
@@ -264,6 +301,15 @@ function safeTransportFailure(error, { timedOut, timeoutMs }) {
   return 'transport failure'
 }
 
+async function cancelResponseBody(response) {
+  try {
+    await response?.body?.cancel?.()
+  } catch {
+    // The response is already being discarded. A broken body stream must not
+    // prevent the router from trying the next safe transport/provider route.
+  }
+}
+
 export class ProviderRouter {
   #breakers = new Map()
 
@@ -299,12 +345,21 @@ export class ProviderRouter {
    * provider-specific) is substituted per attempt rather than baked in by the
    * caller.
    */
-  async call(path, buildBody, { signal, validatePayload } = {}) {
-    return this.#callProviders(this.providers, path, buildBody, { signal, validatePayload })
+  async call(path, buildBody, { signal, validatePayload, transportOverride } = {}) {
+    return this.#callProviders(this.providers, path, buildBody, {
+      signal,
+      validatePayload,
+      transportOverride,
+    })
   }
 
   /** Call an ordered subset while sharing the catalog router's circuit state. */
-  async callSequence(providerIds, path, buildBody, { signal, validatePayload, ignoreCircuit = false } = {}) {
+  async callSequence(
+    providerIds,
+    path,
+    buildBody,
+    { signal, validatePayload, ignoreCircuit = false, transportOverride } = {},
+  ) {
     if (!Array.isArray(providerIds) || providerIds.length === 0) {
       throw new AppError(503, 'agent_sequence_unavailable', 'The selected LLM Sequence has no providers')
     }
@@ -313,11 +368,16 @@ export class ProviderRouter {
     if (providers.some((provider) => !provider)) {
       throw new AppError(503, 'agent_sequence_unavailable', 'The selected LLM Sequence references an unavailable provider')
     }
-    return this.#callProviders(providers, path, buildBody, { signal, validatePayload, ignoreCircuit })
+    return this.#callProviders(providers, path, buildBody, {
+      signal,
+      validatePayload,
+      ignoreCircuit,
+      transportOverride,
+    })
   }
 
   /** Probe exactly one saved provider without silently succeeding on fallback. */
-  async callProvider(providerId, path, buildBody, { signal, validatePayload } = {}) {
+  async callProvider(providerId, path, buildBody, { signal, validatePayload, transportOverride } = {}) {
     const provider = this.providers.find((candidate) => candidate.id === providerId)
     if (!provider) {
       throw new AppError(404, 'agent_provider_not_found', 'The provider was not found in this runtime')
@@ -329,6 +389,7 @@ export class ProviderRouter {
       signal,
       validatePayload,
       ignoreCircuit: true,
+      transportOverride,
     })
   }
 
@@ -336,7 +397,7 @@ export class ProviderRouter {
     providers,
     path,
     buildBody,
-    { signal, validatePayload, ignoreCircuit = false } = {},
+    { signal, validatePayload, ignoreCircuit = false, transportOverride } = {},
   ) {
     if (providers.length === 0) {
       throw new AppError(503, 'agent_not_configured', 'No model provider is configured')
@@ -344,7 +405,19 @@ export class ProviderRouter {
     const attempts = []
     let sawInvalidResponse = false
 
-    for (const provider of providers) {
+    for (const catalogProvider of providers) {
+      // A per-call route is runtime state, not Provider catalog state. Clone
+      // only the effective Provider while preserving its ID so calls made with
+      // and without an override share one circuit breaker.
+      const provider = transportOverride
+        ? {
+            ...catalogProvider,
+            proxyUrls: Array.isArray(transportOverride.proxyUrls)
+              ? [...transportOverride.proxyUrls]
+              : [],
+            directFallback: transportOverride.directFallback,
+          }
+        : catalogProvider
       const breaker = this.#breakers.get(provider.id)
       if (!ignoreCircuit && breaker.open) {
         attempts.push({ provider: provider.id, error: 'circuit open', skipped: true })
@@ -371,6 +444,7 @@ export class ProviderRouter {
       if (signal?.aborted) controller.abort()
       else signal?.addEventListener('abort', abortFromCaller, { once: true })
       const startedAt = performance.now()
+      let responseProxyLease = null
 
       try {
         const anthropic = provider.protocol === 'anthropic-messages' && path === '/chat/completions'
@@ -400,13 +474,24 @@ export class ProviderRouter {
         let lastTransportError = null
         for (const route of transportRoutes) {
           if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
+          let proxyLease = null
           try {
+            proxyLease = route.proxyUrl ? acquireProxyDispatcher(route.proxyUrl) : null
             response = await this.fetchImpl(`${provider.baseUrl}${requestPath}`, {
               ...init,
-              ...(route.proxyUrl ? { dispatcher: proxyDispatcher(route.proxyUrl) } : {}),
+              ...(proxyLease ? { dispatcher: proxyLease.dispatcher } : {}),
             })
+            // Hold the dispatcher through response-body consumption/cancellation.
+            // `fetch()` resolving only proves that headers arrived; closing the
+            // dispatcher at that point can still interrupt a streaming body.
+            responseProxyLease = proxyLease
+            // An HTTP response may be a Provider response forwarded unchanged
+            // by the proxy. Do not replay this non-idempotent, potentially
+            // billable request through another proxy merely because it is 5xx.
+            // Only transport exceptions below advance to the next route.
             break
           } catch (error) {
+            proxyLease?.release()
             lastTransportError = error
             if (controller.signal.aborted) throw error
             this.logger?.warn?.(
@@ -420,7 +505,7 @@ export class ProviderRouter {
           // Upstream bodies may contain reflected prompts, credentials or vendor
           // diagnostics. Status is enough to decide failover; never copy the body
           // into an API error, attempt trail or log.
-          await response.body?.cancel?.().catch?.(() => {})
+          await cancelResponseBody(response)
           if (!shouldFailover(response.status)) {
             // Our request is wrong; every other provider will reject it too.
             breaker.recordSuccess()
@@ -488,6 +573,7 @@ export class ProviderRouter {
         attempts.push({ provider: provider.id, error: reason })
         this.logger?.warn?.(`[agent] ${provider.id} failed (${reason}); trying next provider`)
       } finally {
+        responseProxyLease?.release()
         clearTimeout(timer)
         signal?.removeEventListener?.('abort', abortFromCaller)
       }

@@ -24,6 +24,7 @@ DEPLOY_DOCKER_IMAGE_ID=""
 DEPLOY_PREVIOUS_DOCKER_IMAGE_ID=""
 DEPLOY_PULLED_RUNTIME_IMAGE=""
 DEPLOY_LOCK_DIR=""
+DEPLOY_K8S_NODE_NAME=""
 
 say() { printf '[mx-insight-hub] %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
@@ -218,7 +219,8 @@ require_single_k8s_node() {
   count="$(printf '%s\n' "$nodes" | awk 'NF { count += 1 } END { print count + 0 }')"
   [ "$count" -eq 1 ] \
     || die "internal-production local images and hostPath storage require exactly one Kubernetes node; found $count"
-  say "single-node Internal target: $(printf '%s\n' "$nodes" | awk 'NF { print; exit }')"
+  DEPLOY_K8S_NODE_NAME="$(printf '%s\n' "$nodes" | awk 'NF { print; exit }')"
+  say "single-node Internal target: ${DEPLOY_K8S_NODE_NAME}"
 }
 
 usage() {
@@ -415,6 +417,60 @@ render_file() {
 
 encoded_secret_value() {
   printf '%s' "$1" | base64 | tr -d '\r\n'
+}
+
+# Snapshot the effective Docker daemon proxy without sourcing its systemd
+# drop-ins or mutating/restarting the daemon. Agent workloads consume this
+# namespaced value explicitly; generic HTTP_PROXY variables would also reroute
+# Night-All, Elasticsearch and other unrelated Hub traffic.
+docker_daemon_proxy_snapshot() {
+  local docker_info='{}'
+  local source_locations=''
+
+  if command -v docker >/dev/null 2>&1; then
+    docker_info="$(docker info --format '{{json .}}' 2>/dev/null)" || docker_info='{}'
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    source_locations="$(
+      systemctl show docker.service --property=DropInPaths --value --no-pager 2>/dev/null
+    )" || source_locations=''
+  fi
+
+  MX_INSIGHT_DOCKER_INFO_JSON="$docker_info" \
+  MX_INSIGHT_DOCKER_PROXY_SOURCE_LOCATIONS="$source_locations" \
+  MX_INSIGHT_DOCKER_PROXY_NODE_NAME="$DEPLOY_K8S_NODE_NAME" \
+    node --input-type=module -e '
+      let info = {}
+      try {
+        const candidate = JSON.parse(process.env.MX_INSIGHT_DOCKER_INFO_JSON || "{}")
+        if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) info = candidate
+      } catch {}
+      const value = (...keys) => {
+        for (const key of keys) {
+          if (typeof info[key] === "string" && info[key].trim()) return info[key].trim()
+        }
+        return null
+      }
+      const httpProxy = value("HTTPProxy", "HttpProxy", "httpProxy")
+      const httpsProxy = value("HTTPSProxy", "HttpsProxy", "httpsProxy")
+      const noProxy = value("NoProxy", "NOProxy", "noProxy")
+      const sourceLocations = (process.env.MX_INSIGHT_DOCKER_PROXY_SOURCE_LOCATIONS || "")
+        .split(/\s+/)
+        .map((entry) => entry.replace(/^["\x27]+|["\x27]+$/g, ""))
+        .filter(Boolean)
+      process.stdout.write(JSON.stringify({
+        version: 1,
+        configured: Boolean(httpProxy || httpsProxy),
+        sourceKind: "docker-daemon-effective",
+        runtimeKind: "kubernetes-host-network",
+        httpProxy,
+        httpsProxy,
+        noProxy,
+        sourceLocations,
+        nodeName: process.env.MX_INSIGHT_DOCKER_PROXY_NODE_NAME || null,
+        observedAt: new Date().toISOString(),
+      }))
+    '
 }
 
 require_existing_secret_match() {
@@ -687,12 +743,15 @@ create_runtime_config() {
   local namespace="mx-insight-hub"
   need node
   local database_url="${MX_INSIGHT_DATABASE_URL:?ensure_shared_data_plane must run before create_runtime_config}"
+  local docker_proxy_snapshot
+  docker_proxy_snapshot="$(docker_daemon_proxy_snapshot)"
   local -a secret_args=(
     --from-literal=DATABASE_URL="$database_url"
     --from-literal=MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN"
     --from-literal=MX_INSIGHT_API_KEY_PEPPER="$MX_INSIGHT_API_KEY_PEPPER"
     --from-literal=NIGHT_ALL_SERVICE_TOKEN="${NIGHT_ALL_SERVICE_TOKEN:-}"
     --from-literal=NIGHT_ALL_EXPORT_TOKEN="${NIGHT_ALL_EXPORT_TOKEN:-}"
+    --from-literal=MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT="$docker_proxy_snapshot"
   )
   if [ -n "${MX_INSIGHT_TG_MONITOR_DATABASE_URL:-}" ]; then
     secret_args+=(--from-literal=MX_INSIGHT_TG_MONITOR_DATABASE_URL="$MX_INSIGHT_TG_MONITOR_DATABASE_URL")

@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto'
+import { isIP } from 'node:net'
+import { domainToASCII } from 'node:url'
 import { AppError } from '../core/errors.mjs'
 
 const KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/
 const CONSUMER_PATTERN = /^[a-z0-9][a-z0-9._-]{0,95}$/
 const KINDS = new Set(['chat', 'embedding'])
+const EGRESS_MODES = new Set(['inherit', 'system-egress', 'proxy-sequence'])
 const MAX_SEQUENCE_PROVIDERS = 32
 const MAX_PROXY_ENDPOINTS = 16
 
@@ -53,6 +56,7 @@ function iso(value) {
 }
 
 function sequenceRow(row) {
+  const proxySequenceKey = row.proxy_sequence_key ?? null
   return {
     sequenceKey: row.sequence_key,
     displayName: row.display_name,
@@ -60,13 +64,39 @@ function sequenceRow(row) {
     providerIds: row.provider_ids || [],
     enabled: row.enabled !== false,
     source: row.source,
+    egressMode: row.egress_mode || (proxySequenceKey ? 'proxy-sequence' : 'inherit'),
+    proxySequenceKey,
     providerRevision: Number(row.provider_revision),
+    verifiedProxyFingerprint: row.verified_proxy_fingerprint ?? null,
     revision: Number(row.revision),
     verifiedAt: iso(row.verified_at),
     verifiedBy: row.verified_by ?? null,
     updatedBy: row.updated_by ?? null,
     updatedAt: iso(row.updated_at),
   }
+}
+
+function normalizedEgressMode(value, proxySequenceKey, field = 'egressMode') {
+  const inferred = value == null
+    ? (proxySequenceKey ? 'proxy-sequence' : 'inherit')
+    : value
+  if (!EGRESS_MODES.has(inferred)) {
+    invalid('invalid_agent_proxy', `${field} must be inherit, system-egress, or proxy-sequence`)
+  }
+  if (inferred === 'proxy-sequence' && !proxySequenceKey) {
+    invalid('invalid_agent_proxy', `${field}=proxy-sequence requires a Proxy Sequence`)
+  }
+  if (inferred !== 'proxy-sequence' && proxySequenceKey) {
+    invalid('invalid_agent_proxy', `${field}=${inferred} cannot select a Proxy Sequence`)
+  }
+  return inferred
+}
+
+export function egressRouteOverride(egressMode, proxySequenceKey = null) {
+  const mode = normalizedEgressMode(egressMode, proxySequenceKey)
+  if (mode === 'inherit') return undefined
+  if (mode === 'system-egress') return null
+  return proxySequenceKey
 }
 
 function bindingRow(row) {
@@ -105,10 +135,250 @@ function proxySequenceRow(row) {
   }
 }
 
-export function providerProxyRouteFingerprint(provider, control) {
-  const sequenceKey = provider?.proxySequenceKey || control?.globalProxySequenceKey || null
+function proxyPolicyRow(row = {}) {
+  const sequenceKey = row.global_sequence_key ?? null
+  return {
+    egressMode: row.egress_mode || (sequenceKey ? 'proxy-sequence' : 'inherit'),
+    sequenceKey,
+    globalSequenceKey: sequenceKey,
+    revision: Number(row.revision ?? 0),
+    updatedBy: row.updated_by ?? null,
+    updatedAt: iso(row.updated_at),
+  }
+}
+
+function normalizedNoProxyEntries(value) {
+  return String(value || '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+}
+
+function splitNoProxyHostPort(entry) {
+  if (entry.startsWith('[')) {
+    const closing = entry.indexOf(']')
+    if (closing < 0) return { host: '', port: '' }
+    const suffix = entry.slice(closing + 1)
+    if (suffix && !/^:\d+$/.test(suffix)) return { host: '', port: '' }
+    return { host: entry.slice(1, closing), port: suffix ? suffix.slice(1) : '' }
+  }
+  const colonCount = [...entry].filter((character) => character === ':').length
+  if (colonCount === 1) {
+    const separator = entry.lastIndexOf(':')
+    const possiblePort = entry.slice(separator + 1)
+    if (/^\d+$/.test(possiblePort)) {
+      return { host: entry.slice(0, separator), port: possiblePort }
+    }
+  }
+  return { host: entry, port: '' }
+}
+
+function ipBytes(value) {
+  const host = String(value || '').replace(/^\[|\]$/g, '').split('%', 1)[0]
+  const family = isIP(host)
+  if (family === 4) return { family, bytes: host.split('.').map(Number) }
+  if (family !== 6) return null
+  const halves = host.split('::')
+  if (halves.length > 2) return null
+  const parseHalf = (half) => {
+    if (!half) return []
+    const groups = half.split(':')
+    const last = groups.at(-1)
+    if (last?.includes('.')) {
+      const ipv4 = ipBytes(last)
+      if (!ipv4 || ipv4.family !== 4) return null
+      groups.splice(-1, 1,
+        ((ipv4.bytes[0] << 8) | ipv4.bytes[1]).toString(16),
+        ((ipv4.bytes[2] << 8) | ipv4.bytes[3]).toString(16))
+    }
+    if (groups.some((group) => !/^[0-9a-f]{1,4}$/i.test(group))) return null
+    return groups.map((group) => Number.parseInt(group, 16))
+  }
+  const left = parseHalf(halves[0])
+  const right = parseHalf(halves[1] || '')
+  if (!left || !right) return null
+  const omitted = 8 - left.length - right.length
+  if ((halves.length === 1 && omitted !== 0) || (halves.length === 2 && omitted < 1)) return null
+  const groups = [...left, ...Array(omitted).fill(0), ...right]
+  const bytes = groups.flatMap((group) => [group >> 8, group & 0xff])
+  if (bytes.slice(0, 10).every((byte) => byte === 0)
+    && bytes[10] === 0xff && bytes[11] === 0xff) {
+    return { family: 4, bytes: bytes.slice(12) }
+  }
+  return { family, bytes }
+}
+
+function cidrMatches(host, entry) {
+  const separator = entry.lastIndexOf('/')
+  if (separator <= 0) return false
+  const network = ipBytes(entry.slice(0, separator))
+  const target = ipBytes(host)
+  const bits = Number(entry.slice(separator + 1))
+  if (!network || !target || network.family !== target.family
+    || !Number.isInteger(bits) || bits < 0 || bits > network.bytes.length * 8) return false
+  const fullBytes = Math.floor(bits / 8)
+  const remainingBits = bits % 8
+  for (let index = 0; index < fullBytes; index += 1) {
+    if (network.bytes[index] !== target.bytes[index]) return false
+  }
+  if (remainingBits === 0) return true
+  const mask = (0xff << (8 - remainingBits)) & 0xff
+  return (network.bytes[fullBytes] & mask) === (target.bytes[fullBytes] & mask)
+}
+
+function loopbackHost(host) {
+  if (host === 'localhost') return true
+  const parsed = ipBytes(host)
+  if (!parsed) return false
+  return parsed.family === 4
+    ? parsed.bytes[0] === 127
+    : parsed.bytes.slice(0, 15).every((byte) => byte === 0) && parsed.bytes[15] === 1
+}
+
+function noProxyMatches(target, value) {
+  let url
+  try { url = new URL(target) } catch { return false }
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  if (loopbackHost(hostname)) return true
+  if (!value) return false
+  const port = url.port || (url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '')
+  const targetIp = ipBytes(hostname)
+  for (const entry of normalizedNoProxyEntries(value)) {
+    if (entry === '*') return true
+    if (cidrMatches(hostname, entry)) return true
+    const { host: rawHost, port: entryPort } = splitNoProxyHostPort(entry)
+    if (!rawHost) continue
+    if (entryPort && entryPort !== port) continue
+    const entryIp = ipBytes(rawHost)
+    if (targetIp || entryIp) {
+      if (targetIp && entryIp
+        && targetIp.family === entryIp.family
+        && targetIp.bytes.every((byte, index) => byte === entryIp.bytes[index])) return true
+      continue
+    }
+    const wildcard = rawHost.startsWith('*.')
+    const leadingDot = wildcard || rawHost.startsWith('.')
+    const rawDomain = rawHost.replace(/^\*?\./, '')
+    const domain = domainToASCII(rawDomain) || rawDomain
+    if (!domain || domain.includes('://')) continue
+    if (hostname.endsWith(`.${domain}`) || (!leadingDot && hostname === domain)) return true
+  }
+  return false
+}
+
+function deploymentEgressRoute(provider, deploymentEgress) {
+  const target = provider?.baseUrl || ''
+  const protocol = (() => {
+    try { return new URL(target).protocol } catch { return null }
+  })()
+  const noProxyMatched = noProxyMatches(target, deploymentEgress?.noProxy)
+  const proxyUrl = noProxyMatched
+    ? null
+    : protocol === 'https:'
+      ? deploymentEgress?.httpsProxy || deploymentEgress?.httpProxy || null
+      : protocol === 'http:'
+        ? deploymentEgress?.httpProxy || null
+        : null
+  if (!proxyUrl) {
+    return {
+      proxyUrls: [],
+      directFallback: true,
+      source: noProxyMatched ? 'docker-no-proxy' : 'system',
+      fingerprintRoute: {
+        mode: 'system-egress',
+        ...(noProxyMatched ? { inheritedFrom: 'docker-no-proxy', noProxyMatched: true } : {}),
+      },
+    }
+  }
+  return {
+    proxyUrls: [proxyUrl],
+    directFallback: false,
+    source: 'docker-daemon',
+    fingerprintRoute: {
+      mode: 'docker-daemon-proxy',
+      protocol,
+      proxyUrl,
+      noProxyMatched: false,
+    },
+  }
+}
+
+function redactedProxyUrl(value) {
+  if (!value) return null
+  try {
+    const url = new URL(value)
+    // Public control evidence must not contain URL userinfo, even masked.
+    url.username = ''
+    url.password = ''
+    return url.toString().replace(/\/$/, '')
+  } catch { return null }
+}
+
+function proxyHasCredentials(value) {
+  if (!value) return false
+  try {
+    const url = new URL(value)
+    return Boolean(url.username || url.password)
+  } catch { return false }
+}
+
+function publicDeploymentEgress(deploymentEgress = {}) {
+  return {
+    version: Number(deploymentEgress.version ?? 1),
+    configured: deploymentEgress.configured === true,
+    sourceKind: deploymentEgress.sourceKind ?? null,
+    runtimeKind: deploymentEgress.runtimeKind ?? null,
+    httpProxy: redactedProxyUrl(deploymentEgress.httpProxy),
+    httpsProxy: redactedProxyUrl(deploymentEgress.httpsProxy),
+    noProxy: deploymentEgress.noProxy ?? null,
+    sourceLocations: Array.isArray(deploymentEgress.sourceLocations)
+      ? [...deploymentEgress.sourceLocations]
+      : [],
+    nodeName: deploymentEgress.nodeName ?? null,
+    observedAt: deploymentEgress.observedAt ?? null,
+    httpProxyCredentials: proxyHasCredentials(deploymentEgress.httpProxy),
+    httpsProxyCredentials: proxyHasCredentials(deploymentEgress.httpsProxy),
+  }
+}
+
+function routeFingerprint(route) {
+  return createHash('sha256').update(JSON.stringify(route)).digest('hex')
+}
+
+export function resolveProviderProxyRoute(provider, control, routeOverride = undefined) {
+  const globalSequenceKey = control?.globalProxySequenceKey ?? control?.proxyPolicy?.sequenceKey ?? null
+  const globalEgressMode = control?.globalEgressMode
+    || control?.proxyPolicy?.egressMode
+    || (globalSequenceKey ? 'proxy-sequence' : 'inherit')
+  const source = routeOverride !== undefined
+    ? (routeOverride == null ? 'system' : 'override')
+    : provider?.proxySequenceKey
+      ? 'provider'
+      : globalEgressMode === 'proxy-sequence'
+        ? 'global'
+        : globalEgressMode === 'system-egress'
+          ? 'global-system'
+          : null
+  const sequenceKey = routeOverride !== undefined
+    ? routeOverride
+    : provider?.proxySequenceKey
+      || (globalEgressMode === 'proxy-sequence' ? globalSequenceKey : null)
   if (!sequenceKey) {
-    return createHash('sha256').update(JSON.stringify({ mode: 'system-egress' })).digest('hex')
+    if (source === 'system' || source === 'global-system') {
+      return {
+        proxyUrls: [],
+        directFallback: true,
+        source,
+        fingerprint: routeFingerprint({ mode: 'system-egress' }),
+      }
+    }
+    const deploymentRoute = deploymentEgressRoute(provider, control?.deploymentEgress)
+    return {
+      proxyUrls: deploymentRoute.proxyUrls,
+      directFallback: deploymentRoute.directFallback,
+      source: deploymentRoute.source,
+      fingerprint: routeFingerprint(deploymentRoute.fingerprintRoute),
+    }
   }
   const sequence = (control?.proxySequences || [])
     .find((candidate) => candidate.sequenceKey === sequenceKey)
@@ -116,6 +386,8 @@ export function providerProxyRouteFingerprint(provider, control) {
     (control?.proxyEndpoints || []).map((endpoint) => [endpoint.proxyKey, endpoint]),
   )
   let route
+  let proxyUrls = []
+  let directFallback = false
   if (!sequence) route = { mode: 'missing-proxy-sequence', sequenceKey }
   else if (sequence.enabled === false) route = { mode: 'disabled-proxy-sequence', sequenceKey }
   else {
@@ -133,12 +405,101 @@ export function providerProxyRouteFingerprint(provider, control) {
           directFallback: sequence.directFallback === true,
         }
       : { mode: 'proxy-sequence-no-route', sequenceKey }
+    proxyUrls = proxyRoutes.map(({ proxyUrl }) => proxyUrl)
+    directFallback = proxyRoutes.length > 0 && sequence.directFallback === true
   }
-  return createHash('sha256').update(JSON.stringify(route)).digest('hex')
+  return {
+    proxyUrls,
+    directFallback,
+    source,
+    fingerprint: routeFingerprint(route),
+  }
+}
+
+export function providerProxyRouteFingerprint(provider, control, routeOverride = undefined) {
+  return resolveProviderProxyRoute(provider, control, routeOverride).fingerprint
+}
+
+function fingerprintValue(fingerprints, providerId) {
+  return fingerprints instanceof Map
+    ? fingerprints.get(providerId)
+    : fingerprints?.[providerId]
+}
+
+export function aggregateProviderProxyRouteFingerprint(providerIds, fingerprints) {
+  const orderedRoutes = providerIds.map((providerId) => {
+    const fingerprint = fingerprintValue(fingerprints, providerId)
+    if (typeof fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(fingerprint)) {
+      invalid('invalid_agent_sequence', `verification fingerprint is unavailable for Provider ${providerId}`)
+    }
+    return [providerId, fingerprint]
+  })
+  return routeFingerprint(orderedRoutes)
+}
+
+export function projectSequenceRouteProof(sequence, providerSetting, control) {
+  const currentProviderRevision = Number(providerSetting?.revision ?? 0)
+  const providerIds = Array.isArray(sequence.providerIds) ? sequence.providerIds : []
+  const catalog = new Map(
+    (Array.isArray(providerSetting?.providers) ? providerSetting.providers : [])
+      .map((provider) => [provider?.id, provider]),
+  )
+
+  let routeProofStatus = 'valid'
+  if (sequence.providerRevision !== currentProviderRevision) {
+    routeProofStatus = 'provider-revision-changed'
+  } else if (providerIds.length === 0
+    || new Set(providerIds).size !== providerIds.length
+    || providerIds.some((providerId) => {
+      const provider = catalog.get(providerId)
+      return !provider || provider.enabled === false
+    })) {
+    routeProofStatus = 'provider-unavailable'
+  } else if (typeof sequence.verifiedProxyFingerprint !== 'string'
+    || !/^[0-9a-f]{64}$/.test(sequence.verifiedProxyFingerprint)) {
+    routeProofStatus = 'missing-proof'
+  } else {
+    try {
+      const routeOverride = egressRouteOverride(sequence.egressMode, sequence.proxySequenceKey)
+      const fingerprints = new Map(providerIds.map((providerId) => [
+        providerId,
+        providerProxyRouteFingerprint(catalog.get(providerId), control, routeOverride),
+      ]))
+      const currentAggregate = aggregateProviderProxyRouteFingerprint(providerIds, fingerprints)
+      if (currentAggregate !== sequence.verifiedProxyFingerprint) {
+        routeProofStatus = 'route-changed'
+      }
+    } catch {
+      // Persisted rows are protected by database constraints, but a partially
+      // upgraded or manually repaired database must degrade to revalidation
+      // instead of making the public control endpoint unavailable.
+      routeProofStatus = 'route-changed'
+    }
+  }
+
+  const routeProofValid = routeProofStatus === 'valid'
+  return {
+    ...sequence,
+    routeProofStatus,
+    routeProofValid,
+    needsRevalidation: !routeProofValid,
+  }
 }
 
 function relationMissing(error) {
   return error?.code === '42P01' || error?.code === '3F000'
+}
+
+function sequenceProxyColumnsMissing(error) {
+  if (error?.code !== '42703') return false
+  const detail = `${error?.column || ''} ${error?.message || ''}`
+  return /\b(proxy_sequence_key|verified_proxy_fingerprint)\b/.test(detail)
+}
+
+function egressModeColumnsMissing(error) {
+  if (error?.code !== '42703') return false
+  const detail = `${error?.column || ''} ${error?.message || ''}`
+  return /\begress_mode\b/.test(detail)
 }
 
 async function lockControlKey(client, namespace, key) {
@@ -171,10 +532,7 @@ async function lockEnabledProxyEndpoints(client, sequences, code = 'invalid_agen
 }
 
 function expectedProviderFingerprint(verification, providerId) {
-  const fingerprints = verification?.proxyFingerprints
-  const fingerprint = fingerprints instanceof Map
-    ? fingerprints.get(providerId)
-    : fingerprints?.[providerId]
+  const fingerprint = fingerprintValue(verification?.proxyFingerprints, providerId)
   if (typeof fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(fingerprint)) {
     invalid('invalid_agent_sequence', `verification fingerprint is unavailable for Provider ${providerId}`)
   }
@@ -186,6 +544,8 @@ async function lockAndVerifyProviderRoutes(client, {
   providerIds,
   providerRevision,
   verification,
+  routeOverride,
+  deploymentEgress,
 }) {
   if (!verification || verification.settingsRevision !== providerRevision) {
     invalid('invalid_agent_sequence', 'Provider verification proof is unavailable')
@@ -196,7 +556,7 @@ async function lockAndVerifyProviderRoutes(client, {
   // Advisory locks cover missing legacy rows, which PostgreSQL row locks cannot.
   await lockControlKey(client, 'proxy-settings', 'global')
   const globalSetting = await client.query(
-    `SELECT global_sequence_key
+    `SELECT global_sequence_key, egress_mode
        FROM control.agent_proxy_settings
       WHERE singleton = true
       FOR SHARE`,
@@ -221,9 +581,14 @@ async function lockAndVerifyProviderRoutes(client, {
     return provider
   })
   const globalProxySequenceKey = globalSetting.rows[0]?.global_sequence_key ?? null
-  const sequenceKeys = [...new Set(providers
-    .map((provider) => provider.proxySequenceKey || globalProxySequenceKey)
-    .filter(Boolean))].sort()
+  const globalEgressMode = globalSetting.rows[0]?.egress_mode
+    || (globalProxySequenceKey ? 'proxy-sequence' : 'inherit')
+  const sequenceKeys = routeOverride !== undefined
+    ? (routeOverride == null ? [] : [routeOverride])
+    : [...new Set(providers
+      .map((provider) => provider.proxySequenceKey
+        || (globalEgressMode === 'proxy-sequence' ? globalProxySequenceKey : null))
+      .filter(Boolean))].sort()
   for (const sequenceKey of sequenceKeys) {
     await lockControlKey(client, 'proxy-sequence', sequenceKey)
   }
@@ -255,12 +620,16 @@ async function lockAndVerifyProviderRoutes(client, {
     : { rows: [] }
   const control = {
     globalProxySequenceKey,
+    globalEgressMode,
     proxySequences: sequences.rows.map(proxySequenceRow),
     proxyEndpoints: endpoints.rows.map(proxyEndpointRow),
+    deploymentEgress,
   }
+  const currentFingerprints = new Map()
   for (const provider of providers) {
-    if (providerProxyRouteFingerprint(provider, control)
-      !== expectedProviderFingerprint(verification, provider.id)) {
+    const currentFingerprint = providerProxyRouteFingerprint(provider, control, routeOverride)
+    currentFingerprints.set(provider.id, currentFingerprint)
+    if (currentFingerprint !== expectedProviderFingerprint(verification, provider.id)) {
       throw new AppError(
         409,
         'agent_provider_verification_stale',
@@ -268,12 +637,39 @@ async function lockAndVerifyProviderRoutes(client, {
       )
     }
   }
-  return { catalog, currentProviderRevision }
+  const aggregateProxyFingerprint = aggregateProviderProxyRouteFingerprint(
+    providerIds,
+    currentFingerprints,
+  )
+  if (typeof verification.aggregateProxyFingerprint !== 'string'
+    || !/^[0-9a-f]{64}$/.test(verification.aggregateProxyFingerprint)) {
+    invalid('invalid_agent_sequence', 'aggregate Provider verification fingerprint is unavailable')
+  }
+  if (aggregateProxyFingerprint !== verification.aggregateProxyFingerprint) {
+    throw new AppError(
+      409,
+      'agent_provider_verification_stale',
+      'Provider or Proxy routing changed during verification; reload and retry',
+    )
+  }
+  return { catalog, currentProviderRevision, aggregateProxyFingerprint }
 }
 
 export class AgentControlStore {
-  constructor(pool) {
+  constructor(pool, { deploymentEgress = null } = {}) {
     this.pool = pool
+    this.deploymentEgress = deploymentEgress || {
+      version: 1,
+      configured: false,
+      sourceKind: null,
+      runtimeKind: null,
+      httpProxy: null,
+      httpsProxy: null,
+      noProxy: null,
+      sourceLocations: [],
+      nodeName: null,
+      observedAt: null,
+    }
   }
 
   async ensureBootstrapSequence({ kind, providerIds, providerRevision = 0 }) {
@@ -288,21 +684,31 @@ export class AgentControlStore {
       await client.query(
         `INSERT INTO control.agent_llm_sequences
            (sequence_key, display_name, kind, provider_ids, source,
-            provider_revision, updated_by)
-         VALUES ($1, $2, $3, $4::text[], 'bootstrap', $5, 'environment-bootstrap')
+            egress_mode, proxy_sequence_key, provider_revision, verified_proxy_fingerprint,
+            updated_by)
+         VALUES ($1, $2, $3, $4::text[], 'bootstrap', 'inherit', NULL, $5, NULL,
+                 'environment-bootstrap')
          ON CONFLICT (sequence_key) DO UPDATE SET
            display_name = EXCLUDED.display_name,
            provider_ids = EXCLUDED.provider_ids,
+           egress_mode = EXCLUDED.egress_mode,
+           proxy_sequence_key = EXCLUDED.proxy_sequence_key,
            provider_revision = EXCLUDED.provider_revision,
+           verified_proxy_fingerprint = EXCLUDED.verified_proxy_fingerprint,
            revision = control.agent_llm_sequences.revision + 1,
            updated_by = EXCLUDED.updated_by,
            updated_at = now()
          WHERE control.agent_llm_sequences.source = 'bootstrap'
            AND (control.agent_llm_sequences.display_name,
                 control.agent_llm_sequences.provider_ids,
-                control.agent_llm_sequences.provider_revision)
+                control.agent_llm_sequences.egress_mode,
+                control.agent_llm_sequences.proxy_sequence_key,
+                control.agent_llm_sequences.provider_revision,
+                control.agent_llm_sequences.verified_proxy_fingerprint)
                IS DISTINCT FROM
-               (EXCLUDED.display_name, EXCLUDED.provider_ids, EXCLUDED.provider_revision)`,
+               (EXCLUDED.display_name, EXCLUDED.provider_ids, EXCLUDED.egress_mode,
+                EXCLUDED.proxy_sequence_key, EXCLUDED.provider_revision,
+                EXCLUDED.verified_proxy_fingerprint)`,
         [
           sequenceKey,
           kind === 'chat' ? 'MX Compatibility Chat' : 'MX Compatibility Embedding',
@@ -315,7 +721,7 @@ export class AgentControlStore {
       return sequenceKey
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {})
-      if (relationMissing(error)) return null
+      if (relationMissing(error) || sequenceProxyColumnsMissing(error) || egressModeColumnsMissing(error)) return null
       throw error
     } finally {
       client.release()
@@ -325,59 +731,100 @@ export class AgentControlStore {
   async loadRuntimeSnapshot(kind) {
     assertKind(kind)
     const client = await this.pool.connect()
+    let legacyEgressSchema = false
     try {
-      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
-      const sequences = await client.query(
-        `SELECT sequence_key, display_name, kind, provider_ids, enabled, source,
-                provider_revision, revision, verified_at, verified_by,
-                updated_by, updated_at
-           FROM control.agent_llm_sequences
-          WHERE kind = $1
-          ORDER BY display_name, sequence_key`,
-        [kind],
-      )
-      const binding = await client.query(
-        `SELECT consumer_key, kind, sequence_key, revision, updated_by, updated_at
-           FROM control.agent_consumer_bindings
-          WHERE consumer_key = $1`,
-        [`hub.${kind}.default`],
-      )
-      const proxyEndpoints = await client.query(
-        `SELECT proxy_key, display_name, proxy_url, enabled, revision, updated_by, updated_at
-           FROM control.agent_proxy_endpoints
-          ORDER BY display_name, proxy_key`,
-      )
-      const proxySequences = await client.query(
-        `SELECT sequence_key, display_name, proxy_keys, direct_fallback,
-                enabled, revision, updated_by, updated_at
-           FROM control.agent_proxy_sequences
-          ORDER BY display_name, sequence_key`,
-      )
-      const proxySetting = await client.query(
-        `SELECT global_sequence_key, revision, updated_by, updated_at
-           FROM control.agent_proxy_settings
-          WHERE singleton = true`,
-      )
-      await client.query('COMMIT')
-      return {
-        controlAvailable: true,
-        sequences: sequences.rows.map(sequenceRow),
-        defaultBinding: binding.rows[0] ? bindingRow(binding.rows[0]) : null,
-        proxyEndpoints: proxyEndpoints.rows.map(proxyEndpointRow),
-        proxySequences: proxySequences.rows.map(proxySequenceRow),
-        globalProxySequenceKey: proxySetting.rows[0]?.global_sequence_key ?? null,
-        proxyRevision: Number(proxySetting.rows[0]?.revision ?? 0),
+      for (;;) {
+        try {
+          await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+          const sequences = await client.query(
+            `SELECT sequence_key, display_name, kind, provider_ids, enabled, source,
+                    ${legacyEgressSchema ? '' : 'egress_mode,'}
+                    proxy_sequence_key, provider_revision,
+                    verified_proxy_fingerprint, revision, verified_at,
+                    verified_by, updated_by, updated_at
+               FROM control.agent_llm_sequences
+              WHERE kind = $1
+              ORDER BY display_name, sequence_key`,
+            [kind],
+          )
+          const binding = await client.query(
+            `SELECT consumer_key, kind, sequence_key, revision, updated_by, updated_at
+               FROM control.agent_consumer_bindings
+              WHERE consumer_key = $1`,
+            [`hub.${kind}.default`],
+          )
+          const providerSetting = await client.query(
+            `SELECT revision, providers
+               FROM control.agent_provider_settings
+              WHERE kind = $1`,
+            [kind],
+          )
+          const proxyEndpoints = await client.query(
+            `SELECT proxy_key, display_name, proxy_url, enabled, revision, updated_by, updated_at
+               FROM control.agent_proxy_endpoints
+              ORDER BY display_name, proxy_key`,
+          )
+          const proxySequences = await client.query(
+            `SELECT sequence_key, display_name, proxy_keys, direct_fallback,
+                    enabled, revision, updated_by, updated_at
+               FROM control.agent_proxy_sequences
+              ORDER BY display_name, sequence_key`,
+          )
+          const proxySetting = await client.query(
+            `SELECT ${legacyEgressSchema ? '' : 'egress_mode,'}
+                    global_sequence_key, revision, updated_by, updated_at
+               FROM control.agent_proxy_settings
+              WHERE singleton = true`,
+          )
+          await client.query('COMMIT')
+          const policy = proxyPolicyRow(proxySetting.rows[0])
+          const proxyControl = {
+            globalProxySequenceKey: policy.sequenceKey,
+            globalEgressMode: policy.egressMode,
+            proxyPolicy: policy,
+            proxyEndpoints: proxyEndpoints.rows.map(proxyEndpointRow),
+            proxySequences: proxySequences.rows.map(proxySequenceRow),
+            deploymentEgress: this.deploymentEgress,
+          }
+          return {
+            controlAvailable: true,
+            sequences: sequences.rows
+              .map(sequenceRow)
+              .map((sequence) => projectSequenceRouteProof(
+                sequence,
+                providerSetting.rows[0],
+                proxyControl,
+              )),
+            defaultBinding: binding.rows[0] ? bindingRow(binding.rows[0]) : null,
+            proxyEndpoints: proxyControl.proxyEndpoints,
+            proxySequences: proxyControl.proxySequences,
+            globalProxySequenceKey: policy.sequenceKey,
+            globalEgressMode: policy.egressMode,
+            proxyPolicy: policy,
+            proxyRevision: policy.revision,
+            deploymentEgress: this.deploymentEgress,
+          }
+        } catch (error) {
+          await client.query('ROLLBACK').catch(() => {})
+          if (!legacyEgressSchema && egressModeColumnsMissing(error)) {
+            legacyEgressSchema = true
+            continue
+          }
+          throw error
+        }
       }
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => {})
       // An older database may briefly run new application code before the
       // migration Job completes. Sequence governance must degrade to the
       // legacy catalog order rather than taking down login/readiness.
-      if (relationMissing(error)) {
+      if (relationMissing(error) || sequenceProxyColumnsMissing(error)) {
+        const policy = proxyPolicyRow()
         return {
           controlAvailable: false,
           sequences: [], defaultBinding: null, proxyEndpoints: [],
-          proxySequences: [], globalProxySequenceKey: null, proxyRevision: 0,
+          proxySequences: [], globalProxySequenceKey: null,
+          globalEgressMode: policy.egressMode, proxyPolicy: policy, proxyRevision: 0,
+          deploymentEgress: this.deploymentEgress,
         }
       }
       throw error
@@ -401,6 +848,28 @@ export class AgentControlStore {
     ])
     const sequences = [...chat.sequences, ...embedding.sequences]
     const bindings = [chat.defaultBinding, embedding.defaultBinding].filter(Boolean)
+    const baseline = publicDeploymentEgress(chat.deploymentEgress)
+    const policy = chat.proxyPolicy || proxyPolicyRow()
+    const effective = policy.egressMode === 'proxy-sequence'
+      ? {
+          egressMode: 'proxy-sequence', source: 'hub-policy',
+          sequenceKey: policy.sequenceKey, httpProxy: null, httpsProxy: null, noProxy: null,
+        }
+      : policy.egressMode === 'system-egress'
+        ? {
+            egressMode: 'system-egress', source: 'hub-policy',
+            sequenceKey: null, httpProxy: null, httpsProxy: null, noProxy: null,
+          }
+        : baseline.configured
+          ? {
+              egressMode: 'docker-daemon', source: 'docker-daemon', sequenceKey: null,
+              httpProxy: baseline.httpProxy, httpsProxy: baseline.httpsProxy,
+              noProxy: baseline.noProxy,
+            }
+          : {
+              egressMode: 'system-egress', source: 'system',
+              sequenceKey: null, httpProxy: null, httpsProxy: null, noProxy: baseline.noProxy,
+            }
     return {
       sequences,
       bindings,
@@ -422,6 +891,17 @@ export class AgentControlStore {
         sequences: chat.proxySequences,
         globalSequenceKey: chat.globalProxySequenceKey,
         revision: chat.proxyRevision,
+        policy,
+        baseline,
+        effective,
+        precedence: [
+          { rank: 1, layer: 'request-override', label: '单次请求覆盖' },
+          { rank: 2, layer: 'llm-sequence', label: 'LLM Sequence 出网策略' },
+          { rank: 3, layer: 'provider-compat', label: 'Provider 兼容绑定' },
+          { rank: 4, layer: 'hub-policy', label: 'Hub 全局策略' },
+          { rank: 5, layer: 'docker-daemon', label: 'Docker daemon 部署基线' },
+          { rank: 6, layer: 'system', label: 'Pod/Node 系统出网' },
+        ],
       },
     }
   }
@@ -488,7 +968,10 @@ export class AgentControlStore {
       invalid('invalid_agent_sequence', 'request body must be an object')
     }
     for (const field of Object.keys(input)) {
-      if (!['expectedRevision', 'displayName', 'kind', 'providerIds', 'enabled'].includes(field)) {
+      if (![
+        'expectedRevision', 'displayName', 'kind', 'providerIds', 'enabled',
+        'egressMode', 'proxySequenceKey',
+      ].includes(field)) {
         invalid('invalid_agent_sequence', `request contains unsupported field ${field}`)
       }
     }
@@ -500,6 +983,17 @@ export class AgentControlStore {
     const displayName = normalizedName(input.displayName)
     const enabled = input.enabled ?? true
     if (typeof enabled !== 'boolean') invalid('invalid_agent_sequence', 'enabled must be boolean')
+    const requestedProxySequenceKey = Object.prototype.hasOwnProperty.call(input, 'proxySequenceKey')
+      ? input.proxySequenceKey
+      : undefined
+    if (requestedProxySequenceKey !== undefined && requestedProxySequenceKey !== null) {
+      assertKey(requestedProxySequenceKey, 'proxySequenceKey')
+    }
+    const proxySequenceKey = typeof requestedProxySequenceKey === 'string'
+      ? requestedProxySequenceKey
+      : null
+    const egressMode = normalizedEgressMode(input.egressMode, proxySequenceKey)
+    const routeOverride = egressRouteOverride(egressMode, proxySequenceKey)
     if (!Number.isInteger(providerRevision) || providerRevision < 0) {
       invalid('invalid_agent_sequence', 'provider revision is unavailable')
     }
@@ -507,15 +1001,19 @@ export class AgentControlStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      await lockAndVerifyProviderRoutes(client, {
+      const routeVerification = await lockAndVerifyProviderRoutes(client, {
         kind,
         providerIds,
         providerRevision,
         verification,
+        routeOverride,
+        deploymentEgress: this.deploymentEgress,
       })
       await lockControlKey(client, 'llm-sequence', sequenceKey)
       const current = await client.query(
-        `SELECT revision, kind FROM control.agent_llm_sequences
+        `SELECT revision, kind, egress_mode, proxy_sequence_key,
+                verified_proxy_fingerprint
+           FROM control.agent_llm_sequences
           WHERE sequence_key = $1 FOR UPDATE`,
         [sequenceKey],
       )
@@ -531,25 +1029,42 @@ export class AgentControlStore {
       const saved = await client.query(
         `INSERT INTO control.agent_llm_sequences
            (sequence_key, display_name, kind, provider_ids, enabled, source,
-            provider_revision, revision, verified_at, verified_by,
-            updated_by, updated_at)
-         VALUES ($1, $2, $3, $4::text[], $5, 'database', $6, 1, now(), $7, $8, now())
+            egress_mode, proxy_sequence_key, provider_revision, verified_proxy_fingerprint,
+            revision, verified_at, verified_by, updated_by, updated_at)
+         VALUES ($1, $2, $3, $4::text[], $5, 'database', $6, $7, $8, $9,
+                 1, now(), $10, $11, now())
          ON CONFLICT (sequence_key) DO UPDATE SET
            display_name = EXCLUDED.display_name,
            kind = EXCLUDED.kind,
            provider_ids = EXCLUDED.provider_ids,
            enabled = EXCLUDED.enabled,
            source = 'database',
+           egress_mode = EXCLUDED.egress_mode,
+           proxy_sequence_key = EXCLUDED.proxy_sequence_key,
            provider_revision = EXCLUDED.provider_revision,
+           verified_proxy_fingerprint = EXCLUDED.verified_proxy_fingerprint,
            revision = control.agent_llm_sequences.revision + 1,
            verified_at = now(),
            verified_by = EXCLUDED.verified_by,
            updated_by = EXCLUDED.updated_by,
            updated_at = now()
          RETURNING sequence_key, display_name, kind, provider_ids, enabled,
-                   source, provider_revision, revision, verified_at,
+                   source, egress_mode, proxy_sequence_key, provider_revision,
+                   verified_proxy_fingerprint, revision, verified_at,
                    verified_by, updated_by, updated_at`,
-        [sequenceKey, displayName, kind, providerIds, enabled, providerRevision, verifiedBy, updatedBy],
+        [
+          sequenceKey,
+          displayName,
+          kind,
+          providerIds,
+          enabled,
+          egressMode,
+          proxySequenceKey,
+          providerRevision,
+          routeVerification.aggregateProxyFingerprint,
+          verifiedBy,
+          updatedBy,
+        ],
       )
       await client.query('COMMIT')
       return sequenceRow(saved.rows[0])
@@ -592,7 +1107,9 @@ export class AgentControlStore {
         // after proof validation. Taking the LLM row lock first would invert
         // saveSequence's Global -> Provider -> Proxy -> LLM order and deadlock.
         const candidate = await client.query(
-          `SELECT enabled, provider_ids, provider_revision, revision FROM control.agent_llm_sequences
+          `SELECT enabled, provider_ids, egress_mode, proxy_sequence_key, provider_revision,
+                  verified_proxy_fingerprint, revision
+             FROM control.agent_llm_sequences
             WHERE sequence_key = $1 AND kind = $2`,
           [sequenceKey, kind],
         )
@@ -600,6 +1117,8 @@ export class AgentControlStore {
           invalid('invalid_agent_binding', 'The selected Sequence is missing or disabled')
         }
         const providerIds = candidate.rows[0].provider_ids || []
+        const proxySequenceKey = candidate.rows[0].proxy_sequence_key ?? null
+        const egressMode = normalizedEgressMode(candidate.rows[0].egress_mode, proxySequenceKey)
         const providerRevision = Number(candidate.rows[0].provider_revision)
         if (Number(candidate.rows[0].revision) !== sequenceRevision) {
           throw new AppError(409, 'sequence_verification_stale', 'The selected Sequence changed during verification')
@@ -607,14 +1126,22 @@ export class AgentControlStore {
         if (providerRevision !== verification?.settingsRevision) {
           throw new AppError(409, 'sequence_verification_stale', 'The selected Sequence must be tested against the current Provider catalog')
         }
-        await lockAndVerifyProviderRoutes(client, {
+        const routeVerification = await lockAndVerifyProviderRoutes(client, {
           kind,
           providerIds,
           providerRevision,
           verification,
+          routeOverride: egressRouteOverride(egressMode, proxySequenceKey),
+          deploymentEgress: this.deploymentEgress,
         })
+        if (candidate.rows[0].verified_proxy_fingerprint
+          !== routeVerification.aggregateProxyFingerprint) {
+          throw new AppError(409, 'sequence_verification_stale', 'The selected Sequence changed during verification')
+        }
         const sequence = await client.query(
-          `SELECT enabled, provider_ids, provider_revision, revision FROM control.agent_llm_sequences
+          `SELECT enabled, provider_ids, egress_mode, proxy_sequence_key, provider_revision,
+                  verified_proxy_fingerprint, revision
+             FROM control.agent_llm_sequences
             WHERE sequence_key = $1 AND kind = $2
             FOR SHARE`,
           [sequenceKey, kind],
@@ -622,6 +1149,11 @@ export class AgentControlStore {
         if (!sequence.rows[0] || sequence.rows[0].enabled === false
           || Number(sequence.rows[0].provider_revision) !== providerRevision
           || Number(sequence.rows[0].revision) !== sequenceRevision
+          || normalizedEgressMode(sequence.rows[0].egress_mode,
+            sequence.rows[0].proxy_sequence_key ?? null) !== egressMode
+          || (sequence.rows[0].proxy_sequence_key ?? null) !== proxySequenceKey
+          || sequence.rows[0].verified_proxy_fingerprint
+            !== routeVerification.aggregateProxyFingerprint
           || JSON.stringify(sequence.rows[0].provider_ids || []) !== JSON.stringify(providerIds)) {
           throw new AppError(409, 'sequence_verification_stale', 'The selected Sequence changed during verification')
         }
@@ -849,6 +1381,31 @@ export class AgentControlStore {
           })
         }
       }
+      if (!enabled) {
+        const llmSequences = await client.query(
+          `SELECT sequence_key, kind
+             FROM control.agent_llm_sequences
+            WHERE proxy_sequence_key = $1
+            ORDER BY kind, sequence_key
+            FOR SHARE`,
+          [sequenceKey],
+        )
+        if (llmSequences.rows.length > 0) {
+          throw new AppError(
+            409,
+            'agent_proxy_sequence_in_use',
+            'Remove the Proxy Sequence from every LLM Sequence before disabling it',
+            {
+              global: false,
+              providers: [],
+              sequences: llmSequences.rows.map((row) => ({
+                kind: row.kind,
+                sequenceKey: row.sequence_key,
+              })),
+            },
+          )
+        }
+      }
       const saved = await client.query(
         `INSERT INTO control.agent_proxy_sequences
            (sequence_key, display_name, proxy_keys, direct_fallback,
@@ -930,6 +1487,29 @@ export class AgentControlStore {
           providers,
         })
       }
+      const llmSequences = await client.query(
+        `SELECT sequence_key, kind
+           FROM control.agent_llm_sequences
+          WHERE proxy_sequence_key = $1
+          ORDER BY kind, sequence_key
+          FOR SHARE`,
+        [sequenceKey],
+      )
+      if (llmSequences.rows.length > 0) {
+        throw new AppError(
+          409,
+          'agent_proxy_sequence_in_use',
+          'Remove the Proxy Sequence from every LLM Sequence before deleting it',
+          {
+            global: false,
+            providers: [],
+            sequences: llmSequences.rows.map((row) => ({
+              kind: row.kind,
+              sequenceKey: row.sequence_key,
+            })),
+          },
+        )
+      }
       const deleted = await client.query(
         `DELETE FROM control.agent_proxy_sequences
           WHERE sequence_key = $1
@@ -947,8 +1527,15 @@ export class AgentControlStore {
     }
   }
 
-  async setGlobalProxySequence(sequenceKey, { expectedRevision: expected, updatedBy = 'admin-token' } = {}) {
+  async setGlobalProxySequence(selection, options = {}) {
+    const policy = selection && typeof selection === 'object' && !Array.isArray(selection)
+      ? { ...selection, updatedBy: options.updatedBy ?? selection.updatedBy }
+      : { ...options, sequenceKey: selection }
+    const sequenceKey = policy.sequenceKey ?? null
     if (sequenceKey != null) assertKey(sequenceKey, 'sequenceKey')
+    const egressMode = normalizedEgressMode(policy.egressMode, sequenceKey)
+    const expected = policy.expectedRevision
+    const updatedBy = policy.updatedBy ?? 'admin-token'
     expectedRevision(expected)
     const client = await this.pool.connect()
     try {
@@ -976,23 +1563,19 @@ export class AgentControlStore {
       }
       const saved = await client.query(
         `INSERT INTO control.agent_proxy_settings
-           (singleton, global_sequence_key, revision, updated_by, updated_at)
-         VALUES (true, $1, 1, $2, now())
+           (singleton, egress_mode, global_sequence_key, revision, updated_by, updated_at)
+         VALUES (true, $1, $2, 1, $3, now())
          ON CONFLICT (singleton) DO UPDATE SET
+           egress_mode = EXCLUDED.egress_mode,
            global_sequence_key = EXCLUDED.global_sequence_key,
            revision = control.agent_proxy_settings.revision + 1,
            updated_by = EXCLUDED.updated_by,
            updated_at = now()
-         RETURNING global_sequence_key, revision, updated_by, updated_at`,
-        [sequenceKey, updatedBy],
+         RETURNING egress_mode, global_sequence_key, revision, updated_by, updated_at`,
+        [egressMode, sequenceKey, updatedBy],
       )
       await client.query('COMMIT')
-      return {
-        globalSequenceKey: saved.rows[0].global_sequence_key ?? null,
-        revision: Number(saved.rows[0].revision),
-        updatedBy: saved.rows[0].updated_by ?? null,
-        updatedAt: iso(saved.rows[0].updated_at),
-      }
+      return proxyPolicyRow(saved.rows[0])
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {})
       throw error

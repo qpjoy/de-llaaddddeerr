@@ -27,14 +27,16 @@ test('Agent Market binds native dragging only to explicit handles', async () => 
 
   const center = await readFile(new URL('../../src/pages-agent-center.tsx', import.meta.url), 'utf8')
   assert.doesNotMatch(center, /<article[^>]*(?:draggable|onDragStart)=/u)
-  assert.match(center, /className="mih-sequence-drag-handle" draggable=\{canEdit && !busy\}/u)
-  assert.equal(
-    [...center.matchAll(/className="mih-sequence-drag-handle" draggable=\{canEdit && !busy\}/gu)].length,
-    2,
-    'Provider and Proxy palettes each expose one explicit handle implementation that is disabled while busy',
-  )
+  assert.match(center, /className="mih-sequence-drag-handle"[^>]*draggable=\{canEdit && !busy\}/u)
+  assert.match(center, /className="mih-proxy-endpoint-drag-handle"/u)
+  assert.match(center, /className="mih-proxy-step-drag-handle"/u)
   assert.match(center, /application\/x-mx-insight-provider/u)
-  assert.match(center, /application\/x-mx-insight-proxy/u)
+  assert.match(center, /application\/x-mx-insight-proxy-endpoint/u)
+  assert.match(center, /application\/x-mx-insight-proxy-step/u)
+  assert.match(center, /hasDragType\(event, PROVIDER_MIME\)/u)
+  assert.match(center, /hasDragType\(event, PROXY_STEP_MIME\)/u)
+  assert.match(center, /mih-proxy-insert-slot/u)
+  assert.match(center, /mih-proxy-remove-dropzone/u)
 })
 
 test('Agent Center keeps defaults explicit and uses the shared confirm dialog', async () => {
@@ -46,7 +48,21 @@ test('Agent Center keeps defaults explicit and uses the shared confirm dialog', 
   assert.doesNotMatch(center, /const initial = sequences\.find/u)
   assert.match(center, /不会自动使用 Catalog 第一条或第一个 Sequence/u)
   assert.match(center, /directFallback: false/u)
-  assert.match(center, /不绑定 · 使用系统出网/u)
+  assert.match(center, /继承部署默认（Docker daemon）/u)
+  assert.match(center, /Pod \/ Node 系统出网/u)
+  assert.match(center, /egressMode: submitted\.egressMode/u)
+  assert.match(center, /proxySequenceKey: submitted\.egressMode === 'proxy-sequence'/u)
+  assert.match(center, /mode: 'inherit'/u)
+  assert.match(center, /mode: 'system-egress'/u)
+  assert.match(center, /mode: 'proxy-sequence'/u)
+  assert.match(center, /title="当前 Agent 出网解析"/u)
+  assert.match(center, /优先级覆盖关系/u)
+  assert.match(center, /确认并编辑策略/u)
+  assert.match(center, /tone="primary"/u)
+  assert.match(center, /不会修改 Docker daemon 或宿主 systemd 文件/u)
+  assert.match(center, /<dl className="mih-agent-egress-facts">/u)
+  assert.match(center, /<ol>\{precedence\.map/u)
+  assert.match(center, /不会保存或修改 LLM Sequence、Provider、Hub 的任何绑定/u)
   assert.doesNotMatch(market, /全局默认 LLM Sequence/u)
   assert.match(market, /未设置可用的业务默认（模型阶段确定性降级）/u)
 })
