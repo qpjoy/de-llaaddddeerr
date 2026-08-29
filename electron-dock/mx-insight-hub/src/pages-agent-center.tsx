@@ -422,7 +422,8 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
                         event.dataTransfer.setData(PROVIDER_MIME, provider.id)
                       }}><DotsSixVertical size={19} /></span>
                     <span><strong>{provider.displayName || provider.id}</strong><code>{provider.id}</code><small>{provider.model} · {provider.protocol || 'openai-compatible'}</small></span>
-                    <StatusBadge status={provider.keyConfigured === false ? 'suspended' : 'active'} label={provider.keyConfigured === false ? '缺 Key' : '可测试'} />
+                    <StatusBadge status={provider.keyConfigured === false ? 'suspended' : 'active'}
+                      label={provider.keyConfigured === false ? '缺 Key' : provider.authMode === 'none' ? '无需 Key' : 'Key 已配置'} />
                   </article>
                 ))}
                 {providers.length === 0 ? <p className="mih-agent-center-empty">请先在 LLM Provider 保存至少一个启用配置。</p> : null}
@@ -463,7 +464,7 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
               <div className="mih-agent-route-diagnostic">
                 <strong>当前配置推导路由</strong>
                 <p>{error?.code === 'agent_providers_unavailable'
-                  ? 'Sequence 已开始调用，但所有 Provider 均未成功；transport failure 表示系统出网或已配置代理的传输失败，不是 Prompt 错误。'
+                  ? '当前操作未通过 Provider 验证；报错中的 Provider 发生了传输失败，后续 Provider 可能尚未测试。未绑定应用 Proxy 时由 Node / Pod 直接出网，不会自动继承 Docker daemon 的 systemd 代理；这不是 Prompt 错误。'
                   : '当前草稿或已保存 Sequence 与 Provider revision 不一致，请先重新验证保存。'}</p>
                 <ul>{routeNotes.map((note, index) => <li key={draft.providerIds[index]}><code>{note}</code></li>)}</ul>
                 <a className="qp-button qp-button--outline" href="#/agent/proxies"><Globe size={16} />查看可选 Proxy 配置</a>
@@ -801,8 +802,12 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
             {sequences.map((sequence) => {
               const providerRefs = providerRows.filter(({ provider }) => provider.proxySequenceKey === sequence.sequenceKey)
               const isGlobal = proxy.globalSequenceKey === sequence.sequenceKey
+              const enabledCount = enabledEndpointCount(sequence)
+              const routeSummary = enabledCount === 0
+                ? `${enabledCount} enabled / ${sequence.proxyKeys.length} total · 空链不可绑定`
+                : `${enabledCount} enabled / ${sequence.proxyKeys.length} total${sequence.directFallback ? ' + system egress' : ''}`
               return <article key={sequence.sequenceKey} className={`mih-agent-crud-row${sequenceDraft.sequenceKey === sequence.sequenceKey ? ' is-selected' : ''}`}>
-                <span><strong>{sequence.displayName}</strong><code>{sequence.sequenceKey}</code><small>{enabledEndpointCount(sequence)} enabled / {sequence.proxyKeys.length} total{sequence.directFallback ? ' + system egress' : ''}</small></span>
+                <span><strong>{sequence.displayName}</strong><code>{sequence.sequenceKey}</code><small>{routeSummary}</small></span>
                 <span>{isGlobal ? <StatusBadge status="active" label="全局" /> : null}<StatusBadge status={sequence.enabled ? 'active' : 'disabled'} label={sequence.enabled ? '启用' : '停用'} /><small>{providerRefs.length ? `${providerRefs.length} 个 Provider 绑定` : '无专属绑定'}</small></span>
                 <div>
                   <button className="qp-button qp-button--ghost qp-icon-button" type="button" aria-label={`编辑 ${sequence.displayName}`} disabled={!canEdit || Boolean(busy)} onClick={() => { setSequenceDraft({ ...sequence }); setError(null) }}><PencilSimple size={16} /></button>

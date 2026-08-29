@@ -116,8 +116,11 @@ URL 或任意环境变量名。
 - provider test 使用固定、无业务数据的小请求并且只测指定 provider。它可能仍产生
   provider 侧调用/计费，也不能证明 classifier Pod 拥有相同的 Secret 和网络出口；
   同一 provider 单飞、测试后冷却 5 秒，单进程最多同时探测 2 个 provider。
-- 测试证据绑定精确的 Provider settings revision 与 Proxy 控制面 SHA-256 指纹，最多复用
-  15 分钟；长测试期间发生热刷新不会把旧 Key/旧出口的成功记到新 revision。
+- 测试证据绑定精确的 Provider settings revision 与该 Provider 有效出网路由的 SHA-256
+  指纹，最多复用 15 分钟；未绑定的 Proxy 目录项不会使直连证据失效，而专属或全局
+  绑定变化会强制重新测试。长测试期间发生热刷新不会把旧 Key/旧出口的成功记到新 revision。
+- 有效路由指纹功能首次上线后，旧版本留下的测试证据会保守地重验一次；之后只有 Provider
+  配置或实际生效的出网路由改变才会再次失效。
 - Chat/Embedding 的 HTTP 2xx 仍必须通过语义校验；空 chat 内容、向量数量/index/维度/
   非有限值或返回 model 不匹配都会把该 provider 记为失败并允许健康的下一候选 fallback。
 - rule/Agent assertion 默认只是 `proposed`。当前 API 可读列表但没有 accept/reject

@@ -3,7 +3,10 @@ import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import test from 'node:test'
 import { createApp } from '../../server/app.mjs'
-import { AgentControlStore } from '../../server/agent/control-store.mjs'
+import {
+  AgentControlStore,
+  providerProxyRouteFingerprint,
+} from '../../server/agent/control-store.mjs'
 import { AgentRuntime } from '../../server/agent/runtime.mjs'
 import {
   AgentSettingsStore,
@@ -246,6 +249,108 @@ function proxyControlHarness({
   }
   const client = { query, release() {} }
   return { state, store: new AgentControlStore({ async connect() { return client } }) }
+}
+
+function sequenceVerificationHarness() {
+  const state = {
+    providerSetting: {
+      revision: 2,
+      providers: [provider({ authMode: 'none', proxySequenceKey: null })],
+    },
+    globalSequenceKey: null,
+    proxySequences: new Map([['agent-egress', {
+      sequence_key: 'agent-egress', proxy_keys: ['host-7890'],
+      direct_fallback: false, enabled: true,
+    }]]),
+    proxyEndpoints: new Map([['host-7890', {
+      proxy_key: 'host-7890', proxy_url: 'http://127.0.0.1:7890', enabled: true,
+    }]]),
+    llmSequence: {
+      sequence_key: 'candidate', display_name: 'Candidate', kind: 'chat',
+      provider_ids: ['primary'], enabled: true, source: 'database',
+      provider_revision: 2, revision: 1,
+    },
+    bindingRevision: 0,
+    sequenceWrites: 0,
+    bindingWrites: 0,
+    queries: [],
+  }
+  const query = async (sql, params = []) => {
+    const text = sql.replace(/\s+/g, ' ').trim()
+    state.queries.push({ text, params })
+    if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK'
+      || text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+    if (text.includes('FROM control.agent_proxy_settings')) {
+      return { rows: [{ global_sequence_key: state.globalSequenceKey }] }
+    }
+    if (text.includes('FROM control.agent_provider_settings')) {
+      return { rows: [structuredClone(state.providerSetting)] }
+    }
+    if (text.includes('FROM control.agent_proxy_sequences')) {
+      const requested = new Set(params[0] || [])
+      return {
+        rows: [...state.proxySequences.values()]
+          .filter((sequence) => requested.has(sequence.sequence_key))
+          .map((sequence) => structuredClone(sequence)),
+      }
+    }
+    if (text.includes('FROM control.agent_proxy_endpoints')) {
+      const requested = new Set(params[0] || [])
+      return {
+        rows: [...state.proxyEndpoints.values()]
+          .filter((endpoint) => requested.has(endpoint.proxy_key))
+          .map((endpoint) => structuredClone(endpoint)),
+      }
+    }
+    if (text.includes('SELECT revision FROM control.agent_consumer_bindings')) {
+      return { rows: state.bindingRevision ? [{ revision: state.bindingRevision }] : [] }
+    }
+    if (text.includes('FROM control.agent_llm_sequences')) {
+      if (!state.llmSequence || params[0] !== state.llmSequence.sequence_key) return { rows: [] }
+      if (text.includes('SELECT revision, kind')) {
+        return { rows: [{ revision: state.llmSequence.revision, kind: state.llmSequence.kind }] }
+      }
+      return { rows: [structuredClone(state.llmSequence)] }
+    }
+    if (text.startsWith('INSERT INTO control.agent_llm_sequences')) {
+      state.sequenceWrites += 1
+      state.llmSequence = {
+        ...state.llmSequence,
+        sequence_key: params[0], display_name: params[1], kind: params[2],
+        provider_ids: params[3], enabled: params[4], provider_revision: params[5],
+        revision: Number(state.llmSequence?.revision || 0) + 1,
+      }
+      return { rows: [structuredClone(state.llmSequence)] }
+    }
+    if (text.startsWith('INSERT INTO control.agent_consumer_bindings')) {
+      state.bindingWrites += 1
+      state.bindingRevision += 1
+      return { rows: [{
+        consumer_key: params[0], kind: params[1], sequence_key: params[2],
+        revision: state.bindingRevision, updated_by: params[3],
+        updated_at: '2026-08-29T00:00:00.000Z',
+      }] }
+    }
+    throw new Error(`Unhandled verification SQL: ${text}`)
+  }
+  const client = { query, release() {} }
+  return { state, store: new AgentControlStore({ async connect() { return client } }) }
+}
+
+function verificationFor(state, control = {}) {
+  const providerRow = state.providerSetting.providers[0]
+  return {
+    settingsRevision: state.providerSetting.revision,
+    proxyFingerprints: new Map([[
+      providerRow.id,
+      providerProxyRouteFingerprint(providerRow, {
+        globalProxySequenceKey: state.globalSequenceKey,
+        proxySequences: [],
+        proxyEndpoints: [],
+        ...control,
+      }),
+    ]]),
+  }
 }
 
 test('migration 041 adds only isolated Agent control-plane state and no business writes', async () => {
@@ -497,6 +602,109 @@ test('clearing an LLM default writes a nullable binding tombstone under revision
   )
   const write = queries.find(({ text }) => text.startsWith('INSERT INTO control.agent_consumer_bindings'))
   assert.deepEqual(write.params.slice(0, 3), ['hub.chat.default', 'chat', null])
+})
+
+test('Sequence save and default binding atomically reject a route changed after verification', async () => {
+  const harness = sequenceVerificationHarness()
+  const directProof = verificationFor(harness.state)
+  harness.state.globalSequenceKey = 'agent-egress'
+
+  await assert.rejects(
+    () => harness.store.saveSequence('candidate', {
+      expectedRevision: 1,
+      displayName: 'Candidate',
+      kind: 'chat',
+      providerIds: ['primary'],
+      enabled: true,
+    }, {
+      providerRevision: 2,
+      verification: directProof,
+    }),
+    (error) => error?.status === 409 && error?.code === 'agent_provider_verification_stale',
+  )
+  assert.equal(harness.state.sequenceWrites, 0)
+
+  await assert.rejects(
+    () => harness.store.setDefaultSequence('chat', 'candidate', {
+      expectedRevision: 0,
+      expectedSequenceRevision: 1,
+      verification: directProof,
+    }),
+    (error) => error?.status === 409 && error?.code === 'agent_provider_verification_stale',
+  )
+  assert.equal(harness.state.bindingWrites, 0)
+
+  const proxyProof = verificationFor(harness.state, {
+    proxySequences: [{
+      sequenceKey: 'agent-egress', proxyKeys: ['host-7890'],
+      directFallback: false, enabled: true,
+    }],
+    proxyEndpoints: [{
+      proxyKey: 'host-7890', proxyUrl: 'http://127.0.0.1:7890', enabled: true,
+    }],
+  })
+  const proxyTransactionStart = harness.state.queries.length
+  const saved = await harness.store.saveSequence('candidate', {
+    expectedRevision: 1,
+    displayName: 'Candidate',
+    kind: 'chat',
+    providerIds: ['primary'],
+    enabled: true,
+  }, {
+    providerRevision: 2,
+    verification: proxyProof,
+  })
+  assert.equal(saved.revision, 2)
+
+  harness.state.llmSequence = {
+    ...harness.state.llmSequence,
+    provider_ids: [],
+    revision: 3,
+  }
+  await assert.rejects(
+    () => harness.store.setDefaultSequence('chat', 'candidate', {
+      expectedRevision: 0,
+      expectedSequenceRevision: saved.revision,
+      verification: proxyProof,
+    }),
+    (error) => error?.status === 409 && error?.code === 'sequence_verification_stale',
+  )
+  assert.equal(harness.state.bindingWrites, 0)
+  harness.state.llmSequence = {
+    ...harness.state.llmSequence,
+    provider_ids: ['primary'],
+    revision: 4,
+  }
+
+  const binding = await harness.store.setDefaultSequence('chat', 'candidate', {
+    expectedRevision: 0,
+    expectedSequenceRevision: harness.state.llmSequence.revision,
+    verification: proxyProof,
+  })
+  assert.equal(binding.sequenceKey, 'candidate')
+  assert.equal(harness.state.sequenceWrites, 1)
+  assert.equal(harness.state.bindingWrites, 1)
+
+  const proxyTransactionQueries = harness.state.queries.slice(proxyTransactionStart)
+  const firstGlobalLock = proxyTransactionQueries.findIndex(({ params }) => (
+    params[0] === 'mx-insight-agent:proxy-settings:global'
+  ))
+  const firstProviderLock = proxyTransactionQueries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_provider_settings') && text.includes('FOR SHARE')
+  ))
+  const firstProxySequenceLock = proxyTransactionQueries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_proxy_sequences') && text.includes('FOR SHARE')
+  ))
+  const firstEndpointLock = proxyTransactionQueries.findIndex(({ text }) => (
+    text.includes('FROM control.agent_proxy_endpoints') && text.includes('FOR SHARE')
+  ))
+  const firstSequenceWrite = proxyTransactionQueries.findIndex(({ text }) => (
+    text.startsWith('INSERT INTO control.agent_llm_sequences')
+  ))
+  assert.ok(firstGlobalLock >= 0 && firstGlobalLock < firstProviderLock)
+  assert.ok(firstProviderLock < firstProxySequenceLock)
+  assert.ok(firstProxySequenceLock < firstEndpointLock)
+  assert.ok(firstEndpointLock < firstSequenceWrite)
 })
 
 test('Provider writes lock and validate Proxy Sequences in their persistence transaction', async () => {
@@ -1530,6 +1738,169 @@ test('an exact DB Provider probe uses the same global Proxy Sequence as producti
   runtime.close()
 })
 
+test('Provider probe evidence follows only its effective Proxy route', async () => {
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 2,
+    providers: [provider({ authMode: 'none' })],
+  }))
+  const now = Date.parse('2026-08-29T00:00:00.000Z')
+  const providerTests = []
+  const snapshot = {
+    controlAvailable: true,
+    sequences: [], defaultBinding: null,
+    proxyEndpoints: [], proxySequences: [],
+    globalProxySequenceKey: null, proxyRevision: 0,
+  }
+  let mutateEffectiveRouteOnEvidenceRead = false
+  let restoreDirectDuringProbe = false
+  let savedSequences = 0
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async loadRuntimeSnapshot() { return structuredClone(snapshot) },
+    async listPublicControl() {
+      const latestTests = [...new Map(providerTests.map((entry) => [
+        `${entry.kind}:${entry.providerId}`,
+        entry,
+      ])).values()]
+      const result = {
+        sequences: structuredClone(snapshot.sequences),
+        bindings: [],
+        providerTests: structuredClone(latestTests),
+        proxy: {},
+      }
+      if (mutateEffectiveRouteOnEvidenceRead) {
+        mutateEffectiveRouteOnEvidenceRead = false
+        snapshot.proxyEndpoints = [{
+          proxyKey: 'host-7890', displayName: 'Host 7890',
+          proxyUrl: 'http://127.0.0.1:7890', enabled: true, revision: 1,
+        }]
+        snapshot.proxySequences = [{
+          sequenceKey: 'agent-egress', displayName: 'Agent egress',
+          proxyKeys: ['host-7890'], directFallback: false, enabled: true, revision: 1,
+        }]
+        snapshot.globalProxySequenceKey = 'agent-egress'
+        snapshot.proxyRevision = 1
+      }
+      return result
+    },
+    async recordProbe(input) {
+      providerTests.push({ ...structuredClone(input), testedAt: new Date(now).toISOString() })
+    },
+    async saveSequence(sequenceKey, input, metadata) {
+      savedSequences += 1
+      const existing = snapshot.sequences.find((sequence) => sequence.sequenceKey === sequenceKey)
+      const saved = {
+        sequenceKey,
+        displayName: input.displayName,
+        kind: input.kind,
+        providerIds: [...input.providerIds],
+        enabled: input.enabled,
+        source: 'database',
+        providerRevision: metadata.providerRevision,
+        revision: (existing?.revision || 0) + 1,
+      }
+      snapshot.sequences = [
+        ...snapshot.sequences.filter((sequence) => sequence.sequenceKey !== sequenceKey),
+        saved,
+      ]
+      return structuredClone(saved)
+    },
+  }
+  let fetchCalls = 0
+  const dispatchers = []
+  const runtime = await new AgentRuntime({
+    config: config({ agent: { chatProviders: null, embeddingProviders: null, autoMigrate: false } }),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    controlStore,
+    managedKinds: ['chat'],
+    logger: quiet,
+    refreshIntervalMs: 0,
+    probeCooldownMs: 0,
+    nowFn: () => now,
+    fetchImpl: async (_url, options) => {
+      fetchCalls += 1
+      dispatchers.push(Boolean(options.dispatcher))
+      if (restoreDirectDuringProbe) {
+        restoreDirectDuringProbe = false
+        snapshot.globalProxySequenceKey = null
+        snapshot.proxyRevision += 1
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    },
+  }).start()
+
+  await runtime.testProvider({ kind: 'chat', providerId: 'primary' })
+  assert.equal(fetchCalls, 1)
+  assert.deepEqual(dispatchers, [false])
+  const directFingerprint = providerTests[0].proxyFingerprint
+
+  snapshot.proxySequences = [{
+    sequenceKey: 'unused-empty', displayName: 'Unused empty',
+    proxyKeys: [], directFallback: true, enabled: true, revision: 1,
+  }]
+  await runtime.refresh({ force: true })
+  await runtime.saveSequence('candidate', {
+    expectedRevision: 0,
+    displayName: 'Candidate',
+    kind: 'chat',
+    providerIds: ['primary'],
+    enabled: true,
+  })
+  assert.equal(fetchCalls, 1, 'an unbound Proxy catalog row must not invalidate direct evidence')
+  assert.equal(savedSequences, 1)
+
+  mutateEffectiveRouteOnEvidenceRead = true
+  await assert.rejects(
+    () => runtime.saveSequence('candidate', {
+      expectedRevision: 1,
+      displayName: 'Candidate',
+      kind: 'chat',
+      providerIds: ['primary'],
+      enabled: true,
+    }),
+    (error) => error?.status === 409 && error?.code === 'agent_provider_verification_stale',
+  )
+  assert.equal(fetchCalls, 1, 'a route change during verification must not use stale evidence')
+  assert.equal(savedSequences, 1, 'a route change during verification must stop before saving')
+
+  await runtime.saveSequence('candidate', {
+    expectedRevision: 1,
+    displayName: 'Candidate',
+    kind: 'chat',
+    providerIds: ['primary'],
+    enabled: true,
+  })
+  assert.equal(fetchCalls, 2, 'changing the effective route must trigger a new exact probe')
+  assert.equal(savedSequences, 2)
+  assert.deepEqual(dispatchers, [false, true])
+  assert.notEqual(providerTests.at(-1).proxyFingerprint, directFingerprint)
+
+  snapshot.globalProxySequenceKey = null
+  snapshot.proxyRevision += 1
+  providerTests.length = 0
+  await runtime.refresh({ force: true })
+  mutateEffectiveRouteOnEvidenceRead = true
+  restoreDirectDuringProbe = true
+  await assert.rejects(
+    () => runtime.saveSequence('candidate', {
+      expectedRevision: 2,
+      displayName: 'Candidate',
+      kind: 'chat',
+      providerIds: ['primary'],
+      enabled: true,
+    }),
+    (error) => error?.status === 409 && error?.code === 'agent_provider_verification_stale',
+  )
+  assert.equal(snapshot.globalProxySequenceKey, null, 'the ABA route must end at its original direct state')
+  assert.equal(fetchCalls, 3, 'the intermediate proxy route must actually be probed')
+  assert.equal(dispatchers.at(-1), true)
+  assert.equal(savedSequences, 2, 'ABA evidence must not reach Sequence persistence')
+  runtime.close()
+})
+
 test('a long Provider probe records the exact settings snapshot it actually tested', async () => {
   const harness = databaseHarness()
   harness.state.settings.set('chat', row('chat', {
@@ -1683,6 +2054,7 @@ test('post-commit refresh failure disables a modified active LLM Sequence', asyn
     providers: [provider({ authMode: 'none' })],
   }))
   let failControlReads = false
+  const providerTests = []
   const snapshot = {
     sequences: [{
       sequenceKey: 'active-sequence', displayName: 'Active', kind: 'chat',
@@ -1702,9 +2074,14 @@ test('post-commit refresh failure disables a modified active LLM Sequence', asyn
       return snapshot
     },
     async listPublicControl() {
-      return { sequences: snapshot.sequences, bindings: [snapshot.defaultBinding], providerTests: [], proxy: {} }
+      return { sequences: snapshot.sequences, bindings: [snapshot.defaultBinding], providerTests, proxy: {} }
     },
-    async recordProbe() {},
+    async recordProbe(input) {
+      providerTests.splice(0, providerTests.length, {
+        ...input,
+        testedAt: new Date().toISOString(),
+      })
+    },
     async saveSequence(_key, input) {
       failControlReads = true
       return { ...snapshot.sequences[0], ...input, revision: 2 }

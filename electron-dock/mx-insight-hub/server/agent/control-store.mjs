@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 
 const KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/
@@ -104,6 +105,38 @@ function proxySequenceRow(row) {
   }
 }
 
+export function providerProxyRouteFingerprint(provider, control) {
+  const sequenceKey = provider?.proxySequenceKey || control?.globalProxySequenceKey || null
+  if (!sequenceKey) {
+    return createHash('sha256').update(JSON.stringify({ mode: 'system-egress' })).digest('hex')
+  }
+  const sequence = (control?.proxySequences || [])
+    .find((candidate) => candidate.sequenceKey === sequenceKey)
+  const endpoints = new Map(
+    (control?.proxyEndpoints || []).map((endpoint) => [endpoint.proxyKey, endpoint]),
+  )
+  let route
+  if (!sequence) route = { mode: 'missing-proxy-sequence', sequenceKey }
+  else if (sequence.enabled === false) route = { mode: 'disabled-proxy-sequence', sequenceKey }
+  else {
+    const proxyRoutes = (sequence.proxyKeys || []).flatMap((proxyKey) => {
+      const endpoint = endpoints.get(proxyKey)
+      return !endpoint?.enabled
+        ? []
+        : [{ proxyKey, proxyUrl: endpoint.proxyUrl }]
+    })
+    route = proxyRoutes.length > 0
+      ? {
+          mode: 'proxy-sequence',
+          sequenceKey,
+          proxyRoutes,
+          directFallback: sequence.directFallback === true,
+        }
+      : { mode: 'proxy-sequence-no-route', sequenceKey }
+  }
+  return createHash('sha256').update(JSON.stringify(route)).digest('hex')
+}
+
 function relationMissing(error) {
   return error?.code === '42P01' || error?.code === '3F000'
 }
@@ -135,6 +168,107 @@ async function lockEnabledProxyEndpoints(client, sequences, code = 'invalid_agen
       invalid(code, `Proxy Sequence ${sequence.sequence_key} has no enabled endpoint`)
     }
   }
+}
+
+function expectedProviderFingerprint(verification, providerId) {
+  const fingerprints = verification?.proxyFingerprints
+  const fingerprint = fingerprints instanceof Map
+    ? fingerprints.get(providerId)
+    : fingerprints?.[providerId]
+  if (typeof fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(fingerprint)) {
+    invalid('invalid_agent_sequence', `verification fingerprint is unavailable for Provider ${providerId}`)
+  }
+  return fingerprint
+}
+
+async function lockAndVerifyProviderRoutes(client, {
+  kind,
+  providerIds,
+  providerRevision,
+  verification,
+}) {
+  if (!verification || verification.settingsRevision !== providerRevision) {
+    invalid('invalid_agent_sequence', 'Provider verification proof is unavailable')
+  }
+
+  // Keep the same dependency order used by Proxy binding mutations:
+  // global binding -> Provider settings -> Proxy Sequences -> endpoints.
+  // Advisory locks cover missing legacy rows, which PostgreSQL row locks cannot.
+  await lockControlKey(client, 'proxy-settings', 'global')
+  const globalSetting = await client.query(
+    `SELECT global_sequence_key
+       FROM control.agent_proxy_settings
+      WHERE singleton = true
+      FOR SHARE`,
+  )
+  const setting = await client.query(
+    `SELECT revision, providers
+       FROM control.agent_provider_settings
+      WHERE kind = $1
+      FOR SHARE`,
+    [kind],
+  )
+  const currentProviderRevision = Number(setting.rows[0]?.revision ?? 0)
+  if (currentProviderRevision !== providerRevision) {
+    throw new AppError(409, 'provider_revision_conflict', 'Provider catalog changed during Sequence verification')
+  }
+
+  const catalog = new Map((setting.rows[0]?.providers || []).map((provider) => [provider.id, provider]))
+  const providers = providerIds.map((providerId) => {
+    const provider = catalog.get(providerId)
+    if (!provider) invalid('invalid_agent_sequence', `Unknown ${kind} provider: ${providerId}`)
+    if (provider.enabled === false) invalid('invalid_agent_sequence', `Provider ${providerId} is disabled`)
+    return provider
+  })
+  const globalProxySequenceKey = globalSetting.rows[0]?.global_sequence_key ?? null
+  const sequenceKeys = [...new Set(providers
+    .map((provider) => provider.proxySequenceKey || globalProxySequenceKey)
+    .filter(Boolean))].sort()
+  for (const sequenceKey of sequenceKeys) {
+    await lockControlKey(client, 'proxy-sequence', sequenceKey)
+  }
+  const sequences = sequenceKeys.length > 0
+    ? await client.query(
+        `SELECT sequence_key, proxy_keys, direct_fallback, enabled
+           FROM control.agent_proxy_sequences
+          WHERE sequence_key = ANY($1::text[])
+          ORDER BY sequence_key
+          FOR SHARE`,
+        [sequenceKeys],
+      )
+    : { rows: [] }
+  const proxyKeys = [...new Set(sequences.rows.flatMap((sequence) => (
+    Array.isArray(sequence.proxy_keys) ? sequence.proxy_keys : []
+  )))].sort()
+  for (const proxyKey of proxyKeys) {
+    await lockControlKey(client, 'proxy-endpoint', proxyKey)
+  }
+  const endpoints = proxyKeys.length > 0
+    ? await client.query(
+        `SELECT proxy_key, proxy_url, enabled
+           FROM control.agent_proxy_endpoints
+          WHERE proxy_key = ANY($1::text[])
+          ORDER BY proxy_key
+          FOR SHARE`,
+        [proxyKeys],
+      )
+    : { rows: [] }
+  const control = {
+    globalProxySequenceKey,
+    proxySequences: sequences.rows.map(proxySequenceRow),
+    proxyEndpoints: endpoints.rows.map(proxyEndpointRow),
+  }
+  for (const provider of providers) {
+    if (providerProxyRouteFingerprint(provider, control)
+      !== expectedProviderFingerprint(verification, provider.id)) {
+      throw new AppError(
+        409,
+        'agent_provider_verification_stale',
+        'Provider or Proxy routing changed during verification; reload and retry',
+      )
+    }
+  }
+  return { catalog, currentProviderRevision }
 }
 
 export class AgentControlStore {
@@ -345,6 +479,7 @@ export class AgentControlStore {
 
   async saveSequence(sequenceKey, input, {
     providerRevision,
+    verification,
     verifiedBy = 'admin-token',
     updatedBy = 'admin-token',
   } = {}) {
@@ -372,24 +507,13 @@ export class AgentControlStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      await lockAndVerifyProviderRoutes(client, {
+        kind,
+        providerIds,
+        providerRevision,
+        verification,
+      })
       await lockControlKey(client, 'llm-sequence', sequenceKey)
-      const setting = await client.query(
-        `SELECT revision, providers
-           FROM control.agent_provider_settings
-          WHERE kind = $1
-          FOR SHARE`,
-        [kind],
-      )
-      const currentProviderRevision = Number(setting.rows[0]?.revision ?? 0)
-      if (currentProviderRevision !== providerRevision) {
-        throw new AppError(409, 'provider_revision_conflict', 'Provider catalog changed during Sequence verification')
-      }
-      const catalog = new Map((setting.rows[0]?.providers || []).map((provider) => [provider.id, provider]))
-      for (const providerId of providerIds) {
-        const provider = catalog.get(providerId)
-        if (!provider) invalid('invalid_agent_sequence', `Unknown ${kind} provider: ${providerId}`)
-        if (provider.enabled === false) invalid('invalid_agent_sequence', `Provider ${providerId} is disabled`)
-      }
       const current = await client.query(
         `SELECT revision, kind FROM control.agent_llm_sequences
           WHERE sequence_key = $1 FOR UPDATE`,
@@ -437,7 +561,12 @@ export class AgentControlStore {
     }
   }
 
-  async setDefaultSequence(kind, sequenceKey, { expectedRevision: expected, updatedBy = 'admin-token' } = {}) {
+  async setDefaultSequence(kind, sequenceKey, {
+    expectedRevision: expected,
+    expectedSequenceRevision = null,
+    verification = null,
+    updatedBy = 'admin-token',
+  } = {}) {
     assertKind(kind)
     if (sequenceKey != null) assertKey(sequenceKey, 'sequenceKey')
     expectedRevision(expected)
@@ -458,21 +587,43 @@ export class AgentControlStore {
         })
       }
       if (sequenceKey != null) {
+        const sequenceRevision = expectedRevision(expectedSequenceRevision)
+        // Read the candidate before taking Proxy locks, then lock and compare it
+        // after proof validation. Taking the LLM row lock first would invert
+        // saveSequence's Global -> Provider -> Proxy -> LLM order and deadlock.
+        const candidate = await client.query(
+          `SELECT enabled, provider_ids, provider_revision, revision FROM control.agent_llm_sequences
+            WHERE sequence_key = $1 AND kind = $2`,
+          [sequenceKey, kind],
+        )
+        if (!candidate.rows[0] || candidate.rows[0].enabled === false) {
+          invalid('invalid_agent_binding', 'The selected Sequence is missing or disabled')
+        }
+        const providerIds = candidate.rows[0].provider_ids || []
+        const providerRevision = Number(candidate.rows[0].provider_revision)
+        if (Number(candidate.rows[0].revision) !== sequenceRevision) {
+          throw new AppError(409, 'sequence_verification_stale', 'The selected Sequence changed during verification')
+        }
+        if (providerRevision !== verification?.settingsRevision) {
+          throw new AppError(409, 'sequence_verification_stale', 'The selected Sequence must be tested against the current Provider catalog')
+        }
+        await lockAndVerifyProviderRoutes(client, {
+          kind,
+          providerIds,
+          providerRevision,
+          verification,
+        })
         const sequence = await client.query(
-          `SELECT enabled, provider_revision FROM control.agent_llm_sequences
+          `SELECT enabled, provider_ids, provider_revision, revision FROM control.agent_llm_sequences
             WHERE sequence_key = $1 AND kind = $2
             FOR SHARE`,
           [sequenceKey, kind],
         )
-        if (!sequence.rows[0] || sequence.rows[0].enabled === false) {
-          invalid('invalid_agent_binding', 'The selected Sequence is missing or disabled')
-        }
-        const setting = await client.query(
-          'SELECT revision FROM control.agent_provider_settings WHERE kind = $1 FOR SHARE',
-          [kind],
-        )
-        if (Number(sequence.rows[0].provider_revision) !== Number(setting.rows[0]?.revision ?? 0)) {
-          throw new AppError(409, 'sequence_verification_stale', 'The selected Sequence must be tested against the current Provider catalog')
+        if (!sequence.rows[0] || sequence.rows[0].enabled === false
+          || Number(sequence.rows[0].provider_revision) !== providerRevision
+          || Number(sequence.rows[0].revision) !== sequenceRevision
+          || JSON.stringify(sequence.rows[0].provider_ids || []) !== JSON.stringify(providerIds)) {
+          throw new AppError(409, 'sequence_verification_stale', 'The selected Sequence changed during verification')
         }
       }
       const saved = await client.query(

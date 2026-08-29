@@ -1,6 +1,6 @@
 import { AppError } from '../core/errors.mjs'
-import { createHash } from 'node:crypto'
 import { createAgentFromProviders, parseProviderConfig } from './index.mjs'
+import { providerProxyRouteFingerprint } from './control-store.mjs'
 import { normalizeDatabaseProviders, publicSetting } from './settings-store.mjs'
 
 const DEFAULT_REFRESH_INTERVAL_MS = 5_000
@@ -22,23 +22,6 @@ function parseEnvironmentEmbeddingProviders(raw, expected = {}) {
     throw new AppError(500, 'invalid_configuration', 'Environment embedding provider dimensions must match MX_INSIGHT_EMBEDDING_DIMENSIONS')
   }
   return providers
-}
-
-function proxyControlFingerprint(control) {
-  const endpoints = (control?.proxyEndpoints || [])
-    .map(({ proxyKey, proxyUrl, enabled, revision }) => ({ proxyKey, proxyUrl, enabled, revision }))
-    .sort((left, right) => left.proxyKey.localeCompare(right.proxyKey))
-  const sequences = (control?.proxySequences || [])
-    .map(({ sequenceKey, proxyKeys, directFallback, enabled, revision }) => ({
-      sequenceKey, proxyKeys, directFallback, enabled, revision,
-    }))
-    .sort((left, right) => left.sequenceKey.localeCompare(right.sequenceKey))
-  return createHash('sha256').update(JSON.stringify({
-    endpoints,
-    sequences,
-    globalProxySequenceKey: control?.globalProxySequenceKey || null,
-    proxyRevision: control?.proxyRevision || 0,
-  })).digest('hex')
 }
 
 function environmentSetting(kind, raw, metadata, expectedEmbedding = {}) {
@@ -772,7 +755,7 @@ export class AgentRuntime {
             kind,
             providerId,
             settingsRevision: evidenceSetting?.revision ?? 0,
-            proxyFingerprint: proxyControlFingerprint(evidenceControl),
+            proxyFingerprint: providerProxyRouteFingerprint(provider, evidenceControl),
             model: provider.model,
             protocol: provider.protocol || 'openai-compatible',
             ok: Boolean(result?.ok),
@@ -800,14 +783,18 @@ export class AgentRuntime {
     if (new Set(input.providerIds).size !== input.providerIds.length) {
       throw new AppError(400, 'invalid_agent_sequence', 'An LLM Sequence must not repeat a Provider')
     }
+    await this.#requireFreshVerificationState('LLM Sequence was not saved')
     const changesActiveDefault = this.#control.get(kind)?.defaultBinding?.sequenceKey === sequenceKey
     // Verification is deliberately exact-provider and sequential. It cannot
     // silently pass because a different fallback answered, and it stays below
     // the runtime's bounded probe concurrency.
-    const tests = await this.#ensureProvidersVerified(kind, input.providerIds)
-    const providerRevision = this.#settings.get(kind)?.revision ?? 0
+    const { tests, verification } = await this.#ensureProvidersVerified(kind, input.providerIds)
+    await this.#requireFreshVerificationState('LLM Sequence was not saved')
+    this.#assertVerificationState(kind, input.providerIds, verification)
+    const providerRevision = verification.settingsRevision
     const saved = await this.controlStore.saveSequence(sequenceKey, input, {
       providerRevision,
+      verification,
       verifiedBy: updatedBy,
       updatedBy,
     })
@@ -822,10 +809,13 @@ export class AgentRuntime {
     }
     // Require fresh evidence for the exact provider revision before binding.
     // A just-saved Sequence reuses its probes, avoiding duplicate paid calls.
-    const snapshot = await this.controlStore.loadRuntimeSnapshot(kind)
-    const sequence = snapshot.sequences.find((candidate) => candidate.sequenceKey === sequenceKey)
+    await this.#requireFreshVerificationState('The business default was not changed')
+    const sequence = this.#control.get(kind)?.sequences
+      ?.find((candidate) => candidate.sequenceKey === sequenceKey)
     if (!sequence) throw new AppError(404, 'agent_sequence_not_found', 'The LLM Sequence was not found')
-    await this.#ensureProvidersVerified(kind, sequence.providerIds)
+    const { verification } = await this.#ensureProvidersVerified(kind, sequence.providerIds)
+    await this.#requireFreshVerificationState('The business default was not changed')
+    this.#assertVerificationState(kind, sequence.providerIds, verification)
     // The re-test above records evidence but does not change providerRevision;
     // save the same Sequence to advance its verification timestamp/revision.
     const verified = await this.controlStore.saveSequence(sequenceKey, {
@@ -835,12 +825,15 @@ export class AgentRuntime {
       providerIds: sequence.providerIds,
       enabled: sequence.enabled,
     }, {
-      providerRevision: this.#settings.get(kind)?.revision ?? 0,
+      providerRevision: verification.settingsRevision,
+      verification,
       verifiedBy: updatedBy,
       updatedBy,
     })
     const binding = await this.controlStore.setDefaultSequence(kind, sequenceKey, {
       expectedRevision: input?.expectedRevision,
+      expectedSequenceRevision: verified.revision,
+      verification,
       updatedBy,
     })
     const runtimeApplied = await this.refresh({ force: true })
@@ -864,30 +857,82 @@ export class AgentRuntime {
     return { binding, runtimeApplied }
   }
 
-  async #ensureProvidersVerified(kind, providerIds) {
+  async #requireFreshVerificationState(action) {
+    if (!await this.refresh({ force: true })) {
+      throw new AppError(
+        503,
+        'agent_settings_refresh_failed',
+        `Current Agent settings could not be loaded; ${action}`,
+      )
+    }
+  }
+
+  #providerVerificationState(kind, providerIds) {
     const settingsRevision = this.#settings.get(kind)?.revision ?? 0
-    const proxyFingerprint = proxyControlFingerprint(this.#control.get(kind))
-    const control = await this.controlStore.listPublicControl()
-    const currentPasses = new Map(
-      control.providerTests
+    const providers = new Map(
+      (this.#settings.get(kind)?.providers || []).map((provider) => [provider.id, provider]),
+    )
+    const proxyFingerprints = new Map(providerIds.map((providerId) => [
+      providerId,
+      providerProxyRouteFingerprint(providers.get(providerId), this.#control.get(kind)),
+    ]))
+    return { settingsRevision, proxyFingerprints }
+  }
+
+  #assertVerificationState(kind, providerIds, expected) {
+    const current = this.#providerVerificationState(kind, providerIds)
+    const unchanged = current.settingsRevision === expected.settingsRevision
+      && providerIds.every((providerId) => (
+        current.proxyFingerprints.get(providerId) === expected.proxyFingerprints.get(providerId)
+      ))
+    if (!unchanged) {
+      throw new AppError(
+        409,
+        'agent_provider_verification_stale',
+        'Provider or Proxy routing changed during verification; reload and retry',
+      )
+    }
+  }
+
+  async #ensureProvidersVerified(kind, providerIds) {
+    const verification = this.#providerVerificationState(kind, providerIds)
+    const matchingPasses = (providerTests) => new Map(
+      providerTests
         .filter((test) => {
           const testedAt = Date.parse(test.testedAt || '')
           return test.kind === kind
-            && test.settingsRevision === settingsRevision
-            && test.proxyFingerprint === proxyFingerprint
+            && test.settingsRevision === verification.settingsRevision
+            && test.proxyFingerprint === verification.proxyFingerprints.get(test.providerId)
             && test.ok
             && Number.isFinite(testedAt)
             && this.nowFn() - testedAt <= PROBE_EVIDENCE_MAX_AGE_MS
         })
         .map((test) => [test.providerId, test]),
     )
+    const control = await this.controlStore.listPublicControl()
+    const currentPasses = matchingPasses(control.providerTests)
     const tests = []
     for (const providerId of providerIds) {
       const passed = currentPasses.get(providerId)
       if (passed) tests.push(passed)
       else tests.push(await this.testProvider({ kind, providerId }))
     }
-    return tests
+    // Do not trust only the live call result: route A -> B -> A can otherwise
+    // make the final in-memory fingerprint look unchanged even though a probe
+    // actually ran on B. Re-read durable evidence and require every Provider's
+    // latest successful proof to match the exact state captured above.
+    const persistedPasses = matchingPasses(
+      (await this.controlStore.listPublicControl()).providerTests,
+    )
+    const exactTests = providerIds.map((providerId) => persistedPasses.get(providerId))
+    if (exactTests.some((test) => !test)) {
+      throw new AppError(
+        409,
+        'agent_provider_verification_stale',
+        'Provider or Proxy routing changed during verification; reload and retry',
+      )
+    }
+    return { tests: exactTests, verification }
   }
 
   async testSequence(sequenceKey, { kind, expectedRevision, signal } = {}) {
