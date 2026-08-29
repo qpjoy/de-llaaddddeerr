@@ -2863,6 +2863,95 @@ select {
   color: var(--qp-warning);
 }
 
+.mih-agent-provider-inheritance {
+  align-self: stretch;
+  padding: 12px 13px;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 38%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  background: color-mix(in srgb, var(--qp-primary) 5%, var(--qp-bg-2));
+}
+
+.mih-agent-provider-inheritance.is-invalid {
+  border-color: color-mix(in srgb, var(--qp-danger) 58%, var(--qp-line));
+  background: color-mix(in srgb, var(--qp-danger) 7%, var(--qp-bg-2));
+}
+
+.mih-agent-provider-inheritance > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mih-agent-provider-inheritance > p {
+  margin: 5px 0 0;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-agent-provider-inheritance dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 12px 0 0;
+}
+
+.mih-agent-provider-inheritance dl > div {
+  min-width: 0;
+}
+
+.mih-agent-provider-inheritance dt {
+  color: var(--qp-text-4);
+  font-size: var(--qp-font-caption-2);
+  text-transform: uppercase;
+}
+
+.mih-agent-provider-inheritance dd {
+  margin: 3px 0 0;
+  color: var(--qp-text-2);
+  font-size: var(--qp-font-caption-1);
+  overflow-wrap: anywhere;
+}
+
+.mih-agent-provider-capability-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--qp-warning) 42%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  background: color-mix(in srgb, var(--qp-warning) 7%, var(--qp-bg-2));
+  color: var(--qp-text-2);
+  font-size: var(--qp-font-caption-1);
+  line-height: 1.5;
+}
+
+.mih-agent-provider-capability-warning > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--qp-warning);
+}
+
+.mih-proxy-inherited-binding {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 32%, var(--qp-line));
+  border-radius: var(--qp-radius-sm);
+  background: color-mix(in srgb, var(--qp-primary) 5%, var(--qp-bg-2));
+}
+
+.mih-proxy-inherited-binding strong {
+  color: var(--qp-text-2);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-proxy-inherited-binding small {
+  overflow-wrap: anywhere;
+}
+
 .mih-agent-provider-editor code,
 .mih-table td code {
   overflow-wrap: anywhere;
@@ -3014,6 +3103,10 @@ select {
 
   .mih-agent-provider-editor__wide {
     grid-column: auto;
+  }
+
+  .mih-agent-provider-inheritance dl {
+    grid-template-columns: 1fr;
   }
 
   .mih-agent-provider-editor form > footer,

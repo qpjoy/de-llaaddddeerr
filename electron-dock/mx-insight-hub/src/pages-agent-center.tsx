@@ -45,7 +45,15 @@ type Provider = {
   priority?: number
   authMode?: 'bearer' | 'none'
   enabled?: boolean
+  connectionReady?: boolean
   keyConfigured?: boolean
+  connection?:
+    | { mode: 'dedicated' }
+    | { mode: 'inherit-chat', providerId: string }
+  embeddingCapability?: {
+    status: 'supported' | 'unsupported' | 'probe-required'
+    reason?: string
+  }
 }
 
 type LlmSequence = {
@@ -210,6 +218,17 @@ function sequenceNeedsRevalidation(sequence: LlmSequence | undefined, settings: 
 }
 
 function publicProviderPayload(provider: Provider) {
+  if (provider.connection?.mode === 'inherit-chat') {
+    return {
+      id: provider.id,
+      displayName: provider.displayName || provider.id,
+      model: provider.model,
+      ...(provider.dimensions ? { dimensions: provider.dimensions } : {}),
+      enabled: provider.enabled !== false,
+      priority: provider.priority ?? 0,
+      connection: provider.connection,
+    }
+  }
   return {
     id: provider.id,
     displayName: provider.displayName || provider.id,
@@ -222,7 +241,12 @@ function publicProviderPayload(provider: Provider) {
     enabled: provider.enabled !== false,
     priority: provider.priority ?? 0,
     authMode: provider.authMode || 'bearer',
+    ...(provider.dimensions ? { connection: { mode: 'dedicated' as const } } : {}),
   }
+}
+
+function providerOwnsProxyBinding(provider: Provider) {
+  return provider.connection?.mode !== 'inherit-chat'
 }
 
 export function AgentSequencePage({ token, session, onUnauthorized, notify }: PageProps) {
@@ -246,7 +270,7 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
   const settings = state.data?.settings || {}
   const providers = useMemo<Provider[]>(() => (
     (settings[draft.kind]?.providers || [])
-      .filter((provider: Provider) => provider.enabled !== false)
+      .filter((provider: Provider) => provider.enabled !== false && provider.connectionReady !== false)
   ), [draft.kind, settings])
   const providerById = useMemo(() => new Map(providers.map((provider) => [provider.id, provider])), [providers])
   const defaultBinding = bindings.find((binding: any) => binding.kind === draft.kind)
@@ -583,7 +607,7 @@ export function AgentSequencePage({ token, session, onUnauthorized, notify }: Pa
                         event.dataTransfer.effectAllowed = 'copy'
                         event.dataTransfer.setData(PROVIDER_MIME, provider.id)
                       }}><DotsSixVertical size={19} /></button>
-                    <span><strong>{provider.displayName || provider.id}</strong><code>{provider.id}</code><small>{provider.model} · {provider.protocol || 'openai-compatible'}</small></span>
+                    <span><strong>{provider.displayName || provider.id}</strong><code>{provider.id}</code><small>{provider.model} · {provider.protocol || 'openai-compatible'}{provider.connection?.mode === 'inherit-chat' ? ` · 继承 chat:${provider.connection.providerId}` : ''}</small></span>
                     <StatusBadge status={provider.keyConfigured === false ? 'suspended' : 'active'}
                       label={provider.keyConfigured === false ? '缺 Key' : provider.authMode === 'none' ? '无需 Key' : 'Key 已配置'} />
                   </article>
@@ -712,8 +736,9 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
   const routeProviderOptions = providerRows.map(({ kind, provider }) => ({
     value: `${kind}:${provider.id}`,
     label: provider.displayName || provider.id,
-    description: `${kind} · ${provider.model} · ${provider.id}`,
-    disabled: provider.enabled === false || (provider.authMode !== 'none' && provider.keyConfigured === false),
+    description: `${kind} · ${provider.model} · ${provider.id}${provider.connection?.mode === 'inherit-chat' ? ` · 跟随 chat:${provider.connection.providerId}` : ''}`,
+    disabled: provider.enabled === false || provider.connectionReady === false
+      || (provider.authMode !== 'none' && provider.keyConfigured === false),
   }))
   const routeOptions = [
     {
@@ -747,7 +772,9 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
     policy: [persistedPolicyMode, persistedPolicySequenceKey, persistedPolicyRevision],
     baseline,
   })
-  const sequenceDraftProviderRefs = providerRows.filter(({ provider }) => provider.proxySequenceKey === sequenceDraft.sequenceKey)
+  const sequenceDraftProviderRefs = providerRows.filter(({ provider }) => (
+    providerOwnsProxyBinding(provider) && provider.proxySequenceKey === sequenceDraft.sequenceKey
+  ))
   const sequenceDraftLlmRefs = llmSequences.filter((sequence) => sequence.proxySequenceKey === sequenceDraft.sequenceKey)
   const sequenceDraftReferenceLabels = [
     ...(persistedPolicyMode === 'proxy-sequence' && persistedPolicySequenceKey === sequenceDraft.sequenceKey ? ['Hub 应用策略'] : []),
@@ -940,7 +967,9 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
   }
 
   const removeProxySequence = (sequence: ProxySequence) => {
-    const providerRefs = providerRows.filter(({ provider }) => provider.proxySequenceKey === sequence.sequenceKey)
+    const providerRefs = providerRows.filter(({ provider }) => (
+      providerOwnsProxyBinding(provider) && provider.proxySequenceKey === sequence.sequenceKey
+    ))
     const llmSequenceRefs = llmSequences.filter((candidate) => candidate.proxySequenceKey === sequence.sequenceKey)
     const usedByHubPolicy = persistedPolicyMode === 'proxy-sequence' && persistedPolicySequenceKey === sequence.sequenceKey
     if (usedByHubPolicy || providerRefs.length > 0 || llmSequenceRefs.length > 0) {
@@ -1008,6 +1037,11 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
       setError(new Error(`${kind} Provider 仍由环境变量管理，请先在 LLM Provider 迁移为数据库配置。`))
       return
     }
+    const selectedProvider = setting.providers.find((provider: Provider) => provider.id === providerId)
+    if (!selectedProvider || !providerOwnsProxyBinding(selectedProvider)) {
+      setError(new Error('该 Embedding Provider 继承 Chat Provider 的 Proxy，不能单独设置兼容绑定。'))
+      return
+    }
     setBusy(`provider:${kind}:${providerId}`)
     setError(null)
     try {
@@ -1054,7 +1088,7 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
       return `${explicit} 个 LLM Sequence 设置显式网络策略`
     }
     if (layer === 'provider-compat') {
-      const bound = providerRows.filter(({ provider }) => provider.proxySequenceKey).length
+      const bound = providerRows.filter(({ provider }) => providerOwnsProxyBinding(provider) && provider.proxySequenceKey).length
       return `${bound} 个 Provider 保留低优先级兼容绑定`
     }
     if (layer === 'hub-policy') return `${egressModeLabel(persistedPolicyMode)}${persistedPolicySequenceKey ? ` · ${persistedPolicySequenceKey}` : ''}`
@@ -1159,21 +1193,26 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
             <div className="mih-proxy-provider-bindings">
               {providerRows.map(({ kind, provider }) => (
                 <div key={`${kind}:${provider.id}`}>
-                  <span><strong>{provider.displayName || provider.id}</strong><small>{kind} · <code>{provider.id}</code></small></span>
-                  <DropdownField label="兼容 Proxy Sequence" value={provider.proxySequenceKey || ''}
-                    disabled={!canEdit || Boolean(busy) || state.data?.settings?.[kind]?.source !== 'database'}
-                    onChange={(sequenceKey: string) => bindProvider(kind, provider.id, sequenceKey)}
-                    options={[
-                      { value: '', label: '不设兼容绑定 · 继承 Hub 应用策略', description: '继续按 Hub → Docker daemon → Pod / Node 系统出网解析。' },
-                      ...sequences.filter((sequence) => sequence.enabled).map((sequence) => ({
-                        value: sequence.sequenceKey,
-                        label: sequence.displayName,
-                        description: enabledEndpointCount(sequence)
-                          ? `${enabledEndpointCount(sequence)} 个已启用 endpoint`
-                          : '没有已启用 endpoint，不能绑定',
-                        disabled: enabledEndpointCount(sequence) === 0,
-                      })),
-                    ] as never[]} />
+                  <span><strong>{provider.displayName || provider.id}</strong><small>{kind} · <code>{provider.id}</code>{provider.connection?.mode === 'inherit-chat' ? <> · 继承 <code>chat:{provider.connection.providerId}</code></> : null}</small></span>
+                  {provider.connection?.mode === 'inherit-chat' ? (
+                    <div className="mih-proxy-inherited-binding" role="status">
+                      <strong>跟随 Chat Provider</strong>
+                      <small>连接、凭据和 Proxy 均由 <code>{provider.connection.providerId}</code> 管理</small>
+                    </div>
+                  ) : <DropdownField label="兼容 Proxy Sequence" value={provider.proxySequenceKey || ''}
+                      disabled={!canEdit || Boolean(busy) || state.data?.settings?.[kind]?.source !== 'database'}
+                      onChange={(sequenceKey: string) => bindProvider(kind, provider.id, sequenceKey)}
+                      options={[
+                        { value: '', label: '不设兼容绑定 · 继承 Hub 应用策略', description: '继续按 Hub → Docker daemon → Pod / Node 系统出网解析。' },
+                        ...sequences.filter((sequence) => sequence.enabled).map((sequence) => ({
+                          value: sequence.sequenceKey,
+                          label: sequence.displayName,
+                          description: enabledEndpointCount(sequence)
+                            ? `${enabledEndpointCount(sequence)} 个已启用 endpoint`
+                            : '没有已启用 endpoint，不能绑定',
+                          disabled: enabledEndpointCount(sequence) === 0,
+                        })),
+                      ] as never[]} />}
                 </div>
               ))}
               {providerRows.length === 0 ? <p className="mih-agent-center-empty">尚无 Provider；请先到 LLM Provider 新建。</p> : null}
@@ -1272,7 +1311,9 @@ export function AgentProxyPage({ token, session, onUnauthorized, notify }: PageP
           actions={canEdit ? <button className="qp-button qp-button--outline" type="button" disabled={Boolean(busy)} onClick={newProxySequence}><Plus size={16} />新建 Sequence</button> : null}>
           <div className="mih-agent-crud-list mih-proxy-sequence-list">
             {sequences.map((sequence) => {
-              const providerRefs = providerRows.filter(({ provider }) => provider.proxySequenceKey === sequence.sequenceKey)
+              const providerRefs = providerRows.filter(({ provider }) => (
+                providerOwnsProxyBinding(provider) && provider.proxySequenceKey === sequence.sequenceKey
+              ))
               const llmSequenceRefs = llmSequences.filter((candidate) => candidate.proxySequenceKey === sequence.sequenceKey)
               const isGlobal = persistedPolicyMode === 'proxy-sequence' && persistedPolicySequenceKey === sequence.sequenceKey
               const enabledCount = enabledEndpointCount(sequence)

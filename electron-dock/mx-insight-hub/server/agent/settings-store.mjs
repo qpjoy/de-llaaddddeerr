@@ -1,5 +1,9 @@
 import { AppError } from '../core/errors.mjs'
 import { isIP } from 'node:net'
+import {
+  classifyEmbeddingConnection,
+  classifyEmbeddingModel,
+} from './embedding-capabilities.mjs'
 
 const KINDS = new Set(['chat', 'embedding'])
 const SOURCES = new Set(['environment', 'database'])
@@ -11,7 +15,7 @@ const DEFAULT_TIMEOUT_MS = 60_000
 const INPUT_FIELDS = new Set([
   'id', 'baseUrl', 'model', 'timeoutMs', 'dimensions', 'enabled', 'priority',
   'authMode', 'apiKey', 'clearApiKey', 'displayName', 'protocol',
-  'proxySequenceKey',
+  'proxySequenceKey', 'connection',
 ])
 const UPDATE_FIELDS = new Set(['expectedRevision', 'source', 'providers'])
 
@@ -60,6 +64,34 @@ function normalizeBaseUrl(value, index) {
   return url.toString().replace(/\/+$/, '')
 }
 
+function normalizeConnection(value, index, kind) {
+  if (value == null) return { mode: 'dedicated' }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    invalid(`provider[${index}].connection must be an object`)
+  }
+  const mode = value.mode
+  if (mode === 'dedicated') {
+    if (Object.keys(value).some((field) => field !== 'mode')) {
+      invalid(`provider[${index}].connection contains unsupported fields`)
+    }
+    return { mode }
+  }
+  if (mode !== 'inherit-chat') {
+    invalid(`provider[${index}].connection.mode must be dedicated or inherit-chat`)
+  }
+  if (kind !== 'embedding') {
+    invalid(`provider[${index}].connection.mode inherit-chat is only valid for embedding providers`)
+  }
+  if (Object.keys(value).some((field) => !['mode', 'providerId'].includes(field))) {
+    invalid(`provider[${index}].connection contains unsupported fields`)
+  }
+  if (typeof value.providerId !== 'string'
+    || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value.providerId)) {
+    invalid(`provider[${index}].connection.providerId must be a lowercase provider identifier`)
+  }
+  return { mode, providerId: value.providerId }
+}
+
 function normalizeProvider(entry, index, kind) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) invalid(`provider[${index}] must be an object`)
   for (const field of Object.keys(entry)) {
@@ -71,8 +103,20 @@ function normalizeProvider(entry, index, kind) {
   if (typeof entry.model !== 'string' || !entry.model.trim() || entry.model.trim().length > 200) {
     invalid(`provider[${index}].model is required and must be at most 200 characters`)
   }
-  const timeoutMs = entry.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 300_000) {
+  const connection = normalizeConnection(entry.connection, index, kind)
+  const inherited = connection.mode === 'inherit-chat'
+  const inheritedConnectionFields = [
+    'baseUrl', 'protocol', 'proxySequenceKey', 'timeoutMs', 'authMode',
+    'apiKey', 'clearApiKey',
+  ]
+  if (inherited) {
+    const conflict = inheritedConnectionFields.find((field) => Object.hasOwn(entry, field))
+    if (conflict) {
+      invalid(`provider[${index}].${conflict} must be omitted when connection.mode is inherit-chat`)
+    }
+  }
+  const timeoutMs = inherited ? null : entry.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  if (!inherited && (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 300_000)) {
     invalid(`provider[${index}].timeoutMs must be an integer between 1000 and 300000`)
   }
   const enabled = entry.enabled ?? true
@@ -81,20 +125,22 @@ function normalizeProvider(entry, index, kind) {
   if (!Number.isInteger(priority) || priority < 0 || priority > 10_000) {
     invalid(`provider[${index}].priority must be an integer between 0 and 10000`)
   }
-  const authMode = entry.authMode ?? 'bearer'
-  if (!AUTH_MODES.has(authMode)) invalid(`provider[${index}].authMode must be bearer or none`)
+  const authMode = inherited ? null : entry.authMode ?? 'bearer'
+  if (!inherited && !AUTH_MODES.has(authMode)) invalid(`provider[${index}].authMode must be bearer or none`)
   const displayName = entry.displayName == null ? entry.id : entry.displayName
   if (typeof displayName !== 'string' || !displayName.trim() || displayName.trim().length > 120) {
     invalid(`provider[${index}].displayName must be a non-empty string of at most 120 characters`)
   }
-  const protocol = entry.protocol ?? 'openai-compatible'
-  if (!PROVIDER_PROTOCOLS.has(protocol)) {
+  const protocol = inherited ? null : entry.protocol ?? 'openai-compatible'
+  if (!inherited && !PROVIDER_PROTOCOLS.has(protocol)) {
     invalid(`provider[${index}].protocol must be openai-compatible or anthropic-messages`)
   }
-  if (kind === 'embedding' && protocol !== 'openai-compatible') {
+  if (!inherited && kind === 'embedding' && protocol !== 'openai-compatible') {
     invalid(`provider[${index}].protocol must be openai-compatible for embeddings`)
   }
-  const proxySequenceKey = entry.proxySequenceKey == null || entry.proxySequenceKey === ''
+  const proxySequenceKey = inherited
+    ? null
+    : entry.proxySequenceKey == null || entry.proxySequenceKey === ''
     ? null
     : entry.proxySequenceKey
   if (proxySequenceKey != null && (
@@ -125,7 +171,7 @@ function normalizeProvider(entry, index, kind) {
   if (entry.apiKey != null && entry.clearApiKey) {
     invalid(`provider[${index}] cannot set and clear its API key together`)
   }
-  if (authMode === 'none' && entry.apiKey != null) {
+  if (!inherited && authMode === 'none' && entry.apiKey != null) {
     invalid(`provider[${index}] cannot set an API key when authMode is none`)
   }
 
@@ -133,15 +179,18 @@ function normalizeProvider(entry, index, kind) {
     provider: {
       id: entry.id,
       displayName: displayName.trim(),
-      baseUrl: normalizeBaseUrl(entry.baseUrl, index),
       model: entry.model.trim(),
-      protocol,
-      proxySequenceKey,
-      timeoutMs,
+      connection,
+      ...(!inherited ? {
+        baseUrl: normalizeBaseUrl(entry.baseUrl, index),
+        protocol,
+        proxySequenceKey,
+        timeoutMs,
+        authMode,
+      } : {}),
       ...(kind === 'embedding' ? { dimensions } : {}),
       enabled,
       priority,
-      authMode,
     },
     apiKey: entry.apiKey == null ? null : entry.apiKey.trim(),
     clearApiKey: entry.clearApiKey === true,
@@ -195,6 +244,156 @@ function settingRow(row) {
   }
 }
 
+function inheritedConnectionError(message, details = undefined) {
+  throw new AppError(409, 'embedding_connection_unavailable', message, details)
+}
+
+function embeddingCapabilityError(provider, capability, index = null) {
+  const label = index == null ? `Embedding Provider ${provider.id}` : `provider[${index}]`
+  if (capability.status === 'unsupported') {
+    return `${label} cannot use this connection for embeddings: ${capability.reason}`
+  }
+  // The current router does not send the optional `dimensions` request field.
+  // Accepting a shortened OpenAI vector here would therefore save a snapshot
+  // which is guaranteed to fail its probe and can never match the index lock.
+  if (capability.vendor === 'openai'
+    && capability.defaultDimensions != null
+    && provider.dimensions !== capability.defaultDimensions) {
+    return `${label}.dimensions must be ${capability.defaultDimensions} for ${provider.model}`
+  }
+  return null
+}
+
+/** Return the persisted connection discriminator, including for legacy rows. */
+export function providerConnection(provider, kind = 'embedding') {
+  return normalizeConnection(provider?.connection, provider?.priority ?? 0, kind)
+}
+
+/**
+ * Resolve an Embedding catalog without copying any credential. Inherited rows
+ * keep their reference while exposing only the parent's safe connection
+ * metadata needed by the runtime, Proxy proof, and read-only Admin UI.
+ */
+export function resolveEmbeddingProviderSetting(embeddingSetting, chatSetting, {
+  tolerateUnavailable = false,
+} = {}) {
+  const normalizedEmbedding = normalizeDatabaseProviders(embeddingSetting?.providers || [], {
+    kind: 'embedding',
+  })
+  const chatCatalog = chatSetting?.source === 'database'
+    ? new Map(normalizeDatabaseProviders(chatSetting.providers || [], { kind: 'chat' })
+      .map(({ provider }) => [provider.id, provider]))
+    : new Map()
+
+  const providers = normalizedEmbedding.map(({ provider }, index) => {
+    const connection = providerConnection(provider)
+    if (connection.mode === 'dedicated') {
+      const embeddingCapability = classifyEmbeddingModel(provider, provider.model)
+      const connectionError = embeddingCapabilityError(provider, embeddingCapability, index)
+      if (connectionError && !tolerateUnavailable) invalid(connectionError)
+      return {
+        ...provider,
+        connection,
+        connectionReady: !connectionError,
+        connectionError,
+        embeddingCapability,
+      }
+    }
+    if (chatSetting?.source !== 'database') {
+      if (tolerateUnavailable) {
+        return {
+          ...provider,
+          connection,
+          connectionReady: false,
+          connectionError: 'The database-managed Chat Provider catalog is unavailable',
+          baseUrl: null,
+          protocol: 'openai-compatible',
+          proxySequenceKey: null,
+          timeoutMs: null,
+          authMode: 'bearer',
+          embeddingCapability: classifyEmbeddingModel({}, provider.model),
+        }
+      }
+      inheritedConnectionError(
+        `Embedding Provider ${provider.id} requires a database-managed Chat Provider catalog`,
+        { providerId: provider.id, chatProviderId: connection.providerId },
+      )
+    }
+    const parent = chatCatalog.get(connection.providerId)
+    if (!parent) {
+      if (tolerateUnavailable) {
+        return {
+          ...provider,
+          connection,
+          connectionReady: false,
+          connectionError: `Referenced Chat Provider ${connection.providerId} is missing`,
+          baseUrl: null,
+          protocol: 'openai-compatible',
+          proxySequenceKey: null,
+          timeoutMs: null,
+          authMode: 'bearer',
+          embeddingCapability: classifyEmbeddingModel({}, provider.model),
+        }
+      }
+      inheritedConnectionError(
+        `Embedding Provider ${provider.id} references missing Chat Provider ${connection.providerId}`,
+        { providerId: provider.id, chatProviderId: connection.providerId },
+      )
+    }
+    if (parent.protocol !== 'openai-compatible') {
+      if (tolerateUnavailable) {
+        const embeddingCapability = classifyEmbeddingModel(parent, provider.model)
+        return {
+          ...provider,
+          connection,
+          connectionReady: false,
+          connectionError: `Chat Provider ${parent.id} is not OpenAI-compatible`,
+          baseUrl: parent.baseUrl,
+          protocol: parent.protocol,
+          proxySequenceKey: parent.proxySequenceKey || null,
+          timeoutMs: parent.timeoutMs,
+          authMode: parent.authMode,
+          embeddingCapability,
+        }
+      }
+      inheritedConnectionError(
+        `Chat Provider ${parent.id} does not expose an OpenAI-compatible embedding connection`,
+        { providerId: provider.id, chatProviderId: parent.id },
+      )
+    }
+    const effective = {
+      ...provider,
+      connection,
+      baseUrl: parent.baseUrl,
+      protocol: parent.protocol,
+      proxySequenceKey: parent.proxySequenceKey || null,
+      timeoutMs: parent.timeoutMs,
+      authMode: parent.authMode,
+      connectionReady: parent.enabled !== false,
+    }
+    const embeddingCapability = classifyEmbeddingModel(effective, provider.model)
+    const capabilityError = embeddingCapabilityError(effective, embeddingCapability, index)
+    if (capabilityError && !tolerateUnavailable) invalid(capabilityError)
+    const connectionError = parent.enabled === false
+      ? `Chat Provider ${parent.id} is disabled`
+      : capabilityError
+    return {
+      ...effective,
+      connectionReady: !connectionError,
+      connectionError,
+      embeddingCapability,
+    }
+  })
+  return { ...embeddingSetting, providers }
+}
+
+export function inheritedChatProviderIds(setting) {
+  return new Set((setting?.providers || []).flatMap((provider) => {
+    const connection = providerConnection(provider)
+    return connection.mode === 'inherit-chat' ? [connection.providerId] : []
+  }))
+}
+
 export function publicSetting(setting, configuredIds = new Set()) {
   return {
     kind: setting.kind,
@@ -206,6 +405,14 @@ export function publicSetting(setting, configuredIds = new Set()) {
       baseUrl: provider.baseUrl,
       model: provider.model,
       protocol: provider.protocol || 'openai-compatible',
+      connection: providerConnection(provider, setting.kind),
+      embeddingCapability: provider.embeddingCapability || (
+        setting.kind === 'embedding'
+          ? classifyEmbeddingModel(provider, provider.model)
+          : classifyEmbeddingConnection(provider)
+      ),
+      connectionReady: provider.connectionReady !== false,
+      connectionError: provider.connectionError || null,
       proxySequenceKey: provider.proxySequenceKey || null,
       timeoutMs: provider.timeoutMs,
       ...(setting.kind === 'embedding' ? { dimensions: provider.dimensions } : {}),
@@ -271,13 +478,64 @@ export class AgentSettingsStore {
     if (typeof providerId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(providerId)) {
       invalid('providerId must be a lowercase provider identifier')
     }
-    const { rows } = await this.pool.query(
-      `SELECT api_key
-         FROM control.agent_provider_credentials
-        WHERE kind = $1 AND provider_id = $2`,
-      [kind, providerId],
-    )
-    return rows[0]?.api_key ?? null
+    if (kind === 'chat') {
+      const { rows } = await this.pool.query(
+        `SELECT api_key
+           FROM control.agent_provider_credentials
+          WHERE kind = $1 AND provider_id = $2`,
+        [kind, providerId],
+      )
+      return rows[0]?.api_key ?? null
+    }
+
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const settingResults = []
+      for (const settingKind of ['chat', 'embedding']) {
+        settingResults.push(await client.query(
+          `SELECT kind, source, revision, providers, locked_embedding_model,
+                  locked_embedding_dimensions, updated_by, updated_at
+             FROM control.agent_provider_settings
+            WHERE kind = $1`,
+          [settingKind],
+        ))
+      }
+      const embedding = settingResults[1].rows[0] ? settingRow(settingResults[1].rows[0]) : null
+      const saved = embedding?.providers?.find((provider) => provider.id === providerId)
+      if (!saved) {
+        await client.query('COMMIT')
+        return null
+      }
+      const connection = providerConnection(saved)
+      const credentialKind = connection.mode === 'inherit-chat' ? 'chat' : 'embedding'
+      const credentialProviderId = connection.mode === 'inherit-chat'
+        ? connection.providerId
+        : providerId
+      // Resolve the inherited metadata in the same snapshot before selecting
+      // its secret. This prevents a stale reference from revealing an
+      // unrelated credential after a concurrent catalog replacement.
+      if (connection.mode === 'inherit-chat') {
+        const chat = settingResults[0].rows[0] ? settingRow(settingResults[0].rows[0]) : null
+        resolveEmbeddingProviderSetting(
+          { ...embedding, providers: [saved] },
+          chat,
+        )
+      }
+      const { rows } = await client.query(
+        `SELECT api_key
+           FROM control.agent_provider_credentials
+          WHERE kind = $1 AND provider_id = $2`,
+        [credentialKind, credentialProviderId],
+      )
+      await client.query('COMMIT')
+      return rows[0]?.api_key ?? null
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   /**
@@ -293,6 +551,22 @@ export class AgentSettingsStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      let chatSetting = null
+      if (kind === 'embedding') {
+        const chatResult = await client.query(
+          `SELECT kind, source, revision, providers, locked_embedding_model,
+                  locked_embedding_dimensions, updated_by, updated_at
+             FROM control.agent_provider_settings
+            WHERE kind = 'chat'`,
+        )
+        chatSetting = chatResult.rows[0]
+          ? settingRow(chatResult.rows[0])
+          : {
+              kind: 'chat', source: 'environment', revision: 0, providers: [],
+              lockedEmbeddingModel: null, lockedEmbeddingDimensions: null,
+              updatedBy: null, updatedAt: null,
+            }
+      }
       const settingResult = await client.query(
         `SELECT kind, source, revision, providers, locked_embedding_model,
                 locked_embedding_dimensions, updated_by, updated_at
@@ -308,6 +582,7 @@ export class AgentSettingsStore {
             updatedBy: null, updatedAt: null,
           }
       let credentials = new Map()
+      let inheritedChatCredentials = new Map()
       if (setting.source === 'database') {
         const credentialResult = await client.query(
           `SELECT provider_id, api_key
@@ -316,9 +591,19 @@ export class AgentSettingsStore {
           [kind],
         )
         credentials = new Map(credentialResult.rows.map((row) => [row.provider_id, row.api_key]))
+        if (kind === 'embedding' && inheritedChatProviderIds(setting).size > 0) {
+          const chatCredentialResult = await client.query(
+            `SELECT provider_id, api_key
+               FROM control.agent_provider_credentials
+              WHERE kind = 'chat'`,
+          )
+          inheritedChatCredentials = new Map(
+            chatCredentialResult.rows.map((row) => [row.provider_id, row.api_key]),
+          )
+        }
       }
       await client.query('COMMIT')
-      return { setting, credentials }
+      return { setting, credentials, chatSetting, inheritedChatCredentials }
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {})
       throw error
@@ -328,11 +613,38 @@ export class AgentSettingsStore {
   }
 
   async loadPublicSetting(kind) {
-    const [setting, configuredIds] = await Promise.all([
-      this.loadSetting(kind),
-      this.loadCredentialIds(kind),
+    if (kind === 'chat') {
+      const [setting, configuredIds] = await Promise.all([
+        this.loadSetting(kind),
+        this.loadCredentialIds(kind),
+      ])
+      return publicSetting(setting, configuredIds)
+    }
+    const [setting, configuredIds, chatSetting, chatConfiguredIds] = await Promise.all([
+      this.loadSetting('embedding'),
+      this.loadCredentialIds('embedding'),
+      this.loadSetting('chat'),
+      this.loadCredentialIds('chat'),
     ])
-    return publicSetting(setting, configuredIds)
+    const hasInheritedConnection = inheritedChatProviderIds(setting).size > 0
+    const resolved = hasInheritedConnection
+      ? resolveEmbeddingProviderSetting(
+          setting,
+          chatSetting,
+          { tolerateUnavailable: true },
+        )
+      : setting
+    for (const provider of resolved.providers) {
+      const connection = providerConnection(provider)
+      if (connection.mode === 'inherit-chat') {
+        const parent = chatSetting.providers.find(({ id }) => id === connection.providerId)
+        if (parent && ((parent.authMode || 'bearer') === 'none'
+          || chatConfiguredIds.has(connection.providerId))) {
+          configuredIds.add(provider.id)
+        }
+      }
+    }
+    return publicSetting(resolved, configuredIds)
   }
 
   /**
@@ -432,31 +744,94 @@ export class AgentSettingsStore {
       // repairs/deletes one. The insert participates in PostgreSQL's unique-key
       // serialization, so two expectedRevision=0 writers cannot both upsert a
       // revision-1 value from a missing row.
-      await client.query(
-        `INSERT INTO control.agent_provider_settings (kind)
-         VALUES ($1)
-         ON CONFLICT (kind) DO NOTHING`,
-        [kind],
-      )
-      const currentResult = await client.query(
-        `SELECT kind, source, revision, providers, locked_embedding_model,
-                locked_embedding_dimensions, updated_by, updated_at
-           FROM control.agent_provider_settings
-          WHERE kind = $1
-          FOR UPDATE`,
-        [kind],
-      )
-      const current = currentResult.rows[0]
-        ? settingRow(currentResult.rows[0])
-        : {
-            kind, source: 'environment', revision: 0, providers: [],
-            lockedEmbeddingModel: null, lockedEmbeddingDimensions: null,
-            updatedBy: null, updatedAt: null,
-          }
+      // Every settings writer takes the same Chat -> Embedding lock order.
+      // Embedding inheritance crosses both JSON catalogs, so a single-kind
+      // lock would otherwise permit a dangling parent or a mixed key/baseUrl
+      // snapshot under concurrent Admin writes.
+      for (const settingKind of ['chat', 'embedding']) {
+        await client.query(
+          `INSERT INTO control.agent_provider_settings (kind)
+           VALUES ($1)
+           ON CONFLICT (kind) DO NOTHING`,
+          [settingKind],
+        )
+      }
+      const lockedSettings = new Map()
+      for (const settingKind of ['chat', 'embedding']) {
+        const locked = await client.query(
+          `SELECT kind, source, revision, providers, locked_embedding_model,
+                  locked_embedding_dimensions, updated_by, updated_at
+             FROM control.agent_provider_settings
+            WHERE kind = $1
+            FOR UPDATE`,
+          [settingKind],
+        )
+        lockedSettings.set(settingKind, locked.rows[0]
+          ? settingRow(locked.rows[0])
+          : {
+              kind: settingKind, source: 'environment', revision: 0, providers: [],
+              lockedEmbeddingModel: null, lockedEmbeddingDimensions: null,
+              updatedBy: null, updatedAt: null,
+            })
+      }
+      const current = lockedSettings.get(kind)
+      const currentChat = lockedSettings.get('chat')
+      const currentEmbedding = lockedSettings.get('embedding')
       if (current.revision !== expectedRevision) {
         throw new AppError(409, 'settings_revision_conflict', 'Provider settings changed; reload and retry', {
           currentRevision: current.revision,
         })
+      }
+
+      const inheritedParentIds = inheritedChatProviderIds(currentEmbedding)
+      const inheritedEmbeddingProviders = currentEmbedding.providers.filter((provider) => (
+        providerConnection(provider).mode === 'inherit-chat'
+      ))
+      if (kind === 'chat' && inheritedParentIds.size > 0) {
+        if (source !== 'database') {
+          throw new AppError(
+            409,
+            'agent_provider_in_use',
+            'Chat Provider settings cannot switch to environment while Embedding Providers inherit them',
+            {
+              providerIds: [...inheritedParentIds],
+              embeddingProviderIds: inheritedEmbeddingProviders.map(({ id }) => id),
+            },
+          )
+        }
+        const retainedParentIds = new Set(normalized.map(({ provider }) => provider.id))
+        const removedParents = [...inheritedParentIds].filter((providerId) => !retainedParentIds.has(providerId))
+        if (removedParents.length > 0) {
+          throw new AppError(
+            409,
+            'agent_provider_in_use',
+            'Remove or change inherited Embedding Provider connections before deleting the Chat Provider',
+            {
+              providerIds: removedParents,
+              embeddingProviderIds: inheritedEmbeddingProviders
+                .filter((provider) => removedParents.includes(providerConnection(provider).providerId))
+                .map(({ id }) => id),
+            },
+          )
+        }
+        // Validate every existing child against the prospective parent
+        // metadata. This rejects protocol/capability regressions in the same
+        // transaction which protects the reference.
+        resolveEmbeddingProviderSetting(
+          { ...currentEmbedding, providers: inheritedEmbeddingProviders },
+          {
+            ...currentChat,
+            source: 'database',
+            providers: normalized.map(({ provider }) => provider),
+          },
+        )
+      }
+
+      if (kind === 'embedding' && source === 'database') {
+        resolveEmbeddingProviderSetting(
+          { ...currentEmbedding, source: 'database', providers: normalized.map(({ provider }) => provider) },
+          currentChat,
+        )
       }
 
       // Keep Provider → Proxy Sequence binding validation in the same
@@ -595,10 +970,34 @@ export class AgentSettingsStore {
       )
       const configuredIds = new Set(credentialRows.rows.map((row) => row.provider_id))
       const currentProviders = new Map(current.providers.map((provider) => [provider.id, provider]))
+      let inheritedChatConfiguredIds = new Set()
+      if (kind === 'embedding' && source === 'database'
+        && normalized.some(({ provider }) => providerConnection(provider).mode === 'inherit-chat')) {
+        const inheritedCredentialRows = await client.query(
+          `SELECT provider_id
+             FROM control.agent_provider_credentials
+            WHERE kind = 'chat'`,
+        )
+        inheritedChatConfiguredIds = new Set(
+          inheritedCredentialRows.rows.map((row) => row.provider_id),
+        )
+      }
 
       if (source === 'database') {
         for (const entry of normalized) {
           const { provider, apiKey, clearApiKey } = entry
+          const connection = providerConnection(provider, kind)
+          if (connection.mode === 'inherit-chat') {
+            // An inherited child owns no credential row. Its key presence is
+            // projected from the parent only for this response/runtime view.
+            configuredIds.delete(provider.id)
+            const parent = currentChat.providers.find(({ id }) => id === connection.providerId)
+            if ((parent?.authMode || 'bearer') === 'none'
+              || inheritedChatConfiguredIds.has(connection.providerId)) {
+              configuredIds.add(provider.id)
+            }
+            continue
+          }
           const previous = currentProviders.get(provider.id)
           const hadKey = configuredIds.has(provider.id)
           if (provider.authMode === 'none') {
@@ -656,7 +1055,9 @@ export class AgentSettingsStore {
           [kind, [...retained]],
         )
         for (const entry of normalized) {
-          if (entry.provider.authMode === 'none' || entry.clearApiKey) {
+          const connection = providerConnection(entry.provider, kind)
+          if (connection.mode === 'inherit-chat'
+            || entry.provider.authMode === 'none' || entry.clearApiKey) {
             await client.query(
               'DELETE FROM control.agent_provider_credentials WHERE kind = $1 AND provider_id = $2',
               [kind, entry.provider.id],
@@ -672,8 +1073,34 @@ export class AgentSettingsStore {
         }
       }
 
+      let dependentEmbeddingRevision = null
+      if (kind === 'chat' && inheritedParentIds.size > 0) {
+        const dependent = await client.query(
+          `UPDATE control.agent_provider_settings
+              SET revision = revision + 1,
+                  updated_by = 'chat-provider-inheritance',
+                  updated_at = now()
+            WHERE kind = 'embedding'
+          RETURNING revision`,
+        )
+        dependentEmbeddingRevision = Number(dependent.rows[0]?.revision ?? 0)
+      }
+
       await client.query('COMMIT')
-      return publicSetting(settingRow(updated.rows[0]), configuredIds)
+      const savedSetting = settingRow(updated.rows[0])
+      const publicResult = kind === 'embedding' && source === 'database'
+        ? publicSetting(
+            resolveEmbeddingProviderSetting(savedSetting, currentChat),
+            configuredIds,
+          )
+        : publicSetting(savedSetting, configuredIds)
+      if (dependentEmbeddingRevision != null) {
+        Object.defineProperty(publicResult, 'dependentKinds', {
+          value: ['embedding'],
+          enumerable: false,
+        })
+      }
+      return publicResult
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {})
       throw error

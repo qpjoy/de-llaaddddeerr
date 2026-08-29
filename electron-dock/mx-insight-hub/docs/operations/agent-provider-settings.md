@@ -29,7 +29,11 @@ Agent 中心是 Hub 内部模型能力的唯一管理入口。Agent Market、文
    OpenAI-compatible。Anthropic 的 temperature 上限为 1；Agent Market Trace 会同时
    显示请求值与实际下发值。Chat/Embedding 分别以页面内 Catalog 表格管理；新建和编辑
    只展开当前 Provider 的内联表单，不再用整条 Catalog 的弹窗。Catalog 顺序只用于
-   目录管理；即使只有一个 Provider，也应通过仅含一项的 Sequence 提供服务。
+   目录管理；即使只有一个 Provider，也应通过仅含一项的 Sequence 提供服务。Embedding
+   可以显式引用一个数据库管理的 Chat Provider，复用其 Endpoint、协议、凭据、超时和
+   兼容 Proxy 绑定，但不会复制 Key，也不会继承 Chat 模型；Embedding 模型和 dimensions
+   始终独立保存。能力目录把连接/模型标为“支持”“不支持”或“需要连接测试”：已知不支持
+   的选项不能保存，未知 OpenAI-compatible 网关仍可保存，但加入业务 Sequence 前必须实测。
 2. **LLM Sequence**：把已保存 Provider 按顺序组成可复用服务，并显式保存三态网络策略：
    继承部署默认、Pod/Node 系统出网，或一个有序 Proxy Sequence 作为该服务统一的专属出口。保存和设为业务默认前
    会逐个执行精确连接测试；至少包含一个 Provider。`say hi` 会走完整 Sequence，展示
@@ -71,7 +75,9 @@ Sequence 候选；它们不会自动成为业务默认。migration 042 只会把
 
 1. 在 LLM Provider 确认自动导入结果，或新建 Provider。Base URL 必须是 API 根地址；
    Anthropic 使用 `https://api.anthropic.com/v1`，不要填写 `/messages`。被 LLM Sequence
-   引用的 Provider 不能删除，必须先从对应 Sequence 移除。
+   引用的 Provider 不能删除，必须先从对应 Sequence 移除。创建 Embedding Provider 时可
+   选择“独立配置”，也可选择一个数据库管理的 Chat Provider 作为连接来源；选择继承不会
+   把 Chat Key 返回浏览器或另存一份，且不会自动选择第一条 Chat Provider。
 2. 逐个执行连接测试。测试只访问选中的 Provider；在 LLM Proxy 页面还可明确选择
    「继承部署默认」「Pod/Node 系统出网」或某个已保存 Proxy Sequence 做一次性严格测试。
    这些选项都不默认第一条，
@@ -219,6 +225,17 @@ Embedding 的 Key、HTTPS 地址、超时、启停和同一模型的 failover �
 碰巧相同，它们的向量空间也可能不可比较。设置接口会拒绝这类变化并返回需要 reindex
 的错误。
 
+Embedding 的“继承 Chat Provider”只复用连接账号，不复用 Chat 模型。引用保存在
+Embedding Catalog 中，密钥仍只存在于原 Chat credential 记录；reveal、probe 和运行时
+请求都在服务端解析同一个父引用。被继承的 Chat Provider 不能删除或切回 environment；
+修改其 Endpoint、协议、Key、超时、Proxy 或启停状态会同步提升 Embedding revision，使
+旧 probe evidence 和 Embedding LLM Sequence proof 失效，重新验证后才能继续承接业务。
+
+能力目录是安全提示而不是对所有兼容网关的猜测：官方明确不支持 Embedding 的连接会被
+拒绝，官方已知模型可直接选择；私有或未知 OpenAI-compatible 网关显示“需要连接测试”，
+不会被错误地硬过滤。当前 Router 不发送可选 `dimensions` 请求参数，所以已知 OpenAI
+Embedding 模型必须使用其默认返回维度；支持缩维需要先扩展 Router 契约并重新规划索引。
+
 首次发现 environment Embedding 链时，运行时会把模型和 dimensions 作为向量空间锁
 并发安全地写入 PostgreSQL；后续重新部署即使整条环境链同时改名，也不能绕过该锁。
 `MX_INSIGHT_EMBEDDING_MODEL` 与 `MX_INSIGHT_EMBEDDING_DIMENSIONS` 若已配置，还会作为
@@ -255,6 +272,8 @@ Sequence 因此会失效而不是继续使用 last-known-good 密钥。环境变
 - Launcher platform-admin 可读但写设置返回 `403 admin_token_required`；
 - 旧 revision 写入返回 `409`，不会覆盖另一管理员的更新；
 - 直接绕过界面更新 Catalog 也不能删除被 LLM Sequence 引用的 Provider，服务端返回 `409 agent_provider_in_use`；
+- 直接绕过界面更新 Chat Catalog 也不能删除被 Embedding Provider 继承的父 Provider；继承记录不含独立 API Key，公共响应只显示来源 ID 和安全连接元数据；
+- 已知不支持 Embedding 的连接在前后端均被拒绝；未知 OpenAI-compatible 网关保留 probe-required 路径，不能仅因不在白名单就冒充已支持；
 - 非法 URL、未知字段和客户端提交的 `apiKeyEnv` 被拒绝；
 - 数据库或新配置暂时不可用时，进程保留 last-known-good，Hub readiness、canonical ingest 和 MX-H2I 登录不受影响；
 - analysis pipeline 保持暂停时，部署/保存 provider 不会创建模型任务；classifier 停止时固定源同步和严格 HanLP 投影仍独立运行。

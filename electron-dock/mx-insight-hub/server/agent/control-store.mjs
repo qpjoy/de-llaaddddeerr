@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
 import { domainToASCII } from 'node:url'
 import { AppError } from '../core/errors.mjs'
+import { resolveEmbeddingProviderSetting } from './settings-store.mjs'
 
 const KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/
 const CONSUMER_PATTERN = /^[a-z0-9][a-z0-9._-]{0,95}$/
@@ -452,7 +453,7 @@ export function projectSequenceRouteProof(sequence, providerSetting, control) {
     || new Set(providerIds).size !== providerIds.length
     || providerIds.some((providerId) => {
       const provider = catalog.get(providerId)
-      return !provider || provider.enabled === false
+      return !provider || provider.enabled === false || provider.connectionReady === false
     })) {
     routeProofStatus = 'provider-unavailable'
   } else if (typeof sequence.verifiedProxyFingerprint !== 'string'
@@ -561,8 +562,18 @@ async function lockAndVerifyProviderRoutes(client, {
       WHERE singleton = true
       FOR SHARE`,
   )
+  let chatSetting = null
+  if (kind === 'embedding') {
+    const chat = await client.query(
+      `SELECT kind, source, revision, providers
+         FROM control.agent_provider_settings
+        WHERE kind = 'chat'
+        FOR SHARE`,
+    )
+    chatSetting = chat.rows[0] || null
+  }
   const setting = await client.query(
-    `SELECT revision, providers
+    `SELECT kind, source, revision, providers
        FROM control.agent_provider_settings
       WHERE kind = $1
       FOR SHARE`,
@@ -573,11 +584,16 @@ async function lockAndVerifyProviderRoutes(client, {
     throw new AppError(409, 'provider_revision_conflict', 'Provider catalog changed during Sequence verification')
   }
 
-  const catalog = new Map((setting.rows[0]?.providers || []).map((provider) => [provider.id, provider]))
+  const effectiveSetting = kind === 'embedding' && setting.rows[0]?.source === 'database'
+    ? resolveEmbeddingProviderSetting(setting.rows[0], chatSetting, { tolerateUnavailable: true })
+    : setting.rows[0]
+  const catalog = new Map((effectiveSetting?.providers || []).map((provider) => [provider.id, provider]))
   const providers = providerIds.map((providerId) => {
     const provider = catalog.get(providerId)
     if (!provider) invalid('invalid_agent_sequence', `Unknown ${kind} provider: ${providerId}`)
-    if (provider.enabled === false) invalid('invalid_agent_sequence', `Provider ${providerId} is disabled`)
+    if (provider.enabled === false || provider.connectionReady === false) {
+      invalid('invalid_agent_sequence', `Provider ${providerId} is disabled or its inherited connection is unavailable`)
+    }
     return provider
   })
   const globalProxySequenceKey = globalSetting.rows[0]?.global_sequence_key ?? null
@@ -753,8 +769,17 @@ export class AgentControlStore {
               WHERE consumer_key = $1`,
             [`hub.${kind}.default`],
           )
+          let chatProviderSetting = null
+          if (kind === 'embedding') {
+            const chatProviderResult = await client.query(
+              `SELECT kind, source, revision, providers
+                 FROM control.agent_provider_settings
+                WHERE kind = 'chat'`,
+            )
+            chatProviderSetting = chatProviderResult.rows[0] || null
+          }
           const providerSetting = await client.query(
-            `SELECT revision, providers
+            `SELECT kind, source, revision, providers
                FROM control.agent_provider_settings
               WHERE kind = $1`,
             [kind],
@@ -786,13 +811,21 @@ export class AgentControlStore {
             proxySequences: proxySequences.rows.map(proxySequenceRow),
             deploymentEgress: this.deploymentEgress,
           }
+          const effectiveProviderSetting = kind === 'embedding'
+            && providerSetting.rows[0]?.source === 'database'
+            ? resolveEmbeddingProviderSetting(
+                providerSetting.rows[0],
+                chatProviderSetting,
+                { tolerateUnavailable: true },
+              )
+            : providerSetting.rows[0]
           return {
             controlAvailable: true,
             sequences: sequences.rows
               .map(sequenceRow)
               .map((sequence) => projectSequenceRouteProof(
                 sequence,
-                providerSetting.rows[0],
+                effectiveProviderSetting,
                 proxyControl,
               )),
             defaultBinding: binding.rows[0] ? bindingRow(binding.rows[0]) : null,
@@ -1338,6 +1371,7 @@ export class AgentControlStore {
         providerSettings = await client.query(
           `SELECT kind, providers
              FROM control.agent_provider_settings
+            ORDER BY CASE kind WHEN 'chat' THEN 0 ELSE 1 END
             FOR SHARE`,
         )
       }
@@ -1451,6 +1485,7 @@ export class AgentControlStore {
       const providerSettings = await client.query(
         `SELECT kind, providers
            FROM control.agent_provider_settings
+          ORDER BY CASE kind WHEN 'chat' THEN 0 ELSE 1 END
           FOR SHARE`,
       )
       await lockControlKey(client, 'proxy-sequence', sequenceKey)

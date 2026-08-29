@@ -69,13 +69,16 @@ function databaseHarness() {
     }
 
     if (text.includes('FROM control.agent_provider_settings')) {
-      const kind = params[0] || (text.includes("kind = 'embedding'") ? 'embedding' : null)
+      const kind = params[0]
+        || (text.includes("kind = 'embedding'") ? 'embedding'
+          : text.includes("kind = 'chat'") ? 'chat' : null)
       const found = state.settings.get(kind)
       return { rows: found ? [structuredClone(found)] : [], rowCount: found ? 1 : 0 }
     }
     if (text.startsWith('SELECT provider_id, api_key')) {
+      const kind = params[0] || (text.includes("kind = 'chat'") ? 'chat' : 'embedding')
       return {
-        rows: [...state.credentials.get(params[0]).entries()].map(([provider_id, api_key]) => ({ provider_id, api_key })),
+        rows: [...state.credentials.get(kind).entries()].map(([provider_id, api_key]) => ({ provider_id, api_key })),
       }
     }
     if (text.startsWith('SELECT api_key')) {
@@ -83,7 +86,8 @@ function databaseHarness() {
       return { rows: apiKey == null ? [] : [{ api_key: apiKey }], rowCount: apiKey == null ? 0 : 1 }
     }
     if (text.startsWith('SELECT provider_id')) {
-      return { rows: [...state.credentials.get(params[0]).keys()].map((provider_id) => ({ provider_id })) }
+      const kind = params[0] || (text.includes("kind = 'chat'") ? 'chat' : 'embedding')
+      return { rows: [...state.credentials.get(kind).keys()].map((provider_id) => ({ provider_id })) }
     }
     if (text.includes('FROM control.agent_proxy_sequences')) {
       if (state.proxyMigrationMissing) {
@@ -131,6 +135,17 @@ function databaseHarness() {
       return { rows: [], rowCount: 1 }
     }
     if (text.startsWith('UPDATE control.agent_provider_settings')) {
+      if (text.includes("updated_by = 'chat-provider-inheritance'")) {
+        const current = state.settings.get('embedding')
+        const next = row('embedding', {
+          ...current,
+          revision: current.revision + 1,
+          updated_by: 'chat-provider-inheritance',
+          updated_at: '2026-08-12T00:00:00.000Z',
+        })
+        state.settings.set('embedding', next)
+        return { rows: [{ revision: next.revision }], rowCount: 1 }
+      }
       const current = state.settings.get('embedding')
       if (current.source !== 'environment' || current.locked_embedding_model != null) {
         return { rows: [], rowCount: 0 }
@@ -1656,6 +1671,193 @@ test('database provider validation rejects credential exfiltration URLs and unkn
   )
 })
 
+test('Embedding inheritance is a strict reference and rejects connection or credential duplication', () => {
+  const inherited = {
+    id: 'embed',
+    displayName: 'Inherited embedding',
+    model: 'embedding-a',
+    dimensions: 4,
+    enabled: true,
+    priority: 0,
+    connection: { mode: 'inherit-chat', providerId: 'primary' },
+  }
+  const [normalized] = normalizeDatabaseProviders([inherited], { kind: 'embedding' })
+  assert.deepEqual(normalized.provider.connection, inherited.connection)
+  assert.equal(Object.hasOwn(normalized.provider, 'baseUrl'), false)
+  assert.equal(Object.hasOwn(normalized.provider, 'authMode'), false)
+
+  for (const extra of [
+    { baseUrl: 'https://models.example.com/v1' },
+    { timeoutMs: 10_000 },
+    { authMode: 'bearer' },
+    { proxySequenceKey: 'agent-egress' },
+    { apiKey: 'must-not-copy' },
+    { clearApiKey: true },
+  ]) {
+    assert.throws(
+      () => normalizeDatabaseProviders([{ ...inherited, ...extra }], { kind: 'embedding' }),
+      /must be omitted when connection\.mode is inherit-chat/,
+    )
+  }
+  assert.throws(
+    () => normalizeDatabaseProviders([{
+      ...provider(), connection: { mode: 'inherit-chat', providerId: 'primary' },
+    }], { kind: 'chat' }),
+    /only valid for embedding providers/,
+  )
+})
+
+test('Embedding inherits Chat connection and key at read time without persisting a credential copy', async () => {
+  const sentinel = 'sk-chat-parent-only'
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database',
+    revision: 1,
+    providers: [provider({
+      id: 'primary',
+      displayName: 'Chat parent',
+      proxySequenceKey: null,
+    })],
+  }))
+  harness.state.credentials.get('chat').set('primary', sentinel)
+  const store = new AgentSettingsStore(harness.pool)
+  const inherited = {
+    id: 'embed',
+    displayName: 'Inherited embedding',
+    model: 'embedding-a',
+    dimensions: 4,
+    enabled: true,
+    priority: 0,
+    connection: { mode: 'inherit-chat', providerId: 'primary' },
+  }
+
+  const saved = await store.updateSetting('embedding', {
+    expectedRevision: 0,
+    source: 'database',
+    providers: [inherited],
+  }, {
+    expectedEmbeddingDimensions: 4,
+    embeddingBaseline: { model: 'embedding-a', dimensions: 4 },
+  })
+
+  const persisted = harness.state.settings.get('embedding').providers[0]
+  assert.deepEqual(persisted.connection, inherited.connection)
+  assert.equal(Object.hasOwn(persisted, 'baseUrl'), false)
+  assert.equal(Object.hasOwn(persisted, 'authMode'), false)
+  assert.equal(harness.state.credentials.get('embedding').size, 0)
+  assert.equal(saved.providers[0].baseUrl, 'https://models.example.com/v1')
+  assert.equal(saved.providers[0].keyConfigured, true)
+  assert.equal(saved.providers[0].embeddingCapability.status, 'probe-required')
+  assert.doesNotMatch(JSON.stringify(saved), /sk-chat-parent-only|apiKey/)
+
+  const runtime = await store.loadRuntimeSetting('embedding')
+  assert.equal(runtime.credentials.size, 0)
+  assert.equal(runtime.chatSetting.revision, 1)
+  assert.equal(runtime.inheritedChatCredentials.get('primary'), sentinel)
+  assert.equal(await store.revealCredentialInternal('embedding', 'embed'), sentinel)
+
+  const publicResult = await store.loadPublicSetting('embedding')
+  assert.equal(publicResult.providers[0].keyConfigured, true)
+  assert.deepEqual(publicResult.providers[0].connection, inherited.connection)
+  assert.doesNotMatch(JSON.stringify(publicResult), /sk-chat-parent-only|apiKey/)
+})
+
+test('Embedding inheritance enforces official capability deny-list and router-compatible dimensions', async () => {
+  const inherited = (overrides = {}) => ({
+    id: 'embed', displayName: 'Inherited embedding',
+    model: 'text-embedding-3-small', dimensions: 1536,
+    enabled: true, priority: 0,
+    connection: { mode: 'inherit-chat', providerId: 'primary' },
+    ...overrides,
+  })
+
+  const openai = databaseHarness()
+  openai.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 1,
+    providers: [provider({
+      authMode: 'none', baseUrl: 'https://api.openai.com/v1',
+    })],
+  }))
+  await assert.rejects(
+    () => new AgentSettingsStore(openai.pool).updateSetting('embedding', {
+      expectedRevision: 0,
+      source: 'database',
+      providers: [inherited({ dimensions: 512 })],
+    }, { expectedEmbeddingDimensions: 512 }),
+    (error) => error?.code === 'invalid_provider_settings'
+      && /dimensions must be 1536/.test(error?.message),
+  )
+
+  const deepseek = databaseHarness()
+  deepseek.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 1,
+    providers: [provider({
+      authMode: 'none', baseUrl: 'https://api.deepseek.com/v1',
+    })],
+  }))
+  await assert.rejects(
+    () => new AgentSettingsStore(deepseek.pool).updateSetting('embedding', {
+      expectedRevision: 0,
+      source: 'database',
+      providers: [inherited()],
+    }, { expectedEmbeddingDimensions: 1536 }),
+    (error) => error?.code === 'invalid_provider_settings'
+      && /cannot use this connection for embeddings/.test(error?.message),
+  )
+})
+
+test('Chat parent writes protect inherited references and invalidate Embedding proofs', async () => {
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database',
+    revision: 1,
+    providers: [provider({ id: 'primary', authMode: 'none' })],
+  }))
+  harness.state.settings.set('embedding', row('embedding', {
+    source: 'database',
+    revision: 3,
+    providers: [{
+      id: 'embed', displayName: 'Inherited embedding', model: 'embedding-a', dimensions: 4,
+      enabled: true, priority: 0,
+      connection: { mode: 'inherit-chat', providerId: 'primary' },
+    }],
+    locked_embedding_model: 'embedding-a',
+    locked_embedding_dimensions: 4,
+  }))
+  const store = new AgentSettingsStore(harness.pool)
+
+  await assert.rejects(
+    () => store.updateSetting('chat', {
+      expectedRevision: 1, source: 'environment', providers: [],
+    }),
+    (error) => error?.code === 'agent_provider_in_use'
+      && error?.details?.embeddingProviderIds?.includes('embed'),
+  )
+  await assert.rejects(
+    () => store.updateSetting('chat', {
+      expectedRevision: 1, source: 'database', providers: [],
+    }),
+    (error) => error?.code === 'agent_provider_in_use'
+      && error?.details?.providerIds?.includes('primary'),
+  )
+
+  const saved = await store.updateSetting('chat', {
+    expectedRevision: 1,
+    source: 'database',
+    providers: [provider({
+      id: 'primary', authMode: 'none', timeoutMs: 20_000,
+      baseUrl: 'https://new-gateway.example.com/v1',
+    })],
+  })
+  assert.equal(saved.revision, 2)
+  assert.equal(harness.state.settings.get('embedding').revision, 4)
+  const lockOrder = harness.state.queries
+    .filter(({ text }) => text.includes('FROM control.agent_provider_settings') && text.includes('FOR UPDATE'))
+    .slice(-2)
+    .map(({ params }) => params[0])
+  assert.deepEqual(lockOrder, ['chat', 'embedding'])
+})
+
 test('settings store persists plaintext separately while every public shape stays secret-free', async () => {
   const sentinel = 'sk-secret-must-never-echo'
   const harness = databaseHarness()
@@ -2441,6 +2643,146 @@ test('AgentRuntime probes a disabled saved DB provider in an isolated router wit
   runtime.close()
 })
 
+test('Embedding runtime and probe resolve the inherited Chat connection and credential', async () => {
+  const sentinel = 'inherited-parent-secret'
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database',
+    revision: 2,
+    providers: [provider({ id: 'primary', proxySequenceKey: 'parent-route' })],
+  }))
+  harness.state.credentials.get('chat').set('primary', sentinel)
+  harness.state.settings.set('embedding', row('embedding', {
+    source: 'database',
+    revision: 5,
+    providers: [{
+      id: 'embed', displayName: 'Inherited embedding', model: 'embedding-a', dimensions: 4,
+      enabled: true, priority: 0,
+      connection: { mode: 'inherit-chat', providerId: 'primary' },
+    }],
+    locked_embedding_model: 'embedding-a',
+    locked_embedding_dimensions: 4,
+  }))
+  let request = null
+  const evidence = []
+  const inheritedControl = {
+    controlAvailable: true,
+    sequences: [], defaultBinding: null,
+    proxyEndpoints: [{
+      proxyKey: 'parent-proxy', proxyUrl: 'http://127.0.0.1:7890', enabled: true,
+    }],
+    proxySequences: [{
+      sequenceKey: 'parent-route', proxyKeys: ['parent-proxy'],
+      directFallback: false, enabled: true,
+    }],
+    globalProxySequenceKey: null, proxyRevision: 1,
+  }
+  const controlStore = {
+    async ensureBootstrapSequence() {},
+    async recordProbe(input) { evidence.push(input) },
+    async loadRuntimeSnapshot() {
+      return inheritedControl
+    },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({ embedding: { dimensions: 4 } }),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    controlStore,
+    logger: quiet,
+    refreshIntervalMs: 0,
+    probeCooldownMs: 0,
+    fetchImpl: async (url, options) => {
+      request = {
+        url,
+        authorization: options.headers.authorization,
+        body: JSON.parse(options.body),
+        proxied: Boolean(options.dispatcher),
+      }
+      return new Response(JSON.stringify({
+        data: request.body.input.map((_, index) => ({ index, embedding: [0, 0, 0, 0] })),
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    },
+  }).start()
+
+  const status = runtime.status()
+  assert.equal(status.settings.embedding.providers[0].baseUrl, 'https://models.example.com/v1')
+  assert.deepEqual(status.settings.embedding.providers[0].connection, {
+    mode: 'inherit-chat', providerId: 'primary',
+  })
+  assert.equal(status.settings.embedding.providers[0].keyConfigured, true)
+  assert.ok(status.embeddingCapabilities.providers.length > 0)
+
+  const result = await runtime.testProvider({ kind: 'embedding', providerId: 'embed' })
+  assert.equal(result.ok, true)
+  assert.equal(request.url, 'https://models.example.com/v1/embeddings')
+  assert.equal(request.authorization, `Bearer ${sentinel}`)
+  assert.equal(request.body.model, 'embedding-a')
+  assert.equal(request.proxied, true)
+  assert.equal(evidence.length, 1)
+  assert.equal(evidence[0].proxyFingerprint, providerProxyRouteFingerprint({
+    baseUrl: 'https://models.example.com/v1',
+    proxySequenceKey: 'parent-route',
+  }, inheritedControl))
+  assert.doesNotMatch(JSON.stringify(result), /inherited-parent-secret|authorization|payload/i)
+  runtime.close()
+})
+
+test('a remote Chat parent disable applies a new Embedding revision fail-closed instead of keeping LKG', async () => {
+  const harness = databaseHarness()
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 1,
+    providers: [provider({ id: 'primary' })],
+  }))
+  harness.state.credentials.get('chat').set('primary', 'old-parent-key')
+  harness.state.settings.set('embedding', row('embedding', {
+    source: 'database', revision: 2,
+    providers: [{
+      id: 'embed', displayName: 'Inherited embedding', model: 'embedding-a', dimensions: 4,
+      enabled: true, priority: 0,
+      connection: { mode: 'inherit-chat', providerId: 'primary' },
+    }],
+    locked_embedding_model: 'embedding-a',
+    locked_embedding_dimensions: 4,
+  }))
+  let fetchCalls = 0
+  const runtime = await new AgentRuntime({
+    config: config({ embedding: { dimensions: 4 } }),
+    settingsStore: new AgentSettingsStore(harness.pool),
+    logger: quiet,
+    refreshIntervalMs: 0,
+    probeCooldownMs: 0,
+    fetchImpl: async () => {
+      fetchCalls += 1
+      throw new Error('disabled inherited provider must not be called')
+    },
+  }).start()
+  assert.equal(runtime.status().embeddings.length, 1)
+
+  harness.state.settings.set('chat', row('chat', {
+    source: 'database', revision: 2,
+    providers: [provider({ id: 'primary', enabled: false })],
+  }))
+  harness.state.settings.set('embedding', row('embedding', {
+    ...harness.state.settings.get('embedding'),
+    revision: 3,
+    updated_by: 'chat-provider-inheritance',
+  }))
+
+  assert.equal(await runtime.refresh({ force: true }), true)
+  assert.deepEqual(runtime.status().embeddings, [])
+  assert.equal(runtime.status().settings.embedding.revision, 3)
+  assert.equal(runtime.status().settings.embedding.providers[0].connectionReady, false)
+  await assert.rejects(
+    () => runtime.testProvider({ kind: 'embedding', providerId: 'embed' }),
+    (error) => error?.code === 'embedding_connection_unavailable',
+  )
+  assert.equal(fetchCalls, 0)
+  runtime.close()
+})
+
 test('an exact DB Provider probe uses the same global Proxy Sequence as production calls', async () => {
   const harness = databaseHarness()
   harness.state.settings.set('chat', row('chat', {
@@ -2935,6 +3277,69 @@ test('post-commit refresh failure disables the changed kind and reports deferred
   failReads = false
   assert.equal(await runtime.refresh(), true)
   assert.equal(runtime.status().chat[0].id, 'replacement')
+  runtime.close()
+})
+
+test('post-commit Chat refresh failure also disables inherited Embedding', async () => {
+  let failReads = false
+  const chatSetting = {
+    ...row('chat', {
+      source: 'database', revision: 1,
+      providers: [provider({ id: 'primary' })],
+    }),
+    lockedEmbeddingModel: null,
+    lockedEmbeddingDimensions: null,
+  }
+  const embeddingSetting = {
+    ...row('embedding', {
+      source: 'database', revision: 2,
+      providers: [{
+        id: 'embed', displayName: 'Inherited embedding', model: 'embedding-a', dimensions: 4,
+        enabled: true, priority: 0,
+        connection: { mode: 'inherit-chat', providerId: 'primary' },
+      }],
+    }),
+    lockedEmbeddingModel: 'embedding-a',
+    lockedEmbeddingDimensions: 4,
+  }
+  const settingsStore = {
+    async loadRuntimeSetting(kind) {
+      if (failReads) throw new Error('database unavailable after parent commit')
+      return kind === 'chat'
+        ? { setting: structuredClone(chatSetting), credentials: new Map([['primary', 'old-key']]) }
+        : {
+            setting: structuredClone(embeddingSetting),
+            credentials: new Map(),
+            chatSetting: structuredClone(chatSetting),
+            inheritedChatCredentials: new Map([['primary', 'old-key']]),
+          }
+    },
+    async updateSetting() {
+      failReads = true
+      return {
+        ...structuredClone(chatSetting),
+        revision: 2,
+        dependentKinds: ['embedding'],
+      }
+    },
+  }
+  const runtime = await new AgentRuntime({
+    config: config({ embedding: { dimensions: 4 } }),
+    settingsStore,
+    logger: quiet,
+    refreshIntervalMs: 0,
+  }).start()
+  assert.equal(runtime.status().chat.length, 1)
+  assert.equal(runtime.status().embeddings.length, 1)
+
+  const result = await runtime.updateSetting('chat', {
+    expectedRevision: 1,
+    source: 'database',
+    providers: [provider({ id: 'primary', apiKey: 'replacement-key' })],
+  })
+  assert.equal(result.runtimeApplied, false)
+  assert.deepEqual(runtime.status().chat, [])
+  assert.deepEqual(runtime.status().embeddings, [])
   runtime.close()
 })
 
@@ -3494,6 +3899,15 @@ test('admin provider PUT returns only the safe setting shape', async () => {
   const server = createServer(app)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   try {
+    const overview = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent`,
+      { headers: { 'x-mx-insight-admin-token': 'admin-token-for-agent-settings' } },
+    )
+    assert.equal(overview.status, 200)
+    const overviewPayload = await overview.json()
+    assert.ok(overviewPayload.data.embeddingCapabilities.providers.length > 0)
+    assert.doesNotMatch(JSON.stringify(overviewPayload), /apiKey|apiKeyEnv/)
+
     const response = await fetch(
       `http://127.0.0.1:${server.address().port}/internal/v1/admin/agent/providers/chat`,
       {

@@ -3039,7 +3039,7 @@ components:
     AgentProviderSafe:
       type: object
       additionalProperties: false
-      required: [id, displayName, baseUrl, model, protocol, proxySequenceKey, timeoutMs, enabled, priority, authMode, keyConfigured]
+      required: [id, displayName, baseUrl, model, protocol, connection, connectionReady, connectionError, embeddingCapability, proxySequenceKey, timeoutMs, enabled, priority, authMode, keyConfigured]
       description: >-
         Redacted provider metadata. apiKey, apiKeyEnv, Secret names and
         environment-variable names are intentionally not members of this schema.
@@ -3049,15 +3049,26 @@ components:
           pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
           description: Environment providers may retain legacy uppercase IDs; database-managed IDs are lowercase.
         displayName: { type: string, minLength: 1, maxLength: 120 }
-        baseUrl: { type: string, format: uri }
+        baseUrl: { type: [string, "null"], format: uri }
         model: { type: string, minLength: 1, maxLength: 200 }
         protocol: { type: string, enum: [openai-compatible, anthropic-messages] }
+        connection: { $ref: "#/components/schemas/AgentProviderConnection" }
+        connectionReady:
+          type: boolean
+          description: >-
+            False when the effective inherited connection cannot run, including
+            a disabled or missing Chat Provider, an incompatible protocol, or
+            a connection/model combination rejected by the capability catalog.
+        connectionError:
+          type: [string, "null"]
+          description: Safe configuration reason when the referenced connection cannot run.
+        embeddingCapability: { $ref: "#/components/schemas/AgentEmbeddingCapability" }
         proxySequenceKey:
           type: [string, "null"]
           maxLength: 64
           pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
           description: Legacy Provider-specific Proxy Sequence compatibility binding.
-        timeoutMs: { type: integer, minimum: 1000, maximum: 300000 }
+        timeoutMs: { type: [integer, "null"], minimum: 1000, maximum: 300000 }
         dimensions: { type: integer, minimum: 1 }
         enabled: { type: boolean }
         priority: { type: integer, minimum: 0, maximum: 10000 }
@@ -3065,6 +3076,84 @@ components:
         keyConfigured:
           type: boolean
           description: Presence only; no credential value or lookup name is returned.
+    AgentProviderConnection:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode: { type: string, const: dedicated }
+        - type: object
+          additionalProperties: false
+          required: [mode, providerId]
+          properties:
+            mode: { type: string, const: inherit-chat }
+            providerId: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" }
+    AgentEmbeddingKnownModel:
+      type: object
+      additionalProperties: false
+      required: [id, defaultDimensions, configurableDimensions, allowedDimensions]
+      properties:
+        id: { type: string }
+        defaultDimensions: { type: integer, minimum: 1 }
+        configurableDimensions: { type: boolean }
+        allowedDimensions:
+          type: object
+          additionalProperties: false
+          required: [minimum, maximum]
+          properties:
+            minimum: { type: integer, minimum: 1 }
+            maximum: { type: integer, minimum: 1 }
+    AgentEmbeddingCapability:
+      type: object
+      additionalProperties: false
+      required: [status, vendor, reason, endpointPath, knownModels, checkedAt, revision]
+      properties:
+        status: { type: string, enum: [supported, unsupported, probe-required] }
+        vendor: { type: string }
+        reason: { type: string }
+        endpointPath: { type: [string, "null"] }
+        knownModels:
+          type: array
+          items: { $ref: "#/components/schemas/AgentEmbeddingKnownModel" }
+        checkedAt: { type: string, format: date }
+        revision: { type: integer, minimum: 1 }
+        model: { type: string }
+        defaultDimensions: { type: [integer, "null"], minimum: 1 }
+        configurableDimensions: { type: boolean }
+        allowedDimensions:
+          oneOf:
+            - type: "null"
+            - type: object
+              additionalProperties: false
+              required: [minimum, maximum]
+              properties:
+                minimum: { type: integer, minimum: 1 }
+                maximum: { type: integer, minimum: 1 }
+    AgentEmbeddingCapabilityCatalog:
+      type: object
+      additionalProperties: false
+      required: [revision, checkedAt, providers]
+      properties:
+        revision: { type: integer, minimum: 1 }
+        checkedAt: { type: string, format: date }
+        providers:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [vendor, hosts, protocols, status, endpointPath, reason, source, models]
+            properties:
+              vendor: { type: string }
+              hosts: { type: array, items: { type: string } }
+              protocols: { type: array, items: { type: string } }
+              status: { type: string, enum: [supported, unsupported] }
+              endpointPath: { type: [string, "null"] }
+              reason: { type: string }
+              source: { type: string, format: uri }
+              models:
+                type: array
+                items: { $ref: "#/components/schemas/AgentEmbeddingKnownModel" }
     AgentRuntimeProviderStatus:
       type: object
       additionalProperties: false
@@ -3088,7 +3177,7 @@ components:
         revision: { type: integer, minimum: 0 }
         providers:
           type: array
-          maxItems: 8
+          maxItems: 32
           items: { $ref: "#/components/schemas/AgentProviderSafe" }
         updatedBy: { type: [string, "null"] }
         updatedAt: { type: [string, "null"], format: date-time }
@@ -3112,7 +3201,7 @@ components:
     AgentOverview:
       type: object
       additionalProperties: false
-      required: [available, control, pipelines]
+      required: [available, embeddingCapabilities, control, pipelines]
       properties:
         available: { type: boolean }
         chat:
@@ -3124,6 +3213,7 @@ components:
           maxItems: 8
           items: { $ref: "#/components/schemas/AgentRuntimeProviderStatus" }
         embeddingDimensions: { type: [integer, "null"], minimum: 1 }
+        embeddingCapabilities: { $ref: "#/components/schemas/AgentEmbeddingCapabilityCatalog" }
         settings:
           type: object
           additionalProperties: false
@@ -3988,17 +4078,26 @@ components:
     AgentProviderUpdateInput:
       type: object
       additionalProperties: false
-      required: [id, baseUrl, model]
+      required: [id, model]
       description: >-
         apiKey is accepted only on this write shape. apiKeyEnv, keyConfigured
-        and every other unlisted field are rejected.
+        and every other unlisted field are rejected. A dedicated connection
+        requires baseUrl and may supply its own protocol/auth/key/timeout/proxy.
+        An Embedding inherit-chat connection requires providerId and rejects
+        every dedicated connection field, including apiKey/clearApiKey.
       properties:
         id: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" }
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        connection: { $ref: "#/components/schemas/AgentProviderConnection" }
         baseUrl:
           type: string
           format: uri
           description: HTTPS API root without userinfo, query, fragment, localhost or an IP literal.
         model: { type: string, minLength: 1, maxLength: 200 }
+        protocol: { type: string, enum: [openai-compatible, anthropic-messages] }
+        proxySequenceKey:
+          type: [string, "null"]
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
         timeoutMs: { type: integer, minimum: 1000, maximum: 300000, default: 60000 }
         dimensions:
           type: integer
@@ -4037,7 +4136,7 @@ components:
         source: { type: string, const: database }
         providers:
           type: array
-          maxItems: 8
+          maxItems: 32
           items: { $ref: "#/components/schemas/AgentProviderUpdateInput" }
     AgentProviderUpdateRequest:
       oneOf:

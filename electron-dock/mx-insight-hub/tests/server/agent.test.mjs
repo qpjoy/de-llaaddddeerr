@@ -11,6 +11,13 @@ import {
   shouldFailover,
   validateChatResponse,
 } from '../../server/agent/index.mjs'
+import {
+  EMBEDDING_CAPABILITY_CATALOG_CHECKED_AT,
+  EMBEDDING_CAPABILITY_CATALOG_REVISION,
+  classifyEmbeddingConnection,
+  classifyEmbeddingModel,
+  publicEmbeddingCapabilityCatalog,
+} from '../../server/agent/embedding-capabilities.mjs'
 
 const quiet = { warn() {}, log() {}, error() {} }
 
@@ -68,6 +75,96 @@ test('environment provider config rejects inline API keys', () => {
     }]),
     /cannot configure an API key when authMode is none/,
   )
+})
+
+test('embedding connection capabilities use exact official hosts and preserve unknown services for probing', () => {
+  const openai = classifyEmbeddingConnection({
+    baseUrl: 'https://api.openai.com/v1/',
+    protocol: 'openai-compatible',
+  })
+  assert.equal(openai.status, 'supported')
+  assert.equal(openai.vendor, 'openai')
+  assert.equal(openai.endpointPath, '/embeddings')
+  assert.deepEqual(openai.knownModels.map((entry) => entry.id), [
+    'text-embedding-3-small',
+    'text-embedding-3-large',
+    'text-embedding-ada-002',
+  ])
+
+  for (const [baseUrl, protocol, vendor] of [
+    ['https://api.anthropic.com/v1', 'anthropic-messages', 'anthropic'],
+    ['https://api.deepseek.com/v1', 'openai-compatible', 'deepseek'],
+    ['https://api.moonshot.ai/v1', 'openai-compatible', 'kimi'],
+    ['https://api.moonshot.cn/v1', 'openai-compatible', 'kimi'],
+  ]) {
+    const capability = classifyEmbeddingConnection({ baseUrl, protocol })
+    assert.equal(capability.status, 'unsupported', `${baseUrl} should be unsupported`)
+    assert.equal(capability.vendor, vendor)
+    assert.equal(capability.endpointPath, null)
+  }
+
+  const custom = classifyEmbeddingConnection({
+    baseUrl: 'https://llm.example.test/v1',
+    protocol: 'openai-compatible',
+  })
+  assert.equal(custom.status, 'probe-required')
+  assert.equal(custom.endpointPath, '/embeddings')
+
+  const lookalike = classifyEmbeddingConnection({
+    baseUrl: 'https://api.openai.com.evil.invalid/v1',
+    protocol: 'openai-compatible',
+  })
+  assert.equal(lookalike.status, 'probe-required')
+  assert.equal(lookalike.vendor, 'custom')
+})
+
+test('embedding model capabilities expose official defaults without rejecting unknown models', () => {
+  const provider = { baseUrl: 'https://api.openai.com/v1', protocol: 'openai-compatible' }
+  const expected = [
+    ['text-embedding-3-small', 1536, true],
+    ['text-embedding-3-large', 3072, true],
+    ['text-embedding-ada-002', 1536, false],
+  ]
+
+  for (const [model, dimensions, configurable] of expected) {
+    const capability = classifyEmbeddingModel(provider, model)
+    assert.equal(capability.status, 'supported')
+    assert.equal(capability.defaultDimensions, dimensions)
+    assert.equal(capability.configurableDimensions, configurable)
+    assert.deepEqual(capability.allowedDimensions, configurable
+      ? { minimum: 1, maximum: dimensions }
+      : { minimum: dimensions, maximum: dimensions })
+  }
+
+  const unknown = classifyEmbeddingModel(provider, 'gpt-5.5')
+  assert.equal(unknown.status, 'probe-required')
+  assert.equal(unknown.defaultDimensions, null)
+
+  const custom = classifyEmbeddingModel({
+    baseUrl: 'https://compatible.example.test/v1',
+    protocol: 'openai-compatible',
+  }, 'text-embedding-3-small')
+  assert.equal(custom.status, 'probe-required', 'a known model name does not prove a custom host supports it')
+})
+
+test('public embedding capability catalog is credential-free and mutation-safe', () => {
+  const first = publicEmbeddingCapabilityCatalog()
+  assert.equal(first.revision, EMBEDDING_CAPABILITY_CATALOG_REVISION)
+  assert.equal(first.checkedAt, EMBEDDING_CAPABILITY_CATALOG_CHECKED_AT)
+  assert.equal(first.providers.find((entry) => entry.vendor === 'openai').status, 'supported')
+
+  first.providers[0].hosts[0] = 'mutated.invalid'
+  first.providers[0].models[0].allowedDimensions.maximum = 7
+  const second = publicEmbeddingCapabilityCatalog()
+  assert.equal(second.providers[0].hosts[0], 'api.openai.com')
+  assert.equal(second.providers[0].models[0].allowedDimensions.maximum, 1536)
+
+  const classified = classifyEmbeddingConnection({
+    baseUrl: 'https://user:secret-url-sentinel@custom.example.test/v1',
+    protocol: 'openai-compatible',
+    apiKey: 'secret-key-sentinel',
+  })
+  assert.doesNotMatch(JSON.stringify(classified), /secret-(?:url|key)-sentinel/)
 })
 
 test('provider order is the failover order', () => {

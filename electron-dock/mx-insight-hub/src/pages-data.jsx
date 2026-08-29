@@ -49,6 +49,131 @@ const PROVIDER_PROTOCOL_OPTIONS = [
   { value: 'anthropic-messages', label: 'Anthropic Messages' },
 ]
 
+const DEDICATED_CONNECTION = 'dedicated'
+const INHERIT_CHAT_CONNECTION = 'inherit-chat'
+const INHERIT_CHAT_OPTION_PREFIX = 'inherit-chat:'
+
+function providerConnection(provider, kind = 'embedding') {
+  if (kind !== 'embedding') return { mode: DEDICATED_CONNECTION }
+  const connection = provider?.connection
+  if (connection?.mode === INHERIT_CHAT_CONNECTION && connection.providerId) {
+    return { mode: INHERIT_CHAT_CONNECTION, providerId: String(connection.providerId) }
+  }
+  return { mode: DEDICATED_CONNECTION }
+}
+
+function normalizeEmbeddingCapability(capability = {}, fallbackStatus = 'probe-required') {
+  const status = ['supported', 'unsupported', 'probe-required'].includes(capability.status)
+    ? capability.status
+    : fallbackStatus
+  const reason = String(capability.reason || (
+    status === 'supported'
+      ? '该连接在 Embedding 能力目录中。'
+      : status === 'unsupported'
+        ? '该调用协议不提供 Embedding 接口。'
+        : '能力尚未确认，保存后必须执行 Embedding 连接测试。'
+  ))
+  return {
+    ...capability,
+    status,
+    reason,
+    models: Array.isArray(capability.models)
+      ? capability.models
+      : Array.isArray(capability.knownModels) ? capability.knownModels : [],
+  }
+}
+
+function embeddingCatalogConnection(provider, catalog) {
+  if (!Array.isArray(catalog?.providers)) return null
+  const protocol = provider?.protocol || 'openai-compatible'
+  let hostname = null
+  try {
+    hostname = new URL(provider?.baseUrl || '').hostname.toLowerCase().replace(/\.$/, '')
+  } catch {
+    // Keep an invalid or unfinished URL probe-required until form validation runs.
+  }
+  const entry = catalog.providers.find((candidate) => (
+    hostname && Array.isArray(candidate?.hosts)
+      && candidate.hosts.some((host) => String(host).toLowerCase().replace(/\.$/, '') === hostname)
+  ))
+  if (entry) {
+    if (entry.status === 'supported'
+      && Array.isArray(entry.protocols)
+      && !entry.protocols.includes(protocol)) {
+      return normalizeEmbeddingCapability({
+        ...entry,
+        status: 'unsupported',
+        reason: '该 Provider 协议不能调用目录声明的 Embedding endpoint。',
+      }, 'unsupported')
+    }
+    return normalizeEmbeddingCapability(entry, entry.status)
+  }
+  if (protocol !== 'openai-compatible') {
+    return normalizeEmbeddingCapability({
+      status: 'unsupported',
+      vendor: 'custom',
+      reason: '当前 Embedding 调用仅支持 OpenAI-compatible 协议。',
+    }, 'unsupported')
+  }
+  return normalizeEmbeddingCapability({
+    status: 'probe-required',
+    vendor: 'custom',
+    reason: hostname
+      ? '该 OpenAI-compatible 服务的 Embedding 能力未知，启用前必须连接测试。'
+      : 'Provider Base URL 尚未识别，启用 Embedding 前必须连接测试。',
+  })
+}
+
+function embeddingConnectionCapability(provider, catalog) {
+  return embeddingCatalogConnection(provider, catalog)
+    || normalizeEmbeddingCapability(provider?.embeddingCapability, provider?.protocol === 'anthropic-messages' ? 'unsupported' : 'probe-required')
+}
+
+function embeddingModelCapability(provider, model, catalog) {
+  const connection = embeddingConnectionCapability(provider, catalog)
+  const modelId = String(model || '').trim()
+  if (connection.status !== 'supported') {
+    return { ...connection, model: modelId, defaultDimensions: null, configurableDimensions: false, allowedDimensions: null }
+  }
+  const known = connection.models.find((entry) => embeddingModelName(entry) === modelId)
+  if (!known) {
+    return {
+      ...connection,
+      status: 'probe-required',
+      reason: modelId
+        ? '该模型不在当前 Embedding 白名单中，启用前必须连接测试。'
+        : '尚未选择 Embedding 模型。',
+      model: modelId,
+      defaultDimensions: null,
+      configurableDimensions: false,
+      allowedDimensions: null,
+    }
+  }
+  return {
+    ...connection,
+    ...known,
+    model: modelId,
+    defaultDimensions: known.defaultDimensions ?? null,
+    configurableDimensions: known.configurableDimensions === true,
+    allowedDimensions: known.allowedDimensions || null,
+  }
+}
+
+function embeddingCapabilityLabel(status) {
+  if (status === 'supported') return '支持 Embedding'
+  if (status === 'unsupported') return '不支持 Embedding'
+  return '需要连接测试'
+}
+
+function embeddingModelName(entry) {
+  return typeof entry === 'string' ? entry : String(entry?.id || entry?.model || entry?.name || '')
+}
+
+function embeddingDefaultDimensions(provider, model, catalog) {
+  const dimensions = Number(embeddingModelCapability(provider, model, catalog).defaultDimensions)
+  return Number.isInteger(dimensions) && dimensions > 0 ? dimensions : null
+}
+
 // Pages for the data plane: external sources (P4), the model agent (P5) and the
 // retrieval pipeline. Each one surfaces the degradation state rather than only
 // the happy path — a system quietly running on a fallback is the thing an
@@ -3206,6 +3331,8 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
         llmSequences={llmSequences}
         proxySequences={proxySequences}
         proxyEndpoints={proxyEndpoints}
+        inheritedEmbeddingProviders={embeddingProviders}
+        embeddingCapabilities={agent.embeddingCapabilities}
       /> : null}
       {section === 'providers' ? <AgentProviderPanel
         kind="embedding"
@@ -3222,6 +3349,9 @@ export function AgentPage({ token, session, onUnauthorized, notify, section = 'p
         llmSequences={llmSequences}
         proxySequences={proxySequences}
         proxyEndpoints={proxyEndpoints}
+        chatProviders={chatProviders}
+        chatProviderSource={chatSetting.source}
+        embeddingCapabilities={agent.embeddingCapabilities}
       /> : null}
       {section === 'runtime' ? pipelines.map((pipeline) => (
         <AgentPipelinePanel
@@ -3281,6 +3411,8 @@ function mergeProviderStatus(configured, runtime) {
 function AgentProviderPanel({
   kind, title, subtitle, setting, providers, canEdit, onSave,
   onTest, testingProvider, providerTests, onReveal, llmSequences = [], proxySequences = [], proxyEndpoints = [],
+  chatProviders = [], chatProviderSource = 'environment', inheritedEmbeddingProviders = [],
+  embeddingCapabilities = null,
 }) {
   const sourceLabel = setting.source === 'database' ? '数据库' : '环境变量'
   const [editor, setEditor] = useState(null)
@@ -3301,7 +3433,14 @@ function AgentProviderPanel({
 
   const persist = async (nextDrafts, source = 'database', revision = setting.revision ?? 0) => {
     const normalized = source === 'database'
-      ? normalizeProviderDrafts(nextDrafts, { kind, setting, initialProviders: drafts })
+      ? normalizeProviderDrafts(nextDrafts, {
+        kind,
+        setting,
+        initialProviders: drafts,
+        chatProviders,
+        chatProviderSource,
+        embeddingCapabilities,
+      })
       : []
     return onSave({
       source,
@@ -3371,8 +3510,20 @@ function AgentProviderPanel({
     const references = llmSequences.filter((sequence) => (
       sequence.kind === kind && Array.isArray(sequence.providerIds) && sequence.providerIds.includes(providerId)
     ))
-    if (references.length > 0) {
-      setError(new Error(`请先从 Sequence ${references.map((sequence) => sequence.displayName || sequence.sequenceKey).join('、')} 中移除 ${providerId}。`))
+    const embeddingReferences = kind === 'chat' ? inheritedEmbeddingProviders.filter((provider) => (
+      providerConnection(provider).mode === INHERIT_CHAT_CONNECTION
+      && providerConnection(provider).providerId === providerId
+    )) : []
+    if (references.length > 0 || embeddingReferences.length > 0) {
+      const reasons = [
+        references.length > 0
+          ? `Sequence ${references.map((sequence) => sequence.displayName || sequence.sequenceKey).join('、')}`
+          : null,
+        embeddingReferences.length > 0
+          ? `Embedding Provider ${embeddingReferences.map((provider) => provider.displayName || provider.id).join('、')}`
+          : null,
+      ].filter(Boolean).join('；')
+      setError(new Error(`请先解除 ${reasons} 对 ${providerId} 的引用。`))
       setPendingDelete(null)
       return
     }
@@ -3489,6 +3640,9 @@ function AgentProviderPanel({
         savingAction={savingAction}
         source={setting.source}
         llmSequences={llmSequences}
+        chatProviders={chatProviders}
+        inheritedEmbeddingProviders={inheritedEmbeddingProviders}
+        embeddingCapabilities={embeddingCapabilities}
       />
       {migrationOpen ? <ProviderMigrationEditor
         kind={kind}
@@ -3504,6 +3658,9 @@ function AgentProviderPanel({
         editor={editor}
         proxySequences={proxySequences}
         proxyEndpoints={proxyEndpoints}
+        chatProviders={chatProviders}
+        chatProviderSource={chatProviderSource}
+        embeddingCapabilities={embeddingCapabilities}
         setting={setting}
         busy={savingAction === 'editor'}
         headingRef={editorHeadingRef}
@@ -3638,6 +3795,7 @@ function providerTestKey(kind, provider, revision) {
     kind,
     provider.id,
     revision,
+    provider.connection || { mode: DEDICATED_CONNECTION },
     provider.baseUrl,
     provider.model,
     provider.dimensions ?? null,
@@ -3647,38 +3805,58 @@ function providerTestKey(kind, provider, revision) {
 function ProviderTable({
   providers, kind, revision, canTest, canManage, onTest, testingProvider, providerTests,
   onReveal, onEdit, onDeleteRequest, onDeleteCancel, onDeleteConfirm,
-  pendingDelete, savingAction, source, llmSequences = [],
+  pendingDelete, savingAction, source, llmSequences = [], chatProviders = [],
+  inheritedEmbeddingProviders = [], embeddingCapabilities = null,
 }) {
   const showActions = canTest || canManage
   return (
     <DataTable label={`${kind === 'chat' ? '对话' : 'Embedding'} Provider Catalog`}>
-      <thead><tr><th>Catalog 顺序</th><th>Provider</th><th>模型</th><th>Endpoint</th><th>Proxy</th><th>状态</th><th>凭据</th><th>熔断</th>{showActions ? <th>操作</th> : null}</tr></thead>
+      <thead><tr><th>Catalog 顺序</th><th>Provider</th><th>模型</th><th>连接来源</th><th>Endpoint</th><th>Proxy</th><th>状态</th><th>凭据</th><th>熔断</th>{showActions ? <th>操作</th> : null}</tr></thead>
       <tbody>
         {providers.map((provider, index) => {
+          const connection = providerConnection(provider, kind)
+          const inherited = kind === 'embedding' && connection.mode === INHERIT_CHAT_CONNECTION
+          const chatSource = inherited
+            ? chatProviders.find((candidate) => candidate.id === connection.providerId)
+            : null
+          const capability = kind === 'chat'
+            ? embeddingConnectionCapability(provider, embeddingCapabilities)
+            : embeddingModelCapability(provider, provider.model, embeddingCapabilities)
           const testKey = providerTestKey(kind, provider, revision)
           const test = providerTests?.[testKey]
-          const testDisabled = provider.authMode !== 'none' && !provider.keyConfigured
+          const testDisabled = provider.connectionReady === false
+            || (provider.authMode !== 'none' && !provider.keyConfigured)
           const deleting = pendingDelete === provider.id
           const sequenceReferences = llmSequences.filter((sequence) => (
             sequence.kind === kind && Array.isArray(sequence.providerIds) && sequence.providerIds.includes(provider.id)
           ))
-          const deleteDisabled = sequenceReferences.length > 0 || (kind === 'embedding' && providers.length <= 1)
+          const embeddingReferences = kind === 'chat' ? inheritedEmbeddingProviders.filter((embeddingProvider) => (
+            providerConnection(embeddingProvider).mode === INHERIT_CHAT_CONNECTION
+            && providerConnection(embeddingProvider).providerId === provider.id
+          )) : []
+          const deleteDisabled = sequenceReferences.length > 0 || embeddingReferences.length > 0
+            || (kind === 'embedding' && providers.length <= 1)
           const deleteHint = sequenceReferences.length > 0
             ? `先从 Sequence ${sequenceReferences.map((sequence) => sequence.displayName || sequence.sequenceKey).join('、')} 中移除`
+            : embeddingReferences.length > 0
+              ? `先解除 Embedding Provider ${embeddingReferences.map((embeddingProvider) => embeddingProvider.displayName || embeddingProvider.id).join('、')} 的继承`
             : kind === 'embedding' && providers.length <= 1
               ? 'Embedding Catalog 必须保留至少一个 Provider；可改为停用'
               : ''
           return <tr key={provider.id}>
             <td><strong>序号 {index + 1}</strong><small>排序值 {provider.priority}</small></td>
-            <td><strong>{provider.displayName || provider.id}</strong><small><code>{provider.id}</code></small></td>
+            <td><strong>{provider.displayName || provider.id}</strong><small><code>{provider.id}</code></small>{capability ? <small title={capability.reason}>{kind === 'chat' ? 'Embedding 连接' : '能力'}：{embeddingCapabilityLabel(capability.status)}</small> : null}</td>
             <td><code>{provider.model}</code><small>{provider.protocol || 'openai-compatible'}{kind === 'embedding' ? ` · ${provider.dimensions || '—'} dimensions` : ''}</small></td>
+            <td>{inherited ? <><strong>继承 Chat</strong><small>{chatSource?.displayName || connection.providerId} · <code>{connection.providerId}</code></small></> : <><strong>独立配置</strong><small>连接与凭据由本条维护</small></>}</td>
             <td><code>{provider.baseUrl || '—'}</code><small>{provider.timeoutMs ? `${provider.timeoutMs} ms` : 'timeout 未知'} · {provider.authMode || 'bearer'}</small></td>
-            <td><code>{provider.proxySequenceKey || '继承 Hub 应用出网策略'}</code></td>
-            <td><StatusBadge status={provider.enabled === false ? 'disabled' : 'active'} label={provider.enabled === false ? '停用' : '启用'} /></td>
+            <td>{inherited ? <><strong>跟随 Chat Provider</strong><small><code>{provider.proxySequenceKey || chatSource?.proxySequenceKey || '继承 Hub 应用出网策略'}</code></small></> : <code>{provider.proxySequenceKey || '继承 Hub 应用出网策略'}</code>}</td>
+            <td><StatusBadge
+              status={provider.enabled === false || provider.connectionReady === false ? 'disabled' : 'active'}
+              label={provider.enabled === false ? '停用' : provider.connectionReady === false ? '父连接不可用' : '启用'} /></td>
             <td>{provider.authMode === 'none' ? (
               <StatusBadge status="active" label="无需密钥" />
             ) : (
-              <StatusBadge status={provider.keyConfigured ? 'active' : 'suspended'} label={provider.keyConfigured ? '已配置' : '缺失'} />
+              <><StatusBadge status={provider.keyConfigured ? 'active' : 'suspended'} label={provider.keyConfigured ? '已配置' : '缺失'} />{inherited ? <small>来自 Chat · {chatSource?.displayName || connection.providerId}</small> : null}</>
             )}</td>
             <td>{provider.circuit ? (
               <StatusBadge
@@ -3698,11 +3876,11 @@ function ProviderTable({
                   {testingProvider === testKey ? '测试中' : '测试'}
                 </button>
                 {test ? <small role="status">{test.ok ? `${test.latencyMs} ms · 成功` : '最近失败'}</small> : null}
-                {source === 'database' && provider.authMode !== 'none' && provider.keyConfigured ? (
+                {source === 'database' && !inherited && provider.authMode !== 'none' && provider.keyConfigured ? (
                   <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(testingProvider) || Boolean(savingAction)} onClick={() => onReveal?.(provider)}>
                     <Key size={15} aria-hidden="true" />查看 Key
                   </button>
-                ) : null}
+                ) : inherited && provider.authMode !== 'none' ? <small>Key 由 Chat Provider 管理</small> : null}
               </> : null}
               {canManage ? deleting ? <div className="mih-agent-provider-delete-confirm" role="group" aria-label={`确认删除 ${provider.displayName || provider.id}`}>
                 <button className="qp-button qp-button--danger" type="button"
@@ -3713,6 +3891,9 @@ function ProviderTable({
               </div> : <>
                 {sequenceReferences.length > 0 ? <small className="mih-agent-provider-reference">
                   被 {sequenceReferences.map((sequence) => sequence.displayName || sequence.sequenceKey).join('、')} 引用；请先移出 Sequence
+                </small> : null}
+                {embeddingReferences.length > 0 ? <small className="mih-agent-provider-reference">
+                  被 Embedding Provider {embeddingReferences.map((embeddingProvider) => embeddingProvider.displayName || embeddingProvider.id).join('、')} 继承；请先解除引用
                 </small> : null}
                 <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(savingAction)} onClick={() => onEdit(provider, index)}>
                   <PencilSimple size={15} aria-hidden="true" />编辑
@@ -3727,13 +3908,14 @@ function ProviderTable({
             </div></td> : null}
           </tr>
         })}
-        {providers.length === 0 ? <tr><td colSpan={showActions ? 9 : 8} className="mih-agent-provider-empty">尚未配置 Provider</td></tr> : null}
+        {providers.length === 0 ? <tr><td colSpan={showActions ? 10 : 9} className="mih-agent-provider-empty">尚未配置 Provider</td></tr> : null}
       </tbody>
     </DataTable>
   )
 }
 
 function providerDraft(provider, index, kind) {
+  const connection = providerConnection(provider, kind)
   return {
     id: String(provider.id || ''),
     displayName: String(provider.displayName || provider.id || ''),
@@ -3751,11 +3933,16 @@ function providerDraft(provider, index, kind) {
     originalBaseUrl: String(provider.baseUrl || ''),
     apiKey: '',
     clearKey: false,
+    connectionMode: connection.mode,
+    originalConnectionMode: connection.mode,
+    inheritChatProviderId: connection.mode === INHERIT_CHAT_CONNECTION ? connection.providerId : '',
   }
 }
 
 function blankProvider(index, kind) {
-  return providerDraft({ priority: (index + 1) * 10, enabled: true, authMode: 'bearer' }, index, kind)
+  const draft = providerDraft({ priority: (index + 1) * 10, enabled: true, authMode: 'bearer' }, index, kind)
+  if (kind === 'embedding') draft.connectionMode = ''
+  return draft
 }
 
 function vectorSignatures(providers) {
@@ -3766,7 +3953,10 @@ function vectorSignatures(providers) {
     .sort()
 }
 
-function normalizeProviderDrafts(providers, { kind, setting, initialProviders }) {
+function normalizeProviderDrafts(providers, {
+  kind, setting, initialProviders, chatProviders = [], chatProviderSource = 'environment',
+  embeddingCapabilities = null,
+}) {
   if (providers.length > 32) throw new Error('每个 Catalog 最多可保存 32 个 Provider。')
   const ids = providers.map((provider) => provider.id.trim())
   if (ids.some((id) => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id))) {
@@ -3790,20 +3980,63 @@ function normalizeProviderDrafts(providers, { kind, setting, initialProviders })
     const model = provider.model.trim()
     const timeoutMs = Number(provider.timeoutMs)
     const priority = Number(provider.priority)
-    const dimensions = Number(provider.dimensions)
+    let dimensions = Number(provider.dimensions)
     const apiKey = provider.apiKey.trim()
     if (!displayName || displayName.length > 120) throw new Error(`${id} 的显示名称不能为空且不能超过 120 个字符。`)
-    if (!baseUrl || !model) throw new Error(`${id} 必须填写 Base URL 和模型。`)
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 300_000) {
-      throw new Error(`${id} 的超时必须是 1000–300000 ms 的整数。`)
-    }
+    if (!model) throw new Error(`${id} 必须填写模型。`)
     if (!Number.isInteger(priority) || priority < 0 || priority > 10_000) {
       throw new Error(`${id} 的优先级必须是 0–10000 的整数。`)
     }
     if (kind === 'embedding' && (!Number.isInteger(dimensions) || dimensions < 1)) {
       throw new Error(`${id} 的 Embedding 维度必须是正整数。`)
     }
+    const inherited = kind === 'embedding' && provider.connectionMode === INHERIT_CHAT_CONNECTION
+    if (kind === 'embedding' && ![DEDICATED_CONNECTION, INHERIT_CHAT_CONNECTION].includes(provider.connectionMode)) {
+      throw new Error(`${id} 必须明确选择独立配置或一个 Chat Provider；不会自动选择第一条。`)
+    }
+    if (inherited) {
+      const parentId = String(provider.inheritChatProviderId || '').trim()
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(parentId)) {
+        throw new Error(`${id} 必须选择一个可继承的 Chat Provider。`)
+      }
+      if (chatProviderSource !== 'database') {
+        throw new Error(`${id} 不能继承环境变量管理的 Chat Provider；请先迁移 Chat Catalog 到数据库。`)
+      }
+      const parent = chatProviders.find((candidate) => candidate.id === parentId)
+      if (!parent) throw new Error(`${id} 引用的 Chat Provider ${parentId} 不存在。`)
+      const capability = embeddingModelCapability(parent, model, embeddingCapabilities)
+      if (capability.status === 'unsupported') {
+        throw new Error(`${id} 不能继承 ${parentId}：${capability.reason}`)
+      }
+      const catalogDimensions = Number(capability.defaultDimensions)
+      if (Number.isInteger(catalogDimensions) && catalogDimensions > 0) dimensions = catalogDimensions
+      return {
+        id,
+        displayName,
+        model,
+        dimensions,
+        enabled: provider.enabled,
+        priority,
+        connection: { mode: INHERIT_CHAT_CONNECTION, providerId: parentId },
+      }
+    }
+    if (kind === 'embedding') {
+      const capability = embeddingModelCapability(provider, model, embeddingCapabilities)
+      if (capability.status === 'unsupported') {
+        throw new Error(`${id} 的连接不支持 Embedding：${capability.reason}`)
+      }
+      const catalogDimensions = Number(capability.defaultDimensions)
+      if (Number.isInteger(catalogDimensions) && catalogDimensions > 0) dimensions = catalogDimensions
+    }
+    if (!baseUrl) throw new Error(`${id} 必须填写 Base URL。`)
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 300_000) {
+      throw new Error(`${id} 的超时必须是 1000–300000 ms 的整数。`)
+    }
     const sameCredentialIdentity = provider.keyConfigured && provider.originalId === id
+      && (kind !== 'embedding' || (
+        provider.originalConnectionMode === DEDICATED_CONNECTION
+        && provider.connectionMode === DEDICATED_CONNECTION
+      ))
     if (setting.source === 'environment' && provider.enabled && provider.authMode === 'bearer' && !apiKey) {
       throw new Error(`迁移 ${id} 时必须重新输入 API Key；浏览器不会读取环境变量密钥。`)
     }
@@ -3827,6 +4060,7 @@ function normalizeProviderDrafts(providers, { kind, setting, initialProviders })
       enabled: provider.enabled,
       priority,
       authMode: provider.authMode,
+      ...(kind === 'embedding' ? { connection: { mode: DEDICATED_CONNECTION } } : {}),
       ...(provider.authMode !== 'none' && provider.clearKey ? { clearApiKey: true } : {}),
       ...(provider.authMode !== 'none' && !provider.clearKey && apiKey ? { apiKey } : {}),
     }
@@ -3835,10 +4069,34 @@ function normalizeProviderDrafts(providers, { kind, setting, initialProviders })
   return normalized
 }
 
-function ProviderEditor({ kind, editor, proxySequences, proxyEndpoints, setting, busy, headingRef, onChange, onCancel, onSubmit }) {
+function ProviderEditor({
+  kind, editor, proxySequences, proxyEndpoints, chatProviders = [], chatProviderSource = 'environment',
+  embeddingCapabilities = null, setting, busy, headingRef, onChange, onCancel, onSubmit,
+}) {
   const provider = editor.draft
   const isEmbedding = kind === 'embedding'
   const headingId = `agent-provider-editor-${kind}`
+  const connectionValue = !isEmbedding
+    ? DEDICATED_CONNECTION
+    : provider.connectionMode === INHERIT_CHAT_CONNECTION
+      ? `${INHERIT_CHAT_OPTION_PREFIX}${provider.inheritChatProviderId}`
+      : provider.connectionMode === DEDICATED_CONNECTION ? DEDICATED_CONNECTION : ''
+  const inheritedChat = provider.connectionMode === INHERIT_CHAT_CONNECTION
+    ? chatProviders.find((candidate) => candidate.id === provider.inheritChatProviderId)
+    : null
+  const chatInheritanceAvailable = chatProviderSource === 'database'
+  const effectiveConnectionProvider = inheritedChat || provider
+  const effectiveEmbeddingCapability = isEmbedding && provider.connectionMode
+    ? embeddingModelCapability(effectiveConnectionProvider, provider.model, embeddingCapabilities)
+    : null
+  const inheritedConnectionInvalid = isEmbedding && provider.connectionMode === INHERIT_CHAT_CONNECTION
+    && (!chatInheritanceAvailable || !inheritedChat || effectiveEmbeddingCapability?.status === 'unsupported')
+  const dedicatedConnectionInvalid = isEmbedding && provider.connectionMode === DEDICATED_CONNECTION
+    && effectiveEmbeddingCapability?.status === 'unsupported'
+  const sourceUnselected = isEmbedding && !provider.connectionMode
+  const modelDefaultDimensions = isEmbedding
+    ? embeddingDefaultDimensions(effectiveConnectionProvider, provider.model, embeddingCapabilities)
+    : null
   const enabledProxyKeys = new Set(proxyEndpoints.filter((endpoint) => endpoint.enabled).map((endpoint) => endpoint.proxyKey))
   const proxyOptions = [
     { value: '', label: '不设专属 · 继承 Hub 应用策略', description: '默认继续继承部署时观测到的 Docker daemon 代理；也可由 Hub 策略显式改为 Pod/Node 系统出网。' },
@@ -3855,6 +4113,57 @@ function ProviderEditor({ kind, editor, proxySequences, proxyEndpoints, setting,
   if (provider.proxySequenceKey && !proxyOptions.some((option) => option.value === provider.proxySequenceKey)) {
     proxyOptions.push({ value: provider.proxySequenceKey, label: `${provider.proxySequenceKey}（当前绑定）` })
   }
+  const connectionOptions = isEmbedding ? [
+    {
+      value: DEDICATED_CONNECTION,
+      label: '独立配置',
+      description: '单独维护 Endpoint、凭据、超时和 Proxy。',
+    },
+    { group: true, value: 'chat-provider-group', label: '继承 Chat Provider' },
+    ...chatProviders.map((chatProvider) => {
+      const capability = embeddingConnectionCapability(chatProvider, embeddingCapabilities)
+      return {
+        value: `${INHERIT_CHAT_OPTION_PREFIX}${chatProvider.id}`,
+        label: chatProvider.displayName || chatProvider.id,
+        description: `${embeddingCapabilityLabel(capability.status)} · ${capability.reason}`,
+        disabled: !chatInheritanceAvailable || capability.status === 'unsupported',
+      }
+    }),
+  ] : []
+
+  const changeConnection = (value) => {
+    if (value === DEDICATED_CONNECTION) {
+      onChange({
+        connectionMode: DEDICATED_CONNECTION,
+        inheritChatProviderId: '',
+        keyConfigured: false,
+        apiKey: '',
+        clearKey: false,
+      })
+      return
+    }
+    if (!value.startsWith(INHERIT_CHAT_OPTION_PREFIX)) return
+    const providerId = value.slice(INHERIT_CHAT_OPTION_PREFIX.length)
+    const chatProvider = chatProviders.find((candidate) => candidate.id === providerId)
+    const defaultDimensions = embeddingDefaultDimensions(chatProvider, provider.model, embeddingCapabilities)
+    onChange({
+      connectionMode: INHERIT_CHAT_CONNECTION,
+      inheritChatProviderId: providerId,
+      apiKey: '',
+      clearKey: false,
+      ...(defaultDimensions ? { dimensions: String(defaultDimensions) } : {}),
+    })
+  }
+
+  const changeEmbeddingModel = (model) => {
+    const defaultDimensions = embeddingDefaultDimensions(effectiveConnectionProvider, model, embeddingCapabilities)
+    onChange({ model, ...(defaultDimensions ? { dimensions: String(defaultDimensions) } : {}) })
+  }
+
+  const effectiveAuthMode = inheritedChat?.authMode || provider.authMode
+  const effectiveKeyConfigured = inheritedChat
+    ? inheritedChat.authMode === 'none' || inheritedChat.keyConfigured === true
+    : provider.keyConfigured
   return (
     <section className="mih-agent-provider-editor mih-agent-provider-editor--inline" aria-labelledby={headingId}>
       <header>
@@ -3862,10 +4171,10 @@ function ProviderEditor({ kind, editor, proxySequences, proxyEndpoints, setting,
           <h3 id={headingId} ref={headingRef} tabIndex="-1">
             {editor.mode === 'create' ? `新建${isEmbedding ? ' Embedding' : ' Chat'} Provider` : `编辑 ${provider.displayName || provider.id}`}
           </h3>
-          {provider.authMode === 'none' ? (
+          {effectiveAuthMode === 'none' ? (
             <StatusBadge status="active" label="无需密钥" />
           ) : (
-            <StatusBadge status={provider.keyConfigured ? 'active' : 'suspended'} label={provider.keyConfigured ? '密钥已配置' : '需要密钥'} />
+            <StatusBadge status={effectiveKeyConfigured ? 'active' : 'suspended'} label={effectiveKeyConfigured ? '密钥已配置' : '需要密钥'} />
           )}
         </div>
         <p>{setting.source === 'environment'
@@ -3874,45 +4183,110 @@ function ProviderEditor({ kind, editor, proxySequences, proxyEndpoints, setting,
       </header>
       <form id={`agent-provider-${kind}`} onSubmit={onSubmit}>
         <div className="mih-agent-provider-editor__grid">
+          {isEmbedding ? <DropdownField
+            label="连接与凭据来源"
+            value={connectionValue}
+            onChange={changeConnection}
+            options={connectionOptions}
+            required
+            placeholder="请选择；不会自动选择第一条 Chat Provider"
+            hint={chatInheritanceAvailable
+              ? '继承时复用 Chat Provider 的 Endpoint、协议、凭据、超时和 Proxy；Embedding 只保存自己的模型与维度。'
+              : 'Chat Catalog 仍由环境变量注入；请先在 Chat Provider 区迁移到数据库管理，才能创建继承关系。'}
+            className="mih-agent-provider-editor__wide"
+            disabled={busy}
+          /> : null}
+          {sourceUnselected ? <p className="mih-agent-provider-capability-warning mih-agent-provider-editor__wide" role="status">
+            <Warning size={17} aria-hidden="true" />请明确选择独立配置或一个 Chat Provider；系统不会自动使用 Catalog 第一条。
+          </p> : null}
+          {isEmbedding && !chatInheritanceAvailable ? <p className="mih-agent-provider-capability-warning mih-agent-provider-editor__wide" role="status">
+            <Warning size={17} aria-hidden="true" />继承选项暂不可用：Chat Provider 仍由环境变量管理。先迁移 Chat Catalog；独立 Embedding 配置不受影响。
+          </p> : null}
           <Field label="Provider ID" hint={editor.mode === 'edit' ? '创建后不可修改；如需更名，请新建 Provider 并迁移 Sequence' : ''}>
             <input className="qp-input" required maxLength="64" pattern="[a-z0-9][a-z0-9._-]{0,63}"
               disabled={busy || editor.mode === 'edit'} value={provider.id} onChange={(event) => onChange({ id: event.target.value })} />
           </Field>
           <Field label="显示名称"><input className="qp-input" required maxLength="120" disabled={busy} value={provider.displayName} onChange={(event) => onChange({ displayName: event.target.value })} /></Field>
-          <Field label="模型"><input className="qp-input" required maxLength="200" disabled={busy} value={provider.model} onChange={(event) => onChange({ model: event.target.value })} /></Field>
+          <Field label={isEmbedding ? 'Embedding 模型' : '模型'}><input className="qp-input" required maxLength="200" disabled={busy} value={provider.model} onChange={(event) => isEmbedding ? changeEmbeddingModel(event.target.value) : onChange({ model: event.target.value })} /></Field>
           {!isEmbedding ? <DropdownField label="调用协议" value={provider.protocol}
             onChange={(protocol) => onChange({ protocol })} options={PROVIDER_PROTOCOL_OPTIONS} disabled={busy} /> : null}
-          <Field label="Base URL" className="mih-agent-provider-editor__wide" hint="修改后必须重新输入密钥或明确清除旧密钥">
-            <input className="qp-input" type="url" required disabled={busy} value={provider.baseUrl} placeholder="https://api.example.com/v1" onChange={(event) => onChange({ baseUrl: event.target.value })} />
-          </Field>
-          <Field label="超时（ms）"><input className="qp-input" type="number" min="1000" max="300000" step="1" required disabled={busy} value={provider.timeoutMs} onChange={(event) => onChange({ timeoutMs: event.target.value })} /></Field>
           <Field label="Catalog 排序值" hint="仅决定目录顺序；保存时按数值从小到大排序，不设置系统默认"><input className="qp-input" type="number" min="0" max="10000" step="1" required disabled={busy} value={provider.priority} onChange={(event) => onChange({ priority: event.target.value })} /></Field>
-          {isEmbedding ? <Field label="Dimensions" hint="改变向量空间前必须 reindex"><input className="qp-input" type="number" min="1" step="1" required disabled={busy} value={provider.dimensions} onChange={(event) => onChange({ dimensions: event.target.value })} /></Field> : null}
-          <DropdownField label="认证方式" value={provider.authMode}
-            onChange={(authMode) => onChange({ authMode, ...(authMode === 'none' ? { apiKey: '', clearKey: false } : {}) })}
-            options={PROVIDER_AUTH_OPTIONS} disabled={busy} />
-          <DropdownField label="Provider Proxy" hint="兼容绑定；未指定时继承 Hub 应用出网策略。该策略默认继承部署时观测到的 Docker daemon 代理，也可显式选择 Pod/Node 系统出网。" value={provider.proxySequenceKey}
-            onChange={(proxySequenceKey) => onChange({ proxySequenceKey })} options={proxyOptions} disabled={busy} />
-          <Field label="API Key" className="mih-agent-provider-editor__wide"
-            hint={setting.source === 'environment' && provider.authMode === 'bearer'
-              ? '迁移时必须重新输入；环境变量密钥不会进入浏览器'
-              : '始终不回显；留空保留当前密钥'}>
-            <input className="qp-input" type="password" autoComplete="new-password" maxLength="8192"
-              value={provider.apiKey} disabled={busy || provider.clearKey || provider.authMode === 'none'}
-              onChange={(event) => onChange({ apiKey: event.target.value })} />
-          </Field>
+          {isEmbedding ? <Field label="Dimensions" hint={modelDefaultDimensions
+            ? `当前 Router 不发送 dimensions 参数；${provider.model} 使用默认返回维度 ${modelDefaultDimensions}。`
+            : '未知或自建网关请填写预期返回维度，并以连接测试结果为准；改变向量空间前必须 reindex。'}>
+            <input className="qp-input" type="number" min="1" step="1" required
+              disabled={busy || Boolean(modelDefaultDimensions)} value={modelDefaultDimensions || provider.dimensions}
+              onChange={(event) => onChange({ dimensions: event.target.value })} />
+          </Field> : null}
+          {isEmbedding && provider.connectionMode === INHERIT_CHAT_CONNECTION ? (
+            <section className={`mih-agent-provider-inheritance mih-agent-provider-editor__wide${inheritedConnectionInvalid ? ' is-invalid' : ''}`}
+              role={inheritedConnectionInvalid ? 'alert' : 'status'} aria-live="polite">
+              {inheritedChat ? <>
+                <header><strong>继承 {inheritedChat.displayName || inheritedChat.id}</strong><StatusBadge
+                  status={effectiveEmbeddingCapability.status === 'supported' ? 'active' : effectiveEmbeddingCapability.status === 'unsupported' ? 'suspended' : 'pending'}
+                  label={embeddingCapabilityLabel(effectiveEmbeddingCapability.status)} /></header>
+                <p>{!chatInheritanceAvailable
+                  ? 'Chat Catalog 仍由环境变量管理；请先迁移到数据库管理。'
+                  : effectiveEmbeddingCapability.reason}</p>
+                <dl>
+                  <div><dt>Endpoint</dt><dd><code>{inheritedChat.baseUrl || '未报告'}</code></dd></div>
+                  <div><dt>协议</dt><dd>{inheritedChat.protocol || 'openai-compatible'}</dd></div>
+                  <div><dt>凭据</dt><dd>{effectiveAuthMode === 'none' ? '无需认证' : effectiveKeyConfigured ? 'Chat Provider 已配置' : 'Chat Provider 缺少 Key'}</dd></div>
+                  <div><dt>超时</dt><dd>{inheritedChat.timeoutMs ? `${inheritedChat.timeoutMs} ms` : '未报告'}</dd></div>
+                  <div><dt>Proxy</dt><dd><code>{inheritedChat.proxySequenceKey || '继承 Hub 应用出网策略'}</code></dd></div>
+                </dl>
+              </> : <><strong>继承来源已不存在</strong><p>请重新选择 Chat Provider；当前配置不能保存。</p></>}
+            </section>
+          ) : null}
+          {isEmbedding && provider.connectionMode === DEDICATED_CONNECTION && effectiveEmbeddingCapability ? (
+            <section className={`mih-agent-provider-inheritance mih-agent-provider-editor__wide${dedicatedConnectionInvalid ? ' is-invalid' : ''}`}
+              role={dedicatedConnectionInvalid ? 'alert' : 'status'} aria-live="polite">
+              <header><strong>Embedding 能力目录</strong><StatusBadge
+                status={effectiveEmbeddingCapability.status === 'supported' ? 'active' : effectiveEmbeddingCapability.status === 'unsupported' ? 'suspended' : 'pending'}
+                label={embeddingCapabilityLabel(effectiveEmbeddingCapability.status)} /></header>
+              <p>{effectiveEmbeddingCapability.reason}{embeddingCapabilities?.revision ? ` · Catalog revision ${embeddingCapabilities.revision}` : ''}</p>
+            </section>
+          ) : null}
+          {isEmbedding && effectiveEmbeddingCapability?.status === 'probe-required' ? <p className="mih-agent-provider-capability-warning mih-agent-provider-editor__wide" role="status">
+            <Warning size={17} aria-hidden="true" />{effectiveEmbeddingCapability.reason} 可以保存，但加入业务 Sequence 前必须执行 Embedding 连接测试。
+          </p> : null}
+          {(!isEmbedding || provider.connectionMode === DEDICATED_CONNECTION) ? <>
+            <Field label="Base URL" className="mih-agent-provider-editor__wide" hint="修改后必须重新输入密钥或明确清除旧密钥">
+              <input className="qp-input" type="url" required disabled={busy} value={provider.baseUrl} placeholder="https://api.example.com/v1" onChange={(event) => {
+                const baseUrl = event.target.value
+                const defaultDimensions = isEmbedding
+                  ? embeddingDefaultDimensions({ ...provider, baseUrl }, provider.model, embeddingCapabilities)
+                  : null
+                onChange({ baseUrl, ...(defaultDimensions ? { dimensions: String(defaultDimensions) } : {}) })
+              }} />
+            </Field>
+            <Field label="超时（ms）"><input className="qp-input" type="number" min="1000" max="300000" step="1" required disabled={busy} value={provider.timeoutMs} onChange={(event) => onChange({ timeoutMs: event.target.value })} /></Field>
+            <DropdownField label="认证方式" value={provider.authMode}
+              onChange={(authMode) => onChange({ authMode, ...(authMode === 'none' ? { apiKey: '', clearKey: false } : {}) })}
+              options={PROVIDER_AUTH_OPTIONS} disabled={busy} />
+            <DropdownField label="Provider Proxy" hint="兼容绑定；未指定时继承 Hub 应用出网策略。该策略默认继承部署时观测到的 Docker daemon 代理，也可显式选择 Pod/Node 系统出网。" value={provider.proxySequenceKey}
+              onChange={(proxySequenceKey) => onChange({ proxySequenceKey })} options={proxyOptions} disabled={busy} />
+            <Field label="API Key" className="mih-agent-provider-editor__wide"
+              hint={setting.source === 'environment' && provider.authMode === 'bearer'
+                ? '迁移时必须重新输入；环境变量密钥不会进入浏览器'
+                : '始终不回显；留空保留当前密钥'}>
+              <input className="qp-input" type="password" autoComplete="new-password" maxLength="8192"
+                value={provider.apiKey} disabled={busy || provider.clearKey || provider.authMode === 'none'}
+                onChange={(event) => onChange({ apiKey: event.target.value })} />
+            </Field>
+          </> : null}
         </div>
         <footer>
           <div className="mih-agent-provider-options">
             <label><input type="checkbox" checked={provider.enabled} disabled={busy} onChange={(event) => onChange({ enabled: event.target.checked })} />启用 Provider</label>
-            {provider.authMode !== 'none' && provider.keyConfigured ? <label className="mih-agent-provider-clear">
+            {(!isEmbedding || provider.connectionMode === DEDICATED_CONNECTION) && provider.authMode !== 'none' && provider.keyConfigured ? <label className="mih-agent-provider-clear">
               <input type="checkbox" checked={provider.clearKey} disabled={busy}
                 onChange={(event) => onChange({ clearKey: event.target.checked, apiKey: '' })} />明确清除已保存密钥
             </label> : null}
           </div>
           <div className="mih-page-actions">
             <button className="qp-button qp-button--ghost" type="button" onClick={onCancel} disabled={busy}>取消</button>
-            <button className="qp-button qp-button--primary" type="submit" disabled={busy}>
+            <button className="qp-button qp-button--primary" type="submit" disabled={busy || sourceUnselected || inheritedConnectionInvalid || dedicatedConnectionInvalid}>
               {busy ? '正在保存' : editor.mode === 'create' ? '创建 Provider' : '保存修改'}
             </button>
           </div>

@@ -67,6 +67,35 @@ test('Agent Center keeps defaults explicit and uses the shared confirm dialog', 
   assert.match(market, /未设置可用的业务默认（模型阶段确定性降级）/u)
 })
 
+test('Embedding Provider UI inherits Chat connections without copying secret-bearing fields', async () => {
+  const providers = await readFile(new URL('../../src/pages-data.jsx', import.meta.url), 'utf8')
+  const center = await readFile(new URL('../../src/pages-agent-center.tsx', import.meta.url), 'utf8')
+
+  assert.match(providers, /label="连接与凭据来源"/u)
+  assert.match(providers, /placeholder="请选择；不会自动选择第一条 Chat Provider"/u)
+  assert.match(providers, /embeddingCapabilities=\{agent\.embeddingCapabilities\}/u)
+  assert.match(providers, /disabled: !chatInheritanceAvailable \|\| capability\.status === 'unsupported'/u)
+  assert.match(providers, /Chat Provider 仍由环境变量管理/u)
+  assert.match(providers, /effectiveEmbeddingCapability\?\.status === 'probe-required'/u)
+  assert.match(providers, /provider\.connectionMode === DEDICATED_CONNECTION && effectiveEmbeddingCapability/u)
+  assert.match(providers, /const capability = embeddingModelCapability\(provider, model, embeddingCapabilities\)/u)
+  assert.match(providers, /capability\.status === 'unsupported'[\s\S]*?不能继承/u)
+  assert.match(providers, /connectionMode: DEDICATED_CONNECTION,[\s\S]*?keyConfigured: false,[\s\S]*?apiKey: ''/u)
+  assert.match(providers, /provider\.originalConnectionMode === DEDICATED_CONNECTION[\s\S]*?provider\.connectionMode === DEDICATED_CONNECTION/u)
+  assert.match(providers, /provider\.connectionReady === false[\s\S]*?父连接不可用/u)
+  assert.match(providers, /当前 Router 不发送 dimensions 参数/u)
+  assert.match(providers, /connection: \{ mode: INHERIT_CHAT_CONNECTION, providerId: parentId \}/u)
+  assert.match(providers, /if \(inherited\) \{[\s\S]*?return \{[\s\S]*?connection: \{ mode: INHERIT_CHAT_CONNECTION, providerId: parentId \}/u)
+  assert.match(providers, /Key 由 Chat Provider 管理/u)
+  assert.match(providers, /embeddingReferences\.length > 0/u)
+
+  assert.match(center, /provider\.connection\?\.mode === 'inherit-chat'/u)
+  assert.match(center, /connection: provider\.connection/u)
+  assert.match(center, /providerOwnsProxyBinding/u)
+  assert.match(center, /跟随 Chat Provider/u)
+  assert.match(center, /不能单独设置兼容绑定/u)
+})
+
 function requestBody(definition = freshAdvancedSearchDefinition()) {
   return {
     dryRun: true,

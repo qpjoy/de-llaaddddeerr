@@ -15,6 +15,7 @@ import { normalizeChinaProvince } from './data/china-provinces.mjs'
 import { ADVANCED_SEARCH_AGENT_KEY } from '../agent-market/advanced-search/schemas.ts'
 import { runAdvancedSearchDryRun } from './agent-market/runner.ts'
 import { builtinAdvancedSearchSnapshot } from './agent-market/store.ts'
+import { publicEmbeddingCapabilityCatalog } from './agent/embedding-capabilities.mjs'
 import {
   normalizeSourceCatalogCreate,
   normalizeSourceCatalogOwnerCreate,
@@ -2717,6 +2718,7 @@ export function createApp({
             // The circuit state per provider is the operationally useful part:
             // it shows when the chain is quietly running on a fallback.
             ...(agent?.status() ?? {}),
+            embeddingCapabilities: publicEmbeddingCapabilityCatalog(),
             control: typeof agent?.controlStatus === 'function'
               ? await agent.controlStatus()
               : { sequences: [], bindings: [], providerTests: [], proxy: { endpoints: [], sequences: [], globalSequenceKey: null, revision: 0 } },

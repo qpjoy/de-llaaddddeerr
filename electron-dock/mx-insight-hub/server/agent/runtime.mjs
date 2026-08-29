@@ -7,7 +7,13 @@ import {
   providerProxyRouteFingerprint,
   resolveProviderProxyRoute,
 } from './control-store.mjs'
-import { normalizeDatabaseProviders, publicSetting } from './settings-store.mjs'
+import {
+  normalizeDatabaseProviders,
+  providerConnection,
+  publicSetting,
+  resolveEmbeddingProviderSetting,
+} from './settings-store.mjs'
+import { publicEmbeddingCapabilityCatalog } from './embedding-capabilities.mjs'
 
 const DEFAULT_REFRESH_INTERVAL_MS = 5_000
 const DEFAULT_PROBE_COOLDOWN_MS = 5_000
@@ -43,73 +49,125 @@ function environmentSetting(kind, raw, metadata, expectedEmbedding = {}) {
       throw new AppError(409, 'reindex_required', 'Changing the embedding model or dimensions requires a controlled re-embedding')
     }
   }
+  const safeProviders = providers.map((provider, priority) => ({
+    id: provider.id,
+    displayName: provider.displayName || provider.id,
+    baseUrl: provider.baseUrl,
+    model: provider.model,
+    protocol: provider.protocol || 'openai-compatible',
+    proxySequenceKey: provider.proxySequenceKey || null,
+    timeoutMs: provider.timeoutMs,
+    ...(kind === 'embedding' ? { dimensions: provider.dimensions } : {}),
+    enabled: true,
+    priority,
+    authMode: provider.authMode,
+  }))
+  const configuredIds = new Set(providers.flatMap((provider) => (
+    provider.authMode !== 'bearer' || Boolean(provider.apiKeyEnv && process.env[provider.apiKeyEnv])
+      ? [provider.id]
+      : []
+  )))
   return {
-    setting: {
+    setting: publicSetting({
       kind,
       source: 'environment',
       revision: metadata?.revision ?? 0,
-      providers: providers.map((provider, priority) => ({
-        id: provider.id,
-        displayName: provider.displayName || provider.id,
-        baseUrl: provider.baseUrl,
-        model: provider.model,
-        protocol: provider.protocol || 'openai-compatible',
-        proxySequenceKey: provider.proxySequenceKey || null,
-        timeoutMs: provider.timeoutMs,
-        ...(kind === 'embedding' ? { dimensions: provider.dimensions } : {}),
-        enabled: true,
-        priority,
-        authMode: provider.authMode,
-        keyConfigured: provider.authMode !== 'bearer'
-          || Boolean(provider.apiKeyEnv && process.env[provider.apiKeyEnv]),
-      })),
+      providers: safeProviders,
       updatedBy: metadata?.updatedBy ?? null,
       updatedAt: metadata?.updatedAt ?? null,
-    },
+    }, configuredIds),
     providers,
   }
 }
 
-function databaseSetting(kind, stored, credentials, expectedEmbeddingDimensions) {
+function resolvedDatabaseSnapshot(
+  kind,
+  stored,
+  credentials,
+  expectedEmbeddingDimensions,
+  { chatSetting = null, inheritedChatCredentials = new Map() } = {},
+) {
   const normalized = normalizeDatabaseProviders(stored.providers, {
     kind,
     expectedEmbeddingDimensions,
   })
-  const active = normalized.filter(({ provider }) => provider.enabled)
+  const normalizedSetting = { ...stored, providers: normalized.map(({ provider }) => provider) }
+  const resolvedSetting = kind === 'embedding'
+    ? resolveEmbeddingProviderSetting(normalizedSetting, chatSetting, { tolerateUnavailable: true })
+    : normalizedSetting
+  const active = resolvedSetting.providers.filter((provider) => (
+    provider.enabled && provider.connectionReady !== false
+  ))
   if (kind === 'embedding' && active.length > 0 && (
     !stored.lockedEmbeddingModel || !stored.lockedEmbeddingDimensions
   )) {
     throw new AppError(409, 'embedding_space_unlocked', 'Embedding provider metadata is missing its persisted vector-space lock')
   }
-  if (kind === 'embedding' && stored.lockedEmbeddingModel && normalized.some(({ provider }) => (
+  if (kind === 'embedding' && stored.lockedEmbeddingModel && resolvedSetting.providers.some((provider) => (
     provider.model !== stored.lockedEmbeddingModel
     || provider.dimensions !== stored.lockedEmbeddingDimensions
   ))) {
     throw new AppError(409, 'reindex_required', 'Changing the embedding model or dimensions requires a controlled re-embedding')
   }
-  const configuredIds = new Set(credentials.keys())
-  const providers = normalized
-    .filter(({ provider }) => provider.enabled)
-    .map(({ provider }) => ({
+  const configuredIds = new Set()
+  const allProviders = resolvedSetting.providers.map((provider) => {
+    const connection = providerConnection(provider, kind)
+    const apiKey = connection.mode === 'inherit-chat'
+      ? inheritedChatCredentials.get(connection.providerId)
+      : credentials.get(provider.id)
+    if (provider.authMode === 'none' || apiKey) configuredIds.add(provider.id)
+    return {
       ...provider,
-      ...(provider.authMode === 'bearer'
-        ? { apiKey: credentials.get(provider.id) || null }
-        : {}),
-    }))
+      ...(provider.authMode === 'bearer' ? { apiKey: apiKey || null } : {}),
+    }
+  })
   return {
-    setting: publicSetting({ ...stored, providers: normalized.map((entry) => entry.provider) }, configuredIds),
-    providers: parseProviderConfig(providers, { kind, allowInlineApiKey: true }),
+    resolvedSetting,
+    configuredIds,
+    allProviders,
+    providers: allProviders.filter((provider) => (
+      provider.enabled && provider.connectionReady !== false
+    )),
   }
 }
 
-function databaseProbeProvider(kind, stored, credentials, providerId, expectedEmbeddingDimensions) {
-  const normalized = normalizeDatabaseProviders(stored.providers, {
-    kind,
-    expectedEmbeddingDimensions,
-  })
-  const selected = normalized.find(({ provider }) => provider.id === providerId)?.provider
+function databaseSetting(
+  kind,
+  stored,
+  credentials,
+  expectedEmbeddingDimensions,
+  dependencies = {},
+) {
+  const snapshot = resolvedDatabaseSnapshot(
+    kind, stored, credentials, expectedEmbeddingDimensions, dependencies,
+  )
+  return {
+    setting: publicSetting(snapshot.resolvedSetting, snapshot.configuredIds),
+    providers: parseProviderConfig(snapshot.providers, { kind, allowInlineApiKey: true }),
+  }
+}
+
+function databaseProbeProvider(
+  kind,
+  stored,
+  credentials,
+  providerId,
+  expectedEmbeddingDimensions,
+  dependencies = {},
+) {
+  const snapshot = resolvedDatabaseSnapshot(
+    kind, stored, credentials, expectedEmbeddingDimensions, dependencies,
+  )
+  const selected = snapshot.allProviders.find((provider) => provider.id === providerId)
   if (!selected) {
     throw new AppError(404, 'agent_provider_not_found', 'The saved provider was not found')
+  }
+  if (selected.connectionReady === false) {
+    throw new AppError(
+      409,
+      'embedding_connection_unavailable',
+      selected.connectionError || 'The inherited Embedding connection is unavailable',
+    )
   }
   if (kind === 'embedding') {
     if (!stored.lockedEmbeddingModel || !stored.lockedEmbeddingDimensions) {
@@ -122,13 +180,7 @@ function databaseProbeProvider(kind, stored, credentials, providerId, expectedEm
       throw new AppError(409, 'reindex_required', 'Changing the embedding model or dimensions requires a controlled re-embedding')
     }
   }
-  const provider = {
-    ...selected,
-    ...(selected.authMode === 'bearer'
-      ? { apiKey: credentials.get(selected.id) || null }
-      : {}),
-  }
-  return parseProviderConfig([provider], { kind, allowInlineApiKey: true })[0]
+  return parseProviderConfig([selected], { kind, allowInlineApiKey: true })[0]
 }
 
 export class AgentRuntime {
@@ -343,6 +395,20 @@ export class AgentRuntime {
       loadKind('chat'),
       loadKind('embedding'),
     ])
+    const embeddingInheritsChat = embeddingRuntime.setting?.source === 'database'
+      && (embeddingRuntime.setting.providers || []).some((provider) => (
+        providerConnection(provider).mode === 'inherit-chat'
+      ))
+    // The Embedding store snapshot reads its parent Chat metadata and secrets
+    // in the same repeatable-read transaction. When a child inherits, use that
+    // same parent snapshot for the Chat router too; otherwise one poll could
+    // pair a pre-commit Chat chain with a post-commit Embedding chain.
+    const coherentChatRuntime = embeddingInheritsChat
+      ? {
+          setting: embeddingRuntime.chatSetting || chatRuntime.setting,
+          credentials: embeddingRuntime.inheritedChatCredentials || chatRuntime.credentials,
+        }
+      : chatRuntime
     const emptyControl = {
       controlAvailable: false,
       sequences: [], defaultBinding: null, proxyEndpoints: [], proxySequences: [],
@@ -358,11 +424,17 @@ export class AgentRuntime {
         : emptyControl,
     ])
     return {
-      chat: chatRuntime.setting,
+      chat: coherentChatRuntime.setting,
       embedding: embeddingRuntime.setting,
       credentials: {
-        chat: chatRuntime.credentials,
+        chat: coherentChatRuntime.credentials,
         embedding: embeddingRuntime.credentials,
+      },
+      dependencies: {
+        embedding: {
+          chatSetting: embeddingRuntime.chatSetting || coherentChatRuntime.setting,
+          inheritedChatCredentials: embeddingRuntime.inheritedChatCredentials || coherentChatRuntime.credentials,
+        },
       },
       control: { chat: chatControl, embedding: embeddingControl },
     }
@@ -403,6 +475,7 @@ export class AgentRuntime {
       ? databaseSetting(
           'embedding', snapshot.embedding, snapshot.credentials.embedding,
           this.config.embedding?.dimensions ?? null,
+          snapshot.dependencies?.embedding,
         )
       : environmentSetting(
           'embedding', this.config.agent.embeddingProviders, snapshot.embedding,
@@ -541,6 +614,9 @@ export class AgentRuntime {
       // could send a cleared key or use a provider the operator just disabled.
       // Fail the changed capability closed; the poller will converge later.
       this.#disableKind(kind, updated)
+      for (const dependentKind of updated.dependentKinds || []) {
+        this.#disableKind(dependentKind, this.#settings.get(dependentKind))
+      }
       return { ...updated, runtimeApplied: false }
     }
     return { ...this.#settings.get(kind), runtimeApplied: true }
@@ -583,7 +659,9 @@ export class AgentRuntime {
     const setting = this.#settings.get(kind)
     const enabledIds = new Set(
       (setting?.providers || [])
-        .filter((provider) => provider.enabled !== false)
+        .filter((provider) => (
+          provider.enabled !== false && provider.connectionReady !== false
+        ))
         .map((provider) => provider.id),
     )
     const valid = sequence?.enabled
@@ -757,6 +835,7 @@ export class AgentRuntime {
     let failure = null
     let evidenceSetting = this.#settings.get(kind)
     let evidenceControl = this.#control.get(kind)
+    let evidenceProvider = null
     const withRoute = (value) => routeMode === 'inherit'
       ? { ...value, route: { mode: 'inherit' } }
       : routeOverride === undefined
@@ -825,7 +904,14 @@ export class AgentRuntime {
         runtime.credentials,
         providerId,
         this.config.embedding?.dimensions ?? null,
+        kind === 'embedding'
+          ? {
+              chatSetting: runtime.chatSetting,
+              inheritedChatCredentials: runtime.inheritedChatCredentials,
+            }
+          : {},
       )
+      evidenceProvider = provider
       const route = resolveProviderProxyRoute(provider, evidenceControl, routeOverride)
       if (typeof routeOverride === 'string' && route.proxyUrls.length === 0) {
         throw new AppError(400, 'invalid_agent_proxy_route', 'The selected Proxy Sequence has no usable endpoint')
@@ -858,7 +944,8 @@ export class AgentRuntime {
       const current = this.#probeStates.get(key)
       if (current) current.inFlight = false
       if (this.controlStore && persistEvidence) {
-        const provider = evidenceSetting?.providers?.find((candidate) => candidate.id === providerId)
+        const provider = evidenceProvider
+          || evidenceSetting?.providers?.find((candidate) => candidate.id === providerId)
         if (provider) {
           await this.controlStore.recordProbe({
             kind,
@@ -1255,6 +1342,7 @@ export class AgentRuntime {
   status() {
     return {
       ...this.#agent.status(),
+      embeddingCapabilities: publicEmbeddingCapabilityCatalog(),
       settings: {
         chat: this.#settings.get('chat'),
         embedding: this.#settings.get('embedding'),
