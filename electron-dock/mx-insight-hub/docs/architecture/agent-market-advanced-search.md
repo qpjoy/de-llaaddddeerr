@@ -11,11 +11,40 @@ the graph, stage contracts and tool allowlist; an operator can change prompts,
 model parameters and bounded tool options, move stages to a recoverable trash,
 and compare trace/evaluation output.
 
+## Catalog and execution are separate
+
+Agent Market now has a real, operator-managed catalog rather than treating the
+single dry-run definition as the whole market. Migration
+`045_agent_market_catalog.sql` seeds two truthful categories and two entries:
+
+- **知识问答 / 知识问答 Agent** is a persisted catalog item whose execution
+  adapter has not been implemented yet. It is shown as a draft and cannot run.
+- **Demo Agent / 进阶搜索 Agent · Dry Run** points to the shipped
+  `advanced-search-dry-run` adapter and remains the runnable tutorial.
+
+An operator in the existing Hub Admin Token session can create and edit categories, create custom Agent
+metadata, move an Agent between categories, and disable or restore it with
+optimistic revision checks. A Launcher platform administrator can browse the
+same catalog but cannot mutate or execute it. Built-in categories cannot be
+deleted, and a custom category cannot be deleted while any Agent references it.
+
+Agent Market has no credential, login or session of its own. It reuses the
+current Hub session and the same Hub Admin Token already used by the rest of
+the management console; it never asks the operator for a second token.
+
+Catalog metadata never grants execution. Custom Agent requests cannot submit
+an executor key, module, URL, runnable flag, health value or metrics; the server
+stores a null executor and reports `executor-not-configured`. Adding a runnable
+Agent therefore requires a code-owned, schema-bound adapter to ship first, then
+an explicit server migration binds its fixed adapter identifier. The UI must
+show missing run data as unavailable, not as a synthetic zero, healthy state,
+latency or accuracy score.
+
 ## Runtime and ownership boundary
 
 ```mermaid
 flowchart LR
-  UI["Hub Admin UI\nAgent Market"] -->|"Admin Token\nsave / dry-run"| API["Internal Admin listener\n/agent-market/*"]
+  UI["Hub Admin UI\nAgent Market"] -->|"Existing Hub Admin Token\nsave / dry-run"| API["Internal Admin listener\n/agent-market/*"]
   API --> DEF["Versioned definition\nCAS + append-only snapshots"]
   API --> RUN["Explicit TS runner\n120 s deadline"]
   RUN --> MODEL["Existing Agent provider router\noptional / metered"]
@@ -54,7 +83,7 @@ Two code-owned gates surround seven recoverable stages:
 
 The access/dry-run gate enforces the fixed market key, `dryRun: true`, request
 and prompt limits, canonical stage order, at most two concurrent runs per
-process, Admin Token and the server-owned tool registry. The trace/evaluation
+process, the existing Hub Admin Token session and the server-owned tool registry. The trace/evaluation
 gate validates every stage with Zod, removes
 invented evidence IDs, enforces grounded refusal, and exposes rendered messages,
 parameters, tool summaries, result, provider/model metadata, tokens, latency,
@@ -109,7 +138,8 @@ degradation and the graph either continues with available evidence or refuses.
 opinion state, queue, outbox, index alias, Night-All state, grant, usage ledger
 or MX-H2I state is written. Saving an Agent Market definition is a separate,
 explicit control-plane write. Model and embedding calls can still incur
-provider cost, which is why execution is Admin-Token-only.
+provider cost, which is why execution is restricted to the existing Hub Admin
+Token session.
 
 ## Persistence
 
@@ -122,6 +152,17 @@ The built-in definition is revision 0 and requires no database seed. The first
 save creates revision 1. Concurrent saves serialize on the logical agent key
 and fail with a revision conflict instead of overwriting another edit. There is
 no HTTP DELETE and no cascade to canonical data.
+
+Migration `045_agent_market_catalog.sql` adds:
+
+- `control.agent_market_categories` for revisioned category metadata;
+- `control.agent_market_catalog` for revisioned Agent directory metadata and
+  the server-owned executor binding.
+
+The catalog seeds use `ON CONFLICT DO NOTHING`, so a restart or migration rerun
+does not overwrite operator metadata or re-enable a disabled entry. Agent
+records are retained and disabled/restored through lifecycle updates; this
+iteration does not expose physical Agent deletion.
 
 Run traces are not persisted in this MVP. The UI keeps the current and previous
 response for a local comparison. A later replay ledger must remain isolated and

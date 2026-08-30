@@ -429,6 +429,32 @@ export const adminApi = {
   startBackfill: (token, body) => request(token, `${ADMIN_ROOT}/backfill`, { method: 'POST', body }),
   agent: (token) => request(token, `${ADMIN_ROOT}/agent`),
   agentMarket: (token) => request(token, `${ADMIN_ROOT}/agent-market`),
+  agentMarketCatalog: (token) => request(token, `${ADMIN_ROOT}/agent-market/catalog`),
+  createAgentMarketCategory: (token, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-market/categories`,
+    { method: 'POST', body },
+  ),
+  updateAgentMarketCategory: (token, categoryKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-market/categories/${encodeURIComponent(categoryKey)}`,
+    { method: 'PUT', body },
+  ),
+  deleteAgentMarketCategory: (token, categoryKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-market/categories/${encodeURIComponent(categoryKey)}`,
+    { method: 'DELETE', body },
+  ),
+  createAgentMarketAgent: (token, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-market/agents`,
+    { method: 'POST', body },
+  ),
+  updateAgentMarketAgent: (token, agentKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-market/agents/${encodeURIComponent(agentKey)}`,
+    { method: 'PUT', body },
+  ),
   agentMarketItem: (token, agentKey) => request(
     token,
     `${ADMIN_ROOT}/agent-market/${encodeURIComponent(agentKey)}`,

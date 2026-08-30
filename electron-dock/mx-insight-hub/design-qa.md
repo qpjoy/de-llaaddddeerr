@@ -185,3 +185,65 @@ No actionable P0, P1 or P2 findings remain. The final focused comparison preserv
 4. Final side-by-side and focused comparisons found no remaining actionable mismatch. Dark retains the reference look; light reads as the same product rather than an inverted or washed-out skin.
 
 final result: passed
+
+---
+
+# Agent Market design QA
+
+- Source visual truth: `/Users/qpjoy/.codex/generated_images/01a0532a-6f93-7761-8c1d-c41aed4566f5/exec-bc51c042-8147-4492-9e85-245f4f9906b1.png`
+- Browser-rendered implementation: `/Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/electron-dock/mx-insight-hub/design-qa-final-run.jpg`
+- Additional states: `design-qa-catalog.jpg`, `design-qa-light.jpg`
+- Route: `http://127.0.0.1:5173/#/agent/market`
+- Viewport: 1280 × 720 CSS px, desktop in-app browser
+- Source pixels: 1536 × 1024. For the equal-size comparison it was normalized to 1280 × 853 and top-cropped to 1280 × 720 at 1× density in `/private/tmp/agent-market-reference-1280x720.png`.
+- Implementation pixels: 1280 × 720 at 1× density.
+- State: dark theme, protected Admin Token session, `advanced-search` selected, completed real local dry-run. The source contains illustrative benchmark data; the implementation intentionally shows only values returned by the running service.
+
+## Full-view comparison evidence
+
+The normalized source and final implementation were opened together in one comparison pass. The implementation preserves the source hierarchy and Neon Void language: global navigation, Agent catalog rail, selected Agent identity, bounded run composer, luminous directed stage graph, semantic status colors, and evidence-oriented comparison areas. At this 1280px breakpoint the Inspector moves below the graph rather than compressing into an unreadable third column; the three-column layout is retained above the 1500px breakpoint.
+
+The source presents hypothetical persisted benchmarks, dataset selectors and rich evidence scores. Those values were not copied as fixtures. The implementation instead displays `—`, `暂无运行`, `n=1`, or the actual dry-run trace so that the product does not claim accuracy, route performance or health that it has not measured.
+
+## Focused-region evidence
+
+No separate pixel crop was required after the equal-size comparison because the catalog cards, run composer, graph nodes and state labels remain legible in the 1280 × 720 captures. Additional browser captures verified two important focused states:
+
+- `design-qa-catalog.jpg`: Knowledge Q&A is visibly `Catalog Only · 未配置执行器`, has no stale graph or result, and its run action is disabled.
+- `design-qa-light.jpg`: the same catalog and graph remain readable in the light theme without lost borders or semantic state colors.
+
+## Findings
+
+No actionable P0, P1 or P2 findings remain.
+
+- Typography: Poppins/system CJK fallbacks, heading weights, code text and compact metadata retain the source hierarchy. Small metadata contrast is now raised locally inside the workbench.
+- Spacing and layout: the catalog/main/inspector hierarchy is preserved; at 1280px the responsive two-column arrangement avoids squeezing the main graph. Horizontal graph overflow remains deliberately scrollable.
+- Colors and tokens: Neon Void tokens, cyan selection, green success, amber degradation and red failure are consistently applied in both themes. State is also expressed with text/icons.
+- Image and icon quality: the existing MX logo asset and Phosphor icon family are reused; no placeholder imagery, emoji, handcrafted SVG illustration or CSS substitute was introduced. SVG is limited to semantic graph edges.
+- Copy and content: catalog/run language distinguishes real records, unavailable execution, dry-run safety and single-sample diagnostics. Synthetic accuracy and health claims are absent.
+- Accessibility: semantic buttons, labeled fields, `tablist`/`tabpanel`, focus styles, text state labels and `prefers-reduced-motion` are present. The graph has keyboard-operable DOM nodes in addition to decorative SVG edges.
+
+## Comparison history
+
+1. Initial browser pass found a P2 accessibility issue: numerous 9–11px metadata labels inherited the global extra-faint `text-3`/`text-4` opacity tokens and were visibly harder to read than the source.
+2. Fix: `src/agent-market.css` now scopes stronger theme-aware muted text tokens to `.mih-market-workbench`, preserving the Neon palette while improving dark/light contrast.
+3. Post-fix evidence: `design-qa-final.jpg`, `design-qa-light.jpg`, and the final completed-run capture `design-qa-final-run.jpg`. The normalized source and final run capture were compared together; no further P0/P1/P2 issue was found.
+
+## Primary interactions tested
+
+- One Hub Admin Token login followed by direct Agent Market navigation; no Market-specific credential or second prompt.
+- Real catalog load with two seeded Agents and two categories.
+- Search filtering (`知识` reduced the list to 1 of 2 Agents).
+- Advanced-search dry-run, graph status propagation and real trace/evaluation rendering.
+- Prompt modification followed by a second run, with current-versus-previous input/output and metric comparison.
+- Switching to Knowledge Q&A clears the previous Agent trace and exposes the non-runnable Catalog Only state.
+- New Category and New Agent dialogs, labels, defaults and executor warning.
+- Dark/light theme switching.
+- Browser console after all interactions: 0 errors, 0 warnings.
+
+## Follow-up polish
+
+- P3: when persisted run ledgers and governed evaluation suites are implemented, the source's denser benchmark/timeline treatment can replace the current truthful empty states without changing the catalog or graph hierarchy.
+- P3: a wider-browser capture can be added to the visual regression set to exercise the three-column Inspector layout directly.
+
+final result: passed

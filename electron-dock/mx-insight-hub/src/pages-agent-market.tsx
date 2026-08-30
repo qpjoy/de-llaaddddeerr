@@ -1,15 +1,26 @@
-import { useCallback, useEffect, useMemo, useState, type DragEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react'
 import {
   ArrowCounterClockwise,
   BracketsCurly,
   Brain,
-  ChartBar,
-  CheckCircle,
   Database,
   FloppyDisk,
   FlowArrow,
   LockKey,
+  MagnifyingGlass,
+  PencilSimple,
   Play,
+  Plus,
+  Pulse,
   Recycle,
   ShieldCheck,
   Storefront,
@@ -19,16 +30,20 @@ import {
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import {
+  ConfirmDialog,
   DropdownField,
+  EmptyState,
   ErrorState,
   Field,
   LoadingState,
+  Modal,
   PageHeading,
   StatusBadge,
   useRemoteData,
 } from './components.jsx'
 import {
   ADVANCED_SEARCH_AGENT_KEY,
+  ADVANCED_SEARCH_STAGE_TYPES,
   AdvancedSearchDefinitionSchema,
   type AdvancedSearchDefinition,
   type AdvancedSearchStage,
@@ -52,13 +67,51 @@ type Snapshot = {
   updatedAt: string | null
 }
 
+type CatalogCategory = {
+  categoryKey: string
+  name: string
+  description: string
+  sortOrder: number
+  revision: number
+  builtin: boolean
+  agentCount: number
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+type AgentLifecycle = 'draft' | 'published' | 'disabled'
+
+type CatalogAgent = {
+  agentKey: string
+  name: string
+  summary: string
+  categoryKey: string
+  kind: 'builtin' | 'custom'
+  lifecycle: AgentLifecycle
+  executorKey: string | null
+  runnable: boolean
+  dryRunOnly: boolean
+  tags: string[]
+  revision: number
+  builtin: boolean
+  updatedAt: string | null
+  lastRun: unknown | null
+}
+
+type Catalog = {
+  categories: CatalogCategory[]
+  agents: CatalogAgent[]
+}
+
+type TraceStatus = 'succeeded' | 'degraded' | 'skipped' | 'failed' | 'unknown'
+
 type StageTrace = {
   stageId: string
   type: AdvancedSearchStageType
   title: string
   attempt: number
-  status: 'succeeded' | 'degraded' | 'skipped' | 'failed'
-  durationMs: number
+  status: TraceStatus
+  durationMs: number | null
   input: unknown
   messages: Array<{ role: string, content: string }>
   parameters: Record<string, unknown>
@@ -66,23 +119,24 @@ type StageTrace = {
   output: unknown
   validation: {
     schemaName: string
-    valid: boolean
+    valid: boolean | null
     issues: Array<{ path: string, message: string }>
   }
   model: null | {
     sequenceKey: string | null
     provider: string | null
     model: string | null
-    temperature: number
+    proxy: string | null
+    temperature: number | null
     effectiveTemperature: number | null
-    maxTokens: number
+    maxTokens: number | null
     latencyMs: number | null
     inputTokens: number | null
     outputTokens: number | null
     fallback: boolean
     errorCode: string | null
     responseValidation: null | {
-      valid: boolean
+      valid: boolean | null
       issues: Array<{ path: string, message: string }>
     }
   }
@@ -91,24 +145,19 @@ type StageTrace = {
 
 type DryRunResult = {
   contractVersion: string
-  dryRun: true
   definitionHash: string
-  durationMs: number
+  durationMs: number | null
   safety: Record<string, unknown>
-  dataAccess: {
-    postgres: boolean
-    elasticsearch: boolean
-    modelAvailable: boolean
-  }
+  dataAccess: Record<string, unknown>
   traces: StageTrace[]
   final: null | {
     answer: string
     citations: Array<{ evidenceId: string, claim: string }>
-    confidence: number
+    confidence: number | null
     limitations: string[]
     refused: boolean
   }
-  evaluation: Record<string, number | null>
+  evaluation: Record<string, unknown>
 }
 
 type PageProps = {
@@ -126,6 +175,9 @@ type FilterDraft = {
   toTime: string
 }
 
+type InspectorTab = 'input' | 'prompt' | 'schema' | 'output' | 'tool' | 'metrics'
+type CompareTarget = 'previous' | 'baseline'
+
 const EMPTY_FILTERS: FilterDraft = {
   platform: '',
   datasetId: '',
@@ -142,42 +194,215 @@ const SEARCH_PROFILE_OPTIONS = [
   { value: 'canonical.title-prefix.v1', label: 'Title Prefix · 标题前缀' },
 ]
 
-const STAGE_TABS = [
-  { id: 'prompt', label: 'Prompt / 参数' },
-  { id: 'schema', label: 'Zod Schema' },
-  { id: 'result', label: 'Result' },
+const INSPECTOR_TABS: Array<{ id: InspectorTab, label: string }> = [
+  { id: 'input', label: 'Input' },
+  { id: 'prompt', label: 'Prompt' },
+  { id: 'schema', label: 'Schema' },
+  { id: 'output', label: 'Output' },
+  { id: 'tool', label: 'Tool' },
   { id: 'metrics', label: 'Metrics' },
-] as const
+]
 
-const STAGE_DRAG_MIME = 'application/x-mx-insight-agent-market-stage'
+const LIFECYCLE_OPTIONS = [
+  { value: 'draft', label: '草稿', description: '保留配置，暂不作为正式市场条目。' },
+  { value: 'published', label: '已发布', description: '在 Agent Market 中正常展示。' },
+  { value: 'disabled', label: '已停用', description: '保留历史，但禁止运行。' },
+]
 
-type StageTab = typeof STAGE_TABS[number]['id']
+const GRAPH_X = [74, 222, 370, 518, 666, 814, 962]
 
-function Panel({
-  title,
-  subtitle,
-  actions,
-  children,
-  className = '',
-}: {
-  title: string
-  subtitle?: string
-  actions?: React.ReactNode
-  children: React.ReactNode
-  className?: string
-}) {
-  return (
-    <section className={'qp-panel mih-panel mih-market-panel ' + className}>
-      <header className="mih-panel__header">
-        <div>
-          <h2>{title}</h2>
-          {subtitle ? <p>{subtitle}</p> : null}
-        </div>
-        {actions ? <div className="mih-page-actions">{actions}</div> : null}
-      </header>
-      {children}
-    </section>
-  )
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function stringValue(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+function nullableString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
+function numberValue(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function nullableNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function normalizeCategory(value: unknown): CatalogCategory | null {
+  if (!isRecord(value)) return null
+  const categoryKey = stringValue(value.categoryKey).trim()
+  if (!categoryKey) return null
+  return {
+    categoryKey,
+    name: stringValue(value.name, categoryKey),
+    description: stringValue(value.description),
+    sortOrder: numberValue(value.sortOrder),
+    revision: Math.max(0, Math.trunc(numberValue(value.revision))),
+    builtin: value.builtin === true || value.systemOwned === true,
+    agentCount: Math.max(0, Math.trunc(numberValue(value.agentCount))),
+    createdAt: nullableString(value.createdAt),
+    updatedAt: nullableString(value.updatedAt),
+  }
+}
+
+function normalizeAgent(value: unknown): CatalogAgent | null {
+  if (!isRecord(value)) return null
+  const agentKey = stringValue(value.agentKey).trim()
+  if (!agentKey) return null
+  const kind = value.kind === 'builtin' || value.systemOwned === true ? 'builtin' : 'custom'
+  const lifecycle: AgentLifecycle = value.lifecycle === 'draft'
+    || value.lifecycle === 'published'
+    || value.lifecycle === 'disabled'
+    ? value.lifecycle
+    : value.enabled === false ? 'disabled' : value.enabled === true ? 'published' : 'draft'
+  return {
+    agentKey,
+    name: stringValue(value.name, stringValue(value.displayName, agentKey)),
+    summary: stringValue(value.summary, stringValue(value.description)),
+    categoryKey: stringValue(value.categoryKey),
+    kind,
+    lifecycle,
+    executorKey: nullableString(value.executorKey),
+    runnable: value.runnable === true,
+    dryRunOnly: value.dryRunOnly === true,
+    tags: Array.isArray(value.tags)
+      ? [...new Set(value.tags.filter((tag): tag is string => typeof tag === 'string' && Boolean(tag.trim()))
+        .map((tag) => tag.trim()))]
+      : [],
+    revision: Math.max(0, Math.trunc(numberValue(value.revision))),
+    builtin: value.builtin === true || value.systemOwned === true,
+    updatedAt: nullableString(value.updatedAt),
+    lastRun: value.lastRun ?? null,
+  }
+}
+
+function normalizeCatalog(value: unknown): Catalog {
+  if (!isRecord(value)) return { categories: [], agents: [] }
+  const categories = (Array.isArray(value.categories) ? value.categories : [])
+    .map(normalizeCategory)
+    .filter((item): item is CatalogCategory => Boolean(item))
+    .sort((left, right) => left.sortOrder - right.sortOrder || left.name.localeCompare(right.name, 'zh-CN'))
+  const agents = (Array.isArray(value.agents) ? value.agents : [])
+    .map(normalizeAgent)
+    .filter((item): item is CatalogAgent => Boolean(item))
+  return { categories, agents }
+}
+
+function normalizeIssues(value: unknown): Array<{ path: string, message: string }> {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return []
+    return [{ path: stringValue(item.path), message: stringValue(item.message, '未知校验问题') }]
+  })
+}
+
+function normalizeTrace(value: unknown): StageTrace | null {
+  if (!isRecord(value)) return null
+  const type = stringValue(value.type)
+  if (!ADVANCED_SEARCH_STAGE_TYPES.includes(type as AdvancedSearchStageType)) return null
+  const status: TraceStatus = value.status === 'succeeded'
+    || value.status === 'degraded'
+    || value.status === 'skipped'
+    || value.status === 'failed'
+    ? value.status
+    : 'unknown'
+  const validation = isRecord(value.validation) ? value.validation : {}
+  const modelValue = isRecord(value.model) ? value.model : null
+  const responseValidation = modelValue && isRecord(modelValue.responseValidation)
+    ? modelValue.responseValidation
+    : null
+  const messages = Array.isArray(value.messages)
+    ? value.messages.flatMap((message) => isRecord(message)
+      ? [{ role: stringValue(message.role, 'unknown'), content: stringValue(message.content) }]
+      : [])
+    : []
+  const toolCalls = Array.isArray(value.toolCalls) ? value.toolCalls.filter(isRecord) : []
+  return {
+    stageId: stringValue(value.stageId, type),
+    type: type as AdvancedSearchStageType,
+    title: stringValue(value.title, ADVANCED_SEARCH_STAGE_META[type as AdvancedSearchStageType].label),
+    attempt: Math.max(0, Math.trunc(numberValue(value.attempt))),
+    status,
+    durationMs: nullableNumber(value.durationMs),
+    input: value.input,
+    messages,
+    parameters: isRecord(value.parameters) ? value.parameters : {},
+    toolCalls,
+    output: value.output,
+    validation: {
+      schemaName: stringValue(validation.schemaName),
+      valid: typeof validation.valid === 'boolean' ? validation.valid : null,
+      issues: normalizeIssues(validation.issues),
+    },
+    model: modelValue ? {
+      sequenceKey: nullableString(modelValue.sequenceKey),
+      provider: nullableString(modelValue.provider),
+      model: nullableString(modelValue.model),
+      proxy: nullableString(modelValue.proxy)
+        || nullableString(modelValue.proxyKey)
+        || nullableString(modelValue.route),
+      temperature: nullableNumber(modelValue.temperature),
+      effectiveTemperature: nullableNumber(modelValue.effectiveTemperature),
+      maxTokens: nullableNumber(modelValue.maxTokens),
+      latencyMs: nullableNumber(modelValue.latencyMs),
+      inputTokens: nullableNumber(modelValue.inputTokens),
+      outputTokens: nullableNumber(modelValue.outputTokens),
+      fallback: modelValue.fallback === true,
+      errorCode: nullableString(modelValue.errorCode),
+      responseValidation: responseValidation ? {
+        valid: typeof responseValidation.valid === 'boolean' ? responseValidation.valid : null,
+        issues: normalizeIssues(responseValidation.issues),
+      } : null,
+    } : null,
+    note: nullableString(value.note),
+  }
+}
+
+function normalizeRun(value: unknown): DryRunResult | null {
+  const candidates = [
+    value,
+    isRecord(value) ? value.result : null,
+    isRecord(value) ? value.run : null,
+    isRecord(value) ? value.payload : null,
+  ]
+  const source = candidates.find((candidate) => isRecord(candidate) && Array.isArray(candidate.traces))
+  if (!isRecord(source)) return null
+  const finalValue = isRecord(source.final) ? source.final : null
+  const citations = finalValue && Array.isArray(finalValue.citations)
+    ? finalValue.citations.flatMap((citation) => isRecord(citation)
+      ? [{ evidenceId: stringValue(citation.evidenceId), claim: stringValue(citation.claim) }]
+      : [])
+    : []
+  return {
+    contractVersion: stringValue(source.contractVersion),
+    definitionHash: stringValue(source.definitionHash),
+    durationMs: nullableNumber(source.durationMs),
+    safety: isRecord(source.safety) ? source.safety : {},
+    dataAccess: isRecord(source.dataAccess) ? source.dataAccess : {},
+    traces: (source.traces as unknown[]).map(normalizeTrace).filter((trace): trace is StageTrace => Boolean(trace)),
+    final: finalValue ? {
+      answer: stringValue(finalValue.answer),
+      citations,
+      confidence: nullableNumber(finalValue.confidence),
+      limitations: Array.isArray(finalValue.limitations)
+        ? finalValue.limitations.filter((item): item is string => typeof item === 'string')
+        : [],
+      refused: finalValue.refused === true,
+    } : null,
+    evaluation: isRecord(source.evaluation) ? source.evaluation : {},
+  }
+}
+
+function pretty(value: unknown): string {
+  if (value === undefined) return '—'
+  try {
+    return JSON.stringify(value, null, 2) ?? '—'
+  } catch {
+    return String(value)
+  }
 }
 
 function nullable(value: string): string | null {
@@ -192,21 +417,84 @@ function definitionText(definition: AdvancedSearchDefinition): string {
   return JSON.stringify(definition)
 }
 
-function traceTone(status: StageTrace['status']): string {
+function formatDateTime(value: string | null): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.valueOf())) return value
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
+
+function formatMilliseconds(value: number | null): string {
+  return value == null ? '—' : Math.round(value) + ' ms'
+}
+
+function metricNumber(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Number.isInteger(value) ? String(value) : value.toFixed(2)
+    : '—'
+}
+
+function metricFrom(result: DryRunResult | null, ...keys: string[]): number | null {
+  if (!result) return null
+  for (const key of keys) {
+    const value = result.evaluation[key]
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+  }
+  return null
+}
+
+function percentMetric(value: number | null): string {
+  return value == null ? '—' : (value * 100).toFixed(value * 100 < 10 ? 1 : 0) + '%'
+}
+
+function traceTone(status: TraceStatus): string {
   if (status === 'succeeded') return 'active'
   if (status === 'degraded') return 'degraded'
   if (status === 'failed') return 'down'
   return 'disabled'
 }
 
-function pretty(value: unknown): string {
-  return JSON.stringify(value, null, 2)
+function traceLabel(status: TraceStatus): string {
+  if (status === 'succeeded') return '成功'
+  if (status === 'degraded') return '降级'
+  if (status === 'failed') return '失败'
+  if (status === 'skipped') return '跳过'
+  return '未知'
 }
 
-function metricNumber(value: unknown): string {
-  return typeof value === 'number'
-    ? Number.isInteger(value) ? String(value) : value.toFixed(2)
-    : '—'
+function lifecycleLabel(lifecycle: AgentLifecycle): string {
+  if (lifecycle === 'published') return '已发布'
+  if (lifecycle === 'disabled') return '已停用'
+  return '草稿'
+}
+
+function lifecycleTone(lifecycle: AgentLifecycle): string {
+  if (lifecycle === 'published') return 'active'
+  if (lifecycle === 'disabled') return 'disabled'
+  return 'degraded'
+}
+
+function lastRunSummary(value: unknown): string {
+  if (value == null) return '暂无运行'
+  const run = normalizeRun(value)
+  if (run) {
+    const failed = run.traces.some((trace) => trace.status === 'failed')
+    const degraded = run.traces.some((trace) => trace.status === 'degraded')
+    const status = failed ? '失败' : degraded ? '降级' : run.traces.length ? '完成' : '已有记录'
+    return run.durationMs == null ? status : status + ' · ' + formatMilliseconds(run.durationMs)
+  }
+  if (!isRecord(value)) return '已有运行记录'
+  const status = nullableString(value.status) || nullableString(value.outcome)
+  const duration = nullableNumber(value.durationMs)
+  const at = nullableString(value.finishedAt) || nullableString(value.updatedAt) || nullableString(value.createdAt)
+  return [status, duration == null ? null : formatMilliseconds(duration), at ? formatDateTime(at) : null]
+    .filter(Boolean)
+    .join(' · ') || '已有运行记录'
 }
 
 function setStageState(
@@ -229,6 +517,37 @@ function updateStage(
   const stage = next.stages.find((candidate) => candidate.id === stageId)
   if (stage) mutate(stage)
   return next
+}
+
+function latestTrace(traces: StageTrace[]): StageTrace | null {
+  return traces.length ? traces[traces.length - 1] : null
+}
+
+function Panel({
+  title,
+  subtitle,
+  actions,
+  children,
+  className = '',
+}: {
+  title: string
+  subtitle?: string
+  actions?: ReactNode
+  children: ReactNode
+  className?: string
+}) {
+  return (
+    <section className={'qp-panel mih-panel mih-market-panel ' + className}>
+      <header className="mih-panel__header">
+        <div>
+          <h2>{title}</h2>
+          {subtitle ? <p>{subtitle}</p> : null}
+        </div>
+        {actions ? <div className="mih-page-actions">{actions}</div> : null}
+      </header>
+      {children}
+    </section>
+  )
 }
 
 function StageOptionsEditor({
@@ -255,7 +574,7 @@ function StageOptionsEditor({
         <DropdownField
           label="Search Profile"
           value={stage.options.searchProfile}
-          options={SEARCH_PROFILE_OPTIONS as any}
+          options={SEARCH_PROFILE_OPTIONS as never[]}
           disabled={disabled}
           onChange={(value: string) => onChange((candidate) => {
             if (candidate.type === 'retrieve') {
@@ -326,14 +645,15 @@ function StageOptionsEditor({
   if (stage.type === 'grade') {
     return (
       <div className="mih-market-option-grid">
-        <Field label={'最低相关度 · ' + stage.options.minRelevance.toFixed(2)} hint="低于阈值的证据不会进入答案阶段。">
+        <Field label={'最低相关度 · ' + stage.options.minRelevance.toFixed(2)}
+          hint="低于阈值的证据不会进入答案阶段。">
           <input className="mih-market-range" type="range" min="0" max="1" step="0.05"
             value={stage.options.minRelevance} disabled={disabled}
             onChange={(event) => onChange((candidate) => {
               if (candidate.type === 'grade') candidate.options.minRelevance = Number(event.target.value)
             })} />
         </Field>
-        <Field label="最大纠错回环" hint="MVP 强制 0 或 1，避免无限模型/检索调用。">
+        <Field label="最大纠错回环" hint="强制 0 或 1，避免无限模型/检索调用。">
           <input className="qp-input" type="number" min="0" max="1" value={stage.options.maxRetries}
             disabled={disabled} onChange={(event) => {
               const value = Number(event.target.value)
@@ -352,7 +672,7 @@ function StageOptionsEditor({
           onChange={(event) => onChange((candidate) => {
             if (candidate.type === 'answer') candidate.options.requireCitations = event.target.checked
           })} />
-        <span><strong>强制引用</strong><small>引用 ID 不在本次 evidence 中时自动丢弃；无有效引用则 fallback。</small></span>
+        <span><strong>强制引用</strong><small>无有效 evidence ID 时进入明确拒答。</small></span>
       </label>
     )
   }
@@ -373,23 +693,21 @@ function PromptEditor({
     <div className="mih-market-editor">
       {modelStage ? (
         <>
-          <div className="mih-market-role-grid">
-            <Field label="system" hint="运行时还会追加不可编辑的 Schema / 安全契约。">
-              <textarea className="qp-input mih-market-prompt" value={stage.prompt.system}
-                disabled={disabled} onChange={(event) => onChange((candidate) => {
-                  if ('prompt' in candidate) candidate.prompt.system = event.target.value
-                })} />
-            </Field>
-            <Field label="user template" hint="支持 {{query}}、{{filters}}、{{evidence}}、{{geo}} 等受控变量。">
-              <textarea className="qp-input mih-market-prompt" value={stage.prompt.user}
-                disabled={disabled} onChange={(event) => onChange((candidate) => {
-                  if ('prompt' in candidate) candidate.prompt.user = event.target.value
-                })} />
-            </Field>
-          </div>
+          <Field label="system" hint="运行时追加不可编辑的 Schema / 安全契约。">
+            <textarea className="qp-input mih-market-prompt" value={stage.prompt.system}
+              disabled={disabled} onChange={(event) => onChange((candidate) => {
+                if ('prompt' in candidate) candidate.prompt.system = event.target.value
+              })} />
+          </Field>
+          <Field label="user template" hint="支持 {{query}}、{{filters}}、{{evidence}}、{{geo}}。">
+            <textarea className="qp-input mih-market-prompt" value={stage.prompt.user}
+              disabled={disabled} onChange={(event) => onChange((candidate) => {
+                if ('prompt' in candidate) candidate.prompt.user = event.target.value
+              })} />
+          </Field>
           <div className="mih-market-option-grid">
             <Field label={'Temperature · ' + stage.model.temperature.toFixed(2)}
-              hint="每个 Agent 阶段独立控制，不使用全局 temperature。">
+              hint="每阶段独立控制。">
               <input className="mih-market-range" type="range" min="0" max="2" step="0.05"
                 value={stage.model.temperature} disabled={disabled}
                 onChange={(event) => onChange((candidate) => {
@@ -411,7 +729,7 @@ function PromptEditor({
       ) : (
         <div className="mih-market-tool-note">
           <Wrench size={20} weight="duotone" aria-hidden="true" />
-          <div><strong>固定工具阶段</strong><p>没有 Prompt 或 temperature。工具输入由代码和 Zod 限制，模型不能生成 SQL、DSL 或连接信息。</p></div>
+          <div><strong>固定工具阶段</strong><p>没有 Prompt 或 temperature；工具输入由代码和 Zod 限制。</p></div>
         </div>
       )}
       <StageOptionsEditor stage={stage} disabled={disabled} onChange={onChange} />
@@ -419,291 +737,1060 @@ function PromptEditor({
   )
 }
 
-function StageResult({
-  stage,
-  traces,
+function CategoryEditorModal({
+  category,
+  busy,
+  onClose,
+  onDelete,
+  onSubmit,
 }: {
-  stage: AdvancedSearchStage
-  traces: StageTrace[]
+  category: CatalogCategory | null
+  busy: boolean
+  onClose: () => void
+  onDelete?: () => void
+  onSubmit: (value: { categoryKey: string, name: string, description?: string, sortOrder: number }) => void
 }) {
-  const meta = ADVANCED_SEARCH_STAGE_META[stage.type]
-  if (traces.length === 0) {
-    return (
-      <div className="mih-market-empty-result">
-        <span>返回示例</span>
-        <pre>{pretty(meta.outputExample)}</pre>
-      </div>
-    )
+  const [categoryKey, setCategoryKey] = useState(category?.categoryKey || '')
+  const [name, setName] = useState(category?.name || '')
+  const [description, setDescription] = useState(category?.description || '')
+  const [sortOrder, setSortOrder] = useState(String(category?.sortOrder ?? 100))
+  const formId = category ? 'mih-market-category-edit' : 'mih-market-category-create'
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    onSubmit({
+      categoryKey: categoryKey.trim(),
+      name: name.trim(),
+      description: description.trim() || undefined,
+      sortOrder: Number(sortOrder),
+    })
   }
   return (
-    <div className="mih-market-trace-list">
-      {traces.map((trace) => (
-        <article key={trace.stageId + ':' + trace.attempt} className="mih-market-trace">
-          <header>
-            <strong>{trace.attempt > 0 ? '纠错回环 #' + trace.attempt : '首轮执行'}</strong>
-            <StatusBadge status={traceTone(trace.status)} label={trace.status} />
-          </header>
-          {trace.note ? <p>{trace.note}</p> : null}
-          {trace.messages.length > 0 ? (
-            <details>
-              <summary>查看渲染后的消息</summary>
-              {trace.messages.map((message, index) => (
-                <div className="mih-market-message" key={message.role + ':' + index}>
-                  <span>{message.role}</span>
-                  <pre>{message.content}</pre>
-                </div>
-              ))}
-            </details>
-          ) : null}
-          <details open>
-            <summary>结构化阶段结果</summary>
-            <pre>{pretty(trace.output)}</pre>
-          </details>
-        </article>
-      ))}
-    </div>
-  )
-}
-
-function StageMetrics({ traces }: { traces: StageTrace[] }) {
-  if (traces.length === 0) return <p className="mih-market-muted">运行后显示耗时、模型、token、工具调用与 Schema 结果。</p>
-  return (
-    <div className="mih-market-metrics-table">
-      {traces.map((trace) => (
-        <article key={trace.stageId + ':metrics:' + trace.attempt}>
-          <span>Attempt <strong>{trace.attempt}</strong></span>
-          <span>耗时 <strong>{trace.durationMs} ms</strong></span>
-          <span>有效输出 Schema <strong>{trace.validation.valid ? 'PASS' : 'FAIL'}</strong></span>
-          <span>模型响应 Schema <strong>{trace.model?.responseValidation
-            ? (trace.model.responseValidation.valid ? 'PASS' : 'FAIL')
-            : '—'}</strong></span>
-          <span>模型 <strong>{trace.model?.model || (trace.toolCalls.length ? '固定工具' : '—')}</strong></span>
-          {trace.model ? <span>Temperature <strong>{trace.model.temperature}{trace.model.effectiveTemperature != null
-            && trace.model.effectiveTemperature !== trace.model.temperature
-            ? ` → ${trace.model.effectiveTemperature}` : ''}</strong></span> : null}
-          {trace.model?.sequenceKey ? <span>Sequence <strong>{trace.model.sequenceKey}</strong></span> : null}
-          <span>Tokens <strong>{metricNumber(trace.model?.inputTokens)} / {metricNumber(trace.model?.outputTokens)}</strong></span>
-          <span>Tool calls <strong>{trace.toolCalls.length}</strong></span>
-          {trace.model?.errorCode ? <span>降级码 <strong>{trace.model.errorCode}</strong></span> : null}
-          {trace.model?.responseValidation && !trace.model.responseValidation.valid ? (
-            <span className="mih-market-schema-issues">模型响应问题
-              <strong>{trace.model.responseValidation.issues.slice(0, 3)
-                .map((issue) => (issue.path ? issue.path + ': ' : '') + issue.message)
-                .join(' · ')}</strong>
-            </span>
-          ) : null}
-        </article>
-      ))}
-    </div>
-  )
-}
-
-function StageCard({
-  stage,
-  selected,
-  tab,
-  traces,
-  canEdit,
-  onSelect,
-  onTab,
-  onMutate,
-  onTrash,
-}: {
-  stage: AdvancedSearchStage
-  selected: boolean
-  tab: StageTab
-  traces: StageTrace[]
-  canEdit: boolean
-  onSelect: () => void
-  onTab: (tab: StageTab) => void
-  onMutate: (mutate: (stage: AdvancedSearchStage) => void) => void
-  onTrash: () => void
-}) {
-  const meta = ADVANCED_SEARCH_STAGE_META[stage.type]
-  const Icon = meta.kind === 'agent' ? Brain : Wrench
-  const latest = traces.at(-1)
-  return (
-    <article className={'mih-market-stage' + (selected ? ' is-selected' : '')}>
-      <header className="mih-market-stage__header">
-        <button type="button" className="mih-market-stage__select" onClick={onSelect}
-          aria-expanded={selected}>
-          <span className={'mih-market-stage__icon is-' + meta.kind}><Icon size={20} weight="duotone" /></span>
-          <span>
-            <small>{meta.lesson}</small>
-            <strong>{meta.label}</strong>
-            <p>{meta.description}</p>
-          </span>
-        </button>
-        <div className="mih-market-stage__actions">
-          {latest ? <StatusBadge status={traceTone(latest.status)} label={latest.status} /> : null}
-          <span className="qp-tag">{meta.kind === 'agent' ? 'Agent' : 'Tool'}</span>
-          {canEdit ? (
-            <button className="qp-button qp-button--ghost qp-icon-button" type="button"
-              aria-label={'把 ' + meta.label + ' 移入回收站'} title="移入回收站" onClick={onTrash}>
-              <Trash size={16} aria-hidden="true" />
+    <Modal
+      title={category ? '编辑分类' : '新建分类'}
+      description={category ? 'revision ' + category.revision + ' · ' + category.agentCount + ' 个 Agent' : '创建可复用的市场导航分类。'}
+      size="small"
+      busy={busy}
+      initialFocusRef={undefined}
+      onClose={onClose}
+      footer={(
+        <>
+          {category && onDelete ? (
+            <button className="qp-button qp-button--danger" type="button" disabled={busy} onClick={onDelete}>
+              <Trash size={16} aria-hidden="true" />删除分类
             </button>
           ) : null}
-        </div>
-      </header>
-      {selected ? (
-        <div className="mih-market-stage__body">
-          <nav className="mih-market-tabs" aria-label={meta.label + ' 详情'}>
-            {STAGE_TABS.map((item) => (
-              <button key={item.id} type="button" className={tab === item.id ? 'is-active' : ''}
-                onClick={() => onTab(item.id)}>{item.label}</button>
-            ))}
-          </nav>
-          {tab === 'prompt' ? (
-            <PromptEditor stage={stage} disabled={!canEdit} onChange={onMutate} />
-          ) : null}
-          {tab === 'schema' ? (
-            <div className="mih-market-schema-grid">
-              <div><span>Zod / TypeScript 教学摘录（运行时以右侧为准）</span><pre>{meta.schemaCode}</pre></div>
-              <div><span>同源 JSON Schema</span><pre>{pretty(jsonSchemaForStage(stage.type))}</pre></div>
+          <span className="mih-market-modal-spacer" />
+          <button className="qp-button qp-button--ghost" type="button" disabled={busy} onClick={onClose}>取消</button>
+          <button className="qp-button qp-button--primary" type="submit" form={formId} disabled={busy}>
+            {busy ? '保存中…' : '保存'}
+          </button>
+        </>
+      )}
+    >
+      <form id={formId} className="mih-market-form" onSubmit={submit}>
+        <Field label="Category Key" hint="创建后不可修改；建议使用小写字母、数字、点、下划线或短横线。">
+          <input className="qp-input" required autoFocus={!category} pattern="[a-z0-9][a-z0-9._-]{0,63}"
+            value={categoryKey} disabled={Boolean(category) || busy}
+            onChange={(event) => setCategoryKey(event.target.value)} />
+        </Field>
+        <Field label="分类名称" hint={undefined}>
+          <input className="qp-input" required maxLength={120} value={name} disabled={busy}
+            onChange={(event) => setName(event.target.value)} />
+        </Field>
+        <Field label="说明" hint={undefined}>
+          <textarea className="qp-input" maxLength={1000} value={description} disabled={busy}
+            onChange={(event) => setDescription(event.target.value)} />
+        </Field>
+        <Field label="排序" hint="数值越小越靠前。">
+          <input className="qp-input" required type="number" min="0" max="10000"
+            value={sortOrder} disabled={busy} onChange={(event) => setSortOrder(event.target.value)} />
+        </Field>
+      </form>
+    </Modal>
+  )
+}
+
+function AgentEditorModal({
+  agent,
+  categories,
+  busy,
+  onClose,
+  onSubmit,
+}: {
+  agent: CatalogAgent | null
+  categories: CatalogCategory[]
+  busy: boolean
+  onClose: () => void
+  onSubmit: (value: {
+    agentKey: string
+    name: string
+    summary?: string
+    categoryKey: string
+    tags: string[]
+    lifecycle: AgentLifecycle
+  }) => void
+}) {
+  const [agentKey, setAgentKey] = useState(agent?.agentKey || '')
+  const [name, setName] = useState(agent?.name || '')
+  const [summary, setSummary] = useState(agent?.summary || '')
+  const [categoryKey, setCategoryKey] = useState(agent?.categoryKey || categories[0]?.categoryKey || '')
+  const [tags, setTags] = useState(agent?.tags.join(', ') || '')
+  const [lifecycle, setLifecycle] = useState<AgentLifecycle>(agent?.lifecycle || 'draft')
+  const formId = agent ? 'mih-market-agent-edit' : 'mih-market-agent-create'
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    onSubmit({
+      agentKey: agentKey.trim(),
+      name: name.trim(),
+      summary: summary.trim() || undefined,
+      categoryKey,
+      tags: [...new Set(tags.split(',').map((tag) => tag.trim()).filter(Boolean))],
+      lifecycle,
+    })
+  }
+  return (
+    <Modal
+      title={agent ? '编辑 Agent' : '新建 Agent'}
+      description={agent
+        ? (agent.kind === 'builtin' ? '内置' : '自定义') + ' · revision ' + agent.revision
+        : '自定义 Agent 先进入目录；执行器需由服务端能力接入。'}
+      size="medium"
+      busy={busy}
+      initialFocusRef={undefined}
+      onClose={onClose}
+      footer={(
+        <>
+          <button className="qp-button qp-button--ghost" type="button" disabled={busy} onClick={onClose}>取消</button>
+          <button className="qp-button qp-button--primary" type="submit" form={formId} disabled={busy || !categoryKey}>
+            {busy ? '保存中…' : '保存'}
+          </button>
+        </>
+      )}
+    >
+      <form id={formId} className="mih-market-form" onSubmit={submit}>
+        <Field label="Agent Key" hint="创建后不可修改。">
+          <input className="qp-input" required autoFocus={!agent} pattern="[a-z0-9][a-z0-9._-]{0,126}"
+            value={agentKey} disabled={Boolean(agent) || busy}
+            onChange={(event) => setAgentKey(event.target.value)} />
+        </Field>
+        <Field label="Agent 名称" hint={undefined}>
+          <input className="qp-input" required maxLength={120} value={name} disabled={busy}
+            onChange={(event) => setName(event.target.value)} />
+        </Field>
+        <Field label="简介" hint={undefined}>
+          <textarea className="qp-input" maxLength={1000} value={summary} disabled={busy}
+            onChange={(event) => setSummary(event.target.value)} />
+        </Field>
+        <DropdownField label="分类" required value={categoryKey} disabled={busy}
+          options={categories.map((category) => ({
+            value: category.categoryKey,
+            label: category.name,
+            description: category.description || category.categoryKey,
+          })) as never[]}
+          onChange={setCategoryKey} />
+        <Field label="标签" hint="使用英文逗号分隔。">
+          <input className="qp-input" value={tags} disabled={busy}
+            onChange={(event) => setTags(event.target.value)} />
+        </Field>
+        {agent ? (
+          <>
+            <DropdownField label="生命周期" value={lifecycle} disabled={busy}
+              options={LIFECYCLE_OPTIONS.filter((option) => agent.executorKey
+                ? option.value !== 'draft'
+                : option.value !== 'published') as never[]}
+              onChange={(value: AgentLifecycle) => setLifecycle(value)} />
+            <div className="mih-market-readonly">
+              <span>Executor</span>
+              <strong>{agent.executorKey || '未配置执行器'}</strong>
+              <small>执行器由服务端注册，目录表单不会伪造或覆盖它。</small>
             </div>
-          ) : null}
-          {tab === 'result' ? <StageResult stage={stage} traces={traces} /> : null}
-          {tab === 'metrics' ? <StageMetrics traces={traces} /> : null}
-        </div>
-      ) : null}
-    </article>
+          </>
+        ) : (
+          <div className="mih-inline-warning">
+            <LockKey size={17} aria-hidden="true" />
+            新建的 custom Agent 默认未配置执行器，因此不能运行；可先用于流程设计与目录管理。
+          </div>
+        )}
+      </form>
+    </Modal>
   )
 }
 
-function LockedGate({
-  kind,
-  title,
-  description,
+function CatalogRail({
+  catalog,
+  loading,
+  selectedAgentKey,
+  selectedCategory,
+  search,
+  canAdmin,
+  onSelectAgent,
+  onCategory,
+  onSearch,
+  onCreateCategory,
+  onEditCategory,
+  onCreateAgent,
+  onEditAgent,
+  onToggleAgent,
 }: {
-  kind: 'entry' | 'exit'
-  title: string
-  description: string
+  catalog: Catalog
+  loading: boolean
+  selectedAgentKey: string
+  selectedCategory: string
+  search: string
+  canAdmin: boolean
+  onSelectAgent: (agentKey: string) => void
+  onCategory: (categoryKey: string) => void
+  onSearch: (value: string) => void
+  onCreateCategory: () => void
+  onEditCategory: (category: CatalogCategory) => void
+  onCreateAgent: () => void
+  onEditAgent: (agent: CatalogAgent) => void
+  onToggleAgent: (agent: CatalogAgent) => void
 }) {
-  const Icon = kind === 'entry' ? ShieldCheck : ChartBar
+  const normalizedSearch = search.trim().toLocaleLowerCase('zh-CN')
+  const agents = catalog.agents.filter((agent) => {
+    if (selectedCategory !== 'all' && agent.categoryKey !== selectedCategory) return false
+    if (!normalizedSearch) return true
+    return [agent.name, agent.summary, agent.agentKey, ...agent.tags]
+      .some((value) => value.toLocaleLowerCase('zh-CN').includes(normalizedSearch))
+  })
+  const currentCategory = catalog.categories.find((category) => category.categoryKey === selectedCategory)
+  const categoryOptions = [
+    { value: 'all', label: '全部分类 · ' + catalog.agents.length },
+    ...catalog.categories.map((category) => ({
+      value: category.categoryKey,
+      label: category.name + ' · ' + category.agentCount,
+      description: category.description || category.categoryKey,
+    })),
+  ]
   return (
-    <article className="mih-market-gate">
-      <span><Icon size={21} weight="duotone" aria-hidden="true" /></span>
-      <div><small>LOCKED RUNTIME NODE</small><strong>{title}</strong><p>{description}</p></div>
-      <LockKey size={16} aria-label="不可删除" />
-    </article>
-  )
-}
-
-function EvaluationCompare({
-  previous,
-  current,
-}: {
-  previous: DryRunResult | null
-  current: DryRunResult | null
-}) {
-  if (!current) return null
-  const percent = (value: number | null | undefined) => value == null ? null : value * 100
-  const rows = [
-    ['总耗时', previous?.durationMs, current.durationMs, 'ms'],
-    ['证据数', previous?.evaluation.evidenceCount, current.evaluation.evidenceCount, ''],
-    ['有效输出 Schema', percent(previous?.evaluation.effectiveSchemaPassRate), percent(current.evaluation.effectiveSchemaPassRate), '%'],
-    ['模型响应 Schema', percent(previous?.evaluation.modelSchemaPassRate), percent(current.evaluation.modelSchemaPassRate), '%'],
-    ['降级阶段', previous?.evaluation.degradedStages, current.evaluation.degradedStages, ''],
-    ['引用覆盖', percent(previous?.evaluation.citationCoverage), percent(current.evaluation.citationCoverage), '%'],
-  ] as const
-  return (
-    <Panel title="Trace / Eval Gate" subtitle="上一轮仅作观察对照；概率系统应再绑定固定评测集，不以单次结果判定优劣。">
-      <div className="mih-market-compare">
-        <div className="mih-market-compare__head"><span>指标</span><span>上一轮</span><span>当前轮</span></div>
-        {rows.map(([label, before, after, unit]) => (
-          <div key={label}><span>{label}</span><strong>{before == null ? '—' : metricNumber(before) + unit}</strong><strong>{metricNumber(after) + unit}</strong></div>
+    <aside className="mih-market-catalog" aria-label="Agent Market 目录">
+      <header className="mih-market-catalog__header">
+        <div><p className="qp-kicker">AGENT MARKET</p><h2>Agent Market</h2></div>
+        {canAdmin ? (
+          <div className="mih-market-catalog__create">
+            <button className="qp-button qp-button--ghost qp-icon-button" type="button"
+              aria-label="新建分类" title="新建分类" onClick={onCreateCategory}>
+              <Plus size={16} aria-hidden="true" />
+            </button>
+            <button className="qp-button qp-button--primary qp-icon-button" type="button"
+              aria-label="新建 Agent" title="新建 Agent" disabled={!catalog.categories.length}
+              onClick={onCreateAgent}>
+              <Brain size={16} aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
+      </header>
+      <label className="mih-market-search">
+        <MagnifyingGlass size={16} aria-hidden="true" />
+        <span className="mih-sr-only">搜索 Agent</span>
+        <input type="search" value={search} placeholder="搜索名称、描述或标签…"
+          onChange={(event) => onSearch(event.target.value)} />
+      </label>
+      <div className="mih-market-category-select">
+        <DropdownField label="分类" className="mih-market-compact-dropdown" value={selectedCategory} options={categoryOptions as never[]}
+          onChange={onCategory} />
+        {canAdmin && currentCategory ? (
+          <button className="qp-button qp-button--ghost qp-icon-button" type="button"
+            aria-label={'编辑分类 ' + currentCategory.name} title="编辑当前分类"
+            onClick={() => onEditCategory(currentCategory)}>
+            <PencilSimple size={15} aria-hidden="true" />
+          </button>
+        ) : null}
+      </div>
+      <div className="mih-market-category-chips" aria-label="快捷分类">
+        <button type="button" className={selectedCategory === 'all' ? 'is-active' : ''}
+          aria-pressed={selectedCategory === 'all'} onClick={() => onCategory('all')}>全部</button>
+        {catalog.categories.slice(0, 4).map((category) => (
+          <button type="button" key={category.categoryKey}
+            className={selectedCategory === category.categoryKey ? 'is-active' : ''}
+            aria-pressed={selectedCategory === category.categoryKey}
+            onClick={() => onCategory(category.categoryKey)}>
+            {category.name}
+          </button>
         ))}
       </div>
-    </Panel>
+      <div className="mih-market-agent-list" aria-busy={loading || undefined}>
+        {agents.map((agent) => (
+          <article key={agent.agentKey}
+            className={'mih-market-agent-card' + (selectedAgentKey === agent.agentKey ? ' is-selected' : '')}>
+            <button className="mih-market-agent-card__select" type="button"
+              aria-pressed={selectedAgentKey === agent.agentKey}
+              onClick={() => onSelectAgent(agent.agentKey)}>
+              <span className={'mih-market-agent-card__icon is-' + agent.kind}>
+                {agent.kind === 'builtin'
+                  ? <Storefront size={20} weight="duotone" aria-hidden="true" />
+                  : <Brain size={20} weight="duotone" aria-hidden="true" />}
+              </span>
+              <span className="mih-market-agent-card__copy">
+                <span>
+                  <strong>{agent.name}</strong>
+                  <StatusBadge status={lifecycleTone(agent.lifecycle)} label={lifecycleLabel(agent.lifecycle)} />
+                </span>
+                <small>{agent.summary || '暂无简介'}</small>
+              </span>
+            </button>
+            <div className="mih-market-agent-card__meta">
+              <span>{agent.executorKey ? (agent.runnable ? '可运行' : '执行器不可用') : '未配置执行器'}</span>
+              <span>{lastRunSummary(agent.lastRun)}</span>
+            </div>
+            {agent.tags.length ? (
+              <div className="mih-market-agent-card__tags">
+                {agent.tags.slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}
+              </div>
+            ) : null}
+            {canAdmin ? (
+              <div className="mih-market-agent-card__actions">
+                <button type="button" className="qp-button qp-button--ghost"
+                  onClick={() => onEditAgent(agent)}>
+                  <PencilSimple size={14} aria-hidden="true" />编辑
+                </button>
+                <button type="button" className="qp-button qp-button--ghost"
+                  onClick={() => onToggleAgent(agent)}>
+                  {agent.lifecycle === 'disabled'
+                    ? <><ArrowCounterClockwise size={14} aria-hidden="true" />恢复</>
+                    : <><LockKey size={14} aria-hidden="true" />停用</>}
+                </button>
+              </div>
+            ) : null}
+          </article>
+        ))}
+        {!agents.length && !loading ? (
+          <EmptyState icon={Storefront} title="没有匹配的 Agent"
+            description={search ? '调整搜索词或切换分类。' : '该分类暂时没有 Agent。'}
+            action={undefined} />
+        ) : null}
+      </div>
+      <footer className="mih-market-catalog__footer">
+        <span>共 {agents.length} / {catalog.agents.length} 个 Agent</span>
+        {loading ? <span role="status">正在刷新…</span> : null}
+      </footer>
+    </aside>
   )
+}
+
+function RunConfiguration({
+  canAdmin,
+  enabled,
+  running,
+  saving,
+  dirty,
+  sequenceKey,
+  sequenceOptions,
+  sequenceHint,
+  query,
+  filters,
+  runLabel,
+  runDisabledReason,
+  agentControlError,
+  runError,
+  onSequence,
+  onQuery,
+  onFilters,
+  onRun,
+  onSave,
+  onReset,
+}: {
+  canAdmin: boolean
+  enabled: boolean
+  running: boolean
+  saving: boolean
+  dirty: boolean
+  sequenceKey: string
+  sequenceOptions: Array<{ value: string, label: string, description?: string, disabled?: boolean }>
+  sequenceHint: string
+  query: string
+  filters: FilterDraft
+  runLabel: string
+  runDisabledReason: string | null
+  agentControlError: unknown
+  runError: unknown
+  onSequence: (value: string) => void
+  onQuery: (value: string) => void
+  onFilters: (value: FilterDraft) => void
+  onRun: () => void
+  onSave: () => void
+  onReset: () => void
+}) {
+  return (
+    <section className="mih-market-command" aria-label="Dry Run 配置">
+      <div className="mih-market-command__sequence">
+        <DropdownField label="LLM Sequence" value={sequenceKey} options={sequenceOptions as never[]}
+          hint={sequenceHint} disabled={!canAdmin || !enabled || running || Boolean(agentControlError)}
+          onChange={onSequence} />
+      </div>
+      <Field label="本次输入" hint="仅用于 dry-run；不会写入业务数据。">
+        <textarea className="qp-input mih-market-command__query" value={query}
+          disabled={!canAdmin || !enabled || running} onChange={(event) => onQuery(event.target.value)} />
+      </Field>
+      <div className="mih-market-command__actions">
+        <button className="qp-button qp-button--primary" type="button"
+          disabled={Boolean(runDisabledReason) || running} title={runDisabledReason || undefined}
+          onClick={onRun}>
+          <Play size={17} weight="fill" aria-hidden="true" />{runLabel}
+        </button>
+        <button className="qp-button qp-button--outline" type="button"
+          disabled={!canAdmin || !enabled || saving || !dirty} onClick={onSave}>
+          <FloppyDisk size={16} aria-hidden="true" />{saving ? '保存中…' : '保存 Prompt'}
+        </button>
+        <button className="qp-button qp-button--ghost qp-icon-button" type="button"
+          aria-label="撤销未保存修改" title="撤销未保存修改"
+          disabled={!canAdmin || !enabled || !dirty} onClick={onReset}>
+          <ArrowCounterClockwise size={16} aria-hidden="true" />
+        </button>
+      </div>
+      <details className="mih-market-filters">
+        <summary>受控过滤条件</summary>
+        <div>
+          <Field label="Platform" hint={undefined}><input className="qp-input" value={filters.platform}
+            disabled={!canAdmin || !enabled || running}
+            onChange={(event) => onFilters({ ...filters, platform: event.target.value })} /></Field>
+          <Field label="Dataset ID" hint={undefined}><input className="qp-input" value={filters.datasetId}
+            disabled={!canAdmin || !enabled || running}
+            onChange={(event) => onFilters({ ...filters, datasetId: event.target.value })} /></Field>
+          <Field label="Object Type" hint={undefined}><input className="qp-input" value={filters.objectType}
+            disabled={!canAdmin || !enabled || running}
+            onChange={(event) => onFilters({ ...filters, objectType: event.target.value })} /></Field>
+          <Field label="From Time" hint={undefined}><input className="qp-input" type="datetime-local" value={filters.fromTime}
+            disabled={!canAdmin || !enabled || running}
+            onChange={(event) => onFilters({ ...filters, fromTime: event.target.value })} /></Field>
+          <Field label="To Time" hint={undefined}><input className="qp-input" type="datetime-local" value={filters.toTime}
+            disabled={!canAdmin || !enabled || running}
+            onChange={(event) => onFilters({ ...filters, toTime: event.target.value })} /></Field>
+        </div>
+      </details>
+      {agentControlError ? (
+        <div className="mih-inline-warning"><Warning size={16} aria-hidden="true" />Sequence 数据不可用，模型阶段将无法显式选择。</div>
+      ) : null}
+      {runError ? <ErrorState error={runError} onRetry={undefined} /> : null}
+    </section>
+  )
+}
+
+function AgentFlowGraph({
+  definition,
+  tracesByStage,
+  selectedStage,
+  running,
+  onSelect,
+}: {
+  definition: AdvancedSearchDefinition
+  tracesByStage: Map<AdvancedSearchStageType, StageTrace[]>
+  selectedStage: AdvancedSearchStageType
+  running: boolean
+  onSelect: (stage: AdvancedSearchStageType) => void
+}) {
+  const grade = definition.stages.find((stage) => stage.type === 'grade')
+  const loopEnabled = grade?.type === 'grade' && grade.state === 'active' && grade.options.maxRetries > 0
+  const retryObserved = [...tracesByStage.values()].some((traces) => traces.some((trace) => trace.attempt > 0))
+  return (
+    <section className="mih-market-flow" aria-labelledby="mih-market-flow-title">
+      <header className="mih-market-flow__header">
+        <div><p className="qp-kicker">OBSERVABLE AGENT LOOP</p><h2 id="mih-market-flow-title">阶段图谱 · 分支与纠错回环</h2></div>
+        <div className="mih-market-flow__legend" aria-label="状态图例">
+          <span data-status="succeeded">成功</span>
+          <span data-status="degraded">降级</span>
+          <span data-status="failed">失败</span>
+          <span data-status="idle">未运行</span>
+        </div>
+      </header>
+      <div className="mih-market-flow__viewport">
+        <div className="mih-market-flow__canvas">
+          <svg className="mih-market-flow__edges" viewBox="0 0 1040 230" aria-hidden="true">
+            <defs>
+              <marker id="mih-market-arrow" viewBox="0 0 8 8" refX="6" refY="4"
+                markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 Z" />
+              </marker>
+            </defs>
+            {definition.stages.slice(0, -1).map((stage, index) => {
+              const trace = latestTrace(tracesByStage.get(stage.type) || [])
+              const status = stage.state === 'trashed' ? 'disabled' : trace?.status || 'idle'
+              return (
+                <line key={stage.id + '-edge'} x1={GRAPH_X[index] + 42} y1="92"
+                  x2={GRAPH_X[index + 1] - 42} y2="92"
+                  data-status={status} markerEnd="url(#mih-market-arrow)" />
+              )
+            })}
+            {loopEnabled ? (
+              <path className="mih-market-flow__loop" d="M666 137 C666 206 222 206 222 137"
+                markerEnd="url(#mih-market-arrow)" />
+            ) : null}
+          </svg>
+          {definition.stages.map((stage, index) => {
+            const meta = ADVANCED_SEARCH_STAGE_META[stage.type]
+            const Icon = meta.kind === 'agent' ? Brain : Wrench
+            const traces = tracesByStage.get(stage.type) || []
+            const trace = latestTrace(traces)
+            const status = stage.state === 'trashed' ? 'disabled' : trace?.status || 'idle'
+            const stateLabel = stage.state === 'trashed'
+              ? '已移出流程'
+              : trace ? traceLabel(trace.status) + '，' + formatMilliseconds(trace.durationMs) : '未运行'
+            return (
+              <button key={stage.id} type="button"
+                className={'mih-market-flow-node' + (selectedStage === stage.type ? ' is-selected' : '')}
+                style={{ '--mih-node-left': GRAPH_X[index] + 'px' } as CSSProperties}
+                data-status={status}
+                aria-pressed={selectedStage === stage.type}
+                aria-label={meta.label + '，' + stateLabel}
+                onClick={() => onSelect(stage.type)}>
+                <span className="mih-market-flow-node__orb"><Icon size={23} weight="duotone" aria-hidden="true" /></span>
+                <strong>{meta.label}</strong>
+                <small>{stage.state === 'trashed'
+                  ? '已移出'
+                  : trace
+                    ? formatMilliseconds(trace.durationMs) + (trace.attempt > 0 ? ' · retry ' + trace.attempt : '')
+                    : '未运行'}</small>
+              </button>
+            )
+          })}
+          <div className="mih-market-flow__branches">
+            <span>knowledge_search → 改写</span>
+            <span>structured_filter → 召回</span>
+            <span>clarify → 安全拒答</span>
+          </div>
+          {loopEnabled ? (
+            <div className="mih-market-flow__loop-label">
+              <ArrowCounterClockwise size={14} aria-hidden="true" />
+              {retryObserved ? '证据不足 · 已观察重试 1/1' : '证据不足 → 改写 · 上限 1 次'}
+            </div>
+          ) : null}
+          {running ? (
+            <div className="mih-market-flow__pending" role="status">
+              请求执行中；节点状态将在服务端返回真实 Trace 后更新
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function AttemptPicker({
+  traces,
+  attempt,
+  onChange,
+}: {
+  traces: StageTrace[]
+  attempt: number | null
+  onChange: (attempt: number) => void
+}) {
+  if (traces.length <= 1) return null
+  return (
+    <div className="mih-market-attempts" aria-label="阶段执行轮次">
+      {traces.map((trace) => (
+        <button key={trace.stageId + '-' + trace.attempt} type="button"
+          className={attempt === trace.attempt ? 'is-active' : ''}
+          aria-pressed={attempt === trace.attempt}
+          onClick={() => onChange(trace.attempt)}>
+          {trace.attempt === 0 ? '首轮' : '重试 ' + trace.attempt}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function TraceMetrics({
+  trace,
+  reference,
+}: {
+  trace: StageTrace | null
+  reference: StageTrace | null
+}) {
+  if (!trace) return <p className="mih-market-muted">运行后显示真实耗时、Provider、Proxy、Token 与 Schema 结果。</p>
+  const rows = [
+    ['阶段耗时', formatMilliseconds(trace.durationMs), formatMilliseconds(reference?.durationMs ?? null)],
+    ['Provider', trace.model?.provider || '—', reference?.model?.provider || '—'],
+    ['Proxy', trace.model?.proxy || '—', reference?.model?.proxy || '—'],
+    ['Model', trace.model?.model || (trace.toolCalls.length ? '固定工具' : '—'), reference?.model?.model || '—'],
+    ['Sequence', trace.model?.sequenceKey || '—', reference?.model?.sequenceKey || '—'],
+    ['输入 / 输出 Tokens',
+      metricNumber(trace.model?.inputTokens) + ' / ' + metricNumber(trace.model?.outputTokens),
+      metricNumber(reference?.model?.inputTokens) + ' / ' + metricNumber(reference?.model?.outputTokens)],
+    ['输出 Schema', trace.validation.valid == null ? '—' : trace.validation.valid ? 'PASS' : 'FAIL',
+      reference?.validation.valid == null ? '—' : reference.validation.valid ? 'PASS' : 'FAIL'],
+    ['工具调用', String(trace.toolCalls.length), reference ? String(reference.toolCalls.length) : '—'],
+  ]
+  return (
+    <div className="mih-market-inspector-metrics">
+      <div className="mih-market-inspector-metrics__head"><span>指标</span><span>当前</span><span>对照</span></div>
+      {rows.map(([label, current, previous]) => (
+        <div key={label}><span>{label}</span><strong>{current}</strong><small>{previous}</small></div>
+      ))}
+      {trace.model?.errorCode ? (
+        <div className="mih-inline-warning"><Warning size={16} aria-hidden="true" />降级码：{trace.model.errorCode}</div>
+      ) : null}
+    </div>
+  )
+}
+
+function StageInspector({
+  stage,
+  traces,
+  referenceTraces,
+  tab,
+  attempt,
+  canEdit,
+  onTab,
+  onAttempt,
+  onMutate,
+  onToggleStage,
+}: {
+  stage: AdvancedSearchStage
+  traces: StageTrace[]
+  referenceTraces: StageTrace[]
+  tab: InspectorTab
+  attempt: number | null
+  canEdit: boolean
+  onTab: (tab: InspectorTab) => void
+  onAttempt: (attempt: number) => void
+  onMutate: (mutate: (stage: AdvancedSearchStage) => void) => void
+  onToggleStage: () => void
+}) {
+  const meta = ADVANCED_SEARCH_STAGE_META[stage.type]
+  const trace = traces.find((item) => item.attempt === attempt) || latestTrace(traces)
+  const referenceTrace = latestTrace(referenceTraces)
+  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? INSPECTOR_TABS.length - 1
+        : (index + (event.key === 'ArrowRight' ? 1 : -1) + INSPECTOR_TABS.length) % INSPECTOR_TABS.length
+    const next = INSPECTOR_TABS[nextIndex]
+    onTab(next.id)
+    window.requestAnimationFrame(() => document.getElementById('mih-market-tab-' + next.id)?.focus())
+  }
+  return (
+    <aside className="mih-market-inspector" aria-label="阶段详情">
+      <header className="mih-market-inspector__header">
+        <div><p className="qp-kicker">{meta.lesson}</p><h2>{meta.label}</h2><p>{meta.description}</p></div>
+        <button className="qp-button qp-button--ghost" type="button" disabled={!canEdit}
+          onClick={onToggleStage}>
+          {stage.state === 'active'
+            ? <><Recycle size={15} aria-hidden="true" />移出流程</>
+            : <><ArrowCounterClockwise size={15} aria-hidden="true" />恢复阶段</>}
+        </button>
+      </header>
+      <AttemptPicker traces={traces} attempt={trace?.attempt ?? null} onChange={onAttempt} />
+      <div className="qp-panel-tabs mih-market-inspector__tabs" role="tablist" aria-label={meta.label + ' 详情'}>
+        {INSPECTOR_TABS.map((item, index) => (
+          <button key={item.id} id={'mih-market-tab-' + item.id} type="button"
+            className={'qp-panel-tab' + (tab === item.id ? ' is-active' : '')}
+            role="tab" aria-selected={tab === item.id}
+            aria-controls={'mih-market-tabpanel-' + item.id}
+            tabIndex={tab === item.id ? 0 : -1}
+            onKeyDown={(event) => onTabKeyDown(event, index)}
+            onClick={() => onTab(item.id)}>
+            {item.label}
+          </button>
+        ))}
+      </div>
+      <section className="mih-market-inspector__body" id={'mih-market-tabpanel-' + tab}
+        role="tabpanel" aria-labelledby={'mih-market-tab-' + tab}>
+        {tab === 'input' ? (
+          trace ? (
+            <div className="mih-market-code-block">
+              <span>Attempt {trace.attempt} · 真实阶段输入</span>
+              <pre>{pretty(trace.input)}</pre>
+            </div>
+          ) : <p className="mih-market-muted">运行后显示服务端返回的真实阶段输入。</p>
+        ) : null}
+        {tab === 'prompt' ? <PromptEditor stage={stage} disabled={!canEdit} onChange={onMutate} /> : null}
+        {tab === 'schema' ? (
+          <div className="mih-market-schema-stack">
+            <div className="mih-market-code-block"><span>{meta.schemaName} · Zod 摘录</span><pre>{meta.schemaCode}</pre></div>
+            <div className="mih-market-code-block"><span>同源 JSON Schema</span><pre>{pretty(jsonSchemaForStage(stage.type))}</pre></div>
+          </div>
+        ) : null}
+        {tab === 'output' ? (
+          trace ? (
+            <>
+              {trace.note ? <p className="mih-market-trace-note">{trace.note}</p> : null}
+              <div className="mih-market-code-block"><span>结构化阶段输出</span><pre>{pretty(trace.output)}</pre></div>
+              {trace.validation.issues.length ? (
+                <ul className="mih-market-issues">
+                  {trace.validation.issues.map((issue, index) => (
+                    <li key={issue.path + '-' + index}>{issue.path ? issue.path + ': ' : ''}{issue.message}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          ) : <p className="mih-market-muted">暂无运行输出；这里不会显示示例值冒充真实结果。</p>
+        ) : null}
+        {tab === 'tool' ? (
+          <>
+            <div className="mih-market-tool-contracts">
+              {meta.toolIds.map((toolId) => {
+                const tool = ADVANCED_SEARCH_TOOLS.find((candidate) => candidate.id === toolId)
+                return tool ? (
+                  <article key={tool.id}>
+                    <Wrench size={17} weight="duotone" aria-hidden="true" />
+                    <div><strong>{tool.label}</strong><code>{tool.id}</code><p>{tool.description}</p></div>
+                    <span>sideEffect: {tool.sideEffect}</span>
+                  </article>
+                ) : null
+              })}
+              {!meta.toolIds.length ? <p className="mih-market-muted">该阶段没有固定工具契约。</p> : null}
+            </div>
+            {trace ? (
+              <div className="mih-market-code-block"><span>本次真实 Tool Calls · {trace.toolCalls.length}</span><pre>{pretty(trace.toolCalls)}</pre></div>
+            ) : <p className="mih-market-muted">运行后显示真实工具调用。</p>}
+          </>
+        ) : null}
+        {tab === 'metrics' ? <TraceMetrics trace={trace} reference={referenceTrace} /> : null}
+      </section>
+    </aside>
+  )
+}
+
+function RunColumn({
+  title,
+  label,
+  trace,
+  result,
+  empty,
+}: {
+  title: string
+  label: string
+  trace: StageTrace | null
+  result: DryRunResult | null
+  empty: string
+}) {
+  return (
+    <article className="mih-market-run-column">
+      <header>
+        <div><span>{label}</span><strong>{title}</strong></div>
+        {trace ? <StatusBadge status={traceTone(trace.status)} label={traceLabel(trace.status)} /> : null}
+      </header>
+      {trace ? (
+        <>
+          <div><span>阶段输入</span><pre>{pretty(trace.input)}</pre></div>
+          <div><span>阶段输出</span><pre>{pretty(trace.output)}</pre></div>
+          <dl>
+            <div><dt>阶段耗时</dt><dd>{formatMilliseconds(trace.durationMs)}</dd></div>
+            <div><dt>Provider</dt><dd>{trace.model?.provider || '—'}</dd></div>
+            <div><dt>Proxy</dt><dd>{trace.model?.proxy || '—'}</dd></div>
+            <div><dt>总耗时</dt><dd>{formatMilliseconds(result?.durationMs ?? null)}</dd></div>
+          </dl>
+        </>
+      ) : <p className="mih-market-run-column__empty">{empty}</p>}
+    </article>
+  )
+}
+
+function RunComparison({
+  stageType,
+  current,
+  previous,
+  baseline,
+  compareTarget,
+  onCompareTarget,
+}: {
+  stageType: AdvancedSearchStageType
+  current: DryRunResult | null
+  previous: DryRunResult | null
+  baseline: DryRunResult | null
+  compareTarget: CompareTarget
+  onCompareTarget: (value: CompareTarget) => void
+}) {
+  const reference = compareTarget === 'previous' ? previous : baseline
+  const currentTrace = latestTrace(current?.traces.filter((trace) => trace.type === stageType) || [])
+  const referenceTrace = latestTrace(reference?.traces.filter((trace) => trace.type === stageType) || [])
+  const referenceTitle = compareTarget === 'previous' ? '上一轮' : '已保存基线'
+  return (
+    <section className="mih-market-comparison" aria-labelledby="mih-market-comparison-title">
+      <header>
+        <div>
+          <p className="qp-kicker">INPUT / OUTPUT DIFF</p>
+          <h2 id="mih-market-comparison-title">当前草稿 vs {referenceTitle}</h2>
+          <p>同一阶段的真实输入与结构化输出并排诊断；n=1 仅定位问题，不代表整体质量。</p>
+        </div>
+        <DropdownField label="对照对象" className="mih-market-compact-dropdown" value={compareTarget}
+          options={[
+            { value: 'previous', label: '上一轮（本会话）', description: previous ? '已有可比较运行' : '暂无上一轮' },
+            { value: 'baseline', label: '已保存基线（lastRun）', description: baseline ? '已有 Trace 基线' : '暂无可用 Trace 基线' },
+          ] as never[]}
+          onChange={onCompareTarget} />
+      </header>
+      <div className="mih-market-comparison__grid">
+        <RunColumn label="REFERENCE" title={referenceTitle} trace={referenceTrace} result={reference}
+          empty={compareTarget === 'previous' ? '暂无上一轮。完成第二次 dry-run 后可比较。' : 'catalog.lastRun 未提供可观测 Trace 基线。'} />
+        <RunColumn label="CURRENT" title="当前运行" trace={currentTrace} result={current}
+          empty="尚未运行。运行后这里显示真实输入与输出。" />
+      </div>
+    </section>
+  )
+}
+
+function RunMetricCard({
+  label,
+  current,
+  reference,
+  hint,
+}: {
+  label: string
+  current: string
+  reference: string
+  hint: string
+}) {
+  return (
+    <article className="mih-market-run-metric">
+      <span>{label}</span>
+      <div><small>对照</small><small>当前</small></div>
+      <div><strong>{reference}</strong><strong>{current}</strong></div>
+      <p>{hint}</p>
+    </article>
+  )
+}
+
+function RunMetrics({
+  current,
+  reference,
+}: {
+  current: DryRunResult | null
+  reference: DryRunResult | null
+}) {
+  const currentModels = current?.traces.map((trace) => trace.model).filter((model) => Boolean(model)) || []
+  const referenceModels = reference?.traces.map((trace) => trace.model).filter((model) => Boolean(model)) || []
+  const currentProvider = currentModels.find((model) => model?.provider)?.provider || '—'
+  const referenceProvider = referenceModels.find((model) => model?.provider)?.provider || '—'
+  const currentProxy = currentModels.find((model) => model?.proxy)?.proxy || '—'
+  const referenceProxy = referenceModels.find((model) => model?.proxy)?.proxy || '—'
+  const currentTokens = currentModels.reduce((sum, model) => sum + (model?.inputTokens || 0) + (model?.outputTokens || 0), 0)
+  const referenceTokens = referenceModels.reduce((sum, model) => sum + (model?.inputTokens || 0) + (model?.outputTokens || 0), 0)
+  const currentAccuracy = metricFrom(current, 'accuracy', 'answerAccuracy')
+  const referenceAccuracy = metricFrom(reference, 'accuracy', 'answerAccuracy')
+  const currentSchema = metricFrom(current, 'effectiveSchemaPassRate')
+  const referenceSchema = metricFrom(reference, 'effectiveSchemaPassRate')
+  const currentCitation = metricFrom(current, 'citationCoverage')
+  const referenceCitation = metricFrom(reference, 'citationCoverage')
+  return (
+    <section className="mih-market-run-metrics" aria-labelledby="mih-market-run-metrics-title">
+      <header>
+        <div><p className="qp-kicker">RUN DIAGNOSTICS</p><h2 id="mih-market-run-metrics-title">服务与质量对比</h2></div>
+        <span><Pulse size={16} aria-hidden="true" />n=1 单次诊断</span>
+      </header>
+      <div>
+        <RunMetricCard label="服务总耗时" reference={formatMilliseconds(reference?.durationMs ?? null)}
+          current={formatMilliseconds(current?.durationMs ?? null)} hint="端到端 dry-run" />
+        <RunMetricCard label="Provider" reference={referenceProvider} current={currentProvider}
+          hint="来自真实阶段 Trace" />
+        <RunMetricCard label="Proxy" reference={referenceProxy} current={currentProxy}
+          hint="Trace 未返回则为 —" />
+        <RunMetricCard label="准确性（评测集）" reference={percentMetric(referenceAccuracy)}
+          current={percentMetric(currentAccuracy)} hint="未绑定评测集不计算" />
+        <RunMetricCard label="输出 Schema" reference={percentMetric(referenceSchema)}
+          current={percentMetric(currentSchema)} hint="有效结构化输出" />
+        <RunMetricCard label="引用覆盖" reference={percentMetric(referenceCitation)}
+          current={percentMetric(currentCitation)} hint="仅真实 evaluation" />
+        <RunMetricCard label="Token 总量" reference={reference ? metricNumber(referenceTokens) : '—'}
+          current={current ? metricNumber(currentTokens) : '—'} hint="输入 + 输出" />
+      </div>
+      <p className="mih-market-diagnostic-note">
+        “准确性”必须绑定固定数据集与判分器；单次运行只能诊断耗时、路由、Schema、引用与工具行为，不能外推整体准确率。
+      </p>
+    </section>
+  )
+}
+
+function UnsupportedWorkbench({ agent }: { agent: CatalogAgent }) {
+  return (
+    <div className="mih-market-unsupported">
+      <span><Brain size={34} weight="duotone" aria-hidden="true" /></span>
+      <div><p className="qp-kicker">AGENT WORKBENCH</p><h2>{agent.name}</h2><p>{agent.summary || '该 Agent 暂无说明。'}</p></div>
+      <dl>
+        <div><dt>目录状态</dt><dd>{lifecycleLabel(agent.lifecycle)}</dd></div>
+        <div><dt>Executor</dt><dd>{agent.executorKey || '未配置执行器'}</dd></div>
+        <div><dt>最近运行</dt><dd>{lastRunSummary(agent.lastRun)}</dd></div>
+      </dl>
+      <div className="mih-inline-warning">
+        <LockKey size={17} aria-hidden="true" />
+        {agent.executorKey
+          ? '该执行器尚未接入通用可视化协议；目录信息保持可管理，但不会伪造节点、输入、输出或指标。'
+          : '未配置执行器。可先完善目录与流程设计，接入服务端执行器后再运行。'}
+      </div>
+      <button className="qp-button qp-button--primary" type="button" disabled>
+        <Play size={16} weight="fill" aria-hidden="true" />
+        {agent.executorKey ? '执行器工作台待接入' : '未配置执行器'}
+      </button>
+    </div>
+  )
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback
 }
 
 export function AgentMarketPage({ token, session, onUnauthorized, notify }: PageProps) {
-  const load = useCallback(
-    () => adminApi.agentMarketItem(token, ADVANCED_SEARCH_AGENT_KEY),
-    [token],
+  const canAdmin = session?.kind === 'admin-token'
+  const loadCatalog = useCallback(() => adminApi.agentMarketCatalog(token), [token])
+  const catalogRemote = useRemoteData(loadCatalog, onUnauthorized) as {
+    data: unknown
+    error: unknown
+    loading: boolean
+    refresh: () => void
+  }
+  const catalog = useMemo(() => normalizeCatalog(catalogRemote.data), [catalogRemote.data])
+  const [selectedAgentKey, setSelectedAgentKey] = useState('')
+  const selectedAgent = catalog.agents.find((agent) => agent.agentKey === selectedAgentKey) || null
+  const selectedExecutorKey = selectedAgent?.executorKey || null
+  const isAdvancedWorkbench = selectedExecutorKey === ADVANCED_SEARCH_AGENT_KEY
+
+  useEffect(() => {
+    if (!catalog.agents.length) {
+      setSelectedAgentKey('')
+      return
+    }
+    if (catalog.agents.some((agent) => agent.agentKey === selectedAgentKey)) return
+    const preferred = catalog.agents.find((agent) => agent.executorKey === ADVANCED_SEARCH_AGENT_KEY)
+      || catalog.agents.find((agent) => agent.agentKey === 'advanced-search')
+      || catalog.agents[0]
+    setSelectedAgentKey(preferred.agentKey)
+  }, [catalog.agents, selectedAgentKey])
+
+  const loadDefinition = useCallback(
+    () => isAdvancedWorkbench && selectedExecutorKey
+      ? adminApi.agentMarketItem(token, selectedExecutorKey)
+      : Promise.resolve(null),
+    [isAdvancedWorkbench, selectedExecutorKey, token],
   )
-  const remote = useRemoteData(load, onUnauthorized) as {
-    data: Snapshot | null
-    error: any
+  const definitionRemote = useRemoteData(loadDefinition, onUnauthorized) as {
+    data: unknown
+    error: unknown
     loading: boolean
     refresh: () => void
   }
   const loadAgentControl = useCallback(() => adminApi.agent(token), [token])
   const agentControl = useRemoteData(loadAgentControl, onUnauthorized) as {
-    data: any
-    error: any
+    data: unknown
+    error: unknown
     loading: boolean
-    refresh: () => void
   }
+
+  const initialDefinition = useMemo(() => freshAdvancedSearchDefinition(), [])
   const [snapshot, setSnapshot] = useState<Snapshot>({
     agentKey: ADVANCED_SEARCH_AGENT_KEY,
     revision: 0,
     source: 'builtin',
-    definition: freshAdvancedSearchDefinition(),
+    definition: initialDefinition,
     updatedBy: null,
     updatedAt: null,
   })
-  const [draft, setDraft] = useState<AdvancedSearchDefinition>(() => freshAdvancedSearchDefinition())
+  const [draft, setDraft] = useState<AdvancedSearchDefinition>(() => structuredClone(initialDefinition))
+  const [definitionError, setDefinitionError] = useState<Error | null>(null)
   const [query, setQuery] = useState<string>(ADVANCED_SEARCH_INPUT_EXAMPLE.query)
   const [filters, setFilters] = useState<FilterDraft>(EMPTY_FILTERS)
-  const [sequenceKey, setSequenceKey] = useState<string>('')
+  const [sequenceKey, setSequenceKey] = useState('')
   const [selectedStage, setSelectedStage] = useState<AdvancedSearchStageType>('triage')
-  const [tab, setTab] = useState<StageTab>('prompt')
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('prompt')
+  const [selectedAttempt, setSelectedAttempt] = useState<number | null>(null)
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState<unknown>(null)
   const [result, setResult] = useState<DryRunResult | null>(null)
   const [previousResult, setPreviousResult] = useState<DryRunResult | null>(null)
-  const canEdit = session?.kind === 'admin-token'
-  const chatSequences = (agentControl.data?.control?.sequences || [])
-    .filter((sequence: any) => sequence.kind === 'chat' && sequence.enabled)
-  const chatDefaultBinding = (agentControl.data?.control?.bindings || [])
-    .find((binding: any) => binding.kind === 'chat' && binding.sequenceKey)
-  const chatDefaultSequence = chatSequences
-    .find((sequence: any) => sequence.sequenceKey === chatDefaultBinding?.sequenceKey)
-  const chatDefaultReady = Boolean(chatDefaultSequence)
-    && chatDefaultSequence.providerRevision === Number(agentControl.data?.settings?.chat?.revision ?? 0)
-  const chatSequenceOptions = useMemo(() => [
-    {
-      value: '',
-      label: chatDefaultReady
-        ? `使用业务默认：${chatDefaultSequence.displayName}`
-        : '未设置可用的业务默认（模型阶段确定性降级）',
-      description: chatDefaultReady
-        ? `显式绑定 ${chatDefaultSequence.sequenceKey}`
-        : '不会自动使用第一个 Provider 或 Sequence。',
-    },
-    ...chatSequences.map((sequence: any) => ({
-      value: sequence.sequenceKey,
-      label: `${sequence.displayName} · ${sequence.sequenceKey}`,
-      description: sequence.providerRevision === Number(agentControl.data?.settings?.chat?.revision ?? 0)
-        ? '已匹配当前 Provider revision'
-        : 'Provider 已变化；运行前需要重新验证',
-      disabled: sequence.providerRevision !== Number(agentControl.data?.settings?.chat?.revision ?? 0),
-    })),
-  ], [agentControl.data, chatDefaultReady, chatDefaultSequence, chatSequences])
-  const chatSequenceHint = chatDefaultReady
-    ? '保留此项会使用 Agent 中心显式设置的 Chat 业务默认；显式选择其他 Sequence 时 fail-closed。'
-    : '当前没有可用的 Chat 业务默认；保留此项时模型阶段确定性降级，也可显式选择已验证 Sequence。'
+  const [compareTarget, setCompareTarget] = useState<CompareTarget>('previous')
+  const [search, setSearch] = useState('')
+  const [selectedCategory, setSelectedCategory] = useState('all')
+  const [categoryEditor, setCategoryEditor] = useState<CatalogCategory | 'create' | null>(null)
+  const [categoryDelete, setCategoryDelete] = useState<CatalogCategory | null>(null)
+  const [agentEditor, setAgentEditor] = useState<CatalogAgent | 'create' | null>(null)
+  const [lifecycleConfirm, setLifecycleConfirm] = useState<CatalogAgent | null>(null)
+  const [catalogBusy, setCatalogBusy] = useState(false)
 
   useEffect(() => {
-    if (!remote.data) return
-    const parsed = AdvancedSearchDefinitionSchema.safeParse(remote.data.definition)
-    if (!parsed.success) return
-    const next: Snapshot = { ...remote.data, definition: parsed.data }
+    if (selectedCategory !== 'all'
+      && !catalog.categories.some((category) => category.categoryKey === selectedCategory)) {
+      setSelectedCategory('all')
+    }
+  }, [catalog.categories, selectedCategory])
+
+  useEffect(() => {
+    const emptyDefinition = freshAdvancedSearchDefinition()
+    setSnapshot({
+      agentKey: ADVANCED_SEARCH_AGENT_KEY,
+      revision: 0,
+      source: 'builtin',
+      definition: emptyDefinition,
+      updatedBy: null,
+      updatedAt: null,
+    })
+    setDraft(structuredClone(emptyDefinition))
+    setDefinitionError(null)
+    setResult(null)
+    setPreviousResult(null)
+    setRunError(null)
+    setSelectedStage('triage')
+    setInspectorTab('prompt')
+    setSelectedAttempt(null)
+  }, [selectedAgentKey])
+
+  useEffect(() => {
+    if (!isAdvancedWorkbench || !selectedExecutorKey || !definitionRemote.data) return
+    if (!isRecord(definitionRemote.data)) {
+      setDefinitionError(new Error('Agent definition 响应格式无效'))
+      return
+    }
+    const parsed = AdvancedSearchDefinitionSchema.safeParse(definitionRemote.data.definition)
+    if (!parsed.success) {
+      setDefinitionError(new Error('Agent definition 未通过运行时 Schema 校验'))
+      return
+    }
+    const next: Snapshot = {
+      agentKey: stringValue(definitionRemote.data.agentKey, selectedExecutorKey || ADVANCED_SEARCH_AGENT_KEY),
+      revision: Math.max(0, Math.trunc(numberValue(definitionRemote.data.revision))),
+      source: definitionRemote.data.source === 'database' ? 'database' : 'builtin',
+      definition: parsed.data,
+      updatedBy: nullableString(definitionRemote.data.updatedBy),
+      updatedAt: nullableString(definitionRemote.data.updatedAt),
+    }
     setSnapshot(next)
     setDraft(structuredClone(parsed.data))
-  }, [remote.data])
+    setDefinitionError(null)
+  }, [definitionRemote.data, isAdvancedWorkbench, selectedExecutorKey])
 
-  const activeStages = useMemo(
-    () => draft.stages.filter((stage) => stage.state === 'active'),
-    [draft],
-  )
-  const trashedStages = useMemo(
-    () => draft.stages.filter((stage) => stage.state === 'trashed'),
-    [draft],
-  )
+  const sequenceConfig = useMemo(() => {
+    const data = isRecord(agentControl.data) ? agentControl.data : {}
+    const control = isRecord(data.control) ? data.control : {}
+    const settings = isRecord(data.settings) ? data.settings : {}
+    const chatSettings = isRecord(settings.chat) ? settings.chat : {}
+    const providerRevision = numberValue(chatSettings.revision)
+    const sequences = (Array.isArray(control.sequences) ? control.sequences : [])
+      .filter(isRecord)
+      .filter((sequence) => sequence.kind === 'chat' && sequence.enabled === true)
+    const bindings = (Array.isArray(control.bindings) ? control.bindings : []).filter(isRecord)
+    const binding = bindings.find((candidate) => candidate.kind === 'chat' && nullableString(candidate.sequenceKey))
+    const defaultKey = binding ? nullableString(binding.sequenceKey) : null
+    const defaultSequence = sequences.find((sequence) => sequence.sequenceKey === defaultKey)
+    const defaultReady = Boolean(defaultSequence) && numberValue(defaultSequence?.providerRevision) === providerRevision
+    return {
+      options: [
+        {
+          value: '',
+          label: defaultReady
+            ? '使用业务默认：' + stringValue(defaultSequence?.displayName, defaultKey || 'Chat Sequence')
+            : '未设置可用业务默认（模型阶段确定性降级）',
+          description: defaultReady
+            ? '显式绑定 ' + defaultKey
+            : '不会自动选取第一个 Provider 或 Sequence。',
+        },
+        ...sequences.map((sequence) => ({
+          value: stringValue(sequence.sequenceKey),
+          label: stringValue(sequence.displayName, stringValue(sequence.sequenceKey)) + ' · ' + stringValue(sequence.sequenceKey),
+          description: numberValue(sequence.providerRevision) === providerRevision
+            ? '匹配当前 Provider revision'
+            : 'Provider 已变化；需要重新验证',
+          disabled: numberValue(sequence.providerRevision) !== providerRevision,
+        })),
+      ],
+      hint: defaultReady
+        ? '保留业务默认或显式选择已验证 Sequence；运行请求会记录实际选择。'
+        : '没有可用业务默认；可显式选择已验证 Sequence，否则模型阶段确定性降级。',
+    }
+  }, [agentControl.data])
+
   const dirty = definitionText(draft) !== definitionText(snapshot.definition)
   const tracesByStage = useMemo(() => {
     const grouped = new Map<AdvancedSearchStageType, StageTrace[]>()
@@ -712,37 +1799,29 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
     }
     return grouped
   }, [result])
+  const baselineResult = useMemo(() => normalizeRun(selectedAgent?.lastRun), [selectedAgent?.lastRun])
+  const comparisonResult = compareTarget === 'previous' ? previousResult : baselineResult
+  const previousTracesByStage = useMemo(() => {
+    const grouped = new Map<AdvancedSearchStageType, StageTrace[]>()
+    for (const trace of comparisonResult?.traces || []) {
+      grouped.set(trace.type, [...(grouped.get(trace.type) || []), trace])
+    }
+    return grouped
+  }, [comparisonResult])
+  const selectedStageDefinition = draft.stages.find((stage) => stage.type === selectedStage) || draft.stages[0]
+  const selectedStageTraces = tracesByStage.get(selectedStage) || []
 
-  const mutateStage = (stageId: string, mutate: (stage: AdvancedSearchStage) => void) => {
-    setDraft((current) => updateStage(current, stageId, mutate))
-  }
+  useEffect(() => {
+    setSelectedAttempt(latestTrace(selectedStageTraces)?.attempt ?? null)
+  }, [result, selectedStage])
 
-  const moveToTrash = (stageId: string) => {
-    setDraft((current) => setStageState(current, stageId, 'trashed'))
-    const next = activeStages.find((stage) => stage.id !== stageId)
-    if (selectedStage === stageId && next) setSelectedStage(next.type)
-  }
-
-  const restore = (stageId: string) => {
-    setDraft((current) => setStageState(current, stageId, 'active'))
-    setSelectedStage(stageId as AdvancedSearchStageType)
-  }
-
-  const dragId = (event: DragEvent): string | null => {
-    const id = event.dataTransfer.getData(STAGE_DRAG_MIME)
-    return draft.stages.some((stage) => stage.id === id) ? id : null
-  }
-  const onDragStart = (stageId: string) => (event: DragEvent<HTMLElement>) => {
-    event.dataTransfer.effectAllowed = 'move'
-    event.dataTransfer.setData(STAGE_DRAG_MIME, stageId)
-    event.dataTransfer.setData('text/plain', stageId)
-  }
-  const allowDrop = (event: DragEvent) => {
-    event.preventDefault()
-    event.dataTransfer.dropEffect = 'move'
+  const handleAdminError = (error: unknown, fallback: string) => {
+    if (isRecord(error) && error.status === 401) onUnauthorized?.(error)
+    notify?.(errorMessage(error, fallback), 'warning')
   }
 
   const save = async () => {
+    if (!canAdmin || !selectedExecutorKey || !isAdvancedWorkbench) return
     const parsed = AdvancedSearchDefinitionSchema.safeParse(draft)
     if (!parsed.success) {
       notify?.('当前配置未通过 Zod 校验，请检查空 Prompt 或超出范围的参数。', 'warning')
@@ -750,22 +1829,48 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
     }
     setSaving(true)
     try {
-      const saved = await adminApi.saveAgentMarketItem(token, ADVANCED_SEARCH_AGENT_KEY, {
+      const response = await adminApi.saveAgentMarketItem(token, selectedExecutorKey, {
         expectedRevision: snapshot.revision,
         definition: parsed.data,
       })
+      if (!isRecord(response)) throw new Error('保存响应格式无效')
+      const savedDefinition = AdvancedSearchDefinitionSchema.safeParse(response.definition)
+      if (!savedDefinition.success) throw new Error('保存结果未通过 Agent definition Schema')
+      const saved: Snapshot = {
+        agentKey: stringValue(response.agentKey, selectedExecutorKey),
+        revision: Math.max(0, Math.trunc(numberValue(response.revision))),
+        source: response.source === 'database' ? 'database' : 'builtin',
+        definition: savedDefinition.data,
+        updatedBy: nullableString(response.updatedBy),
+        updatedAt: nullableString(response.updatedAt),
+      }
       setSnapshot(saved)
       setDraft(structuredClone(saved.definition))
-      notify?.('Agent Market 草稿已保存为 revision ' + saved.revision, 'success')
-    } catch (error: any) {
-      if (error?.status === 401) onUnauthorized?.(error)
-      notify?.(error?.message || '保存失败', 'warning')
+      notify?.('Agent Prompt 已保存为 revision ' + saved.revision, 'success')
+    } catch (error) {
+      handleAdminError(error, '保存失败')
     } finally {
       setSaving(false)
     }
   }
 
+  const runDisabledReason = useMemo(() => {
+    if (!selectedAgent) return '请选择 Agent'
+    if (!canAdmin) return '当前 Hub 管理会话无操作权限'
+    if (!selectedAgent.executorKey) return '未配置执行器'
+    if (!selectedAgent.runnable) return selectedAgent.lifecycle === 'disabled' ? 'Agent 已停用' : '当前不可运行'
+    if (!isAdvancedWorkbench) return '当前执行器尚未接入此可视化工作台'
+    if (definitionRemote.loading) return '正在加载执行定义'
+    if (definitionRemote.error || definitionError) return '执行定义不可用'
+    return null
+  }, [canAdmin, definitionError, definitionRemote.error, definitionRemote.loading, isAdvancedWorkbench, selectedAgent])
+
+  const runLabel = running
+    ? '运行中…'
+    : runDisabledReason === '未配置执行器' ? '未配置执行器' : runDisabledReason || '运行 Dry Run'
+
   const run = async () => {
+    if (runDisabledReason || !selectedAgent?.runnable || !selectedExecutorKey) return
     const parsed = AdvancedSearchDefinitionSchema.safeParse(draft)
     if (!parsed.success || !query.trim()) {
       notify?.('请输入问题，并修正未通过 Zod 校验的阶段配置。', 'warning')
@@ -774,8 +1879,7 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
     setRunning(true)
     setRunError(null)
     try {
-      const runSnapshot = structuredClone(parsed.data)
-      const next = await adminApi.runAgentMarketDryRun(token, ADVANCED_SEARCH_AGENT_KEY, {
+      const response = await adminApi.runAgentMarketDryRun(token, selectedExecutorKey, {
         dryRun: true,
         sequenceKey: sequenceKey || null,
         query: query.trim(),
@@ -786,212 +1890,300 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
           fromTime: nullableDateTime(filters.fromTime),
           toTime: nullableDateTime(filters.toTime),
         },
-        definition: runSnapshot,
+        definition: structuredClone(parsed.data),
       })
+      const next = normalizeRun(response)
+      if (!next) throw new Error('Dry run 响应缺少可观测 traces')
       setPreviousResult(result)
       setResult(next)
+      catalogRemote.refresh()
       notify?.('Dry run 完成：0 次业务写入，' + next.traces.length + ' 条阶段 Trace。', 'success')
-    } catch (error: any) {
-      if (error?.status === 401) onUnauthorized?.(error)
+    } catch (error) {
+      if (isRecord(error) && error.status === 401) onUnauthorized?.(error)
       setRunError(error)
     } finally {
       setRunning(false)
     }
   }
 
-  if (remote.loading && !remote.data) return <LoadingState label="正在打开 Agent Market" />
-  if (remote.error && !remote.data) return <ErrorState error={remote.error} onRetry={remote.refresh} />
+  const submitCategory = async (value: { categoryKey: string, name: string, description?: string, sortOrder: number }) => {
+    if (!canAdmin) return
+    const editing = categoryEditor && categoryEditor !== 'create' ? categoryEditor : null
+    setCatalogBusy(true)
+    try {
+      if (editing) {
+        await adminApi.updateAgentMarketCategory(token, editing.categoryKey, {
+          expectedRevision: editing.revision,
+          name: value.name,
+          description: value.description,
+          sortOrder: value.sortOrder,
+        })
+        notify?.('分类“' + value.name + '”已更新', 'success')
+      } else {
+        await adminApi.createAgentMarketCategory(token, value)
+        notify?.('分类“' + value.name + '”已创建', 'success')
+      }
+      setCategoryEditor(null)
+      catalogRemote.refresh()
+    } catch (error) {
+      handleAdminError(error, '分类保存失败')
+    } finally {
+      setCatalogBusy(false)
+    }
+  }
+
+  const confirmDeleteCategory = async () => {
+    if (!categoryDelete || !canAdmin) return
+    setCatalogBusy(true)
+    try {
+      await adminApi.deleteAgentMarketCategory(token, categoryDelete.categoryKey, {
+        expectedRevision: categoryDelete.revision,
+      })
+      notify?.('分类“' + categoryDelete.name + '”已删除', 'success')
+      setCategoryDelete(null)
+      setSelectedCategory('all')
+      catalogRemote.refresh()
+    } catch (error) {
+      handleAdminError(error, '分类删除失败')
+    } finally {
+      setCatalogBusy(false)
+    }
+  }
+
+  const submitAgent = async (value: {
+    agentKey: string
+    name: string
+    summary?: string
+    categoryKey: string
+    tags: string[]
+    lifecycle: AgentLifecycle
+  }) => {
+    if (!canAdmin) return
+    const editing = agentEditor && agentEditor !== 'create' ? agentEditor : null
+    setCatalogBusy(true)
+    try {
+      if (editing) {
+        await adminApi.updateAgentMarketAgent(token, editing.agentKey, {
+          expectedRevision: editing.revision,
+          name: value.name,
+          summary: value.summary,
+          categoryKey: value.categoryKey,
+          tags: value.tags,
+          lifecycle: value.lifecycle,
+        })
+        notify?.('Agent“' + value.name + '”已更新', 'success')
+      } else {
+        await adminApi.createAgentMarketAgent(token, {
+          agentKey: value.agentKey,
+          name: value.name,
+          summary: value.summary,
+          categoryKey: value.categoryKey,
+          tags: value.tags,
+        })
+        notify?.('Agent“' + value.name + '”已创建；未配置执行器', 'success')
+      }
+      setAgentEditor(null)
+      catalogRemote.refresh()
+    } catch (error) {
+      handleAdminError(error, 'Agent 保存失败')
+    } finally {
+      setCatalogBusy(false)
+    }
+  }
+
+  const confirmLifecycle = async () => {
+    if (!lifecycleConfirm || !canAdmin) return
+    const lifecycle: AgentLifecycle = lifecycleConfirm.lifecycle === 'disabled'
+      ? (lifecycleConfirm.executorKey ? 'published' : 'draft')
+      : 'disabled'
+    setCatalogBusy(true)
+    try {
+      await adminApi.updateAgentMarketAgent(token, lifecycleConfirm.agentKey, {
+        expectedRevision: lifecycleConfirm.revision,
+        name: lifecycleConfirm.name,
+        summary: lifecycleConfirm.summary || undefined,
+        categoryKey: lifecycleConfirm.categoryKey,
+        tags: lifecycleConfirm.tags,
+        lifecycle,
+      })
+      notify?.(lifecycleConfirm.name + ' 已' + (lifecycle === 'disabled' ? '停用' : '恢复'), 'success')
+      setLifecycleConfirm(null)
+      catalogRemote.refresh()
+    } catch (error) {
+      handleAdminError(error, lifecycle === 'disabled' ? '停用失败' : '恢复失败')
+    } finally {
+      setCatalogBusy(false)
+    }
+  }
+
+  if (catalogRemote.loading && !catalogRemote.data) return <LoadingState label="正在加载 Agent Market 目录" />
+  if (catalogRemote.error && !catalogRemote.data) return <ErrorState error={catalogRemote.error} onRetry={catalogRemote.refresh} />
 
   return (
     <>
-      <PageHeading
-        eyebrow="AGENT MARKET / LEARNABLE DRY RUN"
+      <PageHeading className="mih-market-page-heading" eyebrow="AGENT CENTER / OBSERVABLE MARKET"
         title="Agent Market"
-        description="第一个示例把进阶搜索拆成可编辑、可验证、可回收的显式阶段图。它只读当前 PG / ES，不接管主搜索，也不进入 MX-H2I 登录与联网链路。"
-        loading={false}
-        onRefresh={undefined}
-      >
-        <StatusBadge status="active" label="1 个内置 Agent" />
+        description="从真实目录选择 Agent，观察阶段流转、输入输出与运行差异；所有 Demo dry-run 保持 0 次业务写入。"
+        loading={catalogRemote.loading} onRefresh={catalogRemote.refresh}>
+        <StatusBadge status="active" label={catalog.agents.length + ' 个 Agent'} />
+        {canAdmin ? (
+          <>
+            <button className="qp-button qp-button--outline" type="button" onClick={() => setCategoryEditor('create')}>
+              <Plus size={16} aria-hidden="true" />新建分类
+            </button>
+            <button className="qp-button qp-button--primary" type="button"
+              disabled={!catalog.categories.length} onClick={() => setAgentEditor('create')}>
+              <Brain size={16} aria-hidden="true" />新建 Agent
+            </button>
+          </>
+        ) : null}
       </PageHeading>
-
-      <section className="mih-market-hero">
-        <div>
-          <span className="mih-market-hero__icon"><Storefront size={30} weight="duotone" /></span>
-          <div>
-            <p className="qp-kicker">MARKET ITEM · {snapshot.source.toUpperCase()} REV {snapshot.revision}</p>
-            <h2>{draft.displayName}</h2>
-            <p>{draft.description}</p>
-          </div>
-        </div>
-        <dl>
-          <div><dt>Active</dt><dd>{activeStages.length}</dd></div>
-          <div><dt>Trash</dt><dd>{trashedStages.length}</dd></div>
-          <div><dt>Writes</dt><dd>0</dd></div>
-          <div><dt>Tools</dt><dd>{ADVANCED_SEARCH_TOOLS.length}</dd></div>
-        </dl>
-      </section>
-
-      {!canEdit ? (
+      {!canAdmin ? (
         <div className="mih-inline-warning mih-market-permission">
           <LockKey size={17} aria-hidden="true" />
-          Launcher 平台管理员可查看定义与示例；保存 Prompt 和运行有模型成本的 dry-run 需要 Admin Token。
+          当前 Hub 管理会话为只读；Agent Market 直接复用当前会话凭据，无需再次认证。
         </div>
       ) : null}
-
-      <div className="mih-market-layout">
-        <aside className="mih-market-runner">
-          <Panel title="运行实验" subtitle="运行使用当前未保存草稿的不可变快照。">
-            <DropdownField
-              label="LLM Sequence"
-              hint={chatSequenceHint}
-              value={sequenceKey}
-              onChange={setSequenceKey}
-              options={chatSequenceOptions as never[]}
-              disabled={!canEdit || running || agentControl.loading}
-            />
-            <Field label="user" hint="这是本次 dry-run 的用户消息。">
-              <textarea className="qp-input mih-market-query" value={query} disabled={!canEdit || running}
-                onChange={(event) => setQuery(event.target.value)} />
-            </Field>
-            <details className="mih-market-filters">
-              <summary>受控检索过滤条件</summary>
-              <Field label="Platform" hint="可选的精确平台过滤。"><input className="qp-input" value={filters.platform}
-                disabled={!canEdit || running} onChange={(event) => setFilters({ ...filters, platform: event.target.value })} /></Field>
-              <Field label="Dataset ID" hint="可选的精确数据集过滤。"><input className="qp-input" value={filters.datasetId}
-                disabled={!canEdit || running} onChange={(event) => setFilters({ ...filters, datasetId: event.target.value })} /></Field>
-              <Field label="Object Type" hint="可选的精确对象类型过滤。"><input className="qp-input" value={filters.objectType}
-                disabled={!canEdit || running} onChange={(event) => setFilters({ ...filters, objectType: event.target.value })} /></Field>
-              <Field label="From Time" hint="可选的事件时间下界。"><input className="qp-input" type="datetime-local" value={filters.fromTime}
-                disabled={!canEdit || running} onChange={(event) => setFilters({ ...filters, fromTime: event.target.value })} /></Field>
-              <Field label="To Time" hint="可选的事件时间上界。"><input className="qp-input" type="datetime-local" value={filters.toTime}
-                disabled={!canEdit || running} onChange={(event) => setFilters({ ...filters, toTime: event.target.value })} /></Field>
-            </details>
-            <div className="mih-market-run-actions">
-              <button className="qp-button qp-button--primary" type="button" disabled={!canEdit || running}
-                onClick={run}><Play size={17} weight="fill" />{running ? '运行中' : '运行 --dry-run'}</button>
-              <button className="qp-button qp-button--outline" type="button"
-                disabled={!canEdit || saving || !dirty} onClick={save}>
-                <FloppyDisk size={17} />{saving ? '保存中' : '保存草稿'}
-              </button>
-            </div>
-            <button className="qp-button qp-button--ghost mih-market-reset" type="button"
-              disabled={!canEdit || !dirty} onClick={() => setDraft(structuredClone(snapshot.definition))}>
-              <ArrowCounterClockwise size={16} />撤销未保存修改
-            </button>
-            {runError ? <ErrorState error={runError as any} onRetry={undefined} /> : null}
-          </Panel>
-
-          <Panel title="白名单工具" subtitle="模型只能提出结构化字段，代码决定是否执行工具。">
-            <div className="mih-market-tools">
-              {ADVANCED_SEARCH_TOOLS.map((tool) => (
-                <article key={tool.id}>
-                  <Wrench size={17} weight="duotone" />
-                  <div><code>{tool.id}</code><p>{tool.description}</p></div>
-                  <span>sideEffect: none</span>
-                </article>
-              ))}
-            </div>
-          </Panel>
-
-          {result?.final ? (
-            <Panel title={result.final.refused ? '本次拒答' : '本次答案'}
-              subtitle={'Confidence ' + Math.round(result.final.confidence * 100) + '%'}>
-              <div className="mih-market-answer">
-                <p>{result.final.answer}</p>
-                {result.final.citations.map((citation) => (
-                  <div key={citation.evidenceId}><code>{citation.evidenceId}</code><span>{citation.claim}</span></div>
-                ))}
-                {result.final.limitations.map((item) => <small key={item}>· {item}</small>)}
-              </div>
-            </Panel>
-          ) : null}
-        </aside>
-
-        <section className="mih-market-graph" aria-label="Agent 阶段图"
-          onDragOver={allowDrop} onDrop={(event) => {
-            const id = dragId(event)
-            if (id) restore(id)
-          }}>
-          <div className="mih-market-graph__heading">
-            <div><p className="qp-kicker">EXPLICIT STAGE GRAPH</p><h2>进阶搜索 Agent</h2></div>
-            <span><FlowArrow size={18} />每阶段独立 Prompt / 参数 / Schema / Result</span>
-          </div>
-          <LockedGate kind="entry" title="Access + DryRun Gate"
-            description="Internal 会话、Admin Token、dryRun=true、白名单工具和输入上限由服务端强制，不能拖走。" />
-          <div className="mih-market-flow-line" aria-hidden="true" />
-          {activeStages.map((stage) => (
-            <div className="mih-market-stage-wrap" key={stage.id}>
-              <StageCard
-                stage={stage}
-                selected={selectedStage === stage.type}
-                tab={tab}
-                traces={tracesByStage.get(stage.type) || []}
-                canEdit={canEdit}
-                onSelect={() => setSelectedStage(stage.type)}
-                onTab={setTab}
-                onMutate={(mutate) => mutateStage(stage.id, mutate)}
-                onTrash={() => moveToTrash(stage.id)}
-              />
-              {stage.type === 'triage' ? (
-                <div className="mih-market-branch-note" aria-label="意图分流条件边">
-                  <span>knowledge_search → rewrite</span>
-                  <span>structured_filter → retrieve</span>
-                  <span>clarify → grounded refusal</span>
+      <section className="mih-market-workbench">
+        <CatalogRail catalog={catalog} loading={catalogRemote.loading}
+          selectedAgentKey={selectedAgentKey} selectedCategory={selectedCategory} search={search}
+          canAdmin={canAdmin} onSelectAgent={setSelectedAgentKey}
+          onCategory={setSelectedCategory} onSearch={setSearch}
+          onCreateCategory={() => setCategoryEditor('create')}
+          onEditCategory={(category) => setCategoryEditor(category)}
+          onCreateAgent={() => setAgentEditor('create')}
+          onEditAgent={(agent) => setAgentEditor(agent)}
+          onToggleAgent={setLifecycleConfirm} />
+        <main className="mih-market-main">
+          {selectedAgent ? (
+            <>
+              <header className="mih-market-agent-heading">
+                <div>
+                  <span className="mih-market-agent-heading__icon"><Brain size={24} weight="duotone" aria-hidden="true" /></span>
+                  <div>
+                    <p className="qp-kicker">
+                      {selectedAgent.kind.toUpperCase()} · {selectedAgent.agentKey} · REV {selectedAgent.revision}
+                    </p>
+                    <h2>{selectedAgent.name}</h2><p>{selectedAgent.summary || '暂无简介'}</p>
+                  </div>
                 </div>
-              ) : null}
-              {stage.type === 'grade' && stage.options.maxRetries > 0 ? (
-                <div className="mih-market-branch-note is-loop" aria-label="纠错回环">
-                  <ArrowCounterClockwise size={14} aria-hidden="true" />
-                  <span>partial / insufficient → rewrite · 最多 {stage.options.maxRetries} 次</span>
+                <div className="mih-market-agent-heading__status">
+                  <StatusBadge status={lifecycleTone(selectedAgent.lifecycle)} label={lifecycleLabel(selectedAgent.lifecycle)} />
+                  <span className="qp-tag">{selectedAgent.executorKey
+                    ? (selectedAgent.dryRunOnly ? 'Dry Run Only' : 'Runtime')
+                    : 'Catalog Only · 未配置执行器'}</span>
+                  <span className="qp-tag">Writes 0</span>
+                  {canAdmin ? (
+                    <button className="qp-button qp-button--ghost qp-icon-button" type="button"
+                      aria-label={'编辑 ' + selectedAgent.name} onClick={() => setAgentEditor(selectedAgent)}>
+                      <PencilSimple size={16} aria-hidden="true" />
+                    </button>
+                  ) : null}
                 </div>
-              ) : null}
-              <div className="mih-market-stage-drag-handle" draggable={canEdit}
-                aria-hidden="true"
-                title={canEdit ? '拖动阶段到回收站' : undefined}
-                onDragStart={canEdit ? onDragStart(stage.id) : undefined} />
-            </div>
-          ))}
-          <LockedGate kind="exit" title="Trace + Eval Gate"
-            description="显示渲染消息、结构化结果、工具、模型、token、耗时与分支理由；不展示或声称展示隐藏思维链。" />
-
-          <section className={'mih-market-trash' + (trashedStages.length ? ' has-items' : '')}
-            onDragOver={allowDrop} onDrop={(event) => {
-              event.stopPropagation()
-              const id = dragId(event)
-              if (id) moveToTrash(id)
-            }}>
-            <header><Recycle size={22} weight="duotone" /><div><strong>阶段回收站</strong><p>拖入测试删除后的影响；配置、Prompt 与原位置仍保留。</p></div></header>
-            <div>
-              {trashedStages.map((stage) => (
-                <article key={stage.id}>
-                  <span className="mih-market-trash__drag-handle" draggable={canEdit}
-                    aria-hidden="true"
-                    title={canEdit ? '拖回阶段图' : undefined}
-                    onDragStart={canEdit ? onDragStart(stage.id) : undefined} />
-                  <span className="mih-market-trash__label">{ADVANCED_SEARCH_STAGE_META[stage.type].label}</span>
-                  <button className="qp-button qp-button--ghost" type="button" disabled={!canEdit}
-                    aria-label={'恢复 ' + ADVANCED_SEARCH_STAGE_META[stage.type].label}
-                    onClick={() => restore(stage.id)}>
-                    <ArrowCounterClockwise size={15} />恢复
-                  </button>
-                </article>
-              ))}
-              {trashedStages.length === 0 ? <small>把任一业务阶段拖到这里，或使用阶段右上角的删除按钮。</small> : null}
-            </div>
+              </header>
+              {isAdvancedWorkbench ? (
+                <>
+                  <RunConfiguration canAdmin={canAdmin}
+                    enabled={!definitionRemote.loading && !definitionRemote.error && !definitionError}
+                    running={running} saving={saving} dirty={dirty}
+                    sequenceKey={sequenceKey} sequenceOptions={sequenceConfig.options}
+                    sequenceHint={sequenceConfig.hint} query={query} filters={filters}
+                    runLabel={runLabel} runDisabledReason={runDisabledReason}
+                    agentControlError={agentControl.error} runError={runError}
+                    onSequence={setSequenceKey} onQuery={setQuery} onFilters={setFilters}
+                    onRun={run} onSave={save}
+                    onReset={() => setDraft(structuredClone(snapshot.definition))} />
+                  {definitionRemote.loading && !definitionRemote.data ? (
+                    <LoadingState label="正在加载 Agent 执行定义" />
+                  ) : definitionRemote.error || definitionError ? (
+                    <ErrorState error={definitionRemote.error || definitionError} onRetry={definitionRemote.refresh} />
+                  ) : (
+                    <>
+                      <AgentFlowGraph definition={draft} tracesByStage={tracesByStage}
+                        selectedStage={selectedStage} running={running} onSelect={(stage) => {
+                          setSelectedStage(stage)
+                          setInspectorTab('input')
+                        }} />
+                      <RunComparison stageType={selectedStage} current={result} previous={previousResult}
+                        baseline={baselineResult} compareTarget={compareTarget} onCompareTarget={setCompareTarget} />
+                      <RunMetrics current={result} reference={comparisonResult} />
+                    </>
+                  )}
+                </>
+              ) : <UnsupportedWorkbench agent={selectedAgent} />}
+            </>
+          ) : (
+            <EmptyState icon={Storefront} title="目录中还没有 Agent"
+              description={canAdmin ? '先创建分类，再创建第一个 Agent。' : '请联系管理员配置 Agent Market。'}
+              action={canAdmin && !catalog.categories.length ? (
+                <button className="qp-button qp-button--primary" type="button" onClick={() => setCategoryEditor('create')}>
+                  <Plus size={16} aria-hidden="true" />新建分类
+                </button>
+              ) : undefined} />
+          )}
+          <section className="mih-market-safety" aria-label="运行安全边界">
+            <div><ShieldCheck size={18} aria-hidden="true" /><span><strong>Hub 管理会话 + Dry Run Gate</strong><small>无需额外凭据；服务端强制 dryRun=true 与输入上限</small></span></div>
+            <div><Database size={18} aria-hidden="true" /><span><strong>PG / ES 只读</strong><small>不写 canonical、outbox 或主搜索配置</small></span></div>
+            <div><BracketsCurly size={18} aria-hidden="true" /><span><strong>Zod 契约</strong><small>输出、Schema 与 UI 观测同源</small></span></div>
+            <div><Warning size={18} aria-hidden="true" /><span><strong>模型可能计费</strong><small>真实 Provider 调用会产生模型成本</small></span></div>
           </section>
-        </section>
-      </div>
-
-      <EvaluationCompare previous={previousResult} current={result} />
-
-      <Panel title="安全边界" subtitle="这个 Demo 是影子实验面，不是生产 Agent 发布或主搜索切换开关。">
-        <div className="mih-market-boundaries">
-          <div><CheckCircle size={20} /><strong>只读 PG / ES</strong><p>不调用 HubService 计费/幂等写路径，不调用 Night-All，不入队、不出 outbox。</p></div>
-          <div><BracketsCurly size={20} /><strong>Zod 单一真相</strong><p>TS 类型、运行时验证和 JSON Schema 同源；教学代码是标明用途的可读摘录，返回示例必须通过真实 Schema。</p></div>
-          <div><Database size={20} /><strong>不改主结果</strong><p>搜索 Profile、索引别名、canonical 记录、用户授权与 MX-H2I 网络状态均不写。</p></div>
-          <div><Warning size={20} /><strong>模型仍可能计费</strong><p>配置 provider 后，Agent 阶段会真实调用模型；无模型时显示确定性降级。</p></div>
-        </div>
-      </Panel>
+        </main>
+        {selectedAgent && isAdvancedWorkbench && selectedStageDefinition ? (
+          <StageInspector stage={selectedStageDefinition} traces={selectedStageTraces}
+            referenceTraces={previousTracesByStage.get(selectedStage) || []}
+            tab={inspectorTab} attempt={selectedAttempt} canEdit={canAdmin}
+            onTab={setInspectorTab} onAttempt={setSelectedAttempt}
+            onMutate={(mutate) => setDraft((current) => updateStage(current, selectedStageDefinition.id, mutate))}
+            onToggleStage={() => setDraft((current) => setStageState(
+              current,
+              selectedStageDefinition.id,
+              selectedStageDefinition.state === 'active' ? 'trashed' : 'active',
+            ))} />
+        ) : (
+          <aside className="mih-market-inspector mih-market-inspector--empty">
+            <FlowArrow size={30} weight="duotone" aria-hidden="true" />
+            <strong>阶段详情</strong>
+            <p>{selectedAgent ? '当前 Agent 暂无可观测阶段协议。' : '选择 Agent 后查看阶段详情。'}</p>
+          </aside>
+        )}
+      </section>
+      {categoryEditor ? (
+        <CategoryEditorModal category={categoryEditor === 'create' ? null : categoryEditor}
+          busy={catalogBusy} onClose={() => setCategoryEditor(null)}
+          onDelete={categoryEditor === 'create' || categoryEditor.builtin ? undefined : () => {
+            setCategoryDelete(categoryEditor)
+            setCategoryEditor(null)
+          }}
+          onSubmit={submitCategory} />
+      ) : null}
+      {categoryDelete ? (
+        <ConfirmDialog title={'删除分类“' + categoryDelete.name + '”？'}
+          description="只有空分类可以删除；服务端会以 revision 做并发保护。"
+          confirmLabel={catalogBusy ? '删除中…' : '删除分类'} busy={catalogBusy}
+          onCancel={() => setCategoryDelete(null)} onConfirm={confirmDeleteCategory}>
+          <p>当前目录报告 {categoryDelete.agentCount} 个 Agent。若数量大于 0，请先移动这些 Agent。</p>
+        </ConfirmDialog>
+      ) : null}
+      {agentEditor ? (
+        <AgentEditorModal agent={agentEditor === 'create' ? null : agentEditor}
+          categories={catalog.categories} busy={catalogBusy}
+          onClose={() => setAgentEditor(null)} onSubmit={submitAgent} />
+      ) : null}
+      {lifecycleConfirm ? (
+        <ConfirmDialog title={lifecycleConfirm.lifecycle === 'disabled'
+          ? '恢复“' + lifecycleConfirm.name + '”？'
+          : '停用“' + lifecycleConfirm.name + '”？'}
+          description={lifecycleConfirm.lifecycle === 'disabled'
+            ? '恢复后按 Agent 类型回到可管理状态；能否运行仍以服务端 runnable 为准。'
+            : '停用会禁止新的运行，但保留配置与历史。'}
+          confirmLabel={catalogBusy
+            ? '处理中…'
+            : lifecycleConfirm.lifecycle === 'disabled' ? '恢复 Agent' : '停用 Agent'}
+          tone={lifecycleConfirm.lifecycle === 'disabled' ? 'primary' : 'danger'}
+          busy={catalogBusy} onCancel={() => setLifecycleConfirm(null)} onConfirm={confirmLifecycle}>
+          <p>将提交 expectedRevision={lifecycleConfirm.revision}，不会覆盖其他管理员的并发修改。</p>
+        </ConfirmDialog>
+      ) : null}
     </>
   )
 }

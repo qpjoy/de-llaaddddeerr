@@ -18,12 +18,13 @@ import { MemoryStore } from '../../server/stores/memory-store.mjs'
 
 const ADMIN_TOKEN = 'agent-market-admin-token'
 
-test('Agent Market binds native dragging only to explicit handles', async () => {
+test('Agent Market keeps its observable graph keyboard-operable without native dragging', async () => {
   const source = await readFile(new URL('../../src/pages-agent-market.tsx', import.meta.url), 'utf8')
-  assert.doesNotMatch(source, /<article[^>]*(?:draggable|onDragStart)=/u)
-  assert.match(source, /className="mih-market-stage-drag-handle" draggable=\{canEdit\}/u)
-  assert.match(source, /className="mih-market-trash__drag-handle" draggable=\{canEdit\}/u)
-  assert.match(source, /application\/x-mx-insight-agent-market-stage/u)
+  assert.doesNotMatch(source, /(?:draggable|onDragStart)=/u)
+  assert.match(source, /阶段图谱 · 分支与纠错回环/u)
+  assert.match(source, /role="tablist"/u)
+  assert.match(source, /onToggleStage=\{\(\) => setDraft/u)
+  assert.match(source, /恢复阶段/u)
 
   const center = await readFile(new URL('../../src/pages-agent-center.tsx', import.meta.url), 'utf8')
   assert.doesNotMatch(center, /<article[^>]*(?:draggable|onDragStart)=/u)
@@ -64,7 +65,7 @@ test('Agent Center keeps defaults explicit and uses the shared confirm dialog', 
   assert.match(center, /<ol>\{precedence\.map/u)
   assert.match(center, /不会保存或修改 LLM Sequence、Provider、Hub 的任何绑定/u)
   assert.doesNotMatch(market, /全局默认 LLM Sequence/u)
-  assert.match(market, /未设置可用的业务默认（模型阶段确定性降级）/u)
+  assert.match(market, /未设置可用(?:的)?业务默认（模型阶段确定性降级）/u)
 })
 
 test('Embedding Provider UI inherits Chat connections without copying secret-bearing fields', async () => {

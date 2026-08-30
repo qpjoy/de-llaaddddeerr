@@ -15,6 +15,7 @@ import { normalizeChinaProvince } from './data/china-provinces.mjs'
 import { ADVANCED_SEARCH_AGENT_KEY } from '../agent-market/advanced-search/schemas.ts'
 import { runAdvancedSearchDryRun } from './agent-market/runner.ts'
 import { builtinAdvancedSearchSnapshot } from './agent-market/store.ts'
+import { builtinAgentMarketCatalog } from './agent-market/catalog.ts'
 import { publicEmbeddingCapabilityCatalog } from './agent/embedding-capabilities.mjs'
 import {
   normalizeSourceCatalogCreate,
@@ -588,7 +589,7 @@ export function createApp({
 
   function requireAgentMarketAdmin(principal) {
     if (principal?.kind !== 'admin-token') {
-      throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may save or run Agent Market drafts')
+      throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may manage or run Agent Market items')
     }
   }
 
@@ -2748,11 +2749,133 @@ export function createApp({
         sendJson(response, 200, { data: items, requestId })
         return
       }
+
+      // Match the collection name as a decoded parameter. Besides accepting a
+      // harmless trailing slash, this prevents encoded reserved names such as
+      // `%63atalog` from falling through to the legacy `:agentKey` route.
+      const marketCollection = routeMatch(
+        pathname,
+        '/internal/v1/admin/agent-market/:collection',
+      )
+      if (marketCollection?.collection === 'catalog' && request.method === 'GET') {
+        requirePlatformAdmin(principal)
+        const data = agentMarket?.listCatalog
+          ? await agentMarket.listCatalog()
+          : builtinAgentMarketCatalog()
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (marketCollection?.collection === 'categories' && request.method === 'GET') {
+        requirePlatformAdmin(principal)
+        const catalog = agentMarket?.listCatalog
+          ? await agentMarket.listCatalog()
+          : builtinAgentMarketCatalog()
+        sendJson(response, 200, { data: catalog.categories, requestId })
+        return
+      }
+      if (marketCollection?.collection === 'categories' && request.method === 'POST') {
+        requireAgentMarketAdmin(principal)
+        if (!agentMarket?.createCategory) {
+          throw new AppError(503, 'agent_market_store_unavailable', 'Managing Agent Market categories requires PostgreSQL')
+        }
+        const data = await agentMarket.createCategory(
+          await readJson(request, 64 * 1024),
+          { updatedBy: principal.memberId || principal.kind || 'admin-token' },
+        )
+        sendJson(response, 201, { data, requestId })
+        return
+      }
+      if (marketCollection?.collection === 'agents' && request.method === 'POST') {
+        requireAgentMarketAdmin(principal)
+        if (!agentMarket?.createCatalogAgent) {
+          throw new AppError(503, 'agent_market_store_unavailable', 'Managing Agent Market Agents requires PostgreSQL')
+        }
+        const data = await agentMarket.createCatalogAgent(
+          await readJson(request, 64 * 1024),
+          { updatedBy: principal.memberId || principal.kind || 'admin-token' },
+        )
+        sendJson(response, 201, { data, requestId })
+        return
+      }
+
+      const marketCatalogItem = routeMatch(
+        pathname,
+        '/internal/v1/admin/agent-market/:collection/:catalogKey',
+      )
+      if (marketCatalogItem?.collection === 'categories' && request.method === 'GET') {
+        requirePlatformAdmin(principal)
+        const catalog = agentMarket?.listCatalog
+          ? await agentMarket.listCatalog()
+          : builtinAgentMarketCatalog()
+        const data = catalog.categories.find((item) => item.categoryKey === marketCatalogItem.catalogKey)
+        if (!data) throw new AppError(404, 'agent_market_category_not_found', 'The Agent Market category was not found')
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (marketCatalogItem?.collection === 'categories' && request.method === 'PUT') {
+        requireAgentMarketAdmin(principal)
+        if (!agentMarket?.updateCategory) {
+          throw new AppError(503, 'agent_market_store_unavailable', 'Managing Agent Market categories requires PostgreSQL')
+        }
+        const data = await agentMarket.updateCategory(
+          marketCatalogItem.catalogKey,
+          await readJson(request, 64 * 1024),
+          { updatedBy: principal.memberId || principal.kind || 'admin-token' },
+        )
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (marketCatalogItem?.collection === 'categories' && request.method === 'DELETE') {
+        requireAgentMarketAdmin(principal)
+        if (!agentMarket?.deleteCategory) {
+          throw new AppError(503, 'agent_market_store_unavailable', 'Managing Agent Market categories requires PostgreSQL')
+        }
+        const data = await agentMarket.deleteCategory(
+          marketCatalogItem.catalogKey,
+          await readJson(request, 16 * 1024),
+        )
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (marketCatalogItem?.collection === 'agents' && request.method === 'GET') {
+        requirePlatformAdmin(principal)
+        const catalog = agentMarket?.listCatalog
+          ? await agentMarket.listCatalog()
+          : builtinAgentMarketCatalog()
+        const data = catalog.agents.find((item) => item.agentKey === marketCatalogItem.catalogKey)
+        if (!data) throw new AppError(404, 'agent_market_catalog_agent_not_found', 'The Agent Market Agent was not found')
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (marketCatalogItem?.collection === 'agents' && request.method === 'PUT') {
+        requireAgentMarketAdmin(principal)
+        if (!agentMarket?.updateCatalogAgent) {
+          throw new AppError(503, 'agent_market_store_unavailable', 'Managing Agent Market Agents requires PostgreSQL')
+        }
+        const data = await agentMarket.updateCatalogAgent(
+          marketCatalogItem.catalogKey,
+          await readJson(request, 64 * 1024),
+          { updatedBy: principal.memberId || principal.kind || 'admin-token' },
+        )
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
       params = routeMatch(pathname, '/internal/v1/admin/agent-market/:agentKey/dry-run')
       if (params && request.method === 'POST') {
         requireAgentMarketAdmin(principal)
-        if (params.agentKey !== ADVANCED_SEARCH_AGENT_KEY) {
+        const catalog = agentMarket?.listCatalog
+          ? await agentMarket.listCatalog()
+          : builtinAgentMarketCatalog()
+        const catalogAgent = catalog.agents.find((item) => item.executorKey === params.agentKey)
+        if (!catalogAgent) {
           throw new AppError(404, 'agent_market_not_found', 'The Agent Market item was not found')
+        }
+        if (!catalogAgent.runnable || !catalogAgent.executorKey) {
+          throw new AppError(409, 'agent_market_executor_unavailable', 'This Agent does not have an enabled server-owned executor')
+        }
+        if (catalogAgent.executorKey !== ADVANCED_SEARCH_AGENT_KEY) {
+          throw new AppError(409, 'agent_market_executor_unavailable', 'This Agent executor is not available in this Hub build')
         }
         const data = await runAdvancedSearchDryRun({
           body: await readJson(request, 256 * 1024),
