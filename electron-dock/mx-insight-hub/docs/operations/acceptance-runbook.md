@@ -32,14 +32,24 @@ bash scripts/manage.sh status
 | 现象 | 处置 |
 | --- | --- |
 | `ImagePullBackOff` | `bash scripts/manage.sh preload`，或设镜像源 `MX_COMMON_ELASTICSEARCH_IMAGE=<mirror>/elasticsearch:9.4.2` |
-| ES 反复重启 / OOM | 内存不够：`MX_COMMON_ELASTICSEARCH_HEAP=512m bash scripts/manage.sh ensure` |
+| ES 反复重启 / OOM | 先确认节点能调度 M 档的 `24Gi` memory request，并检查 `32Gi` limit 与宿主可用内存。仅调低 heap 不会降低 Pod request/limit；不要把它当容量修复。 |
 | `vm.max_map_count` 提不上去 | 脚本会打印需要 root 执行的命令 |
 | `creating retained local PV` | 正常，无默认 StorageClass 时自动建 Retain 本地 PV |
 | PG `Permission denied` / ES `node.lock AccessDeniedException` | hostPath 目录属主不对。**`fsGroup` 对 hostPath 卷不生效**，`ensure` 会按各 Pod 的 runAsUser 修正（PG 999:999 0700，ES 1000:0 0775）并重启崩溃的 Pod |
 | `hanlp: disabled` | 仅在明确接受本地 Jieba 的开发/受控降级环境中正常；生产索引基线要求先部署 HanLP。content/chunk writer 严格使用配置后端，不会在 HanLP 瞬时故障时把 fallback 写进 `*Hanlp` |
-| 首次 `Pulling` 耗时几十分钟 | ES 镜像约 890MB，境外 registry 很慢。`ensure` 现在会先用 Docker 预热 |
+| 首次 `Pulling` 耗时几十分钟 | ES 镜像约 1.3GB，境外 registry 很慢。`ensure` 现在会先用 Docker 预热 |
 
-单节点上这台机器同时跑 Night-All、Hub 及其 worker，ES 默认请求 2Gi / 上限 3Gi / 堆 1g。堆和内存请求要一起调——只调其中一个会让两者不一致，Pod 会 OOM。请求量大约取堆的两倍，剩下是 Lucene 读段用的堆外 page cache。
+单节点上这台机器同时跑 Night-All、Hub 及其 worker。ES 当前固定 M 档为 CPU request
+`1` / limit `8`、memory request `24Gi` / limit `32Gi`、heap `12g`。CPU 可在节点有
+余量时 burst 到 8 核；memory 与 heap 不会自行越过声明值。heap 必须给 Lucene 堆外内存
+和 filesystem page cache 留出空间，部署脚本因此拒绝超过 `12g` 的 override。
+
+资源升档上线前，把以下内容保存为前后对比证据：可调度节点数和目标 `nodeName`、data PVC 的
+UID/`volumeName`、PV UID/hostPath/ReclaimPolicy、ES `cluster_uuid`、index UUID/alias/doc count，
+以及最近一次成功 snapshot。确认 live StatefulSet 使用无 partition 的 `RollingUpdate`，且 PVC
+retention policy 不是 `Delete`。完整 Hub `ops internal-production deploy` 会先约束单节点；若绕过
+它直接运行 `mx-common ensure`，必须另行证明 hostPath PV 与 Pod 固定在同一节点。滚动完成后逐项
+比对上述身份；资源变更允许 Pod UID 改变，不允许 PVC/PV、cluster 或 index 身份改变。
 
 ## 2. Hub 部署
 

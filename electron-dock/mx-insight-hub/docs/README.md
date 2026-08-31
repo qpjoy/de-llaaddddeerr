@@ -98,8 +98,9 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 28. [Agent Market advanced-search dry run](architecture/agent-market-advanced-search.md)
 29. [Agent Studio governed lifecycle](architecture/agent-studio-governed-lifecycle.md)
 30. [Agent Studio LangGraph runtime and Hub data-node design](architecture/agent-studio-langgraph-data-orchestration.md)
-31. [Agent provider settings](operations/agent-provider-settings.md)
-32. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
+31. [Agent Studio platform boundaries, evidence integration and build-vs-buy](architecture/agent-studio-platform-boundaries-and-build-vs-buy.md)
+32. [Agent provider settings](operations/agent-provider-settings.md)
+33. [Open capabilities, file rules and bounded classification cost](adr/0008-open-capabilities-file-rules-and-classification.md)
 
 ## Decisions
 

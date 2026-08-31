@@ -40,7 +40,29 @@ HANLP_BUILDER="${MX_COMMON_HANLP_BUILDER:-mx-common-hanlp}"
 # max heap differ fails Elasticsearch's production bootstrap check, and the
 # memory REQUEST has to leave room for both the heap and the off-heap page cache
 # Lucene reads segments through. Roughly heap x2 is the working rule.
-ELASTICSEARCH_HEAP="${MX_COMMON_ELASTICSEARCH_HEAP:-4g}"
+ELASTICSEARCH_HEAP="${MX_COMMON_ELASTICSEARCH_HEAP:-12g}"
+
+validate_elasticsearch_heap() {
+  local quantity="$ELASTICSEARCH_HEAP" amount unit heap_mi
+  case "$quantity" in
+    *g|*m)
+      unit="${quantity#${quantity%?}}"
+      amount="${quantity%?}"
+      ;;
+    *) die "MX_COMMON_ELASTICSEARCH_HEAP must be a positive whole MiB or GiB value (for example 8g or 512m)" ;;
+  esac
+  case "$amount" in
+    ''|*[!0-9]*) die "MX_COMMON_ELASTICSEARCH_HEAP must be a positive whole MiB or GiB value (for example 8g or 512m)" ;;
+  esac
+  [ "$amount" -gt 0 ] || die "MX_COMMON_ELASTICSEARCH_HEAP must be greater than zero"
+  if [ "$unit" = g ]; then
+    heap_mi=$((10#$amount * 1024))
+  else
+    heap_mi=$((10#$amount))
+  fi
+  [ "$heap_mi" -le 12288 ] \
+    || die "MX_COMMON_ELASTICSEARCH_HEAP must not exceed 12g for the fixed 32Gi Elasticsearch M tier"
+}
 
 say() { printf '[mx-common] %s\n' "$*"; }
 warn() { printf '[mx-common] WARN: %s\n' "$*" >&2; }
@@ -103,7 +125,7 @@ Environment:
   MX_COMMON_HANLP_BUILDER        Dedicated constrained buildx builder name
   MX_COMMON_HANLP_MIN_FREE_GIB  Free disk required before build/import (default 8)
   MX_COMMON_CONTAINERD_ROOT     containerd data root for disk check (default /var/lib/containerd)
-  MX_COMMON_ELASTICSEARCH_HEAP  JVM heap, Xms and Xmx together (default 4g, cap 31g)
+  MX_COMMON_ELASTICSEARCH_HEAP  JVM heap, Xms and Xmx together (default/max 12g for the 32Gi M tier)
   MX_COMMON_AUTO_PRELOAD=0      Do not preload images during ensure
 EOF
 }
@@ -583,13 +605,14 @@ allow_client_namespace() {
 render_manifest() {
   local hanlp_image_id="${MX_COMMON_HANLP_IMAGE_ID:-unmanaged}"
   local hanlp_node_name="${MX_COMMON_HANLP_NODE_NAME:-unmanaged}"
+  [ "${1##*/}" != 20-elasticsearch.yaml ] || validate_elasticsearch_heap
   sed -e "s#docker.elastic.co/elasticsearch/elasticsearch:9.4.2#${ELASTICSEARCH_IMAGE}#g" \
       -e "s#pgvector/pgvector:pg16#${POSTGRES_IMAGE}#g" \
       -e "s#redis:7.4-alpine#${REDIS_IMAGE}#g" \
       -e "s#mx-common-hanlp:local#${HANLP_IMAGE}#g" \
       -e "s#MX_COMMON_HANLP_IMAGE_ID_PLACEHOLDER#${hanlp_image_id}#g" \
       -e "s#MX_COMMON_HANLP_NODE_NAME_PLACEHOLDER#${hanlp_node_name}#g" \
-      -e "s#-Xms4g -Xmx4g#-Xms${ELASTICSEARCH_HEAP} -Xmx${ELASTICSEARCH_HEAP}#g" \
+      -e "s#-Xms12g -Xmx12g#-Xms${ELASTICSEARCH_HEAP} -Xmx${ELASTICSEARCH_HEAP}#g" \
       "$1"
 }
 
@@ -1665,8 +1688,8 @@ report_capacity() {
   allocatable="$(kubectl get nodes -o jsonpath='{.items[0].status.allocatable.memory}' 2>/dev/null || true)"
   [ -n "$allocatable" ] || return 0
 
-  # PostgreSQL 2Gi + Elasticsearch 10Gi + Redis 512Mi of *requests*.
-  requested_mi=$((2048 + 10240 + 512))
+  # PostgreSQL 2Gi + Elasticsearch M tier 24Gi + Redis 512Mi of *requests*.
+  requested_mi=$((2048 + 24576 + 512))
   [ "$component" = "hanlp" ] && requested_mi=$((requested_mi + 1024))
 
   local allocatable_mi=0
@@ -1679,11 +1702,11 @@ report_capacity() {
 
   say "node allocatable memory: ${allocatable_mi}Mi; this stack requests ${requested_mi}Mi"
   if [ "$allocatable_mi" -lt $((requested_mi * 2)) ]; then
-    warn "memory is tight. Elasticsearch requests 2Gi (1g heap, 3Gi limit) and this"
-    warn "node also runs Night-All, the Hub and its workers."
-    warn "  Shrink the heap:  MX_COMMON_ELASTICSEARCH_HEAP=512m bash scripts/manage.sh ensure"
-    warn "  Keep the memory request at roughly twice the heap; the rest is the"
-    warn "  off-heap page cache Lucene reads segments through."
+    warn "memory is tight. Elasticsearch M tier requests 24Gi (12g heap, 32Gi limit)"
+    warn "and may burst to 8 CPUs; PostgreSQL, the Hub and workers need headroom too."
+    warn "  Provision a larger node or define a separately reviewed resource tier."
+    warn "  Changing only MX_COMMON_ELASTICSEARCH_HEAP does not change the fixed"
+    warn "  Pod request/limit or make an undersized node schedulable."
   fi
 }
 

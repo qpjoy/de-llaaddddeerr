@@ -96,10 +96,19 @@ HanLP ready 后重新部署 `mx-insight-hub`；Hub 会从 ready Endpoint 自动�
 
 ```bash
 MX_COMMON_ELASTICSEARCH_IMAGE=<mirror>/elasticsearch:9.4.2   # 境内镜像源
-MX_COMMON_ELASTICSEARCH_HEAP=4g                              # 堆，上限 31g
+MX_COMMON_ELASTICSEARCH_HEAP=12g                             # M 档默认/上限
 MX_COMMON_SEGMENTER=jieba|hanlp|fallback                     # 分词后端
 bash scripts/manage.sh preload                               # 预热镜像，避免 ensure 卡在拉取
 ```
+
+Kubernetes Elasticsearch 当前使用固定 M 档：CPU request `1`、limit `8`，memory
+request `24Gi`、limit `32Gi`，JVM heap `12g`。CPU 可以在节点有余量时 burst 到 limit，
+`8` 不是保证配额；plain StatefulSet 不会按监控阈值自动增大 memory 或 heap。显式调低
+`MX_COMMON_ELASTICSEARCH_HEAP` 会更新 Pod template 并滚动重启，且不会降低固定的
+`24Gi/32Gi` request/limit；超过 `12g` 会被部署脚本拒绝。在既有单节点 Internal 目标上，
+`ensure` 不修改 StatefulSet 名称、Service、PVC 名称或 claim template，资源/heap 变更只滚动
+Pod 并继续挂载原 data PVC。直接在多节点 hostPath 集群运行前，必须先为 PV/Pod 固定同一节点；
+同名 hostPath 在另一节点不是同一份数据。
 
 代码侧：
 
