@@ -7,6 +7,7 @@ sudo qp-tunnel-cli wg preflight --server --subnet 100.127.50.0/24
 sudo qp-tunnel-cli wg install \
   --host <AWS_ELASTIC_IP> \
   --subnet 100.127.50.0/24 \
+  --dns '1.1.1.1, 8.8.8.8' \
   --port-range 20000-20100
 
 # Open UDP 20000-20100 in the AWS security group before using rotation.
@@ -49,6 +50,10 @@ qp-tunnel-cli wg logs --instance mx
 starting point is `100.127.100.0/24`. Preflight also checks active routes and
 the subnets recorded by managed OpenVPN and WireGuard instances.
 
-WireGuard enrollment installs `AllowedIPs = 0.0.0.0/0`; the server enables IPv4
-forwarding and NAT, so client IPv4 traffic exits through the server. The
-client's existing DNS resolver is retained.
+WireGuard profiles default to `DNS = 1.1.1.1, 8.8.8.8` and
+`AllowedIPs = 0.0.0.0/0, ::/0`. `--dns` on `wg install` changes the default;
+`--dns` on `wg create` overrides one client. The server enables IPv4 forwarding
+and NAT, so client IPv4 traffic exits through it. The managed server is
+currently IPv4-only; `::/0` blocks native IPv6 bypass rather than providing
+IPv6 egress. Linux enrollment installs the `resolvconf` helper needed by
+`wg-quick` to apply DNS.

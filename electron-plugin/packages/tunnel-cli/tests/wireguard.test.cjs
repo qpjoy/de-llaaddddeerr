@@ -102,12 +102,24 @@ test('CIDR overlap catches broader VPCs and leaves adjacent tunnel blocks free',
   assert.deepEqual(out.trim().split('\n'), ['broad:0', 'adjacent:1', 'aws:0']);
 });
 
-test('issued profiles route all IPv4 traffic while retaining the existing DNS resolver', () => {
+test('issued profiles route IPv4, prevent IPv6 bypass, and set tunnel DNS', () => {
   const managedSection = scriptContent.slice(0, libraryEnd);
-  assert.match(managedSection, /^AllowedIPs = 0\.0\.0\.0\/0$/m);
-  assert.doesNotMatch(managedSection, /^DNS = /m);
+  assert.match(managedSection, /^QP_WG_DEFAULT_DNS="1\.1\.1\.1, 8\.8\.8\.8"$/m);
+  assert.match(managedSection, /^AllowedIPs = 0\.0\.0\.0\/0, ::\/0$/m);
+  assert.match(managedSection, /^DNS = \$dns$/m);
   assert.match(managedSection, /net\.ipv4\.ip_forward=1/);
   assert.match(managedSection, /-j MASQUERADE/);
+});
+
+test('DNS validation accepts IPv4 lists and rejects injected or invalid values', () => {
+  const out = assertOk(
+    runLibrary(String.raw`
+      qp_wg_validate_dns '1.1.1.1, 8.8.8.8'; echo valid:$?
+      qp_wg_validate_dns '1.1.1.1,172.31.0.2'; echo aws:$?
+      qp_wg_validate_dns '1.1.1.1,999.1.1.1'; echo invalid:$?
+    `),
+  );
+  assert.deepEqual(out.trim().split('\n'), ['valid:0', 'aws:0', 'invalid:1']);
 });
 
 test('rotation increments the UDP port by one when no range is configured', () => {

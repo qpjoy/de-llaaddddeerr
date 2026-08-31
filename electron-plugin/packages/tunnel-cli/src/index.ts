@@ -196,9 +196,9 @@ address and nothing else about its networking changes:
   sudo qp-tunnel-cli open enroll --file internal-01.ovpn
 Run 'qp-tunnel-cli open help' for the full command set.
 
-Managed WireGuard provides a global IPv4 VPN through server-side forwarding
-and NAT. It defaults to 100.127.50.0/24 so it does not collide with OpenVPN's
-100.127.0.0/24:
+Managed WireGuard provides a global VPN with IPv4 egress, tunnel DNS, and IPv6
+bypass prevention. It defaults to 100.127.50.0/24 so it does not collide with
+OpenVPN's 100.127.0.0/24:
   sudo qp-tunnel-cli wg install --host 203.0.113.10 --port-range 20000-20100
   sudo qp-tunnel-cli wg create internal-01
   sudo qp-tunnel-cli wg enroll --file internal-01.conf

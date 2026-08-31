@@ -9,6 +9,7 @@
 # an existing wg0 installation.
 
 QP_WG_DEFAULT_SUBNET="100.127.50.0/24"
+QP_WG_DEFAULT_DNS="1.1.1.1, 8.8.8.8"
 QP_WG_INSTANCE="${QP_WG_INSTANCE:-mx}"
 
 qp_wg_die () { echo "Error: $*" >&2; exit 1; }
@@ -33,6 +34,20 @@ qp_wg_validate_endpoint () {
 	else
 		[[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
 	fi
+}
+
+qp_wg_validate_dns () {
+	local value="$1" entry trimmed count=0
+	local -a entries
+	[[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+	IFS=',' read -r -a entries <<< "$value"
+	for entry in "${entries[@]}"; do
+		trimmed="${entry#"${entry%%[![:space:]]*}"}"
+		trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+		qp_wg_validate_ipv4 "$trimmed" || return 1
+		count=$(( count + 1 ))
+	done
+	[[ "$count" -gt 0 ]]
 }
 
 qp_wg_validate_cidr () {
@@ -246,6 +261,22 @@ qp_wg_install_tools () {
 		|| qp_wg_die "WireGuard or IP routing tools are still unavailable after installation."
 }
 
+qp_wg_install_dns_helper () {
+	qp_wg_have resolvconf && return 0
+	if qp_wg_have apt-get; then
+		apt-get update
+		DEBIAN_FRONTEND=noninteractive apt-get install -y resolvconf
+	elif qp_wg_have dnf; then
+		dnf install -y openresolv
+	elif qp_wg_have yum; then
+		yum install -y epel-release
+		yum install -y openresolv
+	else
+		qp_wg_die "The DNS setting requires resolvconf on this distribution."
+	fi
+	qp_wg_have resolvconf || qp_wg_die "resolvconf is required to apply the WireGuard DNS setting."
+}
+
 qp_wg_wan_interface () {
 	ip -4 route get 1.1.1.1 2>/dev/null \
 		| awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}'
@@ -312,6 +343,7 @@ QP_WG_PORT='$QP_WG_PORT'
 QP_WG_PORT_RANGE='$QP_WG_PORT_RANGE'
 QP_WG_FIREWALL='$QP_WG_FIREWALL'
 QP_WG_WAN_IF='$QP_WG_WAN_IF'
+QP_WG_DNS='$QP_WG_DNS'
 EOF
 	chmod 0600 "$tmp"
 	mv -f "$tmp" "$QP_WG_SERVER_ENV"
@@ -323,6 +355,8 @@ qp_wg_load_server_env () {
 	source "$QP_WG_SERVER_ENV"
 	QP_WG_WAN_IF="${QP_WG_WAN_IF:-$(qp_wg_wan_interface)}"
 	[[ -n "$QP_WG_WAN_IF" ]] || qp_wg_die "Could not determine the outbound interface."
+	QP_WG_DNS="${QP_WG_DNS:-$QP_WG_DEFAULT_DNS}"
+	qp_wg_validate_dns "$QP_WG_DNS" || qp_wg_die "Server state carries an invalid DNS list: $QP_WG_DNS"
 }
 
 qp_wg_server_gateway () {
@@ -359,13 +393,15 @@ EOF
 }
 
 qp_wg_install_server () {
-	local subnet="$QP_WG_DEFAULT_SUBNET" host="" port="" port_range="" private_key conflict validation=0
+	local subnet="$QP_WG_DEFAULT_SUBNET" dns="$QP_WG_DEFAULT_DNS" host="" port="" port_range="" private_key conflict validation=0
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 			--subnet) [[ $# -ge 2 ]] || qp_wg_die "Missing value for --subnet."; subnet="$2"; shift 2 ;;
 			--subnet=*) subnet="${1#--subnet=}"; shift ;;
 			--host) [[ $# -ge 2 ]] || qp_wg_die "Missing value for --host."; host="$2"; shift 2 ;;
 			--host=*) host="${1#--host=}"; shift ;;
+			--dns) [[ $# -ge 2 ]] || qp_wg_die "Missing value for --dns."; dns="$2"; shift 2 ;;
+			--dns=*) dns="${1#--dns=}"; shift ;;
 			--port) [[ $# -ge 2 ]] || qp_wg_die "Missing value for --port."; port="$2"; shift 2 ;;
 			--port=*) port="${1#--port=}"; shift ;;
 			--port-range) [[ $# -ge 2 ]] || qp_wg_die "Missing value for --port-range."; port_range="$2"; shift 2 ;;
@@ -403,6 +439,7 @@ qp_wg_install_server () {
 	[[ -n "$host" ]] || host=$(qp_wg_detect_public_ipv4 || true)
 	[[ -n "$host" ]] || qp_wg_die "Could not detect a public endpoint. On AWS pass the Elastic IP with --host <EIP>."
 	qp_wg_validate_endpoint "$host" || qp_wg_die "Invalid --host endpoint: $host"
+	qp_wg_validate_dns "$dns" || qp_wg_die "--dns must be a comma-separated list of IPv4 DNS servers."
 	qp_wg_install_tools
 	mkdir -p /etc/wireguard "$QP_WG_SERVER_HOME" "$QP_WG_SERVER_CLIENTS"
 	chmod 0700 /etc/wireguard "$QP_WG_SERVER_HOME" "$QP_WG_SERVER_CLIENTS"
@@ -410,6 +447,7 @@ qp_wg_install_server () {
 	QP_WG_HOST="$host"
 	QP_WG_PORT="$port"
 	QP_WG_PORT_RANGE="$port_range"
+	QP_WG_DNS="$dns"
 	QP_WG_FIREWALL=$(qp_wg_firewall_mode)
 	QP_WG_WAN_IF=$(qp_wg_wan_interface)
 	[[ -n "$QP_WG_WAN_IF" ]] || qp_wg_die "Could not determine the outbound interface."
@@ -422,6 +460,7 @@ qp_wg_install_server () {
 	qp_wg_info "WireGuard server '$QP_WG_INSTANCE' is ready."
 	qp_wg_info "Subnet : $QP_WG_SUBNET (server $(qp_wg_server_gateway))"
 	qp_wg_info "Endpoint: $QP_WG_HOST:$QP_WG_PORT/udp"
+	qp_wg_info "DNS     : $QP_WG_DNS"
 	qp_wg_info "Egress  : full IPv4 via $QP_WG_WAN_IF"
 	if [[ -n "$QP_WG_PORT_RANGE" ]]; then
 		qp_wg_info "AWS security group: allow UDP $QP_WG_PORT_RANGE before rotating ports."
@@ -447,7 +486,7 @@ qp_wg_next_client_ip () {
 }
 
 qp_wg_create_client () {
-	local name="${1:-}" client_ip="" output="" private_key public_key psk server_public profile tmp_psk prefix
+	local name="${1:-}" client_ip="" output="" dns="" private_key public_key psk server_public profile tmp_psk prefix
 	local start end client_value
 	[[ -n "$name" ]] || qp_wg_die "Usage: qp-tunnel-cli wg create <name> [--ip ADDRESS] [--output FILE]"
 	shift
@@ -458,11 +497,15 @@ qp_wg_create_client () {
 			--ip=*) client_ip="${1#--ip=}"; shift ;;
 			--output) [[ $# -ge 2 ]] || qp_wg_die "Missing value for --output."; output="$2"; shift 2 ;;
 			--output=*) output="${1#--output=}"; shift ;;
+			--dns) [[ $# -ge 2 ]] || qp_wg_die "Missing value for --dns."; dns="$2"; shift 2 ;;
+			--dns=*) dns="${1#--dns=}"; shift ;;
 			*) qp_wg_die "Unknown create option: $1" ;;
 		esac
 	done
 	qp_wg_require_root
 	qp_wg_load_server_env
+	[[ -n "$dns" ]] || dns="$QP_WG_DNS"
+	qp_wg_validate_dns "$dns" || qp_wg_die "--dns must be a comma-separated list of IPv4 DNS servers."
 	[[ ! -e "$QP_WG_SERVER_CLIENTS/$name.conf" ]] || qp_wg_die "Client '$name' already exists."
 	[[ -n "$client_ip" ]] || client_ip=$(qp_wg_next_client_ip)
 	qp_wg_validate_ipv4 "$client_ip" || qp_wg_die "Invalid --ip value: $client_ip"
@@ -499,11 +542,12 @@ EOF
 [Interface]
 Address = $client_ip/$prefix
 PrivateKey = $private_key
+DNS = $dns
 
 [Peer]
 PublicKey = $server_public
 PresharedKey = $psk
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = $QP_WG_HOST:$QP_WG_PORT
 PersistentKeepalive = 25
 EOF
@@ -530,7 +574,7 @@ qp_wg_profile_meta () {
 
 qp_wg_enroll_client () {
 	local profile="" force=false no_start=false profile_instance subnet client_ip host port tmp prefix
-	local address private_key server_public psk allowed_ips keepalive
+	local address private_key dns server_public psk allowed_ips keepalive
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 			--file) [[ $# -ge 2 ]] || qp_wg_die "Missing value for --file."; profile="$2"; shift 2 ;;
@@ -564,15 +608,22 @@ qp_wg_enroll_client () {
 	prefix="${subnet#*/}"
 	address=$(grep -m1 '^Address = ' "$profile" | cut -d ' ' -f 3)
 	private_key=$(grep -m1 '^PrivateKey = ' "$profile" | cut -d ' ' -f 3)
+	dns=$(grep -m1 '^DNS = ' "$profile" | cut -d ' ' -f 3- || true)
+	[[ -n "$dns" ]] || dns="$QP_WG_DEFAULT_DNS"
 	server_public=$(grep -m1 '^PublicKey = ' "$profile" | cut -d ' ' -f 3)
 	psk=$(grep -m1 '^PresharedKey = ' "$profile" | cut -d ' ' -f 3)
 	allowed_ips=$(grep -m1 '^AllowedIPs = ' "$profile" | cut -d ' ' -f 3-)
 	keepalive=$(grep -m1 '^PersistentKeepalive = ' "$profile" | cut -d ' ' -f 3)
 	[[ "$address" == "$client_ip/$prefix" ]] || qp_wg_die "Profile Address does not match its client metadata."
 	[[ "$private_key" =~ ^[A-Za-z0-9+/]{43}=$ ]] || qp_wg_die "Profile carries an invalid private key."
+	qp_wg_validate_dns "$dns" || qp_wg_die "Profile carries an invalid DNS list."
 	[[ "$server_public" =~ ^[A-Za-z0-9+/]{43}=$ ]] || qp_wg_die "Profile carries an invalid server public key."
 	[[ "$psk" =~ ^[A-Za-z0-9+/]{43}=$ ]] || qp_wg_die "Profile carries an invalid preshared key."
-	[[ "$allowed_ips" == "0.0.0.0/0" ]] || qp_wg_die "Profile must route all IPv4 traffic through WireGuard."
+	case "$allowed_ips" in
+		"0.0.0.0/0") allowed_ips="0.0.0.0/0, ::/0" ;;
+		"0.0.0.0/0, ::/0") ;;
+		*) qp_wg_die "Profile must route IPv4 and block untunneled IPv6 through WireGuard." ;;
+	esac
 	[[ "$keepalive" == 25 ]] || qp_wg_die "Profile PersistentKeepalive must be 25."
 	if [[ -e "$QP_WG_CLIENT_CONFIG" && "$force" != true ]]; then
 		qp_wg_die "Client instance '$QP_WG_INSTANCE' already exists. Pass --force to replace its profile."
@@ -585,6 +636,7 @@ qp_wg_enroll_client () {
 		fi
 	fi
 	qp_wg_install_tools
+	qp_wg_install_dns_helper
 	if [[ -e "$QP_WG_CLIENT_CONFIG" ]]; then
 		systemctl disable --now "$QP_WG_CLIENT_UNIT" >/dev/null 2>&1 || true
 	fi
@@ -596,6 +648,7 @@ qp_wg_enroll_client () {
 [Interface]
 Address = $address
 PrivateKey = $private_key
+DNS = $dns
 
 [Peer]
 PublicKey = $server_public
@@ -612,13 +665,14 @@ QP_WG_SUBNET='$subnet'
 QP_WG_CLIENT_IP='$client_ip'
 QP_WG_HOST='$host'
 QP_WG_PORT='$port'
+QP_WG_DNS='$dns'
 EOF
 	chmod 0600 "$QP_WG_CLIENT_ENV"
 	if [[ "$no_start" != true ]]; then
 		systemctl enable --now "$QP_WG_CLIENT_UNIT"
 	fi
 	qp_wg_info "Enrolled WireGuard client '$QP_WG_INSTANCE' at $client_ip."
-	qp_wg_info "All IPv4 traffic is routed through WireGuard. The existing DNS resolver is retained."
+	qp_wg_info "All IPv4 traffic and DNS use WireGuard; ::/0 prevents native IPv6 bypass."
 }
 
 qp_wg_replace_port_in_file () {
@@ -771,13 +825,14 @@ qp_wg_uninstall () {
 
 qp_wg_help () {
 	cat <<'EOF'
-QPJoy managed WireGuard global IPv4 VPN
+QPJoy managed WireGuard global VPN
 
 Server:
   qp-tunnel-cli wg preflight --server [--subnet 100.127.50.0/24]
-  qp-tunnel-cli wg install --host <AWS-EIP> [--subnet CIDR] [--port PORT]
+  qp-tunnel-cli wg install --host <AWS-EIP> [--subnet CIDR] [--dns DNS-LIST]
+                           [--port PORT]
                            [--port-range 20000-20100] [--instance mx]
-  qp-tunnel-cli wg create internal-01 [--ip 100.127.50.10]
+  qp-tunnel-cli wg create internal-01 [--ip 100.127.50.10] [--dns DNS-LIST]
   qp-tunnel-cli wg list | revoke internal-01
   qp-tunnel-cli wg rotate-port [--port PORT | --port-range 20000-20100]
 
@@ -792,8 +847,9 @@ The default subnet is 100.127.50.0/24. 100.127.100.0/24 is another suggested
 starting point. Do not use 100.128.0.0/16: it is public address space, outside
 RFC 6598's 100.64.0.0/10 shared range.
 
-Enrollment routes all IPv4 traffic through the WireGuard server. The current
-DNS resolver is retained; configure DNS separately when DNS leakage matters.
+Enrollment routes all IPv4 traffic and DNS through the WireGuard server.
+AllowedIPs also contains ::/0 to prevent native IPv6 bypass; managed servers
+currently provide IPv4 egress only, so IPv6 is blocked rather than forwarded.
 
 Without a configured range, rotate-port increments the current UDP port by one.
 With --port-range it selects the next free port in the range; --port selects an

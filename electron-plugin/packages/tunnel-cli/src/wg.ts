@@ -169,13 +169,14 @@ function exitFromSpawn(result: SpawnSyncReturns<Buffer>): never {
 }
 
 function wgHelp(): void {
-  process.stdout.write(`QPJoy managed WireGuard global IPv4 VPN
+  process.stdout.write(`QPJoy managed WireGuard global VPN
 
 Oversea/AWS server:
   qp-tunnel-cli wg preflight --server [--subnet 100.127.50.0/24]
-  qp-tunnel-cli wg install --host <AWS-EIP> [--subnet CIDR] [--port PORT]
+  qp-tunnel-cli wg install --host <AWS-EIP> [--subnet CIDR] [--dns DNS-LIST]
+                           [--port PORT]
                            [--port-range 20000-20100] [--instance mx]
-  qp-tunnel-cli wg create internal-01 [--ip 100.127.50.10]
+  qp-tunnel-cli wg create internal-01 [--ip 100.127.50.10] [--dns DNS-LIST]
   qp-tunnel-cli wg list | revoke internal-01
   qp-tunnel-cli wg rotate-port [--port PORT | --port-range 20000-20100]
 
@@ -195,7 +196,9 @@ With --port-range it selects the next free port in the range; --port selects an
 exact port. It updates the live listener and issued profiles without changing
 keys. Spokes change their Endpoint port manually or re-enroll an updated profile.
 
-Enrollment routes all IPv4 traffic through the WireGuard server. The existing
-DNS resolver is retained.
+Generated profiles default to DNS = 1.1.1.1, 8.8.8.8; pass --dns with a quoted,
+comma-separated IPv4 list to override it. AllowedIPs is 0.0.0.0/0, ::/0. The
+managed server provides IPv4 egress; ::/0 prevents native IPv6 from bypassing
+the tunnel rather than providing IPv6 egress.
 `);
 }
