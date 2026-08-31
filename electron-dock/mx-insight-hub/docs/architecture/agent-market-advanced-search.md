@@ -164,9 +164,45 @@ does not overwrite operator metadata or re-enable a disabled entry. Agent
 records are retained and disabled/restored through lifecycle updates; this
 iteration does not expose physical Agent deletion.
 
-Run traces are not persisted in this MVP. The UI keeps the current and previous
-response for a local comparison. A later replay ledger must remain isolated and
-store only bounded/redacted artifacts, hashes and versions.
+Run traces are not persisted by the server in this MVP. For refresh continuity,
+the Admin UI may keep a best-effort history in the current tab's
+`sessionStorage`: at most three runs per Agent and twelve in total, with an
+eight-hour TTL, a 128 KiB per-run cap and a 384 KiB total cap. The snapshot is an
+allowlist of the existing dry-run response, strips assistant messages and hidden
+reasoning fields, redacts credential-shaped keys and token-shaped text, and
+falls back to terminal trace metadata when a detailed snapshot is too large.
+It never contains the Hub Admin Token and is cleared when the browser session
+ends; storage denial or quota errors must leave dry-run execution usable without
+history. This is convenience state, not an audit/replay ledger or catalog
+`lastRun`. A future shared replay ledger requires a separate retention, tenant,
+encryption and access-control design.
+
+## Terminal trace rules
+
+The UI treats duration and execution state as separate facts. `durationMs` uses
+`Date.now()` millisecond resolution, so a deterministic branch gate can
+legitimately finish in the same millisecond and display `0 ms`. In particular,
+the Answer stage synchronously returns a validated, `degraded` grounded refusal
+when triage requires clarification or the evidence gate is insufficient. Its
+terminal Trace, note, output and `final.refused=true` prove that the node ran;
+zero is not an idle or missing state.
+
+A completed HTTP 200 dry-run is checked with these rules before it is presented
+as a complete run:
+
+1. every active definition stage has at least one terminal Trace whose status is
+   `succeeded`, `degraded`, `skipped` or `failed`;
+2. the taken path is the response-ordered terminal Traces excluding `skipped`;
+   skipped stages remain explicit branch evidence rather than disappearing;
+3. the highest observed `attempt` agrees with
+   `evaluation.correctiveRetries`, and retry Traces remain separate attempts;
+4. an active Answer stage ends in a result/refusal or an explicit failed Trace;
+   a trashed/skipped Answer may have no `final`, while a missing Answer Trace is
+   incomplete.
+
+These checks describe response completeness, not answer quality. A complete run
+may still be degraded, refused or failed, and the UI must show that outcome
+instead of relabeling it as success.
 
 ## Extension rules
 

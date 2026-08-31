@@ -12,6 +12,8 @@ import {
   ArrowCounterClockwise,
   BracketsCurly,
   Brain,
+  CaretLeft,
+  CaretRight,
   Database,
   FloppyDisk,
   FlowArrow,
@@ -29,6 +31,13 @@ import {
   Wrench,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
+import {
+  getAgentMarketRunHistoryStorage,
+  inspectAgentMarketRunTerminal,
+  readAgentMarketRunHistory,
+  rememberAgentMarketRun,
+  type AgentMarketRunTerminalAudit,
+} from './agent-market-run-history.ts'
 import {
   ConfirmDialog,
   DropdownField,
@@ -210,6 +219,25 @@ const LIFECYCLE_OPTIONS = [
 ]
 
 const GRAPH_X = [74, 222, 370, 518, 666, 814, 962]
+const INSPECTOR_COLLAPSED_STORAGE_KEY = 'mx-insight-hub.agent-market.inspector-collapsed'
+
+function readInspectorCollapsed(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    return window.sessionStorage.getItem(INSPECTOR_COLLAPSED_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function writeInspectorCollapsed(collapsed: boolean): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.sessionStorage.setItem(INSPECTOR_COLLAPSED_STORAGE_KEY, String(collapsed))
+  } catch {
+    // The workbench remains usable when storage is blocked or exhausted.
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -465,6 +493,22 @@ function traceLabel(status: TraceStatus): string {
   if (status === 'failed') return '失败'
   if (status === 'skipped') return '跳过'
   return '未知'
+}
+
+function traceDisplayLabel(trace: StageTrace): string {
+  return traceLabel(trace.status) + ' · ' + formatMilliseconds(trace.durationMs)
+}
+
+function traceReason(trace: StageTrace): string {
+  if (trace.note) return trace.note
+  if (trace.model?.errorCode) return '模型返回降级码：' + trace.model.errorCode
+  const issue = trace.validation.issues[0] || trace.model?.responseValidation?.issues[0]
+  if (issue) return (issue.path ? issue.path + '：' : '') + issue.message
+  if (trace.status === 'skipped') return '该阶段未执行；服务端未返回具体跳过原因。'
+  if (trace.status === 'degraded') return '该阶段已走降级路径；服务端未返回具体原因。'
+  if (trace.status === 'failed') return '该阶段执行失败；服务端未返回具体原因。'
+  if (trace.status === 'succeeded') return '该阶段已按服务端 Trace 标记为成功完成。'
+  return '服务端 Trace 未返回补充说明。'
 }
 
 function lifecycleLabel(lifecycle: AgentLifecycle): string {
@@ -1170,12 +1214,14 @@ function RunConfiguration({
 function AgentFlowGraph({
   definition,
   tracesByStage,
+  terminalTrace,
   selectedStage,
   running,
   onSelect,
 }: {
   definition: AdvancedSearchDefinition
   tracesByStage: Map<AdvancedSearchStageType, StageTrace[]>
+  terminalTrace: StageTrace | null
   selectedStage: AdvancedSearchStageType
   running: boolean
   onSelect: (stage: AdvancedSearchStageType) => void
@@ -1190,6 +1236,7 @@ function AgentFlowGraph({
         <div className="mih-market-flow__legend" aria-label="状态图例">
           <span data-status="succeeded">成功</span>
           <span data-status="degraded">降级</span>
+          <span data-status="skipped">跳过</span>
           <span data-status="failed">失败</span>
           <span data-status="idle">未运行</span>
         </div>
@@ -1239,7 +1286,7 @@ function AgentFlowGraph({
                 <small>{stage.state === 'trashed'
                   ? '已移出'
                   : trace
-                    ? formatMilliseconds(trace.durationMs) + (trace.attempt > 0 ? ' · retry ' + trace.attempt : '')
+                    ? traceDisplayLabel(trace) + (trace.attempt > 0 ? ' · retry ' + trace.attempt : '')
                     : '未运行'}</small>
               </button>
             )
@@ -1262,6 +1309,16 @@ function AgentFlowGraph({
           ) : null}
         </div>
       </div>
+      {terminalTrace && !running ? (
+        <div className="mih-market-flow__terminal" data-status={terminalTrace.status}
+          role="status" aria-live="polite">
+          <span>本次终态</span>
+          <strong>{traceDisplayLabel(terminalTrace)}</strong>
+          <small title={traceReason(terminalTrace)}>
+            {ADVANCED_SEARCH_STAGE_META[terminalTrace.type].label}：{traceReason(terminalTrace)}
+          </small>
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -1335,6 +1392,7 @@ function StageInspector({
   onAttempt,
   onMutate,
   onToggleStage,
+  onCollapse,
 }: {
   stage: AdvancedSearchStage
   traces: StageTrace[]
@@ -1346,6 +1404,7 @@ function StageInspector({
   onAttempt: (attempt: number) => void
   onMutate: (mutate: (stage: AdvancedSearchStage) => void) => void
   onToggleStage: () => void
+  onCollapse: () => void
 }) {
   const meta = ADVANCED_SEARCH_STAGE_META[stage.type]
   const trace = traces.find((item) => item.attempt === attempt) || latestTrace(traces)
@@ -1363,15 +1422,23 @@ function StageInspector({
     window.requestAnimationFrame(() => document.getElementById('mih-market-tab-' + next.id)?.focus())
   }
   return (
-    <aside className="mih-market-inspector" aria-label="阶段详情">
+    <aside className="mih-market-inspector" id="mih-market-stage-inspector" aria-label="阶段详情">
       <header className="mih-market-inspector__header">
         <div><p className="qp-kicker">{meta.lesson}</p><h2>{meta.label}</h2><p>{meta.description}</p></div>
-        <button className="qp-button qp-button--ghost" type="button" disabled={!canEdit}
-          onClick={onToggleStage}>
-          {stage.state === 'active'
-            ? <><Recycle size={15} aria-hidden="true" />移出流程</>
-            : <><ArrowCounterClockwise size={15} aria-hidden="true" />恢复阶段</>}
-        </button>
+        <div className="mih-market-inspector__header-actions">
+          <button className="qp-button qp-button--ghost" type="button" disabled={!canEdit}
+            onClick={onToggleStage}>
+            {stage.state === 'active'
+              ? <><Recycle size={15} aria-hidden="true" />移出流程</>
+              : <><ArrowCounterClockwise size={15} aria-hidden="true" />恢复阶段</>}
+          </button>
+          <button className="qp-button qp-button--ghost mih-market-inspector__collapse" type="button"
+            id="mih-market-inspector-collapse" aria-controls="mih-market-stage-inspector"
+            aria-expanded="true" aria-label="向右收起阶段详情" title="向右收起阶段详情"
+            onClick={onCollapse}>
+            <CaretRight size={16} aria-hidden="true" /><span>收起</span>
+          </button>
+        </div>
       </header>
       <AttemptPicker traces={traces} attempt={trace?.attempt ?? null} onChange={onAttempt} />
       <div className="qp-panel-tabs mih-market-inspector__tabs" role="tablist" aria-label={meta.label + ' 详情'}>
@@ -1595,6 +1662,44 @@ function RunMetrics({
   )
 }
 
+function TerminalAuditPanel({ audit }: { audit: AgentMarketRunTerminalAudit | null }) {
+  if (!audit) return null
+  const outcomeLabel = {
+    result: 'result · 已生成结果',
+    refusal: 'refusal · 安全拒答',
+    failed: 'failed · 明确失败',
+    skipped: 'skipped · 答案跳过',
+    missing: 'missing · 缺少终态',
+  }[audit.finalOutcome]
+  const path = audit.takenPath.map((entry) => (
+    entry.stage + (entry.attempt > 0 ? '[retry ' + entry.attempt + ']' : '') + ':' + entry.status
+  )).join(' → ')
+  return (
+    <section className="mih-market-terminal-audit" aria-labelledby="mih-market-terminal-audit-title">
+      <header>
+        <div><p className="qp-kicker">TERMINAL AUDIT</p><h2 id="mih-market-terminal-audit-title">本次运行终态</h2></div>
+        <StatusBadge status={audit.complete ? 'active' : 'down'} label={audit.complete ? '完整' : '不完整'} />
+      </header>
+      <div className="mih-market-terminal-audit__facts">
+        <span className="qp-tag">完整性 · {audit.complete ? 'PASS' : 'FAIL'}</span>
+        <span className="qp-tag">节点终态 · {audit.terminalStages.length}/{ADVANCED_SEARCH_STAGE_TYPES.length}</span>
+        <span className="qp-tag">最终结局 · {outcomeLabel}</span>
+        <span className="qp-tag">Retry · 声明 {audit.retry.declared} / 观测 {audit.retry.observed} · {audit.retry.consistent ? '一致' : '不一致'}</span>
+      </div>
+      <p className="mih-market-terminal-audit__path">
+        <strong>Taken path</strong>
+        <span>{path || '没有可确认的执行路径'}</span>
+      </p>
+      {!audit.complete ? (
+        <div className="mih-inline-warning">
+          <Warning size={16} aria-hidden="true" />
+          缺少终态：{audit.missingTerminalStages.join('、') || 'Retry 或 Final 契约不一致'}。本次响应保留用于诊断，不标记为成功。
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 function UnsupportedWorkbench({ agent }: { agent: CatalogAgent }) {
   return (
     <div className="mih-market-unsupported">
@@ -1625,6 +1730,7 @@ function errorMessage(error: unknown, fallback: string): string {
 
 export function AgentMarketPage({ token, session, onUnauthorized, notify }: PageProps) {
   const canAdmin = session?.kind === 'admin-token'
+  const runHistoryStorage = useMemo(() => getAgentMarketRunHistoryStorage(), [])
   const loadCatalog = useCallback(() => adminApi.agentMarketCatalog(token), [token])
   const catalogRemote = useRemoteData(loadCatalog, onUnauthorized) as {
     data: unknown
@@ -1686,6 +1792,7 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
   const [selectedStage, setSelectedStage] = useState<AdvancedSearchStageType>('triage')
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('prompt')
   const [selectedAttempt, setSelectedAttempt] = useState<number | null>(null)
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(readInspectorCollapsed)
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState<unknown>(null)
@@ -1699,6 +1806,18 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
   const [agentEditor, setAgentEditor] = useState<CatalogAgent | 'create' | null>(null)
   const [lifecycleConfirm, setLifecycleConfirm] = useState<CatalogAgent | null>(null)
   const [catalogBusy, setCatalogBusy] = useState(false)
+
+  const changeInspectorCollapsed = useCallback((collapsed: boolean) => {
+    setInspectorCollapsed(collapsed)
+    writeInspectorCollapsed(collapsed)
+    if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        document.getElementById(collapsed
+          ? 'mih-market-inspector-expand'
+          : 'mih-market-inspector-collapse')?.focus()
+      })
+    }
+  }, [])
 
   useEffect(() => {
     if (selectedCategory !== 'all'
@@ -1726,6 +1845,21 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
     setInspectorTab('prompt')
     setSelectedAttempt(null)
   }, [selectedAgentKey])
+
+  useEffect(() => {
+    if (!canAdmin || !isAdvancedWorkbench || !selectedAgentKey) return
+    const restored = readAgentMarketRunHistory(runHistoryStorage, selectedAgentKey)
+      .map((entry) => normalizeRun(entry.run))
+      .filter((entry): entry is DryRunResult => entry !== null)
+    setResult(restored[0] || null)
+    setPreviousResult(restored[1] || null)
+  }, [canAdmin, isAdvancedWorkbench, runHistoryStorage, selectedAgentKey])
+
+  useEffect(() => {
+    if (canAdmin) return
+    setResult(null)
+    setPreviousResult(null)
+  }, [canAdmin])
 
   useEffect(() => {
     if (!isAdvancedWorkbench || !selectedExecutorKey || !definitionRemote.data) return
@@ -1810,6 +1944,10 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
   }, [comparisonResult])
   const selectedStageDefinition = draft.stages.find((stage) => stage.type === selectedStage) || draft.stages[0]
   const selectedStageTraces = tracesByStage.get(selectedStage) || []
+  const terminalAudit = useMemo(
+    () => result ? inspectAgentMarketRunTerminal(result, draft) : null,
+    [draft, result],
+  )
 
   useEffect(() => {
     setSelectedAttempt(latestTrace(selectedStageTraces)?.attempt ?? null)
@@ -1894,10 +2032,21 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
       })
       const next = normalizeRun(response)
       if (!next) throw new Error('Dry run 响应缺少可观测 traces')
+      const audit = inspectAgentMarketRunTerminal(response, parsed.data)
       setPreviousResult(result)
       setResult(next)
+      if (canAdmin) rememberAgentMarketRun(runHistoryStorage, selectedAgentKey, response)
       catalogRemote.refresh()
-      notify?.('Dry run 完成：0 次业务写入，' + next.traces.length + ' 条阶段 Trace。', 'success')
+      if (!audit.complete) {
+        const issue = audit.missingTerminalStages.length
+          ? '缺少 ' + audit.missingTerminalStages.join('、') + ' 的终态 Trace'
+          : !audit.retry.consistent ? 'Retry 声明与观测不一致' : '缺少 Final 终态'
+        setRunError(new Error('Dry run 响应不完整：' + issue))
+        notify?.('Dry run 已返回但终态审计未通过：' + issue, 'warning')
+      } else {
+        const outcome = audit.finalOutcome === 'refusal' ? '安全拒答' : audit.finalOutcome
+        notify?.('Dry run 完成（' + outcome + '）：0 次业务写入，' + next.traces.length + ' 条阶段 Trace。', 'success')
+      }
     } catch (error) {
       if (isRecord(error) && error.status === 401) onUnauthorized?.(error)
       setRunError(error)
@@ -2044,7 +2193,7 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
           当前 Hub 管理会话为只读；Agent Market 直接复用当前会话凭据，无需再次认证。
         </div>
       ) : null}
-      <section className="mih-market-workbench">
+      <section className={'mih-market-workbench' + (inspectorCollapsed ? ' is-inspector-collapsed' : '')}>
         <CatalogRail catalog={catalog} loading={catalogRemote.loading}
           selectedAgentKey={selectedAgentKey} selectedCategory={selectedCategory} search={search}
           canAdmin={canAdmin} onSelectAgent={setSelectedAgentKey}
@@ -2100,10 +2249,12 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
                   ) : (
                     <>
                       <AgentFlowGraph definition={draft} tracesByStage={tracesByStage}
+                        terminalTrace={latestTrace(result?.traces || [])}
                         selectedStage={selectedStage} running={running} onSelect={(stage) => {
                           setSelectedStage(stage)
                           setInspectorTab('input')
                         }} />
+                      <TerminalAuditPanel audit={terminalAudit} />
                       <RunComparison stageType={selectedStage} current={result} previous={previousResult}
                         baseline={baselineResult} compareTarget={compareTarget} onCompareTarget={setCompareTarget} />
                       <RunMetrics current={result} reference={comparisonResult} />
@@ -2128,7 +2279,16 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
             <div><Warning size={18} aria-hidden="true" /><span><strong>模型可能计费</strong><small>真实 Provider 调用会产生模型成本</small></span></div>
           </section>
         </main>
-        {selectedAgent && isAdvancedWorkbench && selectedStageDefinition ? (
+        {inspectorCollapsed ? (
+          <aside className="mih-market-inspector-rail" aria-label="阶段详情已收起">
+            <button className="qp-button qp-button--ghost" type="button"
+              id="mih-market-inspector-expand" aria-controls="mih-market-stage-inspector"
+              aria-expanded="false" aria-label="向左展开阶段详情" title="向左展开阶段详情"
+              onClick={() => changeInspectorCollapsed(false)}>
+              <CaretLeft size={17} aria-hidden="true" /><span>展开阶段详情</span>
+            </button>
+          </aside>
+        ) : selectedAgent && isAdvancedWorkbench && selectedStageDefinition ? (
           <StageInspector stage={selectedStageDefinition} traces={selectedStageTraces}
             referenceTraces={previousTracesByStage.get(selectedStage) || []}
             tab={inspectorTab} attempt={selectedAttempt} canEdit={canAdmin}
@@ -2138,9 +2298,17 @@ export function AgentMarketPage({ token, session, onUnauthorized, notify }: Page
               current,
               selectedStageDefinition.id,
               selectedStageDefinition.state === 'active' ? 'trashed' : 'active',
-            ))} />
+            ))}
+            onCollapse={() => changeInspectorCollapsed(true)} />
         ) : (
-          <aside className="mih-market-inspector mih-market-inspector--empty">
+          <aside className="mih-market-inspector mih-market-inspector--empty"
+            id="mih-market-stage-inspector" aria-label="阶段详情">
+            <button className="qp-button qp-button--ghost mih-market-inspector__collapse" type="button"
+              id="mih-market-inspector-collapse" aria-controls="mih-market-stage-inspector"
+              aria-expanded="true" aria-label="向右收起阶段详情" title="向右收起阶段详情"
+              onClick={() => changeInspectorCollapsed(true)}>
+              <CaretRight size={16} aria-hidden="true" /><span>收起</span>
+            </button>
             <FlowArrow size={30} weight="duotone" aria-hidden="true" />
             <strong>阶段详情</strong>
             <p>{selectedAgent ? '当前 Agent 暂无可观测阶段协议。' : '选择 Agent 后查看阶段详情。'}</p>
