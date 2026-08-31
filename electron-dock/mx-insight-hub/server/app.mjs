@@ -16,6 +16,9 @@ import { ADVANCED_SEARCH_AGENT_KEY } from '../agent-market/advanced-search/schem
 import { runAdvancedSearchDryRun } from './agent-market/runner.ts'
 import { builtinAdvancedSearchSnapshot } from './agent-market/store.ts'
 import { builtinAgentMarketCatalog } from './agent-market/catalog.ts'
+import { agentStudioExecutionState } from './agent-studio/store.mjs'
+import { listNodeTypes } from './agent-studio/registry.mjs'
+import { listTemplates } from './agent-studio/templates.mjs'
 import { publicEmbeddingCapabilityCatalog } from './agent/embedding-capabilities.mjs'
 import {
   normalizeSourceCatalogCreate,
@@ -411,6 +414,7 @@ export function createApp({
   agent = null,
   agentPipelines = null,
   agentMarket = null,
+  agentStudio = null,
   search = null,
   searchReindex = null,
   embedding = null,
@@ -591,6 +595,19 @@ export function createApp({
     if (principal?.kind !== 'admin-token') {
       throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may manage or run Agent Market items')
     }
+  }
+
+  function requireAgentStudioAdmin(principal) {
+    if (principal?.kind !== 'admin-token') {
+      throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may change or compile Agent Studio drafts')
+    }
+  }
+
+  function requireAgentStudioStore() {
+    if (!agentStudio) {
+      throw new AppError(503, 'agent_studio_store_unavailable', 'Agent Studio persistence requires PostgreSQL migration 046')
+    }
+    return agentStudio
   }
 
   function requireImporter() {
@@ -2728,6 +2745,181 @@ export function createApp({
           requestId,
         })
         return
+      }
+
+      // ---- Agent Studio (P1: authoring + static compile only) -----------
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/agent-studio') {
+        requirePlatformAdmin(principal)
+        sendJson(response, 200, {
+          data: {
+            phase: 'P1',
+            portfolio: agentStudio ? 'available' : 'unavailable',
+            drafts: agentStudio ? 'available' : 'unavailable',
+            compiler: agentStudio ? 'available' : 'unavailable',
+            execution: agentStudioExecutionState(),
+          },
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/agent-studio/node-types') {
+        requirePlatformAdmin(principal)
+        sendJson(response, 200, { data: listNodeTypes(), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/agent-studio/templates') {
+        requirePlatformAdmin(principal)
+        sendJson(response, 200, {
+          data: {
+            items: listTemplates(),
+            execution: agentStudioExecutionState(),
+          },
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/agent-studio/projects') {
+        requirePlatformAdmin(principal)
+        sendJson(response, 200, {
+          data: await requireAgentStudioStore().listProjects(),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/agent-studio/projects') {
+        requireAgentStudioAdmin(principal)
+        const data = await requireAgentStudioStore().createProject(
+          await readJson(request, 256 * 1024),
+          { updatedBy: principal.memberId || principal.kind || 'admin-token' },
+        )
+        sendJson(response, 201, { data, requestId })
+        return
+      }
+
+      params = routeMatch(
+        pathname,
+        '/internal/v1/admin/agent-studio/projects/:agentKey/drafts/:draftId/compile',
+      )
+      if (params && request.method === 'POST') {
+        requireAgentStudioAdmin(principal)
+        const data = await requireAgentStudioStore().compileDraft(
+          params.agentKey,
+          params.draftId,
+          await readJson(request, 64 * 1024),
+          { updatedBy: principal.memberId || principal.kind || 'admin-token' },
+        )
+        sendJson(response, data.reused ? 200 : 201, { data, requestId })
+        return
+      }
+
+      params = routeMatch(
+        pathname,
+        '/internal/v1/admin/agent-studio/projects/:agentKey/drafts/:draftId/artifacts/:artifactId',
+      )
+      if (params && request.method === 'GET') {
+        requirePlatformAdmin(principal)
+        const data = await requireAgentStudioStore().getArtifact(
+          params.agentKey,
+          params.artifactId,
+          params.draftId,
+        )
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(
+        pathname,
+        '/internal/v1/admin/agent-studio/projects/:agentKey/drafts/:draftId',
+      )
+      if (params && request.method === 'GET') {
+        requirePlatformAdmin(principal)
+        const data = await requireAgentStudioStore().getDraft(params.agentKey, params.draftId)
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (params && request.method === 'PUT') {
+        requireAgentStudioAdmin(principal)
+        const data = await requireAgentStudioStore().updateDraft(
+          params.agentKey,
+          params.draftId,
+          await readJson(request, 256 * 1024),
+          { updatedBy: principal.memberId || principal.kind || 'admin-token' },
+        )
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(
+        pathname,
+        '/internal/v1/admin/agent-studio/projects/:agentKey/drafts',
+      )
+      if (params && request.method === 'POST') {
+        requireAgentStudioAdmin(principal)
+        const data = await requireAgentStudioStore().createDraft(
+          params.agentKey,
+          await readJson(request, 256 * 1024),
+          { updatedBy: principal.memberId || principal.kind || 'admin-token' },
+        )
+        sendJson(response, 201, { data, requestId })
+        return
+      }
+
+      // Project-scoped artifact reads are retained for the current frontend;
+      // the draft-scoped path above is the canonical provenance-preserving URI.
+      params = routeMatch(
+        pathname,
+        '/internal/v1/admin/agent-studio/projects/:agentKey/artifacts/:artifactId',
+      )
+      if (params && request.method === 'GET') {
+        requirePlatformAdmin(principal)
+        const data = await requireAgentStudioStore().getArtifact(params.agentKey, params.artifactId)
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      params = routeMatch(pathname, '/internal/v1/admin/agent-studio/projects/:agentKey')
+      if (params && request.method === 'GET') {
+        requirePlatformAdmin(principal)
+        const data = await requireAgentStudioStore().getProject(params.agentKey)
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+      if (params && request.method === 'PUT') {
+        requireAgentStudioAdmin(principal)
+        const data = await requireAgentStudioStore().updateProject(
+          params.agentKey,
+          await readJson(request, 64 * 1024),
+          { updatedBy: principal.memberId || principal.kind || 'admin-token' },
+        )
+        sendJson(response, 200, { data, requestId })
+        return
+      }
+
+      const studioPhasePrefix = '/internal/v1/admin/agent-studio/'
+      let studioPhaseCapability = null
+      if (pathname.startsWith(studioPhasePrefix)) {
+        try {
+          studioPhaseCapability = decodeURIComponent(
+            pathname.slice(studioPhasePrefix.length).split('/')[0],
+          )
+        } catch {
+          studioPhaseCapability = null
+        }
+      }
+      if (
+        studioPhaseCapability
+        && [
+          'runs', 'sandbox', 'sandboxes', 'debug', 'evals', 'eval-suites',
+          'experiments', 'releases', 'deployments',
+        ].includes(studioPhaseCapability)
+      ) {
+        requirePlatformAdmin(principal)
+        throw new AppError(
+          501,
+          'agent_studio_phase_unavailable',
+          `${studioPhaseCapability} is unavailable in Agent Studio P1`,
+          { capability: studioPhaseCapability, availableFrom: 'P2' },
+        )
       }
 
       // ---- Agent Market -------------------------------------------------

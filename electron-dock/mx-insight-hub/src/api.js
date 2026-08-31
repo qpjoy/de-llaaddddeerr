@@ -469,6 +469,46 @@ export const adminApi = {
     `${ADMIN_ROOT}/agent-market/${encodeURIComponent(agentKey)}/dry-run`,
     { method: 'POST', body },
   ),
+  agentStudioNodeTypes: (token) => request(token, `${ADMIN_ROOT}/agent-studio/node-types`),
+  agentStudioTemplates: (token) => request(token, `${ADMIN_ROOT}/agent-studio/templates`),
+  agentStudioProjects: (token) => request(token, `${ADMIN_ROOT}/agent-studio/projects`),
+  createAgentStudioProject: (token, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-studio/projects`,
+    { method: 'POST', body },
+  ),
+  agentStudioProject: (token, agentKey) => request(
+    token,
+    `${ADMIN_ROOT}/agent-studio/projects/${encodeURIComponent(agentKey)}`,
+  ),
+  updateAgentStudioProject: (token, agentKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-studio/projects/${encodeURIComponent(agentKey)}`,
+    { method: 'PUT', body },
+  ),
+  createAgentStudioDraft: (token, agentKey, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-studio/projects/${encodeURIComponent(agentKey)}/drafts`,
+    { method: 'POST', body },
+  ),
+  agentStudioDraft: (token, agentKey, draftId) => request(
+    token,
+    `${ADMIN_ROOT}/agent-studio/projects/${encodeURIComponent(agentKey)}/drafts/${encodeURIComponent(draftId)}`,
+  ),
+  saveAgentStudioDraft: (token, agentKey, draftId, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-studio/projects/${encodeURIComponent(agentKey)}/drafts/${encodeURIComponent(draftId)}`,
+    { method: 'PUT', body },
+  ),
+  compileAgentStudioDraft: (token, agentKey, draftId, body) => request(
+    token,
+    `${ADMIN_ROOT}/agent-studio/projects/${encodeURIComponent(agentKey)}/drafts/${encodeURIComponent(draftId)}/compile`,
+    { method: 'POST', body },
+  ),
+  agentStudioArtifact: (token, agentKey, artifactId) => request(
+    token,
+    `${ADMIN_ROOT}/agent-studio/projects/${encodeURIComponent(agentKey)}/artifacts/${encodeURIComponent(artifactId)}`,
+  ),
   updateAgentProviders: (token, kind, body) => request(
     token,
     `${ADMIN_ROOT}/agent/providers/${encodeURIComponent(kind)}`,
