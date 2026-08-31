@@ -130,6 +130,48 @@ throwaway check. See the design note for the full matrix.
 
 Spoke commands run on Linux and macOS; the server and `egress` are Linux-only.
 
+## WireGuard Global IPv4 VPN (`wg`)
+
+`qp-tunnel-cli wg` provides isolated WireGuard server/client interfaces with
+IPv4 forwarding and NAT on the server. On AWS, pass the Elastic IP as `--host`;
+EIPs are VPC NAT mappings and are not expected to appear in the local interface
+list.
+
+```bash
+sudo qp-tunnel-cli wg preflight --server --subnet 100.127.50.0/24
+sudo qp-tunnel-cli wg install \
+  --host 203.0.113.10 \
+  --subnet 100.127.50.0/24 \
+  --port-range 20000-20100
+sudo qp-tunnel-cli wg create internal-01 --ip 100.127.50.10
+```
+
+Copy the generated `.conf` to the spoke, then enroll it:
+
+```bash
+sudo qp-tunnel-cli wg enroll --file internal-01.conf
+```
+
+The profile routes all IPv4 traffic through WireGuard (`0.0.0.0/0`) while
+retaining the client's existing DNS resolver. The default `100.127.50.0/24`
+avoids the OpenVPN default at `100.127.0.0/24`. `100.127.100.0/24` is another
+recommended start. `100.128.*` is rejected because RFC 6598 ends at
+`100.127.255.255`.
+
+Rotate the live listener and all issued profiles with one command. Without a
+configured range it increments the current port by one; `--port` selects an
+exact port. No WireGuard keys change:
+
+```bash
+sudo qp-tunnel-cli wg rotate-port
+```
+
+Already-enrolled clients can manually change the `Endpoint` port in
+`/etc/wireguard/qpwgc-mx.conf` and run `wg restart --client`, or receive the
+updated profile and run `wg enroll --force`. See
+[wireguard.setup.md](wireguard.setup.md) for the full command sequence and
+multi-instance example.
+
 ## MX H2I V2 Enrollment on Ubuntu
 
 `qp-tunnel-cli h2i` is the native V2 path. It uses the same

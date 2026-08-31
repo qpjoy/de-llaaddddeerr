@@ -27,6 +27,11 @@ const resources = [
     target: resolve(packageRoot, 'resources/openvpn-client.sh'),
     label: 'openvpn-client.sh',
   },
+  {
+    source: resolve(repoRoot, 'scripts/wireguard.sh'),
+    target: resolve(packageRoot, 'resources/wireguard.sh'),
+    label: 'wireguard.sh',
+  },
   // Shipped so `open egress on --mode cn-direct` has a China prefix list
   // without reaching the network. The coarse list is small enough to install as
   // kernel routes; the full list stays in the repository for hosts that want it

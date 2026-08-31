@@ -18,6 +18,7 @@ import { dirname, join, resolve } from 'node:path';
 import { runHdoCli } from './hdo';
 import { runH2iCli } from './h2i';
 import { runOpenCli } from './open';
+import { runWgCli } from './wg';
 
 const args = process.argv.slice(2);
 const packageRoot = resolve(__dirname, '..');
@@ -113,6 +114,9 @@ Usage:
   qp-tunnel-cli open install --subnet 100.127.0.0/24
   qp-tunnel-cli open create internal-01 --ip 100.127.0.10
   qp-tunnel-cli open enroll --file internal-01.ovpn
+  qp-tunnel-cli wg install --host 203.0.113.10 --subnet 100.127.50.0/24
+  qp-tunnel-cli wg create internal-01 --ip 100.127.50.10
+  qp-tunnel-cli wg enroll --file internal-01.conf
   qp-tunnel-cli <mihomo-client command> [options]
   qp-tunnel-cli -- <command> [args...]
   qp-tunnel-cli <command-path> [args...]
@@ -145,6 +149,8 @@ Common commands:
   qp-tunnel-cli h2i status
   qp-tunnel-cli open status
   qp-tunnel-cli open help
+  qp-tunnel-cli wg status
+  qp-tunnel-cli wg help
   qp-tunnel-cli uninstall --purge
   qp-tunnel-cli ./electron-server/scripts/manage.sh redeploy
 
@@ -189,6 +195,15 @@ address and nothing else about its networking changes:
   sudo qp-tunnel-cli open create internal-01
   sudo qp-tunnel-cli open enroll --file internal-01.ovpn
 Run 'qp-tunnel-cli open help' for the full command set.
+
+Managed WireGuard provides a global IPv4 VPN through server-side forwarding
+and NAT. It defaults to 100.127.50.0/24 so it does not collide with OpenVPN's
+100.127.0.0/24:
+  sudo qp-tunnel-cli wg install --host 203.0.113.10 --port-range 20000-20100
+  sudo qp-tunnel-cli wg create internal-01
+  sudo qp-tunnel-cli wg enroll --file internal-01.conf
+  sudo qp-tunnel-cli wg rotate-port
+Run 'qp-tunnel-cli wg help' for the full command set.
 `);
 }
 
@@ -796,6 +811,11 @@ async function main(): Promise<void> {
 
   if (command === 'open' || command === 'ovpn' || command === 'openvpn') {
     await runOpenCli(args.slice(1), { isRoot, sudoSelf });
+    return;
+  }
+
+  if (command === 'wg' || command === 'wireguard') {
+    await runWgCli(args.slice(1), { isRoot, sudoSelf });
     return;
   }
 
