@@ -12,6 +12,7 @@ import {
   Pulse,
   ChartLine,
   Coins,
+  Graph,
   Globe,
   House,
   Key,
@@ -50,11 +51,187 @@ import { AgentProxyPage, AgentSequencePage } from './pages-agent-center.tsx'
 const LazyAgentMarketPage = lazy(() => import('./pages-agent-market.tsx').then((module) => ({
   default: module.AgentMarketPage,
 })))
+const LazyAgentStudioPage = lazy(() => import('./pages-agent-studio.tsx').then((module) => ({
+  default: module.AgentStudioPage,
+})))
 
 function AgentMarketRoute(props) {
   return (
     <Suspense fallback={<LoadingState label="正在加载 Agent Market" />}>
       <LazyAgentMarketPage {...props} />
+    </Suspense>
+  )
+}
+
+function studioDetailFromPath(routePath = '') {
+  const match = /^\/agent\/studio\/projects\/([^/]+)(?:\/drafts\/([^/]+))?$/u.exec(routePath)
+  if (!match) return { view: 'portfolio', projectKey: null, draftId: null }
+  try {
+    return {
+      view: 'detail',
+      projectKey: decodeURIComponent(match[1]),
+      draftId: match[2] ? decodeURIComponent(match[2]) : null,
+    }
+  } catch {
+    return { view: 'portfolio', projectKey: null, draftId: null }
+  }
+}
+
+function studioSequenceOptions(snapshot) {
+  const control = snapshot?.control || {}
+  const providers = snapshot?.settings?.chat?.providers || []
+  const providerById = new Map(providers.map((provider) => [provider.id, provider]))
+  const proxySequences = control.proxy?.sequences || []
+  const proxyByKey = new Map(proxySequences.map((sequence) => [sequence.sequenceKey, sequence]))
+
+  return (control.sequences || [])
+    .filter((sequence) => sequence.kind === 'chat' && sequence.enabled !== false)
+    .map((sequence) => {
+      const providerLabels = (sequence.providerIds || []).map((providerId) => (
+        providerById.get(providerId)?.displayName || providerId
+      ))
+      const firstProvider = providerById.get(sequence.providerIds?.[0])
+      const egressMode = sequence.egressMode
+        || (sequence.proxySequenceKey ? 'proxy-sequence' : 'inherit')
+      const proxySequence = egressMode === 'proxy-sequence'
+        ? proxyByKey.get(sequence.proxySequenceKey)
+        : null
+      const effectiveProxy = egressMode === 'system-egress'
+        ? 'Pod / Node 系统出网'
+        : egressMode === 'proxy-sequence'
+          ? proxySequence
+            ? `${proxySequence.displayName || proxySequence.sequenceKey} · rev ${proxySequence.revision}`
+            : `${sequence.proxySequenceKey || 'Proxy Sequence'} · 缺失或停用`
+          : '继承受治理的 Provider / Hub / Docker daemon 出网策略'
+      const proofMissing = !sequence.verifiedProxyFingerprint
+        || sequence.routeProofStatus === 'missing-proof'
+      const proofStale = sequence.needsRevalidation === true
+        || sequence.routeProofValid === false
+        || ['provider-revision-changed', 'provider-unavailable', 'route-changed']
+          .includes(sequence.routeProofStatus)
+      return {
+        sequenceKey: sequence.sequenceKey,
+        label: sequence.displayName || sequence.sequenceKey,
+        description: providerLabels.length
+          ? `Provider 顺序：${providerLabels.join(' → ')}`
+          : '当前 Sequence 没有可用 Provider',
+        revision: Number(sequence.revision || 0),
+        effectiveModel: firstProvider?.model || '由 Sequence Provider 顺序解析',
+        egressMode,
+        effectiveProxy,
+        routeProof: proofStale ? 'stale' : proofMissing ? 'missing' : 'valid',
+        verifiedAt: sequence.verifiedAt || null,
+      }
+    })
+}
+
+function studioDiagnostics(values) {
+  return (Array.isArray(values) ? values : []).map((diagnostic) => ({
+    ...diagnostic,
+    location: diagnostic.location || diagnostic.path || diagnostic.nodeId || 'Draft',
+  }))
+}
+
+function AgentStudioRoute(props) {
+  const { token, routePath, onUnauthorized } = props
+  const detail = useMemo(() => studioDetailFromPath(routePath), [routePath])
+  const loadProjects = useCallback(() => adminApi.agentStudioProjects(token), [token])
+  const loadProject = useCallback(
+    (agentKey) => adminApi.agentStudioProject(token, agentKey),
+    [token],
+  )
+  const loadDraft = useCallback(
+    (agentKey, draftId) => adminApi.agentStudioDraft(token, agentKey, draftId),
+    [token],
+  )
+  const loadNodeTypes = useCallback(() => adminApi.agentStudioNodeTypes(token), [token])
+  const loadTemplates = useCallback(async () => {
+    const result = await adminApi.agentStudioTemplates(token)
+    return (result?.items || []).map((template) => ({
+      templateKey: template.templateKey,
+      label: template.displayName || template.templateKey,
+      description: template.description || '',
+    }))
+  }, [token])
+  const loadSequences = useCallback(async () => (
+    studioSequenceOptions(await adminApi.agent(token))
+  ), [token])
+  const requireFreshSession = useCallback(async (operation) => {
+    try {
+      return await operation()
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      throw error
+    }
+  }, [onUnauthorized])
+  const createProject = useCallback((input) => requireFreshSession(
+    () => adminApi.createAgentStudioProject(token, input),
+  ), [requireFreshSession, token])
+  const updateProject = useCallback((input) => {
+    const {
+      agentKey,
+      expectedRevision,
+      displayName,
+      summary,
+      owner,
+      dataScope,
+      riskClass,
+      tags,
+      archived,
+    } = input
+    return requireFreshSession(() => adminApi.updateAgentStudioProject(token, agentKey, {
+      expectedRevision,
+      displayName,
+      summary,
+      owner,
+      dataScope,
+      riskClass,
+      tags,
+      archived,
+    }))
+  }, [requireFreshSession, token])
+  const saveDraft = useCallback((payload) => requireFreshSession(
+    () => adminApi.saveAgentStudioDraft(
+      token,
+      payload.agentKey,
+      payload.draftId,
+      { expectedRevision: payload.expectedRevision, definition: payload.definition },
+    ),
+  ), [requireFreshSession, token])
+  const compileDraft = useCallback(async (payload) => {
+    try {
+      const result = await requireFreshSession(() => adminApi.compileAgentStudioDraft(
+        token,
+        payload.agentKey,
+        payload.draftId,
+        { expectedRevision: payload.expectedRevision },
+      ))
+      return { ...result, diagnostics: studioDiagnostics(result?.diagnostics) }
+    } catch (error) {
+      if (error?.status === 422 && Array.isArray(error?.details?.diagnostics)) {
+        return { status: 'failed', diagnostics: studioDiagnostics(error.details.diagnostics) }
+      }
+      throw error
+    }
+  }, [requireFreshSession, token])
+  const openProject = useCallback((agentKey) => {
+    window.location.hash = `/agent/studio/projects/${encodeURIComponent(agentKey)}`
+  }, [])
+  const openDraft = useCallback((agentKey, draftId) => {
+    window.location.hash = `/agent/studio/projects/${encodeURIComponent(agentKey)}/drafts/${encodeURIComponent(draftId)}`
+  }, [])
+  const backToPortfolio = useCallback(() => {
+    window.location.hash = '/agent/studio'
+  }, [])
+
+  return (
+    <Suspense fallback={<LoadingState label="正在加载 Agent Studio" />}>
+      <LazyAgentStudioPage {...props} {...detail}
+        loadProjects={loadProjects} loadProject={loadProject} loadDraft={loadDraft}
+        loadNodeTypes={loadNodeTypes} loadTemplates={loadTemplates} loadSequences={loadSequences}
+        onCreateProject={createProject} updateProject={updateProject}
+        onOpenProject={openProject} onOpenDraft={openDraft}
+        onBackToPortfolio={backToPortfolio} saveDraft={saveDraft} compileDraft={compileDraft} />
     </Suspense>
   )
 }
@@ -104,6 +281,7 @@ const ROUTES = [
   { path: '/agent/sequences', label: 'LLM Sequence', description: '可复用的有序调用链', icon: List, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentSequencePage, capability: 'membership.write', platformAdmin: true },
   { path: '/agent/proxies', label: 'LLM Proxy', description: '可选全局与 Provider 代理链', icon: Globe, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentProxyPage, capability: 'membership.write', platformAdmin: true },
   { path: '/agent/market', label: 'Agent Market', description: '可编辑、可观测的 Agent 示例', icon: Storefront, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentMarketRoute, capability: 'membership.write', platformAdmin: true },
+  { path: '/agent/studio', label: 'Agent Studio', description: '开发、编译与管理 Agent', icon: Graph, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentStudioRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/agent/runtime', label: '原中心 Agent', description: '原有管线、断言与处理边界', icon: Pulse, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentRuntimeRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
   { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read' },
@@ -180,8 +358,9 @@ function readLocation({ canonicalize = false } = {}) {
       )
     }
   }
-  const path = ROUTE_MAP.has(candidatePath) ? candidatePath : '/dashboard'
-  return { path, query }
+  const studioDetail = candidatePath.startsWith('/agent/studio/')
+  const path = ROUTE_MAP.has(candidatePath) ? candidatePath : studioDetail ? '/agent/studio' : '/dashboard'
+  return { path, detailPath: studioDetail ? candidatePath : path, query }
 }
 
 function ThemeToggle({ theme, onToggle, className = '' }) {
@@ -535,8 +714,8 @@ export function App() {
       else params.set(name, String(value))
     }
     const search = params.toString()
-    window.location.hash = `${location.path}${search ? `?${search}` : ''}`
-  }, [location.path, location.query])
+    window.location.hash = `${location.detailPath || location.path}${search ? `?${search}` : ''}`
+  }, [location.detailPath, location.path, location.query])
 
   if (authState !== 'signed-in') {
     return <SessionGate checking={authState === 'checking'} message={authMessage} onAuthenticate={authenticate}
@@ -553,6 +732,7 @@ export function App() {
     token,
     session,
     query: location.query,
+    routePath: location.detailPath || location.path,
     setQuery,
     onUnauthorized: handleUnauthorized,
     notify,

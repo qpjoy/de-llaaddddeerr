@@ -40,6 +40,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "5.0.4",
+    "@xyflow/react": "^12.11.5",
     "chart.js": "4.5.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",

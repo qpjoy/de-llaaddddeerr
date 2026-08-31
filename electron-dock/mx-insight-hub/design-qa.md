@@ -86,6 +86,65 @@ final result: passed
 
 ---
 
+# Agent Studio P1 design QA — 2026-08-31
+
+## Comparison target and evidence
+
+- Portfolio source visual: `/Users/qpjoy/.codex/generated_images/01a05606-8728-79d3-b070-45d33126717a/exec-6900b2fd-275f-47f4-a6f3-5c0bc6f432c3.png`, `1487x1058` pixels.
+- Draft workbench source visual: `/Users/qpjoy/.codex/generated_images/01a05606-8728-79d3-b070-45d33126717a/exec-38cbc327-c4f5-43cb-801e-444d68a2a9f6.png`, `1487x1058` pixels.
+- Browser-rendered Portfolio: `/private/tmp/mx-agent-studio-portfolio-final.jpg`, `1487x1041` capture from a `1487x1058` CSS viewport at device scale factor `2`.
+- Browser-rendered Draft workbench: `/private/tmp/mx-agent-studio-detail-final.jpg`, same viewport and capture dimensions.
+- Same-input full-view comparisons: `/private/tmp/mx-agent-studio-portfolio-compare.png` and `/private/tmp/mx-agent-studio-detail-compare.png`. Each source was top-cropped to `1487x1041` without rescaling, then placed beside the implementation.
+- Same-input focused comparisons: `/private/tmp/mx-agent-studio-portfolio-focus-compare.png` and `/private/tmp/mx-agent-studio-detail-focus-compare.png`, native-density `1237x984` workspace crops.
+- Theme and responsive evidence: `/private/tmp/mx-agent-studio-detail-dark.jpg`, `/private/tmp/mx-agent-studio-detail-1280.jpg`; additional live inspection used `1024x768`.
+- State: local Admin Token session backed by the real PostgreSQL migration. The Portfolio contained four server-owned projects and four CAS drafts; the nationwide public-opinion project retained one immutable compiled Artifact and no fabricated run, evaluation, release or deployment.
+
+## Findings
+
+No actionable P0, P1 or P2 finding remains.
+
+The Portfolio preserves the confirmed authoring IA: `Agent 中心` remains the one first-level group, `Agent Studio` is a second-level entry, the Studio landing route lists all author assets, and a project opens a separate Draft route. The final Portfolio adds the requested governance notice, asset tabs, search, five governed dimensions, dense lifecycle columns, real metadata management and soft archive.
+
+The workbench preserves the confirmed compiler layout: code-owned palette, typed-port React Flow canvas, clickable nodes, Prompt-first inspector, LLM Sequence reference, read-only resolved proxy/model evidence, compile diagnostics and immutable Artifact facts. Build edges stay neutral. The Run Path state shows zero events and zero animated edges because P1 has no Sandbox runtime.
+
+## Required fidelity surfaces
+
+- Typography and layout: the implementation uses the existing Poppins/system-CJK stack and `--qp-font-*` scale, the same 252px global sidebar, compact 58px top bar, one-pixel separators and dense control-plane rhythm. Portfolio columns fit the `1487px` review viewport without document or table overflow; `1280px` remains a three-column workbench and `1024px` moves the inspector below the canvas with no horizontal document overflow.
+- Colors and tokens: cool-light is the default and uses the existing white/blue-gray surfaces with deep teal primary. Dark parity resolves through the same Neon Void variables. Status always combines icon and text; color alone is not the state carrier.
+- Image and icon quality: the real MX Insight Hub logo is reused. Functional icons come from Phosphor and the graph is rendered by React Flow with its attribution visible. No placeholder image, emoji, CSS illustration or handcrafted decorative SVG was introduced.
+- Copy and content: all Portfolio values come from the Studio API. `尚未编译`, `尚未评测`, `无 Release`, `未部署`, `Market 不可见` and `P1/P2/P4` labels are explicit rather than inferred as zero or healthy. Source-catalog coverage is not presented as an executable connector. The concrete public-opinion draft produces only a reviewable mapping proposal.
+- Prompt and model routing: selecting the mapping node exposes editable System Prompt and Task Template fields plus governed variables. The Draft stores only a Sequence key; effective model, egress, proxy and route proof remain read-only. In the local state no matching approved Sequence exists, so the UI truthfully shows unresolved routing instead of silently choosing a Provider or Proxy.
+- Accessibility and interaction: Portfolio rows, tabs, comboboxes, graph nodes, inspector tabs, modals and confirmation actions expose named semantics and focusable controls. Nodes can be selected from the graph and refresh the Inspector. The shared Modal and ConfirmDialog retain keyboard/focus behavior.
+
+## Interaction and regression evidence
+
+1. Search reduced four projects to one. The business-domain combobox exposed only dimensions derived from real tags (`enterprise`, `news`, `public-opinion`, `search`), and combined search/facet filtering returned the expected row.
+2. The server-backed Templates tab displayed the two approved compile-only templates and did not substitute browser fixtures.
+3. The Manage dialog saved a same-value metadata update through project CAS and advanced only the project revision. Soft archive reduced the active list from four to three and exposed the project under `已归档`; its Restore control returned the project to the active list through the same CAS API, leaving all four deliverable products active.
+4. Selecting `Validate Mapping Contract` and `舆情字段映射建议` changed the Node Inspector. The Prompt tab rendered two editable text areas and retained the previously saved guarded prompt.
+5. The compiled project reloaded with Artifact `f09283ad-d97f-47b5-8ba8-39d4dd8a49d2`, hash `8d76390f4822b42a5354af8876363d2c8517e5af908ec4af836586ae26d7b1bc`, zero errors and zero warnings. Its Run Path showed `暂无运行事件`, zero animated edges and compile-only explanatory copy.
+6. A fresh browser navigation after the final React Flow fixes produced zero console warnings or errors. Cool-light, dark, `1487x1058`, `1280x720` and `1024x768` states were inspected.
+7. Validation gates passed: TypeScript, production build, focused Studio/auth boundary tests `16/16`, full Hub suite `866` tests (`864` pass, `2` environment skips, `0` fail), and the complete MX-H2I login/network safety check including password/Feishu/bootstrap-domain/split-DNS/reconnect/ASAR coverage.
+
+## Intentional P1 differences from the concept visuals
+
+- The concept workbench depicts a live Debug run with colored paths and a populated event timeline. P1 has no general runtime, so the implementation stops at Build and Compile and does not simulate success, failure, latency or health.
+- The concept Portfolio contains illustrative products, category labels and lifecycle objects. The implementation displays the four migrated server records and only their real Draft/Artifact objects; Release, Deployment and Market visibility remain empty until those models exist.
+- Import, quarantine, dataset publication, Eval, approval, deployment and Market publishing remain visibly future capabilities. They were not implemented by extending the fixed Agent Market dry-run adapter.
+
+## Comparison history
+
+1. The first implementation pass used a summary strip and omitted the confirmed governance notice, asset tabs and multidimensional filters. It also exposed management actions without a real metadata endpoint. The Portfolio was rebuilt around the confirmed seven-column matrix and the actions were connected to a strict CAS/soft-archive API.
+2. The first workbench capture compressed the graph because it honored wide seed coordinates and showed stale `尚未编译` copy after an Artifact reload. Display-only compact positions and Artifact-derived evidence fixed both issues without changing the saved graph or artifact hash.
+3. The first final Portfolio pass used a `1240px` minimum row width, clipping the Operations column at the `1487px` review viewport. The column contract was reduced to a truthful `1096px` minimum; the final page has `scrollWidth === innerWidth` and all operations remain visible.
+4. Migration review found that soft archive had been inserted into already-applied migration 046. Migration 046 was restored byte-for-byte to its recorded checksum and the additive column moved to migration 047; the live PostgreSQL upgrade preserved four projects, four drafts and the existing Artifact.
+5. Final truth review found that Portfolio lookup could retain an Artifact compiled for an older Draft revision after a new Draft save. The server query now exposes an Artifact only when `compiled.draft_revision = current_draft.current_revision`; a dedicated regression test prevents stale compile state from returning.
+6. Final full-view and focused comparisons found no remaining actionable mismatch. Differences from the running-state concept are deliberate capability boundaries, not missing visual polish.
+
+final result: passed
+
+---
+
 # Data products design QA
 
 ## Scope

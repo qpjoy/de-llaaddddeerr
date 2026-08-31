@@ -1,7 +1,7 @@
 {
   "name": "@qpjoy/tunnel-cli",
-  "version": "2.0.10",
-  "description": "Global QPJoy Tunnel CLI for mihomo-client, legacy HDO, and MX H2I V2 enrollment.",
+  "version": "2.1.7",
+  "description": "Global QPJoy Tunnel CLI for mihomo-client, OpenVPN reverse access, WireGuard VPN, legacy HDO, and MX H2I V2 enrollment.",
   "private": false,
   "type": "commonjs",
   "main": "dist/index.js",
@@ -13,6 +13,8 @@
     "dist",
     "resources",
     "scripts",
+    "docs",
+    "wireguard.setup.md",
     "README.md"
   ],
   "engines": {
@@ -23,7 +25,7 @@
   },
   "dependencies": {
     "@qpjoy/mx-launcher-standalone": "2.3.15",
-    "@qpjoy/electron-core-wireguard": "^2.3.15"
+    "@qpjoy/electron-core-wireguard": "^2.3.16"
   },
   "devDependencies": {
     "@types/node": "^22.10.7"
