@@ -19,6 +19,11 @@
 
 > authoring graph ≠ executable artifact ≠ approved deployment
 
+本文定义生命周期、治理与框架边界；具体 Node.js/LangChain/LangGraph
+runtime、通用 definition/compiler、Hub 数据节点目录、目标 API/数据模型及
+advanced-search 兼容迁移见
+[Agent Studio 通用编排与 Hub 数据节点设计](agent-studio-langgraph-data-orchestration.md)。
+
 React Flow 可以承载编辑和呈现，但不能成为执行器、安全边界或授权系统。LangGraph 可以承载 Agent 内部的状态图、checkpoint、stream 和 HITL，但它本身也不替代工具治理、发布审批、租户鉴权和真实副作用补偿。Temporal 只在流程跨小时/天、跨服务等待或包含可靠副作用时，作为外层业务工作流候选，而不是当前 120 秒 dry-run 的前置依赖。
 
 ## 2. 当前实现核对：fixed runner 并不通用

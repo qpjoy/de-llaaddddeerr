@@ -40,6 +40,17 @@ test('Agent Market keeps its observable graph keyboard-operable without native d
   assert.match(center, /mih-proxy-remove-dropzone/u)
 })
 
+test('Agent Market keeps graph rendering below the stage inspector', async () => {
+  const css = await readFile(new URL('../../src/agent-market.css', import.meta.url), 'utf8')
+
+  assert.match(css, /\.mih-market-main \{[\s\S]*?z-index: 0;[\s\S]*?isolation: isolate;/u)
+  assert.match(css, /\.mih-market-flow \{\s*contain: paint;/u)
+  assert.match(
+    css,
+    /\.mih-market-inspector,\s*\.mih-market-inspector-rail \{\s*z-index: 2;\s*isolation: isolate;/u,
+  )
+})
+
 test('Agent Center keeps defaults explicit and uses the shared confirm dialog', async () => {
   const center = await readFile(new URL('../../src/pages-agent-center.tsx', import.meta.url), 'utf8')
   const market = await readFile(new URL('../../src/pages-agent-market.tsx', import.meta.url), 'utf8')

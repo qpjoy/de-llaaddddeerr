@@ -1242,6 +1242,9 @@
 }
 
 .mih-market-main {
+  position: relative;
+  z-index: 0;
+  isolation: isolate;
   display: grid;
   align-content: start;
   gap: 12px;
@@ -1332,6 +1335,10 @@
   border: 1px solid var(--qp-line);
   border-radius: var(--qp-radius-sm);
   background: var(--qp-bg-3);
+}
+
+.mih-market-flow {
+  contain: paint;
 }
 
 .mih-market-flow__header,
@@ -1827,6 +1834,12 @@
   max-height: none;
   overflow: visible;
   border-left: 1px solid var(--qp-line);
+}
+
+.mih-market-inspector,
+.mih-market-inspector-rail {
+  z-index: 2;
+  isolation: isolate;
 }
 
 .mih-market-inspector__header {
