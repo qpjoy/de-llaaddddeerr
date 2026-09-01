@@ -60,6 +60,19 @@ import {
   publicMobileCommercePage,
 } from './data/mobile-commerce.mjs'
 import {
+  VIRTUAL_SUPERMARKET_ADMIN_CONTRACT,
+  VIRTUAL_SUPERMARKET_PLATFORM,
+  normalizeVirtualSupermarketCategoryCreate,
+  normalizeVirtualSupermarketCategoryPatch,
+  normalizeVirtualSupermarketProductPatch,
+  normalizeVirtualSupermarketPublication,
+  normalizeVirtualSupermarketQuery,
+  virtualSupermarketCategoryResponse,
+  virtualSupermarketDetail,
+  virtualSupermarketMetadata,
+  virtualSupermarketPage,
+} from './data/virtual-supermarket.mjs'
+import {
   adminPublicOpinionCoverageResponse,
   adminPublicOpinionBrowseItemResponse,
   adminPublicOpinionBrowseResponse,
@@ -507,6 +520,7 @@ export class HubService {
       PUBLIC_OPINION_PLATFORM,
       SOURCE_CATALOG_PLATFORM,
       MOBILE_COMMERCE_PLATFORM,
+      VIRTUAL_SUPERMARKET_PLATFORM,
     ])
     const nightAllGrants = canonicalGrants.filter((platform) => !localStoredPlatforms.has(platform))
     const payload = nightAllGrants.length > 0
@@ -627,6 +641,46 @@ export class HubService {
           servingMode: 'stored',
           capabilities: ['commerce_items', 'marketplace_filter', 'catalog_filter', 'task_filter', 'stored_refresh'],
           remoteFetch: { available: false, status: 'reserved' },
+        })
+      }
+    }
+    if (
+      canonicalGrants.includes(VIRTUAL_SUPERMARKET_PLATFORM)
+      && typeof this.store.listVirtualSupermarketProducts === 'function'
+    ) {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms) && !platforms.some((entry) => (
+        (entry?.platform || entry) === VIRTUAL_SUPERMARKET_PLATFORM
+      ))) {
+        let ready = typeof this.store.getVirtualSupermarketStorefrontRevision === 'function'
+          && typeof this.store.getVirtualSupermarketInventoryRevision === 'function'
+        if (ready) {
+          try {
+            await Promise.all([
+              this.store.getVirtualSupermarketStorefrontRevision(),
+              this.store.listVirtualSupermarketCategories(),
+            ])
+          } catch {
+            ready = false
+            this.logger?.warn?.('[virtual-supermarket] serving migration readiness probe failed')
+          }
+        }
+        platforms.push({
+          platform: VIRTUAL_SUPERMARKET_PLATFORM,
+          ready,
+          source: 'hub',
+          servingMode: 'stored',
+          capabilities: [
+            'metadata',
+            'products',
+            'product_detail',
+            'stored_search',
+            'category_filter',
+            'department_filter',
+            'aisle_filter',
+            'shelf_filter',
+            'marketplace_filter',
+          ],
         })
       }
     }
@@ -1330,6 +1384,285 @@ export class HubService {
         this.apiKeyPepper,
       ),
     })
+  }
+
+  #assertVirtualSupermarketStore() {
+    if (
+      typeof this.store.getVirtualSupermarketStorefrontRevision !== 'function'
+      || typeof this.store.listVirtualSupermarketCategories !== 'function'
+      || typeof this.store.listVirtualSupermarketProducts !== 'function'
+      || typeof this.store.getVirtualSupermarketProduct !== 'function'
+      || typeof this.store.getVirtualSupermarketProductByPublicationId !== 'function'
+    ) {
+      throw new AppError(503, 'stored_data_unavailable', 'Virtual-supermarket data requires the current Hub store migration')
+    }
+  }
+
+  async #virtualSupermarketSnapshot(operation, expectedRevision = null, expectedInventoryRevision = null) {
+    this.#assertVirtualSupermarketStore()
+    const before = await this.store.getVirtualSupermarketStorefrontRevision()
+    if (expectedRevision != null && before !== expectedRevision) {
+      throw new AppError(
+        409,
+        'storefront_revision_changed',
+        'Virtual-supermarket publication changed; restart pagination from the first page',
+        { cursorRevision: expectedRevision, storefrontRevision: before },
+      )
+    }
+    let inventoryBefore = null
+    if (expectedInventoryRevision != null) {
+      if (typeof this.store.getVirtualSupermarketInventoryRevision !== 'function') {
+        throw new AppError(503, 'inventory_revision_unavailable', 'Virtual-supermarket inventory revision is unavailable')
+      }
+      inventoryBefore = await this.store.getVirtualSupermarketInventoryRevision()
+      if (inventoryBefore !== expectedInventoryRevision) {
+        throw new AppError(
+          409,
+          'virtual_supermarket_inventory_changed',
+          'Virtual-supermarket inventory changed; restart pagination from the first page',
+          { cursorInventoryRevision: expectedInventoryRevision, inventoryRevision: inventoryBefore },
+        )
+      }
+    }
+    const value = await operation(before)
+    const after = await this.store.getVirtualSupermarketStorefrontRevision()
+    if (after !== before) {
+      throw new AppError(
+        409,
+        'storefront_revision_changed',
+        'Virtual-supermarket publication changed while the response was being assembled; retry the request',
+        { storefrontRevision: after },
+      )
+    }
+    if (expectedInventoryRevision != null) {
+      const inventoryAfter = await this.store.getVirtualSupermarketInventoryRevision()
+      if (inventoryAfter !== inventoryBefore) {
+        throw new AppError(
+          409,
+          'virtual_supermarket_inventory_changed',
+          'Virtual-supermarket inventory changed while the response was being assembled; retry the request',
+          { inventoryRevision: inventoryAfter },
+        )
+      }
+    }
+    return { storefrontRevision: before, value }
+  }
+
+  async virtualSupermarketMetadata(context) {
+    const policy = await this.#storedPlatformPolicy(context, VIRTUAL_SUPERMARKET_PLATFORM, 'Virtual supermarket')
+    return this.#meterStoredRead(context, VIRTUAL_SUPERMARKET_PLATFORM, policy, {
+      path: '/api/v1/data/virtual-supermarket/metadata',
+      fingerprintBody: {},
+      operation: async () => (await this.#virtualSupermarketSnapshot(async (storefrontRevision) => (
+        virtualSupermarketMetadata(
+          await this.store.listVirtualSupermarketCategories(),
+          { storefrontRevision },
+        )
+      ))).value,
+    })
+  }
+
+  async #virtualSupermarketPage(context, queryInput, { path, requireQuery = false } = {}) {
+    const policy = await this.#storedPlatformPolicy(context, VIRTUAL_SUPERMARKET_PLATFORM, 'Virtual supermarket')
+    this.#assertVirtualSupermarketStore()
+    const storefrontRevision = await this.store.getVirtualSupermarketStorefrontRevision()
+    const query = normalizeVirtualSupermarketQuery(queryInput, {
+      cursorSecret: this.apiKeyPepper,
+      maxPageSize: policy.maxPageSize,
+      requireQuery,
+      storefrontRevision,
+    })
+    return this.#meterStoredRead(context, VIRTUAL_SUPERMARKET_PLATFORM, policy, {
+      path,
+      fingerprintBody: {
+        ...query.filters,
+        sort: query.sort,
+        pageSize: query.pageSize,
+        cursor: query.cursorToken,
+      },
+      operation: async () => (await this.#virtualSupermarketSnapshot(async () => (
+        virtualSupermarketPage(
+          await this.store.listVirtualSupermarketProducts({
+            ...query.filters,
+            sort: query.sort,
+            pageSize: query.pageSize,
+            offset: query.offset,
+            includeGovernanceEvidence: false,
+          }),
+          query,
+          this.apiKeyPepper,
+        )
+      ), query.storefrontRevision)).value,
+    })
+  }
+
+  async virtualSupermarketProducts(context, queryInput) {
+    return this.#virtualSupermarketPage(context, queryInput, {
+      path: '/api/v1/data/virtual-supermarket/products',
+    })
+  }
+
+  async virtualSupermarketSearch(context, queryInput) {
+    return this.#virtualSupermarketPage(context, queryInput, {
+      path: '/api/v1/data/virtual-supermarket/search',
+      requireQuery: true,
+    })
+  }
+
+  async virtualSupermarketProduct(context, idInput) {
+    const policy = await this.#storedPlatformPolicy(context, VIRTUAL_SUPERMARKET_PLATFORM, 'Virtual supermarket')
+    const id = requiredUuid(idInput, 'publicationId')
+    return this.#meterStoredRead(context, VIRTUAL_SUPERMARKET_PLATFORM, policy, {
+      path: `/api/v1/data/virtual-supermarket/products/${id}`,
+      fingerprintBody: { id },
+      operation: async () => (await this.#virtualSupermarketSnapshot(async (storefrontRevision) => {
+        const item = await this.store.getVirtualSupermarketProductByPublicationId(id)
+        if (!item) {
+          throw new AppError(404, 'virtual_supermarket_product_not_found', 'Virtual-supermarket product was not found')
+        }
+        return virtualSupermarketDetail(item, { storefrontRevision })
+      })).value,
+    })
+  }
+
+  async adminVirtualSupermarketMetadata() {
+    return (await this.#virtualSupermarketSnapshot(async (storefrontRevision) => (
+      virtualSupermarketMetadata(
+        await this.store.listVirtualSupermarketCategories({ includeArchived: true }),
+        { admin: true, storefrontRevision },
+      )
+    ))).value
+  }
+
+  async adminVirtualSupermarketCategories() {
+    const metadata = await this.adminVirtualSupermarketMetadata()
+    return {
+      contractVersion: VIRTUAL_SUPERMARKET_ADMIN_CONTRACT,
+      storefrontRevision: metadata.storefrontRevision,
+      items: metadata.categories,
+    }
+  }
+
+  async adminCreateVirtualSupermarketCategory(input, { actor = 'admin-token' } = {}) {
+    this.#assertVirtualSupermarketStore()
+    const result = await this.store.createVirtualSupermarketCategory(
+      normalizeVirtualSupermarketCategoryCreate(input),
+      { actor },
+    )
+    return {
+      contractVersion: VIRTUAL_SUPERMARKET_ADMIN_CONTRACT,
+      storefrontRevision: result.storefrontRevision,
+      item: virtualSupermarketCategoryResponse(result.item, { admin: true }),
+    }
+  }
+
+  async adminUpdateVirtualSupermarketCategory(idInput, input, { actor = 'admin-token' } = {}) {
+    this.#assertVirtualSupermarketStore()
+    const id = requiredUuid(idInput, 'categoryId')
+    const { expectedRevision, patch } = normalizeVirtualSupermarketCategoryPatch(input)
+    const result = await this.store.updateVirtualSupermarketCategory(id, patch, { expectedRevision, actor })
+    return {
+      contractVersion: VIRTUAL_SUPERMARKET_ADMIN_CONTRACT,
+      storefrontRevision: result.storefrontRevision,
+      item: virtualSupermarketCategoryResponse(result.item, { admin: true }),
+    }
+  }
+
+  async adminVirtualSupermarketProducts(queryInput) {
+    this.#assertVirtualSupermarketStore()
+    if (typeof this.store.getVirtualSupermarketInventoryRevision !== 'function') {
+      throw new AppError(503, 'inventory_revision_unavailable', 'Virtual-supermarket inventory revision is unavailable')
+    }
+    const [storefrontRevision, inventoryRevision] = await Promise.all([
+      this.store.getVirtualSupermarketStorefrontRevision(),
+      this.store.getVirtualSupermarketInventoryRevision(),
+    ])
+    const query = normalizeVirtualSupermarketQuery(queryInput, {
+      admin: true,
+      cursorSecret: this.apiKeyPepper,
+      storefrontRevision,
+      inventoryRevision,
+    })
+    return (await this.#virtualSupermarketSnapshot(async () => (
+      virtualSupermarketPage(
+        await this.store.listVirtualSupermarketProducts({
+          ...query.filters,
+          sort: query.sort,
+          pageSize: query.pageSize,
+          offset: query.offset,
+          includeGovernanceEvidence: true,
+        }),
+        query,
+        this.apiKeyPepper,
+        { admin: true },
+      )
+    ), query.storefrontRevision, query.inventoryRevision)).value
+  }
+
+  async adminVirtualSupermarketProduct(idInput) {
+    const id = requiredUuid(idInput, 'productId')
+    return (await this.#virtualSupermarketSnapshot(async (storefrontRevision) => {
+      const item = await this.store.getVirtualSupermarketProduct(id)
+      if (!item) {
+        throw new AppError(404, 'virtual_supermarket_product_not_found', 'Virtual-supermarket product was not found')
+      }
+      return virtualSupermarketDetail(item, { admin: true, storefrontRevision })
+    })).value
+  }
+
+  async adminUpdateVirtualSupermarketProduct(idInput, input, { actor = 'admin-token' } = {}) {
+    this.#assertVirtualSupermarketStore()
+    const id = requiredUuid(idInput, 'productId')
+    const { expectedRevision, patch, reason } = normalizeVirtualSupermarketProductPatch(input)
+    const result = await this.store.updateVirtualSupermarketProduct(id, patch, {
+      expectedRevision,
+      actor,
+      eventType: 'update',
+      reason,
+    })
+    return virtualSupermarketDetail(result.item, {
+      admin: true,
+      storefrontRevision: result.storefrontRevision,
+    })
+  }
+
+  async adminPublishVirtualSupermarketProduct(idInput, input, {
+    actor = 'admin-token',
+    publish = true,
+  } = {}) {
+    this.#assertVirtualSupermarketStore()
+    const id = requiredUuid(idInput, 'productId')
+    const { expectedRevision, reason } = normalizeVirtualSupermarketPublication(input)
+    const result = await this.store.updateVirtualSupermarketProduct(
+      id,
+      { status: publish ? 'on_shelf' : 'off_shelf' },
+      {
+        expectedRevision,
+        actor,
+        eventType: publish ? 'publish' : 'unpublish',
+        reason,
+      },
+    )
+    return virtualSupermarketDetail(result.item, {
+      admin: true,
+      storefrontRevision: result.storefrontRevision,
+    })
+  }
+
+  async adminVirtualSupermarketProductEvents(idInput) {
+    this.#assertVirtualSupermarketStore()
+    const id = requiredUuid(idInput, 'productId')
+    return (await this.#virtualSupermarketSnapshot(async (storefrontRevision) => {
+      const item = await this.store.getVirtualSupermarketProduct(id)
+      if (!item) {
+        throw new AppError(404, 'virtual_supermarket_product_not_found', 'Virtual-supermarket product was not found')
+      }
+      return {
+        contractVersion: VIRTUAL_SUPERMARKET_ADMIN_CONTRACT,
+        storefrontRevision,
+        items: await this.store.listVirtualSupermarketProductEvents(id),
+      }
+    })).value
   }
 
   async publicOpinionRegion(context, regionInput, queryInput) {

@@ -46,6 +46,7 @@ import {
   PublicOpinionPage,
   TelegramPage,
 } from './pages-data-products.jsx'
+import { VirtualSupermarketPage } from './pages-virtual-supermarket.jsx'
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
 import { AgentProxyPage, AgentSequencePage } from './pages-agent-center.tsx'
 
@@ -291,6 +292,7 @@ const ROUTES = [
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/virtual-supermarket', label: '虚拟超市', description: '逛货架与商品上架状态', icon: Storefront, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: VirtualSupermarketPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/database-connections', label: '数据库配置', description: '共享只读 PostgreSQL 连接', icon: Key, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DatabaseConnectionsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/sources', label: '清洗任务计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },

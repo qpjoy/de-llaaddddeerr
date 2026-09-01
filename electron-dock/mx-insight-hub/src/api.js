@@ -310,6 +310,45 @@ export const adminApi = {
     `${ADMIN_ROOT}/data-products/public-opinion/records/${encodeURIComponent(id)}`,
     { query },
   ),
+  dataProductVirtualSupermarketMetadata: (token) => request(
+    token, `${ADMIN_ROOT}/data-products/virtual-supermarket/metadata`,
+  ),
+  dataProductVirtualSupermarketCategories: (token, query = {}) => request(
+    token, `${ADMIN_ROOT}/data-products/virtual-supermarket/categories`, { query },
+  ),
+  createDataProductVirtualSupermarketCategory: (token, body) => request(
+    token, `${ADMIN_ROOT}/data-products/virtual-supermarket/categories`, { method: 'POST', body },
+  ),
+  updateDataProductVirtualSupermarketCategory: (token, id, body) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/virtual-supermarket/categories/${encodeURIComponent(id)}`,
+    { method: 'PATCH', body },
+  ),
+  dataProductVirtualSupermarketProducts: (token, query = {}) => request(
+    token, `${ADMIN_ROOT}/data-products/virtual-supermarket/products`, { query },
+  ),
+  dataProductVirtualSupermarketProduct: (token, id) => request(
+    token, `${ADMIN_ROOT}/data-products/virtual-supermarket/products/${encodeURIComponent(id)}`,
+  ),
+  updateDataProductVirtualSupermarketProduct: (token, id, body) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/virtual-supermarket/products/${encodeURIComponent(id)}`,
+    { method: 'PATCH', body },
+  ),
+  publishDataProductVirtualSupermarketProduct: (token, id, body) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/virtual-supermarket/products/${encodeURIComponent(id)}/publish`,
+    { method: 'POST', body },
+  ),
+  unpublishDataProductVirtualSupermarketProduct: (token, id, body) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/virtual-supermarket/products/${encodeURIComponent(id)}/unpublish`,
+    { method: 'POST', body },
+  ),
+  dataProductVirtualSupermarketEvents: (token, id) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/virtual-supermarket/products/${encodeURIComponent(id)}/events`,
+  ),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },

@@ -95,6 +95,13 @@ function queryFilters(searchParams) {
   }
 }
 
+function requireNoQuery(searchParams, label) {
+  const unsupported = [...new Set(searchParams.keys())]
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_fields', `Unsupported ${label} query fields: ${unsupported.join(', ')}`)
+  }
+}
+
 function adminCredential(request) {
   const value = request.headers['x-mx-insight-admin-token']
   return (typeof value === 'string' && value) || bearerToken(request)
@@ -1220,6 +1227,137 @@ export function createApp({
             ...catalog,
             searchCapabilities: capabilities,
           },
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'GET'
+        && pathname === '/internal/v1/admin/data-products/virtual-supermarket/metadata'
+      ) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'virtual-supermarket metadata')
+        sendJson(response, 200, {
+          data: await service.adminVirtualSupermarketMetadata(),
+          requestId,
+        })
+        return
+      }
+      if (pathname === '/internal/v1/admin/data-products/virtual-supermarket/categories') {
+        requireSourceAdmin(principal)
+        if (request.method === 'GET') {
+          sendJson(response, 200, {
+            data: await service.adminVirtualSupermarketCategories(),
+            requestId,
+          })
+          return
+        }
+        if (request.method === 'POST') {
+          sendJson(response, 201, {
+            data: await service.adminCreateVirtualSupermarketCategory(
+              await readJson(request),
+              { actor: principal.memberId || principal.kind || 'admin-token' },
+            ),
+            requestId,
+          })
+          return
+        }
+      }
+      let virtualSupermarketParams = routeMatch(
+        pathname,
+        '/internal/v1/admin/data-products/virtual-supermarket/categories/:id',
+      )
+      if (request.method === 'PATCH' && virtualSupermarketParams) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminUpdateVirtualSupermarketCategory(
+            virtualSupermarketParams.id,
+            await readJson(request),
+            { actor: principal.memberId || principal.kind || 'admin-token' },
+          ),
+          requestId,
+        })
+        return
+      }
+      if (
+        request.method === 'GET'
+        && pathname === '/internal/v1/admin/data-products/virtual-supermarket/products'
+      ) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminVirtualSupermarketProducts(
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      virtualSupermarketParams = routeMatch(
+        pathname,
+        '/internal/v1/admin/data-products/virtual-supermarket/products/:id/publish',
+      )
+      if (request.method === 'POST' && virtualSupermarketParams) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminPublishVirtualSupermarketProduct(
+            virtualSupermarketParams.id,
+            await readJson(request),
+            {
+              actor: principal.memberId || principal.kind || 'admin-token',
+              publish: true,
+            },
+          ),
+          requestId,
+        })
+        return
+      }
+      virtualSupermarketParams = routeMatch(
+        pathname,
+        '/internal/v1/admin/data-products/virtual-supermarket/products/:id/unpublish',
+      )
+      if (request.method === 'POST' && virtualSupermarketParams) {
+        requireSourceAdmin(principal)
+        sendJson(response, 200, {
+          data: await service.adminPublishVirtualSupermarketProduct(
+            virtualSupermarketParams.id,
+            await readJson(request),
+            {
+              actor: principal.memberId || principal.kind || 'admin-token',
+              publish: false,
+            },
+          ),
+          requestId,
+        })
+        return
+      }
+      virtualSupermarketParams = routeMatch(
+        pathname,
+        '/internal/v1/admin/data-products/virtual-supermarket/products/:id/events',
+      )
+      if (request.method === 'GET' && virtualSupermarketParams) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'virtual-supermarket events')
+        sendJson(response, 200, {
+          data: await service.adminVirtualSupermarketProductEvents(virtualSupermarketParams.id),
+          requestId,
+        })
+        return
+      }
+      virtualSupermarketParams = routeMatch(
+        pathname,
+        '/internal/v1/admin/data-products/virtual-supermarket/products/:id',
+      )
+      if (virtualSupermarketParams && ['GET', 'PATCH'].includes(request.method)) {
+        requireSourceAdmin(principal)
+        if (request.method === 'GET') requireNoQuery(searchParams, 'virtual-supermarket detail')
+        sendJson(response, 200, {
+          data: request.method === 'GET'
+            ? await service.adminVirtualSupermarketProduct(virtualSupermarketParams.id)
+            : await service.adminUpdateVirtualSupermarketProduct(
+                virtualSupermarketParams.id,
+                await readJson(request),
+                { actor: principal.memberId || principal.kind || 'admin-token' },
+              ),
           requestId,
         })
         return
@@ -3863,6 +4001,50 @@ export function createApp({
             context,
             Object.fromEntries(searchParams.entries()),
           ),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/virtual-supermarket/metadata') {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'virtual-supermarket metadata')
+        sendJson(response, 200, {
+          data: await service.virtualSupermarketMetadata(context),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/virtual-supermarket/products') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.virtualSupermarketProducts(
+            context,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/virtual-supermarket/search') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.virtualSupermarketSearch(
+            context,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
+      virtualSupermarketParams = routeMatch(
+        pathname,
+        '/api/v1/data/virtual-supermarket/products/:id',
+      )
+      if (request.method === 'GET' && virtualSupermarketParams) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'virtual-supermarket detail')
+        sendJson(response, 200, {
+          data: await service.virtualSupermarketProduct(context, virtualSupermarketParams.id),
           requestId,
         })
         return

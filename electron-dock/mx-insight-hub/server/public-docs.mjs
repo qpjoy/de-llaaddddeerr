@@ -4,7 +4,7 @@ import {
   searchCapabilities,
 } from './search/profiles.mjs'
 
-export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
+export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','virtual-supermarket':'/docs/virtual-supermarket',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
 
 const PUBLIC_SEARCH_PROFILE_IDS = Object.freeze(
   searchCapabilities({ audience: 'public' }).profiles.map((profile) => profile.id),
@@ -164,6 +164,43 @@ const mobileCommerceQueryParameters = [
   {
     name: 'cursor', in: 'query', required: false,
     description: 'HMAC-signed keyset cursor bound to all normalized filters and pageSize.',
+    schema: { type: 'string', minLength: 1, maxLength: 2048 },
+  },
+]
+
+const virtualSupermarketQueryParameters = [
+  {
+    name: 'categoryId', in: 'query', required: false,
+    description: 'Exact active virtual-supermarket category UUID returned by metadata.',
+    schema: { type: 'string', format: 'uuid' },
+  },
+  ...['department', 'aisle', 'shelf'].map((name) => ({
+    name, in: 'query', required: false,
+    description: `Exact semantic ${name} key returned by virtual-supermarket metadata.`,
+    schema: { type: 'string', minLength: 1, maxLength: 128 },
+  })),
+  {
+    name: 'marketplace', in: 'query', required: false,
+    description: 'Exact customer-safe marketplace display value.',
+    schema: { type: 'string', minLength: 1, maxLength: 160 },
+  },
+  {
+    name: 'query', in: 'query', required: false,
+    description: 'Customer-safe product text search. Required on the dedicated search route.',
+    schema: { type: 'string', minLength: 1, maxLength: 240 },
+  },
+  {
+    name: 'sort', in: 'query', required: false,
+    schema: { type: 'string', enum: ['newest', 'title_asc', 'price_asc', 'price_desc'], default: 'newest' },
+  },
+  {
+    name: 'pageSize', in: 'query', required: false,
+    description: 'Defaults to 24; maximum 100, and the virtual_supermarket policy may impose a lower limit.',
+    schema: { type: 'integer', minimum: 1, maximum: 100, default: 24 },
+  },
+  {
+    name: 'cursor', in: 'query', required: false,
+    description: 'Opaque signed cursor bound to every normalized filter, sort, pageSize and storefrontRevision.',
     schema: { type: 'string', minLength: 1, maxLength: 2048 },
   },
 ]
@@ -552,6 +589,33 @@ const mobileCommercePageResponse = {
   },
 }
 
+const virtualSupermarketMetadataResponse = {
+  description: 'Customer-safe semantic storefront metadata for all three render modes.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/VirtualSupermarketMetadataEnvelope' },
+    },
+  },
+}
+
+const virtualSupermarketPageResponse = {
+  description: 'One on-shelf-only page from a single virtual-supermarket storefront revision.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/VirtualSupermarketPageEnvelope' },
+    },
+  },
+}
+
+const virtualSupermarketDetailResponse = {
+  description: 'One on-shelf customer-safe virtual-supermarket product.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/VirtualSupermarketDetailEnvelope' },
+    },
+  },
+}
+
 export const PUBLIC_OPENAPI_DOCUMENT = {
   openapi: '3.1.0',
   info: {
@@ -567,6 +631,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     { name: 'Discovery', description: 'Discover the caller\'s granted platform capabilities.' },
     { name: 'Source Catalog', description: 'Reconstruct the active governed source catalog, filters, taxonomy, owners and status summary.' },
     { name: 'Mobile Commerce', description: 'Read stored mobile-collector commerce captures and their governed source-catalog classification.' },
+    { name: 'Virtual Supermarket', description: 'Reconstruct the on-shelf Hub storefront using semantic department, aisle, shelf and position data.' },
     { name: 'Search', description: 'Idempotent content search.' },
     { name: 'Compatibility', description: 'Temporary Night-All legacy routes with durable Hub evidence and exact last-good fallback.' },
     { name: 'Tools', description: 'Granted platform-independent processing capabilities.' },
@@ -647,6 +712,17 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         platform: 'source_catalog',
                         ready: true,
                         capabilities: ['catalog_entries', 'catalog_metadata', 'catalog_detail', 'filtered_browse'],
+                        source: 'hub',
+                        servingMode: 'stored',
+                      },
+                      {
+                        platform: 'virtual_supermarket',
+                        ready: true,
+                        capabilities: [
+                          'metadata', 'products', 'product_detail', 'stored_search',
+                          'category_filter', 'department_filter', 'aisle_filter',
+                          'shelf_filter', 'marketplace_filter',
+                        ],
                         source: 'hub',
                         servingMode: 'stored',
                       },
@@ -868,6 +944,87 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         },
         parameters: mobileCommerceQueryParameters,
         responses: { 200: mobileCommercePageResponse, ...publicErrors },
+      },
+    },
+    '/data/virtual-supermarket/metadata': {
+      get: {
+        tags: ['Virtual Supermarket'],
+        operationId: 'getVirtualSupermarketMetadata',
+        summary: 'Read the semantic virtual-supermarket storefront model',
+        description: 'Requires the independent virtual_supermarket platform grant. Returns the same ordered department, aisle, shelf and category semantics used by guided browse, panorama and catalog modes. Panorama is a client renderer; this response never exposes WebGL coordinates, camera, mesh, material, lighting or other renderer state. storefrontRevision identifies the complete current publication surface. The response does not expose capture rows, task/run data, source connections, management state or credentials.',
+        'x-mx-allowed-query-fields': [],
+        'x-mx-error-codes': {
+          400: ['unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: [],
+        responses: { 200: virtualSupermarketMetadataResponse, ...publicErrors },
+      },
+    },
+    '/data/virtual-supermarket/products': {
+      get: {
+        tags: ['Virtual Supermarket'],
+        operationId: 'listVirtualSupermarketProducts',
+        summary: 'Browse on-shelf virtual-supermarket products',
+        description: 'Requires the independent virtual_supermarket platform grant. Returns only explicitly published on-shelf Hub publication overlays with independent publication UUIDs; capture/canonical row IDs are never exposed or accepted as product IDs. unpublishing never deletes the referenced canonical capture. placement contains semantic department/aisle/shelf/position values rather than renderer coordinates. sort defaults to newest; v1 has no server-side merchandising sort. The signed cursor is bound to all filters, sort, pageSize and storefrontRevision. A revision change returns storefront_revision_changed instead of silently combining snapshots. Raw captures, task/run/campaign data, share payloads, arbitrary metadata, device/report fields, management actors and physical storage/search controls are excluded.',
+        'x-mx-allowed-query-fields': virtualSupermarketQueryParameters.map(({ name }) => name),
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          409: ['storefront_revision_changed'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: virtualSupermarketQueryParameters,
+        responses: { 200: virtualSupermarketPageResponse, ...publicErrors },
+      },
+    },
+    '/data/virtual-supermarket/products/{id}': {
+      get: {
+        tags: ['Virtual Supermarket'],
+        operationId: 'getVirtualSupermarketProduct',
+        summary: 'Read one on-shelf virtual-supermarket product',
+        description: 'Requires the independent virtual_supermarket platform grant. The path UUID is the independent Hub publication UUID returned by product list or search, never a mobile-commerce capture/canonical row ID. Unknown, off-shelf and archived publications all return the same not-found error and do not reveal internal state. The response uses the same customer-safe product allowlist as list/search and includes the current storefrontRevision.',
+        'x-mx-allowed-query-fields': [],
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          404: ['virtual_supermarket_product_not_found'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: [{
+          name: 'id', in: 'path', required: true,
+          description: 'Exact Hub publication UUID returned by product browse or search.',
+          schema: { type: 'string', format: 'uuid' },
+        }],
+        responses: { 200: virtualSupermarketDetailResponse, ...publicErrors },
+      },
+    },
+    '/data/virtual-supermarket/search': {
+      get: {
+        tags: ['Virtual Supermarket'],
+        operationId: 'searchVirtualSupermarketProducts',
+        summary: 'Search on-shelf virtual-supermarket products',
+        description: 'Requires the independent virtual_supermarket platform grant and a non-blank query. Returns the same on-shelf product projection and cursor/revision semantics as browse. The caller cannot select an Elasticsearch index, field, analyzer, DSL, script or boost. Every GET and retry is separately metered.',
+        'x-mx-allowed-query-fields': virtualSupermarketQueryParameters.map(({ name }) => name),
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          409: ['storefront_revision_changed'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: virtualSupermarketQueryParameters.map((parameter) => (
+          parameter.name === 'query' ? { ...parameter, required: true } : parameter
+        )),
+        responses: { 200: virtualSupermarketPageResponse, ...publicErrors },
       },
     },
     '/data/source-catalog': {
@@ -1982,7 +2139,10 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         additionalProperties: false,
         required: ['id', 'captureId', 'dataVersion', 'marketplace', 'task', 'product', 'shop', 'signals', 'collectedAt'],
         properties: {
-          id: { type: 'string', format: 'uuid' },
+          id: {
+            type: 'string',
+            format: 'uuid',
+          },
           captureId: { type: ['string', 'null'] },
           dataVersion: { type: 'string' },
           marketplace: { $ref: '#/components/schemas/MobileCommerceMarketplace' },
@@ -2081,6 +2241,275 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         required: ['data', 'requestId'],
         properties: {
           data: { $ref: '#/components/schemas/MobileCommercePage' },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      VirtualSupermarketPlacementPart: {
+        type: 'object', additionalProperties: false,
+        required: ['key', 'name', 'sortOrder'],
+        properties: {
+          key: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 160 },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+        },
+      },
+      VirtualSupermarketCategory: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'key', 'name', 'sortOrder', 'department', 'aisle', 'shelf', 'revision', 'updatedAt'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          key: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 160 },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+          department: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+          aisle: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+          shelf: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+          revision: { type: 'integer', minimum: 1 },
+          updatedAt: { type: ['string', 'null'], format: 'date-time' },
+        },
+      },
+      VirtualSupermarketShelf: {
+        type: 'object', additionalProperties: false,
+        required: ['key', 'name', 'sortOrder', 'categories'],
+        properties: {
+          key: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 160 },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+          categories: {
+            type: 'array',
+            items: {
+              type: 'object', additionalProperties: false,
+              required: ['id', 'key', 'name', 'sortOrder'],
+              properties: {
+                id: { type: 'string', format: 'uuid' },
+                key: { type: 'string', minLength: 1, maxLength: 128 },
+                name: { type: 'string', minLength: 1, maxLength: 160 },
+                sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+              },
+            },
+          },
+        },
+      },
+      VirtualSupermarketAisle: {
+        type: 'object', additionalProperties: false,
+        required: ['key', 'name', 'sortOrder', 'shelves'],
+        properties: {
+          key: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 160 },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+          shelves: { type: 'array', items: { $ref: '#/components/schemas/VirtualSupermarketShelf' } },
+        },
+      },
+      VirtualSupermarketDepartment: {
+        type: 'object', additionalProperties: false,
+        required: ['key', 'name', 'sortOrder', 'aisles'],
+        properties: {
+          key: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 160 },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+          aisles: { type: 'array', items: { $ref: '#/components/schemas/VirtualSupermarketAisle' } },
+        },
+      },
+      VirtualSupermarketMetadata: {
+        type: 'object', additionalProperties: false,
+        required: [
+          'contractVersion', 'platform', 'sourceMode', 'storefrontRevision',
+          'catalogRevision', 'categories', 'departments', 'supportedSorts',
+        ],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.virtual-supermarket.v1' },
+          platform: { type: 'string', const: 'virtual_supermarket' },
+          sourceMode: { type: 'string', const: 'stored' },
+          storefrontRevision: { type: 'integer', minimum: 1 },
+          catalogRevision: { type: 'string', pattern: '^sha256:[0-9a-f]{64}$' },
+          categories: { type: 'array', items: { $ref: '#/components/schemas/VirtualSupermarketCategory' } },
+          departments: { type: 'array', items: { $ref: '#/components/schemas/VirtualSupermarketDepartment' } },
+          supportedSorts: {
+            type: 'array', const: ['newest', 'title_asc', 'price_asc', 'price_desc'],
+          },
+        },
+      },
+      VirtualSupermarketMetadataEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: { $ref: '#/components/schemas/VirtualSupermarketMetadata' },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      VirtualSupermarketMarketplace: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'name'],
+        properties: {
+          id: {
+            type: ['string', 'null'],
+            format: 'uuid',
+            description: 'Reviewed public marketplace-directory UUID, or null when no approved mapping exists.',
+          },
+          name: {
+            type: ['string', 'null'],
+            description: 'Reviewed public marketplace name, or null when no approved mapping exists.',
+          },
+        },
+      },
+      VirtualSupermarketPrice: {
+        type: 'object', additionalProperties: false,
+        required: ['amount', 'currency', 'display', 'provenance'],
+        properties: {
+          amount: {
+            type: ['string', 'null'],
+            pattern: '^(?:0|[1-9]\\d{0,17})(?:\\.\\d{1,2})?$',
+            description: 'Normalized decimal amount when the source or curated override is valid.',
+          },
+          currency: {
+            type: ['string', 'null'],
+            pattern: '^[A-Z]{3}$',
+            description: 'Reviewed ISO currency for a curated override. Source prices keep null because the fixed source has no currency field.',
+          },
+          display: {
+            type: ['string', 'null'],
+            description: 'Customer-facing source or curated price text; it does not imply a currency.',
+          },
+          provenance: { type: 'string', enum: ['curated', 'source', 'missing'] },
+        },
+      },
+      VirtualSupermarketProduct: {
+        type: 'object', additionalProperties: false,
+        required: [
+          'id', 'dataVersion', 'listing', 'placement', 'category', 'marketplace',
+          'product', 'shop', 'signals', 'collectedAt',
+        ],
+        properties: {
+          id: {
+            type: 'string',
+            format: 'uuid',
+            description: 'Stable Hub publication UUID; independently allocated and never the mobile-commerce capture/canonical row UUID.',
+          },
+          dataVersion: { type: 'string', pattern: '^\\d+:\\d+$' },
+          listing: {
+            type: 'object', additionalProperties: false,
+            required: ['status', 'revision'],
+            properties: {
+              status: { type: 'string', const: 'on_shelf' },
+              revision: { type: 'integer', minimum: 1 },
+            },
+          },
+          placement: {
+            type: 'object', additionalProperties: false,
+            required: ['department', 'aisle', 'shelf', 'position'],
+            properties: {
+              department: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+              aisle: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+              shelf: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+              position: { type: ['integer', 'null'], minimum: 0, maximum: 1_000_000 },
+            },
+          },
+          category: {
+            type: 'object', additionalProperties: false,
+            required: ['id', 'key', 'name', 'sortOrder'],
+            properties: {
+              id: { type: 'string', format: 'uuid' },
+              key: { type: 'string', minLength: 1, maxLength: 128 },
+              name: { type: 'string', minLength: 1, maxLength: 160 },
+              sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+            },
+          },
+          marketplace: { $ref: '#/components/schemas/VirtualSupermarketMarketplace' },
+          product: {
+            type: 'object', additionalProperties: false,
+            required: ['title', 'specification', 'price', 'provenance'],
+            properties: {
+              title: { type: ['string', 'null'] },
+              specification: { type: ['string', 'null'] },
+              price: { $ref: '#/components/schemas/VirtualSupermarketPrice' },
+              provenance: {
+                type: 'object', additionalProperties: false,
+                required: ['title', 'specification', 'price'],
+                properties: {
+                  title: { type: 'string', enum: ['curated', 'source', 'missing'] },
+                  specification: { type: 'string', enum: ['curated', 'missing'] },
+                  price: { type: 'string', enum: ['curated', 'source', 'missing'] },
+                },
+              },
+            },
+          },
+          shop: {
+            type: 'object', additionalProperties: false,
+            required: ['name'],
+            properties: {
+              name: { type: ['string', 'null'] },
+            },
+          },
+          signals: {
+            type: 'object', additionalProperties: false,
+            required: ['sales'],
+            properties: { sales: { type: ['string', 'null'] } },
+          },
+          collectedAt: { type: ['string', 'null'], format: 'date-time' },
+        },
+      },
+      VirtualSupermarketFilters: {
+        type: 'object', additionalProperties: false,
+        required: ['status', 'categoryId', 'department', 'aisle', 'shelf', 'marketplace', 'query', 'sort'],
+        properties: {
+          status: { type: 'string', const: 'on_shelf' },
+          categoryId: { type: ['string', 'null'], format: 'uuid' },
+          department: { type: ['string', 'null'], maxLength: 128 },
+          aisle: { type: ['string', 'null'], maxLength: 128 },
+          shelf: { type: ['string', 'null'], maxLength: 128 },
+          marketplace: { type: ['string', 'null'], maxLength: 160 },
+          query: { type: ['string', 'null'], maxLength: 240 },
+          sort: { type: 'string', enum: ['newest', 'title_asc', 'price_asc', 'price_desc'] },
+        },
+      },
+      VirtualSupermarketPage: {
+        type: 'object', additionalProperties: false,
+        required: [
+          'contractVersion', 'platform', 'sourceMode', 'storefrontRevision',
+          'filters', 'items', 'pageInfo',
+        ],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.virtual-supermarket.v1' },
+          platform: { type: 'string', const: 'virtual_supermarket' },
+          sourceMode: { type: 'string', const: 'stored' },
+          storefrontRevision: { type: 'integer', minimum: 1 },
+          filters: { $ref: '#/components/schemas/VirtualSupermarketFilters' },
+          items: { type: 'array', maxItems: 100, items: { $ref: '#/components/schemas/VirtualSupermarketProduct' } },
+          pageInfo: {
+            type: 'object', additionalProperties: false,
+            required: ['returnedCount', 'hasMore', 'nextCursor'],
+            properties: {
+              returnedCount: { type: 'integer', minimum: 0, maximum: 100 },
+              hasMore: { type: 'boolean' },
+              nextCursor: { type: ['string', 'null'], maxLength: 2048 },
+            },
+          },
+        },
+      },
+      VirtualSupermarketPageEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: { $ref: '#/components/schemas/VirtualSupermarketPage' },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      VirtualSupermarketDetail: {
+        type: 'object', additionalProperties: false,
+        required: ['contractVersion', 'platform', 'sourceMode', 'storefrontRevision', 'item'],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.virtual-supermarket.v1' },
+          platform: { type: 'string', const: 'virtual_supermarket' },
+          sourceMode: { type: 'string', const: 'stored' },
+          storefrontRevision: { type: 'integer', minimum: 1 },
+          item: { $ref: '#/components/schemas/VirtualSupermarketProduct' },
+        },
+      },
+      VirtualSupermarketDetailEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: { $ref: '#/components/schemas/VirtualSupermarketDetail' },
           requestId: { type: 'string', minLength: 1 },
         },
       },
@@ -3050,6 +3479,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'start', path: '/docs', label: '开始调用' },
   { key: 'rules', path: '/docs/auth', label: '认证与调用规则' },
   { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录' },
+  { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话' },
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情' },
   { key: 'search', path: '/docs/search', label: '通用搜索' },
@@ -3238,6 +3668,43 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
       <tr><td>429</td><td><code>quota_exceeded</code></td><td>等待 platform policy 的计量窗口恢复。</td></tr>
       <tr><td>503</td><td><code>stored_data_unavailable</code></td><td>安全 GET 可稍后重试；保留错误响应的 <code>requestId</code> 供排查。</td></tr>
     </tbody></table>
+    </section>
+
+    <section class="doc-page" data-doc-page="virtual-supermarket">
+    <h2 id="virtual-supermarket">虚拟超市</h2>
+    <div class="notice">虚拟超市是 Hub 拥有的商品发布产品，要求独立 <code>virtual_supermarket</code> platform grant。<code>mobile_commerce</code> 采集读和 <code>source_catalog</code> 源目录读都不会隐式授予该产品，反向也不成立。</div>
+    <p>同一份发布快照支持“逛超市”、“超市全景”和“目录模式”。全景只是客户端 renderer；API 只返回 <code>department / aisle / shelf / position</code> 语义和顺序，不返回 WebGL 坐标、摄像机、网格、材质或灯光。外部应用可用 2D、可访问目录或自己的 3D renderer 复刻业务等价超市。</p>
+    <h3>1. 授权预检</h3>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/capabilities" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  | jq '.data.platforms[] | select(.platform == "virtual_supermarket")'</code></pre>
+    <p>已授权且存储面就绪时，该项使用 <code>source=hub</code>、<code>servingMode=stored</code>，并广告 <code>metadata</code>、<code>products</code>、<code>product_detail</code>、<code>stored_search</code> 与已实现的语义筛选能力。Public 不广告上下架、分类编辑或远程手机采集。</p>
+    <h3>2. 读取超市语义</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/virtual-supermarket/metadata</code></div><p>返回 <code>mx-insight-hub.data-products.virtual-supermarket.v1</code>、<code>storefrontRevision</code>、分类与有序 department/aisle/shelf 结构。</p></div>
+    <pre><code>MARKET_META=$(curl -sS "$HUB_URL/api/v1/data/virtual-supermarket/metadata" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY")
+printf '%s\n' "$MARKET_META" | jq '{contractVersion:.data.contractVersion,storefrontRevision:.data.storefrontRevision,departments:.data.departments,requestId}'</code></pre>
+    <h3>3. 逛货架与读详情</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/virtual-supermarket/products</code></div><p>只返回已显式上架的安全商品投影。支持 <code>categoryId</code>、<code>department</code>、<code>aisle</code>、<code>shelf</code>、<code>marketplace</code>、<code>query</code>、<code>sort</code>、<code>pageSize</code> 和 <code>cursor</code>；<code>sort</code> 默认 <code>newest</code>，且只能是 <code>newest|title_asc|price_asc|price_desc</code>，v1 不提供服务端货架陈列排序。</p></div>
+    <pre><code>PRODUCT_PAGE=$(curl -sS -G "$HUB_URL/api/v1/data/virtual-supermarket/products" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'department=home-care' \
+  --data-urlencode 'aisle=laundry' \
+  --data-urlencode 'sort=newest' \
+  --data-urlencode 'pageSize=24')
+printf '%s\n' "$PRODUCT_PAGE" | jq '{storefrontRevision:.data.storefrontRevision,items:.data.items,pageInfo:.data.pageInfo,requestId}'</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/virtual-supermarket/products/{id}</code></div><p>用列表返回的独立 Hub publication UUID 读取同一 allowlist 详情；它不是 mobile-commerce capture/canonical row ID。下架、归档或不存在都返回 <code>404 virtual_supermarket_product_not_found</code>，不暴露内部状态。</p></div>
+    <h3>4. 搜索已上架商品</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/virtual-supermarket/search?query=婴儿洗衣液</code></div><p><code>query</code> 必填，其余 filters/cursor 与 products 一致。调用方不能选择 Elasticsearch index、field、analyzer、DSL、script 或 boost。</p></div>
+    <pre><code>curl -sS -G "$HUB_URL/api/v1/data/virtual-supermarket/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'query=婴儿洗衣液' \
+  --data-urlencode 'sort=price_asc' \
+  --data-urlencode 'pageSize=20' | jq</code></pre>
+    <div class="notice"><code>storefrontRevision</code> 会随分类和商品发布面变更。不透明 cursor 绑定完整 filters、sort、pageSize 和该 revision；条件改变后必须从首页开始。当 revision 已变更且旧快照不再可服务时，Hub 返回 <code>409 storefront_revision_changed</code>，不静默混页。</div>
+    <h3>5. 外部复刻流程</h3>
+    <p>先读取 metadata 并记录 <code>storefrontRevision</code>；再按默认 <code>sort=newest</code> 从无 cursor 的 products 首页逐页读取到 <code>nextCursor=null</code>。所有页面必须与 metadata 保持同一 revision；不一致或遇到 409 时丢弃未完成本地快照，重新读取 metadata 和首页。完整取回后，按 metadata 的 department/aisle/shelf/category <code>sortOrder</code> 与 item <code>placement.position</code> 在客户端陈列，position 相同或为空时用 publication UUID 稳定打破平局。调用方可选择 2D、3D 或可访问目录 renderer，但不能从 API 的 newest 分页顺序或 WebGL 坐标反推业务货架顺序。</p>
+    <p>响应不包含 capture/source-row ID、marketplace product/shop source ID、marketplace raw label/映射状态/内部 source key、task/run/campaign、raw tags/share payload、metadata/device/<code>is_reported</code>、source profile/table/checkpoint、Admin audit 或凭据。公开 marketplace 只有经审核的 <code>{id,name}</code>；未有 approved mapping 时二者均为 null。价格 amount 使用 decimal string，并返回 display/provenance；当前固定源没有 currency 字段，所以 source price 的 <code>currency=null</code>，不能猜成 CNY，只有人工 curated override 才携带已审核的三位 ISO currency。外层 <code>collectedAt</code> 是观测时间，不是实时交易报价；v1 不发布 brand 或 media 字段，未审核规格保持 null，当前源无图片时不伪造商品图。下架仅改变 storefront overlay，不删除 canonical capture。</p>
     </section>
 
     <section class="doc-page" data-doc-page="search">

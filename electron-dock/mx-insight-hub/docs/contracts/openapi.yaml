@@ -1621,6 +1621,11 @@ paths:
                       capabilities: [catalog_entries, catalog_metadata, catalog_detail, filtered_browse]
                       source: hub
                       servingMode: stored
+                    - platform: virtual_supermarket
+                      ready: true
+                      capabilities: [metadata, products, product_detail, stored_search, category_filter, department_filter, aisle_filter, shelf_filter, marketplace_filter]
+                      source: hub
+                      servingMode: stored
                     - platform: xiaohongshu
                       ready: true
                     - platform: twitter
@@ -2039,6 +2044,212 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /data/mobile-commerce/items:
+    get:
+      operationId: listMobileCommerceItems
+      summary: List stored mobile-commerce captures.
+      description: >-
+        Requires the mobile_commerce platform grant. This existing v1 route
+        remains a capture-observation API and is not the virtual-supermarket
+        publication surface. It reads only committed Hub canonical data and
+        never invokes a marketplace or mobile collector. Raw rows, arbitrary
+        metadata, device/report fields, credentials and operational lineage are
+        excluded. refresh currently accepts only stored.
+      x-mx-allowed-query-fields: [sourcePlatform, catalogEntryId, keyword, brand, taskId, from, to, refresh, pageSize, cursor]
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "409": [remote_fetch_unavailable]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - { name: sourcePlatform, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 120 } }
+        - { name: catalogEntryId, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: keyword, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 240 } }
+        - { name: brand, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 240 } }
+        - { name: taskId, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 120 } }
+        - { name: from, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: false, schema: { type: string, format: date-time } }
+        - name: refresh
+          in: query
+          required: false
+          schema: { type: string, enum: [stored], default: stored }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 2048 }
+      responses:
+        "200":
+          description: A customer-safe stored page of mobile-commerce captures.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MobileCommercePageEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/virtual-supermarket/metadata:
+    get:
+      operationId: getVirtualSupermarketMetadata
+      summary: Read the semantic virtual-supermarket storefront model.
+      description: >-
+        Requires the independent virtual_supermarket platform grant. Returns
+        ordered department, aisle, shelf and category semantics shared by
+        guided browse, panorama and catalog modes. Panorama is a client
+        renderer; WebGL coordinates and renderer state are not exposed.
+      x-mx-allowed-query-fields: []
+      x-mx-error-codes:
+        "400": [unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      responses:
+        "200":
+          description: Customer-safe semantic storefront metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VirtualSupermarketMetadataEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/virtual-supermarket/products:
+    get:
+      operationId: listVirtualSupermarketProducts
+      summary: Browse on-shelf virtual-supermarket products.
+      description: >-
+        Requires the virtual_supermarket grant and returns only explicitly
+        published on-shelf safe projections with independent publication UUIDs;
+        capture/canonical row IDs are never exposed or accepted as product IDs.
+        Cursor state is bound to all filters, sort, page size and
+        storefrontRevision. Sort defaults to newest; v1 has no server-side
+        merchandising sort. Unpublishing never deletes the referenced canonical
+        capture.
+      x-mx-allowed-query-fields: [categoryId, department, aisle, shelf, marketplace, query, sort, pageSize, cursor]
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "409": [storefront_revision_changed]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - { name: categoryId, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: department, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 128 } }
+        - { name: aisle, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 128 } }
+        - { name: shelf, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 128 } }
+        - { name: marketplace, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 160 } }
+        - { name: query, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 240 } }
+        - name: sort
+          in: query
+          required: false
+          schema: { type: string, enum: [newest, title_asc, price_asc, price_desc], default: newest }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 24 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 2048 }
+      responses:
+        "200":
+          description: One on-shelf page from a single storefront revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VirtualSupermarketPageEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/virtual-supermarket/products/{id}:
+    get:
+      operationId: getVirtualSupermarketProduct
+      summary: Read one on-shelf virtual-supermarket product.
+      description: >-
+        The path UUID is the independent Hub publication UUID returned by list
+        or search, never a mobile-commerce capture/canonical row ID. Unknown,
+        off-shelf and archived publications return the same 404 and do not reveal
+        internal state. Uses the same safe projection as browse.
+      x-mx-allowed-query-fields: []
+      x-mx-error-codes:
+        "400": [invalid_request, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "404": [virtual_supermarket_product_not_found]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: One on-shelf customer-safe virtual-supermarket product.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VirtualSupermarketDetailEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/virtual-supermarket/search:
+    get:
+      operationId: searchVirtualSupermarketProducts
+      summary: Search on-shelf virtual-supermarket products.
+      description: >-
+        Requires a non-blank query and returns the same safe page/cursor
+        contract as browse. Physical Elasticsearch controls are not accepted.
+      x-mx-allowed-query-fields: [categoryId, department, aisle, shelf, marketplace, query, sort, pageSize, cursor]
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "409": [storefront_revision_changed]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable]
+      parameters:
+        - { name: categoryId, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: department, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 128 } }
+        - { name: aisle, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 128 } }
+        - { name: shelf, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 128 } }
+        - { name: marketplace, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 160 } }
+        - { name: query, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 240 } }
+        - name: sort
+          in: query
+          required: false
+          schema: { type: string, enum: [newest, title_asc, price_asc, price_desc], default: newest }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 24 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 2048 }
+      responses:
+        "200":
+          description: One on-shelf search page from a single storefront revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VirtualSupermarketPageEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /data/source-catalog:
     get:
       operationId: listSourceCatalogEntries
@@ -2151,6 +2362,39 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/source-catalog/{id}/items:
+    get:
+      operationId: listSourceCatalogItems
+      summary: List stored data classified under one source-catalog entry.
+      description: >-
+        Requires both source_catalog and mobile_commerce platform grants. The
+        path UUID is the governed classification boundary and is injected into
+        the query, so catalogEntryId is not accepted as a query field. P1 reads
+        only committed mobile-commerce captures with that reviewed mapping and
+        never triggers remote acquisition or infers classification from titles.
+      x-mx-allowed-query-fields: [sourcePlatform, keyword, brand, taskId, from, to, refresh, pageSize, cursor]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: sourcePlatform, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 120 } }
+        - { name: keyword, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 240 } }
+        - { name: brand, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 240 } }
+        - { name: taskId, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 120 } }
+        - { name: from, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: refresh, in: query, required: false, schema: { type: string, enum: [stored], default: stored } }
+        - { name: pageSize, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - { name: cursor, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 2048 } }
+      responses:
+        "200":
+          description: One catalog entry and its stored mobile-commerce data page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceCatalogItemsEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /data/source-catalog/metadata:
@@ -5638,6 +5882,26 @@ components:
         capturedAt: { type: string, format: date-time }
         reservedAt: { type: string, format: date-time }
         completedAt: { type: [string, "null"], format: date-time }
+    MobileCommerceMarketplace: {"type":"object","additionalProperties":false,"required":["sourceValue","mappingStatus","catalogEntryId","catalogSourceKey","catalogRevision","canonicalName","majorCategory","scenarios","regions"],"properties":{"sourceValue":{"type":["string","null"]},"mappingStatus":{"type":"string","enum":["mapped","unmapped"]},"catalogEntryId":{"type":["string","null"],"format":"uuid"},"catalogSourceKey":{"type":["string","null"]},"catalogRevision":{"type":["integer","null"],"minimum":1},"canonicalName":{"type":["string","null"]},"majorCategory":{"type":["string","null"]},"scenarios":{"type":"array","items":{"type":"string"}},"regions":{"type":"array","items":{"type":"string"}}}}
+    MobileCommerceItem: {"type":"object","additionalProperties":false,"required":["id","captureId","dataVersion","marketplace","task","product","shop","signals","collectedAt"],"properties":{"id":{"type":"string","format":"uuid"},"captureId":{"type":["string","null"]},"dataVersion":{"type":"string"},"marketplace":{"$ref":"#/components/schemas/MobileCommerceMarketplace"},"task":{"type":"object","additionalProperties":false,"required":["id","keyword","sourceBrandLabel"],"properties":{"id":{"type":["string","null"]},"keyword":{"type":["string","null"]},"sourceBrandLabel":{"type":["string","null"]}}},"product":{"type":"object","additionalProperties":false,"required":["goodsId","title","price","resolution"],"properties":{"goodsId":{"type":["string","null"]},"title":{"type":["string","null"]},"price":{"type":["string","null"]},"resolution":{"type":"string","enum":["source-goods-id","capture-only"]}}},"shop":{"type":"object","additionalProperties":false,"required":["id","name","level","fans","reputation"],"properties":{"id":{"type":["string","null"]},"name":{"type":["string","null"]},"level":{"type":["string","null"]},"fans":{"type":["string","null"]},"reputation":{"type":["string","null"]}}},"signals":{"type":"object","additionalProperties":false,"required":["sales","shipFrom","commentCount","goodRate","tagsText"],"properties":{"sales":{"type":["string","null"]},"shipFrom":{"type":["string","null"]},"commentCount":{"type":["string","null"]},"goodRate":{"type":["string","null"]},"tagsText":{"type":["string","null"]}}},"collectedAt":{"type":["string","null"],"format":"date-time"}}}
+    MobileCommercePage: {"type":"object","additionalProperties":false,"required":["contractVersion","sourceMode","acquisition","scope","filters","items","pageInfo"],"properties":{"contractVersion":{"type":"string","const":"mx-insight-hub.data-products.mobile-commerce-items.v1"},"sourceMode":{"type":"string","const":"stored"},"acquisition":{"type":"object","additionalProperties":false,"required":["remoteFetchAvailable","remoteFetchStatus","executionPlane","hubRole","plannedMode"],"properties":{"remoteFetchAvailable":{"type":"boolean","const":false},"remoteFetchStatus":{"type":"string","const":"reserved"},"executionPlane":{"type":"string","const":"external-mobile-collector"},"hubRole":{"type":"string","const":"asynchronous-trigger-and-data-api"},"plannedMode":{"type":"string","const":"asynchronous-command"}}},"scope":{"type":"object","additionalProperties":false,"required":["authorizationPlatform","datasetId","objectType"],"properties":{"authorizationPlatform":{"type":"string","const":"mobile_commerce"},"datasetId":{"type":"string","const":"mobile-commerce.collected-items.v1"},"objectType":{"type":"string","const":"commerce_capture"}}},"filters":{"type":"object","additionalProperties":false,"required":["sourcePlatform","catalogEntryId","keyword","brand","taskId","from","to"],"properties":{"sourcePlatform":{"type":["string","null"]},"catalogEntryId":{"type":["string","null"],"format":"uuid"},"keyword":{"type":["string","null"]},"brand":{"type":["string","null"]},"taskId":{"type":["string","null"]},"from":{"type":["string","null"],"format":"date-time"},"to":{"type":["string","null"],"format":"date-time"}}},"items":{"type":"array","maxItems":100,"items":{"$ref":"#/components/schemas/MobileCommerceItem"}},"pageInfo":{"type":"object","additionalProperties":false,"required":["returnedCount","hasMore","nextCursor"],"properties":{"returnedCount":{"type":"integer","minimum":0,"maximum":100},"hasMore":{"type":"boolean"},"nextCursor":{"type":["string","null"],"maxLength":2048}}}}}
+    MobileCommercePageEnvelope: {"type":"object","additionalProperties":false,"required":["data","requestId"],"properties":{"data":{"$ref":"#/components/schemas/MobileCommercePage"},"requestId":{"type":"string","minLength":1}}}
+    VirtualSupermarketPlacementPart: {"type":"object","additionalProperties":false,"required":["key","name","sortOrder"],"properties":{"key":{"type":"string","minLength":1,"maxLength":128},"name":{"type":"string","minLength":1,"maxLength":160},"sortOrder":{"type":"integer","minimum":0,"maximum":1000000}}}
+    VirtualSupermarketCategory: {"type":"object","additionalProperties":false,"required":["id","key","name","sortOrder","department","aisle","shelf","revision","updatedAt"],"properties":{"id":{"type":"string","format":"uuid"},"key":{"type":"string","minLength":1,"maxLength":128},"name":{"type":"string","minLength":1,"maxLength":160},"sortOrder":{"type":"integer","minimum":0,"maximum":1000000},"department":{"$ref":"#/components/schemas/VirtualSupermarketPlacementPart"},"aisle":{"$ref":"#/components/schemas/VirtualSupermarketPlacementPart"},"shelf":{"$ref":"#/components/schemas/VirtualSupermarketPlacementPart"},"revision":{"type":"integer","minimum":1},"updatedAt":{"type":["string","null"],"format":"date-time"}}}
+    VirtualSupermarketShelf: {"type":"object","additionalProperties":false,"required":["key","name","sortOrder","categories"],"properties":{"key":{"type":"string","minLength":1,"maxLength":128},"name":{"type":"string","minLength":1,"maxLength":160},"sortOrder":{"type":"integer","minimum":0,"maximum":1000000},"categories":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","key","name","sortOrder"],"properties":{"id":{"type":"string","format":"uuid"},"key":{"type":"string","minLength":1,"maxLength":128},"name":{"type":"string","minLength":1,"maxLength":160},"sortOrder":{"type":"integer","minimum":0,"maximum":1000000}}}}}}
+    VirtualSupermarketAisle: {"type":"object","additionalProperties":false,"required":["key","name","sortOrder","shelves"],"properties":{"key":{"type":"string","minLength":1,"maxLength":128},"name":{"type":"string","minLength":1,"maxLength":160},"sortOrder":{"type":"integer","minimum":0,"maximum":1000000},"shelves":{"type":"array","items":{"$ref":"#/components/schemas/VirtualSupermarketShelf"}}}}
+    VirtualSupermarketDepartment: {"type":"object","additionalProperties":false,"required":["key","name","sortOrder","aisles"],"properties":{"key":{"type":"string","minLength":1,"maxLength":128},"name":{"type":"string","minLength":1,"maxLength":160},"sortOrder":{"type":"integer","minimum":0,"maximum":1000000},"aisles":{"type":"array","items":{"$ref":"#/components/schemas/VirtualSupermarketAisle"}}}}
+    VirtualSupermarketMetadata: {"type":"object","additionalProperties":false,"required":["contractVersion","platform","sourceMode","storefrontRevision","catalogRevision","categories","departments","supportedSorts"],"properties":{"contractVersion":{"type":"string","const":"mx-insight-hub.data-products.virtual-supermarket.v1"},"platform":{"type":"string","const":"virtual_supermarket"},"sourceMode":{"type":"string","const":"stored"},"storefrontRevision":{"type":"integer","minimum":1},"catalogRevision":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"categories":{"type":"array","items":{"$ref":"#/components/schemas/VirtualSupermarketCategory"}},"departments":{"type":"array","items":{"$ref":"#/components/schemas/VirtualSupermarketDepartment"}},"supportedSorts":{"type":"array","const":["newest","title_asc","price_asc","price_desc"]}}}
+    VirtualSupermarketMetadataEnvelope: {"type":"object","additionalProperties":false,"required":["data","requestId"],"properties":{"data":{"$ref":"#/components/schemas/VirtualSupermarketMetadata"},"requestId":{"type":"string","minLength":1}}}
+    VirtualSupermarketMarketplace: {"type":"object","additionalProperties":false,"required":["id","name"],"properties":{"id":{"type":["string","null"],"format":"uuid","description":"Reviewed public marketplace-directory UUID, or null when no approved mapping exists."},"name":{"type":["string","null"],"description":"Reviewed public marketplace name, or null when no approved mapping exists."}}}
+    VirtualSupermarketPrice: {"type":"object","additionalProperties":false,"required":["amount","currency","display","provenance"],"properties":{"amount":{"type":["string","null"],"pattern":"^(?:0|[1-9]\\d{0,17})(?:\\.\\d{1,2})?$","description":"Normalized decimal amount when the source or curated override is valid."},"currency":{"type":["string","null"],"pattern":"^[A-Z]{3}$","description":"Reviewed ISO currency for a curated override. Source prices keep null because the fixed source has no currency field."},"display":{"type":["string","null"],"description":"Customer-facing source or curated price text; it does not imply a currency."},"provenance":{"type":"string","enum":["curated","source","missing"]}}}
+    VirtualSupermarketProduct: {"type":"object","additionalProperties":false,"required":["id","dataVersion","listing","placement","category","marketplace","product","shop","signals","collectedAt"],"properties":{"id":{"type":"string","format":"uuid","description":"Stable Hub publication UUID; independently allocated and never the mobile-commerce capture/canonical row UUID."},"dataVersion":{"type":"string","pattern":"^\\d+:\\d+$"},"listing":{"type":"object","additionalProperties":false,"required":["status","revision"],"properties":{"status":{"type":"string","const":"on_shelf"},"revision":{"type":"integer","minimum":1}}},"placement":{"type":"object","additionalProperties":false,"required":["department","aisle","shelf","position"],"properties":{"department":{"$ref":"#/components/schemas/VirtualSupermarketPlacementPart"},"aisle":{"$ref":"#/components/schemas/VirtualSupermarketPlacementPart"},"shelf":{"$ref":"#/components/schemas/VirtualSupermarketPlacementPart"},"position":{"type":["integer","null"],"minimum":0,"maximum":1000000}}},"category":{"type":"object","additionalProperties":false,"required":["id","key","name","sortOrder"],"properties":{"id":{"type":"string","format":"uuid"},"key":{"type":"string","minLength":1,"maxLength":128},"name":{"type":"string","minLength":1,"maxLength":160},"sortOrder":{"type":"integer","minimum":0,"maximum":1000000}}},"marketplace":{"$ref":"#/components/schemas/VirtualSupermarketMarketplace"},"product":{"type":"object","additionalProperties":false,"required":["title","specification","price","provenance"],"properties":{"title":{"type":["string","null"]},"specification":{"type":["string","null"]},"price":{"$ref":"#/components/schemas/VirtualSupermarketPrice"},"provenance":{"type":"object","additionalProperties":false,"required":["title","specification","price"],"properties":{"title":{"type":"string","enum":["curated","source","missing"]},"specification":{"type":"string","enum":["curated","missing"]},"price":{"type":"string","enum":["curated","source","missing"]}}}}},"shop":{"type":"object","additionalProperties":false,"required":["name"],"properties":{"name":{"type":["string","null"]}}},"signals":{"type":"object","additionalProperties":false,"required":["sales"],"properties":{"sales":{"type":["string","null"]}}},"collectedAt":{"type":["string","null"],"format":"date-time"}}}
+    VirtualSupermarketFilters: {"type":"object","additionalProperties":false,"required":["status","categoryId","department","aisle","shelf","marketplace","query","sort"],"properties":{"status":{"type":"string","const":"on_shelf"},"categoryId":{"type":["string","null"],"format":"uuid"},"department":{"type":["string","null"],"maxLength":128},"aisle":{"type":["string","null"],"maxLength":128},"shelf":{"type":["string","null"],"maxLength":128},"marketplace":{"type":["string","null"],"maxLength":160},"query":{"type":["string","null"],"maxLength":240},"sort":{"type":"string","enum":["newest","title_asc","price_asc","price_desc"]}}}
+    VirtualSupermarketPage: {"type":"object","additionalProperties":false,"required":["contractVersion","platform","sourceMode","storefrontRevision","filters","items","pageInfo"],"properties":{"contractVersion":{"type":"string","const":"mx-insight-hub.data-products.virtual-supermarket.v1"},"platform":{"type":"string","const":"virtual_supermarket"},"sourceMode":{"type":"string","const":"stored"},"storefrontRevision":{"type":"integer","minimum":1},"filters":{"$ref":"#/components/schemas/VirtualSupermarketFilters"},"items":{"type":"array","maxItems":100,"items":{"$ref":"#/components/schemas/VirtualSupermarketProduct"}},"pageInfo":{"type":"object","additionalProperties":false,"required":["returnedCount","hasMore","nextCursor"],"properties":{"returnedCount":{"type":"integer","minimum":0,"maximum":100},"hasMore":{"type":"boolean"},"nextCursor":{"type":["string","null"],"maxLength":2048}}}}}
+    VirtualSupermarketPageEnvelope: {"type":"object","additionalProperties":false,"required":["data","requestId"],"properties":{"data":{"$ref":"#/components/schemas/VirtualSupermarketPage"},"requestId":{"type":"string","minLength":1}}}
+    VirtualSupermarketDetail: {"type":"object","additionalProperties":false,"required":["contractVersion","platform","sourceMode","storefrontRevision","item"],"properties":{"contractVersion":{"type":"string","const":"mx-insight-hub.data-products.virtual-supermarket.v1"},"platform":{"type":"string","const":"virtual_supermarket"},"sourceMode":{"type":"string","const":"stored"},"storefrontRevision":{"type":"integer","minimum":1},"item":{"$ref":"#/components/schemas/VirtualSupermarketProduct"}}}
+    VirtualSupermarketDetailEnvelope: {"type":"object","additionalProperties":false,"required":["data","requestId"],"properties":{"data":{"$ref":"#/components/schemas/VirtualSupermarketDetail"},"requestId":{"type":"string","minLength":1}}}
+    SourceCatalogItemsEnvelope: {"type":"object","additionalProperties":false,"required":["data","requestId"],"properties":{"data":{"type":"object","additionalProperties":false,"required":["contractVersion","catalogEntry","dataProductKey","page"],"properties":{"contractVersion":{"type":"string","const":"mx-insight-hub.data-products.source-catalog-items.v1"},"catalogEntry":{"$ref":"#/components/schemas/SourceCatalogEntry"},"dataProductKey":{"type":"string","const":"mobile-commerce-items"},"page":{"$ref":"#/components/schemas/MobileCommercePage"}}},"requestId":{"type":"string","minLength":1}}}
     SourceCatalogEntry:
       type: object
       additionalProperties: false

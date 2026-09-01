@@ -42,6 +42,7 @@ Open API 文档的业务导航尽量跟随 Admin 信息架构，但只保留可�
 | 开始调用 | `/docs` | Base URL、API Key、首个请求 |
 | 认证与调用规则 | `/docs/auth` | grant、quota、cursor、idempotency |
 | 数据源目录 | `/docs/source-catalog` | 目录列表、详情与 metadata/facets |
+| 虚拟超市 | `/docs/virtual-supermarket` | 超市 metadata、上架商品、货架浏览与搜索 |
 | Telegram 会话 | `/docs/telegram` | 会话、消息、检索、canonical context |
 | 全国舆情 | `/docs/public-opinion` | 地区、coverage、feed、详情、检索 |
 | 通用搜索 | `/docs/search` | live、stored、canonical search |
@@ -175,7 +176,31 @@ projection 会在字段级拦截误粘贴的 DSN、带凭据 URL、Bearer/Basic 
 和私网连接。响应以 `redactedFields` 明示受影响字段；全文搜索、facets 与 summary 也只基于脱敏后的
 投影，不能通过过滤条件旁路探测被拦截内容。
 
-## 6. Telegram 会话公开投影
+## 6. 虚拟超市公开投影
+
+虚拟超市是独立的 Hub 发布产品，使用 `virtual_supermarket` platform grant。它不复用
+`mobile_commerce` 采集观测授权，也不要求 `source_catalog` grant。授权分离保证后续新的商品源
+可以进入超市，而不会让调用方获得原始 capture、来源治理对象或 Admin 操作。
+
+三种 Hub 视图——逛超市、超市全景、目录模式——读取同一 publication snapshot。全景是 renderer：Public
+契约只提供稳定 `department/aisle/shelf/position` 语义和顺序，不提供 WebGL 坐标、摄像机、网格、
+材质或灯光。外部调用方可以用这些语义还原业务等价的超市，并选择自己的 2D/3D 实现。
+
+产品层与 capture 分离：每个 v1 超市商品有独立、稳定的 Hub publication UUID/revision，并引用一条
+不可变源观测；Public UUID 不是 capture/canonical row ID，capture ID 也不能读取 Public 商品详情。
+上架只发布 allowlisted product projection；下架/归档使商品从 Public 列表和详情消失，但不删除
+canonical capture、revision 或源证据。Public marketplace 只返回 approved directory `{id,name}`；
+未映射时二者均为 null。Public 不返回 capture/record identity、marketplace product/shop source ID、
+raw marketplace label/映射状态/内部 source key、task/run/campaign、raw tags/share payload、device/
+metadata/`is_reported`、source table/profile/checkpoint、Admin actor/audit 或物理搜索配置。
+
+metadata 和列表页共享 `storefrontRevision`。不透明 cursor 绑定完整规范化 filters、sort、page size
+和该 revision；调用方修改任何条件都必须从首页开始。Hub 不得静默把同一分页序列混合到新
+revision。外部复刻先在同一 revision 下以默认 `newest` 分页取全量，再按 metadata 的层级
+`sortOrder` 与 item `placement.position` 在客户端陈列；409 必须丢弃未完成快照并重拉。这些契约及商品字段规则详见
+[虚拟超市数据产品与公开契约](../product/virtual-supermarket.md)。
+
+## 7. Telegram 会话公开投影
 
 Telegram 使用 `telegram` platform grant，沿用现有资源：
 
@@ -199,7 +224,7 @@ GET  /api/v1/data/canonical/items/{id}/context
 前后文，同时看到 Monitor/SQLite provenance。Public 合同仍受 Telegram grant 与配额约束；Admin
 的内部质量诊断和连接状态不是会话内容。
 
-## 7. 全国舆情公开投影
+## 8. 全国舆情公开投影
 
 全国舆情使用 `public_opinion` platform grant，复用已发布的地区、coverage、列表和详情合同：
 
@@ -230,7 +255,7 @@ GET /api/v1/data/public-opinion/records/{id}
 pipeline 配置、Admin actor 或模型 reasoning。未取得 step-up capability 的 consumer 必须得到
 403，而不是通过基础 feed 间接获得未发布语料。
 
-## 8. 新增 Public 产品面的交付检查表
+## 9. 新增 Public 产品面的交付检查表
 
 每个新增或扩展的 Public API 合并前必须同时满足：
 

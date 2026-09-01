@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { SOURCE_CATALOG_SEED } from '../data/source-catalog-seed.mjs'
 import { sourceCatalogTermNormalizedName } from '../data/source-catalog.mjs'
+import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../data/virtual-supermarket.mjs'
 
 function nowIso() {
   return new Date().toISOString()
@@ -9,6 +10,147 @@ function nowIso() {
 
 function clone(value) {
   return value == null ? value : structuredClone(value)
+}
+
+function defaultVirtualSupermarketCategory() {
+  const now = nowIso()
+  return {
+    id: VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID,
+    categoryKey: 'uncategorized',
+    displayName: '待分类',
+    departmentKey: 'uncategorized',
+    departmentName: '待分类区',
+    departmentSortOrder: 1_000_000,
+    aisleKey: 'uncategorized',
+    aisleName: '待整理通道',
+    aisleSortOrder: 1_000_000,
+    shelfKey: 'uncategorized',
+    shelfName: '待整理货架',
+    shelfSortOrder: 1_000_000,
+    sortOrder: 1_000_000,
+    revision: 1,
+    archivedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+function defaultVirtualSupermarketListing() {
+  return {
+    explicit: false,
+    publicationId: null,
+    status: 'off_shelf',
+    categoryId: VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID,
+    displayTitle: null,
+    specification: null,
+    priceAmount: null,
+    currency: null,
+    shelfPosition: null,
+    revision: 0,
+    createdBy: null,
+    updatedBy: null,
+    createdAt: null,
+    updatedAt: null,
+  }
+}
+
+function virtualSupermarketMemoryItem(record, listing, category) {
+  return {
+    id: record.id,
+    externalId: record.externalId ?? record.external_id ?? null,
+    title: record.title ?? null,
+    authorName: record.authorName ?? record.author_name ?? null,
+    collectedAt: record.collectedAt ?? record.collected_at ?? null,
+    currentRevision: Number(record.currentRevision ?? record.current_revision ?? 1),
+    stableFields: clone(record.stableFields ?? record.stable_fields ?? {}),
+    listing: clone(listing),
+    category: clone(category),
+  }
+}
+
+function virtualSupermarketEffectivePrice(item) {
+  const value = item.listing.priceAmount
+    ?? item.stableFields?.commerce?.product?.price
+    ?? null
+  const text = value == null ? '' : String(value).trim()
+  if (!/^(?:0|[1-9]\d{0,17})(?:\.\d{1,2})?$/u.test(text)) return null
+  const [whole, fraction = ''] = text.split('.')
+  return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'))
+}
+
+function virtualSupermarketInventoryFingerprint(records) {
+  const snapshots = records.map((record) => ({
+    id: record.id,
+    externalId: record.externalId ?? record.external_id ?? null,
+    currentRevision: Number(record.currentRevision ?? record.current_revision ?? 1),
+    collectedAt: record.collectedAt ?? record.collected_at ?? null,
+    title: record.title ?? null,
+    authorName: record.authorName ?? record.author_name ?? null,
+    stableFields: record.stableFields ?? record.stable_fields ?? {},
+  })).sort((left, right) => left.id.localeCompare(right.id))
+  const maxCollectedAt = snapshots.reduce((maximum, item) => (
+    String(item.collectedAt || '') > maximum ? String(item.collectedAt || '') : maximum
+  ), '')
+  const maxId = snapshots.reduce((maximum, item) => (item.id > maximum ? item.id : maximum), '')
+  const digest = createHash('sha256').update(JSON.stringify({
+    count: snapshots.length,
+    maxCollectedAt,
+    maxId,
+    records: snapshots,
+  })).digest('hex')
+  return `sha256:${digest}`
+}
+
+function assertVirtualSupermarketCategoryHierarchy(categories, candidate, excludedId = null) {
+  const others = categories.filter((category) => category.id !== excludedId)
+  const rules = [
+    {
+      level: 'department',
+      key: candidate.departmentKey,
+      conflict: (category) => (
+        category.departmentKey === candidate.departmentKey
+        && (
+          category.departmentName !== candidate.departmentName
+          || category.departmentSortOrder !== candidate.departmentSortOrder
+        )
+      ),
+    },
+    {
+      level: 'aisle',
+      key: candidate.aisleKey,
+      conflict: (category) => (
+        category.departmentKey === candidate.departmentKey
+        && category.aisleKey === candidate.aisleKey
+        && (
+          category.aisleName !== candidate.aisleName
+          || category.aisleSortOrder !== candidate.aisleSortOrder
+        )
+      ),
+    },
+    {
+      level: 'shelf',
+      key: candidate.shelfKey,
+      conflict: (category) => (
+        category.departmentKey === candidate.departmentKey
+        && category.aisleKey === candidate.aisleKey
+        && category.shelfKey === candidate.shelfKey
+        && (
+          category.shelfName !== candidate.shelfName
+          || category.shelfSortOrder !== candidate.shelfSortOrder
+        )
+      ),
+    },
+  ]
+  for (const rule of rules) {
+    const conflict = others.find(rule.conflict)
+    if (!conflict) continue
+    throw new AppError(
+      409,
+      'virtual_supermarket_category_hierarchy_conflict',
+      'Virtual-supermarket hierarchy key is already bound to different metadata',
+      { level: rule.level, key: rule.key, conflictingCategoryId: conflict.id },
+    )
+  }
 }
 
 function initialSourceCatalogTerms(entries) {
@@ -175,6 +317,24 @@ export class MemoryStore {
     // enough to exercise registration without pretending imports are durable.
     this.externalSources = new Map()
     this.databaseConnections = new Map()
+    const defaultStoreCategory = defaultVirtualSupermarketCategory()
+    this.virtualSupermarketStorefrontRevision = 1
+    this.virtualSupermarketCategories = new Map([[defaultStoreCategory.id, defaultStoreCategory]])
+    this.virtualSupermarketCategoryEvents = new Map([[defaultStoreCategory.id, [{
+      id: '50000000-0000-4000-8000-000000000002',
+      aggregateType: 'category',
+      aggregateId: defaultStoreCategory.id,
+      eventType: 'seed_import',
+      actor: 'memory-seed',
+      fromRevision: null,
+      toRevision: 1,
+      storefrontRevision: 1,
+      reason: null,
+      changes: { seed: 'uncategorized' },
+      createdAt: defaultStoreCategory.createdAt,
+    }]]])
+    this.virtualSupermarketListings = new Map()
+    this.virtualSupermarketProductEvents = new Map()
     // The governance catalog is useful in local development without a data
     // plane. Unlike canonical records it is ordinary administrative metadata,
     // so the memory implementation can exercise the complete CRUD contract.
@@ -1114,6 +1274,324 @@ export class MemoryStore {
     })
     updated.forEach((source) => this.externalSources.set(source.sourceKey, source))
     return clone(updated)
+  }
+
+  // ---- virtual supermarket ---------------------------------------------
+
+  async getVirtualSupermarketStorefrontRevision() {
+    return this.virtualSupermarketStorefrontRevision
+  }
+
+  async getVirtualSupermarketInventoryRevision() {
+    return virtualSupermarketInventoryFingerprint(this.#virtualSupermarketRecords())
+  }
+
+  #bumpVirtualSupermarketStorefront() {
+    this.virtualSupermarketStorefrontRevision += 1
+    return this.virtualSupermarketStorefrontRevision
+  }
+
+  async listVirtualSupermarketCategories({ includeArchived = false } = {}) {
+    return clone([...this.virtualSupermarketCategories.values()]
+      .filter((category) => includeArchived || !category.archivedAt)
+      .sort((left, right) => (
+        left.departmentSortOrder - right.departmentSortOrder
+        || left.departmentKey.localeCompare(right.departmentKey)
+        || left.aisleSortOrder - right.aisleSortOrder
+        || left.aisleKey.localeCompare(right.aisleKey)
+        || left.shelfSortOrder - right.shelfSortOrder
+        || left.shelfKey.localeCompare(right.shelfKey)
+        || left.sortOrder - right.sortOrder
+        || left.categoryKey.localeCompare(right.categoryKey)
+      )))
+  }
+
+  async getVirtualSupermarketCategory(id) {
+    return clone(this.virtualSupermarketCategories.get(id) || null)
+  }
+
+  async createVirtualSupermarketCategory(input, { actor = 'admin-token' } = {}) {
+    if ([...this.virtualSupermarketCategories.values()].some((category) => category.categoryKey === input.categoryKey)) {
+      throw new AppError(409, 'virtual_supermarket_category_exists', 'A virtual-supermarket category with this key already exists')
+    }
+    const createdAt = nowIso()
+    const category = {
+      id: randomUUID(),
+      categoryKey: input.categoryKey,
+      displayName: input.displayName,
+      departmentKey: input.department.key,
+      departmentName: input.department.name,
+      departmentSortOrder: input.department.sortOrder,
+      aisleKey: input.aisle.key,
+      aisleName: input.aisle.name,
+      aisleSortOrder: input.aisle.sortOrder,
+      shelfKey: input.shelf.key,
+      shelfName: input.shelf.name,
+      shelfSortOrder: input.shelf.sortOrder,
+      sortOrder: input.sortOrder,
+      revision: 1,
+      archivedAt: null,
+      createdAt,
+      updatedAt: createdAt,
+    }
+    assertVirtualSupermarketCategoryHierarchy(
+      [...this.virtualSupermarketCategories.values()],
+      category,
+    )
+    this.virtualSupermarketCategories.set(category.id, category)
+    const storefrontRevision = this.#bumpVirtualSupermarketStorefront()
+    this.#appendVirtualSupermarketEvent(this.virtualSupermarketCategoryEvents, category.id, {
+      aggregateType: 'category', eventType: 'create', actor,
+      fromRevision: null, toRevision: 1, storefrontRevision,
+      reason: null, changes: { after: clone(category) },
+    })
+    return { item: clone(category), storefrontRevision }
+  }
+
+  async updateVirtualSupermarketCategory(id, patch, {
+    expectedRevision,
+    actor = 'admin-token',
+  } = {}) {
+    const category = this.virtualSupermarketCategories.get(id)
+    if (!category) {
+      throw new AppError(404, 'virtual_supermarket_category_not_found', 'Virtual-supermarket category was not found')
+    }
+    if (category.revision !== expectedRevision) {
+      throw new AppError(
+        409,
+        'virtual_supermarket_category_revision_conflict',
+        'Virtual-supermarket category changed; reload before saving',
+        { expectedRevision, currentRevision: category.revision },
+      )
+    }
+    const before = clone(category)
+    const merged = {
+      ...before,
+      ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}),
+      ...(patch.department ? {
+        departmentKey: patch.department.key,
+        departmentName: patch.department.name,
+        departmentSortOrder: patch.department.sortOrder,
+      } : {}),
+      ...(patch.aisle ? {
+        aisleKey: patch.aisle.key,
+        aisleName: patch.aisle.name,
+        aisleSortOrder: patch.aisle.sortOrder,
+      } : {}),
+      ...(patch.shelf ? {
+        shelfKey: patch.shelf.key,
+        shelfName: patch.shelf.name,
+        shelfSortOrder: patch.shelf.sortOrder,
+      } : {}),
+      ...(patch.sortOrder !== undefined ? { sortOrder: patch.sortOrder } : {}),
+      revision: category.revision + 1,
+      updatedAt: nowIso(),
+    }
+    assertVirtualSupermarketCategoryHierarchy(
+      [...this.virtualSupermarketCategories.values()],
+      merged,
+      id,
+    )
+    Object.assign(category, merged)
+    const storefrontRevision = this.#bumpVirtualSupermarketStorefront()
+    this.#appendVirtualSupermarketEvent(this.virtualSupermarketCategoryEvents, id, {
+      aggregateType: 'category', eventType: 'update', actor,
+      fromRevision: before.revision, toRevision: category.revision, storefrontRevision,
+      reason: null, changes: { before, after: clone(category) },
+    })
+    return { item: clone(category), storefrontRevision }
+  }
+
+  async listVirtualSupermarketCategoryEvents(id, limit = 50) {
+    return clone((this.virtualSupermarketCategoryEvents.get(id) || [])
+      .slice()
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, Math.max(1, Math.min(Number(limit) || 50, 200))))
+  }
+
+  #virtualSupermarketItem(record) {
+    const listing = this.virtualSupermarketListings.get(record.id) || defaultVirtualSupermarketListing()
+    const category = this.virtualSupermarketCategories.get(listing.categoryId)
+      || this.virtualSupermarketCategories.get(VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID)
+    return virtualSupermarketMemoryItem(record, listing, category)
+  }
+
+  #virtualSupermarketRecords() {
+    return [...this.canonicalRecords.values()].filter((record) => (
+      (record.datasetId ?? record.dataset_id) === 'mobile-commerce.collected-items.v1'
+      && (record.platform ?? null) === 'mobile_commerce'
+      && (record.objectType ?? record.object_type) === 'commerce_capture'
+      && !(record.deletedAt ?? record.deleted_at)
+    ))
+  }
+
+  async listVirtualSupermarketProducts({
+    status = 'all',
+    categoryId = null,
+    department = null,
+    aisle = null,
+    shelf = null,
+    marketplace = null,
+    query = null,
+    sort = 'newest',
+    pageSize = 24,
+    offset = 0,
+    includeGovernanceEvidence = false,
+  } = {}) {
+    const normalizedQuery = query?.normalize('NFKC').trim().toLocaleLowerCase('zh-CN') || null
+    const items = this.#virtualSupermarketRecords()
+      .map((record) => this.#virtualSupermarketItem(record))
+      .filter((item) => {
+        if (status !== 'all' && item.listing.status !== status) return false
+        if (categoryId && item.category.id !== categoryId) return false
+        if (department && item.category.departmentKey !== department) return false
+        if (aisle && item.category.aisleKey !== aisle) return false
+        if (shelf && item.category.shelfKey !== shelf) return false
+        const commerce = item.stableFields?.commerce || {}
+        const mappedMarketplaceValues = commerce.marketplace?.status === 'mapped'
+          ? [commerce.marketplace?.entryId, commerce.marketplace?.canonicalName]
+          : []
+        const marketplaceValues = includeGovernanceEvidence
+          ? [
+              ...mappedMarketplaceValues,
+              commerce.marketplace?.sourceValue,
+              commerce.marketplace?.entryId,
+              commerce.marketplace?.sourceKey,
+              commerce.marketplace?.canonicalName,
+            ]
+          : mappedMarketplaceValues
+        if (marketplace && !marketplaceValues.includes(marketplace)) return false
+        if (normalizedQuery) {
+          const effectiveTitle = item.listing.displayTitle
+            ?? commerce.product?.title
+            ?? item.title
+            ?? null
+          const effectiveShop = commerce.shop?.name ?? item.authorName ?? null
+          const searchable = [
+            effectiveTitle,
+            item.listing.specification,
+            effectiveShop,
+            ...(includeGovernanceEvidence
+              ? [
+                  commerce.product?.title,
+                  item.title,
+                  commerce.shop?.name,
+                  item.authorName,
+                  commerce.signals?.tagsText,
+                ]
+              : []),
+          ].filter(Boolean).join('\n').normalize('NFKC').toLocaleLowerCase('zh-CN')
+          if (!searchable.includes(normalizedQuery)) return false
+        }
+        return !item.category.archivedAt
+      })
+    items.sort((left, right) => {
+      if (sort === 'title_asc') {
+        const leftTitle = left.listing.displayTitle ?? left.stableFields?.commerce?.product?.title ?? left.title ?? ''
+        const rightTitle = right.listing.displayTitle ?? right.stableFields?.commerce?.product?.title ?? right.title ?? ''
+        return leftTitle.localeCompare(rightTitle, 'zh-CN') || left.id.localeCompare(right.id)
+      }
+      if (sort === 'price_asc' || sort === 'price_desc') {
+        const leftPrice = virtualSupermarketEffectivePrice(left)
+        const rightPrice = virtualSupermarketEffectivePrice(right)
+        if (leftPrice == null && rightPrice != null) return 1
+        if (rightPrice == null && leftPrice != null) return -1
+        if (leftPrice != null && rightPrice != null && leftPrice !== rightPrice) {
+          const direction = leftPrice < rightPrice ? -1 : 1
+          return sort === 'price_asc' ? direction : -direction
+        }
+        return left.id.localeCompare(right.id)
+      }
+      return String(right.collectedAt || '').localeCompare(String(left.collectedAt || ''))
+        || right.id.localeCompare(left.id)
+    })
+    return clone(items.slice(offset, offset + pageSize + 1))
+  }
+
+  async getVirtualSupermarketProduct(id, { onShelfOnly = false } = {}) {
+    const record = this.canonicalRecords.get(id)
+    if (!record || !this.#virtualSupermarketRecords().some((candidate) => candidate.id === id)) return null
+    const item = this.#virtualSupermarketItem(record)
+    return onShelfOnly && (item.listing.status !== 'on_shelf' || item.category.archivedAt) ? null : clone(item)
+  }
+
+  async updateVirtualSupermarketProduct(id, patch, {
+    expectedRevision,
+    actor = 'admin-token',
+    eventType = 'update',
+    reason = null,
+  } = {}) {
+    const record = this.#virtualSupermarketRecords().find((candidate) => candidate.id === id)
+    if (!record) {
+      throw new AppError(404, 'virtual_supermarket_product_not_found', 'Virtual-supermarket product was not found')
+    }
+    const current = this.virtualSupermarketListings.get(id) || defaultVirtualSupermarketListing()
+    if (current.revision !== expectedRevision) {
+      throw new AppError(
+        409,
+        'virtual_supermarket_listing_revision_conflict',
+        'Virtual-supermarket listing changed; reload before saving',
+        { expectedRevision, currentRevision: current.revision },
+      )
+    }
+    const categoryId = patch.categoryId !== undefined
+      ? patch.categoryId || VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID
+      : current.categoryId
+    const category = this.virtualSupermarketCategories.get(categoryId)
+    if (!category || category.archivedAt) {
+      throw new AppError(404, 'virtual_supermarket_category_not_found', 'Virtual-supermarket category was not found')
+    }
+    const before = clone(current)
+    const now = nowIso()
+    const listing = {
+      ...current,
+      explicit: true,
+      publicationId: current.publicationId
+        || (patch.status === 'on_shelf' ? randomUUID() : null),
+      ...(patch.status !== undefined ? { status: patch.status } : {}),
+      categoryId,
+      ...(patch.displayTitle !== undefined ? { displayTitle: patch.displayTitle } : {}),
+      ...(patch.specification !== undefined ? { specification: patch.specification } : {}),
+      ...(patch.shelfPosition !== undefined ? { shelfPosition: patch.shelfPosition } : {}),
+      ...(patch.price !== undefined ? {
+        priceAmount: patch.price?.amount ?? null,
+        currency: patch.price?.currency ?? null,
+      } : {}),
+      revision: current.revision + 1,
+      createdBy: current.createdBy || actor,
+      updatedBy: actor,
+      createdAt: current.createdAt || now,
+      updatedAt: now,
+    }
+    this.virtualSupermarketListings.set(id, listing)
+    const storefrontRevision = this.#bumpVirtualSupermarketStorefront()
+    this.#appendVirtualSupermarketEvent(this.virtualSupermarketProductEvents, id, {
+      aggregateType: 'product', eventType, actor,
+      fromRevision: before.revision, toRevision: listing.revision, storefrontRevision,
+      reason, changes: { before, after: clone(listing) },
+    })
+    return { item: clone(this.#virtualSupermarketItem(record)), storefrontRevision }
+  }
+
+  async listVirtualSupermarketProductEvents(id, limit = 50) {
+    return clone((this.virtualSupermarketProductEvents.get(id) || [])
+      .slice()
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, Math.max(1, Math.min(Number(limit) || 50, 200))))
+  }
+
+  async getVirtualSupermarketProductByPublicationId(publicationId) {
+    const match = [...this.virtualSupermarketListings.entries()].find(([, listing]) => (
+      listing.publicationId === publicationId
+    ))
+    if (!match) return null
+    return this.getVirtualSupermarketProduct(match[0], { onShelfOnly: true })
+  }
+
+  #appendVirtualSupermarketEvent(target, aggregateId, event) {
+    const events = target.get(aggregateId) || []
+    events.push({ id: randomUUID(), aggregateId, createdAt: nowIso(), ...clone(event) })
+    target.set(aggregateId, events)
   }
 
   // ---- governed source catalog ------------------------------------------

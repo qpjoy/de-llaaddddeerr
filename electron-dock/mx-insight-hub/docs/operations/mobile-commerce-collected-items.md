@@ -57,7 +57,7 @@ proof of production constraints or of a safe incremental writer.
 | `shop_link` | “复制整段消息…” share text, present in 5/5 | Not a URL. Retain raw text and extract a typed token/URL only when format validation succeeds. |
 | `goods_id` | null in 5/5 | Optional marketplace product ID. When nonempty and format-reviewed, it may support product-entity resolution; absence must not trigger title-based merging. |
 | `shop_id` | null in 5/5 | Optional marketplace seller ID; typed only after format review. |
-| `price` | `10.4`–`38.63`, present in 5/5 | Candidate nonnegative decimal CNY observation. Preserve raw precision and reject invalid/negative values. Currency is a source-contract assumption, not inferred per row. |
+| `price` | `10.4`–`38.63`, present in 5/5 | Candidate nonnegative decimal amount observation. Preserve raw precision and reject invalid/negative values. The table has no currency column, so currency is unknown and must stay null unless a separate reviewed curation step supplies an ISO currency. Do not infer CNY from the platform, locale or sample. |
 | `sales` | `已售181件` in 1/5 | Localized sales text. Preserve raw value and, when grammar is known, extract numeric count plus qualifier; do not turn missing values into zero. |
 | `ship_from` | Delivery promises in 3/5 | Semantically drifted: values such as `48小时内发货` are delivery SLA, not geography. Map to `shippingText`, not a location field. |
 | `shop_level` | null in 5/5 | Optional source-specific seller level; preserve raw taxonomy until a controlled vocabulary exists. |
@@ -223,7 +223,7 @@ flat public schema:
    dumping ground; share payloads are consumed before generic extensions or ES
    text projection.
 3. **Typed commerce** stores stable observations: marketplace catalog entry,
-   title, validated product/seller IDs, decimal price and currency, seller
+   title, validated product/seller IDs, decimal price amount and nullable currency, seller
    display name, parsed sales/comments/follower/good-rate values with raw text,
    shipping text, campaign keyword/task lineage, capture time and parsing
    provenance.
@@ -339,6 +339,19 @@ classification, minimization, lineage and human-review boundaries in a
 compile-only mapping-proposal graph. The fixed deterministic mapping and normal
 canonical/ES projection remain the production path; the template cannot import,
 publish, approve mappings or run remote acquisition.
+
+The virtual-supermarket publication layer adds a second, separately reviewed
+experience record. It must distinguish source-platform classification from the
+product department/aisle/shelf taxonomy; preserve capture identity when
+`goods_id` is missing; represent price as decimal + nullable currency + observation time,
+never inferring currency from the platform or locale;
+and keep brand/specification null until a deterministic parser or reviewer has
+approved the evidence. Candidate category paths, specification parses and
+product-identity links record the raw field anchors, source/catalog revision,
+rule or Agent artifact version, confidence/error and review decision. They may
+inform a publication edit, but an Agent does not automatically merge captures,
+move shelves, publish, unpublish or delete products. See
+[Virtual-supermarket data product and public contract](../product/virtual-supermarket.md).
 
 ## 9. Activation and isolation checklist
 

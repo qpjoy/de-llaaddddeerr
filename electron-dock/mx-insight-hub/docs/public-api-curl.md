@@ -104,6 +104,7 @@ curl -sS -i "$HUB_URL/health/dependencies"
 | --- | --- |
 | 认证与调用规则 | `/docs/auth` |
 | 数据源目录 | `/docs/source-catalog` |
+| 虚拟超市 | `/docs/virtual-supermarket` |
 | Telegram 会话 | `/docs/telegram` |
 | 全国舆情 | `/docs/public-opinion` |
 | 通用搜索 | `/docs/search` |
@@ -173,6 +174,10 @@ revision-fenced display-province 索引均已通过精确合同校验。
 `public_opinion` platform grant 同时存在时才能查看漏斗和未展示记录。
 `source_catalog` 平台项使用 Hub stored 数据面，能力包括
 `catalog_entries`、`catalog_metadata`、`catalog_detail` 和 `filtered_browse`。
+`virtual_supermarket` 是独立的 Hub stored 发布产品授权；它不由
+`mobile_commerce` 或 `source_catalog` 授权推导。当平台项 `ready=true`
+时，应包含 metadata、products、product_detail、stored_search 和已实现的语义
+分类筛选能力，但不包含上下架或 Admin CRUD。
 
 ## 3.1 数据源目录 API
 
@@ -304,6 +309,120 @@ curl -sS \
 | 404 | `source_catalog_entry_not_found` | 重新从列表获取 active UUID。 |
 | 429 | `quota_exceeded` | 等待 platform policy 的计量窗口恢复。 |
 | 503 | `stored_data_unavailable` | 安全 GET 可稍后重试；保留 `requestId` 供排查。 |
+
+## 3.2 虚拟超市 API
+
+这些路由只接受已签发的 consumer API Key，并要求独立
+`virtual_supermarket` platform grant。仅有 `mobile_commerce` 或
+`source_catalog` 授权不能访问。首先预检：
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  "$HUB_URL/api/v1/data/capabilities" \
+  | jq '.data.platforms[] | select(.platform == "virtual_supermarket")'
+```
+
+返回项必须是 `source=hub`、`servingMode=stored`、`ready=true`，并广告
+metadata/products/detail/search 与已实现的分类筛选能力。该发现项不含管理、
+上下架或远程手机采集能力。
+
+### `GET /api/v1/data/virtual-supermarket/metadata`
+
+metadata 返回 `mx-insight-hub.data-products.virtual-supermarket.v1`、
+`storefrontRevision` 和有序的 department/aisle/shelf/category 语义。它足以构造“逛超市”、
+“超市全景”或“目录模式”；全景完全由客户端渲染，响应不包含 WebGL 坐标、摄像机、
+网格、材质或灯光。
+
+```bash
+MARKET_META=$(curl -sS \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  "$HUB_URL/api/v1/data/virtual-supermarket/metadata")
+
+printf '%s\n' "$MARKET_META" \
+  | jq '{contractVersion: .data.contractVersion,
+         storefrontRevision: .data.storefrontRevision,
+         departments: .data.departments,
+         requestId}'
+```
+
+### `GET /api/v1/data/virtual-supermarket/products`
+
+列表只返回已上架 safe projection。支持 `categoryId`、`department`、`aisle`、
+`shelf`、`marketplace`、`query`、`sort`、`pageSize` 和 `cursor`。`sort` 默认
+`newest`，且只能是 `newest|title_asc|price_asc|price_desc`；v1 不提供服务端
+merchandising sort。
+
+```bash
+PRODUCT_PAGE=$(curl -sS --get \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'department=home-care' \
+  --data-urlencode 'aisle=laundry' \
+  --data-urlencode 'sort=newest' \
+  --data-urlencode 'pageSize=24' \
+  "$HUB_URL/api/v1/data/virtual-supermarket/products")
+
+printf '%s\n' "$PRODUCT_PAGE" \
+  | jq '{storefrontRevision: .data.storefrontRevision,
+         items: .data.items,
+         pageInfo: .data.pageInfo,
+         requestId}'
+```
+
+`placement.department/aisle/shelf/position` 是语义货位和陈列顺序，不是三维坐标。
+price amount 使用 decimal string，并返回 display/provenance。当前固定源没有 currency 字段，
+所以 source price 的 `currency=null`，不能猜成 CNY；只有人工 curated price override 才携带
+已审核的三位 ISO currency。商品外层 `collectedAt` 是采集观测时间，不代表平台实时交易价。
+当前 v1 不发布 brand 或 media 字段；规格未审核时为 null。
+
+下一页原样回传 `nextCursor`，并保持所有 filters、sort 和 pageSize 不变。cursor
+与完整条件及 `storefrontRevision` 绑定；条件改变后从无 cursor 首页开始。
+
+### `GET /api/v1/data/virtual-supermarket/products/{id}`
+
+使用列表返回的独立 Hub publication UUID 读取同一 allowlist 详情。这个 UUID 不是
+mobile-commerce capture/canonical row ID，不能用 capture ID 调用此详情路由。下架、归档或不存在统一返回
+`404 virtual_supermarket_product_not_found`；调用方不能据此探测内部状态。下架只改变 Hub
+storefront overlay，不删除 canonical capture。
+
+```bash
+PRODUCT_ID=$(printf '%s\n' "$PRODUCT_PAGE" | jq -r '.data.items[0].id')
+
+curl -sS \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  "$HUB_URL/api/v1/data/virtual-supermarket/products/$PRODUCT_ID" | jq
+```
+
+### `GET /api/v1/data/virtual-supermarket/search`
+
+搜索是安全、已计量的 GET，`query` 必填，其余筛选和 cursor 规则与 products 相同。
+调用方不能指定 Elasticsearch index、field、analyzer、DSL、script 或 boost。
+
+```bash
+curl -sS --get \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'query=婴儿洗衣液' \
+  --data-urlencode 'sort=price_asc' \
+  --data-urlencode 'pageSize=20' \
+  "$HUB_URL/api/v1/data/virtual-supermarket/search" | jq
+```
+
+### 外部复刻流程
+
+外部应用先读取 metadata，记录它的 `storefrontRevision`，再用 `products` 的默认
+`sort=newest` 从无 cursor 首页逐页读取到 `nextCursor=null`。每一页必须与 metadata 保持同一
+revision；任一页不同或遇到 `409 storefront_revision_changed` 时，丢弃未完成的本地快照，重新读取
+metadata 和无 cursor 首页。
+
+完整快照取完后，客户端按 metadata 中 department/aisle/shelf/category 的 `sortOrder` 建导航，
+再按每个 item 的 `placement.position` 陈列；position 相同或为空时用独立 publication UUID
+稳定打破平局。不要把 API 的 `newest` 分页顺序误当成货架顺序。客户端可以分别实现 2D 逛超市、
+3D 全景或可访问目录，但不应从屏幕/WebGL 坐标反推业务分类。
+
+所有这些响应都不包含 capture/source row ID、marketplace product/shop source ID、marketplace raw label/
+映射状态/内部 source key、task/run/campaign、raw tags/share payload、metadata/device/`is_reported`、
+source profile/table/checkpoint、Admin audit 或凭据。公开 marketplace 只有经审核的 `{id,name}`；
+未有 approved mapping 时二者均为 null。
 
 ## 4. 搜索 API
 

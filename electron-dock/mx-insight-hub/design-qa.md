@@ -86,6 +86,58 @@ final result: passed
 
 ---
 
+# Virtual supermarket design QA — 2026-09-02
+
+## Comparison target and evidence
+
+- Selected visual target: `/Users/qpjoy/.codex/generated_images/01a05bf1-23ac-7780-89de-dc633ce6e6e0/exec-e92adeb9-f4f3-405a-b294-a2769134d0f4.png`, `1487x1058` pixels.
+- Final panorama: `/private/tmp/mx-insight-hub-virtual-supermarket-final-1487.png`, `1487x864` browser capture at 1x density.
+- Same-input comparison: `/private/tmp/mx-insight-hub-virtual-supermarket-final-comparison-1487x864.png`; the source was top-cropped to `1487x864` without scaling so both sides use the same visible viewport.
+- Final shelf browsing: `/private/tmp/mx-insight-hub-virtual-supermarket-final-browse.png`, `1487x864`.
+- Final catalog: `/private/tmp/mx-insight-hub-virtual-supermarket-final-catalog.png`, `1487x864`.
+- Final mobile panorama: `/private/tmp/mx-insight-hub-virtual-supermarket-final-390.png`, `390x844`.
+- State: dark Neon Void theme, protected Admin Token session, twelve realistic local QA listings across five governed categories. The QA records are visual evidence only and were not written to a production store.
+
+## Findings
+
+No actionable P0, P1 or P2 design finding remains.
+
+The final equal-size comparison preserves the selected target's command-center hierarchy: department rail, central immersive supermarket scene, semantic route and department hotspots, selected-product evidence, three view modes and compact control bar. The implementation intentionally uses a neutral unverified product illustration because the source rows contain no verified media; it does not fabricate marketplace images or turn share text into URLs.
+
+## Required fidelity surfaces
+
+- Typography and hierarchy: the page uses the Hub/Neon Void font stack and compact control-plane scale. Search, modes, department counts, shelf titles, prices, evidence labels and governance notes remain scannable without competing with the panorama.
+- Spacing and layout: desktop retains the target's three-column spatial composition. Product actions remain above the fold at `1487x864`; the catalog fits all operational columns without horizontal clipping. At `390x844`, the panorama appears before the long department rail so the primary experience is not buried.
+- Colors and tokens: panels, borders, text, cyan selection, green publication state and amber unverified-media notice all resolve through existing `--qp-*` tokens. Status is always paired with text or an icon.
+- Image quality: the panorama, aisle and neutral product illustration are real generated WebP assets sized for their slots. No visible placeholder box, emoji, handcrafted SVG illustration or CSS-art supermarket substitutes an image.
+- Copy and truthfulness: source price does not infer a currency; only curated ISO-currency overrides display a currency symbol. Source evidence, manual overrides and effective display fields remain distinct. `下架` explicitly states that canonical capture evidence is retained.
+- Icons and states: all controls use the installed Phosphor family. Panorama hotspots, browse cards, catalog rows, selected evidence, category management, edit, publish/unpublish confirmation, loading, empty, error and pagination states are implemented.
+- Accessibility and responsiveness: modes expose pressed state; search, dialogs, fields, tables and buttons have accessible names; the shared Modal and ConfirmDialog retain focus behavior. The mobile panorama has practical tap targets and no horizontal document overflow. Reduced-motion rules stop nonessential transitions.
+
+## Interaction and regression evidence
+
+1. `逛超市`, `超市全景` and `目录模式` were switched in the in-app browser and each rendered real server data.
+2. Department/category navigation updates the semantic department → aisle → shelf path; spatial views disclose loaded count and provide bounded cursor loading when more products exist.
+3. `管理分类` opens the real Admin category list and supports create/edit with revision fencing.
+4. The product editor shows source, override and effective provenance, starts with Save disabled, sends only dirty fields and can clear overrides back to source values.
+5. The unpublish confirmation states that Public API/placement visibility is removed while canonical evidence remains; the destructive action was cancelled during QA so the deliverable seed stayed unchanged.
+6. Catalog filtering, status, sort and page controls are visible; stale storefront/inventory cursors reset to page one with an explicit notice.
+7. The evidence link uses `datasetId=mobile-commerce.collected-items.v1`, and Data Center consumes that route filter without overwriting later manual selection.
+8. Final browser console inspection returned zero errors and zero warnings.
+
+## Comparison and fix history
+
+1. The first spatial pass silently capped browse/panorama at 96 items. Both modes now disclose the loaded range and append cursor pages without duplicate IDs.
+2. The first detail flow could retain product A while product B failed to load. Detail state is now bound to the requested ID and renders an explicit error instead of stale evidence.
+3. The first mobile layout placed the department tree before the immersive scene, and the desktop evidence actions fell below the initial viewport. Responsive grid order and evidence density were corrected; the final desktop and `390x844` captures show the primary actions in reach.
+4. The first editor initialized from effective values and could accidentally persist source title/price as curated overrides when only placement changed. It now preserves source/override/effective layers, sends dirty fields only and supports explicit `null` restore.
+5. Source prices initially implied CNY. Source currency is now `null` unless a human curator supplies an ISO code; raw source display remains visible as unverified currency.
+6. Final same-input comparison found no remaining actionable fidelity, responsiveness, content, behavior or accessibility mismatch. Differences in product counts and imagery are deliberate data-truth boundaries rather than visual shortcuts.
+
+final result: passed
+
+---
+
 # Agent Studio P1 design QA — 2026-08-31
 
 ## Comparison target and evidence

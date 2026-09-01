@@ -5,6 +5,7 @@ import { createServer } from 'node:http'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createApp } from '../../server/app.mjs'
+import { PUBLIC_OPENAPI_DOCUMENT } from '../../server/public-docs.mjs'
 
 const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi|justone/i
 const NIGHT_ALL_COMMON_FIELDS = [
@@ -619,6 +620,151 @@ function assertPublicOpinionSearchContract(document) {
   )
 }
 
+const VIRTUAL_SUPERMARKET_QUERY_FIELDS = [
+  'categoryId', 'department', 'aisle', 'shelf', 'marketplace', 'query', 'sort', 'pageSize', 'cursor',
+]
+
+const PUBLIC_DATA_PRODUCT_MIRROR_PATHS = [
+  '/data/mobile-commerce/items',
+  '/data/source-catalog/{id}/items',
+  '/data/virtual-supermarket/metadata',
+  '/data/virtual-supermarket/products',
+  '/data/virtual-supermarket/products/{id}',
+  '/data/virtual-supermarket/search',
+]
+
+const PUBLIC_DATA_PRODUCT_MIRROR_SCHEMAS = [
+  'MobileCommerceMarketplace', 'MobileCommerceItem', 'MobileCommercePage',
+  'MobileCommercePageEnvelope', 'SourceCatalogItemsEnvelope',
+  'VirtualSupermarketPlacementPart', 'VirtualSupermarketCategory',
+  'VirtualSupermarketShelf', 'VirtualSupermarketAisle',
+  'VirtualSupermarketDepartment', 'VirtualSupermarketMetadata',
+  'VirtualSupermarketMetadataEnvelope', 'VirtualSupermarketMarketplace',
+  'VirtualSupermarketPrice', 'VirtualSupermarketProduct',
+  'VirtualSupermarketFilters', 'VirtualSupermarketPage',
+  'VirtualSupermarketPageEnvelope', 'VirtualSupermarketDetail',
+  'VirtualSupermarketDetailEnvelope',
+]
+
+function assertVirtualSupermarketContract(document) {
+  const metadata = document.paths['/data/virtual-supermarket/metadata']?.get
+  const products = document.paths['/data/virtual-supermarket/products']?.get
+  const detail = document.paths['/data/virtual-supermarket/products/{id}']?.get
+  const search = document.paths['/data/virtual-supermarket/search']?.get
+  for (const operation of [metadata, products, detail, search]) assert.ok(operation)
+
+  assert.equal(metadata.operationId, 'getVirtualSupermarketMetadata')
+  assert.deepEqual(metadata['x-mx-allowed-query-fields'], [])
+  assert.deepEqual(metadata['x-mx-error-codes'][400], ['unsupported_fields'])
+  assert.equal(
+    metadata.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/VirtualSupermarketMetadataEnvelope',
+  )
+  assert.equal(products.operationId, 'listVirtualSupermarketProducts')
+  assert.equal(search.operationId, 'searchVirtualSupermarketProducts')
+  assert.deepEqual(products['x-mx-allowed-query-fields'], VIRTUAL_SUPERMARKET_QUERY_FIELDS)
+  assert.deepEqual(search['x-mx-allowed-query-fields'], VIRTUAL_SUPERMARKET_QUERY_FIELDS)
+  assert.deepEqual(products.parameters.map(({ name }) => name), VIRTUAL_SUPERMARKET_QUERY_FIELDS)
+  assert.equal(products.parameters.find(({ name }) => name === 'query').required, false)
+  assert.equal(search.parameters.find(({ name }) => name === 'query').required, true)
+  assert.equal(products.parameters.find(({ name }) => name === 'pageSize').schema.default, 24)
+  assert.deepEqual(products.parameters.find(({ name }) => name === 'sort').schema.enum, [
+    'newest', 'title_asc', 'price_asc', 'price_desc',
+  ])
+  assert.deepEqual(products['x-mx-error-codes'][409], ['storefront_revision_changed'])
+  assert.deepEqual(search['x-mx-error-codes'][409], ['storefront_revision_changed'])
+  assert.deepEqual(detail['x-mx-error-codes'][404], ['virtual_supermarket_product_not_found'])
+  assert.ok(detail['x-mx-error-codes'][400].includes('unsupported_fields'))
+  assert.equal(
+    detail.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/VirtualSupermarketDetailEnvelope',
+  )
+
+  const metadataSchema = document.components.schemas.VirtualSupermarketMetadata
+  assert.equal(metadataSchema.properties.contractVersion.const, 'mx-insight-hub.data-products.virtual-supermarket.v1')
+  assert.equal(metadataSchema.properties.platform.const, 'virtual_supermarket')
+  assert.ok(metadataSchema.required.includes('storefrontRevision'))
+  assert.ok(metadataSchema.required.includes('departments'))
+  assert.deepEqual(metadataSchema.properties.supportedSorts.const, [
+    'newest', 'title_asc', 'price_asc', 'price_desc',
+  ])
+
+  const product = document.components.schemas.VirtualSupermarketProduct
+  assert.match(product.properties.id.description, /independently allocated/u)
+  assert.match(product.properties.id.description, /never the mobile-commerce capture\/canonical row UUID/u)
+  assert.equal(product.additionalProperties, false)
+  assert.deepEqual(Object.keys(product.properties).sort(), [
+    'category', 'collectedAt', 'dataVersion', 'id', 'listing', 'marketplace',
+    'placement', 'product', 'shop', 'signals',
+  ])
+  assert.deepEqual(Object.keys(product.properties.placement.properties), [
+    'department', 'aisle', 'shelf', 'position',
+  ])
+  assert.equal(product.properties.listing.properties.status.const, 'on_shelf')
+  assert.deepEqual(Object.keys(product.properties.product.properties), [
+    'title', 'specification', 'price', 'provenance',
+  ])
+  assert.deepEqual(Object.keys(product.properties.shop.properties), ['name'])
+  assert.deepEqual(Object.keys(document.components.schemas.VirtualSupermarketMarketplace.properties), ['id', 'name'])
+  assert.deepEqual(document.components.schemas.VirtualSupermarketMarketplace.required, ['id', 'name'])
+  assert.deepEqual(Object.keys(document.components.schemas.VirtualSupermarketPrice.properties), [
+    'amount', 'currency', 'display', 'provenance',
+  ])
+  assert.deepEqual(document.components.schemas.VirtualSupermarketPrice.properties.currency.type, ['string', 'null'])
+  assert.match(document.components.schemas.VirtualSupermarketPrice.properties.currency.description, /Source prices keep null/u)
+  assert.doesNotMatch(JSON.stringify(product), /goodsId|shopId|sourceValue|mappingStatus|catalogEntryId|canonicalName|catalogSourceKey|captureId|task|run|campaign|raw|metadata|device|is_reported|brand|media/i)
+  assert.doesNotMatch(
+    JSON.stringify(document.components.schemas.MobileCommerceItem.properties.id),
+    /publication UUID/u,
+  )
+  assert.ok(document.components.schemas.VirtualSupermarketPage.required.includes('storefrontRevision'))
+  assert.ok(document.components.schemas.VirtualSupermarketDetail.required.includes('storefrontRevision'))
+
+  const capability = document.paths['/data/capabilities'].get.responses[200]
+    .content['application/json'].example.data.platforms
+    .find(({ platform }) => platform === 'virtual_supermarket')
+  assert.deepEqual(capability, {
+    platform: 'virtual_supermarket',
+    ready: true,
+    capabilities: [
+      'metadata', 'products', 'product_detail', 'stored_search',
+      'category_filter', 'department_filter', 'aisle_filter',
+      'shelf_filter', 'marketplace_filter',
+    ],
+    source: 'hub',
+    servingMode: 'stored',
+  })
+}
+
+function publicOperationMirrorShape(operation) {
+  return {
+    operationId: operation.operationId,
+    allowedQueryFields: operation['x-mx-allowed-query-fields'] ?? null,
+    errorCodes: operation['x-mx-error-codes'] ?? null,
+    parameters: (operation.parameters || []).map(({ name, in: location, required, schema }) => ({
+      name, in: location, required, schema,
+    })),
+    responseSchema: operation.responses[200]?.content?.['application/json']?.schema ?? null,
+  }
+}
+
+function assertPublicDataProductMirror(dynamicDocument, staticDocument) {
+  for (const path of PUBLIC_DATA_PRODUCT_MIRROR_PATHS) {
+    assert.deepEqual(
+      publicOperationMirrorShape(staticDocument.paths[path].get),
+      publicOperationMirrorShape(dynamicDocument.paths[path].get),
+      `${path} static/dynamic operation contract drifted`,
+    )
+  }
+  for (const name of PUBLIC_DATA_PRODUCT_MIRROR_SCHEMAS) {
+    assert.deepEqual(
+      staticDocument.components.schemas[name],
+      dynamicDocument.components.schemas[name],
+      `${name} static/dynamic schema drifted`,
+    )
+  }
+}
+
 async function withServer(listenerMode, run) {
   const app = createApp({
     service: {},
@@ -639,7 +785,7 @@ async function withServer(listenerMode, run) {
 test('public listener serves self-contained public API documentation', async () => {
   await withServer('public', async (baseUrl) => {
     const pagePaths = [
-      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/search', '/docs/telegram',
+      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/virtual-supermarket', '/docs/search', '/docs/telegram',
       '/docs/public-opinion', '/docs/night-all', '/docs/tools', '/docs/evidence', '/docs/errors',
     ]
     const pages = await Promise.all(pagePaths.map(async (path) => {
@@ -689,6 +835,21 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/source-catalog\/metadata/)
     assert.match(html, /\/api\/v1\/data\/source-catalog\/\{id\}\/items/)
     assert.match(html, /\/api\/v1\/data\/mobile-commerce\/items/)
+    assert.match(html, /\/api\/v1\/data\/virtual-supermarket\/metadata/)
+    assert.match(html, /\/api\/v1\/data\/virtual-supermarket\/products\/\{id\}/)
+    assert.match(html, /\/api\/v1\/data\/virtual-supermarket\/search/)
+    assert.match(html, /virtual_supermarket/)
+    assert.match(html, /逛超市/)
+    assert.match(html, /超市全景/)
+    assert.match(html, /目录模式/)
+    assert.match(html, /全景只是客户端 renderer/)
+    assert.match(html, /department \/ aisle \/ shelf \/ position/)
+    assert.match(html, /storefrontRevision/)
+    assert.match(html, /storefront_revision_changed/)
+    assert.match(html, /外部复刻流程/)
+    assert.match(html, /currency=null/)
+    assert.match(html, /不能猜成 CNY/)
+    assert.match(html, /approved mapping/)
     assert.match(html, /外部手机采集执行器/)
     assert.match(html, /Elasticsearch/)
     assert.match(html, /source-catalog\.public\.v1/)
@@ -749,6 +910,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     const pages = [
       ['/docs/auth', 'rules', '认证与调用规则'],
       ['/docs/source-catalog', 'source-catalog', '数据源目录'],
+      ['/docs/virtual-supermarket', 'virtual-supermarket', '虚拟超市'],
       ['/docs/search', 'search', '通用搜索'],
       ['/docs/telegram', 'telegram', 'Telegram 会话'],
       ['/docs/public-opinion', 'public-opinion', '全国省级舆情'],
@@ -779,6 +941,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     assert.equal((legacyHtml.match(/class="doc-page"/g) || []).length, 1)
     assert.match(legacyHtml, /location\.hash\.slice\(1\)/)
     assert.match(legacyHtml, /'public-opinion':'\/docs\/public-opinion'/)
+    assert.match(legacyHtml, /'virtual-supermarket':'\/docs\/virtual-supermarket'/)
     assert.match(legacyHtml, /telegram:'\/docs\/telegram'/)
 
     for (const [alias, canonical] of [
@@ -826,6 +989,10 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/telegram/entities/search',
       '/data/telegram/messages',
       '/data/telegram/search',
+      '/data/virtual-supermarket/metadata',
+      '/data/virtual-supermarket/products',
+      '/data/virtual-supermarket/products/{id}',
+      '/data/virtual-supermarket/search',
       '/night-all/search/{operation}',
       '/requests/{requestId}',
       '/tools/tokenize',
@@ -864,6 +1031,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assertNightAllPublicContract(document)
     assertCanonicalContextContract(document)
     assertDataProductPublicContract(document)
+    assertVirtualSupermarketContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
       document.components.schemas.CanonicalSearchRequest.properties.searchProfile.default,
@@ -904,7 +1072,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
   })
 })
 
-test('static OpenAPI YAML parses and mirrors the dynamic Night-All compatibility schema', async () => {
+test('static OpenAPI YAML mirrors dynamic Night-All and public data-product contracts', async () => {
   const source = await readFile(
     fileURLToPath(new URL('../../docs/contracts/openapi.yaml', import.meta.url)),
     'utf8',
@@ -929,6 +1097,8 @@ test('static OpenAPI YAML parses and mirrors the dynamic Night-All compatibility
     messages: 'listTelegramMonitorMessages',
     search: 'searchStoredTelegram',
   })
+  assertVirtualSupermarketContract(document)
+  assertPublicDataProductMirror(PUBLIC_OPENAPI_DOCUMENT, document)
 })
 
 test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy', async () => {
@@ -957,7 +1127,7 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
 
 test('admin-only listener does not expose public documentation', async () => {
   await withServer('admin', async (baseUrl) => {
-    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
+    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/virtual-supermarket', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
       const response = await fetch(`${baseUrl}${path}`)
       const payload = await response.json()
       assert.equal(response.status, 404)
