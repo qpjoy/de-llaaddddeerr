@@ -23,9 +23,10 @@
 runtime、通用 definition/compiler、Hub 数据节点目录、目标 API/数据模型及
 advanced-search 兼容迁移见
 [Agent Studio 通用编排与 Hub 数据节点设计](agent-studio-langgraph-data-orchestration.md)。
-外部 AI engineering 平台、Prompt 单一真相、MXT 证据边界及 build-vs-buy 决策，以
-[Agent Studio 平台边界、证据集成与 Build-vs-Buy](agent-studio-platform-boundaries-and-build-vs-buy.md)
-为准。
+Hub-native Trace、Eval、Gate、MXT 证据边界及“不引入外部管理平台”的权威决策，以
+[ADR-0012: Hub-native Agent Studio](../adr/0012-hub-native-agent-studio.md) 为准。历史比较过程见
+[Agent Studio 平台边界、证据集成与 Build-vs-Buy](agent-studio-platform-boundaries-and-build-vs-buy.md)，
+但其外部平台采用路线已失效。
 
 React Flow 可以承载编辑和呈现，但不能成为执行器、安全边界或授权系统。LangGraph 可以承载 Agent 内部的状态图、checkpoint、stream 和 HITL，但它本身也不替代工具治理、发布审批、租户鉴权和真实副作用补偿。Temporal 只在流程跨小时/天、跨服务等待或包含可靠副作用时，作为外层业务工作流候选，而不是当前 120 秒 dry-run 的前置依赖。
 

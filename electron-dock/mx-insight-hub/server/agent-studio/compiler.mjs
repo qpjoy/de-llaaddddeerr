@@ -11,7 +11,89 @@ import {
   resolveNodeType,
 } from './registry.mjs'
 
-export const AGENT_STUDIO_COMPILER_VERSION = 'agent-studio-compiler-p1-v1'
+export const AGENT_STUDIO_COMPILER_VERSION = 'agent-studio-compiler-p1_5-v1'
+export const AGENT_STUDIO_STATIC_ASSURANCE_CONTRACT = 'mx-insight.agent-static-assurance.v1'
+
+const STATIC_ASSURANCE_CHECKS = Object.freeze([
+  {
+    key: 'definition-contract',
+    label: 'Draft contract',
+    diagnosticCodes: new Set(['definition_schema_invalid']),
+  },
+  {
+    key: 'registry-and-config',
+    label: 'Code-owned registry and node config',
+    diagnosticCodes: new Set([
+      'duplicate_node_id', 'forbidden_definition_capability', 'invalid_config_value',
+      'node_config_invalid', 'node_effect_not_allowed', 'unknown_node_type',
+    ]),
+  },
+  {
+    key: 'typed-ports',
+    label: 'Typed ports and edge contracts',
+    diagnosticCodes: new Set([
+      'duplicate_edge', 'edge_input_port_invalid', 'edge_node_invalid',
+      'edge_output_port_invalid', 'input_port_multiple_writers', 'port_type_mismatch',
+      'required_input_unconnected', 'source_route_branch_mismatch',
+    ]),
+  },
+  {
+    key: 'dag-topology',
+    label: 'DAG reachability and terminal paths',
+    diagnosticCodes: new Set([
+      'duplicate_terminal_node', 'entry_node_has_input', 'entry_node_invalid',
+      'entry_node_type_invalid', 'graph_cycle_forbidden', 'node_unreachable',
+      'terminal_node_has_output', 'terminal_node_invalid', 'terminal_node_type_invalid',
+      'terminal_path_missing', 'terminal_unreachable', 'undeclared_terminal_node',
+    ]),
+  },
+  {
+    key: 'budget-envelope',
+    label: 'Static budget envelope',
+    diagnosticCodes: new Set(['budget_insufficient', 'budget_limit_exceeded']),
+  },
+  {
+    key: 'effect-policy',
+    label: 'Read-only effect policy',
+    diagnosticCodes: new Set(['forbidden_definition_capability', 'node_effect_not_allowed']),
+  },
+])
+
+function staticAssurance(diagnostics, {
+  definitionParsed = true,
+  nodeCount = 0,
+  edgeCount = 0,
+  logicalRefCount = 0,
+} = {}) {
+  const codes = new Set(diagnostics.map((item) => item.code))
+  const checks = STATIC_ASSURANCE_CHECKS.map((check, index) => {
+    const evidenceCodes = [...check.diagnosticCodes].filter((code) => codes.has(code)).sort()
+    const status = definitionParsed
+      ? evidenceCodes.length > 0 ? 'failed' : 'passed'
+      : index === 0 ? 'failed' : 'not-evaluated'
+    return {
+      key: check.key,
+      label: check.label,
+      mode: 'static',
+      status,
+      evidenceCodes,
+    }
+  })
+  return canonicalizeJson({
+    contractVersion: AGENT_STUDIO_STATIC_ASSURANCE_CONTRACT,
+    owner: 'mx-insight-hub',
+    mode: 'static',
+    status: diagnostics.length > 0 ? 'failed' : 'passed',
+    checks,
+    evidence: { nodeCount, edgeCount, logicalRefCount },
+    limitations: {
+      runtimeEvents: false,
+      evaluationResults: false,
+      releaseDecision: false,
+      runnable: false,
+    },
+  })
+}
 
 export const DEFAULT_BUDGETS = Object.freeze({
   deadlineMs: 60_000,
@@ -126,13 +208,15 @@ function logicalDependencies(node, config) {
 export function compileAgentDraft(input) {
   const parsed = AgentDraftDefinitionSchema.safeParse(input)
   if (!parsed.success) {
+    const diagnostics = sortDiagnostics(validationIssues(parsed.error).map((issue) => diagnostic(
+      'definition_schema_invalid',
+      issue.message,
+      { path: issue.path },
+    )))
     return {
       valid: false,
-      diagnostics: sortDiagnostics(validationIssues(parsed.error).map((issue) => diagnostic(
-        'definition_schema_invalid',
-        issue.message,
-        { path: issue.path },
-      ))),
+      diagnostics,
+      assurance: staticAssurance(diagnostics, { definitionParsed: false }),
       artifactHash: null,
       normalizedPlan: null,
       dependencyManifest: null,
@@ -430,9 +514,15 @@ export function compileAgentDraft(input) {
   }
 
   if (diagnostics.length > 0) {
+    const sorted = sortDiagnostics(diagnostics)
     return {
       valid: false,
-      diagnostics: sortDiagnostics(diagnostics),
+      diagnostics: sorted,
+      assurance: staticAssurance(sorted, {
+        nodeCount: definition.nodes.length,
+        edgeCount: definition.edges.length,
+        logicalRefCount: logicalRefs.size,
+      }),
       artifactHash: null,
       normalizedPlan: null,
       dependencyManifest: null,
@@ -441,6 +531,11 @@ export function compileAgentDraft(input) {
 
   normalizedNodes.sort((left, right) => left.nodeId.localeCompare(right.nodeId))
   normalizedEdges.sort((left, right) => edgeKey(left).localeCompare(edgeKey(right)))
+  const assurance = staticAssurance([], {
+    nodeCount: normalizedNodes.length,
+    edgeCount: normalizedEdges.length,
+    logicalRefCount: logicalRefs.size,
+  })
   const normalizedPlan = canonicalizeJson({
     contractVersion: AGENT_STUDIO_ARTIFACT_CONTRACT,
     entryNodeId: definition.entryNodeId,
@@ -448,6 +543,7 @@ export function compileAgentDraft(input) {
     nodes: normalizedNodes,
     edges: normalizedEdges,
     budgets,
+    assurance,
     policy: {
       allowedEffects: ['none', 'read'],
       customCode: false,
@@ -471,6 +567,7 @@ export function compileAgentDraft(input) {
   return {
     valid: true,
     diagnostics: [],
+    assurance,
     artifactHash,
     normalizedPlan,
     dependencyManifest,

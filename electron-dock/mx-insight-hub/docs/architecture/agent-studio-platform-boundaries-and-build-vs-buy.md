@@ -1,11 +1,18 @@
 # Agent Studio：平台边界、证据集成与 Build-vs-Buy 决策
 
-状态：**Canonical 架构决策与目标合同**；未标为“已实现”的内容均为规划，不代表当前环境已经安装或接通外部产品  
-更新时间：2026-08-31  
+状态：**Superseded / 历史 Build-vs-Buy 评估记录**；不再是实施路线或目标合同
+
+更新时间：2026-09-01
 适用范围：MX Insight Hub Internal 内的 Agent Studio、Agent 运行、评测、发布及其外部证据集成  
 非目标：本文不安装依赖、不启动外部服务、不改变 MX-H2I 登录、联网、DNS、WireGuard、ProductNetwork 或 Launcher 发布链路
 
-## 1. 决策摘要
+> 2026-09-01 决策更新：团队不引入 Promptfoo、Langfuse 或 LangSmith 管理/运行平台，
+> 只借鉴其 Trace、Dataset、Eval、Experiment 与 Gate 概念并建设 Hub-native 产品。
+> 当前权威决策见 [ADR-0012: Hub-native Agent Studio](../adr/0012-hub-native-agent-studio.md)。
+> 本文保留用于解释比较过程、被否决方案和安全边界；其中的外部 adapter、deep link、spike
+> 与采用路线均不得作为待实施需求。
+
+## 1. 历史决策摘要（已被 ADR-0012 取代）
 
 MX Agent Studio 是 **Hub 业务 Data Agent 的受治理创作与产品控制面**。它负责把 Hub
 已有的数据源、Schema、Mapping、清洗、质量、检索、Embedding、BI、发布与血缘能力，编译成
@@ -463,7 +470,7 @@ IntegrationReference {
 部署模型与权威数据不同。若直接把多个 UI/数据库串联，会产生 Prompt 双写、Run 状态冲突、
 Release 无法重放和凭据外泄风险。
 
-### 9.2 Decision
+### 9.2 Historical decision（superseded）
 
 采用“**自建垂直控制面 + 购买/采用窄横向能力**”：
 
@@ -498,7 +505,7 @@ Release 无法重放和凭据外泄风险。
 - 数据驻留、RBAC、审计、许可成本或运维负担使现有选择不再成立；
 - 实测规模表明 Hub Ledger → OTel outbox 或 eval artifact 保留模型需要重构。
 
-## 10. 阶段路线
+## 10. 历史阶段路线（superseded；不得执行）
 
 每一阶段都是可独立验收的增量，不把后续产品能力伪装成当前可用。
 

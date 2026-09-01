@@ -244,6 +244,12 @@
   color: var(--qp-text-1);
 }
 
+.mih-studio-mode-switch button:disabled {
+  color: var(--qp-text-4);
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
 .mih-studio-filter-chips button.is-active,
 .mih-studio-mode-switch button.is-active {
   background: color-mix(in srgb, var(--qp-primary) 12%, var(--qp-bg-3));
@@ -259,7 +265,7 @@
 
 .mih-studio-dimension-filters {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   min-width: 0;
   border: 1px solid var(--qp-line);
@@ -286,10 +292,10 @@
 .mih-studio-product-columns,
 .mih-studio-product-row {
   display: grid;
-  grid-template-columns: minmax(250px, 1.35fr) minmax(180px, 1fr) 130px 165px 115px 160px 96px;
+  grid-template-columns: minmax(280px, 1.4fr) minmax(220px, 1fr) 140px minmax(210px, 0.9fr) 112px;
   align-items: stretch;
   gap: 0;
-  min-width: 1096px;
+  min-width: 960px;
 }
 
 .mih-studio-product-columns {
@@ -450,6 +456,16 @@
   padding: 12px;
 }
 
+.mih-studio-combined-cell > code {
+  grid-column: 1 / -1;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--qp-primary);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mih-studio-business-cell {
   gap: 7px;
 }
@@ -555,7 +571,7 @@
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  min-width: 1096px;
+  min-width: 960px;
   padding: 10px 14px;
   color: var(--qp-text-4);
   font-size: 9px;
@@ -603,6 +619,60 @@
 .mih-studio-template-catalog p {
   overflow: hidden;
   margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mih-studio-template-catalog article > div > small {
+  color: var(--qp-text-3);
+  font-size: 9px;
+}
+
+.mih-studio-native-lifecycle {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  background: var(--qp-bg-3);
+  box-shadow: var(--qp-shadow-inner-1);
+}
+
+.mih-studio-native-lifecycle > div {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 9px 12px;
+  color: var(--qp-text-4);
+}
+
+.mih-studio-native-lifecycle > div + div {
+  border-left: 1px solid var(--qp-line);
+}
+
+.mih-studio-native-lifecycle > div[data-state='available'] {
+  color: var(--qp-primary);
+  background: color-mix(in srgb, var(--qp-primary) 4%, transparent);
+}
+
+.mih-studio-native-lifecycle span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.mih-studio-native-lifecycle strong {
+  color: var(--qp-text-2);
+  font-size: 10px;
+}
+
+.mih-studio-native-lifecycle small {
+  overflow: hidden;
+  color: var(--qp-text-4);
+  font-size: 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1600,7 +1670,7 @@
 
 .mih-studio-reference-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
   gap: 6px;
 }
 
@@ -1622,7 +1692,74 @@
   white-space: nowrap;
 }
 
+.mih-studio-reference-grid span {
+  color: var(--qp-text-3);
+  font-size: 8px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
 .mih-studio-reference-grid small {
+  color: var(--qp-text-4);
+  font-size: 8px;
+}
+
+.mih-studio-assurance-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.mih-studio-assurance-grid article {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-xs);
+  padding: 7px 8px;
+  background: var(--qp-bg-3);
+  color: var(--qp-success);
+}
+
+.mih-studio-assurance-grid article[data-status='failed'] {
+  color: var(--qp-danger);
+}
+
+.mih-studio-assurance-grid article[data-status='not-evaluated'] {
+  color: var(--qp-text-4);
+}
+
+.mih-studio-assurance-grid article > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mih-studio-assurance-grid strong,
+.mih-studio-assurance-grid code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mih-studio-assurance-grid strong {
+  color: var(--qp-text-2);
+  font-size: 9px;
+}
+
+.mih-studio-assurance-grid code {
+  color: var(--qp-text-4);
+  font-size: 8px;
+}
+
+.mih-studio-assurance-grid > p {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
   color: var(--qp-text-4);
   font-size: 8px;
 }
@@ -1752,6 +1889,19 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .mih-studio-native-lifecycle {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .mih-studio-native-lifecycle > div:nth-child(4) {
+    border-top: 1px solid var(--qp-line);
+    border-left: 0;
+  }
+
+  .mih-studio-native-lifecycle > div:nth-child(5) {
+    border-top: 1px solid var(--qp-line);
+  }
+
   .mih-studio-workbench {
     grid-template-columns: 188px minmax(0, 1fr);
     grid-template-rows: minmax(560px, 64vh) auto 182px;
@@ -1870,6 +2020,29 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .mih-studio-native-lifecycle,
+  .mih-studio-assurance-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mih-studio-native-lifecycle > div:nth-child(3) {
+    border-top: 1px solid var(--qp-line);
+    border-left: 0;
+  }
+
+  .mih-studio-native-lifecycle > div:nth-child(4),
+  .mih-studio-native-lifecycle > div:nth-child(5) {
+    border-top: 1px solid var(--qp-line);
+  }
+
+  .mih-studio-native-lifecycle > div:nth-child(4) {
+    border-left: 1px solid var(--qp-line);
+  }
+
+  .mih-studio-native-lifecycle > div:nth-child(5) {
+    border-left: 0;
+  }
+
   .mih-studio-future-boundary > div:nth-child(3) {
     border-top: 1px solid var(--qp-line);
     border-left: 0;
@@ -1953,12 +2126,19 @@
   }
 
   .mih-studio-reference-grid,
+  .mih-studio-native-lifecycle,
+  .mih-studio-assurance-grid,
   .mih-studio-future-boundary,
   .mih-studio-create-form {
     grid-template-columns: 1fr;
   }
 
   .mih-studio-future-boundary > div + div {
+    border-top: 1px solid var(--qp-line);
+    border-left: 0;
+  }
+
+  .mih-studio-native-lifecycle > div + div {
     border-top: 1px solid var(--qp-line);
     border-left: 0;
   }

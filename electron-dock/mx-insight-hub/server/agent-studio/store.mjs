@@ -606,7 +606,7 @@ export class AgentStudioStore {
           422,
           'agent_studio_compile_failed',
           'The Agent Studio graph did not pass static compilation',
-          { diagnostics: compiled.diagnostics },
+          { diagnostics: compiled.diagnostics, assurance: compiled.assurance },
         )
       }
       const artifactId = this.idFactory()

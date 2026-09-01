@@ -144,6 +144,10 @@ function AgentStudioRoute(props) {
     (agentKey, draftId) => adminApi.agentStudioDraft(token, agentKey, draftId),
     [token],
   )
+  const loadArtifact = useCallback(
+    (agentKey, artifactId) => adminApi.agentStudioArtifact(token, agentKey, artifactId),
+    [token],
+  )
   const loadNodeTypes = useCallback(() => adminApi.agentStudioNodeTypes(token), [token])
   const loadTemplates = useCallback(async () => {
     const result = await adminApi.agentStudioTemplates(token)
@@ -151,6 +155,9 @@ function AgentStudioRoute(props) {
       templateKey: template.templateKey,
       label: template.displayName || template.templateKey,
       description: template.description || '',
+      availability: template.availability,
+      runtimeAvailable: template.runtimeAvailable,
+      definition: template.definition,
     }))
   }, [token])
   const loadSequences = useCallback(async () => (
@@ -209,7 +216,11 @@ function AgentStudioRoute(props) {
       return { ...result, diagnostics: studioDiagnostics(result?.diagnostics) }
     } catch (error) {
       if (error?.status === 422 && Array.isArray(error?.details?.diagnostics)) {
-        return { status: 'failed', diagnostics: studioDiagnostics(error.details.diagnostics) }
+        return {
+          status: 'failed',
+          diagnostics: studioDiagnostics(error.details.diagnostics),
+          assurance: error.details.assurance,
+        }
       }
       throw error
     }
@@ -227,7 +238,7 @@ function AgentStudioRoute(props) {
   return (
     <Suspense fallback={<LoadingState label="正在加载 Agent Studio" />}>
       <LazyAgentStudioPage {...props} {...detail}
-        loadProjects={loadProjects} loadProject={loadProject} loadDraft={loadDraft}
+        loadProjects={loadProjects} loadProject={loadProject} loadDraft={loadDraft} loadArtifact={loadArtifact}
         loadNodeTypes={loadNodeTypes} loadTemplates={loadTemplates} loadSequences={loadSequences}
         onCreateProject={createProject} updateProject={updateProject}
         onOpenProject={openProject} onOpenDraft={openDraft}

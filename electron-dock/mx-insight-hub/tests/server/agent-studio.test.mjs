@@ -72,6 +72,14 @@ test('the public-opinion template compiles to a non-runnable reviewed mapping ar
   assert.equal(first.normalizedPlan.policy.runnable, false)
   assert.equal(first.normalizedPlan.policy.arbitraryNetwork, false)
   assert.equal(first.normalizedPlan.policy.arbitrarySql, false)
+  assert.equal(first.assurance.contractVersion, 'mx-insight.agent-static-assurance.v1')
+  assert.equal(first.assurance.owner, 'mx-insight-hub')
+  assert.equal(first.assurance.status, 'passed')
+  assert.equal(first.assurance.checks.length, 6)
+  assert.ok(first.assurance.checks.every((check) => check.status === 'passed'))
+  assert.deepEqual(first.normalizedPlan.assurance, first.assurance)
+  assert.equal(first.normalizedPlan.assurance.limitations.runtimeEvents, false)
+  assert.equal(first.normalizedPlan.assurance.limitations.evaluationResults, false)
   assert.equal(first.normalizedPlan.ui, undefined)
   assert.equal(
     first.normalizedPlan.nodes.find((node) => node.nodeId === 'human_review').approvalClass,
@@ -111,7 +119,13 @@ test('the compiler rejects unknown nodes, capability injection, type mismatches,
 
   const unknown = structuredClone(base)
   unknown.nodes[2].nodeType = 'hub.schema.user-defined'
-  assert.ok(compileAgentDraft(unknown).diagnostics.some((item) => item.code === 'unknown_node_type'))
+  const unknownResult = compileAgentDraft(unknown)
+  assert.ok(unknownResult.diagnostics.some((item) => item.code === 'unknown_node_type'))
+  assert.equal(unknownResult.assurance.status, 'failed')
+  assert.equal(
+    unknownResult.assurance.checks.find((check) => check.key === 'registry-and-config').status,
+    'failed',
+  )
 
   for (const forbiddenKey of ['url', 'sql', 'code', 'runtimeFactoryId']) {
     const injected = structuredClone(base)

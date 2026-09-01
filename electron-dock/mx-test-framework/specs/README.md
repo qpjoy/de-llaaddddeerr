@@ -52,9 +52,8 @@ MX Test Framework（简称 **MXT**）是一个独立的 e2e 测试平台，位�
 ## 与 MX Agent Studio 的边界
 
 权威边界见
-[`Agent Studio：平台边界、证据集成与 Build-vs-Buy`](../../mx-insight-hub/docs/architecture/agent-studio-platform-boundaries-and-build-vs-buy.md)：
-Hub 负责创建业务 Data Agent，并拥有 Agent 内部 eval、gate 与 release；MXT 只提供部署后黑盒
-质量证据。Promptfoo 由 Hub-owned `EvaluationRunner` 通过隔离 job 执行，不进入当前 MXT 的
-run/case/step 或证据管道。若未来要共享底层 CI/Job 执行基础设施，必须另立 ADR 抽取无领域状态的
-runner substrate，并继续隔离数据库、身份与 payload；这不会把 Agent Eval 变成 MXT 领域对象，
-也不会把 Release 决策移出 Hub。
+[`ADR-0012: Hub-native Agent Studio`](../../mx-insight-hub/docs/adr/0012-hub-native-agent-studio.md)：
+Hub 负责创建业务 Data Agent，并原生拥有 Agent 内部 Trace、Eval、Gate 与 Release；MXT 只提供
+部署后黑盒质量证据。Promptfoo、Langfuse 与 LangSmith 不进入当前 MXT 或 Hub 运行依赖。
+即使未来共享底层 CI/Job 执行基础设施，也必须另立 ADR 抽取无领域状态的 runner substrate，
+继续隔离数据库、身份与 payload；Agent Eval 永远不是 MXT 领域对象，Release 决策也不移出 Hub。
