@@ -13,17 +13,17 @@ import {
   mobileCommerceSourceContractIssues,
 } from './source-contract.mjs'
 
-export const MOBILE_COMMERCE_WRITER_CONTRACT_VERSION = 'mobile-commerce.writer.v2'
+export const MOBILE_COMMERCE_WRITER_CONTRACT_VERSION = 'mobile-commerce.writer.v3'
 export const MOBILE_COMMERCE_WRITER_CONTRACT_SUMMARY = Object.freeze({
   mutation: 'Rows visible to the Hub are append-only. Existing business fields are not updated in place unless a future updated_at/change-journal contract replaces this one.',
   identity: 'id is immutable, unique, and never reused for the lifetime of this fixed dataset; it identifies a capture row, not necessarily a marketplace product. A truncate, table replacement, or ID-sequence reuse requires a new source/dataset contract.',
-  watermark: 'collected_at is non-null, finite source-local Asia/Shanghai collection time assigned before insert and is never rewritten.',
+  watermark: 'collected_at is non-null, finite source-local Asia/Shanghai collection time assigned before insert and is never rewritten. A text/varchar column must contain exactly YYYY-MM-DD HH:mm:ss with no T, offset, fraction, or surrounding whitespace.',
   ordering: 'A later commit cannot insert a collected_at value behind a checkpoint already consumed by the Hub.',
   deletion: 'Hard deletes are not observable under this contract and must not be used for rows that have entered this feed.',
   input: Object.freeze({
     table: `${MOBILE_COMMERCE_SOURCE_LOCATOR.schema}.${MOBILE_COMMERCE_SOURCE_LOCATOR.table}`,
     cursor: [MOBILE_COMMERCE_SOURCE_LOCATOR.cursorColumn, MOBILE_COMMERCE_SOURCE_LOCATOR.idColumn],
-    recommendedIndex: `(${MOBILE_COMMERCE_SOURCE_LOCATOR.cursorColumn}, ${MOBILE_COMMERCE_SOURCE_LOCATOR.idColumn})`,
+    recommendedIndex: `timestamp: (${MOBILE_COMMERCE_SOURCE_LOCATOR.cursorColumn}, ${MOBILE_COMMERCE_SOURCE_LOCATOR.idColumn}); text/varchar: ((${MOBILE_COMMERCE_SOURCE_LOCATOR.cursorColumn} COLLATE "C"), ${MOBILE_COMMERCE_SOURCE_LOCATOR.idColumn})`,
     sourceTimezone: 'Asia/Shanghai (+08:00)',
   }),
 })

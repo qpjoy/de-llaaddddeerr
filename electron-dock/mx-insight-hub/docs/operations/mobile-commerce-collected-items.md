@@ -89,11 +89,14 @@ profiles, representative rows for every marketplace, malformed/oversized JSON
 cases and a reviewed drift policy. The v1 runtime fails closed on any change to
 the exact 25-column set and on incompatible identity/watermark types. For the
 fixed mobile adapter only, legacy nullable declarations on writer-required
-columns follow the guarded `mobile-commerce.writer.v2` exception described
-below; actual NULL values still fail closed. Other column-type profiles remain
-reviewed activation evidence until a full schema digest is persisted; an
-operator must pause promotion when those types change. No drift flows
-automatically into public extensions.
+columns follow the guarded `mobile-commerce.writer.v3` exception described
+below; actual NULL values still fail closed. Writer v3 also has one narrow
+physical-type compatibility path for this fixed adapter: `collected_at` may be
+`text` or `varchar` only when every value is exactly
+`YYYY-MM-DD HH:mm:ss`. Other column-type profiles remain reviewed activation
+evidence until a full schema digest is persisted; an operator must pause
+promotion when those types change. No drift flows automatically into public
+extensions.
 
 ## 3. Identity, cursor and writer contract
 
@@ -122,9 +125,13 @@ of the following are proved:
 
 1. `id` is non-null, unique, immutable and never reused for the lifetime of the
    fixed dataset contract.
-2. `collected_at` is non-null and immutable. A naive timestamp is written and
-   interpreted in `Asia/Shanghai`; Hub stores/serves the normalized UTC instant
-   and may retain the original local representation as lineage.
+2. `collected_at` is non-null and immutable. A PostgreSQL `timestamp` or
+   `timestamptz` is supported. The fixed mobile adapter additionally accepts
+   `text`/`varchar` only when the source value itself is exactly 19 characters
+   in `YYYY-MM-DD HH:mm:ss`: no `T`, UTC offset, fractional seconds or
+   surrounding whitespace. Naive values are interpreted in `Asia/Shanghai`;
+   Hub stores/serves the normalized UTC instant and retains the exact textual
+   value as its source checkpoint.
 3. Rows are append-only: no relevant update, hard delete or backfill occurs
    after the cursor passes. Absence from a page is never a delete.
 4. The writer assigns or attests `collected_at` so commit ordering cannot place
@@ -134,26 +141,37 @@ of the following are proved:
    capture-identity claim and the total ordering of `(collected_at, id)`.
 
 A ready B-tree index beginning with `(collected_at, id)` is strongly
-recommended for source-query performance, but is not a correctness prerequisite
-when a unique `id` index already proves the total order. Its absence is reported
-as an activation warning because PostgreSQL may otherwise scan or sort the
-source table. Likewise, the fixed source may declare `id`, `platform`, `title`
-or `collected_at` nullable in DDL only after an operator accepts the current
-`mobile-commerce.writer.v2` contract that commits to non-null values. The Hub
-reports that DDL mismatch as a warning and applies a runtime NULL guard to every
-pull batch. If any required value is actually NULL, that batch fails closed
-before canonical import or checkpoint advancement. The guarded compatibility
-branch can add source scan/sort work, especially without the composite index;
-the upstream owner should therefore add `NOT NULL` constraints and a ready,
-valid `(collected_at, id)` index when practical.
+recommended for timestamp source-query performance. Text/varchar mode instead
+uses C-collation ordering and recommends
+`((collected_at COLLATE "C"), id)`. These indexes are not correctness
+prerequisites when a unique `id` index already proves the total order. Their
+absence is reported as an activation warning because PostgreSQL may otherwise
+scan or sort the source table. Likewise, the fixed source may declare `id`,
+`platform`, `title` or `collected_at` nullable in DDL only after an operator
+accepts the current `mobile-commerce.writer.v3` contract that commits to
+non-null values. The Hub reports that DDL mismatch as a warning and applies a
+runtime NULL/format guard inside every pull statement. If a required value is
+NULL, or a textual timestamp is not exactly valid, that batch fails closed
+before canonical import or checkpoint advancement, even when the bad row is
+behind the current checkpoint. The guarded compatibility branch can add source
+scan/sort work; the upstream owner should ultimately migrate `collected_at` to
+`timestamp without time zone NOT NULL` and add a ready, valid
+`(collected_at, id)` index when practical.
 
-The reader orders and resumes strictly with:
+For timestamp columns, the reader orders and resumes strictly with:
 
 ```sql
 WHERE (collected_at, id) > ($1, $2)
 ORDER BY collected_at ASC, id ASC
 LIMIT $3
 ```
+
+For text/varchar columns, the equivalent tuple comparison and ordering use
+`collected_at COLLATE "C"`. Because Writer v3 permits only one fixed-width
+representation, this bytewise text order is identical to source-local
+chronological order and to the order after applying the fixed `+08:00` offset.
+The generic database-source connector does not inherit this textual-cursor
+exception.
 
 It advances the durable checkpoint only after raw/source-object, canonical,
 revision and projection-outbox writes commit in Hub PostgreSQL. Replays reuse
@@ -334,11 +352,13 @@ Keep the source paused until all of these are complete:
   no-ID-reuse guarantee and larger samples are reviewed;
 - append-only writer attestation, `Asia/Shanghai` interpretation and unique
   `id` identity index pass, or an ordered journal replaces that cursor; legacy
-  nullable DDL is accepted only with the v2 attestation and per-batch NULL guard,
-  while any actual required NULL fails closed; the recommended
-  `(collected_at, id)` pull index and upstream `NOT NULL` constraints may be
-  added later to remove the explicit source-query performance warnings and
-  guarded-scan overhead;
+  nullable DDL and the narrow exact-text cursor are accepted only with the v3
+  attestation and per-statement NULL/format guard, while any actual required
+  NULL or malformed timestamp fails closed; the recommended timestamp
+  `(collected_at, id)` or text/varchar
+  `((collected_at COLLATE "C"), id)` pull index and upstream `NOT NULL`
+  constraints may be added later to remove the explicit source-query
+  performance warnings and guarded-scan overhead;
 - mapping version, public allowlist, catalog revision, quality thresholds,
   retention and grants are approved;
 - replay/idempotency, malformed rows, timestamp ties, late commits, table

@@ -35,6 +35,7 @@ import {
   mobileCommerceCursorIsFinite,
   mobileCommerceProbeIssues,
   mobileCommerceSourceContractIssues,
+  mobileCommerceTextCursorDate,
 } from '../../server/ingest/mobile-commerce/source-contract.mjs'
 
 const CURSOR_SECRET = 'mobile-commerce-test-cursor-secret'
@@ -319,7 +320,7 @@ test('mobile-commerce pipeline status never returns an inline database password'
   assert.ok(dsnConfiguration.configurationIssues.some((issue) => issue.includes('dsnEnv')))
 })
 
-test('mobile-commerce hot-updates cadence while running and activates only under writer v2 with transient probe warnings', async () => {
+test('mobile-commerce hot-updates cadence while running and activates only under writer v3 with transient probe warnings', async () => {
   const source = {
     id: 'mobile-source-id',
     sourceKey: MOBILE_COMMERCE_SOURCE_KEY,
@@ -396,7 +397,13 @@ test('mobile-commerce hot-updates cadence while running and activates only under
       testSourceCandidate: async (candidate) => calls.candidateTests.push(candidate),
       describe: async (sourceKey, options) => {
         calls.descriptions.push({ sourceKey, options })
-        return { issues: [], warnings: [warning], columns: validColumns() }
+        return {
+          issues: [],
+          warnings: [warning],
+          columns: validColumns().map((column) => (
+            column.name === 'collected_at' ? { ...column, databaseType: 'varchar' } : column
+          )),
+        }
       },
       assertCheckpointCompatible: async (sourceKey, options) => {
         calls.checkpoints.push({ sourceKey, options })
@@ -430,7 +437,7 @@ test('mobile-commerce hot-updates cadence while running and activates only under
     () => pipeline.setStatus('active', {
       writerContractAttestation: {
         confirmed: true,
-        contractVersion: 'mobile-commerce.writer.v1',
+        contractVersion: 'mobile-commerce.writer.v2',
         contractDigest: MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST,
       },
     }),
@@ -446,11 +453,8 @@ test('mobile-commerce hot-updates cadence while running and activates only under
       contractDigest: MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST,
     },
   })
-  assert.equal(MOBILE_COMMERCE_WRITER_CONTRACT_VERSION, 'mobile-commerce.writer.v2')
-  assert.equal(
-    MOBILE_COMMERCE_WRITER_CONTRACT_SUMMARY.input.recommendedIndex,
-    '(collected_at, id)',
-  )
+  assert.equal(MOBILE_COMMERCE_WRITER_CONTRACT_VERSION, 'mobile-commerce.writer.v3')
+  assert.match(MOBILE_COMMERCE_WRITER_CONTRACT_SUMMARY.input.recommendedIndex, /text\/varchar/u)
   assert.equal('requiredIndex' in MOBILE_COMMERCE_WRITER_CONTRACT_SUMMARY.input, false)
   assert.deepEqual(activated.activationWarnings, [warning])
   assert.equal(calls.activations.length, 1)
@@ -493,13 +497,40 @@ test('the mobile-commerce probe enforces all 25 fixed columns and scalar types w
   }
   const wrongTypes = columns.map((column) => {
     if (column.name === 'id') return { ...column, databaseType: 'jsonb' }
-    if (column.name === 'collected_at') return { ...column, databaseType: 'text' }
+    if (column.name === 'collected_at') return { ...column, databaseType: 'jsonb' }
     return column
   })
   assert.deepEqual(mobileCommerceColumnIssues(wrongTypes), [
-    'collected_at must be timestamp or timestamptz',
+    'collected_at must be timestamp, timestamptz, text, or varchar',
     'id must be an integer, UUID, or text scalar',
   ])
+
+  for (const databaseType of ['text', 'varchar']) {
+    const textual = columns.map((column) => (
+      column.name === 'collected_at' ? { ...column, databaseType } : column
+    ))
+    assert.deepEqual(mobileCommerceColumnIssues(textual), [])
+    assert.ok(mobileCommerceColumnWarnings(textual).some((warning) => (
+      warning.includes(`collected_at uses ${databaseType}`)
+      && warning.includes('YYYY-MM-DD HH:mm:ss')
+    )))
+  }
+  assert.equal(
+    mobileCommerceTextCursorDate('2026-07-27 14:58:52')?.toISOString(),
+    '2026-07-27T06:58:52.000Z',
+  )
+  assert.equal(
+    mobileCommerceTextCursorDate('2024-02-29 00:00:00')?.toISOString(),
+    '2024-02-28T16:00:00.000Z',
+  )
+  for (const value of [
+    '2026-02-29 00:00:00',
+    '2026-02-31 00:00:00',
+    '2026-07-27T14:58:52',
+    '2026-07-27 14:58:52.000',
+    ' 2026-07-27 14:58:52',
+    'not-a-date',
+  ]) assert.equal(mobileCommerceTextCursorDate(value), null, value)
 
   assert.deepEqual(mobileCommerceProbeIssues({
     issues: ['writer contract is not attested', 'required mobile-commerce column title is missing'],

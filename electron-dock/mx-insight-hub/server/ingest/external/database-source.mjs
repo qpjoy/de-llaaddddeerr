@@ -22,10 +22,12 @@ import {
   MOBILE_COMMERCE_SOURCE_KEY,
   MOBILE_COMMERCE_SOURCE_LOCATOR,
   MOBILE_COMMERCE_WRITER_REQUIRED_COLUMNS,
+  isMobileCommerceTextCursorType,
   mobileCommerceColumnIssues,
   mobileCommerceColumnWarnings,
   mobileCommerceCursorIsFinite,
   mobileCommerceSourceContractIssues,
+  mobileCommerceTextCursorDate,
 } from '../mobile-commerce/source-contract.mjs'
 
 // Incremental pull from a foreign PostgreSQL database.
@@ -78,6 +80,9 @@ const ID_CASTS = new Map([
   ['varchar', 'text'],
   ['bpchar', 'text'],
 ])
+const MOBILE_COMMERCE_TEXT_CURSOR_SEMANTICS = 'mobile-commerce.cursor.v3'
+const MOBILE_COMMERCE_TEXT_TIMESTAMP_PATTERN = "^[0-9]{4}-((01|03|05|07|08|10|12)-(0[1-9]|[12][0-9]|3[01])|(04|06|09|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8])) (([01][0-9])|2[0-3]):[0-5][0-9]:[0-5][0-9]$"
+const MOBILE_COMMERCE_TEXT_LEAP_TIMESTAMP_PATTERN = "^[0-9]{4}-02-29 (([01][0-9])|2[0-3]):[0-5][0-9]:[0-5][0-9]$"
 
 /**
  * Identifiers cannot be parameterised in SQL, so they are validated instead.
@@ -231,13 +236,14 @@ function valueShape(value) {
   }
 }
 
-function cursorTypes(columns, cursorName, idName) {
+function cursorTypes(columns, cursorName, idName, { mobileCommerce = false } = {}) {
   const cursor = columns.find((column) => column.name === cursorName)
   const id = columns.find((column) => column.name === idName)
   if (!cursor || !id) {
     throw new AppError(409, 'source_schema_mismatch', 'Configured cursor or id column is absent; inspect the source schema')
   }
-  const cursorCast = CURSOR_CASTS.get(cursor.databaseType)
+  const textCursor = mobileCommerce && isMobileCommerceTextCursorType(cursor.databaseType)
+  const cursorCast = textCursor ? 'text' : CURSOR_CASTS.get(cursor.databaseType)
   const idCast = ID_CASTS.get(id.databaseType)
   if (!cursorCast || !idCast) {
     throw new AppError(409, 'unsupported_cursor_type', 'Cursor requires a date/timestamp column and a scalar integer, UUID, or text id column', {
@@ -245,7 +251,21 @@ function cursorTypes(columns, cursorName, idName) {
       id: { name: idName, type: id.databaseType },
     })
   }
-  return { cursorCast, idCast }
+  return { cursorCast, idCast, textCursor }
+}
+
+function mobileCommerceTextCursorSql(cursorColumn) {
+  const year = `(substring(${cursorColumn} FROM '^([0-9]{4})-')::integer)`
+  const leapYear = `(mod(${year}, 400) = 0 OR (mod(${year}, 4) = 0 AND mod(${year}, 100) <> 0))`
+  const valid = `(
+    (${cursorColumn} ~ '${MOBILE_COMMERCE_TEXT_TIMESTAMP_PATTERN}' AND ${year} <> 0)
+    OR (${cursorColumn} ~ '${MOBILE_COMMERCE_TEXT_LEAP_TIMESTAMP_PATTERN}' AND ${year} <> 0 AND ${leapYear})
+  )`
+  return {
+    value: `(${cursorColumn} COLLATE "C")`,
+    valid,
+    invalid: `(NOT ${valid})`,
+  }
 }
 
 function safeFailureCode(error) {
@@ -304,6 +324,9 @@ function sourceContractHash(source, mapping) {
     platform: source.platform,
     objectType: source.objectType,
     mappingVersion: mapping.version,
+    ...(source.sourceKey === MOBILE_COMMERCE_SOURCE_KEY
+      ? { cursorSemantics: MOBILE_COMMERCE_TEXT_CURSOR_SEMANTICS }
+      : {}),
     ...(connection.sourceContractId ? { sourceContractId: connection.sourceContractId } : {}),
   }
   return createHash('sha256').update(JSON.stringify(contract)).digest('hex')
@@ -381,6 +404,20 @@ function indexStartsWith(definition, cursorColumn, idColumn) {
     `\\(\\s*${cursorColumn}\\s*${order}\\s*,\\s*${idColumn}\\s*${order}(?:\\s*,|\\s*\\))`,
     'i',
   ).test(String(definition).replace(/"/g, ''))
+}
+
+function mobileCommerceTextIndexStartsWith(definition, cursorColumn, idColumn) {
+  const sql = String(definition).replace(/"/g, '')
+  if (/\bwhere\b/i.test(sql)) return false
+  const order = '(?:\\s+(?:asc|desc))?(?:\\s+nulls\\s+(?:first|last))?'
+  return new RegExp(
+    `\\(\\s*\\(?\\s*${cursorColumn}\\s+collate\\s+(?:pg_catalog\\.)?c\\s*\\)?${order}\\s*,\\s*${idColumn}\\s*${order}(?:\\s*,|\\s*\\))`,
+    'i',
+  ).test(sql)
+}
+
+function incompleteTupleCheckpoint(position = {}) {
+  return (position.cursor == null) !== (position.lastId == null)
 }
 
 function uniqueIndexProvesOrder(definition, cursorColumn, idColumn) {
@@ -1074,6 +1111,15 @@ export class DatabaseSourcePuller {
         index.valid && index.ready && uniqueIndexProvesIdentity(index.definition, idColumn),
       )
       const mobileCommerceSource = source.sourceKey === MOBILE_COMMERCE_SOURCE_KEY
+      const cursorDefinition = columns.find((column) => column.name === cursorColumn)
+      const mobileCommerceTextCursor = mobileCommerceSource
+        && isMobileCommerceTextCursorType(cursorDefinition?.databaseType)
+      const hasMobileCommerceTextCursorIndex = mobileCommerceTextCursor
+        && metadata.indexes.some((index) => (
+          index.valid
+          && index.ready
+          && mobileCommerceTextIndexStartsWith(index.definition, cursorColumn, idColumn)
+        ))
       return {
         source: safeSource(source),
         columns,
@@ -1091,7 +1137,10 @@ export class DatabaseSourcePuller {
           ...(idColumn != null && !mobileCommerceSource && columns.find((column) => column.name === idColumn)?.nullable
             ? [`id column ${idColumn} must be non-null`]
             : []),
-          ...(cursorColumn != null && names.has(cursorColumn) && !CURSOR_CASTS.has(columns.find((column) => column.name === cursorColumn).databaseType)
+          ...(cursorColumn != null
+            && names.has(cursorColumn)
+            && !CURSOR_CASTS.has(cursorDefinition?.databaseType)
+            && !mobileCommerceTextCursor
             ? [`cursor column ${cursorColumn} has unsupported type`]
             : []),
           ...(idColumn != null && names.has(idColumn) && !ID_CASTS.has(columns.find((column) => column.name === idColumn).databaseType)
@@ -1112,7 +1161,10 @@ export class DatabaseSourcePuller {
         warnings: [
           ...missingMappings.filter((entry) => !requiredMappingTargets.has(entry.target)).map((entry) => entry.message),
           ...(mobileCommerceSource ? mobileCommerceColumnWarnings(columns) : []),
-          ...(mobileCommerceSource && cursorColumn != null && idColumn != null && !hasCursorIndex
+          ...(mobileCommerceTextCursor && !hasMobileCommerceTextCursorIndex
+            ? ['textual collected_at uses strict C-collation ordering; a normal (collected_at, id) index may not support this query, so prefer timestamp or a matching expression index']
+            : []),
+          ...(mobileCommerceSource && !mobileCommerceTextCursor && cursorColumn != null && idColumn != null && !hasCursorIndex
             ? [`no index begins with (${cursorColumn}, ${idColumn}); incremental results remain correct but the source query may scan or sort until the upstream adds this performance index`]
             : []),
         ],
@@ -1269,19 +1321,31 @@ export class DatabaseSourcePuller {
       const columns = await this.#columns(pool, connection)
       const cursorDefinition = columns.find((column) => column.name === cursorName)
       const idDefinition = columns.find((column) => column.name === idName)
+      const mobileCommerceTextCursor = mobileCommerceSource
+        && isMobileCommerceTextCursorType(cursorDefinition?.databaseType)
       const warnings = mobileCommerceSource ? mobileCommerceColumnWarnings(columns) : []
       const issues = [
         ...(!cursorDefinition ? [`cursor column ${cursorName} is missing`] : []),
         ...(!idDefinition ? [`id column ${idName} is missing`] : []),
         ...(cursorDefinition?.nullable && !mobileCommerceSource ? [`cursor column ${cursorName} must be non-null`] : []),
         ...(idDefinition?.nullable && !mobileCommerceSource ? [`id column ${idName} must be non-null`] : []),
-        ...(cursorDefinition && !CURSOR_CASTS.has(cursorDefinition.databaseType)
+        ...(cursorDefinition
+          && !CURSOR_CASTS.has(cursorDefinition.databaseType)
+          && !mobileCommerceTextCursor
           ? [`cursor column ${cursorName} has unsupported type`]
           : []),
         ...(idDefinition && !ID_CASTS.has(idDefinition.databaseType)
           ? [`id column ${idName} has unsupported type`]
           : []),
         ...(mobileCommerceSource ? mobileCommerceColumnIssues(columns) : []),
+        ...(mobileCommerceSource && incompleteTupleCheckpoint(position)
+          ? ['saved mobile-commerce checkpoint must contain both cursor and lastId; reset the checkpoint before resuming']
+          : []),
+        ...(mobileCommerceTextCursor
+          && position.cursor != null
+          && mobileCommerceTextCursorDate(position.cursor) == null
+          ? ['saved mobile-commerce textual checkpoint does not match YYYY-MM-DD HH:mm:ss; reset the checkpoint before resuming']
+          : []),
       ]
       if (issues.length > 0) return await totalOnly('source_cursor_unsafe', issues, warnings)
 
@@ -1302,11 +1366,19 @@ export class DatabaseSourcePuller {
         .map((row) => row.definition)
       if (!definitions.some((definition) => indexStartsWith(definition, cursorName, idName))) {
         const issue = `no index begins with (${cursorName}, ${idName})`
-        if (mobileCommerceSource) {
+        if (mobileCommerceSource && !mobileCommerceTextCursor) {
           warnings.push(`${issue}; incremental results remain correct but the source query may scan or sort until the upstream adds this performance index`)
-        } else {
+        } else if (!mobileCommerceSource) {
           issues.push(issue)
         }
+      }
+      if (
+        mobileCommerceTextCursor
+        && !definitions.some((definition) => (
+          mobileCommerceTextIndexStartsWith(definition, cursorName, idName)
+        ))
+      ) {
+        warnings.push('textual collected_at uses strict C-collation ordering; a normal (collected_at, id) index may not support this query, so prefer timestamp or a matching expression index')
       }
       if (mobileCommerceSource && !definitions.some((definition) => uniqueIndexProvesIdentity(definition, idName))) {
         issues.push(`no unique index proves ${idName} is a stable capture identity`)
@@ -1315,24 +1387,35 @@ export class DatabaseSourcePuller {
       }
       if (issues.length > 0) return await totalOnly('source_cursor_unsafe', issues, warnings)
 
-      const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
+      const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName, {
+        mobileCommerce: mobileCommerceSource,
+      })
       const nullableWriterColumns = mobileCommerceSource
         ? nullableMobileCommerceWriterColumns(columns)
         : []
       if (mobileCommerceSource) {
+        const textCursorSql = mobileCommerceTextCursor
+          ? mobileCommerceTextCursorSql(cursorColumn)
+          : null
+        const cursorValue = textCursorSql?.value ?? cursorColumn
         const nullCounts = nullableWriterColumns.map((name, index) => (
           `count(*) FILTER (WHERE ${quotedIdentifier(name, 'mobile-commerce writer column')} IS NULL)::bigint AS "__mx_required_null_${index}"`
         ))
+        const invalidTextCount = textCursorSql
+          ? [`count(*) FILTER (WHERE ${cursorColumn} IS NOT NULL AND ${textCursorSql.invalid})::bigint AS "__mx_invalid_text_cursor"`]
+          : []
         const remaining = position.cursor == null || position.lastId == null
           ? []
           : [`count(*) FILTER (
                   WHERE ${cursorColumn} IS NOT NULL
-                    AND (${cursorColumn}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast})
+                    ${textCursorSql ? `AND ${textCursorSql.valid}` : ''}
+                    AND (${cursorValue}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast})
                 )::bigint AS remaining_rows`]
         const selections = [
           'count(*)::bigint AS total_rows',
           ...remaining,
           ...nullCounts,
+          ...invalidTextCount,
         ]
         const parameters = remaining.length > 0 ? [position.cursor, position.lastId] : []
         const { rows } = await pool.query(
@@ -1346,6 +1429,9 @@ export class DatabaseSourcePuller {
             ? [`mobile-commerce writer-required column ${name} contains NULL values`]
             : []
         ))
+        if (Number(row.__mx_invalid_text_cursor ?? 0) > 0) {
+          nullIssues.push('mobile-commerce collected_at contains values outside exact YYYY-MM-DD HH:mm:ss Asia/Shanghai text')
+        }
         const totalRows = Number(row.total_rows ?? 0)
         if (nullIssues.length > 0) {
           return {
@@ -1658,6 +1744,13 @@ export class DatabaseSourcePuller {
     const cursorId = `external:${sourceKey}`
     const saved = await this.queue.getCursor(cursorId)
     const position = saved?.position ?? {}
+    if (sourceKey === MOBILE_COMMERCE_SOURCE_KEY && incompleteTupleCheckpoint(position)) {
+      throw new AppError(
+        409,
+        'source_contract_mismatch',
+        'Mobile-commerce checkpoint must contain both cursor and lastId; reset it before resuming',
+      )
+    }
     if (
       sourceKey === PROVINCE_OPINION_SOURCE_KEY
       && position.cursor != null
@@ -1815,7 +1908,23 @@ export class DatabaseSourcePuller {
           )
         }
       }
-      const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
+      const { cursorCast, idCast, textCursor: mobileCommerceTextCursor } = cursorTypes(
+        columns,
+        cursorName,
+        idName,
+        { mobileCommerce: sourceKey === MOBILE_COMMERCE_SOURCE_KEY },
+      )
+      if (
+        mobileCommerceTextCursor
+        && position.cursor != null
+        && mobileCommerceTextCursorDate(position.cursor) == null
+      ) {
+        throw new AppError(
+          409,
+          'source_contract_mismatch',
+          'Saved mobile-commerce textual checkpoint does not match YYYY-MM-DD HH:mm:ss; reset it before resuming',
+        )
+      }
       const cursorAliasName = internalCursorAlias(columns)
       const cursorAlias = quotedIdentifier(cursorAliasName, 'internal cursor alias')
       const nullableWriterColumns = sourceKey === MOBILE_COMMERCE_SOURCE_KEY
@@ -1824,36 +1933,52 @@ export class DatabaseSourcePuller {
       const requiredNullPredicate = nullableWriterColumns
         .map((name) => `${quotedIdentifier(name, 'mobile-commerce writer column')} IS NULL`)
         .join(' OR ')
-      // Writer v2 permits legacy nullable DDL. When that compatibility path is
-      // active, select contract violations in the same PostgreSQL statement as
-      // the page and sort them first. A separate preflight query would have a
-      // read-committed TOCTOU window in which a writer could insert a NULL row.
-      const guardedMobilePage = requiredNullPredicate
-        ? `SELECT *, ${cursorColumn}::text AS ${cursorAlias} FROM ${table}
-          WHERE (${requiredNullPredicate})
+      const textCursorSql = mobileCommerceTextCursor
+        ? mobileCommerceTextCursorSql(cursorColumn)
+        : null
+      const contractViolationPredicate = [
+        requiredNullPredicate ? `(${requiredNullPredicate})` : null,
+        textCursorSql ? `(${cursorColumn} IS NOT NULL AND ${textCursorSql.invalid})` : null,
+      ].filter(Boolean).join(' OR ')
+      const cursorValue = textCursorSql?.value ?? cursorColumn
+      // Writer v3 permits legacy nullable DDL and one strict textual timestamp
+      // form. When either compatibility path is active, select
+      // every contract violation in the same PostgreSQL statement as the page
+      // and sort it first. A separate preflight query would leave a read-
+      // committed TOCTOU window for a concurrent bad insert.
+      const guardedMobilePage = contractViolationPredicate
+        ? `SELECT *, ${cursorValue}::text AS ${cursorAlias} FROM ${table}
+          WHERE (${contractViolationPredicate})
              OR (${cursorColumn} IS NOT NULL
-                AND ($1::${cursorCast} IS NULL OR (${cursorColumn}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast})))
-          ORDER BY CASE WHEN (${requiredNullPredicate}) THEN 0 ELSE 1 END,
-                   ${cursorColumn} NULLS FIRST, ${idColumn} NULLS FIRST
+                ${textCursorSql ? `AND ${textCursorSql.valid}` : ''}
+                AND ($1::${cursorCast} IS NULL OR (${cursorValue}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast})))
+          ORDER BY CASE WHEN (${contractViolationPredicate}) THEN 0 ELSE 1 END,
+                   ${cursorValue} NULLS FIRST, ${idColumn} NULLS FIRST
           LIMIT $3`
         : null
       const { rows } = await pool.query(
-        guardedMobilePage || `SELECT *, ${cursorColumn}::text AS ${cursorAlias} FROM ${table}
+        guardedMobilePage || `SELECT *, ${cursorValue}::text AS ${cursorAlias} FROM ${table}
           WHERE ${cursorColumn} IS NOT NULL
-            AND ($1::${cursorCast} IS NULL OR (${cursorColumn}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast}))
-          ORDER BY ${cursorColumn}, ${idColumn}
+            AND ($1::${cursorCast} IS NULL OR (${cursorValue}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast}))
+          ORDER BY ${cursorValue}, ${idColumn}
           LIMIT $3`,
         [position.cursor ?? null, position.lastId ?? null, limit],
       )
       const requiredNullIssues = mobileCommerceRequiredNullIssues(rows, nullableWriterColumns)
+      if (mobileCommerceTextCursor && rows.some((row) => mobileCommerceTextCursorDate(row[cursorName]) == null)) {
+        requiredNullIssues.push('mobile-commerce collected_at contains values outside exact YYYY-MM-DD HH:mm:ss Asia/Shanghai text')
+      }
       if (requiredNullIssues.length > 0) {
         throw new AppError(
           409,
           'source_contract_mismatch',
-          'Mobile-commerce source contains NULL writer-required values; correct the upstream rows before resuming',
+          'Mobile-commerce source contains values that violate the Writer contract; correct the upstream rows before resuming',
           { issues: requiredNullIssues },
         )
       }
+      const mobileCommerceTextDates = mobileCommerceTextCursor
+        ? rows.map((row) => mobileCommerceTextCursorDate(row[cursorName]))
+        : null
       const cursorDefinition = columns.find((column) => column.name === cursorName)
       const exactCursors = takeExactCursors(rows, cursorAliasName, cursorName, {
         // node-postgres converts `timestamp without time zone` to a Date before
@@ -1966,6 +2091,21 @@ export class DatabaseSourcePuller {
         if (source.platform === 'telegram' && !record.eventTime) {
           rejections.push({ rowIndex: index + 1, reason: 'eventTime is required for Telegram serving', raw })
           continue
+        }
+        if (mobileCommerceTextDates) {
+          const expected = mobileCommerceTextDates[index]
+          if (
+            !(expected instanceof Date)
+            || !(record.collectedAt instanceof Date)
+            || !Number.isFinite(record.collectedAt.getTime())
+            || record.collectedAt.getTime() !== expected.getTime()
+          ) {
+            throw new AppError(
+              409,
+              'source_contract_mismatch',
+              'Mobile-commerce textual collected_at did not map to the attested Asia/Shanghai instant',
+            )
+          }
         }
         enrichMobileCommerceRecord(record, raw, source, { classifyMarketplace: classifyMobileMarketplace })
         refreshMappedPayloadSha256(record)

@@ -239,16 +239,22 @@ commit ordering cannot place a late commit behind an already advanced cursor.
 
 The fixed `mobile-commerce.collected-items.v1` adapter has one deliberately
 narrow compatibility exception for legacy producer DDL. Under the accepted
-`mobile-commerce.writer.v2` attestation, its required `id`, `platform`, `title`
+`mobile-commerce.writer.v3` attestation, its required `id`, `platform`, `title`
 or `collected_at` columns may still be declared nullable, but every pull batch
 must guard those writer-required values at runtime. An actual NULL fails closed
-before import or checkpoint advancement. A ready, valid unique `id` index
-remains a correctness gate. The `(collected_at, id)` composite index is a
-performance recommendation and its absence is an activation warning, not a
-correctness failure. The nullable compatibility path can require additional
-source scans, so the producer should ultimately add `NOT NULL` constraints and
-the composite index. This exception does not relax the watermark or supporting
-index rules for generic managed database sources.
+before import or checkpoint advancement. This fixed adapter also accepts a
+`text`/`varchar` `collected_at` only when every value is exactly
+`YYYY-MM-DD HH:mm:ss`; it uses C-collation tuple ordering, treats the value as
+Asia/Shanghai local time, and rejects malformed values within the same guarded
+page statement. A ready, valid unique `id` index remains a correctness gate.
+The timestamp `(collected_at, id)` or textual
+`((collected_at COLLATE "C"), id)` composite index is a performance
+recommendation and its absence is an activation warning, not a correctness
+failure. The compatibility path can require additional source scans, so the
+producer should ultimately migrate the watermark to `timestamp without time
+zone NOT NULL` and add the timestamp composite index. This exception does not
+relax the watermark, cursor-type or supporting-index rules for generic managed
+database sources.
 
 A column named `updated_at` is evidence only after its writer behavior and index
 are verified. Event time, initial collection time and nullable edit/delete times

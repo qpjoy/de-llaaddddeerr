@@ -74,10 +74,24 @@ function mobileCommerceDatabaseColumns(extraNames = []) {
   }))
 }
 
-function mobileCommerceDatabaseIndexes({ cursor = true, identity = true } = {}) {
+function mobileCommerceTextDatabaseColumns(databaseType = 'varchar') {
+  return mobileCommerceDatabaseColumns().map((column) => (
+    column.column_name === 'collected_at'
+      ? {
+          ...column,
+          data_type: databaseType === 'varchar' ? 'character varying' : 'text',
+          udt_name: databaseType,
+        }
+      : column
+  ))
+}
+
+function mobileCommerceDatabaseIndexes({ cursor = true, identity = true, textCursor = false } = {}) {
   return [
     ...(cursor ? [{
-      definition: 'CREATE INDEX mb_collected_items_cursor_idx ON public.mb_collected_items (collected_at, id)',
+      definition: textCursor
+        ? 'CREATE INDEX mb_collected_items_cursor_text_idx ON public.mb_collected_items (collected_at COLLATE "C", id)'
+        : 'CREATE INDEX mb_collected_items_cursor_idx ON public.mb_collected_items (collected_at, id)',
       valid: true,
       ready: true,
     }] : []),
@@ -1345,6 +1359,102 @@ test('mobile-commerce schema discovery reports writer-attested nullable DDL and 
   assert.ok(result.warnings.some((warning) => warning.includes('no index begins with (collected_at, id)')))
 })
 
+test('mobile-commerce schema discovery accepts only its fixed text and varchar timestamp cursor modes', async () => {
+  for (const databaseType of ['text', 'varchar']) {
+    const source = mobileCommercePullSource()
+    const puller = new DatabaseSourcePuller({
+      store: {
+        getExternalSource: async () => source,
+        getActiveMapping: async () => mobileCommercePullMapping(),
+      },
+      queue: null,
+      poolFactory: () => ({
+        async query(sql) {
+          if (sql.includes('information_schema.columns')) {
+            return { rows: mobileCommerceTextDatabaseColumns(databaseType) }
+          }
+          if (sql.includes('greatest(c.reltuples')) {
+            return { rows: [{ estimated_rows: '5', total_bytes: '8192' }] }
+          }
+          if (sql.includes('FROM pg_indexes')) {
+            return { rows: mobileCommerceDatabaseIndexes() }
+          }
+          return { rows: [] }
+        },
+        async end() {},
+      }),
+    })
+
+    const result = await puller.describe(source.sourceKey)
+    assert.deepEqual(result.issues, [], databaseType)
+    assert.ok(result.warnings.some((warning) => (
+      warning.includes(`collected_at uses ${databaseType}`)
+      && warning.includes('YYYY-MM-DD HH:mm:ss')
+    )), databaseType)
+    assert.ok(result.warnings.some((warning) => warning.includes('C-collation ordering')), databaseType)
+  }
+
+  const generic = {
+    ...mobileCommercePullSource(),
+    sourceKey: 'generic-text-cursor',
+    datasetId: 'generic-text.v1',
+    platform: 'external',
+    objectType: 'record',
+  }
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => generic,
+      getActiveMapping: async () => mobileCommercePullMapping(),
+    },
+    queue: null,
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: mobileCommerceTextDatabaseColumns('varchar') }
+        }
+        if (sql.includes('greatest(c.reltuples')) {
+          return { rows: [{ estimated_rows: '5', total_bytes: '8192' }] }
+        }
+        if (sql.includes('FROM pg_indexes')) return { rows: mobileCommerceDatabaseIndexes() }
+        return { rows: [] }
+      },
+      async end() {},
+    }),
+  })
+  const result = await puller.describe(generic.sourceKey)
+  assert.ok(result.issues.includes('cursor column collected_at has unsupported type'))
+})
+
+test('mobile-commerce schema discovery recognizes its matching C-collation text index', async () => {
+  const source = mobileCommercePullSource()
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mobileCommercePullMapping(),
+    },
+    queue: null,
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: mobileCommerceTextDatabaseColumns('varchar') }
+        }
+        if (sql.includes('greatest(c.reltuples')) {
+          return { rows: [{ estimated_rows: '5', total_bytes: '8192' }] }
+        }
+        if (sql.includes('FROM pg_indexes')) {
+          return { rows: mobileCommerceDatabaseIndexes({ textCursor: true }) }
+        }
+        return { rows: [] }
+      },
+      async end() {},
+    }),
+  })
+
+  const result = await puller.describe(source.sourceKey)
+  assert.deepEqual(result.issues, [])
+  assert.equal(result.warnings.some((warning) => warning.includes('C-collation ordering')), false)
+})
+
 test('mobile-commerce progress treats nullable DDL and a missing composite index as warnings but blocks actual NULL values', async () => {
   const source = mobileCommercePullSource()
   const nullableColumns = mobileCommerceDatabaseColumns().map((column) => ({
@@ -1394,6 +1504,109 @@ test('mobile-commerce progress treats nullable DDL and a missing composite index
   assert.deepEqual(unsafe.issues, [
     'mobile-commerce writer-required column platform contains NULL values',
   ])
+})
+
+test('mobile-commerce progress orders a varchar checkpoint deterministically and blocks malformed source values', async () => {
+  const source = mobileCommercePullSource()
+  const progressWithInvalidCount = async (invalidCount) => {
+    let aggregateSql = ''
+    const puller = new DatabaseSourcePuller({
+      store: {
+        getExternalSource: async () => source,
+        getActiveMapping: async () => mobileCommercePullMapping(),
+      },
+      queue: { getCursor: async () => ({ position: {
+        cursor: '2026-07-27 14:58:52',
+        lastId: '4',
+      } }) },
+      poolFactory: () => ({
+        async query(sql) {
+          if (sql.includes('information_schema.columns')) {
+            return { rows: mobileCommerceTextDatabaseColumns('varchar') }
+          }
+          if (sql.includes('FROM pg_indexes')) {
+            return { rows: mobileCommerceDatabaseIndexes({ cursor: false }) }
+          }
+          if (sql.includes('__mx_invalid_text_cursor')) {
+            aggregateSql = sql
+            return { rows: [{
+              total_rows: '5',
+              remaining_rows: '2',
+              __mx_invalid_text_cursor: invalidCount,
+            }] }
+          }
+          throw new Error(`unexpected query: ${sql}`)
+        },
+        async end() {},
+      }),
+    })
+    return { result: await puller.progress(source.sourceKey), aggregateSql }
+  }
+
+  const safe = await progressWithInvalidCount('0')
+  assert.equal(safe.result.blocker, null)
+  assert.equal(safe.result.completedRows, 3)
+  assert.equal(safe.result.remainingRows, 2)
+  assert.match(safe.aggregateSql, /"collected_at" COLLATE "C"/u)
+  assert.match(safe.aggregateSql, /__mx_invalid_text_cursor/u)
+  assert.ok(safe.result.warnings.some((warning) => warning.includes('C-collation ordering')))
+
+  const unsafe = await progressWithInvalidCount('1')
+  assert.equal(unsafe.result.blocker, 'source_cursor_unsafe')
+  assert.deepEqual(unsafe.result.issues, [
+    'mobile-commerce collected_at contains values outside exact YYYY-MM-DD HH:mm:ss Asia/Shanghai text',
+  ])
+})
+
+test('mobile-commerce progress rejects an incomplete tuple checkpoint and recognizes its text index', async () => {
+  const source = mobileCommercePullSource()
+  const progress = async (position) => {
+    const puller = new DatabaseSourcePuller({
+      store: {
+        getExternalSource: async () => source,
+        getActiveMapping: async () => mobileCommercePullMapping(),
+      },
+      queue: { getCursor: async () => ({ position }) },
+      poolFactory: () => ({
+        async query(sql) {
+          if (sql.includes('information_schema.columns')) {
+            return { rows: mobileCommerceTextDatabaseColumns('varchar') }
+          }
+          if (sql.includes('FROM pg_indexes')) {
+            return { rows: mobileCommerceDatabaseIndexes({ textCursor: true }) }
+          }
+          if (sql.includes('SELECT count(*)::bigint AS total_rows')) {
+            return { rows: [{ total_rows: '5' }] }
+          }
+          if (sql.includes('__mx_invalid_text_cursor')) {
+            return { rows: [{
+              total_rows: '5',
+              remaining_rows: '2',
+              __mx_invalid_text_cursor: '0',
+            }] }
+          }
+          throw new Error(`unexpected query: ${sql}`)
+        },
+        async end() {},
+      }),
+    })
+    return puller.progress(source.sourceKey)
+  }
+
+  for (const position of [
+    { cursor: '2026-07-27 14:58:52' },
+    { lastId: '4' },
+  ]) {
+    const result = await progress(position)
+    assert.equal(result.blocker, 'source_cursor_unsafe')
+    assert.deepEqual(result.issues, [
+      'saved mobile-commerce checkpoint must contain both cursor and lastId; reset the checkpoint before resuming',
+    ])
+  }
+
+  const safe = await progress({ cursor: '2026-07-27 14:58:52', lastId: '4' })
+  assert.equal(safe.blocker, null)
+  assert.equal(safe.warnings.some((warning) => warning.includes('C-collation ordering')), false)
 })
 
 test('database preview returns value-free shapes, never raw row content', async () => {
@@ -1574,6 +1787,42 @@ test('mobile-commerce pull rejects a persisted non-finite checkpoint before open
   assert.equal(checkpointsWritten, 0)
 })
 
+test('mobile-commerce pull rejects either half of a tuple checkpoint before opening the source', async () => {
+  const source = mobileCommercePullSource()
+  for (const position of [
+    { cursor: '2026-07-27 14:58:52' },
+    { lastId: '4' },
+  ]) {
+    let poolsOpened = 0
+    let checkpointsWritten = 0
+    const puller = new DatabaseSourcePuller({
+      store: {
+        getExternalSource: async () => source,
+        getActiveMapping: async () => mobileCommercePullMapping(),
+      },
+      queue: {
+        getCursor: async () => ({ position }),
+        saveCursor: async () => { checkpointsWritten += 1 },
+      },
+      poolFactory: () => {
+        poolsOpened += 1
+        throw new Error('source pool must not open for an incomplete tuple checkpoint')
+      },
+    })
+
+    await assert.rejects(
+      () => puller.pullBatch(source.sourceKey, { batchSize: 10 }),
+      (error) => (
+        error?.status === 409
+        && error?.code === 'source_contract_mismatch'
+        && error?.message.includes('both cursor and lastId')
+      ),
+    )
+    assert.equal(poolsOpened, 0)
+    assert.equal(checkpointsWritten, 0)
+  }
+})
+
 test('mobile-commerce pull rechecks cursor and identity indexes before reading rows', async () => {
   const source = mobileCommercePullSource()
   let selects = 0
@@ -1677,7 +1926,7 @@ test('mobile-commerce nullable-DDL pull fails closed on actual NULL values in th
       && error?.details?.issues?.includes('mobile-commerce writer-required column platform contains NULL values')
     ),
   )
-  assert.match(pageSql, /WHERE \("id" IS NULL OR "platform" IS NULL OR "title" IS NULL OR "collected_at" IS NULL\)/u)
+  assert.match(pageSql, /"id" IS NULL OR "platform" IS NULL OR "title" IS NULL OR "collected_at" IS NULL/u)
   assert.match(pageSql, /ORDER BY CASE WHEN/u)
   assert.equal(importStarts, 0)
   assert.deepEqual(checkpointWrites, [{
@@ -1774,6 +2023,152 @@ test('mobile-commerce pull accepts writer-attested nullable DDL and no composite
     { platform: MOBILE_COMMERCE_PLATFORM },
   ).record.payloadSha256
   assert.notEqual(record.payloadSha256, beforeEnrichment)
+})
+
+test('mobile-commerce pull accepts strict varchar collected_at and checkpoints its exact Shanghai-local text', async () => {
+  const source = mobileCommercePullSource()
+  const mapping = {
+    ...mobileCommercePullMapping(),
+    fieldMap: {
+      ...mobileCommercePullMapping().fieldMap,
+      collectedAt: { from: 'collected_at', type: 'timestamp', timezoneOffsetMinutes: 480 },
+    },
+  }
+  const catalogEntry = {
+    id: 'ad537bbb-4eb0-5297-bcae-bd9d7a533d77',
+    sourceKey: 'source-catalog-0063',
+    revision: 1,
+    canonicalName: '快手小店',
+    aliases: [],
+    majorCategory: '国内电商与本地生活',
+    scenarios: ['内容电商'],
+    regions: ['中国大陆'],
+    archivedAt: null,
+  }
+  let ingested = null
+  let pageSql = ''
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+      listSourceCatalogEntries: async () => [catalogEntry],
+      startImportRun: async () => ({ id: 'run-mobile-varchar', duplicateOf: null }),
+      finishImportRun: async () => {},
+      ingestExternalRecords: async (input) => {
+        ingested = input
+        return {
+          ingested: input.records.length,
+          changed: input.records.length,
+          cursorEnd: input.batch.cursorEnd,
+          rowCount: input.batch.rowCount,
+        }
+      },
+    },
+    queue: {
+      getCursor: async () => ({ position: {} }),
+      saveCursor: async (_id, position, options) => ({ position, status: options.status }),
+    },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: mobileCommerceTextDatabaseColumns('varchar') }
+        }
+        if (sql.includes('FROM pg_indexes')) {
+          return { rows: mobileCommerceDatabaseIndexes({ cursor: false }) }
+        }
+        pageSql = sql
+        const alias = sql.match(/AS "([^"]+)" FROM/u)?.[1]
+        return { rows: [{
+          id: '4',
+          platform: '快手小店',
+          title: '测试商品',
+          collected_at: '2026-07-27 14:58:52',
+          [alias]: '2026-07-27 14:58:52',
+        }] }
+      },
+      async end() {},
+    }),
+  })
+
+  const result = await puller.pullBatch(source.sourceKey, { batchSize: 10 })
+  assert.equal(result.pulled, 1)
+  assert.match(pageSql, /"collected_at" COLLATE "C"/u)
+  assert.match(pageSql, /ORDER BY CASE WHEN/u)
+  assert.equal(ingested.batch.cursorEnd.cursor, '2026-07-27 14:58:52')
+  assert.equal(ingested.batch.cursorEnd.lastId, '4')
+  assert.equal(ingested.records[0].collectedAt.toISOString(), '2026-07-27T06:58:52.000Z')
+  assert.equal(ingested.records[0].rawItem.collected_at, '2026-07-27 14:58:52')
+})
+
+test('mobile-commerce varchar pull returns malformed calendar text before the checkpoint and fails closed', async () => {
+  const source = mobileCommercePullSource()
+  let importStarts = 0
+  let pageSql = ''
+  const checkpointWrites = []
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => ({
+        ...mobileCommercePullMapping(),
+        fieldMap: {
+          ...mobileCommercePullMapping().fieldMap,
+          collectedAt: { from: 'collected_at', type: 'timestamp', timezoneOffsetMinutes: 480 },
+        },
+      }),
+      startImportRun: async () => {
+        importStarts += 1
+        throw new Error('malformed text must fail before import starts')
+      },
+    },
+    queue: {
+      getCursor: async () => ({ position: {
+        cursor: '2026-08-20 00:00:00',
+        lastId: '100',
+      } }),
+      saveCursor: async (_cursorId, position, options) => {
+        checkpointWrites.push({ position, options })
+      },
+    },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: mobileCommerceTextDatabaseColumns('varchar') }
+        }
+        if (sql.includes('FROM pg_indexes')) {
+          return { rows: mobileCommerceDatabaseIndexes({ cursor: false }) }
+        }
+        pageSql = sql
+        const alias = sql.match(/AS "([^"]+)" FROM/u)?.[1]
+        return { rows: [{
+          id: '4',
+          platform: '快手小店',
+          title: '坏时间商品',
+          collected_at: '2026-02-31 00:03:25',
+          [alias]: '2026-02-31 00:03:25',
+        }] }
+      },
+      async end() {},
+    }),
+  })
+
+  await assert.rejects(
+    () => puller.pullBatch(source.sourceKey, { batchSize: 10 }),
+    (error) => (
+      error?.status === 409
+      && error?.code === 'source_contract_mismatch'
+      && error?.details?.issues?.some((issue) => issue.includes('YYYY-MM-DD HH:mm:ss'))
+    ),
+  )
+  assert.match(pageSql, /02-29/u)
+  assert.match(pageSql, /ORDER BY CASE WHEN/u)
+  assert.equal(importStarts, 0)
+  assert.deepEqual(checkpointWrites, [{
+    position: {
+      cursor: '2026-08-20 00:00:00',
+      lastId: '100',
+    },
+    options: { status: 'failed', error: 'source_contract_mismatch' },
+  }])
 })
 
 test('database pull advances a durable total-order cursor only after idempotent ingest', async () => {
