@@ -43,7 +43,7 @@ Open API 文档的业务导航尽量跟随 Admin 信息架构，但只保留可�
 | 认证与调用规则 | `/docs/auth` | grant、quota、cursor、idempotency |
 | 数据源目录 | `/docs/source-catalog` | 目录列表、详情与 metadata/facets |
 | 虚拟超市 | `/docs/virtual-supermarket` | 超市 metadata、上架商品、货架浏览与搜索 |
-| Telegram 会话 | `/docs/telegram` | 会话、消息、检索、canonical context |
+| Telegram 会话 | `/docs/telegram` | 会话、消息、检索、canonical context 与双向 timeline |
 | 全国舆情 | `/docs/public-opinion` | 地区、coverage、feed、详情、检索 |
 | 通用搜索 | `/docs/search` | live、stored、canonical search |
 | Night-All 兼容层 | `/docs/night-all` | 有界迁移兼容路由 |
@@ -81,6 +81,10 @@ Open API 文档的业务导航尽量跟随 Admin 信息架构，但只保留可�
 
 - 列表使用不透明 keyset cursor；调用方只能原样回传 `nextCursor`，不能解码或构造。
 - cursor 绑定规范化筛选条件、排序、来源范围和 page size。修改任一条件必须从首页重新查询。
+- 双向时间线是显式例外：首屏同时返回 `pageInfo.older.cursor` 与
+  `pageInfo.newer.cursor`，续页仍只回传其中一个不透明 cursor，方向由服务端签名封装，调用方不能同时
+  发送方向或重放搜索 cursor。时间线 cursor 额外绑定 dataset、规范化 stream、授权范围、合同版本和
+  排他的 `(eventTime, canonicalId)` 边界。
 - page size 有默认值、consumer policy 上限与服务硬上限；不得提供无界导出或 OFFSET 页码。
 - 返回 `returnedCount`、`hasMore`、`nextCursor`。能安全、经济地计算时才返回 authoritative
   `totalCount`，否则不伪造。
@@ -127,6 +131,13 @@ Telegram 也遵循同一原则：省略新增参数时，既有 chats/messages/s
 兼容游标；`GET /api/v1/data/canonical/items/{id}/context` 的 `before`、`after` 默认仍各为 10，单侧
 上限仍为 50。Monitor + SQLite、会话类型筛选和新的签名游标只能通过显式新参数启用。新增合同必须
 用回归测试同时证明“新能力可用”和“旧请求字节级语义未被静默迁移”。
+
+正式的双向滚动使用新增的
+`GET /api/v1/data/canonical/items/{id}/timeline`，不把 context 或搜索 cursor 偷换成分页协议。它要求
+`telegram` grant，当前仅覆盖能力注册表中的 Monitor 与 SQLite 两个消息 dataset；所有页都只读取
+Hub 当前已存 active 投影，不触发 Telegram、手机端或其他上游采集。v1 是 live keyset：连续请求期间
+新写入、晚到、删除可能改变尚未读取的边界外集合，因此它不是冻结快照，也不是新增/修改/删除的
+changes feed。`hasMore` 只描述 Hub stored 数据，不能解释为上游第一条或最后一条消息。
 
 ## 5. 数据源目录公开投影
 
@@ -209,6 +220,7 @@ GET  /api/v1/data/telegram/chats
 GET  /api/v1/data/telegram/messages
 POST /api/v1/data/telegram/search
 GET  /api/v1/data/canonical/items/{id}/context
+GET  /api/v1/data/canonical/items/{id}/timeline
 ```
 
 - `sourceScope=all|monitor|sqlite` 选择合并、Monitor 或 SQLite。既有 v1 路由在省略参数时继续默认
@@ -216,9 +228,12 @@ GET  /api/v1/data/canonical/items/{id}/context
 - 会话目录支持 `kind=all|channel|group|unknown`、`query` 和 cursor。
 - 消息列表通过稳定 `chatId/chatKey` 选择会话，支持时间窗和 cursor；返回 `canonicalId` 与来源。
 - 搜索默认跨当前 source scope；传 `chatId` 时限定当前会话。
-- 普通历史通过 cursor 连续加载；`before/after` 只属于搜索命中的 canonical context，不是会话总量
-  限制。
+- 普通历史通过 cursor 连续加载；`before/after` 属于搜索命中的 canonical context/timeline 首屏，
+  不是会话总量限制。
 - 上下文仍使用 canonical context 合同，不为 Telegram 复制另一套窗口实现。
+- 持续双向加载使用 canonical timeline：older 页升序 prepend、newer 页升序 append，客户端按
+  canonical ID 去重并在 prepend 后补偿 scroll offset 保持当前视口。搜索 pagination 与 timeline
+  cursor 是两个独立域。
 
 这样调用方可以重建左侧会话目录、频道/群组切换、会话内无限历史、全局/会话内搜索、命中高亮和
 前后文，同时看到 Monitor/SQLite provenance。Public 合同仍受 Telegram grant 与配额约束；Admin

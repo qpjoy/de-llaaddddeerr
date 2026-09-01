@@ -2450,7 +2450,11 @@ test('public Telegram conversation facade exposes explicit mixed-source discover
       'conversation_filter',
       'stored_search',
       'entity_search',
+      'message_context',
+      'message_timeline',
     ])
+    assert.equal(capabilities.payload.data.platforms[0].timeline.contractVersion, 'mx-insight-hub.canonical-timeline.v1')
+    assert.equal(capabilities.payload.data.platforms[0].timeline.consistency, 'live-keyset')
   })
 })
 

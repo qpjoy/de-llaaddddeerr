@@ -154,8 +154,9 @@ dispatch。这里的 `readyPlatforms` 是兼容字段，表示当前 Hub 固定�
 `data.platforms[]` 中出现 `telegram` 只代表 Hub stored/monitor 数据面可用，
 其平台项使用 `source=hub`、`servingMode=stored`；这不代表 Telegram 支持 Night-All
 legacy search。若该项包含 `message_context`，应继续检查 `context.ready` 和
-`context.datasets`；前者是独立的索引服务门禁，后者是明确支持上下文的 dataset
-清单。Key 缺失、无效或已撤销时返回 `401`。
+`context.datasets`；若包含 `message_timeline`，则检查 `timeline.ready`、
+`timeline.consistency=live-keyset` 和 `timeline.datasets`。两者的 ready 都是独立的索引
+服务门禁，dataset 清单是明确支持范围。Key 缺失、无效或已撤销时返回 `401`。
 
 P1 地区目录需要 `data.platforms[]` 中存在 `platform=public_opinion`，且其
 `capabilities` 包含 `region_catalog`。全国/省级 all-ingested feed 还要求同一平台项
@@ -930,6 +931,80 @@ Monitor 当前为 `unknown`，SQLite 当前为 `bounded`。GET 不使用幂等 k
 重试独立计量。未知 dataset 返回 `409 context_not_supported`；所需索引未就绪返回
 `503 serving_indexes_unavailable`。响应复用 canonical public allowlist，不包含 raw、
 `extensions`、连接信息或内部 lineage。
+
+### `GET /api/v1/data/canonical/items/{id}/timeline`
+
+这是搜索命中后持续向前、向后滚动的正式 Public 合同，要求 `telegram` grant。首屏
+不发送 cursor；`before`、`after` 各自默认 10、范围 `0..50`，并受当前 grant 的
+`maxPageSize` 限制。响应 `items` 始终按 `(eventTime, canonicalId)` 升序，
+`items[anchorIndex].id` 是搜索命中项。
+某一侧传 `0` 只会省略该侧的首屏数据；如果 Hub 返回该侧续页游标，游标使用
+`min(10, 当前 grant maxPageSize)` 作为后续页大小，不会产生每页 0 条的游标。
+timeline 与 context 返回的 `eventTime` 保留用于排序和游标排他的 UTC 六位微秒值，
+因此客户端能直接观察服务端实际分页使用的完整总序键。
+
+外部应用可直接按下面的固定流程复刻 Telegram 会话搜索与双向滚动。先搜索并从命中项取
+`canonicalId`（canonical search 的命中则直接取 `id`）：
+
+```bash
+SEARCH_KEY="$(new_idempotency_key)"
+SEARCH_PAGE=$(curl -sS -X POST \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $SEARCH_KEY" \
+  -d '{"query":"AI Agent","sourceScope":"all","scope":"messages","pageSize":20}' \
+  "$HUB_URL/api/v1/data/telegram/search")
+
+ANCHOR_ID=$(printf '%s\n' "$SEARCH_PAGE" | jq -r '.data.items[0] | .canonicalId // .id')
+```
+
+每个搜索下一页都改变了含 cursor 的规范 body，因此必须生成新的 `Idempotency-Key`；只有重试
+完全相同的一页才复用原 Key。timeline 是安全 GET，不发送幂等 Key。
+
+```bash
+ANCHOR_ID="${ANCHOR_ID:?set ANCHOR_ID to a Telegram canonical search item id}"
+TIMELINE=$(curl -sS --get \
+  -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode 'before=10' \
+  --data-urlencode 'after=10' \
+  "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/timeline")
+
+printf '%s\n' "$TIMELINE" \
+  | jq '{items:.data.items,anchorIndex:.data.anchorIndex,pageInfo:.data.pageInfo,consistency:.data.consistency,requestId}'
+```
+
+首屏 `pageInfo.mode=initial`、`direction=null`，并同时返回 `older` 与 `newer`。
+需要更早内容时只回传 `pageInfo.older.cursor`；direction 已封装在签名 token 中：
+
+```bash
+OLDER_CURSOR=$(printf '%s\n' "$TIMELINE" | jq -r '.data.pageInfo.older.cursor // empty')
+
+OLDER_PAGE=$(curl -sS --get \
+  -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode "cursor=$OLDER_CURSOR" \
+  "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/timeline")
+
+printf '%s\n' "$OLDER_PAGE" | jq
+```
+
+续页不能再发送 `before` 或 `after`，也不接受 `olderCursor`、`newerCursor` 或单独的
+direction 字段。搜索、Telegram search、history 和 timeline cursor 不能互换。HMAC
+将路径 anchor、dataset、chat stream、方向、排他 `(eventTime, canonicalId)` 边界、
+page size、tenant/consumer、`telegram` 授权范围及合同版本绑定；篡改或跨作用域重放
+返回 `400 invalid_cursor`。
+
+续页 `anchorIndex=null`，只有所请求方向的 pageInfo 非空。客户端将 older items prepend、
+newer items append，并按 canonical `id` 去重。prepend 前记录 scroll height 与 scrollTop，
+插入后把新增高度补偿到 scrollTop，避免用户当前命中/阅读位置跳动。即使 `newer.hasMore=false`，
+`pageInfo.newer.cursor` 仍会保留：有新项时推进到最新返回项，空页保持原 token，可以继续轮询后来写入；older 已耗尽时其 cursor
+为 null。
+
+`consistency=live-keyset` 明确表示这不是冻结快照：并发写入、晚到或删除可能改变尚未读取的
+边界外集合。`hasMore` 仅描述 Hub 当前 stored active 行，不代表 Telegram 上游完整性；
+该接口不触发 Telegram/Night-All/其他上游采集，也不承诺 changes feed、修改或删除事件。
+当前只支持 capabilities 的 `timeline.datasets` 列出的 Monitor 与 SQLite 两个 message
+dataset。未知 dataset 返回 `409 context_not_supported`，服务索引未就绪返回
+`503 serving_indexes_unavailable`。GET 不使用幂等 key，每次调用和重试独立计量。
 
 ### `POST /api/v1/data/telegram/search`
 

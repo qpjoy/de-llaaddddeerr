@@ -1522,9 +1522,10 @@ paths:
         handler, endpoint, provider, credential, or upstream health.
         legacySearch is null when the consumer has no granted platform eligible
         for Night-All compatibility; compatibility calls then fail closed. The
-        Telegram entry advertises message context per dataset under context;
-        context.ready is an index-serving gate independent from the broader
-        Telegram platform ready flag. The
+        Telegram entry advertises bounded message context and the bidirectional
+        live-keyset timeline per dataset under context and timeline; both ready
+        flags are index-serving gates independent from the broader Telegram
+        platform ready flag. The
         Hub-owned public_opinion entry advertises province_feed,
         province_coverage, item_detail and stored_search. Its ready flag requires
         both an active fixed ingestion
@@ -1564,6 +1565,7 @@ paths:
                               enum: [stored]
                               description: Present for Hub-owned stored-data entries.
                             context: { $ref: "#/components/schemas/CanonicalContextCapability" }
+                            timeline: { $ref: "#/components/schemas/CanonicalTimelineCapability" }
                       legacySearch:
                         description: >-
                           Hub-pinned, grant-filtered dispatch matrix, or null when
@@ -1590,7 +1592,7 @@ paths:
                   platforms:
                     - platform: telegram
                       ready: true
-                      capabilities: [monitor_chats, monitor_messages, sqlite_chats, sqlite_messages, multi_source_conversations, conversation_filter, stored_search, entity_search, message_context]
+                      capabilities: [monitor_chats, monitor_messages, sqlite_chats, sqlite_messages, multi_source_conversations, conversation_filter, stored_search, entity_search, message_context, message_timeline]
                       source: hub
                       servingMode: stored
                       context:
@@ -1600,6 +1602,26 @@ paths:
                         defaultAfter: 10
                         maxBefore: 50
                         maxAfter: 50
+                        datasets:
+                          - datasetId: telegram.monitor.messages.v1
+                            objectType: message
+                            streamType: chat
+                            ordering: [eventTime, canonicalId]
+                            upstreamCompleteness: { status: unknown, basis: null, through: null }
+                          - datasetId: telegram.sqlite.messages.v1
+                            objectType: message
+                            streamType: chat
+                            ordering: [eventTime, canonicalId]
+                            upstreamCompleteness: { status: bounded, basis: append_only_overlap, through: null }
+                      timeline:
+                        contractVersion: mx-insight-hub.canonical-timeline.v1
+                        ready: true
+                        consistency: live-keyset
+                        defaultBefore: 10
+                        defaultAfter: 10
+                        maxBefore: 50
+                        maxAfter: 50
+                        cursor: { opaque: true, directions: [older, newer], newerPolling: true }
                         datasets:
                           - datasetId: telegram.monitor.messages.v1
                             objectType: message
@@ -2037,6 +2059,79 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CanonicalContextEnvelope"
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/canonical/items/{id}/timeline:
+    get:
+      operationId: getCanonicalMessageTimeline
+      summary: Read and continue a bidirectional stored-message timeline.
+      description: >-
+        Requires the telegram platform grant. On the initial call, omit cursor
+        and request independent before and after windows; each defaults to 10,
+        accepts 0..50 and is also constrained by the grant page-size limit. Zero
+        suppresses that side on the initial page; any returned continuation
+        cursor for a zero-sized side uses the default page size constrained by
+        the current grant limit. A
+        continuation call sends only one opaque cursor returned in
+        pageInfo.older.cursor or pageInfo.newer.cursor and must omit before and
+        after. Direction is signed inside the timeline cursor; search, history
+        and timeline cursors are not interchangeable. Every page is ordered
+        ascending by (eventTime, canonicalId); eventTime preserves the exact
+        six-digit UTC microsecond value used by ordering and cursor boundaries.
+        The cursor remains bound to the original anchor, dataset, normalized
+        chat stream, page size, authorization scope and contract version, and
+        never crosses Monitor/SQLite datasets or chats. The implementation uses
+        live keyset consistency rather than a
+        frozen snapshot: concurrent writes, late arrivals and deletes can affect
+        boundary-external rows not yet read. pageInfo hasMore describes only
+        active messages currently stored in Hub, not upstream completeness. The
+        route never invokes Telegram or another upstream collector and does not
+        provide a changes feed. Current support is limited to the two datasets
+        advertised by the Telegram timeline capability. Raw rows, extensions,
+        source credentials and internal lineage remain private. This safe GET is
+        metered on every call and retry.
+      x-mx-allowed-query-fields: [before, after, cursor]
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_cursor, page_size_exceeded, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "404": [item_not_found]
+        "409": [context_not_supported]
+        "429": [quota_exceeded]
+        "503": [stored_data_unavailable, serving_indexes_unavailable]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Original Hub canonical message UUID. It remains path-bound on continuation calls.
+          schema: { type: string, format: uuid }
+        - name: before
+          in: query
+          required: false
+          description: "Initial call only: nearest stored messages before the anchor. Defaults to 10; 0..50 and the grant page-size limit apply. Zero omits older rows from the initial page; a returned older cursor uses the constrained default page size."
+          schema: { type: integer, minimum: 0, maximum: 50, default: 10 }
+        - name: after
+          in: query
+          required: false
+          description: "Initial call only: nearest stored messages after the anchor. Defaults to 10; 0..50 and the grant page-size limit apply. Zero omits newer rows from the initial page; the pollable newer cursor uses the constrained default page size."
+          schema: { type: integer, minimum: 0, maximum: 50, default: 10 }
+        - name: cursor
+          in: query
+          required: false
+          description: "Continuation call only: return exactly one opaque timeline cursor unchanged. It embeds older/newer direction and cannot be combined with before or after."
+          schema: { type: string, minLength: 1, maxLength: 2048 }
+      responses:
+        "200":
+          description: One ascending initial or directional page from a stored Telegram message timeline.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanonicalTimelineEnvelope"
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
@@ -5591,6 +5686,34 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/CanonicalContextCapabilityDataset" }
+    CanonicalTimelineCapability:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, ready, consistency, defaultBefore, defaultAfter, maxBefore, maxAfter, cursor, datasets]
+      properties:
+        contractVersion: { type: string, const: mx-insight-hub.canonical-timeline.v1 }
+        ready:
+          type: boolean
+          description: True only while every serving index required by the advertised dataset set is valid and ready.
+        consistency: { type: string, const: live-keyset }
+        defaultBefore: { type: integer, const: 10 }
+        defaultAfter: { type: integer, const: 10 }
+        maxBefore: { type: integer, const: 50 }
+        maxAfter: { type: integer, const: 50 }
+        cursor:
+          type: object
+          additionalProperties: false
+          required: [opaque, directions, newerPolling]
+          properties:
+            opaque: { type: boolean, const: true }
+            directions:
+              type: array
+              const: [older, newer]
+            newerPolling: { type: boolean, const: true }
+        datasets:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/CanonicalContextCapabilityDataset" }
     CanonicalContextEnvelope:
       type: object
       additionalProperties: false
@@ -5633,6 +5756,101 @@ components:
                 returnedCount: { type: integer, minimum: 1, maximum: 101 }
                 hasMoreStoredBefore: { type: boolean }
                 hasMoreStoredAfter: { type: boolean }
+            ordering:
+              type: object
+              additionalProperties: false
+              required: [fields, direction, quality]
+              properties:
+                fields:
+                  type: array
+                  const: [eventTime, canonicalId]
+                direction: { type: string, const: ascending }
+                quality: { type: string, const: deterministic }
+            upstreamCompleteness: { $ref: "#/components/schemas/CanonicalContextCompleteness" }
+            warnings:
+              type: array
+              maxItems: 1
+              items:
+                type: object
+                additionalProperties: false
+                required: [code, message]
+                properties:
+                  code: { type: string, enum: [upstream_completeness_unknown, upstream_completeness_bounded] }
+                  message: { type: string }
+        requestId: { type: string, format: uuid }
+    CanonicalTimelineDirectionPage:
+      type: object
+      additionalProperties: false
+      required: [hasMore, cursor]
+      description: >-
+        One continuation direction. An exhausted older side has cursor=null. The
+        newer cursor is retained when hasMore=false. It advances to the newest
+        returned item when a page is non-empty and remains unchanged on an
+        empty page, so the client can poll for later stored writes.
+      properties:
+        hasMore:
+          type: boolean
+          description: Whether another active Hub-stored row is currently known beyond this page.
+        cursor:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 2048
+          description: Opaque HMAC timeline cursor. Return unchanged; do not decode, construct or use as a search/history cursor.
+    CanonicalTimelinePageInfo:
+      type: object
+      additionalProperties: false
+      required: [mode, direction, returnedCount, older, newer]
+      properties:
+        mode: { type: string, enum: [initial, continuation] }
+        direction: { type: [string, "null"], enum: [null, older, newer] }
+        returnedCount: { type: integer, minimum: 0, maximum: 101 }
+        older:
+          oneOf:
+            - { $ref: "#/components/schemas/CanonicalTimelineDirectionPage" }
+            - { type: "null" }
+        newer:
+          oneOf:
+            - { $ref: "#/components/schemas/CanonicalTimelineDirectionPage" }
+            - { type: "null" }
+    CanonicalTimelineEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, consistency, source, anchorId, anchorIndex, stream, items, pageInfo, ordering, upstreamCompleteness, warnings]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.canonical-timeline.v1 }
+            consistency:
+              type: string
+              const: live-keyset
+              description: Pages use exclusive live keyset boundaries, not a frozen snapshot or changes-feed revision.
+            source: { type: string, const: hub }
+            anchorId: { type: string, format: uuid }
+            anchorIndex:
+              type: [integer, "null"]
+              minimum: 0
+              maximum: 50
+              description: Index of anchorId on the initial page; null on continuation pages.
+            stream:
+              type: object
+              additionalProperties: false
+              required: [platform, datasetId, objectType, type, id]
+              properties:
+                platform: { type: string, const: telegram }
+                datasetId: { type: string }
+                objectType: { type: string, const: message }
+                type: { type: string, const: chat }
+                id: { type: string, minLength: 1, maxLength: 256 }
+            items:
+              type: array
+              minItems: 0
+              maxItems: 101
+              description: Ascending safe stored-message projection. eventTime preserves the six-digit UTC microsecond value used by timeline ordering and cursor boundaries. Initial items[anchorIndex].id equals anchorId; a continuation may be empty.
+              items: { $ref: "#/components/schemas/StoredSearchItem" }
+            pageInfo: { $ref: "#/components/schemas/CanonicalTimelinePageInfo" }
             ordering:
               type: object
               additionalProperties: false

@@ -162,6 +162,70 @@ function assertCanonicalContextContract(document) {
   assert.equal(capability.properties.maxAfter.const, 50)
 }
 
+function assertCanonicalTimelineContract(document) {
+  const route = document.paths['/data/canonical/items/{id}/timeline']?.get
+  assert.ok(route)
+  assert.equal(route.operationId, 'getCanonicalMessageTimeline')
+  assert.deepEqual(route['x-mx-allowed-query-fields'], ['before', 'after', 'cursor'])
+  assert.deepEqual(route['x-mx-error-codes']['400'], [
+    'invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields',
+  ])
+  assert.deepEqual(route['x-mx-error-codes']['409'], ['context_not_supported'])
+  assert.deepEqual(route['x-mx-error-codes']['503'], [
+    'stored_data_unavailable', 'serving_indexes_unavailable',
+  ])
+  assert.deepEqual(
+    Object.keys(route.responses).map(Number).sort((left, right) => left - right),
+    [200, 400, 401, 403, 404, 409, 429, 503],
+  )
+  assert.deepEqual(route.parameters.map(({ name }) => name), ['id', 'before', 'after', 'cursor'])
+  for (const field of ['before', 'after']) {
+    const parameter = route.parameters.find(({ name }) => name === field)
+    assert.equal(parameter.schema.default, 10)
+    assert.equal(parameter.schema.minimum, 0)
+    assert.equal(parameter.schema.maximum, 50)
+  }
+  assert.equal(route.parameters.find(({ name }) => name === 'cursor').schema.maxLength, 2048)
+  assert.equal(
+    route.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/CanonicalTimelineEnvelope',
+  )
+
+  const data = document.components.schemas.CanonicalTimelineEnvelope.properties.data
+  assert.equal(data.additionalProperties, false)
+  assert.equal(data.properties.contractVersion.const, 'mx-insight-hub.canonical-timeline.v1')
+  assert.equal(data.properties.consistency.const, 'live-keyset')
+  assert.deepEqual(data.properties.anchorIndex.type, ['integer', 'null'])
+  assert.equal(data.properties.items.minItems, 0)
+  assert.equal(data.properties.items.maxItems, 101)
+  assert.equal(data.properties.pageInfo.$ref, '#/components/schemas/CanonicalTimelinePageInfo')
+  assert.deepEqual(data.properties.ordering.properties.fields.const, ['eventTime', 'canonicalId'])
+  assert.ok(data.required.includes('upstreamCompleteness'))
+
+  const pageInfo = document.components.schemas.CanonicalTimelinePageInfo
+  assert.deepEqual(pageInfo.required, ['mode', 'direction', 'returnedCount', 'older', 'newer'])
+  assert.deepEqual(pageInfo.properties.mode.enum, ['initial', 'continuation'])
+  assert.deepEqual(pageInfo.properties.direction.enum, [null, 'older', 'newer'])
+  const direction = document.components.schemas.CanonicalTimelineDirectionPage
+  assert.deepEqual(direction.required, ['hasMore', 'cursor'])
+  assert.deepEqual(direction.properties.cursor.type, ['string', 'null'])
+  assert.match(direction.description, /newer cursor is retained/u)
+
+  const capability = document.components.schemas.CanonicalTimelineCapability
+  assert.equal(capability.properties.contractVersion.const, 'mx-insight-hub.canonical-timeline.v1')
+  assert.equal(capability.properties.consistency.const, 'live-keyset')
+  assert.deepEqual(capability.properties.cursor.properties.directions.const, ['older', 'newer'])
+  assert.equal(capability.properties.cursor.properties.newerPolling.const, true)
+  const capabilitiesEnvelope = resolveSchema(
+    document,
+    document.paths['/data/capabilities'].get.responses[200].content['application/json'].schema,
+  )
+  assert.equal(
+    capabilitiesEnvelope.properties.data.properties.platforms.items.properties.timeline.$ref,
+    '#/components/schemas/CanonicalTimelineCapability',
+  )
+}
+
 function resolveParameter(document, parameter) {
   if (!parameter?.$ref) return parameter
   return document.components.parameters[parameter.$ref.split('/').at(-1)]
@@ -625,6 +689,7 @@ const VIRTUAL_SUPERMARKET_QUERY_FIELDS = [
 ]
 
 const PUBLIC_DATA_PRODUCT_MIRROR_PATHS = [
+  '/data/canonical/items/{id}/timeline',
   '/data/mobile-commerce/items',
   '/data/source-catalog/{id}/items',
   '/data/virtual-supermarket/metadata',
@@ -634,6 +699,8 @@ const PUBLIC_DATA_PRODUCT_MIRROR_PATHS = [
 ]
 
 const PUBLIC_DATA_PRODUCT_MIRROR_SCHEMAS = [
+  'CanonicalTimelineCapability', 'CanonicalTimelineDirectionPage',
+  'CanonicalTimelinePageInfo', 'CanonicalTimelineEnvelope',
   'MobileCommerceMarketplace', 'MobileCommerceItem', 'MobileCommercePage',
   'MobileCommercePageEnvelope', 'SourceCatalogItemsEnvelope',
   'VirtualSupermarketPlacementPart', 'VirtualSupermarketCategory',
@@ -826,7 +893,14 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/stored\/search/)
     assert.match(html, /\/api\/v1\/data\/canonical\/search/)
     assert.match(html, /\/api\/v1\/data\/canonical\/items\/\{id\}\/context/)
+    assert.match(html, /\/api\/v1\/data\/canonical\/items\/\{id\}\/timeline/)
     assert.match(html, /storedWindow\.hasMoreStoredBefore\/After/)
+    assert.match(html, /pageInfo\.older\/newer\.cursor/)
+    assert.match(html, /consistency=live-keyset/)
+    assert.match(html, /不提供 changes feed/)
+    assert.match(html, /外部会话应用复刻流程/)
+    assert.match(html, /canonicalId/)
+    assert.match(html, /保持用户当前视口/)
     assert.match(html, /upstreamCompleteness/)
     assert.match(html, /context_not_supported/)
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
@@ -968,6 +1042,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(document.openapi, '3.1.0')
     assert.deepEqual(paths.sort(), [
       '/data/canonical/items/{id}/context',
+      '/data/canonical/items/{id}/timeline',
       '/data/canonical/search',
       '/data/capabilities',
       '/data/mobile-commerce/items',
@@ -1030,6 +1105,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assertPublicOpinionSearchContract(document)
     assertNightAllPublicContract(document)
     assertCanonicalContextContract(document)
+    assertCanonicalTimelineContract(document)
     assertDataProductPublicContract(document)
     assertVirtualSupermarketContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
@@ -1092,6 +1168,7 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
   assertPublicOpinionContract(document)
   assertPublicOpinionSearchContract(document)
   assertCanonicalContextContract(document)
+  assertCanonicalTimelineContract(document)
   assertDataProductPublicContract(document, {
     chats: 'listTelegramMonitorChats',
     messages: 'listTelegramMonitorMessages',
@@ -1113,7 +1190,12 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   assert.doesNotMatch(guide, /默认 provider 已启用且配置了凭据/)
   assert.doesNotMatch(guide, /存在可执行 handler 或 endpoint candidate/)
   assert.match(guide, /\/api\/v1\/data\/canonical\/items\/\{id\}\/context/)
+  assert.match(guide, /\/api\/v1\/data\/canonical\/items\/\{id\}\/timeline/)
   assert.match(guide, /storedWindow\.hasMoreStoredBefore\/After/)
+  assert.match(guide, /pageInfo\.older\.cursor/)
+  assert.match(guide, /live-keyset/)
+  assert.match(guide, /每个搜索下一页[^。]*新的 `Idempotency-Key`/)
+  assert.match(guide, /新增高度补偿到 scrollTop/)
   assert.match(guide, /upstreamCompleteness/)
   assert.match(guide, /public_opinion.*formal/is)
   assert.match(guide, /includeCandidates=all.*province.*countryCode.*location/is)

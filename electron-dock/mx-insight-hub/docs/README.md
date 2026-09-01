@@ -82,6 +82,7 @@ This directory is the source of truth for MX Insight Hub. Night-All-specific imp
 12. [Admin console design](product/admin-console-design.md)
 13. [Open API v1](contracts/public-api-v1.md)
    - Machine-readable contract: [OpenAPI](contracts/openapi.yaml)
+   - Telegram search-hit bidirectional reading: [canonical timeline](contracts/public-api-v1.md#telegram-canonical-bidirectional-timeline)
 14. [Public API product surfaces and documentation rules](architecture/public-api-product-surfaces.md)
 15. [Public API curl guide](public-api-curl.md)
 16. [Key lifecycle](security/key-lifecycle.md)

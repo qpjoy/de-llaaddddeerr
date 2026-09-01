@@ -410,13 +410,15 @@ function canonicalContextQueryBranch(datasetId, position, side) {
                 row_number() OVER (ORDER BY r.event_time ${direction}, r.id ${direction}) AS side_position,
                 r.id, r.dataset_id, r.platform, r.object_type, r.content_type,
                 r.external_id, r.url, r.title, r.body, r.author_external_id, r.author_name,
-                r.event_time, r.collected_at, r.stable_fields,
+                r.event_time, r.event_time_cursor, r.collected_at, r.stable_fields,
                 r.stable_fields #>> '{relations,chatId}' AS context_id
            FROM anchor a
            CROSS JOIN LATERAL (
              SELECT id, dataset_id, platform, object_type, content_type,
                     external_id, url, title, body, author_external_id, author_name,
-                    event_time, collected_at, stable_fields
+                    event_time,
+                    to_char(event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS event_time_cursor,
+                    collected_at, stable_fields
                FROM core.canonical_records r
               WHERE a.dataset_id = '${datasetId}'
                 AND a.object_type = 'message'
@@ -463,7 +465,9 @@ export function buildCanonicalContextStoragePlan(datasets = CANONICAL_CONTEXT_DA
                 0::bigint AS side_position,
                 id, dataset_id, platform, object_type, content_type,
                 external_id, url, title, body, author_external_id, author_name,
-                event_time, collected_at, stable_fields,
+                event_time,
+                to_char(event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS event_time_cursor,
+                collected_at, stable_fields,
                 stable_fields #>> '{relations,chatId}' AS context_id
            FROM core.canonical_records
           WHERE id = $1::uuid
@@ -482,6 +486,36 @@ export function buildCanonicalContextStoragePlan(datasets = CANONICAL_CONTEXT_DA
 const CANONICAL_CONTEXT_STORAGE_PLAN = buildCanonicalContextStoragePlan()
 const CANONICAL_CONTEXT_SERVING_INDEX_CONTRACTS = CANONICAL_CONTEXT_STORAGE_PLAN.indexContracts
 const CANONICAL_CONTEXT_QUERY_SQL = CANONICAL_CONTEXT_STORAGE_PLAN.querySql
+
+export function buildCanonicalTimelineStoragePlan(datasets = CANONICAL_CONTEXT_DATASETS) {
+  const entries = canonicalContextDatasetEntries(datasets)
+  return Object.freeze(Object.fromEntries(entries.map(([datasetId]) => [
+    datasetId,
+    Object.freeze(Object.fromEntries(['older', 'newer'].map((direction) => {
+      const older = direction === 'older'
+      const comparison = older ? '<' : '>'
+      const order = older ? 'DESC' : 'ASC'
+      return [direction, `SELECT r.id, r.dataset_id, r.platform, r.object_type, r.content_type,
+              r.external_id, r.url, r.title, r.body, r.author_external_id, r.author_name,
+              r.event_time,
+              to_char(r.event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS event_time_cursor,
+              r.collected_at, r.stable_fields,
+              r.stable_fields #>> '{relations,chatId}' AS context_id
+         FROM core.canonical_records r
+        WHERE r.dataset_id = '${datasetId}'
+          AND r.platform = 'telegram'
+          AND r.object_type = 'message'
+          AND r.deleted_at IS NULL
+          AND r.event_time IS NOT NULL
+          AND r.stable_fields #>> '{relations,chatId}' = $1
+          AND (r.event_time, r.id) ${comparison} ($2::timestamptz, $3::uuid)
+        ORDER BY r.event_time ${order}, r.id ${order}
+        LIMIT $4`]
+    }))),
+  ])))
+}
+
+const CANONICAL_TIMELINE_PAGE_SQL = buildCanonicalTimelineStoragePlan()
 const PUBLIC_OPINION_SERVING_INDEX_CONTRACTS = Object.freeze([
   {
     name: 'canonical_province_opinion_hot_idx',
@@ -3020,6 +3054,32 @@ export class PostgresStore {
       hasMoreStoredBefore: beforeRows.length > before,
       hasMoreStoredAfter: afterRows.length > after,
       contextSupported: true,
+    }
+  }
+
+  /**
+   * Continue a canonical chat timeline from a cursor-contained exclusive
+   * boundary. The original anchor row is deliberately not consulted here.
+   */
+  async getCanonicalTimelinePage({
+    datasetId,
+    contextId,
+    direction,
+    boundary,
+    pageSize,
+  }) {
+    const sql = CANONICAL_TIMELINE_PAGE_SQL[datasetId]?.[direction]
+    if (!sql) {
+      throw new AppError(409, 'context_not_supported', 'Canonical item does not support message timeline')
+    }
+    const { rows } = await this.pool.query(
+      sql,
+      [contextId, boundary.eventTime, boundary.id, pageSize + 1],
+    )
+    const page = rows.slice(0, pageSize)
+    return {
+      items: direction === 'older' ? page.reverse() : page,
+      hasMore: rows.length > pageSize,
     }
   }
 

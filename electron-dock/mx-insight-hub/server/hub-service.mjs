@@ -24,6 +24,13 @@ import {
   normalizeCanonicalContextQuery,
 } from './data/canonical-context.mjs'
 import {
+  canonicalTimelineCapability,
+  canonicalTimelineContinuationResponse,
+  canonicalTimelineInitialResponse,
+  canonicalTimelineScopeFingerprint,
+  normalizeCanonicalTimelineQuery,
+} from './data/canonical-timeline.mjs'
+import {
   normalizePublicSourceCatalogDetailQuery,
   normalizePublicSourceCatalogId,
   normalizePublicSourceCatalogMetadataQuery,
@@ -529,17 +536,25 @@ export class HubService {
     if (canonicalGrants.includes('telegram') && typeof this.store.listCanonicalRecords === 'function') {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === 'telegram')) {
-        let context = null
+        let contextCapability = null
+        let timelineCapability = null
         if (
           typeof this.store.getCanonicalContext === 'function'
           && typeof this.store.getCanonicalContextServingIndexStatus === 'function'
         ) {
           try {
-            context = canonicalContextCapability(await this.store.getCanonicalContextServingIndexStatus())
+            const servingIndexes = await this.store.getCanonicalContextServingIndexStatus()
+            contextCapability = canonicalContextCapability(servingIndexes)
+            if (typeof this.store.getCanonicalTimelinePage === 'function') {
+              timelineCapability = canonicalTimelineCapability(servingIndexes)
+            }
           } catch {
             // Capability discovery must not take existing Telegram reads down
             // because the optional context index diagnostic is unavailable.
-            context = canonicalContextCapability(null)
+            contextCapability = canonicalContextCapability(null)
+            if (typeof this.store.getCanonicalTimelinePage === 'function') {
+              timelineCapability = canonicalTimelineCapability(null)
+            }
             this.logger?.warn?.('[canonical-context] serving index status is unavailable')
           }
         }
@@ -567,9 +582,11 @@ export class HubService {
               : []),
             'stored_search',
             'entity_search',
-            ...(context ? ['message_context'] : []),
+            ...(contextCapability ? ['message_context'] : []),
+            ...(timelineCapability ? ['message_timeline'] : []),
           ],
-          ...(context ? { context } : {}),
+          ...(contextCapability ? { context: contextCapability } : {}),
+          ...(timelineCapability ? { timeline: timelineCapability } : {}),
         })
       }
     }
@@ -1873,6 +1890,83 @@ export class HubService {
           throw new AppError(409, 'context_not_supported', 'Canonical item does not support message context')
         }
         return canonicalContextResponse({ query, result })
+      },
+    })
+  }
+
+  async canonicalTimeline(context, idInput, queryInput) {
+    if (
+      typeof this.store.getCanonicalContext !== 'function'
+      || typeof this.store.getCanonicalTimelinePage !== 'function'
+      || typeof this.store.getCanonicalContextServingIndexStatus !== 'function'
+    ) {
+      throw new AppError(503, 'stored_data_unavailable', 'Canonical timeline requires the current Hub store')
+    }
+    const id = requiredUuid(idInput, 'id').toLowerCase()
+    const policy = await this.#storedPlatformPolicy(context, 'telegram', 'Telegram')
+    const scopeFingerprint = canonicalTimelineScopeFingerprint({
+      tenantId: context.tenant.id,
+      consumerId: context.consumer.id,
+    })
+    const query = normalizeCanonicalTimelineQuery(queryInput, {
+      anchorId: id,
+      maxPageSize: policy.maxPageSize,
+      scopeFingerprint,
+      cursorSecret: this.apiKeyPepper,
+    })
+    let servingIndexes
+    try {
+      servingIndexes = await this.store.getCanonicalContextServingIndexStatus()
+    } catch {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Canonical timeline serving index status is unavailable',
+      )
+    }
+    if (!servingIndexes.ready) {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Canonical timeline serving indexes are not ready',
+      )
+    }
+    return this.#meterStoredRead(context, 'telegram', policy, {
+      path: `/api/v1/data/canonical/items/${id}/timeline`,
+      fingerprintBody: query.mode === 'initial'
+        ? { id, before: query.before, after: query.after }
+        : { id, cursor: query.cursorToken },
+      operation: async () => {
+        if (query.mode === 'continuation') {
+          const result = await this.store.getCanonicalTimelinePage({
+            datasetId: query.cursor.datasetId,
+            contextId: query.cursor.streamId,
+            direction: query.cursor.direction,
+            boundary: query.cursor.boundary,
+            pageSize: query.cursor.pageSize,
+          })
+          return canonicalTimelineContinuationResponse({
+            query,
+            result,
+            cursorSecret: this.apiKeyPepper,
+          })
+        }
+        const result = await this.store.getCanonicalContext({
+          id,
+          before: query.before,
+          after: query.after,
+        })
+        if (!result) throw new AppError(404, 'item_not_found', 'Canonical item not found')
+        if (!result.contextSupported) {
+          throw new AppError(409, 'context_not_supported', 'Canonical item does not support message timeline')
+        }
+        return canonicalTimelineInitialResponse({
+          anchorId: id,
+          query,
+          result,
+          scopeFingerprint,
+          cursorSecret: this.apiKeyPepper,
+        })
       },
     })
   }

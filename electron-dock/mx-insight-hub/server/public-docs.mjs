@@ -535,6 +535,15 @@ const canonicalContextResponse = {
   },
 }
 
+const canonicalTimelineResponse = {
+  description: 'One ascending initial or directional page from a stored Telegram message timeline.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/CanonicalTimelineEnvelope' },
+    },
+  },
+}
+
 const publicOpinionPageResponse = {
   description: 'A customer-safe page of canonical public-opinion items for one normalized province.',
   content: {
@@ -652,7 +661,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Discovery'],
         operationId: 'listPublicCapabilities',
         summary: 'List capabilities granted to the authenticated consumer',
-        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. Telegram message context is advertised per dataset under platform.context; context.ready is an index-serving gate and is independent from the broader Telegram platform ready flag. For public_opinion, ready requires both an active fixed ingest source and both valid Hub serving indexes; it is not another grant or a freshness guarantee, and a paused source may still have indexed rows. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for the three Night-All compatibility operations: it is compiled into the deployed Hub contract rather than discovered from Night-All at request time. A platform must appear in both supportedPlatforms and readyPlatforms before dispatch. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for Night-All compatibility; compatibility calls then fail closed.',
+        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. Telegram bounded message context and bidirectional live-keyset timeline are advertised per dataset under platform.context and platform.timeline; their ready flags are index-serving gates independent from the broader Telegram platform ready flag. For public_opinion, ready requires both an active fixed ingest source and both valid Hub serving indexes; it is not another grant or a freshness guarantee, and a paused source may still have indexed rows. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for the three Night-All compatibility operations: it is compiled into the deployed Hub contract rather than discovered from Night-All at request time. A platform must appear in both supportedPlatforms and readyPlatforms before dispatch. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for Night-All compatibility; compatibility calls then fail closed.',
         responses: {
           200: {
             description: 'Granted public capabilities.',
@@ -665,7 +674,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                       {
                         platform: 'telegram',
                         ready: true,
-                        capabilities: ['monitor_chats', 'monitor_messages', 'sqlite_chats', 'sqlite_messages', 'multi_source_conversations', 'conversation_filter', 'stored_search', 'entity_search', 'message_context'],
+                        capabilities: ['monitor_chats', 'monitor_messages', 'sqlite_chats', 'sqlite_messages', 'multi_source_conversations', 'conversation_filter', 'stored_search', 'entity_search', 'message_context', 'message_timeline'],
                         source: 'hub',
                         servingMode: 'stored',
                         context: {
@@ -675,6 +684,32 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                           defaultAfter: 10,
                           maxBefore: 50,
                           maxAfter: 50,
+                          datasets: [
+                            {
+                              datasetId: 'telegram.monitor.messages.v1',
+                              objectType: 'message',
+                              streamType: 'chat',
+                              ordering: ['eventTime', 'canonicalId'],
+                              upstreamCompleteness: { status: 'unknown', basis: null, through: null },
+                            },
+                            {
+                              datasetId: 'telegram.sqlite.messages.v1',
+                              objectType: 'message',
+                              streamType: 'chat',
+                              ordering: ['eventTime', 'canonicalId'],
+                              upstreamCompleteness: { status: 'bounded', basis: 'append_only_overlap', through: null },
+                            },
+                          ],
+                        },
+                        timeline: {
+                          contractVersion: 'mx-insight-hub.canonical-timeline.v1',
+                          ready: true,
+                          consistency: 'live-keyset',
+                          defaultBefore: 10,
+                          defaultAfter: 10,
+                          maxBefore: 50,
+                          maxAfter: 50,
+                          cursor: { opaque: true, directions: ['older', 'newer'], newerPolling: true },
                           datasets: [
                             {
                               datasetId: 'telegram.monitor.messages.v1',
@@ -925,6 +960,47 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
         ],
         responses: { 200: canonicalContextResponse, ...canonicalContextErrors },
+      },
+    },
+    '/data/canonical/items/{id}/timeline': {
+      get: {
+        tags: ['Search', 'Telegram'],
+        operationId: 'getCanonicalMessageTimeline',
+        summary: 'Read and continue a bidirectional stored-message timeline',
+        description: 'Requires the telegram platform grant. On the initial call, omit cursor and request independent before and after windows; each defaults to 10, accepts 0..50 and is also constrained by the grant page-size limit. Zero suppresses that side on the initial page; any returned continuation cursor for a zero-sized side uses the default page size constrained by the current grant limit. A continuation call sends only one opaque cursor returned in pageInfo.older.cursor or pageInfo.newer.cursor and must omit before and after. Direction is signed inside the timeline cursor; search, history and timeline cursors are not interchangeable. Every page is ordered ascending by (eventTime, canonicalId); eventTime preserves the exact six-digit UTC microsecond value used by ordering and cursor boundaries. The cursor remains bound to the original anchor, dataset, normalized chat stream, page size, authorization scope and contract version, and never crosses Monitor/SQLite datasets or chats. The implementation uses live keyset consistency rather than a frozen snapshot: concurrent writes, late arrivals and deletes can affect boundary-external rows not yet read. pageInfo hasMore describes only active messages currently stored in Hub, not upstream completeness. The route never invokes Telegram or another upstream collector and does not provide a changes feed. Current support is limited to the two datasets advertised by the Telegram timeline capability. Raw rows, extensions, source credentials and internal lineage remain private. This safe GET is metered on every call and retry.',
+        'x-mx-allowed-query-fields': ['before', 'after', 'cursor'],
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          404: ['item_not_found'],
+          409: ['context_not_supported'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable', 'serving_indexes_unavailable'],
+        },
+        parameters: [
+          {
+            name: 'id', in: 'path', required: true,
+            description: 'Original Hub canonical message UUID. It remains path-bound on continuation calls.',
+            schema: { type: 'string', format: 'uuid' },
+          },
+          {
+            name: 'before', in: 'query', required: false,
+            description: 'Initial call only: nearest stored messages before the anchor. Defaults to 10; 0..50 and the grant page-size limit apply. Zero omits older rows from the initial page; a returned older cursor uses the constrained default page size.',
+            schema: { type: 'integer', minimum: 0, maximum: 50, default: 10 },
+          },
+          {
+            name: 'after', in: 'query', required: false,
+            description: 'Initial call only: nearest stored messages after the anchor. Defaults to 10; 0..50 and the grant page-size limit apply. Zero omits newer rows from the initial page; the pollable newer cursor uses the constrained default page size.',
+            schema: { type: 'integer', minimum: 0, maximum: 50, default: 10 },
+          },
+          {
+            name: 'cursor', in: 'query', required: false,
+            description: 'Continuation call only: return exactly one opaque timeline cursor unchanged. It embeds older/newer direction and cannot be combined with before or after.',
+            schema: { type: 'string', minLength: 1, maxLength: 2048 },
+          },
+        ],
+        responses: { 200: canonicalTimelineResponse, ...canonicalContextErrors },
       },
     },
     '/data/mobile-commerce/items': {
@@ -2047,6 +2123,33 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
         },
       },
+      CanonicalTimelineCapability: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['contractVersion', 'ready', 'consistency', 'defaultBefore', 'defaultAfter', 'maxBefore', 'maxAfter', 'cursor', 'datasets'],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.canonical-timeline.v1' },
+          ready: { type: 'boolean', description: 'True only while every serving index required by the advertised dataset set is valid and ready.' },
+          consistency: { type: 'string', const: 'live-keyset' },
+          defaultBefore: { type: 'integer', const: 10 },
+          defaultAfter: { type: 'integer', const: 10 },
+          maxBefore: { type: 'integer', const: 50 },
+          maxAfter: { type: 'integer', const: 50 },
+          cursor: {
+            type: 'object', additionalProperties: false,
+            required: ['opaque', 'directions', 'newerPolling'],
+            properties: {
+              opaque: { type: 'boolean', const: true },
+              directions: { type: 'array', const: ['older', 'newer'] },
+              newerPolling: { type: 'boolean', const: true },
+            },
+          },
+          datasets: {
+            type: 'array', minItems: 1,
+            items: { $ref: '#/components/schemas/CanonicalContextCapabilityDataset' },
+          },
+        },
+      },
       CanonicalContextEnvelope: {
         type: 'object',
         additionalProperties: false,
@@ -2090,6 +2193,104 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                   hasMoreStoredAfter: { type: 'boolean' },
                 },
               },
+              ordering: {
+                type: 'object', additionalProperties: false,
+                required: ['fields', 'direction', 'quality'],
+                properties: {
+                  fields: { type: 'array', const: ['eventTime', 'canonicalId'] },
+                  direction: { type: 'string', const: 'ascending' },
+                  quality: { type: 'string', const: 'deterministic' },
+                },
+              },
+              upstreamCompleteness: { $ref: '#/components/schemas/CanonicalContextCompleteness' },
+              warnings: {
+                type: 'array', maxItems: 1,
+                items: {
+                  type: 'object', additionalProperties: false, required: ['code', 'message'],
+                  properties: {
+                    code: { type: 'string', enum: ['upstream_completeness_unknown', 'upstream_completeness_bounded'] },
+                    message: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      CanonicalTimelineDirectionPage: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['hasMore', 'cursor'],
+        description: 'One continuation direction. An exhausted older side has cursor=null. The newer cursor is retained when hasMore=false. It advances to the newest returned item when a page is non-empty and remains unchanged on an empty page, so the client can poll for later stored writes.',
+        properties: {
+          hasMore: { type: 'boolean', description: 'Whether another active Hub-stored row is currently known beyond this page.' },
+          cursor: {
+            type: ['string', 'null'], minLength: 1, maxLength: 2048,
+            description: 'Opaque HMAC timeline cursor. Return unchanged; do not decode, construct or use as a search/history cursor.',
+          },
+        },
+      },
+      CanonicalTimelinePageInfo: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['mode', 'direction', 'returnedCount', 'older', 'newer'],
+        properties: {
+          mode: { type: 'string', enum: ['initial', 'continuation'] },
+          direction: { type: ['string', 'null'], enum: [null, 'older', 'newer'] },
+          returnedCount: { type: 'integer', minimum: 0, maximum: 101 },
+          older: {
+            oneOf: [
+              { $ref: '#/components/schemas/CanonicalTimelineDirectionPage' },
+              { type: 'null' },
+            ],
+          },
+          newer: {
+            oneOf: [
+              { $ref: '#/components/schemas/CanonicalTimelineDirectionPage' },
+              { type: 'null' },
+            ],
+          },
+        },
+      },
+      CanonicalTimelineEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['contractVersion', 'consistency', 'source', 'anchorId', 'anchorIndex', 'stream', 'items', 'pageInfo', 'ordering', 'upstreamCompleteness', 'warnings'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.canonical-timeline.v1' },
+              consistency: {
+                type: 'string', const: 'live-keyset',
+                description: 'Pages use exclusive live keyset boundaries, not a frozen snapshot or changes-feed revision.',
+              },
+              source: { type: 'string', const: 'hub' },
+              anchorId: { type: 'string', format: 'uuid' },
+              anchorIndex: {
+                type: ['integer', 'null'], minimum: 0, maximum: 50,
+                description: 'Index of anchorId on the initial page; null on continuation pages.',
+              },
+              stream: {
+                type: 'object', additionalProperties: false,
+                required: ['platform', 'datasetId', 'objectType', 'type', 'id'],
+                properties: {
+                  platform: { type: 'string', const: 'telegram' },
+                  datasetId: { type: 'string' },
+                  objectType: { type: 'string', const: 'message' },
+                  type: { type: 'string', const: 'chat' },
+                  id: { type: 'string', minLength: 1, maxLength: 256 },
+                },
+              },
+              items: {
+                type: 'array', minItems: 0, maxItems: 101,
+                description: 'Ascending safe stored-message projection. eventTime preserves the six-digit UTC microsecond value used by timeline ordering and cursor boundaries. Initial items[anchorIndex].id equals anchorId; a continuation may be empty.',
+                items: { $ref: '#/components/schemas/StoredSearchItem' },
+              },
+              pageInfo: { $ref: '#/components/schemas/CanonicalTimelinePageInfo' },
               ordering: {
                 type: 'object', additionalProperties: false,
                 required: ['fields', 'direction', 'quality'],
@@ -3348,6 +3549,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                     source: { type: 'string', enum: ['hub'], description: 'Present for Hub-owned platform entries.' },
                     servingMode: { type: 'string', enum: ['stored'], description: 'Present for Hub-owned stored-data entries.' },
                     context: { $ref: '#/components/schemas/CanonicalContextCapability' },
+                    timeline: { $ref: '#/components/schemas/CanonicalTimelineCapability' },
                   },
                 },
               },
@@ -3579,7 +3781,8 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
       <tr><td>结果新鲜度</td><td>可选 <code>type</code>：<code>fresh</code>（默认）表示始终检索当前数据，重放窗口为 120 秒，足以吸收一次重试而不会把 Key 变成缓存；<code>stable</code> 表示同一个 Key 永久返回首次的结果，用于报表、分页序列和审计等需要快照可复现的场景。<code>type</code> 参与请求指纹，同一个 Key 不能在两种语义之间切换。</td></tr>
       <tr><td>POST 分词</td><td>同样必须携带 <code>Idempotency-Key</code>；相同请求重放不会再次分词或重复计量。</td></tr>
       <tr><td>下一页</td><td>使用响应中的 <code>pageInfo.nextCursor</code>，不要解析或修改；因为 body 已变化，新页面必须使用新的幂等 Key。</td></tr>
-      <tr><td>GET 历史/上下文/实体/舆情</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>
+      <tr><td>双向时间线</td><td>首屏读取 <code>pageInfo.older/newer.cursor</code>；每次续页只回传其中一个 <code>cursor</code>，方向已经签名在 token 中。不能同时传 <code>before/after</code>，也不能复用搜索或历史游标。</td></tr>
+      <tr><td>GET 历史/上下文/时间线/实体/舆情</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>
       <tr><td>页大小</td><td>同时受接口上限与该调用者平台策略约束；超限返回 <code>page_size_exceeded</code>。</td></tr>
     </tbody></table>
     </section>
@@ -3892,6 +4095,7 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
       <tr><td>Monitor + SQLite 统一检索</td><td><code>POST /data/canonical/search</code></td><td>授权范围内全部 Telegram canonical dataset</td></tr>
       <tr><td>Monitor + SQLite 会话/消息还原</td><td><code>GET /data/telegram/chats|messages?sourceScope=all</code></td><td>相容响应中增加来源与 canonical 定位</td></tr>
       <tr><td>命中消息的前后文</td><td><code>GET /data/canonical/items/{id}/context</code></td><td>命中项所在 dataset + chat；默认前后各 10 条</td></tr>
+      <tr><td>命中后持续双向滚动</td><td><code>GET /data/canonical/items/{id}/timeline</code></td><td>首屏前后窗口 + 单一不透明方向游标</td></tr>
       <tr><td>指定单个来源数据集</td><td><code>POST /data/stored/search</code></td><td>由 <code>datasetId</code> 精确收窄</td></tr>
     </tbody></table>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/messages</code></div><p>消息历史；支持 <code>sourceScope=all|monitor|sqlite</code>、<code>chatId</code>、<code>from</code>、<code>to</code>、<code>pageSize</code>、<code>cursor</code>。普通 external chatId 且省略 sourceScope 时保留 Monitor v1 cursor；显式来源或 <code>monitor:&lt;UUID&gt;</code>/<code>sqlite:&lt;UUID&gt;</code> chatKey 使用与来源、会话、时间窗和 pageSize 绑定的 HMAC v2 cursor。每条消息返回 <code>canonicalId</code> 和 <code>sourceScope</code>。</p></div>
@@ -3914,13 +4118,33 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     <div class="notice">当前 Monitor 的 <code>upstreamCompleteness.status</code> 为 <code>unknown</code>；SQLite 导入为 <code>bounded</code>。这不会阻止读取 Hub 已提交的上下文，但调用方不得把列表头尾解释成 Telegram 上游历史的绝对头尾。</div>
     <pre><code>curl -sS "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/context?before=10&amp;after=10" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
+    <h3>搜索命中后的双向时间线</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/canonical/items/{id}/timeline?before=10&amp;after=10</code></div><p>正式的双向分页合同。首屏返回升序 <code>items</code>、数字 <code>anchorIndex</code>，以及 <code>pageInfo.older/newer</code>；续页只发送其中一个不透明 <code>cursor</code>，此时 <code>anchorIndex=null</code>，未请求方向的页信息也为 <code>null</code>。<code>before=0</code> 或 <code>after=0</code> 只省略该侧首屏数据；返回的该侧游标使用受 grant 上限约束的默认页大小。路径 <code>id</code>、dataset、chat、方向、排他边界、page size、consumer 授权范围和合同版本都由 HMAC 绑定。</p></div>
+    <pre><code>TIMELINE=$(curl -sS -G "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/timeline" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  --data-urlencode 'before=10' \\
+  --data-urlencode 'after=10')
+
+OLDER_CURSOR=$(printf '%s\n' "$TIMELINE" | jq -r '.data.pageInfo.older.cursor // empty')
+curl -sS -G "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/timeline" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  --data-urlencode "cursor=$OLDER_CURSOR" | jq</code></pre>
+    <div class="notice"><code>eventTime</code> 保留服务端排序和游标排他使用的 UTC 六位微秒值。<code>consistency=live-keyset</code> 表示它不是冻结快照：并发新写入、晚到或删除可能改变尚未读取的边界外集合。<code>hasMore</code> 只说明 Hub 当前 stored active 数据；不证明 Telegram 上游已完整，也不提供 changes feed。即使 <code>newer.hasMore=false</code>，仍保留其 cursor：有新项时推进到最新返回项，空页保持原 token，客户端可用它轮询之后写入；older 耗尽时 cursor 为 null。此 GET 不调用 Telegram 或其他上游采集。</div>
+    <h3>外部会话应用复刻流程</h3>
+    <table><thead><tr><th>步骤</th><th>调用与客户端动作</th></tr></thead><tbody>
+      <tr><td>1. 搜索</td><td><code>POST /data/telegram/search</code> 并提供本页唯一的 <code>Idempotency-Key</code>；搜索结果下一页 body 含新 cursor，必须换新 Key。</td></tr>
+      <tr><td>2. 选中命中</td><td>优先取 message item 的 <code>canonicalId</code>；canonical search item 则取 <code>id</code>，作为 timeline 路径 ID。</td></tr>
+      <tr><td>3. 建立窗口</td><td><code>GET .../{id}/timeline?before=10&amp;after=10</code>；timeline GET 不需要幂等 Key。</td></tr>
+      <tr><td>4. 向上滚动</td><td>回传 <code>pageInfo.older.cursor</code>，按 canonical ID 去重后 prepend；记录插入前后 scroll height 差值并补偿 <code>scrollTop</code>，保持用户当前视口。</td></tr>
+      <tr><td>5. 向下/实时跟随</td><td>回传 <code>pageInfo.newer.cursor</code>，去重后 append；到达底部后可继续用返回的新 newer cursor 轮询。</td></tr>
+    </tbody></table>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/entities/search?query=example&amp;pageSize=20</code></div><p>模糊匹配作者名称/用户名和会话标题/用户名。</p></div>
     <div class="notice">如果搜索响应包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底。Canonical 接口还会以 <code>search.appliedProfile=postgres.substring.v1</code> 和 <code>search_profile_degraded</code> 明示策略变化；Telegram/Stored 兼容响应只保留投影告警。若 Elasticsearch 仍在线但 HanLP 查询降级，三个接口都会返回 <code>search_profile_degraded</code>。已有 Elasticsearch 游标会签名并复用首屏分词状态，不会中途切换模式或重新分词。</div>
     </section>
 
     <section class="doc-page" data-doc-page="discovery">
     <h2 id="discovery">能力、请求状态与用量</h2>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 与 <code>public_opinion</code> 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它们不代表 Night-All compatibility。Telegram 的 <code>context.datasets</code> 是上下文支持清单，<code>context.ready</code> 是独立的服务索引门禁。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 与 <code>public_opinion</code> 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它们不代表 Night-All compatibility。Telegram 的 <code>context.datasets</code> 与 <code>timeline.datasets</code> 分别是 bounded context 和双向时间线支持清单，各自的 <code>ready</code> 是独立服务索引门禁；<code>message_timeline</code> 明示正式时间线能力。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/requests/{requestId}</code></div><p>查询当前调用者拥有的持久请求记录。requestId 来自搜索响应头 <code>x-mx-insight-request-id</code>。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/usage?from=...&amp;to=...</code></div><p>读取当前调用者的请求、提交、释放、未知状态与计费单元汇总。</p></div>
     </section>
@@ -3930,7 +4154,7 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     <table><thead><tr><th>HTTP</th><th>含义</th><th>建议</th></tr></thead><tbody>
       <tr><td>400</td><td>字段、游标、页大小或幂等 Key 不合法</td><td>修正请求，不原样盲重试</td></tr>
       <tr><td>401 / 403</td><td>Key 无效，或平台未授权</td><td>检查 Key 与 capabilities</td></tr>
-      <tr><td>409</td><td>幂等冲突/处理中/结果未知，或该 dataset 不支持上下文</td><td>搜索请求保持原 body 与原幂等 Key；上下文请求先检查 capabilities</td></tr>
+      <tr><td>409</td><td>幂等冲突/处理中/结果未知，或该 dataset 不支持上下文/时间线</td><td>搜索请求保持原 body 与原幂等 Key；上下文/时间线请求先检查 capabilities</td></tr>
       <tr><td>410</td><td>搜索游标过期</td><td>从无 cursor 的第一页重新开始，并使用新幂等 Key</td></tr>
       <tr><td>429</td><td>请求或并发配额耗尽</td><td>等待策略窗口恢复</td></tr>
       <tr><td>503</td><td>当前数据或搜索运行时不可用</td><td>安全 GET 可稍后重试；POST 复用原幂等 Key</td></tr>

@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import {
+  CANONICAL_CONTEXT_DATASETS,
+  canonicalEventTimeCursor,
+} from '../data/canonical-context.mjs'
 import { SOURCE_CATALOG_SEED } from '../data/source-catalog-seed.mjs'
 import { sourceCatalogTermNormalizedName } from '../data/source-catalog.mjs'
 import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../data/virtual-supermarket.mjs'
@@ -10,6 +14,51 @@ function nowIso() {
 
 function clone(value) {
   return value == null ? value : structuredClone(value)
+}
+
+function memoryCanonicalField(record, camel, snake = camel) {
+  return record?.[camel] ?? record?.[snake] ?? null
+}
+
+function memoryCanonicalContextRow(record) {
+  const stableFields = memoryCanonicalField(record, 'stableFields', 'stable_fields') || {}
+  const eventTime = memoryCanonicalField(record, 'eventTime', 'event_time')
+  return {
+    id: record.id,
+    dataset_id: memoryCanonicalField(record, 'datasetId', 'dataset_id'),
+    platform: record.platform ?? null,
+    object_type: memoryCanonicalField(record, 'objectType', 'object_type'),
+    content_type: memoryCanonicalField(record, 'contentType', 'content_type'),
+    external_id: memoryCanonicalField(record, 'externalId', 'external_id'),
+    url: record.url ?? null,
+    title: record.title ?? null,
+    body: record.body ?? null,
+    author_external_id: memoryCanonicalField(record, 'authorExternalId', 'author_external_id'),
+    author_name: memoryCanonicalField(record, 'authorName', 'author_name'),
+    event_time: eventTime,
+    event_time_cursor: canonicalEventTimeCursor(
+      memoryCanonicalField(record, 'eventTimeCursor', 'event_time_cursor') ?? eventTime,
+    ),
+    collected_at: memoryCanonicalField(record, 'collectedAt', 'collected_at'),
+    stable_fields: clone(stableFields),
+    context_id: stableFields?.relations?.chatId ?? null,
+  }
+}
+
+function memoryCanonicalContextActive(record) {
+  return record?.platform === 'telegram'
+    && !memoryCanonicalField(record, 'deletedAt', 'deleted_at')
+}
+
+function canonicalTimelineTuple(row) {
+  return [row.event_time_cursor ?? canonicalEventTimeCursor(row.event_time), row.id]
+}
+
+function compareCanonicalTimelineRows(left, right) {
+  const [leftTime, leftId] = canonicalTimelineTuple(left)
+  const [rightTime, rightId] = canonicalTimelineTuple(right)
+  if (leftTime !== rightTime) return String(leftTime).localeCompare(String(rightTime))
+  return leftId.localeCompare(rightId)
 }
 
 function defaultVirtualSupermarketCategory() {
@@ -1407,6 +1456,95 @@ export class MemoryStore {
       .slice()
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
       .slice(0, Math.max(1, Math.min(Number(limit) || 50, 200))))
+  }
+
+  async getCanonicalContextServingIndexStatus() {
+    return {
+      ready: true,
+      required: [],
+      indexes: [],
+      missing: [],
+      storage: 'memory',
+    }
+  }
+
+  async getCanonicalContext({ id, before, after }) {
+    const source = this.canonicalRecords.get(id)
+    if (!source || !memoryCanonicalContextActive(source)) return null
+    const current = memoryCanonicalContextRow(source)
+    const dataset = CANONICAL_CONTEXT_DATASETS[current.dataset_id]
+    const contextSupported = Boolean(
+      dataset
+      && current.object_type === dataset.objectType
+      && canonicalTimelineTuple(current)[0]
+      && current.context_id,
+    )
+    if (!contextSupported) {
+      return {
+        current,
+        before: [],
+        after: [],
+        hasMoreStoredBefore: false,
+        hasMoreStoredAfter: false,
+        contextSupported: false,
+      }
+    }
+    const stream = [...this.canonicalRecords.values()]
+      .filter(memoryCanonicalContextActive)
+      .map(memoryCanonicalContextRow)
+      .filter((row) => (
+        row.id !== current.id
+        && row.dataset_id === current.dataset_id
+        && row.object_type === dataset.objectType
+        && row.context_id === current.context_id
+        && canonicalTimelineTuple(row)[0]
+      ))
+      .sort(compareCanonicalTimelineRows)
+    const beforeRows = stream.filter((row) => compareCanonicalTimelineRows(row, current) < 0)
+    const afterRows = stream.filter((row) => compareCanonicalTimelineRows(row, current) > 0)
+    return {
+      current,
+      before: before === 0 ? [] : clone(beforeRows.slice(-before)),
+      after: clone(afterRows.slice(0, after)),
+      hasMoreStoredBefore: beforeRows.length > before,
+      hasMoreStoredAfter: afterRows.length > after,
+      contextSupported: true,
+    }
+  }
+
+  async getCanonicalTimelinePage({
+    datasetId,
+    contextId,
+    direction,
+    boundary,
+    pageSize,
+  }) {
+    if (!CANONICAL_CONTEXT_DATASETS[datasetId] || !['older', 'newer'].includes(direction)) {
+      throw new AppError(409, 'context_not_supported', 'Canonical item does not support message timeline')
+    }
+    const boundaryRow = { event_time: boundary.eventTime, id: boundary.id }
+    const rows = [...this.canonicalRecords.values()]
+      .filter(memoryCanonicalContextActive)
+      .map(memoryCanonicalContextRow)
+      .filter((row) => (
+        row.dataset_id === datasetId
+        && row.object_type === 'message'
+        && row.context_id === contextId
+        && canonicalTimelineTuple(row)[0]
+        && (direction === 'older'
+          ? compareCanonicalTimelineRows(row, boundaryRow) < 0
+          : compareCanonicalTimelineRows(row, boundaryRow) > 0)
+      ))
+      .sort((left, right) => (
+        direction === 'older'
+          ? compareCanonicalTimelineRows(right, left)
+          : compareCanonicalTimelineRows(left, right)
+      ))
+    const page = rows.slice(0, pageSize)
+    return {
+      items: clone(direction === 'older' ? page.reverse() : page),
+      hasMore: rows.length > pageSize,
+    }
   }
 
   #virtualSupermarketItem(record) {
