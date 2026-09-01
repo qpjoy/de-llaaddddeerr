@@ -174,6 +174,7 @@ export class MemoryStore {
     // small in-memory catalog makes the local UI and focused HTTP tests honest
     // enough to exercise registration without pretending imports are durable.
     this.externalSources = new Map()
+    this.databaseConnections = new Map()
     // The governance catalog is useful in local development without a data
     // plane. Unlike canonical records it is ordinary administrative metadata,
     // so the memory implementation can exercise the complete CRUD contract.
@@ -927,6 +928,98 @@ export class MemoryStore {
     return []
   }
 
+  // ---- shared database connections -------------------------------------
+
+  #assertDatabaseConnectionReference(id) {
+    if (id != null && !this.databaseConnections.has(id)) {
+      throw new AppError(404, 'database_connection_not_found', `Unknown database connection: ${id}`)
+    }
+  }
+
+  async listDatabaseConnections() {
+    return clone([...this.databaseConnections.values()].sort((left, right) => (
+      right.createdAt.localeCompare(left.createdAt)
+    )))
+  }
+
+  async getDatabaseConnection(id) {
+    return clone(this.databaseConnections.get(id) || null)
+  }
+
+  async createDatabaseConnection({ key, displayName, engine = 'postgresql', connection = {} }) {
+    if ([...this.databaseConnections.values()].some((entry) => entry.key === key)) {
+      throw new AppError(409, 'database_connection_exists', `Database connection key already exists: ${key}`)
+    }
+    const createdAt = nowIso()
+    const entry = {
+      id: randomUUID(),
+      key,
+      displayName,
+      engine,
+      connection: clone(connection),
+      revision: 1,
+      createdAt,
+      updatedAt: createdAt,
+    }
+    this.databaseConnections.set(entry.id, entry)
+    return clone(entry)
+  }
+
+  async updateDatabaseConnection(id, patch, { expectedRevision = null } = {}) {
+    const current = this.databaseConnections.get(id)
+    if (!current) {
+      throw new AppError(404, 'database_connection_not_found', `Unknown database connection: ${id}`)
+    }
+    if (expectedRevision != null && current.revision !== expectedRevision) {
+      throw new AppError(
+        409,
+        'database_connection_revision_conflict',
+        'Database connection changed; reload before saving',
+        { expectedRevision, currentRevision: current.revision },
+      )
+    }
+    const updated = {
+      ...current,
+      ...(Object.prototype.hasOwnProperty.call(patch, 'displayName')
+        ? { displayName: patch.displayName }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(patch, 'engine')
+        ? { engine: patch.engine }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(patch, 'connection')
+        ? { connection: clone(patch.connection) }
+        : {}),
+      revision: current.revision + 1,
+      updatedAt: nowIso(),
+    }
+    this.databaseConnections.set(id, updated)
+    return clone(updated)
+  }
+
+  async listDatabaseConnectionReferences(id) {
+    return clone([...this.externalSources.values()]
+      .filter((source) => source.databaseConnectionId === id)
+      .sort((left, right) => left.sourceKey.localeCompare(right.sourceKey)))
+  }
+
+  async deleteDatabaseConnection(id) {
+    const current = this.databaseConnections.get(id)
+    if (!current) {
+      throw new AppError(404, 'database_connection_not_found', `Unknown database connection: ${id}`)
+    }
+    const references = await this.listDatabaseConnectionReferences(id)
+    if (references.length > 0) {
+      throw new AppError(
+        409,
+        'database_connection_in_use',
+        'Database connection is referenced by one or more external sources',
+        { references: references.map(({ id: sourceId, sourceKey, displayName }) => ({ sourceId, sourceKey, displayName })) },
+      )
+    }
+    this.databaseConnections.delete(id)
+    return clone(current)
+  }
+
   async createExternalSource({
     sourceKey,
     displayName,
@@ -936,15 +1029,18 @@ export class MemoryStore {
     objectType,
     status = 'active',
     connection = {},
+    databaseConnectionId = null,
     syncIntervalSeconds = 60,
   }) {
     if (this.externalSources.has(sourceKey)) {
       throw new AppError(409, 'source_exists', `Source key already exists: ${sourceKey}`)
     }
+    this.#assertDatabaseConnectionReference(databaseConnectionId)
     const createdAt = nowIso()
     const source = {
       id: randomUUID(), sourceKey, displayName, sourceKind, datasetId, platform,
       objectType: objectType || 'record', status, connection,
+      databaseConnectionId,
       syncIntervalSeconds, createdAt, updatedAt: createdAt,
     }
     this.externalSources.set(sourceKey, source)
@@ -959,6 +1055,65 @@ export class MemoryStore {
     return clone([...this.externalSources.values()].sort((left, right) => (
       right.createdAt.localeCompare(left.createdAt)
     )))
+  }
+
+  async updateExternalSource(sourceKey, patch) {
+    const current = this.externalSources.get(sourceKey)
+    if (!current) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
+    if (Object.prototype.hasOwnProperty.call(patch, 'databaseConnectionId')) {
+      this.#assertDatabaseConnectionReference(patch.databaseConnectionId)
+    }
+    const updated = {
+      ...current,
+      ...(Object.prototype.hasOwnProperty.call(patch, 'status') && patch.status != null
+        ? { status: patch.status }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(patch, 'connection') && patch.connection != null
+        ? { connection: clone(patch.connection) }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(patch, 'databaseConnectionId')
+        ? { databaseConnectionId: patch.databaseConnectionId ?? null }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(patch, 'syncIntervalSeconds')
+        ? { syncIntervalSeconds: patch.syncIntervalSeconds ?? null }
+        : {}),
+      updatedAt: nowIso(),
+    }
+    this.externalSources.set(sourceKey, updated)
+    return clone(updated)
+  }
+
+  async updateExternalSourcesBatch(updates) {
+    if (!Array.isArray(updates) || updates.length === 0) return []
+    for (const update of updates) {
+      if (!this.externalSources.has(update.sourceKey)) {
+        throw new AppError(404, 'source_not_found', `Unknown external source: ${update.sourceKey}`)
+      }
+      if (Object.prototype.hasOwnProperty.call(update, 'databaseConnectionId')) {
+        this.#assertDatabaseConnectionReference(update.databaseConnectionId)
+      }
+    }
+    const updated = updates.map((update) => {
+      const current = this.externalSources.get(update.sourceKey)
+      return {
+        ...current,
+        ...(Object.prototype.hasOwnProperty.call(update, 'status') && update.status != null
+          ? { status: update.status }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(update, 'connection') && update.connection != null
+          ? { connection: clone(update.connection) }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(update, 'databaseConnectionId')
+          ? { databaseConnectionId: update.databaseConnectionId ?? null }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(update, 'syncIntervalSeconds')
+          ? { syncIntervalSeconds: update.syncIntervalSeconds ?? null }
+          : {}),
+        updatedAt: nowIso(),
+      }
+    })
+    updated.forEach((source) => this.externalSources.set(source.sourceKey, source))
+    return clone(updated)
   }
 
   // ---- governed source catalog ------------------------------------------
@@ -1395,8 +1550,13 @@ export class MemoryStore {
       .map(sourceCatalogTermNormalizedName)
       .filter(Boolean))]
     const matches = (value) => matchKeys.includes(sourceCatalogTermNormalizedName(value))
+    const marketplaceEntryId = (record) => (
+      record?.stableFields?.commerce?.marketplace?.entryId
+      ?? record?.stable_fields?.commerce?.marketplace?.entryId
+      ?? null
+    )
     const records = [...this.canonicalRecords.values()]
-      .filter((record) => matches(record.platform))
+      .filter((record) => matches(record.platform) || marketplaceEntryId(record) === entry.id)
       .sort((left, right) => String(
         right.eventTime || right.collectedAt || right.lastSeenAt || right.firstSeenAt || '',
       ).localeCompare(String(
@@ -1404,8 +1564,14 @@ export class MemoryStore {
       )))
     const recordIds = new Set(records.filter((record) => !record.deletedAt).map((record) => record.id))
     const chunks = [...this.recordChunks.values()].filter((chunk) => recordIds.has(chunk.recordId))
+    const hasActiveMarketplaceRecord = records.some((record) => (
+      !record.deletedAt && marketplaceEntryId(record) === entry.id
+    ))
     const externalSources = [...this.externalSources.values()]
-      .filter((source) => matches(source.platform))
+      .filter((source) => (
+        matches(source.platform)
+        || (source.sourceKey === 'mobile-commerce-collected-items' && hasActiveMarketplaceRecord)
+      ))
       .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
       .map((source) => ({
         id: source.id,
@@ -1539,7 +1705,7 @@ export class MemoryStore {
   #platformAdmins = new Set()
 
   async upsertExternalIdentity({ issuer, subject, audience, displayName, ...rest }) {
-    const bindingKey = `${issuer} ${subject} ${audience}`
+    const bindingKey = `${issuer}\u0000${subject}\u0000${audience}`
     const existingId = this.#memberByBinding.get(bindingKey)
     if (existingId) {
       const member = this.#members.get(existingId)

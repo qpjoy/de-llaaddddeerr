@@ -2109,6 +2109,63 @@ export class PostgresStore {
     return rows
   }
 
+  async listMobileCommerceItems({
+    sourcePlatform = null,
+    catalogEntryId = null,
+    keyword = null,
+    brand = null,
+    taskId = null,
+    from = null,
+    to = null,
+    pageSize = 50,
+    cursor = null,
+  } = {}) {
+    const values = []
+    const conditions = [
+      `record.dataset_id = 'mobile-commerce.collected-items.v1'`,
+      `record.platform = 'mobile_commerce'`,
+      `record.object_type = 'commerce_capture'`,
+      'record.deleted_at IS NULL',
+    ]
+    const bind = (value) => {
+      values.push(value)
+      return `$${values.length}`
+    }
+    if (sourcePlatform) {
+      conditions.push(`record.stable_fields #>> '{commerce,marketplace,sourceValue}' = ${bind(sourcePlatform)}`)
+    }
+    if (catalogEntryId) {
+      conditions.push(`record.stable_fields #>> '{commerce,marketplace,entryId}' = ${bind(catalogEntryId)}`)
+    }
+    if (keyword) conditions.push(`record.stable_fields #>> '{commerce,task,keyword}' = ${bind(keyword)}`)
+    if (brand) conditions.push(`record.stable_fields #>> '{commerce,task,sourceBrandLabel}' = ${bind(brand)}`)
+    if (taskId) conditions.push(`record.stable_fields #>> '{commerce,task,id}' = ${bind(taskId)}`)
+    if (from) conditions.push(`record.collected_at >= ${bind(from)}::timestamptz`)
+    if (to) conditions.push(`record.collected_at <= ${bind(to)}::timestamptz`)
+    if (cursor) {
+      const sortTime = bind(cursor.sortTime)
+      const id = bind(cursor.id)
+      conditions.push(`(record.collected_at, record.id) < (${sortTime}::timestamptz, ${id}::uuid)`)
+    }
+    const limit = bind(pageSize + 1)
+    const { rows } = await this.pool.query(
+      `SELECT record.id,
+              record.external_id,
+              record.title,
+              record.author_name,
+              record.collected_at,
+              record.stable_fields,
+              record.current_revision,
+              record.collected_at AS sort_time
+         FROM core.canonical_records record
+        WHERE ${conditions.join('\n          AND ')}
+        ORDER BY record.collected_at DESC, record.id DESC
+        LIMIT ${limit}`,
+      values,
+    )
+    return rows
+  }
+
   /**
    * Admin-only Telegram product facade. It intentionally exposes governed
    * canonical business rows from both ingestors without applying a public-chat
@@ -3594,6 +3651,137 @@ export class PostgresStore {
     }
   }
 
+  // ---- shared database connections (migration 048) ----------------------
+
+  async listDatabaseConnections() {
+    const { rows } = await this.pool.query(
+      `SELECT *
+         FROM catalog.database_connections
+        ORDER BY created_at DESC, id`,
+    )
+    return rows.map(databaseConnection)
+  }
+
+  async getDatabaseConnection(id) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM catalog.database_connections WHERE id = $1`,
+      [id],
+    )
+    return databaseConnection(rows[0])
+  }
+
+  async createDatabaseConnection({ key, displayName, engine = 'postgresql', connection = {} }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO catalog.database_connections
+         (id, connection_key, display_name, engine, connection)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (connection_key) DO NOTHING
+       RETURNING *`,
+      [randomUUID(), key, displayName, engine, connection],
+    )
+    if (!rows[0]) {
+      throw new AppError(409, 'database_connection_exists', `Database connection key already exists: ${key}`)
+    }
+    return databaseConnection(rows[0])
+  }
+
+  async updateDatabaseConnection(id, patch, { expectedRevision = null } = {}) {
+    const hasDisplayName = Object.prototype.hasOwnProperty.call(patch, 'displayName')
+    const hasEngine = Object.prototype.hasOwnProperty.call(patch, 'engine')
+    const hasConnection = Object.prototype.hasOwnProperty.call(patch, 'connection')
+    const { rows } = await this.pool.query(
+      `UPDATE catalog.database_connections
+          SET display_name = CASE WHEN $2 THEN $3 ELSE display_name END,
+              engine = CASE WHEN $4 THEN $5 ELSE engine END,
+              connection = CASE WHEN $6 THEN $7 ELSE connection END,
+              revision = revision + 1,
+              updated_at = now()
+        WHERE id = $1
+          AND ($8::integer IS NULL OR revision = $8)
+        RETURNING *`,
+      [
+        id,
+        hasDisplayName,
+        patch.displayName ?? null,
+        hasEngine,
+        patch.engine ?? null,
+        hasConnection,
+        patch.connection ?? null,
+        expectedRevision,
+      ],
+    )
+    if (!rows[0]) {
+      if (expectedRevision != null) {
+        const current = await this.pool.query(
+          `SELECT revision FROM catalog.database_connections WHERE id = $1`,
+          [id],
+        )
+        if (current.rows[0]) {
+          throw new AppError(
+            409,
+            'database_connection_revision_conflict',
+            'Database connection changed; reload before saving',
+            {
+              expectedRevision,
+              currentRevision: Number(current.rows[0].revision),
+            },
+          )
+        }
+      }
+      throw new AppError(404, 'database_connection_not_found', `Unknown database connection: ${id}`)
+    }
+    return databaseConnection(rows[0])
+  }
+
+  async listDatabaseConnectionReferences(id) {
+    const { rows } = await this.pool.query(
+      `SELECT *
+         FROM catalog.external_sources
+        WHERE database_connection_id = $1
+        ORDER BY source_key, id`,
+      [id],
+    )
+    return rows.map(externalSource)
+  }
+
+  async deleteDatabaseConnection(id) {
+    return withPgTransaction(this.pool, async (client) => {
+      const current = await client.query(
+        `SELECT * FROM catalog.database_connections WHERE id = $1 FOR UPDATE`,
+        [id],
+      )
+      if (!current.rows[0]) {
+        throw new AppError(404, 'database_connection_not_found', `Unknown database connection: ${id}`)
+      }
+      const references = await client.query(
+        `SELECT *
+           FROM catalog.external_sources
+          WHERE database_connection_id = $1
+          ORDER BY source_key, id`,
+        [id],
+      )
+      if (references.rows.length > 0) {
+        throw new AppError(
+          409,
+          'database_connection_in_use',
+          'Database connection is referenced by one or more external sources',
+          {
+            references: references.rows.map((row) => ({
+              sourceId: row.id,
+              sourceKey: row.source_key,
+              displayName: row.display_name,
+            })),
+          },
+        )
+      }
+      await client.query(
+        `DELETE FROM catalog.database_connections WHERE id = $1`,
+        [id],
+      )
+      return databaseConnection(current.rows[0])
+    })
+  }
+
   // ---- external sources (migration 008) ----------------------------------
 
   async createExternalSource({
@@ -3605,18 +3793,19 @@ export class PostgresStore {
     objectType,
     status,
     connection,
+    databaseConnectionId = null,
     syncIntervalSeconds = 60,
   }) {
     const { rows } = await this.pool.query(
       `INSERT INTO catalog.external_sources
-         (id, source_key, display_name, source_kind, dataset_id, platform, object_type, status, connection,
-          sync_interval_seconds)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         (id, source_key, display_name, source_kind, dataset_id, platform, object_type, status,
+          database_connection_id, connection, sync_interval_seconds)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (source_key) DO NOTHING
        RETURNING *`,
       [
         randomUUID(), sourceKey, displayName, sourceKind, datasetId, platform,
-        objectType || 'record', status || 'active', connection || {}, syncIntervalSeconds,
+        objectType || 'record', status || 'active', databaseConnectionId, connection || {}, syncIntervalSeconds,
       ],
     )
     if (!rows[0]) throw new AppError(409, 'source_exists', `Source key already exists: ${sourceKey}`)
@@ -3624,12 +3813,14 @@ export class PostgresStore {
   }
 
   async updateExternalSource(sourceKey, patch) {
+    const hasDatabaseConnection = Object.prototype.hasOwnProperty.call(patch, 'databaseConnectionId')
     const hasSyncInterval = Object.prototype.hasOwnProperty.call(patch, 'syncIntervalSeconds')
     const { rows } = await this.pool.query(
       `UPDATE catalog.external_sources
           SET status = coalesce($2, status),
               connection = coalesce($3, connection),
-              sync_interval_seconds = CASE WHEN $4 THEN $5 ELSE sync_interval_seconds END,
+              database_connection_id = CASE WHEN $4 THEN $5 ELSE database_connection_id END,
+              sync_interval_seconds = CASE WHEN $6 THEN $7 ELSE sync_interval_seconds END,
               updated_at = now()
         WHERE source_key = $1
         RETURNING *`,
@@ -3637,6 +3828,8 @@ export class PostgresStore {
         sourceKey,
         patch.status ?? null,
         patch.connection ?? null,
+        hasDatabaseConnection,
+        patch.databaseConnectionId ?? null,
         hasSyncInterval,
         patch.syncIntervalSeconds ?? null,
       ],
@@ -3651,12 +3844,14 @@ export class PostgresStore {
     return withPgTransaction(this.pool, async (client) => {
       const results = []
       for (const update of updates) {
+        const hasDatabaseConnection = Object.prototype.hasOwnProperty.call(update, 'databaseConnectionId')
         const hasSyncInterval = Object.prototype.hasOwnProperty.call(update, 'syncIntervalSeconds')
         const { rows } = await client.query(
           `UPDATE catalog.external_sources
               SET status = coalesce($2, status),
                   connection = coalesce($3, connection),
-                  sync_interval_seconds = CASE WHEN $4 THEN $5 ELSE sync_interval_seconds END,
+                  database_connection_id = CASE WHEN $4 THEN $5 ELSE database_connection_id END,
+                  sync_interval_seconds = CASE WHEN $6 THEN $7 ELSE sync_interval_seconds END,
                   updated_at = now()
             WHERE source_key = $1
             RETURNING *`,
@@ -3664,6 +3859,8 @@ export class PostgresStore {
             update.sourceKey,
             update.status ?? null,
             update.connection ?? null,
+            hasDatabaseConnection,
+            update.databaseConnectionId ?? null,
             hasSyncInterval,
             update.syncIntervalSeconds ?? null,
           ],
@@ -4320,10 +4517,11 @@ export class PostgresStore {
       .filter(Boolean))]
     const [datasetResult, recordResult, sourceResult, chunkResult] = await Promise.all([
       this.pool.query(
-        `WITH matched_records AS (
+         `WITH matched_records AS (
            SELECT *
              FROM core.canonical_records
             WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
+               OR stable_fields #>> '{commerce,marketplace,entryId}' = $2
          ), record_stats AS (
            SELECT record.dataset_id,
                   array_agg(DISTINCT record.platform ORDER BY record.platform) AS platforms,
@@ -4355,23 +4553,33 @@ export class PostgresStore {
            FROM record_stats
            LEFT JOIN chunk_stats USING (dataset_id)
           ORDER BY record_stats.dataset_id`,
-        [matchKeys],
+        [matchKeys, entry.id],
       ),
       this.pool.query(
         `SELECT id, dataset_id, platform, object_type, content_type, external_id,
                 title, current_revision, event_time, collected_at, deleted_at
            FROM core.canonical_records
           WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
+             OR stable_fields #>> '{commerce,marketplace,entryId}' = $2
           ORDER BY coalesce(event_time, collected_at, last_seen_at, first_seen_at) DESC, id DESC
-          LIMIT $2`,
-        [matchKeys, pageSize + 1],
+          LIMIT $3`,
+        [matchKeys, entry.id, pageSize + 1],
       ),
       this.pool.query(
         `SELECT *
-           FROM catalog.external_sources
+          FROM catalog.external_sources
           WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
+             OR (
+               source_key = 'mobile-commerce-collected-items'
+               AND EXISTS (
+                 SELECT 1
+                   FROM core.canonical_records record
+                  WHERE record.deleted_at IS NULL
+                    AND record.stable_fields #>> '{commerce,marketplace,entryId}' = $2
+               )
+             )
           ORDER BY updated_at DESC, source_key`,
-        [matchKeys],
+        [matchKeys, entry.id],
       ),
       this.pool.query(
         `SELECT count(*)::integer AS chunk_count,
@@ -4381,8 +4589,11 @@ export class PostgresStore {
            FROM core.record_chunks chunk
            JOIN core.canonical_records record ON record.id = chunk.record_id
           WHERE record.deleted_at IS NULL
-            AND lower(btrim(normalize(record.platform, NFKC))) = ANY($1::text[])`,
-        [matchKeys],
+            AND (
+              lower(btrim(normalize(record.platform, NFKC))) = ANY($1::text[])
+              OR record.stable_fields #>> '{commerce,marketplace,entryId}' = $2
+            )`,
+        [matchKeys, entry.id],
       ),
     ])
     const datasets = datasetResult.rows.map(sourceCatalogRelatedDataset)
@@ -5732,7 +5943,21 @@ function externalSource(row) {
     objectType: row.object_type,
     status: row.status,
     connection: row.connection,
+    databaseConnectionId: row.database_connection_id ?? null,
     syncIntervalSeconds: row.sync_interval_seconds == null ? null : Number(row.sync_interval_seconds),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  }
+}
+
+function databaseConnection(row) {
+  return row && {
+    id: row.id,
+    key: row.connection_key,
+    displayName: row.display_name,
+    engine: row.engine,
+    connection: row.connection || {},
+    revision: Number(row.revision),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   }
@@ -5875,6 +6100,7 @@ function sourceCatalogRelatedExternalSource(row) {
     platform: row.platform,
     objectType: row.object_type,
     status: row.status,
+    databaseConnectionId: row.database_connection_id ?? null,
     syncIntervalSeconds: row.sync_interval_seconds == null ? null : Number(row.sync_interval_seconds),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),

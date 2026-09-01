@@ -40,6 +40,7 @@ import {
   UsagePage,
 } from './pages.jsx'
 import { AgentPage, BackfillPage, RetrievalPage, SourcesPage } from './pages-data.jsx'
+import { DatabaseConnectionsPage } from './pages-database-connections.jsx'
 import { DataCenterPage } from './pages-catalog.jsx'
 import {
   PublicOpinionPage,
@@ -258,12 +259,18 @@ function AgentRuntimeRoute(props) {
 const SESSION_KEY = 'mx-insight-hub.admin-token'
 const THEME_KEY = 'mx-insight-hub.theme'
 const DATA_PRODUCTS_NAV_KEY = 'data-products'
+const DATA_CLEANING_NAV_KEY = 'data-cleaning'
 const AGENT_CENTER_NAV_KEY = 'agent-center'
 const NAV_PARENTS = {
   [DATA_PRODUCTS_NAV_KEY]: {
     label: '数据产品',
     description: '目录与业务数据展示',
     icon: Package,
+  },
+  [DATA_CLEANING_NAV_KEY]: {
+    label: '数据清洗中心',
+    description: '数据库连接与清洗任务',
+    icon: Database,
   },
   [AGENT_CENTER_NAV_KEY]: {
     label: 'Agent 中心',
@@ -285,7 +292,8 @@ const ROUTES = [
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
-  { path: '/sources', label: '数据清洗计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/database-connections', label: '数据库配置', description: '共享只读 PostgreSQL 连接', icon: Key, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DatabaseConnectionsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/sources', label: '清洗任务计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
   { path: '/agent/providers', label: 'LLM Provider', description: '模型账号、协议与密钥', icon: Key, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentProvidersRoute, capability: 'membership.write', platformAdmin: true },

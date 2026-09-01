@@ -130,6 +130,44 @@ sourceCatalogQueryParameters.push(
   },
 )
 
+const mobileCommerceQueryParameters = [
+  {
+    name: 'sourcePlatform', in: 'query', required: false,
+    description: 'Exact raw marketplace label retained from the collector, such as 快手小店.',
+    schema: { type: 'string', minLength: 1, maxLength: 120 },
+  },
+  {
+    name: 'catalogEntryId', in: 'query', required: false,
+    description: 'Exact governed source-catalog UUID assigned by the reviewed marketplace mapping.',
+    schema: { type: 'string', format: 'uuid' },
+  },
+  ...['keyword', 'brand', 'taskId'].map((name) => ({
+    name, in: 'query', required: false,
+    description: `Exact collector ${name} label; it narrows results and does not grant access.`,
+    schema: { type: 'string', minLength: 1, maxLength: name === 'taskId' ? 120 : 240 },
+  })),
+  ...['from', 'to'].map((name) => ({
+    name, in: 'query', required: false,
+    description: `Inclusive RFC3339 collection-time ${name === 'from' ? 'lower' : 'upper'} bound with an explicit offset.`,
+    schema: { type: 'string', format: 'date-time' },
+  })),
+  {
+    name: 'refresh', in: 'query', required: false,
+    description: 'Only stored is available. Remote acquisition by the external mobile collector is reserved and never runs inside Hub.',
+    schema: { type: 'string', enum: ['stored'], default: 'stored' },
+  },
+  {
+    name: 'pageSize', in: 'query', required: false,
+    description: 'Defaults to 50; maximum 100, and the mobile_commerce policy may impose a lower limit.',
+    schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+  },
+  {
+    name: 'cursor', in: 'query', required: false,
+    description: 'HMAC-signed keyset cursor bound to all normalized filters and pageSize.',
+    schema: { type: 'string', minLength: 1, maxLength: 2048 },
+  },
+]
+
 const publicOpinionDiagnosticsWindowParameters = [
   {
     name: 'from', in: 'query', required: false,
@@ -505,6 +543,15 @@ const publicOpinionRegionFeedResponse = {
   },
 }
 
+const mobileCommercePageResponse = {
+  description: 'A customer-safe stored page of mobile-commerce captures.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/MobileCommercePageEnvelope' },
+    },
+  },
+}
+
 export const PUBLIC_OPENAPI_DOCUMENT = {
   openapi: '3.1.0',
   info: {
@@ -519,6 +566,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   tags: [
     { name: 'Discovery', description: 'Discover the caller\'s granted platform capabilities.' },
     { name: 'Source Catalog', description: 'Reconstruct the active governed source catalog, filters, taxonomy, owners and status summary.' },
+    { name: 'Mobile Commerce', description: 'Read stored mobile-collector commerce captures and their governed source-catalog classification.' },
     { name: 'Search', description: 'Idempotent content search.' },
     { name: 'Compatibility', description: 'Temporary Night-All legacy routes with durable Hub evidence and exact last-good fallback.' },
     { name: 'Tools', description: 'Granted platform-independent processing capabilities.' },
@@ -803,6 +851,25 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         responses: { 200: canonicalContextResponse, ...canonicalContextErrors },
       },
     },
+    '/data/mobile-commerce/items': {
+      get: {
+        tags: ['Mobile Commerce'],
+        operationId: 'listMobileCommerceItems',
+        summary: 'List stored mobile-commerce captures',
+        description: 'Requires the mobile_commerce platform grant. Reads only committed Hub canonical data and never invokes a marketplace or mobile collector. Every ingested row follows the normal canonical outbox and Elasticsearch projection path, so canonical search can query the same dataset. The top-level authorization platform is mobile_commerce; the real marketplace is a governed source-catalog facet. id identifies a capture row, goodsId is optional product identity, collectedAt is Asia/Shanghai-normalized collection time, and share payloads remain text rather than verified URLs. Raw rows, arbitrary metadata, device/report fields, credentials and operational lineage are excluded. refresh currently accepts only stored; future acquisition will be an asynchronous command executed by an external mobile-collector machine, with Hub limited to trigger/status/data APIs.',
+        'x-mx-allowed-query-fields': mobileCommerceQueryParameters.map(({ name }) => name),
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          409: ['remote_fetch_unavailable'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: mobileCommerceQueryParameters,
+        responses: { 200: mobileCommercePageResponse, ...publicErrors },
+      },
+    },
     '/data/source-catalog': {
       get: {
         tags: ['Source Catalog'],
@@ -868,6 +935,32 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           404: errorResponse,
           429: errorResponse,
           503: errorResponse,
+        },
+      },
+    },
+    '/data/source-catalog/{id}/items': {
+      get: {
+        tags: ['Source Catalog', 'Mobile Commerce'],
+        operationId: 'listSourceCatalogItems',
+        summary: 'List stored data classified under one source-catalog entry',
+        description: 'Requires both source_catalog and mobile_commerce platform grants. The path UUID is the governed classification boundary and is injected into the query; catalogEntryId is therefore not accepted as a query field. P1 dispatches to the mobile-commerce stored data product. It returns the safe active catalog entry plus captures whose reviewed stable marketplace facet references that exact entry. The route does not infer from titles and does not trigger remote acquisition. Future data products may extend this catalog-driven surface under a new contract version.',
+        'x-mx-allowed-query-fields': mobileCommerceQueryParameters
+          .filter(({ name }) => name !== 'catalogEntryId')
+          .map(({ name }) => name),
+        parameters: [
+          {
+            name: 'id', in: 'path', required: true,
+            description: 'Exact active source-catalog UUID returned by the list route.',
+            schema: { type: 'string', format: 'uuid' },
+          },
+          ...mobileCommerceQueryParameters.filter(({ name }) => name !== 'catalogEntryId'),
+        ],
+        responses: {
+          200: {
+            description: 'One catalog entry and its stored mobile-commerce data page.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/SourceCatalogItemsEnvelope' } } },
+          },
+          ...publicErrors,
         },
       },
     },
@@ -1863,6 +1956,149 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             },
           },
           requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      MobileCommerceMarketplace: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'sourceValue', 'mappingStatus', 'catalogEntryId', 'catalogSourceKey',
+          'catalogRevision', 'canonicalName', 'majorCategory', 'scenarios', 'regions',
+        ],
+        properties: {
+          sourceValue: { type: ['string', 'null'] },
+          mappingStatus: { type: 'string', enum: ['mapped', 'unmapped'] },
+          catalogEntryId: { type: ['string', 'null'], format: 'uuid' },
+          catalogSourceKey: { type: ['string', 'null'] },
+          catalogRevision: { type: ['integer', 'null'], minimum: 1 },
+          canonicalName: { type: ['string', 'null'] },
+          majorCategory: { type: ['string', 'null'] },
+          scenarios: { type: 'array', items: { type: 'string' } },
+          regions: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      MobileCommerceItem: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'captureId', 'dataVersion', 'marketplace', 'task', 'product', 'shop', 'signals', 'collectedAt'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          captureId: { type: ['string', 'null'] },
+          dataVersion: { type: 'string' },
+          marketplace: { $ref: '#/components/schemas/MobileCommerceMarketplace' },
+          task: {
+            type: 'object', additionalProperties: false,
+            required: ['id', 'keyword', 'sourceBrandLabel'],
+            properties: {
+              id: { type: ['string', 'null'] },
+              keyword: { type: ['string', 'null'] },
+              sourceBrandLabel: { type: ['string', 'null'] },
+            },
+          },
+          product: {
+            type: 'object', additionalProperties: false,
+            required: ['goodsId', 'title', 'price', 'resolution'],
+            properties: {
+              goodsId: { type: ['string', 'null'] },
+              title: { type: ['string', 'null'] },
+              price: { type: ['string', 'null'] },
+              resolution: { type: 'string', enum: ['source-goods-id', 'capture-only'] },
+            },
+          },
+          shop: {
+            type: 'object', additionalProperties: false,
+            required: ['id', 'name', 'level', 'fans', 'reputation'],
+            properties: Object.fromEntries(
+              ['id', 'name', 'level', 'fans', 'reputation']
+                .map((field) => [field, { type: ['string', 'null'] }]),
+            ),
+          },
+          signals: {
+            type: 'object', additionalProperties: false,
+            required: ['sales', 'shipFrom', 'commentCount', 'goodRate', 'tagsText'],
+            properties: Object.fromEntries(
+              ['sales', 'shipFrom', 'commentCount', 'goodRate', 'tagsText']
+                .map((field) => [field, { type: ['string', 'null'] }]),
+            ),
+          },
+          collectedAt: { type: ['string', 'null'], format: 'date-time' },
+        },
+      },
+      MobileCommercePage: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['contractVersion', 'sourceMode', 'acquisition', 'scope', 'filters', 'items', 'pageInfo'],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.mobile-commerce-items.v1' },
+          sourceMode: { type: 'string', const: 'stored' },
+          acquisition: {
+            type: 'object', additionalProperties: false,
+            required: ['remoteFetchAvailable', 'remoteFetchStatus', 'executionPlane', 'hubRole', 'plannedMode'],
+            properties: {
+              remoteFetchAvailable: { type: 'boolean', const: false },
+              remoteFetchStatus: { type: 'string', const: 'reserved' },
+              executionPlane: { type: 'string', const: 'external-mobile-collector' },
+              hubRole: { type: 'string', const: 'asynchronous-trigger-and-data-api' },
+              plannedMode: { type: 'string', const: 'asynchronous-command' },
+            },
+          },
+          scope: {
+            type: 'object', additionalProperties: false,
+            required: ['authorizationPlatform', 'datasetId', 'objectType'],
+            properties: {
+              authorizationPlatform: { type: 'string', const: 'mobile_commerce' },
+              datasetId: { type: 'string', const: 'mobile-commerce.collected-items.v1' },
+              objectType: { type: 'string', const: 'commerce_capture' },
+            },
+          },
+          filters: {
+            type: 'object', additionalProperties: false,
+            required: ['sourcePlatform', 'catalogEntryId', 'keyword', 'brand', 'taskId', 'from', 'to'],
+            properties: {
+              sourcePlatform: { type: ['string', 'null'] },
+              catalogEntryId: { type: ['string', 'null'], format: 'uuid' },
+              keyword: { type: ['string', 'null'] },
+              brand: { type: ['string', 'null'] },
+              taskId: { type: ['string', 'null'] },
+              from: { type: ['string', 'null'], format: 'date-time' },
+              to: { type: ['string', 'null'], format: 'date-time' },
+            },
+          },
+          items: { type: 'array', maxItems: 100, items: { $ref: '#/components/schemas/MobileCommerceItem' } },
+          pageInfo: {
+            type: 'object', additionalProperties: false,
+            required: ['returnedCount', 'hasMore', 'nextCursor'],
+            properties: {
+              returnedCount: { type: 'integer', minimum: 0, maximum: 100 },
+              hasMore: { type: 'boolean' },
+              nextCursor: { type: ['string', 'null'], maxLength: 2048 },
+            },
+          },
+        },
+      },
+      MobileCommercePageEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: { $ref: '#/components/schemas/MobileCommercePage' },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      SourceCatalogItemsEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object', additionalProperties: false,
+            required: ['contractVersion', 'catalogEntry', 'dataProductKey', 'page'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.source-catalog-items.v1' },
+              catalogEntry: { $ref: '#/components/schemas/SourceCatalogEntry' },
+              dataProductKey: { type: 'string', const: 'mobile-commerce-items' },
+              page: { $ref: '#/components/schemas/MobileCommercePage' },
+            },
+          },
+          requestId: { type: 'string', minLength: 1 },
         },
       },
       SourceCatalogEntry: {
@@ -2982,6 +3218,16 @@ curl -sS -G "$HUB_URL/api/v1/data/source-catalog" \
 curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   | jq '{contractVersion: .data.contractVersion, item: .data.item, requestId}'</code></pre>
+
+    <h3>6. 从目录条目读取已归类数据</h3>
+    <div class="notice">手机采集商品记录使用 <code>mobile_commerce</code> 作为授权域，真实平台通过每行的 reviewed source-catalog UUID 分类。按目录读取同时要求 <code>source_catalog</code> 与 <code>mobile_commerce</code> 两个平台授权；目录筛选不能扩大授权。</div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog/{id}/items</code></div><p>P1 返回该 active 目录条目下的 <code>mobile-commerce-items</code> stored 数据产品。支持 <code>keyword</code>、<code>brand</code>、<code>taskId</code>、<code>sourcePlatform</code>、<code>from</code>、<code>to</code>、<code>pageSize</code> 与签名 <code>cursor</code>；路径已经提供 <code>catalogEntryId</code>，query 不再接受它。unknown 平台保留为 unmapped，不靠标题猜目录。</p></div>
+    <pre><code>curl -sS -G "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID/items" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'refresh=stored' \
+  --data-urlencode 'pageSize=50' | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/mobile-commerce/items</code></div><p>直接读取同一安全数据产品，并可用 <code>catalogEntryId</code> 或 raw <code>sourcePlatform</code> 精确收窄。记录进入 canonical 后沿普通 outbox 异步投影到 Elasticsearch；也可通过 <code>POST /api/v1/data/canonical/search</code> 以 <code>platform=mobile_commerce</code>、<code>datasetId=mobile-commerce.collected-items.v1</code>、<code>objectType=commerce_capture</code> 检索。</p></div>
+    <div class="notice"><code>refresh</code> 当前只支持 <code>stored</code>。未来“获取最新”是发往外部手机采集执行器的异步命令；采集运行在另一台机器/手机平台，Hub 只负责触发、状态、清洗、索引和数据接口，不在 Hub 进程中运行平台抓取。</div>
 
     <h3>数据源目录错误码</h3>
     <table><thead><tr><th>HTTP</th><th>error.code</th><th>调用方处理</th></tr></thead><tbody>

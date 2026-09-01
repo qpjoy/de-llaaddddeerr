@@ -29,6 +29,7 @@ import {
   normalizePublicSourceCatalogMetadataQuery,
   normalizePublicSourceCatalogQuery,
   publicSourceCatalogDetail,
+  publicSourceCatalogItem,
   publicSourceCatalogMetadata,
   publicSourceCatalogPage,
   SOURCE_CATALOG_PLATFORM,
@@ -53,6 +54,11 @@ import {
   normalizePublicOpinionDiagnosticsBrowseQuery,
   publicOpinionDiagnosticsBrowseResponse,
 } from './data/public-opinion-diagnostics.mjs'
+import {
+  MOBILE_COMMERCE_PLATFORM,
+  normalizeMobileCommerceQuery,
+  publicMobileCommercePage,
+} from './data/mobile-commerce.mjs'
 import {
   adminPublicOpinionCoverageResponse,
   adminPublicOpinionBrowseItemResponse,
@@ -496,7 +502,12 @@ export class HubService {
   async capabilities(context) {
     const grants = await this.store.listGrants(context.consumer.id)
     const canonicalGrants = [...new Set(grants.map((grant) => canonicalPlatform(grant)))]
-    const localStoredPlatforms = new Set(['telegram', PUBLIC_OPINION_PLATFORM, SOURCE_CATALOG_PLATFORM])
+    const localStoredPlatforms = new Set([
+      'telegram',
+      PUBLIC_OPINION_PLATFORM,
+      SOURCE_CATALOG_PLATFORM,
+      MOBILE_COMMERCE_PLATFORM,
+    ])
     const nightAllGrants = canonicalGrants.filter((platform) => !localStoredPlatforms.has(platform))
     const payload = nightAllGrants.length > 0
       ? await this.adapter.capabilities(nightAllGrants)
@@ -587,7 +598,35 @@ export class HubService {
           ready: true,
           source: 'hub',
           servingMode: 'stored',
-          capabilities: ['catalog_entries', 'catalog_metadata', 'catalog_detail', 'filtered_browse'],
+          capabilities: [
+            'catalog_entries',
+            'catalog_metadata',
+            'catalog_detail',
+            'filtered_browse',
+            ...(canonicalGrants.includes(MOBILE_COMMERCE_PLATFORM)
+              && typeof this.store.listMobileCommerceItems === 'function'
+              ? ['catalog_data_items']
+              : []),
+          ],
+        })
+      }
+    }
+    if (
+      canonicalGrants.includes(MOBILE_COMMERCE_PLATFORM)
+      && typeof this.store.listMobileCommerceItems === 'function'
+    ) {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === MOBILE_COMMERCE_PLATFORM)) {
+        const source = typeof this.store.getExternalSource === 'function'
+          ? await this.store.getExternalSource('mobile-commerce-collected-items')
+          : null
+        platforms.push({
+          platform: MOBILE_COMMERCE_PLATFORM,
+          ready: source?.status === 'active',
+          source: 'hub',
+          servingMode: 'stored',
+          capabilities: ['commerce_items', 'marketplace_filter', 'catalog_filter', 'task_filter', 'stored_refresh'],
+          remoteFetch: { available: false, status: 'reserved' },
         })
       }
     }
@@ -1113,6 +1152,57 @@ export class HubService {
     })
   }
 
+  async sourceCatalogItems(context, idInput, queryInput = {}) {
+    if (
+      typeof this.store.getSourceCatalogEntry !== 'function'
+      || typeof this.store.listMobileCommerceItems !== 'function'
+    ) {
+      throw new AppError(503, 'stored_data_unavailable', 'Source-catalog data queries require the PostgreSQL product store')
+    }
+    if (Object.prototype.hasOwnProperty.call(queryInput, 'catalogEntryId')) {
+      throw new AppError(400, 'unsupported_fields', 'catalogEntryId is supplied by the source-catalog path')
+    }
+    await this.#storedPlatformPolicy(context, SOURCE_CATALOG_PLATFORM, 'Source catalog')
+    const policy = await this.#storedPlatformPolicy(context, MOBILE_COMMERCE_PLATFORM, 'Mobile commerce')
+    const id = normalizePublicSourceCatalogId(idInput)
+    const query = normalizeMobileCommerceQuery(
+      { ...queryInput, catalogEntryId: id },
+      policy.maxPageSize,
+      this.apiKeyPepper,
+    )
+    return this.#meterStoredRead(context, MOBILE_COMMERCE_PLATFORM, policy, {
+      path: `/api/v1/data/source-catalog/${id}/items`,
+      fingerprintBody: {
+        catalogEntryId: id,
+        ...query.filters,
+        refresh: query.refresh,
+        pageSize: query.pageSize,
+        cursor: query.cursorToken,
+      },
+      operation: async () => {
+        const entry = await this.store.getSourceCatalogEntry(id)
+        if (!entry || entry.archivedAt) {
+          throw new AppError(404, 'source_catalog_entry_not_found', 'Source catalog entry was not found')
+        }
+        const page = publicMobileCommercePage(
+          await this.store.listMobileCommerceItems({
+            ...query.filters,
+            pageSize: query.pageSize,
+            cursor: query.cursor,
+          }),
+          query,
+          this.apiKeyPepper,
+        )
+        return {
+          contractVersion: 'mx-insight-hub.data-products.source-catalog-items.v1',
+          catalogEntry: publicSourceCatalogItem(entry),
+          dataProductKey: 'mobile-commerce-items',
+          page,
+        }
+      },
+    })
+  }
+
   async telegramEntities(context, queryInput) {
     if (!this.searchQueries?.searchAuthors || !this.searchQueries?.searchTelegramChats) {
       throw new AppError(503, 'stored_search_unavailable', 'Telegram entity search requires the PostgreSQL search layer')
@@ -1213,6 +1303,32 @@ export class HubService {
       path: '/api/v1/data/public-opinion/regions',
       fingerprintBody: query,
       operation: async () => publicOpinionRegions(query),
+    })
+  }
+
+  async mobileCommerceItems(context, queryInput) {
+    if (typeof this.store.listMobileCommerceItems !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Stored mobile-commerce data requires the PostgreSQL store')
+    }
+    const policy = await this.#storedPlatformPolicy(context, MOBILE_COMMERCE_PLATFORM, 'Mobile commerce')
+    const query = normalizeMobileCommerceQuery(queryInput, policy.maxPageSize, this.apiKeyPepper)
+    return this.#meterStoredRead(context, MOBILE_COMMERCE_PLATFORM, policy, {
+      path: '/api/v1/data/mobile-commerce/items',
+      fingerprintBody: {
+        ...query.filters,
+        refresh: query.refresh,
+        pageSize: query.pageSize,
+        cursor: query.cursorToken,
+      },
+      operation: async () => publicMobileCommercePage(
+        await this.store.listMobileCommerceItems({
+          ...query.filters,
+          pageSize: query.pageSize,
+          cursor: query.cursor,
+        }),
+        query,
+        this.apiKeyPepper,
+      ),
     })
   }
 
@@ -1865,6 +1981,7 @@ export class HubService {
         unitsActual: Math.max(
           1,
           payload.pageInfo?.returnedCount
+            ?? payload.page?.pageInfo?.returnedCount
             ?? payload.storedWindow?.returnedCount
             ?? payload.items?.length
             ?? payload.regions?.length

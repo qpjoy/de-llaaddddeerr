@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import { test } from 'node:test'
 import { createApp } from '../../server/app.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
+import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 
 const ADMIN_TOKEN = 'source-catalog-admin-token-with-enough-length'
 const quiet = { error() {} }
@@ -822,6 +823,185 @@ test('source catalog related data matches canonical names and aliases without ex
     assert.equal(store.canonicalRecords.size, 2)
     assert.equal(store.recordChunks.size, 2)
     assert.equal(store.externalSources.size, 1)
+  })
+})
+
+test('MemoryStore related data follows reviewed mobile marketplace entry IDs instead of source labels', async () => {
+  const store = new MemoryStore()
+  const entries = await store.listSourceCatalogEntries()
+  const target = entries.find((entry) => entry.canonicalName === '快手小店')
+  const other = entries.find((entry) => entry.canonicalName === '淘宝')
+  assert.ok(target)
+  assert.ok(other)
+
+  const activeId = randomUUID()
+  const deletedId = randomUUID()
+  const wrongEntryId = randomUUID()
+  store.canonicalRecords.set(activeId, {
+    id: activeId,
+    datasetId: 'mobile-commerce.collected-items.v1',
+    platform: 'mobile_commerce',
+    objectType: 'commerce_capture',
+    contentType: 'commerce_item',
+    externalId: 'capture-active',
+    title: '与目录名称无关的商品标题',
+    currentRevision: 2,
+    eventTime: '2026-08-27T02:00:00.000Z',
+    collectedAt: '2026-08-27T02:01:00.000Z',
+    deletedAt: null,
+    stableFields: {
+      commerce: {
+        marketplace: {
+          sourceValue: '任意手机端来源标签',
+          entryId: target.id,
+        },
+      },
+    },
+  })
+  store.canonicalRecords.set(deletedId, {
+    id: deletedId,
+    datasetId: 'mobile-commerce.collected-items.v1',
+    platform: 'mobile_commerce',
+    objectType: 'commerce_capture',
+    contentType: 'commerce_item',
+    externalId: 'capture-deleted',
+    title: '已删除但仍属于治理统计的商品',
+    currentRevision: 1,
+    eventTime: '2026-08-27T01:00:00.000Z',
+    collectedAt: '2026-08-27T01:01:00.000Z',
+    deletedAt: '2026-08-27T03:00:00.000Z',
+    stable_fields: {
+      commerce: {
+        marketplace: {
+          sourceValue: '另一个手机端来源标签',
+          entryId: target.id,
+        },
+      },
+    },
+  })
+  store.canonicalRecords.set(wrongEntryId, {
+    id: wrongEntryId,
+    datasetId: 'mobile-commerce.collected-items.v1',
+    platform: 'mobile_commerce',
+    objectType: 'commerce_capture',
+    contentType: 'commerce_item',
+    externalId: 'capture-other-entry',
+    title: `标题刻意包含 ${target.canonicalName}`,
+    currentRevision: 1,
+    eventTime: '2026-08-27T04:00:00.000Z',
+    collectedAt: '2026-08-27T04:01:00.000Z',
+    deletedAt: null,
+    stableFields: {
+      commerce: {
+        marketplace: {
+          sourceValue: target.canonicalName,
+          entryId: other.id,
+        },
+      },
+    },
+  })
+  store.recordChunks.set(randomUUID(), {
+    id: randomUUID(),
+    recordId: activeId,
+    embeddedAt: '2026-08-27T02:02:00.000Z',
+    projectedAt: '2026-08-27T02:03:00.000Z',
+  })
+  await store.createExternalSource({
+    sourceKey: 'mobile-commerce-collected-items',
+    displayName: '手机多平台采集数据',
+    sourceKind: 'database',
+    datasetId: 'mobile-commerce.collected-items.v1',
+    platform: 'mobile_commerce',
+    objectType: 'commerce_capture',
+    status: 'active',
+    connection: {
+      schema: 'public',
+      table: 'mb_collected_items',
+      cursorColumn: 'collected_at',
+      idColumn: 'id',
+      password: 'must-never-leak',
+    },
+    syncIntervalSeconds: 300,
+  })
+
+  const related = await store.sourceCatalogRelatedData(target)
+  assert.deepEqual(related.stats, {
+    datasetCount: 1,
+    externalSourceCount: 1,
+    recordCount: 2,
+    activeRecordCount: 1,
+    deletedRecordCount: 1,
+    revisionCount: 3,
+    chunkCount: 1,
+    embeddedChunkCount: 1,
+    projectedChunkCount: 1,
+  })
+  assert.deepEqual(
+    related.recentRecords.map((record) => record.id),
+    [activeId, deletedId],
+  )
+  assert.equal(related.recentRecords.some((record) => record.id === wrongEntryId), false)
+  assert.equal(related.externalSources[0].sourceKey, 'mobile-commerce-collected-items')
+  assert.deepEqual(related.datasets[0].platforms, ['mobile_commerce'])
+  assert.equal(JSON.stringify(related).includes('must-never-leak'), false)
+  assert.equal(JSON.stringify(related).includes('stableFields'), false)
+  assert.equal(JSON.stringify(related).includes('stable_fields'), false)
+
+  store.canonicalRecords.get(activeId).deletedAt = '2026-08-27T05:00:00.000Z'
+  const deletedOnly = await store.sourceCatalogRelatedData(target)
+  assert.equal(deletedOnly.stats.recordCount, 2)
+  assert.equal(deletedOnly.stats.activeRecordCount, 0)
+  assert.equal(deletedOnly.stats.externalSourceCount, 0)
+  assert.deepEqual(deletedOnly.externalSources, [])
+})
+
+test('Postgres related-data queries bind the reviewed marketplace entry ID across records, sources, and chunks', async () => {
+  const entry = {
+    id: randomUUID(),
+    canonicalName: '快手小店',
+    aliases: ['Kuaishou Shop'],
+  }
+  const calls = []
+  const store = new PostgresStore({
+    query: async (sql, values) => {
+      calls.push({ sql, values })
+      if (sql.includes('count(*)::integer AS chunk_count')) {
+        return {
+          rows: [{
+            chunk_count: 0,
+            embedded_chunk_count: 0,
+            projected_chunk_count: 0,
+            records_with_chunks: 0,
+          }],
+        }
+      }
+      return { rows: [] }
+    },
+  })
+
+  const related = await store.sourceCatalogRelatedData(entry)
+  assert.equal(calls.length, 4)
+  for (const { sql, values } of calls) {
+    assert.match(sql, /stable_fields #>> '\{commerce,marketplace,entryId\}' = \$2/u)
+    assert.deepEqual(values.slice(0, 2), [
+      ['快手小店', 'kuaishou shop'],
+      entry.id,
+    ])
+  }
+  const sourceQuery = calls.find(({ sql }) => sql.includes('FROM catalog.external_sources'))
+  assert.ok(sourceQuery)
+  assert.match(sourceQuery.sql, /source_key = 'mobile-commerce-collected-items'/u)
+  assert.match(sourceQuery.sql, /record\.deleted_at IS NULL/u)
+  assert.deepEqual(related.stats, {
+    datasetCount: 0,
+    externalSourceCount: 0,
+    recordCount: 0,
+    activeRecordCount: 0,
+    deletedRecordCount: 0,
+    revisionCount: 0,
+    chunkCount: 0,
+    embeddedChunkCount: 0,
+    projectedChunkCount: 0,
   })
 })
 

@@ -39,6 +39,40 @@ const SSL_MODE_OPTIONS = [
   { value: 'verify-full', label: 'verify-full' },
 ]
 
+const INLINE_DATABASE_CONNECTION = ''
+
+function databaseConnectionOptions(value) {
+  return [
+    {
+      value: INLINE_DATABASE_CONNECTION,
+      label: '任务内独立填写',
+      description: '在当前任务保存完整 PostgreSQL 连接',
+    },
+    ...asList(value).map((connection) => ({
+      value: connection.id,
+      label: connection.displayName || connection.connectionKey,
+      description: `${connection.host || '—'}:${connection.port || 5432} / ${connection.database || '—'}`,
+      disabled: connection.engine && connection.engine !== 'postgresql',
+    })),
+  ]
+}
+
+function DatabaseConnectionField({ value, onChange, state, className = 'mih-form__wide' }) {
+  return (
+    <DropdownField
+      label="数据库连接"
+      value={value || INLINE_DATABASE_CONNECTION}
+      onChange={onChange}
+      options={databaseConnectionOptions(state?.data)}
+      disabled={state?.loading && !state?.data}
+      className={className}
+      hint={state?.error
+        ? '共享配置暂不可用；仍可选择任务内独立填写。'
+        : '引用“数据库配置”中的共享连接，或为当前任务完整填写。'}
+    />
+  )
+}
+
 const PROVIDER_AUTH_OPTIONS = [
   { value: 'bearer', label: 'Bearer Token' },
   { value: 'none', label: '无需认证' },
@@ -218,11 +252,16 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
   const telegramSqlitePipeline = useRemoteData(loadTelegramSqlitePipeline, onUnauthorized)
   const loadProvinceOpinionPipeline = useCallback(() => adminApi.provinceOpinionPipeline(token), [token])
   const provinceOpinionPipeline = useRemoteData(loadProvinceOpinionPipeline, onUnauthorized)
+  const loadMobileCommercePipeline = useCallback(() => adminApi.mobileCommercePipeline(token), [token])
+  const mobileCommercePipeline = useRemoteData(loadMobileCommercePipeline, onUnauthorized)
+  const loadDatabaseConnections = useCallback(() => adminApi.databaseConnections(token), [token])
+  const databaseConnections = useRemoteData(loadDatabaseConnections, onUnauthorized)
   const [selected, setSelected] = useState(null)
   const [creating, setCreating] = useState(false)
   const [telegramOpen, setTelegramOpen] = useState(false)
   const [telegramSqliteOpen, setTelegramSqliteOpen] = useState(false)
   const [provinceOpinionOpen, setProvinceOpinionOpen] = useState(false)
+  const [mobileCommerceOpen, setMobileCommerceOpen] = useState(false)
 
   if (state.loading && !state.data) return <LoadingState label="正在加载外部数据源" />
   if (state.error && !state.data) return <ErrorState error={state.error} onRetry={state.refresh} />
@@ -245,8 +284,8 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
   return (
     <>
       <PageHeading
-        eyebrow="EXTERNAL SOURCES / MAPPING / IMPORT"
-        title="外部数据源"
+        eyebrow="DATA CLEANING CENTER / TASK PLANS"
+        title="清洗任务计划"
         description="表格、文本与异构库接入。原始副本永久保留，未映射字段进 extensions，映射版本化且必须批准后才生效。"
         loading={state.loading}
         onRefresh={state.refresh}
@@ -288,11 +327,19 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         onRetry={provinceOpinionPipeline.refresh}
       />
 
+      <MobileCommercePipelineCard
+        pipeline={mobileCommercePipeline.data}
+        loading={mobileCommercePipeline.loading}
+        error={mobileCommercePipeline.error}
+        onOpen={() => setMobileCommerceOpen(true)}
+        onRetry={mobileCommercePipeline.refresh}
+      />
+
       {genericSources.length === 0 ? (
         <EmptyState
           icon={Database}
           title="还没有注册通用数据源"
-          description="Telegram monitor、SQLite API 与全国省份舆情已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
+          description="Telegram monitor、SQLite API、全国省份舆情与手机电商采集已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
         />
       ) : (
         <Panel title="通用数据源" subtitle="每个源有独立的 dataset，不会与固定业务清洗任务混合">
@@ -337,6 +384,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
           notify={notify}
           onClose={() => setCreating(false)}
           onCreated={() => { setCreating(false); state.refresh() }}
+          databaseConnections={databaseConnections}
         />
       ) : null}
       {telegramOpen && telegramPipeline.data ? (
@@ -354,6 +402,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
             state.refresh()
           }}
           onOpenAdvanced={openTelegramTaskDetail}
+          databaseConnections={databaseConnections}
         />
       ) : null}
       {telegramSqliteOpen && telegramSqlitePipeline.data ? (
@@ -387,6 +436,24 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
             provinceOpinionPipeline.refresh()
             state.refresh()
           }}
+          databaseConnections={databaseConnections}
+        />
+      ) : null}
+      {mobileCommerceOpen && mobileCommercePipeline.data ? (
+        <MobileCommercePipelineModal
+          token={token}
+          pipeline={mobileCommercePipeline.data}
+          loading={mobileCommercePipeline.loading}
+          onUnauthorized={onUnauthorized}
+          notify={notify}
+          onClose={() => setMobileCommerceOpen(false)}
+          onRefresh={mobileCommercePipeline.refresh}
+          onPipelineChanged={(updated) => {
+            if (updated?.task) mobileCommercePipeline.setData(updated)
+            mobileCommercePipeline.refresh()
+            state.refresh()
+          }}
+          databaseConnections={databaseConnections}
         />
       ) : null}
       {selected ? (
@@ -397,6 +464,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
           notify={notify}
           onClose={() => setSelected(null)}
           onSourceChanged={(source) => { setSelected(source); state.refresh() }}
+          databaseConnections={databaseConnections}
         />
       ) : null}
     </>
@@ -409,6 +477,7 @@ const PIPELINE_MANAGED_SOURCE_KEYS = new Set([
   'telegram-sqlite-api-chats',
   'telegram-sqlite-api-messages',
   'province-opinion-results',
+  'mobile-commerce-collected-items',
 ])
 
 const TELEGRAM_TASK_META = {
@@ -762,8 +831,370 @@ function ProvinceOpinionPipelineCard({ pipeline, loading, error, onOpen, onRetry
   )
 }
 
-function ProvinceOpinionPipelineModal({
+const MOBILE_COMMERCE_FIELDS = [
+  'id',
+  'platform',
+  'task_run_id',
+  'task_id',
+  'keyword',
+  'brand',
+  'title',
+  'product_link',
+  'shop_name',
+  'shop_link',
+  'goods_id',
+  'shop_id',
+  'price',
+  'sales',
+  'ship_from',
+  'shop_level',
+  'shop_fans',
+  'shop_reputation',
+  'comment_count',
+  'good_rate',
+  'tags',
+  'collected_at',
+  'metadata_json',
+  'device_serial',
+  'is_reported',
+]
+
+function mobileCommerceRunning(pipeline) {
+  return ['running', 'draining'].includes(String(
+    pipeline?.task?.cursor?.status || pipeline?.task?.latestRun?.status || '',
+  ).toLowerCase())
+}
+
+function mobileCommerceStatus(pipeline) {
+  if (telegramTaskStuck(pipeline?.task)) return { status: 'down', label: '任务需恢复' }
+  if (mobileCommerceRunning(pipeline)) return { status: 'warning', label: '正在运行' }
+  if (pipeline?.status === 'active') return { status: 'active', label: '已启用' }
+  return { status: 'disabled', label: pipeline?.configured ? '已暂停' : '待配置' }
+}
+
+function mobileCommerceMappingLabel(pipeline) {
+  const mapping = pipeline?.mapping || pipeline?.task?.mapping || {}
+  const activeVersion = mapping.version || mapping.activeVersion || pipeline?.task?.activeMapping?.version
+  if (activeVersion) return `已批准 v${activeVersion}`
+  if (mapping.builtInAvailable && mapping.builtInVersion) return `内置 v${mapping.builtInVersion} 已准备`
+  return mapping.status || '待审核'
+}
+
+function MobileCommercePipelineCard({ pipeline, loading, error, onOpen, onRetry }) {
+  const status = mobileCommerceStatus(pipeline)
+  const task = pipeline?.task || {}
+  const latestRunAt = task.latestRun?.finishedAt || task.latestRun?.startedAt || task.latestRun?.createdAt
+  const sourceConnection = pipeline?.databaseConnection || pipeline?.connection
+
+  return (
+    <section className="qp-panel mih-telegram-card" aria-labelledby="mobile-commerce-pipeline-title">
+      <div className="mih-telegram-card__identity">
+        <span className="mih-telegram-card__icon"><Database size={22} weight="duotone" aria-hidden="true" /></span>
+        <div>
+          <p className="qp-kicker">BUSINESS PIPELINE / MOBILE COMMERCE</p>
+          <h2 id="mobile-commerce-pipeline-title">手机电商采集清洗任务</h2>
+          <p>固定读取 mb_collected_items，按平台目录分类并映射到 canonical 数据中心；当前仅从已存数据库读取。</p>
+        </div>
+      </div>
+      {error && !pipeline ? (
+        <div className="mih-telegram-card__error"><ErrorState error={error} onRetry={onRetry} /></div>
+      ) : (
+        <>
+          <dl className="mih-telegram-card__facts">
+            <div><dt>运行状态</dt><dd><StatusBadge status={status.status} label={status.label} /></dd></div>
+            <div><dt>源库</dt><dd><code>{pipeline?.configured ? `${sourceConnection?.host || '共享数据库配置'}:${sourceConnection?.port || 5432}` : '尚未配置'}</code></dd></div>
+            <div><dt>固定表</dt><dd><code>public.mb_collected_items</code></dd></div>
+            <div><dt>Dataset</dt><dd><code>mobile-commerce.collected-items.v1</code></dd></div>
+            <div><dt>字段映射</dt><dd>{mobileCommerceMappingLabel(pipeline)}</dd></div>
+            <div><dt>同步周期</dt><dd>{formatNumber(pipeline?.syncIntervalSeconds || 300)} 秒</dd></div>
+            <div><dt>读取模式</dt><dd><code>stored-only</code></dd></div>
+            <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
+          </dl>
+          <div className="mih-telegram-card__actions">
+            <span className="mih-telegram-card__alert"><Warning size={15} />远端主动拉取接口未接入</span>
+            <button className="qp-button qp-button--ghost" type="button" disabled={loading || !pipeline} onClick={onOpen}>
+              {loading ? '正在刷新…' : '打开任务控制'}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+function MobileCommercePipelineModal({
   token, pipeline, loading, onUnauthorized, notify, onClose, onRefresh, onPipelineChanged,
+  databaseConnections,
+}) {
+  const task = pipeline.task || {}
+  const connection = pipeline.connection || {}
+  const configured = Boolean(pipeline.configured)
+  const running = mobileCommerceRunning(pipeline)
+  const status = mobileCommerceStatus(pipeline)
+  const stuck = telegramTaskStuck(task) || ['failed', 'blocked', 'overdue'].includes(task.scheduling?.status)
+  const mapping = pipeline.mapping || task.mapping || task.activeMapping || {}
+  const catalogClassification = pipeline.catalogClassification || task.catalogClassification || {}
+  const writerContract = pipeline.writerContract || {}
+  const writerContractVersion = writerContract.contractVersion || writerContract.version
+  const writerContractDigest = writerContract.contractDigest || writerContract.digest
+  const latestWriterAttestation = pipeline.contractAttestation || writerContract.latestAttestation || null
+  const writerContractCurrent = Boolean(
+    latestWriterAttestation
+    && latestWriterAttestation.confirmed !== false
+    && latestWriterAttestation.contractVersion === writerContractVersion
+    && latestWriterAttestation.contractDigest === writerContractDigest,
+  )
+  const [form, setForm] = useState(() => ({
+    databaseConnectionId: pipeline.databaseConnectionId || INLINE_DATABASE_CONNECTION,
+    host: connection.host || '',
+    port: String(connection.port || 5432),
+    database: connection.database || '',
+    username: connection.username || '',
+    password: connection.password || '',
+    sslMode: connection.sslMode || 'require',
+    syncIntervalSeconds: String(pipeline.syncIntervalSeconds || 300),
+  }))
+  const [busyAction, setBusyAction] = useState(null)
+  const [writerContractConfirmed, setWriterContractConfirmed] = useState(false)
+  const [resetConfirmation, setResetConfirmation] = useState('')
+  const configurationIssues = sqlitePipelineIssueMessages(pipeline.configurationIssues)
+  const mappingLabel = mobileCommerceMappingLabel(pipeline)
+  const agentMessage = pipeline.agent?.message || mapping.agentStudio?.message
+
+  useEffect(() => {
+    if (!running || loading) return undefined
+    const timer = window.setTimeout(onRefresh, 2_000)
+    return () => window.clearTimeout(timer)
+  }, [loading, onRefresh, running])
+
+  const mutate = async (action, request, successMessage) => {
+    setBusyAction(action)
+    try {
+      const updated = await request()
+      if (updated?.task || updated?.status) onPipelineChanged(updated)
+      else onRefresh()
+      notify?.(successMessage, 'success')
+      return updated
+    } catch (error) {
+      if (error?.status === 401) onUnauthorized?.(error)
+      notify?.(error.message, 'error')
+      return null
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  const save = (event) => {
+    event.preventDefault()
+    mutate(
+      'save',
+      () => adminApi.updateMobileCommercePipeline(token, {
+        ...(form.databaseConnectionId
+          ? { databaseConnectionId: form.databaseConnectionId }
+          : {
+              connection: {
+                host: form.host.trim(),
+                port: Number(form.port),
+                database: form.database.trim(),
+                username: form.username.trim(),
+                sslMode: form.sslMode,
+                ...(form.password ? { password: form.password } : {}),
+              },
+            }),
+        syncIntervalSeconds: Number(form.syncIntervalSeconds),
+      }),
+      '手机电商采集源库连接已验证并保存；任务仍保持暂停',
+    )
+  }
+
+  const changeStatus = (nextStatus) => mutate(
+    `status-${nextStatus}`,
+    () => adminApi.updateMobileCommercePipelineStatus(
+      token,
+      nextStatus,
+      nextStatus === 'active' ? {
+        confirmed: true,
+        contractVersion: writerContractVersion,
+        contractDigest: writerContractDigest,
+      } : null,
+    ),
+    nextStatus === 'active' ? '手机电商采集清洗任务已启用' : '已安全暂停手机电商采集清洗任务',
+  )
+
+  const runSync = () => mutate(
+    'sync',
+    () => adminApi.runMobileCommercePipeline(token, { batchSize: 500 }),
+    '手机电商采集同步已提交',
+  )
+
+  const resumeFailed = () => mutate(
+    'resume',
+    () => adminApi.resumeMobileCommercePipeline(token),
+    '任务已从原 checkpoint 恢复，未重放已提交数据',
+  )
+
+  const resetCheckpoint = (event) => {
+    event.preventDefault()
+    if (resetConfirmation !== 'mobile-commerce') return
+    mutate(
+      'reset',
+      async () => {
+        const updated = await adminApi.resetMobileCommercePipelineCheckpoint(token, {
+          confirmPipelineKey: resetConfirmation,
+        })
+        setResetConfirmation('')
+        return updated
+      },
+      '一次性全量对齐已准备；下次同步会从源表起点重新扫描',
+    )
+  }
+
+  return (
+    <Modal
+      title={pipeline.displayName || '手机电商采集清洗任务'}
+      description="固定 PostgreSQL 业务管线 · 手机端多商家平台采集结果 · 当前只读取 Hub 已配置数据库"
+      size="xlarge"
+      onClose={onClose}
+      footer={<button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭</button>}
+    >
+      <div className="mih-telegram-toolbar">
+        <div>
+          <StatusBadge status={status.status} label={status.label} />
+          <code>{pipeline.pipelineKey || 'mobile-commerce'}</code>
+          <span className="mih-telegram-toolbar__warning"><Warning size={15} />stored-only · 远端接口未接入</span>
+        </div>
+        <div className="mih-page-actions">
+          {pipeline.status === 'active' ? (
+            <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)} onClick={() => changeStatus('paused')}>
+              <Pause size={16} />{busyAction === 'status-paused' ? '安全暂停中…' : '安全暂停'}
+            </button>
+          ) : (
+            <button className="qp-button qp-button--ghost" type="button"
+              disabled={Boolean(busyAction) || !configured || running || !writerContractVersion || !writerContractDigest || !writerContractConfirmed}
+              title={!configured ? '先验证并保存源库连接' : running ? '等待当前批次收口' : !writerContractVersion || !writerContractDigest ? 'writer 合同尚未加载' : !writerContractConfirmed ? '请先确认源端 writer 合同' : ''}
+              onClick={() => changeStatus('active')}>
+              <Play size={16} />{busyAction === 'status-active' ? '正在启用…' : '启用任务'}
+            </button>
+          )}
+          {stuck ? <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction)} onClick={resumeFailed}>
+            <ArrowClockwise size={16} />{busyAction === 'resume' ? '正在恢复…' : '恢复卡住的任务'}
+          </button> : null}
+          <button className="qp-button" type="button" disabled={Boolean(busyAction) || pipeline.status !== 'active' || !writerContractCurrent}
+            title={!writerContractCurrent ? '当前 writer 合同尚未确认' : ''} onClick={runSync}>
+            <ArrowClockwise size={16} />{busyAction === 'sync' ? '正在提交…' : '立即同步'}
+          </button>
+        </div>
+      </div>
+
+      <Panel title="只读源库与调度" subtitle="固定表、游标、Dataset 与字段合同由业务版本管理；连接可引用公共配置或在任务内完整填写">
+        <form className="mih-form mih-form--grid mih-telegram-config" onSubmit={save}>
+          <DatabaseConnectionField value={form.databaseConnectionId} state={databaseConnections}
+            onChange={(databaseConnectionId) => setForm({ ...form, databaseConnectionId })} />
+          {!form.databaseConnectionId ? <>
+            <Field label="主机"><input className="qp-input" required value={form.host} placeholder="127.0.0.1" onChange={(event) => setForm({ ...form, host: event.target.value })} /></Field>
+            <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={form.port} onChange={(event) => setForm({ ...form, port: event.target.value })} /></Field>
+            <Field label="数据库"><input className="qp-input" required value={form.database} placeholder="night_all" onChange={(event) => setForm({ ...form, database: event.target.value })} /></Field>
+            <Field label="用户名"><input className="qp-input" required autoComplete="off" value={form.username} placeholder="mx_data" onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
+            <Field label="密码" hint={connection.passwordConfigured ? '已配置；留空保留当前密码' : '保存前会验证只读连接'}><input className="qp-input" type="password" required={!connection.passwordConfigured} autoComplete="off" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
+            <DropdownField label="SSL 模式" value={form.sslMode}
+              onChange={(sslMode) => setForm({ ...form, sslMode })} options={SSL_MODE_OPTIONS} />
+          </> : null}
+          <Field label="同步间隔（秒）" hint="60–86400；首次空 checkpoint 会完整扫描">
+            <input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds}
+              onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} />
+          </Field>
+          <div className="mih-page-actions mih-form__wide">
+            <button className="qp-button qp-button--ghost" type="submit" disabled={Boolean(busyAction) || pipeline.status !== 'paused' || running}>
+              {busyAction === 'save' ? '正在验证并保存…' : '验证并保存连接'}
+            </button>
+          </div>
+        </form>
+        {configurationIssues.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">
+          {configurationIssues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
+        </ul> : null}
+      </Panel>
+
+      <Panel title="源端 Writer 增量合同" subtitle="持续写入表的可靠增量依赖上游提交语义；每次启用都要确认当前版本并留下审计记录">
+        <ul className="mih-source-issues mih-source-issues--warning">
+          <li>{writerContract.summary?.mutation || '进入清洗计划的记录采用追加语义；若未来允许原地更新，必须先升级为可观察的 updated_at 或变更日志合同。'}</li>
+          <li>{writerContract.summary?.identity || 'id 是采集行的稳定唯一标识，不等同于商家平台商品主键。'}</li>
+          <li>{writerContract.summary?.watermark || 'collected_at 与 id 组成稳定、单调且不可回退的游标；提交后的记录不能落到 checkpoint 之前。'}</li>
+          <li>{writerContract.summary?.deletion || '源端应采用追加或可观察更新语义；不可观察的硬删除不会被增量游标捕获。'}</li>
+          <li>{writerContract.summary?.ordering || '同一 collected_at 下必须以 id 稳定排序，重试数据由 Canonical 幂等键去重。'}</li>
+        </ul>
+        {pipeline.status !== 'active' || !writerContractCurrent ? (
+          <label className="mih-agent-consent">
+            <input type="checkbox" checked={writerContractConfirmed} disabled={Boolean(busyAction) || running}
+              onChange={(event) => setWriterContractConfirmed(event.target.checked)} />
+            <span>
+              <strong>我已验证源端实现满足上述合同</strong>
+              <small>合同 {writerContractVersion || '待加载'} · 摘要 {writerContractDigest?.slice(0, 12) || '待加载'}… · 勾选后点击“启用任务”写入审计记录</small>
+            </span>
+          </label>
+        ) : (
+          <p className="mih-preview-provenance">当前 writer 合同已确认，自动调度与立即同步可用。</p>
+        )}
+      </Panel>
+
+      <Panel title="固定输入与 25 字段合同" subtitle="源表结构基本固定；Agent 可以提出规范字段与目录分类建议，但只有已审核映射会用于入库">
+        <div className="mih-telegram-capabilities">
+          <div><strong>固定输入</strong><p><code>public.mb_collected_items</code><br /><code>(collected_at, id)</code> 严格增量游标</p></div>
+          <div><strong>Canonical Dataset</strong><p><code>mobile-commerce.collected-items.v1</code><br /><code>mobile_commerce · commerce_capture</code></p></div>
+          <div><strong>字段映射</strong><p>{mappingLabel}<br />固定合同 {MOBILE_COMMERCE_FIELDS.length} 个字段；{agentMessage || 'Agent Studio 仅预留建议能力，不能自动覆盖已批准映射。'}</p></div>
+          <div><strong>按行目录分类</strong><p><code>platform</code> 逐行映射数据源目录中的抖音、快手、淘宝、闲鱼及其 alias；未知值标为 <code>unknown / unmapped</code> 并保留原值，不猜测归属。<br />{catalogClassification.mappingStatus || catalogClassification.status || catalogClassification.summary || '目录规则随业务版本审核。'}</p></div>
+          <div><strong>读取边界</strong><p><code>stored-only</code><br />当前只读取数据库持续新增记录，不会调用尚未实现的手机端远端接口。</p></div>
+          <div><strong>公开投影</strong><p><code>GET /api/v1/data/mobile-commerce/items</code><br />仅返回审核后的 allowlist 字段，不暴露 raw、设备或连接凭据。</p></div>
+          <div><strong>检索链路</strong><p>批准映射 → Canonical 入库 → 异步检索投影 → Elasticsearch 搜索；源表与 ES 均不是事实主库。</p></div>
+          <div><strong>未来“获取最新”</strong><p>由外部手机采集执行器抓取；Hub 只负责异步触发并读取其结果，不在本机抓取。远端接口当前未接入，也不会伪装成可用操作。</p></div>
+        </div>
+        <details className="mih-inline-details"><summary>查看固定 25 字段</summary>
+          <pre className="mih-code-block">{MOBILE_COMMERCE_FIELDS.join(', ')}</pre>
+        </details>
+      </Panel>
+
+      <Panel title="任务状态与映射证据" subtitle="运行证据来自持久化 task/import run；界面汇总不替代 durable lineage">
+        <div className="mih-telegram-task-grid">
+          <article className="mih-telegram-task">
+            <header><div><span className="mih-telegram-task__role">手机电商采集结果</span><code>{task.sourceKey || 'mobile-commerce-collected-items'}</code></div><StatusBadge status={task.cursor?.status || pipeline.status} /></header>
+            <dl className="mih-telegram-task__definition">
+              <div><dt>固定表</dt><dd><code>public.mb_collected_items</code></dd></div>
+              <div><dt>Dataset / 对象</dt><dd><code>mobile-commerce.collected-items.v1</code><small>mobile_commerce · commerce_capture</small></dd></div>
+              <div><dt>映射</dt><dd>{mappingLabel}<small>Agent 建议不能自动覆盖已批准版本</small></dd></div>
+              <div><dt>Checkpoint</dt><dd><code>{compactCheckpoint(task.checkpoint || task.cursor?.position)}</code></dd></div>
+              <div><dt>下次调度</dt><dd>{formatDate(task.nextDueAt)}<small>{task.scheduling?.message}</small></dd></div>
+            </dl>
+          </article>
+        </div>
+      </Panel>
+
+      <PipelineRunHistory token={token} tasks={[task]} onUnauthorized={onUnauthorized} labelOf={() => '手机电商采集结果'} />
+
+      {pipeline.status === 'paused' && !running ? (
+        <section className="mih-source-danger" aria-labelledby="mobile-commerce-checkpoint-reset-title">
+          <div className="mih-source-danger__copy">
+            <Warning size={24} weight="duotone" aria-hidden="true" />
+            <div>
+              <h3 id="mobile-commerce-checkpoint-reset-title">一次性全量对齐</h3>
+              <p>重置后下一次同步会从 mb_collected_items 起点重扫。Canonical 仍幂等去重，但会增加源库、PG 与索引负载。</p>
+            </div>
+          </div>
+          <form className="mih-source-danger__form" onSubmit={resetCheckpoint}>
+            <Field label="输入业务标识以确认" hint={<code>mobile-commerce</code>}>
+              <input className="qp-input" value={resetConfirmation} autoComplete="off" spellCheck="false"
+                onChange={(event) => setResetConfirmation(event.target.value)} />
+            </Field>
+            <button className="qp-button qp-button--danger" type="submit" disabled={Boolean(busyAction) || resetConfirmation !== 'mobile-commerce'}>
+              {busyAction === 'reset' ? '正在准备全量对齐…' : '准备一次性全量对齐'}
+            </button>
+          </form>
+        </section>
+      ) : null}
+    </Modal>
+  )
+}
+
+function ProvinceOpinionPipelineModal({
+  token, pipeline, loading, onUnauthorized, notify, onClose, onRefresh, onPipelineChanged, databaseConnections,
 }) {
   const configured = Boolean(pipeline.configured)
   const running = provinceOpinionRunning(pipeline)
@@ -779,6 +1210,7 @@ function ProvinceOpinionPipelineModal({
     && latestWriterAttestation.contractDigest === writerContract.digest,
   )
   const [form, setForm] = useState(() => ({
+    databaseConnectionId: pipeline.databaseConnectionId || INLINE_DATABASE_CONNECTION,
     host: connection.host || '',
     port: String(connection.port || 5432),
     database: connection.database || '',
@@ -837,14 +1269,18 @@ function ProvinceOpinionPipelineModal({
     mutate(
       'save',
       () => adminApi.updateProvinceOpinionPipeline(token, {
-        connection: {
-          host: form.host.trim(),
-          port: Number(form.port),
-          database: form.database.trim(),
-          username: form.username.trim(),
-          password: form.password,
-          sslMode: form.sslMode,
-        },
+        ...(form.databaseConnectionId
+          ? { databaseConnectionId: form.databaseConnectionId }
+          : {
+              connection: {
+                host: form.host.trim(),
+                port: Number(form.port),
+                database: form.database.trim(),
+                username: form.username.trim(),
+                password: form.password,
+                sslMode: form.sslMode,
+              },
+            }),
         syncIntervalSeconds: Number(form.syncIntervalSeconds),
       }),
       '全国省份舆情源库连接已验证并保存；任务仍保持暂停',
@@ -955,14 +1391,18 @@ function ProvinceOpinionPipelineModal({
 
       <Panel title="只读源库与调度" subtitle="只填写连接坐标；表名、Dataset、对象类型和游标字段由业务版本固定">
         <form className="mih-form mih-form--grid mih-telegram-config" onSubmit={save}>
-          <Field label="主机"><input className="qp-input" required value={form.host} placeholder="127.0.0.1" onChange={(event) => setForm({ ...form, host: event.target.value })} /></Field>
-          <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={form.port} onChange={(event) => setForm({ ...form, port: event.target.value })} /></Field>
-          <Field label="数据库"><input className="qp-input" required value={form.database} placeholder="night_all" onChange={(event) => setForm({ ...form, database: event.target.value })} /></Field>
-          <Field label="用户名"><input className="qp-input" required autoComplete="off" value={form.username} placeholder="mx_data" onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
-          <Field label="密码" hint="明文保存，仅 Admin Token 管理面可读取"><input className="qp-input" type="password" required autoComplete="off" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
-          <DropdownField label="SSL 模式" value={form.sslMode}
-            onChange={(sslMode) => setForm({ ...form, sslMode })}
-            options={[{ ...SSL_MODE_OPTIONS[0], label: 'disable（受控内网）' }, ...SSL_MODE_OPTIONS.slice(1)]} />
+          <DatabaseConnectionField value={form.databaseConnectionId} state={databaseConnections}
+            onChange={(databaseConnectionId) => setForm({ ...form, databaseConnectionId })} />
+          {!form.databaseConnectionId ? <>
+            <Field label="主机"><input className="qp-input" required value={form.host} placeholder="127.0.0.1" onChange={(event) => setForm({ ...form, host: event.target.value })} /></Field>
+            <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={form.port} onChange={(event) => setForm({ ...form, port: event.target.value })} /></Field>
+            <Field label="数据库"><input className="qp-input" required value={form.database} placeholder="night_all" onChange={(event) => setForm({ ...form, database: event.target.value })} /></Field>
+            <Field label="用户名"><input className="qp-input" required autoComplete="off" value={form.username} placeholder="mx_data" onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
+            <Field label="密码" hint="明文保存，仅 Admin Token 管理面可读取"><input className="qp-input" type="password" required autoComplete="off" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
+            <DropdownField label="SSL 模式" value={form.sslMode}
+              onChange={(sslMode) => setForm({ ...form, sslMode })}
+              options={[{ ...SSL_MODE_OPTIONS[0], label: 'disable（受控内网）' }, ...SSL_MODE_OPTIONS.slice(1)]} />
+          </> : null}
           <Field label="同步间隔（秒）" hint="60–86400；首次空 checkpoint 会完整扫描">
             <input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds}
               onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} />
@@ -1416,12 +1856,14 @@ function TelegramSqliteTaskCard({ task, progress, configured }) {
 
 function TelegramPipelineModal({
   token, pipeline, loading, onUnauthorized, notify, onClose, onRefresh, onPipelineChanged, onOpenAdvanced,
+  databaseConnections,
 }) {
   const initialConnection = pipeline.connection || pipeline.tasks?.[0]?.source?.connection || {}
   const configured = telegramPipelineConfigured(pipeline)
   const connectionConsistent = telegramConnectionConsistent(pipeline)
   const scheduleConsistent = telegramScheduleConsistent(pipeline)
   const [form, setForm] = useState(() => ({
+    databaseConnectionId: pipeline.databaseConnectionId || INLINE_DATABASE_CONNECTION,
     host: initialConnection.host || '',
     port: String(initialConnection.port || 5432),
     database: initialConnection.database || '',
@@ -1467,14 +1909,18 @@ function TelegramPipelineModal({
     mutate(
       'save',
       () => adminApi.updateTelegramMonitorPipeline(token, {
-        connection: {
-          host: form.host.trim(),
-          port: Number(form.port),
-          database: form.database.trim(),
-          username: form.username.trim(),
-          password: form.password,
-          sslMode: form.sslMode,
-        },
+        ...(form.databaseConnectionId
+          ? { databaseConnectionId: form.databaseConnectionId }
+          : {
+              connection: {
+                host: form.host.trim(),
+                port: Number(form.port),
+                database: form.database.trim(),
+                username: form.username.trim(),
+                password: form.password,
+                sslMode: form.sslMode,
+              },
+            }),
         syncIntervalSeconds: Number(form.syncIntervalSeconds),
       }),
       'Telegram monitor 连接已验证并统一写入两个子任务',
@@ -1582,13 +2028,17 @@ function TelegramPipelineModal({
       <Panel title="源库与调度" subtitle="只填写一次连接；Hub 会验证只读权限，并把同一连接应用到两个固定输入表">
         <p className="mih-inline-warning"><Key size={16} aria-hidden="true" />连接与明文密码仅 Admin Token 管理面可读取和修改，不需要额外 Provider Key。</p>
         <form className="mih-form mih-form--grid mih-telegram-config" onSubmit={save}>
-          <Field label="主机"><input className="qp-input" required value={form.host} placeholder="127.0.0.1" onChange={(event) => setForm({ ...form, host: event.target.value })} /></Field>
-          <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={form.port} onChange={(event) => setForm({ ...form, port: event.target.value })} /></Field>
-          <Field label="数据库"><input className="qp-input" required value={form.database} placeholder="night_all" onChange={(event) => setForm({ ...form, database: event.target.value })} /></Field>
-          <Field label="用户名"><input className="qp-input" required autoComplete="off" value={form.username} placeholder="mx_data" onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
-          <Field label="密码" hint="明文保存，仅 Admin Token 接口返回"><input className="qp-input" type="text" required autoComplete="off" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
-          <DropdownField label="SSL 模式" value={form.sslMode}
-            onChange={(sslMode) => setForm({ ...form, sslMode })} options={SSL_MODE_OPTIONS} />
+          <DatabaseConnectionField value={form.databaseConnectionId} state={databaseConnections}
+            onChange={(databaseConnectionId) => setForm({ ...form, databaseConnectionId })} />
+          {!form.databaseConnectionId ? <>
+            <Field label="主机"><input className="qp-input" required value={form.host} placeholder="127.0.0.1" onChange={(event) => setForm({ ...form, host: event.target.value })} /></Field>
+            <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={form.port} onChange={(event) => setForm({ ...form, port: event.target.value })} /></Field>
+            <Field label="数据库"><input className="qp-input" required value={form.database} placeholder="night_all" onChange={(event) => setForm({ ...form, database: event.target.value })} /></Field>
+            <Field label="用户名"><input className="qp-input" required autoComplete="off" value={form.username} placeholder="mx_data" onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
+            <Field label="密码" hint="明文保存，仅 Admin Token 接口返回"><input className="qp-input" type="text" required autoComplete="off" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
+            <DropdownField label="SSL 模式" value={form.sslMode}
+              onChange={(sslMode) => setForm({ ...form, sslMode })} options={SSL_MODE_OPTIONS} />
+          </> : null}
           <Field label="同步间隔（秒）" hint="60–86400；暂停后不再发起新批次"><input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds} onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} /></Field>
           <div className="mih-page-actions mih-form__wide">
             <button className="qp-button qp-button--ghost" type="submit" disabled={Boolean(busyAction) || pipeline.status !== 'paused' || running}
@@ -1601,6 +2051,7 @@ function TelegramPipelineModal({
 
       <TelegramSourcePreparationPanel
         key={[
+          pipeline.databaseConnectionId,
           pipeline.connection?.host,
           pipeline.connection?.port,
           pipeline.connection?.database,
@@ -2093,10 +2544,11 @@ function confidenceLabel(value) {
   return `${Math.round((number <= 1 ? number * 100 : number) * 10) / 10}%`
 }
 
-function CreateSourceModal({ token, onUnauthorized, notify, onClose, onCreated }) {
+function CreateSourceModal({ token, onUnauthorized, notify, onClose, onCreated, databaseConnections }) {
   const [form, setForm] = useState({
     sourceKey: '', displayName: '', sourceKind: 'file', datasetId: '', platform: 'external', objectType: 'record',
     fileMode: 'upload', serverPath: '', preferredRuleKey: '',
+    databaseConnectionId: INLINE_DATABASE_CONNECTION,
     host: '', port: '5432', database: '', username: '', password: '', sslMode: 'require',
     schema: 'public', table: '', cursorColumn: '', idColumn: '', syncIntervalSeconds: '300',
   })
@@ -2130,12 +2582,15 @@ function CreateSourceModal({ token, onUnauthorized, notify, onClose, onCreated }
       if (form.sourceKind === 'database') {
         body.syncIntervalSeconds = Number(form.syncIntervalSeconds)
         body.connection = {
-          host: form.host.trim(), port: Number(form.port), database: form.database.trim(),
-          username: form.username.trim(), password: form.password, sslMode: form.sslMode,
+          ...(form.databaseConnectionId ? {} : {
+            host: form.host.trim(), port: Number(form.port), database: form.database.trim(),
+            username: form.username.trim(), password: form.password, sslMode: form.sslMode,
+          }),
           schema: form.schema.trim() || 'public', table: form.table.trim(),
           ...(form.cursorColumn.trim() ? { cursorColumn: form.cursorColumn.trim() } : {}),
           ...(form.idColumn.trim() ? { idColumn: form.idColumn.trim() } : {}),
         }
+        if (form.databaseConnectionId) body.databaseConnectionId = form.databaseConnectionId
       }
       await adminApi.createSource(token, body)
       notify?.(`数据源 ${form.sourceKey} 已注册`, 'success')
@@ -2192,28 +2647,32 @@ function CreateSourceModal({ token, onUnauthorized, notify, onClose, onCreated }
         {form.sourceKind === 'database' ? (
           <>
             <p className="mih-inline-warning mih-form__wide"><Key size={16} />连接信息会在保存前以只读会话验证；明文密码仅当前 Admin Token 管理面可读取。</p>
-            <Field label="主机">
-              <input className="qp-input" value={form.host} required placeholder="127.0.0.1"
-                onChange={(event) => setForm({ ...form, host: event.target.value })} />
-            </Field>
-            <Field label="端口">
-              <input className="qp-input" type="number" min="1" max="65535" value={form.port} required
-                onChange={(event) => setForm({ ...form, port: event.target.value })} />
-            </Field>
-            <Field label="数据库">
-              <input className="qp-input" value={form.database} required placeholder="night_all"
-                onChange={(event) => setForm({ ...form, database: event.target.value })} />
-            </Field>
-            <Field label="用户名">
-              <input className="qp-input" value={form.username} required autoComplete="off" placeholder="mx_data"
-                onChange={(event) => setForm({ ...form, username: event.target.value })} />
-            </Field>
-            <Field label="密码" hint="明文保存并仅向 Admin Token 管理接口返回">
-              <input className="qp-input" type="text" value={form.password} required autoComplete="off"
-                onChange={(event) => setForm({ ...form, password: event.target.value })} />
-            </Field>
-            <DropdownField label="SSL 模式" value={form.sslMode}
-              onChange={(sslMode) => setForm({ ...form, sslMode })} options={SSL_MODE_OPTIONS} />
+            <DatabaseConnectionField value={form.databaseConnectionId} state={databaseConnections}
+              onChange={(databaseConnectionId) => setForm({ ...form, databaseConnectionId })} />
+            {!form.databaseConnectionId ? <>
+              <Field label="主机">
+                <input className="qp-input" value={form.host} required placeholder="127.0.0.1"
+                  onChange={(event) => setForm({ ...form, host: event.target.value })} />
+              </Field>
+              <Field label="端口">
+                <input className="qp-input" type="number" min="1" max="65535" value={form.port} required
+                  onChange={(event) => setForm({ ...form, port: event.target.value })} />
+              </Field>
+              <Field label="数据库">
+                <input className="qp-input" value={form.database} required placeholder="night_all"
+                  onChange={(event) => setForm({ ...form, database: event.target.value })} />
+              </Field>
+              <Field label="用户名">
+                <input className="qp-input" value={form.username} required autoComplete="off" placeholder="mx_data"
+                  onChange={(event) => setForm({ ...form, username: event.target.value })} />
+              </Field>
+              <Field label="密码" hint="明文保存并仅向 Admin Token 管理接口返回">
+                <input className="qp-input" type="text" value={form.password} required autoComplete="off"
+                  onChange={(event) => setForm({ ...form, password: event.target.value })} />
+              </Field>
+              <DropdownField label="SSL 模式" value={form.sslMode}
+                onChange={(sslMode) => setForm({ ...form, sslMode })} options={SSL_MODE_OPTIONS} />
+            </> : null}
             <Field label="Schema">
               <input className="qp-input" value={form.schema} required
                 onChange={(event) => setForm({ ...form, schema: event.target.value })} />
@@ -2282,7 +2741,7 @@ function CreateSourceModal({ token, onUnauthorized, notify, onClose, onCreated }
   )
 }
 
-function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onSourceChanged }) {
+function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onSourceChanged, databaseConnections }) {
   const managedByPipeline = PIPELINE_MANAGED_SOURCE_KEYS.has(source.sourceKey)
   const [currentSource, setCurrentSource] = useState(source)
   const isServerPathSource = currentSource.sourceKind === 'file'
@@ -2651,6 +3110,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
           onTest={testConnection}
           onPreview={previewDatabase}
           onResetCheckpoint={resetCheckpoint}
+          databaseConnections={databaseConnections}
         />
       ) : null}
 
@@ -2920,8 +3380,10 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
 function DatabaseSourceControl({
   source, schema, sync, preview, checkpointResetError, busy, statusTransition, isDraining, editing, canActivate,
   readOnly = false, onEdit, onCancelEdit, onSave, onStatus, onSync, onTest, onPreview, onResetCheckpoint,
+  databaseConnections,
 }) {
   const [draft, setDraft] = useState(() => ({
+    databaseConnectionId: source.databaseConnectionId || INLINE_DATABASE_CONNECTION,
     host: source.connection?.host || '',
     port: String(source.connection?.port || 5432),
     database: source.connection?.database || '',
@@ -2939,10 +3401,13 @@ function DatabaseSourceControl({
   const submit = (event) => {
     event.preventDefault()
     onSave({
+      databaseConnectionId: draft.databaseConnectionId || null,
       syncIntervalSeconds: Number(draft.syncIntervalSeconds),
       connection: {
-        host: draft.host.trim(), port: Number(draft.port), database: draft.database.trim(),
-        username: draft.username.trim(), password: draft.password, sslMode: draft.sslMode,
+        ...(draft.databaseConnectionId ? {} : {
+          host: draft.host.trim(), port: Number(draft.port), database: draft.database.trim(),
+          username: draft.username.trim(), password: draft.password, sslMode: draft.sslMode,
+        }),
         schema: draft.schema.trim() || 'public', table: draft.table.trim(),
         cursorColumn: draft.cursorColumn.trim() || null,
         idColumn: draft.idColumn.trim() || null,
@@ -2955,6 +3420,7 @@ function DatabaseSourceControl({
     if (resetConfirmation !== source.sourceKey) return
     if (await onResetCheckpoint(resetConfirmation)) setResetConfirmation('')
   }
+  const sharedConnection = asList(databaseConnections?.data).find((connection) => connection.id === source.databaseConnectionId)
 
   return (
     <>
@@ -2982,9 +3448,12 @@ function DatabaseSourceControl({
           </>
         }>
         <dl className="mih-source-definition">
+          <div><dt>连接配置</dt><dd>{source.databaseConnectionId
+            ? <><strong>{sharedConnection?.displayName || '共享数据库配置'}</strong><small><code>{sharedConnection?.connectionKey || source.databaseConnectionId}</code></small></>
+            : '任务内独立填写'}</dd></div>
           <div><dt>连接地址</dt><dd><code>{source.connection?.host || '—'}:{source.connection?.port || 5432}</code></dd></div>
           <div><dt>数据库 / 用户</dt><dd><code>{source.connection?.database || '—'} / {source.connection?.username || '—'}</code></dd></div>
-          <div><dt>密码</dt><dd><code>{source.connection?.password || '—'}</code><small>仅 Admin Token 管理面可见</small></dd></div>
+          <div><dt>密码</dt><dd><code>{source.databaseConnectionId ? '由数据库配置管理' : source.connection?.password || '—'}</code><small>仅 Admin Token 管理面可见</small></dd></div>
           <div><dt>SSL</dt><dd><code>{source.connection?.sslMode || 'require'}</code></dd></div>
           <div><dt>源表</dt><dd><code>{source.connection?.schema || 'public'}.{source.connection?.table || '—'}</code></dd></div>
           <div><dt>游标</dt><dd><code>{source.connection?.cursorColumn || '未配置'} + {source.connection?.idColumn || '未配置'}</code></dd></div>
@@ -2997,15 +3466,19 @@ function DatabaseSourceControl({
         <p className="mih-inline-warning"><Key size={16} aria-hidden="true" />连接信息随数据源管理，密码以明文回填；本页面和对应接口仅允许 Admin Token 会话访问。</p>
         {editing && !readOnly ? (
           <form className="mih-form mih-form--grid mih-source-settings" onSubmit={submit}>
-            <Field label="主机"><input className="qp-input" required value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} /></Field>
-            <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={draft.port} onChange={(event) => setDraft({ ...draft, port: event.target.value })} /></Field>
-            <Field label="数据库"><input className="qp-input" required value={draft.database} onChange={(event) => setDraft({ ...draft, database: event.target.value })} /></Field>
-            <Field label="用户名"><input className="qp-input" required autoComplete="off" value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></Field>
-            <Field label="密码" hint="明文保存并仅向 Admin Token 管理接口返回">
-              <input className="qp-input" type="text" required autoComplete="off" value={draft.password} onChange={(event) => setDraft({ ...draft, password: event.target.value })} />
-            </Field>
-            <DropdownField label="SSL 模式" value={draft.sslMode}
-              onChange={(sslMode) => setDraft({ ...draft, sslMode })} options={SSL_MODE_OPTIONS} />
+            <DatabaseConnectionField value={draft.databaseConnectionId} state={databaseConnections}
+              onChange={(databaseConnectionId) => setDraft({ ...draft, databaseConnectionId })} />
+            {!draft.databaseConnectionId ? <>
+              <Field label="主机"><input className="qp-input" required value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} /></Field>
+              <Field label="端口"><input className="qp-input" type="number" min="1" max="65535" required value={draft.port} onChange={(event) => setDraft({ ...draft, port: event.target.value })} /></Field>
+              <Field label="数据库"><input className="qp-input" required value={draft.database} onChange={(event) => setDraft({ ...draft, database: event.target.value })} /></Field>
+              <Field label="用户名"><input className="qp-input" required autoComplete="off" value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></Field>
+              <Field label="密码" hint="明文保存并仅向 Admin Token 管理接口返回">
+                <input className="qp-input" type="text" required autoComplete="off" value={draft.password} onChange={(event) => setDraft({ ...draft, password: event.target.value })} />
+              </Field>
+              <DropdownField label="SSL 模式" value={draft.sslMode}
+                onChange={(sslMode) => setDraft({ ...draft, sslMode })} options={SSL_MODE_OPTIONS} />
+            </> : null}
             <Field label="Schema"><input className="qp-input" required value={draft.schema} onChange={(event) => setDraft({ ...draft, schema: event.target.value })} /></Field>
             <Field label="表名"><input className="qp-input" required value={draft.table} onChange={(event) => setDraft({ ...draft, table: event.target.value })} /></Field>
             <Field label="变更水位列"><input className="qp-input" value={draft.cursorColumn} onChange={(event) => setDraft({ ...draft, cursorColumn: event.target.value })} /></Field>

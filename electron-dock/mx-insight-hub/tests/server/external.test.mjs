@@ -29,10 +29,96 @@ import {
 } from '../../server/ingest/external/database-source.mjs'
 import { runExternalPullJob } from '../../server/ingest/external/sync-job.mjs'
 import { scheduleActiveDatabaseSources } from '../../server/ingest/external/scheduler.mjs'
+import {
+  MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST,
+  MOBILE_COMMERCE_WRITER_CONTRACT_VERSION,
+} from '../../server/ingest/mobile-commerce/pipeline.mjs'
+import {
+  MOBILE_COMMERCE_COLUMNS,
+  MOBILE_COMMERCE_DATASET_ID,
+  MOBILE_COMMERCE_OBJECT_TYPE,
+  MOBILE_COMMERCE_PIPELINE_KEY,
+  MOBILE_COMMERCE_PLATFORM,
+  MOBILE_COMMERCE_SOURCE_KEY,
+  MOBILE_COMMERCE_SOURCE_LOCATOR,
+} from '../../server/ingest/mobile-commerce/source-contract.mjs'
 import { TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST } from '../../server/ingest/telegram/monitor-pipeline.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 
 const hash = (value) => createHash('sha256').update(value).digest('hex').slice(0, 16)
+
+function mobileCommerceDatabaseColumns(extraNames = []) {
+  const required = new Set(['id', 'platform', 'title', 'collected_at'])
+  return [...MOBILE_COMMERCE_COLUMNS, ...extraNames].map((name, index) => ({
+    column_name: name,
+    data_type: name === 'id'
+      ? 'bigint'
+      : name === 'collected_at'
+        ? 'timestamp without time zone'
+        : name === 'metadata_json'
+          ? 'jsonb'
+          : name === 'is_reported'
+            ? 'boolean'
+            : 'text',
+    udt_name: name === 'id'
+      ? 'int8'
+      : name === 'collected_at'
+        ? 'timestamp'
+        : name === 'metadata_json'
+          ? 'jsonb'
+          : name === 'is_reported'
+            ? 'bool'
+            : 'text',
+    is_nullable: required.has(name) ? 'NO' : 'YES',
+    ordinal_position: index + 1,
+  }))
+}
+
+function mobileCommerceDatabaseIndexes({ cursor = true, identity = true } = {}) {
+  return [
+    ...(cursor ? [{
+      definition: 'CREATE INDEX mb_collected_items_cursor_idx ON public.mb_collected_items (collected_at, id)',
+      valid: true,
+      ready: true,
+    }] : []),
+    ...(identity ? [{
+      definition: 'CREATE UNIQUE INDEX mb_collected_items_pkey ON public.mb_collected_items (id)',
+      valid: true,
+      ready: true,
+    }] : []),
+  ]
+}
+
+function mobileCommercePullSource() {
+  return {
+    id: 'mobile-commerce-source',
+    sourceKey: MOBILE_COMMERCE_SOURCE_KEY,
+    sourceKind: 'database',
+    datasetId: MOBILE_COMMERCE_DATASET_ID,
+    platform: MOBILE_COMMERCE_PLATFORM,
+    objectType: MOBILE_COMMERCE_OBJECT_TYPE,
+    status: 'active',
+    connection: {
+      host: 'mobile-commerce.internal',
+      database: 'night_all',
+      username: 'mobile_reader',
+      password: 'private-password',
+      sslMode: 'disable',
+      ...MOBILE_COMMERCE_SOURCE_LOCATOR,
+    },
+  }
+}
+
+function mobileCommercePullMapping() {
+  return {
+    version: 1,
+    fieldMap: {
+      externalId: { from: 'id' },
+      title: { from: 'title' },
+      collectedAt: { from: 'collected_at' },
+    },
+  }
+}
 
 function zipStored(files) {
   const localParts = []
@@ -1179,6 +1265,42 @@ test('database schema discovery rejects nullable cursors and partial indexes as 
   assert.equal(result.indexes[0].ready, false)
 })
 
+test('mobile-commerce schema discovery requires a unique capture id beyond composite cursor order', async () => {
+  const source = mobileCommercePullSource()
+  const mapping = mobileCommercePullMapping()
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+    },
+    queue: null,
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: mobileCommerceDatabaseColumns() }
+        }
+        if (sql.includes('greatest(c.reltuples')) {
+          return { rows: [{ estimated_rows: '5', total_bytes: '8192' }] }
+        }
+        if (sql.includes('FROM pg_indexes')) {
+          return { rows: [{
+            name: 'mb_collected_items_cursor_unique',
+            valid: true,
+            ready: true,
+            definition: 'CREATE UNIQUE INDEX mb_collected_items_cursor_unique ON public.mb_collected_items (collected_at, id)',
+          }] }
+        }
+        return { rows: [] }
+      },
+      async end() {},
+    }),
+  })
+
+  const result = await puller.describe(source.sourceKey)
+  assert.equal(result.issues.includes('no unique index proves (collected_at, id) is a total order'), false)
+  assert.ok(result.issues.includes('no unique index proves id is a stable capture identity'))
+})
+
 test('database preview returns value-free shapes, never raw row content', async () => {
   const source = {
     id: 's1', sourceKey: 'telegram-monitor-messages', displayName: 'Telegram messages',
@@ -1228,6 +1350,256 @@ test('database preview returns value-free shapes, never raw row content', async 
   assert.equal(JSON.stringify(result).includes('safe text'), false)
   assert.match(queries[1], /LIMIT \$1/)
   assert.equal(/ORDER BY/i.test(queries[1]), false)
+})
+
+test('every mobile-commerce pull rechecks all columns and rejects an unknown column before select or import', async () => {
+  const source = mobileCommercePullSource()
+  const mapping = mobileCommercePullMapping()
+  let schemaQueries = 0
+  let selectQueries = 0
+  let importStarts = 0
+  let poolsClosed = 0
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+      startImportRun: async () => {
+        importStarts += 1
+        throw new Error('import must not start after source contract drift')
+      },
+    },
+    queue: {
+      getCursor: async () => ({ position: {} }),
+      saveCursor: async () => {
+        throw new Error('checkpoint must not change after source contract drift')
+      },
+    },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          schemaQueries += 1
+          return { rows: mobileCommerceDatabaseColumns(['collector_build']) }
+        }
+        selectQueries += 1
+        throw new Error('row select must not run after source contract drift')
+      },
+      async end() {
+        poolsClosed += 1
+      },
+    }),
+  })
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assert.rejects(
+      () => puller.pullBatch(source.sourceKey, { batchSize: 10 }),
+      (error) => error?.status === 409 && error?.code === 'source_contract_mismatch',
+    )
+  }
+  assert.equal(schemaQueries, 2, 'schema evidence must not be cached between batches')
+  assert.equal(selectQueries, 0)
+  assert.equal(importStarts, 0)
+  assert.equal(poolsClosed, 2)
+})
+
+test('mobile-commerce pull rejects a non-finite source cursor before starting an import', async () => {
+  const source = mobileCommercePullSource()
+  const mapping = mobileCommercePullMapping()
+  let selectQueries = 0
+  let importStarts = 0
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+      startImportRun: async () => {
+        importStarts += 1
+        throw new Error('import must not start with a non-finite cursor')
+      },
+    },
+    queue: {
+      getCursor: async () => ({ position: {} }),
+      saveCursor: async () => {
+        throw new Error('checkpoint must not change with a non-finite cursor')
+      },
+    },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: mobileCommerceDatabaseColumns() }
+        }
+        if (sql.includes('FROM pg_indexes')) {
+          return { rows: mobileCommerceDatabaseIndexes() }
+        }
+        selectQueries += 1
+        return {
+          rows: [{
+            id: '4',
+            platform: '快手小店',
+            title: '测试商品',
+            collected_at: 'infinity',
+            __mx_insight_cursor_0: 'infinity',
+          }],
+        }
+      },
+      async end() {},
+    }),
+  })
+
+  await assert.rejects(
+    () => puller.pullBatch(source.sourceKey, { batchSize: 10 }),
+    (error) => error?.status === 409 && error?.code === 'source_contract_mismatch',
+  )
+  assert.equal(selectQueries, 1)
+  assert.equal(importStarts, 0)
+})
+
+test('mobile-commerce pull rejects a persisted non-finite checkpoint before opening the source', async () => {
+  const source = mobileCommercePullSource()
+  let poolsOpened = 0
+  let checkpointsWritten = 0
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mobileCommercePullMapping(),
+    },
+    queue: {
+      getCursor: async () => ({ position: { cursor: 'infinity', lastId: '4' } }),
+      saveCursor: async () => { checkpointsWritten += 1 },
+    },
+    poolFactory: () => {
+      poolsOpened += 1
+      throw new Error('source pool must not open for an invalid checkpoint')
+    },
+  })
+
+  await assert.rejects(
+    () => puller.pullBatch(source.sourceKey, { batchSize: 10 }),
+    (error) => error?.status === 409 && error?.code === 'source_contract_mismatch',
+  )
+  assert.equal(poolsOpened, 0)
+  assert.equal(checkpointsWritten, 0)
+})
+
+test('mobile-commerce pull rechecks cursor and identity indexes before reading rows', async () => {
+  const source = mobileCommercePullSource()
+  let selects = 0
+  let importStarts = 0
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mobileCommercePullMapping(),
+      startImportRun: async () => { importStarts += 1 },
+    },
+    queue: {
+      getCursor: async () => ({ position: {} }),
+      saveCursor: async () => {
+        throw new Error('checkpoint must not change after index drift')
+      },
+    },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: mobileCommerceDatabaseColumns() }
+        }
+        if (sql.includes('FROM pg_indexes')) {
+          return { rows: mobileCommerceDatabaseIndexes({ identity: false }) }
+        }
+        selects += 1
+        throw new Error('row select must not run after index drift')
+      },
+      async end() {},
+    }),
+  })
+
+  await assert.rejects(
+    () => puller.pullBatch(source.sourceKey, { batchSize: 10 }),
+    (error) => (
+      error?.status === 409
+      && error?.code === 'source_contract_mismatch'
+      && error?.details?.issues?.includes('mobile-commerce unique capture-id index is missing or invalid')
+    ),
+  )
+  assert.equal(selects, 0)
+  assert.equal(importStarts, 0)
+})
+
+test('mobile-commerce pull preserves source-local timestamp text and classifies from the current catalog snapshot', async () => {
+  const source = mobileCommercePullSource()
+  const mapping = {
+    ...mobileCommercePullMapping(),
+    fieldMap: {
+      ...mobileCommercePullMapping().fieldMap,
+      collectedAt: { from: 'collected_at', type: 'timestamp', timezoneOffsetMinutes: 480 },
+    },
+  }
+  const exactCursor = '2026-08-19 00:03:25.125'
+  let ingested
+  const catalogEntry = {
+    id: '99999999-9999-4999-8999-999999999999',
+    sourceKey: 'source-catalog-9000',
+    revision: 12,
+    canonicalName: '移动商城',
+    aliases: ['移动端小店'],
+    majorCategory: '国内电商与本地生活',
+    scenarios: ['内容电商'],
+    regions: ['中国大陆'],
+    archivedAt: null,
+  }
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+      listSourceCatalogEntries: async (options) => {
+        assert.deepEqual(options, { includeArchived: false })
+        return [catalogEntry]
+      },
+      startImportRun: async () => ({ id: 'run-mobile-success', duplicateOf: null }),
+      finishImportRun: async () => {},
+      ingestExternalRecords: async (input) => {
+        ingested = input
+        return { ingested: input.records.length, changed: input.records.length }
+      },
+    },
+    queue: {
+      getCursor: async () => ({ position: {} }),
+      saveCursor: async (_id, position, options) => ({ position, status: options.status }),
+    },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return { rows: mobileCommerceDatabaseColumns() }
+        }
+        if (sql.includes('FROM pg_indexes')) {
+          return { rows: mobileCommerceDatabaseIndexes() }
+        }
+        const alias = sql.match(/"collected_at"::text AS "([^"]+)"/)?.[1]
+        return { rows: [{
+          id: '4',
+          platform: '移动端小店',
+          title: '测试商品',
+          // Simulate the Date node-postgres creates before business mapping.
+          collected_at: new Date('2026-08-19T00:03:25.125Z'),
+          [alias]: exactCursor,
+        }] }
+      },
+      async end() {},
+    }),
+  })
+
+  const result = await puller.pullBatch(source.sourceKey, { batchSize: 10 })
+  const record = ingested.records[0]
+  assert.equal(result.pulled, 1)
+  assert.equal(record.collectedAt.toISOString(), '2026-08-18T16:03:25.125Z')
+  assert.equal(record.rawItem.collected_at, exactCursor)
+  assert.equal(record.stableFields.commerce.marketplace.entryId, catalogEntry.id)
+  assert.equal(record.stableFields.commerce.marketplace.sourceKey, catalogEntry.sourceKey)
+  assert.equal(record.stableFields.commerce.marketplace.revision, 12)
+  assert.match(record.payloadSha256, /^[a-f0-9]{64}$/u)
+  const beforeEnrichment = applyMapping(
+    { id: '4', platform: '移动端小店', title: '测试商品', collected_at: exactCursor },
+    mapping.fieldMap,
+    { platform: MOBILE_COMMERCE_PLATFORM },
+  ).record.payloadSha256
+  assert.notEqual(record.payloadSha256, beforeEnrichment)
 })
 
 test('database pull advances a durable total-order cursor only after idempotent ingest', async () => {
@@ -2318,6 +2690,109 @@ test('periodic external scheduling selects only active database sources with per
     { sourceKey: 'warehouse-ready', batchSize: 750, trigger: 'schedule', chunk: 0 },
     { dedupeKey: 'external-pull:warehouse-ready:0', priority: 220 },
   ]])
+})
+
+test('periodic mobile-commerce scheduling excludes the fixed source from generic pulls and requires its exact writer attestation', async () => {
+  const fixedSource = {
+    sourceKey: MOBILE_COMMERCE_SOURCE_KEY,
+    displayName: '手机多平台采集数据',
+    sourceKind: 'database',
+    datasetId: MOBILE_COMMERCE_DATASET_ID,
+    platform: MOBILE_COMMERCE_PLATFORM,
+    objectType: MOBILE_COMMERCE_OBJECT_TYPE,
+    status: 'active',
+    connection: { ...MOBILE_COMMERCE_SOURCE_LOCATOR },
+    syncIntervalSeconds: 300,
+  }
+  let source = fixedSource
+  let attestation = null
+  const attestationKeys = []
+  const cursorKeys = []
+  const enqueues = []
+  const statements = []
+  const client = {
+    query: async (sql) => {
+      statements.push(sql)
+      return { rows: [] }
+    },
+    release() {},
+  }
+  const store = {
+    listExternalSources: async () => [source],
+    getLatestPipelineWriterContractAttestation: async (pipelineKey) => {
+      attestationKeys.push(pipelineKey)
+      return attestation
+    },
+  }
+  const queue = {
+    pool: { connect: async () => client },
+    getCursor: async (cursorKey) => {
+      cursorKeys.push(cursorKey)
+      return { status: 'idle', updatedAt: '2026-08-10T07:50:00.000Z' }
+    },
+    enqueue: async (name, payload, options) => {
+      assert.equal(options.client, client, 'the fixed source must use the atomic pipeline branch')
+      enqueues.push([name, payload, options])
+      return enqueues.length
+    },
+  }
+  const schedule = () => scheduleActiveDatabaseSources({
+    store,
+    queue,
+    now: new Date('2026-08-10T08:00:00.000Z'),
+    batchSize: 750,
+  })
+
+  assert.deepEqual(await schedule(), { active: 1, enqueued: 0 })
+  assert.deepEqual(cursorKeys, [], 'an unattested fixed source must not reach the generic scheduler')
+
+  for (const invalid of [
+    {
+      contractVersion: 'mobile-commerce.writer.v0',
+      contractDigest: MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST,
+    },
+    {
+      contractVersion: MOBILE_COMMERCE_WRITER_CONTRACT_VERSION,
+      contractDigest: 'tampered-digest',
+    },
+  ]) {
+    attestation = invalid
+    assert.deepEqual(await schedule(), { active: 1, enqueued: 0 })
+  }
+
+  attestation = {
+    contractVersion: MOBILE_COMMERCE_WRITER_CONTRACT_VERSION,
+    contractDigest: MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST,
+  }
+  source = {
+    ...fixedSource,
+    connection: { ...fixedSource.connection, table: 'drifted_table' },
+  }
+  assert.deepEqual(await schedule(), { active: 1, enqueued: 0 })
+  assert.deepEqual(cursorKeys, [], 'contract drift must not fall back to generic scheduling')
+
+  source = fixedSource
+  assert.deepEqual(await schedule(), { active: 1, enqueued: 1 })
+  assert.deepEqual(attestationKeys, [
+    MOBILE_COMMERCE_PIPELINE_KEY,
+    MOBILE_COMMERCE_PIPELINE_KEY,
+    MOBILE_COMMERCE_PIPELINE_KEY,
+    MOBILE_COMMERCE_PIPELINE_KEY,
+  ])
+  assert.deepEqual(cursorKeys, [`external:${MOBILE_COMMERCE_SOURCE_KEY}`])
+  assert.deepEqual(statements, ['BEGIN', 'COMMIT'])
+  assert.equal(enqueues.length, 1)
+  assert.deepEqual(enqueues[0].slice(0, 2), [
+    'external-pull',
+    {
+      sourceKey: MOBILE_COMMERCE_SOURCE_KEY,
+      batchSize: 750,
+      trigger: 'schedule',
+      chunk: 0,
+    },
+  ])
+  assert.equal(enqueues[0][2].dedupeKey, `external-pull:${MOBILE_COMMERCE_SOURCE_KEY}:0`)
+  assert.equal(enqueues[0][2].priority, 220)
 })
 
 test('periodic Telegram scheduling waits for both inputs and commits the due pair together', async () => {

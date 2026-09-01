@@ -687,6 +687,10 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/telegram\/messages/)
     assert.match(html, /\/api\/v1\/data\/source-catalog/)
     assert.match(html, /\/api\/v1\/data\/source-catalog\/metadata/)
+    assert.match(html, /\/api\/v1\/data\/source-catalog\/\{id\}\/items/)
+    assert.match(html, /\/api\/v1\/data\/mobile-commerce\/items/)
+    assert.match(html, /外部手机采集执行器/)
+    assert.match(html, /Elasticsearch/)
     assert.match(html, /source-catalog\.public\.v1/)
     assert.match(html, /source_catalog/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/provinces\/\{province\}\/items/)
@@ -803,6 +807,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/canonical/items/{id}/context',
       '/data/canonical/search',
       '/data/capabilities',
+      '/data/mobile-commerce/items',
       '/data/public-opinion/funnel',
       '/data/public-opinion/items/{id}',
       '/data/public-opinion/province-coverage',
@@ -815,6 +820,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/source-catalog',
       '/data/source-catalog/metadata',
       '/data/source-catalog/{id}',
+      '/data/source-catalog/{id}/items',
       '/data/stored/search',
       '/data/telegram/chats',
       '/data/telegram/entities/search',
@@ -843,6 +849,16 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(document.components.schemas.TokenizeRequest.additionalProperties, false)
     assert.equal(document.components.schemas.StoredSearchRequest.additionalProperties, false)
     assert.equal(document.components.schemas.CanonicalSearchRequest.additionalProperties, false)
+    assert.equal(document.components.schemas.MobileCommerceItem.additionalProperties, false)
+    assert.equal(
+      document.paths['/data/source-catalog/{id}/items'].get
+        .responses[200].content['application/json'].schema.$ref,
+      '#/components/schemas/SourceCatalogItemsEnvelope',
+    )
+    assert.deepEqual(
+      document.components.schemas.MobileCommercePage.properties.acquisition.properties.executionPlane,
+      { type: 'string', const: 'external-mobile-collector' },
+    )
     assertPublicOpinionContract(document)
     assertPublicOpinionSearchContract(document)
     assertNightAllPublicContract(document)

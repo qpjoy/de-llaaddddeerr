@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto'
 import pg from 'pg'
 import { AppError } from '../../core/errors.mjs'
-import { applyMapping, validateFieldMap, CHUNKER_VERSION } from './mapping.mjs'
+import {
+  applyMapping,
+  validateFieldMap,
+  CHUNKER_VERSION,
+  refreshMappedPayloadSha256,
+} from './mapping.mjs'
 import { isTelegramSourceFunctionDefinition } from '../telegram/source-preparer.mjs'
 import {
   PROVINCE_OPINION_SOURCE_KEY,
@@ -9,6 +14,17 @@ import {
   provinceOpinionCursorIsFinite,
   provinceOpinionSourceContractIssues,
 } from '../province/source-contract.mjs'
+import {
+  createMobileMarketplaceClassifier,
+  enrichMobileCommerceRecord,
+} from '../mobile-commerce/record.mjs'
+import {
+  MOBILE_COMMERCE_SOURCE_KEY,
+  MOBILE_COMMERCE_SOURCE_LOCATOR,
+  mobileCommerceColumnIssues,
+  mobileCommerceCursorIsFinite,
+  mobileCommerceSourceContractIssues,
+} from '../mobile-commerce/source-contract.mjs'
 
 // Incremental pull from a foreign PostgreSQL database.
 //
@@ -25,7 +41,7 @@ import {
 const MAX_BATCH = 5_000
 const MAX_PREVIEW = 3
 const SOURCE_CONNECTION_TIMEOUT_MS = 10_000
-const CONNECTION_FIELDS = new Set([
+const DATABASE_TRANSPORT_FIELDS = new Set([
   'dsnEnv',
   'host',
   'port',
@@ -33,15 +49,19 @@ const CONNECTION_FIELDS = new Set([
   'username',
   'password',
   'sslMode',
+])
+const DATABASE_LOCATOR_FIELDS = new Set([
   'schema',
   'table',
   'cursorColumn',
   'idColumn',
   'sourceContractId',
 ])
+const CONNECTION_FIELDS = new Set([...DATABASE_TRANSPORT_FIELDS, ...DATABASE_LOCATOR_FIELDS])
 const REQUIRED_DIRECT_CONNECTION_FIELDS = ['host', 'database', 'username', 'password']
 const DIRECT_CONNECTION_FIELDS = [...REQUIRED_DIRECT_CONNECTION_FIELDS, 'port', 'sslMode']
 const SSL_MODES = new Set(['disable', 'require', 'verify-ca', 'verify-full'])
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const CURSOR_CASTS = new Map([
   ['timestamptz', 'timestamptz'],
   ['timestamp', 'timestamp'],
@@ -82,13 +102,22 @@ function quotedIdentifier(value, what) {
   return `"${safeIdentifier(value, what)}"`
 }
 
-export function validateDatabaseConnection(connection) {
+function validateConnectionObject(connection) {
   if (!connection || typeof connection !== 'object' || Array.isArray(connection)) {
     throw new AppError(400, 'invalid_connection', 'connection must be an object')
   }
-  const unsupported = Object.keys(connection).filter((key) => !CONNECTION_FIELDS.has(key))
+}
+
+function pickConnectionFields(connection, allowed) {
+  return Object.fromEntries(Object.entries(connection).filter(([key]) => allowed.has(key)))
+}
+
+/** Validate a shared profile's PostgreSQL transport without requiring a table. */
+export function validateDatabaseTransport(connection) {
+  validateConnectionObject(connection)
+  const unsupported = Object.keys(connection).filter((key) => !DATABASE_TRANSPORT_FIELDS.has(key))
   if (unsupported.length > 0) {
-    throw new AppError(400, 'unsupported_connection_fields', `Unsupported database connection fields: ${unsupported.join(', ')}`)
+    throw new AppError(400, 'unsupported_database_transport_fields', `Unsupported database transport fields: ${unsupported.join(', ')}`)
   }
   const usesDsnEnv = connection.dsnEnv != null
   const directFields = DIRECT_CONNECTION_FIELDS.filter((field) => connection[field] != null)
@@ -132,6 +161,16 @@ export function validateDatabaseConnection(connection) {
       throw new AppError(400, 'invalid_database_ssl_mode', 'connection.sslMode must be disable, require, verify-ca, or verify-full')
     }
   }
+  return true
+}
+
+/** Validate the per-source physical table and checkpoint locator. */
+export function validateDatabaseLocator(connection) {
+  validateConnectionObject(connection)
+  const unsupported = Object.keys(connection).filter((key) => !DATABASE_LOCATOR_FIELDS.has(key))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_database_locator_fields', `Unsupported database source locator fields: ${unsupported.join(', ')}`)
+  }
   safeIdentifier(connection.schema || 'public', 'schema')
   safeIdentifier(connection.table, 'table')
   if (connection.cursorColumn != null) safeIdentifier(connection.cursorColumn, 'cursorColumn')
@@ -142,6 +181,17 @@ export function validateDatabaseConnection(connection) {
   ) {
     throw new AppError(400, 'invalid_source_contract_id', 'sourceContractId must be a 32-character lowercase hex identifier')
   }
+  return true
+}
+
+export function validateDatabaseConnection(connection) {
+  validateConnectionObject(connection)
+  const unsupported = Object.keys(connection).filter((key) => !CONNECTION_FIELDS.has(key))
+  if (unsupported.length > 0) {
+    throw new AppError(400, 'unsupported_connection_fields', `Unsupported database connection fields: ${unsupported.join(', ')}`)
+  }
+  validateDatabaseTransport(pickConnectionFields(connection, DATABASE_TRANSPORT_FIELDS))
+  validateDatabaseLocator(pickConnectionFields(connection, DATABASE_LOCATOR_FIELDS))
   return true
 }
 
@@ -279,13 +329,14 @@ function internalCursorAlias(columns) {
   }
 }
 
-function takeExactCursors(rows, alias, cursorColumn) {
+function takeExactCursors(rows, alias, cursorColumn, { replaceCursorValue = false } = {}) {
   return rows.map((row) => {
     // PostgreSQL guarantees this alias for a real pull. The fallback keeps
     // injected pool test doubles and non-pg adapters source-compatible.
     const hasExactCursor = Object.prototype.hasOwnProperty.call(row, alias)
     const cursor = hasExactCursor ? row[alias] : row[cursorColumn]
     if (hasExactCursor) delete row[alias]
+    if (hasExactCursor && replaceCursorValue) row[cursorColumn] = cursor
     return cursor
   })
 }
@@ -330,6 +381,13 @@ function uniqueIndexProvesOrder(definition, cursorColumn, idColumn) {
   return uniqueId.test(sql) || uniquePair.test(sql)
 }
 
+function uniqueIndexProvesIdentity(definition, idColumn) {
+  const sql = String(definition).replace(/"/g, '')
+  if (/\bwhere\b/i.test(sql) || !/\bcreate\s+unique\s+index\b/i.test(sql)) return false
+  const order = '(?:\\s+(?:asc|desc))?(?:\\s+nulls\\s+(?:first|last))?'
+  return new RegExp(`\\(\\s*${idColumn}\\s*${order}\\s*\\)`, 'i').test(sql)
+}
+
 export class DatabaseSourcePuller {
   constructor({
     store,
@@ -344,6 +402,54 @@ export class DatabaseSourcePuller {
     this.poolFactory = poolFactory
     this.env = env
     this.sourceLocks = new Set()
+  }
+
+  async #databaseConnectionProfile(id) {
+    if (typeof id !== 'string' || !UUID_PATTERN.test(id)) {
+      throw new AppError(400, 'invalid_database_connection_id', 'databaseConnectionId must be a UUID')
+    }
+    if (typeof this.store?.getDatabaseConnection !== 'function') {
+      throw new AppError(503, 'database_connection_store_unavailable', 'Shared database connections require a compatible store')
+    }
+    const profile = await this.store.getDatabaseConnection(id)
+    if (!profile) {
+      throw new AppError(404, 'database_connection_not_found', `Unknown database connection: ${id}`)
+    }
+    if (profile.engine !== 'postgresql') {
+      throw new AppError(400, 'unsupported_database_engine', 'Only PostgreSQL database connections are supported')
+    }
+    validateDatabaseTransport(profile.connection || {})
+    return profile
+  }
+
+  /**
+   * Resolve an inline or shared-profile source candidate into one complete
+   * connection. Callers must never persist the returned merged credentials
+   * back into the source locator.
+   */
+  async resolveConnectionCandidate({ databaseConnectionId = null, connection = {} } = {}) {
+    if (databaseConnectionId == null) {
+      validateDatabaseConnection(connection)
+      return {
+        databaseConnectionId: null,
+        databaseConnectionKey: null,
+        databaseConnectionRevision: null,
+        connection: { ...connection },
+      }
+    }
+
+    // A profile is authoritative for transport. Reject even an identical
+    // inline transport instead of silently choosing one copy over the other.
+    validateDatabaseLocator(connection)
+    const profile = await this.#databaseConnectionProfile(databaseConnectionId)
+    const resolved = { ...profile.connection, ...connection }
+    validateDatabaseConnection(resolved)
+    return {
+      databaseConnectionId: profile.id,
+      databaseConnectionKey: profile.key,
+      databaseConnectionRevision: profile.revision,
+      connection: resolved,
+    }
   }
 
   /**
@@ -381,8 +487,9 @@ export class DatabaseSourcePuller {
     }
   }
 
-  async #poolOptions(connection, applicationName) {
-    validateDatabaseConnection(connection)
+  async #poolOptions(connection, applicationName, { requireLocator = true } = {}) {
+    if (requireLocator) validateDatabaseConnection(connection)
+    else validateDatabaseTransport(connection)
     const connectionOptions = connection.dsnEnv
       ? { connectionString: this.#dsn(connection) }
       : this.#directConnectionOptions(connection)
@@ -406,12 +513,13 @@ export class DatabaseSourcePuller {
   }
 
   async #source(sourceKey, { requireMapping = false, mappingOverride = undefined } = {}) {
-    const source = await this.store.getExternalSource(sourceKey)
-    if (!source) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
-    if (source.sourceKind !== 'database') {
+    const persistedSource = await this.store.getExternalSource(sourceKey)
+    if (!persistedSource) throw new AppError(404, 'source_not_found', `Unknown external source: ${sourceKey}`)
+    if (persistedSource.sourceKind !== 'database') {
       throw new AppError(400, 'wrong_source_kind', 'This source is not a database source')
     }
-    validateDatabaseConnection(source.connection || {})
+    const resolved = await this.resolveConnectionCandidate(persistedSource)
+    const source = { ...persistedSource, connection: resolved.connection }
     const mapping = mappingOverride === undefined
       ? await this.store.getActiveMapping(source.id)
       : mappingOverride
@@ -422,7 +530,16 @@ export class DatabaseSourcePuller {
       throw new AppError(409, 'no_approved_mapping', 'This source has no approved field mapping')
     }
     if (mapping) validateFieldMap(mapping.fieldMap)
-    return { source, mapping, connection: source.connection || {} }
+    return {
+      source,
+      mapping,
+      connection: resolved.connection,
+      databaseConnection: resolved.databaseConnectionId == null ? null : {
+        id: resolved.databaseConnectionId,
+        key: resolved.databaseConnectionKey,
+        revision: resolved.databaseConnectionRevision,
+      },
+    }
   }
 
   async #assertManagedSourceContract(pool, connection) {
@@ -805,6 +922,35 @@ export class DatabaseSourcePuller {
     }))
   }
 
+  async #mobileCommerceIndexIssues(pool, connection) {
+    const schema = safeIdentifier(connection.schema || 'public', 'schema')
+    const table = safeIdentifier(connection.table, 'table')
+    const { rows } = await pool.query(
+      `SELECT p.indexdef AS definition, i.indisvalid AS valid, i.indisready AS ready
+         FROM pg_indexes p
+         JOIN pg_namespace n ON n.nspname = p.schemaname
+         JOIN pg_class t ON t.relnamespace = n.oid AND t.relname = p.tablename
+         JOIN pg_class ci ON ci.relnamespace = n.oid AND ci.relname = p.indexname
+         JOIN pg_index i ON i.indrelid = t.oid AND i.indexrelid = ci.oid
+        WHERE p.schemaname = $1 AND p.tablename = $2`,
+      [schema, table],
+    )
+    const definitions = rows
+      .filter((row) => row.valid !== false && row.ready !== false)
+      .map((row) => row.definition)
+    return [
+      ...(!definitions.some((definition) => indexStartsWith(
+        definition,
+        MOBILE_COMMERCE_SOURCE_LOCATOR.cursorColumn,
+        MOBILE_COMMERCE_SOURCE_LOCATOR.idColumn,
+      )) ? ['mobile-commerce pull index is missing or invalid'] : []),
+      ...(!definitions.some((definition) => uniqueIndexProvesIdentity(
+        definition,
+        MOBILE_COMMERCE_SOURCE_LOCATOR.idColumn,
+      )) ? ['mobile-commerce unique capture-id index is missing or invalid'] : []),
+    ]
+  }
+
   async #metadata(pool, connection) {
     const schema = safeIdentifier(connection.schema || 'public', 'schema')
     const table = safeIdentifier(connection.table, 'table')
@@ -914,6 +1060,9 @@ export class DatabaseSourcePuller {
       const hasUniqueOrder = cursorColumn != null && idColumn != null && metadata.indexes.some((index) =>
         index.valid && index.ready && uniqueIndexProvesOrder(index.definition, cursorColumn, idColumn),
       )
+      const hasUniqueIdentity = idColumn != null && metadata.indexes.some((index) =>
+        index.valid && index.ready && uniqueIndexProvesIdentity(index.definition, idColumn),
+      )
       return {
         source: safeSource(source),
         columns,
@@ -942,6 +1091,9 @@ export class DatabaseSourcePuller {
             : []),
           ...(cursorColumn != null && idColumn != null && !hasUniqueOrder
             ? [`no unique index proves (${cursorColumn}, ${idColumn}) is a total order`]
+            : []),
+          ...(source.sourceKey === MOBILE_COMMERCE_SOURCE_KEY && idColumn != null && !hasUniqueIdentity
+            ? [`no unique index proves ${idColumn} is a stable capture identity`]
             : []),
           ...undefinedRequiredMappings,
           ...missingMappings.filter((entry) => requiredMappingTargets.has(entry.target)).map((entry) => entry.message),
@@ -994,11 +1146,10 @@ export class DatabaseSourcePuller {
     }
   }
 
-  /** Test a candidate source connection before it is persisted. */
-  async testConnection(connection) {
+  async #testConnection(connection, { requireLocator, applicationName }) {
     let pool = null
     try {
-      pool = this.poolFactory(await this.#poolOptions(connection, 'mx-insight-hub-source-connection-test'))
+      pool = this.poolFactory(await this.#poolOptions(connection, applicationName, { requireLocator }))
       const { rows } = await pool.query(
         `SELECT current_database() AS database_name,
                 current_user AS database_user,
@@ -1022,6 +1173,34 @@ export class DatabaseSourcePuller {
     } finally {
       if (pool) await pool.end().catch(() => {})
     }
+  }
+
+  /** Test a complete inline source connection before it is persisted. */
+  async testConnection(connection) {
+    return this.#testConnection(connection, {
+      requireLocator: true,
+      applicationName: 'mx-insight-hub-source-connection-test',
+    })
+  }
+
+  /** Test a transport-only candidate for the shared database profile CRUD. */
+  async testDatabaseConnectionTransport(connection) {
+    return this.#testConnection(connection, {
+      requireLocator: false,
+      applicationName: 'mx-insight-hub-database-profile-test',
+    })
+  }
+
+  /** Resolve and test one persisted shared database profile. */
+  async testDatabaseConnectionProfile(databaseConnectionId) {
+    const profile = await this.#databaseConnectionProfile(databaseConnectionId)
+    return this.testDatabaseConnectionTransport(profile.connection)
+  }
+
+  /** Resolve and test a source candidate without persisting the merged secret. */
+  async testSourceCandidate(candidate) {
+    const { connection } = await this.resolveConnectionCandidate(candidate)
+    return this.testConnection(connection)
   }
 
   /** Verify the currently persisted connection for one source. */
@@ -1390,6 +1569,13 @@ export class DatabaseSourcePuller {
     ) {
       throw new AppError(409, 'source_contract_mismatch', 'Province opinion checkpoint contains a non-finite watermark')
     }
+    if (
+      sourceKey === MOBILE_COMMERCE_SOURCE_KEY
+      && position.cursor != null
+      && !mobileCommerceCursorIsFinite(position.cursor)
+    ) {
+      throw new AppError(409, 'source_contract_mismatch', 'Mobile-commerce checkpoint contains a non-finite watermark')
+    }
     const contractHash = sourceContractHash(source, mapping)
     this.#assertCheckpoint(position, {
       contractHash,
@@ -1511,6 +1697,28 @@ export class DatabaseSourcePuller {
           )
         }
       }
+      if (sourceKey === MOBILE_COMMERCE_SOURCE_KEY) {
+        const contractIssues = [
+          ...mobileCommerceSourceContractIssues(source),
+          ...mobileCommerceColumnIssues(columns),
+        ]
+        if (contractIssues.length > 0) {
+          throw new AppError(
+            409,
+            'source_contract_mismatch',
+            'Mobile-commerce source contract changed; pause and re-probe before resuming',
+          )
+        }
+        const indexIssues = await this.#mobileCommerceIndexIssues(pool, connection)
+        if (indexIssues.length > 0) {
+          throw new AppError(
+            409,
+            'source_contract_mismatch',
+            'Mobile-commerce source indexes changed; pause and re-probe before resuming',
+            { issues: indexIssues },
+          )
+        }
+      }
       const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
       const cursorAliasName = internalCursorAlias(columns)
       const cursorAlias = quotedIdentifier(cursorAliasName, 'internal cursor alias')
@@ -1522,7 +1730,14 @@ export class DatabaseSourcePuller {
           LIMIT $3`,
         [position.cursor ?? null, position.lastId ?? null, limit],
       )
-      const exactCursors = takeExactCursors(rows, cursorAliasName, cursorName)
+      const cursorDefinition = columns.find((column) => column.name === cursorName)
+      const exactCursors = takeExactCursors(rows, cursorAliasName, cursorName, {
+        // node-postgres converts `timestamp without time zone` to a Date before
+        // mapping. Restore PostgreSQL's exact source-local text so the fixed
+        // +08:00 rule is independent of the Hub process timezone.
+        replaceCursorValue: sourceKey === MOBILE_COMMERCE_SOURCE_KEY
+          && cursorDefinition?.databaseType === 'timestamp',
+      })
       if (
         sourceKey === PROVINCE_OPINION_SOURCE_KEY
         && exactCursors.some((cursor) => !provinceOpinionCursorIsFinite(cursor))
@@ -1531,6 +1746,16 @@ export class DatabaseSourcePuller {
           409,
           'source_contract_mismatch',
           'Province opinion source returned a non-finite updated_at watermark',
+        )
+      }
+      if (
+        sourceKey === MOBILE_COMMERCE_SOURCE_KEY
+        && exactCursors.some((cursor) => !mobileCommerceCursorIsFinite(cursor))
+      ) {
+        throw new AppError(
+          409,
+          'source_contract_mismatch',
+          'Mobile-commerce source returned a non-finite collected_at watermark',
         )
       }
       await assertOwned()
@@ -1552,6 +1777,21 @@ export class DatabaseSourcePuller {
           await this.queue.saveCursor(cursorId, completedPosition, { status: 'idle', error: null })
         }
         return { pulled: 0, ingested: 0, rejected: 0, importRunId: run?.id ?? null, done: true }
+      }
+
+      let classifyMobileMarketplace = null
+      if (sourceKey === MOBILE_COMMERCE_SOURCE_KEY) {
+        if (typeof this.store.listSourceCatalogEntries !== 'function') {
+          throw new AppError(
+            503,
+            'source_catalog_unavailable',
+            'Mobile-commerce classification requires the governed source catalog',
+          )
+        }
+        // One authoritative catalog snapshot per page keeps every row in the
+        // batch consistent even if an administrator edits the catalog later.
+        const catalogEntries = await this.store.listSourceCatalogEntries({ includeArchived: false })
+        classifyMobileMarketplace = createMobileMarketplaceClassifier(catalogEntries)
       }
 
       if (!run) {
@@ -1603,6 +1843,8 @@ export class DatabaseSourcePuller {
           rejections.push({ rowIndex: index + 1, reason: 'eventTime is required for Telegram serving', raw })
           continue
         }
+        enrichMobileCommerceRecord(record, raw, source, { classifyMarketplace: classifyMobileMarketplace })
+        refreshMappedPayloadSha256(record)
         record.parserVersion = `${CHUNKER_VERSION}:map${mapping.version}`
         mapped.push(record)
       }

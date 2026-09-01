@@ -143,6 +143,19 @@ export const adminApi = {
 
   // External sources (P4).
   sources: (token) => request(token, `${ADMIN_ROOT}/sources`),
+  databaseConnections: (token) => request(token, `${ADMIN_ROOT}/database-connections`),
+  createDatabaseConnection: (token, body) => request(
+    token, `${ADMIN_ROOT}/database-connections`, { method: 'POST', body },
+  ),
+  updateDatabaseConnection: (token, id, body) => request(
+    token, `${ADMIN_ROOT}/database-connections/${encodeURIComponent(id)}`, { method: 'PUT', body },
+  ),
+  deleteDatabaseConnection: (token, id) => request(
+    token, `${ADMIN_ROOT}/database-connections/${encodeURIComponent(id)}`, { method: 'DELETE' },
+  ),
+  testDatabaseConnection: (token, id) => request(
+    token, `${ADMIN_ROOT}/database-connections/${encodeURIComponent(id)}/test`, { method: 'POST' },
+  ),
   fileFormatRules: (token) => request(token, `${ADMIN_ROOT}/file-format-rules`),
   listServerFileRoots: (token) => request(token, `${ADMIN_ROOT}/server-file-roots`),
   dataCenter: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center`, { query }),
@@ -422,6 +435,27 @@ export const adminApi = {
   ),
   resetProvinceOpinionPipelineCheckpoint: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/province-opinion/checkpoint/reset`, { method: 'POST', body },
+  ),
+  mobileCommercePipeline: (token) => request(token, `${ADMIN_ROOT}/pipelines/mobile-commerce`),
+  updateMobileCommercePipeline: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/mobile-commerce`, { method: 'PUT', body },
+  ),
+  updateMobileCommercePipelineStatus: (token, status, writerContractAttestation = null) => request(
+    token,
+    `${ADMIN_ROOT}/pipelines/mobile-commerce/status`,
+    {
+      method: 'POST',
+      body: { status, ...(writerContractAttestation ? { writerContractAttestation } : {}) },
+    },
+  ),
+  runMobileCommercePipeline: (token, body = {}) => request(
+    token, `${ADMIN_ROOT}/pipelines/mobile-commerce/sync`, { method: 'POST', body },
+  ),
+  resumeMobileCommercePipeline: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/mobile-commerce/resume`, { method: 'POST' },
+  ),
+  resetMobileCommercePipelineCheckpoint: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/mobile-commerce/checkpoint/reset`, { method: 'POST', body },
   ),
 
   // Backfill (P3), agent (P5) and retrieval (embedding pipeline).

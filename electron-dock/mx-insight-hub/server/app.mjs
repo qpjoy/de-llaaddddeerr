@@ -46,7 +46,10 @@ import {
   fingerprintFileStructure,
   normalizeStructureColumnName,
 } from './ingest/external/importer.mjs'
-import { validateDatabaseConnection } from './ingest/external/database-source.mjs'
+import {
+  validateDatabaseConnection,
+  validateDatabaseTransport,
+} from './ingest/external/database-source.mjs'
 import {
   isTelegramMonitorSourceKey,
   TelegramMonitorPipeline,
@@ -59,6 +62,12 @@ import {
   isProvinceOpinionSourceKey,
   ProvinceOpinionPipeline,
 } from './ingest/province/monitor-pipeline.mjs'
+import {
+  MobileCommercePipeline,
+} from './ingest/mobile-commerce/pipeline.mjs'
+import {
+  isMobileCommerceSourceKey,
+} from './ingest/mobile-commerce/source-contract.mjs'
 import {
   adminTokenPrincipal,
   filterByTenantCapability,
@@ -295,17 +304,43 @@ function assertGenericSourceMutable(sourceKey) {
     !isTelegramMonitorSourceKey(sourceKey)
     && !isTelegramSQLiteSourceKey(sourceKey)
     && !isProvinceOpinionSourceKey(sourceKey)
+    && !isMobileCommerceSourceKey(sourceKey)
   ) return
   const pipeline = isTelegramSQLiteSourceKey(sourceKey)
     ? 'telegram-sqlite'
     : isProvinceOpinionSourceKey(sourceKey)
       ? 'province-opinion'
-      : 'telegram-monitor'
+      : isMobileCommerceSourceKey(sourceKey)
+        ? 'mobile-commerce'
+        : 'telegram-monitor'
   throw new AppError(
     409,
     'pipeline_managed_source',
     `This fixed source is managed through /internal/v1/admin/pipelines/${pipeline}`,
   )
+}
+
+function safeDatabaseConnection(profile, references = []) {
+  const connection = profile?.connection || {}
+  const { password, ...safeConnection } = connection
+  return profile && {
+    id: profile.id,
+    connectionKey: profile.key,
+    displayName: profile.displayName,
+    engine: profile.engine,
+    ...safeConnection,
+    passwordConfigured: typeof password === 'string' && password.length > 0,
+    revision: profile.revision,
+    references: references.map((source) => ({
+      sourceId: source.id,
+      sourceKey: source.sourceKey,
+      displayName: source.displayName,
+      status: source.status,
+    })),
+    referenceCount: references.length,
+    createdAt: profile.createdAt,
+    updatedAt: profile.updatedAt,
+  }
 }
 
 function adminSourceView(source) {
@@ -441,6 +476,11 @@ export function createApp({
     databasePuller,
     agentPipelineStore: agentPipelines,
     segmenterConfig,
+  })
+  const mobileCommercePipeline = new MobileCommercePipeline({
+    store,
+    queue,
+    databasePuller,
   })
 
   /**
@@ -857,6 +897,100 @@ export function createApp({
     const unique = [...new Set((keys || []).filter(Boolean))]
     if (unique.length === 0 || typeof databasePuller?.withSourceLocks !== 'function') return operation()
     return databasePuller.withSourceLocks(unique, operation)
+  }
+
+  function requireDatabaseConnectionStore() {
+    const methods = [
+      'listDatabaseConnections',
+      'getDatabaseConnection',
+      'createDatabaseConnection',
+      'updateDatabaseConnection',
+      'deleteDatabaseConnection',
+      'listDatabaseConnectionReferences',
+    ]
+    if (methods.some((method) => typeof store?.[method] !== 'function')) {
+      throw new AppError(503, 'database_connection_store_unavailable', 'Database connections require migration 048')
+    }
+  }
+
+  function requireDatabaseConnectionTester() {
+    if (typeof databasePuller?.testDatabaseConnectionTransport !== 'function') {
+      throw new AppError(503, 'source_validation_unavailable', 'Database connection testing requires the PostgreSQL workload')
+    }
+  }
+
+  function databaseConnectionKey(value) {
+    if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(value.trim())) {
+      throw new AppError(
+        400,
+        'invalid_database_connection_key',
+        'connectionKey must be 1-128 lowercase letters, digits, dots, underscores, or hyphens',
+      )
+    }
+    return value.trim()
+  }
+
+  function requiredDatabaseConnectionId(value) {
+    if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)) {
+      throw new AppError(400, 'invalid_database_connection_id', 'Database connection id must be a UUID')
+    }
+    return value
+  }
+
+  async function databaseConnectionView(profile) {
+    const references = profile
+      ? await store.listDatabaseConnectionReferences(profile.id)
+      : []
+    return safeDatabaseConnection(profile, references)
+  }
+
+  function mergedDatabaseTransport(current, patch) {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw new AppError(400, 'invalid_connection', 'connection must be an object')
+    }
+    const candidatePatch = { ...patch }
+    if (candidatePatch.password === '') delete candidatePatch.password
+    const merged = { ...(current || {}), ...candidatePatch }
+    if (typeof candidatePatch.dsnEnv === 'string') {
+      for (const field of ['host', 'port', 'database', 'username', 'password', 'sslMode']) delete merged[field]
+    } else if (Object.keys(candidatePatch).some((field) => (
+      ['host', 'port', 'database', 'username', 'password', 'sslMode'].includes(field)
+    ))) {
+      delete merged.dsnEnv
+    }
+    validateDatabaseTransport(merged)
+    return merged
+  }
+
+  async function withPausedDatabaseConnectionReferences(databaseConnectionId, operation) {
+    const initialReferences = await store.listDatabaseConnectionReferences(databaseConnectionId)
+    const sourceKeys = initialReferences.map((source) => source.sourceKey)
+    if (sourceKeys.length > 0 && typeof databasePuller?.withSourceLocks !== 'function') {
+      throw new AppError(503, 'source_lock_unavailable', 'Referenced source changes require source locking')
+    }
+    return withSourceLocks(sourceKeys, async () => {
+      const references = await store.listDatabaseConnectionReferences(databaseConnectionId)
+      const active = references.filter((source) => source.status !== 'paused')
+      if (active.length > 0) {
+        throw new AppError(
+          409,
+          'database_connection_sources_must_pause',
+          'Pause every referencing cleaning task before changing its shared database connection',
+          { references: active.map(({ sourceKey, displayName, status }) => ({ sourceKey, displayName, status })) },
+        )
+      }
+      for (const source of references) {
+        const cursor = await queue?.getCursor?.(`external:${source.sourceKey}`)
+        if (cursor?.status === 'running') {
+          throw new AppError(
+            409,
+            'source_draining',
+            `Wait for ${source.sourceKey} to reach its checkpoint before changing the shared connection`,
+          )
+        }
+      }
+      return operation(references)
+    })
   }
 
   async function dependencies() {
@@ -1642,6 +1776,130 @@ export function createApp({
         return
       }
 
+      // Shared PostgreSQL transports are credentials, so this entire surface
+      // deliberately keeps the same admin-token-only boundary as sources.
+      if (pathname === '/internal/v1/admin/database-connections') {
+        requireSourceAdmin(principal)
+        requireDatabaseConnectionStore()
+        if (request.method === 'GET') {
+          const profiles = await store.listDatabaseConnections()
+          sendJson(response, 200, {
+            data: await Promise.all(profiles.map(databaseConnectionView)),
+            requestId,
+          })
+          return
+        }
+        if (request.method === 'POST') {
+          requireDatabaseConnectionTester()
+          const body = await readJson(request)
+          const unsupported = Object.keys(body || {}).filter(
+            (field) => !['connectionKey', 'displayName', 'engine', 'connection'].includes(field),
+          )
+          if (unsupported.length > 0) {
+            throw new AppError(400, 'unsupported_fields', `Unsupported database connection fields: ${unsupported.join(', ')}`)
+          }
+          const engine = body?.engine ?? 'postgresql'
+          if (engine !== 'postgresql') {
+            throw new AppError(400, 'unsupported_database_engine', 'Only PostgreSQL database connections are supported')
+          }
+          const connection = mergedDatabaseTransport({}, body?.connection)
+          const test = await databasePuller.testDatabaseConnectionTransport(connection)
+          const created = await store.createDatabaseConnection({
+            key: databaseConnectionKey(body?.connectionKey),
+            displayName: requiredField(body, 'displayName'),
+            engine,
+            connection,
+          })
+          sendJson(response, 201, {
+            data: {
+              ...(await databaseConnectionView(created)),
+              lastTest: { ...test, testedAt: new Date().toISOString() },
+            },
+            requestId,
+          })
+          return
+        }
+      }
+
+      let databaseConnectionParams = routeMatch(pathname, '/internal/v1/admin/database-connections/:id/test')
+      if (request.method === 'POST' && databaseConnectionParams) {
+        requireSourceAdmin(principal)
+        requireDatabaseConnectionStore()
+        requireDatabaseConnectionTester()
+        const databaseConnectionId = requiredDatabaseConnectionId(databaseConnectionParams.id)
+        const profile = await store.getDatabaseConnection(databaseConnectionId)
+        if (!profile) throw new AppError(404, 'database_connection_not_found', 'Database connection was not found')
+        const test = await databasePuller.testDatabaseConnectionTransport(profile.connection)
+        sendJson(response, 200, {
+          data: {
+            databaseConnectionId: profile.id,
+            revision: profile.revision,
+            ...test,
+            testedAt: new Date().toISOString(),
+          },
+          requestId,
+        })
+        return
+      }
+
+      databaseConnectionParams = routeMatch(pathname, '/internal/v1/admin/database-connections/:id')
+      if (databaseConnectionParams && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireDatabaseConnectionStore()
+        const databaseConnectionId = requiredDatabaseConnectionId(databaseConnectionParams.id)
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter(
+          (field) => !['revision', 'displayName', 'connection'].includes(field),
+        )
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported database connection fields: ${unsupported.join(', ')}`)
+        }
+        if (!Number.isSafeInteger(body?.revision) || body.revision < 1) {
+          throw new AppError(400, 'invalid_revision', 'revision must be a positive integer')
+        }
+        const hasDisplayName = Object.prototype.hasOwnProperty.call(body, 'displayName')
+        const hasConnection = Object.prototype.hasOwnProperty.call(body, 'connection')
+        if (!hasDisplayName && !hasConnection) {
+          throw new AppError(400, 'invalid_request', 'displayName or connection is required')
+        }
+        if (hasDisplayName && (typeof body.displayName !== 'string' || !body.displayName.trim())) {
+          throw new AppError(400, 'invalid_request', 'displayName must be a non-blank string')
+        }
+        const update = async () => {
+          const current = await store.getDatabaseConnection(databaseConnectionId)
+          if (!current) throw new AppError(404, 'database_connection_not_found', 'Database connection was not found')
+          if (current.revision !== body.revision) {
+            throw new AppError(409, 'database_connection_revision_conflict', 'Database connection changed; reload before saving', {
+              expectedRevision: body.revision,
+              currentRevision: current.revision,
+            })
+          }
+          const connection = hasConnection
+            ? mergedDatabaseTransport(current.connection, body.connection)
+            : null
+          if (connection) {
+            requireDatabaseConnectionTester()
+            await databasePuller.testDatabaseConnectionTransport(connection)
+          }
+          return store.updateDatabaseConnection(current.id, {
+            ...(hasDisplayName ? { displayName: body.displayName.trim() } : {}),
+            ...(connection ? { connection } : {}),
+          }, { expectedRevision: body.revision })
+        }
+        const updated = hasConnection
+          ? await withPausedDatabaseConnectionReferences(databaseConnectionId, update)
+          : await update()
+        sendJson(response, 200, { data: await databaseConnectionView(updated), requestId })
+        return
+      }
+      if (databaseConnectionParams && request.method === 'DELETE') {
+        requireSourceAdmin(principal)
+        requireDatabaseConnectionStore()
+        const deleted = await store.deleteDatabaseConnection(requiredDatabaseConnectionId(databaseConnectionParams.id))
+        sendJson(response, 200, { data: safeDatabaseConnection(deleted), requestId })
+        return
+      }
+
       // ---- external sources (P4) ------------------------------------------
       //
       // Source configuration includes the upstream password by explicit
@@ -1811,6 +2069,79 @@ export function createApp({
         }
         sendJson(response, 200, {
           data: await provinceOpinionPipeline.resetCheckpoint(body?.confirmPipelineKey),
+          requestId,
+        })
+        return
+      }
+
+      if (pathname === '/internal/v1/admin/pipelines/mobile-commerce') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        if (request.method === 'GET') {
+          sendJson(response, 200, { data: await mobileCommercePipeline.get(), requestId })
+          return
+        }
+        if (request.method === 'PUT') {
+          sendJson(response, 200, {
+            data: await mobileCommercePipeline.configure(await readJson(request)),
+            requestId,
+          })
+          return
+        }
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/mobile-commerce/status') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter(
+          (field) => !['status', 'writerContractAttestation'].includes(field),
+        )
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported status fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await mobileCommercePipeline.setStatus(body?.status, {
+            approvedBy: principal.memberId || 'admin-token',
+            writerContractAttestation: body?.writerContractAttestation ?? null,
+          }),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/mobile-commerce/sync') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 202, {
+          data: await mobileCommercePipeline.sync(await readJson(request)),
+          requestId,
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/pipelines/mobile-commerce/progress') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, { data: await mobileCommercePipeline.progress(), requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/mobile-commerce/resume') {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        sendJson(response, 200, { data: await mobileCommercePipeline.resumeFailedTask(), requestId })
+        return
+      }
+      if (
+        request.method === 'POST'
+        && pathname === '/internal/v1/admin/pipelines/mobile-commerce/checkpoint/reset'
+      ) {
+        requireSourceAdmin(principal)
+        requireDatabasePuller()
+        const body = await readJson(request)
+        const unsupported = Object.keys(body || {}).filter((field) => field !== 'confirmPipelineKey')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported checkpoint reset fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await mobileCommercePipeline.resetCheckpoint(body?.confirmPipelineKey),
           requestId,
         })
         return
@@ -2223,12 +2554,17 @@ export function createApp({
         if (!Number.isInteger(syncIntervalSeconds) || syncIntervalSeconds < 60 || syncIntervalSeconds > 86_400) {
           throw new AppError(400, 'invalid_sync_interval', 'syncIntervalSeconds must be between 60 and 86400')
         }
+        const databaseConnectionId = body.databaseConnectionId ?? null
         if (sourceKind === 'database') {
-          validateDatabaseConnection(body.connection)
-          if (typeof databasePuller?.testConnection !== 'function') {
+          if (typeof databasePuller?.testSourceCandidate !== 'function') {
             throw new AppError(503, 'source_validation_unavailable', 'Database source creation requires the PostgreSQL test workload')
           }
-          await databasePuller.testConnection(body.connection)
+          await databasePuller.testSourceCandidate({
+            databaseConnectionId,
+            connection: body.connection || {},
+          })
+        } else if (databaseConnectionId != null) {
+          throw new AppError(400, 'wrong_source_kind', 'Shared database connections require sourceKind database')
         }
         let sourceConnection = body.connection || {}
         let selectedRule = null
@@ -2300,6 +2636,7 @@ export function createApp({
               platform,
               objectType,
               status: sourceKind === 'database' ? 'paused' : 'active',
+              databaseConnectionId,
               connection: sourceConnection,
               syncIntervalSeconds,
             })
@@ -2320,7 +2657,7 @@ export function createApp({
         const initialSource = await requireSource(params.key)
         const body = await readJson(request)
         const unsupported = Object.keys(body || {}).filter(
-          (field) => !['connection', 'status', 'syncIntervalSeconds'].includes(field),
+          (field) => !['databaseConnectionId', 'connection', 'status', 'syncIntervalSeconds'].includes(field),
         )
         if (unsupported.length > 0) {
           throw new AppError(400, 'unsupported_fields', `Unsupported source fields: ${unsupported.join(', ')}`)
@@ -2328,7 +2665,8 @@ export function createApp({
         if (body.status != null && !['active', 'paused'].includes(body.status)) {
           throw new AppError(400, 'invalid_status', 'status must be active or paused')
         }
-        const changesConnection = body.connection != null
+        const hasDatabaseConnection = Object.prototype.hasOwnProperty.call(body, 'databaseConnectionId')
+        const changesConnection = body.connection != null || hasDatabaseConnection
         if (body.syncIntervalSeconds != null && (
           !Number.isInteger(body.syncIntervalSeconds) || body.syncIntervalSeconds < 60 || body.syncIntervalSeconds > 86_400
         )) {
@@ -2353,23 +2691,34 @@ export function createApp({
               throw new AppError(409, 'source_draining', 'Wait for the running batch to reach its checkpoint before changing connection metadata')
             }
           }
-          const mergedConnection = { ...source.connection, ...(body.connection || {}) }
-          if (body.connection && Object.keys(body.connection).some((field) => (
-            ['host', 'port', 'database', 'username', 'password', 'sslMode'].includes(field)
-          ))) {
-            delete mergedConnection.dsnEnv
-          }
-          if (typeof body.connection?.dsnEnv === 'string') {
-            for (const field of ['host', 'port', 'database', 'username', 'password', 'sslMode']) {
-              delete mergedConnection[field]
+          const candidateDatabaseConnectionId = hasDatabaseConnection
+            ? body.databaseConnectionId
+            : source.databaseConnectionId
+          const locatorFields = ['schema', 'table', 'cursorColumn', 'idColumn', 'sourceContractId']
+          const baseConnection = candidateDatabaseConnectionId && !source.databaseConnectionId
+            ? Object.fromEntries(Object.entries(source.connection || {}).filter(([field]) => locatorFields.includes(field)))
+            : source.connection
+          const mergedConnection = { ...(baseConnection || {}), ...(body.connection || {}) }
+          if (!candidateDatabaseConnectionId) {
+            if (body.connection && Object.keys(body.connection).some((field) => (
+              ['host', 'port', 'database', 'username', 'password', 'sslMode'].includes(field)
+            ))) {
+              delete mergedConnection.dsnEnv
+            }
+            if (typeof body.connection?.dsnEnv === 'string') {
+              for (const field of ['host', 'port', 'database', 'username', 'password', 'sslMode']) {
+                delete mergedConnection[field]
+              }
             }
           }
           if (changesConnection) {
-            validateDatabaseConnection(mergedConnection)
-            if (typeof databasePuller?.testConnection !== 'function') {
+            if (typeof databasePuller?.testSourceCandidate !== 'function') {
               throw new AppError(503, 'source_validation_unavailable', 'Database source connection changes require the PostgreSQL test workload')
             }
-            await databasePuller.testConnection(mergedConnection)
+            await databasePuller.testSourceCandidate({
+              databaseConnectionId: candidateDatabaseConnectionId,
+              connection: mergedConnection,
+            })
           }
           if (body.status === 'active' && source.status !== 'active') {
             requireDatabasePuller()
@@ -2392,6 +2741,7 @@ export function createApp({
           return store.updateExternalSource(params.key, {
             status: body.status ?? null,
             connection: changesConnection ? mergedConnection : null,
+            ...(hasDatabaseConnection ? { databaseConnectionId: body.databaseConnectionId ?? null } : {}),
             ...(body.syncIntervalSeconds == null ? {} : { syncIntervalSeconds: body.syncIntervalSeconds }),
           })
         }
@@ -3506,6 +3856,17 @@ export function createApp({
         sendJson(response, 200, { ...payload, requestId })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/mobile-commerce/items') {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.mobileCommerceItems(
+            context,
+            Object.fromEntries(searchParams.entries()),
+          ),
+          requestId,
+        })
+        return
+      }
       if (request.method === 'POST' && pathname === '/api/v1/tools/tokenize') {
         const context = await requirePublic(request)
         const result = await service.tokenize(context, {
@@ -3562,6 +3923,19 @@ export function createApp({
         const context = await requirePublic(request)
         sendJson(response, 200, {
           data: await service.sourceCatalog(context, Object.fromEntries(searchParams.entries())),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/api/v1/data/source-catalog/:id/items')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        sendJson(response, 200, {
+          data: await service.sourceCatalogItems(
+            context,
+            params.id,
+            Object.fromEntries(searchParams.entries()),
+          ),
           requestId,
         })
         return
