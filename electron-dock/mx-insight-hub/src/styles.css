@@ -8784,25 +8784,32 @@ button.mih-catalog-status {
   background: #03101b;
 }
 
-.mih-market-product-image > img {
+.mih-market-product-image > img,
+.mih-market-product-image__placeholder {
   display: block;
   width: 100%;
   aspect-ratio: 1;
+}
+
+.mih-market-product-image > img {
   object-fit: cover;
 }
 
-.mih-market-product-image > small {
-  position: absolute;
-  right: 4px;
-  bottom: 4px;
-  max-width: calc(100% - 8px);
-  overflow: hidden;
-  border-radius: var(--qp-radius-xs);
-  padding: 2px 4px;
-  background: rgb(1 9 16 / 0.78);
-  color: #b8cbd3;
+.mih-market-product-image__placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background:
+    linear-gradient(135deg, transparent 48%, color-mix(in srgb, var(--qp-line) 42%, transparent) 49% 51%, transparent 52%),
+    color-mix(in srgb, var(--qp-bg-4) 88%, var(--qp-bg-3));
+  color: var(--qp-text-4);
+}
+
+.mih-market-product-image__placeholder > small {
   font-size: 8px;
-  text-overflow: ellipsis;
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -8905,7 +8912,7 @@ button.mih-catalog-status {
   border: 0;
 }
 
-.mih-market-shelf-preview button .mih-market-product-image > small {
+.mih-market-shelf-preview button .mih-market-product-image__placeholder > small {
   display: none;
 }
 
@@ -9166,7 +9173,7 @@ button.mih-catalog-status {
   -webkit-line-clamp: 2;
 }
 
-.mih-market-table__product .mih-market-product-image > small {
+.mih-market-table__product .mih-market-product-image__placeholder > small {
   display: none;
 }
 

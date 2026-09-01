@@ -31,13 +31,15 @@ test('virtual supermarket renderer exposes the three approved modes and real ras
   for (const asset of [
     'assets/virtual-supermarket/supermarket-floor.webp',
     'assets/virtual-supermarket/supermarket-aisle.webp',
-    'assets/virtual-supermarket/products/unverified-product.webp',
   ]) assert.match(pageSource, new RegExp(asset.replaceAll('/', '\\/'), 'u'))
 
   assert.match(pageSource, /<nav className="qp-panel mih-market-departments"/u)
   assert.match(pageSource, /<figure className="qp-panel mih-market-floor"/u)
   assert.match(pageSource, /<table className="mih-table mih-market-table">/u)
-  assert.match(pageSource, /源端未提供已验证图片/u)
+  assert.match(pageSource, /源端未提供已验证商品图片/u)
+  assert.match(pageSource, /mih-market-product-image__placeholder/u)
+  assert.match(pageSource, /暂无图片/u)
+  assert.doesNotMatch(pageSource, /unverified-product\.webp/u)
   assert.doesNotMatch(pageSource, /<select\b|<canvas\b|<svg\b|three|WebGL/iu)
   assert.match(styleSource, /\.mih-market-panorama/u)
   assert.match(styleSource, /var\(--qp-bg-3\)/u)
@@ -128,8 +130,14 @@ test('product editing preserves source provenance and sends only dirty overrides
   assert.match(pageSource, /currency: product\.listingOverrides\.price\?\.currency \|\| ''/u)
   assert.match(pageSource, /币种（ISO 4217）/u)
   assert.match(pageSource, /pattern="\[A-Z\]\{3\}"/u)
-  assert.match(pageSource, /`源价 \$\{sourceDisplay\} · 币种未确认`/u)
-  assert.match(pageSource, /price\.provenance === 'source'/u)
+  assert.match(pageSource, /function readablePriceValue/u)
+  assert.match(pageSource, /parsed\.integer/u)
+  assert.match(pageSource, /minorUnits === BigInt\(origin\)/u)
+  assert.match(pageSource, /function readableSpecification/u)
+  assert.match(pageSource, /JSON\.parse\(trimmed\)/u)
+  assert.match(pageSource, /!value\.startsWith\('\/\/'\)/u)
+  assert.doesNotMatch(pageSource, /源价/u)
+  assert.doesNotMatch(pageSource, /JSON\.stringify/u)
   assert.match(pageSource, /币种未确认/u)
   assert.doesNotMatch(pageSource, /sourceFields\.currency \|\| 'CNY'/u)
 })

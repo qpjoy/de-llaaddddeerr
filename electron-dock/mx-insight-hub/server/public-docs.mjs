@@ -2368,7 +2368,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
           display: {
             type: ['string', 'null'],
-            description: 'Customer-facing source or curated price text; it does not imply a currency.',
+            description: 'Normalized customer-facing amount text; raw structured source evidence is never returned here and it does not imply a currency.',
           },
           provenance: { type: 'string', enum: ['curated', 'source', 'missing'] },
         },

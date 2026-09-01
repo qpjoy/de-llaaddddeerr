@@ -6,6 +6,7 @@ import {
   CaretRight,
   CheckCircle,
   Funnel,
+  ImageSquare,
   List,
   MagnifyingGlass,
   MapPin,
@@ -29,7 +30,6 @@ import {
 
 const FLOOR_ASSET = 'assets/virtual-supermarket/supermarket-floor.webp'
 const AISLE_ASSET = 'assets/virtual-supermarket/supermarket-aisle.webp'
-const UNVERIFIED_PRODUCT_ASSET = 'assets/virtual-supermarket/products/unverified-product.webp'
 
 const MODE_OPTIONS = [
   { value: 'browse', label: '逛超市', icon: Storefront },
@@ -83,32 +83,120 @@ function formatDateTime(value) {
   }).format(date)
 }
 
+function structuredValue(value) {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) return trimmed
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return null
+  }
+}
+
+function readablePriceValue(value, depth = 0) {
+  if (depth > 3 || value == null || value === '') return ''
+  const parsed = structuredValue(value)
+  if (parsed == null) return ''
+  if (typeof parsed === 'number') return Number.isFinite(parsed) ? String(parsed) : ''
+  if (typeof parsed === 'string') {
+    const text = parsed.trim()
+    return text === '[object Object]' ? '' : text
+  }
+  if (Array.isArray(parsed)) {
+    return parsed.map((item) => readablePriceValue(item, depth + 1)).find(Boolean) || ''
+  }
+  if (typeof parsed !== 'object') return ''
+
+  if (Object.hasOwn(parsed, 'integer') || Object.hasOwn(parsed, 'decimal')) {
+    const integer = readablePriceValue(parsed.integer, depth + 1)
+    const decimal = readablePriceValue(parsed.decimal, depth + 1)
+    const origin = readablePriceValue(parsed.origin, depth + 1)
+    const suffix = typeof parsed.suffix === 'string' ? parsed.suffix.trim() : ''
+    if (
+      !suffix
+      && /^\d{1,18}$/u.test(integer)
+      && /^\d{0,2}$/u.test(decimal)
+      && /^\d{1,20}$/u.test(origin)
+    ) {
+      const normalizedInteger = integer.replace(/^0+(?=\d)/u, '')
+      const minorUnits = BigInt(normalizedInteger) * 100n + BigInt(decimal.padEnd(2, '0') || '0')
+      if (minorUnits === BigInt(origin)) return `${normalizedInteger}${decimal ? `.${decimal}` : ''}`
+    }
+    return ''
+  }
+  for (const key of ['display', 'formatted', 'text', 'amount', 'value', 'price']) {
+    const candidate = readablePriceValue(parsed[key], depth + 1)
+    if (candidate) return candidate
+  }
+  return ''
+}
+
+function readableSpecification(value, depth = 0) {
+  if (depth > 3 || value == null || value === '') return ''
+  const parsed = structuredValue(value)
+  if (parsed == null) return ''
+  if (typeof parsed === 'number') return Number.isFinite(parsed) ? String(parsed) : ''
+  if (typeof parsed === 'string') {
+    const text = parsed.trim()
+    return text === '[object Object]' ? '' : text
+  }
+  if (Array.isArray(parsed)) {
+    return [...new Set(parsed.map((item) => readableSpecification(item, depth + 1)).filter(Boolean))].join(' / ')
+  }
+  if (typeof parsed !== 'object') return ''
+
+  for (const key of ['display', 'formatted', 'text', 'specification', 'spec', 'skuName', 'model', 'size']) {
+    const candidate = readableSpecification(parsed[key], depth + 1)
+    if (candidate) return candidate
+  }
+  const scalarValue = readableSpecification(parsed.value, depth + 1)
+  const unit = typeof parsed.unit === 'string' ? parsed.unit.trim() : ''
+  const label = readableSpecification(parsed.label ?? parsed.name, depth + 1)
+  if (scalarValue) return label ? `${label}：${scalarValue}${unit}` : `${scalarValue}${unit}`
+  return label
+}
+
 function formatPrice(price) {
-  const sourceDisplay = price?.display == null ? '' : String(price.display).trim()
-  if (!price || price.amount == null || price.amount === '') {
-    return price?.provenance === 'source' && sourceDisplay
-      ? `源价 ${sourceDisplay} · 币种未确认`
-      : '价格待核验'
-  }
-  const amount = String(price.amount)
+  const amount = readablePriceValue(price?.amount) || readablePriceValue(price?.display) || readablePriceValue(price)
+  if (!amount) return '价格待核验'
   const currency = String(price.currency || '').toUpperCase()
-  if (price.provenance === 'source') {
-    return currency
-      ? `源价 ${sourceDisplay || amount} · ${currency}`
-      : `源价 ${sourceDisplay || amount} · 币种未确认`
-  }
   if (currency === 'CNY') return `¥ ${amount}`
   if (currency) return `${currency} ${amount}`
   return `${amount} · 币种未确认`
 }
 
+function formatSourcePrice(value) {
+  const amount = readablePriceValue(value)
+  return amount ? `${amount} · 币种未确认` : '源端未提供可识别价格'
+}
+
 function mediaUrl(item) {
-  const media = item?.product?.media ?? item?.media
-  const first = Array.isArray(media) ? media[0] : media
-  const candidate = typeof first === 'string' ? first : first?.url
-  return typeof candidate === 'string' && (candidate.startsWith('/') || /^https:\/\//u.test(candidate))
-    ? candidate
-    : UNVERIFIED_PRODUCT_ASSET
+  const product = asObject(item?.product)
+  const candidates = [
+    product.media,
+    product.images,
+    product.imageUrl,
+    product.image_url,
+    product.coverUrl,
+    product.cover_url,
+    product.thumbnailUrl,
+    product.thumbnail_url,
+    item?.media,
+    item?.images,
+    item?.imageUrl,
+    item?.image_url,
+  ].flatMap((candidate) => Array.isArray(candidate) ? candidate : [candidate])
+  for (const candidate of candidates) {
+    const value = typeof candidate === 'string'
+      ? candidate
+      : candidate?.url ?? candidate?.src ?? candidate?.imageUrl ?? candidate?.image_url
+    if (
+      typeof value === 'string'
+      && ((value.startsWith('/') && !value.startsWith('//')) || /^https:\/\//u.test(value))
+    ) return value
+  }
+  return null
 }
 
 function normalizedCategory(raw, index = 0) {
@@ -163,6 +251,7 @@ function normalizeProduct(raw) {
   const status = String(listing.status ?? item.status ?? 'off_shelf') === 'on_shelf'
     ? 'on_shelf'
     : 'off_shelf'
+  const imageUrl = mediaUrl(item)
   return {
     raw: item,
     id: String(item.id ?? item.productId ?? item.canonicalId ?? ''),
@@ -171,7 +260,7 @@ function normalizeProduct(raw) {
     explicit: Boolean(listing.explicit),
     status,
     title: String(product.title ?? item.title ?? '未命名商品'),
-    specification: product.specification ?? item.specification ?? null,
+    specification: readableSpecification(product.specification ?? item.specification) || null,
     brand: product.brand ?? item.brand ?? null,
     price: asObject(product.price ?? item.price),
     provenance: product.provenance ?? item.provenance ?? null,
@@ -183,7 +272,7 @@ function normalizeProduct(raw) {
     },
     sourceFields: {
       title: fieldState.displayTitle?.source ?? sourceEvidence.title ?? null,
-      specification: fieldState.specification?.source ?? null,
+      specification: readableSpecification(fieldState.specification?.source) || null,
       price: fieldState.price?.source ?? sourceEvidence.price ?? null,
       currency: fieldState.currency?.source ?? null,
     },
@@ -205,8 +294,8 @@ function normalizeProduct(raw) {
     shelfKey: category.shelf.key,
     shelfName: category.shelf.name,
     position: placement.position ?? item.position ?? item.shelfPosition ?? listing.position ?? null,
-    imageUrl: mediaUrl(item),
-    hasVerifiedMedia: mediaUrl(item) !== UNVERIFIED_PRODUCT_ASSET,
+    imageUrl,
+    hasVerifiedMedia: Boolean(imageUrl),
   }
 }
 
@@ -288,10 +377,19 @@ function groupDepartments(categories, products) {
 }
 
 function ProductImage({ product, className = '' }) {
+  const [imageFailed, setImageFailed] = useState(false)
+  useEffect(() => setImageFailed(false), [product?.imageUrl])
+  const showImage = Boolean(product?.imageUrl && !imageFailed)
   return (
     <span className={`mih-market-product-image ${className}`.trim()}>
-      <img src={product?.imageUrl || UNVERIFIED_PRODUCT_ASSET} alt={product?.hasVerifiedMedia ? product.title : ''} />
-      {!product?.hasVerifiedMedia ? <small>中性示意图</small> : null}
+      {showImage ? (
+        <img src={product.imageUrl} alt={product.title} onError={() => setImageFailed(true)} />
+      ) : (
+        <span className="mih-market-product-image__placeholder" role="img" aria-label={`${product?.title || '商品'}暂无图片`}>
+          <ImageSquare size={22} aria-hidden="true" />
+          <small>暂无图片</small>
+        </span>
+      )}
     </span>
   )
 }
@@ -390,7 +488,7 @@ function ProductEvidence({ product, shelfProducts, loading, error, onRetry, onSe
         </div>
       </section>
       {!product.hasVerifiedMedia ? (
-        <p className="mih-market-media-note"><WarningCircle size={15} aria-hidden="true" />源端未提供已验证图片，当前图片仅作分类示意。</p>
+        <p className="mih-market-media-note"><WarningCircle size={15} aria-hidden="true" />源端未提供已验证商品图片，当前显示暂无图片占位。</p>
       ) : null}
       <dl className="mih-market-evidence__facts">
         <div><dt>分类路径</dt><dd>{product.departmentName} / {product.aisleName} / {product.shelfName}</dd></div>
@@ -666,14 +764,14 @@ function EditProductModal({ product, categories, busy, error, onClose, onSave })
           <label className="qp-field"><span className="mih-sr-only">展示标题覆盖</span><input ref={titleRef} className="qp-input" value={form.titleOverride} maxLength={512} placeholder={product.sourceFields.title || '输入人工展示标题'} onChange={(event) => setForm({ ...form, titleOverride: event.target.value })} /></label>
         </section>
         <section className="mih-market-override-field">
-          <header><span><strong>展示规格覆盖</strong><small>源值：{product.sourceFields.specification || '源端未提供；清除后不展示规格'}</small></span><button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={!form.specificationOverride} onClick={() => setForm({ ...form, specificationOverride: '' })}>清除人工覆盖</button></header>
+          <header><span><strong>展示规格覆盖</strong><small>源值：{product.sourceFields.specification || '规格待核验；清除后不展示规格'}</small></span><button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={!form.specificationOverride} onClick={() => setForm({ ...form, specificationOverride: '' })}>清除人工覆盖</button></header>
           <label className="qp-field"><span className="mih-sr-only">展示规格覆盖</span><input className="qp-input" value={form.specificationOverride} maxLength={1000} placeholder="输入人工核验规格" onChange={(event) => setForm({ ...form, specificationOverride: event.target.value })} /></label>
         </section>
         <section className="mih-market-override-field">
-          <header><span><strong>展示价格覆盖</strong><small>源值：{product.sourceFields.price == null ? '源端未提供' : `${product.sourceFields.price}（币种未确认）`}</small></span><button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={!form.priceAmount} onClick={() => setForm({ ...form, priceAmount: '', currency: '' })}>恢复源值</button></header>
+          <header><span><strong>展示价格覆盖</strong><small>源值：{formatSourcePrice(product.sourceFields.price)}</small></span><button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={!form.priceAmount} onClick={() => setForm({ ...form, priceAmount: '', currency: '' })}>恢复源值</button></header>
           <div className="mih-market-edit__row">
-            <label className="qp-field"><span className="qp-field__label">价格金额</span><input className="qp-input" inputMode="decimal" value={form.priceAmount} pattern="[0-9]+(?:\\.[0-9]{1,2})?" placeholder={product.sourceFields.price == null ? '输入人工价格' : String(product.sourceFields.price)} onChange={(event) => setForm({ ...form, priceAmount: event.target.value })} /></label>
-            <label className="qp-field"><span className="qp-field__label">币种（ISO 4217）</span><input className="qp-input mih-mono" value={form.currency} maxLength={3} pattern="[A-Z]{3}" placeholder="例如 CNY" onChange={(event) => setForm({ ...form, currency: event.target.value.toUpperCase() })} /><span className="qp-field__hint">{priceInvalid ? '人工价格必须填写三位大写币种代码。' : '源价币种未确认；这里只设置人工覆盖。'}</span></label>
+            <label className="qp-field"><span className="qp-field__label">价格金额</span><input className="qp-input" inputMode="decimal" value={form.priceAmount} pattern="[0-9]+(?:\\.[0-9]{1,2})?" placeholder={readablePriceValue(product.sourceFields.price) || '输入人工价格'} onChange={(event) => setForm({ ...form, priceAmount: event.target.value })} /></label>
+            <label className="qp-field"><span className="qp-field__label">币种（ISO 4217）</span><input className="qp-input mih-mono" value={form.currency} maxLength={3} pattern="[A-Z]{3}" placeholder="例如 CNY" onChange={(event) => setForm({ ...form, currency: event.target.value.toUpperCase() })} /><span className="qp-field__hint">{priceInvalid ? '人工价格必须填写三位大写币种代码。' : '来源币种未确认；这里只设置人工覆盖。'}</span></label>
           </div>
         </section>
         <div className="mih-market-edit__row">

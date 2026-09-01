@@ -380,11 +380,63 @@ function priceFrom(item, commerce) {
       provenance: 'curated',
     }
   }
-  const source = commerce.product?.price == null ? null : String(commerce.product.price).trim()
-  if (source && PRICE_PATTERN.test(source)) {
-    return { amount: source, currency: null, display: source, provenance: 'source' }
+  const source = sourcePriceEvidence(commerce.product?.price)
+  return {
+    amount: source.amount,
+    currency: null,
+    display: source.amount,
+    provenance: source.present ? 'source' : 'missing',
   }
-  return { amount: null, currency: null, display: source, provenance: source ? 'source' : 'missing' }
+}
+
+function sourcePriceEvidence(value) {
+  if (value == null) return { amount: null, present: false, rawText: null }
+  let candidate = value
+  let rawText
+  if (typeof value === 'string') {
+    rawText = value.trim()
+    if (!rawText) return { amount: null, present: false, rawText: null }
+    if (PRICE_PATTERN.test(rawText)) return { amount: rawText, present: true, rawText }
+    if (rawText.length > 512) return { amount: null, present: true, rawText }
+    try {
+      candidate = JSON.parse(rawText)
+    } catch {
+      return { amount: null, present: true, rawText }
+    }
+  } else {
+    try {
+      rawText = JSON.stringify(value)
+    } catch {
+      rawText = String(value)
+    }
+  }
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    return { amount: null, present: true, rawText }
+  }
+  const allowedFields = new Set(['decimal', 'integer', 'origin', 'suffix'])
+  if (Object.keys(candidate).some((field) => !allowedFields.has(field))) {
+    return { amount: null, present: true, rawText }
+  }
+  const suffix = candidate.suffix == null ? '' : String(candidate.suffix).trim()
+  const integer = candidate.integer == null ? '' : String(candidate.integer).trim()
+  const decimal = candidate.decimal == null ? '' : String(candidate.decimal).trim()
+  const origin = candidate.origin == null ? '' : String(candidate.origin).trim()
+  if (
+    suffix
+    || !/^\d{1,18}$/u.test(integer)
+    || (decimal && !/^\d{1,2}$/u.test(decimal))
+    || !/^\d{1,20}$/u.test(origin)
+  ) {
+    return { amount: null, present: true, rawText }
+  }
+  const normalizedInteger = integer.replace(/^0+(?=\d)/u, '')
+  const amount = decimal ? `${normalizedInteger}.${decimal}` : normalizedInteger
+  const minorUnits = BigInt(normalizedInteger) * 100n + BigInt(decimal.padEnd(2, '0') || '0')
+  return {
+    amount: PRICE_PATTERN.test(amount) && minorUnits === BigInt(origin) ? amount : null,
+    present: true,
+    rawText,
+  }
 }
 
 function marketplaceView(value = {}) {
@@ -459,7 +511,7 @@ export function publicVirtualSupermarketProduct(item) {
 export function adminVirtualSupermarketProduct(item) {
   const publicItem = publicVirtualSupermarketProduct(item)
   const commerce = item.stableFields?.commerce || {}
-  const sourcePrice = commerce.product?.price == null ? null : String(commerce.product.price).trim()
+  const sourcePrice = sourcePriceEvidence(commerce.product?.price).rawText
   const sourceCurrency = null
   return {
     ...publicItem,

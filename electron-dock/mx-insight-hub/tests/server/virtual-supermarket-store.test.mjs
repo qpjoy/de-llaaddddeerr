@@ -2,7 +2,10 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../../server/data/virtual-supermarket.mjs'
+import {
+  publicVirtualSupermarketProduct,
+  VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID,
+} from '../../server/data/virtual-supermarket.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 
@@ -464,6 +467,44 @@ test('listing placement edits preserve overrides and explicit null clears them',
   assert.equal(cleared.listing.specification, null)
   assert.equal(cleared.listing.priceAmount, null)
   assert.equal(cleared.listing.currency, null)
+})
+
+test('virtual-supermarket projection renders structured source prices without exposing JSON', async () => {
+  const store = new MemoryStore()
+  const record = canonicalRecord()
+  record.stableFields.commerce.product.price = JSON.stringify({
+    origin: 3990,
+    integer: '39',
+    decimal: '9',
+    suffix: '',
+  })
+  store.canonicalRecords.set(RECORD_ID, record)
+  const { item } = await store.updateVirtualSupermarketProduct(
+    RECORD_ID,
+    { status: 'on_shelf' },
+    { expectedRevision: 0, actor: 'price-shape', eventType: 'publish' },
+  )
+  const product = publicVirtualSupermarketProduct(item)
+  assert.deepEqual(product.product.price, {
+    amount: '39.9',
+    currency: null,
+    display: '39.9',
+    provenance: 'source',
+  })
+  assert.doesNotMatch(JSON.stringify(product), /(?:origin|integer|decimal|suffix)/u)
+
+  item.stableFields.commerce.product.price = JSON.stringify({
+    origin: 3991,
+    integer: '39',
+    decimal: '9',
+    suffix: '',
+  })
+  assert.deepEqual(publicVirtualSupermarketProduct(item).product.price, {
+    amount: null,
+    currency: null,
+    display: null,
+    provenance: 'source',
+  })
 })
 
 test('Memory and Postgres product reads expose the same governed listing shape', async () => {
