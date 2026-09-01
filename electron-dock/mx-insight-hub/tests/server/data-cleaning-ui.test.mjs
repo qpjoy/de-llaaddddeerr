@@ -61,10 +61,59 @@ test('mobile-commerce task plan exposes the fixed stored-only contract and guard
   assert.match(pageSource, /writerContractConfirmed/u)
   assert.match(pageSource, /unknown \/ unmapped/u)
   assert.match(pageSource, /Canonical 入库 → 异步检索投影 → Elasticsearch 搜索/u)
+  assert.match(pageSource, /stored-only · 当前从数据库表增量清洗；远端主动获取未接入，不影响数据库清洗模式/u)
+  assert.match(pageSource, /actionError\?\.details\?\.issues/u)
+  assert.match(pageSource, /<ErrorState error=\{actionError\}/u)
+  assert.match(pageSource, /pipeline\.activationWarnings/u)
+  assert.match(pageSource, /以下兼容性警告不阻止数据库表清洗/u)
   assert.doesNotMatch(pageSource, /远端刷新（接口未接入）/u)
   assert.match(pageSource, /confirmPipelineKey: resetConfirmation/u)
   assert.match(pageSource, /<DatabaseConnectionField/u)
   assert.match(apiSource, /pipelines\/mobile-commerce\/status/u)
   assert.match(apiSource, /writerContractAttestation/u)
   assert.match(apiSource, /pipelines\/mobile-commerce\/checkpoint\/reset/u)
+})
+
+test('every scheduled cleaning plan saves its runtime interval independently from connection changes', async () => {
+  const [, , pageSource] = await frontendSources()
+  const section = (start, end) => {
+    const from = pageSource.indexOf(start)
+    const to = pageSource.indexOf(end)
+    assert.notEqual(from, -1, start)
+    assert.notEqual(to, -1, end)
+    return pageSource.slice(from, to)
+  }
+
+  assert.equal([...pageSource.matchAll(/<RuntimeSyncIntervalControl\b/gu)].length, 5)
+  assert.match(pageSource, /const SYNC_INTERVAL_APPLY_MESSAGE = '当前批次不变，下一次调度检查按新间隔重新计算'/u)
+  assert.match(pageSource, /'保存同步间隔'/u)
+
+  for (const call of [
+    /updateMobileCommercePipeline\(token, \{\s*syncIntervalSeconds: Number\(form\.syncIntervalSeconds\)/u,
+    /updateProvinceOpinionPipeline\(token, \{\s*syncIntervalSeconds: Number\(form\.syncIntervalSeconds\)/u,
+    /updateTelegramSqlitePipeline\(token, \{\s*syncIntervalSeconds: Number\(form\.syncIntervalSeconds\)/u,
+    /updateTelegramMonitorPipeline\(token, \{\s*syncIntervalSeconds: Number\(form\.syncIntervalSeconds\)/u,
+    /updateSource\(token, source\.sourceKey, \{ syncIntervalSeconds \}\)/u,
+  ]) assert.match(pageSource, call)
+
+  for (const [start, end] of [
+    ['function MobileCommercePipelineModal', 'function ProvinceOpinionPipelineModal'],
+    ['function ProvinceOpinionPipelineModal', 'function TelegramSqlitePipelineModal'],
+    ['function TelegramSqlitePipelineModal', 'function TelegramSqliteTaskCard'],
+    ['function TelegramPipelineModal', 'function TelegramTaskCard'],
+  ]) {
+    const connectionSave = section(start, end).match(
+      /const save = \(event\) => \{[\s\S]*?\n  \}\n\n  const saveSyncInterval/u,
+    )?.[0] || ''
+    assert.notEqual(connectionSave, '', start)
+    assert.doesNotMatch(connectionSave, /syncIntervalSeconds:/u, start)
+  }
+
+  const genericSubmit = section('function DatabaseSourceControl', 'function PipelineRunHistory').match(
+    /const submit = \(event\) => \{[\s\S]*?\n  \}\n\n  const saveSchedule/u,
+  )?.[0] || ''
+  assert.notEqual(genericSubmit, '')
+  assert.doesNotMatch(genericSubmit, /syncIntervalSeconds:/u)
+  assert.match(pageSource, /onSave=\{saveSyncInterval\} busy=\{Boolean\(busyAction\)\}/u)
+  assert.match(pageSource, /onSave=\{saveSchedule\} busy=\{busy\}/u)
 })

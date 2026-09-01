@@ -1301,6 +1301,101 @@ test('mobile-commerce schema discovery requires a unique capture id beyond compo
   assert.ok(result.issues.includes('no unique index proves id is a stable capture identity'))
 })
 
+test('mobile-commerce schema discovery reports writer-attested nullable DDL and a missing pull index as warnings', async () => {
+  const source = mobileCommercePullSource()
+  const mapping = mobileCommercePullMapping()
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+    },
+    queue: null,
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return {
+            rows: mobileCommerceDatabaseColumns().map((column) => ({
+              ...column,
+              is_nullable: ['id', 'platform', 'title', 'collected_at'].includes(column.column_name)
+                ? 'YES'
+                : column.is_nullable,
+            })),
+          }
+        }
+        if (sql.includes('greatest(c.reltuples')) {
+          return { rows: [{ estimated_rows: '5', total_bytes: '8192' }] }
+        }
+        if (sql.includes('FROM pg_indexes')) {
+          return { rows: mobileCommerceDatabaseIndexes({ cursor: false }) }
+        }
+        return { rows: [] }
+      },
+      async end() {},
+    }),
+  })
+
+  const result = await puller.describe(source.sourceKey)
+
+  assert.deepEqual(result.issues, [])
+  for (const name of ['id', 'platform', 'title', 'collected_at']) {
+    assert.ok(result.warnings.includes(
+      `mobile-commerce column ${name} allows NULL in DDL; the accepted writer contract must keep committed values non-null, and guarded pulls may scan or sort until upstream adds NOT NULL`,
+    ))
+  }
+  assert.ok(result.warnings.some((warning) => warning.includes('no index begins with (collected_at, id)')))
+})
+
+test('mobile-commerce progress treats nullable DDL and a missing composite index as warnings but blocks actual NULL values', async () => {
+  const source = mobileCommercePullSource()
+  const nullableColumns = mobileCommerceDatabaseColumns().map((column) => ({
+    ...column,
+    is_nullable: ['id', 'platform', 'title', 'collected_at'].includes(column.column_name)
+      ? 'YES'
+      : column.is_nullable,
+  }))
+  const progressWithNullCount = async (nullCount) => {
+    const puller = new DatabaseSourcePuller({
+      store: {
+        getExternalSource: async () => source,
+        getActiveMapping: async () => mobileCommercePullMapping(),
+      },
+      queue: { getCursor: async () => null },
+      poolFactory: () => ({
+        async query(sql) {
+          if (sql.includes('information_schema.columns')) return { rows: nullableColumns }
+          if (sql.includes('FROM pg_indexes')) {
+            return { rows: mobileCommerceDatabaseIndexes({ cursor: false }) }
+          }
+          if (sql.includes('__mx_required_null_0')) {
+            return { rows: [{
+              total_rows: '5',
+              __mx_required_null_0: '0',
+              __mx_required_null_1: nullCount,
+              __mx_required_null_2: '0',
+              __mx_required_null_3: '0',
+            }] }
+          }
+          throw new Error(`unexpected query: ${sql}`)
+        },
+        async end() {},
+      }),
+    })
+    return puller.progress(source.sourceKey)
+  }
+
+  const safe = await progressWithNullCount('0')
+  assert.equal(safe.blocker, null)
+  assert.equal(safe.totalRows, 5)
+  assert.ok(safe.warnings.some((warning) => warning.includes('platform allows NULL in DDL')))
+  assert.ok(safe.warnings.some((warning) => warning.includes('no index begins with (collected_at, id)')))
+
+  const unsafe = await progressWithNullCount('1')
+  assert.equal(unsafe.blocker, 'source_cursor_unsafe')
+  assert.deepEqual(unsafe.issues, [
+    'mobile-commerce writer-required column platform contains NULL values',
+  ])
+})
+
 test('database preview returns value-free shapes, never raw row content', async () => {
   const source = {
     id: 's1', sourceKey: 'telegram-monitor-messages', displayName: 'Telegram messages',
@@ -1522,7 +1617,79 @@ test('mobile-commerce pull rechecks cursor and identity indexes before reading r
   assert.equal(importStarts, 0)
 })
 
-test('mobile-commerce pull preserves source-local timestamp text and classifies from the current catalog snapshot', async () => {
+test('mobile-commerce nullable-DDL pull fails closed on actual NULL values in the guarded page snapshot', async () => {
+  const source = mobileCommercePullSource()
+  let pageSql = ''
+  let importStarts = 0
+  const checkpointWrites = []
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mobileCommercePullMapping(),
+      startImportRun: async () => {
+        importStarts += 1
+        throw new Error('import must not start after a writer-contract violation')
+      },
+    },
+    queue: {
+      getCursor: async () => ({ position: {
+        cursor: '2026-08-20T00:00:00.000Z',
+        lastId: '100',
+      } }),
+      saveCursor: async (_cursorId, position, options) => {
+        checkpointWrites.push({ position, options })
+      },
+    },
+    poolFactory: () => ({
+      async query(sql) {
+        if (sql.includes('information_schema.columns')) {
+          return {
+            rows: mobileCommerceDatabaseColumns().map((column) => ({
+              ...column,
+              is_nullable: ['id', 'platform', 'title', 'collected_at'].includes(column.column_name)
+                ? 'YES'
+                : column.is_nullable,
+            })),
+          }
+        }
+        if (sql.includes('FROM pg_indexes')) {
+          return { rows: mobileCommerceDatabaseIndexes({ cursor: false }) }
+        }
+        pageSql = sql
+        const alias = sql.match(/"collected_at"::text AS "([^"]+)"/)?.[1]
+        return { rows: [{
+          id: '4',
+          platform: null,
+          title: '违反合同的数据',
+          collected_at: new Date('2026-08-19T00:03:25.125Z'),
+          [alias]: '2026-08-19 00:03:25.125',
+        }] }
+      },
+      async end() {},
+    }),
+  })
+
+  await assert.rejects(
+    () => puller.pullBatch(source.sourceKey, { batchSize: 10 }),
+    (error) => (
+      error?.status === 409
+      && error?.code === 'source_contract_mismatch'
+      && error?.details?.issues?.includes('mobile-commerce writer-required column platform contains NULL values')
+    ),
+  )
+  assert.match(pageSql, /WHERE \("id" IS NULL OR "platform" IS NULL OR "title" IS NULL OR "collected_at" IS NULL\)/u)
+  assert.match(pageSql, /ORDER BY CASE WHEN/u)
+  assert.equal(importStarts, 0)
+  assert.deepEqual(checkpointWrites, [{
+    position: {
+      cursor: '2026-08-20T00:00:00.000Z',
+      lastId: '100',
+    },
+    options: { status: 'failed', error: 'source_contract_mismatch' },
+  }])
+})
+
+test('mobile-commerce pull accepts writer-attested nullable DDL and no composite performance index', async () => {
   const source = mobileCommercePullSource()
   const mapping = {
     ...mobileCommercePullMapping(),
@@ -1566,10 +1733,17 @@ test('mobile-commerce pull preserves source-local timestamp text and classifies 
     poolFactory: () => ({
       async query(sql) {
         if (sql.includes('information_schema.columns')) {
-          return { rows: mobileCommerceDatabaseColumns() }
+          return {
+            rows: mobileCommerceDatabaseColumns().map((column) => ({
+              ...column,
+              is_nullable: ['id', 'platform', 'title', 'collected_at'].includes(column.column_name)
+                ? 'YES'
+                : column.is_nullable,
+            })),
+          }
         }
         if (sql.includes('FROM pg_indexes')) {
-          return { rows: mobileCommerceDatabaseIndexes() }
+          return { rows: mobileCommerceDatabaseIndexes({ cursor: false }) }
         }
         const alias = sql.match(/"collected_at"::text AS "([^"]+)"/)?.[1]
         return { rows: [{

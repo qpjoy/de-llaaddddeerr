@@ -793,6 +793,36 @@ test('Telegram rejects mixed shared and inline configure payloads and can switch
   )
 })
 
+test('Telegram monitor hot-updates both task intervals while active and running without locking or probing', async () => {
+  const fixture = telegramPipelineFixture()
+  for (const source of fixture.sources.values()) source.status = 'active'
+  fixture.cursors.get('external:telegram-monitor-messages').status = 'running'
+  const connections = [...fixture.sources.values()].map((source) => structuredClone(source.connection))
+  const pipeline = new TelegramMonitorPipeline(fixture)
+
+  const updated = await pipeline.configure({ syncIntervalSeconds: 900 })
+
+  assert.equal(updated.status, 'active')
+  assert.equal(updated.syncIntervalSeconds, 900)
+  assert.equal(updated.syncIntervalConsistent, true)
+  assert.deepEqual(
+    [...fixture.sources.values()].map((source) => source.syncIntervalSeconds),
+    [900, 900],
+  )
+  assert.deepEqual(
+    [...fixture.sources.values()].map((source) => source.connection),
+    connections,
+  )
+  assert.equal(fixture.calls.some(([kind]) => kind === 'locks'), false)
+  assert.equal(fixture.calls.some(([kind]) => kind === 'testSourceCandidate'), false)
+  assert.equal(fixture.calls.some(([kind]) => kind === 'testConnection'), false)
+
+  await assert.rejects(
+    () => pipeline.configure({ connection: { password: 'rotated-while-active' } }),
+    (error) => error?.code === 'source_pause_required',
+  )
+})
+
 test('Telegram monitor configuration probes once and atomically injects fixed tables and cursors', async () => {
   const fixture = telegramPipelineFixture()
   const pipeline = new TelegramMonitorPipeline(fixture)

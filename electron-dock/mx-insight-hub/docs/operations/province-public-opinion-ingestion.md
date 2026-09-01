@@ -261,8 +261,10 @@ curl -sS -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
 ### 4.2 配置并探测只读连接
 
 `PUT /internal/v1/admin/pipelines/province-opinion` 只接受 `connection` 和
-`syncIntervalSeconds`。源必须暂停且没有运行中的 cursor。当前范围为 60–86,400 秒，
-默认 300 秒。
+`syncIntervalSeconds`。修改连接时源必须暂停且没有运行中的 cursor。仅提交
+`syncIntervalSeconds` 时可在 active/running/draining 状态在线保存；当前批次与已排队
+任务不变，scheduler 在下次扫描时按新间隔重新判断是否到期。当前范围为
+60–86,400 秒，默认 300 秒。
 
 ```json
 {

@@ -186,6 +186,11 @@ The server tests a bounded read-only session, then atomically writes that shared
 connection to both paused/drained inputs while injecting these immutable
 contracts:
 
+An interval-only `PUT` may instead be saved while the pair is active, running
+or draining. It atomically updates both child sources, does not cancel current
+or queued batches, and is used by the next scheduler scan. Connection/profile
+changes retain the paused/drained read-only-probe requirement above.
+
 | Role | Physical input | Cursor / ID candidate | Mapping |
 | --- | --- | --- | --- |
 | chats | `public.tg_monitor_chats` | `updated_at, chat_id` | built-in v2 |

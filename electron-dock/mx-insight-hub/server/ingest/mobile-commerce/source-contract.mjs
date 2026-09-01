@@ -41,6 +41,13 @@ export const MOBILE_COMMERCE_COLUMNS = Object.freeze([
   'is_reported',
 ])
 
+export const MOBILE_COMMERCE_WRITER_REQUIRED_COLUMNS = Object.freeze([
+  'id',
+  'platform',
+  'title',
+  'collected_at',
+])
+
 const TIMESTAMP_TYPES = new Set(['timestamp', 'timestamptz'])
 const ID_TYPES = new Set(['int2', 'int4', 'int8', 'uuid', 'text', 'varchar', 'bpchar'])
 const ALLOWED_INLINE_CONNECTION_FIELDS = new Set([
@@ -85,11 +92,6 @@ export function mobileCommerceColumnIssues(columns = []) {
   for (const name of [...byName.keys()].filter((candidate) => !expected.has(candidate)).sort()) {
     issues.push(`unexpected mobile-commerce column ${name} requires mapping review`)
   }
-  for (const name of ['id', 'platform', 'title', 'collected_at']) {
-    if (byName.get(name)?.nullable === true) {
-      issues.push(`required mobile-commerce column ${name} must be non-null`)
-    }
-  }
   const collectedAt = byName.get('collected_at')
   if (collectedAt && !TIMESTAMP_TYPES.has(collectedAt.databaseType)) {
     issues.push('collected_at must be timestamp or timestamptz')
@@ -99,6 +101,15 @@ export function mobileCommerceColumnIssues(columns = []) {
     issues.push('id must be an integer, UUID, or text scalar')
   }
   return issues
+}
+
+export function mobileCommerceColumnWarnings(columns = []) {
+  const byName = new Map(columns.map((column) => [column.name, column]))
+  return MOBILE_COMMERCE_WRITER_REQUIRED_COLUMNS.flatMap((name) => (
+    byName.get(name)?.nullable === true
+      ? [`mobile-commerce column ${name} allows NULL in DDL; the accepted writer contract must keep committed values non-null, and guarded pulls may scan or sort until upstream adds NOT NULL`]
+      : []
+  ))
 }
 
 export function mobileCommerceCursorIsFinite(value) {

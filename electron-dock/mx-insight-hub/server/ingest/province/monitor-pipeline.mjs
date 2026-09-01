@@ -438,6 +438,15 @@ export class ProvinceOpinionPipeline {
       )
     }
     const interval = syncInterval(body.syncIntervalSeconds)
+    const intervalOnly = Object.keys(body).length === 1
+      && Object.prototype.hasOwnProperty.call(body, 'syncIntervalSeconds')
+    if (intervalOnly) {
+      await this.store.updateExternalSourcesBatch([{
+        sourceKey: PROVINCE_OPINION_SOURCE_KEY,
+        syncIntervalSeconds: interval,
+      }])
+      return this.get()
+    }
     return this.#withLock(async () => {
       const source = await this.#source()
       if (source.status !== 'paused') {

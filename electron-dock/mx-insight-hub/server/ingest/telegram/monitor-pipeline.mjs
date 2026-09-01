@@ -554,6 +554,15 @@ export class TelegramMonitorPipeline {
     }
     const interval = syncInterval(body?.syncIntervalSeconds)
     const keys = TELEGRAM_MONITOR_INPUTS.map((input) => input.sourceKey)
+    const intervalOnly = Object.keys(body).length === 1
+      && Object.prototype.hasOwnProperty.call(body, 'syncIntervalSeconds')
+    if (intervalOnly) {
+      await this.store.updateExternalSourcesBatch(keys.map((sourceKey) => ({
+        sourceKey,
+        syncIntervalSeconds: interval,
+      })))
+      return this.get()
+    }
     return this.#withLocks(keys, async () => {
       const sources = await this.#sources()
       if (sources.some((source) => source.status !== 'paused')) {

@@ -103,6 +103,16 @@ connection changes, mapping approval and reactivation return
 `409 source_draining`. Operators must observe the cursor becoming idle before a
 topology or mapping change.
 
+`syncIntervalSeconds` is scheduling policy rather than source topology. An
+interval-only update is valid while a source or fixed multi-input pipeline is
+active, running or draining and is persisted atomically for every child source.
+It never cancels current, queued or continuation work. The scheduler rereads
+the interval on its next scan and recalculates whether the source is due; a
+scan already holding the previous source snapshot may complete that one due
+decision. Requests that mix an interval with connection/profile, locator,
+mapping or checkpoint-contract changes remain subject to the pause/drain/probe
+gates above.
+
 ### Evolution and compatibility
 
 The configuration has evolved from legacy `dsnEnv`, to complete inline
@@ -226,6 +236,19 @@ Each database source needs a non-null change watermark plus an immutable
 tie-breaker and a supporting full index. The watermark must advance for every
 insert, relevant update and soft delete. The source owner must also prove that
 commit ordering cannot place a late commit behind an already advanced cursor.
+
+The fixed `mobile-commerce.collected-items.v1` adapter has one deliberately
+narrow compatibility exception for legacy producer DDL. Under the accepted
+`mobile-commerce.writer.v2` attestation, its required `id`, `platform`, `title`
+or `collected_at` columns may still be declared nullable, but every pull batch
+must guard those writer-required values at runtime. An actual NULL fails closed
+before import or checkpoint advancement. A ready, valid unique `id` index
+remains a correctness gate. The `(collected_at, id)` composite index is a
+performance recommendation and its absence is an activation warning, not a
+correctness failure. The nullable compatibility path can require additional
+source scans, so the producer should ultimately add `NOT NULL` constraints and
+the composite index. This exception does not relax the watermark or supporting
+index rules for generic managed database sources.
 
 A column named `updated_at` is evidence only after its writer behavior and index
 are verified. Event time, initial collection time and nullable edit/delete times

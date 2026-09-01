@@ -16,6 +16,9 @@ import {
   createMobileMarketplaceClassifier,
 } from '../../server/ingest/mobile-commerce/record.mjs'
 import {
+  MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST,
+  MOBILE_COMMERCE_WRITER_CONTRACT_SUMMARY,
+  MOBILE_COMMERCE_WRITER_CONTRACT_VERSION,
   MobileCommercePipeline,
 } from '../../server/ingest/mobile-commerce/pipeline.mjs'
 import {
@@ -28,6 +31,7 @@ import {
   MOBILE_COMMERCE_SOURCE_KEY,
   MOBILE_COMMERCE_SOURCE_LOCATOR,
   mobileCommerceColumnIssues,
+  mobileCommerceColumnWarnings,
   mobileCommerceCursorIsFinite,
   mobileCommerceProbeIssues,
   mobileCommerceSourceContractIssues,
@@ -315,7 +319,150 @@ test('mobile-commerce pipeline status never returns an inline database password'
   assert.ok(dsnConfiguration.configurationIssues.some((issue) => issue.includes('dsnEnv')))
 })
 
-test('the mobile-commerce probe enforces all 25 fixed columns, required nullability and scalar types', () => {
+test('mobile-commerce hot-updates cadence while running and activates only under writer v2 with transient probe warnings', async () => {
+  const source = {
+    id: 'mobile-source-id',
+    sourceKey: MOBILE_COMMERCE_SOURCE_KEY,
+    sourceKind: 'database',
+    datasetId: MOBILE_COMMERCE_DATASET_ID,
+    platform: MOBILE_COMMERCE_PLATFORM,
+    objectType: MOBILE_COMMERCE_OBJECT_TYPE,
+    displayName: '手机端商家商品采集',
+    status: 'active',
+    databaseConnectionId: null,
+    connection: {
+      host: 'database.internal',
+      database: 'night_all',
+      username: 'mobile_reader',
+      password: 'unchanged-password',
+      sslMode: 'disable',
+      ...MOBILE_COMMERCE_SOURCE_LOCATOR,
+    },
+    syncIntervalSeconds: 300,
+  }
+  const mapping = {
+    id: MOBILE_COMMERCE_MAPPING_ID,
+    version: MOBILE_COMMERCE_MAPPING_VERSION,
+    sourceId: source.id,
+    fieldMap: { externalId: { from: 'id' } },
+  }
+  let cursor = {
+    status: 'running',
+    position: { importRunId: 'mobile-running' },
+    updatedAt: '2026-09-01T00:00:00.000Z',
+  }
+  let latestAttestation = null
+  const calls = {
+    updates: [],
+    locks: [],
+    candidateTests: [],
+    descriptions: [],
+    checkpoints: [],
+    activations: [],
+  }
+  const store = {
+    getExternalSource: async () => source,
+    updateExternalSource: async (sourceKey, patch) => {
+      calls.updates.push({ sourceKey, patch: structuredClone(patch) })
+      Object.assign(source, patch)
+      if (patch.connection) source.connection = structuredClone(patch.connection)
+      return source
+    },
+    getActiveMapping: async () => mapping,
+    listSourceMappings: async () => [mapping],
+    listImportRuns: async () => [],
+    getLatestPipelineWriterContractAttestation: async () => latestAttestation,
+    activateExternalSourcesWithAttestation: async (input) => {
+      calls.activations.push(input)
+      source.status = 'active'
+      latestAttestation = {
+        contractVersion: input.contractVersion,
+        contractDigest: input.contractDigest,
+        contractSummary: input.contractSummary,
+        attestedBy: input.attestedBy,
+      }
+    },
+  }
+  const warning = 'composite index (collected_at, id) is recommended for incremental pull performance'
+  const pipeline = new MobileCommercePipeline({
+    store,
+    queue: { getCursor: async () => cursor },
+    databasePuller: {
+      withSourceLock: async (sourceKey, operation) => {
+        calls.locks.push(sourceKey)
+        return operation()
+      },
+      resolveConnectionCandidate: async () => ({ connection: structuredClone(source.connection) }),
+      testSourceCandidate: async (candidate) => calls.candidateTests.push(candidate),
+      describe: async (sourceKey, options) => {
+        calls.descriptions.push({ sourceKey, options })
+        return { issues: [], warnings: [warning], columns: validColumns() }
+      },
+      assertCheckpointCompatible: async (sourceKey, options) => {
+        calls.checkpoints.push({ sourceKey, options })
+      },
+    },
+  })
+
+  const originalConnection = structuredClone(source.connection)
+  const updated = await pipeline.configure({ syncIntervalSeconds: 900 })
+  assert.equal(updated.status, 'active')
+  assert.equal(updated.syncIntervalSeconds, 900)
+  assert.deepEqual(source.connection, originalConnection)
+  assert.deepEqual(calls.updates, [{
+    sourceKey: MOBILE_COMMERCE_SOURCE_KEY,
+    patch: { syncIntervalSeconds: 900 },
+  }])
+  assert.deepEqual(calls.locks, [])
+  assert.deepEqual(calls.candidateTests, [])
+  assert.deepEqual(calls.descriptions, [])
+
+  await assert.rejects(
+    () => pipeline.configure({ connection: { host: 'other-database.internal' } }),
+    (error) => error?.status === 409 && error?.code === 'source_pause_required',
+  )
+  assert.deepEqual(source.connection, originalConnection)
+  assert.deepEqual(calls.candidateTests, [])
+
+  source.status = 'paused'
+  cursor = { status: 'idle', position: null, updatedAt: '2026-09-01T00:01:00.000Z' }
+  await assert.rejects(
+    () => pipeline.setStatus('active', {
+      writerContractAttestation: {
+        confirmed: true,
+        contractVersion: 'mobile-commerce.writer.v1',
+        contractDigest: MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST,
+      },
+    }),
+    (error) => error?.status === 409 && error?.code === 'writer_contract_attestation_required',
+  )
+  assert.equal(calls.activations.length, 0)
+
+  const activated = await pipeline.setStatus('active', {
+    approvedBy: 'contract-reviewer',
+    writerContractAttestation: {
+      confirmed: true,
+      contractVersion: MOBILE_COMMERCE_WRITER_CONTRACT_VERSION,
+      contractDigest: MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST,
+    },
+  })
+  assert.equal(MOBILE_COMMERCE_WRITER_CONTRACT_VERSION, 'mobile-commerce.writer.v2')
+  assert.equal(
+    MOBILE_COMMERCE_WRITER_CONTRACT_SUMMARY.input.recommendedIndex,
+    '(collected_at, id)',
+  )
+  assert.equal('requiredIndex' in MOBILE_COMMERCE_WRITER_CONTRACT_SUMMARY.input, false)
+  assert.deepEqual(activated.activationWarnings, [warning])
+  assert.equal(calls.activations.length, 1)
+  assert.equal(calls.activations[0].contractVersion, MOBILE_COMMERCE_WRITER_CONTRACT_VERSION)
+  assert.equal(calls.activations[0].contractDigest, MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST)
+  assert.strictEqual(calls.activations[0].contractSummary, MOBILE_COMMERCE_WRITER_CONTRACT_SUMMARY)
+
+  const persistedView = await pipeline.get()
+  assert.equal('activationWarnings' in persistedView, false)
+})
+
+test('the mobile-commerce probe enforces all 25 fixed columns and scalar types while writer attestation owns nullability', () => {
   const columns = validColumns()
   assert.equal(MOBILE_COMMERCE_COLUMNS.length, 25)
   assert.deepEqual(mobileCommerceColumnIssues(columns), [])
@@ -339,7 +486,10 @@ test('the mobile-commerce probe enforces all 25 fixed columns, required nullabil
 
   for (const name of ['id', 'platform', 'title', 'collected_at']) {
     const nullable = columns.map((column) => column.name === name ? { ...column, nullable: true } : column)
-    assert.ok(mobileCommerceColumnIssues(nullable).includes(`required mobile-commerce column ${name} must be non-null`))
+    assert.deepEqual(mobileCommerceColumnIssues(nullable), [], name)
+    assert.deepEqual(mobileCommerceColumnWarnings(nullable), [
+      `mobile-commerce column ${name} allows NULL in DDL; the accepted writer contract must keep committed values non-null, and guarded pulls may scan or sort until upstream adds NOT NULL`,
+    ], name)
   }
   const wrongTypes = columns.map((column) => {
     if (column.name === 'id') return { ...column, databaseType: 'jsonb' }

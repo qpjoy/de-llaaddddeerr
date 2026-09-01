@@ -239,6 +239,30 @@ function DataTable({ label, children }) {
   )
 }
 
+const SYNC_INTERVAL_APPLY_MESSAGE = '当前批次不变，下一次调度检查按新间隔重新计算'
+const SYNC_INTERVAL_SAVED_MESSAGE = `同步间隔已保存；${SYNC_INTERVAL_APPLY_MESSAGE}`
+
+function RuntimeSyncIntervalControl({ value, onChange, onSave, busy, saving }) {
+  const submit = (event) => {
+    event.preventDefault()
+    onSave()
+  }
+
+  return (
+    <form className="mih-form mih-form--grid mih-telegram-config" aria-label="运行时同步间隔配置" onSubmit={submit}>
+      <Field label="同步间隔（秒）" hint={`60–86400；${SYNC_INTERVAL_APPLY_MESSAGE}`}>
+        <input className="qp-input" type="number" min="60" max="86400" required value={value}
+          onChange={(event) => onChange(event.target.value)} />
+      </Field>
+      <div className="mih-page-actions mih-form__wide">
+        <button className="qp-button qp-button--ghost" type="submit" disabled={busy}>
+          {saving ? '正在保存同步间隔…' : '保存同步间隔'}
+        </button>
+      </div>
+    </form>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // External sources
 // ---------------------------------------------------------------------------
@@ -911,7 +935,7 @@ function MobileCommercePipelineCard({ pipeline, loading, error, onOpen, onRetry 
             <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
           </dl>
           <div className="mih-telegram-card__actions">
-            <span className="mih-telegram-card__alert"><Warning size={15} />远端主动拉取接口未接入</span>
+            <span className="mih-source-label">stored-only · 当前从数据库表增量清洗；远端主动获取未接入，不影响数据库清洗模式</span>
             <button className="qp-button qp-button--ghost" type="button" disabled={loading || !pipeline} onClick={onOpen}>
               {loading ? '正在刷新…' : '打开任务控制'}
             </button>
@@ -955,9 +979,12 @@ function MobileCommercePipelineModal({
     syncIntervalSeconds: String(pipeline.syncIntervalSeconds || 300),
   }))
   const [busyAction, setBusyAction] = useState(null)
+  const [actionError, setActionError] = useState(null)
   const [writerContractConfirmed, setWriterContractConfirmed] = useState(false)
   const [resetConfirmation, setResetConfirmation] = useState('')
   const configurationIssues = sqlitePipelineIssueMessages(pipeline.configurationIssues)
+  const activationWarnings = sqlitePipelineIssueMessages(pipeline.activationWarnings)
+  const actionErrorIssues = sqlitePipelineIssueMessages(actionError?.details?.issues)
   const mappingLabel = mobileCommerceMappingLabel(pipeline)
   const agentMessage = pipeline.agent?.message || mapping.agentStudio?.message
 
@@ -969,6 +996,7 @@ function MobileCommercePipelineModal({
 
   const mutate = async (action, request, successMessage) => {
     setBusyAction(action)
+    setActionError(null)
     try {
       const updated = await request()
       if (updated?.task || updated?.status) onPipelineChanged(updated)
@@ -977,6 +1005,7 @@ function MobileCommercePipelineModal({
       return updated
     } catch (error) {
       if (error?.status === 401) onUnauthorized?.(error)
+      setActionError(error)
       notify?.(error.message, 'error')
       return null
     } finally {
@@ -1001,11 +1030,18 @@ function MobileCommercePipelineModal({
                 ...(form.password ? { password: form.password } : {}),
               },
             }),
-        syncIntervalSeconds: Number(form.syncIntervalSeconds),
       }),
       '手机电商采集源库连接已验证并保存；任务仍保持暂停',
     )
   }
+
+  const saveSyncInterval = () => mutate(
+    'save-sync-interval',
+    () => adminApi.updateMobileCommercePipeline(token, {
+      syncIntervalSeconds: Number(form.syncIntervalSeconds),
+    }),
+    SYNC_INTERVAL_SAVED_MESSAGE,
+  )
 
   const changeStatus = (nextStatus) => mutate(
     `status-${nextStatus}`,
@@ -1061,7 +1097,7 @@ function MobileCommercePipelineModal({
         <div>
           <StatusBadge status={status.status} label={status.label} />
           <code>{pipeline.pipelineKey || 'mobile-commerce'}</code>
-          <span className="mih-telegram-toolbar__warning"><Warning size={15} />stored-only · 远端接口未接入</span>
+          <span className="mih-source-label">stored-only · 当前从数据库表增量清洗；远端主动获取未接入，不影响数据库清洗模式</span>
         </div>
         <div className="mih-page-actions">
           {pipeline.status === 'active' ? (
@@ -1086,6 +1122,17 @@ function MobileCommercePipelineModal({
         </div>
       </div>
 
+      {actionError ? (
+        <div className="mih-telegram-card__error mih-form">
+          <ErrorState error={actionError} />
+          {actionErrorIssues.length > 0 ? (
+            <ul className="mih-source-issues mih-source-issues--warning">
+              {actionErrorIssues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+
       <Panel title="只读源库与调度" subtitle="固定表、游标、Dataset 与字段合同由业务版本管理；连接可引用公共配置或在任务内完整填写">
         <form className="mih-form mih-form--grid mih-telegram-config" onSubmit={save}>
           <DatabaseConnectionField value={form.databaseConnectionId} state={databaseConnections}
@@ -1099,16 +1146,15 @@ function MobileCommercePipelineModal({
             <DropdownField label="SSL 模式" value={form.sslMode}
               onChange={(sslMode) => setForm({ ...form, sslMode })} options={SSL_MODE_OPTIONS} />
           </> : null}
-          <Field label="同步间隔（秒）" hint="60–86400；首次空 checkpoint 会完整扫描">
-            <input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds}
-              onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} />
-          </Field>
           <div className="mih-page-actions mih-form__wide">
             <button className="qp-button qp-button--ghost" type="submit" disabled={Boolean(busyAction) || pipeline.status !== 'paused' || running}>
               {busyAction === 'save' ? '正在验证并保存…' : '验证并保存连接'}
             </button>
           </div>
         </form>
+        <RuntimeSyncIntervalControl value={form.syncIntervalSeconds}
+          onChange={(syncIntervalSeconds) => setForm({ ...form, syncIntervalSeconds })}
+          onSave={saveSyncInterval} busy={Boolean(busyAction)} saving={busyAction === 'save-sync-interval'} />
         {configurationIssues.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">
           {configurationIssues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
         </ul> : null}
@@ -1122,6 +1168,14 @@ function MobileCommercePipelineModal({
           <li>{writerContract.summary?.deletion || '源端应采用追加或可观察更新语义；不可观察的硬删除不会被增量游标捕获。'}</li>
           <li>{writerContract.summary?.ordering || '同一 collected_at 下必须以 id 稳定排序，重试数据由 Canonical 幂等键去重。'}</li>
         </ul>
+        {activationWarnings.length > 0 ? (
+          <>
+            <p className="mih-preview-provenance">以下兼容性警告不阻止数据库表清洗：</p>
+            <ul className="mih-source-issues mih-source-issues--warning">
+              {activationWarnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}
+            </ul>
+          </>
+        ) : null}
         {pipeline.status !== 'active' || !writerContractCurrent ? (
           <label className="mih-agent-consent">
             <input type="checkbox" checked={writerContractConfirmed} disabled={Boolean(busyAction) || running}
@@ -1281,11 +1335,18 @@ function ProvinceOpinionPipelineModal({
                 sslMode: form.sslMode,
               },
             }),
-        syncIntervalSeconds: Number(form.syncIntervalSeconds),
       }),
       '全国省份舆情源库连接已验证并保存；任务仍保持暂停',
     )
   }
+
+  const saveSyncInterval = () => mutate(
+    'save-sync-interval',
+    () => adminApi.updateProvinceOpinionPipeline(token, {
+      syncIntervalSeconds: Number(form.syncIntervalSeconds),
+    }),
+    SYNC_INTERVAL_SAVED_MESSAGE,
+  )
 
   const changeStatus = (nextStatus) => mutate(
     `status-${nextStatus}`,
@@ -1403,16 +1464,15 @@ function ProvinceOpinionPipelineModal({
               onChange={(sslMode) => setForm({ ...form, sslMode })}
               options={[{ ...SSL_MODE_OPTIONS[0], label: 'disable（受控内网）' }, ...SSL_MODE_OPTIONS.slice(1)]} />
           </> : null}
-          <Field label="同步间隔（秒）" hint="60–86400；首次空 checkpoint 会完整扫描">
-            <input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds}
-              onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} />
-          </Field>
           <div className="mih-page-actions mih-form__wide">
             <button className="qp-button qp-button--ghost" type="submit" disabled={Boolean(busyAction) || pipeline.status !== 'paused' || running}>
               {busyAction === 'save' ? '正在验证并保存…' : '验证并保存连接'}
             </button>
           </div>
         </form>
+        <RuntimeSyncIntervalControl value={form.syncIntervalSeconds}
+          onChange={(syncIntervalSeconds) => setForm({ ...form, syncIntervalSeconds })}
+          onSave={saveSyncInterval} busy={Boolean(busyAction)} saving={busyAction === 'save-sync-interval'} />
       </Panel>
 
       <Panel title="固定输入、增量与服务索引门禁" subtitle="连接测试只证明可达；启用还必须通过源表合同和 Hub 在线服务索引探测"
@@ -1613,7 +1673,6 @@ function TelegramSqlitePipelineModal({
             baseUrl: form.baseUrl.trim().replace(/\/$/, ''),
             ...(nextToken ? { token: nextToken } : {}),
           },
-          syncIntervalSeconds: Number(form.syncIntervalSeconds),
         })
         setForm((current) => ({ ...current, token: '' }))
         return updated
@@ -1621,6 +1680,14 @@ function TelegramSqlitePipelineModal({
       'Telegram SQLite API 连接已验证并应用到两个固定任务',
     )
   }
+
+  const saveSyncInterval = () => mutate(
+    'save-sync-interval',
+    () => adminApi.updateTelegramSqlitePipeline(token, {
+      syncIntervalSeconds: Number(form.syncIntervalSeconds),
+    }),
+    SYNC_INTERVAL_SAVED_MESSAGE,
+  )
 
   const changeStatus = (nextStatus) => mutate(
     `status-${nextStatus}`,
@@ -1726,10 +1793,6 @@ function TelegramSqlitePipelineModal({
               required={!pipeline.connection?.tokenConfigured} placeholder={pipeline.connection?.tokenConfigured ? '留空保持不变' : '输入 SQLite API Token'}
               onChange={(event) => setForm({ ...form, token: event.target.value })} />
           </Field>
-          <Field label="同步间隔（秒）" hint="60–86400；表示 Hub 判断任务是否到期的周期">
-            <input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds}
-              onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} />
-          </Field>
           <div className="mih-page-actions mih-form__wide">
             <StatusBadge status={pipeline.connection?.tokenConfigured ? 'active' : 'disabled'}
               label={pipeline.connection?.tokenConfigured ? 'Token 已配置' : 'Token 待配置'} />
@@ -1739,6 +1802,9 @@ function TelegramSqlitePipelineModal({
             </button>
           </div>
         </form>
+        <RuntimeSyncIntervalControl value={form.syncIntervalSeconds}
+          onChange={(syncIntervalSeconds) => setForm({ ...form, syncIntervalSeconds })}
+          onSave={saveSyncInterval} busy={Boolean(busyAction)} saving={busyAction === 'save-sync-interval'} />
       </Panel>
 
       <Panel title="同步与数据保留策略" subtitle="首次或换库时全量对齐；平时读取增量窗口，凌晨只对上一自然日，不定时扫描全部历史">
@@ -1921,11 +1987,18 @@ function TelegramPipelineModal({
                 sslMode: form.sslMode,
               },
             }),
-        syncIntervalSeconds: Number(form.syncIntervalSeconds),
       }),
       'Telegram monitor 连接已验证并统一写入两个子任务',
     )
   }
+
+  const saveSyncInterval = () => mutate(
+    'save-sync-interval',
+    () => adminApi.updateTelegramMonitorPipeline(token, {
+      syncIntervalSeconds: Number(form.syncIntervalSeconds),
+    }),
+    SYNC_INTERVAL_SAVED_MESSAGE,
+  )
 
   const changeStatus = (nextStatus) => mutate(
     `status-${nextStatus}`,
@@ -2039,7 +2112,6 @@ function TelegramPipelineModal({
             <DropdownField label="SSL 模式" value={form.sslMode}
               onChange={(sslMode) => setForm({ ...form, sslMode })} options={SSL_MODE_OPTIONS} />
           </> : null}
-          <Field label="同步间隔（秒）" hint="60–86400；暂停后不再发起新批次"><input className="qp-input" type="number" min="60" max="86400" required value={form.syncIntervalSeconds} onChange={(event) => setForm({ ...form, syncIntervalSeconds: event.target.value })} /></Field>
           <div className="mih-page-actions mih-form__wide">
             <button className="qp-button qp-button--ghost" type="submit" disabled={Boolean(busyAction) || pipeline.status !== 'paused' || running}
               title={running ? '运行中的批次收口后才能修改连接' : pipeline.status !== 'paused' ? '请先安全暂停整个业务任务' : ''}>
@@ -2047,6 +2119,9 @@ function TelegramPipelineModal({
             </button>
           </div>
         </form>
+        <RuntimeSyncIntervalControl value={form.syncIntervalSeconds}
+          onChange={(syncIntervalSeconds) => setForm({ ...form, syncIntervalSeconds })}
+          onSave={saveSyncInterval} busy={Boolean(busyAction)} saving={busyAction === 'save-sync-interval'} />
       </Panel>
 
       <TelegramSourcePreparationPanel
@@ -2783,6 +2858,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
   const [mappingDraft, setMappingDraft] = useState('{}')
   const [checkpointResetError, setCheckpointResetError] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [savingSyncInterval, setSavingSyncInterval] = useState(false)
   const [statusTransition, setStatusTransition] = useState(null)
   const fileRef = useRef(null)
   // One hidden file input serves both actions, so it has to know which one
@@ -3018,6 +3094,23 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
     }
   }
 
+  const saveDatabaseSyncInterval = async (syncIntervalSeconds) => {
+    setBusy(true)
+    setSavingSyncInterval(true)
+    try {
+      const updated = await adminApi.updateSource(token, source.sourceKey, { syncIntervalSeconds })
+      setCurrentSource(updated)
+      onSourceChanged(updated)
+      notify?.(SYNC_INTERVAL_SAVED_MESSAGE, 'success')
+      sync.refresh()
+    } catch (error) {
+      notify?.(error.message, 'error')
+    } finally {
+      setBusy(false)
+      setSavingSyncInterval(false)
+    }
+  }
+
   const previewDatabase = async () => {
     setBusy(true)
     try {
@@ -3097,6 +3190,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
           preview={preview}
           checkpointResetError={checkpointResetError}
           busy={busy}
+          savingSyncInterval={savingSyncInterval}
           statusTransition={statusTransition}
           isDraining={isDraining}
           editing={editingSettings}
@@ -3105,6 +3199,7 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
           onEdit={() => setEditingSettings(true)}
           onCancelEdit={() => setEditingSettings(false)}
           onSave={saveDatabaseSettings}
+          onSaveSchedule={saveDatabaseSyncInterval}
           onStatus={changeStatus}
           onSync={runSync}
           onTest={testConnection}
@@ -3378,8 +3473,8 @@ function SourceDetailModal({ token, source, onUnauthorized, notify, onClose, onS
 }
 
 function DatabaseSourceControl({
-  source, schema, sync, preview, checkpointResetError, busy, statusTransition, isDraining, editing, canActivate,
-  readOnly = false, onEdit, onCancelEdit, onSave, onStatus, onSync, onTest, onPreview, onResetCheckpoint,
+  source, schema, sync, preview, checkpointResetError, busy, savingSyncInterval, statusTransition, isDraining, editing, canActivate,
+  readOnly = false, onEdit, onCancelEdit, onSave, onSaveSchedule, onStatus, onSync, onTest, onPreview, onResetCheckpoint,
   databaseConnections,
 }) {
   const [draft, setDraft] = useState(() => ({
@@ -3402,7 +3497,6 @@ function DatabaseSourceControl({
     event.preventDefault()
     onSave({
       databaseConnectionId: draft.databaseConnectionId || null,
-      syncIntervalSeconds: Number(draft.syncIntervalSeconds),
       connection: {
         ...(draft.databaseConnectionId ? {} : {
           host: draft.host.trim(), port: Number(draft.port), database: draft.database.trim(),
@@ -3414,6 +3508,8 @@ function DatabaseSourceControl({
       },
     })
   }
+
+  const saveSchedule = () => onSaveSchedule(Number(draft.syncIntervalSeconds))
 
   const resetCheckpoint = async (event) => {
     event.preventDefault()
@@ -3464,6 +3560,9 @@ function DatabaseSourceControl({
         {isDraining ? <p className="mih-inline-warning"><Warning size={16} aria-hidden="true" />暂停已生效于调度层；当前批次仍在安全收口。完成前不会允许改连接、批准映射或重置 Checkpoint。</p> : null}
         {readOnly ? <p className="mih-inline-warning"><Warning size={16} aria-hidden="true" />这是固定业务子任务。请返回 Telegram monitor 任务控制统一修改连接、周期和启停状态。</p> : null}
         <p className="mih-inline-warning"><Key size={16} aria-hidden="true" />连接信息随数据源管理，密码以明文回填；本页面和对应接口仅允许 Admin Token 会话访问。</p>
+        {!readOnly ? <RuntimeSyncIntervalControl value={draft.syncIntervalSeconds}
+          onChange={(syncIntervalSeconds) => setDraft({ ...draft, syncIntervalSeconds })}
+          onSave={saveSchedule} busy={busy} saving={savingSyncInterval} /> : null}
         {editing && !readOnly ? (
           <form className="mih-form mih-form--grid mih-source-settings" onSubmit={submit}>
             <DatabaseConnectionField value={draft.databaseConnectionId} state={databaseConnections}
@@ -3483,7 +3582,6 @@ function DatabaseSourceControl({
             <Field label="表名"><input className="qp-input" required value={draft.table} onChange={(event) => setDraft({ ...draft, table: event.target.value })} /></Field>
             <Field label="变更水位列"><input className="qp-input" value={draft.cursorColumn} onChange={(event) => setDraft({ ...draft, cursorColumn: event.target.value })} /></Field>
             <Field label="稳定 ID 列"><input className="qp-input" value={draft.idColumn} onChange={(event) => setDraft({ ...draft, idColumn: event.target.value })} /></Field>
-            <Field label="同步间隔（秒）"><input className="qp-input" type="number" min="60" max="86400" required value={draft.syncIntervalSeconds} onChange={(event) => setDraft({ ...draft, syncIntervalSeconds: event.target.value })} /></Field>
             <div className="mih-page-actions mih-form__wide">
               <button className="qp-button qp-button--ghost" type="button" onClick={onCancelEdit}>取消</button>
               <button className="qp-button" type="submit" disabled={busy}>验证并保存</button>

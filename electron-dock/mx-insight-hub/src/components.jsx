@@ -713,9 +713,10 @@ export function ToastStack({ toasts, onDismiss }) {
   return (
     <div className="mih-toast-stack" aria-live="polite" aria-atomic="false">
       {toasts.map((toast) => {
-        const Icon = toast.tone === 'danger' ? XCircle : toast.tone === 'warning' ? WarningCircle : CheckCircle
+        const tone = toast.tone === 'error' ? 'danger' : toast.tone
+        const Icon = tone === 'danger' ? XCircle : tone === 'warning' ? WarningCircle : CheckCircle
         return (
-          <div className={`mih-toast mih-toast--${toast.tone}`} role={toast.tone === 'danger' ? 'alert' : 'status'} key={toast.id}>
+          <div className={`mih-toast mih-toast--${tone}`} role={tone === 'danger' ? 'alert' : 'status'} key={toast.id}>
             <Icon size={18} weight="fill" aria-hidden="true" />
             <span>{toast.message}</span>
             <button type="button" aria-label="关闭通知" onClick={() => onDismiss(toast.id)}>

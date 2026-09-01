@@ -149,10 +149,13 @@ function fixture({ segmenterConfig = HANLP_CONFIG } = {}) {
       return structuredClone(cursor)
     },
   }
-  const calls = { testConnection: [], testSourceCandidate: [], describe: [], compatible: [] }
+  const calls = { locks: [], testConnection: [], testSourceCandidate: [], describe: [], compatible: [] }
   let description = { issues: ['cursor column updated_at is missing'], warnings: [] }
   const databasePuller = {
-    withSourceLock: async (_key, operation) => operation(async () => {}, null),
+    withSourceLock: async (key, operation) => {
+      calls.locks.push(key)
+      return operation(async () => {}, null)
+    },
     testConnection: async (connection) => calls.testConnection.push(structuredClone(connection)),
     resolveConnectionCandidate: async ({ databaseConnectionId = null, connection = {} }) => {
       if (databaseConnectionId == null) {
@@ -432,6 +435,31 @@ test('province pipeline rejects mixed profile/inline payloads and switches back 
   assert.equal(setup.source.connection.password, 'inline-private')
 
   setup.source.status = 'active'
+  await assert.rejects(
+    () => setup.pipeline.configure({ databaseConnectionId: DATABASE_PROFILE_ID }),
+    (error) => error?.code === 'source_pause_required',
+  )
+})
+
+test('province pipeline hot-updates its interval while active and running without locking or probing', async () => {
+  const setup = fixture()
+  setup.source.status = 'active'
+  setup.setCursor({
+    status: 'running',
+    position: { importRunId: 'province-running' },
+    updatedAt: '2026-08-26T04:00:00.000Z',
+  })
+  const connection = structuredClone(setup.source.connection)
+
+  const updated = await setup.pipeline.configure({ syncIntervalSeconds: 900 })
+
+  assert.equal(updated.status, 'active')
+  assert.equal(updated.syncIntervalSeconds, 900)
+  assert.deepEqual(setup.source.connection, connection)
+  assert.deepEqual(setup.calls.locks, [])
+  assert.deepEqual(setup.calls.testSourceCandidate, [])
+  assert.deepEqual(setup.calls.testConnection, [])
+
   await assert.rejects(
     () => setup.pipeline.configure({ databaseConnectionId: DATABASE_PROFILE_ID }),
     (error) => error?.code === 'source_pause_required',

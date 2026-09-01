@@ -87,10 +87,13 @@ The sample also exposes concrete quality risks:
 Activation needs a larger structural sample, per-column null/type/length/cardinality
 profiles, representative rows for every marketplace, malformed/oversized JSON
 cases and a reviewed drift policy. The v1 runtime fails closed on any change to
-the exact 25-column set and on incompatible identity/watermark types or
-nullability. Other column-type profiles remain reviewed activation evidence
-until a full schema digest is persisted; an operator must pause promotion when
-those types change. No drift flows automatically into public extensions.
+the exact 25-column set and on incompatible identity/watermark types. For the
+fixed mobile adapter only, legacy nullable declarations on writer-required
+columns follow the guarded `mobile-commerce.writer.v2` exception described
+below; actual NULL values still fail closed. Other column-type profiles remain
+reviewed activation evidence until a full schema digest is persisted; an
+operator must pause promotion when those types change. No drift flows
+automatically into public extensions.
 
 ## 3. Identity, cursor and writer contract
 
@@ -127,9 +130,22 @@ of the following are proved:
 4. The writer assigns or attests `collected_at` so commit ordering cannot place
    a later commit at or behind the acknowledged cursor. A mobile-device event
    time alone does not satisfy this rule.
-5. PostgreSQL has an exact ready and valid B-tree index whose leading columns
-   are `(collected_at, id)` with compatible types/order/collation, plus a ready
-   and valid unique index on `id` that supports the capture-identity claim.
+5. PostgreSQL has a ready and valid unique index on `id` that supports both the
+   capture-identity claim and the total ordering of `(collected_at, id)`.
+
+A ready B-tree index beginning with `(collected_at, id)` is strongly
+recommended for source-query performance, but is not a correctness prerequisite
+when a unique `id` index already proves the total order. Its absence is reported
+as an activation warning because PostgreSQL may otherwise scan or sort the
+source table. Likewise, the fixed source may declare `id`, `platform`, `title`
+or `collected_at` nullable in DDL only after an operator accepts the current
+`mobile-commerce.writer.v2` contract that commits to non-null values. The Hub
+reports that DDL mismatch as a warning and applies a runtime NULL guard to every
+pull batch. If any required value is actually NULL, that batch fails closed
+before canonical import or checkpoint advancement. The guarded compatibility
+branch can add source scan/sort work, especially without the composite index;
+the upstream owner should therefore add `NOT NULL` constraints and a ready,
+valid `(collected_at, id)` index when practical.
 
 The reader orders and resumes strictly with:
 
@@ -222,7 +238,9 @@ authorization and data-minimization review; they are not admitted by this plan.
 
 ## 7. Public stored-only surface and future refresh
 
-The first external capability is **stored-only**. After activation and an
+The first external capability is **stored-only**. This describes the absence of
+a remote mobile-collector command and does not disable PostgreSQL table
+cleaning. After activation and an
 explicit `mobile_commerce` platform grant, callers use
 `GET /api/v1/data/mobile-commerce/items`. The dedicated response contract is
 `mx-insight-hub.data-products.mobile-commerce-items.v1`; it exposes only the
@@ -314,9 +332,13 @@ Keep the source paused until all of these are complete:
   identity evidence;
 - table shape, exact 25-field mapping, fixed source/dataset identity,
   no-ID-reuse guarantee and larger samples are reviewed;
-- append-only writer attestation, `Asia/Shanghai` interpretation and exact
-  `(collected_at, id)` pull index plus unique `id` index pass, or an ordered
-  journal replaces that cursor;
+- append-only writer attestation, `Asia/Shanghai` interpretation and unique
+  `id` identity index pass, or an ordered journal replaces that cursor; legacy
+  nullable DDL is accepted only with the v2 attestation and per-batch NULL guard,
+  while any actual required NULL fails closed; the recommended
+  `(collected_at, id)` pull index and upstream `NOT NULL` constraints may be
+  added later to remove the explicit source-query performance warnings and
+  guarded-scan overhead;
 - mapping version, public allowlist, catalog revision, quality thresholds,
   retention and grants are approved;
 - replay/idempotency, malformed rows, timestamp ties, late commits, table
@@ -328,3 +350,10 @@ This pipeline is owned by MX Insight Hub's data plane. It must not change MX
 Launcher/MX-H2I authentication or existing user connectivity, including
 Domestic/Internal routing, WireGuard and DNS. Source/profile management remains
 Admin-only and does not broaden Launcher-login session authority.
+
+`syncIntervalSeconds` is runtime scheduling policy for every cleaning plan.
+Saving only that field is allowed while a plan is active, running or draining;
+it does not cancel the current/queued batch. The scheduler rereads the stored
+value on its next scan and recalculates whether the source is due. Connection,
+table, mapping and checkpoint-contract changes retain their pause/drain/probe
+gates.

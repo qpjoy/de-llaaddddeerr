@@ -21,7 +21,9 @@ import {
 import {
   MOBILE_COMMERCE_SOURCE_KEY,
   MOBILE_COMMERCE_SOURCE_LOCATOR,
+  MOBILE_COMMERCE_WRITER_REQUIRED_COLUMNS,
   mobileCommerceColumnIssues,
+  mobileCommerceColumnWarnings,
   mobileCommerceCursorIsFinite,
   mobileCommerceSourceContractIssues,
 } from '../mobile-commerce/source-contract.mjs'
@@ -339,6 +341,19 @@ function takeExactCursors(rows, alias, cursorColumn, { replaceCursorValue = fals
     if (hasExactCursor && replaceCursorValue) row[cursorColumn] = cursor
     return cursor
   })
+}
+
+function nullableMobileCommerceWriterColumns(columns) {
+  const byName = new Map(columns.map((column) => [column.name, column]))
+  return MOBILE_COMMERCE_WRITER_REQUIRED_COLUMNS.filter((name) => byName.get(name)?.nullable === true)
+}
+
+function mobileCommerceRequiredNullIssues(rows, nullableColumns) {
+  return nullableColumns.flatMap((name) => (
+    rows.some((row) => row[name] === null)
+      ? [`mobile-commerce writer-required column ${name} contains NULL values`]
+      : []
+  ))
 }
 
 function importRunKey({ sourceId, contractHash, mappingVersion, position }) {
@@ -939,11 +954,6 @@ export class DatabaseSourcePuller {
       .filter((row) => row.valid !== false && row.ready !== false)
       .map((row) => row.definition)
     return [
-      ...(!definitions.some((definition) => indexStartsWith(
-        definition,
-        MOBILE_COMMERCE_SOURCE_LOCATOR.cursorColumn,
-        MOBILE_COMMERCE_SOURCE_LOCATOR.idColumn,
-      )) ? ['mobile-commerce pull index is missing or invalid'] : []),
       ...(!definitions.some((definition) => uniqueIndexProvesIdentity(
         definition,
         MOBILE_COMMERCE_SOURCE_LOCATOR.idColumn,
@@ -1063,6 +1073,7 @@ export class DatabaseSourcePuller {
       const hasUniqueIdentity = idColumn != null && metadata.indexes.some((index) =>
         index.valid && index.ready && uniqueIndexProvesIdentity(index.definition, idColumn),
       )
+      const mobileCommerceSource = source.sourceKey === MOBILE_COMMERCE_SOURCE_KEY
       return {
         source: safeSource(source),
         columns,
@@ -1074,10 +1085,10 @@ export class DatabaseSourcePuller {
           ...(idColumn == null ? ['idColumn is not configured'] : []),
           ...(cursorColumn != null && !names.has(cursorColumn) ? [`cursor column ${cursorColumn} is missing`] : []),
           ...(idColumn != null && !names.has(idColumn) ? [`id column ${idColumn} is missing`] : []),
-          ...(cursorColumn != null && columns.find((column) => column.name === cursorColumn)?.nullable
+          ...(cursorColumn != null && !mobileCommerceSource && columns.find((column) => column.name === cursorColumn)?.nullable
             ? [`cursor column ${cursorColumn} must be non-null`]
             : []),
-          ...(idColumn != null && columns.find((column) => column.name === idColumn)?.nullable
+          ...(idColumn != null && !mobileCommerceSource && columns.find((column) => column.name === idColumn)?.nullable
             ? [`id column ${idColumn} must be non-null`]
             : []),
           ...(cursorColumn != null && names.has(cursorColumn) && !CURSOR_CASTS.has(columns.find((column) => column.name === cursorColumn).databaseType)
@@ -1086,19 +1097,25 @@ export class DatabaseSourcePuller {
           ...(idColumn != null && names.has(idColumn) && !ID_CASTS.has(columns.find((column) => column.name === idColumn).databaseType)
             ? [`id column ${idColumn} has unsupported type`]
             : []),
-          ...(cursorColumn != null && idColumn != null && !hasCursorIndex
+          ...(cursorColumn != null && idColumn != null && !hasCursorIndex && !mobileCommerceSource
             ? [`no index begins with (${cursorColumn}, ${idColumn})`]
             : []),
           ...(cursorColumn != null && idColumn != null && !hasUniqueOrder
             ? [`no unique index proves (${cursorColumn}, ${idColumn}) is a total order`]
             : []),
-          ...(source.sourceKey === MOBILE_COMMERCE_SOURCE_KEY && idColumn != null && !hasUniqueIdentity
+          ...(mobileCommerceSource && idColumn != null && !hasUniqueIdentity
             ? [`no unique index proves ${idColumn} is a stable capture identity`]
             : []),
           ...undefinedRequiredMappings,
           ...missingMappings.filter((entry) => requiredMappingTargets.has(entry.target)).map((entry) => entry.message),
         ],
-        warnings: missingMappings.filter((entry) => !requiredMappingTargets.has(entry.target)).map((entry) => entry.message),
+        warnings: [
+          ...missingMappings.filter((entry) => !requiredMappingTargets.has(entry.target)).map((entry) => entry.message),
+          ...(mobileCommerceSource ? mobileCommerceColumnWarnings(columns) : []),
+          ...(mobileCommerceSource && cursorColumn != null && idColumn != null && !hasCursorIndex
+            ? [`no index begins with (${cursorColumn}, ${idColumn}); incremental results remain correct but the source query may scan or sort until the upstream adds this performance index`]
+            : []),
+        ],
       }
     } catch (error) {
       throw safeSourceOperationError(
@@ -1218,7 +1235,8 @@ export class DatabaseSourcePuller {
    * knowable without inventing progress.
    */
   async progress(sourceKey) {
-    const { connection } = await this.#source(sourceKey)
+    const { source, connection } = await this.#source(sourceKey)
+    const mobileCommerceSource = source.sourceKey === MOBILE_COMMERCE_SOURCE_KEY
     const table = qualifiedTable(connection)
     const cursorId = `external:${sourceKey}`
     const saved = await this.queue?.getCursor?.(cursorId) ?? null
@@ -1227,7 +1245,7 @@ export class DatabaseSourcePuller {
     let pool = null
     try {
       pool = await this.#pool(connection, 'mx-insight-hub-external-progress')
-      const totalOnly = async (blocker, issues) => {
+      const totalOnly = async (blocker, issues, warnings = []) => {
         const { rows } = await pool.query(`SELECT count(*)::bigint AS total_rows FROM ${table}`)
         return {
           totalRows: Number(rows[0]?.total_rows ?? 0),
@@ -1237,6 +1255,7 @@ export class DatabaseSourcePuller {
           cursor: saved,
           blocker,
           issues,
+          ...(mobileCommerceSource ? { warnings } : {}),
         }
       }
       if (!hasConfiguredCursor) {
@@ -1250,19 +1269,21 @@ export class DatabaseSourcePuller {
       const columns = await this.#columns(pool, connection)
       const cursorDefinition = columns.find((column) => column.name === cursorName)
       const idDefinition = columns.find((column) => column.name === idName)
+      const warnings = mobileCommerceSource ? mobileCommerceColumnWarnings(columns) : []
       const issues = [
         ...(!cursorDefinition ? [`cursor column ${cursorName} is missing`] : []),
         ...(!idDefinition ? [`id column ${idName} is missing`] : []),
-        ...(cursorDefinition?.nullable ? [`cursor column ${cursorName} must be non-null`] : []),
-        ...(idDefinition?.nullable ? [`id column ${idName} must be non-null`] : []),
+        ...(cursorDefinition?.nullable && !mobileCommerceSource ? [`cursor column ${cursorName} must be non-null`] : []),
+        ...(idDefinition?.nullable && !mobileCommerceSource ? [`id column ${idName} must be non-null`] : []),
         ...(cursorDefinition && !CURSOR_CASTS.has(cursorDefinition.databaseType)
           ? [`cursor column ${cursorName} has unsupported type`]
           : []),
         ...(idDefinition && !ID_CASTS.has(idDefinition.databaseType)
           ? [`id column ${idName} has unsupported type`]
           : []),
+        ...(mobileCommerceSource ? mobileCommerceColumnIssues(columns) : []),
       ]
-      if (issues.length > 0) return await totalOnly('source_cursor_unsafe', issues)
+      if (issues.length > 0) return await totalOnly('source_cursor_unsafe', issues, warnings)
 
       const schema = safeIdentifier(connection.schema || 'public', 'schema')
       const sourceTable = safeIdentifier(connection.table, 'table')
@@ -1280,14 +1301,89 @@ export class DatabaseSourcePuller {
         .filter((row) => row.valid !== false && row.ready !== false)
         .map((row) => row.definition)
       if (!definitions.some((definition) => indexStartsWith(definition, cursorName, idName))) {
-        issues.push(`no index begins with (${cursorName}, ${idName})`)
+        const issue = `no index begins with (${cursorName}, ${idName})`
+        if (mobileCommerceSource) {
+          warnings.push(`${issue}; incremental results remain correct but the source query may scan or sort until the upstream adds this performance index`)
+        } else {
+          issues.push(issue)
+        }
       }
-      if (!definitions.some((definition) => uniqueIndexProvesOrder(definition, cursorName, idName))) {
+      if (mobileCommerceSource && !definitions.some((definition) => uniqueIndexProvesIdentity(definition, idName))) {
+        issues.push(`no unique index proves ${idName} is a stable capture identity`)
+      } else if (!mobileCommerceSource && !definitions.some((definition) => uniqueIndexProvesOrder(definition, cursorName, idName))) {
         issues.push(`no unique index proves (${cursorName}, ${idName}) is a total order`)
       }
-      if (issues.length > 0) return await totalOnly('source_cursor_unsafe', issues)
+      if (issues.length > 0) return await totalOnly('source_cursor_unsafe', issues, warnings)
 
       const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
+      const nullableWriterColumns = mobileCommerceSource
+        ? nullableMobileCommerceWriterColumns(columns)
+        : []
+      if (mobileCommerceSource) {
+        const nullCounts = nullableWriterColumns.map((name, index) => (
+          `count(*) FILTER (WHERE ${quotedIdentifier(name, 'mobile-commerce writer column')} IS NULL)::bigint AS "__mx_required_null_${index}"`
+        ))
+        const remaining = position.cursor == null || position.lastId == null
+          ? []
+          : [`count(*) FILTER (
+                  WHERE ${cursorColumn} IS NOT NULL
+                    AND (${cursorColumn}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast})
+                )::bigint AS remaining_rows`]
+        const selections = [
+          'count(*)::bigint AS total_rows',
+          ...remaining,
+          ...nullCounts,
+        ]
+        const parameters = remaining.length > 0 ? [position.cursor, position.lastId] : []
+        const { rows } = await pool.query(
+          `SELECT ${selections.join(',\n                ')}
+             FROM ${table}`,
+          parameters,
+        )
+        const row = rows[0] || {}
+        const nullIssues = nullableWriterColumns.flatMap((name, index) => (
+          Number(row[`__mx_required_null_${index}`] ?? 0) > 0
+            ? [`mobile-commerce writer-required column ${name} contains NULL values`]
+            : []
+        ))
+        const totalRows = Number(row.total_rows ?? 0)
+        if (nullIssues.length > 0) {
+          return {
+            totalRows,
+            completedRows: null,
+            remainingRows: null,
+            percent: null,
+            cursor: saved,
+            blocker: 'source_cursor_unsafe',
+            issues: nullIssues,
+            warnings,
+          }
+        }
+        if (remaining.length === 0) {
+          return {
+            totalRows,
+            completedRows: null,
+            remainingRows: null,
+            percent: null,
+            cursor: saved,
+            blocker: null,
+            issues: [],
+            warnings,
+          }
+        }
+        const remainingRows = Number(row.remaining_rows ?? 0)
+        const completedRows = Math.max(0, totalRows - remainingRows)
+        return {
+          totalRows,
+          completedRows,
+          remainingRows,
+          percent: totalRows === 0 ? 100 : Math.round((completedRows / totalRows) * 10_000) / 100,
+          cursor: saved,
+          blocker: null,
+          issues: [],
+          warnings,
+        }
+      }
       if (position.cursor == null || position.lastId == null) {
         const { rows } = await pool.query(
           `SELECT count(*)::bigint AS total_rows
@@ -1722,14 +1818,42 @@ export class DatabaseSourcePuller {
       const { cursorCast, idCast } = cursorTypes(columns, cursorName, idName)
       const cursorAliasName = internalCursorAlias(columns)
       const cursorAlias = quotedIdentifier(cursorAliasName, 'internal cursor alias')
+      const nullableWriterColumns = sourceKey === MOBILE_COMMERCE_SOURCE_KEY
+        ? nullableMobileCommerceWriterColumns(columns)
+        : []
+      const requiredNullPredicate = nullableWriterColumns
+        .map((name) => `${quotedIdentifier(name, 'mobile-commerce writer column')} IS NULL`)
+        .join(' OR ')
+      // Writer v2 permits legacy nullable DDL. When that compatibility path is
+      // active, select contract violations in the same PostgreSQL statement as
+      // the page and sort them first. A separate preflight query would have a
+      // read-committed TOCTOU window in which a writer could insert a NULL row.
+      const guardedMobilePage = requiredNullPredicate
+        ? `SELECT *, ${cursorColumn}::text AS ${cursorAlias} FROM ${table}
+          WHERE (${requiredNullPredicate})
+             OR (${cursorColumn} IS NOT NULL
+                AND ($1::${cursorCast} IS NULL OR (${cursorColumn}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast})))
+          ORDER BY CASE WHEN (${requiredNullPredicate}) THEN 0 ELSE 1 END,
+                   ${cursorColumn} NULLS FIRST, ${idColumn} NULLS FIRST
+          LIMIT $3`
+        : null
       const { rows } = await pool.query(
-        `SELECT *, ${cursorColumn}::text AS ${cursorAlias} FROM ${table}
+        guardedMobilePage || `SELECT *, ${cursorColumn}::text AS ${cursorAlias} FROM ${table}
           WHERE ${cursorColumn} IS NOT NULL
             AND ($1::${cursorCast} IS NULL OR (${cursorColumn}, ${idColumn}) > ($1::${cursorCast}, $2::${idCast}))
           ORDER BY ${cursorColumn}, ${idColumn}
           LIMIT $3`,
         [position.cursor ?? null, position.lastId ?? null, limit],
       )
+      const requiredNullIssues = mobileCommerceRequiredNullIssues(rows, nullableWriterColumns)
+      if (requiredNullIssues.length > 0) {
+        throw new AppError(
+          409,
+          'source_contract_mismatch',
+          'Mobile-commerce source contains NULL writer-required values; correct the upstream rows before resuming',
+          { issues: requiredNullIssues },
+        )
+      }
       const cursorDefinition = columns.find((column) => column.name === cursorName)
       const exactCursors = takeExactCursors(rows, cursorAliasName, cursorName, {
         // node-postgres converts `timestamp without time zone` to a Date before
