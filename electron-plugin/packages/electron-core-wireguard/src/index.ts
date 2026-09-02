@@ -1530,7 +1530,14 @@ export async function getWindowsWireGuardNrptStatus(input: {
   const product = windowsTunnelProductLabels(tunnelName);
   const comment = `${product.commentPrefix} ${tunnelName}`;
   const legacyStateRelativePath = `${product.programDataDir}\\nrpt-global-${tunnelName}.json`;
-  const probeTimeoutMs = normalizeTimeoutMs(input.probeTimeoutMs, 3000);
+  // The 3 s this used to default to did not cover the work on a slow machine:
+  // PowerShell engine start alone measured ~1.2 s on a field box, before
+  // Get-DnsClientNrptGlobal/Rule (CIM cmdlets, comparable in cost to
+  // Get-NetAdapter, which took ~1.8 s there) had run at all. A probe that runs
+  // out of budget reports state:'probe-failed', which blocks split-DNS
+  // readiness and holds the connection at tunnel-only. The mutex wait stays
+  // capped at 1.5 s -- that is contention control, not a work budget.
+  const probeTimeoutMs = normalizeTimeoutMs(input.probeTimeoutMs, 8000);
   const mutexTimeoutMs = Math.max(25, Math.min(1500, probeTimeoutMs - 250));
 
   const script = [
