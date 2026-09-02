@@ -226,6 +226,11 @@ export interface WireGuardTunnelStatus {
   runtime: WireGuardConnectionRuntimeStatus;
   serviceState?: string | null;
   error?: string | null;
+  // True only when this result actually observed whether the tunnel is up.
+  // A probe that timed out reports active:false like a stopped tunnel does,
+  // and callers must be able to tell the two apart before tearing anything
+  // down. Undefined on platforms/paths that always observe directly.
+  activeObserved?: boolean;
 }
 
 export interface WireGuardWindowsNrptNamespaceStatus {
@@ -934,7 +939,7 @@ export async function repairWireGuardTunnelRoutes(input: {
         message: '当前 WireGuard 配置没有可修复的 HDO route 或 split DNS 规则。'
       };
     }
-    const serviceState = readWindowsTunnelServiceState(profile.interfaceName);
+    const serviceState = readWindowsTunnelServiceState(profile.interfaceName).serviceState;
     if (serviceState !== 'RUNNING') {
       return {
         ...baseResult,
@@ -1464,6 +1469,7 @@ export function getWindowsWireGuardTunnelStatusByName(input: {
     return {
       ...base,
       ok: false,
+      activeObserved: false,
       error: `Windows tunnel status is unavailable on ${input.runtime.platform}`
     };
   }
@@ -1475,6 +1481,7 @@ export function getWindowsWireGuardTunnelStatusByName(input: {
       return {
         ...base,
         active: true,
+        activeObserved: true,
         serviceState: 'RUNNING',
         peers: parseWireGuardDump(rawDump),
         rawDump,
@@ -1488,6 +1495,9 @@ export function getWindowsWireGuardTunnelStatusByName(input: {
     ...base,
     ok: machineState.ok,
     active: machineState.serviceState === 'RUNNING',
+    // active:false is only a claim about the tunnel when the service query
+    // actually answered. Otherwise it is just the field's default.
+    activeObserved: machineState.serviceStateKnown,
     serviceState: machineState.serviceState,
     routes: machineState.routes,
     ifconfig: machineState.adapters.length > 0
@@ -3533,41 +3543,77 @@ function readInterfaceState(interfaceName: string): string | null {
   return safeExecFile('ifconfig', [interfaceName]);
 }
 
-function readWindowsTunnelServiceState(interfaceName: string): string | null {
-  const raw = tryExecFile('sc.exe', ['query', `WireGuardTunnel$${interfaceName}`]).stdout
-    || tryExecFile('sc', ['query', `WireGuardTunnel$${interfaceName}`]).stdout;
-  const match = raw?.match(/STATE\s*:\s*\d+\s+([A-Z_]+)/i);
-  if (match?.[1]) return match[1].toUpperCase();
-  const serviceName = `WireGuardTunnel$${interfaceName}`;
-  const script = [
-    "$ErrorActionPreference = 'SilentlyContinue'",
-    `$svc = Get-Service -Name ${powerShellString(serviceName)}`,
-    "if ($null -eq $svc) { 'NOT_FOUND' } else { [string]$svc.Status }"
-  ].join('; ');
-  const ps = tryExecFile(windowsPowerShellCommand(), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script]);
-  const status = ps.stdout.trim().toUpperCase();
-  return status || null;
-}
+const WINDOWS_TUNNEL_SERVICE_PROBE_TIMEOUT_MS = 8000;
+const WINDOWS_TUNNEL_INVENTORY_PROBE_TIMEOUT_MS = 12_000;
 
-function readWindowsTunnelMachineState(interfaceName: string): {
+// The tunnel service state is the decisive liveness signal, and `sc.exe` answers
+// it without paying for a PowerShell process at all. Only fall back to
+// Get-Service when sc.exe produced nothing we could parse (a localized STATE
+// line, or sc.exe itself unavailable).
+//
+// The distinction between "the service is not running" and "we could not ask"
+// is what callers were missing: a failed probe used to be reported as a stopped
+// tunnel, and MX-H2I then cleaned up a live one.
+function readWindowsTunnelServiceState(interfaceName: string): {
   ok: boolean;
   serviceState: string | null;
-  adapters: string[];
-  routes: string[];
   error: string | null;
 } {
   const serviceName = `WireGuardTunnel$${interfaceName}`;
+  const sc = tryExecFile('sc.exe', ['query', serviceName], WINDOWS_TUNNEL_SERVICE_PROBE_TIMEOUT_MS);
+  const scFallback = sc.stdout
+    ? sc
+    : tryExecFile('sc', ['query', serviceName], WINDOWS_TUNNEL_SERVICE_PROBE_TIMEOUT_MS);
+  const match = scFallback.stdout?.match(/STATE\s*:\s*\d+\s+([A-Z_]+)/i);
+  if (match?.[1]) return { ok: true, serviceState: match[1].toUpperCase(), error: null };
+
   const script = [
     "$ErrorActionPreference = 'Stop'",
     "$ProgressPreference = 'SilentlyContinue'",
     `$svc = Get-Service -Name ${powerShellString(serviceName)} -ErrorAction SilentlyContinue`,
+    "if ($null -eq $svc) { 'NOT_FOUND' } else { ([string]$svc.Status).ToUpperInvariant() }"
+  ].join('\r\n');
+  const ps = tryExecFile(windowsPowerShellCommand(), [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    script
+  ], WINDOWS_TUNNEL_SERVICE_PROBE_TIMEOUT_MS);
+  const serviceState = ps.ok ? (nullableText(ps.stdout)?.toUpperCase() ?? null) : null;
+  if (serviceState) return { ok: true, serviceState, error: null };
+  return {
+    ok: false,
+    serviceState: null,
+    error: ps.stderr.trim()
+      || ps.error
+      || scFallback.error
+      || `Unable to query ${serviceName}`
+  };
+}
+
+// `Get-NetAdapter -IncludeHidden` plus a `Get-NetRoute` per adapter is far more
+// expensive than the service query, and on a machine carrying several tunnel
+// stacks it can run for many seconds. Running both in one spawnSync meant a
+// slow inventory killed the whole process, and that ETIMEDOUT came back as
+// serviceState:null -> active:false, indistinguishable from a genuinely
+// stopped tunnel. Keep them separate so the service answer survives.
+function readWindowsTunnelInventory(interfaceName: string): {
+  ok: boolean;
+  adapters: string[];
+  routes: string[];
+  error: string | null;
+} {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
     `$adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object { [string]$_.Name -eq ${powerShellString(interfaceName)} })`,
     '$routes = @($adapters | ForEach-Object {',
     '  $index = [int]$_.InterfaceIndex',
     "  Get-NetRoute -InterfaceIndex $index -ErrorAction Stop | ForEach-Object { ([string]$_.DestinationPrefix) + '|if=' + [string]$_.InterfaceIndex + '|nextHop=' + [string]$_.NextHop }",
     '})',
     '[pscustomobject]@{',
-    "  serviceState = if ($null -eq $svc) { 'NOT_FOUND' } else { ([string]$svc.Status).ToUpperInvariant() }",
     '  adapters = @($adapters | ForEach-Object { ([string]$_.Name) + \'|if=\' + [string]$_.InterfaceIndex + \'|status=\' + [string]$_.Status })',
     '  routes = $routes',
     '} | ConvertTo-Json -Depth 5 -Compress'
@@ -3579,23 +3625,19 @@ function readWindowsTunnelMachineState(interfaceName: string): {
     'Bypass',
     '-Command',
     script
-  ], 5000);
+  ], WINDOWS_TUNNEL_INVENTORY_PROBE_TIMEOUT_MS);
   if (!result.ok) {
     return {
       ok: false,
-      serviceState: null,
       adapters: [],
       routes: [],
-      error: result.stderr.trim() || result.error || `Unable to query ${serviceName}`
+      error: result.stderr.trim() || result.error || `Unable to enumerate ${interfaceName}`
     };
   }
   try {
     const row = JSON.parse(result.stdout) as Record<string, unknown>;
-    const serviceState = nullableText(row.serviceState)?.toUpperCase() ?? null;
-    if (!serviceState) throw new Error('serviceState is missing');
     return {
       ok: true,
-      serviceState,
       adapters: normalizeWindowsNrptTextList(row.adapters),
       routes: normalizeWindowsNrptTextList(row.routes),
       error: null
@@ -3603,12 +3645,33 @@ function readWindowsTunnelMachineState(interfaceName: string): {
   } catch (err) {
     return {
       ok: false,
-      serviceState: null,
       adapters: [],
       routes: [],
       error: `Invalid Windows tunnel cleanup probe: ${errorMessage(err)}`
     };
   }
+}
+
+function readWindowsTunnelMachineState(interfaceName: string): {
+  ok: boolean;
+  serviceStateKnown: boolean;
+  serviceState: string | null;
+  adapters: string[];
+  routes: string[];
+  error: string | null;
+} {
+  const service = readWindowsTunnelServiceState(interfaceName);
+  const inventory = readWindowsTunnelInventory(interfaceName);
+  return {
+    // `ok` still means "the whole machine state was read", because teardown
+    // readiness checks treat an empty route list as proof of a clean machine.
+    ok: service.ok && inventory.ok,
+    serviceStateKnown: service.ok,
+    serviceState: service.serviceState,
+    adapters: inventory.adapters,
+    routes: inventory.routes,
+    error: [service.error, inventory.error].filter(Boolean).join('; ') || null
+  };
 }
 
 function routeLooksLikeExistingHdoRoute(

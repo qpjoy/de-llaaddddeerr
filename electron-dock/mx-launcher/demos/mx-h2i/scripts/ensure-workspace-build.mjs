@@ -19,10 +19,21 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(here, '..');
 
-/** Packages whose runtime entry is compiled output rather than source. */
+/**
+ * Packages whose runtime entry is compiled output rather than source.
+ *
+ * Dependency order matters: each is built with `pnpm --filter <name> build`,
+ * so a package must appear after everything it imports types from.
+ * electron-core-wireguard and electron-launcher belong here for the same
+ * reason as the others -- they are workspace links whose package.json `main`
+ * points at dist/, so editing their TypeScript has no effect until tsc runs,
+ * and MX-H2I silently keeps running the previously compiled behaviour.
+ */
 const PACKAGES = [
+  '@qpjoy/electron-core-wireguard',
   '@qpjoy/electron-core-mihomo',
-  '@qpjoy/electron-plugin-tunnel'
+  '@qpjoy/electron-plugin-tunnel',
+  '@qpjoy/electron-launcher'
 ];
 
 function packageDir(name) {

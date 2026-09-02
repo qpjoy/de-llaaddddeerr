@@ -14,7 +14,8 @@ const {
   shouldRepairDarwinRetainedOwnership,
   stableOwnershipInstanceId,
   wireGuardRecoveryGate,
-  wireGuardRecoveryTurn
+  wireGuardRecoveryTurn,
+  wireGuardStatusObserved
 } = require('../src/network-recovery-policy.cjs');
 const {
   postConnectDataPlaneReady,
@@ -354,6 +355,49 @@ assert.deepEqual(
   'foreground recovery must receive a fresh turn after the background recovery settles'
 );
 
+// The exact shape the field bundle captured: the Windows machine-state probe
+// spawn timed out, so active is false and serviceState is only present because
+// the summary fell back to the previous value. Reading that as "tunnel down"
+// downgraded a healthy connection and, at startup, tore a live tunnel down --
+// the route audit shows ten NRPT rules and four routes being removed.
+const timedOutWindowsStatus = {
+  ok: false,
+  active: false,
+  activeObserved: false,
+  serviceState: null,
+  error: 'spawnSync C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe ETIMEDOUT'
+};
+assert.equal(
+  wireGuardStatusObserved(timedOutWindowsStatus),
+  false,
+  'a timed-out Windows machine-state probe must not count as observing the tunnel'
+);
+assert.equal(
+  wireGuardStatusObserved(null),
+  false,
+  'a status query that threw observed nothing'
+);
+assert.equal(
+  wireGuardStatusObserved({ ok: true, active: false, activeObserved: true, serviceState: 'STOPPED' }),
+  true,
+  'a service query that answered STOPPED is a real observation of a down tunnel'
+);
+assert.equal(
+  wireGuardStatusObserved({ ok: true, active: true, activeObserved: true }),
+  true,
+  'a running tunnel is observed'
+);
+assert.equal(
+  wireGuardStatusObserved({ ok: false, active: true }),
+  true,
+  'a partially failed read that still saw the tunnel up is an observation'
+);
+assert.equal(
+  wireGuardStatusObserved({ ok: true, active: false }),
+  true,
+  'a status without the newer activeObserved marker falls back to ok'
+);
+
 // A Windows background probe that could not observe the tunnel must not be
 // mistaken for an outage: that downgrade made the runtime ineligible for the
 // system domain proxy, which tore the PAC down and cut Internal browsing until
@@ -433,8 +477,24 @@ const source = readFileSync(
 );
 assert.match(
   source,
-  /const tunnelObserved = Boolean\(status\);/,
+  /const tunnelObserved = wireGuardStatusObserved\(status\);/,
   'probeWireGuardForConnection must record whether it actually observed the tunnel'
+);
+assert.match(
+  source,
+  /let status = await readWireGuardPeerStatusUntilObserved\(mod, runtimeOptions, 'app-startup'\)/,
+  'startup must retry the status probe before drawing a destructive conclusion'
+);
+assert.match(
+  source,
+  /process\.platform === 'win32'\s*&& !pendingCleanupAtStartup\s*&& !wireGuardStatusObserved\(status\)[\s\S]{0,600}?'wireguard\.startup-status-unobserved'/,
+  'an unreadable startup status must preserve state instead of running the orphan cleanup'
+);
+const startupGuardIndex = source.indexOf("'wireguard.startup-status-unobserved'");
+const startupCleanupIndex = source.indexOf("runWindowsNetworkCleanupOnly('app-startup-orphan')");
+assert.ok(
+  startupGuardIndex > 0 && startupGuardIndex < startupCleanupIndex,
+  'the unobserved-status guard must come before the startup cleanup call'
 );
 assert.match(
   source,

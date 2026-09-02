@@ -2,6 +2,21 @@ const DEFAULT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 const DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS = 105 * 1000;
 const DEFAULT_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD = 3;
 
+// A WireGuard status only says the tunnel is down when it actually managed to
+// look. The Windows machine-state probe shells out to PowerShell; when that
+// spawn times out the result still carries active:false, which is
+// byte-for-byte what a stopped tunnel looks like -- the field log shows
+// `statusError: "spawnSync ...powershell.exe ETIMEDOUT"` next to
+// `serviceState: "RUNNING"`. electron-core-wireguard marks that case with
+// activeObserved:false; a null status (the query threw) and ok:false cover the
+// remaining paths. Never act destructively on an unobserved status.
+function wireGuardStatusObserved(status) {
+  if (!status) return false;
+  if (status.activeObserved === false) return false;
+  if (status.active === true) return true;
+  return status.ok !== false;
+}
+
 // A background WireGuard probe can report three different things:
 //   1. the tunnel is confirmed live but a route/ownership/split-DNS proof is
 //      gone (a real split-brain: keeping "connected" would leak traffic),
@@ -156,5 +171,6 @@ module.exports = {
   shouldRepairDarwinRetainedOwnership,
   stableOwnershipInstanceId,
   wireGuardRecoveryGate,
-  wireGuardRecoveryTurn
+  wireGuardRecoveryTurn,
+  wireGuardStatusObserved
 };

@@ -19,7 +19,8 @@ const {
   shouldRepairDarwinRetainedOwnership,
   stableOwnershipInstanceId,
   wireGuardRecoveryGate,
-  wireGuardRecoveryTurn
+  wireGuardRecoveryTurn,
+  wireGuardStatusObserved
 } = require('./network-recovery-policy.cjs');
 const {
   postConnectDataPlaneReady,
@@ -15626,11 +15627,10 @@ async function probeWireGuardForConnection(input) {
       expectedInterfaceAddresses: status?.addresses || []
     });
     const tunnelProofReady = wireGuardStatusIsHealthy(status);
-    // getLauncherWireGuardPeerStatus() returns null when the underlying
-    // wg/sc/PowerShell query throws or times out, which is common on a loaded
-    // Windows box. "We could not look" is not the same claim as "the tunnel is
-    // down", and background callers rely on the difference.
-    const tunnelObserved = Boolean(status);
+    // "We could not look" is not the same claim as "the tunnel is down", and
+    // background callers rely on the difference. Covers both a null status
+    // (the query threw) and a status whose Windows service probe timed out.
+    const tunnelObserved = wireGuardStatusObserved(status);
     const routeReady = route.ok === true;
     const internalApi = routeReady
       ? await probeInternalApiViaOverlay(internalBaseUrl)
@@ -16865,14 +16865,37 @@ async function reconcileExistingWireGuardAfterStartup() {
   try {
     const mod = await importInstalledPackage('@qpjoy/electron-launcher/wireguard');
     const runtimeOptions = wireGuardRuntimeOptions();
-    let status = mod.getLauncherWireGuardPeerStatus(runtimeOptions);
+    let status = await readWireGuardPeerStatusUntilObserved(mod, runtimeOptions, 'app-startup');
     let connection = runtime?.connection || idleConnection();
     const retainedStartupConnection = isRetainedConnectionState(connection.state)
       && Boolean(normalizeRoutePlan(connection.routePlan));
+    const pendingCleanupAtStartup = pendingWindowsCleanupDiagnostic(connection);
+    // Never let an unreadable status drive a teardown. The Windows machine
+    // state probe can time out, and it then reports active:false exactly like a
+    // stopped tunnel does; acting on that has torn down live tunnels -- the
+    // route audit shows ten NRPT rules and four routes being removed from a
+    // tunnel that was up. A pending cleanup marker is different: it is durable
+    // evidence that an earlier teardown did not finish, so that path still runs.
+    if (
+      process.platform === 'win32'
+      && !pendingCleanupAtStartup
+      && !wireGuardStatusObserved(status)
+    ) {
+      queueDiagnosticLog(
+        'warning',
+        'wireguard.startup-status-unobserved',
+        '启动时无法读取 Windows WireGuard 状态（探测超时或失败），已保留上次连接状态，不做清理或降级。',
+        {
+          previousState: connection.state,
+          retainedStartupConnection,
+          statusError: nullableString(status?.error) || null
+        }
+      );
+      return { ok: false, active: null, observed: false, state: connection.state };
+    }
     const activeIdleOrphan = process.platform === 'win32'
       && status?.active === true
       && !retainedStartupConnection;
-    const pendingCleanupAtStartup = pendingWindowsCleanupDiagnostic(connection);
     if (
       process.platform === 'win32'
       && (status?.active !== true || activeIdleOrphan || pendingCleanupAtStartup)
@@ -17329,6 +17352,24 @@ function internalApiProbeBlockedByRoute(baseUrl, targetIp, route) {
 function wireGuardStatusIsHealthy(status) {
   const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes.length : 0;
   return status?.active === true && missingRoutes === 0;
+}
+
+// Startup decisions are destructive, so give a slow machine a couple of extra
+// chances before concluding anything. The probe is synchronous, so the delay
+// between attempts is what actually lets a loaded box catch up.
+async function readWireGuardPeerStatusUntilObserved(mod, runtimeOptions, reason, attempts = 3) {
+  let status = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      status = mod.getLauncherWireGuardPeerStatus(runtimeOptions);
+    } catch (err) {
+      status = null;
+      queueDiagnosticError('wireguard.status-probe-threw', err, { reason, attempt });
+    }
+    if (wireGuardStatusObserved(status)) return status;
+    if (attempt < attempts) await delay(attempt * 750);
+  }
+  return status;
 }
 
 function internalApiHealthStatus(route, internalApi) {

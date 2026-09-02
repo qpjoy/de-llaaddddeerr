@@ -271,10 +271,38 @@ PAC 撤掉，用户的 Internal 浏览直接断，要等下一次成功探测才
 `system domain proxy restored while inactive: route-refresh` 连刷两分多钟，而同期
 `wireguard-route-audit.log` 完全没有 route / NRPT 变更，隧道其实一直好的。
 
+第二份现场诊断包（2.1.19）把「没能观察到」的具体形态钉死了：
+
+```
+"wireGuard": {
+  "active": false,
+  "serviceState": "RUNNING",
+  "statusError": "spawnSync ...powershell.exe ETIMEDOUT"
+}
+```
+
+`active:false` 与 `serviceState:"RUNNING"` 同时出现，是因为 `summarizeWireGuardStatus()`
+在 `status.serviceState` 为 null 时回退到上一次的值。真正的原因是
+`readWindowsTunnelMachineState()` 把 `Get-Service`、`Get-NetAdapter -IncludeHidden` 和
+逐网卡的 `Get-NetRoute` 塞进同一个 spawnSync（5 秒超时）：只要网卡枚举慢，整个进程被杀，
+决定性的 service answer 一起消失，返回值与「隧道确实停了」完全一样。
+
+后果不只是标错状态。启动对账 `reconcileExistingWireGuardAfterStartup()` 用同一个
+`status.active !== true` 去判断「孤儿隧道」，于是对一条完好的隧道跑了完整清理——
+`wireguard-route-audit.log` 里是 `action=down`、`nrpt remove ownedMatches=10`、四条
+route 被删掉，3.5 分钟后才 `action=up` 重新建立。这一段时间用户是真的断网。
+
 规则：
 
-- probe 结果带 `tunnelObserved`。`getLauncherWireGuardPeerStatus()` 返回 null 或 probe
-  抛异常时为 `false`。
+- probe 结果带 `tunnelObserved`，由 `wireGuardStatusObserved()` 判定：status 为 null、
+  或 `activeObserved === false`、或 `ok === false` 都算「没观察到」。
+- `getWindowsWireGuardTunnelStatusByName()` 返回 `activeObserved`，取自 service 查询本身
+  是否得到了答案。
+- service 状态优先用 `sc.exe query`（不付 PowerShell 进程的代价），解析不出来才回退
+  `Get-Service`；网卡/路由枚举拆成独立 probe，它慢或失败都不再吃掉 service answer。
+- 启动对账在 status 未观察到时重试三次，仍然读不到就保留上次状态、既不清理也不降级，
+  只记 `wireguard.startup-status-unobserved`。只有 pending cleanup 标记（上一次 teardown
+  确实没做完的持久化证据）才允许在这种情况下继续清理。
 - 证据丢失只有在 `tunnelObserved === true` 时才能绕过
   `WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD`；未观察到隧道的探测只累加失败计数。
 - 缺失的 diagnostic 一律不等于丢失。`ownershipProofLost` 必须像 `routeProofLost` 一样先
@@ -286,6 +314,26 @@ PAC 撤掉，用户的 Internal 浏览直接断，要等下一次成功探测才
 refresh 会并发 spawn 五个 `reg.exe`，2.5 秒的超时在负载机器上会被正常命中并被当作硬错误
 上报（`system-domain-proxy.status-error`）。超时放宽到 6 秒；慢一次只是跳过下一个 tick，
 `systemDomainProxyRefreshInFlight` 已经保证不会重入。
+
+## 现场排查：Windows 探测耗时
+
+怀疑某台机器是「探测太慢」而不是「网络真的断了」时，在该机器上直接跑：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\diagnose-windows-probe-latency.ps1 -Iterations 20
+```
+
+脚本以子进程方式重放 MX-H2I 真正会 spawn 的每一个查询（`Get-Service`、
+`Get-NetAdapter -IncludeHidden`、`Get-NetRoute`、旧版的三合一脚本、`reg.exe query`、
+WinINet `Add-Type`），输出 min/median/max 与各自的超时预算，并列出隐藏网卡数量、NRPT
+规则归属和杀软信息。它只读不写，也不需要管理员。
+
+判读：
+
+- `Get-Service` 快而「combined」慢 → 网卡/路由枚举是瓶颈，正是本次拆分要解决的场景。
+- 连空的 `powershell startup (baseline)` 都要几秒 → 问题在进程创建本身（杀软/EDR 扫描或
+  磁盘争用），应为 MX-H2I 安装目录和它拉起的 powershell.exe 加排除项。
+- 全部在预算内 → 加大 `-Iterations` 并在机器繁忙时复测，这个卡顿是间歇性的、跟负载走。
 
 ## macOS 长时间运行后切换网络
 
