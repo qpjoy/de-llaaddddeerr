@@ -3561,18 +3561,48 @@ const WINDOWS_TUNNEL_INVENTORY_PROBE_TIMEOUT_MS = 12_000;
 // The distinction between "the service is not running" and "we could not ask"
 // is what callers were missing: a failed probe used to be reported as a stopped
 // tunnel, and MX-H2I then cleaned up a live one.
+// Every state Get-Service (ServiceControllerStatus) or `sc query` can report,
+// plus the NOT_FOUND we synthesise for an absent service. Anything else is
+// output we do not understand, and guessing from it is precisely how a probe
+// turns into a false "tunnel down" -- so an unrecognised answer is reported as
+// "could not observe" instead of as a state.
+const WINDOWS_SERVICE_STATES = new Set([
+  'NOT_FOUND',
+  'STOPPED',
+  'START_PENDING',
+  'STARTPENDING',
+  'STOP_PENDING',
+  'STOPPENDING',
+  'RUNNING',
+  'CONTINUE_PENDING',
+  'CONTINUEPENDING',
+  'PAUSE_PENDING',
+  'PAUSEPENDING',
+  'PAUSED'
+]);
+
+function normalizeWindowsServiceState(value: string | null | undefined): string | null {
+  const text = nullableText(value)?.toUpperCase() ?? null;
+  if (!text) return null;
+  return WINDOWS_SERVICE_STATES.has(text) ? text : null;
+}
+
 function readWindowsTunnelServiceState(interfaceName: string): {
   ok: boolean;
   serviceState: string | null;
   error: string | null;
 } {
   const serviceName = `WireGuardTunnel$${interfaceName}`;
-  const sc = tryExecFile('sc.exe', ['query', serviceName], WINDOWS_TUNNEL_SERVICE_PROBE_TIMEOUT_MS);
-  const scFallback = sc.stdout
-    ? sc
-    : tryExecFile('sc', ['query', serviceName], WINDOWS_TUNNEL_SERVICE_PROBE_TIMEOUT_MS);
-  const match = scFallback.stdout?.match(/STATE\s*:\s*\d+\s+([A-Z_]+)/i);
-  if (match?.[1]) return { ok: true, serviceState: match[1].toUpperCase(), error: null };
+  const sc = tryExecFile(windowsScCommand(), ['query', serviceName], WINDOWS_TUNNEL_SERVICE_PROBE_TIMEOUT_MS);
+  const scState = normalizeWindowsServiceState(
+    sc.stdout?.match(/STATE\s*:\s*\d+\s+([A-Za-z_]+)/)?.[1]
+  );
+  if (scState) return { ok: true, serviceState: scState, error: null };
+  // sc.exe reports a missing service as exit 1060; treat that as authoritative
+  // rather than paying for a PowerShell spawn to learn the same thing.
+  if (/1060/.test(sc.stdout ?? '') || /1060/.test(sc.stderr ?? '')) {
+    return { ok: true, serviceState: 'NOT_FOUND', error: null };
+  }
 
   const script = [
     "$ErrorActionPreference = 'Stop'",
@@ -3588,14 +3618,14 @@ function readWindowsTunnelServiceState(interfaceName: string): {
     '-Command',
     script
   ], WINDOWS_TUNNEL_SERVICE_PROBE_TIMEOUT_MS);
-  const serviceState = ps.ok ? (nullableText(ps.stdout)?.toUpperCase() ?? null) : null;
+  const serviceState = ps.ok ? normalizeWindowsServiceState(ps.stdout) : null;
   if (serviceState) return { ok: true, serviceState, error: null };
   return {
     ok: false,
     serviceState: null,
     error: ps.stderr.trim()
       || ps.error
-      || scFallback.error
+      || sc.error
       || `Unable to query ${serviceName}`
   };
 }
@@ -5027,6 +5057,22 @@ function windowsPowerShellScriptPaths(
 function writePowerShellScriptFile(scriptPath: string, script: string): void {
   mkdirSync(dirname(scriptPath), { recursive: true });
   writeFileSync(scriptPath, `\uFEFF${script.trimEnd()}\n`, 'utf8');
+}
+
+// Resolve sc.exe the same way as powershell.exe: out of SystemRoot rather than
+// off PATH. That keeps a system binary from being shadowed by PATH, and it lets
+// the Windows smoke tests stub it through their SystemRoot override so the
+// service probe stays hermetic instead of reading the build machine's services.
+function windowsScCommand(): string {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  const candidates = systemRoot
+    ? [
+        join(systemRoot, 'Sysnative', 'sc.exe'),
+        join(systemRoot, 'System32', 'sc.exe'),
+        join(systemRoot, 'SysWOW64', 'sc.exe')
+      ]
+    : [];
+  return candidates.find((candidate) => existsSync(candidate)) ?? 'sc.exe';
 }
 
 function windowsPowerShellCommand(): string {

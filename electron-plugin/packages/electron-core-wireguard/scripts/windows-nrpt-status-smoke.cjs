@@ -338,7 +338,44 @@ async function verifyAsyncLiveProbe() {
   const root = mkdtempSync(join(tmpdir(), "mx nrpt user's probe-"));
   const powerShellDir = join(root, 'System32', 'WindowsPowerShell', 'v1.0');
   const powerShell = join(powerShellDir, 'powershell.exe');
+  const system32Dir = join(root, 'System32');
+  const scCommand = join(system32Dir, 'sc.exe');
   const probeScriptCapture = join(root, 'nrpt-probe-command.ps1');
+
+  // The Windows tunnel status is read with two separate probes now: sc.exe (or
+  // Get-Service as a fallback) for the service state, and a PowerShell script
+  // for the adapter/route inventory. Both have to be stubbed, and the
+  // PowerShell stub has to answer according to which script it was handed --
+  // returning the combined snapshot to both made the service probe read the
+  // whole JSON blob as a service state.
+  //
+  // sc.exe in particular must be stubbed rather than inherited from the build
+  // machine: the real one would report whatever WireGuardTunnel$mx-h2i happens
+  // to be doing on that host, which would make this test's result depend on the
+  // machine it runs on.
+  function writeMachineStateStub(snapshot) {
+    mkdirSync(system32Dir, { recursive: true });
+    const state = String(snapshot.serviceState ?? 'NOT_FOUND').toUpperCase();
+    writeFileSync(
+      scCommand,
+      state === 'NOT_FOUND'
+        ? '#!/usr/bin/env node\nprocess.stdout.write("[SC] EnumQueryServicesStatus:OpenService FAILED 1060:\\r\\n");\nprocess.exit(1060);\n'
+        : `#!/usr/bin/env node\nprocess.stdout.write("SERVICE_NAME: mx-h2i\\r\\n        STATE              : 4  ${state}\\r\\n");\n`
+    );
+    chmodSync(scCommand, 0o755);
+    const inventory = JSON.stringify({
+      adapters: snapshot.adapters ?? [],
+      routes: snapshot.routes ?? []
+    });
+    writeFileSync(
+      powerShell,
+      '#!/usr/bin/env node\n'
+      + 'const script = String(process.argv.at(-1) || "");\n'
+      + `if (/Get-Service/.test(script)) { process.stdout.write(${JSON.stringify(state)}); }\n`
+      + `else { process.stdout.write(${JSON.stringify(inventory)}); }\n`
+    );
+    chmodSync(powerShell, 0o755);
+  }
   const configPath = join(root, 'mx-h2i.conf');
   const previousSystemRoot = process.env.SystemRoot;
   mkdirSync(powerShellDir, { recursive: true });
@@ -717,16 +754,11 @@ async function verifyAsyncLiveProbe() {
     );
     assert.match(missingProfileElevated, /\$hdoNrptOwnershipEvidenceComplete = \$false/);
 
-    const missingProfileMachineSnapshot = JSON.stringify({
+    writeMachineStateStub({
       serviceState: 'NOT_FOUND',
       adapters: [],
       routes: []
     });
-    writeFileSync(
-      powerShell,
-      `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(missingProfileMachineSnapshot)});\n`
-    );
-    chmodSync(powerShell, 0o755);
     const missingProfileTunnel = getWindowsWireGuardTunnelStatusByName({
       runtime: {
         platform: 'win32',
@@ -739,16 +771,11 @@ async function verifyAsyncLiveProbe() {
     assert.equal(missingProfileTunnel.serviceState, 'NOT_FOUND');
     assert.equal(missingProfileTunnel.interfaceName, 'mx-h2i');
 
-    const residualAdapterSnapshot = JSON.stringify({
+    writeMachineStateStub({
       serviceState: 'NOT_FOUND',
       adapters: ['mx-h2i|if=42|status=Disconnected'],
       routes: ['10.0.0.0/8|if=42|nextHop=0.0.0.0']
     });
-    writeFileSync(
-      powerShell,
-      `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(residualAdapterSnapshot)});\n`
-    );
-    chmodSync(powerShell, 0o755);
     const residualAdapterTunnel = getWindowsWireGuardTunnelStatusByName({
       runtime: {
         platform: 'win32',
