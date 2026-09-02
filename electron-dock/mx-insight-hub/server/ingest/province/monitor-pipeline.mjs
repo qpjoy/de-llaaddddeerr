@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto'
 import { AppError } from '../../core/errors.mjs'
 import { PROVINCE_GEOGRAPHY_PIPELINE_KEY } from '../../agent/pipeline-store.mjs'
 import { enqueueJobsAtomically } from '../external/atomic-enqueue.mjs'
-import { validateDatabaseConnection } from '../external/database-source.mjs'
 import { EXTERNAL_PULL_QUEUE } from '../external/sync-job.mjs'
 import {
   PROVINCE_OPINION_SOURCE_KEY,
@@ -143,6 +142,27 @@ function sharedConnection(connection = {}) {
   )
 }
 
+function fixedConnection() {
+  return { ...PROVINCE_OPINION_SOURCE_LOCATOR }
+}
+
+function safeDatabaseConnection(resolved, profile = null) {
+  if (!resolved?.databaseConnectionId) return null
+  const connection = resolved.connection || {}
+  return {
+    id: resolved.databaseConnectionId,
+    connectionKey: profile?.key ?? resolved.databaseConnectionKey ?? null,
+    displayName: profile?.displayName ?? null,
+    revision: profile?.revision ?? resolved.databaseConnectionRevision ?? null,
+    host: connection.host ?? null,
+    port: connection.port ?? 5432,
+    database: connection.database ?? null,
+    username: connection.username ?? null,
+    sslMode: connection.sslMode ?? 'require',
+    passwordConfigured: typeof connection.password === 'string' && connection.password.length > 0,
+  }
+}
+
 function isConfigured(connection) {
   return ['host', 'database', 'username', 'password'].every((field) => (
     typeof connection?.[field] === 'string' && connection[field].length > 0
@@ -259,6 +279,26 @@ export class ProvinceOpinionPipeline {
     return source
   }
 
+  async #configuration(source) {
+    try {
+      const resolved = await this.databasePuller.resolveConnectionCandidate(source)
+      const profile = resolved.databaseConnectionId && typeof this.store.getDatabaseConnection === 'function'
+        ? await this.store.getDatabaseConnection(resolved.databaseConnectionId)
+        : null
+      return {
+        effectiveConnection: resolved.connection,
+        databaseConnection: safeDatabaseConnection(resolved, profile),
+        issues: [],
+      }
+    } catch (error) {
+      return {
+        effectiveConnection: null,
+        databaseConnection: null,
+        issues: [error?.message || 'Database connection is not configured'],
+      }
+    }
+  }
+
   async #cursor() {
     return this.queue?.getCursor?.(`external:${PROVINCE_OPINION_SOURCE_KEY}`) ?? null
   }
@@ -309,6 +349,7 @@ export class ProvinceOpinionPipeline {
       this.agentPipelineStore?.getPipeline?.(PROVINCE_GEOGRAPHY_PIPELINE_KEY) ?? null,
     ])
     const connection = sharedConnection(source.connection)
+    const configuration = await this.#configuration(source)
     const sourceContractIssues = provinceOpinionSourceContractIssues(source)
     const hanlpIssues = provinceOpinionHanlpIssues(this.segmenterConfig)
     const fixedContractValid = sourceContractIssues.length === 0
@@ -323,8 +364,12 @@ export class ProvinceOpinionPipeline {
       pipelineKey: PROVINCE_OPINION_PIPELINE_KEY,
       displayName: '全国省份舆情',
       status: source.status,
-      configured: isConfigured(connection) && fixedContractValid,
-      connection,
+      configured: isConfigured(configuration.effectiveConnection)
+        && fixedContractValid
+        && configuration.issues.length === 0,
+      databaseConnectionId: source.databaseConnectionId ?? null,
+      databaseConnection: configuration.databaseConnection,
+      connection: source.databaseConnectionId ? null : connection,
       syncIntervalSeconds: source.syncIntervalSeconds,
       fixedInput: {
         schema: PROVINCE_OPINION_INPUT.schema,
@@ -334,6 +379,7 @@ export class ProvinceOpinionPipeline {
       },
       configurationIssues: [
         ...sourceContractIssues,
+        ...configuration.issues,
         ...hanlpIssues,
         ...(servingIndexes.ready
           ? []
@@ -365,14 +411,22 @@ export class ProvinceOpinionPipeline {
   }
 
   async configure(body = {}) {
-    const unsupported = unsupportedFields(body, new Set(['connection', 'syncIntervalSeconds']))
+    const unsupported = unsupportedFields(body, new Set(['databaseConnectionId', 'connection', 'syncIntervalSeconds']))
     if (unsupported.length > 0) {
       throw new AppError(400, 'unsupported_fields', `Unsupported pipeline fields: ${unsupported.join(', ')}`)
     }
-    if (body.connection == null && body.syncIntervalSeconds == null) {
-      throw new AppError(400, 'invalid_request', 'connection or syncIntervalSeconds is required')
+    const hasProfile = Object.prototype.hasOwnProperty.call(body, 'databaseConnectionId')
+    const hasInline = body.connection != null
+    if (hasProfile && hasInline) {
+      throw new AppError(400, 'ambiguous_database_connection', 'Choose a shared database connection or task-owned credentials, not both')
     }
-    if (body.connection != null && (typeof body.connection !== 'object' || Array.isArray(body.connection))) {
+    if (!hasProfile && !hasInline && body.syncIntervalSeconds == null) {
+      throw new AppError(400, 'invalid_request', 'databaseConnectionId, connection, or syncIntervalSeconds is required')
+    }
+    if (hasProfile && (typeof body.databaseConnectionId !== 'string' || !body.databaseConnectionId.trim())) {
+      throw new AppError(400, 'invalid_database_connection_id', 'databaseConnectionId must be a non-empty UUID')
+    }
+    if (hasInline && (typeof body.connection !== 'object' || Array.isArray(body.connection))) {
       throw new AppError(400, 'invalid_connection', 'connection must be an object')
     }
     const unsupportedConnection = unsupportedFields(body.connection, SHARED_CONNECTION_FIELDS)
@@ -384,6 +438,15 @@ export class ProvinceOpinionPipeline {
       )
     }
     const interval = syncInterval(body.syncIntervalSeconds)
+    const intervalOnly = Object.keys(body).length === 1
+      && Object.prototype.hasOwnProperty.call(body, 'syncIntervalSeconds')
+    if (intervalOnly) {
+      await this.store.updateExternalSourcesBatch([{
+        sourceKey: PROVINCE_OPINION_SOURCE_KEY,
+        syncIntervalSeconds: interval,
+      }])
+      return this.get()
+    }
     return this.#withLock(async () => {
       const source = await this.#source()
       if (source.status !== 'paused') {
@@ -394,22 +457,24 @@ export class ProvinceOpinionPipeline {
         throw new AppError(409, 'source_draining', 'Wait for the province opinion task to reach a checkpoint')
       }
       let connection
-      if (body.connection != null) {
-        connection = {
-          ...sharedConnection(source.connection),
-          ...body.connection,
-          schema: PROVINCE_OPINION_INPUT.schema,
-          table: PROVINCE_OPINION_INPUT.table,
-          cursorColumn: PROVINCE_OPINION_INPUT.cursorColumn,
-          idColumn: PROVINCE_OPINION_INPUT.idColumn,
-        }
+      let databaseConnectionId
+      if (hasProfile || hasInline) {
+        databaseConnectionId = hasProfile ? body.databaseConnectionId.trim() : null
+        connection = hasProfile
+          ? fixedConnection()
+          : {
+              ...(source.databaseConnectionId == null ? sharedConnection(source.connection) : {}),
+              ...body.connection,
+              ...fixedConnection(),
+            }
         delete connection.dsnEnv
-        validateDatabaseConnection(connection)
-        await this.databasePuller.testConnection(connection)
+        const candidate = { databaseConnectionId, connection }
+        await this.databasePuller.resolveConnectionCandidate(candidate)
+        await this.databasePuller.testSourceCandidate(candidate)
       }
       await this.store.updateExternalSourcesBatch([{
         sourceKey: PROVINCE_OPINION_SOURCE_KEY,
-        ...(connection ? { connection } : {}),
+        ...(connection ? { connection, databaseConnectionId } : {}),
         ...(interval === undefined ? {} : { syncIntervalSeconds: interval }),
       }])
       return this.get()
@@ -439,8 +504,8 @@ export class ProvinceOpinionPipeline {
           { issues: sourceContractIssues },
         )
       }
-      const connection = sharedConnection(source.connection)
-      if (!isConfigured(connection)) {
+      const configuration = await this.#configuration(source)
+      if (configuration.issues.length > 0 || !isConfigured(configuration.effectiveConnection)) {
         throw new AppError(409, 'pipeline_not_configured', 'Configure the province opinion database connection before activation')
       }
       const cursor = await this.#cursor()

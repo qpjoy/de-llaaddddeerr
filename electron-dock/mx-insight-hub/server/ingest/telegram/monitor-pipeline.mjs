@@ -83,7 +83,6 @@ function isCurrentWriterContractAttestation(attestation) {
 const SHARED_CONNECTION_FIELDS = new Set([
   'host', 'port', 'database', 'username', 'password', 'sslMode',
 ])
-const FIXED_CONNECTION_FIELDS = new Set(['schema', 'table', 'cursorColumn', 'idColumn'])
 const PIPELINE_ENQUEUE_ERRORS = Object.freeze({
   unavailable: {
     code: 'atomic_enqueue_unavailable',
@@ -106,8 +105,35 @@ function unsupportedFields(value, allowed) {
 
 function sharedConnection(connection = {}) {
   return Object.fromEntries(
-    Object.entries(connection).filter(([field]) => !FIXED_CONNECTION_FIELDS.has(field)),
+    Object.entries(connection).filter(([field]) => SHARED_CONNECTION_FIELDS.has(field)),
   )
+}
+
+function fixedConnection(input, sourceContractId = null) {
+  return {
+    schema: input.schema,
+    table: input.table,
+    cursorColumn: input.cursorColumn,
+    idColumn: input.idColumn,
+    ...(sourceContractId ? { sourceContractId } : {}),
+  }
+}
+
+function safeDatabaseConnection(resolved, profile = null) {
+  if (!resolved?.databaseConnectionId) return null
+  const connection = resolved.connection || {}
+  return {
+    id: resolved.databaseConnectionId,
+    connectionKey: profile?.key ?? resolved.databaseConnectionKey ?? null,
+    displayName: profile?.displayName ?? null,
+    revision: profile?.revision ?? resolved.databaseConnectionRevision ?? null,
+    host: connection.host ?? null,
+    port: connection.port ?? 5432,
+    database: connection.database ?? null,
+    username: connection.username ?? null,
+    sslMode: connection.sslMode ?? 'require',
+    passwordConfigured: typeof connection.password === 'string' && connection.password.length > 0,
+  }
 }
 
 function sameValue(left, right) {
@@ -164,8 +190,17 @@ function isConfigured(connection) {
 
 function pipelineConfiguration(sources) {
   const connections = sources.map((source) => sharedConnection(source.connection))
+  const databaseConnectionIds = sources.map((source) => source.databaseConnectionId ?? null)
+  const sourceContractIds = sources.map((source) => source.connection?.sourceContractId ?? null)
   const intervals = sources.map((source) => source.syncIntervalSeconds)
-  const connectionConsistent = connections.slice(1).every((value) => sameValue(value, connections[0]))
+  const databaseConnectionConsistent = databaseConnectionIds
+    .slice(1)
+    .every((value) => value === databaseConnectionIds[0])
+  const inlineConnectionConsistent = connections.slice(1).every((value) => sameValue(value, connections[0]))
+  const sourceContractConsistent = sourceContractIds.slice(1).every((value) => value === sourceContractIds[0])
+  const connectionConsistent = databaseConnectionConsistent
+    && (databaseConnectionIds[0] !== null || inlineConnectionConsistent)
+    && sourceContractConsistent
   const syncIntervalConsistent = intervals.slice(1).every((value) => value === intervals[0])
   const inputIssues = []
   for (const [index, source] of sources.entries()) {
@@ -175,14 +210,28 @@ function pipelineConfiguration(sources) {
         inputIssues.push(`${input.sourceKey} ${field} must be ${input[field]}`)
       }
     }
+    if (
+      source.databaseConnectionId != null
+      && Object.keys(sharedConnection(source.connection)).length > 0
+    ) {
+      inputIssues.push(`${input.sourceKey} must not duplicate shared database transport fields`)
+    }
   }
   const issues = [...inputIssues]
-  if (!connectionConsistent) issues.push('Telegram monitor tasks do not share one connection')
+  if (!databaseConnectionConsistent) {
+    issues.push('Telegram monitor tasks do not share one database connection profile or inline mode')
+  } else if (databaseConnectionIds[0] === null && !inlineConnectionConsistent) {
+    issues.push('Telegram monitor tasks do not share one connection')
+  }
+  if (!sourceContractConsistent) issues.push('Telegram monitor tasks do not share one source contract generation')
   if (!syncIntervalConsistent) issues.push('Telegram monitor tasks do not share one sync interval')
   return {
-    connection: connectionConsistent ? connections[0] : null,
+    databaseConnectionId: databaseConnectionConsistent ? databaseConnectionIds[0] : null,
+    connection: connectionConsistent && databaseConnectionIds[0] === null ? connections[0] : null,
     syncIntervalSeconds: syncIntervalConsistent ? intervals[0] : null,
     connectionConsistent,
+    databaseConnectionConsistent,
+    sourceContractConsistent,
     syncIntervalConsistent,
     inputContractsConsistent: inputIssues.length === 0,
     issues,
@@ -226,6 +275,34 @@ export class TelegramMonitorPipeline {
 
   async #sources() {
     return Promise.all(TELEGRAM_MONITOR_INPUTS.map((input) => this.#source(input)))
+  }
+
+  async #configuration(sources) {
+    const configuration = pipelineConfiguration(sources)
+    if (configuration.issues.length > 0) {
+      return { ...configuration, effectiveConnection: null, databaseConnection: null }
+    }
+    try {
+      const resolved = await this.databasePuller.resolveConnectionCandidate({
+        databaseConnectionId: configuration.databaseConnectionId,
+        connection: sources[0].connection,
+      })
+      const profile = resolved.databaseConnectionId && typeof this.store.getDatabaseConnection === 'function'
+        ? await this.store.getDatabaseConnection(resolved.databaseConnectionId)
+        : null
+      return {
+        ...configuration,
+        effectiveConnection: resolved.connection,
+        databaseConnection: safeDatabaseConnection(resolved, profile),
+      }
+    } catch (error) {
+      return {
+        ...configuration,
+        effectiveConnection: null,
+        databaseConnection: null,
+        issues: [...configuration.issues, error?.message || 'Database connection is not configured'],
+      }
+    }
   }
 
   async #cursor(sourceKey) {
@@ -296,11 +373,11 @@ export class TelegramMonitorPipeline {
       if (cursors.some((cursor) => cursor?.status === 'running')) {
         throw new AppError(409, 'source_draining', 'Wait for both Telegram monitor tasks to reach a checkpoint')
       }
-      const configuration = pipelineConfiguration(sources)
-      if (configuration.issues.length > 0 || !isConfigured(configuration.connection)) {
+      const configuration = await this.#configuration(sources)
+      if (configuration.issues.length > 0 || !isConfigured(configuration.effectiveConnection)) {
         throw new AppError(409, 'pipeline_configuration_required', 'Save one consistent Telegram source connection before preparing it')
       }
-      const preparation = await this.sourcePreparer.inspect(configuration.connection)
+      const preparation = await this.sourcePreparer.inspect(configuration.effectiveConnection)
       return {
         ...preparation,
         ...await this.#sourcePreparationResetEvidence(sources, preparation),
@@ -347,17 +424,17 @@ export class TelegramMonitorPipeline {
       if (cursors.some((cursor) => cursor?.status === 'running')) {
         throw new AppError(409, 'source_draining', 'Wait for both Telegram monitor tasks to reach a checkpoint')
       }
-      const configuration = pipelineConfiguration(sources)
-      if (configuration.issues.length > 0 || !isConfigured(configuration.connection)) {
+      const configuration = await this.#configuration(sources)
+      if (configuration.issues.length > 0 || !isConfigured(configuration.effectiveConnection)) {
         throw new AppError(409, 'pipeline_configuration_required', 'Save one consistent Telegram source connection before preparing it')
       }
       const migrationConnection = migrationCredentials
         ? {
-            ...configuration.connection,
+            ...configuration.effectiveConnection,
             username: migrationCredentials.username,
             password: migrationCredentials.password,
           }
-        : configuration.connection
+        : configuration.effectiveConnection
       validateDatabaseConnection({
         ...migrationConnection,
         schema: TELEGRAM_MONITOR_INPUTS[0].schema,
@@ -389,7 +466,7 @@ export class TelegramMonitorPipeline {
         ...preparation,
         source: {
           ...preparation.source,
-          user: migrationCredentials ? configuration.connection.username : preparation.source.user,
+          user: migrationCredentials ? configuration.effectiveConnection.username : preparation.source.user,
         },
         migrationAccountUsed: Boolean(migrationCredentials),
         ...resetEvidence,
@@ -423,16 +500,20 @@ export class TelegramMonitorPipeline {
       Promise.all(TELEGRAM_MONITOR_INPUTS.map((input, index) => this.#task(input, sources[index]))),
       this.store.getLatestPipelineWriterContractAttestation?.('telegram-monitor') ?? null,
     ])
-    const configuration = pipelineConfiguration(sources)
+    const configuration = await this.#configuration(sources)
     return {
       pipelineKey: 'telegram-monitor',
       displayName: 'Telegram monitor',
       builtInMappingVersion: TELEGRAM_MONITOR_MAPPING_VERSION,
       status: pipelineStatus(sources),
-      connection: configuration.connection,
+      databaseConnectionId: configuration.databaseConnectionId,
+      databaseConnection: configuration.databaseConnection,
+      connection: configuration.databaseConnectionId ? null : configuration.connection,
       syncIntervalSeconds: configuration.syncIntervalSeconds,
-      configured: configuration.issues.length === 0 && isConfigured(configuration.connection),
+      configured: configuration.issues.length === 0 && isConfigured(configuration.effectiveConnection),
       connectionConsistent: configuration.connectionConsistent,
+      databaseConnectionConsistent: configuration.databaseConnectionConsistent,
+      sourceContractConsistent: configuration.sourceContractConsistent,
       syncIntervalConsistent: configuration.syncIntervalConsistent,
       inputContractsConsistent: configuration.inputContractsConsistent,
       configurationIssues: configuration.issues,
@@ -444,15 +525,23 @@ export class TelegramMonitorPipeline {
     }
   }
 
-  async configure(body) {
-    const unsupported = unsupportedFields(body, new Set(['connection', 'syncIntervalSeconds']))
+  async configure(body = {}) {
+    const unsupported = unsupportedFields(body, new Set(['databaseConnectionId', 'connection', 'syncIntervalSeconds']))
     if (unsupported.length > 0) {
       throw new AppError(400, 'unsupported_fields', `Unsupported pipeline fields: ${unsupported.join(', ')}`)
     }
-    if (body?.connection == null && body?.syncIntervalSeconds == null) {
-      throw new AppError(400, 'invalid_request', 'connection or syncIntervalSeconds is required')
+    const hasProfile = Object.prototype.hasOwnProperty.call(body, 'databaseConnectionId')
+    const hasInline = body.connection != null
+    if (hasProfile && hasInline) {
+      throw new AppError(400, 'ambiguous_database_connection', 'Choose a shared database connection or task-owned credentials, not both')
     }
-    if (body?.connection != null && (typeof body.connection !== 'object' || Array.isArray(body.connection))) {
+    if (!hasProfile && !hasInline && body.syncIntervalSeconds == null) {
+      throw new AppError(400, 'invalid_request', 'databaseConnectionId, connection, or syncIntervalSeconds is required')
+    }
+    if (hasProfile && (typeof body.databaseConnectionId !== 'string' || !body.databaseConnectionId.trim())) {
+      throw new AppError(400, 'invalid_database_connection_id', 'databaseConnectionId must be a non-empty UUID')
+    }
+    if (hasInline && (typeof body.connection !== 'object' || Array.isArray(body.connection))) {
       throw new AppError(400, 'invalid_connection', 'connection must be an object')
     }
     const unsupportedConnection = unsupportedFields(body?.connection, SHARED_CONNECTION_FIELDS)
@@ -465,6 +554,15 @@ export class TelegramMonitorPipeline {
     }
     const interval = syncInterval(body?.syncIntervalSeconds)
     const keys = TELEGRAM_MONITOR_INPUTS.map((input) => input.sourceKey)
+    const intervalOnly = Object.keys(body).length === 1
+      && Object.prototype.hasOwnProperty.call(body, 'syncIntervalSeconds')
+    if (intervalOnly) {
+      await this.store.updateExternalSourcesBatch(keys.map((sourceKey) => ({
+        sourceKey,
+        syncIntervalSeconds: interval,
+      })))
+      return this.get()
+    }
     return this.#withLocks(keys, async () => {
       const sources = await this.#sources()
       if (sources.some((source) => source.status !== 'paused')) {
@@ -476,35 +574,53 @@ export class TelegramMonitorPipeline {
       }
 
       let requestedConnection = null
-      if (body?.connection != null) {
-        const existing = sources.map((source) => sharedConnection(source.connection))
-        const common = existing.slice(1).every((value) => sameValue(value, existing[0])) ? existing[0] : {}
-        requestedConnection = { ...common, ...body.connection }
-        delete requestedConnection.dsnEnv
-        if (!sameValue(sourceCoordinates(common), sourceCoordinates(requestedConnection))) {
-          delete requestedConnection.sourceContractId
+      let databaseConnectionId
+      let preserveSourceContract = false
+      if (hasProfile || hasInline) {
+        const previous = await this.#configuration(sources)
+        if (hasProfile) {
+          databaseConnectionId = body.databaseConnectionId.trim()
+          requestedConnection = fixedConnection(TELEGRAM_MONITOR_INPUTS[0])
+        } else {
+          const existing = sources.every((source) => source.databaseConnectionId == null)
+            ? sources.map((source) => sharedConnection(source.connection))
+            : []
+          const common = existing.length > 0
+            && existing.slice(1).every((value) => sameValue(value, existing[0]))
+            ? existing[0]
+            : {}
+          requestedConnection = {
+            ...common,
+            ...body.connection,
+            ...fixedConnection(TELEGRAM_MONITOR_INPUTS[0]),
+          }
+          delete requestedConnection.dsnEnv
+          databaseConnectionId = null
         }
-        const probeConnection = {
-          ...requestedConnection,
-          schema: TELEGRAM_MONITOR_INPUTS[0].schema,
-          table: TELEGRAM_MONITOR_INPUTS[0].table,
-          cursorColumn: TELEGRAM_MONITOR_INPUTS[0].cursorColumn,
-          idColumn: TELEGRAM_MONITOR_INPUTS[0].idColumn,
-        }
-        validateDatabaseConnection(probeConnection)
-        await this.databasePuller.testConnection(probeConnection)
+        const candidate = { databaseConnectionId, connection: requestedConnection }
+        const resolved = await this.databasePuller.resolveConnectionCandidate(candidate)
+        validateDatabaseConnection(resolved.connection)
+        await this.databasePuller.testSourceCandidate(candidate)
+        preserveSourceContract = Boolean(previous.effectiveConnection)
+          && sameValue(
+            sourceCoordinates(previous.effectiveConnection),
+            sourceCoordinates(resolved.connection),
+          )
       }
 
       const updates = TELEGRAM_MONITOR_INPUTS.map((input) => ({
         sourceKey: input.sourceKey,
         ...(requestedConnection
           ? {
+              databaseConnectionId,
               connection: {
-                ...requestedConnection,
-                schema: input.schema,
-                table: input.table,
-                cursorColumn: input.cursorColumn,
-                idColumn: input.idColumn,
+                ...(databaseConnectionId ? {} : sharedConnection(requestedConnection)),
+                ...fixedConnection(
+                  input,
+                  preserveSourceContract
+                    ? sources.find((source) => source.sourceKey === input.sourceKey)?.connection?.sourceContractId
+                    : null,
+                ),
               },
             }
           : {}),
@@ -530,7 +646,7 @@ export class TelegramMonitorPipeline {
     }
     return this.#withLocks(keys, async () => {
       const sources = await this.#sources()
-      const configuration = pipelineConfiguration(sources)
+      const configuration = await this.#configuration(sources)
       if (configuration.issues.length > 0) {
         throw new AppError(409, 'pipeline_configuration_drift', 'Telegram monitor task configuration has drifted', {
           issues: configuration.issues,
@@ -546,7 +662,7 @@ export class TelegramMonitorPipeline {
         throw new AppError(409, 'source_draining', 'Wait for both Telegram monitor tasks to reach a checkpoint')
       }
       if (this.sourcePreparer) {
-        const preparation = await this.sourcePreparer.inspect(configuration.connection)
+        const preparation = await this.sourcePreparer.inspect(configuration.effectiveConnection)
         const generation = preparation.contract?.generation
         const generationMatches = typeof generation === 'string' && sources.every((source) => (
           source.connection?.sourceContractId === generation

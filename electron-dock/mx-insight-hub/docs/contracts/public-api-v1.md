@@ -131,6 +131,106 @@ invalid UUID returns `400 invalid_source_catalog_id`; any query key returns
 failures use `api_key_required` / `invalid_api_key`, `platform_not_granted`,
 `quota_exceeded`, and `stored_data_unavailable`, respectively.
 
+## Mobile-commerce captures and virtual supermarket
+
+The existing capture routes remain unchanged:
+
+```http
+GET /api/v1/data/mobile-commerce/items
+GET /api/v1/data/source-catalog/{id}/items
+```
+
+`mobile-commerce-items.v1` is a stored observation contract. Its `id` identifies
+a capture row, not necessarily a marketplace product. It retains the
+`mobile_commerce` platform grant, filters, response schema and stored-only
+semantics. The catalog child route additionally requires `source_catalog` and
+uses the reviewed marketplace catalog UUID. Neither route publishes, merges or
+places a supermarket product, and this new product surface does not change its
+v1 behavior.
+
+The virtual supermarket is a separate Hub-owned publication product:
+
+```http
+GET /api/v1/data/virtual-supermarket/metadata
+GET /api/v1/data/virtual-supermarket/products
+GET /api/v1/data/virtual-supermarket/products/{id}
+GET /api/v1/data/virtual-supermarket/search?query=洗衣液
+```
+
+All four routes require the explicit `virtual_supermarket` platform grant. A
+`mobile_commerce` or `source_catalog` grant does not imply this grant, and the
+reverse is also false. Discovery advertises only granted and ready Hub stored
+surfaces with capabilities `metadata`, `products`, `product_detail`,
+`stored_search`, `category_filter`, `department_filter`, `aisle_filter`,
+`shelf_filter`, and `marketplace_filter` when those surfaces are available.
+Public API keys never receive management or publish/unpublish capabilities.
+
+The response contract is
+`mx-insight-hub.data-products.virtual-supermarket.v1`. Public list and detail
+responses are **on-shelf only**. Unpublished, archived and unknown IDs all
+return `404 virtual_supermarket_product_not_found`. Unpublishing changes the
+Hub storefront overlay; it never deletes or tombstones the referenced canonical
+capture.
+
+The public `id` is an independently allocated, stable Hub publication UUID. It
+is not the mobile-commerce capture/canonical row UUID, and a capture UUID is not
+accepted by the Public detail route. The private reference from publication to
+canonical evidence remains an Admin/storage concern.
+
+The Hub console renders the same product snapshot in three modes: 逛超市,
+超市全景 and 目录模式. The panorama is a client renderer, not an API
+coordinate system. Metadata and items expose stable semantic department,
+aisle, shelf and position values; they do not expose WebGL coordinates,
+cameras, meshes, materials, lighting or renderer state. An external client can
+therefore reproduce an equivalent hierarchy using a 2D, accessible or spatial
+renderer of its choice.
+
+`GET /metadata` returns the public department/aisle/shelf/category model and a
+`storefrontRevision`. Product list/search pages return the same revision.
+`GET /products` and `GET /search` accept the allowlisted filters
+`categoryId`, `department`, `aisle`, `shelf`, `marketplace`, `query`, `sort`,
+`pageSize`, and `cursor`; search requires a non-blank `query`. `sort` is one of
+`newest`, `title_asc`, `price_asc`, or `price_desc`, and defaults to `newest`.
+There is no server-side merchandising sort in v1. The consumer policy may reduce
+the page-size maximum.
+
+Pagination uses an opaque HMAC-signed cursor bound to the complete
+normalized filter set, sort, page size and `storefrontRevision`. Clients return
+it unchanged. A changed filter starts a new traversal. Hub must either continue
+serving the exact bound revision or reject a stale traversal with
+`409 storefront_revision_changed`; the current v1 implementation uses the
+latter and never silently combines products from two storefront revisions.
+
+To reproduce the complete storefront, a client first records metadata's
+`storefrontRevision`, then traverses products from an empty cursor through
+`nextCursor=null` without changing filters, sort or page size. After all pages
+have the same revision, it orders department/aisle/shelf/category by metadata
+`sortOrder` and products by `placement.position`, using publication `id` as a
+stable tie-breaker. A metadata/page revision mismatch or 409 invalidates the
+incomplete local snapshot and restarts the traversal from metadata and page one.
+
+The public product projection uses an explicit allowlist: publication ID,
+listing status/revision and data version; title and reviewed specification;
+decimal price, nullable currency and display with provenance;
+semantic category and placement; reviewed marketplace `{id,name}` and shop
+display values; a sales signal; field provenance; and collection time. Price is
+an observation at the item's outer `collectedAt`, not a real-time marketplace
+quote. The fixed source has no currency column, so a source price keeps
+`currency=null`; only a human-curated price override carries a reviewed
+three-letter ISO currency. Missing specification or typed price remains null;
+the API does not invent it. The v1 projection has no brand or media field
+because the current source does not support either safely.
+
+The projection excludes capture/source-row identity, marketplace product/shop
+source IDs, marketplace raw labels/mapping state/internal source keys, task/run/keyword/campaign
+fields, catalog source keys/revisions, raw tags, mixed signals, share/open-app
+payloads, arbitrary metadata, device identifiers, `is_reported`, physical
+source/profile/table/checkpoint/run details, Admin actors/audit, credentials and
+Elasticsearch index/field/DSL controls. Public marketplace is only the approved
+directory `{id,name}`; both values are null without an approved mapping, while
+full mapping evidence remains Admin-only. Title similarity does not merge rows
+when a reviewed marketplace product identity is absent.
+
 ## Tokenize text
 
 ```http
@@ -1076,6 +1176,165 @@ not forward raw Elasticsearch highlight fragments; a UI may highlight the
 original hit from the query text and use `anchorIndex` to mark that same message
 inside the context list. Neighbor items remain an unhighlighted chronological
 reading view.
+
+### Telegram canonical bidirectional timeline
+
+The formal external contract for “search, open one hit, then keep scrolling in
+both directions” is additive and does not change the bounded context route:
+
+```http
+GET /api/v1/data/canonical/items/{id}/timeline?before=10&after=10
+Authorization: Bearer <api-key>
+```
+
+The initial call omits `cursor`. `before` and `after` default independently to
+10 and accept `0..50`; each side is also subject to the current `telegram`
+grant's `maxPageSize`. It returns a single ascending `items` list and a numeric
+`anchorIndex`; `items[anchorIndex].id` equals `anchorId`. It is restricted to the
+anchor's exact registered dataset and normalized chat stream. Current support is
+limited to `telegram.monitor.messages.v1` and
+`telegram.sqlite.messages.v1`, the same two explicit dataset entries exposed by
+`data.platforms[].timeline.datasets`.
+
+A zero window suppresses that side only on the initial page. If Hub returns a
+continuation cursor for that side, the cursor uses the default continuation
+page size (`min(10, current grant maxPageSize)`), not a zero-sized page. This is
+particularly useful for opening only the search hit and retaining the newer
+cursor for polling.
+
+```json
+{
+  "data": {
+    "contractVersion": "mx-insight-hub.canonical-timeline.v1",
+    "consistency": "live-keyset",
+    "source": "hub",
+    "anchorId": "33333333-3333-4333-8333-333333333333",
+    "anchorIndex": 1,
+    "stream": {
+      "platform": "telegram",
+      "datasetId": "telegram.monitor.messages.v1",
+      "objectType": "message",
+      "type": "chat",
+      "id": "-1001234567890"
+    },
+    "items": [
+      {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "datasetId": "telegram.monitor.messages.v1",
+        "platform": "telegram",
+        "objectType": "message",
+        "text": "previous message",
+        "source": "hub"
+      },
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "datasetId": "telegram.monitor.messages.v1",
+        "platform": "telegram",
+        "objectType": "message",
+        "text": "search hit",
+        "source": "hub"
+      }
+    ],
+    "pageInfo": {
+      "mode": "initial",
+      "direction": null,
+      "returnedCount": 2,
+      "older": { "hasMore": true, "cursor": "opaque-older-token" },
+      "newer": { "hasMore": false, "cursor": "opaque-newer-token" }
+    },
+    "ordering": {
+      "fields": ["eventTime", "canonicalId"],
+      "direction": "ascending",
+      "quality": "deterministic"
+    },
+    "upstreamCompleteness": {
+      "status": "unknown",
+      "basis": null,
+      "through": null
+    },
+    "warnings": [{
+      "code": "upstream_completeness_unknown",
+      "message": "No public upstream-capture completeness attestation is available for this dataset."
+    }]
+  },
+  "requestId": "transport-correlation-id"
+}
+```
+
+For continuation, send exactly one cursor from the side being extended and keep
+the original path `id`:
+
+```http
+GET /api/v1/data/canonical/items/{id}/timeline?cursor=<opaque-older-or-newer-token>
+Authorization: Bearer <api-key>
+```
+
+`cursor` cannot be combined with `before` or `after`. `olderCursor` and
+`newerCursor` are not request fields. Direction is inside the signed token, so
+clients do not send or change it. A continuation response has
+`pageInfo.mode=continuation`, `pageInfo.direction=older|newer`,
+`anchorIndex=null`, and only the requested side of `pageInfo` is non-null. Items
+remain ascending for both directions: prepend an older page and append a newer
+page, deduplicating by canonical `id`.
+
+For timeline and context rows, `eventTime` preserves the exact six-digit UTC
+microsecond value used by the `(eventTime, canonicalId)` ordering and exclusive
+cursor boundary. Clients can therefore observe the same total-order key that
+the server pages on.
+
+Timeline cursors are a distinct domain from canonical-search, Telegram-search,
+chat-history and product-list cursors. The HMAC payload binds at least the
+cursor/contract version, original path anchor, exact dataset and normalized chat
+stream, `older|newer` direction, exclusive `(eventTime, canonicalId)` boundary,
+page size, tenant, consumer and `telegram` authorization scope. Tampering,
+cross-consumer reuse, cross-anchor replay or any other scope mismatch returns
+`400 invalid_cursor`. Continuation uses the signed stream and boundary and does
+not need to reread the anchor row, so deleting the original anchor after the
+initial page does not invalidate an otherwise valid cursor.
+
+The newer cursor is intentionally present when `newer.hasMore=false`. It
+advances to the newest returned item when a page is non-empty and remains
+unchanged on an empty page; a client may poll with that cursor for rows
+committed later. An exhausted older side returns `older.cursor=null`. This behavior is
+`live-keyset`, not snapshot isolation: concurrent writes, late arrivals and
+deletes can change boundary-external rows that have not yet been returned. v1
+does not promise a frozen view, gap-free change capture, update/delete events or
+a changes feed. A future change stream must use a separate monotonic revision
+contract rather than changing timeline-cursor semantics.
+
+`hasMore` describes only active rows currently stored by Hub. It never proves
+the first or last Telegram upstream message, and
+`upstreamCompleteness` retains the independent evidence semantics of the context
+contract. The route never calls Telegram, Night-All, a mobile platform or
+another upstream collector. It is a safe, independently metered GET requiring
+the `telegram` platform grant. Unknown items return `404 item_not_found`;
+unregistered datasets return `409 context_not_supported`; invalid windows or
+cursor/window mixing return `400 invalid_request`; the grant/hard window limit
+returns `400 page_size_exceeded`; unavailable serving indexes return
+`503 serving_indexes_unavailable`.
+
+Capability discovery adds `message_timeline` without removing
+`message_context`. The Telegram platform entry includes:
+
+```json
+{
+  "timeline": {
+    "contractVersion": "mx-insight-hub.canonical-timeline.v1",
+    "ready": true,
+    "consistency": "live-keyset",
+    "defaultBefore": 10,
+    "defaultAfter": 10,
+    "maxBefore": 50,
+    "maxAfter": 50,
+    "cursor": {
+      "opaque": true,
+      "directions": ["older", "newer"],
+      "newerPolling": true
+    },
+    "datasets": []
+  }
+}
+```
 
 ### Night-All-v1-compatible stored search
 

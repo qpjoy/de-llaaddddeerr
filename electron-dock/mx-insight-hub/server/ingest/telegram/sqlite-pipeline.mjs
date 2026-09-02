@@ -399,6 +399,15 @@ export class TelegramSQLitePipeline {
       throw new AppError(400, 'invalid_connection', 'token must be a string')
     }
     const interval = syncInterval(body.syncIntervalSeconds)
+    const intervalOnly = Object.keys(body).length === 1
+      && Object.prototype.hasOwnProperty.call(body, 'syncIntervalSeconds')
+    if (intervalOnly) {
+      await this.store.updateExternalSourcesBatch(TELEGRAM_SQLITE_INPUTS.map((input) => ({
+        sourceKey: input.sourceKey,
+        syncIntervalSeconds: interval,
+      })))
+      return this.get()
+    }
 
     return this.#withLocks(async () => {
       const sources = await this.#sources()

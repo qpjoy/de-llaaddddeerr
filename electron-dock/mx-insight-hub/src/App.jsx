@@ -40,11 +40,13 @@ import {
   UsagePage,
 } from './pages.jsx'
 import { AgentPage, BackfillPage, RetrievalPage, SourcesPage } from './pages-data.jsx'
+import { DatabaseConnectionsPage } from './pages-database-connections.jsx'
 import { DataCenterPage } from './pages-catalog.jsx'
 import {
   PublicOpinionPage,
   TelegramPage,
 } from './pages-data-products.jsx'
+import { VirtualSupermarketPage } from './pages-virtual-supermarket.jsx'
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
 import { AgentProxyPage, AgentSequencePage } from './pages-agent-center.tsx'
 
@@ -144,6 +146,10 @@ function AgentStudioRoute(props) {
     (agentKey, draftId) => adminApi.agentStudioDraft(token, agentKey, draftId),
     [token],
   )
+  const loadArtifact = useCallback(
+    (agentKey, artifactId) => adminApi.agentStudioArtifact(token, agentKey, artifactId),
+    [token],
+  )
   const loadNodeTypes = useCallback(() => adminApi.agentStudioNodeTypes(token), [token])
   const loadTemplates = useCallback(async () => {
     const result = await adminApi.agentStudioTemplates(token)
@@ -151,6 +157,9 @@ function AgentStudioRoute(props) {
       templateKey: template.templateKey,
       label: template.displayName || template.templateKey,
       description: template.description || '',
+      availability: template.availability,
+      runtimeAvailable: template.runtimeAvailable,
+      definition: template.definition,
     }))
   }, [token])
   const loadSequences = useCallback(async () => (
@@ -209,7 +218,11 @@ function AgentStudioRoute(props) {
       return { ...result, diagnostics: studioDiagnostics(result?.diagnostics) }
     } catch (error) {
       if (error?.status === 422 && Array.isArray(error?.details?.diagnostics)) {
-        return { status: 'failed', diagnostics: studioDiagnostics(error.details.diagnostics) }
+        return {
+          status: 'failed',
+          diagnostics: studioDiagnostics(error.details.diagnostics),
+          assurance: error.details.assurance,
+        }
       }
       throw error
     }
@@ -227,7 +240,7 @@ function AgentStudioRoute(props) {
   return (
     <Suspense fallback={<LoadingState label="正在加载 Agent Studio" />}>
       <LazyAgentStudioPage {...props} {...detail}
-        loadProjects={loadProjects} loadProject={loadProject} loadDraft={loadDraft}
+        loadProjects={loadProjects} loadProject={loadProject} loadDraft={loadDraft} loadArtifact={loadArtifact}
         loadNodeTypes={loadNodeTypes} loadTemplates={loadTemplates} loadSequences={loadSequences}
         onCreateProject={createProject} updateProject={updateProject}
         onOpenProject={openProject} onOpenDraft={openDraft}
@@ -247,12 +260,18 @@ function AgentRuntimeRoute(props) {
 const SESSION_KEY = 'mx-insight-hub.admin-token'
 const THEME_KEY = 'mx-insight-hub.theme'
 const DATA_PRODUCTS_NAV_KEY = 'data-products'
+const DATA_CLEANING_NAV_KEY = 'data-cleaning'
 const AGENT_CENTER_NAV_KEY = 'agent-center'
 const NAV_PARENTS = {
   [DATA_PRODUCTS_NAV_KEY]: {
     label: '数据产品',
     description: '目录与业务数据展示',
     icon: Package,
+  },
+  [DATA_CLEANING_NAV_KEY]: {
+    label: '数据清洗中心',
+    description: '数据库连接与清洗任务',
+    icon: Database,
   },
   [AGENT_CENTER_NAV_KEY]: {
     label: 'Agent 中心',
@@ -273,8 +292,10 @@ const ROUTES = [
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/virtual-supermarket', label: '虚拟超市', description: '逛货架与商品上架状态', icon: Storefront, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: VirtualSupermarketPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
-  { path: '/sources', label: '数据清洗计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/database-connections', label: '数据库配置', description: '共享只读 PostgreSQL 连接', icon: Key, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DatabaseConnectionsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/sources', label: '清洗任务计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
   { path: '/agent/providers', label: 'LLM Provider', description: '模型账号、协议与密钥', icon: Key, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentProvidersRoute, capability: 'membership.write', platformAdmin: true },

@@ -5,6 +5,7 @@ import { createServer } from 'node:http'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createApp } from '../../server/app.mjs'
+import { PUBLIC_OPENAPI_DOCUMENT } from '../../server/public-docs.mjs'
 
 const FORBIDDEN_PUBLIC_DOC_DETAILS = /x-mx-insight-admin-token|adminToken|launcherSession|availabilityMode|dsnEnv|password|\/internal\/|tikhub|rapidapi|justone/i
 const NIGHT_ALL_COMMON_FIELDS = [
@@ -159,6 +160,70 @@ function assertCanonicalContextContract(document) {
   const capability = document.components.schemas.CanonicalContextCapability
   assert.equal(capability.properties.defaultBefore.const, 10)
   assert.equal(capability.properties.maxAfter.const, 50)
+}
+
+function assertCanonicalTimelineContract(document) {
+  const route = document.paths['/data/canonical/items/{id}/timeline']?.get
+  assert.ok(route)
+  assert.equal(route.operationId, 'getCanonicalMessageTimeline')
+  assert.deepEqual(route['x-mx-allowed-query-fields'], ['before', 'after', 'cursor'])
+  assert.deepEqual(route['x-mx-error-codes']['400'], [
+    'invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields',
+  ])
+  assert.deepEqual(route['x-mx-error-codes']['409'], ['context_not_supported'])
+  assert.deepEqual(route['x-mx-error-codes']['503'], [
+    'stored_data_unavailable', 'serving_indexes_unavailable',
+  ])
+  assert.deepEqual(
+    Object.keys(route.responses).map(Number).sort((left, right) => left - right),
+    [200, 400, 401, 403, 404, 409, 429, 503],
+  )
+  assert.deepEqual(route.parameters.map(({ name }) => name), ['id', 'before', 'after', 'cursor'])
+  for (const field of ['before', 'after']) {
+    const parameter = route.parameters.find(({ name }) => name === field)
+    assert.equal(parameter.schema.default, 10)
+    assert.equal(parameter.schema.minimum, 0)
+    assert.equal(parameter.schema.maximum, 50)
+  }
+  assert.equal(route.parameters.find(({ name }) => name === 'cursor').schema.maxLength, 2048)
+  assert.equal(
+    route.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/CanonicalTimelineEnvelope',
+  )
+
+  const data = document.components.schemas.CanonicalTimelineEnvelope.properties.data
+  assert.equal(data.additionalProperties, false)
+  assert.equal(data.properties.contractVersion.const, 'mx-insight-hub.canonical-timeline.v1')
+  assert.equal(data.properties.consistency.const, 'live-keyset')
+  assert.deepEqual(data.properties.anchorIndex.type, ['integer', 'null'])
+  assert.equal(data.properties.items.minItems, 0)
+  assert.equal(data.properties.items.maxItems, 101)
+  assert.equal(data.properties.pageInfo.$ref, '#/components/schemas/CanonicalTimelinePageInfo')
+  assert.deepEqual(data.properties.ordering.properties.fields.const, ['eventTime', 'canonicalId'])
+  assert.ok(data.required.includes('upstreamCompleteness'))
+
+  const pageInfo = document.components.schemas.CanonicalTimelinePageInfo
+  assert.deepEqual(pageInfo.required, ['mode', 'direction', 'returnedCount', 'older', 'newer'])
+  assert.deepEqual(pageInfo.properties.mode.enum, ['initial', 'continuation'])
+  assert.deepEqual(pageInfo.properties.direction.enum, [null, 'older', 'newer'])
+  const direction = document.components.schemas.CanonicalTimelineDirectionPage
+  assert.deepEqual(direction.required, ['hasMore', 'cursor'])
+  assert.deepEqual(direction.properties.cursor.type, ['string', 'null'])
+  assert.match(direction.description, /newer cursor is retained/u)
+
+  const capability = document.components.schemas.CanonicalTimelineCapability
+  assert.equal(capability.properties.contractVersion.const, 'mx-insight-hub.canonical-timeline.v1')
+  assert.equal(capability.properties.consistency.const, 'live-keyset')
+  assert.deepEqual(capability.properties.cursor.properties.directions.const, ['older', 'newer'])
+  assert.equal(capability.properties.cursor.properties.newerPolling.const, true)
+  const capabilitiesEnvelope = resolveSchema(
+    document,
+    document.paths['/data/capabilities'].get.responses[200].content['application/json'].schema,
+  )
+  assert.equal(
+    capabilitiesEnvelope.properties.data.properties.platforms.items.properties.timeline.$ref,
+    '#/components/schemas/CanonicalTimelineCapability',
+  )
 }
 
 function resolveParameter(document, parameter) {
@@ -619,6 +684,154 @@ function assertPublicOpinionSearchContract(document) {
   )
 }
 
+const VIRTUAL_SUPERMARKET_QUERY_FIELDS = [
+  'categoryId', 'department', 'aisle', 'shelf', 'marketplace', 'query', 'sort', 'pageSize', 'cursor',
+]
+
+const PUBLIC_DATA_PRODUCT_MIRROR_PATHS = [
+  '/data/canonical/items/{id}/timeline',
+  '/data/mobile-commerce/items',
+  '/data/source-catalog/{id}/items',
+  '/data/virtual-supermarket/metadata',
+  '/data/virtual-supermarket/products',
+  '/data/virtual-supermarket/products/{id}',
+  '/data/virtual-supermarket/search',
+]
+
+const PUBLIC_DATA_PRODUCT_MIRROR_SCHEMAS = [
+  'CanonicalTimelineCapability', 'CanonicalTimelineDirectionPage',
+  'CanonicalTimelinePageInfo', 'CanonicalTimelineEnvelope',
+  'MobileCommerceMarketplace', 'MobileCommerceItem', 'MobileCommercePage',
+  'MobileCommercePageEnvelope', 'SourceCatalogItemsEnvelope',
+  'VirtualSupermarketPlacementPart', 'VirtualSupermarketCategory',
+  'VirtualSupermarketShelf', 'VirtualSupermarketAisle',
+  'VirtualSupermarketDepartment', 'VirtualSupermarketMetadata',
+  'VirtualSupermarketMetadataEnvelope', 'VirtualSupermarketMarketplace',
+  'VirtualSupermarketPrice', 'VirtualSupermarketProduct',
+  'VirtualSupermarketFilters', 'VirtualSupermarketPage',
+  'VirtualSupermarketPageEnvelope', 'VirtualSupermarketDetail',
+  'VirtualSupermarketDetailEnvelope',
+]
+
+function assertVirtualSupermarketContract(document) {
+  const metadata = document.paths['/data/virtual-supermarket/metadata']?.get
+  const products = document.paths['/data/virtual-supermarket/products']?.get
+  const detail = document.paths['/data/virtual-supermarket/products/{id}']?.get
+  const search = document.paths['/data/virtual-supermarket/search']?.get
+  for (const operation of [metadata, products, detail, search]) assert.ok(operation)
+
+  assert.equal(metadata.operationId, 'getVirtualSupermarketMetadata')
+  assert.deepEqual(metadata['x-mx-allowed-query-fields'], [])
+  assert.deepEqual(metadata['x-mx-error-codes'][400], ['unsupported_fields'])
+  assert.equal(
+    metadata.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/VirtualSupermarketMetadataEnvelope',
+  )
+  assert.equal(products.operationId, 'listVirtualSupermarketProducts')
+  assert.equal(search.operationId, 'searchVirtualSupermarketProducts')
+  assert.deepEqual(products['x-mx-allowed-query-fields'], VIRTUAL_SUPERMARKET_QUERY_FIELDS)
+  assert.deepEqual(search['x-mx-allowed-query-fields'], VIRTUAL_SUPERMARKET_QUERY_FIELDS)
+  assert.deepEqual(products.parameters.map(({ name }) => name), VIRTUAL_SUPERMARKET_QUERY_FIELDS)
+  assert.equal(products.parameters.find(({ name }) => name === 'query').required, false)
+  assert.equal(search.parameters.find(({ name }) => name === 'query').required, true)
+  assert.equal(products.parameters.find(({ name }) => name === 'pageSize').schema.default, 24)
+  assert.deepEqual(products.parameters.find(({ name }) => name === 'sort').schema.enum, [
+    'newest', 'title_asc', 'price_asc', 'price_desc',
+  ])
+  assert.deepEqual(products['x-mx-error-codes'][409], ['storefront_revision_changed'])
+  assert.deepEqual(search['x-mx-error-codes'][409], ['storefront_revision_changed'])
+  assert.deepEqual(detail['x-mx-error-codes'][404], ['virtual_supermarket_product_not_found'])
+  assert.ok(detail['x-mx-error-codes'][400].includes('unsupported_fields'))
+  assert.equal(
+    detail.responses[200].content['application/json'].schema.$ref,
+    '#/components/schemas/VirtualSupermarketDetailEnvelope',
+  )
+
+  const metadataSchema = document.components.schemas.VirtualSupermarketMetadata
+  assert.equal(metadataSchema.properties.contractVersion.const, 'mx-insight-hub.data-products.virtual-supermarket.v1')
+  assert.equal(metadataSchema.properties.platform.const, 'virtual_supermarket')
+  assert.ok(metadataSchema.required.includes('storefrontRevision'))
+  assert.ok(metadataSchema.required.includes('departments'))
+  assert.deepEqual(metadataSchema.properties.supportedSorts.const, [
+    'newest', 'title_asc', 'price_asc', 'price_desc',
+  ])
+
+  const product = document.components.schemas.VirtualSupermarketProduct
+  assert.match(product.properties.id.description, /independently allocated/u)
+  assert.match(product.properties.id.description, /never the mobile-commerce capture\/canonical row UUID/u)
+  assert.equal(product.additionalProperties, false)
+  assert.deepEqual(Object.keys(product.properties).sort(), [
+    'category', 'collectedAt', 'dataVersion', 'id', 'listing', 'marketplace',
+    'placement', 'product', 'shop', 'signals',
+  ])
+  assert.deepEqual(Object.keys(product.properties.placement.properties), [
+    'department', 'aisle', 'shelf', 'position',
+  ])
+  assert.equal(product.properties.listing.properties.status.const, 'on_shelf')
+  assert.deepEqual(Object.keys(product.properties.product.properties), [
+    'title', 'specification', 'price', 'provenance',
+  ])
+  assert.deepEqual(Object.keys(product.properties.shop.properties), ['name'])
+  assert.deepEqual(Object.keys(document.components.schemas.VirtualSupermarketMarketplace.properties), ['id', 'name'])
+  assert.deepEqual(document.components.schemas.VirtualSupermarketMarketplace.required, ['id', 'name'])
+  assert.deepEqual(Object.keys(document.components.schemas.VirtualSupermarketPrice.properties), [
+    'amount', 'currency', 'display', 'provenance',
+  ])
+  assert.deepEqual(document.components.schemas.VirtualSupermarketPrice.properties.currency.type, ['string', 'null'])
+  assert.match(document.components.schemas.VirtualSupermarketPrice.properties.currency.description, /Source prices keep null/u)
+  assert.doesNotMatch(JSON.stringify(product), /goodsId|shopId|sourceValue|mappingStatus|catalogEntryId|canonicalName|catalogSourceKey|captureId|task|run|campaign|raw|metadata|device|is_reported|brand|media/i)
+  assert.doesNotMatch(
+    JSON.stringify(document.components.schemas.MobileCommerceItem.properties.id),
+    /publication UUID/u,
+  )
+  assert.ok(document.components.schemas.VirtualSupermarketPage.required.includes('storefrontRevision'))
+  assert.ok(document.components.schemas.VirtualSupermarketDetail.required.includes('storefrontRevision'))
+
+  const capability = document.paths['/data/capabilities'].get.responses[200]
+    .content['application/json'].example.data.platforms
+    .find(({ platform }) => platform === 'virtual_supermarket')
+  assert.deepEqual(capability, {
+    platform: 'virtual_supermarket',
+    ready: true,
+    capabilities: [
+      'metadata', 'products', 'product_detail', 'stored_search',
+      'category_filter', 'department_filter', 'aisle_filter',
+      'shelf_filter', 'marketplace_filter',
+    ],
+    source: 'hub',
+    servingMode: 'stored',
+  })
+}
+
+function publicOperationMirrorShape(operation) {
+  return {
+    operationId: operation.operationId,
+    allowedQueryFields: operation['x-mx-allowed-query-fields'] ?? null,
+    errorCodes: operation['x-mx-error-codes'] ?? null,
+    parameters: (operation.parameters || []).map(({ name, in: location, required, schema }) => ({
+      name, in: location, required, schema,
+    })),
+    responseSchema: operation.responses[200]?.content?.['application/json']?.schema ?? null,
+  }
+}
+
+function assertPublicDataProductMirror(dynamicDocument, staticDocument) {
+  for (const path of PUBLIC_DATA_PRODUCT_MIRROR_PATHS) {
+    assert.deepEqual(
+      publicOperationMirrorShape(staticDocument.paths[path].get),
+      publicOperationMirrorShape(dynamicDocument.paths[path].get),
+      `${path} static/dynamic operation contract drifted`,
+    )
+  }
+  for (const name of PUBLIC_DATA_PRODUCT_MIRROR_SCHEMAS) {
+    assert.deepEqual(
+      staticDocument.components.schemas[name],
+      dynamicDocument.components.schemas[name],
+      `${name} static/dynamic schema drifted`,
+    )
+  }
+}
+
 async function withServer(listenerMode, run) {
   const app = createApp({
     service: {},
@@ -639,7 +852,7 @@ async function withServer(listenerMode, run) {
 test('public listener serves self-contained public API documentation', async () => {
   await withServer('public', async (baseUrl) => {
     const pagePaths = [
-      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/search', '/docs/telegram',
+      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/virtual-supermarket', '/docs/search', '/docs/telegram',
       '/docs/public-opinion', '/docs/night-all', '/docs/tools', '/docs/evidence', '/docs/errors',
     ]
     const pages = await Promise.all(pagePaths.map(async (path) => {
@@ -680,13 +893,39 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/stored\/search/)
     assert.match(html, /\/api\/v1\/data\/canonical\/search/)
     assert.match(html, /\/api\/v1\/data\/canonical\/items\/\{id\}\/context/)
+    assert.match(html, /\/api\/v1\/data\/canonical\/items\/\{id\}\/timeline/)
     assert.match(html, /storedWindow\.hasMoreStoredBefore\/After/)
+    assert.match(html, /pageInfo\.older\/newer\.cursor/)
+    assert.match(html, /consistency=live-keyset/)
+    assert.match(html, /不提供 changes feed/)
+    assert.match(html, /外部会话应用复刻流程/)
+    assert.match(html, /canonicalId/)
+    assert.match(html, /保持用户当前视口/)
     assert.match(html, /upstreamCompleteness/)
     assert.match(html, /context_not_supported/)
     assert.match(html, /\/api\/v1\/data\/telegram\/search/)
     assert.match(html, /\/api\/v1\/data\/telegram\/messages/)
     assert.match(html, /\/api\/v1\/data\/source-catalog/)
     assert.match(html, /\/api\/v1\/data\/source-catalog\/metadata/)
+    assert.match(html, /\/api\/v1\/data\/source-catalog\/\{id\}\/items/)
+    assert.match(html, /\/api\/v1\/data\/mobile-commerce\/items/)
+    assert.match(html, /\/api\/v1\/data\/virtual-supermarket\/metadata/)
+    assert.match(html, /\/api\/v1\/data\/virtual-supermarket\/products\/\{id\}/)
+    assert.match(html, /\/api\/v1\/data\/virtual-supermarket\/search/)
+    assert.match(html, /virtual_supermarket/)
+    assert.match(html, /逛超市/)
+    assert.match(html, /超市全景/)
+    assert.match(html, /目录模式/)
+    assert.match(html, /全景只是客户端 renderer/)
+    assert.match(html, /department \/ aisle \/ shelf \/ position/)
+    assert.match(html, /storefrontRevision/)
+    assert.match(html, /storefront_revision_changed/)
+    assert.match(html, /外部复刻流程/)
+    assert.match(html, /currency=null/)
+    assert.match(html, /不能猜成 CNY/)
+    assert.match(html, /approved mapping/)
+    assert.match(html, /外部手机采集执行器/)
+    assert.match(html, /Elasticsearch/)
     assert.match(html, /source-catalog\.public\.v1/)
     assert.match(html, /source_catalog/)
     assert.match(html, /\/api\/v1\/data\/public-opinion\/provinces\/\{province\}\/items/)
@@ -745,6 +984,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     const pages = [
       ['/docs/auth', 'rules', '认证与调用规则'],
       ['/docs/source-catalog', 'source-catalog', '数据源目录'],
+      ['/docs/virtual-supermarket', 'virtual-supermarket', '虚拟超市'],
       ['/docs/search', 'search', '通用搜索'],
       ['/docs/telegram', 'telegram', 'Telegram 会话'],
       ['/docs/public-opinion', 'public-opinion', '全国省级舆情'],
@@ -775,6 +1015,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     assert.equal((legacyHtml.match(/class="doc-page"/g) || []).length, 1)
     assert.match(legacyHtml, /location\.hash\.slice\(1\)/)
     assert.match(legacyHtml, /'public-opinion':'\/docs\/public-opinion'/)
+    assert.match(legacyHtml, /'virtual-supermarket':'\/docs\/virtual-supermarket'/)
     assert.match(legacyHtml, /telegram:'\/docs\/telegram'/)
 
     for (const [alias, canonical] of [
@@ -801,8 +1042,10 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(document.openapi, '3.1.0')
     assert.deepEqual(paths.sort(), [
       '/data/canonical/items/{id}/context',
+      '/data/canonical/items/{id}/timeline',
       '/data/canonical/search',
       '/data/capabilities',
+      '/data/mobile-commerce/items',
       '/data/public-opinion/funnel',
       '/data/public-opinion/items/{id}',
       '/data/public-opinion/province-coverage',
@@ -815,11 +1058,16 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/source-catalog',
       '/data/source-catalog/metadata',
       '/data/source-catalog/{id}',
+      '/data/source-catalog/{id}/items',
       '/data/stored/search',
       '/data/telegram/chats',
       '/data/telegram/entities/search',
       '/data/telegram/messages',
       '/data/telegram/search',
+      '/data/virtual-supermarket/metadata',
+      '/data/virtual-supermarket/products',
+      '/data/virtual-supermarket/products/{id}',
+      '/data/virtual-supermarket/search',
       '/night-all/search/{operation}',
       '/requests/{requestId}',
       '/tools/tokenize',
@@ -843,11 +1091,23 @@ test('public OpenAPI document contains only implemented Open API paths', async (
     assert.equal(document.components.schemas.TokenizeRequest.additionalProperties, false)
     assert.equal(document.components.schemas.StoredSearchRequest.additionalProperties, false)
     assert.equal(document.components.schemas.CanonicalSearchRequest.additionalProperties, false)
+    assert.equal(document.components.schemas.MobileCommerceItem.additionalProperties, false)
+    assert.equal(
+      document.paths['/data/source-catalog/{id}/items'].get
+        .responses[200].content['application/json'].schema.$ref,
+      '#/components/schemas/SourceCatalogItemsEnvelope',
+    )
+    assert.deepEqual(
+      document.components.schemas.MobileCommercePage.properties.acquisition.properties.executionPlane,
+      { type: 'string', const: 'external-mobile-collector' },
+    )
     assertPublicOpinionContract(document)
     assertPublicOpinionSearchContract(document)
     assertNightAllPublicContract(document)
     assertCanonicalContextContract(document)
+    assertCanonicalTimelineContract(document)
     assertDataProductPublicContract(document)
+    assertVirtualSupermarketContract(document)
     assert.deepEqual(document.components.schemas.CanonicalSearchRequest.required, ['query'])
     assert.equal(
       document.components.schemas.CanonicalSearchRequest.properties.searchProfile.default,
@@ -888,7 +1148,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
   })
 })
 
-test('static OpenAPI YAML parses and mirrors the dynamic Night-All compatibility schema', async () => {
+test('static OpenAPI YAML mirrors dynamic Night-All and public data-product contracts', async () => {
   const source = await readFile(
     fileURLToPath(new URL('../../docs/contracts/openapi.yaml', import.meta.url)),
     'utf8',
@@ -908,11 +1168,14 @@ test('static OpenAPI YAML parses and mirrors the dynamic Night-All compatibility
   assertPublicOpinionContract(document)
   assertPublicOpinionSearchContract(document)
   assertCanonicalContextContract(document)
+  assertCanonicalTimelineContract(document)
   assertDataProductPublicContract(document, {
     chats: 'listTelegramMonitorChats',
     messages: 'listTelegramMonitorMessages',
     search: 'searchStoredTelegram',
   })
+  assertVirtualSupermarketContract(document)
+  assertPublicDataProductMirror(PUBLIC_OPENAPI_DOCUMENT, document)
 })
 
 test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy', async () => {
@@ -927,7 +1190,12 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   assert.doesNotMatch(guide, /默认 provider 已启用且配置了凭据/)
   assert.doesNotMatch(guide, /存在可执行 handler 或 endpoint candidate/)
   assert.match(guide, /\/api\/v1\/data\/canonical\/items\/\{id\}\/context/)
+  assert.match(guide, /\/api\/v1\/data\/canonical\/items\/\{id\}\/timeline/)
   assert.match(guide, /storedWindow\.hasMoreStoredBefore\/After/)
+  assert.match(guide, /pageInfo\.older\.cursor/)
+  assert.match(guide, /live-keyset/)
+  assert.match(guide, /每个搜索下一页[^。]*新的 `Idempotency-Key`/)
+  assert.match(guide, /新增高度补偿到 scrollTop/)
   assert.match(guide, /upstreamCompleteness/)
   assert.match(guide, /public_opinion.*formal/is)
   assert.match(guide, /includeCandidates=all.*province.*countryCode.*location/is)
@@ -941,7 +1209,7 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
 
 test('admin-only listener does not expose public documentation', async () => {
   await withServer('admin', async (baseUrl) => {
-    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
+    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/virtual-supermarket', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
       const response = await fetch(`${baseUrl}${path}`)
       const payload = await response.json()
       assert.equal(response.status, 404)

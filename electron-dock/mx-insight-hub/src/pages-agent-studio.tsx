@@ -256,11 +256,37 @@ export type StudioTemplateOption = {
   templateKey: string
   label: string
   description: string
+  availability?: string
+  runtimeAvailable?: boolean
+  definition?: AgentStudioDefinition
 }
 
 export type AgentStudioSaveResult = {
   revision?: number
   updatedAt?: string | null
+}
+
+export type StudioStaticAssuranceCheck = {
+  key: string
+  label: string
+  mode: 'static'
+  status: 'passed' | 'failed' | 'not-evaluated'
+  evidenceCodes?: string[]
+}
+
+export type StudioStaticAssurance = {
+  contractVersion: string
+  owner: 'mx-insight-hub'
+  mode: 'static'
+  status: 'passed' | 'failed'
+  checks: StudioStaticAssuranceCheck[]
+  evidence?: { nodeCount?: number, edgeCount?: number, logicalRefCount?: number }
+  limitations?: {
+    runtimeEvents?: boolean
+    evaluationResults?: boolean
+    releaseDecision?: boolean
+    runnable?: boolean
+  }
 }
 
 export type AgentStudioCompileResult = {
@@ -269,6 +295,16 @@ export type AgentStudioCompileResult = {
   artifactHash?: string | null
   compiledAt?: string | null
   diagnostics?: StudioDiagnostic[]
+  compilerVersion?: string
+  nodeRegistryVersion?: string
+  draftRevision?: number
+  dependencyManifest?: {
+    logicalRefs?: Array<{ kind: string, key: string }>
+  }
+  normalizedPlan?: {
+    assurance?: StudioStaticAssurance
+  }
+  assurance?: StudioStaticAssurance
 }
 
 export type AgentStudioPageProps = {
@@ -293,6 +329,7 @@ export type AgentStudioPageProps = {
   loadProjects?: () => Promise<StudioProjectSummary[]>
   loadProject?: (agentKey: string) => Promise<StudioProjectSummary>
   loadDraft?: (agentKey: string, draftId: string) => Promise<StudioDraft>
+  loadArtifact?: (agentKey: string, artifactId: string) => Promise<AgentStudioCompileResult>
   loadNodeTypes?: () => Promise<StudioNodeRegistry>
   loadSequences?: () => Promise<StudioSequenceOption[]>
   loadTemplates?: () => Promise<StudioTemplateOption[]>
@@ -337,7 +374,7 @@ type StudioNodeData = {
 type StudioFlowNode = Node<StudioNodeData, 'studio'>
 type StudioFlowEdge = Edge
 type InspectorTab = 'prompt' | 'config' | 'io' | 'policy' | 'run'
-type EvidenceTab = 'diagnostics' | 'events' | 'references'
+type EvidenceTab = 'diagnostics' | 'assurance' | 'events' | 'references'
 
 export const AGENT_STUDIO_PREVIEW_NODE_TYPES: StudioNodeRegistry = {
   registryVersion: 'mx-insight-agent-studio-p1-v1',
@@ -573,62 +610,13 @@ function artifactLabel(project: StudioProjectSummary) {
   return { status: 'active', label: '有效', detail: project.artifact.artifactId }
 }
 
-function evaluationLabel(project: StudioProjectSummary) {
-  const evaluation = project.evaluation
-  if (!evaluation || evaluation.status === 'not-run') return { status: 'disabled', label: '尚未评测', detail: '没有真实 eval run' }
-  if (evaluation.status === 'pending') return { status: 'warning', label: '待运行', detail: evaluation.label || '等待评测' }
-  if (evaluation.status === 'failed') return { status: 'down', label: '未通过', detail: evaluation.label || '查看评测证据' }
-  return { status: 'active', label: '已通过', detail: evaluation.label || '查看评测证据' }
-}
+type StudioPortfolioTab = 'projects' | 'templates' | 'artifacts' | 'archived'
 
-function releaseLabel(project: StudioProjectSummary) {
-  if (!project.release) return { status: 'disabled', label: '无 Release', detail: 'P4 · 未来能力' }
-  if (project.release.status === 'candidate') return { status: 'warning', label: 'Candidate', detail: project.release.releaseId }
-  if (project.release.status === 'approved') return { status: 'active', label: 'Approved', detail: project.release.releaseId }
-  return { status: 'disabled', label: 'Deprecated', detail: project.release.releaseId }
-}
-
-function deploymentLabel(project: StudioProjectSummary) {
-  if (!project.deployment) return { status: 'disabled', label: '未部署', detail: '暂无真实运行' }
-  if (project.deployment.status === 'active') return { status: 'active', label: project.deployment.environment, detail: 'Active' }
-  if (project.deployment.status === 'canary') return { status: 'warning', label: project.deployment.environment, detail: 'Canary' }
-  return { status: 'disabled', label: project.deployment.environment, detail: project.deployment.status }
-}
-
-function LifecycleCell({ title, value }: {
-  title: string
-  value: { status: string, label: string, detail: string }
-}) {
-  return (
-    <div className="mih-studio-lifecycle-cell" data-column={title}>
-      <span>{title}</span>
-      <StatusBadge status={value.status} label={value.label} />
-      <small title={value.detail}>{value.detail}</small>
-    </div>
-  )
-}
-
-type StudioPortfolioTab = 'projects' | 'templates' | 'releases' | 'deployments' | 'archived'
-
-function projectBusinessDomain(project: StudioProjectSummary): string {
-  return project.tags?.[0] || project.dataScope
-}
-
-function projectSourceType(project: StudioProjectSummary): string {
-  return project.dataScope.match(/PostgreSQL|SQLite\s*API|REST\s*API|API|文件|数据库/iu)?.[0] || ''
-}
-
-function projectLifecycle(project: StudioProjectSummary): string {
-  if (project.deployment) return 'deployed'
-  if (project.release) return 'released'
+function projectCompileState(project: StudioProjectSummary): string {
   if (project.artifact?.status === 'failed') return 'compile-failed'
-  if (project.artifact) return 'compiled'
-  if (project.draft) return 'draft'
-  return 'idea'
-}
-
-function projectMarketVisible(project: StudioProjectSummary): boolean {
-  return project.release?.status === 'approved' && project.deployment?.status === 'active'
+  if (project.artifact?.status === 'warnings') return 'warnings'
+  if (project.artifact?.status === 'valid') return 'valid'
+  return project.draft ? 'draft-only' : 'idea'
 }
 
 function uniqueOptions(values: string[], emptyLabel: string, labelFor: (value: string) => string = (value) => value) {
@@ -660,7 +648,7 @@ function StudioPortfolio({
   loading: boolean
   error: Error | null
   onRefresh?: () => void | Promise<void>
-  onCreate: () => void
+  onCreate: (templateKey?: string) => void
   onOpen: (agentKey: string) => void
   onManage?: (project: StudioProjectSummary) => void
   onArchive?: (project: StudioProjectSummary) => void
@@ -669,51 +657,44 @@ function StudioPortfolio({
   const [tab, setTab] = useState<StudioPortfolioTab>('projects')
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
-  const [businessDomain, setBusinessDomain] = useState('')
-  const [sourceType, setSourceType] = useState('')
-  const [targetDataset, setTargetDataset] = useState('')
-  const [lifecycle, setLifecycle] = useState('')
-  const [marketVisibility, setMarketVisibility] = useState('')
+  const [tagFilter, setTagFilter] = useState('')
+  const [ownerFilter, setOwnerFilter] = useState('')
+  const [kindFilter, setKindFilter] = useState('')
+  const [compileFilter, setCompileFilter] = useState('')
 
   const nonArchivedProjects = useMemo(() => projects.filter((project) => !project.archived), [projects])
-  const businessOptions = useMemo(() => uniqueOptions(nonArchivedProjects.map(projectBusinessDomain), '全部业务域'), [nonArchivedProjects])
-  const sourceOptions = useMemo(() => uniqueOptions(nonArchivedProjects.map(projectSourceType), '全部来源类型'), [nonArchivedProjects])
-  const datasetOptions = useMemo(() => uniqueOptions(nonArchivedProjects.map((project) => project.dataScope), '全部 Dataset / Scope'), [nonArchivedProjects])
-  const lifecycleOptions = useMemo(() => uniqueOptions(nonArchivedProjects.map(projectLifecycle), '全部生命周期', (value) => ({
-    idea: 'Idea · 未建 Draft',
-    draft: 'Draft · 编辑中',
-    compiled: 'Artifact · 已编译',
-    'compile-failed': 'Artifact · 编译失败',
-    released: 'Release · 已发布',
-    deployed: 'Deployment · 已部署',
+  const tagOptions = useMemo(() => uniqueOptions(nonArchivedProjects.flatMap((project) => project.tags || []), '全部标签'), [nonArchivedProjects])
+  const ownerOptions = useMemo(() => uniqueOptions(nonArchivedProjects.map((project) => project.owner), '全部 Owner'), [nonArchivedProjects])
+  const kindOptions = useMemo(() => uniqueOptions(nonArchivedProjects.map((project) => project.kind), '全部项目类型', (value) => ({
+    custom: '自定义',
+    'template-derived': '模板派生',
+    migration: '迁移草稿',
   }[value] || value)), [nonArchivedProjects])
-  const marketOptions = useMemo(() => uniqueOptions(
-    nonArchivedProjects.map((project) => projectMarketVisible(project) ? 'visible' : 'not-visible'),
-    '全部 Market 可见性',
-    (value) => value === 'visible' ? 'Market 可见' : 'Market 不可见',
-  ), [nonArchivedProjects])
+  const compileOptions = useMemo(() => uniqueOptions(nonArchivedProjects.map(projectCompileState), '全部编译状态', (value) => ({
+    idea: 'Idea · 无 Draft',
+    'draft-only': 'Draft · 尚未编译',
+    valid: 'Artifact · 有效',
+    warnings: 'Artifact · 有警告',
+    'compile-failed': 'Artifact · 编译失败',
+  }[value] || value)), [nonArchivedProjects])
 
   const filteredProjects = useMemo(() => {
     const query = search.trim().toLocaleLowerCase('zh-CN')
     const scoped = projects.filter((project) => {
       if (tab === 'projects' && project.archived) return false
-      if (tab === 'releases' && (project.archived || !project.release)) return false
-      if (tab === 'deployments' && (project.archived || !project.deployment)) return false
+      if (tab === 'artifacts' && (project.archived || !project.artifact)) return false
       if (tab === 'archived' && !project.archived) return false
       if (query && ![
         project.name, project.agentKey, project.owner, project.dataScope, ...(project.tags || []),
       ].join('\n').toLocaleLowerCase('zh-CN').includes(query)) return false
       if (statusFilter === 'attention' && !(project.artifact?.status === 'warnings'
         || project.artifact?.status === 'failed' || project.draft?.saved === false)) return false
-      if (statusFilter === 'awaiting-eval' && !(project.evaluation?.status === 'pending'
-        || (Boolean(project.artifact) && (!project.evaluation || project.evaluation.status === 'not-run')))) return false
+      if (statusFilter === 'draft-only' && Boolean(project.artifact)) return false
       if (statusFilter === 'compiled' && !(project.artifact && project.artifact.status !== 'failed')) return false
-      if (statusFilter === 'published' && !projectMarketVisible(project)) return false
-      if (businessDomain && projectBusinessDomain(project) !== businessDomain) return false
-      if (sourceType && projectSourceType(project) !== sourceType) return false
-      if (targetDataset && project.dataScope !== targetDataset) return false
-      if (lifecycle && projectLifecycle(project) !== lifecycle) return false
-      if (marketVisibility && (projectMarketVisible(project) ? 'visible' : 'not-visible') !== marketVisibility) return false
+      if (tagFilter && !(project.tags || []).includes(tagFilter)) return false
+      if (ownerFilter && project.owner !== ownerFilter) return false
+      if (kindFilter && project.kind !== kindFilter) return false
+      if (compileFilter && projectCompileState(project) !== compileFilter) return false
       return true
     })
     return [...scoped].sort((left, right) => {
@@ -721,7 +702,7 @@ function StudioPortfolio({
       const rightTime = Date.parse(right.updatedAt || right.draft?.updatedAt || '') || 0
       return rightTime - leftTime || left.name.localeCompare(right.name, 'zh-CN')
     })
-  }, [businessDomain, lifecycle, marketVisibility, projects, search, sourceType, statusFilter, tab, targetDataset])
+  }, [compileFilter, kindFilter, ownerFilter, projects, search, statusFilter, tab, tagFilter])
 
   const filteredTemplates = useMemo(() => {
     const query = search.trim().toLocaleLowerCase('zh-CN')
@@ -729,11 +710,9 @@ function StudioPortfolio({
       .join('\n').toLocaleLowerCase('zh-CN').includes(query))
   }, [search, templates])
 
-  const tabDescription = tab === 'releases'
-    ? 'P4 Release 尚未启用；这里只陈列服务端真实返回的 Release。'
-    : tab === 'deployments'
-      ? 'P4 Deployment 尚未启用；不会从 Draft 或 Artifact 推断部署。'
-      : tab === 'archived'
+  const tabDescription = tab === 'artifacts'
+    ? '只陈列当前 Draft revision 对应的真实 immutable Artifact。'
+    : tab === 'archived'
         ? '归档只隐藏活跃资产，不删除 Draft 或 Artifact 历史。'
         : ''
 
@@ -742,7 +721,7 @@ function StudioPortfolio({
       <PageHeading eyebrow="AGENT CENTER / AGENT STUDIO" title="Agent Studio"
         description="创建、编辑、静态编译并管理受治理的 Agent；Agent Market 只负责发现与复用。"
         loading={loading} onRefresh={onRefresh}>
-        <button className="qp-button qp-button--primary" type="button" onClick={onCreate}
+        <button className="qp-button qp-button--primary" type="button" onClick={() => onCreate()}
           disabled={!canMutate} title={!canMutate ? '只读会话，需 Hub Admin Token 修改' : undefined}>
           <Plus size={16} aria-hidden="true" />新建 Agent
         </button>
@@ -750,7 +729,7 @@ function StudioPortfolio({
 
       <div className="mih-studio-notice mih-studio-notice--governance" role="status">
         <ShieldCheck size={17} aria-hidden="true" />
-        <span><strong>治理边界</strong>Studio 管理作者资产；只有真实存在的已审批 Release 与活动 Deployment 才会显示为 Market 可见。P1 当前仅支持 Build 与 Compile。</span>
+        <span><strong>Hub 原生控制面</strong>Agent、Prompt、DAG、编译证据与后续 Trace / Eval / Gate 均由 Hub 管理；本轮不接入外部管理平台。当前真实能力止于 Build 与 Compile。</span>
       </div>
 
       {preview ? (
@@ -771,8 +750,7 @@ function StudioPortfolio({
         {[
           ['projects', 'Agent 项目'],
           ['templates', '模板'],
-          ['releases', 'Releases'],
-          ['deployments', 'Deployments'],
+          ['artifacts', 'Artifacts'],
           ['archived', '已归档'],
         ].map(([value, label]) => (
           <button key={value} type="button" className={tab === value ? 'is-active' : ''}
@@ -792,9 +770,8 @@ function StudioPortfolio({
             {[
               ['all', '全部'],
               ['attention', '待修复'],
-              ['awaiting-eval', '待评测'],
+              ['draft-only', '仅 Draft'],
               ['compiled', '已编译'],
-              ['published', 'Market 可见'],
             ].map(([value, label]) => (
               <button key={value} className={statusFilter === value ? 'is-active' : ''} type="button"
                 aria-pressed={statusFilter === value} onClick={() => setStatusFilter(value)}>{label}</button>
@@ -805,11 +782,10 @@ function StudioPortfolio({
 
       {tab !== 'templates' ? (
         <section className="mih-studio-dimension-filters" aria-label="多维筛选">
-          <DropdownField label="业务域" value={businessDomain} onChange={setBusinessDomain} options={businessOptions} />
-          <DropdownField label="来源类型" value={sourceType} onChange={setSourceType} options={sourceOptions} />
-          <DropdownField label="目标 Dataset" value={targetDataset} onChange={setTargetDataset} options={datasetOptions} />
-          <DropdownField label="生命周期" value={lifecycle} onChange={setLifecycle} options={lifecycleOptions} />
-          <DropdownField label="Market 可见性" value={marketVisibility} onChange={setMarketVisibility} options={marketOptions} />
+          <DropdownField label="标签" value={tagFilter} onChange={setTagFilter} options={tagOptions} />
+          <DropdownField label="Owner" value={ownerFilter} onChange={setOwnerFilter} options={ownerOptions} />
+          <DropdownField label="项目类型" value={kindFilter} onChange={setKindFilter} options={kindOptions} />
+          <DropdownField label="编译状态" value={compileFilter} onChange={setCompileFilter} options={compileOptions} />
         </section>
       ) : null}
 
@@ -820,9 +796,11 @@ function StudioPortfolio({
           {filteredTemplates.map((template) => (
             <article key={template.templateKey}>
               <span><Package size={18} weight="duotone" aria-hidden="true" /></span>
-              <div><strong>{template.label}</strong><code>{template.templateKey}</code><p>{template.description}</p></div>
-              <StatusBadge status="active" label="Authoring only" />
-              {canMutate ? <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={onCreate}>基于模板新建</button> : null}
+              <div><strong>{template.label}</strong><code>{template.templateKey}</code><p>{template.description}</p>
+                {template.definition ? <small>{template.definition.nodes.length} 节点 · {template.definition.edges.length} 边 · {template.definition.terminalNodeIds.length} 终点</small> : null}
+              </div>
+              <StatusBadge status={template.runtimeAvailable ? 'active' : 'disabled'} label={template.runtimeAvailable ? 'Runtime available' : 'Authoring only'} />
+              {canMutate ? <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => onCreate(template.templateKey)}>基于模板新建</button> : null}
             </article>
           ))}
           {!filteredTemplates.length ? <EmptyState icon={Package} title="没有匹配的真实模板"
@@ -832,16 +810,11 @@ function StudioPortfolio({
       {!loading && !error && tab !== 'templates' ? (
         <section className="qp-panel mih-studio-products" aria-label="Agent Studio 产品列表">
           <header className="mih-studio-product-columns" aria-hidden="true">
-            <span>Agent 产品</span><span>业务域 / 数据范围</span><span>Draft</span><span>Artifact / Eval</span>
-            <span>Release</span><span>Deployment / Market</span><span>操作</span>
+            <span>Agent 产品</span><span>Data scope / Tags</span><span>Draft</span><span>Compile Evidence</span><span>操作</span>
           </header>
           <div className="mih-studio-product-list">
             {filteredProjects.map((project) => {
               const artifact = artifactLabel(project)
-              const evaluation = evaluationLabel(project)
-              const release = releaseLabel(project)
-              const deployment = deploymentLabel(project)
-              const marketVisible = projectMarketVisible(project)
               return (
                 <article className="mih-studio-product-row" key={project.agentKey}>
                   <button className="mih-studio-product-identity" type="button" onClick={() => onOpen(project.agentKey)}>
@@ -853,7 +826,7 @@ function StudioPortfolio({
                       <span className="mih-studio-product-owner">{project.owner} · Owner</span>
                     </span>
                   </button>
-                  <div className="mih-studio-business-cell" data-column="业务域 / 数据范围">
+                  <div className="mih-studio-business-cell" data-column="Data scope / Tags">
                     <div>{(project.tags || []).slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}</div>
                     <small>Data scope</small><strong>{project.dataScope}</strong>
                   </div>
@@ -864,14 +837,9 @@ function StudioPortfolio({
                       : <StatusBadge status="disabled" label="Idea · 无 Draft" />}
                     <small>{formatDate(project.draft?.updatedAt || project.updatedAt)}</small>
                   </div>
-                  <div className="mih-studio-combined-cell" data-column="Artifact / Eval">
+                  <div className="mih-studio-combined-cell" data-column="Compile Evidence">
                     <StatusBadge status={artifact.status} label={artifact.label} /><small>{artifact.detail}</small>
-                    <StatusBadge status={evaluation.status} label={evaluation.label} /><small>{evaluation.detail}</small>
-                  </div>
-                  <LifecycleCell title="Release" value={release} />
-                  <div className="mih-studio-combined-cell" data-column="Deployment / Market">
-                    <StatusBadge status={deployment.status} label={deployment.label} /><small>{deployment.detail}</small>
-                    <StatusBadge status={marketVisible ? 'active' : 'disabled'} label={marketVisible ? 'Market 可见' : 'Market 不可见'} />
+                    <code>{project.artifact?.artifactHash ? project.artifact.artifactHash.slice(0, 12) : '尚无 artifact hash'}</code>
                   </div>
                   <div className="mih-studio-product-actions">
                     <button className="qp-button qp-button--outline qp-button--sm" type="button"
@@ -894,17 +862,25 @@ function StudioPortfolio({
             })}
           </div>
           {!filteredProjects.length ? (
-            <EmptyState icon={tab === 'releases' ? RocketLaunch : tab === 'deployments' ? Storefront : Brain}
-              title={tab === 'releases' ? '没有真实 Release' : tab === 'deployments' ? '没有真实 Deployment' : tab === 'archived' ? '没有已归档项目' : '没有匹配的 Agent 产品'}
+            <EmptyState icon={tab === 'artifacts' ? FileCode : Brain}
+              title={tab === 'artifacts' ? '没有真实 Artifact' : tab === 'archived' ? '没有已归档项目' : '没有匹配的 Agent 产品'}
               description={tabDescription || (projects.length ? '调整搜索或多维筛选条件。' : '从已审核模板创建第一个 Draft。')}
-              action={!projects.length && canMutate ? <button className="qp-button qp-button--primary" type="button" onClick={onCreate}><Plus size={16} aria-hidden="true" />新建 Agent</button> : undefined} />
+              action={!projects.length && canMutate ? <button className="qp-button qp-button--primary" type="button" onClick={() => onCreate()}><Plus size={16} aria-hidden="true" />新建 Agent</button> : undefined} />
           ) : null}
           <footer className="mih-studio-products-footer">
             <span>显示 {filteredProjects.length} / {projects.length} 个服务端项目</span>
-            <span>Release、Deployment 与 Market 可见性只按真实对象计算。</span>
+            <span>只按服务端 Draft 与 Artifact 事实计算；不推断运行、评测或发布状态。</span>
           </footer>
         </section>
       ) : null}
+
+      <section className="mih-studio-native-lifecycle" aria-label="Hub 原生 Agent 能力链">
+        <div data-state="available"><NotePencil size={16} aria-hidden="true" /><span><strong>Build</strong><small>Draft、Prompt、DAG · 可用</small></span></div>
+        <div data-state="available"><ShieldCheck size={16} aria-hidden="true" /><span><strong>Compile Evidence</strong><small>类型、策略、预算 · 可用</small></span></div>
+        <div data-state="future"><LockKey size={15} aria-hidden="true" /><span><strong>Run Trace</strong><small>Hub Event Ledger · P2</small></span></div>
+        <div data-state="future"><LockKey size={15} aria-hidden="true" /><span><strong>Eval Dataset</strong><small>Suite、Cases、Dataset · 规划中</small></span></div>
+        <div data-state="future"><LockKey size={15} aria-hidden="true" /><span><strong>Gate & Release</strong><small>审批、部署、Market · 规划中</small></span></div>
+      </section>
     </div>
   )
 }
@@ -1265,6 +1241,9 @@ function Inspector({
   )
   const supportsPrompt = node.data.determinism === 'model'
   const sequence = sequences.find((item) => item.sequenceKey === node.data.sequenceKey) || null
+  const promptVariables = node.data.nodeType === 'llm.mapping.propose'
+    ? ['{{schemaProfile}}', '{{sampleFields}}', '{{targetSchema}}']
+    : ['{{query}}', '{{evidence}}', '{{outputSchema}}']
   const tabs: Array<{ id: InspectorTab, label: string, disabled?: boolean }> = [
     { id: 'prompt', label: 'Prompt', disabled: !supportsPrompt },
     { id: 'config', label: '配置' },
@@ -1301,7 +1280,7 @@ function Inspector({
                 onChange={(event) => onChange({ userPrompt: event.target.value })} />
             </Field>
             <div className="mih-studio-variable-list" aria-label="可用 Prompt 变量">
-              <span>{'{{schemaProfile}}'}</span><span>{'{{sampleFields}}'}</span><span>{'{{targetSchema}}'}</span>
+              {promptVariables.map((variable) => <span key={variable}>{variable}</span>)}
             </div>
             <DropdownField label="LLM Sequence" value={node.data.sequenceKey || ''}
               disabled={!canMutate}
@@ -1371,36 +1350,72 @@ function Inspector({
   )
 }
 
+type StudioEvidenceReference = {
+  kind: string
+  value: string
+  source: 'draft' | 'artifact'
+}
+
+function evidenceReferences(nodes: StudioFlowNode[], compileResult: AgentStudioCompileResult | null): StudioEvidenceReference[] {
+  const keys: Record<string, string> = {
+    sourceRef: 'source',
+    datasetRef: 'dataset',
+    profileRef: 'search-profile',
+    targetSchemaRef: 'schema',
+    outputSchemaRef: 'schema',
+    sequenceKey: 'llm-sequence',
+  }
+  const values = new Map<string, StudioEvidenceReference>()
+  for (const node of nodes) {
+    for (const [configKey, kind] of Object.entries(keys)) {
+      const value = node.data.config[configKey]
+      if (typeof value !== 'string' || !value.trim()) continue
+      values.set(`${kind}:${value}`, { kind, value, source: 'draft' })
+    }
+  }
+  for (const ref of compileResult?.dependencyManifest?.logicalRefs || []) {
+    if (!ref?.kind || !ref?.key) continue
+    values.set(`${ref.kind}:${ref.key}`, { kind: ref.kind, value: ref.key, source: 'artifact' })
+  }
+  return [...values.values()].sort((left, right) => `${left.kind}:${left.value}`.localeCompare(`${right.kind}:${right.value}`))
+}
+
 function EvidenceDrawer({
   tab,
   diagnostics,
   compileResult,
+  references,
   compiling,
   onTab,
 }: {
   tab: EvidenceTab
   diagnostics: StudioDiagnostic[]
   compileResult: AgentStudioCompileResult | null
+  references: StudioEvidenceReference[]
   compiling: boolean
   onTab: (tab: EvidenceTab) => void
 }) {
   const errors = diagnostics.filter((item) => item.severity === 'error').length
   const warnings = diagnostics.filter((item) => item.severity === 'warning').length
+  const assurance = compileResult?.assurance || compileResult?.normalizedPlan?.assurance || null
   return (
     <section className="mih-studio-evidence" aria-label="编译与运行证据">
       <header>
         <div className="mih-studio-evidence-tabs" role="tablist">
           <button className={tab === 'diagnostics' ? 'is-active' : ''} type="button" role="tab"
             aria-selected={tab === 'diagnostics'} onClick={() => onTab('diagnostics')}>编译诊断 · {errors} 错误 / {warnings} 警告</button>
+          <button className={tab === 'assurance' ? 'is-active' : ''} type="button" role="tab"
+            aria-selected={tab === 'assurance'} onClick={() => onTab('assurance')}>Hub 验证 · {assurance?.checks.length || 0}</button>
           <button className={tab === 'events' ? 'is-active' : ''} type="button" role="tab"
-            aria-selected={tab === 'events'} onClick={() => onTab('events')}>运行事件 · 0</button>
+            aria-selected={tab === 'events'} onClick={() => onTab('events')}>Run Trace · 未启用</button>
           <button className={tab === 'references' ? 'is-active' : ''} type="button" role="tab"
-            aria-selected={tab === 'references'} onClick={() => onTab('references')}>数据引用 · 5</button>
+            aria-selected={tab === 'references'} onClick={() => onTab('references')}>受治理引用 · {references.length}</button>
         </div>
         <div className="mih-studio-artifact-facts">
           {compiling ? <span><Clock size={14} aria-hidden="true" />编译中</span> : null}
           <span>Artifact <code>{compileResult?.artifactId || '尚未由服务端生成'}</code></span>
           <span>Hash <code>{compileResult?.artifactHash || '—'}</code></span>
+          {compileResult?.compilerVersion ? <span>Compiler <code>{compileResult.compilerVersion}</code></span> : null}
         </div>
       </header>
       <div className="mih-studio-evidence-body">
@@ -1418,17 +1433,26 @@ function EvidenceDrawer({
             ? '编译通过；已生成不可变 Artifact。P1 仍不可运行。'
             : '尚未编译；保存 Draft 后运行静态验证。'}</span></div>
         ) : null}
-        {tab === 'events' ? <div className="mih-studio-evidence-empty"><Play size={20} aria-hidden="true" /><span>暂无事件。P1 Build edge 保持中性，不模拟 running / succeeded / failed。</span></div> : null}
-        {tab === 'references' ? (
-          <div className="mih-studio-reference-grid">
-            {[
-              ['sourceRef', '已注册来源的受治理引用'],
-              ['schemaProfileRef', '有界结构画像'],
-              ['mappingProposalRef', '模型建议，不代表批准'],
-              ['validationRef', '确定性校验结果'],
-              ['qualityResultRef', '质量与证据摘要'],
-            ].map(([name, description]) => <div key={name}><code>{name}</code><small>{description}</small></div>)}
+        {tab === 'assurance' ? (assurance ? (
+          <div className="mih-studio-assurance-grid">
+            {assurance.checks.map((check) => (
+              <article key={check.key} data-status={check.status}>
+                {check.status === 'passed' ? <CheckCircle size={16} aria-hidden="true" /> : check.status === 'failed' ? <Warning size={16} aria-hidden="true" /> : <Clock size={16} aria-hidden="true" />}
+                <span><strong>{check.label}</strong><code>{check.key}</code></span>
+                <StatusBadge status={check.status === 'passed' ? 'active' : check.status === 'failed' ? 'down' : 'disabled'}
+                  label={check.status === 'passed' ? '通过' : check.status === 'failed' ? '失败' : '未执行'} />
+              </article>
+            ))}
+            <p><ShieldCheck size={14} aria-hidden="true" />这是 Hub Compiler 的静态证据，不代表 Sandbox 已运行、Eval 已通过或 Agent 可发布。</p>
           </div>
+        ) : <div className="mih-studio-evidence-empty"><ShieldCheck size={20} aria-hidden="true" /><span>{compileResult?.artifactId
+          ? '该 Artifact 未包含 mx-insight.agent-static-assurance.v1；重新编译可生成 Hub 原生验证证据。'
+          : '编译后由服务端生成 Hub 原生静态验证证据。'}</span></div>) : null}
+        {tab === 'events' ? <div className="mih-studio-evidence-empty"><LockKey size={20} aria-hidden="true" /><span>Hub Run/Event Ledger 尚未启用。Build edge 保持中性，不模拟 running / succeeded / failed。</span></div> : null}
+        {tab === 'references' ? (
+          references.length ? <div className="mih-studio-reference-grid">
+            {references.map((reference) => <div key={`${reference.kind}:${reference.value}`}><span>{reference.kind}</span><code title={reference.value}>{reference.value}</code><small>{reference.source === 'artifact' ? 'Artifact dependency manifest' : 'Draft node config'}</small></div>)}
+          </div> : <div className="mih-studio-evidence-empty"><Database size={20} aria-hidden="true" /><span>当前 Draft 没有可解析的 source / dataset / schema / sequence 引用。</span></div>
         ) : null}
       </div>
     </section>
@@ -1438,7 +1462,7 @@ function EvidenceDrawer({
 function LifecycleRail({ onCompile, compileDisabled }: { onCompile: () => void, compileDisabled: boolean }) {
   const items: Array<{ label: string, hint: string, state: 'done' | 'active' | 'ready' | 'future', phase?: string }> = [
     { label: 'Idea', hint: '用途与边界', state: 'done' },
-    { label: 'Template', hint: 'Data Cleaning', state: 'done' },
+    { label: 'Template', hint: '已选择', state: 'done' },
     { label: 'Build', hint: '编辑 Draft', state: 'active' },
     { label: 'Compile', hint: '静态验证', state: 'ready' },
     { label: 'Sandbox', hint: '运行事件', state: 'future', phase: 'P2' },
@@ -1526,6 +1550,7 @@ function compileResultFromProject(project: StudioProjectSummary): AgentStudioCom
 function StudioWorkbench({
   project,
   draft,
+  artifact,
   manifests,
   preview,
   canMutate,
@@ -1538,6 +1563,7 @@ function StudioWorkbench({
 }: {
   project: StudioProjectSummary
   draft: StudioDraft
+  artifact?: AgentStudioCompileResult | null
   manifests: StudioNodeManifest[]
   preview: boolean
   canMutate: boolean
@@ -1549,6 +1575,7 @@ function StudioWorkbench({
   onCompileComplete?: (result: AgentStudioCompileResult) => void
 }) {
   const initialSelectedNodeId = draft.definition.nodes.find((node) => node.nodeType === 'llm.mapping.propose')?.nodeId
+    || draft.definition.nodes.find((node) => node.nodeType.startsWith('llm.'))?.nodeId
     || draft.definition.nodes[0]?.nodeId
     || ''
   const [selectedNodeId, setSelectedNodeId] = useState(initialSelectedNodeId)
@@ -1567,23 +1594,23 @@ function StudioWorkbench({
   const [saving, setSaving] = useState(false)
   const [compiling, setCompiling] = useState(false)
   const [diagnostics, setDiagnostics] = useState<StudioDiagnostic[]>([])
-  const [compileResult, setCompileResult] = useState<AgentStudioCompileResult | null>(() => compileResultFromProject(project))
+  const [compileResult, setCompileResult] = useState<AgentStudioCompileResult | null>(() => artifact || compileResultFromProject(project))
   const [evidenceTab, setEvidenceTab] = useState<EvidenceTab>('diagnostics')
-  const [canvasMode, setCanvasMode] = useState<'build' | 'run'>('build')
 
   useEffect(() => {
     const next = graphFromDefinition(draft.definition, manifests, inspectNode)
     setNodes(next.nodes)
     setEdges(next.edges)
     setSelectedNodeId(draft.definition.nodes.find((node) => node.nodeType === 'llm.mapping.propose')?.nodeId
+      || draft.definition.nodes.find((node) => node.nodeType.startsWith('llm.'))?.nodeId
       || draft.definition.nodes[0]?.nodeId
       || '')
     setBaseDefinition(draft.definition)
     setRevision(draft.revision)
     setDirty(false)
     setDiagnostics([])
-    setCompileResult(compileResultFromProject(project))
-  }, [draft.definition, draft.draftId, draft.revision, inspectNode, manifests, project, setEdges, setNodes])
+    setCompileResult(artifact || compileResultFromProject(project))
+  }, [artifact, draft.definition, draft.draftId, draft.revision, inspectNode, manifests, project, setEdges, setNodes])
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null
 
@@ -1705,6 +1732,7 @@ function StudioWorkbench({
       const finalResult: AgentStudioCompileResult = result || { status: 'valid', diagnostics: localDiagnostics }
       setDiagnostics(finalResult.diagnostics || localDiagnostics)
       setCompileResult(finalResult)
+      setEvidenceTab(finalResult.status === 'failed' ? 'diagnostics' : 'assurance')
       onCompileComplete?.(finalResult)
       notify?.(finalResult.status === 'failed' ? 'Draft 编译失败' : 'Draft 已由服务端编译', finalResult.status === 'failed' ? 'error' : 'success')
     } catch (error) {
@@ -1725,11 +1753,13 @@ function StudioWorkbench({
     addPaletteNode(key, flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }))
   }
 
+  const references = useMemo(() => evidenceReferences(nodes, compileResult), [compileResult, nodes])
+
   return (
     <div className="mih-studio-page mih-studio-detail-page">
       <PageHeading eyebrow="AGENT CENTER / AGENT STUDIO / DRAFT"
         title={project.name}
-        description="从已注册来源生成字段映射建议与证据；P1 不执行数据导入、Sandbox 运行或发布。"
+        description={`${project.summary || '在 Hub 中编排受治理的 Agent。'} 当前仅支持 Draft Build 与静态 Compile，不执行数据导入、Sandbox 或发布。`}
         loading={false} onRefresh={undefined}>
         <button className="qp-button qp-button--ghost" type="button" onClick={onBack}>
           <ArrowLeft size={16} aria-hidden="true" />全部 Agent
@@ -1770,13 +1800,13 @@ function StudioWorkbench({
         <Palette manifests={manifests} canMutate={canMutate} onAdd={addPaletteNode} />
         <main className="mih-studio-canvas-panel">
           <header>
-            <div><p className="qp-kicker">BUILD / TYPED PORTS</p><h2>全国舆情多源接入与字段映射 Draft</h2></div>
+            <div><p className="qp-kicker">BUILD / TYPED PORTS</p><h2>{project.name} · Draft rev {revision}</h2></div>
             <div className="mih-studio-canvas-actions">
               <div className="mih-studio-mode-switch" role="group" aria-label="画布显示模式">
-                <button className={canvasMode === 'build' ? 'is-active' : ''} type="button" aria-pressed={canvasMode === 'build'} onClick={() => setCanvasMode('build')}>设计图</button>
-                <button className={canvasMode === 'run' ? 'is-active' : ''} type="button" aria-pressed={canvasMode === 'run'} onClick={() => { setCanvasMode('run'); setEvidenceTab('events') }}>运行路径</button>
+                <button className="is-active" type="button" aria-pressed="true">设计图</button>
+                <button type="button" disabled title="Hub Run/Event Ledger 在 P2 交付">Run Trace · P2</button>
               </div>
-              <span className="mih-studio-no-events"><Clock size={13} aria-hidden="true" />{canvasMode === 'run' ? '暂无事件' : 'Build edge · 中性'}</span>
+              <span className="mih-studio-no-events"><Clock size={13} aria-hidden="true" />Build edge · 中性</span>
             </div>
           </header>
           <div className="mih-studio-flow" onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' }} onDrop={onDrop}>
@@ -1813,21 +1843,16 @@ function StudioWorkbench({
               <MiniMap position="bottom-right" pannable zoomable nodeStrokeWidth={2}
                 nodeColor="var(--qp-bg-active)" maskColor="color-mix(in srgb, var(--qp-bg-1) 64%, transparent)" />
             </ReactFlow>
-            {canvasMode === 'run' ? (
-              <div className="mih-studio-run-overlay" role="status">
-                <Clock size={18} aria-hidden="true" /><span><strong>暂无运行事件</strong><small>Sandbox runtime 在 P2 交付；当前边保持中性。</small></span>
-              </div>
-            ) : null}
           </div>
         </main>
         <Inspector node={selectedNode} tab={inspectorTab} sequences={sequences} canMutate={canMutate}
           onTab={setInspectorTab} onChange={updateSelectedNode} />
-        <EvidenceDrawer tab={evidenceTab} diagnostics={diagnostics} compileResult={compileResult}
+        <EvidenceDrawer tab={evidenceTab} diagnostics={diagnostics} compileResult={compileResult} references={references}
           compiling={compiling} onTab={setEvidenceTab} />
       </section>
 
       <section className="mih-studio-future-boundary" aria-label="P1 交付边界">
-        <div><Wrench size={16} aria-hidden="true" /><span><strong>P1 可用</strong><small>Draft Build、Prompt、typed edges、保存与 Compile callback</small></span></div>
+        <div><Wrench size={16} aria-hidden="true" /><span><strong>P1.5 可用</strong><small>Draft、Prompt、typed DAG、Artifact 与 Hub 静态验证证据</small></span></div>
         <div><LockKey size={16} aria-hidden="true" /><span><strong>P2 / P4 未来</strong><small>Sandbox、Eval、Release、Deploy 与 Market 发布保持禁用</small></span></div>
         <div><Database size={16} aria-hidden="true" /><span><strong>来源事实</strong><small>只接受已注册 sourceRef；不声称目录所有来源都可导入</small></span></div>
         <div><Storefront size={16} aria-hidden="true" /><span><strong>Market 分离</strong><small>Studio 管创作，Market 管发现；当前 Draft 不会上架</small></span></div>
@@ -1841,22 +1866,29 @@ export const AGENT_STUDIO_PREVIEW_TEMPLATES: StudioTemplateOption[] = [
     templateKey: 'public-opinion-mapping',
     label: '全国舆情字段映射',
     description: '从已注册省级舆情 sourceRef 生成可人工复核的 Mapping Proposal。',
+    availability: 'authoring-only',
+    runtimeAvailable: false,
+    definition: AGENT_STUDIO_PREVIEW_DEFINITION,
   },
   {
     templateKey: 'starter-governed-agent',
     label: 'Governed Agent Starter',
     description: 'P1 compile-only 模板；创建后继续配置授权数据引用与 Prompt。',
+    availability: 'authoring-only',
+    runtimeAvailable: false,
   },
 ]
 
 function CreateAgentModal({
   templates,
+  initialTemplateKey,
   busy,
   error,
   onClose,
   onSubmit,
 }: {
   templates: StudioTemplateOption[]
+  initialTemplateKey?: string | null
   busy: boolean
   error: Error | null
   onClose: () => void
@@ -1868,7 +1900,11 @@ function CreateAgentModal({
   const [owner, setOwner] = useState('')
   const [riskClass, setRiskClass] = useState<AgentStudioCreateInput['riskClass']>('low')
   const [tags, setTags] = useState('')
-  const [templateKey, setTemplateKey] = useState(templates[0]?.templateKey || '')
+  const [templateKey, setTemplateKey] = useState(
+    initialTemplateKey && templates.some((item) => item.templateKey === initialTemplateKey)
+      ? initialTemplateKey
+      : templates[0]?.templateKey || '',
+  )
   const keyValid = /^[a-z0-9][a-z0-9._-]{0,127}$/u.test(agentKey)
   const valid = keyValid && displayName.trim().length > 0 && Boolean(templateKey)
 
@@ -2018,6 +2054,7 @@ export function AgentStudioPage({
   loadProjects,
   loadProject,
   loadDraft,
+  loadArtifact,
   loadNodeTypes,
   loadSequences,
   loadTemplates,
@@ -2041,6 +2078,7 @@ export function AgentStudioPage({
   const [portfolioError, setPortfolioError] = useState<Error | null>(null)
   const [loadedProject, setLoadedProject] = useState<StudioProjectSummary | null>(null)
   const [loadedDraft, setLoadedDraft] = useState<StudioDraft | null>(null)
+  const [loadedArtifact, setLoadedArtifact] = useState<AgentStudioCompileResult | null>(null)
   const [loadedRegistry, setLoadedRegistry] = useState<StudioNodeRegistry | null>(null)
   const [loadedSequences, setLoadedSequences] = useState<StudioSequenceOption[] | null>(null)
   const [loadedTemplates, setLoadedTemplates] = useState<StudioTemplateOption[]>(
@@ -2052,6 +2090,7 @@ export function AgentStudioPage({
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<Error | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
+  const [createTemplateKey, setCreateTemplateKey] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<Error | null>(null)
   const [manageTarget, setManageTarget] = useState<StudioProjectSummary | null>(null)
@@ -2141,6 +2180,7 @@ export function AgentStudioPage({
       : internalProjects.find((item) => item.agentKey === requestedProjectKey) || null
     setLoadedProject(localProject)
     setLoadedDraft(null)
+    setLoadedArtifact(null)
     setDetailError(null)
 
     const run = async () => {
@@ -2165,6 +2205,11 @@ export function AgentStudioPage({
           ? await loadDraft(requestedProjectKey, exactDraftId)
           : embeddedDraft)
         if (active) setLoadedDraft(nextDraft || null)
+        const artifactId = nextProject?.artifact?.artifactId
+        if (artifactId && loadArtifact) {
+          const nextArtifact = await loadArtifact(requestedProjectKey, artifactId)
+          if (active) setLoadedArtifact(nextArtifact)
+        }
       } catch (nextError) {
         if (active) setDetailError(handleRemoteError(nextError))
       } finally {
@@ -2173,7 +2218,7 @@ export function AgentStudioPage({
     }
     void run()
     return () => { active = false }
-  }, [draft, effectiveView, handleRemoteError, internalProjects, loadDraft, loadProject, project, requestedDraftId, requestedProjectKey])
+  }, [draft, effectiveView, handleRemoteError, internalProjects, loadArtifact, loadDraft, loadProject, project, requestedDraftId, requestedProjectKey])
 
   useEffect(() => {
     if (effectiveView !== 'detail') return undefined
@@ -2402,7 +2447,7 @@ export function AgentStudioPage({
     if (!activeDraft) return <div className="mih-studio-page"><EmptyState icon={FileCode} title="未找到指定 Draft" description="页面不会用其他 Draft 或 fixture 代替。" action={<button className="qp-button qp-button--outline" type="button" onClick={back}>返回产品列表</button>} /></div>
     if (!manifests.length) return <div className="mih-studio-page"><EmptyState icon={TreeStructure} title="节点 Registry 尚未加载" description="为避免将未知节点冒充可编译能力，工作台保持关闭。" action={<button className="qp-button qp-button--outline" type="button" onClick={back}>返回产品列表</button>} /></div>
     return (
-      <StudioWorkbench project={activeProject} draft={activeDraft} manifests={manifests}
+      <StudioWorkbench project={activeProject} draft={activeDraft} artifact={loadedArtifact} manifests={manifests}
         preview={previewMode} canMutate={canMutate} sequences={sequenceOptions} notify={notify} onBack={back}
         saveDraft={saveDraft} compileDraft={compileDraft} onCompileComplete={updateLocalArtifact} />
     )
@@ -2412,10 +2457,10 @@ export function AgentStudioPage({
     <>
       <StudioPortfolio projects={visibleProjects} templates={templateOptions} preview={previewMode} canMutate={canMutate}
         loading={loading || portfolioLoading || templateLoading} error={error || portfolioError}
-        onRefresh={refreshPortfolio} onCreate={() => { if (canMutate) { setCreateError(null); setCreateOpen(true) } }}
+        onRefresh={refreshPortfolio} onCreate={(templateKey) => { if (canMutate) { setCreateTemplateKey(templateKey || null); setCreateError(null); setCreateOpen(true) } }}
         onOpen={(agentKey) => openProject(agentKey)} onManage={manageAction} onArchive={archiveAction}
         onRestore={restoreAction} />
-      {createOpen ? <CreateAgentModal templates={templateOptions} busy={creating} error={createError}
+      {createOpen ? <CreateAgentModal templates={templateOptions} initialTemplateKey={createTemplateKey} busy={creating} error={createError}
         onClose={() => { if (!creating) setCreateOpen(false) }} onSubmit={createProject} /> : null}
       {manageTarget ? <ManageAgentModal project={manageTarget} busy={updatingProject} error={updateError}
         onClose={() => { if (!updatingProject) setManageTarget(null) }} onSubmit={manageProject} /> : null}

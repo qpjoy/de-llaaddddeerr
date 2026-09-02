@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { CANONICAL_CONTEXT_DATASETS } from '../data/canonical-context.mjs'
+import { VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID } from '../data/virtual-supermarket.mjs'
 import {
   CONNECTOR_ID,
   DATASET_ID,
@@ -116,6 +117,121 @@ const ADMIN_PUBLIC_OPINION_BROWSE_SELECT = `SELECT record.id, record.title, reco
   LEFT JOIN core.public_opinion_current_state publication
     ON publication.record_id = record.id
    AND publication.canonical_revision = record.current_revision`
+
+const VIRTUAL_SUPERMARKET_ITEM_SELECT = `SELECT record.id,
+       record.external_id,
+       record.title,
+       record.author_name,
+       record.collected_at,
+       record.current_revision,
+       record.stable_fields,
+       (listing.record_id IS NOT NULL) AS listing_explicit,
+       listing.publication_id,
+       coalesce(listing.status, 'off_shelf') AS listing_status,
+       coalesce(listing.category_id, '${VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID}'::uuid) AS listing_category_id,
+       listing.display_title,
+       listing.specification,
+       listing.price_amount,
+       listing.currency,
+       listing.shelf_position,
+       coalesce(listing.revision, 0) AS listing_revision,
+       listing.created_by,
+       listing.updated_by,
+       listing.created_at AS listing_created_at,
+       listing.updated_at AS listing_updated_at,
+       category.id AS category_id,
+       category.category_key,
+       category.display_name AS category_display_name,
+       category.department_key,
+       category.department_name,
+       category.department_sort_order,
+       category.aisle_key,
+       category.aisle_name,
+       category.aisle_sort_order,
+       category.shelf_key,
+       category.shelf_name,
+       category.shelf_sort_order,
+       category.sort_order AS category_sort_order,
+       category.revision AS category_revision,
+       category.archived_at AS category_archived_at,
+       category.created_at AS category_created_at,
+       category.updated_at AS category_updated_at,
+       coalesce(listing.display_title,
+                record.stable_fields #>> '{commerce,product,title}',
+                record.title) AS effective_title,
+       CASE
+         WHEN listing.price_amount IS NOT NULL THEN listing.price_amount
+         WHEN (record.stable_fields #>> '{commerce,product,price}')
+              ~ '^(0|[1-9][0-9]{0,17})(\\.[0-9]{1,2})?$'
+           THEN (record.stable_fields #>> '{commerce,product,price}')::numeric
+         ELSE NULL
+       END AS effective_price
+  FROM core.canonical_records record
+  LEFT JOIN serving.virtual_supermarket_listing_state listing
+    ON listing.record_id = record.id
+  JOIN serving.virtual_supermarket_categories category
+    ON category.id = coalesce(listing.category_id, '${VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID}'::uuid)`
+
+async function assertVirtualSupermarketCategoryHierarchy(client, candidate, excludedId = null) {
+  const { rows } = await client.query(
+    `SELECT category.id,
+            CASE
+              WHEN category.department_key = $1
+               AND (category.department_name IS DISTINCT FROM $2
+                    OR category.department_sort_order IS DISTINCT FROM $3)
+                THEN 'department'
+              WHEN category.department_key = $1 AND category.aisle_key = $4
+               AND (category.aisle_name IS DISTINCT FROM $5
+                    OR category.aisle_sort_order IS DISTINCT FROM $6)
+                THEN 'aisle'
+              ELSE 'shelf'
+            END AS conflict_level
+       FROM serving.virtual_supermarket_categories category
+      WHERE ($10::uuid IS NULL OR category.id <> $10::uuid)
+        AND (
+          (category.department_key = $1
+           AND (category.department_name IS DISTINCT FROM $2
+                OR category.department_sort_order IS DISTINCT FROM $3))
+          OR
+          (category.department_key = $1 AND category.aisle_key = $4
+           AND (category.aisle_name IS DISTINCT FROM $5
+                OR category.aisle_sort_order IS DISTINCT FROM $6))
+          OR
+          (category.department_key = $1 AND category.aisle_key = $4
+           AND category.shelf_key = $7
+           AND (category.shelf_name IS DISTINCT FROM $8
+                OR category.shelf_sort_order IS DISTINCT FROM $9))
+        )
+      ORDER BY CASE
+                 WHEN category.department_key = $1
+                  AND (category.department_name IS DISTINCT FROM $2
+                       OR category.department_sort_order IS DISTINCT FROM $3) THEN 1
+                 WHEN category.department_key = $1 AND category.aisle_key = $4
+                  AND (category.aisle_name IS DISTINCT FROM $5
+                       OR category.aisle_sort_order IS DISTINCT FROM $6) THEN 2
+                 ELSE 3
+               END,
+               category.id
+      LIMIT 1`,
+    [
+      candidate.departmentKey, candidate.departmentName, candidate.departmentSortOrder,
+      candidate.aisleKey, candidate.aisleName, candidate.aisleSortOrder,
+      candidate.shelfKey, candidate.shelfName, candidate.shelfSortOrder,
+      excludedId,
+    ],
+  )
+  if (!rows[0]) return
+  const level = rows[0].conflict_level
+  const key = level === 'department'
+    ? candidate.departmentKey
+    : level === 'aisle' ? candidate.aisleKey : candidate.shelfKey
+  throw new AppError(
+    409,
+    'virtual_supermarket_category_hierarchy_conflict',
+    'Virtual-supermarket hierarchy key is already bound to different metadata',
+    { level, key, conflictingCategoryId: rows[0].id },
+  )
+}
 
 export function publicOpinionSourceStage(datasetId, rawItem) {
   if (!publicOpinionDatasets.has(datasetId)) return null
@@ -294,13 +410,15 @@ function canonicalContextQueryBranch(datasetId, position, side) {
                 row_number() OVER (ORDER BY r.event_time ${direction}, r.id ${direction}) AS side_position,
                 r.id, r.dataset_id, r.platform, r.object_type, r.content_type,
                 r.external_id, r.url, r.title, r.body, r.author_external_id, r.author_name,
-                r.event_time, r.collected_at, r.stable_fields,
+                r.event_time, r.event_time_cursor, r.collected_at, r.stable_fields,
                 r.stable_fields #>> '{relations,chatId}' AS context_id
            FROM anchor a
            CROSS JOIN LATERAL (
              SELECT id, dataset_id, platform, object_type, content_type,
                     external_id, url, title, body, author_external_id, author_name,
-                    event_time, collected_at, stable_fields
+                    event_time,
+                    to_char(event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS event_time_cursor,
+                    collected_at, stable_fields
                FROM core.canonical_records r
               WHERE a.dataset_id = '${datasetId}'
                 AND a.object_type = 'message'
@@ -347,7 +465,9 @@ export function buildCanonicalContextStoragePlan(datasets = CANONICAL_CONTEXT_DA
                 0::bigint AS side_position,
                 id, dataset_id, platform, object_type, content_type,
                 external_id, url, title, body, author_external_id, author_name,
-                event_time, collected_at, stable_fields,
+                event_time,
+                to_char(event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS event_time_cursor,
+                collected_at, stable_fields,
                 stable_fields #>> '{relations,chatId}' AS context_id
            FROM core.canonical_records
           WHERE id = $1::uuid
@@ -366,6 +486,36 @@ export function buildCanonicalContextStoragePlan(datasets = CANONICAL_CONTEXT_DA
 const CANONICAL_CONTEXT_STORAGE_PLAN = buildCanonicalContextStoragePlan()
 const CANONICAL_CONTEXT_SERVING_INDEX_CONTRACTS = CANONICAL_CONTEXT_STORAGE_PLAN.indexContracts
 const CANONICAL_CONTEXT_QUERY_SQL = CANONICAL_CONTEXT_STORAGE_PLAN.querySql
+
+export function buildCanonicalTimelineStoragePlan(datasets = CANONICAL_CONTEXT_DATASETS) {
+  const entries = canonicalContextDatasetEntries(datasets)
+  return Object.freeze(Object.fromEntries(entries.map(([datasetId]) => [
+    datasetId,
+    Object.freeze(Object.fromEntries(['older', 'newer'].map((direction) => {
+      const older = direction === 'older'
+      const comparison = older ? '<' : '>'
+      const order = older ? 'DESC' : 'ASC'
+      return [direction, `SELECT r.id, r.dataset_id, r.platform, r.object_type, r.content_type,
+              r.external_id, r.url, r.title, r.body, r.author_external_id, r.author_name,
+              r.event_time,
+              to_char(r.event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS event_time_cursor,
+              r.collected_at, r.stable_fields,
+              r.stable_fields #>> '{relations,chatId}' AS context_id
+         FROM core.canonical_records r
+        WHERE r.dataset_id = '${datasetId}'
+          AND r.platform = 'telegram'
+          AND r.object_type = 'message'
+          AND r.deleted_at IS NULL
+          AND r.event_time IS NOT NULL
+          AND r.stable_fields #>> '{relations,chatId}' = $1
+          AND (r.event_time, r.id) ${comparison} ($2::timestamptz, $3::uuid)
+        ORDER BY r.event_time ${order}, r.id ${order}
+        LIMIT $4`]
+    }))),
+  ])))
+}
+
+const CANONICAL_TIMELINE_PAGE_SQL = buildCanonicalTimelineStoragePlan()
 const PUBLIC_OPINION_SERVING_INDEX_CONTRACTS = Object.freeze([
   {
     name: 'canonical_province_opinion_hot_idx',
@@ -2109,6 +2259,525 @@ export class PostgresStore {
     return rows
   }
 
+  async listMobileCommerceItems({
+    sourcePlatform = null,
+    catalogEntryId = null,
+    keyword = null,
+    brand = null,
+    taskId = null,
+    from = null,
+    to = null,
+    pageSize = 50,
+    cursor = null,
+  } = {}) {
+    const values = []
+    const conditions = [
+      `record.dataset_id = 'mobile-commerce.collected-items.v1'`,
+      `record.platform = 'mobile_commerce'`,
+      `record.object_type = 'commerce_capture'`,
+      'record.deleted_at IS NULL',
+    ]
+    const bind = (value) => {
+      values.push(value)
+      return `$${values.length}`
+    }
+    if (sourcePlatform) {
+      conditions.push(`record.stable_fields #>> '{commerce,marketplace,sourceValue}' = ${bind(sourcePlatform)}`)
+    }
+    if (catalogEntryId) {
+      conditions.push(`record.stable_fields #>> '{commerce,marketplace,entryId}' = ${bind(catalogEntryId)}`)
+    }
+    if (keyword) conditions.push(`record.stable_fields #>> '{commerce,task,keyword}' = ${bind(keyword)}`)
+    if (brand) conditions.push(`record.stable_fields #>> '{commerce,task,sourceBrandLabel}' = ${bind(brand)}`)
+    if (taskId) conditions.push(`record.stable_fields #>> '{commerce,task,id}' = ${bind(taskId)}`)
+    if (from) conditions.push(`record.collected_at >= ${bind(from)}::timestamptz`)
+    if (to) conditions.push(`record.collected_at <= ${bind(to)}::timestamptz`)
+    if (cursor) {
+      const sortTime = bind(cursor.sortTime)
+      const id = bind(cursor.id)
+      conditions.push(`(record.collected_at, record.id) < (${sortTime}::timestamptz, ${id}::uuid)`)
+    }
+    const limit = bind(pageSize + 1)
+    const { rows } = await this.pool.query(
+      `SELECT record.id,
+              record.external_id,
+              record.title,
+              record.author_name,
+              record.collected_at,
+              record.stable_fields,
+              record.current_revision,
+              record.collected_at AS sort_time
+         FROM core.canonical_records record
+        WHERE ${conditions.join('\n          AND ')}
+        ORDER BY record.collected_at DESC, record.id DESC
+        LIMIT ${limit}`,
+      values,
+    )
+    return rows
+  }
+
+  // ---- virtual supermarket ---------------------------------------------
+
+  async getVirtualSupermarketStorefrontRevision() {
+    const { rows } = await this.pool.query(
+      'SELECT revision FROM serving.virtual_supermarket_storefront WHERE id = true',
+    )
+    if (!rows[0]) {
+      throw new AppError(503, 'storefront_revision_unavailable', 'Virtual-supermarket storefront revision is unavailable')
+    }
+    return Number(rows[0].revision)
+  }
+
+  async getVirtualSupermarketInventoryRevision() {
+    const { rows } = await this.pool.query(
+      'SELECT inventory_revision FROM serving.virtual_supermarket_storefront WHERE id = true',
+    )
+    if (rows[0]?.inventory_revision == null) {
+      throw new AppError(503, 'inventory_revision_unavailable', 'Virtual-supermarket inventory revision is unavailable')
+    }
+    return `revision:${rows[0].inventory_revision}`
+  }
+
+  async #bumpVirtualSupermarketStorefront(client) {
+    const { rows } = await client.query(
+      `UPDATE serving.virtual_supermarket_storefront
+          SET revision = revision + 1, updated_at = now()
+        WHERE id = true
+        RETURNING revision`,
+    )
+    if (!rows[0]) {
+      throw new AppError(503, 'storefront_revision_unavailable', 'Virtual-supermarket storefront revision is unavailable')
+    }
+    return Number(rows[0].revision)
+  }
+
+  async listVirtualSupermarketCategories({ includeArchived = false } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT *
+         FROM serving.virtual_supermarket_categories
+        ${includeArchived ? '' : 'WHERE archived_at IS NULL'}
+        ORDER BY department_sort_order, department_key,
+                 aisle_sort_order, aisle_key,
+                 shelf_sort_order, shelf_key,
+                 sort_order, category_key`,
+    )
+    return rows.map(virtualSupermarketCategory)
+  }
+
+  async getVirtualSupermarketCategory(id) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM serving.virtual_supermarket_categories WHERE id = $1::uuid',
+      [id],
+    )
+    return virtualSupermarketCategory(rows[0])
+  }
+
+  async createVirtualSupermarketCategory(input, { actor = 'admin-token' } = {}) {
+    try {
+      return await withPgTransaction(this.pool, async (client) => {
+        await client.query('LOCK TABLE serving.virtual_supermarket_categories IN SHARE ROW EXCLUSIVE MODE')
+        const duplicate = await client.query(
+          'SELECT id FROM serving.virtual_supermarket_categories WHERE category_key = $1 LIMIT 1',
+          [input.categoryKey],
+        )
+        if (duplicate.rows[0]) {
+          throw new AppError(409, 'virtual_supermarket_category_exists', 'A virtual-supermarket category with this key already exists')
+        }
+        const candidate = {
+          id: randomUUID(),
+          categoryKey: input.categoryKey,
+          displayName: input.displayName,
+          departmentKey: input.department.key,
+          departmentName: input.department.name,
+          departmentSortOrder: input.department.sortOrder,
+          aisleKey: input.aisle.key,
+          aisleName: input.aisle.name,
+          aisleSortOrder: input.aisle.sortOrder,
+          shelfKey: input.shelf.key,
+          shelfName: input.shelf.name,
+          shelfSortOrder: input.shelf.sortOrder,
+          sortOrder: input.sortOrder,
+        }
+        await assertVirtualSupermarketCategoryHierarchy(client, candidate)
+        const { rows } = await client.query(
+          `INSERT INTO serving.virtual_supermarket_categories
+             (id, category_key, display_name,
+              department_key, department_name, department_sort_order,
+              aisle_key, aisle_name, aisle_sort_order,
+              shelf_key, shelf_name, shelf_sort_order, sort_order)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          RETURNING *`,
+          [
+            candidate.id, candidate.categoryKey, candidate.displayName,
+            candidate.departmentKey, candidate.departmentName, candidate.departmentSortOrder,
+            candidate.aisleKey, candidate.aisleName, candidate.aisleSortOrder,
+            candidate.shelfKey, candidate.shelfName, candidate.shelfSortOrder, candidate.sortOrder,
+          ],
+        )
+        const category = virtualSupermarketCategory(rows[0])
+        const storefrontRevision = await this.#bumpVirtualSupermarketStorefront(client)
+        await client.query(
+          `INSERT INTO serving.virtual_supermarket_events
+             (id, aggregate_type, aggregate_id, event_type, actor,
+              from_revision, to_revision, storefront_revision, changes)
+           VALUES ($1, 'category', $2, 'create', $3, NULL, 1, $4, $5)`,
+          [randomUUID(), category.id, actor, storefrontRevision, { after: category }],
+        )
+        return { item: category, storefrontRevision }
+      })
+    } catch (error) {
+      if (error?.code === '23505') {
+        throw new AppError(409, 'virtual_supermarket_category_exists', 'A virtual-supermarket category with this key already exists')
+      }
+      throw error
+    }
+  }
+
+  async updateVirtualSupermarketCategory(id, patch, {
+    expectedRevision,
+    actor = 'admin-token',
+  } = {}) {
+    return withPgTransaction(this.pool, async (client) => {
+      await client.query('LOCK TABLE serving.virtual_supermarket_categories IN SHARE ROW EXCLUSIVE MODE')
+      const currentResult = await client.query(
+        'SELECT * FROM serving.virtual_supermarket_categories WHERE id = $1::uuid FOR UPDATE',
+        [id],
+      )
+      const before = virtualSupermarketCategory(currentResult.rows[0])
+      if (!before) {
+        throw new AppError(404, 'virtual_supermarket_category_not_found', 'Virtual-supermarket category was not found')
+      }
+      if (before.revision !== expectedRevision) {
+        throw new AppError(
+          409,
+          'virtual_supermarket_category_revision_conflict',
+          'Virtual-supermarket category changed; reload before saving',
+          { expectedRevision, currentRevision: before.revision },
+        )
+      }
+      const merged = {
+        ...before,
+        ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}),
+        ...(patch.department ? {
+          departmentKey: patch.department.key,
+          departmentName: patch.department.name,
+          departmentSortOrder: patch.department.sortOrder,
+        } : {}),
+        ...(patch.aisle ? {
+          aisleKey: patch.aisle.key,
+          aisleName: patch.aisle.name,
+          aisleSortOrder: patch.aisle.sortOrder,
+        } : {}),
+        ...(patch.shelf ? {
+          shelfKey: patch.shelf.key,
+          shelfName: patch.shelf.name,
+          shelfSortOrder: patch.shelf.sortOrder,
+        } : {}),
+        ...(patch.sortOrder !== undefined ? { sortOrder: patch.sortOrder } : {}),
+      }
+      await assertVirtualSupermarketCategoryHierarchy(client, merged, id)
+      const { rows } = await client.query(
+        `UPDATE serving.virtual_supermarket_categories
+            SET display_name = $3,
+                department_key = $4,
+                department_name = $5,
+                department_sort_order = $6,
+                aisle_key = $7,
+                aisle_name = $8,
+                aisle_sort_order = $9,
+                shelf_key = $10,
+                shelf_name = $11,
+                shelf_sort_order = $12,
+                sort_order = $13,
+                revision = revision + 1,
+                updated_at = now()
+          WHERE id = $1::uuid AND revision = $2
+          RETURNING *`,
+        [
+          id, expectedRevision, merged.displayName,
+          merged.departmentKey, merged.departmentName, merged.departmentSortOrder,
+          merged.aisleKey, merged.aisleName, merged.aisleSortOrder,
+          merged.shelfKey, merged.shelfName, merged.shelfSortOrder, merged.sortOrder,
+        ],
+      )
+      const category = virtualSupermarketCategory(rows[0])
+      const storefrontRevision = await this.#bumpVirtualSupermarketStorefront(client)
+      await client.query(
+        `INSERT INTO serving.virtual_supermarket_events
+           (id, aggregate_type, aggregate_id, event_type, actor,
+            from_revision, to_revision, storefront_revision, changes)
+         VALUES ($1, 'category', $2, 'update', $3, $4, $5, $6, $7)`,
+        [
+          randomUUID(), id, actor, before.revision, category.revision,
+          storefrontRevision, { before, after: category },
+        ],
+      )
+      return { item: category, storefrontRevision }
+    })
+  }
+
+  async listVirtualSupermarketCategoryEvents(id, limit = 50) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200))
+    const { rows } = await this.pool.query(
+      `SELECT * FROM serving.virtual_supermarket_events
+        WHERE aggregate_type = 'category' AND aggregate_id = $1::uuid
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2`,
+      [id, safeLimit],
+    )
+    return rows.map(virtualSupermarketEvent)
+  }
+
+  async listVirtualSupermarketProducts({
+    status = 'all',
+    categoryId = null,
+    department = null,
+    aisle = null,
+    shelf = null,
+    marketplace = null,
+    query = null,
+    sort = 'newest',
+    pageSize = 24,
+    offset = 0,
+    includeGovernanceEvidence = false,
+  } = {}) {
+    const values = []
+    const conditions = [
+      `record.dataset_id = 'mobile-commerce.collected-items.v1'`,
+      `record.platform = 'mobile_commerce'`,
+      `record.object_type = 'commerce_capture'`,
+      'record.deleted_at IS NULL',
+      'category.archived_at IS NULL',
+    ]
+    const bind = (value) => {
+      values.push(value)
+      return `$${values.length}`
+    }
+    if (status !== 'all') conditions.push(`coalesce(listing.status, 'off_shelf') = ${bind(status)}`)
+    if (categoryId) conditions.push(`category.id = ${bind(categoryId)}::uuid`)
+    if (department) conditions.push(`category.department_key = ${bind(department)}`)
+    if (aisle) conditions.push(`category.aisle_key = ${bind(aisle)}`)
+    if (shelf) conditions.push(`category.shelf_key = ${bind(shelf)}`)
+    if (marketplace) {
+      const value = bind(marketplace)
+      conditions.push(includeGovernanceEvidence
+        ? `(
+            record.stable_fields #>> '{commerce,marketplace,sourceValue}' = ${value}
+            OR record.stable_fields #>> '{commerce,marketplace,entryId}' = ${value}
+            OR record.stable_fields #>> '{commerce,marketplace,sourceKey}' = ${value}
+            OR record.stable_fields #>> '{commerce,marketplace,canonicalName}' = ${value}
+          )`
+        : `(
+            record.stable_fields #>> '{commerce,marketplace,status}' = 'mapped'
+            AND (
+              record.stable_fields #>> '{commerce,marketplace,entryId}' = ${value}
+              OR record.stable_fields #>> '{commerce,marketplace,canonicalName}' = ${value}
+            )
+          )`)
+    }
+    if (query) {
+      const escaped = `%${String(query).replace(/[\\%_]/gu, '\\$&')}%`
+      const value = bind(escaped)
+      conditions.push(`(
+        coalesce(listing.display_title, record.stable_fields #>> '{commerce,product,title}', record.title, '') ILIKE ${value} ESCAPE '\\'
+        OR coalesce(listing.specification, '') ILIKE ${value} ESCAPE '\\'
+        OR coalesce(record.stable_fields #>> '{commerce,shop,name}', record.author_name, '') ILIKE ${value} ESCAPE '\\'
+        ${includeGovernanceEvidence
+          ? `OR coalesce(record.stable_fields #>> '{commerce,product,title}', '') ILIKE ${value} ESCAPE '\\'
+            OR coalesce(record.title, '') ILIKE ${value} ESCAPE '\\'
+            OR coalesce(record.stable_fields #>> '{commerce,shop,name}', '') ILIKE ${value} ESCAPE '\\'
+            OR coalesce(record.author_name, '') ILIKE ${value} ESCAPE '\\'
+            OR coalesce(record.stable_fields #>> '{commerce,signals,tagsText}', '') ILIKE ${value} ESCAPE '\\'`
+          : ''}
+      )`)
+    }
+    const orderBy = {
+      newest: 'record.collected_at DESC, record.id DESC',
+      title_asc: 'effective_title ASC NULLS LAST, record.id ASC',
+      price_asc: 'effective_price ASC NULLS LAST, record.id ASC',
+      price_desc: 'effective_price DESC NULLS LAST, record.id ASC',
+    }[sort] || 'record.collected_at DESC, record.id DESC'
+    const limit = bind(pageSize + 1)
+    const skip = bind(offset)
+    const { rows } = await this.pool.query(
+      `${VIRTUAL_SUPERMARKET_ITEM_SELECT}
+        WHERE ${conditions.join('\n          AND ')}
+        ORDER BY ${orderBy}
+        LIMIT ${limit} OFFSET ${skip}`,
+      values,
+    )
+    return rows.map(virtualSupermarketItem)
+  }
+
+  async getVirtualSupermarketProduct(id, { onShelfOnly = false } = {}) {
+    return virtualSupermarketItemById(this.pool, id, { onShelfOnly })
+  }
+
+  async getVirtualSupermarketProductByPublicationId(publicationId) {
+    const { rows } = await this.pool.query(
+      `${VIRTUAL_SUPERMARKET_ITEM_SELECT}
+        WHERE listing.publication_id = $1::uuid
+          AND listing.status = 'on_shelf'
+          AND category.archived_at IS NULL
+          AND record.dataset_id = 'mobile-commerce.collected-items.v1'
+          AND record.platform = 'mobile_commerce'
+          AND record.object_type = 'commerce_capture'
+          AND record.deleted_at IS NULL`,
+      [publicationId],
+    )
+    return virtualSupermarketItem(rows[0])
+  }
+
+  async updateVirtualSupermarketProduct(id, patch, {
+    expectedRevision,
+    actor = 'admin-token',
+    eventType = 'update',
+    reason = null,
+  } = {}) {
+    return withPgTransaction(this.pool, async (client) => {
+      const canonical = await client.query(
+        `SELECT id FROM core.canonical_records
+          WHERE id = $1::uuid
+            AND dataset_id = 'mobile-commerce.collected-items.v1'
+            AND platform = 'mobile_commerce'
+            AND object_type = 'commerce_capture'
+            AND deleted_at IS NULL
+          FOR SHARE`,
+        [id],
+      )
+      if (canonical.rowCount !== 1) {
+        throw new AppError(404, 'virtual_supermarket_product_not_found', 'Virtual-supermarket product was not found')
+      }
+      const currentResult = await client.query(
+        'SELECT * FROM serving.virtual_supermarket_listing_state WHERE record_id = $1::uuid FOR UPDATE',
+        [id],
+      )
+      const row = currentResult.rows[0]
+      const before = row ? {
+        explicit: true,
+        publicationId: row.publication_id,
+        status: row.status,
+        categoryId: row.category_id,
+        displayTitle: row.display_title,
+        specification: row.specification,
+        priceAmount: row.price_amount == null ? null : String(row.price_amount),
+        currency: row.currency,
+        shelfPosition: row.shelf_position == null ? null : Number(row.shelf_position),
+        revision: Number(row.revision),
+      } : {
+        explicit: false,
+        publicationId: null,
+        status: 'off_shelf',
+        categoryId: VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID,
+        displayTitle: null,
+        specification: null,
+        priceAmount: null,
+        currency: null,
+        shelfPosition: null,
+        revision: 0,
+      }
+      if (before.revision !== expectedRevision) {
+        throw new AppError(
+          409,
+          'virtual_supermarket_listing_revision_conflict',
+          'Virtual-supermarket listing changed; reload before saving',
+          { expectedRevision, currentRevision: before.revision },
+        )
+      }
+      const merged = {
+        ...before,
+        publicationId: before.publicationId
+          || (patch.status === 'on_shelf' ? randomUUID() : null),
+        ...(patch.status !== undefined ? { status: patch.status } : {}),
+        ...(patch.categoryId !== undefined
+          ? { categoryId: patch.categoryId || VIRTUAL_SUPERMARKET_DEFAULT_CATEGORY_ID }
+          : {}),
+        ...(patch.displayTitle !== undefined ? { displayTitle: patch.displayTitle } : {}),
+        ...(patch.specification !== undefined ? { specification: patch.specification } : {}),
+        ...(patch.shelfPosition !== undefined ? { shelfPosition: patch.shelfPosition } : {}),
+        ...(patch.price !== undefined ? {
+          priceAmount: patch.price?.amount ?? null,
+          currency: patch.price?.currency ?? null,
+        } : {}),
+      }
+      const category = await client.query(
+        `SELECT id FROM serving.virtual_supermarket_categories
+          WHERE id = $1::uuid AND archived_at IS NULL`,
+        [merged.categoryId],
+      )
+      if (category.rowCount !== 1) {
+        throw new AppError(404, 'virtual_supermarket_category_not_found', 'Virtual-supermarket category was not found')
+      }
+      const nextRevision = before.revision + 1
+      const listingWrite = await client.query(
+        `INSERT INTO serving.virtual_supermarket_listing_state
+           (record_id, publication_id, status, category_id, display_title, specification,
+            price_amount, currency, shelf_position, revision,
+            created_by, updated_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::numeric, $8, $9, $10, $11, $11)
+         ON CONFLICT (record_id) DO UPDATE
+           SET publication_id = EXCLUDED.publication_id,
+               status = EXCLUDED.status,
+               category_id = EXCLUDED.category_id,
+               display_title = EXCLUDED.display_title,
+               specification = EXCLUDED.specification,
+               price_amount = EXCLUDED.price_amount,
+               currency = EXCLUDED.currency,
+               shelf_position = EXCLUDED.shelf_position,
+               revision = EXCLUDED.revision,
+               updated_by = EXCLUDED.updated_by,
+               updated_at = now()
+         WHERE serving.virtual_supermarket_listing_state.revision = $12
+         RETURNING revision`,
+        [
+          id, merged.publicationId, merged.status, merged.categoryId, merged.displayTitle, merged.specification,
+          merged.priceAmount, merged.currency, merged.shelfPosition, nextRevision, actor,
+          expectedRevision,
+        ],
+      )
+      if (listingWrite.rowCount !== 1) {
+        const latest = await client.query(
+          'SELECT revision FROM serving.virtual_supermarket_listing_state WHERE record_id = $1::uuid',
+          [id],
+        )
+        throw new AppError(
+          409,
+          'virtual_supermarket_listing_revision_conflict',
+          'Virtual-supermarket listing changed; reload before saving',
+          { expectedRevision, currentRevision: Number(latest.rows[0]?.revision ?? expectedRevision + 1) },
+        )
+      }
+      const storefrontRevision = await this.#bumpVirtualSupermarketStorefront(client)
+      const after = { ...merged, explicit: true, revision: nextRevision }
+      await client.query(
+        `INSERT INTO serving.virtual_supermarket_events
+           (id, aggregate_type, aggregate_id, event_type, actor,
+            from_revision, to_revision, storefront_revision, reason, changes)
+         VALUES ($1, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          randomUUID(), id, eventType, actor, before.revision, nextRevision,
+          storefrontRevision, reason, { before, after },
+        ],
+      )
+      return {
+        item: await virtualSupermarketItemById(client, id),
+        storefrontRevision,
+      }
+    })
+  }
+
+  async listVirtualSupermarketProductEvents(id, limit = 50) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200))
+    const { rows } = await this.pool.query(
+      `SELECT * FROM serving.virtual_supermarket_events
+        WHERE aggregate_type = 'product' AND aggregate_id = $1::uuid
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2`,
+      [id, safeLimit],
+    )
+    return rows.map(virtualSupermarketEvent)
+  }
+
   /**
    * Admin-only Telegram product facade. It intentionally exposes governed
    * canonical business rows from both ingestors without applying a public-chat
@@ -2385,6 +3054,32 @@ export class PostgresStore {
       hasMoreStoredBefore: beforeRows.length > before,
       hasMoreStoredAfter: afterRows.length > after,
       contextSupported: true,
+    }
+  }
+
+  /**
+   * Continue a canonical chat timeline from a cursor-contained exclusive
+   * boundary. The original anchor row is deliberately not consulted here.
+   */
+  async getCanonicalTimelinePage({
+    datasetId,
+    contextId,
+    direction,
+    boundary,
+    pageSize,
+  }) {
+    const sql = CANONICAL_TIMELINE_PAGE_SQL[datasetId]?.[direction]
+    if (!sql) {
+      throw new AppError(409, 'context_not_supported', 'Canonical item does not support message timeline')
+    }
+    const { rows } = await this.pool.query(
+      sql,
+      [contextId, boundary.eventTime, boundary.id, pageSize + 1],
+    )
+    const page = rows.slice(0, pageSize)
+    return {
+      items: direction === 'older' ? page.reverse() : page,
+      hasMore: rows.length > pageSize,
     }
   }
 
@@ -3594,6 +4289,137 @@ export class PostgresStore {
     }
   }
 
+  // ---- shared database connections (migration 048) ----------------------
+
+  async listDatabaseConnections() {
+    const { rows } = await this.pool.query(
+      `SELECT *
+         FROM catalog.database_connections
+        ORDER BY created_at DESC, id`,
+    )
+    return rows.map(databaseConnection)
+  }
+
+  async getDatabaseConnection(id) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM catalog.database_connections WHERE id = $1`,
+      [id],
+    )
+    return databaseConnection(rows[0])
+  }
+
+  async createDatabaseConnection({ key, displayName, engine = 'postgresql', connection = {} }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO catalog.database_connections
+         (id, connection_key, display_name, engine, connection)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (connection_key) DO NOTHING
+       RETURNING *`,
+      [randomUUID(), key, displayName, engine, connection],
+    )
+    if (!rows[0]) {
+      throw new AppError(409, 'database_connection_exists', `Database connection key already exists: ${key}`)
+    }
+    return databaseConnection(rows[0])
+  }
+
+  async updateDatabaseConnection(id, patch, { expectedRevision = null } = {}) {
+    const hasDisplayName = Object.prototype.hasOwnProperty.call(patch, 'displayName')
+    const hasEngine = Object.prototype.hasOwnProperty.call(patch, 'engine')
+    const hasConnection = Object.prototype.hasOwnProperty.call(patch, 'connection')
+    const { rows } = await this.pool.query(
+      `UPDATE catalog.database_connections
+          SET display_name = CASE WHEN $2 THEN $3 ELSE display_name END,
+              engine = CASE WHEN $4 THEN $5 ELSE engine END,
+              connection = CASE WHEN $6 THEN $7 ELSE connection END,
+              revision = revision + 1,
+              updated_at = now()
+        WHERE id = $1
+          AND ($8::integer IS NULL OR revision = $8)
+        RETURNING *`,
+      [
+        id,
+        hasDisplayName,
+        patch.displayName ?? null,
+        hasEngine,
+        patch.engine ?? null,
+        hasConnection,
+        patch.connection ?? null,
+        expectedRevision,
+      ],
+    )
+    if (!rows[0]) {
+      if (expectedRevision != null) {
+        const current = await this.pool.query(
+          `SELECT revision FROM catalog.database_connections WHERE id = $1`,
+          [id],
+        )
+        if (current.rows[0]) {
+          throw new AppError(
+            409,
+            'database_connection_revision_conflict',
+            'Database connection changed; reload before saving',
+            {
+              expectedRevision,
+              currentRevision: Number(current.rows[0].revision),
+            },
+          )
+        }
+      }
+      throw new AppError(404, 'database_connection_not_found', `Unknown database connection: ${id}`)
+    }
+    return databaseConnection(rows[0])
+  }
+
+  async listDatabaseConnectionReferences(id) {
+    const { rows } = await this.pool.query(
+      `SELECT *
+         FROM catalog.external_sources
+        WHERE database_connection_id = $1
+        ORDER BY source_key, id`,
+      [id],
+    )
+    return rows.map(externalSource)
+  }
+
+  async deleteDatabaseConnection(id) {
+    return withPgTransaction(this.pool, async (client) => {
+      const current = await client.query(
+        `SELECT * FROM catalog.database_connections WHERE id = $1 FOR UPDATE`,
+        [id],
+      )
+      if (!current.rows[0]) {
+        throw new AppError(404, 'database_connection_not_found', `Unknown database connection: ${id}`)
+      }
+      const references = await client.query(
+        `SELECT *
+           FROM catalog.external_sources
+          WHERE database_connection_id = $1
+          ORDER BY source_key, id`,
+        [id],
+      )
+      if (references.rows.length > 0) {
+        throw new AppError(
+          409,
+          'database_connection_in_use',
+          'Database connection is referenced by one or more external sources',
+          {
+            references: references.rows.map((row) => ({
+              sourceId: row.id,
+              sourceKey: row.source_key,
+              displayName: row.display_name,
+            })),
+          },
+        )
+      }
+      await client.query(
+        `DELETE FROM catalog.database_connections WHERE id = $1`,
+        [id],
+      )
+      return databaseConnection(current.rows[0])
+    })
+  }
+
   // ---- external sources (migration 008) ----------------------------------
 
   async createExternalSource({
@@ -3605,18 +4431,19 @@ export class PostgresStore {
     objectType,
     status,
     connection,
+    databaseConnectionId = null,
     syncIntervalSeconds = 60,
   }) {
     const { rows } = await this.pool.query(
       `INSERT INTO catalog.external_sources
-         (id, source_key, display_name, source_kind, dataset_id, platform, object_type, status, connection,
-          sync_interval_seconds)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         (id, source_key, display_name, source_kind, dataset_id, platform, object_type, status,
+          database_connection_id, connection, sync_interval_seconds)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (source_key) DO NOTHING
        RETURNING *`,
       [
         randomUUID(), sourceKey, displayName, sourceKind, datasetId, platform,
-        objectType || 'record', status || 'active', connection || {}, syncIntervalSeconds,
+        objectType || 'record', status || 'active', databaseConnectionId, connection || {}, syncIntervalSeconds,
       ],
     )
     if (!rows[0]) throw new AppError(409, 'source_exists', `Source key already exists: ${sourceKey}`)
@@ -3624,12 +4451,14 @@ export class PostgresStore {
   }
 
   async updateExternalSource(sourceKey, patch) {
+    const hasDatabaseConnection = Object.prototype.hasOwnProperty.call(patch, 'databaseConnectionId')
     const hasSyncInterval = Object.prototype.hasOwnProperty.call(patch, 'syncIntervalSeconds')
     const { rows } = await this.pool.query(
       `UPDATE catalog.external_sources
           SET status = coalesce($2, status),
               connection = coalesce($3, connection),
-              sync_interval_seconds = CASE WHEN $4 THEN $5 ELSE sync_interval_seconds END,
+              database_connection_id = CASE WHEN $4 THEN $5 ELSE database_connection_id END,
+              sync_interval_seconds = CASE WHEN $6 THEN $7 ELSE sync_interval_seconds END,
               updated_at = now()
         WHERE source_key = $1
         RETURNING *`,
@@ -3637,6 +4466,8 @@ export class PostgresStore {
         sourceKey,
         patch.status ?? null,
         patch.connection ?? null,
+        hasDatabaseConnection,
+        patch.databaseConnectionId ?? null,
         hasSyncInterval,
         patch.syncIntervalSeconds ?? null,
       ],
@@ -3651,12 +4482,14 @@ export class PostgresStore {
     return withPgTransaction(this.pool, async (client) => {
       const results = []
       for (const update of updates) {
+        const hasDatabaseConnection = Object.prototype.hasOwnProperty.call(update, 'databaseConnectionId')
         const hasSyncInterval = Object.prototype.hasOwnProperty.call(update, 'syncIntervalSeconds')
         const { rows } = await client.query(
           `UPDATE catalog.external_sources
               SET status = coalesce($2, status),
                   connection = coalesce($3, connection),
-                  sync_interval_seconds = CASE WHEN $4 THEN $5 ELSE sync_interval_seconds END,
+                  database_connection_id = CASE WHEN $4 THEN $5 ELSE database_connection_id END,
+                  sync_interval_seconds = CASE WHEN $6 THEN $7 ELSE sync_interval_seconds END,
                   updated_at = now()
             WHERE source_key = $1
             RETURNING *`,
@@ -3664,6 +4497,8 @@ export class PostgresStore {
             update.sourceKey,
             update.status ?? null,
             update.connection ?? null,
+            hasDatabaseConnection,
+            update.databaseConnectionId ?? null,
             hasSyncInterval,
             update.syncIntervalSeconds ?? null,
           ],
@@ -4320,10 +5155,11 @@ export class PostgresStore {
       .filter(Boolean))]
     const [datasetResult, recordResult, sourceResult, chunkResult] = await Promise.all([
       this.pool.query(
-        `WITH matched_records AS (
+         `WITH matched_records AS (
            SELECT *
              FROM core.canonical_records
             WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
+               OR stable_fields #>> '{commerce,marketplace,entryId}' = $2
          ), record_stats AS (
            SELECT record.dataset_id,
                   array_agg(DISTINCT record.platform ORDER BY record.platform) AS platforms,
@@ -4355,23 +5191,33 @@ export class PostgresStore {
            FROM record_stats
            LEFT JOIN chunk_stats USING (dataset_id)
           ORDER BY record_stats.dataset_id`,
-        [matchKeys],
+        [matchKeys, entry.id],
       ),
       this.pool.query(
         `SELECT id, dataset_id, platform, object_type, content_type, external_id,
                 title, current_revision, event_time, collected_at, deleted_at
            FROM core.canonical_records
           WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
+             OR stable_fields #>> '{commerce,marketplace,entryId}' = $2
           ORDER BY coalesce(event_time, collected_at, last_seen_at, first_seen_at) DESC, id DESC
-          LIMIT $2`,
-        [matchKeys, pageSize + 1],
+          LIMIT $3`,
+        [matchKeys, entry.id, pageSize + 1],
       ),
       this.pool.query(
         `SELECT *
-           FROM catalog.external_sources
+          FROM catalog.external_sources
           WHERE lower(btrim(normalize(platform, NFKC))) = ANY($1::text[])
+             OR (
+               source_key = 'mobile-commerce-collected-items'
+               AND EXISTS (
+                 SELECT 1
+                   FROM core.canonical_records record
+                  WHERE record.deleted_at IS NULL
+                    AND record.stable_fields #>> '{commerce,marketplace,entryId}' = $2
+               )
+             )
           ORDER BY updated_at DESC, source_key`,
-        [matchKeys],
+        [matchKeys, entry.id],
       ),
       this.pool.query(
         `SELECT count(*)::integer AS chunk_count,
@@ -4381,8 +5227,11 @@ export class PostgresStore {
            FROM core.record_chunks chunk
            JOIN core.canonical_records record ON record.id = chunk.record_id
           WHERE record.deleted_at IS NULL
-            AND lower(btrim(normalize(record.platform, NFKC))) = ANY($1::text[])`,
-        [matchKeys],
+            AND (
+              lower(btrim(normalize(record.platform, NFKC))) = ANY($1::text[])
+              OR record.stable_fields #>> '{commerce,marketplace,entryId}' = $2
+            )`,
+        [matchKeys, entry.id],
       ),
     ])
     const datasets = datasetResult.rows.map(sourceCatalogRelatedDataset)
@@ -5732,10 +6581,114 @@ function externalSource(row) {
     objectType: row.object_type,
     status: row.status,
     connection: row.connection,
+    databaseConnectionId: row.database_connection_id ?? null,
     syncIntervalSeconds: row.sync_interval_seconds == null ? null : Number(row.sync_interval_seconds),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   }
+}
+
+function databaseConnection(row) {
+  return row && {
+    id: row.id,
+    key: row.connection_key,
+    displayName: row.display_name,
+    engine: row.engine,
+    connection: row.connection || {},
+    revision: Number(row.revision),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  }
+}
+
+function virtualSupermarketCategory(row) {
+  return row && {
+    id: row.id ?? row.category_id,
+    categoryKey: row.category_key,
+    displayName: row.display_name ?? row.category_display_name,
+    departmentKey: row.department_key,
+    departmentName: row.department_name,
+    departmentSortOrder: Number(row.department_sort_order || 0),
+    aisleKey: row.aisle_key,
+    aisleName: row.aisle_name,
+    aisleSortOrder: Number(row.aisle_sort_order || 0),
+    shelfKey: row.shelf_key,
+    shelfName: row.shelf_name,
+    shelfSortOrder: Number(row.shelf_sort_order || 0),
+    sortOrder: Number(row.sort_order ?? row.category_sort_order ?? 0),
+    revision: Number(row.revision ?? row.category_revision ?? 1),
+    archivedAt: iso(row.archived_at ?? row.category_archived_at),
+    createdAt: iso(row.created_at ?? row.category_created_at),
+    updatedAt: iso(row.updated_at ?? row.category_updated_at),
+  }
+}
+
+function virtualSupermarketItem(row) {
+  return row && {
+    id: row.id,
+    externalId: row.external_id,
+    title: row.title,
+    authorName: row.author_name,
+    collectedAt: iso(row.collected_at),
+    currentRevision: Number(row.current_revision || 1),
+    stableFields: row.stable_fields || {},
+    listing: {
+      explicit: row.listing_explicit === true,
+      publicationId: row.publication_id,
+      status: row.listing_status,
+      categoryId: row.listing_category_id,
+      displayTitle: row.display_title,
+      specification: row.specification,
+      priceAmount: row.price_amount == null ? null : String(row.price_amount),
+      currency: row.currency,
+      shelfPosition: row.shelf_position == null ? null : Number(row.shelf_position),
+      revision: Number(row.listing_revision || 0),
+      createdBy: row.created_by,
+      updatedBy: row.updated_by,
+      createdAt: iso(row.listing_created_at),
+      updatedAt: iso(row.listing_updated_at),
+    },
+    category: virtualSupermarketCategory({
+      ...row,
+      id: row.category_id,
+      display_name: row.category_display_name,
+      sort_order: row.category_sort_order,
+      revision: row.category_revision,
+      archived_at: row.category_archived_at,
+      created_at: row.category_created_at,
+      updated_at: row.category_updated_at,
+    }),
+  }
+}
+
+function virtualSupermarketEvent(row) {
+  return row && {
+    id: row.id,
+    aggregateType: row.aggregate_type,
+    aggregateId: row.aggregate_id,
+    eventType: row.event_type,
+    actor: row.actor,
+    fromRevision: row.from_revision == null ? null : Number(row.from_revision),
+    toRevision: Number(row.to_revision),
+    storefrontRevision: Number(row.storefront_revision),
+    reason: row.reason,
+    changes: row.changes || {},
+    createdAt: iso(row.created_at),
+  }
+}
+
+async function virtualSupermarketItemById(connection, id, { onShelfOnly = false } = {}) {
+  const { rows } = await connection.query(
+    `${VIRTUAL_SUPERMARKET_ITEM_SELECT}
+      WHERE record.id = $1::uuid
+        AND record.dataset_id = 'mobile-commerce.collected-items.v1'
+        AND record.platform = 'mobile_commerce'
+        AND record.object_type = 'commerce_capture'
+        AND record.deleted_at IS NULL
+        ${onShelfOnly ? "AND listing.status = 'on_shelf' AND category.archived_at IS NULL" : ''}`,
+    [id],
+  )
+  return virtualSupermarketItem(rows[0])
 }
 
 function sourceCatalogEntry(row) {
@@ -5875,6 +6828,7 @@ function sourceCatalogRelatedExternalSource(row) {
     platform: row.platform,
     objectType: row.object_type,
     status: row.status,
+    databaseConnectionId: row.database_connection_id ?? null,
     syncIntervalSeconds: row.sync_interval_seconds == null ? null : Number(row.sync_interval_seconds),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),

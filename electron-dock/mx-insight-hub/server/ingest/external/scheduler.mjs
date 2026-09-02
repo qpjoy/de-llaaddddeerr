@@ -17,6 +17,16 @@ import {
   provinceOpinionHanlpIssues,
   provinceOpinionSourceContractIssues,
 } from '../province/monitor-pipeline.mjs'
+import {
+  MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST,
+  MOBILE_COMMERCE_WRITER_CONTRACT_VERSION,
+} from '../mobile-commerce/pipeline.mjs'
+import {
+  MOBILE_COMMERCE_PIPELINE_KEY,
+  MOBILE_COMMERCE_SOURCE_KEY,
+  isMobileCommerceSourceKey,
+  mobileCommerceSourceContractIssues,
+} from '../mobile-commerce/source-contract.mjs'
 import { sqliteApiDailyWindowAt } from './sqlite-api-source.mjs'
 
 const TELEGRAM_SCHEDULE_ERRORS = Object.freeze({
@@ -64,6 +74,21 @@ const PROVINCE_OPINION_SCHEDULE_ERRORS = Object.freeze({
   },
 })
 
+const MOBILE_COMMERCE_SCHEDULE_ERRORS = Object.freeze({
+  unavailable: {
+    code: 'mobile_commerce_schedule_unavailable',
+    message: 'Mobile-commerce scheduling requires the PostgreSQL queue',
+  },
+  failed: {
+    code: 'mobile_commerce_schedule_failed',
+    message: 'No mobile-commerce task was scheduled',
+  },
+  outcomeUnknown: {
+    code: 'mobile_commerce_schedule_outcome_unknown',
+    message: 'The mobile-commerce scheduling outcome is unknown',
+  },
+})
+
 function isDue(source, cursor, now) {
   if (cursor && cursor.status !== 'idle') return false
   const updatedAt = cursor?.updated_at ?? cursor?.updatedAt ?? null
@@ -103,7 +128,11 @@ export async function scheduleActiveDatabaseSources({
   let enqueued = 0
   for (const source of sources) {
     if (source.sourceKind !== 'database' || source.status !== 'active') continue
-    if (isTelegramMonitorSourceKey(source.sourceKey) || isProvinceOpinionSourceKey(source.sourceKey)) continue
+    if (
+      isTelegramMonitorSourceKey(source.sourceKey)
+      || isProvinceOpinionSourceKey(source.sourceKey)
+      || isMobileCommerceSourceKey(source.sourceKey)
+    ) continue
     const cursor = await queue.getCursor(`external:${source.sourceKey}`)
     // A running continuation owns this source. Failed cursors require an
     // operator to fix/probe and explicitly resume; automatic retries would
@@ -160,6 +189,28 @@ export async function scheduleActiveDatabaseSources({
             Math.min(batchSize, PROVINCE_OPINION_SAFE_BATCH_SIZE),
           )],
           PROVINCE_OPINION_SCHEDULE_ERRORS,
+        )
+        enqueued += jobIds.filter((jobId) => jobId != null).length
+      }
+    }
+  }
+
+  const mobileCommerceSource = sources.find((source) => source.sourceKey === MOBILE_COMMERCE_SOURCE_KEY)
+  if (
+    mobileCommerceSource?.sourceKind === 'database'
+    && mobileCommerceSource.status === 'active'
+    && mobileCommerceSourceContractIssues(mobileCommerceSource).length === 0
+  ) {
+    const attestation = await store.getLatestPipelineWriterContractAttestation?.(MOBILE_COMMERCE_PIPELINE_KEY)
+    const attested = attestation?.contractVersion === MOBILE_COMMERCE_WRITER_CONTRACT_VERSION
+      && attestation?.contractDigest === MOBILE_COMMERCE_WRITER_CONTRACT_DIGEST
+    if (attested) {
+      const cursor = await queue.getCursor(`external:${MOBILE_COMMERCE_SOURCE_KEY}`)
+      if (isDue(mobileCommerceSource, cursor, now)) {
+        const jobIds = await enqueueJobsAtomically(
+          queue,
+          [scheduledJob(MOBILE_COMMERCE_SOURCE_KEY, batchSize)],
+          MOBILE_COMMERCE_SCHEDULE_ERRORS,
         )
         enqueued += jobIds.filter((jobId) => jobId != null).length
       }

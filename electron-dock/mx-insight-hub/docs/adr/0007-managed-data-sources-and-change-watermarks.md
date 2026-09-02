@@ -17,36 +17,83 @@ table can be incrementally synchronized without missing edits/deletions.
 
 ## Decision
 
-Use one explicit source resource:
+Keep the physical source as the unit of scheduling, mapping, checkpointing and
+run evidence. A database-backed source may either own a complete inline
+connection or refer to one optional shared database-connection profile:
 
 ```text
-external_source 1 ── N immutable mapping versions
-        |
-        ├── direct PostgreSQL connection or file configuration
-        ├── durable cursor / queued continuation
-        └── N import runs / rejection evidence
+database_connection_profile 1 ── N external_source 1 ── N mapping versions
+                                      |
+                                      ├── table locator and cursor contract
+                                      ├── durable cursor / queued continuation
+                                      └── N import runs / rejection evidence
+
+external_source may instead own one complete inline connection
 ```
+
+This split is an operator reuse boundary, not a return to a runtime Provider
+abstraction. It lets several tables share transport and credentials without
+sharing table identity, mapping, schedule, checkpoint or activation state.
+
+### Database-connection profile
+
+An optional `database_connection_profile` owns only allowlisted transport and
+credential fields: `host`, `port`, `database`, `username`, `password`,
+`sslMode` and narrowly reviewed transport options. It must not own `schema`,
+`table`, `idColumn`, `cursorColumn`, dataset/platform/object type, mappings,
+schedule, checkpoint or delete semantics. Those remain properties of the
+external source that consumes the profile.
+
+A database source selects exactly one connection mode: a profile reference or a
+complete inline connection. It must not partially inherit a profile and then
+override individual credentials or transport coordinates. The durable
+checkpoint contract hashes the effective non-secret connection identity,
+source locator and mapping version; passwords are excluded so a credential-only
+rotation does not invent a new physical source identity.
+
+Only the platform Admin Token can list, create, test, update or delete profiles.
+Updates use an optimistic revision fence rather than an unchecked overwrite.
+Every referring source must be paused and drained; the complete transport
+candidate receives a bounded read-only probe before the atomic profile revision
+is committed. Each source still has to pass its own table/schema/index/writer-
+contract probe before reactivation. A failed transport probe leaves the prior
+revision unchanged. A server, database or other topology-identity change
+changes the checkpoint contract and never resets a checkpoint automatically. A
+credential-only rotation may preserve that contract hash, but still uses the
+same pause, drain and probe gate.
+
+A profile cannot be deleted while any source refers to it, and deletion never
+cascades to sources, mappings, cursors or runs. Operators must first move each
+source to another complete, successfully probed connection mode. Profile
+archive/history objects and profile references from retained import-run rows are
+not part of this revision; historical non-secret execution identity remains in
+the checkpoint/run contract evidence already owned by the source.
 
 ### External source
 
 A PostgreSQL source owns its Hub dataset/platform/object type, polling policy,
-table/cursor mapping and its complete allowlisted connection:
-`host`, `port`, `database`, `username`, `password`, `sslMode`, `schema`, `table`,
-`cursorColumn` and `idColumn`. There is no separate Provider resource or
-credential master key. This keeps onboarding and changes on one Admin page.
+`schema`, `table`, `cursorColumn`, `idColumn`, mapping, checkpoint and source
+generation. Its transport/credential connection is either a reference to one
+profile revision or the existing complete inline allowlist of `host`, `port`,
+`database`, `username`, `password` and `sslMode`. The source remains the
+activation and correctness boundary even when several sources share a profile.
 
-Only the platform Admin Token can list, create, view, test or update
-these sources. Launcher-login sessions and public API keys cannot access source
-management. The password is intentionally stored as plaintext inside
-`catalog.external_sources.connection` and may be returned to that Admin-token
-surface for management. Consequently Hub database readers, base/WAL/logical
-backups and any isolated restore can recover source credentials; those assets
-must be access-controlled, encrypted in storage/transit, audited and excluded
-from logs/support bundles.
+Only the platform Admin Token can list, create, view, test or update these
+sources. Launcher-login sessions and public API keys cannot access source
+management. The password is intentionally stored as recoverable plaintext in
+either `catalog.external_sources.connection` or the protected profile record.
+Legacy inline-source inspection may return its password only to the Admin-token
+surface; profile responses expose only `passwordConfigured` and never return
+the profile password. Consequently
+Hub database readers, base/WAL/logical backups and any isolated restore can
+recover source credentials; those assets must be access-controlled, encrypted
+in storage/transit, audited and excluded from logs/support bundles.
 
 Create/update tests the complete candidate in a bounded read-only session.
-Connection coordinates can change only while that source is paused and drained.
-Activation requires an approved mapping and a successful schema/index probe.
+Inline connection coordinates can change only while that source is paused and
+drained. A shared-profile revision additionally requires every referring source
+paused and drained as described above. Activation requires an approved mapping
+and a successful source-local schema/index/writer-contract probe.
 
 `PUT {status:"paused"}` stops new scheduling immediately but does not abort a
 transaction already reading/writing a batch. That batch is allowed to commit and
@@ -56,10 +103,31 @@ connection changes, mapping approval and reactivation return
 `409 source_draining`. Operators must observe the cursor becoming idle before a
 topology or mapping change.
 
-The legacy `dsnEnv` form remains read-only compatibility for existing sources.
-New source configuration stores connection fields directly, so changing a
-password or host does not require a Hub deployment. No physical connection
-field or credential is part of a public data response.
+`syncIntervalSeconds` is scheduling policy rather than source topology. An
+interval-only update is valid while a source or fixed multi-input pipeline is
+active, running or draining and is persisted atomically for every child source.
+It never cancels current, queued or continuation work. The scheduler rereads
+the interval on its next scan and recalculates whether the source is due; a
+scan already holding the previous source snapshot may complete that one due
+decision. Requests that mix an interval with connection/profile, locator,
+mapping or checkpoint-contract changes remain subject to the pause/drain/probe
+gates above.
+
+### Evolution and compatibility
+
+The configuration has evolved from legacy `dsnEnv`, to complete inline
+connections, and now to an optional reusable connection profile. Existing
+inline sources remain valid and are not forced through a migration. The legacy
+`dsnEnv` form remains read-only compatibility for already persisted sources;
+new sources use either a profile or a complete inline connection. No physical
+connection field, profile identifier or credential is part of a public data
+response.
+
+The retired `catalog.source_providers` rows, where present in historical
+databases, remain compatibility/recovery metadata only. This decision does not
+revive them as a Provider registry, fallback chain, capability router or
+runtime dependency. The new profile has no selection, fallback or business
+routing behavior.
 
 ### Explicit source-contract preparation
 
@@ -133,7 +201,9 @@ new run before resolving that ambiguity can split lineage or acknowledge the
 wrong position and is forbidden.
 
 Source topology operations use PostgreSQL session advisory try-locks.
-Pull/reset/test/connection change share the source lock.
+Pull/reset/test/inline-connection change share the source lock. A profile
+revision uses an optimistic revision fence and takes every referring source
+lock in a stable order before validation and activation.
 A conflict returns `409 source_busy` instead of waiting behind source I/O. Reset
 still requires a paused, drained source; it atomically marks every active
 database run for that source failed with `checkpoint_reset` and stores a fresh
@@ -167,6 +237,25 @@ tie-breaker and a supporting full index. The watermark must advance for every
 insert, relevant update and soft delete. The source owner must also prove that
 commit ordering cannot place a late commit behind an already advanced cursor.
 
+The fixed `mobile-commerce.collected-items.v1` adapter has one deliberately
+narrow compatibility exception for legacy producer DDL. Under the accepted
+`mobile-commerce.writer.v3` attestation, its required `id`, `platform`, `title`
+or `collected_at` columns may still be declared nullable, but every pull batch
+must guard those writer-required values at runtime. An actual NULL fails closed
+before import or checkpoint advancement. This fixed adapter also accepts a
+`text`/`varchar` `collected_at` only when every value is exactly
+`YYYY-MM-DD HH:mm:ss`; it uses C-collation tuple ordering, treats the value as
+Asia/Shanghai local time, and rejects malformed values within the same guarded
+page statement. A ready, valid unique `id` index remains a correctness gate.
+The timestamp `(collected_at, id)` or textual
+`((collected_at COLLATE "C"), id)` composite index is a performance
+recommendation and its absence is an activation warning, not a correctness
+failure. The compatibility path can require additional source scans, so the
+producer should ultimately migrate the watermark to `timestamp without time
+zone NOT NULL` and add the timestamp composite index. This exception does not
+relax the watermark, cursor-type or supporting-index rules for generic managed
+database sources.
+
 A column named `updated_at` is evidence only after its writer behavior and index
 are verified. Event time, initial collection time and nullable edit/delete times
 are not substitutes. Where commit ordering cannot be proved, add a source
@@ -185,17 +274,24 @@ timestamp assumption.
   test, pagination/checkpoint/delete semantics and driver tests. They are not
   represented as arbitrary PostgreSQL config and are not currently advertised
   as available source types.
+- Fixed SQLite read APIs and custom HTTP adapters keep their adapter-local URL,
+  authentication, pagination, freshness and retry contracts. They are not
+  coerced into `database_connection_profile`, even when the remote service is
+  backed by SQLite or another database.
 
 ## Consequences
 
 - Operators can create/test/update each PostgreSQL source without redeploying
-  Hub; repeated tables on one database currently repeat their connection fields.
+  Hub. Repeated tables may reuse an optional connection profile while keeping
+  independent locators, mappings, correctness probes and checkpoints; complete
+  inline connections remain supported.
 - A healthy connection can coexist with a deliberately paused unsafe source.
 - PostgreSQL canonical state remains authoritative; Elasticsearch is rebuildable
   and a search outage cannot stop ingest/history.
 - Source onboarding takes an explicit schema/mapping/watermark review. This is
   intentional: silently skipped changes are more damaging than a visible paused
   source.
-- MX-H2I login/networking is outside this data-plane path. Source management is
-  restricted to Hub's Admin Token and does not alter Launcher,
-  Domestic/Internal routing, WireGuard, DNS or user connectivity.
+- MX-H2I login/networking is outside this data-plane path. Source and profile
+  management are restricted to Hub's Admin Token and do not alter Launcher
+  authentication, Domestic/Internal routing, WireGuard, DNS or user
+  connectivity.

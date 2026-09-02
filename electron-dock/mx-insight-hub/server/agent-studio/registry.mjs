@@ -6,6 +6,7 @@ export const NODE_REGISTRY_VERSION = 'mx-insight-agent-studio-p1-v1'
 const EmptyConfig = z.object({}).strict()
 const SourceInputConfig = z.object({
   sourceRef: z.enum([
+    'source://hub/mobile-commerce.collected-items.v1',
     'source://hub/public-opinion.province.v1',
     'source://planned/enterprise-registry.v1',
     'source://planned/news-feed.v1',

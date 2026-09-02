@@ -4,7 +4,7 @@ import {
   searchCapabilities,
 } from './search/profiles.mjs'
 
-export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
+export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','virtual-supermarket':'/docs/virtual-supermarket',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
 
 const PUBLIC_SEARCH_PROFILE_IDS = Object.freeze(
   searchCapabilities({ audience: 'public' }).profiles.map((profile) => profile.id),
@@ -129,6 +129,81 @@ sourceCatalogQueryParameters.push(
     schema: { type: 'string', minLength: 1, maxLength: 4096 },
   },
 )
+
+const mobileCommerceQueryParameters = [
+  {
+    name: 'sourcePlatform', in: 'query', required: false,
+    description: 'Exact raw marketplace label retained from the collector, such as 快手小店.',
+    schema: { type: 'string', minLength: 1, maxLength: 120 },
+  },
+  {
+    name: 'catalogEntryId', in: 'query', required: false,
+    description: 'Exact governed source-catalog UUID assigned by the reviewed marketplace mapping.',
+    schema: { type: 'string', format: 'uuid' },
+  },
+  ...['keyword', 'brand', 'taskId'].map((name) => ({
+    name, in: 'query', required: false,
+    description: `Exact collector ${name} label; it narrows results and does not grant access.`,
+    schema: { type: 'string', minLength: 1, maxLength: name === 'taskId' ? 120 : 240 },
+  })),
+  ...['from', 'to'].map((name) => ({
+    name, in: 'query', required: false,
+    description: `Inclusive RFC3339 collection-time ${name === 'from' ? 'lower' : 'upper'} bound with an explicit offset.`,
+    schema: { type: 'string', format: 'date-time' },
+  })),
+  {
+    name: 'refresh', in: 'query', required: false,
+    description: 'Only stored is available. Remote acquisition by the external mobile collector is reserved and never runs inside Hub.',
+    schema: { type: 'string', enum: ['stored'], default: 'stored' },
+  },
+  {
+    name: 'pageSize', in: 'query', required: false,
+    description: 'Defaults to 50; maximum 100, and the mobile_commerce policy may impose a lower limit.',
+    schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+  },
+  {
+    name: 'cursor', in: 'query', required: false,
+    description: 'HMAC-signed keyset cursor bound to all normalized filters and pageSize.',
+    schema: { type: 'string', minLength: 1, maxLength: 2048 },
+  },
+]
+
+const virtualSupermarketQueryParameters = [
+  {
+    name: 'categoryId', in: 'query', required: false,
+    description: 'Exact active virtual-supermarket category UUID returned by metadata.',
+    schema: { type: 'string', format: 'uuid' },
+  },
+  ...['department', 'aisle', 'shelf'].map((name) => ({
+    name, in: 'query', required: false,
+    description: `Exact semantic ${name} key returned by virtual-supermarket metadata.`,
+    schema: { type: 'string', minLength: 1, maxLength: 128 },
+  })),
+  {
+    name: 'marketplace', in: 'query', required: false,
+    description: 'Exact customer-safe marketplace display value.',
+    schema: { type: 'string', minLength: 1, maxLength: 160 },
+  },
+  {
+    name: 'query', in: 'query', required: false,
+    description: 'Customer-safe product text search. Required on the dedicated search route.',
+    schema: { type: 'string', minLength: 1, maxLength: 240 },
+  },
+  {
+    name: 'sort', in: 'query', required: false,
+    schema: { type: 'string', enum: ['newest', 'title_asc', 'price_asc', 'price_desc'], default: 'newest' },
+  },
+  {
+    name: 'pageSize', in: 'query', required: false,
+    description: 'Defaults to 24; maximum 100, and the virtual_supermarket policy may impose a lower limit.',
+    schema: { type: 'integer', minimum: 1, maximum: 100, default: 24 },
+  },
+  {
+    name: 'cursor', in: 'query', required: false,
+    description: 'Opaque signed cursor bound to every normalized filter, sort, pageSize and storefrontRevision.',
+    schema: { type: 'string', minLength: 1, maxLength: 2048 },
+  },
+]
 
 const publicOpinionDiagnosticsWindowParameters = [
   {
@@ -460,6 +535,15 @@ const canonicalContextResponse = {
   },
 }
 
+const canonicalTimelineResponse = {
+  description: 'One ascending initial or directional page from a stored Telegram message timeline.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/CanonicalTimelineEnvelope' },
+    },
+  },
+}
+
 const publicOpinionPageResponse = {
   description: 'A customer-safe page of canonical public-opinion items for one normalized province.',
   content: {
@@ -505,6 +589,42 @@ const publicOpinionRegionFeedResponse = {
   },
 }
 
+const mobileCommercePageResponse = {
+  description: 'A customer-safe stored page of mobile-commerce captures.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/MobileCommercePageEnvelope' },
+    },
+  },
+}
+
+const virtualSupermarketMetadataResponse = {
+  description: 'Customer-safe semantic storefront metadata for all three render modes.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/VirtualSupermarketMetadataEnvelope' },
+    },
+  },
+}
+
+const virtualSupermarketPageResponse = {
+  description: 'One on-shelf-only page from a single virtual-supermarket storefront revision.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/VirtualSupermarketPageEnvelope' },
+    },
+  },
+}
+
+const virtualSupermarketDetailResponse = {
+  description: 'One on-shelf customer-safe virtual-supermarket product.',
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/VirtualSupermarketDetailEnvelope' },
+    },
+  },
+}
+
 export const PUBLIC_OPENAPI_DOCUMENT = {
   openapi: '3.1.0',
   info: {
@@ -519,6 +639,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
   tags: [
     { name: 'Discovery', description: 'Discover the caller\'s granted platform capabilities.' },
     { name: 'Source Catalog', description: 'Reconstruct the active governed source catalog, filters, taxonomy, owners and status summary.' },
+    { name: 'Mobile Commerce', description: 'Read stored mobile-collector commerce captures and their governed source-catalog classification.' },
+    { name: 'Virtual Supermarket', description: 'Reconstruct the on-shelf Hub storefront using semantic department, aisle, shelf and position data.' },
     { name: 'Search', description: 'Idempotent content search.' },
     { name: 'Compatibility', description: 'Temporary Night-All legacy routes with durable Hub evidence and exact last-good fallback.' },
     { name: 'Tools', description: 'Granted platform-independent processing capabilities.' },
@@ -539,7 +661,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Discovery'],
         operationId: 'listPublicCapabilities',
         summary: 'List capabilities granted to the authenticated consumer',
-        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. Telegram message context is advertised per dataset under platform.context; context.ready is an index-serving gate and is independent from the broader Telegram platform ready flag. For public_opinion, ready requires both an active fixed ingest source and both valid Hub serving indexes; it is not another grant or a freshness guarantee, and a paused source may still have indexed rows. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for the three Night-All compatibility operations: it is compiled into the deployed Hub contract rather than discovered from Night-All at request time. A platform must appear in both supportedPlatforms and readyPlatforms before dispatch. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for Night-All compatibility; compatibility calls then fail closed.',
+        description: 'Use this response to decide which platform operations and generic capabilities the current API key may call. data.platforms describes granted Hub data surfaces. Telegram bounded message context and bidirectional live-keyset timeline are advertised per dataset under platform.context and platform.timeline; their ready flags are index-serving gates independent from the broader Telegram platform ready flag. For public_opinion, ready requires both an active fixed ingest source and both valid Hub serving indexes; it is not another grant or a freshness guarantee, and a paused source may still have indexed rows. The independent data.legacySearch value is the Hub-pinned, grant-filtered dispatch matrix for the three Night-All compatibility operations: it is compiled into the deployed Hub contract rather than discovered from Night-All at request time. A platform must appear in both supportedPlatforms and readyPlatforms before dispatch. In this pinned contract, readyPlatforms means Hub dispatch eligibility; it does not prove current Night-All handler, endpoint, provider, credential, or upstream health. legacySearch is null when the consumer has no granted platform eligible for Night-All compatibility; compatibility calls then fail closed.',
         responses: {
           200: {
             description: 'Granted public capabilities.',
@@ -552,7 +674,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                       {
                         platform: 'telegram',
                         ready: true,
-                        capabilities: ['monitor_chats', 'monitor_messages', 'sqlite_chats', 'sqlite_messages', 'multi_source_conversations', 'conversation_filter', 'stored_search', 'entity_search', 'message_context'],
+                        capabilities: ['monitor_chats', 'monitor_messages', 'sqlite_chats', 'sqlite_messages', 'multi_source_conversations', 'conversation_filter', 'stored_search', 'entity_search', 'message_context', 'message_timeline'],
                         source: 'hub',
                         servingMode: 'stored',
                         context: {
@@ -562,6 +684,32 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                           defaultAfter: 10,
                           maxBefore: 50,
                           maxAfter: 50,
+                          datasets: [
+                            {
+                              datasetId: 'telegram.monitor.messages.v1',
+                              objectType: 'message',
+                              streamType: 'chat',
+                              ordering: ['eventTime', 'canonicalId'],
+                              upstreamCompleteness: { status: 'unknown', basis: null, through: null },
+                            },
+                            {
+                              datasetId: 'telegram.sqlite.messages.v1',
+                              objectType: 'message',
+                              streamType: 'chat',
+                              ordering: ['eventTime', 'canonicalId'],
+                              upstreamCompleteness: { status: 'bounded', basis: 'append_only_overlap', through: null },
+                            },
+                          ],
+                        },
+                        timeline: {
+                          contractVersion: 'mx-insight-hub.canonical-timeline.v1',
+                          ready: true,
+                          consistency: 'live-keyset',
+                          defaultBefore: 10,
+                          defaultAfter: 10,
+                          maxBefore: 50,
+                          maxAfter: 50,
+                          cursor: { opaque: true, directions: ['older', 'newer'], newerPolling: true },
                           datasets: [
                             {
                               datasetId: 'telegram.monitor.messages.v1',
@@ -599,6 +747,17 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         platform: 'source_catalog',
                         ready: true,
                         capabilities: ['catalog_entries', 'catalog_metadata', 'catalog_detail', 'filtered_browse'],
+                        source: 'hub',
+                        servingMode: 'stored',
+                      },
+                      {
+                        platform: 'virtual_supermarket',
+                        ready: true,
+                        capabilities: [
+                          'metadata', 'products', 'product_detail', 'stored_search',
+                          'category_filter', 'department_filter', 'aisle_filter',
+                          'shelf_filter', 'marketplace_filter',
+                        ],
                         source: 'hub',
                         servingMode: 'stored',
                       },
@@ -803,6 +962,147 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         responses: { 200: canonicalContextResponse, ...canonicalContextErrors },
       },
     },
+    '/data/canonical/items/{id}/timeline': {
+      get: {
+        tags: ['Search', 'Telegram'],
+        operationId: 'getCanonicalMessageTimeline',
+        summary: 'Read and continue a bidirectional stored-message timeline',
+        description: 'Requires the telegram platform grant. On the initial call, omit cursor and request independent before and after windows; each defaults to 10, accepts 0..50 and is also constrained by the grant page-size limit. Zero suppresses that side on the initial page; any returned continuation cursor for a zero-sized side uses the default page size constrained by the current grant limit. A continuation call sends only one opaque cursor returned in pageInfo.older.cursor or pageInfo.newer.cursor and must omit before and after. Direction is signed inside the timeline cursor; search, history and timeline cursors are not interchangeable. Every page is ordered ascending by (eventTime, canonicalId); eventTime preserves the exact six-digit UTC microsecond value used by ordering and cursor boundaries. The cursor remains bound to the original anchor, dataset, normalized chat stream, page size, authorization scope and contract version, and never crosses Monitor/SQLite datasets or chats. The implementation uses live keyset consistency rather than a frozen snapshot: concurrent writes, late arrivals and deletes can affect boundary-external rows not yet read. pageInfo hasMore describes only active messages currently stored in Hub, not upstream completeness. The route never invokes Telegram or another upstream collector and does not provide a changes feed. Current support is limited to the two datasets advertised by the Telegram timeline capability. Raw rows, extensions, source credentials and internal lineage remain private. This safe GET is metered on every call and retry.',
+        'x-mx-allowed-query-fields': ['before', 'after', 'cursor'],
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          404: ['item_not_found'],
+          409: ['context_not_supported'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable', 'serving_indexes_unavailable'],
+        },
+        parameters: [
+          {
+            name: 'id', in: 'path', required: true,
+            description: 'Original Hub canonical message UUID. It remains path-bound on continuation calls.',
+            schema: { type: 'string', format: 'uuid' },
+          },
+          {
+            name: 'before', in: 'query', required: false,
+            description: 'Initial call only: nearest stored messages before the anchor. Defaults to 10; 0..50 and the grant page-size limit apply. Zero omits older rows from the initial page; a returned older cursor uses the constrained default page size.',
+            schema: { type: 'integer', minimum: 0, maximum: 50, default: 10 },
+          },
+          {
+            name: 'after', in: 'query', required: false,
+            description: 'Initial call only: nearest stored messages after the anchor. Defaults to 10; 0..50 and the grant page-size limit apply. Zero omits newer rows from the initial page; the pollable newer cursor uses the constrained default page size.',
+            schema: { type: 'integer', minimum: 0, maximum: 50, default: 10 },
+          },
+          {
+            name: 'cursor', in: 'query', required: false,
+            description: 'Continuation call only: return exactly one opaque timeline cursor unchanged. It embeds older/newer direction and cannot be combined with before or after.',
+            schema: { type: 'string', minLength: 1, maxLength: 2048 },
+          },
+        ],
+        responses: { 200: canonicalTimelineResponse, ...canonicalContextErrors },
+      },
+    },
+    '/data/mobile-commerce/items': {
+      get: {
+        tags: ['Mobile Commerce'],
+        operationId: 'listMobileCommerceItems',
+        summary: 'List stored mobile-commerce captures',
+        description: 'Requires the mobile_commerce platform grant. Reads only committed Hub canonical data and never invokes a marketplace or mobile collector. Every ingested row follows the normal canonical outbox and Elasticsearch projection path, so canonical search can query the same dataset. The top-level authorization platform is mobile_commerce; the real marketplace is a governed source-catalog facet. id identifies a capture row, goodsId is optional product identity, collectedAt is Asia/Shanghai-normalized collection time, and share payloads remain text rather than verified URLs. Raw rows, arbitrary metadata, device/report fields, credentials and operational lineage are excluded. refresh currently accepts only stored; future acquisition will be an asynchronous command executed by an external mobile-collector machine, with Hub limited to trigger/status/data APIs.',
+        'x-mx-allowed-query-fields': mobileCommerceQueryParameters.map(({ name }) => name),
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          409: ['remote_fetch_unavailable'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: mobileCommerceQueryParameters,
+        responses: { 200: mobileCommercePageResponse, ...publicErrors },
+      },
+    },
+    '/data/virtual-supermarket/metadata': {
+      get: {
+        tags: ['Virtual Supermarket'],
+        operationId: 'getVirtualSupermarketMetadata',
+        summary: 'Read the semantic virtual-supermarket storefront model',
+        description: 'Requires the independent virtual_supermarket platform grant. Returns the same ordered department, aisle, shelf and category semantics used by guided browse, panorama and catalog modes. Panorama is a client renderer; this response never exposes WebGL coordinates, camera, mesh, material, lighting or other renderer state. storefrontRevision identifies the complete current publication surface. The response does not expose capture rows, task/run data, source connections, management state or credentials.',
+        'x-mx-allowed-query-fields': [],
+        'x-mx-error-codes': {
+          400: ['unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: [],
+        responses: { 200: virtualSupermarketMetadataResponse, ...publicErrors },
+      },
+    },
+    '/data/virtual-supermarket/products': {
+      get: {
+        tags: ['Virtual Supermarket'],
+        operationId: 'listVirtualSupermarketProducts',
+        summary: 'Browse on-shelf virtual-supermarket products',
+        description: 'Requires the independent virtual_supermarket platform grant. Returns only explicitly published on-shelf Hub publication overlays with independent publication UUIDs; capture/canonical row IDs are never exposed or accepted as product IDs. unpublishing never deletes the referenced canonical capture. placement contains semantic department/aisle/shelf/position values rather than renderer coordinates. sort defaults to newest; v1 has no server-side merchandising sort. The signed cursor is bound to all filters, sort, pageSize and storefrontRevision. A revision change returns storefront_revision_changed instead of silently combining snapshots. Raw captures, task/run/campaign data, share payloads, arbitrary metadata, device/report fields, management actors and physical storage/search controls are excluded.',
+        'x-mx-allowed-query-fields': virtualSupermarketQueryParameters.map(({ name }) => name),
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          409: ['storefront_revision_changed'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: virtualSupermarketQueryParameters,
+        responses: { 200: virtualSupermarketPageResponse, ...publicErrors },
+      },
+    },
+    '/data/virtual-supermarket/products/{id}': {
+      get: {
+        tags: ['Virtual Supermarket'],
+        operationId: 'getVirtualSupermarketProduct',
+        summary: 'Read one on-shelf virtual-supermarket product',
+        description: 'Requires the independent virtual_supermarket platform grant. The path UUID is the independent Hub publication UUID returned by product list or search, never a mobile-commerce capture/canonical row ID. Unknown, off-shelf and archived publications all return the same not-found error and do not reveal internal state. The response uses the same customer-safe product allowlist as list/search and includes the current storefrontRevision.',
+        'x-mx-allowed-query-fields': [],
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          404: ['virtual_supermarket_product_not_found'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: [{
+          name: 'id', in: 'path', required: true,
+          description: 'Exact Hub publication UUID returned by product browse or search.',
+          schema: { type: 'string', format: 'uuid' },
+        }],
+        responses: { 200: virtualSupermarketDetailResponse, ...publicErrors },
+      },
+    },
+    '/data/virtual-supermarket/search': {
+      get: {
+        tags: ['Virtual Supermarket'],
+        operationId: 'searchVirtualSupermarketProducts',
+        summary: 'Search on-shelf virtual-supermarket products',
+        description: 'Requires the independent virtual_supermarket platform grant and a non-blank query. Returns the same on-shelf product projection and cursor/revision semantics as browse. The caller cannot select an Elasticsearch index, field, analyzer, DSL, script or boost. Every GET and retry is separately metered.',
+        'x-mx-allowed-query-fields': virtualSupermarketQueryParameters.map(({ name }) => name),
+        'x-mx-error-codes': {
+          400: ['invalid_request', 'invalid_cursor', 'page_size_exceeded', 'unsupported_fields'],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          409: ['storefront_revision_changed'],
+          429: ['quota_exceeded'],
+          503: ['stored_data_unavailable'],
+        },
+        parameters: virtualSupermarketQueryParameters.map((parameter) => (
+          parameter.name === 'query' ? { ...parameter, required: true } : parameter
+        )),
+        responses: { 200: virtualSupermarketPageResponse, ...publicErrors },
+      },
+    },
     '/data/source-catalog': {
       get: {
         tags: ['Source Catalog'],
@@ -868,6 +1168,32 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           404: errorResponse,
           429: errorResponse,
           503: errorResponse,
+        },
+      },
+    },
+    '/data/source-catalog/{id}/items': {
+      get: {
+        tags: ['Source Catalog', 'Mobile Commerce'],
+        operationId: 'listSourceCatalogItems',
+        summary: 'List stored data classified under one source-catalog entry',
+        description: 'Requires both source_catalog and mobile_commerce platform grants. The path UUID is the governed classification boundary and is injected into the query; catalogEntryId is therefore not accepted as a query field. P1 dispatches to the mobile-commerce stored data product. It returns the safe active catalog entry plus captures whose reviewed stable marketplace facet references that exact entry. The route does not infer from titles and does not trigger remote acquisition. Future data products may extend this catalog-driven surface under a new contract version.',
+        'x-mx-allowed-query-fields': mobileCommerceQueryParameters
+          .filter(({ name }) => name !== 'catalogEntryId')
+          .map(({ name }) => name),
+        parameters: [
+          {
+            name: 'id', in: 'path', required: true,
+            description: 'Exact active source-catalog UUID returned by the list route.',
+            schema: { type: 'string', format: 'uuid' },
+          },
+          ...mobileCommerceQueryParameters.filter(({ name }) => name !== 'catalogEntryId'),
+        ],
+        responses: {
+          200: {
+            description: 'One catalog entry and its stored mobile-commerce data page.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/SourceCatalogItemsEnvelope' } } },
+          },
+          ...publicErrors,
         },
       },
     },
@@ -1797,6 +2123,33 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
         },
       },
+      CanonicalTimelineCapability: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['contractVersion', 'ready', 'consistency', 'defaultBefore', 'defaultAfter', 'maxBefore', 'maxAfter', 'cursor', 'datasets'],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.canonical-timeline.v1' },
+          ready: { type: 'boolean', description: 'True only while every serving index required by the advertised dataset set is valid and ready.' },
+          consistency: { type: 'string', const: 'live-keyset' },
+          defaultBefore: { type: 'integer', const: 10 },
+          defaultAfter: { type: 'integer', const: 10 },
+          maxBefore: { type: 'integer', const: 50 },
+          maxAfter: { type: 'integer', const: 50 },
+          cursor: {
+            type: 'object', additionalProperties: false,
+            required: ['opaque', 'directions', 'newerPolling'],
+            properties: {
+              opaque: { type: 'boolean', const: true },
+              directions: { type: 'array', const: ['older', 'newer'] },
+              newerPolling: { type: 'boolean', const: true },
+            },
+          },
+          datasets: {
+            type: 'array', minItems: 1,
+            items: { $ref: '#/components/schemas/CanonicalContextCapabilityDataset' },
+          },
+        },
+      },
       CanonicalContextEnvelope: {
         type: 'object',
         additionalProperties: false,
@@ -1863,6 +2216,519 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             },
           },
           requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      CanonicalTimelineDirectionPage: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['hasMore', 'cursor'],
+        description: 'One continuation direction. An exhausted older side has cursor=null. The newer cursor is retained when hasMore=false. It advances to the newest returned item when a page is non-empty and remains unchanged on an empty page, so the client can poll for later stored writes.',
+        properties: {
+          hasMore: { type: 'boolean', description: 'Whether another active Hub-stored row is currently known beyond this page.' },
+          cursor: {
+            type: ['string', 'null'], minLength: 1, maxLength: 2048,
+            description: 'Opaque HMAC timeline cursor. Return unchanged; do not decode, construct or use as a search/history cursor.',
+          },
+        },
+      },
+      CanonicalTimelinePageInfo: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['mode', 'direction', 'returnedCount', 'older', 'newer'],
+        properties: {
+          mode: { type: 'string', enum: ['initial', 'continuation'] },
+          direction: { type: ['string', 'null'], enum: [null, 'older', 'newer'] },
+          returnedCount: { type: 'integer', minimum: 0, maximum: 101 },
+          older: {
+            oneOf: [
+              { $ref: '#/components/schemas/CanonicalTimelineDirectionPage' },
+              { type: 'null' },
+            ],
+          },
+          newer: {
+            oneOf: [
+              { $ref: '#/components/schemas/CanonicalTimelineDirectionPage' },
+              { type: 'null' },
+            ],
+          },
+        },
+      },
+      CanonicalTimelineEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['contractVersion', 'consistency', 'source', 'anchorId', 'anchorIndex', 'stream', 'items', 'pageInfo', 'ordering', 'upstreamCompleteness', 'warnings'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.canonical-timeline.v1' },
+              consistency: {
+                type: 'string', const: 'live-keyset',
+                description: 'Pages use exclusive live keyset boundaries, not a frozen snapshot or changes-feed revision.',
+              },
+              source: { type: 'string', const: 'hub' },
+              anchorId: { type: 'string', format: 'uuid' },
+              anchorIndex: {
+                type: ['integer', 'null'], minimum: 0, maximum: 50,
+                description: 'Index of anchorId on the initial page; null on continuation pages.',
+              },
+              stream: {
+                type: 'object', additionalProperties: false,
+                required: ['platform', 'datasetId', 'objectType', 'type', 'id'],
+                properties: {
+                  platform: { type: 'string', const: 'telegram' },
+                  datasetId: { type: 'string' },
+                  objectType: { type: 'string', const: 'message' },
+                  type: { type: 'string', const: 'chat' },
+                  id: { type: 'string', minLength: 1, maxLength: 256 },
+                },
+              },
+              items: {
+                type: 'array', minItems: 0, maxItems: 101,
+                description: 'Ascending safe stored-message projection. eventTime preserves the six-digit UTC microsecond value used by timeline ordering and cursor boundaries. Initial items[anchorIndex].id equals anchorId; a continuation may be empty.',
+                items: { $ref: '#/components/schemas/StoredSearchItem' },
+              },
+              pageInfo: { $ref: '#/components/schemas/CanonicalTimelinePageInfo' },
+              ordering: {
+                type: 'object', additionalProperties: false,
+                required: ['fields', 'direction', 'quality'],
+                properties: {
+                  fields: { type: 'array', const: ['eventTime', 'canonicalId'] },
+                  direction: { type: 'string', const: 'ascending' },
+                  quality: { type: 'string', const: 'deterministic' },
+                },
+              },
+              upstreamCompleteness: { $ref: '#/components/schemas/CanonicalContextCompleteness' },
+              warnings: {
+                type: 'array', maxItems: 1,
+                items: {
+                  type: 'object', additionalProperties: false, required: ['code', 'message'],
+                  properties: {
+                    code: { type: 'string', enum: ['upstream_completeness_unknown', 'upstream_completeness_bounded'] },
+                    message: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      MobileCommerceMarketplace: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'sourceValue', 'mappingStatus', 'catalogEntryId', 'catalogSourceKey',
+          'catalogRevision', 'canonicalName', 'majorCategory', 'scenarios', 'regions',
+        ],
+        properties: {
+          sourceValue: { type: ['string', 'null'] },
+          mappingStatus: { type: 'string', enum: ['mapped', 'unmapped'] },
+          catalogEntryId: { type: ['string', 'null'], format: 'uuid' },
+          catalogSourceKey: { type: ['string', 'null'] },
+          catalogRevision: { type: ['integer', 'null'], minimum: 1 },
+          canonicalName: { type: ['string', 'null'] },
+          majorCategory: { type: ['string', 'null'] },
+          scenarios: { type: 'array', items: { type: 'string' } },
+          regions: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      MobileCommerceItem: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'captureId', 'dataVersion', 'marketplace', 'task', 'product', 'shop', 'signals', 'collectedAt'],
+        properties: {
+          id: {
+            type: 'string',
+            format: 'uuid',
+          },
+          captureId: { type: ['string', 'null'] },
+          dataVersion: { type: 'string' },
+          marketplace: { $ref: '#/components/schemas/MobileCommerceMarketplace' },
+          task: {
+            type: 'object', additionalProperties: false,
+            required: ['id', 'keyword', 'sourceBrandLabel'],
+            properties: {
+              id: { type: ['string', 'null'] },
+              keyword: { type: ['string', 'null'] },
+              sourceBrandLabel: { type: ['string', 'null'] },
+            },
+          },
+          product: {
+            type: 'object', additionalProperties: false,
+            required: ['goodsId', 'title', 'price', 'resolution'],
+            properties: {
+              goodsId: { type: ['string', 'null'] },
+              title: { type: ['string', 'null'] },
+              price: { type: ['string', 'null'] },
+              resolution: { type: 'string', enum: ['source-goods-id', 'capture-only'] },
+            },
+          },
+          shop: {
+            type: 'object', additionalProperties: false,
+            required: ['id', 'name', 'level', 'fans', 'reputation'],
+            properties: Object.fromEntries(
+              ['id', 'name', 'level', 'fans', 'reputation']
+                .map((field) => [field, { type: ['string', 'null'] }]),
+            ),
+          },
+          signals: {
+            type: 'object', additionalProperties: false,
+            required: ['sales', 'shipFrom', 'commentCount', 'goodRate', 'tagsText'],
+            properties: Object.fromEntries(
+              ['sales', 'shipFrom', 'commentCount', 'goodRate', 'tagsText']
+                .map((field) => [field, { type: ['string', 'null'] }]),
+            ),
+          },
+          collectedAt: { type: ['string', 'null'], format: 'date-time' },
+        },
+      },
+      MobileCommercePage: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['contractVersion', 'sourceMode', 'acquisition', 'scope', 'filters', 'items', 'pageInfo'],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.mobile-commerce-items.v1' },
+          sourceMode: { type: 'string', const: 'stored' },
+          acquisition: {
+            type: 'object', additionalProperties: false,
+            required: ['remoteFetchAvailable', 'remoteFetchStatus', 'executionPlane', 'hubRole', 'plannedMode'],
+            properties: {
+              remoteFetchAvailable: { type: 'boolean', const: false },
+              remoteFetchStatus: { type: 'string', const: 'reserved' },
+              executionPlane: { type: 'string', const: 'external-mobile-collector' },
+              hubRole: { type: 'string', const: 'asynchronous-trigger-and-data-api' },
+              plannedMode: { type: 'string', const: 'asynchronous-command' },
+            },
+          },
+          scope: {
+            type: 'object', additionalProperties: false,
+            required: ['authorizationPlatform', 'datasetId', 'objectType'],
+            properties: {
+              authorizationPlatform: { type: 'string', const: 'mobile_commerce' },
+              datasetId: { type: 'string', const: 'mobile-commerce.collected-items.v1' },
+              objectType: { type: 'string', const: 'commerce_capture' },
+            },
+          },
+          filters: {
+            type: 'object', additionalProperties: false,
+            required: ['sourcePlatform', 'catalogEntryId', 'keyword', 'brand', 'taskId', 'from', 'to'],
+            properties: {
+              sourcePlatform: { type: ['string', 'null'] },
+              catalogEntryId: { type: ['string', 'null'], format: 'uuid' },
+              keyword: { type: ['string', 'null'] },
+              brand: { type: ['string', 'null'] },
+              taskId: { type: ['string', 'null'] },
+              from: { type: ['string', 'null'], format: 'date-time' },
+              to: { type: ['string', 'null'], format: 'date-time' },
+            },
+          },
+          items: { type: 'array', maxItems: 100, items: { $ref: '#/components/schemas/MobileCommerceItem' } },
+          pageInfo: {
+            type: 'object', additionalProperties: false,
+            required: ['returnedCount', 'hasMore', 'nextCursor'],
+            properties: {
+              returnedCount: { type: 'integer', minimum: 0, maximum: 100 },
+              hasMore: { type: 'boolean' },
+              nextCursor: { type: ['string', 'null'], maxLength: 2048 },
+            },
+          },
+        },
+      },
+      MobileCommercePageEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: { $ref: '#/components/schemas/MobileCommercePage' },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      VirtualSupermarketPlacementPart: {
+        type: 'object', additionalProperties: false,
+        required: ['key', 'name', 'sortOrder'],
+        properties: {
+          key: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 160 },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+        },
+      },
+      VirtualSupermarketCategory: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'key', 'name', 'sortOrder', 'department', 'aisle', 'shelf', 'revision', 'updatedAt'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          key: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 160 },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+          department: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+          aisle: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+          shelf: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+          revision: { type: 'integer', minimum: 1 },
+          updatedAt: { type: ['string', 'null'], format: 'date-time' },
+        },
+      },
+      VirtualSupermarketShelf: {
+        type: 'object', additionalProperties: false,
+        required: ['key', 'name', 'sortOrder', 'categories'],
+        properties: {
+          key: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 160 },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+          categories: {
+            type: 'array',
+            items: {
+              type: 'object', additionalProperties: false,
+              required: ['id', 'key', 'name', 'sortOrder'],
+              properties: {
+                id: { type: 'string', format: 'uuid' },
+                key: { type: 'string', minLength: 1, maxLength: 128 },
+                name: { type: 'string', minLength: 1, maxLength: 160 },
+                sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+              },
+            },
+          },
+        },
+      },
+      VirtualSupermarketAisle: {
+        type: 'object', additionalProperties: false,
+        required: ['key', 'name', 'sortOrder', 'shelves'],
+        properties: {
+          key: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 160 },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+          shelves: { type: 'array', items: { $ref: '#/components/schemas/VirtualSupermarketShelf' } },
+        },
+      },
+      VirtualSupermarketDepartment: {
+        type: 'object', additionalProperties: false,
+        required: ['key', 'name', 'sortOrder', 'aisles'],
+        properties: {
+          key: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 160 },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+          aisles: { type: 'array', items: { $ref: '#/components/schemas/VirtualSupermarketAisle' } },
+        },
+      },
+      VirtualSupermarketMetadata: {
+        type: 'object', additionalProperties: false,
+        required: [
+          'contractVersion', 'platform', 'sourceMode', 'storefrontRevision',
+          'catalogRevision', 'categories', 'departments', 'supportedSorts',
+        ],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.virtual-supermarket.v1' },
+          platform: { type: 'string', const: 'virtual_supermarket' },
+          sourceMode: { type: 'string', const: 'stored' },
+          storefrontRevision: { type: 'integer', minimum: 1 },
+          catalogRevision: { type: 'string', pattern: '^sha256:[0-9a-f]{64}$' },
+          categories: { type: 'array', items: { $ref: '#/components/schemas/VirtualSupermarketCategory' } },
+          departments: { type: 'array', items: { $ref: '#/components/schemas/VirtualSupermarketDepartment' } },
+          supportedSorts: {
+            type: 'array', const: ['newest', 'title_asc', 'price_asc', 'price_desc'],
+          },
+        },
+      },
+      VirtualSupermarketMetadataEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: { $ref: '#/components/schemas/VirtualSupermarketMetadata' },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      VirtualSupermarketMarketplace: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'name'],
+        properties: {
+          id: {
+            type: ['string', 'null'],
+            format: 'uuid',
+            description: 'Reviewed public marketplace-directory UUID, or null when no approved mapping exists.',
+          },
+          name: {
+            type: ['string', 'null'],
+            description: 'Reviewed public marketplace name, or null when no approved mapping exists.',
+          },
+        },
+      },
+      VirtualSupermarketPrice: {
+        type: 'object', additionalProperties: false,
+        required: ['amount', 'currency', 'display', 'provenance'],
+        properties: {
+          amount: {
+            type: ['string', 'null'],
+            pattern: '^(?:0|[1-9]\\d{0,17})(?:\\.\\d{1,2})?$',
+            description: 'Normalized decimal amount when the source or curated override is valid.',
+          },
+          currency: {
+            type: ['string', 'null'],
+            pattern: '^[A-Z]{3}$',
+            description: 'Reviewed ISO currency for a curated override. Source prices keep null because the fixed source has no currency field.',
+          },
+          display: {
+            type: ['string', 'null'],
+            description: 'Normalized customer-facing amount text; raw structured source evidence is never returned here and it does not imply a currency.',
+          },
+          provenance: { type: 'string', enum: ['curated', 'source', 'missing'] },
+        },
+      },
+      VirtualSupermarketProduct: {
+        type: 'object', additionalProperties: false,
+        required: [
+          'id', 'dataVersion', 'listing', 'placement', 'category', 'marketplace',
+          'product', 'shop', 'signals', 'collectedAt',
+        ],
+        properties: {
+          id: {
+            type: 'string',
+            format: 'uuid',
+            description: 'Stable Hub publication UUID; independently allocated and never the mobile-commerce capture/canonical row UUID.',
+          },
+          dataVersion: { type: 'string', pattern: '^\\d+:\\d+$' },
+          listing: {
+            type: 'object', additionalProperties: false,
+            required: ['status', 'revision'],
+            properties: {
+              status: { type: 'string', const: 'on_shelf' },
+              revision: { type: 'integer', minimum: 1 },
+            },
+          },
+          placement: {
+            type: 'object', additionalProperties: false,
+            required: ['department', 'aisle', 'shelf', 'position'],
+            properties: {
+              department: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+              aisle: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+              shelf: { $ref: '#/components/schemas/VirtualSupermarketPlacementPart' },
+              position: { type: ['integer', 'null'], minimum: 0, maximum: 1_000_000 },
+            },
+          },
+          category: {
+            type: 'object', additionalProperties: false,
+            required: ['id', 'key', 'name', 'sortOrder'],
+            properties: {
+              id: { type: 'string', format: 'uuid' },
+              key: { type: 'string', minLength: 1, maxLength: 128 },
+              name: { type: 'string', minLength: 1, maxLength: 160 },
+              sortOrder: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+            },
+          },
+          marketplace: { $ref: '#/components/schemas/VirtualSupermarketMarketplace' },
+          product: {
+            type: 'object', additionalProperties: false,
+            required: ['title', 'specification', 'price', 'provenance'],
+            properties: {
+              title: { type: ['string', 'null'] },
+              specification: { type: ['string', 'null'] },
+              price: { $ref: '#/components/schemas/VirtualSupermarketPrice' },
+              provenance: {
+                type: 'object', additionalProperties: false,
+                required: ['title', 'specification', 'price'],
+                properties: {
+                  title: { type: 'string', enum: ['curated', 'source', 'missing'] },
+                  specification: { type: 'string', enum: ['curated', 'missing'] },
+                  price: { type: 'string', enum: ['curated', 'source', 'missing'] },
+                },
+              },
+            },
+          },
+          shop: {
+            type: 'object', additionalProperties: false,
+            required: ['name'],
+            properties: {
+              name: { type: ['string', 'null'] },
+            },
+          },
+          signals: {
+            type: 'object', additionalProperties: false,
+            required: ['sales'],
+            properties: { sales: { type: ['string', 'null'] } },
+          },
+          collectedAt: { type: ['string', 'null'], format: 'date-time' },
+        },
+      },
+      VirtualSupermarketFilters: {
+        type: 'object', additionalProperties: false,
+        required: ['status', 'categoryId', 'department', 'aisle', 'shelf', 'marketplace', 'query', 'sort'],
+        properties: {
+          status: { type: 'string', const: 'on_shelf' },
+          categoryId: { type: ['string', 'null'], format: 'uuid' },
+          department: { type: ['string', 'null'], maxLength: 128 },
+          aisle: { type: ['string', 'null'], maxLength: 128 },
+          shelf: { type: ['string', 'null'], maxLength: 128 },
+          marketplace: { type: ['string', 'null'], maxLength: 160 },
+          query: { type: ['string', 'null'], maxLength: 240 },
+          sort: { type: 'string', enum: ['newest', 'title_asc', 'price_asc', 'price_desc'] },
+        },
+      },
+      VirtualSupermarketPage: {
+        type: 'object', additionalProperties: false,
+        required: [
+          'contractVersion', 'platform', 'sourceMode', 'storefrontRevision',
+          'filters', 'items', 'pageInfo',
+        ],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.virtual-supermarket.v1' },
+          platform: { type: 'string', const: 'virtual_supermarket' },
+          sourceMode: { type: 'string', const: 'stored' },
+          storefrontRevision: { type: 'integer', minimum: 1 },
+          filters: { $ref: '#/components/schemas/VirtualSupermarketFilters' },
+          items: { type: 'array', maxItems: 100, items: { $ref: '#/components/schemas/VirtualSupermarketProduct' } },
+          pageInfo: {
+            type: 'object', additionalProperties: false,
+            required: ['returnedCount', 'hasMore', 'nextCursor'],
+            properties: {
+              returnedCount: { type: 'integer', minimum: 0, maximum: 100 },
+              hasMore: { type: 'boolean' },
+              nextCursor: { type: ['string', 'null'], maxLength: 2048 },
+            },
+          },
+        },
+      },
+      VirtualSupermarketPageEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: { $ref: '#/components/schemas/VirtualSupermarketPage' },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      VirtualSupermarketDetail: {
+        type: 'object', additionalProperties: false,
+        required: ['contractVersion', 'platform', 'sourceMode', 'storefrontRevision', 'item'],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.virtual-supermarket.v1' },
+          platform: { type: 'string', const: 'virtual_supermarket' },
+          sourceMode: { type: 'string', const: 'stored' },
+          storefrontRevision: { type: 'integer', minimum: 1 },
+          item: { $ref: '#/components/schemas/VirtualSupermarketProduct' },
+        },
+      },
+      VirtualSupermarketDetailEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: { $ref: '#/components/schemas/VirtualSupermarketDetail' },
+          requestId: { type: 'string', minLength: 1 },
+        },
+      },
+      SourceCatalogItemsEnvelope: {
+        type: 'object', additionalProperties: false,
+        required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object', additionalProperties: false,
+            required: ['contractVersion', 'catalogEntry', 'dataProductKey', 'page'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.data-products.source-catalog-items.v1' },
+              catalogEntry: { $ref: '#/components/schemas/SourceCatalogEntry' },
+              dataProductKey: { type: 'string', const: 'mobile-commerce-items' },
+              page: { $ref: '#/components/schemas/MobileCommercePage' },
+            },
+          },
+          requestId: { type: 'string', minLength: 1 },
         },
       },
       SourceCatalogEntry: {
@@ -2683,6 +3549,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                     source: { type: 'string', enum: ['hub'], description: 'Present for Hub-owned platform entries.' },
                     servingMode: { type: 'string', enum: ['stored'], description: 'Present for Hub-owned stored-data entries.' },
                     context: { $ref: '#/components/schemas/CanonicalContextCapability' },
+                    timeline: { $ref: '#/components/schemas/CanonicalTimelineCapability' },
                   },
                 },
               },
@@ -2814,6 +3681,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'start', path: '/docs', label: '开始调用' },
   { key: 'rules', path: '/docs/auth', label: '认证与调用规则' },
   { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录' },
+  { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话' },
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情' },
   { key: 'search', path: '/docs/search', label: '通用搜索' },
@@ -2913,7 +3781,8 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \\
       <tr><td>结果新鲜度</td><td>可选 <code>type</code>：<code>fresh</code>（默认）表示始终检索当前数据，重放窗口为 120 秒，足以吸收一次重试而不会把 Key 变成缓存；<code>stable</code> 表示同一个 Key 永久返回首次的结果，用于报表、分页序列和审计等需要快照可复现的场景。<code>type</code> 参与请求指纹，同一个 Key 不能在两种语义之间切换。</td></tr>
       <tr><td>POST 分词</td><td>同样必须携带 <code>Idempotency-Key</code>；相同请求重放不会再次分词或重复计量。</td></tr>
       <tr><td>下一页</td><td>使用响应中的 <code>pageInfo.nextCursor</code>，不要解析或修改；因为 body 已变化，新页面必须使用新的幂等 Key。</td></tr>
-      <tr><td>GET 历史/上下文/实体/舆情</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>
+      <tr><td>双向时间线</td><td>首屏读取 <code>pageInfo.older/newer.cursor</code>；每次续页只回传其中一个 <code>cursor</code>，方向已经签名在 token 中。不能同时传 <code>before/after</code>，也不能复用搜索或历史游标。</td></tr>
+      <tr><td>GET 历史/上下文/时间线/实体/舆情</td><td>不使用幂等 Key；每次调用和重试都会独立计量。</td></tr>
       <tr><td>页大小</td><td>同时受接口上限与该调用者平台策略约束；超限返回 <code>page_size_exceeded</code>。</td></tr>
     </tbody></table>
     </section>
@@ -2983,6 +3852,16 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   | jq '{contractVersion: .data.contractVersion, item: .data.item, requestId}'</code></pre>
 
+    <h3>6. 从目录条目读取已归类数据</h3>
+    <div class="notice">手机采集商品记录使用 <code>mobile_commerce</code> 作为授权域，真实平台通过每行的 reviewed source-catalog UUID 分类。按目录读取同时要求 <code>source_catalog</code> 与 <code>mobile_commerce</code> 两个平台授权；目录筛选不能扩大授权。</div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/source-catalog/{id}/items</code></div><p>P1 返回该 active 目录条目下的 <code>mobile-commerce-items</code> stored 数据产品。支持 <code>keyword</code>、<code>brand</code>、<code>taskId</code>、<code>sourcePlatform</code>、<code>from</code>、<code>to</code>、<code>pageSize</code> 与签名 <code>cursor</code>；路径已经提供 <code>catalogEntryId</code>，query 不再接受它。unknown 平台保留为 unmapped，不靠标题猜目录。</p></div>
+    <pre><code>curl -sS -G "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID/items" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'refresh=stored' \
+  --data-urlencode 'pageSize=50' | jq</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/mobile-commerce/items</code></div><p>直接读取同一安全数据产品，并可用 <code>catalogEntryId</code> 或 raw <code>sourcePlatform</code> 精确收窄。记录进入 canonical 后沿普通 outbox 异步投影到 Elasticsearch；也可通过 <code>POST /api/v1/data/canonical/search</code> 以 <code>platform=mobile_commerce</code>、<code>datasetId=mobile-commerce.collected-items.v1</code>、<code>objectType=commerce_capture</code> 检索。</p></div>
+    <div class="notice"><code>refresh</code> 当前只支持 <code>stored</code>。未来“获取最新”是发往外部手机采集执行器的异步命令；采集运行在另一台机器/手机平台，Hub 只负责触发、状态、清洗、索引和数据接口，不在 Hub 进程中运行平台抓取。</div>
+
     <h3>数据源目录错误码</h3>
     <table><thead><tr><th>HTTP</th><th>error.code</th><th>调用方处理</th></tr></thead><tbody>
       <tr><td>400</td><td><code>invalid_request</code>、<code>invalid_cursor</code>、<code>invalid_source_catalog_id</code>、<code>page_size_exceeded</code>、<code>unsupported_fields</code></td><td>修正字段、UUID 或分页状态；不要原样重试。</td></tr>
@@ -2992,6 +3871,43 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
       <tr><td>429</td><td><code>quota_exceeded</code></td><td>等待 platform policy 的计量窗口恢复。</td></tr>
       <tr><td>503</td><td><code>stored_data_unavailable</code></td><td>安全 GET 可稍后重试；保留错误响应的 <code>requestId</code> 供排查。</td></tr>
     </tbody></table>
+    </section>
+
+    <section class="doc-page" data-doc-page="virtual-supermarket">
+    <h2 id="virtual-supermarket">虚拟超市</h2>
+    <div class="notice">虚拟超市是 Hub 拥有的商品发布产品，要求独立 <code>virtual_supermarket</code> platform grant。<code>mobile_commerce</code> 采集读和 <code>source_catalog</code> 源目录读都不会隐式授予该产品，反向也不成立。</div>
+    <p>同一份发布快照支持“逛超市”、“超市全景”和“目录模式”。全景只是客户端 renderer；API 只返回 <code>department / aisle / shelf / position</code> 语义和顺序，不返回 WebGL 坐标、摄像机、网格、材质或灯光。外部应用可用 2D、可访问目录或自己的 3D renderer 复刻业务等价超市。</p>
+    <h3>1. 授权预检</h3>
+    <pre><code>curl -sS "$HUB_URL/api/v1/data/capabilities" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  | jq '.data.platforms[] | select(.platform == "virtual_supermarket")'</code></pre>
+    <p>已授权且存储面就绪时，该项使用 <code>source=hub</code>、<code>servingMode=stored</code>，并广告 <code>metadata</code>、<code>products</code>、<code>product_detail</code>、<code>stored_search</code> 与已实现的语义筛选能力。Public 不广告上下架、分类编辑或远程手机采集。</p>
+    <h3>2. 读取超市语义</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/virtual-supermarket/metadata</code></div><p>返回 <code>mx-insight-hub.data-products.virtual-supermarket.v1</code>、<code>storefrontRevision</code>、分类与有序 department/aisle/shelf 结构。</p></div>
+    <pre><code>MARKET_META=$(curl -sS "$HUB_URL/api/v1/data/virtual-supermarket/metadata" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY")
+printf '%s\n' "$MARKET_META" | jq '{contractVersion:.data.contractVersion,storefrontRevision:.data.storefrontRevision,departments:.data.departments,requestId}'</code></pre>
+    <h3>3. 逛货架与读详情</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/virtual-supermarket/products</code></div><p>只返回已显式上架的安全商品投影。支持 <code>categoryId</code>、<code>department</code>、<code>aisle</code>、<code>shelf</code>、<code>marketplace</code>、<code>query</code>、<code>sort</code>、<code>pageSize</code> 和 <code>cursor</code>；<code>sort</code> 默认 <code>newest</code>，且只能是 <code>newest|title_asc|price_asc|price_desc</code>，v1 不提供服务端货架陈列排序。</p></div>
+    <pre><code>PRODUCT_PAGE=$(curl -sS -G "$HUB_URL/api/v1/data/virtual-supermarket/products" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'department=home-care' \
+  --data-urlencode 'aisle=laundry' \
+  --data-urlencode 'sort=newest' \
+  --data-urlencode 'pageSize=24')
+printf '%s\n' "$PRODUCT_PAGE" | jq '{storefrontRevision:.data.storefrontRevision,items:.data.items,pageInfo:.data.pageInfo,requestId}'</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/virtual-supermarket/products/{id}</code></div><p>用列表返回的独立 Hub publication UUID 读取同一 allowlist 详情；它不是 mobile-commerce capture/canonical row ID。下架、归档或不存在都返回 <code>404 virtual_supermarket_product_not_found</code>，不暴露内部状态。</p></div>
+    <h3>4. 搜索已上架商品</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/virtual-supermarket/search?query=婴儿洗衣液</code></div><p><code>query</code> 必填，其余 filters/cursor 与 products 一致。调用方不能选择 Elasticsearch index、field、analyzer、DSL、script 或 boost。</p></div>
+    <pre><code>curl -sS -G "$HUB_URL/api/v1/data/virtual-supermarket/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  --data-urlencode 'query=婴儿洗衣液' \
+  --data-urlencode 'sort=price_asc' \
+  --data-urlencode 'pageSize=20' | jq</code></pre>
+    <div class="notice"><code>storefrontRevision</code> 会随分类和商品发布面变更。不透明 cursor 绑定完整 filters、sort、pageSize 和该 revision；条件改变后必须从首页开始。当 revision 已变更且旧快照不再可服务时，Hub 返回 <code>409 storefront_revision_changed</code>，不静默混页。</div>
+    <h3>5. 外部复刻流程</h3>
+    <p>先读取 metadata 并记录 <code>storefrontRevision</code>；再按默认 <code>sort=newest</code> 从无 cursor 的 products 首页逐页读取到 <code>nextCursor=null</code>。所有页面必须与 metadata 保持同一 revision；不一致或遇到 409 时丢弃未完成本地快照，重新读取 metadata 和首页。完整取回后，按 metadata 的 department/aisle/shelf/category <code>sortOrder</code> 与 item <code>placement.position</code> 在客户端陈列，position 相同或为空时用 publication UUID 稳定打破平局。调用方可选择 2D、3D 或可访问目录 renderer，但不能从 API 的 newest 分页顺序或 WebGL 坐标反推业务货架顺序。</p>
+    <p>响应不包含 capture/source-row ID、marketplace product/shop source ID、marketplace raw label/映射状态/内部 source key、task/run/campaign、raw tags/share payload、metadata/device/<code>is_reported</code>、source profile/table/checkpoint、Admin audit 或凭据。公开 marketplace 只有经审核的 <code>{id,name}</code>；未有 approved mapping 时二者均为 null。价格 amount 使用 decimal string，并返回 display/provenance；当前固定源没有 currency 字段，所以 source price 的 <code>currency=null</code>，不能猜成 CNY，只有人工 curated override 才携带已审核的三位 ISO currency。外层 <code>collectedAt</code> 是观测时间，不是实时交易报价；v1 不发布 brand 或 media 字段，未审核规格保持 null，当前源无图片时不伪造商品图。下架仅改变 storefront overlay，不删除 canonical capture。</p>
     </section>
 
     <section class="doc-page" data-doc-page="search">
@@ -3179,6 +4095,7 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
       <tr><td>Monitor + SQLite 统一检索</td><td><code>POST /data/canonical/search</code></td><td>授权范围内全部 Telegram canonical dataset</td></tr>
       <tr><td>Monitor + SQLite 会话/消息还原</td><td><code>GET /data/telegram/chats|messages?sourceScope=all</code></td><td>相容响应中增加来源与 canonical 定位</td></tr>
       <tr><td>命中消息的前后文</td><td><code>GET /data/canonical/items/{id}/context</code></td><td>命中项所在 dataset + chat；默认前后各 10 条</td></tr>
+      <tr><td>命中后持续双向滚动</td><td><code>GET /data/canonical/items/{id}/timeline</code></td><td>首屏前后窗口 + 单一不透明方向游标</td></tr>
       <tr><td>指定单个来源数据集</td><td><code>POST /data/stored/search</code></td><td>由 <code>datasetId</code> 精确收窄</td></tr>
     </tbody></table>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/messages</code></div><p>消息历史；支持 <code>sourceScope=all|monitor|sqlite</code>、<code>chatId</code>、<code>from</code>、<code>to</code>、<code>pageSize</code>、<code>cursor</code>。普通 external chatId 且省略 sourceScope 时保留 Monitor v1 cursor；显式来源或 <code>monitor:&lt;UUID&gt;</code>/<code>sqlite:&lt;UUID&gt;</code> chatKey 使用与来源、会话、时间窗和 pageSize 绑定的 HMAC v2 cursor。每条消息返回 <code>canonicalId</code> 和 <code>sourceScope</code>。</p></div>
@@ -3201,13 +4118,33 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     <div class="notice">当前 Monitor 的 <code>upstreamCompleteness.status</code> 为 <code>unknown</code>；SQLite 导入为 <code>bounded</code>。这不会阻止读取 Hub 已提交的上下文，但调用方不得把列表头尾解释成 Telegram 上游历史的绝对头尾。</div>
     <pre><code>curl -sS "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/context?before=10&amp;after=10" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
+    <h3>搜索命中后的双向时间线</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/canonical/items/{id}/timeline?before=10&amp;after=10</code></div><p>正式的双向分页合同。首屏返回升序 <code>items</code>、数字 <code>anchorIndex</code>，以及 <code>pageInfo.older/newer</code>；续页只发送其中一个不透明 <code>cursor</code>，此时 <code>anchorIndex=null</code>，未请求方向的页信息也为 <code>null</code>。<code>before=0</code> 或 <code>after=0</code> 只省略该侧首屏数据；返回的该侧游标使用受 grant 上限约束的默认页大小。路径 <code>id</code>、dataset、chat、方向、排他边界、page size、consumer 授权范围和合同版本都由 HMAC 绑定。</p></div>
+    <pre><code>TIMELINE=$(curl -sS -G "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/timeline" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  --data-urlencode 'before=10' \\
+  --data-urlencode 'after=10')
+
+OLDER_CURSOR=$(printf '%s\n' "$TIMELINE" | jq -r '.data.pageInfo.older.cursor // empty')
+curl -sS -G "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/timeline" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  --data-urlencode "cursor=$OLDER_CURSOR" | jq</code></pre>
+    <div class="notice"><code>eventTime</code> 保留服务端排序和游标排他使用的 UTC 六位微秒值。<code>consistency=live-keyset</code> 表示它不是冻结快照：并发新写入、晚到或删除可能改变尚未读取的边界外集合。<code>hasMore</code> 只说明 Hub 当前 stored active 数据；不证明 Telegram 上游已完整，也不提供 changes feed。即使 <code>newer.hasMore=false</code>，仍保留其 cursor：有新项时推进到最新返回项，空页保持原 token，客户端可用它轮询之后写入；older 耗尽时 cursor 为 null。此 GET 不调用 Telegram 或其他上游采集。</div>
+    <h3>外部会话应用复刻流程</h3>
+    <table><thead><tr><th>步骤</th><th>调用与客户端动作</th></tr></thead><tbody>
+      <tr><td>1. 搜索</td><td><code>POST /data/telegram/search</code> 并提供本页唯一的 <code>Idempotency-Key</code>；搜索结果下一页 body 含新 cursor，必须换新 Key。</td></tr>
+      <tr><td>2. 选中命中</td><td>优先取 message item 的 <code>canonicalId</code>；canonical search item 则取 <code>id</code>，作为 timeline 路径 ID。</td></tr>
+      <tr><td>3. 建立窗口</td><td><code>GET .../{id}/timeline?before=10&amp;after=10</code>；timeline GET 不需要幂等 Key。</td></tr>
+      <tr><td>4. 向上滚动</td><td>回传 <code>pageInfo.older.cursor</code>，按 canonical ID 去重后 prepend；记录插入前后 scroll height 差值并补偿 <code>scrollTop</code>，保持用户当前视口。</td></tr>
+      <tr><td>5. 向下/实时跟随</td><td>回传 <code>pageInfo.newer.cursor</code>，去重后 append；到达底部后可继续用返回的新 newer cursor 轮询。</td></tr>
+    </tbody></table>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/entities/search?query=example&amp;pageSize=20</code></div><p>模糊匹配作者名称/用户名和会话标题/用户名。</p></div>
     <div class="notice">如果搜索响应包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底。Canonical 接口还会以 <code>search.appliedProfile=postgres.substring.v1</code> 和 <code>search_profile_degraded</code> 明示策略变化；Telegram/Stored 兼容响应只保留投影告警。若 Elasticsearch 仍在线但 HanLP 查询降级，三个接口都会返回 <code>search_profile_degraded</code>。已有 Elasticsearch 游标会签名并复用首屏分词状态，不会中途切换模式或重新分词。</div>
     </section>
 
     <section class="doc-page" data-doc-page="discovery">
     <h2 id="discovery">能力、请求状态与用量</h2>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 与 <code>public_opinion</code> 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它们不代表 Night-All compatibility。Telegram 的 <code>context.datasets</code> 是上下文支持清单，<code>context.ready</code> 是独立的服务索引门禁。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/capabilities</code></div><p>返回当前调用者已授权的 Hub 平台、通用 capabilities，以及独立的 Hub-pinned、grant-filtered <code>data.legacySearch</code> operation dispatch 矩阵。该矩阵不证明 Night-All provider readiness。Telegram 与 <code>public_opinion</code> 平台项使用 <code>source=hub</code>、<code>servingMode=stored</code>；它们不代表 Night-All compatibility。Telegram 的 <code>context.datasets</code> 与 <code>timeline.datasets</code> 分别是 bounded context 和双向时间线支持清单，各自的 <code>ready</code> 是独立服务索引门禁；<code>message_timeline</code> 明示正式时间线能力。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/requests/{requestId}</code></div><p>查询当前调用者拥有的持久请求记录。requestId 来自搜索响应头 <code>x-mx-insight-request-id</code>。</p></div>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/usage?from=...&amp;to=...</code></div><p>读取当前调用者的请求、提交、释放、未知状态与计费单元汇总。</p></div>
     </section>
@@ -3217,7 +4154,7 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     <table><thead><tr><th>HTTP</th><th>含义</th><th>建议</th></tr></thead><tbody>
       <tr><td>400</td><td>字段、游标、页大小或幂等 Key 不合法</td><td>修正请求，不原样盲重试</td></tr>
       <tr><td>401 / 403</td><td>Key 无效，或平台未授权</td><td>检查 Key 与 capabilities</td></tr>
-      <tr><td>409</td><td>幂等冲突/处理中/结果未知，或该 dataset 不支持上下文</td><td>搜索请求保持原 body 与原幂等 Key；上下文请求先检查 capabilities</td></tr>
+      <tr><td>409</td><td>幂等冲突/处理中/结果未知，或该 dataset 不支持上下文/时间线</td><td>搜索请求保持原 body 与原幂等 Key；上下文/时间线请求先检查 capabilities</td></tr>
       <tr><td>410</td><td>搜索游标过期</td><td>从无 cursor 的第一页重新开始，并使用新幂等 Key</td></tr>
       <tr><td>429</td><td>请求或并发配额耗尽</td><td>等待策略窗口恢复</td></tr>
       <tr><td>503</td><td>当前数据或搜索运行时不可用</td><td>安全 GET 可稍后重试；POST 复用原幂等 Key</td></tr>

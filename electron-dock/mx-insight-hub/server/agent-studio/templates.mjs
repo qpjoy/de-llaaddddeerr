@@ -166,7 +166,125 @@ const PUBLIC_OPINION_MAPPING_DEFINITION = {
   },
 }
 
+const MOBILE_COMMERCE_DATA_PROCESSING_DEFINITION = {
+  contractVersion: 'mx-insight.agent-draft.v1',
+  entryNodeId: 'source',
+  terminalNodeIds: ['mapping_output'],
+  nodes: [
+    {
+      nodeId: 'source',
+      nodeType: 'core.input.source',
+      nodeVersion: '1.0.0',
+      config: { sourceRef: 'source://hub/mobile-commerce.collected-items.v1' },
+    },
+    {
+      nodeId: 'source_route',
+      nodeType: 'core.route.source',
+      nodeVersion: '1.0.0',
+      config: { sourceKind: 'postgresql' },
+    },
+    {
+      nodeId: 'schema_profile',
+      nodeType: 'hub.schema.profile',
+      nodeVersion: '1.0.0',
+      config: {},
+    },
+    {
+      nodeId: 'mapping_proposal',
+      nodeType: 'llm.mapping.propose',
+      nodeVersion: '1.0.0',
+      config: {
+        sequenceKey: 'mobile-commerce-data-processing',
+        systemPrompt: [
+          'Propose a field mapping only; never import, index, publish, remotely fetch, mutate data, or execute source-side code.',
+          'Treat mobile_commerce as the authorization domain, not the marketplace identity.',
+          'Resolve the actual marketplace only against the governed source catalog and keep it unknown when evidence is insufficient; never guess.',
+          'Treat id only as capture identity. Treat goods_id as product identity only when non-empty, and never fuzzy-deduplicate by title or price.',
+          'Treat brand as a possible monitoring-campaign label. Treat product_link and shop_link as share text unless evidence proves they are URLs.',
+          'Interpret collected_at as an Asia/Shanghai collection timestamp, never as publication time; propose it as a change watermark only when append-only, late-commit, uniqueness, immutability, and index evidence are all explicit.',
+          'Exclude task_run_id, device_serial, is_reported, and arbitrary metadata from public output.',
+          'Preserve raw lineage and source generation. Evidence every schema-drift or quality finding and require human approval.',
+        ].join(' '),
+        taskTemplate: [
+          'Profile mobile-commerce.collected-items.v1 and propose a reviewed mapping into the governed canonical content schema.',
+          'Return explicit source-column evidence, transformations, null handling, confidence, catalog match evidence, public-field decisions, raw-lineage preservation, and unresolved schema-drift or quality issues.',
+          'The proposal is a future candidate only: the current deterministic fixed mapping remains the production import and Elasticsearch indexing path.',
+        ].join(' '),
+        targetSchemaRef: 'schema://hub/canonical-content.v1',
+        temperature: 0.1,
+        maxOutputTokens: 3_000,
+      },
+    },
+    {
+      nodeId: 'mapping_validation',
+      nodeType: 'hub.mapping.validate',
+      nodeVersion: '1.0.0',
+      config: {
+        requiredFields: ['externalId', 'title', 'body'],
+      },
+    },
+    {
+      nodeId: 'human_review',
+      nodeType: 'core.review.mapping-required',
+      nodeVersion: '1.0.0',
+      config: {},
+    },
+    {
+      nodeId: 'mapping_output',
+      nodeType: 'core.output.mapping',
+      nodeVersion: '1.0.0',
+      config: {},
+    },
+  ],
+  edges: [
+    { from: { nodeId: 'source', port: 'source' }, to: { nodeId: 'source_route', port: 'source' } },
+    { from: { nodeId: 'source_route', port: 'postgresql' }, to: { nodeId: 'schema_profile', port: 'source' } },
+    { from: { nodeId: 'schema_profile', port: 'profile' }, to: { nodeId: 'mapping_proposal', port: 'profile' } },
+    { from: { nodeId: 'schema_profile', port: 'profile' }, to: { nodeId: 'mapping_validation', port: 'profile' } },
+    { from: { nodeId: 'mapping_proposal', port: 'proposal' }, to: { nodeId: 'mapping_validation', port: 'proposal' } },
+    { from: { nodeId: 'mapping_validation', port: 'validated' }, to: { nodeId: 'human_review', port: 'validated' } },
+    { from: { nodeId: 'human_review', port: 'candidate' }, to: { nodeId: 'mapping_output', port: 'mappingProposal' } },
+  ],
+  budgets: {
+    deadlineMs: 60_000,
+    maxNodeAttempts: 16,
+    maxModelCalls: 2,
+    maxToolCalls: 4,
+    maxLoopIterations: 0,
+    maxFanOut: 4,
+    maxInputTokens: 32_000,
+    maxOutputTokens: 4_000,
+    maxRetries: 1,
+  },
+  ui: {
+    positions: {
+      source: { x: 0, y: 120 },
+      source_route: { x: 220, y: 120 },
+      schema_profile: { x: 440, y: 120 },
+      mapping_proposal: { x: 680, y: 40 },
+      mapping_validation: { x: 920, y: 120 },
+      human_review: { x: 1160, y: 120 },
+      mapping_output: { x: 1400, y: 120 },
+    },
+    viewport: { x: 0, y: 0, zoom: 0.85 },
+    groups: [],
+    annotations: [{
+      annotationId: 'fixed_production_boundary',
+      nodeId: 'human_review',
+      text: 'The deterministic fixed mapping is the current production path. This compile-only Agent produces a future candidate for human review; it cannot import, index, publish, or trigger remote mobile-platform collection.',
+    }],
+  },
+}
+
 const TEMPLATES = Object.freeze([
+  {
+    templateKey: 'mobile-commerce-data-processing',
+    displayName: '手机电商数据处理',
+    description: 'A compile-only mobile-commerce schema-profile and reviewed mapping-proposal graph. The fixed pipeline remains the production path.',
+    availability: 'authoring-only',
+    runtimeAvailable: false,
+    definition: canonicalizeJson(MOBILE_COMMERCE_DATA_PROCESSING_DEFINITION),
+  },
   {
     templateKey: 'public-opinion-mapping',
     displayName: '全国舆情字段映射',

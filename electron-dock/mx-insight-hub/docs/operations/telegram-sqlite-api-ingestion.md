@@ -162,6 +162,11 @@ rows and is refreshed in one bounded page. The first due run after 02:00
 Asia/Shanghai uses the previous-day window once; the cursor records that local
 date so later 300-second checks do not repeat it.
 
+An Admin may save an interval-only update while the pair is active, running or
+draining. The write is atomic for both child sources, leaves current/queued
+work unchanged and is observed on the next scheduler scan. Base URL or token
+changes still require both sources to be paused and drained.
+
 ## Stalled cursor recovery
 
 The scheduler only considers an `idle` cursor due, and the two SQLite child

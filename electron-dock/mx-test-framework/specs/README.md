@@ -48,3 +48,12 @@ MX Test Framework（简称 **MXT**）是一个独立的 e2e 测试平台，位�
 - 同级应用范式：`mx-insight-hub`（ESM server + migrations + `scripts/manage.sh` + docs/adr）
 - 术语来源：[`mx-launcher/docs/09-observable-automation-test-platform.md`](../../mx-launcher/docs/09-observable-automation-test-platform.md)
   —— 那是 launcher 自己的 HDOI 质量控制面，MXT 只借用了它的 run/case/step 记录结构
+
+## 与 MX Agent Studio 的边界
+
+权威边界见
+[`ADR-0012: Hub-native Agent Studio`](../../mx-insight-hub/docs/adr/0012-hub-native-agent-studio.md)：
+Hub 负责创建业务 Data Agent，并原生拥有 Agent 内部 Trace、Eval、Gate 与 Release；MXT 只提供
+部署后黑盒质量证据。Promptfoo、Langfuse 与 LangSmith 不进入当前 MXT 或 Hub 运行依赖。
+即使未来共享底层 CI/Job 执行基础设施，也必须另立 ADR 抽取无领域状态的 runner substrate，
+继续隔离数据库、身份与 payload；Agent Eval 永远不是 MXT 领域对象，Release 决策也不移出 Hub。

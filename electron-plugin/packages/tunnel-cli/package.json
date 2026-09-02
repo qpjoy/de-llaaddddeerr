@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/tunnel-cli",
-  "version": "2.1.7",
+  "version": "2.1.8",
   "description": "Global QPJoy Tunnel CLI for mihomo-client, OpenVPN reverse access, WireGuard VPN, legacy HDO, and MX H2I V2 enrollment.",
   "private": false,
   "type": "commonjs",

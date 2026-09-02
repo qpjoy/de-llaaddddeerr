@@ -625,8 +625,9 @@ function SearchReindexControl({ token, onUnauthorized, onReindexed }) {
  * Elasticsearch outage from making the catalog look empty: counts and samples
  * come from PostgreSQL, while ES remains a rebuildable serving projection.
  */
-export function DataCenterPage({ token, onUnauthorized }) {
-  const [datasetId, setDatasetId] = useState('')
+export function DataCenterPage({ token, query: routeQuery, onUnauthorized }) {
+  const routeDatasetId = routeQuery?.get('datasetId')?.trim() || ''
+  const [datasetId, setDatasetId] = useState(routeDatasetId)
   const [platform, setPlatform] = useState('')
   const [objectType, setObjectType] = useState('')
   const [queryDraft, setQueryDraft] = useState('')
@@ -741,6 +742,13 @@ export function DataCenterPage({ token, onUnauthorized }) {
     setCursor(null)
     setCursorHistory([])
   }
+
+  useEffect(() => {
+    // Depend on the parameter value, not the URLSearchParams identity: a
+    // same-value route update must not overwrite a later manual selection.
+    setDatasetId(routeDatasetId)
+    resetPagination()
+  }, [routeDatasetId])
 
   useEffect(() => {
     if (!searchProfile || searchProfile === effectiveSearchProfile) return

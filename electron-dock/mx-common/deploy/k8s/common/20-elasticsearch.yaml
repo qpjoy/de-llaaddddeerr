@@ -139,12 +139,10 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: ES_JAVA_OPTS
-              # Heap is capped at 31g on purpose, not sized to the machine.
-              # Above ~32g the JVM loses compressed ordinary object pointers and
-              # every reference doubles in width, so a 33g heap holds LESS than
-              # a 31g one. Give spare RAM to the page cache instead, which is
-              # what Lucene actually reads segments through.
-              value: "-Xms4g -Xmx4g"
+              # M tier: keep the heap below half of the 32Gi container limit and
+              # leave the larger share for Lucene's filesystem cache and native
+              # memory. This is a fixed pod setting; changing it rolls the pod.
+              value: "-Xms12g -Xmx12g"
             - name: TZ
               value: Asia/Shanghai
           readinessProbe:
@@ -163,12 +161,14 @@ spec:
             failureThreshold: 6
           resources:
             requests:
+              # CPU is compressible: reserve one core and allow measured bursts
+              # up to the eight-core M-tier limit below.
               cpu: "1"
-              # Roughly twice the heap: the remainder is off-heap page cache.
-              memory: 10Gi
+              # Reserve twice the heap so Lucene has schedulable page-cache room.
+              memory: 24Gi
             limits:
-              cpu: "4"
-              memory: 16Gi
+              cpu: "8"
+              memory: 32Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

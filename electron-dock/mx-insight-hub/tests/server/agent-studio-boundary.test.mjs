@@ -298,9 +298,10 @@ test('SessionGate and Launcher exchange/introspection keep the existing Hub cont
 })
 
 test('Agent Studio UI reuses the platform-admin route gate and the shared Admin request client', async () => {
-  const [appSource, apiSource] = await Promise.all([
+  const [appSource, apiSource, pageSource] = await Promise.all([
     readFile(new URL('../../src/App.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../../src/api.js', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/pages-agent-studio.tsx', import.meta.url), 'utf8'),
   ])
   const route = appSource.match(/\{ path: '\/agent\/studio',[^\n]+\}/u)?.[0] || ''
   const api = apiSource.slice(
@@ -316,6 +317,33 @@ test('Agent Studio UI reuses the platform-admin route gate and the shared Admin 
   assert.match(api, /method: 'PUT'/u)
   assert.match(api, /\/compile`/u)
   assert.doesNotMatch(api, /fetch\(|sign-in|launcher/iu)
+  assert.match(pageSource, /onCreate\(template\.templateKey\)/u)
+  assert.match(pageSource, /Hub 原生控制面/u)
+  assert.match(pageSource, /Run Trace · 未启用/u)
+  assert.doesNotMatch(pageSource, /数据引用 · 5|awaiting-eval|published', 'Market 可见/u)
+})
+
+test('Hub-native Agent Studio adds no external management platform or JustOne runtime wiring', async () => {
+  const roots = [
+    new URL('../../server/agent-studio/', import.meta.url),
+    new URL('../../deploy/', import.meta.url),
+  ].map(fileURLToPath)
+  const explicitFiles = [
+    new URL('../../package.json', import.meta.url),
+    new URL('../../package-lock.json', import.meta.url),
+    new URL('../../src/App.jsx', import.meta.url),
+    new URL('../../src/pages-agent-studio.tsx', import.meta.url),
+  ].map(fileURLToPath)
+
+  const matches = []
+  for (const path of [
+    ...explicitFiles,
+    ...(await Promise.all(roots.map(sourceFiles))).flat(),
+  ]) {
+    const source = await readFile(path, 'utf8')
+    if (/promptfoo|langfuse|langsmith|jenkins|justone/iu.test(source)) matches.push(path)
+  }
+  assert.deepEqual(matches, [])
 })
 
 test('Agent Studio has no runtime hook in MX-H2I login/network or HDO/WireGuard code', async () => {

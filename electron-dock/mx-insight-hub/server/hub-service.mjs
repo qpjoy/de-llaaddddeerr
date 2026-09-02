@@ -24,11 +24,19 @@ import {
   normalizeCanonicalContextQuery,
 } from './data/canonical-context.mjs'
 import {
+  canonicalTimelineCapability,
+  canonicalTimelineContinuationResponse,
+  canonicalTimelineInitialResponse,
+  canonicalTimelineScopeFingerprint,
+  normalizeCanonicalTimelineQuery,
+} from './data/canonical-timeline.mjs'
+import {
   normalizePublicSourceCatalogDetailQuery,
   normalizePublicSourceCatalogId,
   normalizePublicSourceCatalogMetadataQuery,
   normalizePublicSourceCatalogQuery,
   publicSourceCatalogDetail,
+  publicSourceCatalogItem,
   publicSourceCatalogMetadata,
   publicSourceCatalogPage,
   SOURCE_CATALOG_PLATFORM,
@@ -53,6 +61,24 @@ import {
   normalizePublicOpinionDiagnosticsBrowseQuery,
   publicOpinionDiagnosticsBrowseResponse,
 } from './data/public-opinion-diagnostics.mjs'
+import {
+  MOBILE_COMMERCE_PLATFORM,
+  normalizeMobileCommerceQuery,
+  publicMobileCommercePage,
+} from './data/mobile-commerce.mjs'
+import {
+  VIRTUAL_SUPERMARKET_ADMIN_CONTRACT,
+  VIRTUAL_SUPERMARKET_PLATFORM,
+  normalizeVirtualSupermarketCategoryCreate,
+  normalizeVirtualSupermarketCategoryPatch,
+  normalizeVirtualSupermarketProductPatch,
+  normalizeVirtualSupermarketPublication,
+  normalizeVirtualSupermarketQuery,
+  virtualSupermarketCategoryResponse,
+  virtualSupermarketDetail,
+  virtualSupermarketMetadata,
+  virtualSupermarketPage,
+} from './data/virtual-supermarket.mjs'
 import {
   adminPublicOpinionCoverageResponse,
   adminPublicOpinionBrowseItemResponse,
@@ -496,7 +522,13 @@ export class HubService {
   async capabilities(context) {
     const grants = await this.store.listGrants(context.consumer.id)
     const canonicalGrants = [...new Set(grants.map((grant) => canonicalPlatform(grant)))]
-    const localStoredPlatforms = new Set(['telegram', PUBLIC_OPINION_PLATFORM, SOURCE_CATALOG_PLATFORM])
+    const localStoredPlatforms = new Set([
+      'telegram',
+      PUBLIC_OPINION_PLATFORM,
+      SOURCE_CATALOG_PLATFORM,
+      MOBILE_COMMERCE_PLATFORM,
+      VIRTUAL_SUPERMARKET_PLATFORM,
+    ])
     const nightAllGrants = canonicalGrants.filter((platform) => !localStoredPlatforms.has(platform))
     const payload = nightAllGrants.length > 0
       ? await this.adapter.capabilities(nightAllGrants)
@@ -504,17 +536,25 @@ export class HubService {
     if (canonicalGrants.includes('telegram') && typeof this.store.listCanonicalRecords === 'function') {
       const platforms = payload?.data?.platforms
       if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === 'telegram')) {
-        let context = null
+        let contextCapability = null
+        let timelineCapability = null
         if (
           typeof this.store.getCanonicalContext === 'function'
           && typeof this.store.getCanonicalContextServingIndexStatus === 'function'
         ) {
           try {
-            context = canonicalContextCapability(await this.store.getCanonicalContextServingIndexStatus())
+            const servingIndexes = await this.store.getCanonicalContextServingIndexStatus()
+            contextCapability = canonicalContextCapability(servingIndexes)
+            if (typeof this.store.getCanonicalTimelinePage === 'function') {
+              timelineCapability = canonicalTimelineCapability(servingIndexes)
+            }
           } catch {
             // Capability discovery must not take existing Telegram reads down
             // because the optional context index diagnostic is unavailable.
-            context = canonicalContextCapability(null)
+            contextCapability = canonicalContextCapability(null)
+            if (typeof this.store.getCanonicalTimelinePage === 'function') {
+              timelineCapability = canonicalTimelineCapability(null)
+            }
             this.logger?.warn?.('[canonical-context] serving index status is unavailable')
           }
         }
@@ -542,9 +582,11 @@ export class HubService {
               : []),
             'stored_search',
             'entity_search',
-            ...(context ? ['message_context'] : []),
+            ...(contextCapability ? ['message_context'] : []),
+            ...(timelineCapability ? ['message_timeline'] : []),
           ],
-          ...(context ? { context } : {}),
+          ...(contextCapability ? { context: contextCapability } : {}),
+          ...(timelineCapability ? { timeline: timelineCapability } : {}),
         })
       }
     }
@@ -587,7 +629,75 @@ export class HubService {
           ready: true,
           source: 'hub',
           servingMode: 'stored',
-          capabilities: ['catalog_entries', 'catalog_metadata', 'catalog_detail', 'filtered_browse'],
+          capabilities: [
+            'catalog_entries',
+            'catalog_metadata',
+            'catalog_detail',
+            'filtered_browse',
+            ...(canonicalGrants.includes(MOBILE_COMMERCE_PLATFORM)
+              && typeof this.store.listMobileCommerceItems === 'function'
+              ? ['catalog_data_items']
+              : []),
+          ],
+        })
+      }
+    }
+    if (
+      canonicalGrants.includes(MOBILE_COMMERCE_PLATFORM)
+      && typeof this.store.listMobileCommerceItems === 'function'
+    ) {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms) && !platforms.some((entry) => (entry?.platform || entry) === MOBILE_COMMERCE_PLATFORM)) {
+        const source = typeof this.store.getExternalSource === 'function'
+          ? await this.store.getExternalSource('mobile-commerce-collected-items')
+          : null
+        platforms.push({
+          platform: MOBILE_COMMERCE_PLATFORM,
+          ready: source?.status === 'active',
+          source: 'hub',
+          servingMode: 'stored',
+          capabilities: ['commerce_items', 'marketplace_filter', 'catalog_filter', 'task_filter', 'stored_refresh'],
+          remoteFetch: { available: false, status: 'reserved' },
+        })
+      }
+    }
+    if (
+      canonicalGrants.includes(VIRTUAL_SUPERMARKET_PLATFORM)
+      && typeof this.store.listVirtualSupermarketProducts === 'function'
+    ) {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms) && !platforms.some((entry) => (
+        (entry?.platform || entry) === VIRTUAL_SUPERMARKET_PLATFORM
+      ))) {
+        let ready = typeof this.store.getVirtualSupermarketStorefrontRevision === 'function'
+          && typeof this.store.getVirtualSupermarketInventoryRevision === 'function'
+        if (ready) {
+          try {
+            await Promise.all([
+              this.store.getVirtualSupermarketStorefrontRevision(),
+              this.store.listVirtualSupermarketCategories(),
+            ])
+          } catch {
+            ready = false
+            this.logger?.warn?.('[virtual-supermarket] serving migration readiness probe failed')
+          }
+        }
+        platforms.push({
+          platform: VIRTUAL_SUPERMARKET_PLATFORM,
+          ready,
+          source: 'hub',
+          servingMode: 'stored',
+          capabilities: [
+            'metadata',
+            'products',
+            'product_detail',
+            'stored_search',
+            'category_filter',
+            'department_filter',
+            'aisle_filter',
+            'shelf_filter',
+            'marketplace_filter',
+          ],
         })
       }
     }
@@ -1113,6 +1223,57 @@ export class HubService {
     })
   }
 
+  async sourceCatalogItems(context, idInput, queryInput = {}) {
+    if (
+      typeof this.store.getSourceCatalogEntry !== 'function'
+      || typeof this.store.listMobileCommerceItems !== 'function'
+    ) {
+      throw new AppError(503, 'stored_data_unavailable', 'Source-catalog data queries require the PostgreSQL product store')
+    }
+    if (Object.prototype.hasOwnProperty.call(queryInput, 'catalogEntryId')) {
+      throw new AppError(400, 'unsupported_fields', 'catalogEntryId is supplied by the source-catalog path')
+    }
+    await this.#storedPlatformPolicy(context, SOURCE_CATALOG_PLATFORM, 'Source catalog')
+    const policy = await this.#storedPlatformPolicy(context, MOBILE_COMMERCE_PLATFORM, 'Mobile commerce')
+    const id = normalizePublicSourceCatalogId(idInput)
+    const query = normalizeMobileCommerceQuery(
+      { ...queryInput, catalogEntryId: id },
+      policy.maxPageSize,
+      this.apiKeyPepper,
+    )
+    return this.#meterStoredRead(context, MOBILE_COMMERCE_PLATFORM, policy, {
+      path: `/api/v1/data/source-catalog/${id}/items`,
+      fingerprintBody: {
+        catalogEntryId: id,
+        ...query.filters,
+        refresh: query.refresh,
+        pageSize: query.pageSize,
+        cursor: query.cursorToken,
+      },
+      operation: async () => {
+        const entry = await this.store.getSourceCatalogEntry(id)
+        if (!entry || entry.archivedAt) {
+          throw new AppError(404, 'source_catalog_entry_not_found', 'Source catalog entry was not found')
+        }
+        const page = publicMobileCommercePage(
+          await this.store.listMobileCommerceItems({
+            ...query.filters,
+            pageSize: query.pageSize,
+            cursor: query.cursor,
+          }),
+          query,
+          this.apiKeyPepper,
+        )
+        return {
+          contractVersion: 'mx-insight-hub.data-products.source-catalog-items.v1',
+          catalogEntry: publicSourceCatalogItem(entry),
+          dataProductKey: 'mobile-commerce-items',
+          page,
+        }
+      },
+    })
+  }
+
   async telegramEntities(context, queryInput) {
     if (!this.searchQueries?.searchAuthors || !this.searchQueries?.searchTelegramChats) {
       throw new AppError(503, 'stored_search_unavailable', 'Telegram entity search requires the PostgreSQL search layer')
@@ -1214,6 +1375,311 @@ export class HubService {
       fingerprintBody: query,
       operation: async () => publicOpinionRegions(query),
     })
+  }
+
+  async mobileCommerceItems(context, queryInput) {
+    if (typeof this.store.listMobileCommerceItems !== 'function') {
+      throw new AppError(503, 'stored_data_unavailable', 'Stored mobile-commerce data requires the PostgreSQL store')
+    }
+    const policy = await this.#storedPlatformPolicy(context, MOBILE_COMMERCE_PLATFORM, 'Mobile commerce')
+    const query = normalizeMobileCommerceQuery(queryInput, policy.maxPageSize, this.apiKeyPepper)
+    return this.#meterStoredRead(context, MOBILE_COMMERCE_PLATFORM, policy, {
+      path: '/api/v1/data/mobile-commerce/items',
+      fingerprintBody: {
+        ...query.filters,
+        refresh: query.refresh,
+        pageSize: query.pageSize,
+        cursor: query.cursorToken,
+      },
+      operation: async () => publicMobileCommercePage(
+        await this.store.listMobileCommerceItems({
+          ...query.filters,
+          pageSize: query.pageSize,
+          cursor: query.cursor,
+        }),
+        query,
+        this.apiKeyPepper,
+      ),
+    })
+  }
+
+  #assertVirtualSupermarketStore() {
+    if (
+      typeof this.store.getVirtualSupermarketStorefrontRevision !== 'function'
+      || typeof this.store.listVirtualSupermarketCategories !== 'function'
+      || typeof this.store.listVirtualSupermarketProducts !== 'function'
+      || typeof this.store.getVirtualSupermarketProduct !== 'function'
+      || typeof this.store.getVirtualSupermarketProductByPublicationId !== 'function'
+    ) {
+      throw new AppError(503, 'stored_data_unavailable', 'Virtual-supermarket data requires the current Hub store migration')
+    }
+  }
+
+  async #virtualSupermarketSnapshot(operation, expectedRevision = null, expectedInventoryRevision = null) {
+    this.#assertVirtualSupermarketStore()
+    const before = await this.store.getVirtualSupermarketStorefrontRevision()
+    if (expectedRevision != null && before !== expectedRevision) {
+      throw new AppError(
+        409,
+        'storefront_revision_changed',
+        'Virtual-supermarket publication changed; restart pagination from the first page',
+        { cursorRevision: expectedRevision, storefrontRevision: before },
+      )
+    }
+    let inventoryBefore = null
+    if (expectedInventoryRevision != null) {
+      if (typeof this.store.getVirtualSupermarketInventoryRevision !== 'function') {
+        throw new AppError(503, 'inventory_revision_unavailable', 'Virtual-supermarket inventory revision is unavailable')
+      }
+      inventoryBefore = await this.store.getVirtualSupermarketInventoryRevision()
+      if (inventoryBefore !== expectedInventoryRevision) {
+        throw new AppError(
+          409,
+          'virtual_supermarket_inventory_changed',
+          'Virtual-supermarket inventory changed; restart pagination from the first page',
+          { cursorInventoryRevision: expectedInventoryRevision, inventoryRevision: inventoryBefore },
+        )
+      }
+    }
+    const value = await operation(before)
+    const after = await this.store.getVirtualSupermarketStorefrontRevision()
+    if (after !== before) {
+      throw new AppError(
+        409,
+        'storefront_revision_changed',
+        'Virtual-supermarket publication changed while the response was being assembled; retry the request',
+        { storefrontRevision: after },
+      )
+    }
+    if (expectedInventoryRevision != null) {
+      const inventoryAfter = await this.store.getVirtualSupermarketInventoryRevision()
+      if (inventoryAfter !== inventoryBefore) {
+        throw new AppError(
+          409,
+          'virtual_supermarket_inventory_changed',
+          'Virtual-supermarket inventory changed while the response was being assembled; retry the request',
+          { inventoryRevision: inventoryAfter },
+        )
+      }
+    }
+    return { storefrontRevision: before, value }
+  }
+
+  async virtualSupermarketMetadata(context) {
+    const policy = await this.#storedPlatformPolicy(context, VIRTUAL_SUPERMARKET_PLATFORM, 'Virtual supermarket')
+    return this.#meterStoredRead(context, VIRTUAL_SUPERMARKET_PLATFORM, policy, {
+      path: '/api/v1/data/virtual-supermarket/metadata',
+      fingerprintBody: {},
+      operation: async () => (await this.#virtualSupermarketSnapshot(async (storefrontRevision) => (
+        virtualSupermarketMetadata(
+          await this.store.listVirtualSupermarketCategories(),
+          { storefrontRevision },
+        )
+      ))).value,
+    })
+  }
+
+  async #virtualSupermarketPage(context, queryInput, { path, requireQuery = false } = {}) {
+    const policy = await this.#storedPlatformPolicy(context, VIRTUAL_SUPERMARKET_PLATFORM, 'Virtual supermarket')
+    this.#assertVirtualSupermarketStore()
+    const storefrontRevision = await this.store.getVirtualSupermarketStorefrontRevision()
+    const query = normalizeVirtualSupermarketQuery(queryInput, {
+      cursorSecret: this.apiKeyPepper,
+      maxPageSize: policy.maxPageSize,
+      requireQuery,
+      storefrontRevision,
+    })
+    return this.#meterStoredRead(context, VIRTUAL_SUPERMARKET_PLATFORM, policy, {
+      path,
+      fingerprintBody: {
+        ...query.filters,
+        sort: query.sort,
+        pageSize: query.pageSize,
+        cursor: query.cursorToken,
+      },
+      operation: async () => (await this.#virtualSupermarketSnapshot(async () => (
+        virtualSupermarketPage(
+          await this.store.listVirtualSupermarketProducts({
+            ...query.filters,
+            sort: query.sort,
+            pageSize: query.pageSize,
+            offset: query.offset,
+            includeGovernanceEvidence: false,
+          }),
+          query,
+          this.apiKeyPepper,
+        )
+      ), query.storefrontRevision)).value,
+    })
+  }
+
+  async virtualSupermarketProducts(context, queryInput) {
+    return this.#virtualSupermarketPage(context, queryInput, {
+      path: '/api/v1/data/virtual-supermarket/products',
+    })
+  }
+
+  async virtualSupermarketSearch(context, queryInput) {
+    return this.#virtualSupermarketPage(context, queryInput, {
+      path: '/api/v1/data/virtual-supermarket/search',
+      requireQuery: true,
+    })
+  }
+
+  async virtualSupermarketProduct(context, idInput) {
+    const policy = await this.#storedPlatformPolicy(context, VIRTUAL_SUPERMARKET_PLATFORM, 'Virtual supermarket')
+    const id = requiredUuid(idInput, 'publicationId')
+    return this.#meterStoredRead(context, VIRTUAL_SUPERMARKET_PLATFORM, policy, {
+      path: `/api/v1/data/virtual-supermarket/products/${id}`,
+      fingerprintBody: { id },
+      operation: async () => (await this.#virtualSupermarketSnapshot(async (storefrontRevision) => {
+        const item = await this.store.getVirtualSupermarketProductByPublicationId(id)
+        if (!item) {
+          throw new AppError(404, 'virtual_supermarket_product_not_found', 'Virtual-supermarket product was not found')
+        }
+        return virtualSupermarketDetail(item, { storefrontRevision })
+      })).value,
+    })
+  }
+
+  async adminVirtualSupermarketMetadata() {
+    return (await this.#virtualSupermarketSnapshot(async (storefrontRevision) => (
+      virtualSupermarketMetadata(
+        await this.store.listVirtualSupermarketCategories({ includeArchived: true }),
+        { admin: true, storefrontRevision },
+      )
+    ))).value
+  }
+
+  async adminVirtualSupermarketCategories() {
+    const metadata = await this.adminVirtualSupermarketMetadata()
+    return {
+      contractVersion: VIRTUAL_SUPERMARKET_ADMIN_CONTRACT,
+      storefrontRevision: metadata.storefrontRevision,
+      items: metadata.categories,
+    }
+  }
+
+  async adminCreateVirtualSupermarketCategory(input, { actor = 'admin-token' } = {}) {
+    this.#assertVirtualSupermarketStore()
+    const result = await this.store.createVirtualSupermarketCategory(
+      normalizeVirtualSupermarketCategoryCreate(input),
+      { actor },
+    )
+    return {
+      contractVersion: VIRTUAL_SUPERMARKET_ADMIN_CONTRACT,
+      storefrontRevision: result.storefrontRevision,
+      item: virtualSupermarketCategoryResponse(result.item, { admin: true }),
+    }
+  }
+
+  async adminUpdateVirtualSupermarketCategory(idInput, input, { actor = 'admin-token' } = {}) {
+    this.#assertVirtualSupermarketStore()
+    const id = requiredUuid(idInput, 'categoryId')
+    const { expectedRevision, patch } = normalizeVirtualSupermarketCategoryPatch(input)
+    const result = await this.store.updateVirtualSupermarketCategory(id, patch, { expectedRevision, actor })
+    return {
+      contractVersion: VIRTUAL_SUPERMARKET_ADMIN_CONTRACT,
+      storefrontRevision: result.storefrontRevision,
+      item: virtualSupermarketCategoryResponse(result.item, { admin: true }),
+    }
+  }
+
+  async adminVirtualSupermarketProducts(queryInput) {
+    this.#assertVirtualSupermarketStore()
+    if (typeof this.store.getVirtualSupermarketInventoryRevision !== 'function') {
+      throw new AppError(503, 'inventory_revision_unavailable', 'Virtual-supermarket inventory revision is unavailable')
+    }
+    const [storefrontRevision, inventoryRevision] = await Promise.all([
+      this.store.getVirtualSupermarketStorefrontRevision(),
+      this.store.getVirtualSupermarketInventoryRevision(),
+    ])
+    const query = normalizeVirtualSupermarketQuery(queryInput, {
+      admin: true,
+      cursorSecret: this.apiKeyPepper,
+      storefrontRevision,
+      inventoryRevision,
+    })
+    return (await this.#virtualSupermarketSnapshot(async () => (
+      virtualSupermarketPage(
+        await this.store.listVirtualSupermarketProducts({
+          ...query.filters,
+          sort: query.sort,
+          pageSize: query.pageSize,
+          offset: query.offset,
+          includeGovernanceEvidence: true,
+        }),
+        query,
+        this.apiKeyPepper,
+        { admin: true },
+      )
+    ), query.storefrontRevision, query.inventoryRevision)).value
+  }
+
+  async adminVirtualSupermarketProduct(idInput) {
+    const id = requiredUuid(idInput, 'productId')
+    return (await this.#virtualSupermarketSnapshot(async (storefrontRevision) => {
+      const item = await this.store.getVirtualSupermarketProduct(id)
+      if (!item) {
+        throw new AppError(404, 'virtual_supermarket_product_not_found', 'Virtual-supermarket product was not found')
+      }
+      return virtualSupermarketDetail(item, { admin: true, storefrontRevision })
+    })).value
+  }
+
+  async adminUpdateVirtualSupermarketProduct(idInput, input, { actor = 'admin-token' } = {}) {
+    this.#assertVirtualSupermarketStore()
+    const id = requiredUuid(idInput, 'productId')
+    const { expectedRevision, patch, reason } = normalizeVirtualSupermarketProductPatch(input)
+    const result = await this.store.updateVirtualSupermarketProduct(id, patch, {
+      expectedRevision,
+      actor,
+      eventType: 'update',
+      reason,
+    })
+    return virtualSupermarketDetail(result.item, {
+      admin: true,
+      storefrontRevision: result.storefrontRevision,
+    })
+  }
+
+  async adminPublishVirtualSupermarketProduct(idInput, input, {
+    actor = 'admin-token',
+    publish = true,
+  } = {}) {
+    this.#assertVirtualSupermarketStore()
+    const id = requiredUuid(idInput, 'productId')
+    const { expectedRevision, reason } = normalizeVirtualSupermarketPublication(input)
+    const result = await this.store.updateVirtualSupermarketProduct(
+      id,
+      { status: publish ? 'on_shelf' : 'off_shelf' },
+      {
+        expectedRevision,
+        actor,
+        eventType: publish ? 'publish' : 'unpublish',
+        reason,
+      },
+    )
+    return virtualSupermarketDetail(result.item, {
+      admin: true,
+      storefrontRevision: result.storefrontRevision,
+    })
+  }
+
+  async adminVirtualSupermarketProductEvents(idInput) {
+    this.#assertVirtualSupermarketStore()
+    const id = requiredUuid(idInput, 'productId')
+    return (await this.#virtualSupermarketSnapshot(async (storefrontRevision) => {
+      const item = await this.store.getVirtualSupermarketProduct(id)
+      if (!item) {
+        throw new AppError(404, 'virtual_supermarket_product_not_found', 'Virtual-supermarket product was not found')
+      }
+      return {
+        contractVersion: VIRTUAL_SUPERMARKET_ADMIN_CONTRACT,
+        storefrontRevision,
+        items: await this.store.listVirtualSupermarketProductEvents(id),
+      }
+    })).value
   }
 
   async publicOpinionRegion(context, regionInput, queryInput) {
@@ -1424,6 +1890,83 @@ export class HubService {
           throw new AppError(409, 'context_not_supported', 'Canonical item does not support message context')
         }
         return canonicalContextResponse({ query, result })
+      },
+    })
+  }
+
+  async canonicalTimeline(context, idInput, queryInput) {
+    if (
+      typeof this.store.getCanonicalContext !== 'function'
+      || typeof this.store.getCanonicalTimelinePage !== 'function'
+      || typeof this.store.getCanonicalContextServingIndexStatus !== 'function'
+    ) {
+      throw new AppError(503, 'stored_data_unavailable', 'Canonical timeline requires the current Hub store')
+    }
+    const id = requiredUuid(idInput, 'id').toLowerCase()
+    const policy = await this.#storedPlatformPolicy(context, 'telegram', 'Telegram')
+    const scopeFingerprint = canonicalTimelineScopeFingerprint({
+      tenantId: context.tenant.id,
+      consumerId: context.consumer.id,
+    })
+    const query = normalizeCanonicalTimelineQuery(queryInput, {
+      anchorId: id,
+      maxPageSize: policy.maxPageSize,
+      scopeFingerprint,
+      cursorSecret: this.apiKeyPepper,
+    })
+    let servingIndexes
+    try {
+      servingIndexes = await this.store.getCanonicalContextServingIndexStatus()
+    } catch {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Canonical timeline serving index status is unavailable',
+      )
+    }
+    if (!servingIndexes.ready) {
+      throw new AppError(
+        503,
+        'serving_indexes_unavailable',
+        'Canonical timeline serving indexes are not ready',
+      )
+    }
+    return this.#meterStoredRead(context, 'telegram', policy, {
+      path: `/api/v1/data/canonical/items/${id}/timeline`,
+      fingerprintBody: query.mode === 'initial'
+        ? { id, before: query.before, after: query.after }
+        : { id, cursor: query.cursorToken },
+      operation: async () => {
+        if (query.mode === 'continuation') {
+          const result = await this.store.getCanonicalTimelinePage({
+            datasetId: query.cursor.datasetId,
+            contextId: query.cursor.streamId,
+            direction: query.cursor.direction,
+            boundary: query.cursor.boundary,
+            pageSize: query.cursor.pageSize,
+          })
+          return canonicalTimelineContinuationResponse({
+            query,
+            result,
+            cursorSecret: this.apiKeyPepper,
+          })
+        }
+        const result = await this.store.getCanonicalContext({
+          id,
+          before: query.before,
+          after: query.after,
+        })
+        if (!result) throw new AppError(404, 'item_not_found', 'Canonical item not found')
+        if (!result.contextSupported) {
+          throw new AppError(409, 'context_not_supported', 'Canonical item does not support message timeline')
+        }
+        return canonicalTimelineInitialResponse({
+          anchorId: id,
+          query,
+          result,
+          scopeFingerprint,
+          cursorSecret: this.apiKeyPepper,
+        })
       },
     })
   }
@@ -1865,6 +2408,7 @@ export class HubService {
         unitsActual: Math.max(
           1,
           payload.pageInfo?.returnedCount
+            ?? payload.page?.pageInfo?.returnedCount
             ?? payload.storedWindow?.returnedCount
             ?? payload.items?.length
             ?? payload.regions?.length

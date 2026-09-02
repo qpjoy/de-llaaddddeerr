@@ -7,7 +7,7 @@ import { compileAgentDraft } from '../../server/agent-studio/compiler.mjs'
 import { definitionHash } from '../../server/agent-studio/contracts.mjs'
 import { listNodeTypes } from '../../server/agent-studio/registry.mjs'
 import { AgentStudioStore } from '../../server/agent-studio/store.mjs'
-import { templateDefinition } from '../../server/agent-studio/templates.mjs'
+import { listTemplates, templateDefinition } from '../../server/agent-studio/templates.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 
 const ADMIN_TOKEN = 'agent-studio-test-admin-token'
@@ -72,6 +72,14 @@ test('the public-opinion template compiles to a non-runnable reviewed mapping ar
   assert.equal(first.normalizedPlan.policy.runnable, false)
   assert.equal(first.normalizedPlan.policy.arbitraryNetwork, false)
   assert.equal(first.normalizedPlan.policy.arbitrarySql, false)
+  assert.equal(first.assurance.contractVersion, 'mx-insight.agent-static-assurance.v1')
+  assert.equal(first.assurance.owner, 'mx-insight-hub')
+  assert.equal(first.assurance.status, 'passed')
+  assert.equal(first.assurance.checks.length, 6)
+  assert.ok(first.assurance.checks.every((check) => check.status === 'passed'))
+  assert.deepEqual(first.normalizedPlan.assurance, first.assurance)
+  assert.equal(first.normalizedPlan.assurance.limitations.runtimeEvents, false)
+  assert.equal(first.normalizedPlan.assurance.limitations.evaluationResults, false)
   assert.equal(first.normalizedPlan.ui, undefined)
   assert.equal(
     first.normalizedPlan.nodes.find((node) => node.nodeId === 'human_review').approvalClass,
@@ -93,10 +101,75 @@ test('the public-opinion template compiles to a non-runnable reviewed mapping ar
   assert.equal(first.summary.readOnlyToolNodeCount, 1)
 })
 
+test('the mobile-commerce template preserves fixed-pipeline semantics in an authoring-only proposal', () => {
+  const listed = listTemplates().find((item) => item.templateKey === 'mobile-commerce-data-processing')
+  assert.ok(listed)
+  assert.equal(listed.availability, 'authoring-only')
+  assert.equal(listed.runtimeAvailable, false)
+
+  const definition = templateDefinition('mobile-commerce-data-processing')
+  const compiled = compileAgentDraft(definition)
+  assert.equal(compiled.valid, true)
+  assert.equal(compiled.normalizedPlan.policy.runnable, false)
+  assert.equal(compiled.normalizedPlan.policy.arbitraryNetwork, false)
+  assert.equal(compiled.normalizedPlan.policy.arbitrarySql, false)
+  assert.deepEqual(compiled.normalizedPlan.terminalNodeIds, ['mapping_output'])
+  assert.deepEqual(
+    definition.nodes.map((node) => node.nodeId),
+    [
+      'source',
+      'source_route',
+      'schema_profile',
+      'mapping_proposal',
+      'mapping_validation',
+      'human_review',
+      'mapping_output',
+    ],
+  )
+  assert.ok(compiled.dependencyManifest.logicalRefs.some((item) => (
+    item.kind === 'source'
+    && item.key === 'source://hub/mobile-commerce.collected-items.v1'
+  )))
+  assert.equal(
+    compiled.normalizedPlan.nodes.find((node) => node.nodeId === 'human_review').approvalClass,
+    'human-required',
+  )
+
+  const mappingNode = definition.nodes.find((node) => node.nodeId === 'mapping_proposal')
+  const instructions = `${mappingNode.config.systemPrompt} ${mappingNode.config.taskTemplate}`
+  for (const expected of [
+    'mobile_commerce as the authorization domain',
+    'governed source catalog',
+    'keep it unknown',
+    'id only as capture identity',
+    'goods_id as product identity only when non-empty',
+    'never fuzzy-deduplicate by title or price',
+    'brand as a possible monitoring-campaign label',
+    'product_link and shop_link as share text',
+    'Asia/Shanghai collection timestamp',
+    'never as publication time',
+    'only when append-only, late-commit, uniqueness, immutability, and index evidence are all explicit',
+    'Exclude task_run_id, device_serial, is_reported, and arbitrary metadata from public output',
+    'Preserve raw lineage and source generation',
+    'Evidence every schema-drift or quality finding and require human approval',
+    'never import, index, publish, remotely fetch',
+    'fixed mapping remains the production import and Elasticsearch indexing path',
+  ]) {
+    assert.match(instructions, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'))
+  }
+  assert.match(
+    definition.ui.annotations[0].text,
+    /deterministic fixed mapping is the current production path/u,
+  )
+  assert.match(definition.ui.annotations[0].text, /future candidate for human review/u)
+})
+
 test('the code-owned registry advertises no write/runtime node capability', () => {
   const registry = listNodeTypes()
   assert.equal(registry.execution.status, 'unavailable')
   assert.ok(registry.items.some((item) => item.nodeType === 'core.input.source'))
+  assert.ok(registry.items.find((item) => item.nodeType === 'core.input.source')
+    .configSpec.fields[0].values.includes('source://hub/mobile-commerce.collected-items.v1'))
   assert.ok(registry.items.some((item) => (
     item.nodeType === 'core.review.mapping-required'
     && item.approvalClass === 'human-required'
@@ -111,7 +184,13 @@ test('the compiler rejects unknown nodes, capability injection, type mismatches,
 
   const unknown = structuredClone(base)
   unknown.nodes[2].nodeType = 'hub.schema.user-defined'
-  assert.ok(compileAgentDraft(unknown).diagnostics.some((item) => item.code === 'unknown_node_type'))
+  const unknownResult = compileAgentDraft(unknown)
+  assert.ok(unknownResult.diagnostics.some((item) => item.code === 'unknown_node_type'))
+  assert.equal(unknownResult.assurance.status, 'failed')
+  assert.equal(
+    unknownResult.assurance.checks.find((check) => check.key === 'registry-and-config').status,
+    'failed',
+  )
 
   for (const forbiddenKey of ['url', 'sql', 'code', 'runtimeFactoryId']) {
     const injected = structuredClone(base)

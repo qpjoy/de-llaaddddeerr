@@ -6,7 +6,10 @@ import { createApp } from '../../server/app.mjs'
 import { requestFingerprint } from '../../server/core/crypto.mjs'
 import { AppError } from '../../server/core/errors.mjs'
 import { HubService } from '../../server/hub-service.mjs'
-import { DatabaseSourcePuller } from '../../server/ingest/external/database-source.mjs'
+import {
+  DatabaseSourcePuller,
+  validateDatabaseConnection,
+} from '../../server/ingest/external/database-source.mjs'
 import {
   TELEGRAM_MONITOR_INPUTS,
   TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
@@ -38,6 +41,9 @@ const WRITER_CONTRACT_ATTESTATION = Object.freeze({
   contractVersion: TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION,
   contractDigest: TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST,
 })
+const SHARED_TEST_CONNECTION_FIELDS = new Set([
+  'host', 'port', 'database', 'username', 'password', 'sslMode',
+])
 
 test('Telegram page size keeps the server hard cap even when policy is larger', () => {
   assert.throws(
@@ -418,6 +424,30 @@ async function call(baseUrl, path, { method = 'GET', body, headers = {} } = {}) 
 }
 
 function telegramPipelineFixture() {
+  const databaseProfiles = new Map([
+    ['11111111-1111-4111-8111-111111111111', {
+      id: '11111111-1111-4111-8111-111111111111',
+      key: 'night-all-primary',
+      displayName: 'Night All 主库',
+      revision: 3,
+      engine: 'postgresql',
+      connection: {
+        host: 'database.internal', port: 5432, database: 'night_all', username: 'mx_data',
+        password: 'profile-private', sslMode: 'disable',
+      },
+    }],
+    ['22222222-2222-4222-8222-222222222222', {
+      id: '22222222-2222-4222-8222-222222222222',
+      key: 'night-all-replacement',
+      displayName: 'Night All 替换库',
+      revision: 1,
+      engine: 'postgresql',
+      connection: {
+        host: 'replacement.internal', port: 5432, database: 'night_all', username: 'mx_data',
+        password: 'replacement-private', sslMode: 'disable',
+      },
+    }],
+  ])
   const sources = new Map([
     ['telegram-monitor-chats', {
       id: 'source-chats', sourceKey: 'telegram-monitor-chats', displayName: 'Telegram chats',
@@ -459,6 +489,7 @@ function telegramPipelineFixture() {
   const calls = []
   const store = {
     getExternalSource: async (key) => sources.get(key) ?? null,
+    getDatabaseConnection: async (id) => databaseProfiles.get(id) ?? null,
     getActiveMapping: async (sourceId) => activeMappings.get(sourceId) ?? null,
     listSourceMappings: async (sourceId) => mappings.get(sourceId) ?? [],
     listImportRuns: async (sourceId) => [{ id: `run-${sourceId}`, status: 'succeeded' }],
@@ -471,6 +502,9 @@ function telegramPipelineFixture() {
           ...source,
           ...(update.status == null ? {} : { status: update.status }),
           ...(update.connection == null ? {} : { connection: update.connection }),
+          ...(Object.prototype.hasOwnProperty.call(update, 'databaseConnectionId')
+            ? { databaseConnectionId: update.databaseConnectionId }
+            : {}),
           ...(update.syncIntervalSeconds == null ? {} : { syncIntervalSeconds: update.syncIntervalSeconds }),
         })
       }
@@ -505,6 +539,28 @@ function telegramPipelineFixture() {
       calls.push(['testConnection', structuredClone(connection)])
       return { database: connection.database, user: connection.username, readOnly: true }
     },
+    resolveConnectionCandidate: async ({ databaseConnectionId = null, connection = {} }) => {
+      calls.push(['resolveConnection', databaseConnectionId, structuredClone(connection)])
+      if (databaseConnectionId == null) {
+        return { databaseConnectionId: null, connection: structuredClone(connection) }
+      }
+      const profile = databaseProfiles.get(databaseConnectionId)
+      if (!profile) throw new AppError(404, 'database_connection_not_found', `Unknown database connection: ${databaseConnectionId}`)
+      if (Object.keys(connection).some((field) => SHARED_TEST_CONNECTION_FIELDS.has(field))) {
+        throw new AppError(400, 'mixed_database_connection', 'Profile-backed source must keep only its locator')
+      }
+      return {
+        databaseConnectionId,
+        databaseConnectionKey: profile.key,
+        databaseConnectionRevision: profile.revision,
+        connection: { ...structuredClone(profile.connection), ...structuredClone(connection) },
+      }
+    },
+    testSourceCandidate: async (candidate) => {
+      calls.push(['testSourceCandidate', structuredClone(candidate)])
+      const resolved = await databasePuller.resolveConnectionCandidate(candidate)
+      return databasePuller.testConnection(resolved.connection)
+    },
     assertCheckpointCompatible: async (key, options) => {
       calls.push(['checkpoint', key, options?.mappingOverride?.id])
       return { compatible: true }
@@ -538,7 +594,7 @@ function telegramPipelineFixture() {
       return calls.filter(([kind]) => kind === 'enqueue').length
     },
   }
-  return { sources, mappings, activeMappings, cursors, calls, store, databasePuller, queue }
+  return { sources, mappings, activeMappings, cursors, calls, store, databasePuller, databaseProfiles, queue }
 }
 
 function preparedSource(generation = '0123456789abcdef0123456789abcdef') {
@@ -607,6 +663,166 @@ test('Telegram monitor pipeline exposes one consistent connection and fixed task
   assert.match(drifted.configurationIssues.join(' '), /telegram-monitor-messages table/)
 })
 
+test('Telegram monitor supports one shared database profile without copying its transport secret', async () => {
+  const fixture = telegramPipelineFixture()
+  const profileId = '11111111-1111-4111-8111-111111111111'
+  for (const source of fixture.sources.values()) {
+    source.connection.sourceContractId = '0123456789abcdef0123456789abcdef'
+  }
+  const inspectedConnections = []
+  fixture.sourcePreparer = {
+    inspect: async (connection) => {
+      inspectedConnections.push(structuredClone(connection))
+      return preparedSource()
+    },
+  }
+  const pipeline = new TelegramMonitorPipeline(fixture)
+
+  const configured = await pipeline.configure({ databaseConnectionId: profileId, syncIntervalSeconds: 600 })
+  assert.equal(configured.configured, true)
+  assert.equal(configured.databaseConnectionId, profileId)
+  assert.equal(configured.connection, null)
+  assert.deepEqual(configured.databaseConnection, {
+    id: profileId,
+    connectionKey: 'night-all-primary',
+    displayName: 'Night All 主库',
+    revision: 3,
+    host: 'database.internal',
+    port: 5432,
+    database: 'night_all',
+    username: 'mx_data',
+    sslMode: 'disable',
+    passwordConfigured: true,
+  })
+  assert.equal(JSON.stringify(configured.databaseConnection).includes('profile-private'), false)
+  for (const [index, source] of [...fixture.sources.values()].entries()) {
+    assert.equal(source.databaseConnectionId, profileId)
+    assert.deepEqual(source.connection, {
+      schema: 'public',
+      table: TELEGRAM_MONITOR_INPUTS[index].table,
+      cursorColumn: 'updated_at',
+      idColumn: TELEGRAM_MONITOR_INPUTS[index].idColumn,
+      sourceContractId: '0123456789abcdef0123456789abcdef',
+    })
+  }
+  const candidate = fixture.calls.find(([kind]) => kind === 'testSourceCandidate')[1]
+  assert.equal(candidate.databaseConnectionId, profileId)
+  assert.equal(candidate.connection.table, 'tg_monitor_chats')
+  assert.equal('password' in candidate.connection, false)
+
+  await pipeline.inspectSourcePreparation()
+  assert.equal(inspectedConnections[0].host, 'database.internal')
+  assert.equal(inspectedConnections[0].password, 'profile-private')
+  assert.equal(inspectedConnections[0].table, 'tg_monitor_chats')
+  const active = await pipeline.setStatus('active', {
+    approvedBy: 'shared-profile-operator',
+    writerContractAttestation: WRITER_CONTRACT_ATTESTATION,
+  })
+  assert.equal(active.status, 'active')
+  assert.equal(inspectedConnections[1].password, 'profile-private')
+})
+
+test('Telegram shared-profile mode fails closed on mixed profile ids and duplicated transport drift', async () => {
+  const fixture = telegramPipelineFixture()
+  const [chats, messages] = [...fixture.sources.values()]
+  chats.databaseConnectionId = '11111111-1111-4111-8111-111111111111'
+  messages.databaseConnectionId = '22222222-2222-4222-8222-222222222222'
+  chats.connection = {
+    schema: 'public', table: 'tg_monitor_chats', cursorColumn: 'updated_at', idColumn: 'chat_id',
+  }
+  messages.connection = {
+    schema: 'public', table: 'tg_monitor_messages', cursorColumn: 'updated_at', idColumn: 'id',
+  }
+  const pipeline = new TelegramMonitorPipeline(fixture)
+
+  const mixedProfiles = await pipeline.get()
+  assert.equal(mixedProfiles.configured, false)
+  assert.equal(mixedProfiles.connectionConsistent, false)
+  assert.match(mixedProfiles.configurationIssues.join(' '), /profile or inline mode/)
+
+  messages.databaseConnectionId = chats.databaseConnectionId
+  chats.connection.sourceContractId = '0123456789abcdef0123456789abcdef'
+  messages.connection.sourceContractId = 'fedcba9876543210fedcba9876543210'
+  const generationDrift = await pipeline.get()
+  assert.equal(generationDrift.configured, false)
+  assert.equal(generationDrift.connectionConsistent, false)
+  assert.equal(generationDrift.sourceContractConsistent, false)
+  assert.match(generationDrift.configurationIssues.join(' '), /source contract generation/)
+
+  messages.connection.sourceContractId = chats.connection.sourceContractId
+  messages.connection.host = 'must-not-be-copied.internal'
+  const duplicatedTransport = await pipeline.get()
+  assert.equal(duplicatedTransport.configured, false)
+  assert.match(duplicatedTransport.configurationIssues.join(' '), /must not duplicate shared database transport/)
+
+  delete messages.connection.host
+  fixture.databaseProfiles.delete(chats.databaseConnectionId)
+  const missingProfile = await pipeline.get()
+  assert.equal(missingProfile.configured, false)
+  assert.equal(missingProfile.databaseConnection, null)
+  assert.match(missingProfile.configurationIssues.join(' '), /Unknown database connection/)
+})
+
+test('Telegram rejects mixed shared and inline configure payloads and can switch modes while paused', async () => {
+  const fixture = telegramPipelineFixture()
+  const pipeline = new TelegramMonitorPipeline(fixture)
+  await assert.rejects(
+    () => pipeline.configure({
+      databaseConnectionId: '11111111-1111-4111-8111-111111111111',
+      connection: { host: 'duplicate.internal' },
+    }),
+    (error) => error?.code === 'ambiguous_database_connection',
+  )
+
+  await pipeline.configure({ databaseConnectionId: '11111111-1111-4111-8111-111111111111' })
+  const inline = await pipeline.configure({
+    connection: {
+      host: 'inline.internal', port: 5432, database: 'night_all', username: 'mx_inline',
+      password: 'inline-private', sslMode: 'require',
+    },
+  })
+  assert.equal(inline.databaseConnectionId, null)
+  assert.equal(inline.databaseConnection, null)
+  assert.equal(inline.connection.host, 'inline.internal')
+  assert.equal([...fixture.sources.values()].every((source) => source.databaseConnectionId === null), true)
+
+  fixture.sources.get('telegram-monitor-chats').status = 'active'
+  await assert.rejects(
+    () => pipeline.configure({ databaseConnectionId: '22222222-2222-4222-8222-222222222222' }),
+    (error) => error?.code === 'source_pause_required',
+  )
+})
+
+test('Telegram monitor hot-updates both task intervals while active and running without locking or probing', async () => {
+  const fixture = telegramPipelineFixture()
+  for (const source of fixture.sources.values()) source.status = 'active'
+  fixture.cursors.get('external:telegram-monitor-messages').status = 'running'
+  const connections = [...fixture.sources.values()].map((source) => structuredClone(source.connection))
+  const pipeline = new TelegramMonitorPipeline(fixture)
+
+  const updated = await pipeline.configure({ syncIntervalSeconds: 900 })
+
+  assert.equal(updated.status, 'active')
+  assert.equal(updated.syncIntervalSeconds, 900)
+  assert.equal(updated.syncIntervalConsistent, true)
+  assert.deepEqual(
+    [...fixture.sources.values()].map((source) => source.syncIntervalSeconds),
+    [900, 900],
+  )
+  assert.deepEqual(
+    [...fixture.sources.values()].map((source) => source.connection),
+    connections,
+  )
+  assert.equal(fixture.calls.some(([kind]) => kind === 'locks'), false)
+  assert.equal(fixture.calls.some(([kind]) => kind === 'testSourceCandidate'), false)
+  assert.equal(fixture.calls.some(([kind]) => kind === 'testConnection'), false)
+
+  await assert.rejects(
+    () => pipeline.configure({ connection: { password: 'rotated-while-active' } }),
+    (error) => error?.code === 'source_pause_required',
+  )
+})
+
 test('Telegram monitor configuration probes once and atomically injects fixed tables and cursors', async () => {
   const fixture = telegramPipelineFixture()
   const pipeline = new TelegramMonitorPipeline(fixture)
@@ -666,6 +882,25 @@ test('Telegram connection password rotation preserves source generation while to
   )
 
   await pipeline.configure({ connection: { host: 'replacement.internal' } })
+  assert.equal(
+    [...fixture.sources.values()].every((source) => source.connection.sourceContractId == null),
+    true,
+  )
+})
+
+test('Telegram shared profile replacement clears a source generation bound to the old coordinates', async () => {
+  const fixture = telegramPipelineFixture()
+  for (const source of fixture.sources.values()) {
+    source.connection.sourceContractId = '0123456789abcdef0123456789abcdef'
+  }
+  const pipeline = new TelegramMonitorPipeline(fixture)
+  await pipeline.configure({ databaseConnectionId: '11111111-1111-4111-8111-111111111111' })
+  assert.equal(
+    [...fixture.sources.values()].every((source) => source.connection.sourceContractId != null),
+    true,
+  )
+
+  await pipeline.configure({ databaseConnectionId: '22222222-2222-4222-8222-222222222222' })
   assert.equal(
     [...fixture.sources.values()].every((source) => source.connection.sourceContractId == null),
     true,
@@ -1468,6 +1703,7 @@ test('admin-token direct source routes preflight credentials and return the stor
         readOnly: true,
       }
     },
+    testSourceCandidate: async ({ connection }) => databasePuller.testConnection(connection),
     testSource: async (key) => ({
       database: source.connection.database,
       user: source.connection.username,
@@ -1601,6 +1837,9 @@ test('database source registration rejects a literal DSN before it can be persis
   const app = createApp({
     service: {},
     store: { createExternalSource: async () => { created = true } },
+    databasePuller: {
+      testSourceCandidate: async ({ connection }) => validateDatabaseConnection(connection),
+    },
     adapter: { dependencies: async () => ({ status: 'up' }) },
     adminToken: ADMIN_TOKEN,
   })
@@ -1669,6 +1908,7 @@ test('a paused database source cannot activate before mapping and schema gates p
     databasePuller: {
       describe: async () => ({ issues }),
       testConnection: async () => ({ database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true }),
+      testSourceCandidate: async () => ({ database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true }),
     },
     queue: {},
     adapter: { dependencies: async () => ({ status: 'up' }) },
@@ -1724,6 +1964,10 @@ test('a paused source can switch between legacy dsnEnv and direct credentials wi
     service: {}, store,
     databasePuller: {
       testConnection: async (connection) => {
+        tested.push(structuredClone(connection))
+        return { database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true }
+      },
+      testSourceCandidate: async ({ connection }) => {
         tested.push(structuredClone(connection))
         return { database: 'night_all', user: 'mx_data', serverVersion: '16.11', readOnly: true }
       },
@@ -2206,7 +2450,11 @@ test('public Telegram conversation facade exposes explicit mixed-source discover
       'conversation_filter',
       'stored_search',
       'entity_search',
+      'message_context',
+      'message_timeline',
     ])
+    assert.equal(capabilities.payload.data.platforms[0].timeline.contractVersion, 'mx-insight-hub.canonical-timeline.v1')
+    assert.equal(capabilities.payload.data.platforms[0].timeline.consistency, 'live-keyset')
   })
 })
 

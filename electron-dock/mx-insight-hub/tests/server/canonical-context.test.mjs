@@ -26,6 +26,7 @@ function canonicalRow({
   externalId = '-1007:20',
   body = 'anchor',
   eventTime = '2026-08-24T10:00:00.000Z',
+  eventTimeCursor = null,
   side = 'current',
 } = {}) {
   return {
@@ -42,6 +43,7 @@ function canonicalRow({
     author_external_id: 'user-1',
     author_name: 'Public author',
     event_time: eventTime,
+    event_time_cursor: eventTimeCursor,
     collected_at: '2026-08-24T10:01:00.000Z',
     stable_fields: {
       attributes: { username: 'public-handle' },
@@ -213,6 +215,21 @@ test('canonical context response is one ascending safe list with an explicit sto
   assert.deepEqual(response.warnings.map((warning) => warning.code), ['upstream_completeness_unknown'])
   assert.equal(JSON.stringify(response).includes('must-not-leak'), false)
   assert.equal(JSON.stringify(response).includes('privateCounter'), false)
+
+  const exactResponse = canonicalContextResponse({
+    query: { before: 0, after: 0 },
+    result: {
+      before: [],
+      current: canonicalRow({
+        eventTime: '2026-08-24T10:00:00.123Z',
+        eventTimeCursor: '2026-08-24T10:00:00.123456Z',
+      }),
+      after: [],
+      hasMoreStoredBefore: false,
+      hasMoreStoredAfter: false,
+    },
+  })
+  assert.equal(exactResponse.items[0].eventTime, '2026-08-24T10:00:00.123456Z')
 
   const sqliteResponse = canonicalContextResponse({
     query: { before: 0, after: 0 },
@@ -453,6 +470,7 @@ test('Postgres context lookup uses one bounded statement, dataset/chat partition
   assert.match(queries[0].sql, /\(r\.event_time, r\.id\) > \(a\.event_time, a\.id\)/)
   assert.match(queries[0].sql, /ORDER BY r\.event_time DESC, r\.id DESC/)
   assert.match(queries[0].sql, /ORDER BY r\.event_time ASC, r\.id ASC/)
+  assert.match(queries[0].sql, /to_char\((?:r\.)?event_time AT TIME ZONE 'UTC'/)
   assert.doesNotMatch(queries[0].sql, /raw_payload|extensions/)
   assert.deepEqual(result.before.map((row) => row.external_id), ['-1007:18', '-1007:19'])
   assert.deepEqual(result.after.map((row) => row.external_id), ['-1007:21'])

@@ -143,6 +143,19 @@ export const adminApi = {
 
   // External sources (P4).
   sources: (token) => request(token, `${ADMIN_ROOT}/sources`),
+  databaseConnections: (token) => request(token, `${ADMIN_ROOT}/database-connections`),
+  createDatabaseConnection: (token, body) => request(
+    token, `${ADMIN_ROOT}/database-connections`, { method: 'POST', body },
+  ),
+  updateDatabaseConnection: (token, id, body) => request(
+    token, `${ADMIN_ROOT}/database-connections/${encodeURIComponent(id)}`, { method: 'PUT', body },
+  ),
+  deleteDatabaseConnection: (token, id) => request(
+    token, `${ADMIN_ROOT}/database-connections/${encodeURIComponent(id)}`, { method: 'DELETE' },
+  ),
+  testDatabaseConnection: (token, id) => request(
+    token, `${ADMIN_ROOT}/database-connections/${encodeURIComponent(id)}/test`, { method: 'POST' },
+  ),
   fileFormatRules: (token) => request(token, `${ADMIN_ROOT}/file-format-rules`),
   listServerFileRoots: (token) => request(token, `${ADMIN_ROOT}/server-file-roots`),
   dataCenter: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-center`, { query }),
@@ -297,6 +310,45 @@ export const adminApi = {
     `${ADMIN_ROOT}/data-products/public-opinion/records/${encodeURIComponent(id)}`,
     { query },
   ),
+  dataProductVirtualSupermarketMetadata: (token) => request(
+    token, `${ADMIN_ROOT}/data-products/virtual-supermarket/metadata`,
+  ),
+  dataProductVirtualSupermarketCategories: (token, query = {}) => request(
+    token, `${ADMIN_ROOT}/data-products/virtual-supermarket/categories`, { query },
+  ),
+  createDataProductVirtualSupermarketCategory: (token, body) => request(
+    token, `${ADMIN_ROOT}/data-products/virtual-supermarket/categories`, { method: 'POST', body },
+  ),
+  updateDataProductVirtualSupermarketCategory: (token, id, body) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/virtual-supermarket/categories/${encodeURIComponent(id)}`,
+    { method: 'PATCH', body },
+  ),
+  dataProductVirtualSupermarketProducts: (token, query = {}) => request(
+    token, `${ADMIN_ROOT}/data-products/virtual-supermarket/products`, { query },
+  ),
+  dataProductVirtualSupermarketProduct: (token, id) => request(
+    token, `${ADMIN_ROOT}/data-products/virtual-supermarket/products/${encodeURIComponent(id)}`,
+  ),
+  updateDataProductVirtualSupermarketProduct: (token, id, body) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/virtual-supermarket/products/${encodeURIComponent(id)}`,
+    { method: 'PATCH', body },
+  ),
+  publishDataProductVirtualSupermarketProduct: (token, id, body) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/virtual-supermarket/products/${encodeURIComponent(id)}/publish`,
+    { method: 'POST', body },
+  ),
+  unpublishDataProductVirtualSupermarketProduct: (token, id, body) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/virtual-supermarket/products/${encodeURIComponent(id)}/unpublish`,
+    { method: 'POST', body },
+  ),
+  dataProductVirtualSupermarketEvents: (token, id) => request(
+    token,
+    `${ADMIN_ROOT}/data-products/virtual-supermarket/products/${encodeURIComponent(id)}/events`,
+  ),
   createSource: (token, body) => request(token, `${ADMIN_ROOT}/sources`, { method: 'POST', body }),
   updateSource: (token, key, body) => request(
     token, `${ADMIN_ROOT}/sources/${encodeURIComponent(key)}`, { method: 'PUT', body },
@@ -422,6 +474,27 @@ export const adminApi = {
   ),
   resetProvinceOpinionPipelineCheckpoint: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/province-opinion/checkpoint/reset`, { method: 'POST', body },
+  ),
+  mobileCommercePipeline: (token) => request(token, `${ADMIN_ROOT}/pipelines/mobile-commerce`),
+  updateMobileCommercePipeline: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/mobile-commerce`, { method: 'PUT', body },
+  ),
+  updateMobileCommercePipelineStatus: (token, status, writerContractAttestation = null) => request(
+    token,
+    `${ADMIN_ROOT}/pipelines/mobile-commerce/status`,
+    {
+      method: 'POST',
+      body: { status, ...(writerContractAttestation ? { writerContractAttestation } : {}) },
+    },
+  ),
+  runMobileCommercePipeline: (token, body = {}) => request(
+    token, `${ADMIN_ROOT}/pipelines/mobile-commerce/sync`, { method: 'POST', body },
+  ),
+  resumeMobileCommercePipeline: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/mobile-commerce/resume`, { method: 'POST' },
+  ),
+  resetMobileCommercePipelineCheckpoint: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/mobile-commerce/checkpoint/reset`, { method: 'POST', body },
   ),
 
   // Backfill (P3), agent (P5) and retrieval (embedding pipeline).

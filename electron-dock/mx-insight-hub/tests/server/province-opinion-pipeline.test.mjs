@@ -24,6 +24,10 @@ const HANLP_CONFIG = Object.freeze({
   backend: 'hanlp',
   hanlpUrl: 'http://mx-common-hanlp.mx-common.svc.cluster.local:8000',
 })
+const DATABASE_PROFILE_ID = '33333333-3333-4333-8333-333333333333'
+const SHARED_TEST_CONNECTION_FIELDS = new Set([
+  'host', 'port', 'database', 'username', 'password', 'sslMode',
+])
 
 async function withServer(app, run) {
   const server = createServer(app)
@@ -45,6 +49,17 @@ async function call(baseUrl, path, { method = 'GET', headers = {}, body } = {}) 
 }
 
 function fixture({ segmenterConfig = HANLP_CONFIG } = {}) {
+  const databaseProfiles = new Map([[DATABASE_PROFILE_ID, {
+    id: DATABASE_PROFILE_ID,
+    key: 'night-all-primary',
+    displayName: 'Night All 主库',
+    revision: 4,
+    engine: 'postgresql',
+    connection: {
+      host: 'night-all.internal', port: 5432, database: 'night_all', username: 'mx_data',
+      password: 'profile-private', sslMode: 'require',
+    },
+  }]])
   const source = {
     id: SOURCE_ID,
     sourceKey: PROVINCE_OPINION_INPUT.sourceKey,
@@ -74,6 +89,7 @@ function fixture({ segmenterConfig = HANLP_CONFIG } = {}) {
   let servingIndexesReady = true
   const store = {
     getExternalSource: async () => structuredClone(source),
+    getDatabaseConnection: async (id) => structuredClone(databaseProfiles.get(id) ?? null),
     listSourceMappings: async () => [structuredClone(mapping)],
     getActiveMapping: async () => structuredClone(activeMapping),
     listImportRuns: async () => [],
@@ -133,11 +149,35 @@ function fixture({ segmenterConfig = HANLP_CONFIG } = {}) {
       return structuredClone(cursor)
     },
   }
-  const calls = { testConnection: [], describe: [], compatible: [] }
+  const calls = { locks: [], testConnection: [], testSourceCandidate: [], describe: [], compatible: [] }
   let description = { issues: ['cursor column updated_at is missing'], warnings: [] }
   const databasePuller = {
-    withSourceLock: async (_key, operation) => operation(async () => {}, null),
+    withSourceLock: async (key, operation) => {
+      calls.locks.push(key)
+      return operation(async () => {}, null)
+    },
     testConnection: async (connection) => calls.testConnection.push(structuredClone(connection)),
+    resolveConnectionCandidate: async ({ databaseConnectionId = null, connection = {} }) => {
+      if (databaseConnectionId == null) {
+        return { databaseConnectionId: null, connection: structuredClone(connection) }
+      }
+      const profile = databaseProfiles.get(databaseConnectionId)
+      if (!profile) throw new Error(`Unknown database connection: ${databaseConnectionId}`)
+      if (Object.keys(connection).some((field) => SHARED_TEST_CONNECTION_FIELDS.has(field))) {
+        throw new Error('Profile-backed source must keep only its locator')
+      }
+      return {
+        databaseConnectionId,
+        databaseConnectionKey: profile.key,
+        databaseConnectionRevision: profile.revision,
+        connection: { ...structuredClone(profile.connection), ...structuredClone(connection) },
+      }
+    },
+    testSourceCandidate: async (candidate) => {
+      calls.testSourceCandidate.push(structuredClone(candidate))
+      const resolved = await databasePuller.resolveConnectionCandidate(candidate)
+      return databasePuller.testConnection(resolved.connection)
+    },
     describe: async (key, options) => {
       calls.describe.push({ key, options })
       return structuredClone(description)
@@ -151,6 +191,7 @@ function fixture({ segmenterConfig = HANLP_CONFIG } = {}) {
   }
   return {
     source,
+    databaseProfiles,
     mapping,
     store,
     queue,
@@ -318,6 +359,127 @@ test('province pipeline starts paused/unconfigured and keeps table, cursor and i
   assert.equal(setup.calls.testConnection.length, 1)
   assert.equal(setup.calls.testConnection[0].table, 'monitor_strategy_results')
   assert.equal(setup.calls.testConnection[0].cursorColumn, 'updated_at')
+})
+
+test('province pipeline supports a shared database profile without persisting or returning its password', async () => {
+  const setup = fixture()
+  const configured = await setup.pipeline.configure({
+    databaseConnectionId: DATABASE_PROFILE_ID,
+    syncIntervalSeconds: 600,
+  })
+
+  assert.equal(configured.configured, true)
+  assert.equal(configured.databaseConnectionId, DATABASE_PROFILE_ID)
+  assert.equal(configured.connection, null)
+  assert.deepEqual(configured.databaseConnection, {
+    id: DATABASE_PROFILE_ID,
+    connectionKey: 'night-all-primary',
+    displayName: 'Night All 主库',
+    revision: 4,
+    host: 'night-all.internal',
+    port: 5432,
+    database: 'night_all',
+    username: 'mx_data',
+    sslMode: 'require',
+    passwordConfigured: true,
+  })
+  assert.equal(JSON.stringify(configured.databaseConnection).includes('profile-private'), false)
+  assert.equal(setup.source.databaseConnectionId, DATABASE_PROFILE_ID)
+  assert.deepEqual(setup.source.connection, {
+    schema: 'public',
+    table: 'monitor_strategy_results',
+    cursorColumn: 'updated_at',
+    idColumn: 'id',
+  })
+  assert.deepEqual(setup.calls.testSourceCandidate, [{
+    databaseConnectionId: DATABASE_PROFILE_ID,
+    connection: {
+      schema: 'public',
+      table: 'monitor_strategy_results',
+      cursorColumn: 'updated_at',
+      idColumn: 'id',
+    },
+  }])
+  assert.equal(setup.calls.testConnection[0].password, 'profile-private')
+  assert.equal(setup.calls.testConnection[0].table, 'monitor_strategy_results')
+
+  setup.setDescription(validDescription())
+  const active = await setup.pipeline.setStatus('active', {
+    approvedBy: 'shared-profile-operator',
+    writerContractAttestation: ATTESTATION,
+  })
+  assert.equal(active.status, 'active')
+})
+
+test('province pipeline rejects mixed profile/inline payloads and switches back to inline while paused', async () => {
+  const setup = fixture()
+  await assert.rejects(
+    () => setup.pipeline.configure({
+      databaseConnectionId: DATABASE_PROFILE_ID,
+      connection: { host: 'duplicate.internal' },
+    }),
+    (error) => error?.code === 'ambiguous_database_connection',
+  )
+  await setup.pipeline.configure({ databaseConnectionId: DATABASE_PROFILE_ID })
+  const inline = await setup.pipeline.configure({
+    connection: {
+      host: 'inline.internal', port: 5432, database: 'night_all', username: 'mx_inline',
+      password: 'inline-private', sslMode: 'disable',
+    },
+  })
+  assert.equal(inline.databaseConnectionId, null)
+  assert.equal(inline.databaseConnection, null)
+  assert.equal(inline.connection.host, 'inline.internal')
+  assert.equal(setup.source.databaseConnectionId, null)
+  assert.equal(setup.source.connection.table, 'monitor_strategy_results')
+  assert.equal(setup.source.connection.password, 'inline-private')
+
+  setup.source.status = 'active'
+  await assert.rejects(
+    () => setup.pipeline.configure({ databaseConnectionId: DATABASE_PROFILE_ID }),
+    (error) => error?.code === 'source_pause_required',
+  )
+})
+
+test('province pipeline hot-updates its interval while active and running without locking or probing', async () => {
+  const setup = fixture()
+  setup.source.status = 'active'
+  setup.setCursor({
+    status: 'running',
+    position: { importRunId: 'province-running' },
+    updatedAt: '2026-08-26T04:00:00.000Z',
+  })
+  const connection = structuredClone(setup.source.connection)
+
+  const updated = await setup.pipeline.configure({ syncIntervalSeconds: 900 })
+
+  assert.equal(updated.status, 'active')
+  assert.equal(updated.syncIntervalSeconds, 900)
+  assert.deepEqual(setup.source.connection, connection)
+  assert.deepEqual(setup.calls.locks, [])
+  assert.deepEqual(setup.calls.testSourceCandidate, [])
+  assert.deepEqual(setup.calls.testConnection, [])
+
+  await assert.rejects(
+    () => setup.pipeline.configure({ databaseConnectionId: DATABASE_PROFILE_ID }),
+    (error) => error?.code === 'source_pause_required',
+  )
+})
+
+test('province shared-profile state fails closed on missing profiles or duplicated inline transport', async () => {
+  const setup = fixture()
+  setup.source.databaseConnectionId = DATABASE_PROFILE_ID
+  setup.source.connection.host = 'must-not-be-copied.internal'
+  const duplicated = await setup.pipeline.get()
+  assert.equal(duplicated.configured, false)
+  assert.equal(duplicated.databaseConnection, null)
+  assert.match(duplicated.configurationIssues.join(' '), /keep only its locator/)
+
+  delete setup.source.connection.host
+  setup.databaseProfiles.delete(DATABASE_PROFILE_ID)
+  const missing = await setup.pipeline.get()
+  assert.equal(missing.configured, false)
+  assert.match(missing.configurationIssues.join(' '), /Unknown database connection/)
 })
 
 test('activation fails closed without updated_at/index and requires exact writer attestation', async () => {

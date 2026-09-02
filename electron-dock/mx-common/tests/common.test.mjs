@@ -837,6 +837,79 @@ test('the rendered HanLP pod template tracks the built image ID and local node',
   assert.doesNotMatch(stdout, /MX_COMMON_HANLP_NODE_NAME_PLACEHOLDER/)
 })
 
+test('the Elasticsearch manifest and renderer keep the fixed M-tier contract', async () => {
+  const { execFile } = await import('node:child_process')
+  const { readFile } = await import('node:fs/promises')
+  const { promisify } = await import('node:util')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const run = promisify(execFile)
+  const here = dirname(fileURLToPath(import.meta.url))
+  const script = resolve(here, '../scripts/manage.sh')
+  const manifestPath = resolve(here, '../deploy/k8s/common/20-elasticsearch.yaml')
+  const manifest = await readFile(manifestPath, 'utf8')
+
+  assert.match(manifest, /value: "-Xms12g -Xmx12g"/)
+  assert.match(manifest, /requests:\s+[\s\S]*?cpu: "1"\s+[\s\S]*?memory: 24Gi/)
+  assert.match(manifest, /limits:\s+[\s\S]*?cpu: "8"\s+[\s\S]*?memory: 32Gi/)
+  // Resource-only deploys must preserve the StatefulSet identity and its data
+  // claim so Kubernetes rolls the pod onto the already-bound volume.
+  assert.match(manifest, /kind: StatefulSet[\s\S]*?name: mx-common-elasticsearch/)
+  assert.match(manifest, /serviceName: mx-common-elasticsearch-headless/)
+  assert.match(manifest, /volumeClaimTemplates:[\s\S]*?- metadata:\s+name: data/)
+  assert.match(manifest, /claimName: mx-common-elasticsearch-snapshots/)
+  assert.match(manifest, /storage: 50Gi/)
+
+  const renderedDefault = await run('bash', [
+    '-c',
+    'unset MX_COMMON_ELASTICSEARCH_HEAP; source "$1"; render_manifest "$2"',
+    '_',
+    script,
+    manifestPath,
+  ])
+  assert.match(renderedDefault.stdout, /value: "-Xms12g -Xmx12g"/)
+
+  const renderedOverride = await run('bash', [
+    '-c',
+    'export MX_COMMON_ELASTICSEARCH_HEAP=8g; source "$1"; render_manifest "$2"',
+    '_',
+    script,
+    manifestPath,
+  ])
+  assert.match(renderedOverride.stdout, /value: "-Xms8g -Xmx8g"/)
+
+  await assert.rejects(
+    run('bash', [
+      '-c',
+      'export MX_COMMON_ELASTICSEARCH_HEAP=13g; source "$1"; render_manifest "$2"',
+      '_',
+      script,
+      manifestPath,
+    ]),
+    /must not exceed 12g for the fixed 32Gi Elasticsearch M tier/,
+  )
+})
+
+test('capacity reporting uses the Elasticsearch M-tier memory request', async () => {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, resolve } = await import('node:path')
+  const run = promisify(execFile)
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/manage.sh')
+
+  const { stdout, stderr } = await run('bash', [
+    '-c',
+    'source "$1"; kubectl() { printf "40000Mi"; }; report_capacity',
+    '_',
+    script,
+  ])
+  assert.match(stdout, /this stack requests 27136Mi/)
+  assert.match(stderr, /Elasticsearch M tier requests 24Gi \(12g heap, 32Gi limit\)/)
+  assert.match(stderr, /may burst to 8 CPUs/)
+  assert.match(stderr, /Changing only MX_COMMON_ELASTICSEARCH_HEAP does not change the fixed/)
+})
+
 test('HanLP deploy re-imports the built image to self-heal a stale mutable tag', async () => {
   const { execFile } = await import('node:child_process')
   const { promisify } = await import('node:util')

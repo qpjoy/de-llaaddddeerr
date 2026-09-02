@@ -94,6 +94,17 @@ export function validateFieldMap(fieldMap) {
         errors.push('externalId.separator must be a non-empty string of at most 8 characters')
       }
     }
+    if (rule?.timezoneOffsetMinutes != null) {
+      if (!TIME_TARGETS.has(target)) {
+        errors.push(`${target}.timezoneOffsetMinutes is supported only for timestamp targets`)
+      } else if (
+        !Number.isInteger(rule.timezoneOffsetMinutes)
+        || rule.timezoneOffsetMinutes < -840
+        || rule.timezoneOffsetMinutes > 840
+      ) {
+        errors.push(`${target}.timezoneOffsetMinutes must be an integer between -840 and 840`)
+      }
+    }
   }
   // externalId is the dedup key. Without it every import would create new rows
   // for the same records, which is silent duplication rather than a visible
@@ -187,7 +198,7 @@ function asNumber(value) {
   return parsed
 }
 
-function asTimestamp(value) {
+function asTimestamp(value, { timezoneOffsetMinutes = null } = {}) {
   if (value === null) return null
   const text = String(value).trim()
 
@@ -204,6 +215,33 @@ function asTimestamp(value) {
     if (serial > 20_000 && serial < 80_000) {
       return new Date(Math.round((serial - 25_569) * 86_400_000))
     }
+  }
+  // A source-local timestamp without an offset must not inherit the runtime
+  // container timezone. Fixed source contracts may record their UTC offset so
+  // the same row normalizes identically in Shanghai, UTC, or a test process.
+  const local = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$/u.exec(text)
+  if (local && timezoneOffsetMinutes != null) {
+    const [, year, month, day, hour, minute, second, fraction = ''] = local
+    // PostgreSQL timestamps carry up to microseconds; canonical JS dates use
+    // milliseconds while the exact source text remains in raw lineage/cursor.
+    const milliseconds = Number(fraction.slice(0, 3).padEnd(3, '0'))
+    const parts = [year, month, day, hour, minute, second].map(Number)
+    const [yearNumber, monthNumber, dayNumber, hourNumber, minuteNumber, secondNumber] = parts
+    const localDate = new Date(0)
+    localDate.setUTCHours(hourNumber, minuteNumber, secondNumber, milliseconds)
+    localDate.setUTCFullYear(yearNumber, monthNumber - 1, dayNumber)
+    if (
+      localDate.getUTCFullYear() !== yearNumber
+      || localDate.getUTCMonth() !== monthNumber - 1
+      || localDate.getUTCDate() !== dayNumber
+      || localDate.getUTCHours() !== hourNumber
+      || localDate.getUTCMinutes() !== minuteNumber
+      || localDate.getUTCSeconds() !== secondNumber
+      || localDate.getUTCMilliseconds() !== milliseconds
+    ) return null
+    const utc = localDate.getTime() - timezoneOffsetMinutes * 60_000
+    const parsed = new Date(utc)
+    return Number.isNaN(parsed.getTime()) ? null : parsed
   }
   // Normalise "2026-08-06 11:20:25" to ISO; bare-space form is not valid ISO
   // and parses inconsistently across engines.
@@ -276,7 +314,7 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record', s
     if (value === null) continue
 
     if (rule?.type === 'province_code') mapped[target] = normalizeChinaProvince(String(value))?.code ?? null
-    else if (TIME_TARGETS.has(target)) mapped[target] = asTimestamp(value)
+    else if (TIME_TARGETS.has(target)) mapped[target] = asTimestamp(value, rule)
     else if (NUMBER_TARGETS.has(target) || METRIC_TARGETS.has(target)) mapped[target] = asNumber(value)
     else if (BOOLEAN_TARGETS.has(target)) mapped[target] = asBoolean(value)
     else if (JSON_TARGETS.has(target)) mapped[target] = value
@@ -364,7 +402,7 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record', s
   // the hash: they are part of the public/search projection, so excluding them
   // would update PostgreSQL without incrementing projection_revision and leave
   // Elasticsearch/AI reads stale.
-  record.payloadSha256 = sha256(canonicalJson(contentOnly(record)))
+  refreshMappedPayloadSha256(record)
   return { record, rejected: null }
 }
 
@@ -377,6 +415,16 @@ function contentOnly(record) {
     ...rest
   } = record
   return rest
+}
+
+/**
+ * Recompute the canonical/search digest after a fixed business transform adds
+ * reviewed typed fields. Raw lineage deliberately keeps its independent hash.
+ */
+export function refreshMappedPayloadSha256(record) {
+  if (!record) return record
+  record.payloadSha256 = sha256(canonicalJson(contentOnly(record)))
+  return record
 }
 
 /**

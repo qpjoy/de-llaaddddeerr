@@ -342,7 +342,23 @@ test('Telegram SQLite pause stops both sources immediately and drains before rec
   const fixture = pipelineFixture()
   for (const source of fixture.sources.values()) source.status = 'active'
   fixture.cursors.get('external:telegram-sqlite-api-messages').status = 'running'
+  const connections = [...fixture.sources.values()].map((source) => structuredClone(source.connection))
   const pipeline = new TelegramSQLitePipeline(fixture)
+
+  const hotUpdated = await pipeline.configure({ syncIntervalSeconds: 900 })
+  assert.equal(hotUpdated.status, 'active')
+  assert.equal(hotUpdated.draining, true)
+  assert.equal(hotUpdated.syncIntervalSeconds, 900)
+  assert.deepEqual(
+    [...fixture.sources.values()].map((source) => source.syncIntervalSeconds),
+    [900, 900],
+  )
+  assert.deepEqual(
+    [...fixture.sources.values()].map((source) => source.connection),
+    connections,
+  )
+  assert.equal(fixture.calls.some(([kind]) => kind === 'locks'), false)
+  assert.equal(fixture.calls.some(([kind]) => kind === 'testConnection'), false)
 
   const paused = await pipeline.setStatus('paused')
   assert.equal(paused.status, 'paused')
@@ -350,14 +366,15 @@ test('Telegram SQLite pause stops both sources immediately and drains before rec
   assert.equal(fixture.calls.some(([kind]) => kind === 'locks'), false)
   assert.equal([...fixture.sources.values()].every((source) => source.status === 'paused'), true)
   await assert.rejects(
-    () => pipeline.configure({ syncIntervalSeconds: 900 }),
+    () => pipeline.configure({ connection: { baseUrl: 'https://sqlite-new.test' } }),
     (error) => error?.code === 'source_draining',
   )
 
   fixture.cursors.get('external:telegram-sqlite-api-messages').status = 'idle'
-  const configured = await pipeline.configure({ syncIntervalSeconds: 900 })
+  const configured = await pipeline.configure({ connection: { baseUrl: 'https://sqlite-new.test' } })
   assert.equal(configured.draining, false)
   assert.equal(configured.syncIntervalSeconds, 900)
+  assert.equal(configured.connection.baseUrl, 'https://sqlite-new.test')
 })
 
 test('Telegram SQLite manual sync enqueues both tasks atomically with durable dedupe keys', async () => {

@@ -142,6 +142,7 @@ sudo qp-tunnel-cli wg preflight --server --subnet 100.127.50.0/24
 sudo qp-tunnel-cli wg install \
   --host 203.0.113.10 \
   --subnet 100.127.50.0/24 \
+  --dns '1.1.1.1, 8.8.8.8' \
   --port-range 20000-20100
 sudo qp-tunnel-cli wg create internal-01 --ip 100.127.50.10
 ```
@@ -152,11 +153,13 @@ Copy the generated `.conf` to the spoke, then enroll it:
 sudo qp-tunnel-cli wg enroll --file internal-01.conf
 ```
 
-The profile routes all IPv4 traffic through WireGuard (`0.0.0.0/0`) while
-retaining the client's existing DNS resolver. The default `100.127.50.0/24`
-avoids the OpenVPN default at `100.127.0.0/24`. `100.127.100.0/24` is another
-recommended start. `100.128.*` is rejected because RFC 6598 ends at
-`100.127.255.255`.
+The profile uses `DNS = 1.1.1.1, 8.8.8.8` and
+`AllowedIPs = 0.0.0.0/0, ::/0`. Override DNS at install time or per client with
+`--dns '1.1.1.1, 8.8.8.8, 172.31.0.2'`. IPv4 exits through the server; because
+the managed server is currently IPv4-only, `::/0` prevents native IPv6 bypass
+rather than providing IPv6 egress. The default `100.127.50.0/24` avoids the
+OpenVPN default at `100.127.0.0/24`. `100.127.100.0/24` is another recommended
+start. `100.128.*` is rejected because RFC 6598 ends at `100.127.255.255`.
 
 Rotate the live listener and all issued profiles with one command. Without a
 configured range it increments the current port by one; `--port` selects an

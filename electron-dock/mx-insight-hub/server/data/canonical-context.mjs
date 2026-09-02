@@ -2,6 +2,7 @@ import { AppError } from '../core/errors.mjs'
 import { publicStoredSearchItem } from './stored-search.mjs'
 
 const CONTEXT_QUERY_FIELDS = new Set(['after', 'before'])
+const EVENT_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.(\d{1,6}))?(?:Z|[+-]\d{2}:\d{2})$/
 export const DEFAULT_CANONICAL_CONTEXT_WINDOW = 10
 export const MAX_CANONICAL_CONTEXT_WINDOW = 50
 
@@ -71,8 +72,23 @@ export function normalizeCanonicalContextQuery(input = {}) {
   }
 }
 
-function publicContextItem(row) {
-  return publicStoredSearchItem({
+export function canonicalEventTimeCursor(value) {
+  if (value == null) return null
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime())
+      ? null
+      : `${value.toISOString().slice(0, -1)}000Z`
+  }
+  if (typeof value !== 'string') return null
+  const match = EVENT_TIME_PATTERN.exec(value)
+  if (!match) return null
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return null
+  return `${parsed.toISOString().slice(0, 19)}.${(match[1] || '').padEnd(6, '0')}Z`
+}
+
+export function publicCanonicalContextItem(row) {
+  const item = publicStoredSearchItem({
     id: row.id,
     datasetId: row.dataset_id,
     platform: row.platform,
@@ -90,9 +106,11 @@ function publicContextItem(row) {
     collectedAt: row.collected_at,
     score: null,
   })
+  const exactEventTime = canonicalEventTimeCursor(row.event_time_cursor)
+  return exactEventTime ? { ...item, eventTime: exactEventTime } : item
 }
 
-function upstreamWarning(upstreamCompleteness) {
+export function canonicalContextUpstreamWarning(upstreamCompleteness) {
   if (upstreamCompleteness.status === 'bounded') {
     return {
       code: 'upstream_completeness_bounded',
@@ -111,9 +129,9 @@ function upstreamWarning(upstreamCompleteness) {
 export function canonicalContextResponse({ query, result }) {
   const current = result.current
   const dataset = CANONICAL_CONTEXT_DATASETS[current.dataset_id]
-  const before = result.before.map(publicContextItem)
-  const currentItem = publicContextItem(current)
-  const after = result.after.map(publicContextItem)
+  const before = result.before.map(publicCanonicalContextItem)
+  const currentItem = publicCanonicalContextItem(current)
+  const after = result.after.map(publicCanonicalContextItem)
   const upstreamCompleteness = { ...dataset.upstreamCompleteness }
   return {
     contractVersion: 'mx-insight-hub.canonical-context.v1',
@@ -143,6 +161,6 @@ export function canonicalContextResponse({ query, result }) {
       quality: 'deterministic',
     },
     upstreamCompleteness,
-    warnings: [upstreamWarning(upstreamCompleteness)].filter(Boolean),
+    warnings: [canonicalContextUpstreamWarning(upstreamCompleteness)].filter(Boolean),
   }
 }
