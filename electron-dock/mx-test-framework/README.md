@@ -5,8 +5,26 @@
 被测应用自带用例代码，测试同学在界面上登记用例，平台负责调度、执行、留存结果。
 **它是独立平台**——不参与 mx-launcher 的发版流程，不进 AppCenter，只用它的账号登录。
 
-**当前状态：功能完成，待上机。** 82 个测试通过；尚未在 Internal 上跑过 `deploy`，
-派发 k8s Job 与 mx-launcher 登录这两条路径未在真实环境验证过。
+**当前状态：已在本机真实部署，罗盘 web 与 electron 两条流程端到端跑通。**
+205 个测试通过。真部署（docker compose：server + PostgreSQL，12 个迁移）、
+Cypress 23/23、Playwright `_electron` 4/4 —— 全部实跑验证，记录见
+[23-local-verification.md](specs/23-local-verification.md)。
+
+**尚未验证**：Internal 上的 `deploy`、k8s Job 派发、mx-launcher 登录。
+本机 k8s 卡在 kubeconfig 证书过期（[23 §4](specs/23-local-verification.md)）。
+
+## 两种部署形态，别搞混
+
+| | **Windows 本地服务版** | **正式形态** |
+| --- | --- | --- |
+| 用途 | **做测试、出 demo** | 团队日常、无人值守 |
+| 平台跑在 | 一台 Windows 的 Docker Desktop | 内网 **Linux** 服务器的 Kubernetes |
+| 执行机 | 同一台机器（自己连自己） | Linux 容器跑 Web；Windows / macOS 跑桌面端 |
+| 数据 | 随时可丢，重来即可 | 趋势的唯一来源，不能丢 |
+| 文档 | [24-windows-local-service.md](specs/24-windows-local-service.md) | [10](specs/10-deployment.md) + [15](specs/15-server-side-first-run.md) |
+
+**同一份代码、同一个镜像、同一套迁移，不同的只有部署拓扑。**
+桌面端那条链在两种形态下完全一致——在本地验过什么，上服务器就是什么。
 
 ## 三分钟上手
 
@@ -62,8 +80,13 @@ npx mxt-runner watch
 bash scripts/manage.sh deploy
 ```
 
-镜像 → 数据库迁移 → k8s 服务 → 自动冒烟。另有 `seed` / `verify` / `clean` /
-`status` / `logs` / `down`。详见 [10-deployment.md](specs/10-deployment.md)。
+数据库 → 镜像 → 迁移 → k8s 服务 → 自动冒烟，一条命令。`.env.internal` 里
+**只有 `MXT_ADMIN_TOKEN` 是必填的**：数据库默认由 deploy 自己拉起（namespace 内
+独立实例、独立磁盘，**不与 mx-insight-hub 共实例**），密码自动生成。设了
+`MXT_DATABASE_URL` 才改用外部实例。
+
+另有 `seed` / `verify` / `clean` / `status` / `logs` / `down`。
+详见 [10-deployment.md](specs/10-deployment.md)。
 
 ## 目录
 
@@ -76,7 +99,7 @@ bash scripts/manage.sh deploy
 | [`contracts/`](contracts/) | OpenAPI、runner summary 与 case catalog 的 schema |
 | [`migrations/`](migrations/) | PostgreSQL 迁移，由 `@qpjoy/mx-common` 执行 |
 | [`deploy/`](deploy/) | k8s 清单与本地 compose |
-| [`tests/`](tests/) | 82 个测试 |
+| [`tests/`](tests/) | 205 个测试 |
 
 ## 四条硬约束
 

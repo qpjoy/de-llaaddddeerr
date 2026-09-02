@@ -31,6 +31,21 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        # Same reason as the database's: a hostPath volume does not get
+        # `fsGroup` applied, so it arrives owned by root and the unprivileged
+        # server cannot write a single artifact into it. The failure surfaces
+        # much later than the deploy — as uploads failing on the first real run.
+        - name: fix-permissions
+          image: mx-test-framework:latest
+          imagePullPolicy: IfNotPresent
+          command: ['sh', '-c', 'chown -R 1000:1000 /data/artifacts']
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: artifacts
+              mountPath: /data/artifacts
       containers:
         - name: server
           image: mx-test-framework:latest
@@ -60,6 +75,30 @@ spec:
                 secretKeyRef:
                   name: mx-test-framework-secrets
                   key: MXT_LAUNCHER_URL
+                  optional: true
+            # The address a person can open, used for the link in an alert.
+            # Optional: without it notifications still arrive, just without a
+            # link. `optional: true` so a deployment predating it still starts.
+            - name: MXT_PUBLIC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-test-framework-secrets
+                  key: MXT_PUBLIC_URL
+                  optional: true
+            - name: MXT_GIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-test-framework-secrets
+                  key: MXT_GIT_TOKEN
+                  optional: true
+            # Encrypts the credential store. Without it the platform refuses to
+            # hold secrets rather than storing them in plaintext, so a run whose
+            # suite declares secretRefs would be blocked with that reason.
+            - name: MXT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mx-test-framework-secrets
+                  key: MXT_SECRET_KEY
                   optional: true
             - name: MXT_DATABASE_URL
               valueFrom:

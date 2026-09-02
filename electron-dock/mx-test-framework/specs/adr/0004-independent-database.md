@@ -9,7 +9,12 @@ MXT 需要持久化。同一 PostgreSQL 实例上已有 `mx-insight-hub` 的库�
 
 ## 决策
 
-- MXT 使用**独立数据库 `mx_test`**，不与 insight-hub 或 launcher 共库、共表。
+> **2026-08-31 修订**：原决策是"同实例、独立库"。实测复核后收紧为**独立实例**，
+> 理由见下方「为什么独立库不够」。其余部分不变。
+
+- MXT 使用**独立的 PostgreSQL 实例**，不与 insight-hub 或 launcher 共实例、共库、共表。
+  实例由 `deploy/k8s/internal/15-postgres.yaml` 在 MXT 自己的 namespace 里拉起；
+  设置 `MXT_DATABASE_URL` 可改为指向外部实例。
 - 迁移复用 `@qpjoy/mx-common` 的 `runMigrations`（advisory lock + `schema_migrations`
   + checksum 不可变校验），连接池复用 `createPool`。
 - 迁移文件位于 `migrations/NNN_*.sql`，与 insight-hub 的命名一致。
@@ -31,9 +36,20 @@ MXT 需要持久化。同一 PostgreSQL 实例上已有 `mx-insight-hub` 的库�
 **这与 insight-hub 的 ADR-0003（independent transactional store）是同一条推理**，
 只是换了个应用。同级应用之间共享的是**代码**（`@qpjoy/mx-common`），不是**存储**。
 
+### 为什么独立库不够
+
+独立库挡住了表名冲突和误删，但**实例级的东西一样也没挡住**：连接数上限、
+page cache、autovacuum 工作线程，以及一次重启。上面那三条理由——vacuum 压力、
+生命周期不同、故障隔离——全部是实例级的，独立库一条都解决不了。
+
+约束是"MXT 做的任何事都不能表现为数据平台的延迟"。独立实例是最便宜的兑现方式，
+代价是一个 pod 加一块 20Gi 磁盘。按 23 用例 × 24 次/天的量级，`mxt_run_cases`
+一年不到 1GB，20Gi 是给五年加索引留的余量。
+
 ## 后果
 
-- 需要在部署时创建 `mx_test` 库并配 `MXT_DATABASE_URL`。
+- 部署时不需要任何数据库配置：`manage.sh deploy` 自建实例、自动生成密码。
+  `.env.internal` 里只剩 `MXT_ADMIN_TOKEN` 必填。
 - 跨库关联（例如"这次执行对应哪个版本"）只能靠 ID 引用，不能 JOIN。
   这是可接受的——`mxt_runs.source_ref` 存 `{gitSha, version}` 字符串即可。
 - 共用实例仍有资源竞争（CPU、IO、连接数）。如果将来成为问题，独立库的好处是
@@ -43,6 +59,8 @@ MXT 需要持久化。同一 PostgreSQL 实例上已有 `mx-insight-hub` 的库�
 
 - **共用 insight-hub 库加 schema 隔离**：schema 隔离挡不住 vacuum 压力、
   连接池竞争和迁移故障传播。
+- **共用实例、独立库**（本 ADR 的原决策）：同上，独立库只隔离了命名，
+  没隔离资源。
 - **写进 launcher 的 PlatformStore JSONB**：JSONB 兼容记录适合少量平台对象，
   撑不住 run/case/step 的量级与查询模式（趋势查询需要真正的索引）。
 - **不落库，只存文件**：放弃历史、趋势与 flaky 检测——这正是要建平台的原因。

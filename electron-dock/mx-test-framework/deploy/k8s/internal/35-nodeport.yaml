@@ -1,0 +1,34 @@
+# How a person reaches the platform from their own machine.
+#
+# The ClusterIP Service in 30-server.yaml is reachable only from inside the
+# cluster, which left `kubectl port-forward` as the only way in. That is fine
+# for a smoke test and useless for "open the report and watch the recording".
+#
+# NodePort rather than Ingress on purpose: an Ingress needs a controller and a
+# hostname, and this is an internal tool on an intranet. NodePort needs neither
+# and works the moment the deploy finishes. If an ingress controller shows up
+# later, add an Ingress next to this and drop the port.
+#
+# Reachable at http://<服务器地址>:30879.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-test-framework-external
+  namespace: mx-test-framework
+  labels:
+    app.kubernetes.io/part-of: mx-test-framework
+  annotations:
+    mxt.qpjoy.dev/purpose: "browser access from the intranet"
+spec:
+  type: NodePort
+  # Default (Cluster) traffic policy, not Local. Local would preserve the client
+  # address but only answer on the node actually running the single replica —
+  # on a one-node cluster that is the same thing, and the day a second node
+  # appears it would silently make the port dead on that node.
+  selector:
+    app.kubernetes.io/name: mx-test-framework
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30879

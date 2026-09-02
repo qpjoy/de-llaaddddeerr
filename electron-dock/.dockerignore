@@ -1,0 +1,48 @@
+# Build context for mx-test-framework's image is this directory rather than the
+# project's own, because the image needs mx-common and mx-launcher/ui-design
+# next to it (both are `file:` dependencies).
+#
+# The cost of that choice is that Docker tars up every sibling project on its
+# way to the daemon. mx-launcher alone carries four node_modules trees, one of
+# them an Electron desktop app's — so without this file, `manage.sh deploy`
+# ships gigabytes before it runs a single build step.
+#
+# mx-insight-hub builds from its own directory with `--build-context`, so these
+# rules do not affect it.
+#
+# Listed as explicit exclusions rather than an allowlist with `!` negations:
+# negation ordering in .dockerignore is easy to get subtly wrong, and the
+# failure mode is a missing file inside the image rather than an error here.
+
+**/node_modules
+**/.git
+**/.runtime
+**/coverage
+**/*.log
+
+# Never ship credentials into a build context.
+**/.env
+**/.env.*
+
+# Regenerated inside the image by ui-design/scripts/build.mjs, which uses only
+# node built-ins. Excluding it keeps a stale local build out of the image.
+**/dist
+
+# Siblings the Dockerfile never copies. mx-launcher/ui-design is the one part of
+# mx-launcher the image needs, so the rest of it is excluded piece by piece.
+mx-insight-hub/
+mx-launcher/demos/
+mx-launcher/deploy/
+mx-launcher/desktop/
+mx-launcher/docs/
+mx-launcher/packages/
+mx-launcher/scripts/
+mx-launcher/server/
+mx-launcher/setup/
+mx-launcher/site-slots/
+
+# Local scratch and editor state.
+**/.DS_Store
+**/.vscode/
+**/.idea/
+**/tmp/

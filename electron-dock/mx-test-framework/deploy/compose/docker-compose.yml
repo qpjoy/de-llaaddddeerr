@@ -1,10 +1,14 @@
-# Local development stack. Not a production topology — the Internal deployment
-# uses the shared mx-common PostgreSQL instance, not this throwaway container.
+# Local stack: the whole platform on one machine, with a real database and real
+# migrations. Not the Internal topology — that one brings up its own PostgreSQL
+# StatefulSet in Kubernetes (deploy/k8s/internal/15-postgres.yaml) — but every
+# code path below the deployment layer is the same one production takes.
 name: mx-test-framework
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # Same major version as the Internal StatefulSet, so a dump taken here
+    # restores there.
+    image: postgres:17-alpine
     environment:
       POSTGRES_DB: mx_test
       POSTGRES_USER: mxtest
@@ -21,7 +25,10 @@ services:
 
   migrate:
     build:
-      context: ../..
+      # electron-dock/, not mx-test-framework/: the Dockerfile copies in
+      # ../mx-common and ../mx-launcher/ui-design, so the context has to be the
+      # directory that contains all three.
+      context: ../../..
       dockerfile: mx-test-framework/Dockerfile
     command: ["node", "server/migrate.mjs"]
     environment:
@@ -32,7 +39,10 @@ services:
 
   server:
     build:
-      context: ../..
+      # electron-dock/, not mx-test-framework/: the Dockerfile copies in
+      # ../mx-common and ../mx-launcher/ui-design, so the context has to be the
+      # directory that contains all three.
+      context: ../../..
       dockerfile: mx-test-framework/Dockerfile
     environment:
       MXT_STORE: postgres
@@ -40,6 +50,16 @@ services:
       MXT_ADMIN_TOKEN: local-admin-change-me
       MXT_ARTIFACTS_DIR: /data/artifacts
       MXT_PORT: "8790"
+      # Plain HTTP on localhost: without this the session cookie carries the
+      # Secure flag and never comes back, so the browser can log in and then
+      # immediately appear logged out.
+      MXT_INSECURE_COOKIES: "true"
+      # The address a person opens. Notification links use it; unset means
+      # alerts arrive without one.
+      MXT_PUBLIC_URL: http://127.0.0.1:8790
+      # Encrypts the credential store. Fixed here because this stack is
+      # disposable — the Internal deploy generates one and keeps it in a Secret.
+      MXT_SECRET_KEY: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
     ports:
       - "8790:8790"
     volumes:

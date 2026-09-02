@@ -21,8 +21,34 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # PostgreSQL in the shared mx-common data plane.
+    # PostgreSQL. Normally MXT's own instance in this namespace; the port is
+    # left open rather than pinned to a pod selector so that pointing
+    # MXT_DATABASE_URL at an external instance keeps working.
     - ports:
+        - port: 5432
+          protocol: TCP
+---
+# The bundled database answers to the platform and to nothing else. Without
+# this it would be reachable from every pod in the cluster, which is a strange
+# way to store test results next to a data platform you were asked to keep out
+# of harm's way.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-test-framework-postgres
+  namespace: mx-test-framework
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mx-test-framework-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: mx-test-framework
+      ports:
         - port: 5432
           protocol: TCP
     # Kubernetes API (runner Jobs) and mx-launcher introspection.

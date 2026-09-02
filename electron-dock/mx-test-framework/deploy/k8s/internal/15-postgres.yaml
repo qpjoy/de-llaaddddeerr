@@ -1,0 +1,151 @@
+# MXT's own PostgreSQL, in MXT's own namespace, on MXT's own disk.
+#
+# ADR-0004 originally called for an independent *database* on the shared
+# instance. That is not enough. A test platform writes hundreds of rows per run
+# and deletes them in bulk when the retention window closes; the dead tuples and
+# vacuum pressure from that cycle are paid for by every other database on the
+# instance, including mx-insight-hub's. Sharing an instance also shares a
+# connection limit, a page cache and a restart.
+#
+# The constraint is simply stated: nothing MXT does may show up as latency in
+# the data platform. A separate instance is the cheapest way to mean it, and at
+# this size it costs one pod and one volume.
+#
+# Applied by `manage.sh deploy` only when MXT_DATABASE_URL is not set. Point
+# that variable at an external instance and this file is skipped entirely.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mx-test-framework-postgres-pv
+  labels:
+    app.kubernetes.io/part-of: mx-test-framework
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  # Retain, not Delete: `manage.sh down` must never be the thing that loses the
+  # run history, because the history is the entire reason the platform exists.
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: mx-test-framework-postgres
+  hostPath:
+    path: /var/lib/mx-test-framework/postgres
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-test-framework-postgres
+  namespace: mx-test-framework
+  labels:
+    app.kubernetes.io/name: mx-test-framework-postgres
+    app.kubernetes.io/part-of: mx-test-framework
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mx-test-framework-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mx-test-framework-postgres
+  namespace: mx-test-framework
+  labels:
+    app.kubernetes.io/name: mx-test-framework-postgres
+    app.kubernetes.io/part-of: mx-test-framework
+spec:
+  serviceName: mx-test-framework-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-test-framework-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-test-framework-postgres
+        app.kubernetes.io/part-of: mx-test-framework
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # hostPath volumes do not get `fsGroup` applied — Kubernetes only
+        # reconciles ownership for volume types that support it, and hostPath is
+        # not one of them. The directory arrives owned by root, and the
+        # unprivileged postgres user then fails with
+        # `mkdir: can't create directory '.../pgdata': Permission denied`.
+        #
+        # Fixing it in an init container keeps the database itself unprivileged:
+        # only this three-second step runs as root.
+        - name: fix-permissions
+          image: postgres:17-alpine
+          command: ['sh', '-c', 'chown -R 999:999 /var/lib/postgresql/data']
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: mx_test
+            - name: POSTGRES_USER
+              value: mxt
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mx-test-framework-secrets
+                  key: MXT_POSTGRES_PASSWORD
+            # The image only initialises a data directory it owns. Giving it a
+            # subdirectory keeps it away from a `lost+found` on a mounted volume.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "mxt", "-d", "mx_test"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "mxt", "-d", "mx_test"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: mx-test-framework-postgres
+        resources:
+          requests:
+            storage: 20Gi

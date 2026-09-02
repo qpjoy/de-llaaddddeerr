@@ -1,0 +1,30 @@
+# JENKINS_HOME. Small on purpose: agent pods are ephemeral so no workspace ever
+# lands here, and job configuration comes from JCasC in git. What remains is
+# build history, which logRotator caps.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mx-base-jenkins-home-pv
+  labels:
+    app.kubernetes.io/part-of: mx-base
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: mx-base-jenkins-home
+  hostPath:
+    path: /var/lib/mx-base/jenkins-home
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mx-base-jenkins-home
+  namespace: mx-base
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: mx-base-jenkins-home
+  resources:
+    requests:
+      storage: 20Gi

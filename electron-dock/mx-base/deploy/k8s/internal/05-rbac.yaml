@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mx-base-jenkins
+  namespace: mx-base
+---
+# Jenkins creates one agent pod per build and deletes it afterwards. That is the
+# whole permission set it needs — scoped to its own namespace, and deliberately
+# not including secrets: a controller that can read every Secret in the cluster
+# is a controller whose plugin supply chain is now a cluster-wide risk.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mx-base-jenkins-agents
+  namespace: mx-base
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/log"]
+    verbs: ["create", "get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mx-base-jenkins-agents
+  namespace: mx-base
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mx-base-jenkins-agents
+subjects:
+  - kind: ServiceAccount
+    name: mx-base-jenkins
+    namespace: mx-base

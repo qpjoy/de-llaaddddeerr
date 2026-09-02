@@ -13,6 +13,9 @@ function mapApp(row) {
     slug: row.slug,
     displayName: row.display_name,
     repoUrl: row.repo_url,
+    defaultBranch: row.default_branch ?? null,
+    latestPackage: row.latest_package ?? null,
+    webhookSecret: row.webhook_secret ?? null,
     surfaces: row.surfaces ?? [],
     catalogGlob: row.catalog_glob,
     enabled: row.enabled,
@@ -28,8 +31,14 @@ function mapSuite(row) {
     displayName: row.display_name,
     engine: row.engine,
     surface: row.surface,
+    kind: row.kind ?? 'test',
+    artifactPath: row.artifact_path ?? null,
+    repoUrl: row.repo_url ?? null,
+    defaultBranch: row.default_branch ?? null,
     runnerKind: row.runner_kind,
     runnerImage: row.runner_image,
+    workingDir: row.working_dir ?? null,
+    targetMode: row.target_mode ?? 'external',
     requirements: row.requirements ?? {},
     command: row.command ?? [],
     retryPolicy: row.retry_policy ?? {},
@@ -37,6 +46,66 @@ function mapSuite(row) {
     writesData: row.writes_data,
     enabled: row.enabled,
     createdAt: iso(row.created_at),
+  }
+}
+
+function mapSecret(row) {
+  return {
+    id: row.id,
+    appId: row.app_id,
+    name: row.name,
+    ciphertext: row.ciphertext,
+    iv: row.iv,
+    tag: row.tag,
+    description: row.description,
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  }
+}
+
+function mapAuditEvent(row) {
+  return {
+    id: row.id,
+    actorId: row.actor_id,
+    actorName: row.actor_name,
+    action: row.action,
+    resourceType: row.resource_type,
+    resourceId: row.resource_id,
+    appId: row.app_id,
+    before: row.before ?? null,
+    after: row.after ?? null,
+    sourceIp: row.source_ip,
+    createdAt: iso(row.created_at),
+  }
+}
+
+function mapChannel(row) {
+  return {
+    id: row.id,
+    appId: row.app_id,
+    name: row.name,
+    kind: row.kind,
+    config: row.config ?? {},
+    events: row.events ?? [],
+    enabled: row.enabled,
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at),
+  }
+}
+
+function mapNotification(row) {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    runId: row.run_id,
+    event: row.event,
+    payload: row.payload ?? {},
+    status: row.status,
+    attempts: row.attempts,
+    lastError: row.last_error,
+    createdAt: iso(row.created_at),
+    deliveredAt: iso(row.delivered_at),
   }
 }
 
@@ -109,6 +178,7 @@ function mapRun(row) {
     trigger: row.trigger,
     targetUrl: row.target_url,
     sourceRef: row.source_ref ?? {},
+    appPackage: row.app_package ?? null,
     runnerId: row.runner_id,
     runTokenSha256: row.run_token_sha256,
     artifacts: row.artifacts ?? {},
@@ -187,13 +257,15 @@ export class PostgresStore {
     const id = newId('app')
     try {
       const { rows } = await this.pool.query(
-        `INSERT INTO mxt_apps (id, slug, display_name, repo_url, surfaces, catalog_glob)
-         VALUES ($1,$2,$3,$4,$5::jsonb,$6) RETURNING *`,
+        `INSERT INTO mxt_apps
+           (id, slug, display_name, repo_url, default_branch, surfaces, catalog_glob)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7) RETURNING *`,
         [
           id,
           input.slug,
           input.displayName,
           input.repoUrl ?? null,
+          input.defaultBranch ?? null,
           JSON.stringify(input.surfaces ?? []),
           input.catalogGlob ?? null,
         ],
@@ -222,6 +294,37 @@ export class PostgresStore {
     return rows[0] ? mapApp(rows[0]) : null
   }
 
+  async setWebhookSecret(appId, record) {
+    const { rows } = await this.pool.query(
+      'UPDATE mxt_apps SET webhook_secret = $2::jsonb, updated_at = now() WHERE id = $1 RETURNING *',
+      [appId, JSON.stringify(record)],
+    )
+    return rows[0] ? mapApp(rows[0]) : null
+  }
+
+  async getWebhookSecret(appId) {
+    const { rows } = await this.pool.query('SELECT webhook_secret FROM mxt_apps WHERE id = $1', [appId])
+    return rows[0]?.webhook_secret ?? null
+  }
+
+  async findRunByTaskAndSha(taskId, gitSha) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM mxt_runs
+       WHERE task_id = $1 AND source_ref ->> 'gitSha' = $2 AND trigger = 'webhook'
+       LIMIT 1`,
+      [taskId, gitSha],
+    )
+    return rows[0] ? mapRun(rows[0]) : null
+  }
+
+  async setLatestPackage(appId, pkg) {
+    const { rows } = await this.pool.query(
+      'UPDATE mxt_apps SET latest_package = $2::jsonb, updated_at = now() WHERE id = $1 RETURNING *',
+      [appId, JSON.stringify(pkg)],
+    )
+    return rows[0] ? mapApp(rows[0]) : null
+  }
+
   // -- suites ----------------------------------------------------------------
 
   async createSuite(input) {
@@ -230,8 +333,9 @@ export class PostgresStore {
       const { rows } = await this.pool.query(
         `INSERT INTO mxt_suites
            (id, app_id, slug, display_name, engine, surface, runner_kind, runner_image,
+            working_dir, target_mode, kind, repo_url, default_branch, artifact_path,
             requirements, command, retry_policy, secret_refs, writes_data)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12::jsonb,$13)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18::jsonb,$19)
          RETURNING *`,
         [
           id,
@@ -242,6 +346,12 @@ export class PostgresStore {
           input.surface,
           input.runnerKind,
           input.runnerImage ?? null,
+          input.workingDir ?? null,
+          input.targetMode ?? 'external',
+          input.kind ?? 'test',
+          input.repoUrl ?? null,
+          input.defaultBranch ?? null,
+          input.artifactPath ?? null,
           JSON.stringify(input.requirements ?? {}),
           JSON.stringify(input.command ?? []),
           JSON.stringify(input.retryPolicy ?? {}),
@@ -256,6 +366,54 @@ export class PostgresStore {
       }
       throw error
     }
+  }
+
+  // Partial update of a suite. Only the columns actually present in `patch` are
+  // written, so a caller fixing one field cannot blank the rest by omission.
+  //
+  // A suite that was registered wrong — the wrong command, the wrong repository
+  // — was previously only fixable in the database. That is not an operation a
+  // test lead can be asked to perform, and it made every onboarding script's
+  // "already exists, skipping" a permanent decision.
+  async updateSuite(id, patch) {
+    const columns = {
+      displayName: 'display_name',
+      engine: 'engine',
+      surface: 'surface',
+      runnerKind: 'runner_kind',
+      runnerImage: 'runner_image',
+      workingDir: 'working_dir',
+      targetMode: 'target_mode',
+      kind: 'kind',
+      repoUrl: 'repo_url',
+      defaultBranch: 'default_branch',
+      artifactPath: 'artifact_path',
+      writesData: 'writes_data',
+    }
+    const json = {
+      requirements: 'requirements',
+      command: 'command',
+      retryPolicy: 'retry_policy',
+      secretRefs: 'secret_refs',
+    }
+    const sets = []
+    const values = [id]
+    for (const [key, column] of Object.entries(columns)) {
+      if (!(key in patch)) continue
+      values.push(patch[key] ?? null)
+      sets.push(`${column} = $${values.length}`)
+    }
+    for (const [key, column] of Object.entries(json)) {
+      if (!(key in patch)) continue
+      values.push(JSON.stringify(patch[key]))
+      sets.push(`${column} = $${values.length}::jsonb`)
+    }
+    if (sets.length === 0) return this.getSuite(id)
+    const { rows } = await this.pool.query(
+      `UPDATE mxt_suites SET ${sets.join(', ')} WHERE id = $1 RETURNING *`,
+      values,
+    )
+    return rows[0] ? mapSuite(rows[0]) : null
   }
 
   async listSuites(appId) {
@@ -439,8 +597,8 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       `INSERT INTO mxt_runs
          (id, app_id, suite_id, task_id, profile, track, engine, status, trigger,
-          target_url, source_ref, claim_deadline, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13) RETURNING *`,
+          target_url, source_ref, app_package, claim_deadline, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13,$14) RETURNING *`,
       [
         id,
         input.appId,
@@ -453,6 +611,7 @@ export class PostgresStore {
         input.trigger,
         input.targetUrl ?? null,
         JSON.stringify(input.sourceRef ?? {}),
+        input.appPackage ? JSON.stringify(input.appPackage) : null,
         input.claimDeadline ?? null,
         input.createdBy ?? null,
       ],
@@ -570,6 +729,10 @@ export class PostgresStore {
         `UPDATE mxt_runs SET
            status = $2, finished_at = $3, duration_ms = $4, totals = $5::jsonb,
            catalog = $6::jsonb, artifacts = $7::jsonb, blocked_reason = $8,
+           -- Which commit was actually tested. Written here rather than left at
+           -- whatever the run was created with, because the runner reads it back
+           -- after checkout and that is the only value that describes what ran.
+           source_ref = $9::jsonb,
            -- The credential dies with the run: a crashed-and-restarted runner
            -- must not be able to rewrite a result already recorded.
            lease_until = NULL, run_token_sha256 = NULL
@@ -583,6 +746,7 @@ export class PostgresStore {
           JSON.stringify(run.catalog ?? {}),
           JSON.stringify(run.artifacts ?? {}),
           run.blockedReason ?? null,
+          JSON.stringify(run.sourceRef ?? {}),
         ],
       )
       if (!rows[0]) return null
@@ -856,6 +1020,233 @@ export class PostgresStore {
       taskId: row.task_id,
     }))
   }
+
+  // -- notifications ---------------------------------------------------------
+
+  async createNotificationChannel(input) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO mxt_notification_channels (id, app_id, name, kind, config, events, enabled, created_by)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8) RETURNING *`,
+      [
+        newId('nch'),
+        input.appId ?? null,
+        input.name,
+        input.kind,
+        JSON.stringify(input.config ?? {}),
+        JSON.stringify(input.events ?? ['failure', 'recovery', 'blocked']),
+        input.enabled !== false,
+        input.createdBy ?? null,
+      ],
+    )
+    return mapChannel(rows[0])
+  }
+
+  async listNotificationChannels({ enabled = null, appId = undefined } = {}) {
+    const where = []
+    const values = []
+    if (enabled !== null) {
+      values.push(enabled)
+      where.push(`enabled = $${values.length}`)
+    }
+    if (appId !== undefined) {
+      if (appId === null) {
+        where.push('app_id IS NULL')
+      } else {
+        values.push(appId)
+        where.push(`app_id = $${values.length}`)
+      }
+    }
+    const { rows } = await this.pool.query(
+      `SELECT * FROM mxt_notification_channels
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY created_at`,
+      values,
+    )
+    return rows.map(mapChannel)
+  }
+
+  async getNotificationChannel(id) {
+    const { rows } = await this.pool.query('SELECT * FROM mxt_notification_channels WHERE id = $1', [id])
+    return rows[0] ? mapChannel(rows[0]) : null
+  }
+
+  async updateNotificationChannel(id, patch) {
+    const { rows } = await this.pool.query(
+      `UPDATE mxt_notification_channels
+         SET name = COALESCE($2, name),
+             config = COALESCE($3::jsonb, config),
+             events = COALESCE($4::jsonb, events),
+             enabled = COALESCE($5, enabled),
+             updated_at = now()
+       WHERE id = $1 RETURNING *`,
+      [
+        id,
+        patch.name ?? null,
+        patch.config ? JSON.stringify(patch.config) : null,
+        patch.events ? JSON.stringify(patch.events) : null,
+        patch.enabled ?? null,
+      ],
+    )
+    return rows[0] ? mapChannel(rows[0]) : null
+  }
+
+  async deleteNotificationChannel(id) {
+    const { rowCount } = await this.pool.query('DELETE FROM mxt_notification_channels WHERE id = $1', [id])
+    return rowCount > 0
+  }
+
+  async createNotification(input) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO mxt_notifications (id, channel_id, run_id, event, payload)
+       VALUES ($1,$2,$3,$4,$5::jsonb) RETURNING *`,
+      [newId('ntf'), input.channelId, input.runId ?? null, input.event, JSON.stringify(input.payload ?? {})],
+    )
+    return mapNotification(rows[0])
+  }
+
+  async listPendingNotifications({ limit = 50 } = {}) {
+    // FOR UPDATE SKIP LOCKED is not used: the scheduler is single-replica by
+    // design (30-server.yaml pins replicas to 1). If that ever changes, this is
+    // the query that has to change with it.
+    const { rows } = await this.pool.query(
+      `SELECT * FROM mxt_notifications WHERE status = 'pending' ORDER BY created_at LIMIT $1`,
+      [limit],
+    )
+    return rows.map(mapNotification)
+  }
+
+  async listNotifications({ runId = null, limit = 50 } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM mxt_notifications
+       ${runId ? 'WHERE run_id = $2' : ''}
+       ORDER BY created_at DESC LIMIT $1`,
+      runId ? [limit, runId] : [limit],
+    )
+    return rows.map(mapNotification)
+  }
+
+  async updateNotification(id, patch) {
+    const { rows } = await this.pool.query(
+      `UPDATE mxt_notifications
+         SET status = COALESCE($2, status),
+             attempts = COALESCE($3, attempts),
+             last_error = $4,
+             delivered_at = COALESCE($5, delivered_at)
+       WHERE id = $1 RETURNING *`,
+      [id, patch.status ?? null, patch.attempts ?? null, patch.lastError ?? null, patch.deliveredAt ?? null],
+    )
+    return rows[0] ? mapNotification(rows[0]) : null
+  }
+
+  async findPreviousFinishedRun(taskId, excludeRunId) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM mxt_runs
+       WHERE task_id = $1 AND id <> $2 AND finished_at IS NOT NULL
+         AND status IN ('passed','failed','blocked')
+       ORDER BY finished_at DESC LIMIT 1`,
+      [taskId, excludeRunId],
+    )
+    return rows[0] ? mapRun(rows[0]) : null
+  }
+
+  // -- secrets ---------------------------------------------------------------
+
+  async putSecret(input) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO mxt_secrets (id, app_id, name, ciphertext, iv, tag, description, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (app_id, name) DO UPDATE
+         SET ciphertext = EXCLUDED.ciphertext,
+             iv = EXCLUDED.iv,
+             tag = EXCLUDED.tag,
+             description = COALESCE(EXCLUDED.description, mxt_secrets.description),
+             updated_at = now()
+       RETURNING *`,
+      [
+        newId('sec'),
+        input.appId,
+        input.name,
+        input.ciphertext,
+        input.iv,
+        input.tag,
+        input.description ?? null,
+        input.createdBy ?? null,
+      ],
+    )
+    return mapSecret(rows[0])
+  }
+
+  async listSecrets(appId) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM mxt_secrets WHERE app_id = $1 ORDER BY name',
+      [appId],
+    )
+    return rows.map(mapSecret)
+  }
+
+  async deleteSecret(appId, name) {
+    const { rowCount } = await this.pool.query(
+      'DELETE FROM mxt_secrets WHERE app_id = $1 AND name = $2',
+      [appId, name],
+    )
+    return rowCount > 0
+  }
+
+  // -- audit -----------------------------------------------------------------
+
+  async createAuditEvent(input) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO mxt_audit_events
+         (id, actor_id, actor_name, action, resource_type, resource_id, app_id, before, after, source_ip)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10) RETURNING *`,
+      [
+        newId('aud'),
+        input.actorId ?? null,
+        input.actorName ?? null,
+        input.action,
+        input.resourceType,
+        input.resourceId ?? null,
+        input.appId ?? null,
+        input.before ? JSON.stringify(input.before) : null,
+        input.after ? JSON.stringify(input.after) : null,
+        input.sourceIp ?? null,
+      ],
+    )
+    return mapAuditEvent(rows[0])
+  }
+
+  async listAuditEvents({ resourceType = null, resourceId = null, appId = null, limit = 100 } = {}) {
+    const where = []
+    const values = [limit]
+    for (const [column, value] of [
+      ['resource_type', resourceType],
+      ['resource_id', resourceId],
+      ['app_id', appId],
+    ]) {
+      if (value) {
+        values.push(value)
+        where.push(`${column} = $${values.length}`)
+      }
+    }
+    const { rows } = await this.pool.query(
+      `SELECT * FROM mxt_audit_events
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY created_at DESC LIMIT $1`,
+      values,
+    )
+    return rows.map(mapAuditEvent)
+  }
+
+  async findLastPassingRun(taskId, excludeRunId) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM mxt_runs
+       WHERE task_id = $1 AND id <> $2 AND status = 'passed'
+       ORDER BY finished_at DESC LIMIT 1`,
+      [taskId, excludeRunId],
+    )
+    return rows[0] ? mapRun(rows[0]) : null
+  }
+
 }
 
 export function createPostgresStore({ connectionString, maxConnections = 10 }) {

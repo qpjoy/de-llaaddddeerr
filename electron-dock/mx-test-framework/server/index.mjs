@@ -4,7 +4,8 @@ import { createApp } from './app.mjs'
 import { ArtifactStore } from './artifacts.mjs'
 import { loadConfig } from './config.mjs'
 import { createIdentity } from './identity/index.mjs'
-import { KubernetesDispatcher, dispatchQueued } from './runner/dispatcher.mjs'
+import { deliverPending } from './notify/dispatch.mjs'
+import { KubernetesDispatcher, dispatchQueued, reconcileServerRuns } from './runner/dispatcher.mjs'
 import { startScheduler } from './scheduler.mjs'
 import { MemoryStore } from './store/memory.mjs'
 
@@ -29,7 +30,16 @@ export async function createRuntime(config = loadConfig(), { schedule = true } =
     ? startScheduler({
         store,
         intervalMs: config.schedulerIntervalMs,
-        onTick: () => dispatchServerRuns({ store, dispatcher, config }),
+        onTick: async () => {
+          // Reconcile first: a run whose Job already died should be closed out
+          // before this tick considers dispatching anything else, so the run
+          // list never shows a finished failure as still running.
+          await reconcileServerRuns({ store, dispatcher })
+          // Drain the notification outbox on the same tick. Delivery failures
+          // are retried on later ticks and must never stop dispatching.
+          await deliverPending({ store }).catch(() => {})
+          return dispatchServerRuns({ store, dispatcher, config })
+        },
       })
     : () => {}
   return { store, app, config, identity, artifacts, dispatcher, stopScheduler }

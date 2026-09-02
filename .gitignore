@@ -6,7 +6,7 @@ config.env
 
 .DS_Store
 .pnpm-store/
-node_modules/
+node_modules
 dist/
 
 # Docker VPN runtime artifacts

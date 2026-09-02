@@ -1,0 +1,11 @@
+# Pinned deliberately: an unpinned plugin set means a controller rebuilt six
+# months from now is a different controller. Update by editing this file.
+configuration-as-code:1932.v75cb_b_f1b_698d
+kubernetes:4375.v8d0a_e6bf_7d3c
+workflow-aggregator:608.v67378e9d3db_1
+git:5.7.0
+job-dsl:1.90
+credentials-binding:687.v619cb_15e923f
+timestamper:1.28
+ws-cleanup:0.48
+junit:1311.v34bc4b_a_e2149

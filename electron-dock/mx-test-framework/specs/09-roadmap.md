@@ -2,6 +2,54 @@
 
 每个阶段的出口标准都是"能被别人验证"，不是"代码写完了"。
 
+## 2026-09-01 实测核查
+
+一次逐条实跑的状态核对。**结论：控制面是完整可用的，但平台里还没有一条真实用例。**
+
+| 已实跑验证 | 结果 |
+| --- | --- |
+| 单元 + API 测试 | 97/97 |
+| `scripts/verify.mjs` 端到端 16 项断言 | 全过（注册应用 → 建套件 → 同步目录 → 建任务 → 执行 → 认领 → 归一 → 查步骤） |
+| Web UI | 登录、概览、执行详情（用例级 ID、错误堆栈、步骤时间轴、drift 提示）全部正常 |
+| `seed.mjs` 示例数据 | 正常 |
+| `mxt-runner` CLI | 能起，子命令齐 |
+| runner 容器脚本 6 个场景 | 退出码 0/1/2/2/2/2 全部正确，payload 均为合法 JSON |
+| k8s 清单结构 | 8 个文件解析正常 |
+| Dockerfile 的 COPY 源 | 全部存在；`ui-design/scripts/build.mjs` 零依赖 |
+
+| 仍未验证 | 为什么 |
+| --- | --- |
+| `docker build` | 本机 Docker 引擎未运行。**构建上下文实测 2.4GB**（mx-launcher 的 node_modules），已加 `electron-dock/.dockerignore` 修掉 |
+| k8s Job 派发 | 本机无集群 |
+| mx-launcher 登录 | 未对过真实服务，见开放项 #6 |
+| 跑一条真实 Cypress 用例 | **从未发生过**。这是"有没有平台"的真正分界线 |
+
+### 到"真正的自动化测试平台"还差什么
+
+按依赖顺序，前面不通后面无意义：
+
+**A. 上机（验证为主，不是开发）**
+1. 在 Internal 跑一次 `manage.sh deploy`
+2. 接通 mx-launcher 登录（开放项 #6）
+3. 派发一次真实 k8s Job
+
+**B. 第一条真实用例闭环 —— 这才是平台成立的证明**
+4. 接入 po-frontend 仓库：`repoUrl` + `defaultBranch` + suite command
+5. **`cy.session` 编程式登录**。现状靠人工 `pnpm e2e:login` 捕获 `.auth-session.json`，
+   会过期——**无人值守跑不了，这是 B 段的真正卡点**，不是可选优化
+6. `real` profile 的测试环境与只读账号（开放项 #1，至今未定）
+
+**C. 让它"自动"**
+7. **失败通知**。现在完全没有——没有通知的定时任务等于没跑
+8. Job 状态 reconcile。Pod 被 OOMKill / 驱逐时，run 会卡在 `running` 直到 lease 过期
+9. 产物清理的定时版（现在靠人跑 `manage.sh clean`）
+
+**D. 规模化**
+10. 分片（现在一个 Job 串行跑完整个 suite）
+11. flaky 计分 + quarantine（只在文档里）
+12. Electron：`_electron` spike；临时执行机自助接入；
+    **本地 runner 目前既不 clone 也不下载被测安装包**，只在 `--workdir` 里跑命令
+
 ## 阶段
 
 ### P0 · 骨架与部署 ✅ 代码完成，待上机

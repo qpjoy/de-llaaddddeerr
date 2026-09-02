@@ -134,6 +134,29 @@ function catalogFromV1(summary) {
  * @param {object} summary  raw summary.json from the runner
  * @param {number} exitCode process exit code
  */
+/**
+ * Which commit the run actually tested.
+ *
+ * The runner reads this back with `git rev-parse HEAD` after checkout, so it
+ * describes what was really executed rather than what was asked for. Dropping
+ * it here — which is what happened until this existed — leaves
+ * `mxt_runs.source_ref` permanently empty and makes "which commit was that
+ * failure on" unanswerable, defeating the reason the runner computes it.
+ *
+ * Untrusted input like everything else the runner sends: a sha that is not a
+ * hex string is discarded rather than stored.
+ */
+export function normalizeSourceRef(value) {
+  if (!value || typeof value !== 'object') return null
+  const gitSha = typeof value.gitSha === 'string' && /^[0-9a-f]{7,40}$/iu.test(value.gitSha.trim())
+    ? value.gitSha.trim().toLowerCase()
+    : null
+  const ref = redactLine(value.ref, 200) || null
+  const version = redactLine(value.version, 60) || null
+  if (!gitSha && !ref && !version) return null
+  return { ...(ref ? { ref } : {}), ...(gitSha ? { gitSha } : {}), ...(version ? { version } : {}) }
+}
+
 export function normalizeSummary(summary, exitCode) {
   if (!summary || typeof summary !== 'object' || Array.isArray(summary)) {
     throw new AppError(400, 'summary_schema_invalid', 'summary must be a JSON object')
@@ -183,6 +206,7 @@ export function normalizeSummary(summary, exitCode) {
     cases: uniqueCases,
     duplicates,
     artifacts: normalizeArtifacts(summary.artifacts),
+    sourceRef: normalizeSourceRef(summary.sourceRef),
     targetUrl: summary.targetUrl ? sanitizeUrl(summary.targetUrl) : null,
     startedAt: typeof summary.startedAt === 'string' ? summary.startedAt : null,
     finishedAt: typeof summary.finishedAt === 'string' ? summary.finishedAt : null,

@@ -126,9 +126,12 @@ exit 0
 - **Pod 被 OOMKill / 节点驱逐 / 抢占 → 没有任何上报**，run 卡在 `running` 直到 lease 过期。
   没有 Job 状态的 reconcile 循环，平台不知道 Job 已经死了。
 - **`exit 0` 兜底**让 k8s 永远看到 Job 成功，Job 状态这一路信号被主动丢弃。
-- **`printf` 的 `%` 注入 bug（真实缺陷）**：`summary.json` 里只要出现 `%`（用例标题里写个
-  "通过率 95%" 就够了），`printf` 会把它当格式符解析，payload 直接损坏。
-  必须用 `jq -n --slurpfile` 或 `--data-binary @file` 组装。
+- ~~**`printf` 的 `%` 注入 bug**~~ —— **本条判断有误，已撤回**。`printf FORMAT ARG` 只解析
+  *格式串* 里的 `%`，参数里的 `%` 原样输出。实测 `printf '{"s":%s}' '{"t":"95% ok"}'`
+  输出正确。真正会损坏 payload 的是另一件事：**summary.json 本身不是合法 JSON**
+  （容器写到一半被 OOMKill），此时 payload 变成 `{"exitCode":0,"summary":<半截>}`。
+  更糟的是退出码仍是 0 —— 而平台规则是"冲突时以退出码为准"，于是一次损坏的执行被判成
+  **绿色**。修法不是换 `printf`，是让归一步骤在解析失败时把退出码一起改成 2。
 - **无日志留存**：08 号文档自己写了"实时展示标准输出"，但没有日志管道。
   `ttlSecondsAfterFinished: 3600` 之后 Pod 日志随之消失。
 
@@ -206,7 +209,7 @@ step / caseId / tracks 这些 JUnit 装不下的信息，走 `properties` 扩展
 | 10 | 自研报告渲染 299 行 + 1096 行 vanilla JS UI | `server/report.mjs`、`web/assets/app.js` | 报告渲染是无底洞。改为托管 Playwright HTML report / Allure，平台只存指针 |
 | 11 | "步骤 offsetMs → 录像跳转"要手工实现 | 05 号文档 | **Playwright Trace Viewer 免费给你更好的**：DOM 快照 + 网络 + 控制台 + 逐动作时间轴。自研的视频跳转性价比极低，建议直接砍掉换成 trace |
 | 12 | CLI 登录用明文 password prompt，且支持 `--password` 传参 | `bin/mxt-runner.mjs` | `--password` 会进 shell history 和 `ps`。11 号文档说的是浏览器授权流，实现却是密码 grant。改为 device code flow |
-| 13 | 密钥经 env 注入 | 04 号文档 | env 会出现在 `/proc/<pid>/environ`、崩溃转储、子进程。改为挂载文件 + 进程内读取，或用 External Secrets |
+| 13 | 密钥经 env 注入 | 04 号文档 | ~~改为挂载文件~~ → **结论相反，见 [20](20-secret-store.md)**：每个框架都从 env 读配置，改文件会摧毁零适配；且对本地执行机，文件会在崩溃后留在别人电脑上而 env 随进程消失。真正的防护是「不进 manifest / 不进 shell 环境 / 按精确值脱敏 / 加密落库」四条 |
 | 14 | 无失败通知 | — | **没有通知的定时任务等于没跑**。见 [§4.4](#44-通知策略) |
 | 15 | Case ID 靠标题正则关联 | 03 号文档第 2 级 | Playwright 用 `annotation`、Cypress 用 tag（`{ tags: ['@LP-FE-AUTH-001'] }`）更稳。存量保留正则，新用例强制注解 |
 

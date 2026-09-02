@@ -1,0 +1,97 @@
+# Jenkins configuration as code.
+#
+# This file is the controller. JENKINS_HOME holds build history and nothing that
+# matters, so the controller is rebuildable from git and is deliberately not
+# something to back up.
+#
+# Scope discipline: Jenkins builds artefacts and triggers, it does not schedule
+# tests. Scheduling, dispatch, reports and history all live in mx-test-framework
+# (docs/adr/0001-shared-platform-services.md). Adding a "run the nightly e2e"
+# job here would put mx-base on MXT's critical path and break that ADR.
+
+jenkins:
+  systemMessage: |
+    mx-base · 构建与触发。
+    测试的调度、报告与历史在 mx-test-framework，不在这里。
+    日常工作请开 MXT 后台；这里只在排查构建问题时用。
+  numExecutors: 0          # The controller never runs builds itself.
+  mode: EXCLUSIVE          # Jobs must name a label, so nothing lands here by accident.
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+  authorizationStrategy:
+    globalMatrix:
+      entries:
+        - user:
+            name: "admin"
+            permissions:
+              - "Overall/Administer"
+        - group:
+            name: "authenticated"
+            permissions:
+              - "Overall/Read"
+              - "Job/Read"
+
+  clouds:
+    - kubernetes:
+        name: "internal"
+        # Empty serverUrl means "the cluster I am running in", which is what
+        # keeps this file free of environment-specific addresses.
+        namespace: "mx-base"
+        jenkinsUrl: "http://mx-base-jenkins.mx-base.svc.cluster.local:8080"
+        jenkinsTunnel: "mx-base-jenkins-agent.mx-base.svc.cluster.local:50000"
+        containerCapStr: "10"
+        podRetention: "never"
+        templates:
+          - name: "node"
+            namespace: "mx-base"
+            label: "node"
+            # An agent pod is created per build and deleted after. This is the
+            # whole reason JENKINS_HOME stays small: no workspace ever persists.
+            containers:
+              - name: "node"
+                image: "node:22-bookworm-slim"
+                command: "sleep"
+                args: "infinity"
+                resourceRequestCpu: "1"
+                resourceRequestMemory: "2Gi"
+                resourceLimitMemory: "6Gi"
+
+unclassified:
+  location:
+    url: "${JENKINS_URL}"
+  timestamper:
+    allPipelines: true
+
+# Build history is the only thing that grows here. Capping it is what keeps the
+# controller's volume from being a slow-motion disk leak.
+jobs:
+  - script: |
+      folder('mx') {
+        description('构建产物与外部触发。测试调度在 mx-test-framework。')
+      }
+      pipelineJob('mx/luopan-electron-installer') {
+        description('''
+          构建罗盘的 Windows Electron 安装包，上传制品库，然后告诉 MXT 有新包可测。
+          MXT 自己决定什么时候用它跑测试 —— 这个 job 不触发测试，只交付产物。
+        '''.stripIndent().trim())
+        logRotator { numToKeep(20); artifactNumToKeep(5) }
+        parameters {
+          stringParam('BRANCH', 'public', '要构建的分支')
+        }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote { url('https://github.com/mingxiinfo/po-frontend') }
+                branch('${BRANCH}')
+              }
+            }
+            scriptPath('po-frontend/Jenkinsfile.electron')
+            lightweight(false)
+          }
+        }
+      }
