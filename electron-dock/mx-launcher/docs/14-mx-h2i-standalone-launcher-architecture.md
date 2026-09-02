@@ -320,6 +320,30 @@ createElectronLauncher({
 和能力 token。AppCenter/H2O 默认选择 `mx-h2i`，Luopan 的 embed 应用可以选择
 `luopan`。
 
+### 无边框窗口拖动与 Windows DPI
+
+launcher 模式的窗口不可 resize，尺寸完全由 `constrainWindowBounds()` 按模式推导，所以
+运行期间任何尺寸变化都是 bug，不是用户操作。
+
+Windows 上窗口的移动是每帧重新下发 bounds 完成的。`BrowserWindow.setPosition()` 只保留
+调用方给的 x/y，尺寸则是 Electron 从系统读回来的那一份；在分数 DPI（125% / 150% / 175%）
+下，这个 pixel → DIP → pixel 往返用的是 enclosing 取整，会向外扩。于是每一帧都可能给窗口
+多一个物理像素：左右拖动几秒就明显变宽，窗口原点的 y 不对齐时高度也一起长。macOS 没有
+这个往返，所以只在 Windows 复现。
+
+因此 Windows 上所有逐帧移动都必须走 `moveWindowKeepingSize()`，用 `setBounds()` 下发
+一个**固定不变**的尺寸，而不是 `setPosition()`：每帧输入相同，就不存在累积。配套约束：
+
+- 拖动开始时把尺寸 pin 成 launcher 模式的规范尺寸（`defaultWindowBoundsForMode`），
+  而不是当前读回值，避免一次拖动继承上一次残留的增量。
+- 拖动过程中的尺寸校正是 leading + trailing throttle，不是纯 trailing debounce——
+  只做 trailing 时指针不停就永远不触发，整段拖动都带着增量。
+- 松手时无条件重设为拖动起始尺寸：DIP 宽度可能读回不变而物理宽度已经变宽。
+- 顶部吸附/收起动画同样 pin 尺寸，动画结束后写回 `lastVisibleBounds` 的是计划尺寸而不是
+  系统读回值，否则每次 dock/reveal 都会把增量持久化。
+
+`window-drag-size-safety.test.mjs` 固定这些不变量。
+
 ### WireGuard client runtime
 
 V2 不再让 MX-H2I 直接依赖旧的 `@qpjoy/electron-plugin-hdo` 业务插件。客户端 WG 能力从

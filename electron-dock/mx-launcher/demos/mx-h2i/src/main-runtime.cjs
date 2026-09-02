@@ -14,6 +14,7 @@ const {
   DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
   darwinSupersedableOwnershipOwnerIds,
   isDarwinDynamicProxyEndpointRoute,
+  preserveConnectedOnBackgroundProbe,
   retainedGuestRecoveryDecision,
   shouldRepairDarwinRetainedOwnership,
   stableOwnershipInstanceId,
@@ -208,6 +209,7 @@ let windowBoundsSaveTimer = null;
 let windowBoundsTrackingSuppressed = false;
 let activeWindowDrag = null;
 let windowDragSizeBatchTimer = null;
+let windowDragSizeCorrectedAt = 0;
 let lastWindowDragId = 0;
 let lastWireGuardRecoveryFailureAt = 0;
 let wireGuardBackgroundProbeFailures = 0;
@@ -255,6 +257,10 @@ const TOP_REVEAL_HOLD_MS = 900;
 const TOP_LEAVE_HIDE_MS = 180;
 const WINDOW_BOUNDS_SAVE_DELAY_MS = 420;
 const WINDOW_DRAG_SIZE_BATCH_MS = 80;
+// Windows-only leading+trailing throttle for the drag size assertion. A pure
+// trailing debounce never fires while the pointer keeps moving, so a long drag
+// could accumulate DPI growth for its whole duration before being corrected.
+const WINDOW_DRAG_SIZE_THROTTLE_MS = 120;
 const H2O_PROXY_START_TIMEOUT_MS = 12_000;
 const H2O_PORT_RELEASE_TIMEOUT_MS = 8_000;
 // 订阅里 MATCH 指向的那个 select 组；Internal 渲染订阅时用的是同一个名字。
@@ -2176,7 +2182,7 @@ function registerIpc() {
     stopTopAnimation();
     // Pointer events change position only. Windows size correction always uses
     // the drag-start snapshot, so DPI-adjusted width/height never feed the next move.
-    mainWindow.setPosition(nextBounds.x, nextBounds.y, false);
+    moveWindowKeepingSize(nextBounds.x, nextBounds.y, windowsDrag ? activeWindowDrag : null);
     if (windowsDrag) {
       activeWindowDrag.x = nextBounds.x;
       activeWindowDrag.y = nextBounds.y;
@@ -3043,9 +3049,22 @@ function beginWindowDragSnapshot(inputDragId) {
     id: dragId,
     startX: bounds.x,
     startY: bounds.y,
-    ...bounds
+    ...bounds,
+    ...windowDragPinnedSize(bounds)
   };
+  windowDragSizeCorrectedAt = 0;
   return { bounds: { ...activeWindowDrag } };
+}
+
+// The launcher window is not resizable, so constrainWindowBounds() already
+// forces its size to the mode default. Pinning a drag to that canonical size
+// rather than to whatever Windows currently reports stops one drag from
+// inheriting residual DPI growth left behind by an earlier drag or dock
+// animation, which is how the window used to get permanently wider.
+function windowDragPinnedSize(bounds) {
+  if (currentWindowMode !== 'launcher') return null;
+  const canonical = defaultWindowBoundsForMode('launcher', bounds);
+  return canonical ? { width: canonical.width, height: canonical.height } : null;
 }
 
 function normalizeWindowDragId(value) {
@@ -3053,19 +3072,47 @@ function normalizeWindowDragId(value) {
   return Number.isSafeInteger(dragId) && dragId > 0 ? dragId : null;
 }
 
+// Windows moves the window by re-applying bounds on every pointer/animation
+// frame. `setPosition()` keeps the caller's x/y but re-sends the size Electron
+// reads back from the OS, and on a fractional-DPI display that
+// pixel -> DIP -> pixel round trip rounds outward, so each frame can hand the
+// window one more physical pixel of width (and, depending on where the window
+// sits, height). Feeding a pinned size into `setBounds()` instead makes every
+// frame's input identical, so nothing accumulates. macOS has no such round
+// trip and keeps using setPosition.
+function moveWindowKeepingSize(x, y, size) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const width = Math.round(Number(size?.width));
+  const height = Math.round(Number(size?.height));
+  if (process.platform === 'win32' && Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    mainWindow.setBounds({ x, y, width, height }, false);
+    return;
+  }
+  mainWindow.setPosition(x, y, false);
+}
+
 function scheduleWindowDragSizeCorrection() {
   if (process.platform !== 'win32' || !activeWindowDrag) return;
-  // This must stay a trailing debounce. Repeated setBounds calls while a
-  // frameless Windows window is moving can accumulate non-client/DPI width.
-  if (windowDragSizeBatchTimer) clearTimeout(windowDragSizeBatchTimer);
+  // Leading + trailing throttle. A trailing-only debounce never fires while the
+  // pointer keeps moving, so any residual growth stayed on screen for the whole
+  // drag; asserting the snapshot at a bounded rate keeps the window at its
+  // drag-start size while it is being dragged.
+  const now = Date.now();
+  const elapsed = now - windowDragSizeCorrectedAt;
+  if (elapsed >= WINDOW_DRAG_SIZE_THROTTLE_MS) {
+    applyWindowDragSizeSnapshot();
+    return;
+  }
+  if (windowDragSizeBatchTimer) return;
   windowDragSizeBatchTimer = setTimeout(() => {
     windowDragSizeBatchTimer = null;
     applyWindowDragSizeSnapshot();
-  }, WINDOW_DRAG_SIZE_BATCH_MS);
+  }, Math.max(WINDOW_DRAG_SIZE_BATCH_MS, WINDOW_DRAG_SIZE_THROTTLE_MS - elapsed));
 }
 
-function applyWindowDragSizeSnapshot() {
+function applyWindowDragSizeSnapshot(options = {}) {
   if (!activeWindowDrag || !mainWindow || mainWindow.isDestroyed()) return null;
+  windowDragSizeCorrectedAt = Date.now();
   const current = mainWindow.getBounds();
   const target = {
     x: current.x,
@@ -3075,11 +3122,14 @@ function applyWindowDragSizeSnapshot() {
   };
   activeWindowDrag.x = target.x;
   activeWindowDrag.y = target.y;
-  if (current.width !== target.width || current.height !== target.height) {
+  // On release always re-assert the drag-start size: DIP width can read back
+  // unchanged while the physical window is a few pixels wider, and that residue
+  // is what the next drag would snapshot as its new baseline.
+  const force = options.force === true;
+  if (force || current.width !== target.width || current.height !== target.height) {
     windowBoundsTrackingSuppressed = true;
     try {
-      mainWindow.setSize(target.width, target.height, false);
-      mainWindow.setPosition(target.x, target.y, false);
+      mainWindow.setBounds(target, false);
     } catch (err) {
       console.warn('[mx-h2i] window drag size restore failed:', errorMessage(err));
       queueDiagnosticError('window.drag-size-restore-failed', err, { target });
@@ -3090,8 +3140,8 @@ function applyWindowDragSizeSnapshot() {
   const restored = mainWindow.getBounds();
   activeWindowDrag.x = restored.x;
   activeWindowDrag.y = restored.y;
-  lastVisibleBounds = { ...restored };
-  return restored;
+  lastVisibleBounds = { ...restored, width: target.width, height: target.height };
+  return { ...restored, width: target.width, height: target.height };
 }
 
 function finishWindowDragSnapshot(input) {
@@ -3108,7 +3158,7 @@ function finishWindowDragSnapshot(input) {
     activeWindowDrag.x = Math.round(activeWindowDrag.startX + totalDx);
     activeWindowDrag.y = Math.round(activeWindowDrag.startY + totalDy);
     try {
-      mainWindow.setPosition(activeWindowDrag.x, activeWindowDrag.y, false);
+      moveWindowKeepingSize(activeWindowDrag.x, activeWindowDrag.y, activeWindowDrag);
     } catch (err) {
       console.warn('[mx-h2i] final window drag position failed:', errorMessage(err));
       queueDiagnosticError('window.drag-position-restore-failed', err, {
@@ -3117,8 +3167,9 @@ function finishWindowDragSnapshot(input) {
       });
     }
   }
-  const bounds = applyWindowDragSizeSnapshot();
+  const bounds = applyWindowDragSizeSnapshot({ force: true });
   activeWindowDrag = null;
+  windowDragSizeCorrectedAt = 0;
   return bounds;
 }
 
@@ -3363,7 +3414,7 @@ function snapToTopEdge() {
   };
   animateWindow(bounds, target, 10, () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    lastVisibleBounds = mainWindow.getBounds();
+    lastVisibleBounds = animatedVisibleBounds(target);
   });
   return { docked: true, bounds: target };
 }
@@ -3432,7 +3483,7 @@ function showFromTopEdge() {
   };
   stopTopAnimation();
   try {
-    mainWindow.setPosition(start.x, start.y, false);
+    moveWindowKeepingSize(start.x, start.y, start);
   } catch (err) {
     recoverTopWindowAnimation('top-reveal-start', err, target);
     return;
@@ -3445,7 +3496,7 @@ function showFromTopEdge() {
   topDockLeaveStartedAt = 0;
   animateWindow(start, target, TOP_ANIMATION_STEPS, () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    lastVisibleBounds = mainWindow.getBounds();
+    lastVisibleBounds = animatedVisibleBounds(target);
   });
 }
 
@@ -7770,8 +7821,48 @@ function dockReleaseDistance(bounds, display) {
   return clamp(Math.round(base), 58, 92);
 }
 
-function animateWindow(from, to, steps, onDone) {
+function animationFrameBounds(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  const x = Math.round(Number(row.x));
+  const y = Math.round(Number(row.y));
+  const width = Math.round(Number(row.width));
+  const height = Math.round(Number(row.height));
+  if (![x, y, width, height].every(Number.isFinite)) return null;
+  if (width <= 0 || height <= 0) return null;
+  return { x, y, width, height };
+}
+
+// The window Windows reports back after an animation can be a pixel or two
+// wider than the size the animation was planned with. Recording that readback
+// as lastVisibleBounds is what turned per-frame DPI rounding into permanent,
+// persisted growth, so keep the planned size and take only the position.
+function animatedVisibleBounds(planned) {
+  const observed = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null;
+  const size = animationFrameBounds(planned);
+  if (!observed) return size;
+  if (!size) return observed;
+  return { x: observed.x, y: observed.y, width: size.width, height: size.height };
+}
+
+function animateWindow(input, target, steps, onDone) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  // Electron rejects a non-finite coordinate with an opaque argument
+  // conversion TypeError from inside the timer, which used to surface as
+  // window.top-animation-failed. Reject the frame plan up front instead.
+  const from = animationFrameBounds(input);
+  const to = animationFrameBounds(target);
+  const frames = Math.max(1, Math.round(Number(steps)) || 1);
+  if (!from || !to) {
+    // Same recovery the in-timer throw used to take: clear the dock/hide flags
+    // and put a visible window back, rather than half-completing the move.
+    recoverTopWindowAnimation(
+      'top-animation-bounds',
+      new Error('top window animation received non-finite bounds'),
+      to || from
+    );
+    return;
+  }
   stopTopAnimation();
   let step = 0;
   topAnimationTimer = setInterval(() => {
@@ -7780,12 +7871,16 @@ function animateWindow(from, to, steps, onDone) {
       return;
     }
     step += 1;
-    const t = easeOutCubic(step / steps);
+    const t = easeOutCubic(step / frames);
     const x = Math.round(from.x + (to.x - from.x) * t);
     const y = Math.round(from.y + (to.y - from.y) * t);
     try {
       if (from.width === to.width && from.height === to.height) {
-        mainWindow.setPosition(x, y, false);
+        // Same reason as the drag path: a per-frame setPosition() re-sends the
+        // size Electron read back from Windows, so a fractional-DPI display
+        // grows the window a pixel per animation frame and each dock/reveal
+        // cycle ratchets it wider. Pin the size the animation was planned with.
+        moveWindowKeepingSize(x, y, to);
       } else {
         mainWindow.setBounds({
           x,
@@ -7799,7 +7894,7 @@ function animateWindow(from, to, steps, onDone) {
       recoverTopWindowAnimation('top-animation', err, visibleFallback);
       return;
     }
-    if (step >= steps) {
+    if (step >= frames) {
       stopTopAnimation();
       onDone?.();
     }
@@ -7823,8 +7918,7 @@ function recoverTopWindowAnimation(reason, err, visibleFallback) {
     if (fallback) {
       windowBoundsTrackingSuppressed = true;
       try {
-        mainWindow.setPosition(fallback.x, fallback.y, false);
-        if (process.platform === 'win32') mainWindow.setSize(fallback.width, fallback.height, false);
+        mainWindow.setBounds(fallback, false);
       } finally {
         windowBoundsTrackingSuppressed = false;
       }
@@ -15532,6 +15626,11 @@ async function probeWireGuardForConnection(input) {
       expectedInterfaceAddresses: status?.addresses || []
     });
     const tunnelProofReady = wireGuardStatusIsHealthy(status);
+    // getLauncherWireGuardPeerStatus() returns null when the underlying
+    // wg/sc/PowerShell query throws or times out, which is common on a loaded
+    // Windows box. "We could not look" is not the same claim as "the tunnel is
+    // down", and background callers rely on the difference.
+    const tunnelObserved = Boolean(status);
     const routeReady = route.ok === true;
     const internalApi = routeReady
       ? await probeInternalApiViaOverlay(internalBaseUrl)
@@ -15615,6 +15714,7 @@ async function probeWireGuardForConnection(input) {
     return {
       state: ready ? 'connected' : (tunnelReady ? 'tunnel-only' : 'lease-only'),
       ready,
+      tunnelObserved,
       health: launcherNetworkHealth({
         networkReady: ready,
         wireGuardReady: tunnelReady,
@@ -16263,8 +16363,12 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
         }
         const routeProofLost = wireGuardResult.diagnostics?.route
           && wireGuardResult.diagnostics.route.ok !== true;
-        const ownershipProofLost =
-          wireGuardResult.diagnostics?.standaloneOwnershipRegistry?.ok !== true;
+        // Mirror routeProofLost: only an ownership claim the probe actually
+        // read back can prove the claim was lost. A probe that never got as far
+        // as reading it leaves the key absent, and treating absent as lost is
+        // what let a failed probe bypass the downgrade threshold.
+        const ownershipProofLost = Boolean(wireGuardResult.diagnostics?.standaloneOwnershipRegistry)
+          && wireGuardResult.diagnostics.standaloneOwnershipRegistry.ok !== true;
         const splitDnsProofLost = (
           wireGuardResult.diagnostics?.windowsNrpt?.configured === true
           && wireGuardResult.diagnostics.windowsNrpt.ready !== true
@@ -16278,13 +16382,17 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
           process.platform === 'darwin'
           && !systemDomainProxyConnectionReady(connection.diagnostics?.systemDomainProxy)
         );
-        const preserveConnected = !manual
-          && connection.state === 'connected'
-          && !wireGuardResult.ready
-          && !routeProofLost
-          && !ownershipProofLost
-          && !splitDnsProofLost
-          && wireGuardBackgroundProbeFailures < WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD;
+        const preserveConnected = preserveConnectedOnBackgroundProbe({
+          manual,
+          connectionState: connection.state,
+          probeReady: wireGuardResult.ready,
+          tunnelObserved: wireGuardResult.tunnelObserved,
+          routeProofLost,
+          ownershipProofLost,
+          splitDnsProofLost,
+          consecutiveFailures: wireGuardBackgroundProbeFailures,
+          downgradeThreshold: WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD
+        });
         const currentBrowserFallback = connection.diagnostics?.windowsBrowserFallback || {};
         const nextBrowserFallback = wireGuardResult.diagnostics?.windowsBrowserFallback || {};
         const browserFallbackChanged = process.platform === 'win32'
@@ -17233,6 +17341,10 @@ function wireGuardFailure(message) {
   return {
     state: 'lease-only',
     ready: false,
+    // The probe threw before it could look at the tunnel, so this result says
+    // nothing about whether the tunnel is up. Background callers must not treat
+    // it as proof of an outage.
+    tunnelObserved: false,
     health: blockedHealth(),
     wireGuard: {
       ok: false,

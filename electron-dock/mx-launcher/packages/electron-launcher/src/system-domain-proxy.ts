@@ -56,7 +56,13 @@ const DARWIN_DYNAMIC_DNS_KEY = 'State:/Network/Service/com.qpjoy.electron-launch
 const WINDOWS_PROXY_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
 const DNS_QUERY_TIMEOUT_MS = 1500;
 const PROXY_CONNECT_TIMEOUT_MS = 10_000;
-const WINDOWS_REGISTRY_COMMAND_TIMEOUT_MS = 2500;
+// captureWindowsState() spawns five reg.exe processes at once every background
+// continuation refresh. Process creation on a machine under load or real-time
+// AV scanning routinely passed 2.5 s, and a timed-out query is re-thrown rather
+// than retried, so the refresh reported a hard error for what was only a slow
+// read. Give the spawn room; a slow refresh just skips the next tick, because
+// systemDomainProxyRefreshInFlight already serializes them.
+const WINDOWS_REGISTRY_COMMAND_TIMEOUT_MS = 6000;
 const WINDOWS_PROXY_NOTIFY_TIMEOUT_MS = 5000;
 const WINDOWS_BROWSER_PROXY_PROBE_TIMEOUT_MS = 12_000;
 const WINDOWS_FALLBACK_PAC_TIMEOUT_MS = 1800;

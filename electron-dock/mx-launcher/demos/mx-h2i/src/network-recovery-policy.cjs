@@ -1,5 +1,39 @@
 const DEFAULT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 const DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS = 105 * 1000;
+const DEFAULT_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD = 3;
+
+// A background WireGuard probe can report three different things:
+//   1. the tunnel is confirmed live but a route/ownership/split-DNS proof is
+//      gone (a real split-brain: keeping "connected" would leak traffic),
+//   2. the tunnel is confirmed down,
+//   3. the probe could not observe the tunnel at all.
+// Case 3 is not evidence. On Windows the status query shells out to
+// wg/sc/PowerShell, and those calls time out on a loaded machine; the result
+// used to be indistinguishable from "tunnel down", so a single slow probe
+// dropped a healthy connection to lease-only. That made
+// systemDomainProxyRuntimeEligible() false, which tore the system PAC down and
+// cut Internal browsing until a later probe happened to succeed.
+//
+// Proof loss therefore only bypasses the consecutive-failure threshold when
+// the probe actually observed the tunnel. An unobserved probe just counts
+// toward the threshold, so a real outage is still reported, just after
+// consecutive confirmations rather than a single flaky sample.
+function preserveConnectedOnBackgroundProbe(input = {}) {
+  if (input.manual === true) return false;
+  if (input.connectionState !== 'connected') return false;
+  if (input.probeReady === true) return false;
+  const threshold = Number(input.downgradeThreshold) > 0
+    ? Number(input.downgradeThreshold)
+    : DEFAULT_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD;
+  const failures = Number(input.consecutiveFailures) || 0;
+  if (failures >= threshold) return false;
+  if (input.tunnelObserved === false) return true;
+  return !(
+    input.routeProofLost === true
+    || input.ownershipProofLost === true
+    || input.splitDnsProofLost === true
+  );
+}
 
 function wireGuardRecoveryGate(input = {}) {
   if (input.disconnectInFlight === true) return 'disconnect-in-flight';
@@ -112,10 +146,12 @@ async function wireGuardRecoveryTurn(inFlight, foreground) {
 }
 
 module.exports = {
+  DEFAULT_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD,
   DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
   DEFAULT_FAILURE_COOLDOWN_MS,
   darwinSupersedableOwnershipOwnerIds,
   isDarwinDynamicProxyEndpointRoute,
+  preserveConnectedOnBackgroundProbe,
   retainedGuestRecoveryDecision,
   shouldRepairDarwinRetainedOwnership,
   stableOwnershipInstanceId,

@@ -253,6 +253,40 @@ PAC readback、Chromium `resolveProxy` 与 CONNECT 是发布 browser-connected �
 ready gate；system DNS proof 决定是否同时报告非 PAC 程序 ready。其它诊断在后台执行。
 诊断返回时若连接已切换，结果会被丢弃，不覆盖新状态。
 
+## 后台探测的证据分级
+
+45 秒一次的后台 WireGuard 探测只能得出三种结论，必须区别对待：
+
+1. **隧道确认在线，但 route / ownership / split-DNS 证据丢失**——真实的 split-brain，
+   继续报 `connected` 会让流量泄漏，立即降级。
+2. **隧道确认已断**——真实断线，按现有阈值降级。
+3. **探测没能观察到隧道**——不是证据。
+
+第 3 种在 Windows 上很常见：隧道状态查询要 spawn `wg` / `sc` / PowerShell，机器负载高或
+杀软实时扫描时会超时，`getLauncherWireGuardPeerStatus()` 返回 `null`，probe 抛异常时
+`wireGuardFailure()` 连 diagnostics 都是空的。历史实现把「没读到 ownership claim」当成
+「ownership 丢失」，于是一次慢探测就绕过了连续失败阈值，直接把健康连接写成 `lease-only`。
+`systemDomainProxyRuntimeEligible()` 随即返回 false，5 秒一次的 refresh watcher 把系统
+PAC 撤掉，用户的 Internal 浏览直接断，要等下一次成功探测才恢复——现场日志里是
+`system domain proxy restored while inactive: route-refresh` 连刷两分多钟，而同期
+`wireguard-route-audit.log` 完全没有 route / NRPT 变更，隧道其实一直好的。
+
+规则：
+
+- probe 结果带 `tunnelObserved`。`getLauncherWireGuardPeerStatus()` 返回 null 或 probe
+  抛异常时为 `false`。
+- 证据丢失只有在 `tunnelObserved === true` 时才能绕过
+  `WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD`；未观察到隧道的探测只累加失败计数。
+- 缺失的 diagnostic 一律不等于丢失。`ownershipProofLost` 必须像 `routeProofLost` 一样先
+  判断字段存在。
+- 判定逻辑放在 `network-recovery-policy.cjs` 的 `preserveConnectedOnBackgroundProbe()`，
+  由 `windows-reconnect-safety.test.mjs` 覆盖。
+
+同一类问题的另一面是探测本身的开销：`captureWindowsState()` 每次后台 continuation
+refresh 会并发 spawn 五个 `reg.exe`，2.5 秒的超时在负载机器上会被正常命中并被当作硬错误
+上报（`system-domain-proxy.status-error`）。超时放宽到 6 秒；慢一次只是跳过下一个 tick，
+`systemDomainProxyRefreshInFlight` 已经保证不会重入。
+
 ## macOS 长时间运行后切换网络
 
 macOS 不使用 Windows NRPT。目标门禁要求 local edge 与只覆盖声明 Internal/app domain 的

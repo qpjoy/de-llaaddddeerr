@@ -5,9 +5,11 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const {
+  DEFAULT_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD,
   DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
   darwinSupersedableOwnershipOwnerIds,
   isDarwinDynamicProxyEndpointRoute,
+  preserveConnectedOnBackgroundProbe,
   retainedGuestRecoveryDecision,
   shouldRepairDarwinRetainedOwnership,
   stableOwnershipInstanceId,
@@ -352,9 +354,97 @@ assert.deepEqual(
   'foreground recovery must receive a fresh turn after the background recovery settles'
 );
 
+// A Windows background probe that could not observe the tunnel must not be
+// mistaken for an outage: that downgrade made the runtime ineligible for the
+// system domain proxy, which tore the PAC down and cut Internal browsing until
+// a later probe happened to succeed.
+const unobservedProbe = {
+  manual: false,
+  connectionState: 'connected',
+  probeReady: false,
+  tunnelObserved: false,
+  routeProofLost: false,
+  ownershipProofLost: true,
+  splitDnsProofLost: false,
+  consecutiveFailures: 1,
+  downgradeThreshold: DEFAULT_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD
+};
+assert.equal(
+  preserveConnectedOnBackgroundProbe(unobservedProbe),
+  true,
+  'a probe that never observed the tunnel must not bypass the downgrade threshold'
+);
+assert.equal(
+  preserveConnectedOnBackgroundProbe({
+    ...unobservedProbe,
+    consecutiveFailures: DEFAULT_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD
+  }),
+  false,
+  'consecutive unobserved probes must still downgrade once the threshold is reached'
+);
+assert.equal(
+  preserveConnectedOnBackgroundProbe({
+    ...unobservedProbe,
+    tunnelObserved: true,
+    ownershipProofLost: false,
+    routeProofLost: true
+  }),
+  false,
+  'a route proof lost while the tunnel is confirmed live must downgrade immediately'
+);
+assert.equal(
+  preserveConnectedOnBackgroundProbe({
+    ...unobservedProbe,
+    tunnelObserved: true,
+    ownershipProofLost: false,
+    splitDnsProofLost: true
+  }),
+  false,
+  'a split-DNS proof lost while the tunnel is confirmed live must downgrade immediately'
+);
+assert.equal(
+  preserveConnectedOnBackgroundProbe({
+    ...unobservedProbe,
+    tunnelObserved: true,
+    ownershipProofLost: false
+  }),
+  true,
+  'a confirmed tunnel with all proofs intact keeps the connection while under threshold'
+);
+assert.equal(
+  preserveConnectedOnBackgroundProbe({ ...unobservedProbe, manual: true }),
+  false,
+  'a manual probe always applies its own result'
+);
+assert.equal(
+  preserveConnectedOnBackgroundProbe({ ...unobservedProbe, probeReady: true }),
+  false,
+  'a ready probe must be applied rather than preserved'
+);
+assert.equal(
+  preserveConnectedOnBackgroundProbe({ ...unobservedProbe, connectionState: 'tunnel-only' }),
+  false,
+  'only an already-connected runtime may preserve state across a failed probe'
+);
+
 const source = readFileSync(
   fileURLToPath(new URL('../src/main-runtime.cjs', import.meta.url)),
   'utf8'
+);
+assert.match(
+  source,
+  /const tunnelObserved = Boolean\(status\);/,
+  'probeWireGuardForConnection must record whether it actually observed the tunnel'
+);
+assert.match(
+  source,
+  /function wireGuardFailure\(message\)[\s\S]{0,400}?tunnelObserved: false/,
+  'a probe that threw must report an unobserved tunnel'
+);
+assert.match(
+  source,
+  /const ownershipProofLost = Boolean\(wireGuardResult\.diagnostics\?\.standaloneOwnershipRegistry\)/,
+  'an absent ownership diagnostic is not proof that the ownership claim was lost'
 );
 assert.match(
   source,
