@@ -331,9 +331,37 @@ WinINet `Add-Type`），输出 min/median/max 与各自的超时预算，并列�
 判读：
 
 - `Get-Service` 快而「combined」慢 → 网卡/路由枚举是瓶颈，正是本次拆分要解决的场景。
-- 连空的 `powershell startup (baseline)` 都要几秒 → 问题在进程创建本身（杀软/EDR 扫描或
-  磁盘争用），应为 MX-H2I 安装目录和它拉起的 powershell.exe 加排除项。
+- 原生 exe（`reg.exe` / `sc.exe`）是毫秒级，而空的 `powershell startup (baseline)` 要几百
+  毫秒到几秒 → 被拖慢的不是进程创建本身，而是 PowerShell/.NET 引擎（程序集加载、杀软对
+  托管映像的扫描）。应为 MX-H2I 安装目录和它拉起的 powershell.exe 加杀软排除项。
 - 全部在预算内 → 加大 `-Iterations` 并在机器繁忙时复测，这个卡顿是间歇性的、跟负载走。
+
+### 现场实测基线（2026-09-02）
+
+问题机器（Windows 10.0.26200，腾讯电脑管家接管防护，Defender 实时保护关闭，21 张网卡）
+与一台健康机器的中位数对比：
+
+| probe | 问题机器 | 健康机器 |
+| --- | --- | --- |
+| `reg.exe query` | 32 ms | 12 ms |
+| `sc.exe query`（修复后走这条） | — | 14 ms |
+| 空 `powershell.exe` | **1212 ms** | 133 ms |
+| `Get-Service` | 1502 ms | 175 ms |
+| `Get-NetAdapter -IncludeHidden` | 2961 ms | 765 ms |
+| `Get-NetRoute` | 3178 ms | 1334 ms |
+| 三合一脚本（旧实现，5 s 预算） | 3144 ms（max 3316） | 1402 ms |
+| WinINet `Add-Type` | 1646 ms | 305 ms |
+
+关键结论：`reg.exe` 只要 32 ms，而空的 PowerShell 要 1212 ms —— 慢的不是 spawn，是
+PowerShell 引擎本身。所以每一个 PowerShell probe 在干活之前先付 1.2 秒，这才是它们纷纷
+逼近或越过预算的原因。修复后 tunnel liveness 走 `sc.exe`，完全绕开这笔开销。
+
+三合一脚本这次实测 max 3316 ms、没到 5000 ms，但现场日志里确实出现过 ETIMEDOUT——
+说明脚本跑的时候机器相对空闲，余量只有 1.5 倍，负载一上来就会越过。
+
+据此同时放宽两个预算：WinINet 通知 5 s → 12 s（`Add-Type` 会在运行时调 csc 编译 P/Invoke
+桩，现场日志里一天失败七次），NRPT probe 默认 3 s → 8 s（1.2 s 引擎启动 + CIM cmdlet 的
+开销本来就装不进 3 s；超时会报 `probe-failed`，把连接压在 tunnel-only）。
 
 ## macOS 长时间运行后切换网络
 

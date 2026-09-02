@@ -63,7 +63,13 @@ const PROXY_CONNECT_TIMEOUT_MS = 10_000;
 // read. Give the spawn room; a slow refresh just skips the next tick, because
 // systemDomainProxyRefreshInFlight already serializes them.
 const WINDOWS_REGISTRY_COMMAND_TIMEOUT_MS = 6000;
-const WINDOWS_PROXY_NOTIFY_TIMEOUT_MS = 5000;
+// This one spawns PowerShell *and* makes Add-Type compile a C# P/Invoke stub
+// at run time, so it pays the PowerShell engine start plus a csc.exe
+// invocation. Measured at 1.6-1.8 s median on a field machine that was
+// otherwise idle, and the field log shows it failing outright seven times in a
+// day at the old 5 s budget. It is a fire-and-forget WinINet notification, so
+// waiting longer costs nothing that matters.
+const WINDOWS_PROXY_NOTIFY_TIMEOUT_MS = 12_000;
 const WINDOWS_BROWSER_PROXY_PROBE_TIMEOUT_MS = 12_000;
 const WINDOWS_FALLBACK_PAC_TIMEOUT_MS = 1800;
 const WINDOWS_FALLBACK_PAC_MAX_BYTES = 512 * 1024;

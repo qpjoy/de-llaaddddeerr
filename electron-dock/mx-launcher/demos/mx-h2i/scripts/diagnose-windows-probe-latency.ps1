@@ -40,14 +40,16 @@ $ProgressPreference = 'SilentlyContinue'
 # Timeouts the app enforces on each of these child processes. A probe whose
 # max latency crosses its budget is a probe the app will report as a failure.
 $Budgets = @{
+  'sc.exe query (tunnel service)'  = 8000
   'powershell startup (baseline)'  = 5000
   'Get-Service (tunnel service)'   = 8000
   'Get-NetAdapter -IncludeHidden'  = 12000
   'Get-NetRoute (tunnel adapter)'  = 12000
   'combined service+adapter+route' = 5000
+  'Get-DnsClientNrptRule'          = 8000
   'reg query AutoConfigURL'        = 6000
   'reg query Internet Settings'    = 6000
-  'WinINet InternetSetOption'      = 5000
+  'WinINet InternetSetOption'      = 12000
 }
 
 $PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -134,6 +136,16 @@ $CombinedScript = @"
 # restores the system PAC -- the call that failed seven times in the field log.
 # The DllImport quotes are assembled from [char]34 so no literal double quote
 # has to survive being passed on a command line.
+# The NRPT probe the app runs after every connect and on each split-DNS check.
+# Its budget is small and PowerShell startup eats most of it on a slow machine.
+$NrptScript = @"
+`$ErrorActionPreference = 'Stop'
+`$ProgressPreference = 'SilentlyContinue'
+`$global = Get-DnsClientNrptGlobal -ErrorAction Stop
+`$rules = @(Get-DnsClientNrptRule -ErrorAction Stop)
+'rules=' + `$rules.Count
+"@
+
 $NotifyScript = @"
 `$q = [char]34
 `$sig = '[DllImport(' + `$q + 'wininet.dll' + `$q + ', SetLastError=true)] public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);'
@@ -157,11 +169,16 @@ $lastOutput = @{}
 for ($i = 1; $i -le $Iterations; $i++) {
   Write-Host ("run {0}/{1} ..." -f $i, $Iterations) -ForegroundColor DarkGray
   $results = @(
+    # sc.exe is the path the fixed build takes for tunnel liveness. It is a
+    # native exe, so it never pays the PowerShell/.NET startup tax -- this row
+    # is the one that says whether the fix helps on this machine.
+    (Invoke-TimedNative -Label 'sc.exe query (tunnel service)' -FilePath 'sc.exe' -Arguments @('query', $ServiceName)),
     (Invoke-TimedPowerShell -Label 'powershell startup (baseline)' -Script '1'),
     (Invoke-TimedPowerShell -Label 'Get-Service (tunnel service)'  -Script $ServiceScript),
     (Invoke-TimedPowerShell -Label 'Get-NetAdapter -IncludeHidden' -Script $AdapterScript),
     (Invoke-TimedPowerShell -Label 'Get-NetRoute (tunnel adapter)' -Script $RouteScript),
     (Invoke-TimedPowerShell -Label 'combined service+adapter+route' -Script $CombinedScript),
+    (Invoke-TimedPowerShell -Label 'Get-DnsClientNrptRule' -Script $NrptScript),
     (Invoke-TimedNative -Label 'reg query AutoConfigURL' -FilePath $RegExe -Arguments @('query', $ProxyKey, '/v', 'AutoConfigURL')),
     (Invoke-TimedNative -Label 'reg query Internet Settings' -FilePath $RegExe -Arguments @('query', $ProxyKey)),
     (Invoke-TimedPowerShell -Label 'WinINet InternetSetOption' -Script $NotifyScript)
@@ -263,11 +280,38 @@ if ($over.Count -eq 0) {
     Write-Host 'enumeration is what blows the budget. That is exactly the case the split probe'
     Write-Host 'in the fix addresses -- the tunnel service answer no longer dies with it.'
   }
-  if (@($rows | Where-Object { $_.Probe -eq 'powershell startup (baseline)' -and $_.Max -ge 3000 }).Count -gt 0) {
-    Write-Host 'Even an empty powershell.exe takes seconds to start here. That points at' -ForegroundColor Yellow
-    Write-Host 'antivirus/EDR scanning process creation, or heavy disk contention, rather than'
-    Write-Host 'at any particular cmdlet. Consider an AV exclusion for the MX-H2I install dir'
-    Write-Host 'and for powershell.exe process creation from it.'
+}
+
+# The most useful signal is the gap between a native exe and PowerShell. Both
+# pay the same process-creation cost, so if reg.exe/sc.exe are milliseconds
+# while an empty powershell.exe is seconds, the tax is on the PowerShell/.NET
+# engine itself (assembly load, AV scanning of managed images), not on spawning
+# processes in general -- and the fix's sc.exe path sidesteps it entirely.
+Write-Host ''
+Write-Host '=== native exe vs PowerShell ===' -ForegroundColor Cyan
+$nativeRow = @($rows | Where-Object { $_.Probe -eq 'reg query Internet Settings' })
+$scRow = @($rows | Where-Object { $_.Probe -eq 'sc.exe query (tunnel service)' })
+$psRow = @($rows | Where-Object { $_.Probe -eq 'powershell startup (baseline)' })
+if ($nativeRow.Count -gt 0 -and $psRow.Count -gt 0) {
+  Write-Host ("native exe (reg.exe)      median {0,6} ms" -f $nativeRow[0].Median)
+  if ($scRow.Count -gt 0) {
+    Write-Host ("native exe (sc.exe query) median {0,6} ms   <- what the fixed build uses" -f $scRow[0].Median)
+  }
+  Write-Host ("empty powershell.exe      median {0,6} ms" -f $psRow[0].Median)
+  if ($psRow[0].Median -ge 500 -and $nativeRow[0].Median -lt 200) {
+    $ratio = [math]::Round($psRow[0].Median / [math]::Max(1, $nativeRow[0].Median), 1)
+    Write-Host ''
+    Write-Host ("PowerShell startup costs {0}x a native exe here. Process creation itself is fine;" -f $ratio) -ForegroundColor Yellow
+    Write-Host 'the PowerShell/.NET engine is what is being taxed. Every PowerShell-based probe'
+    Write-Host 'pays that before doing any work, which is what pushed them past their budgets.'
+    Write-Host 'Add an antivirus exclusion for the MX-H2I install directory and for'
+    Write-Host 'powershell.exe launched from it, then re-run this script to confirm.'
+  }
+  if ($scRow.Count -gt 0 -and $psRow.Count -gt 0 -and $scRow[0].Max -lt 500 -and $psRow[0].Median -ge 500) {
+    Write-Host ''
+    Write-Host 'sc.exe answers the tunnel-liveness question in a fraction of the PowerShell cost.' -ForegroundColor Green
+    Write-Host 'The fixed build reads the service state this way first, so the decisive probe no'
+    Write-Host 'longer depends on a PowerShell spawn completing in time.'
   }
 }
 Write-Host ''
