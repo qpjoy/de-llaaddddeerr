@@ -108,7 +108,18 @@ can depend only on the capabilities they own:
 | `@qpjoy/electron-launcher/wireguard` | WireGuard profile rendering, route proof, and peer recovery |
 | `@qpjoy/electron-launcher/system-domain-proxy` | standalone local PAC/proxy edge plus OS PAC apply/restore/verify |
 | `@qpjoy/electron-launcher/standalone-data-plane` | standalone WG apply/stop/diagnostics plus cross-process-safe ownership claims |
+| `@qpjoy/electron-launcher/application-updater` | application-level Release Center controller with serialized check/download/install, cancellation, progress, and typed product hooks |
 | `@qpjoy/electron-launcher/oversea` | logged-in user ensure-subscription exchange with inline YAML and no persisted bearer |
+
+New Electron products should normally use `application-updater`. Existing
+products may keep their current `release-updater` and
+`release-update-executor` orchestration; the new controller is additive and
+does not replace MX-H2I's released macOS or Windows update state machines.
+Publish it under a new immutable semver and pin that version only in the
+product being migrated. Publishing the package does not change an installed
+MX-H2I build; a future MX-H2I rebuild against the newer L1/L2 must pass its own
+update and platform regression gates before release.
+See [the integration guide](../../docs/29-unified-launcher-updater-integration.md).
 
 An Internal-ready standalone product can exchange its in-memory login token for
 the current user's Oversea subscription. Only start a proxy runtime when

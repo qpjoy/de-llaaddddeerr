@@ -100,7 +100,7 @@ test('external ingest initializes publication state before enqueueing analysis a
   assert.match(source, /SET projection_revision = projection_revision \+ 1/)
   assert.match(
     source,
-    /\$25::boolean[\s\S]*?event_time IS NULL[\s\S]*?collected_at IS DISTINCT FROM EXCLUDED\.collected_at/,
+    /\$25::boolean[\s\S]*?event_time IS NULL[\s\S]*?collected_at IS DISTINCT FROM GREATEST\(/,
   )
 })
 

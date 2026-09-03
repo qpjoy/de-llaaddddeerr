@@ -1029,6 +1029,7 @@ export function platformLabel(platform) {
     source_catalog: '数据源目录',
     mobile_commerce: '手机电商采集',
     virtual_supermarket: '虚拟超市',
+    ecommerce: '电商商品数据',
   }
   return labels[platform] || platform
 }

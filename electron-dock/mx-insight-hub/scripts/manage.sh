@@ -743,6 +743,27 @@ create_runtime_config() {
   local namespace="mx-insight-hub"
   need node
   local database_url="${MX_INSIGHT_DATABASE_URL:?ensure_shared_data_plane must run before create_runtime_config}"
+  local justone_configured=0
+  if [ -n "${MX_INSIGHT_JUSTONE_TOKEN:-}" ]; then
+    justone_configured=1
+  fi
+  local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-150000}"
+  local justone_preflight_error=""
+  if ! justone_preflight_error="$(
+    MX_INSIGHT_JUSTONE_CONFIGURED="$justone_configured" \
+    MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
+    node --input-type=module -e '
+      const { preflightJustOneConfig } = await import(process.argv[1])
+      try {
+        preflightJustOneConfig(process.env)
+      } catch (error) {
+        process.stderr.write(error?.message || "JustOne configuration is invalid")
+        process.exit(1)
+      }
+    ' "${ROOT_DIR}/server/config.mjs" 2>&1
+  )"; then
+    die "JustOne preflight failed: ${justone_preflight_error}"
+  fi
   local docker_proxy_snapshot
   docker_proxy_snapshot="$(docker_daemon_proxy_snapshot)"
   local -a secret_args=(
@@ -751,6 +772,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_API_KEY_PEPPER="$MX_INSIGHT_API_KEY_PEPPER"
     --from-literal=NIGHT_ALL_SERVICE_TOKEN="${NIGHT_ALL_SERVICE_TOKEN:-}"
     --from-literal=NIGHT_ALL_EXPORT_TOKEN="${NIGHT_ALL_EXPORT_TOKEN:-}"
+    --from-literal=MX_INSIGHT_JUSTONE_TOKEN="${MX_INSIGHT_JUSTONE_TOKEN:-}"
     --from-literal=MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT="$docker_proxy_snapshot"
   )
   if [ -n "${MX_INSIGHT_TG_MONITOR_DATABASE_URL:-}" ]; then
@@ -805,6 +827,18 @@ create_runtime_config() {
     --from-literal=NIGHT_ALL_BASE_URL="$NIGHT_ALL_BASE_URL" \
     --from-literal=NIGHT_ALL_TIMEOUT_MS="${NIGHT_ALL_TIMEOUT_MS:-30000}" \
     --from-literal=NIGHT_ALL_READY_MODE="${NIGHT_ALL_READY_MODE:-ready_only}" \
+    --from-literal=MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
+    --from-literal=MX_INSIGHT_JUSTONE_CONFIGURED="$justone_configured" \
+    --from-literal=MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED:-0}" \
+    --from-literal=MX_INSIGHT_JUSTONE_TIMEOUT_MS="${MX_INSIGHT_JUSTONE_TIMEOUT_MS:-120000}" \
+    --from-literal=MX_INSIGHT_JUSTONE_FRESH_TTL_MS="${MX_INSIGHT_JUSTONE_FRESH_TTL_MS:-60000}" \
+    --from-literal=MX_INSIGHT_JUSTONE_STALE_TTL_MS="${MX_INSIGHT_JUSTONE_STALE_TTL_MS:-604800000}" \
+    --from-literal=MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS="${MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS:-900000}" \
+    --from-literal=MX_INSIGHT_JUSTONE_MAX_CONCURRENCY="${MX_INSIGHT_JUSTONE_MAX_CONCURRENCY:-8}" \
+    --from-literal=MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY="${MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY:-2}" \
+    --from-literal=MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES="${MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES:-3}" \
+    --from-literal=MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS="${MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS:-60000}" \
+    --from-literal=MX_INSIGHT_JUSTONE_BILLING_JSON="${MX_INSIGHT_JUSTONE_BILLING_JSON:-}" \
     --from-literal=MX_COMMON_ELASTICSEARCH_URL="$elasticsearch_url" \
     --from-literal=MX_COMMON_REDIS_URL="$redis_url" \
     --from-literal=MX_COMMON_HANLP_URL="${MX_COMMON_HANLP_URL:-}" \

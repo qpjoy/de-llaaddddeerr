@@ -117,7 +117,7 @@ const appCenterAppExample = {
   displayName: 'Luopan',
   builtin: false,
   systemOwned: false,
-  packageName: '@qpjoy/luopan-demo',
+  packageName: 'compass',
   version: '0.1.0',
   category: 'custom',
   description: 'Luopan standalone Launcher application.',
@@ -125,7 +125,7 @@ const appCenterAppExample = {
   standaloneChannelProductId: 'luopan',
   productNetworkId: 'luopan',
   enabled: true,
-  channels: ['shadow', 'beta', 'stable'],
+  channels: ['stable'],
   permissions: ['auth.read'],
   requiredCapabilities: ['launcher-network', 'launcher-standalone'],
   accessPolicy: {
@@ -609,13 +609,14 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           'curl -sS -X POST "$BASE/internal/v1/app-center/apps" \\',
           '  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \\',
           '  -H "content-type: application/json" \\',
-          '  --data \'{"appId":"luopan","displayName":"Luopan","packageName":"@qpjoy/luopan-demo","launcherMode":"standalone","enabled":true,"requestedBy":"internal-release-admin"}\''
+          '  --data \'{"appId":"luopan","displayName":"Luopan","packageName":"compass","launcherMode":"standalone","channels":["stable"],"enabled":true,"requestedBy":"internal-release-admin"}\''
         ].join('\n'),
         request: {
           appId: 'luopan',
           displayName: 'Luopan',
-          packageName: '@qpjoy/luopan-demo',
+          packageName: 'compass',
           launcherMode: 'standalone',
+          channels: ['stable'],
           enabled: true,
           requestedBy: 'internal-release-admin'
         },
@@ -637,12 +638,13 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           'curl -sS -X POST "$BASE/internal/v1/app-center/apps/luopan" \\',
           '  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \\',
           '  -H "content-type: application/json" \\',
-          '  --data \'{"displayName":"Luopan","packageName":"@qpjoy/luopan-demo","launcherMode":"standalone","enabled":true,"requestedBy":"internal-release-admin"}\''
+          '  --data \'{"displayName":"Luopan","packageName":"compass","launcherMode":"standalone","channels":["stable"],"enabled":true,"requestedBy":"internal-release-admin"}\''
         ].join('\n'),
         request: {
           displayName: 'Luopan',
-          packageName: '@qpjoy/luopan-demo',
+          packageName: 'compass',
           launcherMode: 'standalone',
+          channels: ['stable'],
           enabled: true,
           requestedBy: 'internal-release-admin'
         },
@@ -1585,26 +1587,26 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       get: operation({
         tag: 'Release Consumer',
         summary: '按安装包身份解析发布产品',
-        description: '用户端从自身 package.json 读取 packageName，并用它取得服务端登记的 productId、组件命名空间与可用 channel。不要列出所有应用后猜测，也不要从 Luopan 示例复制 productId。旧客户端继续显式发送 productId；两条路径兼容共存。packageName 未登记/产品停用返回 404，重复登记返回 409，避免误领其他应用版本。',
+        description: '用户端从自身 package.json 读取 packageName，并用它取得服务端登记的 productId、组件命名空间与可用 channel。正式 Compass 使用 packageName=compass，解析到已有 productId/componentId/ProductNetwork=luopan；@qpjoy/luopan-demo 是后台已持久化旧 row 与历史客户端的迁移兼容 alias。不要列出所有应用后猜测，也不要从 Luopan 示例复制 productId。旧客户端继续显式发送 productId；两条路径兼容共存。packageName 未登记/产品停用返回 404，重复登记返回 409，避免误领其他应用版本。',
         operationId: 'resolveReleaseProduct',
         routeId: 'release.product.resolve',
         auth: 'internal-consumer',
         parameters: [
-          queryParameter('packageName', '@qpjoy/luopan-demo', true, { maxLength: 240 }),
-          queryParameter('channel', 'shadow', false, { pattern: '^[a-z0-9][a-z0-9._-]*$', maxLength: 64 })
+          queryParameter('packageName', 'compass', true, { maxLength: 240 }),
+          queryParameter('channel', 'stable', false, { pattern: '^[a-z0-9][a-z0-9._-]*$', maxLength: 64 })
         ],
-        curl: 'curl -sS -G "$BASE/internal/v1/releases/products/resolve" --data-urlencode "packageName=@qpjoy/luopan-demo" --data-urlencode "channel=shadow"',
+        curl: 'curl -sS -G "$BASE/internal/v1/releases/products/resolve" --data-urlencode "packageName=compass" --data-urlencode "channel=stable"',
         response: {
           identity: {
             appId: 'luopan',
             productId: 'luopan',
-            packageName: '@qpjoy/luopan-demo',
+            packageName: 'compass',
             launcherMode: 'standalone',
             networkProductId: 'luopan',
             componentId: 'luopan',
             rendererComponentId: 'luopan-renderer',
-            channel: 'shadow',
-            channels: ['shadow', 'beta', 'stable']
+            channel: 'stable',
+            channels: ['stable']
           }
         }
       })
@@ -1621,7 +1623,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           installId: 'install_luopan_01',
           userId: 'usr_alice',
           productId: 'luopan',
-          channel: 'shadow',
+          channel: 'stable',
           platform: 'darwin',
           arch: 'arm64',
           artifactKinds: ['app-asar'],
@@ -1675,18 +1677,18 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         auth: 'internal-consumer',
         parameters: [
           queryParameter('componentId', 'luopan', true),
-          queryParameter('channel', 'shadow', false),
+          queryParameter('channel', 'stable', false),
           queryParameter('platform', 'darwin', false),
           queryParameter('arch', 'arm64', false),
           queryParameter('limit', 8, false)
         ],
-        curl: 'curl -sS "$BASE/internal/v1/releases/history?componentId=luopan&channel=shadow&platform=darwin&arch=arm64&limit=8"',
+        curl: 'curl -sS "$BASE/internal/v1/releases/history?componentId=luopan&channel=stable&platform=darwin&arch=arm64&limit=8"',
         response: {
           releases: [{
             releaseId: 'luopan-installer-0.2.0',
             productId: 'luopan',
             version: '0.2.0',
-            channel: 'shadow',
+            channel: 'stable',
             status: 'ready',
             artifactKind: 'app-installer',
             deliveryMode: 'prompt-download-restart',
@@ -1755,7 +1757,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           queryParameter('componentId', 'luopan', true),
           queryParameter('kind', 'app-installer', true),
           queryParameter('version', '0.2.0', true),
-          queryParameter('channel', 'shadow', false, { pattern: '^[a-z0-9][a-z0-9._-]*$', maxLength: 64 }),
+          queryParameter('channel', 'stable', false, { pattern: '^[a-z0-9][a-z0-9._-]*$', maxLength: 64 }),
           queryParameter('platform', 'darwin', false),
           queryParameter('arch', 'arm64', false),
           queryParameter('fileName', 'Luopan-0.2.0-arm64.dmg', true),
@@ -1765,7 +1767,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         requestContentType: 'application/octet-stream',
         requestSchema: { type: 'string', format: 'binary' },
         curl: [
-          'curl -sS -X POST "$BASE/internal/v1/sdk/releases/artifacts?productId=luopan&releaseId=luopan-installer-0.2.0&componentId=luopan&kind=app-installer&version=0.2.0&channel=shadow&platform=darwin&arch=arm64&fileName=Luopan-0.2.0-arm64.dmg&digest=sha256:$SHA256" \\',
+          'curl -sS -X POST "$BASE/internal/v1/sdk/releases/artifacts?productId=luopan&releaseId=luopan-installer-0.2.0&componentId=luopan&kind=app-installer&version=0.2.0&channel=stable&platform=darwin&arch=arm64&fileName=Luopan-0.2.0-arm64.dmg&digest=sha256:$SHA256" \\',
           '  -H "Authorization: Bearer $TOKEN" \\',
           '  -H "content-type: application/octet-stream" \\',
           '  --data-binary "@$ARTIFACT"'
@@ -1829,7 +1831,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             planId: 'relplan_luopan_020_canary',
             releaseId: 'luopan-installer-0.2.0',
             productId: 'luopan',
-            channel: 'shadow',
+            channel: 'stable',
             requestId: 'luopan-0.2.0-canary-001',
             rollout: { strategy: 'manual-ring', percentage: 0, audience: { installIds: ['install_canary'] } },
             test: { gate: { verdict: 'blocked' } }
@@ -1847,7 +1849,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         request: {
           artifactId: 'artifact_luopan_020',
           currentVersion: '0.1.0',
-          channel: 'shadow',
+          channel: 'stable',
           rolloutStrategy: 'manual-ring',
           rolloutPercentage: 0,
           targetInstallIds: ['install_canary'],
@@ -1861,7 +1863,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             planId: 'relplan_luopan_020_canary',
             releaseId: 'luopan-installer-0.2.0',
             productId: 'luopan',
-            channel: 'shadow',
+            channel: 'stable',
             createdBy: 'service-account:svc_release_luopan',
             requestId: 'luopan-0.2.0-canary-001',
             deliveryMode: 'prompt-download-restart',

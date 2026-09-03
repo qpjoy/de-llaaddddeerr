@@ -878,6 +878,13 @@ export class PostgresStore {
          FROM reaped
          WHERE call.usage_request_id = reaped.id AND call.outcome IS NULL
          RETURNING call.id
+       ), closed_external_platform_calls AS (
+         UPDATE external_platform.provider_calls call SET
+           outcome = 'unknown', error_code = 'reservation_lease_expired',
+           completed_at = now()
+         FROM reaped
+         WHERE call.usage_request_id = reaped.id AND call.outcome = 'pending'
+         RETURNING call.id
        )
        SELECT count(*)::integer AS reaped FROM reaped`,
     )
@@ -1757,20 +1764,28 @@ export class PostgresStore {
     batch = null,
     sessionClient = null,
     apiSearchLineage = null,
+    externalPlatformLineage = null,
   }) {
-    if (records.length === 0 && !apiSearchLineage) return { ingested: 0, changed: 0 }
-    if (apiSearchLineage && importRunId) {
+    if (apiSearchLineage && externalPlatformLineage) {
+      throw new AppError(400, 'ambiguous_api_lineage', 'Only one API call lineage may be supplied')
+    }
+    const apiLineage = apiSearchLineage || externalPlatformLineage
+    const externalPlatformCall = Boolean(externalPlatformLineage)
+    if (records.length === 0 && !apiLineage) return { ingested: 0, changed: 0 }
+    if (apiLineage && importRunId) {
       throw new AppError(400, 'ambiguous_ingest_lineage', 'API search and external import lineage cannot be combined')
     }
-    if (apiSearchLineage && (
-      !apiSearchLineage.requestId
-      || !apiSearchLineage.queryFingerprint
-      || !apiSearchLineage.connectorCallId
+    if (apiLineage && (
+      !apiLineage.requestId
+      || !apiLineage.queryFingerprint
+      || !(externalPlatformCall ? apiLineage.providerCallId : apiLineage.connectorCallId)
     )) {
       throw new AppError(400, 'incomplete_api_search_lineage', 'API search lineage is incomplete')
     }
-    const stream = apiSearchLineage
-      ? `${platform}.night-all-compat.v1`
+    const stream = apiLineage
+      ? externalPlatformCall
+        ? `${platform}.external-platform.v1`
+        : `${platform}.night-all-compat.v1`
       : `${platform}.external.v1`
     const client = sessionClient ?? await this.pool.connect()
     let changed = 0
@@ -1781,38 +1796,56 @@ export class PostgresStore {
     let releaseError = null
     try {
       await client.query('BEGIN')
-      if (apiSearchLineage) {
+      if (apiLineage) {
         const runId = randomUUID()
+        const callId = externalPlatformCall ? apiLineage.providerCallId : apiLineage.connectorCallId
+        const callColumn = externalPlatformCall ? 'external_platform_call_id' : 'connector_call_id'
+        const callTable = externalPlatformCall
+          ? 'external_platform.provider_calls'
+          : 'serving.connector_calls'
+        const acceptedOutcome = externalPlatformCall
+          ? "call.outcome = 'succeeded'"
+          : "call.outcome IN ('complete', 'partial')"
+        const externalPlatformBinding = externalPlatformCall
+          ? `AND $2 = 'external-platform:' || call.provider_key
+              AND $3 = split_part(call.operation, '.', 1) || '.external-platform.v1'`
+          : ''
         const inserted = await client.query(
           `INSERT INTO ingest.ingest_runs
              (id, connector_id, stream_id, trigger, request_id, query_fingerprint,
-              connector_call_id)
+              ${callColumn})
            SELECT $1, $2, $3, 'api_search', $4, $5, $6
-             FROM serving.connector_calls call
+             FROM ${callTable} call
             WHERE call.id = $6
               AND call.usage_request_id = $4
               AND call.request_fingerprint = $5
-              AND call.outcome IN ('complete', 'partial')
-           ON CONFLICT (connector_call_id) WHERE connector_call_id IS NOT NULL
+              AND ${acceptedOutcome}
+              ${externalPlatformBinding}
+           ON CONFLICT (${callColumn}) WHERE ${callColumn} IS NOT NULL
            DO NOTHING
            RETURNING id`,
           [
-            runId, connectorId, stream, apiSearchLineage.requestId,
-            apiSearchLineage.queryFingerprint, apiSearchLineage.connectorCallId,
+            runId, connectorId, stream, apiLineage.requestId,
+            apiLineage.queryFingerprint, callId,
           ],
         )
         ingestRunId = inserted.rows[0]?.id || null
         if (!ingestRunId) {
           const existingResult = await client.query(
-            `SELECT id, request_id, query_fingerprint, item_count, finished_at
+            `SELECT id, connector_id, stream_id, request_id, query_fingerprint,
+                    item_count, finished_at
                FROM ingest.ingest_runs
-              WHERE connector_call_id = $1`,
-            [apiSearchLineage.connectorCallId],
+              WHERE ${callColumn} = $1`,
+            [callId],
           )
           const existing = existingResult.rows[0]
           if (!existing
-            || existing.request_id !== apiSearchLineage.requestId
-            || existing.query_fingerprint !== apiSearchLineage.queryFingerprint) {
+            || existing.request_id !== apiLineage.requestId
+            || existing.query_fingerprint !== apiLineage.queryFingerprint
+            || (externalPlatformCall && (
+              existing.connector_id !== connectorId
+              || existing.stream_id !== stream
+            ))) {
             throw new AppError(
               409,
               'api_search_lineage_mismatch',
@@ -1889,8 +1922,8 @@ export class PostgresStore {
         }
       }
 
-      const sourceRunColumn = apiSearchLineage ? 'ingest_run_id' : 'external_import_run_id'
-      const sourceRunId = apiSearchLineage ? ingestRunId : importRunId
+      const sourceRunColumn = apiLineage ? 'ingest_run_id' : 'external_import_run_id'
+      const sourceRunId = apiLineage ? ingestRunId : importRunId
       for (const record of records) {
         if (record.deletedAt != null) deleted += 1
         const rawPayloadSha256 = record.rawPayloadSha256 || record.payloadSha256
@@ -1956,7 +1989,11 @@ export class PostgresStore {
         )
 
         const sourceStage = publicOpinionSourceStage(datasetId, record.rawItem)
-        const refreshUndatedCandidateProjection = sourceStage === 'candidate'
+        // Candidate public-opinion records and real-time external-platform
+        // records use collection time when no upstream event time exists.
+        // Re-project only those bounded cases when a newer observation moves
+        // freshness forward; generic batch re-imports must not churn ES.
+        const refreshCollectedAtProjection = externalPlatformCall || sourceStage === 'candidate'
         const upserted = await client.query(
           `INSERT INTO core.canonical_records
              (id, dataset_id, platform, object_type, external_id, schema_version,
@@ -1975,7 +2012,10 @@ export class PostgresStore {
              author_external_id = EXCLUDED.author_external_id,
              author_name = EXCLUDED.author_name,
              event_time = EXCLUDED.event_time,
-             collected_at = EXCLUDED.collected_at,
+             collected_at = GREATEST(
+               core.canonical_records.collected_at,
+               EXCLUDED.collected_at
+             ),
              latitude = EXCLUDED.latitude,
              longitude = EXCLUDED.longitude,
              country_code = EXCLUDED.country_code,
@@ -1995,7 +2035,10 @@ export class PostgresStore {
                      $25::boolean
                      AND core.canonical_records.event_time IS NULL
                      AND EXCLUDED.event_time IS NULL
-                     AND core.canonical_records.collected_at IS DISTINCT FROM EXCLUDED.collected_at
+                     AND core.canonical_records.collected_at IS DISTINCT FROM GREATEST(
+                       core.canonical_records.collected_at,
+                       EXCLUDED.collected_at
+                     )
                    )
                  )::int
            RETURNING id, current_revision, projection_revision`,
@@ -2006,7 +2049,7 @@ export class PostgresStore {
             record.eventTime, record.collectedAt, record.latitude, record.longitude,
             record.countryCode, record.admin1Code, record.admin2Code,
             record.stableFields, record.extensions, record.deletedAt, record.heatScore,
-            refreshUndatedCandidateProjection,
+            refreshCollectedAtProjection,
           ],
         )
         const { id, current_revision: revision } = upserted.rows[0]
@@ -2112,8 +2155,11 @@ export class PostgresStore {
           )
         }
 
-        if (apiSearchLineage) {
-          const sourceEventId = `${apiSearchLineage.connectorCallId}:${record.objectType}:${record.externalId}`
+        if (apiLineage) {
+          const callId = externalPlatformCall
+            ? apiLineage.providerCallId
+            : apiLineage.connectorCallId
+          const sourceEventId = `${callId}:${record.objectType}:${record.externalId}`
           await client.query(
             `INSERT INTO core.observations
                (id, record_id, connector_id, source_event_id, query_fingerprint,
@@ -2122,9 +2168,9 @@ export class PostgresStore {
              ON CONFLICT (record_id, observation_hash) DO NOTHING`,
             [
               randomUUID(), id, connectorId, sourceEventId,
-              apiSearchLineage.queryFingerprint, record.rank ?? null,
+              apiLineage.queryFingerprint, record.rank ?? null,
               record.metrics || {},
-              observationHash(record, apiSearchLineage.queryFingerprint, sourceEventId),
+              observationHash(record, apiLineage.queryFingerprint, sourceEventId),
               ingestRunId,
             ],
           )
@@ -2147,12 +2193,16 @@ export class PostgresStore {
       }
 
       if (ingestRunId) {
-        await client.query(
+        const completedRun = await client.query(
           `UPDATE ingest.ingest_runs
               SET item_count = $2, finished_at = now()
-            WHERE id = $1`,
+            WHERE id = $1
+            RETURNING id`,
           [ingestRunId, records.length],
         )
+        if (completedRun.rowCount !== 1) {
+          throw new AppError(409, 'api_search_ingest_run_missing', 'API search ingest run no longer exists')
+        }
       }
 
       if (importRunId && batch?.key) {
@@ -2201,8 +2251,8 @@ export class PostgresStore {
         releaseError = error
         const unknown = new AppError(
           503,
-          apiSearchLineage ? 'api_search_ingest_outcome_unknown' : 'external_commit_outcome_unknown',
-          apiSearchLineage
+          apiLineage ? 'api_search_ingest_outcome_unknown' : 'external_commit_outcome_unknown',
+          apiLineage
             ? 'The API search ingest outcome is unknown; retry the same connector call'
             : 'The external batch commit outcome is unknown; retry the same run and batch',
         )
@@ -4101,7 +4151,26 @@ export class PostgresStore {
               observation.query_fingerprint AS observation_query_fingerprint,
               observation_run.request_id AS observation_request_id,
               observation_run.connector_call_id,
+              observation_run.external_platform_call_id,
               connector_call.operation AS connector_operation,
+              external_call.provider_key AS external_provider_key,
+              external_call.operation AS external_operation,
+              external_call.endpoint_key AS external_endpoint_key,
+              external_call.endpoint_version AS external_endpoint_version,
+              external_call.marketplace AS external_marketplace,
+              external_call.outcome AS external_outcome,
+              external_call.billed AS external_billed,
+              external_call.cost_minor AS external_cost_minor,
+              external_call.cost_kind AS external_cost_kind,
+              external_call.currency AS external_currency,
+              external_call.upstream_request_id AS external_upstream_request_id,
+              external_call.upstream_record_time AS external_upstream_record_time,
+              external_call.completed_at AS external_completed_at,
+              external_response.contract_state AS external_response_contract_state,
+              external_response.captured_at AS external_response_captured_at,
+              external_response.payload_sha256 AS external_response_payload_sha256,
+              external_archive.archive_path AS external_archive_path,
+              external_archive.source_key AS external_archive_source_key,
               publication.record_id AS publication_record_id,
               publication.source_stage AS publication_source_stage,
               publication.status AS publication_status,
@@ -4139,6 +4208,17 @@ export class PostgresStore {
            ON observation_run.id = observation.ingest_run_id
          LEFT JOIN serving.connector_calls connector_call
            ON connector_call.id = observation_run.connector_call_id
+         LEFT JOIN external_platform.provider_calls external_call
+           ON external_call.id = observation_run.external_platform_call_id
+         LEFT JOIN external_platform.response_archives external_response
+           ON external_response.provider_call_id = external_call.id
+         LEFT JOIN LATERAL (
+           SELECT archive_path, source_key
+             FROM external_platform.archive_objects
+            WHERE provider_call_id = external_call.id AND object_kind = 'response'
+            ORDER BY item_ordinal
+            LIMIT 1
+         ) external_archive ON true
         ORDER BY page.sort_time ${direction}, page.id ${direction}`,
         values,
       ),
@@ -4177,7 +4257,26 @@ export class PostgresStore {
               observation.query_fingerprint AS observation_query_fingerprint,
               observation_run.request_id AS observation_request_id,
               observation_run.connector_call_id,
+              observation_run.external_platform_call_id,
               connector_call.operation AS connector_operation,
+              external_call.provider_key AS external_provider_key,
+              external_call.operation AS external_operation,
+              external_call.endpoint_key AS external_endpoint_key,
+              external_call.endpoint_version AS external_endpoint_version,
+              external_call.marketplace AS external_marketplace,
+              external_call.outcome AS external_outcome,
+              external_call.billed AS external_billed,
+              external_call.cost_minor AS external_cost_minor,
+              external_call.cost_kind AS external_cost_kind,
+              external_call.currency AS external_currency,
+              external_call.upstream_request_id AS external_upstream_request_id,
+              external_call.upstream_record_time AS external_upstream_record_time,
+              external_call.completed_at AS external_completed_at,
+              external_response.contract_state AS external_response_contract_state,
+              external_response.captured_at AS external_response_captured_at,
+              external_response.payload_sha256 AS external_response_payload_sha256,
+              external_archive.archive_path AS external_archive_path,
+              external_archive.source_key AS external_archive_source_key,
               publication.record_id AS publication_record_id,
               publication.source_stage AS publication_source_stage,
               publication.status AS publication_status,
@@ -4212,6 +4311,17 @@ export class PostgresStore {
            ON observation_run.id = observation.ingest_run_id
          LEFT JOIN serving.connector_calls connector_call
            ON connector_call.id = observation_run.connector_call_id
+         LEFT JOIN external_platform.provider_calls external_call
+           ON external_call.id = observation_run.external_platform_call_id
+         LEFT JOIN external_platform.response_archives external_response
+           ON external_response.provider_call_id = external_call.id
+         LEFT JOIN LATERAL (
+           SELECT archive_path, source_key
+             FROM external_platform.archive_objects
+            WHERE provider_call_id = external_call.id AND object_kind = 'response'
+            ORDER BY item_ordinal
+            LIMIT 1
+         ) external_archive ON true
         WHERE r.id = ANY($1::uuid[])`,
       [ids],
     )
@@ -6557,6 +6667,31 @@ function dataCenterRecordDetail(row) {
         requestId: row.observation_request_id ?? null,
         connectorCallId: row.connector_call_id ?? null,
         operation: row.connector_operation ?? null,
+        ...(row.external_platform_call_id ? {
+          externalPlatformCallId: row.external_platform_call_id,
+          externalPlatform: {
+            providerKey: row.external_provider_key,
+            operation: row.external_operation,
+            endpointKey: row.external_endpoint_key,
+            endpointVersion: row.external_endpoint_version,
+            marketplace: row.external_marketplace,
+            outcome: row.external_outcome,
+            billed: row.external_billed,
+            costMinor: row.external_cost_minor == null ? null : Number(row.external_cost_minor),
+            costKind: row.external_cost_kind,
+            currency: row.external_currency,
+            upstreamRequestId: row.external_upstream_request_id,
+            upstreamRecordTime: row.external_upstream_record_time,
+            completedAt: row.external_completed_at ? iso(row.external_completed_at) : null,
+            responseContractState: row.external_response_contract_state,
+            responseCapturedAt: row.external_response_captured_at
+              ? iso(row.external_response_captured_at)
+              : null,
+            responsePayloadSha256: row.external_response_payload_sha256,
+            archivePath: row.external_archive_path,
+            sourceCatalogKey: row.external_archive_source_key,
+          },
+        } : {}),
       } : null,
     },
     projectionRevision: Number(row.projection_revision || 0),

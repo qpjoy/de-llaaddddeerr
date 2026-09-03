@@ -144,6 +144,12 @@ export const adminApi = {
   // External sources (P4).
   sources: (token) => request(token, `${ADMIN_ROOT}/sources`),
   databaseConnections: (token) => request(token, `${ADMIN_ROOT}/database-connections`),
+  externalPlatforms: (token, query = {}) => request(
+    token, `${ADMIN_ROOT}/external-platforms`, { query },
+  ),
+  externalPlatform: (token, key, query = {}) => request(
+    token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}`, { query },
+  ),
   createDatabaseConnection: (token, body) => request(
     token, `${ADMIN_ROOT}/database-connections`, { method: 'POST', body },
   ),

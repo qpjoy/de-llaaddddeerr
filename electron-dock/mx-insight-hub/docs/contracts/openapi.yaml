@@ -1562,8 +1562,19 @@ paths:
                               description: Present for Hub-owned platform entries.
                             servingMode:
                               type: string
-                              enum: [stored]
-                              description: Present for Hub-owned stored-data entries.
+                              enum: [stored, live_with_stored_fallback]
+                              description: Present for Hub-owned stored or governed live-with-fallback entries.
+                            contractVersion:
+                              type: string
+                              description: Stable Hub contract version when the platform exposes one.
+                            marketplaces:
+                              type: array
+                              items: { type: string, enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu] }
+                            pagination: { type: string, enum: [opaque_cursor] }
+                            idempotencyKey: { type: string, enum: [optional] }
+                            freshnessModes:
+                              type: array
+                              items: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] }
                             context: { $ref: "#/components/schemas/CanonicalContextCapability" }
                             timeline: { $ref: "#/components/schemas/CanonicalTimelineCapability" }
                       legacySearch:
@@ -1648,6 +1659,16 @@ paths:
                       capabilities: [metadata, products, product_detail, stored_search, category_filter, department_filter, aisle_filter, shelf_filter, marketplace_filter]
                       source: hub
                       servingMode: stored
+                    - platform: ecommerce
+                      ready: true
+                      capabilities: [product_search]
+                      source: hub
+                      servingMode: live_with_stored_fallback
+                      contractVersion: mx-insight-hub.ecommerce-products.v1
+                      marketplaces: [taobao, tmall, jd, xiaohongshu_ec, xianyu]
+                      pagination: opaque_cursor
+                      idempotencyKey: optional
+                      freshnessModes: [live, fresh_cache, stored_fallback, idempotent_replay]
                     - platform: xiaohongshu
                       ready: true
                     - platform: twitter
@@ -1717,6 +1738,87 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
         "413": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /data/ecommerce/products/search:
+    post:
+      operationId: searchExternalCommerceProducts
+      summary: Search marketplace products through the governed external data gateway.
+      description: >-
+        Requires the ecommerce platform grant. The strict body accepts only
+        marketplace, query, page, cursor, sort and price; pageSize and routing
+        fields are not part of this contract. page and cursor are mutually
+        exclusive. Prefer Hub's opaque nextCursor, keep marketplace/query/sort/
+        price unchanged, and use a new Idempotency-Key for every next page. Hub
+        may serve an exact fresh snapshot or exact last-good fallback, but never
+        labels stored data as live. External platform identity, credentials,
+        endpoint coordinates and raw responses are not exposed.
+      x-mx-error-codes:
+        "400": [invalid_request, invalid_marketplace, unsupported_marketplace, invalid_query, invalid_page, invalid_cursor, invalid_pagination, cursor_scope_mismatch, continuation_required, unsupported_sort, invalid_price, unsupported_price_filter, unsupported_request_field, invalid_idempotency_key]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
+        "413": [payload_too_large]
+        "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
+        "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
+        "503": [external_platform_unavailable, external_platform_not_configured, external_platform_circuit_open, external_platform_capacity_unavailable]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: >-
+            Optional but recommended for explicit replay control. Reuse it only
+            for a transport retry of the exact same page request. Every next-page
+            request changes the body and must use a new key. When omitted, Hub
+            derives a short-lived freshness-bucket key for the normalized request.
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 128
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExternalCommerceProductSearchRequest" }
+            examples:
+              firstPage:
+                summary: First page
+                value: { marketplace: jd, query: AI recorder }
+              continuation:
+                summary: Continuation with the opaque Hub cursor
+                value: { marketplace: jd, query: AI recorder, cursor: opaque-next-cursor }
+      responses:
+        "200":
+          description: Provider-neutral product results plus explicit Hub freshness metadata.
+          headers:
+            x-mx-insight-request-id:
+              description: Durable Hub request identifier.
+              schema: { type: string, format: uuid }
+            idempotent-replay:
+              description: Whether this body is the committed result for the same caller-supplied idempotency key.
+              schema: { type: string, enum: ["true", "false"] }
+            x-mx-insight-source-mode:
+              description: How Hub satisfied this request.
+              schema: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] }
+            x-mx-insight-captured-at:
+              description: When the delivered external-data snapshot was captured.
+              schema: { type: string, format: date-time }
+            Age:
+              description: Whole seconds between capture and delivery.
+              schema: { type: integer, minimum: 0 }
+            Warning:
+              description: HTTP Warning 110 is present when sourceMode is stored_fallback.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalCommerceProductSearchEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /data/search:
     post:
@@ -5263,6 +5365,137 @@ components:
           maxLength: 4096
           description: Optional transient override; omitted uses the source's stored locator.
         expectedSha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+    ExternalCommerceProductSearchRequest:
+      type: object
+      additionalProperties: false
+      required: [marketplace, query]
+      not: { required: [page, cursor] }
+      description: >-
+        Provider-neutral product search. page and cursor are mutually exclusive.
+        The server owns result-size policy; pageSize is intentionally unsupported.
+      properties:
+        marketplace:
+          type: string
+          enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu]
+        query: { type: string, minLength: 1, maxLength: 200 }
+        page:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 1
+          description: Numeric page for a first traversal. Do not combine with cursor; continuation cursors are preferred.
+        cursor:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Opaque nextCursor from the prior response. Return it unchanged with the same marketplace, query, sort and price.
+        sort:
+          type: string
+          enum: [relevance, sales_desc, price_asc, price_desc, recent, seller_credit, price_drop, newest]
+          description: >-
+            Marketplace-specific. taobao/tmall accept relevance, sales_desc,
+            price_asc and price_desc; xianyu accepts relevance, recent,
+            seller_credit, price_asc, price_desc, price_drop and newest; jd and
+            xiaohongshu_ec do not accept sort.
+        price:
+          type: object
+          additionalProperties: false
+          description: Optional taobao/tmall-only inclusive price range. min must not exceed max.
+          properties:
+            min:
+              type: string
+              pattern: "^(?:0|[1-9][0-9]{0,11})(?:[.][0-9]{1,8})?$"
+            max:
+              type: string
+              pattern: "^(?:0|[1-9][0-9]{0,11})(?:[.][0-9]{1,8})?$"
+    ExternalCommerceProduct:
+      type: object
+      additionalProperties: false
+      required: [id, marketplace, title, url, pricing, shop, images, signals, attributes]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 256 }
+        marketplace: { type: string, enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu] }
+        title: { type: [string, "null"], maxLength: 4096 }
+        url: { type: [string, "null"], format: uri, maxLength: 2048 }
+        pricing:
+          type: object
+          additionalProperties: false
+          required: [current, original, currency]
+          properties:
+            current: { type: [string, "null"], maxLength: 128 }
+            original: { type: [string, "null"], maxLength: 128 }
+            currency: { type: string, minLength: 1, maxLength: 16 }
+        shop:
+          type: object
+          additionalProperties: false
+          required: [id, name]
+          properties:
+            id: { type: [string, "null"], maxLength: 256 }
+            name: { type: [string, "null"], maxLength: 512 }
+        images:
+          type: array
+          maxItems: 20
+          items: { type: string, format: uri, maxLength: 2048 }
+        signals:
+          type: object
+          additionalProperties: false
+          required: [sales, reviewCount, location]
+          properties:
+            sales: { type: [string, "null"], maxLength: 128 }
+            reviewCount: { type: [string, "null"], maxLength: 128 }
+            location: { type: [string, "null"], maxLength: 512 }
+        attributes:
+          type: object
+          additionalProperties: false
+          required: [brand, category]
+          properties:
+            brand: { type: [string, "null"], maxLength: 512 }
+            category: { type: [string, "null"], maxLength: 512 }
+    ExternalCommerceProductSearchPage:
+      type: object
+      additionalProperties: false
+      required: [page, returnedCount, discardedCount, hasMore, nextCursor]
+      properties:
+        page: { type: integer, minimum: 1, maximum: 1000 }
+        returnedCount: { type: integer, minimum: 0 }
+        discardedCount: { type: integer, minimum: 0 }
+        hasMore:
+          type: [boolean, "null"]
+          description: >-
+            null means the platform hinted at more data but Hub could not issue
+            a safe continuation; do not guess another page.
+        nextCursor:
+          type: [string, "null"]
+          maxLength: 4096
+          description: Opaque Hub cursor. null means the client must stop this traversal.
+    ExternalCommerceProductSearchEnvelope:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, data, meta, requestId]
+      properties:
+        contractVersion: { type: string, const: mx-insight-hub.ecommerce-products.v1 }
+        data:
+          type: object
+          additionalProperties: false
+          required: [items, page]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/ExternalCommerceProduct" }
+            page: { $ref: "#/components/schemas/ExternalCommerceProductSearchPage" }
+        meta:
+          type: object
+          additionalProperties: false
+          required: [capturedAt, servedAt, sourceMode, ageSeconds]
+          properties:
+            capturedAt: { type: string, format: date-time }
+            servedAt: { type: string, format: date-time }
+            sourceMode: { type: string, enum: [live, fresh_cache, stored_fallback, idempotent_replay] }
+            ageSeconds: { type: integer, minimum: 0 }
+            fallbackReason:
+              type: string
+              description: Bounded reason category present only for stored_fallback.
+        requestId: { type: string, format: uuid }
     SearchRequest:
       type: object
       additionalProperties: false
@@ -6038,9 +6271,7 @@ components:
             provider null and endpointId hub-canonical-search.
           properties:
             provider:
-              oneOf:
-                - { type: string, enum: [tikhub, rapidapi, justone] }
-                - { type: "null" }
+              type: "null"
             endpointId: { type: [string, "null"] }
     NightAllDataSearchPageInfo:
       type: object

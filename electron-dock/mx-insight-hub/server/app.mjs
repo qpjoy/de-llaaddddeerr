@@ -460,6 +460,8 @@ export function createApp({
   search = null,
   searchReindex = null,
   embedding = null,
+  externalPlatformAdmin = null,
+  externalPlatformGateway = null,
   segmenterConfig = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
@@ -1909,6 +1911,38 @@ export function createApp({
       if (request.method === 'GET' && pathname === '/internal/v1/admin/usage') {
         sendJson(response, 200, {
           data: await scopedUsageFor(principal, queryFilters(searchParams)),
+          requestId,
+        })
+        return
+      }
+
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/external-platforms') {
+        requireSourceAdmin(principal)
+        if (!externalPlatformAdmin) {
+          throw new AppError(503, 'external_platform_store_unavailable', 'External platform analytics are unavailable')
+        }
+        const unsupported = [...new Set(searchParams.keys())].filter((field) => field !== 'range')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported external-platform query fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.overview(searchParams.get('range') || '7d'),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider')
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        if (!externalPlatformAdmin) {
+          throw new AppError(503, 'external_platform_store_unavailable', 'External platform analytics are unavailable')
+        }
+        const unsupported = [...new Set(searchParams.keys())].filter((field) => field !== 'range')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'unsupported_fields', `Unsupported external-platform query fields: ${unsupported.join(', ')}`)
+        }
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.detail(params.provider, searchParams.get('range') || '7d'),
           requestId,
         })
         return
@@ -4005,6 +4039,28 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'POST' && pathname === '/api/v1/data/ecommerce/products/search') {
+        const context = await requirePublic(request)
+        if (!externalPlatformGateway) {
+          throw new AppError(503, 'external_platform_unavailable', 'External product search is unavailable')
+        }
+        const result = await externalPlatformGateway.search(context, {
+          body: await readJson(request, 64 * 1024),
+          idempotencyKey: request.headers['idempotency-key'],
+          path: pathname,
+        })
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay),
+          'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+          ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
+          ...(result.staleAgeSeconds != null ? { age: String(result.staleAgeSeconds) } : {}),
+          ...(result.sourceMode === 'stored_fallback'
+            ? { warning: '110 - "Response is stale"' }
+            : {}),
+        })
+        return
+      }
       if (request.method === 'GET' && pathname === '/api/v1/data/virtual-supermarket/metadata') {
         const context = await requirePublic(request)
         requireNoQuery(searchParams, 'virtual-supermarket metadata')
@@ -4357,13 +4413,21 @@ export function createApp({
         ? error
         : new AppError(500, 'internal_error', 'Internal server error')
       if (!(error instanceof AppError)) logger.error?.({ requestId, error }, 'request failed')
+      const detailRequestId = appError.details?.requestId
+      const durableRequestId = typeof detailRequestId === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(detailRequestId)
+        ? detailRequestId
+        : null
+      if (durableRequestId) {
+        response.setHeader('x-mx-insight-request-id', durableRequestId)
+      }
       sendJson(response, appError.status, {
         error: {
           code: appError.code,
           message: appError.message,
           ...(appError.details ? { details: appError.details } : {}),
         },
-        requestId,
+        requestId: durableRequestId || requestId,
       })
     }
   }

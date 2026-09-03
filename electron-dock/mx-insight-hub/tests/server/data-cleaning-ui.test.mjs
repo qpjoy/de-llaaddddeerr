@@ -8,22 +8,26 @@ async function frontendSources() {
     readFile(new URL('../../src/api.js', import.meta.url), 'utf8'),
     readFile(new URL('../../src/pages-data.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../../src/pages-database-connections.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/pages-external-platforms.jsx', import.meta.url), 'utf8'),
   ])
 }
 
-test('data-cleaning navigation keeps both admin-token-only routes under one parent', async () => {
+test('data-cleaning navigation keeps every privileged route under one parent', async () => {
   const [appSource] = await frontendSources()
   const databaseRoute = appSource.match(/\{ path: '\/database-connections',[^\n]+\}/u)?.[0] || ''
   const plansRoute = appSource.match(/\{ path: '\/sources',[^\n]+\}/u)?.[0] || ''
+  const externalRoute = appSource.match(/\{ path: '\/external-platforms',[^\n]+\}/u)?.[0] || ''
 
   assert.match(appSource, /const DATA_CLEANING_NAV_KEY = 'data-cleaning'/u)
   assert.match(appSource, /label: '数据清洗中心'/u)
-  for (const route of [databaseRoute, plansRoute]) {
+  for (const route of [databaseRoute, plansRoute, externalRoute]) {
     assert.match(route, /navParent: DATA_CLEANING_NAV_KEY/u)
+    assert.match(route, /capability: 'membership\.write'/u)
     assert.match(route, /platformAdmin: true/u)
     assert.match(route, /adminTokenOnly: true/u)
   }
   assert.match(plansRoute, /label: '清洗任务计划'/u)
+  assert.match(externalRoute, /label: '外部数据平台'/u)
 })
 
 test('database connection UI uses the shared dropdown and the safe flat DTO', async () => {

@@ -21,7 +21,7 @@ import type {
   TokenIntrospectionResult,
   UserCenterServiceAccount
 } from '../../types.js';
-import { ReleaseController } from './release.controller.js';
+import { ReleaseController, releaseCheckWithNamedArtifactUrls } from './release.controller.js';
 import { evaluateReleaseCheck } from './release-check.js';
 
 const publisherPrincipal = servicePrincipal('svc_release_luopan', ['sdk.release.read', 'sdk.release.publish']);
@@ -106,6 +106,64 @@ test('release checks let new clients select ASAR without changing legacy install
   assert.equal(legacySelection.releaseId, 'mx-h2i-asar-2.1.3');
 });
 
+test('Luopan release checks rebase only their own Internal artifact endpoint', () => {
+  const internalPlan = releasePlan('luopan', `sha256:${'a'.repeat(64)}`, {
+    artifactUrl: 'http://10.88.88.88:18090/internal/v1/release-artifacts/artifact_test/download?token=old#file',
+    artifactFileName: 'Compass-2.0.3-win32-x64-app.asar'
+  });
+  internalPlan.rollout.percentage = 100;
+  const decision = evaluateReleaseCheck([internalPlan], {
+    installId: 'install_compass',
+    productId: 'luopan',
+    channel: 'shadow',
+    platform: 'darwin',
+    arch: 'arm64',
+    components: { luopan: '0.1.0' }
+  });
+
+  const luopan = releaseCheckWithNamedArtifactUrls(decision, 'luopan');
+  assert.equal(
+    luopan.artifacts[0]?.url,
+    '/internal/v1/release-artifacts/artifact_test/download/Compass-2.0.3-win32-x64-app.asar?token=old#file'
+  );
+
+  const mxH2i = releaseCheckWithNamedArtifactUrls(decision, 'mx-h2i');
+  assert.equal(
+    mxH2i.artifacts[0]?.url,
+    'http://10.88.88.88:18090/internal/v1/release-artifacts/artifact_test/download/Compass-2.0.3-win32-x64-app.asar?token=old#file'
+  );
+
+  const externalPlan = structuredClone(internalPlan);
+  externalPlan.artifacts[0].url = 'https://cdn.example.com/releases/Compass-2.0.3-win32-x64-app.asar';
+  const externalDecision = evaluateReleaseCheck([externalPlan], {
+    installId: 'install_compass',
+    productId: 'luopan',
+    channel: 'shadow',
+    platform: 'darwin',
+    arch: 'arm64',
+    components: { luopan: '0.1.0' }
+  });
+  assert.equal(
+    releaseCheckWithNamedArtifactUrls(externalDecision, 'luopan').artifacts[0]?.url,
+    'https://cdn.example.com/releases/Compass-2.0.3-win32-x64-app.asar'
+  );
+
+  const mismatchedPlan = structuredClone(internalPlan);
+  mismatchedPlan.artifacts[0].url = 'http://10.88.88.88:18090/internal/v1/release-artifacts/other/download';
+  const mismatchedDecision = evaluateReleaseCheck([mismatchedPlan], {
+    installId: 'install_compass',
+    productId: 'luopan',
+    channel: 'shadow',
+    platform: 'darwin',
+    arch: 'arm64',
+    components: { luopan: '0.1.0' }
+  });
+  assert.equal(
+    releaseCheckWithNamedArtifactUrls(mismatchedDecision, 'luopan').artifacts[0]?.url,
+    'http://10.88.88.88:18090/internal/v1/release-artifacts/other/download/Compass-2.0.3-win32-x64-app.asar'
+  );
+});
+
 test('release plan metadata can be edited without changing artifact identity', () => {
   const store = new MemoryStore(testRuntimeConfig());
   const plan = store.createReleaseManagementPlan({
@@ -187,20 +245,37 @@ test('release product identity resolves by package name without changing network
   });
 });
 
-test('release product identity supports the historical Luopan row and fails closed on ambiguity', async () => {
+test('release product identity resolves Compass and supports the historical Luopan alias', async () => {
   const store = new MemoryStore(testRuntimeConfig());
-  store.upsertAppCenterApp({
-    appId: 'luopan',
-    packageName: null,
-    launcherMode: 'standalone',
-    channels: ['shadow', 'stable']
-  });
   const controller = new ReleaseController(store);
 
+  assert.equal(store.getAppCenterApp('luopan')?.packageName, 'compass');
+  const compass = await controller.resolveReleaseProduct('compass', 'stable');
+  assert.equal(compass.identity.productId, 'luopan');
+  assert.equal(compass.identity.componentId, 'luopan');
+  assert.equal(compass.identity.packageName, 'compass');
+
+  const historical = await controller.resolveReleaseProduct('@qpjoy/luopan-demo', 'shadow');
+  assert.equal(historical.identity.productId, 'luopan');
+  assert.equal(historical.identity.componentId, 'luopan');
   assert.equal(
-    (await controller.resolveReleaseProduct('@qpjoy/luopan-demo', 'shadow')).identity.productId,
-    'luopan'
+    historical.identity.packageName,
+    '@qpjoy/luopan-demo'
   );
+
+  // A rolling deployment can still read the package name written by the
+  // historical AppCenter migration. The new client identity must resolve
+  // before an operator rewrites that persisted row.
+  store.upsertAppCenterApp({
+    appId: 'luopan',
+    packageName: '@qpjoy/luopan-demo',
+    launcherMode: 'standalone',
+    productNetworkId: 'luopan',
+    channels: ['shadow', 'stable']
+  });
+  const compassFromHistoricalRow = await controller.resolveReleaseProduct('compass', 'stable');
+  assert.equal(compassFromHistoricalRow.identity.productId, 'luopan');
+  assert.equal(compassFromHistoricalRow.identity.networkProductId, 'luopan');
 
   store.upsertAppCenterApp({
     appId: 'luopan-copy',

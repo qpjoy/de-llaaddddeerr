@@ -122,16 +122,17 @@ export class ReleaseController {
       throw new BadRequestException('release check requires components: { componentId: currentVersion }');
     }
     const plans = await this.store.listReleaseManagementPlans();
+    const requestedProductId = nullableString(body.productId);
     const result = releaseCheckWithNamedArtifactUrls(evaluateReleaseCheck(plans, {
       installId,
       userId: nullableString(body.userId),
-      productId: nullableString(body.productId),
+      productId: requestedProductId,
       channel: nullableString(body.channel) ?? 'stable',
       platform: nullableString(body.platform),
       arch: normalizeReleaseArch(nullableString(body.arch)),
       artifactKinds: releaseCheckArtifactKinds(body.artifactKinds),
       components
-    }));
+    }), requestedProductId);
     await this.store.recordReleaseReport({
       installId,
       status: 'release-check',
@@ -684,8 +685,9 @@ function releasePackageNames(app: AppCenterApp): string[] {
   const values = [
     app.packageName,
     app.manifest?.packageName,
-    // Compatibility for the persisted Luopan row created before AppCenter
-    // stored packageName. New products must register their packageName.
+    // Luopan's released application is named `compass`. Keep resolving the
+    // historical demo name for already published clients and stored records.
+    app.appId === 'luopan' ? 'compass' : null,
     app.appId === 'luopan' ? '@qpjoy/luopan-demo' : null
   ];
   return [...new Set(values
@@ -958,14 +960,42 @@ function releaseCheckArtifactKinds(value: unknown): ReleaseArtifactKind[] | unde
   return [...new Set(kinds)] as ReleaseArtifactKind[];
 }
 
-function releaseCheckWithNamedArtifactUrls(result: ReleaseCheckResult): ReleaseCheckResult {
+export function releaseCheckWithNamedArtifactUrls(
+  result: ReleaseCheckResult,
+  requestedProductId: string | null = null
+): ReleaseCheckResult {
   return {
     ...result,
     artifacts: result.artifacts.map((artifact) => ({
       ...artifact,
-      url: artifact.url ? releaseArtifactUrlWithFileName(artifact.url, artifact.fileName) : null
+      url: artifact.url
+        ? releaseArtifactUrlForProduct(
+          requestedProductId,
+          artifact.artifactId,
+          releaseArtifactUrlWithFileName(artifact.url, artifact.fileName)
+        )
+        : null
     }))
   };
+}
+
+function releaseArtifactUrlForProduct(
+  requestedProductId: string | null,
+  artifactId: string,
+  url: string
+): string {
+  if (requestedProductId?.trim().toLowerCase() !== 'luopan') return url;
+  if (!/^https?:\/\//i.test(url) && !/^\/(?!\/)/.test(url)) return url;
+  try {
+    const parsed = new URL(url, 'http://mx-launcher-internal.invalid');
+    const match = parsed.pathname.match(
+      /^\/internal\/v1\/release-artifacts\/([^/]+)\/download(?:\/[^/]+)?$/
+    );
+    if (!match || decodeURIComponent(match[1]) !== artifactId) return url;
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return url;
+  }
 }
 
 function releaseArtifactUrlWithFileName(url: string, fileName: string | null): string {

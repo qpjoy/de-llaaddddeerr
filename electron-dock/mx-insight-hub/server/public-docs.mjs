@@ -453,6 +453,12 @@ const nightAllCompatibilityIdempotencyParameter = {
   description: 'Permanently names one immutable paid dispatch for this exact path and normalized body. Reuse always replays that result; use a new key only when intentionally requesting a new live call.',
 }
 
+const externalCommerceIdempotencyParameter = {
+  ...idempotencyParameter,
+  required: false,
+  description: 'Optional but recommended for explicit replay control. Reuse the same key only for a transport retry of the exact same page request. Every next-page request changes the body and must use a new key. When omitted, Hub derives a short-lived freshness-bucket key for the normalized request.',
+}
+
 const searchResponse = {
   description: 'Stable data-search response.',
   headers: {
@@ -468,6 +474,44 @@ const searchResponse = {
   content: {
     'application/json': {
       schema: { $ref: '#/components/schemas/SearchEnvelope' },
+    },
+  },
+}
+
+const externalCommerceProductSearchResponse = {
+  description: 'Provider-neutral product results plus explicit Hub freshness metadata.',
+  headers: {
+    'x-mx-insight-request-id': {
+      description: 'Durable Hub request identifier.',
+      schema: { type: 'string', format: 'uuid' },
+    },
+    'idempotent-replay': {
+      description: 'Whether this body is the committed result for the same caller-supplied idempotency key.',
+      schema: { type: 'string', enum: ['true', 'false'] },
+    },
+    'x-mx-insight-source-mode': {
+      description: 'How Hub satisfied this request.',
+      schema: {
+        type: 'string',
+        enum: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+      },
+    },
+    'x-mx-insight-captured-at': {
+      description: 'When the delivered external-data snapshot was captured.',
+      schema: { type: 'string', format: 'date-time' },
+    },
+    Age: {
+      description: 'Whole seconds between capture and delivery.',
+      schema: { type: 'integer', minimum: 0 },
+    },
+    Warning: {
+      description: 'HTTP Warning 110 is present when sourceMode is stored_fallback.',
+      schema: { type: 'string' },
+    },
+  },
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/ExternalCommerceProductSearchEnvelope' },
     },
   },
 }
@@ -641,6 +685,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     { name: 'Source Catalog', description: 'Reconstruct the active governed source catalog, filters, taxonomy, owners and status summary.' },
     { name: 'Mobile Commerce', description: 'Read stored mobile-collector commerce captures and their governed source-catalog classification.' },
     { name: 'Virtual Supermarket', description: 'Reconstruct the on-shelf Hub storefront using semantic department, aisle, shelf and position data.' },
+    { name: 'External Data', description: 'Call governed external data platforms through provider-neutral Hub contracts.' },
     { name: 'Search', description: 'Idempotent content search.' },
     { name: 'Compatibility', description: 'Temporary Night-All legacy routes with durable Hub evidence and exact last-good fallback.' },
     { name: 'Tools', description: 'Granted platform-independent processing capabilities.' },
@@ -761,6 +806,18 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         source: 'hub',
                         servingMode: 'stored',
                       },
+                      {
+                        platform: 'ecommerce',
+                        ready: true,
+                        capabilities: ['product_search'],
+                        source: 'hub',
+                        servingMode: 'live_with_stored_fallback',
+                        contractVersion: 'mx-insight-hub.ecommerce-products.v1',
+                        marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+                        pagination: 'opaque_cursor',
+                        idempotencyKey: 'optional',
+                        freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+                      },
                       { platform: 'xiaohongshu', ready: true },
                       { platform: 'twitter', ready: true },
                     ],
@@ -793,6 +850,69 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             },
           },
           401: errorResponse,
+        },
+      },
+    },
+    '/data/ecommerce/products/search': {
+      post: {
+        tags: ['External Data'],
+        operationId: 'searchExternalCommerceProducts',
+        summary: 'Search marketplace products through the governed external data gateway',
+        description: 'Requires the ecommerce platform grant. The strict body accepts only marketplace, query, page, cursor, sort and price; pageSize and routing fields are not part of this contract. page and cursor are mutually exclusive. Prefer the opaque nextCursor returned by Hub, keep marketplace/query/sort/price unchanged, and use a new Idempotency-Key for every next page. Hub may satisfy an exact request from a fresh snapshot or an exact last-good fallback, but never labels a stored result as live. No external platform identity, credential, endpoint or raw response is exposed.',
+        'x-mx-error-codes': {
+          400: [
+            'invalid_request', 'invalid_marketplace', 'unsupported_marketplace',
+            'invalid_query', 'invalid_page', 'invalid_cursor', 'invalid_pagination',
+            'cursor_scope_mismatch', 'continuation_required', 'unsupported_sort',
+            'invalid_price', 'unsupported_price_filter', 'unsupported_request_field',
+            'invalid_idempotency_key',
+          ],
+          401: ['api_key_required', 'invalid_api_key'],
+          403: ['platform_not_granted'],
+          409: [
+            'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
+            'external_platform_response_unusable',
+          ],
+          413: ['payload_too_large'],
+          429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded'],
+          502: [
+            'external_platform_response_unusable', 'external_platform_outcome_unknown',
+            'external_platform_rejected',
+          ],
+          503: [
+            'external_platform_unavailable', 'external_platform_not_configured',
+            'external_platform_circuit_open', 'external_platform_capacity_unavailable',
+          ],
+        },
+        parameters: [externalCommerceIdempotencyParameter],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/ExternalCommerceProductSearchRequest' },
+              examples: {
+                firstPage: {
+                  summary: 'First page',
+                  value: { marketplace: 'jd', query: 'AI recorder' },
+                },
+                continuation: {
+                  summary: 'Continuation with the opaque Hub cursor',
+                  value: { marketplace: 'jd', query: 'AI recorder', cursor: 'opaque-next-cursor' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: externalCommerceProductSearchResponse,
+          400: errorResponse,
+          401: errorResponse,
+          403: errorResponse,
+          409: errorResponse,
+          413: errorResponse,
+          429: errorResponse,
+          502: errorResponse,
+          503: errorResponse,
         },
       },
     },
@@ -1700,6 +1820,161 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'Opaque nextCursor from the prior page.' },
           type: resultTypeProperty,
+        },
+      },
+      ExternalCommerceProductSearchRequest: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['marketplace', 'query'],
+        not: { required: ['page', 'cursor'] },
+        description: 'Provider-neutral product search. page and cursor are mutually exclusive. The server owns result-size policy; pageSize is intentionally unsupported.',
+        properties: {
+          marketplace: {
+            type: 'string',
+            enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+          },
+          query: { type: 'string', minLength: 1, maxLength: 200 },
+          page: {
+            type: 'integer', minimum: 1, maximum: 1000, default: 1,
+            description: 'Numeric page for a first traversal. Do not combine with cursor; continuation cursors are preferred.',
+          },
+          cursor: {
+            type: 'string', minLength: 1, maxLength: 4096,
+            description: 'Opaque nextCursor from the prior response. Return it unchanged with the same marketplace, query, sort and price.',
+          },
+          sort: {
+            type: 'string',
+            enum: ['relevance', 'sales_desc', 'price_asc', 'price_desc', 'recent', 'seller_credit', 'price_drop', 'newest'],
+            description: 'Marketplace-specific. taobao/tmall accept relevance, sales_desc, price_asc and price_desc; xianyu accepts relevance, recent, seller_credit, price_asc, price_desc, price_drop and newest; jd and xiaohongshu_ec do not accept sort.',
+          },
+          price: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'Optional taobao/tmall-only inclusive price range. min must not exceed max.',
+            properties: {
+              min: {
+                type: 'string',
+                pattern: '^(?:0|[1-9][0-9]{0,11})(?:[.][0-9]{1,8})?$',
+              },
+              max: {
+                type: 'string',
+                pattern: '^(?:0|[1-9][0-9]{0,11})(?:[.][0-9]{1,8})?$',
+              },
+            },
+          },
+        },
+      },
+      ExternalCommerceProduct: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'marketplace', 'title', 'url', 'pricing', 'shop', 'images', 'signals', 'attributes'],
+        properties: {
+          id: { type: 'string', minLength: 1, maxLength: 256 },
+          marketplace: {
+            type: 'string',
+            enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+          },
+          title: { type: ['string', 'null'], maxLength: 4096 },
+          url: { type: ['string', 'null'], format: 'uri', maxLength: 2048 },
+          pricing: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['current', 'original', 'currency'],
+            properties: {
+              current: { type: ['string', 'null'], maxLength: 128 },
+              original: { type: ['string', 'null'], maxLength: 128 },
+              currency: { type: 'string', minLength: 1, maxLength: 16 },
+            },
+          },
+          shop: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['id', 'name'],
+            properties: {
+              id: { type: ['string', 'null'], maxLength: 256 },
+              name: { type: ['string', 'null'], maxLength: 512 },
+            },
+          },
+          images: {
+            type: 'array', maxItems: 20,
+            items: { type: 'string', format: 'uri', maxLength: 2048 },
+          },
+          signals: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['sales', 'reviewCount', 'location'],
+            properties: {
+              sales: { type: ['string', 'null'], maxLength: 128 },
+              reviewCount: { type: ['string', 'null'], maxLength: 128 },
+              location: { type: ['string', 'null'], maxLength: 512 },
+            },
+          },
+          attributes: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['brand', 'category'],
+            properties: {
+              brand: { type: ['string', 'null'], maxLength: 512 },
+              category: { type: ['string', 'null'], maxLength: 512 },
+            },
+          },
+        },
+      },
+      ExternalCommerceProductSearchPage: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['page', 'returnedCount', 'discardedCount', 'hasMore', 'nextCursor'],
+        properties: {
+          page: { type: 'integer', minimum: 1, maximum: 1000 },
+          returnedCount: { type: 'integer', minimum: 0 },
+          discardedCount: { type: 'integer', minimum: 0 },
+          hasMore: {
+            type: ['boolean', 'null'],
+            description: 'null means the platform hinted at more data but Hub could not issue a safe continuation; do not guess another page.',
+          },
+          nextCursor: {
+            type: ['string', 'null'], maxLength: 4096,
+            description: 'Opaque Hub cursor. null means the client must stop this traversal.',
+          },
+        },
+      },
+      ExternalCommerceProductSearchEnvelope: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['contractVersion', 'data', 'meta', 'requestId'],
+        properties: {
+          contractVersion: { type: 'string', const: 'mx-insight-hub.ecommerce-products.v1' },
+          data: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items', 'page'],
+            properties: {
+              items: {
+                type: 'array',
+                items: { $ref: '#/components/schemas/ExternalCommerceProduct' },
+              },
+              page: { $ref: '#/components/schemas/ExternalCommerceProductSearchPage' },
+            },
+          },
+          meta: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['capturedAt', 'servedAt', 'sourceMode', 'ageSeconds'],
+            properties: {
+              capturedAt: { type: 'string', format: 'date-time' },
+              servedAt: { type: 'string', format: 'date-time' },
+              sourceMode: {
+                type: 'string',
+                enum: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+              },
+              ageSeconds: { type: 'integer', minimum: 0 },
+              fallbackReason: {
+                type: 'string',
+                description: 'Bounded reason category present only for stored_fallback.',
+              },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
         },
       },
       NightAllLegacyRequest: {
@@ -3547,7 +3822,25 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                     platform: { type: 'string' }, ready: { type: 'boolean' },
                     capabilities: { type: 'array', items: { type: 'string' } },
                     source: { type: 'string', enum: ['hub'], description: 'Present for Hub-owned platform entries.' },
-                    servingMode: { type: 'string', enum: ['stored'], description: 'Present for Hub-owned stored-data entries.' },
+                    servingMode: {
+                      type: 'string',
+                      enum: ['stored', 'live_with_stored_fallback'],
+                      description: 'Present for Hub-owned stored or governed live-with-fallback entries.',
+                    },
+                    contractVersion: { type: 'string', description: 'Stable Hub contract version when the platform exposes one.' },
+                    marketplaces: {
+                      type: 'array',
+                      items: { type: 'string', enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'] },
+                    },
+                    pagination: { type: 'string', enum: ['opaque_cursor'] },
+                    idempotencyKey: { type: 'string', enum: ['optional'] },
+                    freshnessModes: {
+                      type: 'array',
+                      items: {
+                        type: 'string',
+                        enum: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
+                      },
+                    },
                     context: { $ref: '#/components/schemas/CanonicalContextCapability' },
                     timeline: { $ref: '#/components/schemas/CanonicalTimelineCapability' },
                   },
@@ -3912,6 +4205,34 @@ printf '%s\n' "$PRODUCT_PAGE" | jq '{storefrontRevision:.data.storefrontRevision
 
     <section class="doc-page" data-doc-page="search">
     <h2 id="search">通用搜索</h2>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/products/search</code></div><p>通过 Hub 的外部数据平台网关检索商品。需要 <code>ecommerce</code> 授权；公开合同不会暴露外部平台身份、凭据、接口地址或原始响应。</p></div>
+    <div class="notice">body 只接受 <code>marketplace</code>、<code>query</code>、<code>page</code>、<code>cursor</code>、<code>sort</code>、<code>price</code>，没有 <code>pageSize</code>。<code>page</code> 与 <code>cursor</code> 互斥。重试同一页时复用同一个 Idempotency-Key；使用 <code>nextCursor</code> 请求下一页时必须换新 key，并保持 marketplace/query/sort/price 不变。</div>
+    <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: ecommerce-$(uuidgen)" \
+  -d '{"marketplace":"jd","query":"AI recorder"}' | jq</code></pre>
+    <pre><code>{
+  "contractVersion": "mx-insight-hub.ecommerce-products.v1",
+  "data": {
+    "items": [],
+    "page": { "page": 1, "returnedCount": 0, "discardedCount": 0, "hasMore": false, "nextCursor": null }
+  },
+  "meta": {
+    "capturedAt": "2026-09-03T00:00:00.000Z",
+    "servedAt": "2026-09-03T00:00:00.010Z",
+    "sourceMode": "live",
+    "ageSeconds": 0
+  },
+  "requestId": "00000000-0000-4000-8000-000000000006"
+}</code></pre>
+    <table><thead><tr><th>sourceMode</th><th>含义</th></tr></thead><tbody>
+      <tr><td><code>live</code></td><td>本次完成一次新的外部数据调用。</td></tr>
+      <tr><td><code>fresh_cache</code></td><td>返回同一调用者、同一规范化请求的有效 Hub 快照，没有再次调用外部数据平台。</td></tr>
+      <tr><td><code>stored_fallback</code></td><td>外部调用不可用时返回同请求的 last-good 快照；同时返回年龄信息与 HTTP Warning 110。</td></tr>
+      <tr><td><code>idempotent_replay</code></td><td>同 key、同路径、同 body 的已提交结果重放。</td></tr>
+    </tbody></table>
+    <p><code>hasMore=null</code> 表示没有足够证据安全继续，调用方必须停止，不能自行拼页码或外部 continuation。<code>capturedAt</code>、<code>servedAt</code> 与 <code>ageSeconds</code> 始终用于判断数据时效。</p>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/search</code></div><p>在一个请求中选择一个已授权平台。<code>platform=telegram</code> 使用 Hub 已清洗数据。</p></div>
     <pre><code>curl -sS -X POST "$HUB_URL/api/v1/data/search" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\

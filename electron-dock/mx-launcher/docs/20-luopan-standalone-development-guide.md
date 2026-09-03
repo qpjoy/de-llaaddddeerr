@@ -257,9 +257,11 @@ Launcher network broker。
 
 ### 2.5 更新系统（docs/17，Luopan 必须完整复刻的部分）
 
-这里的 Luopan 是 `demos/luopan` 验收壳，不是正式 Compass 的发布身份。Compass 接入时应在
-AppCenter 登记自己的 `appId/productId/packageName/channels`；客户端用真实 `packageName`
-解析发布身份，Admin 选择对应的 Compass 选项。不要把 demo 的 `luopan` 常量复制到生产包。
+这里的 `demos/luopan` 是验收壳，不是正式 Compass 项目。正式 Compass
+使用 `packageName=compass` 解析已有平台身份：AppCenter `appId=luopan`、Release `productId=luopan`、
+app installer/ASAR `componentId=luopan`、ProductNetwork `luopan`、生产 channel `stable`。
+不要新建 `productId=compass`，也不要改名已有 ProductNetwork。`@qpjoy/luopan-demo`
+只是后台存量 row 和历史客户端的 resolver 迁移兼容；正式项目始终使用 `compass`。
 
 四个角色，前两个在服务端、后两个在包里：
 
@@ -268,7 +270,7 @@ AppCenter 登记自己的 `appId/productId/packageName/channels`；客户端用�
 2. **决策端点** `POST /internal/v1/release/check`：单 install 决策——targets 显式
    圈选优先，percentage 走 sticky 分桶 `sha256(componentId:channel:installId)%10000`，
    gate 未过返回 blocked；响应带 releaseNotes、featureFlags、`rollout.matchedBy`、
-   HMAC 签名。新版 Luopan 先以 `packageName=@qpjoy/luopan-demo` 解析发布身份，再发送服务端
+   HMAC 签名。正式 Compass 先以 `packageName=compass` 解析发布身份，再发送服务端
    返回的 `productId=luopan`，避免把示例 ID 复制到其他产品，也避免派生组件名碰撞。
    旧版显式发送 `productId=luopan` 的路径保持不变。
    客户端**永远拿不到全量 plans**（旧端点已收敛 admin-only）。
@@ -345,7 +347,7 @@ mx-h2i 的约定，建议 Luopan 照搬（luopan demo 已具备前两条）：
 
 | 块 | 内容 | 关键 API |
 | --- | --- | --- |
-| PRODUCT 定义 | `defineLauncherProduct({ productId: 'luopan', ... })` 是现有 ProductNetwork/ownership 的稳定身份；Release updater 另以 `packageName` 向服务端解析发布身份，二者目前同值但生命周期分离 | `defineLauncherProduct`、`createElectronLauncherReleaseUpdater` |
+| PRODUCT 定义 | `defineLauncherProduct({ productId: 'luopan', ... })` 是现有 ProductNetwork/ownership 的稳定身份；正式 Compass 的 Release updater 以 `packageName=compass` 解析到同一 `productId=luopan`，两类字段值不同且生命周期分离 | `defineLauncherProduct`、`createElectronLauncherReleaseUpdater` |
 | runtime state | `RuntimeState`（installId/deviceId/config/connection/oversea/update/events），loadRuntime/saveRuntime/normalize 三件套 | — |
 | lease 获取 | `luopan:connect-test-mode` → `launcherClient().connectNetwork(...)`（registered/test 模式由 `sdkTestMode` 决定，默认 registered；登录后自动带 `identityKind: 'user'` + userId 切登录 lease 段） | `createElectronLauncher` |
 | 用户中心 | `network-ready` 后，`luopan:login` / `luopan:logout` 才经隧道内 VIP 执行 SDK gateway OAuth password grant（docs/15 `/internal/v1/sdk/oauth/token`）→ `principal.userId` 存入 runtime.identity；access token 只留内存。登录用户可命中 Release Center 按 userId 定向的发版 | SDK gateway |
@@ -482,7 +484,8 @@ demo 默认 **registered 模式**（`sdkTestMode=false`），工具栏 **Connect
 ## 5. 更新执行器接线逐段讲解
 
 demo 已带完整接线（本节代码都在 `src-electron/electron-main.ts`，搜索
-"Release update wiring"）。分层记住一件事：
+"Release update wiring"）。下面的身份值是正式 Compass 接入值；demo 现有配置按其
+测试用途保持不变。分层记住一件事：
 
 > **updater = 问服务端"我该不该更新"（check/report）；
 > executor = 把决策落地（下载/校验/staged/激活/回滚）。**
@@ -496,10 +499,8 @@ function releaseUpdater(): ElectronLauncherReleaseUpdater {
   return createElectronLauncherReleaseUpdater({
     baseUrl: state.config.baseUrl,        // 10.88.100.3:18090——决策走产品自己的 VIP
     reportInstallId: state.installId,     // 证据链主键
-    packageName: '@qpjoy/luopan-demo',
-    channel: PRODUCT.release.channel,
-    productId: state.config.productId,    // 仅用于旧服务端滚动升级期回退
-    allowLegacyProductFallback: true
+    packageName: 'compass',
+    channel: 'stable'
   });
 }
 

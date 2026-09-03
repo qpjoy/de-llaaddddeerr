@@ -180,6 +180,13 @@ revision-fenced display-province 索引均已通过精确合同校验。
 时，应包含 metadata、products、product_detail、stored_search 和已实现的语义
 分类筛选能力，但不包含上下架或 Admin CRUD。
 
+调用第 3.3 节前，必须看到显式 `platform=ecommerce` 项。它应广告
+`capabilities=[product_search]`、
+`contractVersion=mx-insight-hub.ecommerce-products.v1`、支持的 marketplaces、
+`pagination=opaque_cursor`、`idempotencyKey=optional`、
+`servingMode=live_with_stored_fallback` 和四种 freshness mode。`ready=true` 只表示当前
+Hub 部署有可用 adapter，不承诺下一次外部调用的网络、余额、配额或实时健康。
+
 ## 3.1 数据源目录 API
 
 本节需要显式 `source_catalog` platform grant，只接受 API Key。负责 consumer 的
@@ -424,6 +431,129 @@ metadata 和无 cursor 首页。
 映射状态/内部 source key、task/run/campaign、raw tags/share payload、metadata/device/`is_reported`、
 source profile/table/checkpoint、Admin audit 或凭据。公开 marketplace 只有经审核的 `{id,name}`；
 未有 approved mapping 时二者均为 null。
+
+## 3.3 外部数据平台商品搜索
+
+### `POST /api/v1/data/ecommerce/products/search`
+
+该接口需要当前 consumer 的 `ecommerce` platform grant。Hub 通过受治理的外部数据平台
+完成实时商品搜索，但公开契约不是透明转发：不会返回外部平台身份、凭据、接口地址、私有
+continuation 或 raw response。
+
+body 是严格对象，只允许以下字段：
+
+| 字段 | 规则 |
+| --- | --- |
+| `marketplace` | 必填；`taobao\|tmall\|jd\|xiaohongshu_ec\|xianyu`。 |
+| `query` | 必填；NFKC 规范化并 trim 后 1–200 字符。 |
+| `page` | 可选；整数 `1..1000`，默认 1，不能与 `cursor` 同时使用。 |
+| `cursor` | 可选；上一页返回的不透明 `nextCursor`，最多 4096 字符。 |
+| `sort` | marketplace 专属：淘宝/天猫支持 `relevance\|sales_desc\|price_asc\|price_desc`；闲鱼支持 `relevance\|recent\|seller_credit\|price_asc\|price_desc\|price_drop\|newest`；京东和小红书店铺不接受。 |
+| `price` | 仅淘宝/天猫；`min/max` 必须是非负 decimal string（整数最多 12 位、小数最多 8 位，不接受指数、空白或前导零），且 min 不得大于 max。 |
+
+`page` 与 `cursor` 互斥；首次遍历可以省略二者，后续优先使用 Hub 返回的 cursor。
+没有 `pageSize`。返回条数由 Hub 的有界策略决定，传入 `pageSize` 或任意路由、凭据字段会
+返回 `400 unsupported_request_field`。
+
+首页调用：
+
+```bash
+ECOMMERCE_BODY='{"marketplace":"taobao","query":"AI recorder","sort":"sales_desc","price":{"min":"100","max":"800"}}'
+ECOMMERCE_FIRST_KEY="$(new_idempotency_key)"
+
+ECOMMERCE_FIRST=$(curl -sS -X POST \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $ECOMMERCE_FIRST_KEY" \
+  -d "$ECOMMERCE_BODY" \
+  "$HUB_URL/api/v1/data/ecommerce/products/search")
+
+printf '%s\n' "$ECOMMERCE_FIRST" \
+  | jq '{contractVersion, items: .data.items, page: .data.page, freshness: .meta, requestId}'
+```
+
+同一页发生网络传输重试时，原样复用 `ECOMMERCE_FIRST_KEY` 和 body。调用下一页时必须使用
+新的 Idempotency-Key，因为 cursor 使 body 发生变化；复用首页 key 会返回
+`409 idempotency_conflict`：
+
+```bash
+ECOMMERCE_CURSOR=$(printf '%s\n' "$ECOMMERCE_FIRST" | jq -r '.data.page.nextCursor // empty')
+
+if [ -n "$ECOMMERCE_CURSOR" ]; then
+  ECOMMERCE_NEXT_KEY="$(new_idempotency_key)"
+  ECOMMERCE_NEXT_BODY=$(printf '%s\n' "$ECOMMERCE_BODY" \
+    | jq -c --arg cursor "$ECOMMERCE_CURSOR" '. + {cursor: $cursor} | del(.page)')
+  curl -sS -X POST \
+    -H "Authorization: Bearer $HUB_KEY" \
+    -H "Content-Type: application/json" \
+    -H "Idempotency-Key: $ECOMMERCE_NEXT_KEY" \
+    -d "$ECOMMERCE_NEXT_BODY" \
+    "$HUB_URL/api/v1/data/ecommerce/products/search" | jq
+fi
+```
+
+cursor 经认证加密，并与 consumer 及 `marketplace/query/sort/price` 绑定；必须保持这些字段
+不变并原样回传 cursor，不能解码、篡改或跨 consumer 使用。
+部分 marketplace 的第二页只能通过 cursor 继续，不能自行拼数字页码。`nextCursor=null`
+时停止；`hasMore=null` 表示外部响应没有提供足够证据让 Hub 发放安全 cursor，同样必须停止，
+不能猜测 continuation。
+
+成功 envelope 固定为：
+
+```json
+{
+  "contractVersion": "mx-insight-hub.ecommerce-products.v1",
+  "data": {
+    "items": [],
+    "page": {
+      "page": 1,
+      "returnedCount": 0,
+      "discardedCount": 0,
+      "hasMore": false,
+      "nextCursor": null
+    }
+  },
+  "meta": {
+    "capturedAt": "2026-09-03T00:00:00.000Z",
+    "servedAt": "2026-09-03T00:00:00.010Z",
+    "sourceMode": "live",
+    "ageSeconds": 0
+  },
+  "requestId": "00000000-0000-4000-8000-000000000006"
+}
+```
+
+`data.items[]` 只包含 provider-neutral 字段：`id/marketplace/title/url`、
+`pricing{current,original,currency}`、`shop{id,name}`、`images[]`、
+`signals{sales,reviewCount,location}` 与 `attributes{brand,category}`。无法可靠映射的可选值为
+`null` 或空数组，不会伪造。
+
+`meta.sourceMode` 与响应头 `x-mx-insight-source-mode` 一致：
+
+| sourceMode | 含义 | 客户端判断 |
+| --- | --- | --- |
+| `live` | 本次完成新的外部数据调用。 | 仍使用 `capturedAt/ageSeconds` 判断时效。 |
+| `fresh_cache` | 同 consumer、同规范化请求的有效快照；没有再次外部调用。 | 当作该 capturedAt 的快照。 |
+| `stored_fallback` | 实时路径不可用，返回同请求的 last-good 快照。 | 检查 `fallbackReason`、`Age`、`Warning: 110`，不得标成实时。 |
+| `idempotent_replay` | 同 key、同 path/body 的已提交结果。 | `idempotent-replay: true`，不产生新的外部调用。 |
+
+`Idempotency-Key` 在传输层可省略，但建议始终显式提供。省略时 Hub 只根据规范化请求生成
+短期 freshness-bucket key，客户端不能用它实现持久重放。缓存与 fallback 都严格绑定当前
+consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 canonical search
+结果拼装。
+
+常见错误：
+
+| HTTP | `error.code` | 处理方式 |
+| --- | --- | --- |
+| 400 | `unsupported_marketplace`, `unsupported_sort`, `unsupported_price_filter`, `invalid_pagination`, `cursor_scope_mismatch`, `unsupported_request_field` | 修正请求或从无 cursor 首页开始，不要原样重试。 |
+| 403 | `platform_not_granted` | 请 operator 为 consumer 授予 `ecommerce`。 |
+| 409 | `request_in_progress`, `idempotency_conflict`, `request_outcome_unknown`, `external_platform_response_unusable` | 同请求保留原 key/requestId；冷却期内不要换 key 自动重发。 |
+| 429 | `quota_exceeded`, `external_platform_busy`, `external_platform_capacity_exceeded` | 按策略窗口退避；不要并发放大。 |
+| 502 | `external_platform_response_unusable`, `external_platform_outcome_unknown`, `external_platform_rejected` | 保存 requestId；前两种可能已经产生外部调用，禁止自动换 key。 |
+| 503 | `external_platform_unavailable`, `external_platform_not_configured`, `external_platform_circuit_open`, `external_platform_capacity_unavailable` | 若没有 exact fallback，按运维窗口退避。 |
+
+公开响应不返回计费、余额或免费额度；未知费用不会冒充为 0。
 
 ## 4. 搜索 API
 

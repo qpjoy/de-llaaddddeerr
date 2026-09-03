@@ -651,6 +651,23 @@ EOF
     ok "跳过 bump，使用各包当前本地版本"
   fi
 
+  header "MX-H2I npm 更新兼容门禁"
+  say "Electron Launcher updater L1/L2/L3"
+  (
+    cd "$ROOT/electron-dock/mx-launcher"
+    pnpm --dir packages/electron-launcher test:updater
+  ) || die "Electron Launcher updater 回归失败"
+  say "Electron Launcher ASAR bootstrap"
+  (
+    cd "$ROOT/electron-dock/mx-launcher"
+    pnpm --dir packages/electron-launcher test:asar-bootstrap
+  ) || die "Electron Launcher ASAR bootstrap 回归失败"
+  say "已上线 MX-H2I macOS/Windows 更新与联网兼容"
+  (
+    cd "$ROOT/electron-dock/mx-launcher"
+    pnpm --dir demos/mx-h2i check
+  ) || die "MX-H2I 兼容回归失败；不得继续打包发布 npm 组"
+
   local preview_dir="/tmp/qpjoy-publish-preview/mx-h2i-npm"
   rm -rf "$preview_dir"
   mkdir -p "$preview_dir"

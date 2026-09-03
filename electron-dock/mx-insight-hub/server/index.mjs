@@ -4,9 +4,13 @@ import { createSegmenter } from '@qpjoy/mx-common/segmenter'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { NightAllAdapter } from './adapters/night-all.mjs'
+import { JustOneAdapter } from './adapters/justone.mjs'
 import { createApp } from './app.mjs'
 import { loadConfig } from './config.mjs'
 import { HubService } from './hub-service.mjs'
+import { ExternalPlatformAdminService } from './external-platforms/admin.mjs'
+import { ExternalPlatformGateway } from './external-platforms/gateway.mjs'
+import { createExternalPlatformStore } from './external-platforms/store.mjs'
 import { createAgentRuntime } from './agent/runtime.mjs'
 import { AgentSettingsStore } from './agent/settings-store.mjs'
 import { AgentControlStore } from './agent/control-store.mjs'
@@ -90,6 +94,35 @@ export async function createRuntime(config = loadConfig()) {
     ? new AdminSearchReindex({ search, segmenterConfig: config.common.segmenter })
     : null
   const segmenter = search?.segmenter ?? createSegmenter(config.common.segmenter)
+  const externalPlatformStore = createExternalPlatformStore({
+    pool,
+    usageStore: store,
+    circuitFailureThreshold: config.justOne.circuitFailureThreshold,
+    circuitOpenMs: config.justOne.circuitOpenMs,
+    uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
+  })
+  // JustOne is optional and is never a Hub readiness dependency. The admin
+  // listener still receives truthful configuration/analytics, while only a
+  // listener that serves public APIs constructs the credentialed adapter.
+  const justOneAdapter = config.justOne.dispatchEnabled && config.listenerMode !== 'admin'
+    ? new JustOneAdapter({
+        token: config.justOne.token,
+        timeoutMs: config.justOne.timeoutMs,
+      })
+    : null
+  const externalPlatformAdmin = new ExternalPlatformAdminService({
+    store: externalPlatformStore,
+    config: config.justOne,
+    durable: Boolean(pool),
+  })
+  const externalPlatformGateway = new ExternalPlatformGateway({
+    usageStore: store,
+    platformStore: externalPlatformStore,
+    adapter: justOneAdapter,
+    config: config.justOne,
+    apiKeyPepper: config.apiKeyPepper,
+    reservationLeaseMs: config.reservationLeaseMs,
+  })
   const service = new HubService({
     store,
     adapter,
@@ -97,6 +130,7 @@ export async function createRuntime(config = loadConfig()) {
     reservationLeaseMs: config.reservationLeaseMs,
     searchQueries: search?.queries ?? null,
     segmenter,
+    externalPlatformCapabilities: () => externalPlatformGateway.capabilities(),
   })
   const embedding = pool && search
     ? new EmbeddingPipeline({
@@ -125,6 +159,8 @@ export async function createRuntime(config = loadConfig()) {
     search,
     searchReindex,
     embedding,
+    externalPlatformAdmin,
+    externalPlatformGateway,
     segmenterConfig: config.common.segmenter,
     launcherAudience: config.launcher.audience,
     backfillPlatforms: config.backfill.platforms,
@@ -136,7 +172,8 @@ export async function createRuntime(config = loadConfig()) {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
-    search, searchReindex, embedding,
+    search, searchReindex, embedding, externalPlatformStore,
+    externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
   }
 }
 

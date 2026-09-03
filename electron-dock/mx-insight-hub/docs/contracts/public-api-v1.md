@@ -64,6 +64,14 @@ by itself. Funnel and unshown-record diagnostics require both grants. The
 `catalog_metadata`, `catalog_detail`, and `filtered_browse` when its stored
 serving surface is ready.
 
+An explicitly granted `ecommerce` entry advertises `product_search`,
+`contractVersion=mx-insight-hub.ecommerce-products.v1`, the supported
+marketplaces, `pagination=opaque_cursor`, `idempotencyKey=optional`, and the
+four freshness modes. Its `servingMode=live_with_stored_fallback` distinguishes
+it from stored-only products. `ready=true` means the deployed Hub has a usable
+adapter; it is not a promise that the external platform, quota or network is
+healthy for the next call.
+
 ## Source catalog
 
 ```http
@@ -230,6 +238,122 @@ Elasticsearch index/field/DSL controls. Public marketplace is only the approved
 directory `{id,name}`; both values are null without an approved mapping, while
 full mapping evidence remains Admin-only. Title similarity does not merge rows
 when a reviewed marketplace product identity is absent.
+
+## External data platform product search
+
+```http
+POST /api/v1/data/ecommerce/products/search
+Authorization: Bearer <mx key>
+Idempotency-Key: <caller-generated key for this page>
+Content-Type: application/json
+
+{
+  "marketplace": "jd",
+  "query": "AI recorder"
+}
+```
+
+This route requires the explicit `ecommerce` platform grant. It is a stable Hub
+contract over a governed external data platform, not a transparent proxy. The
+public request and response never contain the external platform identity,
+credential, endpoint, private continuation value, or raw response.
+
+The request is a strict object. Its complete field allowlist is `marketplace`,
+`query`, `page`, `cursor`, `sort`, and `price`; any other field returns
+`400 unsupported_request_field`. In particular, there is no `pageSize` field:
+Hub owns the bounded result-size policy. `marketplace` is one of `taobao`,
+`tmall`, `jd`, `xiaohongshu_ec`, or `xianyu`. `query` is NFKC-normalized,
+trimmed, required, and limited to 200 characters. `page` is an integer from 1
+through 1,000 and defaults to 1.
+
+`page` and `cursor` are mutually exclusive. Prefer the opaque `nextCursor`
+returned by Hub, return it unchanged, and keep `marketplace`, `query`, `sort`,
+and `price` identical. The cursor is authenticated-encrypted and consumer/scope
+bound; changing a bound field, tampering, or reusing it for another consumer
+returns `400 cursor_scope_mismatch` or `400 invalid_cursor`. Some marketplaces
+require an opaque continuation after page one, so clients must not synthesize a numeric next page.
+If `nextCursor` is null, stop. `hasMore=null` means the external response did not
+provide enough evidence for Hub to issue a safe continuation; it is not
+permission to guess another page.
+
+Sort and price support are marketplace-specific:
+
+- `taobao` and `tmall` accept `relevance`, `sales_desc`, `price_asc`, and
+  `price_desc`; the default is `sales_desc`. They also accept an inclusive
+  `price` object with optional non-negative decimal-string `min` and `max`
+  values. Numbers, exponent notation, whitespace and leading zeroes are not
+  accepted; each value allows at most 12 integer and 8 fractional digits.
+- `xianyu` accepts `relevance`, `recent`, `seller_credit`, `price_asc`,
+  `price_desc`, `price_drop`, and `newest`; the default is `relevance`.
+- `jd` and `xiaohongshu_ec` do not accept `sort`; neither accepts `price`.
+
+`Idempotency-Key` is optional at transport level but strongly recommended for
+auditable replay control. Use the same key only when retrying the exact same
+path and page body. The key permanently binds that request; reusing it with a
+different body returns `409 idempotency_conflict`. Every continuation has a
+different body and **must use a new Idempotency-Key**. When the header is
+omitted, Hub derives a short-lived freshness-bucket key from the normalized
+request; clients must not rely on that generated key for durable replay.
+
+The response is provider-neutral:
+
+```json
+{
+  "contractVersion": "mx-insight-hub.ecommerce-products.v1",
+  "data": {
+    "items": [{
+      "id": "product-id",
+      "marketplace": "jd",
+      "title": "AI recorder",
+      "url": null,
+      "pricing": { "current": "399", "original": null, "currency": "CNY" },
+      "shop": { "id": null, "name": "Example shop" },
+      "images": [],
+      "signals": { "sales": null, "reviewCount": "25", "location": null },
+      "attributes": { "brand": null, "category": null }
+    }],
+    "page": {
+      "page": 1,
+      "returnedCount": 1,
+      "discardedCount": 0,
+      "hasMore": false,
+      "nextCursor": null
+    }
+  },
+  "meta": {
+    "capturedAt": "2026-09-03T00:00:00.000Z",
+    "servedAt": "2026-09-03T00:00:00.010Z",
+    "sourceMode": "live",
+    "ageSeconds": 0
+  },
+  "requestId": "00000000-0000-4000-8000-000000000006"
+}
+```
+
+`meta.sourceMode` is always one of:
+
+- `live`: Hub completed a new external data call;
+- `fresh_cache`: an exact, still-fresh snapshot for the same consumer and
+  normalized request was served without another external call;
+- `stored_fallback`: an exact last-good snapshot was served because the live
+  path was unavailable; the response includes freshness age, a bounded
+  `fallbackReason`, and HTTP `Warning: 110 - "Response is stale"`;
+- `idempotent_replay`: the committed result for the same caller key, path, and
+  body was replayed without another external call.
+
+Every success also returns `x-mx-insight-request-id`,
+`x-mx-insight-source-mode`, `x-mx-insight-captured-at`, `Age`, and
+`idempotent-replay`. `capturedAt` describes the delivered snapshot, while
+`servedAt` describes this response; clients should use them and `ageSeconds`
+instead of assuming a `200` response is live. A fallback is scoped to the exact
+consumer and normalized request. Hub does not substitute a fuzzy query, another
+consumer's data, or a canonical-search result.
+
+The public response intentionally contains no billing or quota fields. On
+`external_platform_outcome_unknown`, `external_platform_response_unusable`, or
+`request_outcome_unknown`, retain the request ID and original idempotency key;
+do not create a new key for an automatic retry because an external call may
+already have occurred.
 
 ## Tokenize text
 

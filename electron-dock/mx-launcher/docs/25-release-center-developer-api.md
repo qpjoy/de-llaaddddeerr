@@ -38,34 +38,41 @@ Publisher 必须从以下任一入口调用：
 `client_credentials` 或 Publisher API。Domestic edge 会拒绝
 `client_credentials`；把 Publisher 路由加入公网 allowlist 也不属于本接入方案。
 
-## 2. 发布身份归属与 Luopan demo 示例
+## 2. 正式 Compass 发布身份与历史兼容
 
-`productId` 是平台分配并登记在 AppCenter 的稳定发布身份，不是让所有客户端复制
-`luopan`。`demos/luopan` 只是 standalone launcher 的验收应用；正式 Compass 或其他用户
-开发的桌面应用必须在 AppCenter 建立自己的记录（例如 `appId/productId=compass` 加真实
-`packageName`），不能与 demo 共用发布流。用户端应从自己的构建元数据读取 `packageName`，通过
-`GET /internal/v1/releases/products/resolve` 取得 `productId`、安装包/renderer 组件名和
-channel。不能先拉取所有应用再按名称猜测。
-
-旧版本继续显式发送本地声明的 `productId/componentId/channel`，接口与计划选择逻辑不变；
-新版解析只服务于 Release Center，不会改写 ProductNetwork、WireGuard、DNS 或现有连接。
-Luopan 的历史 AppCenter 记录早于 `packageName` 字段，服务端保留
-`@qpjoy/luopan-demo → luopan` 兼容映射。其他新产品没有这种隐式回退，必须在注册时写入真实
-`packageName`。
-
-Luopan demo 当前代码中的发布身份如下，只用于 demo 发版验证：
+`packageName` 是客户端构建身份，`productId/componentId` 是平台已分配的稳定发布身份。
+正式 Compass 直接复用已有 Luopan 平台身份，不新建 `productId=compass`，也不改名
+ProductNetwork：
 
 | 内容 | 值 |
 | --- | --- |
-| `packageName` | `@qpjoy/luopan-demo` |
+| AppCenter `appId` | `luopan` |
+| 正式 Electron `packageName` | `compass` |
 | `productId` | `luopan` |
 | 完整安装包 `componentId` | `luopan` |
 | ASAR 应用热更 `componentId` | `luopan` |
 | renderer 热更新 `componentId` | `luopan-renderer` |
-| channel | `stable` |
+| ProductNetwork | `luopan` |
+| 生产 channel | `stable` |
 | macOS 安装包 | DMG，`platform=darwin`，`arch` 按实际包填写 |
 | Windows 安装包 | NSIS EXE，`platform=win32`，`arch` 按实际包填写 |
 | Linux 安装包 | AppImage，`platform=linux`，`arch` 按实际包填写 |
+
+用户端从自己的构建元数据读取 `packageName=compass`，通过
+`GET /internal/v1/releases/products/resolve` 取得上表的发布身份和 channel。不能先拉取所有
+应用再按名称猜测，也不能为 Compass 再创建一套与 `luopan` 竞争的发布身份。
+
+旧版本继续显式发送本地声明的 `productId/componentId/channel`，接口与计划选择逻辑不变；
+新版解析只服务于 Release Center，不会改写 ProductNetwork、WireGuard、DNS 或现有连接。
+`@qpjoy/luopan-demo → luopan` 仅保留为已发布历史客户端和后台存量 row 的
+resolver 迁移兼容。后台页面暂时显示该旧 package name 不会改变正式 Compass
+的解析结果；正式项目仍必须使用 `packageName=compass`。
+
+上线正式 Compass resolver 时必须先完成 Internal 服务端滚动升级，再发布去掉 legacy
+fallback 的客户端。新服务端启动会把内置 `appId=luopan` 元数据规范为
+`packageName=compass`，同时继续接受旧 alias，因此不要求直接改 PostgreSQL，也不要求
+新建 `compass` product。发布客户端前应从每个实际 Internal origin 验证
+`compass/stable` 均解析为现有 `luopan` 身份。
 
 产品与组件共用一个全局命名空间。平台开通其他产品时，`productId` 必须是 1–120
 字符的小写 ID，匹配 `[a-z0-9][a-z0-9._-]*`，并保留 `-renderer`、`-config` 两个
@@ -79,8 +86,10 @@ AppCenter 产品。平台必须在发放 service account 前完成冲突检查�
 `universal`；同一个版本可为不同平台重复以下流程。
 
 Admin 的 Product 下拉直接来自 AppCenter/Launcher Product Registry，并同时显示
-`displayName · productId · packageName · version`。如果下拉只有 Luopan demo 而没有 Compass，
-应先注册 Compass，不能先把 Compass 包发布到 `luopan` 或 `mx-h2i` 后再靠客户端兼容。
+`displayName · productId · packageName · version`。发布正式 Compass 时选择的稳定项仍是
+`appId/productId=luopan`；客户端以 `packageName=compass` 进行 resolver 请求。后台若仍显示
+历史 `@qpjoy/luopan-demo`，这是存量 row 的兼容展示；不要因此创建第二个 Compass
+product，也不能把 Compass 包发布到 `mx-h2i`。
 
 Luopan 从 `0.1.1` 起、MX-H2I 从 `2.1.3` 起在完整安装包入口内置通用
 `@qpjoy/electron-launcher/asar-bootstrap`。生产 ASAR 基座还必须包含 2026-07-31 的
@@ -113,12 +122,18 @@ PROVISION_JSON="$(
   -H 'content-type: application/json' \
   --data-binary '{
     "displayName": "Luopan",
-    "packageName": "@qpjoy/luopan-demo",
+    "packageName": "compass",
     "launcherMode": "standalone",
+    "channels": ["stable"],
     "requestedBy": "internal-release-admin"
   }'
 )"
 ```
+
+该请求展示正式 Compass 的新写入值。已有 Luopan 后台 row 即使仍显示
+`@qpjoy/luopan-demo`，resolver 也会把 `compass` 解析到同一 `luopan` 身份；不要仅为让
+正式客户端解析成功而重复创建应用。只有平台管理员决定规范化存量元数据或
+需要补齐 Publisher credential 时，才对原 `appId=luopan` 执行幂等 upsert。
 
 不要 `echo` 整个 `PROVISION_JSON`。首次签发时响应结构为：
 
@@ -351,7 +366,7 @@ query 字段：
 | `fileName` | 必填；保留正确扩展名，建议只用安全 ASCII 文件名 |
 | `digest` | 必填；文件 sha256，可传 hex 或 `sha256:<hex>` |
 | `platform` / `arch` | 一般可选，但 `app-installer` / `app-asar` 两者都必填 |
-| `channel` | 可选，默认 `stable`；1–64 字符；首字符必须是小写字母或数字，其余只允许 `[a-z0-9._-]`；服务端会规范为小写，Luopan 应显式传 `shadow` |
+| `channel` | 可选，默认 `stable`；1–64 字符；首字符必须是小写字母或数字，其余只允许 `[a-z0-9._-]`；服务端会规范为小写，Compass 生产发布应显式传 `stable` |
 
 `storage` 不对开发者开放：Internal 根据服务端配置选择本地或 OSS，调用方不得传
 AccessKey、bucket、外部 artifact URL 或 `storage=oss` 来绕过服务端策略。
@@ -369,7 +384,7 @@ DIGEST="sha256:$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')"
 
 UPLOAD_JSON="$(
   curl -fsS -X POST \
-    "$BASE/internal/v1/sdk/releases/artifacts?productId=luopan&releaseId=$RELEASE_ID&kind=app-installer&version=$VERSION&componentId=luopan&fileName=$FILE_NAME&digest=$DIGEST&platform=darwin&arch=arm64&channel=shadow" \
+    "$BASE/internal/v1/sdk/releases/artifacts?productId=luopan&releaseId=$RELEASE_ID&kind=app-installer&version=$VERSION&componentId=luopan&fileName=$FILE_NAME&digest=$DIGEST&platform=darwin&arch=arm64&channel=stable" \
     -H "authorization: Bearer $PUBLISHER_TOKEN" \
     -H 'content-type: application/octet-stream' \
     --data-binary "@$ARTIFACT"
@@ -643,7 +658,7 @@ ASAR 的 one-shot 发布可追加：
 ```ts
 const updater = createElectronLauncherReleaseUpdater({
   baseUrl: internalBaseUrl,
-  packageName: '@example/my-desktop-app',
+  packageName: 'compass',
   channel: 'stable',
   reportInstallId: installId
 });
@@ -677,8 +692,8 @@ bootstrap 会自动回滚。
 
 ```bash
 curl -fsS -G "$BASE/internal/v1/releases/products/resolve" \
-  --data-urlencode 'packageName=@qpjoy/luopan-demo' \
-  --data-urlencode 'channel=shadow' |
+  --data-urlencode 'packageName=compass' \
+  --data-urlencode 'channel=stable' |
   jq
 ```
 
@@ -693,7 +708,7 @@ curl -fsS "$BASE/internal/v1/release/check" \
     "installId": "inst_luopan_validation_mac_01",
     "userId": "usr_luopan_tester",
     "productId": "luopan",
-    "channel": "shadow",
+    "channel": "stable",
     "platform": "darwin",
     "arch": "arm64",
     "components": {
@@ -708,7 +723,7 @@ curl -fsS "$BASE/internal/v1/release/check" \
 
 ```bash
 curl -fsS \
-  "$BASE/internal/v1/releases/history?componentId=luopan&channel=shadow&platform=darwin&arch=arm64" |
+  "$BASE/internal/v1/releases/history?componentId=luopan&channel=stable&platform=darwin&arch=arm64" |
   jq
 ```
 
@@ -740,9 +755,9 @@ download URL 缓存成永久 OSS 地址。私有 OSS URL 可能是短期签名 U
 | Publisher 返回 `401` | Bearer 是否缺失/过期、audience 是否为 `mx-sdk` |
 | Publisher/Approver 返回 `403` | token 是否分别有 read+publish 或 read+approve；`allowedProductIds` 是否含 `luopan`；artifact/plan 是否属于 Luopan |
 | upload 返回 `400` | required query 是否完整；ID 长度/字符是否合法；product 是否使用了保留后缀或派生组件是否撞到已启用产品；digest 是否匹配；`app-installer` 是否有 platform/arch；DMG/EXE/AppImage 扩展名与 platform 是否匹配 |
-| create 返回 artifact/channel 错误 | artifactId 是否来自本账号可访问的上传；不要覆盖 artifact 元数据；channel 省略或保持 `shadow` |
+| create 返回 artifact/channel 错误 | artifactId 是否来自本账号可访问的上传；不要覆盖 artifact 元数据；Compass 生产 channel 省略或保持 `stable` |
 | gate 是 `blocked` | 新 plan 等待验证时这是预期行为；先完成 CI/离线验证，再用带 `sdk.release.approve` 的 token 调 gate endpoint |
-| 客户端显示 up-to-date | 依次检查 `channel=shadow`、component、platform/arch、当前版本、gate 是否 passed、定向 user/install 是否命中 |
+| 客户端显示 up-to-date | 依次检查 `channel=stable`、component、platform/arch、当前版本、gate 是否 passed、定向 user/install 是否命中 |
 | 客户端能看到版本但不能下载 | 检查 artifact metadata 的 URL/digest/size/fileName 和 Internal 到 OSS 的权限；不要给客户端裸 OSS AccessKey |
 | Windows 收到 macOS 包 | 每个平台单独 artifact/plan，并确认 `win32/x64` 与 `darwin/arm64|x64|universal` 没有混填 |
 

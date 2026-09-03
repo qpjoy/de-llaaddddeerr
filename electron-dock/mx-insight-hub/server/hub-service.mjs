@@ -163,6 +163,7 @@ const PUBLIC_SEARCH_FIELDS = new Set(['platform', 'query', 'pageSize', 'cursor',
 const RESULT_TYPES = new Set(['fresh', 'stable'])
 const FRESH_REPLAY_WINDOW_MS = 120_000
 const PUBLIC_OPINION_VISIBILITY_CONTRACT = 'public-opinion.publication-visibility.v1'
+const ECOMMERCE_PLATFORM = 'ecommerce'
 
 function publicDataProductContract(response, contractVersion) {
   const payload = { ...response, contractVersion }
@@ -332,6 +333,7 @@ export class HubService {
     ingestQueueName = 'mx-insight-hub:ingest',
     searchQueries = null,
     segmenter = null,
+    externalPlatformCapabilities = null,
     logger = console,
   }) {
     this.store = store
@@ -345,6 +347,7 @@ export class HubService {
     this.ingestQueueName = ingestQueueName
     this.searchQueries = searchQueries
     this.segmenter = segmenter
+    this.externalPlatformCapabilities = externalPlatformCapabilities
     this.logger = logger
   }
 
@@ -528,6 +531,7 @@ export class HubService {
       SOURCE_CATALOG_PLATFORM,
       MOBILE_COMMERCE_PLATFORM,
       VIRTUAL_SUPERMARKET_PLATFORM,
+      ECOMMERCE_PLATFORM,
     ])
     const nightAllGrants = canonicalGrants.filter((platform) => !localStoredPlatforms.has(platform))
     const payload = nightAllGrants.length > 0
@@ -699,6 +703,14 @@ export class HubService {
             'marketplace_filter',
           ],
         })
+      }
+    }
+    if (canonicalGrants.includes(ECOMMERCE_PLATFORM) && this.externalPlatformCapabilities) {
+      const platforms = payload?.data?.platforms
+      if (Array.isArray(platforms) && !platforms.some((entry) => (
+        (entry?.platform || entry) === ECOMMERCE_PLATFORM
+      ))) {
+        platforms.push(await this.externalPlatformCapabilities())
       }
     }
     const capabilityGrants = typeof this.store.listCapabilityGrants === 'function'

@@ -1325,6 +1325,82 @@ for invalid_page_delay in -1 60001 1.5 invalid; do
 done
 printf 'ok - invalid SQLite page delays fail before ConfigMap mutation\n'
 
+# A bad optional paid-provider value must be rejected by deploy preflight
+# before either the ConfigMap or Secret is mutated. Runtime load remains
+# fail-soft so an out-of-band bad value cannot take down admin/login/workers.
+for invalid_justone_assignment in \
+  'MX_INSIGHT_JUSTONE_TIMEOUT_MS=120001' \
+  'MX_INSIGHT_JUSTONE_STALE_TTL_MS=59999' \
+  'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS=invalid' \
+  'MX_INSIGHT_JUSTONE_BILLING_JSON={'
+do
+  invalid_justone_kubectl_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-justone.XXXXXX")"
+  invalid_justone_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-justone-error.XXXXXX")"
+  rm -f -- "$invalid_justone_kubectl_marker"
+  if env "$invalid_justone_assignment" \
+    INVALID_JUSTONE_KUBECTL_MARKER="$invalid_justone_kubectl_marker" \
+    bash -c '
+      set -euo pipefail
+      source "$1/scripts/manage.sh"
+      export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+      export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+      export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+      export NIGHT_ALL_BASE_URL="http://night-all.internal"
+      kubectl() { : >"$INVALID_JUSTONE_KUBECTL_MARKER"; }
+      create_runtime_config
+    ' _ "$ROOT_DIR" >/dev/null 2>"$invalid_justone_error"; then
+    printf 'not ok - invalid JustOne assignment %q was accepted\n' "$invalid_justone_assignment" >&2
+    exit 1
+  fi
+  if [ -e "$invalid_justone_kubectl_marker" ]; then
+    printf 'not ok - invalid JustOne assignment %q reached kubectl\n' "$invalid_justone_assignment" >&2
+    exit 1
+  fi
+  grep -q 'JustOne preflight failed' "$invalid_justone_error"
+  rm -f -- "$invalid_justone_error"
+done
+printf 'ok - invalid JustOne settings fail strict preflight before cluster mutation\n'
+
+invalid_justone_kubectl_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-justone-lease.XXXXXX")"
+invalid_justone_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-justone-lease-error.XXXXXX")"
+rm -f -- "$invalid_justone_kubectl_marker"
+justone_secret='justone-secret-must-never-appear'
+if INVALID_JUSTONE_KUBECTL_MARKER="$invalid_justone_kubectl_marker" \
+  MX_INSIGHT_JUSTONE_TOKEN="$justone_secret" \
+  MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
+  MX_INSIGHT_JUSTONE_TIMEOUT_MS=120000 \
+  MX_INSIGHT_RESERVATION_LEASE_MS=149999 \
+  bash -c '
+    set -euo pipefail
+    source "$1/scripts/manage.sh"
+    export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+    export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+    export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+    export NIGHT_ALL_BASE_URL="http://night-all.internal"
+    kubectl() { : >"$INVALID_JUSTONE_KUBECTL_MARKER"; }
+    create_runtime_config
+  ' _ "$ROOT_DIR" >/dev/null 2>"$invalid_justone_error"; then
+  printf 'not ok - insufficient paid-dispatch reservation lease was accepted\n' >&2
+  exit 1
+fi
+if [ -e "$invalid_justone_kubectl_marker" ]; then
+  printf 'not ok - insufficient JustOne lease reached kubectl\n' >&2
+  exit 1
+fi
+grep -q 'plus 30000' "$invalid_justone_error"
+if grep -Fq "$justone_secret" "$invalid_justone_error"; then
+  printf 'not ok - JustOne preflight error exposed the provider token\n' >&2
+  exit 1
+fi
+rm -f -- "$invalid_justone_error"
+printf 'ok - paid dispatch lease is preflighted without exposing the token\n'
+
+grep -q 'MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS.*900000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS=' "$ROOT_DIR/scripts/manage.sh"
+printf 'ok - JustOne activation and unknown-outcome cooldown are wired through deployment config\n'
+
 # The foreign Telegram reader is optional, but when configured it must be
 # passed as a Secret key (never a ConfigMap value or terminal output).
 tg_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-tg-wired.XXXXXX")"

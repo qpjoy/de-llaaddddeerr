@@ -1,9 +1,10 @@
-import { createHash } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { createWriteStream, existsSync } from 'node:fs';
 import { mkdir, rename, rm } from 'node:fs/promises';
 import { get as httpGet } from 'node:http';
 import { get as httpsGet } from 'node:https';
 import { dirname } from 'node:path';
+import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 import type { FetchLike } from '@qpjoy/mx-launcher-core';
@@ -114,6 +115,8 @@ export interface ElectronLauncherUpdateCheckInput {
   userId?: string | null;
   platform?: string | null;
   arch?: string | null;
+  /** Cancels product resolution and Release Center check requests for this caller. */
+  signal?: AbortSignal;
 }
 
 export interface ElectronLauncherUpdateCheckResult {
@@ -173,6 +176,8 @@ export interface ElectronLauncherReleaseProductIdentity {
 export interface ElectronLauncherReleaseProductResolveInput {
   packageName?: string | null;
   channel?: string | null;
+  /** Cancels this caller without aborting a resolution still shared by another caller. */
+  signal?: AbortSignal;
 }
 
 export interface ElectronLauncherReleaseReportInput {
@@ -189,6 +194,20 @@ export interface ElectronLauncherArtifactDownloadInput {
   maxRedirects?: number;
   /** Required only when a caller supplies a relative artifact URL directly. */
   baseUrl?: string;
+  /** Cancels the active request/stream. An existing verified target is left untouched. */
+  signal?: AbortSignal;
+  /** Total wall-clock timeout across redirects and body download. Omit to disable. */
+  timeoutMs?: number;
+  /** Byte progress and the transition into digest/size verification. */
+  onProgress?: (progress: ElectronLauncherArtifactDownloadProgress) => void;
+}
+
+export interface ElectronLauncherArtifactDownloadProgress {
+  artifactId: string;
+  phase: 'downloading' | 'verifying';
+  bytesReceived: number;
+  totalBytes: number | null;
+  percent: number | null;
 }
 
 export interface ElectronLauncherArtifactDownloadResult {
@@ -208,51 +227,83 @@ export interface ElectronLauncherReleaseUpdater {
 export function createElectronLauncherReleaseUpdater(options: ElectronLauncherReleaseUpdaterOptions): ElectronLauncherReleaseUpdater {
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   const fetchImpl = options.fetchImpl ?? globalFetch();
-  const resolvedProducts = new Map<string, {
+  type ResolvedProductEntry = {
     expiresAt: number;
+    controller: AbortController;
     pending: Promise<ElectronLauncherReleaseProductIdentity>;
-  }>();
+    waiters: number;
+    settled: boolean;
+  };
+  const resolvedProducts = new Map<string, ResolvedProductEntry>();
   const resolveProduct = async (
     input: ElectronLauncherReleaseProductResolveInput = {}
   ): Promise<ElectronLauncherReleaseProductIdentity> => {
+    throwIfRequestAborted(input.signal);
     const packageName = input.packageName?.trim() || options.packageName?.trim() || '';
     if (!packageName) throw new Error('Release Center packageName is required to resolve product identity');
     const channel = input.channel?.trim() || options.channel?.trim() || 'stable';
     const key = `${packageName.toLowerCase()}\u0000${channel.toLowerCase()}`;
-    const cached = resolvedProducts.get(key);
-    if (cached && cached.expiresAt > Date.now()) return cached.pending;
-    if (cached) resolvedProducts.delete(key);
-    const pending = (async () => {
-      try {
-        const params = new URLSearchParams({ packageName, channel });
-        const payload = await requestJson<{ identity?: ElectronLauncherReleaseProductIdentity }>(
-          fetchImpl,
-          joinUrl(baseUrl, `/internal/v1/releases/products/resolve?${params.toString()}`),
-          'GET'
-        );
-        return normalizeReleaseProductIdentity(payload.identity, packageName, channel);
-      } catch (error) {
-        const legacyProductId = options.productId?.trim() || '';
-        if (
-          options.allowLegacyProductFallback === true
-          && legacyProductId
-          && error instanceof ReleaseCenterRequestError
-          && (error.status === 404 || error.status === 405)
-        ) {
-          return legacyReleaseProductIdentity(legacyProductId, packageName, channel);
-        }
-        throw error;
-      }
-    })();
-    resolvedProducts.set(key, {
-      expiresAt: Date.now() + 5 * 60 * 1000,
-      pending
-    });
-    try {
-      return await pending;
-    } catch (error) {
+    let entry = resolvedProducts.get(key);
+    if (entry && entry.expiresAt <= Date.now()) {
       resolvedProducts.delete(key);
-      throw error;
+      if (!entry.settled && entry.waiters === 0) entry.controller.abort('product resolution cache expired');
+      entry = undefined;
+    }
+    if (!entry) {
+      const controller = new AbortController();
+      const pending = (async () => {
+        try {
+          const params = new URLSearchParams({ packageName, channel });
+          const payload = await requestJson<{ identity?: ElectronLauncherReleaseProductIdentity }>(
+            fetchImpl,
+            joinUrl(baseUrl, `/internal/v1/releases/products/resolve?${params.toString()}`),
+            'GET',
+            undefined,
+            controller.signal
+          );
+          return normalizeReleaseProductIdentity(payload.identity, packageName, channel);
+        } catch (error) {
+          const legacyProductId = options.productId?.trim() || '';
+          if (
+            options.allowLegacyProductFallback === true
+            && legacyProductId
+            && error instanceof ReleaseCenterRequestError
+            && (error.status === 404 || error.status === 405)
+          ) {
+            return legacyReleaseProductIdentity(legacyProductId, packageName, channel);
+          }
+          throw error;
+        }
+      })();
+      entry = {
+        expiresAt: Date.now() + 5 * 60 * 1000,
+        controller,
+        pending,
+        waiters: 0,
+        settled: false
+      };
+      const createdEntry = entry;
+      resolvedProducts.set(key, createdEntry);
+      void pending.then(
+        () => {
+          createdEntry.settled = true;
+        },
+        () => {
+          createdEntry.settled = true;
+          if (resolvedProducts.get(key) === createdEntry) resolvedProducts.delete(key);
+        }
+      );
+    }
+    const selectedEntry = entry;
+    selectedEntry.waiters += 1;
+    try {
+      return await waitForRequestWithSignal(selectedEntry.pending, input.signal);
+    } finally {
+      selectedEntry.waiters -= 1;
+      if (input.signal?.aborted && !selectedEntry.settled && selectedEntry.waiters === 0) {
+        if (resolvedProducts.get(key) === selectedEntry) resolvedProducts.delete(key);
+        selectedEntry.controller.abort(input.signal.reason);
+      }
     }
   };
   return {
@@ -260,7 +311,7 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
     async check(input) {
       const checkedAt = new Date().toISOString();
       const identity = options.packageName?.trim()
-        ? await resolveProduct({ channel: input.channel })
+        ? await resolveProduct({ channel: input.channel, signal: input.signal })
         : null;
       const productId = identity?.productId || input.productId?.trim() || options.productId?.trim() || null;
       const componentId = input.componentId?.trim()
@@ -299,19 +350,36 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
               arch: effectiveInput.arch ?? null,
               artifactKinds: effectiveInput.componentKind ? [effectiveInput.componentKind] : undefined,
               components: { [effectiveInput.componentId]: effectiveInput.currentVersion }
-            }
+            },
+            effectiveInput.signal
           );
-          if (payload && typeof payload.status === 'string') {
+          if (
+            payload
+            && (payload.status === 'up-to-date'
+              || payload.status === 'update-available'
+              || payload.status === 'blocked')
+          ) {
             return mapReleaseCheckPayload(payload, effectiveInput, baseUrl, checkedAt);
           }
-        } catch {
-          // Older server without /release/check; use the legacy plans flow.
+          throw new Error('Release Center returned an invalid release/check payload');
+        } catch (error) {
+          // Only an endpoint that is genuinely absent identifies an older
+          // server. Authentication, transport, 5xx and malformed-payload
+          // failures must not bypass server-side rollout/target decisions.
+          if (
+            !(error instanceof ReleaseCenterRequestError)
+            || (error.status !== 404 && error.status !== 405)
+          ) {
+            throw error;
+          }
         }
       }
       const plansPayload = await requestJson<{ plans?: ElectronLauncherReleasePlan[] }>(
         fetchImpl,
         joinUrl(baseUrl, '/internal/v1/release-management/plans'),
-        'GET'
+        'GET',
+        undefined,
+        effectiveInput.signal
       );
       const plans = (Array.isArray(plansPayload.plans) ? plansPayload.plans : [])
         .map((plan) => normalizeReleasePlanArtifactUrls(plan, baseUrl));
@@ -330,7 +398,8 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
           channel: effectiveInput.channel,
           installId: effectiveInput.installId ?? null,
           userId: effectiveInput.userId ?? null
-        }
+        },
+        effectiveInput.signal
       );
       const decision = decisionPayload.decision;
       const artifacts = plan
@@ -385,35 +454,86 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
 export async function downloadElectronLauncherReleaseArtifactToFile(
   input: ElectronLauncherArtifactDownloadInput
 ): Promise<ElectronLauncherArtifactDownloadResult> {
+  throwIfDownloadAborted(input.signal);
   const url = input.artifact.url?.trim();
   if (!url) throw new Error(`Release artifact ${input.artifact.artifactId} has no URL`);
   const downloadUrl = resolveReleaseArtifactUrl(url, input.baseUrl);
+  const timeoutMs = normalizeDownloadTimeout(input.timeoutMs);
   await mkdir(dirname(input.targetPath), { recursive: true });
-  const tempPath = `${input.targetPath}.download`;
-  await rm(tempPath, { force: true });
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(input.signal?.reason);
+  if (input.signal?.aborted) controller.abort(input.signal.reason);
+  else input.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  let timedOut = false;
+  const timeout = timeoutMs === null
+    ? null
+    : setTimeout(() => {
+        timedOut = true;
+        controller.abort(new Error(`Release artifact download timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+  const tempPath = `${input.targetPath}.download-${process.pid}-${randomUUID()}`;
   const hash = createHash('sha256');
   let bytes = 0;
   let digest: string | null = null;
   const expectedDigest = normalizeDigest(input.artifact.digest);
   try {
-    const response = await openDownloadStream(downloadUrl, input.maxRedirects ?? 3);
-    response.stream.on('data', (chunk: Buffer) => {
-      bytes += chunk.length;
-      hash.update(chunk);
+    throwIfDownloadAborted(controller.signal);
+    const response = await openDownloadStream(
+      downloadUrl,
+      normalizeMaxRedirects(input.maxRedirects),
+      controller.signal
+    );
+    const expectedBytes = finiteNonNegativeNumber(input.artifact.sizeBytes);
+    const responseBytes = contentLength(response.contentLength);
+    if (expectedBytes !== null && responseBytes !== null && expectedBytes !== responseBytes) {
+      response.stream.destroy();
+      throw new Error(
+        `Release artifact Content-Length mismatch: expected ${expectedBytes}, got ${responseBytes}`
+      );
+    }
+    const totalBytes = expectedBytes ?? responseBytes;
+    emitDownloadProgress(input, 'downloading', bytes, totalBytes);
+    const meter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        bytes += chunk.length;
+        hash.update(chunk);
+        emitDownloadProgress(input, 'downloading', bytes, totalBytes);
+        callback(null, chunk);
+      }
     });
-    await pipeline(response.stream, createWriteStream(tempPath, { flags: 'wx' }));
+    await pipeline(
+      response.stream,
+      meter,
+      createWriteStream(tempPath, { flags: 'wx' }),
+      { signal: controller.signal }
+    );
+    throwIfDownloadAborted(controller.signal);
+    emitDownloadProgress(input, 'verifying', bytes, totalBytes);
     digest = `sha256:${hash.digest('hex')}`;
-    if (Number.isFinite(input.artifact.sizeBytes) && bytes !== input.artifact.sizeBytes) {
-      throw new Error(`Release artifact size mismatch: expected ${input.artifact.sizeBytes}, got ${bytes}`);
+    if (expectedBytes !== null && bytes !== expectedBytes) {
+      throw new Error(`Release artifact size mismatch: expected ${expectedBytes}, got ${bytes}`);
+    }
+    if (responseBytes !== null && bytes !== responseBytes) {
+      throw new Error(`Release artifact Content-Length mismatch: expected ${responseBytes}, got ${bytes}`);
     }
     if (expectedDigest && digest !== expectedDigest) {
       throw new Error(`Release artifact digest mismatch: expected ${expectedDigest}, got ${digest}`);
     }
+    throwIfDownloadAborted(controller.signal);
+    await replaceDownloadedFile(tempPath, input.targetPath);
   } catch (error) {
     await rm(tempPath, { force: true });
+    if (timedOut) {
+      throw new Error(`Release artifact download timed out after ${timeoutMs}ms`);
+    }
+    if (input.signal?.aborted || controller.signal.aborted) {
+      throw downloadAbortError(input.signal?.reason ?? controller.signal.reason);
+    }
     throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    input.signal?.removeEventListener('abort', abortFromCaller);
   }
-  await rename(tempPath, input.targetPath);
   return {
     ok: true,
     targetPath: input.targetPath,
@@ -680,12 +800,23 @@ function normalizeReleaseArtifactUrls(
 function resolveReleaseArtifactUrl(value: string, baseUrl?: string): string {
   const url = value.trim();
   try {
-    return new URL(url).toString();
+    const absolute = new URL(url);
+    if (baseUrl?.trim() && isPlatformReleaseArtifactPath(absolute.pathname)) {
+      return rebindReleaseArtifactToBase(absolute, baseUrl);
+    }
+    return absolute.toString();
   } catch {
     if (!baseUrl?.trim()) {
       throw new Error(`Relative release artifact URL requires baseUrl: ${url}`);
     }
-    return new URL(url, `${normalizeBaseUrl(baseUrl)}/`).toString();
+    if (url.startsWith('//')) {
+      throw new Error(`Protocol-relative release artifact URL is not allowed: ${url}`);
+    }
+    const resolved = new URL(url, `${normalizeBaseUrl(baseUrl)}/`);
+    if (isPlatformReleaseArtifactPath(resolved.pathname)) {
+      return rebindReleaseArtifactToBase(resolved, baseUrl);
+    }
+    return resolved.toString();
   }
 }
 
@@ -699,20 +830,73 @@ class ReleaseCenterRequestError extends Error {
   }
 }
 
+function throwIfRequestAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw releaseRequestAbortError(signal.reason);
+}
+
+function releaseRequestAbortError(reason?: unknown): Error {
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+  const error = new Error(
+    reason instanceof Error && reason.message
+      ? reason.message
+      : 'Release Center request cancelled'
+  );
+  error.name = 'AbortError';
+  return error;
+}
+
+function waitForRequestWithSignal<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return pending;
+  if (signal.aborted) return Promise.reject(releaseRequestAbortError(signal.reason));
+  return new Promise<T>((resolve, reject) => {
+    let finished = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      reject(releaseRequestAbortError(signal.reason));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    pending.then(
+      (value) => {
+        if (finished) return;
+        finished = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (finished) return;
+        finished = true;
+        cleanup();
+        reject(error);
+      }
+    );
+  });
+}
+
 async function requestJson<T>(
   fetchImpl: FetchLike,
   url: string,
   method: 'GET' | 'POST',
-  body?: Record<string, unknown>
+  body?: Record<string, unknown>,
+  signal?: AbortSignal
 ): Promise<T> {
-  const response = await fetchImpl(url, {
+  type ReleaseFetchInit = NonNullable<Parameters<FetchLike>[1]> & { signal?: AbortSignal };
+  const init: ReleaseFetchInit = {
     method,
     headers: {
       accept: 'application/json',
       ...(body ? { 'content-type': 'application/json' } : {})
     },
-    ...(body ? { body: JSON.stringify(body) } : {})
-  });
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    ...(signal ? { signal } : {})
+  };
+  const response = await (fetchImpl as (
+    input: string,
+    init?: ReleaseFetchInit
+  ) => ReturnType<FetchLike>)(url, init);
   const text = await response.text();
   if (!response.ok) {
     throw new ReleaseCenterRequestError(
@@ -724,12 +908,17 @@ async function requestJson<T>(
   return payload as T;
 }
 
-async function openDownloadStream(url: string, redirectsLeft: number): Promise<{ stream: NodeJS.ReadableStream }> {
+async function openDownloadStream(
+  url: string,
+  redirectsLeft: number,
+  signal: AbortSignal
+): Promise<{ stream: import('node:http').IncomingMessage; contentLength: string | string[] | undefined }> {
   const parsed = new URL(url);
-  const getter = parsed.protocol === 'https:' ? httpsGet : parsed.protocol === 'http:' ? httpGet : null;
-  if (!getter) throw new Error(`Unsupported release artifact URL protocol: ${parsed.protocol}`);
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`Unsupported release artifact URL protocol: ${parsed.protocol}`);
+  }
   return new Promise((resolve, reject) => {
-    const req = getter(parsed, (response) => {
+    const handleResponse = (response: import('node:http').IncomingMessage) => {
       const status = response.statusCode || 0;
       const location = response.headers.location;
       if (status >= 300 && status < 400 && location) {
@@ -739,7 +928,7 @@ async function openDownloadStream(url: string, redirectsLeft: number): Promise<{
           return;
         }
         const redirected = new URL(location, parsed).toString();
-        openDownloadStream(redirected, redirectsLeft - 1).then(resolve, reject);
+        openDownloadStream(redirected, redirectsLeft - 1, signal).then(resolve, reject);
         return;
       }
       if (status < 200 || status >= 300) {
@@ -747,10 +936,135 @@ async function openDownloadStream(url: string, redirectsLeft: number): Promise<{
         reject(new Error(`Release artifact download failed: HTTP ${status}`));
         return;
       }
-      resolve({ stream: response });
-    });
+      resolve({ stream: response, contentLength: response.headers['content-length'] });
+    };
+    const req = parsed.protocol === 'https:'
+      ? httpsGet(parsed, { signal }, handleResponse)
+      : httpGet(parsed, { signal }, handleResponse);
     req.on('error', reject);
   });
+}
+
+function isPlatformReleaseArtifactPath(pathname: string): boolean {
+  return /^\/internal\/v1\/release-artifacts\/[^/]+\/download(?:\/[^/]+)?\/?$/.test(pathname);
+}
+
+function rebindReleaseArtifactToBase(url: URL, baseUrl: string): string {
+  const base = new URL(`${normalizeBaseUrl(baseUrl)}/`);
+  if (base.protocol !== 'http:' && base.protocol !== 'https:') {
+    throw new Error(`Unsupported Release Center baseUrl protocol: ${base.protocol}`);
+  }
+  return new URL(`${url.pathname}${url.search}${url.hash}`, base.origin).toString();
+}
+
+function normalizeMaxRedirects(value: number | undefined): number {
+  if (value === undefined) return 3;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`Release artifact maxRedirects must be a non-negative integer: ${value}`);
+  }
+  return value;
+}
+
+function normalizeDownloadTimeout(value: number | undefined): number | null {
+  if (value === undefined) return null;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`Release artifact timeoutMs must be a positive number: ${value}`);
+  }
+  return value;
+}
+
+function finiteNonNegativeNumber(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function contentLength(value: string | string[] | undefined): number | null {
+  const text = Array.isArray(value) ? value[0] : value;
+  if (!text || !/^\d+$/.test(text.trim())) return null;
+  return finiteNonNegativeNumber(Number(text));
+}
+
+function emitDownloadProgress(
+  input: ElectronLauncherArtifactDownloadInput,
+  phase: ElectronLauncherArtifactDownloadProgress['phase'],
+  bytesReceived: number,
+  totalBytes: number | null
+): void {
+  if (!input.onProgress) return;
+  try {
+    input.onProgress({
+      artifactId: input.artifact.artifactId,
+      phase,
+      bytesReceived,
+      totalBytes,
+      percent: totalBytes === null
+        ? null
+        : totalBytes === 0
+          ? 100
+          : Math.min(100, (bytesReceived / totalBytes) * 100)
+    });
+  } catch {
+    // Progress is observational and must not corrupt or abort an update.
+  }
+}
+
+function throwIfDownloadAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw downloadAbortError(signal.reason);
+}
+
+function downloadAbortError(reason?: unknown): Error {
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+  const error = new Error(
+    reason instanceof Error && reason.message
+      ? reason.message
+      : 'Release artifact download cancelled'
+  );
+  error.name = 'AbortError';
+  return error;
+}
+
+async function replaceDownloadedFile(tempPath: string, targetPath: string): Promise<void> {
+  if (!existsSync(targetPath)) {
+    try {
+      await rename(tempPath, targetPath);
+      return;
+    } catch (error) {
+      if (!isDestinationExistsRenameError(error)) throw error;
+    }
+  }
+
+  // Windows cannot rename over an existing destination. Move the previous
+  // verified file aside first, and restore it if committing the new file fails.
+  const backupPath = `${targetPath}.previous-${process.pid}-${randomUUID()}`;
+  let previousMoved = false;
+  try {
+    try {
+      await rename(targetPath, backupPath);
+      previousMoved = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+    }
+    await rename(tempPath, targetPath);
+    await rm(backupPath, { force: true }).catch(() => undefined);
+    return;
+  } catch (error) {
+    if (previousMoved) {
+      try {
+        await rename(backupPath, targetPath);
+      } catch {
+        // If another successful writer already installed targetPath, keep it.
+        // Otherwise the original commit error remains the most useful failure.
+        if (existsSync(targetPath)) {
+          await rm(backupPath, { force: true }).catch(() => undefined);
+        }
+      }
+    }
+    throw error;
+  }
+}
+
+function isDestinationExistsRenameError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return code === 'EEXIST' || code === 'EPERM' || code === 'EACCES' || code === 'ENOTEMPTY';
 }
 
 function normalizeBaseUrl(value: string): string {
