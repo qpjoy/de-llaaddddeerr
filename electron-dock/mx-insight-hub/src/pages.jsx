@@ -70,6 +70,8 @@ const PLATFORM_CATALOG = [
   'telegram',
   'public_opinion',
   'source_catalog',
+  'mobile_commerce',
+  'virtual_supermarket',
 ]
 
 const DEFAULT_POLICY = { maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 }

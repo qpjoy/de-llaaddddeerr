@@ -1027,6 +1027,8 @@ export function platformLabel(platform) {
     telegram: 'Telegram',
     public_opinion: '全国省份舆情',
     source_catalog: '数据源目录',
+    mobile_commerce: '手机电商采集',
+    virtual_supermarket: '虚拟超市',
   }
   return labels[platform] || platform
 }
