@@ -106,11 +106,14 @@ test('release checks let new clients select ASAR without changing legacy install
   assert.equal(legacySelection.releaseId, 'mx-h2i-asar-2.1.3');
 });
 
-test('Luopan release checks rebase only their own Internal artifact endpoint', () => {
+test('Luopan release checks rebase only their own Internal artifact endpoint when legacy ref ids differ', () => {
+  const digest = 'a'.repeat(64);
+  const routeArtifactId = `artifact_luopan_app-installer_2.0.3_${'b'.repeat(24)}_${digest}`;
   const internalPlan = releasePlan('luopan', `sha256:${'a'.repeat(64)}`, {
-    artifactUrl: 'http://10.88.88.88:18090/internal/v1/release-artifacts/artifact_test/download?token=old#file',
+    artifactUrl: `http://10.88.88.88:18090/internal/v1/release-artifacts/${routeArtifactId}/download?token=old#file`,
     artifactFileName: 'Compass-2.0.3-win32-x64-app.asar'
   });
+  assert.notEqual(internalPlan.artifacts[0].artifactId, routeArtifactId);
   internalPlan.rollout.percentage = 100;
   const decision = evaluateReleaseCheck([internalPlan], {
     installId: 'install_compass',
@@ -124,13 +127,13 @@ test('Luopan release checks rebase only their own Internal artifact endpoint', (
   const luopan = releaseCheckWithNamedArtifactUrls(decision, 'luopan');
   assert.equal(
     luopan.artifacts[0]?.url,
-    '/internal/v1/release-artifacts/artifact_test/download/Compass-2.0.3-win32-x64-app.asar?token=old#file'
+    `/internal/v1/release-artifacts/${routeArtifactId}/download/Compass-2.0.3-win32-x64-app.asar?token=old#file`
   );
 
   const mxH2i = releaseCheckWithNamedArtifactUrls(decision, 'mx-h2i');
   assert.equal(
     mxH2i.artifacts[0]?.url,
-    'http://10.88.88.88:18090/internal/v1/release-artifacts/artifact_test/download/Compass-2.0.3-win32-x64-app.asar?token=old#file'
+    `http://10.88.88.88:18090/internal/v1/release-artifacts/${routeArtifactId}/download/Compass-2.0.3-win32-x64-app.asar?token=old#file`
   );
 
   const externalPlan = structuredClone(internalPlan);
@@ -149,7 +152,8 @@ test('Luopan release checks rebase only their own Internal artifact endpoint', (
   );
 
   const mismatchedPlan = structuredClone(internalPlan);
-  mismatchedPlan.artifacts[0].url = 'http://10.88.88.88:18090/internal/v1/release-artifacts/other/download';
+  const otherProductArtifactId = `artifact_mx-h2i_app-installer_2.0.3_${'c'.repeat(24)}_${digest}`;
+  mismatchedPlan.artifacts[0].url = `http://10.88.88.88:18090/internal/v1/release-artifacts/${otherProductArtifactId}/download`;
   const mismatchedDecision = evaluateReleaseCheck([mismatchedPlan], {
     installId: 'install_compass',
     productId: 'luopan',
@@ -160,7 +164,53 @@ test('Luopan release checks rebase only their own Internal artifact endpoint', (
   });
   assert.equal(
     releaseCheckWithNamedArtifactUrls(mismatchedDecision, 'luopan').artifacts[0]?.url,
-    'http://10.88.88.88:18090/internal/v1/release-artifacts/other/download/Compass-2.0.3-win32-x64-app.asar'
+    `http://10.88.88.88:18090/internal/v1/release-artifacts/${otherProductArtifactId}/download/Compass-2.0.3-win32-x64-app.asar`
+  );
+});
+
+test('release check handler rebases a legacy Admin plan whose ref id differs from its uploaded route id', async () => {
+  const store = new MemoryStore(testRuntimeConfig());
+  const digest = 'd'.repeat(64);
+  const routeArtifactId = `artifact_luopan_app-installer_2.0.4_${'e'.repeat(24)}_${digest}`;
+  const plan = store.createReleaseManagementPlan({
+    releaseId: 'luopan-installer-2.0.4',
+    productId: 'luopan',
+    appId: 'luopan',
+    channel: 'stable',
+    launcherComponentId: 'luopan',
+    launcherUpdatePolicy: 'app-installer',
+    launcherCurrentVersion: '2.0.2',
+    launcherTargetVersion: '2.0.4',
+    artifactKind: 'app-installer',
+    artifactVersion: '2.0.4',
+    artifactUrl: `http://10.88.88.88:18090/internal/v1/release-artifacts/${routeArtifactId}/download`,
+    artifactDigest: `sha256:${digest}`,
+    artifactSizeBytes: 42,
+    artifactPlatform: 'win32',
+    artifactArch: 'x64',
+    artifactFileName: 'Compass-2.0.4-win32-x64.exe',
+    activationMode: 'installer-manual',
+    rolloutStrategy: 'all',
+    rolloutPercentage: 100,
+    e2eResult: 'passed'
+  });
+  assert.notEqual(plan.artifacts[0].artifactId, routeArtifactId);
+
+  const result = await new ReleaseController(store).checkRelease({
+    installId: 'install_compass_legacy_admin',
+    productId: 'luopan',
+    channel: 'stable',
+    platform: 'win32',
+    arch: 'x64',
+    artifactKinds: ['app-installer'],
+    components: { luopan: '2.0.2' }
+  });
+
+  assert.equal(result.status, 'update-available');
+  assert.equal(result.artifacts[0]?.artifactId, plan.artifacts[0].artifactId);
+  assert.equal(
+    result.artifacts[0]?.url,
+    `/internal/v1/release-artifacts/${routeArtifactId}/download/Compass-2.0.4-win32-x64.exe`
   );
 });
 

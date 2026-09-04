@@ -971,7 +971,6 @@ export function releaseCheckWithNamedArtifactUrls(
       url: artifact.url
         ? releaseArtifactUrlForProduct(
           requestedProductId,
-          artifact.artifactId,
           releaseArtifactUrlWithFileName(artifact.url, artifact.fileName)
         )
         : null
@@ -981,7 +980,6 @@ export function releaseCheckWithNamedArtifactUrls(
 
 function releaseArtifactUrlForProduct(
   requestedProductId: string | null,
-  artifactId: string,
   url: string
 ): string {
   if (requestedProductId?.trim().toLowerCase() !== 'luopan') return url;
@@ -991,11 +989,15 @@ function releaseArtifactUrlForProduct(
     const match = parsed.pathname.match(
       /^\/internal\/v1\/release-artifacts\/([^/]+)\/download(?:\/[^/]+)?$/
     );
-    if (!match || decodeURIComponent(match[1]) !== artifactId) return url;
+    if (!match || !isLuopanManagedReleaseArtifactId(decodeURIComponent(match[1]))) return url;
     return `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch {
     return url;
   }
+}
+
+function isLuopanManagedReleaseArtifactId(artifactId: string): boolean {
+  return /^artifact_luopan_[a-z0-9._-]+_[a-f0-9]{24}_[a-f0-9]{64}$/i.test(artifactId);
 }
 
 function releaseArtifactUrlWithFileName(url: string, fileName: string | null): string {
