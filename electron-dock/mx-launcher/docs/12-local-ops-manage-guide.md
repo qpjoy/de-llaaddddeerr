@@ -378,8 +378,11 @@ SITE_SLOT_RELEASE_REVISION=shadow-001 \
 `Materialize Domestic WG` 按钮。正式 `internal-production deploy` 会在 build 前刷新
 `@qpjoy/tunnel-cli@latest` 并重物化 `server/artifacts/site-slots`。
 
-如果 Internal 也没有 npm 出站，就使用当前
-`electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli` 中已缓存的 fallback 版本。没有
+如果 Internal 没有 npm 出站，并且已确认仓库内缓存版本可用于本次部署，应显式设置
+`MX_SHADOW_REFRESH_QP_TUNNEL_CLI_FROM_NPM=0`；否则正式部署默认 strict 刷新会在 npm 失败时
+停止。设置后会复用
+`electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli` 中已缓存的 fallback 版本；它只
+跳过 npm 刷新，不会跳过 server 测试/typecheck 或镜像部署。没有
 Oversea 订阅时，Domestic plan 会停在 `resolve-domestic-bootstrap-subscription`：Internal
 只先准备 fallback artifact，不让 Domestic 自己 npm 拉包，也不执行 `server-on`。
 

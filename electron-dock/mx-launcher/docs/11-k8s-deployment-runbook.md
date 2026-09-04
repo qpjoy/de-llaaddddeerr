@@ -673,6 +673,19 @@ bash scripts/manage.sh ops internal-production status
 bash scripts/manage.sh ops internal-production gateway-smoke
 ```
 
+`internal-production deploy` 在任何 kubeadm 修复、Secret、镜像或 workload 变更前，都会先
+读取仓库根 `packageManager`，通过 Corepack 使用锁定的 pnpm 运行 release SDK publisher
+测试和 server typecheck；任一失败即停止部署。无需人工先执行 Corepack 命令，也可以只运行
+下面的无集群写入门禁：
+
+```bash
+bash scripts/manage.sh ops internal-production predeploy
+```
+
+`MX_INTERNAL_PRODUCTION_SKIP_PREDEPLOY_GATE=1` 只用于已明确承担风险的紧急 break-glass，
+不应作为常规部署配置。日常 Luopan 在 Release Center 上传制品、创建计划和审批 gate 不会
+部署 mx-launcher Server，也不会触发这道门禁。
+
 `internal-production deploy` 会构建 `qpjoy/mx-launcher-server:shadow`、部署
 PostgreSQL / migration Job / Internal API / `mx-internal-gateway`，然后直接通过
 `http://127.0.0.1:18090` 跑 gateway smoke。若该机器有防火墙或云安全组，只允许可信
@@ -696,6 +709,18 @@ Internal server 镜像构建时，Corepack 下载 pnpm 与随后 `pnpm install` 
 MX_SHADOW_NPM_REGISTRY=https://registry.npmjs.org \
   bash scripts/manage.sh ops internal-production deploy
 ```
+
+镜像物化默认还会从 npm 刷新 Domestic 离线 fallback 使用的
+`@qpjoy/tunnel-cli@latest`。本次没有 tunnel-cli 变更、且仓库内缓存 fallback 已确认可用时，
+可关闭这一次 npm 刷新，减少构建主机的外网依赖：
+
+```bash
+MX_SHADOW_REFRESH_QP_TUNNEL_CLI_FROM_NPM=0 \
+  bash scripts/manage.sh ops internal-production deploy
+```
+
+该变量不关闭隧道功能，也不跳过 server predeploy 门禁；后续本地 fallback 版本同步逻辑仍按
+现有规则执行。不要长期固定为 `0`，否则 Domestic 离线 fallback 可能落后于新发布版本。
 
 若构建容器完全没有直连出站，而宿主机代理只监听
 `127.0.0.1:7788`，可让 build stage 使用宿主网络：
