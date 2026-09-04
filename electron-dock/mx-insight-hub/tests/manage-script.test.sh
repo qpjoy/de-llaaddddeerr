@@ -1325,6 +1325,60 @@ for invalid_page_delay in -1 60001 1.5 invalid; do
 done
 printf 'ok - invalid SQLite page delays fail before ConfigMap mutation\n'
 
+# Deployment runs this preflight on the host after building the image. Keep it
+# independent of npm-installed packages: those packages exist inside the image,
+# but a clean deployment checkout is not required to have node_modules.
+clean_preflight_root="$(mktemp -d "${TMPDIR:-/tmp}/mx-insight-hub-clean-preflight.XXXXXX")"
+clean_preflight_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-clean-preflight-marker.XXXXXX")"
+rm -f -- "$clean_preflight_marker"
+mkdir -p "$clean_preflight_root/scripts"
+cp "$ROOT_DIR/scripts/manage.sh" "$clean_preflight_root/scripts/manage.sh"
+cp -R "$ROOT_DIR/server" "$clean_preflight_root/server"
+if [ -e "$clean_preflight_root/node_modules" ] || [ -e "$clean_preflight_root/package.json" ]; then
+  printf 'not ok - clean preflight fixture unexpectedly contains package installation metadata\n' >&2
+  rm -rf -- "$clean_preflight_root"
+  exit 1
+fi
+if ! CLEAN_PREFLIGHT_MARKER="$clean_preflight_marker" bash -c '
+  set -euo pipefail
+  cd "$1"
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+  export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+  export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+  export MX_INSIGHT_JUSTONE_TOKEN="provider-token"
+  export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1
+  export NIGHT_ALL_BASE_URL="http://night-all.internal"
+  export MX_INSIGHT_SEARCH_READY=1
+  docker_daemon_proxy_snapshot() {
+    printf "%s" '\''{"version":1,"configured":false,"sourceKind":"docker-daemon-effective","runtimeKind":"host-process","httpProxy":null,"httpsProxy":null,"noProxy":null,"sourceLocations":[],"nodeName":null,"observedAt":"2026-01-01T00:00:00Z"}'\''
+  }
+  kubectl() {
+    case " $* " in
+      *" create configmap mx-insight-hub-config "*)
+        printf "configmap\\n" >>"$CLEAN_PREFLIGHT_MARKER"
+        printf "apiVersion: v1\\nkind: ConfigMap\\n"
+        ;;
+      *" create secret generic mx-insight-hub-secrets "*)
+        printf "secret\\n" >>"$CLEAN_PREFLIGHT_MARKER"
+        printf "apiVersion: v1\\nkind: Secret\\n"
+        ;;
+      *" apply -f - "*) while IFS= read -r _line; do :; done ;;
+      *) return 1 ;;
+    esac
+  }
+  create_runtime_config
+' _ "$clean_preflight_root"; then
+  printf 'not ok - JustOne deploy preflight required packages absent from a clean host checkout\n' >&2
+  rm -rf -- "$clean_preflight_root"
+  rm -f -- "$clean_preflight_marker"
+  exit 1
+fi
+assert_eq $'configmap\nsecret' "$(cat "$clean_preflight_marker")" \
+  'JustOne deploy preflight works without host node_modules'
+rm -rf -- "$clean_preflight_root"
+rm -f -- "$clean_preflight_marker"
+
 # A bad optional paid-provider value must be rejected by deploy preflight
 # before either the ConfigMap or Secret is mutated. Runtime load remains
 # fail-soft so an out-of-band bad value cannot take down admin/login/workers.

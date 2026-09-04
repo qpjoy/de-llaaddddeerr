@@ -753,14 +753,14 @@ create_runtime_config() {
     MX_INSIGHT_JUSTONE_CONFIGURED="$justone_configured" \
     MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
     node --input-type=module -e '
-      const { preflightJustOneConfig } = await import(process.argv[1])
       try {
+        const { preflightJustOneConfig } = await import(process.argv[1])
         preflightJustOneConfig(process.env)
       } catch (error) {
         process.stderr.write(error?.message || "JustOne configuration is invalid")
         process.exit(1)
       }
-    ' "${ROOT_DIR}/server/config.mjs" 2>&1
+    ' "${ROOT_DIR}/server/external-platforms/config.mjs" 2>&1
   )"; then
     die "JustOne preflight failed: ${justone_preflight_error}"
   fi
