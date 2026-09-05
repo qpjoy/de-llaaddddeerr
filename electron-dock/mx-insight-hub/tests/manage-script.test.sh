@@ -1501,6 +1501,7 @@ grep -q 'MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS.*60000' "$ROOT_DIR/deploy/compose/
 grep -q 'MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_PROVINCE_PAGE_DELAY_MS.*2000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'mx_common: ../../../mx-common' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q '^  ingest:' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'server/workers/ingest.mjs' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q '^  classifier:' "$ROOT_DIR/deploy/compose/docker-compose.yml"
@@ -1517,6 +1518,7 @@ if rg -q 'supplementalGroups|server-files|/shared_dir' \
 fi
 printf 'ok - server-file read group and mount stay scoped to Admin\n'
 printf 'ok - local Compose wires the periodic external-pull worker\n'
+printf 'ok - local Compose supplies the mx-common named build context\n'
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS=' "$ROOT_DIR/scripts/manage.sh"

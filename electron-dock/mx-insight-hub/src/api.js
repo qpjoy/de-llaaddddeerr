@@ -150,6 +150,16 @@ export const adminApi = {
   externalPlatform: (token, key, query = {}) => request(
     token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}`, { query },
   ),
+  updateExternalPlatformCredential: (token, key, body) => request(
+    token,
+    `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/credential`,
+    { method: 'PUT', body },
+  ),
+  revealExternalPlatformCredential: (token, key, adminToken) => request(
+    token,
+    `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/credential/reveal`,
+    { method: 'POST', body: { adminToken } },
+  ),
   createDatabaseConnection: (token, body) => request(
     token, `${ADMIN_ROOT}/database-connections`, { method: 'POST', body },
   ),

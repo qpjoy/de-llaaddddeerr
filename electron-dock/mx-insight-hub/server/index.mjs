@@ -10,6 +10,7 @@ import { loadConfig } from './config.mjs'
 import { HubService } from './hub-service.mjs'
 import { ExternalPlatformAdminService } from './external-platforms/admin.mjs'
 import { ExternalPlatformGateway } from './external-platforms/gateway.mjs'
+import { createExternalPlatformCredentialStore } from './external-platforms/credentials-store.mjs'
 import { createExternalPlatformStore } from './external-platforms/store.mjs'
 import { createAgentRuntime } from './agent/runtime.mjs'
 import { AgentSettingsStore } from './agent/settings-store.mjs'
@@ -101,18 +102,26 @@ export async function createRuntime(config = loadConfig()) {
     circuitOpenMs: config.justOne.circuitOpenMs,
     uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
   })
+  const externalPlatformCredentialStore = createExternalPlatformCredentialStore({
+    pool,
+    environmentConfigured: Boolean(config.justOne.configured),
+  })
   // JustOne is optional and is never a Hub readiness dependency. The admin
   // listener still receives truthful configuration/analytics, while only a
   // listener that serves public APIs constructs the credentialed adapter.
-  const justOneAdapter = config.justOne.dispatchEnabled && config.listenerMode !== 'admin'
+  const justOneAdapter = config.justOne.contractVerified
+    && !config.justOne.configurationError
+    && config.listenerMode !== 'admin'
     ? new JustOneAdapter({
         token: config.justOne.token,
+        credentialResolver: () => externalPlatformCredentialStore.readCredential('justone'),
         timeoutMs: config.justOne.timeoutMs,
       })
     : null
   const externalPlatformAdmin = new ExternalPlatformAdminService({
     store: externalPlatformStore,
     config: config.justOne,
+    credentialStore: externalPlatformCredentialStore,
     durable: Boolean(pool),
   })
   const externalPlatformGateway = new ExternalPlatformGateway({
@@ -173,7 +182,7 @@ export async function createRuntime(config = loadConfig()) {
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore,
-    externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
+    externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
   }
 }
 

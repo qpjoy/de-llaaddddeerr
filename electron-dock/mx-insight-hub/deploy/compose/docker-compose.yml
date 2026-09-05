@@ -24,6 +24,9 @@ services:
       dockerfile: Dockerfile
       additional_contexts:
         ui_design: ../../../mx-launcher/ui-design
+        # Dockerfile COPY --from=mx_common must resolve to this sibling source,
+        # not an attempted docker.io/library/mx_common image pull.
+        mx_common: ../../../mx-common
     image: ${MX_INSIGHT_IMAGE:-mx-insight-hub:local}
     environment:
       MX_INSIGHT_HOST: 0.0.0.0

@@ -9548,6 +9548,7 @@ button.mih-catalog-status {
 }
 
 .mih-external-provider-panel,
+.mih-external-credential-panel,
 .mih-external-chain-panel,
 .mih-external-capability-panel,
 .mih-external-difference-panel,
@@ -9716,6 +9717,53 @@ button.mih-catalog-status {
 .mih-external-detail-status small {
   color: var(--qp-text-3);
   font-size: var(--qp-font-caption-1);
+}
+
+.mih-external-credential-panel {
+  align-content: start;
+}
+
+.mih-external-credential-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr);
+  align-items: start;
+  gap: 14px;
+}
+
+.mih-external-credential-form,
+.mih-external-secret-modal {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.mih-external-secret-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.mih-external-secret-input > .qp-input {
+  min-width: 0;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.mih-external-secret-input > .qp-button {
+  border: 1px solid var(--qp-line-strong);
+  border-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.mih-external-credential-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mih-external-credential-panel > .mih-external-unknown,
+.mih-external-credential-panel > .mih-external-context-note {
+  margin-top: 12px;
 }
 
 .mih-external-two-column {
@@ -9996,6 +10044,7 @@ button.mih-catalog-status {
   }
 
   .mih-external-provider-grid,
+  .mih-external-credential-layout,
   .mih-external-two-column,
   .mih-external-two-column--balanced {
     grid-template-columns: 1fr;
@@ -10048,6 +10097,11 @@ button.mih-catalog-status {
   }
 
   .mih-external-provider-card > footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mih-external-credential-actions {
     align-items: stretch;
     flex-direction: column;
   }

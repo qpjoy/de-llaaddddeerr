@@ -238,22 +238,60 @@ function providerProjection(analytics, todayAnalytics, config, range, now) {
   }
 }
 
+function fallbackCredential(config) {
+  return {
+    source: 'environment',
+    revision: 0,
+    credentialConfigured: Boolean(config.configured ?? config.token),
+    revealable: false,
+    updatedAt: null,
+  }
+}
+
 export class ExternalPlatformAdminService {
-  constructor({ store, config, durable = false }) {
+  constructor({ store, config, credentialStore = null, durable = false }) {
     this.store = store
     this.config = config
+    this.credentialStore = credentialStore
     this.durable = durable
+  }
+
+  #assertProvider(providerKey) {
+    if (providerKey !== 'justone') {
+      throw new AppError(404, 'external_platform_not_found', 'External platform not found')
+    }
+  }
+
+  #requireCredentialStore() {
+    if (!this.credentialStore) {
+      throw new AppError(
+        503,
+        'external_platform_credential_store_unavailable',
+        'External platform credential storage is unavailable',
+      )
+    }
+    return this.credentialStore
+  }
+
+  async #credential(providerKey = 'justone') {
+    this.#assertProvider(providerKey)
+    if (!this.credentialStore) return fallbackCredential(this.config)
+    return this.credentialStore.describeCredential(providerKey)
   }
 
   async #data(rangeValue) {
     const now = new Date()
     const range = externalPlatformRange(rangeValue, now)
-    const [analytics, todayAnalytics] = await Promise.all([
+    const [analytics, todayAnalytics, credential] = await Promise.all([
       this.store.analytics({ from: range.from, bucket: range.bucket }),
       this.store.analytics({ from: shanghaiDayStart(now), bucket: 'hour' }),
+      this.#credential(),
     ])
-    const provider = providerProjection(analytics, todayAnalytics, this.config, range, now)
-    return { now, range, analytics, provider }
+    const provider = providerProjection(analytics, todayAnalytics, {
+      ...this.config,
+      configured: credential.credentialConfigured,
+    }, range, now)
+    return { now, range, analytics, provider, credential }
   }
 
   async overview(rangeValue) {
@@ -288,13 +326,14 @@ export class ExternalPlatformAdminService {
   }
 
   async detail(providerKey, rangeValue) {
-    if (providerKey !== 'justone') throw new AppError(404, 'external_platform_not_found', 'External platform not found')
-    const { now, range, analytics, provider } = await this.#data(rangeValue)
+    this.#assertProvider(providerKey)
+    const { now, range, analytics, provider, credential } = await this.#data(rangeValue)
     return {
       contractVersion: 'mx-insight-hub.external-platform-admin.v1',
       range: range.range,
       generatedAt: now.toISOString(),
       provider,
+      credential,
       pipeline: [
         {
           key: 'stable_contract',
@@ -366,5 +405,34 @@ export class ExternalPlatformAdminService {
         freshness: '专用抓取接口与缓存型通用搜索必须分别建模；当前只接入已核验的商品搜索 v1。',
       },
     }
+  }
+
+  async updateCredential(providerKey, input) {
+    this.#assertProvider(providerKey)
+    return this.#requireCredentialStore().updateCredential(providerKey, input, {
+      updatedBy: 'admin-token',
+    })
+  }
+
+  async revealCredential(providerKey) {
+    this.#assertProvider(providerKey)
+    const store = this.#requireCredentialStore()
+    const status = await store.describeCredential(providerKey)
+    if (status.source !== 'database') {
+      throw new AppError(
+        409,
+        'external_platform_credential_not_revealable',
+        'Environment-managed credentials cannot be revealed by the Hub',
+      )
+    }
+    const apiKey = await store.readCredential(providerKey)
+    if (!apiKey) {
+      throw new AppError(
+        404,
+        'external_platform_credential_not_found',
+        'The external platform has no saved credential',
+      )
+    }
+    return { apiKey }
   }
 }

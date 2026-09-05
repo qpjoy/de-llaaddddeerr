@@ -78,6 +78,57 @@ test('adapter uses the pinned HTTPS path and injects token only into query', asy
   assert.equal(result.archiveObjects[1].kind, 'item')
 })
 
+test('adapter resolves one dynamic credential per dispatch and uses it consistently for redaction', async () => {
+  const credentials = ['database-token-one', 'database-token-two']
+  const seen = []
+  let resolutions = 0
+  const adapter = new JustOneAdapter({
+    token: 'environment-fallback-token',
+    credentialResolver: async () => credentials[resolutions++],
+    fetchImpl: async (url) => {
+      const token = new URL(url).searchParams.get('token')
+      seen.push(token)
+      return response(envelope({
+        items: [{
+          skuId: `sku-${seen.length}`,
+          title: `private ${token}`,
+          itemUrl: `https://item.example.invalid/${seen.length}?token=${token}`,
+        }],
+        hasMore: false,
+      }))
+    },
+  })
+
+  const first = await adapter.searchProducts({ marketplace: 'jd', query: 'camera' })
+  const second = await adapter.searchProducts({ marketplace: 'jd', query: 'camera' })
+
+  assert.equal(resolutions, 2)
+  assert.deepEqual(seen, credentials)
+  assert.doesNotMatch(JSON.stringify(first), /database-token-one/u)
+  assert.doesNotMatch(JSON.stringify(second), /database-token-two/u)
+})
+
+test('adapter falls back to its environment credential when the dynamic store has no value', async () => {
+  let resolutions = 0
+  let dispatchedToken = null
+  const adapter = new JustOneAdapter({
+    token: 'environment-fallback-token',
+    credentialResolver: async () => {
+      resolutions += 1
+      return null
+    },
+    fetchImpl: async (url) => {
+      dispatchedToken = new URL(url).searchParams.get('token')
+      return response(envelope({ items: [], hasMore: false }))
+    },
+  })
+
+  await adapter.searchProducts({ marketplace: 'jd', query: 'camera' })
+
+  assert.equal(resolutions, 1)
+  assert.equal(dispatchedToken, 'environment-fallback-token')
+})
+
 test('default capture timestamp is taken after the complete response body is read', async () => {
   let bodyCompletedAt = null
   const bytes = new TextEncoder().encode(JSON.stringify(envelope({

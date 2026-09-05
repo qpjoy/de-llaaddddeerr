@@ -169,8 +169,11 @@ API or a duplicate dataset.
 - Public API keys require the explicit `ecommerce` grant. Management analytics stay on the Internal Admin
   listener and retain the existing Hub Admin Token-only source-management boundary; Launcher sessions do
   not gain access from a membership alone.
-- Provider secrets are process configuration only. They never enter public documents, cursors, archives,
-  canonical records, logs, management responses or UI state.
+- Provider secrets are either a public-process environment fallback or an isolated Admin-managed credential
+  record. The public listener reads only the active JustOne credential required for dispatch. Ordinary
+  management responses expose metadata only; plaintext can enter transient reveal-modal state solely after
+  Admin Token reauthentication. Secrets never enter public documents, cursors, archives, canonical records
+  or logs.
 - The external-platform worker and ingest job use bounded queues and quotas; failure cannot block login or
   the serving of already-stored Hub data.
 

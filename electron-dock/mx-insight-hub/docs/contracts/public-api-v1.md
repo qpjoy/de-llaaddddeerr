@@ -341,6 +341,20 @@ The response is provider-neutral:
 - `idempotent_replay`: the committed result for the same caller key, path, and
   body was replayed without another external call.
 
+Starting without a fresh snapshot, two requests with the same normalized body
+but two different valid `Idempotency-Key` values produce `live` followed by
+`fresh_cache`. They are two distinct committed Hub usage requests, but only the
+first performs an external provider call and creates provider-cost evidence.
+Repeating the same body with the same key produces `idempotent_replay`: it adds
+neither a Hub usage request nor an external call or provider-cost event. The
+gateway audit trail may record delivery of the replay, but that delivery is not
+a new usage or charge event.
+
+Hub operational usage and provider cost are separate ledgers. Neither is a
+customer invoice. A future versioned Hub price book may decide whether a live,
+cached, fallback, or replayed delivery is customer-billable; it must not infer
+that decision by copying the provider's call cost.
+
 Every success also returns `x-mx-insight-request-id`,
 `x-mx-insight-source-mode`, `x-mx-insight-captured-at`, `Age`, and
 `idempotent-replay`. `capturedAt` describes the delivered snapshot, while
@@ -354,6 +368,50 @@ The public response intentionally contains no billing or quota fields. On
 `request_outcome_unknown`, retain the request ID and original idempotency key;
 do not create a new key for an automatic retry because an external call may
 already have occurred.
+
+### External platform Admin credential control
+
+External-platform overview and detail are available only to the break-glass
+Admin Token at `GET /internal/v1/admin/external-platforms` and
+`GET /internal/v1/admin/external-platforms/{provider}`. Launcher sessions and
+public API keys are rejected. Ordinary overview, detail, and update responses
+never contain a plaintext key. Detail exposes only the safe credential DTO
+`{source, revision, credentialConfigured, revealable, updatedAt}`.
+
+Replace a provider key in database-managed storage with:
+
+```http
+PUT /internal/v1/admin/external-platforms/{provider}/credential
+X-MX-Insight-Admin-Token: <admin token>
+Content-Type: application/json
+
+{
+  "apiKey": "<provider API key>",
+  "expectedRevision": 3
+}
+```
+
+`apiKey` is write-only and is not echoed. `expectedRevision` provides
+optimistic-concurrency protection. An environment-managed key is never
+revealable or copied into database storage by Hub; an operator must submit the
+key again to migrate it.
+
+Viewing or copying a database-managed key requires step-up verification with
+the Admin Token in both the Admin header and request body:
+
+```http
+POST /internal/v1/admin/external-platforms/{provider}/credential/reveal
+X-MX-Insight-Admin-Token: <admin token>
+Content-Type: application/json
+
+{
+  "adminToken": "<admin token>"
+}
+```
+
+This is the only response allowed to contain `{apiKey}`. It carries
+`Cache-Control: no-store`; clients must keep the plaintext only in the local
+reveal interaction and clear it when that interaction closes.
 
 ## Tokenize text
 

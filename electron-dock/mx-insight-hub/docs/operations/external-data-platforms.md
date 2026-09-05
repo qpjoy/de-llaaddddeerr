@@ -13,7 +13,7 @@ provider is JustOne, but public callers use only the Hub-owned
 
 The feature is additive:
 
-- an absent JustOne token disables only new JustOne dispatches;
+- an absent JustOne credential disables only new JustOne dispatches;
 - exact last-good snapshots may remain available until their stale deadline;
 - Hub stored search, cleaning jobs and canonical data continue independently;
 - Launcher, SessionGate, MX-H2I login, WireGuard, DNS and user networking have no dependency on this
@@ -23,15 +23,24 @@ Normal health/smoke must not call the paid interface. A live smoke requires an e
 
 ## 2. Activation checklist
 
-1. Run the normal migration workflow and verify migration `051_external_platform_gateway.sql` is applied.
+1. Run the normal migration workflow and verify migrations `051_external_platform_gateway.sql` and
+   `052_external_platform_credentials.sql` are applied.
    Do not create or patch the `external_platform` tables by hand.
 2. Use PostgreSQL storage (`MX_INSIGHT_STORE=postgres` with `DATABASE_URL`). Memory mode is acceptable only
    for contract tests; it cannot be accepted as durable archive/lineage evidence.
-3. Put `MX_INSIGHT_JUSTONE_TOKEN` only in the public or combined data-plane process. Never put its value in
-   source catalog notes, billing JSON, logs, curl files, the Admin UI or browser storage.
-4. In a split-listener deployment, the Admin process may receive
-   `MX_INSIGHT_JUSTONE_CONFIGURED=1` as a non-secret deployment fact. It does not receive dispatch authority.
-5. Review the bounded defaults before rollout:
+3. Prefer **数据清洗中心 → 外部数据平台 → JustOne → API Key 管理** for a new or rotated key. The password
+   input is never prefilled. Ordinary Admin responses expose only safe credential metadata; reveal/copy
+   requires a second Admin Token check and the plaintext exists only in the open modal. Saving a key does
+   not bypass the independent `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1` release gate.
+4. `MX_INSIGHT_JUSTONE_TOKEN` remains an environment fallback for rolling compatibility. Put it only in the
+   public or combined data-plane process. The Admin process receives at most
+   `MX_INSIGHT_JUSTONE_CONFIGURED=1`, cannot read that environment value, and therefore cannot reveal it.
+   Re-entering the key in the UI deliberately migrates authority to the shared Hub credential store, which
+   lets split public listeners resolve rotations on the next dispatch without a restart.
+5. Treat PostgreSQL, WAL, logical dumps and restored copies as secret-bearing after UI-managed credentials
+   are enabled. The key is isolated from routinely queried analytics tables, never belongs in source catalog
+   notes, billing JSON, logs, curl files or browser storage, and is never returned by overview/detail APIs.
+6. Review the bounded defaults before rollout:
 
    | Setting | Default | Purpose |
    | --- | ---: | --- |
@@ -43,15 +52,15 @@ Normal health/smoke must not call the paid interface. A live smoke requires an e
    | `MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES` | 3 | Consecutive failure threshold. |
    | `MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS` | 60000 | Open-circuit cooldown. |
 
-6. Grant `ecommerce` only to the intended consumer and set its request/window/page policy through the
+7. Grant `ecommerce` only to the intended consumer and set its request/window/page policy through the
    existing platform administration workflow. A source-catalog entry or API key alone does not grant access.
-7. Leave `MX_INSIGHT_JUSTONE_BILLING_JSON` absent until a price book is reviewed. Current configuration
+8. Leave `MX_INSIGHT_JUSTONE_BILLING_JSON` absent until a price book is reviewed. Current configuration
    accepts only `source=manual`; price records require a three-letter currency and `pricingAsOf`. A missing
    price, balance or free quota must remain null/unknown, not zero.
-8. Start with one approved marketplace/query and one page. Verify public delivery, provider-call evidence,
+9. Start with one approved marketplace/query and one page. Verify public delivery, provider-call evidence,
    archive objects and the linked canonical ingest before widening grants or concurrency.
 
-## 3. Read-only management views
+## 3. Management views and credential operations
 
 The management page **数据清洗中心 → 外部数据平台** reads these Internal Admin endpoints:
 
@@ -63,6 +72,18 @@ GET /internal/v1/admin/external-platforms/justone?range=24h|7d|30d
 Both retain the Admin-token-only source-management boundary. A Launcher session, including a platform admin
 membership, is not sufficient. Unknown query fields fail with `400 unsupported_fields`; an unsupported range
 fails with `400 invalid_range`.
+
+The JustOne detail page also provides the only browser credential workflow:
+
+- save/rotate through `PUT /internal/v1/admin/external-platforms/justone/credential` with `apiKey` and the
+  currently displayed `expectedRevision`;
+- reveal through `POST /internal/v1/admin/external-platforms/justone/credential/reveal`, re-entering the
+  Admin Token in the request body;
+- environment-managed keys are marked configured but not revealable; enter the value again to migrate it;
+- successful save clears the input, and closing the reveal dialog clears both the reauthentication value and
+  revealed key from component state;
+- every JSON response uses `Cache-Control: no-store`; overview, detail and write responses never include the
+  key. Do not automate the reveal endpoint or store its response.
 
 ```bash
 export HUB_ADMIN_URL='http://127.0.0.1:18180'
@@ -94,6 +115,11 @@ The overview is not a billing statement. `external_platform.gateway_requests` re
   integrated;
 - `unknownCostCalls`: billed calls whose monetary cost is not known.
 
+`usage_requests` is the separate Hub-side operational meter. A `fresh_cache` request with a new
+Idempotency-Key creates a new committed Hub usage record even though provider cost does not increase; an
+`idempotent_replay` reuses the original request and creates neither. Customer monetary charging is a later,
+append-only price-book/ledger layer and must not copy `provider_calls.cost_minor` as a customer price.
+
 Success rates with no denominator are `null`. Quota, balance, reset time, cost forecast and recommendation
 may also be null/unknown. The UI must preserve that state rather than rendering `0`, `100%`, “free” or an
 estimated recharge amount.
@@ -101,41 +127,66 @@ estimated recharge amount.
 ## 4. Intentional public smoke
 
 Use a dedicated test consumer with an `ecommerce` grant, a low quota and an approved non-production query.
-Read the API key without writing it to shell history:
+Read the Hub API key without writing it to shell history. The first call below intentionally permits exactly
+one paid upstream dispatch; do not put it in readiness, CI or a retry loop:
 
 ```bash
-export HUB_PUBLIC_URL='http://127.0.0.1:18181'
+# Local Compose uses the combined listener on :18180. Internal Kubernetes uses
+# the public listener on :18150; override this value there.
+export HUB_PUBLIC_URL='http://127.0.0.1:18180'
 read -rsp 'MX Insight API Key: ' HUB_API_KEY
 printf '\n'
-SMOKE_KEY="external-smoke-$(uuidgen)"
+LIVE_KEY="external-live-$(uuidgen)"
+CACHE_KEY="external-cache-$(uuidgen)"
+REQUEST_BODY='{"marketplace":"jd","query":"approved smoke query"}'
 
-SMOKE_RESPONSE=$(curl -sS -D /tmp/mxih-external-smoke.headers -X POST \
+LIVE_RESPONSE=$(curl -sS -D /tmp/mxih-external-live.headers -X POST \
   -H "Authorization: Bearer $HUB_API_KEY" \
   -H 'Content-Type: application/json' \
-  -H "Idempotency-Key: $SMOKE_KEY" \
-  -d '{"marketplace":"jd","query":"approved smoke query"}' \
+  -H "Idempotency-Key: $LIVE_KEY" \
+  -d "$REQUEST_BODY" \
   "$HUB_PUBLIC_URL/api/v1/data/ecommerce/products/search")
 
-printf '%s\n' "$SMOKE_RESPONSE" \
+printf '%s\n' "$LIVE_RESPONSE" \
   | jq '{contractVersion, page: .data.page, freshness: .meta, requestId}'
 sed -n '/^x-mx-insight-/Ip;/^idempotent-replay:/Ip;/^age:/Ip;/^warning:/Ip' \
-  /tmp/mxih-external-smoke.headers
+  /tmp/mxih-external-live.headers
+
+# Run before MX_INSIGHT_JUSTONE_FRESH_TTL_MS expires. A new key makes this a
+# separately metered Hub request; the identical normalized body reuses Hub data.
+CACHE_RESPONSE=$(curl -sS -D /tmp/mxih-external-cache.headers -X POST \
+  -H "Authorization: Bearer $HUB_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $CACHE_KEY" \
+  -d "$REQUEST_BODY" \
+  "$HUB_PUBLIC_URL/api/v1/data/ecommerce/products/search")
+
+printf '%s\n' "$CACHE_RESPONSE" \
+  | jq '{contractVersion, page: .data.page, freshness: .meta, requestId}'
+sed -n '/^x-mx-insight-/Ip;/^idempotent-replay:/Ip;/^age:/Ip;/^warning:/Ip' \
+  /tmp/mxih-external-cache.headers
 ```
 
 Delete the temporary header file after review according to the local workstation policy. It contains no API
 key, but may contain request identifiers and timing evidence.
 
-Acceptance for the first call:
+Acceptance for the pair:
 
 - contract version is `mx-insight-hub.ecommerce-products.v1`;
 - every item has only the provider-neutral product allowlist;
 - `meta.sourceMode` and `x-mx-insight-source-mode` agree;
 - capture/serve timestamps and non-negative age are present;
 - `requestId` equals `x-mx-insight-request-id`.
+- the first response is `live`, adding one `provider_calls` row and one Hub usage request;
+- the second response is `fresh_cache`, has a different request ID but the same `capturedAt` and item payload,
+  adds a second Hub usage request, and adds no provider call or provider cost;
+- Admin metrics increase by `hubRequests=2`, `upstreamCalls=1`, `freshCache=1` and
+  `avoidedUpstreamCalls=1`; `billedCalls=1` when the provider returns its documented charged-success result.
 
-Replay the exact body with the same key once. It must return `idempotent_replay` and must not add a provider
-call. If the first page returns `nextCursor`, request that cursor with a **new** key. Never combine `page` and
-`cursor`, never expose/decode the cursor and never use a live smoke loop.
+Reusing `LIVE_KEY` with the exact body is a third, different case: it returns `idempotent_replay` and adds
+neither a new Hub usage reservation nor a provider call. If the first page returns `nextCursor`, request that
+cursor with a **new** key. Never combine `page` and `cursor`, never expose/decode the cursor and never use a
+live smoke loop.
 
 ## 5. Archive and lineage verification
 
@@ -253,7 +304,7 @@ then evaluate quota plan or recharge.
 
 | Symptom / code | Meaning | Operator action |
 | --- | --- | --- |
-| `external_platform_not_configured` | Public data plane has no usable token. | Verify secret injection on that process only. Do not restart or reconfigure Launcher/MX-H2I. |
+| `external_platform_not_configured` | Public data plane has no usable credential. | Check the JustOne page's safe credential status. For an environment fallback, verify secret injection on the public process only. Do not restart or reconfigure Launcher/MX-H2I. |
 | `external_platform_circuit_open` | Consecutive provider failures opened the circuit. | Inspect the latest bounded error and archives, wait for the cooldown, then perform one intentional probe. Do not bypass the circuit with retries. |
 | `external_platform_busy` | Hub global/per-consumer concurrency is full. | Find the dominant tenant/request pattern; reduce client concurrency or policy before raising the global ceiling. |
 | `external_platform_capacity_exceeded` | Provider rate/quota capacity rejected the dispatch. | Stop retry amplification, verify quota evidence and wait for the known reset; unknown reset stays unknown. |
@@ -265,10 +316,17 @@ then evaluate quota plan or recharge.
 
 ## 9. Safe disable and rollback
 
-To stop new JustOne calls globally, remove `MX_INSIGHT_JUSTONE_TOKEN` from the public data-plane secret and
-roll only that Hub process. In a split deployment keep the Admin process secret-free. Exact stored fallback
-may continue until `staleUntil`; afterward Public API returns unavailable. To stop one consumer, remove its
-`ecommerce` grant or set a restrictive policy through the existing authorization workflow.
+To stop one consumer immediately, remove its `ecommerce` grant or set a restrictive policy through the
+existing authorization workflow. To stop all new JustOne dispatches, set
+`MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0` and roll only the Hub public process; this disables dispatch even when
+a database-managed key exists. If the deployment still uses the environment fallback, remove
+`MX_INSIGHT_JUSTONE_TOKEN` at the same time. Exact stored fallback may continue until `staleUntil`; afterward
+Public API returns unavailable.
+
+Keep the prior release's environment secret available for the whole rollback window before migrating source
+authority to the database; an older binary cannot read migration 052's credential row. Conversely, rolling
+back application code does not delete a database-managed key. The contract-verification gate stops dispatch;
+it is not credential revocation.
 
 Do not drop `external_platform` tables, delete archives, clear usage rows or reset idempotency records during
 rollback. They are audit and cost evidence. Removing the connector must not roll back migrations or any

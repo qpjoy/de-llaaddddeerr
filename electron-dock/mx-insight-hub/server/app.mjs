@@ -1931,6 +1931,46 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/credential/reveal')
+      if (params && request.method === 'POST') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'external-platform credential reveal')
+        if (typeof externalPlatformAdmin?.revealCredential !== 'function') {
+          throw new AppError(503, 'external_platform_credential_store_unavailable', 'External platform credential storage is unavailable')
+        }
+        const body = await readJson(request, 16 * 1024)
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          throw new AppError(400, 'invalid_external_platform_credential_reveal', 'Request body must be an object')
+        }
+        const unsupported = Object.keys(body).filter((field) => field !== 'adminToken')
+        if (unsupported.length > 0) {
+          throw new AppError(400, 'invalid_external_platform_credential_reveal', `Request contains unsupported field ${unsupported[0]}`)
+        }
+        if (!adminToken || typeof body.adminToken !== 'string' || !secureEqual(body.adminToken, adminToken)) {
+          throw new AppError(403, 'admin_token_reauthentication_required', 'Re-enter the Hub admin token to reveal this credential')
+        }
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.revealCredential(params.provider),
+          requestId,
+        })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/credential')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'external-platform credential update')
+        if (typeof externalPlatformAdmin?.updateCredential !== 'function') {
+          throw new AppError(503, 'external_platform_credential_store_unavailable', 'External platform credential storage is unavailable')
+        }
+        sendJson(response, 200, {
+          data: await externalPlatformAdmin.updateCredential(
+            params.provider,
+            await readJson(request, 16 * 1024),
+          ),
+          requestId,
+        })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider')
       if (request.method === 'GET' && params) {
         requireSourceAdmin(principal)

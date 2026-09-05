@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import {
   ArrowLeft,
@@ -7,7 +7,10 @@ import {
   CheckCircle,
   CirclesThree,
   Coins,
+  Copy,
   Database,
+  Eye,
+  EyeSlash,
   FlowArrow,
   Globe,
   Key,
@@ -18,12 +21,15 @@ import {
   WarningCircle,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
+import { copyText } from './open-capabilities.js'
 import {
   DropdownField,
   EmptyState,
   ErrorState,
+  Field,
   LoadingState,
   MetricCard,
+  Modal,
   PageHeading,
   StatusBadge,
   formatDate,
@@ -42,7 +48,7 @@ import {
  *
  * GET /external-platforms/:key
  * { contractVersion, range, generatedAt, provider, pipeline, timeSeries,
- *   capabilities, tenants, endpoints, guardrails, costPlan, notes }
+ *   capabilities, tenants, endpoints, guardrails, costPlan, credential, notes }
  *
  * Rates in the v1 contract are 0..1 ratios. Currency amounts ending in
  * `Minor` are integers in that currency's minor unit; null means unknown.
@@ -171,6 +177,13 @@ function optionalNumber(...values) {
 function optionalText(...values) {
   const value = firstDefined(...values)
   return value === undefined ? null : String(value)
+}
+
+function optionalBoolean(...values) {
+  const value = firstDefined(...values)
+  if (value === true || value === 'true' || value === 1 || value === '1') return true
+  if (value === false || value === 'false' || value === 0 || value === '0') return false
+  return null
 }
 
 function ratioToPercent(...values) {
@@ -484,8 +497,39 @@ function normalizeDetail(payload, requestedKey) {
     root.protectionMechanisms,
   )
   const guardrailEvidence = keyedEvidence(guardrailSource)
+  const rawCredential = firstRecord(envelope.credential, root.credential)
   return {
     ...platform,
+    credential: {
+      source: optionalText(
+        rawCredential.source,
+        envelope.credentialSource,
+        root.credentialSource,
+      ),
+      revision: optionalNumber(
+        rawCredential.revision,
+        envelope.credentialRevision,
+        root.credentialRevision,
+      ),
+      credentialConfigured: optionalBoolean(
+        rawCredential.credentialConfigured,
+        rawCredential.keyConfigured,
+        envelope.credentialConfigured,
+        envelope.keyConfigured,
+        root.credentialConfigured,
+        root.keyConfigured,
+      ),
+      revealable: optionalBoolean(
+        rawCredential.revealable,
+        envelope.credentialRevealable,
+        root.credentialRevealable,
+      ),
+      updatedAt: optionalText(
+        rawCredential.updatedAt,
+        envelope.credentialUpdatedAt,
+        root.credentialUpdatedAt,
+      ),
+    },
     cost: normalizeCost({ ...root, billing: firstRecord(envelope.costPlan, root.billing) }),
     notes: firstRecord(envelope.notes, root.notes),
     timeline: normalizeTimeline(envelope, root),
@@ -779,6 +823,249 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
   )
 }
 
+function credentialSourceLabel(source) {
+  const labels = {
+    database: '数据库',
+    environment: '环境变量',
+    none: '未配置',
+  }
+  return labels[source] || source || UNKNOWN
+}
+
+function ExternalPlatformCredentialRevealModal({
+  token,
+  provider,
+  onClose,
+  onUnauthorized,
+  notify,
+}) {
+  const [adminToken, setAdminToken] = useState('')
+  const [revealedApiKey, setRevealedApiKey] = useState('')
+  const [revealedVisible, setRevealedVisible] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+
+  const clearAndClose = useCallback(() => {
+    setAdminToken('')
+    setRevealedApiKey('')
+    setRevealedVisible(false)
+    setError(null)
+    onClose()
+  }, [onClose])
+
+  const reveal = async (event) => {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    setRevealedApiKey('')
+    setRevealedVisible(false)
+    try {
+      const result = await adminApi.revealExternalPlatformCredential(token, provider, adminToken)
+      if (typeof result?.apiKey !== 'string' || !result.apiKey) {
+        throw new Error('管理接口未返回可显示的 API Key')
+      }
+      setRevealedApiKey(result.apiKey)
+      setAdminToken('')
+    } catch (requestError) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setError(requestError)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copyRevealedApiKey = async () => {
+    const copied = await copyText(revealedApiKey)
+    notify?.(
+      copied ? 'JustOne API Key 已复制' : '无法访问剪贴板，请手动选择复制',
+      copied ? 'success' : 'danger',
+    )
+  }
+
+  return (
+    <Modal
+      title="查看 JustOne API Key"
+      description="这是唯一会返回明文 Key 的管理操作；请重新输入 Hub Admin Token。明文只保留在此弹窗，响应禁止缓存。"
+      onClose={clearAndClose}
+      busy={busy}
+      size="small"
+      footer={<button className="qp-button qp-button--ghost" type="button" onClick={clearAndClose} disabled={busy}>关闭并清除</button>}
+    >
+      {!revealedApiKey ? (
+        <form className="mih-external-secret-modal" onSubmit={reveal}>
+          <Field label="重新输入 Admin Token" hint="Launcher Token 和普通 API Key 都不能查看平台密钥。">
+            <input
+              className="qp-input"
+              type="password"
+              autoComplete="off"
+              value={adminToken}
+              onChange={(event) => setAdminToken(event.target.value)}
+              autoFocus
+              required
+            />
+          </Field>
+          {error ? <ErrorState error={error} /> : null}
+          <button className="qp-button qp-button--primary" type="submit" disabled={busy || !adminToken}>
+            <Key size={16} aria-hidden="true" />{busy ? '正在验证' : '验证并读取'}
+          </button>
+        </form>
+      ) : (
+        <div className="mih-external-secret-modal">
+          <Field label="API Key" hint="关闭弹窗后立即从组件状态中清除；请勿截图或粘贴到日志。">
+            <span className="qp-input-group mih-external-secret-input">
+              <input
+                className="qp-input mih-mono"
+                type={revealedVisible ? 'text' : 'password'}
+                readOnly
+                value={revealedApiKey}
+                autoComplete="off"
+              />
+              <button
+                className="qp-button qp-button--ghost qp-icon-button"
+                type="button"
+                aria-label={revealedVisible ? '隐藏 JustOne API Key' : '显示 JustOne API Key'}
+                aria-pressed={revealedVisible}
+                onClick={() => setRevealedVisible((visible) => !visible)}
+              >
+                {revealedVisible ? <EyeSlash size={18} aria-hidden="true" /> : <Eye size={18} aria-hidden="true" />}
+              </button>
+            </span>
+          </Field>
+          <button className="qp-button qp-button--outline" type="button" onClick={copyRevealedApiKey}>
+            <Copy size={16} aria-hidden="true" />复制到剪贴板
+          </button>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
+function ExternalPlatformCredentialPanel({
+  token,
+  provider,
+  credential,
+  onSaved,
+  onUnauthorized,
+  notify,
+}) {
+  const [apiKey, setApiKey] = useState('')
+  const [apiKeyVisible, setApiKeyVisible] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  const [revealing, setRevealing] = useState(false)
+  const isEnvironment = credential.source === 'environment'
+  const hasEnvironmentCredential = isEnvironment && credential.credentialConfigured === true
+  const canReveal = credential.credentialConfigured === true && credential.revealable === true
+  const keyStatus = credential.credentialConfigured === true
+    ? 'active'
+    : credential.credentialConfigured === false ? 'disabled' : 'unknown'
+
+  useEffect(() => {
+    setApiKey('')
+    setApiKeyVisible(false)
+    setError(null)
+    setRevealing(false)
+  }, [provider])
+
+  const save = async (event) => {
+    event.preventDefault()
+    const submittedApiKey = apiKey.trim()
+    if (!submittedApiKey) return
+    setSaving(true)
+    setError(null)
+    try {
+      await adminApi.updateExternalPlatformCredential(token, provider, {
+        apiKey: submittedApiKey,
+        expectedRevision: Number.isInteger(credential.revision) ? credential.revision : 0,
+      })
+      setApiKey('')
+      setApiKeyVisible(false)
+      notify?.(
+        hasEnvironmentCredential ? 'JustOne API Key 已迁移到数据库来源' : 'JustOne API Key 已保存',
+        'success',
+      )
+      onSaved?.()
+    } catch (requestError) {
+      if (requestError?.status === 401) onUnauthorized?.(requestError)
+      setError(requestError)
+      notify?.(requestError?.message || 'JustOne API Key 保存失败', 'danger')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Panel
+      title="API Key 管理"
+      subtitle="密钥写入数据库来源；普通详情响应只返回配置状态，不返回明文。"
+      className="mih-external-credential-panel"
+      action={<StatusBadge status={keyStatus} label={credential.credentialConfigured === null ? '状态未知' : credential.credentialConfigured ? 'Key 已配置' : 'Key 未配置'} />}
+    >
+      <div className="mih-external-credential-layout">
+        <dl className="mih-external-facts">
+          <div><dt>当前来源</dt><dd>{credentialSourceLabel(credential.source)}</dd></div>
+          <div><dt>配置版本</dt><dd>{formatOptionalNumber(credential.revision)}</dd></div>
+          <div><dt>可安全查看</dt><dd>{credential.revealable === null ? UNKNOWN : credential.revealable ? '需二次验证' : '不可查看'}</dd></div>
+          <div><dt>最近更新</dt><dd>{displayDate(credential.updatedAt)}</dd></div>
+        </dl>
+        <form className="mih-external-credential-form" onSubmit={save}>
+          <Field
+            label={hasEnvironmentCredential ? '重输 API Key 并迁移' : credential.credentialConfigured ? '替换 API Key' : '录入 API Key'}
+            hint="输入框永不回填已有密钥；保存成功后立即清空。"
+          >
+            <span className="qp-input-group mih-external-secret-input">
+              <input
+                className="qp-input mih-mono"
+                type={apiKeyVisible ? 'text' : 'password'}
+                autoComplete="new-password"
+                maxLength="4096"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                placeholder="输入新的 JustOne API Key"
+                disabled={saving}
+                required
+              />
+              <button
+                className="qp-button qp-button--ghost qp-icon-button"
+                type="button"
+                aria-label={apiKeyVisible ? '隐藏待保存的 API Key' : '显示待保存的 API Key'}
+                aria-pressed={apiKeyVisible}
+                onClick={() => setApiKeyVisible((visible) => !visible)}
+                disabled={saving || !apiKey}
+              >
+                {apiKeyVisible ? <EyeSlash size={18} aria-hidden="true" /> : <Eye size={18} aria-hidden="true" />}
+              </button>
+            </span>
+          </Field>
+          <div className="mih-external-credential-actions">
+            <button className="qp-button qp-button--primary" type="submit" disabled={saving || !apiKey.trim()}>
+              <Key size={16} aria-hidden="true" />{saving ? '正在保存' : '保存到数据库'}
+            </button>
+            <button className="qp-button qp-button--outline" type="button" disabled={saving || !canReveal} onClick={() => setRevealing(true)}>
+              <Eye size={16} aria-hidden="true" />查看 / 复制
+            </button>
+          </div>
+          {error ? <ErrorState error={error} /> : null}
+        </form>
+      </div>
+      {hasEnvironmentCredential ? (
+        <p className="mih-external-unknown"><WarningCircle size={16} aria-hidden="true" />当前 Key 来自环境变量，Hub 不会通过管理接口读取或显示它。请重新输入并保存，以迁移到数据库来源。</p>
+      ) : (
+        <p className="mih-external-context-note"><ShieldCheck size={16} aria-hidden="true" />只有数据库来源的 Key 可在重新验证 Admin Token 后查看；列表、统计和普通详情不会返回明文。</p>
+      )}
+      {revealing ? (
+        <ExternalPlatformCredentialRevealModal
+          token={token}
+          provider={provider}
+          onUnauthorized={onUnauthorized}
+          notify={notify}
+          onClose={() => setRevealing(false)}
+        />
+      ) : null}
+    </Panel>
+  )
+}
+
 function DetailMetricRail({ detail }) {
   const quotaDisplay = detail.quota.remaining !== null && detail.quota.freeLimit !== null
     ? `${formatNumber(detail.quota.remaining)} / ${formatNumber(detail.quota.freeLimit)}`
@@ -975,7 +1262,7 @@ function DifferencePanel() {
   )
 }
 
-function PlatformDetail({ token, range, provider, setQuery, onUnauthorized }) {
+function PlatformDetail({ token, range, provider, setQuery, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.externalPlatform(token, provider, { range }), [provider, range, token])
   const remote = useRemoteData(load, onUnauthorized)
   const detail = useMemo(() => normalizeDetail(remote.data, provider), [provider, remote.data])
@@ -1004,6 +1291,14 @@ function PlatformDetail({ token, range, provider, setQuery, onUnauthorized }) {
             <StatusBadge status={detail.status} label={statusLabel(detail.status)} />
             <small>最近观测：{displayDate(detail.lastObservedAt)}</small>
           </section>
+          <ExternalPlatformCredentialPanel
+            token={token}
+            provider={provider}
+            credential={detail.credential}
+            onSaved={remote.refresh}
+            onUnauthorized={onUnauthorized}
+            notify={notify}
+          />
           <DetailMetricRail detail={detail} />
           <section className="mih-external-two-column">
             <TrendPanel detail={detail} />
@@ -1047,14 +1342,14 @@ function UnsupportedProvider({ provider, range }) {
   )
 }
 
-export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized }) {
+export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized, notify }) {
   const rawRange = query.get('range') || '24h'
   const range = VALID_RANGES.has(rawRange) ? rawRange : '24h'
   const provider = (query.get('provider') || '').trim().toLowerCase()
 
   if (provider && provider !== 'justone') return <UnsupportedProvider provider={provider} range={range} />
   if (provider === 'justone') {
-    return <PlatformDetail token={token} range={range} provider={provider} setQuery={setQuery} onUnauthorized={onUnauthorized} />
+    return <PlatformDetail token={token} range={range} provider={provider} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} />
   }
   return <PlatformsOverview token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} />
 }

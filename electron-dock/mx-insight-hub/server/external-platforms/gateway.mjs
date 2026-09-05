@@ -207,10 +207,25 @@ export class ExternalPlatformGateway {
     else this.activeByConsumer.set(consumerId, next)
   }
 
-  capabilities() {
+  async #resolvedCredential() {
+    if (!this.adapter) return { ready: false, credential: null }
+    if (typeof this.adapter.resolveCredential !== 'function') {
+      return { ready: true, credential: undefined }
+    }
+    try {
+      const credential = await this.adapter.resolveCredential()
+      return { ready: Boolean(credential), credential }
+    } catch {
+      this.logger?.warn?.('[external-platform] JustOne credential is unavailable')
+      return { ready: false, credential: null }
+    }
+  }
+
+  async capabilities() {
+    const { ready } = await this.#resolvedCredential()
     return {
       platform: AUTHORIZATION_PLATFORM,
-      ready: Boolean(this.adapter),
+      ready,
       source: 'hub',
       servingMode: 'live_with_stored_fallback',
       contractVersion: ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
@@ -376,9 +391,12 @@ export class ExternalPlatformGateway {
 
     const state = await this.platformStore.providerState('justone')
     const circuitOpen = state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now
-    if (!this.adapter || circuitOpen) {
+    const resolvedCredential = circuitOpen
+      ? { ready: Boolean(this.adapter), credential: null }
+      : await this.#resolvedCredential()
+    if (!resolvedCredential.ready || circuitOpen) {
       if (snapshot) {
-        const reason = !this.adapter ? 'provider_not_configured' : 'provider_circuit_open'
+        const reason = !resolvedCredential.ready ? 'provider_not_configured' : 'provider_circuit_open'
         const responseBody = deliveryBody(snapshot.responseBody, {
           requestId: activeRequestId,
           sourceMode: 'stored_fallback',
@@ -544,6 +562,9 @@ export class ExternalPlatformGateway {
           decodeCursor: codec.decode,
           encodeCursor: codec.encode,
           maxPageSize: policy.maxPageSize,
+          ...(resolvedCredential.credential === undefined
+            ? {}
+            : { credential: resolvedCredential.credential }),
         })
         const persistedEvidence = persistedCallEvidence(result)
         const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))

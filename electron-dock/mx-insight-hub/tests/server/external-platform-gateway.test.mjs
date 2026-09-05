@@ -179,6 +179,72 @@ test('live, fresh-cache and idempotent replay are separate delivery modes and on
   assert.equal(analytics.totals.knownCostMinor, 5)
 })
 
+test('missing dynamic credential fails closed before a provider call is recorded', async () => {
+  let resolutions = 0
+  let dispatches = 0
+  const adapter = new JustOneAdapter({
+    credentialResolver: async () => {
+      resolutions += 1
+      return null
+    },
+    fetchImpl: async () => {
+      dispatches += 1
+      return new Response('{}', { headers: { 'content-type': 'application/json' } })
+    },
+  })
+  const state = await fixture({ adapter })
+
+  assert.equal((await state.gateway.capabilities()).ready, false)
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: { marketplace: 'jd', query: 'camera' },
+      idempotencyKey: 'missing-credential-0001',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error instanceof AppError
+      && error.status === 503
+      && error.code === 'external_platform_not_configured',
+  )
+
+  assert.equal(resolutions, 2, 'capability and dispatch checks each read current credential state once')
+  assert.equal(dispatches, 0)
+  assert.equal(state.platformStore.calls.size, 0)
+  assert.equal(state.platformStore.requests.at(-1)?.sourceMode, 'unavailable')
+})
+
+test('gateway resolves one credential before recording and dispatching a provider call', async () => {
+  let resolutions = 0
+  let dispatchedToken = null
+  const adapter = new JustOneAdapter({
+    credentialResolver: async () => {
+      resolutions += 1
+      return 'database-token'
+    },
+    fetchImpl: async (url) => {
+      dispatchedToken = new URL(url).searchParams.get('token')
+      return new Response(JSON.stringify({
+        code: 0,
+        message: null,
+        data: { items: [{ skuId: 'sku-1', title: 'Product' }], hasMore: false },
+        recordTime: '2026-09-03T00:00:00Z',
+        requestId: 'request-1',
+      }), { headers: { 'content-type': 'application/json' } })
+    },
+  })
+  const state = await fixture({ adapter })
+
+  const result = await state.gateway.search(state.context, {
+    body: { marketplace: 'jd', query: 'camera' },
+    idempotencyKey: 'dynamic-credential-0001',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+
+  assert.equal(result.sourceMode, 'live')
+  assert.equal(resolutions, 1)
+  assert.equal(dispatchedToken, 'database-token')
+  assert.equal(state.platformStore.calls.size, 1)
+})
+
 test('a definite provider capacity error returns an exact stored fallback without redispatch', async () => {
   let fail = false
   let calls = 0

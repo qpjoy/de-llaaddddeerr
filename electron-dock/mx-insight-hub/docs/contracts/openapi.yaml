@@ -907,6 +907,129 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /external-platforms:
+    servers:
+      - url: /internal/v1/admin
+    get:
+      operationId: listExternalPlatforms
+      summary: Read provider-neutral external-platform operating evidence.
+      description: >-
+        Break-glass Admin Token only. Launcher sessions and public API keys are
+        rejected. The ordinary overview contains status, usage, upstream-call,
+        reliability and provider-cost evidence, but never an API key or other
+        plaintext provider credential.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalPlatformRange"
+      responses:
+        "200":
+          description: Secret-free external-platform overview.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalPlatformAdminOverviewEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /external-platforms/{provider}:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/ExternalPlatformProvider"
+    get:
+      operationId: getExternalPlatform
+      summary: Read one external platform's secret-free operating detail.
+      description: >-
+        Break-glass Admin Token only. credential reports only source, revision,
+        credentialConfigured, revealable and updatedAt. Neither this response
+        nor the overview returns the plaintext API key.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalPlatformRange"
+      responses:
+        "200":
+          description: External-platform detail with safe credential metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalPlatformAdminDetailEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /external-platforms/{provider}/credential:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/ExternalPlatformProvider"
+    put:
+      operationId: updateExternalPlatformCredential
+      summary: Replace an external platform API key in database-managed storage.
+      description: >-
+        Break-glass Admin Token only. Launcher sessions and public API keys are
+        rejected. apiKey is write-only and is never echoed by successful or
+        error responses. expectedRevision fences concurrent replacement. An
+        environment-managed key cannot be copied into the database by Hub;
+        the operator must submit the key again to migrate its source.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExternalPlatformCredentialUpdateRequest" }
+      responses:
+        "200":
+          description: Safe credential status after the database write.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalPlatformCredentialStatusEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /external-platforms/{provider}/credential/reveal:
+    servers:
+      - url: /internal/v1/admin
+    parameters:
+      - $ref: "#/components/parameters/ExternalPlatformProvider"
+    post:
+      operationId: revealExternalPlatformCredential
+      summary: Reveal one database-managed external platform API key.
+      description: >-
+        Break-glass Admin Token only, with step-up verification: the same Admin
+        Token must also be supplied in the request body. Environment-managed
+        credentials are not revealable. This is the only response that contains
+        the plaintext API key, and it is always returned with Cache-Control:
+        no-store. Callers must discard it when the reveal dialog closes.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExternalPlatformCredentialRevealRequest" }
+      responses:
+        "200":
+          description: One re-authenticated plaintext credential response.
+          headers:
+            Cache-Control:
+              description: Prevents storage of the plaintext response by browsers and intermediaries.
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExternalPlatformCredentialRevealEnvelope" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /sources:
     servers:
       - url: /internal/v1/admin
@@ -3396,6 +3519,22 @@ components:
         minLength: 1
         maxLength: 64
         pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+    ExternalPlatformProvider:
+      name: provider
+      in: path
+      required: true
+      description: Registered external-platform key; callers cannot select an upstream endpoint with it.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[a-z][a-z0-9._-]{0,63}$"
+    ExternalPlatformRange:
+      name: range
+      in: query
+      required: false
+      description: Bounded reporting window; defaults to 7d.
+      schema: { type: string, enum: [24h, 7d, 30d], default: 7d }
     SourceKey:
       name: sourceKey
       in: path
@@ -5365,6 +5504,211 @@ components:
           maxLength: 4096
           description: Optional transient override; omitted uses the source's stored locator.
         expectedSha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+    ExternalPlatformCredentialStatus:
+      type: object
+      additionalProperties: false
+      required: [source, revision, credentialConfigured, revealable, updatedAt]
+      description: >-
+        Secret-free credential metadata used by ordinary Admin responses. It
+        never contains apiKey, an environment-variable name or secret-store
+        coordinates.
+      properties:
+        source:
+          type: string
+          enum: [environment, database]
+          description: Effective credential source. Environment values are never revealable.
+        revision:
+          type: integer
+          minimum: 0
+          description: Optimistic-concurrency revision for the next database replacement.
+        credentialConfigured: { type: boolean }
+        revealable:
+          type: boolean
+          description: True only for a configured database-managed key.
+        updatedAt: { type: [string, "null"], format: date-time }
+    ExternalPlatformCredentialUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [apiKey, expectedRevision]
+      properties:
+        apiKey:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          writeOnly: true
+          description: Replacement provider API key; trimmed, stored, and never echoed.
+        expectedRevision:
+          type: integer
+          minimum: 0
+          description: Revision returned by the latest detail or update response.
+    ExternalPlatformCredentialRevealRequest:
+      type: object
+      additionalProperties: false
+      required: [adminToken]
+      properties:
+        adminToken:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: Step-up copy of the break-glass Admin Token; never stored or echoed.
+    ExternalPlatformCredentialStatusEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data: { $ref: "#/components/schemas/ExternalPlatformCredentialStatus" }
+        requestId: { type: string, minLength: 1 }
+    ExternalPlatformCredentialRevealEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [apiKey]
+          properties:
+            apiKey:
+              type: string
+              minLength: 1
+              maxLength: 4096
+              readOnly: true
+              description: Plaintext key returned only by the re-authenticated no-store reveal response.
+        requestId: { type: string, minLength: 1 }
+    ExternalPlatformAdminProvider:
+      type: object
+      additionalProperties: false
+      required:
+        - key
+        - displayName
+        - kind
+        - status
+        - configured
+        - configuration
+        - description
+        - capabilities
+        - marketplaces
+        - metrics
+        - quota
+        - billing
+        - freshness
+        - circuit
+      description: Provider operating projection; it contains no plaintext credential.
+      properties:
+        key: { type: string, pattern: "^[a-z][a-z0-9._-]{0,63}$" }
+        displayName: { type: string, minLength: 1 }
+        kind: { type: string, const: external_data_api }
+        status: { type: string }
+        configured: { type: boolean }
+        configuration:
+          type: object
+          additionalProperties: false
+          required: [contractVerified, dispatchEligible, error]
+          properties:
+            contractVerified: { type: boolean }
+            dispatchEligible: { type: boolean }
+            error:
+              type: [object, "null"]
+              additionalProperties: false
+              required: [code, message]
+              properties:
+                code: { type: string }
+                message: { type: string }
+        description: { type: string }
+        capabilities:
+          type: array
+          items: { type: string }
+        marketplaces:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [key, label]
+            properties:
+              key: { type: string }
+              label: { type: string }
+        metrics:
+          type: object
+          description: Aggregated Hub-demand and upstream-call evidence.
+          additionalProperties: true
+        quota: { type: object, additionalProperties: true }
+        billing:
+          type: object
+          description: Provider-side cost evidence, not customer billable usage.
+          additionalProperties: true
+        freshness: { type: object, additionalProperties: true }
+        circuit: { type: object, additionalProperties: true }
+    ExternalPlatformAdminOverviewEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [contractVersion, range, generatedAt, summary, providers]
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.external-platform-admin.v1 }
+            range: { type: string, enum: [24h, 7d, 30d] }
+            generatedAt: { type: string, format: date-time }
+            summary:
+              type: object
+              description: Aggregate operating evidence; never a customer billing statement.
+              additionalProperties: true
+            providers:
+              type: array
+              items: { $ref: "#/components/schemas/ExternalPlatformAdminProvider" }
+        requestId: { type: string, minLength: 1 }
+    ExternalPlatformAdminDetailEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, requestId]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required:
+            - contractVersion
+            - range
+            - generatedAt
+            - provider
+            - credential
+            - pipeline
+            - timeSeries
+            - capabilities
+            - tenants
+            - endpoints
+            - guardrails
+            - costPlan
+            - notes
+          properties:
+            contractVersion: { type: string, const: mx-insight-hub.external-platform-admin.v1 }
+            range: { type: string, enum: [24h, 7d, 30d] }
+            generatedAt: { type: string, format: date-time }
+            provider: { $ref: "#/components/schemas/ExternalPlatformAdminProvider" }
+            credential: { $ref: "#/components/schemas/ExternalPlatformCredentialStatus" }
+            pipeline:
+              type: array
+              items: { type: object, additionalProperties: true }
+            timeSeries:
+              type: array
+              items: { type: object, additionalProperties: true }
+            capabilities:
+              type: array
+              items: { type: object, additionalProperties: true }
+            tenants:
+              type: array
+              items: { type: object, additionalProperties: true }
+            endpoints:
+              type: array
+              items: { type: object, additionalProperties: true }
+            guardrails: { type: object, additionalProperties: true }
+            costPlan:
+              type: object
+              description: Provider-side cost forecast, not a customer charge ledger.
+              additionalProperties: true
+            notes: { type: object, additionalProperties: true }
+        requestId: { type: string, minLength: 1 }
     ExternalCommerceProductSearchRequest:
       type: object
       additionalProperties: false

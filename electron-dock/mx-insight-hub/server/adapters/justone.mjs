@@ -17,6 +17,14 @@ export const JUSTONE_MAX_TIMEOUT_MS = 120_000
 export const JUSTONE_DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 export const JUSTONE_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
+function normalizedCredential(value) {
+  if (value == null || value === '') return null
+  if (typeof value !== 'string' || !value.trim() || value.length > 4_096) {
+    throw new TypeError('token must be a non-empty string of at most 4096 characters')
+  }
+  return value.trim()
+}
+
 class BodyLimitError extends Error {
   constructor(bodySize = null) {
     super('response_too_large')
@@ -251,19 +259,26 @@ function succeededUnusable(httpStatus, errorCode, context) {
 }
 
 export class JustOneAdapter {
-  #token
+  #fallbackToken
+  #credentialResolver
 
   constructor({
-    token,
+    token = null,
+    credentialResolver = null,
     fetchImpl = globalThis.fetch,
     timeoutMs = JUSTONE_DEFAULT_TIMEOUT_MS,
     maxResponseBytes = JUSTONE_DEFAULT_MAX_RESPONSE_BYTES,
   } = {}) {
-    if (typeof token !== 'string' || !token.trim() || token.length > 4_096) {
-      throw new TypeError('token must be a non-empty string of at most 4096 characters')
+    const fallbackToken = normalizedCredential(token)
+    if (credentialResolver != null && typeof credentialResolver !== 'function') {
+      throw new TypeError('credentialResolver must be a function')
+    }
+    if (!fallbackToken && !credentialResolver) {
+      throw new TypeError('token or credentialResolver is required')
     }
     if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function')
-    this.#token = token.trim()
+    this.#fallbackToken = fallbackToken
+    this.#credentialResolver = credentialResolver
     this.fetchImpl = fetchImpl
     this.timeoutMs = boundedInteger(timeoutMs, {
       name: 'timeoutMs',
@@ -279,15 +294,27 @@ export class JustOneAdapter {
     })
   }
 
+  async resolveCredential() {
+    const dynamicToken = this.#credentialResolver
+      ? await this.#credentialResolver()
+      : null
+    return normalizedCredential(dynamicToken) || this.#fallbackToken
+  }
+
   async searchProducts(body, {
     decodeCursor,
     encodeCursor,
     maxPageSize,
     capturedAt = null,
+    credential: suppliedCredential,
   } = {}) {
+    const credential = suppliedCredential === undefined
+      ? await this.resolveCredential()
+      : normalizedCredential(suppliedCredential)
+    if (!credential) throw new TypeError('JustOne credential is unavailable')
     const request = normalizeJustOneProductSearchRequest(body, { decodeCursor, maxPageSize })
     const url = new URL(request.endpointPath, JUSTONE_BASE_URL)
-    url.searchParams.set('token', this.#token)
+    url.searchParams.set('token', credential)
     for (const [key, value] of Object.entries(request.upstreamQuery)) {
       url.searchParams.set(key, value)
     }
@@ -298,7 +325,7 @@ export class JustOneAdapter {
     // a later capture timestamp only after the complete body and envelope have
     // passed the acceptance checks below.
     const attemptCapturedAt = capturedAt ?? new Date()
-    const baseArchiveContext = { request, capturedAt: attemptCapturedAt, secret: this.#token }
+    const baseArchiveContext = { request, capturedAt: attemptCapturedAt, secret: credential }
     let response
     try {
       try {
@@ -434,7 +461,7 @@ export class JustOneAdapter {
           bodySize,
           contentType,
           contractState: 'accepted',
-          secret: this.#token,
+          secret: credential,
         })
       } catch (error) {
         if (error instanceof JustOneUpstreamError) throw error
@@ -451,7 +478,7 @@ export class JustOneAdapter {
       const result = {
         ...normalized,
         payload: normalized.publicBody,
-        raw: redactJustOnePrivateFields(raw, { secret: this.#token }),
+        raw: redactJustOnePrivateFields(raw, { secret: credential }),
       }
       // Gateway orchestration can inspect the normalized dispatch, while an
       // accidental JSON spread cannot expose an upstream continuation field.

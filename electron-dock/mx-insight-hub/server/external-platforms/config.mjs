@@ -157,11 +157,11 @@ export function parseJustOneConfig(environment = process.env, {
       'MX_INSIGHT_JUSTONE_STALE_TTL_MS must be greater than or equal to MX_INSIGHT_JUSTONE_FRESH_TTL_MS',
     )
   }
-  if (token && reservationLeaseMs < timeoutMs + 30_000) {
+  if (contractVerified && reservationLeaseMs < timeoutMs + 30_000) {
     throw new AppError(
       500,
       'invalid_configuration',
-      'MX_INSIGHT_RESERVATION_LEASE_MS must be at least MX_INSIGHT_JUSTONE_TIMEOUT_MS plus 30000 when a JustOne token is configured',
+      'MX_INSIGHT_RESERVATION_LEASE_MS must be at least MX_INSIGHT_JUSTONE_TIMEOUT_MS plus 30000 when the JustOne contract is verified',
     )
   }
   const configured = Boolean(token) || configuredSignal

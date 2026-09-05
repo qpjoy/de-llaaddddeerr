@@ -46,11 +46,14 @@ Never update a balance without a corresponding immutable entry. Provider quota a
 
 ## Retention and analytics
 
-Authorization headers, `x-api-key`, Admin tokens and Night-All upstream provider
-secrets are never stored. Direct PostgreSQL source passwords are the explicit
-exception: the Admin-token source plane stores them as plaintext in
-`catalog.external_sources.connection`, so Hub database and backup readers are
-credential-trusted roles. The caller's `Idempotency-Key` is intentionally stored
+Authorization headers, `x-api-key`, Admin tokens and Night-All-owned upstream
+provider secrets are never stored. Direct PostgreSQL source passwords and
+Admin-managed credentials for Hub-native external platforms are the explicit
+exceptions: the Admin-token plane stores them in credential-bearing PostgreSQL
+records, so Hub database, WAL and backup readers are credential-trusted roles.
+Those values are excluded from ordinary metadata and analytics queries; an
+external-platform reveal additionally requires Admin Token reauthentication.
+The caller's `Idempotency-Key` is intentionally stored
 as request business state. Query payload retention should be tenant-configurable
 because search terms can be sensitive. Long-term BI reads should use an
 outbox/CDC projection, not repeatedly scan the transactional request table or

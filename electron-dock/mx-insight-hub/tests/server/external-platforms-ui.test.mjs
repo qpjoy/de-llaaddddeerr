@@ -20,6 +20,7 @@ async function sources() {
 //     freshness, circuit }] }
 // detail = { contractVersion, range, generatedAt, provider,
 //   pipeline: [{ key, label, description, status }],
+//   credential: { source, revision, credentialConfigured, revealable, updatedAt },
 //   timeSeries: [{ bucket, hubRequests, successfulHubRequests, hubSuccessRate,
 //     upstreamCalls, freshCache, storedFallback, idempotentReplay, knownCostMinor }],
 //   capabilities: [{ capability, label, hubContractVersion, providerMapping,
@@ -33,6 +34,30 @@ test('external-platform admin facade uses bounded range queries and encoded prov
 
   assert.match(apiSource, /externalPlatforms: \(token, query = \{\}\) => request\([\s\S]*?`\$\{ADMIN_ROOT\}\/external-platforms`, \{ query \}/u)
   assert.match(apiSource, /externalPlatform: \(token, key, query = \{\}\) => request\([\s\S]*?`\$\{ADMIN_ROOT\}\/external-platforms\/\$\{encodeURIComponent\(key\)\}`, \{ query \}/u)
+  assert.match(apiSource, /updateExternalPlatformCredential:[\s\S]*?encodeURIComponent\(key\)[\s\S]*?\/credential`[\s\S]*?method: 'PUT'/u)
+  assert.match(apiSource, /revealExternalPlatformCredential:[\s\S]*?encodeURIComponent\(key\)[\s\S]*?\/credential\/reveal`[\s\S]*?method: 'POST'[\s\S]*?body: \{ adminToken \}/u)
+})
+
+test('JustOne credential UI keeps normal DTOs secret-free and requires step-up reveal', async () => {
+  const [appSource, , pageSource] = await sources()
+  const route = appSource.match(/\{ path: '\/external-platforms',[^\n]+\}/u)?.[0] || ''
+
+  assert.match(route, /adminTokenOnly: true/u)
+  assert.match(pageSource, /credentialConfigured/u)
+  assert.match(pageSource, /revealable/u)
+  assert.match(pageSource, /expectedRevision: Number\.isInteger\(credential\.revision\) \? credential\.revision : 0/u)
+  assert.match(pageSource, /updateExternalPlatformCredential\(token, provider, \{[\s\S]*?apiKey: submittedApiKey/u)
+  assert.match(pageSource, /revealExternalPlatformCredential\(token, provider, adminToken\)/u)
+  assert.match(pageSource, /type=\{apiKeyVisible \? 'text' : 'password'\}/u)
+  assert.match(pageSource, /autoComplete="new-password"/u)
+  assert.match(pageSource, /type=\{revealedVisible \? 'text' : 'password'\}/u)
+  assert.match(pageSource, /重新输入 Admin Token/u)
+  assert.match(pageSource, /autoComplete="off"/u)
+  assert.match(pageSource, /setRevealedApiKey\(''\)[\s\S]*?setRevealedVisible\(false\)[\s\S]*?onClose\(\)/u)
+  assert.match(pageSource, /copyText\(revealedApiKey\)/u)
+  assert.doesNotMatch(pageSource, /navigator\.clipboard/u)
+  assert.match(pageSource, /当前 Key 来自环境变量[\s\S]*?重新输入并保存[\s\S]*?迁移到数据库来源/u)
+  assert.match(pageSource, /ExternalPlatformsPage\(\{ token, query, setQuery, onUnauthorized, notify \}\)/u)
 })
 
 test('external-platform page supports JustOne detail without changing session gating', async () => {
