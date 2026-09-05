@@ -102,6 +102,143 @@ bash -c '
 ' _ "$ROOT_DIR"
 printf 'ok - absent Secret is provisioned rather than refused\n'
 
+# Optional JustOne activation state is deployment-owned, but omitting it from a
+# later deploy must not silently clear a working environment fallback or reset
+# the independent contract gate. A blank token from an older copied template is
+# also omission; clearing a retained fallback requires a separate one-shot flag.
+justone_preserve_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-justone-preserve.XXXXXX")"
+justone_preserve_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-justone-preserve-output.XXXXXX")"
+rm -f -- "$justone_preserve_marker"
+if ! JUSTONE_PRESERVE_MARKER="$justone_preserve_marker" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  unset MX_INSIGHT_JUSTONE_TOKEN MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED
+  retained_token="retained-provider-token-must-not-be-printed"
+  retained_encoded="$(encoded_secret_value "$retained_token")"
+  kubectl() {
+    case " $* " in
+      *" get secret mx-insight-hub-secrets "*"MX_INSIGHT_JUSTONE_TOKEN"*)
+        printf "%s" "$retained_encoded"
+        ;;
+      *" get configmap mx-insight-hub-config "*"MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED"*)
+        printf "1"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  preserve_existing_justone_runtime_config
+  printf "token=%s\ncontract=%s\n" \
+    "$MX_INSIGHT_JUSTONE_TOKEN" \
+    "$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED" >"$JUSTONE_PRESERVE_MARKER"
+' _ "$ROOT_DIR" >"$justone_preserve_output" 2>&1; then
+  printf 'not ok - omitted JustOne deployment values were not preserved\n' >&2
+  cat "$justone_preserve_output" >&2
+  exit 1
+fi
+assert_eq \
+  $'token=retained-provider-token-must-not-be-printed\ncontract=1' \
+  "$(cat "$justone_preserve_marker")" \
+  'omitted JustOne values inherit the retained Kubernetes state'
+if grep -Fq 'retained-provider-token-must-not-be-printed' "$justone_preserve_output"; then
+  printf 'not ok - preserving the JustOne token exposed it in deploy output\n' >&2
+  exit 1
+fi
+rm -f -- "$justone_preserve_marker" "$justone_preserve_output"
+
+justone_blank_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-justone-blank.XXXXXX")"
+rm -f -- "$justone_blank_marker"
+JUSTONE_BLANK_MARKER="$justone_blank_marker" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_JUSTONE_TOKEN=""
+  export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0
+  retained_encoded="$(encoded_secret_value "retained-token-from-older-template")"
+  kubectl() {
+    case " $* " in
+      *" get secret mx-insight-hub-secrets "*"MX_INSIGHT_JUSTONE_TOKEN"*)
+        printf "%s" "$retained_encoded"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  preserve_existing_justone_runtime_config
+  printf "token=%s\ncontract=%s\n" \
+    "$MX_INSIGHT_JUSTONE_TOKEN" \
+    "$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED" >"$JUSTONE_BLANK_MARKER"
+' _ "$ROOT_DIR"
+assert_eq \
+  $'token=retained-token-from-older-template\ncontract=0' \
+  "$(cat "$justone_blank_marker")" \
+  'legacy blank token preserves fallback while explicit gate zero disables dispatch'
+rm -f -- "$justone_blank_marker"
+
+justone_clear_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-justone-clear.XXXXXX")"
+rm -f -- "$justone_clear_marker"
+JUSTONE_CLEAR_MARKER="$justone_clear_marker" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_JUSTONE_TOKEN="file-or-shell-token"
+  export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0
+  export MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1
+  kubectl() { printf "unexpected-get\n" >>"$JUSTONE_CLEAR_MARKER"; return 1; }
+  preserve_existing_justone_runtime_config
+  printf "token=%s\ncontract=%s\n" \
+    "$MX_INSIGHT_JUSTONE_TOKEN" \
+    "$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED" >"$JUSTONE_CLEAR_MARKER"
+' _ "$ROOT_DIR"
+assert_eq \
+  $'token=\ncontract=0' \
+  "$(cat "$justone_clear_marker")" \
+  'one-shot clear flag removes the environment fallback while gate zero disables dispatch'
+rm -f -- "$justone_clear_marker"
+
+justone_lookup_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-justone-lookup-error.XXXXXX")"
+if bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  unset MX_INSIGHT_JUSTONE_TOKEN MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED
+  kubectl() { return 72; }
+  preserve_existing_justone_runtime_config
+' _ "$ROOT_DIR" >/dev/null 2>"$justone_lookup_error"; then
+  printf 'not ok - failed retained JustOne lookup was treated as an absent value\n' >&2
+  exit 1
+fi
+grep -Fq 'refusing to replace the runtime Secret' "$justone_lookup_error"
+rm -f -- "$justone_lookup_error"
+printf 'ok - failed retained JustOne lookup stops before runtime replacement\n'
+
+# Caller-provided safety overrides must beat persisted .env.internal values.
+# This also proves require_production_env does not source the file a second time.
+justone_override_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-justone-override.XXXXXX")"
+rm -f -- "$justone_override_marker"
+MX_INSIGHT_JUSTONE_TOKEN="" \
+MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0 \
+MX_INSIGHT_SYNC_LAUNCHER=0 \
+JUSTONE_OVERRIDE_MARKER="$justone_override_marker" bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  load_env_file() {
+    export MX_INSIGHT_JUSTONE_TOKEN="persisted-token"
+    export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1
+    export MX_INSIGHT_SYNC_LAUNCHER=1
+  }
+  need() { :; }
+  render_file() {
+    if [ ! -s "$JUSTONE_OVERRIDE_MARKER" ]; then
+      printf "token=%s\ncontract=%s\nsync=%s\n" \
+        "$MX_INSIGHT_JUSTONE_TOKEN" \
+        "$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED" \
+        "$MX_INSIGHT_SYNC_LAUNCHER" >"$JUSTONE_OVERRIDE_MARKER"
+    fi
+  }
+  ops_action internal-production plan
+' _ "$ROOT_DIR"
+assert_eq \
+  $'token=\ncontract=0\nsync=0' \
+  "$(cat "$justone_override_marker")" \
+  'one-shot command environment overrides persisted JustOne and Launcher values'
+rm -f -- "$justone_override_marker"
+
 # API keys enter a fixed 30-day overlap window. The deploy must inspect the
 # effective status and expiry rather than trusting the persisted raw status.
 rotation_secret='mih_live_rotation_example_1234'
@@ -482,7 +619,7 @@ assert_eq \
 bash -c '
   set -euo pipefail
   source "$1/scripts/manage.sh"
-  load_env_file() { :; }
+  load_env_file() { return 91; }
   export MX_INSIGHT_ADMIN_TOKEN=admin-token-with-at-least-32-bytes
   export MX_INSIGHT_API_KEY_PEPPER=api-key-pepper-with-at-least-32-bytes
   export NIGHT_ALL_BASE_URL=http://127.0.0.1:13141
@@ -604,13 +741,15 @@ printf 'ok - Hub namespace is always admitted by the mx-common client policy\n'
 apply_k8s_body="$(sed -n '/^apply_k8s() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
 runtime_config_body="$(sed -n '/^create_runtime_config() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
 namespace_line="$(grep -n '00-namespace.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
+justone_preserve_line="$(grep -n 'preserve_existing_justone_runtime_config' <<<"$apply_k8s_body" | cut -d: -f1)"
 discovery_line="$(grep -n 'discover_hanlp_url' <<<"$apply_k8s_body" | cut -d: -f1)"
 config_line="$(grep -n 'create_runtime_config' <<<"$apply_k8s_body" | cut -d: -f1)"
 first_workload_change_line="$(grep -nE 'rollout restart|scale deployment' <<<"$apply_k8s_body" | head -1 | cut -d: -f1)"
-if ! [ "$namespace_line" -lt "$discovery_line" ] \
+if ! [ "$namespace_line" -lt "$justone_preserve_line" ] \
+  || ! [ "$justone_preserve_line" -lt "$discovery_line" ] \
   || ! [ "$discovery_line" -lt "$config_line" ] \
   || ! [ "$config_line" -lt "$first_workload_change_line" ]; then
-  printf 'not ok - HanLP discovery is not ordered before runtime ConfigMap creation\n' >&2
+  printf 'not ok - retained optional state and HanLP discovery are not ordered before runtime ConfigMap creation\n' >&2
   exit 1
 fi
 grep -q -- '--from-literal=MX_COMMON_HANLP_URL=' <<<"$runtime_config_body"
@@ -1158,7 +1297,7 @@ bash -c '
   }
   systemctl() { printf "%s" "/etc/systemd/system/docker.service.d/proxy.conf"; }
   kubectl() {
-    local target="" argument
+    local target="" argument snapshot_file
     case " $* " in
       *" create configmap mx-insight-hub-config "*) target="$DAEMON_PROXY_CONFIGMAP_MARKER" ;;
       *" create secret generic mx-insight-hub-secrets "*) target="$DAEMON_PROXY_SECRET_MARKER" ;;
@@ -1166,8 +1305,9 @@ bash -c '
     if [ -n "$target" ]; then
       for argument in "$@"; do
         case "$argument" in
-          --from-literal=MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT=*)
-            printf "%s" "${argument#--from-literal=MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT=}" >"$target"
+          --from-file=MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT=*)
+            snapshot_file="${argument#--from-file=MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT=}"
+            cat "$snapshot_file" >"$target"
             ;;
         esac
       done
@@ -1374,10 +1514,176 @@ if ! CLEAN_PREFLIGHT_MARKER="$clean_preflight_marker" bash -c '
   rm -f -- "$clean_preflight_marker"
   exit 1
 fi
-assert_eq $'configmap\nsecret' "$(cat "$clean_preflight_marker")" \
+assert_eq $'secret\nconfigmap' "$(cat "$clean_preflight_marker")" \
   'JustOne deploy preflight works without host node_modules'
 rm -rf -- "$clean_preflight_root"
 rm -f -- "$clean_preflight_marker"
+
+# Runtime Secret values must be read from protected files rather than exposed in
+# kubectl argv. The Secret must also be accepted before an enabled ConfigMap is
+# published, so a partial activation cannot leave a new paid gate without its
+# matching credential generation.
+runtime_secret_value="justone-runtime-secret-must-not-enter-argv"
+runtime_secret_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-runtime-secret-value.XXXXXX")"
+runtime_secret_argv="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-runtime-secret-argv.XXXXXX")"
+runtime_secret_paths="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-runtime-secret-paths.XXXXXX")"
+runtime_config_order="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-runtime-config-order.XXXXXX")"
+rm -f -- "$runtime_secret_marker"
+RUNTIME_SECRET_MARKER="$runtime_secret_marker" \
+RUNTIME_SECRET_ARGV="$runtime_secret_argv" \
+RUNTIME_SECRET_PATHS="$runtime_secret_paths" \
+RUNTIME_CONFIG_ORDER="$runtime_config_order" \
+MX_INSIGHT_JUSTONE_TOKEN="$runtime_secret_value" \
+MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+  export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+  export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+  export NIGHT_ALL_BASE_URL="http://night-all.internal"
+  export MX_INSIGHT_SEARCH_READY=1
+  docker_daemon_proxy_snapshot() { printf "%s" "{}"; }
+  kubectl() {
+    local argument path
+    case " $* " in
+      *" create secret generic mx-insight-hub-secrets "*)
+        printf "secret\n" >>"$RUNTIME_CONFIG_ORDER"
+        printf "%s\n" "$@" >>"$RUNTIME_SECRET_ARGV"
+        for argument in "$@"; do
+          case "$argument" in
+            --from-file=MX_INSIGHT_JUSTONE_TOKEN=*)
+              path="${argument#--from-file=MX_INSIGHT_JUSTONE_TOKEN=}"
+              printf "%s\n" "$path" >>"$RUNTIME_SECRET_PATHS"
+              cat "$path" >"$RUNTIME_SECRET_MARKER"
+              ;;
+            --from-literal=MX_INSIGHT_JUSTONE_TOKEN=*)
+              printf "%s" "${argument#--from-literal=MX_INSIGHT_JUSTONE_TOKEN=}" >"$RUNTIME_SECRET_MARKER"
+              ;;
+          esac
+        done
+        printf "apiVersion: v1\nkind: Secret\n"
+        ;;
+      *" create configmap mx-insight-hub-config "*)
+        printf "config\n" >>"$RUNTIME_CONFIG_ORDER"
+        printf "apiVersion: v1\nkind: ConfigMap\n"
+        ;;
+      *" apply -f - "*) while IFS= read -r _line; do :; done ;;
+      *) return 1 ;;
+    esac
+  }
+  create_runtime_config
+' _ "$ROOT_DIR" >/dev/null
+assert_eq "$runtime_secret_value" "$(cat "$runtime_secret_marker")" \
+  'protected runtime Secret file preserves the JustOne token exactly'
+assert_eq $'secret\nconfig' "$(cat "$runtime_config_order")" \
+  'runtime Secret is accepted before an enabled JustOne ConfigMap'
+if grep -Fq "$runtime_secret_value" "$runtime_secret_argv"; then
+  printf 'not ok - runtime Secret value entered kubectl argv\n' >&2
+  exit 1
+fi
+while IFS= read -r runtime_secret_path; do
+  if [ -e "$runtime_secret_path" ]; then
+    printf 'not ok - protected runtime Secret file survived kubectl apply\n' >&2
+    exit 1
+  fi
+done <"$runtime_secret_paths"
+rm -f -- \
+  "$runtime_secret_marker" "$runtime_secret_argv" \
+  "$runtime_secret_paths" "$runtime_config_order"
+
+failed_secret_config_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-failed-secret-config.XXXXXX")"
+failed_secret_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-failed-secret-error.XXXXXX")"
+rm -f -- "$failed_secret_config_marker"
+if FAILED_SECRET_CONFIG_MARKER="$failed_secret_config_marker" \
+  MX_INSIGHT_JUSTONE_TOKEN="new-provider-token" \
+  MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
+  bash -c '
+    set -euo pipefail
+    source "$1/scripts/manage.sh"
+    export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+    export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+    export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+    export NIGHT_ALL_BASE_URL="http://night-all.internal"
+    export MX_INSIGHT_SEARCH_READY=1
+    docker_daemon_proxy_snapshot() { printf "%s" "{}"; }
+    kubectl() {
+      case " $* " in
+        *" create secret generic mx-insight-hub-secrets "*)
+          printf "apiVersion: v1\nkind: Secret\n"
+          ;;
+        *" create configmap mx-insight-hub-config "*)
+          : >"$FAILED_SECRET_CONFIG_MARKER"
+          printf "apiVersion: v1\nkind: ConfigMap\n"
+          ;;
+        *" apply -f - ") while IFS= read -r _line; do :; done; return 73 ;;
+        *) return 1 ;;
+      esac
+    }
+    create_runtime_config
+  ' _ "$ROOT_DIR" >/dev/null 2>"$failed_secret_error"; then
+  printf 'not ok - failed runtime Secret apply was accepted\n' >&2
+  exit 1
+fi
+if [ -e "$failed_secret_config_marker" ]; then
+  printf 'not ok - enabled JustOne ConfigMap was published after Secret apply failed\n' >&2
+  exit 1
+fi
+rm -f -- "$failed_secret_config_marker" "$failed_secret_error"
+printf 'ok - failed runtime Secret apply cannot publish an enabled JustOne ConfigMap\n'
+
+# Shell-side configured evidence must agree with the runtime parser, which
+# trims an all-whitespace token to null.
+whitespace_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-whitespace-token.XXXXXX")"
+rm -f -- "$whitespace_marker"
+WHITESPACE_MARKER="$whitespace_marker" \
+MX_INSIGHT_JUSTONE_TOKEN=$' \t ' \
+MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+  export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+  export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+  export NIGHT_ALL_BASE_URL="http://night-all.internal"
+  export MX_INSIGHT_SEARCH_READY=1
+  docker_daemon_proxy_snapshot() { printf "%s" "{}"; }
+  kubectl() {
+    local argument path
+    case " $* " in
+      *" create secret generic mx-insight-hub-secrets "*)
+        for argument in "$@"; do
+          case "$argument" in
+            --from-file=MX_INSIGHT_JUSTONE_TOKEN=*)
+              path="${argument#--from-file=MX_INSIGHT_JUSTONE_TOKEN=}"
+              printf "token=%s\n" "$(cat "$path")" >>"$WHITESPACE_MARKER"
+              ;;
+            --from-literal=MX_INSIGHT_JUSTONE_TOKEN=*)
+              printf "token=%s\n" "${argument#--from-literal=MX_INSIGHT_JUSTONE_TOKEN=}" >>"$WHITESPACE_MARKER"
+              ;;
+          esac
+        done
+        printf "apiVersion: v1\nkind: Secret\n"
+        ;;
+      *" create configmap mx-insight-hub-config "*)
+        for argument in "$@"; do
+          case "$argument" in
+            --from-literal=MX_INSIGHT_JUSTONE_CONFIGURED=*)
+              printf "configured=%s\n" "${argument#--from-literal=MX_INSIGHT_JUSTONE_CONFIGURED=}" >>"$WHITESPACE_MARKER"
+              ;;
+          esac
+        done
+        printf "apiVersion: v1\nkind: ConfigMap\n"
+        ;;
+      *" apply -f - "*) while IFS= read -r _line; do :; done ;;
+      *) return 1 ;;
+    esac
+  }
+  create_runtime_config
+' _ "$ROOT_DIR" >/dev/null
+assert_eq $'token=\nconfigured=0' "$(cat "$whitespace_marker")" \
+  'all-whitespace JustOne token is normalized to an unconfigured empty fallback'
+rm -f -- "$whitespace_marker"
 
 # A bad optional paid-provider value must be rejected by deploy preflight
 # before either the ConfigMap or Secret is mutated. Runtime load remains
@@ -1470,10 +1776,13 @@ if ! TG_MARKER="$tg_marker" bash -c '
   export MX_INSIGHT_SEARCH_READY=1
   export MX_INSIGHT_TG_MONITOR_DATABASE_URL="postgres://tg-reader:tg-reader-password@tg-db/night_all"
   kubectl() {
-    local argument
+    local argument secret_file
     for argument in "$@"; do
       case "$argument" in
-        --from-literal=MX_INSIGHT_TG_MONITOR_DATABASE_URL=*) : >"$TG_MARKER" ;;
+        --from-file=MX_INSIGHT_TG_MONITOR_DATABASE_URL=*)
+          secret_file="${argument#--from-file=MX_INSIGHT_TG_MONITOR_DATABASE_URL=}"
+          [ -s "$secret_file" ] && : >"$TG_MARKER"
+          ;;
       esac
     done
     case " $* " in

@@ -43,6 +43,13 @@ MX_INSIGHT_API_KEY_PEPPER=<long-random-pepper>
 NIGHT_ALL_BASE_URL=http://192.168.1.2:13141
 NIGHT_ALL_SERVICE_TOKEN=<night-all-workload-token-when-supported>
 
+# JustOne is optional and remains fail-closed on a first deployment. Prefer
+# entering its API key in 数据清洗中心 → 外部数据平台 → JustOne → API Key 管理.
+# Set this release gate to 1 only after the pinned adapter contract is reviewed.
+MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0
+# Environment fallback only; normally omit/leave blank when database-managed.
+# MX_INSIGHT_JUSTONE_TOKEN=<justone-api-key>
+
 # Optional: mx-common otherwise generates and retains the Hub database password.
 MX_INSIGHT_POSTGRES_PASSWORD=<explicit-url-safe-password-if-pinning-is-required>
 
@@ -67,6 +74,19 @@ available only to the Admin Token; Launcher login sessions and public API keys
 cannot create, inspect, test or change source connections. Pull sessions are
 still forced read-only. The optional legacy Telegram DSN remains a Secret for
 old `dsnEnv` source records only.
+
+The UI-managed JustOne key lives in the shared Hub database and survives an
+ordinary deployment. The runtime Secret and ConfigMap are reconciled each time:
+when `MX_INSIGHT_JUSTONE_TOKEN` is omitted or blank, or when
+`MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED` is omitted, the deploy preserves its
+existing Kubernetes value. An explicit gate value of `0` disables new upstream
+dispatches. Clearing an environment fallback is destructive and requires the
+one-shot command prefix `MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1`; never persist
+that flag in `.env.internal`. A first deployment with neither value remains
+disabled. Updating a database-managed key takes effect on the next dispatch;
+changing the gate requires the normal Public workload rollout performed by the
+deploy command. Explicit command-environment values take precedence over
+`.env.internal`, including emergency gate `0`.
 
 The explicit Telegram **prepare source** action is the only external-DDL
 exception. It runs in the Admin workload (which has the Internal host-network
@@ -105,9 +125,11 @@ manifest to another node. Public, projector and ingest workloads receive
 neither the mount nor the supplemental group.
 
 The command is idempotent after an interrupted deployment. A migration Job is
-recreated; data and credentials remain in `mx-common`. The Hub deploy neither
-recreates nor deletes shared PVCs. Tagged containerd runtime/release images,
-Hub Secrets and shared data-plane assets are retained for runtime or rollback.
+recreated; data and database-managed credentials remain in `mx-common`. The Hub
+deploy neither recreates nor deletes shared PVCs. Runtime ConfigMap/Secret
+objects are reconciled, while omitted optional JustOne values inherit their
+existing Kubernetes values as described above. Tagged containerd runtime/release
+images and shared data-plane assets are retained for runtime or rollback.
 If shared search was unhealthy during deployment, the projector is deliberately
 scaled to zero even though API/Admin Pods can later discover the recovered
 Service. After a successful Admin reindex, verify or restore the projector

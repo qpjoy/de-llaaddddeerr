@@ -553,6 +553,12 @@ consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 
 | 502 | `external_platform_response_unusable`, `external_platform_outcome_unknown`, `external_platform_rejected` | 保存 requestId；前两种可能已经产生外部调用，禁止自动换 key。 |
 | 503 | `external_platform_unavailable`, `external_platform_not_configured`, `external_platform_circuit_open`, `external_platform_capacity_unavailable` | 若没有 exact fallback，按运维窗口退避。 |
 
+`external_platform_not_configured` intentionally does not expose whether a
+provider release gate, credential source or internal credential store is the
+cause. A client must keep the original request/key evidence and must not switch
+`Idempotency-Key` to probe or retry. Operators distinguish those causes through
+the Admin-only external-platform runbook without calling the paid interface.
+
 公开响应不返回计费、余额或免费额度；未知费用不会冒充为 0。
 
 ## 4. 搜索 API

@@ -372,7 +372,9 @@ search_action() {
 }
 
 require_production_env() {
-  load_env_file "${ROOT_DIR}/.env.internal"
+  # ops_action loads .env.internal once, after preserving any explicit command
+  # environment overrides. Do not source it again here or a one-shot emergency
+  # gate/token decision can be silently reverted to the persisted value.
   : "${MX_INSIGHT_ADMIN_TOKEN:?MX_INSIGHT_ADMIN_TOKEN is required in .env.internal or the environment}"
   : "${MX_INSIGHT_API_KEY_PEPPER:?MX_INSIGHT_API_KEY_PEPPER is required in .env.internal or the environment}"
   # MX_INSIGHT_POSTGRES_PASSWORD is optional: the database now lives in the
@@ -418,6 +420,44 @@ render_file() {
 encoded_secret_value() {
   printf '%s' "$1" | base64 | tr -d '\r\n'
 }
+
+# Feed Secret values to kubectl through mode-0600 files. Passing plaintext via
+# --from-literal places it in the process argument list, where another local
+# user may observe it while kubectl is running.
+apply_secret_from_protected_files() (
+  local namespace="$1"
+  local secret_name="$2"
+  shift 2
+  [ $(( $# % 2 )) -eq 0 ] \
+    || die "protected Secret input must contain key/value pairs"
+
+  local secret_dir key value secret_file
+  local -a file_args=()
+  umask 077
+  secret_dir="$(mktemp -d "${TMPDIR:-/tmp}/mx-insight-hub-secret.XXXXXX")" \
+    || die "could not create protected Secret staging directory"
+  trap 'rm -rf -- "$secret_dir"' EXIT
+  trap 'exit 1' HUP INT TERM
+
+  while [ "$#" -gt 0 ]; do
+    key="$1"
+    value="$2"
+    shift 2
+    case "$key" in
+      ''|*[!A-Za-z0-9._-]*) die "invalid Kubernetes Secret key" ;;
+    esac
+    secret_file="${secret_dir}/${key}"
+    printf '%s' "$value" >"$secret_file" \
+      || die "could not stage protected Kubernetes Secret value"
+    chmod 600 "$secret_file" \
+      || die "could not protect Kubernetes Secret staging file"
+    file_args+=("--from-file=${key}=${secret_file}")
+  done
+
+  kubectl -n "$namespace" create secret generic "$secret_name" \
+    "${file_args[@]}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+)
 
 # Snapshot the effective Docker daemon proxy without sourcing its systemd
 # drop-ins or mutating/restarting the daemon. Agent workloads consume this
@@ -510,6 +550,64 @@ validate_existing_runtime_secret() {
     "$MX_INSIGHT_API_KEY_PEPPER" \
     "API-key pepper differs from the retained deployment; automatic rotation is blocked because existing API keys would stop validating. Restore the original .env.internal value or use an explicit key-rotation procedure."
 
+}
+
+# Keep optional paid-connector state stable across ordinary deployments. The
+# runtime Secret and ConfigMap are reconciled from scratch below, so treating an
+# omitted value as an empty/default value would silently clear a working
+# environment fallback and close the independently reviewed dispatch gate.
+# Explicit values still win: CLEAR_JUSTONE_ENV_TOKEN=1 clears the fallback and
+# CONTRACT_VERIFIED=0 disables new upstream dispatches.
+preserve_existing_justone_runtime_config() {
+  local namespace="mx-insight-hub"
+  local existing=""
+  local clear_token="${MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN:-0}"
+
+  case "$clear_token" in
+    0|1) ;;
+    *) die "MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN must be 0 or 1" ;;
+  esac
+
+  if [ "$clear_token" = "1" ]; then
+    MX_INSIGHT_JUSTONE_TOKEN=""
+    export MX_INSIGHT_JUSTONE_TOKEN
+    say "clearing the retained JustOne environment fallback (one-shot request)"
+  elif [ -z "${MX_INSIGHT_JUSTONE_TOKEN:-}" ] \
+    || [[ ! "$MX_INSIGHT_JUSTONE_TOKEN" =~ [^[:space:]] ]]; then
+    if ! existing="$(
+      kubectl -n "$namespace" get secret mx-insight-hub-secrets \
+        --ignore-not-found \
+        -o "jsonpath={.data['MX_INSIGHT_JUSTONE_TOKEN']}" 2>/dev/null
+    )"; then
+      die "could not inspect the retained JustOne environment fallback; refusing to replace the runtime Secret"
+    fi
+    if [ -n "$existing" ]; then
+      need base64
+      MX_INSIGHT_JUSTONE_TOKEN="$(printf '%s' "$existing" | base64 -d)" \
+        || die "could not decode the retained JustOne environment fallback"
+      export MX_INSIGHT_JUSTONE_TOKEN
+      say "preserving the retained JustOne environment fallback (value hidden)"
+    fi
+  fi
+
+  if [ "${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED+x}" != x ]; then
+    if ! existing="$(
+      kubectl -n "$namespace" get configmap mx-insight-hub-config \
+        --ignore-not-found \
+        -o "jsonpath={.data['MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED']}" 2>/dev/null
+    )"; then
+      die "could not inspect the retained JustOne contract gate; refusing to replace the runtime ConfigMap"
+    fi
+    if [ -n "$existing" ]; then
+      case "$existing" in
+        0|1) ;;
+        *) die "retained MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED must be 0 or 1" ;;
+      esac
+      MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="$existing"
+      export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED
+      say "preserving retained JustOne contract gate: ${existing}"
+    fi
+  fi
 }
 
 # Locate the Launcher User Center in the cluster.
@@ -743,14 +841,21 @@ create_runtime_config() {
   local namespace="mx-insight-hub"
   need node
   local database_url="${MX_INSIGHT_DATABASE_URL:?ensure_shared_data_plane must run before create_runtime_config}"
+  local justone_token="${MX_INSIGHT_JUSTONE_TOKEN:-}"
+  if [[ ! "$justone_token" =~ [^[:space:]] ]]; then
+    justone_token=""
+  fi
   local justone_configured=0
-  if [ -n "${MX_INSIGHT_JUSTONE_TOKEN:-}" ]; then
+  if [ -n "$justone_token" ]; then
     justone_configured=1
   fi
+  local justone_contract_verified="${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED:-0}"
   local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-150000}"
   local justone_preflight_error=""
   if ! justone_preflight_error="$(
     MX_INSIGHT_JUSTONE_CONFIGURED="$justone_configured" \
+    MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="$justone_contract_verified" \
+    MX_INSIGHT_JUSTONE_TOKEN="$justone_token" \
     MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
     node --input-type=module -e '
       try {
@@ -764,19 +869,26 @@ create_runtime_config() {
   )"; then
     die "JustOne preflight failed: ${justone_preflight_error}"
   fi
+  if [ "$justone_contract_verified" != "1" ]; then
+    say "JustOne upstream dispatch is disabled by the contract gate; stored Hub data remains available."
+  elif [ "$justone_configured" = "1" ]; then
+    say "JustOne contract gate is enabled; environment fallback is present (value hidden)."
+  else
+    say "JustOne contract gate is enabled; public dispatch requires the Admin-UI database credential."
+  fi
   local docker_proxy_snapshot
   docker_proxy_snapshot="$(docker_daemon_proxy_snapshot)"
-  local -a secret_args=(
-    --from-literal=DATABASE_URL="$database_url"
-    --from-literal=MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN"
-    --from-literal=MX_INSIGHT_API_KEY_PEPPER="$MX_INSIGHT_API_KEY_PEPPER"
-    --from-literal=NIGHT_ALL_SERVICE_TOKEN="${NIGHT_ALL_SERVICE_TOKEN:-}"
-    --from-literal=NIGHT_ALL_EXPORT_TOKEN="${NIGHT_ALL_EXPORT_TOKEN:-}"
-    --from-literal=MX_INSIGHT_JUSTONE_TOKEN="${MX_INSIGHT_JUSTONE_TOKEN:-}"
-    --from-literal=MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT="$docker_proxy_snapshot"
+  local -a secret_values=(
+    DATABASE_URL "$database_url"
+    MX_INSIGHT_ADMIN_TOKEN "$MX_INSIGHT_ADMIN_TOKEN"
+    MX_INSIGHT_API_KEY_PEPPER "$MX_INSIGHT_API_KEY_PEPPER"
+    NIGHT_ALL_SERVICE_TOKEN "${NIGHT_ALL_SERVICE_TOKEN:-}"
+    NIGHT_ALL_EXPORT_TOKEN "${NIGHT_ALL_EXPORT_TOKEN:-}"
+    MX_INSIGHT_JUSTONE_TOKEN "$justone_token"
+    MX_INSIGHT_AGENT_DOCKER_PROXY_SNAPSHOT "$docker_proxy_snapshot"
   )
   if [ -n "${MX_INSIGHT_TG_MONITOR_DATABASE_URL:-}" ]; then
-    secret_args+=(--from-literal=MX_INSIGHT_TG_MONITOR_DATABASE_URL="$MX_INSIGHT_TG_MONITOR_DATABASE_URL")
+    secret_values+=(MX_INSIGHT_TG_MONITOR_DATABASE_URL "$MX_INSIGHT_TG_MONITOR_DATABASE_URL")
   fi
 
   # Shared data-plane endpoints. An explicit URL remains authoritative. When a
@@ -821,6 +933,12 @@ create_runtime_config() {
     elasticsearch_url=""
   fi
 
+  # Accept the matching Secret generation before publishing a newly enabled
+  # paid-provider gate. If Secret creation fails, the existing ConfigMap stays
+  # untouched and a disabled deployment cannot become dispatch-capable later.
+  apply_secret_from_protected_files \
+    "$namespace" mx-insight-hub-secrets "${secret_values[@]}"
+
   kubectl -n "$namespace" create configmap mx-insight-hub-config \
     --from-literal=MX_INSIGHT_HOST=0.0.0.0 \
     --from-literal=MX_INSIGHT_STORE=postgres \
@@ -829,7 +947,7 @@ create_runtime_config() {
     --from-literal=NIGHT_ALL_READY_MODE="${NIGHT_ALL_READY_MODE:-ready_only}" \
     --from-literal=MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
     --from-literal=MX_INSIGHT_JUSTONE_CONFIGURED="$justone_configured" \
-    --from-literal=MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED:-0}" \
+    --from-literal=MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="$justone_contract_verified" \
     --from-literal=MX_INSIGHT_JUSTONE_TIMEOUT_MS="${MX_INSIGHT_JUSTONE_TIMEOUT_MS:-120000}" \
     --from-literal=MX_INSIGHT_JUSTONE_FRESH_TTL_MS="${MX_INSIGHT_JUSTONE_FRESH_TTL_MS:-60000}" \
     --from-literal=MX_INSIGHT_JUSTONE_STALE_TTL_MS="${MX_INSIGHT_JUSTONE_STALE_TTL_MS:-604800000}" \
@@ -858,10 +976,6 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_AGENT_PROVIDERS="${MX_INSIGHT_AGENT_PROVIDERS:-}" \
     --from-literal=MX_INSIGHT_EMBEDDING_PROVIDERS="${MX_INSIGHT_EMBEDDING_PROVIDERS:-}" \
     --from-literal=MX_INSIGHT_AGENT_AUTO_MIGRATE="${MX_INSIGHT_AGENT_AUTO_MIGRATE:-1}" \
-    --dry-run=client -o yaml | kubectl apply -f -
-
-  kubectl -n "$namespace" create secret generic mx-insight-hub-secrets \
-    "${secret_args[@]}" \
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
@@ -1219,6 +1333,7 @@ apply_k8s() {
   kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
   kubectl apply -f "${K8S_DIR}/05-serviceaccount.yaml"
   validate_existing_runtime_secret
+  preserve_existing_justone_runtime_config
   discover_hanlp_url
   create_runtime_config
   create_model_key_secret
@@ -1677,11 +1792,29 @@ ops_action() {
   local action="${2:-}"
   local sync_launcher_override_set=0
   local sync_launcher_override=""
+  local justone_token_override_set=0
+  local justone_token_override=""
+  local justone_contract_override_set=0
+  local justone_contract_override=""
+  local justone_clear_override_set=0
+  local justone_clear_override=""
   [ "$environment" = internal-production ] || die "Only ops internal-production is supported"
   need kubectl
   if [ "${MX_INSIGHT_SYNC_LAUNCHER+x}" = x ]; then
     sync_launcher_override_set=1
     sync_launcher_override="$MX_INSIGHT_SYNC_LAUNCHER"
+  fi
+  if [ "${MX_INSIGHT_JUSTONE_TOKEN+x}" = x ]; then
+    justone_token_override_set=1
+    justone_token_override="$MX_INSIGHT_JUSTONE_TOKEN"
+  fi
+  if [ "${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED+x}" = x ]; then
+    justone_contract_override_set=1
+    justone_contract_override="$MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED"
+  fi
+  if [ "${MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN+x}" = x ]; then
+    justone_clear_override_set=1
+    justone_clear_override="$MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN"
   fi
   load_env_file "${ROOT_DIR}/.env.internal"
   # A one-shot safety choice on the command line must beat the persisted env
@@ -1690,6 +1823,22 @@ ops_action() {
   if [ "$sync_launcher_override_set" = 1 ]; then
     MX_INSIGHT_SYNC_LAUNCHER="$sync_launcher_override"
     export MX_INSIGHT_SYNC_LAUNCHER
+  fi
+  if [ "$justone_token_override_set" = 1 ]; then
+    MX_INSIGHT_JUSTONE_TOKEN="$justone_token_override"
+    export MX_INSIGHT_JUSTONE_TOKEN
+  fi
+  if [ "$justone_contract_override_set" = 1 ]; then
+    MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="$justone_contract_override"
+    export MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED
+  fi
+  # Clearing a retained paid-provider secret is intentionally one-shot. Ignore
+  # a persisted copy of this flag; it must be present in the command environment.
+  if [ "$justone_clear_override_set" = 1 ]; then
+    MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN="$justone_clear_override"
+    export MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN
+  else
+    unset MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN
   fi
   case "$action" in
     plan)

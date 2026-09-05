@@ -2,9 +2,9 @@
 
 ## Source role
 
-Night-All remains the first-party aggregation and intelligence source on the internal server. It calls TikHub, JustOne, RapidAPI, public feeds and crawlers; normalizes platform records; records source evidence; and owns upstream credentials and provider quotas.
+Night-All remains the first-party aggregation and intelligence source on the internal server. It calls TikHub, legacy JustOne routes, RapidAPI, public feeds and crawlers; normalizes platform records; records source evidence; and owns the credentials and quotas for those routes. The versioned JustOne ecommerce product-search capability is implemented as a separate, release-gated Hub-native connector governed by [ADR-0013](../adr/0013-external-data-platform-gateway.md).
 
-MX Insight Hub does not duplicate or fork this logic. Its adapter calls a versioned private Night-All capability contract and converts it into a stable consumer contract.
+MX Insight Hub does not duplicate Night-All's remaining provider orchestration. Its Night-All adapter calls a versioned private capability contract, while its JustOne adapter owns only the pinned ecommerce product-search endpoints behind the same provider-neutral Hub boundary.
 
 For Internal production, keep the host Night-All as the only writer and call it through a workload-authenticated host facade/private Service. A second full Docker Night-All is for isolated local snapshot testing, not a production read shortcut and never shares production PG/Redis or scheduler ownership.
 
@@ -212,13 +212,13 @@ proxied by Hub. The target is to extend the upstream data contract with
 `post_detail`, `post_comments` and `profile` capabilities so they inherit catalog
 readiness, opaque cursors and stable fields.
 
-Night-All remains the connector while it owns upstream routing and paid-token
-business policy. Direct TikHub/JustOne connectors may later replace it per
-platform + operation behind the same Hub boundary: shadow against bounded approved
-calls/fixtures, compare both original legacy envelopes and canonical records, then
-cut over with an explicit rollback policy. Provider selection stays server-side,
-and the public compatibility paths, consumer API keys and canonical search
-contract do not change.
+Night-All remains the connector wherever it owns upstream routing and paid-token
+business policy. JustOne ecommerce product search is the first implemented
+operation-scoped Hub-native connector; other JustOne/TikHub routes
+remain unchanged until each is shadowed against bounded approved calls/fixtures,
+compared at legacy-envelope and canonical levels, and cut over with an explicit
+rollback policy. Provider selection stays server-side, and public compatibility
+paths, consumer API keys and canonical search contracts do not change.
 
 ## Night-All work that stays outside this repository
 

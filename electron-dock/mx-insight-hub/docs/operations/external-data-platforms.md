@@ -31,7 +31,10 @@ Normal health/smoke must not call the paid interface. A live smoke requires an e
 3. Prefer **数据清洗中心 → 外部数据平台 → JustOne → API Key 管理** for a new or rotated key. The password
    input is never prefilled. Ordinary Admin responses expose only safe credential metadata; reveal/copy
    requires a second Admin Token check and the plaintext exists only in the open modal. Saving a key does
-   not bypass the independent `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1` release gate.
+   not open the independent `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1` release gate. Persist that gate in
+   `.env.internal` (or the release environment) and run the normal Hub deploy so the Public workload rolls.
+   `MX_INSIGHT_JUSTONE_CONFIGURED` is only a derived environment-fallback signal; it is neither a credential
+   nor the dispatch gate.
 4. `MX_INSIGHT_JUSTONE_TOKEN` remains an environment fallback for rolling compatibility. Put it only in the
    public or combined data-plane process. The Admin process receives at most
    `MX_INSIGHT_JUSTONE_CONFIGURED=1`, cannot read that environment value, and therefore cannot reveal it.
@@ -60,6 +63,16 @@ Normal health/smoke must not call the paid interface. A live smoke requires an e
 9. Start with one approved marketplace/query and one page. Verify public delivery, provider-call evidence,
    archive objects and the linked canonical ingest before widening grants or concurrency.
 
+On routine Internal deploys, an omitted/blank `MX_INSIGHT_JUSTONE_TOKEN` and an
+omitted `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED` preserve their current Kubernetes
+values. An explicit gate value of `0` disables dispatch. Clearing the retained
+environment fallback requires the one-shot command prefix
+`MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1`; never persist that flag in an env file.
+A first deployment still defaults to no environment key and a closed gate. The
+UI-managed database key is retained independently in PostgreSQL and remains the
+preferred credential source. Command-environment values take precedence over
+`.env.internal` for an intentional activation or emergency stop.
+
 ## 3. Management views and credential operations
 
 The management page **数据清洗中心 → 外部数据平台** reads these Internal Admin endpoints:
@@ -86,20 +99,44 @@ The JustOne detail page also provides the only browser credential workflow:
   key. Do not automate the reveal endpoint or store its response.
 
 ```bash
-export HUB_ADMIN_URL='http://127.0.0.1:18180'
+(
+# Run this on the Internal server. Local Compose uses :18180 instead.
+export HUB_ADMIN_URL='http://127.0.0.1:18151'
+umask 077
+ADMIN_HEADER_FILE="$(mktemp)"
+trap 'rm -f "$ADMIN_HEADER_FILE"' EXIT
 read -rsp 'Hub Admin Token: ' HUB_ADMIN_TOKEN
 printf '\n'
+printf 'x-mx-insight-admin-token: %s\n' "$HUB_ADMIN_TOKEN" >"$ADMIN_HEADER_FILE"
+unset HUB_ADMIN_TOKEN
 
-curl -sS \
-  -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
+curl -fsS \
+  -H "@$ADMIN_HEADER_FILE" \
   "$HUB_ADMIN_URL/internal/v1/admin/external-platforms?range=7d" \
   | jq '.data | {range, generatedAt, summary, providers}'
 
-curl -sS \
-  -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN" \
+curl -fsS \
+  -H "@$ADMIN_HEADER_FILE" \
   "$HUB_ADMIN_URL/internal/v1/admin/external-platforms/justone?range=7d" \
-  | jq '.data | {provider, pipeline, capabilities, tenants, guardrails, costPlan}'
+  | jq '.data | {provider: {status: .provider.status, configuration: .provider.configuration}, credential, pipeline, guardrails, costPlan}'
+)
 ```
+
+For an Internal incident, inspect only non-secret state before any live smoke:
+
+```bash
+kubectl -n mx-insight-hub get configmap mx-insight-hub-config -o json \
+  | jq '.data | {contractVerified: .MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED, configuredSignal: .MX_INSIGHT_JUSTONE_CONFIGURED}'
+kubectl -n mx-insight-hub get secret mx-insight-hub-secrets -o json \
+  | jq '{envFallbackPresent: (((.data.MX_INSIGHT_JUSTONE_TOKEN // "") | length) > 0)}'
+```
+
+Do not print/decode the Secret, call the reveal endpoint, or invoke a product
+search while diagnosing configuration. The required control-plane result is
+`contractVerified=true`, `credentialConfigured=true` and
+`dispatchEligible=true`. If a database credential and gate are both healthy but
+Public still reports unavailable, compare Admin/Public image IDs and database
+identity, confirm migration `052`, then inspect credential-store errors.
 
 The overview is not a billing statement. `external_platform.gateway_requests` records Hub demand, while
 `external_platform.provider_calls` records actual JustOne dispatches. Read these counters distinctly:
@@ -304,7 +341,7 @@ then evaluate quota plan or recharge.
 
 | Symptom / code | Meaning | Operator action |
 | --- | --- | --- |
-| `external_platform_not_configured` | Public data plane has no usable credential. | Check the JustOne page's safe credential status. For an environment fallback, verify secret injection on the public process only. Do not restart or reconfigure Launcher/MX-H2I. |
+| `external_platform_not_configured` | The provider-neutral Public path cannot dispatch: the contract gate may be closed, no DB/environment credential may be usable, or the credential store may be unavailable. | Check the JustOne page's safe `provider.configuration` and `credential` fields, then the Public Pod's non-secret gate state. Do not reveal/decode the key or restart/reconfigure Launcher/MX-H2I. |
 | `external_platform_circuit_open` | Consecutive provider failures opened the circuit. | Inspect the latest bounded error and archives, wait for the cooldown, then perform one intentional probe. Do not bypass the circuit with retries. |
 | `external_platform_busy` | Hub global/per-consumer concurrency is full. | Find the dominant tenant/request pattern; reduce client concurrency or policy before raising the global ceiling. |
 | `external_platform_capacity_exceeded` | Provider rate/quota capacity rejected the dispatch. | Stop retry amplification, verify quota evidence and wait for the known reset; unknown reset stays unknown. |
@@ -319,8 +356,9 @@ then evaluate quota plan or recharge.
 To stop one consumer immediately, remove its `ecommerce` grant or set a restrictive policy through the
 existing authorization workflow. To stop all new JustOne dispatches, set
 `MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=0` and roll only the Hub public process; this disables dispatch even when
-a database-managed key exists. If the deployment still uses the environment fallback, remove
-`MX_INSIGHT_JUSTONE_TOKEN` at the same time. Exact stored fallback may continue until `staleUntil`; afterward
+a database-managed key exists. If the deployment still uses the environment fallback, remove it at the
+same time by prefixing that deploy with
+`MX_INSIGHT_CLEAR_JUSTONE_ENV_TOKEN=1`. Exact stored fallback may continue until `staleUntil`; afterward
 Public API returns unavailable.
 
 Keep the prior release's environment secret available for the whole rollback window before migrating source

@@ -13,18 +13,20 @@ flowchart LR
   L --> A["MX Insight admin-plane\ntenants + keys + grants + usage"]
   P --> DB[("MX Insight PostgreSQL\nrequest + usage ledger")]
   A --> DB
+  P --> J["Hub-native JustOne adapter\ngated ecommerce product search"]
+  J --> X["JustOne"]
   P --> N["Night-All adapter\nfixed internal contract"]
   N --> F["Private Night-All facade"]
   F --> NA["Night-All\nprovider orchestration + facts"]
   NA --> NP[("Night-All PostgreSQL / Redis / artifacts")]
-  NA --> X["TikHub / JustOne / RapidAPI / crawlers / feeds"]
+  NA --> NX["TikHub / legacy JustOne routes / RapidAPI / crawlers / feeds"]
 ```
 
 ## Ownership
 
 | Concern | Owner | Reason |
 | --- | --- | --- |
-| Night-All upstream provider credentials, endpoint selection, fallback, collection, normalization, evidence | Night-All | These change with source behavior and belong next to source integrations. Direct PostgreSQL source credentials are the separate Admin-managed Hub exception. |
+| Upstream provider credentials, endpoint selection, fallback, collection, normalization, evidence | Owning connector plane | Night-All owns its provider routes. Hub explicitly owns the versioned JustOne ecommerce product-search connector and its isolated Admin-managed credential; direct PostgreSQL source credentials are another Hub exception. |
 | Customer tenant, consumer, API key, platform grant, plan, credit, idempotency and usage | MX Insight Hub | These are stable data-product and commercial semantics. |
 | Human operator IAM, K8s deployment, service routing, WireGuard/MX-H2I, public TLS | MX Launcher | These are platform control-plane concerns. |
 | Logs, metrics, traces and alert transport | Shared observability platform | Cross-service operation, but not a replacement for either business database. |

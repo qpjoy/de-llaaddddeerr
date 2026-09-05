@@ -20,6 +20,12 @@ The pepper is a K8s Secret, not a database field. A database dump alone must not
 - Admin token: permits internal operator API access; never accepted by public routes.
 - Night-All service token: workload identity on the private Hub-to-Night-All hop.
 - Night-All upstream/provider credentials: remain in Night-All Credential Center.
+- Hub external-platform credential: a JustOne environment fallback is injected
+  only into the Public/combined runtime. Prefer the Admin-token UI, which stores
+  the value in isolated `control.external_platform_provider_credentials`; safe
+  DTOs return only source/revision/configured metadata, and reveal requires a
+  second Admin Token check. Saving or rotating this credential does not open the
+  independent contract-verification gate.
 - Hub model-provider credential: used only by the bounded mapping/embedding
   Agent. Environment bootstrap keeps it in the model-key K8s Secret. When an
   operator explicitly switches the chain to database mode, the plaintext is
@@ -31,9 +37,10 @@ The pepper is a K8s Secret, not a database field. A database dump alone must not
   public API-key callers or Launcher-login sessions. Database and backup access
   therefore grants access to source credentials and must be restricted/audited.
 
-Database-mode model credentials and source passwords make PostgreSQL dumps,
-WAL, replicas and restore artifacts secret-bearing. The current shared Hub
-database owner cannot enforce workload-level `SELECT` isolation; splitting
+Database-mode external-platform/model credentials and source passwords make
+PostgreSQL dumps, WAL, replicas and restore artifacts secret-bearing. The
+current shared Hub database owner cannot enforce workload-level `SELECT`
+isolation; splitting
 migration, Agent writer/runtime and ordinary workload roles remains required
 before treating the database as a least-privilege credential store.
 
