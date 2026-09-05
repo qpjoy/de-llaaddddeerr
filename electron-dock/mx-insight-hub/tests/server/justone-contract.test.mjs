@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
   ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
@@ -17,6 +18,11 @@ import {
   normalizeJustOneProductSearchResponse,
   redactJustOnePrivateFields,
 } from '../../server/contracts/justone.mjs'
+
+const jdProductSearchV1Fixture = JSON.parse(readFileSync(
+  new URL('../fixtures/justone/jd-product-search-v1.success.json', import.meta.url),
+  'utf8',
+))
 
 function envelope(data) {
   return {
@@ -192,6 +198,37 @@ test('response extraction is shallow, explicit and rejects unreviewed envelope d
     () => extractJustOneProductSearchItems({ code: 0, data: { items: [] } }, 'taobao'),
     (error) => error.code === 'invalid_upstream_envelope',
   )
+})
+
+test('JD V1 accepts the reviewed data.products response shape without changing pagination semantics', () => {
+  const extracted = extractJustOneProductSearchItems(jdProductSearchV1Fixture, 'jd')
+  assert.deepEqual(extracted.path, ['data', 'products'])
+  assert.equal(extracted.items.length, 1)
+
+  const request = normalizeJustOneProductSearchRequest({ marketplace: 'jd', query: '耳机' })
+  const response = normalizeJustOneProductSearchResponse(jdProductSearchV1Fixture, request, {
+    capturedAt: '2026-09-06T05:00:17Z',
+  })
+
+  assert.deepEqual(response.publicBody.data.items[0], {
+    id: 'jd-product-1',
+    marketplace: 'jd',
+    title: '脱敏示例商品',
+    url: null,
+    pricing: { current: '199.00', original: null, currency: 'CNY' },
+    shop: { id: 'jd-shop-1', name: '脱敏示例店铺' },
+    images: [],
+    signals: { sales: null, reviewCount: null, location: null },
+    attributes: { brand: null, category: null },
+  })
+  assert.deepEqual(response.page, {
+    page: 1,
+    returnedCount: 1,
+    discardedCount: 0,
+    hasMore: null,
+    nextCursor: null,
+  })
+  assert.equal(response.archiveObjects[1].envelopePointer, '$.data.products[0]')
 })
 
 test('public response projects a fixed shape and drops private provider fields', () => {

@@ -1,0 +1,21 @@
+{
+  "code": 0,
+  "message": null,
+  "data": {
+    "products": [
+      {
+        "id": "jd-product-1",
+        "title": "脱敏示例商品",
+        "imageUrl": "jfs/example/product.jpg",
+        "price": "199.00",
+        "shopId": "jd-shop-1",
+        "shopName": "脱敏示例店铺"
+      }
+    ],
+    "totalCount": 1,
+    "currentPage": 1,
+    "pageSize": 1,
+    "totalPages": 1
+  },
+  "recordTime": null
+}

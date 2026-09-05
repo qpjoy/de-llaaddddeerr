@@ -179,3 +179,23 @@ jq '.data | {
   archive
 }'
 ```
+
+
+# justone
+```bash
+# .env.internal
+MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1
+# 检查启用状态
+kubectl -n mx-insight-hub get configmap mx-insight-hub-config -o json \
+  | jq '.data | {
+      contractVerified: .MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED,
+      configuredSignal: .MX_INSIGHT_JUSTONE_CONFIGURED
+    }'
+```
+```bash
+# 零费用检查
+curl -fsS \
+  -H "Authorization: Bearer $HUB_API_KEY" \
+  "$HUB_PUBLIC_URL/api/v1/data/capabilities" \
+  | jq '.data.platforms[] | select(.platform == "ecommerce")'
+```

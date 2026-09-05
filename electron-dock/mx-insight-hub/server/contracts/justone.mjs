@@ -63,7 +63,7 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
   jd: endpoint({
     endpointKey: 'jd.product-search.v1',
     path: '/api/jd/search-item-list/v1',
-    itemPaths: [['data', 'items'], ['data', 'list']],
+    itemPaths: [['data', 'items'], ['data', 'list'], ['data', 'products']],
   }),
   xiaohongshu_ec: endpoint({
     endpointKey: 'xiaohongshu-ec.product-search.v1',

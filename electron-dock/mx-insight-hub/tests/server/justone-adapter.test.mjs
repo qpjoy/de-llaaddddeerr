@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
   JUSTONE_BASE_URL,
@@ -7,6 +8,11 @@ import {
   JustOneRejectedError,
   JustOneSucceededUnusableError,
 } from '../../server/adapters/justone.mjs'
+
+const jdProductSearchV1Fixture = JSON.parse(readFileSync(
+  new URL('../fixtures/justone/jd-product-search-v1.success.json', import.meta.url),
+  'utf8',
+))
 
 function response(payload, status = 200, headers = {}) {
   return new Response(JSON.stringify(payload), {
@@ -177,6 +183,24 @@ test('adapter dispatch allowlist contains every marketplace and no caller-select
     () => adapter.searchProducts({ marketplace: 'jd', query: 'test', path: 'https://evil.invalid' }),
     (error) => error?.name === 'JustOneContractError',
   )
+})
+
+test('adapter accepts the reviewed JD V1 data.products response shape', async () => {
+  const adapter = new JustOneAdapter({
+    token: 'test-token',
+    fetchImpl: async () => response(jdProductSearchV1Fixture),
+  })
+
+  const result = await adapter.searchProducts({ marketplace: 'jd', query: '耳机' }, {
+    capturedAt: '2026-09-06T05:00:17Z',
+  })
+
+  assert.equal(result.payload.data.items.length, 1)
+  assert.equal(result.payload.data.items[0].id, 'jd-product-1')
+  assert.equal(result.payload.data.page.hasMore, null)
+  assert.equal(result.payload.data.page.nextCursor, null)
+  assert.equal(result.archiveObjects[0].contractState, 'accepted')
+  assert.equal(result.archiveObjects[1].envelopePointer, '$.data.products[0]')
 })
 
 test('adapter classifies every required business code with safe evidence', async () => {
