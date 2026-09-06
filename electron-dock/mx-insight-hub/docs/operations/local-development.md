@@ -36,7 +36,7 @@ bash scripts/manage.sh data-smoke  # invokes Night-All and may consume provider 
 bash scripts/manage.sh logs
 ```
 
-Normal smoke validates health and Admin auth but deliberately does not call paid providers. `data-smoke` performs one result search and must be intentional.
+Normal smoke validates health and Admin auth but deliberately does not perform provider-backed live acquisition. `data-smoke` performs one result search that may consume provider quota or Hub procurement cost and must be intentional.
 
 ## Isolation
 

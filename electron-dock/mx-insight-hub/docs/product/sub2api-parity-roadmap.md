@@ -7,7 +7,7 @@ The supplied Sub2API dashboard is used as an information-architecture reference,
 | Sub2API concept | MX Insight concept |
 | --- | --- |
 | User / account | Tenant member / consumer application |
-| API key | Consumer API key, one-time secret |
+| API key | Hub Public API key, one-time secret resolving to one consumer identity |
 | Group / subscription | Versioned plan and subscription |
 | Channel / model | Platform + capability + dataset |
 | Token usage | Request, record, byte, agent-token and credit usage dimensions |

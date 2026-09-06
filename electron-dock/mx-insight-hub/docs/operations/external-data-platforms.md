@@ -7,9 +7,15 @@ Related decision: [ADR-0013](../adr/0013-external-data-platform-gateway.md).
 
 ## 1. Operational boundary
 
-This gateway handles paid, realtime external acquisition separately from scheduled cleaning jobs. Its first
+This gateway handles provider-backed realtime external acquisition, which may consume quota or incur Hub
+procurement cost, separately from scheduled cleaning jobs. Its first
 provider is JustOne, but public callers use only the Hub-owned
 `POST /api/v1/data/ecommerce/products/search` contract and the `ecommerce` grant.
+
+The current deployed topology is single-provider: JustOne is the only ecommerce adapter and there is no
+multi-provider runtime router or automatic supplier failover. “Provider-neutral” describes the Public Hub
+contract. `fresh_cache` and `stored_fallback` are exact Hub snapshot delivery modes, not evidence that another
+provider was called. Provider candidates shown in a catalog remain planning evidence until released.
 
 The feature is additive:
 
@@ -19,7 +25,8 @@ The feature is additive:
 - Launcher, SessionGate, MX-H2I login, WireGuard, DNS and user networking have no dependency on this
   connector's readiness.
 
-Normal health/smoke must not call the paid interface. A live smoke requires an explicit operator decision.
+Normal health/smoke must not dispatch live acquisition. A live smoke that may incur provider procurement
+cost requires an explicit operator decision.
 
 ## 2. Activation checklist
 
@@ -57,6 +64,8 @@ Normal health/smoke must not call the paid interface. A live smoke requires an e
 
 7. Grant `ecommerce` only to the intended consumer and set its request/window/page policy through the
    existing platform administration workflow. A source-catalog entry or API key alone does not grant access.
+   External ecommerce search and media accept only an active `mih_live_` Hub Public API Key; no separate
+   product key is issued.
 8. Leave `MX_INSIGHT_JUSTONE_BILLING_JSON` absent until a price book is reviewed. Current configuration
    accepts only `source=manual`; price records require a three-letter currency and `pricingAsOf`. A missing
    price, balance or free quota must remain null/unknown, not zero.
@@ -97,6 +106,29 @@ The JustOne detail page also provides the only browser credential workflow:
   revealed key from component state;
 - every JSON response uses `Cache-Control: no-store`; overview, detail and write responses never include the
   key. Do not automate the reveal endpoint or store its response.
+
+### Authentication and error ownership
+
+Troubleshoot credentials from the outside inward; do not replace one key because a different layer failed:
+
+| Surface | Credential or authority | Stable failure interpretation |
+| --- | --- | --- |
+| Internal external-platform management | Hub Admin Token only | Missing management auth is `401 admin_auth_required`; a Launcher session or Hub Public API key is `403 admin_token_required`. Provider credential reveal additionally returns `403 admin_token_reauthentication_required` when the re-entered Admin Token is absent or wrong. |
+| Public ecommerce with a Live key | Ordinary `mih_live_` Hub Public API Key in bearer or `x-api-key` form | Missing is `401 api_key_required`; invalid, expired or revoked is `401 invalid_api_key`; valid but without `ecommerce` on its owning consumer is `403 platform_not_granted`. No ecommerce-specific key exists. |
+| Public ecommerce with a legacy Test key | Ordinary Hub Public API Key carrying compatibility `environment=test` metadata | With an ecommerce grant, capabilities keeps the entry but reports `ready=false`; search and media return `403 test_key_not_supported` before usage reservation, stored-result/media lookup or provider dispatch. It is not a sandbox. |
+| Hub request policy | Authenticated and granted consumer | `429 quota_exceeded` is consumer quota; `429 external_platform_busy` is Hub concurrency protection. Neither is a provider-key prompt. |
+| Internal provider dispatch | Server-held JustOne API Key | The caller never supplies it. Missing configuration, upstream credential rejection, balance or provider capacity is sanitized as an external-platform availability/capacity error. It must not become Public `invalid_api_key`. |
+
+`502 external_platform_outcome_unknown` and `502 external_platform_response_unusable` are post-dispatch
+evidence and may already have consumed provider quota or incurred Hub procurement cost. Preserve the request ID,
+normalized body and original `Idempotency-Key`; do not rotate the Hub Public API Key, JustOne API Key or
+`Idempotency-Key` merely to force another attempt.
+
+An old browser record marked ambiguous under a Test key is different: keep its exact body, original
+`Idempotency-Key` and one-way credential fingerprint locked, and transfer the available request identity to
+operator reconciliation. The current workbench deliberately sends no capabilities, search or media request for
+that record. Do not paste the historical Test secret, replace it with a Live key or create a new logical request
+until retained usage/gateway/provider/archive evidence has been reviewed.
 
 ```bash
 (
@@ -163,9 +195,14 @@ estimated recharge amount.
 
 ## 4. Intentional public smoke
 
-Use a dedicated test consumer with an `ecommerce` grant, a low quota and an approved non-production query.
+Use a dedicated smoke consumer with an `ecommerce` grant, a low quota, an active `mih_live_` Hub Public API Key
+and an approved non-production query.
 Read the Hub API key without writing it to shell history. The first call below intentionally permits exactly
-one paid upstream dispatch; do not put it in readiness, CI or a retry loop:
+one live upstream dispatch that may incur provider procurement cost; do not put it in readiness, CI or a
+retry loop. Prefer `scripts/justone-apicall.sh`: it performs the zero-cost preflight first, prints the
+non-secret recovery `Idempotency-Key` and body before dispatch, then verifies an exact replay. If a transport
+or outcome error is ambiguous, rerun only with those exact `HUB_IDEMPOTENCY_KEY` and
+`HUB_ECOMMERCE_QUERY` values; never create a new `Idempotency-Key` or query to probe the result.
 
 ```bash
 # Local Compose uses the combined listener on :18180. Internal Kubernetes uses
@@ -189,7 +226,7 @@ printf '%s\n' "$LIVE_RESPONSE" \
 sed -n '/^x-mx-insight-/Ip;/^idempotent-replay:/Ip;/^age:/Ip;/^warning:/Ip' \
   /tmp/mxih-external-live.headers
 
-# Run before MX_INSIGHT_JUSTONE_FRESH_TTL_MS expires. A new key makes this a
+# Run before MX_INSIGHT_JUSTONE_FRESH_TTL_MS expires. A new Idempotency-Key makes this a
 # separately metered Hub request; the identical normalized body reuses Hub data.
 CACHE_RESPONSE=$(curl -sS -D /tmp/mxih-external-cache.headers -X POST \
   -H "Authorization: Bearer $HUB_API_KEY" \
@@ -224,6 +261,11 @@ Reusing `LIVE_KEY` with the exact body is a third, different case: it returns `i
 neither a new Hub usage reservation nor a provider call. If the first page returns `nextCursor`, request that
 cursor with a **new** key. Never combine `page` and `cursor`, never expose/decode the cursor and never use a
 live smoke loop.
+
+The current cursor state is implicitly JustOne. Before a second provider is enabled, the cursor contract must
+be versioned to carry the selected provider and adapter contract inside its authenticated-encrypted payload;
+legacy cursors remain pinned to JustOne. A route-order change must never move a next-page continuation to a
+different supplier.
 
 ## 5. Archive and lineage verification
 
@@ -284,7 +326,7 @@ bound to the provider call; the database uniqueness fence permits at most one li
 run only after the worker accepts the job—rejected/unknown calls are call evidence, not canonical product
 input. Repeated query, page and rank do not create a new product identity. PostgreSQL is authoritative.
 Elasticsearch lag or outage does not invalidate the committed call/archive/canonical evidence; repair
-projection through the existing outbox workflow rather than replaying a paid call.
+projection through the existing outbox workflow rather than replaying a provider call that may incur procurement cost.
 
 ## 6. Freshness, paging and anomaly checks
 
@@ -294,12 +336,18 @@ state. Never use a cache hit as evidence that a different query or consumer is f
 
 For a client returning from page two to page one:
 
-- the same page-one key replays the original committed result indefinitely;
-- a new page-one key may receive `fresh_cache` while the exact snapshot is fresh;
-- after the fresh TTL, a new key may create a new paid dispatch;
-- every next-page request uses a new key and the prior response's opaque cursor.
+- the same page-one `Idempotency-Key` replays the original committed result indefinitely;
+- a new page-one `Idempotency-Key` may receive `fresh_cache` while the exact snapshot is fresh;
+- after the fresh TTL, a new `Idempotency-Key` may create a new provider dispatch and procurement cost;
+- every next-page request uses a new `Idempotency-Key` and the prior response's opaque cursor.
 
-This makes transport retry and user navigation predictable. It does not promise that repeatedly changing keys
+Do not confuse acquisition pagination with the treasure-box product's visual “shelf” paging. Moving among
+already-returned product groups or reopening a product is browser presentation only and must preserve the same
+request ID/source mode without another product-search call. It may issue bounded media reads for newly visible
+items; those reads create no Hub usage or provider dispatch. Only an explicit `nextCursor` action starts a new
+Hub search request and possible provider charge.
+
+This makes transport retry and user navigation predictable. It does not promise that repeatedly changing `Idempotency-Key` values
 will never spend: quotas, exact fresh cache, the cross-key dispatch lease, concurrency and circuit breaker are
 the bounded protection layers.
 
@@ -315,7 +363,19 @@ Monitor per tenant and endpoint for:
 
 Do not invent a universal alert threshold before observing a normal baseline. When abuse is credible, first
 reduce the affected consumer's `ecommerce` quota/concurrency policy or revoke its grant through the governed
-admin workflow. Do not change global login/network settings and do not add an automatic paid retry.
+admin workflow. Do not change global login/network settings and do not add an automatic provider retry that may multiply procurement cost.
+
+The Admin product never loads an upstream `images[]` URL directly. Visible live items use
+`GET /api/v1/data/ecommerce/products/media` with the same `mih_live_` Hub Public API Key plus the committed search `requestId`,
+returned `itemId` and bounded `imageIndex`. The endpoint accepts no URL, verifies same-consumer committed
+evidence, accepts only those three query keys, restricts public HTTPS content to JPEG/PNG/WebP, pins DNS,
+revalidates every redirect and bounds type, signature, time and body size. It creates no Hub usage or
+product-search/provider dispatch. Per-consumer rate/concurrency exhaustion returns
+`external_media_rate_limited`/`external_media_busy` with 429; global relay concurrency also fails as busy.
+Responses are `private, no-store` and vary on Authorization, so browsers and proxies must not retain or mix
+consumer credentials. Hub's bounded same-consumer server cache absorbs repeat reads. Rejection is a presentation failure and must fall back to the neutral local icon; operators must
+not work around it with a direct provider URL or an ad-hoc proxy.
+A Test key is rejected before the committed-result store or media loader is touched and does not create usage.
 
 ## 7. Cost and free-quota planning
 
@@ -341,15 +401,19 @@ then evaluate quota plan or recharge.
 
 | Symptom / code | Meaning | Operator action |
 | --- | --- | --- |
+| `api_key_required` / `invalid_api_key` | The ordinary Hub Public API credential is missing, invalid, expired or revoked. | Verify/reissue that Hub key and its expiry. Do not paste or rotate the JustOne key. |
+| `test_key_not_supported` | A valid legacy Test key reached an external ecommerce search or media route. | Use a Live key only for a deliberately new request. For a historical ambiguous Test record, keep its body/`Idempotency-Key` lock and reconcile it operationally; do not replay it from the page. No usage reservation or provider/media call occurred for this rejection. |
+| `platform_not_granted` | The Hub key is valid, but its consumer lacks the `ecommerce` grant. | Grant the product through the governed Hub authorization workflow; a source-catalog/provider credential does not grant it. |
+| `quota_exceeded` | The authenticated consumer exhausted its Hub ecommerce policy window. | Inspect the consumer policy and demand. Do not treat it as JustOne balance or free-quota evidence. |
 | `external_platform_not_configured` | The provider-neutral Public path cannot dispatch: the contract gate may be closed, no DB/environment credential may be usable, or the credential store may be unavailable. | Check the JustOne page's safe `provider.configuration` and `credential` fields, then the Public Pod's non-secret gate state. Do not reveal/decode the key or restart/reconfigure Launcher/MX-H2I. |
 | `external_platform_circuit_open` | Consecutive provider failures opened the circuit. | Inspect the latest bounded error and archives, wait for the cooldown, then perform one intentional probe. Do not bypass the circuit with retries. |
 | `external_platform_busy` | Hub global/per-consumer concurrency is full. | Find the dominant tenant/request pattern; reduce client concurrency or policy before raising the global ceiling. |
 | `external_platform_capacity_exceeded` | Provider rate/quota capacity rejected the dispatch. | Stop retry amplification, verify quota evidence and wait for the known reset; unknown reset stays unknown. |
-| `external_platform_response_unusable` | A successful external response did not match the reviewed shape. | Treat it as possibly billed. Inspect secret-free response evidence, add a fixture and review the adapter before any change. |
-| `external_platform_outcome_unknown` / `request_outcome_unknown` | Dispatch or durable outcome cannot be proved. | Keep request ID and original key; never issue a new-key automatic retry. Reconcile call, usage and archive evidence. |
+| `external_platform_response_unusable` | A successful external response did not match the reviewed shape. | Treat provider quota/cost as possibly consumed, without inferring a Hub customer charge. Inspect secret-free response evidence, add a fixture and review the adapter before any change. |
+| `external_platform_outcome_unknown` / `request_outcome_unknown` | Dispatch or durable outcome cannot be proved. | Keep request ID and original `Idempotency-Key`; never issue a new-`Idempotency-Key` automatic retry. Reconcile call, usage and archive evidence. |
 | rising `stored_fallback` | Live path is failing while exact snapshots still satisfy clients. | Check capture age, fallback reason, provider state and stale deadline. Do not report the response as live. |
 | provider calls exceed Hub requests | Ledger reconciliation failure. | Freeze connector rollout and inspect transactions; do not estimate spend from incomplete counters. |
-| canonical/ES count lags calls | Ingest or projection backlog, not necessarily acquisition loss. | Verify response/item archives and ingest-run linkage, then repair queue/outbox. Do not repeat the paid search. |
+| canonical/ES count lags calls | Ingest or projection backlog, not necessarily acquisition loss. | Verify response/item archives and ingest-run linkage, then repair queue/outbox. Do not repeat the provider-backed search. |
 
 ## 9. Safe disable and rollback
 

@@ -24,6 +24,22 @@ JustOne, but the product identity is not `JustOne data`:
   `mx-insight-hub.ecommerce-products.v1`;
 - the existing `/docs/search`, OpenAPI and every old public URL remain compatible.
 
+“Provider-neutral” describes ownership of the Public contract; it does not claim that the deployed runtime
+already routes across several suppliers. The current release constructs exactly one verified realtime adapter,
+JustOne. It has no multi-provider router and never changes supplier after a dispatch that may incur provider
+procurement cost has started. Exact Hub
+cache/fallback is the current availability mechanism. A provider shown elsewhere in the source catalog is only
+planning or lineage evidence until its adapter, route and contract tests have been released.
+
+The names are deliberately kept on separate axes:
+
+| Axis | Released value | Meaning |
+| --- | --- | --- |
+| Public authorization product | `ecommerce` | The grant, request quota and future Hub customer-pricing scope. |
+| Hub operation | `ecommerce.products.search` | The stable business operation behind the Public path. |
+| Marketplace | `taobao`, `tmall`, `jd`, `xiaohongshu_ec`, `xianyu` | The business source selected by the caller. |
+| Internal provider | `justone` | The current acquisition supplier; never a Public request parameter or grant. |
+
 The visual companion is the original **数据百宝猫“小聚”**. It is not an imitation of any commercial
 character. Two transparent raster poses are maintained as product assets:
 
@@ -70,13 +86,44 @@ URLs, tokens, endpoint IDs, raw envelopes, archive keys and internal costs are n
    traffic is outside this promise.
 3. The operator chooses a marketplace, sort mode and query.
 4. The searching pose appears while the request is pending.
-5. Results emerge as keyboard-focusable product spheres around the mascot. The Admin surface uses a neutral
-   product icon by default: it does not automatically fetch an upstream image URL. A future explicit operator
-   preview may load a normalized HTTPS image, but that external request and its privacy boundary must be clear.
+5. Results emerge as keyboard-focusable product spheres around the mascot. A visible live item may load its
+   first retained image only through the authenticated Hub media relay. The browser never assigns an upstream
+   URL to `img src`; safe-demo items, missing images and rejected relay reads use the neutral local icon.
 6. Selecting a sphere shows the exact normalized ID, price, shop, brand, category and signal fields.
 7. The evidence panel names the real `sourceMode`, request ID, data age, Hub usage implication and whether a
    new provider call happened.
 8. The operator can open the external-platform command center, API Keys, source catalog or public docs.
+
+### Display paging and media boundary
+
+Product-sphere paging is presentation state over the items already returned in one Hub response. Moving between
+those display groups, reopening an item or returning to the first display group must not call product search,
+create Hub usage or dispatch a provider request. It may perform bounded media reads for newly visible live
+items; those reads retain the same search `requestId` and are not acquisition pages. An acquisition next page
+is different: it exists only when the response supplies `nextCursor`, requires an explicit action, sends that
+cursor with a new `Idempotency-Key` and may consume Hub quota and one provider call. The UI must label those two
+actions differently and keep the original `requestId`, `sourceMode` and capture time on every display group
+derived from the same response.
+
+The released **Hub safe media relay** is:
+
+```http
+GET /api/v1/data/ecommerce/products/media?requestId=<search-request-id>&itemId=<product-id>&imageIndex=0
+Authorization: Bearer <mih_live_ Hub Public API Key for the same consumer>
+```
+
+It creates no Hub usage record and dispatches no product-search/provider request. `requestId` must identify a
+committed HTTP-200 ecommerce response owned by the same consumer; `itemId` and `imageIndex` can select only a
+retained image from that response. The endpoint never accepts a URL. It permits bounded public HTTPS raster
+images in JPEG, PNG or WebP only, pins validated DNS answers, repeats private/loopback/link-local rejection on
+redirects, sends no provider credential or browser cookie, checks declared type and file signature, and limits
+redirects, time and body size. The three named parameters are the complete query allowlist; extra keys fail
+with `400 unsupported_fields`. Consumer window or concurrency protection returns
+`429 external_media_rate_limited` or `429 external_media_busy`; an end-to-end deadline returns
+`504 external_media_timeout`. The response is private Hub-origin media with
+`Cache-Control: private, no-store` and `Vary: Authorization`; browsers and shared caches must not retain it. The SPA
+renders a Blob object URL and revokes it when the sphere unmounts. A relay failure is presentation-only and
+falls back to the neutral local icon without changing search delivery evidence.
 
 ## 4. Interaction state machine
 
@@ -97,12 +144,14 @@ Safe demo is the default and is deliberately obvious. Example IDs start with `de
 names and are never written to Hub storage. It exists to demonstrate the interaction without consuming
 customer quota or provider budget. Pressing its search button stays entirely in the browser: it does not invoke
 `POST /api/v1/data/ecommerce/products/search`, does not consult `MX_INSIGHT_PUBLIC_URL` and does not require a
-Hub consumer key. The surrounding Admin application may still refresh its own authenticated session or other
+Hub Public API key. The surrounding Admin application may still refresh its own authenticated session or other
 Admin data, so “safe” must not be described as a blanket browser-offline mode.
 
 ### Live Hub API
 
-Live mode accepts a **Hub consumer API Key**, not a JustOne key. The value:
+Live mode uses the same **Hub Public API Key** already issued through **API Keys**. There is no ecommerce-specific
+or second “consumer key”: enabling `ecommerce` on the key's owning consumer immediately applies to every active
+key for that consumer, including a replacement key during zero-downtime rotation. The value:
 
 - remains only in React component memory;
 - is rendered as a password field;
@@ -110,17 +159,33 @@ Live mode accepts a **Hub consumer API Key**, not a JustOne key. The value:
 - is not written to localStorage, sessionStorage, a URL or an Admin API;
 - is sent only as `Authorization: Bearer …` to the existing public Hub path.
 
-The operator must check a per-request confirmation before a new logical request. This protects against an
-accidental repeated paid action. The confirmation clears after a completed request. Exact replay uses the
-previous request body and previous idempotency key, so it cannot silently become a new dispatch.
+The Admin workbench requires a per-request confirmation before a new logical request. This is only a demo-page
+anti-misclick guard, not another client authorization step. Direct API callers send their one Hub Public API key
+and the request. The confirmation clears after a completed request. Exact replay uses the previous request body
+and previous `Idempotency-Key`, so it cannot silently become a new dispatch.
 
-The workbench stores only the secret-free exact request ledger and a one-way consumer fingerprint for replay.
-An ambiguous result -- including a transport interruption or an accepted response that cannot be normalized --
-must be retried, if at all, with the same path, normalized body and `Idempotency-Key`. Creating a new key can
-turn an uncertain paid attempt into a second dispatch. Editing or replacing the Hub consumer API Key invalidates
-the workbench's local replay state because the browser cannot prove that the replacement represents the same
-consumer. On submit after a reload, a fingerprint mismatch also rejects and clears the replay. The caller must
-then resolve the old request operationally before explicitly confirming a new logical request.
+External ecommerce acquisition accepts only `mih_live_` keys. A legacy `mih_test_` value is compatibility
+metadata, not an isolated sandbox: for a consumer with the `ecommerce` grant, capabilities reports that platform
+with `ready=false`, while product search and media return `403 test_key_not_supported`. Search rejects before
+grant lookup, usage reservation, cache lookup or provider dispatch; media rejects before a committed-result lookup
+or image-loader call. Neither rejection creates usage or provider-cost evidence.
+
+The workbench rejects a Test prefix before calling capabilities. If an older workbench version left an
+`ambiguous` Test-key request in browser recovery state, the current page preserves its exact body, original
+`Idempotency-Key` and one-way credential fingerprint as a locked operational record, but sends no capabilities,
+search or media request. It instructs the operator to reconcile the historical attempt; pasting the old Test
+secret or replacing it with a Live key is not an in-page recovery path.
+
+For Live requests, the workbench stores only the secret-free exact request ledger and a one-way API-key-secret
+fingerprint for replay. An ambiguous result -- including a transport interruption or an accepted response that
+cannot be normalized -- must be retried, if at all, with the same path, normalized body and `Idempotency-Key`.
+Creating a new `Idempotency-Key` can turn an uncertain live attempt into a second dispatch and another
+provider-cost event.
+Editing or rotating the Hub Public API key may discard a resolved local replay shortcut, but it never clears an
+ambiguous request lock. For an ambiguous Live request, a credential-fingerprint mismatch rejects the action and
+requires the original Live secret or operator reconciliation; the workbench does not guess that a replacement
+belongs to the same consumer and does not unlock a new request. A historical Test-key record always follows the
+operator-only path above. Backend authorization and idempotency scope remain consumer-scoped.
 
 The upstream JustOne key remains in **数据清洗中心 → 外部数据平台 → JustOne → API Key 管理**. Reveal/copy
 requires a second Admin Token check; it never belongs in this product, source-catalog metadata or public docs.
@@ -131,8 +196,8 @@ Production keeps the browser route aligned with the listener boundary:
   credentials, a path, query or fragment. After management authentication, the Admin session returns it as
   `publicApiBaseUrl`, and the SPA uses that runtime value for Public data calls and Public docs links;
 - this value is routing metadata delivered only inside the authenticated management session. It is not an API
-  key, does not authorize a data request and must not be placed in `Authorization`; live calls still require a
-  separately issued Hub consumer API Key;
+  key, does not authorize a data request and must not be placed in `Authorization`; live calls use the ordinary,
+  already-issued `mih_live_` Hub Public API Key whose consumer has the `ecommerce` grant;
 - a direct Admin SPA visit on `:18151` sends bearer-key data calls and docs navigation to the same host on
   Public `:18150` only as the compatibility fallback when no runtime Public origin was delivered;
 - combined local mode and an edge that routes `/admin`, `/api` and `/docs` on one origin stay same-origin;
@@ -142,13 +207,32 @@ Production keeps the browser route aligned with the listener boundary:
   delivery/evidence headers used by this workbench. The Admin listener still returns 404 for every public API
   path, and public CORS never applies to `/internal/v1/admin/*`.
 
+### Authentication and error ownership
+
+Three credentials have different authorities and are never interchangeable:
+
+| Credential | Accepted surface | Failure meaning |
+| --- | --- | --- |
+| Hub Admin Token | External-platform Internal management APIs | Required for provider configuration. Revealing a provider credential additionally requires the same Admin Token to be re-entered. |
+| Launcher Admin session | Only Internal routes allowed by its scopes | Does not authorize provider credential management or reveal; those routes return `403 admin_token_required`. |
+| `mih_live_` Hub Public API Key (ordinary API Keys lifecycle) | `/api/v1/data/ecommerce/products/search` and `/api/v1/data/ecommerce/products/media` | Missing key returns `401 api_key_required`; an invalid, expired or revoked key returns `401 invalid_api_key`; a valid Live key whose consumer lacks the `ecommerce` grant returns `403 platform_not_granted`. No product-specific key is issued. |
+| Legacy `mih_test_` Hub Public API Key | Other Public routes only as their contracts permit | Ecommerce capabilities reports `ready=false`; search and media return `403 test_key_not_supported` before usage reservation, stored-result/media lookup or provider dispatch. The workbench sends no request with it. |
+| JustOne API Key | Server-side JustOne adapter only | Never accepted from the browser or Public caller. Missing provider configuration or provider authentication/capacity problems are returned as provider-neutral external-platform availability errors, not as `invalid_api_key`. |
+
+After authentication, `429 quota_exceeded` is Hub consumer policy; `429 external_platform_busy` is Hub
+dispatch protection; `429 external_platform_capacity_exceeded` is sanitized upstream capacity. A
+`502 external_platform_outcome_unknown` or `502 external_platform_response_unusable` may already have consumed
+provider quota or incurred Hub procurement cost and
+must not be retried with a new `Idempotency-Key`. This ordering prevents a provider credential incident from being mistaken
+for a customer-key problem.
+
 ## 6. Stable API contract
 
 ### Request
 
 ```http
 POST /api/v1/data/ecommerce/products/search
-Authorization: Bearer <Hub consumer API Key>
+Authorization: Bearer <mih_live_ Hub Public API Key>
 Content-Type: application/json
 Idempotency-Key: <8-128 safe characters>
 ```
@@ -160,7 +244,7 @@ Allowed body keys are exactly:
 | `marketplace` | yes | `taobao`, `tmall`, `jd`, `xiaohongshu_ec` or `xianyu`. |
 | `query` | yes | NFKC-normalized non-empty text, maximum 200 characters. |
 | `page` | no | 1–1000; mutually exclusive with `cursor`. |
-| `cursor` | no | Opaque signed Hub cursor; maximum 4096 characters. |
+| `cursor` | no | Opaque authenticated-encrypted Hub cursor; maximum 4096 characters. |
 | `sort` | no | Marketplace-specific allowlist below. |
 | `price` | no | `{min,max}` decimal strings; only Taobao/Tmall. |
 
@@ -192,13 +276,33 @@ Missing evidence remains null or empty. Hub never guesses a field solely to make
 Page evidence includes `page`, `returnedCount`, `discardedCount`, `hasMore` and `nextCursor`. Delivery evidence
 includes `capturedAt`, `servedAt`, `sourceMode`, `ageSeconds` and `requestId`.
 
+### Media read
+
+The optional media endpoint uses the same Public Hub authentication boundary:
+
+```http
+GET /api/v1/data/ecommerce/products/media?requestId=<uuid>&itemId=<returned-id>&imageIndex=<0-19>
+Authorization: Bearer <mih_live_ Hub Public API Key>
+```
+
+The Live key must still have the `ecommerce` grant. A valid Test key returns `403 test_key_not_supported` before
+Hub reads the committed result or invokes the image loader. `requestId`, `itemId` and `imageIndex` are all required;
+`itemId` is bounded to 512 characters. Any other query key returns `400 unsupported_fields`. Success returns
+JPEG, PNG or WebP bytes rather than a JSON envelope; AVIF and GIF are not accepted. The read has no
+`Idempotency-Key`, creates no usage row and never invokes product search. It is an authenticated view of an
+image reference already retained in the same consumer's committed search response, not a generic fetch-by-URL
+service. Per-consumer rate/concurrency and relay-wide concurrency exhaustion return
+`429 external_media_rate_limited` or `429 external_media_busy`; timeout returns
+`504 external_media_timeout`. Responses include `Cache-Control: private, no-store` and
+`Vary: Authorization`, so caches cannot retain or reuse bytes across consumer credentials.
+
 ## 7. Source mode and billing interpretation
 
-Hub customer metering and provider procurement cost are independent evidence domains.
+Hub usage, provider procurement cost and customer pricing are three independent domains.
 
 | sourceMode | New Hub usage row | New provider dispatch | Cost interpretation |
 | --- | --- | --- | --- |
-| `live` | yes | yes | A business-success response is billed upstream; monetary amount remains unknown unless a reviewed price book is configured. |
+| `live` | yes | yes | A business-success response is recorded as provider-billed under the reviewed provider rule; that is internal procurement evidence, not a Hub customer charge. Monetary amount remains unknown unless a reviewed provider price book is configured. |
 | `fresh_cache` | yes | no | A new customer request consumed Hub service while reusing a fresh exact snapshot. |
 | `stored_fallback` | yes | maybe | Fallback can happen before dispatch, or after a failed/ambiguous dispatch; it cannot be labelled universally free. |
 | `idempotent_replay` | no | no | The exact committed request is replayed with the original request ID. |
@@ -206,24 +310,36 @@ Hub customer metering and provider procurement cost are independent evidence dom
 Future Hub pricing must price the service independently from provider cost. A customer charge may include
 normalization, durable archive, search projection, freshness SLA and reliability even when the current request
 uses cache. Provider price/free quota/balance remain null unless obtained from a verified API or a dated manual
-price book; unknown is never zero.
+price book; unknown is never zero. Provider rates, balances, free quota and procurement evidence stay Internal.
+The Public capability, search and media responses never expose them. A separately versioned Hub price book will
+apply customer rates through the same consumer identity, without issuing a second Hub API key or changing this API contract.
 
 ## 8. Idempotency and pagination
 
-- Same path + same normalized body + same key means one exact logical request.
-- Same key + different body returns `409 idempotency_conflict`.
-- Every ambiguous retry reuses the exact original path, normalized body and key. This includes transport
-  failures and accepted-but-unusable provider responses; a new key is never a recovery mechanism.
-- Replay is consumer-scoped. The workbench invalidates replay when its Hub key input changes and rejects a
-  stored replay when the submitted key's consumer fingerprint differs.
-- A next cursor is a new request and uses a new key.
-- Returning to page one is explicit: replay the original key for the original result, or use a new key to ask
+- Same path + same normalized body + same `Idempotency-Key` means one exact logical request.
+- Same `Idempotency-Key` + different body returns `409 idempotency_conflict`.
+- Every Live ambiguous retry reuses the exact original path, normalized body and `Idempotency-Key`. This includes transport
+  failures and accepted-but-unusable provider responses; a new `Idempotency-Key` is never a recovery mechanism.
+- Replay is consumer-scoped in the backend. The browser workbench stores only a one-way fingerprint of the
+  exact API-key secret and requires that same secret for conservative ambiguous-outcome recovery; rotating a
+  key does not reveal whether two secrets belong to the same consumer in browser memory.
+- A historical ambiguous Test-key record remains locked to its stored body, `Idempotency-Key` and fingerprint for
+  operator reconciliation. The page neither validates nor replays it and does not convert it into a Live request.
+- A next cursor is a new request and uses a new `Idempotency-Key`.
+- Returning to page one is explicit: replay the original `Idempotency-Key` for the original result, or use a new `Idempotency-Key` to ask
   for a new first-page observation.
 - `hasMore=false` stops normally.
 - `hasMore=null` also stops. It means the provider response did not prove a safe continuation.
-- Provider continuation data is signed inside the Hub cursor and never exposed separately.
-- `request_in_progress`, unknown outcome and unusable response must never be bypassed by swapping keys in an
+- Provider continuation data is authenticated-encrypted inside the Hub cursor and never exposed separately.
+- `request_in_progress`, unknown outcome and unusable response must never be bypassed by swapping
+  `Idempotency-Key` values in an
   automatic retry loop.
+
+The current cursor state is implicitly bound to the only released provider, JustOne. Before a second provider
+can serve this operation, a new authenticated-encrypted cursor state must carry the selected `providerKey` and
+provider contract version. Existing cursor state remains JustOne-compatible. A next-page request must stay on
+that pinned provider even if route priority changes; if it is unavailable, Hub may serve the exact stored page
+or return a stable error, but must not hand its private continuation to another supplier.
 
 ## 9. Storage and lineage
 
@@ -281,12 +397,17 @@ historical evidence and are not simulated from other endpoints.
 - A new upstream response shape requires a reviewed fixture and an explicit adapter item path.
 - A new marketplace/operation requires a new capability-map entry, tests and release approval; a UI label is
   never enough.
+- A future multi-provider router selects one eligible provider deterministically before dispatch. Credential,
+  contract, circuit or route failures discovered before dispatch may select the next candidate; once a provider
+  call begins, `billed=true`, `billed=null`, unknown outcome or unusable success always stops provider switching.
 
 ## 13. Acceptance criteria
 
 - Safe demo search completes with no Public product-search request, Hub usage or provider request; ordinary
   authenticated Admin bootstrap traffic is not part of this assertion.
-- Live mode cannot submit without a Hub key and explicit cost confirmation.
+- Live mode cannot submit without a `mih_live_` Hub Public API Key and explicit cost confirmation.
+- A Test key makes no capabilities, search or media request from the workbench; a historical ambiguous Test
+  record stays locked for operator reconciliation.
 - The provider key cannot appear in browser storage, URL, source catalog or public output.
 - `live`, `fresh_cache`, `stored_fallback` and `idempotent_replay` are visibly distinct.
 - Selecting a sphere is keyboard accessible and exposes normalized product attributes.
@@ -295,3 +416,7 @@ historical evidence and are not simulated from other endpoints.
 - `prefers-reduced-motion` yields a static but complete state transition.
 - The five connected catalog rows and two evidence-only rows are distinguishable.
 - Public docs continue to pass the provider-identity boundary tests.
+- The page identifies the current runtime as single-provider JustOne and does not claim cross-provider failover.
+- Changing product-sphere display groups performs no acquisition request; requesting `nextCursor` is explicit.
+- Live product images are read only through the authenticated, reference-based Hub media relay; display/media
+  reads neither create ecommerce usage nor dispatch product search, and callers cannot supply a URL.

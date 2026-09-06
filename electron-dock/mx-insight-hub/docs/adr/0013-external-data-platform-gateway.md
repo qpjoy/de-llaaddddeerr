@@ -12,12 +12,16 @@ not an Agent node, credential surface or control plane.
 
 MX Insight Hub needs fresh external data without becoming a transparent API relay. A direct relay would
 couple clients to a provider's endpoint names, response drift, continuation tokens and billing behavior. It
-would also make it hard to distinguish Hub demand from paid provider calls, archive the original evidence,
+would also make it hard to distinguish Hub demand from provider calls that may incur procurement cost, archive the original evidence,
 reuse exact fresh results, or explain why a stored result was returned.
 
 The first native adapter is JustOne product search. The integration must coexist with existing Hub stored
 search, Night-All compatibility and cleaning jobs. It does not own, replace or initialize Launcher,
 SessionGate, MX-H2I login, WireGuard, DNS or user networking.
+
+This ADR uses “provider-neutral” for the ownership and stability of the Public contract, not as a claim about
+the number of deployed suppliers. At the review date, the runtime constructs one ecommerce provider adapter,
+JustOne. There is no multi-provider router or cross-provider failover in the released implementation.
 
 ## Decision
 
@@ -42,6 +46,17 @@ serve the same public route only when it can satisfy the same semantics and evid
 incompatible request, product identity, pagination or freshness model requires a reviewed public contract
 version rather than leaking provider-specific fields into v1.
 
+### 1a. Keep authorization, marketplace and provider separate
+
+- `ecommerce` is the Public platform grant, Hub quota and future customer-pricing scope;
+- `ecommerce.products.search` is the internal name of the stable Hub operation;
+- `taobao`, `tmall`, `jd`, `xiaohongshu_ec` and `xianyu` are caller-visible marketplaces;
+- `justone` is the current internal provider and is neither a Public grant nor a request parameter.
+
+A valid provider credential does not grant a consumer access. Conversely, an `ecommerce` grant does not
+expose a supplier account or entitle the caller to select a supplier. Source-catalog connector hints record
+planning/lineage evidence and do not create an executable route.
+
 ### 2. Keep acquisition separate from cleaning, but converge on canonical data
 
 Realtime acquisition is presented under **数据清洗中心 → 外部数据平台** because it feeds the same data
@@ -65,7 +80,7 @@ not change the already-committed public delivery evidence.
 
 Every actual dispatch receives a `external_platform.provider_calls` row. Even an empty, rejected, malformed
 or outcome-unknown response receives one secret-free `response_archives` observation, because item rows
-alone cannot prove what happened to the paid call. Valid items additionally receive `archive_objects` rows.
+alone cannot prove what happened to the provider call or its procurement cost. Valid items additionally receive `archive_objects` rows.
 
 `archive_path` is a logical taxonomy, not a host filesystem path:
 
@@ -88,12 +103,12 @@ an observation or revision without manufacturing a second product identity. The 
 A caller-supplied `Idempotency-Key` names one immutable `path + normalized body` dispatch. The client reuses
 the key for transport retries of that exact page. Reusing it with a changed request returns
 `409 idempotency_conflict`. Every next-page request has a changed cursor/body and therefore must use a new
-key.
+`Idempotency-Key`.
 
 When a caller omits the key, Hub derives a short-lived freshness-bucket key. This is a convenience and
 duplicate guard, not a durable client replay contract. The gateway additionally holds an exact
-consumer/operation/fingerprint dispatch lease so two concurrent requests with different keys cannot both
-launch the same paid call. Quota, global concurrency, per-consumer concurrency and the provider circuit
+consumer/operation/fingerprint dispatch lease so two concurrent requests with different `Idempotency-Key` values cannot both
+launch the same provider call and multiply procurement cost. Quota, global concurrency, per-consumer concurrency and the provider circuit
 bound faulty-client amplification.
 
 The Hub cursor is consumer-scoped, authenticated-encrypted and bound to marketplace, query, sort and price.
@@ -101,6 +116,25 @@ Provider continuation state such as the JustOne Xiaohongshu EC `searchId` exists
 ciphertext. A client never sees, decodes or supplies it directly. Tampering or reuse by another consumer
 fails closed. `nextCursor=null` ends traversal. `hasMore=null` means Hub cannot prove a safe next step and
 the client must stop rather than incrementing `page`.
+
+The current cursor state is implicitly JustOne because it is the sole provider. Before a second provider is
+released, the next cursor-state version must also bind the internal provider key and adapter contract version.
+Existing cursor state remains JustOne-compatible. Route-priority changes must not move an in-progress
+pagination chain: if its pinned provider is unavailable, Hub serves an exact eligible snapshot or returns a
+stable error rather than disclosing or forwarding its continuation to another supplier.
+
+### 4a. Select future providers only before dispatch
+
+A future router is deterministic for an `operation + marketplace` and chooses from a code-owned provider
+registry. Provider hosts, paths and response contracts remain reviewed code; only secret-free enablement,
+priority and revision may be operational configuration. Disabled, unverified, uncredentialed, unsupported or
+circuit-open candidates may be skipped before a provider-call row or network request exists.
+
+The first multi-provider phase retains one actual provider dispatch per Hub usage request. Once dispatch
+begins, Hub must not change supplier after `billed=true`, `billed=null`, an unknown outcome or a successful but
+unusable response. It uses exact stored fallback when permitted or returns the stable error. Cross-provider
+retry after a definite unbilled rejection is a later decision requiring an ordered attempt ledger, an explicit
+attempt/cost ceiling and new reconciliation tests; it is not inferred from an HTTP status alone.
 
 ### 5. Use exact fresh cache and exact stale fallback
 
@@ -110,7 +144,7 @@ Snapshots are keyed by consumer, operation and the complete normalized request f
 - `fresh_cache` serves an unexpired exact snapshot without a provider call;
 - `stored_fallback` serves an exact last-good snapshot within the configured stale window when dispatch is
   unavailable, rejected, unusable, concurrency-guarded or circuit-open;
-- `idempotent_replay` serves the immutable result already committed to the same caller key.
+- `idempotent_replay` serves the immutable result already committed to the same caller-supplied `Idempotency-Key`.
 
 There is no fuzzy-query, cross-consumer, cross-marketplace, cross-page, canonical-search or “similar item”
 fallback. A stored delivery always exposes capture/serve time, age and source mode; stale fallback also
@@ -118,13 +152,22 @@ emits HTTP Warning 110. The failed attempt and delivered snapshot remain separat
 
 An unusable successful response or an ambiguous network outcome may already have consumed provider quota.
 Without a valid exact snapshot the request returns an outcome-unknown error and is never blindly
-redispatched. Operators and clients retain the same request ID and idempotency key while investigating.
+redispatched. Operators and clients retain the same request ID and `Idempotency-Key` while investigating.
+
+Stored fallback is not provider failover. It reuses one exact Hub-owned response snapshot and preserves its
+capture time and lineage; it never synthesizes a fresh-looking response by querying a second supplier after an
+uncertain provider attempt that may have consumed quota or incurred procurement cost.
 
 ### 6. Separate Hub demand, actual calls and money
 
 `gateway_requests` counts Hub demand. `provider_calls` counts actual dispatches. Cache hits, replay, fallback
 without dispatch, duplicate suppression and circuit rejection are therefore measurable avoided calls rather
 than fictitious provider traffic.
+
+When more than one provider exists, Hub demand and cache/replay remain product-level metrics. A cache hit has
+no honestly “avoided provider” unless an actual routing decision was durably made; it must not be attributed to
+whichever supplier happens to be first today. Provider success, billing and cost use only real provider-call
+evidence, and monetary totals remain grouped by currency.
 
 Successful JustOne business code `0` is recorded as billed according to its documented usage semantics, but
 money remains `costKind=unknown`, `costMinor=null` and `currency=null` unless an operator installs a reviewed
@@ -161,14 +204,34 @@ contribute to the same product without changing the public product contract. If 
 a provider-specific slice, it is a lineage filter over the canonical product—not a second raw-provider
 API or a duplicate dataset.
 
+Product display paging is client presentation over one already-returned response and creates no Hub usage or
+provider call. It may issue bounded media reads for newly visible products, but acquisition paging occurs only
+through an explicit `nextCursor` request with a new `Idempotency-Key`. The two controls must not share a label or
+silently trigger one another.
+
+Normalized `images[]` are data references and are never assigned directly to `img src` in Admin. The Hub
+safe-media relay accepts an authenticated consumer's committed search `requestId`, returned `itemId` and bounded
+`imageIndex`, not an arbitrary URL. It retrieves only the recorded public HTTPS raster reference with pinned
+validated DNS, redirect-by-redirect private-network rejection, no browser/provider credentials, and strict
+redirect/time/body/content-type/signature limits. A media read creates no ecommerce usage record or
+product-search/provider dispatch. It returns private Hub-origin bytes with defensive headers; failure falls
+back to a neutral local icon without changing the original search evidence.
+
 ## Compatibility and isolation
 
 - Existing `/api/v1/data/search`, canonical search, stored data products and three namespaced Night-All
   compatibility routes retain their contracts.
 - External-platform readiness is independent from Hub, Launcher and MX-H2I login/network readiness.
-- Public API keys require the explicit `ecommerce` grant. Management analytics stay on the Internal Admin
+- External ecommerce search and media require an ordinary `mih_live_` Hub Public API key plus the explicit
+  `ecommerce` grant; this is not a second product key. A valid legacy Test key with that grant sees
+  `ecommerce.ready=false` in capabilities, and both routes return `403 test_key_not_supported` before usage
+  reservation, committed-result/media lookup or provider dispatch. Management analytics stay on the Internal Admin
   listener and retain the existing Hub Admin Token-only source-management boundary; Launcher sessions do
   not gain access from a membership alone.
+- A missing ordinary Hub Public API key is `401 api_key_required`; invalid, expired or revoked is `401 invalid_api_key`;
+  a valid key lacking `ecommerce` is `403 platform_not_granted`. The server-only provider key never enters
+  Public authentication. Its absence or rejection becomes a sanitized external-platform availability or
+  capacity error rather than instructing the caller to replace a valid Hub key.
 - Provider secrets are either a public-process environment fallback or an isolated Admin-managed credential
   record. The public listener reads only the active JustOne credential required for dispatch. Ordinary
   management responses expose metadata only; plaintext can enter transient reveal-modal state solely after
@@ -176,13 +239,16 @@ API or a duplicate dataset.
   or logs.
 - The external-platform worker and ingest job use bounded queues and quotas; failure cannot block login or
   the serving of already-stored Hub data.
+- A browser ledger left ambiguous by an older Test-key workbench is retained only as a locked body,
+  `Idempotency-Key` and credential fingerprint for operator reconciliation. The current page does not validate or
+  replay it and never substitutes a Live key.
 
 ## Consequences
 
 Positive:
 
 - clients receive one stable, provider-neutral contract and observable freshness;
-- retries, page navigation and concurrent duplicates do not silently multiply paid calls;
+- retries, page navigation and concurrent duplicates do not silently multiply provider calls or procurement cost;
 - raw evidence, canonical data and actual cost/demand measurements remain connected;
 - additional external platforms can be compared without making their schemas public API contracts.
 
@@ -196,10 +262,18 @@ Costs:
 ## Acceptance gates
 
 - Public OpenAPI and narrative docs contain no JustOne identity, secret or upstream URL.
+- Test-key ecommerce capability discovery is not ready, and search/media reject before usage, store/media or
+  external I/O; the Admin workbench sends no Test-key request.
+- Runtime/UI copy identifies the current topology as one JustOne provider and does not advertise automatic
+  provider failover.
 - Request schema rejects unknown fields and `page + cursor`; it contains no `pageSize`.
 - Every next-page example uses a new `Idempotency-Key` and returns only the opaque Hub cursor.
+- Before another provider is enabled, cursor compatibility pins its provider and adapter contract; ambiguous,
+  billed or unusable dispatches never switch supplier.
 - Every success reports `sourceMode`, `capturedAt`, `servedAt` and `ageSeconds`.
 - Hub requests and actual provider calls can be reconciled without counting avoided calls as spend.
 - Unknown cost, balance, free quota and forecast values remain null/unknown, never zero.
 - Raw response evidence and each normalized item have a queryable logical archive path and call lineage.
+- Client-only display paging causes no acquisition request. Live media is loaded only through the tested,
+  reference-based Hub relay and never through a caller-supplied or direct provider URL.
 - Launcher, SessionGate, MX-H2I login, WireGuard, DNS and networking code have no diff from this feature.

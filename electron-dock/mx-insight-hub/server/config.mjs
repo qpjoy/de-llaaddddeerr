@@ -304,7 +304,7 @@ export function loadConfig(environment = process.env) {
     listenerMode,
     // Non-secret browser routing metadata. The Admin SPA receives this through
     // its authenticated session and still authenticates every public request
-    // with the caller's separately issued Hub consumer key.
+    // with the caller's ordinary Hub Public API key.
     publicApiBaseUrl: parsePublicUrl(environment.MX_INSIGHT_PUBLIC_URL),
     adminToken: listenerMode === 'public'
       ? environment.MX_INSIGHT_ADMIN_TOKEN?.trim() || null

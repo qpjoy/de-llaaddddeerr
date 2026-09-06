@@ -241,6 +241,21 @@ export class ExternalPlatformGateway {
     let durableRequestId = null
     let ownsReservation = false
     try {
+    // `test` is currently issuance metadata, not an isolated no-cost
+    // environment. Enforce this at the last trusted boundary before grants,
+    // quota reservation, cache lookup or provider dispatch so a browser or
+    // direct HTTP client cannot turn a legacy Test key into a provider
+    // dispatch that may consume quota or internal procurement cost.
+    if (
+      context.apiKey?.environment === 'test'
+      || context.apiKey?.prefix?.startsWith('mih_test_')
+    ) {
+      throw new AppError(
+        403,
+        'test_key_not_supported',
+        'Test API keys cannot dispatch external ecommerce acquisition',
+      )
+    }
     const grants = await this.usageStore.listGrants(context.consumer.id)
     if (!grants.includes(AUTHORIZATION_PLATFORM)) {
       throw new AppError(403, 'platform_not_granted', 'E-commerce data is not granted')
@@ -293,8 +308,8 @@ export class ExternalPlatformGateway {
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
       maxRequests: policy.maxRequests,
-      // A caller-supplied key names one immutable paid dispatch. Generated keys
-      // rotate with the freshness bucket, so neither form needs row reuse.
+      // A caller-supplied key names one immutable delivery attempt. Generated
+      // keys rotate with the freshness bucket, so neither form needs row reuse.
       replayWindowMs: null,
     })
     durableRequestId = reservation.request?.id || requestId
@@ -541,7 +556,7 @@ export class ExternalPlatformGateway {
         if (blockedOutcome === 'succeeded_unusable') {
           throw new AppError(409, errorCode, 'A recent response could not be normalized; do not retry automatically')
         }
-        throw new AppError(409, errorCode, 'An equal paid dispatch is already in progress')
+        throw new AppError(409, errorCode, 'An equal external provider dispatch is already in progress')
       }
 
       call = await this.platformStore.beginProviderCall({

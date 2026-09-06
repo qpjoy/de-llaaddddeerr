@@ -1609,7 +1609,8 @@ print_deploy_summary() {
 # End-to-end check of the data path, stage by stage.
 #
 # A single curl only proves the first hop. What actually needs verifying is that
-# one billed request lands in PostgreSQL, produces an outbox event, and reaches
+# one provider-backed request that may incur procurement cost lands in
+# PostgreSQL, produces an outbox event, and reaches
 # Elasticsearch -- four systems, each of which can fail while the one before it
 # reports success. Each stage is reported separately so a failure names itself.
 verify_data_path() {
@@ -1645,8 +1646,8 @@ verify_data_path() {
   fi
   say "  ${platform} is granted"
 
-  # --- 2. the billed upstream call -----------------------------------------
-  say "2/5 search (this calls Night-All and is billed)"
+  # --- 2. provider-backed call; may consume quota/procurement cost ----------
+  say "2/5 search (calls Night-All; may consume provider quota or procurement cost, not proof of Hub customer charging)"
   local before response items
   before="$(pg_count "SELECT count(*) FROM core.canonical_records WHERE platform = '${platform}'")"
   response="$(curl_with_protected_header \

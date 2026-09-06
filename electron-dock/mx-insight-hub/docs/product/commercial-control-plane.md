@@ -114,7 +114,8 @@ stateDiagram-v2
 发行流程：
 
 1. 验证成员 tenant role 和 consumer/subscription 状态；
-2. 选择 `test|live` environment、expiry、IP/CIDR、allowed origin（若适用）；
+2. 选择 `live` environment、expiry、IP/CIDR、allowed origin（若适用）；Test 仅保留为兼容元数据，
+   隔离门槛完成前不在管理台签发；
 3. 固化 entitlement snapshot 和最大 scope；
 4. 只显示一次 plaintext，PG 保存 HMAC digest、prefix、last four；
 5. audit 记录发行人、consumer、snapshot 和 reason，不保存 plaintext。
@@ -130,6 +131,14 @@ stateDiagram-v2
 再细分平台，必须新增 key-scoped grant/entitlement，不能只在签发界面保存一个无执行力
 的勾选列表。
 
+当前 `environment=test` 只是一项兼容元数据，尚未形成隔离沙箱，不能把 `mih_test_` 当作通用
+零费用凭据。管理台当前仅签发 Live Key。外部 ecommerce 另有 fail-closed 路由门禁：有授权的
+Test key 在 capabilities 中看到 `ecommerce.ready=false`，搜索与媒体读取均返回
+`403 test_key_not_supported`，且发生在 usage reservation、已提交结果/媒体读取和 provider dispatch
+之前。旧版遗留的 ambiguous Test 请求只保留原 body、原 `Idempotency-Key` 和指纹锁供运维核查；
+页面不验证原 secret、不发 capabilities/search/media，也不把它转换成 Live 请求。只有第 12 节
+隔离门槛全部满足后才能重新开放 Test 签发。
+
 轮换采用 overlap：先发第二把 key，验证流量，撤销旧 key。缓存鉴权必须有短 TTL 和主动失效。浏览器前端不长期保存 Admin token；公共 key 不进入 URL、日志、Kibana 或 Night-All。
 
 ## 7. 请求授权和额度顺序
@@ -137,6 +146,7 @@ stateDiagram-v2
 ```text
 authenticate key
   -> tenant/consumer/key/subscription state
+  -> route credential-class gate: external ecommerce accepts live only
   -> entitlement snapshot: platform/capability/dataset/field
   -> IP/environment/request constraints
   -> concurrency + request/record/byte/job/agent-token quota
@@ -167,6 +177,12 @@ authenticate key
 - 计费绝不从当前 `providerCalls`、HTTP 状态或 `items.length` 临时猜测；
 - 未知 upstream outcome 保留 reservation，进入 reconciliation，不自动免费重试。
 
+对 replay/cache delivery 引入客户计价前，每条不可变 delivery evidence 必须保存实际调用的
+API key ID，以及 consumer、subscription、entitlement 和 price-book version snapshot；或者
+合同必须明确只按 consumer 计价并在每次 delivery 固化该 consumer 的订阅快照。当前
+`usage_requests.api_key_id` 主要保留原始逻辑请求的 key，不能单独证明轮换后由哪把 key 发起了
+一次 replay，因此现阶段不得据此生成 replay 客户扣费。
+
 ## 9. 管理后台与 Launcher 集成
 
 Hub Admin 提供：
@@ -183,7 +199,7 @@ Launcher AppCenter 只展示入口和 offline-safe 摘要。未来 SSO 将短期
 
 ## 10. 对外接口分面
 
-- Public data API：consumer API key、稳定 schema、产品授权和 usage；
+- Public data API：一把 Hub Public API key、稳定 schema、consumer 级产品授权和 usage；
 - Customer self-service API：成员 token，只操作自己 tenant 的 consumer/key/subscription/usage；
 - Internal Admin API：Hub operator，高风险动作需要审批/audit；
 - Service integration API：Launcher/Night-All workload identity，精确 method/scope；
@@ -206,7 +222,7 @@ public/admin listener 继续物理分离。任何 public wildcard route 都不�
 - reserve、usage 和 ledger 在并发下守恒，余额永不由可变 aggregate 直接改写；
 - plan/group 版本更新不扩大既有 key 权限；
 - key revoke、member suspend、subscription suspend 在定义的传播 SLO 内生效；
-- test/live 数据、Key、配额和账本隔离；
+- 开放 Test 签发前，test/live 数据、Key、配额、账本和 provider dispatch 已隔离；
 - Launcher 登录不能绕过 Hub tenant role，Hub outage 不影响 Launcher/MX-H2I；
 - 缓存命中、stale 回退、partial/unknown 和合并 refresh 的计费均有合同测试；
 - 财务/usage/audit 导出可从 immutable evidence 复算。

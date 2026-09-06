@@ -10,6 +10,7 @@ import { loadConfig } from './config.mjs'
 import { HubService } from './hub-service.mjs'
 import { ExternalPlatformAdminService } from './external-platforms/admin.mjs'
 import { ExternalPlatformGateway } from './external-platforms/gateway.mjs'
+import { createExternalImageLoader } from './external-platforms/media.mjs'
 import { createExternalPlatformCredentialStore } from './external-platforms/credentials-store.mjs'
 import { createExternalPlatformStore } from './external-platforms/store.mjs'
 import { createAgentRuntime } from './agent/runtime.mjs'
@@ -140,6 +141,7 @@ export async function createRuntime(config = loadConfig()) {
     searchQueries: search?.queries ?? null,
     segmenter,
     externalPlatformCapabilities: () => externalPlatformGateway.capabilities(),
+    externalImageLoader: config.listenerMode === 'admin' ? null : createExternalImageLoader(),
   })
   const embedding = pool && search
     ? new EmbeddingPipeline({

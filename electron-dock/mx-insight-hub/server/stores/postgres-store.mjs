@@ -4346,6 +4346,22 @@ export class PostgresStore {
     return safe
   }
 
+  async getCommittedEcommerceImageSource({ requestId, consumerId, itemId, imageIndex }) {
+    const { rows } = await this.pool.query(
+      `SELECT response_body
+         FROM usage_requests
+        WHERE id = $1
+          AND consumer_id = $2
+          AND platform = 'ecommerce'
+          AND status = 'committed'
+          AND response_status = 200`,
+      [requestId, consumerId],
+    )
+    const item = rows[0]?.response_body?.data?.items?.find?.((candidate) => candidate?.id === itemId)
+    const sourceUrl = item?.images?.[imageIndex]
+    return typeof sourceUrl === 'string' && sourceUrl ? sourceUrl : null
+  }
+
   async usage(filters = {}) {
     const values = []
     const clauses = []

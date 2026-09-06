@@ -1184,7 +1184,7 @@ export function createApp({
             memberships: principal.memberships,
             identityProvider: identity?.enabled ? 'mx-launcher' : null,
             // Deployment routing metadata, not a credential. Browser clients
-            // still need an explicit Hub consumer key for every public call.
+            // still need their ordinary Hub Public API key for every public call.
             publicApiBaseUrl,
             // Diagnostic pair for federated sessions: what the provider said,
             // and what would have granted platform admin.
@@ -4085,6 +4085,75 @@ export function createApp({
         sendJson(response, 200, { ...payload, requestId })
         return
       }
+      if (request.method === 'GET' && pathname === '/api/v1/data/ecommerce/products/media') {
+        const downstream = new AbortController()
+        let deliveryTimer = null
+        let resolveDelivery
+        let deliveryFinished = false
+        const deliveryComplete = new Promise((resolve) => { resolveDelivery = resolve })
+        const finishDelivery = () => {
+          if (deliveryFinished) return
+          deliveryFinished = true
+          if (deliveryTimer) clearTimeout(deliveryTimer)
+          request.removeListener('aborted', cancelDownstream)
+          response.removeListener('close', cancelDownstream)
+          response.removeListener('finish', finishDelivery)
+          resolveDelivery()
+        }
+        const cancelDownstream = () => {
+          downstream.abort()
+          finishDelivery()
+        }
+        request.once('aborted', cancelDownstream)
+        response.once('close', cancelDownstream)
+        response.once('finish', finishDelivery)
+        if (request.aborted || response.destroyed) {
+          cancelDownstream()
+          return
+        }
+        const context = await requirePublic(request)
+        if (downstream.signal.aborted || request.aborted || response.destroyed) {
+          cancelDownstream()
+          return
+        }
+        const allowedQueryFields = new Set(['requestId', 'itemId', 'imageIndex'])
+        for (const field of searchParams.keys()) {
+          if (!allowedQueryFields.has(field)) {
+            throw new AppError(400, 'unsupported_fields', `${field} query parameter is not allowed`)
+          }
+        }
+        for (const field of allowedQueryFields) {
+          if (searchParams.getAll(field).length !== 1) {
+            throw new AppError(400, 'invalid_request', `${field} query parameter must appear exactly once`)
+          }
+        }
+        const media = await service.ecommerceProductImage(context, {
+          requestId: requiredQuery(searchParams, 'requestId'),
+          itemId: requiredQuery(searchParams, 'itemId'),
+          imageIndex: requiredQuery(searchParams, 'imageIndex'),
+          signal: downstream.signal,
+          deliveryComplete,
+        })
+        if (downstream.signal.aborted || response.destroyed) {
+          cancelDownstream()
+          return
+        }
+        deliveryTimer = setTimeout(() => response.destroy(), 15_000)
+        deliveryTimer.unref?.()
+        response.writeHead(200, {
+          'content-type': media.contentType,
+          'content-length': media.body.length,
+          'cache-control': 'private, no-store',
+          'content-security-policy': "default-src 'none'; sandbox",
+          'cross-origin-resource-policy': 'same-origin',
+          'referrer-policy': 'no-referrer',
+          vary: 'Authorization',
+          'x-content-type-options': 'nosniff',
+          'x-mx-insight-request-id': requestId,
+        })
+        response.end(media.body)
+        return
+      }
       if (request.method === 'GET' && pathname === '/api/v1/data/mobile-commerce/items') {
         const context = await requirePublic(request)
         sendJson(response, 200, {
@@ -4466,6 +4535,7 @@ export function createApp({
 
       throw new AppError(404, 'not_found', 'Route not found')
     } catch (error) {
+      if (response.destroyed || response.writableEnded) return
       const appError = error instanceof AppError
         ? error
         : new AppError(500, 'internal_error', 'Internal server error')

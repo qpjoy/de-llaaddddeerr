@@ -101,10 +101,10 @@ exact fingerprint.
 
 The compatibility facade attempts the live call first for every new
 `Idempotency-Key`. A committed live or stale delivery is permanently bound to
-that key and exact request fingerprint, so retrying it never dispatches or bills
-again; a deliberately new live call requires a new key. This immutable replay is
+that `Idempotency-Key` and exact request fingerprint, so retrying it never dispatches
+the provider again; a deliberately new live call requires a new `Idempotency-Key`. This immutable replay is
 not a fresh-result cache: an existing compatibility snapshot never skips the live
-attempt for a new key.
+attempt for a new `Idempotency-Key`.
 
 A prior complete public response may be returned only when all of the following
 are true:
@@ -135,11 +135,11 @@ snapshot.
 
 Without a usable exact snapshot, an unusable HTTP 2xx response returns
 `502 upstream_outcome_unknown`, holds usage as `unknown`, and cannot redispatch
-the same key. Definite Night-All `400`, `404`, `409`, `422`
+the same `Idempotency-Key`. Definite Night-All `400`, `404`, `409`, `422`
 and `429` statuses retain their HTTP status behind the safe `night_all_rejected`
 error. Other definite upstream failures map to HTTP 502. Network failure or Hub
 timeout after dispatch maps to HTTP 502 `upstream_outcome_unknown`, leaves the
-usage request `unknown`, and must not be retried automatically with a new key.
+usage request `unknown`, and must not be retried automatically with a new `Idempotency-Key`.
 
 ### 4. Keep compatibility snapshots separate from canonical search
 

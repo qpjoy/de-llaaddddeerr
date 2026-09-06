@@ -1654,7 +1654,11 @@ paths:
         both an active fixed ingestion
         source and both valid Hub serving indexes; it is not an additional grant
         or a guarantee of freshness, and an inactive source may still have
-        previously indexed records available.
+        previously indexed records available. For a valid legacy test key whose
+        consumer has the ecommerce grant, the ecommerce entry remains visible
+        but ready is forced to false. Test is compatibility metadata, not an
+        external ecommerce sandbox. Capability discovery itself creates no
+        ecommerce usage reservation and invokes no provider.
       responses:
         "200":
           description: Capabilities granted to this consumer.
@@ -1867,18 +1871,27 @@ paths:
       operationId: searchExternalCommerceProducts
       summary: Search marketplace products through the governed external data gateway.
       description: >-
-        Requires the ecommerce platform grant. The strict body accepts only
-        marketplace, query, page, cursor, sort and price; pageSize and routing
+        Uses the ordinary Hub Public API key issued through API Keys and requires
+        the ecommerce grant on its owning consumer; every active key for that
+        consumer inherits the grant, so no ecommerce-specific or provider key is
+        accepted. External ecommerce acquisition accepts only a live Hub key. A
+        valid legacy test key receives 403 test_key_not_supported before grant
+        lookup, usage reservation, cache lookup or provider dispatch; the
+        rejection creates no usage reservation and invokes no provider. The strict
+        body accepts only marketplace, query, page, cursor,
+        sort and price; pageSize and routing
         fields are not part of this contract. page and cursor are mutually
         exclusive. Prefer Hub's opaque nextCursor, keep marketplace/query/sort/
         price unchanged, and use a new Idempotency-Key for every next page. Hub
         may serve an exact fresh snapshot or exact last-good fallback, but never
         labels stored data as live. External platform identity, credentials,
-        endpoint coordinates and raw responses are not exposed.
+        endpoint coordinates, provider rate/balance/free quota, procurement
+        amounts, customer invoices and raw responses are not exposed. sourceMode
+        is delivery evidence, not a customer price.
       x-mx-error-codes:
         "400": [invalid_request, invalid_marketplace, unsupported_marketplace, invalid_query, invalid_page, invalid_cursor, invalid_pagination, cursor_scope_mismatch, continuation_required, unsupported_sort, invalid_price, unsupported_price_filter, unsupported_request_field, invalid_idempotency_key]
         "401": [api_key_required, invalid_api_key]
-        "403": [platform_not_granted]
+        "403": [platform_not_granted, test_key_not_supported]
         "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
         "413": [payload_too_large]
         "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
@@ -1891,7 +1904,7 @@ paths:
           description: >-
             Optional but recommended for explicit replay control. Reuse it only
             for a transport retry of the exact same page request. Every next-page
-            request changes the body and must use a new key. When omitted, Hub
+            request changes the body and must use a new Idempotency-Key. When omitted, Hub
             derives a short-lived freshness-bucket key for the normalized request.
           schema:
             type: string
@@ -1943,6 +1956,83 @@ paths:
         "429": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /data/ecommerce/products/media:
+    get:
+      operationId: getExternalCommerceProductMedia
+      summary: Read one retained product image through the governed Hub media relay.
+      x-mx-strict-query: true
+      description: >-
+        Authenticates an ordinary live Hub Public API key and requires the same
+        consumer identity that received a committed ecommerce search result.
+        requestId identifies that response, itemId identifies one
+        returned item and imageIndex selects one of its retained images. Hub
+        never accepts an arbitrary URL on this endpoint. The relay permits
+        bounded public HTTPS raster images only, validates DNS and every
+        redirect, and rejects private-network destinations, oversized bodies
+        and mismatched content. Only JPEG, PNG and WebP are accepted. The three
+        documented parameters are the complete query allowlist. This read
+        creates no Hub usage record and dispatches no product-search request. A
+        valid legacy test key receives 403 test_key_not_supported before any
+        committed-result lookup or media-loader call.
+      x-mx-error-codes:
+        "400": [invalid_request, unsupported_fields]
+        "401": [api_key_required, invalid_api_key]
+        "403": [platform_not_granted, test_key_not_supported]
+        "404": [external_media_not_found]
+        "413": [external_media_too_large]
+        "415": [external_media_type_rejected, external_media_content_invalid, external_media_dimensions_rejected]
+        "422": [external_media_url_invalid, external_media_url_blocked, external_media_host_blocked]
+        "429": [external_media_rate_limited, external_media_busy]
+        "502": [external_media_unavailable, external_media_redirect_rejected]
+        "503": [external_media_unavailable]
+        "504": [external_media_timeout]
+      parameters:
+        - name: requestId
+          in: query
+          required: true
+          description: requestId from the committed ecommerce search response that contained the image reference.
+          schema: { type: string, format: uuid }
+        - name: itemId
+          in: query
+          required: true
+          description: Exact item id from that response.
+          schema: { type: string, minLength: 1, maxLength: 512 }
+        - name: imageIndex
+          in: query
+          required: true
+          description: Zero-based index into that item's images array.
+          schema: { type: integer, minimum: 0, maximum: 19 }
+      responses:
+        "200":
+          description: >-
+            A bounded image retained by the same consumer search response and
+            fetched through the Hub media relay. This read does not create Hub
+            usage or dispatch a product-search request.
+          headers:
+            x-mx-insight-request-id:
+              description: Request identifier for this media read, distinct from the search requestId query parameter.
+              schema: { type: string, format: uuid }
+            cache-control:
+              description: Consumer-private browser caching policy; shared caches must not reuse it across authorization contexts.
+              schema: { type: string, example: "private, no-store" }
+            vary:
+              description: Keeps authenticated media cache entries distinct by consumer credential.
+              schema: { type: string, example: "Authorization" }
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
   /data/search:
     post:
       operationId: searchData
@@ -2049,8 +2139,10 @@ paths:
           in: header
           required: true
           description: >-
-            Permanently names one immutable paid dispatch for this exact path and
-            normalized body. Reuse always replays that result; use a new key only
+            Permanently names one immutable provider dispatch for this exact path
+            and normalized body. It may consume provider quota or Hub procurement
+            cost; it does not prove a Hub customer charge. Reuse always replays
+            that result; use a new Idempotency-Key only
             when intentionally requesting a new live call.
           schema: { type: string, minLength: 8, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
       requestBody:
@@ -3494,10 +3586,19 @@ components:
       type: http
       scheme: bearer
       bearerFormat: MX-API-Key
+      description: >-
+        Ordinary Hub Public API key issued through API Keys. It resolves to one
+        consumer. Hub resolves grants and quotas for that identity; future
+        customer pricing will resolve through its versioned subscription and
+        price-book snapshot without requiring another credential.
     apiKeyHeader:
       type: apiKey
       in: header
       name: x-api-key
+      description: >-
+        The same ordinary Hub Public API key as bearerKey, supplied through
+        x-api-key instead of Authorization. This is not a provider credential or
+        a product-specific key.
   parameters:
     AgentSequenceKey:
       name: sequenceKey
@@ -4729,7 +4830,18 @@ components:
       properties:
         consumerId: { type: string, format: uuid }
         name: { type: string, minLength: 1 }
-        environment: { type: string, enum: [live, test], default: live }
+        environment:
+          type: string
+          enum: [live, test]
+          default: live
+          description: >-
+            Compatibility metadata. The Admin UI currently issues live keys only.
+            test does not yet isolate data, grants, quotas, ledgers or provider
+            dispatch generally and must not be treated as a sandbox or zero-cost
+            key. External ecommerce is separately live-only: capabilities forces
+            ecommerce ready=false and search/media return
+            403 test_key_not_supported without a usage reservation, provider
+            call or media-loader call.
         expiresInDays:
           type: integer
           minimum: 1
@@ -4761,7 +4873,14 @@ components:
           type: string
           description: Non-secret display prefix; never sufficient for authentication.
         lastFour: { type: string, minLength: 4, maxLength: 4 }
-        environment: { type: string, enum: [live, test] }
+        environment:
+          type: string
+          enum: [live, test]
+          description: >-
+            Compatibility metadata; test is not currently an isolated sandbox or
+            a guarantee of zero provider cost. External ecommerce is live-only;
+            for test, capabilities forces ecommerce ready=false and search/media
+            return 403 test_key_not_supported before usage or external I/O.
         status:
           type: string
           enum: [active, revoked]
@@ -6007,7 +6126,7 @@ components:
           enum: [qualified, all]
           description: Valid only with explicit platform=public_opinion. qualified includes only status=qualified candidates and defaults the additional minQualityScore floor to 80; 0 does not reclassify rows. all requires from, to and at least one of province, countryCode or location; omit minQualityScore to retain unscored candidates.
         minQualityScore: { type: integer, minimum: 0, maximum: 100, description: Additional request floor valid only with includeCandidates=qualified or all; it does not change publication status or lower a record qualification threshold. }
-        province: { type: string, minLength: 1, maxLength: 64, description: Exact ISO 3166-2:CN code or supported Chinese province name; valid only with explicit platform=public_opinion. }
+        province: { type: string, minLength: 1, maxLength: 64, description: "Exact ISO 3166-2:CN code or supported Chinese province name; valid only with explicit platform=public_opinion." }
         countryCode: { type: string, pattern: "^[A-Za-z]{2}$", description: Exact ISO 3166-1 alpha-2 country; valid only with explicit platform=public_opinion. }
         location: { type: string, minLength: 1, maxLength: 160, description: Exact normalized location label; valid only with explicit platform=public_opinion. }
         from: { type: string, format: date-time, description: Inclusive lower bound. Formal uses eventTime; an explicit candidate falls back to collectedAt when eventTime is absent. }
@@ -6033,7 +6152,7 @@ components:
           enum: [qualified, all]
           description: Valid only with explicit platform=public_opinion. qualified includes only status=qualified candidates and defaults the additional minQualityScore floor to 80; 0 does not reclassify rows. all requires from, to and at least one of province, countryCode or location; omit minQualityScore to retain unscored candidates.
         minQualityScore: { type: integer, minimum: 0, maximum: 100, description: Additional request floor valid only with includeCandidates=qualified or all; it does not change publication status or lower a record qualification threshold. }
-        province: { type: string, minLength: 1, maxLength: 64, description: Exact ISO 3166-2:CN code or supported Chinese province name; valid only with explicit platform=public_opinion. }
+        province: { type: string, minLength: 1, maxLength: 64, description: "Exact ISO 3166-2:CN code or supported Chinese province name; valid only with explicit platform=public_opinion." }
         countryCode: { type: string, pattern: "^[A-Za-z]{2}$", description: Exact ISO 3166-1 alpha-2 country; valid only with explicit platform=public_opinion. }
         location: { type: string, minLength: 1, maxLength: 160, description: Exact normalized location label; valid only with explicit platform=public_opinion. }
         from: { type: string, format: date-time, description: Inclusive lower bound. Formal uses eventTime; an explicit candidate falls back to collectedAt when eventTime is absent. }

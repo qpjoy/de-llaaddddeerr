@@ -1093,6 +1093,20 @@ export class MemoryStore {
     return clone(safe)
   }
 
+  async getCommittedEcommerceImageSource({ requestId, consumerId, itemId, imageIndex }) {
+    const record = this.requests.get(requestId)
+    if (
+      !record
+      || record.consumerId !== consumerId
+      || record.platform !== 'ecommerce'
+      || record.status !== 'committed'
+      || record.responseStatus !== 200
+    ) return null
+    const item = record.responseBody?.data?.items?.find?.((candidate) => candidate?.id === itemId)
+    const sourceUrl = item?.images?.[imageIndex]
+    return typeof sourceUrl === 'string' && sourceUrl ? sourceUrl : null
+  }
+
   async usage({ tenantId, consumerId, from, to } = {}) {
     const fromDate = from ? new Date(from) : null
     const toDate = to ? new Date(to) : null

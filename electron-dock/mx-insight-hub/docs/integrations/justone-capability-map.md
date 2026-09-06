@@ -1,6 +1,7 @@
 # JustOne capability map and Hub adoption plan
 
-Status: five marketplace product-search adapters verified; every other listed capability is inventory only.
+Status: five marketplace product-search mappings verified on the current single-provider JustOne runtime;
+every other listed capability is inventory only.
 
 Last reviewed: 2026-09-06.
 
@@ -39,6 +40,11 @@ Provider adapter contract: justone.product-search.v1
 Canonical dataset: ecommerce.products.v1
 ```
 
+The four identifiers above are not synonyms. `ecommerce` is the Public authorization and Hub usage scope;
+`ecommerce.products.search` is the Hub business operation; the marketplace is a caller-visible business source;
+and `justone` is an internal supplier. Granting `ecommerce` does not grant or reveal a provider account, and a
+provider name is never accepted in the Public request.
+
 | Hub marketplace | Provider endpoint descriptor | Method | Accepted item paths | Marketplace-specific request behavior | Catalog source |
 | --- | --- | --- | --- | --- | --- |
 | `taobao` | `taobao-tmall.product-search.v1` | GET | `data.items`, `data.itemList` | sort + price; default `sales_desc` | `source-catalog-0058` |
@@ -51,24 +57,69 @@ The provider API documents response `data` broadly. Hub accepts only the item-co
 shape is a contract change: capture a redacted fixture, add a narrow path, run adapter/contract/ingest tests,
 and review discarded-item behavior. A permissive recursive search is not allowed.
 
+### Current topology and future provider routing
+
+The Public contract is provider-neutral, but the released runtime is not yet multi-provider: JustOne is the
+only constructed ecommerce provider adapter, and there is no automatic supplier failover. `fresh_cache` and
+`stored_fallback` mean exact Hub snapshot reuse; they do not mean that Hub called another supplier. Candidate
+providers in this or the source-catalog inventory are not runtime routes.
+
+Before a second supplier is released, Hub must add a code-owned provider registry and a deterministic route for
+each `operation + marketplace`. Hosts, endpoint paths and response contracts remain compiled and reviewed; only
+secret-free enablement, priority and revision may be operator configuration. Selection happens before a
+`provider_calls` row or network request. A candidate that is disabled, unverified, uncredentialed, unsupported
+for the request or already circuit-open may be skipped without cost.
+
+The first multi-provider release must still permit at most one actual provider dispatch per Hub usage request.
+Once dispatch begins, Hub does not change supplier after an outcome with `billed=true`, `billed=null`,
+`unknown` or `succeeded_unusable`; it serves an exact stored snapshot when allowed or returns the stable Public
+error. Even a definite unbilled rejection is not a cross-provider retry until the call ledger supports ordered
+attempt evidence and a reviewed total attempt/cost budget. This prevents a timeout or unparseable paid response
+from becoming two supplier charges hidden behind one customer request.
+
 ### Admin workbench runtime boundary
 
 The released Public path remains provider-neutral. In a split production deployment, `MX_INSIGHT_PUBLIC_URL`
 configures the Public HTTP(S) origin on the Admin server. A successful authenticated Admin session exposes that
 origin as `publicApiBaseUrl`, allowing the SPA to route bearer-key calls to the Public listener at runtime. The
 value is routing metadata, not a credential or grant; it contains no credentials/path/query/fragment and never
-replaces the Hub consumer API Key. Build-time Public URLs and the same-host `:18150` convention are fallbacks.
+replaces the ordinary Hub Public API Key. Build-time Public URLs and the same-host `:18150` convention are fallbacks.
 
 The workbench's safe-demo search is browser-local and never calls the Public product-search operation or the
-provider. Admin session/bootstrap traffic can still occur. Live results use neutral product icons by default;
-the management browser does not automatically load provider image URLs. This avoids leaking an operator's IP,
-cookies or viewing behavior to an upstream image host and avoids treating an untrusted URL as UI content.
+provider. Admin session/bootstrap traffic can still occur. The management browser never assigns a provider
+image URL to `img src`. For a visible live item it may call the authenticated Hub media endpoint with the same
+consumer's committed search `requestId`, normalized `itemId` and bounded `imageIndex`; missing or rejected media
+uses the neutral local icon.
 
-For an ambiguous live outcome, recovery preserves the exact Public path, normalized body and
-`Idempotency-Key`. A different key can create a second billable dispatch. Replacing the Hub consumer key clears
-the workbench's local replay state, and a stored request cannot be replayed when its consumer fingerprint does
-not match. None of this exposes the JustOne credential or provider endpoint identity through the Public
-contract.
+`images[]` in the Public product result remains normalized data, not permission to build an arbitrary proxy.
+`GET /api/v1/data/ecommerce/products/media` accepts no URL, reads only a retained image belonging to a committed
+HTTP-200 ecommerce response for the authenticated consumer, permits bounded public HTTPS JPEG/PNG/WebP content
+and validates DNS plus every redirect against private-network targets. Its three query keys are a strict
+allowlist. It sends no browser cookie or provider credential and validates media type/signature, time and body
+size. Per-consumer rate/concurrency and global relay concurrency have explicit 429 failures. This media read
+creates no Hub usage record and dispatches no product-search request; `private` caching varies on Authorization,
+and failure changes only presentation rather than the original search evidence.
+
+External ecommerce search and media accept only the ordinary `mih_live_` Hub Public API Key; there is no
+JustOne-product credential. A valid legacy Test key with the ecommerce grant sees `ready=false` in capabilities,
+and search/media return `403 test_key_not_supported` before usage reservation, committed-result/media lookup or
+external I/O. If an older workbench left an ambiguous Test-key record, it preserves the exact body,
+`Idempotency-Key` and credential fingerprint only for operator reconciliation and sends no request.
+
+For an ambiguous Live outcome, recovery preserves the exact Public path, normalized body and
+`Idempotency-Key`. A different `Idempotency-Key` can create a second live dispatch and another provider-cost
+event. Replacing the Hub Public API key may clear only a resolved local replay shortcut. An ambiguous lock is
+retained; an API-key-secret fingerprint mismatch rejects replay and requires the original Live secret or operator
+reconciliation, without guessing that a replacement belongs to the same consumer or unlocking a new request.
+Backend authorization and idempotency remain consumer-scoped.
+None of this exposes the JustOne credential or provider endpoint identity through the Public contract.
+
+The Public authentication order is also independent of JustOne: a missing Hub Public API key is
+`401 api_key_required`; an invalid, expired or revoked Hub key is `401 invalid_api_key`; a valid Test key is
+`403 test_key_not_supported`; a valid Live key without the `ecommerce` grant is `403 platform_not_granted`.
+The upstream JustOne key is accepted only inside the server
+adapter. Its absence or rejection becomes a sanitized external-platform availability/capacity error and never
+an `invalid_api_key` response, so callers are not instructed to replace a valid Hub credential.
 
 ## 3. Provider business codes and billing evidence
 
@@ -90,6 +141,10 @@ mapped non-zero codes are recorded as not billed:
 Transport timeout or malformed content can have an unknown billing outcome. Hub records `billed=null`, blocks
 blind redispatch for the fingerprint cooldown and tells the public client not to retry automatically. It never
 converts unknown to zero.
+
+This no-redispatch rule is provider-neutral. Adding another provider must not turn `unknown`, billed success or
+billed-but-unusable evidence from JustOne into permission to call the next supplier for the same logical
+request.
 
 ## 4. Ecommerce candidates
 
@@ -178,6 +233,12 @@ The current product-search archive convention is:
 justone/{marketplace}/product-search/v1/{yyyy-mm-dd}/responses/{sha256}.json
 justone/{marketplace}/product-search/v1/{yyyy-mm-dd}/items/{sha256}.json
 ```
+
+The current encrypted cursor state is implicitly JustOne because it is the only provider. Before another
+provider can serve the same Public operation, the next cursor-state version must carry the selected provider
+key and provider contract version inside the consumer-scoped ciphertext. Existing cursors continue to resolve
+as JustOne. A next page stays with its pinned provider even after route priority changes; Hub never passes one
+provider's private continuation to another.
 
 ## 8. Quota, price and free-credit roadmap
 

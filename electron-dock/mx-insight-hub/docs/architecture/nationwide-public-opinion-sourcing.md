@@ -70,7 +70,8 @@ pending/rejected/failed candidate 仍可进入全国 `CN` 结果，且 `province
 
 现有 `province-coverage`、`/provinces/:province/items`、item detail 与搜索接口保持原路径、
 默认值、授权和 cursor 语义，可继续用于“可用数/缺口”和 formal/candidate 受控视图。浏览器/
-Electron renderer 不保存 Hub API key；正式产品通过 AppCenter/BFF 以 consumer key 访问。
+Electron renderer 不保存 Hub API Key；正式产品通过 AppCenter/BFF 以该 consumer 的普通
+Hub Public API Key 访问，不签发产品专用的第二把凭据。
 该读链路不修改 MX-H2I 的登录、lease、WireGuard、route、DNS/PAC 或用户联网状态机。
 
 ## 内容权利边界

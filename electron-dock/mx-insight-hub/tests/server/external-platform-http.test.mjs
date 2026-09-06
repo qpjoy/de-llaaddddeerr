@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
+import { randomUUID } from 'node:crypto'
+import { createServer, request as httpRequest } from 'node:http'
 import { test } from 'node:test'
 import { createApp } from '../../server/app.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
@@ -49,12 +50,30 @@ async function close(server) {
   })
 }
 
-test('public ecommerce route separates live, fresh cache and idempotent replay accounting', async () => {
+test('one consumer grant covers rotated keys while ecommerce accounting keeps delivery modes separate', async () => {
   const usageStore = new MemoryStore()
-  const service = new HubService({ store: usageStore, adapter: {}, apiKeyPepper: PEPPER })
+  const mediaLoads = []
+  const service = new HubService({
+    store: usageStore,
+    adapter: {},
+    apiKeyPepper: PEPPER,
+    externalImageLoader: async (sourceUrl, options) => {
+      mediaLoads.push({ sourceUrl, options })
+      return { body: Buffer.from('verified-image'), contentType: 'image/png' }
+    },
+  })
   const tenant = await service.createTenant({ name: 'HTTP Tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'HTTP Consumer' })
   const apiKey = await service.createApiKey({ consumerId: consumer.id, name: 'HTTP Key' })
+  const rotatedApiKey = await service.createApiKey({ consumerId: consumer.id, name: 'Rotated HTTP Key' })
+  const testApiKey = await service.createApiKey({
+    consumerId: consumer.id,
+    name: 'Legacy Test HTTP Key',
+    environment: 'test',
+  })
+  // Simulate a row created before environment metadata was backfilled. The
+  // immutable prefix remains authoritative enough to fail closed.
+  usageStore.apiKeys.get(testApiKey.id).environment = 'live'
   await service.putPlatformConfiguration('ecommerce', {
     tenantId: tenant.id,
     consumerId: consumer.id,
@@ -62,6 +81,11 @@ test('public ecommerce route separates live, fresh cache and idempotent replay a
     maxRequests: 10,
     windowSeconds: 3_600,
     maxPageSize: 20,
+  })
+  await usageStore.setPlatformGrant(consumer.id, 'youtube', true)
+  service.adapter.capabilities = async () => ({
+    // A broad legacy adapter must not override the Test-key readiness gate.
+    data: { platforms: [{ platform: 'ecommerce', ready: true }], legacySearch: null },
   })
 
   let adapterCalls = 0
@@ -76,7 +100,7 @@ test('public ecommerce route separates live, fresh cache and idempotent replay a
             items: [{
               id: 'jd:sku-1', marketplace: 'jd', title: 'Camera', url: null,
               pricing: { current: '399', original: null, currency: 'CNY' },
-              shop: { id: null, name: null }, images: [],
+              shop: { id: null, name: null }, images: ['https://images.example.test/camera.png'],
               signals: { sales: null, reviewCount: null, location: null },
               attributes: { brand: null, category: null },
             }],
@@ -110,6 +134,7 @@ test('public ecommerce route separates live, fresh cache and idempotent replay a
     reservationLeaseMs: 150_000,
     logger: { warn() {}, error() {} },
   })
+  service.externalPlatformCapabilities = () => gateway.capabilities()
   const app = createApp({
     service,
     store: usageStore,
@@ -121,11 +146,11 @@ test('public ecommerce route separates live, fresh cache and idempotent replay a
   })
   const server = createServer(app)
   const baseUrl = await listen(server)
-  const request = async (idempotencyKey) => {
+  const request = async (idempotencyKey, secret = apiKey.secret) => {
     const response = await fetch(`${baseUrl}${PATH}`, {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${apiKey.secret}`,
+        authorization: `Bearer ${secret}`,
         'content-type': 'application/json',
         'idempotency-key': idempotencyKey,
       },
@@ -154,8 +179,38 @@ test('public ecommerce route separates live, fresh cache and idempotent replay a
     assert.equal(adapterCalls, 0)
     assert.equal(platformStore.calls.size, 0)
 
+    const testCapabilities = await fetch(`${baseUrl}/api/v1/data/capabilities`, {
+      headers: { authorization: `Bearer ${testApiKey.secret}` },
+    })
+    const testCapabilitiesPayload = await testCapabilities.json()
+    const testEcommerce = testCapabilitiesPayload.data.platforms.find((entry) => entry.platform === 'ecommerce')
+    assert.equal(testCapabilities.status, 200)
+    assert.equal(testEcommerce?.ready, false)
+
+    const rejectedTest = await request('http-test-key-0001', testApiKey.secret)
+    assert.equal(rejectedTest.response.status, 403)
+    assert.equal(rejectedTest.payload.error.code, 'test_key_not_supported')
+
+    const rejectedTestMediaUrl = new URL('/api/v1/data/ecommerce/products/media', baseUrl)
+    rejectedTestMediaUrl.searchParams.set('requestId', randomUUID())
+    rejectedTestMediaUrl.searchParams.set('itemId', 'jd:sku-1')
+    rejectedTestMediaUrl.searchParams.set('imageIndex', '0')
+    const rejectedTestMedia = await fetch(rejectedTestMediaUrl, {
+      headers: { authorization: `Bearer ${testApiKey.secret}` },
+    })
+    assert.equal(rejectedTestMedia.status, 403)
+    assert.equal((await rejectedTestMedia.json()).error.code, 'test_key_not_supported')
+    assert.equal(adapterCalls, 0)
+    assert.equal(mediaLoads.length, 0)
+    assert.equal(platformStore.calls.size, 0)
+    const usageAfterTestRejection = await usageStore.usage({ consumerId: consumer.id })
+    assert.equal(usageAfterTestRejection.requests, 0)
+    assert.equal(usageAfterTestRejection.committed, 0)
+    assert.equal(usageAfterTestRejection.units, 0)
+    assert.deepEqual(usageAfterTestRejection.byPlatform, {})
+
     const live = await request('http-live-key-0001')
-    const cached = await request('http-cache-key-001')
+    const cached = await request('http-cache-key-001', rotatedApiKey.secret)
 
     assert.equal(live.response.status, 200)
     assert.equal(cached.response.status, 200)
@@ -188,7 +243,7 @@ test('public ecommerce route separates live, fresh cache and idempotent replay a
     assert.equal(usageAfterCache.committed, 2)
     assert.equal(usageAfterCache.units, 2)
 
-    const replay = await request('http-live-key-0001')
+    const replay = await request('http-live-key-0001', rotatedApiKey.secret)
     assert.equal(replay.response.status, 200)
     assert.equal(replay.payload.meta.sourceMode, 'idempotent_replay')
     assert.equal(replay.response.headers.get('x-mx-insight-source-mode'), 'idempotent_replay')
@@ -197,6 +252,34 @@ test('public ecommerce route separates live, fresh cache and idempotent replay a
     assert.equal(replay.payload.requestId, live.payload.requestId)
     assert.equal(replay.payload.meta.capturedAt, capturedAt)
     assert.deepEqual(replay.payload.data.items, live.payload.data.items)
+
+    const mediaUrl = new URL('/api/v1/data/ecommerce/products/media', baseUrl)
+    mediaUrl.searchParams.set('requestId', live.payload.requestId)
+    mediaUrl.searchParams.set('itemId', live.payload.data.items[0].id)
+    mediaUrl.searchParams.set('imageIndex', '0')
+    const mediaHeaders = { authorization: `Bearer ${rotatedApiKey.secret}` }
+
+    const unsupportedUrl = new URL(mediaUrl)
+    unsupportedUrl.searchParams.set('url', 'https://attacker.invalid/image.png')
+    const unsupported = await fetch(unsupportedUrl, { headers: mediaHeaders })
+    assert.equal(unsupported.status, 400)
+    assert.equal((await unsupported.json()).error.code, 'unsupported_fields')
+
+    const repeated = await fetch(`${mediaUrl}&imageIndex=1`, { headers: mediaHeaders })
+    assert.equal(repeated.status, 400)
+    assert.equal((await repeated.json()).error.code, 'invalid_request')
+
+    const media = await fetch(mediaUrl, { headers: mediaHeaders })
+    assert.equal(media.status, 200)
+    assert.equal(media.headers.get('content-type'), 'image/png')
+    assert.equal(media.headers.get('cache-control'), 'private, no-store')
+    assert.equal(media.headers.get('vary'), 'Authorization')
+    assert.equal(media.headers.get('x-content-type-options'), 'nosniff')
+    assert.equal(media.headers.get('access-control-allow-origin'), '*')
+    assert.equal(Buffer.from(await media.arrayBuffer()).toString(), 'verified-image')
+    assert.equal(mediaLoads.length, 1)
+    assert.equal(mediaLoads[0].sourceUrl, 'https://images.example.test/camera.png')
+    assert.equal(mediaLoads[0].options.cacheScope, consumer.id)
 
     const usageAfterReplay = await usageStore.usage({ consumerId: consumer.id })
     assert.deepEqual(usageAfterReplay, usageAfterCache)
@@ -221,5 +304,59 @@ test('public ecommerce route separates live, fresh cache and idempotent replay a
   } finally {
     await close(server)
     await usageStore.close()
+  }
+})
+
+test('media route does not begin a relay after the client disconnects during authentication', async () => {
+  let releaseAuthentication
+  let authenticationStarted
+  const authenticationStartedPromise = new Promise((resolve) => { authenticationStarted = resolve })
+  const authenticationReleasePromise = new Promise((resolve) => { releaseAuthentication = resolve })
+  let mediaCalls = 0
+  const service = {
+    async authenticate() {
+      authenticationStarted()
+      await authenticationReleasePromise
+      return { consumer: { id: randomUUID() } }
+    },
+    async ecommerceProductImage() {
+      mediaCalls += 1
+      return { body: Buffer.from('must-not-run'), contentType: 'image/png' }
+    },
+  }
+  const app = createApp({
+    service,
+    store: {},
+    adapter: {},
+    listenerMode: 'public',
+    logger: { error() {} },
+  })
+  const server = createServer(app)
+  const serverObservedClose = new Promise((resolve) => {
+    server.once('request', (_request, response) => response.once('close', resolve))
+  })
+  const baseUrl = await listen(server)
+  const target = new URL('/api/v1/data/ecommerce/products/media', baseUrl)
+  target.searchParams.set('requestId', randomUUID())
+  target.searchParams.set('itemId', 'product-1')
+  target.searchParams.set('imageIndex', '0')
+
+  try {
+    const client = httpRequest(target, {
+      headers: { authorization: 'Bearer mih_test_disconnect_check' },
+    })
+    client.on('error', () => {})
+    client.end()
+    await authenticationStartedPromise
+    const closed = new Promise((resolve) => client.once('close', resolve))
+    client.destroy()
+    await closed
+    await serverObservedClose
+    releaseAuthentication()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(mediaCalls, 0)
+  } finally {
+    releaseAuthentication()
+    await close(server)
   }
 })

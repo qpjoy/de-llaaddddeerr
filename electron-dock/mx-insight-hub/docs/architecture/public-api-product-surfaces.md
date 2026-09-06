@@ -18,7 +18,7 @@ Hub Admin 是操作与治理控制面；Open API 是供外部系统还原业务�
 | 边界 | Hub Admin 控制面 | Open API 数据面 |
 | --- | --- | --- |
 | 路径 | `/internal/v1/admin/*` | `/api/v1/*` |
-| 身份 | Admin Token 或明确支持的 Launcher 管理会话 | Consumer API Key |
+| 身份 | Admin Token 或明确支持的 Launcher 管理会话 | Hub Public API Key（解析到 consumer） |
 | 用途 | 配置、增删改、归档、审计、运行诊断 | 受授权的业务读取、检索和上下文 |
 | 授权 | Hub 管理角色和控制面能力 | platform grant 与可选 step-up capability |
 | 计量 | 管理操作，不借用 consumer 额度 | consumer policy、quota、usage evidence |
@@ -72,8 +72,8 @@ Open API 文档的业务导航尽量跟随 Admin 信息架构，但只保留可�
 ### 4.2 读取、搜索与幂等
 
 - 列表和详情优先使用 `GET`，通过 consumer platform policy 计量，不要求 `Idempotency-Key`。
-- 会触发检索、成本或可能重放的 `POST` 必须接受 `Idempotency-Key`，同 key + 同规范请求重放同一
-  结果；同 key + 不同请求返回冲突。
+- 会触发检索、成本或可能重放的 `POST` 必须接受 `Idempotency-Key`，同一 `Idempotency-Key` +
+  同规范请求重放同一结果；同一 `Idempotency-Key` + 不同请求返回冲突。
 - 服务端不得接受 provider、endpoint、index、SQL、ES DSL、任意字段名、credential 或任意
   `includeRaw` 等物理执行控制。
 

@@ -43,7 +43,7 @@ new_idempotency_key() {
 
 下文每个 POST 都会生成格式合法且新的 `Idempotency-Key`。如果只是重试
 **相同路径和完全相同的规范化 body**，应复用已有的 `IDEMPOTENCY_KEY`，不要再次
-执行 `new_idempotency_key`。更换 body、路径或 cursor 页面必须使用新 key。同一个
+执行 `new_idempotency_key`。更换 body、路径或 cursor 页面必须使用新的 `Idempotency-Key`。同一个
 key 对应不同请求会返回 `409 idempotency_conflict`。
 
 所有 JSON 错误均采用稳定结构：
@@ -186,6 +186,9 @@ revision-fenced display-province 索引均已通过精确合同校验。
 `pagination=opaque_cursor`、`idempotencyKey=optional`、
 `servingMode=live_with_stored_fallback` 和四种 freshness mode。`ready=true` 只表示当前
 Hub 部署有可用 adapter，不承诺下一次外部调用的网络、余额、配额或实时健康。
+若调用凭据是仍可认证的旧 `mih_test_` Key 且所属 consumer 有 ecommerce grant，该项仍会出现，
+但固定为 `ready=false`；Test 只是兼容元数据，不是可调用的 ecommerce 沙箱。读取 capabilities
+本身不创建 ecommerce usage reservation，也不调用供应方。
 
 ## 3.1 数据源目录 API
 
@@ -320,7 +323,7 @@ curl -sS \
 
 ## 3.2 虚拟超市 API
 
-这些路由只接受已签发的 consumer API Key，并要求独立
+这些路由只接受 API Keys 生命周期签发的 Hub Public API Key，并要求独立
 `virtual_supermarket` platform grant。仅有 `mobile_commerce` 或
 `source_catalog` 授权不能访问。首先预检：
 
@@ -440,6 +443,21 @@ source profile/table/checkpoint、Admin audit 或凭据。公开 marketplace 只
 完成实时商品搜索，但公开契约不是透明转发：不会返回外部平台身份、凭据、接口地址、私有
 continuation 或 raw response。
 
+`ecommerce` 是供应方中立的数据授权域，不代表某一家物理数据供应方。当前发布只有一个私有
+合格适配器，尚未启用多供应商运行时路由或自动故障转移；未来新增已验证适配器不改变调用方
+契约。缺失、无效或已撤销
+的 Hub Public API Key 返回 `401 invalid_api_key`（完全缺少凭据时为
+`401 api_key_required`）；仍可认证的 `mih_test_` Key 返回
+`403 test_key_not_supported`；有效 Live Key 但 consumer 未获 `ecommerce` grant 时才返回
+`403 platform_not_granted`。Test 拒绝发生在 grant、usage reservation、缓存和 provider dispatch
+之前，不会创建 usage reservation 或上游调用。调用方应据此区分“重新提供/签发 Key”、
+“使用 Live Key”和“补授数据域权限”。
+这里使用管理台 **API Keys** 已签发的同一把 Key；不需要为 ecommerce 另签 Key，也不需要或
+接受供应方密钥。为该 Key 所属 consumer 启用 ecommerce 后，其全部有效 Key 立即继承授权。
+本节所有搜索和媒体示例要求 `$HUB_KEY` 是以 `mih_live_` 开头的完整 Hub Public API Key。
+若旧版百宝箱留下 Test-key `ambiguous` 记录，只保留原 body、原 `Idempotency-Key` 和指纹锁供
+运维核查；不要运行本节 curl、粘贴旧 Test secret 或换成 Live Key 尝试恢复。
+
 body 是严格对象，只允许以下字段：
 
 | 字段 | 规则 |
@@ -453,7 +471,8 @@ body 是严格对象，只允许以下字段：
 
 `page` 与 `cursor` 互斥；首次遍历可以省略二者，后续优先使用 Hub 返回的 cursor。
 没有 `pageSize`。返回条数由 Hub 的有界策略决定，传入 `pageSize` 或任意路由、凭据字段会
-返回 `400 unsupported_request_field`。
+返回 `400 unsupported_request_field`。管理端百宝箱中的 `3 / 6 / 9` 只是把当前已返回批次
+在浏览器中分组陈列，不进入请求 body、不改变 Hub 数据页，也不会单独触发下一次搜索。
 
 首页调用：
 
@@ -528,6 +547,42 @@ cursor 经认证加密，并与 consumer 及 `marketplace/query/sort/price` 绑�
 `signals{sales,reviewCount,location}` 与 `attributes{brand,category}`。无法可靠映射的可选值为
 `null` 或空数组，不会伪造。
 
+### `GET /api/v1/data/ecommerce/products/media`
+
+商品响应中的 `images[]` 是来源引用，不应由管理浏览器直接加载。需要显示图片时，使用同一
+`mih_live_` Hub Public API Key，通过 Hub 安全中继读取已提交商品响应中的指定图片：
+
+```bash
+curl -sS -G \
+  -H "Authorization: Bearer $HUB_KEY" \
+  --data-urlencode "requestId=$(printf '%s\n' "$ECOMMERCE_FIRST" | jq -r '.requestId')" \
+  --data-urlencode "itemId=$(printf '%s\n' "$ECOMMERCE_FIRST" | jq -r '.data.items[0].id')" \
+  --data-urlencode 'imageIndex=0' \
+  "$HUB_URL/api/v1/data/ecommerce/products/media" \
+  --output product-image
+```
+
+三个 query 参数均必填：`requestId` 是商品搜索成功 envelope 的 Hub request ID，`itemId` 是该
+响应中的商品 ID，`imageIndex` 是 `0..19` 的整数。这也是完整 query allowlist；额外参数返回
+`400 unsupported_fields`。接口不接受 URL；Hub 只会从指定的已提交响应中解析图片来源，并
+通过限制协议、地址、重定向、类型和大小的安全中继返回 JPEG、PNG 或 WebP 内容。
+
+读取必须同时满足：`mih_live_` API Key 有效、consumer 当前仍有 `ecommerce` grant、`requestId` 属于同一
+consumer、该请求是已提交且 HTTP 200 的 ecommerce 请求，并且 item/index 确实存在。认证失败
+返回 `401 invalid_api_key`，缺少数据域权限返回 `403 platform_not_granted`，来源不存在或不属于
+当前 consumer 统一返回 `404 external_media_not_found`。图片来源被安全策略拒绝时返回 4xx，
+外部图片暂不可读取时返回 502，端到端超时返回 `504 external_media_timeout`。超过 consumer 媒体请求窗口返回
+`429 external_media_rate_limited`；consumer 或中继全局并发已满返回
+`429 external_media_busy`，调用方必须退避而不是并发重试。
+
+这次 GET 不创建 Hub usage，不派发商品搜索，也不改变原搜索的 `sourceMode`；它只是按既有
+提交结果读取一项媒体内容。它仍可能按需访问图片来源，因此客户端不要轮询或并发放大；Hub
+内部使用同 consumer 范围的短时有界缓存来避免重复拉取。响应使用实际图片 Content-Type、
+`X-Content-Type-Options: nosniff`、`Cache-Control: private, no-store` 与
+`Vary: Authorization`；浏览器和共享代理不得保留或跨 bearer 复用响应。
+有效 Test Key 会在 Hub 查询已提交结果或调用媒体加载器之前返回
+`403 test_key_not_supported`，不会创建 usage、读取图片来源或触发商品搜索。
+
 `meta.sourceMode` 与响应头 `x-mx-insight-source-mode` 一致：
 
 | sourceMode | 含义 | 客户端判断 |
@@ -535,7 +590,7 @@ cursor 经认证加密，并与 consumer 及 `marketplace/query/sort/price` 绑�
 | `live` | 本次完成新的外部数据调用。 | 仍使用 `capturedAt/ageSeconds` 判断时效。 |
 | `fresh_cache` | 同 consumer、同规范化请求的有效快照；没有再次外部调用。 | 当作该 capturedAt 的快照。 |
 | `stored_fallback` | 实时路径不可用，返回同请求的 last-good 快照。 | 检查 `fallbackReason`、`Age`、`Warning: 110`，不得标成实时。 |
-| `idempotent_replay` | 同 key、同 path/body 的已提交结果。 | `idempotent-replay: true`，不产生新的外部调用。 |
+| `idempotent_replay` | 同 `Idempotency-Key`、同 path/body 的已提交结果。 | `idempotent-replay: true`，不产生新的外部调用。 |
 
 `Idempotency-Key` 在传输层可省略，但建议始终显式提供。省略时 Hub 只根据规范化请求生成
 短期 freshness-bucket key，客户端不能用它实现持久重放。缓存与 fallback 都严格绑定当前
@@ -547,24 +602,29 @@ consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 
 | HTTP | `error.code` | 处理方式 |
 | --- | --- | --- |
 | 400 | `unsupported_marketplace`, `unsupported_sort`, `unsupported_price_filter`, `invalid_pagination`, `cursor_scope_mismatch`, `unsupported_request_field` | 修正请求或从无 cursor 首页开始，不要原样重试。 |
-| 403 | `platform_not_granted` | 请 operator 为 consumer 授予 `ecommerce`。 |
-| 409 | `request_in_progress`, `idempotency_conflict`, `request_outcome_unknown`, `external_platform_response_unusable` | 同请求保留原 key/requestId；冷却期内不要换 key 自动重发。 |
+| 401 | `api_key_required`, `invalid_api_key` | 提供当前 Hub 实例通过 API Keys 签发的完整 Hub Public API Key；不要用管理令牌、掩码或供应方密钥。 |
+| 403 | `test_key_not_supported` | 外部 ecommerce 仅接受 `mih_live_` Hub Public API Key。不要把 Test 当沙箱，也不要用 Live Key 替代历史模糊请求来自动重放。该拒绝不创建 usage reservation 或上游调用。 |
+| 403 | `platform_not_granted` | Live Key 有效；请 operator 为 consumer 授予 `ecommerce`。 |
+| 409 | `request_in_progress`, `idempotency_conflict`, `request_outcome_unknown`, `external_platform_response_unusable` | 同请求保留原 `Idempotency-Key`/requestId；冷却期内不要更换 `Idempotency-Key` 自动重发。 |
 | 429 | `quota_exceeded`, `external_platform_busy`, `external_platform_capacity_exceeded` | 按策略窗口退避；不要并发放大。 |
-| 502 | `external_platform_response_unusable`, `external_platform_outcome_unknown`, `external_platform_rejected` | 保存 requestId；前两种可能已经产生外部调用，禁止自动换 key。 |
+| 502 | `external_platform_response_unusable`, `external_platform_outcome_unknown`, `external_platform_rejected` | 保存 requestId；前两种可能已经产生外部调用，禁止自动更换 `Idempotency-Key`。 |
 | 503 | `external_platform_unavailable`, `external_platform_not_configured`, `external_platform_circuit_open`, `external_platform_capacity_unavailable` | 若没有 exact fallback，按运维窗口退避。 |
 
 `external_platform_not_configured` intentionally does not expose whether a
 provider release gate, credential source or internal credential store is the
-cause. A client must keep the original request/key evidence and must not switch
-`Idempotency-Key` to probe or retry. Operators distinguish those causes through
-the Admin-only external-platform runbook without calling the paid interface.
+cause. A client must keep the original request/`Idempotency-Key` evidence and must not switch
+the `Idempotency-Key` to probe or retry. Operators distinguish those causes through
+the Admin-only external-platform runbook without probing the live acquisition route.
 
-公开响应不返回计费、余额或免费额度；未知费用不会冒充为 0。
+公开响应不返回供应方费率、余额、免费额度、采购成本或客户账单；未知费用不会冒充为 0。
+Hub usage、供应方采购成本与 Hub 客户计价是三个相互独立的计量/计价域。当前前两者已有
+运行证据；客户计价待独立、版本化的 Hub price book 落地，并继续作用于同一 consumer，
+无需更换 API Key，也不能从 `sourceMode` 或供应方成本直接推导。
 
 ## 4. 搜索 API
 
 所有搜索 POST 都会返回 `x-mx-insight-request-id` 和 `idempotent-replay`。必须原样
-保留 opaque `pageInfo.nextCursor`，下一页使用新的幂等 key。
+保留 opaque `pageInfo.nextCursor`，下一页使用新的 `Idempotency-Key`。
 
 `/data/search`、`/data/stored/search` 和 `/data/canonical/search` 支持 `type`：
 
@@ -591,7 +651,7 @@ curl -sS -i -X POST \
 成功返回 `200`。未知 body 字段、平台 fan-out 列表、通配平台，以及调用方选择的
 provider/credential 字段都会被拒绝。Night-All 明确拒绝会映射为安全的
 `502 night_all_rejected`；无法证明 dispatch 结果时返回
-`502 upstream_outcome_unknown`，此时应使用原 request ID/key 查询，不能换新 key
+`502 upstream_outcome_unknown`，此时应使用原 request ID/`Idempotency-Key` 查询，不能换新的 `Idempotency-Key`
 自动重试。
 
 ### `POST /api/v1/data/stored/search`
@@ -635,7 +695,7 @@ curl -sS -i -X POST \
 
 成功返回 `200`，包含本次搜索的授权平台 scope、请求/实际 profile、降级标记、total
 元数据和 `searchMode`。当前 consumer 至少需要一个平台授权。Elasticsearch PIT
-cursor 过期时返回 `410`；应移除 cursor、换新 key 并从第一页重新开始。
+cursor 过期时返回 `410`；应移除 cursor、换新的 `Idempotency-Key` 并从第一页重新开始。
 
 ### stored/canonical 中的 `public_opinion` 可见性
 
@@ -666,13 +726,13 @@ publication visibility 是幂等指纹的一部分。升级到该契约后，首
 `Idempotency-Key`；复用升级前的 key 会返回 `409 idempotency_conflict`，不会回放
 升级前可能未门禁的响应。默认请求的 cursor binding 保持兼容，但升级前创建的
 Elasticsearch PIT 若不是 content-v5 会返回 `503 search_cursor_unavailable`，应移除
-cursor、换新 key 并从第一页重新搜索。
+cursor、换新的 `Idempotency-Key` 并从第一页重新搜索。
 
 ## 5. 全国与省级 all-ingested 舆情 API
 
 这两个 P1 接口只读取 Hub 的 `canonical_current_safe` 当前投影，不直连上游源库。
 正式产品不要把 Hub API Key 存进浏览器或 Electron renderer；应由 AppCenter/BFF 使用
-consumer key 调用，再向前端返回业务所需字段。
+同一把 Hub Public API Key 调用，再向前端返回业务所需字段。
 
 ### `GET /api/v1/data/public-opinion/regions`
 
@@ -857,8 +917,8 @@ endpoint、credential、token/auth、proxy、header/cookie、capability/moduleCo
 timeout、billing、raw/debug、archive/fullArchive/allTweets、archive/count/page 放大
 参数或 workload 覆盖。
 
-每个 compatibility `Idempotency-Key` 永久标识一次付费 dispatch。复用 key 永远
-重放该结果；需要当前数据时必须使用新 key。complete 结果更新 exact last-good
+每个 compatibility `Idempotency-Key` 永久标识一次可能产生 Hub 内部供应方成本的 dispatch。复用 `Idempotency-Key` 永远
+重放该结果；需要当前数据时必须使用新的 `Idempotency-Key`。complete 结果更新 exact last-good
 snapshot；partial 结果会 live 返回但不替换快照。只有
 `STANDARD_PAYLOAD_EMPTY` warning 的结果是确认的 complete 空结果，会替换快照。
 
@@ -871,7 +931,7 @@ fingerprint 完全一致且尚未过期的 complete snapshot。stale 返回状�
 `502 upstream_outcome_unknown`，usage 保持 unknown，同一个 key 不会再次
 dispatch。
 
-错误语义如下；除明确标注的 fallback 外，不要自动换新幂等 key 重试：
+错误语义如下；除明确标注的 fallback 外，不要自动换新 `Idempotency-Key` 重试：
 
 | HTTP / `error.code` | 语义 |
 |---|---|
@@ -1095,7 +1155,7 @@ ANCHOR_ID=$(printf '%s\n' "$SEARCH_PAGE" | jq -r '.data.items[0] | .canonicalId 
 ```
 
 每个搜索下一页都改变了含 cursor 的规范 body，因此必须生成新的 `Idempotency-Key`；只有重试
-完全相同的一页才复用原 Key。timeline 是安全 GET，不发送幂等 Key。
+完全相同的一页才复用原 `Idempotency-Key`。timeline 是安全 GET，不发送幂等 Key。
 
 ```bash
 ANCHOR_ID="${ANCHOR_ID:?set ANCHOR_ID to a Telegram canonical search item id}"

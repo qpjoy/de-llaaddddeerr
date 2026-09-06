@@ -135,7 +135,7 @@ function assertExternalCommerceContract(document) {
       'invalid_idempotency_key',
     ],
     401: ['api_key_required', 'invalid_api_key'],
-    403: ['platform_not_granted'],
+    403: ['platform_not_granted', 'test_key_not_supported'],
     409: [
       'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
       'external_platform_response_unusable',
@@ -161,7 +161,7 @@ function assertExternalCommerceContract(document) {
   assert.equal(idempotency.name, 'Idempotency-Key')
   assert.equal(idempotency.in, 'header')
   assert.equal(idempotency.required, false)
-  assert.match(idempotency.description, /next-page request changes the body and must use a new key/i)
+  assert.match(idempotency.description, /next-page request changes the body and must use a new Idempotency-Key/i)
   assert.equal(idempotency.schema.minLength, 8)
   assert.equal(idempotency.schema.maxLength, 128)
 
@@ -239,6 +239,34 @@ function assertExternalCommerceContract(document) {
   assert.deepEqual(page.properties.hasMore.type, ['boolean', 'null'])
   assert.deepEqual(page.properties.nextCursor.type, ['string', 'null'])
   assert.equal(page.properties.nextCursor.maxLength, 4096)
+
+  const media = document.paths['/data/ecommerce/products/media']?.get
+  assert.ok(media)
+  assert.equal(media.operationId, 'getExternalCommerceProductMedia')
+  assert.doesNotMatch(JSON.stringify(media), /provider|tikhub|rapidapi|justone/i)
+  assert.deepEqual(media.parameters.map(({ name }) => name), [
+    'requestId', 'itemId', 'imageIndex',
+  ])
+  assert.equal(media.parameters.every(({ required }) => required), true)
+  assert.equal(media.parameters[0].schema.format, 'uuid')
+  assert.equal(media.parameters[1].schema.maxLength, 512)
+  assert.equal(media.parameters[2].schema.minimum, 0)
+  assert.equal(media.parameters[2].schema.maximum, 19)
+  assert.deepEqual(
+    Object.keys(media.responses).map(Number).sort((left, right) => left - right),
+    [200, 400, 401, 403, 404, 413, 415, 422, 429, 502, 503, 504],
+  )
+  assert.deepEqual(
+    Object.keys(media.responses[200].content).sort(),
+    ['image/jpeg', 'image/png', 'image/webp'],
+  )
+  for (const response of Object.values(media.responses[200].content)) {
+    assert.equal(response.schema.type, 'string')
+    assert.equal(response.schema.format, 'binary')
+  }
+  assert.match(media.description, /creates no Hub usage record/i)
+  assert.match(media.description, /never accepts an arbitrary URL/i)
+  assert.deepEqual(media['x-mx-error-codes'][403], ['platform_not_granted', 'test_key_not_supported'])
 
   const capabilitiesContent = document.paths['/data/capabilities'].get.responses[200]
     .content['application/json']
@@ -1013,7 +1041,10 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/ecommerce\/products\/search/)
     assert.match(html, /mx-insight-hub\.ecommerce-products\.v1/)
     assert.match(html, /电商数据百宝箱/)
-    assert.match(html, /same key|相同 key/u)
+    assert.match(html, /同一把 Hub Public API Key/u)
+    assert.match(html, /当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移/u)
+    assert.match(html, /第二个候选通过合同验证后/u)
+    assert.match(html, /相同 <code>Idempotency-Key<\/code>/u)
     assert.match(html, /Hub customer|Hub 客户计价/u)
     assert.match(html, /fresh_cache/)
     assert.match(html, /stored_fallback/)
@@ -1087,7 +1118,7 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /minQualityScore/)
     assert.match(html, /countryCode/)
     assert.match(html, /候选 author、contentType/)
-    assert.match(html, /旧 Key 会返回.*idempotency_conflict/)
+    assert.match(html, /旧值会返回.*idempotency_conflict/)
     assert.match(html, /featuredProvinceCodes/)
     assert.match(html, /public_opinion/)
     assert.match(html, /public_opinion\.all_ingested\.read/)
@@ -1198,6 +1229,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/canonical/items/{id}/timeline',
       '/data/canonical/search',
       '/data/capabilities',
+      '/data/ecommerce/products/media',
       '/data/ecommerce/products/search',
       '/data/mobile-commerce/items',
       '/data/public-opinion/funnel',
@@ -1382,7 +1414,7 @@ test('external data platform public contract and internal operations guidance st
     assert.match(source, /marketplace.*query.*page.*cursor.*sort.*price/is)
     assert.match(source, /(?:no|没有) `?pageSize`?/i)
     assert.match(source, /page.*cursor.*mutually exclusive|page.*cursor.*互斥/is)
-    assert.match(source, /next.*new Idempotency-Key|下一页.*新的 Idempotency-Key/is)
+    assert.match(source, /next.*new.*Idempotency-Key|下一页.*新的.*Idempotency-Key/is)
     for (const mode of ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay']) {
       assert.match(source, new RegExp(mode))
     }
@@ -1401,7 +1433,7 @@ test('external data platform public contract and internal operations guidance st
   assert.match(adr, /justone\/\{marketplace\}\/product-search\/\{endpointVersion\}/)
   assert.match(operations, /gateway_requests.*Hub demand/is)
   assert.match(operations, /provider_calls.*actual JustOne dispatches/is)
-  assert.match(operations, /next-page request.*new key|下一页.*新的.*key/is)
+  assert.match(operations, /next-page request.*new.*Idempotency-Key|下一页.*新的.*Idempotency-Key/is)
   assert.match(operations, /Launcher.*MX-H2I/is)
 })
 

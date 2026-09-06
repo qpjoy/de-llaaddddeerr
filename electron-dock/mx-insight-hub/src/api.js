@@ -123,9 +123,11 @@ async function publicDataRequest(apiKey, path, {
   method = 'GET',
   body,
   idempotencyKey,
+  signal,
 } = {}) {
   const response = await fetch(`${publicApiBase()}${path}`, {
     method,
+    signal,
     headers: {
       accept: 'application/json',
       authorization: `Bearer ${apiKey}`,
@@ -154,14 +156,45 @@ async function publicDataRequest(apiKey, path, {
   return { payload, evidence }
 }
 
-// This deliberately accepts a Hub consumer key, never an upstream provider
+async function publicDataImage(apiKey, query, { signal } = {}) {
+  const response = await fetch(`${publicApiBase()}/api/v1/data/ecommerce/products/media${queryString(query)}`, {
+    signal,
+    headers: {
+      accept: 'image/webp,image/png,image/jpeg',
+      authorization: `Bearer ${apiKey}`,
+    },
+  })
+  if (!response.ok) {
+    const payload = await parsePayload(response)
+    throw new ApiError({
+      status: response.status,
+      code: payload?.error?.code,
+      message: payload?.error?.message || `Image request failed with HTTP ${response.status}`,
+      requestId: payload?.requestId || response.headers.get('x-mx-insight-request-id'),
+      details: payload?.error?.details,
+    })
+  }
+  return response.blob()
+}
+
+// This deliberately accepts the ordinary Hub Public API key, never an upstream provider
 // credential. The data-product workbench keeps the value in component memory
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
+  capabilities: (apiKey, { signal } = {}) => publicDataRequest(
+    apiKey,
+    '/api/v1/data/capabilities',
+    { signal },
+  ),
   ecommerceProductsSearch: (apiKey, body, { idempotencyKey } = {}) => publicDataRequest(
     apiKey,
     '/api/v1/data/ecommerce/products/search',
     { method: 'POST', body, idempotencyKey },
+  ),
+  ecommerceProductImage: (apiKey, { requestId, itemId, imageIndex = 0 }, { signal } = {}) => publicDataImage(
+    apiKey,
+    { requestId, itemId, imageIndex },
+    { signal },
   ),
 }
 
@@ -391,7 +424,7 @@ export const adminApi = {
   ),
 
   // Read-only business presentations. These routes deliberately use the
-  // admin session rather than borrowing a consumer API key, so inspecting a
+  // admin session rather than borrowing a Hub Public API key, so inspecting a
   // showcase neither consumes customer quota nor exposes a reusable secret in
   // the renderer.
   dataProductTelegramChats: (token, query = {}) => request(
