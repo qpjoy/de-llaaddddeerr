@@ -995,7 +995,7 @@ async function withServer(listenerMode, run) {
 test('public listener serves self-contained public API documentation', async () => {
   await withServer('public', async (baseUrl) => {
     const pagePaths = [
-      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/virtual-supermarket', '/docs/search', '/docs/telegram',
+      '/docs', '/docs/auth', '/docs/source-catalog', '/docs/ecommerce-treasure-box', '/docs/virtual-supermarket', '/docs/search', '/docs/telegram',
       '/docs/public-opinion', '/docs/night-all', '/docs/tools', '/docs/evidence', '/docs/errors',
     ]
     const pages = await Promise.all(pagePaths.map(async (path) => {
@@ -1012,6 +1012,9 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/search/)
     assert.match(html, /\/api\/v1\/data\/ecommerce\/products\/search/)
     assert.match(html, /mx-insight-hub\.ecommerce-products\.v1/)
+    assert.match(html, /电商数据百宝箱/)
+    assert.match(html, /same key|相同 key/u)
+    assert.match(html, /Hub customer|Hub 客户计价/u)
     assert.match(html, /fresh_cache/)
     assert.match(html, /stored_fallback/)
     assert.match(html, /href="\/docs\/night-all"/)
@@ -1131,6 +1134,7 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     const pages = [
       ['/docs/auth', 'rules', '认证与调用规则'],
       ['/docs/source-catalog', 'source-catalog', '数据源目录'],
+      ['/docs/ecommerce-treasure-box', 'ecommerce-treasure-box', '电商数据百宝箱'],
       ['/docs/virtual-supermarket', 'virtual-supermarket', '虚拟超市'],
       ['/docs/search', 'search', '通用搜索'],
       ['/docs/telegram', 'telegram', 'Telegram 会话'],
@@ -1163,7 +1167,9 @@ test('public documentation navigation uses stable page routes and keeps legacy a
     assert.match(legacyHtml, /location\.hash\.slice\(1\)/)
     assert.match(legacyHtml, /'public-opinion':'\/docs\/public-opinion'/)
     assert.match(legacyHtml, /'virtual-supermarket':'\/docs\/virtual-supermarket'/)
+    assert.match(legacyHtml, /'ecommerce-treasure-box':'\/docs\/ecommerce-treasure-box'/)
     assert.match(legacyHtml, /telegram:'\/docs\/telegram'/)
+    assert.match(legacyHtml, /class="nav-section">数据产品<\/span>/)
 
     for (const [alias, canonical] of [
       ['/docs/authentication', '/docs/auth'],
@@ -1401,7 +1407,7 @@ test('external data platform public contract and internal operations guidance st
 
 test('admin-only listener does not expose public documentation', async () => {
   await withServer('admin', async (baseUrl) => {
-    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/virtual-supermarket', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
+    for (const path of ['/docs', '/docs/auth', '/docs/authentication', '/docs/ecommerce-treasure-box', '/docs/virtual-supermarket', '/docs/telegram', '/docs/public-opinion', '/docs/openapi.json']) {
       const response = await fetch(`${baseUrl}${path}`)
       const payload = await response.json()
       assert.equal(response.status, 404)

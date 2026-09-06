@@ -135,11 +135,35 @@ test('public ecommerce route separates live, fresh cache and idempotent replay a
   }
 
   try {
+    const preflight = await fetch(`${baseUrl}${PATH}`, {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'https://insight.example.test',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'authorization, content-type, idempotency-key',
+      },
+    })
+    assert.equal(preflight.status, 204)
+    assert.equal(preflight.headers.get('access-control-allow-origin'), '*')
+    for (const method of ['GET', 'POST', 'OPTIONS']) {
+      assert.match(preflight.headers.get('access-control-allow-methods') || '', new RegExp(method, 'u'))
+    }
+    for (const header of ['authorization', 'content-type', 'idempotency-key', 'x-api-key']) {
+      assert.match(preflight.headers.get('access-control-allow-headers') || '', new RegExp(header, 'u'))
+    }
+    assert.equal(adapterCalls, 0)
+    assert.equal(platformStore.calls.size, 0)
+
     const live = await request('http-live-key-0001')
     const cached = await request('http-cache-key-001')
 
     assert.equal(live.response.status, 200)
     assert.equal(cached.response.status, 200)
+    assert.equal(live.response.headers.get('access-control-allow-origin'), '*')
+    const exposedHeaders = live.response.headers.get('access-control-expose-headers') || ''
+    for (const header of ['idempotent-replay', 'x-mx-insight-request-id', 'x-mx-insight-source-mode', 'x-mx-insight-captured-at', 'age', 'warning']) {
+      assert.match(exposedHeaders, new RegExp(header, 'u'))
+    }
     assert.equal(live.payload.contractVersion, 'mx-insight-hub.ecommerce-products.v1')
     assert.equal(cached.payload.contractVersion, 'mx-insight-hub.ecommerce-products.v1')
     assert.equal(live.payload.meta.sourceMode, 'live')
@@ -178,6 +202,15 @@ test('public ecommerce route separates live, fresh cache and idempotent replay a
     assert.deepEqual(usageAfterReplay, usageAfterCache)
     assert.equal(adapterCalls, 1)
     assert.equal(platformStore.calls.size, 1)
+
+    const unauthorized = await fetch(`${baseUrl}${PATH}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(BODY),
+    })
+    assert.equal(unauthorized.status, 401)
+    assert.equal(unauthorized.headers.get('access-control-allow-origin'), '*')
+
     const analytics = await platformStore.analytics({ from: new Date(0) })
     assert.equal(analytics.totals.hubRequests, 3)
     assert.equal(analytics.totals.upstreamCalls, 1)

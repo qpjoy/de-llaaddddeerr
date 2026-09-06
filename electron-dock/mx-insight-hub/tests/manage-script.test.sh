@@ -1761,6 +1761,70 @@ grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=' "$ROOT_DIR/scr
 grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS=' "$ROOT_DIR/scripts/manage.sh"
 printf 'ok - JustOne activation and unknown-outcome cooldown are wired through deployment config\n'
 
+grep -q -- '--from-literal=MX_INSIGHT_PUBLIC_URL=' "$ROOT_DIR/scripts/manage.sh"
+grep -q 'MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150' "$ROOT_DIR/scripts/manage.sh"
+printf 'ok - public browser origin is wired into runtime deployment config\n'
+
+public_url_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-public-url.XXXXXX")"
+rm -f -- "$public_url_marker"
+PUBLIC_URL_MARKER="$public_url_marker" \
+MX_INSIGHT_PUBLIC_URL='https://Gate.Example.Test:443/' \
+bash -c '
+  set -euo pipefail
+  source "$1/scripts/manage.sh"
+  export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+  export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+  export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+  export NIGHT_ALL_BASE_URL="http://night-all.internal"
+  export MX_INSIGHT_SEARCH_READY=1
+  docker_daemon_proxy_snapshot() {
+    printf "%s" '\''{"version":1,"configured":false,"sourceKind":"docker-daemon-effective","runtimeKind":"host-process","httpProxy":null,"httpsProxy":null,"noProxy":null,"sourceLocations":[],"nodeName":null,"observedAt":"2026-01-01T00:00:00Z"}'\''
+  }
+  kubectl() {
+    local argument
+    for argument in "$@"; do
+      case "$argument" in
+        --from-literal=MX_INSIGHT_PUBLIC_URL=*)
+          printf "%s" "${argument#--from-literal=MX_INSIGHT_PUBLIC_URL=}" >"$PUBLIC_URL_MARKER"
+          ;;
+      esac
+    done
+    case " $* " in
+      *" --dry-run=client -o yaml "*) printf "apiVersion: v1\\nkind: List\\nitems: []\\n" ;;
+      *) while IFS= read -r _line; do :; done ;;
+    esac
+  }
+  create_runtime_config
+' _ "$ROOT_DIR"
+assert_eq 'https://gate.example.test' "$(cat "$public_url_marker")" \
+  'public browser origin is normalized before ConfigMap publication'
+rm -f -- "$public_url_marker"
+
+invalid_public_url_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-public-url.XXXXXX")"
+invalid_public_url_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-public-url-error.XXXXXX")"
+rm -f -- "$invalid_public_url_marker"
+if INVALID_PUBLIC_URL_MARKER="$invalid_public_url_marker" \
+  MX_INSIGHT_PUBLIC_URL='https://gate.example.test/api' \
+  bash -c '
+    set -euo pipefail
+    source "$1/scripts/manage.sh"
+    export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
+    export MX_INSIGHT_ADMIN_TOKEN="admin-token-with-at-least-32-bytes"
+    export MX_INSIGHT_API_KEY_PEPPER="api-key-pepper-with-at-least-32-bytes"
+    kubectl() { : >"$INVALID_PUBLIC_URL_MARKER"; }
+    create_runtime_config
+  ' _ "$ROOT_DIR" 2>"$invalid_public_url_error"; then
+  printf 'not ok - invalid public browser origin was accepted\n' >&2
+  exit 1
+fi
+if [ -e "$invalid_public_url_marker" ]; then
+  printf 'not ok - invalid public browser origin reached kubectl\n' >&2
+  exit 1
+fi
+grep -q 'MX_INSIGHT_PUBLIC_URL must be an HTTP(S) origin' "$invalid_public_url_error"
+rm -f -- "$invalid_public_url_error"
+printf 'ok - invalid public browser origin fails before ConfigMap mutation\n'
+
 # The foreign Telegram reader is optional, but when configured it must be
 # passed as a Secret key (never a ConfigMap value or terminal output).
 tg_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-tg-wired.XXXXXX")"

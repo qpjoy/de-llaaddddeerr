@@ -77,7 +77,14 @@ before(async () => {
     apiKeyPepper: PEPPER,
   })
 
-  const app = createApp({ service, store, adapter: { dependencies: async () => ({ status: 'up' }) }, identity, adminToken: ADMIN_TOKEN })
+  const app = createApp({
+    service,
+    store,
+    adapter: { dependencies: async () => ({ status: 'up' }) },
+    identity,
+    adminToken: ADMIN_TOKEN,
+    publicApiBaseUrl: 'https://gate.example.test',
+  })
   server = createServer(app)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   baseUrl = `http://127.0.0.1:${server.address().port}`
@@ -113,6 +120,7 @@ test('the admin token still has unscoped access', async () => {
   assert.equal(data.kind, 'admin-token')
   assert.equal(data.scoped, false)
   assert.equal(data.tenantIds, null)
+  assert.equal(data.publicApiBaseUrl, 'https://gate.example.test')
 })
 
 test('the admin token works while Launcher is unreachable', async () => {
@@ -661,6 +669,12 @@ test('an unconfigured Launcher says so instead of hiding the form silently', asy
     const { data } = await response.json()
     assert.equal(data.launcher, null)
     assert.match(data.launcherUnavailableReason, /MX_INSIGHT_LAUNCHER_URL/)
+    const sessionResponse = await fetch(
+      `http://127.0.0.1:${server2.address().port}/internal/v1/admin/session`,
+      { headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN } },
+    )
+    const sessionPayload = await sessionResponse.json()
+    assert.equal(sessionPayload.data.publicApiBaseUrl, null)
   } finally {
     await new Promise((resolve) => server2.close(resolve))
   }

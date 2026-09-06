@@ -4,7 +4,7 @@ import {
   searchCapabilities,
 } from './search/profiles.mjs'
 
-export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','virtual-supermarket':'/docs/virtual-supermarket',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
+export const PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT = `(()=>{const routes={rules:'/docs/auth','source-catalog':'/docs/source-catalog','ecommerce-treasure-box':'/docs/ecommerce-treasure-box','virtual-supermarket':'/docs/virtual-supermarket',search:'/docs/search',telegram:'/docs/telegram','public-opinion':'/docs/public-opinion','night-all':'/docs/night-all',tools:'/docs/tools',discovery:'/docs/evidence',errors:'/docs/errors'};const route=routes[location.hash.slice(1)];if(route)location.replace(route)})()`
 
 const PUBLIC_SEARCH_PROFILE_IDS = Object.freeze(
   searchCapabilities({ audience: 'public' }).profiles.map((profile) => profile.id),
@@ -3971,17 +3971,18 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
 }
 
 export const PUBLIC_DOCS_ROUTES = Object.freeze([
-  { key: 'start', path: '/docs', label: '开始调用' },
-  { key: 'rules', path: '/docs/auth', label: '认证与调用规则' },
-  { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录' },
-  { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市' },
-  { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话' },
-  { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情' },
-  { key: 'search', path: '/docs/search', label: '通用搜索' },
-  { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层' },
-  { key: 'tools', path: '/docs/tools', label: '通用工具' },
-  { key: 'discovery', path: '/docs/evidence', label: '能力与证据' },
-  { key: 'errors', path: '/docs/errors', label: '错误与重试' },
+  { key: 'start', path: '/docs', label: '开始调用', section: '基础' },
+  { key: 'rules', path: '/docs/auth', label: '认证与调用规则', section: '基础' },
+  { key: 'source-catalog', path: '/docs/source-catalog', label: '数据源目录', section: '数据目录' },
+  { key: 'ecommerce-treasure-box', path: '/docs/ecommerce-treasure-box', label: '电商数据百宝箱', section: '数据产品' },
+  { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
+  { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
+  { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
+  { key: 'search', path: '/docs/search', label: '通用搜索', section: '通用能力' },
+  { key: 'night-all', path: '/docs/night-all', label: 'Night-All 兼容层', section: '通用能力' },
+  { key: 'tools', path: '/docs/tools', label: '通用工具', section: '通用能力' },
+  { key: 'discovery', path: '/docs/evidence', label: '能力与证据', section: '运维契约' },
+  { key: 'errors', path: '/docs/errors', label: '错误与重试', section: '运维契约' },
 ])
 
 const PUBLIC_DOCS_ROUTE_ALIASES = Object.freeze({
@@ -4009,6 +4010,8 @@ const PUBLIC_DOCS_TEMPLATE = `<!doctype html>
     .brand strong { display:block; font-size:16px; }
     .brand span,.eyebrow,.muted { color:var(--muted); }
     nav a { display:block; padding:7px 10px; border-left:2px solid transparent; color:var(--muted); }
+    .nav-section { display:block; margin:17px 10px 4px; color:#5f758b; font-size:10px; font-weight:800; letter-spacing:.13em; text-transform:uppercase; }
+    nav .nav-section:first-child { margin-top:0; }
     nav a:hover { border-color:var(--cyan); color:var(--text); text-decoration:none; background:#11202d; }
     nav a.active { border-color:var(--cyan); color:var(--cyan); background:#112b31; }
     main { width:min(1120px,100%); padding:54px clamp(24px,5vw,72px) 90px; }
@@ -4164,6 +4167,112 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
       <tr><td>429</td><td><code>quota_exceeded</code></td><td>等待 platform policy 的计量窗口恢复。</td></tr>
       <tr><td>503</td><td><code>stored_data_unavailable</code></td><td>安全 GET 可稍后重试；保留错误响应的 <code>requestId</code> 供排查。</td></tr>
     </tbody></table>
+    </section>
+
+    <section class="doc-page" data-doc-page="ecommerce-treasure-box">
+    <h2 id="ecommerce-treasure-box">电商数据百宝箱</h2>
+    <p class="lead">面向外部系统的一套稳定商品搜索合同。调用方只认识 Hub 的 <code>ecommerce</code> 授权域、统一商品结构、交付模式与不透明游标，不依赖当前物理数据供应方。</p>
+    <div class="notice">产品演示中的角色、球形陈列和动画只是管理端 renderer。外部系统始终调用现有 <code>POST /api/v1/data/ecommerce/products/search</code>；本次文档分组没有修改任何 API 路径、字段或授权规则。</div>
+
+    <h3>1. 授权与运行能力预检</h3>
+    <p>使用调用者的 Hub API Key，而不是任何上游密钥。先检查 capabilities 中的 <code>ecommerce</code> 项；<code>ready=true</code> 表示当前允许实时调度，false 时仍可能按同一请求返回有效存储兜底。</p>
+    <pre><code>export HUB_URL="https://hub.example.com"
+read -rsp 'MX Insight API Key: ' MX_INSIGHT_API_KEY
+export MX_INSIGHT_API_KEY
+printf '\n'
+
+curl -sS "$HUB_URL/api/v1/data/capabilities" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  | jq '.data.platforms[] | select(.platform == "ecommerce")'</code></pre>
+    <p>当前合同广告 <code>product_search</code>，支持 <code>taobao</code>、<code>tmall</code>、<code>jd</code>、<code>xiaohongshu_ec</code>、<code>xianyu</code>，分页方式是 <code>opaque_cursor</code>，交付方式是 <code>live_with_stored_fallback</code>。</p>
+
+    <h3>2. 发起一次可追踪搜索</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/products/search</code></div><p>需要 <code>ecommerce</code> platform grant。body 是严格对象，不接受路由供应方、上游 endpoint、原始参数或 <code>pageSize</code>。</p></div>
+    <pre><code>REQUEST_KEY="ecommerce-demo-$(uuidgen)"
+REQUEST_BODY='{"marketplace":"jd","query":"便携相机"}'
+
+curl -sS -D /tmp/mx-ecommerce.headers -X POST \
+  "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $REQUEST_KEY" \
+  -d "$REQUEST_BODY" | tee /tmp/mx-ecommerce.json | jq</code></pre>
+    <table><thead><tr><th>字段</th><th>约束</th><th>平台差异</th></tr></thead><tbody>
+      <tr><td><code>marketplace</code></td><td>必填，使用上方五个稳定枚举之一</td><td>决定可用过滤与排序，不决定授权</td></tr>
+      <tr><td><code>query</code></td><td>必填，1–200 字符，NFKC 规范化</td><td>所有平台</td></tr>
+      <tr><td><code>sort</code></td><td>可选；必须是当前 marketplace 支持的值</td><td>淘宝/天猫：<code>relevance|sales_desc|price_asc|price_desc</code>；闲鱼：<code>relevance|recent|seller_credit|price_asc|price_desc|price_drop|newest</code>；京东和小红书电商不接受</td></tr>
+      <tr><td><code>price</code></td><td>可选 <code>{min,max}</code>，金额必须是十进制字符串</td><td>只支持淘宝/天猫</td></tr>
+      <tr><td><code>page</code></td><td>首批兼容字段，1–1000；不能与 cursor 同时出现</td><td>新客户端优先使用 Hub cursor</td></tr>
+      <tr><td><code>cursor</code></td><td>只使用上页返回的不透明签名值</td><td>绑定 marketplace/query/sort/price；不要解析或拼接</td></tr>
+    </tbody></table>
+
+    <h3>3. 消费统一响应</h3>
+    <pre><code>{
+  "contractVersion": "mx-insight-hub.ecommerce-products.v1",
+  "data": {
+    "items": [{
+      "id": "platform-native-id",
+      "marketplace": "jd",
+      "title": "便携相机",
+      "url": "https://example.invalid/product",
+      "pricing": { "current": "899.00", "original": null, "currency": "CNY" },
+      "shop": { "id": "shop-id", "name": "店铺名称" },
+      "images": [],
+      "signals": { "sales": null, "reviewCount": "120", "location": "杭州" },
+      "attributes": { "brand": null, "category": "数码影像" }
+    }],
+    "page": { "page": 1, "returnedCount": 1, "discardedCount": 0, "hasMore": false, "nextCursor": null }
+  },
+  "meta": {
+    "capturedAt": "2026-09-06T00:00:00.000Z",
+    "servedAt": "2026-09-06T00:00:00.010Z",
+    "sourceMode": "live",
+    "ageSeconds": 0
+  },
+  "requestId": "00000000-0000-4000-8000-000000000006"
+}</code></pre>
+    <p>字段没有可靠来源时为 null 或空数组，不由 Hub 猜值。调用方用 <code>contractVersion</code> 选择解析器，用 <code>capturedAt / servedAt / ageSeconds</code> 判断时效，用 <code>sourceMode</code> 判断本次交付路径；不要从响应速度推断是否调用上游。</p>
+
+    <h3>4. 翻页、返回第一页与幂等重放</h3>
+    <p>完全相同的一页在网络重试时必须复用原 <code>Idempotency-Key</code>。下一页携带 <code>nextCursor</code> 并生成新 key；用户返回第一页时，可以重放首次 key 获得完全相同的已提交结果，也可以用新 key 发起一次新的首页读取。两种意图不能混用。</p>
+    <pre><code>NEXT_CURSOR=$(jq -r '.data.page.nextCursor // empty' /tmp/mx-ecommerce.json)
+if [ -n "$NEXT_CURSOR" ]; then
+  NEXT_KEY="ecommerce-next-$(uuidgen)"
+  jq -n --arg cursor "$NEXT_CURSOR" \
+    '{marketplace:"jd",query:"便携相机",cursor:$cursor}' \
+    | curl -sS -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+        -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+        -H 'Content-Type: application/json' \
+        -H "Idempotency-Key: $NEXT_KEY" \
+        --data-binary @- | jq
+fi</code></pre>
+    <div class="notice"><code>hasMore=false</code> 或 <code>hasMore=null</code> 都必须停止。null 表示 Hub 没有足够证据安全地产生 continuation；客户端不能改用自增页码绕过。</div>
+
+    <h3>5. 同一接口的交付与成本语义</h3>
+    <table><thead><tr><th>sourceMode</th><th>新 Hub usage</th><th>新上游调用</th><th>调用方含义</th></tr></thead><tbody>
+      <tr><td><code>live</code></td><td>是</td><td>是</td><td>本次完成新的实时采集；上游成本以私有计费证据为准。</td></tr>
+      <tr><td><code>fresh_cache</code></td><td>是</td><td>否</td><td>新的客户请求复用仍新鲜的同请求快照。</td></tr>
+      <tr><td><code>stored_fallback</code></td><td>是</td><td>可能</td><td>可能在派发前兜底，也可能在一次失败派发后兜底；不能一概写成零上游费用。</td></tr>
+      <tr><td><code>idempotent_replay</code></td><td>否</td><td>否</td><td>相同 key、路径和 body 重放原已提交结果。</td></tr>
+    </tbody></table>
+    <p>要演示保证不新增费用的同接口读取，请原样重放上一步成功请求：</p>
+    <pre><code>curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $REQUEST_KEY" \
+  -d "$REQUEST_BODY" | jq '.meta.sourceMode,.requestId'</code></pre>
+    <p>预期 <code>sourceMode=idempotent_replay</code>，并且 requestId 与首次调用一致。Hub 客户计价和上游采购成本是独立账本；当前响应只报告交付事实，不返回发票金额，也不会把未知价格显示成零。</p>
+
+    <h3>6. 错误、重试与数据归档</h3>
+    <table><thead><tr><th>HTTP / error.code</th><th>客户端动作</th></tr></thead><tbody>
+      <tr><td>400 请求、筛选、游标错误</td><td>修正请求并使用新 key；不要重复错误 body。</td></tr>
+      <tr><td>401 / 403</td><td>轮换 Hub API Key 或申请 <code>ecommerce</code> grant；不要把上游密钥发送给 Hub 公共接口。</td></tr>
+      <tr><td>409 <code>request_in_progress</code></td><td>短暂等待后用同 key 查询，不要换 key 形成第二次派发。</td></tr>
+      <tr><td>409/502 outcome unknown 或 response unusable</td><td>保留同 key 和 requestId，停止自动重试并交给 operator 调查。</td></tr>
+      <tr><td>429</td><td>遵守配额窗口；指数退避只能重试同一逻辑请求。</td></tr>
+      <tr><td>503</td><td>可能没有可用实时供应或快照；保存 requestId，稍后仍用原 key 重试相同请求。</td></tr>
+    </tbody></table>
+    <p>Hub 私下保存响应级调用证据和逐商品归档，再异步写入 <code>ecommerce.products.v1</code> canonical 数据集并投影到 Elasticsearch。公开响应不包含物理供应方身份、上游 endpoint、凭据、原始 envelope、内部归档路径或成本账本。</p>
     </section>
 
     <section class="doc-page" data-doc-page="virtual-supermarket">
@@ -4495,9 +4604,14 @@ function normalizedDocsPath(pathname) {
 }
 
 function docsNavigation(activeKey) {
+  let section = null
   return PUBLIC_DOCS_ROUTES.map((route) => {
     const active = route.key === activeKey
-    return `<a href="${route.path}"${active ? ' class="active" aria-current="page"' : ''}>${route.label}</a>`
+    const heading = route.section !== section
+      ? `<span class="nav-section">${route.section}</span>`
+      : ''
+    section = route.section
+    return `${heading}<a href="${route.path}"${active ? ' class="active" aria-current="page"' : ''}>${route.label}</a>`
   }).join('')
 }
 

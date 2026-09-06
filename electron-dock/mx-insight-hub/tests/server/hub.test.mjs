@@ -177,6 +177,37 @@ test('public listener does not require or receive an admin token', () => {
   )
 })
 
+test('public browser origin is optional, normalized and rejects unsafe URL parts', () => {
+  const base = {
+    MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER,
+  }
+  assert.equal(loadConfig(base).publicApiBaseUrl, null)
+  assert.equal(
+    loadConfig({ ...base, MX_INSIGHT_PUBLIC_URL: ' https://Hub.Example:443/ ' }).publicApiBaseUrl,
+    'https://hub.example',
+  )
+  assert.equal(
+    loadConfig({ ...base, MX_INSIGHT_PUBLIC_URL: 'http://10.88.88.88:18150' }).publicApiBaseUrl,
+    'http://10.88.88.88:18150',
+  )
+
+  for (const value of [
+    'ftp://hub.example',
+    'https://user:secret@hub.example',
+    'https://hub.example/api',
+    'https://hub.example?target=public',
+    'https://hub.example/#docs',
+    `https://hub.example/${'x'.repeat(2_100)}`,
+  ]) {
+    assert.throws(
+      () => loadConfig({ ...base, MX_INSIGHT_PUBLIC_URL: value }),
+      (error) => error?.status === 500 && error?.code === 'invalid_configuration',
+    )
+  }
+})
+
 test('optional external-platform configuration keeps credentials off the admin plane and unknown billing explicit', () => {
   const base = {
     MX_INSIGHT_LISTENER_MODE: 'public',
@@ -678,7 +709,7 @@ test('health reports liveness and dependencies', async () => {
 })
 
 test('listener modes fail closed across public and admin planes', async () => {
-  async function isolatedCall(listenerMode, path, headers, method = 'GET') {
+  async function isolatedResponse(listenerMode, path, headers, method = 'GET') {
     const isolated = createServer(createApp({
       service,
       store,
@@ -689,11 +720,13 @@ test('listener modes fail closed across public and admin planes', async () => {
     }))
     await new Promise((resolve) => isolated.listen(0, '127.0.0.1', resolve))
     try {
-      const response = await fetch(`http://127.0.0.1:${isolated.address().port}${path}`, { headers, method })
-      return response.status
+      return await fetch(`http://127.0.0.1:${isolated.address().port}${path}`, { headers, method })
     } finally {
       await new Promise((resolve) => isolated.close(resolve))
     }
+  }
+  async function isolatedCall(listenerMode, path, headers, method = 'GET') {
+    return (await isolatedResponse(listenerMode, path, headers, method)).status
   }
 
   assert.equal(
@@ -712,6 +745,22 @@ test('listener modes fail closed across public and admin planes', async () => {
     await isolatedCall('admin', '/api/v1/data/capabilities', { authorization: 'Bearer invalid' }),
     404,
   )
+  const adminPublicPreflight = await isolatedResponse(
+    'admin',
+    '/api/v1/data/ecommerce/products/search',
+    { origin: 'https://console.example.test', 'access-control-request-method': 'POST' },
+    'OPTIONS',
+  )
+  assert.equal(adminPublicPreflight.status, 404)
+  assert.equal(adminPublicPreflight.headers.get('access-control-allow-origin'), null)
+  const publicAdminPreflight = await isolatedResponse(
+    'public',
+    '/internal/v1/admin/session',
+    { origin: 'https://console.example.test', 'access-control-request-method': 'GET' },
+    'OPTIONS',
+  )
+  assert.equal(publicAdminPreflight.status, 404)
+  assert.equal(publicAdminPreflight.headers.get('access-control-allow-origin'), null)
 
   const publicServer = createServer(createApp({
     service,

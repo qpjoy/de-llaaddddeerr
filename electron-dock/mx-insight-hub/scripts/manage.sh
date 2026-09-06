@@ -851,6 +851,21 @@ create_runtime_config() {
   fi
   local justone_contract_verified="${MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED:-0}"
   local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-150000}"
+  local public_url="${MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150}"
+  if ! public_url="$(
+    MX_INSIGHT_PUBLIC_URL_VALUE="$public_url" node -e '
+      const value = process.env.MX_INSIGHT_PUBLIC_URL_VALUE
+      if (!value || value.length > 2048 || /[\0\r\n]/u.test(value)) process.exit(1)
+      let url
+      try { url = new URL(value.trim()) } catch { process.exit(1) }
+      if (!["http:", "https:"].includes(url.protocol)
+        || url.username || url.password || url.search || url.hash
+        || (url.pathname !== "" && url.pathname !== "/")) process.exit(1)
+      process.stdout.write(url.origin)
+    '
+  )"; then
+    die "MX_INSIGHT_PUBLIC_URL must be an HTTP(S) origin without credentials, path, query or fragment"
+  fi
   local justone_preflight_error=""
   if ! justone_preflight_error="$(
     MX_INSIGHT_JUSTONE_CONFIGURED="$justone_configured" \
@@ -946,6 +961,7 @@ create_runtime_config() {
     --from-literal=NIGHT_ALL_TIMEOUT_MS="${NIGHT_ALL_TIMEOUT_MS:-30000}" \
     --from-literal=NIGHT_ALL_READY_MODE="${NIGHT_ALL_READY_MODE:-ready_only}" \
     --from-literal=MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
+    --from-literal=MX_INSIGHT_PUBLIC_URL="$public_url" \
     --from-literal=MX_INSIGHT_JUSTONE_CONFIGURED="$justone_configured" \
     --from-literal=MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="$justone_contract_verified" \
     --from-literal=MX_INSIGHT_JUSTONE_TIMEOUT_MS="${MX_INSIGHT_JUSTONE_TIMEOUT_MS:-120000}" \

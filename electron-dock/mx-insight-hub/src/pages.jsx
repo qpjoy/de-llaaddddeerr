@@ -24,7 +24,7 @@ import {
   Users,
   WarningCircle,
 } from '@phosphor-icons/react'
-import { adminApi } from './api.js'
+import { adminApi, publicDocsHref } from './api.js'
 import { copyText, TOKENIZE_CURL_TEMPLATE } from './open-capabilities.js'
 import {
   DropdownField,
@@ -91,16 +91,7 @@ const CAPABILITY_CATALOG = {
   },
 }
 
-const PUBLIC_DOCS_HREF = (() => {
-  const configured = import.meta.env.VITE_MX_INSIGHT_PUBLIC_DOCS_URL?.trim()
-  if (configured) return configured
-  if (typeof window !== 'undefined' && window.location.port === '18151') {
-    const url = new URL('/docs', window.location.origin)
-    url.port = '18150'
-    return url.toString()
-  }
-  return '/docs'
-})()
+const PUBLIC_DOCS_HREF = publicDocsHref()
 
 function tenantAllows(session, tenantId, capability) {
   if (!tenantId) return false

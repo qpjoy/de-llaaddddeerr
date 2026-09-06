@@ -86,6 +86,62 @@ final result: passed
 
 ---
 
+# Ecommerce data treasure box design QA — 2026-09-06
+
+## Comparison target and evidence
+
+- Product-shell source visual truth: `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-2751f16e-5244-42f4-a381-4077548c6df5.png`, `2692x1262` pixels. It defines the existing Hub navigation, dark Neon Void density, catalog status language and JustOne lineage treatment; it is not an exact mock of the new product page.
+- Character-state source visual truth: `/Users/qpjoy/.codex/generated_images/01a0659d-b480-70e3-ba4c-a507ee48c239/exec-fa6ef34d-67a0-4220-b367-53766e2c7ef2.png`, `1212x1298` RGBA pixels.
+- Browser-rendered implementation: `/private/tmp/mx-ecommerce-treasure-box-handoff.png`, `1280x720` pixels from a `1280x720` CSS viewport at device scale factor `1`; `/private/tmp/mx-ecommerce-treasure-box-desktop-final-v2.png` records the selected evidence state.
+- Intermediate desktop evidence: `/private/tmp/mx-ecommerce-treasure-box-1024.jpg`, `1024x768` pixels from a `1024x768` CSS viewport at density `1`.
+- Responsive evidence: `/private/tmp/mx-ecommerce-treasure-box-mobile-top.jpg` and `/private/tmp/mx-ecommerce-treasure-box-mobile.jpg`, each `390x844` pixels from a `390x844` CSS viewport at density `1`.
+- Public-docs evidence: `/private/tmp/mx-ecommerce-treasure-box-docs.jpg`, `1280x4151` pixels from a full-page browser capture at density `1`.
+- Same-input full-view comparison: `/private/tmp/mx-ecommerce-treasure-box-full-comparison.jpg`, `2560x720`. The shell source was aspect-fill normalized to `1280x720`; the implementation remained native `1280x720`.
+- Same-input focused stage comparison: `/private/tmp/mx-ecommerce-treasure-box-stage-comparison-v2.jpg`, `916x452`. The source character was proportionally fitted onto the product stage background at `458x452`; the implementation stage was captured at its native `458x452` size.
+- State: dark theme, protected local Admin Token session, `#/data-products/ecommerce-treasure-box`, zero-upstream-call demo completed with six clickable normalized products and one selected detail.
+
+The source screenshots do not depict this new page, so QA avoids claiming pixel identity. The full-view comparison checks fidelity to the existing Hub shell and status language; the focused comparison checks that the selected original character asset is preserved cleanly inside the interactive orbital presentation.
+
+## Findings
+
+No actionable P0, P1 or P2 finding remains.
+
+The page reads as an existing Hub data product rather than a detached promotional demo. Its control panel, truthful delivery evidence and capability atlas retain the command-center hierarchy, while the original “小聚” presentation stage supplies the requested playful moment without changing the stable API identity.
+
+## Required fidelity surfaces
+
+- Fonts and typography: the implementation reuses the Hub font stack and `--qp-*` type tokens. The Chinese product title, compact control labels, monospaced contract/source identifiers, product names, prices and evidence fields preserve the existing hierarchy at desktop and mobile widths; long identifiers truncate inside bounded cells rather than colliding.
+- Spacing and layout rhythm: desktop keeps the existing sidebar/header frame, a compact facts rail, a two-column search/stage surface and a distinct evidence area. At `1024px` the primary action, full character and clickable goods remain above the initial fold. At `390px` controls stack in task order, the stage measures `360x470`, and document width remains exactly `390px` with no horizontal overflow.
+- Colors and visual tokens: panel backgrounds, borders, text, cyan focus, green safe/evidence states, amber billing caution and purple/blue character accents map to the current Neon Void palette. Cost and delivery state are always paired with text rather than color alone.
+- Image quality and asset fidelity: searching and presenting are real transparent WebP character assets generated for the product and stored under `public/assets/ecommerce-treasure-box/`; no emoji, CSS drawing, handcrafted SVG or placeholder box substitutes the mascot. The focused comparison confirms correct proportions, sharp edges, transparent placement and no stretching. Product orbs deliberately use the neutral Phosphor package icon: the Admin browser never auto-loads an arbitrary upstream image URL.
+- Copy and content: the product identity is “电商数据百宝箱”; Admin-only copy identifies JustOne as the current adapter while the public contract remains `mx-insight-hub.ecommerce-products.v1`. “Here you are”, six-item demo disclosure, five verified marketplaces, four `sourceMode` meanings, billing uncertainty and data lineage are explicit. Candidate official API families are labelled as candidates, not callable capabilities.
+- Interaction and accessibility: search fields and shared searchable dropdowns have labels; the product orbs are named buttons; selection updates the detail panel; interface-atlas groups are ordinary `aria-pressed` buttons; call evidence is a named region. Focus remains visible, status has text, and reduced-motion CSS disables nonessential orbit/character movement.
+- Responsive behavior: `1280x720`, `1024x768` and `390x844` were rendered. Navigation, facts rail, controls, stage, speech bubble, orbs and selected-product content remain reachable, with no clipped persistent controls or horizontal document overflow.
+
+## Primary interactions tested
+
+1. `开始零费用演示` ran entirely in the browser, showed the searching state, transitioned to “Here you are”, rendered six clickable products and recorded `Hub usage=否` and `上游调用=否`.
+2. The default 淘宝 + `便携相机` search returns six matching fixtures in the requested sort order. Selecting `口袋便携相机` updated the detail panel and displayed `¥759.00` with its normalized attributes.
+3. Switching to `实时 Hub API · 可能计费` exposed a memory-only Hub consumer key field and a separate billing confirmation. Submitting without a key stopped locally with a clear validation error; no live or paid request was sent during QA.
+4. `查看目录标记` opened the built-in `JustOne 已接 5` view. The five rows are 淘宝、天猫、京东、小红书店铺、闲鱼; 抖音电商 and 快手小店 remain outside that verified view as connector evidence only.
+5. `/docs/ecommerce-treasure-box` rendered through the dev proxy under the new `数据产品` documentation group, kept the existing `POST /api/v1/data/ecommerce/products/search` path and exposed no upstream provider name. Production Admin sessions now supply the validated, non-secret `MX_INSIGHT_PUBLIC_URL`; direct `18151 → 18150` and same-origin routing remain fallbacks.
+6. Browser console inspection after the final safe-demo, live-guard, catalog, public-docs and responsive flows returned zero errors and zero warnings.
+
+## Comparison history
+
+1. The first equal-size shell and focused character comparisons found no P0/P1/P2 mismatch. The different business content is intentional: the source is the catalog screen that defines the Hub visual grammar, while the implementation is the requested product experience.
+2. Desktop and mobile follow-up captures confirmed that the playful presentation does not displace the search task, billing warning or delivery evidence. No visual fix was required after the comparison pass.
+3. Final interaction regression found that the development StrictMode setup/cleanup cycle left the mounted guard false and could strand the mascot in the searching pose. The effect now restores the guard during setup; the browser rerun completed in 760 ms, rendered six matching product orbs and reached “Here you are”.
+4. Final deployment regression verified Public-only CORS/preflight, authenticated runtime public-origin discovery, listener isolation and the public docs link. The complete suite passed with 1,066 tests, 2 intentional skips and zero failures.
+
+## Follow-up polish
+
+- P3: when more Hub operations graduate from candidate to versioned contracts, the interface atlas can gain operation-specific launch controls without changing the current stable search route.
+
+final result: passed
+
+---
+
 # Virtual supermarket design QA — 2026-09-02
 
 ## Comparison target and evidence

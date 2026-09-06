@@ -18,6 +18,7 @@ import {
   Key,
   List,
   LockKey,
+  MagicWand,
   Moon,
   ShieldCheck,
   SidebarSimple,
@@ -28,7 +29,7 @@ import {
   Sun,
   X,
 } from '@phosphor-icons/react'
-import { adminApi, signInWithLauncher } from './api.js'
+import { adminApi, configurePublicApiBase, signInWithLauncher } from './api.js'
 import { ErrorState, Field, LoadingState, THEME_CHANGE_EVENT, ToastStack } from './components.jsx'
 import {
   ApiKeysPage,
@@ -57,6 +58,17 @@ const LazyAgentMarketPage = lazy(() => import('./pages-agent-market.tsx').then((
 const LazyAgentStudioPage = lazy(() => import('./pages-agent-studio.tsx').then((module) => ({
   default: module.AgentStudioPage,
 })))
+const LazyEcommerceTreasureBoxPage = lazy(() => import('./pages-ecommerce-treasure-box.jsx').then((module) => ({
+  default: module.EcommerceTreasureBoxPage,
+})))
+
+function EcommerceTreasureBoxPage(props) {
+  return (
+    <Suspense fallback={<LoadingState label="正在加载电商数据百宝箱" />}>
+      <LazyEcommerceTreasureBoxPage {...props} />
+    </Suspense>
+  )
+}
 
 function AgentMarketRoute(props) {
   return (
@@ -293,6 +305,7 @@ const ROUTES = [
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-products/ecommerce-treasure-box', label: '电商数据百宝箱', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/virtual-supermarket', label: '虚拟超市', description: '逛货架与商品上架状态', icon: Storefront, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: VirtualSupermarketPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/public-opinion', label: '全国舆情', description: '全国与省级舆情展示', icon: NewspaperClipping, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: PublicOpinionPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/database-connections', label: '数据库配置', description: '共享只读 PostgreSQL 连接', icon: Key, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DatabaseConnectionsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
@@ -681,6 +694,7 @@ export function App() {
     adminApi.session(token)
       .then((data) => {
         if (!active) return
+        configurePublicApiBase(data?.publicApiBaseUrl)
         setSession(data)
         setAuthState('signed-in')
       })
@@ -700,6 +714,7 @@ export function App() {
     // Accepts an admin token or a Launcher session token; the server decides
     // which it is and answers with the capabilities that follow.
     const data = await adminApi.session(candidate)
+    configurePublicApiBase(data?.publicApiBaseUrl)
     writeSessionToken(candidate)
     setToken(candidate)
     setSession(data)
@@ -708,6 +723,7 @@ export function App() {
   }, [])
 
   const signOut = useCallback((message = '') => {
+    configurePublicApiBase(null)
     writeSessionToken('')
     setToken('')
     setAuthState('signed-out')
@@ -806,7 +822,7 @@ export function App() {
             </button>
           </div>
         </header>
-        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
+        <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' ? ' mih-content--dashboard' : ''}`} id="mih-main-content" tabIndex="-1">
           <Page {...pageProps} />
         </main>
       </div>

@@ -163,6 +163,30 @@ function required(environment, name) {
   return value
 }
 
+export function parsePublicUrl(value) {
+  if (value == null || String(value).trim() === '') return null
+  if (typeof value !== 'string' || value.length > 2_048 || /[\0\r\n]/u.test(value)) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_PUBLIC_URL must be a valid HTTP(S) origin or empty')
+  }
+  let parsed
+  try {
+    parsed = new URL(value.trim())
+  } catch {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_PUBLIC_URL must be a valid HTTP(S) origin or empty')
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol)
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+    || (parsed.pathname !== '' && parsed.pathname !== '/')
+  ) {
+    throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_PUBLIC_URL must be an HTTP(S) origin without credentials, path, query or fragment')
+  }
+  return parsed.origin
+}
+
 export function loadConfig(environment = process.env) {
   const listenerMode = environment.MX_INSIGHT_LISTENER_MODE || 'combined'
   if (!['combined', 'public', 'admin'].includes(listenerMode)) {
@@ -278,6 +302,10 @@ export function loadConfig(environment = process.env) {
     host: environment.MX_INSIGHT_HOST || '0.0.0.0',
     port: positiveInteger(environment.MX_INSIGHT_PORT, 18_180, 'MX_INSIGHT_PORT'),
     listenerMode,
+    // Non-secret browser routing metadata. The Admin SPA receives this through
+    // its authenticated session and still authenticates every public request
+    // with the caller's separately issued Hub consumer key.
+    publicApiBaseUrl: parsePublicUrl(environment.MX_INSIGHT_PUBLIC_URL),
     adminToken: listenerMode === 'public'
       ? environment.MX_INSIGHT_ADMIN_TOKEN?.trim() || null
       : required(environment, 'MX_INSIGHT_ADMIN_TOKEN'),

@@ -4723,6 +4723,18 @@ select {
   text-overflow: ellipsis;
 }
 
+.mih-source-cell-tags > .mih-source-connector--connected {
+  border-color: color-mix(in srgb, var(--qp-success) 42%, var(--qp-line));
+  background: color-mix(in srgb, var(--qp-success) 8%, transparent);
+  color: var(--qp-success);
+  font-weight: 600;
+}
+
+.mih-source-cell-tags > .mih-source-connector--evidence {
+  border-style: dashed;
+  color: var(--qp-text-3);
+}
+
 .mih-source-cell-tags > small {
   margin: 0 !important;
   color: var(--qp-text-4);
@@ -10104,5 +10116,904 @@ button.mih-catalog-status {
   .mih-external-credential-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+}
+
+/* Ecommerce treasure box ------------------------------------------------- */
+
+.mih-treasure-page {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.mih-treasure-trust-strip {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.6fr) repeat(2, minmax(190px, 1fr)) auto;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  background: var(--qp-bg-3);
+}
+
+.mih-treasure-trust-strip > span,
+.mih-treasure-trust-strip > a {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 52px;
+  gap: 8px;
+  padding: 9px 14px;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  text-decoration: none;
+}
+
+.mih-treasure-trust-strip > span + span,
+.mih-treasure-trust-strip > a {
+  border-left: 1px solid var(--qp-line);
+}
+
+.mih-treasure-trust-strip svg,
+.mih-treasure-trust-strip > a {
+  color: var(--qp-primary);
+}
+
+.mih-treasure-trust-strip strong {
+  flex: 0 0 auto;
+  color: var(--qp-text-1);
+  font-weight: 600;
+}
+
+.mih-treasure-trust-strip code {
+  overflow: hidden;
+  color: var(--qp-info);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mih-treasure-lab {
+  display: grid;
+  grid-template-columns: 282px minmax(500px, 1fr) 304px;
+  min-height: 608px;
+  overflow: hidden;
+  padding: 0;
+}
+
+.mih-treasure-controls,
+.mih-treasure-inspector {
+  display: grid;
+  align-content: start;
+  gap: 13px;
+  min-width: 0;
+  padding: 18px;
+  background: color-mix(in srgb, var(--qp-bg-3) 94%, var(--qp-primary));
+}
+
+.mih-treasure-controls {
+  border-right: 1px solid var(--qp-line);
+}
+
+.mih-treasure-inspector {
+  border-left: 1px solid var(--qp-line);
+}
+
+.mih-treasure-controls > header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  padding-bottom: 3px;
+}
+
+.mih-treasure-controls > header svg {
+  color: var(--qp-primary);
+}
+
+.mih-treasure-controls > header div {
+  display: grid;
+  gap: 2px;
+}
+
+.mih-treasure-controls > header strong,
+.mih-treasure-call-evidence header strong {
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-body-2);
+}
+
+.mih-treasure-controls > header small {
+  color: var(--qp-text-3);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.mih-treasure-query,
+.mih-treasure-key {
+  position: relative;
+  display: block;
+}
+
+.mih-treasure-query svg,
+.mih-treasure-key svg {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 11px;
+  color: var(--qp-text-4);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.mih-treasure-query .qp-input,
+.mih-treasure-key .qp-input {
+  width: 100%;
+  padding-left: 36px;
+}
+
+.mih-treasure-live-auth {
+  display: grid;
+  gap: 11px;
+  border: 1px solid color-mix(in srgb, var(--qp-warning) 36%, var(--qp-line));
+  border-radius: var(--qp-radius-md);
+  padding: 11px;
+  background: color-mix(in srgb, var(--qp-warning) 7%, var(--qp-bg-4));
+}
+
+.mih-treasure-charge-confirm {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  color: var(--qp-text-2);
+  cursor: pointer;
+}
+
+.mih-treasure-charge-confirm input {
+  margin-top: 2px;
+  accent-color: var(--qp-warning);
+}
+
+.mih-treasure-charge-confirm span {
+  display: grid;
+  gap: 2px;
+}
+
+.mih-treasure-charge-confirm strong {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.mih-treasure-charge-confirm small {
+  color: var(--qp-text-3);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.mih-treasure-search {
+  justify-content: center;
+  width: 100%;
+}
+
+.mih-treasure-auth-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  color: var(--qp-text-4);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.mih-treasure-auth-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--qp-success);
+}
+
+.mih-treasure-stage {
+  position: relative;
+  display: grid;
+  place-items: end center;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--qp-bg-2);
+  isolation: isolate;
+}
+
+.mih-treasure-stage::before,
+.mih-treasure-stage::after,
+.mih-treasure-stage__halo {
+  position: absolute;
+  z-index: -1;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 20%, transparent);
+  border-radius: 50%;
+  content: '';
+}
+
+.mih-treasure-stage::before {
+  top: 96px;
+  width: 390px;
+  height: 390px;
+}
+
+.mih-treasure-stage::after {
+  top: 135px;
+  width: 310px;
+  height: 310px;
+  border-color: color-mix(in srgb, var(--qp-info) 18%, transparent);
+}
+
+.mih-treasure-stage__halo {
+  top: 176px;
+  width: 228px;
+  height: 228px;
+  border-color: color-mix(in srgb, var(--qp-accent, var(--qp-primary)) 22%, transparent);
+  box-shadow: 0 0 80px color-mix(in srgb, var(--qp-primary) 10%, transparent);
+}
+
+.mih-treasure-stage__provider {
+  position: absolute;
+  top: 17px;
+  left: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--qp-line);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: color-mix(in srgb, var(--qp-bg-3) 92%, transparent);
+  color: var(--qp-text-3);
+  font-size: 9px;
+}
+
+.mih-treasure-stage__provider strong {
+  color: var(--qp-primary);
+  letter-spacing: .03em;
+}
+
+.mih-treasure-mascot {
+  position: relative;
+  z-index: 2;
+  width: min(64%, 360px);
+  max-height: 510px;
+  margin-bottom: -2px;
+  object-fit: contain;
+  filter: drop-shadow(0 18px 34px color-mix(in srgb, var(--qp-primary) 18%, transparent));
+  transition: opacity 180ms ease, transform 260ms ease;
+  user-select: none;
+}
+
+.mih-treasure-stage--idle .mih-treasure-mascot {
+  width: min(52%, 300px);
+  opacity: .74;
+  transform: translateY(18px);
+}
+
+.mih-treasure-stage--searching .mih-treasure-mascot {
+  animation: mih-treasure-rummage 680ms ease-in-out infinite alternate;
+}
+
+.mih-treasure-stage--presenting .mih-treasure-mascot {
+  animation: mih-treasure-present 520ms cubic-bezier(.2, .8, .2, 1) both;
+}
+
+.mih-treasure-stage__welcome,
+.mih-treasure-searching-copy {
+  position: absolute;
+  z-index: 5;
+  bottom: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--qp-line);
+  border-radius: 999px;
+  padding: 7px 11px;
+  background: color-mix(in srgb, var(--qp-bg-3) 94%, transparent);
+  color: var(--qp-text-2);
+  font-size: 10px;
+}
+
+.mih-treasure-stage__welcome svg {
+  color: var(--qp-primary);
+}
+
+.mih-treasure-searching-copy i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--qp-primary);
+  animation: mih-treasure-dot 720ms ease-in-out infinite alternate;
+}
+
+.mih-treasure-searching-copy i:nth-child(2) { animation-delay: 120ms; }
+.mih-treasure-searching-copy i:nth-child(3) { animation-delay: 240ms; }
+
+.mih-treasure-speech {
+  position: absolute;
+  z-index: 7;
+  top: 38px;
+  right: 22px;
+  display: grid;
+  gap: 2px;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 45%, var(--qp-line));
+  border-radius: 14px 14px 3px 14px;
+  padding: 10px 13px;
+  background: var(--qp-bg-3);
+  box-shadow: var(--qp-shadow-md);
+  animation: mih-treasure-pop 360ms ease-out both;
+}
+
+.mih-treasure-speech strong {
+  color: var(--qp-primary);
+  font-size: 13px;
+}
+
+.mih-treasure-speech small {
+  color: var(--qp-text-3);
+  font-size: 9px;
+}
+
+.mih-treasure-orb {
+  --orb-render-x: var(--orb-x);
+  --orb-render-y: var(--orb-y);
+  position: absolute;
+  z-index: 6;
+  top: 42%;
+  left: 50%;
+  display: grid;
+  justify-items: center;
+  width: 98px;
+  gap: 3px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--qp-text-2);
+  cursor: pointer;
+  opacity: 0;
+  transform: translate(var(--orb-render-x), var(--orb-render-y)) scale(.62) rotateX(15deg);
+  transform-origin: center;
+  animation: mih-treasure-orb-in 520ms cubic-bezier(.2, .8, .2, 1) var(--orb-delay) forwards,
+    mih-treasure-orb-float 2.6s ease-in-out calc(var(--orb-delay) + 520ms) infinite alternate;
+}
+
+.mih-treasure-orb__visual {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--qp-info) 34%, var(--qp-line));
+  border-radius: 50%;
+  background: var(--qp-bg-3);
+  color: var(--qp-info);
+  box-shadow: 0 9px 20px color-mix(in srgb, var(--qp-bg-1) 55%, transparent), inset -8px -9px 18px color-mix(in srgb, var(--qp-primary) 8%, transparent);
+  transition: border-color var(--qp-transition-fast), transform var(--qp-transition-fast), box-shadow var(--qp-transition-fast);
+}
+
+.mih-treasure-orb__visual img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.mih-treasure-orb > span:nth-child(2),
+.mih-treasure-orb > small {
+  width: 100%;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mih-treasure-orb > span:nth-child(2) {
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.mih-treasure-orb > small {
+  color: var(--qp-text-4);
+  font-size: 8px;
+}
+
+.mih-treasure-orb:hover .mih-treasure-orb__visual,
+.mih-treasure-orb:focus-visible .mih-treasure-orb__visual,
+.mih-treasure-orb.is-selected .mih-treasure-orb__visual {
+  border-color: var(--qp-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--qp-primary) 13%, transparent), 0 10px 24px color-mix(in srgb, var(--qp-primary) 22%, transparent);
+  transform: translateY(-4px) scale(1.06);
+}
+
+.mih-treasure-inspector {
+  grid-template-rows: minmax(0, auto) auto;
+}
+
+.mih-treasure-empty-evidence {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 30px 8px;
+  text-align: center;
+}
+
+.mih-treasure-empty-evidence svg {
+  color: var(--qp-primary);
+}
+
+.mih-treasure-empty-evidence strong {
+  color: var(--qp-text-2);
+  font-size: var(--qp-font-body-2);
+}
+
+.mih-treasure-empty-evidence p,
+.mih-treasure-call-evidence p {
+  margin: 0;
+  color: var(--qp-text-3);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.mih-treasure-evidence {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mih-treasure-evidence > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mih-treasure-evidence > header small {
+  color: var(--qp-text-3);
+  font-size: 9px;
+}
+
+.mih-treasure-evidence h2 {
+  margin: 0;
+  color: var(--qp-text-1);
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.mih-treasure-evidence__price {
+  color: var(--qp-primary);
+  font-family: var(--qp-font-mono);
+  font-size: 15px;
+}
+
+.mih-treasure-evidence dl,
+.mih-treasure-call-evidence dl {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.mih-treasure-evidence dl > div,
+.mih-treasure-call-evidence dl > div {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 8px;
+  border-top: 1px solid var(--qp-line);
+  padding: 7px 0;
+  font-size: 9px;
+}
+
+.mih-treasure-evidence dt,
+.mih-treasure-call-evidence dt {
+  color: var(--qp-text-4);
+}
+
+.mih-treasure-evidence dd,
+.mih-treasure-call-evidence dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--qp-text-2);
+}
+
+.mih-treasure-call-evidence {
+  display: grid;
+  align-self: end;
+  gap: 8px;
+  border-top: 1px solid var(--qp-line);
+  padding-top: 14px;
+}
+
+.mih-treasure-call-evidence > header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.mih-treasure-call-evidence > header svg {
+  color: var(--qp-primary);
+}
+
+.mih-treasure-mode {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--qp-line);
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: var(--qp-bg-4);
+  color: var(--qp-text-2);
+  font-size: 9px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mih-treasure-mode--live,
+.mih-treasure-mode--demo { border-color: color-mix(in srgb, var(--qp-success) 40%, var(--qp-line)); color: var(--qp-success); }
+.mih-treasure-mode--cache { border-color: color-mix(in srgb, var(--qp-info) 40%, var(--qp-line)); color: var(--qp-info); }
+.mih-treasure-mode--fallback { border-color: color-mix(in srgb, var(--qp-warning) 44%, var(--qp-line)); color: var(--qp-warning); }
+.mih-treasure-mode--replay { border-color: color-mix(in srgb, var(--qp-primary) 40%, var(--qp-line)); color: var(--qp-primary); }
+
+.mih-treasure-section {
+  display: grid;
+  gap: 12px;
+}
+
+.mih-treasure-section__header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.mih-treasure-section__header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.mih-treasure-section__header .qp-kicker,
+.mih-treasure-section__header h2,
+.mih-treasure-section__header p {
+  margin: 0;
+}
+
+.mih-treasure-section__header h2 {
+  color: var(--qp-text-1);
+  font-size: 18px;
+}
+
+.mih-treasure-section__header > div > p:last-child {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
+.mih-treasure-atlas-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mih-treasure-atlas-tabs button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  padding: 10px 12px;
+  background: var(--qp-bg-3);
+  color: var(--qp-text-3);
+  cursor: pointer;
+}
+
+.mih-treasure-atlas-tabs button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--qp-primary) 44%, var(--qp-line));
+  background: color-mix(in srgb, var(--qp-primary) 8%, var(--qp-bg-3));
+  color: var(--qp-primary);
+}
+
+.mih-treasure-atlas-tabs span {
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mih-treasure-atlas-tabs small {
+  border-radius: 999px;
+  padding: 2px 6px;
+  background: var(--qp-bg-4);
+  font-size: 9px;
+}
+
+.mih-treasure-capability {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.mih-treasure-capability > header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.mih-treasure-capability > header > span {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid color-mix(in srgb, var(--qp-primary) 32%, var(--qp-line));
+  border-radius: 10px;
+  color: var(--qp-primary);
+}
+
+.mih-treasure-capability h3,
+.mih-treasure-capability p {
+  margin: 0;
+}
+
+.mih-treasure-capability h3 {
+  color: var(--qp-text-1);
+  font-size: 14px;
+}
+
+.mih-treasure-capability p,
+.mih-treasure-capability footer {
+  color: var(--qp-text-3);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.mih-treasure-capability > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.mih-treasure-capability > div > span {
+  border: 1px solid var(--qp-line);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: var(--qp-bg-4);
+  color: var(--qp-text-2);
+  font-size: 9px;
+}
+
+.mih-treasure-capability > footer {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border-top: 1px solid var(--qp-line);
+  padding-top: 10px;
+}
+
+.mih-treasure-capability > footer svg {
+  flex: 0 0 auto;
+  color: var(--qp-success);
+}
+
+.mih-treasure-cost-table td {
+  vertical-align: middle;
+}
+
+.mih-treasure-cost-table td:last-child {
+  min-width: 260px;
+  color: var(--qp-text-3);
+}
+
+.mih-treasure-next-links {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.mih-treasure-next-links > a {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  padding: 12px;
+  background: var(--qp-bg-3);
+  color: var(--qp-primary);
+  text-decoration: none;
+  transition: border-color var(--qp-transition-fast), transform var(--qp-transition-fast);
+}
+
+.mih-treasure-next-links > a:hover {
+  border-color: color-mix(in srgb, var(--qp-primary) 42%, var(--qp-line));
+  transform: translateY(-2px);
+}
+
+.mih-treasure-next-links span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mih-treasure-next-links strong {
+  color: var(--qp-text-1);
+  font-size: 10px;
+}
+
+.mih-treasure-next-links small {
+  overflow: hidden;
+  color: var(--qp-text-3);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes mih-treasure-rummage {
+  from { transform: translateY(2px) rotate(-1deg); }
+  to { transform: translateY(-5px) rotate(1.5deg); }
+}
+
+@keyframes mih-treasure-present {
+  from { opacity: .2; transform: translateY(25px) scale(.9); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes mih-treasure-pop {
+  from { opacity: 0; transform: translateY(8px) scale(.92); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes mih-treasure-orb-in {
+  from { opacity: 0; transform: translate(var(--orb-render-x), calc(var(--orb-render-y) + 58px)) scale(.45) rotateX(32deg); }
+  to { opacity: 1; transform: translate(var(--orb-render-x), var(--orb-render-y)) scale(1) rotateX(0); }
+}
+
+@keyframes mih-treasure-orb-float {
+  from { transform: translate(var(--orb-render-x), var(--orb-render-y)); }
+  to { transform: translate(var(--orb-render-x), calc(var(--orb-render-y) - 7px)); }
+}
+
+@keyframes mih-treasure-dot {
+  from { opacity: .25; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(-2px); }
+}
+
+@media (max-width: 1320px) {
+  .mih-treasure-lab {
+    grid-template-columns: 268px minmax(420px, 1fr);
+  }
+
+  .mih-treasure-inspector {
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr);
+    border-top: 1px solid var(--qp-line);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 980px) {
+  .mih-treasure-trust-strip,
+  .mih-treasure-atlas-tabs,
+  .mih-treasure-next-links {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .mih-treasure-trust-strip > span + span,
+  .mih-treasure-trust-strip > a {
+    border-left: 0;
+    border-top: 1px solid var(--qp-line);
+  }
+
+  .mih-treasure-lab {
+    grid-template-columns: 1fr;
+  }
+
+  .mih-treasure-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-right: 0;
+    border-bottom: 1px solid var(--qp-line);
+  }
+
+  .mih-treasure-controls > header,
+  .mih-treasure-controls > .mih-treasure-search,
+  .mih-treasure-controls > .mih-treasure-live-auth,
+  .mih-treasure-controls > .mih-treasure-auth-note {
+    grid-column: 1 / -1;
+  }
+
+  .mih-treasure-stage {
+    min-height: 570px;
+  }
+}
+
+@media (max-width: 720px) {
+  .mih-treasure-page .mih-page-heading,
+  .mih-treasure-section__header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mih-treasure-trust-strip,
+  .mih-treasure-atlas-tabs,
+  .mih-treasure-next-links,
+  .mih-treasure-controls,
+  .mih-treasure-inspector {
+    grid-template-columns: 1fr;
+  }
+
+  .mih-treasure-controls > * {
+    grid-column: 1 / -1;
+  }
+
+  .mih-treasure-stage {
+    min-height: 520px;
+  }
+
+  .mih-treasure-stage::before { width: 320px; height: 320px; }
+  .mih-treasure-stage::after { width: 252px; height: 252px; }
+  .mih-treasure-stage__halo { width: 190px; height: 190px; }
+
+  .mih-treasure-mascot {
+    width: min(72%, 300px);
+  }
+
+  .mih-treasure-stage--idle .mih-treasure-mascot {
+    width: min(62%, 250px);
+  }
+
+  .mih-treasure-orb {
+    --orb-render-x: var(--orb-x-mobile);
+    --orb-render-y: var(--orb-y-mobile);
+  }
+
+  .mih-treasure-speech {
+    top: 52px;
+    right: 10px;
+  }
+
+  .mih-treasure-inspector {
+    border-top: 1px solid var(--qp-line);
+    border-left: 0;
+  }
+
+  .mih-treasure-cost-table {
+    overflow-x: auto;
+  }
+
+  .mih-treasure-cost-table table {
+    min-width: 720px;
+  }
+}
+
+@media (max-width: 480px) {
+  .mih-treasure-stage {
+    min-height: 470px;
+  }
+
+  .mih-treasure-orb {
+    width: 78px;
+  }
+
+  .mih-treasure-stage__provider {
+    top: 10px;
+    left: 10px;
+  }
+
+  .mih-treasure-speech {
+    max-width: 132px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mih-treasure-stage--searching .mih-treasure-mascot,
+  .mih-treasure-stage--presenting .mih-treasure-mascot,
+  .mih-treasure-speech,
+  .mih-treasure-orb,
+  .mih-treasure-searching-copy i {
+    animation: none;
+  }
+
+  .mih-treasure-orb {
+    opacity: 1;
+    transform: translate(var(--orb-render-x), var(--orb-render-y));
   }
 }

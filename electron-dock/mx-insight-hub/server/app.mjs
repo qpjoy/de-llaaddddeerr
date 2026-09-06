@@ -465,6 +465,7 @@ export function createApp({
   segmenterConfig = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
+  publicApiBaseUrl = null,
   staticRoot,
   logger = console,
 }) {
@@ -1029,11 +1030,24 @@ export function createApp({
         throw new AppError(404, 'not_found', 'Route not found')
       }
 
-      if (request.method === 'OPTIONS') {
+      // Bearer-key public routes are intentionally callable by browser clients
+      // hosted on the separately isolated Admin listener. The token is supplied
+      // explicitly (never a cookie), so wildcard origin does not grant ambient
+      // authority. Expose only the delivery headers needed to distinguish a
+      // live dispatch, cache/fallback and idempotent replay.
+      if (listenerMode !== 'admin' && isPublicPath) {
+        response.setHeader('access-control-allow-origin', '*')
+        response.setHeader(
+          'access-control-expose-headers',
+          'idempotent-replay, x-mx-insight-request-id, x-mx-insight-source-mode, x-mx-insight-captured-at, age, warning',
+        )
+      }
+
+      if (request.method === 'OPTIONS' && isPublicPath) {
         response.writeHead(204, {
           'access-control-allow-origin': '*',
-          'access-control-allow-headers': 'authorization, content-type, idempotency-key, x-api-key, x-mx-insight-admin-token',
-          'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'access-control-allow-headers': 'authorization, content-type, idempotency-key, x-api-key',
+          'access-control-allow-methods': 'GET, POST, OPTIONS',
         })
         response.end()
         return
@@ -1169,6 +1183,9 @@ export function createApp({
             capabilities: principal.capabilities,
             memberships: principal.memberships,
             identityProvider: identity?.enabled ? 'mx-launcher' : null,
+            // Deployment routing metadata, not a credential. Browser clients
+            // still need an explicit Hub consumer key for every public call.
+            publicApiBaseUrl,
             // Diagnostic pair for federated sessions: what the provider said,
             // and what would have granted platform admin.
             ...(principal.launcherScopes

@@ -1,6 +1,69 @@
 const API_BASE = (import.meta.env.VITE_MX_INSIGHT_API_BASE || '').replace(/\/$/, '')
 const ADMIN_ROOT = '/internal/v1/admin'
 
+function withoutTrailingSlash(value) {
+  return String(value || '').trim().replace(/\/+$/, '')
+}
+
+function httpOrigin(value) {
+  const candidate = withoutTrailingSlash(value)
+  if (!candidate) return ''
+  try {
+    const url = new URL(candidate)
+    if (
+      !['http:', 'https:'].includes(url.protocol)
+      || url.username
+      || url.password
+      || url.search
+      || url.hash
+      || (url.pathname !== '' && url.pathname !== '/')
+    ) return ''
+    return url.origin
+  } catch {
+    return ''
+  }
+}
+
+// Production runs the Admin SPA on :18151 and the bearer-key Public API on
+// :18150. The public edge may instead route both surfaces on one origin. Keep
+// the default relative for that edge and for the combined/dev listener, while
+// making a direct Admin-listener visit work without baking one host into the
+// image. The authenticated Admin session supplies the authoritative runtime
+// origin for split-host/TLS deployments; a build-time override remains as a
+// compatibility fallback only.
+const FALLBACK_PUBLIC_API_BASE = (() => {
+  const configured = httpOrigin(import.meta.env.VITE_MX_INSIGHT_PUBLIC_API_BASE)
+  if (configured) return configured
+  if (typeof window !== 'undefined' && window.location.port === '18151') {
+    const url = new URL(window.location.origin)
+    url.port = '18150'
+    return url.origin
+  }
+  return ''
+})()
+
+let runtimePublicApiBase = ''
+
+export function configurePublicApiBase(value) {
+  runtimePublicApiBase = httpOrigin(value)
+}
+
+function publicApiBase() {
+  return runtimePublicApiBase || FALLBACK_PUBLIC_API_BASE
+}
+
+export function publicDocsHref(path = '/docs') {
+  const normalizedPath = path.startsWith('/docs') ? path : `/docs/${String(path).replace(/^\/+/, '')}`
+  if (runtimePublicApiBase) return `${runtimePublicApiBase}${normalizedPath}`
+  const configured = withoutTrailingSlash(import.meta.env.VITE_MX_INSIGHT_PUBLIC_DOCS_URL)
+  if (configured) {
+    return normalizedPath === '/docs'
+      ? configured
+      : `${configured}${normalizedPath.slice('/docs'.length)}`
+  }
+  return `${publicApiBase()}${normalizedPath}`
+}
+
 export class ApiError extends Error {
   constructor({ status = 0, code = 'request_failed', message = 'Request failed', requestId, details } = {}) {
     super(message)
@@ -54,6 +117,52 @@ async function request(token, path, { method = 'GET', body, query, raw, contentT
     })
   }
   return payload?.data
+}
+
+async function publicDataRequest(apiKey, path, {
+  method = 'GET',
+  body,
+  idempotencyKey,
+} = {}) {
+  const response = await fetch(`${publicApiBase()}${path}`, {
+    method,
+    headers: {
+      accept: 'application/json',
+      authorization: `Bearer ${apiKey}`,
+      ...(body ? { 'content-type': 'application/json' } : {}),
+      ...(idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  const payload = await parsePayload(response)
+  const evidence = {
+    requestId: payload?.requestId || response.headers.get('x-mx-insight-request-id'),
+    sourceMode: response.headers.get('x-mx-insight-source-mode') || payload?.meta?.sourceMode || null,
+    idempotentReplay: response.headers.get('idempotent-replay') === 'true',
+    capturedAt: response.headers.get('x-mx-insight-captured-at') || payload?.meta?.capturedAt || null,
+    ageSeconds: payload?.meta?.ageSeconds ?? null,
+  }
+  if (!response.ok) {
+    throw new ApiError({
+      status: response.status,
+      code: payload?.error?.code,
+      message: payload?.error?.message || `Request failed with HTTP ${response.status}`,
+      requestId: evidence.requestId,
+      details: payload?.error?.details,
+    })
+  }
+  return { payload, evidence }
+}
+
+// This deliberately accepts a Hub consumer key, never an upstream provider
+// credential. The data-product workbench keeps the value in component memory
+// and calls the same stable public contract used by external clients.
+export const publicDataApi = {
+  ecommerceProductsSearch: (apiKey, body, { idempotencyKey } = {}) => publicDataRequest(
+    apiKey,
+    '/api/v1/data/ecommerce/products/search',
+    { method: 'POST', body, idempotencyKey },
+  ),
 }
 
 async function health(token, path) {

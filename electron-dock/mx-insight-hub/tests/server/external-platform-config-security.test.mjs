@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { test } from 'node:test'
 import { loadConfig, preflightJustOneConfig } from '../../server/config.mjs'
 import { createRuntime } from '../../server/index.mjs'
@@ -82,6 +83,30 @@ test('admin runtime never constructs a credentialed JustOne adapter', async () =
     assert.equal(runtime.justOneAdapter, null)
     assert.equal((await runtime.externalPlatformGateway.capabilities()).ready, false)
   } finally {
+    await closeRuntime(runtime)
+  }
+})
+
+test('admin session discovers the validated runtime public API origin', async () => {
+  const adminToken = 'admin-token-with-enough-entropy'
+  const runtime = await runtimeFor({
+    ...BASE,
+    MX_INSIGHT_LISTENER_MODE: 'admin',
+    MX_INSIGHT_ADMIN_TOKEN: adminToken,
+    MX_INSIGHT_PUBLIC_URL: 'https://Gate.Example.Test:443/',
+  })
+  const server = createServer(runtime.app)
+  try {
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const response = await fetch(
+      `http://127.0.0.1:${server.address().port}/internal/v1/admin/session`,
+      { headers: { 'x-mx-insight-admin-token': adminToken } },
+    )
+    assert.equal(response.status, 200)
+    const payload = await response.json()
+    assert.equal(payload.data.publicApiBaseUrl, 'https://gate.example.test')
+  } finally {
+    if (server.listening) await new Promise((resolve) => server.close(resolve))
     await closeRuntime(runtime)
   }
 })

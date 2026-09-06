@@ -175,6 +175,7 @@ export async function createRuntime(config = loadConfig()) {
     backfillPlatforms: config.backfill.platforms,
     adminToken: config.adminToken,
     listenerMode: config.listenerMode,
+    publicApiBaseUrl: config.publicApiBaseUrl,
     staticRoot: config.listenerMode === 'public' ? null : resolve(projectRoot, 'dist/client'),
   })
   return {
