@@ -39,10 +39,13 @@ This route-specific safety gate does not turn Test into a general zero-cost
 credential; every other public route retains its own documented contract. If an
 older workbench left an ambiguous Test-key request in browser recovery state, the
 page keeps the exact body, original `Idempotency-Key` and one-way credential
-fingerprint locked as operational evidence but sends no capabilities, search or
-media request. Operators must reconcile that historical attempt from retained Hub
-evidence; pasting the old secret or minting a new key is not an in-page recovery
-path.
+fingerprint as operational evidence and never sends the Test secret to ecommerce.
+After a current Live key passes its zero-cost capability check, the main search
+action performs the consumer-scoped status GET automatically. The page asks for
+neither a UUID nor manual ownership review. An explicit `unknown` may be followed
+by one new-key acquisition when the operator selects `refresh` and presses the
+main button; the page adds `X-MX-Insight-Retry-Of` itself. `reserved` and failed
+lookups remain blocked.
 
 ## Separation
 

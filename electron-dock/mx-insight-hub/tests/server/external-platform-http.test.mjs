@@ -165,7 +165,7 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
       headers: {
         origin: 'https://insight.example.test',
         'access-control-request-method': 'POST',
-        'access-control-request-headers': 'authorization, content-type, idempotency-key',
+        'access-control-request-headers': 'authorization, content-type, idempotency-key, x-mx-insight-retry-of',
       },
     })
     assert.equal(preflight.status, 204)
@@ -173,7 +173,7 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
     for (const method of ['GET', 'POST', 'OPTIONS']) {
       assert.match(preflight.headers.get('access-control-allow-methods') || '', new RegExp(method, 'u'))
     }
-    for (const header of ['authorization', 'content-type', 'idempotency-key', 'x-api-key']) {
+    for (const header of ['authorization', 'content-type', 'idempotency-key', 'x-api-key', 'x-mx-insight-retry-of']) {
       assert.match(preflight.headers.get('access-control-allow-headers') || '', new RegExp(header, 'u'))
     }
     assert.equal(adapterCalls, 0)
@@ -331,6 +331,68 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
   } finally {
     await close(server)
     await usageStore.close()
+  }
+})
+
+test('public ecommerce route forwards the exact uncertain request reference', async () => {
+  const retryOfRequestId = randomUUID()
+  const requestId = randomUUID()
+  let observed = null
+  const service = {
+    async authenticate(secret) {
+      assert.equal(secret, 'mih_live_http_route_secret')
+      return {
+        tenant: { id: randomUUID() },
+        consumer: { id: randomUUID() },
+        apiKey: { id: randomUUID(), environment: 'live' },
+      }
+    },
+  }
+  const externalPlatformGateway = {
+    async search(context, input) {
+      observed = { context, input }
+      return {
+        status: 200,
+        body: { contractVersion: 'mx-insight-hub.ecommerce-products.v1', requestId },
+        requestId,
+        replay: false,
+        sourceMode: 'live',
+        capturedAt: null,
+        staleAgeSeconds: null,
+      }
+    },
+  }
+  const app = createApp({
+    service,
+    store: {},
+    adapter: {},
+    adminToken: null,
+    externalPlatformGateway,
+    listenerMode: 'public',
+    logger: { error() {} },
+  })
+  const server = createServer(app)
+  const baseUrl = await listen(server)
+
+  try {
+    const response = await fetch(`${baseUrl}${PATH}`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer mih_live_http_route_secret',
+        'content-type': 'application/json',
+        'idempotency-key': 'http-uncertain-retry-01',
+        'x-mx-insight-retry-of': retryOfRequestId,
+      },
+      body: JSON.stringify({ ...BODY, deliveryMode: 'refresh' }),
+    })
+
+    assert.equal(response.status, 200)
+    assert.equal(observed?.input.idempotencyKey, 'http-uncertain-retry-01')
+    assert.equal(observed?.input.retryOfRequestId, retryOfRequestId)
+    assert.equal(observed?.input.path, PATH)
+    assert.deepEqual(observed?.input.body, { ...BODY, deliveryMode: 'refresh' })
+  } finally {
+    await close(server)
   }
 })
 

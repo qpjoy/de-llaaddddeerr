@@ -35,7 +35,8 @@ cost requires an explicit operator decision.
 ## 2. Activation checklist
 
 1. Run the normal migration workflow and verify migrations `051_external_platform_gateway.sql` and
-   `052_external_platform_credentials.sql` are applied.
+   `052_external_platform_credentials.sql` and
+   `053_external_platform_uncertain_retry.sql` are applied.
    Do not create or patch the `external_platform` tables by hand.
 2. Use PostgreSQL storage (`MX_INSIGHT_STORE=postgres` with `DATABASE_URL`). Memory mode is acceptable only
    for contract tests; it cannot be accepted as durable archive/lineage evidence.
@@ -132,30 +133,38 @@ to force another attempt. For an ambiguous outcome, query `GET /api/v1/requests/
 received. When an older client retained only its idempotency key, call
 `GET /api/v1/requests/by-idempotency-key` with that value in the `Idempotency-Key` header. Either lookup may use
 any current active Hub Public API key belonging to the same consumer; both create no usage and cannot dispatch
-JustOne. Do not repeat the ecommerce POST while the returned state is `reserved` or `unknown`.
+JustOne. Do not repeat the old ecommerce POST or silently rotate its key while the returned state is `reserved` or
+`unknown`. Only after its automatic GET explicitly returns `unknown` may the treasure-box workbench issue one
+intentionally new acquisition: selecting `refresh` and pressing the main button explicitly accepts that the prior
+request may already have incurred provider cost, and the page sends a new key plus
+`X-MX-Insight-Retry-Of: <old requestId>`. The page gets that UUID from the GET; the operator never enters it.
+`reserved` or a failed status lookup cannot use this path.
 
 The request-status result is an operational state, not a retry timer:
 
 | Status | Browser / operator action |
 | --- | --- |
-| `reserved` | The request may still be running. Keep the original lock and query the same Request ID later; do not POST or create another idempotency key. |
-| `unknown` | The outcome cannot be proved. Keep the lock and reconcile usage, provider-call and archive evidence; browser replay remains disabled. |
+| `reserved` | The request may still be running. Never replay or override it; keep the evidence and let the main action check status again. |
+| `unknown` | The outcome cannot be proved. Browser replay stays disabled and the evidence is retained. One intentionally new acquisition is allowed only when `refresh` is selected and the main button is pressed; the page automatically supplies the retry-of header. A retry loop cannot use this path. |
 | `committed` | The original outcome is durable. An exact same-body, same-key POST may now retrieve that committed result without another usage or provider dispatch. |
-| `released` | Hub proved the reservation was released. Clear the browser lock, but require a new explicit cost confirmation and a new idempotency key for any acquisition. |
+| `released` | Hub proved the reservation was released. Close the prior ledger entry. A later acquisition is a new action and receives a new idempotency key; the page exposes no separate confirmation control. |
 
 Browser ledger v1 records are migrated to v2 without asking for a UUID. After the current Hub Public API key passes
 the zero-cost capability check, the workbench automatically uses the retained `Idempotency-Key` header for a
 consumer-scoped lookup and stores the returned request identity. Corrupt browser-only entries are removed;
 server-side usage/provider/archive evidence is retained. Do not put an idempotency key in a URL and do not use
-POST as a lookup mechanism.
+POST as a lookup mechanism. The page exposes no separate status button or manual consumer-ownership check: its
+single main action performs the GET first, then follows the selected delivery mode.
 
 An old browser record marked ambiguous under a Test key keeps its exact body, original `Idempotency-Key` and
 one-way credential fingerprint as migration evidence. The Test secret is never sent to ecommerce. After a current
 Live key passes the zero-cost capability check, the workbench may use that key for the header-based status lookup;
 the backend resolves consumer ownership. A same-consumer `committed` or `released` result follows the normal
-recovery rules, while `reserved`/`unknown` remains locked and a foreign or absent record cannot be guessed or
-replayed. Local safe-demo and `cache_only` reads remain independently available because neither can create a
-provider call.
+recovery rules. An explicit `unknown` remains retained audit evidence and is never replayed or guessed; it does
+not disable the filters or main action. Selecting `refresh` and pressing the main button creates one new `Idempotency-Key`, adds the
+old request ID through `X-MX-Insight-Retry-Of` and may incur another provider cost. `reserved`, a foreign record or an unavailable lookup
+remains blocked, and the workbench never overrides it silently. Local safe-demo and `cache_only` reads remain
+independently available because neither can create a provider call.
 
 ```bash
 (
@@ -431,7 +440,7 @@ then evaluate quota plan or recharge.
 | Symptom / code | Meaning | Operator action |
 | --- | --- | --- |
 | `api_key_required` / `invalid_api_key` | The ordinary Hub Public API credential is missing, invalid, expired or revoked. | Verify/reissue that Hub key and its expiry. Do not paste or rotate the JustOne key. |
-| `test_key_not_supported` | A valid legacy Test key reached an external ecommerce search or media route. | Use a Live key only for a deliberately new request. For a historical ambiguous Test record, keep its body/`Idempotency-Key` lock and reconcile it operationally; do not replay it from the page. No usage reservation or provider/media call occurred for this rejection. |
+| `test_key_not_supported` | A valid legacy Test key reached an external ecommerce search or media route. | Use a Live key only for a deliberately new request. A historical ambiguous Test record is retained for audit and checked automatically; it does not require the old secret, UUID or manual consumer review. No usage reservation or provider/media call occurred for this rejection. |
 | `platform_not_granted` | The Hub key is valid, but its consumer lacks the `ecommerce` grant. | Grant the product through the governed Hub authorization workflow; a source-catalog/provider credential does not grant it. |
 | `stored_snapshot_not_found` | A `cache_only` request found no exact retained snapshot. No provider call was made. | Change the business filters, use the clearly marked local safe demo, or explicitly authorize one `refresh` request with a new Idempotency-Key. |
 | `quota_exceeded` | The authenticated consumer exhausted its Hub ecommerce policy window. | Inspect the consumer policy and demand. Do not treat it as JustOne balance or free-quota evidence. |
@@ -440,7 +449,9 @@ then evaluate quota plan or recharge.
 | `external_platform_busy` | Hub global/per-consumer concurrency is full. | Find the dominant tenant/request pattern; reduce client concurrency or policy before raising the global ceiling. |
 | `external_platform_capacity_exceeded` | Provider rate/quota capacity rejected the dispatch. | Stop retry amplification, verify quota evidence and wait for the known reset; unknown reset stays unknown. |
 | `external_platform_response_unusable` | A successful external response did not match the reviewed shape. | Treat provider quota/cost as possibly consumed, without inferring a Hub customer charge. Inspect secret-free response evidence, add a fixture and review the adapter before any change. |
-| `external_platform_outcome_unknown` / `request_outcome_unknown` | Dispatch or durable outcome cannot be proved. | Keep the original `Idempotency-Key` and Request ID when available. Use `GET /api/v1/requests/{requestId}`, or use `GET /api/v1/requests/by-idempotency-key` with the key in the request header when no UUID was captured. Either lookup uses the current active Public API key for the same consumer. `reserved`/`unknown` must not POST. Reconcile call, usage and archive evidence; never issue a new-key automatic retry. |
+| `invalid_uncertain_retry` | Retry-of is malformed or is not paired with `refresh`. | Do not hand-edit the UUID. Let the workbench obtain it through the status GET and construct the header. |
+| `uncertain_retry_not_allowed` | The old idempotency key was reused, or the referenced record is absent, already consumed, not eligible `unknown`, or does not match the same consumer/ecommerce fingerprint. The same response hides cross-consumer records. | Keep the old evidence. Do not retry or probe another identifier; `reserved` and succeeded-unusable quarantine are not overrideable. |
+| `external_platform_outcome_unknown` / `request_outcome_unknown` | Dispatch or durable outcome cannot be proved. | Keep the original `Idempotency-Key` and Request ID when available. The workbench automatically uses the applicable status GET with the current active Public API key. Only an explicit `unknown` permits the already-selected `refresh` and main-button action to send one new key with an automatically populated `X-MX-Insight-Retry-Of: <old requestId>`; that click accepts possible duplicate provider cost. `reserved` or a failed lookup stays blocked; never issue a new-key automatic retry. |
 | rising `stored_fallback` | Live path is failing while exact snapshots still satisfy clients. | Check capture age, fallback reason, provider state and stale deadline. Do not report the response as live. |
 | provider calls exceed Hub requests | Ledger reconciliation failure. | Freeze connector rollout and inspect transactions; do not estimate spend from incomplete counters. |
 | canonical/ES count lags calls | Ingest or projection backlog, not necessarily acquisition loss. | Verify response/item archives and ingest-run linkage, then repair queue/outbox. Do not repeat the provider-backed search. |

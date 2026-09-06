@@ -104,18 +104,26 @@ External ecommerce search and media accept only the ordinary `mih_live_` Hub Pub
 JustOne-product credential. A valid legacy Test key with the ecommerce grant sees `ready=false` in capabilities,
 and search/media return `403 test_key_not_supported` before usage reservation, committed-result/media lookup or
 external I/O. If an older workbench left an ambiguous Test-key record, it preserves the exact body,
-`Idempotency-Key` and credential fingerprint only for operator reconciliation and sends no request.
+`Idempotency-Key` and credential fingerprint as audit evidence. The main search action performs the read-only
+lookup automatically with the current Live key; it never asks for the old Test secret, a UUID or a manual consumer
+ownership check.
 
 For an ambiguous Live outcome, recovery preserves the exact Public path, normalized body and
 `Idempotency-Key`. A different `Idempotency-Key` can create a second live dispatch and another provider-cost
-event. The browser first uses a known Request ID when available; otherwise it calls
+event. The browser automatically uses a known Request ID when available; otherwise it calls
 `GET /api/v1/requests/by-idempotency-key` with the original value in the `Idempotency-Key` header. The current
 active Hub Public API key may perform either lookup when it belongs to the same consumer, including after key
 rotation. A locally stored API-key fingerprint is evidence for diagnostics, not an authorization requirement, and
 the UI never asks the user to find or paste a UUID. A different consumer receives `request_not_found` without
-learning whether the request exists. `reserved` and `unknown` remain locked for reconciliation; only `committed`
-is replayed and `released` permits a new request. Backend authorization and idempotency remain consumer-scoped.
-None of this exposes the JustOne credential or provider endpoint identity through the Public contract.
+learning whether the request exists. `committed` is replayed exactly and `released` closes the prior entry. If the
+GET explicitly returns `unknown`, the browser retains it for audit instead of locking the controls. Selecting
+`refresh` and pressing the single main button explicitly authorizes one intentionally
+new request with a new key and `X-MX-Insight-Retry-Of: <old requestId>`. The page obtains this UUID from the
+automatic GET rather than asking the user to enter it. That click accepts the possibility that the earlier
+request already incurred JustOne procurement cost; no background or silent retry is
+permitted. `reserved`, status-network failure and route/version mismatch remain blocked and never send the
+retry-of header. Backend authorization and idempotency remain consumer-scoped. None of this exposes the JustOne
+credential or provider endpoint identity through the Public contract.
 
 The Public authentication order is also independent of JustOne: a missing Hub Public API key is
 `401 api_key_required`; an invalid, expired or revoked Hub key is `401 invalid_api_key`; a valid Test key is

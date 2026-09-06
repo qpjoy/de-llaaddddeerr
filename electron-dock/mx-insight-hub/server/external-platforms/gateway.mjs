@@ -13,6 +13,7 @@ import { createExternalPlatformCursorCodec } from './cursor.mjs'
 const AUTHORIZATION_PLATFORM = 'ecommerce'
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 1_000, windowSeconds: 3_600, maxPageSize: 100 })
 const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
@@ -238,7 +239,7 @@ export class ExternalPlatformGateway {
     }
   }
 
-  async search(context, { body, idempotencyKey, path }) {
+  async search(context, { body, idempotencyKey, retryOfRequestId, path }) {
     let durableRequestId = null
     let ownsReservation = false
     try {
@@ -296,14 +297,45 @@ export class ExternalPlatformGateway {
         'Idempotency-Key is required when deliveryMode is refresh',
       )
     }
+    await this.usageStore.reapStaleReservations()
+    await this.platformStore.reapStaleCalls?.()
+
+    let validatedRetryOfRequestId = null
+    if (retryOfRequestId != null) {
+      if (
+        typeof retryOfRequestId !== 'string'
+        || !UUID_PATTERN.test(retryOfRequestId.trim())
+        || normalized.deliveryMode !== 'refresh'
+      ) {
+        throw new AppError(
+          400,
+          'invalid_uncertain_retry',
+          'X-MX-Insight-Retry-Of requires a request UUID and deliveryMode refresh',
+        )
+      }
+      const candidateId = retryOfRequestId.trim()
+      const previous = await this.usageStore.getUsageRequestForRetry(candidateId, context.consumer.id)
+      if (
+        !previous
+        || previous.status !== 'unknown'
+        || previous.platform !== AUTHORIZATION_PLATFORM
+        || previous.fingerprint !== requestFingerprint
+        || previous.idempotencyKey === idempotencyKey
+      ) {
+        throw new AppError(
+          409,
+          'uncertain_retry_not_allowed',
+          'The referenced uncertain request cannot authorize this retry',
+        )
+      }
+      validatedRetryOfRequestId = candidateId
+    }
     const cacheBucket = Math.floor(Date.now() / this.config.freshTtlMs)
     const effectiveKey = suppliedKey
       ? idempotencyKey
       : `auto:${cacheBucket}:${requestFingerprint.slice(0, 48)}`
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.usageStore.reapStaleReservations()
-    await this.platformStore.reapStaleCalls?.()
     const reservation = await this.usageStore.reserve({
       requestId,
       idempotencyKey: effectiveKey,
@@ -510,6 +542,7 @@ export class ExternalPlatformGateway {
         endpointKey: normalized.endpointKey,
         ownerRequestId: activeRequestId,
         expiresAt: new Date(Date.now() + this.reservationLeaseMs),
+        retryOfRequestId: validatedRetryOfRequestId,
       })
       ownsLease = lease === true || lease?.kind === 'acquired'
       if (!ownsLease) {
@@ -596,6 +629,7 @@ export class ExternalPlatformGateway {
         endpointVersion: normalized.endpointVersion,
         marketplace: normalized.marketplace,
         fingerprint: requestFingerprint,
+        retryOfRequestId: validatedRetryOfRequestId,
       })
       const startedAt = performance.now()
       try {

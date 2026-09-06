@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
   MemoryExternalPlatformStore,
@@ -10,6 +11,18 @@ const FINGERPRINT = 'a'.repeat(64)
 const OTHER_FINGERPRINT = 'b'.repeat(64)
 const OPERATION = 'ecommerce.products.search'
 const ENDPOINT_KEY = 'jd.product-search.v1'
+
+test('migration 053 adds one durable uncertain-retry edge without rewriting existing calls', async () => {
+  const sql = await readFile(
+    new URL('../../migrations/053_external_platform_uncertain_retry.sql', import.meta.url),
+    'utf8',
+  )
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS retry_of_usage_request_id uuid/u)
+  assert.match(sql, /REFERENCES usage_requests\(id\) ON DELETE RESTRICT/u)
+  assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS external_platform_provider_calls_retry_of_idx/u)
+  assert.match(sql, /WHERE retry_of_usage_request_id IS NOT NULL/u)
+  assert.doesNotMatch(sql, /^\s*(?:UPDATE|DELETE FROM|TRUNCATE)\b/imu)
+})
 
 function callInput(overrides = {}) {
   return {
@@ -77,6 +90,49 @@ test('memory beginProviderCall requires one live owned ecommerce reservation', a
   )
 })
 
+test('memory provider-call audit records an unknown retry target only once and in scope', async () => {
+  const first = callInput()
+  const retryOfRequestId = randomUUID()
+  const retryTarget = reservedUsage(first, {
+    id: retryOfRequestId,
+    status: 'unknown',
+    leaseExpiresAt: null,
+  })
+  const usageStore = {
+    requests: new Map([
+      [retryOfRequestId, retryTarget],
+      [first.usageRequestId, reservedUsage(first)],
+    ]),
+  }
+  const store = new MemoryExternalPlatformStore({ usageStore })
+
+  const created = await store.beginProviderCall({ ...first, retryOfRequestId })
+  assert.equal(created.retryOfRequestId, retryOfRequestId)
+
+  const second = callInput({
+    tenantId: first.tenantId,
+    consumerId: first.consumerId,
+    apiKeyId: first.apiKeyId,
+    fingerprint: first.fingerprint,
+  })
+  usageStore.requests.set(second.usageRequestId, reservedUsage(second))
+  await assert.rejects(
+    store.beginProviderCall({ ...second, retryOfRequestId }),
+    (error) => error?.code === 'uncertain_retry_not_allowed',
+  )
+
+  const otherConsumer = callInput({
+    tenantId: first.tenantId,
+    apiKeyId: first.apiKeyId,
+    fingerprint: first.fingerprint,
+  })
+  usageStore.requests.set(otherConsumer.usageRequestId, reservedUsage(otherConsumer))
+  await assert.rejects(
+    store.beginProviderCall({ ...otherConsumer, retryOfRequestId }),
+    (error) => error?.code === 'uncertain_retry_not_allowed',
+  )
+})
+
 test('endpoint contract quarantine is global while unknown fingerprints remain consumer-local', async () => {
   const store = new MemoryExternalPlatformStore({
     usageStore: { requests: new Map() },
@@ -126,6 +182,122 @@ test('endpoint contract quarantine is global while unknown fingerprints remain c
   assert.deepEqual(independentConsumer, { kind: 'acquired' })
 })
 
+test('memory dispatch lease bypasses only the exact referenced unknown request', async () => {
+  const consumerId = randomUUID()
+  const retryOfRequestId = randomUUID()
+  const completedAt = new Date().toISOString()
+  const acquire = (store) => store.acquireDispatchLease({
+    consumerId,
+    operation: OPERATION,
+    fingerprint: FINGERPRINT,
+    endpointKey: ENDPOINT_KEY,
+    ownerRequestId: randomUUID(),
+    expiresAt: new Date(Date.now() + 30_000),
+    retryOfRequestId,
+  })
+  const storeWith = (...calls) => {
+    const store = new MemoryExternalPlatformStore({
+      usageStore: { requests: new Map() },
+      uncertainCooldownMs: 60_000,
+    })
+    for (const call of calls) store.calls.set(call.id, call)
+    return store
+  }
+  const exactUnknown = {
+    id: 'exact-unknown',
+    usageRequestId: retryOfRequestId,
+    consumerId,
+    operation: OPERATION,
+    fingerprint: FINGERPRINT,
+    endpointKey: ENDPOINT_KEY,
+    outcome: 'unknown',
+    startedAt: completedAt,
+    completedAt,
+  }
+
+  assert.deepEqual(await acquire(storeWith(exactUnknown)), { kind: 'acquired' })
+
+  const anotherUnknown = {
+    ...exactUnknown,
+    id: 'another-unknown',
+    usageRequestId: randomUUID(),
+  }
+  const unknownBlocked = await acquire(storeWith(exactUnknown, anotherUnknown))
+  assert.equal(unknownBlocked.kind, 'blocked')
+  assert.equal(unknownBlocked.reason, 'unknown')
+
+  const pendingBlocked = await acquire(storeWith({
+    ...exactUnknown,
+    id: 'pending',
+    outcome: 'pending',
+    completedAt: null,
+  }))
+  assert.equal(pendingBlocked.kind, 'blocked')
+  assert.equal(pendingBlocked.reason, 'pending')
+
+  const unusableBlocked = await acquire(storeWith({
+    ...exactUnknown,
+    id: 'unusable',
+    consumerId: randomUUID(),
+    fingerprint: OTHER_FINGERPRINT,
+    outcome: 'succeeded_unusable',
+  }))
+  assert.equal(unusableBlocked.kind, 'blocked')
+  assert.equal(unusableBlocked.reason, 'succeeded_unusable')
+})
+
+test('Postgres dispatch lease excludes only the referenced unknown usage request', async () => {
+  const retryOfRequestId = randomUUID()
+  const queries = []
+  const completedAt = new Date('2026-09-03T00:00:00.000Z')
+  const store = new PostgresExternalPlatformStore({
+    pool: {
+      async query(sql, values) {
+        queries.push({ sql, values })
+        if (/INSERT INTO external_platform\.dispatch_leases/u.test(sql)) {
+          return { rows: [] }
+        }
+        if (/SELECT outcome, completed_at/u.test(sql)) {
+          return {
+            rows: [{
+              outcome: 'unknown',
+              completed_at: completedAt,
+              blocked_until: new Date(completedAt.getTime() + 60_000),
+            }],
+          }
+        }
+        throw new Error(`unexpected SQL: ${sql}`)
+      },
+    },
+    uncertainCooldownMs: 60_000,
+  })
+
+  const result = await store.acquireDispatchLease({
+    consumerId: randomUUID(),
+    operation: OPERATION,
+    fingerprint: FINGERPRINT,
+    endpointKey: ENDPOINT_KEY,
+    ownerRequestId: randomUUID(),
+    expiresAt: new Date(Date.now() + 30_000),
+    retryOfRequestId,
+  })
+
+  assert.equal(result.kind, 'blocked')
+  assert.equal(result.reason, 'unknown')
+  assert.equal(queries[0].values[7], retryOfRequestId)
+  assert.match(
+    queries[0].sql,
+    /call\.outcome = 'unknown'[\s\S]*?call\.usage_request_id <> \$8/u,
+  )
+  assert.match(queries[0].sql, /call\.outcome = 'pending'/u)
+  assert.match(queries[0].sql, /call\.outcome = 'succeeded_unusable'/u)
+  assert.equal(queries[1].values[5], retryOfRequestId)
+  assert.match(
+    queries[1].sql,
+    /outcome = 'unknown'[\s\S]*?usage_request_id <> \$6/u,
+  )
+})
+
 test('Postgres beginProviderCall locks and inserts only its owned reservation', async () => {
   const input = callInput()
   const queries = []
@@ -155,15 +327,54 @@ test('Postgres beginProviderCall locks and inserts only its owned reservation', 
     startedAt: startedAt.toISOString(),
   })
   const inserted = queries.find(({ sql }) => /WITH owned_request AS MATERIALIZED/u.test(sql))
-  assert.equal(inserted.values.length, 11)
+  assert.equal(inserted.values.length, 12)
   assert.match(inserted.sql, /request\.id = \$5[\s\S]*?request\.status = 'reserved'/u)
   assert.match(inserted.sql, /request\.tenant_id = \$2[\s\S]*?request\.consumer_id = \$3/u)
   assert.match(inserted.sql, /request\.api_key_id = \$4[\s\S]*?request\.fingerprint = \$11/u)
   assert.match(inserted.sql, /request\.platform = 'ecommerce'/u)
   assert.match(inserted.sql, /request\.lease_expires_at > now\(\)/u)
+  assert.match(inserted.sql, /retry_of_usage_request_id/u)
+  assert.equal(inserted.values[11], null)
   assert.match(inserted.sql, /FOR UPDATE[\s\S]*?INSERT INTO external_platform\.provider_calls/u)
   assert.equal(queries.at(-1).sql, 'COMMIT')
   assert.equal(releasedWith, null)
+})
+
+test('Postgres provider-call insert validates and persists uncertain retry lineage', async () => {
+  const input = callInput({ retryOfRequestId: randomUUID() })
+  let inserted
+  const startedAt = new Date('2026-09-03T00:00:00.000Z')
+  const client = {
+    async query(sql, values) {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (/WITH owned_request AS MATERIALIZED/u.test(sql)) {
+        inserted = { sql, values }
+        return { rows: [{ id: input.id, started_at: startedAt }] }
+      }
+      if (/UPDATE external_platform\.provider_state/u.test(sql)) return { rows: [] }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+    release() {},
+  }
+  const store = new PostgresExternalPlatformStore({
+    pool: {
+      async connect() { return client },
+      async query() { throw new Error('reconciliation must not run') },
+    },
+  })
+
+  await store.beginProviderCall(input)
+
+  assert.equal(inserted.values[11], input.retryOfRequestId)
+  assert.match(inserted.sql, /retry\.id = \$12/u)
+  assert.match(inserted.sql, /retry\.status = 'unknown'/u)
+  assert.match(inserted.sql, /retry\.tenant_id = \$2/u)
+  assert.match(inserted.sql, /retry\.consumer_id = \$3/u)
+  assert.match(inserted.sql, /retry\.fingerprint = \$11/u)
+  assert.match(inserted.sql, /retry\.platform = 'ecommerce'/u)
+  assert.match(inserted.sql, /previous_retry\.retry_of_usage_request_id = retry\.id/u)
+  assert.match(inserted.sql, /request_fingerprint, retry_of_usage_request_id/u)
+  assert.match(inserted.sql, /\$12::uuid IS NULL OR EXISTS \(SELECT 1 FROM retry_target\)/u)
 })
 
 test('Postgres beginProviderCall reconciles a lost COMMIT only with the full owned pending call', async () => {
@@ -203,6 +414,7 @@ test('Postgres beginProviderCall reconciles a lost COMMIT only with the full own
     input.id, input.tenantId, input.consumerId, input.apiKeyId, input.usageRequestId,
     input.operation, input.contractVersion, input.endpointKey,
     input.endpointVersion, input.marketplace, input.fingerprint,
+    null,
   ])
   for (const pattern of [
     /call\.tenant_id = \$2/u,
@@ -215,6 +427,7 @@ test('Postgres beginProviderCall reconciles a lost COMMIT only with the full own
     /call\.endpoint_version = \$9/u,
     /call\.marketplace = \$10/u,
     /call\.request_fingerprint = \$11/u,
+    /call\.retry_of_usage_request_id IS NOT DISTINCT FROM \$12::uuid/u,
     /call\.outcome = 'pending'/u,
     /request\.status = 'reserved'/u,
     /request\.platform = 'ecommerce'/u,

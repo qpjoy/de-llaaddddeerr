@@ -459,6 +459,14 @@ const externalCommerceIdempotencyParameter = {
   description: 'Optional for cache_only and cache_first, but required for refresh. Reuse the same Idempotency-Key only for a transport retry of the exact same page request. Every next-page request changes the body and must use a new Idempotency-Key. When omitted, Hub derives a short-lived freshness-bucket key for the normalized request.',
 }
 
+const externalCommerceUncertainRepeatParameter = {
+  name: 'X-MX-Insight-Retry-Of',
+  in: 'header',
+  required: false,
+  description: 'UUID of a matching prior same-consumer ecommerce request whose durable status is unknown. It explicitly accepts possible duplicate provider cost for one intentionally new refresh. Hub verifies the operation and normalized fingerprint. It requires deliveryMode=refresh and a different new Idempotency-Key. It never bypasses reserved state, succeeded-unusable quarantine, failed status lookup, route/version mismatch, quota, circuit or concurrency.',
+  schema: { type: 'string', format: 'uuid' },
+}
+
 const searchResponse = {
   description: 'Stable data-search response.',
   headers: {
@@ -883,7 +891,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['External Data'],
         operationId: 'searchExternalCommerceProducts',
         summary: 'Search marketplace products through the governed external data gateway',
-        description: 'Uses the ordinary Live Hub Public API key issued through API Keys and requires the ecommerce grant on its owning consumer; every active Live key for that consumer inherits the grant, so no ecommerce-specific or provider key is accepted. Legacy Test keys are compatibility metadata rather than an isolated sandbox and are rejected before usage reservation, cache work or provider dispatch. The strict body accepts only marketplace, query, deliveryMode, page, cursor, sort and price; pageSize and provider-routing fields are not part of this contract. deliveryMode defaults to cache_first: cache_only never dispatches external acquisition and returns 404 when no exact snapshot exists; refresh bypasses a fresh snapshot, requires a caller-supplied Idempotency-Key and may still deliver an exact stored fallback when acquisition fails. page and cursor are mutually exclusive. Prefer the opaque nextCursor returned by Hub, keep marketplace/query/sort/price unchanged, and use a new Idempotency-Key for every next page. Hub never labels a stored result as live. A provider success that cannot be normalized is committed as a stable 502; replaying the same Idempotency-Key returns that error without another provider call. A 200 response with an empty items array is a valid delivery, not an interface failure. No external platform identity, credential, endpoint, provider rate/balance/free quota, procurement amount, customer invoice or raw response is exposed; sourceMode is delivery evidence, not a customer price.',
+        description: 'Uses the ordinary Live Hub Public API key issued through API Keys and requires the ecommerce grant on its owning consumer; every active Live key for that consumer inherits the grant, so no ecommerce-specific or provider key is accepted. Legacy Test keys are compatibility metadata rather than an isolated sandbox and are rejected before usage reservation, cache work or provider dispatch. The strict body accepts only marketplace, query, deliveryMode, page, cursor, sort and price; pageSize and provider-routing fields are not part of this contract. deliveryMode defaults to cache_first: cache_only never dispatches external acquisition and returns 404 when no exact snapshot exists; refresh bypasses a fresh snapshot, requires a caller-supplied Idempotency-Key and may still deliver an exact stored fallback when acquisition fails. X-MX-Insight-Retry-Of names a matching prior same-consumer unknown ecommerce request and is accepted only for refresh with a different new Idempotency-Key; Hub verifies operation and normalized fingerprint, and never bypasses reserved state, succeeded-unusable quarantine, lookup failure, route/version mismatch, quota, circuit or concurrency. page and cursor are mutually exclusive. Prefer the opaque nextCursor returned by Hub, keep marketplace/query/sort/price unchanged, and use a new Idempotency-Key for every next page. Hub never labels a stored result as live. A provider success that cannot be normalized is committed as a stable 502; replaying the same Idempotency-Key returns that error without another provider call. A 200 response with an empty items array is a valid delivery, not an interface failure. No external platform identity, credential, endpoint, provider rate/balance/free quota, procurement amount, customer invoice or raw response is exposed; sourceMode is delivery evidence, not a customer price.',
         'x-mx-error-codes': {
           400: [
             'invalid_request', 'invalid_marketplace', 'unsupported_marketplace',
@@ -891,13 +899,14 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             'cursor_scope_mismatch', 'continuation_required', 'unsupported_sort',
             'invalid_price', 'unsupported_price_filter', 'unsupported_request_field',
             'invalid_delivery_mode', 'idempotency_key_required', 'invalid_idempotency_key',
+            'invalid_uncertain_retry',
           ],
           401: ['api_key_required', 'invalid_api_key'],
           403: ['platform_not_granted', 'test_key_not_supported'],
           404: ['stored_snapshot_not_found'],
           409: [
             'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
-            'external_platform_response_unusable',
+            'external_platform_response_unusable', 'uncertain_retry_not_allowed',
           ],
           413: ['payload_too_large'],
           429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded'],
@@ -910,7 +919,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             'external_platform_circuit_open', 'external_platform_capacity_unavailable',
           ],
         },
-        parameters: [externalCommerceIdempotencyParameter],
+        parameters: [externalCommerceIdempotencyParameter, externalCommerceUncertainRepeatParameter],
         requestBody: {
           required: true,
           content: {
@@ -1869,7 +1878,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         tags: ['Evidence'],
         operationId: 'getPublicRequestStatus',
         summary: 'Read the outcome of a request owned by this consumer',
-        description: 'Use x-mx-insight-request-id from a search response. This GET creates no usage and cannot dispatch an upstream call. reserved and unknown remain ambiguous and must not be POSTed again; committed permits exact replay; released requires a newly confirmed acquisition intent.',
+        description: 'Use x-mx-insight-request-id from a search response. This GET creates no usage and cannot dispatch an upstream call. reserved and unknown never permit replay of the old POST; committed permits exact replay and released closes the prior intent. An unknown ecommerce request may be referenced by X-MX-Insight-Retry-Of only for one separate, explicitly confirmed refresh with a different Idempotency-Key; reserved cannot.',
         parameters: [{
           name: 'requestId', in: 'path', required: true,
           schema: { type: 'string', format: 'uuid' },
@@ -4308,6 +4317,7 @@ curl -sS "$HUB_URL/api/v1/data/capabilities" \
   | jq '.data.platforms[] | select(.platform == "ecommerce")'</code></pre>
     <p>当前合同广告 <code>product_search</code>，支持 <code>taobao</code>、<code>tmall</code>、<code>jd</code>、<code>xiaohongshu_ec</code>、<code>xianyu</code>，分页方式是 <code>opaque_cursor</code>，交付方式是 <code>live_with_stored_fallback</code>，请求策略为 <code>cache_only / cache_first / refresh</code>。</p>
     <p><code>401 invalid_api_key</code> 表示认证失败：必须使用同一个 Hub 实例签发时仅展示一次的完整 Hub Public API secret；列表中的掩码、admin token 和外部平台密钥都不能调用公开数据接口。认证通过但其调用身份未授予 ecommerce 时返回 <code>403 platform_not_granted</code>；使用兼容 Test Key 发起正式电商搜索则返回 <code>403 test_key_not_supported</code>，且在建立 usage reservation 或调用供应方前拒绝。授予后原 Live Key 无需重签。</p>
+    <div class="notice">管理台百宝箱不要求第二把 Key、UUID、费用复选框或人工 consumer 归属核查。选择 <code>refresh</code> 并点击“重新采集最新数据”即明确授权一次可能产生上游成本的新采集；这个唯一入口会自动完成能力预检与必要的只读请求状态 GET，再决定精确重放或一次受控新采集。</div>
 
     <h3>2. 发起一次可追踪搜索</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/ecommerce/products/search</code></div><p>需要 <code>ecommerce</code> platform grant。body 是严格对象，不接受路由供应方、上游 endpoint、原始参数或 <code>pageSize</code>。省略 <code>deliveryMode</code> 时保持兼容，等同 <code>cache_first</code>。</p></div>
@@ -4418,7 +4428,7 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $REFRESH_KEY" \
   -d "$REFRESH_BODY" | jq '.meta.sourceMode,.requestId,.data.page'</code></pre>
-    <p>只有返回 <code>sourceMode=live</code> 才证明本次成功结果来自新采集；<code>stored_fallback</code> 可能发生在一次失败派发之后，最终采购成本仍以 Internal provider-call 证据为准。若首次结果不确定，优先以响应的 requestId 查询 <code>GET /api/v1/requests/{requestId}</code>；旧客户端若只保留原幂等键，则把它放入 <code>Idempotency-Key</code> 请求头并查询 <code>GET /api/v1/requests/by-idempotency-key</code>。两种 GET 都不创建 usage，也不会调用供应方；同一 consumer 当前有效的任一 Key 都可核对。<code>reserved</code> 或 <code>unknown</code> 时不得重复 POST，<code>released</code> 时任何新采集都需重新明确确认。只有状态已是 <code>committed</code>，才可原样重放已提交请求：</p>
+    <p>只有返回 <code>sourceMode=live</code> 才证明本次成功结果来自新采集；<code>stored_fallback</code> 可能发生在一次失败派发之后，最终采购成本仍以 Internal provider-call 证据为准。若首次结果不确定，页面自动以响应的 requestId 查询 <code>GET /api/v1/requests/{requestId}</code>；旧客户端若只保留原幂等键，则把它放入 <code>Idempotency-Key</code> 请求头并查询 <code>GET /api/v1/requests/by-idempotency-key</code>。两种 GET 都不创建 usage，也不会调用供应方；同一 consumer 当前有效的任一 Key 都可使用。只有 GET 明确返回 <code>unknown</code> 时，选择 <code>refresh</code> 后点击同一主按钮才会发送一个受控新请求：页面从 GET 自动取得旧 requestId，新请求使用新的 <code>Idempotency-Key</code> 并携带 <code>X-MX-Insight-Retry-Of: &lt;old requestId&gt;</code>，用户无需查找或填写 UUID。选择 <code>refresh</code> 并点击重采按钮本身即明确接受旧请求可能已计费而产生第二次采购成本的风险。<code>reserved</code>、状态网络失败、路由/版本不匹配或 succeeded-unusable 隔离都不允许覆盖；页面不会静默重试。只有状态已是 <code>committed</code>，才可原样重放已提交请求：</p>
     <pre><code>curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   -H 'Content-Type: application/json' \
@@ -4428,21 +4438,21 @@ curl -sS -D - -X POST "$HUB_URL/api/v1/data/ecommerce/products/search" \
 
     <h3>7. 错误、重试与数据归档</h3>
     <table><thead><tr><th>HTTP / error.code</th><th>客户端动作</th></tr></thead><tbody>
-      <tr><td>400 请求、筛选、游标错误</td><td>修正请求并使用新的 <code>Idempotency-Key</code>；不要重复错误 body。</td></tr>
+      <tr><td>400 请求、筛选、游标错误或 <code>invalid_uncertain_retry</code></td><td>修正请求；retry-of 只接受 <code>refresh</code> 和格式正确的旧请求 UUID。不要重复错误 body。</td></tr>
       <tr><td>401 <code>api_key_required / invalid_api_key</code></td><td>提供当前实例签发的完整 Hub Public API Key；仅在失效、过期或撤销时轮换，不要发送上游密钥。</td></tr>
       <tr><td>403 <code>platform_not_granted</code></td><td>为同一 consumer 配置 <code>ecommerce</code> grant；原 Hub Public API Key 无需轮换或重新签发。</td></tr>
       <tr><td>403 <code>test_key_not_supported</code></td><td>改用正式 <code>mih_live_</code> Key。Test 只是兼容标签，不是零成本沙箱；该拒绝发生在 usage reservation 和供应方调用之前。</td></tr>
       <tr><td>404 <code>stored_snapshot_not_found</code></td><td><code>cache_only</code> 没有命中精确存量；本次没有调用外部平台。可修改条件、切换本地安全演示，或在明确确认成本后发起 <code>refresh</code>。</td></tr>
       <tr><td>409 <code>request_in_progress</code></td><td>短暂等待后以原 requestId 调用只读状态 GET；不要 POST 原请求或换键形成第二次派发。</td></tr>
-      <tr><td>409 <code>request_in_progress / request_outcome_unknown / external_platform_response_unusable</code></td><td>本次尝试在供应方派发前被正在处理的请求或既有隔离挡住；它已释放，不是“以后一定不派发”的稳定重放。停止自动重试，由 operator 核查，并在任何后续实时调用前重新明确确认。</td></tr>
-      <tr><td>502 outcome unknown</td><td>本次结果可能已经产生外部采集；保留原 body、<code>Idempotency-Key</code> 和可用的 requestId，只调用请求状态 GET。没有 UUID 时使用幂等键请求头的查询接口，不让用户手工猜或填写 UUID。<code>reserved</code>/<code>unknown</code> 保持锁定并交给 operator，只有 <code>committed</code> 才允许精确 POST 重放。</td></tr>
+      <tr><td>409 <code>request_in_progress / request_outcome_unknown / external_platform_response_unusable / uncertain_retry_not_allowed</code></td><td>默认防重复策略挡住了本次尝试。停止自动重试；主按钮会自动查询旧状态。仅在服务器明确返回 <code>unknown</code> 且操作者确认新 <code>refresh</code> 的潜在重复成本时，才发送 <code>X-MX-Insight-Retry-Of</code>。不存在、跨 consumer、非 unknown、operation/fingerprint 不匹配均不会泄露为可覆盖状态。</td></tr>
+      <tr><td>502 outcome unknown</td><td>本次结果可能已经产生外部采集；保留原 body、<code>Idempotency-Key</code> 和可用的 requestId，页面自动调用状态 GET。无需查找 UUID、费用复选框或人工核查 consumer。<code>committed</code> 精确重放；<code>reserved</code> 继续阻止采集；只有明确 <code>unknown</code> 可在用户再次选择 <code>refresh</code> 并点击重采后发起带专用请求头的新采集。</td></tr>
       <tr><td>502 <code>external_platform_response_unusable</code></td><td>外部平台已返回成功 envelope，但 Hub 无法安全规范化。相同 <code>Idempotency-Key</code> 只重放已提交的原 502，不再次调用上游；保存 requestId 并检查脱敏归档。</td></tr>
       <tr><td>429 <code>quota_exceeded</code></td><td>这是 Hub consumer 配额；等待窗口恢复或调整 ecommerce policy，无需更换 API Key。</td></tr>
       <tr><td>429 external platform busy / capacity</td><td>Hub 并发保护和外部容量是不同原因；按响应退避，不要自动生成另一把幂等键。</td></tr>
       <tr><td>503</td><td>可能没有可用实时供应或快照；保存 requestId，稍后仍用原 <code>Idempotency-Key</code> 重试相同请求。</td></tr>
       <tr><td>200 且 <code>items=[]</code></td><td>这是正常空结果，不是接口故障；可以调整关键词或平台。空结果不能用于推断本次上游成本为零。</td></tr>
     </tbody></table>
-    <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时在浏览器未决账本中保留可用的 Request ID 与原 <code>Idempotency-Key</code>。未解决的实时请求不会阻塞本地安全演示或 <code>cache_only</code> 存量浏览，也不会锁死筛选条件；恢复条件本身不发请求，核对动作只调用状态 GET。旧版 v1 账本会自动迁移到 v2；没有 Request ID 时，页面使用当前同一 consumer 的有效开放能力 API Key，并把幂等键放在请求头中调用 <code>GET /api/v1/requests/by-idempotency-key</code>，不要求用户查找或粘贴 UUID。只有已迁移旧账本收到明确的 <code>request_not_found</code> 才清除孤儿记录；路由不存在或其他核对失败继续保持锁定。只有 <code>committed</code> 才自动精确重放，<code>released</code> 会解除本地锁并重置成本确认。切换演示不会删除实时请求账本。</p>
+    <p>管理台“电商数据百宝箱”会把这些稳定错误码翻译成面向产品操作的中文提示，同时在浏览器未决账本中保留可用的 Request ID 与原 <code>Idempotency-Key</code>。未解决的实时请求不会阻塞本地安全演示或 <code>cache_only</code> 存量浏览，也不会锁死筛选条件。主搜索按钮是唯一入口：页面自动调用状态 GET，没有额外核对按钮、费用复选框，也不要求用户查找或粘贴 UUID、人工核查 consumer 归属。旧版 v1 账本会自动迁移到 v2；没有 Request ID 时，页面使用当前同一 consumer 的有效开放能力 API Key，并把幂等键放在请求头中调用 <code>GET /api/v1/requests/by-idempotency-key</code>。v1 或 v2 本地账本只有在同一 consumer 的查询明确返回 <code>request_not_found</code> 时才清除孤儿记录；路由级 <code>not_found</code> 和其他查询失败继续保留审计。<code>committed</code> 自动精确重放，<code>released</code> 关闭旧记录；只有明确 <code>unknown</code> 可在用户已选择 <code>refresh</code> 并点击重采按钮后，用新幂等键和页面自动填入的 <code>X-MX-Insight-Retry-Of</code> 旧请求 ID 发起一次新采集。<code>reserved</code>、网络失败、路由/版本不匹配和 succeeded-unusable 隔离继续阻止外部调用。切换演示不会删除实时请求账本。</p>
     <p>Hub 私下保存响应级调用证据和逐商品归档，再异步写入 <code>ecommerce.products.v1</code> canonical 数据集并投影到 Elasticsearch。公开响应不包含物理供应方身份、上游 endpoint、凭据、原始 envelope、内部归档路径或成本账本。</p>
     </section>
 

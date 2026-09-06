@@ -10450,36 +10450,6 @@ button.mih-catalog-status {
   color: var(--qp-text-4);
 }
 
-.mih-treasure-charge-confirm {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: start;
-  gap: 8px;
-  color: var(--qp-text-2);
-  cursor: pointer;
-}
-
-.mih-treasure-charge-confirm input {
-  margin-top: 2px;
-  accent-color: var(--qp-warning);
-}
-
-.mih-treasure-charge-confirm span {
-  display: grid;
-  gap: 2px;
-}
-
-.mih-treasure-charge-confirm strong {
-  font-size: 10px;
-  font-weight: 600;
-}
-
-.mih-treasure-charge-confirm small {
-  color: var(--qp-text-3);
-  font-size: 9px;
-  line-height: 1.45;
-}
-
 .mih-treasure-cache-guarantee {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

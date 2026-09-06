@@ -1898,13 +1898,20 @@ paths:
         items array is a valid delivery, not an interface failure. External platform identity, credentials,
         endpoint coordinates, provider rate/balance/free quota, procurement
         amounts, customer invoices and raw responses are not exposed. sourceMode
-        is delivery evidence, not a customer price.
+        is delivery evidence, not a customer price. The optional
+        X-MX-Insight-Retry-Of header is accepted only for refresh with a new
+        Idempotency-Key when its request UUID identifies a matching prior
+        same-consumer request in unknown state; it never bypasses reserved state,
+        lookup failure, route/version mismatch, quota, circuit or concurrency.
+        The Admin treasure-box page obtains that UUID from its automatic status
+        GET when refresh is selected and the main button is pressed; it exposes
+        no UUID field, confirmation checkbox or manual ownership check.
       x-mx-error-codes:
-        "400": [invalid_request, invalid_marketplace, unsupported_marketplace, invalid_query, invalid_page, invalid_cursor, invalid_pagination, cursor_scope_mismatch, continuation_required, unsupported_sort, invalid_price, unsupported_price_filter, unsupported_request_field, invalid_delivery_mode, idempotency_key_required, invalid_idempotency_key]
+        "400": [invalid_request, invalid_marketplace, unsupported_marketplace, invalid_query, invalid_page, invalid_cursor, invalid_pagination, cursor_scope_mismatch, continuation_required, unsupported_sort, invalid_price, unsupported_price_filter, unsupported_request_field, invalid_delivery_mode, idempotency_key_required, invalid_idempotency_key, invalid_uncertain_retry]
         "401": [api_key_required, invalid_api_key]
         "403": [platform_not_granted, test_key_not_supported]
         "404": [stored_snapshot_not_found]
-        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable]
+        "409": [request_in_progress, idempotency_conflict, request_outcome_unknown, external_platform_response_unusable, uncertain_retry_not_allowed]
         "413": [payload_too_large]
         "429": [quota_exceeded, external_platform_busy, external_platform_capacity_exceeded]
         "502": [external_platform_response_unusable, external_platform_outcome_unknown, external_platform_rejected]
@@ -1924,6 +1931,23 @@ paths:
             minLength: 8
             maxLength: 128
             pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+        - name: X-MX-Insight-Retry-Of
+          in: header
+          required: false
+          description: >-
+            UUID of a matching prior same-consumer ecommerce request whose
+            durable status is unknown. Sending this header authorizes one intentionally
+            new refresh and deliberately accepts possible duplicate provider cost. The server verifies
+            operation and normalized fingerprint. It requires
+            deliveryMode=refresh and a different new Idempotency-Key. It does not
+            replay the old request and never bypasses reserved state,
+            succeeded-unusable quarantine, failed status lookup, route/version
+            mismatch, quota, circuit or concurrency. The Admin treasure-box page
+            supplies it from its automatic status GET after the operator selects
+            refresh and presses the main button; the operator does not enter the UUID.
+          schema:
+            type: string
+            format: uuid
       requestBody:
         required: true
         content:
@@ -3589,7 +3613,7 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "200":
-          description: Caller-owned, no-dispatch request status without stored upstream response body. Reserved and unknown do not permit POST replay; committed permits exact replay; released requires a newly confirmed request intent.
+          description: Caller-owned, no-dispatch request status without stored upstream response body. Reserved and unknown do not permit POST replay; committed permits exact replay; released closes the prior request intent. An unknown ecommerce request may be referenced by X-MX-Insight-Retry-Of only for one separate deliberate refresh with a different Idempotency-Key; reserved cannot. In the Admin treasure-box page, selecting refresh and pressing the main button supplies this intent and the old request UUID automatically.
           content:
             application/json:
               schema:

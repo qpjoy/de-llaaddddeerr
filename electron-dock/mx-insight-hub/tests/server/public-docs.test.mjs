@@ -134,13 +134,14 @@ function assertExternalCommerceContract(document) {
       'cursor_scope_mismatch', 'continuation_required', 'unsupported_sort',
       'invalid_price', 'unsupported_price_filter', 'unsupported_request_field',
       'invalid_delivery_mode', 'idempotency_key_required', 'invalid_idempotency_key',
+      'invalid_uncertain_retry',
     ],
     401: ['api_key_required', 'invalid_api_key'],
     403: ['platform_not_granted', 'test_key_not_supported'],
     404: ['stored_snapshot_not_found'],
     409: [
       'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
-      'external_platform_response_unusable',
+      'external_platform_response_unusable', 'uncertain_retry_not_allowed',
     ],
     413: ['payload_too_large'],
     429: ['quota_exceeded', 'external_platform_busy', 'external_platform_capacity_exceeded'],
@@ -158,7 +159,7 @@ function assertExternalCommerceContract(document) {
     [200, 400, 401, 403, 404, 409, 413, 429, 502, 503],
   )
 
-  assert.equal(operation.parameters.length, 1)
+  assert.equal(operation.parameters.length, 2)
   const idempotency = operation.parameters[0]
   assert.equal(idempotency.name, 'Idempotency-Key')
   assert.equal(idempotency.in, 'header')
@@ -166,6 +167,13 @@ function assertExternalCommerceContract(document) {
   assert.match(idempotency.description, /next-page request changes the body and must use a new Idempotency-Key/i)
   assert.equal(idempotency.schema.minLength, 8)
   assert.equal(idempotency.schema.maxLength, 128)
+  const uncertainRepeat = operation.parameters[1]
+  assert.equal(uncertainRepeat.name, 'X-MX-Insight-Retry-Of')
+  assert.equal(uncertainRepeat.in, 'header')
+  assert.equal(uncertainRepeat.required, false)
+  assert.equal(uncertainRepeat.schema.format, 'uuid')
+  assert.match(uncertainRepeat.description, /one intentionally new refresh/i)
+  assert.match(uncertainRepeat.description, /never bypasses reserved state/i)
 
   const requestRef = operation.requestBody.content['application/json'].schema
   assert.equal(requestRef.$ref, '#/components/schemas/ExternalCommerceProductSearchRequest')
@@ -1040,6 +1048,7 @@ test('public listener serves self-contained public API documentation', async () 
     }))
     const response = pages[0].response
     const html = pages.map((page) => page.html).join('\n')
+    const ecommerceHtml = pages.find((page) => page.path === '/docs/ecommerce-treasure-box').html
 
     assert.ok(pages.every((page) => page.response.status === 200))
     assert.match(response.headers.get('content-type'), /^text\/html/)
@@ -1049,7 +1058,7 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /\/api\/v1\/data\/ecommerce\/products\/search/)
     assert.match(html, /mx-insight-hub\.ecommerce-products\.v1/)
     assert.match(html, /电商数据百宝箱/)
-    assert.match(pages.find((page) => page.path === '/docs/ecommerce-treasure-box').html, /JustOne/)
+    assert.match(ecommerceHtml, /JustOne/)
     assert.match(html, /同一把 Hub Public API Key/u)
     assert.match(html, /当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移/u)
     assert.match(html, /第二个候选通过合同验证后/u)
@@ -1058,7 +1067,11 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /fresh_cache/)
     assert.match(html, /stored_fallback/)
     assert.match(html, /相同 <code>Idempotency-Key<\/code> 只重放已提交的原 502，不再次调用上游/u)
-    assert.match(html, /它已释放，不是“以后一定不派发”的稳定重放/u)
+    assert.match(ecommerceHtml, /主搜索按钮是唯一入口/u)
+    assert.match(ecommerceHtml, /没有额外核对按钮/u)
+    assert.match(ecommerceHtml, /X-MX-Insight-Retry-Of/u)
+    assert.match(ecommerceHtml, /只有明确 <code>unknown<\/code>/u)
+    assert.match(ecommerceHtml, /<code>reserved<\/code>、网络失败、路由\/版本不匹配和 succeeded-unusable 隔离继续阻止外部调用/u)
     assert.match(html, /未解决的实时请求不会阻塞本地安全演示或 <code>cache_only<\/code> 存量浏览/u)
     assert.match(html, /不会锁死筛选条件/u)
     assert.match(html, /200 且 <code>items=\[\]<\/code>/u)

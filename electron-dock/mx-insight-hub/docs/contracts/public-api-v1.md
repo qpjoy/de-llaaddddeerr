@@ -287,9 +287,10 @@ interchangeable. A Test-key rejection creates no usage reservation and makes no
 provider call.
 
 An ambiguous request recorded by an older client under a Test key is not a
-replay exception. Preserve its exact body and `Idempotency-Key` as evidence and
-escalate it for operator reconciliation; do not send it through search or media,
-and do not substitute a Live key.
+replay exception. Preserve its exact body and `Idempotency-Key` as evidence. The
+treasure-box page uses the current Live key for an automatic consumer-scoped
+status GET; it does not ask the user for the old Test secret, a request UUID or
+a manual ownership check.
 
 The request is a strict object. Its complete field allowlist is `marketplace`,
 `query`, `deliveryMode`, `page`, `cursor`, `sort`, and `price`; any other field returns
@@ -311,6 +312,20 @@ compatibility. It is a delivery intent, never a provider selector:
 - `refresh` bypasses an exact fresh snapshot and permits one new acquisition. It
   requires a caller-supplied `Idempotency-Key`, and can still return
   `stored_fallback` after an attempted acquisition fails.
+
+`X-MX-Insight-Retry-Of: <old requestId>` is a narrow uncertain-repeat signal.
+It is accepted only with `deliveryMode=refresh`, a new `Idempotency-Key`, and a
+prior same-consumer acquisition whose durable status is positively `unknown`.
+Hub verifies ownership, ecommerce operation and the normalized acquisition
+fingerprint. The treasure-box page obtains the old UUID from its automatic GET
+and adds the header when the operator selects `refresh` and presses the main
+button; the user does not enter it or complete a separate confirmation. Sending
+the header deliberately accepts that the old request may already have incurred
+provider cost. The header never bypasses
+`reserved`, a succeeded-but-unusable endpoint quarantine, a status-lookup
+network failure, route/version mismatch, quota, circuit or concurrency
+protection. Omitting it preserves the default
+duplicate-prevention behavior.
 
 Changing only `deliveryMode` does not change the logical snapshot identity.
 Reusing an already committed `Idempotency-Key` therefore replays its original
@@ -481,7 +496,15 @@ The public response intentionally contains no billing or quota fields. On
 `external_platform_outcome_unknown`, `external_platform_response_unusable`, or
 `request_outcome_unknown`, retain the request ID and original `Idempotency-Key`;
 do not create a new `Idempotency-Key` for an automatic retry because an external call may
-already have occurred. `external_platform_response_unusable` is a known provider
+already have occurred. Only an explicit `unknown` status may be followed by a
+separate `refresh` acquisition carrying a new key and
+`X-MX-Insight-Retry-Of: <old requestId>`. Deliberately sending that combination
+accepts that the prior request may already have incurred provider cost. The
+treasure-box page derives the old request ID from its automatic status GET when
+the operator selects `refresh` and presses the main button; no separate field or
+confirmation is shown. The old record remains audit
+evidence. That is a new request, not recovery or retry. `reserved` and failed
+status lookups cannot use the override. `external_platform_response_unusable` is a known provider
 success whose payload failed the Hub normalizer: Hub commits its public 502 as a
 stable failure, so the same key replays that 502 without another provider call.
 True transport or persistence ambiguity remains `request_outcome_unknown`.
@@ -1773,11 +1796,17 @@ Only the owning consumer can read the record. Data calls identify their
 `platform`; generic tools identify their `capability`. Exactly one is present.
 This read creates no usage and cannot dispatch an upstream call. `reserved`
 means the request may still be running and `unknown` means the outcome remains
-ambiguous; neither state permits the caller to repeat the original POST or use
-a new `Idempotency-Key`. `committed` permits an exact same-body, same-key replay.
+ambiguous; neither state permits the caller to repeat the original POST or treat
+a new `Idempotency-Key` as a retry. `committed` permits an exact same-body,
+same-key replay. Only `unknown` may support one intentionally separate
+`refresh` acquisition: it requires a new key, `X-MX-Insight-Retry-Of` and
+the caller's deliberate acceptance that the unresolved request may already have
+incurred provider cost, while retaining the old record for audit. In the
+treasure-box workbench, selecting `refresh` and pressing the main button supplies
+that intent; there is no separate checkbox, UUID field or ownership-review action.
+`reserved`, lookup failure and contract-version mismatch never qualify.
 `released` proves that reservation is no longer holding an outcome; a later
-provider-capable acquisition is a new intent and requires a fresh key and any
-applicable explicit confirmation.
+provider-capable acquisition is a new intent and requires a fresh key.
 
 If the client persisted its original idempotency key but did not receive the
 request UUID, use the consumer-scoped lookup instead:
@@ -1810,12 +1839,12 @@ under `byPlatform`; generic tools are reported separately under `byCapability`.
 
 | Status | Meaning |
 | --- | --- |
-| `400` | Invalid field, missing idempotency key, or page limit exceeded. |
+| `400` | Invalid field, missing idempotency key, page limit exceeded, or malformed/inapplicable retry-of header (`invalid_uncertain_retry`). |
 | `401` | Missing, invalid or revoked API key. |
 | `402` | Reserved for insufficient production credit. |
 | `403` | Platform/capability is not explicitly granted. |
 | `404` | Resource or caller-owned request does not exist. |
-| `409` | Idempotency conflict, in-progress request, or unknown prior outcome. |
+| `409` | Idempotency conflict, in-progress request, unknown prior outcome, or a retry-of request whose referenced record is not eligible (`uncertain_retry_not_allowed`). |
 | `410` | A search cursor's Elasticsearch PIT has expired; restart from the first page. |
 | `429` | Request/concurrency/period quota exhausted. |
 | `502` | Safe Night-All 5xx/contract rejection, or ambiguous upstream outcome. |

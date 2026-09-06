@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import { JustOneAdapter, JustOneRejectedError } from '../../server/adapters/justone.mjs'
 import { normalizeJustOneProductSearchRequest } from '../../server/contracts/justone.mjs'
@@ -629,6 +630,165 @@ test('an ambiguous dispatch quarantines its exact fingerprint without spending a
       && typeof error.details?.requestId === 'string',
   )
   assert.equal(calls, 1)
+})
+
+test('an explicitly referenced unknown request permits one fresh idempotent dispatch and records its lineage', async () => {
+  let calls = 0
+  const adapter = new JustOneAdapter({
+    token: 'secret-token',
+    fetchImpl: async () => {
+      calls += 1
+      throw new Error('connection ended without a response')
+    },
+  })
+  const state = await fixture({ adapter })
+  const body = { marketplace: 'jd', query: 'camera', deliveryMode: 'refresh' }
+  let originalRequestId
+
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body,
+      idempotencyKey: 'uncertain-original-01',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => {
+      originalRequestId = error?.details?.requestId
+      return error?.code === 'external_platform_outcome_unknown'
+        && typeof originalRequestId === 'string'
+    },
+  )
+
+  state.gateway.adapter = {
+    async searchProducts(request, options) {
+      calls += 1
+      return successfulResult(request, options)
+    },
+  }
+  const result = await state.gateway.search(state.context, {
+    body,
+    idempotencyKey: 'uncertain-retry-0001',
+    retryOfRequestId: originalRequestId,
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+
+  assert.equal(result.status, 200)
+  assert.equal(result.sourceMode, 'live')
+  assert.equal(calls, 2)
+  assert.equal(state.usageStore.requests.get(originalRequestId).status, 'unknown')
+  const retriedCall = [...state.platformStore.calls.values()]
+    .find((call) => call.usageRequestId === result.requestId)
+  assert.equal(retriedCall?.retryOfRequestId, originalRequestId)
+  assert.equal(retriedCall?.outcome, 'succeeded')
+
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body,
+      idempotencyKey: 'uncertain-retry-0002',
+      retryOfRequestId: originalRequestId,
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.status === 409 && error?.code === 'uncertain_retry_not_allowed',
+  )
+  assert.equal(calls, 2, 'one acknowledged unknown request cannot authorize a second dispatch')
+  assert.equal(state.platformStore.calls.size, 2)
+})
+
+test('unknown retry authorization fails closed for malformed, stale-key and cross-scope requests', async () => {
+  let calls = 0
+  const adapter = new JustOneAdapter({
+    token: 'secret-token',
+    fetchImpl: async () => {
+      calls += 1
+      throw new Error('connection ended without a response')
+    },
+  })
+  const state = await fixture({ adapter })
+  const body = { marketplace: 'jd', query: 'camera', deliveryMode: 'refresh' }
+  let originalRequestId
+
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body,
+      idempotencyKey: 'guard-original-0001',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => {
+      originalRequestId = error?.details?.requestId
+      return error?.code === 'external_platform_outcome_unknown'
+    },
+  )
+
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body,
+      idempotencyKey: 'guard-malformed-001',
+      retryOfRequestId: 'not-a-uuid',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.status === 400 && error?.code === 'invalid_uncertain_retry',
+  )
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body,
+      retryOfRequestId: originalRequestId,
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.status === 400 && error?.code === 'idempotency_key_required',
+  )
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: { marketplace: 'jd', query: 'camera', deliveryMode: 'cache_first' },
+      idempotencyKey: 'guard-not-refresh-01',
+      retryOfRequestId: originalRequestId,
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.status === 400 && error?.code === 'invalid_uncertain_retry',
+  )
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body: { marketplace: 'jd', query: 'different', deliveryMode: 'refresh' },
+      idempotencyKey: 'guard-fingerprint-01',
+      retryOfRequestId: originalRequestId,
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.status === 409 && error?.code === 'uncertain_retry_not_allowed',
+  )
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body,
+      idempotencyKey: 'guard-original-0001',
+      retryOfRequestId: originalRequestId,
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.status === 409 && error?.code === 'uncertain_retry_not_allowed',
+  )
+
+  const original = state.usageStore.requests.get(originalRequestId)
+  const originalConsumerId = original.consumerId
+  original.consumerId = randomUUID()
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body,
+      idempotencyKey: 'guard-cross-scope-01',
+      retryOfRequestId: originalRequestId,
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.status === 409 && error?.code === 'uncertain_retry_not_allowed',
+  )
+  original.consumerId = originalConsumerId
+  original.status = 'reserved'
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body,
+      idempotencyKey: 'guard-reserved-0001',
+      retryOfRequestId: originalRequestId,
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.status === 409 && error?.code === 'uncertain_retry_not_allowed',
+  )
+
+  assert.equal(calls, 1, 'invalid retry authorization must never dispatch upstream')
+  assert.equal(state.platformStore.calls.size, 1)
 })
 
 test('a post-dispatch persistence failure closes call and usage evidence as unknown', async () => {

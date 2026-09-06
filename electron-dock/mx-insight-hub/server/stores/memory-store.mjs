@@ -699,6 +699,13 @@ export class MemoryStore {
     return clone(id ? this.requests.get(id) : null)
   }
 
+  // Internal-only projection used by the external-platform retry guard. The
+  // public getRequest method intentionally removes the request fingerprint.
+  async getUsageRequestForRetry(id, consumerId) {
+    const record = this.requests.get(id)
+    return clone(record?.consumerId === consumerId ? record : null)
+  }
+
   async reserve({
     requestId,
     idempotencyKey,

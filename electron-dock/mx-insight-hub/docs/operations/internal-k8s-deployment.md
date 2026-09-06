@@ -141,8 +141,8 @@ For a browser POST, inspect the JSON error code rather than treating every HTTP
 
 - `stored_snapshot_not_found` means the Public route matched and a valid
   `cache_only` request had no exact retained snapshot. This is an expected
-  zero-provider-call result; use the safe demo, change the query, or make a
-  separately confirmed provider-capable request if acquisition is intended.
+  zero-provider-call result; use the safe demo, change the query, or select
+  `refresh` and press the main search button to authorize one acquisition.
 - `not_found` means the request did not reach a matching Public handler. Confirm
   the request method and exact path, check that the authenticated Admin session's
   `publicApiBaseUrl` equals the ConfigMap origin, and verify `/api/v1/*` is routed

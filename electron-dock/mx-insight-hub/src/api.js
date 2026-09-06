@@ -129,6 +129,7 @@ async function publicDataRequest(apiKey, path, {
   method = 'GET',
   body,
   idempotencyKey,
+  retryOfRequestId,
   signal,
 } = {}) {
   const response = await fetch(`${publicApiBase()}${path}`, {
@@ -139,6 +140,7 @@ async function publicDataRequest(apiKey, path, {
       authorization: `Bearer ${apiKey}`,
       ...(body ? { 'content-type': 'application/json' } : {}),
       ...(idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}),
+      ...(retryOfRequestId ? { 'x-mx-insight-retry-of': retryOfRequestId } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   })
@@ -202,10 +204,10 @@ export const publicDataApi = {
     '/api/v1/requests/by-idempotency-key',
     { idempotencyKey, signal },
   ),
-  ecommerceProductsSearch: (apiKey, body, { idempotencyKey } = {}) => publicDataRequest(
+  ecommerceProductsSearch: (apiKey, body, { idempotencyKey, retryOfRequestId } = {}) => publicDataRequest(
     apiKey,
     '/api/v1/data/ecommerce/products/search',
-    { method: 'POST', body, idempotencyKey },
+    { method: 'POST', body, idempotencyKey, retryOfRequestId },
   ),
   ecommerceProductImage: (apiKey, { requestId, itemId, imageIndex = 0 }, { signal } = {}) => publicDataImage(
     apiKey,

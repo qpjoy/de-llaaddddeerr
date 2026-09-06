@@ -1046,7 +1046,7 @@ export function createApp({
       if (request.method === 'OPTIONS' && isPublicPath) {
         response.writeHead(204, {
           'access-control-allow-origin': '*',
-          'access-control-allow-headers': 'authorization, content-type, idempotency-key, x-api-key',
+          'access-control-allow-headers': 'authorization, content-type, idempotency-key, x-api-key, x-mx-insight-retry-of',
           'access-control-allow-methods': 'GET, POST, OPTIONS',
         })
         response.end()
@@ -4173,6 +4173,7 @@ export function createApp({
         const result = await externalPlatformGateway.search(context, {
           body: await readJson(request, 64 * 1024),
           idempotencyKey: request.headers['idempotency-key'],
+          retryOfRequestId: request.headers['x-mx-insight-retry-of'],
           path: pathname,
         })
         sendJson(response, result.status, result.body, {

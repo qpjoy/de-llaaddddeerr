@@ -456,7 +456,8 @@ continuation 或 raw response。
 接受供应方密钥。为该 Key 所属 consumer 启用 ecommerce 后，其全部有效 Key 立即继承授权。
 本节所有搜索和媒体示例要求 `$HUB_KEY` 是以 `mih_live_` 开头的完整 Hub Public API Key。
 若旧版百宝箱留下 Test-key `ambiguous` 记录，只保留原 body、原 `Idempotency-Key` 和指纹锁供
-运维核查；不要粘贴旧 Test secret 或换成 Live Key 尝试恢复该请求。独立的本地安全演示和
+审计；不要粘贴旧 Test secret 或换成 Live Key 重放该请求。管理台使用当前 Live Key 自动执行
+consumer-scoped 状态 GET，不要求用户填写 UUID 或人工核查 consumer 归属。独立的本地安全演示和
 `cache_only` 存量读取不创建 provider call，仍可继续使用。
 
 body 是严格对象，只允许以下字段：
@@ -510,7 +511,8 @@ curl -sS -X POST \
 
 若要明确尝试一次可能产生外部供应方采购成本的新采集，将同一 body 的 `deliveryMode` 设为
 `refresh`，生成一个新的 Idempotency-Key，并且只执行一次。不要把该调用放入 readiness 或
-自动重试循环。
+自动重试循环。对管理台百宝箱，选择“重新采集”并点击主搜索按钮就是这次明确授权，不再有
+独立复选框或二次“核对”按钮。
 
 ```bash
 ECOMMERCE_REFRESH_KEY="$(new_idempotency_key)"
@@ -638,13 +640,14 @@ consumer 和完整请求 fingerprint，不会跨 consumer、模糊 query 或用 
 | 401 | `api_key_required`, `invalid_api_key` | 提供当前 Hub 实例通过 API Keys 签发的完整 Hub Public API Key；不要用管理令牌、掩码或供应方密钥。 |
 | 403 | `test_key_not_supported` | 外部 ecommerce 仅接受 `mih_live_` Hub Public API Key。不要把 Test 当沙箱，也不要用 Live Key 替代历史模糊请求来自动重放。该拒绝不创建 usage reservation 或上游调用。 |
 | 403 | `platform_not_granted` | Live Key 有效；请 operator 为 consumer 授予 `ecommerce`。 |
-| 404 | `stored_snapshot_not_found` | `cache_only` 未命中精确存量；本次没有调用外部平台。换条件或明确确认一次 `refresh`。 |
-| 409 | `request_in_progress`, `idempotency_conflict`, `request_outcome_unknown` | 同请求保留原 `Idempotency-Key`/requestId；冷却期内不要更换 `Idempotency-Key` 自动重发。 |
+| 400 | `invalid_uncertain_retry` | `X-MX-Insight-Retry-Of` 格式错误或未与 `refresh` 配对。管理台会从自动状态 GET 构造该头；不要手填或猜 UUID。 |
+| 404 | `stored_snapshot_not_found` | `cache_only` 未命中精确存量；本次没有调用外部平台。可换条件，或选择 `refresh` 并点击主按钮授权一次采集。 |
+| 409 | `request_in_progress`, `idempotency_conflict`, `request_outcome_unknown`, `uncertain_retry_not_allowed` | 保留原 `Idempotency-Key`/requestId，不要自动换 Key。管理台由同一主按钮先执行状态 GET；只有明确为 `unknown` 且当前选择 `refresh` 时，才自动使用新 Key 和 retry-of 头发起一次独立采集。 |
 | 409 | `external_platform_response_unusable` | 近期同 endpoint 已出现成功但无法规范化的响应；停止探测并由 operator 检查归档。 |
 | 429 | `quota_exceeded` | Hub consumer 配额不足；等待窗口或调整 ecommerce policy，无需换 Key。 |
 | 429 | `external_platform_busy`, `external_platform_capacity_exceeded` | Hub 并发保护或外部容量不足；按响应退避，不要并发放大。 |
-| 502 | `external_platform_response_unusable` | 上游成功 envelope 无法映射。该稳定错误会随同一 `Idempotency-Key` 重放且不再次派发；保存 requestId 并由 operator 核查。 |
-| 502 | `external_platform_outcome_unknown` | 结果可能已经产生外部调用；保存 requestId 和原幂等键，禁止自动换键重试。 |
+| 502 | `external_platform_response_unusable` | 上游成功 envelope 无法映射。该稳定错误会随同一 `Idempotency-Key` 重放且不再次派发；保存 requestId 作为证据，不得使用 uncertain-repeat 通道。 |
+| 502 | `external_platform_outcome_unknown` | 结果可能已经产生外部调用；保存 requestId 和原幂等键，禁止自动换键重试。只有只读状态 GET 明确返回 `unknown`，才可用一次新的 `refresh`、新 Key 和 `X-MX-Insight-Retry-Of`；这可能形成第二笔供应方成本。 |
 | 502 | `external_platform_rejected` | 上游已确定拒绝；检查请求条件，避免连续自动重试。 |
 | 503 | `external_platform_unavailable`, `external_platform_not_configured`, `external_platform_circuit_open`, `external_platform_capacity_unavailable` | 若没有 exact fallback，按运维窗口退避。 |
 | 200 | `data.items=[]` | 正常空结果，不是接口故障；可调整关键词或平台。空结果不能证明上游成本为零。 |
@@ -1299,8 +1302,12 @@ curl -sS -i \
 
 成功返回 `200`，包含 `status=reserved|committed|released|unknown`、units、时间戳和
 可选 platform/capability/source-mode 证据。其他 consumer 的 ID 或不存在的 ID
-返回 `404`。`unknown` 表示结果存在歧义：应保留原幂等 key，不能创建新的付费
-重试。
+返回 `404`。`unknown` 表示结果存在歧义：原 POST 不能重放，也不能在自动重试循环中换 Key。
+对 ecommerce，调用方可明确发送一个独立的 `refresh`：使用新的 `Idempotency-Key`，并把这次
+GET 返回的旧请求 ID 放入 `X-MX-Insight-Retry-Of`；发送该组合即接受旧请求可能已产生供应方成本。
+`reserved`、查询失败、跨 consumer、指纹不匹配或已消费的 retry-of 均不能走此通道。管理台
+百宝箱会在选择 `refresh` 并点击主按钮后自动完成 GET 和请求头组装，页面不要求填写 UUID、
+单独确认或人工核查 consumer 归属。
 
 ### `GET /api/v1/usage`
 

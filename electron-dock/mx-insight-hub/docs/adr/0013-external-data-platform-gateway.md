@@ -252,10 +252,12 @@ back to a neutral local icon without changing the original search evidence.
   or logs.
 - The external-platform worker and ingest job use bounded queues and quotas; failure cannot block login or
   the serving of already-stored Hub data.
-- A browser ledger left ambiguous by an older Test-key workbench is retained only as a locked body,
-  `Idempotency-Key` and credential fingerprint for operator reconciliation. The current page does not validate or
-  replay it and never substitutes a Live key. The record does not freeze business filters or block local safe-demo
-  and `cache_only` reads; it blocks only another provider-capable request until exact recovery or reconciliation.
+- A browser ledger left ambiguous by an older Test-key workbench retains its body, `Idempotency-Key` and credential
+  fingerprint as audit evidence. With a current Live key, the main treasure-box action performs a consumer-scoped
+  status GET automatically; it never asks for the old Test secret, a UUID or a manual ownership check. The record
+  does not freeze business filters or block local safe-demo and `cache_only` reads. When the status is explicitly
+  `unknown`, selecting `refresh` and pressing the main button may issue one new-key acquisition with an automatically
+  populated `X-MX-Insight-Retry-Of`; `reserved` and failed lookups remain blocked.
 
 ## Consequences
 

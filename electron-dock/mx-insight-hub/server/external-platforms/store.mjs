@@ -89,6 +89,7 @@ export class MemoryExternalPlatformStore {
     endpointKey,
     ownerRequestId,
     expiresAt,
+    retryOfRequestId = null,
   }) {
     const now = Date.now()
     const blocker = [...this.calls.values()]
@@ -106,6 +107,7 @@ export class MemoryExternalPlatformStore {
                 call.consumerId === consumerId
                 && call.fingerprint === fingerprint
                 && call.outcome === 'unknown'
+                && call.usageRequestId !== retryOfRequestId
               )
               || (call.endpointKey === endpointKey && call.outcome === 'succeeded_unusable')
             )
@@ -161,6 +163,27 @@ export class MemoryExternalPlatformStore {
         'external_platform_usage_scope_mismatch',
         'Provider call does not match its reserved usage request',
       )
+    }
+    if (input.retryOfRequestId) {
+      const retryTarget = this.usageStore?.requests?.get(input.retryOfRequestId)
+      const retryAlreadyUsed = [...this.calls.values()].some(
+        (call) => call.retryOfRequestId === input.retryOfRequestId,
+      )
+      if (
+        !retryTarget
+        || retryTarget.status !== 'unknown'
+        || retryTarget.tenantId !== input.tenantId
+        || retryTarget.consumerId !== input.consumerId
+        || retryTarget.platform !== 'ecommerce'
+        || retryTarget.fingerprint !== input.fingerprint
+        || retryAlreadyUsed
+      ) {
+        throw new AppError(
+          409,
+          'uncertain_retry_not_allowed',
+          'The referenced uncertain request cannot authorize this retry',
+        )
+      }
     }
     const id = input.id ?? randomUUID()
     if (
@@ -539,6 +562,7 @@ export class PostgresExternalPlatformStore {
     endpointKey,
     ownerRequestId,
     expiresAt,
+    retryOfRequestId = null,
   }) {
     const { rows } = await this.pool.query(
       `INSERT INTO external_platform.dispatch_leases
@@ -561,6 +585,7 @@ export class PostgresExternalPlatformStore {
                      call.consumer_id = $1
                      AND call.request_fingerprint = $3
                      AND call.outcome = 'unknown'
+                     AND ($8::uuid IS NULL OR call.usage_request_id <> $8)
                    )
                    OR (call.endpoint_key = $7 AND call.outcome = 'succeeded_unusable')
                  )
@@ -578,6 +603,7 @@ export class PostgresExternalPlatformStore {
         consumerId, operation, fingerprint, ownerRequestId, expiresAt,
         Math.ceil(this.uncertainCooldownMs / 1_000),
         endpointKey,
+        retryOfRequestId,
       ],
     )
     if (rows[0]?.owner_request_id === ownerRequestId) return { kind: 'acquired' }
@@ -603,6 +629,7 @@ export class PostgresExternalPlatformStore {
                   consumer_id = $1
                   AND request_fingerprint = $3
                   AND outcome = 'unknown'
+                  AND ($6::uuid IS NULL OR usage_request_id <> $6)
                 )
                 OR (endpoint_key = $5 AND outcome = 'succeeded_unusable')
               )
@@ -613,7 +640,7 @@ export class PostgresExternalPlatformStore {
         LIMIT 1`,
       [
         consumerId, operation, fingerprint,
-        Math.ceil(this.uncertainCooldownMs / 1_000), endpointKey,
+        Math.ceil(this.uncertainCooldownMs / 1_000), endpointKey, retryOfRequestId,
       ],
     )
     if (blocker.rows[0]) {
@@ -668,6 +695,7 @@ export class PostgresExternalPlatformStore {
       id, input.tenantId, input.consumerId, input.apiKeyId, input.usageRequestId,
       input.operation, input.contractVersion, input.endpointKey,
       input.endpointVersion, input.marketplace, input.fingerprint,
+      input.retryOfRequestId ?? null,
     ]
     try {
       return await transaction(this.pool, async (client) => {
@@ -684,21 +712,41 @@ export class PostgresExternalPlatformStore {
                 AND request.platform = 'ecommerce'
                 AND (request.lease_expires_at IS NULL OR request.lease_expires_at > now())
               FOR UPDATE
+           ), retry_target AS MATERIALIZED (
+             SELECT retry.id
+               FROM usage_requests retry
+              WHERE retry.id = $12
+                AND retry.status = 'unknown'
+                AND retry.tenant_id = $2
+                AND retry.consumer_id = $3
+                AND retry.fingerprint = $11
+                AND retry.platform = 'ecommerce'
+                AND NOT EXISTS (
+                  SELECT 1
+                    FROM external_platform.provider_calls previous_retry
+                   WHERE previous_retry.retry_of_usage_request_id = retry.id
+                )
+              FOR UPDATE
            )
            INSERT INTO external_platform.provider_calls
              (id, provider_key, tenant_id, consumer_id, api_key_id, usage_request_id,
               operation, contract_version, endpoint_key, endpoint_version, marketplace,
-              request_fingerprint)
-           SELECT $1, 'justone', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+              request_fingerprint, retry_of_usage_request_id)
+           SELECT $1, 'justone', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
              FROM owned_request
+            WHERE $12::uuid IS NULL OR EXISTS (SELECT 1 FROM retry_target)
            RETURNING id, started_at`,
           values,
         )
         if (!rows[0]) {
           throw new AppError(
             409,
-            'external_platform_usage_scope_mismatch',
-            'Provider call does not match its reserved usage request',
+            input.retryOfRequestId
+              ? 'uncertain_retry_not_allowed'
+              : 'external_platform_usage_scope_mismatch',
+            input.retryOfRequestId
+              ? 'The referenced uncertain request cannot authorize this retry'
+              : 'Provider call does not match its reserved usage request',
           )
         }
         await client.query(
@@ -729,6 +777,7 @@ export class PostgresExternalPlatformStore {
             AND call.endpoint_version = $9
             AND call.marketplace = $10
             AND call.request_fingerprint = $11
+            AND call.retry_of_usage_request_id IS NOT DISTINCT FROM $12::uuid
             AND call.outcome = 'pending'
             AND request.status = 'reserved'
             AND request.platform = 'ecommerce'
@@ -737,6 +786,16 @@ export class PostgresExternalPlatformStore {
       ).catch(() => ({ rows: [] }))
       if (reconciled.rows[0]) {
         return { id, startedAt: iso(reconciled.rows[0].started_at) }
+      }
+      if (
+        error?.code === '23505'
+        && error?.constraint === 'external_platform_provider_calls_retry_of_idx'
+      ) {
+        throw new AppError(
+          409,
+          'uncertain_retry_not_allowed',
+          'The referenced uncertain request cannot authorize this retry',
+        )
       }
       throw error
     }

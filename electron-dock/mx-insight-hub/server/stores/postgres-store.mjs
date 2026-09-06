@@ -1170,6 +1170,17 @@ export class PostgresStore {
     return requestRecord(rows[0]) || null
   }
 
+  // Internal-only projection used by the external-platform retry guard. The
+  // public getRequest method intentionally removes the request fingerprint.
+  async getUsageRequestForRetry(id, consumerId) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM usage_requests
+       WHERE id = $1 AND consumer_id = $2`,
+      [id, consumerId],
+    )
+    return requestRecord(rows[0]) || null
+  }
+
   async reserve(input) {
     if (Boolean(input.platform) === Boolean(input.capability)) {
       throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')
